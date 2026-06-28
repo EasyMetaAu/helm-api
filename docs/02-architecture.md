@@ -39,7 +39,9 @@ Each component is summarized here; deeper design lives in its own chapter.
 Built on Hono. Responsibilities:
 
 - Accept the standard API requests on `/v1/chat/completions`, `/v1/messages`,
-  `/v1/responses`, and `/v1beta/models/{model}:generateContent` (Gemini).
+  `/v1/responses`, `/v1beta/models/{model}:generateContent` (Gemini), and
+  `/v1/images/generations` (a dedicated model-pinned endpoint that does **not**
+  dispatch to a protocol adapter / the IR).
 - Normalize request headers and the request/trace id.
 - Apply request-size and timeout limits (`runtime.max_request_bytes`,
   `runtime.request_timeout_ms`).

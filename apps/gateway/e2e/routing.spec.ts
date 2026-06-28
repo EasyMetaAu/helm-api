@@ -28,9 +28,12 @@ const AUTH = { Authorization: `Bearer ${TEST_KEY}`, "Content-Type": "application
 // not the nominal openai-codex primary. With a subscription connected, the codex
 // head would serve instead.
 const ECONOMY_HEAD = "deepseek/deepseek-v4-flash"; // economy static primary serves
-// premium's nominal primary is openai-codex/gpt-5.5 — skipped w/o a subscription,
-// so premium serves its first static fallback, deepseek/deepseek-v4-pro.
-const PREMIUM_HEAD = "deepseek/deepseek-v4-pro";
+// premium's nominal primary is openai-codex/gpt-5.5 — skipped w/o a subscription;
+// the next candidates (anthropic opus, native zenmux-anthropic opus) are also
+// skipped/unserved, so premium's first MOCK-BACKED candidate is the OpenAI-compat
+// zenmux/gpt-5.5 (wire openai/gpt-5.5) — ZenMux IS keyed in the e2e (it carries the
+// gpt-image-2 image model), matching production where the zenmux fallback serves.
+const PREMIUM_HEAD = "zenmux/gpt-5.5";
 const BALANCED_HEAD = "deepseek/deepseek-v4-pro"; // balanced static primary serves
 // economy chain = [openai-codex/gpt-5.4-mini, anthropic/claude-haiku, deepseek/
 // deepseek-v4-flash, openrouter/deepseek-v4-flash, openrouter/auto, zenmux/auto].
@@ -45,7 +48,7 @@ const ECONOMY_NEXT = "openrouter/deepseek-v4-flash";
 // here are EXPLICIT deepseek/* entries, so the wire id is the bare provider_model.
 // The routing ALIAS is surfaced separately via `x-helm-final-model`.
 const ECONOMY_HEAD_WIRE = "deepseek-v4-flash";
-const PREMIUM_HEAD_WIRE = "deepseek-v4-pro";
+const PREMIUM_HEAD_WIRE = "openai/gpt-5.5"; // zenmux/gpt-5.5 → provider_model openai/gpt-5.5
 const ECONOMY_NEXT_WIRE = "deepseek/deepseek-v4-flash";
 
 function chat(content: string, extra: Record<string, unknown> = {}) {

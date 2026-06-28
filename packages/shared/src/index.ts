@@ -296,6 +296,13 @@ export {
   type TargetProviderProtocol,
   TargetProviderProtocolSchema,
 } from "./request/schema.js";
+export {
+  type ImageGenerationRequest,
+  ImageGenerationRequestSchema,
+  type ImageGenerationResponse,
+  ImageGenerationResponseSchema,
+  ImageUsageSchema,
+} from "./request/images-schema.js";
 // Routing signal (POST-MVP Agentic Signals feedback layer; docs/02 telemetry).
 export { type RoutingSignal, RoutingSignalSchema } from "./signals/schema.js";
 export { version } from "./version.js";

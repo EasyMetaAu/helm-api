@@ -25,6 +25,12 @@ all four streaming-capable:
 | Anthropic Messages | `POST /v1/messages` | `anthropic` | `x-api-key` or `Authorization: Bearer` |
 | OpenAI Responses | `POST /v1/responses` | `openai-responses` | `Authorization: Bearer` |
 | Google Gemini | `POST /v1beta/models/{model}:generateContent` (+ `:streamGenerateContent?alt=sse`) | `gemini` | `x-goog-api-key` |
+| OpenAI Images | `POST /v1/images/generations` | (none — model-pinned, no transformer) | `Authorization: Bearer` |
+
+The Images row is an **additional model-pinned surface**, not a fifth inbound
+protocol: it has no `nativeIn`/`nativeOut` transformer pair and does not
+participate in cross-protocol translation, so the **four inbound protocols**
+framing (and the 4×4 matrix) above covers only the translated ones.
 
 Gemini is mounted as catch-alls under both `POST /v1beta/models/:rest{.+}` and
 `POST /models/:rest{.+}`. `generateContent` / `streamGenerateContent` run the

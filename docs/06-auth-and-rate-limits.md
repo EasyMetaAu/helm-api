@@ -5,9 +5,9 @@
 
 Helm never allows anonymous access. Every request to the API surface
 (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`,
-`/v1beta/models/...:generateContent`) must carry a valid API key. The admin UI
-is a separate surface with its own HTTP Basic credentials (see
-[11 · Admin UI](11-admin-ui.md)).
+`/v1beta/models/...:generateContent`, `/v1/images/generations`) must carry a
+valid API key. The admin UI is a separate surface with its own HTTP Basic
+credentials (see [11 · Admin UI](11-admin-ui.md)).
 
 ## Authentication
 
@@ -33,6 +33,11 @@ shared middleware, so they can emit their own error envelopes: `/v1/messages`,
 `/v1/responses`, and `/v1beta/*` each run the same key lookup but shape a 401 in
 their native protocol shape. The Anthropic face accepts either `x-api-key` or
 `Authorization: Bearer`.
+
+`/v1/images/generations` is likewise a self-authenticating route: it runs the
+same key lookup using `Authorization: Bearer` (like the OpenAI Chat face). It
+does **not** require `allow_custom_model` — a standard key can call it even
+though it names the exact image model.
 
 Per **Principle 7**, the plaintext key lives only in the `Authorization` header.
 It is never logged, never echoed in a response, and never written to telemetry
@@ -243,7 +248,9 @@ Budgets are enforced on **all four protocol faces** (OpenAI `/v1/chat`, Anthropi
 `/v1/messages`, OpenAI `/v1/responses`, Gemini `:generateContent`). The
 self-authenticating faces share one routing pipeline, so the check + settle (and
 the streamed-cost backfill that makes the spend dimension correct on the streaming
-path) live there once. All budget config is editable per key in the admin API
+path) live there once. Budgets and rate limits **also** apply to
+`/v1/images/generations`; image cost is metered per image (output tokens × the
+model's image rate). All budget config is editable per key in the admin API
 Keys page and applies on the next request (no restart).
 
 ## Admin authentication is separate

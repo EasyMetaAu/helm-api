@@ -16,6 +16,13 @@ Four client protocols are wired and routed:
 | `POST /v1/messages` | Anthropic Messages | Yes (SSE) and non-stream |
 | `POST /v1/responses` | OpenAI Responses | Yes (SSE) and non-stream |
 | `POST /v1beta/models/{model}:generateContent` | Google Gemini | Yes (SSE via `:streamGenerateContent`) and non-stream |
+| `POST /v1/images/generations` | OpenAI Images API | No (non-stream) |
+
+> The Images surface is **model-pinned** — the client names the exact image model —
+> and does **not** participate in cross-protocol translation. It has no `nativeIn`/
+> `nativeOut` transformer pair, so the count of wired *translated* protocols stays
+> four. (For Google image models the route translates Images ⇄ Gemini `generateContent`
+> internally; the client request/response stay OpenAI-Images-shaped.)
 
 **OpenAI Responses** streaming returns a native Responses SSE stream of
 `response.*` events terminated by a `response.completed` event. There is **no**

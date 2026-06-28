@@ -87,6 +87,11 @@ providers:
       # (zenmux real id).
       - alias: zenmux/gpt-5.5
         provider_model: openai/gpt-5.5
+      # OpenAI IMAGE GENERATION (Images API). A bare alias so OpenAI clients can pin
+      # `model: gpt-image-2` directly; served via the dedicated POST /v1/images/
+      # generations route (NOT chat). Verified live 2026-06-28.
+      - alias: gpt-image-2
+        provider_model: openai/gpt-image-2
       # Gemini is served via the NATIVE Vertex wire instead — see the
       # `zenmux-vertex` provider below (issue #217). The former OpenAI-compat
       # `zenmux/gemini-*` aliases were removed: same upstream, but the native wire
@@ -127,13 +132,14 @@ providers:
         provider_model: gemini-3.1-flash-lite
       - alias: zenmux-vertex/gemini-3.1-pro
         provider_model: gemini-3.1-pro-preview
-      # Native-Gemini IMAGE GENERATION models (responseModalities:[TEXT,IMAGE] →
-      # inlineData PNG parts; helm's gemini transformer maps these to IRMessage.images,
-      # and Gemini→Gemini native passthrough forwards them verbatim). Verified live
-      # 2026-06-28 against the ZenMux vertex-ai endpoint.
-      - alias: zenmux-vertex/gemini-3.1-flash-image
+      # Native-Gemini IMAGE GENERATION models. Served ONLY via the dedicated
+      # POST /v1/images/generations endpoint (the images route translates the request
+      # to a generateContent call with responseModalities:[TEXT,IMAGE] and maps the
+      # inlineData response back to b64_json). BARE aliases so clients address them by
+      # `gpt-image-2`-style model ids, consistent with the OpenAI image models.
+      - alias: gemini-3.1-flash-image
         provider_model: gemini-3.1-flash-image
-      - alias: zenmux-vertex/gemini-3-pro-image
+      - alias: gemini-3-pro-image
         provider_model: gemini-3-pro-image
 
   # ZenMux Anthropic-Messages compatible endpoint (Claude native wire). `type:

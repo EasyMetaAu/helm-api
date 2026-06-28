@@ -115,6 +115,14 @@ export interface ProviderClient {
     req: ChatCompletionRequest,
     opts?: { signal?: AbortSignal },
   ): Promise<Record<string, unknown>>;
+  // OpenAI Images API (POST /v1/images/generations). OPTIONAL — feature-detected by
+  // the images route; only the OpenAI-compat provider implements it. Forwards the
+  // verbatim images body to `${base}/images/generations` and returns the upstream
+  // response (data[].b64_json) untranslated.
+  imageGeneration?(
+    req: Record<string, unknown>,
+    opts?: ProviderCallOptions,
+  ): Promise<Record<string, unknown>>;
   responsesInputTokens?(
     req: ChatCompletionRequest,
     opts?: { signal?: AbortSignal },
@@ -255,6 +263,12 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
     return `${base}/chat/completions`;
   }
 
+  // The images endpoint — same base, different path. Used by imageGeneration().
+  async function imagesUrl(): Promise<string> {
+    const base = cfg.resolveBaseUrl ? await cfg.resolveBaseUrl() : cfg.baseUrl;
+    return `${base}/images/generations`;
+  }
+
   // Fail-closed credential guard (principle 2): EXACTLY ONE of static apiKey or
   // dynamic getAuthHeader. A client built with both / neither cannot resolve an
   // unambiguous auth header, so refuse construction rather than silently pick one.
@@ -333,6 +347,7 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
     req: ChatCompletionRequest,
     external: AbortSignal | undefined,
     capture?: (wireBody: string) => void,
+    urlFn: () => Promise<string> = chatUrl,
   ): Promise<Response> {
     // The exact bytes POSTed upstream — deterministic in `req`, so computed once
     // (outside the retry loop) and surfaced to the capture sink before the first fetch.
@@ -346,7 +361,7 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
       async () => {
         const t = withTimeout(timeoutMs, external);
         try {
-          return await doFetch(await chatUrl(), {
+          return await doFetch(await urlFn(), {
             method: "POST",
             headers: await headers(),
             body: bodyText,
@@ -375,13 +390,14 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
     req: ChatCompletionRequest,
     external: AbortSignal | undefined,
     capture?: (wireBody: string) => void,
+    urlFn: () => Promise<string> = chatUrl,
   ): Promise<Response> {
-    const res = await request(req, external, capture);
+    const res = await request(req, external, capture, urlFn);
     if (res.status === 401 && cfg.onUnauthorized !== undefined) {
       // Discard the 401 body (it may echo the credential) before refreshing.
       await res.body?.cancel().catch(() => {});
       cfg.onUnauthorized();
-      return await request(req, external, capture); // exactly one retry with the new token
+      return await request(req, external, capture, urlFn); // exactly one retry with the new token
     }
     return res;
   }
@@ -406,6 +422,20 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
       const res = await requestWithAuthRetry(req, opts?.signal, opts?.captureUpstream);
       if (!res.ok) throw await errorFromResponse(res);
       return (await res.json()) as ChatCompletionResponse;
+    },
+
+    async imageGeneration(req, opts) {
+      // The images body carries no `messages`, so prepareRequest is a no-op; reuse
+      // the full chat request machinery (auth / timeout / connection-retry / 401-retry
+      // / scrub) but POST to /images/generations instead of /chat/completions.
+      const res = await requestWithAuthRetry(
+        req as unknown as ChatCompletionRequest,
+        opts?.signal,
+        opts?.captureUpstream,
+        imagesUrl,
+      );
+      if (!res.ok) throw await errorFromResponse(res);
+      return (await res.json()) as Record<string, unknown>;
     },
 
     async *chatCompletionStream(req, opts) {

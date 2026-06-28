@@ -64,11 +64,10 @@
 # `gemini-*` catch-all (7) — declaration order is irrelevant. The middle `*` absorbs the
 # version, so a future 3.2/4 flash-lite needs no edit; the trailing `*` absorbs any
 # `-preview` / `-latest` / date suffix (gemini-3.1-flash-lite, gemini-3.5-flash, …).
-# Image-generation ids route to the dedicated image lanes. Longest-literal wins, so
-# `gemini-*flash-image*` (18) beats the text `gemini-*flash*` (12) and `gemini-*pro-image*`
-# (16) beats `gemini-*pro*` (10) — a `*-image` id is never swallowed by a text lane.
-"gemini-*flash-image*": gemini-flash-image
-"gemini-*pro-image*": gemini-pro-image
+# NOTE: image-generation ids (`gemini-*-image`) are NOT mapped here — image gen is
+# served ONLY by the dedicated POST /v1/images/generations endpoint (it bypasses the
+# chat lane machinery + allow_custom_model). A `gemini-*-image` id arriving on the
+# CHAT/generateContent surface falls through to the catch-all (text) — by design.
 "gemini-*flash-lite*": economy
 "gemini-*flash*": gemini-flash
 "gemini-*pro*": gemini-pro

@@ -332,6 +332,46 @@ export function createMockUpstream() {
     // Echo the model so the gateway's resolved provider model is observable.
     return c.json(echoResponse(model));
   });
+
+  // Gemini generateContent (the images route's gemini branch POSTs here, at
+  // `/models/<model>:generateContent`). Returns an inlineData image part so the e2e
+  // asserts the Gemini→Images translation (inlineData→b64_json) + cost mapping
+  // (candidatesTokenCount = 1120 image output tokens).
+  app.post("/models/:spec", async (c) => {
+    if (!c.req.param("spec").endsWith(":generateContent")) {
+      return c.json({ error: { message: "unsupported gemini operation" } }, 404);
+    }
+    return c.json({
+      candidates: [
+        {
+          content: {
+            role: "model",
+            parts: [{ inlineData: { mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUg==" } }],
+          },
+        },
+      ],
+      usageMetadata: { promptTokenCount: 11, candidatesTokenCount: 1120, totalTokenCount: 1131 },
+    });
+  });
+
+  // OpenAI Images API (POST /v1/images/generations → forwarded here). Returns a
+  // deterministic image body so the e2e can assert the round-trip + recorded cost
+  // (output_tokens = 196 image tokens, matching the live gpt-image-2 shape).
+  app.post("/images/generations", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { model?: string };
+    return c.json({
+      created: 0,
+      model: body.model ?? "gpt-image-2",
+      data: [{ b64_json: "iVBORw0KGgoAAAANSUhEUg==" }],
+      usage: {
+        input_tokens: 15,
+        output_tokens: 196,
+        output_tokens_details: { image_tokens: 196 },
+        total_tokens: 211,
+      },
+    });
+  });
+
   return app;
 }
 
