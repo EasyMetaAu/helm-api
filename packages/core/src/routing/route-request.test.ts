@@ -916,3 +916,93 @@ describe("routeRequest — lane-forced reasoning_effort", () => {
     expect(passed.reasoning_effort_forced).toBeUndefined();
   });
 });
+
+describe("routeRequest — requested-model promotion", () => {
+  // A coding lane whose declared head is an expensive model, with the client's
+  // typical model sitting in the fallback — the real production shape.
+  const PROMO_LANES: LanesConfig = {
+    coding: {
+      primary: "openai-codex/gpt-5.5",
+      fallback: ["anthropic/claude-sonnet-4-6", "deepseek/deepseek-v4-pro"],
+      constraints: {},
+    },
+  } as unknown as LanesConfig;
+
+  const planOf = (d: RouteDeps): ExecutionPlan =>
+    (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+
+  it("promotes the requested model to the head of a classified chain", async () => {
+    const d = deps({ lanes: PROMO_LANES });
+    await routeRequest(req({ requested_model: "claude-sonnet-4-6" }), d);
+    expect(planOf(d).candidate_chain).toEqual([
+      "anthropic/claude-sonnet-4-6",
+      "openai-codex/gpt-5.5",
+      "deepseek/deepseek-v4-pro",
+    ]);
+    // The logged candidate chain (admin "通道候选链") matches the executed order.
+    const rec = (d.log as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(rec.lane.candidate_chain[0]).toBe("anthropic/claude-sonnet-4-6");
+  });
+
+  it("leaves the classified chain untouched when the request is auto", async () => {
+    const d = deps({ lanes: PROMO_LANES });
+    await routeRequest(req({ requested_model: "auto" }), d);
+    expect(planOf(d).candidate_chain[0]).toBe("openai-codex/gpt-5.5");
+  });
+
+  it("promotes on the alias→lane path for an allow_custom_model key", async () => {
+    const d = deps({ lanes: PROMO_LANES, modelAliases: { "claude-sonnet-*": "coding" } });
+    await routeRequest(req({ requested_model: "claude-sonnet-4-6" }), d, {
+      allowCustomModel: true,
+    });
+    expect(planOf(d).candidate_chain[0]).toBe("anthropic/claude-sonnet-4-6");
+  });
+
+  it("does not touch an explicit single-model passthrough", async () => {
+    const d = deps({ lanes: PROMO_LANES, isKnownModel: () => true });
+    await routeRequest(req({ requested_model: "anthropic/claude-sonnet-4-6" }), d, {
+      allowCustomModel: true,
+    });
+    expect(planOf(d).candidate_chain).toEqual(["anthropic/claude-sonnet-4-6"]);
+  });
+
+  it("does not touch an explicit lane passthrough", async () => {
+    const d = deps({ isKnownModel: () => true }); // default LANES has `premium`
+    await routeRequest(req({ requested_model: "premium" }), d, { allowCustomModel: true });
+    expect(planOf(d).candidate_chain[0]).toBe("best_reasoning_model");
+  });
+
+  // Governance overrides win over promotion (Codex review P1/P2).
+  it("does not promote during an over-budget degrade (downgrade not bypassable)", async () => {
+    // degrade forces `economy`, whose expansion transitively includes the named
+    // expensive model via `balanced`; promotion must NOT pull it to the head.
+    const lanes: LanesConfig = {
+      economy: { primary: "deepseek/cheap", fallback: ["balanced"], constraints: {} },
+      balanced: {
+        primary: "openai-codex/gpt-5.5",
+        fallback: ["anthropic/claude-sonnet-4-6"],
+        constraints: {},
+      },
+    } as unknown as LanesConfig;
+    const d = deps({ lanes });
+    await routeRequest(req({ requested_model: "gpt-5.5" }), d, {
+      keyCaps: { degradeLane: "economy", allowedLanes: null },
+    });
+    expect(planOf(d).candidate_chain[0]).toBe("deepseek/cheap");
+  });
+
+  it("does not promote when the requested model is aliased to auto", async () => {
+    const lanes: LanesConfig = {
+      balanced: { primary: "deepseek/m-default", fallback: [], constraints: {} },
+      coding: {
+        primary: "deepseek/m-coder",
+        fallback: ["openai-codex/gpt-5.5"],
+        constraints: {},
+      },
+    } as unknown as LanesConfig;
+    // operator maps the vendor id to `auto` → classify, never honor the pinned id.
+    const d = deps({ lanes, modelAliases: { "gpt-5.5": "auto" } });
+    await routeRequest(req({ requested_model: "gpt-5.5" }), d);
+    expect(planOf(d).candidate_chain[0]).toBe("deepseek/m-coder");
+  });
+});
