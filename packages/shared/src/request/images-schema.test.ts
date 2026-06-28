@@ -3,18 +3,20 @@ import { ImageGenerationRequestSchema, ImageGenerationResponseSchema } from "./i
 
 describe("ImageGenerationRequestSchema", () => {
   it("parses a minimal {model, prompt}", () => {
-    expect(ImageGenerationRequestSchema.safeParse({ model: "gpt-image-2", prompt: "a cat" }).success).toBe(
-      true,
-    );
+    expect(
+      ImageGenerationRequestSchema.safeParse({ model: "gpt-image-2", prompt: "a cat" }).success,
+    ).toBe(true);
   });
 
   it("requires a non-empty model and prompt", () => {
     expect(ImageGenerationRequestSchema.safeParse({ model: "gpt-image-2" }).success).toBe(false);
     expect(ImageGenerationRequestSchema.safeParse({ prompt: "a cat" }).success).toBe(false);
-    expect(ImageGenerationRequestSchema.safeParse({ model: "", prompt: "a cat" }).success).toBe(false);
-    expect(ImageGenerationRequestSchema.safeParse({ model: "gpt-image-2", prompt: "" }).success).toBe(
+    expect(ImageGenerationRequestSchema.safeParse({ model: "", prompt: "a cat" }).success).toBe(
       false,
     );
+    expect(
+      ImageGenerationRequestSchema.safeParse({ model: "gpt-image-2", prompt: "" }).success,
+    ).toBe(false);
   });
 
   it("accepts the optional generation params", () => {
