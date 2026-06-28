@@ -35,7 +35,14 @@ function item(traceId: string, overrides: Partial<RequestListItem> = {}): Reques
     status: 'ok',
     latency_ms: 460,
     cost_usd: 0.0123,
-    usage: { input: 1200, output: 340, cached: 800, cacheCreation: 64, nonCached: 400, total: 1540 },
+    usage: {
+      input: 1200,
+      output: 340,
+      cached: 800,
+      cacheCreation: 64,
+      nonCached: 400,
+      total: 1540,
+    },
     tps: 200,
     ...overrides,
   };
@@ -102,7 +109,14 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
       completion_usd: 0.01,
       total_usd: 0.0103,
     },
-    usage: { input: 1200, output: 340, cached: 800, cacheCreation: 64, nonCached: 400, total: 1540 },
+    usage: {
+      input: 1200,
+      output: 340,
+      cached: 800,
+      cacheCreation: 64,
+      nonCached: 400,
+      total: 1540,
+    },
     tps: 200,
     generation_ms: 1700,
     ttfb_ms: 460,
@@ -417,6 +431,83 @@ describe('requests detail page', () => {
     expect(screen.getByTestId('response-body')).toHaveTextContent(/"ok": true/);
   });
 
+  // A 1×1 PNG (bare base64) — the form a generated/input image takes inside a body.
+  const PNG_B64 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+
+  it('surfaces a generated response image up front in the Media overview (Response group only)', () => {
+    // The exact Gemini image-gen shape: image buried at
+    // candidates[0].content.parts[0].inlineData.data. The overview makes it visible
+    // without expanding the JSON tree. Request is text-only → no Request group.
+    render(DetailPage, {
+      data: {
+        detail: detail(),
+        payload: {
+          captured: true,
+          request: { contents: [{ role: 'user', parts: [{ text: 'draw a strawberry' }] }] },
+          response: {
+            candidates: [
+              { content: { parts: [{ inlineData: { mimeType: 'image/png', data: PNG_B64 } }] } },
+            ],
+          },
+        },
+        traceId: 'tr_img',
+      },
+    });
+    const overview = screen.getByTestId('media-overview');
+    const groups = within(overview).getAllByTestId('media-group');
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toHaveTextContent('Response');
+    const img = within(groups[0]).getByRole('img') as HTMLImageElement;
+    expect(img.getAttribute('src')).toBe(`data:image/png;base64,${PNG_B64}`);
+  });
+
+  it('groups SENT and RECEIVED images separately (Request input image + Response image)', () => {
+    render(DetailPage, {
+      data: {
+        detail: detail(),
+        payload: {
+          captured: true,
+          // Anthropic vision input shape: messages[].content[].source.data (base64).
+          request: {
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  {
+                    type: 'image',
+                    source: { type: 'base64', media_type: 'image/png', data: PNG_B64 },
+                  },
+                ],
+              },
+            ],
+          },
+          response: {
+            candidates: [
+              { content: { parts: [{ inlineData: { mimeType: 'image/png', data: PNG_B64 } }] } },
+            ],
+          },
+        },
+        traceId: 'tr_both',
+      },
+    });
+    const groups = within(screen.getByTestId('media-overview')).getAllByTestId('media-group');
+    expect(groups).toHaveLength(2);
+    expect(groups[0]).toHaveTextContent('Request');
+    expect(groups[1]).toHaveTextContent('Response');
+  });
+
+  it('omits the Media overview entirely when no body carries an image', () => {
+    render(DetailPage, {
+      data: {
+        detail: detail(),
+        payload: { captured: true, request: { model: 'auto' }, response: { ok: true } },
+        traceId: 'tr_noimg',
+      },
+    });
+    expect(screen.queryByTestId('media-overview')).not.toBeInTheDocument();
+  });
+
   it('enables Retry for any captured protocol body, disabled only when nothing was captured', () => {
     // Responses (input[]) and Gemini (contents[]) bodies have NO `messages` array —
     // the old gate wrongly disabled Retry for them. The server now recovers the
@@ -493,7 +584,9 @@ describe('requests detail page', () => {
 describe('requests detail loader (payload fails open, detail is fatal)', () => {
   // The loader only reads params.traceId + url.searchParams — a minimal stub is enough.
   // `PageLoad` widens the return to `void | …`; narrow it back to the real object shape.
-  async function runLoad(traceId: string): Promise<Exclude<Awaited<ReturnType<typeof loadDetail>>, void>> {
+  async function runLoad(
+    traceId: string,
+  ): Promise<Exclude<Awaited<ReturnType<typeof loadDetail>>, void>> {
     const event = {
       params: { traceId },
       url: new URL(`http://localhost/requests/${traceId}`),

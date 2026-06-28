@@ -6,7 +6,16 @@
   // otherwise an unreadable wall of characters; this renders the decoded image in a
   // roomy modal via its `data:` URL (already resolved by the caller). Read-only —
   // never mutates the value.
-  let { src, label }: { src: string; label?: string } = $props();
+  // `variant` picks the trigger: 'link' is the inline "View image" text link shown
+  // next to a base64 scalar in the JSON tree; 'thumb' renders the decoded image as a
+  // clickable thumbnail for the gallery strip above the body. Both open the SAME zoom
+  // modal below — the gallery just makes a generated image visible without expanding
+  // the tree first.
+  let {
+    src,
+    label,
+    variant = 'link',
+  }: { src: string; label?: string; variant?: 'link' | 'thumb' } = $props();
 
   let open = $state(false);
 
@@ -91,12 +100,24 @@
   }
 </script>
 
-<button
-  type="button"
-  class="ml-2 cursor-pointer text-link underline"
-  data-testid="image-preview-open"
-  onclick={() => (open = true)}>{$t('View image')}</button
->
+{#if variant === 'thumb'}
+  <button
+    type="button"
+    class="block overflow-hidden rounded border border-border bg-canvas transition-colors hover:border-action focus:border-action [background-image:repeating-conic-gradient(theme(colors.slate.200)_0_25%,transparent_0_50%)] [background-size:12px_12px]"
+    data-testid="image-preview-open"
+    title={label ?? $t('View image')}
+    onclick={() => (open = true)}
+  >
+    <img {src} alt={label ?? $t('View image')} class="h-28 w-28 object-contain" />
+  </button>
+{:else}
+  <button
+    type="button"
+    class="ml-2 cursor-pointer text-link underline"
+    data-testid="image-preview-open"
+    onclick={() => (open = true)}>{$t('View image')}</button
+  >
+{/if}
 
 {#if open}
   <Modal label={label ?? $t('View image')} onclose={close} wide>
