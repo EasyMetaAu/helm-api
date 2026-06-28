@@ -1,4 +1,12 @@
-import { ModelObjectSchema, ModelsListSchema, OpenAIChatRequestSchema } from "@helm/shared";
+import {
+  ImageGenerationRequestSchema,
+  ImageGenerationResponseSchema,
+  InteractionsRequestSchema,
+  InteractionsResponseSchema,
+  ModelObjectSchema,
+  ModelsListSchema,
+  OpenAIChatRequestSchema,
+} from "@helm/shared";
 import { swaggerUI } from "@hono/swagger-ui";
 import type { Hono } from "hono";
 import { z } from "zod";
@@ -11,9 +19,15 @@ import type { BuildInfo } from "../build-info.js";
 // actually validates. 3.1 is chosen deliberately — it is a superset of JSON
 // Schema draft-2020-12, exactly what z.toJSONSchema emits, so generated component
 // schemas drop in without translation. Paths are hand-described (the existing
-// routes are plain Hono handlers, not OpenAPIHono) and cover the PRIMARY surface;
-// admin endpoints are intentionally omitted (internal). All three doc endpoints
-// (/openapi.json, /docs) are PUBLIC — they expose only the schema, never data.
+// routes are plain Hono handlers, not OpenAPIHono) and cover the PRIMARY surface
+// — the four client protocols (OpenAI chat, Anthropic messages, OpenAI Responses,
+// Gemini generateContent) plus the two image-generation endpoints; admin endpoints
+// are intentionally omitted (internal). Request/response bodies reuse the Zod
+// schemas wherever one exists (chat, images, interactions); the loose-passthrough
+// surfaces (Anthropic, Responses, Gemini) carry a runnable `example` instead of a
+// fabricated full schema, since the route forwards those bodies provider-native.
+// The doc endpoints (/openapi.json, /docs) are PUBLIC — they expose only the
+// schema, never data.
 
 type JsonSchema = Record<string, unknown>;
 
@@ -62,14 +76,45 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
         "Authenticate protected endpoints with `Authorization: Bearer <api-key>`.",
     },
     servers: [{ url: "/", description: "This gateway" }],
+    externalDocs: {
+      description: "Helm documentation (routing, lanes, protocol translation, image generation)",
+      url: "https://github.com/EasyMetaAu/helm-api#readme",
+    },
+    tags: [
+      { name: "Meta", description: "Landing page, readiness, and build info — no auth." },
+      { name: "Models", description: "What the key can route to: lanes, `auto`, and aliases." },
+      {
+        name: "Inference",
+        description:
+          'The four client protocols plus image generation. Send `model: "auto"` to let ' +
+          "Helm classify and route, a lane name to pin a lane, or an exact image model id " +
+          "on the image endpoints. Streaming replies are `text/event-stream` (SSE).",
+      },
+    ],
     components: {
       securitySchemes: {
-        bearerAuth: { type: "http", scheme: "bearer", description: "Helm API key" },
+        bearerAuth: {
+          type: "http",
+          scheme: "bearer",
+          description: "Helm API key — `Authorization: Bearer <api-key>`.",
+        },
+        googleApiKey: {
+          type: "apiKey",
+          in: "header",
+          name: "x-goog-api-key",
+          description:
+            "Helm API key in the Gemini SDK's native header (the Gemini endpoints also " +
+            "accept `Authorization: Bearer`).",
+        },
       },
       schemas: {
         ModelsList: component(ModelsListSchema),
         ModelObject: component(ModelObjectSchema),
         ChatCompletionRequest: component(OpenAIChatRequestSchema),
+        ImageGenerationRequest: component(ImageGenerationRequestSchema),
+        ImageGenerationResponse: component(ImageGenerationResponseSchema),
+        InteractionsRequest: component(InteractionsRequestSchema),
+        InteractionsResponse: component(InteractionsResponseSchema),
         ErrorEnvelope: ERROR_ENVELOPE,
       },
     },
@@ -161,11 +206,19 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
             content: {
               "application/json": {
                 schema: { $ref: "#/components/schemas/ChatCompletionRequest" },
+                example: {
+                  model: "auto",
+                  messages: [
+                    { role: "user", content: "Explain consistent hashing in two sentences." },
+                  ],
+                  stream: false,
+                },
               },
             },
           },
           responses: {
             "200": { description: "Chat completion (JSON) or SSE stream when stream=true" },
+            "400": errorResponse("Invalid request (e.g. forbidden lane on a custom-model key)"),
             "401": errorResponse("Missing or invalid API key"),
             "502": errorResponse("All providers failed"),
           },
@@ -175,15 +228,31 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
         post: {
           tags: ["Inference"],
           summary: "Anthropic-compatible Messages API",
-          description: "Self-authenticated; errors render as the Anthropic error envelope.",
+          description:
+            "Send an Anthropic Messages body verbatim — Helm routes it and translates the " +
+            'reply back to the Anthropic shape. `model: "auto"` classifies; a lane name ' +
+            "pins a lane. Set `stream: true` for SSE. The body is forwarded provider-native, " +
+            "so any Anthropic field rides through; errors render as the Anthropic error envelope.",
           security: [{ bearerAuth: [] }],
           requestBody: {
             required: true,
-            content: { "application/json": { schema: { type: "object" } } },
+            content: {
+              "application/json": {
+                schema: { type: "object" },
+                example: {
+                  model: "auto",
+                  max_tokens: 1024,
+                  messages: [
+                    { role: "user", content: "Explain consistent hashing in two sentences." },
+                  ],
+                },
+              },
+            },
           },
           responses: {
             "200": { description: "Anthropic message (JSON) or SSE stream" },
-            "401": { description: "Missing or invalid API key" },
+            "400": errorResponse("Invalid request"),
+            "401": errorResponse("Missing or invalid API key"),
           },
         },
       },
@@ -191,13 +260,23 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
         post: {
           tags: ["Inference"],
           summary: "OpenAI Responses API",
+          description:
+            'OpenAI Responses body (the `input` + `instructions` shape). `model: "auto"` ' +
+            "classifies; a lane name pins a lane. Set `stream: true` for SSE. Forwarded " +
+            "provider-native, so unmodelled fields pass through.",
           security: [{ bearerAuth: [] }],
           requestBody: {
             required: true,
-            content: { "application/json": { schema: { type: "object" } } },
+            content: {
+              "application/json": {
+                schema: { type: "object" },
+                example: { model: "auto", input: "Explain consistent hashing in two sentences." },
+              },
+            },
           },
           responses: {
             "200": { description: "Response (JSON) or SSE stream" },
+            "400": errorResponse("Invalid request"),
             "401": errorResponse("Missing or invalid API key"),
           },
         },
@@ -215,10 +294,26 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
           security: [{ bearerAuth: [] }],
           requestBody: {
             required: true,
-            content: { "application/json": { schema: { type: "object" } } },
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/ImageGenerationRequest" },
+                example: {
+                  model: "gpt-image-2",
+                  prompt: "a single red apple on a plain white background",
+                  size: "1024x1024",
+                },
+              },
+            },
           },
           responses: {
-            "200": { description: "Images response (`{ created, data: [{ b64_json }], usage }`)" },
+            "200": {
+              description: "Generated image(s), billed as output tokens.",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/ImageGenerationResponse" },
+                },
+              },
+            },
             "400": errorResponse("Invalid image generation request"),
             "401": errorResponse("Missing or invalid API key"),
             "404": errorResponse("Model is not a configured image model"),
@@ -238,20 +333,76 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
             "translates the request to a `generateContent` call and maps the response " +
             "back to the interactions `steps[]` shape. An OpenAI image model (gpt-image-2) " +
             "is a 400 → use /v1/images/generations. Non-streaming; budget + rate limits apply.",
-          security: [{ bearerAuth: [] }],
+          security: [{ googleApiKey: [] }, { bearerAuth: [] }],
           requestBody: {
             required: true,
-            content: { "application/json": { schema: { type: "object" } } },
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/InteractionsRequest" },
+                example: {
+                  model: "gemini-3.1-flash-image",
+                  input: "a single red apple on a plain white background",
+                  response_format: { type: "image", aspect_ratio: "1:1" },
+                },
+              },
+            },
           },
           responses: {
             "200": {
-              description:
-                "Interactions response (`{ id, steps: [{ content: [{ type, data }] }] }`)",
+              description: "Interactions response — the image lives at `steps[].content[]`.",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/InteractionsResponse" },
+                },
+              },
             },
             "400": errorResponse("Invalid request, or an OpenAI image model"),
             "401": errorResponse("Missing or invalid API key"),
             "404": errorResponse("Model is not a configured image model"),
             "503": errorResponse("Image provider unavailable (missing credential)"),
+          },
+        },
+      },
+      "/v1beta/models/{model}:generateContent": {
+        post: {
+          tags: ["Inference"],
+          summary: "Google Gemini generateContent",
+          description:
+            "The Gemini SDK's native `generateContent` path. `{model}` is a lane, `auto`, " +
+            "or (for allow_custom_model keys) a Gemini model alias; auth via `x-goog-api-key` " +
+            "(Bearer also accepted). For streaming, call the sibling `:streamGenerateContent` " +
+            "(SSE). Naming a Gemini **image** model and asking for image output " +
+            "(`responseModalities: [TEXT, IMAGE]`) returns the picture inline at " +
+            "`candidates[].content.parts[].inlineData`.",
+          security: [{ googleApiKey: [] }, { bearerAuth: [] }],
+          parameters: [
+            {
+              name: "model",
+              in: "path",
+              required: true,
+              schema: { type: "string" },
+              description:
+                "A lane name, `auto`, or a Gemini model id (e.g. `gemini-3.1-flash-image`).",
+            },
+          ],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { type: "object" },
+                example: {
+                  contents: [
+                    { parts: [{ text: "a single red apple on a plain white background" }] },
+                  ],
+                  generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": { description: "Gemini `generateContent` response (`{ candidates: [...] }`)" },
+            "400": errorResponse("Invalid request"),
+            "401": errorResponse("Missing or invalid API key"),
           },
         },
       },

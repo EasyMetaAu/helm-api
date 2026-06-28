@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-06-28 · 文档/README 对齐今日图片特性 + `/openapi.json` 完善（仅文档与 OpenAPI，无运行时改动）
+
+- **背景（Lukin）**：今日 v0.22.13–v0.22.20 一串提交后核对全部文档；其中**三个提交没碰文档**。另诉求 `/openapi.json` 不够完整、要更好用。
+- **文档缺口补全**：① v0.22.13「点名模型在选中 lane 链内则提到链首」——README/zh 的 model 表与备注原说"标准 key model 字段被忽略"已不准确，改写 + `docs/04` 新增权威小节「In-chain model promotion」（reorder-only、归一化匹配、over-budget/alias→auto 抑制）。② v0.22.19 官方 OpenAI/Google image provider 默认内置——README/zh env 表加 `OPENAI_API_KEY`/`GEMINI_API_KEY`、failover 示例改成内置的 `gpt-image`/`gemini-image` lane（官方上游→ZenMux 回退）、`.env.example` 补两 key。③ v0.22.15+v0.22.20 admin 媒体总览（含生成图）——README/zh payload inspector + `docs/11` 各补一句。
+- **OpenAPI（`apps/gateway/src/routes/openapi.ts`）**：补齐缺失的 `POST /v1beta/models/{model}:generateContent` 路径；images/interactions 的请求+响应 body 接现成 Zod schema（单一来源，不再是空 object）；声明 `x-goog-api-key` apiKey 安全方案并挂到两个 Gemini 端点；给 chat/messages/responses/images/interactions/gemini 各加可直接 "Try it out" 的请求示例；顶层加 tags 描述 + externalDocs。**取舍**：Anthropic/Responses/Gemini 是 loose passthrough，**不造假 full schema**——只给 example，诚实且 Swagger 可用。
+- **验证**：`openapi.test` 扩断言（11 path 全覆盖、4 个 image/interactions 组件、googleApiKey 方案）3/3 绿；gateway typecheck 干净、biome 干净；spec JSON round-trip 正常。fail-close 闸：**无 config/schema 改动**。发 v0.22.21。
+
 ## 2026-06-28 · 图片生成 lane fallback（多 provider 故障转移；gateway，docs/05，原则 5/8）
 
 - **背景（Lukin）**：图片生成是**单点钉死**——每个图片 model 只对应一个 provider，没有熔断、没有 fallback，上游一挂整条请求就失败。诉求：像文本 lane 那样把「同一图片模型在多个 provider 上的别名」组成 lane，一个节点不可用自动 fallback。**关键认识**：一个 alias = 一个 (provider, provider_model)，多 provider = 多 alias，用 lane 串起来——正是文本 fallback 的同一抽象。
@@ -23,19 +30,13 @@
 - **去重重构**：images.ts 的 `buildImageDecision`/`PASSTHROUGH_CLASSIFIER`/`numField` 抽到共享 `routes/image-telemetry.ts`，两个端点共用（一处真源不漂移）；server.ts `resolveImageTarget` 抽成局部 const 给两端点共享。
 - **验证**：route-request +4（标准/custom key 钉死、非图片不动、降级抑制）、interactions schema(4)+route(11，镜像 images.test 含 400-openai/翻译/strip/budget)、images 回归(10)；**全量 4803 单测绿**、四包 typecheck、biome 干净；**e2e 74 绿**（新 `gemini-image.spec` 4：Part1 generateContent→真 inlineData=证明钉死非文本、Part2 interactions→steps 含 image、interactions 拒 gpt-image-2=400、缺 key=401；mock 复用既有 `:generateContent` 返 inlineData，**零 mock 改动**）。**取代**[历史的 Gemini lane 方案]——图片模型现统一 model-pinned（capabilities.outputImage），三入口全任意 key。**坑/限制**：`imageConfig`(aspect_ratio/image_size)→generateContent 的精确字段待 ZenMux 实测（缺省只发 responseModalities，不阻塞主路径）；interactions `steps` 只产单个 model_output（不做 thought/grounding step，满足 SDK `output_image.data`）；非流式。分支 `feat/gemini-image-generation`，**未提交未部署**。
 
-## 2026-06-28 · 请求详情页置顶「全部媒体」总览（请求图 + 响应图，一处看全）（admin UI；docs/07，原则 1）
-
-- **背景（Lukin，box 实查 req `99394953`）**：Gemini 图片生成响应在详情页**只显示一坨 JSON**，生成图没渲染——根因不是缺能力（`imageData.imageDataUrl` base64-magic 嗅探 + `ImagePreview` 缩放 modal + JsonTree 内既有深层「View image」按钮全早已存在），是图片埋在 `candidates[0].…inlineData.data`=**depth 7**、JSON tree 默认只展 2 层翻不到。诉求两段递进：先要请求面板也能看图，最终拍板要一个**独立置顶总览**——把这次调用**发送的图(request)+ 生成的图(response)** 一次性列出、点缩略图弹大图，不用展开 JSON 翻。
-- **决定（两轮：先把带塞进 JsonViewer，再上移为独立总览）**：① `imageData.ts` 纯函数 `collectImages(value)`（递归走 parsed payload，每 string 跑 `imageDataUrl`，按 URL 去重、封顶 24、depth≤24 防爆栈，返 `{url,path}[]`）；② `ImagePreview.svelte` 加 `variant:'link'|'thumb'`——`thumb` 触发器是缩略图 `<img>`，**复用同一个缩放 modal**，`link` 默认不变（JsonTree 旧按钮照旧）；③ **详情页 `[traceId]/+page.svelte`** 在 Request summary 之后插独立 `media-overview` section：`collectImages` 分别扫 request(+upstreamDiffers 时并 upstream，按 URL 去重) 与 response，分「Request」「Response」两组渲缩略图，仅有图才显。**关键决定（与 Lukin 确认）：去掉上一轮加在 `JsonViewer` 里的内嵌缩略图带**（`JsonViewer` 只此页消费，总览接管后内嵌带=同图显示两遍）——JsonViewer 回纯 JSON，「翻」逻辑(tree+深层按钮)原样保留。
-- **坑（验证踩到）**：真实 2.1MB payload 端到端验证不能用 `pnpm dev`——SvelteKit dev 默认 SSR，`load()` 跑服务端、`page.route` 拦不到（页面 500）。须 `pnpm build`+`pnpm preview`（adapter-static SPA，`load` 仅浏览器端）才能 Playwright `page.route` 注入 box 拉来的 detail/payload。Playwright 沙箱无 `require`/`import()`/`fetch`——读本地大文件改 `python3 -m http.server` + `page.request.get`。验证：真实图生成 req→仅 Response 组真图 1408×768；合成「请求带 Anthropic `source.data` 输入图」→ Request+Response 两组都显；点缩略图弹 modal，标题=`组名·字段路径`。
-- **范围/TODO**：跨协议请求图都命中（OpenAI `image_url` data:、Anthropic `source.data`、Gemini `inlineData.data`）；**http(s) 图片 URL 不渲染**（只认 data:/base64）。**已知限制**：流式响应走 `StreamViewer`(拼 SSE) 不扫图，若以后有 Gemini 流式出图再补。i18n 复用既有 `Images`/`Request`/`Response`，仅新增 1 条 help 文案键手填五 locale。
-- **验证**：`imageData.test`+collectImages(4) / `requests.test` 详情页 +3（仅响应图→Response 组、请求+响应→两组、无图→不渲）；admin **522 单测绿**、svelte-check 934/0/0、prettier 干净。分支 `worktree-response-image-render`，**未提交未部署**。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+- **2026-06-28 · 请求详情页置顶「全部媒体」总览（请求图+响应图一处看全；admin UI，docs/07）**：Gemini 生成图埋在 `inlineData.data` depth 7、JSON tree 默认展 2 层翻不到 → 详情页 Request summary 后插独立 `media-overview` section。纯函数 `imageData.collectImages`（递归扫 parsed payload、`imageDataUrl` 嗅探、URL 去重封顶 24、depth≤24）分扫 request(+upstream)/response 两组；`ImagePreview` 加 `variant:'thumb'` 复用同一缩放 modal。去掉上一轮塞进 JsonViewer 的内嵌带（避免同图显两遍），JsonViewer 回纯 JSON。坑：2.1MB payload 端到端须 `build`+`preview`（dev SSR 下 `page.route` 拦不到）；只认 data:/base64，http(s) URL 与流式 `StreamViewer` 不扫。admin 522 测绿。发 v0.22.20（见 [[admin-test-i18n-gotchas]]）。
 
 - **2026-06-28 · 统一图片生成端点 `POST /v1/images/generations`（gpt-image-2 + Gemini，解耦 allow_custom_model；gateway，docs/02，原则 1/6/7）**：接 OpenAI `gpt-image-2`(ZenMux) 须新建端点+代码。核心决策：`allow_custom_model` 是聊天路由旁路门，图片生成天生 model-pinned 不该被它管 → `/v1/images/generations` 作所有图片统一入口、**不门控**（成本靠 budget/rate-limit）；Gemini 图片模型也接进来（ZenMux 实测 Gemini 不在 images 端点→404，route 内翻译 images↔generateContent `responseModalities:[TEXT,IMAGE]`→inlineData→b64_json）。删 lane 路径、Gemini 图片别名改裸名。`resolveImageTarget` 按 `targetProviderProtocol` 分流，cost/telemetry 统一产 OpenAI-Images 形状。准确计费：output_tokens(image_tokens)→`resolveCostUsd`，实测 1024 图 cost `$0.005955` 分毫不差。DB 膨胀闸：响应 base64 入库前 →`[image omitted]` 占位（客户端仍拿完整图）。Codex 修 P1（漏 budget gate+settle 补上）+P2（缺凭据 404→503 provider_unavailable）。schema/provider/cost/route 单测、4777 绿、e2e 70 绿。已发 v0.22.16 部署（见 [[images-endpoint-shipped-deployed]]）。后被 capabilities.outputImage 钉死方案扩展为三入口任意 key（v0.22.17），再被本轮 lane fallback 扩展。
 

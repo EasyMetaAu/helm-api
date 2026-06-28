@@ -96,7 +96,7 @@ The gateway ships a SvelteKit console at `/admin` (HTTP Basic, five languages). 
 **A payload inspector built for debugging.** With verbatim capture on, the same page loads the full request and response bodies as a collapsible tree (or Formatted / Raw):
 
 - **Read anything.** Pop any oversized field — a giant system prompt, a tool schema, a continued-session summary — into a fullscreen, copyable reader instead of scrolling a wrapped cell.
-- **See the multimedia.** Inline base64 or remote images render in place, with zoom, fit-to-window, and open-in-new-tab.
+- **See the multimedia.** A media overview at the top collects every image **sent** (request) and **generated** (response) as clickable thumbnails — no tree-digging — and inline base64 or remote images still render in place, with zoom, fit-to-window, and open-in-new-tab.
 - **Edit and replay.** Hit **Retry**, tweak the body, and re-send it in its original protocol (OpenAI Chat, Anthropic, Responses, or Gemini) as an isolated, newly-traced debug run.
 
 **Pool your subscriptions.** Route Claude Pro/Max, ChatGPT Codex, and GitHub Copilot logins as backends — several accounts per provider, each with its own model curation, egress proxy, priority, and live quota.
@@ -211,11 +211,11 @@ curl http://localhost:8080/v1/chat/completions \
 | Value | What Helm does |
 |---|---|
 | `auto` *(recommended)* | Classifies the request and routes it to the best lane. |
-| any model/lane on a **standard key** | The `model` field is **ignored** — Helm classifies and routes exactly as if you'd sent `auto` (never a 400). |
+| any model/lane on a **standard key** | Helm still classifies and routes as if you'd sent `auto` (never a 400) — the `model` field doesn't pick the lane. But if the model you named is already in the chosen lane's chain, Helm serves *that* candidate first. |
 | a pinned vendor id, e.g. `claude-opus-4-8` — **custom-model key** | The compatibility shim maps it onto a lane (`config/model-aliases.yaml`), cap-bounded by the key's lanes. |
 | a lane name (`premium`) or exact alias (`deepseek/deepseek-v4-pro`) — **custom-model key** | Routes straight into that lane / model, skipping classification. |
 
-> A standard key only ever needs `auto` — Helm classifies everything and the `model` field is ignored. Pinning a lane, a vendor family, or an exact model requires a **custom-model** key (`allow_custom_model`). Lanes are operator config (`lanes.yaml` + dashboard).
+> A standard key only ever needs `auto`. The `model` field never changes which lane is chosen — but when the named model already sits in that lane's chain, Helm promotes it to the front (so Claude Code pinning `claude-sonnet-4-6` gets Sonnet, not the lane's primary; it falls back to the rest of the chain on failure). Pinning a lane, a vendor family, or an out-of-lane model requires a **custom-model** key (`allow_custom_model`). Lanes are operator config (`lanes.yaml` + dashboard).
 
 ### Image generation
 
@@ -251,16 +251,18 @@ curl http://localhost:8080/v1beta/interactions \
 
 #### Image failover across providers
 
-The same image model is often available from several providers (OpenAI direct, ZenMux, OpenRouter…). Group those per-provider aliases into an **image lane** in `config/lanes.yaml` and name the **lane** as your `model` — Helm tries the primary, and on a provider fault (timeout, 5xx, circuit-open) falls over to the next, using the **same circuit breaker** as the chat router. A deterministic client error (a 4xx invalid request — bad size, oversized image) is returned verbatim and does **not** trigger failover.
+The same image model is often available from several providers (official upstream, ZenMux, OpenRouter…). The shipped config already groups them into image **lanes** — name the **lane** as your `model` and Helm tries the primary, then on a provider fault (timeout, 5xx, circuit-open) falls over to the next, using the **same circuit breaker** as the chat router. A deterministic client error (a 4xx invalid request — bad size, oversized image) is returned verbatim and does **not** trigger failover.
 
 ```yaml
-# config/lanes.yaml — members must be image models (capabilities.outputImage) and a
-# single kind (all gpt-image-* OR all gemini-*-image). Request `model: "gpt-image"`.
-gpt-image:
-  primary: gpt-image-2          # OpenAI direct
-  fallback:
-    - zenmux/gpt-image-2        # add the alias under each provider in providers.yaml
-    - openrouter/gpt-image-2
+# config/lanes.yaml — the two shipped image lanes lead with the OFFICIAL upstream,
+# then fall over to the ZenMux relay. Members must be image models
+# (capabilities.outputImage) and a single kind (all gpt-image-* OR all gemini-*-image).
+gpt-image:                          # request `model: "gpt-image"`
+  primary: openai/gpt-image-2       # OpenAI official → ZenMux relay
+  fallback: [gpt-image-2]
+gemini-image:                       # request `model: "gemini-image"`
+  primary: google/gemini-3.1-flash-image   # Google official → ZenMux flash → pro
+  fallback: [gemini-3.1-flash-image, gemini-3-pro-image]
 ```
 
 Image lanes work for **any key** on the two dedicated endpoints (`/v1/images/generations`, `/v1beta/interactions`). On the Gemini `:generateContent` path, naming a lane follows the normal lane rule — it requires an `allow_custom_model` key — so for the broadest reach, point image SDKs at the dedicated endpoints.
@@ -296,6 +298,7 @@ Most-used environment variables (env wins over YAML; full list in [`.env.example
 |---|---|
 | `DEEPSEEK_API_KEY` | Primary provider credential (**required**) |
 | `ZENMUX_API_KEY`, `OPENROUTER_API_KEY` | Optional provider credentials (provider skipped if missing) |
+| `OPENAI_API_KEY`, `GEMINI_API_KEY` | Optional — official OpenAI / Google **image** providers; the shipped `gpt-image` / `gemini-image` lanes lead with these and fail over to ZenMux |
 | `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD` | Dashboard login (Basic auth) |
 | `HELM_HOST` / `HELM_PORT` | Server binding (default `0.0.0.0:8080`) |
 | `HELM_STORE_DRIVER` | `sqlite` (default) or `supabase` |
