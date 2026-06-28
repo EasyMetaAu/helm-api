@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-06-28 · 客户端点名的模型若在候选链内则提到链首（路由；docs/04，原则 5/6）
+
+- **背景（Lukin，box 实查 req `1a4adea9`）**：Claude Code 请求 `claude-sonnet-4-6`（key **非 allow_custom_model**）→ 分类落 `coding` lane，链首 `openai-codex/gpt-5.5`，实际服务 gpt-5.5；而点名的 sonnet-4-6 本就在链第 5 位（`anthropic/claude-sonnet-4-6`，OAuth 订阅别名）且更便宜。诉求：只要分类后的链里含客户点名的模型就用它（提到链首），失败再回退——**不管 key 是否 allow_custom_model**。
+- **决定（reorder-only 不变式）**：新纯函数 `routing/promote-requested-model.ts`，**仅重排链、绝不引入新候选**——故成本被 operator 在该 lane 声明的候选集天然约束，逐候选能力过滤+熔断仍在 `execute` 循环跑（提升后头部 context_too_small/熔断 open 自动 skip 回退），永不比现状差。接在 `route-request.ts` 两处 `expandChain`（分类 681、alias→lane 547）；explicit model（`[model]`）/explicit lane（请求是 lane 名）天然 no-op 不动；`expandLaneChain` 不改（GET /v1/models 复用，不能重排）。
+- **拍板（与 Lukin 确认）**：① **无条件提升**，不加成本护栏（链内即可接受集；极端"点名比首选更贵的在链模型"会涨本，但符合客户本意）；② **内置无开关**（reorder-only 够安全，CLAUDE.md 少旋钮）。
+- **匹配** = 别名 `/` 后 segment 经 `normalizeModelId`（trim+小写+**点号→横线**=官方形式）后比 `requested_model`，两侧同归一化对称（Lukin 追加诉求：`claude-sonnet-4.6` ↔ `claude-sonnet-4-6` 视同一模型；`gpt-5.5` 两侧都变 `gpt-5-5` 仍自匹配、无误配）。多 provider 同 id 取**最早**（保 operator provider 偏好，故直连 Anthropic 仍优先于 zenmux 点号别名）。`auto`/空守卫放归一化**之后**（`AUTO`/`" auto "` 也 no-op）。**用 segment 而非解析 provider_model**：要提升的 `anthropic/claude-sonnet-4-6` 是 `server.ts` 运行时合成的 OAuth 别名，registry.resolve 看不到它，且 registry 别名 `provider_model` 故意≠别名（解析法会漏配）。
+- **治理 guard（Codex review 修，Lukin 拍板修 1+3 留 2）**：promotion 只在路由大脑**没有主动否决**客户模型选择时生效。分类路径（681）加 `honorRequestedModel = !aliasToAuto && keyCaps?.degradeLane == null`：① **over-budget 降级**时不提升——否则 `economy` 展开经 `balanced` 透传含 `openai-codex/gpt-5.5`，点名即把它拽到链首、降级形同虚设（与 0a/1 已有的 degrade-透传抑制对齐，docs/06）；② **alias→auto** 时不提升——operator 说"忽略固定 id 去分类"，promotion 不得把它钉回。**Issue 2（allowed_lanes 封顶）保持现状**：被点名模型本就在被允许 lane 的链内（深层 fallback 可达），属 Lukin 已接受的"无条件提升/成本被 lane 成员约束"权衡；reviewer 建议的 `clamped` 糙修会反噬（封到 balanced、点名更便宜的 sonnet 时反让客户拿到更贵的 gpt-5.5），要精确治理只能上成本护栏（option B，已否）。**主场景不受影响**：CC 普通分类键无 cap/无降级/无 auto，三 guard 全不触发，sonnet 照常提升。
+- **验证**：`promote-requested-model.test`(14) + `route-request.test` 加 7 集成例（分类提升/auto no-op/alias→lane 提升/explicit model 不动/explicit lane 不动/**降级不提升**/**alias→auto 不提升**）；**全量 4756 单测绿**、四包 typecheck、biome 干净（`promote-requested-model.ts` 避非空断言用 `undefined` 收窄）；e2e 安全（`k_e2e` 分类键发的 `gpt-4o-mini`/`claude-3-5-sonnet` 不在 shipped config 链内→无匹配；`k_custom` 走 explicit passthrough→no-op）。分支 `feat/promote-requested-model`，**未提交未部署**。
+
 ## 2026-06-27 · Codex 周限额自动重置（gateway 执行 + admin UI；docs/04，原则 3/5）
 
 - **背景（Lukin）**：ChatGPT/Codex 订阅账号每周限额窗口（`secondary`，7d）打满即被限流，但 ChatGPT 给了几次「重置额度」机会（`consumeCodexResetCredit`）。原先只能在 providers 页手动点「重置限额」。诉求：每个 Codex 账号加开关——开了之后周限打满自动调一次重置；两处可设（管理弹窗常驻 + 重置确认弹层顺手勾「以后自动重置」）。**硬约束**：reset credits 极少，并发请求涌入**绝不能一次烧光**——每账号 **≥1h** 只许调一次。
@@ -24,19 +33,13 @@
 - **详情页 fail-open（真 bug）**：`[traceId]/+page.ts` 原 `Promise.all([getRequest, getRequestPayload])` 注释说 payload「fails open」但代码里 payload 一失败**连累整页** → 改 payload 独立 `.catch(()=>{captured:false})`，只有 detail 本身失败才进错误态；错误态加 **Retry 按钮**（`invalidateAll`）。
 - **验证**：新 `PageSkeleton.svelte`（无文案、`aria-hidden`、零 i18n）；`requests.test` +2（payload 失败仍出 detail / detail 失败才报错，`PageLoad` 返回类型须 `Exclude<…,void>` 收窄）。admin **504 单测全绿**、svelte-check 934/0/0、build 通过。保留所有 testid（e2e 安全）。分支 `fix-admin-nav-skeleton`。
 
-## 2026-06-26 · 记忆事实 subject_key 长度上限 + base64/图片 blob 不入库（gateway 记忆；docs/12 P6）
-
-- **背景（Lukin，box 实查）**：`memory_facts` 项目 `luke` 出现一条 `subject_key` 长 **1920 字符**（一张 jpeg base64 data-URL），真实 subject 都 ≤31。根因：用户消息里的图片，deepseek 观察失败回落确定性兜底 → `serializeContent` 把 multipart 内容 JSON 化（含 base64）→ `extractFactsDeterministic` 取「前 6 词」，而 base64 无空格 = 一个巨型「词」→ 巨型 slug。即上一轮 user-only 修复（v0.22.4）只挡了 tool 角色，**图片是合法 user 内容仍会漏过兜底**。
-- **决定（两道防线，都在 `forgetting/facts.ts` 叶子）**：① **subject_key 上限 80 字符**（`normalizeSubjectKey` 末尾 `.slice(0,80)` + 再去尾 dash）——Lukin 直接要求的"限制名字长度"，只截断病态输入。② **blob 不入库**：`buildReconciledFactBatch` 过滤掉 `isBlobText`（trim 后 >200 字符且**全无空白**）的候选——真事实是句子（有空格），base64/data-URL 是数千字符无断点 = 不是记忆。光截名字不够（base64 正文仍是垃圾），blob 守卫才是根治；名字上限是纵深防御。两者对所有 fact 创建生效（机器 + admin 手动新增同走 `buildReconciledFactBatch`）。
-- **未做（flag）**：没在 `serializeContent` 入库层剥离图片 part——那会改 content_hash dedup 指纹、动 docs/08 原始审计存储，blast 大；blob 守卫在抽取层拦截已足够。若图片噪声继续，再考虑入库层只存 text part。
-- **验证**：`facts.test` 新增 cap（1000 字符 blob → ≤80、无尾 dash、真 topic 不变）+ blob 守卫（data-URL → 0 fact、正常句子 → 1 fact）。**core memory 353 测全绿**，typecheck/biome 干净。
-- **box 清理**：删 `length(subject_key)>80` 的那 1 条（备份 `memory-backup-20260626-213811.sql`），max 长度回到 31，FTS integrity OK。分支 `fix-memory-subject-key-cap`。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+- **2026-06-26 · 记忆事实 subject_key 上限 + base64/图片 blob 不入库（gateway 记忆；docs/12 P6）**：box `memory_facts` 现 1920 字符 subject_key（jpeg base64 data-URL），根因图片合法 user 内容经确定性兜底 `extractFactsDeterministic` 取前 6 词、base64 无空格=巨型词。两道防线（`forgetting/facts.ts` 叶子）：① subject_key ≤80 字符截断；② `buildReconciledFactBatch` 过滤 `isBlobText`（>200 字符且全无空白）blob 候选——真事实有空格、base64 无断点。未在 `serializeContent` 入库层剥图片 part（动 content_hash dedup 指纹+docs/08 审计存储 blast 大）。facts.test +cap/blob 例，core memory 353 绿。box 删该 1 条（备份 `memory-backup-20260626-213811.sql`）。分支 `fix-memory-subject-key-cap`。
 
 - **2026-06-26 · 记忆管理页重做：分页 + Superseded 过滤 + 反思置顶 + 新增事实（admin UI；docs/13）**：`/admin/memory` 五诉求。少写代码：`listFacts` 早支持 `limit/offset/search`+`{rows,total}`、`status='active'` 早已=排除 superseded，故「Superseded」只是**派生过滤值**（新 `FactListStatus=MemoryStatus|"all"|"superseded"`，不动 `MemoryStatusSchema`；sqlite+pg `factListClauses` 加 `superseded→active AND expiredAt IS NOT NULL`）；新增事实复刻 MCP `memory_add`（新 `POST /admin/api/memory/facts`，`MemoryFactCreateSchema` strict）。前端反思置顶改卡片全显、客户端分页器（`FACT_PAGE_SIZE=25` 复用 `pager-*` testid）、新 `AddFactDialog`。坑：`AddFactDialog.test` reject 须先补默认 `mockResolvedValue`（见 [[admin-test-i18n-gotchas]]）；`onsearch` 非法 prop 改 `onsubmit`；`i18n:update` 用英文填新键须手填 zh/ja/ko。admin 502+core/shared 471+memory 48 绿。发 v0.22.5 部署。
 

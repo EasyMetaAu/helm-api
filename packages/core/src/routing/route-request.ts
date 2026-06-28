@@ -13,6 +13,7 @@ import { type Classification as ResolverClassification, resolveLane } from "./la
 import { type ModelAliasMap, resolveModelAlias } from "./model-alias.js";
 import { applyCaps, evaluatePolicies, LANE_RANK, type PolicyContext } from "./policy-engine.js";
 import type { PoliciesConfig } from "./policy-schema.js";
+import { promoteRequestedModel } from "./promote-requested-model.js";
 
 // routeRequest — the SINGLE, framework-agnostic orchestrator for one request
 // (CLAUDE.md principle 1: NO web framework import here — Hono/SSE adaptation
@@ -544,7 +545,7 @@ async function plan(
     return {
       plan: {
         selected_lane: lane,
-        candidate_chain: expandChain(lane, deps.lanes),
+        candidate_chain: promoteRequestedModel(expandChain(lane, deps.lanes), req.requested_model),
         explicit_model: null,
       },
       classifier: passthroughClassifier(),
@@ -678,7 +679,18 @@ async function plan(
     feedback: deps.signalFeedback,
   });
   if (signalAdjustment !== null) cappedLane = signalAdjustment.lane;
-  const chain = expandChain(cappedLane, deps.lanes);
+  // Promotion honors the client's named model — but NOT when the routing brain
+  // deliberately overrode that choice: an alias→auto rewrite (operator said
+  // "classify, ignore the pinned id") or an over-budget degrade (docs/06: the
+  // downgrade must not be bypassable by naming the expensive model — the lane's
+  // expanded fallback can transitively include it; mirrors the passthrough
+  // suppression in steps 0a/1). In those cases the request behaves as auto, so
+  // pass no requested model and keep the degrade/classified lane's declared order.
+  const honorRequestedModel = !aliasToAuto && opts.keyCaps?.degradeLane == null;
+  const chain = promoteRequestedModel(
+    expandChain(cappedLane, deps.lanes),
+    honorRequestedModel ? req.requested_model : "",
+  );
   const explanation =
     signalAdjustment === null
       ? cls.explanation
