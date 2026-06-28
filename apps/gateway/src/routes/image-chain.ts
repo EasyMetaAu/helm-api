@@ -28,8 +28,11 @@ export interface ImageChainTarget {
 // response to the client body, price it); runImageChain only sequences attempts and
 // gates them on the breaker.
 export interface ImageAttemptResult {
-  clientBody: Record<string, unknown>; // returned verbatim to the client (full image)
-  captureBody: Record<string, unknown>; // image-stripped clone for payload capture
+  // Returned verbatim to the client AND captured for telemetry. The base64 image is
+  // NOT stripped here: the store's externalizeImages (payload-blobs.ts) content-
+  // addresses it into payload_blobs (deduped, retention-pruned) and rehydrates it for
+  // the admin detail view — so request_payloads stays lean AND the image is viewable.
+  clientBody: Record<string, unknown>;
   usage: Record<string, unknown> | null; // for budget-settle tokens + decision usage
   cost: number | null; // costOf(servedAlias, body)
   upstreamRequestJson: string | null; // exact bytes forwarded upstream (capture)

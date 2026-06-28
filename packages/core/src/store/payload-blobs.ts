@@ -106,6 +106,21 @@ function walkExternalize(node: unknown, blobs: Map<string, PayloadBlob>): unknow
     }
   }
 
+  // OpenAI Images output: { b64_json:"<base64>" } (the /v1/images/generations data[]
+  // items — also the IR image shape). A bare base64 string, no `data:` wrapper.
+  if (typeof node.b64_json === "string") {
+    const ref = stash(node.b64_json, null, blobs);
+    if (ref) return { ...node, b64_json: ref };
+  }
+
+  // Gemini Interactions output block: { type:"image", mime_type, data:"<base64>" }
+  // (POST /v1beta/interactions steps[].content[]). Distinct from the Anthropic
+  // `type:"image"` block above, which carries the base64 under `source.data`.
+  if (node.type === "image" && typeof node.data === "string") {
+    const ref = stash(node.data, (node.mime_type as string | undefined) ?? null, blobs);
+    if (ref) return { ...node, data: ref };
+  }
+
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(node)) out[k] = walkExternalize(v, blobs);
   return out;

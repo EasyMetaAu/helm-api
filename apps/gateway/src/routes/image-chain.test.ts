@@ -26,7 +26,6 @@ function target(alias: string, kind: "openai" | "gemini" = "openai"): ImageChain
 function okResult(cost: number | null = 0.01) {
   return {
     clientBody: { data: [{ b64_json: "IMG" }] },
-    captureBody: { data: [{ b64_json: "[image omitted]" }] },
     usage: { input_tokens: 1, output_tokens: 2 },
     cost,
     upstreamRequestJson: "{}",

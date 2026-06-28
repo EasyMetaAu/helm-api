@@ -67,27 +67,6 @@ function extractBearer(auth: string | undefined): string | null {
   return m?.[1] ?? null;
 }
 
-// Capture-only clone with the ~1MB base64 image stripped — the request/response are
-// captured for audit, but the megabyte payload must never hit request_payloads
-// (operator DB-bloat guard). The CLIENT still receives the full image.
-function stripImageData(body: Record<string, unknown>): Record<string, unknown> {
-  const data = body.data;
-  if (!Array.isArray(data)) return body;
-  return {
-    ...body,
-    data: data.map((d) => {
-      if (
-        d !== null &&
-        typeof d === "object" &&
-        typeof (d as Record<string, unknown>).b64_json === "string"
-      ) {
-        return { ...(d as Record<string, unknown>), b64_json: "[image omitted]" };
-      }
-      return d;
-    }),
-  };
-}
-
 // Map a Gemini generateContent native response → the OpenAI Images shape, so the
 // rest of the route (cost, telemetry, client response) is provider-uniform. Image
 // parts (inlineData) become data[].b64_json; usageMetadata (candidatesTokenCount =
@@ -262,7 +241,6 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
       const usage = (upstream as { usage?: Record<string, unknown> }).usage ?? null;
       return {
         clientBody: upstream,
-        captureBody: stripImageData(upstream),
         usage,
         cost: deps.costOf(target.alias, upstream),
         upstreamRequestJson,
@@ -321,7 +299,11 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         finalErrorClass: null,
         usage: result.usage,
       });
-      const responseJson = captureEnabled(deps.record) ? JSON.stringify(result.captureBody) : null;
+      // Capture the FULL body — the store's externalizeImages (payload-blobs.ts)
+      // content-addresses the base64 image into payload_blobs (deduped + retention-
+      // pruned) and rehydrates it for the admin detail view. request_payloads keeps
+      // only a sentinel, so it stays lean while the image stays viewable.
+      const responseJson = captureEnabled(deps.record) ? JSON.stringify(result.clientBody) : null;
       await recordServed(
         deps.record,
         {
