@@ -178,6 +178,34 @@ providers:
       - alias: openrouter/auto
         provider_model: openrouter/auto
 
+  # ─── OFFICIAL image-generation providers (cross-provider failover) ───
+  # The gpt-image-2 / gemini-*-image models are reachable via the ZenMux relays
+  # above AND via these DIRECT official upstreams, so an image LANE (lanes.yaml:
+  # gpt-image / gemini-image) fails over across providers. Keys are env-var NAMES
+  # (set OPENAI_API_KEY / GEMINI_API_KEY in the environment); an unset key just makes
+  # that provider unavailable (the chain skips it), never a boot failure.
+
+  # OpenAI OFFICIAL — direct Images API for gpt-image-2.
+  - name: openai
+    type: openai
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    models:
+      - alias: openai/gpt-image-2
+        provider_model: gpt-image-2
+
+  # Google OFFICIAL — Generative Language API (gemini-*-image native wire,
+  # x-goog-api-key). `type: gemini` appends /models/{model}:{op} to base_url.
+  - name: google
+    type: gemini
+    base_url: https://generativelanguage.googleapis.com/v1beta
+    api_key_env: GEMINI_API_KEY
+    models:
+      - alias: google/gemini-3.1-flash-image
+        provider_model: gemini-3.1-flash-image
+      - alias: google/gemini-3-pro-image
+        provider_model: gemini-3-pro-image
+
   # ─────────────────────────────────────────────────────────────────────────────
   # OAUTH SUBSCRIPTION PROVIDER (issue #38) — EXAMPLE, COMMENTED OUT.
   # For subscription / SSO upstreams that issue SHORT-LIVED OAuth access tokens

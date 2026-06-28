@@ -30,6 +30,13 @@ const e2eEnv = {
   // ZenMux carries the image models (gpt-image-2 via /v1/images/generations). Keyed
   // so its provider client is built — without it resolveImageTarget returns null (503).
   ZENMUX_API_KEY: "sk-upstream-mock-key",
+  // Official image providers (openai / google) lead the gpt-image / gemini-image
+  // cross-provider lanes. Keyed (dummy) so their clients are built and the lane
+  // serves its OFFICIAL primary — without these the chain would skip them as
+  // unavailable and the failover test would non-hermetically pass/fail on whether
+  // the runner happens to have the real keys in its environment.
+  OPENAI_API_KEY: "sk-upstream-mock-key",
+  GEMINI_API_KEY: "sk-upstream-mock-key",
   HELM_PROVIDER_BASE_URL: `http://127.0.0.1:${MOCK_PORT}`,
   // e2e-only: lets the `x-helm-eval` request header toggle Layer-2 eval per
   // request so e2e.eval can black-box the cascade without a config reload.

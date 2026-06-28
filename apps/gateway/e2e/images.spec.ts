@@ -50,18 +50,20 @@ test.describe("images e2e", () => {
   test("an image LANE serves its primary, and fails over to the fallback provider when the primary is down", async ({
     request,
   }) => {
-    // `gemini-image` is a lane (primary gemini-3.1-flash-image → fallback
-    // gemini-3-pro-image). A normal request serves the primary…
+    // `gemini-image` is a cross-provider lane (Google official
+    // google/gemini-3.1-flash-image → ZenMux gemini-3.1-flash-image →
+    // gemini-3-pro-image). A normal request serves the official primary…
     const ok = await request.post("/v1/images/generations", {
       headers: AUTH,
       data: { model: "gemini-image", prompt: "a kite" },
     });
     expect(ok.status()).toBe(200);
     expect(ok.headers()["x-helm-lane"]).toBe("gemini-image");
-    expect(ok.headers()["x-helm-final-model"]).toBe("gemini-3.1-flash-image");
+    expect(ok.headers()["x-helm-final-model"]).toBe("google/gemini-3.1-flash-image");
 
-    // …and when the primary is failing (mock steered by the sentinel prompt), the
-    // chain falls over to the fallback provider/model — still a 200 with an image.
+    // …and when the flash model is failing on BOTH providers (the sentinel fails
+    // provider_model gemini-3.1-flash-image, i.e. the Google primary AND the ZenMux
+    // flash leg), the chain falls over to the pro fallback — still a 200 with an image.
     const failover = await request.post("/v1/images/generations", {
       headers: AUTH,
       data: { model: "gemini-image", prompt: "__HELM_FAIL_IMAGE_PRIMARY__ a kite" },
