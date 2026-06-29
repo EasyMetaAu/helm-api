@@ -173,9 +173,25 @@
     return $t('resets in {m}m', { m: p.m });
   }
 
-  // Is this account auto-parked by a usage limit right now? (cooldown in the future)
-  const isUsageLimited = (q: OAuthQuotaSnapshot | undefined): boolean =>
-    q?.usageLimitedUntilMs != null && q.usageLimitedUntilMs > Date.now();
+  // Is this account auto-parked by a usage limit right now? Prefer a saturated
+  // quota window's reset over the short generic 429 fallback, so the status pill
+  // distinguishes 5h vs 7d limits when the quota snapshot proves the source.
+  function usageLimitStatus(
+    q: OAuthQuotaSnapshot | undefined,
+  ): { untilMs: number; label: string | null } | null {
+    const now = Date.now();
+    let untilMs =
+      q?.usageLimitedUntilMs != null && q.usageLimitedUntilMs > now ? q.usageLimitedUntilMs : null;
+    let label: string | null = null;
+    for (const w of q?.windows ?? []) {
+      if (w.usedPercent < 100 || w.resetsAtMs == null || w.resetsAtMs <= now) continue;
+      if (untilMs == null || w.resetsAtMs >= untilMs) {
+        untilMs = w.resetsAtMs;
+        label = windowLabel(w.key);
+      }
+    }
+    return untilMs == null ? null : { untilMs, label };
+  }
 
   // Countdown to auto-recovery for the rate-limited pill — same `durationParts`
   // coarsening as resetIn so a long cooldown reads "auto-recovers in 4d 16h".
@@ -337,8 +353,11 @@
       </p>
     </div>
     <div class="flex w-full shrink-0 gap-2 sm:w-auto">
-      <button type="button" class="btn-secondary flex-1 sm:flex-none" disabled={refreshing} onclick={refresh}
-        >{refreshing ? $t('Refreshing…') : $t('Refresh')}</button
+      <button
+        type="button"
+        class="btn-secondary flex-1 sm:flex-none"
+        disabled={refreshing}
+        onclick={refresh}>{refreshing ? $t('Refreshing…') : $t('Refresh')}</button
       >
       <button
         type="button"
@@ -424,6 +443,8 @@
             {@const saving = savingSchedule[k] === true}
             {@const isCodex = row.provider.id === 'openai-codex'}
             {@const codexCredits = isCodex ? (quota?.resetCredits ?? null) : null}
+            {@const usageLimit = usageLimitStatus(quota)}
+            {@const usageLimitRecovery = usageLimit ? autoRecoverIn(usageLimit.untilMs) : ''}
             <tr class="align-top" data-testid="provider-account-row">
               <!-- Provider / account + type badge -->
               <td data-label={$t('Provider')} class="px-3 py-3">
@@ -435,8 +456,9 @@
                     <span
                       class="badge-ok"
                       data-testid="auto-reset-badge"
-                      title={$t('Auto-resets the weekly limit once it saturates (at most once per hour)')}
-                      >{$t('Auto-reset')}</span
+                      title={$t(
+                        'Auto-resets the weekly limit once it saturates (at most once per hour)',
+                      )}>{$t('Auto-reset')}</span
                     >
                   {/if}
                 </div>
@@ -452,12 +474,14 @@
                 {#if !row.account.schedulable}
                   <div class="mt-1"><span class="badge-neutral">{$t('parked')}</span></div>
                 {/if}
-                {#if isUsageLimited(quota)}
+                {#if usageLimit}
                   <div class="mt-1">
                     <span class="badge-error">{$t('Rate limited')}</span>
-                    {#if quota && autoRecoverIn(quota.usageLimitedUntilMs)}
+                    {#if usageLimitRecovery}
                       <div class="text-[10px] text-ink-muted">
-                        {autoRecoverIn(quota.usageLimitedUntilMs)}
+                        {usageLimit.label
+                          ? `${usageLimit.label} · ${usageLimitRecovery}`
+                          : usageLimitRecovery}
                       </div>
                     {/if}
                   </div>
@@ -480,7 +504,10 @@
                 {#if row.account.models.length > 0}
                   {@const shown = row.account.models.slice(0, MODELS_SHOWN)}
                   {@const extra = row.account.models.length - shown.length}
-                  <div class="flex max-w-full flex-wrap gap-1 lg:w-48" title={row.account.models.join('\n')}>
+                  <div
+                    class="flex max-w-full flex-wrap gap-1 lg:w-48"
+                    title={row.account.models.join('\n')}
+                  >
                     {#each shown as m (m)}
                       <span class="badge-neutral font-mono text-[10px]">{m}</span>
                     {/each}
@@ -531,7 +558,10 @@
                   </div>
                 {/if}
                 {#if codexCredits != null}
-                  <div class="text-[10px] text-ink-muted" class:mt-1={quota && quota.windows.length > 0}>
+                  <div
+                    class="text-[10px] text-ink-muted"
+                    class:mt-1={quota && quota.windows.length > 0}
+                  >
                     {$t('{n} reset credits', { n: codexCredits })}
                   </div>
                 {/if}
@@ -573,7 +603,9 @@
               </td>
 
               <!-- Token expiry -->
-              <td data-label={$t('Expires')} class="px-3 py-3 text-ink-muted">{expiryLabel(row.account)}</td>
+              <td data-label={$t('Expires')} class="px-3 py-3 text-ink-muted"
+                >{expiryLabel(row.account)}</td
+              >
 
               <!-- Actions -->
               <td data-label={$t('Actions')} class="px-3 py-3 lg:text-right">
@@ -599,7 +631,7 @@
                         account: row.account.account,
                       })}>{$t('Manage')}</button
                   >
-                  {#if isUsageLimited(quota)}
+                  {#if usageLimit}
                     <button
                       type="button"
                       class="btn-secondary"

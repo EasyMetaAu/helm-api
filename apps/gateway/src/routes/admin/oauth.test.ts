@@ -165,6 +165,94 @@ describe("admin OAuth routes — read endpoints", () => {
     expect(upsert).toHaveBeenCalled(); // the PULL refreshed the store
   });
 
+  it("GET /oauth/quota extends an active cooldown to the saturated window reset", async () => {
+    const now = Date.now();
+    const shortCooldown = now + 60_000;
+    const weeklyReset = now + 8 * 60 * 60_000;
+    const saturatedWeekly = {
+      key: "7d",
+      usedPercent: 100,
+      resetsAtMs: weeklyReset,
+      windowMinutes: null,
+    };
+    const applyUsageLimit = vi.fn(async () => {});
+    const oauthQuota = {
+      get: vi.fn(async () => ({
+        providerId: "anthropic",
+        account: "default",
+        windows: [],
+        capturedAt: now,
+        source: "anthropic",
+        usageLimitedUntilMs: shortCooldown,
+      })),
+      getAll: vi.fn(async () => [
+        {
+          providerId: "anthropic",
+          account: "default",
+          windows: [saturatedWeekly],
+          capturedAt: now,
+          source: "anthropic",
+          usageLimitedUntilMs: shortCooldown,
+        },
+      ]),
+      upsert: vi.fn(async () => {}),
+      delete: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const seam = fullSeam({
+      fetchAnthropicQuota: vi.fn(async () => [saturatedWeekly]) as never,
+    });
+
+    const res = await app({ oauth: seam, oauthQuota, applyUsageLimit }).request(
+      "/admin/api/oauth/quota",
+    );
+
+    expect(res.status).toBe(200);
+    expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "default", weeklyReset);
+  });
+
+  it("GET /oauth/quota does not newly park an unparked account from a PULL snapshot", async () => {
+    const now = Date.now();
+    const saturatedWeekly = {
+      key: "7d",
+      usedPercent: 100,
+      resetsAtMs: now + 8 * 60 * 60_000,
+      windowMinutes: null,
+    };
+    const applyUsageLimit = vi.fn(async () => {});
+    const oauthQuota = {
+      get: vi.fn(async () => ({
+        providerId: "anthropic",
+        account: "default",
+        windows: [],
+        capturedAt: now,
+        source: "anthropic",
+        usageLimitedUntilMs: null,
+      })),
+      getAll: vi.fn(async () => [
+        {
+          providerId: "anthropic",
+          account: "default",
+          windows: [saturatedWeekly],
+          capturedAt: now,
+          source: "anthropic",
+          usageLimitedUntilMs: null,
+        },
+      ]),
+      upsert: vi.fn(async () => {}),
+      delete: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const seam = fullSeam({
+      fetchAnthropicQuota: vi.fn(async () => [saturatedWeekly]) as never,
+    });
+
+    const res = await app({ oauth: seam, oauthQuota, applyUsageLimit }).request(
+      "/admin/api/oauth/quota",
+    );
+
+    expect(res.status).toBe(200);
+    expect(applyUsageLimit).not.toHaveBeenCalled();
+  });
+
   it("GET /oauth/quota folds the live codex reset-credit count onto its snapshot", async () => {
     const window = { key: "primary", usedPercent: 40, resetsAtMs: null, windowMinutes: 300 };
     const oauthQuota = {

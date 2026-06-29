@@ -1,3 +1,4 @@
+import { windowsToUsageLimit } from "@helm/core";
 import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../../app.js";
@@ -167,6 +168,20 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     // instant a credit is consumed, so a stored snapshot would lie). Keyed by acctKey;
     // attached onto the matching codex snapshot in the response below.
     const resetCredits = new Map<string, number | null>();
+    const extendActiveCooldownFromWindows = async (
+      providerId: string,
+      account: string,
+      windows: Parameters<typeof windowsToUsageLimit>[0],
+    ): Promise<void> => {
+      if (!deps.applyUsageLimit) return;
+      const nowMs = Date.now();
+      const quotaUntil = windowsToUsageLimit(windows, nowMs);
+      if (quotaUntil === null) return;
+      const current = await store.get(providerId, account).catch(() => null);
+      const currentUntil = current?.usageLimitedUntilMs ?? null;
+      if (currentUntil === null || currentUntil <= nowMs || currentUntil >= quotaUntil) return;
+      await deps.applyUsageLimit(providerId, account, quotaUntil).catch(() => {});
+    };
     if (s) {
       try {
         const status = await s.listStatus();
@@ -176,12 +191,12 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         // PUSH still updates the same store on live traffic — the PULL covers
         // accounts that have served nothing yet (else they render "—" forever).
         // NB: this observability PULL refreshes the stored window snapshot (and, for
-        // Codex, the live reset-credit count) but does NOT auto-park. Parking is driven
-        // only by live-traffic evidence (a real 429 in the executor, or a saturated
-        // x-codex header on a real reply) — never by a page-open quota read. That keeps
-        // "Reset usage" effective: clicking it reloads the page (this PULL), which would
-        // otherwise immediately re-derive the same saturated window and re-park the
-        // account before it can serve a single request.
+        // Codex, the live reset-credit count) but does NOT newly auto-park an otherwise
+        // active account. If the account is ALREADY parked by live-traffic evidence
+        // (generic 429 fallback), a saturated quota window may EXTEND that cooldown to
+        // the precise reset time. That keeps "Reset usage" effective: clearing the
+        // cooldown then reloading this page does not immediately re-park the account
+        // before it can serve a single request.
         const acctsOf = (id: string) => status.find((x) => x.id === id)?.accounts ?? [];
         const tasks: Array<Promise<void>> = [];
         // Anthropic: windows only.
@@ -201,6 +216,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                       source: "anthropic",
                     })
                     .catch(() => {});
+                  await extendActiveCooldownFromWindows("anthropic", a.account, windows);
                 }
               })(),
             );
@@ -225,6 +241,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                       source: "codex",
                     })
                     .catch(() => {});
+                  await extendActiveCooldownFromWindows("openai-codex", a.account, result.windows);
                 }
               })(),
             );
