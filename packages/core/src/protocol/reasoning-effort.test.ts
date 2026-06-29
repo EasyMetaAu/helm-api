@@ -102,6 +102,24 @@ describe("applyForcedReasoningToNativeBody — per protocol", () => {
     expect(body.temperature).toBe(1);
   });
 
+  it("anthropic_messages: skips forced thinking when tool_choice forces tool use", () => {
+    const { body, mutated, skippedReason } = applyForcedReasoningToNativeBody(
+      {
+        messages: [],
+        thinking: { type: "disabled" },
+        context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
+        tool_choice: { type: "tool", name: "web_search" },
+      },
+      "anthropic_messages",
+      "high",
+    );
+    expect(mutated).toBe(true);
+    expect(skippedReason).toBe("forced_tool_choice");
+    expect(body.thinking).toBeUndefined();
+    expect(body.context_management).toBeUndefined();
+    expect(body.tool_choice).toEqual({ type: "tool", name: "web_search" });
+  });
+
   it("openai_chat: no-op (lingua franca never passes through)", () => {
     const { mutated } = applyForcedReasoningToNativeBody({ messages: [] }, "openai_chat", "high");
     expect(mutated).toBe(false);

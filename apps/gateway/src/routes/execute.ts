@@ -616,8 +616,13 @@ function prepareNativeRequestForUpstream(
     if (rewritten.mutated) {
       body = rewritten.body;
       bodyChanged = true;
-      if (mutations)
-        appendMutationList(mutations, "body_shims_applied", ["reasoning_effort_forced"]);
+    }
+    if (mutations) {
+      appendMutationList(mutations, "body_shims_applied", [
+        rewritten.skippedReason === "forced_tool_choice"
+          ? "reasoning_effort_skipped_for_forced_tool_choice"
+          : "reasoning_effort_forced",
+      ]);
     }
   }
 
