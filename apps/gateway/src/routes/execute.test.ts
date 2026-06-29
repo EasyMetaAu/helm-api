@@ -1,5 +1,10 @@
 import type { CircuitBreaker, ExecutionPlan, ProviderClient, ProviderRegistry } from "@helm/core";
-import { createCircuitBreaker, createGeminiClient, UpstreamError } from "@helm/core";
+import {
+  createCircuitBreaker,
+  createGeminiClient,
+  TokenRefreshError,
+  UpstreamError,
+} from "@helm/core";
 import {
   type CatalogEntry,
   createNativePassthroughCarrier,
@@ -3930,6 +3935,112 @@ describe("createExecute — onOAuthSubscription429 (auto-park)", () => {
     expect(out.final.status).toBe("error"); // chain exhausted (single parked candidate)
     expect(onOAuthSubscription429).toHaveBeenCalledTimes(1);
     expect(onOAuthSubscription429).toHaveBeenCalledWith("openai-codex/gpt-5");
+  });
+
+  it("does NOT record an alias breaker failure for subscription account-local 429", async () => {
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: rejects(e429()),
+      providers: new Map([["openai-codex", rejects(e429())]]),
+      knownOAuthPrefixes: new Set(["openai-codex"]),
+      oauthAliases: () => new Set(["openai-codex/gpt-5"]),
+      registry: registry({}),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+    const out = await execute(plan(["openai-codex/gpt-5"]), req());
+    expect(out.final.status).toBe("error");
+    expect(recordFailure).not.toHaveBeenCalled();
+  });
+
+  it("does NOT record an alias breaker failure for any subscription provider failure", async () => {
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: rejects(new UpstreamError("upstream_error", "bad gateway", null, 502)),
+      providers: new Map([
+        ["openai-codex", rejects(new UpstreamError("upstream_error", "bad gateway", null, 502))],
+      ]),
+      knownOAuthPrefixes: new Set(["openai-codex"]),
+      oauthAliases: () => new Set(["openai-codex/gpt-5"]),
+      registry: registry({}),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+    const out = await execute(plan(["openai-codex/gpt-5"]), req());
+    expect(out.final.status).toBe("error");
+    expect(recordFailure).not.toHaveBeenCalled();
+  });
+
+  it("does NOT let an existing alias-open breaker skip a subscription alias", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    for (let i = 0; i < 5; i += 1) cb.recordFailure("openai-codex/gpt-5");
+    const canAttempt = vi.spyOn(cb, "canAttempt");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["openai-codex", provider]]),
+      knownOAuthPrefixes: new Set(["openai-codex"]),
+      oauthAliases: () => new Set(["openai-codex/gpt-5"]),
+      registry: registry({}),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+    const out = await execute(plan(["openai-codex/gpt-5"]), req());
+    expect(out.final.status).toBe("ok");
+    expect(canAttempt).not.toHaveBeenCalled();
+  });
+
+  it("does NOT record an alias breaker failure for subscription account-local auth failures", async () => {
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: rejects(new UpstreamError("upstream_error", "unauthorized", null, 401)),
+      providers: new Map([
+        ["anthropic", rejects(new UpstreamError("upstream_error", "unauthorized", null, 401))],
+      ]),
+      knownOAuthPrefixes: new Set(["anthropic"]),
+      oauthAliases: () => new Set(["anthropic/claude-sonnet-4.6"]),
+      registry: registry({}),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+    const out = await execute(plan(["anthropic/claude-sonnet-4.6"]), req());
+    expect(out.final.status).toBe("error");
+    expect(recordFailure).not.toHaveBeenCalled();
+  });
+
+  it("does NOT record an alias breaker failure for subscription token refresh failures", async () => {
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: rejects(new TokenRefreshError("oauth refresh failed (status 401)", 401)),
+      providers: new Map([
+        ["openai-codex", rejects(new TokenRefreshError("oauth refresh failed (status 401)", 401))],
+      ]),
+      knownOAuthPrefixes: new Set(["openai-codex"]),
+      oauthAliases: () => new Set(["openai-codex/gpt-5.4-mini"]),
+      registry: registry({}),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+    const out = await execute(plan(["openai-codex/gpt-5.4-mini"]), req());
+    expect(out.final.status).toBe("error");
+    expect(recordFailure).not.toHaveBeenCalled();
   });
 
   it("does NOT fire on a non-429 failure", async () => {

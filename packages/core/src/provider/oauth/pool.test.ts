@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { preOutputClassifierFor } from "../failover-guard.js";
 import { type ChatCompletionRequest, type ProviderClient, UpstreamError } from "../openai.js";
+import { TokenRefreshError } from "../token-manager.js";
 import { createOAuthPoolClient, type OAuthPoolMember } from "./pool.js";
 
 // A stub account client that records every call it served (so a test can assert
@@ -392,7 +393,7 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     account: string,
     priority: number,
     served: string[],
-    fault: UpstreamError | null,
+    fault: Error | null,
     opts?: { failMidStream?: boolean },
   ): OAuthPoolMember {
     return {
@@ -422,7 +423,9 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
   const OVERLOAD = new UpstreamError("upstream_error", "overloaded", null, null);
   const FIVE_XX = new UpstreamError("upstream_error", "bad gateway", null, 502);
   const RATE = new UpstreamError("upstream_error", "usage limit", null, 429);
+  const AUTH_401 = new UpstreamError("upstream_error", "unauthorized", null, 401);
   const BAD = new UpstreamError("upstream_error", "bad request", null, 400);
+  const REFRESH_401 = new TokenRefreshError("oauth refresh failed (openai-codex, status 401)", 401);
 
   it("retries the next account on a transient fault (non-stream)", async () => {
     const served: string[] = [];
@@ -437,13 +440,22 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     expect(served).toEqual(["b"]); // a never served; b rescued the request
   });
 
-  it("does NOT retry on a 429 — left for the executor's per-account park", async () => {
+  it("parks a rate-limited account and retries a sibling before surfacing to the alias breaker", async () => {
     const served: string[] = [];
+    const limited: Array<{ account: string; untilMs: number }> = [];
+    const selected: string[] = [];
     const pool = createOAuthPoolClient({
       members: [faultMember("a", 10, served, RATE), faultMember("b", 50, served, null)],
+      now: () => 1_000,
+      accountRateLimitCooldownMs: 250,
+      onAccountRateLimit: (account, untilMs) => limited.push({ account, untilMs }),
+      onSelect: (account) => selected.push(account),
     });
-    await expect(pool.chatCompletion(REQ)).rejects.toThrow(/usage limit/);
-    expect(served).toEqual([]); // stopped at a's 429; b (healthy) was never tried
+    await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "b" });
+    await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "b" });
+    expect(served).toEqual(["b", "b"]);
+    expect(selected).toEqual(["a", "b", "b"]);
+    expect(limited).toEqual([{ account: "a", untilMs: 1_250 }]);
   });
 
   it("does NOT retry on a deterministic 4xx", async () => {
@@ -453,6 +465,36 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     });
     await expect(pool.chatCompletion(REQ)).rejects.toThrow(/bad request/);
     expect(served).toEqual([]);
+  });
+
+  it("parks a credential-failed account and retries a sibling before surfacing to the alias breaker", async () => {
+    const served: string[] = [];
+    const selected: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [faultMember("bad", 10, served, REFRESH_401), faultMember("good", 50, served, null)],
+      onSelect: (account) => selected.push(account),
+    });
+
+    await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "good" });
+    await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "good" });
+
+    expect(served).toEqual(["good", "good"]);
+    expect(selected).toEqual(["bad", "good", "good"]);
+  });
+
+  it("parks a persistent upstream auth failure and retries a sibling", async () => {
+    const served: string[] = [];
+    const selected: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [faultMember("bad", 10, served, AUTH_401), faultMember("good", 50, served, null)],
+      onSelect: (account) => selected.push(account),
+    });
+
+    await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "good" });
+    await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "good" });
+
+    expect(served).toEqual(["good", "good"]);
+    expect(selected).toEqual(["bad", "good", "good"]);
   });
 
   it("surfaces the upstream fault (not pool-empty) when every account fails transiently", async () => {
@@ -496,11 +538,7 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
   it("retries native passthrough streaming across accounts (the Codex case)", async () => {
     const served: string[] = [];
     const NATIVE: Record<string, unknown> = { model: "gpt-5.5", stream: true, messages: [] };
-    const mk = (
-      account: string,
-      priority: number,
-      fault: UpstreamError | null,
-    ): OAuthPoolMember => ({
+    const mk = (account: string, priority: number, fault: Error | null): OAuthPoolMember => ({
       account,
       priority,
       schedulable: true,
@@ -527,6 +565,80 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     for await (const c of pool.nativePassthroughStream?.(NATIVE) ?? []) chunks.push(c);
     expect(chunks).toEqual(["data: b\n\n"]);
     expect(served).toEqual(["b"]);
+  });
+
+  it("parks a credential-failed account and retries native passthrough streaming", async () => {
+    const served: string[] = [];
+    const selected: string[] = [];
+    const NATIVE: Record<string, unknown> = { model: "gpt-5.4-mini", stream: true, messages: [] };
+    const mk = (account: string, priority: number, fault: Error | null): OAuthPoolMember => ({
+      account,
+      priority,
+      schedulable: true,
+      client: {
+        async chatCompletion(_req: ChatCompletionRequest) {
+          return { served_by: account };
+        },
+        async *chatCompletionStream(_req: ChatCompletionRequest) {
+          yield `data: ${account}\n\n`;
+        },
+        nativePassthroughStream(_body: Record<string, unknown>): AsyncIterable<string> {
+          return (async function* () {
+            if (fault) throw fault;
+            served.push(account);
+            yield `data: ${account}\n\n`;
+          })();
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [mk("bad", 10, REFRESH_401), mk("good", 50, null)],
+      onSelect: (account) => selected.push(account),
+    });
+
+    const chunks: string[] = [];
+    for await (const c of pool.nativePassthroughStream?.(NATIVE) ?? []) chunks.push(c);
+
+    expect(chunks).toEqual(["data: good\n\n"]);
+    expect(served).toEqual(["good"]);
+    expect(selected).toEqual(["bad", "good"]);
+  });
+
+  it("parks a persistent upstream auth failure and retries native passthrough streaming", async () => {
+    const served: string[] = [];
+    const selected: string[] = [];
+    const NATIVE: Record<string, unknown> = { model: "gpt-5.4-mini", stream: true, messages: [] };
+    const mk = (account: string, priority: number, fault: Error | null): OAuthPoolMember => ({
+      account,
+      priority,
+      schedulable: true,
+      client: {
+        async chatCompletion(_req: ChatCompletionRequest) {
+          return { served_by: account };
+        },
+        async *chatCompletionStream(_req: ChatCompletionRequest) {
+          yield `data: ${account}\n\n`;
+        },
+        nativePassthroughStream(_body: Record<string, unknown>): AsyncIterable<string> {
+          return (async function* () {
+            if (fault) throw fault;
+            served.push(account);
+            yield `data: ${account}\n\n`;
+          })();
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [mk("bad", 10, AUTH_401), mk("good", 50, null)],
+      onSelect: (account) => selected.push(account),
+    });
+
+    const chunks: string[] = [];
+    for await (const c of pool.nativePassthroughStream?.(NATIVE) ?? []) chunks.push(c);
+
+    expect(chunks).toEqual(["data: good\n\n"]);
+    expect(served).toEqual(["good"]);
+    expect(selected).toEqual(["bad", "good"]);
   });
 });
 

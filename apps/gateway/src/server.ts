@@ -452,6 +452,10 @@ export async function synthesizeOAuthProviders(
   // parked across a restart / pool rebuild until its reset time. Optional — absent in
   // unit tests and when no quota store is wired (every member starts un-parked).
   usageLimitSeeds?: ReadonlyMap<string, number | null>,
+  // Pool-local 429 handling can retry a sibling account and hide the failed account
+  // from the executor. This hook persists the cooldown the pool already applied in
+  // memory, so rebuilds/restarts keep routing around that account.
+  onAccountRateLimit?: (providerId: string, account: string, untilMs: number) => void,
 ): Promise<SynthesizedOAuth> {
   if (!oauthCtx) return { providers: [], poolClients: new Map() };
   const declared = new Set<string>(
@@ -584,6 +588,8 @@ export async function synthesizeOAuthProviders(
         // not inside a capture scope (fail-open; never throws).
         markServingAccount(providerId, account);
       },
+      accountRateLimitCooldownMs: DEFAULT_429_COOLDOWN_MS,
+      onAccountRateLimit: (account, untilMs) => onAccountRateLimit?.(providerId, account, untilMs),
       // Let the in-pool retry fail over across accounts on an IN-BAND pre-output failure
       // (200-then-`response.failed`/overloaded after only the preamble): wrap each member's
       // SSE with the protocol's pre-output guard so the doomed stream rotates to a sibling
@@ -1412,6 +1418,7 @@ export async function buildServer(
     captureCodexQuota,
     userMessageQueue,
     await readUsageLimitSeeds(),
+    parkAccountOnLimit,
   );
   const routableProviders: ProviderConfigShared[] = [
     ...config.providers,
@@ -1516,6 +1523,7 @@ export async function buildServer(
           captureCodexQuota,
           userMessageQueue, // SAME gate instance — queue state survives rebuilds
           await readUsageLimitSeeds(), // re-seed cooldowns so a rebuild never un-parks
+          parkAccountOnLimit,
         );
         oauthPoolClients = next.poolClients;
         oauthAliasSet = aliasSetOf(next);
