@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-30 · OAuth 5h 限额恢复时间不再落回 60s（admin/gateway，docs/04，原则 5）
+
+- **背景（Lukin）**：Subscription Providers 页里 Anthropic 账号已经被 429 标为 `Rate limited`，但 quota 快照显示 `5h=98%`、`7d/7d Sonnet` 远未打满；左侧却显示 `0 分钟后自动恢复`，因为只信 `usageLimitedUntilMs=now+60s` 的 generic 429 fallback。
+- **根因**：旧逻辑只把 `usedPercent >= 100` 当作可证明窗口，并且在 UI 中偏向更远的 reset。Anthropic usage PULL 在真实 5h 限额时可能仍报 98–99%（取样/舍入滞后），于是 `/oauth/quota` 没把已 park 账号延长到 5h reset，UI 也找不到窗口 label。
+- **修复决策**：保留 `windowsToUsageLimit` 的严格 100% 语义给「主动 park 健康账号」路径；新增 `windowsToActiveUsageRecovery`：只在账号**已经**因真实 429 处于 cooldown 时，使用 `>=95%` 的 near-full 窗口推断恢复时间，并取最近的未来 reset（5h 与 7d 只显示一个 active limiter）。`/admin/api/oauth/quota` 用它把 60s fallback 延长到真实窗口 reset；providers UI 用同样阈值显示 `5h · auto-recovers in ...`。
+- **取舍/坑**：不会因为单纯看到 98% 就提前 park 正常账号；near-full 仅用于「已有 cooldown」的恢复推断。若未来上游出现多个同时 active 的窗口，本实现按产品预期取最近 reset，最坏情况是过早重试一次后由 429 再次 park。
+- **验证**：新增 core 纯函数测试（98% 5h、最近 reset、94% 忽略）、gateway `/oauth/quota` 延长 active cooldown 测试、admin providers 页截图形态回归测试（不再显示 0m），并覆盖 98% 但未 park 的健康账号不误报。发布前 `pnpm test` 317 文件/4844 测绿，`typecheck`/`svelte-check`/`biome`/`build` 绿；版本 bump 到 v0.22.27。
+
 ## 2026-06-29 · OAuth 配额冷却 extend-only + refresh-429 归账号级（Codex review 跟进；provider 执行/池）
 
 - **背景**：v0.22.23 上线后让 Codex 复审，捞出两条 real-bug（均**非本次回归**，是更早就有的写入交互坑）。
@@ -24,18 +32,13 @@
 - **取舍/坑**：凭据失败不自动改 operator 的持久 `schedulable` 设置，也不删除 token；这是运行时健康隔离，重连/重建 pool 会重新按当前凭据判断。429 会持久化到 `oauth_quota` 的冷却窗口，重建 pool 后仍会绕开该账号直到窗口过期。`overload`(null-status) 当前算 server fault 计入 breaker——若实测短尖峰误触发，可收窄为仅真 HTTP 5xx 计入。
 - **验证**：OAuth pool 回归（非流式 + native passthrough streaming 的 `TokenRefreshError(401)`/持久 `401`/`429` 都转 sibling、后续不再选坏账号）不变；executor 回归更新为 B' 语义——账号级 `429`/`401`/`TokenRefreshError(401)` **不**记 breaker；**`502` 现在 *会* 记 breaker**；被 5xx 打开的 breaker **会**跳过 subscription alias（back-off）；新增端到端：连续 5 个 502 打开 breaker → 第 6 个请求 `circuit_open` 且不再打上游。`pnpm exec vitest run packages/core/src/provider/oauth/pool.test.ts apps/gateway/src/routes/execute.test.ts apps/gateway/src/server.oauth.test.ts` 全绿（execute 106）。
 
-## 2026-06-28 · 文档/README 对齐今日图片特性 + `/openapi.json` 完善（仅文档与 OpenAPI，无运行时改动）
-
-- **背景（Lukin）**：今日 v0.22.13–v0.22.20 一串提交后核对全部文档；其中**三个提交没碰文档**。另诉求 `/openapi.json` 不够完整、要更好用。
-- **文档缺口补全**：① v0.22.13「点名模型在选中 lane 链内则提到链首」——README/zh 的 model 表与备注原说"标准 key model 字段被忽略"已不准确，改写 + `docs/04` 新增权威小节「In-chain model promotion」（reorder-only、归一化匹配、over-budget/alias→auto 抑制）。② v0.22.19 官方 OpenAI/Google image provider 默认内置——README/zh env 表加 `OPENAI_API_KEY`/`GEMINI_API_KEY`、failover 示例改成内置的 `gpt-image`/`gemini-image` lane（官方上游→ZenMux 回退）、`.env.example` 补两 key。③ v0.22.15+v0.22.20 admin 媒体总览（含生成图）——README/zh payload inspector + `docs/11` 各补一句。
-- **OpenAPI（`apps/gateway/src/routes/openapi.ts`）**：补齐缺失的 `POST /v1beta/models/{model}:generateContent` 路径；images/interactions 的请求+响应 body 接现成 Zod schema（单一来源，不再是空 object）；声明 `x-goog-api-key` apiKey 安全方案并挂到两个 Gemini 端点；给 chat/messages/responses/images/interactions/gemini 各加可直接 "Try it out" 的请求示例；顶层加 tags 描述 + externalDocs。**取舍**：Anthropic/Responses/Gemini 是 loose passthrough，**不造假 full schema**——只给 example，诚实且 Swagger 可用。
-- **验证**：`openapi.test` 扩断言（11 path 全覆盖、4 个 image/interactions 组件、googleApiKey 方案）3/3 绿；gateway typecheck 干净、biome 干净；spec JSON round-trip 正常。fail-close 闸：**无 config/schema 改动**。发 v0.22.21。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+- **2026-06-28 · 文档/README 对齐今日图片特性 + `/openapi.json` 完善（仅文档与 OpenAPI，无运行时改动）**：补 README/zh + docs/04/11 中 in-chain model promotion、内置 image provider、admin 媒体总览说明；`openapi.ts` 补 Gemini `:generateContent`、images/interactions schema、Google apiKey security、示例与 tags。验证 `openapi.test` 3/3、gateway typecheck、biome，发 v0.22.21。
 
 - **2026-06-28 · 图片生成 lane fallback（多 provider 故障转移；gateway，docs/05，原则 5/8）**：把"同图片模型在多 provider 的别名"组成普通 lane 复用文本 fallback 抽象（core 零改动）：`execute.ts` 导出 5 个纯分类函数 + 新 `runImageChain` 镜像候选链（breaker/abort/4xx 终止/served-cost/链尽 502、空 503），`server.resolveImageChain` 展链（新导出 `expandLaneChain`）注入两 dedicated 端点；`:generateContent` 零代码（命中 §1a 显式 lane 展链走 execute 跨 provider fallback）。坑：image lane 须单一 kind；generateContent 按名选 lane 仅 allow_custom_model key；shipped `gemini-image` 示例只 wire 一 provider。4815 单测/77 e2e 绿。分支 `feat/image-lane-fallback` **未提交未部署**。
 

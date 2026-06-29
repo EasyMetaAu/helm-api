@@ -9,6 +9,7 @@
     type OAuthAccount,
     type OAuthProviderStatus,
     type OAuthQuotaSnapshot,
+    type OAuthQuotaWindow,
     type OAuthUsageRow,
   } from '$lib/api/oauth.js';
   import ConnectProviderDialog from '$lib/components/ConnectProviderDialog.svelte';
@@ -77,6 +78,7 @@
   let resetNotice = $state<string | null>(null);
 
   const keyOf = (providerId: string, account: string): string => `${providerId}/${account}`;
+  const ACTIVE_LIMIT_RECOVERY_THRESHOLD = 95;
 
   // One table row per connected account, flattened across providers, joined to its
   // usage + quota snapshot (both fail-open: a missing entry renders "—").
@@ -173,9 +175,26 @@
     return $t('resets in {m}m', { m: p.m });
   }
 
-  // Is this account auto-parked by a usage limit right now? Prefer a saturated
-  // quota window's reset over the short generic 429 fallback, so the status pill
-  // distinguishes 5h vs 7d limits when the quota snapshot proves the source.
+  function activeRecoveryWindow(
+    windows: OAuthQuotaWindow[],
+    now: number,
+    threshold: number,
+  ): OAuthQuotaWindow | null {
+    let chosen: OAuthQuotaWindow | null = null;
+    for (const w of windows) {
+      if (w.usedPercent < threshold || w.resetsAtMs == null || w.resetsAtMs <= now) {
+        continue;
+      }
+      if (chosen == null || w.resetsAtMs < (chosen.resetsAtMs ?? Number.POSITIVE_INFINITY)) {
+        chosen = w;
+      }
+    }
+    return chosen;
+  }
+
+  // Is this account auto-parked by a usage limit right now? Prefer the nearest
+  // near-full quota window over the short generic 429 fallback, so an Anthropic 5h
+  // limit reported as 98-99% still shows the real reset instead of "0m".
   function usageLimitStatus(
     q: OAuthQuotaSnapshot | undefined,
   ): { untilMs: number; label: string | null } | null {
@@ -183,12 +202,14 @@
     let untilMs =
       q?.usageLimitedUntilMs != null && q.usageLimitedUntilMs > now ? q.usageLimitedUntilMs : null;
     let label: string | null = null;
-    for (const w of q?.windows ?? []) {
-      if (w.usedPercent < 100 || w.resetsAtMs == null || w.resetsAtMs <= now) continue;
-      if (untilMs == null || w.resetsAtMs >= untilMs) {
-        untilMs = w.resetsAtMs;
-        label = windowLabel(w.key);
-      }
+    const recoveryWindow = activeRecoveryWindow(
+      q?.windows ?? [],
+      now,
+      untilMs == null ? 100 : ACTIVE_LIMIT_RECOVERY_THRESHOLD,
+    );
+    if (recoveryWindow?.resetsAtMs != null) {
+      untilMs = recoveryWindow.resetsAtMs;
+      label = windowLabel(recoveryWindow.key);
     }
     return untilMs == null ? null : { untilMs, label };
   }

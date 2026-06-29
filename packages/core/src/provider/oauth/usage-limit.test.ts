@@ -1,6 +1,12 @@
 import type { OAuthQuotaWindow } from "@helm/shared";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_429_COOLDOWN_MS, LIMIT_THRESHOLD, windowsToUsageLimit } from "./usage-limit.js";
+import {
+  ACTIVE_LIMIT_RECOVERY_THRESHOLD,
+  DEFAULT_429_COOLDOWN_MS,
+  LIMIT_THRESHOLD,
+  windowsToActiveUsageRecovery,
+  windowsToUsageLimit,
+} from "./usage-limit.js";
 
 const win = (over: Partial<OAuthQuotaWindow> = {}): OAuthQuotaWindow => ({
   key: "primary",
@@ -42,6 +48,40 @@ describe("windowsToUsageLimit", () => {
 
   it("exposes sane constants", () => {
     expect(LIMIT_THRESHOLD).toBe(100);
+    expect(ACTIVE_LIMIT_RECOVERY_THRESHOLD).toBeLessThan(LIMIT_THRESHOLD);
     expect(DEFAULT_429_COOLDOWN_MS).toBeGreaterThan(0);
+  });
+});
+
+describe("windowsToActiveUsageRecovery", () => {
+  it("uses a near-full 5h window once the account is already rate-limited", () => {
+    expect(
+      windowsToActiveUsageRecovery(
+        [
+          win({ key: "5h", usedPercent: 98, resetsAtMs: 8_000 }),
+          win({ key: "7d", usedPercent: 61, resetsAtMs: 90_000 }),
+          win({ key: "7d-sonnet", usedPercent: 37, resetsAtMs: 90_000 }),
+        ],
+        1_000,
+      ),
+    ).toBe(8_000);
+  });
+
+  it("chooses the nearest plausible recovery window", () => {
+    expect(
+      windowsToActiveUsageRecovery(
+        [
+          win({ key: "7d", usedPercent: 100, resetsAtMs: 90_000 }),
+          win({ key: "5h", usedPercent: 98, resetsAtMs: 8_000 }),
+        ],
+        1_000,
+      ),
+    ).toBe(8_000);
+  });
+
+  it("ignores windows that are not close to the limit", () => {
+    expect(windowsToActiveUsageRecovery([win({ usedPercent: 94, resetsAtMs: 8_000 })], 1_000)).toBe(
+      null,
+    );
   });
 });

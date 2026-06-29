@@ -490,6 +490,7 @@ export {
 // PKCE / device-code login flows, built-in provider registry (anthropic,
 // github-copilot), and the flow primitives. Ported from openclaw (MIT).
 export {
+  ACTIVE_LIMIT_RECOVERY_THRESHOLD,
   type AnthropicLoginStart,
   anthropicOAuthProvider,
   anthropicUsageToWindows,
@@ -536,6 +537,7 @@ export {
   refreshGitHubCopilotToken,
   refreshOpenAICodexToken,
   type SerializeClientDeps,
+  windowsToActiveUsageRecovery,
   windowsToUsageLimit,
 } from "./provider/oauth/index.js";
 export {
