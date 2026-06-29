@@ -2493,6 +2493,58 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     expect(upstreamBodies[0]).toEqual(nativeBody);
   });
 
+  it("skips lane-forced Anthropic thinking when native tool_choice forces a tool", async () => {
+    const provider = anthropicProvider(NATIVE_RESP);
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-sonnet-4-6",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const carrier = {
+      protocol: "anthropic_messages" as const,
+      body: {
+        model: "claude-sonnet-4-6",
+        max_tokens: 32000,
+        temperature: 1,
+        thinking: { type: "disabled" },
+        output_config: { effort: "high" },
+        tool_choice: { type: "tool", name: "web_search" },
+        tools: [{ name: "web_search", input_schema: { type: "object" } }],
+        messages: [{ role: "user", content: [{ type: "text", text: "search" }] }],
+      },
+      headers: { "x-api-key": "client" },
+      mutations: {},
+    };
+
+    const out = await execute(
+      plan(["a"]),
+      anthropicReq({
+        native_request: carrier,
+        reasoning_effort: "medium",
+        reasoning_effort_forced: true,
+      }),
+    );
+
+    const forwarded = provider.nativePassthrough.mock.calls[0]?.[0] as typeof carrier;
+    expect(forwarded.body.thinking).toBeUndefined();
+    expect(forwarded.body.tool_choice).toEqual({ type: "tool", name: "web_search" });
+    expect(forwarded.mutations).toMatchObject({
+      body_shims_applied: ["reasoning_effort_skipped_for_forced_tool_choice"],
+    });
+    expect(out.attempts[0]?.passthrough_mutations).toMatchObject(forwarded.mutations);
+  });
+
   it("strips empty Anthropic text blocks before native passthrough dispatch", async () => {
     const provider = anthropicProvider(NATIVE_RESP);
     const execute = createExecute({

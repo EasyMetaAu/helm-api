@@ -33,6 +33,37 @@ export interface AnthropicThinking {
   budget_tokens: number;
 }
 
+export type ForcedReasoningSkipReason = "forced_tool_choice";
+
+export interface ApplyForcedReasoningResult {
+  body: Record<string, unknown>;
+  mutated: boolean;
+  skippedReason?: ForcedReasoningSkipReason;
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+function anthropicToolChoiceForcesUse(body: Record<string, unknown>): boolean {
+  const toolChoice = body.tool_choice;
+  return (
+    toolChoice === "any" ||
+    (isRecord(toolChoice) && (toolChoice.type === "any" || toolChoice.type === "tool"))
+  );
+}
+
+function stripAnthropicThinkingForForcedToolChoice(body: Record<string, unknown>): {
+  body: Record<string, unknown>;
+  mutated: boolean;
+} {
+  if (body.thinking === undefined) return { body, mutated: false };
+  const next = { ...body };
+  delete next.thinking;
+  delete next.context_management;
+  return { body: next, mutated: true };
+}
+
 /** effort → Anthropic thinking block; `none`/unrecognized → undefined (disabled). */
 export function reasoningEffortToAnthropicThinking(effort: string): AnthropicThinking | undefined {
   const budget = ANTHROPIC_THINKING_BUDGET[effort];
@@ -78,7 +109,7 @@ export function applyForcedReasoningToNativeBody(
   body: Record<string, unknown>,
   protocol: TargetProviderProtocol,
   effort: string,
-): { body: Record<string, unknown>; mutated: boolean } {
+): ApplyForcedReasoningResult {
   switch (protocol) {
     case "gemini": {
       const tc = reasoningEffortToThinkingConfig(effort as IRReasoningEffort);
@@ -100,8 +131,13 @@ export function applyForcedReasoningToNativeBody(
       else next.reasoning = { effort };
       return { body: next, mutated: true };
     }
-    case "anthropic_messages":
+    case "anthropic_messages": {
+      if (effort !== "none" && anthropicToolChoiceForcesUse(body)) {
+        const stripped = stripAnthropicThinkingForForcedToolChoice(body);
+        return { ...stripped, skippedReason: "forced_tool_choice" };
+      }
       return { body: applyForcedAnthropicThinking(body, effort), mutated: true };
+    }
     default:
       return { body, mutated: false }; // openai_chat: never passes through.
   }
