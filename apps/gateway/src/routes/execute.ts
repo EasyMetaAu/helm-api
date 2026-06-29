@@ -677,7 +677,8 @@ export function upstreamStatusOf(err: unknown): number | null {
 // belong on the breaker (back off + half-open probe), exactly like a configured provider.
 export function isAccountScopedFault(err: unknown): boolean {
   if (err instanceof TokenRefreshError) {
-    return err.httpStatus === 400 || err.httpStatus === 401 || err.httpStatus === 403;
+    const s = err.httpStatus;
+    return s === 400 || s === 401 || s === 403 || s === 429;
   }
   const status = upstreamStatusOf(err);
   return status === 401 || status === 403 || status === 429;

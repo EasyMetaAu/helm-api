@@ -65,8 +65,11 @@ function isCredentialAccountFailure(err: unknown): boolean {
 
 // Usage/rate limits are also subscription-account scoped. The pool must park the
 // selected account and try a sibling; otherwise one exhausted account can open the
-// alias-wide breaker for every account exposing the same model.
+// alias-wide breaker for every account exposing the same model. A token-refresh 429
+// (the account's OAuth refresh endpoint is itself rate-limited) is equally account-
+// scoped — back that account off and let a sibling serve, never the model alias.
 function isRateLimitAccountFailure(err: unknown): boolean {
+  if (err instanceof TokenRefreshError) return err.httpStatus === 429;
   return err instanceof UpstreamError && err.upstreamStatus === 429;
 }
 
@@ -95,6 +98,9 @@ export interface OAuthPoolMember {
 // (the member may have been dropped by a concurrent rebuild).
 export interface OAuthPoolClient extends ProviderClient {
   setUsageLimit(account: string, untilMs: number | null): void;
+  // The account's current auto-park cooldown (epoch ms), or null if eligible now. Lets
+  // the gateway make a park EXTEND-ONLY — never shorten a precise quota reset already set.
+  getUsageLimit(account: string): number | null;
 }
 
 export interface OAuthPoolDeps {
@@ -261,7 +267,13 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   }
 
   function parkRateLimitedAccount(entry: PoolEntry): void {
-    const untilMs = now() + accountRateLimitCooldownMs;
+    const candidate = now() + accountRateLimitCooldownMs;
+    // Extend-only: a precise upstream quota reset (e.g. a Codex weekly limit, captured
+    // from response headers before the 429 threw) may already sit far in the future —
+    // the generic short fallback must never pull it back in. Propagate the kept value to
+    // the hook so the persisted snapshot is not shortened either.
+    const current = entry.member.usageLimitedUntilMs;
+    const untilMs = current != null && current > candidate ? current : candidate;
     entry.member.usageLimitedUntilMs = untilMs;
     forgetStickyAccount(entry.member.account);
     try {
@@ -378,6 +390,9 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     setUsageLimit(account: string, untilMs: number | null): void {
       const entry = entries.find((e) => e.member.account === account);
       if (entry) entry.member.usageLimitedUntilMs = untilMs;
+    },
+    getUsageLimit(account: string): number | null {
+      return entries.find((e) => e.member.account === account)?.member.usageLimitedUntilMs ?? null;
     },
     async chatCompletion(
       req: ChatCompletionRequest,

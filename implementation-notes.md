@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-29 · OAuth 配额冷却 extend-only + refresh-429 归账号级（Codex review 跟进；provider 执行/池）
+
+- **背景**：v0.22.23 上线后让 Codex 复审，捞出两条 real-bug（均**非本次回归**，是更早就有的写入交互坑）。
+- **#1 配额冷却被 60s 覆盖**：Codex Responses 抛 429 前先经 `captureCodexQuota` 把**精确长 reset**（如周限）写进 `oauth_quota`+pool 成员；同一 429 随后命中 pool `parkRateLimitedAccount` 写 `now()+DEFAULT_429_COOLDOWN_MS`(60s)，`setUsageLimit` 无条件覆盖 → 账号本该停到远期却 60s 后重入、再 429、循环猛敲。**修复 = park 改 extend-only**：`parkRateLimitedAccount`（直接写成员处）与 server `applyUsageLimit`（三条 park 路径的汇聚点，新加 `OAuthPoolClient.getUsageLimit`）都取 `max(现存未来冷却, 候选)`；`null`（admin/auto reset 清除）仍直通。无论 captureCodexQuota / pool hook / executor 侧 channel 谁后写，长 reset 不被缩短。比较用**内存成员的权威值**（同步），无 store 读竞态。
+- **#2 refresh-429 漏判**：`TokenRefreshError(429)`（refresh 端点被限流）既不在 pool `isCredentialAccountFailure(400/401/403)` 也不在 `isRateLimitAccountFailure(UpstreamError 429)` → 不 park、冒泡后 `isAccountScopedFault` 也漏 → 一个账号的 refresh-429 仍能记 alias breaker。**修复**：pool `isRateLimitAccountFailure` 与 executor `isAccountScopedFault` 都纳入 `TokenRefreshError(429)`（两层仍对称）。
+- **Codex 同时确认无误**：无条件 `canAttempt/recordSuccess/recordAbort` 正确；`recordAbort` 只释放 half-open 不清计数；abort/queue-timeout 在 recordFailure 前已排除；null-status overload 计入 breaker 是对的（pool 先 sibling 重试，冒泡=全池救不了）。
+- **验证**：pool 新增 refresh-429 转 sibling、extend-only（精确长 reset 不被 60s 缩短、hook 透传 kept 值）；executor 新增 `isAccountScopedFault` 分类矩阵（含 `TokenRefreshError(429)`/null-status overload/abort/null）。trio 160 绿、四包 typecheck、biome、build 绿。凭据 401/403 仍永久 park 到 rebuild（本次未改）。发 v0.22.24。
+
 ## 2026-06-29 · OAuth 单账号故障不再污染 alias 级熔断（provider 执行；docs/04，原则 5）
 
 - **线上证据（Lukin）**：`la.atmy.work` 今日 `dcba621e-f8dc-4eec-90db-54352b2fb577` 前 5 个 `/v1/responses` 请求都选中 `openai-codex` 的同一账号 `Luke@OpenAI`，并在 `openai-codex/gpt-5.4-mini` 上报 `oauth refresh failed (... status 401)`；第 6 个请求未再进入 OAuth pool，而是直接 `circuit_open`。根因：执行器熔断 key 是 alias（正确用于普通 provider），但 OAuth pool 内的账号凭据失效被冒泡成 alias 级 provider failure，导致一个坏账号把同模型整个订阅池熔断。
@@ -23,18 +31,13 @@
 - **OpenAPI（`apps/gateway/src/routes/openapi.ts`）**：补齐缺失的 `POST /v1beta/models/{model}:generateContent` 路径；images/interactions 的请求+响应 body 接现成 Zod schema（单一来源，不再是空 object）；声明 `x-goog-api-key` apiKey 安全方案并挂到两个 Gemini 端点；给 chat/messages/responses/images/interactions/gemini 各加可直接 "Try it out" 的请求示例；顶层加 tags 描述 + externalDocs。**取舍**：Anthropic/Responses/Gemini 是 loose passthrough，**不造假 full schema**——只给 example，诚实且 Swagger 可用。
 - **验证**：`openapi.test` 扩断言（11 path 全覆盖、4 个 image/interactions 组件、googleApiKey 方案）3/3 绿；gateway typecheck 干净、biome 干净；spec JSON round-trip 正常。fail-close 闸：**无 config/schema 改动**。发 v0.22.21。
 
-## 2026-06-28 · 图片生成 lane fallback（多 provider 故障转移；gateway，docs/05，原则 5/8）
-
-- **背景（Lukin）**：图片生成是**单点钉死**——每个图片 model 只对应一个 provider，没有熔断、没有 fallback，上游一挂整条请求就失败。诉求：像文本 lane 那样把「同一图片模型在多个 provider 上的别名」组成 lane，一个节点不可用自动 fallback。**关键认识**：一个 alias = 一个 (provider, provider_model)，多 provider = 多 alias，用 lane 串起来——正是文本 fallback 的同一抽象。
-- **设计（core 零改动，复用现成机器）**：① **Piece 1 配置零 schema 改动**——图片 lane 就是普通 lane，成员是跨 provider 图片别名（`config/lanes.yaml` 加 `gemini-image` 示例：flash primary→pro fallback）。② **Piece 2 两 dedicated 端点加链式执行**——`execute.ts` 导出 5 个纯分类函数（`isAbort`/`upstreamStatusOf`/`errorClassOf`/`isUpstreamRequestRejection`/`errorDetailOf`）；新 `routes/image-chain.ts` `runImageChain(targets,breaker,attempt,signal)` **镜像 execute.ts 候选链语义**但针对单发非流式（breaker-OPEN→skip / 成功→recordSuccess+return / abort→recordAbort+终止 / 4xx invalid_request→终止 verbatim 不记熔断不 fallback / 其它失败→recordFailure+换下一个 / 链尽→502 all_providers_failed、空→503 lane_unavailable）；server.ts 新 `resolveImageChain(model)` 包装 `resolveImageTarget`（lane→`expandLaneChain`（**新从 @helm/core 导出**）否则 `[model]`，逐别名解析、丢非图片/无凭据/错 kind 成员、空→404/503），`breaker`（同 chat 实例）+ resolver 注入两路由；images/interactions 把单 target 换成 chain，**预算闸链外一次**、settle 按 **served** alias cost、`costOf` 用 served alias；`buildImageDecision` 泛化收 `attempts[]`+chain（`final.model_alias`=served leaf 非 lane 名、`fallback_count`=非skip-1、latency/cost 现场推导）。③ **Piece 3 `:generateContent` 零代码**——lane 名不在 registry→`isImageModel` false→§0pre 跳过→命中 §1a 显式 lane 展链→execute.ts 已做跨 provider fallback+native passthrough。
-- **取舍/坑（文档化）**：① **混 kind lane 危险**——openai 的 `size` 等对 gemini 成员无意义，且 4xx invalid_request 终止规则会掩盖可用 fallback → 约定 **image lane 单一 kind**（用户 gpt-image 跨 zenmux/openrouter/openai 天然全 openai-kind，满足）。② **generateContent 默认 key 限制**——§1a 受 `allowCustomModel` 闸控（route-request.ts:611），所以在 generateContent 上**按名字选 image lane 仅 allow_custom_model key 生效**（与所有其它 lane 一致）；任意-key 图片 fallback 走两个 dedicated 端点（本就 ungated）。引导图片 SDK 优先用 dedicated 端点（degrade key 在 generateContent 上还会被强制到 degradeLane 文本 lane）。③ **breaker 按 alias 共享**——图片 alias 熔断状态在 dedicated 端点与 generateContent 间共享=期望行为（每 alias 一个健康视图）。④ **lane 卫生**——误放文本别名进 image lane fallback 会被 `resolveImageTarget` 丢弃显示为 skip 行（噪音无害）。⑤ shipped `config/lanes.yaml` 的 `gemini-image` 示例只 wire 一个 provider（zenmux-vertex），是 flash→pro 同 provider 故障转移；真多 provider 须 box 加 `zenmux/gpt-image-2` 等别名（部署时核实 provider 真支持 `/images/generations`）。
-- **验证**：`image-chain.test`(7：fallback/skip/abort/4xx-终止/全失败 502/空 503/served cost)、`image-telemetry.test`(4：多 attempt fallback_count/skip 不计/全失败/裸模型 image label)、images.test(10)+interactions.test(12) 改 dep（resolveImageChain+breaker）；**全量 4815 单测绿**、四包 typecheck、biome 干净、`pnpm build` 绿；**e2e 77 绿**（images.spec +1：lane primary 服务 + sentinel 注入 primary 失败→fallback gemini-3-pro-image 出图；gemini-image.spec +1：interactions 同款 fallback；mock 加 `FAIL_IMAGE_PRIMARY_SENTINEL` prompt-steered 失败注入，不破坏直连 flash 200）。分支 `feat/image-lane-fallback`，**未提交未部署**。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+- **2026-06-28 · 图片生成 lane fallback（多 provider 故障转移；gateway，docs/05，原则 5/8）**：把"同图片模型在多 provider 的别名"组成普通 lane 复用文本 fallback 抽象（core 零改动）：`execute.ts` 导出 5 个纯分类函数 + 新 `runImageChain` 镜像候选链（breaker/abort/4xx 终止/served-cost/链尽 502、空 503），`server.resolveImageChain` 展链（新导出 `expandLaneChain`）注入两 dedicated 端点；`:generateContent` 零代码（命中 §1a 显式 lane 展链走 execute 跨 provider fallback）。坑：image lane 须单一 kind；generateContent 按名选 lane 仅 allow_custom_model key；shipped `gemini-image` 示例只 wire 一 provider。4815 单测/77 e2e 绿。分支 `feat/image-lane-fallback` **未提交未部署**。
 
 - **2026-06-28 · Gemini-SDK 图片生成两条官方表面（generateContent 路由钉死 + 新 /v1beta/interactions；gateway/routing，docs/04/05，原则 1/5/6）**：为 Gemini SDK 补官方形状：`outputImage` 钉死 `:generateContent` 图片模型且任意 key 可用；新增 `/v1beta/interactions` 翻译到 generateContent 并返回 `steps[].content[].image.data`；抽共享 `image-telemetry`。4803 单测、四包 typecheck、biome、74 e2e 绿；限制：`imageConfig` 字段待 ZenMux 实测，interactions v1 非流式。
 

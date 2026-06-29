@@ -1261,8 +1261,18 @@ export async function buildServer(
     account: string,
     untilMs: number | null,
   ): Promise<void> => {
-    oauthPoolClients.get(providerId)?.setUsageLimit(account, untilMs);
-    await store.oauthQuota.setUsageLimit(providerId, account, untilMs);
+    const pool = oauthPoolClients.get(providerId);
+    // A park (non-null) is EXTEND-ONLY: a precise quota reset (e.g. a Codex weekly limit,
+    // captured from headers before the 429) must not be pulled back in by the generic 60s
+    // 429 fallback, whichever park fires last. null = clear (admin "Reset usage" / weekly
+    // auto-reset) always wins. The live member holds the authoritative cooldown — max it.
+    let effective = untilMs;
+    if (untilMs !== null) {
+      const current = pool?.getUsageLimit(account) ?? null;
+      if (current !== null && current > untilMs) effective = current;
+    }
+    pool?.setUsageLimit(account, effective);
+    await store.oauthQuota.setUsageLimit(providerId, account, effective);
   };
 
   // Fire-and-forget park (detection hot path): never blocks / fails a served request.

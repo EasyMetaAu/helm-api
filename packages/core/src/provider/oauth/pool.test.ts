@@ -426,6 +426,7 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
   const AUTH_401 = new UpstreamError("upstream_error", "unauthorized", null, 401);
   const BAD = new UpstreamError("upstream_error", "bad request", null, 400);
   const REFRESH_401 = new TokenRefreshError("oauth refresh failed (openai-codex, status 401)", 401);
+  const REFRESH_429 = new TokenRefreshError("oauth refresh rate-limited (status 429)", 429);
 
   it("retries the next account on a transient fault (non-stream)", async () => {
     const served: string[] = [];
@@ -456,6 +457,53 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     expect(served).toEqual(["b", "b"]);
     expect(selected).toEqual(["a", "b", "b"]);
     expect(limited).toEqual([{ account: "a", untilMs: 1_250 }]);
+  });
+
+  it("parks a refresh-rate-limited account (TokenRefreshError 429) and retries a sibling", async () => {
+    const served: string[] = [];
+    const selected: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [faultMember("bad", 10, served, REFRESH_429), faultMember("good", 50, served, null)],
+      now: () => 1_000,
+      accountRateLimitCooldownMs: 250,
+      onSelect: (account) => selected.push(account),
+    });
+    await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "good" });
+    await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "good" });
+    expect(served).toEqual(["good", "good"]);
+    expect(selected).toEqual(["bad", "good", "good"]); // bad stays cooled on the 2nd request
+  });
+
+  it("a rate-limit park never SHORTENS a precise quota cooldown already set (extend-only)", async () => {
+    const served: string[] = [];
+    const limited: Array<{ account: string; untilMs: number }> = [];
+    const FAR = 9_000_000; // a precise Codex weekly reset, far past now()+cooldown
+    let poolRef: ReturnType<typeof createOAuthPoolClient> | undefined;
+    const precise: OAuthPoolMember = {
+      account: "a",
+      priority: 10,
+      schedulable: true,
+      client: {
+        async chatCompletion(_req: ChatCompletionRequest) {
+          // Mimic captureCodexQuota: the precise long reset lands BEFORE the 429 throws.
+          poolRef?.setUsageLimit("a", FAR);
+          throw RATE;
+        },
+        chatCompletionStream(_req: ChatCompletionRequest): AsyncIterable<string> {
+          return (async function* () {})();
+        },
+      },
+    };
+    const pool = createOAuthPoolClient({
+      members: [precise, faultMember("b", 50, served, null)],
+      now: () => 1_000,
+      accountRateLimitCooldownMs: 250,
+      onAccountRateLimit: (account, untilMs) => limited.push({ account, untilMs }),
+    });
+    poolRef = pool;
+    await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "b" });
+    expect(pool.getUsageLimit("a")).toBe(FAR); // NOT pulled back to 1_000 + 250
+    expect(limited).toEqual([{ account: "a", untilMs: FAR }]); // hook persists the kept value
   });
 
   it("does NOT retry on a deterministic 4xx", async () => {
