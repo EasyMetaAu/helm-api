@@ -3956,7 +3956,7 @@ describe("createExecute — onOAuthSubscription429 (auto-park)", () => {
     expect(recordFailure).not.toHaveBeenCalled();
   });
 
-  it("does NOT record an alias breaker failure for any subscription provider failure", async () => {
+  it("DOES record an alias breaker failure for a subscription server fault (5xx)", async () => {
     const cb = breaker();
     const recordFailure = vi.spyOn(cb, "recordFailure");
     const execute = createExecute({
@@ -3974,16 +3974,18 @@ describe("createExecute — onOAuthSubscription429 (auto-park)", () => {
     });
     const out = await execute(plan(["openai-codex/gpt-5"]), req());
     expect(out.final.status).toBe("error");
-    expect(recordFailure).not.toHaveBeenCalled();
+    // A 5xx that survived the pool's sibling retry = WHOLE-POOL outage, not one account →
+    // the breaker MUST back the alias off, exactly like a configured provider.
+    expect(recordFailure).toHaveBeenCalledWith("openai-codex/gpt-5");
   });
 
-  it("does NOT let an existing alias-open breaker skip a subscription alias", async () => {
+  it("lets a server-fault-opened alias breaker skip a subscription alias (back-off)", async () => {
     const provider = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "ok" }),
       chatCompletionStream: vi.fn(),
     } as unknown as ProviderClient;
     const cb = breaker();
-    for (let i = 0; i < 5; i += 1) cb.recordFailure("openai-codex/gpt-5");
+    for (let i = 0; i < 5; i += 1) cb.recordFailure("openai-codex/gpt-5"); // a 5xx storm opened it
     const canAttempt = vi.spyOn(cb, "canAttempt");
     const execute = createExecute({
       defaultProvider: provider,
@@ -3997,8 +3999,13 @@ describe("createExecute — onOAuthSubscription429 (auto-park)", () => {
       signal: new AbortController().signal,
     });
     const out = await execute(plan(["openai-codex/gpt-5"]), req());
-    expect(out.final.status).toBe("ok");
-    expect(canAttempt).not.toHaveBeenCalled();
+    // The open breaker fast-fails the alias WITHOUT touching the pool — the back-off we want.
+    expect(canAttempt).toHaveBeenCalledWith("openai-codex/gpt-5");
+    expect(out.attempts[0]?.skip_reason).toBe("circuit_open");
+    expect(
+      (provider as unknown as { chatCompletion: ReturnType<typeof vi.fn> }).chatCompletion,
+    ).not.toHaveBeenCalled();
+    expect(out.final.status).toBe("error");
   });
 
   it("does NOT record an alias breaker failure for subscription account-local auth failures", async () => {
@@ -4041,6 +4048,38 @@ describe("createExecute — onOAuthSubscription429 (auto-park)", () => {
     const out = await execute(plan(["openai-codex/gpt-5.4-mini"]), req());
     expect(out.final.status).toBe("error");
     expect(recordFailure).not.toHaveBeenCalled();
+  });
+
+  it("a sustained 5xx pool outage opens the breaker, then fast-fails the next request", async () => {
+    const cb = breaker(); // SHARED across requests, like the live executor
+    const oauth = {
+      chatCompletion: vi
+        .fn()
+        .mockRejectedValue(new UpstreamError("upstream_error", "bad", null, 502)),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const mk = () =>
+      createExecute({
+        defaultProvider: oauth,
+        providers: new Map([["openai-codex", oauth]]),
+        knownOAuthPrefixes: new Set(["openai-codex"]),
+        oauthAliases: () => new Set(["openai-codex/gpt-5"]),
+        registry: registry({}),
+        breaker: cb,
+        catalog: new Map(),
+        now: clock(),
+        signal: new AbortController().signal,
+      });
+    const calls = () =>
+      (oauth as unknown as { chatCompletion: ReturnType<typeof vi.fn> }).chatCompletion.mock.calls
+        .length;
+    // Drive the outage: 5 requests each surface a 502 and tick the breaker toward OPEN.
+    for (let i = 0; i < 5; i += 1) await mk()(plan(["openai-codex/gpt-5"]), req());
+    const callsBefore = calls();
+    // 6th request: breaker is OPEN → the alias is skipped WITHOUT another upstream call.
+    const out = await mk()(plan(["openai-codex/gpt-5"]), req());
+    expect(out.attempts[0]?.skip_reason).toBe("circuit_open");
+    expect(calls()).toBe(callsBefore); // no new upstream call — the amplification is capped
   });
 
   it("does NOT fire on a non-429 failure", async () => {

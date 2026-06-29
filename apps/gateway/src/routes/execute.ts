@@ -18,6 +18,7 @@ import {
   preOutputClassifierFor,
   resolveCostUsd,
   sanitizeCodexResponsesNativeBody,
+  TokenRefreshError,
   UpstreamError,
 } from "@helm/core";
 import type {
@@ -659,6 +660,24 @@ export function upstreamStatusOf(err: unknown): number | null {
   return err instanceof UpstreamError ? err.upstreamStatus : null;
 }
 
+// OAuth subscription faults the POOL already isolates per-account: a credential failure
+// (TokenRefreshError or upstream 401/403) or a usage/rate limit (429). The pool parks the
+// member + retries a sibling for exactly these, so when one still SURFACES to the executor
+// it means that account is out — NOT that the shared model alias is unhealthy. Such faults
+// must stay OFF the alias circuit breaker, or one bad account opens the alias for every
+// account exposing the same model. Mirrors the pool's isCredentialAccountFailure +
+// isRateLimitAccountFailure (same status set) so the two layers agree on what is
+// account-scoped. Server/transport faults (5xx / overload / timeout) are NOT account-scoped
+// — they survive the pool's sibling retry only when the WHOLE pool is unhealthy, so they DO
+// belong on the breaker (back off + half-open probe), exactly like a configured provider.
+export function isAccountScopedFault(err: unknown): boolean {
+  if (err instanceof TokenRefreshError) {
+    return err.httpStatus === 400 || err.httpStatus === 401 || err.httpStatus === 403;
+  }
+  const status = upstreamStatusOf(err);
+  return status === 401 || status === 403 || status === 429;
+}
+
 export function errorClassOf(err: unknown): string {
   if (err instanceof UpstreamError) {
     // OAuth (issue #38, D5): a persistent upstream 401 — the client already
@@ -934,16 +953,17 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         continue;
       }
 
-      // 1) Circuit breaker gate (keyed by alias — the routing unit). OAuth
-      // subscription aliases bypass it: the pool owns per-account isolation.
-      const usesAliasCircuitBreaker = !isOAuthSubscriptionAlias(alias);
-      if (usesAliasCircuitBreaker) {
-        const gate = breaker.canAttempt(alias);
-        if (!gate.allow) {
-          circuitSkipped = true;
-          attempts.push(skipRow(alias, gate.reason ?? "circuit_open", elapsed()));
-          continue;
-        }
+      // 1) Circuit breaker gate (keyed by alias — the routing unit). OAuth subscription
+      // aliases ARE gated like any other alias: the breaker reflects WHOLE-POOL health
+      // (a sustained server/transport outage that survived in-pool sibling retry), so it
+      // must still back the alias off + half-open-probe. Per-account faults never reach
+      // here — the pool absorbs them, and the recordFailure skip below keeps the rare
+      // surfaced one off the breaker.
+      const gate = breaker.canAttempt(alias);
+      if (!gate.allow) {
+        circuitSkipped = true;
+        attempts.push(skipRow(alias, gate.reason ?? "circuit_open", elapsed()));
+        continue;
       }
 
       // 2) Capability filter. Missing catalog data remains fail-open for generic
@@ -1119,7 +1139,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 log,
               ),
           );
-          if (usesAliasCircuitBreaker) breaker.recordSuccess(alias);
+          breaker.recordSuccess(alias);
           // Streamed usage is not known at peek time → cost null, backfilled later.
           attempts.push(okRow(alias, elapsed(), null, passthrough));
           return {
@@ -1170,7 +1190,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 log,
               ),
           );
-          if (usesAliasCircuitBreaker) breaker.recordSuccess(alias);
+          breaker.recordSuccess(alias);
           // Streamed usage is not known at peek time → cost null (not measured).
           attempts.push(okRow(alias, elapsed(), null, attemptTelemetry));
           return {
@@ -1215,7 +1235,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           const body = await withAttemptDeadline(req.attempt_timeout_ms, signal, (attemptSignal) =>
             passthroughInvoke(passthroughBody, { signal: attemptSignal, captureUpstream }),
           );
-          if (usesAliasCircuitBreaker) breaker.recordSuccess(alias);
+          breaker.recordSuccess(alias);
           const usage =
             req.protocol === "openai_responses"
               ? usageFromResponsesResponse(body)
@@ -1238,7 +1258,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         const body = await withAttemptDeadline(req.attempt_timeout_ms, signal, (attemptSignal) =>
           provider.chatCompletion(bodyReq.body, { signal: attemptSignal, captureUpstream }),
         );
-        if (usesAliasCircuitBreaker) breaker.recordSuccess(alias);
+        breaker.recordSuccess(alias);
         attempts.push(okRow(alias, elapsed(), costOf(alias, body), attemptTelemetry));
         return {
           attempts,
@@ -1251,7 +1271,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         // Client abort: non-provider fault. Terminate the chain WITHOUT marking a
         // breaker failure or counting it as all_providers_failed.
         if (isAbort(err, signal)) {
-          if (usesAliasCircuitBreaker) breaker.recordAbort(alias);
+          breaker.recordAbort(alias);
           attempts.push({
             alias,
             skipped: false,
@@ -1288,7 +1308,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         // defeat the throttle the operator deliberately turned on. 503 via
         // lane_unavailable (retryable in the client's eyes).
         if (isQueueTimeout(err)) {
-          if (usesAliasCircuitBreaker) breaker.recordAbort(alias);
+          breaker.recordAbort(alias);
           attempts.push({
             alias,
             skipped: false,
@@ -1369,10 +1389,15 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           };
         }
 
-        // Genuine pre-first-chunk failure: record on the alias breaker for configured
-        // provider aliases. OAuth subscription aliases are pooled account sets, so their
-        // isolation lives inside the pool; one account must never open the model alias.
-        if (usesAliasCircuitBreaker) breaker.recordFailure(alias);
+        // Genuine pre-first-chunk failure: record on the alias breaker — EXCEPT an OAuth
+        // subscription fault the pool already isolates per-account (credential 401/403 or
+        // a 429). Those are pooled-account state, never an alias-wide signal, so one bad
+        // account must not open the model alias. A server/transport fault (5xx / overload /
+        // timeout) that survived the pool's sibling retry means the WHOLE pool is down →
+        // record it so the breaker backs the alias off, just like a configured provider.
+        if (!(isOAuthSubscriptionAlias(alias) && isAccountScopedFault(err))) {
+          breaker.recordFailure(alias);
+        }
         // Auto-park a subscription account that hit its rate/usage limit. A genuine
         // (non-`:free`, handled above) 429 on an OAuth alias means the served account
         // is throttled — signal the gateway to park it so the pool routes around it.
