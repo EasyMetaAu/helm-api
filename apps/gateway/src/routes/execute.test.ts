@@ -12,7 +12,7 @@ import {
   type TargetProviderProtocol,
 } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
-import { createExecute, detectRequestModalities } from "./execute.js";
+import { createExecute, detectRequestModalities, isAccountScopedFault } from "./execute.js";
 
 function req(over: Partial<InternalRequest> = {}): InternalRequest {
   return {
@@ -3955,6 +3955,35 @@ describe("createExecute — OAuth subscription alias guard (fail-closed)", () =>
     expect(
       (dflt as unknown as { chatCompletion: ReturnType<typeof vi.fn> }).chatCompletion,
     ).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Fault classifier: exactly the faults the OAuth pool isolates per-account (credential
+// 401/403 + refresh, and 429 incl. token-refresh-429) are "account-scoped" and must stay
+// OFF the alias breaker; server/transport faults are not. Must mirror the pool's
+// isCredentialAccountFailure + isRateLimitAccountFailure status set.
+describe("isAccountScopedFault — classifier", () => {
+  it("TRUE for credential + rate-limit faults the pool parks", () => {
+    expect(isAccountScopedFault(new TokenRefreshError("x", 400))).toBe(true);
+    expect(isAccountScopedFault(new TokenRefreshError("x", 401))).toBe(true);
+    expect(isAccountScopedFault(new TokenRefreshError("x", 403))).toBe(true);
+    expect(isAccountScopedFault(new TokenRefreshError("x", 429))).toBe(true); // refresh rate-limit
+    expect(isAccountScopedFault(new UpstreamError("upstream_error", "x", null, 401))).toBe(true);
+    expect(isAccountScopedFault(new UpstreamError("upstream_error", "x", null, 403))).toBe(true);
+    expect(isAccountScopedFault(new UpstreamError("upstream_error", "x", null, 429))).toBe(true);
+  });
+
+  it("FALSE for server/transport + request-shape faults that belong on the breaker", () => {
+    expect(isAccountScopedFault(new UpstreamError("upstream_error", "x", null, 500))).toBe(false);
+    expect(isAccountScopedFault(new UpstreamError("upstream_error", "x", null, 502))).toBe(false);
+    expect(
+      isAccountScopedFault(new UpstreamError("upstream_error", "overloaded", null, null)),
+    ).toBe(false); // null-status overload = whole-pool health
+    expect(isAccountScopedFault(new UpstreamError("upstream_error", "x", null, 400))).toBe(false);
+    expect(isAccountScopedFault(new TokenRefreshError("x", 500))).toBe(false);
+    expect(isAccountScopedFault(new TokenRefreshError("x", null))).toBe(false);
+    expect(isAccountScopedFault(new Error("client abort"))).toBe(false);
+    expect(isAccountScopedFault(null)).toBe(false);
   });
 });
 
