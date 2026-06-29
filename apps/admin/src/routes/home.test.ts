@@ -1,5 +1,10 @@
+import { fireEvent, render, screen } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { invalidateAll } from '$app/navigation';
+import type { RequestListItem } from '$lib/api/requests.js';
 import type { DashboardStats } from '$lib/api/stats.js';
+import type { TrendBucket } from '$lib/dashboard-chart.js';
+import type { RangeKey } from '$lib/requests-filters.js';
 import { load } from './+page.js';
 
 const mocks = vi.hoisted(() => {
@@ -28,6 +33,64 @@ const mocks = vi.hoisted(() => {
 
 const EMPTY_STATS = mocks.emptyStats;
 
+// LayerChart touches browser-only APIs and is expensive to import in jsdom. The
+// component test uses an empty aggregate, so charts render empty states and these
+// stubs are never instantiated.
+vi.mock('layerchart', () => ({ AreaChart: () => {}, PieChart: () => {} }));
+
+import HomePage from './+page.svelte';
+
+type HomeStats = {
+  total: number;
+  ok: number;
+  errors: number;
+  successRate: number | null;
+  avgLatency: number | null;
+  avgTps: number | null;
+  totalCost: number | null;
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  cacheHitRate: number | null;
+};
+
+type HomePageData = {
+  items: RequestListItem[];
+  range: RangeKey;
+  startDate?: string;
+  endDate?: string;
+  bucket: TrendBucket;
+  stats: HomeStats;
+  agg: DashboardStats;
+  compare: Record<string, { pct: number | null; base: number }> | null;
+};
+
+function pageData(overrides: Partial<HomePageData> = {}): HomePageData {
+  return {
+    items: [],
+    range: 'today',
+    bucket: 'hour',
+    stats: {
+      total: 0,
+      ok: 0,
+      errors: 0,
+      successRate: null,
+      avgLatency: null,
+      avgTps: null,
+      totalCost: null,
+      totalTokens: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedTokens: 0,
+      cacheHitRate: null,
+    },
+    agg: EMPTY_STATS,
+    compare: null,
+    ...overrides,
+  };
+}
+
 vi.mock('$lib/api/stats.js', () => ({
   EMPTY_STATS: mocks.emptyStats,
   getStats: (...args: unknown[]) => mocks.getStats(...args),
@@ -42,6 +105,15 @@ describe('home dashboard loader', () => {
     vi.restoreAllMocks();
     mocks.getStats.mockReset().mockResolvedValue(EMPTY_STATS);
     mocks.listRequests.mockReset().mockResolvedValue({ items: [] });
+    vi.mocked(invalidateAll).mockClear();
+  });
+
+  it('renders a refresh control that reloads all dashboard data', async () => {
+    render(HomePage, { data: pageData() });
+
+    await fireEvent.click(screen.getByTestId('refresh-now'));
+
+    expect(invalidateAll).toHaveBeenCalledTimes(1);
   });
 
   it('loads all-time stats with an explicit full-history window', async () => {
