@@ -1,11 +1,12 @@
 <script lang="ts">
   import { AreaChart, PieChart, Tooltip } from 'layerchart';
   import { untrack } from 'svelte';
-  import { goto } from '$app/navigation';
+  import { goto, invalidateAll } from '$app/navigation';
   import { base } from '$app/paths';
   import type { RequestListItem } from '$lib/api/requests.js';
   import type { DashboardStats } from '$lib/api/stats.js';
   import RangeFilter from '$lib/components/RangeFilter.svelte';
+  import RefreshControl from '$lib/components/RefreshControl.svelte';
   import RequestsTable from '$lib/components/RequestsTable.svelte';
   import { formatTrendTick, trendAxisTicks, type TrendBucket } from '$lib/dashboard-chart.js';
   import { formatCount, formatTokens, formatTps, formatUsd } from '$lib/format.js';
@@ -242,13 +243,23 @@
 </script>
 
 <div class="w-full px-4 py-6 md:px-8 md:py-8">
-  <header class="mb-6">
-    <h1 class="page-title">{$t('Overview')}</h1>
-    <p class="section-desc mt-1">
-      {$t(
-        'A live snapshot of how the gateway is routing requests right now, plus shortcuts to manage it.',
-      )}
-    </p>
+  <header class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+    <div class="min-w-0">
+      <h1 class="page-title">{$t('Overview')}</h1>
+      <p class="section-desc mt-1">
+        {$t(
+          'A live snapshot of how the gateway is routing requests right now, plus shortcuts to manage it.',
+        )}
+      </p>
+    </div>
+    <!-- Refresh now + auto-refresh cadence. Re-runs the dashboard loader, covering
+         stats, comparisons, charts, and the recent-request preview in one pass. -->
+    <div class="shrink-0">
+      <RefreshControl
+        onRefresh={() => invalidateAll()}
+        storageKey="helm_admin_home_refresh_interval"
+      />
+    </div>
   </header>
 
   <!-- Date-range filter: scopes the stat cards + recent-request preview to a window.
