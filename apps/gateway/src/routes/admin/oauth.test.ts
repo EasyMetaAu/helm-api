@@ -210,6 +210,57 @@ describe("admin OAuth routes — read endpoints", () => {
     expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "default", weeklyReset);
   });
 
+  it("GET /oauth/quota extends an active cooldown to a near-full 5h recovery reset", async () => {
+    const now = Date.now();
+    const shortCooldown = now + 60_000;
+    const fiveHourReset = now + 2 * 60 * 60_000 + 57 * 60_000;
+    const likelyFiveHourLimit = {
+      key: "5h",
+      usedPercent: 98,
+      resetsAtMs: fiveHourReset,
+      windowMinutes: null,
+    };
+    const applyUsageLimit = vi.fn(async () => {});
+    const oauthQuota = {
+      get: vi.fn(async () => ({
+        providerId: "anthropic",
+        account: "default",
+        windows: [],
+        capturedAt: now,
+        source: "anthropic",
+        usageLimitedUntilMs: shortCooldown,
+      })),
+      getAll: vi.fn(async () => [
+        {
+          providerId: "anthropic",
+          account: "default",
+          windows: [
+            likelyFiveHourLimit,
+            { key: "7d", usedPercent: 61, resetsAtMs: now + 5 * 86_400_000, windowMinutes: null },
+          ],
+          capturedAt: now,
+          source: "anthropic",
+          usageLimitedUntilMs: shortCooldown,
+        },
+      ]),
+      upsert: vi.fn(async () => {}),
+      delete: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const seam = fullSeam({
+      fetchAnthropicQuota: vi.fn(async () => [
+        likelyFiveHourLimit,
+        { key: "7d", usedPercent: 61, resetsAtMs: now + 5 * 86_400_000, windowMinutes: null },
+      ]) as never,
+    });
+
+    const res = await app({ oauth: seam, oauthQuota, applyUsageLimit }).request(
+      "/admin/api/oauth/quota",
+    );
+
+    expect(res.status).toBe(200);
+    expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "default", fiveHourReset);
+  });
+
   it("GET /oauth/quota does not newly park an unparked account from a PULL snapshot", async () => {
     const now = Date.now();
     const saturatedWeekly = {

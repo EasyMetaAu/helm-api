@@ -1,4 +1,4 @@
-import { windowsToUsageLimit } from "@helm/core";
+import { windowsToActiveUsageRecovery } from "@helm/core";
 import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../../app.js";
@@ -171,11 +171,11 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     const extendActiveCooldownFromWindows = async (
       providerId: string,
       account: string,
-      windows: Parameters<typeof windowsToUsageLimit>[0],
+      windows: Parameters<typeof windowsToActiveUsageRecovery>[0],
     ): Promise<void> => {
       if (!deps.applyUsageLimit) return;
       const nowMs = Date.now();
-      const quotaUntil = windowsToUsageLimit(windows, nowMs);
+      const quotaUntil = windowsToActiveUsageRecovery(windows, nowMs);
       if (quotaUntil === null) return;
       const current = await store.get(providerId, account).catch(() => null);
       const currentUntil = current?.usageLimitedUntilMs ?? null;
@@ -193,8 +193,8 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         // NB: this observability PULL refreshes the stored window snapshot (and, for
         // Codex, the live reset-credit count) but does NOT newly auto-park an otherwise
         // active account. If the account is ALREADY parked by live-traffic evidence
-        // (generic 429 fallback), a saturated quota window may EXTEND that cooldown to
-        // the precise reset time. That keeps "Reset usage" effective: clearing the
+        // (generic 429 fallback), a near-full quota window may EXTEND that cooldown to
+        // the likely reset time. That keeps "Reset usage" effective: clearing the
         // cooldown then reloading this page does not immediately re-park the account
         // before it can serve a single request.
         const acctsOf = (id: string) => status.find((x) => x.id === id)?.accounts ?? [];

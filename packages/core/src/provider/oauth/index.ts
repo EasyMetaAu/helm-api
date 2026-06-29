@@ -72,7 +72,9 @@ export type {
   OAuthProviderInterface,
 } from "./types.js";
 export {
+  ACTIVE_LIMIT_RECOVERY_THRESHOLD,
   DEFAULT_429_COOLDOWN_MS,
   LIMIT_THRESHOLD,
+  windowsToActiveUsageRecovery,
   windowsToUsageLimit,
 } from "./usage-limit.js";

@@ -155,6 +155,73 @@ describe('providers page', () => {
     expect(within(row).getByText(/7d.*auto-recovers in 8h/i)).toBeInTheDocument();
   });
 
+  it('uses a near-full 5h quota window over the generic 429 fallback', () => {
+    const now = Date.now();
+    renderPage({
+      quota: [
+        {
+          providerId: 'anthropic',
+          account: 'acct-claude',
+          windows: [
+            {
+              key: '5h',
+              usedPercent: 98,
+              resetsAtMs: now + 2 * 60 * 60_000 + 57 * 60_000,
+              windowMinutes: null,
+            },
+            {
+              key: '7d',
+              usedPercent: 61,
+              resetsAtMs: now + 5 * 86_400_000 + 10 * 60 * 60_000,
+              windowMinutes: null,
+            },
+            {
+              key: '7d-sonnet',
+              usedPercent: 37,
+              resetsAtMs: now + 5 * 86_400_000 + 10 * 60 * 60_000,
+              windowMinutes: null,
+            },
+          ],
+          capturedAt: now,
+          source: 'anthropic',
+          usageLimitedUntilMs: now + 60_000,
+        },
+      ],
+    });
+
+    const row = screen.getByTestId('provider-account-row');
+    expect(within(row).getByText('Rate limited')).toBeInTheDocument();
+    expect(within(row).getByText(/5h.*auto-recovers in 2h/i)).toBeInTheDocument();
+    expect(within(row).queryByText(/auto-recovers in 0m/i)).not.toBeInTheDocument();
+  });
+
+  it('does not mark a healthy account rate-limited from a near-full window alone', () => {
+    const now = Date.now();
+    renderPage({
+      quota: [
+        {
+          providerId: 'anthropic',
+          account: 'acct-claude',
+          windows: [
+            {
+              key: '5h',
+              usedPercent: 98,
+              resetsAtMs: now + 2 * 60 * 60_000 + 57 * 60_000,
+              windowMinutes: null,
+            },
+          ],
+          capturedAt: now,
+          source: 'anthropic',
+          usageLimitedUntilMs: null,
+        },
+      ],
+    });
+
+    const row = screen.getByTestId('provider-account-row');
+    expect(within(row).getByText('98%')).toBeInTheDocument();
+    expect(within(row).queryByText('Rate limited')).not.toBeInTheDocument();
+  });
+
   it('renders "Direct" and caps the models list with a +N pill', () => {
     renderPage({
       providers: [
