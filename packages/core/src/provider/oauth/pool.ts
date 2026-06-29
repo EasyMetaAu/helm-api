@@ -27,17 +27,19 @@ import {
   type ProviderClient,
   UpstreamError,
 } from "../openai.js";
+import { TokenRefreshError } from "../token-manager.js";
+import { DEFAULT_429_COOLDOWN_MS } from "./usage-limit.js";
 
 // Which PRE-FIRST-CHUNK failure justifies trying a SIBLING account in the same pool
 // before the executor advances to the next alias. A Codex (openai_responses + native
 // tools) request has NO valid cross-protocol fallback — every non-Responses alias is
 // skipped — so the only real fallback is another account of the SAME subscription. We
 // retry only TRANSIENT, account-agnostic server faults (a 5xx / overload / connect
-// timeout on one account says nothing about its siblings) and DELIBERATELY exclude:
-//   • 429 — a usage/rate limit is per-account; the executor must SEE it to park that
-//     account (retrying here would hide the 429 and leave it un-parked / mis-attributed);
-//   • other 4xx (400/401/403/413/422) — deterministic request/auth faults a sibling
-//     would hit identically; surface immediately so the executor classifies + advances.
+// timeout on one account says nothing about its siblings) and DELIBERATELY exclude
+// deterministic request-shape 4xx (400/413/422) — a sibling would hit those
+// identically, so surface them immediately for executor classification. Account-local
+// OAuth 401/403/429 is handled by the dedicated helpers below, because those statuses
+// say something about the selected subscription account, not about the model alias.
 // Non-UpstreamError (client abort, programmer error) is never retried.
 function isRetryableTransientError(err: unknown): boolean {
   if (!(err instanceof UpstreamError)) return false;
@@ -45,6 +47,27 @@ function isRetryableTransientError(err: unknown): boolean {
   const status = err.upstreamStatus;
   if (status === null) return true; // network / overload with no HTTP status
   return status >= 500; // 5xx incl. 529 (overloaded); excludes 429 + every other 4xx
+}
+
+// Token refresh/auth failures are scoped to the selected subscription account.
+// If one account's stored refresh token is rejected, a healthy sibling should rescue
+// the request instead of letting the executor trip the alias-wide circuit breaker.
+function isCredentialAccountFailure(err: unknown): boolean {
+  if (err instanceof TokenRefreshError) {
+    const status = err.httpStatus;
+    return status === 400 || status === 401 || status === 403;
+  }
+  if (err instanceof UpstreamError) {
+    return err.upstreamStatus === 401 || err.upstreamStatus === 403;
+  }
+  return false;
+}
+
+// Usage/rate limits are also subscription-account scoped. The pool must park the
+// selected account and try a sibling; otherwise one exhausted account can open the
+// alias-wide breaker for every account exposing the same model.
+function isRateLimitAccountFailure(err: unknown): boolean {
+  return err instanceof UpstreamError && err.upstreamStatus === 429;
 }
 
 // One account in the pool: its scheduling knobs plus the fully-wired client that
@@ -84,6 +107,11 @@ export interface OAuthPoolDeps {
   // Fires with the selected account on each served call — the seam the gateway
   // uses to record the serving subscription in telemetry / logs (no secrets).
   onSelect?: (account: string) => void;
+  // Fires when the selected account hits an upstream 429. The pool already applies
+  // the in-memory cooldown before calling this; the hook lets the gateway persist the
+  // same cooldown so rebuilds/restarts keep routing around the account.
+  onAccountRateLimit?: (account: string, untilMs: number) => void;
+  accountRateLimitCooldownMs?: number;
   // Pre-output failover classifiers for the in-pool retry (issue: a native byte-relay
   // that 200s then fails IN-BAND after only a content-free preamble — e.g. a Responses
   // `response.created` before `response.failed`/server_is_overloaded). WITHOUT this, the
@@ -107,6 +135,7 @@ interface PoolEntry {
 export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   const now = deps.now ?? (() => Date.now());
   const stickyTtlMs = deps.stickyTtlMs ?? 10 * 60 * 1000;
+  const accountRateLimitCooldownMs = deps.accountRateLimitCooldownMs ?? DEFAULT_429_COOLDOWN_MS;
   const entries: PoolEntry[] = deps.members.map((member) => ({ member, lastUsedAt: 0 }));
   const stickySessions = new Map<string, { account: string; expiresAt: number }>();
 
@@ -220,6 +249,28 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     return best;
   }
 
+  function forgetStickyAccount(account: string): void {
+    for (const [key, sticky] of stickySessions) {
+      if (sticky.account === account) stickySessions.delete(key);
+    }
+  }
+
+  function parkCredentialFailedAccount(entry: PoolEntry): void {
+    entry.member.schedulable = false;
+    forgetStickyAccount(entry.member.account);
+  }
+
+  function parkRateLimitedAccount(entry: PoolEntry): void {
+    const untilMs = now() + accountRateLimitCooldownMs;
+    entry.member.usageLimitedUntilMs = untilMs;
+    forgetStickyAccount(entry.member.account);
+    try {
+      deps.onAccountRateLimit?.(entry.member.account, untilMs);
+    } catch {
+      /* fail-open: persistence/telemetry hooks must not break in-pool failover */
+    }
+  }
+
   // Non-stream in-pool retry: try the selected account; on a transient pre-result fault
   // advance to the next eligible sibling, until one succeeds or none remain. When the
   // pool is exhausted we surface the LAST upstream fault (the real cause), not the
@@ -241,6 +292,16 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       try {
         return await call(entry.member.client);
       } catch (err) {
+        if (isCredentialAccountFailure(err)) {
+          parkCredentialFailedAccount(entry);
+          lastErr = err;
+          continue;
+        }
+        if (isRateLimitAccountFailure(err)) {
+          parkRateLimitedAccount(entry);
+          lastErr = err;
+          continue;
+        }
         if (!isRetryableTransientError(err)) throw err;
         lastErr = err;
       }
@@ -276,8 +337,16 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         first = await iterator.next(); // pre-first-(real-)chunk fault surfaces HERE
       } catch (err) {
         if (iterator) await iterator.return?.().catch(() => {});
-        if (!isRetryableTransientError(err)) throw err;
-        lastErr = err;
+        if (isCredentialAccountFailure(err)) {
+          parkCredentialFailedAccount(entry);
+          lastErr = err;
+        } else if (isRateLimitAccountFailure(err)) {
+          parkRateLimitedAccount(entry);
+          lastErr = err;
+        } else {
+          if (!isRetryableTransientError(err)) throw err;
+          lastErr = err;
+        }
         let next: PoolEntry;
         try {
           next = select(stickyKey, tried);

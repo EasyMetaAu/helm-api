@@ -934,12 +934,16 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         continue;
       }
 
-      // 1) Circuit breaker gate (keyed by alias — the routing unit).
-      const gate = breaker.canAttempt(alias);
-      if (!gate.allow) {
-        circuitSkipped = true;
-        attempts.push(skipRow(alias, gate.reason ?? "circuit_open", elapsed()));
-        continue;
+      // 1) Circuit breaker gate (keyed by alias — the routing unit). OAuth
+      // subscription aliases bypass it: the pool owns per-account isolation.
+      const usesAliasCircuitBreaker = !isOAuthSubscriptionAlias(alias);
+      if (usesAliasCircuitBreaker) {
+        const gate = breaker.canAttempt(alias);
+        if (!gate.allow) {
+          circuitSkipped = true;
+          attempts.push(skipRow(alias, gate.reason ?? "circuit_open", elapsed()));
+          continue;
+        }
       }
 
       // 2) Capability filter. Missing catalog data remains fail-open for generic
@@ -1115,7 +1119,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 log,
               ),
           );
-          breaker.recordSuccess(alias);
+          if (usesAliasCircuitBreaker) breaker.recordSuccess(alias);
           // Streamed usage is not known at peek time → cost null, backfilled later.
           attempts.push(okRow(alias, elapsed(), null, passthrough));
           return {
@@ -1166,7 +1170,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 log,
               ),
           );
-          breaker.recordSuccess(alias);
+          if (usesAliasCircuitBreaker) breaker.recordSuccess(alias);
           // Streamed usage is not known at peek time → cost null (not measured).
           attempts.push(okRow(alias, elapsed(), null, attemptTelemetry));
           return {
@@ -1211,7 +1215,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           const body = await withAttemptDeadline(req.attempt_timeout_ms, signal, (attemptSignal) =>
             passthroughInvoke(passthroughBody, { signal: attemptSignal, captureUpstream }),
           );
-          breaker.recordSuccess(alias);
+          if (usesAliasCircuitBreaker) breaker.recordSuccess(alias);
           const usage =
             req.protocol === "openai_responses"
               ? usageFromResponsesResponse(body)
@@ -1234,7 +1238,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         const body = await withAttemptDeadline(req.attempt_timeout_ms, signal, (attemptSignal) =>
           provider.chatCompletion(bodyReq.body, { signal: attemptSignal, captureUpstream }),
         );
-        breaker.recordSuccess(alias);
+        if (usesAliasCircuitBreaker) breaker.recordSuccess(alias);
         attempts.push(okRow(alias, elapsed(), costOf(alias, body), attemptTelemetry));
         return {
           attempts,
@@ -1247,7 +1251,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         // Client abort: non-provider fault. Terminate the chain WITHOUT marking a
         // breaker failure or counting it as all_providers_failed.
         if (isAbort(err, signal)) {
-          breaker.recordAbort(alias);
+          if (usesAliasCircuitBreaker) breaker.recordAbort(alias);
           attempts.push({
             alias,
             skipped: false,
@@ -1284,7 +1288,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         // defeat the throttle the operator deliberately turned on. 503 via
         // lane_unavailable (retryable in the client's eyes).
         if (isQueueTimeout(err)) {
-          breaker.recordAbort(alias);
+          if (usesAliasCircuitBreaker) breaker.recordAbort(alias);
           attempts.push({
             alias,
             skipped: false,
@@ -1365,15 +1369,14 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           };
         }
 
-        // Genuine pre-first-chunk failure: record on the breaker, try next. This row
-        // carries the REAL passthrough telemetry: a failure during nativePassthrough
-        // (UpstreamError) lands HERE just like a chatCompletion failure — the trail
-        // shows the verbatim-forward was attempted on this candidate before it failed.
-        breaker.recordFailure(alias);
+        // Genuine pre-first-chunk failure: record on the alias breaker for configured
+        // provider aliases. OAuth subscription aliases are pooled account sets, so their
+        // isolation lives inside the pool; one account must never open the model alias.
+        if (usesAliasCircuitBreaker) breaker.recordFailure(alias);
         // Auto-park a subscription account that hit its rate/usage limit. A genuine
         // (non-`:free`, handled above) 429 on an OAuth alias means the served account
         // is throttled — signal the gateway to park it so the pool routes around it.
-        // Pure side-channel: the breaker failure + chain advance below are unchanged.
+        // Pure side-channel: chain advancement below is unchanged.
         if (upstreamStatusOf(err) === 429 && isOAuthSubscriptionAlias(alias)) {
           onOAuthSubscription429?.(alias);
         }
