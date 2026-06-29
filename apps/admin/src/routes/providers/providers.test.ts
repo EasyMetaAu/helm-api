@@ -127,6 +127,34 @@ describe('providers page', () => {
     expect(within(row).getByText('claude-haiku-4-5')).toBeInTheDocument();
   });
 
+  it('uses the saturated quota window as the rate-limit recovery source', () => {
+    const now = Date.now();
+    renderPage({
+      quota: [
+        {
+          providerId: 'anthropic',
+          account: 'acct-claude',
+          windows: [
+            { key: '5h', usedPercent: 0, resetsAtMs: now + 30 * 60_000, windowMinutes: null },
+            {
+              key: '7d',
+              usedPercent: 100,
+              resetsAtMs: now + 8 * 60 * 60_000 + 11 * 60_000,
+              windowMinutes: null,
+            },
+          ],
+          capturedAt: now,
+          source: 'anthropic',
+          usageLimitedUntilMs: now + 60_000,
+        },
+      ],
+    });
+
+    const row = screen.getByTestId('provider-account-row');
+    expect(within(row).getByText('Rate limited')).toBeInTheDocument();
+    expect(within(row).getByText(/7d.*auto-recovers in 8h/i)).toBeInTheDocument();
+  });
+
   it('renders "Direct" and caps the models list with a +N pill', () => {
     renderPage({
       providers: [
@@ -286,7 +314,12 @@ describe('providers page', () => {
           providerId: 'openai-codex',
           account: 'acct-codex',
           windows: [
-            { key: 'primary', usedPercent: 80, resetsAtMs: Date.now() + 3_600_000, windowMinutes: 300 },
+            {
+              key: 'primary',
+              usedPercent: 80,
+              resetsAtMs: Date.now() + 3_600_000,
+              windowMinutes: 300,
+            },
           ],
           capturedAt: Date.now(),
           source: 'codex',
@@ -332,9 +365,7 @@ describe('providers page', () => {
     );
     expect(invalidateAllMock).toHaveBeenCalledTimes(1);
     // Success banner reflects how many windows were restored.
-    await waitFor(() =>
-      expect(screen.getByRole('status')).toHaveTextContent('Reset 2 window(s)'),
-    );
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Reset 2 window(s)'));
     // Dialog is dismissed after a successful reset.
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
