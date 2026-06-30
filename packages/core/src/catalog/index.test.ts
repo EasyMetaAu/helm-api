@@ -163,6 +163,27 @@ describe("loadCatalog", () => {
     expect(entry?.capabilities.requiresStreaming).toBe(true);
   });
 
+  it("propagates per-model reasoning effort policy into the merged catalog entry", () => {
+    const cat = loadCatalog({
+      generated,
+      capabilitiesOverride: {
+        "anthropic/claude-haiku-4-5-20251001": {
+          reasoningEffort: {
+            anthropicOutputConfig: { supported: false },
+            anthropicThinking: {
+              supported: true,
+              levels: ["minimal", "low", "medium", "high", "xhigh", "max"],
+            },
+          },
+        },
+      },
+      pricingOverride: {},
+    });
+    const effort = cat.get("anthropic/claude-haiku-4-5-20251001")?.capabilities.reasoningEffort;
+    expect(effort?.anthropicOutputConfig?.supported).toBe(false);
+    expect(effort?.anthropicThinking?.levels).toContain("xhigh");
+  });
+
   it("leaves requiresStreaming absent for entries that never set it (back-compat)", () => {
     const cat = loadCatalog({ generated, capabilitiesOverride: {}, pricingOverride: {} });
     expect(cat.get("openai/gpt-4o")?.capabilities.requiresStreaming).toBeUndefined();

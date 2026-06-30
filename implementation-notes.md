@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-30 · per-model reasoning effort policy（执行 fallback / 协议转换，docs/04/05，原则 2/5/8）
+
+- **背景（Lukin）**：生产请求 `10124906-2d15-4cf6-accf-8ce26227a8ca` 走 `economy`，首个 `openai-codex/gpt-5.4-mini` 3s timeout 后 fallback 到 `anthropic/claude-haiku-4-5-20251001`；Haiku 返回 `400 invalid_request_error: This model does not support the effort parameter.`。客户端原始 payload 没有 `reasoning_effort`，是 `economy.reasoning_effort: medium` 在路由阶段强制注入。
+- **根因**：`reasoning_effort` 是跨协议 IR 字段，但模型真正支持的是具体 wire 字段：OpenAI `reasoning.effort`、Anthropic `output_config.effort`、Anthropic `thinking`、Gemini `thinkingConfig`。Haiku 4.5 支持 manual thinking budget，但不支持 Anthropic adaptive `output_config.effort`；旧代码把 lane effort 同时合成 thinking + output_config，导致下游 400。之前的 executor guard 又把支持信息写死在代码里，并且选择 skip candidate，不能表达“这个模型能用 thinking，但不能用 effort 参数”。
+- **修复决策**：在 catalog capability 增加 `reasoningEffort`，由 `config/capabilities.yaml` 为每个模型声明各 wire 字段是否支持、支持哪些 level、以及 level map。executor 在每个 candidate attempt 上按该 policy 适配 body：支持则按配置映射，不支持则删除该 wire 参数，继续尝试当前模型；不再因为 unsupported effort 直接 skip candidate。
+- **当前配置**：Codex/OpenAI entries 声明 `openaiReasoning` levels；Gemini entries 声明 `geminiThinkingConfig`；Anthropic Opus/Fable 使用 `anthropicOutputConfig` 并禁用 manual thinking；Sonnet 4.6 将 `xhigh -> max`；Haiku 4.5 删除 `output_config.effort`，但保留/合成 manual `thinking`。
+- **验证**：新增 translated + native passthrough regression：Sonnet `xhigh` 映射为 `output_config.effort=max` 且不 skip；Haiku `reasoning_effort=medium` 仍使用 Haiku，上游 body 无 `output_config` 且有 `thinking`；native passthrough 同样删除 unsupported `output_config.effort`。
+
 ## 2026-06-30 · Anthropic `output_config.effort` 与 OpenAI `reasoning_effort` 双向保真（协议转换/执行 fallback，docs/05/04，原则 5/8）
 
 - **背景（Lukin）**：生产请求 `fb2fd618-edd6-4da3-8d9f-419e59c2dcb4` 显示 Anthropic 入站体带 `output_config:{"effort":"xhigh"}`，首个 Opus attempt 失败后 fallback 到 `openai-codex/gpt-5.5` 成功；但最终上游 GPT 请求没有 `reasoning` / `reasoning_effort`，只在 attempt mutation 里看到 `provider_raw_stripped_for_target:["context_management","output_config"]`。
@@ -25,19 +33,13 @@
 - **范围限制**：目前 UI 只对 `anthropic` 与 `openai-codex` 显示 Fast 开关；其他 provider 显示不支持。Anthropic 的 `count_tokens` 路径不注入 `speed`，避免把消息生成参数带到 token 统计端点。
 - **验证计划**：provider 单测覆盖翻译请求与 native passthrough 都被强制覆盖；gateway/admin 单测覆盖 `fastMode` / `allow_fast_mode` 的 API 校验、持久化、列表展示、池合成、客户端降级与 UI 切换。
 
-## 2026-06-30 · OAuth 5h 限额恢复时间不再落回 60s（admin/gateway，docs/04，原则 5）
-
-- **背景（Lukin）**：Subscription Providers 页里 Anthropic 账号已经被 429 标为 `Rate limited`，但 quota 快照显示 `5h=98%`、`7d/7d Sonnet` 远未打满；左侧却显示 `0 分钟后自动恢复`，因为只信 `usageLimitedUntilMs=now+60s` 的 generic 429 fallback。
-- **根因**：旧逻辑只把 `usedPercent >= 100` 当作可证明窗口，并且在 UI 中偏向更远的 reset。Anthropic usage PULL 在真实 5h 限额时可能仍报 98–99%（取样/舍入滞后），于是 `/oauth/quota` 没把已 park 账号延长到 5h reset，UI 也找不到窗口 label。
-- **修复决策**：保留 `windowsToUsageLimit` 的严格 100% 语义给「主动 park 健康账号」路径；新增 `windowsToActiveUsageRecovery`：只在账号**已经**因真实 429 处于 cooldown 时，使用 `>=95%` 的 near-full 窗口推断恢复时间，并取最近的未来 reset（5h 与 7d 只显示一个 active limiter）。`/admin/api/oauth/quota` 用它把 60s fallback 延长到真实窗口 reset；providers UI 用同样阈值显示 `5h · auto-recovers in ...`。
-- **取舍/坑**：不会因为单纯看到 98% 就提前 park 正常账号；near-full 仅用于「已有 cooldown」的恢复推断。若未来上游出现多个同时 active 的窗口，本实现按产品预期取最近 reset，最坏情况是过早重试一次后由 429 再次 park。
-- **验证**：新增 core 纯函数测试（98% 5h、最近 reset、94% 忽略）、gateway `/oauth/quota` 延长 active cooldown 测试、admin providers 页截图形态回归测试（不再显示 0m），并覆盖 98% 但未 park 的健康账号不误报。发布前 `pnpm test` 317 文件/4844 测绿，`typecheck`/`svelte-check`/`biome`/`build` 绿；版本 bump 到 v0.22.27。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+- **2026-06-30 · OAuth 5h 限额恢复时间不再落回 60s（admin/gateway，docs/04，原则 5）**：已 park 账号的 generic 60s 429 fallback 改用 near-full (`>=95%`) 窗口推断真实恢复时间，避免 Anthropic 5h 98–99% 限额显示 `0m`；健康账号仍不因 98% 预先 park。验证 core/gateway/admin 相关测试、全量 test/typecheck/svelte-check/biome/build 绿，发 v0.22.27。
 
 - **2026-06-29 · OAuth 配额冷却 extend-only + refresh-429 归账号级（Codex review 跟进；provider 执行/池）**：修复 Codex quota 精确长 reset 被 generic 60s 429 覆盖的问题（park/applyUsageLimit 改 extend-only，清除仍直通）；同时把 `TokenRefreshError(429)` 纳入 pool 与 executor 的账号级 rate-limit 分类，避免 refresh 限流污染 alias breaker。验证 pool/executor 矩阵、typecheck、biome、build 绿，发 v0.22.24。
 

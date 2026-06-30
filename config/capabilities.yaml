@@ -67,6 +67,10 @@ openai-codex/gpt-5.5:
   jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
+  reasoningEffort:
+    openaiReasoning:
+      supported: true
+      levels: [low, medium, high, xhigh]
   maxContextTokens: 272000
   maxOutputTokens: 128000
 openai-codex/gpt-5.4:
@@ -74,6 +78,10 @@ openai-codex/gpt-5.4:
   jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
+  reasoningEffort:
+    openaiReasoning:
+      supported: true
+      levels: [low, medium, high, xhigh]
   maxContextTokens: 272000
   maxOutputTokens: 128000
 openai-codex/gpt-5.4-mini:
@@ -81,6 +89,10 @@ openai-codex/gpt-5.4-mini:
   jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
+  reasoningEffort:
+    openaiReasoning:
+      supported: true
+      levels: [low, medium, high, xhigh]
   maxContextTokens: 272000
   maxOutputTokens: 65536
 # Official DeepSeek API: json_object YES, json_schema NO (response_format json_schema
@@ -126,6 +138,10 @@ zenmux/gpt-5.5:
   jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
+  reasoningEffort:
+    openaiReasoning:
+      supported: true
+      levels: [low, medium, high, xhigh]
   # OpenRouter lists `file` input for gpt-5.5 (text+image+file->text).
   modalities: [document]
   maxContextTokens: 1050000
@@ -141,6 +157,9 @@ zenmux-vertex/gemini-3.5-flash:
   supportsVision: true
   supportsStreaming: true
   supportsCachedContent: true
+  reasoningEffort:
+    geminiThinkingConfig:
+      supported: true
   modalities: [audio, video, document]
   maxContextTokens: 1048576
   maxOutputTokens: 65536
@@ -150,6 +169,9 @@ zenmux-vertex/gemini-3.1-flash-lite:
   supportsVision: true
   supportsStreaming: true
   supportsCachedContent: true
+  reasoningEffort:
+    geminiThinkingConfig:
+      supported: true
   modalities: [audio, video, document]
   maxContextTokens: 1048576
   maxOutputTokens: 65536
@@ -159,6 +181,9 @@ zenmux-vertex/gemini-3.1-pro:
   supportsVision: true
   supportsStreaming: true
   supportsCachedContent: true
+  reasoningEffort:
+    geminiThinkingConfig:
+      supported: true
   modalities: [audio, video, document]
   maxContextTokens: 1048576
   maxOutputTokens: 65536
@@ -230,6 +255,14 @@ zenmux-anthropic/claude-opus-4.8:
   jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
+  reasoningEffort:
+    anthropicOutputConfig:
+      supported: true
+      levels: [low, medium, high, xhigh, max]
+      map:
+        minimal: low
+    anthropicThinking:
+      supported: false
   modalities: [document]
   maxContextTokens: 1000000
   maxOutputTokens: 128000
@@ -238,6 +271,16 @@ zenmux-anthropic/claude-sonnet-4.6:
   jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
+  reasoningEffort:
+    anthropicOutputConfig:
+      supported: true
+      levels: [low, medium, high, max]
+      map:
+        minimal: low
+        xhigh: max
+    anthropicThinking:
+      supported: true
+      levels: [minimal, low, medium, high, xhigh, max]
   modalities: [document]
   maxContextTokens: 1000000
   maxOutputTokens: 128000
@@ -250,6 +293,12 @@ zenmux-anthropic/claude-haiku-4.5:
   jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
+  reasoningEffort:
+    anthropicOutputConfig:
+      supported: false
+    anthropicThinking:
+      supported: true
+      levels: [minimal, low, medium, high, xhigh, max]
   modalities: [document]
   maxContextTokens: 200000
   maxOutputTokens: 128000
@@ -267,6 +316,14 @@ anthropic/claude-opus-4-8:
   jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
+  reasoningEffort:
+    anthropicOutputConfig:
+      supported: true
+      levels: [low, medium, high, xhigh, max]
+      map:
+        minimal: low
+    anthropicThinking:
+      supported: false
   modalities: [document]
   maxContextTokens: 1000000
   maxOutputTokens: 128000
@@ -275,6 +332,16 @@ anthropic/claude-sonnet-4-6:
   jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
+  reasoningEffort:
+    anthropicOutputConfig:
+      supported: true
+      levels: [low, medium, high, max]
+      map:
+        minimal: low
+        xhigh: max
+    anthropicThinking:
+      supported: true
+      levels: [minimal, low, medium, high, xhigh, max]
   modalities: [document]
   maxContextTokens: 1000000
   maxOutputTokens: 128000
@@ -283,6 +350,14 @@ anthropic/claude-fable-5:
   jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
+  reasoningEffort:
+    anthropicOutputConfig:
+      supported: true
+      levels: [low, medium, high, xhigh, max]
+      map:
+        minimal: low
+    anthropicThinking:
+      supported: false
   modalities: [document]
   maxContextTokens: 1000000
   maxOutputTokens: 128000
@@ -291,6 +366,12 @@ anthropic/claude-haiku-4-5-20251001:
   jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
+  reasoningEffort:
+    anthropicOutputConfig:
+      supported: false
+    anthropicThinking:
+      supported: true
+      levels: [minimal, low, medium, high, xhigh, max]
   modalities: [document]
   maxContextTokens: 200000
   maxOutputTokens: 65536

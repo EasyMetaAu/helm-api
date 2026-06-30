@@ -8,6 +8,7 @@ import type {
 } from "@helm/core";
 import {
   anthropicNativeBodyRequiresSystemFold,
+  applyForcedAnthropicThinking,
   applyForcedReasoningToNativeBody,
   canUseNativePassthrough,
   checkCapability,
@@ -23,10 +24,12 @@ import {
 } from "@helm/core";
 import type {
   AttemptErrorDetail,
+  Capabilities,
   CatalogEntry,
   InternalRequest,
   NativePassthroughCarrier,
   Protocol,
+  ReasoningEffortWireCapability,
   TargetProviderProtocol,
 } from "@helm/shared";
 import {
@@ -535,6 +538,8 @@ function prepareNativeRequestForUpstream(
   // so the override beats the client even on the byte-passthrough path. undefined =>
   // body stays verbatim (default).
   forcedReasoningEffort: string | undefined,
+  caps: Capabilities | undefined,
+  requestReasoningEffort: string | undefined,
 ): NativePassthroughCarrier | Record<string, unknown> {
   if (nativeRequest === undefined) {
     throw new Error("native passthrough invoked without a native request");
@@ -626,6 +631,19 @@ function prepareNativeRequestForUpstream(
     }
   }
 
+  const policyMutations = carrier?.mutations ?? {};
+  const policyBody = applyReasoningEffortPolicy(
+    body,
+    protocol,
+    caps,
+    requestReasoningEffort,
+    policyMutations,
+  );
+  if (policyBody !== body) {
+    body = policyBody;
+    bodyChanged = true;
+  }
+
   if (streamReframed && mutations) mutations.stream_reframed = true;
 
   if (carrier === null) return body;
@@ -704,10 +722,6 @@ const ANTHROPIC_NATIVE_CONTEXT_LIMITS = [
   { pattern: /^claude-haiku-4[-.]5(?:-|$)/, maxContextTokens: 1_000_000 },
 ] as const;
 
-const ANTHROPIC_OUTPUT_EFFORTS = {
-  sonnet_4_6: new Set(["low", "medium", "high", "max"]),
-} as const;
-
 function bareAnthropicModelId(model: string): string {
   const slash = model.lastIndexOf("/");
   return (slash >= 0 ? model.slice(slash + 1) : model).toLowerCase();
@@ -738,23 +752,222 @@ function outputConfigEffort(value: unknown): string | null {
   return typeof effort === "string" && effort.length > 0 ? effort : null;
 }
 
-function anthropicOutputEffortSkipReason(
-  req: InternalRequest,
-  targetProviderProtocol: TargetProviderProtocol,
-  providerModel: string,
-): string | null {
-  if (targetProviderProtocol !== "anthropic_messages") return null;
-  const nativeBody = req.native_request ? nativePassthroughBody(req.native_request) : null;
-  const effort =
-    outputConfigEffort(nativeBody?.output_config) ??
-    outputConfigEffort(req.provider_raw?.output_config);
-  if (effort === null) return null;
+function outputConfigEffortFromReasoningEffort(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 && value !== "none" ? value : null;
+}
 
-  const bare = bareAnthropicModelId(providerModel);
-  if (/^claude-sonnet-4[-.]6(?:-|$)/.test(bare)) {
-    return ANTHROPIC_OUTPUT_EFFORTS.sonnet_4_6.has(effort) ? null : "unsupported_reasoning_effort";
+type ReasoningEffortPolicy = NonNullable<Capabilities["reasoningEffort"]>;
+
+type WireEffortDecision =
+  | { kind: "keep"; effort: string; mapped: boolean }
+  | { kind: "strip"; mapped: false };
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function decideWireEffort(
+  policy: ReasoningEffortWireCapability | undefined,
+  effort: string | null,
+): WireEffortDecision | null {
+  if (effort === null) return null;
+  if (effort === "none") return { kind: "strip", mapped: false };
+  if (policy === undefined) return null;
+  if (!policy.supported) return { kind: "strip", mapped: false };
+
+  const mapped = policy.map?.[effort] ?? effort;
+  if (policy.levels !== undefined && !(policy.levels as readonly string[]).includes(mapped)) {
+    return { kind: "strip", mapped: false };
   }
-  return null;
+  return { kind: "keep", effort: mapped, mapped: mapped !== effort };
+}
+
+function appendReasoningPolicyShim(
+  mutations: NativePassthroughCarrier["mutations"],
+  shim: string,
+): void {
+  appendMutationList(mutations, "body_shims_applied", [shim]);
+}
+
+function setObjectField(
+  body: Record<string, unknown>,
+  key: string,
+  value: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const next = { ...body };
+  if (value === undefined || Object.keys(value).length === 0) delete next[key];
+  else next[key] = value;
+  return next;
+}
+
+function applyOutputConfigEffort(
+  body: Record<string, unknown>,
+  decision: WireEffortDecision,
+): Record<string, unknown> {
+  const current = isPlainRecord(body.output_config) ? body.output_config : {};
+  const outputConfig = { ...current };
+  if (decision.kind === "keep") outputConfig.effort = decision.effort;
+  else delete outputConfig.effort;
+  return setObjectField(body, "output_config", outputConfig);
+}
+
+function stripReasoningEffort(body: Record<string, unknown>): Record<string, unknown> {
+  if (body.reasoning_effort === undefined) return body;
+  const next = { ...body };
+  delete next.reasoning_effort;
+  return next;
+}
+
+function openAIReasoningEffort(body: Record<string, unknown>): string | null {
+  if (!isPlainRecord(body.reasoning)) return null;
+  return nonEmptyString(body.reasoning.effort);
+}
+
+function applyOpenAIReasoningEffort(
+  body: Record<string, unknown>,
+  decision: WireEffortDecision,
+): Record<string, unknown> {
+  const current = isPlainRecord(body.reasoning) ? body.reasoning : {};
+  const reasoning = { ...current };
+  if (decision.kind === "keep") reasoning.effort = decision.effort;
+  else delete reasoning.effort;
+  return setObjectField(body, "reasoning", reasoning);
+}
+
+function applyOpenAIReasoningPolicy(
+  body: Record<string, unknown>,
+  policy: ReasoningEffortWireCapability | undefined,
+  mutations: NativePassthroughCarrier["mutations"],
+): Record<string, unknown> {
+  if (policy === undefined) return body;
+  const explicitReasoningEffort = openAIReasoningEffort(body);
+  const effort = explicitReasoningEffort ?? nonEmptyString(body.reasoning_effort);
+  const decision = decideWireEffort(policy, effort);
+  if (decision === null) return body;
+  if (decision.kind === "strip") {
+    appendReasoningPolicyShim(mutations, "reasoning_effort_stripped_for_model");
+    const next =
+      explicitReasoningEffort !== null ? applyOpenAIReasoningEffort(body, decision) : body;
+    return stripReasoningEffort(next);
+  }
+  if (decision.mapped) {
+    appendReasoningPolicyShim(mutations, "reasoning_effort_mapped_for_model");
+    const next =
+      explicitReasoningEffort !== null
+        ? applyOpenAIReasoningEffort(body, decision)
+        : { ...body, reasoning_effort: decision.effort };
+    return next;
+  }
+  return body;
+}
+
+function applyGeminiThinkingPolicy(
+  body: Record<string, unknown>,
+  policy: ReasoningEffortWireCapability | undefined,
+  mutations: NativePassthroughCarrier["mutations"],
+): Record<string, unknown> {
+  if (policy === undefined) return body;
+  let next = applyOpenAIReasoningPolicy(body, policy, mutations);
+  if (!policy.supported) {
+    const generationConfig = isPlainRecord(next.generationConfig)
+      ? { ...next.generationConfig }
+      : null;
+    if (generationConfig?.thinkingConfig !== undefined) {
+      delete generationConfig.thinkingConfig;
+      next = setObjectField(next, "generationConfig", generationConfig);
+      appendReasoningPolicyShim(mutations, "reasoning_effort_stripped_for_model");
+    }
+  }
+  return next;
+}
+
+function applyAnthropicReasoningPolicy(
+  body: Record<string, unknown>,
+  policy: ReasoningEffortPolicy,
+  fallbackReasoningEffort: string | undefined,
+  mutations: NativePassthroughCarrier["mutations"],
+): Record<string, unknown> {
+  const outputPolicy = policy.anthropicOutputConfig;
+  const thinkingPolicy = policy.anthropicThinking;
+  if (outputPolicy === undefined && thinkingPolicy === undefined) return body;
+
+  let next = body;
+  const bodyReasoningEffort = nonEmptyString(next.reasoning_effort);
+  const explicitOutputEffort = outputConfigEffort(next.output_config);
+  const sourceEffort = bodyReasoningEffort ?? fallbackReasoningEffort ?? explicitOutputEffort;
+
+  if (outputPolicy !== undefined) {
+    const outputDecision = decideWireEffort(
+      outputPolicy,
+      explicitOutputEffort ?? outputConfigEffortFromReasoningEffort(sourceEffort),
+    );
+    if (outputDecision?.kind === "strip") {
+      next = applyOutputConfigEffort(next, outputDecision);
+      appendReasoningPolicyShim(mutations, "reasoning_effort_stripped_for_model");
+    } else if (outputDecision?.kind === "keep") {
+      next = applyOutputConfigEffort(next, outputDecision);
+      if (outputDecision.mapped) {
+        appendReasoningPolicyShim(mutations, "reasoning_effort_mapped_for_model");
+      }
+    }
+  }
+
+  if (thinkingPolicy !== undefined) {
+    const thinkingDecision = decideWireEffort(thinkingPolicy, sourceEffort ?? null);
+    if (!thinkingPolicy.supported) {
+      let stripped = bodyReasoningEffort !== null || fallbackReasoningEffort !== undefined;
+      if (next.thinking !== undefined) {
+        next = { ...next };
+        delete next.thinking;
+        delete next.context_management;
+        stripped = true;
+      }
+      if (stripped) appendReasoningPolicyShim(mutations, "reasoning_effort_stripped_for_model");
+    } else if (thinkingDecision?.kind === "keep") {
+      next = applyForcedAnthropicThinking(next, thinkingDecision.effort);
+      if (thinkingDecision.mapped) {
+        appendReasoningPolicyShim(mutations, "reasoning_effort_mapped_for_model");
+      }
+    } else if (thinkingDecision?.kind === "strip" && next.thinking !== undefined) {
+      next = { ...next };
+      delete next.thinking;
+      delete next.context_management;
+      appendReasoningPolicyShim(mutations, "reasoning_effort_stripped_for_model");
+    }
+  }
+
+  // Once model-specific policy is active, make the requested tier concrete on the
+  // fields above. Leaving `reasoning_effort` would let provider adapters synthesize
+  // another unsupported provider-specific field after this guard.
+  if (bodyReasoningEffort !== null) {
+    next = stripReasoningEffort(next);
+  }
+  return next;
+}
+
+function applyReasoningEffortPolicy(
+  body: Record<string, unknown>,
+  targetProviderProtocol: TargetProviderProtocol,
+  caps: Capabilities | undefined,
+  fallbackReasoningEffort: string | undefined,
+  mutations: NativePassthroughCarrier["mutations"],
+): Record<string, unknown> {
+  const policy = caps?.reasoningEffort;
+  if (policy === undefined) return body;
+
+  switch (targetProviderProtocol) {
+    case "openai_chat":
+    case "openai_responses":
+      return applyOpenAIReasoningPolicy(body, policy.openaiReasoning, mutations);
+    case "gemini":
+      return applyGeminiThinkingPolicy(body, policy.geminiThinkingConfig, mutations);
+    case "anthropic_messages":
+      return applyAnthropicReasoningPolicy(body, policy, fallbackReasoningEffort, mutations);
+  }
 }
 
 function countTokensInputTokens(raw: unknown): number | null {
@@ -1011,17 +1224,6 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         continue;
       }
 
-      const effortSkip = anthropicOutputEffortSkipReason(
-        req,
-        target.targetProviderProtocol,
-        providerModel,
-      );
-      if (effortSkip !== null) {
-        capabilityPruned = true;
-        attempts.push(skipRow(alias, effortSkip, elapsed()));
-        continue;
-      }
-
       const exactContextLimit = effectiveContextLimit(catalogEntry, providerModel);
       if (
         target.targetProviderProtocol === "anthropic_messages" &&
@@ -1037,6 +1239,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             false,
             provider.nativeProtocolProfile,
             req.reasoning_effort_forced === true ? req.reasoning_effort : undefined,
+            caps,
+            req.reasoning_effort,
           );
           const countBody = { ...nativePassthroughBody(countInput) };
           delete countBody.stream;
@@ -1112,6 +1316,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             true,
             provider.nativeProtocolProfile,
             req.reasoning_effort_forced === true ? req.reasoning_effort : undefined,
+            caps,
+            req.reasoning_effort,
           );
           if (hasResponsesHistoryGap(req)) {
             const mutations = nativePassthroughMutations(passthroughBody);
@@ -1161,7 +1367,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           // Translate stream path (passthrough disabled): the existing byte-for-byte
           // forward. peekStream opens chatCompletionStream(stripInternal); the row
           // carries the (used:false) passthrough telemetry. No nativePassthrough marker.
-          const rendered = stripInternal(req, providerModel, target.targetProviderProtocol);
+          const rendered = stripInternal(req, providerModel, target.targetProviderProtocol, caps);
           attemptTelemetry = withRequestMutations(
             passthrough,
             mergeRequestMutations(
@@ -1232,6 +1438,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             false,
             provider.nativeProtocolProfile,
             req.reasoning_effort_forced === true ? req.reasoning_effort : undefined,
+            caps,
+            req.reasoning_effort,
           );
           if (hasResponsesHistoryGap(req)) {
             const mutations = nativePassthroughMutations(passthroughBody);
@@ -1259,7 +1467,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             upstreamRequest: capturedUpstream,
           };
         }
-        const bodyReq = stripInternal(req, providerModel, target.targetProviderProtocol);
+        const bodyReq = stripInternal(req, providerModel, target.targetProviderProtocol, caps);
         attemptTelemetry = withRequestMutations(passthrough, bodyReq.request_mutations);
         const body = await withAttemptDeadline(req.attempt_timeout_ms, signal, (attemptSignal) =>
           provider.chatCompletion(bodyReq.body, { signal: attemptSignal, captureUpstream }),
@@ -1614,6 +1822,7 @@ function stripInternal(
   req: InternalRequest,
   providerModel: string,
   targetProviderProtocol: TargetProviderProtocol,
+  caps: Capabilities | undefined,
 ): { body: Record<string, unknown>; request_mutations?: NativePassthroughCarrier["mutations"] } {
   const requestMutations: NativePassthroughCarrier["mutations"] = {};
   const openAICompatibleWire =
@@ -1679,10 +1888,17 @@ function stripInternal(
       req.stream_options && typeof req.stream_options === "object" ? req.stream_options : {};
     body.stream_options = { ...streamOptions, include_usage: true };
   }
+  const policyBody = applyReasoningEffortPolicy(
+    body,
+    targetProviderProtocol,
+    caps,
+    req.reasoning_effort,
+    requestMutations,
+  );
   const renderedBody =
     targetProviderProtocol === "openai_chat" || targetProviderProtocol === "openai_responses"
-      ? renderOpenAINativeBody(body)
-      : body;
+      ? renderOpenAINativeBody(policyBody)
+      : policyBody;
   return {
     body: renderedBody,
     ...(Object.keys(requestMutations).length > 0 ? { request_mutations: requestMutations } : {}),

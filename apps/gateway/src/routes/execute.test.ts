@@ -11,6 +11,7 @@ import {
   type CatalogEntry,
   createNativePassthroughCarrier,
   type InternalRequest,
+  type NativePassthroughCarrier,
   type TargetProviderProtocol,
 } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
@@ -912,11 +913,11 @@ describe("createExecute — gateway execution adapter", () => {
     expect(recordFailure).not.toHaveBeenCalled();
   });
 
-  it("skips Anthropic candidates whose output_config.effort is unsupported by the target model", async () => {
+  it("maps Anthropic output_config.effort through the target model policy instead of skipping", async () => {
     const provider = {
-      chatCompletion: vi.fn().mockResolvedValue({ id: "second" }),
+      chatCompletion: vi.fn().mockResolvedValue({ id: "sonnet" }),
       chatCompletionStream: vi.fn(),
-    } as unknown as ProviderClient;
+    } as unknown as ProviderClient & { chatCompletion: ReturnType<typeof vi.fn> };
     const execute = createExecute({
       defaultProvider: provider,
       providers: new Map([["mock", provider]]),
@@ -926,46 +927,106 @@ describe("createExecute — gateway execution adapter", () => {
           providerModel: "claude-sonnet-4-6",
           targetProviderProtocol: "anthropic_messages",
         },
-        codex: {
-          providerName: "mock",
-          providerModel: "gpt-5.5",
-          targetProviderProtocol: "openai_responses",
-        },
       }),
       breaker: breaker(),
-      catalog: new Map(),
+      catalog: new Map([
+        [
+          "sonnet",
+          entry("sonnet", {
+            reasoningEffort: {
+              anthropicOutputConfig: {
+                supported: true,
+                levels: ["low", "medium", "high", "max"],
+                map: { xhigh: "max" },
+              },
+              anthropicThinking: {
+                supported: true,
+                levels: ["minimal", "low", "medium", "high", "xhigh", "max"],
+              },
+            },
+          }),
+        ],
+      ]),
       now: clock(),
       signal: new AbortController().signal,
     });
 
-    const out = await execute(
-      plan(["sonnet", "codex"]),
-      req({
-        protocol: "anthropic_messages",
-        requested_model: "claude-sonnet-4-6",
-        provider_raw: { output_config: { effort: "xhigh" } },
-        native_request: createNativePassthroughCarrier({
-          protocol: "anthropic_messages",
-          body: {
-            model: "claude-sonnet-4-6",
-            messages: [{ role: "user", content: "hello" }],
-            output_config: { effort: "xhigh" },
-            max_tokens: 64,
-          },
-          headers: {},
-        }),
-      }),
-    );
+    const out = await execute(plan(["sonnet"]), req({ reasoning_effort: "xhigh" }));
 
     expect(out.final.status).toBe("ok");
     expect(provider.chatCompletion).toHaveBeenCalledOnce();
-    expect(out.attempts[0]).toMatchObject({
-      alias: "sonnet",
-      skipped: true,
-      skip_reason: "unsupported_reasoning_effort",
-      status: "error",
+    const body = provider.chatCompletion.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(body.output_config).toEqual({ effort: "max" });
+    expect(body.reasoning_effort).toBeUndefined();
+    expect((body.thinking as { type?: string } | undefined)?.type).toBe("enabled");
+    expect(out.attempts[0]).toMatchObject({ alias: "sonnet", skipped: false, status: "ok" });
+    expect(out.attempts[0]?.request_mutations).toMatchObject({
+      body_shims_applied: ["reasoning_effort_mapped_for_model"],
     });
-    expect(out.attempts[1]?.status).toBe("ok");
+  });
+
+  it("uses Anthropic Haiku and strips unsupported output_config.effort for that attempt", async () => {
+    const upstreamBodies: Array<Record<string, unknown>> = [];
+    const provider = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.test", apiKey: "sk-test" },
+      fetch: vi.fn(async (_url, init) => {
+        upstreamBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return new Response(
+          JSON.stringify({
+            id: "msg_1",
+            type: "message",
+            role: "assistant",
+            content: [{ type: "text", text: "ok" }],
+            stop_reason: "end_turn",
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }) as unknown as typeof fetch,
+    });
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        haiku: {
+          providerName: "anthro",
+          providerModel: "claude-haiku-4-5-20251001",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map([
+        [
+          "haiku",
+          entry("haiku", {
+            reasoningEffort: {
+              anthropicOutputConfig: { supported: false },
+              anthropicThinking: {
+                supported: true,
+                levels: ["minimal", "low", "medium", "high", "xhigh", "max"],
+              },
+            },
+          }),
+        ],
+      ]),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["haiku"]), req({ reasoning_effort: "medium" }));
+
+    expect(out.final).toEqual({
+      status: "ok",
+      alias: "haiku",
+      providerModel: "claude-haiku-4-5-20251001",
+    });
+    expect(upstreamBodies[0]?.output_config).toBeUndefined();
+    expect(upstreamBodies[0]?.reasoning_effort).toBeUndefined();
+    expect((upstreamBodies[0]?.thinking as { type?: string } | undefined)?.type).toBe("enabled");
+    expect(out.attempts[0]).toMatchObject({ alias: "haiku", skipped: false, status: "ok" });
+    expect(out.attempts[0]?.request_mutations).toMatchObject({
+      body_shims_applied: ["reasoning_effort_stripped_for_model"],
+    });
   });
 
   it("short-circuits the chain on an upstream request-shape 400 and surfaces it verbatim", async () => {
@@ -2246,6 +2307,80 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     expect(okRow?.provider_model).toBe("claude-x");
   });
 
+  it("native passthrough strips Anthropic effort when the target model does not support it", async () => {
+    const provider = anthropicProvider(NATIVE_RESP);
+    const haikuEntry: CatalogEntry = {
+      modelKey: "haiku",
+      capabilities: {
+        supportsTools: true,
+        jsonOutput: "schema",
+        supportsVision: true,
+        supportsStreaming: true,
+        reasoningEffort: {
+          anthropicOutputConfig: { supported: false },
+          anthropicThinking: {
+            supported: true,
+            levels: ["minimal", "low", "medium", "high", "xhigh", "max"],
+          },
+        },
+        maxContextTokens: 200000,
+        maxOutputTokens: 65536,
+      },
+      pricing: {
+        inputPerMTokUsd: null,
+        outputPerMTokUsd: null,
+        cacheReadPerMTokUsd: null,
+        cacheWritePerMTokUsd: null,
+      },
+      source: "generated",
+    };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        haiku: {
+          providerName: "anthro",
+          providerModel: "claude-haiku-4-5-20251001",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map([["haiku", haikuEntry]]),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(
+      plan(["haiku"]),
+      anthropicReq({
+        reasoning_effort: "medium",
+        native_request: createNativePassthroughCarrier({
+          protocol: "anthropic_messages",
+          body: {
+            model: "anthropic/claude-haiku-4-5-20251001",
+            max_tokens: 64,
+            messages: [{ role: "user", content: "hi" }],
+            output_config: { effort: "medium" },
+          },
+          headers: {},
+        }),
+      }),
+    );
+
+    const forwarded = provider.nativePassthrough.mock.calls[0]?.[0] as NativePassthroughCarrier;
+    expect(forwarded.body.output_config).toBeUndefined();
+    expect((forwarded.body.thinking as { type?: string } | undefined)?.type).toBe("enabled");
+    expect(forwarded.mutations).toMatchObject({
+      body_shims_applied: ["reasoning_effort_stripped_for_model"],
+    });
+    expect(out.final).toEqual({
+      status: "ok",
+      alias: "haiku",
+      providerModel: "claude-haiku-4-5-20251001",
+    });
+  });
+
   it("anthropic native body with an inline system turn DISABLES passthrough (folds via chatCompletion)", async () => {
     // Regression for request 81f3fa9e... on older/unknown models: Claude Code 2.1.175
     // emits the MCP-server instructions as a TRAILING system message ([user, system]).
@@ -3297,6 +3432,81 @@ describe("createExecute — native protocol passthrough (#217)", () => {
       background: true,
     });
     expect((forwarded.mutations as Record<string, unknown>).body_shims_applied).toBeUndefined();
+  });
+
+  it("native Responses passthrough strips unsupported reasoning.effort per model policy", async () => {
+    const responsesBody = {
+      id: "resp_generic",
+      object: "response",
+      status: "completed",
+      output: [],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const provider = {
+      nativeProtocolProfile: "generic_openai_responses",
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockResolvedValue(responsesBody),
+    } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
+    const entry: CatalogEntry = {
+      modelKey: "r",
+      capabilities: {
+        supportsTools: true,
+        jsonOutput: "schema",
+        supportsVision: true,
+        supportsStreaming: true,
+        reasoningEffort: {
+          openaiReasoning: { supported: true, levels: ["low", "medium", "high", "xhigh"] },
+        },
+        maxContextTokens: 272000,
+        maxOutputTokens: 128000,
+      },
+      pricing: {
+        inputPerMTokUsd: null,
+        outputPerMTokUsd: null,
+        cacheReadPerMTokUsd: null,
+        cacheWritePerMTokUsd: null,
+      },
+      source: "generated",
+    };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["openai", provider]]),
+      registry: protocolRegistry({
+        r: {
+          providerName: "openai",
+          providerModel: "gpt-5.5",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map([["r", entry]]),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const carrier = {
+      protocol: "openai_responses" as const,
+      body: {
+        model: "gpt-5.5",
+        input: "hi",
+        reasoning: { effort: "max", summary: "auto" },
+      },
+      headers: {},
+      mutations: {},
+    };
+
+    const out = await execute(
+      plan(["r"]),
+      req({ protocol: "openai_responses", native_request: carrier }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    const forwarded = provider.nativePassthrough.mock.calls[0]?.[0] as typeof carrier;
+    expect(forwarded.body.reasoning).toEqual({ summary: "auto" });
+    expect(forwarded.mutations).toMatchObject({
+      body_shims_applied: ["reasoning_effort_stripped_for_model"],
+    });
   });
 
   it("hoists a developer system item into Codex `instructions` on passthrough (pi-ai shape)", async () => {
