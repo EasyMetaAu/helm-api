@@ -32,11 +32,12 @@ function seedPreV26(): string {
   ins.run(27);
   // v28 alters memory_facts (+ FTS), absent from this oauth_quota-only fixture → pre-mark.
   ins.run(28);
-  // v30 alters telemetry and v31 alters api_keys; both are absent here → pre-mark.
+  // v30/v32 alter telemetry and v31 alters api_keys; both are absent here → pre-mark.
   // v29 (payload_blobs) is out of scope too.
   ins.run(29);
   ins.run(30);
   ins.run(31);
+  ins.run(32);
   raw.exec(`
     CREATE TABLE oauth_quota (
       provider_id TEXT NOT NULL,

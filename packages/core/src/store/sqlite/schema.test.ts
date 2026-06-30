@@ -66,11 +66,11 @@ describe("sqlite schema + migrations", () => {
       // pre-mark applied, out of scope.
       // v28 alters memory_facts (+ FTS); this memory_jobs-only fixture never creates
       // memory_facts → pre-mark applied (out of scope for this v14–v16 test).
-      // v30 alters telemetry and v31 alters api_keys; both tables are absent from
+      // v30/v32 alter telemetry and v31 alters api_keys; both tables are absent from
       // this memory_jobs-only fixture → pre-mark applied. v29 (payload_blobs CREATE)
       // has no dependency but is pre-marked too.
       // biome-ignore format: keep the version ledger on one readable line
-      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 28, 29, 30, 31])
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 28, 29, 30, 31, 32])
         rec.run(v, Date.now());
       const insert = seed.prepare(
         "INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -158,11 +158,95 @@ describe("sqlite schema + migrations", () => {
       "decision_json",
       "final_status",
       "cost_usd",
+      "latency_total_ms",
+      "prompt_tokens",
+      "completion_tokens",
+      "cached_tokens",
+      "cache_creation_tokens",
+      "served_model",
+      "generation_ms",
       "created_at",
     ]) {
       expect(telCols).toContain(c);
     }
+    const telemetryIndexes = raw
+      .prepare("PRAGMA index_list(telemetry)")
+      .all()
+      .map((idx) => (idx as { name: string }).name);
+    expect(telemetryIndexes).toContain("idx_telemetry_admin_window_cover");
+    expect(telemetryIndexes).toContain("idx_telemetry_admin_key_window_cover");
     raw.close();
+  });
+
+  it("v32 backfills telemetry latency and creates admin aggregate indexes", () => {
+    const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v32-"));
+    const path = join(dir, "helm.db");
+    try {
+      const seed = new Database(path);
+      seed.exec(
+        "CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);",
+      );
+      seed.exec(`
+        CREATE TABLE telemetry (
+          id TEXT PRIMARY KEY,
+          request_id TEXT NOT NULL UNIQUE,
+          api_key_id TEXT NOT NULL,
+          decision_json TEXT NOT NULL,
+          final_status TEXT,
+          cost_usd REAL,
+          prompt_tokens INTEGER,
+          completion_tokens INTEGER,
+          cached_tokens INTEGER,
+          cache_creation_tokens INTEGER,
+          served_model TEXT,
+          generation_ms INTEGER,
+          created_at INTEGER NOT NULL
+        );
+      `);
+      const rec = seed.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)");
+      for (let v = 1; v <= 31; v++) rec.run(v, Date.now());
+      seed
+        .prepare(
+          `INSERT INTO telemetry (
+            id, request_id, api_key_id, decision_json, final_status, cost_usd,
+            prompt_tokens, completion_tokens, cached_tokens, cache_creation_tokens,
+            served_model, generation_ms, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "t1",
+          "req_1",
+          "k1",
+          JSON.stringify({ latency_total_ms: 1234 }),
+          "ok",
+          0.01,
+          10,
+          2,
+          1,
+          0,
+          "gpt-4o",
+          500,
+          1000,
+        );
+      seed.close();
+
+      runMigrations(path);
+
+      const after = new Database(path);
+      const row = after
+        .prepare("SELECT latency_total_ms FROM telemetry WHERE request_id = ?")
+        .get("req_1") as { latency_total_ms: number };
+      expect(row.latency_total_ms).toBe(1234);
+      const telemetryIndexes = after
+        .prepare("PRAGMA index_list(telemetry)")
+        .all()
+        .map((idx) => (idx as { name: string }).name);
+      expect(telemetryIndexes).toContain("idx_telemetry_admin_window_cover");
+      expect(telemetryIndexes).toContain("idx_telemetry_admin_key_window_cover");
+      after.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("v6 rebuild relaxes cost_usd to REAL and preserves existing rows", () => {
@@ -279,8 +363,8 @@ describe("sqlite schema + migrations", () => {
       // api_keys-only fixture) → pre-mark applied.
       // v25 (telemetry.generation_ms): no telemetry table here → pre-mark applied.
       // v28 alters memory_facts (absent from this api_keys-only fixture) → pre-mark.
-      // v30 alters telemetry (absent here) → pre-mark; v29 (payload_blobs) pre-marked too.
-      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 18, 20, 21, 22, 24, 25, 28, 29, 30])
+      // v30/v32 alter telemetry (absent here) → pre-mark; v29 (payload_blobs) pre-marked too.
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 18, 20, 21, 22, 24, 25, 28, 29, 30, 32])
         rec.run(v, Date.now());
       seed
         .prepare(

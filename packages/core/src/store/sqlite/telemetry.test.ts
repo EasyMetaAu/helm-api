@@ -62,6 +62,26 @@ function freshStore() {
 }
 
 describe("SqliteTelemetryStore", () => {
+  it("denormalizes latency for dashboard aggregates instead of reading decision_json", async () => {
+    const db = createSqliteDb(":memory:");
+    const store = new SqliteTelemetryStore(db);
+    await store.insert({
+      decision: decision("req_1", { latency_total_ms: 1200 }),
+      apiKeyId: "k1",
+      createdAt: new Date(1000),
+    });
+
+    db.$sqlite
+      .prepare(
+        "UPDATE telemetry SET decision_json = json_set(decision_json, '$.latency_total_ms', 999999) WHERE request_id = ?",
+      )
+      .run("req_1");
+
+    const agg = await store.aggregate(0, 2000, "hour");
+    expect(agg.totals.avgLatencyMs).toBe(1200);
+    db.$sqlite.close();
+  });
+
   it("round-trips insert -> queryRecent without losing nested structure", async () => {
     const store = freshStore();
     const at = new Date(1717155600000);

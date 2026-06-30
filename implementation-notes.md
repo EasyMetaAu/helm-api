@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-07-01 · admin telemetry 聚合改为列化延迟 + 覆盖索引（Admin observability / store，docs/07/11，原则 7）
+
+- **背景（Lukin）**：生产 SQLite 数据库约 22GB，`/admin/api/stats` 在 7d/30d 窗口可跑到 100s+；由于 SQLite 适配器使用同步 `better-sqlite3`，这类长统计会阻塞 Node event loop，让其它管理端 API 看起来也一起卡住。
+- **根因**：`TelemetryStore.aggregate()` 的 totals 查询仍从 `decision_json` 里 `json_extract('$.latency_total_ms')` 计算平均延迟；在大窗口下这会强制逐行读 telemetry 大 JSON 并解析。series / byModel / usage 也依赖同一时间窗扫描，缺少覆盖索引时会回表读取更多页面。
+- **修复决策**：新增 `telemetry.latency_total_ms` 普通列，写入时从 `DecisionRecord.latency_total_ms` 列化；SQLite v32 / Postgres v31 对历史行从 JSON 回填该列，并把 aggregate 的 `AVG` 改为读普通列。
+- **索引决策**：新增两条管理端聚合覆盖索引：全局窗口以 `created_at` 开头，key 详情窗口以 `(api_key_id, created_at)` 开头，并覆盖 status/cost/tokens/cache/generation/model/key 字段。目标是让 dashboard 三个聚合 shape 尽量扫描窄索引页，减少 JSON 解析和回表。
+- **范围限制**：本次不改 admin 路由返回形状，也不引入物化日报表；先消除确认过的同步慢查询放大器。若未来 telemetry 增长到百万级以上，再考虑后台 rollup 表或异步 worker。
+- **验证**：新增 SQLite/PG 迁移回填测试、SQLite “篡改 decision_json 后 aggregate 仍读列化延迟”测试、跨适配器 aggregate 延迟契约；全量 `pnpm test` 4887/4887 绿，`pnpm typecheck`、`pnpm build` 绿。
+
 ## 2026-06-30 · admin favicon cache policy（Admin UI 静态资源，docs/11，原则 7）
 
 - **背景（Lukin）**：`/admin/favicon.svg` 与 `/admin/favicon.png` 在浏览器网络面板里表现很慢，但文件本身很小（SVG 664B、PNG 约 19KB）。实测问题不是图片体积，而是 admin 静态资源缓存策略把它们当作 SPA shell 处理。
@@ -23,20 +32,13 @@
 - **当前配置**：Codex/OpenAI entries 声明 `openaiReasoning` levels；Gemini entries 声明 `geminiThinkingConfig`；Anthropic Opus/Fable 使用 `anthropicOutputConfig` 并禁用 manual thinking；Sonnet 4.6 将 `xhigh -> max`；Haiku 4.5 删除 `output_config.effort`，但保留/合成 manual `thinking`。
 - **验证**：新增 translated + native passthrough regression：Sonnet `xhigh` 映射为 `output_config.effort=max` 且不 skip；Haiku `reasoning_effort=medium` 仍使用 Haiku，上游 body 无 `output_config` 且有 `thinking`；native passthrough 同样删除 unsupported `output_config.effort`。
 
-## 2026-06-30 · Anthropic `output_config.effort` 与 OpenAI `reasoning_effort` 双向保真（协议转换/执行 fallback，docs/05/04，原则 5/8）
-
-- **背景（Lukin）**：生产请求 `fb2fd618-edd6-4da3-8d9f-419e59c2dcb4` 显示 Anthropic 入站体带 `output_config:{"effort":"xhigh"}`，首个 Opus attempt 失败后 fallback 到 `openai-codex/gpt-5.5` 成功；但最终上游 GPT 请求没有 `reasoning` / `reasoning_effort`，只在 attempt mutation 里看到 `provider_raw_stripped_for_target:["context_management","output_config"]`。
-- **根因**：Anthropic adapter 只把 `output_config` 保存在 `provider_raw`，跨到 OpenAI/Responses 目标时该 provider-native 字段会被正确剥离；但剥离前没有把其中的 `effort` 提升到 IR 的跨协议字段 `reasoning_effort`，所以 GPT fallback 没有任何可映射的推理等级。
-- **修复决策**：`transformRequestOut` 保留 `provider_raw.output_config` 以维持 Anthropic round-trip，同时把 `output_config.effort` 通过 `IRReasoningEffortSchema` 规范化为 `IR.reasoning_effort`。这样 Anthropic/Opus → OpenAI Chat 目标继续发 `reasoning_effort`，Anthropic/Opus → OpenAI Responses/Codex 目标继续由 provider client 映射为 `reasoning.effort`。
-- **反向补齐**：GPT/OpenAI → Anthropic/Opus fallback 不能只发 `thinking.budget_tokens`；`transformRequestIn` 与订阅执行器 `openaiToAnthropicRequest` 在没有显式 `output_config` 时，会由 `reasoning_effort` 合成 `output_config:{effort}`。显式 Anthropic `output_config` 仍优先，避免覆盖客户端原生设置。
-- **范围限制**：只映射明确的“等级”字段 `output_config.effort`；不从 Anthropic `thinking.budget_tokens` 反推 effort，避免把预算数值猜成错误等级。`reasoning_effort:"none"` 不合成未知的 `output_config.effort=none`，仍通过不注入 thinking 保持禁用语义。缺省请求不注入任何 reasoning 字段，保持现有默认行为。
-- **验证**：新增 Anthropic adapter/provider 单测（有/无 effort、显式 output_config 优先）、executor 非流式与流式双向跨协议 fallback 测试，分别断言最终 GPT/Responses 上游 JSON 携带 `reasoning.effort`，最终 Anthropic/Opus 上游 JSON 携带 `output_config.effort`；`pnpm vitest run packages/core/src/protocol/anthropic/request.test.ts packages/core/src/provider/anthropic.test.ts apps/gateway/src/routes/execute.test.ts` 绿，发布前跑全量校验。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+- **2026-06-30 · Anthropic `output_config.effort` 与 OpenAI `reasoning_effort` 双向保真（协议转换/执行 fallback，docs/05/04，原则 5/8）**：Anthropic 入站 `output_config.effort` 提升到 IR `reasoning_effort`，OpenAI/Responses fallback 保留推理等级；反向 GPT/OpenAI→Anthropic 在无显式 output_config 时合成 `output_config.effort`；只映射等级字段，不从 `thinking.budget_tokens` 反推。
 
 - **2026-06-30 · Fast mode 账号强制覆盖 + API key 透传限制（OAuth subscription provider / key governance，docs/04/11，原则 2/5）**：账号级 `fastMode` 统一映射到 Codex `service_tier:"priority"` 与 Anthropic `speed:"fast"` + beta header，并强制覆盖 provider wire request；per-key `allow_fast_mode` 只治理客户端透传，不阻止账号级强制启用；UI 仅对支持 provider 展示。
 

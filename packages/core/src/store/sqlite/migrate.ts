@@ -689,6 +689,53 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE api_keys ADD COLUMN allow_fast_mode INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    // Admin dashboard aggregate hot path: /admin/api/stats was averaging
+    // json_extract(decision_json, '$.latency_total_ms') across the whole telemetry
+    // window. On production SQLite that forced table reads + JSON parsing for
+    // every dashboard load and blocked Node's synchronous better-sqlite3 thread.
+    // Denormalize the total latency and add covering indexes for the global and
+    // per-key aggregate windows so SUM/COUNT/GROUP BY can scan narrow index pages.
+    version: 32,
+    sql: `
+      ALTER TABLE telemetry ADD COLUMN latency_total_ms INTEGER;
+
+      UPDATE telemetry
+      SET latency_total_ms = CAST(json_extract(decision_json, '$.latency_total_ms') AS INTEGER)
+      WHERE latency_total_ms IS NULL
+        AND json_extract(decision_json, '$.latency_total_ms') IS NOT NULL;
+
+      CREATE INDEX IF NOT EXISTS idx_telemetry_admin_window_cover
+        ON telemetry (
+          created_at,
+          final_status,
+          cost_usd,
+          prompt_tokens,
+          completion_tokens,
+          cached_tokens,
+          cache_creation_tokens,
+          latency_total_ms,
+          generation_ms,
+          served_model,
+          api_key_id
+        );
+
+      CREATE INDEX IF NOT EXISTS idx_telemetry_admin_key_window_cover
+        ON telemetry (
+          api_key_id,
+          created_at,
+          final_status,
+          cost_usd,
+          prompt_tokens,
+          completion_tokens,
+          cached_tokens,
+          cache_creation_tokens,
+          latency_total_ms,
+          generation_ms,
+          served_model
+        );
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

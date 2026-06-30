@@ -668,6 +668,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(agg.totals.completionTokens).toBe(75); // 20+10+40+5
       expect(agg.totals.cachedTokens).toBe(80);
       expect(agg.totals.cacheCreationTokens).toBe(16);
+      expect(agg.totals.avgLatencyMs).toBe(1200);
 
       // Series: two day buckets, chronological, summed per day.
       expect(agg.series).toHaveLength(2);

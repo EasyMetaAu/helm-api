@@ -51,12 +51,10 @@ export const telemetry = sqliteTable("telemetry", {
   decisionJson: text("decision_json").notNull(), // JSON.stringify(DecisionRecord), redacted
   finalStatus: text("final_status"), // denormalized final.status for querying
   costUsd: real("cost_usd"), // nullable; REAL mirrors pg doublePrecision (no truncation)
-  // Dashboard token accounting (migration v22): denormalized served-completion
-  // token counts + served model for cheap SQL aggregation (SUM / GROUP BY) on the
-  // admin homepage. Nullable — NULL = pre-feature row / usage not measured
-  // (forward-only, no backfill). Counts come from DecisionRecord.usage (the
-  // gateway's post-served stamp); servedModel mirrors final.provider_model so the
-  // by-model breakdown is a plain GROUP BY without json_extract.
+  // Dashboard accounting: denormalized latency (migration v32), token counts
+  // (migration v22) + served model for cheap SQL aggregation on the admin
+  // homepage. Nullable — NULL = pre-feature row / usage not measured.
+  latencyTotalMs: integer("latency_total_ms"),
   promptTokens: integer("prompt_tokens"),
   completionTokens: integer("completion_tokens"),
   cachedTokens: integer("cached_tokens"),
