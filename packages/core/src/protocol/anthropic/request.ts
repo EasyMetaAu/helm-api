@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   type IRContentPart,
   type IRMessage,
+  IRReasoningEffortSchema,
   type IRRequest,
   IRRequestSchema,
   type IRToolCall,
@@ -455,6 +456,22 @@ function anthropicToolChoiceToIR(toolChoice: unknown): {
   return { tool_choice: toolChoice }; // unknown shape: keep verbatim
 }
 
+function outputConfigReasoningEffort(outputConfig: unknown): IRRequest["reasoning_effort"] {
+  if (outputConfig === null || typeof outputConfig !== "object" || Array.isArray(outputConfig)) {
+    return undefined;
+  }
+  const effort = (outputConfig as Record<string, unknown>).effort;
+  const parsed = IRReasoningEffortSchema.safeParse(effort);
+  return parsed.success ? parsed.data : undefined;
+}
+
+function outputConfigFromReasoningEffort(
+  effort: IRRequest["reasoning_effort"],
+): { effort: NonNullable<IRRequest["reasoning_effort"]> } | undefined {
+  if (effort === undefined || effort === "none") return undefined;
+  return { effort };
+}
+
 export function transformRequestOut(req: unknown): IRRequest {
   // fail-closed: a structurally invalid request never enters the pipeline.
   const parsed = AnthropicMessagesRequestSchema.parse(req);
@@ -594,6 +611,7 @@ export function transformRequestOut(req: unknown): IRRequest {
   if (parsed.output_config !== undefined) providerRaw.output_config = parsed.output_config;
 
   const toolChoiceIR = anthropicToolChoiceToIR(parsed.tool_choice);
+  const reasoningEffort = outputConfigReasoningEffort(parsed.output_config);
 
   const ir: IRRequest = {
     model: parsed.model,
@@ -617,6 +635,7 @@ export function transformRequestOut(req: unknown): IRRequest {
     ...(parsed.thinking !== undefined ? { thinking: parsed.thinking } : {}),
     ...(parsed.service_tier !== undefined ? { service_tier: parsed.service_tier } : {}),
     ...(parsed.cache_control !== undefined ? { cache_control: parsed.cache_control } : {}),
+    ...(reasoningEffort !== undefined ? { reasoning_effort: reasoningEffort } : {}),
     ...(Object.keys(providerRaw).length > 0 ? { provider_raw: providerRaw } : {}),
   };
 
@@ -1090,6 +1109,8 @@ export function transformRequestIn(ir: IRRequest): AnthropicOutboundRequest {
   // the outbound output_format drops Anthropic-unsupported constraint keywords.
   const outputFormat = responseFormatToOutputFormat(parsed.response_format);
   const thinking = thinkingFromIR(parsed);
+  const outputConfig =
+    parsed.provider_raw?.output_config ?? outputConfigFromReasoningEffort(parsed.reasoning_effort);
   const stopSequences = stopSequencesFromIR(parsed.stop);
 
   // NB: the tool-name reverse map is NOT emitted onto the outbound request wire (an
@@ -1137,9 +1158,7 @@ export function transformRequestIn(ir: IRRequest): AnthropicOutboundRequest {
       ? { container: parsed.provider_raw.container }
       : {}),
     ...(parsed.provider_raw?.speed !== undefined ? { speed: parsed.provider_raw.speed } : {}),
-    ...(parsed.provider_raw?.output_config !== undefined
-      ? { output_config: parsed.provider_raw.output_config }
-      : {}),
+    ...(outputConfig !== undefined ? { output_config: outputConfig } : {}),
   };
   return out;
 }

@@ -62,6 +62,27 @@ describe("openaiToAnthropicRequest", () => {
     expect(body.top_k).toBeUndefined();
   });
 
+  it("derives Anthropic output_config.effort from OpenAI reasoning_effort", () => {
+    const body = openaiToAnthropicRequest({
+      model: "claude-opus-4-8",
+      messages: [{ role: "user", content: "solve" }],
+      reasoning_effort: "xhigh",
+    } as unknown as Parameters<typeof openaiToAnthropicRequest>[0]);
+
+    expect(body.output_config).toEqual({ effort: "xhigh" });
+  });
+
+  it("keeps explicit Anthropic output_config over reasoning_effort-derived output_config", () => {
+    const body = openaiToAnthropicRequest({
+      model: "claude-opus-4-8",
+      messages: [{ role: "user", content: "solve" }],
+      reasoning_effort: "high",
+      output_config: { effort: "xhigh", verbosity: "normal" },
+    } as unknown as Parameters<typeof openaiToAnthropicRequest>[0]);
+
+    expect(body.output_config).toEqual({ effort: "xhigh", verbosity: "normal" });
+  });
+
   it("keeps an explicit client thinking block over a reasoning_effort-derived one", () => {
     const clientThinking = { type: "enabled", budget_tokens: 5000 };
     const body = openaiToAnthropicRequest({
