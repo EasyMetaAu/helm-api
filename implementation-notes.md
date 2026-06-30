@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-06-30 · Anthropic `output_config.effort` 与 OpenAI `reasoning_effort` 双向保真（协议转换/执行 fallback，docs/05/04，原则 5/8）
+
+- **背景（Lukin）**：生产请求 `fb2fd618-edd6-4da3-8d9f-419e59c2dcb4` 显示 Anthropic 入站体带 `output_config:{"effort":"xhigh"}`，首个 Opus attempt 失败后 fallback 到 `openai-codex/gpt-5.5` 成功；但最终上游 GPT 请求没有 `reasoning` / `reasoning_effort`，只在 attempt mutation 里看到 `provider_raw_stripped_for_target:["context_management","output_config"]`。
+- **根因**：Anthropic adapter 只把 `output_config` 保存在 `provider_raw`，跨到 OpenAI/Responses 目标时该 provider-native 字段会被正确剥离；但剥离前没有把其中的 `effort` 提升到 IR 的跨协议字段 `reasoning_effort`，所以 GPT fallback 没有任何可映射的推理等级。
+- **修复决策**：`transformRequestOut` 保留 `provider_raw.output_config` 以维持 Anthropic round-trip，同时把 `output_config.effort` 通过 `IRReasoningEffortSchema` 规范化为 `IR.reasoning_effort`。这样 Anthropic/Opus → OpenAI Chat 目标继续发 `reasoning_effort`，Anthropic/Opus → OpenAI Responses/Codex 目标继续由 provider client 映射为 `reasoning.effort`。
+- **反向补齐**：GPT/OpenAI → Anthropic/Opus fallback 不能只发 `thinking.budget_tokens`；`transformRequestIn` 与订阅执行器 `openaiToAnthropicRequest` 在没有显式 `output_config` 时，会由 `reasoning_effort` 合成 `output_config:{effort}`。显式 Anthropic `output_config` 仍优先，避免覆盖客户端原生设置。
+- **范围限制**：只映射明确的“等级”字段 `output_config.effort`；不从 Anthropic `thinking.budget_tokens` 反推 effort，避免把预算数值猜成错误等级。`reasoning_effort:"none"` 不合成未知的 `output_config.effort=none`，仍通过不注入 thinking 保持禁用语义。缺省请求不注入任何 reasoning 字段，保持现有默认行为。
+- **验证**：新增 Anthropic adapter/provider 单测（有/无 effort、显式 output_config 优先）、executor 非流式与流式双向跨协议 fallback 测试，分别断言最终 GPT/Responses 上游 JSON 携带 `reasoning.effort`，最终 Anthropic/Opus 上游 JSON 携带 `output_config.effort`；`pnpm vitest run packages/core/src/protocol/anthropic/request.test.ts packages/core/src/provider/anthropic.test.ts apps/gateway/src/routes/execute.test.ts` 绿，发布前跑全量校验。
+
 ## 2026-06-30 · Fast mode 账号强制覆盖 + API key 透传限制（OAuth subscription provider / key governance，docs/04/11，原则 2/5）
 
 - **背景（Lukin）**：ChatGPT/Codex 与 Claude 订阅账号都支持更快服务档位，但 Helm 不能做成全局 provider 开关；同一订阅池里每个账号的权益/成本/限额可能不同，必须让 operator 按账号单独启用。
@@ -24,19 +33,13 @@
 - **取舍/坑**：不会因为单纯看到 98% 就提前 park 正常账号；near-full 仅用于「已有 cooldown」的恢复推断。若未来上游出现多个同时 active 的窗口，本实现按产品预期取最近 reset，最坏情况是过早重试一次后由 429 再次 park。
 - **验证**：新增 core 纯函数测试（98% 5h、最近 reset、94% 忽略）、gateway `/oauth/quota` 延长 active cooldown 测试、admin providers 页截图形态回归测试（不再显示 0m），并覆盖 98% 但未 park 的健康账号不误报。发布前 `pnpm test` 317 文件/4844 测绿，`typecheck`/`svelte-check`/`biome`/`build` 绿；版本 bump 到 v0.22.27。
 
-## 2026-06-29 · OAuth 配额冷却 extend-only + refresh-429 归账号级（Codex review 跟进；provider 执行/池）
-
-- **背景**：v0.22.23 上线后让 Codex 复审，捞出两条 real-bug（均**非本次回归**，是更早就有的写入交互坑）。
-- **#1 配额冷却被 60s 覆盖**：Codex Responses 抛 429 前先经 `captureCodexQuota` 把**精确长 reset**（如周限）写进 `oauth_quota`+pool 成员；同一 429 随后命中 pool `parkRateLimitedAccount` 写 `now()+DEFAULT_429_COOLDOWN_MS`(60s)，`setUsageLimit` 无条件覆盖 → 账号本该停到远期却 60s 后重入、再 429、循环猛敲。**修复 = park 改 extend-only**：`parkRateLimitedAccount`（直接写成员处）与 server `applyUsageLimit`（三条 park 路径的汇聚点，新加 `OAuthPoolClient.getUsageLimit`）都取 `max(现存未来冷却, 候选)`；`null`（admin/auto reset 清除）仍直通。无论 captureCodexQuota / pool hook / executor 侧 channel 谁后写，长 reset 不被缩短。比较用**内存成员的权威值**（同步），无 store 读竞态。
-- **#2 refresh-429 漏判**：`TokenRefreshError(429)`（refresh 端点被限流）既不在 pool `isCredentialAccountFailure(400/401/403)` 也不在 `isRateLimitAccountFailure(UpstreamError 429)` → 不 park、冒泡后 `isAccountScopedFault` 也漏 → 一个账号的 refresh-429 仍能记 alias breaker。**修复**：pool `isRateLimitAccountFailure` 与 executor `isAccountScopedFault` 都纳入 `TokenRefreshError(429)`（两层仍对称）。
-- **Codex 同时确认无误**：无条件 `canAttempt/recordSuccess/recordAbort` 正确；`recordAbort` 只释放 half-open 不清计数；abort/queue-timeout 在 recordFailure 前已排除；null-status overload 计入 breaker 是对的（pool 先 sibling 重试，冒泡=全池救不了）。
-- **验证**：pool 新增 refresh-429 转 sibling、extend-only（精确长 reset 不被 60s 缩短、hook 透传 kept 值）；executor 新增 `isAccountScopedFault` 分类矩阵（含 `TokenRefreshError(429)`/null-status overload/abort/null）。trio 160 绿、四包 typecheck、biome、build 绿。凭据 401/403 仍永久 park 到 rebuild（本次未改）。发 v0.22.24。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+- **2026-06-29 · OAuth 配额冷却 extend-only + refresh-429 归账号级（Codex review 跟进；provider 执行/池）**：修复 Codex quota 精确长 reset 被 generic 60s 429 覆盖的问题（park/applyUsageLimit 改 extend-only，清除仍直通）；同时把 `TokenRefreshError(429)` 纳入 pool 与 executor 的账号级 rate-limit 分类，避免 refresh 限流污染 alias breaker。验证 pool/executor 矩阵、typecheck、biome、build 绿，发 v0.22.24。
 
 - **2026-06-29 · OAuth 单账号故障不再污染 alias 级熔断（provider 执行；docs/04，原则 5）**：OAuth pool 内部拦截账号级 `TokenRefreshError(400/401/403)`、上游 `401/403` 与 `429`，按账号 park/冷却并请求内 sibling 重试；executor 只对账号级故障跳过 alias breaker，整池 5xx/transport 故障仍记 breaker。验证 pool/executor/server OAuth 回归绿。
 

@@ -610,6 +610,30 @@ describe("anthropic transformRequestOut", () => {
     expect(ir.provider_raw?.output_config).toEqual({ effort: "medium" });
   });
 
+  it("maps Anthropic output_config.effort onto cross-provider reasoning_effort", () => {
+    const ir = transformRequestOut({
+      model: "claude-opus-4-8",
+      max_tokens: 64,
+      output_config: { effort: "xhigh" },
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    expect(ir.reasoning_effort).toBe("xhigh");
+    expect(ir.provider_raw?.output_config).toEqual({ effort: "xhigh" });
+  });
+
+  it("leaves reasoning_effort absent when Anthropic output_config has no effort", () => {
+    const ir = transformRequestOut({
+      model: "claude-opus-4-8",
+      max_tokens: 64,
+      output_config: { verbosity: "normal" },
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    expect(ir.reasoning_effort).toBeUndefined();
+    expect(ir.provider_raw?.output_config).toEqual({ verbosity: "normal" });
+  });
+
   it("preserves top-level cache_control for automatic prompt caching", () => {
     const ir = transformRequestOut({
       model: "claude-3-5-sonnet",
@@ -763,6 +787,25 @@ describe("anthropic transformRequestIn — P4 params", () => {
     });
     expect(out.thinking).toMatchObject({ type: "enabled" });
     expect((out.thinking as { budget_tokens?: number }).budget_tokens).toBeGreaterThan(0);
+  });
+
+  it("maps IR reasoning_effort onto Anthropic output_config.effort when no raw output_config exists", () => {
+    const out = transformRequestIn({
+      model: "claude-opus-4-8",
+      messages: [{ role: "user", content: "hi" }],
+      reasoning_effort: "xhigh",
+    });
+    expect(out.output_config).toEqual({ effort: "xhigh" });
+  });
+
+  it("keeps explicit Anthropic output_config over synthesized reasoning_effort", () => {
+    const out = transformRequestIn({
+      model: "claude-opus-4-8",
+      messages: [{ role: "user", content: "hi" }],
+      reasoning_effort: "high",
+      provider_raw: { output_config: { effort: "xhigh", verbosity: "normal" } },
+    });
+    expect(out.output_config).toEqual({ effort: "xhigh", verbosity: "normal" });
   });
 
   // order 9: budget must match litellm exactly (billing impact). Previously bloated

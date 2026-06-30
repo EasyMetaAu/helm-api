@@ -1173,6 +1173,12 @@ function claudeSessionIdFromBody(body: Record<string, unknown>): string | null {
   }
 }
 
+function outputConfigFromReasoningEffort(effort: unknown): { effort: string } | undefined {
+  return typeof effort === "string" && effort.length > 0 && effort !== "none"
+    ? { effort }
+    : undefined;
+}
+
 function toAnthropicMessages(messages: Array<Record<string, unknown>>): AnthropicMessage[] {
   const out: AnthropicMessage[] = [];
   const push = (message: AnthropicMessage): void => {
@@ -1290,7 +1296,8 @@ export function openaiToAnthropicRequest(
   if (r.mcp_servers !== undefined) body.mcp_servers = r.mcp_servers;
   if (r.container !== undefined) body.container = r.container;
   if (r.speed !== undefined) body.speed = r.speed;
-  if (r.output_config !== undefined) body.output_config = r.output_config;
+  const outputConfig = r.output_config ?? outputConfigFromReasoningEffort(r.reasoning_effort);
+  if (outputConfig !== undefined) body.output_config = outputConfig;
   if (r.stream === true) body.stream = true;
   if (typeof r.stop === "string") body.stop_sequences = [r.stop];
   else if (Array.isArray(r.stop)) body.stop_sequences = r.stop;
