@@ -79,6 +79,67 @@ describe("runPgMigrations — per-migration atomicity", () => {
     await db.$close();
   });
 
+  it("v31 backfills telemetry latency and creates admin aggregate indexes", async () => {
+    const client = new PGlite();
+    const db = Object.assign(drizzlePglite(client), { $close: () => client.close() });
+    await db.execute(
+      sql.raw("CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at BIGINT NOT NULL)"),
+    );
+    await db.execute(
+      sql.raw(`
+        CREATE TABLE telemetry (
+          id TEXT PRIMARY KEY,
+          request_id TEXT NOT NULL UNIQUE,
+          api_key_id TEXT NOT NULL,
+          decision_json JSONB NOT NULL,
+          final_status TEXT,
+          cost_usd DOUBLE PRECISION,
+          prompt_tokens INTEGER,
+          completion_tokens INTEGER,
+          cached_tokens INTEGER,
+          cache_creation_tokens INTEGER,
+          served_model TEXT,
+          generation_ms INTEGER,
+          created_at BIGINT NOT NULL
+        )
+      `),
+    );
+    for (let version = 1; version <= 30; version++) {
+      await db.execute(
+        sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),
+      );
+    }
+    await db.execute(
+      sql.raw(`
+        INSERT INTO telemetry (
+          id, request_id, api_key_id, decision_json, final_status, cost_usd,
+          prompt_tokens, completion_tokens, cached_tokens, cache_creation_tokens,
+          served_model, generation_ms, created_at
+        ) VALUES (
+          't1', 'req_1', 'k1', '{"latency_total_ms":1234}'::jsonb, 'ok', 0.01,
+          10, 2, 1, 0, 'gpt-4o', 500, 1000
+        )
+      `),
+    );
+
+    await expect(runPgMigrations(db)).resolves.toBeUndefined();
+
+    const row = (await db.execute(
+      sql.raw("SELECT latency_total_ms FROM telemetry WHERE request_id = 'req_1'"),
+    )) as { rows: Array<{ latency_total_ms: number }> };
+    expect(row.rows[0]?.latency_total_ms).toBe(1234);
+    const indexes = (await db.execute(
+      sql.raw("SELECT indexname FROM pg_indexes WHERE tablename = 'telemetry'"),
+    )) as { rows: Array<{ indexname: string }> };
+    expect(indexes.rows.map((r) => r.indexname)).toEqual(
+      expect.arrayContaining([
+        "idx_telemetry_admin_window_cover",
+        "idx_telemetry_admin_key_window_cover",
+      ]),
+    );
+    await db.$close();
+  });
+
   // docs/12 "Schema deltas" (P2) — the forgetting migration (sqlite v18 / pg
   // v17). Additive columns + the new account-scoped memory_facts table, mirrored
   // into the pg dialect per CLAUDE.md (dialect differences sealed in the adapter).
@@ -160,11 +221,10 @@ describe("runPgMigrations — per-migration atomicity", () => {
     // oauth_quota → pre-mark applied (out of scope).
     // v27 (pgvector + tsvector over memory_facts): this fixture never creates
     // memory_facts (+ no pgvector here) → pre-mark applied, out of scope.
-    // v29 (telemetry lane/decided_by generated columns): no telemetry table here →
-    // pre-mark applied; v30 alters api_keys (absent here). v28 (payload_blobs CREATE)
-    // is pre-marked too (out of scope).
+    // v29/v31 alter telemetry (absent here) → pre-mark applied; v30 alters api_keys
+    // (absent here). v28 (payload_blobs CREATE) is pre-marked too (out of scope).
     // biome-ignore format: keep the version ledger on one readable line
-    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 29, 30]) {
+    for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 29, 30, 31]) {
       await db.execute(
         sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),
       );
@@ -262,11 +322,11 @@ describe("runPgMigrations — per-migration atomicity", () => {
     // v26 (idx_memory_jobs_claim): no memory_jobs table in this messages fixture → pre-mark.
     // v27 (pgvector + tsvector over memory_facts): this messages fixture never creates
     // memory_facts (+ no pgvector here) → pre-mark applied, out of scope.
-    // v28 (payload_blobs), v29 (telemetry generated columns), and v30 (api_keys
-    // allow_fast_mode) are out of scope here too.
+    // v28 (payload_blobs), v29/v31 (telemetry generated/aggregate columns), and
+    // v30 (api_keys allow_fast_mode) are out of scope here too.
     for (const version of [
       1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25, 26, 27,
-      28, 29, 30,
+      28, 29, 30, 31,
     ]) {
       await db.execute(
         sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),

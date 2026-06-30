@@ -365,11 +365,12 @@ describe("sqlite v18 forgetting schema deltas", () => {
       rec.run(26, Date.now());
       // v27 indexes memory_jobs; this memory-only fixture never creates it → pre-mark.
       rec.run(27, Date.now());
-      // v30 alters telemetry and v31 alters api_keys; both are absent here → pre-mark.
+      // v30/v32 alter telemetry and v31 alters api_keys; both are absent here → pre-mark.
       // v29 (payload_blobs) is out of scope too.
       rec.run(29, Date.now());
       rec.run(30, Date.now());
       rec.run(31, Date.now());
+      rec.run(32, Date.now());
       seed.close();
 
       expect(() => runMigrations(path)).not.toThrow();

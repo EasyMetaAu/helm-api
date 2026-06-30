@@ -590,6 +590,50 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS allow_fast_mode BOOLEAN NOT NULL DEFAULT FALSE;
     `,
   },
+  {
+    // Admin dashboard aggregate hot path — pg mirror of sqlite v32. Store
+    // latency_total_ms as a real column so dashboard aggregates do not parse the
+    // decision_json blob/jsonb on every request, and add covering indexes for
+    // global and per-key aggregate windows.
+    version: 31,
+    sql: `
+      ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS latency_total_ms INTEGER;
+
+      UPDATE telemetry
+      SET latency_total_ms = ((decision_json ->> 'latency_total_ms')::DOUBLE PRECISION)::INTEGER
+      WHERE latency_total_ms IS NULL
+        AND jsonb_typeof(decision_json -> 'latency_total_ms') = 'number';
+
+      CREATE INDEX IF NOT EXISTS idx_telemetry_admin_window_cover
+        ON telemetry (created_at)
+        INCLUDE (
+          final_status,
+          cost_usd,
+          prompt_tokens,
+          completion_tokens,
+          cached_tokens,
+          cache_creation_tokens,
+          latency_total_ms,
+          generation_ms,
+          served_model,
+          api_key_id
+        );
+
+      CREATE INDEX IF NOT EXISTS idx_telemetry_admin_key_window_cover
+        ON telemetry (api_key_id, created_at)
+        INCLUDE (
+          final_status,
+          cost_usd,
+          prompt_tokens,
+          completion_tokens,
+          cached_tokens,
+          cache_creation_tokens,
+          latency_total_ms,
+          generation_ms,
+          served_model
+        );
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

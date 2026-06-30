@@ -49,8 +49,9 @@ export class SqliteTelemetryStore implements TelemetryStore {
       decisionJson: JSON.stringify(input.decision),
       finalStatus: input.decision.final.status,
       costUsd: finalCost,
-      // Denormalized token counts + served model (migration v22) for cheap
-      // aggregation. NULL when the gateway never stamped usage (forward-only).
+      // Denormalized dashboard fields for cheap aggregation. NULL when the
+      // gateway never stamped a field (forward-only / legacy rows).
+      latencyTotalMs: input.decision.latency_total_ms,
       promptTokens: usage?.prompt_tokens ?? null,
       completionTokens: usage?.completion_tokens ?? null,
       cachedTokens: usage?.cached_tokens ?? null,
@@ -214,9 +215,7 @@ export class SqliteTelemetryStore implements TelemetryStore {
         completionTokens: sql<number>`COALESCE(SUM(${telemetry.completionTokens}), 0)`,
         cachedTokens: sql<number>`COALESCE(SUM(${telemetry.cachedTokens}), 0)`,
         cacheCreationTokens: sql<number>`COALESCE(SUM(${telemetry.cacheCreationTokens}), 0)`,
-        avgLatencyMs: sql<
-          number | null
-        >`AVG(json_extract(${telemetry.decisionJson}, '$.latency_total_ms'))`,
+        avgLatencyMs: sql<number | null>`AVG(${telemetry.latencyTotalMs})`,
         // True-TPS aggregate ratio inputs. The CASE keeps numerator + denominator on
         // the SAME rows (streaming rows with a measured window, generation_ms > 0), so
         // a non-streaming completion never inflates the rate. The shaper divides them.
