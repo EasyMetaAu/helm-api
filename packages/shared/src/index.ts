@@ -22,6 +22,10 @@ export {
   type PricingOverride,
   PricingOverrideSchema,
   PricingSchema,
+  type ReasoningEffortCapability,
+  ReasoningEffortCapabilitySchema,
+  type ReasoningEffortWireCapability,
+  ReasoningEffortWireCapabilitySchema,
 } from "./catalog/schema.js";
 // Layer-2 eval output model (docs/03 §Task classification) — strict JSON the eval model
 // emits; validated as untrusted external input, fail-open on any failure.

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ReasoningEffortSchema } from "../config/lanes-schema.js";
 
 // Catalog metadata = per-model capabilities + pricing. Two layers:
 //   1. generated  — synced from LiteLLM's model_prices_and_context_window.json
@@ -15,6 +16,37 @@ import { z } from "zod";
 // request without them is unaffected; one WITH them gets an explicit skip reason).
 export const InputModalitySchema = z.enum(["audio", "video", "document"]);
 export type InputModality = z.infer<typeof InputModalitySchema>;
+
+// Per-model reasoning/effort wire compatibility. The router's normalized
+// `reasoning_effort` may become different provider fields per attempt
+// (`reasoning.effort`, Anthropic `output_config.effort`, Anthropic `thinking`,
+// Gemini `thinkingConfig`). Some models support only a subset of tiers, or only
+// one of those wire fields. Config declares that explicitly so the executor can
+// map or strip unsupported fields before the upstream call instead of hard-coding
+// model ids or burning avoidable 400s.
+export const ReasoningEffortWireCapabilitySchema = z
+  .strictObject({
+    supported: z.boolean(),
+    // If omitted with supported:true, every known Helm tier is accepted as-is.
+    levels: z.array(ReasoningEffortSchema).nonempty().optional(),
+    // Incoming Helm tier -> upstream-supported tier. Unknown keys are allowed so
+    // operators can bridge newly observed client tiers before Helm adds them.
+    map: z.record(z.string().min(1), ReasoningEffortSchema).optional(),
+  })
+  .strict();
+
+export const ReasoningEffortCapabilitySchema = z
+  .strictObject({
+    // OpenAI Chat `reasoning_effort` / Responses `reasoning.effort`.
+    openaiReasoning: ReasoningEffortWireCapabilitySchema.optional(),
+    // Anthropic adaptive thinking effort: `output_config: { effort }`.
+    anthropicOutputConfig: ReasoningEffortWireCapabilitySchema.optional(),
+    // Anthropic manual extended thinking: `thinking: { type, budget_tokens }`.
+    anthropicThinking: ReasoningEffortWireCapabilitySchema.optional(),
+    // Gemini `generationConfig.thinkingConfig`.
+    geminiThinkingConfig: ReasoningEffortWireCapabilitySchema.optional(),
+  })
+  .strict();
 
 export const CapabilitiesSchema = z.object({
   supportsTools: z.boolean(),
@@ -53,6 +85,7 @@ export const CapabilitiesSchema = z.object({
   // its provider via native passthrough (preserving responseModalities → inlineData)
   // instead of being swallowed by a `gemini-*flash*` glob onto a text lane.
   outputImage: z.boolean().optional(),
+  reasoningEffort: ReasoningEffortCapabilitySchema.optional(),
   maxContextTokens: z.number().int().nonnegative(),
   maxOutputTokens: z.number().int().nonnegative().nullable(),
 });
@@ -123,6 +156,8 @@ export const CapabilitiesOverrideSchema = z.record(
 );
 export const PricingOverrideSchema = z.record(z.string().min(1), PricingOverrideEntrySchema);
 
+export type ReasoningEffortWireCapability = z.infer<typeof ReasoningEffortWireCapabilitySchema>;
+export type ReasoningEffortCapability = z.infer<typeof ReasoningEffortCapabilitySchema>;
 export type Capabilities = z.infer<typeof CapabilitiesSchema>;
 export type Pricing = z.infer<typeof PricingSchema>;
 export type CatalogSource = z.infer<typeof CatalogSourceSchema>;
