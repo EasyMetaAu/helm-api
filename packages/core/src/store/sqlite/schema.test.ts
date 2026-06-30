@@ -66,10 +66,11 @@ describe("sqlite schema + migrations", () => {
       // pre-mark applied, out of scope.
       // v28 alters memory_facts (+ FTS); this memory_jobs-only fixture never creates
       // memory_facts → pre-mark applied (out of scope for this v14–v16 test).
-      // v30 alters telemetry (absent from this memory_jobs-only fixture) → pre-mark
-      // applied; v29 (payload_blobs CREATE) has no dependency but pre-marked too.
+      // v30 alters telemetry and v31 alters api_keys; both tables are absent from
+      // this memory_jobs-only fixture → pre-mark applied. v29 (payload_blobs CREATE)
+      // has no dependency but is pre-marked too.
       // biome-ignore format: keep the version ledger on one readable line
-      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 28, 29, 30])
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 28, 29, 30, 31])
         rec.run(v, Date.now());
       const insert = seed.prepare(
         "INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -141,6 +142,7 @@ describe("sqlite schema + migrations", () => {
       "role",
       "allowed_lanes",
       "allow_custom_model",
+      "allow_fast_mode",
       "disabled",
       "created_at",
     ]) {

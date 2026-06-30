@@ -101,6 +101,8 @@ export interface OAuthAdminStatus {
     // Codex only: auto-consume a reset credit when the weekly window saturates
     // (default false). Folded in so the providers page can pre-fill the reset dialog.
     autoReset: boolean;
+    // Per-account Fast mode, folded in so the providers page can inline-edit it.
+    fastMode: boolean;
     // The account's egress proxy, REDACTED (principle 7: never the password, only
     // `hasPassword`) — or null for a direct connection. Folded into the list from the
     // SAME already-loaded settings blob as priority/schedulable, so the providers page
@@ -187,6 +189,7 @@ export interface OAuthAdminAccess {
     priority?: number;
     schedulable?: boolean;
     autoReset?: boolean;
+    fastMode?: boolean;
   }): Promise<void>;
   // Pull the Anthropic OAuth usage endpoint for one account → quota windows
   // (providers page Tier 3). Claude exposes a dedicated usage endpoint, so this is
@@ -233,6 +236,8 @@ export interface AccountScheduleView {
   schedulable: boolean;
   // Codex only: auto-consume a reset credit when the weekly window saturates.
   autoReset: boolean;
+  // Per-account Fast mode.
+  fastMode: boolean;
 }
 
 // Redacted proxy projection for the admin read path: the password is NEVER echoed,
@@ -404,6 +409,7 @@ export interface KeySummary {
   name: string | null;
   allowed_lanes: string[] | null;
   allow_custom_model: boolean;
+  allow_fast_mode: boolean;
   disabled: boolean;
   // Per-key rate-limit override (docs/06). null = inherit the system default; a
   // number (0 = unlimited) overrides that dimension. Surfaced so the admin UI can

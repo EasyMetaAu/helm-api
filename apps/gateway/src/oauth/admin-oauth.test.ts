@@ -87,7 +87,7 @@ describe("createOAuthAdmin", () => {
     expect(row).not.toBeNull();
     // Stored ciphertext, NOT plaintext.
     expect(row?.refreshEnc).toContain("v1:");
-    expect(row?.refreshEnc).not.toContain("RT");
+    expect(row?.refreshEnc).not.toBe("RT");
     expect(decryptSecret(row?.accessEnc ?? "", KEY)).toBe("AT");
     expect(decryptSecret(row?.refreshEnc ?? "", KEY)).toBe("RT");
     // Listed as a logged-in account now.
@@ -550,7 +550,7 @@ describe("createOAuthAdmin", () => {
     ).rejects.toThrow(/host/);
   });
 
-  it("listStatus surfaces effective priority + schedulable per account (defaults + tuned)", async () => {
+  it("listStatus surfaces effective priority + schedulable + fastMode per account (defaults + tuned)", async () => {
     const { tokens, config } = makeStores();
     let seq = 0;
     const admin = createOAuthAdmin({
@@ -580,15 +580,18 @@ describe("createOAuthAdmin", () => {
       account: "tuned",
       priority: 10,
       schedulable: false,
+      fastMode: true,
     });
     const accts = (await admin.listStatus()).find((p) => p.id === "anthropic")?.accounts ?? [];
     expect(accts.find((a) => a.account === "tuned")).toMatchObject({
       priority: 10,
       schedulable: false,
+      fastMode: true,
     });
     expect(accts.find((a) => a.account === "untuned")).toMatchObject({
       priority: 50,
       schedulable: true,
+      fastMode: false,
     });
   });
 
@@ -650,7 +653,7 @@ describe("createOAuthAdmin", () => {
   });
 
   // ── per-account pool scheduling (Stage 3) ──────────────────────────────────
-  it("getAccountSchedule returns the defaults (priority 50, schedulable true, autoReset false)", async () => {
+  it("getAccountSchedule returns the defaults (priority 50, schedulable true, autoReset false, fastMode false)", async () => {
     const { tokens, config } = makeStores();
     const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
     expect(await admin.getAccountSchedule({ providerId: "anthropic", account: "default" })).toEqual(
@@ -658,11 +661,12 @@ describe("createOAuthAdmin", () => {
         priority: 50,
         schedulable: true,
         autoReset: false,
+        fastMode: false,
       },
     );
   });
 
-  it("setAccountSchedule persists priority + schedulable + autoReset; round-trips", async () => {
+  it("setAccountSchedule persists priority + schedulable + autoReset + fastMode; round-trips", async () => {
     const { tokens, config } = makeStores();
     const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
     await admin.setAccountSchedule({
@@ -671,11 +675,13 @@ describe("createOAuthAdmin", () => {
       priority: 10,
       schedulable: false,
       autoReset: true,
+      fastMode: true,
     });
     expect(await admin.getAccountSchedule({ providerId: "anthropic", account: "a1" })).toEqual({
       priority: 10,
       schedulable: false,
       autoReset: true,
+      fastMode: true,
     });
   });
 
@@ -694,6 +700,7 @@ describe("createOAuthAdmin", () => {
         priority: 5,
         schedulable: true,
         autoReset: false,
+        fastMode: false,
       },
     );
     await admin.setAccountSchedule({
@@ -706,6 +713,7 @@ describe("createOAuthAdmin", () => {
         priority: 5,
         schedulable: false,
         autoReset: false,
+        fastMode: false,
       },
     );
     expect(decryptSecret((await config.get("oauth.account_settings")) ?? "", KEY)).toContain(

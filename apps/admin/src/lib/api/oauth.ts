@@ -21,6 +21,9 @@ export interface OAuthAccount {
   // Codex only: auto-consume a reset credit when the weekly window saturates
   // (default false). Lets the providers page pre-fill the reset-confirm checkbox.
   autoReset?: boolean;
+  // Per-account Fast mode. Claude accounts force speed=fast; Codex accounts force
+  // service_tier=priority when this account serves a request.
+  fastMode?: boolean;
   // The account's egress proxy, REDACTED (never the password — only `hasPassword`),
   // or null for a direct connection. Folded onto the row by the gateway so the list
   // shows which proxy each account tunnels through without the per-account GET the
@@ -422,9 +425,11 @@ export interface AccountSchedule {
   schedulable: boolean;
   // Codex only: auto-consume a reset credit when the weekly window saturates.
   autoReset: boolean;
+  // Per-account Fast mode.
+  fastMode: boolean;
 }
 
-// GET /oauth/:provider/account?account= -> { priority, schedulable, autoReset } (defaults applied).
+// GET /oauth/:provider/account?account= -> { priority, schedulable, autoReset, fastMode }.
 export async function getAccountSchedule(
   provider: string,
   account = 'default',
@@ -435,12 +440,12 @@ export async function getAccountSchedule(
   return asJson(res);
 }
 
-// PUT /oauth/:provider/account { account, priority?, schedulable?, autoReset? } -> 204.
+// PUT /oauth/:provider/account { account, priority?, schedulable?, autoReset?, fastMode? } -> 204.
 // Any field may be omitted to leave it unchanged.
 export async function setAccountSchedule(
   provider: string,
   account: string,
-  patch: { priority?: number; schedulable?: boolean; autoReset?: boolean },
+  patch: { priority?: number; schedulable?: boolean; autoReset?: boolean; fastMode?: boolean },
 ): Promise<void> {
   const res = await fetch(`${BASE}/${provider}/account`, {
     method: 'PUT',

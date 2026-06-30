@@ -680,6 +680,15 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_telemetry_decided_by ON telemetry (decided_by);
     `,
   },
+  {
+    // Per-key Fast-mode passthrough cap (docs/06): additive boolean default false.
+    // This controls only CLIENT-requested Fast fields; account-level Fast mode lives
+    // in OAuth account settings and still forces Fast regardless of the key cap.
+    version: 31,
+    sql: `
+      ALTER TABLE api_keys ADD COLUMN allow_fast_mode INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {

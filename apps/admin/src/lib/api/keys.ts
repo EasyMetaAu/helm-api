@@ -21,6 +21,7 @@ export interface ApiKeyView {
   name: string | null; // human-readable label; null = unnamed (cosmetic only)
   allowed_lanes: string[] | null; // lane whitelist (empty/null = any lane)
   allow_custom_model: boolean; // explicit client-model passthrough
+  allow_fast_mode: boolean; // explicit client-requested Fast mode passthrough
   disabled: boolean; // revoked state (soft)
   rate_limit_rpm: number | null; // per-key RPM override; null = inherit system default
   rate_limit_tpm: number | null; // per-key TPM override; null = inherit system default
@@ -52,6 +53,7 @@ export interface CreateKeyInput {
   name?: string;
   allowed_lanes?: string[];
   allow_custom_model?: boolean;
+  allow_fast_mode?: boolean;
   // Optional per-key rate limits at mint time. Omitted => inherit the system
   // default. 0 => explicitly unlimited for that dimension.
   rate_limit_rpm?: number;
@@ -83,6 +85,7 @@ export interface UpdateKeyInput {
   name?: string | null;
   allowed_lanes?: string[] | null;
   allow_custom_model?: boolean;
+  allow_fast_mode?: boolean;
   rate_limit_rpm?: number | null;
   rate_limit_tpm?: number | null;
   budget_requests?: number | null;
@@ -167,6 +170,7 @@ function normalizeView(raw: Record<string, unknown>): ApiKeyView {
     name: typeof raw.name === 'string' && raw.name.trim().length > 0 ? raw.name.trim() : null,
     allowed_lanes: Array.isArray(allowed) ? allowed.map(String) : null,
     allow_custom_model: raw.allow_custom_model === true,
+    allow_fast_mode: raw.allow_fast_mode === true,
     disabled: raw.disabled === true,
     // null/absent = inherit system default; a finite number (incl. 0) = override.
     rate_limit_rpm: typeof raw.rate_limit_rpm === 'number' ? raw.rate_limit_rpm : null,
@@ -198,6 +202,9 @@ function toServerBody(input: CreateKeyInput): Record<string, unknown> {
   }
   if (input.allow_custom_model !== undefined) {
     out.allow_custom_model = input.allow_custom_model;
+  }
+  if (input.allow_fast_mode !== undefined) {
+    out.allow_fast_mode = input.allow_fast_mode;
   }
   // Send rate limits only when set (0 is meaningful = unlimited, so check undefined).
   if (input.rate_limit_rpm !== undefined) out.rate_limit_rpm = input.rate_limit_rpm;

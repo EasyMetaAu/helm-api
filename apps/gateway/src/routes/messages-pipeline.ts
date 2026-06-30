@@ -31,6 +31,7 @@ import {
 } from "@helm/shared";
 import type { ServingAccount } from "../runtime/serving-account.js";
 import type { WriteQueue } from "../runtime/write-queue.js";
+import { downgradeClientFastModeIfDisallowed } from "./fast-mode.js";
 import { copyLiteLLMRequestParams, providerRawFromRequest } from "./internal-request-params.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
 import {
@@ -656,7 +657,10 @@ export function createMessagesPipeline(
       if (!Array.isArray(ir.messages) || ir.messages.length === 0) {
         throw new PipelineError("invalid_request", "messages must be a non-empty array", traceId);
       }
-      const internal = toInternalRequest(ir, identity, traceId, protocol);
+      const internal = downgradeClientFastModeIfDisallowed(
+        toInternalRequest(ir, identity, traceId, protocol),
+        identity.caps?.allowFastMode === true,
+      );
       const originalMessagesForMemory = [...(internal.messages as IRMessage[])];
 
       // Memory scope rides ir.metadata, already stamped by the route from the

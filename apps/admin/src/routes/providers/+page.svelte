@@ -295,6 +295,24 @@
     }
   }
 
+  async function toggleFastMode(
+    providerId: string,
+    account: string,
+    fastMode: boolean,
+  ): Promise<void> {
+    const k = keyOf(providerId, account);
+    savingSchedule = { ...savingSchedule, [k]: true };
+    error = null;
+    try {
+      await setAccountSchedule(providerId, account, { fastMode });
+      await invalidateAll();
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t('Failed to update Fast mode');
+    } finally {
+      savingSchedule = { ...savingSchedule, [k]: false };
+    }
+  }
+
   // "Reset usage": clear the auto-park cooldown so the account rejoins the pool on the
   // next request. Cooldown-only — the operator's schedulable park is untouched. On
   // success invalidateAll re-reads the (now-cleared) snapshot so the pill disappears.
@@ -452,6 +470,7 @@
             <th class="px-3 py-2">{$t('Quota')}</th>
             <th class="px-3 py-2">{$t('Priority')}</th>
             <th class="px-3 py-2">{$t('Schedulable')}</th>
+            <th class="px-3 py-2">{$t('Fast')}</th>
             <th class="px-3 py-2">{$t('Expires')}</th>
             <th class="px-3 py-2"></th>
           </tr>
@@ -463,6 +482,7 @@
             {@const quota = quotaByKey.get(k)}
             {@const saving = savingSchedule[k] === true}
             {@const isCodex = row.provider.id === 'openai-codex'}
+            {@const supportsFast = row.provider.id === 'anthropic' || row.provider.id === 'openai-codex'}
             {@const codexCredits = isCodex ? (quota?.resetCredits ?? null) : null}
             {@const usageLimit = usageLimitStatus(quota)}
             {@const usageLimitRecovery = usageLimit ? autoRecoverIn(usageLimit.untilMs) : ''}
@@ -621,6 +641,27 @@
                       e.currentTarget.checked,
                     )}
                 />
+              </td>
+
+              <!-- Fast mode (per-account upstream override) -->
+              <td data-label={$t('Fast')} class="px-3 py-3">
+                {#if supportsFast}
+                  <input
+                    type="checkbox"
+                    class="h-5 w-5 disabled:opacity-50 md:h-4 md:w-4"
+                    checked={row.account.fastMode ?? false}
+                    disabled={saving}
+                    aria-label={$t('Fast mode')}
+                    onchange={(e) =>
+                      toggleFastMode(
+                        row.provider.id,
+                        row.account.account,
+                        e.currentTarget.checked,
+                      )}
+                  />
+                {:else}
+                  <span class="text-xs text-ink-muted">—</span>
+                {/if}
               </td>
 
               <!-- Token expiry -->

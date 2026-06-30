@@ -29,6 +29,7 @@ export class PgKeyStore implements KeyStore {
       name: input.name ?? null,
       allowedLanes: input.allowedLanes ?? null,
       allowCustomModel: input.allowCustomModel ?? false,
+      allowFastMode: input.allowFastMode ?? false,
       disabled: false,
       // Per-key rate-limit override: undefined input => NULL => inherit system default.
       rateLimitRpm: input.rateLimitRpm ?? null,
@@ -103,6 +104,7 @@ export class PgKeyStore implements KeyStore {
         | "name"
         | "allowedLanes"
         | "allowCustomModel"
+        | "allowFastMode"
         | "rateLimitRpm"
         | "rateLimitTpm"
         | "budgetRequests"
@@ -122,6 +124,7 @@ export class PgKeyStore implements KeyStore {
     // Native jsonb: assign the array (or null = no cap) directly, no stringify.
     if (patch.allowedLanes !== undefined) set.allowedLanes = patch.allowedLanes;
     if (patch.allowCustomModel !== undefined) set.allowCustomModel = patch.allowCustomModel;
+    if (patch.allowFastMode !== undefined) set.allowFastMode = patch.allowFastMode;
     if (patch.rateLimitRpm !== undefined) set.rateLimitRpm = patch.rateLimitRpm;
     if (patch.rateLimitTpm !== undefined) set.rateLimitTpm = patch.rateLimitTpm;
     if (patch.budgetRequests !== undefined) set.budgetRequests = patch.budgetRequests;
@@ -159,6 +162,7 @@ export class PgKeyStore implements KeyStore {
       name: row.name ?? null,
       allowed_lanes: row.allowedLanes ?? null,
       allow_custom_model: row.allowCustomModel,
+      allow_fast_mode: row.allowFastMode,
       disabled: row.disabled,
       rate_limit_rpm: row.rateLimitRpm ?? null,
       rate_limit_tpm: row.rateLimitTpm ?? null,

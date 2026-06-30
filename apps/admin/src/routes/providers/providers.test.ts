@@ -41,6 +41,7 @@ function provider(overrides: Partial<OAuthProviderStatus> = {}): OAuthProviderSt
         healthy: true,
         priority: 10,
         schedulable: true,
+        fastMode: false,
         // Redacted egress proxy (password never crosses) + effective routable models,
         // both folded onto the row by the gateway — the two new list columns.
         proxy: { type: 'socks5', host: '10.0.0.1', port: 1080, hasPassword: true },
@@ -120,6 +121,7 @@ describe('providers page', () => {
     expect(within(row).getByText('74%')).toBeInTheDocument();
     expect(within(row).getByDisplayValue('10')).toBeInTheDocument();
     expect(within(row).getByRole('checkbox', { name: /schedulable/i })).toBeChecked();
+    expect(within(row).getByRole('checkbox', { name: /fast mode/i })).not.toBeChecked();
     // Proxy column: the redacted egress hop, compact "type · host:port".
     expect(within(row).getByText('socks5 · 10.0.0.1:1080')).toBeInTheDocument();
     // Models column: each effective model as a pill (3 ≤ cap, so all show, no "+N").
@@ -297,6 +299,22 @@ describe('providers page', () => {
     expect(invalidateAllMock).toHaveBeenCalledTimes(1);
   });
 
+  it('toggles per-account Fast mode through the scheduling endpoint', async () => {
+    renderPage();
+    const checkbox = within(screen.getByTestId('provider-account-row')).getByRole('checkbox', {
+      name: /fast mode/i,
+    });
+
+    await fireEvent.click(checkbox);
+
+    await waitFor(() =>
+      expect(setAccountSchedule).toHaveBeenCalledWith('anthropic', 'acct-claude', {
+        fastMode: true,
+      }),
+    );
+    expect(invalidateAllMock).toHaveBeenCalledTimes(1);
+  });
+
   it('opens the Test dialog seeded with the account’s routable models', async () => {
     renderPage();
     const row = screen.getByTestId('provider-account-row');
@@ -369,6 +387,7 @@ describe('providers page', () => {
               priority: 50,
               schedulable: true,
               autoReset,
+              fastMode: false,
               proxy: null,
               models: ['gpt-5.5'],
             },

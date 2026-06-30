@@ -106,6 +106,23 @@ describe("account-settings", () => {
     });
   });
 
+  it("round-trips the per-account fastMode flag and merges it independently", async () => {
+    const config = makeConfig();
+    await setAccountSettings(config, KEY, "anthropic", "work", { fastMode: true });
+    expect(getAccountSettings(await loadAccountSettings(config, KEY), "anthropic", "work")).toEqual(
+      { fastMode: true },
+    );
+
+    await setAccountSettings(config, KEY, "anthropic", "work", { priority: 7 });
+    await setAccountSettings(config, KEY, "anthropic", "work", { fastMode: false });
+    expect(getAccountSettings(await loadAccountSettings(config, KEY), "anthropic", "work")).toEqual(
+      {
+        priority: 7,
+        fastMode: false,
+      },
+    );
+  });
+
   it("serializes concurrent load-merge-save updates so unrelated accounts are preserved", async () => {
     const config = new DelayedFirstSetConfig();
     const first = setAccountSettings(config, KEY, "anthropic", "work", {

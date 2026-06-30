@@ -36,6 +36,7 @@ import { INTERNAL_API_KEY_ID } from "../internal-key.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
 import type { ServingAccount } from "../runtime/serving-account.js";
 import type { WriteQueue } from "../runtime/write-queue.js";
+import { downgradeClientFastModeIfDisallowed } from "./fast-mode.js";
 import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.js";
 import { copyLiteLLMRequestParams, providerRawFromRequest } from "./internal-request-params.js";
 import { type MemoryKeyDefaults, resolveMemoryScope } from "./memory-scope.js";
@@ -222,6 +223,7 @@ interface ChatIdentity {
   userId: string | null;
   caps: {
     allowCustomModel: boolean;
+    allowFastMode?: boolean;
     allowedLanes?: string[] | null;
     budget?: BudgetCaps;
     /** Per-key memory defaults (issue #97); absent = memory off unless headers say otherwise. */
@@ -469,7 +471,8 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       },
     });
 
-    const internal = toInternalRequest(body, traceId, identity, sessionKey, memoryScope);
+    let internal = toInternalRequest(body, traceId, identity, sessionKey, memoryScope);
+    internal = downgradeClientFastModeIfDisallowed(internal, identity.caps.allowFastMode);
     // Per-candidate attempt timeout: a slow head model times out and the executor falls
     // back to the next candidate (instead of waiting out the global 90s connect timeout).
     // Honored ONLY from the trusted INTERNAL key — the classifier eval / memory self-HTTP

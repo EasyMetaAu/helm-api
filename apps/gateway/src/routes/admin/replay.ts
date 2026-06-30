@@ -16,6 +16,7 @@ import {
 } from "@helm/shared";
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
+import { downgradeClientFastModeIfDisallowed } from "../fast-mode.js";
 import { copyLiteLLMRequestParams, providerRawFromRequest } from "../internal-request-params.js";
 import type { MessagesIdentity, PipelineRunResult } from "../messages.js";
 import { createMessagesPipeline, PipelineError } from "../messages-pipeline.js";
@@ -203,7 +204,10 @@ async function replayOpenAIChat(
     const where = issue?.path.length ? `${issue.path.join(".")}: ` : "";
     return { ok: false, status: 400, error: `${where}${issue?.message ?? "invalid request body"}` };
   }
-  const internal = buildInternal(parsed.data, traceId, key);
+  const internal = downgradeClientFastModeIfDisallowed(
+    buildInternal(parsed.data, traceId, key),
+    key.allow_fast_mode,
+  );
   const result = await deps.replay.route(
     internal,
     {
@@ -340,7 +344,11 @@ async function replayViaPipeline(
     keyPrefix: key.prefix,
     // Faithful routing caps; NO budget block → the pipeline's budget gate/settle
     // is a no-op (it is also unwired below), so the replay never charges usage.
-    caps: { allowCustomModel: key.allow_custom_model, allowedLanes: key.allowed_lanes },
+    caps: {
+      allowCustomModel: key.allow_custom_model,
+      allowFastMode: key.allow_fast_mode,
+      allowedLanes: key.allowed_lanes,
+    },
   };
 
   // The SAME routing core as the live face — but with NO memory / budget /

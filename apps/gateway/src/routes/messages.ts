@@ -44,6 +44,9 @@ export interface MessagesIdentity {
     rateLimit?: { rpm: number | null; tpm: number | null };
     /** Per-key max in-flight requests (issue #93). null/absent = unlimited. */
     concurrencyLimit?: number | null;
+    /** Per-key cap for client-requested Fast mode passthrough. Account-level Fast
+     *  mode can still be forced by subscription account settings. */
+    allowFastMode?: boolean;
     /** Per-key usage budgets (docs/06), read by the pipeline's budget gate/settle.
      *  Absent = no budgets on this face. */
     budget?: BudgetCaps;

@@ -381,6 +381,7 @@ function buildOAuthAccountClient(
   account: string,
   oauthCtx: OAuthRuntimeCtx,
   proxy: ProxyConfig | undefined,
+  fastMode: boolean,
   base: { baseUrl: string; timeoutMs: number },
   onResponseMeta?: (headers: Headers) => void,
 ): ProviderClient | null {
@@ -414,6 +415,7 @@ function buildOAuthAccountClient(
     proxy,
     identity,
     onResponseMeta,
+    fastMode,
   );
 }
 
@@ -543,6 +545,7 @@ export async function synthesizeOAuthProviders(
         account,
         oauthCtx,
         proxy,
+        s.fastMode === true,
         { baseUrl: fallbackBaseUrl, timeoutMs },
         onResponseMeta,
       );
@@ -633,6 +636,14 @@ export function resolveProviderProxy(
   if (!p.oauth || !isOAuthPreset(p.oauth)) return undefined;
   const proxy = getAccountSettings(accountSettings, p.oauth.provider, p.oauth.account).proxy;
   return proxy ? (proxy as ProxyConfig) : undefined;
+}
+
+function resolveProviderFastMode(
+  p: ProviderConfigShared,
+  accountSettings: AccountSettingsMap,
+): boolean {
+  if (!p.oauth || !isOAuthPreset(p.oauth)) return false;
+  return getAccountSettings(accountSettings, p.oauth.provider, p.oauth.account).fastMode === true;
 }
 
 function isAnthropicPresetOAuth(p: ProviderConfigShared): boolean {
@@ -777,10 +788,14 @@ export function buildProviderClients(
   const clients = new Map<string, ProviderClient>();
   for (const p of providers) {
     const proxy = resolveProviderProxy(p, accountSettings);
+    const fastMode = resolveProviderFastMode(p, accountSettings);
     const cred = buildCredential(p, oauthCtx, proxy);
     if (!cred) continue; // no credential → cannot build a client; skip.
     const baseUrl = p.base_url ?? fallbackBaseUrl;
-    clients.set(p.name, createProviderClient(p, { baseUrl, timeoutMs }, cred, proxy));
+    clients.set(
+      p.name,
+      createProviderClient(p, { baseUrl, timeoutMs }, cred, proxy, undefined, undefined, fastMode),
+    );
   }
   return clients;
 }
@@ -806,6 +821,9 @@ function createProviderClient(
   // client uses it today (its `x-codex-*` rate-limit windows are PUSHed on every
   // reply); bound per-account by synthesis so the scrape knows which subscription.
   onResponseMeta?: (headers: Headers) => void,
+  // Per-account Fast mode for OAuth subscription providers. The provider client
+  // forces the corresponding upstream request field when this account serves a call.
+  fastMode = false,
 ): ProviderClient {
   // One proxy fetch per client (the executor keeps one client per account, so the
   // undici dispatcher is pooled per account). Built ONCE here, not per request.
@@ -817,6 +835,7 @@ function createProviderClient(
         ...cred,
         metadataUserId: identity?.metadataUserId,
         claudeCliFingerprintMode: p.claude_cli_fingerprint_mode,
+        fastMode,
       },
       fetch: providerFetch,
     });
@@ -826,7 +845,7 @@ function createProviderClient(
   // the dynamic OAuth header; a static key never drives this path.
   if (p.type === "openai-responses" && "getAuthHeader" in cred) {
     return createCodexResponsesClient({
-      config: { ...base, ...cred, sessionId: identity?.sessionId, onResponseMeta },
+      config: { ...base, ...cred, sessionId: identity?.sessionId, onResponseMeta, fastMode },
       fetch: providerFetch,
     });
   }
@@ -2145,7 +2164,8 @@ export async function buildServer(
             { oauth: { provider: providerId, account } } as unknown as ProviderConfigShared,
             acctSettings,
           );
-          return buildOAuthAccountClient(providerId, account, ctx, proxy, {
+          const fastMode = getAccountSettings(acctSettings, providerId, account).fastMode === true;
+          return buildOAuthAccountClient(providerId, account, ctx, proxy, fastMode, {
             baseUrl: synthBaseUrl,
             timeoutMs,
           });
@@ -2302,6 +2322,7 @@ export async function buildServer(
           caps: {
             allowedLanes: record.allowed_lanes,
             allowCustomModel: record.allow_custom_model,
+            allowFastMode: record.allow_fast_mode,
             // Per-key rate-limit override (docs/06): carried so the self-auth
             // /v1/messages + /v1/responses paths enforce per-key limits too, not
             // just the OpenAI chat middleware.
@@ -2472,6 +2493,7 @@ export async function buildServer(
           caps: {
             allowedLanes: record.allowed_lanes,
             allowCustomModel: record.allow_custom_model,
+            allowFastMode: record.allow_fast_mode,
             // Per-key rate-limit override (docs/06): carried so the self-auth
             // /v1/messages + /v1/responses paths enforce per-key limits too, not
             // just the OpenAI chat middleware.
@@ -2566,6 +2588,7 @@ export async function buildServer(
       caps: {
         allowedLanes: record.allowed_lanes,
         allowCustomModel: record.allow_custom_model,
+        allowFastMode: record.allow_fast_mode,
         rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
         // Per-key max in-flight (issue #93): read by the concurrency gate.
         concurrencyLimit: record.concurrency_limit,

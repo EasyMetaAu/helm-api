@@ -18,6 +18,7 @@ describe("SqliteKeyStore", () => {
       role: "user",
       allowedLanes: ["economy", "balanced"],
       allowCustomModel: true,
+      allowFastMode: true,
     });
     const got = await store.getByHash("sha256_h1");
     expect(got).not.toBeNull();
@@ -29,6 +30,7 @@ describe("SqliteKeyStore", () => {
       role: "user",
       allowed_lanes: ["economy", "balanced"],
       allow_custom_model: true,
+      allow_fast_mode: true,
       disabled: false,
     });
   });
@@ -208,7 +210,7 @@ describe("SqliteKeyStore", () => {
     expect(got?.rate_limit_tpm).toBeNull();
   });
 
-  it("updateKey edits caps: allowed_lanes, allow_custom_model (set + clear)", async () => {
+  it("updateKey edits caps: allowed_lanes, allow_custom_model, allow_fast_mode (set + clear)", async () => {
     const store = freshStore();
     await store.createKey({
       keyId: "k1",
@@ -221,10 +223,12 @@ describe("SqliteKeyStore", () => {
     await store.updateKey("k1", {
       allowedLanes: ["economy", "balanced"],
       allowCustomModel: true,
+      allowFastMode: true,
     });
     let got = await store.getByHash("h1");
     expect(got?.allowed_lanes).toEqual(["economy", "balanced"]);
     expect(got?.allow_custom_model).toBe(true);
+    expect(got?.allow_fast_mode).toBe(true);
     // an unrelated column (rate limit) is left untouched
     expect(got?.rate_limit_rpm).toBe(7);
     // role is never written by updateKey
@@ -234,6 +238,7 @@ describe("SqliteKeyStore", () => {
     got = await store.getByHash("h1");
     expect(got?.allowed_lanes).toBeNull();
     expect(got?.allow_custom_model).toBe(true);
+    expect(got?.allow_fast_mode).toBe(true);
   });
 
   it("updateKey is PARTIAL: an omitted field is left untouched", async () => {

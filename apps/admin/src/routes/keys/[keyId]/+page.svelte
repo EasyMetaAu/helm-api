@@ -219,6 +219,10 @@
         <dd class="mt-0.5 text-ink-body">{key.allow_custom_model ? $t('yes') : $t('no')}</dd>
       </div>
       <div>
+        <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Fast mode')}</dt>
+        <dd class="mt-0.5 text-ink-body">{key.allow_fast_mode ? $t('yes') : $t('no')}</dd>
+      </div>
+      <div>
         <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Rate limit')}</dt>
         <dd class="mt-0.5 text-ink-body">
           {$t('RPM')}: {limitLabel(key.rate_limit_rpm)} · {$t('TPM')}: {limitLabel(

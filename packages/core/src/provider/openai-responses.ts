@@ -17,7 +17,12 @@
 // ⚠️ ToS: reverse-engineered first-party Codex client; the operator opts in (issue
 // #38 README disclaimer). Request/SSE shapes + identity ported from openclaw (MIT).
 
-import { isNativePassthroughCarrier, type NativePassthroughInput } from "@helm/shared";
+import {
+  appendMutationList,
+  cloneCarrierWithBody,
+  isNativePassthroughCarrier,
+  type NativePassthroughInput,
+} from "@helm/shared";
 import { prepareNativePassthroughRequest } from "./native-passthrough.js";
 import {
   type ChatCompletionRequest,
@@ -43,6 +48,10 @@ export interface CodexResponsesClientConfig {
   // Overrides the default Codex-client User-Agent (openclaw proves a custom UA is
   // accepted by the backend; the real first-party value is not required).
   userAgent?: string;
+  // Per-account Fast mode for ChatGPT/Codex subscription traffic. When enabled the
+  // account forces OpenAI Responses `service_tier: "priority"` on every request it
+  // serves, including native passthrough bodies that already supplied another tier.
+  fastMode?: boolean;
   // Response-metadata hook (providers page Tier 3 quota). Invoked with the upstream
   // response Headers AS SOON AS they resolve — BEFORE any SSE chunk is read — so the
   // caller can scrape the `x-codex-*` rate-limit window headers without buffering or
@@ -76,6 +85,7 @@ const ORIGINATOR = "helm"; // matches the OAuth login `originator` (openai-codex
 // ChatGPT-account model allowlist is gated by the account's Codex ENTITLEMENT, not by
 // originator/UA/body — impersonating codex_cli_rs changed nothing.)
 const DEFAULT_USER_AGENT = "helm-codex/1.0.0";
+const CODEX_FAST_SERVICE_TIER = "priority";
 
 const RESPONSES_REASONING_DELTA_TYPES = new Set([
   "response.reasoning_summary.delta",
@@ -540,6 +550,16 @@ function withTimeout(timeoutMs: number, external?: AbortSignal) {
   };
 }
 
+function forceCodexFastMode(input: NativePassthroughInput): NativePassthroughInput {
+  const body = isNativePassthroughCarrier(input) ? input.body : input;
+  if (body.service_tier === CODEX_FAST_SERVICE_TIER) return input;
+  const next = { ...body, service_tier: CODEX_FAST_SERVICE_TIER };
+  if (!isNativePassthroughCarrier(input)) return next;
+  const carrier = cloneCarrierWithBody(input, next);
+  appendMutationList(carrier.mutations, "body_shims_applied", ["codex_fast_mode"]);
+  return carrier;
+}
+
 export function createCodexResponsesClient(deps: CodexResponsesClientDeps): ProviderClient {
   const doFetch = deps.fetch ?? globalThis.fetch;
   const cfg = deps.config;
@@ -601,14 +621,15 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     external?: AbortSignal,
     capture?: (wireBody: string) => void,
   ): Promise<Response> {
+    const wireInput = cfg.fastMode === true ? forceCodexFastMode(input) : input;
     const providerHeaders = await headers();
-    if (isNativePassthroughCarrier(input) && cfg.userAgent === undefined) {
-      const hasClientUserAgent = Object.keys(input.headers).some(
+    if (isNativePassthroughCarrier(wireInput) && cfg.userAgent === undefined) {
+      const hasClientUserAgent = Object.keys(wireInput.headers).some(
         (name) => name.toLowerCase() === "user-agent",
       );
       if (hasClientUserAgent) delete providerHeaders["User-Agent"];
     }
-    const prepared = prepareNativePassthroughRequest(input, providerHeaders, {
+    const prepared = prepareNativePassthroughRequest(wireInput, providerHeaders, {
       mergeHeaders: ["openai-beta"],
     });
     // The exact Responses-native bytes POSTed upstream (translate path: OpenAI→Responses

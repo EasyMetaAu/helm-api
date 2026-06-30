@@ -42,6 +42,9 @@ export const ApiKeyRecordSchema = z.object({
   // Per-key caps (docs/06): present-but-nullable so the storage shape is explicit.
   allowed_lanes: z.array(z.string()).nullable(),
   allow_custom_model: z.boolean(),
+  // Per-key Fast-mode passthrough cap. false = client-requested Fast is downgraded
+  // unless the serving subscription account itself has Fast mode forced on.
+  allow_fast_mode: z.boolean().default(false),
   disabled: z.boolean(),
   // Per-key rate-limit overrides (docs/06). NULL = inherit the system default
   // (runtime setting rate_limit_default_{rpm,tpm}); a number overrides that ONE
@@ -115,6 +118,7 @@ export const CreateKeyRequestSchema = z
     name: KeyNameSchema.optional(),
     allowed_lanes: z.array(z.string().min(1)).optional(),
     allow_custom_model: z.boolean().optional(),
+    allow_fast_mode: z.boolean().optional(),
     // Optional per-key rate limits at mint time. Omitted => inherit the system
     // default. 0 => explicitly unlimited for that dimension (Principle 2 fail-closed on
     // a negative/non-int value).
@@ -152,13 +156,15 @@ export type CreateKeyRequest = z.infer<typeof CreateKeyRequestSchema>;
 //   - allowed_lanes:        null = remove the whitelist.
 //   - rate_limit_{rpm,tpm}: null = inherit the system default; a number sets an
 //     explicit override (0 = unlimited for that dimension).
-// allow_custom_model is a plain boolean (not nullable): present = set, omit = leave.
+// allow_custom_model / allow_fast_mode are plain booleans (not nullable): present
+// = set, omit = leave.
 export const UpdateKeyRequestSchema = z
   .object({
     // Rename a key after mint. Omit = leave unchanged; null = clear back to unnamed.
     name: KeyNameSchema.nullable().optional(),
     allowed_lanes: z.array(z.string().min(1)).nullable().optional(),
     allow_custom_model: z.boolean().optional(),
+    allow_fast_mode: z.boolean().optional(),
     rate_limit_rpm: z.number().int().nonnegative().nullable().optional(),
     rate_limit_tpm: z.number().int().nonnegative().nullable().optional(),
     // Budget edits (docs/06). Omit = leave unchanged; null = clear the cap (no cap);

@@ -26,6 +26,7 @@ function keyRecord(over: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
     name: null,
     allowed_lanes: null,
     allow_custom_model: false,
+    allow_fast_mode: false,
     disabled: false,
     rate_limit_rpm: null,
     rate_limit_tpm: null,
@@ -377,6 +378,38 @@ describe("POST /v1/chat/completions (routing pipeline)", () => {
     const plan = harness.execute.mock.calls[0]?.[0] as ExecutionPlan;
     expect(plan.selected_lane).toBe("balanced");
     expect(harness.log).toHaveBeenCalledOnce();
+  });
+
+  it("downgrades client-requested Fast mode when the API key disallows it", async () => {
+    const { deps: d, harness } = deps();
+    harness.execute.mockResolvedValue(nonStreamOutcome({ ok: true }));
+    const app = buildApp(d);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...NONSTREAM_BODY, service_tier: "priority" }),
+    });
+
+    expect(res.status).toBe(200);
+    const internal = harness.execute.mock.calls[0]?.[1] as InternalRequest;
+    expect(internal.service_tier).toBe("default");
+  });
+
+  it("preserves client-requested Fast mode when the API key allows it", async () => {
+    const { deps: d, harness } = deps();
+    harness.execute.mockResolvedValue(nonStreamOutcome({ ok: true }));
+    const app = buildApp(d, { record: { allow_fast_mode: true } });
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...NONSTREAM_BODY, service_tier: "priority" }),
+    });
+
+    expect(res.status).toBe(200);
+    const internal = harness.execute.mock.calls[0]?.[1] as InternalRequest;
+    expect(internal.service_tier).toBe("priority");
   });
 
   it("accepts the LiteLLM-compatible /chat/completions alias", async () => {

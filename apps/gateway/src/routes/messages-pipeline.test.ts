@@ -1,8 +1,10 @@
 import type { ExecutionResult, InjectDeps, ObserveDeps, RouteOptions } from "@helm/core";
 import {
+  createNativePassthroughCarrier,
   type InternalRequest,
   type MemoryMessageInput,
   makeHelmError,
+  type NativePassthroughCarrier,
   type Protocol,
 } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
@@ -152,7 +154,7 @@ describe("createMessagesPipeline — streamIR protocol branch", () => {
     const pipeline = createMessagesPipeline(route, "openai_responses");
     const run = await pipeline.run(
       irOf({ stream: true, metadata: { trace_id: "trace-1", responses_stream_id: "resp_route" } }),
-      IDENTITY,
+      { ...IDENTITY, caps: { allowFastMode: true } },
       new AbortController().signal,
     );
     const events: Array<Record<string, unknown>> = [];
@@ -269,6 +271,92 @@ describe("createMessagesPipeline — failure surfaces", () => {
       allowedLanes: null,
       degradeLane: null,
     });
+  });
+
+  it("downgrades Anthropic client Fast mode when the API key disallows passthrough", async () => {
+    let sawReq: InternalRequest | null = null;
+    const route: RouteFn = async (req) => {
+      sawReq = req;
+      return okResult({ id: "x" });
+    };
+    const pipeline = createMessagesPipeline(route);
+    const native = createNativePassthroughCarrier({
+      protocol: "anthropic_messages",
+      body: { model: "claude-opus-4-8", messages: [], speed: "fast" },
+      rawBody: '{"speed":"fast"}',
+      headers: {},
+    });
+
+    await pipeline.run(
+      irOf({ speed: "fast", metadata: { trace_id: "trace-1", native_request: native } }),
+      { keyId: "k1", accountId: "acct", caps: { allowFastMode: false } },
+      new AbortController().signal,
+    );
+
+    expect(sawReq).not.toBeNull();
+    const req = sawReq as unknown as InternalRequest;
+    expect(req.provider_raw?.speed).toBe("standard");
+    const carrier = req.native_request as NativePassthroughCarrier;
+    expect(carrier.body.speed).toBe("standard");
+    expect(carrier.raw_body).toBeUndefined();
+    expect(carrier.mutations.body_shims_applied).toEqual(["client_fast_speed_downgraded"]);
+  });
+
+  it("preserves Anthropic client Fast mode when the API key allows passthrough", async () => {
+    let sawReq: InternalRequest | null = null;
+    const route: RouteFn = async (req) => {
+      sawReq = req;
+      return okResult({ id: "x" });
+    };
+    const pipeline = createMessagesPipeline(route);
+    const native = createNativePassthroughCarrier({
+      protocol: "anthropic_messages",
+      body: { model: "claude-opus-4-8", messages: [], speed: "fast" },
+      rawBody: '{"speed":"fast"}',
+      headers: {},
+    });
+
+    await pipeline.run(
+      irOf({ speed: "fast", metadata: { trace_id: "trace-1", native_request: native } }),
+      { keyId: "k1", accountId: "acct", caps: { allowFastMode: true } },
+      new AbortController().signal,
+    );
+
+    expect(sawReq).not.toBeNull();
+    const req = sawReq as unknown as InternalRequest;
+    expect(req.provider_raw?.speed).toBe("fast");
+    const carrier = req.native_request as NativePassthroughCarrier;
+    expect(carrier.body.speed).toBe("fast");
+    expect(carrier.raw_body).toBe('{"speed":"fast"}');
+    expect(carrier.mutations.body_shims_applied).toBeUndefined();
+  });
+
+  it("downgrades Responses client service_tier Fast passthrough when the API key disallows it", async () => {
+    let sawReq: InternalRequest | null = null;
+    const route: RouteFn = async (req) => {
+      sawReq = req;
+      return okResult({ id: "x" });
+    };
+    const pipeline = createMessagesPipeline(route, "openai_responses");
+    const native = createNativePassthroughCarrier({
+      protocol: "openai_responses",
+      body: { model: "gpt-5.5", input: "hi", service_tier: "priority" },
+      rawBody: '{"service_tier":"priority"}',
+      headers: {},
+    });
+
+    await pipeline.run(
+      irOf({ service_tier: "priority", metadata: { trace_id: "trace-1", native_request: native } }),
+      { keyId: "k1", accountId: "acct" },
+      new AbortController().signal,
+    );
+
+    expect(sawReq).not.toBeNull();
+    const req = sawReq as unknown as InternalRequest;
+    expect(req.service_tier).toBe("default");
+    const carrier = req.native_request as NativePassthroughCarrier;
+    expect(carrier.body.service_tier).toBe("default");
+    expect(carrier.mutations.body_shims_applied).toEqual(["client_fast_service_tier_downgraded"]);
   });
 });
 
@@ -1119,7 +1207,7 @@ describe("createMessagesPipeline — production IR params", () => {
         output_config: { effort: "xhigh" },
         provider_raw: { metadata: { request_id: "client-meta" } },
       }),
-      IDENTITY,
+      { ...IDENTITY, caps: { allowFastMode: true } },
       new AbortController().signal,
     );
 
