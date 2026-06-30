@@ -135,4 +135,14 @@ describe("mountAdminStatic", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("Cache-Control")).toBe("public, max-age=31536000, immutable");
   });
+
+  it("caches favicon assets instead of forcing a full re-fetch on every admin load", async () => {
+    for (const path of ["/admin/favicon.svg", "/admin/favicon.png"]) {
+      const res = await appWith(ENABLED).request(path, {
+        headers: { Authorization: CRED },
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Cache-Control")).toBe("private, max-age=604800");
+    }
+  });
 });

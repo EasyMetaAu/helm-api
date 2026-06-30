@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-06-30 · admin favicon cache policy（Admin UI 静态资源，docs/11，原则 7）
+
+- **背景（Lukin）**：`/admin/favicon.svg` 与 `/admin/favicon.png` 在浏览器网络面板里表现很慢，但文件本身很小（SVG 664B、PNG 约 19KB）。实测问题不是图片体积，而是 admin 静态资源缓存策略把它们当作 SPA shell 处理。
+- **根因**：`admin-static` 对除 `/_app/immutable/` 外的所有 `/admin` 静态资源统一设置 `Cache-Control: no-cache`。这对 `index.html` 是正确的（必须每次 revalidate 才能捡到新 hash chunk），但 favicon 不是 shell；再加上 `app.html` 同时声明 SVG 与 PNG，浏览器可发起重复图标请求。
+- **修复决策**：`/admin/favicon.{svg,png}` 单独设置 `Cache-Control: private, max-age=604800`，只允许浏览器私有缓存一周；`/admin/` 与 SPA deep-link fallback 仍保持 `no-cache`，避免部署后旧 shell 指向旧 chunk。
+- **前端决策**：admin shell 只声明 SVG favicon，保留 PNG 文件作为兼容/直接访问资产，但不主动让浏览器同时拉两张图。
+- **验证**：新增 gateway 静态资源缓存回归测试与 admin shell favicon 数量测试；运行时检查确认 favicons 返回私有 7 天缓存，`/admin/` 仍返回 `no-cache`。
+
 ## 2026-06-30 · per-model reasoning effort policy（执行 fallback / 协议转换，docs/04/05，原则 2/5/8）
 
 - **背景（Lukin）**：生产请求 `10124906-2d15-4cf6-accf-8ce26227a8ca` 走 `economy`，首个 `openai-codex/gpt-5.4-mini` 3s timeout 后 fallback 到 `anthropic/claude-haiku-4-5-20251001`；Haiku 返回 `400 invalid_request_error: This model does not support the effort parameter.`。客户端原始 payload 没有 `reasoning_effort`，是 `economy.reasoning_effort: medium` 在路由阶段强制注入。
@@ -24,20 +32,13 @@
 - **范围限制**：只映射明确的“等级”字段 `output_config.effort`；不从 Anthropic `thinking.budget_tokens` 反推 effort，避免把预算数值猜成错误等级。`reasoning_effort:"none"` 不合成未知的 `output_config.effort=none`，仍通过不注入 thinking 保持禁用语义。缺省请求不注入任何 reasoning 字段，保持现有默认行为。
 - **验证**：新增 Anthropic adapter/provider 单测（有/无 effort、显式 output_config 优先）、executor 非流式与流式双向跨协议 fallback 测试，分别断言最终 GPT/Responses 上游 JSON 携带 `reasoning.effort`，最终 Anthropic/Opus 上游 JSON 携带 `output_config.effort`；`pnpm vitest run packages/core/src/protocol/anthropic/request.test.ts packages/core/src/provider/anthropic.test.ts apps/gateway/src/routes/execute.test.ts` 绿，发布前跑全量校验。
 
-## 2026-06-30 · Fast mode 账号强制覆盖 + API key 透传限制（OAuth subscription provider / key governance，docs/04/11，原则 2/5）
-
-- **背景（Lukin）**：ChatGPT/Codex 与 Claude 订阅账号都支持更快服务档位，但 Helm 不能做成全局 provider 开关；同一订阅池里每个账号的权益/成本/限额可能不同，必须让 operator 按账号单独启用。
-- **外部接口决策**：OpenAI/Codex Responses 请求级启用使用 `service_tier: "priority"`；Anthropic Claude 请求级启用使用 `speed: "fast"` 并携带 `anthropic-beta: fast-mode-2026-02-01`。Helm 的 UI/API 暴露统一布尔 `fastMode`，不把上游私有字段泄露为配置市场。
-- **实现决策**：`AccountSettings.fastMode` 持久化在账号设置里；OAuth pool 合成每个账号 client 时把该布尔注入 provider client。启用后在最底层 provider wire request 上**强制覆盖**客户端已有值：Codex 覆写/补入 `service_tier:"priority"`，Claude 覆写/补入 `speed:"fast"`，保证只要该账号接单就一定走 Fast mode。
-- **API key 治理决策**：`allow_fast_mode` 是 per-key cap，只控制**客户端请求的 Fast mode 透传**。关闭时网关在入口把 OpenAI/Codex `service_tier:"priority"/"fast"` 降为 `"default"`，把 Anthropic `speed:"fast"` 降为 `"standard"`，并从 native passthrough 的 `anthropic-beta` 中移除 `fast-mode-2026-02-01`，但不阻止账号级 `fastMode` 在 provider 层重新强制启用。
-- **范围限制**：目前 UI 只对 `anthropic` 与 `openai-codex` 显示 Fast 开关；其他 provider 显示不支持。Anthropic 的 `count_tokens` 路径不注入 `speed`，避免把消息生成参数带到 token 统计端点。
-- **验证计划**：provider 单测覆盖翻译请求与 native passthrough 都被强制覆盖；gateway/admin 单测覆盖 `fastMode` / `allow_fast_mode` 的 API 校验、持久化、列表展示、池合成、客户端降级与 UI 切换。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+- **2026-06-30 · Fast mode 账号强制覆盖 + API key 透传限制（OAuth subscription provider / key governance，docs/04/11，原则 2/5）**：账号级 `fastMode` 统一映射到 Codex `service_tier:"priority"` 与 Anthropic `speed:"fast"` + beta header，并强制覆盖 provider wire request；per-key `allow_fast_mode` 只治理客户端透传，不阻止账号级强制启用；UI 仅对支持 provider 展示。
 
 - **2026-06-30 · OAuth 5h 限额恢复时间不再落回 60s（admin/gateway，docs/04，原则 5）**：已 park 账号的 generic 60s 429 fallback 改用 near-full (`>=95%`) 窗口推断真实恢复时间，避免 Anthropic 5h 98–99% 限额显示 `0m`；健康账号仍不因 98% 预先 park。验证 core/gateway/admin 相关测试、全量 test/typecheck/svelte-check/biome/build 绿，发 v0.22.27。
 

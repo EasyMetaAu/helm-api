@@ -28,6 +28,7 @@ import { type AdminAuthConfig, basicAuth } from "../middleware/basic-auth.js";
 // avoid drifting the path string in two places.
 export const ADMIN_BUILD_ROOT = "./apps/admin/build";
 const INDEX_PATH = `${ADMIN_BUILD_ROOT}/index.html`;
+const FAVICON_CACHE_CONTROL = "private, max-age=604800";
 
 // Strip the mount prefix, mapping `/admin/_app/x.js` to `apps/admin/build/_app/x.js`;
 // `/admin` itself maps to the root directory (serveStatic falls back to index.html).
@@ -41,6 +42,9 @@ function stripAdminPrefix(path: string): string {
 //   • /admin/_app/immutable/** are content-hashed build artifacts: a given URL's
 //     bytes never change (the hash IS the content), so cache them for a year as
 //     `immutable` — the browser never even revalidates them.
+//   • /admin/favicon.* are tiny static assets but NOT part of the SPA shell. Cache
+//     them for a bounded window so browser tab icons do not force a full file
+//     re-fetch on every admin load.
 //   • Everything else — crucially index.html, the SPA *shell* that hard-codes the
 //     current build's hashed chunk URLs — MUST be revalidated on every load. By
 //     default serveStatic emits only Last-Modified (no Cache-Control), so the
@@ -58,6 +62,8 @@ function stripAdminPrefix(path: string): string {
 function setSpaCacheHeaders(c: Context): void {
   if (c.req.path.includes("/_app/immutable/")) {
     c.header("Cache-Control", "public, max-age=31536000, immutable");
+  } else if (/^\/admin\/favicon\.(?:svg|png)$/.test(c.req.path)) {
+    c.header("Cache-Control", FAVICON_CACHE_CONTROL);
   } else {
     c.header("Cache-Control", "no-cache");
   }
