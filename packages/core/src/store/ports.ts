@@ -114,6 +114,9 @@ export interface CreateKeyInput {
   name?: string;
   allowedLanes?: string[];
   allowCustomModel?: boolean;
+  // Per-key cap for CLIENT-requested Fast mode passthrough. Server/account-level
+  // forced Fast mode is controlled separately by account settings.
+  allowFastMode?: boolean;
   // Per-key rate-limit override (docs/06). Omitted => stored NULL => inherit the
   // system default at check time. 0 => explicitly unlimited for that dimension.
   rateLimitRpm?: number;
@@ -173,6 +176,7 @@ export interface KeyPatch {
   name?: string | null;
   allowedLanes?: string[] | null;
   allowCustomModel?: boolean;
+  allowFastMode?: boolean;
   rateLimitRpm?: number | null;
   rateLimitTpm?: number | null;
   // Budget edits: present (even null) => written; null clears the cap (no cap).

@@ -1376,6 +1376,34 @@ describe("createAnthropicClient", () => {
     ).toBe("ok");
   });
 
+  it("forces speed=fast when per-account Fast mode is enabled", async () => {
+    let sentBody: Record<string, unknown> | null = null;
+    let beta = "";
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      beta = new Headers(init?.headers).get("anthropic-beta") ?? "";
+      return jsonResponse({
+        id: "msg",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static", fastMode: true },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await client.chatCompletion({
+      model: "claude-x",
+      messages: [{ role: "user", content: "hi" }],
+      speed: "standard",
+    });
+
+    expect(sentBody).toEqual(expect.objectContaining({ speed: "fast" }));
+    expect(beta).toContain("fast-mode-2026-02-01");
+  });
+
   it("derives the user-agent from the CLIENT's captured version so header + billing block agree", async () => {
     let seenUA = "";
     let seenBilling = "";
@@ -2173,6 +2201,33 @@ describe("createAnthropicClient — nativePassthrough", () => {
     await client.nativePassthrough?.(body);
     // Byte-for-byte equal to the input — the body is the carrier, unmodified.
     expect(sentBody).toEqual(body);
+  });
+
+  it("overrides native passthrough speed when per-account Fast mode is enabled", async () => {
+    const body = { ...nativeBody(), speed: "standard" };
+    let sentBody: Record<string, unknown> | null = null;
+    let beta = "";
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      beta = new Headers(init?.headers).get("anthropic-beta") ?? "";
+      return jsonResponse({
+        id: "msg_pt",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static", fastMode: true },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await client.nativePassthrough?.(body);
+
+    expect(sentBody).toEqual(expect.objectContaining({ speed: "fast" }));
+    expect(beta).toContain("fast-mode-2026-02-01");
   });
 
   it("returns the upstream native JSON VERBATIM (no anthropicToOpenAIResponse translation)", async () => {

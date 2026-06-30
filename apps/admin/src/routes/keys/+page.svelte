@@ -248,6 +248,7 @@
               <td data-label={$t('Caps')} class="px-3 py-2 text-ink-muted">
                 <div>{$t('Allowed lanes')}: {key.allowed_lanes?.join(', ') || $t('No cap')}</div>
                 <div>{$t('Custom model')}: {key.allow_custom_model ? $t('yes') : $t('no')}</div>
+                <div>{$t('Fast mode')}: {key.allow_fast_mode ? $t('yes') : $t('no')}</div>
               </td>
               <td data-label={$t('Rate limit')} class="px-3 py-2 text-ink-muted">
                 <div>{$t('RPM')}: {limitLabel(key.rate_limit_rpm)}</div>

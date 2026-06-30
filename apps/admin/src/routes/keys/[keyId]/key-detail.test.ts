@@ -55,6 +55,7 @@ function keyView(overrides: Partial<ApiKeyView> = {}): ApiKeyView {
     name: 'Prod backend',
     allowed_lanes: ['balanced'],
     allow_custom_model: false,
+    allow_fast_mode: false,
     disabled: false,
     rate_limit_rpm: null,
     rate_limit_tpm: null,
@@ -196,13 +197,15 @@ function pageData(
 
 describe('key detail page', () => {
   it('renders the key name, config card, headline stats, and scoped request list', () => {
-    render(KeyDetailPage, { data: pageData() });
+    render(KeyDetailPage, { data: pageData({ key: keyView({ allow_fast_mode: true }) }) });
 
     expect(screen.getByRole('heading', { name: /prod backend/i })).toBeInTheDocument();
     expect(screen.getByText('helm_live_ab12')).toBeInTheDocument();
     // Config card surfaces the caps ('balanced' shows in the config + the row lane).
     expect(screen.getByRole('heading', { name: /configuration/i })).toBeInTheDocument();
     expect(screen.getAllByText('balanced').length).toBeGreaterThan(0);
+    expect(screen.getByText(/Fast mode/i)).toBeInTheDocument();
+    expect(screen.getByText(/^yes$/i)).toBeInTheDocument();
     // Headline request count from stats.
     expect(screen.getByText('42')).toBeInTheDocument();
     // The scoped request row links to the shared request detail page, carrying THIS

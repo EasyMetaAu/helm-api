@@ -15,7 +15,13 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { homedir, release as osRelease, type as osType } from "node:os";
-import { type NativePassthroughInput, nativePassthroughBody } from "@helm/shared";
+import {
+  appendMutationList,
+  cloneCarrierWithBody,
+  isNativePassthroughCarrier,
+  type NativePassthroughInput,
+  nativePassthroughBody,
+} from "@helm/shared";
 import {
   type AnthropicToolNameMap,
   createAnthropicToolNameMap,
@@ -50,6 +56,9 @@ export interface AnthropicClientConfig {
   // Wire-image profile for Claude Code emulation. "auto" keeps static API-key
   // providers conservative while making OAuth subscription traffic strict.
   claudeCliFingerprintMode?: "auto" | "off" | "conservative" | "strict";
+  // Per-account Fast mode for Claude subscription traffic. When enabled the
+  // account forces Anthropic `speed: "fast"` on every generation request it serves.
+  fastMode?: boolean;
   // Transient-connection retry at the fetch boundary (provider/retry.ts). Optional —
   // omitted falls back to defaults (2 retries, [200,500] ms). Pre-first-byte, so the
   // retry is idempotent. See ProviderConfig for the rationale.
@@ -981,7 +990,7 @@ function buildClaudeCodeAgentPrompt(model: string): string {
     " - Assistant knowledge cutoff is January 2026.",
     " - The most recent Claude models are Fable 5 and the Claude 4.X family. Model IDs — Fable 5: 'claude-fable-5', Opus 4.8: 'claude-opus-4-8', Sonnet 4.6: 'claude-sonnet-4-6', Haiku 4.5: 'claude-haiku-4-5-20251001'. When building AI applications, default to the latest and most capable Claude models.",
     " - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).",
-    " - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast and is available on Opus 4.8/4.7/4.6.",
+    " - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast and is available on Opus 4.8/4.7; Opus 4.6 requests with Fast mode are served as standard.",
     "",
     "# Context management",
     "When the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.",
@@ -1423,6 +1432,16 @@ function withTimeout(timeoutMs: number, external?: AbortSignal) {
   };
 }
 
+function forceAnthropicFastMode(input: NativePassthroughInput): NativePassthroughInput {
+  const body = nativePassthroughBody(input);
+  if (body.speed === "fast") return input;
+  const next = { ...body, speed: "fast" };
+  if (!isNativePassthroughCarrier(input)) return next;
+  const carrier = cloneCarrierWithBody(input, next);
+  appendMutationList(carrier.mutations, "body_shims_applied", ["anthropic_fast_mode"]);
+  return carrier;
+}
+
 export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient {
   const doFetch = deps.fetch ?? globalThis.fetch;
   const cfg = deps.config;
@@ -1513,9 +1532,11 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     includeClaudeCliRuntimeHeaders = true,
     normalizeToolNames = false,
   ): Promise<AnthropicRequestResult> {
-    const body = nativePassthroughBody(input);
+    const wireInput =
+      cfg.fastMode === true && endpointUrl === url ? forceAnthropicFastMode(input) : input;
+    const body = nativePassthroughBody(wireInput);
     const prepared = prepareNativePassthroughRequest(
-      input,
+      wireInput,
       await headers(body, extraBetas, { includeClaudeCliRuntimeHeaders }),
       {
         mergeHeaders: ["anthropic-beta"],

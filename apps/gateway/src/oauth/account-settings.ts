@@ -34,6 +34,9 @@ export interface AccountSettings {
   // Codex only: when true, auto-consume one rate-limit reset credit the moment the
   // weekly window saturates (≥100%). Unset/false = never auto-reset (manual only).
   autoReset?: boolean;
+  // Per-account Fast mode. Anthropic accounts force `speed:"fast"`; Codex accounts
+  // force Responses `service_tier:"priority"` on every request served by this account.
+  fastMode?: boolean;
   // Optional upstream proxy for this account's provider traffic.
   proxy?: {
     type: "http" | "https" | "socks5";

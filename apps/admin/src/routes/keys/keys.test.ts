@@ -26,6 +26,7 @@ function key(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView {
     name: null,
     allowed_lanes: null,
     allow_custom_model: false,
+    allow_fast_mode: false,
     disabled: false,
     rate_limit_rpm: null,
     rate_limit_tpm: null,
@@ -73,6 +74,13 @@ describe('keys page', () => {
     // No long opaque secret string anywhere (prefixes are short helm_live_xxxx).
     const text = document.body.textContent ?? '';
     expect(text).not.toMatch(/helm_live_[A-Za-z0-9]{16,}/);
+  });
+
+  it('shows each key Fast mode passthrough cap in the Caps column', () => {
+    renderPage([key('k1', { allow_fast_mode: true }), key('k2', { allow_fast_mode: false })]);
+    const rows = screen.getAllByTestId('key-row');
+    expect(within(rows[0]).getByText(/Fast mode:\s*yes/i)).toBeInTheDocument();
+    expect(within(rows[1]).getByText(/Fast mode:\s*no/i)).toBeInTheDocument();
   });
 
   it('shows the key name in the row, and an "unnamed" placeholder when null', () => {
@@ -286,6 +294,7 @@ describe('keys page', () => {
         name: null,
         allowed_lanes: ['economy'],
         allow_custom_model: false,
+        allow_fast_mode: false,
         rate_limit_rpm: 120,
         rate_limit_tpm: null, // untouched → still inherit (null), not undefined
         // Budgets untouched → still no cap (null) + default behavior.

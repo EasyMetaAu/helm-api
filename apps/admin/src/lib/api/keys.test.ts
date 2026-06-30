@@ -19,6 +19,7 @@ function summaryRow(
     role: 'user',
     allowed_lanes: null,
     allow_custom_model: false,
+    allow_fast_mode: false,
     disabled: false,
     rate_limit_rpm: null,
     rate_limit_tpm: null,
@@ -108,6 +109,7 @@ describe('keys api client', () => {
       role: 'user',
       allowed_lanes: ['economy', 'balanced'],
       allow_custom_model: false,
+      allow_fast_mode: true,
     });
 
     const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
@@ -117,6 +119,7 @@ describe('keys api client', () => {
     expect(body.role).toBe('user');
     expect(body.allowed_lanes).toEqual(['economy', 'balanced']);
     expect(body.allow_custom_model).toBe(false);
+    expect(body.allow_fast_mode).toBe(true);
     expect(result.key_id).toBe('key_1');
     expect(result.plaintext).toBe('helm_live_SECRET_ONCE');
     // Server-minted non-sensitive prefix is carried so the UI never slices the
@@ -183,6 +186,16 @@ describe('keys api client', () => {
     expect(keys[1].name).toBe('Production backend');
   });
 
+  it('listKeys surfaces allow_fast_mode and defaults missing values to false', async () => {
+    const rows = [summaryRow('k1'), summaryRow('k2', { allow_fast_mode: true })];
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(JSON.stringify(rows), { status: 200 }),
+    );
+    const keys = await listKeys();
+    expect(keys[0].allow_fast_mode).toBe(false);
+    expect(keys[1].allow_fast_mode).toBe(true);
+  });
+
   it('createKey sends the name when set and omits it when blank (strict schema)', async () => {
     // A Response body is single-use, so give each call its own fresh Response.
     (fetch as ReturnType<typeof vi.fn>)
@@ -240,6 +253,7 @@ describe('keys api client', () => {
     await updateKey('key_1', {
       allowed_lanes: ['economy', 'balanced'],
       allow_custom_model: true,
+      allow_fast_mode: true,
       rate_limit_rpm: null,
       rate_limit_tpm: 100,
     });
@@ -249,6 +263,7 @@ describe('keys api client', () => {
     const body = JSON.parse(init.body as string);
     expect(body.allowed_lanes).toEqual(['economy', 'balanced']);
     expect(body.allow_custom_model).toBe(true);
+    expect(body.allow_fast_mode).toBe(true);
     expect(body.rate_limit_rpm).toBeNull(); // explicit null = clear
     expect(body.rate_limit_tpm).toBe(100);
   });

@@ -223,7 +223,9 @@
   let schedulable = $state<boolean>(true);
   // Codex only: auto-consume a reset credit the moment the weekly window saturates.
   const isCodex = $derived(providerId === 'openai-codex');
+  const supportsFast = $derived(providerId === 'anthropic' || providerId === 'openai-codex');
   let autoReset = $state<boolean>(false);
+  let fastMode = $state<boolean>(false);
 
   async function loadSchedule(): Promise<void> {
     scheduleError = null;
@@ -232,11 +234,13 @@
     priority = '50';
     schedulable = true;
     autoReset = false;
+    fastMode = false;
     try {
       const s = await getAccountSchedule(providerId, account);
       priority = String(s.priority);
       schedulable = s.schedulable;
       autoReset = s.autoReset;
+      fastMode = s.fastMode;
     } catch (e) {
       scheduleError = e instanceof Error ? e.message : $t('Failed to load schedule');
     } finally {
@@ -254,7 +258,12 @@
     }
     scheduleSaving = true;
     try {
-      await setAccountSchedule(providerId, account, { priority: p, schedulable, autoReset });
+      await setAccountSchedule(providerId, account, {
+        priority: p,
+        schedulable,
+        autoReset,
+        fastMode,
+      });
       dirty = true;
       scheduleSaved = true;
     } catch (e) {
@@ -519,6 +528,17 @@
             <p class="field-help">
               {$t(
                 'When the weekly limit saturates, Helm automatically spends one reset credit to restore it (at most once per hour). Reset credits are limited, so leave this off if you want to spend them manually.',
+              )}
+            </p>
+          {/if}
+          {#if supportsFast}
+            <label class="checkbox-field" data-testid="fast-mode-toggle">
+              <input type="checkbox" class="checkbox" bind:checked={fastMode} />
+              <span class="text-sm text-ink-body">{$t('Fast mode')}</span>
+            </label>
+            <p class="field-help">
+              {$t(
+                'When enabled, Helm forces this account to use the provider’s fast serving tier for every request it serves.',
               )}
             </p>
           {/if}

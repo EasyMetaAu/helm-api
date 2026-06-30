@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-06-30 · Fast mode 账号强制覆盖 + API key 透传限制（OAuth subscription provider / key governance，docs/04/11，原则 2/5）
+
+- **背景（Lukin）**：ChatGPT/Codex 与 Claude 订阅账号都支持更快服务档位，但 Helm 不能做成全局 provider 开关；同一订阅池里每个账号的权益/成本/限额可能不同，必须让 operator 按账号单独启用。
+- **外部接口决策**：OpenAI/Codex Responses 请求级启用使用 `service_tier: "priority"`；Anthropic Claude 请求级启用使用 `speed: "fast"` 并携带 `anthropic-beta: fast-mode-2026-02-01`。Helm 的 UI/API 暴露统一布尔 `fastMode`，不把上游私有字段泄露为配置市场。
+- **实现决策**：`AccountSettings.fastMode` 持久化在账号设置里；OAuth pool 合成每个账号 client 时把该布尔注入 provider client。启用后在最底层 provider wire request 上**强制覆盖**客户端已有值：Codex 覆写/补入 `service_tier:"priority"`，Claude 覆写/补入 `speed:"fast"`，保证只要该账号接单就一定走 Fast mode。
+- **API key 治理决策**：`allow_fast_mode` 是 per-key cap，只控制**客户端请求的 Fast mode 透传**。关闭时网关在入口把 OpenAI/Codex `service_tier:"priority"/"fast"` 降为 `"default"`，把 Anthropic `speed:"fast"` 降为 `"standard"`，并从 native passthrough 的 `anthropic-beta` 中移除 `fast-mode-2026-02-01`，但不阻止账号级 `fastMode` 在 provider 层重新强制启用。
+- **范围限制**：目前 UI 只对 `anthropic` 与 `openai-codex` 显示 Fast 开关；其他 provider 显示不支持。Anthropic 的 `count_tokens` 路径不注入 `speed`，避免把消息生成参数带到 token 统计端点。
+- **验证计划**：provider 单测覆盖翻译请求与 native passthrough 都被强制覆盖；gateway/admin 单测覆盖 `fastMode` / `allow_fast_mode` 的 API 校验、持久化、列表展示、池合成、客户端降级与 UI 切换。
+
 ## 2026-06-30 · OAuth 5h 限额恢复时间不再落回 60s（admin/gateway，docs/04，原则 5）
 
 - **背景（Lukin）**：Subscription Providers 页里 Anthropic 账号已经被 429 标为 `Rate limited`，但 quota 快照显示 `5h=98%`、`7d/7d Sonnet` 远未打满；左侧却显示 `0 分钟后自动恢复`，因为只信 `usageLimitedUntilMs=now+60s` 的 generic 429 fallback。
@@ -23,20 +32,13 @@
 - **Codex 同时确认无误**：无条件 `canAttempt/recordSuccess/recordAbort` 正确；`recordAbort` 只释放 half-open 不清计数；abort/queue-timeout 在 recordFailure 前已排除；null-status overload 计入 breaker 是对的（pool 先 sibling 重试，冒泡=全池救不了）。
 - **验证**：pool 新增 refresh-429 转 sibling、extend-only（精确长 reset 不被 60s 缩短、hook 透传 kept 值）；executor 新增 `isAccountScopedFault` 分类矩阵（含 `TokenRefreshError(429)`/null-status overload/abort/null）。trio 160 绿、四包 typecheck、biome、build 绿。凭据 401/403 仍永久 park 到 rebuild（本次未改）。发 v0.22.24。
 
-## 2026-06-29 · OAuth 单账号故障不再污染 alias 级熔断（provider 执行；docs/04，原则 5）
-
-- **线上证据（Lukin）**：`la.atmy.work` 今日 `dcba621e-f8dc-4eec-90db-54352b2fb577` 前 5 个 `/v1/responses` 请求都选中 `openai-codex` 的同一账号 `Luke@OpenAI`，并在 `openai-codex/gpt-5.4-mini` 上报 `oauth refresh failed (... status 401)`；第 6 个请求未再进入 OAuth pool，而是直接 `circuit_open`。根因：执行器熔断 key 是 alias（正确用于普通 provider），但 OAuth pool 内的账号凭据失效被冒泡成 alias 级 provider failure，导致一个坏账号把同模型整个订阅池熔断。
-- **修复决策**：在 `packages/core/src/provider/oauth/pool.ts` 把账号本地错误拦在池内：`TokenRefreshError(400/401/403)` 与上游持久 `401/403` 会将当前 member 标为不可调度并清掉 sticky session；上游 `429` 会只给当前 member 写 `usageLimitedUntilMs` 冷却并触发 gateway 持久化 hook；三类错误都会在同一请求内选择 sibling 账号重试。这样健康 sibling 可接管，请求不会把错误传到 alias breaker。
-- **链路耗尽语义（v0.22.23 修订为按故障类别 gate，取代 v0.22.22 的"完全绕过"）**：v0.22.22 曾让 executor 对 OAuth subscription alias **完全绕过** breaker（canAttempt/recordSuccess/recordAbort/recordFailure 全跳）——这"用力过猛"：连**共享设施的 5xx 宕机**也不再熔断，整池 5xx 时每个请求都重新试穿全 pool → N×（池大小倍）猛敲已宕机的上游、无退避、用户慢失败。**v0.22.23 改为按故障类别 gate**（`apps/gateway/src/routes/execute.ts` 新增 `isAccountScopedFault`，与 pool 的 `isCredentialAccountFailure`+`isRateLimitAccountFailure` 同状态集对称）：`canAttempt/recordSuccess/recordAbort` **还原为对所有 alias 无条件**；**只有 `recordFailure` 在 `isOAuthSubscriptionAlias(alias) && isAccountScopedFault(err)` 时跳过**。即——账号级故障（凭据 `TokenRefreshError(400/401/403)`/上游 `401/403`、`429`）永不开 alias breaker（pool 已按账号 park+sibling 重试、自带 fast-fail）；而 server/transport 故障（5xx/overload/timeout）只在**穿透 pool 全员重试后仍冒泡**时记 breaker → 整池宕机才退避 + half-open 探测恢复，和普通配置 provider 一致。
-- **两层不变量**：pool = 账号级隔离（请求内 sibling-rescue + park）；alias breaker = 全池健康（跨请求退避 + half-open）。"executor 跳过的"恰好等于"pool park 的"那几类，所以两层对同一故障的归类一致、不打架。
-- **取舍/坑**：凭据失败不自动改 operator 的持久 `schedulable` 设置，也不删除 token；这是运行时健康隔离，重连/重建 pool 会重新按当前凭据判断。429 会持久化到 `oauth_quota` 的冷却窗口，重建 pool 后仍会绕开该账号直到窗口过期。`overload`(null-status) 当前算 server fault 计入 breaker——若实测短尖峰误触发，可收窄为仅真 HTTP 5xx 计入。
-- **验证**：OAuth pool 回归（非流式 + native passthrough streaming 的 `TokenRefreshError(401)`/持久 `401`/`429` 都转 sibling、后续不再选坏账号）不变；executor 回归更新为 B' 语义——账号级 `429`/`401`/`TokenRefreshError(401)` **不**记 breaker；**`502` 现在 *会* 记 breaker**；被 5xx 打开的 breaker **会**跳过 subscription alias（back-off）；新增端到端：连续 5 个 502 打开 breaker → 第 6 个请求 `circuit_open` 且不再打上游。`pnpm exec vitest run packages/core/src/provider/oauth/pool.test.ts apps/gateway/src/routes/execute.test.ts apps/gateway/src/server.oauth.test.ts` 全绿（execute 106）。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+- **2026-06-29 · OAuth 单账号故障不再污染 alias 级熔断（provider 执行；docs/04，原则 5）**：OAuth pool 内部拦截账号级 `TokenRefreshError(400/401/403)`、上游 `401/403` 与 `429`，按账号 park/冷却并请求内 sibling 重试；executor 只对账号级故障跳过 alias breaker，整池 5xx/transport 故障仍记 breaker。验证 pool/executor/server OAuth 回归绿。
 
 - **2026-06-28 · 文档/README 对齐今日图片特性 + `/openapi.json` 完善（仅文档与 OpenAPI，无运行时改动）**：补 README/zh + docs/04/11 中 in-chain model promotion、内置 image provider、admin 媒体总览说明；`openapi.ts` 补 Gemini `:generateContent`、images/interactions schema、Google apiKey security、示例与 tags。验证 `openapi.test` 3/3、gateway typecheck、biome，发 v0.22.21。
 

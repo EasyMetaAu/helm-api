@@ -19,6 +19,11 @@ import {
   tlsTransportProviders,
 } from "./server.js";
 
+function sseResponse(events: object[]): Response {
+  const body = events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
+  return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+}
+
 // Compose a validated shared ProviderConfig (so tests exercise the real schema
 // shape, not a hand-rolled object). Parse never fails for these fixtures.
 function provider(raw: Record<string, unknown>): ProviderConfigShared {
@@ -452,5 +457,47 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     expect(poolClients.has("openai-codex")).toBe(true);
     const aliases = (providers[0]?.models ?? []).map((m) => m.alias).sort();
     expect(aliases).toEqual(["openai-codex/gpt-5.4", "openai-codex/gpt-5.5"]);
+  });
+
+  it("threads per-account Fast mode into the synthesized Codex pool client", async () => {
+    const { ctx, config } = oauthStores();
+    await ctx.store.upsert({
+      providerId: "openai-codex",
+      account: "fast",
+      accessEnc: encryptSecret("codex-access", ENC_KEY),
+      refreshEnc: encryptSecret("codex-refresh", ENC_KEY),
+      expiresAt: FAR_FUTURE,
+      meta: null,
+      updatedAt: 1,
+    });
+    await setAccountSettings(config, ENC_KEY, "openai-codex", "fast", {
+      enabledModels: ["gpt-5.5"],
+      fastMode: true,
+    });
+    let sentBody: Record<string, unknown> | null = null;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      sentBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return sseResponse([
+        { type: "response.output_item.added", item: { type: "message", role: "assistant" } },
+        { type: "response.output_text.delta", delta: "ok" },
+        { type: "response.completed", response: { status: "completed", usage: {} } },
+      ]);
+    });
+
+    const { poolClients } = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+    );
+
+    await poolClients.get("openai-codex")?.chatCompletion({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+      service_tier: "default",
+    });
+    expect(sentBody).toEqual(expect.objectContaining({ service_tier: "priority" }));
   });
 });

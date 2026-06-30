@@ -173,6 +173,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         role: "user",
         allowedLanes: ["economy", "balanced"],
         allowCustomModel: true,
+        allowFastMode: true,
       });
       const got = await ctx.stores.keys.getByHash("sha256_h1");
       expect(got).toMatchObject<Partial<ApiKeyRecord>>({
@@ -183,6 +184,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         role: "user",
         allowed_lanes: ["economy", "balanced"],
         allow_custom_model: true,
+        allow_fast_mode: true,
         disabled: false,
       });
     });
@@ -386,7 +388,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(got?.memory_thread_source).toBe("auto");
     });
 
-    it("updateKey edits caps (allowed_lanes / allow_custom_model) and clears with null", async () => {
+    it("updateKey edits caps (allowed_lanes / allow_custom_model / allow_fast_mode) and clears with null", async () => {
       ctx = await make();
       await ctx.stores.keys.createKey({
         keyId: "k1",
@@ -398,16 +400,19 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       await ctx.stores.keys.updateKey("k1", {
         allowedLanes: ["economy", "balanced"],
         allowCustomModel: true,
+        allowFastMode: true,
       });
       let got = await ctx.stores.keys.getByHash("h1");
       expect(got?.allowed_lanes).toEqual(["economy", "balanced"]);
       expect(got?.allow_custom_model).toBe(true);
+      expect(got?.allow_fast_mode).toBe(true);
       expect(got?.role).toBe("user"); // never rewritten by updateKey
       // null clears the whitelist back to "no cap"; an omitted field is left untouched.
       await ctx.stores.keys.updateKey("k1", { allowedLanes: null });
       got = await ctx.stores.keys.getByHash("h1");
       expect(got?.allowed_lanes).toBeNull();
       expect(got?.allow_custom_model).toBe(true);
+      expect(got?.allow_fast_mode).toBe(true);
     });
 
     it("updateKey on a missing key rejects (not silently)", async () => {

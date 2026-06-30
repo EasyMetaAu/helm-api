@@ -582,6 +582,14 @@ const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_telemetry_decided_by ON telemetry (decided_by);
     `,
   },
+  {
+    // Per-key Fast-mode passthrough cap (docs/06) — pg mirror of sqlite v31.
+    // Additive boolean default false; account-level Fast mode remains separate.
+    version: 30,
+    sql: `
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS allow_fast_mode BOOLEAN NOT NULL DEFAULT FALSE;
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

@@ -54,6 +54,7 @@
     const input: CreateKeyInput = {
       role,
       allow_custom_model: form.allowCustomModel,
+      allow_fast_mode: form.allowFastMode,
     };
     const trimmedName = name.trim();
     if (trimmedName.length > 0) input.name = trimmedName;
@@ -112,6 +113,7 @@
         name: name.trim().length > 0 ? name.trim() : null,
         allowed_lanes: form.allowedLanes.length > 0 ? [...form.allowedLanes] : null,
         allow_custom_model: form.allowCustomModel,
+        allow_fast_mode: form.allowFastMode,
         disabled: false,
         rate_limit_rpm: form.rpm ?? null,
         rate_limit_tpm: form.tpm ?? null,

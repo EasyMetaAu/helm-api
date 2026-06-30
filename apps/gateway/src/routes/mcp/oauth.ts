@@ -194,6 +194,7 @@ function identityFromClaims(claims: Record<string, unknown>): AuthIdentity {
     caps: {
       allowedLanes: null,
       allowCustomModel: false,
+      allowFastMode: false,
       rateLimit: { rpm: null, tpm: null },
       concurrencyLimit: null,
       budget: {
@@ -310,7 +311,7 @@ export function registerMcpOAuth(app: Hono<AppEnv>, deps: McpOAuthDeps): void {
     const nowSec = Math.floor(deps.now() / 1000);
 
     const claims = verifyJwt(code, deps.signingKey, nowSec);
-    if (!claims || claims.typ !== "mcp_code")
+    if (claims?.typ !== "mcp_code")
       return c.json(
         { error: "invalid_grant", error_description: "bad or expired authorization code" },
         400,

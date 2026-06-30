@@ -154,6 +154,13 @@ describe("ApiKeyRecordSchema", () => {
     expect(ApiKeyRecordSchema.parse(fullKey()).name).toBeNull();
   });
 
+  it("defaults allow_fast_mode to false when omitted (legacy rows / additive field)", () => {
+    expect(ApiKeyRecordSchema.parse(fullKey()).allow_fast_mode).toBe(false);
+    expect(ApiKeyRecordSchema.parse({ ...fullKey(), allow_fast_mode: true }).allow_fast_mode).toBe(
+      true,
+    );
+  });
+
   it("accepts a name (1..100 chars), trims it, and rejects empty/whitespace/over-long", () => {
     expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), name: "Production backend" }).success).toBe(
       true,
@@ -240,6 +247,12 @@ describe("CreateKeyRequestSchema", () => {
     expect(CreateKeyRequestSchema.safeParse({ name: "   " }).success).toBe(false);
     expect(CreateKeyRequestSchema.safeParse({ name: "x".repeat(101) }).success).toBe(false);
   });
+
+  it("accepts the optional Fast-mode passthrough cap at mint", () => {
+    const res = CreateKeyRequestSchema.safeParse({ role: "user", allow_fast_mode: true });
+    expect(res.success).toBe(true);
+    if (res.success) expect(res.data.allow_fast_mode).toBe(true);
+  });
 });
 
 describe("UpdateKeyRequestSchema", () => {
@@ -255,11 +268,12 @@ describe("UpdateKeyRequestSchema", () => {
     expect(UpdateKeyRequestSchema.safeParse({}).success).toBe(true);
   });
 
-  it("accepts editable caps: allowed_lanes / allow_custom_model", () => {
+  it("accepts editable caps: allowed_lanes / allow_custom_model / allow_fast_mode", () => {
     expect(
       UpdateKeyRequestSchema.safeParse({ allowed_lanes: ["economy", "balanced"] }).success,
     ).toBe(true);
     expect(UpdateKeyRequestSchema.safeParse({ allow_custom_model: true }).success).toBe(true);
+    expect(UpdateKeyRequestSchema.safeParse({ allow_fast_mode: true }).success).toBe(true);
   });
 
   it("accepts null to clear the allowed-lanes whitelist", () => {

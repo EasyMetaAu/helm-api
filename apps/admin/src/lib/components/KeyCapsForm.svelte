@@ -7,6 +7,7 @@
   export type KeyCaps = {
     allowedLanes: string[];
     allowCustomModel: boolean;
+    allowFastMode: boolean;
     rpm: number | null;
     tpm: number | null;
     concurrencyLimit: number | null;
@@ -26,6 +27,7 @@
     return {
       allowedLanes: [],
       allowCustomModel: false,
+      allowFastMode: false,
       rpm: null,
       tpm: null,
       concurrencyLimit: null,
@@ -48,6 +50,7 @@
     return {
       allowedLanes: [...(key.allowed_lanes ?? [])],
       allowCustomModel: key.allow_custom_model,
+      allowFastMode: key.allow_fast_mode,
       rpm: key.rate_limit_rpm,
       tpm: key.rate_limit_tpm,
       concurrencyLimit: key.concurrency_limit,
@@ -193,6 +196,23 @@
   <span class="field-help"
     >{$t(
       'Lets this client bypass lanes and target a specific model by name. Leave off to keep every request routed through lanes.',
+    )}</span
+  >
+</div>
+
+<div class="flex flex-col gap-1">
+  <label class="checkbox-field">
+    <input
+      type="checkbox"
+      class="checkbox"
+      bind:checked={form.allowFastMode}
+      aria-label={$t('allow client-requested Fast mode')}
+    />
+    <span class="text-ink-body">{$t('Allow client-requested Fast mode')}</span>
+  </label>
+  <span class="field-help"
+    >{$t(
+      "Lets this client request the provider's fast serving tier. If off, client Fast requests are downgraded unless the serving account forces Fast mode.",
     )}</span
   >
 </div>

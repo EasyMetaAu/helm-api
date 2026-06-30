@@ -68,6 +68,7 @@ describe('admin oauth api client', () => {
                 healthy: true,
                 priority: 20,
                 schedulable: true,
+                fastMode: true,
               },
             ],
           },
@@ -79,6 +80,7 @@ describe('admin oauth api client', () => {
     const status = await listOAuthStatus();
     expect(status.configured).toBe(true);
     expect(status.providers[0]?.accounts[0]?.account).toBe('acct-a');
+    expect(status.providers[0]?.accounts[0]?.fastMode).toBe(true);
     expect(JSON.stringify(status)).not.toMatch(/access_token|refresh_token|secret/i);
   });
 
@@ -175,7 +177,11 @@ describe('admin oauth api client', () => {
     const fetchFn = vi.fn<typeof fetch>(async () => resp(null, { ok: true, status: 204 }));
     vi.stubGlobal('fetch', fetchFn);
 
-    await setAccountSchedule('anthropic', 'acct-a', { priority: 5, schedulable: false });
+    await setAccountSchedule('anthropic', 'acct-a', {
+      priority: 5,
+      schedulable: false,
+      fastMode: true,
+    });
 
     const call = firstCall(fetchFn.mock.calls);
     expect(call[0]).toBe('/admin/api/oauth/anthropic/account');
@@ -185,6 +191,7 @@ describe('admin oauth api client', () => {
       account: 'acct-a',
       priority: 5,
       schedulable: false,
+      fastMode: true,
     });
   });
 

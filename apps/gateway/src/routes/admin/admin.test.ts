@@ -85,6 +85,7 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
         name: input.name ?? null,
         allowed_lanes: input.allowedLanes ?? null,
         allow_custom_model: input.allowCustomModel ?? false,
+        allow_fast_mode: input.allowFastMode ?? false,
         disabled: false,
         rate_limit_rpm: input.rateLimitRpm ?? null,
         rate_limit_tpm: input.rateLimitTpm ?? null,
@@ -127,6 +128,7 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
       if (patch.name !== undefined) row.name = patch.name;
       if (patch.allowedLanes !== undefined) row.allowed_lanes = patch.allowedLanes;
       if (patch.allowCustomModel !== undefined) row.allow_custom_model = patch.allowCustomModel;
+      if (patch.allowFastMode !== undefined) row.allow_fast_mode = patch.allowFastMode;
       if (patch.rateLimitRpm !== undefined) row.rate_limit_rpm = patch.rateLimitRpm;
       if (patch.rateLimitTpm !== undefined) row.rate_limit_tpm = patch.rateLimitTpm;
       if (patch.budgetRequests !== undefined) row.budget_requests = patch.budgetRequests;
@@ -714,6 +716,22 @@ describe("admin.api keys", () => {
     expect(keyStore.rows[0]?.rate_limit_tpm).toBeNull();
   });
 
+  it("POST persists allow_fast_mode and the list surfaces it", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    const created = await app.request("/admin/api/keys", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ role: "user", allow_fast_mode: true }),
+    });
+    expect(created.status).toBe(201);
+    expect(keyStore.rows[0]?.allow_fast_mode).toBe(true);
+    const list = (await (await app.request("/admin/api/keys")).json()) as Array<
+      Record<string, unknown>
+    >;
+    expect(list[0]?.allow_fast_mode).toBe(true);
+  });
+
   it("PATCH edits a key's rate limits (number sets, null clears) without touching caps", async () => {
     const deps = buildDeps();
     const app = buildApp(deps);
@@ -742,7 +760,7 @@ describe("admin.api keys", () => {
     expect(keyStore.rows[0]?.rate_limit_tpm).toBe(5000);
   });
 
-  it("PATCH edits a key's caps (allowed_lanes, allow_custom_model; null clears)", async () => {
+  it("PATCH edits a key's caps (allowed_lanes, allow_custom_model, allow_fast_mode; null clears)", async () => {
     const deps = buildDeps();
     const app = buildApp(deps);
     await app.request("/admin/api/keys", {
@@ -756,11 +774,13 @@ describe("admin.api keys", () => {
       body: JSON.stringify({
         allowed_lanes: ["economy", "balanced"],
         allow_custom_model: true,
+        allow_fast_mode: true,
       }),
     });
     expect(set.status).toBe(200);
     expect(keyStore.rows[0]?.allowed_lanes).toEqual(["economy", "balanced"]);
     expect(keyStore.rows[0]?.allow_custom_model).toBe(true);
+    expect(keyStore.rows[0]?.allow_fast_mode).toBe(true);
     expect(keyStore.rows[0]?.rate_limit_rpm).toBe(7); // unrelated field untouched
     expect(keyStore.rows[0]?.role).toBe("user"); // role never rewritten
     // null clears the whitelist back to "no cap".
@@ -772,6 +792,7 @@ describe("admin.api keys", () => {
     expect(clear.status).toBe(200);
     expect(keyStore.rows[0]?.allowed_lanes).toBeNull();
     expect(keyStore.rows[0]?.allow_custom_model).toBe(true); // omitted → untouched
+    expect(keyStore.rows[0]?.allow_fast_mode).toBe(true); // omitted → untouched
   });
 
   it("PATCH rejects role and other unknown fields with 400 (fail-closed, strict)", async () => {

@@ -46,6 +46,7 @@ function record(overrides: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
     name: null,
     allowed_lanes: null,
     allow_custom_model: false,
+    allow_fast_mode: false,
     disabled: false,
     rate_limit_rpm: null,
     rate_limit_tpm: null,

@@ -967,6 +967,34 @@ describe("createCodexResponsesClient", () => {
     ).toBe("ok");
   });
 
+  it("forces service_tier=priority when per-account Fast mode is enabled", async () => {
+    let sentBody: Record<string, unknown> | null = null;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return sseResponse([
+        { type: "response.output_item.added", item: { type: "message", role: "assistant" } },
+        { type: "response.output_text.delta", delta: "ok" },
+        { type: "response.completed", response: { status: "completed", usage: {} } },
+      ]);
+    });
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        fastMode: true,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await client.chatCompletion({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+      service_tier: "default",
+    });
+
+    expect(sentBody).toEqual(expect.objectContaining({ service_tier: "priority" }));
+  });
+
   it("onResponseMeta fires EXACTLY once with the response headers and never perturbs the streamed chunks (Principle 8)", async () => {
     const fetchMock = vi.fn(
       async () =>
@@ -1374,6 +1402,31 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
     const joined = chunks.join("");
     expect(joined).toContain("response.created");
     expect(joined).not.toContain("chat.completion.chunk");
+  });
+
+  it("overrides native passthrough service_tier when per-account Fast mode is enabled", async () => {
+    const body = { ...nativeStreamBody(), service_tier: "default" };
+    let sentBody: Record<string, unknown> | null = null;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return sseStreamResponse([
+        'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+      ]);
+    });
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        fastMode: true,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    for await (const chunk of client.nativePassthroughStream?.(body) ?? []) {
+      void chunk;
+    }
+
+    expect(sentBody).toEqual(expect.objectContaining({ service_tier: "priority" }));
   });
 
   it("does NOT call openaiToResponsesRequest (the verbatim body has no instructions rewrite)", async () => {

@@ -39,6 +39,7 @@ export const apiKeys = pgTable("api_keys", {
   name: text("name"), // human-readable label; NULL = unnamed (cosmetic only)
   allowedLanes: jsonb("allowed_lanes").$type<string[]>(), // native jsonb array
   allowCustomModel: boolean("allow_custom_model").notNull().default(false),
+  allowFastMode: boolean("allow_fast_mode").notNull().default(false),
   disabled: boolean("disabled").notNull().default(false),
   // Per-key rate-limit override (docs/06). Nullable: NULL = inherit the system
   // default at check time; a value (0 = unlimited) overrides that one dimension.
