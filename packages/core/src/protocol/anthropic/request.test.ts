@@ -576,6 +576,36 @@ describe("anthropic transformRequestOut", () => {
     expect(ir.thinking).toEqual({ type: "enabled", budget_tokens: 2048 });
   });
 
+  it("also normalizes Anthropic thinking budget into IR reasoning_effort", () => {
+    const ir = transformRequestOut({
+      model: "claude-3-7-sonnet",
+      max_tokens: 64,
+      thinking: { type: "enabled", budget_tokens: 4096 },
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(ir.reasoning_effort).toBe("high");
+  });
+
+  it("prefers Anthropic output_config.effort as the cross-protocol reasoning effort", () => {
+    const ir = transformRequestOut({
+      model: "claude-3-7-sonnet",
+      max_tokens: 64,
+      thinking: { type: "enabled", budget_tokens: 2048 },
+      output_config: { effort: "xhigh" },
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(ir.reasoning_effort).toBe("xhigh");
+  });
+
+  it("does not inject reasoning_effort when Anthropic reasoning is absent", () => {
+    const ir = transformRequestOut({
+      model: "claude-3-7-sonnet",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(ir.reasoning_effort).toBeUndefined();
+  });
+
   it("passes service_tier through to the IR", () => {
     const ir = transformRequestOut({
       model: "claude-3-5-sonnet",

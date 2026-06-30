@@ -1,7 +1,9 @@
 import type { CircuitBreaker, ExecutionPlan, ProviderClient, ProviderRegistry } from "@helm/core";
 import {
+  anthropicTransformRequestOut,
   createCircuitBreaker,
   createGeminiClient,
+  createGenericOpenAIResponsesClient,
   TokenRefreshError,
   UpstreamError,
 } from "@helm/core";
@@ -168,6 +170,21 @@ async function* gen(chunks: string[]): AsyncGenerator<string> {
 function clock() {
   let t = 0;
   return () => (t += 10);
+}
+
+function responseJson(body: unknown, init: ResponseInit = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "Content-Type": "application/json", ...(init.headers ?? {}) },
+    ...init,
+  });
+}
+
+function responseSse(events: object[]): Response {
+  return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
 }
 
 describe("createExecute — gateway execution adapter", () => {
@@ -2195,6 +2212,23 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     });
   }
 
+  function anthropicReqFromNative(
+    nativeBody: Record<string, unknown>,
+    over: Partial<InternalRequest> = {},
+  ): InternalRequest {
+    const ir = anthropicTransformRequestOut(nativeBody);
+    return anthropicReq({
+      messages: ir.messages as InternalRequest["messages"],
+      max_tokens: typeof ir.max_tokens === "number" ? ir.max_tokens : null,
+      stream: ir.stream === true,
+      thinking: ir.thinking,
+      reasoning_effort: ir.reasoning_effort,
+      provider_raw: ir.provider_raw as InternalRequest["provider_raw"],
+      native_request: nativeBody,
+      ...over,
+    });
+  }
+
   const NATIVE_RESP = {
     id: "msg_1",
     type: "message",
@@ -2739,7 +2773,10 @@ describe("createExecute — native protocol passthrough (#217)", () => {
       nativePassthrough: vi.fn().mockRejectedValue(new UpstreamError("upstream_error", "boom")),
     } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
     const tail = {
-      chatCompletion: vi.fn().mockResolvedValue({ id: "translated-tail" }),
+      chatCompletion: vi.fn((body, options) => {
+        options?.captureUpstream?.(JSON.stringify(body));
+        return Promise.resolve({ id: "translated-tail" });
+      }),
       chatCompletionStream: vi.fn(),
     } as unknown as ProviderClient & { chatCompletion: ReturnType<typeof vi.fn> };
     const execute = createExecute({
@@ -2767,10 +2804,21 @@ describe("createExecute — native protocol passthrough (#217)", () => {
       nativeProtocolPassthroughEnabled: () => true,
     });
 
-    const out = await execute(plan(["a", "b"]), anthropicReq());
+    const out = await execute(
+      plan(["a", "b"]),
+      anthropicReqFromNative({
+        ...NATIVE,
+        thinking: { type: "enabled", budget_tokens: 4096 },
+        output_config: { effort: "high" },
+      }),
+    );
     expect(head.nativePassthrough).toHaveBeenCalledTimes(1);
     expect(tail.chatCompletion).toHaveBeenCalledTimes(1);
-    expect(tail.chatCompletion.mock.calls[0]?.[0]).toMatchObject({ model: "gpt-x" });
+    const fallbackBody = tail.chatCompletion.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(fallbackBody).toMatchObject({ model: "gpt-x", reasoning_effort: "high" });
+    expect(fallbackBody.thinking).toBeUndefined();
+    expect(fallbackBody.output_config).toBeUndefined();
+    expect(out.upstreamRequest).toBe(JSON.stringify(fallbackBody));
     expect(out.final).toEqual({ status: "ok", alias: "b", providerModel: "gpt-x" });
     expect(out.body).toEqual({ id: "translated-tail" });
     expect(out.attempts[0]?.status).toBe("error");
@@ -2779,6 +2827,128 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     expect(out.attempts[1]?.target_provider_protocol).toBe("openai_chat");
     expect(out.attempts[1]?.passthrough_used).toBe(false);
     expect(out.attempts[1]?.passthrough_disable_reason).toBe("protocol_mismatch");
+  });
+
+  it("cross-protocol fallback to OpenAI Responses sends captured upstream reasoning.effort without Anthropic-only fields", async () => {
+    const head = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockRejectedValue(new UpstreamError("upstream_error", "boom")),
+    } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
+    const tail = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://api.openai.test/v1", apiKey: "sk-test" },
+      fetch: vi.fn(async () =>
+        responseJson({
+          id: "resp_1",
+          object: "response",
+          status: "completed",
+          output: [
+            { type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] },
+          ],
+        }),
+      ) as unknown as typeof fetch,
+    });
+    const execute = createExecute({
+      defaultProvider: head,
+      providers: new Map<string, ProviderClient>([
+        ["anthro", head],
+        ["responses", tail],
+      ]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+        b: {
+          providerName: "responses",
+          providerModel: "gpt-5.5",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(
+      plan(["a", "b"]),
+      anthropicReqFromNative({
+        ...NATIVE,
+        thinking: { type: "enabled", budget_tokens: 4096 },
+        output_config: { effort: "high" },
+      }),
+    );
+
+    expect(out.final).toEqual({ status: "ok", alias: "b", providerModel: "gpt-5.5" });
+    const upstreamBody = JSON.parse(out.upstreamRequest ?? "{}");
+    expect(upstreamBody.reasoning).toEqual({ effort: "high" });
+    expect(upstreamBody.reasoning_effort).toBeUndefined();
+    expect(upstreamBody.thinking).toBeUndefined();
+    expect(upstreamBody.output_config).toBeUndefined();
+    expect(out.attempts[1]?.target_provider_protocol).toBe("openai_responses");
+  });
+
+  it("cross-protocol fallback to Gemini maps Anthropic reasoning into thinkingConfig without Anthropic-only fields", async () => {
+    const head = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockRejectedValue(new UpstreamError("upstream_error", "boom")),
+    } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
+    const tail = createGeminiClient({
+      config: { baseUrl: "https://generativelanguage.googleapis.com/v1beta", apiKey: "g" },
+      fetch: vi.fn(async () =>
+        responseJson({
+          candidates: [
+            { content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" },
+          ],
+          usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+        }),
+      ) as unknown as typeof fetch,
+    });
+    const execute = createExecute({
+      defaultProvider: head,
+      providers: new Map<string, ProviderClient>([
+        ["anthro", head],
+        ["google", tail],
+      ]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+        b: {
+          providerName: "google",
+          providerModel: "gemini-2.5-pro",
+          targetProviderProtocol: "gemini",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(
+      plan(["a", "b"]),
+      anthropicReqFromNative({
+        ...NATIVE,
+        thinking: { type: "enabled", budget_tokens: 4096 },
+        output_config: { effort: "high" },
+      }),
+    );
+
+    expect(out.final).toEqual({ status: "ok", alias: "b", providerModel: "gemini-2.5-pro" });
+    const upstreamBody = JSON.parse(out.upstreamRequest ?? "{}");
+    expect(upstreamBody.generationConfig?.thinkingConfig).toMatchObject({ includeThoughts: true });
+    expect(upstreamBody.reasoning_effort).toBeUndefined();
+    expect(upstreamBody.thinking).toBeUndefined();
+    expect(upstreamBody.output_config).toBeUndefined();
+    expect(out.attempts[1]?.target_provider_protocol).toBe("gemini");
   });
 
   it("an UpstreamError from nativePassthrough records a breaker failure and advances the chain", async () => {
@@ -3518,6 +3688,23 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
     });
   }
 
+  function anthropicStreamReqFromNative(
+    nativeBody: Record<string, unknown>,
+    over: Partial<InternalRequest> = {},
+  ): InternalRequest {
+    const ir = anthropicTransformRequestOut(nativeBody);
+    return anthropicStreamReq({
+      messages: ir.messages as InternalRequest["messages"],
+      max_tokens: typeof ir.max_tokens === "number" ? ir.max_tokens : null,
+      stream: true,
+      thinking: ir.thinking,
+      reasoning_effort: ir.reasoning_effort,
+      provider_raw: ir.provider_raw as InternalRequest["provider_raw"],
+      native_request: nativeBody,
+      ...over,
+    });
+  }
+
   // Anthropic SSE frames the upstream byte-relays back, verbatim.
   const SSE = [
     'event: message_start\ndata: {"type":"message_start"}\n\n',
@@ -3795,16 +3982,93 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
       nativeProtocolPassthroughEnabled: () => true,
     });
 
-    const out = await execute(plan(["a", "b"]), anthropicStreamReq());
+    const out = await execute(
+      plan(["a", "b"]),
+      anthropicStreamReqFromNative({
+        ...NATIVE_STREAM,
+        thinking: { type: "enabled", budget_tokens: 8192 },
+        output_config: { effort: "xhigh" },
+      }),
+    );
 
     expect(head.nativePassthroughStream).toHaveBeenCalledTimes(1);
     expect(tail.chatCompletionStream).toHaveBeenCalledTimes(1);
+    const fallbackBody = tail.chatCompletionStream.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(fallbackBody).toMatchObject({ model: "gpt-x", reasoning_effort: "xhigh" });
+    expect(fallbackBody.thinking).toBeUndefined();
+    expect(fallbackBody.output_config).toBeUndefined();
     expect(out.final).toEqual({ status: "ok", alias: "b", providerModel: "gpt-x" });
     expect(out.stream).not.toBeNull();
     expect(out.attempts[0]?.passthrough_used).toBe(true);
     expect(out.attempts[1]?.target_provider_protocol).toBe("openai_chat");
     expect(out.attempts[1]?.passthrough_used).toBe(false);
     expect(out.attempts[1]?.passthrough_disable_reason).toBe("protocol_mismatch");
+  });
+
+  it("stream cross-protocol fallback to OpenAI Responses captures reasoning.effort without Anthropic-only fields", async () => {
+    // biome-ignore lint/correctness/useYield: pre-first-chunk failure throws before any yield
+    async function* diesBeforeFirst(): AsyncGenerator<string> {
+      throw new UpstreamError("upstream_error", "connect failed");
+    }
+    const head = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: vi.fn().mockReturnValue(diesBeforeFirst()),
+    } as unknown as ProviderClient & { nativePassthroughStream: ReturnType<typeof vi.fn> };
+    const tail = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://api.openai.test/v1", apiKey: "sk-test" },
+      fetch: vi.fn(async () =>
+        responseSse([
+          { type: "response.created", response: { id: "r1", status: "in_progress" } },
+          { type: "response.output_item.added", item: { type: "message", content: [] } },
+          { type: "response.output_text.delta", delta: "ok", output_index: 0, content_index: 0 },
+          { type: "response.output_text.done", text: "ok", output_index: 0, content_index: 0 },
+          { type: "response.completed", response: { id: "r1", status: "completed" } },
+        ]),
+      ) as unknown as typeof fetch,
+    });
+    const execute = createExecute({
+      defaultProvider: head,
+      providers: new Map<string, ProviderClient>([
+        ["anthro", head],
+        ["responses", tail],
+      ]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+        b: {
+          providerName: "responses",
+          providerModel: "gpt-5.5",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(
+      plan(["a", "b"]),
+      anthropicStreamReqFromNative({
+        ...NATIVE_STREAM,
+        thinking: { type: "enabled", budget_tokens: 4096 },
+        output_config: { effort: "high" },
+      }),
+    );
+
+    expect(out.final).toEqual({ status: "ok", alias: "b", providerModel: "gpt-5.5" });
+    const upstreamBody = JSON.parse(out.upstreamRequest ?? "{}");
+    expect(upstreamBody.reasoning).toEqual({ effort: "high" });
+    expect(upstreamBody.reasoning_effort).toBeUndefined();
+    expect(upstreamBody.thinking).toBeUndefined();
+    expect(upstreamBody.output_config).toBeUndefined();
+    expect(out.stream).not.toBeNull();
+    expect(out.attempts[1]?.target_provider_protocol).toBe("openai_responses");
   });
 
   it("a client abort during the stream peek records client_abort without a breaker failure", async () => {

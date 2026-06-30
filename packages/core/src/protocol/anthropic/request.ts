@@ -2,6 +2,8 @@ import { z } from "zod";
 import {
   type IRContentPart,
   type IRMessage,
+  type IRReasoningEffort,
+  IRReasoningEffortSchema,
   type IRRequest,
   IRRequestSchema,
   type IRToolCall,
@@ -595,6 +597,8 @@ export function transformRequestOut(req: unknown): IRRequest {
 
   const toolChoiceIR = anthropicToolChoiceToIR(parsed.tool_choice);
 
+  const reasoningEffort = reasoningEffortFromAnthropicRequest(parsed);
+
   const ir: IRRequest = {
     model: parsed.model,
     messages: merged,
@@ -615,6 +619,7 @@ export function transformRequestOut(req: unknown): IRRequest {
     // The extended-thinking config rides IR.thinking (the provider-shaped reasoning
     // bag), distinct from the per-message `thinking` block extension built above.
     ...(parsed.thinking !== undefined ? { thinking: parsed.thinking } : {}),
+    ...(reasoningEffort !== undefined ? { reasoning_effort: reasoningEffort } : {}),
     ...(parsed.service_tier !== undefined ? { service_tier: parsed.service_tier } : {}),
     ...(parsed.cache_control !== undefined ? { cache_control: parsed.cache_control } : {}),
     ...(Object.keys(providerRaw).length > 0 ? { provider_raw: providerRaw } : {}),
@@ -792,6 +797,47 @@ function thinkingFromIR(ir: IRRequest): AnthropicThinkingConfigOut | undefined {
 function stopSequencesFromIR(stop: IRRequest["stop"]): string[] | undefined {
   if (stop === undefined) return undefined;
   return typeof stop === "string" ? [stop] : stop;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseReasoningEffort(value: unknown): IRReasoningEffort | undefined {
+  if (typeof value !== "string") return undefined;
+  const parsed = IRReasoningEffortSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+function reasoningEffortFromAnthropicBudget(budget: number): IRReasoningEffort {
+  if (budget <= 0) return "none";
+  if (budget <= 1024) return "low";
+  if (budget <= 2048) return "medium";
+  if (budget <= 4096) return "high";
+  if (budget <= 8192) return "xhigh";
+  return "max";
+}
+
+function reasoningEffortFromAnthropicThinking(thinking: unknown): IRReasoningEffort | undefined {
+  if (!isRecord(thinking)) return undefined;
+  if (thinking.type === "disabled") return "none";
+  if (thinking.type !== "enabled") return undefined;
+  return typeof thinking.budget_tokens === "number"
+    ? reasoningEffortFromAnthropicBudget(thinking.budget_tokens)
+    : undefined;
+}
+
+function reasoningEffortFromOutputConfig(outputConfig: unknown): IRReasoningEffort | undefined {
+  return isRecord(outputConfig) ? parseReasoningEffort(outputConfig.effort) : undefined;
+}
+
+function reasoningEffortFromAnthropicRequest(
+  parsed: AnthropicMessagesRequest,
+): IRReasoningEffort | undefined {
+  return (
+    reasoningEffortFromOutputConfig(parsed.output_config) ??
+    reasoningEffortFromAnthropicThinking(parsed.thinking)
+  );
 }
 
 function normalizeAnthropicContextManagement(value: unknown): unknown {

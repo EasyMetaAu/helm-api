@@ -1652,9 +1652,19 @@ function stripInternal(
   if (req.max_tokens !== null) body.max_tokens = req.max_tokens;
   for (const key of FORWARDED_REQUEST_PARAM_KEYS) {
     const value = req[key];
-    if (key === "thinking" && Array.isArray(value)) {
-      requestMutations.thinking_history_stripped_for_target = true;
-      continue;
+    if (key === "thinking") {
+      if (Array.isArray(value)) {
+        requestMutations.thinking_history_stripped_for_target = true;
+        continue;
+      }
+      if (
+        targetProviderProtocol !== "anthropic_messages" &&
+        value !== undefined &&
+        value !== null
+      ) {
+        requestMutations.thinking_history_stripped_for_target = true;
+        continue;
+      }
     }
     if (value !== undefined && value !== null) body[key] = value;
   }
