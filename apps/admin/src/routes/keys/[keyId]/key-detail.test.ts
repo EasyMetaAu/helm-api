@@ -236,7 +236,7 @@ describe('key detail page', () => {
     );
   });
 
-  it('shows a "view all" link to the global requests list (filtered by key) when there is more', () => {
+  it('shows a "view all" link to the global requests list filtered by key and active window', () => {
     render(KeyDetailPage, {
       data: pageData({
         // 60 in the window, only the most-recent 25 shown → there IS more.
@@ -245,10 +245,37 @@ describe('key detail page', () => {
     });
     // No in-page pager any more — the key page only shows the recent slice.
     expect(screen.queryByTestId('pager-status')).not.toBeInTheDocument();
-    // "View all" hands the full history off to the global list, scoped to this key
-    // and range=all (the key's whole history, not just the selected window).
+    // The clean global requests URL defaults to today, so the link only needs key_id.
     const link = screen.getByTestId('view-all-requests');
-    expect(link).toHaveAttribute('href', '/requests?key_id=k1&range=all');
+    expect(link).toHaveAttribute('href', '/requests?key_id=k1');
+  });
+
+  it('carries a non-default key detail preset into the global requests list', () => {
+    render(KeyDetailPage, {
+      data: pageData({
+        filters: { range: '7d', page: 1 },
+        requests: { items: [requestItem('tr_1')], total: 60, page: 1, pageSize: 25 },
+      }),
+    });
+
+    expect(screen.getByTestId('view-all-requests')).toHaveAttribute(
+      'href',
+      '/requests?range=7d&key_id=k1',
+    );
+  });
+
+  it('carries a custom key detail date range into the global requests list', () => {
+    render(KeyDetailPage, {
+      data: pageData({
+        filters: { range: 'today', startDate: '2026-06-01', endDate: '2026-06-03', page: 1 },
+        requests: { items: [requestItem('tr_1')], total: 60, page: 1, pageSize: 25 },
+      }),
+    });
+
+    expect(screen.getByTestId('view-all-requests')).toHaveAttribute(
+      'href',
+      '/requests?start=2026-06-01&end=2026-06-03&key_id=k1',
+    );
   });
 
   it('hides the "view all" link when the window\'s requests all fit on the page', () => {

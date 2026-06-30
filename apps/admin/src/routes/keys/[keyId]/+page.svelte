@@ -15,7 +15,12 @@
     type KeyDetailFilters,
     keyDetailFiltersToSearch,
   } from '$lib/key-detail-filters.js';
-  import { type RangeKey, todayLocalDate } from '$lib/requests-filters.js';
+  import {
+    DEFAULT_PAGE_SIZE,
+    type RangeKey,
+    filtersToSearch,
+    todayLocalDate,
+  } from '$lib/requests-filters.js';
   import { t } from '$lib/i18n';
 
   type Stats = {
@@ -153,9 +158,20 @@
 
   // ── Request list (scoped to this key) ────────────────────────────────────────
   // Only the most-recent page is shown here (no in-page pager); a "view all" link
-  // hands the full history off to the global requests list, pre-filtered to this
+  // hands the current window off to the global requests list, pre-filtered to this
   // key. `hasMore` decides whether that link is worth showing.
   const hasMore = $derived(data.requests.total > data.requests.items.length);
+  const viewAllRequestsHref = $derived.by(() => {
+    const qs = filtersToSearch({
+      range: data.filters.range,
+      startDate: data.filters.startDate,
+      endDate: data.filters.endDate,
+      keyId: data.keyId,
+      page: 1,
+      pageSize: DEFAULT_PAGE_SIZE,
+    });
+    return `${base}/requests${qs ? `?${qs}` : ''}`;
+  });
 
   // Carry THIS key page (its window/range filters) as `from`, so the request
   // detail's Back link returns here — not to the global requests list.
@@ -499,15 +515,10 @@
       <RequestsTable items={data.requests.items} {detailHref} showKey={false} />
 
       {#if hasMore}
-        <!-- Only the most-recent page is shown here. The full history lives in the
-             global requests list; "View all" hands off there pre-filtered to this
-             key (range=all so it shows the key's whole history, not just the window
-             selected above). -->
+        <!-- Only the most-recent page is shown here. The full current window lives
+             in the global requests list, still pre-filtered to this key. -->
         <div class="mt-4 text-sm">
-          <a
-            data-testid="view-all-requests"
-            class="link-inline"
-            href={`${base}/requests?key_id=${encodeURIComponent(data.keyId)}&range=all`}
+          <a data-testid="view-all-requests" class="link-inline" href={viewAllRequestsHref}
             >{$t('View all requests for this key')} →</a
           >
         </div>
