@@ -246,6 +246,104 @@ function billingHeaderText(system: unknown): string | null {
   return null;
 }
 
+const CLAUDE_CODE_DATE_FINGERPRINT_RE =
+  /Today['\u2019\u02bc\u02b9]s date is ([0-9]{4})[-/]([0-9]{2})[-/]([0-9]{2})\./g;
+
+function normalizeClaudeCodeDateText(text: string): { text: string; normalized: boolean } {
+  const next = text.replace(
+    CLAUDE_CODE_DATE_FINGERPRINT_RE,
+    (_match, year: string, month: string, day: string) =>
+      `Today's date is ${year}-${month}-${day}.`,
+  );
+  return { text: next, normalized: next !== text };
+}
+
+function normalizeTextBlockArray(value: Array<unknown>): {
+  value: Array<unknown>;
+  normalized: boolean;
+} {
+  let normalized = false;
+  const next = value.map((block) => {
+    if (block === null || typeof block !== "object" || Array.isArray(block)) return block;
+    const record = block as Record<string, unknown>;
+    if (record.type !== "text" || typeof record.text !== "string") return block;
+    const text = normalizeClaudeCodeDateText(record.text);
+    if (!text.normalized) return block;
+    normalized = true;
+    return { ...record, text: text.text };
+  });
+  return normalized ? { value: next, normalized } : { value, normalized: false };
+}
+
+function normalizeSystemFingerprint(system: unknown): { value: unknown; normalized: boolean } {
+  if (typeof system === "string") {
+    const text = normalizeClaudeCodeDateText(system);
+    return text.normalized
+      ? { value: text.text, normalized: true }
+      : { value: system, normalized: false };
+  }
+  if (!Array.isArray(system)) return { value: system, normalized: false };
+  return normalizeTextBlockArray(system);
+}
+
+function normalizeMessageContentFingerprint(content: unknown): {
+  value: unknown;
+  normalized: boolean;
+} {
+  if (typeof content === "string") {
+    const text = normalizeClaudeCodeDateText(content);
+    return text.normalized
+      ? { value: text.text, normalized: true }
+      : { value: content, normalized: false };
+  }
+  if (!Array.isArray(content)) return { value: content, normalized: false };
+  return normalizeTextBlockArray(content);
+}
+
+function normalizeMessagesFingerprint(
+  messages: unknown,
+  opts: { normalizeAllTextMessages: boolean },
+): { value: unknown; normalized: boolean } {
+  if (!Array.isArray(messages)) return { value: messages, normalized: false };
+  let normalized = false;
+  const next = messages.map((message) => {
+    if (message === null || typeof message !== "object" || Array.isArray(message)) return message;
+    const record = message as Record<string, unknown>;
+    const role = record.role;
+    if (role !== "system" && role !== "developer" && !opts.normalizeAllTextMessages) {
+      return message;
+    }
+    const content = normalizeMessageContentFingerprint(record.content);
+    if (!content.normalized) return message;
+    normalized = true;
+    return { ...record, content: content.value };
+  });
+  return normalized ? { value: next, normalized } : { value: messages, normalized: false };
+}
+
+export function normalizeClaudeCodeDateFingerprintInAnthropicRequest(body: unknown): {
+  body: unknown;
+  normalized: boolean;
+} {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return { body, normalized: false };
+  }
+  const record = body as Record<string, unknown>;
+  const system = normalizeSystemFingerprint(record.system);
+  const messages = normalizeMessagesFingerprint(record.messages, {
+    normalizeAllTextMessages: billingHeaderText(record.system) !== null,
+  });
+  if (!system.normalized && !messages.normalized) return { body, normalized: false };
+  return {
+    body: {
+      ...record,
+      ...(system.normalized ? { system: system.value } : {}),
+      ...(messages.normalized ? { messages: messages.value } : {}),
+    },
+    normalized: true,
+  };
+}
+
 // —— system: string | block[] -> IR message content (string or multipart). ————————
 function normalizeSystem(system: z.infer<typeof AnthropicSystemSchema>): IRMessage["content"] {
   if (typeof system === "string") return system;
