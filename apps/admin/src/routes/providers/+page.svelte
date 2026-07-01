@@ -55,8 +55,9 @@
   // Accounts whose inline schedule edit is in flight (keyed provider/account) — used
   // to disable the control while saving without blocking the rest of the table.
   let savingSchedule = $state<Record<string, boolean>>({});
-  // Accounts whose "Reset usage" click is in flight (keyed provider/account) — clears
-  // the auto-park cooldown (#291).
+  // Codex accounts whose "Reset usage" click is in flight (keyed provider/account) —
+  // clears Helm's local auto-park cooldown (#291). Claude's 5h/7d windows are upstream
+  // subscription limits and are not operator-resettable.
   let resetting = $state<Record<string, boolean>>({});
   // The Codex account whose "Reset limit" consume is awaiting confirmation. A reset
   // spends a scarce, irreversible credit AND restores the WHOLE upstream ChatGPT
@@ -482,7 +483,8 @@
             {@const quota = quotaByKey.get(k)}
             {@const saving = savingSchedule[k] === true}
             {@const isCodex = row.provider.id === 'openai-codex'}
-            {@const supportsFast = row.provider.id === 'anthropic' || row.provider.id === 'openai-codex'}
+            {@const supportsFast =
+              row.provider.id === 'anthropic' || row.provider.id === 'openai-codex'}
             {@const codexCredits = isCodex ? (quota?.resetCredits ?? null) : null}
             {@const usageLimit = usageLimitStatus(quota)}
             {@const usageLimitRecovery = usageLimit ? autoRecoverIn(usageLimit.untilMs) : ''}
@@ -653,11 +655,7 @@
                     disabled={saving}
                     aria-label={$t('Fast mode')}
                     onchange={(e) =>
-                      toggleFastMode(
-                        row.provider.id,
-                        row.account.account,
-                        e.currentTarget.checked,
-                      )}
+                      toggleFastMode(row.provider.id, row.account.account, e.currentTarget.checked)}
                   />
                 {:else}
                   <span class="text-xs text-ink-muted">—</span>
@@ -693,7 +691,7 @@
                         account: row.account.account,
                       })}>{$t('Manage')}</button
                   >
-                  {#if usageLimit}
+                  {#if usageLimit && isCodex}
                     <button
                       type="button"
                       class="btn-secondary"

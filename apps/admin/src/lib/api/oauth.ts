@@ -208,9 +208,10 @@ export async function logoutOAuth(provider: string, account = 'default'): Promis
   if (!res.ok && res.status !== 204) await asJson(res);
 }
 
-// POST /oauth/:provider/reset?account= -> clear the auto-park usage-limit cooldown so
-// a rate-limited account rejoins the pool on the next request ("Reset usage"). Leaves
-// the operator's schedulable park untouched.
+// POST /oauth/:provider/reset?account= -> Codex-only local cooldown override. Clears
+// Helm's auto-park usage-limit cooldown so the account rejoins the pool on the next
+// request ("Reset usage"). Leaves the operator's schedulable park untouched. Claude
+// 5h/7d windows are upstream subscription limits and are not resettable here.
 export async function resetUsageLimit(provider: string, account = 'default'): Promise<void> {
   const res = await fetch(`${BASE}/${provider}/reset?account=${encodeURIComponent(account)}`, {
     method: 'POST',
