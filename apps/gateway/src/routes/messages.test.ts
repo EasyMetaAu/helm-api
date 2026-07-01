@@ -838,6 +838,14 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
         },
         { type: "text", text: "Todayʹs date is 2026/07/01." },
       ],
+      messages: [{ role: "user", content: "user marker: Today's date is 2026/07/02." }],
+      tools: [
+        {
+          name: "date_check",
+          description: "tool marker: Todayʼs date is 2026/07/03.",
+          input_schema: { type: "object", properties: {} },
+        },
+      ],
     };
     const { record, insertPayload } = makeRecord({ capturePayloads: true });
     const { deps, harness } = makeDeps({ record });
@@ -851,18 +859,38 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
 
     const meta = (harness.pipelineSawIR?.metadata ?? {}) as { native_request?: unknown };
     const carrier = meta.native_request as {
-      body?: { system?: Array<{ text?: string }> };
+      body?: {
+        system?: Array<{ text?: string }>;
+        messages?: Array<{ content?: string }>;
+        tools?: Array<{ description?: string }>;
+      };
       raw_body?: string;
       mutations?: { body_shims_applied?: string[] };
     };
     expect(carrier.body?.system?.[1]?.text).toBe("Today's date is 2026-07-01.");
-    expect(JSON.parse(carrier.raw_body ?? "{}").system[1].text).toBe("Today's date is 2026-07-01.");
+    expect(carrier.body?.messages?.[0]?.content).toBe("user marker: Today's date is 2026-07-02.");
+    expect(carrier.body?.tools?.[0]?.description).toBe("tool marker: Today's date is 2026-07-03.");
+    const rawCarrier = JSON.parse(carrier.raw_body ?? "{}") as {
+      system: Array<{ text?: string }>;
+      messages: Array<{ content?: string }>;
+      tools: Array<{ description?: string }>;
+    };
+    expect(rawCarrier.system[1]?.text).toBe("Today's date is 2026-07-01.");
+    expect(rawCarrier.messages[0]?.content).toBe("user marker: Today's date is 2026-07-02.");
+    expect(rawCarrier.tools[0]?.description).toBe("tool marker: Today's date is 2026-07-03.");
     expect(carrier.mutations?.body_shims_applied).toContain(
       "claude_code_date_fingerprint_normalized",
     );
 
     const payload = insertPayload.mock.calls[0]?.[0] as { requestJson: string };
-    expect(JSON.parse(payload.requestJson).system[1].text).toBe("Todayʹs date is 2026/07/01.");
+    const captured = JSON.parse(payload.requestJson) as {
+      system: Array<{ text?: string }>;
+      messages: Array<{ content?: string }>;
+      tools: Array<{ description?: string }>;
+    };
+    expect(captured.system[1]?.text).toBe("Todayʹs date is 2026/07/01.");
+    expect(captured.messages[0]?.content).toBe("user marker: Today's date is 2026/07/02.");
+    expect(captured.tools[0]?.description).toBe("tool marker: Todayʼs date is 2026/07/03.");
   });
 
   it("stamps native_request on a STREAMING request too (Phase 2 streaming passthrough)", async () => {
