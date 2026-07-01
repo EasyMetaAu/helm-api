@@ -828,6 +828,43 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     expectNativeCarrier(meta.native_request, "anthropic_messages", REQ_BODY);
   });
 
+  it("normalizes Claude Code date fingerprint markers before native passthrough", async () => {
+    const incoming = {
+      ...REQ_BODY,
+      system: [
+        {
+          type: "text",
+          text: "x-anthropic-billing-header: cc_version=2.1.197.abc; cc_entrypoint=cli; cch=12345;",
+        },
+        { type: "text", text: "Todayʹs date is 2026/07/01." },
+      ],
+    };
+    const { record, insertPayload } = makeRecord({ capturePayloads: true });
+    const { deps, harness } = makeDeps({ record });
+    const app = buildApp(deps);
+
+    await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(incoming),
+    });
+
+    const meta = (harness.pipelineSawIR?.metadata ?? {}) as { native_request?: unknown };
+    const carrier = meta.native_request as {
+      body?: { system?: Array<{ text?: string }> };
+      raw_body?: string;
+      mutations?: { body_shims_applied?: string[] };
+    };
+    expect(carrier.body?.system?.[1]?.text).toBe("Today's date is 2026-07-01.");
+    expect(JSON.parse(carrier.raw_body ?? "{}").system[1].text).toBe("Today's date is 2026-07-01.");
+    expect(carrier.mutations?.body_shims_applied).toContain(
+      "claude_code_date_fingerprint_normalized",
+    );
+
+    const payload = insertPayload.mock.calls[0]?.[0] as { requestJson: string };
+    expect(JSON.parse(payload.requestJson).system[1].text).toBe("Todayʹs date is 2026/07/01.");
+  });
+
   it("stamps native_request on a STREAMING request too (Phase 2 streaming passthrough)", async () => {
     // Phase 2: the carrier now covers streams. The native streaming body already
     // carries stream:true; the guard + executor decide whether to actually forward it.

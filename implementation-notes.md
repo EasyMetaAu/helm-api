@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-07-01 · Claude Code 日期指纹入站归一化（Anthropic protocol / native passthrough，docs/05/07，原则 7/8）
+
+- **背景（Lukin）**：升级最新 `claude update` 后当前最新客户端为 `2.1.197`；二进制中确认仍存在 `ANTHROPIC_BASE_URL` + `Asia/Shanghai|Asia/Urumqi` 检测，以及把 `Today's date is YYYY-MM-DD.` 改成不同 apostrophe / slash 日期格式的逻辑。
+- **风险**：Helm 的 `/v1/messages` 会把 Claude Code 原始 Anthropic body 同时转换成 IR，并作为 `native_request` 交给 native passthrough；如果不处理，日期指纹会在互译路径和 byte passthrough 路径继续到达上游。
+- **修复决策**：新增 core 纯函数 `normalizeClaudeCodeDateFingerprintInAnthropicRequest()`，只还原精确日期句式：`Today[',’,ʼ,ʹ]s date is YYYY[-/]MM[-/]DD.` → `Today's date is YYYY-MM-DD.`；默认只处理 top-level `system` 与 `system/developer` message，若检测到 Claude Code billing header，则也处理 message 文本块以覆盖动态 system sections 被移到消息里的形态。
+- **passthrough 决策**：`request_payloads.request_json` 保留客户端原始输入用于审计；`native_request.body/raw_body` 使用归一化后的 body，并在 mutation ledger 记录 `body_shims_applied=["claude_code_date_fingerprint_normalized"]`，避免隐式改写。
+- **验证**：新增 core 纯函数测试与 gateway native carrier 回归；`pnpm vitest run packages/core/src/protocol/anthropic/request.test.ts packages/core/src/protocol/anthropic/date-fingerprint.test.ts apps/gateway/src/routes/messages.test.ts` 122/122 绿，`pnpm typecheck` 绿，触碰文件 Biome 绿，全仓 `pnpm lint` 退出 0（仅既有 style info）。全量 `pnpm test` 4888/4890 绿后被 2 个 PGlite 15s timeout 拦住，两个失败文件单独重跑均绿。
+
 ## 2026-07-01 · admin telemetry 聚合改为列化延迟 + 覆盖索引（Admin observability / store，docs/07/11，原则 7）
 
 - **背景（Lukin）**：生产 SQLite 数据库约 22GB，`/admin/api/stats` 在 7d/30d 窗口可跑到 100s+；由于 SQLite 适配器使用同步 `better-sqlite3`，这类长统计会阻塞 Node event loop，让其它管理端 API 看起来也一起卡住。
@@ -24,19 +32,13 @@
 - **前端决策**：admin shell 只声明 SVG favicon，保留 PNG 文件作为兼容/直接访问资产，但不主动让浏览器同时拉两张图。
 - **验证**：新增 gateway 静态资源缓存回归测试与 admin shell favicon 数量测试；运行时检查确认 favicons 返回私有 7 天缓存，`/admin/` 仍返回 `no-cache`。
 
-## 2026-06-30 · per-model reasoning effort policy（执行 fallback / 协议转换，docs/04/05，原则 2/5/8）
-
-- **背景（Lukin）**：生产请求 `10124906-2d15-4cf6-accf-8ce26227a8ca` 走 `economy`，首个 `openai-codex/gpt-5.4-mini` 3s timeout 后 fallback 到 `anthropic/claude-haiku-4-5-20251001`；Haiku 返回 `400 invalid_request_error: This model does not support the effort parameter.`。客户端原始 payload 没有 `reasoning_effort`，是 `economy.reasoning_effort: medium` 在路由阶段强制注入。
-- **根因**：`reasoning_effort` 是跨协议 IR 字段，但模型真正支持的是具体 wire 字段：OpenAI `reasoning.effort`、Anthropic `output_config.effort`、Anthropic `thinking`、Gemini `thinkingConfig`。Haiku 4.5 支持 manual thinking budget，但不支持 Anthropic adaptive `output_config.effort`；旧代码把 lane effort 同时合成 thinking + output_config，导致下游 400。之前的 executor guard 又把支持信息写死在代码里，并且选择 skip candidate，不能表达“这个模型能用 thinking，但不能用 effort 参数”。
-- **修复决策**：在 catalog capability 增加 `reasoningEffort`，由 `config/capabilities.yaml` 为每个模型声明各 wire 字段是否支持、支持哪些 level、以及 level map。executor 在每个 candidate attempt 上按该 policy 适配 body：支持则按配置映射，不支持则删除该 wire 参数，继续尝试当前模型；不再因为 unsupported effort 直接 skip candidate。
-- **当前配置**：Codex/OpenAI entries 声明 `openaiReasoning` levels；Gemini entries 声明 `geminiThinkingConfig`；Anthropic Opus/Fable 使用 `anthropicOutputConfig` 并禁用 manual thinking；Sonnet 4.6 将 `xhigh -> max`；Haiku 4.5 删除 `output_config.effort`，但保留/合成 manual `thinking`。
-- **验证**：新增 translated + native passthrough regression：Sonnet `xhigh` 映射为 `output_config.effort=max` 且不 skip；Haiku `reasoning_effort=medium` 仍使用 Haiku，上游 body 无 `output_config` 且有 `thinking`；native passthrough 同样删除 unsupported `output_config.effort`。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+- **2026-06-30 · per-model reasoning effort policy（执行 fallback / 协议转换，docs/04/05，原则 2/5/8）**：新增 catalog `reasoningEffort` policy，按模型/协议 wire 字段映射或删除 unsupported effort；Haiku 4.5 保留 manual `thinking` 但删除 `output_config.effort`，Sonnet `xhigh -> max`，translated/native passthrough 回归覆盖。
 
 - **2026-06-30 · Anthropic `output_config.effort` 与 OpenAI `reasoning_effort` 双向保真（协议转换/执行 fallback，docs/05/04，原则 5/8）**：Anthropic 入站 `output_config.effort` 提升到 IR `reasoning_effort`，OpenAI/Responses fallback 保留推理等级；反向 GPT/OpenAI→Anthropic 在无显式 output_config 时合成 `output_config.effort`；只映射等级字段，不从 `thinking.budget_tokens` 反推。
 

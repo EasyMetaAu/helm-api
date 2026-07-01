@@ -352,6 +352,7 @@ export {
   transformRequestOut as anthropicTransformRequestOut,
   transformResponseIn as anthropicTransformResponseIn,
 } from "./protocol/anthropic/index.js";
+export { normalizeClaudeCodeDateFingerprintInAnthropicRequest } from "./protocol/anthropic/request.js";
 // Gemini-native error envelope transformer (docs/05, 07). HelmError -> the Google
 // google.rpc.Status { error: { code, message, status } } shape; status/code from
 // err.http_status.
