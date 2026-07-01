@@ -617,18 +617,22 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
   });
 
   // POST /oauth/:provider/reset?account=... -> 204 ("Reset usage")
-  // Clear the AUTO-park usage-limit cooldown so a rate-limited account rejoins the
-  // pool on the next request. Clears ONLY the cooldown (live member + persisted) —
-  // an operator-parked (schedulable=false) account stays parked. No rebuild needed:
-  // applyUsageLimit flips the live member in place. 503 when OAuth is disabled (no
-  // seam) — same as every other /oauth/* route, so a disabled deployment never mutates
-  // quota state. (buildServer always wires applyUsageLimit, so the seam is the real gate.)
+  // Codex-only local cooldown override: clear Helm's AUTO-park usage-limit cooldown
+  // so the account rejoins the pool on the next request. Clears ONLY the cooldown
+  // (live member + persisted) — an operator-parked (schedulable=false) account stays
+  // parked. Claude's 5h/7d subscription windows are upstream limits, so they are not
+  // exposed here as resettable. No rebuild needed: applyUsageLimit flips the live
+  // member in place. 503 when OAuth is disabled (no seam), matching /oauth/* routes.
   app.post("/admin/api/oauth/:provider/reset", async (c) => {
     const s = seam();
     if (!s || !deps.applyUsageLimit) return c.json({ error: "oauth login not configured" }, 503);
+    const providerId = c.req.param("provider");
+    if (providerId !== "openai-codex") {
+      return c.json({ error: "usage reset is only supported for openai-codex" }, 400);
+    }
     const account = c.req.query("account") || DEFAULT_ACCOUNT;
     try {
-      await deps.applyUsageLimit(c.req.param("provider"), account, null);
+      await deps.applyUsageLimit(providerId, account, null);
       return c.body(null, 204);
     } catch (e) {
       return c.json({ error: errMessage(e) }, 400);

@@ -224,6 +224,34 @@ describe('providers page', () => {
     expect(within(row).queryByText('Rate limited')).not.toBeInTheDocument();
   });
 
+  it('does not render "Reset usage" for a rate-limited Anthropic account', () => {
+    const now = Date.now();
+    renderPage({
+      quota: [
+        {
+          providerId: 'anthropic',
+          account: 'acct-claude',
+          windows: [
+            {
+              key: '5h',
+              usedPercent: 100,
+              resetsAtMs: now + 2 * 60 * 60_000,
+              windowMinutes: null,
+            },
+          ],
+          capturedAt: now,
+          source: 'anthropic',
+          usageLimitedUntilMs: now + 2 * 60 * 60_000,
+        },
+      ],
+    });
+
+    const row = screen.getByTestId('provider-account-row');
+    expect(within(row).getByText('Rate limited')).toBeInTheDocument();
+    expect(within(row).queryByRole('button', { name: /reset usage/i })).not.toBeInTheDocument();
+    expect(resetUsageLimit).not.toHaveBeenCalled();
+  });
+
   it('renders "Direct" and caps the models list with a +N pill', () => {
     renderPage({
       providers: [

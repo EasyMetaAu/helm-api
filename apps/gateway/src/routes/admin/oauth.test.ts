@@ -663,16 +663,18 @@ describe("admin OAuth routes — POST /oauth/:provider/reset (Reset usage)", () 
     expect(applyUsageLimit).toHaveBeenCalledWith("openai-codex", "default", null);
   });
 
-  it("honors an explicit ?account and never touches schedulable (cooldown only)", async () => {
+  it("rejects Anthropic reset because Claude usage windows are not resettable", async () => {
     const applyUsageLimit = vi.fn(async () => {});
     const seam = fullSeam();
     const res = await app({ oauth: seam, applyUsageLimit }).request(
       "/admin/api/oauth/anthropic/reset?account=work",
       { method: "POST" },
     );
-    expect(res.status).toBe(204);
-    expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "work", null);
-    // Reset is a cooldown-only operation — it must not re-schedule the account.
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { error: string }).toMatchObject({
+      error: "usage reset is only supported for openai-codex",
+    });
+    expect(applyUsageLimit).not.toHaveBeenCalled();
     expect(
       (seam as unknown as { setAccountSchedule: ReturnType<typeof vi.fn> }).setAccountSchedule,
     ).not.toHaveBeenCalled();
