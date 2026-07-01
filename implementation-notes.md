@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-07-01 · Claude Code 日期指纹扩展到全部 prompt 文本面（Anthropic protocol / anti-fingerprint，docs/05/07，原则 7/8）
+
+- **背景（Lukin）**：阅读 X 复盘后确认风险不应只按 `system` 推断；Claude Code 当前实现虽把 `currentDate` 放入系统上下文，但从防检测角度，任意会被发往 Anthropic 的 prompt 文本块只要出现同一句隐写模板，都应还原为普通字符串。
+- **修复决策**：`normalizeClaudeCodeDateFingerprintInAnthropicRequest()` 不再依赖 billing header，也不再按 message role 限制；所有 `messages[].content` 的 string / `type:"text"` block 都归一化，嵌套 `tool_result.content` 也处理。
+- **工具提示面**：`tools[].description` 也是会进入上游 prompt surface 的自然语言说明，同样归一化；但 `tool_use.input`、`input_schema`、`metadata` 等结构化/数据字段不递归改写，避免把用户数据或 schema 常量改坏。
+- **边界**：仍只匹配精确句式 `Today[',’,ʼ,ʹ]s date is YYYY[-/]MM[-/]DD.`，统一输出 `Today's date is YYYY-MM-DD.`；这覆盖 X 文强调的「普通第三方端点 + 中国时区」即普通 apostrophe + slash 日期。
+- **验证**：新增 core 测试覆盖 user/assistant/tool_result/tools description，gateway native carrier 测试覆盖 message + tools 字段；目标 Vitest 绿。
+
 ## 2026-07-01 · Claude Code 日期指纹入站归一化（Anthropic protocol / native passthrough，docs/05/07，原则 7/8）
 
 - **背景（Lukin）**：升级最新 `claude update` 后当前最新客户端为 `2.1.197`；二进制中确认仍存在 `ANTHROPIC_BASE_URL` + `Asia/Shanghai|Asia/Urumqi` 检测，以及把 `Today's date is YYYY-MM-DD.` 改成不同 apostrophe / slash 日期格式的逻辑。
@@ -24,19 +32,13 @@
 - **范围限制**：本次不改 admin 路由返回形状，也不引入物化日报表；先消除确认过的同步慢查询放大器。若未来 telemetry 增长到百万级以上，再考虑后台 rollup 表或异步 worker。
 - **验证**：新增 SQLite/PG 迁移回填测试、SQLite “篡改 decision_json 后 aggregate 仍读列化延迟”测试、跨适配器 aggregate 延迟契约；全量 `pnpm test` 4887/4887 绿，`pnpm typecheck`、`pnpm build` 绿。
 
-## 2026-06-30 · admin favicon cache policy（Admin UI 静态资源，docs/11，原则 7）
-
-- **背景（Lukin）**：`/admin/favicon.svg` 与 `/admin/favicon.png` 在浏览器网络面板里表现很慢，但文件本身很小（SVG 664B、PNG 约 19KB）。实测问题不是图片体积，而是 admin 静态资源缓存策略把它们当作 SPA shell 处理。
-- **根因**：`admin-static` 对除 `/_app/immutable/` 外的所有 `/admin` 静态资源统一设置 `Cache-Control: no-cache`。这对 `index.html` 是正确的（必须每次 revalidate 才能捡到新 hash chunk），但 favicon 不是 shell；再加上 `app.html` 同时声明 SVG 与 PNG，浏览器可发起重复图标请求。
-- **修复决策**：`/admin/favicon.{svg,png}` 单独设置 `Cache-Control: private, max-age=604800`，只允许浏览器私有缓存一周；`/admin/` 与 SPA deep-link fallback 仍保持 `no-cache`，避免部署后旧 shell 指向旧 chunk。
-- **前端决策**：admin shell 只声明 SVG favicon，保留 PNG 文件作为兼容/直接访问资产，但不主动让浏览器同时拉两张图。
-- **验证**：新增 gateway 静态资源缓存回归测试与 admin shell favicon 数量测试；运行时检查确认 favicons 返回私有 7 天缓存，`/admin/` 仍返回 `no-cache`。
-
 ---
 
 ## 历史条目摘要（压缩归档）
 
 > 以下为更早条目的一行要点（新→旧）。完整原文见 git history（本文件在 2026-06-05 压缩前的版本）。
+
+- **2026-06-30 · admin favicon cache policy（Admin UI 静态资源，docs/11，原则 7）**：favicon 慢不是体积问题，而是 `/admin` 静态资源 no-cache 策略；`/admin/favicon.{svg,png}` 改私有缓存 7 天，SPA shell/deep-link fallback 仍 no-cache，admin shell 只声明 SVG 避免双拉；补 gateway/admin 回归测试。
 
 - **2026-06-30 · per-model reasoning effort policy（执行 fallback / 协议转换，docs/04/05，原则 2/5/8）**：新增 catalog `reasoningEffort` policy，按模型/协议 wire 字段映射或删除 unsupported effort；Haiku 4.5 保留 manual `thinking` 但删除 `output_config.effort`，Sonnet `xhigh -> max`，translated/native passthrough 回归覆盖。
 
