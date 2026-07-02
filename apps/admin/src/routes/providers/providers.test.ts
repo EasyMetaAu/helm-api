@@ -129,6 +129,39 @@ describe('providers page', () => {
     expect(within(row).getByText('claude-haiku-4-5')).toBeInTheDocument();
   });
 
+  it('labels the current Claude scoped weekly Fable quota window', () => {
+    renderPage({
+      quota: [
+        {
+          providerId: 'anthropic',
+          account: 'acct-claude',
+          windows: [
+            { key: '5h', usedPercent: 11, resetsAtMs: Date.now() + 3_600_000, windowMinutes: null },
+            {
+              key: '7d',
+              usedPercent: 7,
+              resetsAtMs: Date.now() + 86_400_000,
+              windowMinutes: null,
+            },
+            {
+              key: '7d-fable',
+              usedPercent: 5,
+              resetsAtMs: Date.now() + 86_400_000,
+              windowMinutes: null,
+            },
+          ],
+          capturedAt: Date.now(),
+          source: 'anthropic',
+          usageLimitedUntilMs: null,
+        },
+      ],
+    });
+
+    const row = screen.getByTestId('provider-account-row');
+    expect(within(row).getByText('7d · Fable')).toBeInTheDocument();
+    expect(within(row).getByText('5%')).toBeInTheDocument();
+  });
+
   it('uses the saturated quota window as the rate-limit recovery source', () => {
     const now = Date.now();
     renderPage({

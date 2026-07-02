@@ -95,6 +95,21 @@ describe("loadRuntimeCatalog", () => {
     expect(gpt4o?.capabilities.supportsVision).toBe(true);
   });
 
+  it("loads the native Claude Fable pricing and capabilities from real config", () => {
+    const catalog = loadRuntimeCatalog({ configDir: "config" });
+    const fable = catalog.get("anthropic/claude-fable-5");
+
+    expect(fable?.source).toBe("override");
+    expect(fable?.pricing).toMatchObject({
+      inputPerMTokUsd: 10,
+      outputPerMTokUsd: 50,
+      cacheReadPerMTokUsd: 1,
+      cacheWritePerMTokUsd: 12.5,
+    });
+    expect(fable?.capabilities.maxContextTokens).toBe(1_000_000);
+    expect(fable?.capabilities.supportsStreaming).toBe(true);
+  });
+
   it("fails closed on an invalid override yaml (principle 2)", () => {
     expect(() =>
       loadRuntimeCatalog({

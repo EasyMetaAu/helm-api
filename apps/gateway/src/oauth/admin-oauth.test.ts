@@ -993,16 +993,35 @@ describe("createOAuthAdmin > fetchAnthropicQuota", () => {
       json({
         five_hour: { utilization: 3, resets_at: "2026-06-04T12:00:00.000Z" },
         seven_day: { utilization: 17, resets_at: "2026-06-08T12:00:00.000Z" },
-        seven_day_sonnet: { utilization: 0, resets_at: "2026-06-08T12:00:00.000Z" },
+        seven_day_sonnet: null,
+        limits: [
+          {
+            kind: "session",
+            group: "session",
+            percent: 3,
+            resets_at: "2026-06-04T12:00:00.000Z",
+            scope: null,
+          },
+          {
+            kind: "weekly_all",
+            group: "weekly",
+            percent: 17,
+            resets_at: "2026-06-08T12:00:00.000Z",
+            scope: null,
+          },
+          {
+            kind: "weekly_scoped",
+            group: "weekly",
+            percent: 5,
+            resets_at: "2026-06-08T12:00:00.000Z",
+            scope: { model: { id: null, display_name: "Fable" }, surface: null },
+          },
+        ],
       }),
     );
     const first = await fetchQuota({ account: "default" });
     const second = await fetchQuota({ account: "default" });
-    expect(first?.map((w) => `${w.key}:${w.usedPercent}`)).toEqual([
-      "5h:3",
-      "7d:17",
-      "7d-sonnet:0",
-    ]);
+    expect(first?.map((w) => `${w.key}:${w.usedPercent}`)).toEqual(["5h:3", "7d:17", "7d-fable:5"]);
     expect(second).toEqual(first); // served from the warm cache
     expect(usageHits()).toBe(1);
   });

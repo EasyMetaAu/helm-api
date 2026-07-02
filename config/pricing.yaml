@@ -104,8 +104,10 @@ zenmux-anthropic/claude-haiku-4.5:
 # selection) so subscription traffic shows real $ in the dashboard instead of "—".
 # Generated catalog has no entry for these models (only old claude-3-5-*), so per the
 # "API price first, else official" rule these use OFFICIAL Anthropic list prices.
-# cache_read = 0.1x input, cache_write (5-min) = 1.25x input — load-bearing: Claude
-# Code caches heavily, and without these computeCostUsd bills cached tokens at full
+# cache_read = 0.1x input, cache_write (5-min) = 1.25x input — verified against the
+# official Anthropic pricing page on 2026-07-02 (Fable 5: $10/M input, $50/M
+# output, $1/M cache hit, $12.50/M 5-min cache write). Load-bearing: Claude Code
+# caches heavily, and without these computeCostUsd bills cached tokens at full
 # input rate (large over-estimate). MUST stay in sync with the capabilities.yaml caps.
 anthropic/claude-opus-4-8:
   inputPerMTokUsd: 5.0

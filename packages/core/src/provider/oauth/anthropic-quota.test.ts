@@ -6,6 +6,73 @@ const RESET = "2026-06-03T12:00:00.000Z";
 const RESET_MS = Date.parse(RESET);
 
 describe("parseAnthropicUsageBody", () => {
+  it("uses the current limits[] shape so scoped Fable usage is not dropped", () => {
+    const out = parseAnthropicUsageBody(
+      {
+        five_hour: { utilization: 11, resets_at: RESET },
+        seven_day: { utilization: 7, resets_at: RESET },
+        seven_day_opus: null,
+        seven_day_sonnet: null,
+        limits: [
+          {
+            kind: "session",
+            group: "session",
+            percent: 11,
+            resets_at: RESET,
+            scope: null,
+            is_active: true,
+          },
+          {
+            kind: "weekly_all",
+            group: "weekly",
+            percent: 7,
+            resets_at: RESET,
+            scope: null,
+            is_active: false,
+          },
+          {
+            kind: "weekly_scoped",
+            group: "weekly",
+            percent: 5,
+            resets_at: RESET,
+            scope: { model: { id: null, display_name: "Fable" }, surface: null },
+            is_active: false,
+          },
+        ],
+      },
+      NOW,
+    );
+    expect(out).toEqual([
+      { key: "5h", usedPercent: 11, resetsAtMs: RESET_MS, windowMinutes: null },
+      { key: "7d", usedPercent: 7, resetsAtMs: RESET_MS, windowMinutes: null },
+      { key: "7d-fable", usedPercent: 5, resetsAtMs: RESET_MS, windowMinutes: null },
+    ]);
+  });
+
+  it("fills missing session/all windows from legacy fields when limits[] is partial", () => {
+    const out = parseAnthropicUsageBody(
+      {
+        five_hour: { utilization: 11, resets_at: RESET },
+        seven_day: { utilization: 7, resets_at: RESET },
+        limits: [
+          {
+            kind: "weekly_scoped",
+            group: "weekly",
+            percent: 5,
+            resets_at: RESET,
+            scope: { model: { id: null, display_name: "Fable" }, surface: null },
+          },
+        ],
+      },
+      NOW,
+    );
+    expect(out).toEqual([
+      { key: "7d-fable", usedPercent: 5, resetsAtMs: RESET_MS, windowMinutes: null },
+      { key: "5h", usedPercent: 11, resetsAtMs: RESET_MS, windowMinutes: null },
+      { key: "7d", usedPercent: 7, resetsAtMs: RESET_MS, windowMinutes: null },
+    ]);
+  });
+
   it("maps the four windows to 5h / 7d / 7d-opus / 7d-sonnet (utilization is 0–100 percent)", () => {
     const out = parseAnthropicUsageBody(
       {

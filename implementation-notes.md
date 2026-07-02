@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-07-02 · Claude Fable 周限额改读 `limits[]`（Admin providers / OAuth quota，docs/11，原则 3/7）
+
+- **背景（Lukin）**：Claude Code 的 Plan usage limits 已把 scoped weekly model 用量显示为 `Fable`，不再是旧的 Sonnet 专项行；本机真实 `GET https://api.anthropic.com/api/oauth/usage` 返回中，`seven_day_sonnet` 为 `null`，而 `limits[]` 包含 `kind:"weekly_scoped"` + `scope.model.display_name:"Fable"`。
+- **修复决策**：Anthropic quota parser 优先读取新的 `limits[]`：`session -> 5h`、`weekly_all -> 7d`、`weekly_scoped -> 7d-{model-slug}`，例如 Fable 变成 `7d-fable`；旧 top-level `five_hour/seven_day/seven_day_opus/seven_day_sonnet` 只作为 fallback，保证老 payload 继续可读。
+- **UI 决策**：providers 页 quota label 增加 `7d · Fable`，并为未来 `7d-*` scoped key 提供通用标题化 fallback；避免下一次 Claude 增加 scoped model 时页面又退回原始 key 或显示旧 Sonnet。
+- **价格决策**：`anthropic/claude-fable-5` 已按官方 Anthropic 价格配置为 input `$10/M`、output `$50/M`、cache hit `$1/M`、5-minute cache write `$12.50/M`；官方还有 1-hour cache write `$20/M`，但当前 Helm pricing schema 只有一个 `cacheWritePerMTokUsd`，所以仍记录 5-minute rate，避免在本次小修里扩大 telemetry schema。
+- **验证**：真实上游 usage payload 与 `/v1/models` 已本机核验；新增 parser、gateway quota pull、providers 页面回归测试。目标 parser/admin 页面测试与 typecheck 绿；gateway SQLite 相关测试仍被本机 `better-sqlite3` Node ABI 不匹配阻塞。
+
 ## 2026-07-02 · OAuth 测试成功与 quota PULL 同步账号可用状态（Admin providers / OAuth cooldown，docs/04/11，原则 3/5/7）
 
 - **背景（Lukin）**：生产中 `riverathomas6094@outlook.com` 已能通过单账号 Test 成功返回，但 providers 页仍因旧 `usage_limited_until_ms` 显示“已限流 / 3 天后恢复”，正常路由池也继续跳过该账号。
