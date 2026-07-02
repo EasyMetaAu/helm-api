@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-07-02 · OAuth 测试成功与 quota PULL 同步账号可用状态（Admin providers / OAuth cooldown，docs/04/11，原则 3/5/7）
+
+- **背景（Lukin）**：生产中 `riverathomas6094@outlook.com` 已能通过单账号 Test 成功返回，但 providers 页仍因旧 `usage_limited_until_ms` 显示“已限流 / 3 天后恢复”，正常路由池也继续跳过该账号。
+- **修复决策**：`GET /admin/api/oauth/quota` 对“已 park 账号”把成功 quota PULL 视作可信状态同步：窗口 near-full 时用真实恢复窗口 `replace` 旧 cooldown；窗口干净时清空 cooldown；未 park 账号仍不会因 PULL 预先 park。
+- **测试路径决策**：Providers 页 Test 仍使用独立 per-account client，不写 request telemetry / payload，也不扰动主路由 breaker；但测试成功会写入 `oauth_usage` 并清空旧 auto-park cooldown，因为它消耗真实上游额度且证明账号当前可用。
+- **UI 决策**：Test 成功后自动 `invalidateAll()`，让状态 pill、Today 用量和 quota/cooldown 立即重新读取，而不是要求操作员手动刷新。
+- **验证**：新增 admin OAuth route 回归覆盖干净窗口清 cooldown、旧 7d cooldown 替换为 active 5h、Test 成功记录用量并清 cooldown；目标 Vitest 53/53 绿，typecheck / build 绿。本机全量 SQLite 测试受 `better-sqlite3` Node ABI 不匹配阻塞，非业务断言失败。
+
 ## 2026-07-01 · Claude Code 日期指纹扩展到全部 prompt 文本面（Anthropic protocol / anti-fingerprint，docs/05/07，原则 7/8）
 
 - **背景（Lukin）**：阅读 X 复盘后确认风险不应只按 `system` 推断；Claude Code 当前实现虽把 `currentDate` 放入系统上下文，但从防检测角度，任意会被发往 Anthropic 的 prompt 文本块只要出现同一句隐写模板，都应还原为普通字符串。
@@ -42,7 +50,6 @@
 - **2026-06-30 · Fast mode 账号强制覆盖 + API key 透传限制（OAuth subscription provider / key governance，docs/04/11，原则 2/5）**：账号级 `fastMode` 统一映射到 Codex `service_tier:"priority"` 与 Anthropic `speed:"fast"` + beta header，并强制覆盖 provider wire request；per-key `allow_fast_mode` 只治理客户端透传，不阻止账号级强制启用；UI 仅对支持 provider 展示。
 - **2026-06-30 · OAuth 5h 限额恢复时间不再落回 60s（admin/gateway，docs/04，原则 5）**：已 park 账号的 generic 60s 429 fallback 改用 near-full (`>=95%`) 窗口推断真实恢复时间，避免 Anthropic 5h 98–99% 限额显示 `0m`；健康账号仍不因 98% 预先 park。验证 core/gateway/admin 相关测试、全量 test/typecheck/svelte-check/biome/build 绿，发 v0.22.27。
 - **2026-06-29 · OAuth 配额冷却 extend-only + refresh-429 归账号级（Codex review 跟进；provider 执行/池）**：修复 Codex quota 精确长 reset 被 generic 60s 429 覆盖的问题（park/applyUsageLimit 改 extend-only，清除仍直通）；同时把 `TokenRefreshError(429)` 纳入 pool 与 executor 的账号级 rate-limit 分类，避免 refresh 限流污染 alias breaker。验证 pool/executor 矩阵、typecheck、biome、build 绿，发 v0.22.24。
-- **2026-06-29 · OAuth 单账号故障不再污染 alias 级熔断（provider 执行；docs/04，原则 5）**：OAuth pool 内部拦截账号级 `TokenRefreshError(400/401/403)`、上游 `401/403` 与 `429`，按账号 park/冷却并请求内 sibling 重试；executor 只对账号级故障跳过 alias breaker，整池 5xx/transport 故障仍记 breaker。验证 pool/executor/server OAuth 回归绿。
 
 ## 更早历史总览
 

@@ -1279,6 +1279,7 @@ export async function buildServer(
     providerId: string,
     account: string,
     untilMs: number | null,
+    mode: "extend" | "replace" = "extend",
   ): Promise<void> => {
     const pool = oauthPoolClients.get(providerId);
     // A park (non-null) is EXTEND-ONLY: a precise quota reset (e.g. a Codex weekly limit,
@@ -1286,7 +1287,7 @@ export async function buildServer(
     // 429 fallback, whichever park fires last. null = clear (admin "Reset usage" / weekly
     // auto-reset) always wins. The live member holds the authoritative cooldown — max it.
     let effective = untilMs;
-    if (untilMs !== null) {
+    if (untilMs !== null && mode === "extend") {
       const current = pool?.getUsageLimit(account) ?? null;
       if (current !== null && current > untilMs) effective = current;
     }
