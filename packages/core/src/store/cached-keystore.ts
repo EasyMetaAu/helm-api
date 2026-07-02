@@ -27,11 +27,12 @@ interface Entry {
 // tracked by Map insertion order (delete + re-insert moves a key to most-recent), the
 // same proven pattern as createEvalCache.
 //
-// Any mutation (createKey/disable/deleteKey/updateKey) forwards to the inner store and
-// then busts the WHOLE cache: mutations are rare admin operations, and a full clear
-// avoids maintaining a keyId→hash reverse index while guaranteeing a revoked or edited
-// key is never served stale within the process (all mutations flow through this same
-// wrapped instance — see server.ts composition root).
+// Any mutation (createKey/disable/deleteKey/updateKey/rotateKey) forwards to the
+// inner store and then busts the WHOLE cache: mutations are rare admin operations,
+// and a full clear avoids maintaining a keyId→hash reverse index while
+// guaranteeing a revoked, edited, or rotated key is never served stale within the
+// process (all mutations flow through this same wrapped instance — see server.ts
+// composition root).
 export function createCachedKeyStore(inner: KeyStore, opts: CachedKeyStoreOptions): KeyStore {
   const { ttlMs, maxEntries, now } = opts;
   const cache = new Map<string, Entry>();
@@ -84,6 +85,15 @@ export function createCachedKeyStore(inner: KeyStore, opts: CachedKeyStoreOption
     async updateKey(keyId: string, patch: KeyPatch): Promise<void> {
       await inner.updateKey(keyId, patch);
       cache.clear();
+    },
+
+    async rotateKey(keyId, input) {
+      await inner.rotateKey(keyId, input);
+      cache.clear();
+    },
+
+    getSecretEnc(keyId) {
+      return inner.getSecretEnc(keyId);
     },
   };
 }

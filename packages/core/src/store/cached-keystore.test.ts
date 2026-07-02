@@ -28,6 +28,8 @@ function makeInner(rows: Map<string, ApiKeyRecord | null> = new Map()): KeyStore
     disable: vi.fn(async (_keyId: string) => {}),
     deleteKey: vi.fn(async (_keyId: string) => {}),
     updateKey: vi.fn(async (_keyId: string, _patch: KeyPatch) => {}),
+    rotateKey: vi.fn(async (_keyId: string, _input: { hash: string; prefix: string }) => {}),
+    getSecretEnc: vi.fn(async (_keyId: string) => "enc:test"),
   };
 }
 
@@ -119,6 +121,10 @@ describe("createCachedKeyStore", () => {
     ["disable", async (s: KeyStore) => s.disable("k1")],
     ["deleteKey", async (s: KeyStore) => s.deleteKey("k1")],
     ["updateKey", async (s: KeyStore) => s.updateKey("k1", { name: "x" })],
+    [
+      "rotateKey",
+      async (s: KeyStore) => s.rotateKey("k1", { hash: "h2", prefix: "helm_live_yyyy" }),
+    ],
   ])("busts the whole cache on %s", async (_name, mutate) => {
     const rows = new Map<string, ApiKeyRecord | null>([["h1", rec("k1", "h1")]]);
     const inner = makeInner(rows);
@@ -155,6 +161,16 @@ describe("createCachedKeyStore", () => {
 
     await cached.updateKey("k1", { allowCustomModel: true });
     expect(inner.updateKey).toHaveBeenCalledWith("k1", { allowCustomModel: true });
+
+    await cached.rotateKey("k1", { hash: "h10", prefix: "helm_live_zzzz", secretEnc: "enc:z" });
+    expect(inner.rotateKey).toHaveBeenCalledWith("k1", {
+      hash: "h10",
+      prefix: "helm_live_zzzz",
+      secretEnc: "enc:z",
+    });
+
+    expect(await cached.getSecretEnc("k1")).toBe("enc:test");
+    expect(inner.getSecretEnc).toHaveBeenCalledWith("k1");
 
     await cached.list();
     expect(inner.list).toHaveBeenCalledTimes(1);

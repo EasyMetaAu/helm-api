@@ -634,6 +634,42 @@ const MIGRATIONS: readonly Migration[] = [
         );
     `,
   },
+  {
+    // Recoverable API keys — pg mirror of sqlite v33. Existing rows remain
+    // hash-only and unrecoverable; new/rotated rows may store AES-GCM ciphertext
+    // here. This is encrypted material, never raw plaintext.
+    version: 32,
+    sql: `
+      CREATE TABLE IF NOT EXISTS api_keys (
+        key_id TEXT PRIMARY KEY,
+        hash TEXT NOT NULL UNIQUE,
+        prefix TEXT NOT NULL,
+        secret_enc TEXT,
+        account_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        name TEXT,
+        allowed_lanes JSONB,
+        allow_custom_model BOOLEAN NOT NULL DEFAULT FALSE,
+        allow_fast_mode BOOLEAN NOT NULL DEFAULT FALSE,
+        disabled BOOLEAN NOT NULL DEFAULT FALSE,
+        rate_limit_rpm INTEGER,
+        rate_limit_tpm INTEGER,
+        budget_requests INTEGER,
+        budget_tokens INTEGER,
+        budget_spend_usd DOUBLE PRECISION,
+        budget_window_seconds INTEGER,
+        over_budget_behavior TEXT NOT NULL DEFAULT 'degrade',
+        degrade_lane TEXT,
+        concurrency_limit INTEGER,
+        memory_mode TEXT NOT NULL DEFAULT 'off',
+        memory_project_id TEXT,
+        memory_thread_source TEXT NOT NULL DEFAULT 'header',
+        created_at BIGINT NOT NULL
+      );
+
+      ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS secret_enc TEXT;
+    `,
+  },
 ];
 
 // Anything that can run a raw SQL string against the Postgres connection. Both

@@ -53,9 +53,7 @@
   let geminiCurl = $derived(
     `curl "${baseBare}/v1beta/models/auto:generateContent" \\\n  -H "Content-Type: application/json" \\\n  -H "x-goog-api-key: ${keyShown}" \\\n  -d '{"contents":[{"parts":[{"text":"Hello from Helm"}]}]}'`,
   );
-  let openclawCfg = $derived(
-    `base_url: ${baseV1}\napi_key: ${keyShown}\nmodel: auto`,
-  );
+  let openclawCfg = $derived(`base_url: ${baseV1}\napi_key: ${keyShown}\nmodel: auto`);
   let sdkOpenai = $derived(
     `from openai import OpenAI\n\nclient = OpenAI(base_url="${baseV1}", api_key="${keyShown}")\nclient.chat.completions.create(model="auto", messages=[...])`,
   );
@@ -79,7 +77,9 @@
 
 {#snippet codeBlock(id: string, code: string, testid: string)}
   <div class="overflow-hidden rounded-lg border border-slate-200">
-    <div class="flex items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-3 py-1.5">
+    <div
+      class="flex items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-3 py-1.5"
+    >
       <span class="font-mono text-xs text-ink-muted">{testid.replace('snippet-', '')}</span>
       <button type="button" class="btn-primary-sm" onclick={() => copy(id, code)}
         >{copiedId === id ? $t('Copied') : $t('Copy')}</button
@@ -102,9 +102,7 @@
 
     {#if plaintextKey}
       <p data-testid="connect-secret-note" class="mt-2 text-sm text-amber-700">
-        {$t(
-          'These snippets include your new key, shown only this once. Copy what you need now — we store only a hash, so it cannot be recovered later.',
-        )}
+        {$t('These snippets include your API key. Copy what you need now and keep it private.')}
       </p>
     {/if}
 
@@ -114,19 +112,39 @@
       role="tablist"
       aria-label={$t('Connect a client')}
     >
-      <button type="button" role="tab" class="tab-btn shrink-0 whitespace-nowrap" aria-selected={tab === 'claude'}
+      <button
+        type="button"
+        role="tab"
+        class="tab-btn shrink-0 whitespace-nowrap"
+        aria-selected={tab === 'claude'}
         onclick={() => (tab = 'claude')}>{$t('Claude Code')}</button
       >
-      <button type="button" role="tab" class="tab-btn shrink-0 whitespace-nowrap" aria-selected={tab === 'codex'}
+      <button
+        type="button"
+        role="tab"
+        class="tab-btn shrink-0 whitespace-nowrap"
+        aria-selected={tab === 'codex'}
         onclick={() => (tab = 'codex')}>{$t('Codex CLI')}</button
       >
-      <button type="button" role="tab" class="tab-btn shrink-0 whitespace-nowrap" aria-selected={tab === 'gemini'}
+      <button
+        type="button"
+        role="tab"
+        class="tab-btn shrink-0 whitespace-nowrap"
+        aria-selected={tab === 'gemini'}
         onclick={() => (tab = 'gemini')}>{$t('Gemini')}</button
       >
-      <button type="button" role="tab" class="tab-btn shrink-0 whitespace-nowrap" aria-selected={tab === 'openclaw'}
+      <button
+        type="button"
+        role="tab"
+        class="tab-btn shrink-0 whitespace-nowrap"
+        aria-selected={tab === 'openclaw'}
         onclick={() => (tab = 'openclaw')}>{$t('OpenClaw')}</button
       >
-      <button type="button" role="tab" class="tab-btn shrink-0 whitespace-nowrap" aria-selected={tab === 'sdk'}
+      <button
+        type="button"
+        role="tab"
+        class="tab-btn shrink-0 whitespace-nowrap"
+        aria-selected={tab === 'sdk'}
         onclick={() => (tab = 'sdk')}>{$t('OpenAI / Anthropic SDK')}</button
       >
     </div>
@@ -134,31 +152,43 @@
     <div class="mt-4 min-h-0 flex-1 overflow-auto">
       {#if tab === 'claude'}
         <p class="mb-2 text-sm text-ink-body">
-          {$t('Set these environment variables. The base URL is the bare origin — do NOT add /v1 (Anthropic clients append /v1/messages themselves).')}
+          {$t(
+            'Set these environment variables. The base URL is the bare origin — do NOT add /v1 (Anthropic clients append /v1/messages themselves).',
+          )}
         </p>
         {@render codeBlock('claude-env', claudeEnv, 'snippet-claude')}
       {:else if tab === 'codex'}
         <p class="mb-2 text-sm text-ink-body">
-          {$t('Add a provider to ~/.codex/config.toml. The base URL MUST end in /v1 (Codex appends /responses).')}
+          {$t(
+            'Add a provider to ~/.codex/config.toml. The base URL MUST end in /v1 (Codex appends /responses).',
+          )}
         </p>
         {@render codeBlock('codex-toml', codexToml, 'snippet-codex')}
       {:else if tab === 'gemini'}
         <p class="mb-2 text-sm text-ink-body">
-          {$t('Point the Gemini CLI at Helm with these environment variables. The base URL is the bare origin — the CLI appends /v1beta/models/{model}:generateContent itself.')}
+          {$t(
+            'Point the Gemini CLI at Helm with these environment variables. The base URL is the bare origin — the CLI appends /v1beta/models/{model}:generateContent itself.',
+          )}
         </p>
         {@render codeBlock('gemini-env', geminiEnv, 'snippet-gemini-env')}
         <p class="mb-2 mt-3 text-sm text-ink-body">
-          {$t('Or call Helm\'s native Gemini route directly. The base URL is the bare origin; the request path adds /v1beta/models/{model}:generateContent, and auth uses x-goog-api-key.')}
+          {$t(
+            "Or call Helm's native Gemini route directly. The base URL is the bare origin; the request path adds /v1beta/models/{model}:generateContent, and auth uses x-goog-api-key.",
+          )}
         </p>
         {@render codeBlock('gemini-curl', geminiCurl, 'snippet-gemini')}
       {:else if tab === 'openclaw'}
         <p class="mb-2 text-sm text-ink-body">
-          {$t('Configure an OpenAI-compatible provider. The base URL ends in /v1; for the Anthropic path, use the bare origin instead.')}
+          {$t(
+            'Configure an OpenAI-compatible provider. The base URL ends in /v1; for the Anthropic path, use the bare origin instead.',
+          )}
         </p>
         {@render codeBlock('openclaw-cfg', openclawCfg, 'snippet-openclaw')}
       {:else}
         <p class="mb-2 text-sm text-ink-body">
-          {$t('Any OpenAI- or Anthropic-compatible SDK works — only the base URL and key change. Note the /v1 on the OpenAI base URL and its absence on the Anthropic one.')}
+          {$t(
+            'Any OpenAI- or Anthropic-compatible SDK works — only the base URL and key change. Note the /v1 on the OpenAI base URL and its absence on the Anthropic one.',
+          )}
         </p>
         <div class="flex flex-col gap-3">
           {@render codeBlock('sdk-openai', sdkOpenai, 'snippet-sdk-openai')}

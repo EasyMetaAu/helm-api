@@ -71,15 +71,18 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
-function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
-  const rows: ApiKeyRecord[] = [];
+type TestKeyRecord = ApiKeyRecord & { secret_enc: string | null };
+
+function makeKeyStore(): KeyStore & { rows: TestKeyRecord[] } {
+  const rows: TestKeyRecord[] = [];
   return {
     rows,
     async createKey(input: CreateKeyInput): Promise<ApiKeyRecord> {
-      const rec: ApiKeyRecord = {
+      const rec: TestKeyRecord = {
         key_id: input.keyId,
         hash: input.hash,
         prefix: input.prefix,
+        secret_enc: input.secretEnc ?? null,
         account_id: input.accountId,
         role: input.role,
         name: input.name ?? null,
@@ -144,6 +147,18 @@ function makeKeyStore(): KeyStore & { rows: ApiKeyRecord[] } {
       if (patch.memoryProjectId !== undefined) row.memory_project_id = patch.memoryProjectId;
       if (patch.memoryThreadSource !== undefined)
         row.memory_thread_source = patch.memoryThreadSource;
+    },
+    async rotateKey(keyId, input) {
+      const row = rows.find((r) => r.key_id === keyId);
+      if (!row) throw new Error(`key not found: ${keyId}`);
+      row.hash = input.hash;
+      row.prefix = input.prefix;
+      row.secret_enc = input.secretEnc ?? null;
+    },
+    async getSecretEnc(keyId) {
+      const row = rows.find((r) => r.key_id === keyId);
+      if (!row) throw new Error(`key not found: ${keyId}`);
+      return row.secret_enc;
     },
   };
 }
@@ -284,7 +299,7 @@ function decision(traceId: string, lane: string): DecisionRecord {
   };
 }
 
-let keyStore: KeyStore & { rows: ApiKeyRecord[] };
+let keyStore: KeyStore & { rows: TestKeyRecord[] };
 let rules: RuleStore;
 
 function buildDeps(over: Partial<AdminApiDeps> = {}): AdminApiDeps {
@@ -301,6 +316,10 @@ function buildDeps(over: Partial<AdminApiDeps> = {}): AdminApiDeps {
       prefix: "helm_live_PLAI",
     }),
     genKeyId: () => `key_${++n}`,
+    keySecrets: {
+      encrypt: (plaintext) => `enc:${Buffer.from(plaintext, "utf8").toString("base64")}`,
+      decrypt: (blob) => Buffer.from(blob.slice("enc:".length), "base64").toString("utf8"),
+    },
     accountId: "acct_default",
     modelAliases: () =>
       Promise.resolve(
@@ -599,8 +618,9 @@ describe("admin.api keys", () => {
     // The server-minted non-sensitive prefix is returned so the SPA need not slice
     // the plaintext (a redaction footgun); it is the same display prefix stored.
     expect(body.prefix).toBe("helm_live_PLAI");
-    // Stored as hash + prefix only — never the plaintext.
+    // Stored as hash + prefix plus encrypted recovery material — never plaintext.
     expect(keyStore.rows[0]?.hash).toBe("hash_of_plaintext_full");
+    expect(keyStore.rows[0]?.secret_enc).toMatch(/^enc:/);
     expect(JSON.stringify(keyStore.rows[0])).not.toContain("PLAINTEXT_SECRET");
     expect(keyStore.rows[0]?.memory_mode).toBe("off");
     expect(keyStore.rows[0]?.memory_thread_source).toBe("auto");
@@ -614,6 +634,77 @@ describe("admin.api keys", () => {
     expect(list[0]?.prefix).toBe("helm_live_PLAI");
     expect(list[0]).not.toHaveProperty("hash");
     expect(list[0]).not.toHaveProperty("plaintext");
+    expect(list[0]).not.toHaveProperty("secret_enc");
+  });
+
+  it("GET /keys/:id/secret reveals encrypted key material and rejects hash-only rows", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    await app.request("/admin/api/keys", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ role: "user" }),
+    });
+    const reveal = await app.request("/admin/api/keys/key_1/secret");
+    expect(reveal.status).toBe(200);
+    expect(await reveal.json()).toEqual({
+      key_id: "key_1",
+      plaintext: "helm_live_PLAINTEXT_SECRET",
+    });
+
+    const row = keyStore.rows[0];
+    expect(row).toBeDefined();
+    if (!row) throw new Error("expected key row");
+    row.secret_enc = null;
+    const old = await app.request("/admin/api/keys/key_1/secret");
+    expect(old.status).toBe(409);
+  });
+
+  it("POST /keys/:id/rotate replaces hash/prefix/secret while preserving the key row", async () => {
+    let i = 0;
+    const deps = buildDeps({
+      genKey: () => {
+        i += 1;
+        return {
+          plaintext: `helm_live_ROTATED_SECRET_${i}`,
+          hash: `hash_${i}`,
+          prefix: `helm_live_R${i}`,
+        };
+      },
+    });
+    const app = buildApp(deps);
+    await app.request("/admin/api/keys", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({
+        role: "user",
+        name: "Production",
+        allowed_lanes: ["balanced"],
+        rate_limit_rpm: 7,
+      }),
+    });
+    const beforeId = keyStore.rows[0]?.key_id;
+    const beforeCreated = keyStore.rows[0]?.disabled;
+
+    const rotated = await app.request("/admin/api/keys/key_1/rotate", { method: "POST" });
+    expect(rotated.status).toBe(200);
+    expect(await rotated.json()).toEqual({
+      key_id: "key_1",
+      plaintext: "helm_live_ROTATED_SECRET_2",
+      prefix: "helm_live_R2",
+      recoverable: true,
+    });
+    expect(keyStore.rows).toHaveLength(1);
+    expect(keyStore.rows[0]?.key_id).toBe(beforeId);
+    expect(keyStore.rows[0]?.name).toBe("Production");
+    expect(keyStore.rows[0]?.allowed_lanes).toEqual(["balanced"]);
+    expect(keyStore.rows[0]?.rate_limit_rpm).toBe(7);
+    expect(keyStore.rows[0]?.disabled).toBe(beforeCreated);
+    expect(keyStore.rows[0]?.hash).toBe("hash_2");
+    expect(keyStore.rows[0]?.prefix).toBe("helm_live_R2");
+    expect(JSON.stringify(keyStore.rows[0])).not.toContain("ROTATED_SECRET_2");
+    expect(await deps.keyStore.getByHash("hash_1")).toBeNull();
+    expect((await deps.keyStore.getByHash("hash_2"))?.key_id).toBe("key_1");
   });
 
   it("POST persists per-key memory defaults and the LIST surfaces them (issue #97)", async () => {

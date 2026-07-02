@@ -45,10 +45,10 @@ default) with `Authorization: Bearer` as a fallback. Like the other image
 surfaces it is **model-pinned** and does **not** require `allow_custom_model` —
 any key can call it.
 
-Per **Principle 7**, the plaintext key lives only in the `Authorization` header.
-It is never logged, never echoed in a response, and never written to telemetry
-or the captured payload tables. Logs reference a key by `key_id` or `keyPrefix`
-only.
+Per **Principle 7**, the plaintext key lives in the `Authorization` header and,
+when encrypted recovery is configured, in the authenticated admin create/reveal/
+rotate response. It is never logged and never written to telemetry or the
+captured payload tables. Logs reference a key by `key_id` or `keyPrefix` only.
 
 ```yaml
 # config/auth.yaml
@@ -64,8 +64,8 @@ On first start, if the `KeyStore` contains **no** keys, the gateway mints a
 single `role=root` key (`bootstrapRootKey` in
 `packages/core/src/auth/bootstrap.ts`):
 
-- Only the sha256 **hash** and the display **prefix** are persisted — never the
-  plaintext.
+- Only the sha256 **hash** and the display **prefix** are persisted for bootstrap
+  keys — never the plaintext.
 - The plaintext is printed to the boot log **exactly once** for the operator to
   capture. It is not recoverable afterward.
 - The check is idempotent: if any key already exists, bootstrap does nothing
@@ -122,23 +122,24 @@ The stored record (`ApiKeyRecord`, single source of truth in
 All of these are resolved at auth time onto `AuthIdentity.caps` and threaded
 through the request — downstream code reads the caps, never the store.
 
-- **Hashed storage only.** The store port's `CreateKeyInput` has no plaintext
-  field, so the persistence layer is structurally unable to store a plaintext
-  key. The plaintext of a freshly minted key is returned to the admin caller
-  exactly once and then discarded.
+- **Hash-auth + encrypted recovery.** The store port's `CreateKeyInput` has no
+  plaintext field, so the persistence layer is structurally unable to store a raw
+  key. It may store `secret_enc`, an AES-GCM ciphertext encrypted with
+  `HELM_OAUTH_ENC_KEY`, for admin-only reveal. Existing rows without `secret_enc`
+  remain unrecoverable until rotated.
 - **Per-key caps.** `allowed_lanes` and `allow_custom_model` constrain how a key
   may route. `allow_custom_model` lets the `model` field name a concrete model
   alias or a lane (docs/04); an explicit lane is still bounded by `allowed_lanes`
   and a violation is a 400, not a silent downgrade. (A per-key `max_lane` ceiling
   was retired — lanes are parallel, not a strict hierarchy, so the whitelist
   subsumes it; see implementation-notes.md.)
-- **Rotation & revocation never mutate in place.** `KeyStore.disable` is a soft
-  revoke (`disabled = true`); rotate by minting a new key and disabling the old
-  one. `KeyStore.updateKey` is a partial PATCH that writes only the per-key cap
-  columns present in the patch (rate limits, allowed lanes, custom-model flag,
-  budgets, concurrency, memory defaults), leaving omitted columns untouched; it
-  never mutates `role` or the immutable identity
-  (`key_id`/`hash`/`prefix`/`account_id`).
+- **Rotation preserves history.** `KeyStore.rotateKey` replaces only `hash`,
+  `prefix`, and optional `secret_enc` on the same `key_id`; name, account, role,
+  caps, usage, and telemetry history stay attached to that key. `KeyStore.disable`
+  is a soft revoke (`disabled = true`). `KeyStore.updateKey` is a partial PATCH
+  that writes only the per-key cap columns present in the patch (rate limits,
+  allowed lanes, custom-model flag, budgets, concurrency, memory defaults),
+  leaving omitted columns untouched; it never mutates `role` or account identity.
 - **Permanent deletion is an explicit second step.** An already-**revoked** key
   may be physically removed via `KeyStore.deleteKey` (admin:
   `DELETE /admin/api/keys/:id?purge=true`). The route gates it server-side: an

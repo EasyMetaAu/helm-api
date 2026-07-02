@@ -20,10 +20,17 @@ export type SqliteDb = BetterSQLite3Database<Schema> & {
 // _migrations table records applied versions so re-running is idempotent. We
 // apply DDL directly (rather than via drizzle-kit's generated bundle) so the
 // adapter is self-contained and needs no build-time codegen step.
-interface Migration {
-  readonly version: number;
-  readonly sql: string;
-}
+type Migration =
+  | {
+      readonly version: number;
+      readonly sql: string;
+      readonly run?: never;
+    }
+  | {
+      readonly version: number;
+      readonly run: (db: Database.Database) => void;
+      readonly sql?: never;
+    };
 
 const MIGRATIONS: readonly Migration[] = [
   {
@@ -736,6 +743,49 @@ const MIGRATIONS: readonly Migration[] = [
         );
     `,
   },
+  {
+    // Recoverable API keys (admin-only reveal + in-place rotation). Existing rows
+    // remain hash-only and unrecoverable; new/rotated rows may store AES-GCM
+    // ciphertext here. This is encrypted material, never raw plaintext.
+    version: 33,
+    run: (db) => {
+      const cols = db.prepare("PRAGMA table_info(api_keys)").all() as Array<{ name: string }>;
+      if (cols.length === 0) {
+        db.exec(`
+          CREATE TABLE api_keys (
+            key_id TEXT PRIMARY KEY,
+            hash TEXT NOT NULL UNIQUE,
+            prefix TEXT NOT NULL,
+            secret_enc TEXT,
+            account_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            name TEXT,
+            allowed_lanes TEXT,
+            allow_custom_model INTEGER NOT NULL DEFAULT 0,
+            allow_fast_mode INTEGER NOT NULL DEFAULT 0,
+            disabled INTEGER NOT NULL DEFAULT 0,
+            rate_limit_rpm INTEGER,
+            rate_limit_tpm INTEGER,
+            budget_requests INTEGER,
+            budget_tokens INTEGER,
+            budget_spend_usd REAL,
+            budget_window_seconds INTEGER,
+            over_budget_behavior TEXT NOT NULL DEFAULT 'degrade',
+            degrade_lane TEXT,
+            concurrency_limit INTEGER,
+            memory_mode TEXT NOT NULL DEFAULT 'off',
+            memory_project_id TEXT,
+            memory_thread_source TEXT NOT NULL DEFAULT 'header',
+            created_at INTEGER NOT NULL
+          );
+        `);
+        return;
+      }
+      if (!cols.some((c) => c.name === "secret_enc")) {
+        db.exec("ALTER TABLE api_keys ADD COLUMN secret_enc TEXT;");
+      }
+    },
+  },
 ];
 
 function applyMigrations(db: Database.Database): void {
@@ -751,7 +801,8 @@ function applyMigrations(db: Database.Database): void {
   const record = db.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)");
   const runAll = db.transaction((pending: readonly Migration[]) => {
     for (const m of pending) {
-      db.exec(m.sql);
+      if (m.run) m.run(db);
+      else db.exec(m.sql);
       record.run(m.version, Date.now());
     }
   });

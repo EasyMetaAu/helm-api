@@ -77,7 +77,7 @@ docker compose logs helm | grep -i "root API key"
 | 🪪 | **Drop-in for fixed-model clients** | A client that hard-codes a vendor model id (Claude Code's `claude-opus-4-8`, an SDK locked to `gpt-5.5`) just works — no *400 unknown model*. A **standard key** classifies it like `auto`; a **custom-model key** can map each vendor family onto a lane via `model-aliases.yaml` (cap-bounded). |
 | 🛡️ | **Resilient execution** | Circuit breaker (OPEN/HALF_OPEN + single probe), capability filter with explicit skip reasons, `:free`-tier 429 skipping, per-key concurrency queueing. Client disconnects are never counted as provider faults. |
 | 🔐 | **OAuth subscriptions** | Route your Claude Pro/Max, ChatGPT Codex, and GitHub Copilot subscriptions as backends — pooled accounts, per-account model curation / egress proxy / scheduling, all hot-reloaded. *(Opt-in; read the [ToS warning](#oauth-subscription-providers-claude-promax-chatgpt-codex-github-copilot).)* |
-| 🔑 | **Keys with teeth** | Mandatory auth; keys stored as SHA-256 hashes only. Per key: lane whitelist, custom-model permission, RPM/TPM limits, usage budgets (degrade or reject), concurrency cap, memory mode. Revoke softly, then delete permanently. |
+| 🔑 | **Keys with teeth** | Mandatory auth; keys authenticate by SHA-256 hash; encrypted recovery material can be stored for admin reveal/rotation. Per key: lane whitelist, custom-model permission, RPM/TPM limits, usage budgets (degrade or reject), concurrency cap, memory mode. Rotate in place, revoke softly, then delete permanently. |
 | 🧠 | **Memory middleware** | On by default: remembered context is injected before routing as a trailing turn; a background worker compresses and consolidates — compaction is **auto-adaptive and zero-config** (prices and context windows resolve from the model catalog; size / idle / context-pressure triggers). Summarize/merge default to deterministic local logic, with an **opt-in LLM path** (`config.memory.llm`, off by default). A forgetting/tiering layer (decay, reinforcement, retention) keeps it honest. Opt out per key or per request (`x-memory-mode: off`). |
 | 📊 | **Total observability** | A redacted decision record per request — classifier, policy, lane, every provider attempt, latency, fallbacks, cost. Verbatim payload capture to a separate table (on by default, 30-day retention). A payload inspector reads long fields fullscreen, previews inline images, and an editable **Retry** button replays any captured request in its own protocol. |
 | 🖥️ | **Admin dashboard** | SvelteKit SPA at `/admin` behind HTTP Basic: overview, key CRUD, lane/policy/classifier editors, system settings, drill-down request log. Edits **write back to `config/*.yaml`** (comment-preserving, atomic) and rebind live — no restart, and they survive one. Five languages. |
@@ -304,7 +304,7 @@ Most-used environment variables (env wins over YAML; full list in [`.env.example
 | `HELM_STORE_DRIVER` | `sqlite` (default) or `supabase` |
 | `HELM_STORE_URL_ENV` | For `supabase`: the **name** of the env var holding the Postgres DSN |
 | `HELM_RATE_LIMIT_ENABLED` | Turn rate limiting on (off by default) |
-| `HELM_OAUTH_ENC_KEY` | 32-byte key encrypting stored OAuth tokens (**required** if any subscription provider is configured) |
+| `HELM_OAUTH_ENC_KEY` | 32-byte key encrypting recoverable API keys and stored OAuth tokens (**required** if any subscription provider is configured; needed for later API-key reveal) |
 
 > **Storage.** SQLite (`better-sqlite3`, a `helm.db` file under `./data`) is the default. For Postgres/Supabase, set `HELM_STORE_DRIVER=supabase` and point `HELM_STORE_URL_ENV` at the env var holding your DSN. Unknown drivers fail closed at startup.
 >
@@ -314,7 +314,7 @@ Most-used environment variables (env wins over YAML; full list in [`.env.example
 
 A provider can authenticate with an **OAuth subscription** instead of a static key: log in from the dashboard (**Providers → Connect**). Claude Pro/Max and ChatGPT Codex use an authorization-code paste; GitHub Copilot uses a device code. Helm stores the rotating refresh token **encrypted at rest** and refreshes access tokens automatically.
 
-Set **`HELM_OAUTH_ENC_KEY`** (32 bytes: base64 or 64 hex chars) — Helm refuses to start if a subscription provider is configured without it. Then add an `oauth: { provider: anthropic | github-copilot | openai-codex }` block to the provider (commented examples in `config/providers.yaml`; for Claude use `type: anthropic`).
+Set **`HELM_OAUTH_ENC_KEY`** (32 bytes: base64 or 64 hex chars) — Helm refuses to start if a subscription provider is configured without it. The same key encrypts API-key recovery material used by the admin reveal/rotate flows. Then add an `oauth: { provider: anthropic | github-copilot | openai-codex }` block to the provider (commented examples in `config/providers.yaml`; for Claude use `type: anthropic`).
 
 Pool **several accounts per provider**. Each account (**Providers → Manage**) gets its own:
 

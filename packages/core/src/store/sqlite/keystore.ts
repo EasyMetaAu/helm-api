@@ -1,6 +1,6 @@
 import type { ApiKeyRecord } from "@helm/shared";
 import { asc, eq } from "drizzle-orm";
-import type { CreateKeyInput, KeyPatch, KeyStore } from "../ports.js";
+import type { CreateKeyInput, KeyPatch, KeyStore, RotateKeyInput } from "../ports.js";
 import type { SqliteDb } from "./migrate.js";
 import { apiKeys } from "./schema.js";
 
@@ -22,6 +22,7 @@ export class SqliteKeyStore implements KeyStore {
       keyId: input.keyId,
       hash: input.hash,
       prefix: input.prefix,
+      secretEnc: input.secretEnc ?? null,
       accountId: input.accountId,
       role: input.role,
       // Human-readable label: undefined input => NULL => unnamed.
@@ -149,6 +150,33 @@ export class SqliteKeyStore implements KeyStore {
     if (res.changes === 0) {
       throw new Error(`key not found: ${keyId}`);
     }
+  }
+
+  async rotateKey(keyId: string, input: RotateKeyInput): Promise<void> {
+    const res = this.db
+      .update(apiKeys)
+      .set({
+        hash: input.hash,
+        prefix: input.prefix,
+        secretEnc: input.secretEnc ?? null,
+      })
+      .where(eq(apiKeys.keyId, keyId))
+      .run();
+    if (res.changes === 0) {
+      throw new Error(`key not found: ${keyId}`);
+    }
+  }
+
+  async getSecretEnc(keyId: string): Promise<string | null> {
+    const row = this.db
+      .select({ secretEnc: apiKeys.secretEnc })
+      .from(apiKeys)
+      .where(eq(apiKeys.keyId, keyId))
+      .get();
+    if (row === undefined) {
+      throw new Error(`key not found: ${keyId}`);
+    }
+    return row.secretEnc ?? null;
   }
 
   // Row -> port record. Restores dialect encodings; exposes hash + prefix only.

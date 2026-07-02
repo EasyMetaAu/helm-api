@@ -9,14 +9,14 @@ import type { AdminApiDeps, KeySummary, KeyUsageSummary } from "./deps.js";
 // default; the SPA still sends an explicit window, this is just the safe fallback.
 const DAY_MS = 86_400_000;
 
-// /admin/api/keys — manage API keys (KeyStore, NEVER yaml). CLAUDE.md Principle 7: keys
-// are stored as sha256 hash + display prefix ONLY. The plaintext is minted here,
-// returned EXACTLY ONCE in the POST response, and never persisted or echoed again.
-// The list view projects to a redacted KeySummary — no hash full-text, no plaintext.
-// Revocation is a soft disable (disabled:true), never an in-place rewrite (docs/06
-// key rotation/revocation). A physical delete is offered only as an explicit
-// second step (DELETE ?purge=true) on an already-revoked key — never on an active
-// one — so destruction is deliberate and the soft-revoke audit step is preserved.
+// /admin/api/keys — manage API keys (KeyStore, NEVER yaml). Plaintext is minted
+// here and returned only to the authenticated admin surface. New/rotated rows may
+// store AES-GCM ciphertext for later admin reveal, but list/detail responses still
+// project to a redacted KeySummary — no hash full-text, no plaintext, no ciphertext.
+// Revocation is a soft disable (disabled:true). Rotation updates only hash/prefix/
+// ciphertext on the SAME key_id, preserving metadata and history. A physical delete
+// is offered only as an explicit second step (DELETE ?purge=true) on an already
+// revoked key, so destruction is deliberate and the soft-revoke audit step remains.
 
 // Redact a stored record to the summary the list view exposes. Deliberately omits
 // `hash` and `account_id` internals beyond what the UI needs; NEVER plaintext.
@@ -96,6 +96,68 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
     );
   });
 
+  // GET /keys/:id/secret -> reveal the full key when this row has encrypted
+  // recovery material. Old hash-only rows cannot be recovered by design.
+  app.get("/admin/api/keys/:id/secret", async (c) => {
+    if (!deps.keySecrets) {
+      return c.json({ error: "key reveal is not configured" }, 503);
+    }
+    const id = c.req.param("id");
+    if (id === INTERNAL_API_KEY_ID) {
+      return c.json({ error: "internal system key cannot be revealed" }, 403);
+    }
+    let secretEnc: string | null;
+    try {
+      secretEnc = await deps.keyStore.getSecretEnc(id);
+    } catch {
+      return c.json({ error: "key not found" }, 404);
+    }
+    if (!secretEnc) {
+      return c.json(
+        {
+          error:
+            "full key is not available for this row; rotate it to store recoverable key material",
+        },
+        409,
+      );
+    }
+    try {
+      return c.json({ key_id: id, plaintext: deps.keySecrets.decrypt(secretEnc) });
+    } catch {
+      return c.json({ error: "stored key cannot be decrypted with the current key" }, 500);
+    }
+  });
+
+  // POST /keys/:id/rotate -> rotate the secret value in-place. The old plaintext
+  // stops authenticating immediately because the hash changes, but key_id, name,
+  // caps, account, role, telemetry, and usage history are preserved.
+  app.post("/admin/api/keys/:id/rotate", async (c) => {
+    const id = c.req.param("id");
+    if (id === INTERNAL_API_KEY_ID) {
+      return c.json({ error: "internal system key cannot be rotated" }, 403);
+    }
+    const existing = (await deps.keyStore.list()).find((r) => r.key_id === id);
+    if (!existing) return c.json({ error: "key not found" }, 404);
+    if (existing.disabled) return c.json({ error: "revoked keys cannot be rotated" }, 409);
+    const minted = deps.genKey();
+    const secretEnc = deps.keySecrets ? deps.keySecrets.encrypt(minted.plaintext) : null;
+    try {
+      await deps.keyStore.rotateKey(id, {
+        hash: minted.hash,
+        prefix: minted.prefix,
+        secretEnc,
+      });
+    } catch {
+      return c.json({ error: "key not found" }, 404);
+    }
+    return c.json({
+      key_id: id,
+      plaintext: minted.plaintext,
+      prefix: minted.prefix,
+      recoverable: secretEnc !== null,
+    });
+  });
+
   // GET /keys/:id -> the full redacted record (KeySummary) | 404. The detail page
   // reads every per-key cap to render its config card; we reuse the list's
   // redaction (prefix only — NEVER hash/plaintext, principle 7). list().find
@@ -119,6 +181,7 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       keyId,
       hash: minted.hash,
       prefix: minted.prefix,
+      secretEnc: deps.keySecrets ? deps.keySecrets.encrypt(minted.plaintext) : null,
       accountId: deps.accountId,
       role: parsed.data.role,
       name: parsed.data.name,
@@ -141,7 +204,15 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
     // The ONLY place plaintext is ever returned. `prefix` is the server-minted
     // non-sensitive display prefix (already persisted) — returned so the SPA need
     // not slice the plaintext to build a redacted view (a redaction footgun).
-    return c.json({ key_id: keyId, plaintext: minted.plaintext, prefix: minted.prefix }, 201);
+    return c.json(
+      {
+        key_id: keyId,
+        plaintext: minted.plaintext,
+        prefix: minted.prefix,
+        recoverable: deps.keySecrets !== undefined,
+      },
+      201,
+    );
   });
 
   // PATCH /keys/:id — edit a key's per-key caps (docs/06). Every cap is editable

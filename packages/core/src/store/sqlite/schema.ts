@@ -3,13 +3,15 @@ import { blob, integer, primaryKey, real, sqliteTable, text } from "drizzle-orm/
 // SQLite (Drizzle) table definitions for the sqlite Store adapter. Columns align
 // with docs/06 (api_keys) and docs/02 (telemetry / decision record). Dialect
 // quirks (no native boolean/array) are encapsulated HERE — core and the supabase
-// adapter never see them. Per CLAUDE.md principle 7: NO plaintext column; only
-// hash + prefix. Telemetry stores a redacted decision JSON, no plaintext payload.
+// adapter never see them. Per CLAUDE.md principle 7: NO plaintext column; auth
+// keys keep hash + prefix, with optional encrypted recovery material for the admin
+// reveal path. Telemetry stores a redacted decision JSON, no plaintext payload.
 
 export const apiKeys = sqliteTable("api_keys", {
   keyId: text("key_id").primaryKey(),
   hash: text("hash").notNull().unique(), // sha256(plaintext); getByHash uses the unique index
   prefix: text("prefix").notNull(), // helm_live_xxxx — display/debug only
+  secretEnc: text("secret_enc"), // encrypted full key for admin recovery; never plaintext
   accountId: text("account_id").notNull(),
   role: text("role").notNull(), // 'root' | 'user'
   name: text("name"), // human-readable label; NULL = unnamed (cosmetic only)

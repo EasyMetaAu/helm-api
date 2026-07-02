@@ -107,9 +107,7 @@
 
     {#if plaintextKey}
       <p data-testid="connect-secret-note" class="mt-2 text-sm text-amber-700">
-        {$t(
-          'These snippets include your new key, shown only this once. Copy what you need now — we store only a hash, so it cannot be recovered later.',
-        )}
+        {$t('These snippets include your API key. Copy what you need now and keep it private.')}
       </p>
     {/if}
 

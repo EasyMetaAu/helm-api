@@ -1,19 +1,15 @@
 // Admin API key client. The admin UI is a pure consumer of the gateway's
 // /admin/api/* HTTP surface — it imports NO core/gateway business logic and owns
-// NO auth logic (CLAUDE.md Principle 1). The backend (apps/gateway admin/keys.ts) is the
-// single source of truth and enforces CLAUDE.md Principle 7 / docs/06:
-//   - keys are stored as sha256 hash + display prefix ONLY; the list view
-//     projects to a redacted KeySummary (prefix only — NEVER hash full-text or
-//     plaintext);
-//   - the plaintext is minted server-side and returned EXACTLY ONCE in the POST
-//     response, never persisted or echoed again;
-//   - revocation is a soft DELETE (disabled:true), never a physical delete or
-//     in-place rewrite (rotation/revocation semantics).
+// NO auth logic (CLAUDE.md Principle 1). Normal list/detail responses are redacted
+// KeySummary rows (prefix only — NEVER hash full-text, plaintext, or ciphertext).
+// Full keys cross this boundary only through dedicated create/reveal/rotate calls.
+// Rotation mutates only the secret value for the same key_id; revocation is a soft
+// DELETE (disabled:true).
 // We define UI-facing types here rather than depend on @helm/core (admin must not
 // import core); the role enum mirrors the server KeyRoleSchema (root | user).
 
 // Redacted key view for list/detail. By construction this NEVER carries a hash
-// full-text or plaintext — only the short display prefix.
+// full-text, plaintext, or ciphertext — only the short display prefix.
 export interface ApiKeyView {
   key_id: string;
   prefix: string; // e.g. helm_live_ab12 — display/debug only
@@ -102,13 +98,23 @@ export interface UpdateKeyInput {
   memory_thread_source?: 'header' | 'auto';
 }
 
-// The ONLY shape that ever carries plaintext, returned once by POST. `prefix` is
-// the server-minted non-sensitive display prefix (same value stored + listed) —
-// carried so the UI builds the redacted view from it instead of slicing plaintext.
+// Create/rotate responses intentionally carry plaintext so the operator can copy
+// the new value. `prefix` is the server-minted non-sensitive display prefix (same
+// value stored + listed) — carried so the UI builds the redacted view from it
+// instead of slicing plaintext.
 export interface CreatedKey {
   key_id: string;
   plaintext: string;
   prefix: string;
+  // true when the server stored encrypted recovery material, so this key can be
+  // revealed later from the admin surface. Older/self-hosted deployments without
+  // an encryption key still return plaintext now, but cannot reveal it later.
+  recoverable?: boolean;
+}
+
+export interface RevealedKey {
+  key_id: string;
+  plaintext: string;
 }
 
 // DELETE response (soft revoke). The server echoes the revoked id; it does NOT
@@ -243,7 +249,8 @@ function normalizeUsage(raw: Record<string, unknown>): KeyUsage {
     key_id: String(raw.key_id ?? ''),
     requests: numOr0(raw.requests),
     error_count: numOr0(raw.error_count),
-    cost_usd: typeof raw.cost_usd === 'number' && Number.isFinite(raw.cost_usd) ? raw.cost_usd : null,
+    cost_usd:
+      typeof raw.cost_usd === 'number' && Number.isFinite(raw.cost_usd) ? raw.cost_usd : null,
     total_tokens: numOr0(raw.total_tokens),
   };
 }
@@ -281,13 +288,29 @@ export async function getKeysUsage(window: KeyUsageWindow = {}): Promise<KeyUsag
   return rows.map(normalizeUsage);
 }
 
-// POST /admin/api/keys -> { key_id, plaintext } (plaintext returned ONCE).
+// POST /admin/api/keys -> { key_id, plaintext, prefix, recoverable }.
 export async function createKey(input: CreateKeyInput): Promise<CreatedKey> {
   const res = await fetch(BASE, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(toServerBody(input)),
   });
+  return asJson<CreatedKey>(res);
+}
+
+// GET /admin/api/keys/:id/secret -> reveal the stored full key. Throws when the
+// row is hash-only/unrecoverable or the server has no encryption key configured.
+export async function revealKey(keyId: string): Promise<RevealedKey> {
+  const res = await fetch(`${BASE}/${encodeURIComponent(keyId)}/secret`, {
+    headers: { accept: 'application/json' },
+  });
+  return asJson<RevealedKey>(res);
+}
+
+// POST /admin/api/keys/:id/rotate -> rotate the secret in-place for the same
+// key_id. The response carries the new plaintext so the operator can copy it.
+export async function rotateKey(keyId: string): Promise<CreatedKey> {
+  const res = await fetch(`${BASE}/${encodeURIComponent(keyId)}/rotate`, { method: 'POST' });
   return asJson<CreatedKey>(res);
 }
 

@@ -269,6 +269,39 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       ).rejects.toThrow();
     });
 
+    it("stores optional encrypted recovery material and rotates secret identity in-place", async () => {
+      ctx = await make();
+      await ctx.stores.keys.createKey({
+        keyId: "k1",
+        hash: "h1",
+        prefix: "helm_live_old",
+        secretEnc: "enc:old",
+        accountId: "a",
+        role: "user",
+        name: "Production",
+        allowedLanes: ["balanced"],
+        rateLimitRpm: 7,
+      });
+      expect(await ctx.stores.keys.getSecretEnc("k1")).toBe("enc:old");
+
+      await ctx.stores.keys.rotateKey("k1", {
+        hash: "h2",
+        prefix: "helm_live_new",
+        secretEnc: "enc:new",
+      });
+
+      expect(await ctx.stores.keys.getByHash("h1")).toBeNull();
+      const got = await ctx.stores.keys.getByHash("h2");
+      expect(got).toMatchObject<Partial<ApiKeyRecord>>({
+        key_id: "k1",
+        prefix: "helm_live_new",
+        name: "Production",
+        allowed_lanes: ["balanced"],
+        rate_limit_rpm: 7,
+      });
+      expect(await ctx.stores.keys.getSecretEnc("k1")).toBe("enc:new");
+    });
+
     it("per-key rate limits: omitted -> null, set at create round-trips, updateKey edits", async () => {
       ctx = await make();
       // omitted -> null (inherit system default)

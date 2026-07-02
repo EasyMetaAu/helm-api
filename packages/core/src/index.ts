@@ -714,8 +714,8 @@ export {
   startSignalScheduler,
 } from "./signals/scheduler.js";
 export type { RoutingSignal } from "./signals/types.js";
-// At-rest encryption for OAuth subscription secrets (issue #38). AES-256-GCM under
-// HELM_OAUTH_ENC_KEY; the only reversibly-stored secret class in Helm.
+// At-rest encryption for recoverable operator-managed secrets. AES-256-GCM under
+// HELM_OAUTH_ENC_KEY; used for OAuth subscription tokens and recoverable API keys.
 export {
   decryptSecret,
   encryptSecret,

@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiKeyView } from './keys.js';
-import { createKey, getKey, getKeysUsage, listKeys, revokeKey, updateKey } from './keys.js';
+import {
+  createKey,
+  getKey,
+  getKeysUsage,
+  listKeys,
+  revealKey,
+  revokeKey,
+  rotateKey,
+  updateKey,
+} from './keys.js';
 
 // The admin UI talks to the gateway ONLY over /admin/api/* HTTP (DoD: no core
 // import). These tests pin the client contract against a mocked fetch. The
@@ -129,7 +138,9 @@ describe('keys api client', () => {
 
   it('createKey omits empty optional caps so the strict server schema accepts it', async () => {
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      new Response(JSON.stringify({ key_id: 'key_2', plaintext: 'x' }), { status: 201 }),
+      new Response(JSON.stringify({ key_id: 'key_2', plaintext: 'x', prefix: 'p' }), {
+        status: 201,
+      }),
     );
 
     await createKey({ role: 'user' });
@@ -238,7 +249,9 @@ describe('keys api client', () => {
 
   it('createKey omits rate limits when not provided (inherit system default)', async () => {
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      new Response(JSON.stringify({ key_id: 'key_2', plaintext: 'x' }), { status: 201 }),
+      new Response(JSON.stringify({ key_id: 'key_2', plaintext: 'x', prefix: 'p' }), {
+        status: 201,
+      }),
     );
     await createKey({ role: 'user' });
     const body = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body as string);
@@ -296,6 +309,47 @@ describe('keys api client', () => {
     expect(url).toBe('/admin/api/keys/key_1');
     expect(init.method).toBe('DELETE');
     expect(out.revoked).toBe('key_1');
+  });
+
+  it('revealKey GETs the dedicated secret endpoint and returns plaintext only there', async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(JSON.stringify({ key_id: 'key_1', plaintext: 'helm_live_SECRET' }), {
+        status: 200,
+      }),
+    );
+
+    const out = await revealKey('key_1');
+
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toBe('/admin/api/keys/key_1/secret');
+    expect(init.headers).toEqual(expect.objectContaining({ accept: 'application/json' }));
+    expect(out.plaintext).toBe('helm_live_SECRET');
+  });
+
+  it('rotateKey POSTs to the rotate endpoint and returns the replacement plaintext', async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          key_id: 'key_1',
+          plaintext: 'helm_live_ROTATED',
+          prefix: 'helm_live_ROTA',
+          recoverable: true,
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const out = await rotateKey('key_1');
+
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toBe('/admin/api/keys/key_1/rotate');
+    expect(init.method).toBe('POST');
+    expect(out).toEqual({
+      key_id: 'key_1',
+      plaintext: 'helm_live_ROTATED',
+      prefix: 'helm_live_ROTA',
+      recoverable: true,
+    });
   });
 
   it('createKey rejects on a non-2xx response (fail-closed, no half-minted plaintext)', async () => {

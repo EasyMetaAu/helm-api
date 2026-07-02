@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-07-02 · API key 加密恢复与原地轮转（Auth / Admin keys，docs/06/11，原则 7）
+
+- **背景（Lukin）**：管理后台原本只能创建后一次性显示 API key；如果操作员没有保存完整 key，只能删除或重新创建。现需支持查看已存在 key 的完整值，并支持不丢历史的轮转。
+- **安全决策**：鉴权路径仍只用 `sha256(plaintext)` 查找；数据库不保存明文 key。新增 `api_keys.secret_enc` 只保存 AES-GCM 密文，复用 `HELM_OAUTH_ENC_KEY` 作为 at-rest 加密密钥。未配置该密钥时，新建/轮转仍返回一次性 plaintext，但后续 reveal 不可用。
+- **兼容决策**：已有 hash-only 行无法从 sha256 反推出完整 key，因此管理后台 reveal 会明确返回不可恢复；操作员可对该行执行 rotate，让同一个 `key_id` 获得新的 hash/prefix/secret_enc。
+- **轮转决策**：`KeyStore.rotateKey()` 只替换 `hash`、`prefix`、`secret_enc`，保留 `key_id`、name、role、account、caps、usage 与 telemetry 关联。旧 key 值立即失效，但请求历史仍挂在同一 key 下。
+- **UI 决策**：Keys 页面新增「View full key」和「Rotate」。Reveal/rotated plaintext 只存在短暂 modal state；普通 list/detail 仍只显示 prefix，不返回 hash、plaintext 或 ciphertext。
+- **验证计划**：覆盖 store contract（SQLite/Postgres）、cached keystore、admin routes、admin API client 与 Keys 页面交互；旧 hash-only 行 reveal 失败、新/轮转行可 reveal。
+
 ## 2026-07-02 · Claude Fable 周限额改读 `limits[]`（Admin providers / OAuth quota，docs/11，原则 3/7）
 
 - **背景（Lukin）**：Claude Code 的 Plan usage limits 已把 scoped weekly model 用量显示为 `Fable`，不再是旧的 Sonnet 专项行；本机真实 `GET https://api.anthropic.com/api/oauth/usage` 返回中，`seven_day_sonnet` 为 `null`，而 `limits[]` 包含 `kind:"weekly_scoped"` + `scope.model.display_name:"Fable"`。
@@ -50,14 +59,12 @@
 
 ---
 
-## 历史条目摘要（最近 7 条）
+## 历史条目摘要（最近 4 条）
 
 - **2026-06-30 · admin favicon cache policy（Admin UI 静态资源，docs/11，原则 7）**：favicon 慢不是体积问题，而是 `/admin` 静态资源 no-cache 策略；`/admin/favicon.{svg,png}` 改私有缓存 7 天，SPA shell/deep-link fallback 仍 no-cache，admin shell 只声明 SVG 避免双拉；补 gateway/admin 回归测试。
 - **2026-06-30 · per-model reasoning effort policy（执行 fallback / 协议转换，docs/04/05，原则 2/5/8）**：新增 catalog `reasoningEffort` policy，按模型/协议 wire 字段映射或删除 unsupported effort；Haiku 4.5 保留 manual `thinking` 但删除 `output_config.effort`，Sonnet `xhigh -> max`，translated/native passthrough 回归覆盖。
 - **2026-06-30 · Anthropic `output_config.effort` 与 OpenAI `reasoning_effort` 双向保真（协议转换/执行 fallback，docs/05/04，原则 5/8）**：Anthropic 入站 `output_config.effort` 提升到 IR `reasoning_effort`，OpenAI/Responses fallback 保留推理等级；反向 GPT/OpenAI→Anthropic 在无显式 output_config 时合成 `output_config.effort`；只映射等级字段，不从 `thinking.budget_tokens` 反推。
 - **2026-06-30 · Fast mode 账号强制覆盖 + API key 透传限制（OAuth subscription provider / key governance，docs/04/11，原则 2/5）**：账号级 `fastMode` 统一映射到 Codex `service_tier:"priority"` 与 Anthropic `speed:"fast"` + beta header，并强制覆盖 provider wire request；per-key `allow_fast_mode` 只治理客户端透传，不阻止账号级强制启用；UI 仅对支持 provider 展示。
-- **2026-06-30 · OAuth 5h 限额恢复时间不再落回 60s（admin/gateway，docs/04，原则 5）**：已 park 账号的 generic 60s 429 fallback 改用 near-full (`>=95%`) 窗口推断真实恢复时间，避免 Anthropic 5h 98–99% 限额显示 `0m`；健康账号仍不因 98% 预先 park。验证 core/gateway/admin 相关测试、全量 test/typecheck/svelte-check/biome/build 绿，发 v0.22.27。
-- **2026-06-29 · OAuth 配额冷却 extend-only + refresh-429 归账号级（Codex review 跟进；provider 执行/池）**：修复 Codex quota 精确长 reset 被 generic 60s 429 覆盖的问题（park/applyUsageLimit 改 extend-only，清除仍直通）；同时把 `TokenRefreshError(429)` 纳入 pool 与 executor 的账号级 rate-limit 分类，避免 refresh 限流污染 alias breaker。验证 pool/executor 矩阵、typecheck、biome、build 绿，发 v0.22.24。
 
 ## 更早历史总览
 

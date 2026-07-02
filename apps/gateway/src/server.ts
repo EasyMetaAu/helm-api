@@ -35,6 +35,7 @@ import {
   decryptSecret,
   discoverOAuthModels,
   type EmbeddingJob,
+  encryptSecret,
   expandLaneChain,
   type GeminiGenerateContentResponse,
   type GeneratedKey,
@@ -2207,6 +2208,12 @@ export async function buildServer(
         return { plaintext: k.plaintext, hash: k.hash, prefix: k.prefix };
       },
       genKeyId: () => randomUUID(),
+      keySecrets: oauthEncKey
+        ? {
+            encrypt: (plaintext) => encryptSecret(plaintext, oauthEncKey),
+            decrypt: (blob) => decryptSecret(blob, oauthEncKey),
+          }
+        : undefined,
       accountId: "default",
       // System Settings: read the live value; on save, validate+persist to the
       // config_kv store then apply live (logger level, rate-limit switch). The

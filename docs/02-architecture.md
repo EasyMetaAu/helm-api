@@ -61,8 +61,9 @@ back to the client protocol, preserving streaming semantics. See
 ### Auth Resolver
 
 Resolves an API key to an identity, attaches account/org/user/role and capability
-metadata, and enforces authentication. API keys are stored only as a sha256 hash;
-the plaintext key never appears in telemetry or logs. The resolved identity
+metadata, and enforces authentication. API keys authenticate by sha256 hash; new
+or rotated keys may also keep encrypted recovery material for admin reveal. The
+plaintext key never appears in telemetry or logs. The resolved identity
 carries the per-key caps (`allowed_lanes`, `allow_custom_model`, rate/budget
 limits, `degrade_lane`, memory mode) that later stages enforce. See
 [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md).
@@ -260,7 +261,8 @@ fetched at runtime.
   explicitly configured otherwise.
 - The generated catalog is a supply-chain input, not policy.
 - The Debug UI must explain why a provider was selected or skipped.
-- Secrets are never logged in plaintext; API keys are stored as a sha256 hash.
+- Secrets are never logged in plaintext; API keys authenticate by sha256 hash,
+  with optional encrypted recovery material for the admin surface.
 
 ## Admin surface and deployment
 

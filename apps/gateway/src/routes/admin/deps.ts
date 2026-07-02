@@ -74,6 +74,11 @@ export interface GeneratedKeyParts {
   prefix: string;
 }
 
+export interface KeySecretCipher {
+  encrypt(plaintext: string): string;
+  decrypt(blob: string): string;
+}
+
 // Read/write seam for the admin OAuth-login surface (issue #38). The routes stay
 // pure HTTP glue (Principle 1): all flow orchestration (ephemeral PKCE/device
 // session state, the upstream token exchange, at-rest encryption, and the
@@ -369,6 +374,9 @@ export interface AdminApiDeps {
   genKey: () => GeneratedKeyParts;
   // Generate a key_id for a new key. Injected so tests get deterministic ids.
   genKeyId: () => string;
+  // Optional encrypted recovery for API keys. When absent, new keys still work
+  // and return plaintext at creation/rotation, but later reveal is unavailable.
+  keySecrets?: KeySecretCipher;
   // The account a newly-created admin key belongs to (MVP: single account).
   accountId: string;
   // Token estimator (chars/4) the memory admin route uses to recompute a
@@ -448,10 +456,14 @@ export interface KeySummary {
   memory_thread_source: "header" | "auto";
 }
 
-// New-key response: the ONLY place plaintext is ever returned, once.
+// New-key/rotated-key response: carries plaintext intentionally so the operator
+// can copy it. If `recoverable` is true, encrypted material was stored and the
+// admin reveal endpoint can show it later.
 export interface CreatedKey {
   key_id: string;
   plaintext: string;
+  prefix: string;
+  recoverable?: boolean;
 }
 
 // Per-key usage rollup for the /admin/keys list "Usage" column (GET

@@ -1,10 +1,10 @@
-// Encryption-at-rest for OAuth secrets (packages/core, principle 1 — framework
-// agnostic). UNLIKE API keys (which Helm stores sha256-only, principle 7), an
-// OAuth refresh/access token MUST be stored REVERSIBLY because it is replayed to
-// the upstream token endpoint. This is a new secret class, so it is encrypted at
-// rest with AES-256-GCM under an operator-supplied key (env HELM_OAUTH_ENC_KEY,
-// resolved at the composition root — this module only ever receives the already
-// decoded key Buffer, never the env name).
+// Encryption-at-rest for recoverable operator-managed secrets (packages/core,
+// principle 1 — framework agnostic). OAuth refresh/access tokens must be stored
+// reversibly because they are replayed upstream; API keys may also store encrypted
+// recovery material for the authenticated admin reveal path. Both use AES-256-GCM
+// under an operator-supplied key (env HELM_OAUTH_ENC_KEY, resolved at the
+// composition root — this module only ever receives the already decoded key Buffer,
+// never the env name).
 //
 // Blob format: "v1:" + base64(iv(12) | ciphertext | authTag(16)). The "v1:" prefix
 // reserves room for an algorithm/key-rotation change without a data migration.

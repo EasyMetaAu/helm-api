@@ -138,6 +138,7 @@ describe("sqlite schema + migrations", () => {
       "key_id",
       "hash",
       "prefix",
+      "secret_enc",
       "account_id",
       "role",
       "allowed_lanes",

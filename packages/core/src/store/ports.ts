@@ -101,12 +101,16 @@ export interface BudgetStore {
 // pure types — no SQL, no Drizzle import, no web framework. All structured data
 // types come from @helm/shared via z.infer. See CLAUDE.md "DB abstraction layer".
 
-// Input for creating a key: accepts hash + prefix only — NO plaintext field, so
-// the port layer cannot persist a plaintext key (principle 7).
+// Input for creating a key: accepts hash + prefix, plus optional encrypted
+// recoverable material. The plaintext itself still never crosses the store port.
 export interface CreateKeyInput {
   keyId: string;
   hash: string; // sha256(plaintext) hex
   prefix: string; // e.g. helm_live_xxxx — display/debug only
+  // AES-GCM ciphertext for the full key, used only by the authenticated admin
+  // reveal surface. Null/omitted means this row is hash-only and cannot be
+  // recovered. Never store raw plaintext here.
+  secretEnc?: string | null;
   accountId: string;
   role: "root" | "user";
   // Optional human-readable label (cosmetic; never an auth/routing input). Omitted
@@ -165,6 +169,15 @@ export interface KeyStore {
   // Touches ONLY the editable cap columns — NEVER role or the immutable identity
   // (key_id/hash/prefix/account_id). Throws if the key id is unknown (fail-loud).
   updateKey(keyId: string, patch: KeyPatch): Promise<void>;
+  // Rotate the secret value in-place while preserving key_id, account_id, role,
+  // name, caps, usage history, and telemetry references. The caller supplies the
+  // freshly-generated hash/prefix and optional encrypted full key. Throws on an
+  // unknown id or a duplicate hash.
+  rotateKey(keyId: string, input: RotateKeyInput): Promise<void>;
+  // Return encrypted recoverable key material for an admin reveal. Throws on an
+  // unknown id; returns null when a row predates recoverable storage or was minted
+  // while encryption was not configured.
+  getSecretEnc(keyId: string): Promise<string | null>;
 }
 
 // Partial per-key cap edit. A field PRESENT (even as null) is written; an ABSENT
@@ -194,6 +207,12 @@ export interface KeyPatch {
   memoryMode?: "off" | "observe" | "inject";
   memoryProjectId?: string | null;
   memoryThreadSource?: "header" | "auto";
+}
+
+export interface RotateKeyInput {
+  hash: string;
+  prefix: string;
+  secretEnc?: string | null;
 }
 
 // Telemetry insert input: decision record + a redacted key reference. Never

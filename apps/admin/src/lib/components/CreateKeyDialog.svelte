@@ -10,11 +10,11 @@
   import Modal from '$lib/components/Modal.svelte';
   import { t } from '$lib/i18n';
 
-  // Create-key dialog: owns the caps form AND the ONE-TIME plaintext reveal.
-  // CLAUDE.md Principle 7 / docs/06: the plaintext is returned by the create response
-  // exactly once, shown once, then wiped from component state on close — it is
-  // never persisted, re-fetchable, or surfaced anywhere else. The dialog bubbles
-  // the redacted view (prefix only, NO plaintext) up via `oncreated`.
+  // Create-key dialog: owns the caps form AND the plaintext reveal. The plaintext
+  // is wiped from component state on close; if the server has at-rest encryption
+  // configured it can also store encrypted recovery material for later admin reveal.
+  // The dialog bubbles the redacted view (prefix only, NO plaintext) up via
+  // `oncreated`.
   let {
     lanes,
     oncreated,
@@ -145,9 +145,13 @@
   {#if revealed}
     <h2 class="section-header">{$t('Your new API key')}</h2>
     <p class="mt-1 text-sm text-amber-700">
-      {$t(
-        'Copy it now — this is the only time it will be shown. We store only a hash, so it cannot be recovered later.',
-      )}
+      {#if revealed.recoverable === false}
+        {$t(
+          'Copy it now — key reveal encryption is not configured, so it cannot be recovered later.',
+        )}
+      {:else}
+        {$t('Copy it now and keep it private. You can reveal it later from API Keys.')}
+      {/if}
     </p>
     <div class="mt-3 flex items-center gap-2">
       <code
@@ -193,7 +197,9 @@
           bind:value={name}
         />
         <span class="field-help"
-          >{$t('A label to help you recognize this key later — e.g. the project it belongs to.')}</span
+          >{$t(
+            'A label to help you recognize this key later — e.g. the project it belongs to.',
+          )}</span
         >
       </label>
 

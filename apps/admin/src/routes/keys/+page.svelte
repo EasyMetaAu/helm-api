@@ -1,7 +1,16 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { base } from '$app/paths';
-  import { type ApiKeyView, deleteKey, type KeyUsage, revokeKey } from '$lib/api/keys.js';
+  import {
+    type ApiKeyView,
+    type CreatedKey,
+    deleteKey,
+    type KeyUsage,
+    revealKey,
+    type RevealedKey,
+    revokeKey,
+    rotateKey,
+  } from '$lib/api/keys.js';
   import ConnectClientDialog from '$lib/components/ConnectClientDialog.svelte';
   import CreateKeyDialog from '$lib/components/CreateKeyDialog.svelte';
   import EditKeyDialog from '$lib/components/EditKeyDialog.svelte';
@@ -11,10 +20,10 @@
 
   // API key management view. HARD security line (CLAUDE.md Principle 7 / docs/06): the
   // list shows ONLY the display prefix + sha256-backed reference — never plaintext.
-  // The plaintext is shown once by the create dialog at mint time, then wiped.
-  // Revocation is a SOFT disable (server flips disabled:true) — the row is kept,
-  // never removed or rewritten in place (rotation/revocation stays auditable). This view is a pure
-  // consumer of /admin/api/* — it owns no auth logic and persists no credentials.
+  // Plaintext appears only in transient create/reveal/rotate modal state, then is
+  // wiped. Revocation is a SOFT disable (server flips disabled:true); rotation
+  // preserves the key row and history. This view is a pure consumer of
+  // /admin/api/* — it owns no auth logic and persists no credentials.
   let { data }: { data: { keys: ApiKeyView[]; lanes: string[]; usage: KeyUsage[] } } = $props();
 
   // The auto-minted internal LLM key (server-managed, re-minted each startup, backs the
@@ -45,12 +54,24 @@
   // The key_id currently pending a permanent-delete confirmation, if any.
   let confirmingDelete = $state<string | null>(null);
   let deleting = $state<string | null>(null);
+  // Reveal/rotate expose plaintext intentionally, but only inside these transient
+  // modal states. The normal key list remains prefix-only.
+  let revealing = $state<string | null>(null);
+  let revealedKey = $state<(RevealedKey & { prefix: string }) | null>(null);
+  let revealCopied = $state<boolean>(false);
+  let confirmingRotate = $state<string | null>(null);
+  let rotating = $state<string | null>(null);
+  let rotatedKey = $state<CreatedKey | null>(null);
+  let rotatedCopied = $state<boolean>(false);
 
   // The display prefix of the key pending revoke confirmation — purely for copy.
   let confirmingPrefix = $derived(keys.find((k) => k.key_id === confirmingRevoke)?.prefix ?? '');
   // The display prefix of the key pending delete confirmation — purely for copy.
   let confirmingDeletePrefix = $derived(
     keys.find((k) => k.key_id === confirmingDelete)?.prefix ?? '',
+  );
+  let confirmingRotatePrefix = $derived(
+    keys.find((k) => k.key_id === confirmingRotate)?.prefix ?? '',
   );
 
   // The key currently being edited in the Edit dialog (null = closed). All caps
@@ -112,6 +133,58 @@
     confirmingRevoke = keyId;
   }
 
+  async function copySecret(value: string, kind: 'reveal' | 'rotate'): Promise<void> {
+    try {
+      await navigator.clipboard?.writeText(value);
+      if (kind === 'reveal') revealCopied = true;
+      else rotatedCopied = true;
+    } catch {
+      if (kind === 'reveal') revealCopied = false;
+      else rotatedCopied = false;
+    }
+  }
+
+  async function handleReveal(key: ApiKeyView): Promise<void> {
+    error = null;
+    revealing = key.key_id;
+    revealCopied = false;
+    try {
+      const revealed = await revealKey(key.key_id);
+      revealedKey = { ...revealed, prefix: key.prefix };
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t('Failed to reveal key');
+    } finally {
+      revealing = null;
+    }
+  }
+
+  function askRotate(keyId: string): void {
+    error = null;
+    confirmingRotate = keyId;
+  }
+
+  function cancelRotate(): void {
+    confirmingRotate = null;
+  }
+
+  async function confirmRotate(): Promise<void> {
+    const keyId = confirmingRotate;
+    if (!keyId) return;
+    error = null;
+    rotating = keyId;
+    rotatedCopied = false;
+    try {
+      const rotated = await rotateKey(keyId);
+      keys = keys.map((k) => (k.key_id === keyId ? { ...k, prefix: rotated.prefix } : k));
+      confirmingRotate = null;
+      rotatedKey = rotated;
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t('Failed to rotate key');
+    } finally {
+      rotating = null;
+    }
+  }
+
   function cancelRevoke(): void {
     confirmingRevoke = null;
   }
@@ -166,7 +239,7 @@
       <h1 class="page-title">{$t('API Keys')}</h1>
       <p class="section-desc">
         {$t(
-          'An API key authenticates a client and can be restricted to a specific set of lanes. Keys are stored as a hash plus a short display prefix — the full key is shown only once, at creation.',
+          'An API key authenticates a client and can be restricted to a specific set of lanes. Keys authenticate by hash; recoverable rows can be revealed or rotated from this page.',
         )}
       </p>
     </div>
@@ -316,7 +389,24 @@
                   <a class="btn-secondary" href={detailHref(key.key_id)}>{$t('Details')}</a>
                   {#if key.key_id === INTERNAL_KEY_ID}
                     <!-- system-managed internal key: read-only, no edit/revoke/delete -->
+                  {:else}
+                    <button
+                      type="button"
+                      class="btn-secondary"
+                      disabled={revealing === key.key_id}
+                      onclick={() => handleReveal(key)}
+                      >{revealing === key.key_id ? $t('Revealing…') : $t('View full key')}</button
+                    >
+                  {/if}
+                  {#if key.key_id === INTERNAL_KEY_ID}
+                    <!-- system-managed internal key: read-only, no edit/revoke/delete -->
                   {:else if !key.disabled}
+                    <button
+                      type="button"
+                      class="btn-secondary"
+                      disabled={rotating === key.key_id}
+                      onclick={() => askRotate(key.key_id)}>{$t('Rotate')}</button
+                    >
                     <button type="button" class="btn-secondary" onclick={() => startEdit(key)}
                       >{$t('Edit')}</button
                     >
@@ -341,6 +431,101 @@
         </tbody>
       </table>
     </div>
+  {/if}
+
+  {#if revealedKey}
+    <Modal label={$t('Full API key')} onclose={() => (revealedKey = null)}>
+      <h2 class="section-header">{$t('Full API key')}</h2>
+      <p class="mt-2 text-sm text-amber-800">
+        {$t('This value grants access as')}
+        <code class="font-mono">{revealedKey.prefix}</code>{$t('. Keep it private.')}
+      </p>
+      <div class="mt-3 flex items-center gap-2">
+        <code
+          data-testid="revealed-key-value"
+          class="flex-1 break-all rounded bg-slate-100 px-3 py-2 font-mono text-sm text-ink-strong"
+          >{revealedKey.plaintext}</code
+        >
+        <button
+          type="button"
+          class="btn-primary-sm"
+          onclick={() => revealedKey && copySecret(revealedKey.plaintext, 'reveal')}
+          >{revealCopied ? $t('Copied') : $t('Copy')}</button
+        >
+      </div>
+      <div class="mt-4 flex justify-end">
+        <button type="button" class="btn-secondary" onclick={() => (revealedKey = null)}
+          >{$t('Close')}</button
+        >
+      </div>
+    </Modal>
+  {/if}
+
+  {#if confirmingRotate}
+    <Modal
+      label={$t('Rotate key')}
+      onclose={cancelRotate}
+      dismissible={rotating !== confirmingRotate}
+    >
+      <h2 class="section-header">{$t('Rotate key')}</h2>
+      <p class="mt-2 text-sm text-amber-800">
+        {$t('Rotate key')}
+        <code class="font-mono">{confirmingRotatePrefix}</code>{$t(
+          '? The current value stops working immediately. Key id, name, caps, and request history stay in place.',
+        )}
+      </p>
+      <div class="mt-4 flex justify-end gap-2">
+        <button
+          type="button"
+          class="btn-secondary"
+          disabled={rotating === confirmingRotate}
+          onclick={cancelRotate}>{$t('Cancel')}</button
+        >
+        <button
+          type="button"
+          class="btn-danger"
+          disabled={rotating === confirmingRotate}
+          onclick={confirmRotate}
+          >{rotating === confirmingRotate ? $t('Rotating…') : $t('Rotate key')}</button
+        >
+      </div>
+    </Modal>
+  {/if}
+
+  {#if rotatedKey}
+    <Modal
+      label={$t('Replacement key created')}
+      onclose={() => (rotatedKey = null)}
+      dismissible={false}
+    >
+      <h2 class="section-header">{$t('Replacement key created')}</h2>
+      <p class="mt-2 text-sm text-amber-800">
+        {$t('Copy this new API key. It replaces the previous value for the same key.')}
+      </p>
+      {#if rotatedKey.recoverable === false}
+        <p class="mt-1 text-sm text-amber-800">
+          {$t('Key reveal encryption is not configured, so this value cannot be recovered later.')}
+        </p>
+      {/if}
+      <div class="mt-3 flex items-center gap-2">
+        <code
+          data-testid="rotated-key-value"
+          class="flex-1 break-all rounded bg-slate-100 px-3 py-2 font-mono text-sm text-ink-strong"
+          >{rotatedKey.plaintext}</code
+        >
+        <button
+          type="button"
+          class="btn-primary-sm"
+          onclick={() => rotatedKey && copySecret(rotatedKey.plaintext, 'rotate')}
+          >{rotatedCopied ? $t('Copied') : $t('Copy')}</button
+        >
+      </div>
+      <div class="mt-4 flex justify-end">
+        <button type="button" class="btn-success" onclick={() => (rotatedKey = null)}
+          >{$t('Done')}</button
+        >
+      </div>
+    </Modal>
   {/if}
 
   {#if confirmingRevoke}

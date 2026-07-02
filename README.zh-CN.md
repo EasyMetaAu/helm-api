@@ -77,7 +77,7 @@ docker compose logs helm | grep -i "root API key"
 | 🪪 | **固定模型的客户端也能即插即用** | 客户端写死的厂商模型 id（Claude Code 的 `claude-opus-4-8`、锁定 `gpt-5.5` 的 SDK）照样能用——不再吃 *400 unknown model*。**标准 key** 把它当 `auto` 分类；**自定义模型 key** 可通过 `model-aliases.yaml` 把每个厂商家族映射到一条 lane（受 lane 白名单收口）。 |
 | 🛡️ | **稳健的执行层** | 熔断器（OPEN/HALF_OPEN + 单探针）、能力过滤（跳过候选时记下明确原因）、`:free` 档 429 跳过、按 key 并发排队。客户端断连永远不算供应商故障。 |
 | 🔐 | **OAuth 订阅** | 把 Claude Pro/Max、ChatGPT Codex、GitHub Copilot 的**订阅**当后端来路由——多账号组池，逐账号做模型策展 / 出口代理 / 调度，全部热重载。*（可选功能，先读 [ToS 警告](#oauth-订阅类供应商claude-promaxchatgpt-codexgithub-copilot)。）* |
-| 🔑 | **带约束力的 key** | 强制鉴权；key 只存 SHA-256 哈希。每把 key 可设：lane 白名单、自定义模型权限、RPM/TPM 限流、用量预算（降级或拒绝）、并发上限、记忆模式。先软吊销，再永久删除。 |
+| 🔑 | **带约束力的 key** | 强制鉴权；key 鉴权走 SHA-256 哈希，可额外保存加密恢复材料供管理后台查看/轮转。每把 key 可设：lane 白名单、自定义模型权限、RPM/TPM 限流、用量预算（降级或拒绝）、并发上限、记忆模式。可原地轮转，先软吊销，再永久删除。 |
 | 🧠 | **Memory 中间件** | 默认开启：路由前把记忆作为一轮追加消息注入上下文；后台 worker 负责压缩与归并——压缩**全自动、零配置**（价格与上下文窗口取自模型目录；按体量 / 空闲 / 上下文压力三种时机触发）。摘要与归并默认走确定性的本地逻辑，另有**可选的 LLM 路径**（`config.memory.llm`，默认关闭）；遗忘/分层机制（衰减、强化、保留期）防止记忆膨胀。可按 key 或按请求关闭（`x-memory-mode: off`）。 |
 | 📊 | **全程可观测** | 每个请求一条脱敏决策记录——分类、策略、lane、每次供应商尝试、延迟、兜底、成本。正文逐字捕获单独存表（默认开，保留 30 天）。正文检查器支持长字段全屏阅读、内联图片预览，可编辑的 **Retry** 按钮能按原协议重放任何已捕获的请求。 |
 | 🖥️ | **管理面板** | `/admin` 上的 SvelteKit SPA，HTTP Basic 把守：概览、key 增删改、lane / 策略 / 分类器编辑器、系统设置、可下钻的请求日志。编辑会**写回 `config/*.yaml`**（保留注释、原子写入）并实时重绑——无需重启，重启也不丢。支持 5 种语言。 |
@@ -303,7 +303,7 @@ gemini-image:                       # 请求填 `model: "gemini-image"`
 | `HELM_STORE_DRIVER` | `sqlite`（默认）或 `supabase` |
 | `HELM_STORE_URL_ENV` | 用 `supabase` 时：存放 Postgres DSN 的环境变量**名** |
 | `HELM_RATE_LIMIT_ENABLED` | 打开限流（默认关闭） |
-| `HELM_OAUTH_ENC_KEY` | 加密所存 OAuth token 的 32 字节密钥（配了订阅类供应商时**必填**） |
+| `HELM_OAUTH_ENC_KEY` | 加密可恢复 API key 与 OAuth token 的 32 字节密钥（配了订阅类供应商时**必填**；管理后台后续查看完整 API key 也需要它） |
 
 > **存储。** 默认 SQLite（`better-sqlite3`，`./data` 下的 `helm.db` 文件）。要用 Postgres/Supabase：`HELM_STORE_DRIVER=supabase`，再让 `HELM_STORE_URL_ENV` 指向存放 DSN 的环境变量。未知驱动在启动时 fail-closed。
 >
@@ -313,7 +313,7 @@ gemini-image:                       # 请求填 `model: "gemini-image"`
 
 供应商除了静态 key，还能用 **OAuth 订阅**鉴权：在面板里登录（**提供商 → 连接**）。Claude Pro/Max 和 ChatGPT Codex 走「粘贴授权码」，GitHub Copilot 走设备码。Helm 把会轮换的 refresh token **加密存盘**，并自动刷新短时的 access token。
 
-先设 **`HELM_OAUTH_ENC_KEY`**（32 字节：base64 或 64 位十六进制）——配置了订阅类供应商却没设这把密钥，Helm 拒绝启动。然后给供应商加一个 `oauth: { provider: anthropic | github-copilot | openai-codex }` 块（`config/providers.yaml` 里有注释掉的示例；Claude 用 `type: anthropic`）。
+先设 **`HELM_OAUTH_ENC_KEY`**（32 字节：base64 或 64 位十六进制）——配置了订阅类供应商却没设这把密钥，Helm 拒绝启动。同一把密钥也用于加密管理后台查看/轮转 API key 所需的恢复材料。然后给供应商加一个 `oauth: { provider: anthropic | github-copilot | openai-codex }` 块（`config/providers.yaml` 里有注释掉的示例；Claude 用 `type: anthropic`）。
 
 同一供应商可以**接入多个账号**组成池。每个账号（**提供商 → 管理**）各有：
 

@@ -167,6 +167,8 @@ describe("bootstrapRootKey", () => {
       disable: vi.fn(),
       deleteKey: vi.fn(),
       updateKey: vi.fn(),
+      rotateKey: vi.fn(),
+      getSecretEnc: vi.fn(),
     };
     await expect(
       bootstrapRootKey({ keyStore: failing, generateKey, now: () => new Date(), log: () => {} }),

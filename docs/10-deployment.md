@@ -86,10 +86,12 @@ Configuration comes from **files** and **environment variables**, and env vars
     `config/runtime.yaml`).
   - `HELM_STORE_DRIVER` (`sqlite` | `supabase`), `HELM_STORE_URL_ENV`
   - `HELM_DATA_DIR` (data directory, default `./data`), `HELM_KEYS_PERSIST_TO`
-  - `HELM_OAUTH_ENC_KEY` — a 32-byte key used to encrypt stored OAuth
-    subscription tokens. **Mandatory whenever any OAuth subscription provider is
-    connected**: the gateway refuses to start if one is configured without it,
-    and the admin OAuth surface stays disabled until it is set.
+  - `HELM_OAUTH_ENC_KEY` — a 32-byte key used to encrypt recoverable API keys and
+    stored OAuth subscription tokens. **Mandatory whenever any OAuth subscription
+    provider is connected**: the gateway refuses to start if one is configured
+    without it, and the admin OAuth surface stays disabled until it is set. API
+    keys minted or rotated without it still authenticate, but cannot be revealed
+    later.
   - Background-worker toggles: `HELM_SIGNALS_DISABLED=1` stops the signal
     scheduler and `HELM_MEMORY_WORKER_DISABLED=1` stops the memory worker (both
     run by default); `HELM_MEMORY_WORKER_INTERVAL_MS` tunes the memory worker

@@ -72,14 +72,15 @@ time and by model; and the most recent routing decisions.
 
 ### Rule management
 
-- **Keys** (`/keys`) — create and revoke API keys and edit the full per-key cap
+- **Keys** (`/keys`) — create, reveal, rotate, and revoke API keys and edit the full per-key cap
   set: allowed lanes, custom-model permission, rate limits (RPM/TPM), usage
   budgets (requests / tokens / spend with a budget window plus the over-budget
   behavior and degrade lane), the concurrency limit, and the memory mode
   (`off` / `observe` / `inject` with project id and thread source). Backed by the
   KeyStore (`/admin/api/keys` `GET` / `POST` / `PATCH` / `DELETE`), never YAML.
-  The plaintext of a freshly minted key is returned exactly once (Principle 7);
-  revocation is a soft disable. A revoked key can then be permanently deleted as
+  Full key reveal works only for rows with encrypted recovery material; older
+  hash-only keys must be rotated before they become recoverable. Revocation is a
+  soft disable. A revoked key can then be permanently deleted as
   an explicit second step (DELETE `?purge=true`); the server refuses to purge an
   active key (409 'key must be revoked before deletion'). Telemetry keeps an
   unlinked key_id reference for audit history. See [06 · Auth, API Keys & Rate

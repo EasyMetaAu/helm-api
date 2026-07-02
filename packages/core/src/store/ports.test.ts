@@ -8,6 +8,7 @@ import type {
   KeyStore,
   RecentDecisionRecord,
   RequestPayload,
+  RotateKeyInput,
   TelemetryAggregate,
   TelemetryKeyUsage,
   TelemetryPage,
@@ -19,13 +20,14 @@ import type {
 // self-consistent (if it compiles, the signatures line up). It also exercises
 // the soft-revoke semantics.
 class InMemoryKeyStore implements KeyStore {
-  private readonly byId = new Map<string, ApiKeyRecord>();
+  private readonly byId = new Map<string, ApiKeyRecord & { secretEnc: string | null }>();
 
   async createKey(input: CreateKeyInput): Promise<ApiKeyRecord> {
-    const record: ApiKeyRecord = {
+    const record: ApiKeyRecord & { secretEnc: string | null } = {
       key_id: input.keyId,
       hash: input.hash,
       prefix: input.prefix,
+      secretEnc: input.secretEnc ?? null,
       account_id: input.accountId,
       role: input.role,
       name: input.name ?? null,
@@ -83,6 +85,19 @@ class InMemoryKeyStore implements KeyStore {
       next.over_budget_behavior = patch.overBudgetBehavior;
     if (patch.degradeLane !== undefined) next.degrade_lane = patch.degradeLane;
     this.byId.set(keyId, next);
+  }
+  async rotateKey(keyId: string, input: RotateKeyInput): Promise<void> {
+    const r = this.byId.get(keyId);
+    if (!r) return;
+    this.byId.set(keyId, {
+      ...r,
+      hash: input.hash,
+      prefix: input.prefix,
+      secretEnc: input.secretEnc ?? null,
+    });
+  }
+  async getSecretEnc(keyId: string): Promise<string | null> {
+    return this.byId.get(keyId)?.secretEnc ?? null;
   }
 }
 
@@ -367,6 +382,7 @@ describe("port type contracts", () => {
       | "keyId"
       | "hash"
       | "prefix"
+      | "secretEnc"
       | "accountId"
       | "role"
       | "name"

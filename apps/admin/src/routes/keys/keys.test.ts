@@ -11,11 +11,15 @@ const createKey = vi.fn();
 const revokeKey = vi.fn();
 const updateKey = vi.fn();
 const deleteKey = vi.fn();
+const revealKey = vi.fn();
+const rotateKey = vi.fn();
 vi.mock('$lib/api/keys.js', () => ({
   createKey: (...args: unknown[]) => createKey(...args),
   revokeKey: (...args: unknown[]) => revokeKey(...args),
   updateKey: (...args: unknown[]) => updateKey(...args),
   deleteKey: (...args: unknown[]) => deleteKey(...args),
+  revealKey: (...args: unknown[]) => revealKey(...args),
+  rotateKey: (...args: unknown[]) => rotateKey(...args),
 }));
 
 function key(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView {
@@ -58,9 +62,18 @@ describe('keys page', () => {
     revokeKey.mockReset();
     updateKey.mockReset();
     deleteKey.mockReset();
+    revealKey.mockReset();
+    rotateKey.mockReset();
     updateKey.mockResolvedValue(undefined);
     revokeKey.mockResolvedValue({ revoked: '' });
     deleteKey.mockResolvedValue({ deleted: '' });
+    revealKey.mockResolvedValue({ key_id: 'k1', plaintext: 'helm_live_REVEALEDSECRET0000' });
+    rotateKey.mockResolvedValue({
+      key_id: 'k1',
+      plaintext: 'helm_live_ROTATEDSECRET0000',
+      prefix: 'helm_live_rota',
+      recoverable: true,
+    });
   });
 
   it('lists each key by prefix/role/caps/status and shows NO plaintext-like secret', () => {
@@ -121,6 +134,44 @@ describe('keys page', () => {
     // Disabled (revoked) row still lets an operator inspect its history.
     expect(within(rows[1]).getByRole('link', { name: /details/i }).getAttribute('href')).toBe(
       '/keys/k2',
+    );
+  });
+
+  it('reveals the full key in a modal without putting it in the list permanently', async () => {
+    revealKey.mockResolvedValue({ key_id: 'k1', plaintext: 'helm_live_REVEALEDSECRET0000' });
+    renderPage([key('k1', { prefix: 'helm_live_ab12' })]);
+    const row = screen.getByTestId('key-row');
+    await fireEvent.click(within(row).getByRole('button', { name: /view full key/i }));
+
+    await waitFor(() => expect(revealKey).toHaveBeenCalledWith('k1'));
+    const dialog = screen.getByRole('dialog', { name: /full api key/i });
+    expect(within(dialog).getByTestId('revealed-key-value')).toHaveTextContent(
+      'helm_live_REVEALEDSECRET0000',
+    );
+    await fireEvent.click(within(dialog).getByRole('button', { name: /close/i }));
+    await waitFor(() => expect(screen.queryByTestId('revealed-key-value')).not.toBeInTheDocument());
+    expect(screen.getByText('helm_live_ab12')).toBeInTheDocument();
+  });
+
+  it('rotates an active key in place: same row, new prefix, replacement plaintext modal', async () => {
+    rotateKey.mockResolvedValue({
+      key_id: 'k1',
+      plaintext: 'helm_live_ROTATEDSECRET0000',
+      prefix: 'helm_live_rota',
+      recoverable: true,
+    });
+    renderPage([key('k1', { prefix: 'helm_live_ab12', name: 'Prod' })]);
+    const row = screen.getByTestId('key-row');
+    await fireEvent.click(within(row).getByRole('button', { name: /^rotate$/i }));
+    const confirm = screen.getByRole('dialog', { name: /rotate key/i });
+    await fireEvent.click(within(confirm).getByRole('button', { name: /^rotate key$/i }));
+
+    await waitFor(() => expect(rotateKey).toHaveBeenCalledWith('k1'));
+    expect(screen.getAllByTestId('key-row')).toHaveLength(1);
+    expect(screen.getByText('helm_live_rota')).toBeInTheDocument();
+    const replacement = screen.getByRole('dialog', { name: /replacement key created/i });
+    expect(within(replacement).getByTestId('rotated-key-value')).toHaveTextContent(
+      'helm_live_ROTATEDSECRET0000',
     );
   });
 
@@ -189,7 +240,12 @@ describe('keys page', () => {
   });
 
   it('after creating a key the new row shows only the prefix (no plaintext in the list)', async () => {
-    createKey.mockResolvedValue({ key_id: 'key_new', plaintext: 'helm_live_TOPSECRETVALUE0000' });
+    createKey.mockResolvedValue({
+      key_id: 'key_new',
+      plaintext: 'helm_live_TOPSECRETVALUE0000',
+      prefix: 'helm_live_TOPS',
+      recoverable: true,
+    });
     renderPage([key('k1')]);
     await fireEvent.click(screen.getByRole('button', { name: /new key|create/i }));
 

@@ -2,10 +2,10 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import CreateKeyDialog from './CreateKeyDialog.svelte';
 
-// The dialog owns the create form + the ONE-TIME plaintext reveal. It calls the
+// The dialog owns the create form + the plaintext reveal. It calls the
 // injected `createKey` and bubbles the new key view up via `oncreated`. The
-// plaintext is shown exactly once and wiped from component state on close
-// (CLAUDE.md Principle 7 / docs/06: plaintext returns once, never re-viewable).
+// plaintext is wiped from component state on close; the server may also store
+// encrypted recovery material for later admin reveal.
 
 const createKey = vi.fn();
 vi.mock('$lib/api/keys.js', () => ({
@@ -28,7 +28,12 @@ function setup() {
 describe('CreateKeyDialog', () => {
   beforeEach(() => {
     createKey.mockReset();
-    createKey.mockResolvedValue({ key_id: 'key_1', plaintext: PLAINTEXT, prefix: PREFIX });
+    createKey.mockResolvedValue({
+      key_id: 'key_1',
+      plaintext: PLAINTEXT,
+      prefix: PREFIX,
+      recoverable: true,
+    });
   });
 
   it('submits the chosen allowed-lanes whitelist + passthrough caps to createKey', async () => {

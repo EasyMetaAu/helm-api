@@ -28,12 +28,14 @@ const bytea = customType<{ data: Buffer; driverData: Buffer }>({
 // never see them (CLAUDE.md "DB abstraction layer"). Epoch-millisecond timestamps are stored
 // as bigint (mode: "number") so the value space matches the sqlite timestamp_ms
 // columns exactly and the port contract is byte-for-byte identical across
-// drivers. Per principle 7: NO plaintext column anywhere — only hash + prefix.
+// drivers. Per principle 7: NO plaintext column anywhere — only hash + prefix,
+// plus optional encrypted recovery material for the admin reveal path.
 
 export const apiKeys = pgTable("api_keys", {
   keyId: text("key_id").primaryKey(),
   hash: text("hash").notNull().unique(), // sha256(plaintext); getByHash uses the unique index
   prefix: text("prefix").notNull(), // helm_live_xxxx — display/debug only
+  secretEnc: text("secret_enc"), // encrypted full key for admin recovery; never plaintext
   accountId: text("account_id").notNull(),
   role: text("role").notNull(), // 'root' | 'user'
   name: text("name"), // human-readable label; NULL = unnamed (cosmetic only)
