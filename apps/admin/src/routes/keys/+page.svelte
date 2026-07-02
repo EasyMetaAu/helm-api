@@ -58,6 +58,7 @@
   // modal states. The normal key list remains prefix-only.
   let revealing = $state<string | null>(null);
   let revealedKey = $state<(RevealedKey & { prefix: string }) | null>(null);
+  let unavailableRevealKey = $state<ApiKeyView | null>(null);
   let revealCopied = $state<boolean>(false);
   let confirmingRotate = $state<string | null>(null);
   let rotating = $state<string | null>(null);
@@ -73,6 +74,7 @@
   let confirmingRotatePrefix = $derived(
     keys.find((k) => k.key_id === confirmingRotate)?.prefix ?? '',
   );
+  let unavailableRevealPrefix = $derived(unavailableRevealKey?.prefix ?? '');
 
   // The key currently being edited in the Edit dialog (null = closed). All caps
   // are editable there EXCEPT the immutable identity and role (see EditKeyDialog).
@@ -146,12 +148,22 @@
 
   async function handleReveal(key: ApiKeyView): Promise<void> {
     error = null;
+    unavailableRevealKey = null;
     revealing = key.key_id;
     revealCopied = false;
     try {
       const revealed = await revealKey(key.key_id);
       revealedKey = { ...revealed, prefix: key.prefix };
     } catch (e) {
+      if (
+        e instanceof Error &&
+        (e.name === 'FullKeyUnavailableError' ||
+          e.message.includes('full key is not available') ||
+          e.message.includes('full-key recovery'))
+      ) {
+        unavailableRevealKey = key;
+        return;
+      }
       error = e instanceof Error ? e.message : $t('Failed to reveal key');
     } finally {
       revealing = null;
@@ -165,6 +177,12 @@
 
   function cancelRotate(): void {
     confirmingRotate = null;
+  }
+
+  function rotateUnavailableKey(): void {
+    const keyId = unavailableRevealKey?.key_id;
+    unavailableRevealKey = null;
+    if (keyId) askRotate(keyId);
   }
 
   async function confirmRotate(): Promise<void> {
@@ -431,6 +449,32 @@
         </tbody>
       </table>
     </div>
+  {/if}
+
+  {#if unavailableRevealKey}
+    <Modal label={$t('Full key unavailable')} onclose={() => (unavailableRevealKey = null)}>
+      <h2 class="section-header">{$t('Full key unavailable')}</h2>
+      <p class="mt-2 text-sm text-amber-800">
+        {$t(
+          'This key was created before full-key recovery was enabled. Helm only stored a hash, so the old full value cannot be reconstructed.',
+        )}
+      </p>
+      <p class="mt-2 text-sm text-ink-muted">
+        <code class="font-mono">{unavailableRevealPrefix}</code>{' '}{$t(
+          'can be rotated to generate a new full key for the same key id and request history. The current value will stop working only after the next confirmation step.',
+        )}
+      </p>
+      <div class="mt-4 flex justify-end gap-2">
+        <button
+          type="button"
+          class="btn-secondary"
+          onclick={() => (unavailableRevealKey = null)}>{$t('Cancel')}</button
+        >
+        <button type="button" class="btn-danger" onclick={rotateUnavailableKey}
+          >{$t('Rotate this key')}</button
+        >
+      </div>
+    </Modal>
   {/if}
 
   {#if revealedKey}

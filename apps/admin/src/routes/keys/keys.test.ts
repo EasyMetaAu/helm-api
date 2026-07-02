@@ -153,6 +153,27 @@ describe('keys page', () => {
     expect(screen.getByText('helm_live_ab12')).toBeInTheDocument();
   });
 
+  it('explains legacy hash-only reveal failures and routes rotation through confirmation', async () => {
+    const unavailable = new Error(
+      'This key was created before full-key recovery was enabled. Helm only stored a hash, so the old full value cannot be reconstructed.',
+    );
+    unavailable.name = 'FullKeyUnavailableError';
+    revealKey.mockRejectedValue(unavailable);
+    renderPage([key('k1', { prefix: 'helm_live_old1' })]);
+    const row = screen.getByTestId('key-row');
+
+    await fireEvent.click(within(row).getByRole('button', { name: /view full key/i }));
+
+    const unavailableDialog = await screen.findByRole('dialog', { name: /full key unavailable/i });
+    expect(within(unavailableDialog).getByText(/cannot be reconstructed/i)).toBeInTheDocument();
+    await fireEvent.click(within(unavailableDialog).getByRole('button', { name: /rotate this key/i }));
+
+    const confirm = screen.getByRole('dialog', { name: /rotate key/i });
+    expect(rotateKey).not.toHaveBeenCalled();
+    await fireEvent.click(within(confirm).getByRole('button', { name: /^rotate key$/i }));
+    await waitFor(() => expect(rotateKey).toHaveBeenCalledWith('k1'));
+  });
+
   it('rotates an active key in place: same row, new prefix, replacement plaintext modal', async () => {
     rotateKey.mockResolvedValue({
       key_id: 'k1',

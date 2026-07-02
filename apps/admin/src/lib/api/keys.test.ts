@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiKeyView } from './keys.js';
 import {
   createKey,
+  FullKeyUnavailableError,
   getKey,
   getKeysUsage,
   listKeys,
@@ -324,6 +325,20 @@ describe('keys api client', () => {
     expect(url).toBe('/admin/api/keys/key_1/secret');
     expect(init.headers).toEqual(expect.objectContaining({ accept: 'application/json' }));
     expect(out.plaintext).toBe('helm_live_SECRET');
+  });
+
+  it('maps legacy hash-only reveal 409 to a typed unavailable error', async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error:
+            'full key is not available for this row; rotate it to store recoverable key material',
+        }),
+        { status: 409 },
+      ),
+    );
+
+    await expect(revealKey('key_1')).rejects.toBeInstanceOf(FullKeyUnavailableError);
   });
 
   it('rotateKey POSTs to the rotate endpoint and returns the replacement plaintext', async () => {

@@ -149,6 +149,15 @@ export interface KeyUsageWindow {
 }
 
 const BASE = '/admin/api/keys';
+export const FULL_KEY_UNAVAILABLE_MESSAGE =
+  'This key was created before full-key recovery was enabled. Helm only stored a hash, so the old full value cannot be reconstructed.';
+
+export class FullKeyUnavailableError extends Error {
+  constructor() {
+    super(FULL_KEY_UNAVAILABLE_MESSAGE);
+    this.name = 'FullKeyUnavailableError';
+  }
+}
 
 async function asJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -304,6 +313,17 @@ export async function revealKey(keyId: string): Promise<RevealedKey> {
   const res = await fetch(`${BASE}/${encodeURIComponent(keyId)}/secret`, {
     headers: { accept: 'application/json' },
   });
+  if (res.status === 409) {
+    const body = await res
+      .clone()
+      .json()
+      .catch(() => null);
+    const serverError =
+      body && typeof body === 'object' && 'error' in body ? String(body.error) : '';
+    if (serverError.includes('full key is not available')) {
+      throw new FullKeyUnavailableError();
+    }
+  }
   return asJson<RevealedKey>(res);
 }
 
