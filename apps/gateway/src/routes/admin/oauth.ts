@@ -31,6 +31,25 @@ function isAbort(e: unknown, signal: AbortSignal): boolean {
   return e instanceof Error && (e.name === "AbortError" || /abort/i.test(e.message));
 }
 
+function testUsageTokens(ev: {
+  type: string;
+  promptTokens?: unknown;
+  completionTokens?: unknown;
+  totalTokens?: unknown;
+}): number | null {
+  if (ev.type !== "usage") return null;
+  if (typeof ev.totalTokens === "number" && Number.isFinite(ev.totalTokens)) {
+    return Math.max(0, Math.trunc(ev.totalTokens));
+  }
+  const prompt =
+    typeof ev.promptTokens === "number" && Number.isFinite(ev.promptTokens) ? ev.promptTokens : 0;
+  const completion =
+    typeof ev.completionTokens === "number" && Number.isFinite(ev.completionTokens)
+      ? ev.completionTokens
+      : 0;
+  return Math.max(0, Math.trunc(prompt + completion));
+}
+
 // A malformed proxy body — thrown by parseProxyInput, caught at the route to map to
 // a 400. Distinct type so a genuine seam error isn't masked as a parse error.
 class ProxyParseError extends Error {}
@@ -168,19 +187,23 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     // instant a credit is consumed, so a stored snapshot would lie). Keyed by acctKey;
     // attached onto the matching codex snapshot in the response below.
     const resetCredits = new Map<string, number | null>();
-    const extendActiveCooldownFromWindows = async (
+    const syncActiveCooldownFromWindows = async (
       providerId: string,
       account: string,
       windows: Parameters<typeof windowsToActiveUsageRecovery>[0],
     ): Promise<void> => {
       if (!deps.applyUsageLimit) return;
       const nowMs = Date.now();
-      const quotaUntil = windowsToActiveUsageRecovery(windows, nowMs);
-      if (quotaUntil === null) return;
       const current = await store.get(providerId, account).catch(() => null);
       const currentUntil = current?.usageLimitedUntilMs ?? null;
-      if (currentUntil === null || currentUntil <= nowMs || currentUntil >= quotaUntil) return;
-      await deps.applyUsageLimit(providerId, account, quotaUntil).catch(() => {});
+      if (currentUntil === null || currentUntil <= nowMs) return;
+      const quotaUntil = windowsToActiveUsageRecovery(windows, nowMs);
+      if (quotaUntil === null) {
+        await deps.applyUsageLimit(providerId, account, null, "replace").catch(() => {});
+        return;
+      }
+      if (currentUntil === quotaUntil) return;
+      await deps.applyUsageLimit(providerId, account, quotaUntil, "replace").catch(() => {});
     };
     if (s) {
       try {
@@ -196,7 +219,9 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         // (generic 429 fallback), a near-full quota window may EXTEND that cooldown to
         // the likely reset time. That keeps "Reset usage" effective: clearing the
         // cooldown then reloading this page does not immediately re-park the account
-        // before it can serve a single request.
+        // before it can serve a single request. For an ALREADY parked account, a
+        // successful PULL is also trusted to clear or shorten stale cooldowns: clean
+        // windows mean the account is available again.
         const acctsOf = (id: string) => status.find((x) => x.id === id)?.accounts ?? [];
         const tasks: Array<Promise<void>> = [];
         // Anthropic: windows only.
@@ -216,7 +241,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                       source: "anthropic",
                     })
                     .catch(() => {});
-                  await extendActiveCooldownFromWindows("anthropic", a.account, windows);
+                  await syncActiveCooldownFromWindows("anthropic", a.account, windows);
                 }
               })(),
             );
@@ -241,7 +266,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                       source: "codex",
                     })
                     .catch(() => {});
-                  await extendActiveCooldownFromWindows("openai-codex", a.account, result.windows);
+                  await syncActiveCooldownFromWindows("openai-codex", a.account, result.windows);
                 }
               })(),
             );
@@ -574,8 +599,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
   // bare "ok". Fail-open (Principle 3): a missing tester 503s before streaming;
   // missing account/model 400s; any upstream failure is surfaced as an in-band
   // `error` event (HTTP 200, never a 5xx) so the dialog can show what went wrong. A
-  // client/modal abort is silent (not a provider fault). No telemetry is recorded —
-  // the fresh client carries its own no-op breaker (see oauth-test.ts).
+  // client/modal abort is silent (not a provider fault). No request telemetry is
+  // recorded — the fresh client carries its own no-op breaker (see oauth-test.ts).
+  // A SUCCESSFUL test still consumes real upstream quota, so record OAuth account
+  // usage and clear any stale auto-park cooldown.
   app.post("/admin/api/oauth/:provider/test", async (c) => {
     const tester = deps.oauthTester;
     if (!tester) return c.json({ error: "oauth login not configured" }, 503);
@@ -589,11 +616,26 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     const signal = c.req.raw.signal;
     return streamSSE(c, async (sse) => {
       const startedAt = Date.now();
+      let tokens = 0;
       await sse.writeSSE({ data: JSON.stringify({ type: "start", model }) });
       try {
         for await (const ev of tester.test({ providerId, account, model, prompt, signal })) {
+          const usageTokens = testUsageTokens(ev);
+          if (usageTokens !== null) tokens = usageTokens;
           await sse.writeSSE({ data: JSON.stringify(ev) });
         }
+        const nowMs = Date.now();
+        await deps.oauthUsage
+          ?.record({
+            providerId,
+            account,
+            bucketMs: nowMs - (nowMs % 3_600_000),
+            tokens,
+            costUsd: null,
+            nowMs,
+          })
+          .catch(() => {});
+        await deps.applyUsageLimit?.(providerId, account, null, "replace").catch(() => {});
         await sse.writeSSE({
           data: JSON.stringify({ type: "done", durationMs: Date.now() - startedAt }),
         });

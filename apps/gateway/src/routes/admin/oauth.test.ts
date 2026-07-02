@@ -212,7 +212,7 @@ describe("admin OAuth routes — read endpoints", () => {
     );
 
     expect(res.status).toBe(200);
-    expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "default", weeklyReset);
+    expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "default", weeklyReset, "replace");
   });
 
   it("GET /oauth/quota extends an active cooldown to a near-full 5h recovery reset", async () => {
@@ -263,7 +263,92 @@ describe("admin OAuth routes — read endpoints", () => {
     );
 
     expect(res.status).toBe(200);
-    expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "default", fiveHourReset);
+    expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "default", fiveHourReset, "replace");
+  });
+
+  it("GET /oauth/quota clears an active cooldown when fresh windows show no active limit", async () => {
+    const now = Date.now();
+    const activeCooldown = now + 4 * 86_400_000;
+    const cleanWindows = [
+      { key: "5h", usedPercent: 0, resetsAtMs: null, windowMinutes: null },
+      { key: "7d", usedPercent: 0, resetsAtMs: null, windowMinutes: null },
+    ];
+    const applyUsageLimit = vi.fn(async () => {});
+    const oauthQuota = {
+      get: vi.fn(async () => ({
+        providerId: "anthropic",
+        account: "default",
+        windows: [],
+        capturedAt: now,
+        source: "anthropic",
+        usageLimitedUntilMs: activeCooldown,
+      })),
+      getAll: vi.fn(async () => [
+        {
+          providerId: "anthropic",
+          account: "default",
+          windows: cleanWindows,
+          capturedAt: now,
+          source: "anthropic",
+          usageLimitedUntilMs: activeCooldown,
+        },
+      ]),
+      upsert: vi.fn(async () => {}),
+      delete: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const seam = fullSeam({
+      fetchAnthropicQuota: vi.fn(async () => cleanWindows) as never,
+    });
+
+    const res = await app({ oauth: seam, oauthQuota, applyUsageLimit }).request(
+      "/admin/api/oauth/quota",
+    );
+
+    expect(res.status).toBe(200);
+    expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "default", null, "replace");
+  });
+
+  it("GET /oauth/quota replaces a stale long cooldown with the active shorter recovery window", async () => {
+    const now = Date.now();
+    const staleCooldown = now + 5 * 86_400_000;
+    const fiveHourReset = now + 2 * 60 * 60_000;
+    const windows = [
+      { key: "5h", usedPercent: 98, resetsAtMs: fiveHourReset, windowMinutes: null },
+      { key: "7d", usedPercent: 40, resetsAtMs: staleCooldown, windowMinutes: null },
+    ];
+    const applyUsageLimit = vi.fn(async () => {});
+    const oauthQuota = {
+      get: vi.fn(async () => ({
+        providerId: "anthropic",
+        account: "default",
+        windows: [],
+        capturedAt: now,
+        source: "anthropic",
+        usageLimitedUntilMs: staleCooldown,
+      })),
+      getAll: vi.fn(async () => [
+        {
+          providerId: "anthropic",
+          account: "default",
+          windows,
+          capturedAt: now,
+          source: "anthropic",
+          usageLimitedUntilMs: staleCooldown,
+        },
+      ]),
+      upsert: vi.fn(async () => {}),
+      delete: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const seam = fullSeam({
+      fetchAnthropicQuota: vi.fn(async () => windows) as never,
+    });
+
+    const res = await app({ oauth: seam, oauthQuota, applyUsageLimit }).request(
+      "/admin/api/oauth/quota",
+    );
+
+    expect(res.status).toBe(200);
+    expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "default", fiveHourReset, "replace");
   });
 
   it("GET /oauth/quota does not newly park an unparked account from a PULL snapshot", async () => {

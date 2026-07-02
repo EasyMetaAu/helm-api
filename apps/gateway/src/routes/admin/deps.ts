@@ -22,6 +22,8 @@ import type { ModelOption } from "../../oauth/effective-models.js";
 import type { PayloadCaptureDeps } from "../payload-capture.js";
 import type { OAuthTester } from "./oauth-test.js";
 
+export type UsageLimitWriteMode = "extend" | "replace";
+
 // Injected dependency contracts for the admin API. Per CLAUDE.md principle 1 the
 // route files are PURE HTTP glue — they own no business logic and never touch the
 // filesystem or DB directly. The two persistence targets are deliberately separate
@@ -346,8 +348,11 @@ export interface AdminApiDeps {
   // Per-account connectivity tester (Subscription Providers "Test" button). Streams
   // a single short completion through a FRESH, isolated per-account client — its own
   // token + proxy + executor type, and its OWN no-op breaker — so a test records NO
-  // telemetry / request_payloads and never perturbs the live routing pool. Optional:
-  // the /oauth/:provider/test route 503s when absent (present iff OAuth is wired).
+  // telemetry / request_payloads and never perturbs the live routing pool. A
+  // SUCCESSFUL test still records OAuth account usage and clears stale auto-park
+  // cooldowns because it consumes real upstream quota and proves the account is
+  // available. Optional: the /oauth/:provider/test route 503s when absent (present
+  // iff OAuth is wired).
   oauthTester?: OAuthTester;
   // The catalog of routable model options the Lanes admin UI offers as combobox
   // suggestions (so an operator picks a real alias instead of hand-typing one — a
@@ -390,7 +395,12 @@ export interface AdminApiDeps {
   // the /quota PULL passes a saturated window's reset. Touches ONLY the cooldown,
   // never `schedulable` (operator park stays independent). Optional — absent in unit
   // tests / when no OAuth pool is wired; the reset route 503s, the PULL park is skipped.
-  applyUsageLimit?: (providerId: string, account: string, untilMs: number | null) => Promise<void>;
+  applyUsageLimit?: (
+    providerId: string,
+    account: string,
+    untilMs: number | null,
+    mode?: UsageLimitWriteMode,
+  ) => Promise<void>;
 }
 
 // Re-exported for route signatures.

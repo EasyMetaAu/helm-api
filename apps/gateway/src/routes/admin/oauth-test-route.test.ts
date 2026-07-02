@@ -94,6 +94,39 @@ describe("POST /admin/api/oauth/:provider/test", () => {
     );
   });
 
+  it("records successful test usage and clears any stale account cooldown", async () => {
+    const tester = testerOf([
+      { type: "content", text: "OK" },
+      { type: "usage", promptTokens: 10, completionTokens: 2, totalTokens: 12 },
+      { type: "finish", reason: "stop" },
+    ]);
+    const oauthUsage = {
+      record: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthUsage"];
+    const applyUsageLimit = vi.fn(async () => {});
+
+    const res = await app({ oauthTester: tester, oauthUsage, applyUsageLimit }).request(
+      "/admin/api/oauth/anthropic/test",
+      {
+        method: "POST",
+        headers: JSONH,
+        body: JSON.stringify({ account: "default", model: "claude-x" }),
+      },
+    );
+
+    expect(res.status).toBe(200);
+    expect(sseEvents(await res.text()).at(-1)).toMatchObject({ type: "done" });
+    expect(oauthUsage?.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerId: "anthropic",
+        account: "default",
+        tokens: 12,
+        costUsd: null,
+      }),
+    );
+    expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "default", null, "replace");
+  });
+
   it("emits an in-band error event (HTTP 200, not 5xx) when the tester throws mid-stream", async () => {
     const tester = testerOf(() =>
       (async function* () {

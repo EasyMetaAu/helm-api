@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { invalidateAll } from '$app/navigation';
   import { streamAccountTest } from '$lib/api/oauth.js';
   import Modal from '$lib/components/Modal.svelte';
   import { t } from '$lib/i18n';
@@ -62,7 +63,10 @@
         } else if (ev.type === 'done') {
           durationMs = ev.durationMs ?? Math.round(performance.now() - startedAt);
           // A `done` that arrives after an `error` keeps the failed status.
-          if (status === 'running') status = 'success';
+          if (status === 'running') {
+            status = 'success';
+            void invalidateAll();
+          }
         }
       }
       // Stream ended without a terminal event (e.g. an abort) — settle to idle.
