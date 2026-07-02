@@ -141,6 +141,18 @@
     return $t('in {m}m', { m: p.m });
   }
 
+  function titleFromSlug(slug: string): string {
+    return slug
+      .split('-')
+      .filter(Boolean)
+      .map((part) =>
+        part.length <= 3
+          ? part.toUpperCase()
+          : `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`,
+      )
+      .join(' ');
+  }
+
   // Friendly window labels (provider-specific keys → display).
   function windowLabel(key: string): string {
     const map: Record<string, string> = {
@@ -148,12 +160,15 @@
       '7d': '7d',
       '7d-opus': '7d · Opus',
       '7d-sonnet': '7d · Sonnet',
+      '7d-fable': '7d · Fable',
       // Codex windows: `primary` is the 5-hour rolling window (windowMinutes 300),
       // `secondary` is the weekly limit (windowMinutes 10080) — matching the Codex UI.
       primary: '5h',
       secondary: $t('Weekly'),
     };
-    return map[key] ?? key;
+    if (map[key]) return map[key];
+    if (key.startsWith('7d-')) return `7d · ${titleFromSlug(key.slice(3))}`;
+    return key;
   }
 
   // Color ramp mirrors claude-relay: calm under 75%, warning to 90%, danger beyond.

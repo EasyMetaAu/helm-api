@@ -33,9 +33,10 @@ export type OAuthUsageRow = z.infer<typeof OAuthUsageRowSchema>;
 // ── Quota (Tier 3): latest rate-limit window snapshot per (provider, account) ─
 
 // One rate-limit window. `key` names the window (Claude: 5h / 7d / 7d-opus /
-// 7d-sonnet; Codex: primary / secondary). `usedPercent` is 0–100. `resetsAtMs` is the epoch
-// ms the window resets (null when unknown). `windowMinutes` is the window length
-// when the provider reports it (Codex), else null.
+// 7d-sonnet / 7d-fable; Codex: primary / secondary). `usedPercent` is 0–100.
+// `resetsAtMs` is the epoch ms the window resets (null when unknown).
+// `windowMinutes` is the window length when the provider reports it (Codex), else
+// null.
 export const OAuthQuotaWindowSchema = z
   .object({
     key: z.string(),
@@ -76,17 +77,46 @@ export type OAuthQuotaSnapshot = z.infer<typeof OAuthQuotaSnapshotSchema>;
 // `"seven_day_opus": null` on plans without a separate Opus weekly cap), so each
 // field is `.nullish()` — a strict `.optional()` would REJECT the null and fail the
 // whole parse, leaving the page blank. The SAME applies to the INNER fields: a
-// PRESENT window can still carry `"resets_at": null` (e.g. a weekly Sonnet cap not
+// PRESENT window can still carry `"resets_at": null` (e.g. a weekly scoped cap not
 // yet touched, so no countdown), so both inner fields are `.nullish()` too — an
 // inner `.optional()` would reject that null and drop EVERY window, freezing the
-// providers page on a stale snapshot. `utilization` is already a 0–100 PERCENT
-// (e.g. 33.0), NOT a 0–1 fraction — do not re-scale on ingest. `resets_at` is an
-// ISO-8601 timestamp. Windows: five_hour / seven_day / seven_day_opus /
-// seven_day_sonnet (mirrors the official Claude /usage display).
+// providers page on a stale snapshot. Older payloads expose fixed top-level
+// windows: five_hour / seven_day / seven_day_opus / seven_day_sonnet.
 const AnthropicWindowSchema = z
   .object({
     utilization: z.number().nullish(),
     resets_at: z.string().nullish(),
+  })
+  .loose();
+
+// Current Claude usage payloads also carry a generic `limits[]` list. That list is
+// now the authoritative source for scoped model limits (for example Fable) because
+// old fixed fields such as `seven_day_sonnet` may be null even when a scoped weekly
+// row exists. `percent` is already a 0-100 percentage.
+const AnthropicLimitScopeSchema = z
+  .object({
+    model: z
+      .object({
+        id: z.string().nullable().optional(),
+        display_name: z.string().nullable().optional(),
+      })
+      .loose()
+      .nullable()
+      .optional(),
+    surface: z.unknown().nullable().optional(),
+  })
+  .loose()
+  .nullable()
+  .optional();
+
+const AnthropicLimitSchema = z
+  .object({
+    kind: z.string().optional(),
+    group: z.string().optional(),
+    percent: z.number().nullish(),
+    resets_at: z.string().nullish(),
+    scope: AnthropicLimitScopeSchema,
+    is_active: z.boolean().optional(),
   })
   .loose();
 
@@ -96,6 +126,7 @@ export const AnthropicOAuthUsageSchema = z
     seven_day: AnthropicWindowSchema.nullish(),
     seven_day_opus: AnthropicWindowSchema.nullish(),
     seven_day_sonnet: AnthropicWindowSchema.nullish(),
+    limits: z.array(AnthropicLimitSchema).nullish(),
   })
   .loose();
 
