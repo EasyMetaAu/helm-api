@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-07-03 · API key 级 usage stats 给外部自动化读取（Gateway usage API / telemetry，docs/07，原则 7）
+
+- **背景（Lukin）**：Skillstore 公开页需要每天同步 AI audit token / cost 快照；旧办法直接从 Helm SQLite 和 claude-relay Redis 取数，不适合作为长期自动化接口。新的来源应主要走 Helm 系统，并通过 API key 读取统计数据。
+- **接口决策**：新增 `GET /v1/usage/stats`，复用现有 API-key auth，不挂 admin Basic Auth。默认 `start=0`、`end=now`，返回当前 key 的累计 request/token/cost 汇总；仍接受 `start/end/bucket/tzOffsetMinutes` 以便后续做日窗口或趋势同步。
+- **隔离决策**：接口忽略 caller 传入的 `key_id`，只使用 `authMiddleware` 解析出的 `identity.keyId` 调 `TelemetryStore.aggregate(..., keyId)`；这样 Skillstore workflow 只能读它自己的 Helm key，不可能枚举其它 key 的用量。
+- **返回形状**：返回紧凑 snake_case 机器格式：`prompt_tokens`、`completion_tokens`、`total_tokens`、`cost_usd` 等，避免让下游 workflow 依赖 admin dashboard 的 series/byModel 大结构。
+- **限制 / TODO**：该接口反映 Helm telemetry 当前保留窗口内的数据；历史上还在 claude-relay 的用量需要 Skillstore 侧保留 legacy baseline 或临时兼容同步，等所有 audit 入口完全切到 Helm 后再移除 relay 补数。
+- **验证计划**：新增 route 测试覆盖缺 key 401、当前 key 聚合、恶意 `key_id` 被忽略；OpenAPI 加入 bearer-secured usage endpoint。
+
 ## 2026-07-02 · API key 加密恢复与原地轮转（Auth / Admin keys，docs/06/11，原则 7）
 
 - **背景（Lukin）**：管理后台原本只能创建后一次性显示 API key；如果操作员没有保存完整 key，只能删除或重新创建。现需支持查看已存在 key 的完整值，并支持不丢历史的轮转。

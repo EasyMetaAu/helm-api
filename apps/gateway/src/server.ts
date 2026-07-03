@@ -159,6 +159,7 @@ import { registerMessagesRoute } from "./routes/messages.js";
 import { createMessagesPipeline } from "./routes/messages-pipeline.js";
 import { registerModelsRoute } from "./routes/models.js";
 import { type ResponsesRouteDeps, registerResponsesRoute } from "./routes/responses.js";
+import { registerUsageStatsRoute } from "./routes/usage.js";
 import {
   markServingAccount,
   type ServingAccount,
@@ -1873,6 +1874,15 @@ export async function buildServer(
     // routability never disagree.
     oauthAliases: () => oauthAliasSet,
   });
+
+  // Machine-readable usage stats for API-key owners. Read-only and scoped by the
+  // authenticated key id; unlike /admin/api/stats this is not Basic Auth and does
+  // not accept a caller-supplied key_id.
+  app.use(
+    "/v1/usage/*",
+    authMiddleware({ keyStore, log: (l) => logger.log("warn", "auth", { line: l }) }),
+  );
+  registerUsageStatsRoute(app, { telemetry });
 
   // Memory MCP server (docs/13): POST /mcp exposes fact/reflection CRUD to
   // external agents, authed by the SAME API key as /v1 (so a tool call is scoped

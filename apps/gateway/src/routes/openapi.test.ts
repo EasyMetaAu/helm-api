@@ -22,6 +22,7 @@ describe("OpenAPI docs", () => {
       "/healthz",
       "/version",
       "/v1/models",
+      "/v1/usage/stats",
       "/v1/chat/completions",
       "/v1/messages",
       "/v1/responses",
@@ -56,6 +57,8 @@ describe("OpenAPI docs", () => {
     ]);
     // /v1/models is marked as bearer-secured; / is public.
     expect(doc.paths["/v1/models"]?.get.security).toEqual([{ bearerAuth: [] }]);
+    expect(doc.paths["/v1/usage/stats"]?.get.security).toEqual([{ bearerAuth: [] }]);
+    expect(doc.components.schemas.UsageStats).toBeDefined();
     expect(doc.paths["/"]?.get.security).toEqual([]);
   });
 

@@ -84,6 +84,10 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
       { name: "Meta", description: "Landing page, readiness, and build info — no auth." },
       { name: "Models", description: "What the key can route to: lanes, `auto`, and aliases." },
       {
+        name: "Usage",
+        description: "Read-only telemetry aggregates scoped to the authenticated API key.",
+      },
+      {
         name: "Inference",
         description:
           'The four client protocols plus image generation. Send `model: "auto"` to let ' +
@@ -115,6 +119,49 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
         ImageGenerationResponse: component(ImageGenerationResponseSchema),
         InteractionsRequest: component(InteractionsRequestSchema),
         InteractionsResponse: component(InteractionsResponseSchema),
+        UsageStats: {
+          type: "object",
+          properties: {
+            object: { const: "usage_stats" },
+            api_key_id: { type: "string" },
+            range: {
+              type: "object",
+              properties: {
+                start_ms: { type: "integer", minimum: 0 },
+                end_ms: { type: "integer", minimum: 0 },
+                bucket: { enum: ["hour", "day"] },
+                tz_offset_minutes: { type: "integer", minimum: -720, maximum: 840 },
+              },
+              required: ["start_ms", "end_ms", "bucket", "tz_offset_minutes"],
+            },
+            totals: {
+              type: "object",
+              properties: {
+                requests: { type: "integer", minimum: 0 },
+                ok_count: { type: "integer", minimum: 0 },
+                error_count: { type: "integer", minimum: 0 },
+                prompt_tokens: { type: "integer", minimum: 0 },
+                completion_tokens: { type: "integer", minimum: 0 },
+                total_tokens: { type: "integer", minimum: 0 },
+                cached_tokens: { type: "integer", minimum: 0 },
+                cache_creation_tokens: { type: "integer", minimum: 0 },
+                cost_usd: { type: "number", minimum: 0 },
+              },
+              required: [
+                "requests",
+                "ok_count",
+                "error_count",
+                "prompt_tokens",
+                "completion_tokens",
+                "total_tokens",
+                "cached_tokens",
+                "cache_creation_tokens",
+                "cost_usd",
+              ],
+            },
+          },
+          required: ["object", "api_key_id", "range", "totals"],
+        },
         ErrorEnvelope: ERROR_ENVELOPE,
       },
     },
@@ -189,6 +236,56 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
               },
             },
             "400": errorResponse("Unknown model / not available to this key"),
+            "401": errorResponse("Missing or invalid API key"),
+          },
+        },
+      },
+      "/v1/usage/stats": {
+        get: {
+          tags: ["Usage"],
+          summary: "Get usage stats for the authenticated key",
+          description:
+            "Returns compact token, request, and cost totals scoped to the API key used " +
+            "for authentication. `key_id` query parameters are ignored; callers cannot " +
+            "read another key's usage through this endpoint.",
+          security: [{ bearerAuth: [] }],
+          parameters: [
+            {
+              name: "start",
+              in: "query",
+              required: false,
+              schema: { type: "integer", minimum: 0 },
+              description: "Inclusive epoch-ms lower bound. Defaults to 0 for cumulative usage.",
+            },
+            {
+              name: "end",
+              in: "query",
+              required: false,
+              schema: { type: "integer", minimum: 0 },
+              description: "Exclusive epoch-ms upper bound. Defaults to the current server time.",
+            },
+            {
+              name: "bucket",
+              in: "query",
+              required: false,
+              schema: { enum: ["hour", "day"], default: "day" },
+              description: "Telemetry aggregation bucket. Present for query parity with stats.",
+            },
+            {
+              name: "tzOffsetMinutes",
+              in: "query",
+              required: false,
+              schema: { type: "integer", minimum: -720, maximum: 840, default: 0 },
+              description: "East-positive timezone offset used for bucket flooring.",
+            },
+          ],
+          responses: {
+            "200": {
+              description: "Usage totals scoped to the authenticated key",
+              content: {
+                "application/json": { schema: { $ref: "#/components/schemas/UsageStats" } },
+              },
+            },
             "401": errorResponse("Missing or invalid API key"),
           },
         },
