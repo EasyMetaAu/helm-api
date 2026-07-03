@@ -1,3 +1,4 @@
+import type { ReasoningEffort } from "@helm/shared";
 import type { PoliciesConfig, Policy, PolicyMatch } from "./policy-schema.js";
 
 // Policy Engine — first-match evaluator + caps application. Pure, deterministic,
@@ -30,6 +31,7 @@ export interface PolicyOutcome {
   matched_policy_id: string | null; // null = no policy matched
   use_lane: string | null; // matched policy's use_lane (may be null if caps-only)
   allowed_lanes: string[] | null;
+  reasoning_effort: ReasoningEffort | null;
   reason: string; // human-readable, inspectable in the Debug UI
 }
 
@@ -51,6 +53,7 @@ const EMPTY_OUTCOME: PolicyOutcome = {
   matched_policy_id: null,
   use_lane: null,
   allowed_lanes: null,
+  reasoning_effort: null,
   reason: "no policy matched",
 };
 
@@ -94,7 +97,12 @@ function policyId(policy: Policy, index: number): string {
 // policy still binds. No match => all-null outcome so the resolver falls back to
 // task/complexity.
 export function evaluatePolicies(ctx: PolicyContext, cfg: PoliciesConfig): PolicyOutcome {
-  let pinned: { id: string; use_lane: string | null; reason: string } | null = null;
+  let pinned: {
+    id: string;
+    use_lane: string | null;
+    reasoning_effort: ReasoningEffort | null;
+    reason: string;
+  } | null = null;
   let allowedLanes: string[] | null = null;
 
   for (let i = 0; i < cfg.policies.length; i++) {
@@ -108,7 +116,12 @@ export function evaluatePolicies(ctx: PolicyContext, cfg: PoliciesConfig): Polic
     // PIN: first match wins the lane intent + telemetry id/reason.
     if (pinned === null) {
       const trigger = hits.length > 0 ? `match on [${hits.join(", ")}]` : "no match constraints";
-      pinned = { id, use_lane: policy.use_lane ?? null, reason: `policy '${id}' ${trigger}` };
+      pinned = {
+        id,
+        use_lane: policy.use_lane ?? null,
+        reasoning_effort: policy.reasoning_effort ?? null,
+        reason: `policy '${id}' ${trigger}`,
+      };
     }
 
     // ACCUMULATE caps from this match (regardless of whether it was the pin).
@@ -122,6 +135,7 @@ export function evaluatePolicies(ctx: PolicyContext, cfg: PoliciesConfig): Polic
     matched_policy_id: pinned.id,
     use_lane: pinned.use_lane,
     allowed_lanes: allowedLanes,
+    reasoning_effort: pinned.reasoning_effort,
     reason: pinned.reason,
   };
 }

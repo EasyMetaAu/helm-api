@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Policy } from './policies.js';
-import { listPolicies, savePolicies, TASK_TYPE_OPTIONS } from './policies.js';
+import { listPolicies, REASONING_EFFORTS, savePolicies, TASK_TYPE_OPTIONS } from './policies.js';
 
 // The admin UI talks to the gateway ONLY over /admin/api/* HTTP (DoD: no core
 // import). These tests pin the client contract against a mocked fetch. The wire
@@ -48,7 +48,7 @@ describe('policies api client', () => {
     const rows: Policy[] = [
       { match: { task_type: 'coding' }, use_lane: 'coding' },
       { match: { complexity: 'complex' }, use_lane: 'premium' },
-      { match: {}, use_lane: 'balanced' },
+      { match: {}, use_lane: 'balanced', reasoning_effort: 'low' },
     ];
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify(rows), { status: 200 }),
@@ -61,6 +61,7 @@ describe('policies api client', () => {
     expect(policies[0].match.task_type).toBe('coding');
     expect(policies[0].use_lane).toBe('coding');
     expect(policies[2].match).toEqual({}); // empty match = catch-all
+    expect(policies[2].reasoning_effort).toBe('low');
   });
 
   it('savePolicies PUTs /admin/api/policies with the ordered list as the body', async () => {
@@ -86,7 +87,7 @@ describe('policies api client', () => {
   });
 
   it('savePolicies sends use_lane as the policy action (force lane)', async () => {
-    const list: Policy[] = [{ match: {}, use_lane: 'balanced' }];
+    const list: Policy[] = [{ match: {}, use_lane: 'balanced', reasoning_effort: 'high' }];
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify(list), { status: 200 }),
     );
@@ -94,7 +95,12 @@ describe('policies api client', () => {
     await savePolicies(list);
     const body = JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body as string);
     expect(body[0].use_lane).toBe('balanced');
+    expect(body[0].reasoning_effort).toBe('high');
     expect(body[0].max_lane).toBeUndefined();
+  });
+
+  it('shares the policy reasoning-effort options with the lane editor contract', () => {
+    expect(REASONING_EFFORTS).toEqual(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
   });
 
   it('savePolicies rejects when the server returns a non-2xx (fail-closed)', async () => {

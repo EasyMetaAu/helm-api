@@ -4,6 +4,8 @@
     COMPLEXITY_OPTIONS,
     type Policy,
     type PolicyMatch,
+    REASONING_EFFORTS,
+    type ReasoningEffort,
     TASK_TYPE_OPTIONS,
   } from '$lib/api/policies.js';
   import { t } from '$lib/i18n';
@@ -11,8 +13,8 @@
   // Single ordered policy row: a pure "condition → action" editor. It owns NO
   // matching logic (first-match resolution lives in headless core, Principle 1/Principle 5);
   // it only enforces enum constraints (no free text), then bubbles changes up so
-  // the parent owns the ordered list. The only action is `use_lane` (force the
-  // matching requests onto a lane); per-key `allowed_lanes` is the restrict knob.
+  // the parent owns the ordered list. Actions can force the matching requests onto
+  // a lane and/or force reasoning effort; per-key `allowed_lanes` is the restrict knob.
   let {
     policy,
     index,
@@ -38,6 +40,7 @@
   const initial = untrack(() => policy);
   let match = $state<PolicyMatch>({ ...initial.match });
   let useLane = $state<string>(initial.use_lane ?? '');
+  let reasoningEffort = $state<ReasoningEffort | ''>(initial.reasoning_effort ?? '');
 
   const isCatchAll = $derived(Object.keys(match).length === 0);
 
@@ -45,6 +48,7 @@
   function emit(): void {
     const next: Policy = { ...initial, match: { ...match } };
     next.use_lane = useLane === '' ? undefined : useLane;
+    next.reasoning_effort = reasoningEffort === '' ? undefined : reasoningEffort;
     onchange(next);
   }
 
@@ -60,6 +64,11 @@
 
   function setLane(value: string): void {
     useLane = value;
+    emit();
+  }
+
+  function setReasoningEffort(value: string): void {
+    reasoningEffort = value as ReasoningEffort | '';
     emit();
   }
 </script>
@@ -153,22 +162,42 @@
   </fieldset>
 
   <fieldset class="flex flex-col gap-2">
-    <legend class="field-label">{$t('Then force the lane:')}</legend>
+    <legend class="field-label">{$t('Then apply actions:')}</legend>
     <p class="field-help">{$t('Force lane sends matching requests to that lane.')}</p>
 
-    <label class="field sm:max-w-xs">
-      <span class="field-label">{$t('Force lane')}</span>
-      <select
-        aria-label={$t('use lane')}
-        class="select"
-        value={useLane}
-        onchange={(e) => setLane(e.currentTarget.value)}
-      >
-        <option value="">{$t('(select lane)')}</option>
-        {#each lanes as l (l)}
-          <option value={l}>{l}</option>
-        {/each}
-      </select>
-    </label>
+    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+      <label class="field">
+        <span class="field-label">{$t('Force lane')}</span>
+        <select
+          aria-label={$t('use lane')}
+          class="select"
+          value={useLane}
+          onchange={(e) => setLane(e.currentTarget.value)}
+        >
+          <option value="">{$t('(select lane)')}</option>
+          {#each lanes as l (l)}
+            <option value={l}>{l}</option>
+          {/each}
+        </select>
+      </label>
+
+      <label class="field">
+        <span class="field-label">{$t('Forced reasoning effort')}</span>
+        <select
+          aria-label={$t('policy reasoning effort')}
+          class="select"
+          value={reasoningEffort}
+          onchange={(e) => setReasoningEffort(e.currentTarget.value)}
+        >
+          <option value="">{$t('Unset (lane/client decides)')}</option>
+          {#each REASONING_EFFORTS as eff (eff)}
+            <option value={eff}>{eff}</option>
+          {/each}
+        </select>
+        <span class="field-help">
+          {$t('Policy value overrides the selected lane and client reasoning effort.')}
+        </span>
+      </label>
+    </div>
   </fieldset>
 </div>

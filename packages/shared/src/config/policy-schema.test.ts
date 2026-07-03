@@ -19,8 +19,23 @@ describe("policy-schema", () => {
     expect(cfg.policies[0]?.use_lane).toBe("coding");
   });
 
-  it("fail-closed: a policy with no action field (use_lane/allowed_lanes) throws", () => {
+  it("parses a policy with standalone reasoning_effort override", () => {
+    const cfg = parsePoliciesConfig({
+      policies: [{ id: "p1", match: { task_type: "coding" }, reasoning_effort: "low" }],
+    });
+    expect(cfg.policies[0]?.reasoning_effort).toBe("low");
+  });
+
+  it("fail-closed: a policy with no action field (use_lane/allowed_lanes/reasoning_effort) throws", () => {
     expect(() => parsePoliciesConfig({ policies: [{ match: { task_type: "coding" } }] })).toThrow();
+  });
+
+  it("fail-closed: unknown policy reasoning_effort value throws", () => {
+    expect(() =>
+      parsePoliciesConfig({
+        policies: [{ match: { task_type: "coding" }, reasoning_effort: "ultra" }],
+      }),
+    ).toThrow();
   });
 
   it("fail-closed: unknown field in policy (.strict) throws", () => {

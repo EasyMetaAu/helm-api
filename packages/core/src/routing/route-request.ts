@@ -5,6 +5,7 @@ import {
   type InternalRequest,
   makeHelmError,
   type NativePassthroughMutationLedger,
+  type ReasoningEffort,
   type RoutingSignal,
 } from "@helm/shared";
 import { expandLaneChain } from "../lanes/expand-chain.js";
@@ -337,6 +338,7 @@ interface PlanDecision {
   plan: ExecutionPlan;
   classifier: DecisionRecord["classifier"];
   policy: DecisionRecord["policy"];
+  forcedReasoningEffort: ReasoningEffort | null;
   /** Layer-2 eval self-cost (USD), non-null ONLY when eval ran. Threaded into
    *  cost_breakdown.eval_usd, kept separate from completion cost (principle 5). */
   evalUsd: number | null;
@@ -419,6 +421,7 @@ function candidateAllowedByCaps(
     matched_policy_id: null,
     use_lane: null,
     allowed_lanes: keyCaps.allowedLanes,
+    reasoning_effort: null,
     reason: "key caps",
   });
   return capped === candidateLane;
@@ -536,6 +539,7 @@ async function plan(
       },
       classifier: passthroughClassifier(),
       policy: { matched_policy_id: null, reason: "image generation (model-pinned)" },
+      forcedReasoningEffort: null,
       evalUsd: null,
     };
   }
@@ -573,6 +577,7 @@ async function plan(
         matched_policy_id: null,
         use_lane: null,
         allowed_lanes: opts.keyCaps.allowedLanes,
+        reasoning_effort: null,
         reason: "key caps",
       });
     }
@@ -590,6 +595,7 @@ async function plan(
           ? `model alias "${req.requested_model}" -> lane "${aliasTarget}" (capped to "${lane}")`
           : `model alias "${req.requested_model}" -> lane "${aliasTarget}"`,
       },
+      forcedReasoningEffort: outcome.reasoning_effort,
       evalUsd: null,
     };
   }
@@ -643,6 +649,7 @@ async function plan(
         },
         classifier: passthroughClassifier(),
         policy: { matched_policy_id: null, reason: "explicit lane passthrough" },
+        forcedReasoningEffort: null,
         evalUsd: null,
       };
     }
@@ -664,6 +671,7 @@ async function plan(
       plan: { selected_lane: model, candidate_chain: [model], explicit_model: model },
       classifier: passthroughClassifier(),
       policy: { matched_policy_id: null, reason: "explicit model passthrough" },
+      forcedReasoningEffort: null,
       evalUsd: null,
     };
   }
@@ -702,6 +710,7 @@ async function plan(
       matched_policy_id: null,
       use_lane: null,
       allowed_lanes: opts.keyCaps.allowedLanes,
+      reasoning_effort: null,
       reason: "key caps",
     });
   }
@@ -750,6 +759,7 @@ async function plan(
       explanation,
     },
     policy: { matched_policy_id: outcome.matched_policy_id, reason: outcome.reason },
+    forcedReasoningEffort: outcome.reasoning_effort,
     evalUsd: cls.eval_usd ?? null,
   };
 }
@@ -803,15 +813,17 @@ export async function routeRequest(
     };
   }
 
-  const { plan: execPlan, classifier, policy, evalUsd } = planned;
+  const { plan: execPlan, classifier, policy, forcedReasoningEffort, evalUsd } = planned;
 
-  // Lane-FORCED reasoning effort (config-as-code): when the selected lane pins
-  // `reasoning_effort`, overwrite the request so the CLIENT value cannot win. The
+  // Policy/Lane-FORCED reasoning effort (config-as-code): when the matched policy
+  // or selected lane pins `reasoning_effort`, overwrite the request so the CLIENT
+  // value cannot win. Policy wins over lane; `none` is a real override. The
   // translated path forwards `req.reasoning_effort` (stripInternal); the flag tells
   // execute's native-passthrough path to rewrite the verbatim body's reasoning field
-  // (without it, passthrough stays byte-verbatim). A lane that does not pin it leaves
-  // today's request-driven behavior untouched.
-  const forcedReasoning = deps.lanes[execPlan.selected_lane]?.reasoning_effort;
+  // (without it, passthrough stays byte-verbatim). No policy/lane pin leaves today's
+  // request-driven behavior untouched.
+  const forcedReasoning =
+    forcedReasoningEffort ?? deps.lanes[execPlan.selected_lane]?.reasoning_effort;
   if (forcedReasoning !== undefined) {
     req.reasoning_effort = forcedReasoning;
     req.reasoning_effort_forced = true;

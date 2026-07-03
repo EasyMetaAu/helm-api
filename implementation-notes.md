@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-07-03 · 策略级 reasoning_effort 覆盖 Lane 默认值（Routing policies / Admin policies，docs/04/11，原则 2/5/6）
+
+- **背景（Lukin）**：Lane 已支持 `reasoning_effort`，但 policy 命中后只能强制车道，不能针对某类任务把思考等级调高/调低；这导致同一 Lane 内的请求无法按策略更细粒度控制推理预算。
+- **语义决策**：Policy 新增可选 action `reasoning_effort`，与 Lane 使用同一严格枚举：`none|minimal|low|medium|high|xhigh|max`。最终优先级为 **policy > selected lane > client request**；其中 `none` 是显式覆盖，可关闭 Lane 的高思考等级。
+- **first-match 决策**：`reasoning_effort` 跟 `use_lane` 一样取第一条命中 policy 的值；`allowed_lanes` 仍保持原有“所有命中策略取交集”的 cap 语义。这样不会让靠后的 restrict-only rule 意外改写思考等级。
+- **执行路径**：`routeRequest` 在生成 `ExecutionPlan` 后用 `policy.reasoning_effort ?? lane.reasoning_effort` 覆盖 `req.reasoning_effort` 并设置 `reasoning_effort_forced=true`，复用现有 translated/native passthrough 出站改写链路，不触碰 provider 选择与 fallback 机制。
+- **Admin 决策**：Policies 页面新增“Forced reasoning effort”下拉，复用 LaneEditor 的同一组选项；API client round-trip `reasoning_effort`，gateway 仍由 `PoliciesConfigSchema` 对整个 policy 列表 fail-closed 校验。
+- **验证计划**：新增 shared/core policy schema、policy engine、routeRequest、admin API client、PolicyRow 回归测试；再跑目标 Vitest、typecheck/lint/build。
+
 ## 2026-07-03 · cron monitor 自动化请求降到低成本规则（Classifier / routing，docs/03/04，原则 2/4）
 
 - **背景（Lukin）**：生产 `openclaw` key 的 monitor/cron 请求常请求 `gpt-5.4-mini`，但因 key 不允许 custom model，路由走分类器；请求带长历史、36 个左右工具和 `MONITOR.md` 文件路径，Layer-1 把它判成 `coding/medium`，最终第一候选落到 `openai-codex/gpt-5.5`。

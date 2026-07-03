@@ -1,6 +1,11 @@
 import { fireEvent, render, screen, within } from '@testing-library/svelte';
 import { describe, expect, it, vi } from 'vitest';
-import { COMPLEXITY_OPTIONS, type Policy, TASK_TYPE_OPTIONS } from '$lib/api/policies.js';
+import {
+  COMPLEXITY_OPTIONS,
+  type Policy,
+  REASONING_EFFORTS,
+  TASK_TYPE_OPTIONS,
+} from '$lib/api/policies.js';
 import PolicyRow from './PolicyRow.svelte';
 
 function makePolicy(overrides: Partial<Policy> = {}): Policy {
@@ -75,7 +80,7 @@ describe('PolicyRow', () => {
     expect(complexitySelect.tagName).toBe('SELECT');
   });
 
-  it('force-lane is the only action: the select updates use_lane (no max_lane cap)', async () => {
+  it('force-lane select updates use_lane (no max_lane cap)', async () => {
     const onchange = vi.fn();
     render(PolicyRow, {
       policy: makePolicy({ use_lane: 'balanced' }),
@@ -87,7 +92,7 @@ describe('PolicyRow', () => {
       onmove: vi.fn(),
     });
 
-    // the retired max_lane "cap" select is gone — force lane is the sole action.
+    // the retired max_lane "cap" select is gone.
     expect(screen.queryByLabelText(/max lane/i)).toBeNull();
 
     await fireEvent.change(screen.getByLabelText(/use lane/i), {
@@ -95,6 +100,30 @@ describe('PolicyRow', () => {
     });
     const last = onchange.mock.calls.at(-1)?.[0] as Policy;
     expect(last.use_lane).toBe('premium');
+  });
+
+  it('reasoning-effort select offers the lane options and updates reasoning_effort', async () => {
+    const onchange = vi.fn();
+    render(PolicyRow, {
+      policy: makePolicy({ reasoning_effort: 'medium' }),
+      index: 0,
+      total: 1,
+      lanes: LANES,
+      onchange,
+      onremove: vi.fn(),
+      onmove: vi.fn(),
+    });
+
+    const select = screen.getByLabelText(/policy reasoning effort/i) as HTMLSelectElement;
+    const values = Array.from(select.options)
+      .map((o) => o.value)
+      .filter((v) => v !== '');
+    expect(values).toEqual([...REASONING_EFFORTS]);
+    expect(select.value).toBe('medium');
+
+    await fireEvent.change(select, { target: { value: 'xhigh' } });
+    const last = onchange.mock.calls.at(-1)?.[0] as Policy;
+    expect(last.reasoning_effort).toBe('xhigh');
   });
 
   it('empty match is flagged as a catch-all (warns it swallows later rules)', () => {
