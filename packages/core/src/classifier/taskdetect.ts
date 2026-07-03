@@ -1,4 +1,5 @@
 import type { ClassifierRulesConfig, InternalRequest } from "@helm/shared";
+import { isLowCostAutomationPrompt } from "./automation-signals.js";
 import { lastUserMessageText } from "./message-text.js";
 import { detectCodeBlock, detectFilePath, detectStackTrace, detectUrl } from "./signals.js";
 
@@ -22,7 +23,10 @@ import { detectCodeBlock, detectFilePath, detectStackTrace, detectUrl } from "./
 // coding agent (even "thanks") as coding. This mirrors the language guard's
 // "current turn only" rule (engine.ts §5.5: "historical keyword hits … are not
 // evidence that Layer-1 understood this prompt"). Tool names (path 2) stay full —
-// they are a legitimate per-request capability signal, not history.
+// they are a legitimate per-request capability signal, not history. Low-cost
+// monitor/cron probes are the narrow exception: their tool surface and MONITOR.md
+// path are ambient automation context, so explicit current-turn task keywords must
+// carry the classification instead.
 
 export type TaskType =
   | "chat"
@@ -76,6 +80,7 @@ export function detectTask(req: DetectInput, cfg: ClassifierRulesConfig): TaskDe
   // Text evidence is scoped to the CURRENT user turn (see header). Tool names are
   // request-wide (a capability signal, not history) and read from req.tools below.
   const text = lastUserMessageText(req.messages);
+  const lowCostAutomation = isLowCostAutomationPrompt(text, cfg);
   const toolNames = extractToolNames(req.tools);
 
   // Accumulate score + reasons per task. Lazily created on first hit.
@@ -100,13 +105,15 @@ export function detectTask(req: DetectInput, cfg: ClassifierRulesConfig): TaskDe
   }
 
   // ── path 2: tool-name prefixes (DATA) ────────────────────────────────────
-  for (const [task, prefixes] of Object.entries(cfg.tool_prefixes)) {
-    if (!isTaskType(task)) continue;
-    for (const prefix of prefixes) {
-      if (prefix.length === 0) continue;
-      for (const name of toolNames) {
-        if (name.startsWith(prefix)) {
-          bump(task, TOOL_PREFIX_WEIGHT, `tool_prefix:${prefix}`);
+  if (!lowCostAutomation) {
+    for (const [task, prefixes] of Object.entries(cfg.tool_prefixes)) {
+      if (!isTaskType(task)) continue;
+      for (const prefix of prefixes) {
+        if (prefix.length === 0) continue;
+        for (const name of toolNames) {
+          if (name.startsWith(prefix)) {
+            bump(task, TOOL_PREFIX_WEIGHT, `tool_prefix:${prefix}`);
+          }
         }
       }
     }
@@ -115,7 +122,9 @@ export function detectTask(req: DetectInput, cfg: ClassifierRulesConfig): TaskDe
   // ── path 3: structural signals (CODE — shared regexes) ───────────────────
   if (detectCodeBlock(text) > 0) bump("coding", STRUCTURAL_WEIGHT, "code_block");
   if (detectStackTrace(text) > 0) bump("coding", STRUCTURAL_WEIGHT, "stack_trace");
-  if (detectFilePath(text) > 0) bump("coding", STRUCTURAL_WEIGHT, "file_path");
+  if (!lowCostAutomation && detectFilePath(text) > 0) {
+    bump("coding", STRUCTURAL_WEIGHT, "file_path");
+  }
   if (detectUrl(text) > 0) bump("web", STRUCTURAL_WEIGHT, "url");
   if (hasImageAttachment(req.attachments)) bump("vision", STRUCTURAL_WEIGHT, "image_attachment");
   if (isJsonResponseFormat(req.response_format)) {

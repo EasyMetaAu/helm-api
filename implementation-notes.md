@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-07-03 · cron monitor 自动化请求降到低成本规则（Classifier / routing，docs/03/04，原则 2/4）
+
+- **背景（Lukin）**：生产 `openclaw` key 的 monitor/cron 请求常请求 `gpt-5.4-mini`，但因 key 不允许 custom model，路由走分类器；请求带长历史、36 个左右工具和 `MONITOR.md` 文件路径，Layer-1 把它判成 `coding/medium`，最终第一候选落到 `openai-codex/gpt-5.5`。
+- **根因**：这些工具和文件路径是自动化探针的环境能力，不代表当前用户 turn 是 coding 任务；`tools_floor`、`tool_count`、`detectFilePath()` 叠加后把“检查状态，无事不回复”的低成本请求误升到 coding/balanced 级别。
+- **规则决策**：新增 `classifier.rules.overrides.low_cost_automation`，只有同时命中 `intent_markers`（如 `[cron:`、`MONITOR.md`）和 `no_reply_markers`（如 `NO_REPLY`、`nothing to action`）时，才 set 到 `simple`；普通“解释 NO_REPLY”不会触发。长历史不再让该自动化探针升档，真实窗口适配交给后续 capability filter。
+- **task_type 决策**：低成本自动化模式下，task detector 忽略 ambient tool-prefix 和 file-path 证据，但仍保留显式 coding keyword（如 `debug/refactor/function`）的升级路径，避免真正要修代码的 monitor 任务被错误降级。
+- **验证计划**：新增 openclaw cron monitor golden route 回归、override 单测、taskdetect 单测和 schema 默认值测试；目标是该形态走 `chat/simple/economy`，链首回到 `openai-codex/gpt-5.4-mini`。
+
 ## 2026-07-03 · 上下文窗口超限按候选跳过处理（执行 fallback / streaming telemetry，docs/04/07，原则 5/8）
 
 - **背景（Lukin）**：生产请求 `69d5058f-ea6c-4bfc-91d8-0686a7c120f3` 最终由 `anthropic/claude-opus-4-8` 成功服务，但链中 `openai-codex/gpt-5.5` 先返回 Responses stream `context_length_exceeded`，admin 详情把它显示为普通 `upstream_error`。

@@ -17,6 +17,7 @@ function makeConfig(
     task_keywords: Record<string, string[]>;
     tool_prefixes: Record<string, string[]>;
     task_activation: Record<string, number>;
+    classifier_overrides: Partial<ClassifierRulesConfig["overrides"]>;
   }> = {},
 ): ClassifierRulesConfig {
   return ClassifierRulesConfigSchema.parse({
@@ -37,7 +38,7 @@ function makeConfig(
     },
     task_activation: overrides.task_activation ?? { web: 3.0 },
     tier_boundaries: {},
-    overrides: {},
+    overrides: overrides.classifier_overrides ?? {},
     momentum: {},
   });
 }
@@ -201,6 +202,43 @@ describe("detectTask", () => {
       cfg,
     );
     expect(res.task_type).toBe("chat");
+  });
+
+  it("does not let cron monitor paths or ambient tools masquerade as coding", () => {
+    const cfg = makeConfig({
+      classifier_overrides: {
+        low_cost_automation: {
+          intent_markers: ["[cron:", "MONITOR.md"],
+          no_reply_markers: ["NO_REPLY", "nothing to action"],
+        },
+      },
+    });
+    const res = detectTask(
+      makeReq(
+        "[cron:2026-07-03T01:00:00Z] chief-monitor Read /Users/lukin/AgentData/chief/MONITOR.md and execute it strictly. Return NO_REPLY if nothing to action.",
+        { tools: [{ function: { name: "code_read" } }, { function: { name: "shell_run" } }] },
+      ),
+      cfg,
+    );
+    expect(res.task_type).toBe("chat");
+  });
+
+  it("still detects explicit coding intent inside a cron monitor prompt", () => {
+    const cfg = makeConfig({
+      classifier_overrides: {
+        low_cost_automation: {
+          intent_markers: ["[cron:", "MONITOR.md"],
+          no_reply_markers: ["NO_REPLY"],
+        },
+      },
+    });
+    const res = detectTask(
+      makeReq(
+        "[cron:2026-07-03T01:00:00Z] Read /tmp/MONITOR.md, debug the failing function, and return NO_REPLY only if nothing changed.",
+      ),
+      cfg,
+    );
+    expect(res.task_type).toBe("coding");
   });
 
   it("breaks an exact-score tie stably, not by config key order (no silent demote)", () => {

@@ -46,6 +46,12 @@ export const ClassifierRulesConfigSchema = z.object({
     exact_confirmation_tokens: z
       .array(z.string())
       .default(["yes", "no", "sure", "got it", "ok", "thanks"]),
+    low_cost_automation: z
+      .object({
+        intent_markers: z.array(z.string()).default([]),
+        no_reply_markers: z.array(z.string()).default([]),
+      })
+      .prefault({}),
     formal_logic_keywords: z.array(z.string()).default([]),
     tools_floor: TierSchema.default("standard"),
     long_context_token_threshold: z.number().int().positive().default(64_000),
