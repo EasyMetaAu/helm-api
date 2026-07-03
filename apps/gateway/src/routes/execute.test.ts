@@ -913,6 +913,74 @@ describe("createExecute — gateway execution adapter", () => {
     expect(recordFailure).not.toHaveBeenCalled();
   });
 
+  it("skips a candidate on context_length_exceeded without tripping the breaker", async () => {
+    // Some upstreams report model-window overflow as an in-band stream error without an
+    // HTTP 400 status. That is a candidate capability miss, not provider health.
+    // Helm should try the next model and render the failed candidate as skipped.
+    // biome-ignore lint/correctness/useYield: pre-first-chunk failure throws before any yield
+    async function* contextWindowError(): AsyncGenerator<string> {
+      throw new UpstreamError(
+        "upstream_error",
+        "codex responses stream error",
+        {
+          type: "error",
+          error: {
+            type: "invalid_request_error",
+            code: "context_length_exceeded",
+            message:
+              "Your input exceeds the context window of this model. Please adjust your input and try again.",
+            param: "input",
+          },
+          sequence_number: 2,
+        },
+        null,
+      );
+    }
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi
+        .fn()
+        .mockReturnValueOnce(contextWindowError())
+        .mockReturnValueOnce(gen(['data: {"ok":1}\n\n', "data: [DONE]\n\n"])),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: protocolRegistry({
+        codex: {
+          providerName: "mock",
+          providerModel: "gpt-5.5",
+          targetProviderProtocol: "openai_responses",
+        },
+        opus: {
+          providerName: "mock",
+          providerModel: "claude-opus-4-8",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["codex", "opus"]), req({ stream: true }));
+
+    expect(out.final).toEqual({ status: "ok", alias: "opus", providerModel: "claude-opus-4-8" });
+    expect(out.attempts[0]).toMatchObject({
+      alias: "codex",
+      skipped: true,
+      skip_reason: "context_too_small",
+      status: "error",
+      error_class: null,
+    });
+    expect(out.attempts[0]?.error_detail).toBeNull();
+    expect(out.attempts[1]?.status).toBe("ok");
+    expect(recordFailure).not.toHaveBeenCalled();
+  });
+
   it("maps Anthropic output_config.effort through the target model policy instead of skipping", async () => {
     const provider = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "sonnet" }),

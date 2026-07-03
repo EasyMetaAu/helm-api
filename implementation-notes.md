@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-07-03 · 上下文窗口超限按候选跳过处理（执行 fallback / streaming telemetry，docs/04/07，原则 5/8）
+
+- **背景（Lukin）**：生产请求 `69d5058f-ea6c-4bfc-91d8-0686a7c120f3` 最终由 `anthropic/claude-opus-4-8` 成功服务，但链中 `openai-codex/gpt-5.5` 先返回 Responses stream `context_length_exceeded`，admin 详情把它显示为普通 `upstream_error`。
+- **修复决策**：`context_length_exceeded` / “context window” / “prompt is too long” 属于当前候选模型窗口不足；即使它来自首个有效输出前的 SSE error 且没有 HTTP 400，也记录为 `skipped:true` + `skip_reason:"context_too_small"`，继续执行 fallback。
+- **熔断决策**：该类错误不调用 `breaker.recordFailure()`，不触发 OAuth 账号 auto-park，也不计入 execution fallback count；它和预检能力过滤的 `context_too_small` 语义保持一致。
+- **保留边界**：非上下文类 request-shape 错误（例如图片尺寸超限、非法参数）仍短路为 `invalid_request`，因为换候选模型无法修复请求体本身。
+- **验证**：新增执行器 stream 回归测试，覆盖 Codex Responses `context_length_exceeded` 先失败、后续 Opus 成功、首个 attempt 显示跳过且不记录 breaker failure；目标 `execute.test.ts` 117/117 绿。
+
 ## 2026-07-03 · API key 级 usage stats 给外部自动化读取（Gateway usage API / telemetry，docs/07，原则 7）
 
 - **背景（Lukin）**：Skillstore 公开页需要每天同步 AI audit token / cost 快照；旧办法直接从 Helm SQLite 和 claude-relay Redis 取数，不适合作为长期自动化接口。新的来源应主要走 Helm 系统，并通过 API key 读取统计数据。
@@ -68,12 +76,10 @@
 
 ---
 
-## 历史条目摘要（最近 4 条）
+## 历史条目摘要（最近 2 条）
 
 - **2026-06-30 · admin favicon cache policy（Admin UI 静态资源，docs/11，原则 7）**：favicon 慢不是体积问题，而是 `/admin` 静态资源 no-cache 策略；`/admin/favicon.{svg,png}` 改私有缓存 7 天，SPA shell/deep-link fallback 仍 no-cache，admin shell 只声明 SVG 避免双拉；补 gateway/admin 回归测试。
 - **2026-06-30 · per-model reasoning effort policy（执行 fallback / 协议转换，docs/04/05，原则 2/5/8）**：新增 catalog `reasoningEffort` policy，按模型/协议 wire 字段映射或删除 unsupported effort；Haiku 4.5 保留 manual `thinking` 但删除 `output_config.effort`，Sonnet `xhigh -> max`，translated/native passthrough 回归覆盖。
-- **2026-06-30 · Anthropic `output_config.effort` 与 OpenAI `reasoning_effort` 双向保真（协议转换/执行 fallback，docs/05/04，原则 5/8）**：Anthropic 入站 `output_config.effort` 提升到 IR `reasoning_effort`，OpenAI/Responses fallback 保留推理等级；反向 GPT/OpenAI→Anthropic 在无显式 output_config 时合成 `output_config.effort`；只映射等级字段，不从 `thinking.budget_tokens` 反推。
-- **2026-06-30 · Fast mode 账号强制覆盖 + API key 透传限制（OAuth subscription provider / key governance，docs/04/11，原则 2/5）**：账号级 `fastMode` 统一映射到 Codex `service_tier:"priority"` 与 Anthropic `speed:"fast"` + beta header，并强制覆盖 provider wire request；per-key `allow_fast_mode` 只治理客户端透传，不阻止账号级强制启用；UI 仅对支持 provider 展示。
 
 ## 更早历史总览
 

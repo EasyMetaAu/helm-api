@@ -1000,6 +1000,17 @@ function upstreamErrorType(raw: unknown): string | null {
   return typeof top === "string" && top !== "error" ? top : null;
 }
 
+function upstreamErrorCode(raw: unknown): string | null {
+  if (raw === null || typeof raw !== "object") return null;
+  const inner = (raw as { error?: unknown }).error;
+  if (inner !== null && typeof inner === "object") {
+    const code = (inner as { code?: unknown }).code;
+    if (typeof code === "string") return code;
+  }
+  const top = (raw as { code?: unknown }).code;
+  return typeof top === "string" ? top : null;
+}
+
 // Human-readable upstream error message (for surfacing to the client verbatim), if
 // the provider nested one under `error.message`.
 function upstreamErrorMessage(raw: unknown): string | null {
@@ -1012,15 +1023,32 @@ function upstreamErrorMessage(raw: unknown): string | null {
   return null;
 }
 
+// A model-specific context-window rejection means THIS candidate cannot serve the
+// request, but a later fallback with a larger window may still succeed. Some streaming
+// providers emit this as an in-band SSE error with no HTTP status, so classify from the
+// provider error body/message rather than relying on status alone.
+export function isContextWindowRejection(err: unknown): boolean {
+  if (!(err instanceof UpstreamError)) return false;
+  if (upstreamErrorCode(err.providerRaw) === "context_length_exceeded") return true;
+  const text = `${err.message} ${upstreamErrorMessage(err.providerRaw) ?? ""} ${rawErrorText(
+    err.providerRaw,
+  )}`.toLowerCase();
+  return (
+    text.includes("context_length_exceeded") ||
+    text.includes("context window") ||
+    text.includes("context length") ||
+    text.includes("maximum context") ||
+    text.includes("prompt is too long")
+  );
+}
+
 // A DETERMINISTIC request-shape rejection from the upstream: the request body is
-// itself invalid (oversized image, prompt too long, bad param). Re-sending the
-// IDENTICAL body to another candidate is futile — every provider rejects it — and
-// the client owns the fix. Claude Code in particular relies on receiving this 4xx
-// to trigger its own context compaction; burying it behind the fallback chain
-// (synthetic all_providers_failed 502) is exactly what stopped compaction from
-// firing through the gateway. So the executor short-circuits and surfaces it
-// verbatim (see the catch block below). 429 is intentionally NOT here: that is
-// genuine rate-limiting, legitimately retryable on another candidate.
+// itself invalid independent of the selected model (oversized image, bad param).
+// Re-sending the IDENTICAL body to another candidate is futile — every provider
+// rejects it — and the client owns the fix. Context-window errors are handled
+// separately by `isContextWindowRejection`: a larger-window fallback may succeed.
+// 429 is intentionally NOT here: that is genuine rate-limiting, legitimately
+// retryable on another candidate.
 export function isUpstreamRequestRejection(err: unknown): boolean {
   if (!(err instanceof UpstreamError)) return false;
   const status = err.upstreamStatus;
@@ -1030,7 +1058,7 @@ export function isUpstreamRequestRejection(err: unknown): boolean {
   // also honor the unambiguous phrasings real upstreams use for shape errors.
   if (status === 413) return true;
   const text = `${err.message} ${rawErrorText(err.providerRaw)}`.toLowerCase();
-  return text.includes("prompt is too long") || text.includes("max allowed size");
+  return text.includes("max allowed size");
 }
 
 // Coerce an already-scrubbed upstream error body into the schema's record|null
@@ -1567,13 +1595,30 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           continue;
         }
 
-        // Deterministic request-shape rejection (oversized image, prompt too long,
-        // bad param): the body is invalid for EVERY candidate, so do NOT advance the
-        // chain and do NOT fault the breaker (the upstream is healthy — the request is
-        // what's wrong). Surface the upstream's structured error VERBATIM as a 400
-        // invalid_request: Claude Code needs this 4xx to drive its own context
-        // compaction, and burying it behind a fallback (all_providers_failed 502) is
-        // what prevented compaction from firing through the gateway.
+        // Model context window overflow: THIS candidate cannot serve the request,
+        // but a later fallback with a larger window can. Treat it like a late-discovered
+        // capability skip, not provider health: no breaker failure, no red provider
+        // error row, and no execution-fallback count.
+        if (isContextWindowRejection(err)) {
+          capabilityPruned = true;
+          attempts.push({
+            alias,
+            skipped: true,
+            skip_reason: "context_too_small",
+            status: "error",
+            error_class: null,
+            latency_ms: elapsed(),
+            cost_usd: null,
+            error_detail: null,
+            ...attemptTelemetry,
+          });
+          continue;
+        }
+
+        // Deterministic request-shape rejection (oversized image, bad param): the
+        // body is invalid for EVERY candidate, so do NOT advance the chain and do NOT
+        // fault the breaker (the upstream is healthy — the request is what's wrong).
+        // Surface the upstream's structured error VERBATIM as a 400 invalid_request.
         if (isUpstreamRequestRejection(err)) {
           const detail = errorDetailOf(err);
           attempts.push({
