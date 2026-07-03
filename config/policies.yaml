@@ -3,8 +3,9 @@
 # rule: the policy engine walks the list top-to-bottom and the FIRST policy whose
 # `match` fully holds (AND of every written field) wins. A policy must declare at
 # least one action: pin a lane (`use_lane`) and/or restrict the candidate to a
-# whitelist (`allowed_lanes`). `.strict()`-validated by PoliciesConfigSchema (@helm/shared):
-# a typo in a field name fails the gateway boot (fail-closed, principle 2).
+# whitelist (`allowed_lanes`) and/or force reasoning effort (`reasoning_effort`).
+# `.strict()`-validated by PoliciesConfigSchema (@helm/shared): a typo in a field
+# name fails the gateway boot (fail-closed, principle 2).
 #
 # These are SAMPLES — adjust to your own lane set / org structure.
 

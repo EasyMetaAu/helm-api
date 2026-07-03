@@ -971,6 +971,46 @@ describe("routeRequest — lane-forced reasoning_effort", () => {
     expect(passed.reasoning_effort).toBe("low");
     expect(passed.reasoning_effort_forced).toBeUndefined();
   });
+
+  it("lets a matched policy reasoning_effort override the selected lane reasoning_effort", async () => {
+    const d = deps({
+      lanes: lanesWithForce(),
+      policies: {
+        policies: [
+          {
+            id: "coding_force_low",
+            match: { task_type: "coding" },
+            use_lane: "coding",
+            reasoning_effort: "low",
+          },
+        ],
+      },
+    });
+    await routeRequest(req({ reasoning_effort: "max" }), d);
+    const passed = reqPassedToExecute(d);
+    expect(passed.reasoning_effort).toBe("low");
+    expect(passed.reasoning_effort_forced).toBe(true);
+  });
+
+  it("treats policy reasoning_effort=none as an explicit override over the lane", async () => {
+    const d = deps({
+      lanes: lanesWithForce(),
+      policies: {
+        policies: [
+          {
+            id: "coding_disable_reasoning",
+            match: { task_type: "coding" },
+            use_lane: "coding",
+            reasoning_effort: "none",
+          },
+        ],
+      },
+    });
+    await routeRequest(req({ reasoning_effort: "max" }), d);
+    const passed = reqPassedToExecute(d);
+    expect(passed.reasoning_effort).toBe("none");
+    expect(passed.reasoning_effort_forced).toBe(true);
+  });
 });
 
 describe("routeRequest — requested-model promotion", () => {

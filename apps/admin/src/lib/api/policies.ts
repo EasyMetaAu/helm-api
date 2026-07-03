@@ -7,6 +7,10 @@
 // the order IS the match priority, so the client preserves order on the wire and
 // the gateway PUTs the whole set (no per-item patch that could lose priority).
 
+import { isReasoningEffort, REASONING_EFFORTS, type ReasoningEffort } from './lanes.js';
+
+export { REASONING_EFFORTS, type ReasoningEffort };
+
 export interface PolicyMatch {
   task_type?: string; // enum: docs/03 task_type set (TASK_TYPE_OPTIONS)
   complexity?: string; // enum: server PolicyMatchSchema set (COMPLEXITY_OPTIONS)
@@ -19,6 +23,8 @@ export interface Policy {
   id?: string;
   match: PolicyMatch; // all written fields AND together; empty match = catch-all
   use_lane?: string; // force matching requests onto this lane
+  // Policy-forced reasoning effort; omitted = lane/client behavior decides.
+  reasoning_effort?: ReasoningEffort;
 }
 
 // Dropdown enums. task_type MUST mirror the gateway's canonical TaskTypeSchema
@@ -74,6 +80,7 @@ function normalizePolicy(raw: Record<string, unknown>): Policy {
   };
   if (typeof raw.id === 'string') p.id = raw.id;
   if (typeof raw.use_lane === 'string') p.use_lane = raw.use_lane;
+  if (isReasoningEffort(raw.reasoning_effort)) p.reasoning_effort = raw.reasoning_effort;
   return p;
 }
 
@@ -88,6 +95,7 @@ function toServerBody(p: Policy): Record<string, unknown> {
   const out: Record<string, unknown> = { match };
   if (p.id) out.id = p.id;
   if (p.use_lane) out.use_lane = p.use_lane;
+  if (p.reasoning_effort) out.reasoning_effort = p.reasoning_effort;
   return out;
 }
 

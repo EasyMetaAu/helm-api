@@ -26,6 +26,21 @@ describe("evaluatePolicies — first-match", () => {
     expect(out.use_lane).toBe("coding");
   });
 
+  it("returns the FIRST matching policy reasoning_effort override", () => {
+    const c = cfg([
+      { id: "first", match: { task_type: "coding" }, use_lane: "coding", reasoning_effort: "low" },
+      {
+        id: "second",
+        match: { task_type: "coding" },
+        use_lane: "premium",
+        reasoning_effort: "max",
+      },
+    ]);
+    const out = evaluatePolicies(baseCtx, c);
+    expect(out.matched_policy_id).toBe("first");
+    expect(out.reasoning_effort).toBe("low");
+  });
+
   it("PINs the first use_lane but ACCUMULATES allowed_lanes from later matching policies", () => {
     // First-match wins the PIN (use_lane), but a later matching restrict-only
     // policy (allowed_lanes placed last) must NOT be discarded.
@@ -69,6 +84,7 @@ describe("evaluatePolicies — first-match", () => {
     expect(out.matched_policy_id).toBeNull();
     expect(out.use_lane).toBeNull();
     expect(out.allowed_lanes).toBeNull();
+    expect(out.reasoning_effort).toBeNull();
   });
 
   it("returns all-null outcome on empty policy list", () => {
@@ -138,6 +154,7 @@ describe("applyCaps — allowed_lanes", () => {
     matched_policy_id: "p",
     use_lane: null,
     allowed_lanes: ["economy", "balanced"],
+    reasoning_effort: null,
     reason: "",
   };
 
@@ -155,6 +172,7 @@ describe("applyCaps — allowed_lanes", () => {
       matched_policy_id: "p",
       use_lane: null,
       allowed_lanes: ["balanced", "premium"],
+      reasoning_effort: null,
       reason: "",
     };
     // candidate economy is below all allowed -> lowest allowed = balanced
@@ -169,6 +187,7 @@ describe("applyCaps — allowed_lanes", () => {
       matched_policy_id: "p",
       use_lane: null,
       allowed_lanes: ["economy", "balanced", "premium"],
+      reasoning_effort: null,
       reason: "",
     };
     expect(applyCaps("coding", out)).toBe("balanced");
@@ -182,6 +201,7 @@ describe("applyCaps — no caps", () => {
       matched_policy_id: null,
       use_lane: null,
       allowed_lanes: null,
+      reasoning_effort: null,
       reason: "",
     };
     expect(applyCaps("premium", out)).toBe("premium");

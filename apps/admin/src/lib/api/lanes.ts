@@ -31,7 +31,7 @@ export const REASONING_EFFORTS: ReasoningEffort[] = [
   'max',
 ];
 
-function isReasoningEffort(v: unknown): v is ReasoningEffort {
+export function isReasoningEffort(v: unknown): v is ReasoningEffort {
   return typeof v === 'string' && (REASONING_EFFORTS as string[]).includes(v);
 }
 

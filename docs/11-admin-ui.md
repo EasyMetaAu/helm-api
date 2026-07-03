@@ -90,7 +90,8 @@ time and by model; and the most recent routing decisions.
   catalog of routable aliases (`/admin/api/models`). See [04 · Routing &
   Lanes](04-routing-and-lanes.md).
 - **Policies** (`/policies`) — view/edit the policy matching rules
-  (`task_type` / `complexity` / `user` / `org` → lane) via `/admin/api/policies`.
+  (`task_type` / `complexity` / request constraints → lane and reasoning effort)
+  via `/admin/api/policies`.
 - **Classifier** (`/classifier`) — toggle eval, tune `confidence_threshold`, and
   inspect the rule dimensions/weights (`/admin/api/classifier`). See [03 ·
   Classification Cascade](03-classification.md).

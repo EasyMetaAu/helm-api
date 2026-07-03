@@ -281,13 +281,21 @@ capability filter — those happen later, in the executor.
 Policies (`config/policies.yaml`) let operators customize routing server-side
 without touching client code. Each policy is a **first-match** rule: the engine
 walks the list top-to-bottom, and the first policy whose `match` fully holds (an
-AND of every written field) wins the lane pin. A policy must declare at least one
-action — a pin (`use_lane`) and/or a restrict (`allowed_lanes` whitelist). The file
-is `.strict()`-validated, so a typo in a field name fails the gateway boot.
+AND of every written field) wins the lane pin and reasoning-effort override. A
+policy must declare at least one action — a pin (`use_lane`), a restrict
+(`allowed_lanes` whitelist), and/or a reasoning override (`reasoning_effort`).
+The file is `.strict()`-validated, so a typo in a field name fails the gateway
+boot.
 
 Caps behave differently from pins: while the **first** matching policy wins the
-pin, the `allowed_lanes` whitelist **accumulates** (intersection) across every
-matching policy, so a restrict policy placed after a pin policy still binds.
+pin and `reasoning_effort`, the `allowed_lanes` whitelist **accumulates**
+(intersection) across every matching policy, so a restrict policy placed after a
+pin policy still binds.
+
+Reasoning effort precedence is explicit: `policy.reasoning_effort` overrides the
+selected lane's `reasoning_effort`, which overrides the client's request value.
+`none` is a real override and disables the lane/client reasoning effort for that
+matched policy.
 
 The nine shipped policies, in evaluation order (`task_type × complexity → lane`,
 plus a JSON-contract pin first and a budget-org cap last):
@@ -313,6 +321,7 @@ policies:
   - id: math_complex_to_premium
     match: { task_type: math, complexity: complex }
     use_lane: premium
+    reasoning_effort: high
 
   - id: chat_simple_to_economy
     match: { task_type: chat, complexity: simple }
