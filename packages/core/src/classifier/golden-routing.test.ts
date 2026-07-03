@@ -615,3 +615,37 @@ describe("GOLDEN: system-prompt-heavy trivial chat routes cheap, not premium", (
     expect(got.selected_lane).not.toBe("coding");
   });
 });
+
+// PROD regression (openclaw key, 2026-07-03): scheduled monitor prompts often
+// carry dozens of available tools, long history, and a file path to MONITOR.md.
+// That request shape is ambient automation context, not evidence of a coding
+// task. It must stay on the cheap lane unless the current user turn contains a
+// real coding/debugging instruction.
+describe("GOLDEN: cron monitor automation stays cheap", () => {
+  it("openclaw cron monitor with many tools and long history -> economy, not coding", async () => {
+    const request = req(
+      "[cron:2026-07-03T01:00:00Z] chief-monitor Read /Users/lukin/AgentData/chief/MONITOR.md and execute it strictly. Return NO_REPLY if nothing to action.",
+      {
+        requested_model: "gpt-5.4-mini",
+        protocol: "openai_responses",
+        messages: [
+          { role: "assistant", content: "prior context ".repeat(22_000) },
+          {
+            role: "user",
+            content:
+              "[cron:2026-07-03T01:00:00Z] chief-monitor Read /Users/lukin/AgentData/chief/MONITOR.md and execute it strictly. Return NO_REPLY if nothing to action.",
+          },
+        ],
+        tools: Array.from({ length: 36 }, (_value, index) => ({
+          type: "function",
+          function: { name: `tool_${index}` },
+        })),
+      },
+    );
+
+    const got = await decide(request);
+    expect(got.task_type).toBe("chat");
+    expect(got.complexity).toBe("simple");
+    expect(got.selected_lane).toBe("economy");
+  });
+});

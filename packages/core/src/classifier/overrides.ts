@@ -1,4 +1,5 @@
 import type { ClassifierRulesConfig, InternalRequest } from "@helm/shared";
+import { isLowCostAutomationPrompt } from "./automation-signals.js";
 import { detectCodeBlock, detectStackTrace, keywordMatcher } from "./signals.js";
 import type { Complexity } from "./tiers.js";
 
@@ -15,7 +16,7 @@ import type { Complexity } from "./tiers.js";
 export type OverrideKind = "set" | "floor";
 
 export interface OverrideHit {
-  /** "heartbeat" | "exact_confirmation" | "formal_logic" | "tools_floor" | "long_context" | "short_message" */
+  /** "heartbeat" | "exact_confirmation" | "low_cost_automation" | "formal_logic" | "tools_floor" | "long_context" | "short_message" */
   rule: string;
   kind: OverrideKind;
   complexity: Complexity;
@@ -65,6 +66,13 @@ export function evaluateOverrides(
   // reasoning regardless of how low the weighted score was.
   if (containsAny(fullText, ov.formal_logic_keywords)) {
     hits.push({ rule: "formal_logic", kind: "set", complexity: "reasoning" });
+  }
+
+  // Low-cost automation: scheduled monitor probes with an explicit no-reply
+  // contract should not be raised by ambient tool/file-path or long-history
+  // signals. True window fit is enforced later by the capability filter.
+  if (isLowCostAutomationPrompt(lastUserText, cfg)) {
+    hits.push({ rule: "low_cost_automation", kind: "set", complexity: "simple" });
   }
 
   // Short-message shortcut: a tiny last user message with NO complex structural

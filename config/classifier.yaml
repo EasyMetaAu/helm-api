@@ -177,6 +177,13 @@ classifier:
     overrides:
       heartbeat_tokens: ["HEARTBEAT_OK"]
       exact_confirmation_tokens: ["yes", "no", "sure", "got it", "ok", "thanks", "是", "否", "可以", "好的", "谢谢", "对", "嗯", "行", "好", "没问题", "收到", "明白", "知道了"]
+      # Low-cost automation guards production monitor/cron probes from being
+      # escalated just because the request exposes many tools or names a
+      # MONITOR.md path. BOTH marker groups must match, and true long-context
+      # fit is left to the capability filter after lane selection.
+      low_cost_automation:
+        intent_markers: ["[cron:", "chief-monitor", "architect-monitor", "MONITOR.md"]
+        no_reply_markers: ["NO_REPLY", "nothing to action", "无事不回复", "没事不回复", "无需回复"]
       formal_logic_keywords: ["⊢", "∴", "modus ponens", "first-order logic", "充分必要", "反证法", "归纳法"]
       tools_floor: standard
       long_context_token_threshold: 64000  # capability signal (NOT a task_type); bumped 50k->64k to match llm-router lanes.yaml long_context anchor

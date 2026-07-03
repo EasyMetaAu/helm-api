@@ -7,14 +7,7 @@ import { applyOverrides, evaluateOverrides } from "./overrides.js";
 // override-relevant block. The dimension/scoring surface is irrelevant here —
 // overrides are a pure, separate signal path that bypasses weighted scoring.
 function makeConfig(
-  overridesBlock: Partial<{
-    heartbeat_tokens: string[];
-    formal_logic_keywords: string[];
-    tools_floor: "simple" | "standard" | "complex" | "reasoning";
-    long_context_token_threshold: number;
-    long_context_floor: "simple" | "standard" | "complex" | "reasoning";
-    short_message_max_chars: number;
-  }> = {},
+  overridesBlock: Partial<ClassifierRulesConfig["overrides"]> = {},
 ): ClassifierRulesConfig {
   return ClassifierRulesConfigSchema.parse({
     dimensions: {},
@@ -80,6 +73,65 @@ describe("evaluateOverrides — formal logic (set → reasoning)", () => {
     );
     expect(hits).toContainEqual({ rule: "formal_logic", kind: "set", complexity: "reasoning" });
     expect(applyOverrides("simple", hits)).toBe("reasoning");
+  });
+});
+
+describe("evaluateOverrides — low-cost automation (set → simple)", () => {
+  const lowCostAutomation = {
+    intent_markers: ["[cron:", "MONITOR.md"],
+    no_reply_markers: ["NO_REPLY", "nothing to action"],
+  };
+
+  it("pins a cron monitor no-reply probe to simple despite tools floor (prod regression)", () => {
+    const cfg = makeConfig({ low_cost_automation: lowCostAutomation });
+    const hits = evaluateOverrides(
+      req({
+        content:
+          "[cron:2026-07-03T01:00:00Z] chief-monitor Read /Users/lukin/AgentData/chief/MONITOR.md and execute it strictly. Return NO_REPLY if nothing to action.",
+        tools: [{ name: "code_read" }],
+      }),
+      cfg,
+      58_000,
+    );
+    expect(hits).toContainEqual({
+      rule: "low_cost_automation",
+      kind: "set",
+      complexity: "simple",
+    });
+    expect(hits).toContainEqual({ rule: "tools_floor", kind: "floor", complexity: "standard" });
+    expect(applyOverrides("complex", hits)).toBe("simple");
+  });
+
+  it("does not fire on a normal NO_REPLY explanation without an automation marker", () => {
+    const cfg = makeConfig({ low_cost_automation: lowCostAutomation });
+    const hits = evaluateOverrides(
+      req({ content: "Explain why this integration sometimes returns NO_REPLY." }),
+      cfg,
+      20,
+    );
+    expect(hits.find((h) => h.rule === "low_cost_automation")).toBeUndefined();
+  });
+
+  it("lets low-cost automation beat long-history floors; capability filter owns window fit", () => {
+    const cfg = makeConfig({
+      low_cost_automation: lowCostAutomation,
+      long_context_token_threshold: 100,
+    });
+    const hits = evaluateOverrides(
+      req({
+        content:
+          "[cron:2026-07-03T01:00:00Z] Read /tmp/MONITOR.md. Return NO_REPLY if nothing to action.",
+      }),
+      cfg,
+      101,
+    );
+    expect(hits).toContainEqual({
+      rule: "low_cost_automation",
+      kind: "set",
+      complexity: "simple",
+    });
+    expect(hits).toContainEqual({ rule: "long_context", kind: "floor", complexity: "complex" });
+    expect(applyOverrides("complex", hits)).toBe("simple");
   });
 });
 

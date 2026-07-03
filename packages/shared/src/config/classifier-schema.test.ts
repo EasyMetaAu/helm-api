@@ -22,6 +22,10 @@ function fullClassifier() {
       task_activation: { web: 3.0 },
       overrides: {
         heartbeat_tokens: ["HEARTBEAT_OK"],
+        low_cost_automation: {
+          intent_markers: ["[cron:", "MONITOR.md"],
+          no_reply_markers: ["NO_REPLY"],
+        },
         formal_logic_keywords: ["⊢"],
         tools_floor: "standard",
         long_context_token_threshold: 64000,
@@ -91,6 +95,10 @@ describe("ClassifierConfigSchema", () => {
     expect(parsed.momentum.max_history_weight).toBe(0.6);
     expect(parsed.overrides.long_context_token_threshold).toBe(64000);
     expect(parsed.overrides.heartbeat_tokens).toEqual(["HEARTBEAT_OK"]);
+    expect(parsed.overrides.low_cost_automation).toEqual({
+      intent_markers: [],
+      no_reply_markers: [],
+    });
     expect(parsed.overrides.tools_floor).toBe("standard");
   });
 
