@@ -70,6 +70,62 @@ describe("PgMemoryStore admin/MCP surface (docs/13)", () => {
     expect(byProject.get("p1")?.lastUpdated).toBeInstanceOf(Date);
   });
 
+  it("getMemoryAdminStats returns scoped storage and queue status", async () => {
+    const { store } = await newStore();
+    await store.ensureThread({ id: "t1", ownerId: "a", projectId: "p1" });
+    const first = await store.appendMessage({
+      threadId: "t1",
+      messageIndex: 0,
+      role: "user",
+      content: "hello",
+      tokenEstimate: 1,
+    });
+    const last = await store.appendMessage({
+      threadId: "t1",
+      messageIndex: 1,
+      role: "assistant",
+      content: "world",
+      tokenEstimate: 1,
+    });
+    await store.appendObservation({
+      threadId: "t1",
+      sourceMessageRange: [first, last],
+      observationText: "User said hello.",
+      observedAt: NOW,
+    });
+    await addFact(store, { accountId: "a", projectId: "p1", factText: "User said hello." });
+    await store.enqueueJob({
+      type: "observer",
+      scope: { accountId: "a", projectId: "p1", threadId: "t1" },
+    });
+
+    const stats = await store.getMemoryAdminStats({
+      accountId: "a",
+      projectId: "p1",
+      now: NOW,
+    });
+
+    expect(stats.storage).toMatchObject({
+      threads: 1,
+      messages: 2,
+      observations: 1,
+      activeFacts: 1,
+    });
+    expect(stats.queue).toMatchObject({ pending: 1, running: 0, open: 1 });
+    expect(stats.queue.byType).toContainEqual({ type: "observer", status: "pending", count: 1 });
+    expect(stats.activity.lastMessageAt).toBeInstanceOf(Date);
+    expect(stats.activity.lastObservationAt).toBeInstanceOf(Date);
+
+    const globalStats = await store.getMemoryAdminStats({ now: NOW });
+    expect(globalStats.storage).toMatchObject({
+      threads: 1,
+      messages: 2,
+      observations: 1,
+      activeFacts: 1,
+    });
+    expect(globalStats.queue).toMatchObject({ pending: 1, running: 0, open: 1 });
+  });
+
   it("listFacts: 'active' hides superseded, 'all' shows it; ILIKE search works", async () => {
     const { store } = await newStore();
     await addFact(store, {

@@ -8,9 +8,11 @@
     type FactCreateResult,
     type FactQuery,
     type FactStatusFilter,
+    getMemoryStats,
     listFacts,
     listReflections,
     type MemoryScope,
+    type MemoryStats,
     type Reflection,
     resolveKey,
   } from '$lib/api/memory.js';
@@ -32,11 +34,18 @@
   // facts/reflections load on selection.
   let {
     data,
-  }: { data: { scopes: MemoryScope[]; keys: ApiKeyView[]; initialKeyId?: string | null } } =
-    $props();
+  }: {
+    data: {
+      scopes: MemoryScope[];
+      keys: ApiKeyView[];
+      initialStats?: MemoryStats;
+      initialKeyId?: string | null;
+    };
+  } = $props();
 
   const scopes = untrack(() => data.scopes);
   const keys = untrack(() => data.keys);
+  const initialStats = untrack(() => data.initialStats ?? null);
 
   type Tab = 'scope' | 'key';
   let tab = $state<Tab>('scope');
@@ -58,9 +67,12 @@
   let selectedKeyId = $state<string>('');
 
   let error = $state<string | null>(null);
+  let statsError = $state<string | null>(null);
   // Neutral (non-error) feedback line — e.g. "fact added" / "already existed". Cleared
   // whenever an error is raised or a new selection is made.
   let notice = $state<string | null>(null);
+  let stats = $state<MemoryStats | null>(initialStats);
+  let loadingStats = $state<boolean>(initialStats === null);
 
   // Facts table state. The list is paginated + searchable client-side (facts load on
   // selection, not via the loader), so page/search live here and drive loadFacts.
@@ -117,6 +129,49 @@
     if (s.resourceId !== null) q.resourceId = s.resourceId;
     if (s.threadId !== null) q.threadId = s.threadId;
     return q;
+  }
+
+  function compactNumber(value: number): string {
+    return new Intl.NumberFormat().format(value);
+  }
+
+  function ageFromNow(
+    iso: string | null,
+    baseIso: string | null = stats?.generatedAt ?? null,
+  ): string {
+    if (iso === null || baseIso === null) return '—';
+    const delta = Math.max(0, new Date(baseIso).getTime() - new Date(iso).getTime());
+    const minutes = Math.floor(delta / 60_000);
+    if (minutes < 1) return $t('<1m');
+    if (minutes < 60) return $t('{count}m', { count: minutes });
+    const hours = Math.floor(minutes / 60);
+    if (hours < 48) return $t('{count}h', { count: hours });
+    return $t('{count}d', { count: Math.floor(hours / 24) });
+  }
+
+  function statsBadge(s: MemoryStats | null): { cls: string; text: string } {
+    if (s === null) return { cls: 'badge-neutral', text: $t('Unknown') };
+    if (s.queue.staleRunning > 0) return { cls: 'badge-neutral', text: $t('Stale jobs') };
+    if (s.queue.running > 0) return { cls: 'badge-ok', text: $t('Running') };
+    if (s.queue.pending > 0) return { cls: 'badge-neutral', text: $t('Queued') };
+    return { cls: 'badge-neutral', text: $t('Idle') };
+  }
+
+  const statsScopeLabel = $derived(
+    selected === null ? $t('All memory') : `${selectionLabel} · ${selected.accountId}`,
+  );
+  const statusBadge = $derived(statsBadge(stats));
+
+  async function loadStats(scope: SelectedScope | null = selected): Promise<void> {
+    loadingStats = true;
+    statsError = null;
+    try {
+      stats = await getMemoryStats(scope === null ? {} : scopeQuery(scope));
+    } catch (e) {
+      statsError = e instanceof Error ? e.message : $t('Failed to load memory status');
+    } finally {
+      loadingStats = false;
+    }
   }
 
   async function loadFacts(): Promise<void> {
@@ -178,7 +233,7 @@
     factStatus = 'active';
     factSearch = '';
     factPage = 1;
-    await Promise.all([loadFacts(), loadReflections()]);
+    await Promise.all([loadFacts(), loadReflections(), loadStats(s)]);
   }
 
   function pickScopeRow(s: MemoryScope): void {
@@ -202,6 +257,7 @@
       selectionLabel = '';
       facts = [];
       reflections = [];
+      void loadStats(null);
       return;
     }
     error = null;
@@ -243,6 +299,7 @@
     editingFact = null;
     // The status filter may now exclude the edited row — re-fetch to reflect it.
     void loadFacts();
+    void loadStats();
   }
 
   // After adding a fact: close, jump to the live (Active) view's first page so the new
@@ -259,6 +316,7 @@
     factStatus = 'active';
     factSearch = '';
     reloadFactsFromFirstPage();
+    void loadStats();
   }
 
   function startEditReflection(r: Reflection): void {
@@ -269,6 +327,7 @@
   function onReflectionSaved(updated: Reflection): void {
     reflections = reflections.map((r) => (r.id === updated.id ? updated : r));
     editingReflection = null;
+    void loadStats();
   }
 
   function askDeleteFact(f: Fact): void {
@@ -283,7 +342,7 @@
     try {
       await deleteFact(f.id);
       confirmingFactDelete = null;
-      await loadFacts();
+      await Promise.all([loadFacts(), loadStats()]);
     } catch (e) {
       error = e instanceof Error ? e.message : $t('Failed to delete fact');
     }
@@ -301,7 +360,7 @@
     try {
       await deleteReflection(r.id);
       confirmingReflectionDelete = null;
-      await loadReflections();
+      await Promise.all([loadReflections(), loadStats()]);
     } catch (e) {
       error = e instanceof Error ? e.message : $t('Failed to delete reflection');
     }
@@ -315,7 +374,13 @@
     if (id && keys.some((k) => k.key_id === id)) {
       tab = 'key';
       void pickKey(id);
+    } else if (initialStats === null) {
+      void loadStats(null);
     }
+    const timer = window.setInterval(() => {
+      void loadStats();
+    }, 15_000);
+    return () => window.clearInterval(timer);
   });
 </script>
 
@@ -347,6 +412,124 @@
       {notice}
     </p>
   {/if}
+
+  <section data-testid="memory-stats" class="flex flex-col gap-3">
+    <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+      <div class="min-w-0">
+        <div class="flex flex-wrap items-center gap-2">
+          <h2 class="section-header">{$t('Memory status')}</h2>
+          <span class={statusBadge.cls}>{statusBadge.text}</span>
+        </div>
+        <p class="section-desc font-mono">{statsScopeLabel}</p>
+      </div>
+      <button
+        type="button"
+        class="btn-secondary"
+        disabled={loadingStats}
+        onclick={() => loadStats()}>{loadingStats ? $t('Refreshing…') : $t('Refresh')}</button
+      >
+    </div>
+    {#if statsError}
+      <p class="alert-error" role="alert">{statsError}</p>
+    {/if}
+    <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <div class="card flex flex-col gap-2">
+        <p class="text-xs uppercase tracking-wide text-ink-muted">{$t('Queue')}</p>
+        <p class="text-2xl font-semibold text-ink-strong">
+          {stats ? compactNumber(stats.queue.open) : '—'}
+        </p>
+        <div class="flex flex-wrap gap-2 text-xs text-ink-muted">
+          <span>{$t('{count} pending', { count: stats?.queue.pending ?? 0 })}</span>
+          <span>{$t('{count} running', { count: stats?.queue.running ?? 0 })}</span>
+          <span>{$t('{count} stale', { count: stats?.queue.staleRunning ?? 0 })}</span>
+        </div>
+      </div>
+      <div class="card flex flex-col gap-2">
+        <p class="text-xs uppercase tracking-wide text-ink-muted">{$t('Lag')}</p>
+        <p class="text-2xl font-semibold text-ink-strong">
+          {stats ? ageFromNow(stats.queue.oldestPendingAt) : '—'}
+        </p>
+        <div class="flex flex-col gap-1 text-xs text-ink-muted">
+          <span>{$t('Oldest pending')}</span>
+          <span
+            >{$t('Oldest running: {age}', {
+              age: ageFromNow(stats?.queue.oldestRunningAt ?? null),
+            })}</span
+          >
+        </div>
+      </div>
+      <div class="card flex flex-col gap-2">
+        <p class="text-xs uppercase tracking-wide text-ink-muted">{$t('Raw input')}</p>
+        <p class="text-2xl font-semibold text-ink-strong">
+          {stats ? compactNumber(stats.storage.messages) : '—'}
+        </p>
+        <div class="flex flex-wrap gap-2 text-xs text-ink-muted">
+          <span>{$t('{count} threads', { count: stats?.storage.threads ?? 0 })}</span>
+          <span>{$t('{count} observations', { count: stats?.storage.observations ?? 0 })}</span>
+        </div>
+      </div>
+      <div class="card flex flex-col gap-2">
+        <p class="text-xs uppercase tracking-wide text-ink-muted">{$t('Learned')}</p>
+        <p class="text-2xl font-semibold text-ink-strong">
+          {stats ? compactNumber(stats.storage.activeFacts + stats.storage.activeReflections) : '—'}
+        </p>
+        <div class="flex flex-wrap gap-2 text-xs text-ink-muted">
+          <span>{$t('{count} active facts', { count: stats?.storage.activeFacts ?? 0 })}</span>
+          <span
+            >{$t('{count} active reflections', {
+              count: stats?.storage.activeReflections ?? 0,
+            })}</span
+          >
+        </div>
+      </div>
+    </div>
+    <div class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,24rem)]">
+      <div class="card flex flex-col gap-2 text-sm">
+        <p class="text-xs uppercase tracking-wide text-ink-muted">{$t('Activity')}</p>
+        <div class="grid gap-2 sm:grid-cols-2">
+          <div>
+            <p class="text-ink-muted">{$t('Last raw message')}</p>
+            <p class="text-ink-strong">
+              {stats?.activity.lastMessageAt ? formatTimestamp(stats.activity.lastMessageAt) : '—'}
+            </p>
+          </div>
+          <div>
+            <p class="text-ink-muted">{$t('Last observation')}</p>
+            <p class="text-ink-strong">
+              {stats?.activity.lastObservationAt
+                ? formatTimestamp(stats.activity.lastObservationAt)
+                : '—'}
+            </p>
+          </div>
+          <div>
+            <p class="text-ink-muted">{$t('Last completed job')}</p>
+            <p class="text-ink-strong">
+              {stats?.queue.newestDoneAt ? formatTimestamp(stats.queue.newestDoneAt) : '—'}
+            </p>
+          </div>
+          <div>
+            <p class="text-ink-muted">{$t('Last refreshed')}</p>
+            <p class="text-ink-strong">
+              {stats?.generatedAt ? formatTimestamp(stats.generatedAt) : '—'}
+            </p>
+          </div>
+        </div>
+      </div>
+      <div class="card flex flex-col gap-2 text-sm">
+        <p class="text-xs uppercase tracking-wide text-ink-muted">{$t('Jobs by type')}</p>
+        {#if stats === null || stats.queue.byType.length === 0}
+          <p class="text-ink-muted">—</p>
+        {:else}
+          <div class="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1">
+            {#each stats.queue.byType as row (`${row.type}:${row.status}`)}
+              <span class="truncate text-ink-muted">{row.type} · {row.status}</span>
+              <span class="font-mono text-ink-strong">{compactNumber(row.count)}</span>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    </div>
+  </section>
 
   <!-- Tab switcher: By Scope / By Key. aria-selected drives both a11y + style. -->
   <div class="flex gap-2" role="tablist">

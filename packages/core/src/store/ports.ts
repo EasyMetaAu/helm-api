@@ -26,6 +26,46 @@ import type { BucketState } from "../ratelimit/token-bucket.js";
 // Lifecycle status of a background memory job (docs/08 memory_jobs.status).
 export type MemoryJobStatus = "pending" | "running" | "done" | "failed";
 
+export interface MemoryAdminStatsScope {
+  accountId?: string;
+  projectId?: string;
+  resourceId?: string;
+  threadId?: string;
+}
+
+export interface MemoryAdminStats {
+  generatedAt: Date;
+  scope: MemoryAdminStatsScope;
+  storage: {
+    threads: number;
+    messages: number;
+    observations: number;
+    facts: number;
+    activeFacts: number;
+    reflections: number;
+    activeReflections: number;
+  };
+  queue: {
+    pending: number;
+    running: number;
+    done: number;
+    failed: number;
+    open: number;
+    staleRunning: number;
+    oldestPendingAt: Date | null;
+    oldestRunningAt: Date | null;
+    newestDoneAt: Date | null;
+    newestFailedAt: Date | null;
+    byType: Array<{ type: string; status: string; count: number }>;
+  };
+  activity: {
+    lastMessageAt: Date | null;
+    lastObservationAt: Date | null;
+    lastFactUpdatedAt: Date | null;
+    lastReflectionUpdatedAt: Date | null;
+  };
+}
+
 // Persistence for the per-key rate-limit token buckets. The limiter is a
 // security/quota boundary: this port is fail-CLOSED — a read/write failure must
 // propagate (the limiter then rejects), NEVER degrade into "unlimited". One row
@@ -866,6 +906,12 @@ export interface MemoryStore {
   // reflections are guarded owner_id IS NOT NULL (nullable column — legacy/global
   // rows must never surface under an account).
   listMemoryScopes?(input: { accountId?: string }): Promise<MemoryScopeSummary[]>;
+
+  // Operational snapshot for the admin Memory page. This is READ-ONLY
+  // observability: queue depth, stale running leases, raw/derived row counts, and
+  // recent activity timestamps for either the whole memory store or a selected
+  // in-account scope. It must not read message bodies or mutate worker state.
+  getMemoryAdminStats?(input: MemoryAdminStatsScope & { now: Date }): Promise<MemoryAdminStats>;
 
   // Read ONE fact by id, account-guarded (cross-tenant id → null). Any status.
   getFactById?(input: { accountId: string; id: string }): Promise<Fact | null>;

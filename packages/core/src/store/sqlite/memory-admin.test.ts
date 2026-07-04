@@ -161,6 +161,64 @@ describe("SqliteMemoryStore.listMemoryScopes (docs/13)", () => {
   });
 });
 
+describe("SqliteMemoryStore.getMemoryAdminStats (docs/13)", () => {
+  it("returns global storage and queue status without a scope filter", async () => {
+    const { store } = newStore(NOW);
+    await store.ensureThread({ id: "t1", ownerId: "a", projectId: "p1" });
+    const first = await store.appendMessage({
+      threadId: "t1",
+      messageIndex: 0,
+      role: "user",
+      content: "hello",
+      tokenEstimate: 1,
+    });
+    const last = await store.appendMessage({
+      threadId: "t1",
+      messageIndex: 1,
+      role: "assistant",
+      content: "world",
+      tokenEstimate: 1,
+    });
+    await store.appendObservation({
+      threadId: "t1",
+      sourceMessageRange: [first, last],
+      observationText: "User said hello.",
+      observedAt: NOW,
+    });
+    await addFact(store, {
+      accountId: "a",
+      projectId: "p1",
+      factText: "User said hello.",
+      now: NOW,
+    });
+    await addReflection(store, {
+      accountId: "a",
+      projectId: "p1",
+      text: "User is testing memory stats.",
+      version: 1,
+      updatedAt: NOW,
+    });
+    await store.enqueueJob({
+      type: "observer",
+      scope: { accountId: "a", projectId: "p1", threadId: "t1" },
+    });
+
+    const stats = await store.getMemoryAdminStats({ now: NOW });
+
+    expect(stats.storage).toMatchObject({
+      threads: 1,
+      messages: 2,
+      observations: 1,
+      activeFacts: 1,
+      activeReflections: 1,
+    });
+    expect(stats.queue).toMatchObject({ pending: 1, running: 0, open: 1 });
+    expect(stats.queue.byType).toContainEqual({ type: "observer", status: "pending", count: 1 });
+    expect(stats.activity.lastMessageAt).toBeInstanceOf(Date);
+    expect(stats.activity.lastObservationAt).toBeInstanceOf(Date);
+  });
+});
+
 describe("SqliteMemoryStore fact reads (docs/13)", () => {
   it("getFactById is account-guarded (cross-tenant id → null)", async () => {
     const { store } = newStore(NOW);

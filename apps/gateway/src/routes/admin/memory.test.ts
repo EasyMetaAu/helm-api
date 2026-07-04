@@ -89,6 +89,74 @@ describe("/admin/api/memory routes (docs/13)", () => {
     expect(byProject.get("p2")?.reflectionCount).toBe(1);
   });
 
+  it("returns operational stats for the selected memory scope", async () => {
+    const { store } = seededStore();
+    await store.ensureThread({ id: "t1", ownerId: "acct", projectId: "p1" });
+    const first = await store.appendMessage({
+      threadId: "t1",
+      messageIndex: 0,
+      role: "user",
+      content: "hello",
+      tokenEstimate: 1,
+    });
+    const last = await store.appendMessage({
+      threadId: "t1",
+      messageIndex: 1,
+      role: "assistant",
+      content: "world",
+      tokenEstimate: 1,
+    });
+    await store.appendObservation({
+      threadId: "t1",
+      sourceMessageRange: [first, last],
+      observationText: "User said hello.",
+      observedAt: NOW,
+    });
+    await addFact(store, "greeting", "User said hello.", "p1");
+    await store.upsertReflection({
+      accountId: "acct",
+      projectId: "p1",
+      reflectionText: "User is testing memory stats.",
+      version: 1,
+      tokenEstimate: 1,
+      updatedAt: NOW,
+    });
+    await store.enqueueJob({
+      type: "observer",
+      scope: { accountId: "acct", projectId: "p1", threadId: "t1" },
+    });
+    const app = buildApp(store);
+    const res = await app.request("/admin/api/memory/stats?accountId=acct&projectId=p1");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      storage: {
+        threads: number;
+        messages: number;
+        observations: number;
+        activeFacts: number;
+        activeReflections: number;
+      };
+      queue: {
+        pending: number;
+        open: number;
+        byType: Array<{ type: string; status: string; count: number }>;
+      };
+      activity: { lastMessageAt: string | null; lastObservationAt: string | null };
+    };
+    expect(body.storage).toMatchObject({
+      threads: 1,
+      messages: 2,
+      observations: 1,
+      activeFacts: 1,
+      activeReflections: 1,
+    });
+    expect(body.queue.pending).toBe(1);
+    expect(body.queue.open).toBe(1);
+    expect(body.queue.byType).toContainEqual({ type: "observer", status: "pending", count: 1 });
+    expect(body.activity.lastMessageAt).not.toBeNull();
+    expect(body.activity.lastObservationAt).not.toBeNull();
+  });
+
   it("lists facts with default 'all' status visibility and supports filters", async () => {
     const { store } = seededStore();
     await addFact(store, "fav", "old", undefined);
