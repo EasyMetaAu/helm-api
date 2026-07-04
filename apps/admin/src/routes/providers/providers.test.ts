@@ -230,6 +230,47 @@ describe('providers page', () => {
     expect(within(row).queryByText(/auto-recovers in 0m/i)).not.toBeInTheDocument();
   });
 
+  it('does not treat saturated scoped Claude model windows as a global account limit', () => {
+    const now = Date.now();
+    renderPage({
+      quota: [
+        {
+          providerId: 'anthropic',
+          account: 'acct-claude',
+          windows: [
+            { key: '5h', usedPercent: 8, resetsAtMs: now + 3 * 60 * 60_000, windowMinutes: null },
+            {
+              key: '7d',
+              usedPercent: 75,
+              resetsAtMs: now + 2 * 86_400_000,
+              windowMinutes: null,
+            },
+            {
+              key: '7d-fable',
+              usedPercent: 100,
+              resetsAtMs: now + 2 * 86_400_000,
+              windowMinutes: null,
+            },
+            {
+              key: '7d-sonnet',
+              usedPercent: 100,
+              resetsAtMs: now + 2 * 86_400_000,
+              windowMinutes: null,
+            },
+          ],
+          capturedAt: now,
+          source: 'anthropic',
+          usageLimitedUntilMs: now + 2 * 86_400_000,
+        },
+      ],
+    });
+
+    const row = screen.getByTestId('provider-account-row');
+    expect(within(row).getByText('7d · Fable')).toBeInTheDocument();
+    expect(within(row).getAllByText('100%')).toHaveLength(2);
+    expect(within(row).queryByText('Rate limited')).not.toBeInTheDocument();
+  });
+
   it('does not mark a healthy account rate-limited from a near-full window alone', () => {
     const now = Date.now();
     renderPage({

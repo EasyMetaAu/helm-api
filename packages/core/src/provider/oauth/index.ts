@@ -44,6 +44,7 @@ export {
   type OAuthPoolClient,
   type OAuthPoolDeps,
   type OAuthPoolMember,
+  type OAuthRateLimitParkContext,
 } from "./pool.js";
 export { getOAuthProvider, getOAuthProviders, listOAuthProviderIds } from "./registry.js";
 export {
@@ -74,6 +75,7 @@ export type {
 export {
   ACTIVE_LIMIT_RECOVERY_THRESHOLD,
   DEFAULT_429_COOLDOWN_MS,
+  isAccountWideQuotaWindow,
   LIMIT_THRESHOLD,
   windowsToActiveUsageRecovery,
   windowsToUsageLimit,
