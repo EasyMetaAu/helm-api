@@ -90,6 +90,35 @@ function countOf(row: { n?: number } | undefined): number {
   return row?.n ?? 0;
 }
 
+function sqliteMemoryJobScope(input: MemoryAdminStatsScope): {
+  clauses: string[];
+  args: unknown[];
+} {
+  const clauses: string[] = [];
+  const args: unknown[] = [];
+  if (input.accountId !== undefined) {
+    clauses.push("json_extract(scope_id, '$.accountId') = ?");
+    args.push(input.accountId);
+  }
+  if (input.projectId !== undefined) {
+    clauses.push("json_extract(scope_id, '$.projectId') = ?");
+    args.push(input.projectId);
+  }
+  if (input.resourceId !== undefined) {
+    clauses.push("json_extract(scope_id, '$.resourceId') = ?");
+    args.push(input.resourceId);
+  }
+  if (input.threadId !== undefined) {
+    clauses.push("json_extract(scope_id, '$.threadId') = ?");
+    args.push(input.threadId);
+  }
+  return { clauses, args };
+}
+
+function sqliteWhere(clauses: readonly string[]): string {
+  return clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+}
+
 // Observation read scope. Two shapes (docs/08):
 //  - thread scope (inject + observer): the thread's own rows, owner-checked;
 //  - project/resource scope (the REFLECTOR's target): aggregate across ALL the
@@ -1148,16 +1177,6 @@ export class SqliteMemoryStore implements MemoryStore {
       threadId,
       threadId,
     ];
-    const jobArgs = [
-      accountId,
-      accountId,
-      projectId,
-      projectId,
-      resourceId,
-      resourceId,
-      threadId,
-      threadId,
-    ];
     const threadWhere = `
       (? IS NULL OR t.owner_id = ?)
       AND (? IS NULL OR t.project_id = ?)
@@ -1170,12 +1189,7 @@ export class SqliteMemoryStore implements MemoryStore {
       AND (? IS NULL OR resource_id = ?)
       AND (? IS NULL OR thread_id = ?)
     `;
-    const jobWhere = `
-      (? IS NULL OR json_extract(scope_id, '$.accountId') = ?)
-      AND (? IS NULL OR json_extract(scope_id, '$.projectId') = ?)
-      AND (? IS NULL OR json_extract(scope_id, '$.resourceId') = ?)
-      AND (? IS NULL OR json_extract(scope_id, '$.threadId') = ?)
-    `;
+    const jobScope = sqliteMemoryJobScope(input);
     const threads = (
       noScopeFilter
         ? this.db.$sqlite.prepare("SELECT COUNT(*) AS n FROM memory_threads").get()
@@ -1253,8 +1267,7 @@ export class SqliteMemoryStore implements MemoryStore {
             )
             .get(...itemArgs)
     ) as { n: number; active: number | null; lastAt: number | null } | undefined;
-    const jobWhereSql = noScopeFilter ? "" : `WHERE ${jobWhere}`;
-    const scopedJobArgs = noScopeFilter ? [] : jobArgs;
+    const jobWhereSql = sqliteWhere(jobScope.clauses);
     const queueRows = this.db.$sqlite
       .prepare(
         `SELECT status, COUNT(*) AS n
@@ -1262,7 +1275,7 @@ export class SqliteMemoryStore implements MemoryStore {
           ${jobWhereSql}
           GROUP BY status`,
       )
-      .all(...scopedJobArgs) as Array<{ status: string; n: number }>;
+      .all(...jobScope.args) as Array<{ status: string; n: number }>;
     const queue = { pending: 0, running: 0, done: 0, failed: 0 };
     for (const row of queueRows) {
       if (row.status === "pending") queue.pending = row.n;
@@ -1270,26 +1283,33 @@ export class SqliteMemoryStore implements MemoryStore {
       else if (row.status === "done") queue.done = row.n;
       else if (row.status === "failed") queue.failed = row.n;
     }
-    const queueTimes = this.db.$sqlite
-      .prepare(
-        `SELECT
-            MIN(CASE WHEN status = 'pending' THEN created_at END) AS oldestPendingAt,
-            MIN(CASE WHEN status = 'running' THEN updated_at END) AS oldestRunningAt,
-            MAX(CASE WHEN status = 'done' THEN updated_at END) AS newestDoneAt,
-            MAX(CASE WHEN status = 'failed' THEN updated_at END) AS newestFailedAt,
-           SUM(CASE WHEN status = 'running' AND updated_at <= ? THEN 1 ELSE 0 END) AS staleRunning
-           FROM memory_jobs
-          ${jobWhereSql}`,
-      )
-      .get(input.now.getTime() - RUNNING_LEASE_MS, ...scopedJobArgs) as
-      | {
-          oldestPendingAt: number | null;
-          oldestRunningAt: number | null;
-          newestDoneAt: number | null;
-          newestFailedAt: number | null;
-          staleRunning: number | null;
-        }
-      | undefined;
+    const jobScalar = (
+      expr: string,
+      status: MemoryJobStatus,
+      extraClause?: string,
+      extraArgs: readonly unknown[] = [],
+    ): number | null => {
+      const clauses = ["status = ?", ...jobScope.clauses];
+      const args: unknown[] = [status, ...jobScope.args];
+      if (extraClause !== undefined) {
+        clauses.push(extraClause);
+        args.push(...extraArgs);
+      }
+      const row = this.db.$sqlite
+        .prepare(`SELECT ${expr} AS value FROM memory_jobs ${sqliteWhere(clauses)}`)
+        .get(...args) as { value: number | null } | undefined;
+      return row?.value ?? null;
+    };
+    const queueTimes = {
+      oldestPendingAt: jobScalar("MIN(created_at)", "pending"),
+      oldestRunningAt: jobScalar("MIN(updated_at)", "running"),
+      newestDoneAt: jobScalar("MAX(updated_at)", "done"),
+      newestFailedAt: jobScalar("MAX(updated_at)", "failed"),
+      staleRunning:
+        jobScalar("COUNT(*)", "running", "updated_at <= ?", [
+          input.now.getTime() - RUNNING_LEASE_MS,
+        ]) ?? 0,
+    };
     const byType = this.db.$sqlite
       .prepare(
         `SELECT type, status, COUNT(*) AS count
@@ -1298,7 +1318,7 @@ export class SqliteMemoryStore implements MemoryStore {
           GROUP BY type, status
           ORDER BY type ASC, status ASC`,
       )
-      .all(...scopedJobArgs) as Array<{ type: string; status: string; count: number }>;
+      .all(...jobScope.args) as Array<{ type: string; status: string; count: number }>;
     return {
       generatedAt: input.now,
       scope: {

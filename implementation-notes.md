@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-07-04 · Memory stats 队列统计避免扫全量历史 job（Admin memory performance，docs/11/13，原则 1/7）
+
+- **背景（Lukin）**：线上逐页排查 admin API timing 后，绝大多数接口在 1–20ms，`/admin/api/oauth*` 稳定约 140–160ms；真正稳定慢的是 `/admin/api/memory/stats`，每次约 8.6–11.2s，导致 Memory 页面打开/刷新时明显卡住。
+- **根因**：生产 `memory_jobs` 已接近 10 万行且全部为历史 `done` job。stats 接口每次刷新都用 `CASE WHEN status = ...` 对整张 job 历史做时间统计，又额外做 `type/status` 汇总；这些读是同步 SQLite 路径，会阻塞 Node 事件循环，放大成后台页面卡顿。
+- **查询决策**：队列时间统计拆成按状态查询：pending 查最早 `created_at`，running 查最早/过期 `updated_at`，done/failed 查最新 `updated_at`。这样没有 open job 时不再为几个空指标扫描全部 done 历史。
+- **索引决策**：SQLite/Postgres 都新增 `memory_jobs(status, updated_at, created_at)` 与 `memory_jobs(type, status)`，分别服务状态时间统计和 jobs-by-type 汇总；迁移对缺少 `memory_jobs` 的老 fixture/部分升级库保持兼容。
+- **保持不变**：返回 JSON 语义不变；仍然是只读 admin observability，不读取 message body、不输出明文 key/payload、不触发 worker。
+- **验证计划**：覆盖 SQLite/Postgres stats 返回语义和迁移索引存在性；部署后用线上 `/admin/api/memory/stats` timing、`/admin/memory` 浏览器点击、`/healthz`/`/version` 验证。
+
 ## 2026-07-04 · OAuth 账号池改为会话亲和调度（OAuth provider pool / routing，docs/04/11，原则 3/5/7）
 
 - **背景（Lukin）**：订阅 provider 有多个账号时，单纯 priority + LRU 轮询会让同一客户端会话在多个账号/多个上游设备身份之间漂移，容易呈现“账号池”特征。目标是同一 session/device 尽量固定到同一账号，只有账号不可用、额度/限流、或账号容量已满时才切换，同时让多个账号在新会话维度尽量均衡使用。
@@ -88,18 +97,10 @@
 - **task_type 决策**：低成本自动化模式下，task detector 忽略 ambient tool-prefix 和 file-path 证据，但仍保留显式 coding keyword（如 `debug/refactor/function`）的升级路径，避免真正要修代码的 monitor 任务被错误降级。
 - **验证计划**：新增 openclaw cron monitor golden route 回归、override 单测、taskdetect 单测和 schema 默认值测试；目标是该形态走 `chat/simple/economy`，链首回到 `openai-codex/gpt-5.4-mini`。
 
-## 2026-07-03 · 上下文窗口超限按候选跳过处理（执行 fallback / streaming telemetry，docs/04/07，原则 5/8）
-
-- **背景（Lukin）**：生产请求 `69d5058f-ea6c-4bfc-91d8-0686a7c120f3` 最终由 `anthropic/claude-opus-4-8` 成功服务，但链中 `openai-codex/gpt-5.5` 先返回 Responses stream `context_length_exceeded`，admin 详情把它显示为普通 `upstream_error`。
-- **修复决策**：`context_length_exceeded` / “context window” / “prompt is too long” 属于当前候选模型窗口不足；即使它来自首个有效输出前的 SSE error 且没有 HTTP 400，也记录为 `skipped:true` + `skip_reason:"context_too_small"`，继续执行 fallback。
-- **熔断决策**：该类错误不调用 `breaker.recordFailure()`，不触发 OAuth 账号 auto-park，也不计入 execution fallback count；它和预检能力过滤的 `context_too_small` 语义保持一致。
-- **保留边界**：非上下文类 request-shape 错误（例如图片尺寸超限、非法参数）仍短路为 `invalid_request`，因为换候选模型无法修复请求体本身。
-- **验证**：新增执行器 stream 回归测试，覆盖 Codex Responses `context_length_exceeded` 先失败、后续 Opus 成功、首个 attempt 显示跳过且不记录 breaker failure；目标 `execute.test.ts` 117/117 绿。
-
 ## 历史条目摘要（最近 2 条）
 
+- **2026-07-03 · 上下文窗口超限按候选跳过处理（执行 fallback / streaming telemetry，docs/04/07，原则 5/8）**：`context_length_exceeded` / prompt-too-long 类错误按候选 `context_too_small` 跳过并继续 fallback，不熔断 provider。
 - **2026-07-03 · API key 级 usage stats 给外部自动化读取（Gateway usage API / telemetry，docs/07，原则 7）**：`GET /v1/usage/stats` 复用 API-key auth，只聚合当前 key 的 request/token/cost 统计，避免外部自动化直接读库。
-- **2026-07-02 · API key 加密恢复与原地轮转（Auth / Admin keys，docs/06/11，原则 7）**：API key reveal/rotate 改用 `secret_enc` 恢复材料，鉴权仍只依赖 sha256，历史 hash-only key 明确不可恢复但可原地轮转。
 
 ## 更早历史总览
 
