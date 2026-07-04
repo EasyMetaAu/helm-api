@@ -154,6 +154,7 @@ function renderPage(scopes: MemoryScope[], keys: ApiKeyView[] = [key('k1')]) {
 
 describe('memory page', () => {
   beforeEach(() => {
+    localStorage.clear();
     listFacts.mockReset();
     listReflections.mockReset();
     getMemoryStats.mockReset();
@@ -180,6 +181,18 @@ describe('memory page', () => {
     expect(screen.getAllByTestId('scope-row')).toHaveLength(2);
     expect(screen.getByText('proj-a')).toBeInTheDocument();
     expect(screen.getByText('proj-b')).toBeInTheDocument();
+  });
+
+  it('uses the shared refresh control for memory status reloads and cadence selection', async () => {
+    renderPage([scope()]);
+
+    expect(screen.getByTestId('refresh-control')).toBeInTheDocument();
+    await fireEvent.click(screen.getByTestId('refresh-now'));
+    await waitFor(() => expect(getMemoryStats).toHaveBeenCalledWith({}));
+
+    await fireEvent.click(screen.getByTestId('refresh-toggle'));
+    expect(screen.getByTestId('refresh-menu')).toBeInTheDocument();
+    expect(screen.getByTestId('refresh-interval-30')).toBeInTheDocument();
   });
 
   it('selecting a scope loads and renders the facts and reflections tables', async () => {

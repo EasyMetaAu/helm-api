@@ -95,7 +95,11 @@ Configuration comes from **files** and **environment variables**, and env vars
   - Background-worker toggles: `HELM_SIGNALS_DISABLED=1` stops the signal
     scheduler and `HELM_MEMORY_WORKER_DISABLED=1` stops the memory worker (both
     run by default); `HELM_MEMORY_WORKER_INTERVAL_MS` tunes the memory worker
-    tick (default `60000`).
+    tick (default `60000`). Memory catch-up can be tuned with
+    `HELM_MEMORY_WORKER_BATCH_SIZE`, `HELM_MEMORY_WORKER_MAX_BATCHES_PER_DRAIN`,
+    `HELM_MEMORY_WORKER_MAX_DRAIN_MS`, `HELM_MEMORY_WORKER_COALESCE_MS`, and
+    `HELM_MEMORY_WORKER_CONCURRENCY` (default `3`, capped at `8` to avoid a
+    background LLM fan-out spike on small self-hosted machines).
   - Anthropic preset OAuth execution uses `transport_profile: auto` by default,
     which routes final provider execution through the optional Chrome-like
     TLS/JA3 transport (`wreq-js`) instead of undici. Set
