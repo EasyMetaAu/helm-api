@@ -1,20 +1,28 @@
 <script lang="ts">
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import { t } from '$lib/i18n';
+
+  const SHARED_STORAGE_KEY = 'helm_admin_refresh_interval';
+  const LEGACY_STORAGE_KEYS = [
+    'helm_admin_home_refresh_interval',
+    'helm_admin_requests_refresh_interval',
+    'helm_admin_providers_refresh_interval',
+    'helm_admin_memory_refresh_interval',
+  ];
+  const REFRESH_INTERVAL_EVENT = 'helm-admin-refresh-interval-change';
 
   // Split refresh control (Grafana-style): the left button refreshes the page
   // now, the caret opens a menu that picks an auto-refresh cadence. The parent
   // owns what "refresh" means (the requests list re-runs its loader via
-  // invalidateAll); this component only schedules the calls and reports state.
-  // Stateless w.r.t. data — purely a trigger, so it stays reusable across pages.
+  // invalidateAll); this component only schedules the calls and reports state. The
+  // cadence is a single admin-wide preference so all pages stay in lockstep.
   let {
     onRefresh,
-    storageKey,
+    storageKey = SHARED_STORAGE_KEY,
   }: {
     onRefresh: () => void | Promise<void>;
-    // When set, the chosen cadence is persisted to localStorage under this key and
-    // restored on mount, so the setting survives navigation (e.g. opening a request
-    // detail and coming back). Omit it to keep the control purely in-memory/reusable.
+    // Mostly for tests/future embedded use. Admin routes should omit this so they
+    // all share SHARED_STORAGE_KEY.
     storageKey?: string;
   } = $props();
 
@@ -43,6 +51,36 @@
   let timer: ReturnType<typeof setInterval> | null = null;
 
   const activeLabel = $derived(INTERVALS.find((o) => o.seconds === intervalSeconds)?.label ?? null);
+
+  function parseInterval(value: string | null): number | null {
+    if (value === null) return null;
+    const seconds = Number(value);
+    if (
+      Number.isFinite(seconds) &&
+      (seconds === 0 || INTERVALS.some((o) => o.seconds === seconds))
+    ) {
+      return seconds;
+    }
+    return null;
+  }
+
+  function readStoredInterval(key: string): string | null {
+    if (typeof localStorage === 'undefined') return null;
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+
+  function writeStoredInterval(key: string, seconds: number): void {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem(key, String(seconds));
+    } catch {
+      // ignore — auto-refresh keeps working without persistence
+    }
+  }
 
   // Run a refresh, guarding against overlap so a slow load never stacks ticks.
   async function runRefresh(): Promise<void> {
@@ -73,23 +111,32 @@
     }
   }
 
+  function applyInterval(seconds: number): void {
+    intervalSeconds = seconds;
+    applyTimer(seconds);
+  }
+
   // Persist the cadence so it survives navigation. Best-effort: storage may be
   // unavailable (private mode) — the setting still applies for the session.
   function persist(seconds: number): void {
-    if (!storageKey || typeof localStorage === 'undefined') return;
-    try {
-      localStorage.setItem(storageKey, String(seconds));
-    } catch {
-      // ignore — auto-refresh keeps working without persistence
-    }
+    writeStoredInterval(storageKey, seconds);
+  }
+
+  function broadcast(seconds: number): void {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(
+      new CustomEvent(REFRESH_INTERVAL_EVENT, {
+        detail: { storageKey, seconds },
+      }),
+    );
   }
 
   // Apply a cadence chosen from the menu: update state, restart the timer, persist.
   function selectInterval(seconds: number): void {
-    intervalSeconds = seconds;
+    applyInterval(seconds);
     open = false;
-    applyTimer(seconds);
     persist(seconds);
+    broadcast(seconds);
   }
 
   // Restore a saved cadence on mount and resume ticking. A missing/corrupt value
@@ -99,23 +146,39 @@
   // localStorage access can throw (private mode, or jsdom's opaque-origin stub), so a
   // failure just leaves auto-refresh Off rather than breaking the whole page render.
   untrack(() => {
-    if (!storageKey || typeof localStorage === 'undefined') return;
-    let saved: string | null = null;
-    try {
-      saved = localStorage.getItem(storageKey);
-    } catch {
-      return; // storage unavailable — stay Off for the session
+    let saved = readStoredInterval(storageKey);
+    if (saved === null && storageKey === SHARED_STORAGE_KEY) {
+      for (const legacyKey of LEGACY_STORAGE_KEYS) {
+        const legacyValue = readStoredInterval(legacyKey);
+        if (parseInterval(legacyValue) !== null) {
+          saved = legacyValue;
+          writeStoredInterval(storageKey, Number(legacyValue));
+          break;
+        }
+      }
     }
     if (saved === null) return;
-    const seconds = Number(saved);
-    if (
-      Number.isFinite(seconds) &&
-      (seconds === 0 || INTERVALS.some((o) => o.seconds === seconds))
-    ) {
-      intervalSeconds = seconds;
-      applyTimer(seconds);
-    }
+    const seconds = parseInterval(saved);
+    if (seconds !== null) applyInterval(seconds);
   });
+
+  function applyExternalInterval(seconds: number): void {
+    if (seconds === intervalSeconds) return;
+    applyInterval(seconds);
+  }
+
+  function onSharedInterval(event: Event): void {
+    const detail = (event as CustomEvent<{ storageKey?: string; seconds?: number }>).detail;
+    if (detail?.storageKey !== storageKey) return;
+    const seconds = parseInterval(String(detail.seconds));
+    if (seconds !== null) applyExternalInterval(seconds);
+  }
+
+  function onStorageInterval(event: StorageEvent): void {
+    if (event.key !== storageKey) return;
+    const seconds = parseInterval(event.newValue);
+    if (seconds !== null) applyExternalInterval(seconds);
+  }
 
   // Close the menu on any pointer-down outside the control (click-outside).
   function onWindowPointerDown(event: PointerEvent): void {
@@ -123,6 +186,15 @@
     const target = event.target as Node | null;
     if (root && target && !root.contains(target)) open = false;
   }
+
+  onMount(() => {
+    window.addEventListener(REFRESH_INTERVAL_EVENT, onSharedInterval);
+    window.addEventListener('storage', onStorageInterval);
+    return () => {
+      window.removeEventListener(REFRESH_INTERVAL_EVENT, onSharedInterval);
+      window.removeEventListener('storage', onStorageInterval);
+    };
+  });
 
   onDestroy(stopTimer);
 </script>

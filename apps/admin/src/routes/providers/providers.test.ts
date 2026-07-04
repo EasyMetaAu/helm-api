@@ -129,6 +129,17 @@ describe('providers page', () => {
     expect(within(row).getByText('claude-haiku-4-5')).toBeInTheDocument();
   });
 
+  it('renders the shared refresh control with auto-refresh intervals', async () => {
+    renderPage();
+
+    await fireEvent.click(screen.getByTestId('refresh-now'));
+    expect(invalidateAllMock).toHaveBeenCalledTimes(1);
+
+    await fireEvent.click(screen.getByTestId('refresh-toggle'));
+    expect(screen.getByTestId('refresh-menu')).toBeInTheDocument();
+    expect(screen.getByTestId('refresh-interval-10')).toHaveTextContent('10s');
+  });
+
   it('labels the current Claude scoped weekly Fable quota window', () => {
     renderPage({
       quota: [

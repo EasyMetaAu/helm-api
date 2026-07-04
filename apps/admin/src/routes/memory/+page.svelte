@@ -415,10 +415,7 @@
         </div>
         <p class="section-desc font-mono">{statsScopeLabel}</p>
       </div>
-      <RefreshControl
-        storageKey="helm_admin_memory_refresh_interval"
-        onRefresh={() => loadStats()}
-      />
+      <RefreshControl onRefresh={() => loadStats()} />
     </div>
     {#if statsError}
       <p class="alert-error" role="alert">{statsError}</p>

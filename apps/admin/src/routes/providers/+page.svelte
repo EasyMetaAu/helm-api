@@ -15,6 +15,7 @@
   import ConnectProviderDialog from '$lib/components/ConnectProviderDialog.svelte';
   import ManageAccountDialog from '$lib/components/ManageAccountDialog.svelte';
   import Modal from '$lib/components/Modal.svelte';
+  import RefreshControl from '$lib/components/RefreshControl.svelte';
   import TestAccountDialog from '$lib/components/TestAccountDialog.svelte';
   import { durationParts, formatCount, formatTokens, formatUsd } from '$lib/format';
   import { t } from '$lib/i18n';
@@ -38,7 +39,6 @@
   } = $props();
 
   let error = $state<string | null>(untrack(() => data.loadError ?? null));
-  let refreshing = $state<boolean>(false);
   let showConnect = $state<boolean>(false);
   let managing = $state<{ providerId: string; providerName: string; account: string } | null>(null);
   // The account whose connectivity-test dialog is open (providers page "Test"
@@ -255,20 +255,15 @@
     void invalidateAll();
   }
 
-  // Manual refresh: re-run the page load (status + today's usage + quota windows in
+  // Page refresh: re-run the page load (status + today's usage + quota windows in
   // parallel). Usage counters are read live; the Anthropic quota PULL stays behind
   // the gateway's 5-min debounce (the upstream endpoint rate-limits aggressively),
   // so within that window the bars re-render from the cached snapshot. The load
   // itself never throws (fail-open) — `loadError` carries the only failure signal.
   async function refresh(): Promise<void> {
-    refreshing = true;
     error = null;
-    try {
-      await invalidateAll();
-      error = data.loadError ?? null;
-    } finally {
-      refreshing = false;
-    }
+    await invalidateAll();
+    error = data.loadError ?? null;
   }
 
   function onManaged(): void {
@@ -416,12 +411,9 @@
       </p>
     </div>
     <div class="flex w-full shrink-0 gap-2 sm:w-auto">
-      <button
-        type="button"
-        class="btn-secondary flex-1 sm:flex-none"
-        disabled={refreshing}
-        onclick={refresh}>{refreshing ? $t('Refreshing…') : $t('Refresh')}</button
-      >
+      <div class="flex-1 sm:flex-none">
+        <RefreshControl onRefresh={refresh} />
+      </div>
       <button
         type="button"
         class="btn-primary flex-1 sm:flex-none"

@@ -1,6 +1,9 @@
-import { fireEvent, render, screen } from '@testing-library/svelte';
+import { fireEvent, render, screen, within } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import RefreshControl from './RefreshControl.svelte';
+
+const SHARED_KEY = 'helm_admin_refresh_interval';
+const LEGACY_HOME_KEY = 'helm_admin_home_refresh_interval';
 
 // Split refresh control: the left button refreshes now (calls `onRefresh`), the
 // caret opens a menu that picks an auto-refresh cadence. These tests pin the two
@@ -89,12 +92,10 @@ describe('RefreshControl', () => {
     expect(onRefresh).not.toHaveBeenCalled();
   });
 
-  // When a storageKey is supplied the chosen cadence survives navigation: it is
-  // written to localStorage on every pick and restored (timer resumed) on mount,
-  // so leaving for a detail page and coming back keeps auto-refresh running.
-  describe('persistence (storageKey)', () => {
-    const KEY = 'helm_admin_requests_refresh_interval';
-
+  // The chosen cadence is a single admin-wide preference. It is written to
+  // localStorage on every pick, restored (timer resumed) on mount, and broadcast
+  // to other mounted controls so home/requests/providers/memory never diverge.
+  describe('shared persistence', () => {
     // jsdom's localStorage is non-functional under the opaque `about:blank`
     // origin this suite runs in (methods are undefined), so install a real
     // in-memory Storage on the global — same approach as github.test.ts.
@@ -114,42 +115,65 @@ describe('RefreshControl', () => {
     afterEach(() => vi.unstubAllGlobals());
 
     it('persists the selected cadence to localStorage', async () => {
-      render(RefreshControl, { onRefresh: vi.fn(), storageKey: KEY });
+      render(RefreshControl, { onRefresh: vi.fn() });
       await fireEvent.click(screen.getByTestId('refresh-toggle'));
       await fireEvent.click(screen.getByTestId('refresh-interval-30'));
-      expect(localStorage.getItem(KEY)).toBe('30');
+      expect(localStorage.getItem(SHARED_KEY)).toBe('30');
     });
 
     it('persists Off (0) when auto-refresh is turned off', async () => {
-      render(RefreshControl, { onRefresh: vi.fn(), storageKey: KEY });
+      render(RefreshControl, { onRefresh: vi.fn() });
       await fireEvent.click(screen.getByTestId('refresh-toggle'));
       await fireEvent.click(screen.getByTestId('refresh-interval-30'));
       await fireEvent.click(screen.getByTestId('refresh-toggle'));
       await fireEvent.click(screen.getByTestId('refresh-interval-off'));
-      expect(localStorage.getItem(KEY)).toBe('0');
+      expect(localStorage.getItem(SHARED_KEY)).toBe('0');
     });
 
     it('restores the saved cadence on mount and resumes ticking', async () => {
-      localStorage.setItem(KEY, '5');
+      localStorage.setItem(SHARED_KEY, '5');
       const onRefresh = vi.fn();
-      render(RefreshControl, { onRefresh, storageKey: KEY });
+      render(RefreshControl, { onRefresh });
       // Cadence reflected immediately, timer already running.
       expect(screen.getByTestId('refresh-active')).toHaveTextContent('5s');
       await vi.advanceTimersByTimeAsync(5000);
       expect(onRefresh).toHaveBeenCalledTimes(1);
     });
 
-    it('ignores a corrupt / unknown stored value', async () => {
-      localStorage.setItem(KEY, 'not-a-number');
-      render(RefreshControl, { onRefresh: vi.fn(), storageKey: KEY });
-      expect(screen.queryByTestId('refresh-active')).not.toBeInTheDocument();
+    it('migrates a legacy page-specific cadence to the shared key', async () => {
+      localStorage.setItem(LEGACY_HOME_KEY, '5');
+      const onRefresh = vi.fn();
+      render(RefreshControl, { onRefresh });
+      expect(screen.getByTestId('refresh-active')).toHaveTextContent('5s');
+      expect(localStorage.getItem(SHARED_KEY)).toBe('5');
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(onRefresh).toHaveBeenCalledTimes(1);
     });
 
-    it('does not persist when no storageKey is given', async () => {
+    it('syncs all mounted controls when one cadence changes', async () => {
+      const firstRefresh = vi.fn();
+      const secondRefresh = vi.fn();
+      const first = render(RefreshControl, { onRefresh: firstRefresh });
+      const second = render(RefreshControl, { onRefresh: secondRefresh });
+      const firstUi = within(first.container);
+      const secondUi = within(second.container);
+
+      await fireEvent.click(firstUi.getByTestId('refresh-toggle'));
+      await fireEvent.click(firstUi.getByTestId('refresh-interval-5'));
+
+      expect(firstUi.getByTestId('refresh-active')).toHaveTextContent('5s');
+      expect(secondUi.getByTestId('refresh-active')).toHaveTextContent('5s');
+      expect(localStorage.getItem(SHARED_KEY)).toBe('5');
+
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(firstRefresh).toHaveBeenCalledTimes(1);
+      expect(secondRefresh).toHaveBeenCalledTimes(1);
+    });
+
+    it('ignores a corrupt / unknown stored value', async () => {
+      localStorage.setItem(SHARED_KEY, 'not-a-number');
       render(RefreshControl, { onRefresh: vi.fn() });
-      await fireEvent.click(screen.getByTestId('refresh-toggle'));
-      await fireEvent.click(screen.getByTestId('refresh-interval-30'));
-      expect(localStorage.getItem(KEY)).toBeNull();
+      expect(screen.queryByTestId('refresh-active')).not.toBeInTheDocument();
     });
   });
 });

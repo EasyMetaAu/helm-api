@@ -255,10 +255,7 @@
     <!-- Refresh now + auto-refresh cadence. Re-runs the dashboard loader, covering
          stats, comparisons, charts, and the recent-request preview in one pass. -->
     <div class="shrink-0">
-      <RefreshControl
-        onRefresh={() => invalidateAll()}
-        storageKey="helm_admin_home_refresh_interval"
-      />
+      <RefreshControl onRefresh={() => invalidateAll()} />
     </div>
   </header>
 
