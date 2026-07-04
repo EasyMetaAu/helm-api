@@ -152,7 +152,7 @@
   }
 </script>
 
-<section class="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 py-6 md:px-8">
+<section class="flex w-full flex-col gap-6 px-4 py-6 md:px-8">
   <header class="flex flex-col gap-2">
     <h1 class="page-title">{$t('System Settings')}</h1>
     <p class="section-desc">
