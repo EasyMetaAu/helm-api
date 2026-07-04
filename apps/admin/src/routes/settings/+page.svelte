@@ -152,11 +152,11 @@
   }
 </script>
 
-<section class="flex w-full flex-col gap-4 px-4 py-6 md:px-8">
+<section class="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 py-6 md:px-8">
   <header class="flex flex-col gap-2">
     <h1 class="page-title">{$t('System Settings')}</h1>
     <p class="section-desc">
-      {$t('Runtime settings that take effect immediately — no restart needed.')}
+      {$t('Runtime settings that take effect immediately, no restart needed.')}
     </p>
   </header>
 
@@ -165,445 +165,500 @@
   {/if}
 
   {#if data.settings}
-    <!-- Routing -->
-    <section class="card flex flex-col gap-3 text-sm">
-      <h2 class="section-header">{$t('Routing')}</h2>
-
-      <label class="flex flex-col gap-1">
-        <span class="font-medium">{$t('Default fallback lane')}</span>
-        <select
-          data-testid="default-lane"
-          class="select w-40 min-h-11 md:min-h-0"
-          bind:value={form.default_lane}
-        >
-          {#each laneOptions as name (name)}
-            <option value={name}>{name}</option>
-          {/each}
-        </select>
-        <span class="field-help"
-          >{$t(
-            'Where a request lands when the classifier cannot decide or nothing else matches. Complexity tiers (simple/medium/complex) are unaffected. Defaults to balanced.',
-          )}</span
-        >
-      </label>
-    </section>
-
-    <!-- Rate limiting -->
-    <section class="card flex flex-col gap-3 text-sm">
-      <h2 class="section-header">{$t('Rate limiting')}</h2>
-
-      <label class="flex items-start gap-3">
-        <input
-          type="checkbox"
-          data-testid="rate-limit-enabled"
-          class="checkbox mt-0.5"
-          bind:checked={form.rate_limit_enabled}
-        />
-        <span>
-          <span class="font-medium">{$t('Enable rate limiting')}</span>
-          <span class="field-help block"
-            >{$t('Apply the configured per-key request and token limits.')}</span
-          >
-        </span>
-      </label>
-
-      <div class="flex flex-col gap-3 border-l-2 border-slate-100 pl-3 sm:flex-row sm:gap-6">
-        <label class="flex flex-col gap-1">
-          <span class="font-medium">{$t('Default requests per minute (RPM)')}</span>
-          <input
-            type="number"
-            min="0"
-            step="1"
-            data-testid="rate-limit-default-rpm"
-            class="input-sm w-32 min-h-11 md:min-h-0"
-            bind:value={form.rate_limit_default_rpm}
-          />
-        </label>
-        <label class="flex flex-col gap-1">
-          <span class="font-medium">{$t('Default tokens per minute (TPM)')}</span>
-          <input
-            type="number"
-            min="0"
-            step="1"
-            data-testid="rate-limit-default-tpm"
-            class="input-sm w-32 min-h-11 md:min-h-0"
-            bind:value={form.rate_limit_default_tpm}
-          />
-        </label>
-      </div>
-      <span class="field-help"
-        >{$t(
-          'The fallback limit for any key without its own per-key value. 0 means unlimited.',
-        )}</span
-      >
-    </section>
-
-    <!-- Request queueing (issue #93) -->
-    <section class="card flex flex-col gap-3 text-sm">
-      <h2 class="section-header">{$t('Request queueing')}</h2>
-
-      <label class="flex items-start gap-3">
-        <input
-          type="checkbox"
-          data-testid="concurrency-queue-enabled"
-          class="checkbox mt-0.5"
-          bind:checked={form.concurrency_queue_enabled}
-        />
-        <span>
-          <span class="font-medium">{$t('Queue requests over a key’s concurrency limit')}</span>
-          <span class="field-help block"
-            >{$t(
-              'When an API key exceeds its max concurrent requests, extra requests wait in line instead of being rejected immediately. Suits agents that fire parallel tool calls.',
-            )}</span
-          >
-        </span>
-      </label>
-
-      <div class="flex flex-col gap-3 border-l-2 border-slate-100 pl-3 lg:flex-row lg:gap-6">
-        <label class="flex flex-col gap-1">
-          <span class="font-medium">{$t('Minimum queue size')}</span>
-          <input
-            type="number"
-            min="1"
-            max="100"
-            step="1"
-            data-testid="concurrency-queue-min-size"
-            class="input-sm w-32 min-h-11 md:min-h-0"
-            bind:value={form.concurrency_queue_min_size}
-          />
-          <span class="field-help">{$t('Fixed lower bound on how many requests may wait.')}</span>
-        </label>
-        <label class="flex flex-col gap-1">
-          <span class="font-medium">{$t('Queue size multiplier')}</span>
-          <input
-            type="number"
-            min="0"
-            step="0.5"
-            data-testid="concurrency-queue-multiplier"
-            class="input-sm w-32 min-h-11 md:min-h-0"
-            bind:value={form.concurrency_queue_size_multiplier}
-          />
-          <span class="field-help"
-            >{$t(
-              'Max queue = MAX(multiplier × key limit, minimum). 0 uses the minimum only.',
-            )}</span
-          >
-        </label>
-        <label class="flex flex-col gap-1">
-          <span class="font-medium">{$t('Queue wait timeout (ms)')}</span>
-          <input
-            type="number"
-            min="5000"
-            max="300000"
-            step="1000"
-            data-testid="concurrency-queue-timeout"
-            class="input-sm w-32 min-h-11 md:min-h-0"
-            bind:value={form.concurrency_queue_wait_timeout_ms}
-          />
-          <span class="field-help">{$t('Waiting longer than this returns 429.')}</span>
-        </label>
+    <div class="flex flex-col gap-3">
+      <div class="flex flex-col gap-1">
+        <h2 class="section-header">{$t('Traffic controls')}</h2>
+        <p class="section-desc">{$t('Routing, limits, queues, and request shaping.')}</p>
       </div>
 
-      <label class="flex items-start gap-3">
-        <input
-          type="checkbox"
-          data-testid="user-message-queue-enabled"
-          class="checkbox mt-0.5"
-          bind:checked={form.user_message_queue_enabled}
-        />
-        <span>
-          <span class="font-medium">{$t('Serialize user messages per subscription account')}</span>
-          <span class="field-help block"
-            >{$t(
-              'Runs user-message requests to the same OAuth account one at a time with a minimum gap, to avoid tripping upstream rate limits. Tool results and assistant continuations are never queued.',
-            )}</span
-          >
-        </span>
-      </label>
+      <section class="card flex flex-col gap-4 text-sm">
+        <h3 class="text-base font-semibold text-slate-900">{$t('Routing')}</h3>
+        <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <label class="flex flex-col gap-1">
+            <span class="font-medium">{$t('Default fallback lane')}</span>
+            <select
+              data-testid="default-lane"
+              class="select min-h-11 w-40 md:min-h-0"
+              bind:value={form.default_lane}
+            >
+              {#each laneOptions as name (name)}
+                <option value={name}>{name}</option>
+              {/each}
+            </select>
+            <span class="field-help"
+              >{$t(
+                'Where a request lands when the classifier cannot decide or nothing else matches. Complexity tiers (simple/medium/complex) are unaffected. Defaults to balanced.',
+              )}</span
+            >
+          </label>
 
-      <div class="flex flex-col gap-3 border-l-2 border-slate-100 pl-3 lg:flex-row lg:gap-6">
-        <label class="flex flex-col gap-1">
-          <span class="font-medium">{$t('Gap between requests (ms)')}</span>
-          <input
-            type="number"
-            min="0"
-            max="10000"
-            step="50"
-            data-testid="user-message-queue-delay"
-            class="input-sm w-32 min-h-11 md:min-h-0"
-            bind:value={form.user_message_queue_delay_ms}
-          />
-          <span class="field-help"
-            >{$t('Minimum time between one request finishing and the next starting.')}</span
-          >
-        </label>
-        <label class="flex flex-col gap-1">
-          <span class="font-medium">{$t('Queue wait timeout (ms)')}</span>
-          <input
-            type="number"
-            min="1000"
-            max="300000"
-            step="500"
-            data-testid="user-message-queue-timeout"
-            class="input-sm w-32 min-h-11 md:min-h-0"
-            bind:value={form.user_message_queue_wait_timeout_ms}
-          />
-          <span class="field-help">{$t('Waiting longer than this returns 503.')}</span>
-        </label>
-      </div>
-    </section>
+          <label class="flex flex-col gap-1">
+            <span class="font-medium">{$t('Visual context compression')}</span>
+            <select
+              data-testid="visual-context-compression"
+              class="select min-h-11 w-44 md:min-h-0"
+              bind:value={form.visual_context_compression}
+            >
+              {#each VISUAL_CONTEXT_COMPRESSION_OPTIONS as mode (mode)}
+                <option value={mode}>{mode}</option>
+              {/each}
+            </select>
+            <span class="field-help"
+              >{$t(
+                'Off by default. Observe records would-apply telemetry without changing requests.',
+              )}</span
+            >
+          </label>
+        </div>
+      </section>
 
-    <!-- Request optimization -->
-    <section class="card flex flex-col gap-3 text-sm">
-      <h2 class="section-header">{$t('Request optimization')}</h2>
+      <section class="card flex flex-col gap-3 text-sm">
+        <h3 class="text-base font-semibold text-slate-900">{$t('Rate limiting')}</h3>
 
-      <label class="flex flex-col gap-1">
-        <span class="font-medium">{$t('Visual context compression')}</span>
-        <select
-          data-testid="visual-context-compression"
-          class="select w-44 min-h-11 md:min-h-0"
-          bind:value={form.visual_context_compression}
-        >
-          {#each VISUAL_CONTEXT_COMPRESSION_OPTIONS as mode (mode)}
-            <option value={mode}>{mode}</option>
-          {/each}
-        </select>
-        <span class="field-help"
-          >{$t(
-            'Off by default. Observe records would-apply telemetry without changing requests.',
-          )}</span
-        >
-      </label>
-    </section>
-
-    <!-- Logging -->
-    <section class="card flex flex-col gap-3 text-sm">
-      <h2 class="section-header">{$t('Logging')}</h2>
-
-      <label class="flex flex-col gap-1">
-        <span class="font-medium">{$t('Log level')}</span>
-        <select
-          data-testid="log-level"
-          class="select w-40 min-h-11 md:min-h-0"
-          bind:value={form.log_level}
-        >
-          {#each LOG_LEVEL_OPTIONS as level (level)}
-            <option value={level}>{level}</option>
-          {/each}
-        </select>
-        <span class="field-help">{$t('How much detail the gateway writes to its logs.')}</span>
-      </label>
-
-      <label class="flex items-start gap-3">
-        <input
-          type="checkbox"
-          data-testid="capture-payloads"
-          class="checkbox mt-0.5"
-          bind:checked={form.capture_payloads}
-        />
-        <span>
-          <span class="font-medium">{$t('Record full request and response bodies')}</span>
-          <span class="field-help block"
-            >{$t(
-              'When on, the complete request and response of every call are stored so you can view them here.',
-            )}</span
-          >
-          <span class="field-help mt-1 block text-amber-600"
-            >{$t(
-              'Privacy note: this stores message content in plaintext. Turn it off to keep only routing metadata.',
-            )}</span
-          >
-        </span>
-      </label>
-
-      <label class="flex flex-col gap-1">
-        <span class="font-medium">{$t('Keep recorded bodies for (days)')}</span>
-        <input
-          type="number"
-          min="1"
-          max="3650"
-          data-testid="retention-days"
-          class="input-sm w-32 min-h-11 md:min-h-0"
-          bind:value={form.payload_retention_days}
-        />
-        <span class="field-help">{$t('Older bodies are deleted automatically.')}</span>
-      </label>
-    </section>
-
-    <!-- Data retention & cleanup / archival -->
-    <section class="card flex flex-col gap-3 text-sm">
-      <h2 class="section-header">{$t('Data retention & cleanup')}</h2>
-      <p class="field-help">
-        {$t(
-          'A scheduled sweep deletes old data per the windows below. Training/audit data is archived to a compressed file before deletion; you can download those archives or clean up immediately.',
-        )}
-      </p>
-
-      <label class="flex items-start gap-3">
-        <input
-          type="checkbox"
-          data-testid="cleanup-enabled"
-          class="checkbox mt-0.5"
-          bind:checked={form.cleanup_enabled}
-        />
-        <span>
-          <span class="font-medium">{$t('Enable automatic cleanup')}</span>
-          <span class="field-help block"
-            >{$t('Master switch. When off, nothing is deleted automatically.')}</span
-          >
-        </span>
-      </label>
-
-      <div class="flex flex-col gap-3 border-l-2 border-slate-100 pl-3 sm:flex-row sm:gap-6">
-        <label class="flex flex-col gap-1">
-          <span class="font-medium">{$t('Run every (hours)')}</span>
-          <input
-            type="number"
-            min="1"
-            max="168"
-            step="1"
-            data-testid="cleanup-interval-hours"
-            class="input-sm w-32 min-h-11 md:min-h-0"
-            bind:value={form.cleanup_interval_hours}
-          />
-          <span class="field-help">{$t('Interval changes take effect on the next restart.')}</span>
-        </label>
-        <label class="flex items-start gap-3 self-end pb-1">
-          <input
-            type="checkbox"
-            data-testid="cleanup-archive-enabled"
-            class="checkbox mt-0.5"
-            bind:checked={form.cleanup_archive_enabled}
-          />
-          <span class="font-medium">{$t('Archive before deleting')}</span>
-        </label>
-      </div>
-
-      <!-- Auto-compaction (sqlite VACUUM) — reclaims the disk space cleanup's deletes
-           leave on the freelist; runs at most once a day at a low-traffic hour. -->
-      <div class="flex flex-col gap-3 border-l-2 border-slate-100 pl-3 sm:flex-row sm:gap-6">
         <label class="flex items-start gap-3">
           <input
             type="checkbox"
-            data-testid="vacuum-enabled"
+            data-testid="rate-limit-enabled"
             class="checkbox mt-0.5"
-            bind:checked={form.vacuum_enabled}
+            bind:checked={form.rate_limit_enabled}
           />
           <span>
-            <span class="font-medium">{$t('Compact database automatically')}</span>
+            <span class="font-medium">{$t('Enable rate limiting')}</span>
             <span class="field-help block"
-              >{$t(
-                'Runs VACUUM once a day to reclaim deleted disk space. The database is briefly locked while it runs.',
-              )}</span
+              >{$t('Apply the configured per-key request and token limits.')}</span
             >
           </span>
         </label>
-        <label class="flex flex-col gap-1 self-end">
-          <span class="font-medium">{$t('Run at hour (0-23, server local time)')}</span>
-          <input
-            type="number"
-            min="0"
-            max="23"
-            step="1"
-            data-testid="vacuum-hour"
-            class="input-sm w-32 min-h-11 md:min-h-0"
-            bind:value={form.vacuum_hour}
-            disabled={!form.vacuum_enabled}
-          />
-        </label>
+
+        <div class="grid grid-cols-1 gap-3 border-l-2 border-slate-100 pl-3 sm:grid-cols-2">
+          <label class="flex flex-col gap-1">
+            <span class="font-medium">{$t('Default requests per minute (RPM)')}</span>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              data-testid="rate-limit-default-rpm"
+              class="input-sm min-h-11 w-32 md:min-h-0"
+              bind:value={form.rate_limit_default_rpm}
+            />
+          </label>
+          <label class="flex flex-col gap-1">
+            <span class="font-medium">{$t('Default tokens per minute (TPM)')}</span>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              data-testid="rate-limit-default-tpm"
+              class="input-sm min-h-11 w-32 md:min-h-0"
+              bind:value={form.rate_limit_default_tpm}
+            />
+          </label>
+        </div>
+        <span class="field-help"
+          >{$t(
+            'The fallback limit for any key without its own per-key value. 0 means unlimited.',
+          )}</span
+        >
+      </section>
+
+      <section class="card flex flex-col gap-4 text-sm">
+        <h3 class="text-base font-semibold text-slate-900">{$t('Request queueing')}</h3>
+
+        <div class="grid grid-cols-1 gap-5 lg:grid-cols-2">
+          <div class="flex flex-col gap-3">
+            <label class="flex items-start gap-3">
+              <input
+                type="checkbox"
+                data-testid="concurrency-queue-enabled"
+                class="checkbox mt-0.5"
+                bind:checked={form.concurrency_queue_enabled}
+              />
+              <span>
+                <span class="font-medium"
+                  >{$t('Queue requests over a key’s concurrency limit')}</span
+                >
+                <span class="field-help block"
+                  >{$t(
+                    'When an API key exceeds its max concurrent requests, extra requests wait in line instead of being rejected immediately. Suits agents that fire parallel tool calls.',
+                  )}</span
+                >
+              </span>
+            </label>
+
+            <div class="grid grid-cols-1 gap-3 border-l-2 border-slate-100 pl-3 sm:grid-cols-3">
+              <label class="flex flex-col gap-1">
+                <span class="font-medium">{$t('Minimum queue size')}</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  step="1"
+                  data-testid="concurrency-queue-min-size"
+                  class="input-sm min-h-11 w-32 md:min-h-0"
+                  bind:value={form.concurrency_queue_min_size}
+                />
+                <span class="field-help"
+                  >{$t('Fixed lower bound on how many requests may wait.')}</span
+                >
+              </label>
+              <label class="flex flex-col gap-1">
+                <span class="font-medium">{$t('Queue size multiplier')}</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.5"
+                  data-testid="concurrency-queue-multiplier"
+                  class="input-sm min-h-11 w-32 md:min-h-0"
+                  bind:value={form.concurrency_queue_size_multiplier}
+                />
+                <span class="field-help"
+                  >{$t(
+                    'Max queue = MAX(multiplier × key limit, minimum). 0 uses the minimum only.',
+                  )}</span
+                >
+              </label>
+              <label class="flex flex-col gap-1">
+                <span class="font-medium">{$t('Queue wait timeout (ms)')}</span>
+                <input
+                  type="number"
+                  min="5000"
+                  max="300000"
+                  step="1000"
+                  data-testid="concurrency-queue-timeout"
+                  class="input-sm min-h-11 w-32 md:min-h-0"
+                  bind:value={form.concurrency_queue_wait_timeout_ms}
+                />
+                <span class="field-help">{$t('Waiting longer than this returns 429.')}</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="flex flex-col gap-3">
+            <label class="flex items-start gap-3">
+              <input
+                type="checkbox"
+                data-testid="user-message-queue-enabled"
+                class="checkbox mt-0.5"
+                bind:checked={form.user_message_queue_enabled}
+              />
+              <span>
+                <span class="font-medium"
+                  >{$t('Serialize user messages per subscription account')}</span
+                >
+                <span class="field-help block"
+                  >{$t(
+                    'Runs user-message requests to the same OAuth account one at a time with a minimum gap, to avoid tripping upstream rate limits. Tool results and assistant continuations are never queued.',
+                  )}</span
+                >
+              </span>
+            </label>
+
+            <div class="grid grid-cols-1 gap-3 border-l-2 border-slate-100 pl-3 sm:grid-cols-2">
+              <label class="flex flex-col gap-1">
+                <span class="font-medium">{$t('Gap between requests (ms)')}</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="10000"
+                  step="50"
+                  data-testid="user-message-queue-delay"
+                  class="input-sm min-h-11 w-32 md:min-h-0"
+                  bind:value={form.user_message_queue_delay_ms}
+                />
+                <span class="field-help"
+                  >{$t('Minimum time between one request finishing and the next starting.')}</span
+                >
+              </label>
+              <label class="flex flex-col gap-1">
+                <span class="font-medium">{$t('Queue wait timeout (ms)')}</span>
+                <input
+                  type="number"
+                  min="1000"
+                  max="300000"
+                  step="500"
+                  data-testid="user-message-queue-timeout"
+                  class="input-sm min-h-11 w-32 md:min-h-0"
+                  bind:value={form.user_message_queue_wait_timeout_ms}
+                />
+                <span class="field-help">{$t('Waiting longer than this returns 503.')}</span>
+              </label>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="flex flex-col gap-3">
+      <div class="flex flex-col gap-1">
+        <h2 class="section-header">{$t('Observability')}</h2>
+        <p class="section-desc">{$t('Logs and captured request detail.')}</p>
       </div>
 
-      <!-- Per-category toggles + windows -->
-      <div class="flex flex-col gap-3 border-l-2 border-slate-100 pl-3">
-        <label class="flex flex-wrap items-center gap-2">
-          <input type="checkbox" class="checkbox" bind:checked={form.telemetry_cleanup_enabled} />
-          <span class="font-medium">{$t('Decision records (routing/cost telemetry)')}</span>
-          <input
-            type="number"
-            min="1"
-            max="3650"
-            class="input-sm w-24 min-h-11 md:min-h-0"
-            bind:value={form.telemetry_retention_days}
-          />
-          <span class="field-help">{$t('days · archived')}</span>
-        </label>
+      <section class="card flex flex-col gap-3 text-sm">
+        <h3 class="text-base font-semibold text-slate-900">{$t('Logging')}</h3>
 
-        <label class="flex flex-wrap items-center gap-2">
-          <input type="checkbox" class="checkbox" bind:checked={form.payloads_cleanup_enabled} />
-          <span class="font-medium">{$t('Full request/response bodies')}</span>
-          <span class="field-help">{$t('uses the “keep bodies for” window above · archived')}</span>
-        </label>
+        <div class="grid grid-cols-1 gap-4 md:grid-cols-[minmax(0,16rem)_minmax(0,1fr)]">
+          <label class="flex flex-col gap-1">
+            <span class="font-medium">{$t('Log level')}</span>
+            <select
+              data-testid="log-level"
+              class="select min-h-11 w-40 md:min-h-0"
+              bind:value={form.log_level}
+            >
+              {#each LOG_LEVEL_OPTIONS as level (level)}
+                <option value={level}>{level}</option>
+              {/each}
+            </select>
+            <span class="field-help">{$t('How much detail the gateway writes to its logs.')}</span>
+          </label>
 
-        <label class="flex flex-wrap items-center gap-2">
-          <input
-            type="checkbox"
-            class="checkbox"
-            bind:checked={form.memory_messages_cleanup_enabled}
-          />
-          <span class="font-medium">{$t('Raw conversation messages')}</span>
-          <input
-            type="number"
-            min="1"
-            max="3650"
-            class="input-sm w-24 min-h-11 md:min-h-0"
-            bind:value={form.memory_messages_retention_days}
-          />
-          <span class="field-help">{$t('days · archived · highest training value (opt-in)')}</span>
-        </label>
+          <div class="flex flex-col gap-3">
+            <label class="flex items-start gap-3">
+              <input
+                type="checkbox"
+                data-testid="capture-payloads"
+                class="checkbox mt-0.5"
+                bind:checked={form.capture_payloads}
+              />
+              <span>
+                <span class="font-medium">{$t('Record full request and response bodies')}</span>
+                <span class="field-help block"
+                  >{$t(
+                    'When on, the complete request and response of every call are stored so you can view them here.',
+                  )}</span
+                >
+                <span class="field-help mt-1 block text-amber-600"
+                  >{$t(
+                    'Privacy note: this stores message content in plaintext. Turn it off to keep only routing metadata.',
+                  )}</span
+                >
+              </span>
+            </label>
 
-        <label class="flex flex-wrap items-center gap-2">
-          <input type="checkbox" class="checkbox" bind:checked={form.oauth_usage_cleanup_enabled} />
-          <span class="font-medium">{$t('OAuth usage counters')}</span>
-          <input
-            type="number"
-            min="1"
-            max="3650"
-            class="input-sm w-24 min-h-11 md:min-h-0"
-            bind:value={form.oauth_usage_retention_days}
-          />
-          <span class="field-help">{$t('days · deleted')}</span>
-        </label>
+            <label class="flex flex-col gap-1 border-l-2 border-slate-100 pl-3">
+              <span class="font-medium">{$t('Keep recorded bodies for (days)')}</span>
+              <input
+                type="number"
+                min="1"
+                max="3650"
+                data-testid="retention-days"
+                class="input-sm min-h-11 w-32 md:min-h-0"
+                bind:value={form.payload_retention_days}
+              />
+              <span class="field-help">{$t('Older bodies are deleted automatically.')}</span>
+            </label>
+          </div>
+        </div>
+      </section>
+    </div>
 
-        <label class="flex flex-wrap items-center gap-2">
-          <input type="checkbox" class="checkbox" bind:checked={form.memory_jobs_cleanup_enabled} />
-          <span class="font-medium">{$t('Finished memory jobs')}</span>
-          <input
-            type="number"
-            min="1"
-            max="3650"
-            class="input-sm w-24 min-h-11 md:min-h-0"
-            bind:value={form.memory_jobs_retention_days}
-          />
-          <span class="field-help">{$t('days · deleted')}</span>
-        </label>
-
-        <label class="flex flex-wrap items-center gap-2">
-          <input
-            type="checkbox"
-            class="checkbox"
-            bind:checked={form.memory_derived_cleanup_enabled}
-          />
-          <span class="font-medium">{$t('Derived memory (observations & facts)')}</span>
-          <input
-            type="number"
-            min="1"
-            max="3650"
-            class="input-sm w-24 min-h-11 md:min-h-0"
-            bind:value={form.memory_derived_retention_days}
-          />
-          <span class="field-help">{$t('days · deleted (opt-in)')}</span>
-        </label>
+    <div class="flex flex-col gap-3">
+      <div class="flex flex-col gap-1">
+        <h2 class="section-header">{$t('Data retention & cleanup')}</h2>
+        <p class="section-desc">
+          {$t(
+            'A scheduled sweep deletes old data per the windows below. Training/audit data is archived to a compressed file before deletion; you can download those archives or clean up immediately.',
+          )}
+        </p>
       </div>
 
+      <section class="card flex flex-col gap-3 text-sm">
+        <h3 class="text-base font-semibold text-slate-900">{$t('Cleanup schedule')}</h3>
+
+        <label class="flex items-start gap-3">
+          <input
+            type="checkbox"
+            data-testid="cleanup-enabled"
+            class="checkbox mt-0.5"
+            bind:checked={form.cleanup_enabled}
+          />
+          <span>
+            <span class="font-medium">{$t('Enable automatic cleanup')}</span>
+            <span class="field-help block"
+              >{$t('Master switch. When off, nothing is deleted automatically.')}</span
+            >
+          </span>
+        </label>
+
+        <div class="grid grid-cols-1 gap-4 border-l-2 border-slate-100 pl-3 md:grid-cols-2">
+          <label class="flex flex-col gap-1">
+            <span class="font-medium">{$t('Run every (hours)')}</span>
+            <input
+              type="number"
+              min="1"
+              max="168"
+              step="1"
+              data-testid="cleanup-interval-hours"
+              class="input-sm min-h-11 w-32 md:min-h-0"
+              bind:value={form.cleanup_interval_hours}
+            />
+            <span class="field-help">{$t('Interval changes take effect on the next restart.')}</span
+            >
+          </label>
+          <label class="flex items-start gap-3 self-end pb-1">
+            <input
+              type="checkbox"
+              data-testid="cleanup-archive-enabled"
+              class="checkbox mt-0.5"
+              bind:checked={form.cleanup_archive_enabled}
+            />
+            <span class="font-medium">{$t('Archive before deleting')}</span>
+          </label>
+        </div>
+
+        <div class="grid grid-cols-1 gap-4 border-l-2 border-slate-100 pl-3 md:grid-cols-2">
+          <label class="flex items-start gap-3">
+            <input
+              type="checkbox"
+              data-testid="vacuum-enabled"
+              class="checkbox mt-0.5"
+              bind:checked={form.vacuum_enabled}
+            />
+            <span>
+              <span class="font-medium">{$t('Compact database automatically')}</span>
+              <span class="field-help block"
+                >{$t(
+                  'Runs VACUUM once a day to reclaim deleted disk space. The database is briefly locked while it runs.',
+                )}</span
+              >
+            </span>
+          </label>
+          <label class="flex flex-col gap-1 self-end">
+            <span class="font-medium">{$t('Run at hour (0-23, server local time)')}</span>
+            <input
+              type="number"
+              min="0"
+              max="23"
+              step="1"
+              data-testid="vacuum-hour"
+              class="input-sm min-h-11 w-32 md:min-h-0"
+              bind:value={form.vacuum_hour}
+              disabled={!form.vacuum_enabled}
+            />
+          </label>
+        </div>
+      </section>
+
+      <section class="card flex flex-col gap-3 text-sm">
+        <h3 class="text-base font-semibold text-slate-900">{$t('Retention windows')}</h3>
+
+        <div class="grid grid-cols-1 gap-3 lg:grid-cols-2">
+          <label class="flex flex-wrap items-center gap-2 border-l-2 border-slate-100 pl-3">
+            <input type="checkbox" class="checkbox" bind:checked={form.telemetry_cleanup_enabled} />
+            <span class="font-medium">{$t('Decision records (routing/cost telemetry)')}</span>
+            <input
+              type="number"
+              min="1"
+              max="3650"
+              class="input-sm min-h-11 w-24 md:min-h-0"
+              bind:value={form.telemetry_retention_days}
+            />
+            <span class="field-help">{$t('days · archived')}</span>
+          </label>
+
+          <label class="flex flex-wrap items-center gap-2 border-l-2 border-slate-100 pl-3">
+            <input type="checkbox" class="checkbox" bind:checked={form.payloads_cleanup_enabled} />
+            <span class="font-medium">{$t('Full request/response bodies')}</span>
+            <span class="field-help"
+              >{$t('uses the “keep bodies for” window above · archived')}</span
+            >
+          </label>
+
+          <label class="flex flex-wrap items-center gap-2 border-l-2 border-slate-100 pl-3">
+            <input
+              type="checkbox"
+              class="checkbox"
+              bind:checked={form.memory_messages_cleanup_enabled}
+            />
+            <span class="font-medium">{$t('Raw conversation messages')}</span>
+            <input
+              type="number"
+              min="1"
+              max="3650"
+              class="input-sm min-h-11 w-24 md:min-h-0"
+              bind:value={form.memory_messages_retention_days}
+            />
+            <span class="field-help">{$t('days · archived · highest training value (opt-in)')}</span
+            >
+          </label>
+
+          <label class="flex flex-wrap items-center gap-2 border-l-2 border-slate-100 pl-3">
+            <input
+              type="checkbox"
+              class="checkbox"
+              bind:checked={form.oauth_usage_cleanup_enabled}
+            />
+            <span class="font-medium">{$t('OAuth usage counters')}</span>
+            <input
+              type="number"
+              min="1"
+              max="3650"
+              class="input-sm min-h-11 w-24 md:min-h-0"
+              bind:value={form.oauth_usage_retention_days}
+            />
+            <span class="field-help">{$t('days · deleted')}</span>
+          </label>
+
+          <label class="flex flex-wrap items-center gap-2 border-l-2 border-slate-100 pl-3">
+            <input
+              type="checkbox"
+              class="checkbox"
+              bind:checked={form.memory_jobs_cleanup_enabled}
+            />
+            <span class="font-medium">{$t('Finished memory jobs')}</span>
+            <input
+              type="number"
+              min="1"
+              max="3650"
+              class="input-sm min-h-11 w-24 md:min-h-0"
+              bind:value={form.memory_jobs_retention_days}
+            />
+            <span class="field-help">{$t('days · deleted')}</span>
+          </label>
+
+          <label class="flex flex-wrap items-center gap-2 border-l-2 border-slate-100 pl-3">
+            <input
+              type="checkbox"
+              class="checkbox"
+              bind:checked={form.memory_derived_cleanup_enabled}
+            />
+            <span class="font-medium">{$t('Derived memory (observations & facts)')}</span>
+            <input
+              type="number"
+              min="1"
+              max="3650"
+              class="input-sm min-h-11 w-24 md:min-h-0"
+              bind:value={form.memory_derived_retention_days}
+            />
+            <span class="field-help">{$t('days · deleted (opt-in)')}</span>
+          </label>
+        </div>
+
+        <p class="field-help">
+          {$t('Cleanup settings are saved with the “Save settings” button below.')}
+        </p>
+      </section>
+    </div>
+
+    <div class="card-actions border-t-0 pt-0">
+      {#if saved}
+        <span class="badge-ok" role="status">{$t('Saved')}</span>
+      {/if}
+      <button class="btn-primary" onclick={handleSave} disabled={saving || !data.settings}>
+        {$t('Save settings')}
+      </button>
+    </div>
+
+    <section class="card flex flex-col gap-3 text-sm">
+      <h2 class="section-header">{$t('Maintenance actions')}</h2>
       <p class="field-help">
-        {$t('Cleanup settings are saved with the “Save settings” button below.')}
+        {$t('These actions run immediately and do not wait for Save settings.')}
       </p>
 
       {#if cleanupError}
         <p class="alert-error" role="alert">{cleanupError}</p>
       {/if}
 
-      <!-- Runtime actions (independent of Save) — each confirms before running -->
       <div class="flex flex-wrap items-center gap-3">
         <button
           class="btn-secondary"
@@ -669,15 +724,6 @@
         </div>
       {/if}
     </section>
-
-    <div class="card-actions border-t-0 pt-0">
-      {#if saved}
-        <span class="badge-ok" role="status">{$t('Saved')}</span>
-      {/if}
-      <button class="btn-primary" onclick={handleSave} disabled={saving || !data.settings}>
-        {$t('Save settings')}
-      </button>
-    </div>
 
     {#if confirmingClean}
       <Modal
