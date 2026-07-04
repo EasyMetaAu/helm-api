@@ -34,6 +34,7 @@ describe("defaultSettingsFromConfig", () => {
     expect(defaultSettingsFromConfig(cfg(true))).toEqual({
       capture_payloads: true,
       native_protocol_passthrough: true,
+      visual_context_compression: "off",
       payload_retention_days: 30,
       rate_limit_enabled: true,
       rate_limit_default_rpm: 0,

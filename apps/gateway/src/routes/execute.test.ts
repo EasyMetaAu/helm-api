@@ -12,6 +12,7 @@ import {
   createNativePassthroughCarrier,
   type InternalRequest,
   type NativePassthroughCarrier,
+  nativePassthroughBody,
   type TargetProviderProtocol,
 } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
@@ -1975,6 +1976,217 @@ describe("createExecute — gateway execution adapter", () => {
     expect(out.attempts[0]?.error_class).not.toBe("client_abort");
     expect(recordFailure).toHaveBeenCalledTimes(1);
     expect(out.final.status).toBe("ok");
+  });
+
+  it("applies visual context compression to Anthropic native passthrough when enabled", async () => {
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn(async () => ({
+        id: "ok",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      })),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: protocolRegistry({
+        fable: {
+          providerName: "mock",
+          providerModel: "claude-fable-5",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map([["fable", entry("fable")]]),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+      visualContextCompressionMode: () => "enabled",
+      visualContextCompressor: async ({ body }) => ({
+        body: { ...body, compressed: true },
+        mutation: {
+          mode: "enabled",
+          applied: true,
+          would_apply: true,
+          reason: "applied",
+          orig_chars: 50_000,
+          compressed_chars: 42_000,
+          image_count: 2,
+          image_bytes: 12_000,
+          owns_cache_control: true,
+          marker_count: 1,
+        },
+      }),
+    });
+
+    const out = await execute(
+      plan(["fable"]),
+      req({
+        protocol: "anthropic_messages",
+        requested_model: "claude-fable-5",
+        native_request: createNativePassthroughCarrier({
+          protocol: "anthropic_messages",
+          body: {
+            model: "anthropic/claude-fable-5",
+            messages: [{ role: "user", content: "large dense context" }],
+            max_tokens: 64,
+          },
+          headers: {},
+        }),
+      }),
+    );
+
+    const sent = nativePassthroughBody(
+      (provider.nativePassthrough as ReturnType<typeof vi.fn>).mock.calls[0]?.[0],
+    );
+    expect(out.final.status).toBe("ok");
+    expect(sent.compressed).toBe(true);
+    expect(out.attempts[0]?.request_mutations?.visual_context_compression).toMatchObject({
+      mode: "enabled",
+      applied: true,
+      would_apply: true,
+      reason: "applied",
+    });
+  });
+
+  it("observes visual context compression without changing the upstream body", async () => {
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn(async () => ({
+        id: "ok",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      })),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: protocolRegistry({
+        fable: {
+          providerName: "mock",
+          providerModel: "claude-fable-5",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map([["fable", entry("fable")]]),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+      visualContextCompressionMode: () => "observe",
+      visualContextCompressor: async ({ body }) => ({
+        body,
+        mutation: {
+          mode: "observe",
+          applied: false,
+          would_apply: true,
+          reason: "applied",
+          orig_chars: 50_000,
+          compressed_chars: 42_000,
+          image_count: 2,
+          image_bytes: 12_000,
+          owns_cache_control: true,
+          marker_count: 1,
+        },
+      }),
+    });
+
+    const out = await execute(
+      plan(["fable"]),
+      req({
+        protocol: "anthropic_messages",
+        requested_model: "claude-fable-5",
+        native_request: createNativePassthroughCarrier({
+          protocol: "anthropic_messages",
+          body: {
+            model: "anthropic/claude-fable-5",
+            messages: [{ role: "user", content: "large dense context" }],
+            max_tokens: 64,
+          },
+          headers: {},
+        }),
+      }),
+    );
+
+    const sent = nativePassthroughBody(
+      (provider.nativePassthrough as ReturnType<typeof vi.fn>).mock.calls[0]?.[0],
+    );
+    expect(out.final.status).toBe("ok");
+    expect(sent.compressed).toBeUndefined();
+    expect(out.attempts[0]?.request_mutations?.visual_context_compression).toMatchObject({
+      mode: "observe",
+      applied: false,
+      would_apply: true,
+    });
+  });
+
+  it("uses visual context compression before Anthropic count_tokens context preflight", async () => {
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      countTokens: vi.fn(async (body: Record<string, unknown>) => ({
+        input_tokens: body.compressed === true ? 10 : 500,
+      })),
+      nativePassthrough: vi.fn(async () => ({
+        id: "ok",
+        usage: { input_tokens: 10, output_tokens: 1 },
+      })),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: protocolRegistry({
+        fable: {
+          providerName: "mock",
+          providerModel: "claude-fable-5",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map([["fable", entry("fable", { maxContextTokens: 100 })]]),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+      visualContextCompressionMode: () => "enabled",
+      visualContextCompressor: async ({ body }) => ({
+        body: { ...body, compressed: true },
+        mutation: {
+          mode: "enabled",
+          applied: true,
+          would_apply: true,
+          reason: "applied",
+          orig_chars: 50_000,
+          compressed_chars: 42_000,
+          image_count: 2,
+          image_bytes: 12_000,
+          owns_cache_control: true,
+          marker_count: 1,
+        },
+      }),
+    });
+
+    const out = await execute(
+      plan(["fable"]),
+      req({
+        protocol: "anthropic_messages",
+        requested_model: "claude-fable-5",
+        native_request: createNativePassthroughCarrier({
+          protocol: "anthropic_messages",
+          body: {
+            model: "anthropic/claude-fable-5",
+            messages: [{ role: "user", content: "large dense context" }],
+            max_tokens: 64,
+          },
+          headers: {},
+        }),
+      }),
+    );
+
+    expect(provider.countTokens).toHaveBeenCalledOnce();
+    expect(out.final.status).toBe("ok");
+    expect(out.attempts[0]).toMatchObject({ alias: "fable", skipped: false, status: "ok" });
+    expect(provider.nativePassthrough).toHaveBeenCalledOnce();
   });
 
   // ── capability-wire: the real catalog feeds the capability filter ──────────

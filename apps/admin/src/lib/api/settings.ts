@@ -6,6 +6,7 @@
 // the whole object on PUT and fail-closes (400) on any invalid field.
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+export type VisualContextCompressionMode = 'off' | 'observe' | 'enabled';
 
 export interface RuntimeSettings {
   capture_payloads: boolean;
@@ -18,6 +19,9 @@ export interface RuntimeSettings {
   // The admin toggle was removed in #236, but the field stays in the model so it
   // round-trips through Save unchanged (never reset to false — the #225 lesson).
   native_protocol_passthrough: boolean;
+  // Lossy visual context compression for bulky Anthropic-native requests. Default
+  // OFF; observe records would-apply telemetry while sending original text.
+  visual_context_compression: VisualContextCompressionMode;
   rate_limit_enabled: boolean;
   // System DEFAULT quota any key without its own per-key override falls back to.
   // 0 = unlimited (mirrors the quota convention). Runtime-editable here.
@@ -62,6 +66,11 @@ export interface RuntimeSettings {
 }
 
 export const LOG_LEVEL_OPTIONS: readonly LogLevel[] = ['debug', 'info', 'warn', 'error'];
+export const VISUAL_CONTEXT_COMPRESSION_OPTIONS: readonly VisualContextCompressionMode[] = [
+  'off',
+  'observe',
+  'enabled',
+];
 
 const BASE = '/admin/api/settings';
 
@@ -90,6 +99,11 @@ function normalize(raw: Record<string, unknown>): RuntimeSettings {
     // across an admin save. normalize() drops any key it doesn't name, so omitting
     // this would silently reset the flag on every save (the #225 lesson).
     native_protocol_passthrough: raw.native_protocol_passthrough !== false,
+    visual_context_compression: (
+      VISUAL_CONTEXT_COMPRESSION_OPTIONS as readonly string[]
+    ).includes(raw.visual_context_compression as string)
+      ? (raw.visual_context_compression as VisualContextCompressionMode)
+      : 'off',
     rate_limit_enabled: raw.rate_limit_enabled === true,
     rate_limit_default_rpm:
       typeof raw.rate_limit_default_rpm === 'number' ? raw.rate_limit_default_rpm : 0,

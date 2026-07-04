@@ -10,6 +10,7 @@
   } from '$lib/api/cleanup.js';
   import {
     LOG_LEVEL_OPTIONS,
+    VISUAL_CONTEXT_COMPRESSION_OPTIONS,
     type LogLevel,
     type RuntimeSettings,
     saveSettings,
@@ -34,6 +35,7 @@
     // a toggle (UI removed in #236) — kept in the working copy so it round-trips
     // through Save unchanged and is never reset to false (the #225 lesson).
     native_protocol_passthrough: true,
+    visual_context_compression: 'off',
     rate_limit_enabled: false,
     rate_limit_default_rpm: 0,
     rate_limit_default_tpm: 0,
@@ -351,13 +353,40 @@
       </div>
     </section>
 
+    <!-- Request optimization -->
+    <section class="card flex flex-col gap-3 text-sm">
+      <h2 class="section-header">{$t('Request optimization')}</h2>
+
+      <label class="flex flex-col gap-1">
+        <span class="font-medium">{$t('Visual context compression')}</span>
+        <select
+          data-testid="visual-context-compression"
+          class="select w-44 min-h-11 md:min-h-0"
+          bind:value={form.visual_context_compression}
+        >
+          {#each VISUAL_CONTEXT_COMPRESSION_OPTIONS as mode (mode)}
+            <option value={mode}>{mode}</option>
+          {/each}
+        </select>
+        <span class="field-help"
+          >{$t(
+            'Off by default. Observe records would-apply telemetry without changing requests.',
+          )}</span
+        >
+      </label>
+    </section>
+
     <!-- Logging -->
     <section class="card flex flex-col gap-3 text-sm">
       <h2 class="section-header">{$t('Logging')}</h2>
 
       <label class="flex flex-col gap-1">
         <span class="font-medium">{$t('Log level')}</span>
-        <select data-testid="log-level" class="select w-40 min-h-11 md:min-h-0" bind:value={form.log_level}>
+        <select
+          data-testid="log-level"
+          class="select w-40 min-h-11 md:min-h-0"
+          bind:value={form.log_level}
+        >
           {#each LOG_LEVEL_OPTIONS as level (level)}
             <option value={level}>{level}</option>
           {/each}
@@ -502,9 +531,7 @@
         <label class="flex flex-wrap items-center gap-2">
           <input type="checkbox" class="checkbox" bind:checked={form.payloads_cleanup_enabled} />
           <span class="font-medium">{$t('Full request/response bodies')}</span>
-          <span class="field-help"
-            >{$t('uses the “keep bodies for” window above · archived')}</span
-          >
+          <span class="field-help">{$t('uses the “keep bodies for” window above · archived')}</span>
         </label>
 
         <label class="flex flex-wrap items-center gap-2">
@@ -595,7 +622,9 @@
           {vacuuming ? $t('Compacting…') : $t('Compact database')}
         </button>
         <span class="field-help"
-          >{$t('“Clean now” runs immediately; “Compact database” reclaims disk (briefly locks).')}</span
+          >{$t(
+            '“Clean now” runs immediately; “Compact database” reclaims disk (briefly locks).',
+          )}</span
         >
       </div>
 
@@ -630,7 +659,9 @@
               <li class="flex flex-wrap items-center gap-2">
                 <a class="link" href={archiveDownloadUrl(a)} download>{a.runId}/{a.file}</a>
                 <span class="field-help"
-                  >{formatBytes(a.bytes)} · {formatTimestamp(new Date(a.modifiedMs).toISOString())}</span
+                  >{formatBytes(a.bytes)} · {formatTimestamp(
+                    new Date(a.modifiedMs).toISOString(),
+                  )}</span
                 >
               </li>
             {/each}

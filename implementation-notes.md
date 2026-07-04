@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-07-04 · 视觉上下文压缩以 observe/off 为默认接入（Request optimizer / native Anthropic，docs/04/05/07/11，原则 1/3/5/7/8）
+
+- **背景（Lukin）**：pxpipe 证明“密集文本渲成图片”在特定模型/价格结构下可能降低输入 token 成本，但该方法不是无损压缩；模型视觉路径会丢失精确字符串、数字、路径、hash、ID 等细节。
+- **产品决策**：运行时设置新增 `visual_context_compression: off|observe|enabled`，默认 `off`。`observe` 会在副本上跑压缩并记录 would-apply telemetry，但实际仍发送原始文本；`enabled` 才会发送压缩后的 body。
+- **执行边界**：MVP 只接 Anthropic native passthrough。它在当前候选 provider 调用前工作，不改变 lane、candidate chain、provider selection、fallback_count 或 breaker 语义。压缩失败 fail-open 回原 body，只记安全日志，不算 provider fault。
+- **上下文窗口决策**：Anthropic `count_tokens` 预检前先尝试压缩，因此“原文超窗口但压缩后可进入窗口”的候选不会被过早 `context_too_small` 跳过。非 passthrough/非 Anthropic/非 vision-capable 目标保持原行为。
+- **安全决策**：core 包装器内置 `keepSharp`，命中 UUID/hash/长数字/URL/path/line-ref/secret-like/request-id 等精确字段时保留文本，避免把必须逐字可靠的内容压进图片。DecisionRecord 只存计数、reason、image_count/image_bytes 等无正文摘要，不存 PNG 或 imaged source text。
+- **实现取舍**：不把几 MB 字体 atlas 复制进 Helm；直接依赖 pxpipe 的公开 `transformAnthropicMessages` 渲染器和 gate。这样保持 Helm core 的 headless 约束，也让后续 pxpipe 修复可通过依赖升级吸收。
+- **验证计划**：新增 shared runtime schema、core optimizer、gateway execute、admin settings API 回归；再跑目标 Vitest、Svelte check、typecheck、lint、build。
+
 ## 2026-07-04 · OAuth 账号池改为会话亲和调度（OAuth provider pool / routing，docs/04/11，原则 3/5/7）
 
 - **背景（Lukin）**：订阅 provider 有多个账号时，单纯 priority + LRU 轮询会让同一客户端会话在多个账号/多个上游设备身份之间漂移，容易呈现“账号池”特征。目标是同一 session/device 尽量固定到同一账号，只有账号不可用、额度/限流、或账号容量已满时才切换，同时让多个账号在新会话维度尽量均衡使用。
@@ -88,18 +98,10 @@
 - **task_type 决策**：低成本自动化模式下，task detector 忽略 ambient tool-prefix 和 file-path 证据，但仍保留显式 coding keyword（如 `debug/refactor/function`）的升级路径，避免真正要修代码的 monitor 任务被错误降级。
 - **验证计划**：新增 openclaw cron monitor golden route 回归、override 单测、taskdetect 单测和 schema 默认值测试；目标是该形态走 `chat/simple/economy`，链首回到 `openai-codex/gpt-5.4-mini`。
 
-## 2026-07-03 · 上下文窗口超限按候选跳过处理（执行 fallback / streaming telemetry，docs/04/07，原则 5/8）
-
-- **背景（Lukin）**：生产请求 `69d5058f-ea6c-4bfc-91d8-0686a7c120f3` 最终由 `anthropic/claude-opus-4-8` 成功服务，但链中 `openai-codex/gpt-5.5` 先返回 Responses stream `context_length_exceeded`，admin 详情把它显示为普通 `upstream_error`。
-- **修复决策**：`context_length_exceeded` / “context window” / “prompt is too long” 属于当前候选模型窗口不足；即使它来自首个有效输出前的 SSE error 且没有 HTTP 400，也记录为 `skipped:true` + `skip_reason:"context_too_small"`，继续执行 fallback。
-- **熔断决策**：该类错误不调用 `breaker.recordFailure()`，不触发 OAuth 账号 auto-park，也不计入 execution fallback count；它和预检能力过滤的 `context_too_small` 语义保持一致。
-- **保留边界**：非上下文类 request-shape 错误（例如图片尺寸超限、非法参数）仍短路为 `invalid_request`，因为换候选模型无法修复请求体本身。
-- **验证**：新增执行器 stream 回归测试，覆盖 Codex Responses `context_length_exceeded` 先失败、后续 Opus 成功、首个 attempt 显示跳过且不记录 breaker failure；目标 `execute.test.ts` 117/117 绿。
-
 ## 历史条目摘要（最近 2 条）
 
+- **2026-07-03 · 上下文窗口超限按候选跳过处理（执行 fallback / streaming telemetry，docs/04/07，原则 5/8）**：`context_length_exceeded` / “prompt is too long” 按当前候选窗口不足记录 `skipped:true` + `skip_reason:"context_too_small"`，不熔断、不计 fallback_count，并继续执行后续候选。
 - **2026-07-03 · API key 级 usage stats 给外部自动化读取（Gateway usage API / telemetry，docs/07，原则 7）**：`GET /v1/usage/stats` 复用 API-key auth，只聚合当前 key 的 request/token/cost 统计，避免外部自动化直接读库。
-- **2026-07-02 · API key 加密恢复与原地轮转（Auth / Admin keys，docs/06/11，原则 7）**：API key reveal/rotate 改用 `secret_enc` 恢复材料，鉴权仍只依赖 sha256，历史 hash-only key 明确不可恢复但可原地轮转。
 
 ## 更早历史总览
 
