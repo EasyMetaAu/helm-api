@@ -3,23 +3,25 @@
 // with its own token manager + egress proxy + executor type). On every call it
 // SELECTS one account, then delegates the whole request to that account's client.
 //
-// Selection (CRS-reference scheduler): from the SCHEDULABLE members, pick the one
-// with the lowest `priority` (lower = preferred); ties broken by least-recently-
-// used (oldest `lastUsedAt` first), giving round-robin within an equal priority.
-// The chosen member's `lastUsedAt` is bumped (in-memory) so the next call rotates
-// to its sibling. `onSelect(account)` fires with the picked account so the caller
-// can record WHICH subscription served the request (telemetry / structured log).
+// Selection: when the request carries a stable session/device fingerprint, bind it
+// to one account by deterministic rendezvous hashing inside the lowest-priority
+// eligible tier. That makes new sessions spread across equal-priority accounts,
+// while repeated turns stay on the same account unless it is parked, usage-limited,
+// or currently at capacity. Requests with no session signal keep the old LRU
+// round-robin behavior inside the lowest-priority tier.
 //
 // Fail-closed (principle 2): a pool with no schedulable member cannot serve, so
 // the call throws — the executor records the failure and advances the chain, never
 // silently picks a parked account. Streaming and non-streaming share the SAME
 // selection (one pick per call), so a streamed request also rotates the pool.
 
+import { createHash } from "node:crypto";
 import {
   isNativePassthroughCarrier,
   type NativePassthroughInput,
   nativePassthroughBody,
 } from "@helm/shared";
+import { isUserMessageRequest } from "../../queue/user-turn.js";
 import { guardPreOutputFailure, type PreOutputClassifier } from "../failover-guard.js";
 import {
   type ChatCompletionRequest,
@@ -73,6 +75,13 @@ function isRateLimitAccountFailure(err: unknown): boolean {
   return err instanceof UpstreamError && err.upstreamStatus === 429;
 }
 
+// The per-account user-message queue reports backpressure with this structural flag.
+// Treat it as account-scoped capacity pressure: try a sibling account before surfacing
+// a terminal 503. No instanceof check, because the class may cross package boundaries.
+function isAccountBackpressureFailure(err: unknown): boolean {
+  return err instanceof Error && (err as { queueTimeout?: unknown }).queueTimeout === true;
+}
+
 // One account in the pool: its scheduling knobs plus the fully-wired client that
 // carries that account's credential + proxy. `lastUsedAt` is MUTABLE soft state
 // (round-robin cursor); it starts at 0 so an untouched account is always preferred
@@ -82,6 +91,10 @@ export interface OAuthPoolMember {
   priority: number;
   schedulable: boolean;
   client: ProviderClient;
+  // Optional live capacity probe. When true, the pool prefers another eligible account
+  // before committing this request. If every eligible account is busy, selection falls
+  // back to the normal target and lets that member's queue wait.
+  isAtCapacity?: () => boolean;
   // Auto-park cooldown: epoch ms until which this account is removed from selection
   // because it hit its usage/rate limit (null/undefined = eligible). Distinct from
   // `schedulable` (the operator's manual park). MUTABLE soft state — the gateway flips
@@ -118,7 +131,7 @@ export interface OAuthPoolDeps {
   stickyTtlMs?: number;
   // Fires with the selected account on each served call — the seam the gateway
   // uses to record the serving subscription in telemetry / logs (no secrets).
-  onSelect?: (account: string) => void;
+  onSelect?: (account: string, selection: OAuthPoolSelection) => void;
   // Fires when the selected account hits an account-wide upstream 429. The pool already
   // applies the in-memory cooldown before calling this; the hook lets the gateway persist
   // the same cooldown so rebuilds/restarts keep routing around the account.
@@ -147,12 +160,22 @@ interface PoolEntry {
   lastUsedAt: number;
 }
 
+export interface OAuthPoolSelection {
+  reason: "sticky_hit" | "hash_assign" | "lru";
+  affinityKeySource: string | null;
+  capacityAvoided: boolean;
+  allCandidatesAtCapacity: boolean;
+  busyEligibleAccounts: number;
+  retryAttempt: number;
+}
+
 export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   const now = deps.now ?? (() => Date.now());
   const stickyTtlMs = deps.stickyTtlMs ?? 10 * 60 * 1000;
   const accountRateLimitCooldownMs = deps.accountRateLimitCooldownMs ?? DEFAULT_429_COOLDOWN_MS;
   const entries: PoolEntry[] = deps.members.map((member) => ({ member, lastUsedAt: 0 }));
   const stickySessions = new Map<string, { account: string; expiresAt: number }>();
+  let selectionCounter = 0;
 
   // An account is eligible only when the operator has not parked it (`schedulable`)
   // AND its auto-park cooldown has elapsed. Re-evaluated on every select() against the
@@ -177,36 +200,86 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
   }
 
+  function objectRecord(value: unknown): Record<string, unknown> | null {
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  }
+
+  function deviceIdFromMetadataUserId(userId: string): string | null {
+    try {
+      const parsed = objectRecord(JSON.parse(userId) as unknown);
+      if (parsed === null) return null;
+      return bodyString(parsed, "device_id") ?? bodyString(parsed, "deviceId");
+    } catch {
+      return null;
+    }
+  }
+
+  function deviceAffinityKeyFromBody(body: Record<string, unknown>): string | null {
+    const direct = bodyString(body, "device_id") ?? bodyString(body, "deviceId");
+    if (direct !== null) return `device_id:${direct}`;
+    const metadata = objectRecord(body.metadata);
+    if (metadata === null) return null;
+    const metadataDevice = bodyString(metadata, "device_id") ?? bodyString(metadata, "deviceId");
+    if (metadataDevice !== null) return `metadata.device_id:${metadataDevice}`;
+    const userId = bodyString(metadata, "user_id");
+    const parsedDevice = userId === null ? null : deviceIdFromMetadataUserId(userId);
+    return parsedDevice === null ? null : `metadata.user_id.device_id:${parsedDevice}`;
+  }
+
   function stickyKeyFromNative(input: NativePassthroughInput): string | null {
     const body = nativePassthroughBody(input);
+    const bodyDeviceKey = deviceAffinityKeyFromBody(body);
+    if (bodyDeviceKey !== null) return bodyDeviceKey;
     if (isNativePassthroughCarrier(input)) {
-      for (const header of [
-        "session_id",
-        "x-session-id",
-        "x-client-request-id",
-        "prompt_cache_key",
-        "conversation_id",
-      ]) {
+      for (const header of ["device_id", "x-device-id"]) {
+        const value = headerValue(input.headers, header);
+        if (value !== null) return `${header}:${value}`;
+      }
+      for (const header of ["session_id", "x-session-id", "prompt_cache_key", "conversation_id"]) {
         const value = headerValue(input.headers, header);
         if (value !== null) return `${header}:${value}`;
       }
     }
-    for (const key of [
-      "session_id",
-      "prompt_cache_key",
-      "conversation_id",
-      "previous_response_id",
-    ]) {
+    for (const key of ["session_id", "prompt_cache_key", "conversation_id"]) {
       const value = bodyString(body, key);
       if (value !== null) return `${key}:${value}`;
     }
-    const metadata = body.metadata;
-    if (metadata !== null && typeof metadata === "object" && !Array.isArray(metadata)) {
-      for (const key of ["session_id", "conversation_id", "thread_id"]) {
-        const value = bodyString(metadata as Record<string, unknown>, key);
+    const metadata = objectRecord(body.metadata);
+    if (metadata !== null) {
+      for (const key of ["session_id", "conversation_id", "thread_id", "user_id"]) {
+        const value = bodyString(metadata, key);
         if (value !== null) return `metadata.${key}:${value}`;
       }
     }
+    const previousResponseId = bodyString(body, "previous_response_id");
+    if (previousResponseId !== null) return `previous_response_id:${previousResponseId}`;
+    return null;
+  }
+
+  function stickyKeyFromChat(req: ChatCompletionRequest): string | null {
+    const deviceKey = deviceAffinityKeyFromBody(req);
+    if (deviceKey !== null) return deviceKey;
+    for (const key of [
+      "prompt_cache_key",
+      "session_id",
+      "conversation_id",
+      "user",
+      "safety_identifier",
+    ]) {
+      const value = bodyString(req, key);
+      if (value !== null) return `${key}:${value}`;
+    }
+    const metadata = objectRecord(req.metadata);
+    if (metadata !== null) {
+      for (const key of ["session_id", "conversation_id", "thread_id", "user_id"]) {
+        const value = bodyString(metadata, key);
+        if (value !== null) return `metadata.${key}:${value}`;
+      }
+    }
+    const previousResponseId = bodyString(req, "previous_response_id");
+    if (previousResponseId !== null) return `previous_response_id:${previousResponseId}`;
     return null;
   }
 
@@ -220,40 +293,62 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     return typeof model === "string" && model.trim().length > 0 ? model.trim() : null;
   }
 
-  // Pick the next account: lowest priority, then oldest lastUsedAt (LRU round-
-  // robin within equal priority). Bumps the winner's cursor and notifies onSelect.
-  // Throws when no member is schedulable (fail-closed — the caller treats it as a
-  // provider failure and advances the fallback chain).
-  // `exclude` holds accounts already TRIED-and-transiently-failed this request (in-pool
-  // retry): they are skipped — both as the sticky target and in the LRU scan — so each
-  // retry advances to a fresh sibling and the loop terminates (bounded by member count).
-  function select(stickyKey?: string | null, exclude?: ReadonlySet<string>): PoolEntry {
-    const nowMs = now();
-    if (stickyKey) {
-      const sticky = stickySessions.get(stickyKey);
-      if (sticky !== undefined && sticky.expiresAt > nowMs) {
-        const entry = entries.find(
-          (candidate) =>
-            candidate.member.account === sticky.account &&
-            candidate.member.schedulable &&
-            !usageLimited(candidate.member, nowMs) &&
-            !exclude?.has(candidate.member.account),
-        );
-        if (entry !== undefined) {
-          entry.lastUsedAt = nowMs;
-          sticky.expiresAt = nowMs + stickyTtlMs;
-          deps.onSelect?.(entry.member.account);
-          return entry;
-        }
-      }
-      stickySessions.delete(stickyKey);
-    }
+  function stickyScore(stickyKey: string, account: string): bigint {
+    return createHash("sha256")
+      .update(stickyKey)
+      .update("\0")
+      .update(account)
+      .digest()
+      .readBigUInt64BE(0);
+  }
 
+  function atCapacity(entry: PoolEntry): boolean {
+    try {
+      return entry.member.isAtCapacity?.() === true;
+    } catch {
+      return false;
+    }
+  }
+
+  function eligibleEntries(nowMs: number, exclude: ReadonlySet<string> | undefined): PoolEntry[] {
+    return entries.filter(
+      (e) =>
+        e.member.schedulable && !usageLimited(e.member, nowMs) && !exclude?.has(e.member.account),
+    );
+  }
+
+  function preferredCapacityTier(
+    eligible: PoolEntry[],
+    avoidBusy: boolean,
+  ): {
+    candidates: PoolEntry[];
+    capacityAvoided: boolean;
+    allCandidatesAtCapacity: boolean;
+    busyEligibleAccounts: number;
+  } {
+    if (!avoidBusy) {
+      return {
+        candidates: eligible,
+        capacityAvoided: false,
+        allCandidatesAtCapacity: false,
+        busyEligibleAccounts: 0,
+      };
+    }
+    const nonBusy = eligible.filter((e) => !atCapacity(e));
+    const busyEligibleAccounts = eligible.length - nonBusy.length;
+    // If every account is busy, do not fail closed. Let the chosen member's queue wait
+    // and preserve the existing retry/timeout behavior.
+    return {
+      candidates: nonBusy.length > 0 ? nonBusy : eligible,
+      capacityAvoided: nonBusy.length > 0 && busyEligibleAccounts > 0,
+      allCandidatesAtCapacity: eligible.length > 0 && nonBusy.length === 0,
+      busyEligibleAccounts,
+    };
+  }
+
+  function chooseByLru(candidates: PoolEntry[]): PoolEntry | undefined {
     let best: PoolEntry | undefined;
-    for (const e of entries) {
-      if (!e.member.schedulable) continue; // operator park
-      if (usageLimited(e.member, nowMs)) continue; // auto-park cooldown
-      if (exclude?.has(e.member.account)) continue; // already tried this request (retry)
+    for (const e of candidates) {
       if (
         !best ||
         e.member.priority < best.member.priority ||
@@ -262,16 +357,116 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         best = e;
       }
     }
-    if (!best) throw new Error("oauth pool has no schedulable account");
-    best.lastUsedAt = nowMs;
+    return best;
+  }
+
+  function chooseByStickyHash(candidates: PoolEntry[], stickyKey: string): PoolEntry | undefined {
+    let tierPriority: number | undefined;
+    for (const e of candidates) {
+      if (tierPriority === undefined || e.member.priority < tierPriority) {
+        tierPriority = e.member.priority;
+      }
+    }
+    let best: { entry: PoolEntry; score: bigint } | undefined;
+    for (const e of candidates) {
+      if (e.member.priority !== tierPriority) continue;
+      const score = stickyScore(stickyKey, e.member.account);
+      if (best === undefined || score > best.score) best = { entry: e, score };
+    }
+    return best?.entry;
+  }
+
+  function responseIdFromResult(result: unknown): string | null {
+    const body = objectRecord(result);
+    if (body === null) return null;
+    const direct = bodyString(body, "id");
+    if (direct !== null) return direct;
+    const response = objectRecord(body.response);
+    return response === null ? null : bodyString(response, "id");
+  }
+
+  function rememberResponseAffinity(result: unknown, entry: PoolEntry): void {
+    const id = responseIdFromResult(result);
+    if (id === null) return;
+    stickySessions.set(`previous_response_id:${id}`, {
+      account: entry.member.account,
+      expiresAt: now() + stickyTtlMs,
+    });
+  }
+
+  function affinityKeySource(stickyKey: string | null): string | null {
+    if (stickyKey === null) return null;
+    const separator = stickyKey.indexOf(":");
+    return separator > 0 ? stickyKey.slice(0, separator) : "unknown";
+  }
+
+  function commitSelection(
+    entry: PoolEntry,
+    stickyKey: string | null,
+    nowMs: number,
+    selection: OAuthPoolSelection,
+  ): PoolEntry {
+    selectionCounter += 1;
+    entry.lastUsedAt = selectionCounter;
     if (stickyKey) {
       stickySessions.set(stickyKey, {
-        account: best.member.account,
+        account: entry.member.account,
         expiresAt: nowMs + stickyTtlMs,
       });
     }
-    deps.onSelect?.(best.member.account);
-    return best;
+    deps.onSelect?.(entry.member.account, selection);
+    return entry;
+  }
+
+  // Pick the next account: lowest priority, then oldest lastUsedAt (LRU round-
+  // robin within equal priority). Bumps the winner's cursor and notifies onSelect.
+  // Throws when no member is schedulable (fail-closed — the caller treats it as a
+  // provider failure and advances the fallback chain).
+  // `exclude` holds accounts already TRIED-and-transiently-failed this request (in-pool
+  // retry): they are skipped — both as the sticky target and in the LRU scan — so each
+  // retry advances to a fresh sibling and the loop terminates (bounded by member count).
+  function select(
+    stickyKey?: string | null,
+    exclude?: ReadonlySet<string>,
+    opts: { avoidBusy?: boolean } = {},
+  ): PoolEntry {
+    const nowMs = now();
+    const eligible = eligibleEntries(nowMs, exclude);
+    const capacityTier = preferredCapacityTier(eligible, opts.avoidBusy === true);
+    const selectionBase = {
+      affinityKeySource: affinityKeySource(stickyKey ?? null),
+      capacityAvoided: capacityTier.capacityAvoided,
+      allCandidatesAtCapacity: capacityTier.allCandidatesAtCapacity,
+      busyEligibleAccounts: capacityTier.busyEligibleAccounts,
+      retryAttempt: exclude?.size ?? 0,
+    };
+    if (stickyKey) {
+      const sticky = stickySessions.get(stickyKey);
+      if (sticky !== undefined && sticky.expiresAt > nowMs) {
+        const entry = capacityTier.candidates.find(
+          (candidate) => candidate.member.account === sticky.account,
+        );
+        if (entry !== undefined) {
+          sticky.expiresAt = nowMs + stickyTtlMs;
+          return commitSelection(entry, stickyKey, nowMs, {
+            ...selectionBase,
+            reason: "sticky_hit",
+          });
+        }
+      }
+      stickySessions.delete(stickyKey);
+    }
+
+    const stickyOnly = stickyKey?.startsWith("previous_response_id:") === true;
+    const best =
+      stickyKey && !stickyOnly && capacityTier.candidates.length > 0
+        ? chooseByStickyHash(capacityTier.candidates, stickyKey)
+        : chooseByLru(capacityTier.candidates);
+    if (!best) throw new Error("oauth pool has no schedulable account");
+    return commitSelection(best, stickyOnly ? null : (stickyKey ?? null), nowMs, {
+      ...selectionBase,
+      reason: stickyKey && !stickyOnly ? "hash_assign" : "lru",
+    });
   }
 
   function forgetStickyAccount(account: string): void {
@@ -327,6 +522,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   async function completeWithRetry<R>(
     stickyKey: string | null,
     model: string | null,
+    avoidBusy: boolean,
     call: (client: ProviderClient) => Promise<R>,
   ): Promise<R> {
     const tried = new Set<string>();
@@ -334,13 +530,15 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     for (;;) {
       let entry: PoolEntry;
       try {
-        entry = select(stickyKey, tried);
+        entry = select(stickyKey, tried, { avoidBusy });
       } catch (selErr) {
         throw lastErr ?? selErr;
       }
       tried.add(entry.member.account);
       try {
-        return await call(entry.member.client);
+        const result = await call(entry.member.client);
+        rememberResponseAffinity(result, entry);
+        return result;
       } catch (err) {
         if (isCredentialAccountFailure(err)) {
           parkCredentialFailedAccount(entry);
@@ -349,6 +547,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         }
         if (isRateLimitAccountFailure(err)) {
           parkRateLimitedAccount(entry, err, model);
+          lastErr = err;
+          continue;
+        }
+        if (isAccountBackpressureFailure(err)) {
           lastErr = err;
           continue;
         }
@@ -367,6 +569,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     firstEntry: PoolEntry,
     stickyKey: string | null,
     model: string | null,
+    avoidBusy: boolean,
     open: (client: ProviderClient) => AsyncIterable<string>,
     // When set, each member's SSE is wrapped so a pre-output error frame (after only a
     // content-free preamble) throws BEFORE the first yielded chunk — turning "commit on
@@ -394,13 +597,15 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         } else if (isRateLimitAccountFailure(err)) {
           parkRateLimitedAccount(entry, err, model);
           lastErr = err;
+        } else if (isAccountBackpressureFailure(err)) {
+          lastErr = err;
         } else {
           if (!isRetryableTransientError(err)) throw err;
           lastErr = err;
         }
         let next: PoolEntry;
         try {
-          next = select(stickyKey, tried);
+          next = select(stickyKey, tried, { avoidBusy });
         } catch {
           throw lastErr; // no sibling left → surface the real upstream cause
         }
@@ -437,8 +642,11 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       req: ChatCompletionRequest,
       opts?: { signal?: AbortSignal },
     ): Promise<ChatCompletionResponse> {
-      return completeWithRetry(null, modelFromChat(req), (client) =>
-        client.chatCompletion(req, opts),
+      return completeWithRetry(
+        stickyKeyFromChat(req),
+        modelFromChat(req),
+        isUserMessageRequest(req),
+        (client) => client.chatCompletion(req, opts),
       );
     },
     chatCompletionStream(
@@ -447,11 +655,14 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     ): AsyncIterable<string> {
       // Pick SYNCHRONOUSLY (one pick per call) before opening the stream so rotation +
       // onSelect fire on the call turn; streamWithRetry only adds sibling fallbacks.
-      const first = select();
+      const stickyKey = stickyKeyFromChat(req);
+      const avoidBusy = isUserMessageRequest(req);
+      const first = select(stickyKey, undefined, { avoidBusy });
       return streamWithRetry(
         first,
-        null,
+        stickyKey,
         modelFromChat(req),
+        avoidBusy,
         (client) => client.chatCompletionStream(req, opts),
         deps.chatStreamPreambleClassifier,
       );
@@ -473,12 +684,17 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       // rotation + onSelect fire on the call turn exactly like the other methods. A member
       // missing the method throws a NON-transient error → surfaced at once (fail-closed,
       // never silently routed to a translating sibling), not retried.
-      return completeWithRetry(stickyKeyFromNative(body), modelFromNative(body), (client) => {
-        if (!client.nativePassthrough) {
-          throw new Error("oauth pool member does not support native passthrough");
-        }
-        return client.nativePassthrough(body, opts);
-      });
+      return completeWithRetry(
+        stickyKeyFromNative(body),
+        modelFromNative(body),
+        isUserMessageRequest(nativePassthroughBody(body)),
+        (client) => {
+          if (!client.nativePassthrough) {
+            throw new Error("oauth pool member does not support native passthrough");
+          }
+          return client.nativePassthrough(body, opts);
+        },
+      );
     },
     // Streaming native passthrough (issue #217, Phase 2). A SYNCHRONOUS method (NOT an
     // async fn) so select() — and thus rotation + onSelect — fires on the CALL turn,
@@ -490,9 +706,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       opts?: { signal?: AbortSignal },
     ): AsyncIterable<string> {
       const stickyKey = stickyKeyFromNative(body);
+      const avoidBusy = isUserMessageRequest(nativePassthroughBody(body));
       // Pick + fail-closed check SYNCHRONOUSLY on the call turn (rotation + onSelect, and a
       // synchronous throw if the picked member can't passthrough-stream), exactly as before.
-      const first = select(stickyKey);
+      const first = select(stickyKey, undefined, { avoidBusy });
       if (!first.member.client.nativePassthroughStream) {
         throw new Error("oauth pool member does not support native passthrough streaming");
       }
@@ -500,6 +717,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         first,
         stickyKey,
         modelFromNative(body),
+        avoidBusy,
         (client) => {
           if (!client.nativePassthroughStream) {
             throw new Error("oauth pool member does not support native passthrough streaming");

@@ -569,11 +569,12 @@ export async function synthesizeOAuthProviders(
       // Serialize user-message requests per account (issue #93, feature B). The
       // wrap sits INSIDE the pool member so the gate key is the concrete account
       // the pool selected; non-user turns and a disabled setting pass through.
+      const queueKey = `${providerId} ${account}`;
       const serialized = userMessageQueue
         ? createSerializingClient({
             inner: client,
             gate: userMessageQueue.gate,
-            key: `${providerId} ${account}`,
+            key: queueKey,
             getConfig: userMessageQueue.getConfig,
             isUserMessage: isUserMessageRequest,
             log: (lvl, msg, fields) => log(lvl, msg, fields),
@@ -584,6 +585,15 @@ export async function synthesizeOAuthProviders(
         priority: s.priority ?? 50,
         schedulable: true,
         client: serialized,
+        isAtCapacity: userMessageQueue
+          ? () => {
+              const qc = userMessageQueue.getConfig();
+              return (
+                qc.enabled &&
+                userMessageQueue.gate.wouldQueue({ key: queueKey, delayMs: qc.delayMs })
+              );
+            }
+          : undefined,
         // Seed the auto-park cooldown from the persisted snapshot (survives restart /
         // rebuild). A past timestamp is harmless — select() treats now>=until as
         // eligible — so stale seeds self-clear.
@@ -600,8 +610,17 @@ export async function synthesizeOAuthProviders(
     const pool = createOAuthPoolClient({
       members,
       now: () => Date.now(),
-      onSelect: (account) => {
-        log("info", "oauth.pool.select", { providerId, account });
+      onSelect: (account, selection) => {
+        log("info", "oauth.pool.select", {
+          providerId,
+          account,
+          selection_reason: selection.reason,
+          affinity_key_source: selection.affinityKeySource,
+          capacity_avoided: selection.capacityAvoided,
+          all_candidates_at_capacity: selection.allCandidatesAtCapacity,
+          busy_eligible_accounts: selection.busyEligibleAccounts,
+          retry_attempt: selection.retryAttempt,
+        });
         // Stamp the per-request holder so the route's settle path can attribute
         // today's usage to THIS subscription (providers page Tier 2). No-op when
         // not inside a capture scope (fail-open; never throws).

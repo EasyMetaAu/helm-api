@@ -173,4 +173,41 @@ describe("createKeyedSerialGate", () => {
     if (a.ok) a.release();
     if (b.ok) b.release();
   });
+
+  it("reports whether a fresh acquire would queue", async () => {
+    const gate = createKeyedSerialGate();
+    expect(gate.wouldQueue({ key: "acct1", delayMs: 200 })).toBe(false);
+
+    const first = await gate.acquire(args());
+    expect(gate.wouldQueue({ key: "acct1", delayMs: 200 })).toBe(true);
+
+    const waiting = gate.acquire(args());
+    expect(gate.wouldQueue({ key: "acct1", delayMs: 200 })).toBe(true);
+
+    if (first.ok) first.release();
+    await vi.advanceTimersByTimeAsync(200);
+    const granted = await waiting;
+    expect(gate.wouldQueue({ key: "acct1", delayMs: 200 })).toBe(true);
+
+    if (granted.ok) granted.release();
+    expect(gate.wouldQueue({ key: "acct1", delayMs: 200 })).toBe(true);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(gate.wouldQueue({ key: "acct1", delayMs: 200 })).toBe(false);
+  });
+
+  it("does not report a released zero-delay key as queued", async () => {
+    const gate = createKeyedSerialGate();
+    const first = await gate.acquire(args({ delayMs: 0 }));
+    expect(gate.wouldQueue({ key: "acct1", delayMs: 0 })).toBe(true);
+    if (first.ok) first.release();
+    expect(gate.wouldQueue({ key: "acct1", delayMs: 0 })).toBe(false);
+  });
+
+  it("wouldQueue is scoped per key", async () => {
+    const gate = createKeyedSerialGate();
+    const first = await gate.acquire(args({ key: "acctA" }));
+    expect(gate.wouldQueue({ key: "acctA", delayMs: 200 })).toBe(true);
+    expect(gate.wouldQueue({ key: "acctB", delayMs: 200 })).toBe(false);
+    if (first.ok) first.release();
+  });
 });

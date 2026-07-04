@@ -23,6 +23,10 @@ export type SerialAcquireResult =
 
 export interface KeyedSerialGate {
   acquire(args: SerialAcquireArgs): Promise<SerialAcquireResult>;
+  // Would a fresh acquire for this key have to wait instead of starting now?
+  // Used by the OAuth account pool to prefer another eligible account before it
+  // commits a session to a busy subscription account.
+  wouldQueue(args: { key: string; delayMs: number }): boolean;
 }
 
 export interface KeyedSerialGateDeps {
@@ -149,6 +153,14 @@ export function createKeyedSerialGate(deps: KeyedSerialGateDeps = {}): KeyedSeri
         entry.waiters.push(waiter);
         pump(args.key);
       });
+    },
+
+    wouldQueue(args: { key: string; delayMs: number }): boolean {
+      const entry = entries.get(args.key);
+      if (!entry) return false;
+      if (entry.locked || entry.waiters.length > 0) return true;
+      if (entry.lastCompletionMs === null || args.delayMs <= 0) return false;
+      return entry.lastCompletionMs + args.delayMs > now();
     },
   };
 }

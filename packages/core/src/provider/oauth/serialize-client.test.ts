@@ -267,6 +267,29 @@ describe("createSerializingClient", () => {
     expect(inner.nativeCalls).toBe(2);
   });
 
+  it("serializes native Responses input calls with the configured delay", async () => {
+    const inner = makeNativeInner();
+    const client = makeClient(inner, { enabled: true, delayMs: 200, timeoutMs: 5_000 });
+    const responsesReq = {
+      model: "gpt-5.5",
+      input: [{ type: "message", role: "user", content: "hi" }],
+    };
+    const t0 = Date.now();
+    const first = client.nativePassthrough?.(responsesReq);
+    let secondDoneAt: number | null = null;
+    const second = client.nativePassthrough?.(responsesReq).then((r) => {
+      secondDoneAt = Date.now();
+      return r;
+    });
+
+    await first;
+    await vi.advanceTimersByTimeAsync(200);
+    await second;
+
+    expect((secondDoneAt ?? 0) - t0).toBeGreaterThanOrEqual(200);
+    expect(inner.nativeCalls).toBe(2);
+  });
+
   it("holds the lock across the FULL nativePassthroughStream drain", async () => {
     const inner = makeNativeInner(["c1", "c2", "c3"]);
     const client = makeClient(inner, { enabled: true, delayMs: 0, timeoutMs: 5_000 });
@@ -284,6 +307,32 @@ describe("createSerializingClient", () => {
     await it?.next();
     await it?.next(); // done:true — generator finally releases
     await second;
+    expect(secondGranted).toBe(true);
+    expect(inner.nativeStreamCalls).toBe(1);
+  });
+
+  it("holds the lock across a native Responses input stream", async () => {
+    const inner = makeNativeInner(["c1", "c2", "c3"]);
+    const client = makeClient(inner, { enabled: true, delayMs: 0, timeoutMs: 5_000 });
+    const responsesReq = {
+      model: "gpt-5.5",
+      input: [{ type: "message", role: "user", content: "hi" }],
+    };
+    const it = client.nativePassthroughStream?.(responsesReq)[Symbol.asyncIterator]();
+    await it?.next();
+    let secondGranted = false;
+    const second = client.nativePassthrough?.(responsesReq).then((r) => {
+      secondGranted = true;
+      return r;
+    });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(secondGranted).toBe(false);
+    await it?.next();
+    await it?.next();
+    await it?.next();
+    await second;
+
     expect(secondGranted).toBe(true);
     expect(inner.nativeStreamCalls).toBe(1);
   });

@@ -76,4 +76,41 @@ describe("isUserMessageRequest", () => {
     expect(isUserMessageRequest({ messages: "nope" })).toBe(false);
     expect(isUserMessageRequest({ messages: [null] })).toBe(false);
   });
+
+  it("true for Responses input string and last user message items", () => {
+    expect(isUserMessageRequest({ input: "hello" })).toBe(true);
+    expect(
+      isUserMessageRequest({
+        input: [
+          { type: "message", role: "assistant", content: "previous" },
+          { type: "message", role: "user", content: [{ type: "input_text", text: "next" }] },
+        ],
+      }),
+    ).toBe(true);
+    expect(
+      isUserMessageRequest({
+        input: [
+          { role: "assistant", content: "previous" },
+          { role: "user", content: "next" },
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  it("false for Responses tool outputs and non-user continuations", () => {
+    expect(
+      isUserMessageRequest({
+        input: [
+          { type: "message", role: "user", content: "question" },
+          { type: "function_call_output", call_id: "call_1", output: "42" },
+        ],
+      }),
+    ).toBe(false);
+    expect(isUserMessageRequest({ input: [{ type: "reasoning", id: "rs_1" }] })).toBe(false);
+    expect(
+      isUserMessageRequest({
+        input: [{ type: "message", role: "assistant", content: "continuing" }],
+      }),
+    ).toBe(false);
+  });
 });

@@ -29,6 +29,10 @@ function member(
 }
 
 const REQ: ChatCompletionRequest = { model: "m", messages: [] };
+const USER_REQ: ChatCompletionRequest = {
+  model: "m",
+  messages: [{ role: "user", content: "hi" }],
+};
 
 describe("createOAuthPoolClient — account selection", () => {
   it("prefers the lowest priority (lower = preferred)", async () => {
@@ -57,6 +61,274 @@ describe("createOAuthPoolClient — account selection", () => {
     await pool.chatCompletion(REQ);
     await pool.chatCompletion(REQ);
     expect(calls).toEqual(["a", "b", "a", "b"]);
+  });
+
+  it("keeps a chat prompt_cache_key on one deterministic account", async () => {
+    const calls: string[] = [];
+    const selected: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [member("a", 50, true, calls), member("b", 50, true, calls)],
+      onSelect: (acc) => selected.push(acc),
+    });
+
+    const req = { ...USER_REQ, prompt_cache_key: "thread-a" };
+    await pool.chatCompletion(req);
+    await pool.chatCompletion(req);
+    await pool.chatCompletion(req);
+
+    // thread-a hashes to b; repeated turns do not LRU-rotate across accounts.
+    expect(calls).toEqual(["b", "b", "b"]);
+    expect(selected).toEqual(["b", "b", "b"]);
+  });
+
+  it("uses chat metadata conversation_id as a sticky account key for streams", async () => {
+    const calls: string[] = [];
+    const selected: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [member("a", 50, true, calls), member("b", 50, true, calls)],
+      onSelect: (acc) => selected.push(acc),
+    });
+    const req = { ...USER_REQ, metadata: { conversation_id: "conv-b" } };
+
+    for await (const _ of pool.chatCompletionStream(req)) {
+      /* drain first stream */
+    }
+    for await (const _ of pool.chatCompletionStream(req)) {
+      /* drain second stream */
+    }
+
+    // conv-b hashes to a; streaming now follows the same affinity rule as non-stream.
+    expect(calls).toEqual(["a", "a"]);
+    expect(selected).toEqual(["a", "a"]);
+  });
+
+  it("spreads distinct sticky sessions across equal-priority accounts", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [member("a", 50, true, calls), member("b", 50, true, calls)],
+    });
+
+    await pool.chatCompletion({ ...USER_REQ, metadata: { conversation_id: "conv-b" } });
+    await pool.chatCompletion({ ...USER_REQ, prompt_cache_key: "thread-a" });
+
+    expect(calls).toEqual(["a", "b"]);
+  });
+
+  it("keeps new sticky-session distribution reasonably balanced across equal-priority accounts", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        member("a", 50, true, calls),
+        member("b", 50, true, calls),
+        member("c", 50, true, calls),
+      ],
+    });
+
+    for (let i = 0; i < 300; i += 1) {
+      await pool.chatCompletion({ ...USER_REQ, prompt_cache_key: `session-${i}` });
+    }
+
+    const counts = new Map<string, number>();
+    for (const account of calls) counts.set(account, (counts.get(account) ?? 0) + 1);
+    expect(counts.size).toBe(3);
+    for (const count of counts.values()) {
+      expect(count).toBeGreaterThan(70);
+      expect(count).toBeLessThan(130);
+    }
+  });
+
+  it("prefers a stable metadata.user_id device id over changing chat session signals", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [member("a", 50, true, calls), member("b", 50, true, calls)],
+    });
+    const userId = (session: string) =>
+      JSON.stringify({ device_id: "device-stable-1", account_uuid: "", session_id: session });
+
+    await pool.chatCompletion({
+      ...USER_REQ,
+      prompt_cache_key: "thread-a",
+      metadata: { user_id: userId("session-1") },
+    });
+    await pool.chatCompletion({
+      ...USER_REQ,
+      metadata: { conversation_id: "conv-b", user_id: userId("session-2") },
+    });
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toBe(calls[0]);
+  });
+
+  it("uses an explicit metadata device_id as chat account affinity", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [member("a", 50, true, calls), member("b", 50, true, calls)],
+    });
+
+    await pool.chatCompletion({
+      ...USER_REQ,
+      prompt_cache_key: "thread-a",
+      metadata: { device_id: "device-explicit-1" },
+    });
+    await pool.chatCompletion({
+      ...USER_REQ,
+      metadata: { conversation_id: "conv-b", device_id: "device-explicit-1" },
+    });
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toBe(calls[0]);
+  });
+
+  it("maps a known previous_response_id back to the account that produced it", async () => {
+    const calls: string[] = [];
+    const responseMember = (account: string): OAuthPoolMember => ({
+      account,
+      priority: 50,
+      schedulable: true,
+      client: {
+        async chatCompletion(_req: ChatCompletionRequest) {
+          calls.push(account);
+          return { id: `resp-${account}`, served_by: account };
+        },
+        async *chatCompletionStream(_req: ChatCompletionRequest) {
+          calls.push(account);
+          yield `data: ${account}\n\n`;
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [responseMember("a"), responseMember("b")],
+    });
+
+    await pool.chatCompletion(REQ);
+    await pool.chatCompletion({ ...USER_REQ, previous_response_id: "resp-a" });
+
+    expect(calls).toEqual(["a", "a"]);
+  });
+
+  it("does not hash an unknown previous_response_id as a fake stable account key", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [member("a", 50, true, calls), member("b", 50, true, calls)],
+    });
+
+    await pool.chatCompletion({ ...USER_REQ, previous_response_id: "resp-1" });
+    await pool.chatCompletion({ ...USER_REQ, previous_response_id: "resp-2" });
+
+    expect(calls).toEqual(["a", "b"]);
+  });
+
+  it("does not let previous_response_id override a stable chat user key", async () => {
+    const calls: string[] = [];
+    const responseMember = (account: string): OAuthPoolMember => ({
+      account,
+      priority: 50,
+      schedulable: true,
+      client: {
+        async chatCompletion(_req: ChatCompletionRequest) {
+          calls.push(account);
+          return { id: `resp-${account}`, served_by: account };
+        },
+        async *chatCompletionStream(_req: ChatCompletionRequest) {
+          calls.push(account);
+          yield `data: ${account}\n\n`;
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [responseMember("a"), responseMember("b")],
+    });
+
+    await pool.chatCompletion(REQ);
+    await pool.chatCompletion({
+      ...USER_REQ,
+      user: "stable-user",
+      previous_response_id: "resp-a",
+    });
+
+    expect(calls).toEqual(["a", "b"]);
+  });
+
+  it("keeps sticky hashing inside the lowest-priority eligible tier", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [member("a", 10, true, calls), member("b", 50, true, calls)],
+    });
+
+    await pool.chatCompletion({ ...USER_REQ, prompt_cache_key: "thread-a" });
+
+    // thread-a hashes to b when both accounts are equal priority, but b is a lower
+    // preference tier here. Priority still wins before affinity distribution.
+    expect(calls).toEqual(["a"]);
+  });
+
+  it("uses a lower-priority account when the whole preferred tier is at capacity", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        { ...member("a", 10, true, calls), isAtCapacity: () => true },
+        member("b", 50, true, calls),
+      ],
+    });
+
+    await pool.chatCompletion({ ...USER_REQ, metadata: { conversation_id: "conv-b" } });
+
+    // conv-b normally maps to preferred account a, but a would queue and b is open.
+    expect(calls).toEqual(["b"]);
+  });
+
+  it("prefers another account when the sticky target is at capacity", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        { ...member("a", 50, true, calls), isAtCapacity: () => true },
+        member("b", 50, true, calls),
+      ],
+    });
+
+    await pool.chatCompletion({ ...USER_REQ, metadata: { conversation_id: "conv-b" } });
+
+    // conv-b normally hashes to a, but a would queue, so the request moves to b.
+    expect(calls).toEqual(["b"]);
+  });
+
+  it("prefers another account when a chat stream sticky target is at capacity", async () => {
+    const calls: string[] = [];
+    const selected: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        { ...member("a", 50, true, calls), isAtCapacity: () => true },
+        member("b", 50, true, calls),
+      ],
+      onSelect: (acc) => selected.push(acc),
+    });
+
+    const chunks: string[] = [];
+    for await (const c of pool.chatCompletionStream({
+      ...USER_REQ,
+      metadata: { conversation_id: "conv-b" },
+    })) {
+      chunks.push(c);
+    }
+
+    expect(calls).toEqual(["b"]);
+    expect(selected).toEqual(["b"]);
+    expect(chunks).toEqual(["data: b\n\n"]);
+  });
+
+  it("queues on the sticky account when every eligible account is at capacity", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        { ...member("a", 50, true, calls), isAtCapacity: () => true },
+        { ...member("b", 50, true, calls), isAtCapacity: () => true },
+      ],
+    });
+
+    await pool.chatCompletion({ ...USER_REQ, metadata: { conversation_id: "conv-b" } });
+
+    // All accounts are busy, so selection falls back to the deterministic target.
+    expect(calls).toEqual(["a"]);
   });
 
   it("skips an unschedulable account entirely", async () => {
@@ -275,11 +547,13 @@ describe("createOAuthPoolClient — nativePassthrough", () => {
     clock += 10;
     await pool.nativePassthrough?.(secondSession);
 
-    expect(pt).toEqual(["a", "a", "b"]);
-    expect(selected).toEqual(["a", "a", "b"]);
+    expect(pt[1]).toBe(pt[0]);
+    expect(selected[1]).toBe(selected[0]);
+    expect(pt).toHaveLength(3);
+    expect(selected).toHaveLength(3);
   });
 
-  it("expires native sticky sessions and returns to LRU selection", async () => {
+  it("expires native sticky cache entries but recomputes the same deterministic account", async () => {
     const pt: string[] = [];
     let clock = 1_000;
     const pool = createOAuthPoolClient({
@@ -298,7 +572,96 @@ describe("createOAuthPoolClient — nativePassthrough", () => {
     clock += 100;
     await pool.nativePassthrough?.(native);
 
-    expect(pt).toEqual(["a", "b"]);
+    expect(pt).toHaveLength(2);
+    expect(pt[1]).toBe(pt[0]);
+  });
+
+  it("keeps a native metadata.user_id device id on one account even when session ids change", async () => {
+    const pt: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [ptMember("a", 50, pt), ptMember("b", 50, pt)],
+    });
+    const userId = (session: string) =>
+      JSON.stringify({ device_id: "native-device-1", account_uuid: "", session_id: session });
+
+    await pool.nativePassthrough?.({
+      protocol: "anthropic_messages" as const,
+      body: { model: "claude", messages: [], metadata: { user_id: userId("session-1") } },
+      headers: {},
+      mutations: {},
+    });
+    await pool.nativePassthrough?.({
+      protocol: "anthropic_messages" as const,
+      body: { model: "claude", messages: [], metadata: { user_id: userId("session-2") } },
+      headers: {},
+      mutations: {},
+    });
+
+    expect(pt).toHaveLength(2);
+    expect(pt[1]).toBe(pt[0]);
+  });
+
+  it("prefers another account when a native sticky target is at capacity", async () => {
+    const pt: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [{ ...ptMember("a", 50, pt), isAtCapacity: () => true }, ptMember("b", 50, pt)],
+    });
+
+    await pool.nativePassthrough?.({
+      protocol: "anthropic_messages" as const,
+      body: {
+        model: "claude",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: { conversation_id: "conv-b" },
+      },
+      headers: {},
+      mutations: {},
+    });
+
+    expect(pt).toEqual(["b"]);
+  });
+
+  it("serializes native Responses input capacity checks through the same user-turn detector", async () => {
+    const pt: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [{ ...ptMember("a", 50, pt), isAtCapacity: () => true }, ptMember("b", 50, pt)],
+    });
+
+    await pool.nativePassthrough?.({
+      protocol: "openai_responses" as const,
+      body: {
+        model: "gpt-5.5",
+        input: [{ type: "message", role: "user", content: "hi" }],
+        prompt_cache_key: "stick-a",
+      },
+      headers: {},
+      mutations: {},
+    });
+
+    expect(pt).toEqual(["b"]);
+  });
+
+  it("ignores per-request x-client-request-id when a stable native body key exists", async () => {
+    const pt: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [ptMember("a", 50, pt), ptMember("b", 50, pt)],
+    });
+
+    await pool.nativePassthrough?.({
+      protocol: "openai_responses" as const,
+      body: { model: "gpt-5.5", input: "hi", prompt_cache_key: "thread-a" },
+      headers: { "x-client-request-id": "one" },
+      mutations: {},
+    });
+    await pool.nativePassthrough?.({
+      protocol: "openai_responses" as const,
+      body: { model: "gpt-5.5", input: "hi", prompt_cache_key: "thread-a" },
+      headers: { "x-client-request-id": "two" },
+      mutations: {},
+    });
+
+    expect(pt).toHaveLength(2);
+    expect(pt[1]).toBe(pt[0]);
   });
 
   it("throws fail-closed when the selected member lacks nativePassthrough (never falls back to a sibling)", async () => {
@@ -367,6 +730,66 @@ describe("createOAuthPoolClient — nativePassthroughStream", () => {
     expect(chunks).toEqual(["data: a\n\n", "data: b\n\n"]);
   });
 
+  it("prefers another account when a native stream sticky target is at capacity", async () => {
+    const pt: string[] = [];
+    const selected: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        { ...ptStreamMember("a", 50, pt), isAtCapacity: () => true },
+        ptStreamMember("b", 50, pt),
+      ],
+      onSelect: (acc) => selected.push(acc),
+    });
+
+    const stream = pool.nativePassthroughStream?.({
+      protocol: "anthropic_messages" as const,
+      body: {
+        model: "claude",
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+        metadata: { conversation_id: "conv-b" },
+      },
+      headers: {},
+      mutations: {},
+    });
+    const chunks: string[] = [];
+    for await (const c of stream ?? []) chunks.push(c);
+
+    expect(pt).toEqual(["b"]);
+    expect(selected).toEqual(["b"]);
+    expect(chunks).toEqual(["data: b\n\n"]);
+  });
+
+  it("applies capacity checks to native Responses input streams", async () => {
+    const pt: string[] = [];
+    const selected: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        { ...ptStreamMember("a", 50, pt), isAtCapacity: () => true },
+        ptStreamMember("b", 50, pt),
+      ],
+      onSelect: (acc) => selected.push(acc),
+    });
+
+    const stream = pool.nativePassthroughStream?.({
+      protocol: "openai_responses" as const,
+      body: {
+        model: "gpt-5.5",
+        stream: true,
+        input: [{ type: "message", role: "user", content: "hi" }],
+        prompt_cache_key: "stick-a",
+      },
+      headers: {},
+      mutations: {},
+    });
+    const chunks: string[] = [];
+    for await (const c of stream ?? []) chunks.push(c);
+
+    expect(pt).toEqual(["b"]);
+    expect(selected).toEqual(["b"]);
+    expect(chunks).toEqual(["data: b\n\n"]);
+  });
+
   it("throws fail-closed when the selected member lacks nativePassthroughStream", async () => {
     const pt: string[] = [];
     const pool = createOAuthPoolClient({
@@ -427,6 +850,9 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
   const BAD = new UpstreamError("upstream_error", "bad request", null, 400);
   const REFRESH_401 = new TokenRefreshError("oauth refresh failed (openai-codex, status 401)", 401);
   const REFRESH_429 = new TokenRefreshError("oauth refresh rate-limited (status 429)", 429);
+  const QUEUE_TIMEOUT = Object.assign(new Error("user message queue wait timed out"), {
+    queueTimeout: true,
+  });
 
   it("retries the next account on a transient fault (non-stream)", async () => {
     const served: string[] = [];
@@ -452,11 +878,48 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
       onAccountRateLimit: (account, untilMs) => limited.push({ account, untilMs }),
       onSelect: (account) => selected.push(account),
     });
+
     await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "b" });
     await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "b" });
     expect(served).toEqual(["b", "b"]);
     expect(selected).toEqual(["a", "b", "b"]);
     expect(limited).toEqual([{ account: "a", untilMs: 1_250 }]);
+  });
+
+  it("treats an account queue timeout as sibling capacity failover", async () => {
+    const served: string[] = [];
+    const selected: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        faultMember("busy", 10, served, QUEUE_TIMEOUT),
+        faultMember("open", 50, served, null),
+      ],
+      onSelect: (account) => selected.push(account),
+    });
+
+    await expect(pool.chatCompletion(USER_REQ)).resolves.toEqual({ served_by: "open" });
+
+    expect(served).toEqual(["open"]);
+    expect(selected).toEqual(["busy", "open"]);
+  });
+
+  it("treats a chat stream queue timeout as sibling capacity failover", async () => {
+    const served: string[] = [];
+    const selected: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        faultMember("busy", 10, served, QUEUE_TIMEOUT),
+        faultMember("open", 50, served, null),
+      ],
+      onSelect: (account) => selected.push(account),
+    });
+
+    const chunks: string[] = [];
+    for await (const c of pool.chatCompletionStream(USER_REQ)) chunks.push(c);
+
+    expect(chunks).toEqual(["data: open\n\n"]);
+    expect(served).toEqual(["open"]);
+    expect(selected).toEqual(["busy", "open"]);
   });
 
   it("can retry a sibling on a model-scoped 429 without globally parking the account", async () => {
@@ -657,6 +1120,47 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     for await (const c of pool.nativePassthroughStream?.(NATIVE) ?? []) chunks.push(c);
     expect(chunks).toEqual(["data: b\n\n"]);
     expect(served).toEqual(["b"]);
+  });
+
+  it("treats a native stream queue timeout as sibling capacity failover", async () => {
+    const served: string[] = [];
+    const selected: string[] = [];
+    const NATIVE: Record<string, unknown> = {
+      model: "gpt-5.5",
+      stream: true,
+      messages: [{ role: "user", content: "hi" }],
+    };
+    const mk = (account: string, priority: number, fault: Error | null): OAuthPoolMember => ({
+      account,
+      priority,
+      schedulable: true,
+      client: {
+        async chatCompletion(_req: ChatCompletionRequest) {
+          return { served_by: account };
+        },
+        async *chatCompletionStream(_req: ChatCompletionRequest) {
+          yield `data: ${account}\n\n`;
+        },
+        nativePassthroughStream(_body: Record<string, unknown>): AsyncIterable<string> {
+          return (async function* () {
+            if (fault) throw fault;
+            served.push(account);
+            yield `data: ${account}\n\n`;
+          })();
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [mk("busy", 10, QUEUE_TIMEOUT), mk("open", 50, null)],
+      onSelect: (account) => selected.push(account),
+    });
+
+    const chunks: string[] = [];
+    for await (const c of pool.nativePassthroughStream?.(NATIVE) ?? []) chunks.push(c);
+
+    expect(chunks).toEqual(["data: open\n\n"]);
+    expect(served).toEqual(["open"]);
+    expect(selected).toEqual(["busy", "open"]);
   });
 
   it("parks a credential-failed account and retries native passthrough streaming", async () => {
