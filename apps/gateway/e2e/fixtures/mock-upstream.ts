@@ -170,8 +170,9 @@ export const TOOL_CALL_STREAM_CHUNKS = [
 // reads the prompt text to decide normal vs slow.
 // Stable substring of the eval system prompt (apps/gateway/src/routes/classify.ts
 // buildEvalPrompt). Only the Layer-2 classify call sends it, so the mock can
-// discriminate eval calls without coupling to the model id.
-export const EVAL_PROMPT_MARKER = "Classify the request.";
+// discriminate eval calls without coupling to the model id. Keep this aligned
+// with the XML boundary instruction, not the untrusted user text inside it.
+export const EVAL_PROMPT_MARKER = "Classify only the request inside <user_request>";
 export const EVAL_SLOW_SENTINEL = "__HELM_EVAL_SLOW__";
 // Delay (ms) the slow judge sleeps before answering — comfortably past BOTH e2e
 // eval timeouts (inner timeout_ms 3000 / outer outer_timeout_ms 4000) so the
@@ -295,7 +296,7 @@ export function createMockUpstream() {
     }
 
     // ── Layer-2 eval branch: the request is the internal classify call. We key
-    //    on the eval SYSTEM-PROMPT marker ("Classify the request.", see
+    //    on the eval SYSTEM-PROMPT marker (see EVAL_PROMPT_MARKER and
     //    apps/gateway/src/routes/classify.ts) — NOT the model id — so the eval
     //    model can be a real model that ALSO serves a lane (e.g. deepseek-v4-flash)
     //    without the mock mistaking a normal routed request for an eval call
