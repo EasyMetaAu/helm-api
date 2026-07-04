@@ -88,6 +88,14 @@ describe("SqliteMemoryStore — idle-flush candidates", () => {
     expect(await store.listIdleFlushCandidates({ idleBeforeMs: afterActivity, limit: 10 })).toEqual(
       [{ accountId: "acct-a", threadId: "t1" }],
     );
+    // Too old for the configured backfill window → skipped.
+    expect(
+      await store.listIdleFlushCandidates({
+        idleBeforeMs: afterActivity,
+        idleAfterMs: afterActivity,
+        limit: 10,
+      }),
+    ).toEqual([]);
   });
 
   it("a fully-covered thread leaves the candidate set (sweep terminates)", async () => {

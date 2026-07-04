@@ -124,12 +124,16 @@ describe("CompactionOverridesSchema (via MemoryConfigSchema.compaction)", () => 
     expect(m.compaction).toEqual({});
     expect(m.compaction.segment_min_tokens).toBeUndefined();
     expect(m.compaction.idle_flush_s).toBeUndefined();
+    expect(m.compaction.idle_flush_max_age_s).toBeUndefined();
     expect(m.compaction.force_context_ratio).toBeUndefined();
   });
 
   it("a written override round-trips; omitted siblings are NOT materialized", () => {
-    const m = MemoryConfigSchema.parse({ compaction: { idle_flush_s: 7200 } });
+    const m = MemoryConfigSchema.parse({
+      compaction: { idle_flush_s: 7200, idle_flush_max_age_s: 86_400 },
+    });
     expect(m.compaction.idle_flush_s).toBe(7200);
+    expect(m.compaction.idle_flush_max_age_s).toBe(86_400);
     // No .default() materialization — the merge/no-lying-knob contract.
     expect("segment_min_tokens" in m.compaction).toBe(false);
     expect("force_context_ratio" in m.compaction).toBe(false);
@@ -142,6 +146,7 @@ describe("CompactionOverridesSchema (via MemoryConfigSchema.compaction)", () => 
     expect(() => MemoryConfigSchema.parse({ compaction: { force_context_ratio: 1.2 } })).toThrow();
     expect(() => MemoryConfigSchema.parse({ compaction: { segment_min_tokens: -1 } })).toThrow();
     expect(() => MemoryConfigSchema.parse({ compaction: { idle_flush_s: 0 } })).toThrow();
+    expect(() => MemoryConfigSchema.parse({ compaction: { idle_flush_max_age_s: 0 } })).toThrow();
     expect(() => MemoryConfigSchema.parse({ compaction: { min_keep_ratio: 1.5 } })).toThrow();
   });
 });

@@ -303,6 +303,22 @@ describe("runObserverJob", () => {
     expect(jobUpdates).toContainEqual({ jobId: "job-1", status: "done" });
   });
 
+  it("prefers the largest idle uncovered segment over a tiny leading gap", async () => {
+    const messages = makeMessages(10, 10);
+    const { store, observations } = makeFakeStore(messages, [
+      ["m2", "m3"],
+      ["m5", "m5"],
+    ]);
+    const deps = makeDeps(store, { now: () => new Date(NOW.getTime() + 2 * 3_600_000) });
+
+    const out = await runObserverJob(JOB, deps);
+
+    expect(observations).toHaveLength(1);
+    expect(observations[0]?.sourceMessageRange).toEqual(["m6", "m10"]);
+    expect(observations[0]?.observationText).toContain("Observed 5 msgs");
+    expect(out.sourceMessageRange).toEqual(["m6", "m10"]);
+  });
+
   it("resolves pricing from the thread's stamped model via getThreadMeta", async () => {
     const messages = makeMessages(8);
     const { store } = makeFakeStore(messages);

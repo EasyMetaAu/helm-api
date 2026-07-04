@@ -1754,10 +1754,12 @@ export class PgMemoryStore implements MemoryStore {
   // monopolize the worker's small per-tick page.
   async listIdleFlushCandidates(input: {
     idleBeforeMs: number;
+    idleAfterMs?: number;
     limit: number;
   }): Promise<
     Array<{ accountId: string; threadId: string; projectId?: string; resourceId?: string }>
   > {
+    const idleAfterMs = input.idleAfterMs ?? null;
     const result = (await this.db.execute(sql`
       WITH candidates AS (
         SELECT t.owner_id AS owner_id, t.id AS thread_id,
@@ -1768,6 +1770,9 @@ export class PgMemoryStore implements MemoryStore {
          WHERE t.owner_id IS NOT NULL
            AND (SELECT MAX(m.created_at) FROM memory_messages m WHERE m.thread_id = t.id)
                  <= ${input.idleBeforeMs}
+           AND (${idleAfterMs}::bigint IS NULL OR
+                (SELECT MAX(m.created_at) FROM memory_messages m WHERE m.thread_id = t.id)
+                  >= ${idleAfterMs})
            AND EXISTS (
              -- A message NOT covered by ANY observation's [first,last] range,
              -- using the SAME order as listMessages/Observer.

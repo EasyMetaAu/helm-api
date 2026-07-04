@@ -1966,6 +1966,7 @@ export class SqliteMemoryStore implements MemoryStore {
   // backlog cannot monopolize the worker's small per-tick page.
   async listIdleFlushCandidates(input: {
     idleBeforeMs: number;
+    idleAfterMs?: number;
     limit: number;
   }): Promise<
     Array<{ accountId: string; threadId: string; projectId?: string; resourceId?: string }>
@@ -1981,6 +1982,7 @@ export class SqliteMemoryStore implements MemoryStore {
             WHERE t.owner_id IS NOT NULL
               AND last_activity IS NOT NULL
               AND last_activity <= ?
+              AND (? IS NULL OR last_activity >= ?)
               AND EXISTS (
                 -- A message NOT covered by ANY observation's [first,last] range,
                 -- using the SAME order as listMessages/Observer. Interval
@@ -2056,7 +2058,12 @@ export class SqliteMemoryStore implements MemoryStore {
            ORDER BY scope_rank ASC, last_activity ASC, thread_id ASC
            LIMIT ?`,
       )
-      .all(input.idleBeforeMs, input.limit) as Array<{
+      .all(
+        input.idleBeforeMs,
+        input.idleAfterMs ?? null,
+        input.idleAfterMs ?? null,
+        input.limit,
+      ) as Array<{
       owner_id: string;
       thread_id: string;
       project_id: string | null;

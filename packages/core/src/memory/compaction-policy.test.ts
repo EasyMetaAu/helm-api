@@ -250,8 +250,13 @@ describe("resolveCompactionTunables — config overrides over internal priors", 
   });
 
   it("a written override wins per-field; omitted siblings keep their priors", () => {
-    const t = resolveCompactionTunables({ idle_flush_s: 7200, force_context_ratio: 0.9 });
+    const t = resolveCompactionTunables({
+      idle_flush_s: 7200,
+      idle_flush_max_age_s: 86_400,
+      force_context_ratio: 0.9,
+    });
     expect(t.idleFlushS).toBe(7200);
+    expect(t.idleFlushMaxAgeS).toBe(86_400);
     expect(t.forceContextRatio).toBe(0.9);
     expect(t.segmentMinTokens).toBe(AUTO_PRIORS.segmentMinTokens);
     expect(t.minRecentMessages).toBe(AUTO_PRIORS.minRecentMessages);

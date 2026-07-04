@@ -11,6 +11,8 @@
 #                               # uncovered segment reaches this many tokens
 #   idle_flush_s: 3600          # fold a quiet thread's whole uncovered history
 #                               # after this many seconds without a new message
+#   idle_flush_max_age_s: 86400 # optional: skip idle backfill older than this
+#                               # many seconds (unset = process all history)
 #   force_context_ratio: 0.8    # force compaction once the active footprint
 #                               # reaches this fraction of the model's window
 #   min_recent_messages: 4      # keep floor: at least this many recent messages…

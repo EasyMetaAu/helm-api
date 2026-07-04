@@ -47,12 +47,16 @@ export async function maybeEnqueueIdleObserverJobs(deps: IdleFlushDeps): Promise
   }
 
   try {
-    const idleBeforeMs =
-      deps.now().getTime() - resolveCompactionTunables(deps.compaction).idleFlushS * 1000;
-    const candidates = await listCandidates.call(deps.memoryStore, {
-      idleBeforeMs,
+    const nowMs = deps.now().getTime();
+    const tunables = resolveCompactionTunables(deps.compaction);
+    const input: { idleBeforeMs: number; idleAfterMs?: number; limit: number } = {
+      idleBeforeMs: nowMs - tunables.idleFlushS * 1000,
       limit: deps.batchSize,
-    });
+    };
+    if (tunables.idleFlushMaxAgeS !== undefined) {
+      input.idleAfterMs = nowMs - tunables.idleFlushMaxAgeS * 1000;
+    }
+    const candidates = await listCandidates.call(deps.memoryStore, input);
     for (const { accountId, threadId, projectId, resourceId } of candidates) {
       // Per-thread guard: one thread's enqueue failure must not skip the rest.
       try {
