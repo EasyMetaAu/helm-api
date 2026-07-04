@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-07-04 · 记忆页只读运行状态面板（Admin memory observability，docs/08/11/13，原则 1/7）
+
+- **背景（Lukin）**：`/admin/memory` 只能看到已经形成的 facts/reflections，看不到 raw message 是否还在进入、后台 job 是否在跑、队列是否滞后或是否有 running lease 卡住；排障需要直接查日志/SQLite。
+- **接口决策**：新增 `GET /admin/api/memory/stats`，复用记忆页现有 scope/key 过滤语义，返回线程、消息、观察、事实、反思、job 状态分布、最早 pending/running、最近 activity 与生成时间。
+- **安全/性能决策**：接口只读、无请求正文、无明文 key/payload 输出；统计用 count/max/min 聚合，不触发 worker、不创建 job、不读取正文内容。全局视图直接聚合原表，只有选中 scope/key 时才 join scope 过滤，避免打开页面就反复扫全量 join。缺少 stats 能力的 store 返回 503，不影响现有记忆管理和网关请求路径。
+- **UI 决策**：记忆页顶部增加状态面板，15 秒轻量刷新一次；按当前选中的 scope/key 同步切换，能直接看到 queued/running/stale、滞后时间、raw input、learned output 和 jobs by type。
+- **验证计划**：覆盖 SQLite/Postgres store 聚合、admin route、admin 页面加载/筛选联动与 locale 文案；再跑目标 Vitest、typecheck、lint/build。
+
 ## 2026-07-04 · Claude scoped weekly quota 不触发账号级限流（Admin providers / OAuth quota，docs/04/11，原则 3/5/7）
 
 - **背景（Lukin）**：providers 页出现 `7d · Fable` 100% 后，账号被显示为“已限流”，并且路由池把整个 Anthropic OAuth 账号排除；但账号级 `7d` 全模型额度仍有余量，只有 Fable / Sonnet 这类 scoped model cap 不可用。
@@ -86,18 +94,10 @@
 - **价格决策**：`anthropic/claude-fable-5` 已按官方 Anthropic 价格配置为 input `$10/M`、output `$50/M`、cache hit `$1/M`、5-minute cache write `$12.50/M`；官方还有 1-hour cache write `$20/M`，但当前 Helm pricing schema 只有一个 `cacheWritePerMTokUsd`，所以仍记录 5-minute rate，避免在本次小修里扩大 telemetry schema。
 - **验证**：真实上游 usage payload 与 `/v1/models` 已本机核验；新增 parser、gateway quota pull、providers 页面回归测试。目标 parser/admin 页面测试与 typecheck 绿；gateway SQLite 相关测试仍被本机 `better-sqlite3` Node ABI 不匹配阻塞。
 
-## 2026-07-02 · OAuth 测试成功与 quota PULL 同步账号可用状态（Admin providers / OAuth cooldown，docs/04/11，原则 3/5/7）
-
-- **背景（Lukin）**：生产中 `riverathomas6094@outlook.com` 已能通过单账号 Test 成功返回，但 providers 页仍因旧 `usage_limited_until_ms` 显示“已限流 / 3 天后恢复”，正常路由池也继续跳过该账号。
-- **修复决策**：`GET /admin/api/oauth/quota` 对“已 park 账号”把成功 quota PULL 视作可信状态同步：窗口 near-full 时用真实恢复窗口 `replace` 旧 cooldown；窗口干净时清空 cooldown；未 park 账号仍不会因 PULL 预先 park。
-- **测试路径决策**：Providers 页 Test 仍使用独立 per-account client，不写 request telemetry / payload，也不扰动主路由 breaker；但测试成功会写入 `oauth_usage` 并清空旧 auto-park cooldown，因为它消耗真实上游额度且证明账号当前可用。
-- **UI 决策**：Test 成功后自动 `invalidateAll()`，让状态 pill、Today 用量和 quota/cooldown 立即重新读取，而不是要求操作员手动刷新。
-- **验证**：新增 admin OAuth route 回归覆盖干净窗口清 cooldown、旧 7d cooldown 替换为 active 5h、Test 成功记录用量并清 cooldown；目标 Vitest 53/53 绿，typecheck / build 绿。本机全量 SQLite 测试受 `better-sqlite3` Node ABI 不匹配阻塞，非业务断言失败。
-
 ## 历史条目摘要（最近 2 条）
 
+- **2026-07-02 · OAuth 测试成功与 quota PULL 同步账号可用状态（Admin providers / OAuth cooldown，docs/04/11，原则 3/5/7）**：已 park 账号的成功 quota PULL/Test 会用真实 quota 状态替换或清空旧 cooldown，并刷新 providers 页状态。
 - **2026-07-01 · Claude Code 日期指纹入站归一化（Anthropic protocol / native passthrough，docs/05/07，原则 7/8）**：Helm 在 Anthropic native passthrough 与互译路径中归一化 Claude Code 日期指纹，并用 mutation ledger 记录改写；新增 core/gateway 回归覆盖。
-- **2026-07-01 · admin telemetry 聚合改为列化延迟 + 覆盖索引（Admin observability / store，docs/07/11，原则 7）**：`/admin/api/stats` 慢源于从 `decision_json` 聚合延迟并回表扫描；新增 `telemetry.latency_total_ms` 与全局/key 维度覆盖索引，让 dashboard 读列化数据并减少 SQLite 同步阻塞。
 
 ## 更早历史总览
 

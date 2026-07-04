@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiKeyView } from '$lib/api/keys.js';
-import type { Fact, MemoryScope, Reflection } from '$lib/api/memory.js';
+import type { Fact, MemoryScope, MemoryStats, Reflection } from '$lib/api/memory.js';
 import MemoryPage from './+page.svelte';
 
 // The page consumes scopes + keys from `load` (mocked via the `data` prop) and
@@ -11,6 +11,7 @@ import MemoryPage from './+page.svelte';
 
 const listFacts = vi.fn();
 const listReflections = vi.fn();
+const getMemoryStats = vi.fn();
 const resolveKey = vi.fn();
 const createFact = vi.fn();
 const updateFact = vi.fn();
@@ -18,6 +19,7 @@ const updateReflection = vi.fn();
 const deleteFact = vi.fn();
 const deleteReflection = vi.fn();
 vi.mock('$lib/api/memory.js', () => ({
+  getMemoryStats: (...args: unknown[]) => getMemoryStats(...args),
   listFacts: (...args: unknown[]) => listFacts(...args),
   listReflections: (...args: unknown[]) => listReflections(...args),
   resolveKey: (...args: unknown[]) => resolveKey(...args),
@@ -107,14 +109,54 @@ function key(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView {
   };
 }
 
+function stats(overrides: Partial<MemoryStats> = {}): MemoryStats {
+  return {
+    generatedAt: '2026-07-04T03:40:00.000Z',
+    scope: {},
+    storage: {
+      threads: 50,
+      messages: 1249,
+      observations: 19,
+      facts: 0,
+      activeFacts: 0,
+      reflections: 0,
+      activeReflections: 0,
+    },
+    queue: {
+      pending: 29,
+      running: 3,
+      done: 19,
+      failed: 0,
+      open: 32,
+      staleRunning: 0,
+      oldestPendingAt: '2026-07-04T03:34:25.000Z',
+      oldestRunningAt: '2026-07-04T03:38:14.000Z',
+      newestDoneAt: '2026-07-04T03:39:20.000Z',
+      newestFailedAt: null,
+      byType: [
+        { type: 'observer', status: 'pending', count: 29 },
+        { type: 'observer', status: 'running', count: 3 },
+      ],
+    },
+    activity: {
+      lastMessageAt: '2026-07-04T03:20:00.000Z',
+      lastObservationAt: '2026-07-04T03:39:20.000Z',
+      lastFactUpdatedAt: null,
+      lastReflectionUpdatedAt: null,
+    },
+    ...overrides,
+  };
+}
+
 function renderPage(scopes: MemoryScope[], keys: ApiKeyView[] = [key('k1')]) {
-  return render(MemoryPage, { data: { scopes, keys } });
+  return render(MemoryPage, { data: { scopes, keys, initialStats: stats() } });
 }
 
 describe('memory page', () => {
   beforeEach(() => {
     listFacts.mockReset();
     listReflections.mockReset();
+    getMemoryStats.mockReset();
     resolveKey.mockReset();
     createFact.mockReset();
     updateFact.mockReset();
@@ -123,11 +165,15 @@ describe('memory page', () => {
     deleteReflection.mockReset();
     listFacts.mockResolvedValue({ rows: [fact('f1'), fact('f2')], total: 2 });
     listReflections.mockResolvedValue({ rows: [reflection('r1')], total: 1 });
+    getMemoryStats.mockResolvedValue(stats());
     resolveKey.mockResolvedValue({ key_id: 'k1', accountId: 'acct', projectId: 'proj-a' });
   });
 
   it('renders both tabs and the By Scope table of scopes', () => {
     renderPage([scope(), scope({ projectId: 'proj-b', factCount: 1, reflectionCount: 0 })]);
+    expect(screen.getByTestId('memory-stats')).toBeInTheDocument();
+    expect(screen.getByText('32')).toBeInTheDocument();
+    expect(screen.getByText(/29 pending/i)).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /by scope/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /by key/i })).toBeInTheDocument();
     // The By Scope tab is active by default: scope rows are listed.
@@ -142,6 +188,9 @@ describe('memory page', () => {
 
     await waitFor(() => expect(listFacts).toHaveBeenCalled());
     expect(listReflections).toHaveBeenCalled();
+    expect(getMemoryStats).toHaveBeenCalledWith(
+      expect.objectContaining({ accountId: 'acct', projectId: 'proj-a' }),
+    );
 
     // Facts table renders a row per fact with its text.
     await waitFor(() => expect(screen.getAllByTestId('fact-row')).toHaveLength(2));
@@ -166,6 +215,11 @@ describe('memory page', () => {
     await waitFor(() => expect(resolveKey).toHaveBeenCalledWith('k1'));
     // Resolving the key loads that account/project scope's facts.
     await waitFor(() => expect(listFacts).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(getMemoryStats).toHaveBeenCalledWith(
+        expect.objectContaining({ accountId: 'acct', projectId: 'proj-a' }),
+      ),
+    );
     await waitFor(() => expect(screen.getAllByTestId('fact-row').length).toBeGreaterThan(0));
   });
 

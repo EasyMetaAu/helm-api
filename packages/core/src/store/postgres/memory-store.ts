@@ -39,6 +39,8 @@ import { forgettingScore, type ScoreConfig } from "../../memory/forgetting/score
 import { sha256Hex } from "../../memory/message-hash.js";
 import { reciprocalRankFusion } from "../../memory/recall/rrf.js";
 import {
+  type MemoryAdminStats,
+  type MemoryAdminStatsScope,
   MemoryFactContentHashConflictError,
   type MemoryJobStatus,
   type MemoryMessageArchiveRow,
@@ -76,6 +78,20 @@ function reflectionScopeWhere(scope: ReflectionScope): SQL {
 // How long a claimed (`running`) job stays exclusively leased — pg mirror of the
 // sqlite adapter's constant (same contract, see its comment).
 const RUNNING_LEASE_MS = 5 * 60_000;
+
+function dateOrNull(ms: number | string | null | undefined): Date | null {
+  return ms === null || ms === undefined ? null : new Date(Number(ms));
+}
+
+function numberOf(value: number | string | bigint | null | undefined): number {
+  return value === null || value === undefined ? 0 : Number(value);
+}
+
+function pgRows<T>(result: unknown): T[] {
+  if (Array.isArray(result)) return result as T[];
+  const maybe = result as { rows?: T[] };
+  return Array.isArray(maybe.rows) ? maybe.rows : [];
+}
 
 // Observation read scope — pg mirror of the sqlite adapter's observationScopeWhere
 // (same contract, different dialect). Thread scope = the thread's own rows;
@@ -1168,6 +1184,225 @@ export class PgMemoryStore implements MemoryStore {
       reflectionCount: Number(r.reflectionCount),
       lastUpdated: r.lastUpdated !== null ? new Date(Number(r.lastUpdated)) : null,
     }));
+  }
+
+  async getMemoryAdminStats(
+    input: MemoryAdminStatsScope & { now: Date },
+  ): Promise<MemoryAdminStats> {
+    const accountId = input.accountId ?? null;
+    const projectId = input.projectId ?? null;
+    const resourceId = input.resourceId ?? null;
+    const threadId = input.threadId ?? null;
+    const noScopeFilter =
+      accountId === null && projectId === null && resourceId === null && threadId === null;
+    const threads = pgRows<{ n: number | string }>(
+      await this.db.execute(
+        noScopeFilter
+          ? sql`SELECT COUNT(*)::bigint AS n FROM memory_threads`
+          : sql`
+              SELECT COUNT(*)::bigint AS n
+                FROM memory_threads t
+               WHERE (${accountId}::text IS NULL OR t.owner_id = ${accountId})
+                 AND (${projectId}::text IS NULL OR t.project_id = ${projectId})
+                 AND (${resourceId}::text IS NULL OR t.resource_id = ${resourceId})
+                 AND (${threadId}::text IS NULL OR t.id = ${threadId})
+            `,
+      ),
+    )[0];
+    const messages = pgRows<{ n: number | string; lastAt: number | string | null }>(
+      await this.db.execute(
+        noScopeFilter
+          ? sql`SELECT COUNT(*)::bigint AS n, MAX(created_at)::bigint AS "lastAt" FROM memory_messages`
+          : sql`
+              SELECT COUNT(*)::bigint AS n, MAX(m.created_at)::bigint AS "lastAt"
+                FROM memory_messages m
+                JOIN memory_threads t ON t.id = m.thread_id
+               WHERE (${accountId}::text IS NULL OR t.owner_id = ${accountId})
+                 AND (${projectId}::text IS NULL OR t.project_id = ${projectId})
+                 AND (${resourceId}::text IS NULL OR t.resource_id = ${resourceId})
+                 AND (${threadId}::text IS NULL OR t.id = ${threadId})
+            `,
+      ),
+    )[0];
+    const observations = pgRows<{ n: number | string; lastAt: number | string | null }>(
+      await this.db.execute(
+        noScopeFilter
+          ? sql`SELECT COUNT(*)::bigint AS n, MAX(observed_at)::bigint AS "lastAt" FROM memory_observations`
+          : sql`
+              SELECT COUNT(*)::bigint AS n, MAX(o.observed_at)::bigint AS "lastAt"
+                FROM memory_observations o
+                JOIN memory_threads t ON t.id = o.thread_id
+               WHERE (${accountId}::text IS NULL OR t.owner_id = ${accountId})
+                 AND (${projectId}::text IS NULL OR t.project_id = ${projectId})
+                 AND (${resourceId}::text IS NULL OR t.resource_id = ${resourceId})
+                 AND (${threadId}::text IS NULL OR t.id = ${threadId})
+            `,
+      ),
+    )[0];
+    const facts = pgRows<{
+      n: number | string;
+      active: number | string | null;
+      lastAt: number | string | null;
+    }>(
+      await this.db.execute(
+        noScopeFilter
+          ? sql`
+              SELECT COUNT(*)::bigint AS n,
+                     SUM(CASE WHEN status = 'active' AND expired_at IS NULL THEN 1 ELSE 0 END)::bigint AS active,
+                     MAX(updated_at)::bigint AS "lastAt"
+                FROM memory_facts
+            `
+          : sql`
+              SELECT COUNT(*)::bigint AS n,
+                     SUM(CASE WHEN status = 'active' AND expired_at IS NULL THEN 1 ELSE 0 END)::bigint AS active,
+                     MAX(updated_at)::bigint AS "lastAt"
+                FROM memory_facts
+               WHERE (${accountId}::text IS NULL OR owner_id = ${accountId})
+                 AND (${projectId}::text IS NULL OR project_id = ${projectId})
+                 AND (${resourceId}::text IS NULL OR resource_id = ${resourceId})
+                 AND (${threadId}::text IS NULL OR thread_id = ${threadId})
+            `,
+      ),
+    )[0];
+    const reflections = pgRows<{
+      n: number | string;
+      active: number | string | null;
+      lastAt: number | string | null;
+    }>(
+      await this.db.execute(
+        noScopeFilter
+          ? sql`
+              SELECT COUNT(*)::bigint AS n,
+                     SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END)::bigint AS active,
+                     MAX(updated_at)::bigint AS "lastAt"
+                FROM memory_reflections
+            `
+          : sql`
+              SELECT COUNT(*)::bigint AS n,
+                     SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END)::bigint AS active,
+                     MAX(updated_at)::bigint AS "lastAt"
+                FROM memory_reflections
+               WHERE (${accountId}::text IS NULL OR owner_id = ${accountId})
+                 AND (${projectId}::text IS NULL OR project_id = ${projectId})
+                 AND (${resourceId}::text IS NULL OR resource_id = ${resourceId})
+                 AND (${threadId}::text IS NULL OR thread_id = ${threadId})
+            `,
+      ),
+    )[0];
+    const queueRows = pgRows<{ status: string; n: number | string }>(
+      await this.db.execute(
+        noScopeFilter
+          ? sql`
+              SELECT status, COUNT(*)::bigint AS n
+                FROM memory_jobs
+               GROUP BY status
+            `
+          : sql`
+              SELECT status, COUNT(*)::bigint AS n
+                FROM memory_jobs
+               WHERE (${accountId}::text IS NULL OR scope_id::jsonb ->> 'accountId' = ${accountId})
+                 AND (${projectId}::text IS NULL OR scope_id::jsonb ->> 'projectId' = ${projectId})
+                 AND (${resourceId}::text IS NULL OR scope_id::jsonb ->> 'resourceId' = ${resourceId})
+                 AND (${threadId}::text IS NULL OR scope_id::jsonb ->> 'threadId' = ${threadId})
+               GROUP BY status
+            `,
+      ),
+    );
+    const queue = { pending: 0, running: 0, done: 0, failed: 0 };
+    for (const row of queueRows) {
+      if (row.status === "pending") queue.pending = numberOf(row.n);
+      else if (row.status === "running") queue.running = numberOf(row.n);
+      else if (row.status === "done") queue.done = numberOf(row.n);
+      else if (row.status === "failed") queue.failed = numberOf(row.n);
+    }
+    const queueTimes = pgRows<{
+      oldestPendingAt: number | string | null;
+      oldestRunningAt: number | string | null;
+      newestDoneAt: number | string | null;
+      newestFailedAt: number | string | null;
+      staleRunning: number | string | null;
+    }>(
+      await this.db.execute(
+        noScopeFilter
+          ? sql`
+              SELECT
+                MIN(CASE WHEN status = 'pending' THEN created_at END)::bigint AS "oldestPendingAt",
+                MIN(CASE WHEN status = 'running' THEN updated_at END)::bigint AS "oldestRunningAt",
+                MAX(CASE WHEN status = 'done' THEN updated_at END)::bigint AS "newestDoneAt",
+                MAX(CASE WHEN status = 'failed' THEN updated_at END)::bigint AS "newestFailedAt",
+                SUM(CASE WHEN status = 'running' AND updated_at <= ${input.now.getTime() - RUNNING_LEASE_MS} THEN 1 ELSE 0 END)::bigint AS "staleRunning"
+               FROM memory_jobs
+            `
+          : sql`
+              SELECT
+                MIN(CASE WHEN status = 'pending' THEN created_at END)::bigint AS "oldestPendingAt",
+                MIN(CASE WHEN status = 'running' THEN updated_at END)::bigint AS "oldestRunningAt",
+                MAX(CASE WHEN status = 'done' THEN updated_at END)::bigint AS "newestDoneAt",
+                MAX(CASE WHEN status = 'failed' THEN updated_at END)::bigint AS "newestFailedAt",
+                SUM(CASE WHEN status = 'running' AND updated_at <= ${input.now.getTime() - RUNNING_LEASE_MS} THEN 1 ELSE 0 END)::bigint AS "staleRunning"
+               FROM memory_jobs
+              WHERE (${accountId}::text IS NULL OR scope_id::jsonb ->> 'accountId' = ${accountId})
+                AND (${projectId}::text IS NULL OR scope_id::jsonb ->> 'projectId' = ${projectId})
+                AND (${resourceId}::text IS NULL OR scope_id::jsonb ->> 'resourceId' = ${resourceId})
+                AND (${threadId}::text IS NULL OR scope_id::jsonb ->> 'threadId' = ${threadId})
+            `,
+      ),
+    )[0];
+    const byType = pgRows<{ type: string; status: string; count: number | string }>(
+      await this.db.execute(
+        noScopeFilter
+          ? sql`
+              SELECT type, status, COUNT(*)::bigint AS count
+                FROM memory_jobs
+               GROUP BY type, status
+               ORDER BY type ASC, status ASC
+            `
+          : sql`
+              SELECT type, status, COUNT(*)::bigint AS count
+                FROM memory_jobs
+               WHERE (${accountId}::text IS NULL OR scope_id::jsonb ->> 'accountId' = ${accountId})
+                 AND (${projectId}::text IS NULL OR scope_id::jsonb ->> 'projectId' = ${projectId})
+                 AND (${resourceId}::text IS NULL OR scope_id::jsonb ->> 'resourceId' = ${resourceId})
+                 AND (${threadId}::text IS NULL OR scope_id::jsonb ->> 'threadId' = ${threadId})
+               GROUP BY type, status
+               ORDER BY type ASC, status ASC
+            `,
+      ),
+    ).map((r) => ({ type: r.type, status: r.status, count: numberOf(r.count) }));
+    return {
+      generatedAt: input.now,
+      scope: {
+        ...(input.accountId !== undefined ? { accountId: input.accountId } : {}),
+        ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+        ...(input.resourceId !== undefined ? { resourceId: input.resourceId } : {}),
+        ...(input.threadId !== undefined ? { threadId: input.threadId } : {}),
+      },
+      storage: {
+        threads: numberOf(threads?.n),
+        messages: numberOf(messages?.n),
+        observations: numberOf(observations?.n),
+        facts: numberOf(facts?.n),
+        activeFacts: numberOf(facts?.active),
+        reflections: numberOf(reflections?.n),
+        activeReflections: numberOf(reflections?.active),
+      },
+      queue: {
+        ...queue,
+        open: queue.pending + queue.running,
+        staleRunning: numberOf(queueTimes?.staleRunning),
+        oldestPendingAt: dateOrNull(queueTimes?.oldestPendingAt),
+        oldestRunningAt: dateOrNull(queueTimes?.oldestRunningAt),
+        newestDoneAt: dateOrNull(queueTimes?.newestDoneAt),
+        newestFailedAt: dateOrNull(queueTimes?.newestFailedAt),
+        byType,
+      },
+      activity: {
+        lastMessageAt: dateOrNull(messages?.lastAt),
+        lastObservationAt: dateOrNull(observations?.lastAt),
+        lastFactUpdatedAt: dateOrNull(facts?.lastAt),
+        lastReflectionUpdatedAt: dateOrNull(reflections?.lastAt),
+      },
+    };
   }
 
   async getFactById(input: { accountId: string; id: string }): Promise<Fact | null> {

@@ -74,6 +74,44 @@ export interface KeyScope {
   projectId: string | null;
 }
 
+export interface MemoryStats {
+  generatedAt: string;
+  scope: {
+    accountId?: string;
+    projectId?: string;
+    resourceId?: string;
+    threadId?: string;
+  };
+  storage: {
+    threads: number;
+    messages: number;
+    observations: number;
+    facts: number;
+    activeFacts: number;
+    reflections: number;
+    activeReflections: number;
+  };
+  queue: {
+    pending: number;
+    running: number;
+    done: number;
+    failed: number;
+    open: number;
+    staleRunning: number;
+    oldestPendingAt: string | null;
+    oldestRunningAt: string | null;
+    newestDoneAt: string | null;
+    newestFailedAt: string | null;
+    byType: Array<{ type: string; status: string; count: number }>;
+  };
+  activity: {
+    lastMessageAt: string | null;
+    lastObservationAt: string | null;
+    lastFactUpdatedAt: string | null;
+    lastReflectionUpdatedAt: string | null;
+  };
+}
+
 // Fact list query: scope narrowing + status visibility ('all' shows superseded /
 // archived / pruned rows too — a management read, unlike the inject hot path).
 export interface FactQuery {
@@ -192,6 +230,14 @@ export async function resolveKey(keyId: string): Promise<KeyScope> {
     headers: { accept: 'application/json' },
   });
   return asJson<KeyScope>(res);
+}
+
+// GET /admin/api/memory/stats -> operational snapshot for the status panels.
+export async function getMemoryStats(params: FactQuery = {}): Promise<MemoryStats> {
+  const res = await fetch(`${BASE}/stats${queryString({ ...params })}`, {
+    headers: { accept: 'application/json' },
+  });
+  return asJson<MemoryStats>(res);
 }
 
 // GET /admin/api/memory/facts -> { rows, total } for a scope + status filter.

@@ -39,6 +39,8 @@ import { forgettingScore, type ScoreConfig } from "../../memory/forgetting/score
 import { sha256Hex } from "../../memory/message-hash.js";
 import { reciprocalRankFusion } from "../../memory/recall/rrf.js";
 import {
+  type MemoryAdminStats,
+  type MemoryAdminStatsScope,
   MemoryFactContentHashConflictError,
   type MemoryJobStatus,
   type MemoryMessageArchiveRow,
@@ -79,6 +81,14 @@ function reflectionScopeWhere(scope: ReflectionScope): SQL {
 // and re-claims it — without this, the enqueue dedupe against running rows would
 // block the scope's queue FOREVER. 5 min is far beyond any real tick's work.
 const RUNNING_LEASE_MS = 5 * 60_000;
+
+function dateOrNull(ms: number | null | undefined): Date | null {
+  return ms === null || ms === undefined ? null : new Date(ms);
+}
+
+function countOf(row: { n?: number } | undefined): number {
+  return row?.n ?? 0;
+}
 
 // Observation read scope. Two shapes (docs/08):
 //  - thread scope (inject + observer): the thread's own rows, owner-checked;
@@ -1107,6 +1117,222 @@ export class SqliteMemoryStore implements MemoryStore {
       reflectionCount: r.reflectionCount,
       lastUpdated: r.lastUpdated !== null ? new Date(r.lastUpdated) : null,
     }));
+  }
+
+  async getMemoryAdminStats(
+    input: MemoryAdminStatsScope & { now: Date },
+  ): Promise<MemoryAdminStats> {
+    const accountId = input.accountId ?? null;
+    const projectId = input.projectId ?? null;
+    const resourceId = input.resourceId ?? null;
+    const threadId = input.threadId ?? null;
+    const noScopeFilter =
+      accountId === null && projectId === null && resourceId === null && threadId === null;
+    const threadArgs = [
+      accountId,
+      accountId,
+      projectId,
+      projectId,
+      resourceId,
+      resourceId,
+      threadId,
+      threadId,
+    ];
+    const itemArgs = [
+      accountId,
+      accountId,
+      projectId,
+      projectId,
+      resourceId,
+      resourceId,
+      threadId,
+      threadId,
+    ];
+    const jobArgs = [
+      accountId,
+      accountId,
+      projectId,
+      projectId,
+      resourceId,
+      resourceId,
+      threadId,
+      threadId,
+    ];
+    const threadWhere = `
+      (? IS NULL OR t.owner_id = ?)
+      AND (? IS NULL OR t.project_id = ?)
+      AND (? IS NULL OR t.resource_id = ?)
+      AND (? IS NULL OR t.id = ?)
+    `;
+    const itemWhere = `
+      (? IS NULL OR owner_id = ?)
+      AND (? IS NULL OR project_id = ?)
+      AND (? IS NULL OR resource_id = ?)
+      AND (? IS NULL OR thread_id = ?)
+    `;
+    const jobWhere = `
+      (? IS NULL OR json_extract(scope_id, '$.accountId') = ?)
+      AND (? IS NULL OR json_extract(scope_id, '$.projectId') = ?)
+      AND (? IS NULL OR json_extract(scope_id, '$.resourceId') = ?)
+      AND (? IS NULL OR json_extract(scope_id, '$.threadId') = ?)
+    `;
+    const threads = (
+      noScopeFilter
+        ? this.db.$sqlite.prepare("SELECT COUNT(*) AS n FROM memory_threads").get()
+        : this.db.$sqlite
+            .prepare(`SELECT COUNT(*) AS n FROM memory_threads t WHERE ${threadWhere}`)
+            .get(...threadArgs)
+    ) as { n: number } | undefined;
+    const messages = (
+      noScopeFilter
+        ? this.db.$sqlite
+            .prepare("SELECT COUNT(*) AS n, MAX(created_at) AS lastAt FROM memory_messages")
+            .get()
+        : this.db.$sqlite
+            .prepare(
+              `SELECT COUNT(*) AS n, MAX(m.created_at) AS lastAt
+          FROM memory_messages m
+           JOIN memory_threads t ON t.id = m.thread_id
+          WHERE ${threadWhere}
+        `,
+            )
+            .get(...threadArgs)
+    ) as { n: number; lastAt: number | null } | undefined;
+    const observations = (
+      noScopeFilter
+        ? this.db.$sqlite
+            .prepare("SELECT COUNT(*) AS n, MAX(observed_at) AS lastAt FROM memory_observations")
+            .get()
+        : this.db.$sqlite
+            .prepare(
+              `SELECT COUNT(*) AS n, MAX(o.observed_at) AS lastAt
+          FROM memory_observations o
+           JOIN memory_threads t ON t.id = o.thread_id
+          WHERE ${threadWhere}
+        `,
+            )
+            .get(...threadArgs)
+    ) as { n: number; lastAt: number | null } | undefined;
+    const facts = (
+      noScopeFilter
+        ? this.db.$sqlite
+            .prepare(
+              `SELECT COUNT(*) AS n,
+                SUM(CASE WHEN status = 'active' AND expired_at IS NULL THEN 1 ELSE 0 END) AS active,
+                MAX(updated_at) AS lastAt
+           FROM memory_facts`,
+            )
+            .get()
+        : this.db.$sqlite
+            .prepare(
+              `SELECT COUNT(*) AS n,
+                SUM(CASE WHEN status = 'active' AND expired_at IS NULL THEN 1 ELSE 0 END) AS active,
+                MAX(updated_at) AS lastAt
+           FROM memory_facts
+          WHERE ${itemWhere}`,
+            )
+            .get(...itemArgs)
+    ) as { n: number; active: number | null; lastAt: number | null } | undefined;
+    const reflections = (
+      noScopeFilter
+        ? this.db.$sqlite
+            .prepare(
+              `SELECT COUNT(*) AS n,
+                SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active,
+                MAX(updated_at) AS lastAt
+           FROM memory_reflections`,
+            )
+            .get()
+        : this.db.$sqlite
+            .prepare(
+              `SELECT COUNT(*) AS n,
+                SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active,
+                MAX(updated_at) AS lastAt
+           FROM memory_reflections
+          WHERE ${itemWhere}`,
+            )
+            .get(...itemArgs)
+    ) as { n: number; active: number | null; lastAt: number | null } | undefined;
+    const jobWhereSql = noScopeFilter ? "" : `WHERE ${jobWhere}`;
+    const scopedJobArgs = noScopeFilter ? [] : jobArgs;
+    const queueRows = this.db.$sqlite
+      .prepare(
+        `SELECT status, COUNT(*) AS n
+           FROM memory_jobs
+          ${jobWhereSql}
+          GROUP BY status`,
+      )
+      .all(...scopedJobArgs) as Array<{ status: string; n: number }>;
+    const queue = { pending: 0, running: 0, done: 0, failed: 0 };
+    for (const row of queueRows) {
+      if (row.status === "pending") queue.pending = row.n;
+      else if (row.status === "running") queue.running = row.n;
+      else if (row.status === "done") queue.done = row.n;
+      else if (row.status === "failed") queue.failed = row.n;
+    }
+    const queueTimes = this.db.$sqlite
+      .prepare(
+        `SELECT
+            MIN(CASE WHEN status = 'pending' THEN created_at END) AS oldestPendingAt,
+            MIN(CASE WHEN status = 'running' THEN updated_at END) AS oldestRunningAt,
+            MAX(CASE WHEN status = 'done' THEN updated_at END) AS newestDoneAt,
+            MAX(CASE WHEN status = 'failed' THEN updated_at END) AS newestFailedAt,
+           SUM(CASE WHEN status = 'running' AND updated_at <= ? THEN 1 ELSE 0 END) AS staleRunning
+           FROM memory_jobs
+          ${jobWhereSql}`,
+      )
+      .get(input.now.getTime() - RUNNING_LEASE_MS, ...scopedJobArgs) as
+      | {
+          oldestPendingAt: number | null;
+          oldestRunningAt: number | null;
+          newestDoneAt: number | null;
+          newestFailedAt: number | null;
+          staleRunning: number | null;
+        }
+      | undefined;
+    const byType = this.db.$sqlite
+      .prepare(
+        `SELECT type, status, COUNT(*) AS count
+           FROM memory_jobs
+          ${jobWhereSql}
+          GROUP BY type, status
+          ORDER BY type ASC, status ASC`,
+      )
+      .all(...scopedJobArgs) as Array<{ type: string; status: string; count: number }>;
+    return {
+      generatedAt: input.now,
+      scope: {
+        ...(input.accountId !== undefined ? { accountId: input.accountId } : {}),
+        ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+        ...(input.resourceId !== undefined ? { resourceId: input.resourceId } : {}),
+        ...(input.threadId !== undefined ? { threadId: input.threadId } : {}),
+      },
+      storage: {
+        threads: countOf(threads),
+        messages: countOf(messages),
+        observations: countOf(observations),
+        facts: countOf(facts),
+        activeFacts: facts?.active ?? 0,
+        reflections: countOf(reflections),
+        activeReflections: reflections?.active ?? 0,
+      },
+      queue: {
+        ...queue,
+        open: queue.pending + queue.running,
+        staleRunning: queueTimes?.staleRunning ?? 0,
+        oldestPendingAt: dateOrNull(queueTimes?.oldestPendingAt),
+        oldestRunningAt: dateOrNull(queueTimes?.oldestRunningAt),
+        newestDoneAt: dateOrNull(queueTimes?.newestDoneAt),
+        newestFailedAt: dateOrNull(queueTimes?.newestFailedAt),
+        byType,
+      },
+      activity: {
+        lastMessageAt: dateOrNull(messages?.lastAt),
+        lastObservationAt: dateOrNull(observations?.lastAt),
+        lastFactUpdatedAt: dateOrNull(facts?.lastAt),
+        lastReflectionUpdatedAt: dateOrNull(reflections?.lastAt),
+      },
+    };
   }
 
   // Read ONE fact by id, account-guarded (cross-tenant id → null), ANY status.

@@ -74,6 +74,24 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
     return c.json(scopes);
   });
 
+  // GET /memory/stats — operational snapshot for the top status panels: queue
+  // depth, stale running leases, raw/derived counts, and recent activity. Same
+  // scope filters as the table reads; read-only and body-free.
+  app.get("/admin/api/memory/stats", async (c) => {
+    const store = resolveStore(c, deps);
+    if (store instanceof Response) return store;
+    if (store.getMemoryAdminStats === undefined) {
+      return c.json({ error: "memory stats unavailable" }, 503);
+    }
+    const accountId = c.req.query("accountId");
+    const stats = await store.getMemoryAdminStats({
+      ...(accountId !== undefined && accountId !== "" ? { accountId } : {}),
+      ...scopeFromQuery(c),
+      now: new Date(),
+    });
+    return c.json(stats);
+  });
+
   // GET /memory/by-key/:keyId — resolve a key to its memory scope (account +
   // EFFECTIVE project) for the "By Key" tab. The effective project mirrors the
   // request path: an explicit memory_project_id (shared pool) else the key's own
