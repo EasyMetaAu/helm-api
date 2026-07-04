@@ -2802,6 +2802,15 @@ export async function buildServer(
   if (process.env.HELM_MEMORY_WORKER_DISABLED !== "1") {
     const intervalRaw = Number(process.env.HELM_MEMORY_WORKER_INTERVAL_MS ?? 60_000);
     const intervalMs = Number.isFinite(intervalRaw) && intervalRaw > 0 ? intervalRaw : 60_000;
+    const batchRaw = Number(process.env.HELM_MEMORY_WORKER_BATCH_SIZE ?? 50);
+    const memoryWorkerBatchSize =
+      Number.isFinite(batchRaw) && batchRaw > 0 ? Math.floor(batchRaw) : 50;
+    const maxBatchesRaw = Number(process.env.HELM_MEMORY_WORKER_MAX_BATCHES_PER_DRAIN ?? 10);
+    const memoryWorkerMaxBatches =
+      Number.isFinite(maxBatchesRaw) && maxBatchesRaw > 0 ? Math.floor(maxBatchesRaw) : 10;
+    const maxDrainRaw = Number(process.env.HELM_MEMORY_WORKER_MAX_DRAIN_MS ?? 30_000);
+    const memoryWorkerMaxDrainMs =
+      Number.isFinite(maxDrainRaw) && maxDrainRaw > 0 ? Math.floor(maxDrainRaw) : 30_000;
     // Debounce window for the request-driven wake() (see scheduler MemoryWorkerDeps).
     // Default 8s: a paused user's fact forms in ~8s while a burst of turns still
     // coalesces into one observer run. Clamped below the interval (the backstop must
@@ -2813,9 +2822,12 @@ export async function buildServer(
         : Math.min(8_000, intervalMs);
     memoryWorker = startMemoryWorker({
       memoryStore: store.memory,
-      batchSize: 10,
+      batchSize: memoryWorkerBatchSize,
       intervalMs,
       coalesceMs,
+      maxBatchesPerDrain: memoryWorkerMaxBatches,
+      maxDrainMs: memoryWorkerMaxDrainMs,
+      yieldBetweenBatches: () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
       now: () => Date.now(),
       log: memoryLog,
       runObserver: (job) => runObserverJob(job, observerDeps),
@@ -2865,7 +2877,7 @@ export async function buildServer(
         await maybeEnqueueIdleObserverJobs({
           memoryStore: store.memory,
           now: () => new Date(),
-          batchSize: 10,
+          batchSize: memoryWorkerBatchSize * memoryWorkerMaxBatches,
           compaction: config.memory.compaction,
           log: memoryLog,
         });

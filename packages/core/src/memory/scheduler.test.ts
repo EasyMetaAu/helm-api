@@ -86,6 +86,61 @@ describe("startMemoryWorker", () => {
     expect(runObserver).toHaveBeenCalledWith({ jobId: "j1", accountId: "acct-a", threadId: "t1" });
   });
 
+  it("can drain multiple full batches in one tick for backlog catch-up", async () => {
+    const batches: MemoryJobRow[][] = [
+      [{ jobId: "j1", type: "observer", scope: { accountId: "acct-a", threadId: "t1" } }],
+      [{ jobId: "j2", type: "observer", scope: { accountId: "acct-a", threadId: "t2" } }],
+      [],
+    ];
+    const { store } = makeStore([]);
+    const claimSpy = store.claimPendingJobs as ReturnType<typeof vi.fn>;
+    claimSpy.mockImplementation(async () => batches.shift() ?? []);
+    const runObserver = vi.fn(async (): Promise<ObserverResult> => OBS_NOOP);
+    const handle = startMemoryWorker(
+      makeDeps(store, { batchSize: 1, maxBatchesPerDrain: 10, runObserver }),
+    );
+
+    await vi.advanceTimersByTimeAsync(1000);
+    handle.stop();
+
+    expect(runObserver).toHaveBeenCalledTimes(2);
+    expect(claimSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it("stops catch-up after the drain time cap between batches", async () => {
+    let now = 0;
+    const { store } = makeStore([]);
+    const claimSpy = store.claimPendingJobs as ReturnType<typeof vi.fn>;
+    claimSpy.mockImplementation(async () => {
+      now += 20;
+      return [
+        { jobId: `j-${now}`, type: "observer", scope: { accountId: "acct-a", threadId: "t1" } },
+      ];
+    });
+    const log = vi.fn();
+    const runObserver = vi.fn(async (): Promise<ObserverResult> => OBS_NOOP);
+    const handle = startMemoryWorker(
+      makeDeps(store, {
+        batchSize: 1,
+        maxBatchesPerDrain: 10,
+        maxDrainMs: 15,
+        now: () => now,
+        log,
+        runObserver,
+      }),
+    );
+
+    await vi.advanceTimersByTimeAsync(1000);
+    handle.stop();
+
+    expect(runObserver).toHaveBeenCalledTimes(1);
+    expect(claimSpy).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith("memory.worker.drain_time_cap", {
+      batches: 1,
+      max_drain_ms: 15,
+    });
+  });
+
   it("dispatches a reflector row to runReflector with the full scope", async () => {
     const scope = { accountId: "acct-a", projectId: "p1", threadId: "t1" };
     const { store } = makeStore([{ jobId: "j2", type: "reflector", scope }]);

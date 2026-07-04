@@ -20,6 +20,16 @@ export interface MemoryWorkerDeps {
   // How many jobs to claim per tick.
   batchSize: number;
   intervalMs: number;
+  // Catch-up mode: one interval/wake drain can claim multiple batches back-to-back
+  // instead of waiting for the next timer. Defaults to 1 for old callers/tests; the
+  // gateway sets a larger value so a large backlog clears quickly.
+  maxBatchesPerDrain?: number;
+  // Wall-clock guard for catch-up drains. Checked between batches, so an in-flight
+  // batch is allowed to finish and record job statuses before the cap applies.
+  maxDrainMs?: number;
+  // Optional macrotask yield between full batches. The gateway wires this so a
+  // backlog catch-up drain does not monopolize Node's event loop on small hosts.
+  yieldBetweenBatches?: () => Promise<void>;
   // Quiet-window (ms) for wake() — the event-driven, OFF-interval drain the request
   // path triggers after a memory observe settles. TRAILING-EDGE debounce: each wake
   // re-arms the window, so a burst of turns coalesces into ONE drain. Because the
@@ -194,7 +204,7 @@ async function processJob(job: MemoryJobRow, deps: MemoryWorkerDeps): Promise<vo
 export function startMemoryWorker(deps: MemoryWorkerDeps): MemoryWorkerHandle {
   // Claim + dispatch one batch. The latency-critical path — NO onTick housekeeping
   // (that is the interval's job). Shared by the interval tick and the wake drain.
-  const drainJobs = async (): Promise<void> => {
+  const drainJobs = async (): Promise<number> => {
     const jobs = await deps.memoryStore.claimPendingJobs(deps.batchSize);
     for (const job of jobs) {
       // Per-job guard: a single failing job must not abort the rest of the batch
@@ -223,6 +233,7 @@ export function startMemoryWorker(deps: MemoryWorkerDeps): MemoryWorkerHandle {
         }
       }
     }
+    return jobs.length;
   };
 
   // Reentrancy guard: the interval tick and a wake drain (or two overlapping wakes)
@@ -241,7 +252,24 @@ export function startMemoryWorker(deps: MemoryWorkerDeps): MemoryWorkerHandle {
     try {
       do {
         rerun = false;
-        await drainJobs();
+        const maxBatches = Math.max(1, Math.floor(deps.maxBatchesPerDrain ?? 1));
+        const maxDrainMs =
+          deps.maxDrainMs !== undefined ? Math.max(1, Math.floor(deps.maxDrainMs)) : null;
+        const startedAt = deps.now();
+        let batches = 0;
+        let lastClaimed = 0;
+        do {
+          lastClaimed = await drainJobs();
+          batches += 1;
+          if (lastClaimed < deps.batchSize) break;
+          if (maxDrainMs !== null && deps.now() - startedAt >= maxDrainMs) break;
+          if (batches < maxBatches) await deps.yieldBetweenBatches?.();
+        } while (batches < maxBatches);
+        if (lastClaimed >= deps.batchSize && batches >= maxBatches) {
+          deps.log("memory.worker.drain_batch_cap", { batches, batch_size: deps.batchSize });
+        } else if (lastClaimed >= deps.batchSize && maxDrainMs !== null) {
+          deps.log("memory.worker.drain_time_cap", { batches, max_drain_ms: maxDrainMs });
+        }
       } while (rerun);
     } finally {
       draining = false;

@@ -21,7 +21,7 @@ function newStore() {
       return new Date(tickMs);
     },
   );
-  return { store, clock: () => tickMs };
+  return { store, db, clock: () => tickMs };
 }
 
 describe("SqliteMemoryStore — thread model stamp", () => {
@@ -112,6 +112,45 @@ describe("SqliteMemoryStore — idle-flush candidates", () => {
       observationText: "covered",
       observedAt: new Date(clock() + 1),
     });
+    expect(
+      await store.listIdleFlushCandidates({ idleBeforeMs: clock() + 1000, limit: 10 }),
+    ).toEqual([]);
+  });
+
+  it("uses observer message order, not created_at order, when testing covered ranges", async () => {
+    const { store, db, clock } = newStore();
+    await store.ensureThread({ id: "t1", ownerId: "acct-a" });
+    const m1 = await store.appendMessage({
+      threadId: "t1",
+      messageIndex: 0,
+      role: "user",
+      content: "first in transcript",
+      tokenEstimate: 1,
+    });
+    const m2 = await store.appendMessage({
+      threadId: "t1",
+      messageIndex: 1,
+      role: "user",
+      content: "middle in transcript",
+      tokenEstimate: 1,
+    });
+    const m3 = await store.appendMessage({
+      threadId: "t1",
+      messageIndex: 2,
+      role: "user",
+      content: "last in transcript",
+      tokenEstimate: 1,
+    });
+    // Historical rows can have created_at out of observer order. The observer and
+    // source ranges are based on message_index order, so this middle row is covered.
+    db.$sqlite.prepare("UPDATE memory_messages SET created_at = ? WHERE id = ?").run(1, m2);
+    await store.appendObservation({
+      threadId: "t1",
+      sourceMessageRange: [m1, m3],
+      observationText: "covers all three transcript positions",
+      observedAt: new Date(clock() + 1),
+    });
+
     expect(
       await store.listIdleFlushCandidates({ idleBeforeMs: clock() + 1000, limit: 10 }),
     ).toEqual([]);
@@ -284,5 +323,22 @@ describe("SqliteMemoryStore — idle-flush candidates", () => {
       limit: 1,
     });
     expect(limited).toHaveLength(1);
+  });
+
+  it("interleaves idle candidates by project so one backlog cannot monopolize the page", async () => {
+    const { store, clock } = newStore();
+    for (const id of ["a1", "a2", "a3"]) {
+      await store.ensureThread({ id, ownerId: "acct-a", projectId: "proj-a" });
+      await store.appendMessage({ threadId: id, role: "user", content: id, tokenEstimate: 1 });
+    }
+    await store.ensureThread({ id: "b1", ownerId: "acct-a", projectId: "proj-b" });
+    await store.appendMessage({ threadId: "b1", role: "user", content: "b1", tokenEstimate: 1 });
+
+    const limited = await store.listIdleFlushCandidates({
+      idleBeforeMs: clock() + 1000,
+      limit: 2,
+    });
+
+    expect(limited.map((c) => c.threadId)).toEqual(["a1", "b1"]);
   });
 });

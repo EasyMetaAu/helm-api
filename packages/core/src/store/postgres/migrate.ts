@@ -15,15 +15,28 @@ export type PgDb = (PgliteDatabase<Schema> | PostgresJsDatabase<Schema>) & {
   readonly $close: () => Promise<void>;
 };
 
+// Anything that can run a raw SQL string against the Postgres connection. Both
+// the drizzle pglite and postgres-js handles satisfy this via `.execute()`.
+interface RawExecutor {
+  execute(query: ReturnType<typeof sql.raw>): Promise<unknown>;
+}
+
 // Checked-in DDL for the Postgres dialect — the pg equivalent of the sqlite
 // migrations. Each statement is idempotent (IF NOT EXISTS) so re-running is safe;
 // a `_migrations` ledger records applied versions the same way the sqlite adapter
 // does. Epoch-ms timestamps are BIGINT to match the sqlite timestamp_ms value
 // space exactly. NO plaintext column anywhere (principle 7).
-interface Migration {
-  readonly version: number;
-  readonly sql: string;
-}
+type Migration =
+  | {
+      readonly version: number;
+      readonly sql: string;
+      readonly run?: never;
+    }
+  | {
+      readonly version: number;
+      readonly run: (db: RawExecutor) => Promise<void>;
+      readonly sql?: never;
+    };
 
 // Session-level pg advisory lock for startup migrations. Two 32-bit keys spell
 // "HELM" and "API\0"; using the two-key form keeps the constants inside pg int4.
@@ -670,12 +683,68 @@ const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS secret_enc TEXT;
     `,
   },
+  {
+    // Memory idle-flush catch-up indexes — pg mirror of sqlite v34.
+    version: 33,
+    run: async (db) => {
+      if (
+        await pgTableHasColumns(db, "memory_threads", [
+          "owner_id",
+          "project_id",
+          "resource_id",
+          "id",
+        ])
+      ) {
+        await db.execute(
+          sql.raw(`
+            CREATE INDEX IF NOT EXISTS idx_memory_threads_owner_project_resource
+              ON memory_threads (owner_id, project_id, resource_id, id)
+          `),
+        );
+      }
+      if (
+        await pgTableHasColumns(db, "memory_messages", [
+          "thread_id",
+          "message_index",
+          "created_at",
+          "id",
+        ])
+      ) {
+        await db.execute(
+          sql.raw(`
+            CREATE INDEX IF NOT EXISTS idx_memory_messages_thread_order
+              ON memory_messages (thread_id, message_index, created_at, id)
+          `),
+        );
+      }
+    },
+  },
 ];
 
-// Anything that can run a raw SQL string against the Postgres connection. Both
-// the drizzle pglite and postgres-js handles satisfy this via `.execute()`.
-interface RawExecutor {
-  execute(query: ReturnType<typeof sql.raw>): Promise<unknown>;
+function resultRows<T>(result: unknown): T[] {
+  if (Array.isArray(result)) return result as T[];
+  const maybe = result as { rows?: T[] };
+  return Array.isArray(maybe.rows) ? maybe.rows : [];
+}
+
+async function pgTableHasColumns(
+  db: RawExecutor,
+  table: "memory_threads" | "memory_messages",
+  requiredColumns: readonly string[],
+): Promise<boolean> {
+  const rows = resultRows<{ column_name: string }>(
+    await db.execute(
+      sql.raw(`
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = '${table}'
+      `),
+    ),
+  );
+  if (rows.length === 0) return false;
+  const names = new Set(rows.map((r) => r.column_name));
+  return requiredColumns.every((name) => names.has(name));
 }
 
 // Split a migration block into individual statements. Postgres' wire protocol
@@ -717,8 +786,12 @@ export async function runPgMigrations(db: RawExecutor): Promise<void> {
       if (have.has(m.version)) continue;
       await db.execute(sql.raw("BEGIN"));
       try {
-        for (const stmt of splitStatements(m.sql)) {
-          await db.execute(sql.raw(stmt));
+        if (m.run) {
+          await m.run(db);
+        } else {
+          for (const stmt of splitStatements(m.sql)) {
+            await db.execute(sql.raw(stmt));
+          }
         }
         await db.execute(
           sql.raw(

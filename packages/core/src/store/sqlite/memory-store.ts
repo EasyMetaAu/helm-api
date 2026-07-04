@@ -1730,15 +1730,14 @@ export class SqliteMemoryStore implements MemoryStore {
   // idleBeforeMs — the thread's last appended message, NOT memory_threads.
   // updated_at (ordinary turns append messages without touching the thread row,
   // so updated_at would mark an active thread idle and compact it mid-chat).
-  // "Uncompacted" is the COVERAGE FRONTIER: a message newer than the newest
-  // message any observation covers (range ends joined back to their message rows;
-  // coverage is prefix-contiguous, so the frontier is exact for tails — the only
-  // steady-state uncovered shape). NOT observed_at: the observer runs AFTER the
-  // messages it covers, so observed_at would hide the kept-recent tail a writeback
-  // pass left uncovered. project_id/resource_id ride along so the observer can
-  // promote the resulting observation to the project/resource reflection. Once the
-  // frontier catches up the thread leaves the candidate set, so the sweep
-  // TERMINATES. Oldest-idle first; `limit` bounds the scan.
+  // "Uncompacted" uses the SAME interval order as listMessages/Observer:
+  // message_index first, then created_at/id as the legacy tie-break. This is
+  // load-bearing: source_message_range is produced from observer order, so using
+  // created_at/id alone can resurrect fully-covered historical rows as eternal
+  // false candidates. project_id/resource_id ride along so the observer can
+  // promote the resulting observation to the project/resource reflection.
+  // Candidates are interleaved by owner+project+resource, so one stale project
+  // backlog cannot monopolize the worker's small per-tick page.
   async listIdleFlushCandidates(input: {
     idleBeforeMs: number;
     limit: number;
@@ -1747,41 +1746,89 @@ export class SqliteMemoryStore implements MemoryStore {
   > {
     const rows = this.db.$sqlite
       .prepare(
-        `SELECT t.owner_id AS owner_id, t.id AS thread_id,
-                t.project_id AS project_id, t.resource_id AS resource_id,
-                (SELECT MAX(m.created_at) FROM memory_messages m WHERE m.thread_id = t.id)
-                  AS last_activity
-           FROM memory_threads t
-          WHERE t.owner_id IS NOT NULL
-            AND last_activity IS NOT NULL
-            AND last_activity <= ?
-            AND EXISTS (
-              -- A message NOT covered by ANY observation's [first,last] range —
-              -- the SAME interval semantics alreadyObservedMessageIds uses, over
-              -- the SAME (created_at, id) order listMessages uses. Interval
-              -- containment (not a global frontier) is load-bearing twice over:
-              -- a sparse gap BEFORE a later observation must still surface the
-              -- thread, and messages appended in one request can share a
-              -- millisecond, so the full tuple — not just created_at — decides
-              -- containment. A thread with no observations has no ranges, so
-              -- every message qualifies.
-              SELECT 1 FROM memory_messages m
-               WHERE m.thread_id = t.id
-                 AND NOT EXISTS (
-                   SELECT 1 FROM memory_observations o
-                   JOIN memory_messages mf
-                     ON mf.id = json_extract(o.source_message_range, '$[0]')
-                   JOIN memory_messages ml
-                     ON ml.id = json_extract(o.source_message_range, '$[1]')
-                    WHERE o.thread_id = t.id
-                      AND (mf.created_at < m.created_at
-                        OR (mf.created_at = m.created_at AND mf.id <= m.id))
-                      AND (ml.created_at > m.created_at
-                        OR (ml.created_at = m.created_at AND ml.id >= m.id))
-                 )
-            )
-          ORDER BY last_activity ASC
-          LIMIT ?`,
+        `WITH candidates AS (
+           SELECT t.owner_id AS owner_id, t.id AS thread_id,
+                  t.project_id AS project_id, t.resource_id AS resource_id,
+                  (SELECT MAX(m.created_at) FROM memory_messages m WHERE m.thread_id = t.id)
+                    AS last_activity
+             FROM memory_threads t
+            WHERE t.owner_id IS NOT NULL
+              AND last_activity IS NOT NULL
+              AND last_activity <= ?
+              AND EXISTS (
+                -- A message NOT covered by ANY observation's [first,last] range,
+                -- using the SAME order as listMessages/Observer. Interval
+                -- containment catches sparse gaps before later observations, and
+                -- the full tuple handles same-message-index / same-ms ties.
+                SELECT 1 FROM memory_messages m
+                 WHERE m.thread_id = t.id
+                   AND NOT EXISTS (
+                     SELECT 1 FROM memory_observations o
+                     JOIN memory_messages mf
+                       ON mf.id = json_extract(o.source_message_range, '$[0]')
+                     JOIN memory_messages ml
+                       ON ml.id = json_extract(o.source_message_range, '$[1]')
+                      WHERE o.thread_id = t.id
+                        AND (
+                          (
+                            (CASE WHEN mf.message_index IS NULL THEN 1 ELSE 0 END,
+                             COALESCE(mf.message_index, 9223372036854775807),
+                             mf.created_at,
+                             mf.id)
+                            <=
+                            (CASE WHEN m.message_index IS NULL THEN 1 ELSE 0 END,
+                             COALESCE(m.message_index, 9223372036854775807),
+                             m.created_at,
+                             m.id)
+                            AND
+                            (CASE WHEN m.message_index IS NULL THEN 1 ELSE 0 END,
+                             COALESCE(m.message_index, 9223372036854775807),
+                             m.created_at,
+                             m.id)
+                            <=
+                            (CASE WHEN ml.message_index IS NULL THEN 1 ELSE 0 END,
+                             COALESCE(ml.message_index, 9223372036854775807),
+                             ml.created_at,
+                             ml.id)
+                          )
+                          OR
+                          (
+                            (CASE WHEN ml.message_index IS NULL THEN 1 ELSE 0 END,
+                             COALESCE(ml.message_index, 9223372036854775807),
+                             ml.created_at,
+                             ml.id)
+                            <=
+                            (CASE WHEN m.message_index IS NULL THEN 1 ELSE 0 END,
+                             COALESCE(m.message_index, 9223372036854775807),
+                             m.created_at,
+                             m.id)
+                            AND
+                            (CASE WHEN m.message_index IS NULL THEN 1 ELSE 0 END,
+                             COALESCE(m.message_index, 9223372036854775807),
+                             m.created_at,
+                             m.id)
+                            <=
+                            (CASE WHEN mf.message_index IS NULL THEN 1 ELSE 0 END,
+                             COALESCE(mf.message_index, 9223372036854775807),
+                             mf.created_at,
+                             mf.id)
+                          )
+                        )
+                   )
+              )
+          ),
+          ranked AS (
+            SELECT *,
+                   ROW_NUMBER() OVER (
+                     PARTITION BY owner_id, COALESCE(project_id, ''), COALESCE(resource_id, '')
+                     ORDER BY last_activity ASC, thread_id ASC
+                   ) AS scope_rank
+              FROM candidates
+          )
+          SELECT owner_id, thread_id, project_id, resource_id
+            FROM ranked
+           ORDER BY scope_rank ASC, last_activity ASC, thread_id ASC
+           LIMIT ?`,
       )
       .all(input.idleBeforeMs, input.limit) as Array<{
       owner_id: string;

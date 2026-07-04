@@ -1513,11 +1513,10 @@ export class PgMemoryStore implements MemoryStore {
   // MAX(memory_messages.created_at) ≤ idleBeforeMs (the last appended message,
   // NOT memory_threads.updated_at — ordinary turns append messages without
   // touching the thread row, so updated_at would mark an active thread idle).
-  // Uncompacted = coverage FRONTIER (a message newer than the newest covered
-  // message; range ends joined back to their message rows), NOT observed_at
-  // (which would hide the kept-recent tail). project_id/resource_id ride along
-  // for promotion. Terminates once the frontier catches up. jsonb ->> 1 reads
-  // the range's lastId.
+  // Uncompacted uses the SAME interval order as listMessages/Observer:
+  // message_index first, then created_at/id as the legacy tie-break. Candidates
+  // are interleaved by owner+project+resource so one stale project backlog cannot
+  // monopolize the worker's small per-tick page.
   async listIdleFlushCandidates(input: {
     idleBeforeMs: number;
     limit: number;
@@ -1525,36 +1524,102 @@ export class PgMemoryStore implements MemoryStore {
     Array<{ accountId: string; threadId: string; projectId?: string; resourceId?: string }>
   > {
     const result = (await this.db.execute(sql`
-      SELECT t.owner_id AS owner_id, t.id AS thread_id,
-             t.project_id AS project_id, t.resource_id AS resource_id,
-             (SELECT MAX(m.created_at) FROM memory_messages m WHERE m.thread_id = t.id)
-               AS last_activity
-        FROM memory_threads t
-       WHERE t.owner_id IS NOT NULL
-         AND (SELECT MAX(m.created_at) FROM memory_messages m WHERE m.thread_id = t.id)
-               <= ${input.idleBeforeMs}
-         AND EXISTS (
-           -- A message NOT covered by ANY observation's [first,last] range — the
-           -- SAME interval semantics alreadyObservedMessageIds uses, over the
-           -- SAME (created_at, id) order listMessages uses. Interval containment
-           -- (not a global frontier) catches sparse gaps BEFORE later
-           -- observations, and the full tuple handles same-millisecond ties.
-           SELECT 1 FROM memory_messages m
-            WHERE m.thread_id = t.id
-              AND NOT EXISTS (
-                SELECT 1 FROM memory_observations o
-                JOIN memory_messages mf
-                  ON mf.id = o.source_message_range ->> 0
-                JOIN memory_messages ml
-                  ON ml.id = o.source_message_range ->> 1
-                 WHERE o.thread_id = t.id
-                   AND (mf.created_at < m.created_at
-                     OR (mf.created_at = m.created_at AND mf.id <= m.id))
-                   AND (ml.created_at > m.created_at
-                     OR (ml.created_at = m.created_at AND ml.id >= m.id))
-              )
-         )
-       ORDER BY last_activity ASC
+      WITH candidates AS (
+        SELECT t.owner_id AS owner_id, t.id AS thread_id,
+               t.project_id AS project_id, t.resource_id AS resource_id,
+               (SELECT MAX(m.created_at) FROM memory_messages m WHERE m.thread_id = t.id)
+                 AS last_activity
+          FROM memory_threads t
+         WHERE t.owner_id IS NOT NULL
+           AND (SELECT MAX(m.created_at) FROM memory_messages m WHERE m.thread_id = t.id)
+                 <= ${input.idleBeforeMs}
+           AND EXISTS (
+             -- A message NOT covered by ANY observation's [first,last] range,
+             -- using the SAME order as listMessages/Observer.
+             SELECT 1 FROM memory_messages m
+              WHERE m.thread_id = t.id
+                AND NOT EXISTS (
+                  SELECT 1 FROM memory_observations o
+                  JOIN memory_messages mf
+                    ON mf.id = o.source_message_range ->> 0
+                  JOIN memory_messages ml
+                    ON ml.id = o.source_message_range ->> 1
+                   WHERE o.thread_id = t.id
+                     AND (
+                       (
+                         ROW(
+                           CASE WHEN mf.message_index IS NULL THEN 1 ELSE 0 END,
+                           COALESCE(mf.message_index, 2147483647),
+                           mf.created_at,
+                           mf.id
+                         )
+                         <=
+                         ROW(
+                           CASE WHEN m.message_index IS NULL THEN 1 ELSE 0 END,
+                           COALESCE(m.message_index, 2147483647),
+                           m.created_at,
+                           m.id
+                         )
+                         AND
+                         ROW(
+                           CASE WHEN m.message_index IS NULL THEN 1 ELSE 0 END,
+                           COALESCE(m.message_index, 2147483647),
+                           m.created_at,
+                           m.id
+                         )
+                         <=
+                         ROW(
+                           CASE WHEN ml.message_index IS NULL THEN 1 ELSE 0 END,
+                           COALESCE(ml.message_index, 2147483647),
+                           ml.created_at,
+                           ml.id
+                         )
+                       )
+                       OR
+                       (
+                         ROW(
+                           CASE WHEN ml.message_index IS NULL THEN 1 ELSE 0 END,
+                           COALESCE(ml.message_index, 2147483647),
+                           ml.created_at,
+                           ml.id
+                         )
+                         <=
+                         ROW(
+                           CASE WHEN m.message_index IS NULL THEN 1 ELSE 0 END,
+                           COALESCE(m.message_index, 2147483647),
+                           m.created_at,
+                           m.id
+                         )
+                         AND
+                         ROW(
+                           CASE WHEN m.message_index IS NULL THEN 1 ELSE 0 END,
+                           COALESCE(m.message_index, 2147483647),
+                           m.created_at,
+                           m.id
+                         )
+                         <=
+                         ROW(
+                           CASE WHEN mf.message_index IS NULL THEN 1 ELSE 0 END,
+                           COALESCE(mf.message_index, 2147483647),
+                           mf.created_at,
+                           mf.id
+                         )
+                       )
+                     )
+                )
+           )
+      ),
+      ranked AS (
+        SELECT *,
+               ROW_NUMBER() OVER (
+                 PARTITION BY owner_id, COALESCE(project_id, ''), COALESCE(resource_id, '')
+                 ORDER BY last_activity ASC, thread_id ASC
+               ) AS scope_rank
+          FROM candidates
+      )
+      SELECT owner_id, thread_id, project_id, resource_id
+        FROM ranked
+       ORDER BY scope_rank ASC, last_activity ASC, thread_id ASC
        LIMIT ${input.limit}
     `)) as unknown;
     const rows = (

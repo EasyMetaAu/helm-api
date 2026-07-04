@@ -7,6 +7,25 @@
 
 ---
 
+## 2026-07-04 · 跨协议 reasoning 历史不兼容按候选跳过（执行 fallback / 协议转换，docs/04/05/07，原则 3/5/8）
+
+- **背景（Lukin）**：Claude/Anthropic thinking-mode 请求在 fallback 到 OpenAI-compatible DeepSeek（如 `deepseek/deepseek-v4-pro`）时，多次暴露 `400 invalid_request: The reasoning_content in the thinking mode must be passed back to the API.` 给客户端。
+- **根因**：Anthropic 原生历史不携带 OpenAI/DeepSeek 风格的 assistant `reasoning_content`；如果跨协议 fallback 仍把 Anthropic `thinking` 控制或不适配的 `reasoning_effort` 带到 OpenAI-compatible 上游，DeepSeek 会把它理解成 thinking-mode continuation，并要求上一轮 assistant reasoning history 原样回传。
+- **出站改写决策**：跨协议转到 OpenAI-compatible wire 时剥离 Anthropic `thinking` 控制；当 catalog 已知该目标没有 OpenAI reasoning wire 支持时，同时剥离 `reasoning_effort`。同协议 Anthropic passthrough 和真正支持 reasoning wire 的 OpenAI-compatible 目标不受影响。
+- **fallback 决策**：`reasoning_content` + `thinking mode` 的上游 400 不是全局 request-shape 错误，而是当前候选模型/协议组合缺历史字段；执行器记录 `skipped:true` + `skip_reason:"reasoning_history_incompatible"`，不熔断 provider，继续尝试后续候选。
+- **边界**：其它确定性 400/413/422（例如坏参数、图片过大）仍按 `invalid_request` 终止，因为换候选无法修复请求本身。这里只针对明确的 reasoning-history 缺失错误 fail-open。
+- **验证**：新增执行器回归覆盖跨协议剥离 thinking/reasoning 控制，以及 DeepSeek 类 400 后继续 fallback；目标 `execute.test.ts` 119/119 绿，`pnpm typecheck` 绿，`pnpm lint` 退出 0（仅既有 style info）。
+
+## 2026-07-04 · memory idle-flush 防饥饿与受控追赶（Memory worker / store，docs/08/12，原则 3/7）
+
+- **背景（Lukin）**：生产 `openclaw` key 已持续写入 raw memory，但 `/admin/memory` 看不到事实/反思；排查发现后台 worker 不是完全停了，而是大量旧项目候选反复进入 idle-flush 队列，导致新项目长期排不到。
+- **根因**：Observer 实际按 `message_index, created_at, id` 读取消息并生成 `source_message_range`；但 `listIdleFlushCandidates()` 用 `created_at/id` 判断 observation 覆盖范围。旧线程在 observer 顺序下已覆盖，却在候选 SQL 里被误判为未覆盖，形成永远不会消失的假候选。
+- **查询决策**：SQLite / Postgres 的 idle-flush 候选判断改用与 `listMessages()` 完全一致的 tuple order，并支持 range 两端反向的历史数据；这样同一线程被覆盖后会真正退出候选集。
+- **公平性决策**：候选排序增加 `ROW_NUMBER() OVER (PARTITION BY owner_id, project_id, resource_id ...)`，按 scope rank 交错输出，避免 `ww/luke/skillstore` 这类旧项目 backlog 独占整页，使 `openclaw` 这类新项目也能进入处理窗口。
+- **追赶决策**：worker 支持单次 tick/wake 连续 drain 多批，但仍是串行执行；gateway 默认 `batchSize=50`、`maxBatchesPerDrain=10`、`maxDrainMs=30000`，并在批次之间让出事件循环。也就是说默认最多 500 个任务/轮，明显快于旧的 10/轮，但不会引入并发洪峰；线上可通过环境变量逐步调大。
+- **索引/迁移决策**：新增 memory thread scope 索引与 message observer-order 索引；迁移只在目标表/列真实存在时建索引，兼容早期被部分标记为已迁移的自托管库和测试 fixture。
+- **验证**：新增 SQLite/Postgres observer-order 覆盖回归、project fair-interleaving 回归、scheduler 多批 drain 与时间上限回归；目标 memory/scheduler/migration 测试 83/83 绿。
+
 ## 2026-07-03 · 策略级 reasoning_effort 覆盖 Lane 默认值（Routing policies / Admin policies，docs/04/11，原则 2/5/6）
 
 - **背景（Lukin）**：Lane 已支持 `reasoning_effort`，但 policy 命中后只能强制车道，不能针对某类任务把思考等级调高/调低；这导致同一 Lane 内的请求无法按策略更细粒度控制推理预算。
@@ -74,30 +93,13 @@
 - **边界**：仍只匹配精确句式 `Today[',’,ʼ,ʹ]s date is YYYY[-/]MM[-/]DD.`，统一输出 `Today's date is YYYY-MM-DD.`；这覆盖 X 文强调的「普通第三方端点 + 中国时区」即普通 apostrophe + slash 日期。
 - **验证**：新增 core 测试覆盖 user/assistant/tool_result/tools description，gateway native carrier 测试覆盖 message + tools 字段；目标 Vitest 绿。
 
-## 2026-07-01 · Claude Code 日期指纹入站归一化（Anthropic protocol / native passthrough，docs/05/07，原则 7/8）
-
-- **背景（Lukin）**：升级最新 `claude update` 后当前最新客户端为 `2.1.197`；二进制中确认仍存在 `ANTHROPIC_BASE_URL` + `Asia/Shanghai|Asia/Urumqi` 检测，以及把 `Today's date is YYYY-MM-DD.` 改成不同 apostrophe / slash 日期格式的逻辑。
-- **风险**：Helm 的 `/v1/messages` 会把 Claude Code 原始 Anthropic body 同时转换成 IR，并作为 `native_request` 交给 native passthrough；如果不处理，日期指纹会在互译路径和 byte passthrough 路径继续到达上游。
-- **修复决策**：新增 core 纯函数 `normalizeClaudeCodeDateFingerprintInAnthropicRequest()`，只还原精确日期句式：`Today[',’,ʼ,ʹ]s date is YYYY[-/]MM[-/]DD.` → `Today's date is YYYY-MM-DD.`；默认只处理 top-level `system` 与 `system/developer` message，若检测到 Claude Code billing header，则也处理 message 文本块以覆盖动态 system sections 被移到消息里的形态。
-- **passthrough 决策**：`request_payloads.request_json` 保留客户端原始输入用于审计；`native_request.body/raw_body` 使用归一化后的 body，并在 mutation ledger 记录 `body_shims_applied=["claude_code_date_fingerprint_normalized"]`，避免隐式改写。
-- **验证**：新增 core 纯函数测试与 gateway native carrier 回归；`pnpm vitest run packages/core/src/protocol/anthropic/request.test.ts packages/core/src/protocol/anthropic/date-fingerprint.test.ts apps/gateway/src/routes/messages.test.ts` 122/122 绿，`pnpm typecheck` 绿，触碰文件 Biome 绿，全仓 `pnpm lint` 退出 0（仅既有 style info）。全量 `pnpm test` 4888/4890 绿后被 2 个 PGlite 15s timeout 拦住，两个失败文件单独重跑均绿。
-
-## 2026-07-01 · admin telemetry 聚合改为列化延迟 + 覆盖索引（Admin observability / store，docs/07/11，原则 7）
-
-- **背景（Lukin）**：生产 SQLite 数据库约 22GB，`/admin/api/stats` 在 7d/30d 窗口可跑到 100s+；由于 SQLite 适配器使用同步 `better-sqlite3`，这类长统计会阻塞 Node event loop，让其它管理端 API 看起来也一起卡住。
-- **根因**：`TelemetryStore.aggregate()` 的 totals 查询仍从 `decision_json` 里 `json_extract('$.latency_total_ms')` 计算平均延迟；在大窗口下这会强制逐行读 telemetry 大 JSON 并解析。series / byModel / usage 也依赖同一时间窗扫描，缺少覆盖索引时会回表读取更多页面。
-- **修复决策**：新增 `telemetry.latency_total_ms` 普通列，写入时从 `DecisionRecord.latency_total_ms` 列化；SQLite v32 / Postgres v31 对历史行从 JSON 回填该列，并把 aggregate 的 `AVG` 改为读普通列。
-- **索引决策**：新增两条管理端聚合覆盖索引：全局窗口以 `created_at` 开头，key 详情窗口以 `(api_key_id, created_at)` 开头，并覆盖 status/cost/tokens/cache/generation/model/key 字段。目标是让 dashboard 三个聚合 shape 尽量扫描窄索引页，减少 JSON 解析和回表。
-- **范围限制**：本次不改 admin 路由返回形状，也不引入物化日报表；先消除确认过的同步慢查询放大器。若未来 telemetry 增长到百万级以上，再考虑后台 rollup 表或异步 worker。
-- **验证**：新增 SQLite/PG 迁移回填测试、SQLite “篡改 decision_json 后 aggregate 仍读列化延迟”测试、跨适配器 aggregate 延迟契约；全量 `pnpm test` 4887/4887 绿，`pnpm typecheck`、`pnpm build` 绿。
-
 ---
 
 ## 历史条目摘要（最近 2 条）
 
-- **2026-06-30 · admin favicon cache policy（Admin UI 静态资源，docs/11，原则 7）**：favicon 慢不是体积问题，而是 `/admin` 静态资源 no-cache 策略；`/admin/favicon.{svg,png}` 改私有缓存 7 天，SPA shell/deep-link fallback 仍 no-cache，admin shell 只声明 SVG 避免双拉；补 gateway/admin 回归测试。
-- **2026-06-30 · per-model reasoning effort policy（执行 fallback / 协议转换，docs/04/05，原则 2/5/8）**：新增 catalog `reasoningEffort` policy，按模型/协议 wire 字段映射或删除 unsupported effort；Haiku 4.5 保留 manual `thinking` 但删除 `output_config.effort`，Sonnet `xhigh -> max`，translated/native passthrough 回归覆盖。
+- **2026-07-01 · Claude Code 日期指纹入站归一化（Anthropic protocol / native passthrough，docs/05/07，原则 7/8）**：Helm 在 Anthropic native passthrough 与互译路径中归一化 Claude Code 日期指纹，并用 mutation ledger 记录改写；新增 core/gateway 回归覆盖。
+- **2026-07-01 · admin telemetry 聚合改为列化延迟 + 覆盖索引（Admin observability / store，docs/07/11，原则 7）**：`/admin/api/stats` 慢源于从 `decision_json` 聚合延迟并回表扫描；新增 `telemetry.latency_total_ms` 与全局/key 维度覆盖索引，让 dashboard 读列化数据并减少 SQLite 同步阻塞。
 
 ## 更早历史总览
 
-2026-06-28 及以前的工作主要围绕 Helm API 的协议面、路由执行、admin 可观测性与自托管部署逐步成型：补齐 Gemini/OpenAI/Anthropic/Responses 双向转换、SSE 流式正确性、tool-call/JSON schema/思考参数保真、模型别名与能力/成本目录、provider fallback 与熔断语义、OAuth subscription providers、多账户池与 quota 处理、memory observe/inject/forgetting/admin/MCP、请求 payload 捕获与 request detail UI、API key 治理、admin 表格/过滤/分页/i18n、Docker/CI/release/deploy 验证，以及早期 Phase 0 的 Hono + SvelteKit static admin + Store 端口 + SQLite/Supabase 架构决策。更早细节不再逐条保留在本文件；需要精确背景时回查 git history。
+2026-06-30 及以前的工作主要围绕 Helm API 的协议面、路由执行、admin 可观测性与自托管部署逐步成型：补齐 Gemini/OpenAI/Anthropic/Responses 双向转换、SSE 流式正确性、tool-call/JSON schema/思考参数保真、per-model reasoning effort、模型别名与能力/成本目录、provider fallback 与熔断语义、OAuth subscription providers、多账户池与 quota 处理、memory observe/inject/forgetting/admin/MCP、请求 payload 捕获与 request detail UI、API key 治理、admin 表格/过滤/分页/i18n、Docker/CI/release/deploy 验证，以及早期 Phase 0 的 Hono + SvelteKit static admin + Store 端口 + SQLite/Supabase 架构决策。更早细节不再逐条保留在本文件；需要精确背景时回查 git history。

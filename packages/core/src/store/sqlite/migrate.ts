@@ -786,7 +786,47 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // Memory idle-flush catch-up indexes. The sweep now uses observer-order range
+    // semantics and fair interleaving; keep the hot per-thread message scans and
+    // owner/project thread scan off the table path on large self-hosted SQLite DBs.
+    version: 34,
+    run: (db) => {
+      if (
+        sqliteTableHasColumns(db, "memory_threads", ["owner_id", "project_id", "resource_id", "id"])
+      ) {
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_memory_threads_owner_project_resource
+            ON memory_threads (owner_id, project_id, resource_id, id);
+        `);
+      }
+      if (
+        sqliteTableHasColumns(db, "memory_messages", [
+          "thread_id",
+          "message_index",
+          "created_at",
+          "id",
+        ])
+      ) {
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_memory_messages_thread_order
+            ON memory_messages (thread_id, message_index, created_at, id);
+        `);
+      }
+    },
+  },
 ];
+
+function sqliteTableHasColumns(
+  db: Database.Database,
+  table: string,
+  requiredColumns: readonly string[],
+): boolean {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (cols.length === 0) return false;
+  const names = new Set(cols.map((c) => c.name));
+  return requiredColumns.every((name) => names.has(name));
+}
 
 function applyMigrations(db: Database.Database): void {
   db.exec(
