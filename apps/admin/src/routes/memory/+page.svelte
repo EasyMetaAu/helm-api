@@ -21,6 +21,7 @@
   import EditFactDialog from '$lib/components/EditFactDialog.svelte';
   import EditReflectionDialog from '$lib/components/EditReflectionDialog.svelte';
   import Modal from '$lib/components/Modal.svelte';
+  import RefreshControl from '$lib/components/RefreshControl.svelte';
   import { formatTimestamp } from '$lib/format.js';
   import { paginationItems } from '$lib/pagination.js';
   import { t } from '$lib/i18n';
@@ -72,7 +73,6 @@
   // whenever an error is raised or a new selection is made.
   let notice = $state<string | null>(null);
   let stats = $state<MemoryStats | null>(initialStats);
-  let loadingStats = $state<boolean>(initialStats === null);
 
   // Facts table state. The list is paginated + searchable client-side (facts load on
   // selection, not via the loader), so page/search live here and drive loadFacts.
@@ -163,14 +163,11 @@
   const statusBadge = $derived(statsBadge(stats));
 
   async function loadStats(scope: SelectedScope | null = selected): Promise<void> {
-    loadingStats = true;
     statsError = null;
     try {
       stats = await getMemoryStats(scope === null ? {} : scopeQuery(scope));
     } catch (e) {
       statsError = e instanceof Error ? e.message : $t('Failed to load memory status');
-    } finally {
-      loadingStats = false;
     }
   }
 
@@ -377,10 +374,6 @@
     } else if (initialStats === null) {
       void loadStats(null);
     }
-    const timer = window.setInterval(() => {
-      void loadStats();
-    }, 15_000);
-    return () => window.clearInterval(timer);
   });
 </script>
 
@@ -422,12 +415,10 @@
         </div>
         <p class="section-desc font-mono">{statsScopeLabel}</p>
       </div>
-      <button
-        type="button"
-        class="btn-secondary"
-        disabled={loadingStats}
-        onclick={() => loadStats()}>{loadingStats ? $t('Refreshing…') : $t('Refresh')}</button
-      >
+      <RefreshControl
+        storageKey="helm_admin_memory_refresh_interval"
+        onRefresh={() => loadStats()}
+      />
     </div>
     {#if statsError}
       <p class="alert-error" role="alert">{statsError}</p>

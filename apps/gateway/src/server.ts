@@ -2829,6 +2829,11 @@ export async function buildServer(
     const maxDrainRaw = Number(process.env.HELM_MEMORY_WORKER_MAX_DRAIN_MS ?? 30_000);
     const memoryWorkerMaxDrainMs =
       Number.isFinite(maxDrainRaw) && maxDrainRaw > 0 ? Math.floor(maxDrainRaw) : 30_000;
+    const concurrencyRaw = Number(process.env.HELM_MEMORY_WORKER_CONCURRENCY ?? 3);
+    const memoryWorkerConcurrency =
+      Number.isFinite(concurrencyRaw) && concurrencyRaw > 0
+        ? Math.min(8, Math.floor(concurrencyRaw))
+        : 3;
     // Debounce window for the request-driven wake() (see scheduler MemoryWorkerDeps).
     // Default 8s: a paused user's fact forms in ~8s while a burst of turns still
     // coalesces into one observer run. Clamped below the interval (the backstop must
@@ -2841,6 +2846,7 @@ export async function buildServer(
     memoryWorker = startMemoryWorker({
       memoryStore: store.memory,
       batchSize: memoryWorkerBatchSize,
+      concurrency: memoryWorkerConcurrency,
       intervalMs,
       coalesceMs,
       maxBatchesPerDrain: memoryWorkerMaxBatches,

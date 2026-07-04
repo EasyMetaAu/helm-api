@@ -107,6 +107,38 @@ describe("startMemoryWorker", () => {
     expect(claimSpy).toHaveBeenCalledTimes(3);
   });
 
+  it("processes one claimed batch with bounded concurrency", async () => {
+    const { store } = makeStore([
+      { jobId: "j1", type: "observer", scope: { accountId: "acct-a", threadId: "t1" } },
+      { jobId: "j2", type: "observer", scope: { accountId: "acct-a", threadId: "t2" } },
+      { jobId: "j3", type: "observer", scope: { accountId: "acct-a", threadId: "t3" } },
+    ]);
+    const releases: Array<() => void> = [];
+    const started: string[] = [];
+    const runObserver = vi.fn(
+      (job): Promise<ObserverResult> =>
+        new Promise((resolve) => {
+          started.push(job.jobId);
+          releases.push(() => resolve(OBS_NOOP));
+        }),
+    );
+    const handle = startMemoryWorker(makeDeps(store, { concurrency: 2, runObserver }));
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(started).toEqual(["j1", "j2"]);
+
+    releases.shift()?.();
+    await vi.runOnlyPendingTimersAsync();
+    expect(started).toEqual(["j1", "j2", "j3"]);
+
+    releases.shift()?.();
+    releases.shift()?.();
+    await vi.runOnlyPendingTimersAsync();
+    handle.stop();
+
+    expect(runObserver).toHaveBeenCalledTimes(3);
+  });
+
   it("stops catch-up after the drain time cap between batches", async () => {
     let now = 0;
     const { store } = makeStore([]);

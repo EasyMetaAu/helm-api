@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-07-04 · memory worker 受控并发追赶（Memory worker / scheduler，docs/08/12，原则 3/7）
+
+- **背景（Lukin）**：线上 `/admin/memory` 显示队列持续运行但追赶很慢；生产采样显示 worker 没有卡死，CPU/内存仍有余量，但 open queue 基本维持在约 500，旧 idle-flush backlog 很难明显下降。
+- **根因**：上一版已经把 `batchSize` / `maxBatchesPerDrain` 做大，但 worker 在一个 batch 内仍逐条 `await` LLM 任务。单纯继续调大 batch 只会让更多 job 长时间停在 `running`，不一定提升吞吐，还会让一次 drain 持续更久。
+- **调度决策**：`MemoryWorkerDeps` 新增 `concurrency`，默认 1 以保持 core 旧调用行为；gateway 默认 `HELM_MEMORY_WORKER_CONCURRENCY=3`，同一 claimed batch 内最多并发 3 个 job，让 LLM-bound observer/reflector 任务并行等待上游返回。
+- **安全决策**：gateway 对 `HELM_MEMORY_WORKER_CONCURRENCY` 硬封顶 8；仍保留 `batchSize`、`maxBatchesPerDrain`、`maxDrainMs`、批次间 yield 与 wake debounce，避免在 1GB 自托管容器上产生无上限后台 LLM fan-out。
+- **运维建议**：生产先用默认 3 观察；若 CPU/内存仍低且 `done_1m - enqueued_1m` 不够，可逐步调到 4/5；不要直接把 batch 调到几百来追赶，因为那会增加 running lease 和单轮 drain 风险。
+- **验证计划**：新增 scheduler 并发上限回归，覆盖同 batch 只启动 N 个任务、前一个完成后才启动下一个；再跑 memory scheduler、admin memory 页面、typecheck、lint、build。
+
 ## 2026-07-04 · 记忆页只读运行状态面板（Admin memory observability，docs/08/11/13，原则 1/7）
 
 - **背景（Lukin）**：`/admin/memory` 只能看到已经形成的 facts/reflections，看不到 raw message 是否还在进入、后台 job 是否在跑、队列是否滞后或是否有 running lease 卡住；排障需要直接查日志/SQLite。
@@ -86,18 +95,10 @@
 - **UI 决策**：Keys 页面新增「View full key」和「Rotate」。Reveal/rotated plaintext 只存在短暂 modal state；普通 list/detail 仍只显示 prefix，不返回 hash、plaintext 或 ciphertext。
 - **验证计划**：覆盖 store contract（SQLite/Postgres）、cached keystore、admin routes、admin API client 与 Keys 页面交互；旧 hash-only 行 reveal 失败、新/轮转行可 reveal。
 
-## 2026-07-02 · Claude Fable 周限额改读 `limits[]`（Admin providers / OAuth quota，docs/11，原则 3/7）
-
-- **背景（Lukin）**：Claude Code 的 Plan usage limits 已把 scoped weekly model 用量显示为 `Fable`，不再是旧的 Sonnet 专项行；本机真实 `GET https://api.anthropic.com/api/oauth/usage` 返回中，`seven_day_sonnet` 为 `null`，而 `limits[]` 包含 `kind:"weekly_scoped"` + `scope.model.display_name:"Fable"`。
-- **修复决策**：Anthropic quota parser 优先读取新的 `limits[]`：`session -> 5h`、`weekly_all -> 7d`、`weekly_scoped -> 7d-{model-slug}`，例如 Fable 变成 `7d-fable`；旧 top-level `five_hour/seven_day/seven_day_opus/seven_day_sonnet` 只作为 fallback，保证老 payload 继续可读。
-- **UI 决策**：providers 页 quota label 增加 `7d · Fable`，并为未来 `7d-*` scoped key 提供通用标题化 fallback；避免下一次 Claude 增加 scoped model 时页面又退回原始 key 或显示旧 Sonnet。
-- **价格决策**：`anthropic/claude-fable-5` 已按官方 Anthropic 价格配置为 input `$10/M`、output `$50/M`、cache hit `$1/M`、5-minute cache write `$12.50/M`；官方还有 1-hour cache write `$20/M`，但当前 Helm pricing schema 只有一个 `cacheWritePerMTokUsd`，所以仍记录 5-minute rate，避免在本次小修里扩大 telemetry schema。
-- **验证**：真实上游 usage payload 与 `/v1/models` 已本机核验；新增 parser、gateway quota pull、providers 页面回归测试。目标 parser/admin 页面测试与 typecheck 绿；gateway SQLite 相关测试仍被本机 `better-sqlite3` Node ABI 不匹配阻塞。
-
 ## 历史条目摘要（最近 2 条）
 
+- **2026-07-02 · Claude Fable 周限额改读 `limits[]`（Admin providers / OAuth quota，docs/11，原则 3/7）**：Anthropic quota parser 优先读取新 `limits[]` weekly scoped payload，并在 providers 页显示 `7d · Fable` 等模型级周限额。
 - **2026-07-02 · OAuth 测试成功与 quota PULL 同步账号可用状态（Admin providers / OAuth cooldown，docs/04/11，原则 3/5/7）**：已 park 账号的成功 quota PULL/Test 会用真实 quota 状态替换或清空旧 cooldown，并刷新 providers 页状态。
-- **2026-07-01 · Claude Code 日期指纹入站归一化（Anthropic protocol / native passthrough，docs/05/07，原则 7/8）**：Helm 在 Anthropic native passthrough 与互译路径中归一化 Claude Code 日期指纹，并用 mutation ledger 记录改写；新增 core/gateway 回归覆盖。
 
 ## 更早历史总览
 

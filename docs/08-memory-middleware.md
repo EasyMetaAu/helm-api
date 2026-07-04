@@ -226,7 +226,12 @@ The `MemoryWorker` is started process-wide by default. It claims pending
 ```text
 HELM_MEMORY_WORKER_DISABLED      set to "1" to disable the worker entirely
 HELM_MEMORY_WORKER_INTERVAL_MS   tick interval (default 60000)
-batchSize                        jobs claimed per tick (10)
+HELM_MEMORY_WORKER_BATCH_SIZE    jobs claimed per batch (default 50)
+HELM_MEMORY_WORKER_CONCURRENCY   simultaneous jobs per claimed batch (default 3, capped at 8)
+HELM_MEMORY_WORKER_MAX_BATCHES_PER_DRAIN
+                                  consecutive batches per drain (default 10)
+HELM_MEMORY_WORKER_MAX_DRAIN_MS  wall-clock guard between batches (default 30000)
+HELM_MEMORY_WORKER_COALESCE_MS   request-driven wake debounce (default 8000)
 ```
 
 `decay` jobs are only ever enqueued when `forgetting.enabled`, so a build with

@@ -19,6 +19,10 @@ export interface MemoryWorkerDeps {
   memoryStore: MemoryStore;
   // How many jobs to claim per tick.
   batchSize: number;
+  // How many claimed jobs may run at the same time. Defaults to 1 for old
+  // callers/tests; the gateway can raise it modestly to drain LLM-bound backlog
+  // without claiming a huge batch that sits `running` for minutes.
+  concurrency?: number;
   intervalMs: number;
   // Catch-up mode: one interval/wake drain can claim multiple batches back-to-back
   // instead of waiting for the next timer. Defaults to 1 for old callers/tests; the
@@ -204,35 +208,54 @@ async function processJob(job: MemoryJobRow, deps: MemoryWorkerDeps): Promise<vo
 export function startMemoryWorker(deps: MemoryWorkerDeps): MemoryWorkerHandle {
   // Claim + dispatch one batch. The latency-critical path — NO onTick housekeeping
   // (that is the interval's job). Shared by the interval tick and the wake drain.
-  const drainJobs = async (): Promise<number> => {
-    const jobs = await deps.memoryStore.claimPendingJobs(deps.batchSize);
-    for (const job of jobs) {
-      // Per-job guard: a single failing job must not abort the rest of the batch
-      // nor stop the timer (principle 3). The runners record their own outcome on
-      // the row; this catch is the belt-and-braces around everything else.
+  const workerConcurrency = Math.max(1, Math.floor(deps.concurrency ?? 1));
+
+  const runOneJob = async (job: MemoryJobRow): Promise<void> => {
+    // Per-job guard: a single failing job must not abort the rest of the batch
+    // nor stop the timer (principle 3). The runners record their own outcome on
+    // the row; this catch is the belt-and-braces around everything else.
+    try {
+      await processJob(job, deps);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      deps.log("memory.worker.job_failed", {
+        job_id: job.jobId,
+        type: job.type,
+        error: message,
+      });
+      // claimPendingJobs already flipped this row to `running`, and enqueueJob
+      // dedupes against pending AND running rows — swallowing the throw without
+      // closing the row would block this scope's queue FOREVER. Best-effort:
+      // even the failure bookkeeping must never escape the tick.
       try {
-        await processJob(job, deps);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        deps.log("memory.worker.job_failed", {
+        await deps.memoryStore.updateJobStatus(job.jobId, "failed", message);
+      } catch (updateErr) {
+        deps.log("memory.worker.job_update_failed", {
           job_id: job.jobId,
-          type: job.type,
-          error: message,
+          error: updateErr instanceof Error ? updateErr.message : String(updateErr),
         });
-        // claimPendingJobs already flipped this row to `running`, and enqueueJob
-        // dedupes against pending AND running rows — swallowing the throw without
-        // closing the row would block this scope's queue FOREVER. Best-effort:
-        // even the failure bookkeeping must never escape the tick.
-        try {
-          await deps.memoryStore.updateJobStatus(job.jobId, "failed", message);
-        } catch (updateErr) {
-          deps.log("memory.worker.job_update_failed", {
-            job_id: job.jobId,
-            error: updateErr instanceof Error ? updateErr.message : String(updateErr),
-          });
-        }
       }
     }
+  };
+
+  const processClaimedJobs = async (jobs: MemoryJobRow[]): Promise<void> => {
+    if (jobs.length === 0) return;
+    let next = 0;
+    const runLane = async (): Promise<void> => {
+      while (next < jobs.length) {
+        const job = jobs[next];
+        next += 1;
+        if (job !== undefined) await runOneJob(job);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(workerConcurrency, jobs.length) }, () => runLane()),
+    );
+  };
+
+  const drainJobs = async (): Promise<number> => {
+    const jobs = await deps.memoryStore.claimPendingJobs(deps.batchSize);
+    await processClaimedJobs(jobs);
     return jobs.length;
   };
 
