@@ -146,7 +146,20 @@ describe("evaluateOverrides — low-cost automation (set → simple)", () => {
 
 describe("evaluateOverrides — cheap model low-risk current turn (set → simple)", () => {
   const cheapModelLowRisk = {
-    requested_model_markers: ["gpt-5.4-mini", "spark"],
+    requested_model_markers: [
+      "economy",
+      "gpt-5.4-mini",
+      "spark",
+      "deepseek-v4-flash",
+      "deepseek/deepseek-v4-flash",
+      "openrouter/deepseek-v4-flash",
+      "claude-haiku",
+      "claude-haiku-*",
+      "claude-3-5-haiku",
+      "claude-3-5-haiku-*",
+      "anthropic/claude-haiku-*",
+      "zenmux-anthropic/claude-haiku-*",
+    ],
     current_turn_max_chars: 300,
     low_risk_markers: ["check", "inspect", "status", "read"],
     blocked_markers: ["debug", "fix", "implement", "refactor", "patch"],
@@ -177,6 +190,33 @@ describe("evaluateOverrides — cheap model low-risk current turn (set → simpl
     expect(hits).toContainEqual({ rule: "tools_floor", kind: "floor", complexity: "standard" });
     expect(hits).toContainEqual({ rule: "long_context", kind: "floor", complexity: "complex" });
     expect(applyOverrides("complex", hits)).toBe("simple");
+  });
+
+  it.each([
+    "economy",
+    "deepseek-v4-flash",
+    "deepseek/deepseek-v4-flash",
+    "openrouter/deepseek-v4-flash",
+    "claude-haiku",
+    "claude-haiku-4-5-20251001",
+    "claude-3-5-haiku-20241022",
+    "anthropic/claude-haiku-4-5-20251001",
+    "zenmux-anthropic/claude-haiku-4.5",
+  ])("treats %s as a cheap-model hint", (requestedModel) => {
+    const cfg = makeConfig({ cheap_model_low_risk: cheapModelLowRisk });
+    const hits = evaluateOverrides(
+      req({
+        requested_model: requestedModel,
+        content: "Please check the current status and report anything notable.",
+      }),
+      cfg,
+      20,
+    );
+    expect(hits).toContainEqual({
+      rule: "cheap_model_low_risk",
+      kind: "set",
+      complexity: "simple",
+    });
   });
 
   it("does not fire for explicit heavy-model requests", () => {

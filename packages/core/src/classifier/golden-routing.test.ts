@@ -674,6 +674,29 @@ describe("GOLDEN: cheap-model low-risk current turns stay cheap", () => {
     expect(got.selected_lane).toBe("economy");
   });
 
+  it.each([
+    "economy",
+    "deepseek-v4-flash",
+    "claude-haiku",
+  ])("short low-risk %s request with long history -> economy", async (requestedModel) => {
+    const request = req("Please check the current status and report anything notable.", {
+      requested_model: requestedModel,
+      messages: [
+        { role: "assistant", content: "prior repository context ".repeat(18_000) },
+        { role: "user", content: "Please check the current status and report anything notable." },
+      ],
+      tools: Array.from({ length: 37 }, (_value, index) => ({
+        type: "function",
+        function: { name: `tool_${index}` },
+      })),
+    });
+
+    const got = await decide(request);
+    expect(got.task_type).toBe("chat");
+    expect(got.complexity).toBe("simple");
+    expect(got.selected_lane).toBe("economy");
+  });
+
   it("explicit gpt-5.5 request with the same low-risk turn is not down-routed", async () => {
     const request = req("Please check the current status and report anything notable.", {
       requested_model: "gpt-5.5",

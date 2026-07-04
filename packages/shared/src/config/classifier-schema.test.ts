@@ -27,7 +27,13 @@ function fullClassifier() {
           no_reply_markers: ["NO_REPLY"],
         },
         cheap_model_low_risk: {
-          requested_model_markers: ["gpt-5.4-mini", "spark"],
+          requested_model_markers: [
+            "economy",
+            "gpt-5.4-mini",
+            "spark",
+            "deepseek-v4-flash",
+            "claude-haiku",
+          ],
           current_turn_max_chars: 300,
           low_risk_markers: ["check", "status"],
           blocked_markers: ["fix", "implement"],
