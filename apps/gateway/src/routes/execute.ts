@@ -638,6 +638,7 @@ function prepareNativeRequestForUpstream(
     caps,
     requestReasoningEffort,
     policyMutations,
+    protocol,
   );
   if (policyBody !== body) {
     body = policyBody;
@@ -865,6 +866,8 @@ function applyOpenAIReasoningPolicy(
   return body;
 }
 
+const STRIP_REASONING_EFFORT_POLICY: ReasoningEffortWireCapability = { supported: false };
+
 function applyGeminiThinkingPolicy(
   body: Record<string, unknown>,
   policy: ReasoningEffortWireCapability | undefined,
@@ -955,18 +958,28 @@ function applyReasoningEffortPolicy(
   caps: Capabilities | undefined,
   fallbackReasoningEffort: string | undefined,
   mutations: NativePassthroughCarrier["mutations"],
+  sourceProtocol: Protocol,
 ): Record<string, unknown> {
   const policy = caps?.reasoningEffort;
-  if (policy === undefined) return body;
+  const crossProtocol = sourceProtocol !== targetProviderProtocol;
 
   switch (targetProviderProtocol) {
     case "openai_chat":
     case "openai_responses":
-      return applyOpenAIReasoningPolicy(body, policy.openaiReasoning, mutations);
+      return applyOpenAIReasoningPolicy(
+        body,
+        policy?.openaiReasoning ??
+          (caps !== undefined && crossProtocol ? STRIP_REASONING_EFFORT_POLICY : undefined),
+        mutations,
+      );
     case "gemini":
-      return applyGeminiThinkingPolicy(body, policy.geminiThinkingConfig, mutations);
+      return policy === undefined
+        ? body
+        : applyGeminiThinkingPolicy(body, policy.geminiThinkingConfig, mutations);
     case "anthropic_messages":
-      return applyAnthropicReasoningPolicy(body, policy, fallbackReasoningEffort, mutations);
+      return policy === undefined
+        ? body
+        : applyAnthropicReasoningPolicy(body, policy, fallbackReasoningEffort, mutations);
   }
 }
 
@@ -1053,12 +1066,22 @@ export function isUpstreamRequestRejection(err: unknown): boolean {
   if (!(err instanceof UpstreamError)) return false;
   const status = err.upstreamStatus;
   if (status !== 400 && status !== 413 && status !== 422) return false;
+  if (isReasoningHistoryRejection(err)) return false;
   if (upstreamErrorType(err.providerRaw) === "invalid_request_error") return true;
   // 413 is "payload too large" by definition; some providers omit a typed body, so
   // also honor the unambiguous phrasings real upstreams use for shape errors.
   if (status === 413) return true;
   const text = `${err.message} ${rawErrorText(err.providerRaw)}`.toLowerCase();
   return text.includes("max allowed size");
+}
+
+function isReasoningHistoryRejection(err: unknown): boolean {
+  if (!(err instanceof UpstreamError)) return false;
+  if (err.upstreamStatus !== 400) return false;
+  const text = `${err.message} ${upstreamErrorMessage(err.providerRaw) ?? ""} ${rawErrorText(
+    err.providerRaw,
+  )}`.toLowerCase();
+  return text.includes("reasoning_content") && text.includes("thinking mode");
 }
 
 // Coerce an already-scrubbed upstream error body into the schema's record|null
@@ -1615,6 +1638,26 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           continue;
         }
 
+        // DeepSeek-style thinking mode is candidate-specific: when a fallback target
+        // requires OpenAI `reasoning_content` history that the source protocol cannot
+        // supply, another candidate may still serve the request. Do not surface this
+        // as a terminal client 400 and do not fault provider health.
+        if (isReasoningHistoryRejection(err)) {
+          capabilityPruned = true;
+          attempts.push({
+            alias,
+            skipped: true,
+            skip_reason: "reasoning_history_incompatible",
+            status: "error",
+            error_class: null,
+            latency_ms: elapsed(),
+            cost_usd: null,
+            error_detail: errorDetailOf(err),
+            ...attemptTelemetry,
+          });
+          continue;
+        }
+
         // Deterministic request-shape rejection (oversized image, bad param): the
         // body is invalid for EVERY candidate, so do NOT advance the chain and do NOT
         // fault the breaker (the upstream is healthy — the request is what's wrong).
@@ -1910,6 +1953,18 @@ function stripInternal(
       requestMutations.thinking_history_stripped_for_target = true;
       continue;
     }
+    if (
+      key === "thinking" &&
+      value !== undefined &&
+      openAICompatibleWire &&
+      req.protocol !== targetProviderProtocol
+    ) {
+      requestMutations.thinking_config_stripped_for_openai = true;
+      appendMutationList(requestMutations, "body_shims_applied", [
+        "thinking_config_stripped_for_openai",
+      ]);
+      continue;
+    }
     if (value !== undefined && value !== null) body[key] = value;
   }
   if (targetProviderProtocol === "anthropic_messages" && req.cache_control !== undefined) {
@@ -1939,6 +1994,7 @@ function stripInternal(
     caps,
     req.reasoning_effort,
     requestMutations,
+    req.protocol,
   );
   const renderedBody =
     targetProviderProtocol === "openai_chat" || targetProviderProtocol === "openai_responses"

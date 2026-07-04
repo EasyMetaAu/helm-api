@@ -363,6 +363,57 @@ describe("createExecute — gateway execution adapter", () => {
     });
   });
 
+  it("strips Anthropic thinking controls on OpenAI-compatible fallback without reasoning support", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: protocolRegistry({
+        default_good_model: {
+          providerName: "mock",
+          providerModel: "deepseek-v4-pro",
+          targetProviderProtocol: "openai_chat",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map([["default_good_model", entry("default_good_model")]]),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["default_good_model"]),
+      req({
+        protocol: "anthropic_messages",
+        thinking: { type: "adaptive" },
+        reasoning_effort: "medium",
+        provider_raw: { output_config: { effort: "medium" } },
+      }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    const body = (provider.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(body.thinking).toBeUndefined();
+    expect(body.reasoning_effort).toBeUndefined();
+    expect(body.output_config).toBeUndefined();
+    expect(out.attempts[0]?.request_mutations).toMatchObject({
+      thinking_config_stripped_for_openai: true,
+      provider_raw_stripped_for_openai: ["output_config"],
+    });
+    expect(out.attempts[0]?.request_mutations?.body_shims_applied).toEqual(
+      expect.arrayContaining([
+        "thinking_config_stripped_for_openai",
+        "reasoning_effort_stripped_for_model",
+      ]),
+    );
+  });
+
   it("does not forward Anthropic-only provider_raw keys to OpenAI-compatible upstreams", async () => {
     const provider = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
@@ -1166,6 +1217,66 @@ describe("createExecute — gateway execution adapter", () => {
       error_class: "invalid_request",
     });
     expect(provider.chatCompletion).toHaveBeenCalledOnce();
+    expect(recordFailure).not.toHaveBeenCalled();
+  });
+
+  it("falls back when an OpenAI-compatible thinking target requires missing reasoning_content history", async () => {
+    const provider = {
+      chatCompletion: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new UpstreamError(
+            "upstream_error",
+            "upstream returned 400",
+            {
+              error: {
+                message:
+                  "The `reasoning_content` in the thinking mode must be passed back to the API.",
+                type: "invalid_request_error",
+                param: null,
+                code: "invalid_request_error",
+              },
+            },
+            400,
+          ),
+        )
+        .mockResolvedValueOnce({ id: "second" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: protocolRegistry({
+        deepseek: {
+          providerName: "mock",
+          providerModel: "deepseek-v4-pro",
+          targetProviderProtocol: "openai_chat",
+        },
+        tail: {
+          providerName: "mock",
+          providerModel: "gpt-fallback",
+          targetProviderProtocol: "openai_chat",
+        },
+      }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["deepseek", "tail"]), req());
+
+    expect(out.final).toEqual({ status: "ok", alias: "tail", providerModel: "gpt-fallback" });
+    expect(provider.chatCompletion).toHaveBeenCalledTimes(2);
+    expect(out.attempts[0]).toMatchObject({
+      alias: "deepseek",
+      skipped: true,
+      skip_reason: "reasoning_history_incompatible",
+      status: "error",
+      error_class: null,
+    });
     expect(recordFailure).not.toHaveBeenCalled();
   });
 
