@@ -10,7 +10,20 @@
   // edits/reorders the list and writes the whole set back via the API client.
   let { data }: { data: { policies: Policy[]; lanes?: string[] } } = $props();
 
-  let policies = $state<Policy[]>(untrack(() => data.policies.map((p) => ({ ...p }))));
+  type PolicyRowState = { key: string; policy: Policy };
+
+  let nextPolicyRowKey = 0;
+
+  function makePolicyRow(policy: Policy): PolicyRowState {
+    nextPolicyRowKey += 1;
+    return {
+      key: `${policy.id ?? 'policy'}-${nextPolicyRowKey}`,
+      policy: { ...policy, match: { ...policy.match } },
+    };
+  }
+
+  let policyRows = $state<PolicyRowState[]>(untrack(() => data.policies.map(makePolicyRow)));
+  const policies = $derived(policyRows.map((row) => row.policy));
   // Lane names for the action dropdowns. Falls back to the well-known set when
   // the load didn't supply them (the gateway is the source of truth on save).
   const lanes = untrack(() => data.lanes ?? ['economy', 'balanced', 'premium', 'coding']);
@@ -18,28 +31,129 @@
   let error = $state<string | null>(null);
   let saving = $state(false);
   let saved = $state(false);
+  let draggingKey = $state<string | null>(null);
+  let dropTargetKey = $state<string | null>(null);
+  let stopPointerDrag: (() => void) | null = null;
 
   function updateRow(index: number, next: Policy): void {
-    policies = policies.map((p, i) => (i === index ? next : p));
+    policyRows = policyRows.map((row, i) =>
+      i === index ? { ...row, policy: { ...next, match: { ...next.match } } } : row,
+    );
   }
 
   function removeRow(index: number): void {
-    policies = policies.filter((_, i) => i !== index);
+    policyRows = policyRows.filter((_, i) => i !== index);
   }
 
   function moveRow(from: number, to: number): void {
-    if (to < 0 || to >= policies.length) return;
-    const next = [...policies];
+    if (from === to || from < 0 || from >= policyRows.length || to < 0 || to >= policyRows.length) {
+      return;
+    }
+    const next = [...policyRows];
     const [moved] = next.splice(from, 1);
     next.splice(to, 0, moved);
-    policies = next;
+    policyRows = next;
+  }
+
+  function indexOfKey(key: string): number {
+    return policyRows.findIndex((row) => row.key === key);
+  }
+
+  function resetDrag(): void {
+    draggingKey = null;
+    dropTargetKey = null;
+  }
+
+  function finishPointerDrag(): void {
+    stopPointerDrag?.();
+    stopPointerDrag = null;
+    resetDrag();
+  }
+
+  function targetIndexFromClientY(clientY: number): number {
+    const rows = Array.from(document.querySelectorAll('[data-testid="policy-row"]'));
+    if (rows.length === 0) return -1;
+
+    for (let i = 0; i < rows.length; i += 1) {
+      const rect = rows[i].getBoundingClientRect();
+      if (clientY < rect.top + rect.height / 2) return i;
+    }
+    return rows.length - 1;
+  }
+
+  function handlePointerMove(event: PointerEvent): void {
+    if (draggingKey === null) return;
+    event.preventDefault();
+    const from = indexOfKey(draggingKey);
+    const to = targetIndexFromClientY(event.clientY);
+    if (from === -1 || to === -1) return;
+    if (from !== to) moveRow(from, to);
+    dropTargetKey = draggingKey;
+  }
+
+  function handlePointerStart(index: number, event: PointerEvent): void {
+    if (event.button !== 0 || policyRows.length < 2) return;
+    const row = policyRows[index];
+    if (!row) return;
+    finishPointerDrag();
+    event.preventDefault();
+    draggingKey = row.key;
+    dropTargetKey = row.key;
+
+    const pointerId = event.pointerId;
+    const onMove = (nextEvent: PointerEvent) => {
+      if (nextEvent.pointerId === pointerId) handlePointerMove(nextEvent);
+    };
+    const onUp = (nextEvent: PointerEvent) => {
+      if (nextEvent.pointerId !== pointerId) return;
+      finishPointerDrag();
+    };
+    window.addEventListener('pointermove', onMove, { passive: false });
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    stopPointerDrag = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+  }
+
+  function handleDragStart(index: number, event: DragEvent): void {
+    const row = policyRows[index];
+    if (!row) return;
+    draggingKey = row.key;
+    dropTargetKey = null;
+    event.dataTransfer?.setData('text/plain', row.key);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+  }
+
+  function handleDragOver(index: number, event: DragEvent): void {
+    if (draggingKey === null) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    dropTargetKey = policyRows[index]?.key ?? null;
+  }
+
+  function handleDrop(index: number, event: DragEvent): void {
+    event.preventDefault();
+    const key = draggingKey ?? event.dataTransfer?.getData('text/plain');
+    if (!key) {
+      resetDrag();
+      return;
+    }
+    const from = indexOfKey(key);
+    if (from !== -1) moveRow(from, index);
+    resetDrag();
   }
 
   async function addRow(): Promise<void> {
     // New rule defaults to a concrete action so it is never a silent no-op
     // (server requires at least one of use_lane/allowed_lanes). Appended LAST so it
     // gets the lowest priority (first-match order) and can't shadow existing rules.
-    policies = [...policies, { match: { task_type: TASK_TYPE_OPTIONS[0] }, use_lane: lanes[0] }];
+    policyRows = [
+      ...policyRows,
+      makePolicyRow({ match: { task_type: TASK_TYPE_OPTIONS[0] }, use_lane: lanes[0] }),
+    ];
     // The new row appends to the end of a potentially long list, so the click can
     // land below the fold and look like a no-op. Scroll it into view for
     // immediate feedback.
@@ -56,7 +170,7 @@
     saving = true;
     try {
       const result = await savePolicies(policies);
-      policies = result.map((p) => ({ ...p }));
+      policyRows = result.map(makePolicyRow);
       saved = true;
     } catch (e) {
       error = e instanceof Error ? e.message : $t('Failed to save policies');
@@ -91,7 +205,7 @@
     </p>
   {/if}
 
-  {#if policies.length === 0}
+  {#if policyRows.length === 0}
     <div class="empty-state" data-testid="policies-empty">
       <p class="font-medium text-ink-body">{$t('No policies yet')}</p>
       <p class="mt-1 text-sm text-ink-muted">
@@ -103,15 +217,22 @@
   {/if}
 
   <div class="flex flex-col gap-4">
-    {#each policies as policy, i (i)}
+    {#each policyRows as row, i (row.key)}
       <PolicyRow
-        {policy}
+        policy={row.policy}
         index={i}
-        total={policies.length}
+        total={policyRows.length}
         {lanes}
+        dragging={draggingKey === row.key}
+        dropTarget={dropTargetKey === row.key}
         onchange={(next) => updateRow(i, next)}
         onremove={removeRow}
         onmove={moveRow}
+        ondragstart={handleDragStart}
+        ondragover={handleDragOver}
+        ondrop={handleDrop}
+        ondragend={resetDrag}
+        onpointerstart={handlePointerStart}
       />
     {/each}
   </div>

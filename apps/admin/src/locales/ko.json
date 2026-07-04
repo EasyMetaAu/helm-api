@@ -216,6 +216,7 @@
   "disabled": "비활성화됨",
   "Disconnect": "연결 해제",
   "Disconnecting…": "연결 해제 중…",
+  "drag to reorder policy": "드래그하여 정책 순서 변경",
   "Done": "완료",
   "Done in {ms} ms": "{ms} ms 소요",
   "down": "아래",

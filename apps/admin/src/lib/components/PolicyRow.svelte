@@ -20,17 +20,31 @@
     index,
     total,
     lanes,
+    dragging = false,
+    dropTarget = false,
     onchange,
     onremove,
     onmove,
+    ondragstart = () => {},
+    ondragover = () => {},
+    ondrop = () => {},
+    ondragend = () => {},
+    onpointerstart = () => {},
   }: {
     policy: Policy;
     index: number;
     total: number;
     lanes: string[];
+    dragging?: boolean;
+    dropTarget?: boolean;
     onchange: (next: Policy) => void;
     onremove: (index: number) => void;
     onmove: (from: number, to: number) => void;
+    ondragstart?: (index: number, event: DragEvent) => void;
+    ondragover?: (index: number, event: DragEvent) => void;
+    ondrop?: (index: number, event: DragEvent) => void;
+    ondragend?: () => void;
+    onpointerstart?: (index: number, event: PointerEvent) => void;
   } = $props();
 
   // Own an editable copy seeded from the initial prop. The component accumulates
@@ -71,10 +85,49 @@
     reasoningEffort = value as ReasoningEffort | '';
     emit();
   }
+
+  function handleDragKeydown(event: KeyboardEvent): void {
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      onmove(index, index - 1);
+      return;
+    }
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      onmove(index, index + 1);
+    }
+  }
 </script>
 
-<div class="card flex flex-col gap-3" data-testid="policy-row">
+<div
+  class={`card flex flex-col gap-3 transition-shadow ${
+    dragging ? 'opacity-60 ring-2 ring-slate-300' : ''
+  } ${dropTarget ? 'ring-2 ring-slate-400' : ''}`}
+  data-testid="policy-row"
+  role="group"
+  aria-label={`${$t('priority')} ${index + 1}`}
+  ondragover={(event) => ondragover(index, event)}
+  ondrop={(event) => ondrop(index, event)}
+>
   <header class="flex items-center gap-2">
+    <button
+      type="button"
+      class="btn-icon shrink-0 cursor-grab text-slate-400 hover:text-slate-700 active:cursor-grabbing"
+      aria-label={$t('drag to reorder policy')}
+      title={$t('drag to reorder policy')}
+      disabled={total < 2}
+      data-testid="policy-drag-handle"
+      ondragstart={(event) => ondragstart(index, event)}
+      ondragend={ondragend}
+      onpointerdown={(event) => onpointerstart(index, event)}
+      onkeydown={handleDragKeydown}
+    >
+      <svg viewBox="0 0 20 20" class="h-4 w-4" fill="currentColor" aria-hidden="true">
+        <path
+          d="M7 5.25a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Zm0 4.75a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Zm-1.25 6a1.25 1.25 0 1 0 0-2.5 1.25 1.25 0 0 0 0 2.5Zm9.75-10.75a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0ZM14.25 11.25a1.25 1.25 0 1 0 0-2.5 1.25 1.25 0 0 0 0 2.5Zm1.25 3.5a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Z"
+        />
+      </svg>
+    </button>
     <span
       class="flex h-6 w-6 items-center justify-center rounded-full bg-slate-900 text-xs font-semibold text-white"
       data-testid="policy-index"
@@ -84,20 +137,6 @@
       >{$t('first match wins — lower number = higher priority')}</span
     >
     <span class="flex-1"></span>
-    <button
-      type="button"
-      class="btn-icon"
-      aria-label={$t('move up')}
-      onclick={() => onmove(index, index - 1)}
-      disabled={index === 0}>↑</button
-    >
-    <button
-      type="button"
-      class="btn-icon"
-      aria-label={$t('move down')}
-      onclick={() => onmove(index, index + 1)}
-      disabled={index === total - 1}>↓</button
-    >
     <button
       type="button"
       class="btn-icon hover:bg-red-50 hover:text-red-600"

@@ -216,6 +216,7 @@
   "disabled": "已停用",
   "Disconnect": "中斷連線",
   "Disconnecting…": "正在中斷連線…",
+  "drag to reorder policy": "拖動以調整策略順序",
   "Done": "完成",
   "Done in {ms} ms": "耗時 {ms} 毫秒",
   "down": "下行",

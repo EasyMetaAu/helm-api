@@ -139,7 +139,23 @@ describe('PolicyRow', () => {
     expect(screen.getByTestId('catch-all-warning')).toBeInTheDocument();
   });
 
-  it('remove and move buttons call their callbacks', async () => {
+  it('shows one drag handle for reordering instead of separate up/down buttons', () => {
+    render(PolicyRow, {
+      policy: makePolicy(),
+      index: 1,
+      total: 3,
+      lanes: LANES,
+      onchange: vi.fn(),
+      onremove: vi.fn(),
+      onmove: vi.fn(),
+    });
+    const row = screen.getByTestId('policy-row');
+    expect(within(row).getByRole('button', { name: /drag to reorder/i })).toBeInTheDocument();
+    expect(within(row).queryByRole('button', { name: /move up/i })).toBeNull();
+    expect(within(row).queryByRole('button', { name: /move down/i })).toBeNull();
+  });
+
+  it('drag handle supports keyboard reordering and remove still calls its callback', async () => {
     const onremove = vi.fn();
     const onmove = vi.fn();
     render(PolicyRow, {
@@ -152,7 +168,9 @@ describe('PolicyRow', () => {
       onmove,
     });
     const row = screen.getByTestId('policy-row');
-    await fireEvent.click(within(row).getByRole('button', { name: /move up/i }));
+    await fireEvent.keyDown(within(row).getByRole('button', { name: /drag to reorder/i }), {
+      key: 'ArrowUp',
+    });
     expect(onmove).toHaveBeenCalledWith(1, 0);
     await fireEvent.click(within(row).getByRole('button', { name: /remove/i }));
     expect(onremove).toHaveBeenCalledWith(1);
