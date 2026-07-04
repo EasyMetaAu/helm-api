@@ -93,6 +93,27 @@ function pgRows<T>(result: unknown): T[] {
   return Array.isArray(maybe.rows) ? maybe.rows : [];
 }
 
+function pgMemoryJobScopeClauses(input: MemoryAdminStatsScope): SQL[] {
+  const clauses: SQL[] = [];
+  if (input.accountId !== undefined) {
+    clauses.push(sql`scope_id::jsonb ->> 'accountId' = ${input.accountId}`);
+  }
+  if (input.projectId !== undefined) {
+    clauses.push(sql`scope_id::jsonb ->> 'projectId' = ${input.projectId}`);
+  }
+  if (input.resourceId !== undefined) {
+    clauses.push(sql`scope_id::jsonb ->> 'resourceId' = ${input.resourceId}`);
+  }
+  if (input.threadId !== undefined) {
+    clauses.push(sql`scope_id::jsonb ->> 'threadId' = ${input.threadId}`);
+  }
+  return clauses;
+}
+
+function pgWhere(clauses: readonly SQL[]): SQL {
+  return clauses.length > 0 ? sql`WHERE ${sql.join([...clauses], sql` AND `)}` : sql``;
+}
+
 // Observation read scope — pg mirror of the sqlite adapter's observationScopeWhere
 // (same contract, different dialect). Thread scope = the thread's own rows;
 // project/resource scope = aggregated across all the owner's matching threads
@@ -1195,6 +1216,7 @@ export class PgMemoryStore implements MemoryStore {
     const threadId = input.threadId ?? null;
     const noScopeFilter =
       accountId === null && projectId === null && resourceId === null && threadId === null;
+    const jobScopeClauses = pgMemoryJobScopeClauses(input);
     const threads = pgRows<{ n: number | string }>(
       await this.db.execute(
         noScopeFilter
@@ -1291,21 +1313,12 @@ export class PgMemoryStore implements MemoryStore {
     )[0];
     const queueRows = pgRows<{ status: string; n: number | string }>(
       await this.db.execute(
-        noScopeFilter
-          ? sql`
-              SELECT status, COUNT(*)::bigint AS n
-                FROM memory_jobs
-               GROUP BY status
-            `
-          : sql`
-              SELECT status, COUNT(*)::bigint AS n
-                FROM memory_jobs
-               WHERE (${accountId}::text IS NULL OR scope_id::jsonb ->> 'accountId' = ${accountId})
-                 AND (${projectId}::text IS NULL OR scope_id::jsonb ->> 'projectId' = ${projectId})
-                 AND (${resourceId}::text IS NULL OR scope_id::jsonb ->> 'resourceId' = ${resourceId})
-                 AND (${threadId}::text IS NULL OR scope_id::jsonb ->> 'threadId' = ${threadId})
-               GROUP BY status
-            `,
+        sql`
+          SELECT status, COUNT(*)::bigint AS n
+            FROM memory_jobs
+            ${pgWhere(jobScopeClauses)}
+           GROUP BY status
+        `,
       ),
     );
     const queue = { pending: 0, running: 0, done: 0, failed: 0 };
@@ -1315,58 +1328,38 @@ export class PgMemoryStore implements MemoryStore {
       else if (row.status === "done") queue.done = numberOf(row.n);
       else if (row.status === "failed") queue.failed = numberOf(row.n);
     }
-    const queueTimes = pgRows<{
-      oldestPendingAt: number | string | null;
-      oldestRunningAt: number | string | null;
-      newestDoneAt: number | string | null;
-      newestFailedAt: number | string | null;
-      staleRunning: number | string | null;
-    }>(
-      await this.db.execute(
-        noScopeFilter
-          ? sql`
-              SELECT
-                MIN(CASE WHEN status = 'pending' THEN created_at END)::bigint AS "oldestPendingAt",
-                MIN(CASE WHEN status = 'running' THEN updated_at END)::bigint AS "oldestRunningAt",
-                MAX(CASE WHEN status = 'done' THEN updated_at END)::bigint AS "newestDoneAt",
-                MAX(CASE WHEN status = 'failed' THEN updated_at END)::bigint AS "newestFailedAt",
-                SUM(CASE WHEN status = 'running' AND updated_at <= ${input.now.getTime() - RUNNING_LEASE_MS} THEN 1 ELSE 0 END)::bigint AS "staleRunning"
-               FROM memory_jobs
-            `
-          : sql`
-              SELECT
-                MIN(CASE WHEN status = 'pending' THEN created_at END)::bigint AS "oldestPendingAt",
-                MIN(CASE WHEN status = 'running' THEN updated_at END)::bigint AS "oldestRunningAt",
-                MAX(CASE WHEN status = 'done' THEN updated_at END)::bigint AS "newestDoneAt",
-                MAX(CASE WHEN status = 'failed' THEN updated_at END)::bigint AS "newestFailedAt",
-                SUM(CASE WHEN status = 'running' AND updated_at <= ${input.now.getTime() - RUNNING_LEASE_MS} THEN 1 ELSE 0 END)::bigint AS "staleRunning"
-               FROM memory_jobs
-              WHERE (${accountId}::text IS NULL OR scope_id::jsonb ->> 'accountId' = ${accountId})
-                AND (${projectId}::text IS NULL OR scope_id::jsonb ->> 'projectId' = ${projectId})
-                AND (${resourceId}::text IS NULL OR scope_id::jsonb ->> 'resourceId' = ${resourceId})
-                AND (${threadId}::text IS NULL OR scope_id::jsonb ->> 'threadId' = ${threadId})
-            `,
-      ),
-    )[0];
+    const jobScalar = async (
+      expr: SQL,
+      status: MemoryJobStatus,
+      extraClauses: readonly SQL[] = [],
+    ): Promise<number | string | null> => {
+      const rows = pgRows<{ value: number | string | null }>(
+        await this.db.execute(sql`
+          SELECT ${expr} AS value
+            FROM memory_jobs
+            ${pgWhere([sql`status = ${status}`, ...jobScopeClauses, ...extraClauses])}
+        `),
+      );
+      return rows[0]?.value ?? null;
+    };
+    const queueTimes = {
+      oldestPendingAt: await jobScalar(sql`MIN(created_at)::bigint`, "pending"),
+      oldestRunningAt: await jobScalar(sql`MIN(updated_at)::bigint`, "running"),
+      newestDoneAt: await jobScalar(sql`MAX(updated_at)::bigint`, "done"),
+      newestFailedAt: await jobScalar(sql`MAX(updated_at)::bigint`, "failed"),
+      staleRunning: await jobScalar(sql`COUNT(*)::bigint`, "running", [
+        sql`updated_at <= ${input.now.getTime() - RUNNING_LEASE_MS}`,
+      ]),
+    };
     const byType = pgRows<{ type: string; status: string; count: number | string }>(
       await this.db.execute(
-        noScopeFilter
-          ? sql`
-              SELECT type, status, COUNT(*)::bigint AS count
-                FROM memory_jobs
-               GROUP BY type, status
-               ORDER BY type ASC, status ASC
-            `
-          : sql`
-              SELECT type, status, COUNT(*)::bigint AS count
-                FROM memory_jobs
-               WHERE (${accountId}::text IS NULL OR scope_id::jsonb ->> 'accountId' = ${accountId})
-                 AND (${projectId}::text IS NULL OR scope_id::jsonb ->> 'projectId' = ${projectId})
-                 AND (${resourceId}::text IS NULL OR scope_id::jsonb ->> 'resourceId' = ${resourceId})
-                 AND (${threadId}::text IS NULL OR scope_id::jsonb ->> 'threadId' = ${threadId})
-               GROUP BY type, status
-               ORDER BY type ASC, status ASC
-            `,
+        sql`
+          SELECT type, status, COUNT(*)::bigint AS count
+            FROM memory_jobs
+            ${pgWhere(jobScopeClauses)}
+           GROUP BY type, status
+           ORDER BY type ASC, status ASC
+        `,
       ),
     ).map((r) => ({ type: r.type, status: r.status, count: numberOf(r.count) }));
     return {

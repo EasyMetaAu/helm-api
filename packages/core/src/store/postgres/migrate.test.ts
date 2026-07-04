@@ -140,6 +140,17 @@ describe("runPgMigrations — per-migration atomicity", () => {
     await db.$close();
   });
 
+  it("creates memory job admin-stats indexes", async () => {
+    const db = await createPgliteDb();
+    const indexes = (await db.execute(
+      sql.raw("SELECT indexname FROM pg_indexes WHERE tablename = 'memory_jobs'"),
+    )) as { rows: Array<{ indexname: string }> };
+    expect(indexes.rows.map((r) => r.indexname)).toEqual(
+      expect.arrayContaining(["idx_memory_jobs_status_updated_at", "idx_memory_jobs_type_status"]),
+    );
+    await db.$close();
+  });
+
   // docs/12 "Schema deltas" (P2) — the forgetting migration (sqlite v18 / pg
   // v17). Additive columns + the new account-scoped memory_facts table, mirrored
   // into the pg dialect per CLAUDE.md (dialect differences sealed in the adapter).

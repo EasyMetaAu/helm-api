@@ -236,6 +236,15 @@ describe("sqlite v18 forgetting schema deltas", () => {
       .map((i) => (i as { name: string }).name);
   }
 
+  it("creates memory job admin-stats indexes", () => {
+    const db = createSqliteDb(":memory:");
+    const raw = db.$sqlite;
+    expect(indexNames(raw, "memory_jobs")).toEqual(
+      expect.arrayContaining(["idx_memory_jobs_status_updated_at", "idx_memory_jobs_type_status"]),
+    );
+    raw.close();
+  });
+
   it("adds the forgetting columns to memory_observations", () => {
     const db = createSqliteDb(":memory:");
     const raw = db.$sqlite;

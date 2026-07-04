@@ -815,6 +815,28 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // Admin memory stats queue indexes. /admin/api/memory/stats reads queue depth,
+    // oldest/newest timestamps, stale running jobs, and jobs-by-type on every Memory
+    // page refresh. Production keeps tens of thousands of completed jobs between
+    // cleanup sweeps, so those reads must use narrow status/type indexes instead of
+    // repeatedly scanning the whole memory_jobs history.
+    version: 35,
+    run: (db) => {
+      if (sqliteTableHasColumns(db, "memory_jobs", ["status", "updated_at", "created_at"])) {
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_memory_jobs_status_updated_at
+            ON memory_jobs (status, updated_at, created_at);
+        `);
+      }
+      if (sqliteTableHasColumns(db, "memory_jobs", ["type", "status"])) {
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_memory_jobs_type_status
+            ON memory_jobs (type, status);
+        `);
+      }
+    },
+  },
 ];
 
 function sqliteTableHasColumns(
