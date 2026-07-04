@@ -4046,7 +4046,15 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
   // Anthropic SSE frames the upstream byte-relays back, verbatim.
   const SSE = [
     'event: message_start\ndata: {"type":"message_start"}\n\n',
-    'event: content_block_delta\ndata: {"type":"content_block_delta"}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+  ];
+
+  const EMPTY_ANTHROPIC_SSE = [
+    'event: message_start\ndata: {"type":"message_start"}\n\n',
+    'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+    'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":0}}\n\n',
     'event: message_stop\ndata: {"type":"message_stop"}\n\n',
   ];
 
@@ -4275,6 +4283,59 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
     expect(out.attempts[0]?.status).toBe("error");
     expect(out.attempts[0]?.error_class).toBe("upstream_error");
     // The chain advanced and the second anthropic candidate streamed via passthrough.
+    expect(tail.nativePassthroughStream).toHaveBeenCalledTimes(1);
+    expect(out.final.status).toBe("ok");
+    expect(out.stream).not.toBeNull();
+    expect(out.nativePassthrough).toBe(true);
+  });
+
+  it("an Anthropic passthrough stream that ends with no real output records a failure and advances the chain", async () => {
+    const head = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: vi.fn().mockReturnValue(gen(EMPTY_ANTHROPIC_SSE)),
+    } as unknown as ProviderClient & { nativePassthroughStream: ReturnType<typeof vi.fn> };
+    const tail = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: vi.fn().mockReturnValue(gen(SSE)),
+    } as unknown as ProviderClient & { nativePassthroughStream: ReturnType<typeof vi.fn> };
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: tail,
+      providers: new Map([
+        ["anthro-a", head],
+        ["anthro-b", tail],
+      ]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro-a",
+          providerModel: "claude-a",
+          targetProviderProtocol: "anthropic_messages",
+        },
+        b: {
+          providerName: "anthro-b",
+          providerModel: "claude-b",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(plan(["a", "b"]), anthropicStreamReq());
+    expect(head.nativePassthroughStream).toHaveBeenCalledTimes(1);
+    expect(recordFailure).toHaveBeenCalledTimes(1);
+    expect(recordFailure).toHaveBeenCalledWith("a");
+    expect(out.attempts[0]?.status).toBe("error");
+    expect(out.attempts[0]?.error_class).toBe("upstream_error");
+    expect(out.attempts[0]?.error_detail?.message).toBe(
+      "upstream stream ended before producing any output",
+    );
     expect(tail.nativePassthroughStream).toHaveBeenCalledTimes(1);
     expect(out.final.status).toBe("ok");
     expect(out.stream).not.toBeNull();

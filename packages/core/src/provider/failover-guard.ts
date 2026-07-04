@@ -61,6 +61,14 @@ function tryParse(data: string): Record<string, unknown> | null {
   }
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
+function nonEmptyString(value: unknown): boolean {
+  return typeof value === "string" && value.length > 0;
+}
+
 // ── OpenAI Responses ─────────────────────────────────────────────────────────
 // Preamble: response.created / response.in_progress (emitted unconditionally before
 // any model work). Error: error / response.failed. Everything else (deltas,
@@ -86,8 +94,10 @@ const responsesClassifier: PreOutputClassifier = {
 };
 
 // ── Anthropic Messages ───────────────────────────────────────────────────────
-// Preamble: message_start (no content yet) / ping (keep-alive). Error: error.
-// content_block_*, message_delta, message_stop are committing output.
+// Preamble: message_start / ping / empty block lifecycle events. Error: error.
+// Output: real content only — text/thinking deltas, tool_use starts, tool input
+// deltas, or redacted/signature content. Terminal message_delta/message_stop alone
+// must not commit; otherwise an upstream can "succeed" with no client-visible output.
 const anthropicClassifier: PreOutputClassifier = {
   classify(data) {
     if (data === "[DONE]") return "output";
@@ -96,6 +106,42 @@ const anthropicClassifier: PreOutputClassifier = {
     const t = obj.type;
     if (t === "message_start" || t === "ping") return "preamble";
     if (t === "error") return "error";
+    if (t === "content_block_start") {
+      const block = asRecord(obj.content_block);
+      if (!block) return "preamble";
+      switch (block.type) {
+        case "tool_use":
+          return nonEmptyString(block.id) && nonEmptyString(block.name) ? "output" : "preamble";
+        case "text":
+          return nonEmptyString(block.text) ? "output" : "preamble";
+        case "thinking":
+          return nonEmptyString(block.thinking) ? "output" : "preamble";
+        case "redacted_thinking":
+          return nonEmptyString(block.data) ? "output" : "preamble";
+        default:
+          return "output";
+      }
+    }
+    if (t === "content_block_delta") {
+      const delta = asRecord(obj.delta);
+      if (!delta) return "preamble";
+      if (nonEmptyString(delta.text)) return "output";
+      if (nonEmptyString(delta.partial_json)) return "output";
+      if (nonEmptyString(delta.thinking)) return "output";
+      if (nonEmptyString(delta.signature)) return "output";
+      switch (delta.type) {
+        case "text_delta":
+        case "input_json_delta":
+        case "thinking_delta":
+        case "signature_delta":
+          return "preamble";
+        default:
+          return "output";
+      }
+    }
+    if (t === "content_block_stop" || t === "message_delta" || t === "message_stop") {
+      return "preamble";
+    }
     return "output";
   },
   errorMessage(data) {
