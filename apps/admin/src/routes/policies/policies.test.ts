@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Policy } from '$lib/api/policies.js';
 import PoliciesPage from './+page.svelte';
 
@@ -20,10 +20,25 @@ function renderPage(policies: Policy[]) {
   return render(PoliciesPage, { data: { policies } });
 }
 
+async function firePointer(
+  target: Document | Node | Element | Window,
+  type: string,
+  init: { button?: number; clientY: number; pointerId?: number },
+) {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.assign(event, { pointerId: 1, ...init });
+  await fireEvent(target, event);
+}
+
 describe('policies page', () => {
   beforeEach(() => {
     savePolicies.mockReset();
     savePolicies.mockImplementation((list: Policy[]) => Promise.resolve(list));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it('renders the policies in order with 1-based priority numbers', () => {
@@ -87,6 +102,81 @@ describe('policies page', () => {
     await waitFor(() => expect(savePolicies).toHaveBeenCalledTimes(1));
     const sent = savePolicies.mock.calls[0][0] as Policy[];
     expect(sent.map((p) => p.match.task_type)).toEqual(['math', 'coding']);
+  });
+
+  it('auto-scrolls and continues reordering while pointer dragging near the list edge', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) =>
+      window.setTimeout(() => callback(0), 16),
+    );
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((handle) =>
+      window.clearTimeout(handle),
+    );
+
+    const main = document.createElement('main');
+    let scrollTop = 0;
+    Object.defineProperty(main, 'clientHeight', { configurable: true, value: 300 });
+    Object.defineProperty(main, 'scrollHeight', { configurable: true, value: 900 });
+    Object.defineProperty(main, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    main.getBoundingClientRect = () =>
+      ({ top: 0, bottom: 300, height: 300, left: 0, right: 600, width: 600 }) as DOMRect;
+    const scrollBy = vi.fn((optionsOrX?: ScrollToOptions | number, y?: number) => {
+      scrollTop += typeof optionsOrX === 'number' ? Number(y ?? 0) : Number(optionsOrX?.top ?? 0);
+    });
+    main.scrollBy = scrollBy as unknown as typeof main.scrollBy;
+    document.body.append(main);
+
+    render(
+      PoliciesPage,
+      {
+        target: main,
+        props: {
+          data: {
+            policies: [
+              policy({ match: { task_type: 'coding' }, use_lane: 'coding' }),
+              policy({ match: { task_type: 'math' }, use_lane: 'premium' }),
+              policy({ match: { task_type: 'chat' }, use_lane: 'economy' }),
+            ],
+          },
+        },
+      },
+    );
+
+    const rowRect = (row: HTMLElement): DOMRect => {
+      const rows = Array.from(document.querySelectorAll('[data-testid="policy-row"]'));
+      const index = rows.indexOf(row);
+      const top = 80 + index * 100 - scrollTop;
+      return { top, bottom: top + 80, height: 80, left: 0, right: 600, width: 600 } as DOMRect;
+    };
+
+    for (const row of screen.getAllByTestId('policy-row')) {
+      row.getBoundingClientRect = () => rowRect(row);
+    }
+
+    const rows = screen.getAllByTestId('policy-row');
+    const firstHandle = within(rows[0]).getByRole('button', { name: /drag to reorder/i });
+    firstHandle.getBoundingClientRect = () =>
+      ({ top: 96, bottom: 128, height: 32, left: 16, right: 48, width: 32 }) as DOMRect;
+
+    await firePointer(firstHandle, 'pointerdown', { button: 0, clientY: 112 });
+    await firePointer(window, 'pointermove', { clientY: 280 });
+    await vi.advanceTimersByTimeAsync(80);
+    await firePointer(window, 'pointerup', { clientY: 280 });
+
+    expect(scrollBy).toHaveBeenCalled();
+    expect(scrollTop).toBeGreaterThan(0);
+    const nextRows = screen.getAllByTestId('policy-row');
+    expect((within(nextRows[0]).getByLabelText(/task type/i) as HTMLSelectElement).value).toBe(
+      'math',
+    );
+    expect(nextRows.map((row) => within(row).getByTestId('policy-index').textContent?.trim()))
+      .toEqual(['1', '2', '3']);
   });
 
   it('on save failure shows an error and keeps the pre-save list (fail-closed, no dirty write)', async () => {

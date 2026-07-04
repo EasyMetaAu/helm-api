@@ -34,6 +34,11 @@
   let draggingKey = $state<string | null>(null);
   let dropTargetKey = $state<string | null>(null);
   let stopPointerDrag: (() => void) | null = null;
+  let lastDragClientY: number | null = null;
+  let autoScrollFrame: number | null = null;
+
+  const AUTO_SCROLL_EDGE_PX = 72;
+  const AUTO_SCROLL_MAX_STEP_PX = 18;
 
   function updateRow(index: number, next: Policy): void {
     policyRows = policyRows.map((row, i) =>
@@ -62,6 +67,7 @@
   function resetDrag(): void {
     draggingKey = null;
     dropTargetKey = null;
+    cancelAutoScroll();
   }
 
   function finishPointerDrag(): void {
@@ -81,14 +87,73 @@
     return rows.length - 1;
   }
 
-  function handlePointerMove(event: PointerEvent): void {
+  function scrollContainer(): HTMLElement | null {
+    const main = document.querySelector('main');
+    return main instanceof HTMLElement ? main : null;
+  }
+
+  function dragAutoScrollDelta(container: HTMLElement, clientY: number): number {
+    const rect = container.getBoundingClientRect();
+    const topDistance = clientY - rect.top;
+    const bottomDistance = rect.bottom - clientY;
+    if (topDistance < AUTO_SCROLL_EDGE_PX) {
+      return -Math.ceil(
+        ((AUTO_SCROLL_EDGE_PX - Math.max(0, topDistance)) / AUTO_SCROLL_EDGE_PX) *
+          AUTO_SCROLL_MAX_STEP_PX,
+      );
+    }
+    if (bottomDistance < AUTO_SCROLL_EDGE_PX) {
+      return Math.ceil(
+        ((AUTO_SCROLL_EDGE_PX - Math.max(0, bottomDistance)) / AUTO_SCROLL_EDGE_PX) *
+          AUTO_SCROLL_MAX_STEP_PX,
+      );
+    }
+    return 0;
+  }
+
+  function moveDraggingRowToClientY(clientY: number): void {
     if (draggingKey === null) return;
-    event.preventDefault();
     const from = indexOfKey(draggingKey);
-    const to = targetIndexFromClientY(event.clientY);
+    const to = targetIndexFromClientY(clientY);
     if (from === -1 || to === -1) return;
     if (from !== to) moveRow(from, to);
     dropTargetKey = draggingKey;
+  }
+
+  function runAutoScroll(): void {
+    autoScrollFrame = null;
+    if (draggingKey === null || lastDragClientY === null) return;
+
+    const container = scrollContainer();
+    if (!container) return;
+
+    const delta = dragAutoScrollDelta(container, lastDragClientY);
+    if (delta === 0) return;
+
+    container.scrollBy({ top: delta });
+    moveDraggingRowToClientY(lastDragClientY);
+    autoScrollFrame = window.requestAnimationFrame(runAutoScroll);
+  }
+
+  function scheduleAutoScroll(clientY: number): void {
+    lastDragClientY = clientY;
+    if (autoScrollFrame !== null) return;
+    autoScrollFrame = window.requestAnimationFrame(runAutoScroll);
+  }
+
+  function cancelAutoScroll(): void {
+    if (autoScrollFrame !== null) {
+      window.cancelAnimationFrame(autoScrollFrame);
+      autoScrollFrame = null;
+    }
+    lastDragClientY = null;
+  }
+
+  function handlePointerMove(event: PointerEvent): void {
+    if (draggingKey === null) return;
+    event.preventDefault();
+    moveDraggingRowToClientY(event.clientY);
+    scheduleAutoScroll(event.clientY);
   }
 
   function handlePointerStart(index: number, event: PointerEvent): void {
