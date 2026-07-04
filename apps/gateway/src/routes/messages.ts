@@ -13,6 +13,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
+import { type ServingAccount, stampServingAccount } from "../runtime/serving-account.js";
 import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.js";
 import { type MemoryKeyDefaults, resolveMemoryScope } from "./memory-scope.js";
 import { PipelineError } from "./messages-pipeline.js";
@@ -100,6 +101,7 @@ export interface PipelineRunResult {
    *  Each face writes it verbatim into the captured payload so the admin sees what the
    *  model actually received. Null/absent on a routing failure (no served attempt). */
   readonly upstreamRequest?: string | null;
+  readonly servingAccount?: ServingAccount | null;
   /** Drain the full (non-stream) result into ONE IR response object. */
   collect(): Promise<unknown>;
   /** The outbound-protocol event stream: one object per wire event. For Anthropic
@@ -592,6 +594,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
           // backfill) already mutated result.decision. result.decision exists even
           // on a pre-stream failure, so a failed stream still records. Fail-open.
           if (deps.record) {
+            stampServingAccount(result.decision, result.servingAccount ?? null);
             await recordServed(
               deps.record,
               {
@@ -629,6 +632,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
       // /admin/requests. responseJson null = no body. result.decision exists even
       // on failure. Fail-open inside recordServed.
       if (deps.record) {
+        stampServingAccount(result.decision, result.servingAccount ?? null);
         await recordServed(
           deps.record,
           {
@@ -654,6 +658,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     // Record the served (non-stream) request: telemetry row (→ /admin/requests) +
     // verbatim request/response body. Mirrors chat.ts. Fail-open inside recordServed.
     if (deps.record) {
+      stampServingAccount(result.decision, result.servingAccount ?? null);
       await recordServed(
         deps.record,
         {

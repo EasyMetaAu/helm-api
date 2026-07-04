@@ -227,6 +227,19 @@ describe("DecisionRecordSchema", () => {
     expect(parsed.cost_breakdown.eval_usd).toBeNull();
   });
 
+  it("defaults serving_account to null and round-trips the final subscription account", () => {
+    expect(DecisionRecordSchema.parse(fullRecord()).serving_account).toBeNull();
+
+    const parsed = DecisionRecordSchema.parse({
+      ...fullRecord(),
+      serving_account: { provider_id: "anthropic", account: "claude-team-a" },
+    });
+    expect(parsed.serving_account).toEqual({
+      provider_id: "anthropic",
+      account: "claude-team-a",
+    });
+  });
+
   it("rejects a negative fallback_count", () => {
     const r = { ...fullRecord(), fallback_count: -1 };
     expect(DecisionRecordSchema.safeParse(r).success).toBe(false);

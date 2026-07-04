@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-07-04 · 请求记录最终订阅账号并重排请求列表字段（Telemetry / Admin requests，docs/04/07/11，原则 1/5/7）
+
+- **背景（Lukin）**：请求 telemetry 只能看到最终 model/provider alias，无法确认使用订阅 provider 时最后落到哪个具体订阅账号；排查成本、额度、限流和账号池调度时缺少每次请求的账号级事实。
+- **记录决策**：`DecisionRecord` 新增 `serving_account: { provider_id, account } | null`。OAuth pool 仍只在执行深处通过 ALS 标记候选账号；真正落库前由 gateway 在最终结果已知后 stamp，避免 core/provider 合同依赖 Hono 或 admin。
+- **防误记边界**：只有最终 `final.model_alias` 仍属于被标记账号的 provider 前缀时才记录账号；如果订阅账号候选失败后 fallback 到其它 provider，写入 `null`，避免把 stale selection 错记成实际服务账号。
+- **尝试元数据决策**：`provider_attempts` 保留 `provider_name`、`provider_model`、passthrough/protocol mutation 等执行层已有元数据。Admin 只展示已记录字段，不从 alias 重新推断业务事实。
+- **UI 决策**：请求列表字段按排障优先级重排为：Time、Status、Key、Provider、Subscription account、Served model、Requested model、Lane、Fallbacks、Latency、TPS、Tokens、Cost、Task、Complexity、Decided by、Error、Request ID。Trace ID 仍可点击但降到末尾；详情摘要同步露出 Provider / Subscription account，执行链路每个 attempt 显示 provider、账号、alias 与上游 wire model。
+- **安全/隐私**：只记录 provider id 与订阅账号显示名，不记录 OAuth token、明文 API key 或正文；key 仍只显示 prefix。旧记录和非订阅 provider 统一显示 `—`/`null`。
+- **验证计划**：覆盖 shared schema round-trip、telemetry builder 元数据保留、gateway stamp guard、admin mapper、请求列表/详情/执行链路渲染；再跑目标 Vitest、typecheck、lint、build。
+
 ## 2026-07-04 · cheap-model 短低风险当前轮不被长历史抬价（Classifier / routing，docs/03/04，原则 2/4/5）
 
 - **背景（Lukin）**：生产 `openclaw` 24h 数据显示，部分请求显式请求 `gpt-5.4-mini` / cheap alias，最后一条 user 只有约 200 字且是 read/check/status 类低风险动作，但因为完整 transcript 很大、tools 很多，被 Layer-1 长上下文/工具信号抬到 `balanced/coding`，最终使用 `gpt-5.5`。
@@ -88,27 +98,10 @@
 - **边界**：其它确定性 400/413/422（例如坏参数、图片过大）仍按 `invalid_request` 终止，因为换候选无法修复请求本身。这里只针对明确的 reasoning-history 缺失错误 fail-open。
 - **验证**：新增执行器回归覆盖跨协议剥离 thinking/reasoning 控制，以及 DeepSeek 类 400 后继续 fallback；目标 `execute.test.ts` 119/119 绿，`pnpm typecheck` 绿，`pnpm lint` 退出 0（仅既有 style info）。
 
-## 2026-07-04 · memory idle-flush 防饥饿与受控追赶（Memory worker / store，docs/08/12，原则 3/7）
+## 历史条目摘要（最近 4 条）
 
-- **背景（Lukin）**：生产 `openclaw` key 已持续写入 raw memory，但 `/admin/memory` 看不到事实/反思；排查发现后台 worker 不是完全停了，而是大量旧项目候选反复进入 idle-flush 队列，导致新项目长期排不到。
-- **根因**：Observer 实际按 `message_index, created_at, id` 读取消息并生成 `source_message_range`；但 `listIdleFlushCandidates()` 用 `created_at/id` 判断 observation 覆盖范围。旧线程在 observer 顺序下已覆盖，却在候选 SQL 里被误判为未覆盖，形成永远不会消失的假候选。
-- **查询决策**：SQLite / Postgres 的 idle-flush 候选判断改用与 `listMessages()` 完全一致的 tuple order，并支持 range 两端反向的历史数据；这样同一线程被覆盖后会真正退出候选集。
-- **公平性决策**：候选排序增加 `ROW_NUMBER() OVER (PARTITION BY owner_id, project_id, resource_id ...)`，按 scope rank 交错输出，避免 `ww/luke/skillstore` 这类旧项目 backlog 独占整页，使 `openclaw` 这类新项目也能进入处理窗口。
-- **追赶决策**：worker 支持单次 tick/wake 连续 drain 多批，但仍是串行执行；gateway 默认 `batchSize=50`、`maxBatchesPerDrain=10`、`maxDrainMs=30000`，并在批次之间让出事件循环。也就是说默认最多 500 个任务/轮，明显快于旧的 10/轮，但不会引入并发洪峰；线上可通过环境变量逐步调大。
-- **索引/迁移决策**：新增 memory thread scope 索引与 message observer-order 索引；迁移只在目标表/列真实存在时建索引，兼容早期被部分标记为已迁移的自托管库和测试 fixture。
-- **验证**：新增 SQLite/Postgres observer-order 覆盖回归、project fair-interleaving 回归、scheduler 多批 drain 与时间上限回归；目标 memory/scheduler/migration 测试 83/83 绿。
-
-## 2026-07-03 · 策略级 reasoning_effort 覆盖 Lane 默认值（Routing policies / Admin policies，docs/04/11，原则 2/5/6）
-
-- **背景（Lukin）**：Lane 已支持 `reasoning_effort`，但 policy 命中后只能强制车道，不能针对某类任务把思考等级调高/调低；这导致同一 Lane 内的请求无法按策略更细粒度控制推理预算。
-- **语义决策**：Policy 新增可选 action `reasoning_effort`，与 Lane 使用同一严格枚举：`none|minimal|low|medium|high|xhigh|max`。最终优先级为 **policy > selected lane > client request**；其中 `none` 是显式覆盖，可关闭 Lane 的高思考等级。
-- **first-match 决策**：`reasoning_effort` 跟 `use_lane` 一样取第一条命中 policy 的值；`allowed_lanes` 仍保持原有“所有命中策略取交集”的 cap 语义。这样不会让靠后的 restrict-only rule 意外改写思考等级。
-- **执行路径**：`routeRequest` 在生成 `ExecutionPlan` 后用 `policy.reasoning_effort ?? lane.reasoning_effort` 覆盖 `req.reasoning_effort` 并设置 `reasoning_effort_forced=true`，复用现有 translated/native passthrough 出站改写链路，不触碰 provider 选择与 fallback 机制。
-- **Admin 决策**：Policies 页面新增“Forced reasoning effort”下拉，复用 LaneEditor 的同一组选项；API client round-trip `reasoning_effort`，gateway 仍由 `PoliciesConfigSchema` 对整个 policy 列表 fail-closed 校验。
-- **验证计划**：新增 shared/core policy schema、policy engine、routeRequest、admin API client、PolicyRow 回归测试；再跑目标 Vitest、typecheck/lint/build。
-
-## 历史条目摘要（最近 2 条）
-
+- **2026-07-04 · memory idle-flush 防饥饿与受控追赶（Memory worker / store，docs/08/12，原则 3/7）**：idle-flush 候选判断改用 observer-order tuple，按 scope rank 交错输出，并支持受控多批 drain，避免旧 backlog 饿死新项目。
+- **2026-07-03 · 策略级 reasoning_effort 覆盖 Lane 默认值（Routing policies / Admin policies，docs/04/11，原则 2/5/6）**：Policy action 可强制 reasoning_effort，优先级为 policy > selected lane > client request，复用现有执行改写链路。
 - **2026-07-03 · cron monitor 自动化请求降到低成本规则（Classifier / routing，docs/03/04，原则 2/4）**：monitor/cron + no-reply 标记命中时降到 `simple/economy`，但保留显式 coding keyword 升级路径，避免自动化探针误打高价模型。
 - **2026-07-03 · 上下文窗口超限按候选跳过处理（执行 fallback / streaming telemetry，docs/04/07，原则 5/8）**：`context_length_exceeded` / prompt-too-long 类错误按候选 `context_too_small` 跳过并继续 fallback，不熔断 provider。
 

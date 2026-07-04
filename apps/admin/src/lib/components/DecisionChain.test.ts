@@ -19,6 +19,8 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
     key_prefix: 'helm_live_ab12',
     key_name: null,
     requested_model: 'gpt-4o',
+    served_provider: 'anthropic',
+    serving_account: { provider_id: 'anthropic', account: 'claude-team-a' },
     final_model: 'claude-x',
     lane: 'premium',
     status: 'ok',
@@ -45,6 +47,8 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
       {
         model: 'gpt-x',
         provider: 'openai',
+        provider_model: 'gpt-x',
+        serving_account: null,
         outcome: 'error',
         latency_ms: 120,
         error_class: 'upstream_error',
@@ -57,6 +61,8 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
       {
         model: 'claude-x',
         provider: 'anthropic',
+        provider_model: 'claude-x',
+        serving_account: { provider_id: 'anthropic', account: 'claude-team-a' },
         outcome: 'success',
         latency_ms: 340,
         error_detail: null,
@@ -64,6 +70,8 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
       {
         model: 'small-x',
         provider: 'local',
+        provider_model: 'small-x',
+        serving_account: null,
         outcome: 'skipped',
         skip_reason: 'capability_unsatisfiable',
         latency_ms: 0,
@@ -237,6 +245,7 @@ describe('DecisionChain', () => {
     expect(rows[0]).toHaveTextContent(/error/i);
     expect(rows[0]).toHaveTextContent('120');
     expect(rows[1]).toHaveTextContent(/success/i);
+    expect(rows[1]).toHaveTextContent('claude-team-a');
     expect(rows[2]).toHaveTextContent(/skipped/i);
     // Codes render as human labels; the raw code is preserved in the title tooltip.
     expect(rows[2]).toHaveTextContent('No compatible model');

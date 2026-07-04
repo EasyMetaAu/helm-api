@@ -19,6 +19,8 @@ function item(overrides: Partial<RequestListItem> = {}): RequestListItem {
     complexity: 'high',
     decided_by: 'rules',
     lane: 'premium',
+    served_provider: 'anthropic',
+    serving_account: { provider_id: 'anthropic', account: 'claude-team-a' },
     final_model: 'claude-x',
     fallback_count: 1,
     status: 'ok',

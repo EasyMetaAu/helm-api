@@ -123,6 +123,11 @@ export const FinalDecisionSchema = z.object({
   error_reason: z.string().nullable(),
 });
 
+export const ServingAccountDecisionSchema = z.object({
+  provider_id: z.string().min(1),
+  account: z.string().min(1),
+});
+
 // Cost split (docs/07 "cost split (including eval's own self-cost)"). `eval_usd` isolates the
 // Layer-2 small-model self-cost (non-null ONLY when eval actually ran; null when
 // eval was skipped/disabled) from `completion_usd` (Σ of the served provider
@@ -210,6 +215,10 @@ export const DecisionRecordSchema = z.object({
   lane: LaneDecisionSchema,
   provider_attempts: z.array(ProviderAttemptSchema),
   final: FinalDecisionSchema,
+  // Concrete subscription account that ultimately served the request. Null for
+  // non-subscription providers, legacy rows, failed requests, or stale selections
+  // that later fell back to a different provider. Body-free routing metadata only.
+  serving_account: ServingAccountDecisionSchema.nullable().default(null),
   // Total served latency = Σ provider_attempts.latency_ms (docs/07 latency).
   // `.default(0)` so legacy records validate; the builder computes the real sum.
   latency_total_ms: z.number().nonnegative().default(0),
@@ -255,6 +264,7 @@ export type LaneDecision = z.infer<typeof LaneDecisionSchema>;
 export type AttemptErrorDetail = z.infer<typeof AttemptErrorDetailSchema>;
 export type ProviderAttempt = z.infer<typeof ProviderAttemptSchema>;
 export type FinalDecision = z.infer<typeof FinalDecisionSchema>;
+export type ServingAccountDecision = z.infer<typeof ServingAccountDecisionSchema>;
 export type CostBreakdown = z.infer<typeof CostBreakdownSchema>;
 export type TokenUsageBreakdown = z.infer<typeof TokenUsageSchema>;
 export type MemoryDecision = z.infer<typeof MemoryDecisionSchema>;

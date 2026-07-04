@@ -95,5 +95,6 @@ export function buildImageDecision(p: {
             cache_creation_tokens: null,
           },
     generation_ms: null,
+    serving_account: null,
   };
 }

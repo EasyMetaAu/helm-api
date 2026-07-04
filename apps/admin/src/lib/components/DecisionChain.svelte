@@ -74,6 +74,10 @@
       return String(value);
     }
   }
+
+  function accountTitle(account: RequestDetail['provider_attempts'][number]['serving_account']): string {
+    return account ? `${account.provider_id}/${account.account}` : '';
+  }
 </script>
 
 <div class="flex flex-col gap-4">
@@ -236,8 +240,18 @@
       {#each detail.provider_attempts as a, i (i)}
         <li data-testid="attempt-row" class="flex flex-col gap-1 text-sm">
           <div class="flex flex-wrap items-center gap-2">
-            <span class="font-mono text-ink-strong">{a.provider}</span>
+            <span class="font-mono text-ink-strong">{a.provider ?? '—'}</span>
+            {#if a.serving_account}
+              <span class="badge-neutral" title={accountTitle(a.serving_account)}
+                >{a.serving_account.account}</span
+              >
+            {/if}
             <span class="text-ink-muted">{a.model}</span>
+            {#if a.provider_model && a.provider_model !== a.model}
+              <span class="text-ink-muted" title={$t('Provider model')}
+                >{$t('wire:')} {a.provider_model}</span
+              >
+            {/if}
             <span class={outcomeBadge(a.outcome)} title={a.outcome}
               >{$t(attemptCodeLabel(a.outcome))}</span
             >

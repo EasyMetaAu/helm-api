@@ -1,7 +1,9 @@
+import type { DecisionRecord } from "@helm/shared";
 import { describe, expect, it } from "vitest";
 import {
   markServingAccount,
   servedByAccount,
+  stampServingAccount,
   withServingAccountCapture,
 } from "./serving-account.js";
 
@@ -50,5 +52,26 @@ describe("servedByAccount", () => {
 
   it("requires the slash boundary (no prefix-substring false positives)", () => {
     expect(servedByAccount(ACCT, "anthropic-mirror/x")).toBe(false);
+  });
+});
+
+describe("stampServingAccount", () => {
+  function decision(modelAlias: string | null = "anthropic/claude-opus-4-8"): DecisionRecord {
+    return {
+      final: { model_alias: modelAlias },
+      serving_account: null,
+    } as unknown as DecisionRecord;
+  }
+
+  it("stamps the final subscription account only when the served alias belongs to it", () => {
+    const d = decision();
+    stampServingAccount(d, ACCT);
+    expect(d.serving_account).toEqual({ provider_id: "anthropic", account: "default" });
+  });
+
+  it("clears stale selections after fallback to another provider", () => {
+    const d = decision("openai/gpt-5");
+    stampServingAccount(d, ACCT);
+    expect(d.serving_account).toBeNull();
   });
 });

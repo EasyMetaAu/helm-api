@@ -185,18 +185,6 @@
           </dd>
         </div>
         <div>
-          <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Requested model')}</dt>
-          <dd class="mt-0.5 font-mono text-ink-body">{d.requested_model ?? '—'}</dd>
-        </div>
-        <div>
-          <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Served model')}</dt>
-          <dd class="mt-0.5 font-mono text-ink-body">{d.final_model ?? '—'}</dd>
-        </div>
-        <div>
-          <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Lane')}</dt>
-          <dd class="mt-0.5 text-ink-body">{d.lane || '—'}</dd>
-        </div>
-        <div>
           <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Status')}</dt>
           <dd class="mt-0.5">
             {#if d.status === 'error'}
@@ -205,6 +193,35 @@
               <span class="badge-ok">{$t('ok')}</span>
             {/if}
           </dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Provider')}</dt>
+          <dd class="mt-0.5 font-mono text-ink-body">{d.served_provider ?? '—'}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase tracking-wide text-slate-400">
+            {$t('Subscription account')}
+          </dt>
+          <dd
+            class="mt-0.5 font-mono text-ink-body"
+            title={d.serving_account
+              ? `${d.serving_account.provider_id}/${d.serving_account.account}`
+              : undefined}
+          >
+            {d.serving_account?.account ?? '—'}
+          </dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Served model')}</dt>
+          <dd class="mt-0.5 font-mono text-ink-body">{d.final_model ?? '—'}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Requested model')}</dt>
+          <dd class="mt-0.5 font-mono text-ink-body">{d.requested_model ?? '—'}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Lane')}</dt>
+          <dd class="mt-0.5 text-ink-body">{d.lane || '—'}</dd>
         </div>
         <div>
           <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Latency')}</dt>

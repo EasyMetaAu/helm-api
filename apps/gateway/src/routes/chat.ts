@@ -34,7 +34,7 @@ import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
 import { INTERNAL_API_KEY_ID } from "../internal-key.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
-import type { ServingAccount } from "../runtime/serving-account.js";
+import { type ServingAccount, stampServingAccount } from "../runtime/serving-account.js";
 import type { WriteQueue } from "../runtime/write-queue.js";
 import { downgradeClientFastModeIfDisallowed } from "./fast-mode.js";
 import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.js";
@@ -867,6 +867,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
             c.get("logger").log("warn", "cost.stream_backfill_failed", { trace_id: traceId });
           }
           await capturePayload(captureOn ? rawSse : null, result.upstreamRequest ?? null);
+          stampServingAccount(result.decision, servingAccount);
           await persist(result.decision);
           // Usage-budget settle (streamed): runs HERE — after the usage tail
           // backfilled the streamed cost — so the spend dimension settles the real
@@ -918,6 +919,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       result.body !== null ? JSON.stringify(result.body) : null,
       result.upstreamRequest ?? null,
     );
+    stampServingAccount(result.decision, servingAccount);
     await persist(result.decision);
     if (result.final.status === "error" || result.body === null) {
       const error =

@@ -802,6 +802,8 @@ export async function routeRequest(
       usage: null,
       // Served-stream generation window is gateway-timed/stamped — null here.
       generation_ms: null,
+      // Concrete subscription account is gateway-stamped after execution.
+      serving_account: null,
     };
     deps.log(decision);
     return {
@@ -884,6 +886,8 @@ export async function routeRequest(
     usage: null,
     // Served-stream generation window is gateway-timed/stamped — null here.
     generation_ms: null,
+    // Concrete subscription account is gateway-stamped after execution.
+    serving_account: null,
   };
 
   deps.log(decision);
