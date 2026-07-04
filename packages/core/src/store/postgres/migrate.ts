@@ -719,6 +719,28 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // Admin memory stats queue indexes — pg mirror of sqlite v35.
+    version: 34,
+    run: async (db) => {
+      if (await pgTableHasColumns(db, "memory_jobs", ["status", "updated_at", "created_at"])) {
+        await db.execute(
+          sql.raw(`
+            CREATE INDEX IF NOT EXISTS idx_memory_jobs_status_updated_at
+              ON memory_jobs (status, updated_at, created_at)
+          `),
+        );
+      }
+      if (await pgTableHasColumns(db, "memory_jobs", ["type", "status"])) {
+        await db.execute(
+          sql.raw(`
+            CREATE INDEX IF NOT EXISTS idx_memory_jobs_type_status
+              ON memory_jobs (type, status)
+          `),
+        );
+      }
+    },
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {
@@ -729,7 +751,7 @@ function resultRows<T>(result: unknown): T[] {
 
 async function pgTableHasColumns(
   db: RawExecutor,
-  table: "memory_threads" | "memory_messages",
+  table: "memory_threads" | "memory_messages" | "memory_jobs",
   requiredColumns: readonly string[],
 ): Promise<boolean> {
   const rows = resultRows<{ column_name: string }>(
