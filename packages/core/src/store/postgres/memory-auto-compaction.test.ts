@@ -106,6 +106,13 @@ describe("PgMemoryStore — idle-flush candidates", () => {
       limit: 10,
     });
     expect(candidates).toEqual([{ accountId: "acct-a", threadId: "tA" }]);
+    expect(
+      await store.listIdleFlushCandidates({
+        idleBeforeMs: clock() + 1000,
+        idleAfterMs: clock() + 1000,
+        limit: 10,
+      }),
+    ).toEqual([]);
     await db.$close();
   });
 

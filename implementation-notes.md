@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-07-04 · idle-flush 碎片段优先压缩最大连续段（Memory Observer，docs/08/12，原则 3/7）
+
+- **背景（Lukin）**：线上 `v0.23.0` 后记忆队列仍持续运行，排查发现总候选不是 30 多万 job，而是约 3.07 万个 idle candidate thread；最近完成的 observer 基本不会重新成为候选，未见大面积死循环。
+- **边界问题**：个别超长历史 thread 已被旧 observation 切成很多碎片段。Observer 在 idle 模式下原本选择“第一个可压缩段”，如果最前面只是 1 条 message 的小洞，就会一次 internal LLM 只压缩 1 条，形成有限但很慢的长尾。
+- **调度决策**：idle-flush 下仍然不把稀疏集合写成一个虚假的连续 `source_message_range`；但在多个可压缩连续段之间，优先选择 `compressedTokens` 最大、再按 `compressedCount` 打破平局的段。这样 source range 仍精确，同时优先消掉大尾巴，避免一个超长 thread 反复消耗小段 LLM 调用。
+- **跳过决策**：新增可选 `compaction.idle_flush_max_age_s`，让 idle-flush 只处理最近窗口内变 idle 的 thread；线上可设 `86400` 跳过超过 24 小时的旧 backfill，避免为历史冷数据继续消耗 internal LLM token。未配置时保持旧行为。
+- **保持不变**：非 idle 的 writeback/size/context-pressure 路径仍选最早可压缩段，保持时间顺序和已有 cache/keep 语义；open-job dedupe、worker 并发和 idle candidate SQL 不变。
+- **验证计划**：新增 Observer 回归测试，覆盖 idle 且前方有 tiny gap、大段未覆盖尾部时选择最大段；新增 config/idle-flush/store 回归覆盖 max-age 窗口；再跑目标测试、typecheck、lint、build。
+
 ## 2026-07-04 · memory worker 受控并发追赶（Memory worker / scheduler，docs/08/12，原则 3/7）
 
 - **背景（Lukin）**：线上 `/admin/memory` 显示队列持续运行但追赶很慢；生产采样显示 worker 没有卡死，CPU/内存仍有余量，但 open queue 基本维持在约 500，旧 idle-flush backlog 很难明显下降。
@@ -86,19 +95,10 @@
 - **限制 / TODO**：该接口反映 Helm telemetry 当前保留窗口内的数据；历史上还在 claude-relay 的用量需要 Skillstore 侧保留 legacy baseline 或临时兼容同步，等所有 audit 入口完全切到 Helm 后再移除 relay 补数。
 - **验证计划**：新增 route 测试覆盖缺 key 401、当前 key 聚合、恶意 `key_id` 被忽略；OpenAPI 加入 bearer-secured usage endpoint。
 
-## 2026-07-02 · API key 加密恢复与原地轮转（Auth / Admin keys，docs/06/11，原则 7）
-
-- **背景（Lukin）**：管理后台原本只能创建后一次性显示 API key；如果操作员没有保存完整 key，只能删除或重新创建。现需支持查看已存在 key 的完整值，并支持不丢历史的轮转。
-- **安全决策**：鉴权路径仍只用 `sha256(plaintext)` 查找；数据库不保存明文 key。新增 `api_keys.secret_enc` 只保存 AES-GCM 密文，复用 `HELM_OAUTH_ENC_KEY` 作为 at-rest 加密密钥。未配置该密钥时，新建/轮转仍返回一次性 plaintext，但后续 reveal 不可用。
-- **兼容决策**：已有 hash-only 行无法从 sha256 反推出完整 key，因此管理后台 reveal 会明确返回不可恢复；操作员可对该行执行 rotate，让同一个 `key_id` 获得新的 hash/prefix/secret_enc。
-- **轮转决策**：`KeyStore.rotateKey()` 只替换 `hash`、`prefix`、`secret_enc`，保留 `key_id`、name、role、account、caps、usage 与 telemetry 关联。旧 key 值立即失效，但请求历史仍挂在同一 key 下。
-- **UI 决策**：Keys 页面新增「View full key」和「Rotate」。Reveal/rotated plaintext 只存在短暂 modal state；普通 list/detail 仍只显示 prefix，不返回 hash、plaintext 或 ciphertext。
-- **验证计划**：覆盖 store contract（SQLite/Postgres）、cached keystore、admin routes、admin API client 与 Keys 页面交互；旧 hash-only 行 reveal 失败、新/轮转行可 reveal。
-
 ## 历史条目摘要（最近 2 条）
 
+- **2026-07-02 · API key 加密恢复与原地轮转（Auth / Admin keys，docs/06/11，原则 7）**：API key reveal/rotate 使用 `secret_enc` 保存可恢复密文，认证仍只依赖 sha256，旧 hash-only 行需 rotate 后才可 reveal。
 - **2026-07-02 · Claude Fable 周限额改读 `limits[]`（Admin providers / OAuth quota，docs/11，原则 3/7）**：Anthropic quota parser 优先读取新 `limits[]` weekly scoped payload，并在 providers 页显示 `7d · Fable` 等模型级周限额。
-- **2026-07-02 · OAuth 测试成功与 quota PULL 同步账号可用状态（Admin providers / OAuth cooldown，docs/04/11，原则 3/5/7）**：已 park 账号的成功 quota PULL/Test 会用真实 quota 状态替换或清空旧 cooldown，并刷新 providers 页状态。
 
 ## 更早历史总览
 

@@ -429,7 +429,23 @@ export async function runObserverJob(
       segment,
       decision: chooseAutoCompaction(segment, inputs),
     }));
-    const selected = decisions.find(({ decision }) => decision.shouldCompact);
+    // In idle-flush catch-up, a historical thread can be fragmented by older
+    // observations: tiny one-message gaps before a large uncovered tail. Pick the
+    // largest compactable segment first so one quiet thread cannot burn one LLM
+    // call per tiny gap while still keeping every source range exact.
+    const selected = idle
+      ? decisions.reduce<(typeof decisions)[number] | undefined>(
+          (best, item) =>
+            item.decision.shouldCompact &&
+            (best === undefined ||
+              item.decision.compressedTokens > best.decision.compressedTokens ||
+              (item.decision.compressedTokens === best.decision.compressedTokens &&
+                item.decision.compressedCount > best.decision.compressedCount))
+              ? item
+              : best,
+          undefined,
+        )
+      : decisions.find(({ decision }) => decision.shouldCompact);
     if (selected === undefined) {
       // No compaction this run → mine the uncovered turns for durable facts.
       await maybeEagerExtractFacts(job, all, covered, deps);

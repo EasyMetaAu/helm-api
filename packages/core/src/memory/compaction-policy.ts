@@ -89,6 +89,7 @@ export const AUTO_PRIORS = {
 export interface CompactionTunables {
   segmentMinTokens: number;
   idleFlushS: number;
+  idleFlushMaxAgeS?: number;
   forceContextRatio: number;
   minRecentMessages: number;
   minKeepRatio: number;
@@ -97,6 +98,7 @@ export interface CompactionTunables {
 export function resolveCompactionTunables(overrides?: {
   segment_min_tokens?: number;
   idle_flush_s?: number;
+  idle_flush_max_age_s?: number;
   force_context_ratio?: number;
   min_recent_messages?: number;
   min_keep_ratio?: number;
@@ -104,6 +106,9 @@ export function resolveCompactionTunables(overrides?: {
   return {
     segmentMinTokens: overrides?.segment_min_tokens ?? AUTO_PRIORS.segmentMinTokens,
     idleFlushS: overrides?.idle_flush_s ?? AUTO_PRIORS.idleFlushS,
+    ...(overrides?.idle_flush_max_age_s !== undefined
+      ? { idleFlushMaxAgeS: overrides.idle_flush_max_age_s }
+      : {}),
     forceContextRatio: overrides?.force_context_ratio ?? AUTO_PRIORS.forceContextRatio,
     minRecentMessages: overrides?.min_recent_messages ?? AUTO_PRIORS.minRecentMessages,
     minKeepRatio: overrides?.min_keep_ratio ?? AUTO_PRIORS.minKeepRatio,

@@ -877,6 +877,7 @@ export interface MemoryStore {
   // additive — pre-phase fixtures stay valid; the sweep null-checks.
   listIdleFlushCandidates?(input: {
     idleBeforeMs: number;
+    idleAfterMs?: number;
     limit: number;
   }): Promise<
     Array<{ accountId: string; threadId: string; projectId?: string; resourceId?: string }>

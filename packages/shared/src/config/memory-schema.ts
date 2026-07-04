@@ -154,6 +154,10 @@ export const CompactionOverridesSchema = z
     // Idle flush: fold a quiet thread's whole uncovered history after this many
     // seconds without a new message (internal default 3600).
     idle_flush_s: z.number().int().positive().optional(),
+    // Optional backfill window: when set, idle-flush only considers threads whose
+    // last activity is newer than now - idle_flush_max_age_s. This lets operators
+    // skip very old cold history instead of spending background LLM tokens on it.
+    idle_flush_max_age_s: z.number().int().positive().optional(),
     // Context-pressure safety valve: force compaction once the active footprint
     // reaches this fraction of the served model's context window (default 0.8).
     force_context_ratio: z.number().gt(0).max(1).optional(),

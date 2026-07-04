@@ -88,6 +88,17 @@ describe("maybeEnqueueIdleObserverJobs", () => {
     });
   });
 
+  it("passes idle_flush_max_age_s as a lower activity bound to skip cold backfill", async () => {
+    const { store } = makeStore([]);
+    const deps = { ...makeDeps(store), compaction: { idle_flush_max_age_s: 86_400 } };
+    await maybeEnqueueIdleObserverJobs(deps);
+    expect(store.listIdleFlushCandidates).toHaveBeenCalledWith({
+      idleBeforeMs: new Date("2026-06-05T00:00:00.000Z").getTime() - AUTO_PRIORS.idleFlushS * 1000,
+      idleAfterMs: new Date("2026-06-05T00:00:00.000Z").getTime() - 86_400 * 1000,
+      limit: 100,
+    });
+  });
+
   it("is a no-op when no thread is idle", async () => {
     const { store, enqueued } = makeStore([]);
     await maybeEnqueueIdleObserverJobs(makeDeps(store));
