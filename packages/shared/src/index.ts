@@ -167,6 +167,8 @@ export {
   PolicyDecisionSchema,
   type ProviderAttempt,
   ProviderAttemptSchema,
+  type ServingAccountDecision,
+  ServingAccountDecisionSchema,
   type TokenUsageBreakdown,
   TokenUsageSchema,
 } from "./decision/schema.js";

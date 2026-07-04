@@ -200,6 +200,29 @@ describe("buildDecisionRecord", () => {
     expect(record.provider_attempts[2]?.cost_usd).toBe(0.002);
   });
 
+  it("4b. preserves provider metadata on each attempt", () => {
+    const record = buildDecisionRecord(
+      parts({
+        attempts: [
+          {
+            ...okAttempt("anthropic/claude-opus-4-8"),
+            provider_name: "anthropic",
+            provider_model: "claude-opus-4-8",
+            target_provider_protocol: "anthropic_messages",
+          },
+        ],
+        final: finalOk({
+          model_alias: "anthropic/claude-opus-4-8",
+          provider_model: "claude-opus-4-8",
+        }),
+      }),
+    );
+
+    expect(record.provider_attempts[0]?.provider_name).toBe("anthropic");
+    expect(record.provider_attempts[0]?.provider_model).toBe("claude-opus-4-8");
+    expect(record.provider_attempts[0]?.target_provider_protocol).toBe("anthropic_messages");
+  });
+
   it("5. terminal failure: final.status error, error_reason is an error_class", () => {
     const record = buildDecisionRecord(
       parts({

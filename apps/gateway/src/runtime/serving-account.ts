@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { DecisionRecord } from "@helm/shared";
 
 // Per-request "which OAuth subscription served this call" holder (providers page
 // Tier 2 usage attribution). The pool's `onSelect(account)` fires DEEP inside
@@ -58,4 +59,18 @@ export function servedByAccount(
 ): boolean {
   if (!servingAccount || !servedAlias) return false;
   return servedAlias.startsWith(`${servingAccount.providerId}/`);
+}
+
+export function stampServingAccount(
+  decision: DecisionRecord,
+  servingAccount: ServingAccount | null,
+): void {
+  if (!servingAccount || !servedByAccount(servingAccount, decision.final.model_alias)) {
+    decision.serving_account = null;
+    return;
+  }
+  decision.serving_account = {
+    provider_id: servingAccount.providerId,
+    account: servingAccount.account,
+  };
 }

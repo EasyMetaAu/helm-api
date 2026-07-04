@@ -153,6 +153,8 @@ function requestItem(traceId: string): RequestListItem {
     complexity: 'complex',
     decided_by: 'rules',
     lane: 'balanced',
+    served_provider: 'openai',
+    serving_account: null,
     final_model: 'gpt-4o',
     fallback_count: 0,
     status: 'ok',

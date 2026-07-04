@@ -46,6 +46,8 @@ export interface RequestListItem {
   complexity: string;
   decided_by: 'rules' | 'eval' | 'default' | 'fallback'; // decision layer (classification stage)
   lane: string;
+  served_provider: string | null;
+  serving_account: ServingAccountView | null;
   final_model: string | null;
   fallback_count: number; // execution fallback count (provider attempts - 1)
   status: 'ok' | 'error';
@@ -80,6 +82,11 @@ export interface TokenUsageView {
   total: number | null; // input + output when present; null when neither is measured
 }
 
+export interface ServingAccountView {
+  provider_id: string;
+  account: string;
+}
+
 // Redacted per-attempt upstream failure detail (admin-debug-error-detail).
 // Present only for an attempt that failed at the upstream; the backend has
 // already key-scrubbed `provider_raw` (Principle 7), so this is safe to display.
@@ -91,7 +98,9 @@ export interface AttemptErrorDetail {
 
 export interface ProviderAttempt {
   model: string;
-  provider: string;
+  provider: string | null;
+  provider_model: string | null;
+  serving_account: ServingAccountView | null;
   outcome: 'success' | 'error' | 'timeout' | 'rate_limited' | 'circuit_open' | 'skipped';
   skip_reason?: string;
   latency_ms: number;
@@ -111,6 +120,8 @@ export interface RequestDetail {
   key_prefix: string | null;
   key_name: string | null;
   requested_model: string | null; // what the client asked for
+  served_provider: string | null; // concrete provider that served the request
+  serving_account: ServingAccountView | null; // final subscription account, if any
   final_model: string | null; // the served model alias (null = no provider served)
   lane: string; // selected lane ('' on a legacy record)
   status: 'ok' | 'error';
@@ -183,6 +194,7 @@ interface RawAttempt {
   error_class?: string | null;
   latency_ms?: number;
   cost_usd?: number | null;
+  provider_name?: string | null;
   provider_model?: string | null;
   // Redacted upstream failure detail (admin-debug-error-detail). Null/absent on
   // ok/skipped rows and on legacy records.
@@ -254,6 +266,10 @@ interface RawDecisionRecord {
     status?: string;
     error_reason?: string | null;
   };
+  serving_account?: {
+    provider_id?: string | null;
+    account?: string | null;
+  } | null;
 }
 
 const BASE = '/admin/api/requests';
@@ -329,6 +345,42 @@ function attemptOutcome(a: RawAttempt): ProviderAttempt['outcome'] {
   return 'error';
 }
 
+function nonEmptyString(v: unknown): string | null {
+  return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
+function aliasPrefix(alias: string | null): string | null {
+  if (!alias) return null;
+  const slash = alias.indexOf('/');
+  return slash > 0 ? alias.slice(0, slash) : null;
+}
+
+function normalizeServingAccount(raw: RawDecisionRecord): ServingAccountView | null {
+  const providerId = nonEmptyString(raw.serving_account?.provider_id);
+  const account = nonEmptyString(raw.serving_account?.account);
+  return providerId && account ? { provider_id: providerId, account } : null;
+}
+
+function successfulAttempt(raw: RawDecisionRecord, attempts: RawAttempt[]): RawAttempt | null {
+  const finalAlias = nonEmptyString(raw.final?.model_alias);
+  if (finalAlias) {
+    const exact = attempts.find(
+      (a) => a.status === 'ok' && a.skipped !== true && a.alias === finalAlias,
+    );
+    if (exact) return exact;
+  }
+  return attempts.find((a) => a.status === 'ok' && a.skipped !== true) ?? null;
+}
+
+function servedProvider(raw: RawDecisionRecord, attempts: RawAttempt[]): string | null {
+  const attempt = successfulAttempt(raw, attempts);
+  return (
+    nonEmptyString(attempt?.provider_name) ??
+    aliasPrefix(nonEmptyString(raw.final?.model_alias)) ??
+    aliasPrefix(nonEmptyString(attempt?.alias))
+  );
+}
+
 // Project the recorded `usage` block -> the UI token view. Reads only the four
 // recorded counts (Principle 1 — never recomputes upstream figures); DERIVES
 // `nonCached` (input − cached, clamped ≥0) and `total` (input + output) for the
@@ -376,6 +428,7 @@ export function computeTtfbMs(raw: RawDecisionRecord): number | null {
 // record does not carry are derived or safely defaulted; NEVER fabricated.
 export function toListItem(raw: RawDecisionRecord): RequestListItem {
   const attempts = Array.isArray(raw.provider_attempts) ? raw.provider_attempts : [];
+  const account = normalizeServingAccount(raw);
   const status: RequestListItem['status'] = raw.final?.status === 'error' ? 'error' : 'ok';
   const errorClass =
     status === 'error'
@@ -404,6 +457,8 @@ export function toListItem(raw: RawDecisionRecord): RequestListItem {
     complexity: raw.classifier?.complexity ?? '',
     decided_by: normalizeDecidedBy(raw.classifier?.decided_by),
     lane: raw.lane?.selected_lane ?? '',
+    served_provider: servedProvider(raw, attempts),
+    serving_account: account,
     final_model: raw.final?.model_alias ?? null,
     // Prefer the recorded value; fall back to deriving from attempts for legacy
     // records (Principle 5: execution-stage count, distinct from decided_by).
@@ -473,6 +528,7 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
   const completion = sumCost(attempts);
   const status = raw.final?.status === 'error' ? 'error' : 'ok';
   const evalCacheHit = raw.classifier?.eval_cache_hit ?? null;
+  const account = normalizeServingAccount(raw);
   return {
     trace_id: String(raw.trace_id ?? raw.request_id ?? ''),
     // Same source as the list "Time" column (created_at, flattened by the detail
@@ -486,6 +542,8 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
       typeof raw.key_prefix === 'string' && raw.key_prefix.length > 0 ? raw.key_prefix : null,
     key_name: typeof raw.key_name === 'string' && raw.key_name.length > 0 ? raw.key_name : null,
     requested_model: raw.requested_model ?? null,
+    served_provider: servedProvider(raw, attempts),
+    serving_account: account,
     final_model: raw.final?.model_alias ?? null,
     lane: raw.lane?.selected_lane ?? '',
     status,
@@ -518,7 +576,18 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
     lane_candidates: Array.isArray(raw.lane?.candidate_chain) ? raw.lane.candidate_chain : [],
     provider_attempts: attempts.map((a) => ({
       model: String(a.alias ?? ''),
-      provider: String(a.provider_model ?? a.alias ?? ''),
+      provider:
+        nonEmptyString(a.provider_name) ??
+        aliasPrefix(nonEmptyString(a.alias)) ??
+        nonEmptyString(a.provider_model),
+      provider_model: nonEmptyString(a.provider_model),
+      serving_account:
+        account &&
+        a.status === 'ok' &&
+        a.skipped !== true &&
+        nonEmptyString(a.alias) === nonEmptyString(raw.final?.model_alias)
+          ? account
+          : null,
       outcome: attemptOutcome(a),
       skip_reason: a.skip_reason ?? undefined,
       latency_ms: typeof a.latency_ms === 'number' ? a.latency_ms : 0,

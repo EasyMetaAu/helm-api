@@ -43,6 +43,7 @@ function makeRecord(taskType: string, lane: string): DecisionRecord {
     memory: null,
     usage: null,
     generation_ms: null,
+    serving_account: null,
   };
 }
 

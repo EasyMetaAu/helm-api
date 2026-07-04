@@ -482,6 +482,7 @@ function decision(): DecisionRecord {
     cost_breakdown: { eval_usd: null, completion_usd: null, total_usd: null },
     usage: null,
     generation_ms: null,
+    serving_account: null,
     final: { status: "ok", model_alias: "openai/gpt" },
   } as unknown as DecisionRecord;
 }

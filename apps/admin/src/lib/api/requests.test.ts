@@ -39,6 +39,8 @@ function rawRecord(overrides: Record<string, unknown> = {}): Record<string, unkn
       },
       {
         alias: 'premium',
+        provider_name: 'anthropic',
+        provider_model: 'claude-x',
         skipped: false,
         skip_reason: null,
         status: 'ok',
@@ -53,6 +55,7 @@ function rawRecord(overrides: Record<string, unknown> = {}): Record<string, unkn
       status: 'ok',
       error_reason: null,
     },
+    serving_account: { provider_id: 'anthropic', account: 'claude-team-a' },
     latency_total_ms: 460,
     fallback_count: 1,
     cost_breakdown: { eval_usd: 0.0002, completion_usd: 0.01, total_usd: 0.0102 },
@@ -74,6 +77,16 @@ describe('toListItem', () => {
     expect(row.fallback_count).toBe(1);
     expect(row.cost_usd).toBeCloseTo(0.01);
     expect(row.decided_by).toBe('eval');
+  });
+
+  it('surfaces the served provider and final subscription account on list rows', () => {
+    const row = toListItem(rawRecord());
+    expect(row.served_provider).toBe('anthropic');
+    expect(row.serving_account).toEqual({ provider_id: 'anthropic', account: 'claude-team-a' });
+
+    const nonSubscription = toListItem(rawRecord({ serving_account: null }));
+    expect(nonSubscription.served_provider).toBe('anthropic');
+    expect(nonSubscription.serving_account).toBeNull();
   });
 
   it('falls back to "—" for key_prefix when the record carries none (never plaintext)', () => {
@@ -136,6 +149,8 @@ describe('toDetail', () => {
     expect(d.key_name).toBe('Production backend');
     expect(d.requested_model).toBe('gpt-4o');
     expect(d.final_model).toBe('premium'); // served model alias
+    expect(d.served_provider).toBe('anthropic');
+    expect(d.serving_account).toEqual({ provider_id: 'anthropic', account: 'claude-team-a' });
     expect(d.lane).toBe('coding');
     expect(d.status).toBe('ok');
     expect(d.latency_ms).toBe(460);
@@ -254,6 +269,12 @@ describe('toDetail', () => {
     });
     // The ok attempt carries no detail.
     expect(d.provider_attempts[1]?.error_detail ?? null).toBeNull();
+    expect(d.provider_attempts[1]?.provider).toBe('anthropic');
+    expect(d.provider_attempts[1]?.provider_model).toBe('claude-x');
+    expect(d.provider_attempts[1]?.serving_account).toEqual({
+      provider_id: 'anthropic',
+      account: 'claude-team-a',
+    });
   });
 
   it('maps a missing error_detail to null (legacy records)', () => {

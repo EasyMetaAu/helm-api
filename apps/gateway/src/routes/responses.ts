@@ -7,6 +7,7 @@ import type { AppEnv } from "../app.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
+import { stampServingAccount } from "../runtime/serving-account.js";
 import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
@@ -648,6 +649,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           // result.decision exists even on a pre-stream failure, so a failed stream
           // still records. Fail-open inside recordServed.
           if (deps.record && result !== null) {
+            stampServingAccount(result.decision, result.servingAccount ?? null);
             await recordServed(
               deps.record,
               {
@@ -724,6 +726,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       // still appears in /admin/requests. responseJson null = no body produced.
       // result.decision exists even on failure. Fail-open inside recordServed.
       if (deps.record) {
+        stampServingAccount(result.decision, result.servingAccount ?? null);
         await recordServed(
           deps.record,
           {
@@ -764,6 +767,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     // Record the served (non-stream) request: telemetry row (→ /admin/requests) +
     // verbatim request/response body. Mirrors chat.ts. Fail-open inside recordServed.
     if (deps.record) {
+      stampServingAccount(result.decision, result.servingAccount ?? null);
       await recordServed(
         deps.record,
         {

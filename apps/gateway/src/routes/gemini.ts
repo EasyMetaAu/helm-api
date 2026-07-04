@@ -9,6 +9,7 @@ import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
+import { stampServingAccount } from "../runtime/serving-account.js";
 import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult, RouteError } from "./messages.js";
@@ -430,6 +431,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
           // backfill) already mutated result.decision. result.decision exists even
           // on a pre-stream failure, so a failed stream still records. Fail-open.
           if (deps.record) {
+            stampServingAccount(result.decision, result.servingAccount ?? null);
             await recordServed(
               deps.record,
               {
@@ -460,6 +462,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
       // /admin/requests. responseJson null = no body. result.decision exists even
       // on failure. Fail-open inside recordServed.
       if (deps.record) {
+        stampServingAccount(result.decision, result.servingAccount ?? null);
         await recordServed(
           deps.record,
           {
@@ -485,6 +488,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
     // Record the served (non-stream) request: telemetry row (→ /admin/requests) +
     // verbatim request/response body. Mirrors chat.ts. Fail-open inside recordServed.
     if (deps.record) {
+      stampServingAccount(result.decision, result.servingAccount ?? null);
       await recordServed(
         deps.record,
         {

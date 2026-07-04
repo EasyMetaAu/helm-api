@@ -30,6 +30,8 @@ function item(traceId: string, overrides: Partial<RequestListItem> = {}): Reques
     complexity: 'high',
     decided_by: 'rules',
     lane: 'premium',
+    served_provider: 'anthropic',
+    serving_account: { provider_id: 'anthropic', account: 'claude-team-a' },
     final_model: 'claude-x',
     fallback_count: 1,
     status: 'ok',
@@ -70,6 +72,8 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
     key_prefix: 'helm_live_ab12',
     key_name: 'Production backend',
     requested_model: 'gpt-4o',
+    served_provider: 'anthropic',
+    serving_account: { provider_id: 'anthropic', account: 'claude-team-a' },
     final_model: 'claude-x',
     lane: 'premium',
     status: 'ok',
@@ -96,6 +100,8 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
       {
         model: 'claude-x',
         provider: 'anthropic',
+        provider_model: 'claude-x',
+        serving_account: { provider_id: 'anthropic', account: 'claude-team-a' },
         outcome: 'success',
         latency_ms: 340,
         error_detail: null,
@@ -145,6 +151,8 @@ describe('requests list page', () => {
     expect(first).toHaveTextContent('high'); // complexity
     expect(first).toHaveTextContent('rules'); // decided_by
     expect(first).toHaveTextContent('premium'); // lane
+    expect(first).toHaveTextContent('anthropic'); // provider
+    expect(first).toHaveTextContent('claude-team-a'); // subscription account
     expect(first).toHaveTextContent('claude-x'); // final_model
     expect(first).toHaveTextContent('460'); // latency_ms
     expect(within(first).getByTestId('cell-tps')).toHaveTextContent('200 tok/s'); // true TPS
@@ -206,15 +214,16 @@ describe('requests list page', () => {
     );
   });
 
-  it('shows the request ID as the first column and the recorded time, with no separate "view" action', () => {
+  it('puts high-signal columns before classifier details, with trace ID at the end', () => {
     render(ListPage, {
       data: listData([item('tr_first', { ts: '2026-05-31T10:00:00Z' })]),
     });
     const cells = screen.getByTestId('request-row').querySelectorAll('td');
-    // Request ID is the FIRST column.
-    expect(cells[0]).toHaveTextContent('tr_first');
-    // The time column (second) renders the recorded timestamp (year is locale-stable).
-    expect(cells[1]).toHaveTextContent('2026');
+    expect(cells[0]).toHaveTextContent('2026'); // time first
+    expect(cells[1]).toHaveTextContent('ok'); // status before diagnostics
+    expect(cells[3]).toHaveTextContent('anthropic'); // provider before model/classifier
+    expect(cells[4]).toHaveTextContent('claude-team-a'); // concrete subscription account
+    expect(cells[cells.length - 1]).toHaveTextContent('tr_first'); // trace id still available
     // The trailing "view" link is gone — the whole row is the link now.
     expect(screen.queryByText('view')).not.toBeInTheDocument();
   });
@@ -367,13 +376,15 @@ describe('requests detail page', () => {
     expect(screen.getByTestId('payload-summary')).toHaveTextContent(/not recorded/i);
   });
 
-  it('renders a Request summary card with key (name+prefix), requested+served model, lane, status, latency', () => {
+  it('renders a Request summary card with key, provider/account, requested+served model, lane, status, latency', () => {
     render(DetailPage, {
       data: { detail: detail(), payload: { captured: false }, traceId: 'tr_1' },
     });
     const summary = screen.getByTestId('request-summary');
     expect(summary).toHaveTextContent('Production backend'); // key name
     expect(summary).toHaveTextContent('helm_live_ab12'); // key prefix (traceability)
+    expect(summary).toHaveTextContent('anthropic'); // concrete provider
+    expect(summary).toHaveTextContent('claude-team-a'); // concrete subscription account
     expect(summary).toHaveTextContent('gpt-4o'); // requested model
     expect(summary).toHaveTextContent('claude-x'); // served model
     expect(summary).toHaveTextContent('premium'); // lane

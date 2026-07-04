@@ -58,6 +58,10 @@
         return 'badge-neutral';
     }
   }
+
+  function accountTitle(account: RequestListItem['serving_account']): string | undefined {
+    return account ? `${account.provider_id}/${account.account}` : undefined;
+  }
 </script>
 
 <!-- Key cell contents (name + prefix subtitle, or bare prefix). Shared between the
@@ -69,16 +73,17 @@
   {:else}
     <code class="font-mono text-ink-strong">{r.key_prefix}</code>
   {/if}
+  <span aria-hidden="true"> </span>
 {/snippet}
 
 <div class="table-wrap">
   <table class="table-base">
     <thead class="table-head">
       <tr>
-        <th class="px-3 py-2" title={$t('The unique trace ID recorded for this request.')}
-          >{$t('Request ID')}</th
-        >
         <th class="px-3 py-2" title={$t('When the gateway received the request.')}>{$t('Time')}</th>
+        <th class="px-3 py-2" title={$t('Whether the request succeeded or returned an error.')}
+          >{$t('Status')}</th
+        >
         {#if showKey}
           <th
             class="px-3 py-2"
@@ -86,35 +91,27 @@
             >{$t('Key')}</th
           >
         {/if}
-        <th class="px-3 py-2" title={$t('The model the client asked for in its request.')}
-          >{$t('Requested model')}</th
+        <th class="px-3 py-2" title={$t('The concrete provider that served this request.')}
+          >{$t('Provider')}</th
         >
         <th
           class="px-3 py-2"
-          title={$t('Task type the classifier detected (e.g. coding, json, vision).')}
-          >{$t('Task')}</th
-        >
-        <th
-          class="px-3 py-2"
-          title={$t('Estimated request difficulty used to pick a quality tier.')}
-          >{$t('Complexity')}</th
-        >
-        <th class="px-3 py-2" title={$t('Which classification layer chose the lane.')}
-          >{$t('Decided by')}</th
-        >
-        <th class="px-3 py-2" title={$t('The quality/cost tier the request was routed to.')}
-          >{$t('Lane')}</th
+          title={$t('The subscription account that served this request, when applicable.')}
+          >{$t('Subscription account')}</th
         >
         <th class="px-3 py-2" title={$t('The model that actually handled the request.')}
           >{$t('Served model')}</th
+        >
+        <th class="px-3 py-2" title={$t('The model the client asked for in its request.')}
+          >{$t('Requested model')}</th
+        >
+        <th class="px-3 py-2" title={$t('The quality/cost tier the request was routed to.')}
+          >{$t('Lane')}</th
         >
         <th
           class="px-3 py-2"
           title={$t('How many fallback models were tried before one succeeded.')}
           >{$t('Fallbacks')}</th
-        >
-        <th class="px-3 py-2" title={$t('Whether the request succeeded or returned an error.')}
-          >{$t('Status')}</th
         >
         <th class="px-3 py-2" title={$t('End-to-end response time in milliseconds.')}
           >{$t('Latency')}</th
@@ -131,8 +128,24 @@
         <th class="px-3 py-2" title={$t('Estimated cost of the request in US dollars.')}
           >{$t('Cost')}</th
         >
+        <th
+          class="px-3 py-2"
+          title={$t('Task type the classifier detected (e.g. coding, json, vision).')}
+          >{$t('Task')}</th
+        >
+        <th
+          class="px-3 py-2"
+          title={$t('Estimated request difficulty used to pick a quality tier.')}
+          >{$t('Complexity')}</th
+        >
+        <th class="px-3 py-2" title={$t('Which classification layer chose the lane.')}
+          >{$t('Decided by')}</th
+        >
         <th class="px-3 py-2" title={$t('The error class, if the request failed.')}
           >{$t('Error')}</th
+        >
+        <th class="px-3 py-2" title={$t('The unique trace ID recorded for this request.')}
+          >{$t('Request ID')}</th
         >
       </tr>
     </thead>
@@ -146,14 +159,14 @@
           class="table-row cursor-pointer"
           onclick={(e) => onRowClick(e, r.trace_id)}
         >
-          <td class="px-3 py-2">
-            <a
-              class="link-inline block max-w-[7rem] truncate font-mono text-ink-strong lg:max-w-none"
-              href={detailHref(r.trace_id)}
-              title={r.trace_id}>{r.trace_id}</a
-            >
-          </td>
           <td class="px-3 py-2 text-ink-body">{formatTs(r.ts)}</td>
+          <td class="px-3 py-2">
+            {#if r.status === 'error'}
+              <span class="badge-error">{$t('error')}</span>
+            {:else}
+              <span class="badge-ok">{$t('ok')}</span>
+            {/if}
+          </td>
           {#if showKey}
             <td class="px-3 py-2">
               {#if r.key_id && onKeyFilter}
@@ -184,34 +197,41 @@
               {/if}
             </td>
           {/if}
-          <td class="px-3 py-2 text-ink-body">{r.requested_model ?? '—'}</td>
-          <td class="px-3 py-2 text-ink-body">{r.task_type || '—'}</td>
-          <td class="px-3 py-2 text-ink-body">{r.complexity || '—'}</td>
-          <td class="px-3 py-2">
-            <span data-testid="decided-by" class={decidedByClass(r.decided_by)}>{r.decided_by}</span
-            >
+          <td class="px-3 py-2 font-mono text-ink-body">{r.served_provider ?? '—'}</td>
+          <td
+            class="px-3 py-2 font-mono text-ink-body"
+            title={accountTitle(r.serving_account)}
+          >
+            {r.serving_account?.account ?? '—'}
           </td>
-          <td class="px-3 py-2 text-ink-body">{r.lane || '—'}</td>
           <td class="px-3 py-2 text-ink-body">{r.final_model ?? '—'}</td>
+          <td class="px-3 py-2 text-ink-body">{r.requested_model ?? '—'}</td>
+          <td class="px-3 py-2 text-ink-body">{r.lane || '—'}</td>
           <td class="px-3 py-2 text-ink-body">{r.fallback_count}</td>
-          <td class="px-3 py-2">
-            {#if r.status === 'error'}
-              <span class="badge-error">{$t('error')}</span>
-            {:else}
-              <span class="badge-ok">{$t('ok')}</span>
-            {/if}
-          </td>
           <td class="px-3 py-2 font-mono text-ink-body">{r.latency_ms}ms</td>
           <td data-testid="cell-tps" class="px-3 py-2 font-mono text-ink-body"
             >{formatTps(r.tps)}</td
           >
           <td class="px-3 py-2"><TokensCell usage={r.usage} /></td>
           <td class="px-3 py-2 font-mono text-ink-body">{formatUsd(r.cost_usd)}</td>
+          <td class="px-3 py-2 text-ink-body">{r.task_type || '—'}</td>
+          <td class="px-3 py-2 text-ink-body">{r.complexity || '—'}</td>
+          <td class="px-3 py-2">
+            <span data-testid="decided-by" class={decidedByClass(r.decided_by)}>{r.decided_by}</span
+            >
+          </td>
           <td
             class="px-3 py-2 {r.error_class ? 'text-red-600' : 'text-ink-muted'}"
             title={r.error_class ?? undefined}
             >{r.error_class ? $t(attemptCodeLabel(r.error_class)) : '—'}</td
           >
+          <td class="px-3 py-2">
+            <a
+              class="link-inline block max-w-[7rem] truncate font-mono text-ink-strong lg:max-w-none"
+              href={detailHref(r.trace_id)}
+              title={r.trace_id}>{r.trace_id}</a
+            >
+          </td>
         </tr>
       {/each}
     </tbody>

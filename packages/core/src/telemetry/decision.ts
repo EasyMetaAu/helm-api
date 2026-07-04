@@ -109,6 +109,40 @@ function executionFallbackCount(attempts: AttemptRecord[]): number {
   return Math.max(0, served - 1);
 }
 
+function providerAttemptRecord(a: AttemptRecord): DecisionRecord["provider_attempts"][number] {
+  return {
+    alias: a.alias,
+    skipped: a.skipped,
+    skip_reason: a.skip_reason,
+    status: a.status,
+    error_class: a.error_class,
+    latency_ms: a.latency_ms,
+    cost_usd: a.cost_usd,
+    // Per-attempt upstream failure detail (admin-debug-error-detail). The whole
+    // record is run through `redact` below, so any key echoed in provider_raw
+    // is irreversibly fingerprinted before persistence (principle 7).
+    error_detail: a.error_detail,
+    ...(a.passthrough_considered !== undefined
+      ? { passthrough_considered: a.passthrough_considered }
+      : {}),
+    ...(a.passthrough_used !== undefined ? { passthrough_used: a.passthrough_used } : {}),
+    ...(a.passthrough_disable_reason !== undefined
+      ? { passthrough_disable_reason: a.passthrough_disable_reason }
+      : {}),
+    ...(a.source_protocol !== undefined ? { source_protocol: a.source_protocol } : {}),
+    ...(a.target_provider_protocol !== undefined
+      ? { target_provider_protocol: a.target_provider_protocol }
+      : {}),
+    ...(a.response_protocol !== undefined ? { response_protocol: a.response_protocol } : {}),
+    ...(a.provider_name !== undefined ? { provider_name: a.provider_name } : {}),
+    ...(a.provider_model !== undefined ? { provider_model: a.provider_model } : {}),
+    ...(a.passthrough_mutations !== undefined
+      ? { passthrough_mutations: a.passthrough_mutations }
+      : {}),
+    ...(a.request_mutations !== undefined ? { request_mutations: a.request_mutations } : {}),
+  };
+}
+
 // Assemble the complete DecisionRecord, every field filled (explicit null where
 // the spec requires null — never omitted). The request is the source of the
 // trace id (the pipeline uses request_id as the trace id). The whole record is
@@ -153,25 +187,14 @@ export function buildDecisionRecord(parts: DecisionParts): DecisionRecord {
     },
     // Field-for-field identical to ProviderAttemptSchema — copy verbatim, in
     // chain order (skipped candidates included with their skip_reason).
-    provider_attempts: attempts.map((a) => ({
-      alias: a.alias,
-      skipped: a.skipped,
-      skip_reason: a.skip_reason,
-      status: a.status,
-      error_class: a.error_class,
-      latency_ms: a.latency_ms,
-      cost_usd: a.cost_usd,
-      // Per-attempt upstream failure detail (admin-debug-error-detail). The whole
-      // record is run through `redact` below, so any key echoed in provider_raw
-      // is irreversibly fingerprinted before persistence (principle 7).
-      error_detail: a.error_detail,
-    })),
+    provider_attempts: attempts.map(providerAttemptRecord),
     final: {
       model_alias: final.model_alias,
       provider_model: final.provider_model,
       status: final.status,
       error_reason: final.error_reason,
     },
+    serving_account: null,
     latency_total_ms: attempts.reduce((acc, a) => acc + a.latency_ms, 0),
     fallback_count: executionFallbackCount(attempts),
     cost_breakdown: {

@@ -53,6 +53,7 @@ function decision(requestId: string, overrides: Partial<DecisionRecord> = {}): D
     memory: null,
     usage: null,
     generation_ms: null,
+    serving_account: null,
     ...overrides,
   };
 }

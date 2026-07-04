@@ -1,4 +1,9 @@
-import type { AttemptErrorDetail } from "@helm/shared";
+import type {
+  AttemptErrorDetail,
+  NativePassthroughMutationLedger,
+  Protocol,
+  TargetProviderProtocol,
+} from "@helm/shared";
 
 // One row of the decision record's `provider_attempts` (docs/02). Field-for-field
 // aligned with shared `ProviderAttemptSchema` so this array feeds it directly.
@@ -19,4 +24,14 @@ export interface AttemptRecord {
   // Upstream failure detail for THIS attempt (admin-debug-error-detail). Non-null
   // only for a genuine pre-first-chunk provider failure; null for ok/skipped rows.
   error_detail: AttemptErrorDetail | null;
+  passthrough_considered?: boolean;
+  passthrough_used?: boolean;
+  passthrough_disable_reason?: string | null;
+  source_protocol?: Protocol | null;
+  target_provider_protocol?: TargetProviderProtocol | null;
+  response_protocol?: Protocol | null;
+  provider_name?: string | null;
+  provider_model?: string | null;
+  passthrough_mutations?: NativePassthroughMutationLedger;
+  request_mutations?: NativePassthroughMutationLedger;
 }

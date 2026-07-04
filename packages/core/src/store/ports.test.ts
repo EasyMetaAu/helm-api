@@ -362,6 +362,7 @@ describe("Store ports are implementable contracts", () => {
       memory: null,
       usage: null,
       generation_ms: null,
+      serving_account: null,
     } satisfies DecisionRecord;
     await store.insert({ decision, apiKeyId: "k1", createdAt: new Date() });
     expect(await store.queryRecent(10)).toHaveLength(1);
