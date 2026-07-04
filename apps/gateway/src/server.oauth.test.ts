@@ -1,5 +1,6 @@
 import {
   __setWreqModuleForTesting,
+  createKeyedSerialGate,
   createSqliteDb,
   encryptSecret,
   SqliteConfigStore,
@@ -499,5 +500,136 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       service_tier: "default",
     });
     expect(sentBody).toEqual(expect.objectContaining({ service_tier: "priority" }));
+  });
+
+  it("synthesizes capacity-aware account selection from the shared user-message queue", async () => {
+    const { ctx, config } = oauthStores();
+    for (const account of ["a", "b"]) {
+      await ctx.store.upsert({
+        providerId: "openai-codex",
+        account,
+        accessEnc: encryptSecret(`access-${account}`, ENC_KEY),
+        refreshEnc: encryptSecret(`refresh-${account}`, ENC_KEY),
+        expiresAt: FAR_FUTURE,
+        meta: null,
+        updatedAt: 1,
+      });
+      await setAccountSettings(config, ENC_KEY, "openai-codex", account, {
+        enabledModels: ["gpt-5.5"],
+        priority: 50,
+      });
+    }
+
+    const gate = createKeyedSerialGate();
+    const held = await gate.acquire({
+      key: "openai-codex a",
+      delayMs: 0,
+      timeoutMs: 5_000,
+    });
+    expect(held.ok).toBe(true);
+    const authHeaders: string[] = [];
+    const logs: Array<{ msg: string; fields?: Record<string, unknown> }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      authHeaders.push(new Headers(init?.headers).get("authorization") ?? "");
+      return sseResponse([
+        { type: "response.output_item.added", item: { type: "message", role: "assistant" } },
+        { type: "response.output_text.delta", delta: "ok" },
+        { type: "response.completed", response: { status: "completed", usage: {} } },
+      ]);
+    });
+
+    const { poolClients } = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      (_lvl, msg, fields) => logs.push({ msg, fields }),
+      undefined,
+      {
+        gate,
+        getConfig: () => ({ enabled: true, delayMs: 0, timeoutMs: 5_000 }),
+      },
+    );
+
+    await poolClients.get("openai-codex")?.chatCompletion({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+      prompt_cache_key: "stick-a",
+    });
+
+    // stick-a hashes to account "a", but account a is already holding the queue
+    // lease, so the synthesized pool commits this request to account b.
+    expect(authHeaders).toEqual(["Bearer access-b"]);
+    const selectLog = logs.find((l) => l.msg === "oauth.pool.select");
+    expect(selectLog?.fields).toMatchObject({
+      providerId: "openai-codex",
+      account: "b",
+      selection_reason: "hash_assign",
+      affinity_key_source: "prompt_cache_key",
+      capacity_avoided: true,
+      busy_eligible_accounts: 1,
+      retry_attempt: 0,
+    });
+    if (held.ok) held.release();
+  });
+
+  it("does not steer away from the sticky target when the shared queue is disabled", async () => {
+    const { ctx, config } = oauthStores();
+    for (const account of ["a", "b"]) {
+      await ctx.store.upsert({
+        providerId: "openai-codex",
+        account,
+        accessEnc: encryptSecret(`access-${account}`, ENC_KEY),
+        refreshEnc: encryptSecret(`refresh-${account}`, ENC_KEY),
+        expiresAt: FAR_FUTURE,
+        meta: null,
+        updatedAt: 1,
+      });
+      await setAccountSettings(config, ENC_KEY, "openai-codex", account, {
+        enabledModels: ["gpt-5.5"],
+        priority: 50,
+      });
+    }
+
+    const gate = createKeyedSerialGate();
+    const held = await gate.acquire({
+      key: "openai-codex a",
+      delayMs: 0,
+      timeoutMs: 5_000,
+    });
+    expect(held.ok).toBe(true);
+    const authHeaders: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      authHeaders.push(new Headers(init?.headers).get("authorization") ?? "");
+      return sseResponse([
+        { type: "response.output_item.added", item: { type: "message", role: "assistant" } },
+        { type: "response.output_text.delta", delta: "ok" },
+        { type: "response.completed", response: { status: "completed", usage: {} } },
+      ]);
+    });
+
+    const { poolClients } = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+      undefined,
+      {
+        gate,
+        getConfig: () => ({ enabled: false, delayMs: 0, timeoutMs: 5_000 }),
+      },
+    );
+
+    await poolClients.get("openai-codex")?.chatCompletion({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+      prompt_cache_key: "stick-a",
+    });
+
+    expect(authHeaders).toEqual(["Bearer access-a"]);
+    if (held.ok) held.release();
   });
 });

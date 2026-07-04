@@ -488,7 +488,10 @@ async function testResponsesExecuteStoreForcedFalse(): Promise<void> {
       assert.equal(parsed.model, "gpt-5-codex");
       assert.equal(parsed.store, false);
       assert.deepEqual(parsed.future_field, { preserved: true });
-      assert.deepEqual(carrier.mutations.body_shims_applied, ["store_forced_false"]);
+      assert.deepEqual(carrier.mutations.body_shims_applied, [
+        "instructions_defaulted",
+        "store_forced_false",
+      ]);
       assert.equal(carrier.mutations.model_rewritten?.to, "gpt-5-codex");
       const headers = lowerHeaders(captured[0]?.headers ?? {});
       assert.equal(headers["x-helm-internal"], undefined);

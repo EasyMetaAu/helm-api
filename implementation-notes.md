@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-07-04 · OAuth 账号池改为会话亲和调度（OAuth provider pool / routing，docs/04/11，原则 3/5/7）
+
+- **背景（Lukin）**：订阅 provider 有多个账号时，单纯 priority + LRU 轮询会让同一客户端会话在多个账号/多个上游设备身份之间漂移，容易呈现“账号池”特征。目标是同一 session/device 尽量固定到同一账号，只有账号不可用、额度/限流、或账号容量已满时才切换，同时让多个账号在新会话维度尽量均衡使用。
+- **调度决策**：OAuth pool 优先从显式 `device_id` / `metadata.device_id` / `metadata.user_id` JSON envelope 里的 `device_id` 生成 affinity key；没有 device 信号时再使用 `prompt_cache_key`、`session_id`、`conversation_id`、`metadata.session_id/conversation_id/thread_id/user_id` 等稳定会话信号。有 key 时在最低 priority 的可用账号集合里用 rendezvous hashing 选择账号，保证新会话均衡分布且进程重启后仍尽量落到同一账号。无 key 的请求保留原 LRU 行为。
+- **Responses 连续性决策**：`previous_response_id` 不再作为 hashable affinity key，因为它会随轮次变化；只有 pool 已经从成功的非流式响应 `id` / `response.id` 记录过“这个 response 由哪个账号产生”时，后续同 id 才作为 sticky hit 回到原账号。未知 `previous_response_id` 回到 LRU，不制造假粘性。
+- **容量决策**：per-account user-message queue 新增 `wouldQueue()` 探针。账号被锁住、已有等待者、或仍在请求间隔窗口内时，pool 会优先选择同池其它可用账号；若所有账号都会排队，则回到 deterministic target 并让队列等待，避免无账号可用时误报 provider down。用户 turn 判定同时覆盖 Chat `messages[]` 和 Responses `input`，避免 Codex native `/v1/responses` 绕过队列。
+- **切换边界**：401/403、429/usage cooldown、pre-output transient fault、以及账号队列 timeout 都作为账号级切换原因处理；确定性 4xx 仍不切 sibling。账号级限流仍会 forget 当前 sticky，避免后续会话继续命中不可用账号。
+- **观测决策**：`oauth.pool.select` 日志只记录非敏感选择元信息（`selection_reason`、`affinity_key_source`、`capacity_avoided`、`busy_eligible_accounts`、`retry_attempt`），不记录具体 device/session key 值，便于生产验收“切换只因故障/额度/容量压力”。
+- **验证计划**：新增 OAuth pool affinity/capacity 单测、serial gate `wouldQueue()` 单测、gateway `synthesizeOAuthProviders` 集成测试；再跑相关执行器回归、全量 Vitest、typecheck、lint、build 和 Playwright e2e。
+
 ## 2026-07-04 · idle-flush 碎片段优先压缩最大连续段（Memory Observer，docs/08/12，原则 3/7）
 
 - **背景（Lukin）**：线上 `v0.23.0` 后记忆队列仍持续运行，排查发现总候选不是 30 多万 job，而是约 3.07 万个 idle candidate thread；最近完成的 observer 基本不会重新成为候选，未见大面积死循环。
@@ -86,19 +96,10 @@
 - **保留边界**：非上下文类 request-shape 错误（例如图片尺寸超限、非法参数）仍短路为 `invalid_request`，因为换候选模型无法修复请求体本身。
 - **验证**：新增执行器 stream 回归测试，覆盖 Codex Responses `context_length_exceeded` 先失败、后续 Opus 成功、首个 attempt 显示跳过且不记录 breaker failure；目标 `execute.test.ts` 117/117 绿。
 
-## 2026-07-03 · API key 级 usage stats 给外部自动化读取（Gateway usage API / telemetry，docs/07，原则 7）
-
-- **背景（Lukin）**：Skillstore 公开页需要每天同步 AI audit token / cost 快照；旧办法直接从 Helm SQLite 和 claude-relay Redis 取数，不适合作为长期自动化接口。新的来源应主要走 Helm 系统，并通过 API key 读取统计数据。
-- **接口决策**：新增 `GET /v1/usage/stats`，复用现有 API-key auth，不挂 admin Basic Auth。默认 `start=0`、`end=now`，返回当前 key 的累计 request/token/cost 汇总；仍接受 `start/end/bucket/tzOffsetMinutes` 以便后续做日窗口或趋势同步。
-- **隔离决策**：接口忽略 caller 传入的 `key_id`，只使用 `authMiddleware` 解析出的 `identity.keyId` 调 `TelemetryStore.aggregate(..., keyId)`；这样 Skillstore workflow 只能读它自己的 Helm key，不可能枚举其它 key 的用量。
-- **返回形状**：返回紧凑 snake_case 机器格式：`prompt_tokens`、`completion_tokens`、`total_tokens`、`cost_usd` 等，避免让下游 workflow 依赖 admin dashboard 的 series/byModel 大结构。
-- **限制 / TODO**：该接口反映 Helm telemetry 当前保留窗口内的数据；历史上还在 claude-relay 的用量需要 Skillstore 侧保留 legacy baseline 或临时兼容同步，等所有 audit 入口完全切到 Helm 后再移除 relay 补数。
-- **验证计划**：新增 route 测试覆盖缺 key 401、当前 key 聚合、恶意 `key_id` 被忽略；OpenAPI 加入 bearer-secured usage endpoint。
-
 ## 历史条目摘要（最近 2 条）
 
-- **2026-07-02 · API key 加密恢复与原地轮转（Auth / Admin keys，docs/06/11，原则 7）**：API key reveal/rotate 使用 `secret_enc` 保存可恢复密文，认证仍只依赖 sha256，旧 hash-only 行需 rotate 后才可 reveal。
-- **2026-07-02 · Claude Fable 周限额改读 `limits[]`（Admin providers / OAuth quota，docs/11，原则 3/7）**：Anthropic quota parser 优先读取新 `limits[]` weekly scoped payload，并在 providers 页显示 `7d · Fable` 等模型级周限额。
+- **2026-07-03 · API key 级 usage stats 给外部自动化读取（Gateway usage API / telemetry，docs/07，原则 7）**：`GET /v1/usage/stats` 复用 API-key auth，只聚合当前 key 的 request/token/cost 统计，避免外部自动化直接读库。
+- **2026-07-02 · API key 加密恢复与原地轮转（Auth / Admin keys，docs/06/11，原则 7）**：API key reveal/rotate 改用 `secret_enc` 恢复材料，鉴权仍只依赖 sha256，历史 hash-only key 明确不可恢复但可原地轮转。
 
 ## 更早历史总览
 
