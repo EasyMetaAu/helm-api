@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-07-04 · Claude scoped weekly quota 不触发账号级限流（Admin providers / OAuth quota，docs/04/11，原则 3/5/7）
+
+- **背景（Lukin）**：providers 页出现 `7d · Fable` 100% 后，账号被显示为“已限流”，并且路由池把整个 Anthropic OAuth 账号排除；但账号级 `7d` 全模型额度仍有余量，只有 Fable / Sonnet 这类 scoped model cap 不可用。
+- **根因**：`windowsToUsageLimit()` 与 `windowsToActiveUsageRecovery()` 把所有 100% quota window 都当作账号级 limiter；`7d-fable` / `7d-sonnet` / `7d-opus` 这种 scoped weekly model window 因而被错误写入 `usage_limited_until_ms`，扩大成全账号 cooldown。OAuth pool 的 429 backstop 也没有区分 Anthropic 模型级 429。
+- **语义决策**：只有账号级窗口（`5h`、`7d`、Codex `primary/secondary` 等非 `7d-*` key）能 park 整个账号；`7d-*` 只说明对应 Claude 模型的周限额已满，不能阻止同账号继续服务其它模型。
+- **执行路径决策**：Anthropic `claude-fable-*` / `claude-sonnet-*` / `claude-opus-*` 的 429 不写全局 cooldown；当前请求仍可在池内尝试 sibling account 或交给执行 fallback，但不会把该账号从所有模型的调度池里移除。
+- **UI 决策**：providers 页渲染“已限流”时只用账号级窗口解释恢复时间；如果页面已有账号级窗口且它们未触顶，旧的全局 cooldown 不再显示为 active rate limit。
+- **验证计划**：新增 core quota helper、OAuth pool、admin `/oauth/quota`、providers 页面回归测试，覆盖 Fable/Sonnet scoped window 100% 但 `7d` 仍有余量时不触发账号级限流。
+
 ## 2026-07-04 · 跨协议 reasoning 历史不兼容按候选跳过（执行 fallback / 协议转换，docs/04/05/07，原则 3/5/8）
 
 - **背景（Lukin）**：Claude/Anthropic thinking-mode 请求在 fallback 到 OpenAI-compatible DeepSeek（如 `deepseek/deepseek-v4-pro`）时，多次暴露 `400 invalid_request: The reasoning_content in the thinking mode must be passed back to the API.` 给客户端。
@@ -84,16 +93,6 @@
 - **测试路径决策**：Providers 页 Test 仍使用独立 per-account client，不写 request telemetry / payload，也不扰动主路由 breaker；但测试成功会写入 `oauth_usage` 并清空旧 auto-park cooldown，因为它消耗真实上游额度且证明账号当前可用。
 - **UI 决策**：Test 成功后自动 `invalidateAll()`，让状态 pill、Today 用量和 quota/cooldown 立即重新读取，而不是要求操作员手动刷新。
 - **验证**：新增 admin OAuth route 回归覆盖干净窗口清 cooldown、旧 7d cooldown 替换为 active 5h、Test 成功记录用量并清 cooldown；目标 Vitest 53/53 绿，typecheck / build 绿。本机全量 SQLite 测试受 `better-sqlite3` Node ABI 不匹配阻塞，非业务断言失败。
-
-## 2026-07-01 · Claude Code 日期指纹扩展到全部 prompt 文本面（Anthropic protocol / anti-fingerprint，docs/05/07，原则 7/8）
-
-- **背景（Lukin）**：阅读 X 复盘后确认风险不应只按 `system` 推断；Claude Code 当前实现虽把 `currentDate` 放入系统上下文，但从防检测角度，任意会被发往 Anthropic 的 prompt 文本块只要出现同一句隐写模板，都应还原为普通字符串。
-- **修复决策**：`normalizeClaudeCodeDateFingerprintInAnthropicRequest()` 不再依赖 billing header，也不再按 message role 限制；所有 `messages[].content` 的 string / `type:"text"` block 都归一化，嵌套 `tool_result.content` 也处理。
-- **工具提示面**：`tools[].description` 也是会进入上游 prompt surface 的自然语言说明，同样归一化；但 `tool_use.input`、`input_schema`、`metadata` 等结构化/数据字段不递归改写，避免把用户数据或 schema 常量改坏。
-- **边界**：仍只匹配精确句式 `Today[',’,ʼ,ʹ]s date is YYYY[-/]MM[-/]DD.`，统一输出 `Today's date is YYYY-MM-DD.`；这覆盖 X 文强调的「普通第三方端点 + 中国时区」即普通 apostrophe + slash 日期。
-- **验证**：新增 core 测试覆盖 user/assistant/tool_result/tools description，gateway native carrier 测试覆盖 message + tools 字段；目标 Vitest 绿。
-
----
 
 ## 历史条目摘要（最近 2 条）
 

@@ -178,6 +178,10 @@
     return 'bg-indigo-500';
   }
 
+  function isAccountWideQuotaWindow(w: OAuthQuotaWindow): boolean {
+    return !w.key.startsWith('7d-');
+  }
+
   // "resets in 4d 16h" countdown from an absolute reset timestamp; null/elapsed ⇒ "".
   // Shares `durationParts` with `expiryLabel` so the coarsening (a 7-day window reads
   // "4d 16h", not "112h 2m") stays identical across every duration label.
@@ -198,6 +202,7 @@
   ): OAuthQuotaWindow | null {
     let chosen: OAuthQuotaWindow | null = null;
     for (const w of windows) {
+      if (!isAccountWideQuotaWindow(w)) continue;
       if (w.usedPercent < threshold || w.resetsAtMs == null || w.resetsAtMs <= now) {
         continue;
       }
@@ -226,6 +231,9 @@
     if (recoveryWindow?.resetsAtMs != null) {
       untilMs = recoveryWindow.resetsAtMs;
       label = windowLabel(recoveryWindow.key);
+    }
+    if (untilMs != null && q?.windows.some(isAccountWideQuotaWindow) && recoveryWindow == null) {
+      return null;
     }
     return untilMs == null ? null : { untilMs, label };
   }

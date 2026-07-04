@@ -215,6 +215,60 @@ describe("admin OAuth routes — read endpoints", () => {
     expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "default", weeklyReset, "replace");
   });
 
+  it("GET /oauth/quota clears a global cooldown when only scoped model windows are saturated", async () => {
+    const now = Date.now();
+    const shortCooldown = now + 60_000;
+    const windows = [
+      { key: "5h", usedPercent: 0, resetsAtMs: now + 3 * 60 * 60_000, windowMinutes: null },
+      { key: "7d", usedPercent: 75, resetsAtMs: now + 2 * 86_400_000, windowMinutes: null },
+      {
+        key: "7d-fable",
+        usedPercent: 100,
+        resetsAtMs: now + 2 * 86_400_000,
+        windowMinutes: null,
+      },
+      {
+        key: "7d-sonnet",
+        usedPercent: 100,
+        resetsAtMs: now + 2 * 86_400_000,
+        windowMinutes: null,
+      },
+    ];
+    const applyUsageLimit = vi.fn(async () => {});
+    const oauthQuota = {
+      get: vi.fn(async () => ({
+        providerId: "anthropic",
+        account: "default",
+        windows: [],
+        capturedAt: now,
+        source: "anthropic",
+        usageLimitedUntilMs: shortCooldown,
+      })),
+      getAll: vi.fn(async () => [
+        {
+          providerId: "anthropic",
+          account: "default",
+          windows,
+          capturedAt: now,
+          source: "anthropic",
+          usageLimitedUntilMs: shortCooldown,
+        },
+      ]),
+      upsert: vi.fn(async () => {}),
+      delete: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const seam = fullSeam({
+      fetchAnthropicQuota: vi.fn(async () => windows) as never,
+    });
+
+    const res = await app({ oauth: seam, oauthQuota, applyUsageLimit }).request(
+      "/admin/api/oauth/quota",
+    );
+
+    expect(res.status).toBe(200);
+    expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "default", null, "replace");
+  });
+
   it("GET /oauth/quota extends an active cooldown to a near-full 5h recovery reset", async () => {
     const now = Date.now();
     const shortCooldown = now + 60_000;

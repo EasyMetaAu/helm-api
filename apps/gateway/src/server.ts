@@ -356,6 +356,20 @@ const ROUTABLE_OAUTH_PROTOCOLS = new Map(
   ]),
 );
 
+function isAnthropicScopedWeeklyModel(model: string | null): boolean {
+  if (!model) return false;
+  const normalized = model.toLowerCase();
+  return (
+    normalized.includes("claude-fable") ||
+    normalized.includes("claude-sonnet") ||
+    normalized.includes("claude-opus")
+  );
+}
+
+function shouldParkOAuthRateLimit(providerId: string, model: string | null): boolean {
+  return !(providerId === "anthropic" && isAnthropicScopedWeeklyModel(model));
+}
+
 // The synthesis result (issue #38, Stage 3): one synthetic provider config per
 // routable subscription, plus the POOL client that serves ALL its accounts. The
 // config carries the UNION of every schedulable account's enabled models as
@@ -595,6 +609,7 @@ export async function synthesizeOAuthProviders(
       },
       accountRateLimitCooldownMs: DEFAULT_429_COOLDOWN_MS,
       onAccountRateLimit: (account, untilMs) => onAccountRateLimit?.(providerId, account, untilMs),
+      shouldParkRateLimit: ({ model }) => shouldParkOAuthRateLimit(providerId, model),
       // Let the in-pool retry fail over across accounts on an IN-BAND pre-output failure
       // (200-then-`response.failed`/overloaded after only the preamble): wrap each member's
       // SSE with the protocol's pre-output guard so the doomed stream rotates to a sibling
@@ -1307,17 +1322,20 @@ export async function buildServer(
     );
   };
 
-  // Executor hook: a genuine 429 on a subscription alias means the SERVED account hit
-  // its limit. Resolve the provider from the alias prefix + the served account from the
-  // ALS holder (set by the pool's onSelect for THIS attempt), then park it for a short
-  // re-probe window. The precise long cooldown for Codex/Anthropic arrives via the
-  // quota-window capture path; this is the backstop (and the ONLY signal for Copilot).
+  // Executor hook: an account-wide 429 on a subscription alias means the SERVED account
+  // hit its limit. Resolve the provider from the alias prefix + the served account from
+  // the ALS holder (set by the pool's onSelect for THIS attempt), then park it for a
+  // short re-probe window. Scoped Anthropic model caps are not account-wide. The precise
+  // long cooldown for Codex/Anthropic arrives via the quota-window capture path; this is
+  // the backstop (and the ONLY signal for Copilot).
   const onOAuthSubscription429 = (alias: string): void => {
     const acct = servingAccountStore.getStore()?.selected;
     if (!acct) return;
     const slash = alias.indexOf("/");
     const providerId = slash > 0 ? alias.slice(0, slash) : alias;
+    const model = slash > 0 ? alias.slice(slash + 1) : null;
     if (acct.providerId !== providerId) return; // stale holder guard (different provider)
+    if (!shouldParkOAuthRateLimit(providerId, model)) return;
     parkAccountOnLimit(providerId, acct.account, Date.now() + DEFAULT_429_COOLDOWN_MS);
   };
 

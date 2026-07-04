@@ -21,6 +21,13 @@ export const ACTIVE_LIMIT_RECOVERY_THRESHOLD = 95;
 // signal. The precise (long) cooldown comes from the quota-window path when present.
 export const DEFAULT_429_COOLDOWN_MS = 60_000;
 
+// Anthropic scoped weekly model windows are named `7d-<model>` (for example
+// `7d-fable` / `7d-sonnet`). They mean "this model is capped", not "the whole
+// account is capped"; only account-wide windows may park the account globally.
+export function isAccountWideQuotaWindow(window: OAuthQuotaWindow): boolean {
+  return !window.key.startsWith("7d-");
+}
+
 // The cooldown end implied by a set of rate-limit windows, or null when none is
 // exhausted. Returns the LATEST future reset among saturated windows: while ANY
 // saturated window is still active the account stays limited, so un-parking must
@@ -29,6 +36,7 @@ export const DEFAULT_429_COOLDOWN_MS = 60_000;
 export function windowsToUsageLimit(windows: OAuthQuotaWindow[], nowMs: number): number | null {
   let until: number | null = null;
   for (const w of windows) {
+    if (!isAccountWideQuotaWindow(w)) continue;
     if (w.usedPercent < LIMIT_THRESHOLD) continue;
     if (w.resetsAtMs === null || w.resetsAtMs <= nowMs) continue;
     if (until === null || w.resetsAtMs > until) until = w.resetsAtMs;
@@ -47,6 +55,7 @@ export function windowsToActiveUsageRecovery(
 ): number | null {
   let until: number | null = null;
   for (const w of windows) {
+    if (!isAccountWideQuotaWindow(w)) continue;
     if (w.usedPercent < ACTIVE_LIMIT_RECOVERY_THRESHOLD) continue;
     if (w.resetsAtMs === null || w.resetsAtMs <= nowMs) continue;
     if (until === null || w.resetsAtMs < until) until = w.resetsAtMs;

@@ -103,6 +103,12 @@ export interface OAuthPoolClient extends ProviderClient {
   getUsageLimit(account: string): number | null;
 }
 
+export interface OAuthRateLimitParkContext {
+  account: string;
+  model: string | null;
+  error: unknown;
+}
+
 export interface OAuthPoolDeps {
   members: OAuthPoolMember[];
   // Injected clock (default Date.now) so the LRU cursor is testable.
@@ -113,11 +119,14 @@ export interface OAuthPoolDeps {
   // Fires with the selected account on each served call — the seam the gateway
   // uses to record the serving subscription in telemetry / logs (no secrets).
   onSelect?: (account: string) => void;
-  // Fires when the selected account hits an upstream 429. The pool already applies
-  // the in-memory cooldown before calling this; the hook lets the gateway persist the
-  // same cooldown so rebuilds/restarts keep routing around the account.
+  // Fires when the selected account hits an account-wide upstream 429. The pool already
+  // applies the in-memory cooldown before calling this; the hook lets the gateway persist
+  // the same cooldown so rebuilds/restarts keep routing around the account.
   onAccountRateLimit?: (account: string, untilMs: number) => void;
   accountRateLimitCooldownMs?: number;
+  // Optional model-aware guard for provider-specific scoped caps. Returning false
+  // means "retry a sibling for this request, but do not globally park the account".
+  shouldParkRateLimit?: (ctx: OAuthRateLimitParkContext) => boolean;
   // Pre-output failover classifiers for the in-pool retry (issue: a native byte-relay
   // that 200s then fails IN-BAND after only a content-free preamble — e.g. a Responses
   // `response.created` before `response.failed`/server_is_overloaded). WITHOUT this, the
@@ -201,6 +210,16 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     return null;
   }
 
+  function modelFromNative(input: NativePassthroughInput): string | null {
+    const model = nativePassthroughBody(input).model;
+    return typeof model === "string" && model.trim().length > 0 ? model.trim() : null;
+  }
+
+  function modelFromChat(req: ChatCompletionRequest): string | null {
+    const model = req.model;
+    return typeof model === "string" && model.trim().length > 0 ? model.trim() : null;
+  }
+
   // Pick the next account: lowest priority, then oldest lastUsedAt (LRU round-
   // robin within equal priority). Bumps the winner's cursor and notifies onSelect.
   // Throws when no member is schedulable (fail-closed — the caller treats it as a
@@ -266,7 +285,25 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     forgetStickyAccount(entry.member.account);
   }
 
-  function parkRateLimitedAccount(entry: PoolEntry): void {
+  function shouldParkRateLimitedAccount(
+    entry: PoolEntry,
+    err: unknown,
+    model: string | null,
+  ): boolean {
+    try {
+      return (
+        deps.shouldParkRateLimit?.({ account: entry.member.account, model, error: err }) ?? true
+      );
+    } catch {
+      return true;
+    }
+  }
+
+  function parkRateLimitedAccount(entry: PoolEntry, err: unknown, model: string | null): void {
+    if (!shouldParkRateLimitedAccount(entry, err, model)) {
+      forgetStickyAccount(entry.member.account);
+      return;
+    }
     const candidate = now() + accountRateLimitCooldownMs;
     // Extend-only: a precise upstream quota reset (e.g. a Codex weekly limit, captured
     // from response headers before the 429 threw) may already sit far in the future —
@@ -289,6 +326,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   // internal "no schedulable account" — the executor records THAT and advances the chain.
   async function completeWithRetry<R>(
     stickyKey: string | null,
+    model: string | null,
     call: (client: ProviderClient) => Promise<R>,
   ): Promise<R> {
     const tried = new Set<string>();
@@ -310,7 +348,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
           continue;
         }
         if (isRateLimitAccountFailure(err)) {
-          parkRateLimitedAccount(entry);
+          parkRateLimitedAccount(entry, err, model);
           lastErr = err;
           continue;
         }
@@ -328,6 +366,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   async function* streamWithRetry(
     firstEntry: PoolEntry,
     stickyKey: string | null,
+    model: string | null,
     open: (client: ProviderClient) => AsyncIterable<string>,
     // When set, each member's SSE is wrapped so a pre-output error frame (after only a
     // content-free preamble) throws BEFORE the first yielded chunk — turning "commit on
@@ -353,7 +392,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
           parkCredentialFailedAccount(entry);
           lastErr = err;
         } else if (isRateLimitAccountFailure(err)) {
-          parkRateLimitedAccount(entry);
+          parkRateLimitedAccount(entry, err, model);
           lastErr = err;
         } else {
           if (!isRetryableTransientError(err)) throw err;
@@ -398,7 +437,9 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       req: ChatCompletionRequest,
       opts?: { signal?: AbortSignal },
     ): Promise<ChatCompletionResponse> {
-      return completeWithRetry(null, (client) => client.chatCompletion(req, opts));
+      return completeWithRetry(null, modelFromChat(req), (client) =>
+        client.chatCompletion(req, opts),
+      );
     },
     chatCompletionStream(
       req: ChatCompletionRequest,
@@ -410,6 +451,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       return streamWithRetry(
         first,
         null,
+        modelFromChat(req),
         (client) => client.chatCompletionStream(req, opts),
         deps.chatStreamPreambleClassifier,
       );
@@ -431,7 +473,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       // rotation + onSelect fire on the call turn exactly like the other methods. A member
       // missing the method throws a NON-transient error → surfaced at once (fail-closed,
       // never silently routed to a translating sibling), not retried.
-      return completeWithRetry(stickyKeyFromNative(body), (client) => {
+      return completeWithRetry(stickyKeyFromNative(body), modelFromNative(body), (client) => {
         if (!client.nativePassthrough) {
           throw new Error("oauth pool member does not support native passthrough");
         }
@@ -457,6 +499,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       return streamWithRetry(
         first,
         stickyKey,
+        modelFromNative(body),
         (client) => {
           if (!client.nativePassthroughStream) {
             throw new Error("oauth pool member does not support native passthrough streaming");

@@ -459,6 +459,50 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     expect(limited).toEqual([{ account: "a", untilMs: 1_250 }]);
   });
 
+  it("can retry a sibling on a model-scoped 429 without globally parking the account", async () => {
+    const served: string[] = [];
+    const selected: string[] = [];
+    const limited: Array<{ account: string; untilMs: number }> = [];
+    const scopedModelMember = (account: string, priority: number): OAuthPoolMember => ({
+      account,
+      priority,
+      schedulable: true,
+      client: {
+        async chatCompletion(req: ChatCompletionRequest) {
+          if (req.model === "claude-fable-5") throw RATE;
+          served.push(account);
+          return { served_by: account };
+        },
+        chatCompletionStream(_req: ChatCompletionRequest): AsyncIterable<string> {
+          return (async function* () {})();
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [
+        scopedModelMember("a", 10),
+        { ...member("b", 50, true, served), client: stubClient("b", served) },
+      ],
+      now: () => 1_000,
+      accountRateLimitCooldownMs: 250,
+      shouldParkRateLimit: ({ model }) => model !== "claude-fable-5",
+      onAccountRateLimit: (account, untilMs) => limited.push({ account, untilMs }),
+      onSelect: (account) => selected.push(account),
+    });
+
+    await expect(pool.chatCompletion({ model: "claude-fable-5", messages: [] })).resolves.toEqual({
+      served_by: "b",
+    });
+    await expect(pool.chatCompletion({ model: "claude-opus-4-6", messages: [] })).resolves.toEqual({
+      served_by: "a",
+    });
+
+    expect(pool.getUsageLimit("a")).toBeNull();
+    expect(limited).toEqual([]);
+    expect(selected).toEqual(["a", "b", "a"]);
+    expect(served).toEqual(["b", "a"]);
+  });
+
   it("parks a refresh-rate-limited account (TokenRefreshError 429) and retries a sibling", async () => {
     const served: string[] = [];
     const selected: string[] = [];
