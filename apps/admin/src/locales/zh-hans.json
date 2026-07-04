@@ -216,6 +216,7 @@
   "disabled": "已禁用",
   "Disconnect": "断开连接",
   "Disconnecting…": "正在断开连接…",
+  "drag to reorder policy": "拖动以调整策略顺序",
   "Done": "完成",
   "Done in {ms} ms": "耗时 {ms} 毫秒",
   "down": "下行",

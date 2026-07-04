@@ -216,6 +216,7 @@
   "disabled": "無効",
   "Disconnect": "切断",
   "Disconnecting…": "切断中…",
+  "drag to reorder policy": "ドラッグしてポリシーの順序を変更",
   "Done": "完了",
   "Done in {ms} ms": "{ms} ms で完了",
   "down": "下り",

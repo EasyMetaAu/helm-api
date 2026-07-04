@@ -64,14 +64,24 @@ describe('policies page', () => {
     expect(screen.getAllByTestId('policy-row')).toHaveLength(2);
   });
 
-  it('reordering changes the saved array order (order = priority)', async () => {
+  it('dragging a row changes the visible order and saved array order', async () => {
     renderPage([
       policy({ match: { task_type: 'coding' }, use_lane: 'coding' }),
       policy({ match: { task_type: 'math' }, use_lane: 'premium' }),
     ]);
-    const rows = screen.getAllByTestId('policy-row');
-    // move the 2nd row up
-    await fireEvent.click(within(rows[1]).getByRole('button', { name: /move up/i }));
+    let rows = screen.getAllByTestId('policy-row');
+    const dragHandle = within(rows[1]).getByRole('button', { name: /drag to reorder/i });
+
+    await fireEvent.dragStart(dragHandle);
+    await fireEvent.dragOver(rows[0]);
+    await fireEvent.drop(rows[0]);
+
+    rows = screen.getAllByTestId('policy-row');
+    expect((within(rows[0]).getByLabelText(/task type/i) as HTMLSelectElement).value).toBe('math');
+    expect((within(rows[1]).getByLabelText(/task type/i) as HTMLSelectElement).value).toBe(
+      'coding',
+    );
+
     await fireEvent.click(screen.getByRole('button', { name: /save policies/i }));
 
     await waitFor(() => expect(savePolicies).toHaveBeenCalledTimes(1));
