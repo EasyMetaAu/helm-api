@@ -649,6 +649,13 @@ export type {
   RateLimitResult,
 } from "./ratelimit/types.js";
 export {
+  optimizeVisualContext,
+  type VisualContextCompressionInput,
+  type VisualContextCompressionMutation,
+  type VisualContextCompressionResult,
+  type VisualContextCompressor,
+} from "./request-optimizer/visual-context-compression.js";
+export {
   type Classification as LaneResolverClassification,
   type LaneDecision,
   type PolicyOutcome as LaneResolverPolicyOutcome,

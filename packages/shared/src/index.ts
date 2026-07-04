@@ -91,6 +91,8 @@ export {
   LogLevelSchema,
   type RuntimeSettings,
   RuntimeSettingsSchema,
+  type VisualContextCompressionMode,
+  VisualContextCompressionModeSchema,
 } from "./config/runtime-settings.schema.js";
 // Config model (docs/02, 06).
 export {

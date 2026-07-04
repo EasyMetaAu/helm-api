@@ -21,6 +21,7 @@
     "better-sqlite3": "^12.10.0",
     "drizzle-orm": "^0.45.2",
     "postgres": "^3.4.9",
+    "pxpipe-proxy": "0.8.0",
     "socks": "^2.8.9",
     "sqlite-vec": "^0.1.9",
     "undici": "^8.3.0",

@@ -11,6 +11,7 @@ describe("RuntimeSettingsSchema", () => {
     const parsed = RuntimeSettingsSchema.parse({});
     expect(parsed.capture_payloads).toBe(true);
     expect(parsed.native_protocol_passthrough).toBe(true);
+    expect(parsed.visual_context_compression).toBe("off");
     expect(parsed.payload_retention_days).toBe(30);
     expect(parsed.rate_limit_enabled).toBe(false);
     expect(parsed.rate_limit_default_rpm).toBe(0);
@@ -22,6 +23,7 @@ describe("RuntimeSettingsSchema", () => {
     const parsed = RuntimeSettingsSchema.parse({
       capture_payloads: false,
       native_protocol_passthrough: false,
+      visual_context_compression: "observe",
       payload_retention_days: 7,
       rate_limit_enabled: true,
       rate_limit_default_rpm: 60,
@@ -31,6 +33,7 @@ describe("RuntimeSettingsSchema", () => {
     expect(parsed).toEqual({
       capture_payloads: false,
       native_protocol_passthrough: false,
+      visual_context_compression: "observe",
       payload_retention_days: 7,
       rate_limit_enabled: true,
       rate_limit_default_rpm: 60,
@@ -133,6 +136,21 @@ describe("RuntimeSettingsSchema", () => {
 
   it("RuntimeSettings is the z.infer of RuntimeSettingsSchema (single type source)", () => {
     expectTypeOf<RuntimeSettings>().toEqualTypeOf<z.infer<typeof RuntimeSettingsSchema>>();
+  });
+
+  it("accepts only known visual context compression modes", () => {
+    expect(RuntimeSettingsSchema.safeParse({ visual_context_compression: "off" }).success).toBe(
+      true,
+    );
+    expect(RuntimeSettingsSchema.safeParse({ visual_context_compression: "observe" }).success).toBe(
+      true,
+    );
+    expect(RuntimeSettingsSchema.safeParse({ visual_context_compression: "enabled" }).success).toBe(
+      true,
+    );
+    expect(RuntimeSettingsSchema.safeParse({ visual_context_compression: "auto" }).success).toBe(
+      false,
+    );
   });
 
   it("backfills queueing defaults from an empty object (both queues OFF)", () => {

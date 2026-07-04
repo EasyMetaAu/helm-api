@@ -19,6 +19,7 @@ import { z } from "zod";
 // bearer key lives in the Authorization header, never in the chat body we store).
 
 export const LogLevelSchema = z.enum(["debug", "info", "warn", "error"]);
+export const VisualContextCompressionModeSchema = z.enum(["off", "observe", "enabled"]);
 
 export const RuntimeSettingsSchema = z.object({
   // Record full request/response bodies for each call. Default ON (operator
@@ -33,6 +34,13 @@ export const RuntimeSettingsSchema = z.object({
   // back to translation for openai_chat (lingua franca) and cross-protocol attempts,
   // so a later heterogeneous fallback can translate if reached.
   native_protocol_passthrough: z.boolean().default(true),
+  // Visual context compression renders bulky Anthropic-native context into image
+  // blocks before an upstream call. Default OFF because the technique is lossy:
+  // dense images are useful for gist/context, not exact byte recall. `observe`
+  // runs the estimator/transform on a copy and records body-free telemetry while
+  // sending the original request; `enabled` sends the transformed body when the
+  // optimizer applies.
+  visual_context_compression: VisualContextCompressionModeSchema.default("off"),
   // Auto-prune captured payloads older than this many days. Bounds the storage
   // footprint and the plaintext-exposure window. Capped at 10 years.
   payload_retention_days: z.number().int().positive().max(3650).default(30),
@@ -152,4 +160,5 @@ export const RuntimeSettingsSchema = z.object({
 });
 
 export type LogLevel = z.infer<typeof LogLevelSchema>;
+export type VisualContextCompressionMode = z.infer<typeof VisualContextCompressionModeSchema>;
 export type RuntimeSettings = z.infer<typeof RuntimeSettingsSchema>;

@@ -5,6 +5,8 @@ import type {
   ProviderClient,
   ProviderRegistry,
   RouteProviderAttempt,
+  VisualContextCompressionMutation,
+  VisualContextCompressor,
 } from "@helm/core";
 import {
   anthropicNativeBodyRequiresSystemFold,
@@ -16,6 +18,7 @@ import {
   hoistResponsesInstructions,
   type NativePassthroughDisableReason,
   openaiTransformer,
+  optimizeVisualContext,
   preOutputClassifierFor,
   resolveCostUsd,
   sanitizeCodexResponsesNativeBody,
@@ -31,6 +34,7 @@ import type {
   Protocol,
   ReasoningEffortWireCapability,
   TargetProviderProtocol,
+  VisualContextCompressionMode,
 } from "@helm/shared";
 import {
   appendMutationList,
@@ -117,6 +121,10 @@ export interface ExecuteAdapterDeps {
    *  This dep is OPTIONAL: when absent (a caller that never wires it) the executor treats
    *  passthrough as OFF — a defensive fallback, independent of the setting's own default. */
   nativeProtocolPassthroughEnabled?: () => boolean;
+  /** Runtime feature flag for lossy visual context compression. Default OFF. */
+  visualContextCompressionMode?: () => VisualContextCompressionMode;
+  /** Test seam / alternate implementation for visual context compression. */
+  visualContextCompressor?: VisualContextCompressor;
   /** Auto-park hook (OAuth usage limit). Fired when a SUBSCRIPTION alias's attempt
    *  fails pre-first-chunk with a genuine (non-`:free`) upstream 429 — the served
    *  account just hit its rate/usage limit. The gateway reads WHICH account served
@@ -1125,6 +1133,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     signal,
     log,
     nativeProtocolPassthroughEnabled,
+    visualContextCompressionMode,
+    visualContextCompressor = optimizeVisualContext,
   } = deps;
   const knownOAuthPrefixes = deps.knownOAuthPrefixes;
   const oauthAliases = deps.oauthAliases;
@@ -1275,6 +1285,46 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         continue;
       }
 
+      // Native protocol passthrough decision for THIS attempt (issue #217), computed
+      // before the Anthropic count_tokens preflight so visual compression can reduce
+      // an over-window native request before we decide to skip the candidate.
+      const passthrough = decideNativePassthroughForAttempt({
+        req,
+        target,
+        enabled: nativeProtocolPassthroughEnabled?.() === true,
+      });
+      let visualCompressionMutation: VisualContextCompressionMutation | undefined;
+      let optimizedNativeBody: Record<string, unknown> | null = null;
+      const optimizeNativeBodyForAttempt = async (
+        input: NativePassthroughCarrier | Record<string, unknown>,
+      ): Promise<NativePassthroughCarrier | Record<string, unknown>> => {
+        if (!passthrough.passthrough_used) return input;
+        const body = nativePassthroughBody(input);
+        if (optimizedNativeBody === null) {
+          try {
+            const optimized = await visualContextCompressor({
+              mode: visualContextCompressionMode?.() ?? "off",
+              targetProviderProtocol: target.targetProviderProtocol,
+              model: providerModel,
+              body,
+              capabilities: caps,
+              requestId: req.request_id,
+            });
+            optimizedNativeBody = optimized.body;
+            visualCompressionMutation = optimized.mutation;
+          } catch (err) {
+            log?.("warn", "visual_context_compression.failed_open", {
+              alias,
+              error_class: errorClassOf(err),
+            });
+            optimizedNativeBody = body;
+          }
+        }
+        return isNativePassthroughCarrier(input)
+          ? cloneCarrierWithBody(input, optimizedNativeBody)
+          : optimizedNativeBody;
+      };
+
       const exactContextLimit = effectiveContextLimit(catalogEntry, providerModel);
       if (
         target.targetProviderProtocol === "anthropic_messages" &&
@@ -1293,7 +1343,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             caps,
             req.reasoning_effort,
           );
-          const countBody = { ...nativePassthroughBody(countInput) };
+          const optimizedCountInput = await optimizeNativeBodyForAttempt(countInput);
+          const countBody = { ...nativePassthroughBody(optimizedCountInput) };
           delete countBody.stream;
           const tokenCount = await provider.countTokens(countBody, { signal });
           const inputTokens = countTokensInputTokens(tokenCount);
@@ -1314,16 +1365,6 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       // failure from here on is a PROVIDER fault, not a capability gap.
       attemptedAny = true;
 
-      // Native protocol passthrough decision for THIS attempt (issue #217). Pure
-      // guard + body-free telemetry; computed AFTER the capability filter so the
-      // passthrough never bypasses a hard capability skip. The decision is a
-      // body+response SUBSTITUTION inside the existing per-candidate try/catch — so
-      // breaker / abort / free-429 / chain-advance below are identical either way.
-      const passthrough = decideNativePassthroughForAttempt({
-        req,
-        target,
-        enabled: nativeProtocolPassthroughEnabled?.() === true,
-      });
       let attemptTelemetry: PassthroughTelemetry = passthrough;
 
       // 3) Invoke the provider (stream or non-stream). We send the RESOLVED
@@ -1360,21 +1401,27 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           // the client's `model` is the routing alias (e.g. `anthropic/claude-…`), not
           // a real upstream model id. Everything else is forwarded verbatim. Mirrors
           // stripInternal's `model: providerModel`; without it the upstream 404s.
-          const passthroughBody = prepareNativeRequestForUpstream(
-            nativeBody,
-            providerModel,
-            req.protocol,
-            true,
-            provider.nativeProtocolProfile,
-            req.reasoning_effort_forced === true ? req.reasoning_effort : undefined,
-            caps,
-            req.reasoning_effort,
+          const passthroughBody = await optimizeNativeBodyForAttempt(
+            prepareNativeRequestForUpstream(
+              nativeBody,
+              providerModel,
+              req.protocol,
+              true,
+              provider.nativeProtocolProfile,
+              req.reasoning_effort_forced === true ? req.reasoning_effort : undefined,
+              caps,
+              req.reasoning_effort,
+            ),
           );
           if (hasResponsesHistoryGap(req)) {
             const mutations = nativePassthroughMutations(passthroughBody);
             if (mutations) mutations.responses_previous_response_id_native_passthrough = true;
           }
           passthrough.passthrough_mutations = nativePassthroughMutations(passthroughBody);
+          attemptTelemetry = withRequestMutations(
+            passthrough,
+            visualCompressionMutationLedger(visualCompressionMutation),
+          );
           // Pre-output failover guard (principle 5 + 8): a same-protocol byte-relay
           // that 200s then fails IN-BAND before any output (e.g. Responses
           // `response.failed`/server_is_overloaded after only the `response.created`
@@ -1404,7 +1451,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           );
           breaker.recordSuccess(alias);
           // Streamed usage is not known at peek time → cost null, backfilled later.
-          attempts.push(okRow(alias, elapsed(), null, passthrough));
+          attempts.push(okRow(alias, elapsed(), null, attemptTelemetry));
           return {
             attempts,
             final: { status: "ok", alias, providerModel },
@@ -1482,21 +1529,27 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           // `model` is the routing alias (e.g. `anthropic/claude-…`), but the gateway
           // picked this upstream model — forward it so the upstream doesn't 404 on the
           // alias. Everything else verbatim. Mirrors stripInternal's `model: providerModel`.
-          const passthroughBody = prepareNativeRequestForUpstream(
-            nativeBody,
-            providerModel,
-            req.protocol,
-            false,
-            provider.nativeProtocolProfile,
-            req.reasoning_effort_forced === true ? req.reasoning_effort : undefined,
-            caps,
-            req.reasoning_effort,
+          const passthroughBody = await optimizeNativeBodyForAttempt(
+            prepareNativeRequestForUpstream(
+              nativeBody,
+              providerModel,
+              req.protocol,
+              false,
+              provider.nativeProtocolProfile,
+              req.reasoning_effort_forced === true ? req.reasoning_effort : undefined,
+              caps,
+              req.reasoning_effort,
+            ),
           );
           if (hasResponsesHistoryGap(req)) {
             const mutations = nativePassthroughMutations(passthroughBody);
             if (mutations) mutations.responses_previous_response_id_native_passthrough = true;
           }
           passthrough.passthrough_mutations = nativePassthroughMutations(passthroughBody);
+          attemptTelemetry = withRequestMutations(
+            passthrough,
+            visualCompressionMutationLedger(visualCompressionMutation),
+          );
           const body = await withAttemptDeadline(req.attempt_timeout_ms, signal, (attemptSignal) =>
             passthroughInvoke(passthroughBody, { signal: attemptSignal, captureUpstream }),
           );
@@ -1508,7 +1561,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 ? usageFromGeminiResponse(body)
                 : usageFromAnthropicResponse(body);
           const pricedBody = usage ? { ...body, usage } : body;
-          attempts.push(okRow(alias, elapsed(), costOf(alias, pricedBody), passthrough));
+          attempts.push(okRow(alias, elapsed(), costOf(alias, pricedBody), attemptTelemetry));
           return {
             attempts,
             final: { status: "ok", alias, providerModel },
@@ -1893,6 +1946,12 @@ function withRequestMutations(
     return passthrough;
   }
   return { ...passthrough, request_mutations: requestMutations };
+}
+
+function visualCompressionMutationLedger(
+  mutation: VisualContextCompressionMutation | undefined,
+): NativePassthroughCarrier["mutations"] | undefined {
+  return mutation ? { visual_context_compression: mutation } : undefined;
 }
 
 function mergeRequestMutations(

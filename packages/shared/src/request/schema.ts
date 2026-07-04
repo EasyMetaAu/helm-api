@@ -45,6 +45,27 @@ export const NativePassthroughMutationLedgerSchema = z
     provider_profile_applied: z.string().nullable().optional(),
     body_shims_applied: z.array(z.string()).optional(),
     stream_reframed: z.boolean().optional(),
+    // Visual context compression telemetry. Body-free by design: reason strings,
+    // counts, and flags only. Never store the imaged source text or PNG bytes here.
+    visual_context_compression: z
+      .object({
+        mode: z.enum(["observe", "enabled"]),
+        applied: z.boolean(),
+        would_apply: z.boolean(),
+        reason: z.string(),
+        detail: z.string().optional(),
+        orig_chars: z.number().int().nonnegative(),
+        compressed_chars: z.number().int().nonnegative(),
+        image_count: z.number().int().nonnegative(),
+        image_bytes: z.number().int().nonnegative(),
+        image_pixels: z.number().int().nonnegative().optional(),
+        estimated_image_tokens: z.number().int().nonnegative().optional(),
+        kept_sharp_blocks: z.number().int().nonnegative().optional(),
+        dropped_chars: z.number().int().nonnegative().optional(),
+        owns_cache_control: z.boolean(),
+        marker_count: z.number().int().nonnegative(),
+      })
+      .optional(),
   })
   .passthrough();
 
