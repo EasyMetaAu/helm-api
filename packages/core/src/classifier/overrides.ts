@@ -16,7 +16,7 @@ import type { Complexity } from "./tiers.js";
 export type OverrideKind = "set" | "floor";
 
 export interface OverrideHit {
-  /** "heartbeat" | "exact_confirmation" | "low_cost_automation" | "formal_logic" | "tools_floor" | "long_context" | "short_message" */
+  /** "heartbeat" | "exact_confirmation" | "low_cost_automation" | "cheap_model_low_risk" | "formal_logic" | "tools_floor" | "long_context" | "short_message" */
   rule: string;
   kind: OverrideKind;
   complexity: Complexity;
@@ -31,7 +31,10 @@ const RANK: Record<Complexity, number> = Object.fromEntries(
   ORDER.map((tier, i) => [tier, i]),
 ) as Record<Complexity, number>;
 
-type OverrideInput = Pick<InternalRequest, "messages" | "tools" | "max_tokens">;
+type OverrideInput = Pick<
+  InternalRequest,
+  "messages" | "requested_model" | "response_format" | "attachments" | "tools" | "max_tokens"
+>;
 
 // Returns ALL matching overrides (possibly empty). The engine decides the final
 // tier via `applyOverrides`. This separation keeps detection pure and lets the
@@ -73,6 +76,15 @@ export function evaluateOverrides(
   // signals. True window fit is enforced later by the capability filter.
   if (isLowCostAutomationPrompt(lastUserText, cfg)) {
     hits.push({ rule: "low_cost_automation", kind: "set", complexity: "simple" });
+  }
+
+  // Cheap-model low-risk current turn: a client explicitly requested a cheap
+  // model for a short read/check/status turn, but the transcript may carry a very
+  // large history and many tools. Scope the signal to the current user turn and
+  // require the requested model + low-risk marker so generic long-context work is
+  // not silently down-routed.
+  if (isCheapModelLowRiskTurn(req, lastUserText, cfg)) {
+    hits.push({ rule: "cheap_model_low_risk", kind: "set", complexity: "simple" });
   }
 
   // Short-message shortcut: a tiny last user message with NO complex structural
@@ -138,6 +150,43 @@ function isShortAndSimple(text: string, maxChars: number, cfg: ClassifierRulesCo
   return true;
 }
 
+function isCheapModelLowRiskTurn(
+  req: OverrideInput,
+  text: string,
+  cfg: ClassifierRulesConfig,
+): boolean {
+  const cheap = cfg.overrides.cheap_model_low_risk;
+  if (cheap.requested_model_markers.length === 0 || cheap.low_risk_markers.length === 0) {
+    return false;
+  }
+  if (!modelMatches(req.requested_model, cheap.requested_model_markers)) return false;
+  if (isJsonResponseFormat(req.response_format)) return false;
+  if (hasImageAttachment(req.attachments)) return false;
+
+  const trimmed = text.trim();
+  if (trimmed.length === 0 || trimmed.length > cheap.current_turn_max_chars) return false;
+  if (detectCodeBlock(trimmed) > 0) return false;
+  if (detectStackTrace(trimmed) > 0) return false;
+  if (containsAny(trimmed, cheap.blocked_markers)) return false;
+  return containsAny(trimmed, cheap.low_risk_markers);
+}
+
+function modelMatches(model: string, markers: string[]): boolean {
+  const normalized = model.trim().toLowerCase();
+  if (normalized.length === 0) return false;
+  return markers.some((marker) => {
+    const m = marker.trim().toLowerCase();
+    if (m.length === 0) return false;
+    if (m.includes("*")) return globToRegExp(m).test(normalized);
+    return normalized === m;
+  });
+}
+
+function globToRegExp(glob: string): RegExp {
+  const escaped = glob.replace(/[.+?^${}()|[\]\\]/gu, "\\$&").replace(/\*/gu, ".*");
+  return new RegExp(`^${escaped}$`, "u");
+}
+
 // The short-message disqualifier must see BOTH the English signal dimensions and
 // their international (*_intl_kw) counterparts — otherwise a short Chinese analysis/
 // security/diagnostic prompt ("分析这个系统的根因") is wrongly force-pinned `simple`
@@ -169,6 +218,23 @@ function containsAny(text: string, keywords: string[]): boolean {
   if (text.trim().length === 0) return false;
   const haystack = text.toLowerCase();
   return keywords.some((kw) => kw.length > 0 && haystack.includes(kw.toLowerCase()));
+}
+
+function isJsonResponseFormat(rf: OverrideInput["response_format"]): boolean {
+  if (!isRecord(rf)) return false;
+  const t = rf.type;
+  return typeof t === "string" && (t === "json_object" || t === "json_schema");
+}
+
+function hasImageAttachment(attachments: OverrideInput["attachments"]): boolean {
+  if (!Array.isArray(attachments) || attachments.length === 0) return false;
+  for (const att of attachments) {
+    if (!isRecord(att)) return true;
+    const t = att.type;
+    if (typeof t !== "string") return true;
+    if (t === "image" || t === "image_url" || t.startsWith("image")) return true;
+  }
+  return false;
 }
 
 function normalizeUtterance(text: string): string {
