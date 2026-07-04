@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-07-04 · internal LLM prompt 输入用 XML 数据边界隔离（Memory / classifier eval，docs/03/08/12，原则 3/4/7）
+
+- **背景（Lukin）**：生产 request `4fa73a51-56d3-4f40-a34d-7ce1e9d1194b` 显示 `internal-llm` key 的一次普通 chat self-call 把任务规则、runtime context、群聊历史和输出契约拼在同一个 user message 里；最后一条群消息包含“可以合并”等业务动作词，容易让小模型把 untrusted chat content 当成可执行指令或错误语境。
+- **Helm 边界**：这条具体 Feishu reply-gate prompt 是调用方发给 Helm 的普通 `/v1/chat/completions` 请求，Helm 不能自动知道哪段是可信规则、哪段是聊天记录；调用方仍需把业务 prompt 改成 XML 分区。Helm 本次修复的是自己创建的 internal LLM prompt：Layer-2 classifier eval 与 memory observation/reflection/fact extraction。
+- **实现决策**：新增 `prompt-boundary` helper，对 XML text 做 `&/< />` escaping；eval 把最后真实 user turn 包进 `<user_request>`；memory 把 schema/时间放进 `<trusted_task_json>`，把 raw messages / observations 放进 `<untrusted_messages_json>` 或 `<untrusted_observations_json>`。
+- **安全语义**：system prompt 明确要求模型把 untrusted XML section 当数据而不是指令；用户内容里伪造的闭合标签会被转义，不能提前关闭数据区。现有 JSON output schema、temperature、timeout、fail-open fallback、日志不记录 prompt 的约束保持不变。
+- **排查结论**：除 memory LLM 与 classifier eval 外，`memory-self-http` 只是把已构造请求走 loopback 以便观测，`memory-embedder` 是 embedding 输入，不是指令型 prompt；未发现第三个 Helm 自己拼自然语言 prompt 的 internal key 调用面。
+- **验证计划**：新增 eval 与 memory prompt-boundary 回归，先证明旧实现裸放数据会失败，再验证 XML section 和 tag-breakout escaping；跑 focused Vitest、typecheck、lint。
+
 ## 2026-07-04 · 请求记录最终订阅账号并重排请求列表字段（Telemetry / Admin requests，docs/04/07/11，原则 1/5/7）
 
 - **背景（Lukin）**：请求 telemetry 只能看到最终 model/provider alias，无法确认使用订阅 provider 时最后落到哪个具体订阅账号；排查成本、额度、限流和账号池调度时缺少每次请求的账号级事实。
@@ -89,17 +98,9 @@
 - **UI 决策**：providers 页渲染“已限流”时只用账号级窗口解释恢复时间；如果页面已有账号级窗口且它们未触顶，旧的全局 cooldown 不再显示为 active rate limit。
 - **验证计划**：新增 core quota helper、OAuth pool、admin `/oauth/quota`、providers 页面回归测试，覆盖 Fable/Sonnet scoped window 100% 但 `7d` 仍有余量时不触发账号级限流。
 
-## 2026-07-04 · 跨协议 reasoning 历史不兼容按候选跳过（执行 fallback / 协议转换，docs/04/05/07，原则 3/5/8）
+## 历史条目摘要（最近 5 条）
 
-- **背景（Lukin）**：Claude/Anthropic thinking-mode 请求在 fallback 到 OpenAI-compatible DeepSeek（如 `deepseek/deepseek-v4-pro`）时，多次暴露 `400 invalid_request: The reasoning_content in the thinking mode must be passed back to the API.` 给客户端。
-- **根因**：Anthropic 原生历史不携带 OpenAI/DeepSeek 风格的 assistant `reasoning_content`；如果跨协议 fallback 仍把 Anthropic `thinking` 控制或不适配的 `reasoning_effort` 带到 OpenAI-compatible 上游，DeepSeek 会把它理解成 thinking-mode continuation，并要求上一轮 assistant reasoning history 原样回传。
-- **出站改写决策**：跨协议转到 OpenAI-compatible wire 时剥离 Anthropic `thinking` 控制；当 catalog 已知该目标没有 OpenAI reasoning wire 支持时，同时剥离 `reasoning_effort`。同协议 Anthropic passthrough 和真正支持 reasoning wire 的 OpenAI-compatible 目标不受影响。
-- **fallback 决策**：`reasoning_content` + `thinking mode` 的上游 400 不是全局 request-shape 错误，而是当前候选模型/协议组合缺历史字段；执行器记录 `skipped:true` + `skip_reason:"reasoning_history_incompatible"`，不熔断 provider，继续尝试后续候选。
-- **边界**：其它确定性 400/413/422（例如坏参数、图片过大）仍按 `invalid_request` 终止，因为换候选无法修复请求本身。这里只针对明确的 reasoning-history 缺失错误 fail-open。
-- **验证**：新增执行器回归覆盖跨协议剥离 thinking/reasoning 控制，以及 DeepSeek 类 400 后继续 fallback；目标 `execute.test.ts` 119/119 绿，`pnpm typecheck` 绿，`pnpm lint` 退出 0（仅既有 style info）。
-
-## 历史条目摘要（最近 4 条）
-
+- **2026-07-04 · 跨协议 reasoning 历史不兼容按候选跳过（执行 fallback / 协议转换，docs/04/05/07，原则 3/5/8）**：跨协议转 OpenAI-compatible 时剥离不兼容 thinking/reasoning 控制，并把 DeepSeek 类 reasoning-history 400 作为候选跳过而非全局失败。
 - **2026-07-04 · memory idle-flush 防饥饿与受控追赶（Memory worker / store，docs/08/12，原则 3/7）**：idle-flush 候选判断改用 observer-order tuple，按 scope rank 交错输出，并支持受控多批 drain，避免旧 backlog 饿死新项目。
 - **2026-07-03 · 策略级 reasoning_effort 覆盖 Lane 默认值（Routing policies / Admin policies，docs/04/11，原则 2/5/6）**：Policy action 可强制 reasoning_effort，优先级为 policy > selected lane > client request，复用现有执行改写链路。
 - **2026-07-03 · cron monitor 自动化请求降到低成本规则（Classifier / routing，docs/03/04，原则 2/4）**：monitor/cron + no-reply 标记命中时降到 `simple/economy`，但保留显式 coding keyword 升级路径，避免自动化探针误打高价模型。
