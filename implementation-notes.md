@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-07-04 · cheap-model 短低风险当前轮不被长历史抬价（Classifier / routing，docs/03/04，原则 2/4/5）
+
+- **背景（Lukin）**：生产 `openclaw` 24h 数据显示，部分请求显式请求 `gpt-5.4-mini` / cheap alias，最后一条 user 只有约 200 字且是 read/check/status 类低风险动作，但因为完整 transcript 很大、tools 很多，被 Layer-1 长上下文/工具信号抬到 `balanced/coding`，最终使用 `gpt-5.5`。
+- **规则决策**：新增配置化 override `cheap_model_low_risk`。只有 `requested_model` 命中配置 cheap markers、最后一条 user 在 `current_turn_max_chars` 内、命中低风险 marker、且没有 blocked marker 时，才把 complexity 设为 `simple`。判断只看当前 user turn，不用历史正文。
+- **安全边界**：显式 `gpt-5.5` 请求不受影响；JSON response_format、vision attachment、代码变更/调试/部署/安全/数学等 blocked marker 均不触发。真正的窗口 fit 和 provider 能力仍交给后续 capability filter / fallback。
+- **配置取舍**：默认 markers 包含 `economy`、`gpt-5.4-mini` / `gpt-5.4-mini-*` / `spark`，并用 `*deepseek-v4-flash` / `*claude-haiku-*` / `*claude-3-5-haiku-*` 覆盖 bare、provider-prefixed 与 dated 形态；但没有把 `gpt54` 当成 economy hint，避免把用户想要的中档模型继续压到 mini。
+- **验证计划**：新增 override 单测和 golden routing 回归，覆盖 cheap-model 短低风险长历史降到 economy、重模型请求不降级、code-changing/JSON/vision 不触发；再跑 targeted Vitest、typecheck、build。
+
 ## 2026-07-04 · 视觉上下文压缩以 observe/off 为默认接入（Request optimizer / native Anthropic，docs/04/05/07/11，原则 1/3/5/7/8）
 
 - **背景（Lukin）**：pxpipe 证明“密集文本渲成图片”在特定模型/价格结构下可能降低输入 token 成本，但该方法不是无损压缩；模型视觉路径会丢失精确字符串、数字、路径、hash、ID 等细节。

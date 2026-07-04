@@ -29,15 +29,24 @@ function makeConfig(
 function req(opts: {
   content?: string;
   messages?: { role: string; content: unknown }[];
+  requested_model?: string;
+  response_format?: Record<string, unknown> | null;
+  attachments?: unknown[] | null;
   tools?: unknown[] | null;
   max_tokens?: number | null;
 }): {
   messages: { role: string; content: unknown }[];
+  requested_model: string;
+  response_format: Record<string, unknown> | null;
+  attachments: unknown[] | null;
   tools: unknown[] | null;
   max_tokens: number | null;
 } {
   return {
     messages: opts.messages ?? [{ role: "user", content: opts.content ?? "" }],
+    requested_model: opts.requested_model ?? "auto",
+    response_format: opts.response_format ?? null,
+    attachments: opts.attachments ?? null,
     tools: opts.tools ?? null,
     max_tokens: opts.max_tokens ?? null,
   };
@@ -132,6 +141,130 @@ describe("evaluateOverrides — low-cost automation (set → simple)", () => {
     });
     expect(hits).toContainEqual({ rule: "long_context", kind: "floor", complexity: "complex" });
     expect(applyOverrides("complex", hits)).toBe("simple");
+  });
+});
+
+describe("evaluateOverrides — cheap model low-risk current turn (set → simple)", () => {
+  const cheapModelLowRisk = {
+    requested_model_markers: [
+      "economy",
+      "gpt-5.4-mini",
+      "spark",
+      "*deepseek-v4-flash",
+      "claude-haiku",
+      "*claude-haiku-*",
+      "claude-3-5-haiku",
+      "*claude-3-5-haiku-*",
+    ],
+    current_turn_max_chars: 300,
+    low_risk_markers: ["check", "inspect", "status", "read"],
+    blocked_markers: ["debug", "fix", "implement", "refactor", "patch"],
+  };
+
+  it("pins a short low-risk cheap-model request to simple despite long history/tools", () => {
+    const cfg = makeConfig({
+      cheap_model_low_risk: cheapModelLowRisk,
+      long_context_token_threshold: 1_000,
+    });
+    const hits = evaluateOverrides(
+      req({
+        requested_model: "gpt-5.4-mini",
+        messages: [
+          { role: "assistant", content: "prior implementation details ".repeat(10_000) },
+          { role: "user", content: "Please check the current status and report anything notable." },
+        ],
+        tools: [{ name: "shell_exec" }],
+      }),
+      cfg,
+      70_000,
+    );
+    expect(hits).toContainEqual({
+      rule: "cheap_model_low_risk",
+      kind: "set",
+      complexity: "simple",
+    });
+    expect(hits).toContainEqual({ rule: "tools_floor", kind: "floor", complexity: "standard" });
+    expect(hits).toContainEqual({ rule: "long_context", kind: "floor", complexity: "complex" });
+    expect(applyOverrides("complex", hits)).toBe("simple");
+  });
+
+  it.each([
+    "economy",
+    "deepseek-v4-flash",
+    "deepseek/deepseek-v4-flash",
+    "openrouter/deepseek-v4-flash",
+    "claude-haiku",
+    "claude-haiku-4-5-20251001",
+    "claude-3-5-haiku-20241022",
+    "anthropic/claude-haiku-4-5-20251001",
+    "zenmux-anthropic/claude-haiku-4.5",
+  ])("treats %s as a cheap-model hint", (requestedModel) => {
+    const cfg = makeConfig({ cheap_model_low_risk: cheapModelLowRisk });
+    const hits = evaluateOverrides(
+      req({
+        requested_model: requestedModel,
+        content: "Please check the current status and report anything notable.",
+      }),
+      cfg,
+      20,
+    );
+    expect(hits).toContainEqual({
+      rule: "cheap_model_low_risk",
+      kind: "set",
+      complexity: "simple",
+    });
+  });
+
+  it("does not fire for explicit heavy-model requests", () => {
+    const cfg = makeConfig({ cheap_model_low_risk: cheapModelLowRisk });
+    const hits = evaluateOverrides(
+      req({
+        requested_model: "gpt-5.5",
+        content: "Please check the current status and report anything notable.",
+      }),
+      cfg,
+      20,
+    );
+    expect(hits.find((h) => h.rule === "cheap_model_low_risk")).toBeUndefined();
+  });
+
+  it("does not fire for code-changing current turns", () => {
+    const cfg = makeConfig({ cheap_model_low_risk: cheapModelLowRisk });
+    const hits = evaluateOverrides(
+      req({
+        requested_model: "gpt-5.4-mini",
+        content: "Please inspect this bug, fix the function, and patch the tests.",
+      }),
+      cfg,
+      20,
+    );
+    expect(hits.find((h) => h.rule === "cheap_model_low_risk")).toBeUndefined();
+  });
+
+  it("does not fire when JSON or vision constraints are present", () => {
+    const cfg = makeConfig({ cheap_model_low_risk: cheapModelLowRisk });
+    expect(
+      evaluateOverrides(
+        req({
+          requested_model: "gpt-5.4-mini",
+          content: "Please check this and return structured fields.",
+          response_format: { type: "json_schema" },
+        }),
+        cfg,
+        20,
+      ).find((h) => h.rule === "cheap_model_low_risk"),
+    ).toBeUndefined();
+    expect(
+      evaluateOverrides(
+        req({
+          requested_model: "gpt-5.4-mini",
+          content: "Please inspect this screenshot status.",
+          attachments: [{ type: "image" }],
+        }),
+        cfg,
+        20,
+      ).find((h) => h.rule === "cheap_model_low_risk"),
+    ).toBeUndefined();
   });
 });
 

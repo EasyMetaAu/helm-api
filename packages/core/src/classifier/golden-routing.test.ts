@@ -649,3 +649,68 @@ describe("GOLDEN: cron monitor automation stays cheap", () => {
     expect(got.selected_lane).toBe("economy");
   });
 });
+
+// PROD regression (openclaw key, 2026-07-04): short "check/status" current
+// turns that explicitly request a cheap model can carry a huge transcript. The
+// current turn is low-risk, so long-history/tools signals must not upgrade it to
+// gpt-5.5. Explicit heavy-model requests remain untouched.
+describe("GOLDEN: cheap-model low-risk current turns stay cheap", () => {
+  it("short low-risk gpt-5.4-mini request with long history -> economy", async () => {
+    const request = req("Please check the current status and report anything notable.", {
+      requested_model: "gpt-5.4-mini",
+      messages: [
+        { role: "assistant", content: "prior repository context ".repeat(18_000) },
+        { role: "user", content: "Please check the current status and report anything notable." },
+      ],
+      tools: Array.from({ length: 37 }, (_value, index) => ({
+        type: "function",
+        function: { name: `tool_${index}` },
+      })),
+    });
+
+    const got = await decide(request);
+    expect(got.task_type).toBe("chat");
+    expect(got.complexity).toBe("simple");
+    expect(got.selected_lane).toBe("economy");
+  });
+
+  it.each([
+    "economy",
+    "deepseek-v4-flash",
+    "claude-haiku",
+  ])("short low-risk %s request with long history -> economy", async (requestedModel) => {
+    const request = req("Please check the current status and report anything notable.", {
+      requested_model: requestedModel,
+      messages: [
+        { role: "assistant", content: "prior repository context ".repeat(18_000) },
+        { role: "user", content: "Please check the current status and report anything notable." },
+      ],
+      tools: Array.from({ length: 37 }, (_value, index) => ({
+        type: "function",
+        function: { name: `tool_${index}` },
+      })),
+    });
+
+    const got = await decide(request);
+    expect(got.task_type).toBe("chat");
+    expect(got.complexity).toBe("simple");
+    expect(got.selected_lane).toBe("economy");
+  });
+
+  it("explicit gpt-5.5 request with the same low-risk turn is not down-routed", async () => {
+    const request = req("Please check the current status and report anything notable.", {
+      requested_model: "gpt-5.5",
+      messages: [
+        { role: "assistant", content: "prior repository context ".repeat(18_000) },
+        { role: "user", content: "Please check the current status and report anything notable." },
+      ],
+      tools: Array.from({ length: 37 }, (_value, index) => ({
+        type: "function",
+        function: { name: `tool_${index}` },
+      })),
+    });
+
+    const got = await decide(request);
+    expect(got.selected_lane).not.toBe("economy");
+  });
+});

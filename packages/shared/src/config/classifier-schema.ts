@@ -52,6 +52,14 @@ export const ClassifierRulesConfigSchema = z.object({
         no_reply_markers: z.array(z.string()).default([]),
       })
       .prefault({}),
+    cheap_model_low_risk: z
+      .object({
+        requested_model_markers: z.array(z.string()).default([]),
+        current_turn_max_chars: z.number().int().positive().default(300),
+        low_risk_markers: z.array(z.string()).default([]),
+        blocked_markers: z.array(z.string()).default([]),
+      })
+      .prefault({}),
     formal_logic_keywords: z.array(z.string()).default([]),
     tools_floor: TierSchema.default("standard"),
     long_context_token_threshold: z.number().int().positive().default(64_000),

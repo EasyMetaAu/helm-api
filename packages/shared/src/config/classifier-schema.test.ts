@@ -26,6 +26,19 @@ function fullClassifier() {
           intent_markers: ["[cron:", "MONITOR.md"],
           no_reply_markers: ["NO_REPLY"],
         },
+        cheap_model_low_risk: {
+          requested_model_markers: [
+            "economy",
+            "gpt-5.4-mini",
+            "spark",
+            "*deepseek-v4-flash",
+            "claude-haiku",
+            "*claude-haiku-*",
+          ],
+          current_turn_max_chars: 300,
+          low_risk_markers: ["check", "status"],
+          blocked_markers: ["fix", "implement"],
+        },
         formal_logic_keywords: ["⊢"],
         tools_floor: "standard",
         long_context_token_threshold: 64000,
@@ -98,6 +111,12 @@ describe("ClassifierConfigSchema", () => {
     expect(parsed.overrides.low_cost_automation).toEqual({
       intent_markers: [],
       no_reply_markers: [],
+    });
+    expect(parsed.overrides.cheap_model_low_risk).toEqual({
+      requested_model_markers: [],
+      current_turn_max_chars: 300,
+      low_risk_markers: [],
+      blocked_markers: [],
     });
     expect(parsed.overrides.tools_floor).toBe("standard");
   });

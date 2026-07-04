@@ -184,6 +184,16 @@ classifier:
       low_cost_automation:
         intent_markers: ["[cron:", "chief-monitor", "architect-monitor", "MONITOR.md"]
         no_reply_markers: ["NO_REPLY", "nothing to action", "无事不回复", "没事不回复", "无需回复"]
+      # Cheap-model low-risk keeps short current-turn read/check/status requests
+      # on the cheap lane when the client explicitly asked for a cheap model,
+      # even if the transcript carries a large history or many tools. It is
+      # scoped to the LAST user turn and excludes code-changing / JSON / vision
+      # requests, so explicit heavy-model or edit/debug work is not down-routed.
+      cheap_model_low_risk:
+        requested_model_markers: ["economy", "gpt-5.4-mini", "gpt-5.4-mini-*", "spark", "*deepseek-v4-flash", "claude-haiku", "*claude-haiku-*", "claude-3-5-haiku", "*claude-3-5-haiku-*"]
+        current_turn_max_chars: 300
+        low_risk_markers: ["check", "inspect", "status", "health", "read", "list", "show", "summarize", "report", "monitor", "look at", "see if", "查看", "检查", "状态", "健康", "读取", "列出", "展示", "总结", "报告", "监控"]
+        blocked_markers: ["debug", "fix", "implement", "refactor", "modify", "edit", "patch", "write", "create", "generate", "delete", "deploy", "release", "security", "vulnerability", "exploit", "prove", "derive", "calculate", "solve", "调试", "修复", "实现", "重构", "修改", "编辑", "补丁", "编写", "创建", "生成", "删除", "部署", "发布", "安全", "漏洞", "利用", "证明", "推导", "计算", "求解"]
       formal_logic_keywords: ["⊢", "∴", "modus ponens", "first-order logic", "充分必要", "反证法", "归纳法"]
       tools_floor: standard
       long_context_token_threshold: 64000  # capability signal (NOT a task_type); bumped 50k->64k to match llm-router lanes.yaml long_context anchor
