@@ -268,6 +268,41 @@ request additionally prunes `object`-only backends (official DeepSeek →
 `openrouter/deepseek-v4-flash` mirror), while a bare `json_object` request still
 serves on the `object` tier.
 
+### OAuth subscription account selection
+
+Lane routing stops at the provider/model alias. For OAuth subscription aliases
+(`anthropic/*`, `openai-codex/*`, `copilot/*` when connected through Providers),
+the provider pool performs a second, narrower choice: which concrete account
+serves this request. That choice is **not** a lane rewrite and does not expose the
+account as a client-facing model.
+
+The pool excludes accounts that are manually parked (`schedulable: false`), lack
+the requested curated model, or are temporarily auto-parked by a usage-limit
+cooldown. It then applies the provider's global account-usage strategy:
+
+- `balanced` — keep sticky sessions on the same account, otherwise hash a new
+  session when an `x-session-key` is present and fall back to LRU spreading.
+- `manual_priority` — use account priority first, rotating only within the best
+  eligible priority tier.
+- `low_risk` — in the best priority tier, prefer the account with the lowest fresh
+  quota pressure; stale or missing quota falls back to the normal priority/LRU
+  behavior.
+- `use_expiring` — in the best priority tier, prefer usable quota windows that
+  will reset soon. Codex reset credits are counted only as discounted virtual
+  capacity for this score; selection never spends them.
+
+If a selected subscription account hits an account-wide limit before useful
+output, the pool can retry a sibling account inside the same provider alias. A
+confirmed account-wide limit also parks that account until the reset time when a
+quota window is known, or for a short cooldown when only a generic 429 is known.
+Scoped limits, such as an Anthropic model-specific cap, can retry a sibling for
+the current request without globally parking the account.
+
+Telemetry records this as `serving_account` on the final decision and
+`provider_attempts[].provider_name` / `provider_attempts[].provider_model` on
+attempt rows, so operators can distinguish "the lane chose `openai-codex/gpt-5.5`"
+from "account `work-codex-2` actually served it."
+
 ### Chain expansion
 
 `expandLaneChain` flattens `primary` + `fallback[]` into one ordered candidate

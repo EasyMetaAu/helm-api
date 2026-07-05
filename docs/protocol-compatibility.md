@@ -25,19 +25,20 @@ all four streaming-capable:
 | Anthropic Messages | `POST /v1/messages` | `anthropic` | `x-api-key` or `Authorization: Bearer` |
 | OpenAI Responses | `POST /v1/responses` | `openai-responses` | `Authorization: Bearer` |
 | Google Gemini | `POST /v1beta/models/{model}:generateContent` (+ `:streamGenerateContent?alt=sse`) | `gemini` | `x-goog-api-key` |
-| OpenAI Images | `POST /v1/images/generations` | (none — model-pinned, no transformer) | `Authorization: Bearer` |
-| Gemini Interactions | `POST /v1beta/interactions` | (none — model-pinned, translated to `generateContent`) | `x-goog-api-key` |
+| OpenAI Images | `POST /v1/images/generations` | (none — image model/lane chain, no text transformer) | `Authorization: Bearer` |
+| Gemini Interactions | `POST /v1beta/interactions` | (none — image model/lane chain, translated to `generateContent`) | `x-goog-api-key` |
 
-The Images and Interactions rows are **additional model-pinned surfaces**, not
-fifth/sixth inbound protocols: neither has a `nativeIn`/`nativeOut` transformer
-pair, so the **four inbound protocols** framing (and the 4×4 matrix) above covers
-only the translated ones. The Interactions request (`{model, input,
+The Images and Interactions rows are **additional image-generation surfaces**, not
+fifth/sixth inbound text protocols: neither has a `nativeIn`/`nativeOut`
+transformer pair, so the **four inbound protocols** framing (and the 4×4 matrix)
+above covers only the translated text ones. Image requests name either an exact
+image model or an image lane, skip text classification, and can fail over inside
+the configured image chain. The Interactions request (`{model, input,
 response_format}`) is translated internally to a Gemini `generateContent` call —
 upstream speaks `generateContent`, not interactions — and the response is mapped
 back to `{id, steps:[…]}`. The native `:generateContent` endpoint likewise now
-serves image models (`gemini-3.1-flash-image`, `gemini-3-pro-image`), model-pinned
-via `capabilities.outputImage` ahead of the `gemini-*flash*` glob so
-`responseModalities` → `inlineData` survives.
+serves image models (`gemini-3.1-flash-image`, `gemini-3-pro-image`) via
+`capabilities.outputImage`, so `responseModalities` → `inlineData` survives.
 
 Gemini is mounted as catch-alls under both `POST /v1beta/models/:rest{.+}` and
 `POST /models/:rest{.+}`. `generateContent` / `streamGenerateContent` run the

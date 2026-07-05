@@ -10,7 +10,7 @@ see one standard interface and output shape.
 It accepts standard AI API requests, classifies each request's task type and
 complexity, routes it to the appropriate lane, executes it through a provider
 adapter, and records every decision for debugging. A management interface ships
-alongside the gateway for basic rule management.
+alongside the gateway for operations, configuration, and request debugging.
 
 Manage traffic as **configuration**, not as **code**.
 
@@ -68,9 +68,10 @@ surfaces. The first is **OpenAI-Images-compatible** — `POST /v1/images/generat
 clients**: the existing `:generateContent` endpoint now serves image models
 (`gemini-3.1-flash-image`, `gemini-3-pro-image`), and a dedicated
 **`POST /v1beta/interactions`** endpoint (the Gemini Interactions API) is translated
-to `generateContent` internally. All three are **model-pinned**: the client names the
-exact image model, so these surfaces do **not** normalize into the IR and do **not**
-share the `routeRequest` classification/lane core. See
+to `generateContent` internally. Image requests name either an exact image model
+or an image lane, skip text classification, and can fail over inside the
+configured image chain. These surfaces do **not** normalize into the text IR and
+do **not** share the `routeRequest` classification core. See
 [05 · Protocol Translation](05-protocol-translation.md).
 
 Clients should only need to change their `base_url` and API key. A client never
@@ -88,8 +89,10 @@ Provider adapters can target:
 - OAuth subscription providers — Claude Pro/Max, ChatGPT Codex, GitHub Copilot —
   connected via manual authorization-code paste (Claude/Codex) or device-code
   flow (Copilot), backed by a pooled, hot-reloadable, per-account credential store
-  (issue #38; see [09 · Roadmap](09-roadmap.md)).
-- Gemini native (future).
+  with per-account model curation, egress proxy, scheduling, quota snapshots,
+  selectable pool strategies, and guarded Codex reset-credit recovery.
+- Gemini native request handling, including Gemini image models on
+  `generateContent` and the Gemini Interactions image surface.
 
 Provider aliases are an internal supply-chain detail. They are not the primary
 user-facing surface.
@@ -124,9 +127,11 @@ pre-forgetting behavior. See [08 · Memory Middleware](08-memory-middleware.md).
 7. Enforce that an API key exists at startup; no anonymous access.
 8. Open-source and self-hosted: one-command Docker deployment, config-as-code, no
    hard dependency on external services (see [10 · Deployment](10-deployment.md)).
-9. Ship a management interface for basic rule management, authenticated with HTTP
-   Basic credentials (see [11 · Admin UI](11-admin-ui.md)).
-10. Keep memory as opt-in middleware (see [08 · Memory Middleware](08-memory-middleware.md)).
+9. Ship a management interface for keys, routing config, providers, memory,
+   settings, and request debugging, authenticated with HTTP Basic credentials
+   (see [11 · Admin UI](11-admin-ui.md)).
+10. Keep memory as middleware that can be disabled per key or per request (see
+    [08 · Memory Middleware](08-memory-middleware.md)).
 
 ## Non-goals
 
@@ -147,7 +152,7 @@ Client request
   -> Auth / API Key          # mandatory; a key must exist at startup
   -> Task Classifier         # the three-layer classification cascade
   -> Policy / Lane Router    # select a lane
-  -> Provider Adapter + Fallback   # execute + in-chain fallback
+  -> Provider Adapter + Fallback   # execute + in-chain fallback; OAuth aliases pick an account inside the pool
   -> Telemetry / Debug UI    # decision record + payload capture
 ```
 

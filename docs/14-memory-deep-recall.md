@@ -1,14 +1,14 @@
 # 14 — Memory Deep Recall (Hybrid Fact Retrieval + `memory_recall` MCP tool)
 
-> Status: proposed → in implementation.
+> Status: **implemented**.
 > Builds on [08 — memory middleware](08-memory-middleware.md),
 > [12 — memory forgetting & tiering](12-memory-forgetting-and-tiering.md) (this **implements its deferred P8**),
 > [13 — memory admin & MCP](13-memory-admin-and-mcp.md) (this **adds a 7th MCP tool**).
 
 ## Problem
 
-`docs/13` shipped six MCP CRUD tools over the long tier (`memory_facts` + `memory_reflections`).
-Its `memory_search` is a **substring `LIKE` over `fact_text`** (plus an O(n) JS `includes()` scan of
+`docs/13` originally shipped MCP CRUD tools over the long tier (`memory_facts` + `memory_reflections`).
+Its exact `memory_search` is a **substring `LIKE` over `fact_text`** (plus an O(n) JS `includes()` scan of
 reflections). That is the *wrong* retrieval for an external agent asking **"what did we discuss /
 decide about X"**:
 

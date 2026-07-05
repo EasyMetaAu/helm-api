@@ -80,18 +80,31 @@ Configuration comes from **files** and **environment variables**, and env vars
 - Environment variables — the common ones are in `.env.example`:
   - `HELM_HOST`, `HELM_PORT`, `HELM_BASE_PATH`
   - `HELM_ADMIN_USER`, `HELM_ADMIN_PASSWORD`, `HELM_ADMIN_ENABLED`
-  - `HELM_RATE_LIMIT_ENABLED`, `HELM_REQUEST_TIMEOUT_MS`, `HELM_MAX_REQUEST_BYTES`
+  - `HELM_REQUIRE_API_KEY`, `HELM_RATE_LIMIT_ENABLED`,
+    `HELM_REQUEST_TIMEOUT_MS`, `HELM_MAX_REQUEST_BYTES`,
+    `HELM_SSE_HEARTBEAT_MS`
   - `HELM_SIGNAL_FEEDBACK_ENABLED` — opt into Agentic Signals feedback for ranked
     lane promotion (disabled by default; detailed thresholds live in
     `config/runtime.yaml`).
   - `HELM_STORE_DRIVER` (`sqlite` | `supabase`), `HELM_STORE_URL_ENV`
-  - `HELM_DATA_DIR` (data directory, default `./data`), `HELM_KEYS_PERSIST_TO`
+  - `HELM_DATA_DIR` (data directory, default `./data`), `HELM_KEYS_PERSIST_TO`,
+    `HELM_ARCHIVE_DIR` (cleanup archive output, default under the data dir)
   - `HELM_OAUTH_ENC_KEY` — a 32-byte key used to encrypt recoverable API keys and
     stored OAuth subscription tokens. **Mandatory whenever any OAuth subscription
     provider is connected**: the gateway refuses to start if one is configured
     without it, and the admin OAuth surface stays disabled until it is set. API
     keys minted or rotated without it still authenticate, but cannot be revealed
-    later.
+    later. The optional MCP OAuth shim also derives its signing key from this env
+    var when `memory.mcp.oauth.enabled` is true.
+  - Memory LLM overrides: `HELM_MEMORY_LLM_ENABLED`, `HELM_MEMORY_LLM_MODEL`,
+    `HELM_MEMORY_LLM_OBSERVATION_MODEL`, `HELM_MEMORY_LLM_REFLECTION_MODEL`,
+    `HELM_MEMORY_LLM_FACTS_MODEL`, `HELM_MEMORY_LLM_TIMEOUT_MS`,
+    `HELM_MEMORY_LLM_TEMPERATURE`, and per-task max-token envs
+    (`HELM_MEMORY_LLM_OBSERVATION_MAX_TOKENS`,
+    `HELM_MEMORY_LLM_REFLECTION_MAX_TOKENS`,
+    `HELM_MEMORY_LLM_FACTS_MAX_TOKENS`). MCP itself is enabled in
+    `config/memory.yaml` (`memory.mcp.enabled`, with optional
+    `memory.mcp.oauth.*`), not by an env override.
   - Background-worker toggles: `HELM_SIGNALS_DISABLED=1` stops the signal
     scheduler and `HELM_MEMORY_WORKER_DISABLED=1` stops the memory worker (both
     run by default); `HELM_MEMORY_WORKER_INTERVAL_MS` tunes the memory worker
@@ -99,7 +112,13 @@ Configuration comes from **files** and **environment variables**, and env vars
     `HELM_MEMORY_WORKER_BATCH_SIZE`, `HELM_MEMORY_WORKER_MAX_BATCHES_PER_DRAIN`,
     `HELM_MEMORY_WORKER_MAX_DRAIN_MS`, `HELM_MEMORY_WORKER_COALESCE_MS`, and
     `HELM_MEMORY_WORKER_CONCURRENCY` (default `3`, capped at `8` to avoid a
-    background LLM fan-out spike on small self-hosted machines).
+    background LLM fan-out spike on small self-hosted machines). Cleanup can be
+    disabled wholesale with `HELM_CLEANUP_DISABLED=1`.
+  - Write/runtime safety knobs: `HELM_AUTH_CACHE_TTL_MS`,
+    `HELM_WRITE_QUEUE_FLUSH_MS`, `HELM_WRITE_QUEUE_MAX_DEPTH`,
+    `HELM_MEMORY_INJECT_TOKEN_BUDGET`, and `HELM_SHUTDOWN_DRAIN_MS`.
+  - HTTP egress tuning: `HELM_UNDICI_KEEPALIVE_MS`,
+    `HELM_UNDICI_KEEPALIVE_MAX_MS`, and `HELM_UNDICI_CONNECTIONS`.
   - Anthropic preset OAuth execution uses `transport_profile: auto` by default,
     which routes final provider execution through the optional Chrome-like
     TLS/JA3 transport (`wreq-js`) instead of undici. Set

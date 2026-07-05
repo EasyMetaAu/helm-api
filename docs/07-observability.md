@@ -77,13 +77,18 @@ plaintext key and no private payload. The record holds:
   lanes, thresholds, and aggregate signal summaries.
 - `policy`: the matched policy id and a reason.
 - `lane`: the selected lane and the ordered candidate chain.
-- `provider_attempts[]`: per attempt — alias, `skipped` + `skip_reason`, status,
-  `error_class`, latency, cost, and `error_detail` (the real upstream status +
-  redacted message + redacted `provider_raw`, captured even when a later
-  candidate served the request).
+- `provider_attempts[]`: per attempt — alias, concrete `provider_name` /
+  `provider_model` when known, `skipped` + `skip_reason`, status, `error_class`,
+  latency, cost, and `error_detail` (the real upstream status + redacted message
+  + redacted `provider_raw`, captured even when a later candidate served the
+  request).
 - `final`: the served model alias / provider model, status, and error reason.
+- `serving_account`: the final OAuth subscription account (`provider_id` +
+  account label) when an OAuth pool served the request; otherwise `null`.
 - `latency_total_ms`, `fallback_count` (execution-stage count), and
-  `cost_breakdown` (`eval_usd` / `completion_usd` / `total_usd`).
+  `cost_breakdown` (`eval_usd` / `completion_usd` / `total_usd`). Where the
+  protocol exposes it, payload metadata also carries token usage, generation
+  time, and throughput fields for the request-detail page.
 - `memory`: stamped by the gateway **after** the inject phase ran (the routing
   core never touches memory); `null` when memory inject was off / skipped /
   failed. Counts and ids only — **never memory content** (Principle 7):
@@ -146,15 +151,28 @@ never bloats the decision JSON.
 The admin Debug UI ([11 · Admin UI](11-admin-ui.md)) is a pure consumer of the
 redacted decision record plus the optional captured payload.
 
-The request **list** shows per row: time, key prefix, requested model, classified
-task type, complexity, the decision stage (`decided_by`: rules / eval / default /
-fallback), selected lane, final model, fallback count, status, latency, cost, and
-error reason.
+The request **list** shows per row: time, trace id, key prefix, protocol,
+requested model, classified task type, complexity, the decision stage
+(`decided_by`: rules / eval / default / fallback), selected lane, final model,
+fallback count, status, latency, cost, token count, and error reason. It supports
+operator filters for time window, status, lane, decision stage, model/key/trace
+search, and other high-cardinality fields that are cheap to apply in the
+admin API.
 
 The request **detail** shows: request metadata, the classifier output (with
 confidence and matched dimensions/signals), whether eval ran and whether it hit
 the cache, the matched policy, the lane candidate chain, every provider attempt
 (including upstream `error_detail`), the final response metadata or structured
-error, the cost split (including eval's own self-cost), and the trace id. When
-`capture_payloads` is on and the row is present, the detail can also load the full
-captured request/response bodies.
+error, the final OAuth serving account when present, token usage, throughput,
+generation/first-token timing, the cost split (including eval's own self-cost),
+and the trace id. When `capture_payloads` is on and the row is present, the
+detail can also load the full captured request/response bodies, upstream request
+body, assembled streaming output, and provider raw metadata.
+
+The payload viewer is purpose-built for debugging real failures: it renders
+formatted and raw JSON, opens large text fields in a fullscreen reader, previews
+inline base64 or remote images, groups request/response media in a top-level media
+overview, compares client vs upstream request bodies, and shows SSE event streams
+when they were captured. The editable **Retry** action replays the captured body
+through its original protocol as a new trace and displays precise non-retryable
+states instead of hiding them behind a generic failure.

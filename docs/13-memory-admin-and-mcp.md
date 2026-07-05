@@ -1,23 +1,23 @@
 # 13 — Memory Admin UI + Memory MCP Server
 
-> Status: proposed (issue) → in implementation on branch `worktree-memory-admin-mcp`.
+> Status: **implemented**. The admin `/memory` page and optional `POST /mcp`
+> JSON-RPC memory server ship in the gateway. MCP is disabled by default and
+> enabled with `memory.mcp.enabled`.
 > Builds on [08 — memory middleware](08-memory-middleware.md), [11 — admin UI](11-admin-ui.md),
 > [12 — memory forgetting & tiering](12-memory-forgetting-and-tiering.md).
 
 ## Problem
 
-The memory subsystem (threads → observations → reflections + facts) accumulates state but is
-**unobservable and unmanageable**:
+The memory subsystem (threads → observations → reflections + facts) accumulates state. Operators and external agents need controlled ways to inspect and curate that state:
 
 - Operators cannot see, correct, or delete what the gateway has remembered. A wrong fact
   ("user prefers X") lives until it is superseded by chance.
-- No programmatic surface exists for **external agents** (Claude Code, Codex, other tools) to read
-  or write memory — the gateway is the only writer, and only via background extraction.
+- **External agents** (Claude Code, Codex, ChatGPT connectors, other tools) need a programmatic read/write surface without bypassing Helm's account isolation.
 
-This doc adds two surfaces over the **existing** `memory_facts` + `memory_reflections` tiers:
+Helm exposes two surfaces over the **existing** `memory_facts` + `memory_reflections` tiers:
 
 1. **Admin page** `/memory` — manage **facts + reflections**, with **By Key** and **By Scope** views.
-2. **Memory MCP server** `POST /mcp` — **full CRUD** tools, API-key authed, for external agents.
+2. **Memory MCP server** `POST /mcp` — JSON-RPC MCP tools for CRUD, exact search, and deep recall; API-key authed by default, with an optional OAuth 2.1 shim for clients that cannot send raw API keys.
 
 Raw `memory_messages` / `memory_observations` (the short/mid tiers) are intentionally **out of
 scope** — they are transient and internal; the long tier (facts + reflections) is the durable,
@@ -41,9 +41,9 @@ boundary is `UNIQUE(owner_id, content_hash)` where `content_hash = sha256(normal
 
 ## Surface 1 — Admin
 
-### New `MemoryStore` port methods (both SQLite + Postgres adapters)
+### `MemoryStore` port methods (both SQLite + Postgres adapters)
 
-All **optional** (`?`) on the port — additive, so existing fakes stay valid; routes 503 when absent.
+These methods are additive on the port; routes fail closed when the active store does not implement the management surface.
 
 | Method | Purpose |
 |---|---|
@@ -80,19 +80,24 @@ need no SSE; this bridge is fully testable via Hono's `app.request()` (the SDK's
 `StreamableHTTPServerTransport` is not). Tool defs live in a transport-agnostic module so a later
 swap to the Web-standard transport is one file.
 
-- **Auth:** the existing API-key `authMiddleware` (bearer → `identity.accountId` + memory defaults).
+- **Auth:** by default, the existing API-key auth (bearer → `identity.accountId` + memory defaults).
 - **Gating:** new config `memory.mcp.enabled` (default **false**, fail-closed). `/mcp` is mounted
   only when enabled and a memory store exists; otherwise 404.
+- **Optional OAuth 2.1 shim:** `memory.mcp.oauth.enabled` exposes protected-resource and
+  authorization-server discovery plus authorize/token endpoints for ChatGPT-style MCP connectors.
+  The shim maps an OAuth token back to an existing API key/account and signs stateless access JWTs
+  with a key derived from `HELM_OAUTH_ENC_KEY`; startup fails if the shim is enabled without that key.
 - **Tenant isolation (non-negotiable):** every handler derives `accountId` from `identity` only.
   Tool params may override `projectId/resourceId/threadId` but never the account; id-addressed
   tools (`get/update/delete`) re-check `owner_id = accountId` → cross-tenant id returns not-found.
 
-### Tools (6, `type: "fact" | "reflection"` discriminator)
+### Tools (7, `type: "fact" | "reflection"` discriminator where applicable)
 
 | Tool | Maps to |
 |---|---|
 | `memory_add` | fact → `buildReconciledFactBatch` (cap 1) + `insertFactsReconciled` (gets dedup + same-subject supersede for free); reflection → `upsertReflection` at high-water+1 |
 | `memory_search` | `listFacts({ search })` / `listReflections` (active-only unless `includeInactive`) |
+| `memory_recall` | hybrid fact recall from docs/14: FTS/keyword + forgetting score, with an optional vector leg when embeddings are configured; fail-open to keyword/score if embeddings fail or are disabled |
 | `memory_list` | `listFacts` / `listReflections` (paginated) |
 | `memory_get` | `getFactById` / `getReflectionById` (account-guarded) |
 | `memory_update` | `updateFact` / `updateReflectionText` |
@@ -100,13 +105,15 @@ swap to the Web-standard transport is one file.
 
 ## Decisions
 
-- **MCP transport:** lightweight JSON-RPC bridge (most testable); migrate to Web-standard transport
-  when `@modelcontextprotocol/server` 2.0 GAs.
-- **Fact delete = soft (`pruned`).** The hash tombstone keeps `(owner_id, content_hash)` occupied, so
-  re-adding identical text needs rewording in v1 (documented in the tool description). No resurrect.
+- **MCP transport:** lightweight JSON-RPC bridge for the Streamable-HTTP MCP shape; the tool
+  implementation is transport-agnostic.
+- **Fact delete = soft (`pruned`).** Re-adding the same fact text resurrects the pruned fact rather
+  than silently deduping it away.
 - **Reflection edit edits text in place, no version bump.** `version` stays the Reflector's counter.
 - **MCP add reuses the reconcile path** (supersede preserved) rather than a raw insert.
-- **`memory.mcp.enabled` defaults false.** New port methods are optional; routes 503 if missing.
+- **`memory.mcp.enabled` defaults false.** New port methods are optional; admin routes fail closed when the surface is missing, and `/mcp` is not mounted unless the MCP dependencies are available.
+- **`memory.mcp.oauth.enabled` defaults false.** The OAuth shim adds public discovery/authorize/token
+  endpoints, so operators must opt in explicitly and provide `HELM_OAUTH_ENC_KEY`.
 
 ## Why this is safe (CLAUDE.md alignment)
 

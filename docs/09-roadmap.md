@@ -6,8 +6,8 @@
 > inject + background workers, on by default), per-key budgets / rate limits /
 > concurrency limiting, runtime hot-reload settings with admin YAML write-back,
 > verbatim payload capture, four streaming inbound protocols, full OAuth subscription
-> providers, Agentic Signals feedback into ranked-lane routing, an admin-UI
-> overhaul, auto-adaptive memory compaction, and permanent delete of revoked keys. The
+> providers, Agentic Signals feedback into ranked-lane routing, image lanes with
+> failover, Memory MCP, an admin-UI overhaul, auto-adaptive memory compaction, and permanent delete of revoked keys. The
 > "deferred" list below is what is genuinely still out of scope or not yet wired.
 
 ## Delivered
@@ -39,9 +39,10 @@ The Protocol Adapter accepts **four inbound protocols, all with streaming**:
   `:streamGenerateContent?alt=sse` — auth via `x-goog-api-key`, native incremental
   delta frames.
 
-Image generation is served by a dedicated `/v1/images/generations` surface
-**outside** the Protocol Adapter — it is model-pinned (the client names the exact
-image model) and does not go through cross-protocol translation or the IR.
+Image generation is served by dedicated image surfaces (`/v1/images/generations`
+and `/v1beta/interactions`) plus Gemini image handling on `generateContent`. An
+image request names either an exact image model or an image lane, skips text
+classification, and can fail over inside the configured image chain.
 
 Clients can mix SDKs; cross-protocol SSE conversion is covered per direction. See
 [05 · Protocol Translation](05-protocol-translation.md).
@@ -54,7 +55,8 @@ default of `off` to opt out (zero DB touch):
 
 - **`observe`** — write-only capture of inbound/outbound turns.
 - **`inject`** — synchronous read-back that full-replaces the message array before
-  routing, then also writes. Wired on the chat, Messages, and Responses surfaces.
+  routing, then also writes. Wired on the chat, Messages, Responses, and Gemini
+  text-generation surfaces.
 - **Background `MemoryWorker`** runs process-wide by default (disable via
   `HELM_MEMORY_WORKER_DISABLED=1`), dispatching observer / reflector / decay jobs.
 - **Forgetting & tiering** (short / mid / long, see [12 · Memory Tiering](12-memory-forgetting-and-tiering.md))

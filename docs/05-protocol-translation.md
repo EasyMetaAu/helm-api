@@ -19,19 +19,19 @@ Four client protocols are wired and routed:
 | `POST /v1/images/generations` | OpenAI Images API | No (non-stream) |
 | `POST /v1beta/interactions` | Gemini Interactions API | No (non-stream) |
 
-> The image-generation surfaces are **model-pinned** — the client names the exact
-> image model (`gemini-3.1-flash-image`, `gemini-3-pro-image`, …) — and do **not**
-> participate in cross-protocol translation. None has a `nativeIn`/`nativeOut`
-> transformer pair, so the count of wired *translated* protocols stays four. There
-> are three such entrypoints:
+> The image-generation surfaces name either an exact image model
+> (`gemini-3.1-flash-image`, `gemini-3-pro-image`, …) or an image lane, skip text
+> classification, and do **not** participate in the text IR. None has a
+> `nativeIn`/`nativeOut` transformer pair, so the count of wired *translated*
+> protocols stays four. There are three such entrypoints:
 > - **OpenAI Images** (`/v1/images/generations`). For Google image models the route
 >   translates Images ⇄ Gemini `generateContent` internally; the client
 >   request/response stay OpenAI-Images-shaped.
 > - **Native `:generateContent`** — the existing Gemini endpoint now serves image
->   models too. Because the model is flagged `capabilities.outputImage: true` it is
->   **model-pinned** ahead of the `gemini-*flash*` model-alias glob and
->   classification, so it reaches its native-Gemini provider via native passthrough
->   and `generationConfig.responseModalities: ["TEXT","IMAGE"]` → response
+>   models too. Because the model is flagged `capabilities.outputImage: true` it
+>   skips the `gemini-*flash*` text model-alias glob and text classification, so it
+>   reaches its native-Gemini provider via native passthrough and
+>   `generationConfig.responseModalities: ["TEXT","IMAGE"]` → response
 >   `candidates[].content.parts[].inlineData` survives intact instead of being
 >   swallowed onto a text lane.
 > - **Gemini Interactions** (`/v1beta/interactions`) — request `{model, input,

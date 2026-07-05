@@ -40,8 +40,9 @@ Built on Hono. Responsibilities:
 
 - Accept the standard API requests on `/v1/chat/completions`, `/v1/messages`,
   `/v1/responses`, `/v1beta/models/{model}:generateContent` (Gemini), and
-  `/v1/images/generations` (a dedicated model-pinned endpoint that does **not**
-  dispatch to a protocol adapter / the IR).
+  `/v1/images/generations` (a dedicated image endpoint that accepts either an
+  exact image model or an image lane, skips text classification, and can fail
+  over inside the configured image chain).
 - Normalize request headers and the request/trace id.
 - Apply request-size and timeout limits (`runtime.max_request_bytes`,
   `runtime.request_timeout_ms`).
@@ -152,10 +153,17 @@ Executes candidates in lane order (`packages/core/src/executor`,
 - Handle streaming and non-streaming paths consistently.
 - Return a structured attempt record per candidate.
 
+When a candidate is an OAuth subscription alias (Claude Pro/Max, ChatGPT Codex,
+or Copilot), the lane has selected the provider/model alias only. The OAuth pool
+then selects the concrete serving account inside that provider pool, using the
+configured account strategy, sticky session key, account priority, schedulable
+state, usage cooldowns, and fresh quota snapshots.
+
 ### Telemetry / Request Log
 
 Persists the routing decision, the provider-attempt chain, the auth/key identity,
-and cost & latency. Secrets are redacted; the decision record carries no message
+the final OAuth serving account when a subscription pool served the request, and
+cost & latency. Secrets are redacted; the decision record carries no message
 bodies. Full request/response payloads are captured separately (governed by the
 `capture_payloads` runtime setting, on by default) into a dedicated payload store
 and aged out per `payload_retention_days`. The error model and Debug UI are in
@@ -177,13 +185,13 @@ Memory is **on by default** and overridable per request via the `x-memory-mode`
 header, normalized in core. Absent a header and a per-key default, the mode
 resolves to `inject`; newly created API keys are also minted with `inject`.
 Setting `x-memory-mode: off` (or a key default of `off`) touches no storage.
-`observe` writes the turn back to
-memory; `inject` additionally does a synchronous read-back that **fully replaces
-the message array before routing**, then also writes. Both phases are wired on the
-chat, messages, and responses surfaces (when the mode is `observe`/`inject`) — not
-on the Gemini or models surfaces. A background `MemoryWorker` (observer / reflector
-/ decay jobs) runs process-wide by default and can be disabled via env. See
-[08 · Memory](08-memory-middleware.md).
+`observe` writes the turn back to memory; `inject` additionally does a synchronous
+read-back that **fully replaces the message array before routing**, then also
+writes. Both phases are wired on the chat, messages, responses, and Gemini
+`generateContent` text surfaces (when the mode is `observe`/`inject`) — not on
+image-only or models/listing surfaces. A background `MemoryWorker` (observer /
+reflector / decay jobs) runs process-wide by default and can be disabled via env.
+See [08 · Memory](08-memory-middleware.md).
 
 ## Internal request shape
 
@@ -219,7 +227,8 @@ feeds telemetry and the Debug UI. It captures the classifier outcome (including
 `decided_by`: `rules | eval | default | fallback`), the matched policy, the
 selected lane and expanded candidate chain, every provider attempt (with skip
 reasons), the final outcome, `fallback_count` (execution-stage swaps only), a
-cost breakdown, and a `memory` block of counts/ids only (never memory content).
+cost breakdown, `serving_account` for the final OAuth subscription account when
+applicable, and a `memory` block of counts/ids only (never memory content).
 Field-level detail lives in [07 · Error Model & Observability](07-observability.md).
 
 The classifier `decided_by` describes **only** the classification stage; the
@@ -267,15 +276,13 @@ fetched at runtime.
 ## Admin surface and deployment
 
 Beyond the request pipeline, Helm has a **management plane** (Admin UI): a web
-console for basic rule management (lanes / policies / classifier / keys) and
-request debugging, plus a "System Settings" page for runtime-mutable settings
-(payload capture, retention, the rate-limit switch, log level) that apply without
-a restart. It is independent of API traffic and authenticated with HTTP Basic
-credentials (file / environment). The admin surface is mounted when admin is
-enabled — i.e. when credentials are configured (auto-enable) OR
+console for keys, lanes, policies, classifier, OAuth providers, memory,
+request debugging/retry, and runtime settings/cleanup. Runtime-mutable settings
+apply without a restart. It is independent of API traffic and authenticated with
+HTTP Basic credentials (file / environment). The admin surface is mounted when
+admin is enabled — i.e. when credentials are configured (auto-enable) OR
 `HELM_ADMIN_ENABLED` / `admin.enabled` is set; otherwise `/admin` and
-`/admin/api` return 404. See
-[11 · Admin UI](11-admin-ui.md).
+`/admin/api` return 404. See [11 · Admin UI](11-admin-ui.md).
 
 Deployment: **open-source, self-hosted, one-command Docker**, config-as-code,
 local storage by default (SQLite), no hard dependency on external services. A

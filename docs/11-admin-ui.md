@@ -3,9 +3,10 @@
 > Status: **implemented.** A SvelteKit + Tailwind SPA (`adapter-static`),
 > built into `apps/admin/build` and served by the gateway under `/admin`.
 
-After it boots, Helm ships a web console for basic rule management and request
-debugging. It is meant for **internal** use and is gated by HTTP Basic
-credentials.
+After it boots, Helm ships a web console for operating the gateway: keys, lanes,
+policies, classifier rules, OAuth subscription providers, memory, request
+debugging/replay, runtime settings, and data cleanup. It is meant for
+**internal** use and is gated by HTTP Basic credentials.
 
 ## Authentication: HTTP Basic
 
@@ -84,7 +85,9 @@ time and by model; and the most recent routing decisions.
   an explicit second step (DELETE `?purge=true`); the server refuses to purge an
   active key (409 'key must be revoked before deletion'). Telemetry keeps an
   unlinked key_id reference for audit history. See [06 · Auth, API Keys & Rate
-  Limits](06-auth-and-rate-limits.md).
+  Limits](06-auth-and-rate-limits.md). Each key also has a detail view with usage
+  charts, scoped recent requests, configured caps, and a memory shortcut for the
+  key's default account/project scope.
 - **Lanes** (`/lanes`) — view/edit each lane's `primary + fallback[]`
   (`/admin/api/lanes` CRUD). The model combobox is populated from a read-only
   catalog of routable aliases (`/admin/api/models`). See [04 · Routing &
@@ -120,11 +123,19 @@ never diverge.
   provider is configured without it.
   - **Connect** runs the login flow — manual paste-the-redirect for Claude/Codex,
     device-code for Copilot.
-  - **Manage** opens a per-account dialog with three tabs: **Models** (curate the
+  - **Manage** opens a per-account dialog with tabs for **Models** (curate the
     exposed set — a live allow-list, not just a display filter), **Proxy**
-    (per-account HTTP/HTTPS/SOCKS5 egress), and **Schedule** (`priority` plus a
-    `schedulable` toggle).
-  - **Pooling** — several accounts per provider are pooled (priority asc, then LRU).
+    (per-account HTTP/HTTPS/SOCKS5 egress), and **Schedule** (`priority`,
+    `schedulable`, Fast mode where the upstream client supports it, and guarded
+    auto-reset for Codex).
+  - **Pooling strategy** — several accounts per provider are pooled with a global
+    strategy: `balanced`, `manual_priority`, `low_risk`, or `use_expiring`.
+    Strategies use sticky sessions, priority, live quota windows, usage cooldowns,
+    and reset-credit soft scoring without exposing account labels as client
+    models.
+  - **Quota controls** — the page shows today's served traffic, live quota windows,
+    usage-limit cooldowns, Codex reset-credit count, **Test** account action,
+    local **Reset usage**, and guarded Codex **Reset limit**.
   - **Hot-reload** — every change (connect, disconnect, curation, proxy, scheduling)
     re-synthesizes the live provider pool and applies on the next request, no restart.
   - **Token storage** — tokens are stored encrypted and never returned to the UI
@@ -140,12 +151,14 @@ never diverge.
 - **Settings** (`/settings`) — the runtime-mutable settings the operator can
   change without a restart (`/admin/api/settings`, validated against
   `RuntimeSettingsSchema`, fail-closed on an invalid body). A representative set:
-  `capture_payloads` (default on) and `payload_retention_days`; the rate-limit
-  master switch (`rate_limit_enabled`) and system default quota
-  (`rate_limit_default_rpm` / `_tpm`); the concurrency overflow queue
-  (`concurrency_queue_enabled` plus `min_size` / `size_multiplier` /
-  `wait_timeout_ms`); the per-OAuth-account user-message serial queue (its
-  `enabled` / `delay` / `timeout`); and `log_level`. See [07 · Error Model &
+  `default_lane`; `capture_payloads` (default on) and `payload_retention_days`;
+  the rate-limit master switch (`rate_limit_enabled`) and system default quota
+  (`rate_limit_default_rpm` / `_tpm`); visual context compression; the concurrency
+  overflow queue (`concurrency_queue_enabled` plus `min_size` /
+  `size_multiplier` / `wait_timeout_ms`); the per-OAuth-account user-message
+  serial queue (its `enabled` / `delay` / `timeout`); cleanup schedule,
+  retention windows, archive-before-delete, manual clean-now, database vacuum,
+  and archive download; and `log_level`. See [07 · Error Model &
   Observability](07-observability.md) and [06 · Auth, API Keys & Rate
   Limits](06-auth-and-rate-limits.md).
 
@@ -168,21 +181,22 @@ never diverge.
   (`/requests/[traceId]`), reading the read-only `/admin/api/requests` endpoints.
   This reuses the observability surface from [07 · Error Model &
   Observability](07-observability.md): classification stage, matched policy, lane
-  candidate chain, provider attempts, cost, error, and `trace_id`. When
-  `capture_payloads` is on, the detail can load the full captured request/response
-  bodies (`/admin/api/requests/:traceId/payload`). The body viewer renders the
-  payload as a collapsible tree (or Formatted / Raw), pops any oversized field — a
-  system prompt, a tool schema, a continued-session summary — into a fullscreen,
-  copyable reader, and previews inline base64/remote images with zoom,
-  fit-to-window, and open-in-new-tab. A consolidated **media overview** at the top
-  of the page collects every image **sent** (request) and **generated** (response,
-  incl. image-generation output) as clickable thumbnails, so pictures buried at a
-  deep base64 leaf are visible without tree-digging. When the full request body was
-  captured, the detail page offers an editable **Retry** button. The server
-  recovers the original protocol (OpenAI chat, Anthropic messages, OpenAI
-  Responses, or Gemini) and re-sends the (optionally edited) body in its native
-  shape as an isolated, newly-traced debug re-run via the server replay endpoint;
-  a body that cannot be replayed returns a precise 400.
+  candidate chain, provider attempts, final OAuth serving account, cost, token
+  usage, throughput/timing, error, and `trace_id`. When `capture_payloads` is on,
+  the detail can load the full captured request/response bodies
+  (`/admin/api/requests/:traceId/payload`) plus upstream request metadata. The
+  body viewer renders the payload as a collapsible tree (or Formatted / Raw), pops
+  any oversized field — a system prompt, a tool schema, a continued-session
+  summary — into a fullscreen, copyable reader, and previews inline base64/remote
+  images with zoom, fit-to-window, and open-in-new-tab. A consolidated **media
+  overview** at the top of the page collects every image **sent** (request) and
+  **generated** (response, incl. image-generation output) as clickable thumbnails,
+  so pictures buried at a deep base64 leaf are visible without tree-digging. The
+  detail page also exposes upstream request diffs, captured SSE/event streams, and
+  retry state. When the full request body was captured, the editable **Retry**
+  button lets the operator resend the body in its original protocol (OpenAI chat,
+  Anthropic messages, OpenAI Responses, or Gemini) as an isolated, newly-traced
+  debug run; a body that cannot be replayed returns a precise 400.
 
 ![Requests — filter by decided-by, lane, and status; every row links to its trail](assets/screenshots/02-requests.png)
 
@@ -190,8 +204,7 @@ never diverge.
 
 ## Boundaries
 
-- Basic rule management and request inspection only — no multi-tenancy and no
-  fine-grained RBAC.
+- Internal operations console only — no multi-tenancy and no fine-grained RBAC.
 - No agent orchestration in the admin UI. Memory **content** is browsable and
   editable on the Memory page (by scope or key); the per-key memory **mode** is
   configured on the Keys page.

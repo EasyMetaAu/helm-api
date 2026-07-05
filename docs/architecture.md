@@ -458,7 +458,7 @@ sequenceDiagram
 
     rect rgb(238,245,255)
     Note over Pool,Up: per request
-    Pool->>Pool: select account — priority asc, then round-robin (LRU)
+    Pool->>Pool: select account — strategy + sticky + quota/cooldown gates
     Pool->>TM: ensure fresh access token
     TM->>TS: load token, refresh if expired (serialized across instances)
     TS-->>TM: access token
@@ -467,11 +467,12 @@ sequenceDiagram
     end
 ```
 
-Account selection honors `priority` (lower serves first) with round-robin within
-a tier; a "parked" account stays connected but out of rotation. A removed model
-stops routing immediately (the allow-list is live, not a display filter). An
-*unconnected* subscription alias referenced by a lane **fails open** — Helm skips
-to the next fallback rather than erroring.
+Account selection honors the provider's global strategy (`balanced`,
+`manual_priority`, `low_risk`, or `use_expiring`), sticky session keys,
+per-account priority, live quota windows, usage-limit cooldowns, and manual
+parking. A removed model stops routing immediately (the allow-list is live, not
+a display filter). An *unconnected* subscription alias referenced by a lane
+**fails open** — Helm skips to the next fallback rather than erroring.
 
 > ⚠️ Routing a Claude/ChatGPT/Copilot subscription through a third-party gateway
 > may violate the provider's ToS. Opt-in, self-hosted, your responsibility.

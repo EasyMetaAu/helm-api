@@ -37,13 +37,13 @@ their native protocol shape. The Anthropic face accepts either `x-api-key` or
 `/v1/images/generations` is likewise a self-authenticating route: it runs the
 same key lookup using `Authorization: Bearer` (like the OpenAI Chat face). It
 does **not** require `allow_custom_model` — a standard key can call it even
-though it names the exact image model.
+though it names an exact image model or image lane.
 
 `/v1beta/interactions` (the Gemini Interactions image-generation surface)
 self-authenticates the same way, but using `x-goog-api-key` (the Gemini SDK
 default) with `Authorization: Bearer` as a fallback. Like the other image
-surfaces it is **model-pinned** and does **not** require `allow_custom_model` —
-any key can call it.
+surfaces it can name an image model or image lane and does **not** require
+`allow_custom_model` — any key can call it.
 
 Per **Principle 7**, the plaintext key lives in the `Authorization` header and,
 when encrypted recovery is configured, in the authenticated admin create/reveal/
@@ -260,6 +260,43 @@ image-generation surfaces — `/v1/images/generations`, the Gemini
 `:generateContent` image models, and `/v1beta/interactions`; image cost is metered
 per image (output tokens × the model's image rate). All budget config is editable
 per key in the admin API Keys page and applies on the next request (no restart).
+
+## OAuth subscription quotas and reset credits
+
+Per-key rate limits and budgets above are Helm-owned controls. OAuth subscription
+quotas are different: they describe the upstream account's remaining subscription
+capacity, are stored per provider/account, and are used for account-pool
+availability and scoring (see [04 · Routing & Lanes](04-routing-and-lanes.md)).
+They never grant a client more API-key budget.
+
+Quota collection is intentionally fail-open:
+
+- Codex quota windows are captured from `x-codex-*` response headers on served
+  requests and from the provider usage endpoint used by the Providers page.
+- Anthropic quota windows are pulled from the provider usage endpoint.
+- Missing, stale, or failed quota reads render as unknown in the UI and make
+  quota-aware strategies fall back toward the balanced behavior.
+
+When a quota window is saturated and carries a future reset time, Helm parks that
+OAuth account until the reset timestamp and persists the cooldown in
+`oauth_quota.usage_limited_until_ms`, so a pool rebuild or restart keeps routing
+around it. A generic account-wide 429 without a precise window applies a shorter
+probe cooldown. The Providers page **Reset usage** action only clears Helm's local
+cooldown/snapshot for a Codex account so it can rejoin the pool; it does not spend
+an upstream reset credit.
+
+Codex reset credits are separate. The Providers page **Reset limit** action
+spends one upstream Codex rate-limit reset credit through the official consume
+endpoint and is fail-closed: if the consume call fails, the operator sees an
+error. Helm guards the mutation:
+
+- manual **Reset limit** is allowed only when a weekly Codex window is at least
+  90% used;
+- auto-reset runs only for accounts that opted in, only after the weekly window is
+  saturated, and through a shared-account guard so sibling Helm labels for the
+  same ChatGPT login cannot double-spend the same credit;
+- reset credits may influence the `use_expiring` strategy as discounted virtual
+  capacity, but **selection never consumes them**.
 
 ## Admin authentication is separate
 

@@ -76,7 +76,7 @@ docker compose logs helm | grep -i "root API key"
 | 🛣️ | **Lanes + policies** | Requests route through lanes (`economy` / `balanced` / `premium`, plus task lanes `coding`, `json`, `vision`, `tool_use`), never raw provider names. First-match policies pin or cap the lane. Each lane = a primary model + a fallback chain, all in config. Opt-in Agentic Signals can promote a degraded lane within those caps. |
 | 🪪 | **Drop-in for fixed-model clients** | A client that hard-codes a vendor model id (Claude Code's `claude-opus-4-8`, an SDK locked to `gpt-5.5`) just works — no *400 unknown model*. A **standard key** classifies it like `auto`; a **custom-model key** can map each vendor family onto a lane via `model-aliases.yaml` (cap-bounded). |
 | 🛡️ | **Resilient execution** | Circuit breaker (OPEN/HALF_OPEN + single probe), capability filter with explicit skip reasons, `:free`-tier 429 skipping, per-key concurrency queueing. Client disconnects are never counted as provider faults. |
-| 🔐 | **OAuth subscriptions** | Route your Claude Pro/Max, ChatGPT Codex, and GitHub Copilot subscriptions as backends — pooled accounts, per-account model curation / egress proxy / scheduling, all hot-reloaded. *(Opt-in; read the [ToS warning](#oauth-subscription-providers-claude-promax-chatgpt-codex-github-copilot).)* |
+| 🔐 | **OAuth subscriptions** | Route your Claude Pro/Max, ChatGPT Codex, and GitHub Copilot subscriptions as backends — pooled accounts, per-account model curation / egress proxy / scheduling, global pool strategies, live quota windows, and guarded Codex reset-credit recovery. *(Opt-in; read the [ToS warning](#oauth-subscription-providers-claude-promax-chatgpt-codex-github-copilot).)* |
 | 🔑 | **Keys with teeth** | Mandatory auth; keys authenticate by SHA-256 hash; encrypted recovery material can be stored for admin reveal/rotation. Per key: lane whitelist, custom-model permission, RPM/TPM limits, usage budgets (degrade or reject), concurrency cap, memory mode. Rotate in place, revoke softly, then delete permanently. |
 | 🧠 | **Memory middleware** | On by default: remembered context is injected before routing as a trailing turn; a background worker compresses and consolidates — compaction is **auto-adaptive and zero-config** (prices and context windows resolve from the model catalog; size / idle / context-pressure triggers). Summarize/merge default to deterministic local logic, with an **opt-in LLM path** (`config.memory.llm`, off by default). A forgetting/tiering layer (decay, reinforcement, retention) keeps it honest. Opt out per key or per request (`x-memory-mode: off`). |
 | 📊 | **Total observability** | A redacted decision record per request — classifier, policy, lane, every provider attempt, latency, fallbacks, cost. Verbatim payload capture to a separate table (on by default, 30-day retention). A payload inspector reads long fields fullscreen, previews inline images, and an editable **Retry** button replays any captured request in its own protocol. |
@@ -99,7 +99,7 @@ The gateway ships a SvelteKit console at `/admin` (HTTP Basic, five languages). 
 - **See the multimedia.** A media overview at the top collects every image **sent** (request) and **generated** (response) as clickable thumbnails — no tree-digging — and inline base64 or remote images still render in place, with zoom, fit-to-window, and open-in-new-tab.
 - **Edit and replay.** Hit **Retry**, tweak the body, and re-send it in its original protocol (OpenAI Chat, Anthropic, Responses, or Gemini) as an isolated, newly-traced debug run.
 
-**Pool your subscriptions.** Route Claude Pro/Max, ChatGPT Codex, and GitHub Copilot logins as backends — several accounts per provider, each with its own model curation, egress proxy, priority, and live quota.
+**Pool your subscriptions.** Route Claude Pro/Max, ChatGPT Codex, and GitHub Copilot logins as backends — several accounts per provider, each with its own model curation, egress proxy, priority, live quota, reset-credit controls, and a global account-usage strategy.
 
 [![Subscription providers — pooled OAuth accounts with per-account quota, proxy, schedule, and status](docs/assets/screenshots/06-providers.png)](docs/assets/screenshots/06-providers.png)
 
@@ -203,8 +203,8 @@ curl http://localhost:8080/v1/chat/completions \
 | `POST /v1/messages` | Anthropic Messages | ✅ |
 | `POST /v1/responses` | OpenAI Responses | ✅ |
 | `POST /v1beta/models/{model}:generateContent` | Google Gemini | ✅ (via `:streamGenerateContent`; auth via `x-goog-api-key`) |
-| `POST /v1/images/generations` | OpenAI Images API ([image generation](#image-generation)) | — (model-pinned, any key) |
-| `POST /v1beta/interactions` | Gemini Interactions API ([image generation](#image-generation)) | — (model-pinned, any key) |
+| `POST /v1/images/generations` | OpenAI Images API ([image generation](#image-generation)) | — (image model/lane, any key) |
+| `POST /v1beta/interactions` | Gemini Interactions API ([image generation](#image-generation)) | — (image model/lane, any key) |
 
 **What to put in `model`:**
 
@@ -219,7 +219,7 @@ curl http://localhost:8080/v1/chat/completions \
 
 ### Image generation
 
-Image models are **model-pinned**: you name the exact model (or an image **lane** — see [Failover](#image-failover-across-providers) below), with no classification, and **any valid key** works (no `allow_custom_model` needed; cost is bounded by the key's budget / rate limit). Operator-configured models: `gpt-image-2` (OpenAI), `gemini-3.1-flash-image` / `gemini-3-pro-image` (Google "Nano Banana"). Every call is metered per image (output tokens × the model's image rate) and appears in the dashboard like any other request. Three entrypoints — match the one your SDK speaks:
+Image requests name either an exact image model or an image **lane** — see [Failover](#image-failover-across-providers) below. They skip text classification, and **any valid key** works (no `allow_custom_model` needed; cost is bounded by the key's budget / rate limit). Operator-configured models: `gpt-image-2` (OpenAI), `gemini-3.1-flash-image` / `gemini-3-pro-image` (Google "Nano Banana"). Every call is metered per image (output tokens × the model's image rate) and appears in the dashboard like any other request. Three entrypoints — match the one your SDK speaks:
 
 **1. OpenAI Images API** — `POST /v1/images/generations` (Bearer auth), `{ "created", "data": [{ "b64_json" }], "usage" }`:
 
@@ -273,6 +273,10 @@ Image lanes work for **any key** on the two dedicated endpoints (`/v1/images/gen
 |---|---|---|
 | `GET /` · `GET /healthz` · `GET /version` | — | Landing page · readiness · build info |
 | `GET /v1/models` · `GET /v1/models/{id}` | API key | Models the key can route to (lanes + `auto`; concrete aliases with capabilities & pricing for custom-model keys) |
+| `GET /v1/usage/stats` | API key | Per-key usage aggregates over a requested time window |
+| `POST /v1/messages/count_tokens` | API key | Anthropic-shaped token-count helper |
+| `/v1/responses/*` lifecycle helpers | API key | `input_tokens`, `compact`, retrieve/delete/cancel/input-items for Responses-compatible clients |
+| `POST /mcp` + OAuth discovery | API key or optional MCP OAuth | Optional memory MCP tools when `memory.mcp.enabled` is on |
 | `/admin` · `/admin/api/*` | Basic auth | Dashboard + its JSON backend (mounted only when admin is enabled) |
 
 ## Configuration
@@ -320,7 +324,16 @@ Pool **several accounts per provider**. Each account (**Providers → Manage**) 
 
 - **Models** — a live allow-list, not a display filter: a removed model stops routing immediately; an uncurated model is refused (fail-closed).
 - **Proxy** — HTTP/HTTPS/SOCKS5 egress per account, used across the entire subscription flow, so co-hosted accounts exit from distinct IPs.
-- **Schedule** — `priority` (lower serves first) + a `schedulable` toggle; round-robin (LRU) within equal priority. Park an account to keep it connected but out of rotation.
+- **Schedule** — `priority` (lower serves first) + a `schedulable` toggle. Park an account to keep it connected but out of rotation.
+
+The account pool also has one **global usage strategy** that applies inside every subscription provider pool:
+
+- `balanced` — spread new sessions across accounts while preserving sticky sessions.
+- `manual_priority` — follow account priority first; rotate only within the same priority.
+- `low_risk` — prefer lower quota pressure in the best priority tier to reduce 429 risk.
+- `use_expiring` — prefer accounts with short or weekly quota that will reset soon, and count Codex reset credits as discounted recoverable capacity.
+
+Quota signals are soft scoring inputs: stale or missing quota falls back to the balanced behavior, while hard cooldowns and manually parked accounts are still excluded. Codex reset credits are **never spent by selection**. They are consumed only by the explicit **Reset limit** action or by the guarded auto-reset flow, and only when a weekly Codex window is saturated enough.
 
 Everything hot-reloads — connect, disconnect, curation, proxy, scheduling — next request, no restart. Helm also mirrors each official client's identity headers and sends a **stable per-account device identity** (never rotated mid-stream) to reduce ban-correlation risk.
 

@@ -76,7 +76,7 @@ docker compose logs helm | grep -i "root API key"
 | 🛣️ | **Lane + 策略路由** | 请求走 lane（`economy` / `balanced` / `premium`，外加任务 lane `coding`、`json`、`vision`、`tool_use`），从不直接面对供应商名。首条命中的策略可以钉死或封顶 lane。每条 lane = 一个主模型 + 一条兜底链，全在配置里。可选的 Agentic Signals 能在这些上限内，把异常的 lane 提升到更健康的强档 lane。 |
 | 🪪 | **固定模型的客户端也能即插即用** | 客户端写死的厂商模型 id（Claude Code 的 `claude-opus-4-8`、锁定 `gpt-5.5` 的 SDK）照样能用——不再吃 *400 unknown model*。**标准 key** 把它当 `auto` 分类；**自定义模型 key** 可通过 `model-aliases.yaml` 把每个厂商家族映射到一条 lane（受 lane 白名单收口）。 |
 | 🛡️ | **稳健的执行层** | 熔断器（OPEN/HALF_OPEN + 单探针）、能力过滤（跳过候选时记下明确原因）、`:free` 档 429 跳过、按 key 并发排队。客户端断连永远不算供应商故障。 |
-| 🔐 | **OAuth 订阅** | 把 Claude Pro/Max、ChatGPT Codex、GitHub Copilot 的**订阅**当后端来路由——多账号组池，逐账号做模型策展 / 出口代理 / 调度，全部热重载。*（可选功能，先读 [ToS 警告](#oauth-订阅类供应商claude-promaxchatgpt-codexgithub-copilot)。）* |
+| 🔐 | **OAuth 订阅** | 把 Claude Pro/Max、ChatGPT Codex、GitHub Copilot 的**订阅**当后端来路由——多账号组池，逐账号做模型策展 / 出口代理 / 调度，全局账号使用策略、实时额度窗口，以及受保护的 Codex reset-credit 恢复。*（可选功能，先读 [ToS 警告](#oauth-订阅类供应商claude-promaxchatgpt-codexgithub-copilot)。）* |
 | 🔑 | **带约束力的 key** | 强制鉴权；key 鉴权走 SHA-256 哈希，可额外保存加密恢复材料供管理后台查看/轮转。每把 key 可设：lane 白名单、自定义模型权限、RPM/TPM 限流、用量预算（降级或拒绝）、并发上限、记忆模式。可原地轮转，先软吊销，再永久删除。 |
 | 🧠 | **Memory 中间件** | 默认开启：路由前把记忆作为一轮追加消息注入上下文；后台 worker 负责压缩与归并——压缩**全自动、零配置**（价格与上下文窗口取自模型目录；按体量 / 空闲 / 上下文压力三种时机触发）。摘要与归并默认走确定性的本地逻辑，另有**可选的 LLM 路径**（`config.memory.llm`，默认关闭）；遗忘/分层机制（衰减、强化、保留期）防止记忆膨胀。可按 key 或按请求关闭（`x-memory-mode: off`）。 |
 | 📊 | **全程可观测** | 每个请求一条脱敏决策记录——分类、策略、lane、每次供应商尝试、延迟、兜底、成本。正文逐字捕获单独存表（默认开，保留 30 天）。正文检查器支持长字段全屏阅读、内联图片预览，可编辑的 **Retry** 按钮能按原协议重放任何已捕获的请求。 |
@@ -99,7 +99,7 @@ docker compose logs helm | grep -i "root API key"
 - **多媒体直接看。** 页面顶部有一块媒体总览，把每张**发送**（请求）和**生成**（响应）的图片汇集成可点击的缩略图——无需在 JSON 树里翻找；内联的 base64 或远程图片仍会就地渲染，支持缩放、适应窗口、在新标签页打开。
 - **改完即重放。** 点 **重试**、编辑正文，按它原本的协议（OpenAI Chat / Anthropic / Responses / Gemini）作为一次隔离、全新追踪的调试调用重新发出。
 
-**把订阅组成池。** 把 Claude Pro/Max、ChatGPT Codex、GitHub Copilot 的登录当后端来路由——同一供应商接多个账号，每个账号各有模型策展、出口代理、优先级和实时配额。
+**把订阅组成池。** 把 Claude Pro/Max、ChatGPT Codex、GitHub Copilot 的登录当后端来路由——同一供应商接多个账号，每个账号各有模型策展、出口代理、优先级、实时配额、reset-credit 控制，以及一套全局账号使用策略。
 
 [![订阅类供应商 —— 组池的 OAuth 账号，逐账号配额 / 代理 / 调度 / 状态](docs/assets/screenshots/06-providers.png)](docs/assets/screenshots/06-providers.png)
 
@@ -203,8 +203,8 @@ curl http://localhost:8080/v1/chat/completions \
 | `POST /v1/messages` | Anthropic Messages | ✅ |
 | `POST /v1/responses` | OpenAI Responses | ✅ |
 | `POST /v1beta/models/{model}:generateContent` | Google Gemini | ✅（走 `:streamGenerateContent`；用 `x-goog-api-key` 鉴权） |
-| `POST /v1/images/generations` | OpenAI Images API（[图片生成](#图片生成)） | —（钉死模型，任意 key 可用） |
-| `POST /v1beta/interactions` | Gemini Interactions API（[图片生成](#图片生成)） | —（钉死模型，任意 key 可用） |
+| `POST /v1/images/generations` | OpenAI Images API（[图片生成](#图片生成)） | —（图片模型/lane，任意 key 可用） |
+| `POST /v1beta/interactions` | Gemini Interactions API（[图片生成](#图片生成)） | —（图片模型/lane，任意 key 可用） |
 
 **`model` 字段填什么：**
 
@@ -219,7 +219,7 @@ curl http://localhost:8080/v1/chat/completions \
 
 ### 图片生成
 
-图片模型一律**钉死到具体 provider**：直接写出模型 id，或写一个图片 **lane**（见下方[跨 provider 故障转移](#图片跨-provider-故障转移)），不经分类，且**任意有效 key 都能用**（无需 `allow_custom_model`；成本由该 key 的预算 / 限流约束）。可配置的模型：`gpt-image-2`（OpenAI）、`gemini-3.1-flash-image` / `gemini-3-pro-image`（Google「Nano Banana」）。每次调用按图片计量（output tokens × 该模型的图片费率），并和其他请求一样进入面板。三个入口——按你的 SDK 说哪种协议来选：
+图片请求可以写具体图片模型，也可以写图片 **lane**（见下方[跨 provider 故障转移](#图片跨-provider-故障转移)），不经文本分类，且**任意有效 key 都能用**（无需 `allow_custom_model`；成本由该 key 的预算 / 限流约束）。可配置的模型：`gpt-image-2`（OpenAI）、`gemini-3.1-flash-image` / `gemini-3-pro-image`（Google「Nano Banana」）。每次调用按图片计量（output tokens × 该模型的图片费率），并和其他请求一样进入面板。三个入口——按你的 SDK 说哪种协议来选：
 
 **1. OpenAI Images API** —— `POST /v1/images/generations`（Bearer 鉴权），响应 `{ "created", "data": [{ "b64_json" }], "usage" }`：
 
@@ -272,6 +272,10 @@ gemini-image:                       # 请求填 `model: "gemini-image"`
 |---|---|---|
 | `GET /` · `GET /healthz` · `GET /version` | — | 落地页 · 就绪探针 · 构建信息 |
 | `GET /v1/models` · `GET /v1/models/{id}` | API key | 列出该 key 能路由到的模型（lane + `auto`；自定义模型 key 还会看到带能力与定价的具体别名） |
+| `GET /v1/usage/stats` | API key | 查询当前 key 在指定时间窗口内的用量聚合 |
+| `POST /v1/messages/count_tokens` | API key | Anthropic 形状的 token 计数辅助接口 |
+| `/v1/responses/*` 生命周期辅助接口 | API key | `input_tokens`、`compact`、retrieve/delete/cancel/input-items，供 Responses 兼容客户端使用 |
+| `POST /mcp` + OAuth discovery | API key 或可选 MCP OAuth | 开启 `memory.mcp.enabled` 后暴露的 Memory MCP 工具 |
 | `/admin` · `/admin/api/*` | Basic auth | 面板 + 其 JSON 后端（仅在启用面板时才挂载） |
 
 ## 配置
@@ -319,7 +323,16 @@ gemini-image:                       # 请求填 `model: "gemini-image"`
 
 - **模型** —— 一份实时白名单，不是显示层过滤：移除的模型立刻停止路由，未策展的模型直接被拒（fail-closed）。
 - **代理** —— 按账号设 HTTP/HTTPS/SOCKS5 出口，整条订阅链路都走它，让同机的多个账号从不同 IP 出去。
-- **调度** —— `priority`（越小越优先）+ `schedulable` 开关；同优先级内按 LRU 轮询。「停泊」一个账号即保持连接但退出轮换。
+- **调度** —— `priority`（越小越优先）+ `schedulable` 开关；「停泊」一个账号即保持连接但退出轮换。
+
+账号池还有一个**全局使用策略**，在每个订阅 provider 的账号池内部生效：
+
+- `balanced` —— 新会话尽量均摊，同时保持会话粘性。
+- `manual_priority` —— 严格优先按账号 priority，用同一优先级内的轮换。
+- `low_risk` —— 在最高优先级层里优先选额度压力更低的账号，降低 429 风险。
+- `use_expiring` —— 优先使用短窗口或周窗口里快要重置、仍有余量的账号，并把 Codex reset credits 作为打折后的可恢复容量纳入评分。
+
+额度只是软评分信号：额度缺失或过期时会回到 balanced 行为；手动停泊和硬 cooldown 仍会把账号排除在调度外。Codex reset credits **不会因为选择策略被自动消费**，只会在明确点击 **Reset limit** 或开启受保护的 auto-reset 后消费，并且必须满足 weekly quota 已足够饱和的门槛。
 
 这里的一切都热重载——连接、断开、策展、代理、调度——下一个请求即生效，无需重启。Helm 还会照搬官方客户端的身份头，并发送**稳定的按账号设备标识**（绝不中途轮换），以降低被关联封号的风险。
 

@@ -383,11 +383,13 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
           tags: ["Inference"],
           summary: "OpenAI-compatible image generation",
           description:
-            "Generate images from a text prompt. Model-pinned: `model` is the exact " +
-            "image model id (e.g. `gpt-image-2`, `gemini-3.1-flash-image`) — NOT a lane " +
-            "or `auto`, and `allow_custom_model` is not required. No classification, " +
-            "lanes, or cross-protocol translation; the request is forwarded to the " +
-            "named model's provider. Non-streaming. Per-key budget and rate limits apply.",
+            "Generate images from a text prompt. `model` may be an exact image model id " +
+            "(e.g. `gpt-image-2`, `gemini-3.1-flash-image`) or an image lane such as " +
+            "`gpt-image` / `gemini-image`; `auto` is not used, and `allow_custom_model` " +
+            "is not required. Helm skips text classification, resolves the ordered image " +
+            "chain, and fails over across image providers on provider faults. Gemini image " +
+            "targets are translated to/from `generateContent`. Non-streaming. Per-key " +
+            "budget and rate limits apply.",
           security: [{ bearerAuth: [] }],
           requestBody: {
             required: true,
