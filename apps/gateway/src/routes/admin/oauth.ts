@@ -2,6 +2,11 @@ import { windowsToActiveUsageRecovery } from "@helm/core";
 import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../../app.js";
+import {
+  CODEX_RESET_MIN_WEEKLY_USED_PERCENT,
+  canConsumeResetCredit,
+  codexWeeklyUsedPercent,
+} from "../../oauth/auto-reset.js";
 import type { AccountProxyInput, AdminApiDeps, OAuthAdminAccess } from "./deps.js";
 
 // /admin/api/oauth/* — interactive OAuth subscription login from the admin UI
@@ -315,6 +320,56 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     const body = (await c.req.json().catch(() => ({}))) as { account?: unknown };
     const account =
       typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT;
+    const snapshot = await deps.oauthQuota?.get(providerId, account).catch(() => null);
+    if (!snapshot) {
+      return c.json(
+        {
+          error: "reset credit blocked: Codex weekly quota snapshot is unavailable",
+          code: "quota_unavailable",
+        },
+        409,
+      );
+    }
+    const weeklyUsedPercent = codexWeeklyUsedPercent(snapshot.windows);
+    if (!canConsumeResetCredit(snapshot.windows)) {
+      return c.json(
+        {
+          error: `reset credit blocked: Codex weekly usage must be at least ${CODEX_RESET_MIN_WEEKLY_USED_PERCENT}%`,
+          code: "weekly_usage_below_reset_threshold",
+          weeklyUsedPercent,
+          minWeeklyUsedPercent: CODEX_RESET_MIN_WEEKLY_USED_PERCENT,
+        },
+        409,
+      );
+    }
+    const guard = deps.resetCreditGuard;
+    if (!guard) {
+      return c.json(
+        { error: "reset credit guard is not configured", code: "reset_credit_guard_unavailable" },
+        503,
+      );
+    }
+    const reservation = await guard.reserve({
+      providerId,
+      account,
+      windows: snapshot.windows,
+      mode: "manual",
+    });
+    if (!reservation.ok) {
+      if (reservation.retryAfterMs !== undefined) {
+        c.header("Retry-After", String(Math.ceil(reservation.retryAfterMs / 1000)));
+      }
+      return c.json(
+        {
+          error: reservation.error,
+          code: reservation.code,
+          ...(reservation.retryAfterMs === undefined
+            ? {}
+            : { retryAfterMs: reservation.retryAfterMs }),
+        },
+        reservation.status,
+      );
+    }
     try {
       const result = await s.consumeCodexResetCredit({ account });
       return c.json(result, 200);

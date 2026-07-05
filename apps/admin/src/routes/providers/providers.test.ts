@@ -485,7 +485,7 @@ describe('providers page', () => {
 
   // ── Codex "Reset limit" (rate-limit reset credit) ──────────────────────────
   // One Codex account + a quota snapshot carrying the live reset-credit count.
-  function renderCodex(resetCredits: number | null, autoReset = false) {
+  function renderCodex(resetCredits: number | null, autoReset = false, weeklyUsedPercent = 95) {
     renderPage({
       providers: [
         provider({
@@ -518,6 +518,12 @@ describe('providers page', () => {
               usedPercent: 80,
               resetsAtMs: Date.now() + 3_600_000,
               windowMinutes: 300,
+            },
+            {
+              key: 'secondary',
+              usedPercent: weeklyUsedPercent,
+              resetsAtMs: Date.now() + 3 * 86_400_000,
+              windowMinutes: 10_080,
             },
           ],
           capturedAt: Date.now(),
@@ -581,10 +587,37 @@ describe('providers page', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
+  it('does not persist auto-reset from the reset dialog when the consume fails', async () => {
+    consumeCodexResetCredit.mockRejectedValue(new Error('no credits'));
+    renderCodex(2);
+    const row = screen.getByTestId('provider-account-row');
+    await fireEvent.click(within(row).getByRole('button', { name: /reset limit \(2\)/i }));
+
+    const dialog = screen.getByRole('dialog');
+    await fireEvent.click(within(dialog).getByTestId('reset-auto-reset-toggle'));
+    await fireEvent.click(within(dialog).getByRole('button', { name: /^reset limit$/i }));
+
+    await waitFor(() => expect(consumeCodexResetCredit).toHaveBeenCalled());
+    expect(setAccountSchedule).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent('no credits');
+  });
+
   it('disables "Reset limit" for a Codex account with no reset credits', () => {
     renderCodex(0);
     const row = screen.getByTestId('provider-account-row');
     expect(within(row).getByRole('button', { name: /reset limit/i })).toBeDisabled();
+    expect(consumeCodexResetCredit).not.toHaveBeenCalled();
+  });
+
+  it('disables "Reset limit" until the Codex weekly window reaches 90%', () => {
+    renderCodex(2, false, 89);
+    const row = screen.getByTestId('provider-account-row');
+    const button = within(row).getByRole('button', { name: /reset limit \(2\)/i });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute(
+      'title',
+      'Weekly usage must reach 90% before reset credits can be used',
+    );
     expect(consumeCodexResetCredit).not.toHaveBeenCalled();
   });
 

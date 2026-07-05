@@ -501,6 +501,33 @@ describe("admin OAuth routes — read endpoints", () => {
 });
 
 describe("admin OAuth routes — reset credit", () => {
+  const codexWindows = (weeklyUsedPercent = 90) => [
+    {
+      key: "secondary",
+      usedPercent: weeklyUsedPercent,
+      resetsAtMs: Date.now() + 86_400_000,
+      windowMinutes: 10_080,
+    },
+  ];
+  const quotaStore = (windows = codexWindows()): AdminApiDeps["oauthQuota"] =>
+    ({
+      get: vi.fn(async (providerId: string, account: string) => ({
+        providerId,
+        account,
+        windows,
+        capturedAt: Date.now(),
+        source: "codex",
+        usageLimitedUntilMs: null,
+      })),
+    }) as unknown as AdminApiDeps["oauthQuota"];
+  const allowResetCredit = () => ({
+    reserve: vi.fn(async () => ({
+      ok: true as const,
+      sharedKey: "codex:shared-account",
+      windowId: "secondary:1",
+    })),
+  });
+
   it("503 when the seam lacks consumeCodexResetCredit", async () => {
     const res = await app({ oauth: fullSeam() }).request(
       "/admin/api/oauth/openai-codex/reset-credit",
@@ -521,37 +548,128 @@ describe("admin OAuth routes — reset credit", () => {
     expect(res.status).toBe(400);
   });
 
-  it("200 consumes a credit and returns { code, windowsReset } (defaults the account)", async () => {
+  it("409 when no Codex quota snapshot is available", async () => {
     const consume = vi.fn(async () => ({ code: "ok", windowsReset: 2 }));
+    const guard = allowResetCredit();
     const seam = fullSeam({ consumeCodexResetCredit: consume as never });
-    const res = await app({ oauth: seam }).request("/admin/api/oauth/openai-codex/reset-credit", {
+    const res = await app({ oauth: seam, resetCreditGuard: guard }).request(
+      "/admin/api/oauth/openai-codex/reset-credit",
+      {
+        method: "POST",
+        headers: JSONH,
+        body: "{}",
+      },
+    );
+    expect(res.status).toBe(409);
+    expect((await res.json()) as { code: string }).toMatchObject({ code: "quota_unavailable" });
+    expect(guard.reserve).not.toHaveBeenCalled();
+    expect(consume).not.toHaveBeenCalled();
+  });
+
+  it("409 blocks reset-credit consumption when weekly usage is below 90%", async () => {
+    const consume = vi.fn(async () => ({ code: "ok", windowsReset: 2 }));
+    const guard = allowResetCredit();
+    const seam = fullSeam({ consumeCodexResetCredit: consume as never });
+    const res = await app({
+      oauth: seam,
+      oauthQuota: quotaStore(codexWindows(89)),
+      resetCreditGuard: guard,
+    }).request("/admin/api/oauth/openai-codex/reset-credit", {
+      method: "POST",
+      headers: JSONH,
+      body: "{}",
+    });
+    expect(res.status).toBe(409);
+    expect((await res.json()) as { code: string; minWeeklyUsedPercent: number }).toMatchObject({
+      code: "weekly_usage_below_reset_threshold",
+      minWeeklyUsedPercent: 90,
+    });
+    expect(guard.reserve).not.toHaveBeenCalled();
+    expect(consume).not.toHaveBeenCalled();
+  });
+
+  it("429 blocks reset-credit consumption when the one-hour guard is active", async () => {
+    const consume = vi.fn(async () => ({ code: "ok", windowsReset: 2 }));
+    const guard = {
+      reserve: vi.fn(async () => ({
+        ok: false as const,
+        status: 429 as const,
+        code: "reset_credit_cooldown_active",
+        error: "cooldown",
+        retryAfterMs: 60_000,
+      })),
+    };
+    const seam = fullSeam({ consumeCodexResetCredit: consume as never });
+    const res = await app({
+      oauth: seam,
+      oauthQuota: quotaStore(),
+      resetCreditGuard: guard,
+    }).request("/admin/api/oauth/openai-codex/reset-credit", {
+      method: "POST",
+      headers: JSONH,
+      body: "{}",
+    });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(consume).not.toHaveBeenCalled();
+  });
+
+  it("200 consumes a credit only after quota + guard allow it (defaults the account)", async () => {
+    const consume = vi.fn(async () => ({ code: "ok", windowsReset: 2 }));
+    const guard = allowResetCredit();
+    const seam = fullSeam({ consumeCodexResetCredit: consume as never });
+    const res = await app({
+      oauth: seam,
+      oauthQuota: quotaStore(),
+      resetCreditGuard: guard,
+    }).request("/admin/api/oauth/openai-codex/reset-credit", {
       method: "POST",
       headers: JSONH,
       body: "{}",
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ code: "ok", windowsReset: 2 });
+    expect(guard.reserve).toHaveBeenCalledWith({
+      providerId: "openai-codex",
+      account: "default",
+      windows: expect.arrayContaining([
+        expect.objectContaining({ key: "secondary", usedPercent: 90 }),
+      ]),
+      mode: "manual",
+    });
     expect(consume).toHaveBeenCalledWith({ account: "default" });
   });
 
   it("passes an explicit account through to the seam", async () => {
     const consume = vi.fn(async () => ({ code: "ok", windowsReset: 1 }));
+    const guard = allowResetCredit();
     const seam = fullSeam({ consumeCodexResetCredit: consume as never });
-    await app({ oauth: seam }).request("/admin/api/oauth/openai-codex/reset-credit", {
-      method: "POST",
-      headers: JSONH,
-      body: JSON.stringify({ account: "work" }),
-    });
+    await app({ oauth: seam, oauthQuota: quotaStore(), resetCreditGuard: guard }).request(
+      "/admin/api/oauth/openai-codex/reset-credit",
+      {
+        method: "POST",
+        headers: JSONH,
+        body: JSON.stringify({ account: "work" }),
+      },
+    );
+    expect(guard.reserve).toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: "openai-codex", account: "work", mode: "manual" }),
+    );
     expect(consume).toHaveBeenCalledWith({ account: "work" });
   });
 
   it("502 when the seam throws (fail-closed upstream error)", async () => {
+    const guard = allowResetCredit();
     const seam = fullSeam({
       consumeCodexResetCredit: vi.fn(async () => {
         throw new Error("no credits");
       }) as never,
     });
-    const res = await app({ oauth: seam }).request("/admin/api/oauth/openai-codex/reset-credit", {
+    const res = await app({
+      oauth: seam,
+      oauthQuota: quotaStore(),
+      resetCreditGuard: guard,
+    }).request("/admin/api/oauth/openai-codex/reset-credit", {
       method: "POST",
       headers: JSONH,
       body: "{}",

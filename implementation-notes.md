@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-07-05 · Codex reset-credit 消费改为硬门禁（OAuth quota / Admin providers，docs/04/11，原则 3/5/7）
+
+- **背景（Lukin）**：Codex rate-limit reset credit 是稀缺上游额度，不能因为 providers 页刷新、容器重启、持续 saturated header 或误开 auto-reset 而快速消耗。既要保留手动/自动恢复能力，也要默认 fail-closed 保护 reset credits。
+- **消费门槛**：手动和自动 reset-credit consume 都必须看到 Codex weekly `secondary` window，且 `usedPercent >= 90`；5h `primary` window 自恢复，永远不能作为花费 reset credit 的理由。缺少 quota snapshot 时手动接口返回 409，不直接 PULL 上游再消费。
+- **自动 reset 边界**：auto-reset 仍只在 weekly `secondary >= 100` 时尝试；手动和自动消费都共享同一持久 guard：同一 shared ChatGPT account 一小时内只能 reserve 一次，同一 weekly window 只能 reserve 一次。guard 写在 `config_kv`，key 只含 shared account 的 sha256，不保存 ChatGPT id 明文。
+- **并发/重启决策**：进程内 shared-key in-flight 折叠同进程 sibling burst；真正的一小时 reservation 用 `ConfigStore.setIfMissingOrNumericLte` 在 SQLite/Postgres 单条 SQL 原子抢占，防多实例同时 read-then-write 双消费；持久 `window` guard 防同一 weekly window 在冷却过后继续消费。guard/store 出错或缺少原子 reservation 能力时 fail-closed，宁可不 reset，也不能快速烧额度。
+- **审计决策**：`consumeCodexResetCredit` 生成并记录 `redeem_request_id`；auto-reset 在上游 consume 成功后立刻打 `oauth.auto_reset.consumed`，本地 unpark 失败单独记 `oauth.auto_reset.unpark_failed`，避免“credit 已花但日志看起来像 consume 失败”。
+- **UI 决策**：providers 页 `Reset limit` 按 weekly >=90、resetCredits >0、quota snapshot 存在才可点；确认弹窗里的 auto-reset 勾选只在 consume 成功后保存，失败不会悄悄开启未来自动消费。
+- **验证计划**：覆盖纯 eligibility、持久 cooldown、跨 guard 实例原子抢占、同 weekly window 手动/自动去重、admin route fail-closed、redeem id 审计、providers 按钮禁用和失败不保存 autoReset；再跑 targeted Vitest、store contract、gateway typecheck、admin svelte-check、Biome/Prettier。
+
 ## 2026-07-04 · internal LLM prompt 输入用 XML 数据边界隔离（Memory / classifier eval，docs/03/08/12，原则 3/4/7）
 
 - **背景（Lukin）**：生产 request `4fa73a51-56d3-4f40-a34d-7ce1e9d1194b` 显示 `internal-llm` key 的一次普通 chat self-call 把任务规则、runtime context、群聊历史和输出契约拼在同一个 user message 里；最后一条群消息包含“可以合并”等业务动作词，容易让小模型把 untrusted chat content 当成可执行指令或错误语境。
@@ -89,22 +99,13 @@
 - **UI 决策**：记忆页顶部增加状态面板，15 秒轻量刷新一次；按当前选中的 scope/key 同步切换，能直接看到 queued/running/stale、滞后时间、raw input、learned output 和 jobs by type。
 - **验证计划**：覆盖 SQLite/Postgres store 聚合、admin route、admin 页面加载/筛选联动与 locale 文案；再跑目标 Vitest、typecheck、lint/build。
 
-## 2026-07-04 · Claude scoped weekly quota 不触发账号级限流（Admin providers / OAuth quota，docs/04/11，原则 3/5/7）
-
-- **背景（Lukin）**：providers 页出现 `7d · Fable` 100% 后，账号被显示为“已限流”，并且路由池把整个 Anthropic OAuth 账号排除；但账号级 `7d` 全模型额度仍有余量，只有 Fable / Sonnet 这类 scoped model cap 不可用。
-- **根因**：`windowsToUsageLimit()` 与 `windowsToActiveUsageRecovery()` 把所有 100% quota window 都当作账号级 limiter；`7d-fable` / `7d-sonnet` / `7d-opus` 这种 scoped weekly model window 因而被错误写入 `usage_limited_until_ms`，扩大成全账号 cooldown。OAuth pool 的 429 backstop 也没有区分 Anthropic 模型级 429。
-- **语义决策**：只有账号级窗口（`5h`、`7d`、Codex `primary/secondary` 等非 `7d-*` key）能 park 整个账号；`7d-*` 只说明对应 Claude 模型的周限额已满，不能阻止同账号继续服务其它模型。
-- **执行路径决策**：Anthropic `claude-fable-*` / `claude-sonnet-*` / `claude-opus-*` 的 429 不写全局 cooldown；当前请求仍可在池内尝试 sibling account 或交给执行 fallback，但不会把该账号从所有模型的调度池里移除。
-- **UI 决策**：providers 页渲染“已限流”时只用账号级窗口解释恢复时间；如果页面已有账号级窗口且它们未触顶，旧的全局 cooldown 不再显示为 active rate limit。
-- **验证计划**：新增 core quota helper、OAuth pool、admin `/oauth/quota`、providers 页面回归测试，覆盖 Fable/Sonnet scoped window 100% 但 `7d` 仍有余量时不触发账号级限流。
-
 ## 历史条目摘要（最近 5 条）
 
+- **2026-07-04 · Claude scoped weekly quota 不触发账号级限流（Admin providers / OAuth quota，docs/04/11，原则 3/5/7）**：只有账号级窗口能 park 整个 OAuth 账号，`7d-*` scoped model cap 只影响对应模型，不触发全账号限流。
 - **2026-07-04 · 跨协议 reasoning 历史不兼容按候选跳过（执行 fallback / 协议转换，docs/04/05/07，原则 3/5/8）**：跨协议转 OpenAI-compatible 时剥离不兼容 thinking/reasoning 控制，并把 DeepSeek 类 reasoning-history 400 作为候选跳过而非全局失败。
 - **2026-07-04 · memory idle-flush 防饥饿与受控追赶（Memory worker / store，docs/08/12，原则 3/7）**：idle-flush 候选判断改用 observer-order tuple，按 scope rank 交错输出，并支持受控多批 drain，避免旧 backlog 饿死新项目。
 - **2026-07-03 · 策略级 reasoning_effort 覆盖 Lane 默认值（Routing policies / Admin policies，docs/04/11，原则 2/5/6）**：Policy action 可强制 reasoning_effort，优先级为 policy > selected lane > client request，复用现有执行改写链路。
 - **2026-07-03 · cron monitor 自动化请求降到低成本规则（Classifier / routing，docs/03/04，原则 2/4）**：monitor/cron + no-reply 标记命中时降到 `simple/economy`，但保留显式 coding keyword 升级路径，避免自动化探针误打高价模型。
-- **2026-07-03 · 上下文窗口超限按候选跳过处理（执行 fallback / streaming telemetry，docs/04/07，原则 5/8）**：`context_length_exceeded` / prompt-too-long 类错误按候选 `context_too_small` 跳过并继续 fallback，不熔断 provider。
 
 ## 更早历史总览
 

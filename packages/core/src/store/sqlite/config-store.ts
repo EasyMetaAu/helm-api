@@ -22,4 +22,18 @@ export class SqliteConfigStore implements ConfigStore {
       .onConflictDoUpdate({ target: configKv.key, set: { value } })
       .run();
   }
+
+  async setIfMissingOrNumericLte(key: string, value: string, lte: number): Promise<boolean> {
+    const res = this.db.$sqlite
+      .prepare(`
+        INSERT INTO config_kv (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        WHERE config_kv.value GLOB '[0-9]*'
+          AND config_kv.value NOT GLOB '*[^0-9]*'
+          AND CAST(config_kv.value AS INTEGER) <= ?
+      `)
+      .run(key, value, Math.trunc(lte));
+    return res.changes > 0;
+  }
 }

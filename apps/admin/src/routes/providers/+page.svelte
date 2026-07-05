@@ -80,6 +80,7 @@
 
   const keyOf = (providerId: string, account: string): string => `${providerId}/${account}`;
   const ACTIVE_LIMIT_RECOVERY_THRESHOLD = 95;
+  const CODEX_RESET_MIN_WEEKLY_USED_PERCENT = 90;
 
   // One table row per connected account, flattened across providers, joined to its
   // usage + quota snapshot (both fail-open: a missing entry renders "—").
@@ -146,9 +147,7 @@
       .split('-')
       .filter(Boolean)
       .map((part) =>
-        part.length <= 3
-          ? part.toUpperCase()
-          : `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`,
+        part.length <= 3 ? part.toUpperCase() : `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`,
       )
       .join(' ');
   }
@@ -236,6 +235,36 @@
       return null;
     }
     return untilMs == null ? null : { untilMs, label };
+  }
+
+  function codexWeeklyUsedPercent(q: OAuthQuotaSnapshot | undefined): number | null {
+    const weekly = q?.windows
+      .filter((w) => w.key === 'secondary')
+      .map((w) => w.usedPercent)
+      .filter((pct) => Number.isFinite(pct));
+    return weekly && weekly.length > 0 ? Math.max(...weekly) : null;
+  }
+
+  function canUseCodexResetCredit(
+    q: OAuthQuotaSnapshot | undefined,
+    credits: number | null,
+  ): boolean {
+    return (
+      credits != null &&
+      credits > 0 &&
+      (codexWeeklyUsedPercent(q) ?? -1) >= CODEX_RESET_MIN_WEEKLY_USED_PERCENT
+    );
+  }
+
+  function resetCreditTitle(q: OAuthQuotaSnapshot | undefined, credits: number | null): string {
+    const weekly = codexWeeklyUsedPercent(q);
+    if (credits == null) return $t('Reset-credit count unavailable');
+    if (credits <= 0) return $t('No reset credits available');
+    if (weekly == null) return $t('Weekly quota snapshot unavailable');
+    if (weekly < CODEX_RESET_MIN_WEEKLY_USED_PERCENT) {
+      return $t('Weekly usage must reach 90% before reset credits can be used');
+    }
+    return $t('Consume one credit to restore the rate-limit window');
   }
 
   // Countdown to auto-recovery for the rate-limited pill — same `durationParts`
@@ -361,16 +390,19 @@
     error = null;
     resetNotice = null;
     try {
-      // Persist the auto-reset opt-in first, decoupled from the consume below: even if
-      // the reset fails (no credit / network), the operator's "do this automatically
-      // from now on" choice still sticks. Best-effort — a save failure never blocks the
-      // reset (they can still toggle it in the Manage dialog).
+      const quota = quotaByKey.get(keyOf(providerId, account));
+      if (!canUseCodexResetCredit(quota, confirmingReset.credits)) {
+        error = $t('Reset limit requires weekly usage of at least 90%');
+        return;
+      }
+      const result = await consumeCodexResetCredit(providerId, account);
+      // Persist the auto-reset opt-in only after the scarce reset-credit consume
+      // succeeds. A failed manual reset must not silently enable future auto-spends.
       try {
         await setAccountSchedule(providerId, account, { autoReset });
       } catch {
         /* non-fatal: the manual reset is the primary action */
       }
-      const result = await consumeCodexResetCredit(providerId, account);
       confirmingReset = null;
       await invalidateAll();
       resetNotice =
@@ -501,6 +533,7 @@
             {@const supportsFast =
               row.provider.id === 'anthropic' || row.provider.id === 'openai-codex'}
             {@const codexCredits = isCodex ? (quota?.resetCredits ?? null) : null}
+            {@const canResetCodexLimit = isCodex && canUseCodexResetCredit(quota, codexCredits)}
             {@const usageLimit = usageLimitStatus(quota)}
             {@const usageLimitRecovery = usageLimit ? autoRecoverIn(usageLimit.untilMs) : ''}
             <tr class="align-top" data-testid="provider-account-row">
@@ -719,12 +752,8 @@
                     <button
                       type="button"
                       class="btn-secondary"
-                      disabled={codexCredits == null || codexCredits <= 0}
-                      title={codexCredits == null
-                        ? $t('Reset-credit count unavailable')
-                        : codexCredits <= 0
-                          ? $t('No reset credits available')
-                          : $t('Consume one credit to restore the rate-limit window')}
+                      disabled={!canResetCodexLimit}
+                      title={resetCreditTitle(quota, codexCredits)}
                       onclick={() =>
                         (confirmingReset = {
                           providerId: row.provider.id,
