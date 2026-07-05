@@ -514,37 +514,6 @@
     </p>
   {/if}
 
-  {#if data.configured}
-    {@const selectedStrategy =
-      strategyOptions.find((option) => option.value === data.selectionStrategy) ?? strategyOptions[0]}
-    <section
-      class="flex flex-col gap-3 border-y border-slate-200 bg-white px-1 py-4 md:flex-row md:items-center md:justify-between"
-    >
-      <div class="min-w-0">
-        <h2 class="text-sm font-semibold text-ink-body">
-          {$t('Account usage strategy')}
-        </h2>
-        <p class="mt-1 max-w-3xl text-xs leading-snug text-ink-muted">
-          {$t('Applies to all connected subscription accounts. Per-account controls stay limited to priority and scheduling.')}
-        </p>
-        <p class="mt-1 max-w-3xl text-xs leading-snug text-ink-muted">
-          {$t(selectedStrategy.description)}
-        </p>
-      </div>
-      <select
-        class="min-h-11 w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-ink-body disabled:opacity-50 md:min-h-0 md:w-60"
-        aria-label={$t('Account usage strategy')}
-        value={data.selectionStrategy}
-        disabled={savingStrategy}
-        onchange={(e) => saveSelectionStrategy(e.currentTarget.value as OAuthSelectionStrategy)}
-      >
-        {#each strategyOptions as option (option.value)}
-          <option value={option.value}>{$t(option.label)}</option>
-        {/each}
-      </select>
-    </section>
-  {/if}
-
   {#if showConnect}
     <ConnectProviderDialog
       providers={data.providers}
@@ -582,6 +551,32 @@
       </p>
     </div>
   {:else}
+    {@const selectedStrategy =
+      strategyOptions.find((option) => option.value === data.selectionStrategy) ?? strategyOptions[0]}
+    <div class="card flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div class="min-w-0">
+        <h2 class="field-label">
+          {$t('Account usage strategy')}
+        </h2>
+        <p class="field-help mt-0.5 max-w-2xl leading-snug">
+          {$t('Applies to all connected subscription accounts. Per-account controls stay limited to priority and scheduling.')}
+        </p>
+        <p class="field-help mt-0.5 max-w-2xl leading-snug">
+          {$t(selectedStrategy.description)}
+        </p>
+      </div>
+      <select
+        class="select shrink-0 disabled:opacity-50 sm:w-56"
+        aria-label={$t('Account usage strategy')}
+        value={data.selectionStrategy}
+        disabled={savingStrategy}
+        onchange={(e) => saveSelectionStrategy(e.currentTarget.value as OAuthSelectionStrategy)}
+      >
+        {#each strategyOptions as option (option.value)}
+          <option value={option.value}>{$t(option.label)}</option>
+        {/each}
+      </select>
+    </div>
     <div class="cards-table-frame">
       <table class="cards-table">
         <thead class="table-head">
