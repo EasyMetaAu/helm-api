@@ -41,6 +41,15 @@ export interface ResetCreditGuardDeps {
   ) => void;
 }
 
+// Header PUSH windows derive `resetsAtMs` from local `nowMs + reset_after_seconds`.
+// The logical weekly window is stable, but that derived absolute timestamp can jitter
+// by milliseconds/seconds across responses and can differ slightly from the usage
+// endpoint's absolute `reset_at`. Treat close reset deadlines as the same weekly
+// window so one logical Codex week cannot burn multiple reset credits. Keep the
+// tolerance narrow: it absorbs clock/proxy/header drift without masking a real
+// weekly-window boundary shift.
+const WEEKLY_WINDOW_RESET_TOLERANCE_MS = 30 * 60 * 1000;
+
 export function resetCreditGuardHash(sharedKey: string): string {
   return createHash("sha256").update(sharedKey, "utf8").digest("hex");
 }
@@ -55,12 +64,41 @@ export function resetCreditGuardWindowConfigKey(sharedKey: string): string {
 
 export const resetCreditGuardAutoWindowConfigKey = resetCreditGuardWindowConfigKey;
 
-function weeklyWindowId(windows: readonly OAuthQuotaWindow[]): string | null {
+interface WeeklyWindowMarker {
+  windowId: string;
+  resetAtMs: number;
+}
+
+function weeklyWindowMarker(windows: readonly OAuthQuotaWindow[]): WeeklyWindowMarker | null {
   const weekly = windows
     .filter((w) => w.key === "secondary")
     .filter((w) => Number.isFinite(w.usedPercent))
     .sort((a, b) => b.usedPercent - a.usedPercent)[0];
-  return weekly?.resetsAtMs == null ? null : `secondary:${weekly.resetsAtMs}`;
+  if (weekly?.resetsAtMs == null || !Number.isFinite(weekly.resetsAtMs)) return null;
+  return {
+    windowId: `secondary:${weekly.resetsAtMs}`,
+    resetAtMs: weekly.resetsAtMs,
+  };
+}
+
+function parseReservedWeeklyWindow(raw: string): { key: string; resetAtMs: number } | null {
+  const [key, resetAtRaw, ...rest] = raw.split(":");
+  if (rest.length > 0 || key !== "secondary") return null;
+  const resetAtMs = Number(resetAtRaw);
+  return Number.isFinite(resetAtMs) && resetAtMs >= 0 ? { key, resetAtMs } : null;
+}
+
+function compareReservedWeeklyWindow(
+  reserved: string | null,
+  current: WeeklyWindowMarker,
+): "none" | "same" | "different" | "invalid" {
+  if (reserved === null) return "none";
+  if (reserved === current.windowId) return "same";
+  const parsed = parseReservedWeeklyWindow(reserved);
+  if (!parsed) return "invalid";
+  return Math.abs(parsed.resetAtMs - current.resetAtMs) <= WEEKLY_WINDOW_RESET_TOLERANCE_MS
+    ? "same"
+    : "different";
 }
 
 function cooldownBlocked(
@@ -96,8 +134,8 @@ export function createResetCreditGuard(deps: ResetCreditGuardDeps): ResetCreditG
   }
 
   async function reserveWindow(sharedKey: string, windows: readonly OAuthQuotaWindow[]) {
-    const windowId = weeklyWindowId(windows);
-    if (windowId == null) {
+    const window = weeklyWindowMarker(windows);
+    if (window == null) {
       return {
         ok: false,
         status: 409,
@@ -105,7 +143,16 @@ export function createResetCreditGuard(deps: ResetCreditGuardDeps): ResetCreditG
         error: "reset credit blocked: Codex weekly window reset time is unavailable",
       } as const;
     }
-    if ((await readReservedWindow(sharedKey)) === windowId) {
+    const reserved = compareReservedWeeklyWindow(await readReservedWindow(sharedKey), window);
+    if (reserved === "invalid") {
+      return {
+        ok: false,
+        status: 503,
+        code: "reset_credit_window_guard_corrupt",
+        error: "reset credit guard failed closed: stored weekly window marker is invalid",
+      } as const;
+    }
+    if (reserved === "same") {
       return {
         ok: false,
         status: 409,
@@ -113,7 +160,7 @@ export function createResetCreditGuard(deps: ResetCreditGuardDeps): ResetCreditG
         error: "reset credit blocked: this Codex weekly window already reserved a reset credit",
       } as const;
     }
-    return { ok: true, windowId } as const;
+    return { ok: true, windowId: window.windowId } as const;
   }
 
   return {
@@ -146,6 +193,15 @@ export function createResetCreditGuard(deps: ResetCreditGuardDeps): ResetCreditG
           const memoryLast = lastBySharedKey.get(sharedKey);
           if (memoryLast !== undefined && !cooldownPassed(memoryLast, nowMs)) {
             return cooldownBlocked(memoryLast, nowMs);
+          }
+          if (memoryLast === undefined) {
+            const persistedLast = await readPersistedLast(sharedKey);
+            if (persistedLast !== undefined) {
+              lastBySharedKey.set(sharedKey, persistedLast);
+              if (!cooldownPassed(persistedLast, nowMs)) {
+                return cooldownBlocked(persistedLast, nowMs);
+              }
+            }
           }
 
           const window = await reserveWindow(sharedKey, windows);
