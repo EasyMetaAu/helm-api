@@ -878,6 +878,8 @@
   "Waiting longer than this returns 429.": "等待超过该时间将返回 429。",
   "Waiting longer than this returns 503.": "等待超过该时间将返回 503。",
   "Weekly": "周限",
+  "Weekly quota snapshot unavailable": "周限额快照不可用",
+  "Weekly usage must reach 90% before reset credits can be used": "周用量必须达到 90% 后才能使用重置额度",
   "Weight": "权重",
   "What this single request cost, split across routing, optional eval, and completion.": "这一个请求的成本，分摊到路由、可选评估和补全三部分。",
   "When a provider has several accounts, Helm pools them: a lower priority is served first, with round-robin within an equal priority. Parking an account keeps it connected but out of routing.": "当一个提供商有多个账户时，Helm 会将它们汇集：优先级较低的会先被服务，相同优先级内采用轮询。停放账户会保持其连接，但不参与路由。",
