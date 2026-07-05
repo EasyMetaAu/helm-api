@@ -433,6 +433,16 @@ export interface AdminApiDeps {
     untilMs: number | null,
     mode?: UsageLimitWriteMode,
   ) => Promise<void>;
+  // Refresh one account's live soft quota snapshot in the current OAuth pool. Used by
+  // the /quota PULL so quota-aware strategies see fresh windows/reset credits without
+  // waiting for a full pool rebuild. Optional in tests/disabled deployments.
+  applyQuotaSnapshot?: (
+    providerId: string,
+    account: string,
+    windows: OAuthQuotaWindow[],
+    capturedAtMs: number,
+    resetCredits?: number | null,
+  ) => void;
 }
 
 // Re-exported for route signatures.

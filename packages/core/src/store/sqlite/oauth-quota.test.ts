@@ -48,6 +48,30 @@ describe("SqliteOAuthQuotaStore", () => {
     close();
   });
 
+  it("round-trips reset credits and preserves them when a header snapshot omits the count", async () => {
+    const { store, close } = freshStore();
+    await store.upsert(
+      snap({
+        providerId: "openai-codex",
+        source: "codex",
+        resetCredits: 2,
+      }),
+    );
+    expect((await store.get("openai-codex", "a"))?.resetCredits).toBe(2);
+
+    await store.upsert(
+      snap({
+        providerId: "openai-codex",
+        source: "codex-headers",
+        capturedAt: 999,
+        resetCredits: undefined,
+      }),
+    );
+
+    expect((await store.get("openai-codex", "a"))?.resetCredits).toBe(2);
+    close();
+  });
+
   it("getAll returns every account's latest snapshot; get is null when absent", async () => {
     const { store, close } = freshStore();
     expect(await store.get("anthropic", "missing")).toBeNull();

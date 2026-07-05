@@ -33,6 +33,11 @@ describe("OAuthQuotaSnapshotSchema — usageLimitedUntilMs", () => {
     expect(parsed.usageLimitedUntilMs).toBe(1_700_000);
   });
 
+  it("round-trips an optional Codex reset-credit count", () => {
+    const parsed = OAuthQuotaSnapshotSchema.parse({ ...base, resetCredits: 2 });
+    expect(parsed.resetCredits).toBe(2);
+  });
+
   it("rejects a non-integer cooldown", () => {
     expect(() => OAuthQuotaSnapshotSchema.parse({ ...base, usageLimitedUntilMs: 1.5 })).toThrow();
   });

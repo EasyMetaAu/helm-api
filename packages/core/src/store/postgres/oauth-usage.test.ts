@@ -122,6 +122,30 @@ describe("PgOAuthQuotaStore (pglite)", () => {
     await db.$close();
   });
 
+  it("round-trips reset credits and preserves them when a header snapshot omits the count", async () => {
+    const db: PgDb = await createPgliteDb();
+    const store = new PgOAuthQuotaStore(db);
+    await store.upsert(
+      snap({
+        providerId: "openai-codex",
+        source: "codex",
+        resetCredits: 2,
+      }),
+    );
+    expect((await store.get("openai-codex", "a"))?.resetCredits).toBe(2);
+
+    await store.upsert(
+      snap({
+        providerId: "openai-codex",
+        source: "codex-headers",
+        capturedAt: 999,
+        resetCredits: undefined,
+      }),
+    );
+    expect((await store.get("openai-codex", "a"))?.resetCredits).toBe(2);
+    await db.$close();
+  });
+
   it("setUsageLimit upserts a synthetic row; a window upsert preserves the cooldown; null clears it", async () => {
     const db: PgDb = await createPgliteDb();
     const store = new PgOAuthQuotaStore(db);

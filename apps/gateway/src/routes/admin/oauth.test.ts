@@ -468,6 +468,7 @@ describe("admin OAuth routes — read endpoints", () => {
       upsert: vi.fn(async () => {}),
       delete: vi.fn(async () => {}),
     } as unknown as AdminApiDeps["oauthQuota"];
+    const upsert = oauthQuota?.upsert as unknown as ReturnType<typeof vi.fn>;
     const seam = fullSeam({
       listStatus: vi.fn(async () => ({
         selectionStrategy: "balanced",
@@ -475,12 +476,23 @@ describe("admin OAuth routes — read endpoints", () => {
       })) as never,
       fetchCodexQuota: vi.fn(async () => ({ windows: [window], resetCredits: 3 })) as never,
     });
-    const res = await app({ oauth: seam, oauthQuota }).request("/admin/api/oauth/quota");
+    const applyQuotaSnapshot = vi.fn();
+    const res = await app({ oauth: seam, oauthQuota, applyQuotaSnapshot }).request(
+      "/admin/api/oauth/quota",
+    );
     const body = (await res.json()) as {
       quota: Array<{ providerId: string; resetCredits?: number }>;
     };
     expect(body.quota).toHaveLength(1);
     expect(body.quota[0]?.resetCredits).toBe(3);
+    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({ resetCredits: 3 }));
+    expect(applyQuotaSnapshot).toHaveBeenCalledWith(
+      "openai-codex",
+      "default",
+      [window],
+      expect.any(Number),
+      3,
+    );
   });
 
   it("GET /oauth/:provider/models returns available + enabled", async () => {

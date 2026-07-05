@@ -208,9 +208,8 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     // Codex push captured under an old label) that would show as a phantom account.
     const acctKey = (providerId: string, account: string) => `${providerId}\u0000${account}`;
     let bound: Set<string> | null = null;
-    // Codex reset-credit counts, surfaced LIVE (never persisted — the value drops the
-    // instant a credit is consumed, so a stored snapshot would lie). Keyed by acctKey;
-    // attached onto the matching codex snapshot in the response below.
+    // Codex reset-credit counts from the live usage PULL. They are persisted with the
+    // latest snapshot for quota-aware strategy scoring, then folded onto the response.
     const resetCredits = new Map<string, number | null>();
     const syncActiveCooldownFromWindows = async (
       providerId: string,
@@ -259,15 +258,17 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
               (async () => {
                 const windows = await fetchAnthropic({ account: a.account });
                 if (windows && windows.length > 0) {
+                  const capturedAt = Date.now();
                   await store
                     .upsert({
                       providerId: "anthropic",
                       account: a.account,
                       windows,
-                      capturedAt: Date.now(),
+                      capturedAt,
                       source: "anthropic",
                     })
                     .catch(() => {});
+                  deps.applyQuotaSnapshot?.("anthropic", a.account, windows, capturedAt);
                   await syncActiveCooldownFromWindows("anthropic", a.account, windows);
                 }
               })(),
@@ -284,15 +285,24 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                 if (!result) return;
                 resetCredits.set(acctKey("openai-codex", a.account), result.resetCredits);
                 if (result.windows.length > 0) {
+                  const capturedAt = Date.now();
                   await store
                     .upsert({
                       providerId: "openai-codex",
                       account: a.account,
                       windows: result.windows,
-                      capturedAt: Date.now(),
+                      capturedAt,
                       source: "codex",
+                      resetCredits: result.resetCredits,
                     })
                     .catch(() => {});
+                  deps.applyQuotaSnapshot?.(
+                    "openai-codex",
+                    a.account,
+                    result.windows,
+                    capturedAt,
+                    result.resetCredits,
+                  );
                   await syncActiveCooldownFromWindows("openai-codex", a.account, result.windows);
                 }
               })(),
