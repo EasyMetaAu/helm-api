@@ -320,8 +320,12 @@
       {$t('Layer-2 small-model evaluation chose the lane.')}
     </span>
     <span class="flex items-center gap-2 text-xs text-ink-body">
-      <span class="badge-fallback">{$t('fallback')}</span>
+      <span class="badge-classifier-fallback">{$t('fallback')}</span>
       {$t('Classification failed safely and fell back to balanced.')}
+    </span>
+    <span class="flex items-center gap-2 text-xs text-ink-body">
+      <span class="badge-neutral">{$t('default')}</span>
+      {$t('Default (explicit passthrough or fail-open)')}
     </span>
   </div>
 
@@ -333,7 +337,12 @@
       </p>
     </div>
   {:else}
-    <RequestsTable items={data.items} {detailHref} onKeyFilter={(keyId) => go({ keyId })} />
+    <RequestsTable
+      items={data.items}
+      {detailHref}
+      onKeyFilter={(keyId) => go({ keyId })}
+      variant="full"
+    />
 
     <!-- Pagination footer: rows-per-page on the left, numbered pages + Prev/Next on
          the right. `total` reflects the active filters so the counts stay consistent

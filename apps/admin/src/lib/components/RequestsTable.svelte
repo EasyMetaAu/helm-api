@@ -25,14 +25,22 @@
     detailHref,
     onKeyFilter,
     keyHref,
-    showKey = true,
+    showKey,
+    variant = 'full',
   }: {
     items: RequestListItem[];
     detailHref: (traceId: string) => string;
     onKeyFilter?: (keyId: string) => void;
     keyHref?: (keyId: string) => string;
     showKey?: boolean;
+    variant?: 'recent' | 'full' | 'key';
   } = $props();
+
+  const visibleKey = $derived(showKey ?? variant !== 'key');
+  const compactMetrics = $derived(variant !== 'full');
+  const visibleRequestId = $derived(variant === 'full');
+  const showRoutingDetail = $derived(variant !== 'recent');
+  const showServingAccount = $derived(variant !== 'recent');
 
   // Navigate when the row is clicked, EXCEPT when the click originates on an inner
   // control (the request-id <a> and the key-filter <button> handle their own click).
@@ -53,7 +61,7 @@
       case 'eval':
         return 'badge-eval';
       case 'fallback':
-        return 'badge-fallback';
+        return 'badge-classifier-fallback';
       default: // default
         return 'badge-neutral';
     }
@@ -61,6 +69,23 @@
 
   function accountTitle(account: RequestListItem['serving_account']): string | undefined {
     return account ? `${account.provider_id}/${account.account}` : undefined;
+  }
+
+  function requestedModel(r: RequestListItem): string | null {
+    if (!r.requested_model) return null;
+    if (r.requested_model === 'auto') return null;
+    if (r.status !== 'error' && r.requested_model === r.final_model) return null;
+    return r.requested_model;
+  }
+
+  function servedModel(r: RequestListItem): string {
+    if (r.status === 'error') return $t('not served');
+    return r.final_model ?? '—';
+  }
+
+  function servingProvider(r: RequestListItem): string {
+    if (r.status === 'error' && !r.served_provider) return $t('not served');
+    return r.served_provider ?? '—';
   }
 </script>
 
@@ -76,99 +101,198 @@
   <span aria-hidden="true"> </span>
 {/snippet}
 
-<div class="table-wrap">
-  <table class="table-base">
+{#snippet timeCell(r: RequestListItem)}
+  {#if visibleRequestId}
+    {formatTs(r.ts)}
+  {:else}
+    <a
+      data-testid="request-detail-link"
+      class="link-inline font-mono text-ink-strong"
+      href={detailHref(r.trace_id)}
+      title={r.trace_id}
+    >
+      {formatTs(r.ts)}
+    </a>
+  {/if}
+{/snippet}
+
+{#snippet resultCell(r: RequestListItem)}
+  <div data-testid="cell-result" class="leading-tight">
+    {#if r.status === 'error'}
+      <span class="badge-error">{$t('error')}</span>
+      {#if r.error_class}
+        <div class="mt-1 max-w-[12rem] truncate text-xs text-red-600" title={r.error_class}>
+          {$t(attemptCodeLabel(r.error_class))}
+        </div>
+      {/if}
+    {:else}
+      <span class="badge-ok">{$t('ok')}</span>
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet modelCell(r: RequestListItem)}
+  <div data-testid="cell-model" class="leading-tight">
+    <div
+      class="max-w-[16rem] truncate font-mono text-ink-strong"
+      title={r.final_model ?? undefined}
+    >
+      {servedModel(r)}
+    </div>
+    {#if requestedModel(r)}
+      <div
+        class="mt-1 max-w-[16rem] truncate font-mono text-xs text-ink-muted"
+        title={r.requested_model ?? undefined}
+      >
+        {$t('requested:')}
+        {r.requested_model}
+      </div>
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet routingCell(r: RequestListItem)}
+  <div data-testid="cell-routing" class="leading-tight">
+    <div class="flex flex-wrap items-center gap-1.5">
+      <span class="badge-neutral">{r.lane || '—'}</span>
+      <span
+        data-testid="decided-by"
+        class={decidedByClass(r.decided_by)}
+        title={$t('Classification-stage decision source')}
+      >
+        {r.decided_by}
+      </span>
+    </div>
+    {#if showRoutingDetail}
+      <div class="mt-1 text-xs text-ink-muted">
+        {r.task_type || '—'}{#if r.complexity}
+          · {r.complexity}{/if}
+      </div>
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet servingCell(r: RequestListItem)}
+  <div data-testid="cell-serving" class="leading-tight">
+    <div class="flex flex-wrap items-center gap-1.5">
+      <span
+        class="max-w-[12rem] truncate font-mono text-ink-body"
+        title={accountTitle(r.serving_account) ?? r.served_provider ?? undefined}
+      >
+        {servingProvider(r)}
+      </span>
+      {#if r.fallback_count > 0}
+        <span class="badge-fallback" title={$t('Execution fallback count')}>
+          {$t('exec +{n}', { n: r.fallback_count })}
+        </span>
+      {/if}
+    </div>
+    {#if showServingAccount && r.serving_account}
+      <div
+        class="mt-1 max-w-[12rem] truncate font-mono text-xs text-ink-muted"
+        title={accountTitle(r.serving_account)}
+      >
+        {r.serving_account.account}
+      </div>
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet performanceCell(r: RequestListItem)}
+  <div data-testid="cell-performance" class="font-mono text-xs leading-tight">
+    <div>{r.latency_ms}ms</div>
+    <div data-testid="cell-tps" class="text-ink-muted">{formatTps(r.tps)}</div>
+  </div>
+{/snippet}
+
+{#snippet metricsCell(r: RequestListItem)}
+  <div data-testid="cell-metrics" class="font-mono text-xs leading-tight">
+    {#if variant === 'recent'}
+      <div>{r.latency_ms}ms · {formatTps(r.tps)}</div>
+      <div class="text-ink-muted">{formatUsd(r.cost_usd)}</div>
+      <div class="mt-1">
+        <TokensCell usage={r.usage} />
+      </div>
+    {:else}
+      <div>{formatUsd(r.cost_usd)}</div>
+      <div class="mt-1">
+        <TokensCell usage={r.usage} />
+      </div>
+      <div class="text-ink-muted">{r.latency_ms}ms · {formatTps(r.tps)}</div>
+    {/if}
+  </div>
+{/snippet}
+
+<div class="cards-table-frame">
+  <table class="cards-table">
     <thead class="table-head">
       <tr>
         <th class="px-3 py-2" title={$t('When the gateway received the request.')}>{$t('Time')}</th>
-        <th class="px-3 py-2" title={$t('Whether the request succeeded or returned an error.')}
-          >{$t('Status')}</th
+        <th
+          class="px-3 py-2"
+          title={$t('Whether the request succeeded, with the final error class when it failed.')}
+          >{$t('Result')}</th
         >
-        {#if showKey}
+        {#if visibleKey}
           <th
             class="px-3 py-2"
             title={$t('The API key that authenticated the client, shown by prefix only.')}
             >{$t('Key')}</th
           >
         {/if}
-        <th class="px-3 py-2" title={$t('The concrete provider that served this request.')}
-          >{$t('Provider')}</th
+        <th
+          class="px-3 py-2"
+          title={$t('The model that served the request, with the requested model when different.')}
+          >{$t('Model')}</th
         >
         <th
           class="px-3 py-2"
-          title={$t('The subscription account that served this request, when applicable.')}
-          >{$t('Subscription account')}</th
+          title={$t('Classification result: lane, decision source, task, and complexity.')}
+          >{$t('Routing')}</th
         >
-        <th class="px-3 py-2" title={$t('The model that actually handled the request.')}
-          >{$t('Served model')}</th
+        <th class="px-3 py-2" title={$t('Provider, account, and execution fallback count.')}
+          >{$t('Serving')}</th
         >
-        <th class="px-3 py-2" title={$t('The model the client asked for in its request.')}
-          >{$t('Requested model')}</th
-        >
-        <th class="px-3 py-2" title={$t('The quality/cost tier the request was routed to.')}
-          >{$t('Lane')}</th
-        >
-        <th
-          class="px-3 py-2"
-          title={$t('How many fallback models were tried before one succeeded.')}
-          >{$t('Fallbacks')}</th
-        >
-        <th class="px-3 py-2" title={$t('End-to-end response time in milliseconds.')}
-          >{$t('Latency')}</th
-        >
-        <th
-          class="px-3 py-2"
-          title={$t(
-            'Generation throughput: output tokens per second. Only measured for streamed responses.',
-          )}>{$t('TPS')}</th
-        >
-        <th class="px-3 py-2" title={$t('Token usage: input / output, with cached input tokens.')}
-          >{$t('Tokens')}</th
-        >
-        <th class="px-3 py-2" title={$t('Estimated cost of the request in US dollars.')}
-          >{$t('Cost')}</th
-        >
-        <th
-          class="px-3 py-2"
-          title={$t('Task type the classifier detected (e.g. coding, json, vision).')}
-          >{$t('Task')}</th
-        >
-        <th
-          class="px-3 py-2"
-          title={$t('Estimated request difficulty used to pick a quality tier.')}
-          >{$t('Complexity')}</th
-        >
-        <th class="px-3 py-2" title={$t('Which classification layer chose the lane.')}
-          >{$t('Decided by')}</th
-        >
-        <th class="px-3 py-2" title={$t('The error class, if the request failed.')}
-          >{$t('Error')}</th
-        >
-        <th class="px-3 py-2" title={$t('The unique trace ID recorded for this request.')}
-          >{$t('Request ID')}</th
-        >
+        {#if compactMetrics}
+          <th class="px-3 py-2" title={$t('Cost, token usage, latency, and throughput.')}
+            >{$t('Metrics')}</th
+          >
+        {:else}
+          <th class="px-3 py-2" title={$t('Estimated cost of the request in US dollars.')}
+            >{$t('Cost')}</th
+          >
+          <th class="px-3 py-2" title={$t('Token usage: input / output, with cached input tokens.')}
+            >{$t('Tokens')}</th
+          >
+          <th class="px-3 py-2" title={$t('End-to-end latency and streamed generation throughput.')}
+            >{$t('Performance')}</th
+          >
+        {/if}
+        {#if visibleRequestId}
+          <th class="px-3 py-2" title={$t('The unique trace ID recorded for this request.')}
+            >{$t('Request ID')}</th
+          >
+        {/if}
       </tr>
     </thead>
     <tbody>
       {#each items as r (r.trace_id)}
-        <!-- The whole row links to the detail page; the request-id cell keeps a real
-             <a> for keyboard / open-in-new-tab. -->
+        <!-- The whole row links to the detail page; full view keeps the request-id
+             <a>, while compact views keep a real detail <a> in the time cell. -->
         <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
         <tr
           data-testid="request-row"
-          class="table-row cursor-pointer"
+          class="cursor-pointer"
           onclick={(e) => onRowClick(e, r.trace_id)}
         >
-          <td class="px-3 py-2 text-ink-body">{formatTs(r.ts)}</td>
-          <td class="px-3 py-2">
-            {#if r.status === 'error'}
-              <span class="badge-error">{$t('error')}</span>
-            {:else}
-              <span class="badge-ok">{$t('ok')}</span>
-            {/if}
+          <td data-label={$t('Time')} class="px-3 py-2 text-ink-body">
+            {@render timeCell(r)}
           </td>
-          {#if showKey}
-            <td class="px-3 py-2">
+          <td data-label={$t('Result')} class="px-3 py-2">
+            {@render resultCell(r)}
+          </td>
+          {#if visibleKey}
+            <td data-label={$t('Key')} class="px-3 py-2">
               {#if r.key_id && onKeyFilter}
                 <!-- In-page filter (the /requests list): a <button> updates the
                      querystring; onRowClick lets it handle the click, not the row. -->
@@ -197,41 +321,38 @@
               {/if}
             </td>
           {/if}
-          <td class="px-3 py-2 font-mono text-ink-body">{r.served_provider ?? '—'}</td>
-          <td
-            class="px-3 py-2 font-mono text-ink-body"
-            title={accountTitle(r.serving_account)}
-          >
-            {r.serving_account?.account ?? '—'}
+          <td data-label={$t('Model')} class="px-3 py-2">
+            {@render modelCell(r)}
           </td>
-          <td class="px-3 py-2 text-ink-body">{r.final_model ?? '—'}</td>
-          <td class="px-3 py-2 text-ink-body">{r.requested_model ?? '—'}</td>
-          <td class="px-3 py-2 text-ink-body">{r.lane || '—'}</td>
-          <td class="px-3 py-2 text-ink-body">{r.fallback_count}</td>
-          <td class="px-3 py-2 font-mono text-ink-body">{r.latency_ms}ms</td>
-          <td data-testid="cell-tps" class="px-3 py-2 font-mono text-ink-body"
-            >{formatTps(r.tps)}</td
-          >
-          <td class="px-3 py-2"><TokensCell usage={r.usage} /></td>
-          <td class="px-3 py-2 font-mono text-ink-body">{formatUsd(r.cost_usd)}</td>
-          <td class="px-3 py-2 text-ink-body">{r.task_type || '—'}</td>
-          <td class="px-3 py-2 text-ink-body">{r.complexity || '—'}</td>
-          <td class="px-3 py-2">
-            <span data-testid="decided-by" class={decidedByClass(r.decided_by)}>{r.decided_by}</span
-            >
+          <td data-label={$t('Routing')} class="px-3 py-2">
+            {@render routingCell(r)}
           </td>
-          <td
-            class="px-3 py-2 {r.error_class ? 'text-red-600' : 'text-ink-muted'}"
-            title={r.error_class ?? undefined}
-            >{r.error_class ? $t(attemptCodeLabel(r.error_class)) : '—'}</td
-          >
-          <td class="px-3 py-2">
-            <a
-              class="link-inline block max-w-[7rem] truncate font-mono text-ink-strong lg:max-w-none"
-              href={detailHref(r.trace_id)}
-              title={r.trace_id}>{r.trace_id}</a
-            >
+          <td data-label={$t('Serving')} class="px-3 py-2">
+            {@render servingCell(r)}
           </td>
+          {#if compactMetrics}
+            <td data-label={$t('Metrics')} class="px-3 py-2">
+              {@render metricsCell(r)}
+            </td>
+          {:else}
+            <td data-label={$t('Cost')} class="px-3 py-2 font-mono text-ink-body">
+              {formatUsd(r.cost_usd)}
+            </td>
+            <td data-label={$t('Tokens')} class="px-3 py-2"><TokensCell usage={r.usage} /></td>
+            <td data-label={$t('Performance')} class="px-3 py-2">
+              {@render performanceCell(r)}
+            </td>
+          {/if}
+          {#if visibleRequestId}
+            <td data-label={$t('Request ID')} class="px-3 py-2">
+              <a
+                data-testid="request-detail-link"
+                class="link-inline block max-w-[7rem] truncate font-mono text-ink-strong lg:max-w-none"
+                href={detailHref(r.trace_id)}
+                title={r.trace_id}>{r.trace_id}</a
+              >
+            </td>
+          {/if}
         </tr>
       {/each}
     </tbody>

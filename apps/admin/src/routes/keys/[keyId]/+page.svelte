@@ -512,7 +512,7 @@
     {#if data.requests.items.length === 0}
       <div class="empty-state">{$t('No requests for this key in the selected window.')}</div>
     {:else}
-      <RequestsTable items={data.requests.items} {detailHref} showKey={false} />
+      <RequestsTable items={data.requests.items} {detailHref} showKey={false} variant="key" />
 
       {#if hasMore}
         <!-- Only the most-recent page is shown here. The full current window lives

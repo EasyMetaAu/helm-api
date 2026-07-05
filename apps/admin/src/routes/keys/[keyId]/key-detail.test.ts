@@ -212,7 +212,7 @@ describe('key detail page', () => {
     expect(screen.getByText('42')).toBeInTheDocument();
     // The scoped request row links to the shared request detail page, carrying THIS
     // key page as `from` so the detail's Back link returns here (not the global list).
-    const link = screen.getByRole('link', { name: 'tr_1' });
+    const link = screen.getByTestId('request-detail-link');
     expect(link.getAttribute('href')).toBe('/requests/tr_1?from=%2Fkeys%2Fk1');
   });
 
