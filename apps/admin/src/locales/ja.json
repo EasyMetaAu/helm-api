@@ -878,6 +878,8 @@
   "Waiting longer than this returns 429.": "これより長く待機すると 429 が返されます。",
   "Waiting longer than this returns 503.": "これより長く待機すると 503 が返されます。",
   "Weekly": "週間",
+  "Weekly quota snapshot unavailable": "週次クォータのスナップショットを取得できません",
+  "Weekly usage must reach 90% before reset credits can be used": "リセットクレジットを使うには、週次使用率が 90% に達している必要があります",
   "Weight": "重み",
   "What this single request cost, split across routing, optional eval, and completion.": "この単一リクエストのコストを、ルーティング、任意の評価、補完に分けて表示します。",
   "When a provider has several accounts, Helm pools them: a lower priority is served first, with round-robin within an equal priority. Parking an account keeps it connected but out of routing.": "プロバイダーに複数のアカウントがある場合、Helmはそれらをプールします。優先度が低いものから先に処理され、同じ優先度内ではラウンドロビンで処理されます。アカウントをパーキングすると、接続は維持されますがルーティングからは除外されます。",
