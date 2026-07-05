@@ -272,29 +272,39 @@ They never grant a client more API-key budget.
 Quota collection is intentionally fail-open:
 
 - Codex quota windows are captured from `x-codex-*` response headers on served
-  requests and from the provider usage endpoint used by the Providers page.
+  requests. A saturated live Codex window with a future reset can newly park that
+  account until the reset timestamp.
+- The Providers page can also pull Codex quota windows from the upstream usage
+  endpoint for display and strategy scoring. That admin pull does **not** newly
+  auto-park an otherwise active account; it only preserves/syncs an existing
+  usage-limit cooldown when one is already present.
 - Anthropic quota windows are pulled from the provider usage endpoint.
 - Missing, stale, or failed quota reads render as unknown in the UI and make
   quota-aware strategies fall back toward the balanced behavior.
 
-When a quota window is saturated and carries a future reset time, Helm parks that
-OAuth account until the reset timestamp and persists the cooldown in
-`oauth_quota.usage_limited_until_ms`, so a pool rebuild or restart keeps routing
-around it. A generic account-wide 429 without a precise window applies a shorter
-probe cooldown. The Providers page **Reset usage** action only clears Helm's local
-cooldown/snapshot for a Codex account so it can rejoin the pool; it does not spend
-an upstream reset credit.
+When a live quota signal or account-wide rate limit parks an OAuth account, Helm
+persists the cooldown in `oauth_quota.usage_limited_until_ms`, so a pool rebuild
+or restart keeps routing around it. A generic account-wide 429 without a precise
+window applies a shorter probe cooldown. The Providers page **Reset usage** action
+is Codex-only and clears only Helm's local Codex usage-limit cooldown so the
+account can rejoin the pool; it does not clear quota windows/snapshots, and it
+does not spend an upstream reset credit.
 
 Codex reset credits are separate. The Providers page **Reset limit** action
 spends one upstream Codex rate-limit reset credit through the official consume
 endpoint and is fail-closed: if the consume call fails, the operator sees an
 error. Helm guards the mutation:
 
-- manual **Reset limit** is allowed only when a weekly Codex window is at least
-  90% used;
+- the UI enables **Reset limit** only when reset credits are available and a
+  weekly Codex window is at least 90% used;
+- the server requires an available quota snapshot, the same 90% weekly threshold,
+  and the reset-credit guard before it attempts the upstream consume;
 - auto-reset runs only for accounts that opted in, only after the weekly window is
   saturated, and through a shared-account guard so sibling Helm labels for the
   same ChatGPT login cannot double-spend the same credit;
+- a successful consume resets the shared upstream ChatGPT account, so sibling Helm
+  labels backed by the same login re-pull their restored windows and decremented
+  credit count;
 - reset credits may influence the `use_expiring` strategy as discounted virtual
   capacity, but **selection never consumes them**.
 

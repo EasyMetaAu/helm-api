@@ -9,6 +9,7 @@ its ordered chain. The framework-agnostic orchestrator is `routeRequest`
 ## Lane routing priority
 
 ```text
+image-output model             # exact image model → image lane, any key; suppressed while over-budget degrading
 model-alias shim               # fixed vendor id → lane / `auto`; cap-bounded; allow_custom_model keys only
   > explicit model/lane        # concrete model/lane; skips classify + policy; allow_custom_model keys only
   > classifier short-circuit   # decided_by 'default' | 'fallback' → straight to the default fallback lane (classified branch only)
@@ -27,6 +28,15 @@ custom-model key the shim runs first (priority 0; see
 [Model-alias compatibility shim](#model-alias-compatibility-shim) below), then
 explicit passthrough — a request naming a concrete model or lane skips
 classification and policy entirely and is executed directly.
+
+Image-output models are the exception to the custom-model gate on the Gemini
+`generateContent` route: when the requested model is known to produce images,
+Helm treats it as an exact image request for **any** valid key, selects the
+synthetic `image` lane label for telemetry, and skips text classification and the
+model-alias shim. This pre-step is suppressed while a key is over-budget and
+forced to a degrade lane, so image requests cannot bypass budget enforcement. The
+two dedicated image endpoints use the same image-chain semantics outside the text
+router.
 
 Within the classified branch, the resolver applies its own priority-0
 short-circuit: if the classifier `decided_by` is `default` (classify() itself
@@ -281,15 +291,23 @@ the requested curated model, or are temporarily auto-parked by a usage-limit
 cooldown. It then applies the provider's global account-usage strategy:
 
 - `balanced` — keep sticky sessions on the same account, otherwise hash a new
-  session when an `x-session-key` is present and fall back to LRU spreading.
-- `manual_priority` — use account priority first, rotating only within the best
-  eligible priority tier.
+  session from provider-native affinity inputs and fall back to LRU spreading.
+- `manual_priority` — sticky hits still win; otherwise use account priority
+  first, rotating only within the best eligible priority tier.
 - `low_risk` — in the best priority tier, prefer the account with the lowest fresh
-  quota pressure; stale or missing quota falls back to the normal priority/LRU
-  behavior.
+  quota pressure; a sticky account in the same tier is kept when it is close
+  enough to the best pressure. Stale or missing quota falls back to the normal
+  sticky/hash/LRU behavior.
 - `use_expiring` — in the best priority tier, prefer usable quota windows that
-  will reset soon. Codex reset credits are counted only as discounted virtual
-  capacity for this score; selection never spends them.
+  will reset soon. A sticky account in the same tier is kept when its score is
+  close enough to the best score. Codex reset credits are counted only as
+  discounted virtual capacity for this score; selection never spends them.
+
+Sticky affinity is derived from the request shape the upstream client already
+sends: device ids, session/conversation metadata, `prompt_cache_key`,
+`conversation_id`, `user`, `safety_identifier`, and `previous_response_id` where
+present. Helm does not require clients to send a Helm-specific session header for
+OAuth account affinity.
 
 If a selected subscription account hits an account-wide limit before useful
 output, the pool can retry a sibling account inside the same provider alias. A
@@ -298,10 +316,13 @@ quota window is known, or for a short cooldown when only a generic 429 is known.
 Scoped limits, such as an Anthropic model-specific cap, can retry a sibling for
 the current request without globally parking the account.
 
-Telemetry records this as `serving_account` on the final decision and
-`provider_attempts[].provider_name` / `provider_attempts[].provider_model` on
-attempt rows, so operators can distinguish "the lane chose `openai-codex/gpt-5.5`"
-from "account `work-codex-2` actually served it."
+Telemetry stamps `serving_account` on the final decision only when the final
+served alias still belongs to that selected OAuth provider; if the OAuth attempt
+falls through to a non-OAuth fallback, the field is cleared. Attempt rows still
+carry `provider_attempts[].provider_name` / `provider_attempts[].provider_model`
+when known. Selection details such as strategy, sticky/hash reason, capacity
+avoidance, and retry attempt are emitted as structured logs (`oauth.pool.select`),
+not as DecisionRecord fields.
 
 ### Chain expansion
 
