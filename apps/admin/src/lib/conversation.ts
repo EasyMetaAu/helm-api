@@ -27,6 +27,17 @@ export type TurnPart =
   // args/output kept as-is (object OR raw JSON string) — the viewer parses, not us.
   | { kind: 'tool_call'; id: string | null; name: string; args: unknown }
   | { kind: 'tool_result'; callId: string | null; name: string | null; output: unknown }
+  // A call paired with its result — the shape the UI renders (one block: fn → status,
+  // args in, result out). Produced by the post-fold pairing pass; either side may be
+  // absent (truncated capture) but never both.
+  | {
+      kind: 'tool_exchange';
+      id: string | null;
+      name: string;
+      args: unknown;
+      hasResult: boolean;
+      output: unknown;
+    }
   | { kind: 'unknown'; value: unknown }; // fail-soft catch-all — never dropped
 
 export interface ConversationTurn {
@@ -342,13 +353,17 @@ function geminiParts(rawParts: unknown, seenResults: Map<string, number>, callOr
     } else if (asRecord(part.functionCall)) {
       const fc = asRecord(part.functionCall) as Record<string, unknown>;
       const name = str(fc.name) ?? '';
+      // Gemini functionCall has no id — synthesize a stable `name#ordinal` key so the
+      // Nth call of a name pairs with the Nth response (callOrder tracks occurrence).
+      const ordinal = callOrder.filter((n) => n === name).length;
       callOrder.push(name);
-      parts.push({ kind: 'tool_call', id: null, name, args: fc.args });
+      parts.push({ kind: 'tool_call', id: `${name}#${ordinal}`, name, args: fc.args });
     } else if (asRecord(part.functionResponse)) {
       const fr = asRecord(part.functionResponse) as Record<string, unknown>;
       const name = str(fr.name) ?? '';
-      seenResults.set(name, (seenResults.get(name) ?? 0) + 1);
-      parts.push({ kind: 'tool_result', callId: null, name, output: fr.response });
+      const ordinal = seenResults.get(name) ?? 0;
+      seenResults.set(name, ordinal + 1);
+      parts.push({ kind: 'tool_result', callId: `${name}#${ordinal}`, name, output: fr.response });
     } else if (resolveImage(part)) {
       parts.push({ kind: 'image', url: resolveImage(part) as string });
     } else {
@@ -508,9 +523,85 @@ export function extractConversation(request: unknown, response: unknown): Conver
     for (const turn of turns) {
       if (turn.parts.length > MAX_PARTS) turn.parts = capParts(turn.parts);
     }
-    return turns;
+    // Post-fold cleanup (drives clarity — the viewer only draws what survives here):
+    //   1. pair tool_call ↔ tool_result across turns into one tool_exchange part
+    //   2. drop empty parts (whitespace text / empty reasoning / valueless unknown)
+    //   3. drop turns that end up with nothing to show
+    return cleanTurns(pairToolExchanges(turns));
   } catch {
     // Fail-soft: a bad payload can never blank the page.
     return [];
   }
+}
+
+// ── post-fold clarity pass ───────────────────────────────────────────────────
+
+// Pair each tool_call with the tool_result that answers it (by id/callId) and fold
+// the two into a single `tool_exchange` part on the CALL's turn. The result turn's
+// paired part is removed; if that empties the turn it's dropped by cleanTurns. A
+// call with no matching result becomes a tool_exchange with hasResult:false; an
+// orphan result (no matching call) is left as-is so it's never silently lost.
+function pairToolExchanges(turns: ConversationTurn[]): ConversationTurn[] {
+  // Index the FIRST tool_result for each callId (a call's answer can appear in any
+  // later turn — results usually follow but don't assume adjacency).
+  const resultByCallId = new Map<string, unknown>();
+  const consumed = new Set<string>(); // callIds folded into a tool_exchange
+  for (const turn of turns) {
+    for (const p of turn.parts) {
+      if (p.kind === 'tool_result' && p.callId && !resultByCallId.has(p.callId)) {
+        resultByCallId.set(p.callId, p.output);
+      }
+    }
+  }
+  return turns.map((turn) => {
+    const parts: TurnPart[] = [];
+    for (const p of turn.parts) {
+      if (p.kind === 'tool_call') {
+        const has = p.id != null && resultByCallId.has(p.id);
+        if (has && p.id) consumed.add(p.id);
+        parts.push({
+          kind: 'tool_exchange',
+          id: p.id,
+          name: p.name,
+          args: p.args,
+          hasResult: has,
+          output: has && p.id ? resultByCallId.get(p.id) : null,
+        });
+      } else if (p.kind === 'tool_result' && p.callId && consumed.has(p.callId)) {
+        // this result was folded into its call's tool_exchange — drop it
+      } else {
+        parts.push(p);
+      }
+    }
+    return { ...turn, parts };
+  });
+}
+
+/** A part carries no signal and should not render. */
+function isEmptyPart(p: TurnPart): boolean {
+  switch (p.kind) {
+    case 'text':
+    case 'reasoning':
+      return p.text.trim() === '';
+    case 'image':
+      return !p.url;
+    case 'unknown':
+      return p.value == null || p.value === '';
+    default:
+      return false; // tool_call / tool_result / tool_exchange always carry signal
+  }
+}
+
+// Drop empty parts, then drop turns left with nothing. Exception: an assistant turn
+// whose only content was reasoning that got hidden should not silently vanish — but
+// reasoning parts are non-empty here (empty ones are dropped as noise), so a truly
+// empty assistant turn genuinely has nothing to show and is correctly removed.
+function cleanTurns(turns: ConversationTurn[]): ConversationTurn[] {
+  const out: ConversationTurn[] = [];
+  for (const turn of turns) {
+    const parts = turn.parts.filter((p) => !isEmptyPart(p));
+    if (parts.length === 0) continue;
+    out.push({ ...turn, parts });
+  }
+  return out;
 }

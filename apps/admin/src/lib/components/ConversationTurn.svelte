@@ -1,63 +1,57 @@
 <script lang="ts">
   import { t } from '$lib/i18n';
-  import type { ConversationTurn } from '$lib/conversation';
+  import type { ConversationTurn, TurnPart } from '$lib/conversation';
   import ImagePreview from './ImagePreview.svelte';
   import JsonViewer from './JsonViewer.svelte';
 
-  // One conversation row, rendered as a single-column transcript (the shape agent
-  // logs actually take — a Codex/Claude-Code turn stream is mostly same-role runs,
-  // so left/right bubbles leave half the width empty). Each row: a role avatar + name
-  // on a colored left spine, then the content. Consecutive same-role turns are
-  // `grouped` — the avatar/header is dropped so a run reads as one block. A tall row
-  // clamps to a fixed height with a fade + "Show more" (measured, so it works for any
-  // content), and reasoning / tool bodies stay collapsed. So a 150-turn session opens
-  // skimmable. Pure presentation; folding lives in conversation.ts.
+  // One conversation row in the transcript. Two states, inverted from a naive viewer:
+  //   COLLAPSED (default) — a single dense line: role dot + name (first of a run only)
+  //     + a one-line preview + type badges (reasoning / tool / image / error) + a size
+  //     hint. This is what makes a 150-turn Codex trace scannable instead of a wall.
+  //   EXPANDED (on click) — full text, reasoning, merged tool exchanges, images.
+  // Raw wire JSON is a hover-revealed { } icon (not a per-turn link × 48). The
+  // normalizer already dropped empty parts/turns, so everything here carries signal.
+  // Pure presentation; folding + suppression live in conversation.ts.
   let {
     turn,
     index,
-    showSystem,
     showReasoning,
     grouped = false,
+    forceExpanded = null,
   }: {
     turn: ConversationTurn;
     index: number;
-    showSystem: boolean;
     showReasoning: boolean;
-    /** True when the previous turn had the same role — hide avatar + header. */
+    /** True when the previous turn had the same role — hide the avatar/name header. */
     grouped?: boolean;
+    /** Parent collapse/expand-all: true/false forces state; null = per-row control. */
+    forceExpanded?: boolean | null;
   } = $props();
 
+  let localOpen = $state(false);
   let sourceOpen = $state(false);
-  let expanded = $state(false);
-  // Set by the `clampProbe` action once the natural height exceeds the cap.
-  let overflowing = $state(false);
-
-  // Collapsed rows cap here; taller content fades under a "Show more". ~10 lines —
-  // enough to read the gist, small enough a 400px context dump can't dominate.
-  const CLAMP_PX = 240;
-
-  // Measure rendered content vs the cap (content-agnostic, unlike a char count).
-  // ResizeObserver may be absent (jsdom / very old browsers) — degrade to a one-shot
-  // measure so the row still renders and clamps on its initial height.
-  function clampProbe(node: HTMLElement) {
-    const measure = () => {
-      overflowing = node.scrollHeight > CLAMP_PX + 8;
-    };
-    measure();
-    if (typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver(measure);
-    ro.observe(node);
-    return { destroy: () => ro.disconnect() };
+  // Parent "expand all / collapse all" wins while it's non-null; a manual click after
+  // that reverts this row to local control.
+  let override = $state<boolean | null>(null);
+  const open = $derived(override ?? forceExpanded ?? localOpen);
+  // Reset the manual override whenever the parent flips the global switch.
+  $effect(() => {
+    forceExpanded;
+    override = null;
+  });
+  function toggle() {
+    override = !open;
+    localOpen = !open;
   }
 
-  // Per-role identity: avatar glyph + color, and a left spine tint. Straight from the
-  // app tokens (indigo brand = assistant, slate = user, amber = system, sky = tool).
-  type RoleStyle = { glyph: string; avatar: string; spine: string; name: string };
+  // Per-role identity: dot color + spine tint + name color — straight from app tokens
+  // (indigo brand = assistant, slate = user, amber = system, sky = tool).
+  type RoleStyle = { dot: string; spine: string; name: string };
   const ROLE: Record<ConversationTurn['role'], RoleStyle> = {
-    user: { glyph: 'U', avatar: 'bg-slate-700 text-white', spine: 'border-slate-300', name: 'text-ink-strong' },
-    assistant: { glyph: 'AI', avatar: 'bg-brand text-white', spine: 'border-indigo-300', name: 'text-brand' },
-    system: { glyph: 'S', avatar: 'bg-amber-500 text-white', spine: 'border-amber-300', name: 'text-amber-700' },
-    tool: { glyph: '↳', avatar: 'bg-sky-600 text-white', spine: 'border-sky-300', name: 'text-sky-700' },
+    user: { dot: 'bg-slate-500', spine: 'border-slate-200', name: 'text-ink-strong' },
+    assistant: { dot: 'bg-brand', spine: 'border-indigo-200', name: 'text-brand' },
+    system: { dot: 'bg-amber-500', spine: 'border-amber-200', name: 'text-amber-700' },
+    tool: { dot: 'bg-sky-500', spine: 'border-sky-200', name: 'text-sky-700' },
   };
   const style = $derived(ROLE[turn.role]);
   function roleLabel(role: ConversationTurn['role']): string {
@@ -70,136 +64,193 @@
           : $t('Tool');
   }
 
+  // ── collapsed-line summary ─────────────────────────────────────────────────
+  // First non-empty text, single line, clipped — the "what was said" preview.
+  const preview = $derived.by(() => {
+    const textPart = turn.parts.find((p) => p.kind === 'text');
+    if (textPart && textPart.kind === 'text') return textPart.text.replace(/\s+/g, ' ').trim();
+    // no text → describe by the dominant non-text part
+    const ex = turn.parts.find((p) => p.kind === 'tool_exchange');
+    if (ex && ex.kind === 'tool_exchange') return `${ex.name || $t('tool call')}()`;
+    const r = turn.parts.find((p) => p.kind === 'reasoning');
+    if (r && r.kind === 'reasoning') return r.text.replace(/\s+/g, ' ').trim();
+    if (turn.parts.some((p) => p.kind === 'image')) return $t('Image');
+    if (turn.parts.some((p) => p.kind === 'tool_result')) return $t('tool result');
+    // a turn with only opaque/unknown parts still gets a label, never a blank row
+    if (turn.parts.length > 0) return $t('Other content');
+    return '';
+  });
+
+  // Type badges — icons only for the kinds actually present (absence itself is signal).
+  const counts = $derived.by(() => {
+    let reasoning = 0;
+    let tools = 0;
+    let images = 0;
+    let errors = 0;
+    for (const p of turn.parts) {
+      if (p.kind === 'reasoning') reasoning++;
+      else if (p.kind === 'tool_exchange') {
+        tools++;
+        if (p.hasResult && isErrorOutput(p.output)) errors++;
+      } else if (p.kind === 'image') images++;
+    }
+    return { reasoning, tools, images, errors };
+  });
+
+  // A rough size hint for the collapsed line, so a 40KB context dump is obvious.
+  const sizeHint = $derived.by(() => {
+    let chars = 0;
+    for (const p of turn.parts) {
+      if (p.kind === 'text' || p.kind === 'reasoning') chars += p.text.length;
+      else if (p.kind === 'tool_exchange') chars += approxLen(p.args) + approxLen(p.output);
+    }
+    if (chars < 1000) return '';
+    return chars < 10000 ? `${Math.round(chars / 100) / 10}k` : `${Math.round(chars / 1000)}k`;
+  });
+
+  function approxLen(v: unknown): number {
+    if (typeof v === 'string') return v.length;
+    if (v == null) return 0;
+    try {
+      return JSON.stringify(v).length;
+    } catch {
+      return 0;
+    }
+  }
+  function isErrorOutput(v: unknown): boolean {
+    const s = typeof v === 'string' ? v : approxLen(v) > 0 ? JSON.stringify(v) : '';
+    return /"?(error|is_error|isError)"?\s*[:=]\s*(true|"[^"]|')/i.test(s) || /^error\b/i.test(s.trim());
+  }
+  function exchangeStatus(p: Extract<TurnPart, { kind: 'tool_exchange' }>): {
+    glyph: string;
+    cls: string;
+    label: string;
+  } {
+    if (!p.hasResult) return { glyph: '⋯', cls: 'text-ink-faint', label: $t('no result') };
+    if (isErrorOutput(p.output)) return { glyph: '✗', cls: 'text-red-600', label: $t('error') };
+    if (p.output == null || p.output === '' || approxLen(p.output) <= 2)
+      return { glyph: '∅', cls: 'text-ink-faint', label: $t('empty') };
+    return { glyph: '✓', cls: 'text-emerald-600', label: $t('ok') };
+  }
+
   function partKey(i: number): string {
     return `${index}-${i}`;
   }
 </script>
 
-{#if turn.role === 'system' && !showSystem}
-  <!-- System prompt: one quiet strip behind the global toggle (prompts are huge). -->
-  <div class="rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-1.5 text-xs text-ink-muted">
-    {$t('System prompt hidden — toggle “Show system” above to reveal.')}
+<div
+  data-testid="conversation-turn"
+  data-turn-role={turn.role}
+  data-open={open}
+  class={`group border-l-2 pl-3 ${style.spine} ${grouped ? '' : 'mt-3'}`}
+>
+  <!-- Collapsed header line: click anywhere to expand. One dense, scannable row. -->
+  <div class="flex items-center gap-2">
+    <button
+      type="button"
+      data-testid="conversation-row-toggle"
+      class="flex min-w-0 flex-1 items-center gap-2 py-1 text-left"
+      onclick={toggle}
+      aria-expanded={open}
+    >
+      <!-- disclosure caret -->
+      <span class="shrink-0 text-[10px] text-ink-faint">{open ? '▾' : '▸'}</span>
+      <!-- role dot + name (name only on the first row of a same-role run) -->
+      <span class={`h-2 w-2 shrink-0 rounded-full ${style.dot}`}></span>
+      {#if !grouped}
+        <span class={`shrink-0 text-xs font-semibold ${style.name}`}>{roleLabel(turn.role)}</span>
+      {/if}
+      <!-- one-line preview (hidden once expanded — the full content shows below) -->
+      {#if !open}
+        <span class="min-w-0 flex-1 truncate text-xs text-ink-muted">{preview}</span>
+      {:else}
+        <span class="flex-1"></span>
+      {/if}
+      <!-- type badges: only what's present -->
+      <span class="flex shrink-0 items-center gap-1.5 text-[11px] text-ink-faint">
+        {#if counts.reasoning}<span title={$t('Reasoning')}>🧠</span>{/if}
+        {#if counts.tools}<span title={$t('tool call')}>🔧{counts.tools > 1 ? `×${counts.tools}` : ''}</span>{/if}
+        {#if counts.images}<span title={$t('Image')}>🖼{counts.images > 1 ? `×${counts.images}` : ''}</span>{/if}
+        {#if counts.errors}<span class="text-red-500" title={$t('error')}>⚠</span>{/if}
+        {#if sizeHint}<span class="font-mono">{sizeHint}</span>{/if}
+      </span>
+    </button>
+    <!-- hover-revealed raw-source affordance (no 48 always-on links) -->
+    <button
+      type="button"
+      data-testid="conversation-source-toggle"
+      class="shrink-0 rounded px-1 font-mono text-xs text-ink-faint opacity-0 transition-opacity hover:text-link focus:opacity-100 group-hover:opacity-100"
+      title={$t('View source')}
+      onclick={() => (sourceOpen = !sourceOpen)}
+    >
+      {'{ }'}
+    </button>
   </div>
-{:else}
-  <div
-    data-testid="conversation-turn"
-    data-turn-role={turn.role}
-    class={`flex gap-3 border-l-2 pl-3 ${style.spine} ${grouped ? 'mt-0' : 'mt-3'}`}
-  >
-    <!-- Avatar rail: shown once per run of same-role turns; a spacer keeps grouped
-         rows aligned under the first. -->
-    <div class="w-7 shrink-0">
-      {#if !grouped}
-        <div
-          class={`flex h-7 w-7 items-center justify-center rounded-full text-[10px] font-semibold ${style.avatar}`}
-          title={roleLabel(turn.role)}
-        >
-          {style.glyph}
-        </div>
-      {/if}
-    </div>
 
-    <div class="flex min-w-0 flex-1 flex-col">
-      {#if !grouped}
-        <div class="mb-1 flex items-center gap-2 text-xs">
-          <span class={`font-semibold ${style.name}`}>{roleLabel(turn.role)}</span>
-          <button
-            type="button"
-            data-testid="conversation-source-toggle"
-            class="ml-auto text-ink-faint transition-colors hover:text-link"
-            onclick={() => (sourceOpen = !sourceOpen)}
-          >
-            {sourceOpen ? $t('Hide source') : $t('View source')}
-          </button>
-        </div>
-      {/if}
-
-      <div class="relative">
-        <div
-          use:clampProbe
-          class="overflow-hidden text-sm text-ink-body"
-          style={overflowing && !expanded ? `max-height:${CLAMP_PX}px` : ''}
-        >
-          {#if turn.parts.length === 0}
-            <p class="italic text-ink-faint">{$t('(no visible content)')}</p>
-          {/if}
-
-          {#each turn.parts as part, i (partKey(i))}
-            {#if part.kind === 'text'}
-              <p class="whitespace-pre-wrap break-words leading-relaxed">{part.text}</p>
-            {:else if part.kind === 'reasoning'}
-              <details
-                data-testid="conversation-reasoning"
-                class="my-1 rounded-lg border border-violet-200 bg-violet-50/70 p-2"
-                open={showReasoning}
-              >
-                <summary class="cursor-pointer text-xs font-medium text-violet-700">{$t('Reasoning')}</summary>
-                <p class="mt-1 whitespace-pre-wrap break-words text-xs text-ink-muted">{part.text}</p>
-              </details>
-            {:else if part.kind === 'image'}
-              <div class="my-1">
-                <ImagePreview src={part.url} label={$t('Image')} variant="thumb" />
+  <!-- Expanded body -->
+  {#if open}
+    <div class="pb-2 pl-4 text-sm text-ink-body">
+      {#each turn.parts as part, i (partKey(i))}
+        {#if part.kind === 'text'}
+          <p class="my-1 whitespace-pre-wrap break-words leading-relaxed">{part.text}</p>
+        {:else if part.kind === 'reasoning'}
+          <details data-testid="conversation-reasoning" class="my-1 rounded-lg border border-violet-200 bg-violet-50/60 p-2" open={showReasoning}>
+            <summary class="cursor-pointer text-xs font-medium text-violet-700">🧠 {$t('Reasoning')}</summary>
+            <p class="mt-1 whitespace-pre-wrap break-words text-xs text-ink-muted">{part.text}</p>
+          </details>
+        {:else if part.kind === 'image'}
+          <div class="my-1"><ImagePreview src={part.url} label={$t('Image')} variant="thumb" /></div>
+        {:else if part.kind === 'tool_exchange'}
+          {@const st = exchangeStatus(part)}
+          <details data-testid="conversation-tool" class="my-1 rounded-lg border border-sky-200 bg-sky-50/50">
+            <summary class="flex cursor-pointer items-center gap-2 px-2 py-1.5 text-xs">
+              <span>🔧</span>
+              <span class="font-mono font-medium text-ink-strong">{part.name || $t('tool call')}</span>
+              <span class="flex-1"></span>
+              <span class={`font-medium ${st.cls}`}>{st.glyph} {st.label}</span>
+            </summary>
+            <div class="space-y-2 border-t border-sky-100 p-2">
+              <div>
+                <div class="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-faint">{$t('Arguments')}</div>
+                <JsonViewer value={part.args} />
               </div>
-            {:else if part.kind === 'tool_call'}
-              <details data-testid="conversation-tool" class="my-1 rounded-lg border border-sky-200 bg-sky-50/70 p-2">
-                <summary class="flex cursor-pointer items-center gap-1.5 text-xs">
-                  <span class="badge-rules">{$t('tool call')}</span>
-                  <span class="font-mono font-medium text-ink-strong">{part.name || $t('(unnamed)')}</span>
-                  {#if part.id}<span class="truncate font-mono text-ink-faint">{part.id}</span>{/if}
-                </summary>
-                <div class="mt-1.5"><JsonViewer value={part.args} /></div>
-              </details>
-            {:else if part.kind === 'tool_result'}
-              <details data-testid="conversation-tool" class="my-1 rounded-lg border border-border bg-canvas p-2">
-                <summary class="flex cursor-pointer items-center gap-1.5 text-xs">
-                  <span class="badge-neutral">{$t('tool result')}</span>
-                  {#if part.name}<span class="font-mono font-medium text-ink-strong">{part.name}</span>{/if}
-                </summary>
-                <div class="mt-1.5"><JsonViewer value={part.output} /></div>
-              </details>
-            {:else}
-              <details data-testid="conversation-tool" class="my-1 rounded-lg border border-border bg-canvas p-2">
-                <summary class="cursor-pointer text-xs text-ink-muted">{$t('Other content')}</summary>
-                <div class="mt-1.5"><JsonViewer value={part.value} /></div>
-              </details>
-            {/if}
-          {/each}
-        </div>
-
-        <!-- Fade + toggle over the cut-off edge of a clamped row. -->
-        {#if overflowing}
-          {#if !expanded}
-            <div class="pointer-events-none absolute inset-x-0 bottom-6 h-8 bg-gradient-to-t from-surface to-transparent"></div>
-          {/if}
-          <button
-            type="button"
-            data-testid="conversation-expand"
-            class="mt-1 text-xs font-medium text-link hover:underline"
-            onclick={() => (expanded = !expanded)}
-          >
-            {expanded ? $t('Show less') : $t('Show more')}
-          </button>
+              {#if part.hasResult}
+                <div>
+                  <div class="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-faint">{$t('Result')}</div>
+                  <JsonViewer value={part.output} />
+                </div>
+              {/if}
+            </div>
+          </details>
+        {:else if part.kind === 'tool_result'}
+          <!-- orphan result (no matching call) — kept, never silently lost -->
+          <details data-testid="conversation-tool" class="my-1 rounded-lg border border-border bg-canvas p-2">
+            <summary class="flex cursor-pointer items-center gap-1.5 text-xs">
+              <span class="badge-neutral">{$t('tool result')}</span>
+              {#if part.name}<span class="font-mono font-medium text-ink-strong">{part.name}</span>{/if}
+            </summary>
+            <div class="mt-1.5"><JsonViewer value={part.output} /></div>
+          </details>
+        {:else if part.kind === 'tool_call'}
+          <!-- defensive: a bare call the pairing pass didn't convert -->
+          <details data-testid="conversation-tool" class="my-1 rounded-lg border border-sky-200 bg-sky-50/50 p-2">
+            <summary class="cursor-pointer text-xs"><span class="badge-rules">{$t('tool call')}</span> <span class="font-mono">{part.name}</span></summary>
+            <div class="mt-1.5"><JsonViewer value={part.args} /></div>
+          </details>
+        {:else}
+          <details data-testid="conversation-tool" class="my-1 rounded-lg border border-border bg-canvas p-2">
+            <summary class="cursor-pointer text-xs text-ink-muted">{$t('Other content')}</summary>
+            <div class="mt-1.5"><JsonViewer value={part.value} /></div>
+          </details>
         {/if}
-      </div>
-
-      <!-- Grouped rows have no header; give them their own quiet source toggle. -->
-      {#if grouped}
-        <button
-          type="button"
-          data-testid="conversation-source-toggle"
-          class="mt-0.5 self-start text-[11px] text-ink-faint hover:text-link"
-          onclick={() => (sourceOpen = !sourceOpen)}
-        >
-          {sourceOpen ? $t('Hide source') : $t('View source')}
-        </button>
-      {/if}
-
-      <!-- View source: the exact captured wire object for THIS turn, lazily mounted. -->
-      {#if sourceOpen}
-        <div data-testid="conversation-source" class="mt-1">
-          <JsonViewer value={turn.raw} />
-        </div>
-      {/if}
+      {/each}
     </div>
-  </div>
-{/if}
+  {/if}
+
+  <!-- Raw wire object for THIS turn, revealed by the { } affordance. -->
+  {#if sourceOpen}
+    <div data-testid="conversation-source" class="mb-2 ml-4">
+      <JsonViewer value={turn.raw} />
+    </div>
+  {/if}
+</div>

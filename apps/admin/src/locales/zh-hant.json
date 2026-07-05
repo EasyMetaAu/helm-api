@@ -153,7 +153,7 @@
   "Codex and other stdio-only clients reach the HTTP server through the mcp-remote bridge in ~/.codex/config.toml.": "Codex 及其他僅支援 stdio 的用戶端，透過 ~/.codex/config.toml 中的 mcp-remote 橋接來存取 HTTP 伺服器。",
   "Codex CLI": "Codex CLI",
   "Collapse": "收起",
-  "Collapse all": "全部收合",
+  "Collapse all": "全部收起",
   "Compact database": "壓縮資料庫",
   "Compact database automatically": "自動壓縮資料庫",
   "Compact database now?": "立即壓縮資料庫？",
@@ -924,5 +924,10 @@
   "Zoom in": "放大",
   "Zoom out": "縮小",
   "Show more": "展開",
-  "Show less": "收起"
+  "Show less": "收起",
+  "First reply": "首個回覆",
+  "Arguments": "參數",
+  "no result": "無結果",
+  "empty": "空",
+  "{count} system prompt hidden — show": "已隱藏 {count} 條系統提示 —— 點擊顯示"
 }

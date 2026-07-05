@@ -924,5 +924,10 @@
   "Zoom in": "Zoom in",
   "Zoom out": "Zoom out",
   "Show more": "Show more",
-  "Show less": "Show less"
+  "Show less": "Show less",
+  "First reply": "First reply",
+  "Arguments": "Arguments",
+  "no result": "no result",
+  "empty": "empty",
+  "{count} system prompt hidden — show": "{count} system prompt hidden — show"
 }

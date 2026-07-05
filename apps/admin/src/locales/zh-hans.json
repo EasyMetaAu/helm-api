@@ -924,5 +924,10 @@
   "Zoom in": "放大",
   "Zoom out": "缩小",
   "Show more": "展开",
-  "Show less": "收起"
+  "Show less": "收起",
+  "First reply": "首个回复",
+  "Arguments": "参数",
+  "no result": "无结果",
+  "empty": "空",
+  "{count} system prompt hidden — show": "已隐藏 {count} 条系统提示 —— 点击显示"
 }
