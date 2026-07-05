@@ -227,6 +227,7 @@ export async function resetUsageLimit(provider: string, account = 'default'): Pr
 export interface CodexResetCreditResult {
   code: string | null;
   windowsReset: number | null;
+  redeemRequestId?: string;
 }
 
 // POST /oauth/:provider/reset-credit -> consume one rate-limit reset credit for the

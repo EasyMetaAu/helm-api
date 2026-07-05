@@ -1058,6 +1058,10 @@ export class MemoryFactContentHashConflictError extends Error {
 export interface ConfigStore {
   get(key: string): Promise<string | null>;
   set(key: string, value: string): Promise<void>;
+  // Atomic scarce-resource reservation helper. Sets `key=value` only when the row
+  // is missing or the current value is a valid non-negative integer <= `lte`.
+  // Returns true only for the caller that won the reservation.
+  setIfMissingOrNumericLte?(key: string, value: string, lte: number): Promise<boolean>;
 }
 
 // Persisted OAuth subscription credentials (issue #38 follow-up — makes the

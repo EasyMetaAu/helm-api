@@ -1116,12 +1116,12 @@ describe("createOAuthAdmin > codex reset credit", () => {
     expect(result?.resetCredits).toBeNull();
   });
 
-  it("consumeCodexResetCredit POSTs a redeem id with the bearer + account-id headers", async () => {
-    const { admin, consumeCalls } = await connectCodex({
+  it("consumeCodexResetCredit POSTs and audits a redeem id with the bearer + account-id headers", async () => {
+    const { admin, consumeCalls, logs } = await connectCodex({
       onConsume: () => json({ code: "ok", credit: { id: "c_1" }, windows_reset: 2 }),
     });
     const result = await admin.consumeCodexResetCredit?.({ account: "default" });
-    expect(result).toEqual({ code: "ok", windowsReset: 2 });
+    expect(result).toMatchObject({ code: "ok", windowsReset: 2 });
 
     expect(consumeCalls()).toHaveLength(1);
     const init = consumeCalls()[0]?.init;
@@ -1132,6 +1132,18 @@ describe("createOAuthAdmin > codex reset credit", () => {
     expect(headers["content-type"]).toBe("application/json");
     const body = JSON.parse(String(init?.body)) as { redeem_request_id?: unknown };
     expect(typeof body.redeem_request_id).toBe("string");
+    expect(result?.redeemRequestId).toBe(body.redeem_request_id);
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        level: "info",
+        message: "oauth.reset_credit.consumed",
+        fields: expect.objectContaining({
+          account: "default",
+          redeem_request_id: body.redeem_request_id,
+          windows_reset: 2,
+        }),
+      }),
+    );
   });
 
   it("consumeCodexResetCredit busts the quota cache so the next PULL re-fetches", async () => {
@@ -1181,10 +1193,17 @@ describe("createOAuthAdmin > codex reset credit", () => {
     await expect(admin.consumeCodexResetCredit?.({ account: "default" })).rejects.toThrow(
       /status 402/,
     );
-    expect(logs).toContainEqual({
-      level: "warn",
-      message: "oauth.reset_credit.failed",
-      fields: { provider_id: "openai-codex", account: "default", status: 402 },
-    });
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        level: "warn",
+        message: "oauth.reset_credit.failed",
+        fields: expect.objectContaining({
+          provider_id: "openai-codex",
+          account: "default",
+          status: 402,
+          redeem_request_id: expect.any(String),
+        }),
+      }),
+    );
   });
 });

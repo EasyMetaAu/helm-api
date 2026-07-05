@@ -19,6 +19,7 @@ import type {
   RuntimeSettings,
 } from "@helm/shared";
 import type { ModelOption } from "../../oauth/effective-models.js";
+import type { ResetCreditGuard } from "../../oauth/reset-credit-guard.js";
 import type { PayloadCaptureDeps } from "../payload-capture.js";
 import type { OAuthTester } from "./oauth-test.js";
 
@@ -234,6 +235,8 @@ export type CodexQuotaResult = {
 export interface CodexResetCreditResult {
   code: string | null;
   windowsReset: number | null;
+  // Locally generated idempotency/audit id sent to upstream as redeem_request_id.
+  redeemRequestId?: string;
 }
 
 // The effective scheduling for one account: defaults applied (priority 50,
@@ -350,6 +353,10 @@ export interface AdminApiDeps {
   // list when absent (fail-open; never 503 the whole page over observability).
   oauthUsage?: OAuthUsageStore;
   oauthQuota?: OAuthQuotaStore;
+  // Hard safety gate before any Codex reset-credit consume (manual button or
+  // auto-reset). Optional only for tests/disabled deployments; reset-credit routes
+  // fail closed when it is absent.
+  resetCreditGuard?: ResetCreditGuard;
   // Per-account connectivity tester (Subscription Providers "Test" button). Streams
   // a single short completion through a FRESH, isolated per-account client — its own
   // token + proxy + executor type, and its OWN no-op breaker — so a test records NO

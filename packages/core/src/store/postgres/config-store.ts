@@ -21,4 +21,17 @@ export class PgConfigStore implements ConfigStore {
       .values({ key, value })
       .onConflictDoUpdate({ target: configKv.key, set: { value: sql`excluded.value` } });
   }
+
+  async setIfMissingOrNumericLte(key: string, value: string, lte: number): Promise<boolean> {
+    const result = (await this.db.execute(sql`
+      INSERT INTO config_kv (key, value)
+      VALUES (${key}, ${value})
+      ON CONFLICT (key) DO UPDATE SET value = excluded.value
+      WHERE config_kv.value ~ '^[0-9]+$'
+        AND config_kv.value::numeric <= ${Math.trunc(lte)}
+      RETURNING key
+    `)) as { rows?: Array<{ key: string }> } | Array<{ key: string }>;
+    const rows = Array.isArray(result) ? result : (result.rows ?? []);
+    return rows[0] !== undefined;
+  }
 }

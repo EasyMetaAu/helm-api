@@ -1932,5 +1932,24 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       await ctx.stores.config.set("k", "v2");
       expect(await ctx.stores.config.get("k")).toBe("v2");
     });
+
+    it("atomically sets a numeric guard only when missing or old enough", async () => {
+      ctx = await make();
+      if (!ctx.stores.config.setIfMissingOrNumericLte) {
+        throw new Error("ConfigStore must support atomic numeric reservations");
+      }
+      const setIf = ctx.stores.config.setIfMissingOrNumericLte.bind(ctx.stores.config);
+
+      await expect(setIf("guard", "100", 50)).resolves.toBe(true);
+      expect(await ctx.stores.config.get("guard")).toBe("100");
+      await expect(setIf("guard", "200", 99)).resolves.toBe(false);
+      expect(await ctx.stores.config.get("guard")).toBe("100");
+      await expect(setIf("guard", "200", 100)).resolves.toBe(true);
+      expect(await ctx.stores.config.get("guard")).toBe("200");
+
+      await ctx.stores.config.set("guard", "not-a-number");
+      await expect(setIf("guard", "300", 1_000)).resolves.toBe(false);
+      expect(await ctx.stores.config.get("guard")).toBe("not-a-number");
+    });
   });
 });

@@ -154,7 +154,11 @@ export interface OAuthAdminDeps {
   // on a stale snapshot for ~a day with zero log evidence. Optional so the many
   // existing unit harnesses stay untouched. Ids/labels/status only — never a body
   // or token (principle 7).
-  log?: (level: "warn" | "error", message: string, fields?: Record<string, unknown>) => void;
+  log?: (
+    level: "info" | "warn" | "error",
+    message: string,
+    fields?: Record<string, unknown>,
+  ) => void;
 }
 
 // Split a credential into store fields. `meta` carries every key beyond the
@@ -755,6 +759,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       });
       const authorization = await tm.getAuthHeader(); // "Bearer <access>"
       const accountId = codexAccountIdFromToken(authorization.replace(/^Bearer\s+/i, ""));
+      const redeemRequestId = randomUUID();
       const res = await doFetch(CODEX_RESET_URL, {
         method: "POST",
         headers: {
@@ -763,7 +768,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           "content-type": "application/json",
           ...(accountId ? { "chatgpt-account-id": accountId } : {}),
         },
-        body: JSON.stringify({ redeem_request_id: randomUUID() }),
+        body: JSON.stringify({ redeem_request_id: redeemRequestId }),
         signal: AbortSignal.timeout(QUOTA_FETCH_TIMEOUT_MS),
       });
       if (!res.ok) {
@@ -772,11 +777,19 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           provider_id: CODEX,
           account,
           status: res.status,
+          redeem_request_id: redeemRequestId,
         });
         throw new Error(`codex reset-credit consume failed (status ${res.status})`);
       }
       const body: unknown = await res.json().catch(() => null);
       const result = parseCodexResetResult(body);
+      log("info", "oauth.reset_credit.consumed", {
+        provider_id: CODEX,
+        account,
+        redeem_request_id: redeemRequestId,
+        code: result.code,
+        windows_reset: result.windowsReset,
+      });
       // The consume restored the windows AND decremented the credit count. The grant is
       // keyed by the upstream ChatGPT account (chatgpt_account_id), which can back
       // SEVERAL connected helm accounts — so a single consume resets every sibling that
@@ -788,7 +801,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       for (const key of [...quotaCache.keys()]) {
         if (key.startsWith(`${CODEX} `)) quotaCache.delete(key);
       }
-      return result;
+      return { ...result, redeemRequestId };
     },
   };
 }

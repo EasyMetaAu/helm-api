@@ -7,18 +7,38 @@
 // and at most ONE consume per account per hour (cooldown), so a burst of concurrent
 // saturated replies can't drain the grant.
 
-// At least one hour between reset-credit consumes for the same account. A freshly
-// reset weekly window cannot re-saturate within an hour, so this also makes the
-// in-memory cooldown safe across a gateway restart (no second spend is physically
-// possible before it would expire anyway).
+// At least one hour between reset-credit consumes for the same shared ChatGPT
+// account. The runtime also persists this guard so a container restart cannot
+// rapidly drain the scarce reset-credit grant.
 export const AUTO_RESET_COOLDOWN_MS = 60 * 60 * 1000;
+
+// Manual and automatic reset-credit consumes are only allowed once the Codex weekly
+// window is genuinely close to exhausted. The 5h window recovers on its own and
+// must never justify spending a weekly reset credit.
+export const CODEX_RESET_MIN_WEEKLY_USED_PERCENT = 90;
+
+export function codexWeeklyUsedPercent(
+  windows: ReadonlyArray<{ key: string; usedPercent: number }>,
+): number | null {
+  const weekly = windows
+    .filter((w) => w.key === "secondary")
+    .map((w) => w.usedPercent)
+    .filter((pct) => Number.isFinite(pct));
+  return weekly.length === 0 ? null : Math.max(...weekly);
+}
+
+export function canConsumeResetCredit(
+  windows: ReadonlyArray<{ key: string; usedPercent: number }>,
+): boolean {
+  return (codexWeeklyUsedPercent(windows) ?? -1) >= CODEX_RESET_MIN_WEEKLY_USED_PERCENT;
+}
 
 // True when the WEEKLY window is fully used. Codex keys the 7d window "secondary";
 // the 5h window ("primary") is deliberately ignored (it recovers on its own).
 export function weeklySaturated(
   windows: ReadonlyArray<{ key: string; usedPercent: number }>,
 ): boolean {
-  return windows.some((w) => w.key === "secondary" && w.usedPercent >= 100);
+  return (codexWeeklyUsedPercent(windows) ?? -1) >= 100;
 }
 
 // True when enough time has passed since the last auto-reset for this account

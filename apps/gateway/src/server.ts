@@ -105,6 +105,7 @@ import type {
   ClassifierConfig,
   ErrorClass,
   InternalRequest,
+  OAuthQuotaWindow,
   ProviderConfig as ProviderConfigShared,
   RuntimeSettings,
   TargetProviderProtocol,
@@ -134,9 +135,10 @@ import {
   loadAccountSettings,
 } from "./oauth/account-settings.js";
 import { createOAuthAdmin } from "./oauth/admin-oauth.js";
-import { cooldownPassed, weeklySaturated } from "./oauth/auto-reset.js";
+import { weeklySaturated } from "./oauth/auto-reset.js";
 import { anthropicMetadataUserId, stableSessionId } from "./oauth/device-identity.js";
 import { effectiveOAuthModelOptions, type ModelOption } from "./oauth/effective-models.js";
+import { createResetCreditGuard, resetCreditGuardHash } from "./oauth/reset-credit-guard.js";
 import { createResponsesRegistry } from "./responses-registry.js";
 import { createArchiveFsAccess } from "./routes/admin/cleanup-fs.js";
 import { registerAdminApi } from "./routes/admin/index.js";
@@ -1365,17 +1367,11 @@ export async function buildServer(
   // Reset credits are SCARCE and the grant is keyed by the upstream ChatGPT account
   // (chatgpt_account_id), which can back SEVERAL connected helm labels — so the spend
   // guard MUST key on that shared id, not the helm label, or two sibling labels both
-  // saturating would each spend a credit for the one shared window. `autoResetLast`
-  // (the ≥1h cooldown, keyed by the shared id) is the correctness guard: the check +
-  // commit are adjacent and synchronous, so concurrent siblings serialize on it.
-  // `autoResetInFlight` (keyed by the cheap helm label) only collapses a same-label
-  // burst before the async work, to avoid a token-read stampede. Fire-and-forget +
-  // fail-open: any failure (no credit, network, opted-out) leaves the account parked.
-  const autoResetLast = new Map<string, number>(); // sharedKey -> last consume epoch-ms
+  // saturating would each spend a credit for the one shared window. `autoResetInFlight`
+  // (keyed by the cheap helm label) only collapses a same-label burst before async
+  // work, to avoid a token-read stampede. Fire-and-forget + fail-open: any failure
+  // leaves parked state.
   const autoResetInFlight = new Set<string>(); // helm label -> a reset is being evaluated
-  // ponytail: cooldown is process memory — a restart clears it, but a just-reset weekly
-  // window cannot re-saturate within an hour, so a second spend is physically impossible
-  // before the cooldown would have expired anyway. No persistence needed.
 
   // Resolve the SHARED reset-credit key for a Codex helm account: its chatgpt_account_id
   // (`codex:<id>`), decoded from the STORED access token — no network/refresh, and the
@@ -1398,8 +1394,20 @@ export async function buildServer(
     return helmKey;
   };
 
-  const maybeAutoReset = (providerId: string, account: string, nowMs: number): void => {
-    if (!oauthAdmin?.consumeCodexResetCredit || !oauthEncKey) return;
+  const resetCreditGuard = createResetCreditGuard({
+    config: store.config,
+    resolveSharedKey: ({ providerId, account }) => resolveCodexAccountKey(providerId, account),
+    log: (lvl, msg, fields) => logger.log(lvl, msg, fields),
+  });
+
+  const maybeAutoReset = (
+    providerId: string,
+    account: string,
+    windows: OAuthQuotaWindow[],
+    nowMs: number,
+  ): void => {
+    const consumeCodexResetCredit = oauthAdmin?.consumeCodexResetCredit;
+    if (!consumeCodexResetCredit || !oauthEncKey) return;
     const helmKey = `${providerId} ${account}`;
     if (autoResetInFlight.has(helmKey)) return; // collapse a same-label burst (cheap, sync)
     autoResetInFlight.add(helmKey);
@@ -1411,32 +1419,72 @@ export async function buildServer(
           account,
         );
         if (!s.autoReset) return; // opted out → never spend a credit
-        // Guard on the SHARED ChatGPT account: check + commit are adjacent (no await
-        // between), so concurrent sibling labels serialize here and only one spends.
-        const sharedKey = await resolveCodexAccountKey(providerId, account);
-        if (!cooldownPassed(autoResetLast.get(sharedKey), nowMs)) return;
-        autoResetLast.set(sharedKey, nowMs);
-        const r = await oauthAdmin.consumeCodexResetCredit?.({ account });
+        const reservation = await resetCreditGuard.reserve({
+          providerId,
+          account,
+          windows,
+          mode: "auto",
+          nowMs,
+        });
+        if (!reservation.ok) {
+          logger.log(reservation.status === 429 ? "info" : "warn", "oauth.auto_reset.blocked", {
+            provider_id: providerId,
+            code: reservation.code,
+            retry_after_ms: reservation.retryAfterMs ?? null,
+          });
+          return;
+        }
+        const sharedKey = reservation.sharedKey;
+        const guardHash = resetCreditGuardHash(sharedKey).slice(0, 12);
+        let r: Awaited<ReturnType<typeof consumeCodexResetCredit>>;
+        try {
+          r = await consumeCodexResetCredit({ account });
+        } catch (e) {
+          logger.log("error", "oauth.auto_reset.failed", {
+            provider_id: providerId,
+            account,
+            guard: guardHash,
+            stage: "consume",
+            line: e instanceof Error ? e.message : String(e),
+          });
+          return;
+        }
+        logger.log("info", "oauth.auto_reset.consumed", {
+          provider_id: providerId,
+          account,
+          guard: guardHash,
+          redeem_request_id: r.redeemRequestId ?? null,
+          code: r.code ?? null,
+          windows_reset: r.windowsReset ?? null,
+        });
         // The consume restored the shared window for EVERY sibling on this login — unpark
         // them all (the trigger account included), or a sibling parked by its own
         // saturated reply would stay out of rotation until its window's natural reset.
         const codexAccounts = (await store.oauthTokens.list()).filter(
           (t) => t.providerId === providerId,
         );
-        await Promise.all(
+        const unparkResults = await Promise.allSettled(
           codexAccounts.map(async (t) => {
             if ((await resolveCodexAccountKey(t.providerId, t.account)) === sharedKey) {
               await applyUsageLimit(t.providerId, t.account, null);
             }
           }),
         );
-        logger.log("info", "oauth.auto_reset.consumed", {
-          provider_id: providerId,
-          windows_reset: r?.windowsReset ?? null,
-        });
+        const unparkFailed = unparkResults.filter((x) => x.status === "rejected").length;
+        if (unparkFailed > 0) {
+          logger.log("error", "oauth.auto_reset.unpark_failed", {
+            provider_id: providerId,
+            account,
+            guard: guardHash,
+            failed_accounts: unparkFailed,
+            redeem_request_id: r.redeemRequestId ?? null,
+          });
+        }
       } catch (e) {
         logger.log("error", "oauth.auto_reset.failed", {
           provider_id: providerId,
+          account,
+          stage: "post_consume",
           line: e instanceof Error ? e.message : String(e),
         });
       } finally {
@@ -1461,7 +1509,7 @@ export async function buildServer(
     if (until !== null) parkAccountOnLimit(providerId, account, until);
     // Then, if the WEEKLY window is the one that saturated and the account opted in,
     // auto-consume a reset credit to restore it (guarded by a ≥1h per-account cooldown).
-    if (weeklySaturated(windows)) maybeAutoReset(providerId, account, nowMs);
+    if (weeklySaturated(windows)) maybeAutoReset(providerId, account, windows, nowMs);
   };
   // Per-account user-message serial queue (issue #93, feature B). ONE long-lived
   // gate for the whole process: it must survive pool rebuilds so queued requests
@@ -2286,6 +2334,7 @@ export async function buildServer(
       // /oauth/usage + /oauth/quota admin routes (fail-open to empty when absent).
       oauthUsage: store.oauthUsage,
       oauthQuota: store.oauthQuota,
+      resetCreditGuard,
       // Per-account connectivity tester (providers page "Test" button); see above.
       oauthTester,
       // Hot-reload the routable OAuth pool after any admin mutation (proxy /
