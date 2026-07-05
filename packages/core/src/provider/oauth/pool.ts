@@ -20,6 +20,7 @@ import {
   isNativePassthroughCarrier,
   type NativePassthroughInput,
   nativePassthroughBody,
+  type OAuthQuotaWindow,
 } from "@helm/shared";
 import { isUserMessageRequest } from "../../queue/user-turn.js";
 import { guardPreOutputFailure, type PreOutputClassifier } from "../failover-guard.js";
@@ -103,7 +104,13 @@ export interface OAuthPoolMember {
   // against `now` on every select(), so recovery is AUTOMATIC once the timestamp passes
   // — no timer, no sweep.
   usageLimitedUntilMs?: number | null;
+  // Latest quota windows for strategy-only scoring. These are soft observability
+  // signals: stale/missing windows must never make the pool fail closed.
+  quotaWindows?: OAuthQuotaWindow[];
+  quotaCapturedAtMs?: number | null;
 }
+
+export type OAuthSelectionStrategy = "balanced" | "manual_priority" | "low_risk" | "use_expiring";
 
 // The pool's ProviderClient plus an out-of-band mutator the gateway uses to park /
 // un-park a single account in O(1) — a single 429 must NOT rebuild the whole pool
@@ -114,6 +121,7 @@ export interface OAuthPoolClient extends ProviderClient {
   // The account's current auto-park cooldown (epoch ms), or null if eligible now. Lets
   // the gateway make a park EXTEND-ONLY — never shorten a precise quota reset already set.
   getUsageLimit(account: string): number | null;
+  setQuotaSnapshot(account: string, windows: OAuthQuotaWindow[], capturedAtMs: number): void;
 }
 
 export interface OAuthRateLimitParkContext {
@@ -137,6 +145,8 @@ export interface OAuthPoolDeps {
   // the same cooldown so rebuilds/restarts keep routing around the account.
   onAccountRateLimit?: (account: string, untilMs: number) => void;
   accountRateLimitCooldownMs?: number;
+  selectionStrategy?: OAuthSelectionStrategy;
+  quotaFreshMs?: number;
   // Optional model-aware guard for provider-specific scoped caps. Returning false
   // means "retry a sibling for this request, but do not globally park the account".
   shouldParkRateLimit?: (ctx: OAuthRateLimitParkContext) => boolean;
@@ -161,7 +171,8 @@ interface PoolEntry {
 }
 
 export interface OAuthPoolSelection {
-  reason: "sticky_hit" | "hash_assign" | "lru";
+  reason: "sticky_hit" | "hash_assign" | "lru" | "strategy";
+  strategy: OAuthSelectionStrategy;
   affinityKeySource: string | null;
   capacityAvoided: boolean;
   allCandidatesAtCapacity: boolean;
@@ -173,6 +184,8 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   const now = deps.now ?? (() => Date.now());
   const stickyTtlMs = deps.stickyTtlMs ?? 10 * 60 * 1000;
   const accountRateLimitCooldownMs = deps.accountRateLimitCooldownMs ?? DEFAULT_429_COOLDOWN_MS;
+  const selectionStrategy = deps.selectionStrategy ?? "balanced";
+  const quotaFreshMs = deps.quotaFreshMs ?? 10 * 60 * 1000;
   const entries: PoolEntry[] = deps.members.map((member) => ({ member, lastUsedAt: 0 }));
   const stickySessions = new Map<string, { account: string; expiresAt: number }>();
   let selectionCounter = 0;
@@ -376,6 +389,157 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     return best?.entry;
   }
 
+  function preferredPriorityTier(candidates: PoolEntry[]): PoolEntry[] {
+    let tierPriority: number | undefined;
+    for (const e of candidates) {
+      if (tierPriority === undefined || e.member.priority < tierPriority) {
+        tierPriority = e.member.priority;
+      }
+    }
+    return tierPriority === undefined
+      ? []
+      : candidates.filter((e) => e.member.priority === tierPriority);
+  }
+
+  function quotaFresh(member: OAuthPoolMember, nowMs: number): boolean {
+    const capturedAt = member.quotaCapturedAtMs;
+    return capturedAt != null && capturedAt > 0 && nowMs - capturedAt <= quotaFreshMs;
+  }
+
+  function quotaWindowAppliesToModel(window: OAuthQuotaWindow, model: string | null): boolean {
+    if (!window.key.startsWith("7d-")) return true;
+    if (!model) return false;
+    const scoped = window.key.slice(3).toLowerCase();
+    return scoped.length > 0 && model.toLowerCase().includes(scoped);
+  }
+
+  function applicableQuotaWindows(
+    entry: PoolEntry,
+    model: string | null,
+    nowMs: number,
+  ): OAuthQuotaWindow[] {
+    if (!quotaFresh(entry.member, nowMs)) return [];
+    return (entry.member.quotaWindows ?? []).filter((w) => quotaWindowAppliesToModel(w, model));
+  }
+
+  function quotaPressure(entry: PoolEntry, model: string | null, nowMs: number): number | null {
+    const windows = applicableQuotaWindows(entry, model, nowMs);
+    if (windows.length === 0) return null;
+    return Math.max(...windows.map((w) => w.usedPercent));
+  }
+
+  function expiringQuotaValue(
+    entry: PoolEntry,
+    model: string | null,
+    nowMs: number,
+  ): number | null {
+    let best = 0;
+    for (const w of applicableQuotaWindows(entry, model, nowMs)) {
+      if (w.resetsAtMs === null || w.resetsAtMs <= nowMs) continue;
+      const remaining = Math.max(0, 100 - w.usedPercent);
+      if (remaining <= 0) continue;
+      const hoursUntilReset = Math.max((w.resetsAtMs - nowMs) / 3_600_000, 0.25);
+      const value = remaining / hoursUntilReset;
+      if (value > best) best = value;
+    }
+    return best > 0 ? best : null;
+  }
+
+  function chooseByLowRisk(
+    candidates: PoolEntry[],
+    model: string | null,
+    nowMs: number,
+    sticky?: PoolEntry,
+  ): PoolEntry | undefined {
+    let best: { entry: PoolEntry; pressure: number } | undefined;
+    for (const entry of preferredPriorityTier(candidates)) {
+      const pressure = quotaPressure(entry, model, nowMs);
+      if (pressure === null) continue;
+      if (
+        best === undefined ||
+        pressure < best.pressure ||
+        (pressure === best.pressure && entry.lastUsedAt < best.entry.lastUsedAt)
+      ) {
+        best = { entry, pressure };
+      }
+    }
+    if (best === undefined) return undefined;
+    const stickyPressure =
+      sticky && sticky.member.priority === best.entry.member.priority
+        ? quotaPressure(sticky, model, nowMs)
+        : null;
+    return sticky && stickyPressure !== null && stickyPressure <= best.pressure + 10
+      ? sticky
+      : best.entry;
+  }
+
+  function chooseByExpiringQuota(
+    candidates: PoolEntry[],
+    model: string | null,
+    nowMs: number,
+    sticky?: PoolEntry,
+  ): PoolEntry | undefined {
+    let best: { entry: PoolEntry; value: number } | undefined;
+    for (const entry of preferredPriorityTier(candidates)) {
+      const value = expiringQuotaValue(entry, model, nowMs);
+      if (value === null) continue;
+      if (
+        best === undefined ||
+        value > best.value ||
+        (value === best.value && entry.lastUsedAt < best.entry.lastUsedAt)
+      ) {
+        best = { entry, value };
+      }
+    }
+    if (best === undefined) return undefined;
+    const stickyValue =
+      sticky && sticky.member.priority === best.entry.member.priority
+        ? expiringQuotaValue(sticky, model, nowMs)
+        : null;
+    return sticky && stickyValue !== null && stickyValue >= best.value * 0.85 ? sticky : best.entry;
+  }
+
+  function chooseByStrategy(
+    candidates: PoolEntry[],
+    stickyKey: string | null,
+    sticky: PoolEntry | undefined,
+    model: string | null,
+    nowMs: number,
+  ): { entry: PoolEntry | undefined; reason: OAuthPoolSelection["reason"] } {
+    if (selectionStrategy === "balanced") {
+      if (sticky) return { entry: sticky, reason: "sticky_hit" };
+      const entry =
+        stickyKey && candidates.length > 0
+          ? chooseByStickyHash(candidates, stickyKey)
+          : chooseByLru(candidates);
+      return { entry, reason: stickyKey ? "hash_assign" : "lru" };
+    }
+
+    if (selectionStrategy === "manual_priority") {
+      return sticky
+        ? { entry: sticky, reason: "sticky_hit" }
+        : { entry: chooseByLru(candidates), reason: "lru" };
+    }
+
+    const strategyEntry =
+      selectionStrategy === "low_risk"
+        ? chooseByLowRisk(candidates, model, nowMs, sticky)
+        : chooseByExpiringQuota(candidates, model, nowMs, sticky);
+    if (strategyEntry) {
+      return {
+        entry: strategyEntry,
+        reason: strategyEntry === sticky ? "sticky_hit" : "strategy",
+      };
+    }
+
+    if (sticky) return { entry: sticky, reason: "sticky_hit" };
+    const entry =
+      stickyKey && candidates.length > 0
+        ? chooseByStickyHash(candidates, stickyKey)
+        : chooseByLru(candidates);
+    return { entry, reason: stickyKey ? "hash_assign" : "lru" };
+  }
+
   function responseIdFromResult(result: unknown): string | null {
     const body = objectRecord(result);
     if (body === null) return null;
@@ -428,7 +592,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   function select(
     stickyKey?: string | null,
     exclude?: ReadonlySet<string>,
-    opts: { avoidBusy?: boolean } = {},
+    opts: { avoidBusy?: boolean; model?: string | null } = {},
   ): PoolEntry {
     const nowMs = now();
     const eligible = eligibleEntries(nowMs, exclude);
@@ -439,7 +603,9 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       allCandidatesAtCapacity: capacityTier.allCandidatesAtCapacity,
       busyEligibleAccounts: capacityTier.busyEligibleAccounts,
       retryAttempt: exclude?.size ?? 0,
+      strategy: selectionStrategy,
     };
+    let stickyEntry: PoolEntry | undefined;
     if (stickyKey) {
       const sticky = stickySessions.get(stickyKey);
       if (sticky !== undefined && sticky.expiresAt > nowMs) {
@@ -448,24 +614,30 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         );
         if (entry !== undefined) {
           sticky.expiresAt = nowMs + stickyTtlMs;
-          return commitSelection(entry, stickyKey, nowMs, {
-            ...selectionBase,
-            reason: "sticky_hit",
-          });
+          stickyEntry = entry;
         }
       }
-      stickySessions.delete(stickyKey);
+      if (stickyEntry === undefined) stickySessions.delete(stickyKey);
     }
 
     const stickyOnly = stickyKey?.startsWith("previous_response_id:") === true;
-    const best =
-      stickyKey && !stickyOnly && capacityTier.candidates.length > 0
-        ? chooseByStickyHash(capacityTier.candidates, stickyKey)
-        : chooseByLru(capacityTier.candidates);
+    if (stickyOnly && stickyEntry) {
+      return commitSelection(stickyEntry, null, nowMs, {
+        ...selectionBase,
+        reason: "sticky_hit",
+      });
+    }
+    const { entry: best, reason } = chooseByStrategy(
+      capacityTier.candidates,
+      stickyOnly ? null : (stickyKey ?? null),
+      stickyEntry,
+      opts.model ?? null,
+      nowMs,
+    );
     if (!best) throw new Error("oauth pool has no schedulable account");
     return commitSelection(best, stickyOnly ? null : (stickyKey ?? null), nowMs, {
       ...selectionBase,
-      reason: stickyKey && !stickyOnly ? "hash_assign" : "lru",
+      reason,
     });
   }
 
@@ -530,7 +702,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     for (;;) {
       let entry: PoolEntry;
       try {
-        entry = select(stickyKey, tried, { avoidBusy });
+        entry = select(stickyKey, tried, { avoidBusy, model });
       } catch (selErr) {
         throw lastErr ?? selErr;
       }
@@ -605,7 +777,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         }
         let next: PoolEntry;
         try {
-          next = select(stickyKey, tried, { avoidBusy });
+          next = select(stickyKey, tried, { avoidBusy, model });
         } catch {
           throw lastErr; // no sibling left → surface the real upstream cause
         }
@@ -638,6 +810,12 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     getUsageLimit(account: string): number | null {
       return entries.find((e) => e.member.account === account)?.member.usageLimitedUntilMs ?? null;
     },
+    setQuotaSnapshot(account: string, windows: OAuthQuotaWindow[], capturedAtMs: number): void {
+      const entry = entries.find((e) => e.member.account === account);
+      if (!entry) return;
+      entry.member.quotaWindows = windows;
+      entry.member.quotaCapturedAtMs = capturedAtMs;
+    },
     async chatCompletion(
       req: ChatCompletionRequest,
       opts?: { signal?: AbortSignal },
@@ -657,7 +835,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       // onSelect fire on the call turn; streamWithRetry only adds sibling fallbacks.
       const stickyKey = stickyKeyFromChat(req);
       const avoidBusy = isUserMessageRequest(req);
-      const first = select(stickyKey, undefined, { avoidBusy });
+      const first = select(stickyKey, undefined, { avoidBusy, model: modelFromChat(req) });
       return streamWithRetry(
         first,
         stickyKey,
@@ -709,7 +887,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       const avoidBusy = isUserMessageRequest(nativePassthroughBody(body));
       // Pick + fail-closed check SYNCHRONOUSLY on the call turn (rotation + onSelect, and a
       // synchronous throw if the picked member can't passthrough-stream), exactly as before.
-      const first = select(stickyKey, undefined, { avoidBusy });
+      const first = select(stickyKey, undefined, { avoidBusy, model: modelFromNative(body) });
       if (!first.member.client.nativePassthroughStream) {
         throw new Error("oauth pool member does not support native passthrough streaming");
       }

@@ -32,6 +32,8 @@ function fullSeam(over: Partial<OAuthAdminAccess> = {}): OAuthAdminAccess {
       fastMode: false,
     })),
     setAccountSchedule: vi.fn(async () => {}),
+    getProviderStrategy: vi.fn(async () => ({ selectionStrategy: "balanced" })),
+    setProviderStrategy: vi.fn(async () => {}),
     ...over,
   } as unknown as OAuthAdminAccess;
 }
@@ -58,6 +60,8 @@ describe("admin OAuth routes — 503 when the seam is not configured", () => {
     ["PUT", "/admin/api/oauth/x/proxy"],
     ["GET", "/admin/api/oauth/x/account"],
     ["PUT", "/admin/api/oauth/x/account"],
+    ["GET", "/admin/api/oauth/x/strategy"],
+    ["PUT", "/admin/api/oauth/x/strategy"],
     ["POST", "/admin/api/oauth/openai-codex/reset-credit"],
     ["DELETE", "/admin/api/oauth/x"],
     ["POST", "/admin/api/oauth/x/reset"],
@@ -856,6 +860,31 @@ describe("admin OAuth routes — mutations + validation", () => {
       schedulable: false,
       autoReset: true,
       fastMode: true,
+    });
+  });
+
+  it("GET/PUT provider strategy validates selectable account-pool strategies", async () => {
+    const seam = fullSeam();
+    const got = await app({ oauth: seam }).request("/admin/api/oauth/anthropic/strategy");
+    expect(got.status).toBe(200);
+    expect(await got.json()).toEqual({ selectionStrategy: "balanced" });
+
+    const bad = await app({ oauth: fullSeam() }).request("/admin/api/oauth/anthropic/strategy", {
+      method: "PUT",
+      headers: JSONH,
+      body: JSON.stringify({ selectionStrategy: "random" }),
+    });
+    expect(bad.status).toBe(400);
+
+    const ok = await app({ oauth: seam }).request("/admin/api/oauth/anthropic/strategy", {
+      method: "PUT",
+      headers: JSONH,
+      body: JSON.stringify({ selectionStrategy: "use_expiring" }),
+    });
+    expect(ok.status).toBe(204);
+    expect(seam.setProviderStrategy).toHaveBeenCalledWith({
+      providerId: "anthropic",
+      selectionStrategy: "use_expiring",
     });
   });
 

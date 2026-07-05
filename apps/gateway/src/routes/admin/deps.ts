@@ -5,6 +5,7 @@ import type {
   Lane,
   MemoryStore,
   OAuthQuotaStore,
+  OAuthSelectionStrategy,
   OAuthUsageStore,
   PoliciesConfig,
   RouteOptions,
@@ -91,6 +92,9 @@ export interface OAuthAdminStatus {
   id: string; // provider id: 'anthropic' | 'github-copilot' | 'openai-codex'
   name: string;
   flow: "manual_paste" | "device_code"; // shapes the UI
+  // Provider-level account-pool selection strategy. This chooses BETWEEN accounts
+  // for this provider; per-account priority/schedulable remain account knobs.
+  selectionStrategy: OAuthSelectionStrategy;
   // `healthy` reflects whether the account's token could be (re)obtained when the
   // status was read — true once it has a working durable credential, false when a
   // refresh failed (needs reconnecting). The short-lived access-token `expiresAt`
@@ -199,6 +203,13 @@ export interface OAuthAdminAccess {
     autoReset?: boolean;
     fastMode?: boolean;
   }): Promise<void>;
+  // Provider-level account-pool selection strategy. Defaults to balanced when no
+  // operator setting is stored.
+  getProviderStrategy(input: { providerId: string }): Promise<AccountPoolStrategyView>;
+  setProviderStrategy(input: {
+    providerId: string;
+    selectionStrategy: OAuthSelectionStrategy;
+  }): Promise<void>;
   // Pull the Anthropic OAuth usage endpoint for one account → quota windows
   // (providers page Tier 3). Claude exposes a dedicated usage endpoint, so this is
   // an on-demand PULL behind a short TTL cache. FAIL-OPEN: returns null on any
@@ -248,6 +259,10 @@ export interface AccountScheduleView {
   autoReset: boolean;
   // Per-account Fast mode.
   fastMode: boolean;
+}
+
+export interface AccountPoolStrategyView {
+  selectionStrategy: OAuthSelectionStrategy;
 }
 
 // Redacted proxy projection for the admin read path: the password is NEVER echoed,
@@ -419,7 +434,7 @@ export interface AdminApiDeps {
 }
 
 // Re-exported for route signatures.
-export type { CreateKeyInput };
+export type { CreateKeyInput, OAuthSelectionStrategy };
 
 // ── Wire shapes (admin-API-only response/request projections) ────────────────
 

@@ -7,7 +7,12 @@ import {
   canConsumeResetCredit,
   codexWeeklyUsedPercent,
 } from "../../oauth/auto-reset.js";
-import type { AccountProxyInput, AdminApiDeps, OAuthAdminAccess } from "./deps.js";
+import type {
+  AccountProxyInput,
+  AdminApiDeps,
+  OAuthAdminAccess,
+  OAuthSelectionStrategy,
+} from "./deps.js";
 
 // /admin/api/oauth/* — interactive OAuth subscription login from the admin UI
 // (issue #38). Pure HTTP glue (Principle 1): every flow step delegates to the
@@ -58,6 +63,19 @@ function testUsageTokens(ev: {
 // A malformed proxy body — thrown by parseProxyInput, caught at the route to map to
 // a 400. Distinct type so a genuine seam error isn't masked as a parse error.
 class ProxyParseError extends Error {}
+
+const SELECTION_STRATEGIES: ReadonlySet<string> = new Set([
+  "balanced",
+  "manual_priority",
+  "low_risk",
+  "use_expiring",
+]);
+
+function parseSelectionStrategy(raw: unknown): OAuthSelectionStrategy | null {
+  return typeof raw === "string" && SELECTION_STRATEGIES.has(raw)
+    ? (raw as OAuthSelectionStrategy)
+    : null;
+}
 
 // Parse a request body's `proxy` field into the AccountProxyInput write shape (or
 // null = no/clear proxy). Shared by the connect-start routes (proxy from step 1)
@@ -641,6 +659,41 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         fastMode,
       });
       // Rebuild so the new priority / schedulable reorders (or parks) this account now.
+      if (!(await afterMutation())) return c.json(notApplied, 503);
+      return c.body(null, 204);
+    } catch (e) {
+      return c.json({ error: errMessage(e) }, 400);
+    }
+  });
+
+  // GET /oauth/:provider/strategy -> { selectionStrategy }
+  // Provider-level strategy for selecting BETWEEN connected accounts. Account
+  // priority/schedulable remain per-account knobs.
+  app.get("/admin/api/oauth/:provider/strategy", async (c) => {
+    const s = seam();
+    if (!s) return c.json({ error: "oauth login not configured" }, 503);
+    try {
+      return c.json(await s.getProviderStrategy({ providerId: c.req.param("provider") }));
+    } catch (e) {
+      return c.json({ error: errMessage(e) }, 400);
+    }
+  });
+
+  // PUT /oauth/:provider/strategy { selectionStrategy } -> 204
+  // Changing the strategy rebuilds the live pool so the next request uses it.
+  app.put("/admin/api/oauth/:provider/strategy", async (c) => {
+    const s = seam();
+    if (!s) return c.json({ error: "oauth login not configured" }, 503);
+    const body = (await c.req.json().catch(() => ({}))) as { selectionStrategy?: unknown };
+    const selectionStrategy = parseSelectionStrategy(body.selectionStrategy);
+    if (selectionStrategy === null) {
+      return c.json(
+        { error: "selectionStrategy must be balanced, manual_priority, low_risk, or use_expiring" },
+        400,
+      );
+    }
+    try {
+      await s.setProviderStrategy({ providerId: c.req.param("provider"), selectionStrategy });
       if (!(await afterMutation())) return c.json(notApplied, 503);
       return c.body(null, 204);
     } catch (e) {

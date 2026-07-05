@@ -27,6 +27,7 @@ import {
 } from "@helm/core";
 import type { OAuthQuotaWindow } from "@helm/shared";
 import type {
+  AccountPoolStrategyView,
   AccountProxyInput,
   AccountProxyView,
   AccountScheduleView,
@@ -38,8 +39,11 @@ import type {
 import {
   clearAccountSettings,
   getAccountSettings,
+  getProviderSettings,
   loadAccountSettings,
+  loadProviderSettings,
   setAccountSettings,
+  setProviderSettings,
 } from "./account-settings.js";
 import { effectiveAccountModels } from "./effective-models.js";
 
@@ -317,6 +321,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       // so the list carries each account's effective priority + schedulable without an
       // N+1 per-account GET. Fail-open to {} (defaults applied below).
       const settings = await loadAccountSettings(deps.config, deps.encKey);
+      const providerSettings = await loadProviderSettings(deps.config, deps.encKey);
       // Ensure-fresh every stored account in parallel so the page reflects live,
       // auto-renewed expiries (and surfaces a dead credential as unhealthy).
       const refreshed = await Promise.all(
@@ -353,18 +358,24 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           id: ANTHROPIC,
           name: "Anthropic (Claude Pro/Max)",
           flow: "manual_paste",
+          selectionStrategy:
+            getProviderSettings(providerSettings, ANTHROPIC).selectionStrategy ?? "balanced",
           accounts: accountsFor(ANTHROPIC),
         },
         {
           id: CODEX,
           name: "ChatGPT Plus/Pro (Codex)",
           flow: "manual_paste",
+          selectionStrategy:
+            getProviderSettings(providerSettings, CODEX).selectionStrategy ?? "balanced",
           accounts: accountsFor(CODEX),
         },
         {
           id: COPILOT,
           name: "GitHub Copilot",
           flow: "device_code",
+          selectionStrategy:
+            getProviderSettings(providerSettings, COPILOT).selectionStrategy ?? "balanced",
           accounts: accountsFor(COPILOT),
         },
       ];
@@ -590,6 +601,18 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       if (autoReset !== undefined) patch.autoReset = autoReset;
       if (fastMode !== undefined) patch.fastMode = fastMode;
       await setAccountSettings(deps.config, deps.encKey, providerId, account, patch);
+    },
+
+    async getProviderStrategy({ providerId }): Promise<AccountPoolStrategyView> {
+      const s = getProviderSettings(
+        await loadProviderSettings(deps.config, deps.encKey),
+        providerId,
+      );
+      return { selectionStrategy: s.selectionStrategy ?? "balanced" };
+    },
+
+    async setProviderStrategy({ providerId, selectionStrategy }): Promise<void> {
+      await setProviderSettings(deps.config, deps.encKey, providerId, { selectionStrategy });
     },
 
     async fetchAnthropicQuota({ account }): Promise<OAuthQuotaWindow[] | null> {

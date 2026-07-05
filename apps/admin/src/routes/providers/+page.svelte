@@ -6,10 +6,12 @@
     logoutOAuth,
     resetUsageLimit,
     setAccountSchedule,
+    setProviderStrategy,
     type OAuthAccount,
     type OAuthProviderStatus,
     type OAuthQuotaSnapshot,
     type OAuthQuotaWindow,
+    type OAuthSelectionStrategy,
     type OAuthUsageRow,
   } from '$lib/api/oauth.js';
   import ConnectProviderDialog from '$lib/components/ConnectProviderDialog.svelte';
@@ -55,6 +57,9 @@
   // Accounts whose inline schedule edit is in flight (keyed provider/account) — used
   // to disable the control while saving without blocking the rest of the table.
   let savingSchedule = $state<Record<string, boolean>>({});
+  // Provider-level strategy saves are keyed by provider id. The strategy selects
+  // between accounts within that provider; account priority/schedulable stay below.
+  let savingStrategy = $state<Record<string, boolean>>({});
   // Codex accounts whose "Reset usage" click is in flight (keyed provider/account) —
   // clears Helm's local auto-park cooldown (#291). Claude's 5h/7d windows are upstream
   // subscription limits and are not operator-resettable.
@@ -81,6 +86,32 @@
   const keyOf = (providerId: string, account: string): string => `${providerId}/${account}`;
   const ACTIVE_LIMIT_RECOVERY_THRESHOLD = 95;
   const CODEX_RESET_MIN_WEEKLY_USED_PERCENT = 90;
+  const strategyOptions: Array<{
+    value: OAuthSelectionStrategy;
+    label: string;
+    description: string;
+  }> = [
+    {
+      value: 'balanced',
+      label: 'Balanced',
+      description: 'Spread new sessions across accounts while keeping sessions sticky.',
+    },
+    {
+      value: 'manual_priority',
+      label: 'Manual priority',
+      description: 'Follow account priority first; rotate only within the same priority.',
+    },
+    {
+      value: 'low_risk',
+      label: 'Low risk',
+      description: 'Prefer accounts with lower quota pressure to reduce 429 risk.',
+    },
+    {
+      value: 'use_expiring',
+      label: 'Avoid waste',
+      description: 'Prefer accounts with quota left that will reset soon.',
+    },
+  ];
 
   // One table row per connected account, flattened across providers, joined to its
   // usage + quota snapshot (both fail-open: a missing entry renders "—").
@@ -361,6 +392,22 @@
     }
   }
 
+  async function saveStrategy(
+    providerId: string,
+    selectionStrategy: OAuthSelectionStrategy,
+  ): Promise<void> {
+    savingStrategy = { ...savingStrategy, [providerId]: true };
+    error = null;
+    try {
+      await setProviderStrategy(providerId, selectionStrategy);
+      await invalidateAll();
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t('Failed to update strategy');
+    } finally {
+      savingStrategy = { ...savingStrategy, [providerId]: false };
+    }
+  }
+
   // "Reset usage": clear the auto-park cooldown so the account rejoins the pool on the
   // next request. Cooldown-only — the operator's schedulable park is untouched. On
   // success invalidateAll re-reads the (now-cleared) snapshot so the pill disappears.
@@ -536,6 +583,9 @@
             {@const canResetCodexLimit = isCodex && canUseCodexResetCredit(quota, codexCredits)}
             {@const usageLimit = usageLimitStatus(quota)}
             {@const usageLimitRecovery = usageLimit ? autoRecoverIn(usageLimit.untilMs) : ''}
+            {@const selectedStrategy =
+              strategyOptions.find((option) => option.value === row.provider.selectionStrategy) ??
+              strategyOptions[0]}
             <tr class="align-top" data-testid="provider-account-row">
               <!-- Provider / account + type badge -->
               <td data-label={$t('Provider')} class="px-3 py-3">
@@ -552,6 +602,25 @@
                       )}>{$t('Auto-reset')}</span
                     >
                   {/if}
+                </div>
+                <div class="mt-2 text-xs font-medium text-ink-muted">{$t('Account strategy')}</div>
+                <select
+                  class="mt-1 min-h-11 w-full rounded border border-slate-300 bg-white px-2 py-1 text-xs text-ink-body disabled:opacity-50 md:min-h-0"
+                  aria-label={`${row.provider.name} strategy`}
+                  value={row.provider.selectionStrategy}
+                  disabled={savingStrategy[row.provider.id] === true}
+                  onchange={(e) =>
+                    saveStrategy(
+                      row.provider.id,
+                      e.currentTarget.value as OAuthSelectionStrategy,
+                    )}
+                >
+                  {#each strategyOptions as option (option.value)}
+                    <option value={option.value}>{$t(option.label)}</option>
+                  {/each}
+                </select>
+                <div class="mt-1 text-[10px] leading-snug text-ink-muted">
+                  {$t(selectedStrategy.description)}
                 </div>
               </td>
 

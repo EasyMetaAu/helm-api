@@ -6,6 +6,7 @@
 import { clientTzOffsetMinutes } from '$lib/requests-filters.js';
 
 export type OAuthFlow = 'manual_paste' | 'device_code';
+export type OAuthSelectionStrategy = 'balanced' | 'manual_priority' | 'low_risk' | 'use_expiring';
 
 export interface OAuthAccount {
   account: string;
@@ -39,6 +40,7 @@ export interface OAuthProviderStatus {
   id: string;
   name: string;
   flow: OAuthFlow;
+  selectionStrategy: OAuthSelectionStrategy;
   accounts: OAuthAccount[];
 }
 
@@ -453,6 +455,20 @@ export async function setAccountSchedule(
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ account, ...patch }),
+  });
+  if (!res.ok && res.status !== 204) await asJson(res);
+}
+
+// PUT /oauth/:provider/strategy { selectionStrategy } -> 204. Persists the
+// provider-level account-pool strategy and hot-rebuilds the live pool.
+export async function setProviderStrategy(
+  provider: string,
+  selectionStrategy: OAuthSelectionStrategy,
+): Promise<void> {
+  const res = await fetch(`${BASE}/${provider}/strategy`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ selectionStrategy }),
   });
   if (!res.ok && res.status !== 204) await asJson(res);
 }

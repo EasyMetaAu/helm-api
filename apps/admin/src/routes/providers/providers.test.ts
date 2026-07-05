@@ -7,6 +7,7 @@ import ProvidersPage from './+page.svelte';
 const logoutOAuth = vi.fn();
 const resetUsageLimit = vi.fn();
 const setAccountSchedule = vi.fn();
+const setProviderStrategy = vi.fn();
 const streamAccountTest = vi.fn();
 const consumeCodexResetCredit = vi.fn();
 vi.mock('$lib/api/oauth.js', () => ({
@@ -21,6 +22,7 @@ vi.mock('$lib/api/oauth.js', () => ({
   setAccountModels: vi.fn(),
   setAccountProxy: vi.fn(),
   setAccountSchedule: (...args: unknown[]) => setAccountSchedule(...args),
+  setProviderStrategy: (...args: unknown[]) => setProviderStrategy(...args),
   startDeviceCode: vi.fn(),
   startManualPaste: vi.fn(),
   streamAccountTest: (...args: unknown[]) => streamAccountTest(...args),
@@ -33,6 +35,7 @@ function provider(overrides: Partial<OAuthProviderStatus> = {}): OAuthProviderSt
     id: 'anthropic',
     name: 'Claude Max',
     flow: 'manual_paste',
+    selectionStrategy: 'balanced',
     accounts: [
       {
         account: 'acct-claude',
@@ -100,20 +103,27 @@ describe('providers page', () => {
   beforeEach(() => {
     logoutOAuth.mockReset();
     setAccountSchedule.mockReset();
+    setProviderStrategy.mockReset();
     streamAccountTest.mockReset();
     consumeCodexResetCredit.mockReset();
     invalidateAllMock.mockReset();
     logoutOAuth.mockResolvedValue(undefined);
     setAccountSchedule.mockResolvedValue(undefined);
+    setProviderStrategy.mockResolvedValue(undefined);
   });
 
   it('renders connected subscription accounts with usage, quota, and scheduling controls', () => {
     renderPage();
 
     expect(screen.getByText('Subscription Providers')).toBeInTheDocument();
+    expect(screen.getByLabelText('Claude Max strategy')).toHaveValue('balanced');
     const row = screen.getByTestId('provider-account-row');
     expect(within(row).getByText('Claude Max')).toBeInTheDocument();
     expect(within(row).getByText('acct-claude')).toBeInTheDocument();
+    expect(within(row).getByText('Account strategy')).toBeInTheDocument();
+    expect(
+      within(row).getByText('Spread new sessions across accounts while keeping sessions sticky.'),
+    ).toBeInTheDocument();
     expect(within(row).getByText('connected')).toBeInTheDocument();
     expect(within(row).getByText('42 req')).toBeInTheDocument();
     expect(within(row).getByText('1.5K tok')).toBeInTheDocument();
@@ -127,6 +137,19 @@ describe('providers page', () => {
     // Models column: each effective model as a pill (3 ≤ cap, so all show, no "+N").
     expect(within(row).getByText('claude-opus-4-6')).toBeInTheDocument();
     expect(within(row).getByText('claude-haiku-4-5')).toBeInTheDocument();
+  });
+
+  it('updates a provider-level account selection strategy', async () => {
+    renderPage();
+
+    await fireEvent.change(screen.getByLabelText('Claude Max strategy'), {
+      target: { value: 'use_expiring' },
+    });
+
+    await waitFor(() =>
+      expect(setProviderStrategy).toHaveBeenCalledWith('anthropic', 'use_expiring'),
+    );
+    expect(invalidateAllMock).toHaveBeenCalledTimes(1);
   });
 
   it('renders the shared refresh control with auto-refresh intervals', async () => {

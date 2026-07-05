@@ -1,6 +1,13 @@
 import { type ConfigStore, createSqliteDb, SqliteConfigStore } from "@helm/core";
 import { describe, expect, it } from "vitest";
-import { getAccountSettings, loadAccountSettings, setAccountSettings } from "./account-settings.js";
+import {
+  getAccountSettings,
+  getProviderSettings,
+  loadAccountSettings,
+  loadProviderSettings,
+  setAccountSettings,
+  setProviderSettings,
+} from "./account-settings.js";
 
 const KEY = Buffer.alloc(32, 7);
 
@@ -121,6 +128,26 @@ describe("account-settings", () => {
         fastMode: false,
       },
     );
+  });
+
+  it("round-trips provider-level selection strategy independently from account settings", async () => {
+    const config = makeConfig();
+    await setAccountSettings(config, KEY, "anthropic", "work", { priority: 7 });
+    await setProviderSettings(config, KEY, "anthropic", { selectionStrategy: "use_expiring" });
+
+    expect(getAccountSettings(await loadAccountSettings(config, KEY), "anthropic", "work")).toEqual(
+      {
+        priority: 7,
+      },
+    );
+    expect(getProviderSettings(await loadProviderSettings(config, KEY), "anthropic")).toEqual({
+      selectionStrategy: "use_expiring",
+    });
+
+    await setProviderSettings(config, KEY, "anthropic", { selectionStrategy: "low_risk" });
+    expect(getProviderSettings(await loadProviderSettings(config, KEY), "anthropic")).toEqual({
+      selectionStrategy: "low_risk",
+    });
   });
 
   it("serializes concurrent load-merge-save updates so unrelated accounts are preserved", async () => {

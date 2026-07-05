@@ -1,4 +1,9 @@
-import { type ConfigStore, decryptSecret, encryptSecret } from "@helm/core";
+import {
+  type ConfigStore,
+  decryptSecret,
+  encryptSecret,
+  type OAuthSelectionStrategy,
+} from "@helm/core";
 
 // Per-account OAuth subscription SETTINGS (issue #38 follow-up). These are
 // OPERATOR choices that live ALONGSIDE the stored credential but must NOT ride in
@@ -14,6 +19,13 @@ import { type ConfigStore, decryptSecret, encryptSecret } from "@helm/core";
 // a corrupt blob must never block routing or the admin page).
 
 const SETTINGS_KEY = "oauth.account_settings";
+const PROVIDER_SETTINGS_KEY = "oauth.provider_settings";
+const SELECTION_STRATEGIES = new Set<OAuthSelectionStrategy>([
+  "balanced",
+  "manual_priority",
+  "low_risk",
+  "use_expiring",
+]);
 // NUL composite separator: it cannot appear in a provider id or account label,
 // so `${providerId}\u0000${account}` is an unambiguous, collision-free map key
 // (a printable separator could collide with a label that contains it).
@@ -50,6 +62,12 @@ export interface AccountSettings {
 // The whole map: internal composite key -> settings. Exported for the callers that
 // thread it (server synthesis, admin seam).
 export type AccountSettingsMap = Record<string, AccountSettings>;
+
+export interface ProviderSettings {
+  selectionStrategy?: OAuthSelectionStrategy;
+}
+
+export type ProviderSettingsMap = Record<string, ProviderSettings>;
 
 function composite(providerId: string, account: string): string {
   return `${providerId}${SEP}${account}`;
@@ -95,6 +113,30 @@ export async function saveAccountSettings(
   await config.set(SETTINGS_KEY, encryptSecret(JSON.stringify(map), encKey));
 }
 
+export async function loadProviderSettings(
+  config: ConfigStore,
+  encKey: Buffer,
+): Promise<ProviderSettingsMap> {
+  try {
+    const blob = await config.get(PROVIDER_SETTINGS_KEY);
+    if (!blob) return {};
+    const json = decryptSecret(blob, encKey);
+    const parsed: unknown = JSON.parse(json);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return parsed as ProviderSettingsMap;
+  } catch {
+    return {};
+  }
+}
+
+export async function saveProviderSettings(
+  config: ConfigStore,
+  encKey: Buffer,
+  map: ProviderSettingsMap,
+): Promise<void> {
+  await config.set(PROVIDER_SETTINGS_KEY, encryptSecret(JSON.stringify(map), encKey));
+}
+
 // Read one account's settings out of an already-loaded map (never throws).
 export function getAccountSettings(
   map: AccountSettingsMap,
@@ -102,6 +144,16 @@ export function getAccountSettings(
   account: string,
 ): AccountSettings {
   return map[composite(providerId, account)] ?? {};
+}
+
+export function getProviderSettings(
+  map: ProviderSettingsMap,
+  providerId: string,
+): ProviderSettings {
+  const raw = map[providerId] ?? {};
+  return SELECTION_STRATEGIES.has(raw.selectionStrategy as OAuthSelectionStrategy)
+    ? raw
+    : { ...raw, selectionStrategy: undefined };
 }
 
 // Merge a partial patch into one account's settings and PERSIST the whole map.
@@ -120,6 +172,19 @@ export async function setAccountSettings(
     const key = composite(providerId, account);
     map[key] = { ...map[key], ...patch };
     await saveAccountSettings(config, encKey, map);
+  });
+}
+
+export async function setProviderSettings(
+  config: ConfigStore,
+  encKey: Buffer,
+  providerId: string,
+  patch: ProviderSettings,
+): Promise<void> {
+  await serializeSettingsMutation(config, async () => {
+    const map = await loadProviderSettings(config, encKey);
+    map[providerId] = { ...map[providerId], ...patch };
+    await saveProviderSettings(config, encKey, map);
   });
 }
 

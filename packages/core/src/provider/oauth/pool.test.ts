@@ -63,6 +63,98 @@ describe("createOAuthPoolClient — account selection", () => {
     expect(calls).toEqual(["a", "b", "a", "b"]);
   });
 
+  it("low_risk strategy prefers the account with the lowest applicable quota pressure", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        {
+          ...member("nearly-full", 50, true, calls),
+          quotaWindows: [{ key: "5h", usedPercent: 91, resetsAtMs: 20_000, windowMinutes: 300 }],
+          quotaCapturedAtMs: 1_000,
+        },
+        {
+          ...member("cooler", 50, true, calls),
+          quotaWindows: [{ key: "5h", usedPercent: 42, resetsAtMs: 20_000, windowMinutes: 300 }],
+          quotaCapturedAtMs: 1_000,
+        },
+      ],
+      selectionStrategy: "low_risk",
+      now: () => 2_000,
+    });
+
+    await pool.chatCompletion(REQ);
+
+    expect(calls).toEqual(["cooler"]);
+  });
+
+  it("use_expiring strategy spends quota that is both available and close to reset", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        {
+          ...member("far", 50, true, calls),
+          quotaWindows: [
+            { key: "5h", usedPercent: 20, resetsAtMs: 11 * 60 * 60 * 1000, windowMinutes: 300 },
+          ],
+          quotaCapturedAtMs: 1_000,
+        },
+        {
+          ...member("soon", 50, true, calls),
+          quotaWindows: [
+            { key: "5h", usedPercent: 40, resetsAtMs: 30 * 60 * 1000, windowMinutes: 300 },
+          ],
+          quotaCapturedAtMs: 1_000,
+        },
+      ],
+      selectionStrategy: "use_expiring",
+      now: () => 1_000,
+    });
+
+    await pool.chatCompletion(REQ);
+
+    expect(calls).toEqual(["soon"]);
+  });
+
+  it("manual_priority keeps new sessions on priority/LRU instead of hash assignment", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [member("a", 50, true, calls), member("b", 50, true, calls)],
+      selectionStrategy: "manual_priority",
+    });
+
+    await pool.chatCompletion({ ...USER_REQ, prompt_cache_key: "thread-a" });
+    await pool.chatCompletion({ ...USER_REQ, prompt_cache_key: "thread-a" });
+
+    // thread-a hashes to b in balanced mode, but manual_priority lets the first LRU
+    // account own the session, then sticky keeps later turns there.
+    expect(calls).toEqual(["a", "a"]);
+  });
+
+  it("quota strategies fall back to balanced selection when every quota snapshot is stale", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        {
+          ...member("a", 50, true, calls),
+          quotaWindows: [{ key: "5h", usedPercent: 99, resetsAtMs: 20_000, windowMinutes: 300 }],
+          quotaCapturedAtMs: 1_000,
+        },
+        {
+          ...member("b", 50, true, calls),
+          quotaWindows: [{ key: "5h", usedPercent: 1, resetsAtMs: 20_000, windowMinutes: 300 }],
+          quotaCapturedAtMs: 1_000,
+        },
+      ],
+      selectionStrategy: "low_risk",
+      quotaFreshMs: 500,
+      now: () => 2_000,
+    });
+
+    await pool.chatCompletion(REQ);
+
+    expect(calls).toEqual(["a"]);
+  });
+
   it("keeps a chat prompt_cache_key on one deterministic account", async () => {
     const calls: string[] = [];
     const selected: string[] = [];
@@ -201,6 +293,47 @@ describe("createOAuthPoolClient — account selection", () => {
     });
 
     await pool.chatCompletion(REQ);
+    await pool.chatCompletion({ ...USER_REQ, previous_response_id: "resp-a" });
+
+    expect(calls).toEqual(["a", "a"]);
+  });
+
+  it("keeps previous_response_id affinity even when a quota strategy prefers another account", async () => {
+    const calls: string[] = [];
+    let clock = 1_000;
+    const responseMember = (account: string): OAuthPoolMember => ({
+      account,
+      priority: 50,
+      schedulable: true,
+      client: {
+        async chatCompletion(_req: ChatCompletionRequest) {
+          calls.push(account);
+          return { id: `resp-${account}`, served_by: account };
+        },
+        async *chatCompletionStream(_req: ChatCompletionRequest) {
+          calls.push(account);
+          yield `data: ${account}\n\n`;
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [responseMember("a"), responseMember("b")],
+      selectionStrategy: "low_risk",
+      now: () => clock,
+    });
+
+    await pool.chatCompletion(REQ);
+    pool.setQuotaSnapshot(
+      "a",
+      [{ key: "5h", usedPercent: 90, resetsAtMs: 20_000, windowMinutes: 300 }],
+      clock,
+    );
+    pool.setQuotaSnapshot(
+      "b",
+      [{ key: "5h", usedPercent: 10, resetsAtMs: 20_000, windowMinutes: 300 }],
+      clock,
+    );
+    clock = 2_000;
     await pool.chatCompletion({ ...USER_REQ, previous_response_id: "resp-a" });
 
     expect(calls).toEqual(["a", "a"]);
