@@ -837,6 +837,20 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // Codex reset-credit count for quota-aware account selection. Nullable and
+    // observability-only; header refreshes can leave it unchanged when no count is
+    // present, while Codex usage PULLs refresh it.
+    version: 36,
+    run: (db) => {
+      if (
+        sqliteTableHasColumns(db, "oauth_quota", ["provider_id"]) &&
+        !sqliteTableHasColumns(db, "oauth_quota", ["reset_credits"])
+      ) {
+        db.exec("ALTER TABLE oauth_quota ADD COLUMN reset_credits INTEGER;");
+      }
+    },
+  },
 ];
 
 function sqliteTableHasColumns(

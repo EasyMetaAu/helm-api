@@ -171,6 +171,76 @@ describe("createOAuthPoolClient — account selection", () => {
     expect(calls).toEqual(["soon"]);
   });
 
+  it("use_expiring strategy combines short and weekly windows instead of only taking the best single window", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        {
+          ...member("weekly-left", 50, true, calls),
+          quotaWindows: [
+            { key: "primary", usedPercent: 60, resetsAtMs: 60 * 60 * 1000, windowMinutes: 300 },
+            {
+              key: "secondary",
+              usedPercent: 60,
+              resetsAtMs: 60 * 60 * 1000,
+              windowMinutes: 10_080,
+            },
+          ],
+          quotaCapturedAtMs: 1_000,
+        },
+        {
+          ...member("short-left", 50, true, calls),
+          quotaWindows: [
+            { key: "primary", usedPercent: 10, resetsAtMs: 60 * 60 * 1000, windowMinutes: 300 },
+            {
+              key: "secondary",
+              usedPercent: 100,
+              resetsAtMs: 60 * 60 * 1000,
+              windowMinutes: 10_080,
+            },
+          ],
+          quotaCapturedAtMs: 1_000,
+        },
+      ],
+      selectionStrategy: "use_expiring",
+      now: () => 1_000,
+    });
+
+    await pool.chatCompletion(REQ);
+
+    expect(calls).toEqual(["weekly-left"]);
+  });
+
+  it("use_expiring strategy includes Codex reset credits as recoverable weekly capacity", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        {
+          ...member("no-credits", 50, true, calls),
+          quotaWindows: [
+            { key: "primary", usedPercent: 0, resetsAtMs: 60 * 60 * 1000, windowMinutes: 300 },
+          ],
+          quotaCapturedAtMs: 1_000,
+          quotaResetCredits: 0,
+        },
+        {
+          ...member("has-credits", 50, true, calls),
+          quotaWindows: [
+            { key: "primary", usedPercent: 10, resetsAtMs: 60 * 60 * 1000, windowMinutes: 300 },
+          ],
+          quotaCapturedAtMs: 1_000,
+          quotaResetCredits: 2,
+        },
+      ],
+      selectionStrategy: "use_expiring",
+      now: () => 1_000,
+    });
+
+    await pool.chatCompletion(REQ);
+
+    expect(calls).toEqual(["has-credits"]);
+  });
+
   it("manual_priority keeps new sessions on priority/LRU instead of hash assignment", async () => {
     const calls: string[] = [];
     const pool = createOAuthPoolClient({

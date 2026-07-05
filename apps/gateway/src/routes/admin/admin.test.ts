@@ -1672,6 +1672,7 @@ describe("admin.api oauth quota", () => {
       providerId: "openai-codex",
       account: "mylukin",
       source: "codex",
+      resetCredits: 2,
     });
   });
 

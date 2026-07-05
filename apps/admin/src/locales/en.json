@@ -571,7 +571,7 @@
   "Port": "Port",
   "Preview": "Preview",
   "Prefer accounts with lower quota pressure to reduce 429 risk.": "Prefer accounts with lower quota pressure to reduce 429 risk.",
-  "Prefer accounts with quota left that will reset soon.": "Prefer accounts with quota left that will reset soon.",
+  "Prefer accounts with 5h or weekly quota resetting soon, plus Codex reset credits.": "Prefer accounts with 5h or weekly quota resetting soon, plus Codex reset credits.",
   "Previous": "Previous",
   "Primary": "Primary",
   "Primary is required and cannot be empty.": "Primary is required and cannot be empty.",

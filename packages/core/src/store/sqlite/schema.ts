@@ -228,6 +228,8 @@ export const oauthQuota = sqliteTable(
     // scheduling pool (null = not limited). The runtime twin of `windows` — the
     // scheduler gates on it; the "Reset usage" action sets it back to null.
     usageLimitedUntilMs: integer("usage_limited_until_ms"), // nullable
+    // Codex only: available rate-limit reset credits captured from the usage PULL.
+    resetCredits: integer("reset_credits"), // nullable
   },
   (t) => [primaryKey({ columns: [t.providerId, t.account] })],
 );
