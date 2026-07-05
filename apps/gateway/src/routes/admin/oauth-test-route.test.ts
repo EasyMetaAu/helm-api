@@ -1,3 +1,4 @@
+import { TokenRefreshError } from "@helm/core";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../../app.js";
@@ -145,5 +146,44 @@ describe("POST /admin/api/oauth/:provider/test", () => {
     expect(err?.error).toMatch(/429/);
     // No spurious done event after a failure.
     expect(events.some((e) => e.type === "done")).toBe(false);
+  });
+
+  it("marks the account as credential-failed when the test refresh gets a permanent 401", async () => {
+    const tester: OAuthTester = {
+      test: vi.fn(
+        () =>
+          ({
+            [Symbol.asyncIterator]() {
+              return {
+                async next(): Promise<IteratorResult<TestStreamEvent>> {
+                  throw new TokenRefreshError(
+                    "oauth refresh failed (openai-codex, status 401)",
+                    401,
+                  );
+                },
+              };
+            },
+          }) satisfies AsyncIterable<TestStreamEvent>,
+      ),
+    };
+    const onOAuthCredentialFailure = vi.fn(async () => {});
+
+    const res = await app({ oauthTester: tester, onOAuthCredentialFailure }).request(
+      "/admin/api/oauth/openai-codex/test",
+      {
+        method: "POST",
+        headers: JSONH,
+        body: JSON.stringify({ account: "easymetaau@gmail.com", model: "gpt-5.4-mini" }),
+      },
+    );
+
+    expect(res.status).toBe(200);
+    const events = sseEvents(await res.text());
+    expect(events.find((e) => e.type === "error")?.error).toContain("status 401");
+    expect(onOAuthCredentialFailure).toHaveBeenCalledWith(
+      "openai-codex",
+      "easymetaau@gmail.com",
+      "oauth refresh failed (openai-codex, status 401)",
+    );
   });
 });

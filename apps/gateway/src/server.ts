@@ -135,6 +135,7 @@ import {
   getAccountSettings,
   loadAccountSettings,
   loadGlobalOAuthSettings,
+  markAccountCredentialFailure,
 } from "./oauth/account-settings.js";
 import { createOAuthAdmin } from "./oauth/admin-oauth.js";
 import { weeklySaturated } from "./oauth/auto-reset.js";
@@ -484,6 +485,9 @@ export async function synthesizeOAuthProviders(
   // from the executor. This hook persists the cooldown the pool already applied in
   // memory, so rebuilds/restarts keep routing around that account.
   onAccountRateLimit?: (providerId: string, account: string, untilMs: number) => void,
+  // Pool-local credential failures are permanent until reconnect. Persist the
+  // auto-disabled state so admin status, rebuilds, and restarts agree with the live pool.
+  onAccountCredentialFailure?: (providerId: string, account: string, error: unknown) => void,
 ): Promise<SynthesizedOAuth> {
   if (!oauthCtx) return { providers: [], poolClients: new Map() };
   const declared = new Set<string>(
@@ -517,6 +521,14 @@ export async function synthesizeOAuthProviders(
     const unionModels = new Set<string>();
     for (const account of accounts) {
       const s = getAccountSettings(accountSettings, providerId, account);
+      if (typeof s.credentialFailedAt === "number") {
+        log("warn", "oauth.autoroute.skip", {
+          providerId,
+          account,
+          reason: "credential failed",
+        });
+        continue;
+      }
       if (s.schedulable === false) {
         log("info", "oauth.autoroute.parked", { providerId, account });
         continue;
@@ -646,6 +658,8 @@ export async function synthesizeOAuthProviders(
       },
       accountRateLimitCooldownMs: DEFAULT_429_COOLDOWN_MS,
       onAccountRateLimit: (account, untilMs) => onAccountRateLimit?.(providerId, account, untilMs),
+      onAccountCredentialFailure: (account, error) =>
+        onAccountCredentialFailure?.(providerId, account, error),
       shouldParkRateLimit: ({ model }) => shouldParkOAuthRateLimit(providerId, model),
       // Let the in-pool retry fail over across accounts on an IN-BAND pre-output failure
       // (200-then-`response.failed`/overloaded after only the preamble): wrap each member's
@@ -1049,6 +1063,19 @@ export async function buildServer(
   const oauthCtx: OAuthRuntimeCtx | undefined = oauthEncKey
     ? { store: store.oauthTokens, encKey: oauthEncKey }
     : undefined;
+  let rebuildOAuthPool: (() => Promise<{ applied: boolean }>) | undefined;
+  const rebuildAfterOAuthCredentialFailure = async (
+    providerId: string,
+    account: string,
+  ): Promise<void> => {
+    const rebuilt = await rebuildOAuthPool?.();
+    if (rebuilt?.applied === false) {
+      logger.log("warn", "oauth.credential_failure.rebuild_not_applied", {
+        provider_id: providerId,
+        account,
+      });
+    }
+  };
 
   // The admin OAuth-login surface, built ONCE here (was inlined into AdminApiDeps
   // below) so the execution-path quota hook can reuse its `consumeCodexResetCredit`
@@ -1059,6 +1086,7 @@ export async function buildServer(
         encKey: oauthCtx.encKey,
         config: store.config,
         log: (lvl, msg, fields) => logger.log(lvl, msg, fields),
+        onCredentialFailure: rebuildAfterOAuthCredentialFailure,
       })
     : undefined;
 
@@ -1365,6 +1393,32 @@ export async function buildServer(
       }),
     );
   };
+  const markOAuthCredentialFailure = async (
+    providerId: string,
+    account: string,
+    reason: string,
+  ): Promise<void> => {
+    if (!oauthCtx) return;
+    await markAccountCredentialFailure(store.config, oauthCtx.encKey, providerId, account, {
+      at: Date.now(),
+      reason,
+    });
+    await rebuildAfterOAuthCredentialFailure(providerId, account);
+  };
+  const markOAuthCredentialFailureLater = (
+    providerId: string,
+    account: string,
+    error: unknown,
+  ): void => {
+    const reason = error instanceof Error ? error.message : "oauth credential failed";
+    void markOAuthCredentialFailure(providerId, account, reason).catch((e) =>
+      logger.log("error", "oauth.credential_failure.persist_failed", {
+        provider_id: providerId,
+        account,
+        line: e instanceof Error ? e.message : String(e),
+      }),
+    );
+  };
   const applyQuotaSnapshot = (
     providerId: string,
     account: string,
@@ -1571,6 +1625,7 @@ export async function buildServer(
     userMessageQueue,
     await readQuotaSeeds(),
     parkAccountOnLimit,
+    markOAuthCredentialFailureLater,
   );
   const routableProviders: ProviderConfigShared[] = [
     ...config.providers,
@@ -1661,7 +1716,7 @@ export async function buildServer(
   // admin route can return an honest "saved but not applied" (503) on failure instead
   // of a false 204 (the persisted change still wins on the next rebuild / restart).
   let rebuildChain: Promise<void> = Promise.resolve();
-  const rebuildOAuthPool = async (): Promise<{ applied: boolean }> => {
+  rebuildOAuthPool = async (): Promise<{ applied: boolean }> => {
     let applied = true;
     rebuildChain = rebuildChain.then(async () => {
       try {
@@ -1676,6 +1731,7 @@ export async function buildServer(
           userMessageQueue, // SAME gate instance — queue state survives rebuilds
           await readQuotaSeeds(), // re-seed cooldowns + quota windows for strategy scoring
           parkAccountOnLimit,
+          markOAuthCredentialFailureLater,
         );
         oauthPoolClients = next.poolClients;
         oauthAliasSet = aliasSetOf(next);
@@ -2381,6 +2437,7 @@ export async function buildServer(
       // persist, no rebuild. Never touches schedulable.
       applyUsageLimit,
       applyQuotaSnapshot,
+      onOAuthCredentialFailure: markOAuthCredentialFailure,
     });
 
     // Admin SPA static hosting (/admin). MUST be mounted AFTER registerAdminApi so

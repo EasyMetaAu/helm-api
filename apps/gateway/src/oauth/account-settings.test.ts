@@ -1,9 +1,11 @@
 import { type ConfigStore, createSqliteDb, SqliteConfigStore } from "@helm/core";
 import { describe, expect, it } from "vitest";
 import {
+  clearAccountCredentialFailure,
   getAccountSettings,
   loadAccountSettings,
   loadGlobalOAuthSettings,
+  markAccountCredentialFailure,
   setAccountSettings,
   setGlobalOAuthSettings,
 } from "./account-settings.js";
@@ -127,6 +129,62 @@ describe("account-settings", () => {
         fastMode: false,
       },
     );
+  });
+
+  it("marks a credential failure as unhealthy and auto-parks only when not already manually parked", async () => {
+    const config = makeConfig();
+    await setAccountSettings(config, KEY, "openai-codex", "default", { priority: 7 });
+
+    await markAccountCredentialFailure(config, KEY, "openai-codex", "default", {
+      at: 12_345,
+      reason: "oauth refresh failed (openai-codex, status 401)",
+    });
+
+    expect(
+      getAccountSettings(await loadAccountSettings(config, KEY), "openai-codex", "default"),
+    ).toEqual({
+      priority: 7,
+      schedulable: false,
+      autoDisabledForCredentialFailure: true,
+      credentialFailedAt: 12_345,
+      credentialFailureReason: "oauth refresh failed (openai-codex, status 401)",
+    });
+
+    await setAccountSettings(config, KEY, "openai-codex", "manual", { schedulable: false });
+    await markAccountCredentialFailure(config, KEY, "openai-codex", "manual", {
+      at: 20_000,
+      reason: "upstream returned 401",
+    });
+    expect(
+      getAccountSettings(await loadAccountSettings(config, KEY), "openai-codex", "manual"),
+    ).toMatchObject({
+      schedulable: false,
+      autoDisabledForCredentialFailure: false,
+      credentialFailedAt: 20_000,
+    });
+  });
+
+  it("clears credential failure on reconnect and only re-enables auto-disabled accounts", async () => {
+    const config = makeConfig();
+    await markAccountCredentialFailure(config, KEY, "openai-codex", "auto", {
+      at: 12_345,
+      reason: "oauth refresh failed (openai-codex, status 401)",
+    });
+    await setAccountSettings(config, KEY, "openai-codex", "manual", { schedulable: false });
+    await markAccountCredentialFailure(config, KEY, "openai-codex", "manual", {
+      at: 20_000,
+      reason: "upstream returned 401",
+    });
+
+    await clearAccountCredentialFailure(config, KEY, "openai-codex", "auto");
+    await clearAccountCredentialFailure(config, KEY, "openai-codex", "manual");
+
+    expect(
+      getAccountSettings(await loadAccountSettings(config, KEY), "openai-codex", "auto"),
+    ).toEqual({});
+    expect(
+      getAccountSettings(await loadAccountSettings(config, KEY), "openai-codex", "manual"),
+    ).toEqual({ schedulable: false });
   });
 
   it("round-trips the global account selection strategy independently from account settings", async () => {

@@ -101,6 +101,10 @@ export interface OAuthAdminStatus {
     expiresAt: number | null;
     updatedAt: number;
     healthy: boolean;
+    // Durable credential rejection. While true, reconnect is the only recovery path;
+    // priority/fast-mode edits may still be saved, but the schedulable toggle cannot
+    // put the account back into the routing pool.
+    credentialFailed?: boolean;
     // Effective pool scheduling (defaults applied: priority 50, schedulable true),
     // folded into the list so the providers page renders + inline-edits them without
     // an N+1 per-account GET. LOWER priority = served first; schedulable false parks
@@ -443,6 +447,10 @@ export interface AdminApiDeps {
     capturedAtMs: number,
     resetCredits?: number | null,
   ) => void;
+  // Durable OAuth credential failure. A refresh 400/401/403 or persistent upstream
+  // 401/403 means the account needs reconnecting, not just a short cooldown. The
+  // gateway persists that state and rebuilds the pool so admin status and routing agree.
+  onOAuthCredentialFailure?: (providerId: string, account: string, reason: string) => Promise<void>;
 }
 
 // Re-exported for route signatures.

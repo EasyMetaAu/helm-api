@@ -1284,9 +1284,13 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
   it("parks a credential-failed account and retries a sibling before surfacing to the alias breaker", async () => {
     const served: string[] = [];
     const selected: string[] = [];
+    const credentialFailures: Array<{ account: string; error: unknown }> = [];
     const pool = createOAuthPoolClient({
       members: [faultMember("bad", 10, served, REFRESH_401), faultMember("good", 50, served, null)],
       onSelect: (account) => selected.push(account),
+      onAccountCredentialFailure: (account, error) => {
+        credentialFailures.push({ account, error });
+      },
     });
 
     await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "good" });
@@ -1294,6 +1298,7 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
 
     expect(served).toEqual(["good", "good"]);
     expect(selected).toEqual(["bad", "good", "good"]);
+    expect(credentialFailures).toEqual([{ account: "bad", error: REFRESH_401 }]);
   });
 
   it("parks a persistent upstream auth failure and retries a sibling", async () => {

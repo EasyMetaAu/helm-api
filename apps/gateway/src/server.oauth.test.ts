@@ -383,6 +383,30 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     expect(aliases).toEqual(["anthropic/claude-opus-4-6"]);
   });
 
+  it("excludes a credential-failed account from the synthesized pool until reconnect", async () => {
+    const { ctx, config } = oauthStores();
+    await seedAnthropic(ctx, "dead");
+    await setAccountSettings(config, ENC_KEY, "anthropic", "dead", {
+      enabledModels: ["claude-opus-4-6"],
+      credentialFailedAt: 12_345,
+      credentialFailureReason: "oauth refresh failed (anthropic, status 401)",
+      autoDisabledForCredentialFailure: true,
+      schedulable: false,
+    });
+
+    const { providers, poolClients } = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+    );
+
+    expect(providers).toEqual([]);
+    expect(poolClients.size).toBe(0);
+  });
+
   it("returns empty when no OAuth runtime is wired (no enc key)", async () => {
     const { config } = oauthStores();
     const out = await synthesizeOAuthProviders([], undefined, config, "https://f/v1", 60_000, noop);

@@ -410,31 +410,31 @@ describe("admin OAuth routes — read endpoints", () => {
     expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "default", fiveHourReset, "replace");
   });
 
-  it("GET /oauth/quota does not newly park an unparked account from a PULL snapshot", async () => {
+  it("GET /oauth/quota parks an unparked account from a saturated account-wide PULL snapshot", async () => {
     const now = Date.now();
     const saturatedWeekly = {
-      key: "7d",
+      key: "secondary",
       usedPercent: 100,
       resetsAtMs: now + 8 * 60 * 60_000,
-      windowMinutes: null,
+      windowMinutes: 10_080,
     };
     const applyUsageLimit = vi.fn(async () => {});
     const oauthQuota = {
       get: vi.fn(async () => ({
-        providerId: "anthropic",
+        providerId: "openai-codex",
         account: "default",
         windows: [],
         capturedAt: now,
-        source: "anthropic",
+        source: "codex",
         usageLimitedUntilMs: null,
       })),
       getAll: vi.fn(async () => [
         {
-          providerId: "anthropic",
+          providerId: "openai-codex",
           account: "default",
           windows: [saturatedWeekly],
           capturedAt: now,
-          source: "anthropic",
+          source: "codex",
           usageLimitedUntilMs: null,
         },
       ]),
@@ -442,7 +442,69 @@ describe("admin OAuth routes — read endpoints", () => {
       delete: vi.fn(async () => {}),
     } as unknown as AdminApiDeps["oauthQuota"];
     const seam = fullSeam({
-      fetchAnthropicQuota: vi.fn(async () => [saturatedWeekly]) as never,
+      listStatus: vi.fn(async () => ({
+        selectionStrategy: "balanced",
+        providers: [{ id: "openai-codex", name: "Codex", accounts: [{ account: "default" }] }],
+      })) as never,
+      fetchCodexQuota: vi.fn(async () => ({
+        windows: [saturatedWeekly],
+        resetCredits: 0,
+      })) as never,
+    });
+
+    const res = await app({ oauth: seam, oauthQuota, applyUsageLimit }).request(
+      "/admin/api/oauth/quota",
+    );
+
+    expect(res.status).toBe(200);
+    expect(applyUsageLimit).toHaveBeenCalledWith(
+      "openai-codex",
+      "default",
+      saturatedWeekly.resetsAtMs,
+      "extend",
+    );
+  });
+
+  it("GET /oauth/quota does not newly park an unparked account from a near-full PULL snapshot", async () => {
+    const now = Date.now();
+    const nearFullFiveHour = {
+      key: "primary",
+      usedPercent: 98,
+      resetsAtMs: now + 2 * 60 * 60_000,
+      windowMinutes: 300,
+    };
+    const applyUsageLimit = vi.fn(async () => {});
+    const oauthQuota = {
+      get: vi.fn(async () => ({
+        providerId: "openai-codex",
+        account: "default",
+        windows: [],
+        capturedAt: now,
+        source: "codex",
+        usageLimitedUntilMs: null,
+      })),
+      getAll: vi.fn(async () => [
+        {
+          providerId: "openai-codex",
+          account: "default",
+          windows: [nearFullFiveHour],
+          capturedAt: now,
+          source: "codex",
+          usageLimitedUntilMs: null,
+        },
+      ]),
+      upsert: vi.fn(async () => {}),
+      delete: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const seam = fullSeam({
+      listStatus: vi.fn(async () => ({
+        selectionStrategy: "balanced",
+        providers: [{ id: "openai-codex", name: "Codex", accounts: [{ account: "default" }] }],
+      })) as never,
+      fetchCodexQuota: vi.fn(async () => ({
+        windows: [nearFullFiveHour],
+        resetCredits: 0,
+      })) as never,
     });
 
     const res = await app({ oauth: seam, oauthQuota, applyUsageLimit }).request(

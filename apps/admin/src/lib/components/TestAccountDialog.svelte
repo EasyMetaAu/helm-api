@@ -60,6 +60,7 @@
         } else if (ev.type === 'error') {
           status = 'error';
           errorMsg = ev.error;
+          void invalidateAll();
         } else if (ev.type === 'done') {
           durationMs = ev.durationMs ?? Math.round(performance.now() - startedAt);
           // A `done` that arrives after an `error` keeps the failed status.

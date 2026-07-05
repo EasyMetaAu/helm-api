@@ -15,6 +15,9 @@ export interface OAuthAccount {
   // True when the account has a working durable credential (the gateway auto-renews
   // the short-lived access token). False = a refresh failed → needs reconnecting.
   healthy: boolean;
+  // True after a durable OAuth credential rejection. Reconnect clears it; the
+  // schedulable toggle alone must not appear to recover the account.
+  credentialFailed?: boolean;
   // Effective pool scheduling (defaults applied by the gateway: 50 / true). LOWER
   // priority = served first; schedulable false parks the account out of rotation.
   priority: number;

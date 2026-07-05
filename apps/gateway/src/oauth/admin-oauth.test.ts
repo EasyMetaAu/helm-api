@@ -8,7 +8,7 @@ import {
 } from "@helm/core";
 import type { OAuthQuotaWindow } from "@helm/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getAccountSettings, loadAccountSettings } from "./account-settings.js";
+import { getAccountSettings, loadAccountSettings, setAccountSettings } from "./account-settings.js";
 import { createOAuthAdmin } from "./admin-oauth.js";
 
 const KEY = Buffer.alloc(32, 4);
@@ -294,6 +294,8 @@ describe("createOAuthAdmin", () => {
 
   it("listStatus marks an account unhealthy when its refresh fails (needs reconnect)", async () => {
     const store = makeStore();
+    const config = makeConfig();
+    const onCredentialFailure = vi.fn(async () => {});
     await store.upsert({
       providerId: "github-copilot",
       account: "dead",
@@ -306,8 +308,9 @@ describe("createOAuthAdmin", () => {
     const admin = createOAuthAdmin({
       store,
       encKey: KEY,
-      config: makeConfig(),
+      config,
       now: () => 10_000_000,
+      onCredentialFailure,
     });
     vi.stubGlobal(
       "fetch",
@@ -316,6 +319,54 @@ describe("createOAuthAdmin", () => {
     const acct = (await admin.listStatus()).providers.find((p) => p.id === "github-copilot")
       ?.accounts[0];
     expect(acct?.healthy).toBe(false);
+    expect(acct?.credentialFailed).toBe(true);
+    expect(onCredentialFailure).toHaveBeenCalledWith(
+      "github-copilot",
+      "dead",
+      "oauth refresh failed (github-copilot, status 401)",
+    );
+    const settings = getAccountSettings(
+      await loadAccountSettings(config, KEY),
+      "github-copilot",
+      "dead",
+    );
+    expect(settings.credentialFailedAt).toBe(10_000_000);
+    expect(settings.schedulable).toBe(false);
+  });
+
+  it("listStatus treats a persisted credential failure as reconnect-only and does not refresh", async () => {
+    const { tokens, config } = makeStores();
+    await tokens.upsert({
+      providerId: "openai-codex",
+      account: "dead",
+      accessEnc: encryptSecret("x", KEY),
+      refreshEnc: encryptSecret("revoked", KEY),
+      expiresAt: 1000,
+      meta: null,
+      updatedAt: 1,
+    });
+    await setAccountSettings(config, KEY, "openai-codex", "dead", {
+      credentialFailedAt: 12_345,
+      credentialFailureReason: "oauth refresh failed (openai-codex, status 401)",
+      schedulable: false,
+    });
+    const fetchFn = vi.fn(async () => {
+      throw new Error("must not refresh a credential-failed account");
+    });
+    const admin = createOAuthAdmin({
+      store: tokens,
+      encKey: KEY,
+      config,
+      makeFetch: () => fetchFn as unknown as typeof fetch,
+    });
+
+    const acct = (await admin.listStatus()).providers.find((p) => p.id === "openai-codex")
+      ?.accounts[0];
+
+    expect(acct?.healthy).toBe(false);
+    expect(acct?.credentialFailed).toBe(true);
+    expect(acct?.schedulable).toBe(false);
+    expect(fetchFn).not.toHaveBeenCalled();
   });
 
   it("rejects the wrong flow for a provider", async () => {
@@ -692,6 +743,41 @@ describe("createOAuthAdmin", () => {
       autoReset: true,
       fastMode: true,
     });
+  });
+
+  it("setAccountSchedule rejects re-enabling a credential-failed account until reconnect", async () => {
+    const { tokens, config } = makeStores();
+    await setAccountSettings(config, KEY, "openai-codex", "dead", {
+      schedulable: false,
+      credentialFailedAt: 12_345,
+      credentialFailureReason: "oauth refresh failed (openai-codex, status 401)",
+      autoDisabledForCredentialFailure: true,
+    });
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
+
+    await expect(
+      admin.setAccountSchedule({
+        providerId: "openai-codex",
+        account: "dead",
+        schedulable: true,
+      }),
+    ).rejects.toThrow(/needs reconnect/);
+
+    expect(await admin.getAccountSchedule({ providerId: "openai-codex", account: "dead" })).toEqual(
+      {
+        priority: 50,
+        schedulable: false,
+        autoReset: false,
+        fastMode: false,
+      },
+    );
+    const settings = getAccountSettings(
+      await loadAccountSettings(config, KEY),
+      "openai-codex",
+      "dead",
+    );
+    expect(settings.credentialFailedAt).toBe(12_345);
+    expect(settings.autoDisabledForCredentialFailure).toBe(true);
   });
 
   it("setAccountSchedule leaves an omitted field unchanged + preserves proxy", async () => {

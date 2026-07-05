@@ -1,4 +1,4 @@
-import { windowsToActiveUsageRecovery } from "@helm/core";
+import { windowsToActiveUsageRecovery, windowsToUsageLimit } from "@helm/core";
 import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../../app.js";
@@ -7,6 +7,10 @@ import {
   canConsumeResetCredit,
   codexWeeklyUsedPercent,
 } from "../../oauth/auto-reset.js";
+import {
+  isPermanentOAuthCredentialFailure,
+  oauthCredentialFailureReason,
+} from "../../oauth/credential-failure.js";
 import type {
   AccountProxyInput,
   AdminApiDeps,
@@ -39,6 +43,18 @@ function errMessage(e: unknown): string {
 function isAbort(e: unknown, signal: AbortSignal): boolean {
   if (signal.aborted) return true;
   return e instanceof Error && (e.name === "AbortError" || /abort/i.test(e.message));
+}
+
+async function recordCredentialFailure(
+  deps: AdminApiDeps,
+  providerId: string,
+  account: string,
+  err: unknown,
+): Promise<void> {
+  if (!deps.onOAuthCredentialFailure || !isPermanentOAuthCredentialFailure(err)) return;
+  await deps
+    .onOAuthCredentialFailure(providerId, account, oauthCredentialFailureReason(err))
+    .catch(() => {});
 }
 
 function testUsageTokens(ev: {
@@ -211,7 +227,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     // Codex reset-credit counts from the live usage PULL. They are persisted with the
     // latest snapshot for quota-aware strategy scoring, then folded onto the response.
     const resetCredits = new Map<string, number | null>();
-    const syncActiveCooldownFromWindows = async (
+    const syncCooldownFromWindows = async (
       providerId: string,
       account: string,
       windows: Parameters<typeof windowsToActiveUsageRecovery>[0],
@@ -220,7 +236,13 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       const nowMs = Date.now();
       const current = await store.get(providerId, account).catch(() => null);
       const currentUntil = current?.usageLimitedUntilMs ?? null;
-      if (currentUntil === null || currentUntil <= nowMs) return;
+      if (currentUntil === null || currentUntil <= nowMs) {
+        const quotaUntil = windowsToUsageLimit(windows, nowMs);
+        if (quotaUntil !== null) {
+          await deps.applyUsageLimit(providerId, account, quotaUntil, "extend").catch(() => {});
+        }
+        return;
+      }
       const quotaUntil = windowsToActiveUsageRecovery(windows, nowMs);
       if (quotaUntil === null) {
         await deps.applyUsageLimit(providerId, account, null, "replace").catch(() => {});
@@ -240,14 +262,12 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         // PUSH still updates the same store on live traffic — the PULL covers
         // accounts that have served nothing yet (else they render "—" forever).
         // NB: this observability PULL refreshes the stored window snapshot (and, for
-        // Codex, the live reset-credit count) but does NOT newly auto-park an otherwise
-        // active account. If the account is ALREADY parked by live-traffic evidence
-        // (generic 429 fallback), a near-full quota window may EXTEND that cooldown to
-        // the likely reset time. That keeps "Reset usage" effective: clearing the
-        // cooldown then reloading this page does not immediately re-park the account
-        // before it can serve a single request. For an ALREADY parked account, a
-        // successful PULL is also trusted to clear or shorten stale cooldowns: clean
-        // windows mean the account is available again.
+        // Codex, the live reset-credit count) and parks an otherwise active account
+        // only when an account-wide window is truly saturated (100% with a future
+        // reset). Near-full windows (98-99%) are used only after a real 429 has already
+        // created a cooldown, where they refine the recovery time. That keeps healthy
+        // near-full accounts schedulable while preventing the UI from saying "limited"
+        // as the pool continues to route to the same exhausted account.
         const acctsOf = (id: string) => status.providers.find((x) => x.id === id)?.accounts ?? [];
         const tasks: Array<Promise<void>> = [];
         // Anthropic: windows only.
@@ -269,7 +289,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                     })
                     .catch(() => {});
                   deps.applyQuotaSnapshot?.("anthropic", a.account, windows, capturedAt);
-                  await syncActiveCooldownFromWindows("anthropic", a.account, windows);
+                  await syncCooldownFromWindows("anthropic", a.account, windows);
                 }
               })(),
             );
@@ -303,7 +323,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                     capturedAt,
                     result.resetCredits,
                   );
-                  await syncActiveCooldownFromWindows("openai-codex", a.account, result.windows);
+                  await syncCooldownFromWindows("openai-codex", a.account, result.windows);
                 }
               })(),
             );
@@ -764,6 +784,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       } catch (e) {
         // A client disconnect / modal close is not a provider failure — stay quiet.
         if (isAbort(e, signal)) return;
+        await recordCredentialFailure(deps, providerId, account, e);
         await sse.writeSSE({ data: JSON.stringify({ type: "error", error: errMessage(e) }) });
       }
     });

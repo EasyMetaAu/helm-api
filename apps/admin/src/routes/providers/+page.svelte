@@ -607,6 +607,7 @@
             {@const canResetCodexLimit = isCodex && canUseCodexResetCredit(quota, codexCredits)}
             {@const usageLimit = usageLimitStatus(quota)}
             {@const usageLimitRecovery = usageLimit ? autoRecoverIn(usageLimit.untilMs) : ''}
+            {@const credentialFailed = row.account.credentialFailed === true}
             <tr class="align-top" data-testid="provider-account-row">
               <!-- Provider / account + type badge -->
               <td data-label={$t('Provider')} class="px-3 py-3">
@@ -753,8 +754,9 @@
                   type="checkbox"
                   class="h-5 w-5 disabled:opacity-50 md:h-4 md:w-4"
                   checked={row.account.schedulable}
-                  disabled={saving}
+                  disabled={saving || credentialFailed}
                   aria-label={$t('Schedulable')}
+                  title={credentialFailed ? $t('needs reconnect') : undefined}
                   onchange={(e) =>
                     toggleSchedulable(
                       row.provider.id,
