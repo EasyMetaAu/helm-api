@@ -2,11 +2,10 @@ import { type ConfigStore, createSqliteDb, SqliteConfigStore } from "@helm/core"
 import { describe, expect, it } from "vitest";
 import {
   getAccountSettings,
-  getProviderSettings,
   loadAccountSettings,
-  loadProviderSettings,
+  loadGlobalOAuthSettings,
   setAccountSettings,
-  setProviderSettings,
+  setGlobalOAuthSettings,
 } from "./account-settings.js";
 
 const KEY = Buffer.alloc(32, 7);
@@ -130,22 +129,22 @@ describe("account-settings", () => {
     );
   });
 
-  it("round-trips provider-level selection strategy independently from account settings", async () => {
+  it("round-trips the global account selection strategy independently from account settings", async () => {
     const config = makeConfig();
     await setAccountSettings(config, KEY, "anthropic", "work", { priority: 7 });
-    await setProviderSettings(config, KEY, "anthropic", { selectionStrategy: "use_expiring" });
+    await setGlobalOAuthSettings(config, KEY, { selectionStrategy: "use_expiring" });
 
     expect(getAccountSettings(await loadAccountSettings(config, KEY), "anthropic", "work")).toEqual(
       {
         priority: 7,
       },
     );
-    expect(getProviderSettings(await loadProviderSettings(config, KEY), "anthropic")).toEqual({
+    expect(await loadGlobalOAuthSettings(config, KEY)).toEqual({
       selectionStrategy: "use_expiring",
     });
 
-    await setProviderSettings(config, KEY, "anthropic", { selectionStrategy: "low_risk" });
-    expect(getProviderSettings(await loadProviderSettings(config, KEY), "anthropic")).toEqual({
+    await setGlobalOAuthSettings(config, KEY, { selectionStrategy: "low_risk" });
+    expect(await loadGlobalOAuthSettings(config, KEY)).toEqual({
       selectionStrategy: "low_risk",
     });
   });

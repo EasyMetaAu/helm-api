@@ -40,7 +40,6 @@ export interface OAuthProviderStatus {
   id: string;
   name: string;
   flow: OAuthFlow;
-  selectionStrategy: OAuthSelectionStrategy;
   accounts: OAuthAccount[];
 }
 
@@ -63,12 +62,20 @@ async function asJson<T>(res: Response): Promise<T> {
 // OAuth login is not configured (HELM_OAUTH_ENC_KEY unset).
 export async function listOAuthStatus(): Promise<{
   configured: boolean;
+  selectionStrategy: OAuthSelectionStrategy;
   providers: OAuthProviderStatus[];
 }> {
   const res = await fetch(BASE, { headers: { accept: 'application/json' } });
-  if (res.status === 503) return { configured: false, providers: [] };
-  const body = await asJson<{ providers: OAuthProviderStatus[] }>(res);
-  return { configured: true, providers: body.providers };
+  if (res.status === 503) return { configured: false, selectionStrategy: 'balanced', providers: [] };
+  const body = await asJson<{
+    selectionStrategy?: OAuthSelectionStrategy;
+    providers: OAuthProviderStatus[];
+  }>(res);
+  return {
+    configured: true,
+    selectionStrategy: body.selectionStrategy ?? 'balanced',
+    providers: body.providers,
+  };
 }
 
 // ── per-account usage + quota (providers page enrichment) ────────────────────
@@ -459,13 +466,12 @@ export async function setAccountSchedule(
   if (!res.ok && res.status !== 204) await asJson(res);
 }
 
-// PUT /oauth/:provider/strategy { selectionStrategy } -> 204. Persists the
-// provider-level account-pool strategy and hot-rebuilds the live pool.
-export async function setProviderStrategy(
-  provider: string,
+// PUT /oauth/strategy { selectionStrategy } -> 204. Persists the global
+// account-pool strategy and hot-rebuilds every live OAuth pool.
+export async function setSelectionStrategy(
   selectionStrategy: OAuthSelectionStrategy,
 ): Promise<void> {
-  const res = await fetch(`${BASE}/${provider}/strategy`, {
+  const res = await fetch(`${BASE}/strategy`, {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ selectionStrategy }),

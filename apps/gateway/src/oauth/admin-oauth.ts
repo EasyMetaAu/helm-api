@@ -34,16 +34,15 @@ import type {
   CodexQuotaResult,
   CodexResetCreditResult,
   OAuthAdminAccess,
-  OAuthAdminStatus,
+  OAuthAdminStatusResponse,
 } from "../routes/admin/deps.js";
 import {
   clearAccountSettings,
   getAccountSettings,
-  getProviderSettings,
   loadAccountSettings,
-  loadProviderSettings,
+  loadGlobalOAuthSettings,
   setAccountSettings,
-  setProviderSettings,
+  setGlobalOAuthSettings,
 } from "./account-settings.js";
 import { effectiveAccountModels } from "./effective-models.js";
 
@@ -315,13 +314,13 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
   }
 
   return {
-    async listStatus(): Promise<OAuthAdminStatus[]> {
+    async listStatus(): Promise<OAuthAdminStatusResponse> {
       const rows = await deps.store.list();
       // Load the per-account settings blob ONCE for the whole page (a single decrypt)
       // so the list carries each account's effective priority + schedulable without an
       // N+1 per-account GET. Fail-open to {} (defaults applied below).
       const settings = await loadAccountSettings(deps.config, deps.encKey);
-      const providerSettings = await loadProviderSettings(deps.config, deps.encKey);
+      const globalSettings = await loadGlobalOAuthSettings(deps.config, deps.encKey);
       // Ensure-fresh every stored account in parallel so the page reflects live,
       // auto-renewed expiries (and surfaces a dead credential as unhealthy).
       const refreshed = await Promise.all(
@@ -353,32 +352,29 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       );
       const accountsFor = (id: string) =>
         refreshed.filter((x) => x.providerId === id).map(({ providerId: _p, ...rest }) => rest);
-      return [
-        {
-          id: ANTHROPIC,
-          name: "Anthropic (Claude Pro/Max)",
-          flow: "manual_paste",
-          selectionStrategy:
-            getProviderSettings(providerSettings, ANTHROPIC).selectionStrategy ?? "balanced",
-          accounts: accountsFor(ANTHROPIC),
-        },
-        {
-          id: CODEX,
-          name: "ChatGPT Plus/Pro (Codex)",
-          flow: "manual_paste",
-          selectionStrategy:
-            getProviderSettings(providerSettings, CODEX).selectionStrategy ?? "balanced",
-          accounts: accountsFor(CODEX),
-        },
-        {
-          id: COPILOT,
-          name: "GitHub Copilot",
-          flow: "device_code",
-          selectionStrategy:
-            getProviderSettings(providerSettings, COPILOT).selectionStrategy ?? "balanced",
-          accounts: accountsFor(COPILOT),
-        },
-      ];
+      return {
+        selectionStrategy: globalSettings.selectionStrategy ?? "balanced",
+        providers: [
+          {
+            id: ANTHROPIC,
+            name: "Anthropic (Claude Pro/Max)",
+            flow: "manual_paste",
+            accounts: accountsFor(ANTHROPIC),
+          },
+          {
+            id: CODEX,
+            name: "ChatGPT Plus/Pro (Codex)",
+            flow: "manual_paste",
+            accounts: accountsFor(CODEX),
+          },
+          {
+            id: COPILOT,
+            name: "GitHub Copilot",
+            flow: "device_code",
+            accounts: accountsFor(COPILOT),
+          },
+        ],
+      };
     },
 
     async startManualPaste({ providerId, proxy }) {
@@ -603,16 +599,13 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       await setAccountSettings(deps.config, deps.encKey, providerId, account, patch);
     },
 
-    async getProviderStrategy({ providerId }): Promise<AccountPoolStrategyView> {
-      const s = getProviderSettings(
-        await loadProviderSettings(deps.config, deps.encKey),
-        providerId,
-      );
+    async getSelectionStrategy(): Promise<AccountPoolStrategyView> {
+      const s = await loadGlobalOAuthSettings(deps.config, deps.encKey);
       return { selectionStrategy: s.selectionStrategy ?? "balanced" };
     },
 
-    async setProviderStrategy({ providerId, selectionStrategy }): Promise<void> {
-      await setProviderSettings(deps.config, deps.encKey, providerId, { selectionStrategy });
+    async setSelectionStrategy({ selectionStrategy }): Promise<void> {
+      await setGlobalOAuthSettings(deps.config, deps.encKey, { selectionStrategy });
     },
 
     async fetchAnthropicQuota({ account }): Promise<OAuthQuotaWindow[] | null> {

@@ -133,9 +133,8 @@ import { type RateLimiterPort, rateLimitMiddleware } from "./middleware/rate-lim
 import {
   type AccountSettingsMap,
   getAccountSettings,
-  getProviderSettings,
   loadAccountSettings,
-  loadProviderSettings,
+  loadGlobalOAuthSettings,
 } from "./oauth/account-settings.js";
 import { createOAuthAdmin } from "./oauth/admin-oauth.js";
 import { weeklySaturated } from "./oauth/auto-reset.js";
@@ -501,7 +500,8 @@ export async function synthesizeOAuthProviders(
   // Per-account settings: enabledModels curation + priority + schedulable.
   // Loaded once (fail-open to {}).
   const accountSettings = await loadAccountSettings(config, oauthCtx.encKey);
-  const providerSettings = await loadProviderSettings(config, oauthCtx.encKey);
+  const globalSettings = await loadGlobalOAuthSettings(config, oauthCtx.encKey);
+  const selectionStrategy: OAuthSelectionStrategy = globalSettings.selectionStrategy ?? "balanced";
   const providers: ProviderConfigShared[] = [];
   const poolClients = new Map<string, OAuthPoolClient>();
 
@@ -619,8 +619,6 @@ export async function synthesizeOAuthProviders(
       log("warn", "oauth.autoroute.empty", { providerId });
       continue;
     }
-    const selectionStrategy: OAuthSelectionStrategy =
-      getProviderSettings(providerSettings, providerId).selectionStrategy ?? "balanced";
     // ONE pool client per provider, keyed by providerId. onSelect records the
     // serving account (Stage 3 telemetry) — a non-secret structured log line.
     const pool = createOAuthPoolClient({

@@ -6,7 +6,7 @@
     logoutOAuth,
     resetUsageLimit,
     setAccountSchedule,
-    setProviderStrategy,
+    setSelectionStrategy,
     type OAuthAccount,
     type OAuthProviderStatus,
     type OAuthQuotaSnapshot,
@@ -33,6 +33,7 @@
   }: {
     data: {
       configured: boolean;
+      selectionStrategy: OAuthSelectionStrategy;
       providers: OAuthProviderStatus[];
       usage: OAuthUsageRow[];
       quota: OAuthQuotaSnapshot[];
@@ -57,9 +58,9 @@
   // Accounts whose inline schedule edit is in flight (keyed provider/account) — used
   // to disable the control while saving without blocking the rest of the table.
   let savingSchedule = $state<Record<string, boolean>>({});
-  // Provider-level strategy saves are keyed by provider id. The strategy selects
-  // between accounts within that provider; account priority/schedulable stay below.
-  let savingStrategy = $state<Record<string, boolean>>({});
+  // One global account-pool strategy applies across every subscription provider pool.
+  // Account priority/schedulable remain per-account controls below.
+  let savingStrategy = $state<boolean>(false);
   // Codex accounts whose "Reset usage" click is in flight (keyed provider/account) —
   // clears Helm's local auto-park cooldown (#291). Claude's 5h/7d windows are upstream
   // subscription limits and are not operator-resettable.
@@ -392,19 +393,16 @@
     }
   }
 
-  async function saveStrategy(
-    providerId: string,
-    selectionStrategy: OAuthSelectionStrategy,
-  ): Promise<void> {
-    savingStrategy = { ...savingStrategy, [providerId]: true };
+  async function saveSelectionStrategy(selectionStrategy: OAuthSelectionStrategy): Promise<void> {
+    savingStrategy = true;
     error = null;
     try {
-      await setProviderStrategy(providerId, selectionStrategy);
+      await setSelectionStrategy(selectionStrategy);
       await invalidateAll();
     } catch (e) {
       error = e instanceof Error ? e.message : $t('Failed to update strategy');
     } finally {
-      savingStrategy = { ...savingStrategy, [providerId]: false };
+      savingStrategy = false;
     }
   }
 
@@ -516,6 +514,37 @@
     </p>
   {/if}
 
+  {#if data.configured}
+    {@const selectedStrategy =
+      strategyOptions.find((option) => option.value === data.selectionStrategy) ?? strategyOptions[0]}
+    <section
+      class="flex flex-col gap-3 border-y border-slate-200 bg-white px-1 py-4 md:flex-row md:items-center md:justify-between"
+    >
+      <div class="min-w-0">
+        <h2 class="text-sm font-semibold text-ink-body">
+          {$t('Account usage strategy')}
+        </h2>
+        <p class="mt-1 max-w-3xl text-xs leading-snug text-ink-muted">
+          {$t('Applies to all connected subscription accounts. Per-account controls stay limited to priority and scheduling.')}
+        </p>
+        <p class="mt-1 max-w-3xl text-xs leading-snug text-ink-muted">
+          {$t(selectedStrategy.description)}
+        </p>
+      </div>
+      <select
+        class="min-h-11 w-full rounded border border-slate-300 bg-white px-3 py-2 text-sm text-ink-body disabled:opacity-50 md:min-h-0 md:w-60"
+        aria-label={$t('Account usage strategy')}
+        value={data.selectionStrategy}
+        disabled={savingStrategy}
+        onchange={(e) => saveSelectionStrategy(e.currentTarget.value as OAuthSelectionStrategy)}
+      >
+        {#each strategyOptions as option (option.value)}
+          <option value={option.value}>{$t(option.label)}</option>
+        {/each}
+      </select>
+    </section>
+  {/if}
+
   {#if showConnect}
     <ConnectProviderDialog
       providers={data.providers}
@@ -583,9 +612,6 @@
             {@const canResetCodexLimit = isCodex && canUseCodexResetCredit(quota, codexCredits)}
             {@const usageLimit = usageLimitStatus(quota)}
             {@const usageLimitRecovery = usageLimit ? autoRecoverIn(usageLimit.untilMs) : ''}
-            {@const selectedStrategy =
-              strategyOptions.find((option) => option.value === row.provider.selectionStrategy) ??
-              strategyOptions[0]}
             <tr class="align-top" data-testid="provider-account-row">
               <!-- Provider / account + type badge -->
               <td data-label={$t('Provider')} class="px-3 py-3">
@@ -602,25 +628,6 @@
                       )}>{$t('Auto-reset')}</span
                     >
                   {/if}
-                </div>
-                <div class="mt-2 text-xs font-medium text-ink-muted">{$t('Account strategy')}</div>
-                <select
-                  class="mt-1 min-h-11 w-full rounded border border-slate-300 bg-white px-2 py-1 text-xs text-ink-body disabled:opacity-50 md:min-h-0"
-                  aria-label={`${row.provider.name} strategy`}
-                  value={row.provider.selectionStrategy}
-                  disabled={savingStrategy[row.provider.id] === true}
-                  onchange={(e) =>
-                    saveStrategy(
-                      row.provider.id,
-                      e.currentTarget.value as OAuthSelectionStrategy,
-                    )}
-                >
-                  {#each strategyOptions as option (option.value)}
-                    <option value={option.value}>{$t(option.label)}</option>
-                  {/each}
-                </select>
-                <div class="mt-1 text-[10px] leading-snug text-ink-muted">
-                  {$t(selectedStrategy.description)}
                 </div>
               </td>
 

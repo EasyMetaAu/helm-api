@@ -19,7 +19,7 @@ import {
 // a corrupt blob must never block routing or the admin page).
 
 const SETTINGS_KEY = "oauth.account_settings";
-const PROVIDER_SETTINGS_KEY = "oauth.provider_settings";
+const GLOBAL_SETTINGS_KEY = "oauth.global_settings";
 const SELECTION_STRATEGIES = new Set<OAuthSelectionStrategy>([
   "balanced",
   "manual_priority",
@@ -63,11 +63,9 @@ export interface AccountSettings {
 // thread it (server synthesis, admin seam).
 export type AccountSettingsMap = Record<string, AccountSettings>;
 
-export interface ProviderSettings {
+export interface GlobalOAuthSettings {
   selectionStrategy?: OAuthSelectionStrategy;
 }
-
-export type ProviderSettingsMap = Record<string, ProviderSettings>;
 
 function composite(providerId: string, account: string): string {
   return `${providerId}${SEP}${account}`;
@@ -113,28 +111,37 @@ export async function saveAccountSettings(
   await config.set(SETTINGS_KEY, encryptSecret(JSON.stringify(map), encKey));
 }
 
-export async function loadProviderSettings(
+function normalizeSelectionStrategy(
+  selectionStrategy: unknown,
+): OAuthSelectionStrategy | undefined {
+  return SELECTION_STRATEGIES.has(selectionStrategy as OAuthSelectionStrategy)
+    ? (selectionStrategy as OAuthSelectionStrategy)
+    : undefined;
+}
+
+export async function loadGlobalOAuthSettings(
   config: ConfigStore,
   encKey: Buffer,
-): Promise<ProviderSettingsMap> {
+): Promise<GlobalOAuthSettings> {
   try {
-    const blob = await config.get(PROVIDER_SETTINGS_KEY);
+    const blob = await config.get(GLOBAL_SETTINGS_KEY);
     if (!blob) return {};
     const json = decryptSecret(blob, encKey);
     const parsed: unknown = JSON.parse(json);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    return parsed as ProviderSettingsMap;
+    const raw = parsed as GlobalOAuthSettings;
+    return { selectionStrategy: normalizeSelectionStrategy(raw.selectionStrategy) };
   } catch {
     return {};
   }
 }
 
-export async function saveProviderSettings(
+export async function saveGlobalOAuthSettings(
   config: ConfigStore,
   encKey: Buffer,
-  map: ProviderSettingsMap,
+  settings: GlobalOAuthSettings,
 ): Promise<void> {
-  await config.set(PROVIDER_SETTINGS_KEY, encryptSecret(JSON.stringify(map), encKey));
+  await config.set(GLOBAL_SETTINGS_KEY, encryptSecret(JSON.stringify(settings), encKey));
 }
 
 // Read one account's settings out of an already-loaded map (never throws).
@@ -144,16 +151,6 @@ export function getAccountSettings(
   account: string,
 ): AccountSettings {
   return map[composite(providerId, account)] ?? {};
-}
-
-export function getProviderSettings(
-  map: ProviderSettingsMap,
-  providerId: string,
-): ProviderSettings {
-  const raw = map[providerId] ?? {};
-  return SELECTION_STRATEGIES.has(raw.selectionStrategy as OAuthSelectionStrategy)
-    ? raw
-    : { ...raw, selectionStrategy: undefined };
 }
 
 // Merge a partial patch into one account's settings and PERSIST the whole map.
@@ -175,16 +172,18 @@ export async function setAccountSettings(
   });
 }
 
-export async function setProviderSettings(
+export async function setGlobalOAuthSettings(
   config: ConfigStore,
   encKey: Buffer,
-  providerId: string,
-  patch: ProviderSettings,
+  patch: GlobalOAuthSettings,
 ): Promise<void> {
   await serializeSettingsMutation(config, async () => {
-    const map = await loadProviderSettings(config, encKey);
-    map[providerId] = { ...map[providerId], ...patch };
-    await saveProviderSettings(config, encKey, map);
+    const current = await loadGlobalOAuthSettings(config, encKey);
+    await saveGlobalOAuthSettings(config, encKey, {
+      ...current,
+      ...patch,
+      selectionStrategy: normalizeSelectionStrategy(patch.selectionStrategy),
+    });
   });
 }
 

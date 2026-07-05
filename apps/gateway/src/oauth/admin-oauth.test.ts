@@ -52,11 +52,16 @@ describe("createOAuthAdmin", () => {
   it("lists the three built-in providers with no accounts initially", async () => {
     const admin = createOAuthAdmin({ store: makeStore(), encKey: KEY, config: makeConfig() });
     const status = await admin.listStatus();
-    expect(status.map((p) => p.id).sort()).toEqual(["anthropic", "github-copilot", "openai-codex"]);
-    expect(status.find((p) => p.id === "anthropic")?.flow).toBe("manual_paste");
-    expect(status.find((p) => p.id === "openai-codex")?.flow).toBe("manual_paste");
-    expect(status.find((p) => p.id === "github-copilot")?.flow).toBe("device_code");
-    expect(status.every((p) => p.accounts.length === 0)).toBe(true);
+    expect(status.selectionStrategy).toBe("balanced");
+    expect(status.providers.map((p) => p.id).sort()).toEqual([
+      "anthropic",
+      "github-copilot",
+      "openai-codex",
+    ]);
+    expect(status.providers.find((p) => p.id === "anthropic")?.flow).toBe("manual_paste");
+    expect(status.providers.find((p) => p.id === "openai-codex")?.flow).toBe("manual_paste");
+    expect(status.providers.find((p) => p.id === "github-copilot")?.flow).toBe("device_code");
+    expect(status.providers.every((p) => p.accounts.length === 0)).toBe(true);
   });
 
   it("manual-paste: start -> complete persists an ENCRYPTED credential", async () => {
@@ -92,7 +97,7 @@ describe("createOAuthAdmin", () => {
     expect(decryptSecret(row?.refreshEnc ?? "", KEY)).toBe("RT");
     // Listed as a logged-in account now.
     const status = await admin.listStatus();
-    expect(status.find((p) => p.id === "anthropic")?.accounts).toHaveLength(1);
+    expect(status.providers.find((p) => p.id === "anthropic")?.accounts).toHaveLength(1);
   });
 
   it("binds MULTIPLE accounts of the SAME provider (each connect = a new account)", async () => {
@@ -119,12 +124,12 @@ describe("createOAuthAdmin", () => {
         account,
       });
     }
-    const anthropic = (await admin.listStatus()).find((p) => p.id === "anthropic");
+    const anthropic = (await admin.listStatus()).providers.find((p) => p.id === "anthropic");
     expect(anthropic?.accounts.map((a) => a.account).sort()).toEqual(["personal", "work"]);
 
     // Disconnecting one leaves the other intact.
     await admin.logout({ providerId: "anthropic", account: "work" });
-    const after = (await admin.listStatus()).find((p) => p.id === "anthropic");
+    const after = (await admin.listStatus()).providers.find((p) => p.id === "anthropic");
     expect(after?.accounts.map((a) => a.account)).toEqual(["personal"]);
   });
 
@@ -277,7 +282,8 @@ describe("createOAuthAdmin", () => {
         ],
       ]),
     );
-    const acct = (await admin.listStatus()).find((p) => p.id === "github-copilot")?.accounts[0];
+    const acct = (await admin.listStatus()).providers.find((p) => p.id === "github-copilot")
+      ?.accounts[0];
     expect(acct?.healthy).toBe(true);
     expect(acct?.expiresAt ?? 0).toBeGreaterThan(NOW); // renewed into the future
     // The store now holds the freshly re-minted token.
@@ -307,7 +313,8 @@ describe("createOAuthAdmin", () => {
       "fetch",
       routeFetch([[/copilot_internal\/v2\/token/, () => json({ error: "bad" }, 401)]]),
     );
-    const acct = (await admin.listStatus()).find((p) => p.id === "github-copilot")?.accounts[0];
+    const acct = (await admin.listStatus()).providers.find((p) => p.id === "github-copilot")
+      ?.accounts[0];
     expect(acct?.healthy).toBe(false);
   });
 
@@ -582,7 +589,8 @@ describe("createOAuthAdmin", () => {
       schedulable: false,
       fastMode: true,
     });
-    const accts = (await admin.listStatus()).find((p) => p.id === "anthropic")?.accounts ?? [];
+    const accts =
+      (await admin.listStatus()).providers.find((p) => p.id === "anthropic")?.accounts ?? [];
     expect(accts.find((a) => a.account === "tuned")).toMatchObject({
       priority: 10,
       schedulable: false,
@@ -631,7 +639,8 @@ describe("createOAuthAdmin", () => {
       account: "proxied",
       models: ["claude-opus-4-6"],
     });
-    const accts = (await admin.listStatus()).find((p) => p.id === "anthropic")?.accounts ?? [];
+    const accts =
+      (await admin.listStatus()).providers.find((p) => p.id === "anthropic")?.accounts ?? [];
 
     const proxied = accts.find((a) => a.account === "proxied");
     // Proxy is surfaced REDACTED (principle 7: hasPassword, never the secret).

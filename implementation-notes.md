@@ -20,12 +20,12 @@
 ## 2026-07-05 · OAuth 账号池支持可选额度使用策略（OAuth provider pool / routing / Admin providers，docs/04/11，原则 3/5/7）
 
 - **背景（Lukin）**：订阅 provider 的多账号池不只有一种合理用法。有的用户希望低风险、少 429、尽量均摊；有的用户希望避免额度浪费，把快重置且还剩较多额度的账号优先用掉；有的用户希望完全按自己设置的 priority 操作。
-- **产品决策**：策略是 provider 级别，而不是 account 级别。它描述“这个 provider 的账号池如何选择账号”；如果每个账号各自声明策略，会在一次选择中产生冲突。
+- **产品决策**：策略是全局账号池级别，而不是 account 级别，也不是每个 provider 单独配置。用户选择的是“整个系统如何使用订阅账号额度”；该策略在每个订阅 provider 的账号池内统一生效。跨 provider/model 的选择仍由 lanes/policies/fallback 负责，不被这个账号策略替代。
 - **策略集合**：`balanced` 保持现有 sticky/hash/LRU 均衡；`manual_priority` 按 priority + LRU 分配新会话，已有会话继续 sticky；`low_risk` 在最低 priority 层里优先选择 quota pressure 更低的账号，降低打到上限/429 的概率；`use_expiring` 优先使用“剩余额度多且离 reset 更近”的窗口，目标是减少快重置前未用完的额度。
 - **额度语义**：quota windows 只作为软评分输入，缺失或超过 freshness 窗口时自动回退到 balanced 行为；`usageLimitedUntilMs` 仍是硬调度门禁。Codex reset credits 不当作普通容量参与评分，因为它是稀缺的消耗型恢复能力，仍只在手动/auto-reset 流程里使用。
 - **会话边界**：`previous_response_id` 是强亲和，必须回到产生该 response 的账号，即使 quota 策略觉得另一个账号更优；普通 sticky 会话在 quota 策略下只允许在软阈值内保持，以避免长期卡在高压账号。
 - **Scoped quota 边界**：Anthropic `7d-*` scoped windows 只在当前模型匹配对应 slug 时参与评分，不扩大成全账号压力或全账号 cooldown。
-- **实现路径**：core OAuth pool 统一负责策略选择；gateway 从 encrypted provider settings 读取策略，启动/热重建时注入 pool，并把 quota snapshots seed 到 pool member；Codex header PUSH 捕获后即时刷新 live pool member 的软 quota snapshot。Admin Providers 页面提供 provider-level 下拉选择，保存后热重建生效。
+- **实现路径**：core OAuth pool 统一负责策略选择；gateway 从 encrypted global OAuth settings 读取策略，启动/热重建时注入所有订阅账号池，并把 quota snapshots seed 到 pool member；Codex header PUSH 捕获后即时刷新 live pool member 的软 quota snapshot。Admin Providers 页面提供一个系统级下拉选择，保存后热重建生效。
 - **验证计划**：覆盖 core 策略、provider settings round-trip、admin API、Providers UI、Svelte check、typecheck、lint；SQLite-backed 测试依赖本地 `better-sqlite3` ABI，若本机 Node ABI 不匹配需先重建 native addon。
 
 ## 2026-07-04 · internal LLM prompt 输入用 XML 数据边界隔离（Memory / classifier eval，docs/03/08/12，原则 3/4/7）

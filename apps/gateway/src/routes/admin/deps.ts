@@ -92,9 +92,6 @@ export interface OAuthAdminStatus {
   id: string; // provider id: 'anthropic' | 'github-copilot' | 'openai-codex'
   name: string;
   flow: "manual_paste" | "device_code"; // shapes the UI
-  // Provider-level account-pool selection strategy. This chooses BETWEEN accounts
-  // for this provider; per-account priority/schedulable remain account knobs.
-  selectionStrategy: OAuthSelectionStrategy;
   // `healthy` reflects whether the account's token could be (re)obtained when the
   // status was read — true once it has a working durable credential, false when a
   // refresh failed (needs reconnecting). The short-lived access-token `expiresAt`
@@ -129,9 +126,17 @@ export interface OAuthAdminStatus {
   }>;
 }
 
+export interface OAuthAdminStatusResponse {
+  // Global account-pool selection strategy. This chooses BETWEEN connected accounts
+  // inside each subscription provider pool; Lanes/Policies still choose the model
+  // and provider chain.
+  selectionStrategy: OAuthSelectionStrategy;
+  providers: OAuthAdminStatus[];
+}
+
 export interface OAuthAdminAccess {
   // Built-in providers + which accounts are currently logged in (no secrets).
-  listStatus(): Promise<OAuthAdminStatus[]>;
+  listStatus(): Promise<OAuthAdminStatusResponse>;
   // Anthropic manual-paste: begin -> { authorizeUrl }; the verifier/state are held
   // server-side keyed by sessionId. complete exchanges the pasted redirect URL.
   // `proxy` (optional, entered in the connect dialog's first step) is validated +
@@ -203,13 +208,10 @@ export interface OAuthAdminAccess {
     autoReset?: boolean;
     fastMode?: boolean;
   }): Promise<void>;
-  // Provider-level account-pool selection strategy. Defaults to balanced when no
-  // operator setting is stored.
-  getProviderStrategy(input: { providerId: string }): Promise<AccountPoolStrategyView>;
-  setProviderStrategy(input: {
-    providerId: string;
-    selectionStrategy: OAuthSelectionStrategy;
-  }): Promise<void>;
+  // Global account-pool selection strategy. Defaults to balanced when no operator
+  // setting is stored.
+  getSelectionStrategy(): Promise<AccountPoolStrategyView>;
+  setSelectionStrategy(input: { selectionStrategy: OAuthSelectionStrategy }): Promise<void>;
   // Pull the Anthropic OAuth usage endpoint for one account → quota windows
   // (providers page Tier 3). Claude exposes a dedicated usage endpoint, so this is
   // an on-demand PULL behind a short TTL cache. FAIL-OPEN: returns null on any
