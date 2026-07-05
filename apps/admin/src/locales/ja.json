@@ -922,5 +922,12 @@
   "Yesterday: {value}": "前日：{value}",
   "Your new API key": "新しい API キー",
   "Zoom in": "拡大",
-  "Zoom out": "縮小"
+  "Zoom out": "縮小",
+  "Show more": "もっと見る",
+  "Show less": "折りたたむ",
+  "First reply": "最初の返信",
+  "Arguments": "引数",
+  "no result": "結果なし",
+  "empty": "空",
+  "{count} system prompt hidden — show": "{count} 件のシステムプロンプトを非表示 — 表示"
 }

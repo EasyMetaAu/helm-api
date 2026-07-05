@@ -145,25 +145,28 @@ describe('extractConversation — OpenAI Chat', () => {
       },
       null,
     );
-    const call = findPart(turns, 'tool_call');
-    const result = findPart(turns, 'tool_result');
-    expect(call?.kind === 'tool_call' && call.id).toBe('call_0');
-    expect(call?.kind === 'tool_call' && call.name).toBe('get_weather');
-    expect(result?.kind === 'tool_result' && result.callId).toBe('call_0');
+    // call + result fold into ONE tool_exchange on the call's turn (result consumed)
+    const ex = findPart(turns, 'tool_exchange');
+    expect(ex?.kind === 'tool_exchange' && ex.id).toBe('call_0');
+    expect(ex?.kind === 'tool_exchange' && ex.name).toBe('get_weather');
+    expect(ex?.kind === 'tool_exchange' && ex.hasResult).toBe(true);
+    expect(ex?.kind === 'tool_exchange' && ex.output).toBe('18C');
     // args carried un-stringified (raw string here — normalizer must not parse)
-    expect(call?.kind === 'tool_call' && call.args).toBe('{"c":"P"}');
+    expect(ex?.kind === 'tool_exchange' && ex.args).toBe('{"c":"P"}');
+    // the standalone tool_result turn was consumed → not double-rendered
+    expect(findPart(turns, 'tool_result')).toBeUndefined();
   });
-  it('C4b role:tool result is NOT also rendered as a plain-text part (no double output)', () => {
+  it('C4b lone role:tool result with no matching call stays an orphan tool_result (not dropped)', () => {
     const turns = extractConversation(
       { messages: [{ role: 'tool', tool_call_id: 'call_0', content: '18C' }] },
       null,
     );
-    // exactly one part — the tool_result — never a duplicate text bubble
+    // exactly one part — the orphan tool_result — never a duplicate text bubble
     expect(kinds(turns[0])).toEqual(['tool_result']);
     const r = turns[0].parts[0];
     expect(r.kind === 'tool_result' && r.output).toBe('18C');
   });
-  it('C5 multiple tool_calls preserved in one assistant turn', () => {
+  it('C5 multiple tool_calls each become a tool_exchange (no result → hasResult false)', () => {
     const turns = extractConversation(
       {
         messages: [
@@ -179,8 +182,9 @@ describe('extractConversation — OpenAI Chat', () => {
       },
       null,
     );
-    const calls = turns[0].parts.filter((p) => p.kind === 'tool_call');
-    expect(calls).toHaveLength(2);
+    const exchanges = turns[0].parts.filter((p) => p.kind === 'tool_exchange');
+    expect(exchanges).toHaveLength(2);
+    expect(exchanges.every((p) => p.kind === 'tool_exchange' && !p.hasResult)).toBe(true);
   });
   it('C8 streamed response folded as final assistant turn', () => {
     const turns = extractConversation({ messages: [{ role: 'user', content: 'hi' }] }, OPENAI_STREAM);
@@ -224,13 +228,13 @@ describe('extractConversation — Anthropic', () => {
       },
       null,
     );
-    const call = findPart(turns, 'tool_call');
-    const result = findPart(turns, 'tool_result');
-    expect(call?.kind === 'tool_call' && call.id).toBe('toolu_1');
-    expect(call?.kind === 'tool_call' && call.args).toEqual({ q: 'x' }); // object kept as object
-    expect(result?.kind === 'tool_result' && result.callId).toBe('toolu_1');
-    // result can display fn name via the id→name index
-    expect(result?.kind === 'tool_result' && result.name).toBe('search');
+    const ex = findPart(turns, 'tool_exchange');
+    expect(ex?.kind === 'tool_exchange' && ex.id).toBe('toolu_1');
+    expect(ex?.kind === 'tool_exchange' && ex.name).toBe('search');
+    expect(ex?.kind === 'tool_exchange' && ex.args).toEqual({ q: 'x' }); // object kept as object
+    expect(ex?.kind === 'tool_exchange' && ex.hasResult).toBe(true);
+    expect(ex?.kind === 'tool_exchange' && ex.output).toBe('done');
+    expect(findPart(turns, 'tool_result')).toBeUndefined(); // folded into the exchange
   });
   it('C7 thinking block → reasoning part, separate from text', () => {
     const turns = extractConversation(
@@ -276,10 +280,11 @@ describe('extractConversation — OpenAI Responses', () => {
       },
       null,
     );
-    const call = findPart(turns, 'tool_call');
-    const result = findPart(turns, 'tool_result');
-    expect(call?.kind === 'tool_call' && call.id).toBe('fc_1');
-    expect(result?.kind === 'tool_result' && result.callId).toBe('fc_1');
+    const ex = findPart(turns, 'tool_exchange');
+    expect(ex?.kind === 'tool_exchange' && ex.id).toBe('fc_1');
+    expect(ex?.kind === 'tool_exchange' && ex.name).toBe('lookup');
+    expect(ex?.kind === 'tool_exchange' && ex.hasResult).toBe(true);
+    expect(ex?.kind === 'tool_exchange' && ex.output).toBe('ok');
   });
   it('C7 reasoning item → reasoning part', () => {
     const turns = extractConversation(
@@ -329,11 +334,12 @@ describe('extractConversation — Gemini', () => {
       },
       null,
     );
-    const call = findPart(turns, 'tool_call');
-    const result = findPart(turns, 'tool_result');
-    expect(call?.kind === 'tool_call' && call.name).toBe('get_weather');
-    expect(call?.kind === 'tool_call' && call.args).toEqual({ city: 'Paris' });
-    expect(result?.kind === 'tool_result' && result.name).toBe('get_weather');
+    // Gemini has no call id — paired by synthesized name#ordinal into one exchange
+    const ex = findPart(turns, 'tool_exchange');
+    expect(ex?.kind === 'tool_exchange' && ex.name).toBe('get_weather');
+    expect(ex?.kind === 'tool_exchange' && ex.args).toEqual({ city: 'Paris' });
+    expect(ex?.kind === 'tool_exchange' && ex.hasResult).toBe(true);
+    expect(ex?.kind === 'tool_exchange' && ex.output).toEqual({ temp: 18 });
   });
   it('C7 thought:true part → reasoning', () => {
     const turns = extractConversation(
@@ -348,8 +354,10 @@ describe('extractConversation — Gemini', () => {
   });
   it('C8b streamed gemini tool args are folded back to an object, not a JSON string', () => {
     const turns = extractConversation({ contents: [{ role: 'user', parts: [{ text: 'hi' }] }] }, GEMINI_TOOL_STREAM);
-    const call = findPart(turns, 'tool_call');
-    expect(call?.kind === 'tool_call' && call.args).toEqual({ city: 'Paris' });
+    // streamed response tool call → tool_exchange with no result
+    const ex = findPart(turns, 'tool_exchange');
+    expect(ex?.kind === 'tool_exchange' && ex.args).toEqual({ city: 'Paris' });
+    expect(ex?.kind === 'tool_exchange' && ex.hasResult).toBe(false);
   });
   it('C9 non-stream gemini object (candidates[])', () => {
     const turns = extractConversation(
@@ -449,5 +457,115 @@ describe('resilience — never throws', () => {
         expect(() => extractConversation(clone, null)).not.toThrow();
       }
     }
+  });
+});
+
+// ── clarity pass: empty suppression + tool pairing ───────────────────────────
+describe('clarity pass', () => {
+  it('drops an empty reasoning part (no empty Reasoning block)', () => {
+    const turns = extractConversation(
+      { messages: [{ role: 'assistant', content: [{ type: 'thinking', thinking: '   ' }, { type: 'text', text: 'hi' }] }] },
+      null,
+    );
+    expect(kinds(turns[0])).toEqual(['text']); // reasoning stripped, text kept
+  });
+  it('drops a whitespace-only text part', () => {
+    const turns = extractConversation(
+      { messages: [{ role: 'user', content: [{ type: 'text', text: '  ' }, { type: 'text', text: 'real' }] }] },
+      null,
+    );
+    expect(kinds(turns[0])).toEqual(['text']);
+    expect(firstText(turns[0])).toBe('real');
+  });
+  it('drops a turn that folds to nothing (empty content → no bubble)', () => {
+    const turns = extractConversation(
+      { messages: [{ role: 'user', content: 'hello' }, { role: 'assistant', content: '   ' }, { role: 'user', content: 'bye' }] },
+      null,
+    );
+    // the empty assistant turn is suppressed entirely
+    expect(turns.map((t) => t.role)).toEqual(['user', 'user']);
+    expect(turns.map(firstText)).toEqual(['hello', 'bye']);
+  });
+  it('a pure-reasoning assistant turn survives only if the reasoning is non-empty', () => {
+    const kept = extractConversation(
+      { messages: [{ role: 'assistant', content: [{ type: 'thinking', thinking: 'real reasoning' }] }] },
+      null,
+    );
+    expect(kept).toHaveLength(1);
+    expect(kinds(kept[0])).toEqual(['reasoning']);
+    const gone = extractConversation(
+      { messages: [{ role: 'assistant', content: [{ type: 'thinking', thinking: '' }] }] },
+      null,
+    );
+    expect(gone).toEqual([]); // nothing to show
+  });
+  it('two same-name Gemini calls each pair with their OWN result in order (no cross-pair)', () => {
+    const turns = extractConversation(
+      {
+        contents: [
+          { role: 'model', parts: [{ functionCall: { name: 'search', args: { q: 'a' } } }] },
+          { role: 'user', parts: [{ functionResponse: { name: 'search', response: 'RES-A' } }] },
+          { role: 'model', parts: [{ functionCall: { name: 'search', args: { q: 'b' } } }] },
+          { role: 'user', parts: [{ functionResponse: { name: 'search', response: 'RES-B' } }] },
+        ],
+      },
+      null,
+    );
+    const exchanges = turns.flatMap((t) => t.parts).filter((p) => p.kind === 'tool_exchange');
+    expect(exchanges).toHaveLength(2);
+    // first call → first result, second call → second result (document order)
+    expect(exchanges[0].kind === 'tool_exchange' && exchanges[0].output).toBe('RES-A');
+    expect(exchanges[1].kind === 'tool_exchange' && exchanges[1].output).toBe('RES-B');
+  });
+  it('duplicate call ids: each result consumed at most once (one-result-per-call)', () => {
+    const turns = extractConversation(
+      {
+        messages: [
+          { role: 'assistant', content: null, tool_calls: [{ id: 'dup', function: { name: 'f', arguments: '{}' } }] },
+          { role: 'tool', tool_call_id: 'dup', content: 'R1' },
+          { role: 'assistant', content: null, tool_calls: [{ id: 'dup', function: { name: 'f', arguments: '{}' } }] },
+          { role: 'tool', tool_call_id: 'dup', content: 'R2' },
+        ],
+      },
+      null,
+    );
+    const ex = turns.flatMap((t) => t.parts).filter((p) => p.kind === 'tool_exchange');
+    expect(ex).toHaveLength(2);
+    expect(ex[0].kind === 'tool_exchange' && ex[0].output).toBe('R1');
+    expect(ex[1].kind === 'tool_exchange' && ex[1].output).toBe('R2'); // NOT R1 twice
+    // both results consumed → no orphan tool_result survives
+    expect(turns.flatMap((t) => t.parts).some((p) => p.kind === 'tool_result')).toBe(false);
+  });
+  it('a result that precedes all its calls stays an orphan (never folded)', () => {
+    const turns = extractConversation(
+      {
+        messages: [
+          { role: 'tool', tool_call_id: 'x', content: 'early' },
+          { role: 'assistant', content: null, tool_calls: [{ id: 'x', function: { name: 'f', arguments: '{}' } }] },
+        ],
+      },
+      null,
+    );
+    const parts = turns.flatMap((t) => t.parts);
+    // the early result can't answer a later call → orphan kept; call has no result
+    expect(parts.some((p) => p.kind === 'tool_result')).toBe(true);
+    const ex = parts.find((p) => p.kind === 'tool_exchange');
+    expect(ex?.kind === 'tool_exchange' && ex.hasResult).toBe(false);
+  });
+  it('a call and its result across turns collapse into ONE tool_exchange (result turn dropped)', () => {
+    const turns = extractConversation(
+      {
+        messages: [
+          { role: 'assistant', content: null, tool_calls: [{ id: 'c1', function: { name: 'f', arguments: '{}' } }] },
+          { role: 'tool', tool_call_id: 'c1', content: 'result' },
+        ],
+      },
+      null,
+    );
+    // one turn (assistant) with a tool_exchange; the tool turn was consumed+dropped
+    expect(turns).toHaveLength(1);
+    const ex = turns[0].parts[0];
+    expect(ex.kind).toBe('tool_exchange');
+    expect(ex.kind === 'tool_exchange' && ex.hasResult).toBe(true);
   });
 });
