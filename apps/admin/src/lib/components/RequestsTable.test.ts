@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/svelte';
+import { fireEvent, render, screen, within } from '@testing-library/svelte';
 import { describe, expect, it, vi } from 'vitest';
 import type { RequestListItem } from '$lib/api/requests.js';
 import RequestsTable from './RequestsTable.svelte';
@@ -26,7 +26,14 @@ function item(overrides: Partial<RequestListItem> = {}): RequestListItem {
     status: 'ok',
     latency_ms: 460,
     cost_usd: 0.0123,
-    usage: { input: 1200, output: 340, cached: 800, cacheCreation: 64, nonCached: 400, total: 1540 },
+    usage: {
+      input: 1200,
+      output: 340,
+      cached: 800,
+      cacheCreation: 64,
+      nonCached: 400,
+      total: 1540,
+    },
     tps: 200,
     ...overrides,
   };
@@ -64,5 +71,94 @@ describe('RequestsTable key cell', () => {
     });
     expect(screen.queryByTestId('key-filter')).toBeNull();
     expect(screen.queryByText('Key')).toBeNull();
+  });
+});
+
+describe('RequestsTable variants', () => {
+  it('renders the full request-audit columns as grouped cells', () => {
+    render(RequestsTable, { items: [item()], detailHref, variant: 'full' });
+
+    const row = screen.getByTestId('request-row');
+    expect(within(row).getByTestId('cell-result')).toHaveTextContent('ok');
+    expect(within(row).getByTestId('cell-model')).toHaveTextContent('claude-x');
+    expect(within(row).getByTestId('cell-model')).toHaveTextContent('requested: gpt-4o');
+    expect(within(row).getByTestId('cell-routing')).toHaveTextContent('premium');
+    expect(within(row).getByTestId('cell-routing')).toHaveTextContent('coding');
+    expect(within(row).getByTestId('cell-serving')).toHaveTextContent('anthropic');
+    expect(within(row).getByTestId('cell-serving')).toHaveTextContent('exec +1');
+    expect(within(row).getByTestId('cell-performance')).toHaveTextContent('460ms');
+    expect(screen.getByText('Request ID')).toBeInTheDocument();
+  });
+
+  it('uses a compact metrics cell and hides Request ID in the dashboard recent variant', () => {
+    render(RequestsTable, { items: [item()], detailHref, variant: 'recent' });
+
+    const row = screen.getByTestId('request-row');
+    expect(within(row).getByTestId('cell-metrics')).toHaveTextContent('460ms');
+    expect(within(row).getByTestId('cell-metrics')).toHaveTextContent('$0.0123');
+    expect(within(row).getByTestId('cell-metrics')).toHaveTextContent('↑ 1.2K');
+    expect(within(row).getByTestId('cell-metrics')).toHaveTextContent('↓ 340');
+    expect(within(row).getByTestId('cell-metrics')).toHaveTextContent('cached 800');
+    expect(within(row).getByTestId('request-detail-link')).toHaveAttribute(
+      'href',
+      '/requests/tr_1',
+    );
+    expect(screen.queryByText('Request ID')).toBeNull();
+  });
+
+  it('uses the key-detail variant without repeating the already-scoped key', () => {
+    render(RequestsTable, { items: [item()], detailHref, variant: 'key' });
+
+    expect(screen.queryByText('Key')).toBeNull();
+    expect(screen.queryByText('Request ID')).toBeNull();
+    expect(screen.getByTestId('request-detail-link')).toHaveAttribute('href', '/requests/tr_1');
+    expect(screen.getByTestId('cell-metrics')).toBeInTheDocument();
+  });
+
+  it('keeps unknown token usage as unknown in compact metrics', () => {
+    render(RequestsTable, {
+      items: [
+        item({
+          usage: {
+            input: null,
+            output: null,
+            cached: null,
+            cacheCreation: null,
+            nonCached: null,
+            total: null,
+          },
+        }),
+      ],
+      detailHref,
+      variant: 'recent',
+    });
+
+    expect(screen.getByTestId('cell-metrics')).not.toHaveTextContent('— tok');
+    expect(within(screen.getByTestId('cell-metrics')).getByTestId('tokens-cell')).toHaveTextContent(
+      '—',
+    );
+  });
+
+  it('does not repeat normal auto-routing requests as requested-model drift', () => {
+    render(RequestsTable, {
+      items: [item({ requested_model: 'auto', final_model: 'claude-x' })],
+      detailHref,
+      variant: 'full',
+    });
+
+    expect(screen.getByTestId('cell-model')).toHaveTextContent('claude-x');
+    expect(screen.getByTestId('cell-model')).not.toHaveTextContent('requested: auto');
+  });
+
+  it('uses distinct badges for classification fallback and execution fallback', () => {
+    render(RequestsTable, {
+      items: [item({ decided_by: 'fallback', fallback_count: 2 })],
+      detailHref,
+      variant: 'full',
+    });
+
+    const row = screen.getByTestId('request-row');
+    expect(within(row).getByTestId('decided-by')).toHaveClass('badge-classifier-fallback');
+    expect(within(row).getByText('exec +2')).toHaveClass('badge-fallback');
   });
 });

@@ -187,8 +187,8 @@
   });
 
   // A recent-requests row mirrors the full request list: the whole row links to the
-  // detail page, but the Request-ID cell keeps a real <a> so keyboard / middle-click /
-  // open-in-new-tab still work (the row click is a mouse convenience on top).
+  // detail page, and the compact Time cell keeps a real <a> so keyboard /
+  // middle-click / open-in-new-tab still work.
   function detailHref(traceId: string): string {
     return `${base}/requests/${traceId}`;
   }
@@ -540,8 +540,12 @@
         <span>{$t('small-model Layer-2 evaluation')}</span>
       </span>
       <span class="inline-flex items-center gap-1.5">
-        <span class="badge-fallback">{$t('fallback')}</span>
+        <span class="badge-classifier-fallback">{$t('fallback')}</span>
         <span>{$t('defaulted to the balanced lane')}</span>
+      </span>
+      <span class="inline-flex items-center gap-1.5">
+        <span class="badge-neutral">{$t('default')}</span>
+        <span>{$t('Default (explicit passthrough or fail-open)')}</span>
       </span>
     </div>
 
@@ -552,7 +556,7 @@
         )}
       </div>
     {:else}
-      <RequestsTable items={recent} {detailHref} keyHref={keyFilterHref} />
+      <RequestsTable items={recent} {detailHref} keyHref={keyFilterHref} variant="recent" />
     {/if}
   </section>
 

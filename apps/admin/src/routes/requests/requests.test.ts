@@ -151,13 +151,13 @@ describe('requests list page', () => {
     expect(first).toHaveTextContent('high'); // complexity
     expect(first).toHaveTextContent('rules'); // decided_by
     expect(first).toHaveTextContent('premium'); // lane
-    expect(first).toHaveTextContent('anthropic'); // provider
-    expect(first).toHaveTextContent('claude-team-a'); // subscription account
+    expect(within(first).getByTestId('cell-serving')).toHaveTextContent('anthropic'); // provider
+    expect(within(first).getByTestId('cell-serving')).toHaveTextContent('claude-team-a'); // subscription account
     expect(first).toHaveTextContent('claude-x'); // final_model
     expect(first).toHaveTextContent('460'); // latency_ms
     expect(within(first).getByTestId('cell-tps')).toHaveTextContent('200 tok/s'); // true TPS
     expect(first).toHaveTextContent(/0\.0123|0\.012/); // cost
-    expect(first).toHaveTextContent('1'); // fallback_count
+    expect(within(first).getByTestId('cell-serving')).toHaveTextContent('exec +1'); // fallback_count
     // The error row surfaces error_class as a human label (raw code in the title attr).
     expect(rows[1]).toHaveTextContent('All providers failed');
     // No plaintext-like long secret anywhere.
@@ -214,15 +214,21 @@ describe('requests list page', () => {
     );
   });
 
-  it('puts high-signal columns before classifier details, with trace ID at the end', () => {
+  it('groups high-signal request fields into semantic cells, with trace ID at the end', () => {
     render(ListPage, {
       data: listData([item('tr_first', { ts: '2026-05-31T10:00:00Z' })]),
     });
     const cells = screen.getByTestId('request-row').querySelectorAll('td');
     expect(cells[0]).toHaveTextContent('2026'); // time first
-    expect(cells[1]).toHaveTextContent('ok'); // status before diagnostics
-    expect(cells[3]).toHaveTextContent('anthropic'); // provider before model/classifier
-    expect(cells[4]).toHaveTextContent('claude-team-a'); // concrete subscription account
+    expect(cells[1]).toHaveTextContent('ok'); // result before diagnostics
+    expect(cells[3]).toHaveTextContent('claude-x'); // served model
+    expect(cells[3]).toHaveTextContent('requested: gpt-4o'); // requested model drift
+    expect(cells[4]).toHaveTextContent('premium'); // routing lane
+    expect(cells[4]).toHaveTextContent('coding'); // classifier task
+    expect(cells[4]).toHaveTextContent('high'); // classifier complexity
+    expect(cells[5]).toHaveTextContent('anthropic'); // concrete provider
+    expect(cells[5]).toHaveTextContent('claude-team-a'); // concrete subscription account
+    expect(cells[5]).toHaveTextContent('exec +1'); // execution fallback count
     expect(cells[cells.length - 1]).toHaveTextContent('tr_first'); // trace id still available
     // The trailing "view" link is gone — the whole row is the link now.
     expect(screen.queryByText('view')).not.toBeInTheDocument();
