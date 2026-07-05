@@ -72,6 +72,7 @@ describe('admin oauth api client', () => {
                 expiresAt: null,
                 updatedAt: 1,
                 healthy: true,
+                credentialFailed: false,
                 priority: 20,
                 schedulable: true,
                 fastMode: true,
@@ -87,6 +88,7 @@ describe('admin oauth api client', () => {
     expect(status.configured).toBe(true);
     expect(status.selectionStrategy).toBe('low_risk');
     expect(status.providers[0]?.accounts[0]?.account).toBe('acct-a');
+    expect(status.providers[0]?.accounts[0]?.credentialFailed).toBe(false);
     expect(status.providers[0]?.accounts[0]?.fastMode).toBe(true);
     expect(JSON.stringify(status)).not.toMatch(/access_token|refresh_token|secret/i);
   });

@@ -443,6 +443,36 @@ describe('providers page', () => {
     expect(invalidateAllMock).toHaveBeenCalledTimes(1);
   });
 
+  it('disables schedulability for credential-failed accounts', async () => {
+    renderPage({
+      providers: [
+        provider({
+          accounts: [
+            {
+              account: 'acct-claude',
+              expiresAt: null,
+              updatedAt: Date.now(),
+              healthy: false,
+              credentialFailed: true,
+              priority: 10,
+              schedulable: false,
+              fastMode: false,
+              proxy: null,
+              models: ['claude-opus-4-6'],
+            },
+          ],
+        }),
+      ],
+    });
+    const row = screen.getByTestId('provider-account-row');
+    const checkbox = within(row).getByRole('checkbox', { name: /schedulable/i });
+
+    expect(within(row).getByText('needs reconnect')).toBeInTheDocument();
+    expect(checkbox).toBeDisabled();
+
+    expect(setAccountSchedule).not.toHaveBeenCalled();
+  });
+
   it('toggles per-account Fast mode through the scheduling endpoint', async () => {
     renderPage();
     const checkbox = within(screen.getByTestId('provider-account-row')).getByRole('checkbox', {

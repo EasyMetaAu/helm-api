@@ -158,6 +158,11 @@ export interface OAuthPoolDeps {
   // Optional model-aware guard for provider-specific scoped caps. Returning false
   // means "retry a sibling for this request, but do not globally park the account".
   shouldParkRateLimit?: (ctx: OAuthRateLimitParkContext) => boolean;
+  // Fires when a selected account's durable credential is rejected (refresh 400/401/403
+  // or persistent upstream 401/403). The pool already removes that account from this
+  // process; the hook lets the gateway persist the disabled state for admin status,
+  // rebuilds, and restarts.
+  onAccountCredentialFailure?: (account: string, error: unknown) => void;
   // Pre-output failover classifiers for the in-pool retry (issue: a native byte-relay
   // that 200s then fails IN-BAND after only a content-free preamble — e.g. a Responses
   // `response.created` before `response.failed`/server_is_overloaded). WITHOUT this, the
@@ -196,6 +201,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   const quotaFreshMs = deps.quotaFreshMs ?? 10 * 60 * 1000;
   const entries: PoolEntry[] = deps.members.map((member) => ({ member, lastUsedAt: 0 }));
   const stickySessions = new Map<string, { account: string; expiresAt: number }>();
+  const credentialFailureReported = new Set<string>();
   let selectionCounter = 0;
 
   // An account is eligible only when the operator has not parked it (`schedulable`)
@@ -681,9 +687,16 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     }
   }
 
-  function parkCredentialFailedAccount(entry: PoolEntry): void {
+  function parkCredentialFailedAccount(entry: PoolEntry, err: unknown): void {
     entry.member.schedulable = false;
     forgetStickyAccount(entry.member.account);
+    if (credentialFailureReported.has(entry.member.account)) return;
+    credentialFailureReported.add(entry.member.account);
+    try {
+      deps.onAccountCredentialFailure?.(entry.member.account, err);
+    } catch {
+      /* fail-open: persistence hooks must not break in-pool failover */
+    }
   }
 
   function shouldParkRateLimitedAccount(
@@ -747,7 +760,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         return result;
       } catch (err) {
         if (isCredentialAccountFailure(err)) {
-          parkCredentialFailedAccount(entry);
+          parkCredentialFailedAccount(entry, err);
           lastErr = err;
           continue;
         }
@@ -798,7 +811,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       } catch (err) {
         if (iterator) await iterator.return?.().catch(() => {});
         if (isCredentialAccountFailure(err)) {
-          parkCredentialFailedAccount(entry);
+          parkCredentialFailedAccount(entry, err);
           lastErr = err;
         } else if (isRateLimitAccountFailure(err)) {
           parkRateLimitedAccount(entry, err, model);

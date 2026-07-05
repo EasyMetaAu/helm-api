@@ -7,6 +7,21 @@
 
 ---
 
+## 2026-07-06 · 配额 PULL 的 100% 账号级窗口必须同步停车（OAuth provider pool / Admin providers，docs/04/11，原则 3/5/7）
+
+- **背景（Lukin）**：Providers 页可以从 Codex/Anthropic usage PULL 看到账号级窗口已经 100% 并显示“已限流”，但后端只把该 PULL 当观测快照；如果 live traffic 没先触发 429/header PUSH 写入 `usageLimitedUntilMs`，OAuth pool 仍会继续选择这个账号。
+- **调度决策**：`/admin/api/oauth/quota` 成功拉到账号级窗口 `usedPercent >= 100` 且有未来 reset 时，立即写入 `usageLimitedUntilMs` 并同步 live pool member；近满但未满（例如 98/99%）不主动停车，只在账号已经被真实 429 停车后用于修正恢复时间。
+- **恢复边界**：干净窗口会继续清理已存在 cooldown；scoped model 窗口（如 Anthropic `7d-*`）仍不扩大成全账号停车。Codex reset credit 消费成功后通过现有刷新路径恢复窗口并清理 cooldown。
+- **测试路径**：覆盖 `/oauth/quota` 从 Codex saturated PULL 新建 cooldown，以及 near-full PULL 不误停车；再跑 admin OAuth route focused tests、typecheck/lint/build。
+
+## 2026-07-05 · OAuth 凭证失效持久化为 needs reconnect（OAuth provider pool / Admin providers，docs/04/11，原则 3/5/7）
+
+- **背景（Lukin）**：Providers 页连通性测试可能返回 `oauth refresh failed (... status 401)`，但账号仍显示 connected，且未自动从调度中禁用；原实现只在当前 pool 进程内把 401/403 账号摘掉，admin status 与持久配置没有同步。
+- **状态决策**：refresh 400/401/403 或持久 upstream 401/403 视为 durable credential failure，而不是 429 usage cooldown。Helm 会写入 encrypted account settings：`credentialFailedAt` / `credentialFailureReason`，并把账号 `schedulable:false`；status 显示 unhealthy，重新合成 pool 时跳过该账号。
+- **恢复边界**：成功 reconnect 会清除 credential failure。若账号是 Helm 因凭证失败自动禁用，则恢复默认 schedulable；若原本就是用户手动 parked，则 reconnect 后仍保持手动 parked。
+- **操作边界**：Providers 页会显式返回 `credentialFailed` 并禁用 schedulable 开关；后端同样拒绝把 credential-failed 账号直接设回 schedulable。状态页若首次发现永久凭证失败，会触发 live pool rebuild，避免“后台已禁用但当前 pool 仍在用”。
+- **测试路径**：覆盖 core pool credential-failure hook、admin test 401 标记、account-settings mark/clear、synthesizeOAuthProviders 跳过 failed account、providers UI 失败后刷新；再跑 targeted Vitest、typecheck、lint、diff check。
+
 ## 2026-07-05 · 避免浪费策略纳入周额度与 Codex reset credits（OAuth provider pool / quota，docs/04/11，原则 3/5/7）
 
 - **背景（Lukin）**：`use_expiring` 不能只看单个快重置窗口；用户实际关心的是 5 小时额度、周额度，以及 Codex 账号还剩多少次 reset credit。周额度快到 reset 且还有大量剩余额度时应被优先使用；有 reset credits 的账号也具备额外恢复能力，应进入评分。

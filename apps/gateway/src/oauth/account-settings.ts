@@ -43,6 +43,15 @@ export interface AccountSettings {
   priority?: number;
   // When false the account is skipped by the scheduler (kept connected, parked).
   schedulable?: boolean;
+  // Durable credential failure detected from a refresh 400/401/403 or upstream auth
+  // rejection. While set, the account is treated as unhealthy and not routable until a
+  // successful reconnect clears it.
+  credentialFailedAt?: number;
+  credentialFailureReason?: string;
+  // True when Helm, not the operator, flipped schedulable:false because the credential
+  // failed. A successful reconnect may safely restore default schedulability only for
+  // these auto-disabled accounts; manually parked accounts stay parked.
+  autoDisabledForCredentialFailure?: boolean;
   // Codex only: when true, auto-consume one rate-limit reset credit the moment the
   // weekly window saturates (≥100%). Unset/false = never auto-reset (manual only).
   autoReset?: boolean;
@@ -168,6 +177,53 @@ export async function setAccountSettings(
     const map = await loadAccountSettings(config, encKey);
     const key = composite(providerId, account);
     map[key] = { ...map[key], ...patch };
+    await saveAccountSettings(config, encKey, map);
+  });
+}
+
+export async function markAccountCredentialFailure(
+  config: ConfigStore,
+  encKey: Buffer,
+  providerId: string,
+  account: string,
+  failure: { at: number; reason: string },
+): Promise<void> {
+  await serializeSettingsMutation(config, async () => {
+    const map = await loadAccountSettings(config, encKey);
+    const key = composite(providerId, account);
+    const current = map[key] ?? {};
+    const wasOperatorParked =
+      current.schedulable === false && current.autoDisabledForCredentialFailure !== true;
+    map[key] = {
+      ...current,
+      schedulable: false,
+      credentialFailedAt: failure.at,
+      credentialFailureReason: failure.reason.slice(0, 240),
+      autoDisabledForCredentialFailure: !wasOperatorParked,
+    };
+    await saveAccountSettings(config, encKey, map);
+  });
+}
+
+export async function clearAccountCredentialFailure(
+  config: ConfigStore,
+  encKey: Buffer,
+  providerId: string,
+  account: string,
+): Promise<void> {
+  await serializeSettingsMutation(config, async () => {
+    const map = await loadAccountSettings(config, encKey);
+    const key = composite(providerId, account);
+    const current = map[key];
+    if (!current) return;
+    const next: AccountSettings = { ...current };
+    const shouldRestoreDefaultSchedulable =
+      next.autoDisabledForCredentialFailure === true && next.schedulable === false;
+    delete next.credentialFailedAt;
+    delete next.credentialFailureReason;
+    delete next.autoDisabledForCredentialFailure;
+    if (shouldRestoreDefaultSchedulable) delete next.schedulable;
+    map[key] = next;
     await saveAccountSettings(config, encKey, map);
   });
 }

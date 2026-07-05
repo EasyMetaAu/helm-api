@@ -37,13 +37,19 @@ import type {
   OAuthAdminStatusResponse,
 } from "../routes/admin/deps.js";
 import {
+  clearAccountCredentialFailure,
   clearAccountSettings,
   getAccountSettings,
   loadAccountSettings,
   loadGlobalOAuthSettings,
+  markAccountCredentialFailure,
   setAccountSettings,
   setGlobalOAuthSettings,
 } from "./account-settings.js";
+import {
+  isPermanentOAuthCredentialFailure,
+  oauthCredentialFailureReason,
+} from "./credential-failure.js";
 import { effectiveAccountModels } from "./effective-models.js";
 
 // Admin OAuth-login orchestration (issue #38) — the implementation behind the
@@ -162,6 +168,14 @@ export interface OAuthAdminDeps {
     message: string,
     fields?: Record<string, unknown>,
   ) => void;
+  // Called after listStatus discovers and persists a durable credential failure.
+  // server.ts uses this to rebuild the live OAuth pool so admin status and routing
+  // agree immediately. Optional for unit tests and disabled deployments.
+  onCredentialFailure?: (
+    providerId: string,
+    account: string,
+    reason: string,
+  ) => Promise<void> | void;
 }
 
 // Split a credential into store fields. `meta` carries every key beyond the
@@ -287,9 +301,15 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     // The account's egress proxy (from the already-loaded settings) so the lazy
     // refresh tunnels through the SAME hop as execution — never the real IP.
     proxy?: ProxyConfig,
-  ): Promise<{ account: string; expiresAt: number | null; updatedAt: number; healthy: boolean }> {
+  ): Promise<{
+    account: string;
+    expiresAt: number | null;
+    updatedAt: number;
+    healthy: boolean;
+    credentialFailed: boolean;
+  }> {
     const provider = getOAuthProvider(providerId);
-    if (!provider) return { account, ...stored, healthy: true };
+    if (!provider) return { account, ...stored, healthy: true, credentialFailed: false };
     const tm = createTokenManager({
       oauth: { kind: "preset", providerId, account },
       tokenStore: deps.store,
@@ -299,10 +319,22 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       now,
     });
     let healthy = true;
+    let credentialFailed = false;
     try {
       await tm.getAuthHeader(); // refresh-if-expired + write back; no-op when fresh
-    } catch {
+    } catch (e) {
       healthy = false; // refresh-token / durable credential is dead → needs re-login
+      credentialFailed = isPermanentOAuthCredentialFailure(e);
+      if (credentialFailed) {
+        const reason = oauthCredentialFailureReason(e);
+        await markAccountCredentialFailure(deps.config, deps.encKey, providerId, account, {
+          at: now(),
+          reason,
+        });
+        await Promise.resolve(deps.onCredentialFailure?.(providerId, account, reason)).catch(
+          () => {},
+        );
+      }
     }
     const r = await deps.store.get(providerId, account);
     return {
@@ -310,6 +342,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       expiresAt: r?.expiresAt ?? stored.expiresAt,
       updatedAt: r?.updatedAt ?? stored.updatedAt,
       healthy,
+      credentialFailed,
     };
   }
 
@@ -328,16 +361,23 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           // Same defaults as getAccountSchedule (priority 50, schedulable true) so a
           // never-tuned account always renders a concrete value.
           const sch = getAccountSettings(settings, r.providerId, r.account);
+          const hasCredentialFailure = typeof sch.credentialFailedAt === "number";
+          const fresh = hasCredentialFailure
+            ? {
+                account: r.account,
+                expiresAt: r.expiresAt,
+                updatedAt: r.updatedAt,
+                healthy: false,
+                credentialFailed: true,
+              }
+            : await ensureFresh(r.providerId, r.account, r, sch.proxy as ProxyConfig | undefined);
+          const { credentialFailed, ...freshView } = fresh;
           return {
             providerId: r.providerId,
-            ...(await ensureFresh(
-              r.providerId,
-              r.account,
-              r,
-              sch.proxy as ProxyConfig | undefined,
-            )),
+            ...freshView,
+            credentialFailed,
             priority: sch.priority ?? 50,
-            schedulable: sch.schedulable ?? true,
+            schedulable: credentialFailed ? false : (sch.schedulable ?? true),
             autoReset: sch.autoReset ?? false,
             fastMode: sch.fastMode ?? false,
             // Both folded from the SAME settings blob (zero extra network): the
@@ -417,6 +457,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       // not routable) — harmless, and overwritten by the next successful bind.
       await persistProxy(s.providerId, account, s.proxy);
       await persist(s.providerId, account, creds);
+      await clearAccountCredentialFailure(deps.config, deps.encKey, s.providerId, account);
       sessions.delete(sessionId);
     },
 
@@ -463,6 +504,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       // account is never bound without its proxy, so it can't later route directly.
       await persistProxy(s.providerId, account, s.proxy);
       await persist(s.providerId, account, creds);
+      await clearAccountCredentialFailure(deps.config, deps.encKey, s.providerId, account);
       sessions.delete(sessionId);
       return { status: "done" };
     },
@@ -570,7 +612,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       // (priority 50, schedulable true, autoReset false) even for a never-tuned account.
       return {
         priority: s.priority ?? 50,
-        schedulable: s.schedulable ?? true,
+        schedulable: typeof s.credentialFailedAt === "number" ? false : (s.schedulable ?? true),
         autoReset: s.autoReset ?? false,
         fastMode: s.fastMode ?? false,
       };
@@ -584,6 +626,16 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       autoReset,
       fastMode,
     }): Promise<void> {
+      if (schedulable === true) {
+        const current = getAccountSettings(
+          await loadAccountSettings(deps.config, deps.encKey),
+          providerId,
+          account,
+        );
+        if (typeof current.credentialFailedAt === "number") {
+          throw new Error("account needs reconnect before it can be scheduled");
+        }
+      }
       // Top-level merge (setAccountSettings) preserves curation/proxy. Only patch
       // the fields the caller supplied — an omitted field stays unchanged.
       const patch: {
@@ -591,9 +643,11 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         schedulable?: boolean;
         autoReset?: boolean;
         fastMode?: boolean;
+        autoDisabledForCredentialFailure?: boolean;
       } = {};
       if (priority !== undefined) patch.priority = priority;
       if (schedulable !== undefined) patch.schedulable = schedulable;
+      if (schedulable !== undefined) patch.autoDisabledForCredentialFailure = false;
       if (autoReset !== undefined) patch.autoReset = autoReset;
       if (fastMode !== undefined) patch.fastMode = fastMode;
       await setAccountSettings(deps.config, deps.encKey, providerId, account, patch);
