@@ -160,6 +160,89 @@ describe("createResetCreditGuard", () => {
     ).resolves.toMatchObject({ ok: true });
   });
 
+  it("treats small weekly reset timestamp jitter as the same reserved window", async () => {
+    const config = new MemoryConfig();
+    const resolveSharedKey = vi.fn(async () => "codex:shared-account");
+    const guard = createResetCreditGuard({ config, resolveSharedKey });
+    const now = 5_000_000;
+    const windowReset = now + 3 * 86_400_000;
+
+    await expect(
+      guard.reserve({
+        providerId: "openai-codex",
+        account: "work-a",
+        windows: [weeklyWindow(100, windowReset)],
+        mode: "auto",
+        nowMs: now,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+
+    const jitteredSameWindow = await guard.reserve({
+      providerId: "openai-codex",
+      account: "work-b",
+      windows: [weeklyWindow(100, windowReset + 5 * 60_000)],
+      mode: "manual",
+      nowMs: now + AUTO_RESET_COOLDOWN_MS,
+    });
+
+    expect(jitteredSameWindow).toMatchObject({
+      ok: false,
+      status: 409,
+      code: "reset_credit_window_already_reserved",
+    });
+  });
+
+  it("allows a reset deadline just outside the jitter tolerance", async () => {
+    const config = new MemoryConfig();
+    const resolveSharedKey = vi.fn(async () => "codex:shared-account");
+    const guard = createResetCreditGuard({ config, resolveSharedKey });
+    const now = 5_500_000;
+    const windowReset = now + 3 * 86_400_000;
+
+    await expect(
+      guard.reserve({
+        providerId: "openai-codex",
+        account: "work-a",
+        windows: [weeklyWindow(100, windowReset)],
+        mode: "auto",
+        nowMs: now,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+
+    await expect(
+      guard.reserve({
+        providerId: "openai-codex",
+        account: "work-b",
+        windows: [weeklyWindow(100, windowReset + 31 * 60_000)],
+        mode: "auto",
+        nowMs: now + AUTO_RESET_COOLDOWN_MS,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+  });
+
+  it("fails closed when the reserved weekly window marker is corrupt", async () => {
+    const config = new MemoryConfig();
+    const resolveSharedKey = vi.fn(async () => "codex:shared-account");
+    const guard = createResetCreditGuard({ config, resolveSharedKey });
+    const now = 5_750_000;
+
+    config.values.set(resetCreditGuardWindowConfigKey("codex:shared-account"), "not-a-window");
+
+    await expect(
+      guard.reserve({
+        providerId: "openai-codex",
+        account: "work",
+        windows: [weeklyWindow(100, now + 3 * 86_400_000)],
+        mode: "manual",
+        nowMs: now,
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      status: 503,
+      code: "reset_credit_window_guard_corrupt",
+    });
+  });
+
   it("blocks reset-credit reserve when the weekly window cannot be identified", async () => {
     const config = new MemoryConfig();
     const guard = createResetCreditGuard({
