@@ -20,48 +20,50 @@ const MULTITURN = {
 };
 
 describe('Conversation', () => {
-  it('renders under the passed testid and one bubble per turn', () => {
+  it('renders under the passed testid; hidden system prompt is not a bubble', () => {
     render(Conversation, { request: MULTITURN, response: null, testid: 'conversation' });
     expect(screen.getByTestId('conversation')).toBeInTheDocument();
-    // system + 3 messages = 4 turns
-    expect(screen.getAllByTestId('conversation-turn')).toHaveLength(4);
+    // system is collapsed by default (not a bubble) → 3 message bubbles render
+    expect(screen.getAllByTestId('conversation-turn')).toHaveLength(3);
   });
 
-  it('aligns user/tool right and assistant/system left via data-turn-role', () => {
+  it('tags each row with its role via data-turn-role in order', () => {
     render(Conversation, { request: MULTITURN, response: null });
     const rows = screen.getAllByTestId('conversation-turn');
     const roles = rows.map((r) => r.getAttribute('data-turn-role'));
-    expect(roles).toEqual(['system', 'user', 'assistant', 'user']);
-    // right-aligned turns carry items-end; left-aligned items-start
-    const user = rows[1];
-    expect(user.className).toContain('items-end');
-    const assistant = rows[2];
-    expect(assistant.className).toContain('items-start');
+    expect(roles).toEqual(['user', 'assistant', 'user']);
+    // each role carries its own colored left spine (design-token class)
+    expect(rows[0].className).toContain('border-slate-300'); // user
+    expect(rows[1].className).toContain('border-indigo-300'); // assistant
   });
 
-  it('"View source" reveals only the clicked turn (no wrong-index bleak)', async () => {
+  it('"View source" reveals only the clicked turn (no wrong-index bleed)', async () => {
     render(Conversation, { request: MULTITURN, response: null });
     const rows = screen.getAllByTestId('conversation-turn');
     // nothing open initially
     expect(screen.queryAllByTestId('conversation-source')).toHaveLength(0);
-    // open turn #2 (index 1, the first user message)
-    const toggle = within(rows[1]).getByTestId('conversation-source-toggle');
+    // open the first user turn (row 0)
+    const toggle = within(rows[0]).getByTestId('conversation-source-toggle');
     await fireEvent.click(toggle);
-    // exactly one source panel, and it's inside row #2
-    const sources = screen.getAllByTestId('conversation-source');
-    expect(sources).toHaveLength(1);
-    expect(within(rows[1]).queryByTestId('conversation-source')).not.toBeNull();
-    expect(within(rows[2]).queryByTestId('conversation-source')).toBeNull();
+    // exactly one source panel, inside row 0 only
+    expect(screen.getAllByTestId('conversation-source')).toHaveLength(1);
+    expect(within(rows[0]).queryByTestId('conversation-source')).not.toBeNull();
+    expect(within(rows[1]).queryByTestId('conversation-source')).toBeNull();
     // the revealed JSON is that turn's raw wire object
-    expect(rows[1].textContent).toContain('hello');
+    expect(rows[0].textContent).toContain('hello');
   });
 
-  it('system turn is hidden until "Show system" is toggled', async () => {
-    render(Conversation, { request: MULTITURN, response: null });
-    const systemRow = screen.getAllByTestId('conversation-turn')[0];
-    expect(systemRow.textContent).not.toContain('Be precise.');
+  it('system prompt is hidden until "Show system" is toggled', async () => {
+    render(Conversation, { request: MULTITURN, response: null, testid: 'conversation' });
+    // hidden by default: 3 bubbles, no system text anywhere
+    expect(screen.getAllByTestId('conversation-turn')).toHaveLength(3);
+    expect(screen.getByTestId('conversation').textContent).not.toContain('Be precise.');
     await fireEvent.click(screen.getByTestId('conversation-toggle-system'));
-    expect(screen.getAllByTestId('conversation-turn')[0].textContent).toContain('Be precise.');
+    // revealed: system becomes a bubble → 4 turns, its text present
+    const rows = screen.getAllByTestId('conversation-turn');
+    expect(rows).toHaveLength(4);
+    expect(rows[0].getAttribute('data-turn-role')).toBe('system');
+    expect(rows[0].textContent).toContain('Be precise.');
   });
 
   it('reasoning block is present in DOM but collapsed by default', () => {

@@ -922,5 +922,7 @@
   "Yesterday: {value}": "前日：{value}",
   "Your new API key": "新しい API キー",
   "Zoom in": "拡大",
-  "Zoom out": "縮小"
+  "Zoom out": "縮小",
+  "Show more": "もっと見る",
+  "Show less": "折りたたむ"
 }

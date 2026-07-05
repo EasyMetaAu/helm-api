@@ -922,5 +922,7 @@
   "Yesterday: {value}": "Yesterday: {value}",
   "Your new API key": "Your new API key",
   "Zoom in": "Zoom in",
-  "Zoom out": "Zoom out"
+  "Zoom out": "Zoom out",
+  "Show more": "Show more",
+  "Show less": "Show less"
 }

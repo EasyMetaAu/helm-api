@@ -51,9 +51,18 @@
       <span class="ml-auto">{$t('{count} turns', { count: turns.length })}</span>
     </div>
 
-    <div class="flex flex-col gap-3">
+    <!-- Group consecutive same-role turns: only the first of a run shows its
+         avatar + label, so a long stretch of Codex context/tool turns reads as one
+         cluster instead of a wall of repeated "User" stamps. -->
+    <div class="flex flex-col">
       {#each visible as turn, i (i)}
-        <ConversationTurn {turn} index={i} {showSystem} {showReasoning} />
+        <ConversationTurn
+          {turn}
+          index={i}
+          {showSystem}
+          {showReasoning}
+          grouped={i > 0 && visible[i - 1].role === turn.role}
+        />
       {/each}
     </div>
 

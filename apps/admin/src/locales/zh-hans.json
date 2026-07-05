@@ -922,5 +922,7 @@
   "Yesterday: {value}": "昨日：{value}",
   "Your new API key": "你的新 API 密钥",
   "Zoom in": "放大",
-  "Zoom out": "缩小"
+  "Zoom out": "缩小",
+  "Show more": "展开",
+  "Show less": "收起"
 }

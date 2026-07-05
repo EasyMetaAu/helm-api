@@ -922,5 +922,7 @@
   "Yesterday: {value}": "전일: {value}",
   "Your new API key": "새 API 키",
   "Zoom in": "확대",
-  "Zoom out": "축소"
+  "Zoom out": "축소",
+  "Show more": "더 보기",
+  "Show less": "접기"
 }
