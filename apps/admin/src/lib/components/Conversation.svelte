@@ -27,8 +27,14 @@
   let showReasoning = $state(false);
   // null = all roles; otherwise only this role shows.
   let roleFilter = $state<ConversationTurn['role'] | null>(null);
-  // Global expand/collapse: null = per-row control, true/false = force all.
-  let forceExpanded = $state<boolean | null>(null);
+  // Global expand/collapse: a bumping nonce so even a repeated "Expand all" re-applies
+  // to rows the user manually collapsed in between.
+  let expandCommand = $state<{ open: boolean; nonce: number } | null>(null);
+  let expandNonce = 0;
+  function commandAll(openAll: boolean) {
+    expandNonce += 1;
+    expandCommand = { open: openAll, nonce: expandNonce };
+  }
 
   const systemCount = $derived(allTurns.filter((tn) => tn.role === 'system').length);
 
@@ -95,10 +101,10 @@
       <span class="text-ink-faint">·</span>
 
       <!-- collapse / expand all -->
-      <button type="button" data-testid="conversation-expand-all" class="text-ink-muted hover:text-link" onclick={() => (forceExpanded = true)}>
+      <button type="button" data-testid="conversation-expand-all" class="text-ink-muted hover:text-link" onclick={() => commandAll(true)}>
         {$t('Expand all')}
       </button>
-      <button type="button" data-testid="conversation-collapse-all" class="text-ink-muted hover:text-link" onclick={() => (forceExpanded = false)}>
+      <button type="button" data-testid="conversation-collapse-all" class="text-ink-muted hover:text-link" onclick={() => commandAll(false)}>
         {$t('Collapse all')}
       </button>
 
@@ -136,7 +142,7 @@
             {turn}
             index={i}
             {showReasoning}
-            {forceExpanded}
+            {expandCommand}
             grouped={i > 0 && visible[i - 1].role === turn.role}
           />
         </div>

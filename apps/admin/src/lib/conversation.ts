@@ -542,37 +542,78 @@ export function extractConversation(request: unknown, response: unknown): Conver
 // call with no matching result becomes a tool_exchange with hasResult:false; an
 // orphan result (no matching call) is left as-is so it's never silently lost.
 function pairToolExchanges(turns: ConversationTurn[]): ConversationTurn[] {
-  // Index the FIRST tool_result for each callId (a call's answer can appear in any
-  // later turn — results usually follow but don't assume adjacency).
-  const resultByCallId = new Map<string, unknown>();
-  const consumed = new Set<string>(); // callIds folded into a tool_exchange
-  for (const turn of turns) {
-    for (const p of turn.parts) {
-      if (p.kind === 'tool_result' && p.callId && !resultByCallId.has(p.callId)) {
-        resultByCallId.set(p.callId, p.output);
+  // Pair in DOCUMENT ORDER, one result per call: each call takes the FIRST not-yet-
+  // consumed result with the same id that appears AT OR AFTER it. This is robust to
+  // (a) ids that are only locally unique — Gemini synthesizes per-turn `name#ordinal`
+  // keys that can repeat across turns, (b) duplicate ids in a malformed body, and
+  // (c) a result that precedes all its calls (it stays an orphan). A result consumed
+  // by a call is dropped from its own turn; an unmatched result is kept, never lost.
+  //
+  // Build a flat list of every result's linear position so a call can claim the next
+  // free one for its id without O(n²) rescans.
+  type Loc = { ti: number; pi: number };
+  const resultsById = new Map<string, Loc[]>(); // id → result locations, in order
+  turns.forEach((turn, ti) =>
+    turn.parts.forEach((p, pi) => {
+      if (p.kind === 'tool_result' && p.callId) {
+        const list = resultsById.get(p.callId) ?? [];
+        list.push({ ti, pi });
+        resultsById.set(p.callId, list);
       }
-    }
-  }
-  return turns.map((turn) => {
+    }),
+  );
+  const nextFree = new Map<string, number>(); // id → index into resultsById[id]
+  const consumed = new Set<string>(); // "ti:pi" of results folded into a call
+  const outputAt = (loc: Loc): unknown => {
+    const p = turns[loc.ti]?.parts[loc.pi];
+    return p && p.kind === 'tool_result' ? p.output : null;
+  };
+
+  // Pass 1: walk calls in order, claim each one's next free same-id result.
+  const claimed = new Map<string, Loc | null>(); // "callTi:callPi" → result loc
+  turns.forEach((turn, ti) =>
+    turn.parts.forEach((p, pi) => {
+      if (p.kind !== 'tool_call') return;
+      const key = `${ti}:${pi}`;
+      const list = p.id ? resultsById.get(p.id) : undefined;
+      if (!list) {
+        claimed.set(key, null);
+        return;
+      }
+      let idx = nextFree.get(p.id as string) ?? 0;
+      // skip results that appear strictly BEFORE this call (can't answer it)
+      while (idx < list.length && (list[idx].ti < ti || (list[idx].ti === ti && list[idx].pi < pi))) idx++;
+      if (idx < list.length) {
+        const loc = list[idx];
+        nextFree.set(p.id as string, idx + 1);
+        consumed.add(`${loc.ti}:${loc.pi}`);
+        claimed.set(key, loc);
+      } else {
+        claimed.set(key, null);
+      }
+    }),
+  );
+
+  // Pass 2: emit tool_exchange for each call; drop consumed results; keep the rest.
+  return turns.map((turn, ti) => {
     const parts: TurnPart[] = [];
-    for (const p of turn.parts) {
+    turn.parts.forEach((p, pi) => {
       if (p.kind === 'tool_call') {
-        const has = p.id != null && resultByCallId.has(p.id);
-        if (has && p.id) consumed.add(p.id);
+        const loc = claimed.get(`${ti}:${pi}`) ?? null;
         parts.push({
           kind: 'tool_exchange',
           id: p.id,
           name: p.name,
           args: p.args,
-          hasResult: has,
-          output: has && p.id ? resultByCallId.get(p.id) : null,
+          hasResult: loc !== null,
+          output: loc ? outputAt(loc) : null,
         });
-      } else if (p.kind === 'tool_result' && p.callId && consumed.has(p.callId)) {
-        // this result was folded into its call's tool_exchange — drop it
+      } else if (p.kind === 'tool_result' && consumed.has(`${ti}:${pi}`)) {
+        // folded into its call's tool_exchange — drop
       } else {
         parts.push(p);
       }
-    }
+    });
     return { ...turn, parts };
   });
 }

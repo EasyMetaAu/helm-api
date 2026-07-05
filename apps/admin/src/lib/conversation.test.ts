@@ -499,6 +499,59 @@ describe('clarity pass', () => {
     );
     expect(gone).toEqual([]); // nothing to show
   });
+  it('two same-name Gemini calls each pair with their OWN result in order (no cross-pair)', () => {
+    const turns = extractConversation(
+      {
+        contents: [
+          { role: 'model', parts: [{ functionCall: { name: 'search', args: { q: 'a' } } }] },
+          { role: 'user', parts: [{ functionResponse: { name: 'search', response: 'RES-A' } }] },
+          { role: 'model', parts: [{ functionCall: { name: 'search', args: { q: 'b' } } }] },
+          { role: 'user', parts: [{ functionResponse: { name: 'search', response: 'RES-B' } }] },
+        ],
+      },
+      null,
+    );
+    const exchanges = turns.flatMap((t) => t.parts).filter((p) => p.kind === 'tool_exchange');
+    expect(exchanges).toHaveLength(2);
+    // first call → first result, second call → second result (document order)
+    expect(exchanges[0].kind === 'tool_exchange' && exchanges[0].output).toBe('RES-A');
+    expect(exchanges[1].kind === 'tool_exchange' && exchanges[1].output).toBe('RES-B');
+  });
+  it('duplicate call ids: each result consumed at most once (one-result-per-call)', () => {
+    const turns = extractConversation(
+      {
+        messages: [
+          { role: 'assistant', content: null, tool_calls: [{ id: 'dup', function: { name: 'f', arguments: '{}' } }] },
+          { role: 'tool', tool_call_id: 'dup', content: 'R1' },
+          { role: 'assistant', content: null, tool_calls: [{ id: 'dup', function: { name: 'f', arguments: '{}' } }] },
+          { role: 'tool', tool_call_id: 'dup', content: 'R2' },
+        ],
+      },
+      null,
+    );
+    const ex = turns.flatMap((t) => t.parts).filter((p) => p.kind === 'tool_exchange');
+    expect(ex).toHaveLength(2);
+    expect(ex[0].kind === 'tool_exchange' && ex[0].output).toBe('R1');
+    expect(ex[1].kind === 'tool_exchange' && ex[1].output).toBe('R2'); // NOT R1 twice
+    // both results consumed → no orphan tool_result survives
+    expect(turns.flatMap((t) => t.parts).some((p) => p.kind === 'tool_result')).toBe(false);
+  });
+  it('a result that precedes all its calls stays an orphan (never folded)', () => {
+    const turns = extractConversation(
+      {
+        messages: [
+          { role: 'tool', tool_call_id: 'x', content: 'early' },
+          { role: 'assistant', content: null, tool_calls: [{ id: 'x', function: { name: 'f', arguments: '{}' } }] },
+        ],
+      },
+      null,
+    );
+    const parts = turns.flatMap((t) => t.parts);
+    // the early result can't answer a later call → orphan kept; call has no result
+    expect(parts.some((p) => p.kind === 'tool_result')).toBe(true);
+    const ex = parts.find((p) => p.kind === 'tool_exchange');
+    expect(ex?.kind === 'tool_exchange' && ex.hasResult).toBe(false);
+  });
   it('a call and its result across turns collapse into ONE tool_exchange (result turn dropped)', () => {
     const turns = extractConversation(
       {

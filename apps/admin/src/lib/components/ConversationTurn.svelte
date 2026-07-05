@@ -17,31 +17,34 @@
     index,
     showReasoning,
     grouped = false,
-    forceExpanded = null,
+    expandCommand = null,
   }: {
     turn: ConversationTurn;
     index: number;
     showReasoning: boolean;
     /** True when the previous turn had the same role — hide the avatar/name header. */
     grouped?: boolean;
-    /** Parent collapse/expand-all: true/false forces state; null = per-row control. */
-    forceExpanded?: boolean | null;
+    /**
+     * Global expand/collapse-all. `nonce` bumps on every click (even repeats), so the
+     * effect always re-fires and re-applies `open` — a second "Expand all" after a
+     * manual collapse still opens the row. null = no global command issued yet.
+     */
+    expandCommand?: { open: boolean; nonce: number } | null;
   } = $props();
 
-  let localOpen = $state(false);
+  let open = $state(false);
   let sourceOpen = $state(false);
-  // Parent "expand all / collapse all" wins while it's non-null; a manual click after
-  // that reverts this row to local control.
-  let override = $state<boolean | null>(null);
-  const open = $derived(override ?? forceExpanded ?? localOpen);
-  // Reset the manual override whenever the parent flips the global switch.
+  // Apply a global command whenever its nonce changes (tracked by value, so identical
+  // consecutive commands still re-apply). A later per-row toggle just flips `open`.
+  let lastNonce = -1;
   $effect(() => {
-    forceExpanded;
-    override = null;
+    if (expandCommand && expandCommand.nonce !== lastNonce) {
+      lastNonce = expandCommand.nonce;
+      open = expandCommand.open;
+    }
   });
   function toggle() {
-    override = !open;
-    localOpen = !open;
+    open = !open;
   }
 
   // Per-role identity: dot color + spine tint + name color — straight from app tokens

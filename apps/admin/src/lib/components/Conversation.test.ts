@@ -83,6 +83,18 @@ describe('Conversation', () => {
     for (const r of screen.getAllByTestId('conversation-turn')) expect(r.getAttribute('data-open')).toBe('true');
   });
 
+  it('a REPEATED "Expand all" re-opens a row collapsed in between (nonce re-fires)', async () => {
+    render(Conversation, { request: MULTITURN, response: null });
+    await fireEvent.click(screen.getByTestId('conversation-expand-all'));
+    const row0 = screen.getAllByTestId('conversation-turn')[0];
+    // manually collapse row 0
+    await fireEvent.click(within(row0).getByTestId('conversation-row-toggle'));
+    expect(row0.getAttribute('data-open')).toBe('false');
+    // second Expand all must re-open it (the Codex-found bug)
+    await fireEvent.click(screen.getByTestId('conversation-expand-all'));
+    expect(screen.getAllByTestId('conversation-turn')[0].getAttribute('data-open')).toBe('true');
+  });
+
   it('role filter narrows to a single role', async () => {
     render(Conversation, { request: MULTITURN, response: null, testid: 'conversation' });
     const filter = screen.getByTestId('conversation-filter');
