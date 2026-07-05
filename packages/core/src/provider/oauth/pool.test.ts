@@ -87,6 +87,62 @@ describe("createOAuthPoolClient — account selection", () => {
     expect(calls).toEqual(["cooler"]);
   });
 
+  it("quota strategies score only the preferred priority tier", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        {
+          ...member("preferred-but-hot", 10, true, calls),
+          quotaWindows: [{ key: "5h", usedPercent: 91, resetsAtMs: 20_000, windowMinutes: 300 }],
+          quotaCapturedAtMs: 1_000,
+        },
+        {
+          ...member("backup-and-cool", 50, true, calls),
+          quotaWindows: [{ key: "5h", usedPercent: 5, resetsAtMs: 20_000, windowMinutes: 300 }],
+          quotaCapturedAtMs: 1_000,
+        },
+      ],
+      selectionStrategy: "low_risk",
+      now: () => 2_000,
+    });
+
+    await pool.chatCompletion(REQ);
+
+    expect(calls).toEqual(["preferred-but-hot"]);
+  });
+
+  it("low_risk strategy applies Anthropic scoped weekly windows only to matching models", async () => {
+    const calls: string[] = [];
+    const mkScopedPool = () =>
+      createOAuthPoolClient({
+        members: [
+          {
+            ...member("opus-cool", 50, true, calls),
+            quotaWindows: [
+              { key: "7d-opus", usedPercent: 10, resetsAtMs: 20_000, windowMinutes: null },
+              { key: "7d-sonnet", usedPercent: 90, resetsAtMs: 20_000, windowMinutes: null },
+            ],
+            quotaCapturedAtMs: 1_000,
+          },
+          {
+            ...member("sonnet-cool", 50, true, calls),
+            quotaWindows: [
+              { key: "7d-opus", usedPercent: 90, resetsAtMs: 20_000, windowMinutes: null },
+              { key: "7d-sonnet", usedPercent: 10, resetsAtMs: 20_000, windowMinutes: null },
+            ],
+            quotaCapturedAtMs: 1_000,
+          },
+        ],
+        selectionStrategy: "low_risk",
+        now: () => 2_000,
+      });
+
+    await mkScopedPool().chatCompletion({ ...REQ, model: "claude-sonnet-4-6" });
+    await mkScopedPool().chatCompletion({ ...REQ, model: "claude-opus-4-8" });
+
+    expect(calls).toEqual(["sonnet-cool", "opus-cool"]);
+  });
+
   it("use_expiring strategy spends quota that is both available and close to reset", async () => {
     const calls: string[] = [];
     const pool = createOAuthPoolClient({
