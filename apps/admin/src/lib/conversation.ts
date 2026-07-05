@@ -364,10 +364,10 @@ function geminiParts(rawParts: unknown, seenResults: Map<string, number>, callOr
       const ordinal = seenResults.get(name) ?? 0;
       seenResults.set(name, ordinal + 1);
       parts.push({ kind: 'tool_result', callId: `${name}#${ordinal}`, name, output: fr.response });
-    } else if (resolveImage(part)) {
-      parts.push({ kind: 'image', url: resolveImage(part) as string });
     } else {
-      parts.push({ kind: 'unknown', value: p });
+      const img = resolveImage(part);
+      if (img) parts.push({ kind: 'image', url: img });
+      else parts.push({ kind: 'unknown', value: p });
     }
   }
   return parts;
