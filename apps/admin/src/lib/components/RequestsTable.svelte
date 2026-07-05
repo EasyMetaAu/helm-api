@@ -37,10 +37,7 @@
   } = $props();
 
   const visibleKey = $derived(showKey ?? variant !== 'key');
-  const compactMetrics = $derived(variant !== 'full');
   const visibleRequestId = $derived(variant === 'full');
-  const showRoutingDetail = $derived(variant !== 'recent');
-  const showServingAccount = $derived(variant !== 'recent');
 
   // Navigate when the row is clicked, EXCEPT when the click originates on an inner
   // control (the request-id <a> and the key-filter <button> handle their own click).
@@ -163,12 +160,10 @@
         {r.decided_by}
       </span>
     </div>
-    {#if showRoutingDetail}
-      <div class="mt-1 text-xs text-ink-muted">
-        {r.task_type || '—'}{#if r.complexity}
-          · {r.complexity}{/if}
-      </div>
-    {/if}
+    <div class="mt-1 text-xs text-ink-muted">
+      {r.task_type || '—'}{#if r.complexity}
+        · {r.complexity}{/if}
+    </div>
   </div>
 {/snippet}
 
@@ -187,7 +182,7 @@
         </span>
       {/if}
     </div>
-    {#if showServingAccount && r.serving_account}
+    {#if r.serving_account}
       <div
         class="mt-1 max-w-[12rem] truncate font-mono text-xs text-ink-muted"
         title={accountTitle(r.serving_account)}
@@ -202,24 +197,6 @@
   <div data-testid="cell-performance" class="font-mono text-xs leading-tight">
     <div>{r.latency_ms}ms</div>
     <div data-testid="cell-tps" class="text-ink-muted">{formatTps(r.tps)}</div>
-  </div>
-{/snippet}
-
-{#snippet metricsCell(r: RequestListItem)}
-  <div data-testid="cell-metrics" class="font-mono text-xs leading-tight">
-    {#if variant === 'recent'}
-      <div>{r.latency_ms}ms · {formatTps(r.tps)}</div>
-      <div class="text-ink-muted">{formatUsd(r.cost_usd)}</div>
-      <div class="mt-1">
-        <TokensCell usage={r.usage} />
-      </div>
-    {:else}
-      <div>{formatUsd(r.cost_usd)}</div>
-      <div class="mt-1">
-        <TokensCell usage={r.usage} />
-      </div>
-      <div class="text-ink-muted">{r.latency_ms}ms · {formatTps(r.tps)}</div>
-    {/if}
   </div>
 {/snippet}
 
@@ -253,21 +230,15 @@
         <th class="px-3 py-2" title={$t('Provider, account, and execution fallback count.')}
           >{$t('Serving')}</th
         >
-        {#if compactMetrics}
-          <th class="px-3 py-2" title={$t('Cost, token usage, latency, and throughput.')}
-            >{$t('Metrics')}</th
-          >
-        {:else}
-          <th class="px-3 py-2" title={$t('Estimated cost of the request in US dollars.')}
-            >{$t('Cost')}</th
-          >
-          <th class="px-3 py-2" title={$t('Token usage: input / output, with cached input tokens.')}
-            >{$t('Tokens')}</th
-          >
-          <th class="px-3 py-2" title={$t('End-to-end latency and streamed generation throughput.')}
-            >{$t('Performance')}</th
-          >
-        {/if}
+        <th class="px-3 py-2" title={$t('Estimated cost of the request in US dollars.')}
+          >{$t('Cost')}</th
+        >
+        <th class="px-3 py-2" title={$t('Token usage: input / output, with cached input tokens.')}
+          >{$t('Tokens')}</th
+        >
+        <th class="px-3 py-2" title={$t('End-to-end latency and streamed generation throughput.')}
+          >{$t('Performance')}</th
+        >
         {#if visibleRequestId}
           <th class="px-3 py-2" title={$t('The unique trace ID recorded for this request.')}
             >{$t('Request ID')}</th
@@ -330,19 +301,13 @@
           <td data-label={$t('Serving')} class="px-3 py-2">
             {@render servingCell(r)}
           </td>
-          {#if compactMetrics}
-            <td data-label={$t('Metrics')} class="px-3 py-2">
-              {@render metricsCell(r)}
-            </td>
-          {:else}
-            <td data-label={$t('Cost')} class="px-3 py-2 font-mono text-ink-body">
-              {formatUsd(r.cost_usd)}
-            </td>
-            <td data-label={$t('Tokens')} class="px-3 py-2"><TokensCell usage={r.usage} /></td>
-            <td data-label={$t('Performance')} class="px-3 py-2">
-              {@render performanceCell(r)}
-            </td>
-          {/if}
+          <td data-label={$t('Cost')} class="px-3 py-2 font-mono text-ink-body">
+            {formatUsd(r.cost_usd)}
+          </td>
+          <td data-label={$t('Tokens')} class="px-3 py-2"><TokensCell usage={r.usage} /></td>
+          <td data-label={$t('Performance')} class="px-3 py-2">
+            {@render performanceCell(r)}
+          </td>
           {#if visibleRequestId}
             <td data-label={$t('Request ID')} class="px-3 py-2">
               <a

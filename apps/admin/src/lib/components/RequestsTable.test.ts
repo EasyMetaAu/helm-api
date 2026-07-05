@@ -90,15 +90,21 @@ describe('RequestsTable variants', () => {
     expect(screen.getByText('Request ID')).toBeInTheDocument();
   });
 
-  it('uses a compact metrics cell and hides Request ID in the dashboard recent variant', () => {
+  it('keeps the request-list metric columns and hides only Request ID in the dashboard recent variant', () => {
     render(RequestsTable, { items: [item()], detailHref, variant: 'recent' });
 
     const row = screen.getByTestId('request-row');
-    expect(within(row).getByTestId('cell-metrics')).toHaveTextContent('460ms');
-    expect(within(row).getByTestId('cell-metrics')).toHaveTextContent('$0.0123');
-    expect(within(row).getByTestId('cell-metrics')).toHaveTextContent('↑ 1.2K');
-    expect(within(row).getByTestId('cell-metrics')).toHaveTextContent('↓ 340');
-    expect(within(row).getByTestId('cell-metrics')).toHaveTextContent('cached 800');
+    expect(screen.getByText('Cost')).toBeInTheDocument();
+    expect(screen.getByText('Tokens')).toBeInTheDocument();
+    expect(screen.getByText('Performance')).toBeInTheDocument();
+    expect(screen.queryByText('Metrics')).toBeNull();
+    expect(within(row).getByText('$0.0123')).toBeInTheDocument();
+    expect(within(row).getByTestId('tokens-cell')).toHaveTextContent('↑ 1.2K');
+    expect(within(row).getByTestId('tokens-cell')).toHaveTextContent('↓ 340');
+    expect(within(row).getByTestId('tokens-cell')).toHaveTextContent('cached 800');
+    expect(within(row).getByTestId('cell-performance')).toHaveTextContent('460ms');
+    expect(within(row).getByTestId('cell-routing')).toHaveTextContent('coding');
+    expect(within(row).getByTestId('cell-serving')).toHaveTextContent('claude-team-a');
     expect(within(row).getByTestId('request-detail-link')).toHaveAttribute(
       'href',
       '/requests/tr_1',
@@ -112,10 +118,13 @@ describe('RequestsTable variants', () => {
     expect(screen.queryByText('Key')).toBeNull();
     expect(screen.queryByText('Request ID')).toBeNull();
     expect(screen.getByTestId('request-detail-link')).toHaveAttribute('href', '/requests/tr_1');
-    expect(screen.getByTestId('cell-metrics')).toBeInTheDocument();
+    expect(screen.getByText('Cost')).toBeInTheDocument();
+    expect(screen.getByText('Tokens')).toBeInTheDocument();
+    expect(screen.getByText('Performance')).toBeInTheDocument();
+    expect(screen.queryByText('Metrics')).toBeNull();
   });
 
-  it('keeps unknown token usage as unknown in compact metrics', () => {
+  it('keeps unknown token usage as unknown in the shared token column', () => {
     render(RequestsTable, {
       items: [
         item({
@@ -133,10 +142,8 @@ describe('RequestsTable variants', () => {
       variant: 'recent',
     });
 
-    expect(screen.getByTestId('cell-metrics')).not.toHaveTextContent('— tok');
-    expect(within(screen.getByTestId('cell-metrics')).getByTestId('tokens-cell')).toHaveTextContent(
-      '—',
-    );
+    expect(screen.getByTestId('tokens-cell')).not.toHaveTextContent('— tok');
+    expect(screen.getByTestId('tokens-cell')).toHaveTextContent('—');
   });
 
   it('does not repeat normal auto-routing requests as requested-model drift', () => {
