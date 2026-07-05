@@ -18,8 +18,8 @@ import type { AdminApiDeps } from "./deps.js";
 export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void {
   // GET /requests -> { items: (DecisionRecord & { created_at })[], total, page,
   // pageSize } — a filtered + numbered page, most recent first, already redacted.
-  // The query (page/pageSize + date-window/status/decided_by/lane/model filters)
-  // is parsed through the shared schema, which is FAIL-OPEN: a malformed param
+  // The query (page/pageSize + date-window/status/decided_by/lane/model-or-route
+  // filters) is parsed through the shared schema, which is FAIL-OPEN: a malformed param
   // (stale bookmark, hand-typed) coerces to a safe default rather than 5xx-ing a
   // read endpoint. The store pairs each record with its recorded timestamp (a
   // separate column kept out of the redacted record); we flatten it onto the row

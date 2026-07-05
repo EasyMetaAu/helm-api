@@ -1132,9 +1132,14 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(
         (await ctx.stores.telemetry.queryPage({ limit: 50, offset: 0, lane: "premium" })).total,
       ).toBe(2);
-      // model matches requested OR served, case-insensitive
+      // model matches requested OR served OR lane/channel, case-insensitive
       expect(
         (await ctx.stores.telemetry.queryPage({ limit: 50, offset: 0, model: "gpt-4o" })).rows
+          .map((r) => r.record.request_id)
+          .sort(),
+      ).toEqual(["err_eval", "ok_eval"]);
+      expect(
+        (await ctx.stores.telemetry.queryPage({ limit: 50, offset: 0, model: "prem" })).rows
           .map((r) => r.record.request_id)
           .sort(),
       ).toEqual(["err_eval", "ok_eval"]);

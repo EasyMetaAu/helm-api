@@ -8,8 +8,9 @@ import { AttemptStatusSchema, DecidedBySchema } from "./schema.js";
 // safe default instead of throwing. Single source of truth via z.infer.
 //
 // Filtering is split by where the data lives: `status` rides the denormalized
-// telemetry.final_status column; `decided_by`/`lane`/`model` are extracted from
-// the decision JSON by the store adapter; `start`/`end` bound created_at as a
+// telemetry.final_status column; `decided_by`/`lane` are extracted from generated
+// columns; `model` is a contains search over requested model, served model alias,
+// and lane/channel text; `start`/`end` bound created_at as a
 // half-open window [start, end) — mirroring TelemetryStore.queryWindow so adjacent
 // windows never overlap.
 
@@ -40,6 +41,9 @@ export const RequestsQuerySchema = z.object({
   status: AttemptStatusSchema.optional().catch(undefined),
   decided_by: DecidedBySchema.optional().catch(undefined),
   lane: optionalText,
+  // Contains search, not exact matching. Store adapters match requested_model,
+  // final.model_alias, and the selected lane/channel so operators can type a
+  // partial public model or route name from the requests table.
   model: optionalText,
   // Exact api_key_id scope (the key detail page's request list). Unlike `lane`/
   // `model` (substring), the store matches this with equality — it is an internal
