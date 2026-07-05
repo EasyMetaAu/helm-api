@@ -73,10 +73,14 @@ services:
 Configuration comes from **files** and **environment variables**, and env vars
 **win** (this is what makes containerized deployment and secret injection clean):
 
-- `config/*.yaml` — `lanes`, `policies`, `classifier`, `providers`,
-  `capabilities`, `pricing`, `auth`, `runtime`, `server`, `memory` (see
-  [02 · Architecture](02-architecture.md)). This is the single config tree
-  mounted at `/app/config`.
+- Boot config files loaded into the validated Helm config tree:
+  `server.yaml`, `auth.yaml`, `providers.yaml`, `runtime.yaml`, and optional
+  `classifier.yaml`, `lanes.yaml`, `policies.yaml`, `memory.yaml`, and
+  `model-aliases.yaml` (see [02 · Architecture](02-architecture.md)). This is the
+  config tree mounted at `/app/config`.
+- Catalog override files: `capabilities.yaml` and `pricing.yaml`. They are read
+  by the runtime model catalog loader, not by the top-level `loadConfig()` merge,
+  and override the checked-in generated catalog (`pnpm sync:catalog` output).
 - Environment variables — the common ones are in `.env.example`:
   - `HELM_HOST`, `HELM_PORT`, `HELM_BASE_PATH`
   - `HELM_ADMIN_USER`, `HELM_ADMIN_PASSWORD`, `HELM_ADMIN_ENABLED`
@@ -169,3 +173,13 @@ Keep the mounted `config/` and `data/` directories; they are not overwritten.
 > Note: telemetry and captured payloads persist on the `data` volume across
 > redeploys. When debugging, filter the request log by the container's start time
 > so rows written by an older image are not mistaken for current behavior.
+
+## Publishing
+
+The GitHub publish workflow runs on pushes to `main`. Every successful publish
+pushes `ghcr.io/easymetaau/helm-api:latest` and a `sha-*` tag. When the pushed
+commit changes `package.json` to a package version that does not already have a
+matching GitHub release, the workflow also publishes the semver image tag and
+creates `v<version>` automatically. Normal release work therefore consists of
+reviewing the merged change scope, bumping `package.json`, merging to `main`, and
+waiting for the publish workflow before pulling the image on the remote host.

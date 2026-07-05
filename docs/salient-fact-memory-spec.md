@@ -47,7 +47,7 @@ Reproduced on `la.atmy.work` (pi-coding-agent / "Mimi" client, project
 
 | Step | Request | Thread | Result |
 |---|---|---|---|
-| User: "我喜欢的数字是42,你记住" | `b680540b` 14:08:38 | `019edb0b…` | stored as raw `memory_messages` |
+| User: "Remember that my favorite number is 42" | `b680540b` 14:08:38 | `019edb0b…` | stored as raw `memory_messages` |
 | User opens new session, expects recall | `463354fa` 14:09:48 | `019edb10…` | `memory_hydrated:true`, but the injected reflection is the stale v2 ("greeted by Mimi"), **no 42** |
 
 What the DB showed:

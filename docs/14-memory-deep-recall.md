@@ -12,8 +12,8 @@ Its exact `memory_search` is a **substring `LIKE` over `fact_text`** (plus an O(
 reflections). That is the *wrong* retrieval for an external agent asking **"what did we discuss /
 decide about X"**:
 
-- `LIKE '%成本%'` can never match a fact stored as "cost" — **no cross-lingual recall** (helm usage is
-  bilingual zh+en).
+- A keyword query written in one language can never match a fact stored only in
+  another language — **no cross-lingual recall**.
 - substring match has **no relevance ranking** — every hit is equal; a decayed/superseded fact ranks
   the same as a fresh, central one.
 - it ignores the rich ranking signals the fact store already carries (`importance`, `referenceCount`,
@@ -215,7 +215,7 @@ embedding_dimensions: z.number().int().positive().optional(),
 |---|---|---|
 | 1 | `packages/shared/src/config/memory-schema.test.ts` | `facts_retrieval` defaults backfill; unknown key throws; `embedding_model`/`embedding_dimensions` parse; absent ⇒ undefined. |
 | 2 | `packages/shared/src/memory/jobs.test.ts` | `MemoryJobTypeSchema` accepts `"embedding"`; unknown type throws. |
-| 3 | `packages/core/src/store/sqlite/memory-search.test.ts` | `searchFacts` over `:memory:`: FTS-only path returns matching facts ranked; **CJK** query `编程语言` matches a fact via trigram; `owner_id` isolation (cross-tenant id → empty); superseded/expired fact never returned. |
+| 3 | `packages/core/src/store/sqlite/memory-search.test.ts` | `searchFacts` over `:memory:`: FTS-only path returns matching facts ranked; a CJK query matches a fact via trigram; `owner_id` isolation (cross-tenant id → empty); superseded/expired fact never returned. |
 | 4 | same | vector leg with a **fake embedding** (deterministic): a semantically-near fact outranks a keyword-only hit; RRF order stable on a fixture. |
 | 5 | `packages/core/src/store/store-contract.test.ts` | parity: `searchFacts` on sqlite + PGlite (pgvector + tsvector) return the same match set / relative order on a fixed corpus. |
 | 6 | `packages/core/src/store/sqlite/memory-schema.test.ts` | migration v28: `memory_facts_fts` exists + stays in sync on insert/update/delete; backfill via `'rebuild'`; `embedding` column present. |

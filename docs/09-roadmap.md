@@ -29,7 +29,7 @@
 
 ### Protocol translation
 
-The Protocol Adapter accepts **four inbound protocols, all with streaming**:
+The Protocol Adapter accepts **four translated text protocols, all with streaming**:
 
 - OpenAI Chat `POST /v1/chat/completions`
 - Anthropic Messages `POST /v1/messages`

@@ -251,15 +251,16 @@ Enforcement runs in two phases, split by failure mode:
   push a bucket slightly negative (a soft cap); subsequent requests are then over
   budget.
 
-Budgets are enforced on **all four protocol faces** (OpenAI `/v1/chat`, Anthropic
+Budgets are enforced on the routed text faces (OpenAI `/v1/chat`, Anthropic
 `/v1/messages`, OpenAI `/v1/responses`, Gemini `:generateContent`). The
 self-authenticating faces share one routing pipeline, so the check + settle (and
-the streamed-cost backfill that makes the spend dimension correct on the streaming
-path) live there once. Budgets and rate limits **also** apply to the
+the streamed-cost backfill that makes the spend dimension correct on the
+streaming path) live there once. Budgets and rate limits **also** apply to the
 image-generation surfaces — `/v1/images/generations`, the Gemini
-`:generateContent` image models, and `/v1beta/interactions`; image cost is metered
-per image (output tokens × the model's image rate). All budget config is editable
-per key in the admin API Keys page and applies on the next request (no restart).
+`:generateContent` image models, and `/v1beta/interactions`; image cost is
+metered per image (output tokens × the model's image rate). All budget config is
+editable per key in the admin API Keys page and applies on the next request (no
+restart).
 
 ## OAuth subscription quotas and reset credits
 

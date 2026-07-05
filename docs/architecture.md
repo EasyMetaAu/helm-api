@@ -247,10 +247,11 @@ results, so a transient upstream failure can't be amplified into a 300s outage.
 ## 7. Routing & lane resolution
 
 How a request becomes an ordered chain of concrete model aliases. See
-[04 Routing & Lanes](04-routing-and-lanes.md). The shipped config has **16 lanes**:
+[04 Routing & Lanes](04-routing-and-lanes.md). The shipped config has **18 lanes**:
 3 quality lanes (`economy`/`balanced`/`premium`), 4 task lanes
-(`coding`/`json`/`vision`/`tool_use`), and 9 vendor-family lanes that are the
-rewrite targets of the model-alias compatibility shim.
+(`coding`/`json`/`vision`/`tool_use`), 9 vendor-family lanes that are the
+rewrite targets of the model-alias compatibility shim, and 2 image-generation
+lanes (`gpt-image`, `gemini-image`).
 
 ```mermaid
 flowchart TD
