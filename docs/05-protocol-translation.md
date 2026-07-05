@@ -6,9 +6,10 @@ shape. Open-source references and the coverage matrix are in
 [Research Notes](research-notes.md). The implementation lives in
 `packages/core/src/protocol/`.
 
-## Wired protocols
+## Wired surfaces
 
-Four client protocols are wired and routed:
+Four translated text protocols and two dedicated image-generation surfaces are
+wired and routed:
 
 | Endpoint | Protocol | Streaming |
 |----------|----------|-----------|
@@ -22,8 +23,8 @@ Four client protocols are wired and routed:
 > The image-generation surfaces name either an exact image model
 > (`gemini-3.1-flash-image`, `gemini-3-pro-image`, …) or an image lane, skip text
 > classification, and do **not** participate in the text IR. None has a
-> `nativeIn`/`nativeOut` transformer pair, so the count of wired *translated*
-> protocols stays four. There are three such entrypoints:
+> `nativeIn`/`nativeOut` transformer pair, so the count of wired *translated text*
+> protocols stays four. There are three image entrypoints:
 > - **OpenAI Images** (`/v1/images/generations`). For Google image models the route
 >   translates Images ⇄ Gemini `generateContent` internally; the client
 >   request/response stay OpenAI-Images-shaped.
@@ -78,7 +79,7 @@ the terminal frame carries the completed `functionCall` parts, `finishReason`, a
 `usageMetadata`. The transformers live in `packages/core/src/protocol/gemini/`;
 see `apps/gateway/src/routes/gemini.ts` for the route.
 
-> **litellm parity.** All four faces are aligned to litellm's field coverage:
+> **litellm parity.** All four translated text faces are aligned to litellm's field coverage:
 > the full sampling/control knob set, usage detail (reasoning / cache /
 > per-modality), a unified reasoning bridge, full multimodal I/O, and both-ways
 > `finish_reason` maps. The per-pair data-loss matrix and the parity scorecard

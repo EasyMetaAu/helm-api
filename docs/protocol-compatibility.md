@@ -14,10 +14,10 @@ degradation, so this page and the tests stay in lock-step.
 
 ---
 
-## The four inbound protocols
+## The four inbound text protocols
 
-Each client protocol is parsed by a named transformer (`nativeIn`/`nativeOut`),
-all four streaming-capable:
+Each translated text protocol is parsed by a named transformer
+(`nativeIn`/`nativeOut`), and all four are streaming-capable:
 
 | Protocol | Endpoint | Transformer | Auth header |
 |---|---|---|---|
@@ -30,10 +30,10 @@ all four streaming-capable:
 
 The Images and Interactions rows are **additional image-generation surfaces**, not
 fifth/sixth inbound text protocols: neither has a `nativeIn`/`nativeOut`
-transformer pair, so the **four inbound protocols** framing (and the 4×4 matrix)
-above covers only the translated text ones. Image requests name either an exact
-image model or an image lane, skip text classification, and can fail over inside
-the configured image chain. The Interactions request (`{model, input,
+transformer pair, so the **four inbound text-protocol** framing (and the 4×4
+matrix) above covers only the translated text ones. Image requests name either an
+exact image model or an image lane, skip text classification, and can fail over
+inside the configured image chain. The Interactions request (`{model, input,
 response_format}`) is translated internally to a Gemini `generateContent` call —
 upstream speaks `generateContent`, not interactions — and the response is mapped
 back to `{id, steps:[…]}`. The native `:generateContent` endpoint likewise now
@@ -184,7 +184,7 @@ it (the field is required upstream but optional on the Helm face).
 
 ---
 
-## Cross-cutting field coverage (all four protocols)
+## Cross-cutting field coverage (translated text protocols)
 
 These IR fields map **both ways** on every protocol that has a native surface for
 them; where a protocol lacks one, the cell above shows the degradation.

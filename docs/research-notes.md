@@ -70,16 +70,16 @@ Designs reused:
   `advisory=null`, and the main path continues.
 - L1 cache: keyed by `conversation_id`, 60s TTL, LRU of 5000 entries.
 
-What Helm changes:
+What Helm changed:
 
 - The probe is **advisory only** (it does not change routing); Helm's eval is
   **decision-making** — its output selects a lane directly.
 - The cache key moves from `conversation_id` to a **content hash** (better for a
   stateless gateway).
-- The probe call has **no `max_tokens` cap** (a cost risk at scale) → Helm must
-  add a cap.
-- The probe's `fallbacks` / `production_timeout_ms` are "configured but not wired"
-  → Helm must either implement them or drop them; configuration must not lie.
+- Helm's eval config caps `max_tokens`, has both inner and outer timeouts, and
+  fail-opens to `balanced`.
+- Helm's eval schema exposes only fields consumed by the implementation; dead
+  config fields from the reference design were not copied.
 
 ## Protocol translation references
 

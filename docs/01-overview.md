@@ -49,9 +49,9 @@ configured.
 
 ## Client-facing API surface
 
-Helm exposes standard AI API shapes. Four client protocols are wired and routed
-today; all four normalize into one OpenAI-Chat-shaped internal representation
-(IR) and share a single routing core (`routeRequest`):
+Helm exposes standard AI API shapes. Four translated text protocols are wired and
+routed today; those four normalize into one OpenAI-Chat-shaped internal
+representation (IR) and share a single routing core (`routeRequest`):
 
 - **OpenAI Chat Completions** — `POST /v1/chat/completions` (streaming and
   non-streaming).
@@ -62,7 +62,7 @@ today; all four normalize into one OpenAI-Chat-shaped internal representation
   and `:streamGenerateContent` (streaming via `?alt=sse`, emitted as nameless `data:`
   delta frames).
 
-Alongside those four translated protocols, Helm exposes separate **image-generation**
+Alongside those four translated text protocols, Helm exposes separate **image-generation**
 surfaces. The first is **OpenAI-Images-compatible** — `POST /v1/images/generations`
 (non-streaming). Image generation is also available natively to **Gemini SDK
 clients**: the existing `:generateContent` endpoint now serves image models
@@ -121,9 +121,10 @@ pre-forgetting behavior. See [08 · Memory Middleware](08-memory-middleware.md).
    request/response bodies are also captured to a separate `request_payloads`
    table (on by default, retention-pruned) — distinct from the redacted
    `DecisionRecord`.
-6. Work out of the box: default lanes shipped (three quality/cost tiers — economy,
-   balanced, premium — plus task lanes coding, json, vision, tool_use), with the
-   LLM eval **off** by default.
+6. Work out of the box: default lanes shipped (three quality/cost tiers —
+   economy, balanced, premium — plus task lanes coding, json, vision, tool_use,
+   vendor-family compatibility lanes, and image lanes), with the LLM eval **off**
+   by default.
 7. Enforce that an API key exists at startup; no anonymous access.
 8. Open-source and self-hosted: one-command Docker deployment, config-as-code, no
    hard dependency on external services (see [10 · Deployment](10-deployment.md)).

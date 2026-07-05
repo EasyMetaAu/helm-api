@@ -66,14 +66,17 @@ The SPA pages (`apps/admin/src/routes/`) are pure consumers of the gateway's
 ### Dashboard
 
 The landing page (`/`) gives an at-a-glance overview: request volume, success
-rate, latency, throughput, and spend over a selectable window; token usage over
-time and by model; and the most recent routing decisions.
+rate, latency, throughput, and spend over a selectable preset or custom window;
+day-over-day deltas; token usage over time and by model; recent routing
+decisions; key-filter shortcuts; and the shared auto-refresh cadence used across
+admin pages.
 
 ![Dashboard — KPIs, token usage over time, tokens by model, and recent requests](assets/screenshots/01-dashboard.png)
 
 ### Rule management
 
-- **Keys** (`/keys`) — create, reveal, rotate, and revoke API keys and edit the full per-key cap
+- **Keys** (`/keys`) — create, reveal, rotate, revoke, and permanently delete API
+  keys; open copyable **Connect Client** snippets; and edit the full per-key cap
   set: allowed lanes, custom-model permission, rate limits (RPM/TPM), usage
   budgets (requests / tokens / spend with a budget window plus the over-budget
   behavior and degrade lane), the concurrency limit, and the memory mode
@@ -87,14 +90,17 @@ time and by model; and the most recent routing decisions.
   unlinked key_id reference for audit history. See [06 · Auth, API Keys & Rate
   Limits](06-auth-and-rate-limits.md). Each key also has a detail view with usage
   charts, scoped recent requests, configured caps, and a memory shortcut for the
-  key's default account/project scope.
+  key's default account/project scope and direct filter links into the request
+  log.
 - **Lanes** (`/lanes`) — view/edit each lane's `primary + fallback[]`
   (`/admin/api/lanes` CRUD). The model combobox is populated from a read-only
   catalog of routable aliases (`/admin/api/models`). See [04 · Routing &
   Lanes](04-routing-and-lanes.md).
-- **Policies** (`/policies`) — view/edit the policy matching rules
-  (`task_type` / `complexity` / request constraints → lane and reasoning effort)
-  via `/admin/api/policies`.
+- **Policies** (`/policies`) — view/edit first-match policy rules
+  (`task_type` / `complexity` / request constraints → forced lane and/or forced
+  reasoning effort) via `/admin/api/policies`. The config schema also supports
+  `allowed_lanes` whitelist policies; the current UI exposes the common
+  force-lane / reasoning-effort path.
 - **Classifier** (`/classifier`) — toggle eval, tune `confidence_threshold`, and
   inspect the rule dimensions/weights (`/admin/api/classifier`). See [03 ·
   Classification Cascade](03-classification.md).
@@ -110,7 +116,7 @@ never diverge.
 
 ![Lanes — primary model plus an ordered, reorderable fallback chain per lane](assets/screenshots/04-lanes.png)
 
-![Policies — first-match rules that pin or cap the lane for matching requests](assets/screenshots/08-policies.png)
+![Policies — first-match rules that force a lane or reasoning effort for matching requests](assets/screenshots/08-policies.png)
 
 ![Classifier — Layer-2 eval toggle, confidence threshold, rule dimensions, and eval limits](assets/screenshots/05-classifier.png)
 
@@ -170,19 +176,22 @@ never diverge.
   by **scope** (project / resource / thread) or by **key**, then drill in to view,
   edit, or remove individual facts and per-scope reflections
   (`/admin/api/memory`). Read-only counts up front; content opens on demand. The
-  same store is also reachable over MCP at `/mcp`. See [13 · Memory Admin &
-  MCP](13-memory-admin-and-mcp.md) and [14 · Memory: Deep Recall](14-memory-deep-recall.md).
+  same store is also reachable over MCP at `/mcp`; the page includes a **Connect
+  via MCP** dialog for connector/client setup when MCP is enabled. See [13 ·
+  Memory Admin & MCP](13-memory-admin-and-mcp.md) and [14 · Memory: Deep
+  Recall](14-memory-deep-recall.md).
 
 ![Memory — facts and reflections grouped by scope, with counts and last-updated](assets/screenshots/07-memory.png)
 
 ### Request debugging
 
-- **Requests** (`/requests`) — the request list, plus a per-request detail page
-  (`/requests/[traceId]`), reading the read-only `/admin/api/requests` endpoints.
-  This reuses the observability surface from [07 · Error Model &
-  Observability](07-observability.md): classification stage, matched policy, lane
-  candidate chain, provider attempts, final OAuth serving account, cost, token
-  usage, throughput/timing, error, and `trace_id`. When `capture_payloads` is on,
+- **Requests** (`/requests`) — the URL-backed, paginated request list, plus a
+  per-request detail page (`/requests/[traceId]`), reading the read-only
+  `/admin/api/requests` endpoints. This reuses the observability surface from
+  [07 · Error Model & Observability](07-observability.md): key filters, the
+  decided-by legend, classification stage, matched policy, lane candidate chain,
+  provider attempts, final OAuth serving account, cost, token usage, true TPS,
+  throughput/timing, error, and `trace_id`. When `capture_payloads` is on,
   the detail can load the full captured request/response bodies
   (`/admin/api/requests/:traceId/payload`) plus upstream request metadata. The
   body viewer renders the payload as a collapsible tree (or Formatted / Raw), pops
@@ -208,5 +217,8 @@ never diverge.
 - No agent orchestration in the admin UI. Memory **content** is browsable and
   editable on the Memory page (by scope or key); the per-key memory **mode** is
   configured on the Keys page.
-- Complex configuration can still be edited directly in `config/*.yaml` and
-  reloaded — the admin UI is a convenience layer, not the only entry point.
+- Boot-time configuration can still be edited directly in `config/*.yaml` and
+  picked up on restart. The admin UI hot-applies the surfaces it owns (lanes,
+  policies, classifier, runtime settings, key caps, provider account settings,
+  and memory content), but it is a convenience layer rather than the only entry
+  point.

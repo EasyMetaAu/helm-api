@@ -4,9 +4,9 @@
 
 # Helm API
 
-**English** · [简体中文](README.zh-CN.md)
+**English** · [Chinese](README.zh-CN.md)
 
-### One gateway in front of every LLM provider. Pick models by config, not code.
+### One control plane for LLM traffic: text, images, subscriptions, fallback, and memory.
 
 Open-source · self-hosted · MIT
 
@@ -19,9 +19,9 @@ Open-source · self-hosted · MIT
 
 </div>
 
-You maintain fallback logic, provider quirks, cost trade-offs, and model churn — copied into every client. That work belongs in one place, behind one interface.
+LLM apps tend to accumulate routing code in all the wrong places: fallback lists inside clients, one-off patches for provider quirks, hard-coded model names, ad hoc cost controls, and no clean way to answer "why did this request go there?"
 
-Helm API is that place: an open-source, self-hosted **LLM routing gateway** — *nginx for the LLM world*. Your app sends a normal OpenAI, Anthropic, or Gemini request. A declarative YAML config decides which model answers, fails over when a provider breaks, translates protocols both ways, and records every decision. Clients set a `base_url` and an API key. Nothing else.
+Helm API puts that work in one place: an open-source, self-hosted **LLM routing gateway** — *nginx for the LLM world*. Your app sends normal OpenAI, Anthropic, Gemini, or image-generation requests. Helm classifies the request, picks a lane, chooses a provider account, falls back when an upstream breaks, translates protocols when needed, and records the whole decision trail. Clients usually change only `base_url` and the API key.
 
 > **Manage traffic as configuration, not as code.**
 
@@ -71,23 +71,24 @@ docker compose logs helm | grep -i "root API key"
 
 |  | Feature | Detail |
 | :---: | :--- | :--- |
-| 🔀 | **Four client protocols** | OpenAI Chat, Anthropic Messages, OpenAI Responses, Google Gemini — all streaming + non-streaming. One IR in the middle: any client reaches any backend with a consistent output shape, SSE included. |
+| 🔀 | **Multi-protocol text routing** | OpenAI Chat, Anthropic Messages, OpenAI Responses, and Google Gemini — streaming + non-streaming. Text requests share one routing core, with native passthrough when the inbound protocol already matches the selected upstream. |
+| 🖼️ | **Image generation with failover** | OpenAI Images (`/v1/images/generations`), Gemini image models on `generateContent`, and Gemini Interactions (`/v1beta/interactions`). Image requests can name an image model or image lane and fail over across providers without text classification. |
 | 🧭 | **Three-layer classification** | Deterministic rules (pure, zero-network, unit-tested — always on) → optional small-model eval (`temperature: 0`, cached, off by default — needs a configured eval model) → `balanced` lane as the fail-open sink. |
-| 🛣️ | **Lanes + policies** | Requests route through lanes (`economy` / `balanced` / `premium`, plus task lanes `coding`, `json`, `vision`, `tool_use`), never raw provider names. First-match policies pin or cap the lane. Each lane = a primary model + a fallback chain, all in config. Opt-in Agentic Signals can promote a degraded lane within those caps. |
+| 🛣️ | **Lanes + policies** | Requests route through lanes (`economy`, `balanced`, `premium`, plus task lanes like `coding`, `json`, `vision`, `tool_use`), never raw provider names. First-match policies can force a lane, restrict allowed lanes in config, and override reasoning effort. Each lane is a primary model plus an ordered fallback chain. Opt-in Agentic Signals can promote weak ranked lanes without overriding explicit pins or key caps. |
 | 🪪 | **Drop-in for fixed-model clients** | A client that hard-codes a vendor model id (Claude Code's `claude-opus-4-8`, an SDK locked to `gpt-5.5`) just works — no *400 unknown model*. A **standard key** classifies it like `auto`; a **custom-model key** can map each vendor family onto a lane via `model-aliases.yaml` (cap-bounded). |
 | 🛡️ | **Resilient execution** | Circuit breaker (OPEN/HALF_OPEN + single probe), capability filter with explicit skip reasons, `:free`-tier 429 skipping, per-key concurrency queueing. Client disconnects are never counted as provider faults. |
 | 🔐 | **OAuth subscriptions** | Route your Claude Pro/Max, ChatGPT Codex, and GitHub Copilot subscriptions as backends — pooled accounts, per-account model curation / egress proxy / scheduling, global pool strategies, live quota windows, and guarded Codex reset-credit recovery. *(Opt-in; read the [ToS warning](#oauth-subscription-providers-claude-promax-chatgpt-codex-github-copilot).)* |
 | 🔑 | **Keys with teeth** | Mandatory auth; keys authenticate by SHA-256 hash; encrypted recovery material can be stored for admin reveal/rotation. Per key: lane whitelist, custom-model permission, RPM/TPM limits, usage budgets (degrade or reject), concurrency cap, memory mode. Rotate in place, revoke softly, then delete permanently. |
 | 🧠 | **Memory middleware** | On by default: remembered context is injected before routing as a trailing turn; a background worker compresses and consolidates — compaction is **auto-adaptive and zero-config** (prices and context windows resolve from the model catalog; size / idle / context-pressure triggers). Summarize/merge default to deterministic local logic, with an **opt-in LLM path** (`config.memory.llm`, off by default). A forgetting/tiering layer (decay, reinforcement, retention) keeps it honest. Opt out per key or per request (`x-memory-mode: off`). |
 | 📊 | **Total observability** | A redacted decision record per request — classifier, policy, lane, every provider attempt, latency, fallbacks, cost. Verbatim payload capture to a separate table (on by default, 30-day retention). A payload inspector reads long fields fullscreen, previews inline images, and an editable **Retry** button replays any captured request in its own protocol. |
-| 🖥️ | **Admin dashboard** | SvelteKit SPA at `/admin` behind HTTP Basic: overview, key CRUD, lane/policy/classifier editors, system settings, drill-down request log. Edits **write back to `config/*.yaml`** (comment-preserving, atomic) and rebind live — no restart, and they survive one. Five languages. |
+| 🖥️ | **Admin dashboard** | SvelteKit SPA at `/admin` behind HTTP Basic when admin is enabled: overview, request debugger, key CRUD, lane/policy/classifier editors, OAuth providers, memory, and system settings. Lanes/policies/classifier write back to YAML and rebind live; keys, settings, providers, and memory persist through their stores/APIs. Five languages. |
 | 💾 | **Storage** | SQLite by default (one local file). Postgres / Supabase behind the same Store-port abstraction — switch with one env var. |
 
 **Roadmap:** Account/customer billing is intentionally out of scope. See [09 Roadmap](docs/09-roadmap.md).
 
 ## Inside the dashboard
 
-The gateway ships a SvelteKit console at `/admin` (HTTP Basic, five languages). Everything here is live — edits write back to `config/*.yaml` and rebind on the next request, no restart.
+The gateway ships a SvelteKit console at `/admin` (HTTP Basic, five languages) when admin is enabled. Everything here is live: route rules rebind on the next request, runtime settings apply without a restart, provider-pool edits rebuild the next request's pool, and key changes take effect immediately.
 
 **Every request, fully explained.** Open any request to follow the whole trail: which layer classified it, the policy that applied, the lane's full candidate chain, each provider actually tried, and the cost split down to cached tokens.
 
@@ -103,7 +104,7 @@ The gateway ships a SvelteKit console at `/admin` (HTTP Basic, five languages). 
 
 [![Subscription providers — pooled OAuth accounts with per-account quota, proxy, schedule, and status](docs/assets/screenshots/06-providers.png)](docs/assets/screenshots/06-providers.png)
 
-**Routing is just config.** Each lane is a primary model plus an ordered fallback chain — reorder, swap, or constrain it from the UI or the YAML.
+**Routing is just config.** Each lane is a primary model plus an ordered fallback chain. Reorder or swap lane candidates in the UI or YAML; policy and key caps keep clients inside the lanes you allow.
 
 [![Lanes editor — primary model and ordered fallback chain per lane](docs/assets/screenshots/04-lanes.png)](docs/assets/screenshots/04-lanes.png)
 
@@ -117,7 +118,7 @@ The gateway ships a SvelteKit console at `/admin` (HTTP Basic, five languages). 
 | [<img src="docs/assets/screenshots/01-dashboard.png" width="420">](docs/assets/screenshots/01-dashboard.png)<br>**Dashboard** — traffic, spend, token usage, recent decisions | [<img src="docs/assets/screenshots/02-requests.png" width="420">](docs/assets/screenshots/02-requests.png)<br>**Requests** — the filterable request log |
 | [<img src="docs/assets/screenshots/03-request-trail.png" width="420">](docs/assets/screenshots/03-request-trail.png)<br>**Request trail** — the full per-request decision trail | [<img src="docs/assets/screenshots/04-lanes.png" width="420">](docs/assets/screenshots/04-lanes.png)<br>**Lanes** — primary + ordered fallback chain per lane |
 | [<img src="docs/assets/screenshots/05-classifier.png" width="420">](docs/assets/screenshots/05-classifier.png)<br>**Classifier** — eval toggle, threshold, rule weights | [<img src="docs/assets/screenshots/06-providers.png" width="420">](docs/assets/screenshots/06-providers.png)<br>**Providers** — pooled OAuth subscription accounts |
-| [<img src="docs/assets/screenshots/07-memory.png" width="420">](docs/assets/screenshots/07-memory.png)<br>**Memory** — facts & reflections by scope or key | [<img src="docs/assets/screenshots/08-policies.png" width="420">](docs/assets/screenshots/08-policies.png)<br>**Policies** — first-match rules that pick or cap the lane |
+| [<img src="docs/assets/screenshots/07-memory.png" width="420">](docs/assets/screenshots/07-memory.png)<br>**Memory** — facts & reflections by scope or key | [<img src="docs/assets/screenshots/08-policies.png" width="420">](docs/assets/screenshots/08-policies.png)<br>**Policies** — first-match rules that force lanes or reasoning effort |
 | [<img src="docs/assets/screenshots/09-keys.png" width="420">](docs/assets/screenshots/09-keys.png)<br>**API Keys** — per-key caps, limits, budgets, memory mode | [<img src="docs/assets/screenshots/10-settings.png" width="420">](docs/assets/screenshots/10-settings.png)<br>**Settings** — payload capture, rate limits, queue, DB maintenance |
 
 Each screen is annotated in **[11 · Admin UI](docs/11-admin-ui.md)**.
@@ -135,10 +136,10 @@ And two fallbacks that are never conflated: *classification fallback* (undecided
 
 ## Architecture
 
-Four client protocols enter one stable interface; one framework-agnostic core does the work; config drives every stage. (For the same pipeline as sequence, flow, and state diagrams, see **[Architecture & Data Flow](docs/architecture.md)**.)
+Text protocols, image endpoints, and optional memory tools enter one governed gateway; one framework-agnostic core does the routing work; config drives every stage. (For the same pipeline as sequence, flow, and state diagrams, see **[Architecture & Data Flow](docs/architecture.md)**.)
 
 ```text
-CLIENT ── OpenAI · Anthropic · OpenAI Responses · Google Gemini
+CLIENT ── OpenAI · Anthropic · OpenAI Responses · Google Gemini · Images
           one base_url + one Helm key · send model:"auto"
              │
              ▼
@@ -281,7 +282,7 @@ Image lanes work for **any key** on the two dedicated endpoints (`/v1/images/gen
 
 ## Configuration
 
-Everything lives in `config/*.yaml`, Zod-validated on load. **Invalid config stops the gateway from starting.** Lanes, policies, the classifier, and system settings are also editable live in the dashboard — edits persist back to the YAML files (comments preserved) and apply on the next request.
+Boot-time behavior lives in `config/*.yaml`, Zod-validated on load. **Invalid config stops the gateway from starting.** Lanes, policies, and classifier rules are editable live in the dashboard and write back to YAML (comments preserved, atomic). Runtime settings, keys, OAuth provider accounts, memory, and captured request data live in the store and apply without a restart through their admin APIs.
 
 | File | Controls | Live-editable |
 |---|---|---|
@@ -290,10 +291,10 @@ Everything lives in `config/*.yaml`, Zod-validated on load. **Invalid config sto
 | `runtime.yaml` | Request limits, rate-limit defaults, storage driver, opt-in signal feedback | partial |
 | `providers.yaml` | Upstream providers + model aliases (credentials by env-var **name** only) | — |
 | `lanes.yaml` | Each lane's primary model + fallback chain (quality, task, and vendor-family lanes) | ✅ persists |
-| `policies.yaml` | First-match rules that pick or cap the lane | ✅ persists |
+| `policies.yaml` | First-match rules that force a lane, restrict allowed lanes, or force reasoning effort | ✅ persists |
 | `classifier.yaml` | Built-in rules + the optional eval model | ✅ persists |
 | `model-aliases.yaml` | Maps a pinned vendor model id → lane / `auto` (compatibility shim, optional) | — |
-| `memory.yaml` | Forgetting/tiering knobs (on in the shipped config) · optional compaction trigger overrides (`compaction:`) · optional LLM summarizer (`llm:`, off by default). A leftover `observer:` block from older configs refuses startup | ✅ |
+| `memory.yaml` | Forgetting/tiering knobs (on in the shipped config) · optional compaction trigger overrides (`compaction:`) · optional LLM summarizer (`llm:`, off by default). A leftover `observer:` block from older configs refuses startup | partial |
 | `capabilities.yaml` / `pricing.yaml` | Manual overrides on the model catalog (incl. prompt-cache read/write prices) | — |
 
 Most-used environment variables (env wins over YAML; full list in [`.env.example`](.env.example)):

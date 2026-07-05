@@ -7,16 +7,17 @@ numbered documents below describe the system **as it ships** — read them in or
 
 Helm API is an **open-source, self-hosted** LLM routing gateway (MIT license,
 deployed with Docker) — think of it as "**nginx for the LLM world**". It accepts
-standard AI API requests on four inbound protocols (OpenAI Chat Completions,
-Anthropic Messages, OpenAI Responses, and Google Gemini) — plus a dedicated
-OpenAI-Images-compatible image-generation endpoint (`/v1/images/generations`) and
-Gemini image surfaces — uses deterministic rules (optionally aided by a
-small-model evaluation that is **off by default**) to classify text requests by
-task type and complexity, and routes them to a configurable **lane** rather than
-to a bare provider alias. Image requests name an image model or image lane and
-can fail over inside the configured image chain. Helm records every routing
-decision for debugging. Clients only change their `base_url` and API key. A
-management interface ships with the gateway for operations and request debugging.
+standard AI API requests on four translated text protocols (OpenAI Chat
+Completions, Anthropic Messages, OpenAI Responses, and Google Gemini) — plus a
+dedicated OpenAI-Images-compatible image-generation endpoint
+(`/v1/images/generations`) and Gemini image surfaces — uses deterministic rules
+(optionally aided by a small-model evaluation that is **off by default**) to
+classify text requests by task type and complexity, and routes them to a
+configurable **lane** rather than to a bare provider alias. Image requests name an
+image model or image lane and can fail over inside the configured image chain.
+Helm records every routing decision for debugging. Clients only change their
+`base_url` and API key. A management interface ships with the gateway for
+operations and request debugging.
 
 ## Reading order
 
@@ -43,8 +44,8 @@ management interface ships with the gateway for operations and request debugging
 | 14 | [Memory: Deep Recall](14-memory-deep-recall.md) | Hybrid fact retrieval (`memory_recall`): RRF fusion of vector embedding (sqlite-vec/pgvector), full-text (FTS5 trigram / tsvector, CJK-aware), and forgetting-score. Fail-open, dual-language. Gated by `config.memory.forgetting.facts_retrieval`. |
 | — | [Salient-Fact Memory](salient-fact-memory-spec.md) | **Implemented, opt-in** (`config.memory.forgetting.consolidate.eager_facts`, default off). Why a short "remember X" turn formed no cross-session memory, and the fix: eager fact extraction decoupled from compaction + deterministic scope-filtered fact injection (the formation+injection layer below the deferred P8 retrieval; no embeddings, no migration). |
 | — | [Protocol Compatibility](protocol-compatibility.md) | Per-pair data-loss matrix, the `n>1` cap / `data_loss` warning policy, the `provider_raw` passthrough list, capability-gated modalities, and the litellm parity scorecard. |
-| — | [LiteLLM 协议互译缺口修复 Spec](protocol-translation-litellm-gap-spec.md) | 基于本地 LiteLLM 参考实现和 wiki 对照生成的四协议互译缺口修复计划：Anthropic provider_raw/空文本块、Responses continuation/lifecycle/stream prelude、Gemini countTokens/schema、远程媒体与 MCP/file_search。 |
-| — | [原生直通保真规范](native-passthrough-fidelity-spec.md) | Anthropic Messages 和 OpenAI Responses 原生直通的中文设计草案：header/body 保真、允许的修改、流式策略、治理边界、CRS 借鉴项和验收标准。 |
+| — | [LiteLLM Protocol Gap Spec](protocol-translation-litellm-gap-spec.md) | Source-checked compatibility backlog comparing Helm's current protocol surfaces with LiteLLM-style behavior: Responses lifecycle, native passthrough, Gemini helpers, remote media, and MCP/file-search boundaries. |
+| — | [Native Passthrough Fidelity Spec](native-passthrough-fidelity-spec.md) | Contract for Anthropic Messages, OpenAI Responses, and Gemini native passthrough: header/body fidelity, allowed mutations, streaming behavior, governance boundaries, telemetry, and tests. |
 | — | [Research Notes](research-notes.md) | Appendix: open-source references and comparisons for the rule engine, protocol translation, probes, etc. |
 
 ## Design principles

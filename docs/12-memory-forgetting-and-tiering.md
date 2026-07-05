@@ -68,8 +68,9 @@ So memory must do two more things the current pipeline does not:
    a **structural dimension** of this design, not a column we sort by: every
    memory ages through the score, every fact carries bi-temporal validity
    (`valid_from` / `invalid_at` / `expired_at`), and supersede-on-contradiction is
-   **not optional**. (Tencent's Agent Memory engine articulates the same rule:
-   "时序不是 metadata，而是 Memory OS 的结构维度" — see Prior art below.)
+   **not optional**. Tencent's Agent Memory engine articulates the same rule in
+   its own words: temporal order is not metadata; it is a structural dimension of
+   the memory operating system. See Prior art below.
 
 This stays true to the core principles: **deterministic-first** (the score is a
 pure, unit-testable function — no LLM, no network), **fail-open** (any forgetting

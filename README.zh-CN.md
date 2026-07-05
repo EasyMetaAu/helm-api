@@ -6,7 +6,7 @@
 
 [English](README.md) · **简体中文**
 
-### 一个网关，挡在所有 LLM 供应商前面。选模型靠配置，不靠改代码。
+### 把 LLM 流量集中管起来：文本、图片、订阅账号、兜底、记忆，一处配置。
 
 开源 · 自托管 · MIT
 
@@ -19,9 +19,9 @@
 
 </div>
 
-兜底逻辑、各家供应商的怪癖、成本权衡、模型更替——这些东西，你正在往每一个客户端里重复维护。它们本该集中在一个地方，藏在一个接口后面。
+很多 LLM 应用越做越重：客户端里塞着兜底列表、供应商兼容补丁、写死的模型名、临时成本控制；出了问题还很难回答一句最基本的话：这个请求为什么走到了那个模型？
 
-Helm API 就是这个地方：一个开源、自托管的 **LLM 路由网关**——*LLM 世界的 nginx*。你的应用照常发一个 OpenAI、Anthropic 或 Gemini 请求；由一份声明式 YAML 配置决定哪个模型来应答、供应商挂了切到哪个备用、协议怎么双向互译，并把每一次决策记录在案。客户端只设 `base_url` 和 API key，别的什么都不用管。
+Helm API 把这些事收回到一个地方：一个开源、自托管的 **LLM 路由网关**——*LLM 世界的 nginx*。你的应用照常发 OpenAI、Anthropic、Gemini 或图片生成请求；Helm 负责分类、选 lane、挑供应商账号、上游故障时兜底、必要时做协议互译，并把完整决策链路记录下来。多数客户端只需要改 `base_url` 和 API key。
 
 > **把流量当配置来管，而不是当代码来改。**
 
@@ -71,23 +71,24 @@ docker compose logs helm | grep -i "root API key"
 
 |  | 功能 | 说明 |
 | :---: | :--- | :--- |
-| 🔀 | **四种客户端协议** | OpenAI Chat、Anthropic Messages、OpenAI Responses、Google Gemini——全部支持流式 + 非流式。中间是同一套 IR：任意客户端触达任意后端，输出格式一致，SSE 也不例外。 |
+| 🔀 | **多协议文本路由** | OpenAI Chat、Anthropic Messages、OpenAI Responses、Google Gemini——流式和非流式都支持。文本请求共用同一个路由内核；当入站协议和上游协议一致时，还会优先走原生直通，减少协议损耗。 |
+| 🖼️ | **图片生成也能兜底** | OpenAI Images（`/v1/images/generations`）、Gemini 图片模型的 `generateContent`、Gemini Interactions（`/v1beta/interactions`）。图片请求可以写具体图片模型，也可以写图片 lane，不走文本分类，但能像文本 lane 一样跨 provider 兜底。 |
 | 🧭 | **三层分类** | 确定性规则（纯函数、零网络、有单测——常驻开启）→ 可选的小模型 eval（`temperature: 0`、带缓存、默认关闭——需要先配好 eval 模型）→ `balanced` lane 作为 fail-open 兜底口。 |
-| 🛣️ | **Lane + 策略路由** | 请求走 lane（`economy` / `balanced` / `premium`，外加任务 lane `coding`、`json`、`vision`、`tool_use`），从不直接面对供应商名。首条命中的策略可以钉死或封顶 lane。每条 lane = 一个主模型 + 一条兜底链，全在配置里。可选的 Agentic Signals 能在这些上限内，把异常的 lane 提升到更健康的强档 lane。 |
+| 🛣️ | **Lane + 策略路由** | 请求走 lane（`economy`、`balanced`、`premium`，外加 `coding`、`json`、`vision`、`tool_use` 等任务 lane），从不直接面对供应商名。首条命中的策略可以强制 lane、在配置里限制可用 lane，或覆盖 reasoning effort。每条 lane = 一个主模型 + 一条有序兜底链。可选的 Agentic Signals 可以在不破坏显式钉选和 key 限制的前提下，把状态差的档位提升到更健康的档位。 |
 | 🪪 | **固定模型的客户端也能即插即用** | 客户端写死的厂商模型 id（Claude Code 的 `claude-opus-4-8`、锁定 `gpt-5.5` 的 SDK）照样能用——不再吃 *400 unknown model*。**标准 key** 把它当 `auto` 分类；**自定义模型 key** 可通过 `model-aliases.yaml` 把每个厂商家族映射到一条 lane（受 lane 白名单收口）。 |
 | 🛡️ | **稳健的执行层** | 熔断器（OPEN/HALF_OPEN + 单探针）、能力过滤（跳过候选时记下明确原因）、`:free` 档 429 跳过、按 key 并发排队。客户端断连永远不算供应商故障。 |
 | 🔐 | **OAuth 订阅** | 把 Claude Pro/Max、ChatGPT Codex、GitHub Copilot 的**订阅**当后端来路由——多账号组池，逐账号做模型策展 / 出口代理 / 调度，全局账号使用策略、实时额度窗口，以及受保护的 Codex reset-credit 恢复。*（可选功能，先读 [ToS 警告](#oauth-订阅类供应商claude-promaxchatgpt-codexgithub-copilot)。）* |
 | 🔑 | **带约束力的 key** | 强制鉴权；key 鉴权走 SHA-256 哈希，可额外保存加密恢复材料供管理后台查看/轮转。每把 key 可设：lane 白名单、自定义模型权限、RPM/TPM 限流、用量预算（降级或拒绝）、并发上限、记忆模式。可原地轮转，先软吊销，再永久删除。 |
 | 🧠 | **Memory 中间件** | 默认开启：路由前把记忆作为一轮追加消息注入上下文；后台 worker 负责压缩与归并——压缩**全自动、零配置**（价格与上下文窗口取自模型目录；按体量 / 空闲 / 上下文压力三种时机触发）。摘要与归并默认走确定性的本地逻辑，另有**可选的 LLM 路径**（`config.memory.llm`，默认关闭）；遗忘/分层机制（衰减、强化、保留期）防止记忆膨胀。可按 key 或按请求关闭（`x-memory-mode: off`）。 |
 | 📊 | **全程可观测** | 每个请求一条脱敏决策记录——分类、策略、lane、每次供应商尝试、延迟、兜底、成本。正文逐字捕获单独存表（默认开，保留 30 天）。正文检查器支持长字段全屏阅读、内联图片预览，可编辑的 **Retry** 按钮能按原协议重放任何已捕获的请求。 |
-| 🖥️ | **管理面板** | `/admin` 上的 SvelteKit SPA，HTTP Basic 把守：概览、key 增删改、lane / 策略 / 分类器编辑器、系统设置、可下钻的请求日志。编辑会**写回 `config/*.yaml`**（保留注释、原子写入）并实时重绑——无需重启，重启也不丢。支持 5 种语言。 |
+| 🖥️ | **管理面板** | 启用 admin 后，`/admin` 上会提供一个 HTTP Basic 保护的 SvelteKit SPA：概览、请求调试、key 增删改、lane / 策略 / 分类器编辑器、OAuth 提供商、记忆、系统设置。Lane / 策略 / 分类器会写回 YAML 并实时重绑；key、设置、provider、memory 则通过各自的 store/API 持久化。支持 5 种语言。 |
 | 💾 | **存储** | 默认 SQLite（一个本地文件）。Postgres / Supabase 走同一套 Store 端口抽象——改一个环境变量即可切换。 |
 
 **路线图：** 账户 / 客户级计费明确不在范围内。详见 [09 路线图](docs/09-roadmap.md)。
 
 ## 面板里都有什么
 
-网关自带一个 SvelteKit 控制台，挂在 `/admin`（HTTP Basic，5 种语言）。这里的一切都是实时的——改动写回 `config/*.yaml`，下一个请求即生效，无需重启。
+启用 admin 后，网关会在 `/admin` 提供一个 SvelteKit 控制台（HTTP Basic，5 种语言）。这里的操作都是实时生效：路由规则下一个请求就重绑，运行时设置无需重启，provider 账号池会立即重建，key 的启停和限制也会马上生效。
 
 **每一个请求，都讲得清。** 点开任意请求，跟着完整链路走一遍：哪一层做的分类、命中了哪条策略、这条 lane 的完整候选链、实际尝试了哪些供应商，以及细到缓存 token 的成本拆分。
 
@@ -103,7 +104,7 @@ docker compose logs helm | grep -i "root API key"
 
 [![订阅类供应商 —— 组池的 OAuth 账号，逐账号配额 / 代理 / 调度 / 状态](docs/assets/screenshots/06-providers.png)](docs/assets/screenshots/06-providers.png)
 
-**路由就是配置。** 每条 lane 就是「一个主模型 + 一条有序兜底链」——在界面或 YAML 里随手重排、替换、收口。
+**路由就是配置。** 每条 lane 就是「一个主模型 + 一条有序兜底链」——可以在界面或 YAML 里重排、替换；策略和 key 限制负责把客户端约束在允许的 lane 内。
 
 [![Lane 编辑器 —— 每条 lane 的主模型与有序兜底链](docs/assets/screenshots/04-lanes.png)](docs/assets/screenshots/04-lanes.png)
 
@@ -117,7 +118,7 @@ docker compose logs helm | grep -i "root API key"
 | [<img src="docs/assets/screenshots/01-dashboard.png" width="420">](docs/assets/screenshots/01-dashboard.png)<br>**仪表板** —— 流量、花费、token 用量、最近决策 | [<img src="docs/assets/screenshots/02-requests.png" width="420">](docs/assets/screenshots/02-requests.png)<br>**请求** —— 可筛选的请求日志 |
 | [<img src="docs/assets/screenshots/03-request-trail.png" width="420">](docs/assets/screenshots/03-request-trail.png)<br>**请求链路** —— 单个请求的完整决策链 | [<img src="docs/assets/screenshots/04-lanes.png" width="420">](docs/assets/screenshots/04-lanes.png)<br>**Lane** —— 每条 lane 的主模型 + 有序兜底链 |
 | [<img src="docs/assets/screenshots/05-classifier.png" width="420">](docs/assets/screenshots/05-classifier.png)<br>**分类器** —— eval 开关、置信阈值、规则权重 | [<img src="docs/assets/screenshots/06-providers.png" width="420">](docs/assets/screenshots/06-providers.png)<br>**提供商** —— 组池的 OAuth 订阅账号 |
-| [<img src="docs/assets/screenshots/07-memory.png" width="420">](docs/assets/screenshots/07-memory.png)<br>**记忆** —— 按 scope 或 key 浏览事实与反思 | [<img src="docs/assets/screenshots/08-policies.png" width="420">](docs/assets/screenshots/08-policies.png)<br>**策略** —— 首条命中、挑选或封顶 lane 的规则 |
+| [<img src="docs/assets/screenshots/07-memory.png" width="420">](docs/assets/screenshots/07-memory.png)<br>**记忆** —— 按 scope 或 key 浏览事实与反思 | [<img src="docs/assets/screenshots/08-policies.png" width="420">](docs/assets/screenshots/08-policies.png)<br>**策略** —— 首条命中，强制 lane 或 reasoning effort |
 | [<img src="docs/assets/screenshots/09-keys.png" width="420">](docs/assets/screenshots/09-keys.png)<br>**API 密钥** —— 逐 key 的上限、限流、预算、记忆模式 | [<img src="docs/assets/screenshots/10-settings.png" width="420">](docs/assets/screenshots/10-settings.png)<br>**系统设置** —— 正文捕获、限流、排队、数据库维护 |
 
 每个界面的逐项说明见 **[11 管理界面](docs/11-admin-ui.md)**。
@@ -135,10 +136,10 @@ docker compose logs helm | grep -i "root API key"
 
 ## 架构
 
-四种客户端协议进入同一套稳定接口；一个不依赖框架的内核干所有活；配置驱动每一个阶段。（想看同一条流水线的时序图、流程图与状态图，见 **[架构与数据流](docs/architecture.md)**。）
+文本协议、图片端点和可选的记忆工具都进入同一个受治理的网关；一个不依赖框架的内核负责路由；配置驱动每一个阶段。（想看同一条流水线的时序图、流程图与状态图，见 **[架构与数据流](docs/architecture.md)**。）
 
 ```text
-CLIENT ── OpenAI · Anthropic · OpenAI Responses · Google Gemini
+CLIENT ── OpenAI · Anthropic · OpenAI Responses · Google Gemini · Images
           一个 base_url + 一把 Helm key · 发 model:"auto"
              │
              ▼
@@ -280,7 +281,7 @@ gemini-image:                       # 请求填 `model: "gemini-image"`
 
 ## 配置
 
-一切都在 `config/*.yaml` 里，加载时经 Zod 校验。**非法配置直接让网关无法启动。** Lane、策略、分类器和系统设置还能在面板里实时编辑——改动会写回 YAML 文件（注释原样保留），下一个请求即生效。
+启动配置都在 `config/*.yaml` 里，加载时经 Zod 校验。**非法配置直接让网关无法启动。** Lane、策略和分类器可以在面板里实时编辑，并写回 YAML 文件（注释原样保留、原子写入）。运行时设置、key、OAuth 账号、memory、请求正文等则走各自的 store/API，同样无需重启即可生效。
 
 | 文件 | 控制什么 | 可实时改 |
 |---|---|---|
@@ -289,10 +290,10 @@ gemini-image:                       # 请求填 `model: "gemini-image"`
 | `runtime.yaml` | 请求限额、限流默认值、存储驱动、可选信号反馈 | 部分 |
 | `providers.yaml` | 上游供应商 + 模型别名（凭证只引用环境变量**名**） | — |
 | `lanes.yaml` | 每条 lane 的主模型 + 兜底链（质量 lane、任务 lane、厂商家族 lane） | ✅ 持久化 |
-| `policies.yaml` | 首条命中、用来挑选或封顶 lane 的规则 | ✅ 持久化 |
+| `policies.yaml` | 首条命中，用来强制 lane、限制可用 lane 或强制 reasoning effort 的规则 | ✅ 持久化 |
 | `classifier.yaml` | 内置规则 + 可选的 eval 模型 | ✅ 持久化 |
 | `model-aliases.yaml` | 把写死的厂商模型 id 映射到 lane / `auto`（兼容垫片，可选） | — |
-| `memory.yaml` | 遗忘/分层旋钮（出厂配置即开启）· 可选的压缩触发覆盖（`compaction:`）· 可选的 LLM 摘要器（`llm:`，默认关闭）。旧版遗留的 `observer:` 配置块会导致启动失败 | ✅ |
+| `memory.yaml` | 遗忘/分层旋钮（出厂配置即开启）· 可选的压缩触发覆盖（`compaction:`）· 可选的 LLM 摘要器（`llm:`，默认关闭）。旧版遗留的 `observer:` 配置块会导致启动失败 | 部分 |
 | `capabilities.yaml` / `pricing.yaml` | 对模型目录的手动覆盖项（含 prompt 缓存读/写价格） | — |
 
 最常用的环境变量（env 优先于 YAML；完整列表见 [`.env.example`](.env.example)）：

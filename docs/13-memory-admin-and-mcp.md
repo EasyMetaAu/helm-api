@@ -58,7 +58,7 @@ These methods are additive on the port; routes fail closed when the active store
 `insertFactsReconciled` gains an optional return `{ insertedIds, supersededIds } | void` (back-compat;
 existing callers ignore it) so the MCP `memory_add` tool can echo the new fact id.
 
-### Admin API routes `/admin/api/memory/*` (HTTP Basic, like all admin routes)
+### Admin API routes `/admin/api/memory/*` (HTTP Basic when admin is mounted)
 
 `GET /scopes` · `GET /by-key/:keyId` (→ `{accountId, projectId}`) · `GET|… /facts` (list/get/patch/delete)
 · `GET|… /reflections` (list/get/patch/delete). Bodies Zod-validated (`.strict()`, fail-closed) before

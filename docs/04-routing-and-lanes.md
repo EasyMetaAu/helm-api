@@ -181,18 +181,36 @@ these: economy=0 < balanced=1 < premium=2):
 ```yaml
 economy:
   purpose: Cheap and fast for simple tasks
-  primary: deepseek/deepseek-v4-flash
-  fallback: [openai-codex/gpt-5.4-mini, openrouter/deepseek-v4-flash, balanced]
+  reasoning_effort: medium
+  primary: openai-codex/gpt-5.4-mini
+  fallback:
+    - anthropic/claude-haiku-4-5-20251001
+    - deepseek/deepseek-v4-flash
+    - openrouter/deepseek-v4-flash
+    - openrouter/auto
+    - zenmux/auto
 
 balanced:
   purpose: Default quality/cost tradeoff (classification fallback terminal)
-  primary: deepseek/deepseek-v4-pro
-  fallback: [openrouter/deepseek-v4-pro, zenmux/claude-sonnet-4.6, zenmux/auto, openrouter/auto]
+  reasoning_effort: medium
+  primary: openai-codex/gpt-5.5
+  fallback:
+    - anthropic/claude-sonnet-4-6
+    - deepseek/deepseek-v4-pro
+    - openrouter/deepseek-v4-pro
+    - zenmux-anthropic/claude-sonnet-4.6
+    - zenmux/auto
+    - openrouter/auto
 
 premium:
   purpose: Strong reasoning and high quality
+  reasoning_effort: high
   primary: openai-codex/gpt-5.5
-  fallback: [zenmux/claude-opus-4.8, zenmux/gpt-5.5, balanced]
+  fallback:
+    - anthropic/claude-opus-4-8
+    - zenmux-anthropic/claude-opus-4.8
+    - zenmux/gpt-5.5
+    - balanced
 ```
 
 `balanced` is **required** and must be healthy — it is the terminal of the
@@ -212,13 +230,13 @@ coding:
 json:
   purpose: Strict structured-output (JSON) responses
   primary: deepseek/deepseek-v4-flash
-  fallback: [balanced]
+  fallback: [openrouter/deepseek-v4-flash, balanced]
   constraints:
     require_json: true
 
 vision:
   purpose: Multimodal / image understanding
-  primary: zenmux/gemini-3.5-flash
+  primary: zenmux-vertex/gemini-3.5-flash
   fallback: [premium]
   constraints:
     require_vision: true
@@ -247,8 +265,9 @@ gpt-5.5       gpt-5.4        gpt-5.4-mini
 gemini-pro    gemini-flash
 ```
 
-(16 lanes total.) These exist so a client that pins a fixed vendor id lands on
-that family's real model instead of the GPT-led `premium` lane. Each one
+(18 lanes total when the two image-generation lanes below are included.) These
+exist so a client that pins a fixed vendor id lands on that family's real model
+instead of the GPT-led `premium` lane. Each one
 **leads with the requested vendor's native/subscription alias** — the Claude
 lanes with the `anthropic/*` Claude OAuth pool, the GPT lanes with the
 `openai-codex/*` subscription, the Gemini lanes with the static `zenmux/*` key —
@@ -259,20 +278,18 @@ request from the generic-lane backing.
 
 ### Provider mix and the `*/auto` tail
 
-The cheap and default lanes anchor on the **always-available** official
-`deepseek` primary — a static key that works in dev, e2e, and a fresh install
-with no subscription bound. The `premium` / `coding` / `tool_use` lanes lead with
-the `openai-codex` subscription channel (connect it in admin → Providers), each
-backed by a static fallback so the lane **degrades gracefully**: an unconnected
-`openai-codex/*` candidate fails OPEN (skip to the next fallback), never a 5xx.
+The shipped lanes deliberately mix subscription aliases and static API-key
+providers. Several quality and task lanes lead with subscription aliases such as
+`openai-codex/*` or `anthropic/*` (connect them in admin → Providers), but they
+also include static provider fallbacks such as DeepSeek, OpenRouter, ZenMux, and
+ZenMux Anthropic. An unconnected subscription alias is treated as an unavailable
+candidate and fails OPEN to the next fallback, never a 5xx by itself.
 
-The `*/auto` aliases (`zenmux/auto`, `openrouter/auto`) sit only at the **tail of
-the `balanced` chain** — every other lane reaches them by falling through to
-`balanced`, not by carrying its own auto tail. Those auto aliases are
-deliberately JSON-incapable in the catalog (`jsonOutput: none`), so a
-strict-JSON request prunes them via the Capability Filter and lands on a
-deterministic JSON-capable model — proving the filter fires on the default
-config. The same filter discriminates the two JSON tiers: a strict `json_schema`
+The `*/auto` aliases (`zenmux/auto`, `openrouter/auto`) sit at the **tails of
+cheap/default fallback chains**. They are deliberately JSON-incapable in the
+catalog (`jsonOutput: none`), so a strict-JSON request prunes them via the
+Capability Filter and lands on a deterministic JSON-capable model — proving the
+filter fires on the default config. The same filter discriminates the two JSON tiers: a strict `json_schema`
 request additionally prunes `object`-only backends (official DeepSeek →
 `no_response_schema_support`) and lands on a `schema`-capable one (e.g. the cheap
 `openrouter/deepseek-v4-flash` mirror), while a bare `json_object` request still
@@ -353,8 +370,9 @@ selected lane's `reasoning_effort`, which overrides the client's request value.
 `none` is a real override and disables the lane/client reasoning effort for that
 matched policy.
 
-The nine shipped policies, in evaluation order (`task_type × complexity → lane`,
-plus a JSON-contract pin first and a budget-org cap last):
+The shipped policies are intentionally small and explicit. In evaluation order
+they pin JSON-contract requests first, then steer selected
+`task_type × complexity` cases:
 
 ```yaml
 policies:
@@ -377,7 +395,6 @@ policies:
   - id: math_complex_to_premium
     match: { task_type: math, complexity: complex }
     use_lane: premium
-    reasoning_effort: high
 
   - id: chat_simple_to_economy
     match: { task_type: chat, complexity: simple }
@@ -391,15 +408,22 @@ policies:
     match: { task_type: security, complexity: complex }
     use_lane: premium
 
-  - id: global_economy_cap                 # restrict-only catch-all; clamps ALL traffic
-    match: {}                              # empty match = applies to every request
-    allowed_lanes: [economy, balanced]     # premium becomes unreachable fleet-wide
 ```
 
 Policies must stay explicit and inspectable; there is no hidden, hard-to-debug
 model scoring behind them. Note that the policy `complexity` field uses the
 collapsed routing tiers (`simple | medium | complex`), matching the classifier's
 mapped output (see [03](03-classification.md)).
+
+A restrict-only policy is still supported by the schema and engine. For example,
+an operator can add a catch-all whitelist to make `premium` unreachable fleet-wide:
+
+```yaml
+policies:
+  - id: global_economy_cap
+    match: {}                              # empty match = every request
+    allowed_lanes: [economy, balanced]
+```
 
 ## Caps: policy then key
 
