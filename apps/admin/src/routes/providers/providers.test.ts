@@ -1,12 +1,18 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invalidateAll } from '$app/navigation';
-import type { OAuthProviderStatus, OAuthQuotaSnapshot, OAuthUsageRow } from '$lib/api/oauth.js';
+import type {
+  OAuthProviderStatus,
+  OAuthQuotaSnapshot,
+  OAuthSelectionStrategy,
+  OAuthUsageRow,
+} from '$lib/api/oauth.js';
 import ProvidersPage from './+page.svelte';
 
 const logoutOAuth = vi.fn();
 const resetUsageLimit = vi.fn();
 const setAccountSchedule = vi.fn();
+const setSelectionStrategy = vi.fn();
 const streamAccountTest = vi.fn();
 const consumeCodexResetCredit = vi.fn();
 vi.mock('$lib/api/oauth.js', () => ({
@@ -21,6 +27,7 @@ vi.mock('$lib/api/oauth.js', () => ({
   setAccountModels: vi.fn(),
   setAccountProxy: vi.fn(),
   setAccountSchedule: (...args: unknown[]) => setAccountSchedule(...args),
+  setSelectionStrategy: (...args: unknown[]) => setSelectionStrategy(...args),
   startDeviceCode: vi.fn(),
   startManualPaste: vi.fn(),
   streamAccountTest: (...args: unknown[]) => streamAccountTest(...args),
@@ -79,6 +86,7 @@ const quota: OAuthQuotaSnapshot[] = [
 function renderPage(
   overrides: Partial<{
     configured: boolean;
+    selectionStrategy: OAuthSelectionStrategy;
     providers: OAuthProviderStatus[];
     usage: OAuthUsageRow[];
     quota: OAuthQuotaSnapshot[];
@@ -88,6 +96,7 @@ function renderPage(
   return render(ProvidersPage, {
     data: {
       configured: true,
+      selectionStrategy: 'balanced',
       providers: [provider()],
       usage,
       quota,
@@ -100,17 +109,28 @@ describe('providers page', () => {
   beforeEach(() => {
     logoutOAuth.mockReset();
     setAccountSchedule.mockReset();
+    setSelectionStrategy.mockReset();
     streamAccountTest.mockReset();
     consumeCodexResetCredit.mockReset();
     invalidateAllMock.mockReset();
     logoutOAuth.mockResolvedValue(undefined);
     setAccountSchedule.mockResolvedValue(undefined);
+    setSelectionStrategy.mockResolvedValue(undefined);
   });
 
   it('renders connected subscription accounts with usage, quota, and scheduling controls', () => {
     renderPage();
 
     expect(screen.getByText('Subscription Providers')).toBeInTheDocument();
+    expect(screen.getByLabelText('Account usage strategy')).toHaveValue('balanced');
+    expect(
+      screen.getByText(
+        'Applies to all connected subscription accounts. Per-account controls stay limited to priority and scheduling.',
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('Spread new sessions across accounts while keeping sessions sticky.'),
+    ).toBeInTheDocument();
     const row = screen.getByTestId('provider-account-row');
     expect(within(row).getByText('Claude Max')).toBeInTheDocument();
     expect(within(row).getByText('acct-claude')).toBeInTheDocument();
@@ -127,6 +147,17 @@ describe('providers page', () => {
     // Models column: each effective model as a pill (3 ≤ cap, so all show, no "+N").
     expect(within(row).getByText('claude-opus-4-6')).toBeInTheDocument();
     expect(within(row).getByText('claude-haiku-4-5')).toBeInTheDocument();
+  });
+
+  it('updates the global account selection strategy', async () => {
+    renderPage();
+
+    await fireEvent.change(screen.getByLabelText('Account usage strategy'), {
+      target: { value: 'use_expiring' },
+    });
+
+    await waitFor(() => expect(setSelectionStrategy).toHaveBeenCalledWith('use_expiring'));
+    expect(invalidateAllMock).toHaveBeenCalledTimes(1);
   });
 
   it('renders the shared refresh control with auto-refresh intervals', async () => {

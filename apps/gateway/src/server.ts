@@ -63,6 +63,7 @@ import {
   maybeEnqueueIdleObserverJobs,
   type OAuthPoolClient,
   type OAuthPoolMember,
+  type OAuthSelectionStrategy,
   type OAuthTokenStore,
   type ObserveDeps,
   type ObserverDeps,
@@ -133,6 +134,7 @@ import {
   type AccountSettingsMap,
   getAccountSettings,
   loadAccountSettings,
+  loadGlobalOAuthSettings,
 } from "./oauth/account-settings.js";
 import { createOAuthAdmin } from "./oauth/admin-oauth.js";
 import { weeklySaturated } from "./oauth/auto-reset.js";
@@ -386,6 +388,12 @@ export interface SynthesizedOAuth {
   poolClients: Map<string, OAuthPoolClient>;
 }
 
+export interface OAuthQuotaSeed {
+  windows: OAuthQuotaWindow[];
+  capturedAt: number;
+  usageLimitedUntilMs: number | null;
+}
+
 // Build a FRESH, standalone executor client for ONE oauth account: its token manager
 // + egress proxy + executor type + stable anti-ban identity — exactly the per-account
 // binding the routing pool uses, minus the pool/serial wrap. Shared by
@@ -467,11 +475,10 @@ export async function synthesizeOAuthProviders(
     gate: KeyedSerialGate;
     getConfig: () => { enabled: boolean; delayMs: number; timeoutMs: number };
   },
-  // Persisted auto-park cooldowns keyed `${providerId} ${account}` (from oauth_quota).
-  // Each freshly built member is seeded with its cooldown so a parked account stays
-  // parked across a restart / pool rebuild until its reset time. Optional — absent in
-  // unit tests and when no quota store is wired (every member starts un-parked).
-  usageLimitSeeds?: ReadonlyMap<string, number | null>,
+  // Persisted quota snapshots keyed `${providerId} ${account}` (from oauth_quota).
+  // Cooldowns are hard scheduling gates; windows/capturedAt are soft scoring inputs
+  // for quota-aware strategies and must fail open when missing/stale.
+  quotaSeeds?: ReadonlyMap<string, OAuthQuotaSeed>,
   // Pool-local 429 handling can retry a sibling account and hide the failed account
   // from the executor. This hook persists the cooldown the pool already applied in
   // memory, so rebuilds/restarts keep routing around that account.
@@ -493,6 +500,8 @@ export async function synthesizeOAuthProviders(
   // Per-account settings: enabledModels curation + priority + schedulable.
   // Loaded once (fail-open to {}).
   const accountSettings = await loadAccountSettings(config, oauthCtx.encKey);
+  const globalSettings = await loadGlobalOAuthSettings(config, oauthCtx.encKey);
+  const selectionStrategy: OAuthSelectionStrategy = globalSettings.selectionStrategy ?? "balanced";
   const providers: ProviderConfigShared[] = [];
   const poolClients = new Map<string, OAuthPoolClient>();
 
@@ -572,6 +581,7 @@ export async function synthesizeOAuthProviders(
       // wrap sits INSIDE the pool member so the gate key is the concrete account
       // the pool selected; non-user turns and a disabled setting pass through.
       const queueKey = `${providerId} ${account}`;
+      const quotaSeed = quotaSeeds?.get(queueKey);
       const serialized = userMessageQueue
         ? createSerializingClient({
             inner: client,
@@ -599,7 +609,9 @@ export async function synthesizeOAuthProviders(
         // Seed the auto-park cooldown from the persisted snapshot (survives restart /
         // rebuild). A past timestamp is harmless — select() treats now>=until as
         // eligible — so stale seeds self-clear.
-        usageLimitedUntilMs: usageLimitSeeds?.get(`${providerId} ${account}`) ?? null,
+        usageLimitedUntilMs: quotaSeed?.usageLimitedUntilMs ?? null,
+        quotaWindows: quotaSeed?.windows,
+        quotaCapturedAtMs: quotaSeed?.capturedAt,
       });
     }
 
@@ -612,11 +624,13 @@ export async function synthesizeOAuthProviders(
     const pool = createOAuthPoolClient({
       members,
       now: () => Date.now(),
+      selectionStrategy,
       onSelect: (account, selection) => {
         log("info", "oauth.pool.select", {
           providerId,
           account,
           selection_reason: selection.reason,
+          selection_strategy: selection.strategy,
           affinity_key_source: selection.affinityKeySource,
           capacity_avoided: selection.capacityAvoided,
           all_candidates_at_capacity: selection.allCandidatesAtCapacity,
@@ -656,6 +670,7 @@ export async function synthesizeOAuthProviders(
       providerId,
       accounts: members.length,
       models: unionModels.size,
+      selection_strategy: selectionStrategy,
     });
   }
   return { providers, poolClients };
@@ -1296,14 +1311,19 @@ export async function buildServer(
   // flip targets the live members IN PLACE — no pool rebuild on a single 429.
   let oauthPoolClients: Map<string, OAuthPoolClient> = new Map();
 
-  // Read the persisted cooldowns (oauth_quota) keyed `${providerId} ${account}` so a
-  // freshly (re)synthesized member is seeded with its cooldown (survives restart /
-  // rebuild). Fail-open to empty — a read error just means every member starts un-parked.
-  const readUsageLimitSeeds = async (): Promise<Map<string, number | null>> => {
-    const seeds = new Map<string, number | null>();
+  // Read persisted quota snapshots (oauth_quota) keyed `${providerId} ${account}`.
+  // Cooldowns seed hard scheduling; windows/capturedAt seed quota-aware strategies.
+  // Fail-open to empty — a read error just means every member starts un-parked and
+  // quota-aware strategies fall back to balanced behavior.
+  const readQuotaSeeds = async (): Promise<Map<string, OAuthQuotaSeed>> => {
+    const seeds = new Map<string, OAuthQuotaSeed>();
     try {
       for (const snap of await store.oauthQuota.getAll()) {
-        seeds.set(`${snap.providerId} ${snap.account}`, snap.usageLimitedUntilMs ?? null);
+        seeds.set(`${snap.providerId} ${snap.account}`, {
+          windows: snap.windows,
+          capturedAt: snap.capturedAt,
+          usageLimitedUntilMs: snap.usageLimitedUntilMs ?? null,
+        });
       }
     } catch {
       /* fail-open: no seeds */
@@ -1500,6 +1520,7 @@ export async function buildServer(
     const nowMs = Date.now();
     const windows = parseCodexQuotaHeaders(headers, nowMs);
     if (windows.length === 0) return; // no quota headers on this reply → nothing to store
+    oauthPoolClients.get(providerId)?.setQuotaSnapshot(account, windows, nowMs);
     void store.oauthQuota
       .upsert({ providerId, account, windows, capturedAt: nowMs, source: "codex-headers" })
       .catch(() => logger.log("error", "oauth.quota.capture_failed", { provider_id: providerId }));
@@ -1534,7 +1555,7 @@ export async function buildServer(
     (lvl, msg, f) => logger.log(lvl, msg, f),
     captureCodexQuota,
     userMessageQueue,
-    await readUsageLimitSeeds(),
+    await readQuotaSeeds(),
     parkAccountOnLimit,
   );
   const routableProviders: ProviderConfigShared[] = [
@@ -1639,7 +1660,7 @@ export async function buildServer(
           (lvl, msg, f) => logger.log(lvl, msg, f),
           captureCodexQuota,
           userMessageQueue, // SAME gate instance — queue state survives rebuilds
-          await readUsageLimitSeeds(), // re-seed cooldowns so a rebuild never un-parks
+          await readQuotaSeeds(), // re-seed cooldowns + quota windows for strategy scoring
           parkAccountOnLimit,
         );
         oauthPoolClients = next.poolClients;

@@ -45,6 +45,7 @@ export {
   type OAuthPoolDeps,
   type OAuthPoolMember,
   type OAuthRateLimitParkContext,
+  type OAuthSelectionStrategy,
 } from "./pool.js";
 export { getOAuthProvider, getOAuthProviders, listOAuthProviderIds } from "./registry.js";
 export {

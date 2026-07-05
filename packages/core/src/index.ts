@@ -528,6 +528,7 @@ export {
   type OAuthProviderId,
   type OAuthProviderInterface,
   type OAuthRateLimitParkContext,
+  type OAuthSelectionStrategy,
   openaiCodexOAuthProvider,
   parseAnthropicUsageBody,
   parseCodexQuotaHeaders,

@@ -5,6 +5,7 @@ import type {
   Lane,
   MemoryStore,
   OAuthQuotaStore,
+  OAuthSelectionStrategy,
   OAuthUsageStore,
   PoliciesConfig,
   RouteOptions,
@@ -125,9 +126,17 @@ export interface OAuthAdminStatus {
   }>;
 }
 
+export interface OAuthAdminStatusResponse {
+  // Global account-pool selection strategy. This chooses BETWEEN connected accounts
+  // inside each subscription provider pool; Lanes/Policies still choose the model
+  // and provider chain.
+  selectionStrategy: OAuthSelectionStrategy;
+  providers: OAuthAdminStatus[];
+}
+
 export interface OAuthAdminAccess {
   // Built-in providers + which accounts are currently logged in (no secrets).
-  listStatus(): Promise<OAuthAdminStatus[]>;
+  listStatus(): Promise<OAuthAdminStatusResponse>;
   // Anthropic manual-paste: begin -> { authorizeUrl }; the verifier/state are held
   // server-side keyed by sessionId. complete exchanges the pasted redirect URL.
   // `proxy` (optional, entered in the connect dialog's first step) is validated +
@@ -199,6 +208,10 @@ export interface OAuthAdminAccess {
     autoReset?: boolean;
     fastMode?: boolean;
   }): Promise<void>;
+  // Global account-pool selection strategy. Defaults to balanced when no operator
+  // setting is stored.
+  getSelectionStrategy(): Promise<AccountPoolStrategyView>;
+  setSelectionStrategy(input: { selectionStrategy: OAuthSelectionStrategy }): Promise<void>;
   // Pull the Anthropic OAuth usage endpoint for one account → quota windows
   // (providers page Tier 3). Claude exposes a dedicated usage endpoint, so this is
   // an on-demand PULL behind a short TTL cache. FAIL-OPEN: returns null on any
@@ -248,6 +261,10 @@ export interface AccountScheduleView {
   autoReset: boolean;
   // Per-account Fast mode.
   fastMode: boolean;
+}
+
+export interface AccountPoolStrategyView {
+  selectionStrategy: OAuthSelectionStrategy;
 }
 
 // Redacted proxy projection for the admin read path: the password is NEVER echoed,
@@ -419,7 +436,7 @@ export interface AdminApiDeps {
 }
 
 // Re-exported for route signatures.
-export type { CreateKeyInput };
+export type { CreateKeyInput, OAuthSelectionStrategy };
 
 // ── Wire shapes (admin-API-only response/request projections) ────────────────
 

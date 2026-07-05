@@ -7,7 +7,12 @@ import {
   canConsumeResetCredit,
   codexWeeklyUsedPercent,
 } from "../../oauth/auto-reset.js";
-import type { AccountProxyInput, AdminApiDeps, OAuthAdminAccess } from "./deps.js";
+import type {
+  AccountProxyInput,
+  AdminApiDeps,
+  OAuthAdminAccess,
+  OAuthSelectionStrategy,
+} from "./deps.js";
 
 // /admin/api/oauth/* — interactive OAuth subscription login from the admin UI
 // (issue #38). Pure HTTP glue (Principle 1): every flow step delegates to the
@@ -58,6 +63,19 @@ function testUsageTokens(ev: {
 // A malformed proxy body — thrown by parseProxyInput, caught at the route to map to
 // a 400. Distinct type so a genuine seam error isn't masked as a parse error.
 class ProxyParseError extends Error {}
+
+const SELECTION_STRATEGIES: ReadonlySet<string> = new Set([
+  "balanced",
+  "manual_priority",
+  "low_risk",
+  "use_expiring",
+]);
+
+function parseSelectionStrategy(raw: unknown): OAuthSelectionStrategy | null {
+  return typeof raw === "string" && SELECTION_STRATEGIES.has(raw)
+    ? (raw as OAuthSelectionStrategy)
+    : null;
+}
 
 // Parse a request body's `proxy` field into the AccountProxyInput write shape (or
 // null = no/clear proxy). Shared by the connect-start routes (proxy from step 1)
@@ -114,7 +132,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
   app.get("/admin/api/oauth", async (c) => {
     const s = seam();
     if (!s) return c.json({ error: "oauth login not configured (set HELM_OAUTH_ENC_KEY)" }, 503);
-    return c.json({ providers: await s.listStatus() });
+    return c.json(await s.listStatus());
   });
 
   // GET /oauth/usage?tzOffsetMinutes -> today's per-account served traffic (providers
@@ -146,7 +164,9 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     if (s) {
       try {
         const status = await s.listStatus();
-        bound = new Set(status.flatMap((p) => p.accounts.map((a) => usageKey(p.id, a.account))));
+        bound = new Set(
+          status.providers.flatMap((p) => p.accounts.map((a) => usageKey(p.id, a.account))),
+        );
       } catch {
         // fail-open: a listing failure returns all rows rather than hiding data
       }
@@ -213,7 +233,9 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     if (s) {
       try {
         const status = await s.listStatus();
-        bound = new Set(status.flatMap((p) => p.accounts.map((a) => acctKey(p.id, a.account))));
+        bound = new Set(
+          status.providers.flatMap((p) => p.accounts.map((a) => acctKey(p.id, a.account))),
+        );
         // Refresh the usage-endpoint PULL for each connected account (cached in the
         // seam). Anthropic and Codex both expose one; the Codex `x-codex-*` header
         // PUSH still updates the same store on live traffic — the PULL covers
@@ -227,7 +249,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         // before it can serve a single request. For an ALREADY parked account, a
         // successful PULL is also trusted to clear or shorten stale cooldowns: clean
         // windows mean the account is available again.
-        const acctsOf = (id: string) => status.find((x) => x.id === id)?.accounts ?? [];
+        const acctsOf = (id: string) => status.providers.find((x) => x.id === id)?.accounts ?? [];
         const tasks: Array<Promise<void>> = [];
         // Anthropic: windows only.
         const fetchAnthropic = s.fetchAnthropicQuota;
@@ -641,6 +663,41 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         fastMode,
       });
       // Rebuild so the new priority / schedulable reorders (or parks) this account now.
+      if (!(await afterMutation())) return c.json(notApplied, 503);
+      return c.body(null, 204);
+    } catch (e) {
+      return c.json({ error: errMessage(e) }, 400);
+    }
+  });
+
+  // GET /oauth/strategy -> { selectionStrategy }
+  // Global strategy for selecting BETWEEN connected accounts inside each provider
+  // pool. Lanes/Policies still choose the model/provider chain.
+  app.get("/admin/api/oauth/strategy", async (c) => {
+    const s = seam();
+    if (!s) return c.json({ error: "oauth login not configured" }, 503);
+    try {
+      return c.json(await s.getSelectionStrategy());
+    } catch (e) {
+      return c.json({ error: errMessage(e) }, 400);
+    }
+  });
+
+  // PUT /oauth/strategy { selectionStrategy } -> 204
+  // Changing the strategy rebuilds every live OAuth pool so the next request uses it.
+  app.put("/admin/api/oauth/strategy", async (c) => {
+    const s = seam();
+    if (!s) return c.json({ error: "oauth login not configured" }, 503);
+    const body = (await c.req.json().catch(() => ({}))) as { selectionStrategy?: unknown };
+    const selectionStrategy = parseSelectionStrategy(body.selectionStrategy);
+    if (selectionStrategy === null) {
+      return c.json(
+        { error: "selectionStrategy must be balanced, manual_priority, low_risk, or use_expiring" },
+        400,
+      );
+    }
+    try {
+      await s.setSelectionStrategy({ selectionStrategy });
       if (!(await afterMutation())) return c.json(notApplied, 503);
       return c.body(null, 204);
     } catch (e) {

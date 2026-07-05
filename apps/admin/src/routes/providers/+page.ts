@@ -4,6 +4,7 @@ import {
   listOAuthStatus,
   type OAuthProviderStatus,
   type OAuthQuotaSnapshot,
+  type OAuthSelectionStrategy,
   type OAuthUsageRow,
 } from '$lib/api/oauth.js';
 import type { PageLoad } from './$types.js';
@@ -15,6 +16,7 @@ import type { PageLoad } from './$types.js';
 // endpoint must never block or break the page).
 export const load: PageLoad = async (): Promise<{
   configured: boolean;
+  selectionStrategy: OAuthSelectionStrategy;
   providers: OAuthProviderStatus[];
   usage: OAuthUsageRow[];
   quota: OAuthQuotaSnapshot[];
@@ -31,6 +33,7 @@ export const load: PageLoad = async (): Promise<{
   if (!statusRes.ok) {
     return {
       configured: false,
+      selectionStrategy: 'balanced',
       providers: [],
       usage,
       quota,
@@ -40,5 +43,11 @@ export const load: PageLoad = async (): Promise<{
           : 'Failed to load OAuth providers',
     };
   }
-  return { configured: statusRes.configured, providers: statusRes.providers, usage, quota };
+  return {
+    configured: statusRes.configured,
+    selectionStrategy: statusRes.selectionStrategy,
+    providers: statusRes.providers,
+    usage,
+    quota,
+  };
 };

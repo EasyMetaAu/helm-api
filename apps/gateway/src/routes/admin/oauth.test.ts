@@ -9,9 +9,10 @@ import { registerOAuthRoutes } from "./oauth.js";
 // mock seam covers the route logic (validation, error mapping, afterMutation).
 function fullSeam(over: Partial<OAuthAdminAccess> = {}): OAuthAdminAccess {
   return {
-    listStatus: vi.fn(async () => [
-      { id: "anthropic", name: "Anthropic", accounts: [{ account: "default" }] },
-    ]),
+    listStatus: vi.fn(async () => ({
+      selectionStrategy: "balanced",
+      providers: [{ id: "anthropic", name: "Anthropic", accounts: [{ account: "default" }] }],
+    })),
     startManualPaste: vi.fn(async () => ({ sessionId: "s1", authorizeUrl: "https://auth" })),
     completeManualPaste: vi.fn(async () => {}),
     startDeviceCode: vi.fn(async () => ({
@@ -32,6 +33,8 @@ function fullSeam(over: Partial<OAuthAdminAccess> = {}): OAuthAdminAccess {
       fastMode: false,
     })),
     setAccountSchedule: vi.fn(async () => {}),
+    getSelectionStrategy: vi.fn(async () => ({ selectionStrategy: "balanced" })),
+    setSelectionStrategy: vi.fn(async () => {}),
     ...over,
   } as unknown as OAuthAdminAccess;
 }
@@ -56,6 +59,8 @@ describe("admin OAuth routes — 503 when the seam is not configured", () => {
     ["PUT", "/admin/api/oauth/x/models"],
     ["GET", "/admin/api/oauth/x/proxy"],
     ["PUT", "/admin/api/oauth/x/proxy"],
+    ["GET", "/admin/api/oauth/strategy"],
+    ["PUT", "/admin/api/oauth/strategy"],
     ["GET", "/admin/api/oauth/x/account"],
     ["PUT", "/admin/api/oauth/x/account"],
     ["POST", "/admin/api/oauth/openai-codex/reset-credit"],
@@ -464,9 +469,10 @@ describe("admin OAuth routes — read endpoints", () => {
       delete: vi.fn(async () => {}),
     } as unknown as AdminApiDeps["oauthQuota"];
     const seam = fullSeam({
-      listStatus: vi.fn(async () => [
-        { id: "openai-codex", name: "Codex", accounts: [{ account: "default" }] },
-      ]) as never,
+      listStatus: vi.fn(async () => ({
+        selectionStrategy: "balanced",
+        providers: [{ id: "openai-codex", name: "Codex", accounts: [{ account: "default" }] }],
+      })) as never,
       fetchCodexQuota: vi.fn(async () => ({ windows: [window], resetCredits: 3 })) as never,
     });
     const res = await app({ oauth: seam, oauthQuota }).request("/admin/api/oauth/quota");
@@ -857,6 +863,28 @@ describe("admin OAuth routes — mutations + validation", () => {
       autoReset: true,
       fastMode: true,
     });
+  });
+
+  it("GET/PUT global strategy validates selectable account-pool strategies", async () => {
+    const seam = fullSeam();
+    const got = await app({ oauth: seam }).request("/admin/api/oauth/strategy");
+    expect(got.status).toBe(200);
+    expect(await got.json()).toEqual({ selectionStrategy: "balanced" });
+
+    const bad = await app({ oauth: fullSeam() }).request("/admin/api/oauth/strategy", {
+      method: "PUT",
+      headers: JSONH,
+      body: JSON.stringify({ selectionStrategy: "random" }),
+    });
+    expect(bad.status).toBe(400);
+
+    const ok = await app({ oauth: seam }).request("/admin/api/oauth/strategy", {
+      method: "PUT",
+      headers: JSONH,
+      body: JSON.stringify({ selectionStrategy: "use_expiring" }),
+    });
+    expect(ok.status).toBe(204);
+    expect(seam.setSelectionStrategy).toHaveBeenCalledWith({ selectionStrategy: "use_expiring" });
   });
 
   it("DELETE /oauth/:provider logs out the account (204) and rebuilds the pool", async () => {

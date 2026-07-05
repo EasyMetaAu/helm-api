@@ -5,6 +5,7 @@ import {
   getOAuthUsage,
   listOAuthStatus,
   logoutOAuth,
+  setSelectionStrategy,
   setAccountSchedule,
   startManualPaste,
 } from './oauth.js';
@@ -46,7 +47,11 @@ describe('admin oauth api client', () => {
     const fetchFn = vi.fn(async () => resp({ error: 'not_configured' }, { ok: false, status: 503 }));
     vi.stubGlobal('fetch', fetchFn);
 
-    await expect(listOAuthStatus()).resolves.toEqual({ configured: false, providers: [] });
+    await expect(listOAuthStatus()).resolves.toEqual({
+      configured: false,
+      selectionStrategy: 'balanced',
+      providers: [],
+    });
     expect(fetchFn).toHaveBeenCalledWith('/admin/api/oauth', {
       headers: { accept: 'application/json' },
     });
@@ -55,6 +60,7 @@ describe('admin oauth api client', () => {
   it('parses configured provider status without exposing secrets', async () => {
     const fetchFn = vi.fn(async () =>
       resp({
+        selectionStrategy: 'low_risk',
         providers: [
           {
             id: 'anthropic',
@@ -79,9 +85,23 @@ describe('admin oauth api client', () => {
 
     const status = await listOAuthStatus();
     expect(status.configured).toBe(true);
+    expect(status.selectionStrategy).toBe('low_risk');
     expect(status.providers[0]?.accounts[0]?.account).toBe('acct-a');
     expect(status.providers[0]?.accounts[0]?.fastMode).toBe(true);
     expect(JSON.stringify(status)).not.toMatch(/access_token|refresh_token|secret/i);
+  });
+
+  it('saves the global selection strategy', async () => {
+    const fetchFn = vi.fn(async () => resp(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchFn);
+
+    await setSelectionStrategy('use_expiring');
+
+    expect(fetchFn).toHaveBeenCalledWith('/admin/api/oauth/strategy', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ selectionStrategy: 'use_expiring' }),
+    });
   });
 
   it('fails open for usage and quota observability reads', async () => {

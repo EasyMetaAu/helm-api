@@ -1534,9 +1534,12 @@ describe("admin.api oauth usage", () => {
       schedulable: true,
     });
     const oauth = {
-      listStatus: async () => [
-        { id: "openai-codex", name: "C", flow: "manual_paste", accounts: [acct("mylukin")] },
-      ],
+      listStatus: async () => ({
+        selectionStrategy: "balanced",
+        providers: [
+          { id: "openai-codex", name: "C", flow: "manual_paste", accounts: [acct("mylukin")] },
+        ],
+      }),
     } as unknown as AdminApiDeps["oauth"];
     const app = buildApp(buildDeps({ oauthUsage, oauth }));
     const res = await app.request("/admin/api/oauth/usage");
@@ -1593,10 +1596,13 @@ describe("admin.api oauth quota", () => {
     } as unknown as AdminApiDeps["oauthQuota"];
     // Bound accounts: anthropic/mylukin + openai-codex/mylukin (NOT codex/default).
     const oauth = {
-      listStatus: async () => [
-        { id: "anthropic", name: "A", flow: "manual_paste", accounts: [acct("mylukin")] },
-        { id: "openai-codex", name: "C", flow: "manual_paste", accounts: [acct("mylukin")] },
-      ],
+      listStatus: async () => ({
+        selectionStrategy: "balanced",
+        providers: [
+          { id: "anthropic", name: "A", flow: "manual_paste", accounts: [acct("mylukin")] },
+          { id: "openai-codex", name: "C", flow: "manual_paste", accounts: [acct("mylukin")] },
+        ],
+      }),
       fetchAnthropicQuota: async () => [
         { key: "5h", usedPercent: 6, resetsAtMs: 5_000, windowMinutes: null },
       ],
@@ -1629,23 +1635,26 @@ describe("admin.api oauth quota", () => {
       delete: async () => {},
     } as unknown as AdminApiDeps["oauthQuota"];
     const oauth = {
-      listStatus: async () => [
-        {
-          id: "openai-codex",
-          name: "C",
-          flow: "manual_paste",
-          accounts: [
-            {
-              account: "mylukin",
-              expiresAt: null,
-              updatedAt: 0,
-              healthy: true,
-              priority: 50,
-              schedulable: true,
-            },
-          ],
-        },
-      ],
+      listStatus: async () => ({
+        selectionStrategy: "balanced",
+        providers: [
+          {
+            id: "openai-codex",
+            name: "C",
+            flow: "manual_paste",
+            accounts: [
+              {
+                account: "mylukin",
+                expiresAt: null,
+                updatedAt: 0,
+                healthy: true,
+                priority: 50,
+                schedulable: true,
+              },
+            ],
+          },
+        ],
+      }),
       // The PULL twin of the x-codex-* header PUSH: windows + reset-credit count.
       fetchCodexQuota: async () => ({
         windows: [

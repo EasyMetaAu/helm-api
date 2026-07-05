@@ -1,6 +1,12 @@
 import { type ConfigStore, createSqliteDb, SqliteConfigStore } from "@helm/core";
 import { describe, expect, it } from "vitest";
-import { getAccountSettings, loadAccountSettings, setAccountSettings } from "./account-settings.js";
+import {
+  getAccountSettings,
+  loadAccountSettings,
+  loadGlobalOAuthSettings,
+  setAccountSettings,
+  setGlobalOAuthSettings,
+} from "./account-settings.js";
 
 const KEY = Buffer.alloc(32, 7);
 
@@ -121,6 +127,26 @@ describe("account-settings", () => {
         fastMode: false,
       },
     );
+  });
+
+  it("round-trips the global account selection strategy independently from account settings", async () => {
+    const config = makeConfig();
+    await setAccountSettings(config, KEY, "anthropic", "work", { priority: 7 });
+    await setGlobalOAuthSettings(config, KEY, { selectionStrategy: "use_expiring" });
+
+    expect(getAccountSettings(await loadAccountSettings(config, KEY), "anthropic", "work")).toEqual(
+      {
+        priority: 7,
+      },
+    );
+    expect(await loadGlobalOAuthSettings(config, KEY)).toEqual({
+      selectionStrategy: "use_expiring",
+    });
+
+    await setGlobalOAuthSettings(config, KEY, { selectionStrategy: "low_risk" });
+    expect(await loadGlobalOAuthSettings(config, KEY)).toEqual({
+      selectionStrategy: "low_risk",
+    });
   });
 
   it("serializes concurrent load-merge-save updates so unrelated accounts are preserved", async () => {

@@ -6,6 +6,7 @@
 import { clientTzOffsetMinutes } from '$lib/requests-filters.js';
 
 export type OAuthFlow = 'manual_paste' | 'device_code';
+export type OAuthSelectionStrategy = 'balanced' | 'manual_priority' | 'low_risk' | 'use_expiring';
 
 export interface OAuthAccount {
   account: string;
@@ -61,12 +62,20 @@ async function asJson<T>(res: Response): Promise<T> {
 // OAuth login is not configured (HELM_OAUTH_ENC_KEY unset).
 export async function listOAuthStatus(): Promise<{
   configured: boolean;
+  selectionStrategy: OAuthSelectionStrategy;
   providers: OAuthProviderStatus[];
 }> {
   const res = await fetch(BASE, { headers: { accept: 'application/json' } });
-  if (res.status === 503) return { configured: false, providers: [] };
-  const body = await asJson<{ providers: OAuthProviderStatus[] }>(res);
-  return { configured: true, providers: body.providers };
+  if (res.status === 503) return { configured: false, selectionStrategy: 'balanced', providers: [] };
+  const body = await asJson<{
+    selectionStrategy?: OAuthSelectionStrategy;
+    providers: OAuthProviderStatus[];
+  }>(res);
+  return {
+    configured: true,
+    selectionStrategy: body.selectionStrategy ?? 'balanced',
+    providers: body.providers,
+  };
 }
 
 // ── per-account usage + quota (providers page enrichment) ────────────────────
@@ -453,6 +462,19 @@ export async function setAccountSchedule(
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ account, ...patch }),
+  });
+  if (!res.ok && res.status !== 204) await asJson(res);
+}
+
+// PUT /oauth/strategy { selectionStrategy } -> 204. Persists the global
+// account-pool strategy and hot-rebuilds every live OAuth pool.
+export async function setSelectionStrategy(
+  selectionStrategy: OAuthSelectionStrategy,
+): Promise<void> {
+  const res = await fetch(`${BASE}/strategy`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ selectionStrategy }),
   });
   if (!res.ok && res.status !== 204) await asJson(res);
 }

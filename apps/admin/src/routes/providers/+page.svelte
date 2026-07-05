@@ -6,10 +6,12 @@
     logoutOAuth,
     resetUsageLimit,
     setAccountSchedule,
+    setSelectionStrategy,
     type OAuthAccount,
     type OAuthProviderStatus,
     type OAuthQuotaSnapshot,
     type OAuthQuotaWindow,
+    type OAuthSelectionStrategy,
     type OAuthUsageRow,
   } from '$lib/api/oauth.js';
   import ConnectProviderDialog from '$lib/components/ConnectProviderDialog.svelte';
@@ -31,6 +33,7 @@
   }: {
     data: {
       configured: boolean;
+      selectionStrategy: OAuthSelectionStrategy;
       providers: OAuthProviderStatus[];
       usage: OAuthUsageRow[];
       quota: OAuthQuotaSnapshot[];
@@ -55,6 +58,9 @@
   // Accounts whose inline schedule edit is in flight (keyed provider/account) — used
   // to disable the control while saving without blocking the rest of the table.
   let savingSchedule = $state<Record<string, boolean>>({});
+  // One global account-pool strategy applies across every subscription provider pool.
+  // Account priority/schedulable remain per-account controls below.
+  let savingStrategy = $state<boolean>(false);
   // Codex accounts whose "Reset usage" click is in flight (keyed provider/account) —
   // clears Helm's local auto-park cooldown (#291). Claude's 5h/7d windows are upstream
   // subscription limits and are not operator-resettable.
@@ -81,6 +87,32 @@
   const keyOf = (providerId: string, account: string): string => `${providerId}/${account}`;
   const ACTIVE_LIMIT_RECOVERY_THRESHOLD = 95;
   const CODEX_RESET_MIN_WEEKLY_USED_PERCENT = 90;
+  const strategyOptions: Array<{
+    value: OAuthSelectionStrategy;
+    label: string;
+    description: string;
+  }> = [
+    {
+      value: 'balanced',
+      label: 'Balanced',
+      description: 'Spread new sessions across accounts while keeping sessions sticky.',
+    },
+    {
+      value: 'manual_priority',
+      label: 'Manual priority',
+      description: 'Follow account priority first; rotate only within the same priority.',
+    },
+    {
+      value: 'low_risk',
+      label: 'Low risk',
+      description: 'Prefer accounts with lower quota pressure to reduce 429 risk.',
+    },
+    {
+      value: 'use_expiring',
+      label: 'Avoid waste',
+      description: 'Prefer accounts with quota left that will reset soon.',
+    },
+  ];
 
   // One table row per connected account, flattened across providers, joined to its
   // usage + quota snapshot (both fail-open: a missing entry renders "—").
@@ -361,6 +393,19 @@
     }
   }
 
+  async function saveSelectionStrategy(selectionStrategy: OAuthSelectionStrategy): Promise<void> {
+    savingStrategy = true;
+    error = null;
+    try {
+      await setSelectionStrategy(selectionStrategy);
+      await invalidateAll();
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t('Failed to update strategy');
+    } finally {
+      savingStrategy = false;
+    }
+  }
+
   // "Reset usage": clear the auto-park cooldown so the account rejoins the pool on the
   // next request. Cooldown-only — the operator's schedulable park is untouched. On
   // success invalidateAll re-reads the (now-cleared) snapshot so the pill disappears.
@@ -506,6 +551,32 @@
       </p>
     </div>
   {:else}
+    {@const selectedStrategy =
+      strategyOptions.find((option) => option.value === data.selectionStrategy) ?? strategyOptions[0]}
+    <div class="card flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div class="min-w-0">
+        <h2 class="field-label">
+          {$t('Account usage strategy')}
+        </h2>
+        <p class="field-help mt-0.5 max-w-2xl leading-snug">
+          {$t('Applies to all connected subscription accounts. Per-account controls stay limited to priority and scheduling.')}
+        </p>
+        <p class="field-help mt-0.5 max-w-2xl leading-snug">
+          {$t(selectedStrategy.description)}
+        </p>
+      </div>
+      <select
+        class="select shrink-0 disabled:opacity-50 sm:w-56"
+        aria-label={$t('Account usage strategy')}
+        value={data.selectionStrategy}
+        disabled={savingStrategy}
+        onchange={(e) => saveSelectionStrategy(e.currentTarget.value as OAuthSelectionStrategy)}
+      >
+        {#each strategyOptions as option (option.value)}
+          <option value={option.value}>{$t(option.label)}</option>
+        {/each}
+      </select>
+    </div>
     <div class="cards-table-frame">
       <table class="cards-table">
         <thead class="table-head">

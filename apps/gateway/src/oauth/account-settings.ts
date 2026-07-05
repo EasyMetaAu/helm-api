@@ -1,4 +1,9 @@
-import { type ConfigStore, decryptSecret, encryptSecret } from "@helm/core";
+import {
+  type ConfigStore,
+  decryptSecret,
+  encryptSecret,
+  type OAuthSelectionStrategy,
+} from "@helm/core";
 
 // Per-account OAuth subscription SETTINGS (issue #38 follow-up). These are
 // OPERATOR choices that live ALONGSIDE the stored credential but must NOT ride in
@@ -14,6 +19,13 @@ import { type ConfigStore, decryptSecret, encryptSecret } from "@helm/core";
 // a corrupt blob must never block routing or the admin page).
 
 const SETTINGS_KEY = "oauth.account_settings";
+const GLOBAL_SETTINGS_KEY = "oauth.global_settings";
+const SELECTION_STRATEGIES = new Set<OAuthSelectionStrategy>([
+  "balanced",
+  "manual_priority",
+  "low_risk",
+  "use_expiring",
+]);
 // NUL composite separator: it cannot appear in a provider id or account label,
 // so `${providerId}\u0000${account}` is an unambiguous, collision-free map key
 // (a printable separator could collide with a label that contains it).
@@ -50,6 +62,10 @@ export interface AccountSettings {
 // The whole map: internal composite key -> settings. Exported for the callers that
 // thread it (server synthesis, admin seam).
 export type AccountSettingsMap = Record<string, AccountSettings>;
+
+export interface GlobalOAuthSettings {
+  selectionStrategy?: OAuthSelectionStrategy;
+}
 
 function composite(providerId: string, account: string): string {
   return `${providerId}${SEP}${account}`;
@@ -95,6 +111,39 @@ export async function saveAccountSettings(
   await config.set(SETTINGS_KEY, encryptSecret(JSON.stringify(map), encKey));
 }
 
+function normalizeSelectionStrategy(
+  selectionStrategy: unknown,
+): OAuthSelectionStrategy | undefined {
+  return SELECTION_STRATEGIES.has(selectionStrategy as OAuthSelectionStrategy)
+    ? (selectionStrategy as OAuthSelectionStrategy)
+    : undefined;
+}
+
+export async function loadGlobalOAuthSettings(
+  config: ConfigStore,
+  encKey: Buffer,
+): Promise<GlobalOAuthSettings> {
+  try {
+    const blob = await config.get(GLOBAL_SETTINGS_KEY);
+    if (!blob) return {};
+    const json = decryptSecret(blob, encKey);
+    const parsed: unknown = JSON.parse(json);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const raw = parsed as GlobalOAuthSettings;
+    return { selectionStrategy: normalizeSelectionStrategy(raw.selectionStrategy) };
+  } catch {
+    return {};
+  }
+}
+
+export async function saveGlobalOAuthSettings(
+  config: ConfigStore,
+  encKey: Buffer,
+  settings: GlobalOAuthSettings,
+): Promise<void> {
+  await config.set(GLOBAL_SETTINGS_KEY, encryptSecret(JSON.stringify(settings), encKey));
+}
+
 // Read one account's settings out of an already-loaded map (never throws).
 export function getAccountSettings(
   map: AccountSettingsMap,
@@ -120,6 +169,21 @@ export async function setAccountSettings(
     const key = composite(providerId, account);
     map[key] = { ...map[key], ...patch };
     await saveAccountSettings(config, encKey, map);
+  });
+}
+
+export async function setGlobalOAuthSettings(
+  config: ConfigStore,
+  encKey: Buffer,
+  patch: GlobalOAuthSettings,
+): Promise<void> {
+  await serializeSettingsMutation(config, async () => {
+    const current = await loadGlobalOAuthSettings(config, encKey);
+    await saveGlobalOAuthSettings(config, encKey, {
+      ...current,
+      ...patch,
+      selectionStrategy: normalizeSelectionStrategy(patch.selectionStrategy),
+    });
   });
 }
 
