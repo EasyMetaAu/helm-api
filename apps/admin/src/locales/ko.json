@@ -866,6 +866,8 @@
   "Waiting longer than this returns 429.": "이보다 오래 기다리면 429를 반환합니다.",
   "Waiting longer than this returns 503.": "이보다 오래 기다리면 503을 반환합니다.",
   "Weekly": "주간",
+  "Weekly quota snapshot unavailable": "주간 할당량 스냅샷을 사용할 수 없음",
+  "Weekly usage must reach 90% before reset credits can be used": "재설정 크레딧을 사용하려면 주간 사용량이 90%에 도달해야 합니다",
   "Weight": "가중치",
   "What this single request cost, split across routing, optional eval, and completion.": "라우팅, 선택적 평가, 완료로 나누어 이 단일 요청에 든 비용입니다.",
   "When a provider has several accounts, Helm pools them: a lower priority is served first, with round-robin within an equal priority. Parking an account keeps it connected but out of routing.": "제공자에 여러 계정이 있는 경우 Helm은 이를 풀링합니다. 낮은 우선순위가 먼저 처리되며, 동일한 우선순위 내에서는 라운드 로빈 방식으로 처리됩니다. 계정을 파킹하면 연결은 유지되지만 라우팅에서는 제외됩니다.",

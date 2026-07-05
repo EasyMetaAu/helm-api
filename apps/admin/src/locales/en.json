@@ -866,6 +866,8 @@
   "Waiting longer than this returns 429.": "Waiting longer than this returns 429.",
   "Waiting longer than this returns 503.": "Waiting longer than this returns 503.",
   "Weekly": "Weekly",
+  "Weekly quota snapshot unavailable": "Weekly quota snapshot unavailable",
+  "Weekly usage must reach 90% before reset credits can be used": "Weekly usage must reach 90% before reset credits can be used",
   "Weight": "Weight",
   "What this single request cost, split across routing, optional eval, and completion.": "What this single request cost, split across routing, optional eval, and completion.",
   "When a provider has several accounts, Helm pools them: a lower priority is served first, with round-robin within an equal priority. Parking an account keeps it connected but out of routing.": "When a provider has several accounts, Helm pools them: a lower priority is served first, with round-robin within an equal priority. Parking an account keeps it connected but out of routing.",
