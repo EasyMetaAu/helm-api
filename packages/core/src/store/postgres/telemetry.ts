@@ -136,10 +136,12 @@ export class PgTelemetryStore implements TelemetryStore {
     // instead of a jsonb extract — an index seek, no per-row jsonb scan.
     if (query.decidedBy !== undefined) conds.push(sql`decided_by = ${query.decidedBy}`);
     if (query.lane !== undefined) conds.push(sql`lane = ${query.lane}`);
+    // Broad operator search: requested model, served alias, or selected
+    // lane/channel. This backs the admin "Requested model / lane" box.
     if (query.model !== undefined) {
       const pat = likeContains(query.model);
       conds.push(
-        sql`(${telemetry.decisionJson} ->> 'requested_model' ILIKE ${pat} ESCAPE '\\' OR ${telemetry.decisionJson} -> 'final' ->> 'model_alias' ILIKE ${pat} ESCAPE '\\')`,
+        sql`(${telemetry.decisionJson} ->> 'requested_model' ILIKE ${pat} ESCAPE '\\' OR ${telemetry.decisionJson} -> 'final' ->> 'model_alias' ILIKE ${pat} ESCAPE '\\' OR lane ILIKE ${pat} ESCAPE '\\')`,
       );
     }
     return and(...conds);

@@ -1,11 +1,13 @@
 import { fireEvent, render, screen, within } from '@testing-library/svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { goto } from '$app/navigation';
+import type { ApiKeyView } from '$lib/api/keys.js';
 import type { RequestDetail, RequestListItem } from '$lib/api/requests.js';
 import { DEFAULT_FILTERS, type RequestsFilters } from '$lib/requests-filters.js';
 import DetailPage from './[traceId]/+page.svelte';
 import { load as loadDetail, safeBackTo } from './[traceId]/+page.js';
 import ListPage from './+page.svelte';
+import { load as loadList } from './+page.js';
 
 // The Debug UI is a READ-ONLY consumer of /admin/api/* — it renders the trail the
 // backend recorded and re-computes nothing (docs/07, Principle 1). The list/detail
@@ -14,9 +16,15 @@ import ListPage from './+page.svelte';
 
 const getRequest = vi.fn();
 const getRequestPayload = vi.fn();
+const listRequests = vi.fn();
+const listKeys = vi.fn();
 vi.mock('$lib/api/requests.js', () => ({
+  listRequests: (...args: unknown[]) => listRequests(...args),
   getRequest: (...args: unknown[]) => getRequest(...args),
   getRequestPayload: (...args: unknown[]) => getRequestPayload(...args),
+}));
+vi.mock('$lib/api/keys.js', () => ({
+  listKeys: (...args: unknown[]) => listKeys(...args),
 }));
 
 function item(traceId: string, overrides: Partial<RequestListItem> = {}): RequestListItem {
@@ -54,7 +62,13 @@ function item(traceId: string, overrides: Partial<RequestListItem> = {}): Reques
 // single unfiltered page so the common case stays terse.
 function listData(
   items: RequestListItem[],
-  over: { total?: number; page?: number; pageSize?: number; filters?: RequestsFilters } = {},
+  over: {
+    total?: number;
+    page?: number;
+    pageSize?: number;
+    filters?: RequestsFilters;
+    keys?: ApiKeyView[];
+  } = {},
 ) {
   return {
     items,
@@ -62,6 +76,33 @@ function listData(
     page: over.page ?? 1,
     pageSize: over.pageSize ?? 50,
     filters: over.filters ?? DEFAULT_FILTERS,
+    keys: over.keys ?? [],
+  };
+}
+
+function apiKey(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView {
+  return {
+    key_id: keyId,
+    prefix: `helm_live_${keyId}`,
+    role: 'user',
+    name: null,
+    allowed_lanes: null,
+    allow_custom_model: false,
+    allow_fast_mode: false,
+    disabled: false,
+    rate_limit_rpm: null,
+    rate_limit_tpm: null,
+    budget_requests: null,
+    budget_tokens: null,
+    budget_spend_usd: null,
+    budget_window_seconds: null,
+    over_budget_behavior: 'degrade',
+    degrade_lane: null,
+    concurrency_limit: null,
+    memory_mode: 'off',
+    memory_project_id: null,
+    memory_thread_source: 'header',
+    ...overrides,
   };
 }
 
@@ -249,17 +290,55 @@ describe('requests list page', () => {
     expect(goto).toHaveBeenCalledWith('?key_id=k_42', expect.anything());
   });
 
-  it('shows a removable chip for the active key filter and clears it', async () => {
+  it('lists API keys in the primary filter and filters by the selected key_id', async () => {
+    vi.mocked(goto).mockClear();
+    render(ListPage, {
+      data: listData([item('tr_k')], {
+        keys: [
+          apiKey('k_42', { name: 'Prod', prefix: 'helm_live_prod' }),
+          apiKey('k_old', { prefix: 'helm_live_old', disabled: true }),
+        ],
+      }),
+    });
+    const select = screen.getByTestId('filter-key');
+    expect(within(select).getByRole('option', { name: 'Prod / helm_live_prod' })).toBeInTheDocument();
+    expect(within(select).getByRole('option', { name: /helm_live_old.*revoked/i })).toBeInTheDocument();
+
+    await fireEvent.change(select, { target: { value: 'k_42' } });
+    expect(goto).toHaveBeenCalledWith('?key_id=k_42', expect.anything());
+  });
+
+  it('preselects the active API key filter and clears it from the dropdown', async () => {
     vi.mocked(goto).mockClear();
     render(ListPage, {
       data: listData([item('tr_k', { key_name: 'Prod', key_id: 'k_42' })], {
         filters: { ...DEFAULT_FILTERS, keyId: 'k_42' },
+        keys: [apiKey('k_42', { name: 'Prod', prefix: 'helm_live_prod' })],
       }),
     });
-    // The chip labels itself from the matching row (name preferred over prefix).
-    expect(screen.getByTestId('key-filter-chip')).toHaveTextContent('Prod');
-    // Clearing drops key_id → back to the clean default URL.
-    await fireEvent.click(screen.getByTestId('key-filter-clear'));
+    const select = screen.getByTestId('filter-key') as HTMLSelectElement;
+    expect(select.value).toBe('k_42');
+    await fireEvent.change(select, { target: { value: '' } });
+    expect(goto).toHaveBeenCalledWith('?', expect.anything());
+  });
+
+  it('submits a partial requested-model / lane search via the existing model query param', async () => {
+    vi.mocked(goto).mockClear();
+    render(ListPage, { data: listData([item('tr_a')]) });
+    await fireEvent.input(screen.getByTestId('filter-model'), { target: { value: 'gpt-5' } });
+    await fireEvent.submit(screen.getByTestId('filter-model').closest('form') as HTMLFormElement);
+    expect(goto).toHaveBeenCalledWith('?model=gpt-5', expect.anything());
+  });
+
+  it('shows and clears legacy exact lane filters without hiding the active scope', async () => {
+    vi.mocked(goto).mockClear();
+    render(ListPage, {
+      data: listData([item('tr_lane')], {
+        filters: { ...DEFAULT_FILTERS, lane: 'premium' },
+      }),
+    });
+    expect(screen.getByTestId('lane-filter-chip')).toHaveTextContent('premium');
+    await fireEvent.click(screen.getByTestId('lane-filter-clear'));
     expect(goto).toHaveBeenCalledWith('?', expect.anything());
   });
 
@@ -595,6 +674,41 @@ describe('requests detail page', () => {
       },
     });
     expect(screen.getByTestId('detail-error')).toBeInTheDocument();
+  });
+});
+
+describe('requests list loader', () => {
+  async function runListLoad(
+    search = '',
+  ): Promise<Exclude<Awaited<ReturnType<typeof loadList>>, void>> {
+    const event = {
+      url: new URL(`http://localhost/requests${search}`),
+    } as unknown as Parameters<typeof loadList>[0];
+    return (await loadList(event)) as Exclude<Awaited<ReturnType<typeof loadList>>, void>;
+  }
+
+  beforeEach(() => {
+    listRequests.mockReset();
+    listKeys.mockReset();
+    listRequests.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 50 });
+    listKeys.mockResolvedValue([apiKey('k_42', { name: 'Prod', prefix: 'helm_live_prod' })]);
+  });
+
+  it('loads requests and redacted API key choices for the filter dropdown', async () => {
+    const data = await runListLoad('?key_id=k_42&model=gpt&page=2');
+    expect(listRequests).toHaveBeenCalledWith(
+      expect.objectContaining({ keyId: 'k_42', model: 'gpt', page: 2 }),
+    );
+    expect(listKeys).toHaveBeenCalled();
+    expect((data.keys as ApiKeyView[]).map((key) => key.key_id)).toEqual(['k_42']);
+    expect(data.filters.keyId).toBe('k_42');
+  });
+
+  it('keeps the request list usable when the key-choice fetch fails', async () => {
+    listKeys.mockRejectedValue(new Error('keys timeout'));
+    const data = await runListLoad('?model=claude');
+    expect(data.keys).toEqual([]);
+    expect(data.filters.model).toBe('claude');
   });
 });
 

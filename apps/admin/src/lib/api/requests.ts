@@ -637,6 +637,8 @@ export interface RequestsQueryParams {
   status?: RequestListItem['status'];
   decidedBy?: RequestListItem['decided_by'];
   lane?: string;
+  // Contains search over requested model, served model alias and selected lane /
+  // public channel. Kept as `model` for URL/API compatibility.
   model?: string;
   // Exact api_key_id scope (the key detail page's request list). Serialized as
   // `key_id` to match the backend schema.

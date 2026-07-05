@@ -3,6 +3,7 @@
   import { goto, invalidateAll } from '$app/navigation';
   import { base } from '$app/paths';
   import type { RequestListItem } from '$lib/api/requests.js';
+  import type { ApiKeyView } from '$lib/api/keys.js';
   import RangeFilter from '$lib/components/RangeFilter.svelte';
   import RefreshControl from '$lib/components/RefreshControl.svelte';
   import RequestsTable from '$lib/components/RequestsTable.svelte';
@@ -32,6 +33,7 @@
       page: number;
       pageSize: number;
       filters: RequestsFilters;
+      keys: ApiKeyView[];
     };
   } = $props();
 
@@ -45,6 +47,7 @@
   );
   let lane = $state(untrack(() => data.filters.lane ?? ''));
   let model = $state(untrack(() => data.filters.model ?? ''));
+  let keyId = $state(untrack(() => data.filters.keyId ?? ''));
   let pageSize = $state(untrack(() => data.filters.pageSize));
   // Custom calendar-day window (From/To). The active window lives in the URL
   // (?start=&end=) and OVERRIDES the preset; these mirror it, re-synced below.
@@ -60,10 +63,18 @@
     decidedBy = f.decidedBy ?? '';
     lane = f.lane ?? '';
     model = f.model ?? '';
+    keyId = f.keyId ?? '';
     pageSize = f.pageSize;
     customStart = f.startDate ?? '';
     customEnd = f.endDate ?? '';
   });
+
+  const keyOptions = $derived(
+    [...data.keys].sort((a, b) => {
+      if (a.disabled !== b.disabled) return a.disabled ? 1 : -1;
+      return keyOptionLabel(a).localeCompare(keyOptionLabel(b));
+    }),
+  );
 
   const customActive = $derived(Boolean(data.filters.startDate && data.filters.endDate));
 
@@ -83,10 +94,7 @@
       decidedBy: decidedBy || undefined,
       lane: lane.trim() || undefined,
       model: model.trim() || undefined,
-      // The key scope has no input control — it persists across other filter
-      // changes and is only changed by clicking a row's key or clearing the chip
-      // (`next` overrides). Reset passes `keyId: undefined` to drop it.
-      keyId: data.filters.keyId,
+      keyId: keyId || undefined,
       pageSize,
       page: 1,
       ...next,
@@ -126,7 +134,7 @@
       decidedBy: decidedBy || undefined,
       lane: lane.trim() || undefined,
       model: model.trim() || undefined,
-      keyId: data.filters.keyId,
+      keyId: keyId || undefined,
       pageSize,
       page: n,
     });
@@ -139,19 +147,16 @@
     decidedBy = '';
     lane = '';
     model = '';
+    keyId = '';
     customStart = '';
     customEnd = '';
     go({ keyId: undefined });
   }
 
-  // Label for the active key-filter chip: the recognizable key name/prefix from
-  // the first matching row, falling back to a truncated id when the filtered
-  // window has no rows to read it from.
-  const keyFilterLabel = $derived(
-    data.items[0]?.key_name ||
-      data.items[0]?.key_prefix ||
-      (data.filters.keyId ? `${data.filters.keyId.slice(0, 12)}…` : ''),
-  );
+  function keyOptionLabel(key: ApiKeyView): string {
+    const baseLabel = key.name ? `${key.name} / ${key.prefix}` : key.prefix;
+    return key.disabled ? `${baseLabel} (${$t('revoked')})` : baseLabel;
+  }
 
   // Detail route for a row. The whole row is clickable (below); we also keep a
   // real <a> on the request-id cell so middle-click / open-in-new-tab / keyboard
@@ -223,18 +228,51 @@
     </div>
   </div>
 
-  <!-- Filter bar. Selects apply immediately; the lane/model text inputs apply on
-       Enter (form submit). Changing any filter resets to page 1. -->
+  <!-- Filter bar. The high-frequency pivots come first: API key, then requested
+       model / route text. Selects apply immediately; text search applies on Enter
+       or Apply. Changing any filter resets to page 1. -->
   <form
-    class="card flex flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-end"
+    class="card grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(16rem,1.25fr)_minmax(18rem,1.35fr)_minmax(8rem,.65fr)_minmax(10rem,.75fr)_auto] xl:items-end"
     onsubmit={(e) => {
       e.preventDefault();
       go();
     }}
   >
     <label class="flex flex-col gap-1 text-xs font-medium text-ink-muted">
+      {$t('API Key')}
+      <select
+        data-testid="filter-key"
+        class="select"
+        bind:value={keyId}
+        onchange={() => go()}
+      >
+        <option value="">{$t('All')}</option>
+        {#each keyOptions as key (key.key_id)}
+          <option value={key.key_id}>{keyOptionLabel(key)}</option>
+        {/each}
+      </select>
+    </label>
+
+    <label class="flex flex-col gap-1 text-xs font-medium text-ink-muted">
+      {$t('Requested model / lane')}
+      <input
+        data-testid="filter-model"
+        class="input"
+        type="search"
+        autocomplete="off"
+        bind:value={model}
+        placeholder={$t('Any part, e.g. gpt-5 or premium')}
+      />
+    </label>
+
+    <label class="flex flex-col gap-1 text-xs font-medium text-ink-muted">
       {$t('Status')}
-      <select data-testid="filter-status" class="select" bind:value={status} onchange={() => go()}>
+      <select
+        data-testid="filter-status"
+        class="select"
+        bind:value={status}
+        onchange={() => go()}
+      >
         <option value="">{$t('All')}</option>
         <option value="ok">{$t('ok')}</option>
         <option value="error">{$t('error')}</option>
@@ -257,29 +295,7 @@
       </select>
     </label>
 
-    <label class="flex flex-col gap-1 text-xs font-medium text-ink-muted">
-      {$t('Lane')}
-      <input
-        data-testid="filter-lane"
-        class="input"
-        type="text"
-        bind:value={lane}
-        placeholder={$t('e.g. premium')}
-      />
-    </label>
-
-    <label class="flex flex-col gap-1 text-xs font-medium text-ink-muted">
-      {$t('Model')}
-      <input
-        data-testid="filter-model"
-        class="input"
-        type="text"
-        bind:value={model}
-        placeholder={$t('Search model')}
-      />
-    </label>
-
-    <div class="flex items-center gap-2">
+    <div class="flex items-center gap-2 sm:col-span-2 xl:col-span-1">
       <button type="submit" class="btn-secondary">{$t('Apply')}</button>
       <button type="button" data-testid="filter-reset" class="btn-secondary" onclick={reset}
         >{$t('Reset')}</button
@@ -287,21 +303,22 @@
     </div>
   </form>
 
-  <!-- Active API-key scope (set by clicking a row's key, or arriving from a key's
-       "view more" link). Shown as a removable chip since it has no input control. -->
-  {#if data.filters.keyId}
-    <div data-testid="key-filter-chip" class="flex items-center gap-2 text-sm">
-      <span class="text-ink-muted">{$t('Filtered by key')}:</span>
+  <!-- Existing deep links may still carry an exact lane filter. The primary model
+       search now also matches lane/channel text, but this chip makes legacy lane
+       scopes visible and clearable instead of hidden. -->
+  {#if data.filters.lane}
+    <div data-testid="lane-filter-chip" class="flex items-center gap-2 text-sm">
+      <span class="text-ink-muted">{$t('Lane')}:</span>
       <span
         class="inline-flex items-center gap-1.5 rounded-full border border-slate-300 bg-slate-50 px-2.5 py-0.5 font-medium text-ink-strong"
       >
-        {keyFilterLabel}
+        {data.filters.lane}
         <button
           type="button"
-          data-testid="key-filter-clear"
+          data-testid="lane-filter-clear"
           class="text-ink-muted hover:text-ink-strong"
           aria-label={$t('Clear')}
-          onclick={() => go({ keyId: undefined })}>&times;</button
+          onclick={() => go({ lane: undefined })}>&times;</button
         >
       </span>
     </div>

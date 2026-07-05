@@ -123,10 +123,12 @@ export class SqliteTelemetryStore implements TelemetryStore {
     // of json_extract — an index seek, no per-row JSON parse.
     if (query.decidedBy !== undefined) conds.push(sql`decided_by = ${query.decidedBy}`);
     if (query.lane !== undefined) conds.push(sql`lane = ${query.lane}`);
+    // Broad operator search: requested model, served alias, or selected
+    // lane/channel. This backs the admin "Requested model / lane" box.
     if (query.model !== undefined) {
       const pat = likeContains(query.model);
       conds.push(
-        sql`(json_extract(${telemetry.decisionJson}, '$.requested_model') LIKE ${pat} ESCAPE '\\' OR json_extract(${telemetry.decisionJson}, '$.final.model_alias') LIKE ${pat} ESCAPE '\\')`,
+        sql`(json_extract(${telemetry.decisionJson}, '$.requested_model') LIKE ${pat} ESCAPE '\\' OR json_extract(${telemetry.decisionJson}, '$.final.model_alias') LIKE ${pat} ESCAPE '\\' OR lane LIKE ${pat} ESCAPE '\\')`,
       );
     }
     return and(...conds);

@@ -239,14 +239,23 @@ describe("SqliteTelemetryStore", () => {
     expect(page.rows.map((r) => r.record.request_id)).toEqual(["a"]);
   });
 
-  it("filters by model substring across requested OR served, case-insensitive", async () => {
+  it("filters by model substring across requested, served or lane, case-insensitive", async () => {
     const store = freshStore();
     await seed(store, "req", 1000, { requestedModel: "gpt-4o-mini", servedModel: "claude-x" });
     await seed(store, "srv", 2000, { requestedModel: "auto", servedModel: "GPT-4o" });
-    await seed(store, "none", 3000, { requestedModel: "auto", servedModel: "claude-x" });
+    await seed(store, "lane", 3000, {
+      lane: "premium",
+      requestedModel: "auto",
+      servedModel: "claude-x",
+    });
     const page = await store.queryPage({ limit: 50, offset: 0, model: "gpt-4o" });
     expect(page.rows.map((r) => r.record.request_id).sort()).toEqual(["req", "srv"]);
     expect(page.total).toBe(2);
+    expect(
+      (await store.queryPage({ limit: 50, offset: 0, model: "prem" })).rows.map(
+        (r) => r.record.request_id,
+      ),
+    ).toEqual(["lane"]);
   });
 
   it("filters by half-open date window [startMs, endMs)", async () => {
