@@ -6,6 +6,7 @@
   import { attemptCodeLabel } from '$lib/format/attempt-codes.js';
   import { formatTimestamp, formatTps } from '$lib/format.js';
   import { t } from '$lib/i18n';
+  import Conversation from '$lib/components/Conversation.svelte';
   import CostBreakdown from '$lib/components/CostBreakdown.svelte';
   import DecisionChain from '$lib/components/DecisionChain.svelte';
   import TokenUsage from '$lib/components/TokenUsage.svelte';
@@ -39,6 +40,11 @@
 
   let copied = $state(false);
   let showRetry = $state(false);
+
+  // The Request panel has two lenses over the SAME captured body: a chat transcript
+  // (default — read it as a user⇄agent dialog) and the raw JSON tree (source of
+  // truth). Additive: the raw view and everything below it are unchanged.
+  let reqView = $state<'chat' | 'raw'>('chat');
 
   async function copyTrace(): Promise<void> {
     try {
@@ -283,7 +289,31 @@
             {$t('Full request body recorded for this call.')}
           {/if}
         </p>
-        <JsonViewer value={data.payload.request} testid="request-body" />
+        <!-- Two lenses over the same captured body: Chat (a readable user⇄agent
+             transcript, default) and Raw (the JSON tree — source of truth). -->
+        <div class="mb-3 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            data-testid="request-view-chat"
+            class={`rounded border px-3 py-1 text-sm ${reqView === 'chat' ? 'border-action bg-action text-white' : 'border-border bg-surface text-ink-muted hover:bg-canvas'}`}
+            onclick={() => (reqView = 'chat')}>{$t('Conversation')}</button
+          >
+          <button
+            type="button"
+            data-testid="request-view-raw"
+            class={`rounded border px-3 py-1 text-sm ${reqView === 'raw' ? 'border-action bg-action text-white' : 'border-border bg-surface text-ink-muted hover:bg-canvas'}`}
+            onclick={() => (reqView = 'raw')}>{$t('Raw')}</button
+          >
+        </div>
+        {#if reqView === 'chat'}
+          <Conversation
+            request={data.payload.request}
+            response={data.payload.response}
+            testid="conversation"
+          />
+        {:else}
+          <JsonViewer value={data.payload.request} testid="request-body" />
+        {/if}
       {:else}
         <p class="field-help mb-2">
           {$t(
