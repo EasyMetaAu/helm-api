@@ -515,7 +515,7 @@ describe('requests detail page', () => {
     expect(within(tp).getByTestId('generation-ms')).toHaveTextContent('—');
   });
 
-  it('renders the full captured request and response bodies when capture is on', () => {
+  it('renders the full captured request and response bodies when capture is on', async () => {
     render(DetailPage, {
       data: {
         detail: detail(),
@@ -523,6 +523,9 @@ describe('requests detail page', () => {
         traceId: 'tr_1',
       },
     });
+    // The Request panel now defaults to the Conversation lens; the raw JSON tree
+    // lives behind the "Raw" tab. Switch to it to assert the verbatim body.
+    await fireEvent.click(screen.getByTestId('request-view-raw'));
     expect(screen.getByTestId('request-body')).toHaveTextContent(/"model": "auto"/);
     expect(screen.getByTestId('response-body')).toHaveTextContent(/"ok": true/);
   });
