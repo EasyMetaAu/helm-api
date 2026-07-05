@@ -741,6 +741,18 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // Codex reset-credit count for quota-aware account selection — pg mirror of
+    // sqlite v36. Nullable and observability-only; Codex usage PULLs refresh it.
+    version: 35,
+    run: async (db) => {
+      if (await pgTableHasColumns(db, "oauth_quota", ["provider_id"])) {
+        await db.execute(
+          sql.raw("ALTER TABLE oauth_quota ADD COLUMN IF NOT EXISTS reset_credits INTEGER"),
+        );
+      }
+    },
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {
@@ -751,7 +763,7 @@ function resultRows<T>(result: unknown): T[] {
 
 async function pgTableHasColumns(
   db: RawExecutor,
-  table: "memory_threads" | "memory_messages" | "memory_jobs",
+  table: "memory_threads" | "memory_messages" | "memory_jobs" | "oauth_quota",
   requiredColumns: readonly string[],
 ): Promise<boolean> {
   const rows = resultRows<{ column_name: string }>(

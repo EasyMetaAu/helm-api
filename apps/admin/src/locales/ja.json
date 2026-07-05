@@ -571,7 +571,7 @@
   "Port": "ポート",
   "Preview": "プレビュー",
   "Prefer accounts with lower quota pressure to reduce 429 risk.": "429 リスクを下げるため、クォータ負荷が低いアカウントを優先します。",
-  "Prefer accounts with quota left that will reset soon.": "まもなくリセットされ、まだクォータが残っているアカウントを優先します。",
+  "Prefer accounts with 5h or weekly quota resetting soon, plus Codex reset credits.": "まもなくリセットされる 5 時間枠または週次クォータと、Codex リセットクレジットを考慮して優先します。",
   "Previous": "前へ",
   "Primary": "プライマリ",
   "Primary is required and cannot be empty.": "プライマリは必須で、空にできません。",

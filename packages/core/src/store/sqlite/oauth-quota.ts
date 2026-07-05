@@ -21,16 +21,24 @@ export class SqliteOAuthQuotaStore implements OAuthQuotaStore {
       windows: JSON.stringify(snapshot.windows),
       capturedAt: snapshot.capturedAt,
       source: snapshot.source,
+      ...(snapshot.resetCredits !== undefined ? { resetCredits: snapshot.resetCredits } : {}),
     };
-    // Note: usage_limited_until_ms is intentionally absent from BOTH the insert
-    // values (defaults to NULL on a brand-new row) and the conflict SET — an
-    // observability refresh must never overwrite an active cooldown.
+    const set = {
+      windows: row.windows,
+      capturedAt: row.capturedAt,
+      source: row.source,
+      ...(snapshot.resetCredits !== undefined ? { resetCredits: snapshot.resetCredits } : {}),
+    };
+    // Note: usage_limited_until_ms is intentionally absent from BOTH the insert values
+    // (defaults to NULL on a brand-new row) and the conflict SET — an observability
+    // refresh must never overwrite an active cooldown. reset_credits is updated only
+    // when the caller has a fresh Codex PULL count; Codex header PUSHes preserve it.
     this.db
       .insert(oauthQuota)
       .values(row)
       .onConflictDoUpdate({
         target: [oauthQuota.providerId, oauthQuota.account],
-        set: { windows: row.windows, capturedAt: row.capturedAt, source: row.source },
+        set,
       })
       .run();
   }
@@ -48,6 +56,7 @@ export class SqliteOAuthQuotaStore implements OAuthQuotaStore {
         capturedAt: 0,
         source: providerId === "anthropic" ? "anthropic" : "codex-headers",
         usageLimitedUntilMs: untilMs,
+        resetCredits: null,
       })
       .onConflictDoUpdate({
         target: [oauthQuota.providerId, oauthQuota.account],
@@ -90,6 +99,7 @@ export class SqliteOAuthQuotaStore implements OAuthQuotaStore {
       capturedAt: row.capturedAt,
       source: row.source,
       usageLimitedUntilMs: row.usageLimitedUntilMs ?? null,
+      resetCredits: row.resetCredits ?? null,
     });
   }
 }

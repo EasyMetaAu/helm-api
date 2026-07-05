@@ -110,7 +110,7 @@
     {
       value: 'use_expiring',
       label: 'Avoid waste',
-      description: 'Prefer accounts with quota left that will reset soon.',
+      description: 'Prefer accounts with 5h or weekly quota resetting soon, plus Codex reset credits.',
     },
   ];
 

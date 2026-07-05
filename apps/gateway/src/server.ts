@@ -392,6 +392,7 @@ export interface OAuthQuotaSeed {
   windows: OAuthQuotaWindow[];
   capturedAt: number;
   usageLimitedUntilMs: number | null;
+  resetCredits?: number | null;
 }
 
 // Build a FRESH, standalone executor client for ONE oauth account: its token manager
@@ -612,6 +613,7 @@ export async function synthesizeOAuthProviders(
         usageLimitedUntilMs: quotaSeed?.usageLimitedUntilMs ?? null,
         quotaWindows: quotaSeed?.windows,
         quotaCapturedAtMs: quotaSeed?.capturedAt,
+        quotaResetCredits: quotaSeed?.resetCredits ?? null,
       });
     }
 
@@ -1323,6 +1325,7 @@ export async function buildServer(
           windows: snap.windows,
           capturedAt: snap.capturedAt,
           usageLimitedUntilMs: snap.usageLimitedUntilMs ?? null,
+          resetCredits: snap.resetCredits ?? null,
         });
       }
     } catch {
@@ -1361,6 +1364,17 @@ export async function buildServer(
         line: e instanceof Error ? e.message : String(e),
       }),
     );
+  };
+  const applyQuotaSnapshot = (
+    providerId: string,
+    account: string,
+    windows: OAuthQuotaWindow[],
+    capturedAtMs: number,
+    resetCredits?: number | null,
+  ): void => {
+    oauthPoolClients
+      .get(providerId)
+      ?.setQuotaSnapshot(account, windows, capturedAtMs, resetCredits);
   };
 
   // Executor hook: an account-wide 429 on a subscription alias means the SERVED account
@@ -2366,6 +2380,7 @@ export async function buildServer(
       // /quota PULL parks a saturated account — both flip the live member in place +
       // persist, no rebuild. Never touches schedulable.
       applyUsageLimit,
+      applyQuotaSnapshot,
     });
 
     // Admin SPA static hosting (/admin). MUST be mounted AFTER registerAdminApi so

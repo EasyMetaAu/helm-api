@@ -65,6 +65,9 @@ export const OAuthQuotaSnapshotSchema = z
     capturedAt: z.number().int(), // epoch ms the snapshot was taken
     source: z.enum(["anthropic", "codex-headers", "codex"]),
     usageLimitedUntilMs: z.number().int().nullable().default(null),
+    // Codex only: how many rate-limit reset credits are available at capture time.
+    // Optional because Anthropic has no equivalent and older rows predate this field.
+    resetCredits: z.number().int().nonnegative().nullable().optional(),
   })
   .strict();
 

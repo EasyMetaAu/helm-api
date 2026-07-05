@@ -571,7 +571,7 @@
   "Port": "端口",
   "Preview": "预览",
   "Prefer accounts with lower quota pressure to reduce 429 risk.": "优先使用额度压力低的账号，降低 429 风险。",
-  "Prefer accounts with quota left that will reset soon.": "优先使用快重置且还剩额度的账号，减少浪费。",
+  "Prefer accounts with 5h or weekly quota resetting soon, plus Codex reset credits.": "优先使用 5 小时或周额度快重置、且结合 Codex 重置次数的账号，减少浪费。",
   "Previous": "上一页",
   "Primary": "主用",
   "Primary is required and cannot be empty.": "主用为必填，不能为空。",

@@ -351,6 +351,8 @@ export const oauthQuota = pgTable(
     // scheduling pool (null = not limited). Runtime twin of `windows`; the "Reset
     // usage" action sets it back to null.
     usageLimitedUntilMs: bigint("usage_limited_until_ms", { mode: "number" }), // nullable
+    // Codex only: available rate-limit reset credits captured from the usage PULL.
+    resetCredits: integer("reset_credits"), // nullable
   },
   (t) => [primaryKey({ columns: [t.providerId, t.account] })],
 );

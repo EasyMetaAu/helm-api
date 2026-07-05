@@ -108,6 +108,9 @@ export interface OAuthPoolMember {
   // signals: stale/missing windows must never make the pool fail closed.
   quotaWindows?: OAuthQuotaWindow[];
   quotaCapturedAtMs?: number | null;
+  // Codex only: available rate-limit reset credits captured with the latest usage
+  // snapshot. Soft signal for quota-aware scoring; never consumed by selection.
+  quotaResetCredits?: number | null;
 }
 
 export type OAuthSelectionStrategy = "balanced" | "manual_priority" | "low_risk" | "use_expiring";
@@ -121,7 +124,12 @@ export interface OAuthPoolClient extends ProviderClient {
   // The account's current auto-park cooldown (epoch ms), or null if eligible now. Lets
   // the gateway make a park EXTEND-ONLY — never shorten a precise quota reset already set.
   getUsageLimit(account: string): number | null;
-  setQuotaSnapshot(account: string, windows: OAuthQuotaWindow[], capturedAtMs: number): void;
+  setQuotaSnapshot(
+    account: string,
+    windows: OAuthQuotaWindow[],
+    capturedAtMs: number,
+    resetCredits?: number | null,
+  ): void;
 }
 
 export interface OAuthRateLimitParkContext {
@@ -413,6 +421,32 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     return scoped.length > 0 && model.toLowerCase().includes(scoped);
   }
 
+  function isWeeklyQuotaWindow(window: OAuthQuotaWindow): boolean {
+    return (
+      window.key === "secondary" ||
+      window.key === "7d" ||
+      window.key.startsWith("7d-") ||
+      (window.windowMinutes !== null && window.windowMinutes >= 7 * 24 * 60)
+    );
+  }
+
+  function expiringWindowWeight(window: OAuthQuotaWindow): number {
+    return isWeeklyQuotaWindow(window) ? 2 : 1;
+  }
+
+  function resetCreditValue(entry: PoolEntry, nowMs: number): number {
+    if (!quotaFresh(entry.member, nowMs)) return 0;
+    const credits = entry.member.quotaResetCredits;
+    if (credits == null || credits <= 0) return 0;
+    // A reset credit can restore one set of Codex rate-limit windows, but spending it
+    // is guarded elsewhere. Treat it as discounted virtual weekly capacity: important
+    // enough to break ties and influence Avoid Waste, not enough to beat a natural
+    // window that is about to reset with large unused quota.
+    const cappedCredits = Math.min(Math.trunc(credits), 5);
+    const virtualWeeklyValue = 100 / (7 * 24);
+    return cappedCredits * virtualWeeklyValue * 10;
+  }
+
   function applicableQuotaWindows(
     entry: PoolEntry,
     model: string | null,
@@ -433,16 +467,16 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     model: string | null,
     nowMs: number,
   ): number | null {
-    let best = 0;
+    let total = 0;
     for (const w of applicableQuotaWindows(entry, model, nowMs)) {
       if (w.resetsAtMs === null || w.resetsAtMs <= nowMs) continue;
       const remaining = Math.max(0, 100 - w.usedPercent);
       if (remaining <= 0) continue;
       const hoursUntilReset = Math.max((w.resetsAtMs - nowMs) / 3_600_000, 0.25);
-      const value = remaining / hoursUntilReset;
-      if (value > best) best = value;
+      total += (remaining / hoursUntilReset) * expiringWindowWeight(w);
     }
-    return best > 0 ? best : null;
+    total += resetCreditValue(entry, nowMs);
+    return total > 0 ? total : null;
   }
 
   function chooseByLowRisk(
@@ -810,11 +844,17 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     getUsageLimit(account: string): number | null {
       return entries.find((e) => e.member.account === account)?.member.usageLimitedUntilMs ?? null;
     },
-    setQuotaSnapshot(account: string, windows: OAuthQuotaWindow[], capturedAtMs: number): void {
+    setQuotaSnapshot(
+      account: string,
+      windows: OAuthQuotaWindow[],
+      capturedAtMs: number,
+      resetCredits?: number | null,
+    ): void {
       const entry = entries.find((e) => e.member.account === account);
       if (!entry) return;
       entry.member.quotaWindows = windows;
       entry.member.quotaCapturedAtMs = capturedAtMs;
+      if (resetCredits !== undefined) entry.member.quotaResetCredits = resetCredits;
     },
     async chatCompletion(
       req: ChatCompletionRequest,

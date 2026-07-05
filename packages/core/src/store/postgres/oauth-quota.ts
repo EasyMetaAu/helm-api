@@ -13,24 +13,30 @@ export class PgOAuthQuotaStore implements OAuthQuotaStore {
   constructor(private readonly db: PgDb) {}
 
   async upsert(snapshot: Omit<OAuthQuotaSnapshot, "usageLimitedUntilMs">): Promise<void> {
+    const values = {
+      providerId: snapshot.providerId,
+      account: snapshot.account,
+      windows: snapshot.windows,
+      capturedAt: snapshot.capturedAt,
+      source: snapshot.source,
+      ...(snapshot.resetCredits !== undefined ? { resetCredits: snapshot.resetCredits } : {}),
+    };
+    const set = {
+      windows: snapshot.windows,
+      capturedAt: snapshot.capturedAt,
+      source: snapshot.source,
+      ...(snapshot.resetCredits !== undefined ? { resetCredits: snapshot.resetCredits } : {}),
+    };
     // usage_limited_until_ms is intentionally absent from BOTH insert values (NULL on
     // a new row) and the conflict SET — a window refresh must not clobber a cooldown.
+    // reset_credits is updated only when the caller has a fresh Codex PULL count;
+    // Codex header PUSHes preserve it.
     await this.db
       .insert(oauthQuota)
-      .values({
-        providerId: snapshot.providerId,
-        account: snapshot.account,
-        windows: snapshot.windows,
-        capturedAt: snapshot.capturedAt,
-        source: snapshot.source,
-      })
+      .values(values)
       .onConflictDoUpdate({
         target: [oauthQuota.providerId, oauthQuota.account],
-        set: {
-          windows: snapshot.windows,
-          capturedAt: snapshot.capturedAt,
-          source: snapshot.source,
-        },
+        set,
       });
   }
 
@@ -46,6 +52,7 @@ export class PgOAuthQuotaStore implements OAuthQuotaStore {
         capturedAt: 0,
         source: providerId === "anthropic" ? "anthropic" : "codex-headers",
         usageLimitedUntilMs: untilMs,
+        resetCredits: null,
       })
       .onConflictDoUpdate({
         target: [oauthQuota.providerId, oauthQuota.account],
@@ -82,6 +89,7 @@ export class PgOAuthQuotaStore implements OAuthQuotaStore {
       capturedAt: row.capturedAt,
       source: row.source,
       usageLimitedUntilMs: row.usageLimitedUntilMs ?? null,
+      resetCredits: row.resetCredits ?? null,
     });
   }
 }
