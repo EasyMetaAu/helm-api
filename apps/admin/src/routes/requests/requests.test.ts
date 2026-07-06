@@ -16,12 +16,16 @@ import { load as loadList } from './+page.js';
 
 const getRequest = vi.fn();
 const getRequestPayload = vi.fn();
+const getRequestPayloadMeta = vi.fn();
+const getRequestPayloadPart = vi.fn();
 const listRequests = vi.fn();
 const listKeys = vi.fn();
 vi.mock('$lib/api/requests.js', () => ({
   listRequests: (...args: unknown[]) => listRequests(...args),
   getRequest: (...args: unknown[]) => getRequest(...args),
   getRequestPayload: (...args: unknown[]) => getRequestPayload(...args),
+  getRequestPayloadMeta: (...args: unknown[]) => getRequestPayloadMeta(...args),
+  getRequestPayloadPart: (...args: unknown[]) => getRequestPayloadPart(...args),
 }));
 vi.mock('$lib/api/keys.js', () => ({
   listKeys: (...args: unknown[]) => listKeys(...args),
@@ -419,6 +423,9 @@ describe('requests list page', () => {
 describe('requests detail page', () => {
   beforeEach(() => {
     getRequest.mockReset();
+    getRequestPayload.mockReset();
+    getRequestPayloadMeta.mockReset();
+    getRequestPayloadPart.mockReset();
   });
 
   it('Back link returns to the originating page passed via the loader (backTo)', () => {
@@ -528,6 +535,34 @@ describe('requests detail page', () => {
     await fireEvent.click(screen.getByTestId('request-view-raw'));
     expect(screen.getByTestId('request-body')).toHaveTextContent(/"model": "auto"/);
     expect(screen.getByTestId('response-body')).toHaveTextContent(/"ok": true/);
+  });
+
+  it('loads captured bodies lazily from the payload part API', async () => {
+    getRequestPayloadPart.mockResolvedValueOnce({
+      captured: true,
+      part: 'request',
+      value: { model: 'auto' },
+      created_at: 1234,
+    });
+    render(DetailPage, {
+      data: {
+        detail: detail(),
+        payload: {
+          captured: true,
+          parts: { request: true, response: false, upstream_request: false },
+          created_at: 1234,
+        },
+        traceId: 'tr_lazy',
+      },
+    });
+
+    expect(getRequestPayloadPart).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByTestId('request-view-raw'));
+    expect(screen.queryByTestId('request-body')).not.toBeInTheDocument();
+    await fireEvent.click(screen.getByTestId('load-request-body'));
+
+    expect(await screen.findByTestId('request-body')).toHaveTextContent(/"model": "auto"/);
+    expect(getRequestPayloadPart).toHaveBeenCalledWith('tr_lazy', 'request');
   });
 
   // A 1×1 PNG (bare base64) — the form a generated/input image takes inside a body.
@@ -731,21 +766,24 @@ describe('requests detail loader (payload fails open, detail is fatal)', () => {
   beforeEach(() => {
     getRequest.mockReset();
     getRequestPayload.mockReset();
+    getRequestPayloadMeta.mockReset();
+    getRequestPayloadPart.mockReset();
   });
 
   it('still returns the detail when the payload fetch fails — a body error must not sink the page', async () => {
     getRequest.mockResolvedValue(detail());
-    getRequestPayload.mockRejectedValue(new Error('payload timeout'));
+    getRequestPayloadMeta.mockRejectedValue(new Error('payload timeout'));
     const data = await runLoad('tr_1');
     // The decision trail renders; the payload merely fails open to "not captured".
     expect(data.detail).not.toBeNull();
     expect(data.payload).toEqual({ captured: false });
     expect(data.loadError).toBeUndefined();
+    expect(getRequestPayload).not.toHaveBeenCalled();
   });
 
   it('surfaces a retryable error state only when the detail itself fails', async () => {
     getRequest.mockRejectedValue(new Error('not found'));
-    getRequestPayload.mockResolvedValue({ captured: false });
+    getRequestPayloadMeta.mockResolvedValue({ captured: false });
     const data = await runLoad('missing');
     expect(data.detail).toBeNull();
     expect(data.loadError).toBe('not found');

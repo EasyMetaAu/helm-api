@@ -10,6 +10,9 @@ import type {
   RecentDecisionRecord,
   RequestPayload,
   RequestPayloadArchiveRow,
+  RequestPayloadMeta,
+  RequestPayloadPart,
+  RequestPayloadPartRecord,
   TelemetryAggregate,
   TelemetryArchiveRow,
   TelemetryKeyUsage,
@@ -318,6 +321,27 @@ export class SqliteTelemetryStore implements TelemetryStore {
         `SELECT request_json AS req, response_json AS resp, upstream_request_json AS up, created_at AS ts
          FROM request_payloads WHERE request_id = ?`,
       ),
+      getMeta: db.prepare(
+        `SELECT
+           request_id AS id,
+           request_json IS NOT NULL AS hasReq,
+           response_json IS NOT NULL AS hasResp,
+           upstream_request_json IS NOT NULL AS hasUp,
+           created_at AS ts
+         FROM request_payloads WHERE request_id = ?`,
+      ),
+      getRequestPart: db.prepare(
+        `SELECT request_id AS id, request_json AS value, created_at AS ts
+         FROM request_payloads WHERE request_id = ?`,
+      ),
+      getResponsePart: db.prepare(
+        `SELECT request_id AS id, response_json AS value, created_at AS ts
+         FROM request_payloads WHERE request_id = ?`,
+      ),
+      getUpstreamPart: db.prepare(
+        `SELECT request_id AS id, upstream_request_json AS value, created_at AS ts
+         FROM request_payloads WHERE request_id = ?`,
+      ),
       getBlob: db.prepare("SELECT bytes FROM payload_blobs WHERE sha256 = ?"),
     };
   }
@@ -390,6 +414,42 @@ export class SqliteTelemetryStore implements TelemetryStore {
       requestJson: this.decodeColumn(row.req) ?? "",
       responseJson: this.decodeColumn(row.resp),
       upstreamRequestJson: this.decodeColumn(row.up),
+      createdAt: new Date(row.ts),
+    };
+  }
+
+  async getPayloadMeta(requestId: string): Promise<RequestPayloadMeta | null> {
+    const row = this.stmts().getMeta.get(requestId) as
+      | { id: string; hasReq: number; hasResp: number; hasUp: number; ts: number }
+      | undefined;
+    if (!row) return null;
+    return {
+      requestId: row.id,
+      createdAt: new Date(row.ts),
+      parts: {
+        request: row.hasReq === 1,
+        response: row.hasResp === 1,
+        upstreamRequest: row.hasUp === 1,
+      },
+    };
+  }
+
+  async getPayloadPart(
+    requestId: string,
+    part: RequestPayloadPart,
+  ): Promise<RequestPayloadPartRecord | null> {
+    const stmt =
+      part === "request"
+        ? this.stmts().getRequestPart
+        : part === "response"
+          ? this.stmts().getResponsePart
+          : this.stmts().getUpstreamPart;
+    const row = stmt.get(requestId) as { id: string; value: unknown; ts: number } | undefined;
+    if (!row) return null;
+    return {
+      requestId: row.id,
+      part,
+      json: this.decodeColumn(row.value),
       createdAt: new Date(row.ts),
     };
   }

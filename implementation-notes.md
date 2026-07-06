@@ -15,6 +15,15 @@
 - **观测决策**：触发时写入 passthrough mutation `body_shims_applied: ["anthropic_billing_cch_stabilized"]`，并清掉 raw_body 走重序列化，避免 telemetry 显示仍是旧的客户端 raw body。后续线上可按该 mutation 与 `cached_tokens/cache_creation_tokens` 验证成本改善。
 - **风险边界**：如果 Anthropic 将来开始强校验官方 `cch` 与整请求字节一致，这个 shim 可能引发上游拒绝；届时可通过 native passthrough flag 或后续 runtime setting 回滚。当前生产证据显示 `cch` 更像缓存/归因指纹而非认证字段。
 
+## 2026-07-06 · Admin 请求详情 payload 改为分段懒加载（Admin requests performance，docs/07/11，原则 1/7）
+
+- **背景（Lukin）**：线上 `/admin/requests/:traceId` 详情页会在首屏同时拉完整 request/response/upstream payload；部分记录超过 1MB，经公网和未压缩 JSON 传输后容易出现长时间白屏/卡顿。
+- **接口决策**：保留原 `/admin/api/requests/:traceId/payload` 全量兼容；新增 `?part=meta` 只返回捕获状态与三个分段是否存在，`?part=request|response|upstream_request` 只返回单段正文。SQLite/Postgres adapter 实现轻量读取，老 adapter 通过 `getPayload()` fallback。
+- **UI 决策**：详情页 loader 只取 meta；Conversation/Raw/Response/Forwarded upstream/Retry 在用户点击时才按需取对应分段。这样列表到详情的首屏不再被大 payload 阻塞，同时保留完整审计正文查看能力。
+- **memory stats 决策**：`/admin/api/memory/stats` 增加 10 秒按 scope 短缓存；管理员写入/编辑/删除 facts/reflections 后清缓存，避免重复刷新扫统计表。返回语义不变。
+- **保留策略**：`payload_retention_days` 继续保持 **3 天**；本次不把它降到 1 天（Lukin 明确要求）。
+- **验证计划**：覆盖 gateway payload meta/part、SQLite/Postgres store contract、admin loader 懒加载 UI、memory stats cache；发布后用线上 API timing、gzip 响应头和浏览器网络请求确认。
+
 ## 2026-07-06 · 纯工具 turn 去掉空 header 行 + peek 收到 3 行（Admin conversation view，docs/11，原则 1）
 
 - **背景（Lukin）**：默认展开后，纯工具 turn 在工具块上方还多渲染一条近乎空的折叠 header 行（`▾ ● { }`：caret+role dot+空 preview+源码切换），很丑；另外 output peek 6 行太多。

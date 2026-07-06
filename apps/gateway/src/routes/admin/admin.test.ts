@@ -1474,6 +1474,55 @@ describe("admin.api request payload", () => {
     expect(res.status).toBe(200);
     expect(((await res.json()) as { upstream_request: unknown }).upstream_request).toBeNull();
   });
+
+  it("returns lightweight payload metadata without reading the full body", async () => {
+    const telemetry = {
+      ...makeTelemetry(),
+      getPayload: async () => {
+        throw new Error("full payload should not be read");
+      },
+      getPayloadMeta: async (id: string) =>
+        id === "req_3"
+          ? {
+              requestId: "req_3",
+              createdAt: new Date(1234),
+              parts: { request: true, response: false, upstreamRequest: true },
+            }
+          : null,
+    } as unknown as TelemetryStore;
+    const app = buildApp(buildDeps({ telemetry }));
+    const res = await app.request("/admin/api/requests/req_3/payload?part=meta");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      captured: true,
+      created_at: 1234,
+      parts: { request: true, response: false, upstream_request: true },
+    });
+  });
+
+  it("returns one requested payload part", async () => {
+    const telemetry = {
+      ...makeTelemetry(),
+      getPayloadPart: async (id: string, part: "request" | "response" | "upstream_request") =>
+        id === "req_4" && part === "upstream_request"
+          ? {
+              requestId: "req_4",
+              part,
+              json: JSON.stringify({ model: "gpt-resolved" }),
+              createdAt: new Date(1234),
+            }
+          : null,
+    } as unknown as TelemetryStore;
+    const app = buildApp(buildDeps({ telemetry }));
+    const res = await app.request("/admin/api/requests/req_4/payload?part=upstream_request");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      captured: true,
+      part: "upstream_request",
+      value: { model: "gpt-resolved" },
+      created_at: 1234,
+    });
+  });
 });
 
 describe("admin.api oauth usage", () => {

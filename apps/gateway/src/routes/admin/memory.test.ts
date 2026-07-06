@@ -1,7 +1,7 @@
 import { createSqliteDb, factContentHash, type MemoryStore, SqliteMemoryStore } from "@helm/core";
 import type { ApiKeyRecord, Fact } from "@helm/shared";
 import { Hono } from "hono";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../../app.js";
 import type { AdminApiDeps } from "./deps.js";
 import { registerMemoryRoutes } from "./memory.js";
@@ -155,6 +155,25 @@ describe("/admin/api/memory routes (docs/13)", () => {
     expect(body.queue.byType).toContainEqual({ type: "observer", status: "pending", count: 1 });
     expect(body.activity.lastMessageAt).not.toBeNull();
     expect(body.activity.lastObservationAt).not.toBeNull();
+  });
+
+  it("caches operational stats briefly per selected memory scope", async () => {
+    const { store } = seededStore();
+    const statsSpy = vi.spyOn(store, "getMemoryAdminStats");
+    const app = buildApp(store);
+
+    expect((await app.request("/admin/api/memory/stats?accountId=acct&projectId=p1")).status).toBe(
+      200,
+    );
+    expect((await app.request("/admin/api/memory/stats?accountId=acct&projectId=p1")).status).toBe(
+      200,
+    );
+    expect(statsSpy).toHaveBeenCalledTimes(1);
+
+    expect((await app.request("/admin/api/memory/stats?accountId=acct&projectId=p2")).status).toBe(
+      200,
+    );
+    expect(statsSpy).toHaveBeenCalledTimes(2);
   });
 
   it("lists facts with default 'all' status visibility and supports filters", async () => {

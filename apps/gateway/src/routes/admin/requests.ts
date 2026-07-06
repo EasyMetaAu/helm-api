@@ -1,3 +1,9 @@
+import type {
+  RequestPayload,
+  RequestPayloadMeta,
+  RequestPayloadPart,
+  RequestPayloadPartRecord,
+} from "@helm/core";
 import { RequestsQuerySchema } from "@helm/shared";
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
@@ -99,7 +105,34 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
   // parse them back so the SPA renders structured JSON, falling back to the raw
   // string if it was a non-JSON stream (assembled SSE).
   app.get("/admin/api/requests/:traceId/payload", async (c) => {
-    const p = await deps.telemetry.getPayload(c.req.param("traceId"));
+    const traceId = c.req.param("traceId");
+    const part = parsePayloadPart(c.req.query("part"));
+    if (part === "invalid") return c.json({ error: "invalid payload part" }, 400);
+    if (part === "meta") {
+      const meta = await getPayloadMeta(deps, traceId);
+      if (!meta) return c.json({ captured: false });
+      return c.json({
+        captured: true,
+        created_at: meta.createdAt.getTime(),
+        parts: {
+          request: meta.parts.request,
+          response: meta.parts.response,
+          upstream_request: meta.parts.upstreamRequest,
+        },
+      });
+    }
+    if (part !== "full") {
+      const p = await getPayloadPart(deps, traceId, part);
+      if (!p) return c.json({ captured: false });
+      return c.json({
+        captured: true,
+        part,
+        value: p.json === null ? null : parseMaybeJson(p.json),
+        created_at: p.createdAt.getTime(),
+      });
+    }
+
+    const p = await deps.telemetry.getPayload(traceId);
     if (!p) return c.json({ captured: false });
     return c.json({
       captured: true,
@@ -112,6 +145,58 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
       created_at: p.createdAt.getTime(),
     });
   });
+}
+
+type PayloadPartQuery = "full" | "meta" | RequestPayloadPart | "invalid";
+
+function parsePayloadPart(value: string | undefined): PayloadPartQuery {
+  if (value === undefined || value === "" || value === "full") return "full";
+  if (value === "meta") return "meta";
+  if (value === "request" || value === "response" || value === "upstream_request") return value;
+  return "invalid";
+}
+
+async function getPayloadMeta(
+  deps: AdminApiDeps,
+  requestId: string,
+): Promise<RequestPayloadMeta | null> {
+  if (deps.telemetry.getPayloadMeta) return deps.telemetry.getPayloadMeta(requestId);
+  const p = await deps.telemetry.getPayload(requestId);
+  return p ? metaFromPayload(p) : null;
+}
+
+function metaFromPayload(p: RequestPayload): RequestPayloadMeta {
+  return {
+    requestId: p.requestId,
+    createdAt: p.createdAt,
+    parts: {
+      request: p.requestJson !== null,
+      response: p.responseJson !== null,
+      upstreamRequest: p.upstreamRequestJson !== null,
+    },
+  };
+}
+
+async function getPayloadPart(
+  deps: AdminApiDeps,
+  requestId: string,
+  part: RequestPayloadPart,
+): Promise<RequestPayloadPartRecord | null> {
+  if (deps.telemetry.getPayloadPart) return deps.telemetry.getPayloadPart(requestId, part);
+  const p = await deps.telemetry.getPayload(requestId);
+  if (!p) return null;
+  return {
+    requestId: p.requestId,
+    part,
+    json: payloadPartJson(p, part),
+    createdAt: p.createdAt,
+  };
+}
+
+function payloadPartJson(p: RequestPayload, part: RequestPayloadPart): string | null {
+  if (part === "request") return p.requestJson;
+  if (part === "response") return p.responseJson;
+  return p.upstreamRequestJson;
 }
 
 // Parse stored JSON text back to a value; if it isn't valid JSON (e.g. assembled
