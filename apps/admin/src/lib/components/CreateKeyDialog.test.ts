@@ -41,6 +41,9 @@ describe('CreateKeyDialog', () => {
     // Tick a subset of lanes; the whitelist is the only lane cap (no max-lane field).
     await fireEvent.click(screen.getByLabelText('economy'));
     await fireEvent.click(screen.getByLabelText('balanced'));
+    await fireEvent.input(screen.getByLabelText('Blocked models'), {
+      target: { value: 'gpt-4o\nanthropic/claude-sonnet-4-6' },
+    });
     await fireEvent.click(screen.getByLabelText('allow client-requested Fast mode'));
     // allow_custom_model defaults to false; leave that checkbox unchecked.
     await fireEvent.click(screen.getByRole('button', { name: /create key/i }));
@@ -48,6 +51,7 @@ describe('CreateKeyDialog', () => {
     await waitFor(() => expect(createKey).toHaveBeenCalledTimes(1));
     const input = createKey.mock.calls[0][0];
     expect(input.allowed_lanes).toEqual(['economy', 'balanced']);
+    expect(input.blocked_models).toEqual(['gpt-4o', 'anthropic/claude-sonnet-4-6']);
     expect(input.allow_custom_model).toBe(false);
     expect(input.allow_fast_mode).toBe(true);
   });

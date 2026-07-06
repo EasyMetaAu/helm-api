@@ -18,6 +18,7 @@ describe("SqliteKeyStore", () => {
       role: "user",
       allowedLanes: ["economy", "balanced"],
       allowCustomModel: true,
+      blockedModels: ["gpt-4o"],
       allowFastMode: true,
     });
     const got = await store.getByHash("sha256_h1");
@@ -30,6 +31,7 @@ describe("SqliteKeyStore", () => {
       role: "user",
       allowed_lanes: ["economy", "balanced"],
       allow_custom_model: true,
+      blocked_models: ["gpt-4o"],
       allow_fast_mode: true,
       disabled: false,
     });
@@ -223,21 +225,24 @@ describe("SqliteKeyStore", () => {
     await store.updateKey("k1", {
       allowedLanes: ["economy", "balanced"],
       allowCustomModel: true,
+      blockedModels: ["gpt-4o", "anthropic/claude-sonnet-4-6"],
       allowFastMode: true,
     });
     let got = await store.getByHash("h1");
     expect(got?.allowed_lanes).toEqual(["economy", "balanced"]);
     expect(got?.allow_custom_model).toBe(true);
+    expect(got?.blocked_models).toEqual(["gpt-4o", "anthropic/claude-sonnet-4-6"]);
     expect(got?.allow_fast_mode).toBe(true);
     // an unrelated column (rate limit) is left untouched
     expect(got?.rate_limit_rpm).toBe(7);
     // role is never written by updateKey
     expect(got?.role).toBe("user");
     // null clears the whitelist back to "no cap"
-    await store.updateKey("k1", { allowedLanes: null });
+    await store.updateKey("k1", { allowedLanes: null, blockedModels: null });
     got = await store.getByHash("h1");
     expect(got?.allowed_lanes).toBeNull();
     expect(got?.allow_custom_model).toBe(true);
+    expect(got?.blocked_models).toBeNull();
     expect(got?.allow_fast_mode).toBe(true);
   });
 

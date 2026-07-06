@@ -32,6 +32,7 @@ function toSummary(rec: {
   name: string | null;
   allowed_lanes: string[] | null;
   allow_custom_model: boolean;
+  blocked_models: string[] | null;
   allow_fast_mode: boolean;
   disabled: boolean;
   rate_limit_rpm: number | null;
@@ -54,6 +55,7 @@ function toSummary(rec: {
     name: rec.name,
     allowed_lanes: rec.allowed_lanes,
     allow_custom_model: rec.allow_custom_model,
+    blocked_models: rec.blocked_models,
     allow_fast_mode: rec.allow_fast_mode,
     disabled: rec.disabled,
     rate_limit_rpm: rec.rate_limit_rpm,
@@ -193,6 +195,7 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       name: parsed.data.name,
       allowedLanes: parsed.data.allowed_lanes,
       allowCustomModel: parsed.data.allow_custom_model ?? false,
+      blockedModels: parsed.data.blocked_models,
       allowFastMode: parsed.data.allow_fast_mode ?? false,
       rateLimitRpm: parsed.data.rate_limit_rpm,
       rateLimitTpm: parsed.data.rate_limit_tpm,
@@ -244,6 +247,7 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       name?: string | null;
       allowedLanes?: string[] | null;
       allowCustomModel?: boolean;
+      blockedModels?: string[] | null;
       allowFastMode?: boolean;
       rateLimitRpm?: number | null;
       rateLimitTpm?: number | null;
@@ -261,6 +265,7 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
     if (d.name !== undefined) patch.name = d.name;
     if (d.allowed_lanes !== undefined) patch.allowedLanes = d.allowed_lanes;
     if (d.allow_custom_model !== undefined) patch.allowCustomModel = d.allow_custom_model;
+    if (d.blocked_models !== undefined) patch.blockedModels = d.blocked_models;
     if (d.allow_fast_mode !== undefined) patch.allowFastMode = d.allow_fast_mode;
     if (d.rate_limit_rpm !== undefined) patch.rateLimitRpm = d.rate_limit_rpm;
     if (d.rate_limit_tpm !== undefined) patch.rateLimitTpm = d.rate_limit_tpm;

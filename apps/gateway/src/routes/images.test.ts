@@ -138,6 +138,90 @@ describe("registerImagesRoute", () => {
     expect(res.status).toBe(401);
   });
 
+  it("rejects a direct image model that is blocked for the key", async () => {
+    const { app, imageGeneration, enqueueTelemetry } = setup({
+      auth: {
+        resolve: async (cred) =>
+          cred === "k"
+            ? ({
+                keyId: "key1",
+                accountId: "acct",
+                keyPrefix: "helm_live_xy",
+                caps: { budget: BUDGET_CAPS, blockedModels: ["gpt-image-2"] },
+              } as MessagesIdentity)
+            : null,
+      },
+    });
+
+    const res = await post(app, { model: "gpt-image-2", prompt: "x" });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { message: string; code: string } };
+    expect(body.error.message).toContain("blocked for this key");
+    expect(body.error.code).toBe("model_blocked");
+    expect(imageGeneration).not.toHaveBeenCalled();
+    expect(enqueueTelemetry).not.toHaveBeenCalled();
+  });
+
+  it("removes blocked image candidates from an image lane before fallback execution", async () => {
+    const blockedImageGeneration = vi.fn().mockResolvedValue(UPSTREAM);
+    const allowedImageGeneration = vi.fn().mockResolvedValue(UPSTREAM);
+    const blockedClient = { imageGeneration: blockedImageGeneration } as unknown as ProviderClient;
+    const allowedClient = { imageGeneration: allowedImageGeneration } as unknown as ProviderClient;
+    const { app, enqueueTelemetry } = setup({
+      auth: {
+        resolve: async (cred) =>
+          cred === "k"
+            ? ({
+                keyId: "key1",
+                accountId: "acct",
+                keyPrefix: "helm_live_xy",
+                caps: { budget: BUDGET_CAPS, blockedModels: ["gpt-image-primary"] },
+              } as MessagesIdentity)
+            : null,
+      },
+      resolveImageChain: (model) =>
+        model === "image-lane"
+          ? {
+              ok: true,
+              laneName: "image-lane",
+              candidateChain: ["gpt-image-primary", "gpt-image-fallback"],
+              targets: [
+                {
+                  client: blockedClient,
+                  providerModel: "openai/gpt-image-primary",
+                  alias: "gpt-image-primary",
+                  kind: "openai",
+                },
+                {
+                  client: allowedClient,
+                  providerModel: "openai/gpt-image-fallback",
+                  alias: "gpt-image-fallback",
+                  kind: "openai",
+                },
+              ],
+            }
+          : { ok: false, status: 404 },
+      costOf: (alias) => (alias === "gpt-image-fallback" ? 0.007 : null),
+    });
+
+    const res = await post(app, { model: "image-lane", prompt: "x" });
+
+    expect(res.status).toBe(200);
+    expect(blockedImageGeneration).not.toHaveBeenCalled();
+    expect(allowedImageGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "openai/gpt-image-fallback", prompt: "x" }),
+      expect.anything(),
+    );
+    expect(res.headers.get("x-helm-final-model")).toBe("gpt-image-fallback");
+
+    const decision = enqueueTelemetry.mock.calls[0]?.[0].decision;
+    expect(decision.lane.candidate_chain).toEqual(["gpt-image-fallback"]);
+    expect(decision.provider_attempts.map((a: { alias: string }) => a.alias)).toEqual([
+      "gpt-image-fallback",
+    ]);
+  });
+
   it("returns 404 for a model that is not a configured image model", async () => {
     const { app } = setup();
     const res = await post(app, { model: "not-an-image-model", prompt: "x" });

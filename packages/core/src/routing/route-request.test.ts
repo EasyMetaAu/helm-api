@@ -580,6 +580,39 @@ describe("routeRequest — orchestration", () => {
     expect(plan.selected_lane).toBe("balanced");
   });
 
+  it("signal feedback skips a promoted lane when blocked_models removes its whole chain", async () => {
+    const lanes: LanesConfig = {
+      economy: { primary: "cheap_model", fallback: [], constraints: {} },
+      balanced: { primary: "default_good_model", fallback: [], constraints: {} },
+      premium: { primary: "best_reasoning_model", fallback: [], constraints: {} },
+    } as unknown as LanesConfig;
+    const d = deps({
+      classify: vi.fn(async () =>
+        classification({ task_type: "general", complexity: "medium", constraints: {} }),
+      ),
+      policies: { policies: [] },
+      lanes,
+      signalFeedback: {
+        enabled: true,
+        minSamples: 20,
+        getSignal: vi.fn(async (_taskType, lane) =>
+          lane === "balanced"
+            ? routingSignal({ lane, successRate: 0.4, fallbackRate: 0.8, errorRate: 0.6 })
+            : routingSignal({ lane, successRate: 0.99, fallbackRate: 0, errorRate: 0 }),
+        ),
+      },
+    });
+
+    const result = await routeRequest(req(), d, {
+      keyCaps: { allowedLanes: null, blockedModels: ["best_reasoning_model"] },
+    });
+
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(result.final.status).toBe("ok");
+    expect(plan.selected_lane).toBe("balanced");
+    expect(plan.candidate_chain).toEqual(["default_good_model"]);
+  });
+
   it("signal feedback does not override policy pins, explicit passthrough, or over-budget degradation", async () => {
     const getSignal = vi.fn(async (_taskType: string, lane: string) =>
       routingSignal({ lane, successRate: lane === "premium" ? 0.99 : 0.2, errorRate: 0.8 }),
@@ -794,6 +827,95 @@ describe("routeRequest — orchestration", () => {
   });
 });
 
+describe("routeRequest — per-key blocked models", () => {
+  it("rejects an explicit model passthrough when the key blocks that model", async () => {
+    const d = deps({ isKnownModel: () => true });
+    const result = await routeRequest(req({ requested_model: "gpt-4o" }), d, {
+      allowCustomModel: true,
+      keyCaps: { allowedLanes: null, blockedModels: ["gpt-4o"] },
+    });
+
+    expect(result.final.status).toBe("error");
+    expect(result.error?.error_class).toBe("invalid_request");
+    expect(result.error?.message).toContain('model "gpt-4o" is blocked for this key');
+    expect(d.execute).not.toHaveBeenCalled();
+    expect(d.classify).not.toHaveBeenCalled();
+  });
+
+  it("rejects a direct blocked model even when the key cannot use explicit passthrough", async () => {
+    const d = deps({ isKnownModel: () => true });
+    const result = await routeRequest(req({ requested_model: "gpt-4o" }), d, {
+      allowCustomModel: false,
+      keyCaps: { allowedLanes: null, blockedModels: ["gpt-4o"] },
+    });
+
+    expect(result.final.status).toBe("error");
+    expect(result.error?.error_class).toBe("invalid_request");
+    expect(result.error?.message).toContain('model "gpt-4o" is blocked for this key');
+    expect(d.execute).not.toHaveBeenCalled();
+    expect(d.classify).not.toHaveBeenCalled();
+  });
+
+  it("removes blocked models from a classified lane chain before execution", async () => {
+    const d = deps();
+    const result = await routeRequest(req(), d, {
+      keyCaps: { allowedLanes: null, blockedModels: ["coder_a", "best_reasoning_model"] },
+    });
+
+    expect(result.final.status).toBe("ok");
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("coding");
+    expect(plan.candidate_chain).toEqual(["coder_b", "default_good_model"]);
+    expect(plan.candidate_chain).not.toContain("coder_a");
+    expect(plan.candidate_chain).not.toContain("best_reasoning_model");
+  });
+
+  it("removes blocked models from an explicit lane fallback chain", async () => {
+    const d = deps();
+    const result = await routeRequest(req({ requested_model: "premium" }), d, {
+      allowCustomModel: true,
+      keyCaps: { allowedLanes: ["premium"], blockedModels: ["best_reasoning_model"] },
+    });
+
+    expect(result.final.status).toBe("ok");
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("premium");
+    expect(plan.candidate_chain).toEqual(["default_good_model"]);
+  });
+
+  it("does not treat a blocked_models string as a lane blacklist", async () => {
+    const d = deps();
+    const result = await routeRequest(req({ requested_model: "premium" }), d, {
+      allowCustomModel: true,
+      keyCaps: { allowedLanes: null, blockedModels: ["premium"] },
+    });
+
+    expect(result.final.status).toBe("ok");
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("premium");
+    expect(plan.explicit_model).toBeNull();
+  });
+
+  it("rejects a lane when blocked_models removes every candidate in its chain", async () => {
+    const d = deps();
+    const result = await routeRequest(req({ requested_model: "premium" }), d, {
+      allowCustomModel: true,
+      keyCaps: {
+        allowedLanes: ["premium"],
+        blockedModels: ["best_reasoning_model", "default_good_model"],
+      },
+    });
+
+    expect(result.final.status).toBe("error");
+    expect(result.error?.error_class).toBe("invalid_request");
+    expect(result.error?.message).toContain('all candidate models for lane "premium"');
+    expect(d.execute).not.toHaveBeenCalled();
+    const rec = (d.log as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(rec.lane.selected_lane).toBe("premium");
+    expect(rec.lane.candidate_chain).toEqual([]);
+  });
+});
+
 // Virtual model-alias map (docs/04): a vendor model id (e.g. Claude Code's
 // "claude-opus-4-8") is rewritten onto a lane / "auto" BEFORE the passthrough
 // gate, so a fixed-model client routes without a 400 even on a default key.
@@ -838,6 +960,19 @@ describe("routeRequest — virtual model aliases", () => {
     expect(rec.requested_model).toBe("claude-opus-4-8");
     expect(rec.lane.selected_lane).toBe("premium");
     expect(rec.policy.reason).toContain("alias");
+  });
+
+  it("rejects an alias-mapped model when the requested model is blocked for this key", async () => {
+    const d = deps({ modelAliases: { "claude-opus-4-8": "premium" } });
+    const result = await routeRequest(req({ requested_model: "claude-opus-4-8" }), d, {
+      allowCustomModel: true,
+      keyCaps: { allowedLanes: null, blockedModels: ["claude-opus-4-8"] },
+    });
+
+    expect(result.final.status).toBe("error");
+    expect(result.error?.error_class).toBe("invalid_request");
+    expect(result.error?.message).toContain("blocked for this key");
+    expect(d.execute).not.toHaveBeenCalled();
   });
 
   it("resolves the alias BEFORE the unknown-model 400 on an allow_custom_model key", async () => {

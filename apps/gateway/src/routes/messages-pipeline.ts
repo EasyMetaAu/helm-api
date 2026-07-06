@@ -768,7 +768,12 @@ export function createMessagesPipeline(
       }
 
       const caps = identity.caps as
-        | { allowCustomModel?: unknown; allowedLanes?: unknown; budget?: BudgetCaps }
+        | {
+            allowCustomModel?: unknown;
+            allowedLanes?: unknown;
+            blockedModels?: unknown;
+            budget?: BudgetCaps;
+          }
         | undefined;
       const allowCustomModel = caps?.allowCustomModel === true;
 
@@ -804,6 +809,7 @@ export function createMessagesPipeline(
         allowedLanes: Array.isArray(caps?.allowedLanes) ? (caps.allowedLanes as string[]) : null,
         // Forced degrade lane for this request (docs/06); null = no degrade.
         degradeLane,
+        blockedModels: Array.isArray(caps?.blockedModels) ? (caps.blockedModels as string[]) : null,
       };
 
       const result = await route(internal, { allowCustomModel, keyPrefix, keyCaps }, signal);

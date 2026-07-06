@@ -194,6 +194,7 @@ function identityFromClaims(claims: Record<string, unknown>): AuthIdentity {
     caps: {
       allowedLanes: null,
       allowCustomModel: false,
+      blockedModels: null,
       allowFastMode: false,
       rateLimit: { rpm: null, tpm: null },
       concurrencyLimit: null,

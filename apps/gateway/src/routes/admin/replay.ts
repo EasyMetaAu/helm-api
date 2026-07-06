@@ -213,7 +213,11 @@ async function replayOpenAIChat(
     {
       allowCustomModel: key.allow_custom_model,
       keyPrefix: key.prefix,
-      keyCaps: { allowedLanes: key.allowed_lanes, degradeLane: null },
+      keyCaps: {
+        allowedLanes: key.allowed_lanes,
+        degradeLane: null,
+        blockedModels: key.blocked_models,
+      },
     },
     args.signal,
   );
@@ -348,6 +352,7 @@ async function replayViaPipeline(
       allowCustomModel: key.allow_custom_model,
       allowFastMode: key.allow_fast_mode,
       allowedLanes: key.allowed_lanes,
+      blockedModels: key.blocked_models,
     },
   };
 

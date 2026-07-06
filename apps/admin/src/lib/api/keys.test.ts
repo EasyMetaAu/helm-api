@@ -29,6 +29,7 @@ function summaryRow(
     role: 'user',
     allowed_lanes: null,
     allow_custom_model: false,
+    blocked_models: null,
     allow_fast_mode: false,
     disabled: false,
     rate_limit_rpm: null,
@@ -119,6 +120,7 @@ describe('keys api client', () => {
       role: 'user',
       allowed_lanes: ['economy', 'balanced'],
       allow_custom_model: false,
+      blocked_models: ['gpt-4o'],
       allow_fast_mode: true,
     });
 
@@ -129,6 +131,7 @@ describe('keys api client', () => {
     expect(body.role).toBe('user');
     expect(body.allowed_lanes).toEqual(['economy', 'balanced']);
     expect(body.allow_custom_model).toBe(false);
+    expect(body.blocked_models).toEqual(['gpt-4o']);
     expect(body.allow_fast_mode).toBe(true);
     expect(result.key_id).toBe('key_1');
     expect(result.plaintext).toBe('helm_live_SECRET_ONCE');
@@ -150,7 +153,18 @@ describe('keys api client', () => {
     const body = JSON.parse(init.body as string);
     expect(body).not.toHaveProperty('max_lane');
     expect(body).not.toHaveProperty('allowed_lanes');
+    expect(body).not.toHaveProperty('blocked_models');
     expect(body.role).toBe('user');
+  });
+
+  it('listKeys surfaces blocked model ids as null-or-array', async () => {
+    const rows = [summaryRow('k1'), summaryRow('k2', { blocked_models: ['gpt-4o'] })];
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(JSON.stringify(rows), { status: 200 }),
+    );
+    const keys = await listKeys();
+    expect(keys[0].blocked_models).toBeNull();
+    expect(keys[1].blocked_models).toEqual(['gpt-4o']);
   });
 
   it('listKeys surfaces per-key rate limits (null = inherit, number = override)', async () => {
@@ -267,6 +281,7 @@ describe('keys api client', () => {
     await updateKey('key_1', {
       allowed_lanes: ['economy', 'balanced'],
       allow_custom_model: true,
+      blocked_models: ['gpt-4o'],
       allow_fast_mode: true,
       rate_limit_rpm: null,
       rate_limit_tpm: 100,
@@ -277,6 +292,7 @@ describe('keys api client', () => {
     const body = JSON.parse(init.body as string);
     expect(body.allowed_lanes).toEqual(['economy', 'balanced']);
     expect(body.allow_custom_model).toBe(true);
+    expect(body.blocked_models).toEqual(['gpt-4o']);
     expect(body.allow_fast_mode).toBe(true);
     expect(body.rate_limit_rpm).toBeNull(); // explicit null = clear
     expect(body.rate_limit_tpm).toBe(100);
@@ -290,6 +306,16 @@ describe('keys api client', () => {
     const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
     const body = JSON.parse(init.body as string);
     expect(body.allowed_lanes).toBeNull();
+  });
+
+  it('updateKey forwards null to clear the blocked-model blacklist', async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(JSON.stringify({ key_id: 'key_1' }), { status: 200 }),
+    );
+    await updateKey('key_1', { blocked_models: null });
+    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    const body = JSON.parse(init.body as string);
+    expect(body.blocked_models).toBeNull();
   });
 
   it('updateKey rejects on a non-2xx response (404)', async () => {

@@ -28,6 +28,10 @@ export const MemoryThreadSourceSchema = z.enum(["header", "auto"]);
 // update schemas so the three can never drift apart.
 const KeyNameSchema = z.string().trim().min(1).max(100);
 
+// Exact client-facing model ids blocked for this API key across direct requests
+// and lane/fallback chains. Trim only; do not lowercase provider/model ids.
+const BlockedModelsSchema = z.array(z.string().trim().min(1)).nullable();
+
 export const ApiKeyRecordSchema = z.object({
   key_id: z.string().min(1),
   hash: z.string().min(1), // sha256(plaintext) hex; never the plaintext
@@ -42,6 +46,9 @@ export const ApiKeyRecordSchema = z.object({
   // Per-key caps (docs/06): present-but-nullable so the storage shape is explicit.
   allowed_lanes: z.array(z.string()).nullable(),
   allow_custom_model: z.boolean(),
+  // Per-key model blacklist. It removes exact models from every route this key
+  // can take; legacy rows default to null = no blacklist.
+  blocked_models: BlockedModelsSchema.default(null),
   // Per-key Fast-mode passthrough cap. false = client-requested Fast is downgraded
   // unless the serving subscription account itself has Fast mode forced on.
   allow_fast_mode: z.boolean().default(false),
@@ -118,6 +125,7 @@ export const CreateKeyRequestSchema = z
     name: KeyNameSchema.optional(),
     allowed_lanes: z.array(z.string().min(1)).optional(),
     allow_custom_model: z.boolean().optional(),
+    blocked_models: z.array(z.string().trim().min(1)).optional(),
     allow_fast_mode: z.boolean().optional(),
     // Optional per-key rate limits at mint time. Omitted => inherit the system
     // default. 0 => explicitly unlimited for that dimension (Principle 2 fail-closed on
@@ -164,6 +172,7 @@ export const UpdateKeyRequestSchema = z
     name: KeyNameSchema.nullable().optional(),
     allowed_lanes: z.array(z.string().min(1)).nullable().optional(),
     allow_custom_model: z.boolean().optional(),
+    blocked_models: BlockedModelsSchema.optional(),
     allow_fast_mode: z.boolean().optional(),
     rate_limit_rpm: z.number().int().nonnegative().nullable().optional(),
     rate_limit_tpm: z.number().int().nonnegative().nullable().optional(),

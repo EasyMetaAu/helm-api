@@ -158,6 +158,9 @@ export interface CreateKeyInput {
   name?: string;
   allowedLanes?: string[];
   allowCustomModel?: boolean;
+  // Exact client-facing model ids this key may not request when explicit model
+  // passthrough is enabled. Omitted => NULL => no blacklist.
+  blockedModels?: string[];
   // Per-key cap for CLIENT-requested Fast mode passthrough. Server/account-level
   // forced Fast mode is controlled separately by account settings.
   allowFastMode?: boolean;
@@ -229,6 +232,8 @@ export interface KeyPatch {
   name?: string | null;
   allowedLanes?: string[] | null;
   allowCustomModel?: boolean;
+  // null clears the blacklist; omitted leaves it untouched.
+  blockedModels?: string[] | null;
   allowFastMode?: boolean;
   rateLimitRpm?: number | null;
   rateLimitTpm?: number | null;

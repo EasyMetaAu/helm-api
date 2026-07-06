@@ -434,18 +434,21 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       await ctx.stores.keys.updateKey("k1", {
         allowedLanes: ["economy", "balanced"],
         allowCustomModel: true,
+        blockedModels: ["gpt-4o"],
         allowFastMode: true,
       });
       let got = await ctx.stores.keys.getByHash("h1");
       expect(got?.allowed_lanes).toEqual(["economy", "balanced"]);
       expect(got?.allow_custom_model).toBe(true);
+      expect(got?.blocked_models).toEqual(["gpt-4o"]);
       expect(got?.allow_fast_mode).toBe(true);
       expect(got?.role).toBe("user"); // never rewritten by updateKey
       // null clears the whitelist back to "no cap"; an omitted field is left untouched.
-      await ctx.stores.keys.updateKey("k1", { allowedLanes: null });
+      await ctx.stores.keys.updateKey("k1", { allowedLanes: null, blockedModels: null });
       got = await ctx.stores.keys.getByHash("h1");
       expect(got?.allowed_lanes).toBeNull();
       expect(got?.allow_custom_model).toBe(true);
+      expect(got?.blocked_models).toBeNull();
       expect(got?.allow_fast_mode).toBe(true);
     });
 

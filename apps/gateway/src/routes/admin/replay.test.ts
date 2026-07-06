@@ -18,6 +18,7 @@ function fakeKey(overrides: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
     name: null,
     allowed_lanes: null,
     allow_custom_model: false,
+    blocked_models: null,
     allow_fast_mode: false,
     disabled: false,
     rate_limit_rpm: null,
@@ -222,7 +223,7 @@ describe("runReplay", () => {
     expect(call?.opts).toEqual({
       allowCustomModel: false,
       keyPrefix: "helm_live_ab12",
-      keyCaps: { allowedLanes: null, degradeLane: null },
+      keyCaps: { allowedLanes: null, degradeLane: null, blockedModels: null },
     });
   });
 
@@ -329,7 +330,7 @@ describe("runReplay", () => {
     expect(rec.routeCalls[0]?.opts).toEqual({
       allowCustomModel: true,
       keyPrefix: "helm_live_root",
-      keyCaps: { allowedLanes: null, degradeLane: null },
+      keyCaps: { allowedLanes: null, degradeLane: null, blockedModels: null },
     });
     expect(rec.routeCalls[0]?.req.api_key_id).toBe("k_root");
     // Telemetry attributes the replay to the key ACTUALLY used.

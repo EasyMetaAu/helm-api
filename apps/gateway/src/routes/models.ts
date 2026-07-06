@@ -38,6 +38,7 @@ export function registerModelsRoute(app: Hono<AppEnv>, deps: ModelsRouteDeps): v
       providerAliases: oauth.length ? [...deps.providerAliases, ...oauth] : deps.providerAliases,
       allowCustomModel: identity.caps.allowCustomModel,
       allowedLanes: identity.caps.allowedLanes,
+      blockedModels: identity.caps.blockedModels,
     });
   };
 

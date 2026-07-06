@@ -143,6 +143,7 @@ describe("sqlite schema + migrations", () => {
       "role",
       "allowed_lanes",
       "allow_custom_model",
+      "blocked_models",
       "allow_fast_mode",
       "disabled",
       "created_at",

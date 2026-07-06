@@ -46,6 +46,7 @@
       name: name.trim().length > 0 ? name.trim() : null,
       allowed_lanes: form.allowedLanes.length > 0 ? [...form.allowedLanes] : null,
       allow_custom_model: form.allowCustomModel,
+      blocked_models: form.blockedModels.length > 0 ? [...form.blockedModels] : null,
       allow_fast_mode: form.allowFastMode,
       rate_limit_rpm: form.rpm ?? null,
       rate_limit_tpm: form.tpm ?? null,
@@ -68,6 +69,7 @@
         name: patch.name ?? null,
         allowed_lanes: patch.allowed_lanes ?? null,
         allow_custom_model: form.allowCustomModel,
+        blocked_models: patch.blocked_models ?? null,
         allow_fast_mode: form.allowFastMode,
         rate_limit_rpm: patch.rate_limit_rpm ?? null,
         rate_limit_tpm: patch.rate_limit_tpm ?? null,
@@ -128,7 +130,9 @@
         bind:value={name}
       />
       <span class="field-help"
-        >{$t('A label to help you recognize this key later — e.g. the project it belongs to.')}</span
+        >{$t(
+          'A label to help you recognize this key later — e.g. the project it belongs to.',
+        )}</span
       >
     </label>
 

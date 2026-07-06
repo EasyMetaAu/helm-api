@@ -2520,6 +2520,7 @@ export async function buildServer(
           caps: {
             allowedLanes: record.allowed_lanes,
             allowCustomModel: record.allow_custom_model,
+            blockedModels: record.blocked_models,
             allowFastMode: record.allow_fast_mode,
             // Per-key rate-limit override (docs/06): carried so the self-auth
             // /v1/messages + /v1/responses paths enforce per-key limits too, not
@@ -2691,6 +2692,7 @@ export async function buildServer(
           caps: {
             allowedLanes: record.allowed_lanes,
             allowCustomModel: record.allow_custom_model,
+            blockedModels: record.blocked_models,
             allowFastMode: record.allow_fast_mode,
             // Per-key rate-limit override (docs/06): carried so the self-auth
             // /v1/messages + /v1/responses paths enforce per-key limits too, not
@@ -2786,6 +2788,7 @@ export async function buildServer(
       caps: {
         allowedLanes: record.allowed_lanes,
         allowCustomModel: record.allow_custom_model,
+        blockedModels: record.blocked_models,
         allowFastMode: record.allow_fast_mode,
         rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
         // Per-key max in-flight (issue #93): read by the concurrency gate.

@@ -46,6 +46,7 @@ function record(overrides: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
     name: null,
     allowed_lanes: null,
     allow_custom_model: false,
+    blocked_models: null,
     allow_fast_mode: false,
     disabled: false,
     rate_limit_rpm: null,
@@ -104,6 +105,20 @@ describe("GET /v1/models", () => {
     expect(pro?.type).toBe("model");
     expect(pro?.pricing?.inputPerMTokUsd).toBe(0.5);
     expect(pro?.lanes?.sort()).toEqual(["balanced", "economy"]);
+  });
+
+  it("allow_custom_model key: hides blocked aliases from model discovery", async () => {
+    const res = await buildApp(
+      record({ allow_custom_model: true, blocked_models: ["deepseek/pro"] }),
+    ).request("/v1/models", {
+      headers: AUTH,
+    });
+    const body = (await res.json()) as ModelsList;
+    const ids = body.data.map((m) => m.id);
+    expect(ids).toContain("economy");
+    expect(ids).not.toContain("balanced");
+    expect(ids).toContain("deepseek/flash");
+    expect(ids).not.toContain("deepseek/pro");
   });
 
   it("allow_custom_model key: includes live subscription (OAuth) aliases", async () => {

@@ -469,6 +469,7 @@ export interface KeySummary {
   name: string | null;
   allowed_lanes: string[] | null;
   allow_custom_model: boolean;
+  blocked_models: string[] | null;
   allow_fast_mode: boolean;
   disabled: boolean;
   // Per-key rate-limit override (docs/06). null = inherit the system default; a

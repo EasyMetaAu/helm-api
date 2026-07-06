@@ -12,6 +12,7 @@ function rec(keyId: string, hash: string): ApiKeyRecord {
     role: "user",
     allowed_lanes: null,
     allow_custom_model: false,
+    blocked_models: null,
     disabled: false,
     rate_limit_rpm: null,
     rate_limit_tpm: null,

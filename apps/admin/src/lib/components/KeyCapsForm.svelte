@@ -7,6 +7,7 @@
   export type KeyCaps = {
     allowedLanes: string[];
     allowCustomModel: boolean;
+    blockedModels: string[];
     allowFastMode: boolean;
     rpm: number | null;
     tpm: number | null;
@@ -27,6 +28,7 @@
     return {
       allowedLanes: [],
       allowCustomModel: false,
+      blockedModels: [],
       allowFastMode: false,
       rpm: null,
       tpm: null,
@@ -50,6 +52,7 @@
     return {
       allowedLanes: [...(key.allowed_lanes ?? [])],
       allowCustomModel: key.allow_custom_model,
+      blockedModels: [...(key.blocked_models ?? [])],
       allowFastMode: key.allow_fast_mode,
       rpm: key.rate_limit_rpm,
       tpm: key.rate_limit_tpm,
@@ -64,6 +67,18 @@
       memoryProject: key.memory_project_id ?? '',
       memoryThreadSource: key.memory_thread_source,
     };
+  }
+
+  export function parseBlockedModels(value: string): string[] {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const raw of value.split(/[\n,;]+/)) {
+      const model = raw.trim();
+      if (model.length === 0 || seen.has(model)) continue;
+      seen.add(model);
+      out.push(model);
+    }
+    return out;
   }
 </script>
 
@@ -111,6 +126,10 @@
     form.allowedLanes = checked
       ? [...form.allowedLanes, lane]
       : form.allowedLanes.filter((l) => l !== lane);
+  }
+
+  function updateBlockedModels(value: string): void {
+    form.blockedModels = parseBlockedModels(value);
   }
 
   // One-line state recaps shown on the closed section headers.
@@ -199,6 +218,23 @@
     )}</span
   >
 </div>
+
+<label class="flex flex-col gap-1 text-sm">
+  <span class="field-label">{$t('Blocked models')}</span>
+  <textarea
+    rows="3"
+    aria-label={$t('Blocked models')}
+    placeholder={$t('One model id per line')}
+    class="input min-h-20 resize-y"
+    value={form.blockedModels.join('\n')}
+    oninput={(e) => updateBlockedModels(e.currentTarget.value)}
+  ></textarea>
+  <span class="field-help"
+    >{$t(
+      'Blocks exact model ids for this key across direct model requests and all lane/fallback routes.',
+    )}</span
+  >
+</label>
 
 <div class="flex flex-col gap-1">
   <label class="checkbox-field">

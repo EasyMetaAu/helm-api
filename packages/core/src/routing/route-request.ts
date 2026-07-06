@@ -229,7 +229,12 @@ export interface RouteOptions {
    *  target lane (ranked OR a task lane) and cannot be bypassed by explicit-model
    *  passthrough (passthrough is suppressed while degrading). The forced lane is
    *  still clamped to `allowedLanes` (the harder security bound). */
-  keyCaps?: { allowedLanes: string[] | null; degradeLane?: string | null };
+  keyCaps?: {
+    allowedLanes: string[] | null;
+    degradeLane?: string | null;
+    /** Exact model ids this key may never use, including lane/fallback chains. */
+    blockedModels?: string[] | null;
+  };
 }
 
 export interface RoutingSignalFeedbackDeps {
@@ -344,13 +349,17 @@ interface PlanDecision {
   evalUsd: number | null;
 }
 
-// An explicit passthrough rejected BEFORE execution (unknown model / lane not in
-// the key's allowed_lanes — docs/04 strict validation). Carries everything the
-// orchestrator needs to log a complete error DecisionRecord without executing:
-// `selectedLane` is the requested name (chain stays empty — nothing was planned).
+// A routing decision rejected BEFORE execution (unknown explicit model, lane not
+// in the key's allowed_lanes, or blocked_models removing every candidate). Carries
+// everything needed to log a complete error DecisionRecord without executing.
 interface PlanRejection {
   reject: HelmError;
   selectedLane: string;
+  candidateChain?: string[];
+  classifier?: DecisionRecord["classifier"];
+  policy?: DecisionRecord["policy"];
+  forcedReasoningEffort?: ReasoningEffort | null;
+  evalUsd?: number | null;
 }
 
 function isRejection(p: PlanDecision | PlanRejection): p is PlanRejection {
@@ -383,6 +392,22 @@ function signalSummary(signal: RoutingSignal): Record<string, unknown> {
   };
 }
 
+function blockedModelSetForCaps(keyCaps: RouteOptions["keyCaps"]): Set<string> | null {
+  const blocked = keyCaps?.blockedModels;
+  if (!Array.isArray(blocked) || blocked.length === 0) return null;
+  return new Set(blocked);
+}
+
+function laneHasPermittedModel(
+  lane: string,
+  lanes: LanesConfig,
+  keyCaps: RouteOptions["keyCaps"],
+): boolean {
+  const blocked = blockedModelSetForCaps(keyCaps);
+  if (blocked === null) return true;
+  return expandChain(lane, lanes).some((alias) => !blocked.has(alias));
+}
+
 function isDegradedSignal(signal: RoutingSignal, thresholds: SignalFeedbackThresholds): boolean {
   if (signal.samples < thresholds.minSamples) return false;
   return (
@@ -412,6 +437,7 @@ function strongerRankedLanes(selectedLane: string, lanes: LanesConfig): string[]
 
 function candidateAllowedByCaps(
   candidateLane: string,
+  lanes: LanesConfig,
   policyOutcome: ReturnType<typeof evaluatePolicies>,
   keyCaps: RouteOptions["keyCaps"],
 ): boolean {
@@ -424,7 +450,8 @@ function candidateAllowedByCaps(
     reasoning_effort: null,
     reason: "key caps",
   });
-  return capped === candidateLane;
+  if (capped !== candidateLane) return false;
+  return laneHasPermittedModel(candidateLane, lanes, keyCaps);
 }
 
 async function maybeApplySignalFeedback(args: {
@@ -447,7 +474,7 @@ async function maybeApplySignalFeedback(args: {
 
   const thresholds = signalThresholds(feedback);
   const candidates = strongerRankedLanes(selectedLane, lanes).filter((candidate) =>
-    candidateAllowedByCaps(candidate, policyOutcome, keyCaps),
+    candidateAllowedByCaps(candidate, lanes, policyOutcome, keyCaps),
   );
   if (candidates.length === 0) return null;
 
@@ -509,6 +536,47 @@ function passthroughClassifier(): DecisionRecord["classifier"] {
   };
 }
 
+function blockedModelSet(opts: RouteOptions): Set<string> | null {
+  return blockedModelSetForCaps(opts.keyCaps);
+}
+
+function filterBlockedModels(chain: string[], opts: RouteOptions): string[] {
+  const blocked = blockedModelSet(opts);
+  if (blocked === null) return chain;
+  const filtered = chain.filter((alias) => !blocked.has(alias));
+  return filtered.length === chain.length ? chain : filtered;
+}
+
+function isDirectBlockedModel(req: InternalRequest, deps: RouteDeps, opts: RouteOptions): boolean {
+  const model = req.requested_model;
+  if (model.length === 0 || model === "auto") return false;
+  if (Object.hasOwn(deps.lanes, model)) return false;
+  return blockedModelSet(opts)?.has(model) === true;
+}
+
+function noPermittedModelsRejection(args: {
+  req: InternalRequest;
+  selectedLane: string;
+  classifier: DecisionRecord["classifier"];
+  policy: DecisionRecord["policy"];
+  forcedReasoningEffort: ReasoningEffort | null;
+  evalUsd: number | null;
+}): PlanRejection {
+  return {
+    reject: makeHelmError({
+      error_class: "invalid_request",
+      message: `all candidate models for lane "${args.selectedLane}" are blocked for this key`,
+      trace_id: args.req.request_id,
+    }),
+    selectedLane: args.selectedLane,
+    candidateChain: [],
+    classifier: args.classifier,
+    policy: args.policy,
+    forcedReasoningEffort: args.forcedReasoningEffort,
+    evalUsd: args.evalUsd,
+  };
+}
+
 // Compute the execution plan + the classifier/policy decision segments. Explicit
 // passthrough short-circuits classify/policy/resolver entirely (docs/04: highest
 // priority, gated by allow_custom_model).
@@ -517,6 +585,22 @@ async function plan(
   deps: RouteDeps,
   opts: RouteOptions,
 ): Promise<PlanDecision | PlanRejection> {
+  if (isDirectBlockedModel(req, deps, opts)) {
+    return {
+      reject: makeHelmError({
+        error_class: "invalid_request",
+        message: `model "${req.requested_model}" is blocked for this key`,
+        trace_id: req.request_id,
+      }),
+      selectedLane: req.requested_model,
+      candidateChain: [],
+      classifier: passthroughClassifier(),
+      policy: { matched_policy_id: null, reason: "blocked model rejected" },
+      forcedReasoningEffort: null,
+      evalUsd: null,
+    };
+  }
+
   // 0pre) IMAGE-GENERATION models are ALWAYS model-pinned to their exact alias —
   //    for ANY key, regardless of allow_custom_model, and AHEAD of the alias-glob
   //    shim (§0a) and classification (§2). An image model has no "auto"/classify
@@ -582,19 +666,34 @@ async function plan(
       });
     }
     const clamped = lane !== aliasTarget;
+    const chain = filterBlockedModels(
+      promoteRequestedModel(expandChain(lane, deps.lanes), req.requested_model),
+      opts,
+    );
+    const policy = {
+      matched_policy_id: outcome.matched_policy_id,
+      reason: clamped
+        ? `model alias "${req.requested_model}" -> lane "${aliasTarget}" (capped to "${lane}")`
+        : `model alias "${req.requested_model}" -> lane "${aliasTarget}"`,
+    };
+    if (chain.length === 0) {
+      return noPermittedModelsRejection({
+        req,
+        selectedLane: lane,
+        classifier: passthroughClassifier(),
+        policy,
+        forcedReasoningEffort: outcome.reasoning_effort,
+        evalUsd: null,
+      });
+    }
     return {
       plan: {
         selected_lane: lane,
-        candidate_chain: promoteRequestedModel(expandChain(lane, deps.lanes), req.requested_model),
+        candidate_chain: chain,
         explicit_model: null,
       },
       classifier: passthroughClassifier(),
-      policy: {
-        matched_policy_id: outcome.matched_policy_id,
-        reason: clamped
-          ? `model alias "${req.requested_model}" -> lane "${aliasTarget}" (capped to "${lane}")`
-          : `model alias "${req.requested_model}" -> lane "${aliasTarget}"`,
-      },
+      policy,
       forcedReasoningEffort: outcome.reasoning_effort,
       evalUsd: null,
     };
@@ -641,14 +740,26 @@ async function plan(
           selectedLane: model,
         };
       }
+      const policy = { matched_policy_id: null, reason: "explicit lane passthrough" };
+      const chain = filterBlockedModels(expandChain(model, deps.lanes), opts);
+      if (chain.length === 0) {
+        return noPermittedModelsRejection({
+          req,
+          selectedLane: model,
+          classifier: passthroughClassifier(),
+          policy,
+          forcedReasoningEffort: null,
+          evalUsd: null,
+        });
+      }
       return {
         plan: {
           selected_lane: model,
-          candidate_chain: expandChain(model, deps.lanes),
+          candidate_chain: chain,
           explicit_model: null,
         },
         classifier: passthroughClassifier(),
-        policy: { matched_policy_id: null, reason: "explicit lane passthrough" },
+        policy,
         forcedReasoningEffort: null,
         evalUsd: null,
       };
@@ -731,34 +842,51 @@ async function plan(
   // suppression in steps 0a/1). In those cases the request behaves as auto, so
   // pass no requested model and keep the degrade/classified lane's declared order.
   const honorRequestedModel = !aliasToAuto && opts.keyCaps?.degradeLane == null;
-  const chain = promoteRequestedModel(
-    expandChain(cappedLane, deps.lanes),
-    honorRequestedModel ? req.requested_model : "",
+  const chain = filterBlockedModels(
+    promoteRequestedModel(
+      expandChain(cappedLane, deps.lanes),
+      honorRequestedModel ? req.requested_model : "",
+    ),
+    opts,
   );
   const explanation =
     signalAdjustment === null
       ? cls.explanation
       : [...cls.explanation, signalAdjustment.explanation];
 
+  const classifier: DecisionRecord["classifier"] = {
+    task_type: cls.task_type,
+    complexity: cls.complexity,
+    confidence: cls.confidence,
+    decided_by: cls.decided_by,
+    // Thread Layer-2 eval observability straight from the classify adapter
+    // (cascade). null/undefined collapse to null so the record never carries
+    // an ambiguous undefined (principle 5: classification fields only).
+    rules_confidence: cls.rules_confidence ?? null,
+    eval_cache_hit: cls.eval_cache_hit ?? null,
+    eval_model: cls.eval_model ?? null,
+    eval_latency_ms: cls.eval_latency_ms ?? null,
+    fallback_reason: cls.fallback_reason ?? null,
+    constraints: cls.constraints as Record<string, unknown>,
+    explanation,
+  };
+  const policy = { matched_policy_id: outcome.matched_policy_id, reason: outcome.reason };
+
+  if (chain.length === 0) {
+    return noPermittedModelsRejection({
+      req,
+      selectedLane: cappedLane,
+      classifier,
+      policy,
+      forcedReasoningEffort: outcome.reasoning_effort,
+      evalUsd: cls.eval_usd ?? null,
+    });
+  }
+
   return {
     plan: { selected_lane: cappedLane, candidate_chain: chain, explicit_model: null },
-    classifier: {
-      task_type: cls.task_type,
-      complexity: cls.complexity,
-      confidence: cls.confidence,
-      decided_by: cls.decided_by,
-      // Thread Layer-2 eval observability straight from the classify adapter
-      // (cascade). null/undefined collapse to null so the record never carries
-      // an ambiguous undefined (principle 5: classification fields only).
-      rules_confidence: cls.rules_confidence ?? null,
-      eval_cache_hit: cls.eval_cache_hit ?? null,
-      eval_model: cls.eval_model ?? null,
-      eval_latency_ms: cls.eval_latency_ms ?? null,
-      fallback_reason: cls.fallback_reason ?? null,
-      constraints: cls.constraints as Record<string, unknown>,
-      explanation,
-    },
-    policy: { matched_policy_id: outcome.matched_policy_id, reason: outcome.reason },
+    classifier,
+    policy,
     forcedReasoningEffort: outcome.reasoning_effort,
     evalUsd: cls.eval_usd ?? null,
   };
@@ -771,10 +899,10 @@ export async function routeRequest(
 ): Promise<ExecutionResult> {
   const planned = await plan(req, deps, opts);
 
-  // Explicit passthrough rejected before execution (unknown model / lane not
-  // permitted): no provider was attempted, but the rejection is still a routing
-  // decision — log a complete error record (empty chain, no attempts, costs
-  // unknown) so it shows up in the Debug UI like any other terminal error.
+  // Rejected before execution (unknown model, lane not permitted, or every
+  // candidate blocked for this key): no provider was attempted, but the rejection
+  // is still a routing decision — log a complete error record so it shows up in
+  // the Debug UI like any other terminal error.
   if (isRejection(planned)) {
     const decision: DecisionRecord = {
       request_id: req.request_id,
@@ -782,9 +910,12 @@ export async function routeRequest(
       requested_model: req.requested_model,
       protocol: req.protocol,
       key_prefix: opts.keyPrefix ?? null,
-      classifier: passthroughClassifier(),
-      policy: { matched_policy_id: null, reason: "explicit passthrough rejected" },
-      lane: { selected_lane: planned.selectedLane, candidate_chain: [] },
+      classifier: planned.classifier ?? passthroughClassifier(),
+      policy: planned.policy ?? {
+        matched_policy_id: null,
+        reason: "explicit passthrough rejected",
+      },
+      lane: { selected_lane: planned.selectedLane, candidate_chain: planned.candidateChain ?? [] },
       provider_attempts: [],
       final: {
         model_alias: null,
@@ -794,7 +925,11 @@ export async function routeRequest(
       },
       latency_total_ms: 0,
       fallback_count: 0,
-      cost_breakdown: { eval_usd: null, completion_usd: null, total_usd: null },
+      cost_breakdown: {
+        eval_usd: planned.evalUsd ?? null,
+        completion_usd: null,
+        total_usd: planned.evalUsd ?? null,
+      },
       // Stamped by the GATEWAY after inject ran (memory is a middleware) — the
       // routing core always emits null.
       memory: null,
