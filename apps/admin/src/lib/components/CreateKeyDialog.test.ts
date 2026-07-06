@@ -41,18 +41,18 @@ describe('CreateKeyDialog', () => {
     // Tick a subset of lanes; the whitelist is the only lane cap (no max-lane field).
     await fireEvent.click(screen.getByLabelText('economy'));
     await fireEvent.click(screen.getByLabelText('balanced'));
+    await fireEvent.click(screen.getByLabelText('allow custom model'));
     await fireEvent.input(screen.getByLabelText('Blocked models'), {
       target: { value: 'gpt-4o\nanthropic/claude-sonnet-4-6' },
     });
     await fireEvent.click(screen.getByLabelText('allow client-requested Fast mode'));
-    // allow_custom_model defaults to false; leave that checkbox unchecked.
     await fireEvent.click(screen.getByRole('button', { name: /create key/i }));
 
     await waitFor(() => expect(createKey).toHaveBeenCalledTimes(1));
     const input = createKey.mock.calls[0][0];
     expect(input.allowed_lanes).toEqual(['economy', 'balanced']);
     expect(input.blocked_models).toEqual(['gpt-4o', 'anthropic/claude-sonnet-4-6']);
-    expect(input.allow_custom_model).toBe(false);
+    expect(input.allow_custom_model).toBe(true);
     expect(input.allow_fast_mode).toBe(true);
   });
 
@@ -78,12 +78,15 @@ describe('CreateKeyDialog', () => {
     expect(input.rate_limit_tpm).toBeUndefined();
   });
 
-  it('collapses the optional cap sections by default, basics stay visible', () => {
+  it('collapses the optional cap sections by default, basics stay visible', async () => {
     setup();
     // Basics (lanes + passthrough) are immediately visible — not inside a section.
     expect(screen.getByLabelText('economy')).toBeInTheDocument();
     expect(screen.getByLabelText('allow custom model')).toBeInTheDocument();
     expect(screen.getByLabelText('allow client-requested Fast mode')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Blocked models')).not.toBeInTheDocument();
+    await fireEvent.click(screen.getByLabelText('allow custom model'));
+    expect(screen.getByLabelText('Blocked models')).toBeInTheDocument();
     // The three optional groups render as <details> sections, all closed.
     const sections = document.querySelectorAll('details');
     expect(sections).toHaveLength(3);

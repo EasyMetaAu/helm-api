@@ -9,9 +9,7 @@ import zhHant from '../../locales/zh-hant.json';
 // ConnectMcpDialog (Memory page) ships localized prose around literal copy-paste
 // snippets. These are static `$t('…')` calls so the extractor sees them — but a
 // missing translation still silently falls back to English (the exact regression
-// the Memory nav subtitle hit). Guard every translatable string. 'curl' is a proper
-// noun (command name), identical across locales by design, so it is NOT asserted to
-// differ from English.
+// the Memory nav subtitle hit). Guard every translatable string.
 const mcpKeys = [
   'Connect via MCP',
   "Give an AI agent persistent memory. Helm's MCP server exposes the facts and reflections on this page as tools (memory_add, memory_search, memory_list, …), scoped to the account behind your API key.",
@@ -21,8 +19,7 @@ const mcpKeys = [
   'Codex and other stdio-only clients reach the HTTP server through the mcp-remote bridge in ~/.codex/config.toml.',
   'Check connectivity and auth with a raw JSON-RPC call. It lists the memory tools the server exposes.',
   'JSON config',
-  // ChatGPT OAuth walkthrough prose ('ChatGPT' itself is a proper noun, identical
-  // across locales by design, so — like 'curl' — it is not asserted to differ).
+  // ChatGPT OAuth walkthrough prose.
   "ChatGPT connects over OAuth, not a bearer key — you won't paste your key into ChatGPT. Instead, ChatGPT opens a Helm login page where you paste it to authorize.",
   'In ChatGPT, open Settings → Connectors and add a custom connector / MCP server (you may need to turn on developer mode).',
   'Server URL: paste the URL above (it must end in /mcp).',

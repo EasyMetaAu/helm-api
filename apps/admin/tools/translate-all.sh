@@ -95,15 +95,6 @@ for lang_pair in "${languages[@]}"; do
   echo ""
 done
 
-# Keep technical enum labels (decided_by: rules/eval/fallback) in English across
-# every locale — they must match the raw values shown in the request table + logs.
-print_info "Forcing do-not-translate enum labels to English..."
-if node tools/keep-english.mjs; then
-  print_status "Enum labels kept in English"
-else
-  print_error "keep-english step failed"
-fi
-
 echo "================================"
 print_info "Translation task completed!"
 print_status "Success: ${success} languages"

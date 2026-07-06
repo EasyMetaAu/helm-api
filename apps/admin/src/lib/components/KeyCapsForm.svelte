@@ -219,22 +219,24 @@
   >
 </div>
 
-<label class="flex flex-col gap-1 text-sm">
-  <span class="field-label">{$t('Blocked models')}</span>
-  <textarea
-    rows="3"
-    aria-label={$t('Blocked models')}
-    placeholder={$t('One model id per line')}
-    class="input min-h-20 resize-y"
-    value={form.blockedModels.join('\n')}
-    oninput={(e) => updateBlockedModels(e.currentTarget.value)}
-  ></textarea>
-  <span class="field-help"
-    >{$t(
-      'Blocks exact model ids for this key across direct model requests and all lane/fallback routes.',
-    )}</span
-  >
-</label>
+{#if form.allowCustomModel}
+  <label class="flex flex-col gap-1 text-sm">
+    <span class="field-label">{$t('Blocked models')}</span>
+    <textarea
+      rows="3"
+      aria-label={$t('Blocked models')}
+      placeholder={$t('One model id per line')}
+      class="input min-h-20 resize-y"
+      value={form.blockedModels.join('\n')}
+      oninput={(e) => updateBlockedModels(e.currentTarget.value)}
+    ></textarea>
+    <span class="field-help"
+      >{$t(
+        'Blocks exact model ids for this key across direct model requests and all lane/fallback routes.',
+      )}</span
+    >
+  </label>
+{/if}
 
 <div class="flex flex-col gap-1">
   <label class="checkbox-field">
