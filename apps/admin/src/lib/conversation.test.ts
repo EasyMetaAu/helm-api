@@ -570,60 +570,74 @@ describe('clarity pass', () => {
   });
 });
 
-// formatToolArgs powers the collapsed row's `Name(<detail>)` preview. It picks one
-// meaningful field per known tool, coerces a JSON-string arg to its object, truncates,
-// and NEVER throws (returns '' when there's nothing to show). Tool names are Claude
-// Code's capitalized names; matching is case-insensitive so lowercase OpenAI names work.
+// formatToolArgs powers the collapsed row's `Name(<detail>)` preview. It is GENERIC
+// and whitelist-free: it works off the ARGS shape (surface the most readable field,
+// else the first scalar, else compact JSON), so EVERY tool renders a detail — known,
+// unknown, lowercase, or a custom MCP tool. The tool NAME is not even consulted (a
+// couple of polish touches key on the FIELD, e.g. `command` chains, `content` sizes).
+// PURE + fail-soft: never throws, '' only when there's genuinely nothing to show.
 describe('formatToolArgs', () => {
-  it('shows the Bash command', () => {
+  it('surfaces a preferred field: command / file_path / query …', () => {
     expect(formatToolArgs('Bash', { command: 'ls -la', description: 'list' })).toBe('ls -la');
+    expect(formatToolArgs('Read', { file_path: '/a/b.ts' })).toBe('/a/b.ts');
+    expect(formatToolArgs('Edit', { file_path: '/a/c.ts', old_string: 'x' })).toBe('/a/c.ts');
+    expect(formatToolArgs('Grep', { pattern: 'foo', path: '/x' })).toBe('foo');
+    expect(formatToolArgs('WebSearch', { query: 'helm router' })).toBe('helm router');
   });
 
-  it('chains a multi-stage Bash command with →', () => {
+  it('works for an UNKNOWN / custom tool by picking its first readable field', () => {
+    // No whitelist — a never-seen tool still shows a detail, not a blind `Name()`.
+    expect(formatToolArgs('my_custom_mcp_tool', { url: 'https://x.dev', method: 'GET' })).toBe('https://x.dev');
+    expect(formatToolArgs('totally_unknown', { widget_id: 'w-42', extra: 'z' })).toBe('w-42');
+  });
+
+  it('does NOT depend on tool name (lowercase, weird casing all work)', () => {
+    expect(formatToolArgs('read', { file_path: '/HEARTBEAT.md' })).toBe('/HEARTBEAT.md');
+    expect(formatToolArgs('bash', { command: 'pwd' })).toBe('pwd');
+    expect(formatToolArgs('', { query: 'x' })).toBe('x'); // even an empty name
+  });
+
+  it('chains a multi-stage command on → (field-keyed polish, any tool)', () => {
     expect(formatToolArgs('Bash', { command: 'cd /tmp && ls; echo done' })).toBe('cd /tmp → ls → echo done');
   });
 
-  it('matches tool names case-insensitively (lowercase openai)', () => {
-    expect(formatToolArgs('bash', { command: 'pwd' })).toBe('pwd');
-  });
-
-  it('shows file_path for Read/Edit', () => {
-    expect(formatToolArgs('Read', { file_path: '/a/b.ts' })).toBe('/a/b.ts');
-    expect(formatToolArgs('Edit', { file_path: '/a/c.ts', old_string: 'x' })).toBe('/a/c.ts');
-  });
-
-  it('appends a size suffix for Write', () => {
+  it('appends a size hint when a file_path has sibling content (any tool)', () => {
     expect(formatToolArgs('Write', { file_path: '/tmp/x.md', content: 'y'.repeat(2100) })).toBe('/tmp/x.md · 2.1k');
-    expect(formatToolArgs('Write', { file_path: '/tmp/x.md', content: '' })).toBe('/tmp/x.md');
+    expect(formatToolArgs('Write', { file_path: '/tmp/x.md', content: '' })).toBe('/tmp/x.md'); // empty content, no hint
   });
 
-  it('shows the Agent description, not the long prompt', () => {
-    expect(formatToolArgs('Agent', { description: 'Map supply', prompt: 'x'.repeat(500), subagent_type: 'general' })).toBe('Map supply');
-  });
-
-  it('shows subject for TaskCreate and id→status for TaskUpdate', () => {
-    expect(formatToolArgs('TaskCreate', { subject: 'Widen window', description: 'z' })).toBe('Widen window');
-    expect(formatToolArgs('TaskUpdate', { taskId: '12', status: 'in_progress', owner: 'x' })).toBe('12 → in_progress');
+  it('prefers a human field over a long prompt only via ranking, never gating', () => {
+    // description outranks prompt in the preference list.
+    expect(formatToolArgs('Agent', { description: 'Map supply', prompt: 'x'.repeat(500) })).toBe('Map supply');
+    // but a tool with ONLY prompt still shows it (no whitelist to exclude it).
+    expect(formatToolArgs('SomeAgent', { prompt: 'do the thing' })).toBe('do the thing');
   });
 
   it('coerces a raw JSON-string arg to its object', () => {
     expect(formatToolArgs('Bash', JSON.stringify({ command: 'whoami' }))).toBe('whoami');
   });
 
-  it('falls back to truncated JSON for an unknown tool', () => {
-    expect(formatToolArgs('MysteryTool', { a: 1, b: 'two' })).toBe('{"a":1,"b":"two"}');
+  it('picks the first scalar when NO preferred key matches', () => {
+    expect(formatToolArgs('Weird', { taskId: '12', status: 'in_progress' })).toBe('12');
+    expect(formatToolArgs('Cron', { schedule: '*/5 * * * *', on: true })).toBe('*/5 * * * *');
   });
 
-  it('shows the cron expression for CronCreate', () => {
-    expect(formatToolArgs('CronCreate', { cron: '*/17 * * * *', prompt: 'x', recurring: true })).toBe('*/17 * * * *');
+  it('shows a numeric/boolean scalar field rather than nothing', () => {
+    expect(formatToolArgs('N', { count: 42 })).toBe('42');
+    expect(formatToolArgs('B', { enabled: true })).toBe('true');
+  });
+
+  it('compact JSON only when there is no scalar field at all', () => {
+    expect(formatToolArgs('Nested', { filter: { a: 1 }, items: [1, 2] })).toBe('{"filter":{"a":1},"items":[1,2]}');
+  });
+
+  it('shows a bare string / array arg directly', () => {
+    expect(formatToolArgs('Whatever', 'just text')).toBe('just text');
+    expect(formatToolArgs('Arr', [1, 2, 3])).toBe('[1,2,3]');
   });
 
   it('an empty-object arg shows nothing (bare Name()), not {}', () => {
     expect(formatToolArgs('TaskList', {})).toBe('');
-  });
-
-  it('shows a bare string arg', () => {
-    expect(formatToolArgs('Whatever', 'just text')).toBe('just text');
   });
 
   it('truncates long details with an ellipsis', () => {
@@ -632,9 +646,8 @@ describe('formatToolArgs', () => {
     expect(out.endsWith('…')).toBe(true);
   });
 
-  it('is fail-soft: null/garbage args → empty string', () => {
+  it('is fail-soft: null/undefined args → empty string', () => {
     expect(formatToolArgs('Bash', null)).toBe('');
     expect(formatToolArgs('Bash', undefined)).toBe('');
-    expect(formatToolArgs('Read', { file_path: 123 })).toBe(''); // wrong type → nothing to show
   });
 });
