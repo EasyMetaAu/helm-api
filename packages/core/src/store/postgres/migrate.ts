@@ -778,6 +778,18 @@ const MIGRATIONS: readonly Migration[] = [
         ON telemetry (api_key_id, created_at, model_search);
     `,
   },
+  {
+    // Per-key model blacklist. Nullable jsonb array; removes exact models from
+    // direct requests and all lane/fallback chains.
+    version: 37,
+    run: async (db) => {
+      if (await pgTableHasColumns(db, "api_keys", ["key_id"])) {
+        await db.execute(
+          sql.raw("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS blocked_models JSONB"),
+        );
+      }
+    },
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {
@@ -788,7 +800,7 @@ function resultRows<T>(result: unknown): T[] {
 
 async function pgTableHasColumns(
   db: RawExecutor,
-  table: "memory_threads" | "memory_messages" | "memory_jobs" | "oauth_quota",
+  table: "api_keys" | "memory_threads" | "memory_messages" | "memory_jobs" | "oauth_quota",
   requiredColumns: readonly string[],
 ): Promise<boolean> {
   const rows = resultRows<{ column_name: string }>(

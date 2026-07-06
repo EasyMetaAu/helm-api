@@ -225,6 +225,7 @@ interface ChatIdentity {
     allowCustomModel: boolean;
     allowFastMode?: boolean;
     allowedLanes?: string[] | null;
+    blockedModels?: string[] | null;
     budget?: BudgetCaps;
     /** Per-key memory defaults (issue #97); absent = memory off unless headers say otherwise. */
     memory?: MemoryKeyDefaults;
@@ -716,6 +717,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
           // Forced degrade lane: set only when the key is over budget AND its
           // behavior is "degrade" (docs/06). null = no degrade for this request.
           degradeLane,
+          blockedModels: identity.caps?.blockedModels ?? null,
         },
       },
       c.req.raw.signal,

@@ -33,6 +33,7 @@ class InMemoryKeyStore implements KeyStore {
       name: input.name ?? null,
       allowed_lanes: input.allowedLanes ?? null,
       allow_custom_model: input.allowCustomModel ?? false,
+      blocked_models: input.blockedModels ?? null,
       allow_fast_mode: input.allowFastMode ?? false,
       disabled: false,
       rate_limit_rpm: input.rateLimitRpm ?? null,
@@ -73,6 +74,7 @@ class InMemoryKeyStore implements KeyStore {
     const next = { ...r };
     if (patch.allowedLanes !== undefined) next.allowed_lanes = patch.allowedLanes;
     if (patch.allowCustomModel !== undefined) next.allow_custom_model = patch.allowCustomModel;
+    if (patch.blockedModels !== undefined) next.blocked_models = patch.blockedModels;
     if (patch.allowFastMode !== undefined) next.allow_fast_mode = patch.allowFastMode;
     if (patch.rateLimitRpm !== undefined) next.rate_limit_rpm = patch.rateLimitRpm;
     if (patch.rateLimitTpm !== undefined) next.rate_limit_tpm = patch.rateLimitTpm;
@@ -389,6 +391,7 @@ describe("port type contracts", () => {
       | "name"
       | "allowedLanes"
       | "allowCustomModel"
+      | "blockedModels"
       | "allowFastMode"
       | "rateLimitRpm"
       | "rateLimitTpm"

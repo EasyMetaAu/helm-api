@@ -256,6 +256,7 @@ describe("createMessagesPipeline — failure surfaces", () => {
     expect((sawOpts as RouteOptions | null)?.keyCaps).toEqual({
       allowedLanes: ["economy"],
       degradeLane: null,
+      blockedModels: null,
     });
   });
 
@@ -270,6 +271,7 @@ describe("createMessagesPipeline — failure surfaces", () => {
     expect((sawOpts as RouteOptions | null)?.keyCaps).toEqual({
       allowedLanes: null,
       degradeLane: null,
+      blockedModels: null,
     });
   });
 

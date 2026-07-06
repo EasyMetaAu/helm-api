@@ -34,6 +34,8 @@ export interface BuildModelsListInput {
   allowCustomModel: boolean;
   /** The key's allowed_lanes cap; null/undefined = unconstrained. */
   allowedLanes?: string[] | null;
+  /** Exact concrete aliases hidden from and unavailable to this key. */
+  blockedModels?: string[] | null;
 }
 
 // Provider name an alias is owned by: the prefix before the first "/" (e.g.
@@ -46,10 +48,16 @@ function ownerOf(alias: string): string {
 export function buildModelsList(input: BuildModelsListInput): ModelsList {
   const { lanes, catalog, providerAliases, allowCustomModel } = input;
 
-  // Visible lanes: config (insertion) order, narrowed by the key's allowed_lanes.
+  const blocked = new Set(input.blockedModels ?? []);
+  const laneHasVisibleCandidate = (name: string): boolean =>
+    expandLaneChain(name, lanes).some((alias) => !blocked.has(alias));
+
+  // Visible lanes: config (insertion) order, narrowed by the key's allowed_lanes
+  // and by the key's blocked_models. A lane whose entire expanded chain is
+  // blocked is not actually usable by this key, so do not advertise it.
   const allowed = input.allowedLanes ?? null;
   const visibleLanes = Object.keys(lanes).filter(
-    (name) => allowed === null || allowed.includes(name),
+    (name) => (allowed === null || allowed.includes(name)) && laneHasVisibleCandidate(name),
   );
 
   const data: ModelObject[] = [];
@@ -89,7 +97,9 @@ export function buildModelsList(input: BuildModelsListInput): ModelsList {
       }
     }
 
-    const uniqueAliases = [...new Set(providerAliases)].sort((a, b) => a.localeCompare(b));
+    const uniqueAliases = [...new Set(providerAliases)]
+      .filter((alias) => !blocked.has(alias))
+      .sort((a, b) => a.localeCompare(b));
     for (const alias of uniqueAliases) {
       const meta = catalog.get(alias);
       data.push({

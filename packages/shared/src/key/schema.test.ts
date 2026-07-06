@@ -32,6 +32,24 @@ describe("ApiKeyRecordSchema", () => {
     expect(ApiKeyRecordSchema.safeParse(withCaps).success).toBe(true);
   });
 
+  it("accepts per-key blocked model ids and defaults legacy rows to no blacklist", () => {
+    const legacy = ApiKeyRecordSchema.parse(fullKey());
+    expect(legacy.blocked_models).toBeNull();
+
+    const parsed = ApiKeyRecordSchema.parse({
+      ...fullKey(),
+      blocked_models: ["gpt-4o", "anthropic/claude-sonnet-4-6"],
+    });
+    expect(parsed.blocked_models).toEqual(["gpt-4o", "anthropic/claude-sonnet-4-6"]);
+  });
+
+  it("rejects blank blocked model ids on create/update payloads", () => {
+    expect(CreateKeyRequestSchema.safeParse({ blocked_models: ["gpt-4o", "  "] }).success).toBe(
+      false,
+    );
+    expect(UpdateKeyRequestSchema.safeParse({ blocked_models: [""] }).success).toBe(false);
+  });
+
   it("enforces the role enum", () => {
     for (const r of ["root", "user"] as const) {
       expect(ApiKeyRecordSchema.safeParse({ ...fullKey(), role: r }).success).toBe(true);

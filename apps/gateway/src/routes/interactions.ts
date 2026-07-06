@@ -273,7 +273,32 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
             "UNAVAILABLE",
           );
     }
-    const geminiTargets = chain.targets.filter((t) => t.kind === "gemini");
+    const blockedModels = new Set(identity.caps?.blockedModels ?? []);
+    const permittedTargets =
+      blockedModels.size === 0
+        ? chain.targets
+        : chain.targets.filter((target) => !blockedModels.has(target.alias));
+    const permittedCandidateChain =
+      blockedModels.size === 0
+        ? chain.candidateChain
+        : chain.candidateChain.filter((alias) => !blockedModels.has(alias));
+    if (permittedTargets.length === 0) {
+      const directBlocked = blockedModels.has(parsed.data.model);
+      return errorJson(
+        c,
+        400,
+        directBlocked
+          ? `model '${parsed.data.model}' is blocked for this key`
+          : `all image candidate models for '${parsed.data.model}' are blocked for this key`,
+        "INVALID_ARGUMENT",
+      );
+    }
+    const permittedChain = {
+      ...chain,
+      candidateChain: permittedCandidateChain,
+      targets: permittedTargets,
+    };
+    const geminiTargets = permittedChain.targets.filter((t) => t.kind === "gemini");
     if (geminiTargets.length === 0) {
       return errorJson(
         c,
@@ -333,8 +358,8 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
           traceId,
           keyPrefix,
           requested: parsed.data.model,
-          selectedLane: chain.laneName,
-          candidateChain: chain.candidateChain,
+          selectedLane: permittedChain.laneName,
+          candidateChain: permittedChain.candidateChain,
           attempts: outcome.attempts,
           served: null,
           finalErrorClass: outcome.errorClass,
@@ -368,8 +393,8 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
         traceId,
         keyPrefix,
         requested: parsed.data.model,
-        selectedLane: chain.laneName,
-        candidateChain: chain.candidateChain,
+        selectedLane: permittedChain.laneName,
+        candidateChain: permittedChain.candidateChain,
         attempts: outcome.attempts,
         served: { alias: served.alias, providerModel: served.providerModel },
         finalErrorClass: null,
@@ -411,7 +436,7 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
     }
 
     // 8) Observability headers + the interactions JSON (full image) to the client.
-    c.header("x-helm-lane", chain.laneName);
+    c.header("x-helm-lane", permittedChain.laneName);
     c.header("x-helm-final-model", served.alias);
     c.header("x-helm-provider-model", served.providerModel);
     return c.json(result.clientBody);

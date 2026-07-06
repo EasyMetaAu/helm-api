@@ -59,6 +59,7 @@
     const trimmedName = name.trim();
     if (trimmedName.length > 0) input.name = trimmedName;
     if (form.allowedLanes.length > 0) input.allowed_lanes = [...form.allowedLanes];
+    if (form.blockedModels.length > 0) input.blocked_models = [...form.blockedModels];
     // Send a rate limit only when the operator set one; blank => inherit default.
     // `!= null` also catches the `undefined` Svelte 5 gives an emptied number input.
     if (form.rpm != null) input.rate_limit_rpm = form.rpm;
@@ -113,6 +114,7 @@
         name: name.trim().length > 0 ? name.trim() : null,
         allowed_lanes: form.allowedLanes.length > 0 ? [...form.allowedLanes] : null,
         allow_custom_model: form.allowCustomModel,
+        blocked_models: form.blockedModels.length > 0 ? [...form.blockedModels] : null,
         allow_fast_mode: form.allowFastMode,
         disabled: false,
         rate_limit_rpm: form.rpm ?? null,

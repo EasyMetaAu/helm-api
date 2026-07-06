@@ -100,6 +100,41 @@ describe("buildModelsList", () => {
     expect(flash?.lanes).toEqual(["economy"]);
   });
 
+  it("allow_custom_model key: omits blocked concrete aliases", () => {
+    const list = buildModelsList({
+      lanes,
+      catalog,
+      providerAliases,
+      allowCustomModel: true,
+      blockedModels: ["deepseek/pro"],
+    });
+
+    const ids = list.data.map((m) => m.id);
+    expect(ids).toContain("economy");
+    expect(ids).not.toContain("balanced");
+    expect(ids).toContain("premium");
+    expect(ids).toContain("auto");
+    expect(ids).toContain("deepseek/flash");
+    expect(ids).toContain("openai/o");
+    expect(ids).not.toContain("deepseek/pro");
+  });
+
+  it("normal key: hides a lane when blocked_models removes its whole chain", () => {
+    const list = buildModelsList({
+      lanes,
+      catalog,
+      providerAliases,
+      allowCustomModel: false,
+      blockedModels: ["deepseek/pro"],
+    });
+
+    const ids = list.data.map((m) => m.id);
+    expect(ids).toContain("economy");
+    expect(ids).not.toContain("balanced");
+    expect(ids).toContain("premium");
+    expect(ids).toContain("auto");
+  });
+
   it("nested lane references expand to leaf aliases for membership", () => {
     const list = buildModelsList({
       lanes,

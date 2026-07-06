@@ -88,6 +88,7 @@ function makeKeyStore(): KeyStore & { rows: TestKeyRecord[] } {
         name: input.name ?? null,
         allowed_lanes: input.allowedLanes ?? null,
         allow_custom_model: input.allowCustomModel ?? false,
+        blocked_models: input.blockedModels ?? null,
         allow_fast_mode: input.allowFastMode ?? false,
         disabled: false,
         rate_limit_rpm: input.rateLimitRpm ?? null,
@@ -131,6 +132,7 @@ function makeKeyStore(): KeyStore & { rows: TestKeyRecord[] } {
       if (patch.name !== undefined) row.name = patch.name;
       if (patch.allowedLanes !== undefined) row.allowed_lanes = patch.allowedLanes;
       if (patch.allowCustomModel !== undefined) row.allow_custom_model = patch.allowCustomModel;
+      if (patch.blockedModels !== undefined) row.blocked_models = patch.blockedModels;
       if (patch.allowFastMode !== undefined) row.allow_fast_mode = patch.allowFastMode;
       if (patch.rateLimitRpm !== undefined) row.rate_limit_rpm = patch.rateLimitRpm;
       if (patch.rateLimitTpm !== undefined) row.rate_limit_tpm = patch.rateLimitTpm;
@@ -610,7 +612,11 @@ describe("admin.api keys", () => {
     const created = await app.request("/admin/api/keys", {
       method: "POST",
       headers: JSON_HEADERS,
-      body: JSON.stringify({ role: "user", allowed_lanes: ["balanced"] }),
+      body: JSON.stringify({
+        role: "user",
+        allowed_lanes: ["balanced"],
+        blocked_models: ["gpt-4o"],
+      }),
     });
     expect(created.status).toBe(201);
     const body = (await created.json()) as { key_id: string; plaintext: string; prefix: string };
@@ -622,6 +628,7 @@ describe("admin.api keys", () => {
     // Stored as hash + prefix plus encrypted recovery material — never plaintext.
     expect(keyStore.rows[0]?.hash).toBe("hash_of_plaintext_full");
     expect(keyStore.rows[0]?.secret_enc).toMatch(/^enc:/);
+    expect(keyStore.rows[0]?.blocked_models).toEqual(["gpt-4o"]);
     expect(JSON.stringify(keyStore.rows[0])).not.toContain("PLAINTEXT_SECRET");
     expect(keyStore.rows[0]?.memory_mode).toBe("off");
     expect(keyStore.rows[0]?.memory_thread_source).toBe("auto");
@@ -633,6 +640,7 @@ describe("admin.api keys", () => {
     expect(raw).not.toContain("PLAINTEXT_SECRET");
     expect(raw).not.toContain("hash_of_plaintext_full"); // no hash full-text
     expect(list[0]?.prefix).toBe("helm_live_PLAI");
+    expect(list[0]?.blocked_models).toEqual(["gpt-4o"]);
     expect(list[0]).not.toHaveProperty("hash");
     expect(list[0]).not.toHaveProperty("plaintext");
     expect(list[0]).not.toHaveProperty("secret_enc");
@@ -852,7 +860,7 @@ describe("admin.api keys", () => {
     expect(keyStore.rows[0]?.rate_limit_tpm).toBe(5000);
   });
 
-  it("PATCH edits a key's caps (allowed_lanes, allow_custom_model, allow_fast_mode; null clears)", async () => {
+  it("PATCH edits a key's caps (allowed_lanes, blocked_models, allow_custom_model, allow_fast_mode; null clears)", async () => {
     const deps = buildDeps();
     const app = buildApp(deps);
     await app.request("/admin/api/keys", {
@@ -866,12 +874,14 @@ describe("admin.api keys", () => {
       body: JSON.stringify({
         allowed_lanes: ["economy", "balanced"],
         allow_custom_model: true,
+        blocked_models: ["gpt-4o"],
         allow_fast_mode: true,
       }),
     });
     expect(set.status).toBe(200);
     expect(keyStore.rows[0]?.allowed_lanes).toEqual(["economy", "balanced"]);
     expect(keyStore.rows[0]?.allow_custom_model).toBe(true);
+    expect(keyStore.rows[0]?.blocked_models).toEqual(["gpt-4o"]);
     expect(keyStore.rows[0]?.allow_fast_mode).toBe(true);
     expect(keyStore.rows[0]?.rate_limit_rpm).toBe(7); // unrelated field untouched
     expect(keyStore.rows[0]?.role).toBe("user"); // role never rewritten
@@ -879,10 +889,11 @@ describe("admin.api keys", () => {
     const clear = await app.request("/admin/api/keys/key_1", {
       method: "PATCH",
       headers: JSON_HEADERS,
-      body: JSON.stringify({ allowed_lanes: null }),
+      body: JSON.stringify({ allowed_lanes: null, blocked_models: null }),
     });
     expect(clear.status).toBe(200);
     expect(keyStore.rows[0]?.allowed_lanes).toBeNull();
+    expect(keyStore.rows[0]?.blocked_models).toBeNull();
     expect(keyStore.rows[0]?.allow_custom_model).toBe(true); // omitted → untouched
     expect(keyStore.rows[0]?.allow_fast_mode).toBe(true); // omitted → untouched
   });

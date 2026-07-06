@@ -30,6 +30,7 @@ function key(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView {
     name: null,
     allowed_lanes: null,
     allow_custom_model: false,
+    blocked_models: null,
     allow_fast_mode: false,
     disabled: false,
     rate_limit_rpm: null,
@@ -365,6 +366,9 @@ describe('keys page', () => {
     await fireEvent.input(within(dialog).getByLabelText(/requests per minute/i), {
       target: { value: '120' },
     });
+    await fireEvent.input(within(dialog).getByLabelText('Blocked models'), {
+      target: { value: 'gpt-4o' },
+    });
     await fireEvent.click(within(dialog).getByRole('button', { name: /save changes/i }));
     await waitFor(() =>
       expect(updateKey).toHaveBeenCalledWith('k1', {
@@ -372,6 +376,7 @@ describe('keys page', () => {
         name: null,
         allowed_lanes: ['economy'],
         allow_custom_model: false,
+        blocked_models: ['gpt-4o'],
         allow_fast_mode: false,
         rate_limit_rpm: 120,
         rate_limit_tpm: null, // untouched → still inherit (null), not undefined

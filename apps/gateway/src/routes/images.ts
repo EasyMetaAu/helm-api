@@ -200,6 +200,32 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
             "provider_unavailable",
           );
     }
+    const blockedModels = new Set(identity.caps?.blockedModels ?? []);
+    const permittedTargets =
+      blockedModels.size === 0
+        ? chain.targets
+        : chain.targets.filter((target) => !blockedModels.has(target.alias));
+    const permittedCandidateChain =
+      blockedModels.size === 0
+        ? chain.candidateChain
+        : chain.candidateChain.filter((alias) => !blockedModels.has(alias));
+    if (permittedTargets.length === 0) {
+      const directBlocked = blockedModels.has(parsed.data.model);
+      return errorJson(
+        c,
+        400,
+        "invalid_request_error",
+        directBlocked
+          ? `model '${parsed.data.model}' is blocked for this key`
+          : `all image candidate models for '${parsed.data.model}' are blocked for this key`,
+        "model_blocked",
+      );
+    }
+    const permittedChain = {
+      ...chain,
+      candidateChain: permittedCandidateChain,
+      targets: permittedTargets,
+    };
 
     // 5b) Per-key usage-budget gate (docs/06), mirroring the chat face — ONCE, before
     //     the chain runs (a fallback within one request is still one billable image).
@@ -247,7 +273,12 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
       };
     };
 
-    const outcome = await runImageChain(chain.targets, deps.breaker, attempt, c.req.raw.signal);
+    const outcome = await runImageChain(
+      permittedChain.targets,
+      deps.breaker,
+      attempt,
+      c.req.raw.signal,
+    );
 
     // 6b) Terminal failure. A client abort is a NON-provider fault → no record, no 5xx.
     if (!outcome.ok) {
@@ -257,8 +288,8 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
           traceId,
           keyPrefix,
           requested: parsed.data.model,
-          selectedLane: chain.laneName,
-          candidateChain: chain.candidateChain,
+          selectedLane: permittedChain.laneName,
+          candidateChain: permittedChain.candidateChain,
           attempts: outcome.attempts,
           served: null,
           finalErrorClass: outcome.errorClass,
@@ -292,8 +323,8 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         traceId,
         keyPrefix,
         requested: parsed.data.model,
-        selectedLane: chain.laneName,
-        candidateChain: chain.candidateChain,
+        selectedLane: permittedChain.laneName,
+        candidateChain: permittedChain.candidateChain,
         attempts: outcome.attempts,
         served: { alias: served.alias, providerModel: served.providerModel },
         finalErrorClass: null,
@@ -337,7 +368,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
     }
 
     // 8) Observability headers + the VERBATIM upstream body (full image) to the client.
-    c.header("x-helm-lane", chain.laneName);
+    c.header("x-helm-lane", permittedChain.laneName);
     c.header("x-helm-final-model", served.alias);
     c.header("x-helm-provider-model", served.providerModel);
     return c.json(result.clientBody);

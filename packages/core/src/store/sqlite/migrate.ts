@@ -878,6 +878,19 @@ const MIGRATIONS: readonly Migration[] = [
         ON telemetry (api_key_id, created_at, model_search);
     `,
   },
+  {
+    // Per-key model blacklist. Nullable JSON text array; removes exact models
+    // from direct requests and all lane/fallback chains.
+    version: 38,
+    run: (db) => {
+      if (
+        sqliteTableHasColumns(db, "api_keys", ["key_id"]) &&
+        !sqliteTableHasColumns(db, "api_keys", ["blocked_models"])
+      ) {
+        db.exec("ALTER TABLE api_keys ADD COLUMN blocked_models TEXT;");
+      }
+    },
+  },
 ];
 
 function sqliteTableHasColumns(

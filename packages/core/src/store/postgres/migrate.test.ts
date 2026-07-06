@@ -205,6 +205,40 @@ describe("runPgMigrations — per-migration atomicity", () => {
     await db.$close();
   });
 
+  it("v37 adds blocked_models for per-key model blacklists", async () => {
+    const client = new PGlite();
+    const db = Object.assign(drizzlePglite(client), { $close: () => client.close() });
+    await db.execute(
+      sql.raw("CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at BIGINT NOT NULL)"),
+    );
+    await db.execute(sql.raw("CREATE TABLE api_keys (key_id TEXT PRIMARY KEY)"));
+    for (let version = 1; version <= 36; version++) {
+      await db.execute(
+        sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),
+      );
+    }
+
+    await expect(runPgMigrations(db)).resolves.toBeUndefined();
+
+    const columns = (await db.execute(
+      sql.raw(`
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'api_keys'
+      `),
+    )) as { rows: Array<{ column_name: string }> };
+    expect(columns.rows.map((r) => r.column_name)).toContain("blocked_models");
+    await db.execute(
+      sql.raw("INSERT INTO api_keys (key_id, blocked_models) VALUES ('k1', '[\"gpt-4o\"]'::jsonb)"),
+    );
+    const row = (await db.execute(
+      sql.raw("SELECT blocked_models FROM api_keys WHERE key_id = 'k1'"),
+    )) as { rows: Array<{ blocked_models: string[] }> };
+    expect(row.rows[0]?.blocked_models).toEqual(["gpt-4o"]);
+    await db.$close();
+  });
+
   it("creates memory job admin-stats indexes", async () => {
     const db = await createPgliteDb();
     const indexes = (await db.execute(

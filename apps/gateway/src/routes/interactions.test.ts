@@ -219,6 +219,94 @@ describe("registerInteractionsRoute", () => {
     expect(res.status).toBe(401);
   });
 
+  it("rejects a direct Gemini image model that is blocked for the key", async () => {
+    const { app, nativePassthrough, enqueueTelemetry } = setup({
+      auth: {
+        resolve: async (cred) =>
+          cred === "k"
+            ? ({
+                keyId: "key1",
+                accountId: "acct",
+                keyPrefix: "helm_live_xy",
+                caps: { budget: BUDGET_CAPS, blockedModels: ["gemini-3.1-flash-image"] },
+              } as MessagesIdentity)
+            : null,
+      },
+    });
+
+    const res = await post(app, { model: "gemini-3.1-flash-image", input: "x" });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { message: string; status: string } };
+    expect(body.error.message).toContain("blocked for this key");
+    expect(body.error.status).toBe("INVALID_ARGUMENT");
+    expect(nativePassthrough).not.toHaveBeenCalled();
+    expect(enqueueTelemetry).not.toHaveBeenCalled();
+  });
+
+  it("removes blocked Gemini image candidates from a lane before fallback execution", async () => {
+    const blockedNativePassthrough = vi.fn().mockResolvedValue(NATIVE);
+    const allowedNativePassthrough = vi.fn().mockResolvedValue(NATIVE);
+    const blockedClient = {
+      nativePassthrough: blockedNativePassthrough,
+    } as unknown as ProviderClient;
+    const allowedClient = {
+      nativePassthrough: allowedNativePassthrough,
+    } as unknown as ProviderClient;
+    const { app, enqueueTelemetry } = setup({
+      auth: {
+        resolve: async (cred) =>
+          cred === "k"
+            ? ({
+                keyId: "key1",
+                accountId: "acct",
+                keyPrefix: "helm_live_xy",
+                caps: { budget: BUDGET_CAPS, blockedModels: ["gemini-image-primary"] },
+              } as MessagesIdentity)
+            : null,
+      },
+      resolveImageChain: (model) =>
+        model === "image-lane"
+          ? {
+              ok: true,
+              laneName: "image-lane",
+              candidateChain: ["gemini-image-primary", "gemini-image-fallback"],
+              targets: [
+                {
+                  client: blockedClient,
+                  providerModel: "gemini-image-primary",
+                  alias: "gemini-image-primary",
+                  kind: "gemini",
+                },
+                {
+                  client: allowedClient,
+                  providerModel: "gemini-image-fallback",
+                  alias: "gemini-image-fallback",
+                  kind: "gemini",
+                },
+              ],
+            }
+          : { ok: false, status: 404 },
+      costOf: (alias) => (alias === "gemini-image-fallback" ? 0.07 : null),
+    });
+
+    const res = await post(app, { model: "image-lane", input: "x" });
+
+    expect(res.status).toBe(200);
+    expect(blockedNativePassthrough).not.toHaveBeenCalled();
+    expect(allowedNativePassthrough).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "gemini-image-fallback" }),
+      expect.anything(),
+    );
+    expect(res.headers.get("x-helm-final-model")).toBe("gemini-image-fallback");
+
+    const decision = enqueueTelemetry.mock.calls[0]?.[0].decision;
+    expect(decision.lane.candidate_chain).toEqual(["gemini-image-fallback"]);
+    expect(decision.provider_attempts.map((a: { alias: string }) => a.alias)).toEqual([
+      "gemini-image-fallback",
+    ]);
+  });
+
   it("returns 404 for a model that is not a configured image model", async () => {
     const { app } = setup();
     const res = await post(app, { model: "not-an-image-model", input: "x" });

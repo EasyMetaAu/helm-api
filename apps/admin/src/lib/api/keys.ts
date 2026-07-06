@@ -17,6 +17,7 @@ export interface ApiKeyView {
   name: string | null; // human-readable label; null = unnamed (cosmetic only)
   allowed_lanes: string[] | null; // lane whitelist (empty/null = any lane)
   allow_custom_model: boolean; // explicit client-model passthrough
+  blocked_models: string[] | null; // exact model ids denied across direct and lane routes
   allow_fast_mode: boolean; // explicit client-requested Fast mode passthrough
   disabled: boolean; // revoked state (soft)
   rate_limit_rpm: number | null; // per-key RPM override; null = inherit system default
@@ -49,6 +50,7 @@ export interface CreateKeyInput {
   name?: string;
   allowed_lanes?: string[];
   allow_custom_model?: boolean;
+  blocked_models?: string[];
   allow_fast_mode?: boolean;
   // Optional per-key rate limits at mint time. Omitted => inherit the system
   // default. 0 => explicitly unlimited for that dimension.
@@ -81,6 +83,7 @@ export interface UpdateKeyInput {
   name?: string | null;
   allowed_lanes?: string[] | null;
   allow_custom_model?: boolean;
+  blocked_models?: string[] | null;
   allow_fast_mode?: boolean;
   rate_limit_rpm?: number | null;
   rate_limit_tpm?: number | null;
@@ -177,6 +180,7 @@ async function asJson<T>(res: Response): Promise<T> {
 // leak a secret even if the server response ever changed shape (defence in depth).
 function normalizeView(raw: Record<string, unknown>): ApiKeyView {
   const allowed = raw.allowed_lanes;
+  const blocked = raw.blocked_models;
   return {
     key_id: String(raw.key_id ?? ''),
     prefix: String(raw.prefix ?? ''),
@@ -186,6 +190,7 @@ function normalizeView(raw: Record<string, unknown>): ApiKeyView {
     name: typeof raw.name === 'string' && raw.name.trim().length > 0 ? raw.name.trim() : null,
     allowed_lanes: Array.isArray(allowed) ? allowed.map(String) : null,
     allow_custom_model: raw.allow_custom_model === true,
+    blocked_models: Array.isArray(blocked) ? blocked.map(String) : null,
     allow_fast_mode: raw.allow_fast_mode === true,
     disabled: raw.disabled === true,
     // null/absent = inherit system default; a finite number (incl. 0) = override.
@@ -218,6 +223,9 @@ function toServerBody(input: CreateKeyInput): Record<string, unknown> {
   }
   if (input.allow_custom_model !== undefined) {
     out.allow_custom_model = input.allow_custom_model;
+  }
+  if (input.blocked_models && input.blocked_models.length > 0) {
+    out.blocked_models = input.blocked_models;
   }
   if (input.allow_fast_mode !== undefined) {
     out.allow_fast_mode = input.allow_fast_mode;

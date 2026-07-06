@@ -17,6 +17,7 @@ export interface AuthIdentity {
   caps: {
     allowedLanes: string[] | null;
     allowCustomModel: boolean;
+    blockedModels: string[] | null;
     /** Per-key cap for client-requested Fast mode passthrough. Account-level Fast
      *  mode can still be forced by subscription account settings. */
     allowFastMode: boolean;
@@ -105,6 +106,7 @@ export function authMiddleware(deps: AuthDeps): MiddlewareHandler {
       caps: {
         allowedLanes: record.allowed_lanes,
         allowCustomModel: record.allow_custom_model,
+        blockedModels: record.blocked_models,
         allowFastMode: record.allow_fast_mode,
         rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
         concurrencyLimit: record.concurrency_limit,

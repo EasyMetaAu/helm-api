@@ -91,6 +91,7 @@ function key(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView {
     name: null,
     allowed_lanes: null,
     allow_custom_model: false,
+    blocked_models: null,
     allow_fast_mode: false,
     disabled: false,
     rate_limit_rpm: null,
