@@ -3,7 +3,7 @@ import { DEFAULT_LANES, parseLanesConfig } from "@helm/core";
 import type { ApiKeyRecord, ClassifierConfig, DecisionRecord, RuntimeSettings } from "@helm/shared";
 import { ClassifierConfigSchema, RuntimeSettingsSchema } from "@helm/shared";
 import { Hono } from "hono";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../../app.js";
 import { basicAuth } from "../../middleware/basic-auth.js";
 import { handleError } from "../../middleware/error-handler.js";
@@ -1055,7 +1055,10 @@ describe("admin.api keys", () => {
     ]);
   });
 
-  it("GET /keys/usage defaults to the last 24h when the window is omitted", async () => {
+  it("GET /keys/usage defaults to today in the viewer's local day when the window is omitted", async () => {
+    const now = Date.UTC(2026, 5, 1, 20, 0, 0);
+    const todayStartUtc = Date.UTC(2026, 5, 1, 16, 0, 0); // UTC+8 local midnight
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(now);
     const windows: Array<{ start: number; end: number }> = [];
     const telemetry: TelemetryStore = {
       ...makeTelemetry(),
@@ -1064,10 +1067,14 @@ describe("admin.api keys", () => {
         return [];
       },
     };
-    const app = buildApp(buildDeps({ telemetry }));
-    const res = await app.request("/admin/api/keys/usage");
-    expect(res.status).toBe(200);
-    expect((windows[0]?.end ?? 0) - (windows[0]?.start ?? 0)).toBe(86_400_000);
+    try {
+      const app = buildApp(buildDeps({ telemetry }));
+      const res = await app.request("/admin/api/keys/usage?tzOffsetMinutes=480");
+      expect(res.status).toBe(200);
+      expect(windows[0]).toEqual({ start: todayStartUtc, end: now });
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 });
 
