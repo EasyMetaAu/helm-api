@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-07-06 · Anthropic native passthrough 稳定 Claude Code billing cch（Provider execution / prompt cache，docs/04/05，原则 3/5/7/8）
+
+- **背景（Lukin）**：线上 `claude-fable-5` 请求大多是 Anthropic native passthrough，理论上应保留 Claude Code 原始 body；但 production SQLite 样本显示同一会话里 `system[0]` 的 `x-anthropic-billing-header` 只有 `cch` 每轮变化（`cc_version`/`cc_entrypoint` 稳定），导致 Anthropic prompt cache 的严格前缀匹配被第一块内容打断，缓存读取只覆盖小前缀，成本显著偏高。
+- **问题归属**：这不是 Helm 协议转换 correctness bug；原样转发本身成立。这里是对 Claude Code 官方 billing header 与 Anthropic prompt cache 机制冲突的兼容性 workaround：为了自托管网关的成本边界，允许 native passthrough 做一个可审计的最小 body shim。
+- **修复边界**：只在 `protocol === anthropic_messages` 且 `system[0]` 明确是 `x-anthropic-billing-header`、含 5 位 hex `cch` 时触发；保留 `cc_version`、`cc_entrypoint`、system/messages/tools 正文和 cache_control，仅把 `cch` 替换成由稳定 cache-prefix 材料（resolved model、system、tools，排除 messages）计算出的 5 位值。没有该 header 的 native 请求完全不变。
+- **观测决策**：触发时写入 passthrough mutation `body_shims_applied: ["anthropic_billing_cch_stabilized"]`，并清掉 raw_body 走重序列化，避免 telemetry 显示仍是旧的客户端 raw body。后续线上可按该 mutation 与 `cached_tokens/cache_creation_tokens` 验证成本改善。
+- **风险边界**：如果 Anthropic 将来开始强校验官方 `cch` 与整请求字节一致，这个 shim 可能引发上游拒绝；届时可通过 native passthrough flag 或后续 runtime setting 回滚。当前生产证据显示 `cch` 更像缓存/归因指纹而非认证字段。
+
 ## 2026-07-06 · 纯工具 turn 去掉空 header 行 + peek 收到 3 行（Admin conversation view，docs/11，原则 1）
 
 - **背景（Lukin）**：默认展开后，纯工具 turn 在工具块上方还多渲染一条近乎空的折叠 header 行（`▾ ● { }`：caret+role dot+空 preview+源码切换），很丑；另外 output peek 6 行太多。

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   CircuitBreaker,
   ExecuteOutcome,
@@ -49,6 +50,10 @@ import {
   usageFromGeminiResponse,
   usageFromResponsesResponse,
 } from "./payload-capture.js";
+
+const ANTHROPIC_BILLING_HEADER_PREFIX = "x-anthropic-billing-header:";
+const ANTHROPIC_BILLING_CCH_RE = /\bcch=([0-9a-f]{5});/i;
+const ANTHROPIC_BILLING_CCH_PLACEHOLDER = "cch=00000;";
 
 // Gateway execution adapter — the `execute` injected into routeRequest. It walks
 // the resolved candidate chain (ExecutionPlan.candidate_chain) honoring the
@@ -535,6 +540,59 @@ function sanitizeAnthropicNativeBody(body: Record<string, unknown>): {
     : { body, strippedEmptyTextBlocks: 0 };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => stableJson(item)).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function stabilizeAnthropicBillingCch(body: Record<string, unknown>): {
+  body: Record<string, unknown>;
+  stabilized: boolean;
+} {
+  const system = body.system;
+  if (!Array.isArray(system)) return { body, stabilized: false };
+  const first = system[0];
+  if (!isRecord(first)) return { body, stabilized: false };
+  const text = first.text;
+  if (
+    typeof text !== "string" ||
+    !text.startsWith(ANTHROPIC_BILLING_HEADER_PREFIX) ||
+    !ANTHROPIC_BILLING_CCH_RE.test(text)
+  ) {
+    return { body, stabilized: false };
+  }
+
+  const placeholderText = text.replace(ANTHROPIC_BILLING_CCH_RE, ANTHROPIC_BILLING_CCH_PLACEHOLDER);
+  const placeholderSystem = [{ ...first, text: placeholderText }, ...system.slice(1)];
+  // Only cache-prefix material feeds this compatibility hash. Including messages would
+  // reproduce Claude Code's per-turn rotating cch and defeat prompt caching again.
+  const cachePrefixFingerprint = stableJson({
+    model: typeof body.model === "string" ? body.model : null,
+    system: placeholderSystem,
+    tools: body.tools ?? null,
+  });
+  const stableCch = createHash("sha256").update(cachePrefixFingerprint).digest("hex").slice(0, 5);
+  const nextText = text.replace(ANTHROPIC_BILLING_CCH_RE, `cch=${stableCch};`);
+  if (nextText === text) return { body, stabilized: false };
+  return {
+    body: {
+      ...body,
+      system: [{ ...first, text: nextText }, ...system.slice(1)],
+    },
+    stabilized: true,
+  };
+}
+
 function prepareNativeRequestForUpstream(
   nativeRequest: InternalRequest["native_request"],
   providerModel: string,
@@ -616,6 +674,14 @@ function prepareNativeRequestForUpstream(
           "empty_anthropic_text_blocks_stripped",
         ]);
         mutations.empty_anthropic_text_blocks_stripped = sanitized.strippedEmptyTextBlocks;
+      }
+    }
+    const stableBilling = stabilizeAnthropicBillingCch(body);
+    if (stableBilling.stabilized) {
+      body = stableBilling.body;
+      bodyChanged = true;
+      if (mutations) {
+        appendMutationList(mutations, "body_shims_applied", ["anthropic_billing_cch_stabilized"]);
       }
     }
   }

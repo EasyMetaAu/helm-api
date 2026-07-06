@@ -2698,6 +2698,74 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     expect(okRow?.provider_model).toBe("claude-x");
   });
 
+  it("stabilizes Claude Code billing cch on Anthropic native passthrough so prompt cache survives turns", async () => {
+    const provider = anthropicProvider(NATIVE_RESP);
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["anthro", provider]]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "anthro",
+          providerModel: "claude-x",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const carrier = (cch: string, text: string): NativePassthroughCarrier => ({
+      protocol: "anthropic_messages",
+      body: {
+        model: "claude-x",
+        max_tokens: 16,
+        system: [
+          {
+            type: "text",
+            text: `x-anthropic-billing-header: cc_version=2.1.175.baa; cc_entrypoint=cli; cch=${cch};`,
+          },
+          { type: "text", text: "You are Claude Code.", cache_control: { type: "ephemeral" } },
+          { type: "text", text: "stable project rules", cache_control: { type: "ephemeral" } },
+        ],
+        tools: [{ name: "Read", input_schema: { type: "object" } }],
+        messages: [{ role: "user", content: [{ type: "text", text }] }],
+      },
+      raw_body: `raw-${cch}`,
+      headers: { "x-api-key": "client" },
+      mutations: {},
+    });
+
+    const first = await execute(
+      plan(["a"]),
+      anthropicReq({ native_request: carrier("aaaaa", "first turn") }),
+    );
+    const second = await execute(
+      plan(["a"]),
+      anthropicReq({ native_request: carrier("bbbbb", "a much longer follow-up turn") }),
+    );
+
+    const firstForwarded = provider.nativePassthrough.mock
+      .calls[0]?.[0] as NativePassthroughCarrier;
+    const secondForwarded = provider.nativePassthrough.mock
+      .calls[1]?.[0] as NativePassthroughCarrier;
+    const cchOf = (forwarded: NativePassthroughCarrier) =>
+      String(
+        ((forwarded.body.system as Array<Record<string, unknown>>)[0] as { text?: unknown }).text,
+      ).match(/\bcch=([0-9a-f]{5});/)?.[1];
+    expect(cchOf(firstForwarded)).toMatch(/^[0-9a-f]{5}$/);
+    expect(cchOf(secondForwarded)).toBe(cchOf(firstForwarded));
+    expect(cchOf(firstForwarded)).not.toBe("aaaaa");
+    expect(cchOf(secondForwarded)).not.toBe("bbbbb");
+    expect(firstForwarded.raw_body).toBeUndefined();
+    expect(firstForwarded.mutations.body_shims_applied).toEqual([
+      "anthropic_billing_cch_stabilized",
+    ]);
+    expect(first.attempts[0]?.passthrough_mutations).toMatchObject(firstForwarded.mutations);
+    expect(second.attempts[0]?.passthrough_mutations).toMatchObject(secondForwarded.mutations);
+  });
+
   it("native passthrough strips Anthropic effort when the target model does not support it", async () => {
     const provider = anthropicProvider(NATIVE_RESP);
     const haikuEntry: CatalogEntry = {
