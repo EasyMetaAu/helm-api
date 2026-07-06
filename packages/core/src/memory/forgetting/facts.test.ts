@@ -61,7 +61,7 @@ describe("buildReconciledFactBatch blob guard (no base64/image facts)", () => {
   const base = { ownerId: "acct", scope: {}, cap: 8, fallbackNow: new Date("2026-06-26") };
 
   it("drops a candidate whose text is a long whitespace-free blob", () => {
-    const blob = "data:image/jpeg;base64," + "ABCD".repeat(300); // no spaces, ~1200 chars
+    const blob = `data:image/jpeg;base64,${"ABCD".repeat(300)}`; // no spaces, ~1200 chars
     const facts = buildReconciledFactBatch({
       ...base,
       extracted: [{ subjectText: "img", factText: blob }],

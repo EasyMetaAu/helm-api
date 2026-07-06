@@ -9,6 +9,9 @@ import type {
   RecentDecisionRecord,
   RequestPayload,
   RequestPayloadArchiveRow,
+  RequestPayloadMeta,
+  RequestPayloadPart,
+  RequestPayloadPartRecord,
   TelemetryAggregate,
   TelemetryArchiveRow,
   TelemetryKeyUsage,
@@ -411,6 +414,61 @@ export class PgTelemetryStore implements TelemetryStore {
       responseJson: decode(row.responseJson),
       upstreamRequestJson: decode(row.upstreamRequestJson) ?? null,
       createdAt: new Date(row.createdAt), // epoch-ms bigint → Date
+    };
+  }
+
+  async getPayloadMeta(requestId: string): Promise<RequestPayloadMeta | null> {
+    const rows = await this.db
+      .select({
+        requestId: requestPayloads.requestId,
+        hasRequest: sql<boolean>`${requestPayloads.requestJson} IS NOT NULL`,
+        hasResponse: sql<boolean>`${requestPayloads.responseJson} IS NOT NULL`,
+        hasUpstream: sql<boolean>`${requestPayloads.upstreamRequestJson} IS NOT NULL`,
+        createdAt: requestPayloads.createdAt,
+      })
+      .from(requestPayloads)
+      .where(eq(requestPayloads.requestId, requestId))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      requestId: row.requestId,
+      createdAt: new Date(row.createdAt),
+      parts: {
+        request: row.hasRequest,
+        response: row.hasResponse,
+        upstreamRequest: row.hasUpstream,
+      },
+    };
+  }
+
+  async getPayloadPart(
+    requestId: string,
+    part: RequestPayloadPart,
+  ): Promise<RequestPayloadPartRecord | null> {
+    const column =
+      part === "request"
+        ? requestPayloads.requestJson
+        : part === "response"
+          ? requestPayloads.responseJson
+          : requestPayloads.upstreamRequestJson;
+    const rows = await this.db
+      .select({
+        requestId: requestPayloads.requestId,
+        value: column,
+        createdAt: requestPayloads.createdAt,
+      })
+      .from(requestPayloads)
+      .where(eq(requestPayloads.requestId, requestId))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return null;
+    const decode = await this.rehydrateColumns([row.value]);
+    return {
+      requestId: row.requestId,
+      part,
+      json: decode(row.value),
+      createdAt: new Date(row.createdAt),
     };
   }
 

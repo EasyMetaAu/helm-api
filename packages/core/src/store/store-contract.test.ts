@@ -1227,6 +1227,17 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(got?.responseJson).toBe(responseJson);
       expect(got?.upstreamRequestJson).toBe(upstreamRequestJson);
       expect(got?.createdAt.getTime()).toBe(5000);
+      expect(await ctx.stores.telemetry.getPayloadMeta?.("req_1")).toEqual({
+        requestId: "req_1",
+        createdAt: new Date(5000),
+        parts: { request: true, response: true, upstreamRequest: true },
+      });
+      expect(await ctx.stores.telemetry.getPayloadPart?.("req_1", "response")).toEqual({
+        requestId: "req_1",
+        part: "response",
+        json: responseJson,
+        createdAt: new Date(5000),
+      });
       expect(await ctx.stores.telemetry.getPayload("nope")).toBeNull();
     });
 

@@ -290,6 +290,25 @@ export interface RequestPayload {
   createdAt: Date;
 }
 
+export type RequestPayloadPart = "request" | "response" | "upstream_request";
+
+export interface RequestPayloadMeta {
+  requestId: string;
+  createdAt: Date;
+  parts: {
+    request: boolean;
+    response: boolean;
+    upstreamRequest: boolean;
+  };
+}
+
+export interface RequestPayloadPartRecord {
+  requestId: string;
+  part: RequestPayloadPart;
+  json: string | null;
+  createdAt: Date;
+}
+
 // One telemetry row as exported by the archive scan — engine-neutral and
 // JSON-serializable (createdAt is epoch ms, the decision is the parsed record),
 // so both the sqlite and pg adapters yield byte-identical archive lines. `id` is
@@ -501,6 +520,14 @@ export interface TelemetryStore {
   // backfill the assembled response). Stores verbatim bodies — never redacted.
   insertPayload(input: InsertPayloadInput): Promise<void>;
   getPayload(requestId: string): Promise<RequestPayload | null>;
+  // Lightweight admin detail reads. These are optional so older test doubles and
+  // custom adapters can fall back to getPayload(), but real adapters implement them
+  // to avoid rehydrating/transmitting every captured body on initial page load.
+  getPayloadMeta?(requestId: string): Promise<RequestPayloadMeta | null>;
+  getPayloadPart?(
+    requestId: string,
+    part: RequestPayloadPart,
+  ): Promise<RequestPayloadPartRecord | null>;
   // Delete payloads with createdAt strictly older than the cutoff (epoch ms).
   // Drives payload_retention_days auto-prune; safe to call opportunistically.
   prunePayloads(olderThanMs: number): Promise<void>;
