@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-07-06 · 纯工具 turn 去掉空 header 行 + peek 收到 3 行（Admin conversation view，docs/11，原则 1）
+
+- **背景（Lukin）**：默认展开后，纯工具 turn 在工具块上方还多渲染一条近乎空的折叠 header 行（`▾ ● { }`：caret+role dot+空 preview+源码切换），很丑；另外 output peek 6 行太多。
+- **改动 1（删空 header）**：`ConversationTurn.svelte` 把折叠 header 行包在 `{#if !toolOnly}` 里——纯工具 turn 不再渲染它，工具块自己的 `● Name(args) ✓ ok` 行就是整条 row。把 per-turn 的 `{ }` view-source 切换挪到**第一个工具部分**那一行右侧（hover 显现，`toolOnly && firstToolPart === i` 只出现一次，不逐行重复）；非纯工具 turn 仍用原 header 里的 `{ }`（不重复）。`toolOnly`/`firstToolPart` 改 `$derived`，`open` 初值用 `untrack(() => isToolOnly(turn))` 消除 `state_referenced_locally` 警告。
+- **改动 2（peek 3 行）**：加 `PEEK_LINES = 3` 常量，两处 `toolOutputPeek(part.output, PEEK_LINES)` 传入（`toolOutputPeek` 默认仍 6，只在组件里收窄）。
+- **测试**：更新「peek」用例断言 3 行可见、第 4 行隐藏、`+5`（8 行输入）；新增「纯工具 turn 无 `conversation-row-toggle`，但 `conversation-source-toggle` 在工具行上」。97 conversation/render 测试绿、svelte-check 0/0/0。full-run 里 `requests.test.ts` 2 红是并发 PGlite flake（隔离跑 40/40 绿，非本次改动，见 [[pnpm-test-pglite-flake]]）。
+- **共享树坑（记）**：切回 main 时发现工作树带着 sibling session（Codex `codex/admin-perf-lazy-payload`）未提交的 `packages/core/src/store/*telemetry.ts` WIP——**没碰它**，直接开隔离 worktree（干净 checkout，不含 sibling 文件）。参见 [[git-add-explicit-not-all-shared-tree]]。
+- **发布**：v0.25.10。worktree `worktree-tool-row-cleaner`。
+
 ## 2026-07-06 · 纯工具 turn 默认展开，去掉多一次点击（Admin conversation view，docs/11，原则 1）
 
 - **背景（Lukin）**：终端风格上线后，看一个工具的 output peek 要点**两次**——先点行展开 turn（row-toggle），再点 `… +N lines` 出完整 JSON。第一层折叠对「整条 turn 就是一个工具调用」的行是纯多余摩擦。Lukin 要求参考 Claude Code：peek 直接可见，不用先展开。

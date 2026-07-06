@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { t } from '$lib/i18n';
   import { formatToolArgs, toolOutputPeek, type ConversationTurn, type TurnPart } from '$lib/conversation';
   import ImagePreview from './ImagePreview.svelte';
@@ -39,7 +40,16 @@
   // once at mount (turns never mutate in place), so read `turn` inside the initializer.
   const isToolOnly = (t: ConversationTurn): boolean =>
     t.parts.length > 0 && t.parts.every((p) => p.kind === 'tool_exchange' || p.kind === 'tool_result' || p.kind === 'tool_call');
-  let open = $state(isToolOnly(turn));
+  // A tool-only turn drops the separate role-header row entirely: it would render as an
+  // near-empty `▾ ● { }` line above the tool block (ugly, no content). The tool line IS
+  // the row — it carries the name, args, status, and the hover-revealed source toggle.
+  const toolOnly = $derived(isToolOnly(turn));
+  // Index of the first tool part — the one that carries the turn's single `{ }` source
+  // toggle when the header row is dropped (tool-only turns), so it appears once, not per row.
+  const firstToolPart = $derived(turn.parts.findIndex((p) => p.kind === 'tool_exchange' || p.kind === 'tool_result' || p.kind === 'tool_call'));
+  // Read the initial tool-only-ness once for the default open state (untracked so the
+  // $state initializer doesn't capture `turn` reactively — turns never mutate in place).
+  let open = $state(untrack(() => isToolOnly(turn)));
   let sourceOpen = $state(false);
   // Apply a global command whenever its nonce changes (tracked by value, so identical
   // consecutive commands still re-apply). A later per-row toggle just flips `open`.
@@ -67,6 +77,8 @@
 
   // Expanded tool header gets a wider arg budget than the 72-char collapsed line.
   const EXPANDED_ARG_CHARS = 160;
+  // Inline output peek is a glimpse, not the log — keep it short (full body is one click away).
+  const PEEK_LINES = 3;
 
   // Per-role identity: dot color + spine tint + name color — straight from app tokens
   // (indigo brand = assistant, slate = user, amber = system, sky = tool).
@@ -170,48 +182,52 @@
   data-open={open}
   class={`group border-l-2 pl-3 ${style.spine} ${grouped ? '' : 'mt-3'}`}
 >
-  <!-- Collapsed header line: click anywhere to expand. One dense, scannable row. -->
-  <div class="flex items-center gap-2">
-    <button
-      type="button"
-      data-testid="conversation-row-toggle"
-      class="flex min-w-0 flex-1 items-center gap-2 py-1 text-left"
-      onclick={toggle}
-      aria-expanded={open}
-    >
-      <!-- disclosure caret -->
-      <span class="shrink-0 text-[10px] text-ink-faint">{open ? '▾' : '▸'}</span>
-      <!-- role dot + name (name only on the first row of a same-role run) -->
-      <span class={`h-2 w-2 shrink-0 rounded-full ${style.dot}`}></span>
-      {#if !grouped}
-        <span class={`shrink-0 text-xs font-semibold ${style.name}`}>{roleLabel(turn.role)}</span>
-      {/if}
-      <!-- one-line preview (hidden once expanded — the full content shows below) -->
-      {#if !open}
-        <span class="min-w-0 flex-1 truncate text-xs text-ink-muted">{preview}</span>
-      {:else}
-        <span class="flex-1"></span>
-      {/if}
-      <!-- type badges: only what's present -->
-      <span class="flex shrink-0 items-center gap-1.5 text-[11px] text-ink-faint">
-        {#if counts.reasoning}<span title={$t('Reasoning')}>🧠</span>{/if}
-        {#if counts.tools}<span title={$t('tool call')}>🔧{counts.tools > 1 ? `×${counts.tools}` : ''}</span>{/if}
-        {#if counts.images}<span title={$t('Image')}>🖼{counts.images > 1 ? `×${counts.images}` : ''}</span>{/if}
-        {#if counts.errors}<span class="text-red-500" title={$t('error')}>⚠</span>{/if}
-        {#if sizeHint}<span class="font-mono">{sizeHint}</span>{/if}
-      </span>
-    </button>
-    <!-- hover-revealed raw-source affordance (no 48 always-on links) -->
-    <button
-      type="button"
-      data-testid="conversation-source-toggle"
-      class="shrink-0 rounded px-1 font-mono text-xs text-ink-faint opacity-0 transition-opacity hover:text-link focus:opacity-100 group-hover:opacity-100"
-      title={$t('View source')}
-      onclick={() => (sourceOpen = !sourceOpen)}
-    >
-      {'{ }'}
-    </button>
-  </div>
+  <!-- Collapsed header line: click anywhere to expand. One dense, scannable row.
+       A tool-only turn SKIPS this row — the tool block below is the whole row (it
+       carries name/args/status + its own source toggle), so no empty `▾ ● { }` line. -->
+  {#if !toolOnly}
+    <div class="flex items-center gap-2">
+      <button
+        type="button"
+        data-testid="conversation-row-toggle"
+        class="flex min-w-0 flex-1 items-center gap-2 py-1 text-left"
+        onclick={toggle}
+        aria-expanded={open}
+      >
+        <!-- disclosure caret -->
+        <span class="shrink-0 text-[10px] text-ink-faint">{open ? '▾' : '▸'}</span>
+        <!-- role dot + name (name only on the first row of a same-role run) -->
+        <span class={`h-2 w-2 shrink-0 rounded-full ${style.dot}`}></span>
+        {#if !grouped}
+          <span class={`shrink-0 text-xs font-semibold ${style.name}`}>{roleLabel(turn.role)}</span>
+        {/if}
+        <!-- one-line preview (hidden once expanded — the full content shows below) -->
+        {#if !open}
+          <span class="min-w-0 flex-1 truncate text-xs text-ink-muted">{preview}</span>
+        {:else}
+          <span class="flex-1"></span>
+        {/if}
+        <!-- type badges: only what's present -->
+        <span class="flex shrink-0 items-center gap-1.5 text-[11px] text-ink-faint">
+          {#if counts.reasoning}<span title={$t('Reasoning')}>🧠</span>{/if}
+          {#if counts.tools}<span title={$t('tool call')}>🔧{counts.tools > 1 ? `×${counts.tools}` : ''}</span>{/if}
+          {#if counts.images}<span title={$t('Image')}>🖼{counts.images > 1 ? `×${counts.images}` : ''}</span>{/if}
+          {#if counts.errors}<span class="text-red-500" title={$t('error')}>⚠</span>{/if}
+          {#if sizeHint}<span class="font-mono">{sizeHint}</span>{/if}
+        </span>
+      </button>
+      <!-- hover-revealed raw-source affordance (no 48 always-on links) -->
+      <button
+        type="button"
+        data-testid="conversation-source-toggle"
+        class="shrink-0 rounded px-1 font-mono text-xs text-ink-faint opacity-0 transition-opacity hover:text-link focus:opacity-100 group-hover:opacity-100"
+        title={$t('View source')}
+        onclick={() => (sourceOpen = !sourceOpen)}
+      >
+        {'{ }'}
+      </button>
+    </div>
+  {/if}
 
   <!-- Expanded body — flat, terminal-style transcript (no boxes; dot+indent spine). -->
   {#if open}
@@ -229,23 +245,37 @@
         {:else if part.kind === 'tool_exchange'}
           {@const st = exchangeStatus(part)}
           {@const detail = formatToolArgs(part.name, part.args, EXPANDED_ARG_CHARS)}
-          {@const peek = part.hasResult ? toolOutputPeek(part.output) : { lines: [], moreLines: 0 }}
+          {@const peek = part.hasResult ? toolOutputPeek(part.output, PEEK_LINES) : { lines: [], moreLines: 0 }}
           {@const full = toolOpen.has(i)}
           <div data-testid="conversation-tool" class="my-1.5">
-            <!-- Header: ● Name(args)  <status> — click toggles the full args+result viewer. -->
-            <button
-              type="button"
-              data-testid="conversation-tool-toggle"
-              class="flex w-full items-baseline gap-2 text-left font-mono text-xs"
-              onclick={() => toggleTool(i)}
-              aria-expanded={full}
-            >
-              <span class="shrink-0 text-sky-500">●</span>
-              <span class="min-w-0 flex-1 break-words">
-                <span class="font-semibold text-ink-strong">{part.name || $t('tool call')}</span><span class="text-ink-muted">({detail})</span>
-              </span>
-              <span class={`shrink-0 font-medium ${st.cls}`}>{st.glyph} {st.label}</span>
-            </button>
+            <!-- Header: ● Name(args)  <status>  { } — click toggles the full args+result
+                 viewer; the hover-revealed { } shows this turn's raw wire object. -->
+            <div class="flex items-baseline gap-2">
+              <button
+                type="button"
+                data-testid="conversation-tool-toggle"
+                class="flex min-w-0 flex-1 items-baseline gap-2 text-left font-mono text-xs"
+                onclick={() => toggleTool(i)}
+                aria-expanded={full}
+              >
+                <span class="shrink-0 text-sky-500">●</span>
+                <span class="min-w-0 flex-1 break-words">
+                  <span class="font-semibold text-ink-strong">{part.name || $t('tool call')}</span><span class="text-ink-muted">({detail})</span>
+                </span>
+                <span class={`shrink-0 font-medium ${st.cls}`}>{st.glyph} {st.label}</span>
+              </button>
+              {#if toolOnly && firstToolPart === i}
+                <button
+                  type="button"
+                  data-testid="conversation-source-toggle"
+                  class="shrink-0 rounded px-1 font-mono text-xs text-ink-faint opacity-0 transition-opacity hover:text-link focus:opacity-100 group-hover:opacity-100"
+                  title={$t('View source')}
+                  onclick={() => (sourceOpen = !sourceOpen)}
+                >
+                  {'{ }'}
+                </button>
+              {/if}
+            </div>
             <!-- Inline output peek (first lines) under a left rule — the CC glimpse. -->
             {#if !full && peek.lines.length}
               <div class="mt-0.5 border-l-2 border-border pl-3 font-mono text-[11px] leading-snug text-ink-muted">
@@ -287,7 +317,7 @@
           </div>
         {:else if part.kind === 'tool_result'}
           <!-- orphan result (no matching call) — kept, never silently lost -->
-          {@const peek = toolOutputPeek(part.output)}
+          {@const peek = toolOutputPeek(part.output, PEEK_LINES)}
           {@const full = toolOpen.has(i)}
           <div data-testid="conversation-tool" class="my-1.5 font-mono text-xs">
             <button
