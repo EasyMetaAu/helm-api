@@ -141,8 +141,9 @@ export interface KeyUsage {
   total_tokens: number;
 }
 
-// Half-open window for the usage rollup; both bounds optional (the backend
-// defaults to the last 24h, then now, and fails open on junk).
+// Half-open window for the usage rollup; both bounds optional (the API Keys page
+// sends local-midnight start for "today"; the backend falls back to today, then
+// now, and fails open on junk).
 export interface KeyUsageWindow {
   start?: number; // epoch ms (inclusive)
   end?: number; // epoch ms (exclusive)
@@ -285,8 +286,8 @@ export async function getKey(keyId: string): Promise<ApiKeyView | null> {
 }
 
 // GET /admin/api/keys/usage?start&end -> per-key usage rollup for the list column.
-// The window is resolved client-side (the list defaults to the last 24h); the
-// backend fills its own 24h default when omitted and fails open on a bad window.
+// The window is resolved client-side (the list defaults to today); the backend
+// fills its own today default when omitted and fails open on a bad window.
 export async function getKeysUsage(window: KeyUsageWindow = {}): Promise<KeyUsage[]> {
   const qs = new URLSearchParams();
   if (window.start !== undefined) qs.set('start', String(window.start));

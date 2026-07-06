@@ -4,10 +4,15 @@ import type { AppEnv } from "../../app.js";
 import { INTERNAL_API_KEY_ID } from "../../internal-key.js";
 import type { AdminApiDeps, KeySummary, KeyUsageSummary } from "./deps.js";
 
-// Default usage window for the list column when start/end are omitted: last 24h
-// (mirrors the dashboard /stats default). The list view shows "last 24h" by
-// default; the SPA still sends an explicit window, this is just the safe fallback.
+// Default usage window for the list column when start is omitted: today in the
+// viewer's local day. The SPA sends an explicit local-midnight start; this fallback
+// covers direct API calls and stale clients.
 const DAY_MS = 86_400_000;
+
+function localDayStartMs(nowMs: number, tzOffsetMinutes: number): number {
+  const offsetMs = tzOffsetMinutes * 60_000;
+  return nowMs + offsetMs - ((nowMs + offsetMs) % DAY_MS) - offsetMs;
+}
 
 // /admin/api/keys — manage API keys (KeyStore, NEVER yaml). Plaintext is minted
 // here and returned only to the authenticated admin surface. New/rotated rows may
@@ -76,12 +81,13 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
   // GET /keys/usage?start&end -> KeyUsageSummary[] — per-key usage rollup for the
   // list "Usage" column (ONE GROUP BY in the store, never one-per-key). MUST be
   // registered BEFORE /keys/:id or Hono would match "usage" as an :id. The window
-  // is parsed with the SAME fail-open schema as /stats (start/end only; bucket/tz/
-  // key_id are irrelevant here and ignored) and defaults to the last 24h.
+  // is parsed with the SAME fail-open schema as /stats. `start`/`end` are the
+  // half-open window; when start is omitted, `tzOffsetMinutes` lets the fallback
+  // mean the viewer's local "today" instead of a rolling 24h window.
   app.get("/admin/api/keys/usage", async (c) => {
     const q = StatsQuerySchema.parse(c.req.query());
     const end = q.end ?? Date.now();
-    const start = q.start ?? end - DAY_MS;
+    const start = q.start ?? localDayStartMs(end, q.tzOffsetMinutes);
     const usage = await deps.telemetry.usageByKey(start, end);
     return c.json(
       usage.map(

@@ -4,11 +4,11 @@ import { resolveWindow } from '$lib/requests-filters.js';
 import type { PageLoad } from './$types.js';
 
 // SPA load: fetch the redacted key list (prefix only — never plaintext) plus the
-// lane names (for the create-form caps dropdown) and the per-key last-24h usage
-// rollup (the list "Usage" column). Usage is SUPPLEMENTARY observability — it
-// fails soft to [] so an aggregate hiccup never blanks the whole key list.
+// lane names (for the create-form caps dropdown) and today's per-key usage rollup
+// (the list "Usage" column). Usage is SUPPLEMENTARY observability — it fails soft
+// to [] so an aggregate hiccup never blanks the whole key list.
 export const load: PageLoad = async () => {
-  const { start } = resolveWindow('24h', Date.now());
+  const { start } = resolveWindow('today', Date.now());
   const [keys, lanes, usage] = await Promise.all([
     listKeys(),
     listLanes(),

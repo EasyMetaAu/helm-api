@@ -34,9 +34,9 @@
   let keys = $state<ApiKeyView[]>(untrack(() => data.keys));
   const lanes = untrack(() => data.lanes);
 
-  // Per-key last-24h usage, keyed by key_id for O(1) row lookup. A key absent from
-  // the map saw no traffic in the window → the cell renders "—". Display-only
-  // (refreshed on the next load); never mutated by the local create/revoke edits.
+  // Today's per-key usage, keyed by key_id for O(1) row lookup. A key absent from
+  // the map saw no traffic today → the cell renders "—". Display-only (refreshed
+  // on the next load); never mutated by the local create/revoke edits.
   const usageById = $derived(new Map(data.usage.map((u) => [u.key_id, u])));
 
   // Detail-page link for one key — the per-key stats + scoped request list.
@@ -305,7 +305,7 @@
             <th class="px-3 py-2">{$t('Rate limit')}</th>
             <th class="px-3 py-2">{$t('Budget')}</th>
             <th class="px-3 py-2">{$t('Memory')}</th>
-            <th class="px-3 py-2">{$t('Usage (24h)')}</th>
+            <th class="px-3 py-2">{$t('Usage (today)')}</th>
             <th class="px-3 py-2">{$t('Status')}</th>
             <th class="px-3 py-2"></th>
           </tr>
@@ -376,7 +376,7 @@
                   {/if}
                 {/if}
               </td>
-              <td data-label={$t('Usage (24h)')} class="px-3 py-2 text-ink-muted">
+              <td data-label={$t('Usage (today)')} class="px-3 py-2 text-ink-muted">
                 {#if usageById.get(key.key_id)}
                   {@const u = usageById.get(key.key_id)}
                   <div class="text-ink-body">
@@ -392,7 +392,7 @@
                     {$t('tok')}
                   </div>
                 {:else}
-                  <span title={$t('No traffic in the last 24h')}>—</span>
+                  <span title={$t('No traffic today')}>—</span>
                 {/if}
               </td>
               <td data-label={$t('Status')} class="px-3 py-2">

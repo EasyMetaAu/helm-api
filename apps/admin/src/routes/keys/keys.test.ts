@@ -196,12 +196,13 @@ describe('keys page', () => {
     );
   });
 
-  it('renders the 24h usage cell for a key with traffic, "—" for one without', () => {
+  it('renders the today usage cell for a key with traffic, "—" for one without', () => {
     renderPage(
       [key('k1'), key('k2')],
       undefined,
       [{ key_id: 'k1', requests: 7, error_count: 1, cost_usd: 0.042, total_tokens: 1500 }],
     );
+    expect(screen.getByRole('columnheader', { name: /usage \(today\)/i })).toBeInTheDocument();
     const rows = screen.getAllByTestId('key-row');
     // k1 has usage: request count + error count + cost + tokens all render.
     expect(within(rows[0]).getByText(/7/)).toBeInTheDocument();
