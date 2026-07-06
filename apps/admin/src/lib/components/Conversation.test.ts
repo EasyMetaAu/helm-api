@@ -141,15 +141,31 @@ describe('Conversation', () => {
     expect(row.getAttribute('data-open')).toBe('true');
     const tool = screen.getByTestId('conversation-tool');
     expect(tool).toHaveTextContent('Bash(ls -la)');
-    // inline peek shows the first lines; 8 lines total, 6 shown → "+2 lines"
+    // inline peek is capped at 3 lines; 8 lines total, 3 shown → "+5 lines"
     expect(tool).toHaveTextContent('line1');
-    expect(tool).toHaveTextContent('+2');
+    expect(tool).toHaveTextContent('line3');
+    expect(tool).not.toHaveTextContent('line4'); // 4th line is hidden behind the +N
+    expect(tool).toHaveTextContent('+5');
     // full JsonViewer NOT mounted until we ask for it
     expect(within(tool).queryByText('Arguments')).toBeNull();
     // ONE click on the expand affordance → full args + result appear
     await fireEvent.click(within(tool).getByTestId('conversation-tool-expand'));
     expect(within(tool).getByText('Arguments')).toBeInTheDocument();
     expect(within(tool).getByText('Result')).toBeInTheDocument();
+  });
+
+  it('a tool-only turn drops the header row — no conversation-row-toggle, source toggle on the tool line', () => {
+    render(Conversation, {
+      request: {
+        messages: [{ role: 'assistant', content: [{ type: 'tool_use', id: 'c1', name: 'Bash', input: { command: 'ls' } }] }],
+      },
+      response: null,
+    });
+    const row = screen.getByTestId('conversation-turn');
+    // the separate role-header row (with its toggle) is gone for a tool-only turn
+    expect(within(row).queryByTestId('conversation-row-toggle')).toBeNull();
+    // but the { } view-source affordance still exists (moved onto the tool line)
+    expect(within(row).getByTestId('conversation-source-toggle')).toBeInTheDocument();
   });
 
   it('tool-only turn shows the key argument in the parens, not a blind Name()', () => {
