@@ -928,6 +928,9 @@
   "First reply": "最初の返信",
   "Arguments": "引数",
   "no result": "結果なし",
+  "lines": "行",
+  "click to expand": "クリックで展開",
+  "view details": "詳細を表示",
   "empty": "空",
   "{count} system prompt hidden — show": "{count} 件のシステムプロンプトを非表示 — 表示"
 }

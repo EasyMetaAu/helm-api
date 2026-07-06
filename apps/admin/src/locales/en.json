@@ -928,6 +928,9 @@
   "First reply": "First reply",
   "Arguments": "Arguments",
   "no result": "no result",
+  "lines": "lines",
+  "click to expand": "click to expand",
+  "view details": "view details",
   "empty": "empty",
   "{count} system prompt hidden — show": "{count} system prompt hidden — show"
 }

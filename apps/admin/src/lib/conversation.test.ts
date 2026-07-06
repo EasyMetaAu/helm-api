@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { detectProtocol, extractConversation, formatToolArgs, type ConversationTurn } from './conversation.js';
+import { detectProtocol, extractConversation, formatToolArgs, toolOutputPeek, type ConversationTurn } from './conversation.js';
 
 // The normalizer folds a captured request body (one of four native wire protocols)
 // plus its response (parsed JSON, or a raw SSE string for streamed calls) into an
@@ -649,5 +649,60 @@ describe('formatToolArgs', () => {
   it('is fail-soft: null/undefined args → empty string', () => {
     expect(formatToolArgs('Bash', null)).toBe('');
     expect(formatToolArgs('Bash', undefined)).toBe('');
+  });
+});
+
+// toolOutputPeek gives the CC-style inline glimpse of a tool result: the first N
+// lines of text + how many more are hidden. Coerces object/array output to pretty
+// JSON, trims trailing blanks, never throws.
+describe('toolOutputPeek', () => {
+  it('returns all lines and moreLines:0 when at/under the cap', () => {
+    expect(toolOutputPeek('a\nb\nc')).toEqual({ lines: ['a', 'b', 'c'], moreLines: 0 });
+  });
+
+  it('caps to maxLines and reports the remainder', () => {
+    const out = ['l1', 'l2', 'l3', 'l4', 'l5', 'l6', 'l7', 'l8'].join('\n');
+    expect(toolOutputPeek(out, 6)).toEqual({ lines: ['l1', 'l2', 'l3', 'l4', 'l5', 'l6'], moreLines: 2 });
+  });
+
+  it('defaults to 6 lines', () => {
+    const out = Array.from({ length: 10 }, (_, i) => `x${i}`).join('\n');
+    const peek = toolOutputPeek(out);
+    expect(peek.lines).toHaveLength(6);
+    expect(peek.moreLines).toBe(4);
+  });
+
+  it('pretty-prints an object result and counts its lines', () => {
+    const peek = toolOutputPeek({ ok: true, n: 2 });
+    expect(peek.lines[0]).toBe('{');
+    expect(peek.lines.join('\n')).toContain('"ok": true');
+    expect(peek.moreLines).toBe(0); // 4-line pretty JSON < 6
+  });
+
+  it('coerces a JSON-string result to pretty JSON', () => {
+    const peek = toolOutputPeek('{"a":1,"b":2}');
+    expect(peek.lines).toEqual(['{', '  "a": 1,', '  "b": 2', '}']);
+  });
+
+  it('trims trailing blank lines (no phantom +N)', () => {
+    expect(toolOutputPeek('one\ntwo\n\n\n')).toEqual({ lines: ['one', 'two'], moreLines: 0 });
+  });
+
+  it('empty / nullish output → nothing to peek', () => {
+    expect(toolOutputPeek('')).toEqual({ lines: [], moreLines: 0 });
+    expect(toolOutputPeek(null)).toEqual({ lines: [], moreLines: 0 });
+    expect(toolOutputPeek(undefined)).toEqual({ lines: [], moreLines: 0 });
+  });
+});
+
+// The expanded tool header can afford a wider arg preview than the collapsed row.
+describe('formatToolArgs maxChars', () => {
+  it('honors a wider cap when passed', () => {
+    const long = 'echo ' + 'x'.repeat(200);
+    const wide = formatToolArgs('Bash', { command: long }, 160);
+    const narrow = formatToolArgs('Bash', { command: long });
+    expect(wide.length).toBeLessThanOrEqual(160);
+    expect(wide.length).toBeGreaterThan(narrow.length); // wider cap shows more
+    expect(narrow.length).toBeLessThanOrEqual(72);
   });
 });
