@@ -104,7 +104,7 @@ describe('Conversation', () => {
     expect(rows[0].getAttribute('data-turn-role')).toBe('assistant');
   });
 
-  it('a tool call and its result render as ONE merged tool block on expand', async () => {
+  it('a tool call and its result render as ONE merged tool block, open by default (no extra click)', () => {
     render(Conversation, {
       request: {
         messages: [
@@ -117,15 +117,16 @@ describe('Conversation', () => {
     // one row (the tool result turn was folded away)
     const rows = screen.getAllByTestId('conversation-turn');
     expect(rows).toHaveLength(1);
-    await fireEvent.click(within(rows[0]).getByTestId('conversation-row-toggle'));
+    // tool-only turn is expanded by default — the block is there without any click
+    expect(rows[0].getAttribute('data-open')).toBe('true');
     const tool = screen.getByTestId('conversation-tool');
     expect(tool).toHaveTextContent('get_weather');
     expect(tool).toHaveTextContent('ok'); // result status glyph label
   });
 
-  it('expanded tool block shows Name(args) inline + an output peek, full viewer only on click', async () => {
-    // Terminal-style: the block shows `Bash(…)` + the first lines of output inline; the
-    // heavy JsonViewer args/result only appear after clicking the tool header/affordance.
+  it('tool-only turn shows Name(args) + output peek inline WITHOUT a click; full viewer on click', async () => {
+    // The whole friction fix: a turn that is just a tool call opens by default, so the
+    // header + inline peek are visible immediately. Only the full JsonViewer is gated.
     render(Conversation, {
       request: {
         messages: [
@@ -136,24 +137,24 @@ describe('Conversation', () => {
       response: null,
     });
     const row = screen.getByTestId('conversation-turn');
-    await fireEvent.click(within(row).getByTestId('conversation-row-toggle'));
+    // NO click — the tool block, header, and peek are present on first render
+    expect(row.getAttribute('data-open')).toBe('true');
     const tool = screen.getByTestId('conversation-tool');
-    // header shows the tool name + inlined args
     expect(tool).toHaveTextContent('Bash(ls -la)');
     // inline peek shows the first lines; 8 lines total, 6 shown → "+2 lines"
     expect(tool).toHaveTextContent('line1');
     expect(tool).toHaveTextContent('+2');
     // full JsonViewer NOT mounted until we ask for it
     expect(within(tool).queryByText('Arguments')).toBeNull();
-    // click the expand affordance → full args + result appear
+    // ONE click on the expand affordance → full args + result appear
     await fireEvent.click(within(tool).getByTestId('conversation-tool-expand'));
     expect(within(tool).getByText('Arguments')).toBeInTheDocument();
     expect(within(tool).getByText('Result')).toBeInTheDocument();
   });
 
-  it('collapsed tool-call row shows the key argument in the parens, not a blind Name()', () => {
-    // Real Anthropic tool_use shape (the box capture): the collapsed summary must
-    // read `Bash(grep …)` so the reader sees WHAT the tool did, not just that it ran.
+  it('tool-only turn shows the key argument in the parens, not a blind Name()', () => {
+    // Real Anthropic tool_use shape (the box capture): the header must read `Bash(grep …)`
+    // so the reader sees WHAT the tool did, not just that it ran.
     render(Conversation, {
       request: {
         messages: [
@@ -166,10 +167,31 @@ describe('Conversation', () => {
       response: null,
     });
     const row = screen.getByTestId('conversation-turn');
-    // still collapsed — the preview line carries the arg detail
-    expect(row.getAttribute('data-open')).toBe('false');
+    // tool-only → open by default; the header carries the arg detail with no click
+    expect(row.getAttribute('data-open')).toBe('true');
     expect(row.textContent).toContain('Bash(grep -rn foo scripts/)');
     expect(row.textContent).not.toContain('Bash()');
+  });
+
+  it('a MIXED turn (text + tool) still starts collapsed', () => {
+    // Only pure tool turns auto-expand; a turn with prose stays one-line to keep long
+    // traces scannable. Here the assistant narrates AND calls a tool in one turn.
+    render(Conversation, {
+      request: {
+        messages: [
+          {
+            role: 'assistant',
+            content: [
+              { type: 'text', text: 'Let me check the weather.' },
+              { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'weather' } },
+            ],
+          },
+        ],
+      },
+      response: null,
+    });
+    const row = screen.getByTestId('conversation-turn');
+    expect(row.getAttribute('data-open')).toBe('false');
   });
 
   it('image renders ImagePreview (not base64) once expanded', async () => {

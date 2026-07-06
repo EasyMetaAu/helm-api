@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-07-06 · 纯工具 turn 默认展开，去掉多一次点击（Admin conversation view，docs/11，原则 1）
+
+- **背景（Lukin）**：终端风格上线后，看一个工具的 output peek 要点**两次**——先点行展开 turn（row-toggle），再点 `… +N lines` 出完整 JSON。第一层折叠对「整条 turn 就是一个工具调用」的行是纯多余摩擦。Lukin 要求参考 Claude Code：peek 直接可见，不用先展开。
+- **确认方向（AskUserQuestion）**：**纯工具 turn 默认展开**（peek 直接显示），文本/混合 turn 仍默认折叠（保持长 trace 可扫）。
+- **实现**：`ConversationTurn.svelte` 加 `isToolOnly(turn)`（parts 非空且全为 `tool_exchange`/`tool_result`/`tool_call`）；`let open = $state(isToolOnly(turn))`。用**具名函数**在 initializer 里读 `turn`（避免 Svelte `state_referenced_locally` 警告——turn 不会原地变，mount 时算一次即可）。展开态 header/peek 逻辑不变；点 `+N lines` 仍出完整 JsonViewer（第二层保留）。`expandCommand`（全部展开/收起）照常覆盖。
+- **测试更新**：3 个旧断言「tool turn 默认 collapsed / 需点击」翻转为默认 `data-open==='true'` + peek 无点击可见；新增「混合（text+tool）turn 仍 collapsed」用例。670 admin 单测绿、`ConversationTurn.svelte` svelte-check 0 warning。
+- **可视验证坑（记）**：本 session 的 worktree 里有自动清理会**反复删掉未追踪的临时文件**（`/tmp/*.json`、`static/*` payload、`harness-data.json` 每次命令后消失），静态 harness 走不通；改用 live box 部署后截图验证（部署产物不被清理）。
+- **发布轨迹**：终端风格 = v0.25.8（PR #474）；本次默认展开为 v0.25.9。**worktree `worktree-tool-turn-auto-expand`**。
+
 ## 2026-07-06 · 对话视图工具执行改为 Claude-Code 终端风格（inline peek，Admin requests / conversation view，docs/11，原则 1）
 
 - **背景（Lukin）**：原展开态工具块是重边框卡片（🔧 Tool ✓ ok + 两个 bordered JsonViewer 面板 Arguments/Result），boxy、不看展开就不知道工具做了什么。Lukin 给了 Claude Code 终端 transcript 截图，要求参考它做得更清晰。

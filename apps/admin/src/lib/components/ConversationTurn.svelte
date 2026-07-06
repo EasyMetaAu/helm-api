@@ -32,7 +32,14 @@
     expandCommand?: { open: boolean; nonce: number } | null;
   } = $props();
 
-  let open = $state(false);
+  // A turn made entirely of tool calls (no prose/image/reasoning) is opened by default:
+  // its whole signal IS the tool exchange, so the extra "expand the row first" click is
+  // pure friction — the inline peek should just be there (Claude-Code style). Mixed and
+  // text/reasoning turns still start collapsed to keep a long trace scannable. Computed
+  // once at mount (turns never mutate in place), so read `turn` inside the initializer.
+  const isToolOnly = (t: ConversationTurn): boolean =>
+    t.parts.length > 0 && t.parts.every((p) => p.kind === 'tool_exchange' || p.kind === 'tool_result' || p.kind === 'tool_call');
+  let open = $state(isToolOnly(turn));
   let sourceOpen = $state(false);
   // Apply a global command whenever its nonce changes (tracked by value, so identical
   // consecutive commands still re-apply). A later per-row toggle just flips `open`.
