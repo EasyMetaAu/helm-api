@@ -107,6 +107,18 @@ export interface RecordServedDeps extends PayloadCaptureDeps {
   writes?: WriteQueue;
 }
 
+export function decisionForTimedOutRequest(decision: DecisionRecord): DecisionRecord {
+  return {
+    ...decision,
+    final: {
+      ...decision.final,
+      status: "error",
+      error_reason: "timeout",
+    },
+    serving_account: null,
+  };
+}
+
 // Record ONE served request: the telemetry row (always — this is what makes the
 // request appear in /admin/requests) plus the verbatim request/response payload
 // (gated by capture_payloads). Shared by the three pipeline faces (/v1/responses,
@@ -121,12 +133,16 @@ export async function recordServed(
     decision: DecisionRecord;
     requestJson: string;
     responseJson: string | null;
+    timedOut?: boolean;
     // The exact body forwarded upstream (post inject + translation); null when no
     // provider served or capture context lacks it.
     upstreamRequestJson?: string | null;
   },
   log: (msg: string) => void,
 ): Promise<void> {
+  const decision =
+    args.timedOut === true ? decisionForTimedOutRequest(args.decision) : args.decision;
+  const responseJson = args.timedOut === true ? null : args.responseJson;
   // Deferred + batched path: enqueue both writes to run AFTER the response, off the
   // hot path. The redaction is done HERE (synchronously) so the enqueued snapshot is
   // independent of anything that touches the decision later.
@@ -136,7 +152,7 @@ export async function recordServed(
       w.enqueuePayload({
         requestId: args.requestId,
         requestJson: args.requestJson,
-        responseJson: args.responseJson,
+        responseJson,
         upstreamRequestJson: args.upstreamRequestJson ?? null,
         createdAt: new Date(deps.now()),
       });
@@ -144,7 +160,7 @@ export async function recordServed(
       // owns payload retention (archive-first), governed by the cleanup settings.
     }
     w.enqueueTelemetry({
-      decision: deps.redact(args.decision),
+      decision: deps.redact(decision),
       apiKeyId: args.apiKeyId,
       createdAt: new Date(deps.now()),
     });
@@ -157,7 +173,7 @@ export async function recordServed(
     {
       requestId: args.requestId,
       requestJson: args.requestJson,
-      responseJson: args.responseJson,
+      responseJson,
       upstreamRequestJson: args.upstreamRequestJson ?? null,
       now: deps.now(),
     },
@@ -165,7 +181,7 @@ export async function recordServed(
   );
   try {
     await deps.telemetry.insert({
-      decision: deps.redact(args.decision),
+      decision: deps.redact(decision),
       apiKeyId: args.apiKeyId,
       createdAt: new Date(deps.now()),
     });

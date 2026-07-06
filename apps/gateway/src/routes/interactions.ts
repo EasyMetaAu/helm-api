@@ -5,6 +5,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
+import { requestSignal, requestTimedOut } from "../middleware/limits.js";
 import type { GeminiRateLimiterPort } from "./gemini.js";
 import {
   type ImageAttempt,
@@ -220,7 +221,7 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
       const acquired = await deps.concurrencyGate.acquire({
         keyId: identity.keyId,
         limit: identity.caps?.concurrencyLimit ?? null,
-        signal: c.req.raw.signal,
+        signal: requestSignal(c),
       });
       if (!acquired.ok) {
         c.header("retry-after", String(acquired.retryAfterSeconds));
@@ -336,7 +337,7 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
             parsed.data.generation_config ?? null,
           ),
         },
-        { signal: c.req.raw.signal, captureUpstream },
+        { signal: requestSignal(c), captureUpstream },
       )) as Record<string, unknown>;
       const interactionsBody = nativeToInteractions(native, `int_${traceId}`);
       const usageBody = usageBodyFromNative(native);
@@ -348,7 +349,7 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
       };
     };
 
-    const outcome = await runImageChain(geminiTargets, deps.breaker, attempt, c.req.raw.signal);
+    const outcome = await runImageChain(geminiTargets, deps.breaker, attempt, requestSignal(c));
 
     // 6b) Terminal failure. A client abort is a NON-provider fault → no record.
     if (!outcome.ok) {
@@ -373,6 +374,7 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
             decision,
             requestJson,
             responseJson: null,
+            timedOut: requestTimedOut(c),
             upstreamRequestJson: null,
           },
           log,
@@ -412,6 +414,7 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
           decision,
           requestJson,
           responseJson,
+          timedOut: requestTimedOut(c),
           upstreamRequestJson: result.upstreamRequestJson,
         },
         log,

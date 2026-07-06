@@ -738,4 +738,23 @@ describe("recordServed — deferred write queue (the three pipeline faces)", () 
     expect(s.inserted).toHaveLength(1);
     expect(s.payloads).toHaveLength(1);
   });
+
+  it("records a timed-out request as an error even if the provider later completed", async () => {
+    const s = sink();
+    const d: RecordServedDeps = {
+      telemetry: s.telemetry,
+      redact: (x) => x,
+      now: () => 5000,
+      capturePayloads: () => true,
+    };
+    await recordServed(d, { ...args, requestId: "req_timeout", timedOut: true }, () => {});
+    expect(s.inserted[0]?.final).toMatchObject({
+      status: "error",
+      error_reason: "timeout",
+      model_alias: "openai/gpt",
+    });
+    expect(s.inserted[0]?.serving_account).toBeNull();
+    expect(s.payloads[0]?.responseJson).toBeNull();
+    expect(args.decision.final.status).toBe("ok");
+  });
 });

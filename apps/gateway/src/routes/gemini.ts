@@ -9,6 +9,7 @@ import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
+import { requestSignal, requestTimedOut } from "../middleware/limits.js";
 import { stampServingAccount } from "../runtime/serving-account.js";
 import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.js";
 import { resolveMemoryScope } from "./memory-scope.js";
@@ -224,7 +225,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
       const acquired = await deps.concurrencyGate.acquire({
         keyId: identity.keyId,
         limit: identity.caps?.concurrencyLimit ?? null,
-        signal: c.req.raw.signal,
+        signal: requestSignal(c),
       });
       if (!acquired.ok) {
         c.header("retry-after", String(acquired.retryAfterSeconds));
@@ -268,7 +269,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
           const counted = await deps.countTokens(
             { ...(native as Record<string, unknown>), model: route.model },
             identity,
-            c.req.raw.signal,
+            requestSignal(c),
           );
           return c.json(counted as Record<string, unknown>);
         } catch {
@@ -340,7 +341,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
     //    PipelineError(invalid_request) for an empty request.
     let result: PipelineRunResult;
     try {
-      result = await deps.pipeline.run(ir, identity, c.req.raw.signal);
+      result = await deps.pipeline.run(ir, identity, requestSignal(c));
     } catch (err) {
       if (err instanceof PipelineError) {
         return sendError(c, {
@@ -379,7 +380,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
         try {
           for await (const item of withHeartbeat(result.streamIR(), {
             heartbeatMs,
-            signal: c.req.raw.signal,
+            signal: requestSignal(c),
           })) {
             if (item.type === "beat") {
               if (atEventBoundary(lastWrite)) await sse.write(HEARTBEAT_COMMENT);
@@ -440,6 +441,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
                 decision: result.decision,
                 requestJson,
                 responseJson: captureBodies ? captured.join("") : null,
+                timedOut: requestTimedOut(c),
                 upstreamRequestJson: result.upstreamRequest ?? null,
               },
               (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
@@ -471,6 +473,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
             decision: result.decision,
             requestJson,
             responseJson: null,
+            timedOut: requestTimedOut(c),
             upstreamRequestJson: result.upstreamRequest ?? null,
           },
           (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
@@ -497,6 +500,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
           decision: result.decision,
           requestJson,
           responseJson: captureBodies ? JSON.stringify(body) : null,
+          timedOut: requestTimedOut(c),
           upstreamRequestJson: result.upstreamRequest ?? null,
         },
         (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),

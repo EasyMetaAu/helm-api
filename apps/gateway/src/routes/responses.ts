@@ -7,6 +7,7 @@ import type { AppEnv } from "../app.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
+import { requestSignal, requestTimedOut } from "../middleware/limits.js";
 import { stampServingAccount } from "../runtime/serving-account.js";
 import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.js";
 import { resolveMemoryScope } from "./memory-scope.js";
@@ -364,8 +365,8 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       }
       const body =
         deps.registry !== undefined
-          ? await method(responseId, identity, c.req.raw.signal, registryRecord ?? undefined)
-          : await method(responseId, identity, c.req.raw.signal);
+          ? await method(responseId, identity, requestSignal(c), registryRecord ?? undefined)
+          : await method(responseId, identity, requestSignal(c));
       return c.json(body as Record<string, unknown>);
     };
 
@@ -385,7 +386,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       ir.metadata = { ...(ir.metadata ?? {}), trace_id: traceId };
       let result: PipelineRunResult;
       try {
-        result = await deps.pipeline.run(ir, identity, c.req.raw.signal);
+        result = await deps.pipeline.run(ir, identity, requestSignal(c));
         const collected = await result.collect();
         return c.json(deps.transformer.transformResponseOut(collected) as Record<string, unknown>);
       } catch (err) {
@@ -393,7 +394,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         throw err;
       }
     }
-    const body = await method(native, identity, c.req.raw.signal);
+    const body = await method(native, identity, requestSignal(c));
     return c.json(body as Record<string, unknown>);
   };
 
@@ -403,7 +404,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     const native = await parseJsonBody(c, traceId);
     const providerMethod = deps.lifecycle?.inputTokens;
     if (providerMethod !== undefined) {
-      const body = await providerMethod(native, identity, c.req.raw.signal);
+      const body = await providerMethod(native, identity, requestSignal(c));
       return c.json(body as Record<string, unknown>);
     }
     return c.json({ input_tokens: estimateResponsesInputTokens(native), estimated: true });
@@ -455,7 +456,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       const acquired = await deps.concurrencyGate.acquire({
         keyId: identity.keyId,
         limit: identity.caps?.concurrencyLimit ?? null,
-        signal: c.req.raw.signal,
+        signal: requestSignal(c),
       });
       if (!acquired.ok) {
         c.header("retry-after", String(acquired.retryAfterSeconds));
@@ -581,10 +582,10 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         let streamResponseId: string | null = null;
         let streamStatus: string | null = null;
         try {
-          result = await deps.pipeline.run(ir, identity, c.req.raw.signal);
+          result = await deps.pipeline.run(ir, identity, requestSignal(c));
           for await (const item of withHeartbeat(result.streamIR(), {
             heartbeatMs,
-            signal: c.req.raw.signal,
+            signal: requestSignal(c),
           })) {
             if (item.type === "beat") {
               if (atEventBoundary(lastWrite)) await sse.write(HEARTBEAT_COMMENT);
@@ -658,6 +659,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                 decision: result.decision,
                 requestJson,
                 responseJson: captureBodies ? captured.join("") : null,
+                timedOut: requestTimedOut(c),
                 upstreamRequestJson: result.upstreamRequest ?? null,
               },
               (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
@@ -697,7 +699,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     //    after the Responses prelude has already reached the client.
     let result: PipelineRunResult;
     try {
-      result = await deps.pipeline.run(ir, identity, c.req.raw.signal);
+      result = await deps.pipeline.run(ir, identity, requestSignal(c));
     } catch (err) {
       if (err instanceof PipelineError) throw pipelineToHelm(err, traceId);
       throw err;
@@ -735,6 +737,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
             decision: result.decision,
             requestJson,
             responseJson: null,
+            timedOut: requestTimedOut(c),
             upstreamRequestJson: result.upstreamRequest ?? null,
           },
           (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
@@ -776,6 +779,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           decision: result.decision,
           requestJson,
           responseJson: captureBodies ? JSON.stringify(body) : null,
+          timedOut: requestTimedOut(c),
           upstreamRequestJson: result.upstreamRequest ?? null,
         },
         (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
