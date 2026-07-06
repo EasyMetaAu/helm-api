@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { detectProtocol, extractConversation, type ConversationTurn } from './conversation.js';
+import { detectProtocol, extractConversation, formatToolArgs, type ConversationTurn } from './conversation.js';
 
 // The normalizer folds a captured request body (one of four native wire protocols)
 // plus its response (parsed JSON, or a raw SSE string for streamed calls) into an
@@ -567,5 +567,74 @@ describe('clarity pass', () => {
     const ex = turns[0].parts[0];
     expect(ex.kind).toBe('tool_exchange');
     expect(ex.kind === 'tool_exchange' && ex.hasResult).toBe(true);
+  });
+});
+
+// formatToolArgs powers the collapsed row's `Name(<detail>)` preview. It picks one
+// meaningful field per known tool, coerces a JSON-string arg to its object, truncates,
+// and NEVER throws (returns '' when there's nothing to show). Tool names are Claude
+// Code's capitalized names; matching is case-insensitive so lowercase OpenAI names work.
+describe('formatToolArgs', () => {
+  it('shows the Bash command', () => {
+    expect(formatToolArgs('Bash', { command: 'ls -la', description: 'list' })).toBe('ls -la');
+  });
+
+  it('chains a multi-stage Bash command with →', () => {
+    expect(formatToolArgs('Bash', { command: 'cd /tmp && ls; echo done' })).toBe('cd /tmp → ls → echo done');
+  });
+
+  it('matches tool names case-insensitively (lowercase openai)', () => {
+    expect(formatToolArgs('bash', { command: 'pwd' })).toBe('pwd');
+  });
+
+  it('shows file_path for Read/Edit', () => {
+    expect(formatToolArgs('Read', { file_path: '/a/b.ts' })).toBe('/a/b.ts');
+    expect(formatToolArgs('Edit', { file_path: '/a/c.ts', old_string: 'x' })).toBe('/a/c.ts');
+  });
+
+  it('appends a size suffix for Write', () => {
+    expect(formatToolArgs('Write', { file_path: '/tmp/x.md', content: 'y'.repeat(2100) })).toBe('/tmp/x.md · 2.1k');
+    expect(formatToolArgs('Write', { file_path: '/tmp/x.md', content: '' })).toBe('/tmp/x.md');
+  });
+
+  it('shows the Agent description, not the long prompt', () => {
+    expect(formatToolArgs('Agent', { description: 'Map supply', prompt: 'x'.repeat(500), subagent_type: 'general' })).toBe('Map supply');
+  });
+
+  it('shows subject for TaskCreate and id→status for TaskUpdate', () => {
+    expect(formatToolArgs('TaskCreate', { subject: 'Widen window', description: 'z' })).toBe('Widen window');
+    expect(formatToolArgs('TaskUpdate', { taskId: '12', status: 'in_progress', owner: 'x' })).toBe('12 → in_progress');
+  });
+
+  it('coerces a raw JSON-string arg to its object', () => {
+    expect(formatToolArgs('Bash', JSON.stringify({ command: 'whoami' }))).toBe('whoami');
+  });
+
+  it('falls back to truncated JSON for an unknown tool', () => {
+    expect(formatToolArgs('MysteryTool', { a: 1, b: 'two' })).toBe('{"a":1,"b":"two"}');
+  });
+
+  it('shows the cron expression for CronCreate', () => {
+    expect(formatToolArgs('CronCreate', { cron: '*/17 * * * *', prompt: 'x', recurring: true })).toBe('*/17 * * * *');
+  });
+
+  it('an empty-object arg shows nothing (bare Name()), not {}', () => {
+    expect(formatToolArgs('TaskList', {})).toBe('');
+  });
+
+  it('shows a bare string arg', () => {
+    expect(formatToolArgs('Whatever', 'just text')).toBe('just text');
+  });
+
+  it('truncates long details with an ellipsis', () => {
+    const out = formatToolArgs('Read', { file_path: '/'.repeat(200) });
+    expect(out.length).toBeLessThanOrEqual(72);
+    expect(out.endsWith('…')).toBe(true);
+  });
+
+  it('is fail-soft: null/garbage args → empty string', () => {
+    expect(formatToolArgs('Bash', null)).toBe('');
+    expect(formatToolArgs('Bash', undefined)).toBe('');
+    expect(formatToolArgs('Read', { file_path: 123 })).toBe(''); // wrong type → nothing to show
   });
 });

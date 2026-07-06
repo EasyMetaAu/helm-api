@@ -1,6 +1,6 @@
 <script lang="ts">
   import { t } from '$lib/i18n';
-  import type { ConversationTurn, TurnPart } from '$lib/conversation';
+  import { formatToolArgs, type ConversationTurn, type TurnPart } from '$lib/conversation';
   import ImagePreview from './ImagePreview.svelte';
   import JsonViewer from './JsonViewer.svelte';
 
@@ -72,9 +72,11 @@
   const preview = $derived.by(() => {
     const textPart = turn.parts.find((p) => p.kind === 'text');
     if (textPart && textPart.kind === 'text') return textPart.text.replace(/\s+/g, ' ').trim();
-    // no text → describe by the dominant non-text part
+    // no text → describe by the dominant non-text part. For a tool call, fill the
+    // parens with a preview of its key argument so the row reads `Bash(grep …)`, not
+    // a blind `Bash()` (full args still show expanded).
     const ex = turn.parts.find((p) => p.kind === 'tool_exchange');
-    if (ex && ex.kind === 'tool_exchange') return `${ex.name || $t('tool call')}()`;
+    if (ex && ex.kind === 'tool_exchange') return `${ex.name || $t('tool call')}(${formatToolArgs(ex.name, ex.args)})`;
     const r = turn.parts.find((p) => p.kind === 'reasoning');
     if (r && r.kind === 'reasoning') return r.text.replace(/\s+/g, ' ').trim();
     if (turn.parts.some((p) => p.kind === 'image')) return $t('Image');
