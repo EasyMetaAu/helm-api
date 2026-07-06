@@ -428,7 +428,7 @@ function assistantTurnFromAssembled(a: AssembledStream, raw: unknown): Conversat
 }
 
 /** Parse a complete JSON string back to its value; return the input unchanged otherwise. */
-function coerceJson(value: string): unknown {
+export function coerceJson(value: string): unknown {
   const s = value.trim();
   if (!s || (s[0] !== '{' && s[0] !== '[')) return value;
   try {
@@ -645,4 +645,104 @@ function cleanTurns(turns: ConversationTurn[]): ConversationTurn[] {
     out.push({ ...turn, parts });
   }
   return out;
+}
+
+// ── collapsed tool-call arg preview ──────────────────────────────────────────
+// The collapsed conversation row shows a tool call as `Name(<detail>)`. Without a
+// detail it reads just `Bash()` — the reader sees THAT a tool ran but not WHAT it
+// did. This picks the single most meaningful field per known tool (Claude Code's
+// own capitalized tool names, verified against real captures) and truncates it, so
+// `Bash()` becomes `Bash(grep -rn "172.31…" scripts/)`. Full args still render in
+// the expanded view; this is only the one-line summary. Mirrors AgentCrew's
+// tool-format.ts. PURE + fail-soft: never throws, worst case returns ''.
+
+const MAX_TOOL_DETAIL_CHARS = 72;
+
+function truncateDetail(s: string): string {
+  const t = s.replace(/\s+/g, ' ').trim();
+  return t.length <= MAX_TOOL_DETAIL_CHARS ? t : `${t.slice(0, MAX_TOOL_DETAIL_CHARS - 1)}…`;
+}
+
+// ponytail: naive top-level split (not quote-aware) — a `&&`/`;`/`||` inside a quoted
+// string over-splits, harmless in a display preview. Make it quote-aware only if a
+// real command visibly mis-splits.
+export function formatBashCommandChain(command: string): string {
+  const stages = command
+    .split(/\s*(?:&&|\|\||;)\s*/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return stages.length <= 1 ? command.trim() : stages.join(' → ');
+}
+
+/**
+ * One-line detail for a tool call's args — the `<detail>` inside `Name(<detail>)`.
+ * Returns '' when there's nothing worth showing (caller renders bare `Name()`).
+ * `args` may be an object OR a raw JSON string (the fold keeps it verbatim), so we
+ * coerce a JSON string back to its object first.
+ */
+export function formatToolArgs(name: string, args: unknown): string {
+  try {
+    const parsed = typeof args === 'string' ? coerceJson(args) : args;
+    const a = asRecord(parsed);
+    // A tool arg that isn't an object (a bare string/number) is still worth showing.
+    if (!a) {
+      const s = str(parsed);
+      return s ? truncateDetail(s) : '';
+    }
+    const key = name.toLowerCase();
+    const field = (k: string): string | null => str(a[k]);
+
+    if (key === 'bash') {
+      const cmd = field('command');
+      return cmd ? truncateDetail(formatBashCommandChain(cmd)) : '';
+    }
+    if (key === 'read' || key === 'edit' || key === 'multiedit') {
+      const fp = field('file_path');
+      return fp ? truncateDetail(fp) : '';
+    }
+    if (key === 'write') {
+      const fp = field('file_path');
+      if (!fp) return '';
+      const content = a.content;
+      const chars = typeof content === 'string' ? content.length : 0;
+      const suffix = chars >= 1000 ? ` · ${Math.round(chars / 100) / 10}k` : chars > 0 ? ` · ${chars}` : '';
+      return `${truncateDetail(fp)}${suffix}`;
+    }
+    if (key === 'agent' || key === 'task') {
+      const d = field('description') ?? field('subject');
+      return d ? truncateDetail(d) : '';
+    }
+    if (key === 'taskcreate') {
+      const subj = field('subject');
+      return subj ? truncateDetail(subj) : '';
+    }
+    if (key === 'taskupdate') {
+      const id = field('taskId');
+      const status = field('status');
+      const parts = [id, status].filter(Boolean).join(' → ');
+      return parts ? truncateDetail(parts) : '';
+    }
+    if (key === 'sendmessage') {
+      const summary = field('summary');
+      return summary ? truncateDetail(summary) : '';
+    }
+    if (key === 'glob' || key === 'grep' || key === 'ls') {
+      const inline = field('pattern') ?? field('path');
+      return inline ? truncateDetail(inline) : '';
+    }
+    if (key === 'webfetch' || key === 'websearch') {
+      const inline = field('url') ?? field('query');
+      return inline ? truncateDetail(inline) : '';
+    }
+    if (key === 'croncreate') {
+      const cron = field('cron');
+      return cron ? truncateDetail(cron) : '';
+    }
+    // Unknown tool → truncated raw JSON of the whole object. An empty object shows
+    // nothing (bare `Name()`) rather than a noisy `Name({})`.
+    if (Object.keys(a).length === 0) return '';
+    return truncateDetail(JSON.stringify(parsed));
+  } catch {
+    return '';
+  }
 }

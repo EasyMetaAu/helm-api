@@ -123,6 +123,27 @@ describe('Conversation', () => {
     expect(tool).toHaveTextContent('ok'); // result status glyph label
   });
 
+  it('collapsed tool-call row shows the key argument in the parens, not a blind Name()', () => {
+    // Real Anthropic tool_use shape (the box capture): the collapsed summary must
+    // read `Bash(grep …)` so the reader sees WHAT the tool did, not just that it ran.
+    render(Conversation, {
+      request: {
+        messages: [
+          {
+            role: 'assistant',
+            content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'grep -rn foo scripts/', description: 'search' } }],
+          },
+        ],
+      },
+      response: null,
+    });
+    const row = screen.getByTestId('conversation-turn');
+    // still collapsed — the preview line carries the arg detail
+    expect(row.getAttribute('data-open')).toBe('false');
+    expect(row.textContent).toContain('Bash(grep -rn foo scripts/)');
+    expect(row.textContent).not.toContain('Bash()');
+  });
+
   it('image renders ImagePreview (not base64) once expanded', async () => {
     const b64 = `iVBORw0KGgo${'A'.repeat(40)}`;
     render(Conversation, {

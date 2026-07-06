@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-07-06 · 折叠会话行显示工具调用参数预览（Admin requests / conversation view，docs/11，原则 1）
+
+- **背景（Lukin）**：请求详情「对话」视图里，assistant 的工具调用折叠行只显示 `Bash()` / `Read()` / `Write()` / `Agent()` 空括号——能看出调用了工具，却看不出具体参数。展开才有完整参数，折叠摘要是盲的。
+- **实现决策**：`conversation.ts` 新增纯函数 `formatToolArgs(name, args)`，只返回括号内的 detail 字符串（`Name(...)` 外壳由调用方拼）。按 Claude Code 大写工具名逐个挑最有意义的单字段（Bash→command 且 `&&`/`;`/`||` 顶层切分成 `→` 链；Read/Edit/MultiEdit→file_path；Write→file_path+内容字数；Agent/Task→description；TaskCreate→subject；TaskUpdate→taskId→status；SendMessage→summary；Glob/Grep/LS→pattern??path；WebFetch/WebSearch→url??query；CronCreate→cron），未知工具回退截断 JSON，空对象回退空串（裸 `Name()`）。参数可能是对象或原始 JSON 串，先 `coerceJson` 归一。72 字符硬截断带 `…`。参照 AgentCrew `channels/ux/tool-format.ts` 的模式。
+- **纯度/失败软化**：`formatToolArgs` 与整个 `conversation.ts` 一致——纯、永不抛，最坏返回 `''`；折叠行渲染不会因坏参数崩页。工具名大小写不敏感（同时覆盖 OpenAI 小写工具名）。
+- **UI 改动面**：仅 `ConversationTurn.svelte` 的 `preview` derived 一行（`Name()` → `Name(${formatToolArgs(...)})`）+ import。展开视图、badges、size hint、状态字形全部不动。无新 i18n key（参数是逐字数据，不可翻译）。
+- **ponytail 简化**：shell 切分是朴素顶层 split（非引号感知），引号内的 `&&`/`;` 会过度切分——展示预览里无害，真命令可见 mis-split 时再升级为引号感知（代码标 `// ponytail:`）。
+- **验证**：`conversation.test.ts` 加 `formatToolArgs` 用例（Bash 链/Read/Write 字数/Agent/对象-vs-JSON串/未知回退/空对象/截断/null 失败软化/CronCreate）；`Conversation.test.ts` 加一条真实 Anthropic `tool_use` 形状的渲染契约（折叠行断言含 `Bash(grep …)` 不含 `Bash()`），走完整 parser→组件→DOM。657 admin 单测绿、svelte-check 0 error。
+
 ## 2026-07-06 · 配额 PULL 的 100% 账号级窗口必须同步停车（OAuth provider pool / Admin providers，docs/04/11，原则 3/5/7）
 
 - **背景（Lukin）**：Providers 页可以从 Codex/Anthropic usage PULL 看到账号级窗口已经 100% 并显示“已限流”，但后端只把该 PULL 当观测快照；如果 live traffic 没先触发 429/header PUSH 写入 `usageLimitedUntilMs`，OAuth pool 仍会继续选择这个账号。
