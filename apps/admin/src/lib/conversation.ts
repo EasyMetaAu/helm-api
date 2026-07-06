@@ -650,13 +650,39 @@ function cleanTurns(turns: ConversationTurn[]): ConversationTurn[] {
 // ── collapsed tool-call arg preview ──────────────────────────────────────────
 // The collapsed conversation row shows a tool call as `Name(<detail>)`. Without a
 // detail it reads just `Bash()` — the reader sees THAT a tool ran but not WHAT it
-// did. This picks the single most meaningful field per known tool (Claude Code's
-// own capitalized tool names, verified against real captures) and truncates it, so
-// `Bash()` becomes `Bash(grep -rn "172.31…" scripts/)`. Full args still render in
-// the expanded view; this is only the one-line summary. Mirrors AgentCrew's
-// tool-format.ts. PURE + fail-soft: never throws, worst case returns ''.
+// did. This produces a one-line detail for ANY tool, with NO per-tool whitelist:
+// tool names change (casing, custom MCP tools, future built-ins), so gating on a
+// known list leaves everything else blind. Instead it works generically off the
+// ARGS shape — pick the most human-readable field present, else the first primitive,
+// else compact JSON. A tiny key-preference list only RANKS which field reads best;
+// it never GATES (an unranked object still shows its first field). Full args render
+// in the expanded view; this is only the summary. PURE + fail-soft: never throws.
 
 const MAX_TOOL_DETAIL_CHARS = 72;
+
+// Keys that tend to hold the single most meaningful value across tools/APIs, most
+// telling first. Purely a RANKING for which field to surface — not a gate: an object
+// with none of these still falls through to its first primitive field below.
+const PREFERRED_KEYS = [
+  'command',
+  'file_path',
+  'filePath',
+  'pattern', // before `path` — a search pattern is more telling than its dir
+  'query',
+  'url',
+  'path',
+  // short human labels before bulky bodies — `description` reads better than a 2KB `prompt`
+  'description',
+  'subject',
+  'summary',
+  'title',
+  'name',
+  'message',
+  'prompt',
+  'content',
+  'text',
+  'input',
+];
 
 function truncateDetail(s: string): string {
   const t = s.replace(/\s+/g, ' ').trim();
@@ -674,74 +700,64 @@ export function formatBashCommandChain(command: string): string {
   return stages.length <= 1 ? command.trim() : stages.join(' → ');
 }
 
+// Render one scalar arg value compactly (string/number/bool). Objects/arrays aren't
+// scalars — the caller handles those via JSON. Returns null for a non-scalar/empty.
+function scalarText(v: unknown): string | null {
+  if (typeof v === 'string') return v.trim() === '' ? null : v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  return null;
+}
+
 /**
- * One-line detail for a tool call's args — the `<detail>` inside `Name(<detail>)`.
- * Returns '' when there's nothing worth showing (caller renders bare `Name()`).
- * `args` may be an object OR a raw JSON string (the fold keeps it verbatim), so we
- * coerce a JSON string back to its object first.
+ * One-line detail for a tool call's args — the `<detail>` inside `Name(<detail>)`,
+ * for ANY tool (no whitelist). Returns '' only when there's genuinely nothing to
+ * show. `args` may be an object OR a raw JSON string (the fold keeps it verbatim),
+ * so we coerce a JSON string back to its object first.
  */
-export function formatToolArgs(name: string, args: unknown): string {
+export function formatToolArgs(_name: string, args: unknown): string {
   try {
     const parsed = typeof args === 'string' ? coerceJson(args) : args;
+    // Non-object arg (a bare string / number / array) — show it directly.
     const a = asRecord(parsed);
-    // A tool arg that isn't an object (a bare string/number) is still worth showing.
     if (!a) {
-      const s = str(parsed);
-      return s ? truncateDetail(s) : '';
+      const s = scalarText(parsed);
+      if (s) return truncateDetail(s);
+      return parsed == null ? '' : truncateDetail(JSON.stringify(parsed));
     }
-    const key = name.toLowerCase();
-    const field = (k: string): string | null => str(a[k]);
+    if (Object.keys(a).length === 0) return ''; // empty object → bare `Name()`
 
-    if (key === 'bash') {
-      const cmd = field('command');
-      return cmd ? truncateDetail(formatBashCommandChain(cmd)) : '';
+    // Pick the field to surface: a preferred key first (ranking, not gate), else the
+    // first scalar field in insertion order. Works for every tool, known or not.
+    let picked: { key: string; value: string } | null = null;
+    for (const k of PREFERRED_KEYS) {
+      const v = scalarText(a[k]);
+      if (v !== null) {
+        picked = { key: k, value: v };
+        break;
+      }
     }
-    if (key === 'read' || key === 'edit' || key === 'multiedit') {
-      const fp = field('file_path');
-      return fp ? truncateDetail(fp) : '';
+    if (!picked) {
+      for (const [k, v] of Object.entries(a)) {
+        const s = scalarText(v);
+        if (s !== null) {
+          picked = { key: k, value: s };
+          break;
+        }
+      }
     }
-    if (key === 'write') {
-      const fp = field('file_path');
-      if (!fp) return '';
-      const content = a.content;
-      const chars = typeof content === 'string' ? content.length : 0;
-      const suffix = chars >= 1000 ? ` · ${Math.round(chars / 100) / 10}k` : chars > 0 ? ` · ${chars}` : '';
-      return `${truncateDetail(fp)}${suffix}`;
+    // No scalar field anywhere (all nested objects/arrays) → compact JSON of the whole.
+    if (!picked) return truncateDetail(JSON.stringify(parsed));
+
+    // Light polish, keyed on the FIELD (not the tool name), so it applies to any tool
+    // carrying that field: a shell command chains on `&&`/`;`; a written file with a
+    // sibling `content` string gets a size hint.
+    if (picked.key === 'command') return truncateDetail(formatBashCommandChain(picked.value));
+    if ((picked.key === 'file_path' || picked.key === 'filePath') && typeof a.content === 'string' && a.content.length > 0) {
+      const chars = a.content.length;
+      const suffix = chars >= 1000 ? ` · ${Math.round(chars / 100) / 10}k` : ` · ${chars}`;
+      return `${truncateDetail(picked.value)}${suffix}`;
     }
-    if (key === 'agent' || key === 'task') {
-      const d = field('description') ?? field('subject');
-      return d ? truncateDetail(d) : '';
-    }
-    if (key === 'taskcreate') {
-      const subj = field('subject');
-      return subj ? truncateDetail(subj) : '';
-    }
-    if (key === 'taskupdate') {
-      const id = field('taskId');
-      const status = field('status');
-      const parts = [id, status].filter(Boolean).join(' → ');
-      return parts ? truncateDetail(parts) : '';
-    }
-    if (key === 'sendmessage') {
-      const summary = field('summary');
-      return summary ? truncateDetail(summary) : '';
-    }
-    if (key === 'glob' || key === 'grep' || key === 'ls') {
-      const inline = field('pattern') ?? field('path');
-      return inline ? truncateDetail(inline) : '';
-    }
-    if (key === 'webfetch' || key === 'websearch') {
-      const inline = field('url') ?? field('query');
-      return inline ? truncateDetail(inline) : '';
-    }
-    if (key === 'croncreate') {
-      const cron = field('cron');
-      return cron ? truncateDetail(cron) : '';
-    }
-    // Unknown tool → truncated raw JSON of the whole object. An empty object shows
-    // nothing (bare `Name()`) rather than a noisy `Name({})`.
-    if (Object.keys(a).length === 0) return '';
-    return truncateDetail(JSON.stringify(parsed));
+    return truncateDetail(picked.value);
   } catch {
     return '';
   }
