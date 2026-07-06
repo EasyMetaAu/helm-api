@@ -1,6 +1,6 @@
 <script lang="ts">
   import { t } from '$lib/i18n';
-  import { formatToolArgs, type ConversationTurn, type TurnPart } from '$lib/conversation';
+  import { formatToolArgs, toolOutputPeek, type ConversationTurn, type TurnPart } from '$lib/conversation';
   import ImagePreview from './ImagePreview.svelte';
   import JsonViewer from './JsonViewer.svelte';
 
@@ -46,6 +46,20 @@
   function toggle() {
     open = !open;
   }
+
+  // Which tool parts have their FULL JsonViewer revealed (keyed by part index). The
+  // terminal-style block shows an inline peek by default; clicking "+N lines" or the
+  // header lifts the full args+result viewer. A Set keeps each tool row independent.
+  let toolOpen = $state<Set<number>>(new Set());
+  function toggleTool(i: number) {
+    const next = new Set(toolOpen);
+    if (next.has(i)) next.delete(i);
+    else next.add(i);
+    toolOpen = next;
+  }
+
+  // Expanded tool header gets a wider arg budget than the 72-char collapsed line.
+  const EXPANDED_ARG_CHARS = 160;
 
   // Per-role identity: dot color + spine tint + name color — straight from app tokens
   // (indigo brand = assistant, slate = user, amber = system, sky = tool).
@@ -192,60 +206,126 @@
     </button>
   </div>
 
-  <!-- Expanded body -->
+  <!-- Expanded body — flat, terminal-style transcript (no boxes; dot+indent spine). -->
   {#if open}
     <div class="pb-2 pl-4 text-sm text-ink-body">
       {#each turn.parts as part, i (partKey(i))}
         {#if part.kind === 'text'}
           <p class="my-1 whitespace-pre-wrap break-words leading-relaxed">{part.text}</p>
         {:else if part.kind === 'reasoning'}
-          <details data-testid="conversation-reasoning" class="my-1 rounded-lg border border-violet-200 bg-violet-50/60 p-2" open={showReasoning}>
-            <summary class="cursor-pointer text-xs font-medium text-violet-700">🧠 {$t('Reasoning')}</summary>
-            <p class="mt-1 whitespace-pre-wrap break-words text-xs text-ink-muted">{part.text}</p>
+          <details data-testid="conversation-reasoning" class="my-1" open={showReasoning}>
+            <summary class="cursor-pointer text-xs font-medium text-violet-600">🧠 {$t('Reasoning')}</summary>
+            <p class="mt-1 whitespace-pre-wrap break-words border-l-2 border-violet-200 pl-3 text-xs text-ink-muted">{part.text}</p>
           </details>
         {:else if part.kind === 'image'}
           <div class="my-1"><ImagePreview src={part.url} label={$t('Image')} variant="thumb" /></div>
         {:else if part.kind === 'tool_exchange'}
           {@const st = exchangeStatus(part)}
-          <details data-testid="conversation-tool" class="my-1 rounded-lg border border-sky-200 bg-sky-50/50">
-            <summary class="flex cursor-pointer items-center gap-2 px-2 py-1.5 text-xs">
-              <span>🔧</span>
-              <span class="font-mono font-medium text-ink-strong">{part.name || $t('tool call')}</span>
-              <span class="flex-1"></span>
-              <span class={`font-medium ${st.cls}`}>{st.glyph} {st.label}</span>
-            </summary>
-            <div class="space-y-2 border-t border-sky-100 p-2">
-              <div>
-                <div class="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-faint">{$t('Arguments')}</div>
-                <JsonViewer value={part.args} />
+          {@const detail = formatToolArgs(part.name, part.args, EXPANDED_ARG_CHARS)}
+          {@const peek = part.hasResult ? toolOutputPeek(part.output) : { lines: [], moreLines: 0 }}
+          {@const full = toolOpen.has(i)}
+          <div data-testid="conversation-tool" class="my-1.5">
+            <!-- Header: ● Name(args)  <status> — click toggles the full args+result viewer. -->
+            <button
+              type="button"
+              data-testid="conversation-tool-toggle"
+              class="flex w-full items-baseline gap-2 text-left font-mono text-xs"
+              onclick={() => toggleTool(i)}
+              aria-expanded={full}
+            >
+              <span class="shrink-0 text-sky-500">●</span>
+              <span class="min-w-0 flex-1 break-words">
+                <span class="font-semibold text-ink-strong">{part.name || $t('tool call')}</span><span class="text-ink-muted">({detail})</span>
+              </span>
+              <span class={`shrink-0 font-medium ${st.cls}`}>{st.glyph} {st.label}</span>
+            </button>
+            <!-- Inline output peek (first lines) under a left rule — the CC glimpse. -->
+            {#if !full && peek.lines.length}
+              <div class="mt-0.5 border-l-2 border-border pl-3 font-mono text-[11px] leading-snug text-ink-muted">
+                {#each peek.lines as line, li (li)}
+                  <div class="truncate whitespace-pre">{line || ' '}</div>
+                {/each}
               </div>
-              {#if part.hasResult}
+            {/if}
+            <!-- Affordance: reveal the full args + result JsonViewer inline. -->
+            {#if !full}
+              <button
+                type="button"
+                data-testid="conversation-tool-expand"
+                class="mt-0.5 pl-3 font-mono text-[11px] text-link hover:underline"
+                onclick={() => toggleTool(i)}
+              >
+                {peek.moreLines > 0 ? `… +${peek.moreLines} ${$t('lines')} (${$t('click to expand')})` : `⋯ ${$t('view details')}`}
+              </button>
+            {:else}
+              <div class="mt-1 space-y-2 border-l-2 border-sky-200 pl-3">
                 <div>
-                  <div class="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-faint">{$t('Result')}</div>
-                  <JsonViewer value={part.output} />
+                  <div class="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-faint">{$t('Arguments')}</div>
+                  <JsonViewer value={part.args} />
                 </div>
-              {/if}
-            </div>
-          </details>
+                {#if part.hasResult}
+                  <div>
+                    <div class="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-faint">{$t('Result')}</div>
+                    <JsonViewer value={part.output} />
+                  </div>
+                {/if}
+                <button
+                  type="button"
+                  data-testid="conversation-tool-collapse"
+                  class="font-mono text-[11px] text-link hover:underline"
+                  onclick={() => toggleTool(i)}>▾ {$t('Collapse')}</button
+                >
+              </div>
+            {/if}
+          </div>
         {:else if part.kind === 'tool_result'}
           <!-- orphan result (no matching call) — kept, never silently lost -->
-          <details data-testid="conversation-tool" class="my-1 rounded-lg border border-border bg-canvas p-2">
-            <summary class="flex cursor-pointer items-center gap-1.5 text-xs">
-              <span class="badge-neutral">{$t('tool result')}</span>
-              {#if part.name}<span class="font-mono font-medium text-ink-strong">{part.name}</span>{/if}
-            </summary>
-            <div class="mt-1.5"><JsonViewer value={part.output} /></div>
-          </details>
+          {@const peek = toolOutputPeek(part.output)}
+          {@const full = toolOpen.has(i)}
+          <div data-testid="conversation-tool" class="my-1.5 font-mono text-xs">
+            <button
+              type="button"
+              data-testid="conversation-tool-toggle"
+              class="flex w-full items-baseline gap-2 text-left"
+              onclick={() => toggleTool(i)}
+              aria-expanded={full}
+            >
+              <span class="shrink-0 text-ink-faint">●</span>
+              <span class="text-ink-muted">{$t('tool result')}{#if part.name} <span class="font-semibold text-ink-strong">{part.name}</span>{/if}</span>
+            </button>
+            {#if !full && peek.lines.length}
+              <div class="mt-0.5 border-l-2 border-border pl-3 text-[11px] leading-snug text-ink-muted">
+                {#each peek.lines as line, li (li)}<div class="truncate whitespace-pre">{line || ' '}</div>{/each}
+              </div>
+            {/if}
+            {#if full}
+              <div class="mt-1 border-l-2 border-border pl-3"><JsonViewer value={part.output} /></div>
+            {/if}
+          </div>
         {:else if part.kind === 'tool_call'}
           <!-- defensive: a bare call the pairing pass didn't convert -->
-          <details data-testid="conversation-tool" class="my-1 rounded-lg border border-sky-200 bg-sky-50/50 p-2">
-            <summary class="cursor-pointer text-xs"><span class="badge-rules">{$t('tool call')}</span> <span class="font-mono">{part.name}</span></summary>
-            <div class="mt-1.5"><JsonViewer value={part.args} /></div>
-          </details>
+          {@const full = toolOpen.has(i)}
+          <div data-testid="conversation-tool" class="my-1.5 font-mono text-xs">
+            <button
+              type="button"
+              data-testid="conversation-tool-toggle"
+              class="flex w-full items-baseline gap-2 text-left"
+              onclick={() => toggleTool(i)}
+              aria-expanded={full}
+            >
+              <span class="shrink-0 text-sky-500">●</span>
+              <span class="min-w-0 flex-1 break-words"
+                ><span class="font-semibold text-ink-strong">{part.name || $t('tool call')}</span><span class="text-ink-muted"
+                  >({formatToolArgs(part.name, part.args, EXPANDED_ARG_CHARS)})</span
+                ></span
+              >
+            </button>
+            {#if full}<div class="mt-1 border-l-2 border-sky-200 pl-3"><JsonViewer value={part.args} /></div>{/if}
+          </div>
         {:else}
-          <details data-testid="conversation-tool" class="my-1 rounded-lg border border-border bg-canvas p-2">
-            <summary class="cursor-pointer text-xs text-ink-muted">{$t('Other content')}</summary>
-            <div class="mt-1.5"><JsonViewer value={part.value} /></div>
+          <details data-testid="conversation-tool" class="my-1">
+            <summary class="cursor-pointer font-mono text-xs text-ink-muted">● {$t('Other content')}</summary>
+            <div class="mt-1 border-l-2 border-border pl-3"><JsonViewer value={part.value} /></div>
           </details>
         {/if}
       {/each}

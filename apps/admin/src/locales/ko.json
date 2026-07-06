@@ -928,6 +928,9 @@
   "First reply": "첫 응답",
   "Arguments": "인수",
   "no result": "결과 없음",
+  "lines": "줄",
+  "click to expand": "클릭하여 펼치기",
+  "view details": "상세 보기",
   "empty": "비어 있음",
   "{count} system prompt hidden — show": "시스템 프롬프트 {count}개 숨김 — 표시"
 }

@@ -123,6 +123,34 @@ describe('Conversation', () => {
     expect(tool).toHaveTextContent('ok'); // result status glyph label
   });
 
+  it('expanded tool block shows Name(args) inline + an output peek, full viewer only on click', async () => {
+    // Terminal-style: the block shows `Bash(…)` + the first lines of output inline; the
+    // heavy JsonViewer args/result only appear after clicking the tool header/affordance.
+    render(Conversation, {
+      request: {
+        messages: [
+          { role: 'assistant', content: [{ type: 'tool_use', id: 'c1', name: 'Bash', input: { command: 'ls -la' } }] },
+          { role: 'tool', content: [{ type: 'tool_result', tool_use_id: 'c1', content: 'line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8' }] },
+        ],
+      },
+      response: null,
+    });
+    const row = screen.getByTestId('conversation-turn');
+    await fireEvent.click(within(row).getByTestId('conversation-row-toggle'));
+    const tool = screen.getByTestId('conversation-tool');
+    // header shows the tool name + inlined args
+    expect(tool).toHaveTextContent('Bash(ls -la)');
+    // inline peek shows the first lines; 8 lines total, 6 shown → "+2 lines"
+    expect(tool).toHaveTextContent('line1');
+    expect(tool).toHaveTextContent('+2');
+    // full JsonViewer NOT mounted until we ask for it
+    expect(within(tool).queryByText('Arguments')).toBeNull();
+    // click the expand affordance → full args + result appear
+    await fireEvent.click(within(tool).getByTestId('conversation-tool-expand'));
+    expect(within(tool).getByText('Arguments')).toBeInTheDocument();
+    expect(within(tool).getByText('Result')).toBeInTheDocument();
+  });
+
   it('collapsed tool-call row shows the key argument in the parens, not a blind Name()', () => {
     // Real Anthropic tool_use shape (the box capture): the collapsed summary must
     // read `Bash(grep …)` so the reader sees WHAT the tool did, not just that it ran.

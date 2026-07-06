@@ -684,9 +684,9 @@ const PREFERRED_KEYS = [
   'input',
 ];
 
-function truncateDetail(s: string): string {
+function truncateDetail(s: string, max = MAX_TOOL_DETAIL_CHARS): string {
   const t = s.replace(/\s+/g, ' ').trim();
-  return t.length <= MAX_TOOL_DETAIL_CHARS ? t : `${t.slice(0, MAX_TOOL_DETAIL_CHARS - 1)}…`;
+  return t.length <= max ? t : `${t.slice(0, max - 1)}…`;
 }
 
 // ponytail: naive top-level split (not quote-aware) — a `&&`/`;`/`||` inside a quoted
@@ -714,15 +714,15 @@ function scalarText(v: unknown): string | null {
  * show. `args` may be an object OR a raw JSON string (the fold keeps it verbatim),
  * so we coerce a JSON string back to its object first.
  */
-export function formatToolArgs(_name: string, args: unknown): string {
+export function formatToolArgs(_name: string, args: unknown, maxChars = MAX_TOOL_DETAIL_CHARS): string {
   try {
     const parsed = typeof args === 'string' ? coerceJson(args) : args;
     // Non-object arg (a bare string / number / array) — show it directly.
     const a = asRecord(parsed);
     if (!a) {
       const s = scalarText(parsed);
-      if (s) return truncateDetail(s);
-      return parsed == null ? '' : truncateDetail(JSON.stringify(parsed));
+      if (s) return truncateDetail(s, maxChars);
+      return parsed == null ? '' : truncateDetail(JSON.stringify(parsed), maxChars);
     }
     if (Object.keys(a).length === 0) return ''; // empty object → bare `Name()`
 
@@ -746,19 +746,56 @@ export function formatToolArgs(_name: string, args: unknown): string {
       }
     }
     // No scalar field anywhere (all nested objects/arrays) → compact JSON of the whole.
-    if (!picked) return truncateDetail(JSON.stringify(parsed));
+    if (!picked) return truncateDetail(JSON.stringify(parsed), maxChars);
 
     // Light polish, keyed on the FIELD (not the tool name), so it applies to any tool
     // carrying that field: a shell command chains on `&&`/`;`; a written file with a
     // sibling `content` string gets a size hint.
-    if (picked.key === 'command') return truncateDetail(formatBashCommandChain(picked.value));
+    if (picked.key === 'command') return truncateDetail(formatBashCommandChain(picked.value), maxChars);
     if ((picked.key === 'file_path' || picked.key === 'filePath') && typeof a.content === 'string' && a.content.length > 0) {
       const chars = a.content.length;
       const suffix = chars >= 1000 ? ` · ${Math.round(chars / 100) / 10}k` : ` · ${chars}`;
-      return `${truncateDetail(picked.value)}${suffix}`;
+      return `${truncateDetail(picked.value, maxChars - suffix.length)}${suffix}`;
     }
-    return truncateDetail(picked.value);
+    return truncateDetail(picked.value, maxChars);
   } catch {
     return '';
+  }
+}
+
+// ── tool output peek (Claude-Code-style inline glimpse) ──────────────────────
+// The expanded tool row shows the FIRST few lines of a result inline (under a `│`
+// rule) plus a `+N lines` affordance — a glimpse before the full JsonViewer. Coerce
+// any output shape to text (string as-is; object/array → pretty JSON, matching
+// JsonViewer's posture), split on newlines, trim trailing blanks, cap to maxLines.
+// PURE + fail-soft: never throws → { lines: [], moreLines: 0 }.
+function outputToText(output: unknown): string {
+  if (typeof output === 'string') {
+    const parsed = coerceJson(output);
+    // A JSON string → pretty-print (like JsonViewer); a plain string → verbatim.
+    return parsed !== output && parsed != null && typeof parsed === 'object' ? safeStringify(parsed) : output;
+  }
+  if (output == null) return '';
+  return safeStringify(output);
+}
+function safeStringify(v: unknown): string {
+  try {
+    return JSON.stringify(v, null, 2) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+export function toolOutputPeek(output: unknown, maxLines = 6): { lines: string[]; moreLines: number } {
+  try {
+    const text = outputToText(output);
+    if (text.trim() === '') return { lines: [], moreLines: 0 };
+    // drop trailing blank lines so they don't inflate the +N count
+    const all = text.split('\n');
+    while (all.length && all[all.length - 1].trim() === '') all.pop();
+    const lines = all.slice(0, maxLines);
+    return { lines, moreLines: Math.max(0, all.length - lines.length) };
+  } catch {
+    return { lines: [], moreLines: 0 };
   }
 }

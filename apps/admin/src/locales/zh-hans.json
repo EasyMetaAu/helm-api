@@ -928,6 +928,9 @@
   "First reply": "首个回复",
   "Arguments": "参数",
   "no result": "无结果",
+  "lines": "行",
+  "click to expand": "点击展开",
+  "view details": "查看详情",
   "empty": "空",
   "{count} system prompt hidden — show": "已隐藏 {count} 条系统提示 —— 点击显示"
 }

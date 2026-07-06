@@ -7,6 +7,17 @@
 
 ---
 
+## 2026-07-06 · 对话视图工具执行改为 Claude-Code 终端风格（inline peek，Admin requests / conversation view，docs/11，原则 1）
+
+- **背景（Lukin）**：原展开态工具块是重边框卡片（🔧 Tool ✓ ok + 两个 bordered JsonViewer 面板 Arguments/Result），boxy、不看展开就不知道工具做了什么。Lukin 给了 Claude Code 终端 transcript 截图，要求参考它做得更清晰。
+- **确认方向**：展开态 tool block 采用 CC 的 inline peek；**整个 timeline** 转成 borderless dot+indent 终端观感。折叠行 arg 预览（v0.25.7）保持不动。
+- **新纯函数**：`conversation.ts` 加 `toolOutputPeek(output, maxLines=6) → {lines, moreLines}`：output 归一成文本（字符串原样；JSON 串/对象/数组 → pretty JSON，与 JsonViewer 一致），split `\n`，剔尾部空行（防虚增 +N），截前 N 行报剩余数；纯、永不抛。`formatToolArgs` 加可选 `maxChars`（默认 72；展开态 header 传 160，`truncateDetail` 也接受 max）。
+- **组件重构**（`ConversationTurn.svelte` 为主）：展开体去掉 `rounded-lg border bg-*-50` 卡片；每个 turn 用 role dot（`●`）+ 单条淡 spine。tool_exchange = 行1 `●` + mono 粗体 `Name`(`formatToolArgs(...,160)` args) + 复用 `exchangeStatus` 状态字形；行下 `toolOutputPeek` 前几行挂在 `│` 左规则里；footer `… +N lines (click to expand)`（无更多行时 `⋯ view details`）——点开才 inline 挂**完整** JsonViewer（args+result，逃生舱不丢）+ `▾ Collapse`。reasoning 去紫盒改 `🧠` + muted 左规则文本。per-tool 展开用 `toolOpen: Set<number>`，各行独立。
+- **testid 保留**（e2e 硬断言，见 [[e2e-admin-specs-live-in-gateway]]）：`conversation-turn/-tool/-reasoning/-row-toggle/-source-toggle/-source`、`data-open`、`data-turn-role` 全留；新增 `conversation-tool-toggle/-expand/-collapse`。只改样式+内部结构。
+- **i18n**：新增 3 key `lines`/`click to expand`/`view details`，5 语手填（意译：点击展开/查看详情等），插在 `no result` 后（[[i18n-sync-incremental-empty-only]] / [[admin-test-i18n-gotchas]]）。
+- **ponytail**：无新库无新组件，restyle + 1 纯 helper；peek 是 `split('\n').slice()`，非语法高亮（标 `// ponytail:`）；peek 行数 6 硬编码（配置化是投机，跳过）。
+- **验证**：`toolOutputPeek`/`maxChars` 单测 + `Conversation.test.ts` 渲染契约（header `Bash(ls -la)` + peek `line1` + `+2` + 点开才出 Arguments/Result）；668 admin 单测绿、svelte-check 0 error。**真实数据可视验证**：临时 harness route 加载 box trace `2fb017ae` 全 743 turn 真 payload，Playwright 截图确认 `● Bash(ssh…) ✓ ok` + SQL 结果行 inline peek + `… +21 lines (click to expand)`，点开出完整 Tree/Formatted/Raw JsonViewer——与 CC 截图一致；harness 用后即删。**在 git worktree `worktree-cc-terminal-conversation` 开发（Lukin 要求不在 main 搞）。**
+
 ## 2026-07-06 · 折叠会话行显示工具调用参数预览（whitelist-free，Admin requests / conversation view，docs/11，原则 1）
 
 - **背景（Lukin）**：请求详情「对话」视图里，assistant 的工具调用折叠行只显示 `Bash()` / `Read()` / `Write()` / `Agent()` 空括号——能看出调用了工具，却看不出具体参数。
