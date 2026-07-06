@@ -5,6 +5,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
+import { requestSignal, requestTimedOut } from "../middleware/limits.js";
 import type { GeminiRateLimiterPort } from "./gemini.js";
 import {
   type ImageAttempt,
@@ -146,7 +147,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
       const acquired = await deps.concurrencyGate.acquire({
         keyId: identity.keyId,
         limit: identity.caps?.concurrencyLimit ?? null,
-        signal: c.req.raw.signal,
+        signal: requestSignal(c),
       });
       if (!acquired.ok) {
         c.header("retry-after", String(acquired.retryAfterSeconds));
@@ -255,13 +256,13 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
             contents: [{ role: "user", parts: [{ text: parsed.data.prompt }] }],
             generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
           },
-          { signal: c.req.raw.signal, captureUpstream },
+          { signal: requestSignal(c), captureUpstream },
         );
         upstream = mapGeminiToImages((native ?? {}) as Record<string, unknown>);
       } else {
         upstream = (await target.client.imageGeneration?.(
           { ...parsed.data, model: target.providerModel },
-          { signal: c.req.raw.signal, captureUpstream },
+          { signal: requestSignal(c), captureUpstream },
         )) as Record<string, unknown>;
       }
       const usage = (upstream as { usage?: Record<string, unknown> }).usage ?? null;
@@ -277,7 +278,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
       permittedChain.targets,
       deps.breaker,
       attempt,
-      c.req.raw.signal,
+      requestSignal(c),
     );
 
     // 6b) Terminal failure. A client abort is a NON-provider fault → no record, no 5xx.
@@ -303,6 +304,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
             decision,
             requestJson,
             responseJson: null,
+            timedOut: requestTimedOut(c),
             upstreamRequestJson: null,
           },
           log,
@@ -343,6 +345,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
           decision,
           requestJson,
           responseJson,
+          timedOut: requestTimedOut(c),
           upstreamRequestJson: result.upstreamRequestJson,
         },
         log,

@@ -5,6 +5,7 @@ import type { AppEnv } from "./app.js";
 import { createApp } from "./app.js";
 import type { LogFields, Logger, LogLevel } from "./logging.js";
 import { HelmHttpError, handleError, openAIErrorEnvelope } from "./middleware/error-handler.js";
+import { requestTimedOut } from "./middleware/limits.js";
 
 interface Captured {
   level: LogLevel;
@@ -124,6 +125,31 @@ describe("createApp: trace_id, logging, error handling", () => {
     const body = JSON.parse(text) as { error: Record<string, string> };
     expect(body.error.code).toBe("upstream_error");
     expect(lines.some((l) => l.level === "error")).toBe(true);
+  });
+
+  it("marks the request context as timed out while late route work continues", async () => {
+    const { logger } = fakeLogger();
+    const app = createApp({
+      logger,
+      limits: { maxBodyBytes: 1024, requestTimeoutMs: 5 },
+      genTraceId: () => "trace-timeout",
+    });
+    let lateTimedOut: boolean | null = null;
+    let lateDone: (() => void) | null = null;
+    const late = new Promise<void>((resolve) => {
+      lateDone = resolve;
+    });
+    app.get("/slow", async (c) => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      lateTimedOut = requestTimedOut(c);
+      lateDone?.();
+      return c.text("late");
+    });
+
+    const res = await app.request("/slow");
+    expect(res.status).toBe(504);
+    await late;
+    expect(lateTimedOut).toBe(true);
   });
 
   it("does not leak Authorization header into logs or error bodies", async () => {

@@ -13,6 +13,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
+import { requestSignal, requestTimedOut } from "../middleware/limits.js";
 import { type ServingAccount, stampServingAccount } from "../runtime/serving-account.js";
 import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.js";
 import { type MemoryKeyDefaults, resolveMemoryScope } from "./memory-scope.js";
@@ -294,7 +295,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     }
     if (deps.countTokens !== undefined) {
       try {
-        return c.json(await deps.countTokens(obj, identity, c.req.raw.signal));
+        return c.json(await deps.countTokens(obj, identity, requestSignal(c)));
       } catch {
         // Token helpers are compatibility helpers, not generation. Fall back to a
         // deterministic estimate instead of making /v1/messages/count_tokens flaky.
@@ -358,7 +359,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
       const acquired = await deps.concurrencyGate.acquire({
         keyId: identity.keyId,
         limit: identity.caps?.concurrencyLimit ?? null,
-        signal: c.req.raw.signal,
+        signal: requestSignal(c),
       });
       if (!acquired.ok) {
         c.header("retry-after", String(acquired.retryAfterSeconds));
@@ -490,7 +491,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     //    (no placeholder synthesis) — map it to a 400 in the Anthropic envelope.
     let result: PipelineRunResult;
     try {
-      result = await deps.pipeline.run(ir, identity, c.req.raw.signal);
+      result = await deps.pipeline.run(ir, identity, requestSignal(c));
     } catch (err) {
       if (err instanceof PipelineError) {
         return sendError(c, {
@@ -540,7 +541,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
         try {
           for await (const item of withHeartbeat(result.streamIR(), {
             heartbeatMs,
-            signal: c.req.raw.signal,
+            signal: requestSignal(c),
           })) {
             if (item.type === "beat") {
               if (atEventBoundary(lastWrite)) await sse.write(HEARTBEAT_COMMENT);
@@ -605,6 +606,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
                 decision: result.decision,
                 requestJson,
                 responseJson: captureBodies ? captured.join("") : null,
+                timedOut: requestTimedOut(c),
                 upstreamRequestJson: result.upstreamRequest ?? null,
               },
               (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
@@ -643,6 +645,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
             decision: result.decision,
             requestJson,
             responseJson: null,
+            timedOut: requestTimedOut(c),
             upstreamRequestJson: result.upstreamRequest ?? null,
           },
           (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
@@ -669,6 +672,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
           decision: result.decision,
           requestJson,
           responseJson: captureBodies ? JSON.stringify(body) : null,
+          timedOut: requestTimedOut(c),
           upstreamRequestJson: result.upstreamRequest ?? null,
         },
         (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),

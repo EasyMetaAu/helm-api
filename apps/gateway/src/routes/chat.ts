@@ -34,6 +34,7 @@ import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
 import { INTERNAL_API_KEY_ID } from "../internal-key.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
+import { requestSignal, requestTimedOut } from "../middleware/limits.js";
 import { type ServingAccount, stampServingAccount } from "../runtime/serving-account.js";
 import type { WriteQueue } from "../runtime/write-queue.js";
 import { downgradeClientFastModeIfDisallowed } from "./fast-mode.js";
@@ -45,6 +46,7 @@ import {
   captureEnabled,
   createSseCapture,
   createStreamGenerationTimer,
+  decisionForTimedOutRequest,
   type PayloadCaptureDeps,
   persistPayload,
   tokensFromUsage,
@@ -492,8 +494,9 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // affected by anything that touches the decision after the response returns.
     // With a write queue wired, the insert is deferred + batched off the hot path.
     const persist = async (decision: DecisionRecord) => {
+      const decisionSnapshot = requestTimedOut(c) ? decisionForTimedOutRequest(decision) : decision;
       const input: InsertTelemetryInput = {
-        decision: deps.redact(decision) as DecisionRecord,
+        decision: deps.redact(decisionSnapshot) as DecisionRecord,
         apiKeyId: identity.keyId,
         createdAt: new Date(),
       };
@@ -517,12 +520,13 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       responseJson: string | null,
       upstreamRequestJson: string | null,
     ) => {
+      const capturedResponseJson = requestTimedOut(c) ? null : responseJson;
       if (deps.writes !== undefined) {
         if (!captureEnabled(deps)) return;
         deps.writes.enqueuePayload({
           requestId: traceId,
           requestJson,
-          responseJson,
+          responseJson: capturedResponseJson,
           upstreamRequestJson,
           createdAt: new Date(deps.now()),
         });
@@ -530,7 +534,13 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       }
       await persistPayload(
         deps,
-        { requestId: traceId, requestJson, responseJson, upstreamRequestJson, now: deps.now() },
+        {
+          requestId: traceId,
+          requestJson,
+          responseJson: capturedResponseJson,
+          upstreamRequestJson,
+          now: deps.now(),
+        },
         (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
       );
     };
@@ -720,7 +730,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
           blockedModels: identity.caps?.blockedModels ?? null,
         },
       },
-      c.req.raw.signal,
+      requestSignal(c),
       classifyOverrides,
     );
     // The subscription the pool selected (null for a configured/non-OAuth provider),
@@ -805,7 +815,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
         try {
           for await (const item of withHeartbeat(stream, {
             heartbeatMs,
-            signal: c.req.raw.signal,
+            signal: requestSignal(c),
           })) {
             if (item.type === "beat") {
               if (atEventBoundary(lastWrite)) await sse.write(HEARTBEAT_COMMENT);

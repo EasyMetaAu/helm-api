@@ -1,11 +1,24 @@
 import { makeHelmError } from "@helm/shared";
-import type { MiddlewareHandler } from "hono";
+import type { Context, MiddlewareHandler } from "hono";
 import type { AppEnv } from "../app.js";
 import { HelmHttpError } from "./error-handler.js";
 
 export interface LimitsConfig {
   maxBodyBytes: number;
   requestTimeoutMs: number;
+}
+
+export interface RequestTimeoutState {
+  signal: AbortSignal;
+  timedOut: boolean;
+}
+
+export function requestSignal(c: Context<AppEnv>): AbortSignal {
+  return c.get("request_timeout")?.signal ?? c.req.raw.signal;
+}
+
+export function requestTimedOut(c: Context<AppEnv>): boolean {
+  return c.get("request_timeout")?.timedOut === true;
 }
 
 function tooLarge(traceId: string): HelmHttpError {
@@ -51,7 +64,15 @@ export function timeout(cfg: LimitsConfig): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     const traceId = c.get("trace_id");
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), cfg.requestTimeoutMs);
+    const state: RequestTimeoutState = {
+      signal: AbortSignal.any([c.req.raw.signal, controller.signal]),
+      timedOut: false,
+    };
+    c.set("request_timeout", state);
+    const timer = setTimeout(() => {
+      state.timedOut = true;
+      controller.abort();
+    }, cfg.requestTimeoutMs);
     try {
       await Promise.race([
         next(),

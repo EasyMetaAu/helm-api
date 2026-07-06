@@ -3,7 +3,12 @@ import { Hono } from "hono";
 import { readBuildInfo } from "./build-info.js";
 import type { Logger } from "./logging.js";
 import { handleError } from "./middleware/error-handler.js";
-import { bodyLimit, type LimitsConfig, timeout } from "./middleware/limits.js";
+import {
+  bodyLimit,
+  type LimitsConfig,
+  type RequestTimeoutState,
+  timeout,
+} from "./middleware/limits.js";
 import { normalizeHeaders } from "./middleware/normalize-headers.js";
 import { requestLoggerMiddleware } from "./middleware/request-logger.js";
 import { traceIdMiddleware } from "./middleware/trace-id.js";
@@ -26,6 +31,7 @@ export type AppEnv = {
   Variables: {
     trace_id: string;
     logger: Logger;
+    request_timeout?: RequestTimeoutState;
   };
 };
 

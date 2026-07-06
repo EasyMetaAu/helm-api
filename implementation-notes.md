@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-07-06 · 请求总超时必须驱动下游 abort 与失败 telemetry（Gateway runtime / telemetry，docs/02/07，原则 3/5/7）
+
+- **背景（Lukin）**：生产 `gpt-5.5` 长请求超过 Helm `request_timeout_ms` 后，客户端收到 504，但上游 provider 后续完成，Telemetry 仍把 `final_status` 记成 `ok`，导致日志和 Admin requests 不能反映客户端真实结果。
+- **语义决策**：Gateway 总超时是**客户端可见的终态**；一旦触发，后续即使 provider 晚完成，也不能把该 request 记录为成功。持久化前把 `DecisionRecord.final.status` 规范成 `error`、`error_reason: "timeout"`，同时 `serving_account` 清空。Provider attempt 仍保留原始上游事实（例如 late `ok` / cost），避免把“上游后来完成”伪造成 provider failure。
+- **执行决策**：timeout 中间件在 Hono context 上挂一个 request state：`timedOut` 与 `AbortSignal.any([client, timeout])`。各路由的 provider/pipeline/concurrency 调用使用这个统一 signal，尽量在 Helm 超时时停止下游；真实客户端断开判断仍只看原始 client signal，避免把 Helm timeout 当成用户主动取消。
+- **payload 决策**：如果请求已经 timeout，`request_payloads.response_json` 写 `null`，因为客户端实际收到的是 504，不是晚到的 provider response。`upstream_request_json` 可继续保留，便于追查发给上游的请求。
+- **覆盖面**：OpenAI Chat 的自有 persist 路径和 `recordServed` 共享路径都覆盖；Messages / Responses / Gemini / Images / Interactions 都传入 request timeout state，防止协议面漂移。
+- **验证路径**：新增 timeout context 与 late-success telemetry 测试；覆盖 app/limits/chat/messages/responses/gemini/images/interactions/payload-capture targeted tests，并跑 gateway typecheck。
+
 ## 2026-07-06 · API key 绝对模型黑名单（Key governance / routing / Admin keys，docs/04/06/11，原则 5/6/7）
 
 - **背景（Lukin）**：每个 API key 需要能禁止若干具体模型，语义是“这个用户无论通过 direct model、显式 lane、auto/classified lane、alias-to-lane 还是 execution fallback，都不能实际用到这些模型”。
@@ -90,21 +99,13 @@
 - **恢复边界**：干净窗口会继续清理已存在 cooldown；scoped model 窗口（如 Anthropic `7d-*`）仍不扩大成全账号停车。Codex reset credit 消费成功后通过现有刷新路径恢复窗口并清理 cooldown。
 - **测试路径**：覆盖 `/oauth/quota` 从 Codex saturated PULL 新建 cooldown，以及 near-full PULL 不误停车；再跑 admin OAuth route focused tests、typecheck/lint/build。
 
-## 2026-07-05 · OAuth 凭证失效持久化为 needs reconnect（OAuth provider pool / Admin providers，docs/04/11，原则 3/5/7）
-
-- **背景（Lukin）**：Providers 页连通性测试可能返回 `oauth refresh failed (... status 401)`，但账号仍显示 connected，且未自动从调度中禁用；原实现只在当前 pool 进程内把 401/403 账号摘掉，admin status 与持久配置没有同步。
-- **状态决策**：refresh 400/401/403 或持久 upstream 401/403 视为 durable credential failure，而不是 429 usage cooldown。Helm 会写入 encrypted account settings：`credentialFailedAt` / `credentialFailureReason`，并把账号 `schedulable:false`；status 显示 unhealthy，重新合成 pool 时跳过该账号。
-- **恢复边界**：成功 reconnect 会清除 credential failure。若账号是 Helm 因凭证失败自动禁用，则恢复默认 schedulable；若原本就是用户手动 parked，则 reconnect 后仍保持手动 parked。
-- **操作边界**：Providers 页会显式返回 `credentialFailed` 并禁用 schedulable 开关；后端同样拒绝把 credential-failed 账号直接设回 schedulable。状态页若首次发现永久凭证失败，会触发 live pool rebuild，避免“后台已禁用但当前 pool 仍在用”。
-- **测试路径**：覆盖 core pool credential-failure hook、admin test 401 标记、account-settings mark/clear、synthesizeOAuthProviders 跳过 failed account、providers UI 失败后刷新；再跑 targeted Vitest、typecheck、lint、diff check。
-
 ## 历史条目摘要（最近 5 条）
 
+- **2026-07-05 · OAuth 凭证失效持久化为 needs reconnect（OAuth provider pool / Admin providers，docs/04/11，原则 3/5/7）**：refresh/持久 upstream 400/401/403 标记 credential failure、写入账号设置并摘出调度，reconnect 成功后按手动/自动停车边界恢复。
 - **2026-07-05 · 避免浪费策略纳入周额度与 Codex reset credits（OAuth provider pool / quota，docs/04/11，原则 3/5/7）**：`use_expiring` 汇总短窗口、周额度与 reset credits 软评分，quota PULL 会刷新 live pool snapshot 但不自动消费 credit。
 - **2026-07-05 · Codex reset-credit 消费改为硬门禁（OAuth quota / Admin providers，docs/04/11，原则 3/5/7）**：手动/自动 reset credit 必须命中 weekly secondary 阈值与持久 guard，缺少 snapshot 时 fail-closed，避免烧稀缺额度。
 - **2026-07-05 · OAuth 账号池支持可选额度使用策略（OAuth provider pool / routing / Admin providers，docs/04/11，原则 3/5/7）**：新增 balanced/manual_priority/low_risk/use_expiring 全局账号池策略，保持 previous_response_id 强亲和和 scoped quota 边界。
 - **2026-07-04 · internal LLM prompt 输入用 XML 数据边界隔离（Memory / classifier eval，docs/03/08/12，原则 3/4/7）**：classifier eval 与 memory LLM 把可信任务和不可信消息放进 XML/JSON 数据区并 escape，防止用户内容突破数据边界。
-- **2026-07-04 · 请求记录最终订阅账号并重排请求列表字段（Telemetry / Admin requests，docs/04/07/11，原则 1/5/7）**：`DecisionRecord.serving_account` 记录最终服务订阅账号，admin 请求列表/详情按排障优先级展示 provider、account、served/requested model。
 
 ## 更早历史总览
 
