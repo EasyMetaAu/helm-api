@@ -366,6 +366,7 @@ describe('keys page', () => {
     await fireEvent.input(within(dialog).getByLabelText(/requests per minute/i), {
       target: { value: '120' },
     });
+    await fireEvent.click(within(dialog).getByLabelText('allow custom model'));
     await fireEvent.input(within(dialog).getByLabelText('Blocked models'), {
       target: { value: 'gpt-4o' },
     });
@@ -375,7 +376,7 @@ describe('keys page', () => {
         // Name untouched in this edit → still unnamed (null), never undefined.
         name: null,
         allowed_lanes: ['economy'],
-        allow_custom_model: false,
+        allow_custom_model: true,
         blocked_models: ['gpt-4o'],
         allow_fast_mode: false,
         rate_limit_rpm: 120,
