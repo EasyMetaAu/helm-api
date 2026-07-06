@@ -776,6 +776,8 @@ export type {
   InsertPayloadInput,
   InsertTelemetryInput,
   KeyStore,
+  MemoryAdminStats,
+  MemoryAdminStatsScope,
   MemoryJobStatus,
   MemoryStore,
   OAuthQuotaStore,
@@ -785,6 +787,9 @@ export type {
   RateLimitConsumeResult,
   RateLimitStore,
   RequestPayload,
+  RequestPayloadMeta,
+  RequestPayloadPart,
+  RequestPayloadPartRecord,
   SignalStore,
   TelemetryStore,
 } from "./store/ports.js";

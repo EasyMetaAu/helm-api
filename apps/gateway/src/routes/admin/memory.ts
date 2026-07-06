@@ -1,4 +1,9 @@
-import { buildReconciledFactBatch, MemoryFactContentHashConflictError } from "@helm/core";
+import {
+  buildReconciledFactBatch,
+  type MemoryAdminStats,
+  type MemoryAdminStatsScope,
+  MemoryFactContentHashConflictError,
+} from "@helm/core";
 import {
   effectiveMemoryProjectId,
   type FactListStatus,
@@ -21,6 +26,7 @@ import type { AdminApiDeps } from "./deps.js";
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
+const MEMORY_STATS_CACHE_TTL_MS = 10_000;
 const FACT_STATUSES = new Set(["active", "superseded", "archived", "pruned", "all"]);
 const REFLECTION_STATUSES = new Set(["active", "archived", "all"]);
 
@@ -61,8 +67,31 @@ function scopeFromQuery(c: Context<AppEnv>): {
   return scope;
 }
 
+function statsScopeFromQuery(c: Context<AppEnv>): MemoryAdminStatsScope {
+  const accountId = c.req.query("accountId");
+  return {
+    ...(accountId !== undefined && accountId !== "" ? { accountId } : {}),
+    ...scopeFromQuery(c),
+  };
+}
+
+function memoryStatsCacheKey(scope: MemoryAdminStatsScope): string {
+  return [
+    scope.accountId ?? "",
+    scope.projectId ?? "",
+    scope.resourceId ?? "",
+    scope.threadId ?? "",
+  ].join("\u0000");
+}
+
+function statsJsonBody(stats: MemoryAdminStats): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(stats)) as Record<string, unknown>;
+}
+
 export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void {
   const estimateTokens = deps.estimateTokens ?? ((text: string) => Math.ceil(text.length / 4));
+  const statsCache = new Map<string, { expiresAt: number; body: Record<string, unknown> }>();
+  const clearStatsCache = () => statsCache.clear();
 
   // GET /memory/scopes — the "By Scope" tab: one row per (account,project,
   // resource,thread) group with fact/reflection counts + last-updated.
@@ -83,13 +112,15 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
     if (store.getMemoryAdminStats === undefined) {
       return c.json({ error: "memory stats unavailable" }, 503);
     }
-    const accountId = c.req.query("accountId");
-    const stats = await store.getMemoryAdminStats({
-      ...(accountId !== undefined && accountId !== "" ? { accountId } : {}),
-      ...scopeFromQuery(c),
-      now: new Date(),
-    });
-    return c.json(stats);
+    const scope = statsScopeFromQuery(c);
+    const key = memoryStatsCacheKey(scope);
+    const nowMs = Date.now();
+    const cached = statsCache.get(key);
+    if (cached !== undefined && cached.expiresAt > nowMs) return c.json(cached.body);
+    const stats = await store.getMemoryAdminStats({ ...scope, now: new Date() });
+    const body = statsJsonBody(stats);
+    statsCache.set(key, { expiresAt: nowMs + MEMORY_STATS_CACHE_TTL_MS, body });
+    return c.json(body);
   });
 
   // GET /memory/by-key/:keyId — resolve a key to its memory scope (account +
@@ -174,6 +205,7 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
     // can show it without a second round-trip; null only on a pure dedup (no new row).
     const createdId = res.insertedIds[0] ?? resurrected[0] ?? null;
     const fact = createdId !== null ? await store.getFactById({ accountId, id: createdId }) : null;
+    clearStatsCache();
     return c.json(
       {
         fact,
@@ -210,6 +242,7 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
         patch: parsed.data,
         now: new Date(),
       });
+      if (updated !== null) clearStatsCache();
       return updated === null ? c.json({ error: "fact not found" }, 404) : c.json(updated);
     } catch (e) {
       if (e instanceof MemoryFactContentHashConflictError) {
@@ -226,6 +259,7 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
     if (store instanceof Response) return store;
     const id = c.req.param("id");
     const deleted = await store.deleteFact({ accountId: accountOf(c, deps), id, now: new Date() });
+    if (deleted) clearStatsCache();
     return deleted ? c.json({ deleted: id }) : c.json({ error: "fact not found" }, 404);
   });
 
@@ -274,6 +308,7 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
       tokenEstimate: estimateTokens(parsed.data.reflectionText),
       now: new Date(),
     });
+    if (updated !== null) clearStatsCache();
     return updated === null ? c.json({ error: "reflection not found" }, 404) : c.json(updated);
   });
 
@@ -285,6 +320,7 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
     if (store instanceof Response) return store;
     const id = c.req.param("id");
     const deleted = await store.deleteReflection({ accountId: accountOf(c, deps), id });
+    if (deleted) clearStatsCache();
     return deleted ? c.json({ deleted: id }) : c.json({ error: "reflection not found" }, 404);
   });
 }

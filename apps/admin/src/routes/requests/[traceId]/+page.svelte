@@ -1,7 +1,12 @@
 <script lang="ts">
   import { base } from '$app/paths';
   import { invalidateAll } from '$app/navigation';
-  import type { RequestDetail, RequestPayloadView } from '$lib/api/requests.js';
+  import {
+    getRequestPayloadPart,
+    type RequestDetail,
+    type RequestPayloadPartName,
+    type RequestPayloadView,
+  } from '$lib/api/requests.js';
   import { deepEqual } from '$lib/deep-equal.js';
   import { attemptCodeLabel } from '$lib/format/attempt-codes.js';
   import { formatTimestamp, formatTps } from '$lib/format.js';
@@ -46,6 +51,82 @@
   // truth). Additive: the raw view and everything below it are unchanged.
   let reqView = $state<'chat' | 'raw'>('chat');
 
+  type PartStatus = 'idle' | 'loading' | 'loaded' | 'error';
+  type PayloadValues = Partial<Record<RequestPayloadPartName, unknown>>;
+  type PayloadStatuses = Record<RequestPayloadPartName, PartStatus>;
+
+  function hasOwn(obj: object, key: string): boolean {
+    return Object.prototype.hasOwnProperty.call(obj, key);
+  }
+
+  function pagePayload(): RequestPayloadView {
+    return data.payload ?? { captured: false };
+  }
+
+  function initialPayloadValues(payload: RequestPayloadView): PayloadValues {
+    return {
+      ...(hasOwn(payload, 'request') ? { request: payload.request } : {}),
+      ...(hasOwn(payload, 'response') ? { response: payload.response } : {}),
+      ...(hasOwn(payload, 'upstream_request') ? { upstream_request: payload.upstream_request } : {}),
+    };
+  }
+
+  function initialPayloadStatuses(payload: RequestPayloadView): PayloadStatuses {
+    return {
+      request: hasOwn(payload, 'request') ? 'loaded' : 'idle',
+      response: hasOwn(payload, 'response') ? 'loaded' : 'idle',
+      upstream_request: hasOwn(payload, 'upstream_request') ? 'loaded' : 'idle',
+    };
+  }
+
+  let payloadValues = $state<PayloadValues>(initialPayloadValues(pagePayload()));
+  let payloadStatus = $state<PayloadStatuses>(initialPayloadStatuses(pagePayload()));
+  let payloadErrors = $state<Partial<Record<RequestPayloadPartName, string>>>({});
+
+  function hasPayloadPart(part: RequestPayloadPartName): boolean {
+    if (data.payload?.captured !== true) return false;
+    if (data.payload.parts) return data.payload.parts[part];
+    return hasOwn(data.payload, part);
+  }
+
+  async function loadPayloadPart(part: RequestPayloadPartName): Promise<unknown> {
+    if (!hasPayloadPart(part)) return null;
+    if (payloadStatus[part] === 'loaded') return payloadValues[part];
+    if (payloadStatus[part] === 'loading') return payloadValues[part];
+    payloadStatus[part] = 'loading';
+    payloadErrors[part] = undefined;
+    const res = await getRequestPayloadPart(data.traceId, part);
+    if (res.captured !== true || res.part !== part) {
+      payloadStatus[part] = 'error';
+      payloadErrors[part] = $t('Payload was not available.');
+      return null;
+    }
+    payloadValues[part] = res.value ?? null;
+    payloadStatus[part] = 'loaded';
+    return payloadValues[part];
+  }
+
+  async function loadConversation(): Promise<void> {
+    await Promise.all([
+      loadPayloadPart('request'),
+      hasPayloadPart('response') ? loadPayloadPart('response') : Promise.resolve(null),
+    ]);
+  }
+
+  async function loadUpstreamRequest(): Promise<void> {
+    await Promise.all([
+      loadPayloadPart('request'),
+      hasPayloadPart('upstream_request')
+        ? loadPayloadPart('upstream_request')
+        : Promise.resolve(null),
+    ]);
+  }
+
+  async function openRetry(): Promise<void> {
+    const body = await loadPayloadPart('request');
+    if (body && typeof body === 'object') showRetry = true;
+  }
+
   async function copyTrace(): Promise<void> {
     try {
       await navigator.clipboard?.writeText(data.traceId);
@@ -62,18 +143,22 @@
   // so the client doesn't enumerate shapes here (that would wrongly disable e.g. a
   // string-`input` Responses body). Disabled only when nothing was captured (capture
   // off, or the payload was pruned).
-  const replayBody = $derived(data.payload?.captured === true ? data.payload.request : undefined);
-  const canRetry = $derived(!!replayBody && typeof replayBody === 'object');
+  const replayBody = $derived(payloadValues.request);
+  const canRetry = $derived(data.payload?.captured === true && hasPayloadPart('request'));
 
   // The forwarded-upstream body is worth a SEPARATE panel only when it actually
   // differs from the inbound client body (memory injection / protocol translation /
   // model patch). When they are structurally identical — e.g. a no-memory request to
   // an OpenAI-shaped provider — a second panel is pure noise, so we collapse to one.
-  const hasUpstream = $derived(
-    data.payload?.captured === true && data.payload?.upstream_request != null,
-  );
+  const hasUpstream = $derived(data.payload?.captured === true && hasPayloadPart('upstream_request'));
+  const requestLoaded = $derived(payloadStatus.request === 'loaded');
+  const responseLoaded = $derived(payloadStatus.response === 'loaded');
+  const upstreamLoaded = $derived(payloadStatus.upstream_request === 'loaded');
   const upstreamDiffers = $derived(
-    hasUpstream && !deepEqual(data.payload.request, data.payload.upstream_request),
+    hasUpstream &&
+      requestLoaded &&
+      upstreamLoaded &&
+      !deepEqual(payloadValues.request, payloadValues.upstream_request),
   );
 
   // Media overview: every image in this call surfaced up front, so an operator sees
@@ -95,15 +180,15 @@
     return out;
   }
   const requestImages = $derived(
-    data.payload?.captured === true
+    data.payload?.captured === true && requestLoaded
       ? dedupeByUrl([
-          ...collectImages(data.payload.request),
-          ...(upstreamDiffers ? collectImages(data.payload.upstream_request) : []),
+          ...collectImages(payloadValues.request),
+          ...(upstreamDiffers ? collectImages(payloadValues.upstream_request) : []),
         ])
       : [],
   );
   const responseImages = $derived(
-    data.payload?.captured === true ? collectImages(data.payload.response) : [],
+    data.payload?.captured === true && responseLoaded ? collectImages(payloadValues.response) : [],
   );
   const mediaGroups = $derived(
     [
@@ -153,14 +238,15 @@
           type="button"
           data-testid="retry-request"
           class="btn-primary"
-          disabled={!canRetry}
+          disabled={!canRetry || payloadStatus.request === 'loading'}
           title={canRetry ? '' : $t('Retry unavailable — no captured request body.')}
-          onclick={() => (showRetry = true)}>{$t('Retry')}</button
+          onclick={openRetry}
+          >{payloadStatus.request === 'loading' ? $t('Loading') : $t('Retry')}</button
         >
       </div>
     </header>
 
-    {#if showRetry && canRetry}
+    {#if showRetry && replayBody && typeof replayBody === 'object'}
       <RetryDialog
         traceId={d.trace_id}
         initialRequest={replayBody}
@@ -283,10 +369,10 @@
             )}
           {:else if hasUpstream}
             {$t(
-              'Full request body recorded for this call. The body forwarded upstream was identical (no memory injection or translation).',
+              'Payload capture is available for this call. Large bodies are loaded only when you open a section.',
             )}
           {:else}
-            {$t('Full request body recorded for this call.')}
+            {$t('Payload capture is available for this call. Large bodies are loaded on demand.')}
           {/if}
         </p>
         <!-- Two lenses over the same captured body: Chat (a readable user⇄agent
@@ -302,17 +388,61 @@
             type="button"
             data-testid="request-view-raw"
             class={`rounded border px-3 py-1 text-sm ${reqView === 'raw' ? 'border-action bg-action text-white' : 'border-border bg-surface text-ink-muted hover:bg-canvas'}`}
-            onclick={() => (reqView = 'raw')}>{$t('Raw')}</button
+          onclick={() => (reqView = 'raw')}>{$t('Raw')}</button
           >
         </div>
         {#if reqView === 'chat'}
-          <Conversation
-            request={data.payload.request}
-            response={data.payload.response}
-            testid="conversation"
-          />
+          {#if !requestLoaded || (hasPayloadPart('response') && !responseLoaded)}
+            <div class="rounded border border-dashed border-border bg-canvas p-3">
+              <p class="field-help mb-2">
+                {$t('Load the captured request and response only when you need the transcript.')}
+              </p>
+              <button
+                type="button"
+                data-testid="load-conversation"
+                class="btn-secondary"
+                disabled={payloadStatus.request === 'loading' || payloadStatus.response === 'loading'}
+                onclick={loadConversation}
+                >{payloadStatus.request === 'loading' || payloadStatus.response === 'loading'
+                  ? $t('Loading')
+                  : $t('Load conversation')}</button
+              >
+              {#if payloadErrors.request || payloadErrors.response}
+                <p class="mt-2 text-sm text-red-600">
+                  {payloadErrors.request ?? payloadErrors.response}
+                </p>
+              {/if}
+            </div>
+          {:else}
+            <Conversation
+              request={payloadValues.request}
+              response={payloadValues.response}
+              testid="conversation"
+            />
+          {/if}
         {:else}
-          <JsonViewer value={data.payload.request} testid="request-body" />
+          {#if !requestLoaded}
+            <div class="rounded border border-dashed border-border bg-canvas p-3">
+              <p class="field-help mb-2">
+                {$t('Load the raw request body only when you need to inspect it.')}
+              </p>
+              <button
+                type="button"
+                data-testid="load-request-body"
+                class="btn-secondary"
+                disabled={payloadStatus.request === 'loading'}
+                onclick={() => loadPayloadPart('request')}
+                >{payloadStatus.request === 'loading'
+                  ? $t('Loading')
+                  : $t('Load request body')}</button
+              >
+              {#if payloadErrors.request}
+                <p class="mt-2 text-sm text-red-600">{payloadErrors.request}</p>
+              {/if}
+            </div>
+          {:else}
+            <JsonViewer value={payloadValues.request} testid="request-body" />
+          {/if}
         {/if}
       {:else}
         <p class="field-help mb-2">
@@ -331,7 +461,7 @@
          memory injection + protocol translation. Shown as a SEPARATE panel only when
          it differs from the inbound body; when identical, the single "Request" panel
          above already covers it (no duplicate). -->
-    {#if upstreamDiffers}
+    {#if hasUpstream}
       <section class="card text-sm">
         <h2 class="section-header">{$t('Forwarded to upstream LLM')}</h2>
         <p class="field-help mb-2">
@@ -339,7 +469,34 @@
             'The exact request sent to the provider — after memory injection and protocol translation. This is what the model actually received.',
           )}
         </p>
-        <JsonViewer value={data.payload.upstream_request} testid="upstream-request-body" />
+        {#if !upstreamLoaded || !requestLoaded}
+          <div class="rounded border border-dashed border-border bg-canvas p-3">
+            <p class="field-help mb-2">
+              {$t('Load this only when you need to compare the client body with the provider body.')}
+            </p>
+            <button
+              type="button"
+              data-testid="load-upstream-request"
+              class="btn-secondary"
+              disabled={payloadStatus.upstream_request === 'loading' || payloadStatus.request === 'loading'}
+              onclick={loadUpstreamRequest}
+              >{payloadStatus.upstream_request === 'loading' || payloadStatus.request === 'loading'
+                ? $t('Loading')
+                : $t('Load upstream request')}</button
+            >
+            {#if payloadErrors.upstream_request || payloadErrors.request}
+              <p class="mt-2 text-sm text-red-600">
+                {payloadErrors.upstream_request ?? payloadErrors.request}
+              </p>
+            {/if}
+          </div>
+        {:else if upstreamDiffers}
+          <JsonViewer value={payloadValues.upstream_request} testid="upstream-request-body" />
+        {:else}
+          <p class="field-help italic">
+            {$t('The forwarded upstream body matched the client request body.')}
+          </p>
+        {/if}
       </section>
     {/if}
 
@@ -411,19 +568,38 @@
             : JSON.stringify(d.error.provider_raw)}
         </div>
       </section>
-    {:else if data.payload?.captured && data.payload?.response != null}
+    {:else if data.payload?.captured && hasPayloadPart('response')}
       <section class="card text-sm">
         <h2 class="section-header">{$t('Response')}</h2>
-        {#if isSseStream(data.payload.response)}
+        {#if !responseLoaded}
+          <div class="rounded border border-dashed border-border bg-canvas p-3">
+            <p class="field-help mb-2">
+              {$t('Load the full response body only when you need to inspect it.')}
+            </p>
+            <button
+              type="button"
+              data-testid="load-response-body"
+              class="btn-secondary"
+              disabled={payloadStatus.response === 'loading'}
+              onclick={() => loadPayloadPart('response')}
+              >{payloadStatus.response === 'loading'
+                ? $t('Loading')
+                : $t('Load response body')}</button
+            >
+            {#if payloadErrors.response}
+              <p class="mt-2 text-sm text-red-600">{payloadErrors.response}</p>
+            {/if}
+          </div>
+        {:else if isSseStream(payloadValues.response)}
           <!-- Streaming call: the stored body is the raw SSE wire text. Render it
                stream-aware (assembled final message / per-chunk table / raw). -->
           <p class="field-help mb-2">
             {$t('Streaming response — assembled from the recorded SSE stream.')}
           </p>
-          <StreamViewer raw={data.payload.response} testid="response-body" />
+          <StreamViewer raw={payloadValues.response as string} testid="response-body" />
         {:else}
           <p class="field-help mb-2">{$t('Full response body recorded for this call.')}</p>
-          <JsonViewer value={data.payload.response} testid="response-body" />
+          <JsonViewer value={payloadValues.response} testid="response-body" />
         {/if}
       </section>
     {:else if d.response_meta}

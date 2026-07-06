@@ -716,6 +716,20 @@ export interface RequestPayloadView {
   // is what the client sent). Null/absent when no provider served or pre-feature.
   upstream_request?: unknown;
   created_at?: number;
+  parts?: {
+    request: boolean;
+    response: boolean;
+    upstream_request: boolean;
+  };
+}
+
+export type RequestPayloadPartName = 'request' | 'response' | 'upstream_request';
+
+export interface RequestPayloadPartView {
+  captured: boolean;
+  part?: RequestPayloadPartName;
+  value?: unknown;
+  created_at?: number;
 }
 
 // GET /admin/api/requests/:traceId/payload -> the captured bodies. Resolves to
@@ -728,6 +742,36 @@ export async function getRequestPayload(traceId: string): Promise<RequestPayload
     });
     if (!res.ok) return { captured: false };
     return (await res.json()) as RequestPayloadView;
+  } catch {
+    return { captured: false };
+  }
+}
+
+export async function getRequestPayloadMeta(traceId: string): Promise<RequestPayloadView> {
+  try {
+    const res = await fetch(`${BASE}/${encodeURIComponent(traceId)}/payload?part=meta`, {
+      headers: { accept: 'application/json' },
+    });
+    if (!res.ok) return { captured: false };
+    return (await res.json()) as RequestPayloadView;
+  } catch {
+    return { captured: false };
+  }
+}
+
+export async function getRequestPayloadPart(
+  traceId: string,
+  part: RequestPayloadPartName,
+): Promise<RequestPayloadPartView> {
+  try {
+    const res = await fetch(
+      `${BASE}/${encodeURIComponent(traceId)}/payload?part=${encodeURIComponent(part)}`,
+      {
+        headers: { accept: 'application/json' },
+      },
+    );
+    if (!res.ok) return { captured: false };
+    return (await res.json()) as RequestPayloadPartView;
   } catch {
     return { captured: false };
   }
