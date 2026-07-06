@@ -753,6 +753,31 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // Admin /requests keyword search — pg mirror of sqlite v37. Keep the existing
+    // requested_model OR final.model_alias OR lane semantics, but compute them once
+    // into a lowercase STORED column so model= scans a narrow indexed value instead
+    // of extracting three jsonb paths for every candidate row.
+    version: 36,
+    sql: `
+      ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS model_search TEXT
+        GENERATED ALWAYS AS (
+          lower(
+            coalesce(decision_json ->> 'requested_model', '') ||
+            chr(31) ||
+            coalesce(decision_json -> 'final' ->> 'model_alias', '') ||
+            chr(31) ||
+            coalesce(decision_json -> 'lane' ->> 'selected_lane', '')
+          )
+        ) STORED;
+
+      CREATE INDEX IF NOT EXISTS idx_telemetry_admin_model_window
+        ON telemetry (created_at, model_search);
+
+      CREATE INDEX IF NOT EXISTS idx_telemetry_admin_key_model_window
+        ON telemetry (api_key_id, created_at, model_search);
+    `,
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {

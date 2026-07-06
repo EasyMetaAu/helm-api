@@ -66,11 +66,11 @@ describe("sqlite schema + migrations", () => {
       // pre-mark applied, out of scope.
       // v28 alters memory_facts (+ FTS); this memory_jobs-only fixture never creates
       // memory_facts → pre-mark applied (out of scope for this v14–v16 test).
-      // v30/v32 alter telemetry and v31 alters api_keys; both tables are absent from
+      // v30/v32/v37 alter telemetry and v31 alters api_keys; both tables are absent from
       // this memory_jobs-only fixture → pre-mark applied. v29 (payload_blobs CREATE)
       // has no dependency but is pre-marked too.
       // biome-ignore format: keep the version ledger on one readable line
-      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 28, 29, 30, 31, 32])
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 28, 29, 30, 31, 32, 37])
         rec.run(v, Date.now());
       const insert = seed.prepare(
         "INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -130,7 +130,7 @@ describe("sqlite schema + migrations", () => {
       .all()
       .map((c) => (c as { name: string }).name);
     const telCols = raw
-      .prepare("PRAGMA table_info(telemetry)")
+      .prepare("PRAGMA table_xinfo(telemetry)")
       .all()
       .map((c) => (c as { name: string }).name);
 
@@ -166,6 +166,7 @@ describe("sqlite schema + migrations", () => {
       "cache_creation_tokens",
       "served_model",
       "generation_ms",
+      "model_search",
       "created_at",
     ]) {
       expect(telCols).toContain(c);
@@ -176,6 +177,8 @@ describe("sqlite schema + migrations", () => {
       .map((idx) => (idx as { name: string }).name);
     expect(telemetryIndexes).toContain("idx_telemetry_admin_window_cover");
     expect(telemetryIndexes).toContain("idx_telemetry_admin_key_window_cover");
+    expect(telemetryIndexes).toContain("idx_telemetry_admin_model_window");
+    expect(telemetryIndexes).toContain("idx_telemetry_admin_key_model_window");
     raw.close();
   });
 
@@ -244,6 +247,79 @@ describe("sqlite schema + migrations", () => {
         .map((idx) => (idx as { name: string }).name);
       expect(telemetryIndexes).toContain("idx_telemetry_admin_window_cover");
       expect(telemetryIndexes).toContain("idx_telemetry_admin_key_window_cover");
+      after.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("v37 adds model_search for admin request keyword filtering", () => {
+    const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v37-"));
+    const path = join(dir, "helm.db");
+    try {
+      const seed = new Database(path);
+      seed.exec(
+        "CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);",
+      );
+      seed.exec(`
+        CREATE TABLE telemetry (
+          id TEXT PRIMARY KEY,
+          request_id TEXT NOT NULL UNIQUE,
+          api_key_id TEXT NOT NULL,
+          decision_json TEXT NOT NULL,
+          final_status TEXT,
+          cost_usd REAL,
+          prompt_tokens INTEGER,
+          completion_tokens INTEGER,
+          cached_tokens INTEGER,
+          cache_creation_tokens INTEGER,
+          served_model TEXT,
+          generation_ms INTEGER,
+          latency_total_ms INTEGER,
+          created_at INTEGER NOT NULL
+        );
+      `);
+      const rec = seed.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)");
+      for (let v = 1; v <= 36; v++) rec.run(v, Date.now());
+      seed
+        .prepare(
+          `INSERT INTO telemetry (
+            id, request_id, api_key_id, decision_json, final_status, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "t1",
+          "req_1",
+          "k1",
+          JSON.stringify({
+            requested_model: "Claude-Fable-5",
+            final: { model_alias: "anthropic/claude-fable-5" },
+            lane: { selected_lane: "premium" },
+          }),
+          "ok",
+          1000,
+        );
+      seed.close();
+
+      runMigrations(path);
+
+      const after = new Database(path);
+      const cols = after
+        .prepare("PRAGMA table_xinfo(telemetry)")
+        .all()
+        .map((c) => (c as { name: string }).name);
+      expect(cols).toContain("model_search");
+      const row = after
+        .prepare("SELECT model_search FROM telemetry WHERE request_id = ?")
+        .get("req_1") as { model_search: string };
+      expect(row.model_search).toContain("claude-fable-5");
+      expect(row.model_search).toContain("premium");
+      const telemetryIndexes = after
+        .prepare("PRAGMA index_list(telemetry)")
+        .all()
+        .map((idx) => (idx as { name: string }).name);
+      expect(telemetryIndexes).toContain("idx_telemetry_admin_model_window");
+      expect(telemetryIndexes).toContain("idx_telemetry_admin_key_model_window");
       after.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -364,8 +440,8 @@ describe("sqlite schema + migrations", () => {
       // api_keys-only fixture) → pre-mark applied.
       // v25 (telemetry.generation_ms): no telemetry table here → pre-mark applied.
       // v28 alters memory_facts (absent from this api_keys-only fixture) → pre-mark.
-      // v30/v32 alter telemetry (absent here) → pre-mark; v29 (payload_blobs) pre-marked too.
-      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 18, 20, 21, 22, 24, 25, 28, 29, 30, 32])
+      // v30/v32/v37 alter telemetry (absent here) → pre-mark; v29 (payload_blobs) pre-marked too.
+      for (const v of [1, 2, 3, 4, 5, 6, 7, 8, 9, 18, 20, 21, 22, 24, 25, 28, 29, 30, 32, 37])
         rec.run(v, Date.now());
       seed
         .prepare(

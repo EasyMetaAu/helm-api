@@ -15,6 +15,14 @@
 - **观测决策**：触发时写入 passthrough mutation `body_shims_applied: ["anthropic_billing_cch_stabilized"]`，并清掉 raw_body 走重序列化，避免 telemetry 显示仍是旧的客户端 raw body。后续线上可按该 mutation 与 `cached_tokens/cache_creation_tokens` 验证成本改善。
 - **风险边界**：如果 Anthropic 将来开始强校验官方 `cch` 与整请求字节一致，这个 shim 可能引发上游拒绝；届时可通过 native passthrough flag 或后续 runtime setting 回滚。当前生产证据显示 `cch` 更像缓存/归因指纹而非认证字段。
 
+## 2026-07-06 · Admin 请求列表模型关键词搜索改走预计算列（Admin requests performance，docs/07/11，原则 1/7）
+
+- **背景（Lukin）**：线上 `/admin/api/requests?...&model=fable&key_id=...` 首字节约 5.26s。生产 SQLite 虽能用 `(api_key_id, created_at)` 索引把范围缩到当天该 key 的 7922 行，但 `model` 筛选仍要对每行 `decision_json` 做 `requested_model` / `final.model_alias` JSON 提取和 LIKE，`COUNT` 单独就约 2.36s。
+- **查询决策**：保持 `model=` 的既有语义（substring 匹配 requested model、served alias、selected lane；大小写不敏感），新增生成列 `model_search`：把三段文本 lower 后拼成一个小搜索面。SQLite 用 VIRTUAL generated column，Postgres 用 STORED generated column。
+- **索引决策**：新增 `idx_telemetry_admin_model_window(created_at, model_search)` 与 `idx_telemetry_admin_key_model_window(api_key_id, created_at, model_search)`，让 admin 列表和计数扫描小索引值，不再为候选行反复解析 JSON。
+- **保持不变**：不改 API 参数、不改 UI、不改 payload/telemetry retention；`payload_retention_days` 继续保持 3 天。
+- **验证计划**：覆盖 SQLite/Postgres 迁移、SQLite telemetry 查询、跨 adapter store contract；发布后用同一线上 URL 比较 TTFB/total，并确认 `EXPLAIN QUERY PLAN` 使用新索引。
+
 ## 2026-07-06 · Admin 请求详情 payload 改为分段懒加载（Admin requests performance，docs/07/11，原则 1/7）
 
 - **背景（Lukin）**：线上 `/admin/requests/:traceId` 详情页会在首屏同时拉完整 request/response/upstream payload；部分记录超过 1MB，经公网和未压缩 JSON 传输后容易出现长时间白屏/卡顿。

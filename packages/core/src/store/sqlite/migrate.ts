@@ -851,6 +851,33 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // Admin /requests keyword search: model= used to parse decision_json for every
+    // candidate row (requested_model OR final.model_alias OR lane), which made
+    // day+key searches slow on large SQLite files. Promote that concatenated
+    // search surface to a VIRTUAL generated column and cover the admin date/key
+    // windows with small indexes. The search remains substring + case-insensitive
+    // for ASCII model/lane ids by storing lowercase text and lowercasing the query.
+    version: 37,
+    sql: `
+      ALTER TABLE telemetry ADD COLUMN model_search TEXT
+        GENERATED ALWAYS AS (
+          lower(
+            coalesce(json_extract(decision_json, '$.requested_model'), '') ||
+            char(31) ||
+            coalesce(json_extract(decision_json, '$.final.model_alias'), '') ||
+            char(31) ||
+            coalesce(json_extract(decision_json, '$.lane.selected_lane'), '')
+          )
+        ) VIRTUAL;
+
+      CREATE INDEX IF NOT EXISTS idx_telemetry_admin_model_window
+        ON telemetry (created_at, model_search);
+
+      CREATE INDEX IF NOT EXISTS idx_telemetry_admin_key_model_window
+        ON telemetry (api_key_id, created_at, model_search);
+    `,
+  },
 ];
 
 function sqliteTableHasColumns(
