@@ -340,7 +340,7 @@ describe('providers page', () => {
     expect(within(row).queryByText('Rate limited')).not.toBeInTheDocument();
   });
 
-  it('does not render "Reset usage" for a rate-limited Anthropic account', () => {
+  it('does not render the local retry action for a rate-limited Anthropic account', () => {
     const now = Date.now();
     renderPage({
       quota: [
@@ -596,6 +596,46 @@ describe('providers page', () => {
     });
   }
 
+  function renderCodexCooldown(
+    windows: OAuthQuotaSnapshot['windows'],
+    usageLimitedUntilMs: number,
+  ) {
+    renderPage({
+      providers: [
+        provider({
+          id: 'openai-codex',
+          name: 'Codex',
+          accounts: [
+            {
+              account: 'acct-codex',
+              expiresAt: null,
+              updatedAt: Date.now(),
+              healthy: true,
+              priority: 50,
+              schedulable: true,
+              autoReset: false,
+              fastMode: false,
+              proxy: null,
+              models: ['gpt-5.5'],
+            },
+          ],
+        }),
+      ],
+      usage: [],
+      quota: [
+        {
+          providerId: 'openai-codex',
+          account: 'acct-codex',
+          windows,
+          capturedAt: Date.now(),
+          source: 'codex',
+          usageLimitedUntilMs,
+          resetCredits: 2,
+        },
+      ],
+    });
+  }
+
   it('shows the Auto-reset badge on the list only when the account opted in', async () => {
     renderCodex(2, true);
     const row = screen.getByTestId('provider-account-row');
@@ -606,6 +646,64 @@ describe('providers page', () => {
     renderCodex(2, false);
     const row = screen.getByTestId('provider-account-row');
     expect(within(row).queryByTestId('auto-reset-badge')).not.toBeInTheDocument();
+  });
+
+  it('does not show a local retry action for a Codex account still blocked by a quota window', () => {
+    const now = Date.now();
+    renderCodexCooldown(
+      [
+        {
+          key: 'primary',
+          usedPercent: 100,
+          resetsAtMs: now + 2 * 60 * 60_000,
+          windowMinutes: 300,
+        },
+        {
+          key: 'secondary',
+          usedPercent: 95,
+          resetsAtMs: now + 3 * 86_400_000,
+          windowMinutes: 10_080,
+        },
+      ],
+      now + 2 * 60 * 60_000,
+    );
+
+    const row = screen.getByTestId('provider-account-row');
+    expect(within(row).getByText('Rate limited')).toBeInTheDocument();
+    expect(within(row).queryByRole('button', { name: /retry account/i })).not.toBeInTheDocument();
+    expect(within(row).queryByRole('button', { name: /reset usage/i })).not.toBeInTheDocument();
+  });
+
+  it('shows a local retry action only for a Codex cooldown without an active quota window', async () => {
+    resetUsageLimit.mockResolvedValue(undefined);
+    const now = Date.now();
+    renderCodexCooldown(
+      [
+        {
+          key: 'primary',
+          usedPercent: 54,
+          resetsAtMs: now + 2 * 60 * 60_000,
+          windowMinutes: 300,
+        },
+        {
+          key: 'secondary',
+          usedPercent: 42,
+          resetsAtMs: now + 3 * 86_400_000,
+          windowMinutes: 10_080,
+        },
+      ],
+      now + 60_000,
+    );
+
+    const row = screen.getByTestId('provider-account-row');
+    const button = within(row).getByRole('button', { name: /retry account/i });
+    expect(button).toHaveAttribute('title', 'Clear Helm local cooldown and try this account again');
+    expect(within(row).queryByRole('button', { name: /reset usage/i })).not.toBeInTheDocument();
+
+    await fireEvent.click(button);
+
+    await waitFor(() => expect(resetUsageLimit).toHaveBeenCalledWith('openai-codex', 'acct-codex'));
+    expect(invalidateAllMock).toHaveBeenCalledTimes(1);
   });
 
   it('confirms before consuming a Codex reset credit, then refreshes on success', async () => {

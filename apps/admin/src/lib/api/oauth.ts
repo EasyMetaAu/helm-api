@@ -111,7 +111,7 @@ export interface OAuthQuotaSnapshot {
   source: 'anthropic' | 'codex-headers' | 'codex';
   // Auto-park cooldown: epoch ms until which the account is removed from the pool
   // because it hit its usage limit (null = not limited). Drives the "Rate limited —
-  // auto-recovers in …" pill + the "Reset usage" button.
+  // auto-recovers in …" pill + the local "Retry account" button.
   usageLimitedUntilMs: number | null;
   // Codex only: how many rate-limit reset credits the account can consume right now
   // (surfaced LIVE off the /quota PULL, never persisted). undefined = not a Codex
@@ -222,8 +222,8 @@ export async function logoutOAuth(provider: string, account = 'default'): Promis
 
 // POST /oauth/:provider/reset?account= -> Codex-only local cooldown override. Clears
 // Helm's auto-park usage-limit cooldown so the account rejoins the pool on the next
-// request ("Reset usage"). Leaves the operator's schedulable park untouched. Claude
-// 5h/7d windows are upstream subscription limits and are not resettable here.
+// request ("Retry account"). Leaves the operator's schedulable park untouched. Upstream
+// 5h/7d windows are subscription limits and are not resettable here.
 export async function resetUsageLimit(provider: string, account = 'default'): Promise<void> {
   const res = await fetch(`${BASE}/${provider}/reset?account=${encodeURIComponent(account)}`, {
     method: 'POST',
