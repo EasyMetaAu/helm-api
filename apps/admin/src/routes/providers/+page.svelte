@@ -61,8 +61,8 @@
   // One global account-pool strategy applies across every subscription provider pool.
   // Account priority/schedulable remain per-account controls below.
   let savingStrategy = $state<boolean>(false);
-  // Codex accounts whose "Reset usage" click is in flight (keyed provider/account) —
-  // clears Helm's local auto-park cooldown (#291). Claude's 5h/7d windows are upstream
+  // Codex accounts whose local retry click is in flight (keyed provider/account) —
+  // clears Helm's local auto-park cooldown (#291). Upstream 5h/7d windows are provider
   // subscription limits and are not operator-resettable.
   let resetting = $state<Record<string, boolean>>({});
   // The Codex account whose "Reset limit" consume is awaiting confirmation. A reset
@@ -244,12 +244,20 @@
     return chosen;
   }
 
+  type UsageLimitStatus = {
+    untilMs: number;
+    label: string | null;
+    retryable: boolean;
+  };
+
   // Is this account auto-parked by a usage limit right now? Prefer the nearest
-  // near-full quota window over the short generic 429 fallback, so an Anthropic 5h
-  // limit reported as 98-99% still shows the real reset instead of "0m".
+  // near-full quota window over the short generic 429 fallback, so an upstream 5h
+  // limit reported as 98-99% still shows the real reset instead of "0m". The row
+  // action is retryable only when no active upstream quota window explains the park.
   function usageLimitStatus(
     q: OAuthQuotaSnapshot | undefined,
-  ): { untilMs: number; label: string | null } | null {
+    allowLocalRetry = false,
+  ): UsageLimitStatus | null {
     const now = Date.now();
     let untilMs =
       q?.usageLimitedUntilMs != null && q.usageLimitedUntilMs > now ? q.usageLimitedUntilMs : null;
@@ -262,11 +270,12 @@
     if (recoveryWindow?.resetsAtMs != null) {
       untilMs = recoveryWindow.resetsAtMs;
       label = windowLabel(recoveryWindow.key);
+      return { untilMs, label, retryable: false };
     }
-    if (untilMs != null && q?.windows.some(isAccountWideQuotaWindow) && recoveryWindow == null) {
+    if (untilMs != null && !allowLocalRetry && q?.windows.some(isAccountWideQuotaWindow)) {
       return null;
     }
-    return untilMs == null ? null : { untilMs, label };
+    return untilMs == null ? null : { untilMs, label, retryable: allowLocalRetry };
   }
 
   function codexWeeklyUsedPercent(q: OAuthQuotaSnapshot | undefined): number | null {
@@ -406,10 +415,10 @@
     }
   }
 
-  // "Reset usage": clear the auto-park cooldown so the account rejoins the pool on the
-  // next request. Cooldown-only — the operator's schedulable park is untouched. On
-  // success invalidateAll re-reads the (now-cleared) snapshot so the pill disappears.
-  async function resetUsage(providerId: string, account: string): Promise<void> {
+  // "Retry account": clear Helm's local auto-park cooldown so the account rejoins the
+  // pool on the next request. Cooldown-only — upstream quota windows and the operator's
+  // schedulable park are untouched. On success invalidateAll re-reads the snapshot.
+  async function retryAccount(providerId: string, account: string): Promise<void> {
     const k = keyOf(providerId, account);
     resetting = { ...resetting, [k]: true };
     error = null;
@@ -417,7 +426,7 @@
       await resetUsageLimit(providerId, account);
       await invalidateAll();
     } catch (e) {
-      error = e instanceof Error ? e.message : $t('Failed to reset usage limit');
+      error = e instanceof Error ? e.message : $t('Failed to retry account');
     } finally {
       resetting = { ...resetting, [k]: false };
     }
@@ -605,7 +614,7 @@
               row.provider.id === 'anthropic' || row.provider.id === 'openai-codex'}
             {@const codexCredits = isCodex ? (quota?.resetCredits ?? null) : null}
             {@const canResetCodexLimit = isCodex && canUseCodexResetCredit(quota, codexCredits)}
-            {@const usageLimit = usageLimitStatus(quota)}
+            {@const usageLimit = usageLimitStatus(quota, isCodex)}
             {@const usageLimitRecovery = usageLimit ? autoRecoverIn(usageLimit.untilMs) : ''}
             {@const credentialFailed = row.account.credentialFailed === true}
             <tr class="align-top" data-testid="provider-account-row">
@@ -812,13 +821,14 @@
                         account: row.account.account,
                       })}>{$t('Manage')}</button
                   >
-                  {#if usageLimit && isCodex}
+                  {#if usageLimit?.retryable && isCodex}
                     <button
                       type="button"
                       class="btn-secondary"
                       disabled={resetting[k] === true}
-                      onclick={() => resetUsage(row.provider.id, row.account.account)}
-                      >{resetting[k] === true ? $t('Resetting…') : $t('Reset usage')}</button
+                      title={$t('Clear Helm local cooldown and try this account again')}
+                      onclick={() => retryAccount(row.provider.id, row.account.account)}
+                      >{resetting[k] === true ? $t('Retrying…') : $t('Retry account')}</button
                     >
                   {/if}
                   {#if isCodex}
