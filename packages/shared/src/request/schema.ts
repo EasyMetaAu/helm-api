@@ -64,6 +64,7 @@ export const NativePassthroughMutationLedgerSchema = z
         dropped_chars: z.number().int().nonnegative().optional(),
         owns_cache_control: z.boolean(),
         marker_count: z.number().int().nonnegative(),
+        cache_control_markers_stripped: z.number().int().nonnegative().optional(),
       })
       .optional(),
   })
