@@ -94,6 +94,7 @@ The stored record (`ApiKeyRecord`, single source of truth in
   role: "root" | "user",
   allowed_lanes: string[] | null,   // allow-list of lanes (empty/null = any lane)
   allow_custom_model: boolean,      // may the client pin a model OR lane directly?
+  blocked_models: string[] | null,  // case-insensitive model denylist patterns; supports * and ?
   disabled: boolean,
 
   // Rate limit (null = inherit system default; 0 = explicitly unlimited)
@@ -127,12 +128,20 @@ through the request — downstream code reads the caps, never the store.
   key. It may store `secret_enc`, an AES-GCM ciphertext encrypted with
   `HELM_OAUTH_ENC_KEY`, for admin-only reveal. Existing rows without `secret_enc`
   remain unrecoverable until rotated.
-- **Per-key caps.** `allowed_lanes` and `allow_custom_model` constrain how a key
-  may route. `allow_custom_model` lets the `model` field name a concrete model
-  alias or a lane (docs/04); an explicit lane is still bounded by `allowed_lanes`
-  and a violation is a 400, not a silent downgrade. (A per-key `max_lane` ceiling
-  was retired — lanes are parallel, not a strict hierarchy, so the whitelist
-  subsumes it; see implementation-notes.md.)
+- **Per-key caps.** `allowed_lanes`, `allow_custom_model`, and `blocked_models`
+  constrain how a key may route. `allow_custom_model` lets the `model` field name
+  a concrete model alias or a lane (docs/04); an explicit lane is still bounded by
+  `allowed_lanes` and a violation is a 400, not a silent downgrade.
+  `blocked_models` is independent of passthrough: direct requests for a blocked
+  concrete model are rejected, while automatic routing, lane routing, and
+  execution fallback chains filter blocked concrete aliases out before serving.
+  Entries match case-insensitively. Plain entries are exact model ids; glob
+  entries support `*` for any text and `?` for one character, for example
+  `gpt-4o`, `anthropic/*`, or `claude-?-sonnet`. `blocked_models` is not a lane
+  blacklist: `auto` and lane names are not blocked directly; the concrete models
+  inside those lanes are filtered. (A per-key `max_lane` ceiling was retired —
+  lanes are parallel, not a strict hierarchy, so the whitelist subsumes it; see
+  implementation-notes.md.)
 - **Rotation preserves history.** `KeyStore.rotateKey` replaces only `hash`,
   `prefix`, and optional `secret_enc` on the same `key_id`; name, account, role,
   caps, usage, and telemetry history stay attached to that key. `KeyStore.disable`

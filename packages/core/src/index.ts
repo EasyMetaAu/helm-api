@@ -325,6 +325,7 @@ export {
   type MemoryScope,
   MemoryScopeSchema,
 } from "./memory/types.js";
+export { type BlockedModelMatcher, createBlockedModelMatcher } from "./model-blocking.js";
 // Anthropic Messages transformer — the second client-presentation surface
 // (docs/05). Inbound native->IR, outbound IR->native (+ stream state machine +
 // error translation). Reimplemented from the docs, not copied from upstream.

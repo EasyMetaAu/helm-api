@@ -1,6 +1,7 @@
 import type { CatalogEntry, ModelObject, ModelsList } from "@helm/shared";
 import { expandLaneChain } from "../lanes/expand-chain.js";
 import type { LanesConfig } from "../lanes/schema.js";
+import { createBlockedModelMatcher } from "../model-blocking.js";
 
 // buildModelsList — the pure data builder behind GET /v1/models. Framework-free
 // (principle 1): the gateway route serializes the result; this module decides
@@ -34,7 +35,7 @@ export interface BuildModelsListInput {
   allowCustomModel: boolean;
   /** The key's allowed_lanes cap; null/undefined = unconstrained. */
   allowedLanes?: string[] | null;
-  /** Exact concrete aliases hidden from and unavailable to this key. */
+  /** Case-insensitive concrete alias patterns hidden from and unavailable to this key. */
   blockedModels?: string[] | null;
 }
 
@@ -48,9 +49,10 @@ function ownerOf(alias: string): string {
 export function buildModelsList(input: BuildModelsListInput): ModelsList {
   const { lanes, catalog, providerAliases, allowCustomModel } = input;
 
-  const blocked = new Set(input.blockedModels ?? []);
+  const blocked = createBlockedModelMatcher(input.blockedModels);
+  const isBlocked = (alias: string): boolean => blocked?.matches(alias) === true;
   const laneHasVisibleCandidate = (name: string): boolean =>
-    expandLaneChain(name, lanes).some((alias) => !blocked.has(alias));
+    expandLaneChain(name, lanes).some((alias) => !isBlocked(alias));
 
   // Visible lanes: config (insertion) order, narrowed by the key's allowed_lanes
   // and by the key's blocked_models. A lane whose entire expanded chain is
@@ -98,7 +100,7 @@ export function buildModelsList(input: BuildModelsListInput): ModelsList {
     }
 
     const uniqueAliases = [...new Set(providerAliases)]
-      .filter((alias) => !blocked.has(alias))
+      .filter((alias) => !isBlocked(alias))
       .sort((a, b) => a.localeCompare(b));
     for (const alias of uniqueAliases) {
       const meta = catalog.get(alias);

@@ -19,7 +19,7 @@ export const apiKeys = sqliteTable("api_keys", {
   allowCustomModel: integer("allow_custom_model", { mode: "boolean" }) // SQLite has no native boolean
     .notNull()
     .default(false),
-  blockedModels: text("blocked_models"), // JSON text array of exact model ids; NULL = no blacklist
+  blockedModels: text("blocked_models"), // JSON text array of model blacklist patterns; NULL = none
   allowFastMode: integer("allow_fast_mode", { mode: "boolean" }).notNull().default(false),
   disabled: integer("disabled", { mode: "boolean" }).notNull().default(false),
   // Per-key rate-limit override (docs/06). Nullable: NULL = inherit the system

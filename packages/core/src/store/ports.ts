@@ -158,8 +158,10 @@ export interface CreateKeyInput {
   name?: string;
   allowedLanes?: string[];
   allowCustomModel?: boolean;
-  // Exact client-facing model ids this key may not request when explicit model
-  // passthrough is enabled. Omitted => NULL => no blacklist.
+  // Case-insensitive exact/glob client-facing model ids this key may never use.
+  // Applies independently of explicit-model passthrough: direct model requests
+  // are rejected, and automatic/lane/fallback chains are filtered.
+  // Omitted => NULL => no blacklist.
   blockedModels?: string[];
   // Per-key cap for CLIENT-requested Fast mode passthrough. Server/account-level
   // forced Fast mode is controlled separately by account settings.

@@ -86,10 +86,11 @@
   import { untrack } from 'svelte';
   import { t } from '$lib/i18n';
 
-  // Progressive disclosure: the two fields that define what the key can REACH
-  // (lanes + passthrough) are always visible; the tuning groups most operators
-  // never touch (rates, budgets, memory) are collapsed <details> sections, each
-  // with a one-line state summary so a closed section is never a mystery.
+  // Progressive disclosure: the fields that define what the key can reach or must
+  // never reach (lanes + model denylist + passthrough) are always visible; the
+  // tuning groups most operators never touch (rates, budgets, memory) are
+  // collapsed <details> sections, each with a one-line state summary so a closed
+  // section is never a mystery.
   let {
     form = $bindable(),
     lanes,
@@ -179,7 +180,7 @@
   {/if}
 {/snippet}
 
-<!-- Basics: what the key can reach. Always visible. -->
+<!-- Basics: what the key can reach, and what it must never reach. Always visible. -->
 <fieldset class="flex flex-col gap-1 text-sm">
   <legend class="field-label">{$t('Allowed lanes')}</legend>
   <div class="flex flex-wrap gap-3">
@@ -202,6 +203,23 @@
   >
 </fieldset>
 
+<label class="flex flex-col gap-1 text-sm">
+  <span class="field-label">{$t('Blocked models')}</span>
+  <textarea
+    rows="3"
+    aria-label={$t('Blocked models')}
+    placeholder={$t('One model id or pattern per line')}
+    class="input min-h-20 resize-y"
+    value={form.blockedModels.join('\n')}
+    oninput={(e) => updateBlockedModels(e.currentTarget.value)}
+  ></textarea>
+  <span class="field-help"
+    >{$t(
+      'Blocks model ids or glob patterns for this key. Matching is case-insensitive; use * for any text and ? for one character. Applies to direct model requests, automatic routing, lane routes, and fallback chains.',
+    )}</span
+  >
+</label>
+
 <div class="flex flex-col gap-1">
   <label class="checkbox-field">
     <input
@@ -218,25 +236,6 @@
     )}</span
   >
 </div>
-
-{#if form.allowCustomModel}
-  <label class="flex flex-col gap-1 text-sm">
-    <span class="field-label">{$t('Blocked models')}</span>
-    <textarea
-      rows="3"
-      aria-label={$t('Blocked models')}
-      placeholder={$t('One model id per line')}
-      class="input min-h-20 resize-y"
-      value={form.blockedModels.join('\n')}
-      oninput={(e) => updateBlockedModels(e.currentTarget.value)}
-    ></textarea>
-    <span class="field-help"
-      >{$t(
-        'Blocks exact model ids for this key across direct model requests and all lane/fallback routes.',
-      )}</span
-    >
-  </label>
-{/if}
 
 <div class="flex flex-col gap-1">
   <label class="checkbox-field">

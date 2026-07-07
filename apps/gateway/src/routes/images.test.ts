@@ -147,7 +147,7 @@ describe("registerImagesRoute", () => {
                 keyId: "key1",
                 accountId: "acct",
                 keyPrefix: "helm_live_xy",
-                caps: { budget: BUDGET_CAPS, blockedModels: ["gpt-image-2"] },
+                caps: { budget: BUDGET_CAPS, blockedModels: ["GPT-IMAGE-*"] },
               } as MessagesIdentity)
             : null,
       },
@@ -176,7 +176,7 @@ describe("registerImagesRoute", () => {
                 keyId: "key1",
                 accountId: "acct",
                 keyPrefix: "helm_live_xy",
-                caps: { budget: BUDGET_CAPS, blockedModels: ["gpt-image-primary"] },
+                caps: { budget: BUDGET_CAPS, blockedModels: ["GPT-IMAGE-PRI*"] },
               } as MessagesIdentity)
             : null,
       },

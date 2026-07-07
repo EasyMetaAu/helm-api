@@ -10,6 +10,7 @@ import {
 } from "@helm/shared";
 import { expandLaneChain } from "../lanes/expand-chain.js";
 import type { LanesConfig } from "../lanes/schema.js";
+import { type BlockedModelMatcher, createBlockedModelMatcher } from "../model-blocking.js";
 import { type Classification as ResolverClassification, resolveLane } from "./lane-resolver.js";
 import { type ModelAliasMap, resolveModelAlias } from "./model-alias.js";
 import { applyCaps, evaluatePolicies, LANE_RANK, type PolicyContext } from "./policy-engine.js";
@@ -232,7 +233,7 @@ export interface RouteOptions {
   keyCaps?: {
     allowedLanes: string[] | null;
     degradeLane?: string | null;
-    /** Exact model ids this key may never use, including lane/fallback chains. */
+    /** Case-insensitive model id patterns this key may never use, including lane/fallback chains. */
     blockedModels?: string[] | null;
   };
 }
@@ -392,10 +393,8 @@ function signalSummary(signal: RoutingSignal): Record<string, unknown> {
   };
 }
 
-function blockedModelSetForCaps(keyCaps: RouteOptions["keyCaps"]): Set<string> | null {
-  const blocked = keyCaps?.blockedModels;
-  if (!Array.isArray(blocked) || blocked.length === 0) return null;
-  return new Set(blocked);
+function blockedModelMatcherForCaps(keyCaps: RouteOptions["keyCaps"]): BlockedModelMatcher | null {
+  return createBlockedModelMatcher(keyCaps?.blockedModels);
 }
 
 function laneHasPermittedModel(
@@ -403,9 +402,9 @@ function laneHasPermittedModel(
   lanes: LanesConfig,
   keyCaps: RouteOptions["keyCaps"],
 ): boolean {
-  const blocked = blockedModelSetForCaps(keyCaps);
+  const blocked = blockedModelMatcherForCaps(keyCaps);
   if (blocked === null) return true;
-  return expandChain(lane, lanes).some((alias) => !blocked.has(alias));
+  return expandChain(lane, lanes).some((alias) => !blocked.matches(alias));
 }
 
 function isDegradedSignal(signal: RoutingSignal, thresholds: SignalFeedbackThresholds): boolean {
@@ -536,14 +535,14 @@ function passthroughClassifier(): DecisionRecord["classifier"] {
   };
 }
 
-function blockedModelSet(opts: RouteOptions): Set<string> | null {
-  return blockedModelSetForCaps(opts.keyCaps);
+function blockedModelMatcher(opts: RouteOptions): BlockedModelMatcher | null {
+  return blockedModelMatcherForCaps(opts.keyCaps);
 }
 
 function filterBlockedModels(chain: string[], opts: RouteOptions): string[] {
-  const blocked = blockedModelSet(opts);
+  const blocked = blockedModelMatcher(opts);
   if (blocked === null) return chain;
-  const filtered = chain.filter((alias) => !blocked.has(alias));
+  const filtered = chain.filter((alias) => !blocked.matches(alias));
   return filtered.length === chain.length ? chain : filtered;
 }
 
@@ -551,7 +550,7 @@ function isDirectBlockedModel(req: InternalRequest, deps: RouteDeps, opts: Route
   const model = req.requested_model;
   if (model.length === 0 || model === "auto") return false;
   if (Object.hasOwn(deps.lanes, model)) return false;
-  return blockedModelSet(opts)?.has(model) === true;
+  return blockedModelMatcher(opts)?.matches(model) === true;
 }
 
 function noPermittedModelsRejection(args: {

@@ -846,7 +846,7 @@ describe("routeRequest — per-key blocked models", () => {
     const d = deps({ isKnownModel: () => true });
     const result = await routeRequest(req({ requested_model: "gpt-4o" }), d, {
       allowCustomModel: false,
-      keyCaps: { allowedLanes: null, blockedModels: ["gpt-4o"] },
+      keyCaps: { allowedLanes: null, blockedModels: ["GPT-4O"] },
     });
 
     expect(result.final.status).toBe("error");
@@ -859,7 +859,7 @@ describe("routeRequest — per-key blocked models", () => {
   it("removes blocked models from a classified lane chain before execution", async () => {
     const d = deps();
     const result = await routeRequest(req(), d, {
-      keyCaps: { allowedLanes: null, blockedModels: ["coder_a", "best_reasoning_model"] },
+      keyCaps: { allowedLanes: null, blockedModels: ["CODER_A", "BEST_REASONING*"] },
     });
 
     expect(result.final.status).toBe("ok");
@@ -887,7 +887,7 @@ describe("routeRequest — per-key blocked models", () => {
     const d = deps();
     const result = await routeRequest(req({ requested_model: "premium" }), d, {
       allowCustomModel: true,
-      keyCaps: { allowedLanes: null, blockedModels: ["premium"] },
+      keyCaps: { allowedLanes: null, blockedModels: ["prem*"] },
     });
 
     expect(result.final.status).toBe("ok");

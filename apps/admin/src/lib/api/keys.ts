@@ -17,7 +17,7 @@ export interface ApiKeyView {
   name: string | null; // human-readable label; null = unnamed (cosmetic only)
   allowed_lanes: string[] | null; // lane whitelist (empty/null = any lane)
   allow_custom_model: boolean; // explicit client-model passthrough
-  blocked_models: string[] | null; // exact model ids denied across direct and lane routes
+  blocked_models: string[] | null; // case-insensitive exact/glob model ids denied across routes
   allow_fast_mode: boolean; // explicit client-requested Fast mode passthrough
   disabled: boolean; // revoked state (soft)
   rate_limit_rpm: number | null; // per-key RPM override; null = inherit system default

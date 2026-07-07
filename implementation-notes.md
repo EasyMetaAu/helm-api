@@ -21,9 +21,9 @@
 - **背景（Lukin）**：每个 API key 需要能禁止若干具体模型，语义是“这个用户无论通过 direct model、显式 lane、auto/classified lane、alias-to-lane 还是 execution fallback，都不能实际用到这些模型”。
 - **产品边界**：`blocked_models` 是具体模型 denylist，不是 lane denylist。请求若直接点名被禁的具体模型，立即返回结构化 `invalid_request`；请求若点名 lane 或走自动路由，则在执行前从 expanded candidate chain 中剥离被禁模型，fallback 会自然跳过它们。Chat/Messages/Responses/Gemini 走 `routeRequest`，Images/Interactions 入口在各自 image chain 执行前应用同一过滤。
 - **空链处理**：如果某个 lane 的所有候选都被当前 key 的 `blocked_models` 剥空，路由阶段直接返回 `invalid_request`，不进入 provider executor，也不把它伪装成 provider failure。Routing signal feedback 也会跳过被黑名单剥空的提升目标，避免把本来可用的 lane 误提升成拒绝。
-- **匹配语义**：只做 `trim` 后的精确模型 ID 匹配，不 lowercase、不 glob、不按 provider 前缀扩展；`auto`、空模型、lane 名本身不会作为模型命中，lane 内的具体模型会被过滤。
+- **匹配语义**：`blocked_models` 每项先 `trim`，匹配时大小写不敏感；普通文本是精确模型 ID，包含 `*` 或 `?` 时按 glob 处理（`*` 任意长度，`?` 单个字符，正则特殊字符按字面量）。不按 provider 前缀隐式扩展；`auto`、空模型、lane 名本身不会作为模型命中，lane 内的具体模型 alias 会被过滤。
 - **数据与迁移**：API key schema 增加 nullable `blocked_models`；create/update 支持设置与清空。SQLite v38 用 JSON text，Postgres v37 用 JSONB；两个 store adapter 都做 round-trip，并保持旧 row 默认 `null`。
-- **可见性与 UI**：`/v1/models` 会按当前 key 隐藏被 block 的 concrete alias；若某 lane 过滤后没有任何可用候选，该 lane 也不展示。Admin keys 的共享 caps form 增加多行 `Blocked models` 输入，支持换行、逗号、分号分隔并去重。
+- **可见性与 UI**：`/v1/models` 会按当前 key 隐藏被 block 的 concrete alias；若某 lane 过滤后没有任何可用候选，该 lane 也不展示。Admin keys 的共享 caps form 始终展示多行 `Blocked models` 输入，独立于 `allow_custom_model`，支持换行、逗号、分号分隔并去重。
 - **验证路径**：覆盖 shared schema、direct reject、classified/explicit/alias lane chain filtering、routing signal 提升过滤、空链拒绝、models list 过滤、SQLite/Postgres store contract、gateway auth/admin/chat/messages/replay/models threading，以及 admin create/edit/list 表单映射。
 
 ## 2026-07-06 · Anthropic native passthrough 稳定 Claude Code billing cch（Provider execution / prompt cache，docs/04/05，原则 3/5/7/8）

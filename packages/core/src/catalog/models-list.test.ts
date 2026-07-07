@@ -100,21 +100,21 @@ describe("buildModelsList", () => {
     expect(flash?.lanes).toEqual(["economy"]);
   });
 
-  it("allow_custom_model key: omits blocked concrete aliases", () => {
+  it("allow_custom_model key: omits blocked concrete aliases with case-insensitive globs", () => {
     const list = buildModelsList({
       lanes,
       catalog,
       providerAliases,
       allowCustomModel: true,
-      blockedModels: ["deepseek/pro"],
+      blockedModels: ["DEEPSEEK/*"],
     });
 
     const ids = list.data.map((m) => m.id);
-    expect(ids).toContain("economy");
+    expect(ids).not.toContain("economy");
     expect(ids).not.toContain("balanced");
     expect(ids).toContain("premium");
     expect(ids).toContain("auto");
-    expect(ids).toContain("deepseek/flash");
+    expect(ids).not.toContain("deepseek/flash");
     expect(ids).toContain("openai/o");
     expect(ids).not.toContain("deepseek/pro");
   });

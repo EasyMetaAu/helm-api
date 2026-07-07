@@ -879,8 +879,8 @@ const MIGRATIONS: readonly Migration[] = [
     `,
   },
   {
-    // Per-key model blacklist. Nullable JSON text array; removes exact models
-    // from direct requests and all lane/fallback chains.
+    // Per-key model blacklist. Nullable JSON text array of model patterns,
+    // applied to direct requests and all lane/fallback chains.
     version: 38,
     run: (db) => {
       if (
