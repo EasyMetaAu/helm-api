@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-07-07 · Anthropic 兼容改写路径稳定 CCH 并接入视觉压缩（Provider execution / cost control，docs/04/05，原则 3/5/7/8）
+
+- **背景（Lukin）**：生产 Luke key 的 `claude-fable-5` 请求在 v0.25.17 后仍只有约三成 cache-read share。复查发现 `cch` 不是被删除：客户端原始 billing header 无 `cch`，上游 body 有 Helm 重建的 `cch`；但 OAuth strict fingerprint 会再按完整 body 签 CCH，messages/max_tokens 等非缓存前缀变化仍会让 `system[0]` 变化。另一半问题是这批请求大多因 `provider_requires_compatibility_rewrite` 走普通 `chatCompletion` 翻译路径，而 `visual_context_compression` 只挂在 native passthrough body 上，无法处理真正贵的兼容改写请求。
+- **执行决策**：strict Claude CLI shape 仍保留 header 顺序、tool cloak、runtime headers，但 CCH 改为只从 cache-prefix 材料（model/system/tools，排除 messages 和采样参数）计算，避免第一块 system 自己烧掉 prompt cache。再给 `ProviderCallOptions` 增加 Anthropic-only `optimizeAnthropicBody` 钩子；Anthropic provider 先按既有逻辑生成最终 Anthropic Messages body，再在 capture/POST 前调用该钩子。这样不绕过 provider 的 OAuth、签名、重试和响应转换，也不会影响 OpenAI/Gemini providers。
+- **Telemetry 决策**：execute 在 stream/non-stream 翻译路径都传入同一个 per-attempt optimizer，并把 `visual_context_compression` mutation 与既有 `request_mutations` 合并；provider 忽略/未调用时 mutation 为空，避免把没有实际压缩的请求误报成省钱。
+- **风险边界**：该钩子只优化 Anthropic-native wire body；`mode=off` 仍为 no-op，压缩器异常 fail-open 发原 body。实际节省依赖 pxpipe 对该请求形态是否 `applied:true`，上线后必须用 mutation + usage 验证，而不是只看功能开关。
+- **验证路径**：新增 execute 测试覆盖 `provider_requires_compatibility_rewrite` 仍调用 visual compression 并记录 mutation；新增 Anthropic provider 测试确认 translated body 在 capture/POST 前被优化。
+
 ## 2026-07-06 · 请求总超时必须驱动下游 abort 与失败 telemetry（Gateway runtime / telemetry，docs/02/07，原则 3/5/7）
 
 - **背景（Lukin）**：生产 `gpt-5.5` 长请求超过 Helm `request_timeout_ms` 后，客户端收到 504，但上游 provider 后续完成，Telemetry 仍把 `final_status` 记成 `ok`，导致日志和 Admin requests 不能反映客户端真实结果。

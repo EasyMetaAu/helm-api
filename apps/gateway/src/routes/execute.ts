@@ -1361,30 +1361,36 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       });
       let visualCompressionMutation: VisualContextCompressionMutation | undefined;
       let optimizedNativeBody: Record<string, unknown> | null = null;
+      const optimizeAnthropicBodyForAttempt = async (
+        body: Record<string, unknown>,
+      ): Promise<Record<string, unknown>> => {
+        if (target.targetProviderProtocol !== "anthropic_messages") return body;
+        try {
+          const optimized = await visualContextCompressor({
+            mode: visualContextCompressionMode?.() ?? "off",
+            targetProviderProtocol: target.targetProviderProtocol,
+            model: providerModel,
+            body,
+            capabilities: caps,
+            requestId: req.request_id,
+          });
+          visualCompressionMutation = optimized.mutation;
+          return optimized.body;
+        } catch (err) {
+          log?.("warn", "visual_context_compression.failed_open", {
+            alias,
+            error_class: errorClassOf(err),
+          });
+          return body;
+        }
+      };
       const optimizeNativeBodyForAttempt = async (
         input: NativePassthroughCarrier | Record<string, unknown>,
       ): Promise<NativePassthroughCarrier | Record<string, unknown>> => {
         if (!passthrough.passthrough_used) return input;
         const body = nativePassthroughBody(input);
         if (optimizedNativeBody === null) {
-          try {
-            const optimized = await visualContextCompressor({
-              mode: visualContextCompressionMode?.() ?? "off",
-              targetProviderProtocol: target.targetProviderProtocol,
-              model: providerModel,
-              body,
-              capabilities: caps,
-              requestId: req.request_id,
-            });
-            optimizedNativeBody = optimized.body;
-            visualCompressionMutation = optimized.mutation;
-          } catch (err) {
-            log?.("warn", "visual_context_compression.failed_open", {
-              alias,
-              error_class: errorClassOf(err),
-            });
-            optimizedNativeBody = body;
-          }
+          optimizedNativeBody = await optimizeAnthropicBodyForAttempt(body);
         }
         return isNativePassthroughCarrier(input)
           ? cloneCarrierWithBody(input, optimizedNativeBody)
@@ -1532,13 +1538,6 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           // forward. peekStream opens chatCompletionStream(stripInternal); the row
           // carries the (used:false) passthrough telemetry. No nativePassthrough marker.
           const rendered = stripInternal(req, providerModel, target.targetProviderProtocol, caps);
-          attemptTelemetry = withRequestMutations(
-            passthrough,
-            mergeRequestMutations(
-              rendered.request_mutations,
-              provider.streamReframed === true ? { stream_reframed: true } : undefined,
-            ),
-          );
           // Pre-output failover guard (principle 5 + 8): the translate generators
           // ALREADY throw on a terminal error frame, but they yield an empty role
           // preamble chunk first, so peekStream would commit success before the throw.
@@ -1556,6 +1555,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                   const raw = provider.chatCompletionStream(rendered.body, {
                     signal: attemptSignal,
                     captureUpstream,
+                    optimizeAnthropicBody: optimizeAnthropicBodyForAttempt,
                   });
                   return translateClassifier
                     ? guardPreOutputFailure(raw, translateClassifier)
@@ -1567,6 +1567,14 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               ),
           );
           breaker.recordSuccess(alias);
+          attemptTelemetry = withRequestMutations(
+            passthrough,
+            mergeRequestMutations(
+              rendered.request_mutations,
+              provider.streamReframed === true ? { stream_reframed: true } : undefined,
+              visualCompressionMutationLedger(visualCompressionMutation),
+            ),
+          );
           // Streamed usage is not known at peek time → cost null (not measured).
           attempts.push(okRow(alias, elapsed(), null, attemptTelemetry));
           return {
@@ -1638,9 +1646,19 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           };
         }
         const bodyReq = stripInternal(req, providerModel, target.targetProviderProtocol, caps);
-        attemptTelemetry = withRequestMutations(passthrough, bodyReq.request_mutations);
         const body = await withAttemptDeadline(req.attempt_timeout_ms, signal, (attemptSignal) =>
-          provider.chatCompletion(bodyReq.body, { signal: attemptSignal, captureUpstream }),
+          provider.chatCompletion(bodyReq.body, {
+            signal: attemptSignal,
+            captureUpstream,
+            optimizeAnthropicBody: optimizeAnthropicBodyForAttempt,
+          }),
+        );
+        attemptTelemetry = withRequestMutations(
+          passthrough,
+          mergeRequestMutations(
+            bodyReq.request_mutations,
+            visualCompressionMutationLedger(visualCompressionMutation),
+          ),
         );
         breaker.recordSuccess(alias);
         attempts.push(okRow(alias, elapsed(), costOf(alias, body), attemptTelemetry));
