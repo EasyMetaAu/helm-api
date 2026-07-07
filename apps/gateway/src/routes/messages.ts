@@ -48,7 +48,7 @@ export interface MessagesIdentity {
     rateLimit?: { rpm: number | null; tpm: number | null };
     /** Per-key max in-flight requests (issue #93). null/absent = unlimited. */
     concurrencyLimit?: number | null;
-    /** Exact model ids denied across direct model requests and lane/fallback routes. */
+    /** Case-insensitive exact/glob model ids denied across direct requests and lane/fallback routes. */
     blockedModels?: string[] | null;
     /** Per-key cap for client-requested Fast mode passthrough. Account-level Fast
      *  mode can still be forced by subscription account settings. */

@@ -1,4 +1,10 @@
-import type { BudgetCaps, BudgetCheckResult, BudgetProbe, CircuitBreaker } from "@helm/core";
+import {
+  type BudgetCaps,
+  type BudgetCheckResult,
+  type BudgetProbe,
+  type CircuitBreaker,
+  createBlockedModelMatcher,
+} from "@helm/core";
 import { ImageGenerationRequestSchema } from "@helm/shared";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -201,17 +207,18 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
             "provider_unavailable",
           );
     }
-    const blockedModels = new Set(identity.caps?.blockedModels ?? []);
+    const blockedModels = createBlockedModelMatcher(identity.caps?.blockedModels);
     const permittedTargets =
-      blockedModels.size === 0
+      blockedModels === null
         ? chain.targets
-        : chain.targets.filter((target) => !blockedModels.has(target.alias));
+        : chain.targets.filter((target) => !blockedModels.matches(target.alias));
     const permittedCandidateChain =
-      blockedModels.size === 0
+      blockedModels === null
         ? chain.candidateChain
-        : chain.candidateChain.filter((alias) => !blockedModels.has(alias));
+        : chain.candidateChain.filter((alias) => !blockedModels.matches(alias));
     if (permittedTargets.length === 0) {
-      const directBlocked = blockedModels.has(parsed.data.model);
+      const directBlocked =
+        chain.laneName !== parsed.data.model && blockedModels?.matches(parsed.data.model) === true;
       return errorJson(
         c,
         400,

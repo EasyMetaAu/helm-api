@@ -228,7 +228,7 @@ describe("registerInteractionsRoute", () => {
                 keyId: "key1",
                 accountId: "acct",
                 keyPrefix: "helm_live_xy",
-                caps: { budget: BUDGET_CAPS, blockedModels: ["gemini-3.1-flash-image"] },
+                caps: { budget: BUDGET_CAPS, blockedModels: ["GEMINI-3.1-*-IMAGE"] },
               } as MessagesIdentity)
             : null,
       },
@@ -261,7 +261,7 @@ describe("registerInteractionsRoute", () => {
                 keyId: "key1",
                 accountId: "acct",
                 keyPrefix: "helm_live_xy",
-                caps: { budget: BUDGET_CAPS, blockedModels: ["gemini-image-primary"] },
+                caps: { budget: BUDGET_CAPS, blockedModels: ["GEMINI-IMAGE-PRI*"] },
               } as MessagesIdentity)
             : null,
       },

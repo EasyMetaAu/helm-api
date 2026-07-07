@@ -46,8 +46,8 @@ export const ApiKeyRecordSchema = z.object({
   // Per-key caps (docs/06): present-but-nullable so the storage shape is explicit.
   allowed_lanes: z.array(z.string()).nullable(),
   allow_custom_model: z.boolean(),
-  // Per-key model blacklist. It removes exact models from every route this key
-  // can take; legacy rows default to null = no blacklist.
+  // Per-key model blacklist. It removes case-insensitive exact/glob model
+  // patterns from every route this key can take; legacy rows default to null.
   blocked_models: BlockedModelsSchema.default(null),
   // Per-key Fast-mode passthrough cap. false = client-requested Fast is downgraded
   // unless the serving subscription account itself has Fast mode forced on.
