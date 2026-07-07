@@ -133,6 +133,7 @@ function protocolRegistry(
       providerName: string;
       providerModel: string;
       targetProviderProtocol: TargetProviderProtocol;
+      providerRequiresCompatibilityRewrite?: boolean;
     }
   >,
 ): ProviderRegistry {
@@ -149,7 +150,7 @@ function protocolRegistry(
           baseUrl: "http://x",
           apiKeyEnv: "X",
           targetProviderProtocol: hit.targetProviderProtocol,
-          providerRequiresCompatibilityRewrite: false,
+          providerRequiresCompatibilityRewrite: hit.providerRequiresCompatibilityRewrite === true,
         },
       };
     },
@@ -2187,6 +2188,91 @@ describe("createExecute — gateway execution adapter", () => {
     expect(out.final.status).toBe("ok");
     expect(out.attempts[0]).toMatchObject({ alias: "fable", skipped: false, status: "ok" });
     expect(provider.nativePassthrough).toHaveBeenCalledOnce();
+  });
+
+  it("applies visual context compression on Anthropic compatibility rewrite attempts", async () => {
+    const provider = {
+      chatCompletion: vi.fn(async (_body: Record<string, unknown>, opts) => {
+        const upstreamBody = await opts?.optimizeAnthropicBody?.({
+          model: "claude-fable-5",
+          system: [{ type: "text", text: "stable prefix", cache_control: { type: "ephemeral" } }],
+          messages: [{ role: "user", content: [{ type: "text", text: "large visual context" }] }],
+          max_tokens: 64,
+        });
+        expect(upstreamBody).toMatchObject({ compressed: true });
+        return {
+          id: "ok",
+          usage: { input_tokens: 10, output_tokens: 1 },
+        };
+      }),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: protocolRegistry({
+        fable: {
+          providerName: "mock",
+          providerModel: "claude-fable-5",
+          targetProviderProtocol: "anthropic_messages",
+          providerRequiresCompatibilityRewrite: true,
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map([["fable", entry("fable")]]),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+      visualContextCompressionMode: () => "enabled",
+      visualContextCompressor: async ({ body }) => ({
+        body: { ...body, compressed: true },
+        mutation: {
+          mode: "enabled",
+          applied: true,
+          would_apply: true,
+          reason: "applied",
+          orig_chars: 50_000,
+          compressed_chars: 42_000,
+          image_count: 1,
+          image_bytes: 12_000,
+          owns_cache_control: true,
+          marker_count: 1,
+        },
+      }),
+    });
+
+    const out = await execute(
+      plan(["fable"]),
+      req({
+        protocol: "anthropic_messages",
+        requested_model: "claude-fable-5",
+        native_request: createNativePassthroughCarrier({
+          protocol: "anthropic_messages",
+          body: {
+            model: "anthropic/claude-fable-5",
+            system: [{ type: "text", text: "stable prefix", cache_control: { type: "ephemeral" } }],
+            messages: [{ role: "user", content: "large visual context" }],
+            max_tokens: 64,
+          },
+          headers: {},
+        }),
+      }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    expect(provider.chatCompletion).toHaveBeenCalledOnce();
+    expect(provider.nativePassthrough).not.toHaveBeenCalled();
+    expect(out.attempts[0]?.passthrough_used).toBe(false);
+    expect(out.attempts[0]?.passthrough_disable_reason).toBe(
+      "provider_requires_compatibility_rewrite",
+    );
+    expect(out.attempts[0]?.request_mutations?.visual_context_compression).toMatchObject({
+      mode: "enabled",
+      applied: true,
+      would_apply: true,
+      reason: "applied",
+    });
   });
 
   // ── capability-wire: the real catalog feeds the capability filter ──────────

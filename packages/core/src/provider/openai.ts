@@ -71,6 +71,12 @@ export type NativeProtocolProfile =
 export interface ProviderCallOptions {
   signal?: AbortSignal;
   captureUpstream?: (wireBody: string) => void;
+  /** Anthropic-only post-translation optimizer. Called after an OpenAI/IR-shaped
+   * request is rendered into Anthropic Messages wire format, just before the POST
+   * body is captured/sent. Other providers ignore it. */
+  optimizeAnthropicBody?: (
+    body: Record<string, unknown>,
+  ) => Record<string, unknown> | Promise<Record<string, unknown>>;
   // PER-CANDIDATE timeout hint (ms) for an internal LOOPBACK call. Consumed ONLY by the
   // self-HTTP client (memory-self-http.ts), which forwards it to the nested gateway as
   // `x-helm-attempt-timeout-ms` so that request's executor bounds each candidate (a slow

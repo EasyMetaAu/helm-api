@@ -808,9 +808,19 @@ function serializeAnthropicBody(
   const orderedPlaceholder = orderTopLevelFields(placeholderBody, CLAUDE_CLI_BODY_FIELD_ORDER);
   const bodyTextWithPlaceholder = JSON.stringify(orderedPlaceholder);
   if (!hasSystemBillingCchPlaceholder(orderedPlaceholder)) return bodyTextWithPlaceholder;
+  // CCH lives in system[0], so deriving it from changing messages would invalidate
+  // Anthropic's strict prefix cache before the real prompt content is even compared.
+  const stablePrefixWithPlaceholder = orderTopLevelFields(
+    {
+      model: placeholderBody.model ?? null,
+      system: placeholderBody.system ?? null,
+      tools: placeholderBody.tools ?? null,
+    },
+    CLAUDE_CLI_BODY_FIELD_ORDER,
+  );
   const signedBody = withSignedSystemBillingCch(
     placeholderBody,
-    computeClaudeCliCch(bodyTextWithPlaceholder),
+    computeClaudeCliCch(JSON.stringify(stablePrefixWithPlaceholder)),
   );
   return JSON.stringify(orderTopLevelFields(signedBody, CLAUDE_CLI_BODY_FIELD_ORDER));
 }
@@ -1663,8 +1673,12 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
 
     async chatCompletion(req, opts) {
       const model = String((req as Record<string, unknown>).model ?? "");
+      const translatedBody = openaiToAnthropicRequest(req, { metadataUserId: cfg.metadataUserId });
+      const body = opts?.optimizeAnthropicBody
+        ? await opts.optimizeAnthropicBody(translatedBody)
+        : translatedBody;
       const { res, toolNameMap } = await requestWithRetry(
-        openaiToAnthropicRequest(req, { metadataUserId: cfg.metadataUserId }),
+        body,
         opts?.signal,
         url,
         [],
@@ -1679,10 +1693,13 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
 
     async *chatCompletionStream(req, opts) {
       const model = String((req as Record<string, unknown>).model ?? "");
-      const body = {
+      const translatedBody = {
         ...openaiToAnthropicRequest(req, { metadataUserId: cfg.metadataUserId }),
         stream: true,
       };
+      const body = opts?.optimizeAnthropicBody
+        ? await opts.optimizeAnthropicBody(translatedBody)
+        : translatedBody;
       const { res, toolNameMap } = await requestWithRetry(
         body,
         opts?.signal,

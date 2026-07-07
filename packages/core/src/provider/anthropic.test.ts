@@ -1351,6 +1351,40 @@ describe("createAnthropicClient", () => {
     expect(Array.isArray(parsed.messages)).toBe(true);
   });
 
+  it("lets the gateway optimize the translated Anthropic body before POST and capture", async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const parsed = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      expect(parsed).toMatchObject({ visual_context_compressed: true });
+      return jsonResponse({
+        id: "msg",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    let captured: string | null = null;
+
+    await client.chatCompletion(
+      { model: "claude-x", messages: [{ role: "user", content: "hi" }], max_tokens: 64 },
+      {
+        captureUpstream: (body) => {
+          captured = body;
+        },
+        optimizeAnthropicBody: async (body) => ({
+          ...body,
+          visual_context_compressed: true,
+        }),
+      },
+    );
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(JSON.parse(captured ?? "null")).toMatchObject({ visual_context_compressed: true });
+  });
+
   it("sends Bearer + Claude-Code identity headers + system spoof; 401-retries once", async () => {
     let calls = 0;
     const seenAuth: string[] = [];
@@ -1506,7 +1540,7 @@ describe("createAnthropicClient", () => {
     expect(seenRequestIds[0]).not.toBe(seenRequestIds[1]);
   });
 
-  it("defaults OAuth subscription traffic to strict Claude CLI body signing and header/body order", async () => {
+  it("defaults OAuth subscription traffic to strict Claude CLI shape with cache-stable CCH", async () => {
     const uid = '{"device_id":"D","account_uuid":"","session_id":"S"}';
     const seenBodies: string[] = [];
     const seenHeaderOrders: string[][] = [];
@@ -1545,6 +1579,14 @@ describe("createAnthropicClient", () => {
       ],
       max_tokens: 65,
     });
+    await client.chatCompletion({
+      model: "m",
+      messages: [
+        { role: "system", content: "changed system" },
+        { role: "user", content: "hi" },
+      ],
+      max_tokens: 65,
+    });
 
     const first = JSON.parse(seenBodies[0] ?? "{}") as {
       system: Array<{ text: string }>;
@@ -1552,13 +1594,18 @@ describe("createAnthropicClient", () => {
     const second = JSON.parse(seenBodies[1] ?? "{}") as {
       system: Array<{ text: string }>;
     };
+    const third = JSON.parse(seenBodies[2] ?? "{}") as {
+      system: Array<{ text: string }>;
+    };
     const firstCch = first.system[0]?.text.match(/\bcch=([0-9a-f]{5});/)?.[1];
     const secondCch = second.system[0]?.text.match(/\bcch=([0-9a-f]{5});/)?.[1];
+    const thirdCch = third.system[0]?.text.match(/\bcch=([0-9a-f]{5});/)?.[1];
     expect(firstCch).toMatch(/^[0-9a-f]{5}$/);
     expect(firstCch).not.toBe("00000");
-    // Strict mode signs the final serialized body, so a non-system body mutation
-    // changes cch. The pure translator keeps its cache-stable conservative hash.
-    expect(secondCch).not.toBe(firstCch);
+    // Strict mode keeps Claude-like shape/order, but CCH must remain cache-prefix
+    // stable so changing non-prefix request fields does not burn prompt cache.
+    expect(secondCch).toBe(firstCch);
+    expect(thirdCch).not.toBe(firstCch);
     expect(Object.keys(first)).toEqual(["model", "messages", "system", "metadata", "max_tokens"]);
     expect(seenHeaderOrders[0]?.slice(0, 14)).toEqual([
       "Accept",
@@ -1655,7 +1702,7 @@ describe("createAnthropicClient", () => {
     expect(seenCch[1]).toBe(seenCch[0]);
   });
 
-  it("defaults non-official Anthropic-compatible relays to strict Claude CLI signing", async () => {
+  it("defaults non-official Anthropic-compatible relays to strict shape with cache-stable CCH", async () => {
     const seenCch: string[] = [];
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as { system: Array<{ text: string }> };
@@ -1688,11 +1735,20 @@ describe("createAnthropicClient", () => {
       ],
       max_tokens: 65,
     });
+    await client.chatCompletion({
+      model: "m",
+      messages: [
+        { role: "system", content: "changed system" },
+        { role: "user", content: "hi" },
+      ],
+      max_tokens: 65,
+    });
 
-    expect(seenCch).toHaveLength(2);
+    expect(seenCch).toHaveLength(3);
     expect(seenCch[0]).toMatch(/^[0-9a-f]{5}$/);
     expect(seenCch[0]).not.toBe("00000");
-    expect(seenCch[1]).not.toBe(seenCch[0]);
+    expect(seenCch[1]).toBe(seenCch[0]);
+    expect(seenCch[2]).not.toBe(seenCch[0]);
   });
 
   it("strict Claude CLI tool pipeline matches the golden fixture and restores tool names", async () => {
