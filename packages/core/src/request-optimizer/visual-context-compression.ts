@@ -77,6 +77,7 @@ function mutationFromResult(
   mode: Exclude<VisualContextCompressionMode, "off">,
   result: PxpipeTransformResult,
   applied: boolean,
+  overrides: { markerCount?: number; strippedCacheControlMarkers?: number } = {},
 ): VisualContextCompressionMutation {
   const imagePixels =
     typeof result.info.imagePixels === "number" && result.info.imagePixels >= 0
@@ -103,7 +104,16 @@ function mutationFromResult(
       ? { dropped_chars: Math.max(0, Math.floor(result.info.droppedChars)) }
       : {}),
     owns_cache_control: result.cache.ownsCacheControl,
-    marker_count: Math.max(0, Math.floor(result.cache.markerCount)),
+    marker_count: Math.max(0, Math.floor(overrides.markerCount ?? result.cache.markerCount)),
+    ...(overrides.strippedCacheControlMarkers !== undefined &&
+    overrides.strippedCacheControlMarkers > 0
+      ? {
+          cache_control_markers_stripped: Math.max(
+            0,
+            Math.floor(overrides.strippedCacheControlMarkers),
+          ),
+        }
+      : {}),
   };
 }
 
@@ -136,6 +146,52 @@ function parseObjectJson(bytes: Uint8Array): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function stripCacheControlAfterOwnedImageMarker(body: Record<string, unknown>): {
+  body: Record<string, unknown>;
+  stripped: number;
+} {
+  const messages = body.messages;
+  if (!Array.isArray(messages)) return { body, stripped: 0 };
+
+  let anchor: { messageIndex: number; partIndex: number } | null = null;
+  for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
+    const message = messages[messageIndex];
+    if (!isRecord(message) || !Array.isArray(message.content)) continue;
+    for (let partIndex = 0; partIndex < message.content.length; partIndex += 1) {
+      const part = message.content[partIndex];
+      if (isRecord(part) && part.type === "image" && part.cache_control !== undefined) {
+        anchor = { messageIndex, partIndex };
+      }
+    }
+  }
+  if (anchor === null) return { body, stripped: 0 };
+
+  let stripped = 0;
+  const nextMessages = messages.map((message, messageIndex) => {
+    if (!isRecord(message) || !Array.isArray(message.content)) return message;
+    let changed = false;
+    const nextContent = message.content.map((part, partIndex) => {
+      const afterAnchor =
+        messageIndex > anchor.messageIndex ||
+        (messageIndex === anchor.messageIndex && partIndex > anchor.partIndex);
+      if (!afterAnchor || !isRecord(part) || part.cache_control === undefined) return part;
+      const { cache_control: _cacheControl, ...rest } = part;
+      stripped += 1;
+      changed = true;
+      return rest;
+    });
+    return changed ? { ...message, content: nextContent } : message;
+  });
+
+  return stripped > 0
+    ? { body: { ...body, messages: nextMessages }, stripped }
+    : { body, stripped };
 }
 
 export async function optimizeVisualContext(
@@ -197,8 +253,15 @@ export async function optimizeVisualContext(
     };
   }
 
+  const strippedCacheControls = result.cache.ownsCacheControl
+    ? stripCacheControlAfterOwnedImageMarker(transformedBody)
+    : { body: transformedBody, stripped: 0 };
+
   return {
-    body: transformedBody,
-    mutation: mutationFromResult(input.mode, result, true),
+    body: strippedCacheControls.body,
+    mutation: mutationFromResult(input.mode, result, true, {
+      markerCount: Math.max(0, result.cache.markerCount - strippedCacheControls.stripped),
+      strippedCacheControlMarkers: strippedCacheControls.stripped,
+    }),
   };
 }

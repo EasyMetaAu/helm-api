@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-07-07 · 视觉压缩后收敛 cache_control 并保留客户端 billing identity（Provider execution / cost control，docs/04/05，原则 3/5/7/8）
+
+- **背景（Lukin）**：生产 Luke key 的 `claude-fable-5` / GSC 请求在 v0.25.18 后成本下降，但 cache-read share 没明显上升。线上 payload 复查显示 CCH 已从几乎每轮变化降到少数稳定桶；继续拆缓存的原因之一是压缩图片 anchor 后面仍残留动态文本上的 `cache_control`（例如 teammate 状态、短用户指令），导致 Anthropic 尝试更长但每轮变化的缓存前缀并产生额外 cache-write。
+- **cache_control 决策**：当 pxpipe 返回 `applied:true` 且 `ownsCacheControl:true` 时，Helm 只保留压缩图片上的 cache anchor，并剥离该 anchor 之后 message content blocks 的 `cache_control`。不改变图片、文本、工具或消息顺序；未压缩、observe/off、无图片 anchor 的请求完全不变。这样缓存断点回到稳定图片前缀，后续动态尾巴按普通 fresh input 计费，不再写成新的 prompt-cache 前缀。
+- **Telemetry 决策**：`visual_context_compression.marker_count` 记录最终发出的 marker 数；新增 `cache_control_markers_stripped` 只记录剥离数量，不记录正文或图片数据，便于上线后验证是否减少了无意义 cache-write。
+- **billing identity 决策**：入口已提取的 `metadata.client_billing_header` 现在会在 Anthropic compatibility translation body 中透传给 provider 翻译器。真实 Anthropic provider 只用它重建 billing block 和 User-Agent，不把 `client_billing_header` 当 Anthropic `metadata` 字段发给上游；provider_raw `metadata.user_id` 仍保留。
+- **风险边界**：该修复不尝试改写工具列表，也不删除图片 anchor 之前的调用方 cache marker，避免破坏官方/客户端有意设置的稳定早期断点。它解决的是“压缩接管缓存断点后，后置动态断点继续污染缓存前缀”的窄问题。
+- **验证路径**：新增 visual compression 单测覆盖后置动态 marker 剥离与 telemetry；新增 execute 单测覆盖 `client_billing_header` 合并到 Anthropic translation metadata。执行层 126 个测试、压缩层测试与 workspace typecheck 通过。
+
 ## 2026-07-07 · Anthropic 兼容改写路径稳定 CCH 并接入视觉压缩（Provider execution / cost control，docs/04/05，原则 3/5/7/8）
 
 - **背景（Lukin）**：生产 Luke key 的 `claude-fable-5` 请求在 v0.25.17 后仍只有约三成 cache-read share。复查发现 `cch` 不是被删除：客户端原始 billing header 无 `cch`，上游 body 有 Helm 重建的 `cch`；但 OAuth strict fingerprint 会再按完整 body 签 CCH，messages/max_tokens 等非缓存前缀变化仍会让 `system[0]` 变化。另一半问题是这批请求大多因 `provider_requires_compatibility_rewrite` 走普通 `chatCompletion` 翻译路径，而 `visual_context_compression` 只挂在 native passthrough body 上，无法处理真正贵的兼容改写请求。
@@ -88,32 +97,13 @@
 - **ponytail**：无新库无新组件，restyle + 1 纯 helper；peek 是 `split('\n').slice()`，非语法高亮（标 `// ponytail:`）；peek 行数 6 硬编码（配置化是投机，跳过）。
 - **验证**：`toolOutputPeek`/`maxChars` 单测 + `Conversation.test.ts` 渲染契约（header `Bash(ls -la)` + peek `line1` + `+2` + 点开才出 Arguments/Result）；668 admin 单测绿、svelte-check 0 error。**真实数据可视验证**：临时 harness route 加载 box trace `2fb017ae` 全 743 turn 真 payload，Playwright 截图确认 `● Bash(ssh…) ✓ ok` + SQL 结果行 inline peek + `… +21 lines (click to expand)`，点开出完整 Tree/Formatted/Raw JsonViewer——与 CC 截图一致；harness 用后即删。**在 git worktree `worktree-cc-terminal-conversation` 开发（Lukin 要求不在 main 搞）。**
 
-## 2026-07-06 · 折叠会话行显示工具调用参数预览（whitelist-free，Admin requests / conversation view，docs/11，原则 1）
-
-- **背景（Lukin）**：请求详情「对话」视图里，assistant 的工具调用折叠行只显示 `Bash()` / `Read()` / `Write()` / `Agent()` 空括号——能看出调用了工具，却看不出具体参数。
-- **关键修正（Lukin 明确指令「不要写白名单，所有工具都要」）**：第一版按大写工具名逐个 special-case（Bash/Read/Write/Agent/Task…），导致名单外的工具（如小写 `read()`、自定义 MCP 工具）仍然是盲括号——见截图 `read()`。**改为完全无白名单、纯按 args 形状泛化**：`formatToolArgs(_name, args)` **不看工具名**，从对象里挑最可读字段渲染，因此任何工具都有 detail。
-- **选字段算法**：① 非对象参数（字符串/数字/数组）直接展示；② 对象：先按 `PREFERRED_KEYS` 排序挑首个 scalar 字段（顺序是**排序不是门禁**：`command`→`file_path`→`pattern`(先于 path)→`query`→`url`→`path`→短标签 `description`/`subject`/`summary`/`title`/`name`/`message`（**先于**大块 `prompt`/`content`/`text`/`input`）），命名外的对象仍回落到**第一个 scalar 字段**；③ 全是嵌套对象/数组 → 整体 compact JSON；④ 空对象 → 空串（裸 `Name()`）。参数可能是对象或原始 JSON 串，先 `coerceJson` 归一。72 字符硬截断带 `…`。
-- **按字段（非按工具名）的轻润色**：`command` 字段做 `&&`/`;`/`||` 顶层切分成 `→` 链；`file_path`/`filePath` 且有 sibling `content` 字符串时追加字数 hint。因为 key 于字段，对任何携带该字段的工具都生效。
-- **纯度/失败软化**：与整个 `conversation.ts` 一致——纯、永不抛，最坏返回 `''`；折叠行渲染不会因坏参数崩页。工具名完全不参与（连大小写都无关）。
-- **UI 改动面**：仅 `ConversationTurn.svelte` 的 `preview` derived 一行 + import。展开视图、badges、size hint、状态字形全部不动。无新 i18n key。
-- **ponytail 简化**：shell 切分是朴素顶层 split（非引号感知），引号内 `&&`/`;` 会过度切分——展示预览里无害（代码标 `// ponytail:`）。
-- **验证**：`conversation.test.ts` 覆盖泛化契约（preferred 字段/未知工具/自定义 MCP 工具/大小写无关/命令链/字数 hint/排序不门禁/first-scalar 回退/数字布尔 scalar/纯嵌套→JSON/裸串数组/空对象/截断/null 软化）；`Conversation.test.ts` 保留真实 Anthropic `tool_use` 渲染契约。截图 `read(HEARTBEAT.md)`、`some_custom_mcp_tool(/v1/x)`、`weird_tool(3)` 均验证通过。svelte-check 0 error。
-- **发布轨迹**：第一版（带白名单）= v0.25.6（PR #471，已发布并部署 box）。本次无白名单重写为后续版本。
-
-## 2026-07-06 · 配额 PULL 的 100% 账号级窗口必须同步停车（OAuth provider pool / Admin providers，docs/04/11，原则 3/5/7）
-
-- **背景（Lukin）**：Providers 页可以从 Codex/Anthropic usage PULL 看到账号级窗口已经 100% 并显示“已限流”，但后端只把该 PULL 当观测快照；如果 live traffic 没先触发 429/header PUSH 写入 `usageLimitedUntilMs`，OAuth pool 仍会继续选择这个账号。
-- **调度决策**：`/admin/api/oauth/quota` 成功拉到账号级窗口 `usedPercent >= 100` 且有未来 reset 时，立即写入 `usageLimitedUntilMs` 并同步 live pool member；近满但未满（例如 98/99%）不主动停车，只在账号已经被真实 429 停车后用于修正恢复时间。
-- **恢复边界**：干净窗口会继续清理已存在 cooldown；scoped model 窗口（如 Anthropic `7d-*`）仍不扩大成全账号停车。Codex reset credit 消费成功后通过现有刷新路径恢复窗口并清理 cooldown。
-- **测试路径**：覆盖 `/oauth/quota` 从 Codex saturated PULL 新建 cooldown，以及 near-full PULL 不误停车；再跑 admin OAuth route focused tests、typecheck/lint/build。
-
 ## 历史条目摘要（最近 5 条）
 
+- **2026-07-06 · 折叠会话行显示工具调用参数预览（Admin requests / conversation view，docs/11，原则 1）**：工具参数预览改为 whitelist-free，按 args 形状泛化提取 readable scalar，覆盖自定义/大小写不同工具并保留展开详情。
+- **2026-07-06 · 配额 PULL 的 100% 账号级窗口必须同步停车（OAuth provider pool / Admin providers，docs/04/11，原则 3/5/7）**：quota PULL 看到账号级 100% 窗口时立即写入 cooldown 并同步 live pool，scoped model 窗口不扩大成全账号停车。
 - **2026-07-05 · OAuth 凭证失效持久化为 needs reconnect（OAuth provider pool / Admin providers，docs/04/11，原则 3/5/7）**：refresh/持久 upstream 400/401/403 标记 credential failure、写入账号设置并摘出调度，reconnect 成功后按手动/自动停车边界恢复。
 - **2026-07-05 · 避免浪费策略纳入周额度与 Codex reset credits（OAuth provider pool / quota，docs/04/11，原则 3/5/7）**：`use_expiring` 汇总短窗口、周额度与 reset credits 软评分，quota PULL 会刷新 live pool snapshot 但不自动消费 credit。
 - **2026-07-05 · Codex reset-credit 消费改为硬门禁（OAuth quota / Admin providers，docs/04/11，原则 3/5/7）**：手动/自动 reset credit 必须命中 weekly secondary 阈值与持久 guard，缺少 snapshot 时 fail-closed，避免烧稀缺额度。
-- **2026-07-05 · OAuth 账号池支持可选额度使用策略（OAuth provider pool / routing / Admin providers，docs/04/11，原则 3/5/7）**：新增 balanced/manual_priority/low_risk/use_expiring 全局账号池策略，保持 previous_response_id 强亲和和 scoped quota 边界。
-- **2026-07-04 · internal LLM prompt 输入用 XML 数据边界隔离（Memory / classifier eval，docs/03/08/12，原则 3/4/7）**：classifier eval 与 memory LLM 把可信任务和不可信消息放进 XML/JSON 数据区并 escape，防止用户内容突破数据边界。
 
 ## 更早历史总览
 

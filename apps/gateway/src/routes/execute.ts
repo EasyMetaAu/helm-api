@@ -2122,6 +2122,14 @@ function stripInternal(
   for (const [key, value] of Object.entries(renderedRaw.body)) {
     body[key] = value;
   }
+  if (
+    targetProviderProtocol === "anthropic_messages" &&
+    typeof req.metadata.client_billing_header === "string" &&
+    req.metadata.client_billing_header.length <= 128
+  ) {
+    const metadata = isRecord(body.metadata) ? body.metadata : {};
+    body.metadata = { ...metadata, client_billing_header: req.metadata.client_billing_header };
+  }
   // Streamed usage (cost #6): OpenAI-compatible upstreams only emit a trailing
   // `usage` chunk when asked. Opt in so the gateway can price streamed calls
   // (the route parses that chunk to backfill completion cost). Harmless to the

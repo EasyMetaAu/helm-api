@@ -113,6 +113,63 @@ describe("optimizeVisualContext", () => {
     });
   });
 
+  it("removes later dynamic cache_control markers when pxpipe owns the image marker", async () => {
+    const original = { model: "claude-fable-5", messages: [{ role: "user", content: "hello" }] };
+    const transformed = {
+      ...original,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: { type: "base64", media_type: "image/png", data: "stable-history" },
+              cache_control: { type: "ephemeral" },
+            },
+            {
+              type: "text",
+              text: "latest teammate status",
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "continue",
+              cache_control: { type: "ephemeral" },
+            },
+          ],
+        },
+      ],
+    };
+
+    const out = await optimizeVisualContext({
+      mode: "enabled",
+      targetProviderProtocol: "anthropic_messages",
+      model: "claude-fable-5",
+      body: original,
+      capabilities: caps,
+      transformer: async () => ({
+        ...pxpipeResult(transformed),
+        cache: { ownsCacheControl: true, markerCount: 3 },
+      }),
+    });
+
+    const messages = out.body.messages as Array<{
+      content: Array<{ cache_control?: unknown }>;
+    }>;
+    expect(messages[0]?.content[0]?.cache_control).toEqual({ type: "ephemeral" });
+    expect(messages[0]?.content[1]?.cache_control).toBeUndefined();
+    expect(messages[1]?.content[0]?.cache_control).toBeUndefined();
+    expect(out.mutation).toMatchObject({
+      marker_count: 1,
+      cache_control_markers_stripped: 2,
+    });
+  });
+
   it("skips non-vision targets before calling pxpipe", async () => {
     const transformer = vi.fn();
     const out = await optimizeVisualContext({

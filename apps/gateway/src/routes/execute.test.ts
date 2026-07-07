@@ -820,6 +820,64 @@ describe("createExecute — gateway execution adapter", () => {
     expect(body.cache_control).toEqual({ type: "ephemeral" });
   });
 
+  it("threads captured client_billing_header to Anthropic compatibility translation metadata", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const anthroRegistry: ProviderRegistry = {
+      resolve(alias: string) {
+        if (alias !== "candidate") {
+          return { ok: false, error: { kind: "unknown_alias", alias } };
+        }
+        return {
+          ok: true,
+          value: {
+            alias,
+            providerName: "mock",
+            providerModel: "claude-x",
+            baseUrl: "http://x",
+            apiKeyEnv: "X",
+            targetProviderProtocol: "anthropic_messages",
+            providerRequiresCompatibilityRewrite: true,
+          },
+        };
+      },
+      list: () => ["candidate"],
+    };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: anthroRegistry,
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+    const base = req();
+
+    await execute(
+      plan(["candidate"]),
+      req({
+        protocol: "anthropic_messages",
+        metadata: {
+          ...base.metadata,
+          client_billing_header: "cc_version=2.1.202.c96; cc_entrypoint=cli",
+        },
+        provider_raw: { metadata: { user_id: "stable-device" } },
+      }),
+    );
+
+    const body = (provider.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(body.metadata).toEqual({
+      user_id: "stable-device",
+      client_billing_header: "cc_version=2.1.202.c96; cc_entrypoint=cli",
+    });
+  });
+
   it("merges streamed client stream_options while forcing include_usage for cost capture", async () => {
     const provider = {
       chatCompletion: vi.fn(),
