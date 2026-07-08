@@ -65,13 +65,17 @@ function record(overrides: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
   };
 }
 
-function buildApp(rec: ApiKeyRecord | null, oauthAliases?: () => Iterable<string>) {
+function buildApp(
+  rec: ApiKeyRecord | null,
+  oauthAliases?: () => Iterable<string>,
+  lanesThunk: () => typeof lanes = () => lanes,
+) {
   const getByHash = vi.fn().mockResolvedValue(rec);
   const app = createApp({ logger: { log: () => {} } });
   const auth = authMiddleware({ keyStore: { getByHash }, log: () => {} });
   app.use("/v1/models", auth);
   app.use("/v1/models/*", auth);
-  registerModelsRoute(app, { lanes: () => lanes, catalog, providerAliases, oauthAliases });
+  registerModelsRoute(app, { lanes: lanesThunk, catalog, providerAliases, oauthAliases });
   return app;
 }
 
@@ -150,6 +154,18 @@ describe("GET /v1/models", () => {
     const res = await buildApp(record()).request("/v1/models/balanced", { headers: AUTH });
     expect(res.status).toBe(200);
     expect(((await res.json()) as { id: string }).id).toBe("balanced");
+  });
+
+  it("caches the listing per caps within TTL (rebuild skipped on repeat hits)", async () => {
+    // A misbehaving client hammering /v1/models must not re-run buildModelsList each
+    // time. Probe via the lanes thunk: cache hits never touch it.
+    const lanesSpy = vi.fn(() => lanes);
+    const app = buildApp(record(), undefined, lanesSpy);
+    for (let i = 0; i < 5; i++) {
+      const res = await app.request("/v1/models", { headers: AUTH });
+      expect(res.status).toBe(200);
+    }
+    expect(lanesSpy).toHaveBeenCalledTimes(1);
   });
 
   it("retrieve: unknown/forbidden id -> structured error (OpenAI envelope)", async () => {
