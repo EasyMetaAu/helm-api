@@ -11,7 +11,7 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "format": "prettier --write . --plugin prettier-plugin-svelte",
     "i18n:extract": "npx easyi18n extract -s ./src -o ./src/locales/en.json",
-    "i18n:update": "npx easyi18n update ./src/locales/en.json ./src/locales/zh-hans.json ./src/locales/zh-hant.json ./src/locales/ja.json ./src/locales/ko.json",
+    "i18n:update": "npx easyi18n update ./src/locales/en.json ./src/locales/zh-hans.json ./src/locales/zh-hant.json ./src/locales/ja.json ./src/locales/ko.json ./src/locales/es.json ./src/locales/pt.json",
     "i18n:translate": "./tools/translate-all.sh",
     "i18n:sync": "pnpm i18n:extract && pnpm i18n:update && pnpm i18n:translate"
   },

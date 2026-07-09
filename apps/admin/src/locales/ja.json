@@ -814,7 +814,7 @@
   "Testing…": "テスト中…",
   "Text": "テキスト",
   "That fact already exists — no duplicate was created.": "そのファクトは既に存在します — 重複は作成されませんでした。",
-  "The": "",
+  "The": "この",
   "The API key that authenticated the client, shown by prefix only.": "クライアントを認証したAPIキー。プレフィックスのみ表示されます。",
   "The classifier decides which lane each request is routed to.": "分類器は各リクエストをどのレーンにルーティングするかを決定します。",
   "The concrete provider that served this request.": "このリクエストを実際に処理した具体的なプロバイダー。",

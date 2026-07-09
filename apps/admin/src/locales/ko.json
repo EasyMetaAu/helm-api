@@ -814,7 +814,7 @@
   "Testing…": "테스트 중…",
   "Text": "텍스트",
   "That fact already exists — no duplicate was created.": "해당 사실이 이미 존재합니다 — 중복이 생성되지 않았습니다.",
-  "The": "",
+  "The": "이",
   "The API key that authenticated the client, shown by prefix only.": "클라이언트를 인증한 API 키이며, 접두사로만 표시됩니다.",
   "The classifier decides which lane each request is routed to.": "분류기는 각 요청이 라우팅될 레인을 결정합니다.",
   "The concrete provider that served this request.": "이 요청을 실제로 처리한 구체적인 제공업체입니다.",

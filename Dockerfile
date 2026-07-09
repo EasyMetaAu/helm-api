@@ -11,6 +11,7 @@ RUN corepack enable && apt-get update && apt-get install -y --no-install-recomme
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
 COPY apps/gateway/package.json apps/gateway/
 COPY apps/admin/package.json apps/admin/
+COPY apps/portal/package.json apps/portal/
 COPY packages/core/package.json packages/core/
 COPY packages/shared/package.json packages/shared/
 RUN pnpm install --frozen-lockfile
@@ -46,6 +47,12 @@ COPY --from=builder --chown=helm:helm /app/out ./
 # (ADMIN_BUILD_ROOT = ./apps/admin/build, resolved from /app) expects — otherwise
 # /admin 404s while /admin/api works.
 COPY --from=builder --chown=helm:helm /app/apps/admin/build ./apps/admin/build
+# Self-service portal SPA static assets (docs/12). Same reasoning as admin: the
+# gateway serves it from PORTAL_BUILD_ROOT = ./apps/portal/build (resolved from
+# /app); without this copy /portal 404s while /portal/api works. portal-static.ts
+# also reads the built index.html at startup for the CSP script hash, so the HTML
+# must be present in the image.
+COPY --from=builder --chown=helm:helm /app/apps/portal/build ./apps/portal/build
 # Ship the default config/*.yaml so the image boots standalone (CI smoke + first run).
 # Safe to bake: providers.yaml references credentials by env-var NAME only, never a
 # plaintext key (principle 7). Operators still override by mounting a volume at /app/config.
