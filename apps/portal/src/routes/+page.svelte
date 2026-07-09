@@ -139,7 +139,7 @@
   function formatTrendAxisValue(value: unknown): string {
     const date =
       value instanceof Date ? value : new Date(value as string | number);
-    return formatTrendTick(date, "day");
+    return formatTrendTick(date, bucket);
   }
 
   // Budget: percent used against the cap when there is one (docs/12 §4.3).
