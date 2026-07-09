@@ -368,7 +368,7 @@
           </PieChart>
         </div>
         <ul class="mt-3 flex flex-wrap justify-center gap-x-4 gap-y-1.5">
-          {#each byModel as slice, i (slice.model)}
+          {#each byModel as slice, i (i)}
             <li class="flex items-start gap-1.5 text-xs text-ink-2">
               <span
                 class="mt-0.5 size-2.5 shrink-0 rounded-full"
