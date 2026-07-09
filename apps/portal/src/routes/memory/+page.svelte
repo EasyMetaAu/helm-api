@@ -6,6 +6,7 @@
   import {
     deleteFact,
     deleteReflection,
+    factMatchesStatus,
     listAllFacts,
     listAllReflections,
     type Fact,
@@ -44,16 +45,7 @@
   const filteredFacts = $derived.by(() => {
     const query = factSearch.trim().toLowerCase();
     return facts.filter((fact) => {
-      const statusMatch =
-        factStatus === "all" ||
-        (factStatus === "active" &&
-          fact.status === "active" &&
-          !fact.superseded) ||
-        (factStatus === "superseded" &&
-          fact.status === "active" &&
-          fact.superseded) ||
-        fact.status === factStatus;
-      if (!statusMatch) return false;
+      if (!factMatchesStatus(fact, factStatus)) return false;
       if (!query) return true;
       return `${fact.subjectKey} ${fact.factText}`
         .toLowerCase()
@@ -241,6 +233,52 @@
   {/if}
 
   <section class="mb-6 flex flex-col gap-3">
+    <h2 class="section-header">{$t("Reflections")}</h2>
+    {#if reflections.length === 0}
+      <div class="empty-state">{$t("No reflections yet.")}</div>
+    {:else}
+      <div class="flex flex-col gap-3">
+        {#each reflections as reflection (reflection.id)}
+          <div data-testid="reflection-row" class="card flex flex-col gap-2">
+            <div class="flex items-start justify-between gap-3">
+              <div
+                class="flex flex-wrap items-center gap-2 text-xs text-ink-muted"
+              >
+                {#if reflection.status === "active"}
+                  <span class="badge-ok">{$t("active")}</span>
+                {:else}
+                  <span class="badge-neutral">{$t("archived")}</span>
+                {/if}
+                <span>{$t("Version")} {reflection.version}</span>
+                <span aria-hidden="true">·</span>
+                <span>{formatTimestamp(reflection.updatedAt)}</span>
+              </div>
+              <div class="flex shrink-0 gap-2">
+                <button
+                  type="button"
+                  class="btn-secondary"
+                  onclick={() => (editingReflection = reflection)}
+                  >{$t("Edit")}</button
+                >
+                <button
+                  type="button"
+                  class="btn-danger-outline"
+                  onclick={() => (confirmingReflectionDelete = reflection)}
+                >
+                  {$t("Delete")}
+                </button>
+              </div>
+            </div>
+            <p class="whitespace-pre-wrap break-words text-sm text-ink-body">
+              {reflection.reflectionText}
+            </p>
+          </div>
+        {/each}
+      </div>
+    {/if}
+  </section>
+
+  <section class="flex flex-col gap-3">
     <div
       class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between"
     >
@@ -408,52 +446,6 @@
             onclick={() => (factPage += 1)}>{$t("Next")}</button
           >
         </nav>
-      </div>
-    {/if}
-  </section>
-
-  <section class="flex flex-col gap-3">
-    <h2 class="section-header">{$t("Reflections")}</h2>
-    {#if reflections.length === 0}
-      <div class="empty-state">{$t("No reflections yet.")}</div>
-    {:else}
-      <div class="flex flex-col gap-3">
-        {#each reflections as reflection (reflection.id)}
-          <div data-testid="reflection-row" class="card flex flex-col gap-2">
-            <div class="flex items-start justify-between gap-3">
-              <div
-                class="flex flex-wrap items-center gap-2 text-xs text-ink-muted"
-              >
-                {#if reflection.status === "active"}
-                  <span class="badge-ok">{$t("active")}</span>
-                {:else}
-                  <span class="badge-neutral">{$t("archived")}</span>
-                {/if}
-                <span>{$t("Version")} {reflection.version}</span>
-                <span aria-hidden="true">·</span>
-                <span>{formatTimestamp(reflection.updatedAt)}</span>
-              </div>
-              <div class="flex shrink-0 gap-2">
-                <button
-                  type="button"
-                  class="btn-secondary"
-                  onclick={() => (editingReflection = reflection)}
-                  >{$t("Edit")}</button
-                >
-                <button
-                  type="button"
-                  class="btn-danger-outline"
-                  onclick={() => (confirmingReflectionDelete = reflection)}
-                >
-                  {$t("Delete")}
-                </button>
-              </div>
-            </div>
-            <p class="whitespace-pre-wrap break-words text-sm text-ink-body">
-              {reflection.reflectionText}
-            </p>
-          </div>
-        {/each}
       </div>
     {/if}
   </section>
