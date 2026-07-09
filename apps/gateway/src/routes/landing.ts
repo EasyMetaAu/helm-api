@@ -129,6 +129,11 @@ const PAGE = `<!doctype html>
         <span class="desc">Models your key can route to</span>
         <span class="path mono">/v1/models</span>
       </a>
+      <a href="/portal">
+        <span class="label">Portal</span>
+        <span class="desc">Your usage, requests &amp; memory — sign in with your key</span>
+        <span class="path mono">/portal</span>
+      </a>
       <a href="/admin">
         <span class="label">Dashboard</span>
         <span class="desc">Lanes, keys &amp; request telemetry</span>
