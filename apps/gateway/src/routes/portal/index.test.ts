@@ -250,6 +250,67 @@ describe("portal API", () => {
       const parsed = JSON.parse(body) as { by_model: { model: string }[] };
       expect(parsed.by_model[0]?.model).toBe("gpt-5.5"); // public alias, not the wire id
     });
+
+    it("MERGES by_model rows that resolve to the same label (no duplicate keys → SPA crash)", async () => {
+      // Real production data has MANY distinct wire models that map to 'other'
+      // (unmapped/retired ids). Without merging, the doughnut gets N same-named
+      // slices → the keyed {#each} throws each_key_duplicate. Assert one row/label.
+      const tel = telemetry({
+        async aggregate() {
+          const row = (servedModel: string | null, totalTokens: number, requests: number) => ({
+            servedModel,
+            promptTokens: totalTokens,
+            completionTokens: 0,
+            totalTokens,
+            requests,
+            costUsd: 0.01,
+          });
+          return {
+            totals: {
+              requests: 6,
+              okCount: 6,
+              errorCount: 0,
+              totalCostUsd: 0.06,
+              promptTokens: 60,
+              completionTokens: 0,
+              cachedTokens: 0,
+              cacheCreationTokens: 0,
+              avgLatencyMs: null,
+              avgTps: null,
+            },
+            series: [],
+            byModel: [
+              row("WIRE_A", 30, 3), // → gpt-5.5
+              row("UNMAPPED_1", 10, 1), // → other
+              row("UNMAPPED_2", 15, 1), // → other
+              row(null, 5, 1), // → other (unstamped)
+            ],
+          };
+        },
+      });
+      const getByHash = vi.fn().mockResolvedValue(record());
+      const app = createApp({ logger: { log: () => {} } });
+      app.use("/portal/api/*", authMiddleware({ keyStore: { getByHash }, log: () => {} }));
+      registerPortalApi(app, {
+        telemetry: tel,
+        now: () => 10_000,
+        resolveModelLabel: (wire: string) => (wire === "WIRE_A" ? "gpt-5.5" : null),
+      });
+      const body = (await (
+        await app.request("/portal/api/usage/stats", { headers: AUTH })
+      ).json()) as {
+        by_model: { model: string; total_tokens: number; requests: number }[];
+      };
+      const labels = body.by_model.map((m) => m.model);
+      // Exactly one row per label — no duplicates.
+      expect(new Set(labels).size).toBe(labels.length);
+      const other = body.by_model.find((m) => m.model === "other");
+      expect(other?.total_tokens).toBe(30); // 10 + 15 + 5 merged
+      expect(other?.requests).toBe(3); // 1 + 1 + 1 merged
+      // Ordered by total tokens desc: gpt-5.5 (30) ties other (30) — both present, unique.
+      expect(labels).toContain("gpt-5.5");
+      expect(labels).toContain("other");
+    });
   });
 
   describe("GET /portal/api/requests", () => {

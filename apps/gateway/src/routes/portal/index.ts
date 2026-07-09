@@ -94,14 +94,14 @@ export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void 
         completion_tokens: s.completionTokens,
         cost_usd: s.costUsd,
       })),
-      by_model: agg.byModel.map((m) => ({
-        // NEVER emit m.servedModel verbatim — it is the internal wire provider_model
-        // (原则 6 / R7). Resolve to the public alias; unmappable/unstamped → "other".
-        model: m.servedModel ? (deps.resolveModelLabel?.(m.servedModel) ?? "other") : "other",
-        requests: m.requests,
-        total_tokens: m.totalTokens,
-        cost_usd: m.costUsd,
-      })),
+      // Resolve each row's wire provider_model to its PUBLIC alias (NEVER emit the
+      // wire id verbatim — 原则 6 / R7) and MERGE rows that resolve to the same
+      // label: many distinct wire models map to "other" (unmapped/unstamped), and
+      // several wire ids can share one alias — so without merging the doughnut gets
+      // multiple same-named slices (duplicate keys → the SPA's keyed {#each} crashes).
+      by_model: aggregateByLabel(agg.byModel, (m) =>
+        m.servedModel ? (deps.resolveModelLabel?.(m.servedModel) ?? "other") : "other",
+      ),
       budget: {
         requests: b.requests,
         tokens: b.tokens,
@@ -174,6 +174,39 @@ export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void 
       created_at: p.createdAt.getTime(),
     });
   });
+}
+
+// Resolve each usage row to a public label and merge rows sharing it, so the
+// portal's by_model list has EXACTLY ONE entry per label (no duplicate keys, no
+// wire-id leak). Sums tokens/requests; cost is null only when NO row in the group
+// had a measured cost (COALESCE honesty, matches the store). Ordered by total
+// tokens desc so the doughnut renders largest-first, same as the store.
+type ModelUsageRow = Awaited<ReturnType<TelemetryStore["aggregate"]>>["byModel"][number];
+function aggregateByLabel(
+  rows: ModelUsageRow[],
+  labelOf: (m: ModelUsageRow) => string,
+): Array<{ model: string; requests: number; total_tokens: number; cost_usd: number | null }> {
+  const byLabel = new Map<
+    string,
+    { model: string; requests: number; total_tokens: number; cost_usd: number | null }
+  >();
+  for (const m of rows) {
+    const label = labelOf(m);
+    const acc = byLabel.get(label);
+    if (acc) {
+      acc.requests += m.requests;
+      acc.total_tokens += m.totalTokens;
+      if (m.costUsd !== null) acc.cost_usd = (acc.cost_usd ?? 0) + m.costUsd;
+    } else {
+      byLabel.set(label, {
+        model: label,
+        requests: m.requests,
+        total_tokens: m.totalTokens,
+        cost_usd: m.costUsd,
+      });
+    }
+  }
+  return [...byLabel.values()].sort((a, b) => b.total_tokens - a.total_tokens);
 }
 
 // Mirror admin's part reader: prefer the narrow getPayloadPart, fall back to the
