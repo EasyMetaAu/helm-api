@@ -7,6 +7,29 @@
 
 ---
 
+## 2026-07-09 · 个人门户（Self-Service Portal）完整实现 + 补齐 + 多语言（docs/12，原则 1/6/7）→ v0.26.0
+
+- **v0.26.0 发布范围**：整个 self-service portal（apps/portal 新 SvelteKit SPA）+ 6 个 bearer-scoped 端点 + 白名单脱敏 + Docker 集成 + admin/portal 7 语言 i18n。
+- **补齐工作（第一版太简陋，对照 spec+admin 重做，Codex 执行我验收）**：Requests 列表补全筛选（RangeFilter today/yesterday/7d/30d/all + 自定义日期 + status + model 搜索 + RefreshControl + URL 同步，后端 `/portal/api/requests` 扩展 start/end/status/model 参数、apiKeyId 写死）；Overview 加环比 delta + 顶部 RangeFilter+RefreshControl（同 admin Dashboard）；Memory 从 128 行残废重做成完整 CRUD（复用 admin AddFactDialog/EditFactDialog/EditReflectionDialog 但改走 mcpTool，加搜索/状态筛选/分页/"什么是记忆"说明+隐私文案）；Connect 的 MCP tab 补全 ChatGPT OAuth 6 步/JSON config/Codex mcp-remote 桥（逐字移植 admin ConnectMcpDialog）。
+- **安全后端二次修复（by_model 泄漏）**：telemetry `served_model` 列存的是 `final.provider_model`（wire id）不是公开别名。portal usage `by_model` 直接透出会泄漏 provider wire model（原则 6/R7）。修复：`registerPortalApi` 加 `resolveModelLabel` dep（从 config.providers 构建 wire→alias 反查），unmappable→"other"。加 2 个防泄漏单测。
+- **UI 打磨（Lukin 反馈）**：① 导航当前页从淡底改**实心 indigo 胶囊+白字**（aria-current）；② Connect 客户端 tab 从失效的 `.tab-active`（无对应 CSS）改**分段控件**（白底胶囊+aria-selected）；③ Connect 代码块加分步注释（`# 1) Set env` / `# 2) Run`）消除孤立 `claude` 困惑；④ Memory 页 disabled 判断从 `memory.mode==='off'` 改成只看 MCP 是否可用（mode=off 仍能浏览/管理记忆）；⑤ 账户菜单下拉加 `clickOutside` action（`$lib/clickOutside.ts`，pointerdown capture）点空白关闭（Modal scrim + RefreshControl 本来就有 outside-click）。
+- **多语言（原用户明确要求）**：admin+portal 各加 es(Español)/pt(Português)，现 7 语言（en/zh-hans/zh-hant/ja/ko/es/pt）。languages.ts(LocaleCode+SUPPORTED+normalizeLocale)/loaders.ts/package.json i18n:update 都扩展。跑 i18n:extract 拉全 $t key，14 个 locale 文件全部 0 空值。技术术语/URL/CLI/代码/占位符{value}保持原文，中文意译。**注意**：`i18n:translate` 工具依赖 LAN relay(192.168.199.7)本机不可达，翻译由 Codex 手工做；代码块字符串是裸 template string 不走 $t()，天然不译。
+- **验收方式（关键）**：全程本地 Docker 部署验收（重建镜像→跑安全红线测试→Playwright 真浏览器三档屏幕走查）。seed 脚本造 143 条 8 天多模型 telemetry 让 Overview 图表/环比/donut 有数据。memory.mcp 需 config 开启（默认关，portal Memory 页才活）。**Dockerfile 必须加 apps/portal/package.json（install 阶段）+ portal build 拷贝**，否则 /portal 404。portal-static.ts 启动时从 built index.html 读 CSP script hash（SvelteKit adapter-static 注入内联 bootstrap script，强 CSP 会拦→白屏，用 hash 放行）。
+
+- **背景**：实现 docs/12 完整三迭代门户——key 持有者只能看/管自己那把 key 的接入/用量/请求/记忆。全新 `apps/portal` SvelteKit SPA + 6 个 bearer-scoped `/portal/api/*` 端点 + 白名单脱敏层，全程 TDD（安全红线测试先行）。
+- **后端决策**：
+  - `toPortalDecisionView`（`packages/shared/src/decision/portal-view.ts`，框架无关）**白名单**投影 DecisionRecord——只透 served_model(=final.model_alias)/lane/status/latency/cost/usage，剔除 provider_attempts、serving_account、classifier、lane.candidate_chain、final.provider_model（供应链/内部推理 = 核心 IP，原则 6）。单测扫描序列化输出确认 8 个 poison 字符串（provider 别名/wire model/eval model/账号 id）绝不出现。
+  - `assertOwnsTrace`（`apps/gateway/src/routes/portal/ownership.ts`）：traceId 详情/payload **先** `getApiKeyId==identity.keyId` 再取数据（R1）；miss 与"属于别人"同一 not_found 分支 → 404 而非 403（R2 防枚举）；keyId 缺失 **throw**（fail-closed，绝不 scopeless 查询，R5）。
+  - 6 端点（`routes/portal/index.ts`）全部照抄 `usage.ts` 范式：写死 `identity.keyId`/`accountId`，忽略调用方任何 key_id/account_id 入参。usage/stats 复用 `aggregate` 并**透出被 /v1 丢弃的 series+byModel+budget**。payload 端点白名单 `part∈{request,response}`，**拒 upstream_request**（400，原则 6）。
+- **memory 决策（关键省成本）**：**不做 memory REST**——前端直接打现有 `POST /mcp` JSON-RPC（docs/12 §4.2 endpoint 6，零新后端）。`accountId`/`projectId` 由 MCP ctx 从 bearer 派生，前端绝不传（R3/R4，已核实 tools.ts 服务端强制）。
+- **前端决策**：
+  - 明文 key + `sessionStorage` + 每请求 `Authorization: Bearer`（docs/12 §4.1）；否决 session token/localStorage/cookie。
+  - **复用 admin 资产**：app.css（设计系统）、i18n（改 STORAGE_KEY 为 helm_portal_locale）、format.ts、pagination.ts、LayerChart 图表配置、请求详情 viewer（Conversation/TokenUsage/CostBreakdown/JsonViewer）。**不复用 RequestsTable**（耦合 admin decision shape 的"过程视角"——attempt codes/decided_by），改写门户简表只显示白名单"结果视角"字段（比适配 RequestsTable 更省代码且语义正确）。
+  - `apps/portal/src/lib/api/requests.ts` 是**类型 shim**：只重声明 viewer 需要的 `TokenUsageView`/`RequestDetail['cost_breakdown']`，避免拖入整个 admin requests 解析器。
+- **踩坑（浏览器验证抓到的真 bug）**：SvelteKit adapter-static 往 index.html 注入一个内联 bootstrap `<script>`，被强 CSP `script-src 'self'` 拦截 → SPA 白屏不启动。修复：svelte.config 开 `kit.csp.mode:'hash'`（SvelteKit 算出该脚本 SHA256 并写进 HTML 的 `<meta>` CSP），`portal-static.ts` 启动时从 built index.html **读取该 hash 并折进响应头 CSP 的 script-src**——header 与 meta 携带同一 hash，浏览器求交集后放行。hash 每次 build 变，但运行时现读现折，永不脱同步。
+- **验证路径**：21 个后端单测（portal-view/ownership/routes/portal-static）+ typecheck + svelte-check 0 error + biome 干净；一次性 tsx 脚本 boot 真实 gateway 验证 21 条运行时红线（跨 key 详情/payload 404、upstream 拒绝、series/budget 透出、CSP 头），再用 Playwright 真浏览器走 login→Overview→Connect（base_url 无 /v1、Test connection→Connected）→Account 全流程通过。
+- **TODO/边界**：门户对 XSS 防护上限 = CSP 强度，sessionStorage 非 XSS 免疫（诚实边界写进登录页文案）；根治需门户专用只读 scope key（后续 key-scoping 特性，不在本次）。RefreshControl（自动刷新）门户未加，需要再补。
+
 ## 2026-07-07 · 视觉压缩后收敛 cache_control 并保留客户端 billing identity（Provider execution / cost control，docs/04/05，原则 3/5/7/8）
 
 - **背景（Lukin）**：生产 Luke key 的 `claude-fable-5` / GSC 请求在 v0.25.18 后成本下降，但 cache-read share 没明显上升。线上 payload 复查显示 CCH 已从几乎每轮变化降到少数稳定桶；继续拆缓存的原因之一是压缩图片 anchor 后面仍残留动态文本上的 `cache_control`（例如 teammate 状态、短用户指令），导致 Anthropic 尝试更长但每轮变化的缓存前缀并产生额外 cache-write。

@@ -6,7 +6,14 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["apps/**/*.ts", "packages/**/*.ts", "!**/dist", "!**/.svelte-kit", "!apps/admin"]
+    "includes": [
+      "apps/**/*.ts",
+      "packages/**/*.ts",
+      "!**/dist",
+      "!**/.svelte-kit",
+      "!apps/admin",
+      "!apps/portal"
+    ]
   },
   "formatter": {
     "enabled": true,

@@ -11,6 +11,8 @@ const loaders: Record<LocaleCode, () => Promise<TranslationDict>> = {
   'zh-hant': async () => (await import('../../locales/zh-hant.json')).default as TranslationDict,
   ja: async () => (await import('../../locales/ja.json')).default as TranslationDict,
   ko: async () => (await import('../../locales/ko.json')).default as TranslationDict,
+  es: async () => (await import('../../locales/es.json')).default as TranslationDict,
+  pt: async () => (await import('../../locales/pt.json')).default as TranslationDict,
 };
 
 export async function loadLocaleDict(locale: LocaleCode): Promise<TranslationDict> {

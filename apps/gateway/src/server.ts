@@ -163,6 +163,8 @@ import type { MessagesIdentity, RouteError } from "./routes/messages.js";
 import { registerMessagesRoute } from "./routes/messages.js";
 import { createMessagesPipeline } from "./routes/messages-pipeline.js";
 import { registerModelsRoute } from "./routes/models.js";
+import { registerPortalApi } from "./routes/portal/index.js";
+import { mountPortalStatic, PORTAL_BUILD_ROOT } from "./routes/portal-static.js";
 import { type ResponsesRouteDeps, registerResponsesRoute } from "./routes/responses.js";
 import { registerUsageStatsRoute } from "./routes/usage.js";
 import {
@@ -2060,6 +2062,27 @@ export async function buildServer(
   );
   registerUsageStatsRoute(app, { telemetry });
 
+  // Self-service portal REST (docs/12). Bearer-scoped like /v1/usage — NOT Basic
+  // Auth, never accepts a caller-supplied key_id/account_id (every handler
+  // write-forces identity). Mounted unconditionally (independent of the admin
+  // surface); the SPA shell is mounted separately below.
+  app.use(
+    "/portal/api/*",
+    authMiddleware({ keyStore, log: (l) => logger.log("warn", "auth", { line: l }) }),
+  );
+  // Reverse map wire provider_model -> PUBLIC alias, so the portal usage doughnut
+  // shows the lane-visible model name instead of leaking the provider's wire id
+  // (原则 6 / R7). Built once from config.providers[].models[]; unmapped → "other".
+  const wireToAlias = new Map<string, string>();
+  for (const p of config.providers) {
+    for (const m of p.models)
+      if (!wireToAlias.has(m.provider_model)) wireToAlias.set(m.provider_model, m.alias);
+  }
+  registerPortalApi(app, {
+    telemetry,
+    resolveModelLabel: (wire) => wireToAlias.get(wire) ?? null,
+  });
+
   // Memory MCP server (docs/13): POST /mcp exposes fact/reflection CRUD to
   // external agents, authed by the SAME API key as /v1 (so a tool call is scoped
   // to the key's account + default project — tenant-isolated). Fail-closed: only
@@ -2457,6 +2480,19 @@ export async function buildServer(
       line: "admin surface not mounted (no credentials / not enabled); set HELM_ADMIN_USER + HELM_ADMIN_PASSWORD to enable",
     });
   }
+
+  // Self-service portal SPA static hosting (/portal, docs/12). UNCONDITIONAL and
+  // independent of the admin surface: the shell is public (no Basic Auth); auth
+  // happens per-request when the SPA calls /portal/api/* with a Bearer key. MUST be
+  // mounted AFTER registerPortalApi so /portal/api/* wins (Hono registration order).
+  // A strong CSP is applied in the sub-app (sessionStorage key → XSS is the threat).
+  if (!existsSync(PORTAL_BUILD_ROOT)) {
+    logger.log("warn", "portal.static_missing", {
+      dir: PORTAL_BUILD_ROOT,
+      line: `portal SPA build not found at ${PORTAL_BUILD_ROOT}; /portal will 404 until 'pnpm build' produces it`,
+    });
+  }
+  app.route("/portal", mountPortalStatic());
 
   // Both Anthropic /v1/messages and OpenAI /v1/responses share this pipeline
   // shape; each gets the SAME observe deps so memory observe fires on every

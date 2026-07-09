@@ -814,7 +814,7 @@
   "Testing…": "测试中…",
   "Text": "文本",
   "That fact already exists — no duplicate was created.": "该事实已存在——未创建重复项。",
-  "The": "",
+  "The": "该",
   "The API key that authenticated the client, shown by prefix only.": "用于客户端鉴权的 API 密钥，仅显示前缀。",
   "The classifier decides which lane each request is routed to.": "分类器决定每个请求被路由到哪个 lane。",
   "The concrete provider that served this request.": "实际处理此请求的具体提供商。",

@@ -1,0 +1,313 @@
+@import "tailwindcss";
+
+/* LayerChart ships its own class strings (Tooltip/Axis/Grid/PieChart) inside
+   node_modules — Tailwind v4 won't scan a dependency unless told to. Without this
+   the tooltip's bg-surface-100 / text-surface-content and the axis/grid strokes
+   are never generated, so the tooltip renders with NO background (text blends in)
+   and the axes look broken. @source makes Tailwind emit those utilities. */
+@source '../node_modules/layerchart/dist';
+
+/* ============================================================================
+   Helm admin — design tokens & component recipes (Tailwind v4, CSS-first).
+   Single source of truth for the UI. Pages compose the .recipe classes below
+   instead of hand-picking shades, so the visual language stays consistent.
+
+   Color ROLES (semantic, not literal): use bg-brand / text-ink-muted / etc.
+   for one-off needs; use the component recipes for buttons/cards/inputs/etc.
+   ========================================================================== */
+
+@theme {
+  /* — Surfaces & borders — */
+  --color-surface: var(--color-white); /* cards, dialogs, sidebar, header */
+  --color-canvas: var(
+    --color-slate-50
+  ); /* app shell, table head, empty states */
+  --color-border: var(--color-slate-200); /* container outline */
+  --color-border-hair: var(--color-slate-100); /* in-table row divider */
+  --color-border-control: var(
+    --color-slate-300
+  ); /* inputs, secondary buttons */
+
+  /* — Text (ink) — */
+  --color-ink: var(--color-slate-900); /* titles / headings */
+  --color-ink-strong: var(--color-slate-700); /* labels, strong body */
+  --color-ink-body: var(--color-slate-600); /* default cell / body text */
+  --color-ink-muted: var(--color-slate-500); /* descriptions, captions */
+  --color-ink-faint: var(--color-slate-400); /* muted glyphs only */
+
+  /* — Brand vs action (kept distinct on purpose) — */
+  --color-brand: var(--color-indigo-600); /* logo + active nav ONLY */
+  --color-brand-soft: var(--color-indigo-50); /* active nav background */
+  --color-action: var(--color-slate-800); /* primary button fill */
+  --color-action-hover: var(--color-slate-700);
+
+  /* — Status — */
+  --color-success: var(--color-emerald-600);
+  --color-danger: var(--color-red-600);
+  --color-warning: var(--color-amber-500);
+  --color-link: var(--color-sky-600); /* inline links + Layer-1 "rules" */
+  --color-eval: var(--color-violet-600); /* Layer-2 "eval" */
+
+  /* — Chart surfaces (LayerChart / LayerStack tokens) —
+     LayerChart's Tooltip/Axis/Grid style themselves with `bg-surface-100`,
+     `text-surface-content`, `stroke-surface-content/…` utilities. They are NOT
+     defined by Tailwind, so without these the tooltip renders with no background
+     (text blends into the chart) and the axes/grid strokes never appear. Mapped
+     onto our slate ramp so charts read on-brand. */
+  --color-surface-100: var(--color-white); /* tooltip background */
+  --color-surface-200: var(--color-slate-50);
+  --color-surface-300: var(--color-slate-100);
+  --color-surface-content: var(
+    --color-slate-700
+  ); /* tooltip text, axis/grid strokes */
+
+  /* — Radius: two tiers only — */
+  --radius-control: 0.25rem; /* buttons, inputs, pills (rounded) */
+  --radius-container: 0.5rem; /* cards, dialogs, tables (rounded-lg) */
+}
+
+/* LayerChart's PieChart fills each slice with `hsl(var(--color-primary))` …
+   `--color-danger)` — bare HSL TRIPLETS consumed inside hsl(), NOT Tailwind
+   utilities (so they live here as plain custom props, not in @theme). Without
+   them the hsl() is invalid and every slice falls back to BLACK. Reuse our
+   brand/status hues as "H S% L%" triples so the pie matches the trend areas. */
+:root {
+  --color-primary: 217 91% 60%; /* blue   — matches TREND_SERIES input */
+  --color-secondary: 160 84% 39%; /* green  — matches TREND_SERIES output */
+  --color-info: 199 89% 48%; /* sky */
+  --color-success: 142 71% 45%; /* emerald */
+  --color-warning: 38 92% 50%; /* amber  — matches TREND_SERIES cached */
+  --color-danger: 0 84% 60%; /* red */
+}
+
+/* The soft drop shadow LayerChart's tooltip applies via `elevation-1`. Without
+   it the floating tooltip has no lift off the chart. */
+@utility elevation-1 {
+  box-shadow:
+    0 1px 3px rgb(0 0 0 / 0.12),
+    0 1px 2px rgb(0 0 0 / 0.08);
+}
+
+@layer components {
+  /* — Containers — */
+  .card {
+    @apply rounded-lg border border-slate-200 bg-white p-4;
+  }
+  .dialog {
+    @apply rounded-lg border border-slate-300 bg-white p-5 shadow-sm;
+  }
+  /* — Modal: centered overlay built from a fixed backdrop + scrim + panel — */
+  .modal-backdrop {
+    @apply fixed inset-0 z-50 flex items-center justify-center p-4;
+  }
+  .modal-scrim {
+    @apply absolute inset-0 cursor-default bg-slate-900/40;
+  }
+  .modal-panel {
+    @apply relative z-10 max-h-[calc(100vh-2rem)] w-full max-w-lg overflow-y-auto rounded-lg border border-slate-300 bg-white p-5 shadow-lg focus:outline-none;
+  }
+
+  /* — Buttons — */
+  .btn-primary {
+    @apply inline-flex min-h-11 cursor-pointer items-center justify-center gap-1.5 rounded bg-slate-800 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 disabled:cursor-not-allowed disabled:opacity-50 md:min-h-0;
+  }
+  .btn-primary-sm {
+    @apply inline-flex cursor-pointer items-center justify-center gap-1.5 rounded bg-slate-800 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-secondary {
+    @apply inline-flex min-h-11 cursor-pointer items-center justify-center gap-1.5 rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 disabled:cursor-not-allowed disabled:opacity-50 md:min-h-0;
+  }
+  .btn-success {
+    @apply inline-flex min-h-11 cursor-pointer items-center justify-center gap-1.5 rounded bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-emerald-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 disabled:opacity-50 md:min-h-0;
+  }
+  .btn-danger {
+    @apply inline-flex min-h-11 cursor-pointer items-center justify-center gap-1.5 rounded bg-red-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-red-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400 disabled:opacity-50 md:min-h-0;
+  }
+  .btn-danger-outline {
+    @apply inline-flex min-h-11 cursor-pointer items-center justify-center gap-1.5 rounded border border-red-300 px-3 py-1.5 text-sm text-red-700 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300 disabled:cursor-not-allowed disabled:opacity-50 md:min-h-0;
+  }
+  /* Compact icon control (reorder/remove rows). Real hit area + disabled state. */
+  .btn-icon {
+    @apply inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 md:h-7 md:w-7;
+  }
+
+  /* — Form controls — */
+  .input {
+    @apply w-full rounded border border-slate-300 px-2 py-1.5 text-sm text-slate-900 transition-colors placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200;
+  }
+  /* Compact variant of .input for inline/table use (per-key rate limits, the
+     latency cap). Same border + focus ring as .input — ONLY the padding is
+     tighter — so every text/number field shares one height + one focus state.
+     Width is set by the caller (e.g. `input-sm w-24`). */
+  .input-sm {
+    @apply rounded border border-slate-300 px-2 py-1 text-sm text-slate-900 transition-colors placeholder:text-slate-400 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200;
+  }
+  .select {
+    @apply w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-700 transition-colors focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-200;
+  }
+  /* Native checkbox, sized + brand-neutral accent + matching focus ring so every
+     checkbox reads the same across pages (was raw browser default before). */
+  .checkbox {
+    @apply h-4 w-4 rounded border-slate-300 accent-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400;
+  }
+  /* "[box] label" inline group. Pair with .checkbox on the input. */
+  .checkbox-field {
+    @apply flex items-center gap-2 text-sm text-slate-700;
+  }
+  /* Vertical label → control → help group. The canonical form field stack. */
+  .field {
+    @apply flex flex-col gap-1;
+  }
+  .field-label {
+    @apply text-sm font-medium text-slate-700;
+  }
+  .field-help {
+    @apply text-xs text-slate-500;
+  }
+  /* — Collapsible form section (optional cap groups in the key dialogs) —
+     A native <details> styled as a bordered fold: clickable header row (title +
+     "Optional" badge + one-line state summary) and an indented field body.
+     Native disclosure keeps the content in the DOM (a11y, find-in-page, tests). */
+  .form-section {
+    @apply rounded-lg border border-slate-200;
+  }
+  .form-section-summary {
+    @apply flex cursor-pointer select-none list-none items-center gap-2 rounded-lg px-3 py-2.5 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 [&::-webkit-details-marker]:hidden;
+  }
+  .form-section-body {
+    @apply flex flex-col gap-3 border-t border-slate-100 p-3;
+  }
+  /* Standard card footer: a right-aligned action row (Save / Cancel) divided from
+     the fields above. Used at the bottom of every editable card so the primary
+     action sits in one consistent place app-wide. */
+  .card-actions {
+    @apply mt-1 flex items-center justify-end gap-3 border-t border-slate-100 pt-3;
+  }
+
+  /* — Badges / pills (self-contained, single class) — */
+  .badge {
+    @apply inline-flex items-center rounded px-2 py-0.5 text-xs font-medium;
+  }
+  .badge-ok {
+    @apply inline-flex items-center rounded bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700;
+  }
+  .badge-error {
+    @apply inline-flex items-center rounded bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700;
+  }
+  .badge-neutral {
+    @apply inline-flex items-center rounded bg-slate-200 px-2 py-0.5 text-xs font-medium text-slate-600;
+  }
+  .badge-rules {
+    @apply inline-flex items-center rounded bg-sky-100 px-2 py-0.5 text-xs font-medium text-sky-700;
+  }
+  .badge-eval {
+    @apply inline-flex items-center rounded bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-700;
+  }
+  .badge-classifier-fallback {
+    @apply inline-flex items-center rounded bg-rose-100 px-2 py-0.5 text-xs font-medium text-rose-700;
+  }
+  .badge-fallback {
+    @apply inline-flex items-center rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800;
+  }
+
+  /* — Progress bars (quota / session windows on the providers page) — */
+  /* A thin rounded track; the inner .progress-bar's width = used%, and its color
+     ramps with utilization (set inline by the consumer: normal/warn/danger). */
+  .progress-track {
+    @apply h-1.5 w-full overflow-hidden rounded-full bg-slate-200;
+  }
+  .progress-bar {
+    @apply h-full rounded-full transition-all;
+  }
+
+  /* — Typography roles — */
+  .page-title {
+    @apply text-2xl font-semibold tracking-tight text-slate-900;
+  }
+  .section-header {
+    @apply text-lg font-semibold text-slate-900;
+  }
+  .section-desc {
+    @apply text-sm text-slate-500;
+  }
+
+  /* — Tables — */
+  /* `relative` makes this the containing block for any absolutely-positioned
+     descendant (e.g. an `sr-only` <th> label). Without it such a child escapes to
+     <html> and, sitting at the far edge of a wide table, forces a phantom
+     page-wide horizontal scroll on small screens. */
+  .table-wrap {
+    @apply relative overflow-x-auto rounded-lg border border-slate-200;
+  }
+  /* whitespace-nowrap keeps every cell on one line so the table holds its natural
+     width and .table-wrap (overflow-x-auto) scrolls cleanly on small screens,
+     instead of cramming columns and soft-wrapping into a mess. Explicit block
+     lines inside a cell (e.g. the keys "Caps" stack) are unaffected. */
+  .table-base {
+    @apply w-full whitespace-nowrap text-left text-sm;
+  }
+  .table-head {
+    @apply bg-slate-50 text-xs font-medium uppercase tracking-wide text-slate-500;
+  }
+  .table-row {
+    @apply border-t border-slate-100 hover:bg-slate-50;
+  }
+
+  /* — Responsive "cards table" (Providers / API Keys) — these wide management
+     tables would otherwise hide columns (and their row actions) off a horizontal
+     scroll on phones. BELOW lg each row reflows into a bordered CARD and each cell
+     into a stacked "label / value" line (the label is injected from the cell's
+     data-label); AT lg+ it is an ordinary table. Crucially there is still ONE <tr>
+     per record (no duplicated markup), so unit tests and screen readers see a
+     single row. Pair with `data-label="…"` on every <td>, drop `.table-row` from
+     the <tr>, and wrap the <table> in a `.cards-table-frame`. */
+  .cards-table {
+    @apply w-full text-left text-sm;
+  }
+  .cards-table thead {
+    @apply hidden lg:table-header-group;
+  }
+  .cards-table tbody {
+    @apply block lg:table-row-group;
+  }
+  .cards-table tr {
+    @apply mb-3 block rounded-lg border border-slate-200 bg-white last:mb-0 lg:mb-0 lg:table-row lg:rounded-none lg:border-0 lg:border-t lg:border-slate-100 lg:bg-transparent lg:last:mb-0 lg:hover:bg-slate-50;
+  }
+  .cards-table td {
+    @apply block px-3 py-1.5 lg:table-cell lg:whitespace-nowrap lg:py-2;
+  }
+  .cards-table td::before {
+    content: attr(data-label);
+    @apply mb-0.5 block text-xs font-medium uppercase tracking-wide text-ink-muted lg:hidden;
+  }
+  /* The cards carry their own border on mobile, so the table only needs a frame
+     (scroll + outline) once it becomes a real table at lg+. */
+  .cards-table-frame {
+    @apply lg:overflow-x-auto lg:rounded-lg lg:border lg:border-slate-200;
+  }
+
+  /* — Tabs — */
+  /* Underline-style section switcher (e.g. the per-account Manage dialog). The
+     selected tab gets a slate underline + strong ink; the rest stay muted. Driven
+     by `aria-selected` so the markup carries the a11y state and the style follows. */
+  .tab-btn {
+    @apply -mb-px border-b-2 border-transparent px-1 pb-2 text-sm font-medium text-slate-500 transition-colors hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 aria-selected:border-slate-800 aria-selected:text-slate-900;
+  }
+
+  /* — Feedback & states — */
+  .alert-error {
+    @apply rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700;
+  }
+  .alert-warn {
+    @apply rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800;
+  }
+  .alert-success {
+    @apply rounded border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-700;
+  }
+  .empty-state {
+    @apply rounded-lg border border-dashed border-slate-300 bg-slate-50 p-10 text-center text-sm text-slate-500;
+  }
+  .link-inline {
+    @apply text-sky-600 transition-colors hover:text-sky-700 hover:underline;
+  }
+}
