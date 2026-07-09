@@ -296,7 +296,9 @@ describe("portal API", () => {
         now: () => 10_000,
         resolveModelLabel: (wire: string) => (wire === "WIRE_A" ? "gpt-5.5" : null),
       });
-      const body = (await (await app.request("/portal/api/usage/stats", { headers: AUTH })).json()) as {
+      const body = (await (
+        await app.request("/portal/api/usage/stats", { headers: AUTH })
+      ).json()) as {
         by_model: { model: string; total_tokens: number; requests: number }[];
       };
       const labels = body.by_model.map((m) => m.model);
