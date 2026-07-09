@@ -1,9 +1,15 @@
 import { mcpTool } from "./client";
+import type { MemoryStatus } from "./memory-types";
 
 // Portal memory over MCP tools/call (docs/12 §4.2 endpoint 6). accountId/projectId
 // are server-derived from the bearer key — never sent (R3/R4).
-export type MemoryStatus = "active" | "archived" | "pruned";
-export type FactStatusFilter = MemoryStatus | "superseded" | "all";
+// MemoryStatus + the fact-status filter live in alias-free modules so the pure
+// filter predicate is unit-testable without SvelteKit's $app/$lib runtime.
+export type { MemoryStatus } from "./memory-types";
+export {
+  factMatchesStatus,
+  type FactStatusFilter,
+} from "./fact-status";
 
 export interface Fact {
   id: string;

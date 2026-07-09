@@ -15,6 +15,9 @@ export default defineConfig({
             "packages/**/*.test.ts",
             "apps/gateway/**/*.test.ts",
             "scripts/**/*.test.ts",
+            // Portal has no Svelte test project; its pure-TS helper tests (no
+            // `$lib`/`$app` aliases, no .svelte imports) run in the node project.
+            "apps/portal/src/lib/**/*.test.ts",
           ],
           // The postgres store suite opens an in-process PGlite (WASM Postgres)
           // per test. Under a full parallel run, many WASM cold-starts contend for
