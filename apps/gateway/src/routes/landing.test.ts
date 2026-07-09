@@ -9,8 +9,8 @@ describe("GET / (landing page)", () => {
     expect(res.headers.get("content-type")).toContain("text/html");
     const html = await res.text();
     expect(html).toContain("Helm API");
-    // Links to the documented public + admin surface.
-    for (const path of ["/docs", "/v1/models", "/healthz", "/admin"]) {
+    // Links to the documented public + portal + admin surface.
+    for (const path of ["/docs", "/v1/models", "/portal", "/healthz", "/admin"]) {
       expect(html).toContain(`href="${path}"`);
     }
     // /version is surfaced (referenced in the dashboard copy + fetched live).
