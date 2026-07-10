@@ -26,7 +26,7 @@ const AUTH = { Authorization: `Bearer ${TEST_KEY}`, "Content-Type": "application
 const ECONOMY_HEAD = "openai/gpt-5.6-luna";
 const PREMIUM_HEAD = "openai/gpt-5.6-sol";
 const BALANCED_HEAD = "openai/gpt-5.6-terra";
-// economy chain after a failed official Luna call skips Codex/Anthropic
+// economy chain after a failed official Luna fallback skips Codex/Anthropic
 // subscription aliases and falls forward to the DeepSeek flash static fallback.
 const ECONOMY_NEXT = "deepseek/deepseek-v4-flash";
 
@@ -48,9 +48,10 @@ function chat(content: string, extra: Record<string, unknown> = {}) {
 
 test.describe("routing e2e", () => {
   // ── Scenario 1: simple prompt → economy lane ────────────────────────────────
-  // The economy head (openai/gpt-5.6-luna) is json + non-stream capable, so
-  // a plain non-stream request serves it directly. Routing is asserted via the
-  // debug headers; the resolved bare wire id is surfaced as x-helm-provider-model.
+  // The economy primary is openai-codex/gpt-5.6-luna. With no subscription
+  // connected in e2e, it is skipped and the json + non-stream capable official
+  // Luna fallback serves directly. Routing is asserted via the debug headers; the
+  // resolved bare wire id is surfaced as x-helm-provider-model.
   test("simple prompt -> economy lane", async ({ request }) => {
     const res = await request.post("/v1/chat/completions", {
       // Clearly-simple: strong simple-keyword signals (hi/thanks/ok) push the
@@ -60,7 +61,8 @@ test.describe("routing e2e", () => {
     });
     expect(res.status()).toBe(200);
     expect(res.headers()["x-helm-lane"]).toBe("economy");
-    // final model is the economy head; its resolved provider_model is the bare id.
+    // final model is the official economy fallback; its resolved provider_model is
+    // the bare id.
     expect(res.headers()["x-helm-final-model"]).toBe(ECONOMY_HEAD);
     expect(res.headers()["x-helm-provider-model"]).toBe(ECONOMY_HEAD_WIRE);
   });
@@ -109,18 +111,18 @@ test.describe("routing e2e", () => {
   });
 
   // ── Scenario 4: primary provider error → EXECUTION fallback serves ──────────
-  // Mock injects a one-shot 5xx for the economy head (`openai/gpt-5.6-luna`);
-  // the skipped codex/anthropic candidates never serve, so the first in-chain
-  // candidate that serves is `deepseek/deepseek-v4-flash`. Lane stays `economy`
-  // (execution fallback ≠ classification fallback, principle 5).
+  // Mock injects a one-shot 5xx for the official Luna fallback
+  // (`openai/gpt-5.6-luna`); the skipped codex/anthropic candidates never serve,
+  // so the first in-chain candidate that serves is `deepseek/deepseek-v4-flash`.
+  // Lane stays `economy` (execution fallback ≠ classification fallback, principle 5).
   test("primary provider error -> fallback model serves (execution fallback)", async ({
     request,
   }) => {
     // The prompt routes to economy (simple) AND carries the fail sentinel so the
-    // mock 5xxs the economy head. The gateway only forwards model+messages
-    // upstream, so the fault is steered through the prompt. The economy head is
-    // invoked (non-stream) and 5xxs, so the gateway falls forward past the skipped
-    // codex candidate to the next static one — the upstream-error fallback this
+    // mock 5xxs the official Luna fallback. The gateway only forwards model+messages
+    // upstream, so the fault is steered through the prompt. The official Luna fallback
+    // is invoked (non-stream) and 5xxs, so the gateway falls forward past the skipped
+    // codex candidates to the next static one — the upstream-error fallback this
     // scenario is about.
     const res = await request.post("/v1/chat/completions", {
       // Same clearly-simple economy prompt as scenario 1, plus the fail sentinel.

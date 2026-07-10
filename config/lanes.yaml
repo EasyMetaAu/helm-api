@@ -13,10 +13,10 @@
 # `openai-codex` SUBSCRIPTION slugs where the ChatGPT/Codex backend accepts them
 # (connect it in admin → Providers) and fall back to official OpenAI GPT-5.6 API
 # aliases when OPENAI_API_KEY is configured. The official `gpt-5.6` alias routes
-# to Sol, but the subscription backend rejects the bare alias; Luna is official API
-# surface, but is not yet accepted by the subscription backend on this executor
-# path. DeepSeek/OpenRouter/ZenMux remain static lower fallbacks so lanes degrade
-# gracefully when Codex or OpenAI API is unavailable. An unconnected candidate
+# to Sol, but the subscription backend rejects the bare alias, so Helm routes to
+# the concrete Sol/Terra/Luna subscription slugs instead. DeepSeek/OpenRouter/ZenMux
+# remain static lower fallbacks so lanes degrade gracefully when Codex or OpenAI API
+# is unavailable. An unconnected candidate
 # fails OPEN (Phase-0 back-fill / skip to the next fallback), never a 5xx. Each
 # lane still ends in a `*/auto` tail fallback; those auto aliases are deliberately
 # JSON-INCAPABLE (catalog jsonOutput:none), so a strict-JSON request prunes them
@@ -27,8 +27,9 @@
 economy:
   purpose: Cheap and fast for simple tasks
   reasoning_effort: medium
-  primary: openai/gpt-5.6-luna
+  primary: openai-codex/gpt-5.6-luna
   fallback:
+    - openai/gpt-5.6-luna
     - openai-codex/gpt-5.4-mini
     - anthropic/claude-haiku-4-5-20251001
     - deepseek/deepseek-v4-flash
@@ -180,8 +181,9 @@ claude-haiku:
 "gpt-5.6-luna":
   purpose: OpenAI GPT-5.6 Luna tier — efficient/high-volume
   reasoning_effort: medium
-  primary: openai/gpt-5.6-luna
+  primary: openai-codex/gpt-5.6-luna
   fallback:
+    - openai/gpt-5.6-luna
     - economy
 
 # Stays on GPT-5.5 ACROSS providers (Codex subscription -> static ZenMux key) before

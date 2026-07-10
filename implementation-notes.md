@@ -10,8 +10,8 @@
 ## 2026-07-10 · GPT-5.6 family support in Helm defaults（Routing / provider catalog / cost telemetry，docs/03/04/07，原则 3/4/5/6）
 
 - **官方来源**：OpenAI latest-model docs 确认 `gpt-5.6` alias routes to `gpt-5.6-sol`，并给出 `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` 三档；OpenAI Models/Pricing docs 确认 1,050,000 context、128,000 max output、Responses/Chat/Batch 支持，以及标准价 input/cache-read/cache-write/output。
-- **路由决策**：quality lanes 升级为 GPT-5.6 family：`premium/coding/tool_use` 走 verified subscription Sol，`balanced` 走 verified subscription Terra，`economy` 先走 official OpenAI Luna（有 `OPENAI_API_KEY` 时）再降级到 subscription `gpt-5.4-mini` 与既有低成本链；同时新增 `gpt-5.6*` vendor-family lanes，让显式模型请求先走同家族再降级到既有质量 lane。
-- **供应链边界**：`gpt-5.6` 是 official API alias（routes to Sol），但 ChatGPT/Codex subscription backend 当前拒绝裸 `gpt-5.6`。Helm 默认 curated subscription list 包含 `openai-codex/gpt-5.6-sol` / `openai-codex/gpt-5.6-terra` / `openai-codex/gpt-5.6-luna`；operator 仍可手工增删并用 account test 验证。
+- **路由决策**：quality lanes 升级为 GPT-5.6 family：`premium/coding/tool_use` 走 verified subscription Sol，`balanced` 走 verified subscription Terra，`economy` 走 verified subscription Luna 并以 official OpenAI Luna（有 `OPENAI_API_KEY` 时）兜底，再降级到 subscription `gpt-5.4-mini` 与既有低成本链；同时新增 `gpt-5.6*` vendor-family lanes，让显式模型请求先走同家族再降级到既有质量 lane。
+- **供应链边界**：`gpt-5.6` 是 official API alias（routes to Sol），但 ChatGPT/Codex subscription backend 当前拒绝裸 `gpt-5.6`。Helm 默认 curated subscription list 包含 `openai-codex/gpt-5.6-sol` / `openai-codex/gpt-5.6-terra` / `openai-codex/gpt-5.6-luna`，显式 `gpt-5.6-luna` 与 `economy` 默认优先使用 Luna 的 OAuth 路径；operator 仍可手工增删并用 account test 验证。
 - **context 边界**：`openai/*` official API aliases 使用官方 1.05M context；`openai-codex/*` subscription aliases 继续保守使用 272K context cap，因为线上 Codex 订阅后端已有 `context_length_exceeded` 证据。这里优先避免 oversized 请求先打到必失败的订阅后端。
 - **价格决策**：telemetry pricing 使用官方标准 tier，不使用 priority tier；cache write 按 1.25x input 记录，cache read 使用折扣价。成本数据只用于观测，不参与路由选择。
 - **OpenAI wire 参数**：Responses `max_output_tokens` 经 IR 到 official OpenAI GPT-5.6 Chat wire 时必须渲染为 `max_completion_tokens`，不能沿用旧 `max_tokens`；否则 `openai/gpt-5.6-luna` 等官方 GPT-5.6 模型会返回 `unsupported_parameter`。
