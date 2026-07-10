@@ -10,10 +10,11 @@
 ## 2026-07-10 · GPT-5.6 family support in Helm defaults（Routing / provider catalog / cost telemetry，docs/03/04/07，原则 3/4/5/6）
 
 - **官方来源**：OpenAI latest-model docs 确认 `gpt-5.6` alias routes to `gpt-5.6-sol`，并给出 `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` 三档；OpenAI Models/Pricing docs 确认 1,050,000 context、128,000 max output、Responses/Chat/Batch 支持，以及标准价 input/cache-read/cache-write/output。
-- **路由决策**：quality lanes 升级为 Sol/Terra/Luna：`premium/coding/tool_use` 走 Sol，`balanced` 走 Terra，`economy` 走 Luna；同时新增 `gpt-5.6*` vendor-family lanes，让显式模型请求先走同家族再降级到既有质量 lane。
-- **供应链边界**：`openai/*` official API aliases 使用官方 1.05M context；`openai-codex/*` subscription aliases 继续保守使用 272K context cap，因为线上 Codex 订阅后端已有 `context_length_exceeded` 证据。这里优先避免 oversized 请求先打到必失败的订阅后端。
+- **路由决策**：quality lanes 升级为 GPT-5.6 family：`premium/coding/tool_use` 走 verified subscription Sol，`balanced` 走 verified subscription Terra，`economy` 先走 official OpenAI Luna（有 `OPENAI_API_KEY` 时）再降级到 subscription `gpt-5.4-mini` 与既有低成本链；同时新增 `gpt-5.6*` vendor-family lanes，让显式模型请求先走同家族再降级到既有质量 lane。
+- **供应链边界**：`gpt-5.6` 是 official API alias（routes to Sol），但 ChatGPT/Codex subscription backend 当前拒绝裸 `gpt-5.6`；`gpt-5.6-luna` 是 official API/Codex App model，但当前 subscription executor path 直测返回 404。Helm 因此只把 `openai-codex/gpt-5.6-sol` / `openai-codex/gpt-5.6-terra` 放入默认 curated subscription list；operator 仍可手工添加实验 slug 并用 account test 验证。
+- **context 边界**：`openai/*` official API aliases 使用官方 1.05M context；`openai-codex/*` subscription aliases 继续保守使用 272K context cap，因为线上 Codex 订阅后端已有 `context_length_exceeded` 证据。这里优先避免 oversized 请求先打到必失败的订阅后端。
 - **价格决策**：telemetry pricing 使用官方标准 tier，不使用 priority tier；cache write 按 1.25x input 记录，cache read 使用折扣价。成本数据只用于观测，不参与路由选择。
-- **兼容性**：Codex OAuth 仍是 curated-only（无 live list endpoint），新 curated list 以 GPT-5.6 family 开头并保留 GPT-5.5/GPT-5.4/GPT-5.4-mini，管理员保存的 enabledModels 仍然是权威覆盖。
+- **兼容性**：Codex OAuth 仍是 curated-only（无 live list endpoint），默认 curated list 以 verified GPT-5.6 Sol/Terra 开头并保留 GPT-5.5/GPT-5.4/GPT-5.4-mini，管理员保存的 enabledModels 仍然是权威覆盖。`model-aliases.yaml` 同时接受 Codex App/CLI 内部 `openai.gpt-5.6-*` 名字；Responses 入口接受 Codex CLI 发出的 `reasoning:null` 并按未设置处理。
 
 ## 2026-07-09 · 个人门户（Self-Service Portal）完整实现 + 补齐 + 多语言（docs/12，原则 1/6/7）→ v0.26.0
 

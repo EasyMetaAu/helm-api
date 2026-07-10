@@ -20,19 +20,13 @@ import { listGitHubCopilotModels } from "./github-copilot.js";
 // override via an explicit providers.yaml entry.
 export const CURATED_OAUTH_MODELS: Record<string, string[]> = {
   anthropic: ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
-  // ChatGPT Codex set. Starts with the current GPT-5.6 family, then keeps the
-  // previous GA models as fallback choices operators can still select. Operators
-  // can add/remove models via the Manage dialog (their saved list is authoritative)
-  // or a providers.yaml override.
-  "openai-codex": [
-    "gpt-5.6",
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-    "gpt-5.5",
-    "gpt-5.4",
-    "gpt-5.4-mini",
-  ],
+  // ChatGPT Codex set. Keep this to the subscription backend slugs that are known
+  // to execute through the ChatGPT Codex OAuth path. The public API `gpt-5.6`
+  // alias routes to Sol, but the subscription backend currently rejects the bare
+  // alias; Luna is an official GPT-5.6/API model, but is not yet accepted by the
+  // subscription backend on this executor path. Operators can still add/remove
+  // models via the Manage dialog (their saved list is authoritative).
+  "openai-codex": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
 };
 
 // Live-list Anthropic (Claude Pro/Max) models via GET /v1/models with the OAuth

@@ -416,7 +416,18 @@ describe("createOAuthAdmin", () => {
       updatedAt: 1,
     });
     const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
-    const { canPull } = await admin.listModels({ providerId: "openai-codex", account: "default" });
+    const { available, enabled, canPull } = await admin.listModels({
+      providerId: "openai-codex",
+      account: "default",
+    });
+    expect(available).toEqual([
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.5",
+      "gpt-5.4",
+      "gpt-5.4-mini",
+    ]);
+    expect(enabled).toEqual(available);
     // No live list-models API → the UI hides "pull from provider".
     expect(canPull).toBe(false);
   });

@@ -179,6 +179,7 @@ const ResponsesRequestSchema = z
         summary: z.union([z.boolean(), z.string()]).optional(),
       })
       .passthrough()
+      .nullable()
       .optional(),
     // Context-window truncation control — no IR home, rides provider_raw.
     truncation: z.enum(["auto", "disabled"]).optional(),
@@ -479,7 +480,7 @@ function toIRRequest(req: NativeRequest): IRRequest {
     providerRaw.responses_native_tools = normalizedTools.nativeTools;
   // Reasoning config + truncation have no IR field of their own; preserve verbatim.
   // NB: a distinct key — provider_raw.reasoning already holds inbound reasoning ITEMS.
-  if (parsed.reasoning !== undefined) providerRaw.reasoning_config = parsed.reasoning;
+  if (parsed.reasoning != null) providerRaw.reasoning_config = parsed.reasoning;
   if (parsed.truncation !== undefined) providerRaw.truncation = parsed.truncation;
   // Preserve the raw Responses `text` so a responses->responses round-trip is lossless
   // even after we canonicalize it into IR.response_format for other backends.
