@@ -676,6 +676,7 @@ describe("GOLDEN: cheap-model low-risk current turns stay cheap", () => {
 
   it.each([
     "economy",
+    "gpt-5.6-luna",
     "deepseek-v4-flash",
     "claude-haiku",
   ])("short low-risk %s request with long history -> economy", async (requestedModel) => {

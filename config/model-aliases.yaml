@@ -46,6 +46,14 @@
 # (it is more literal than `gpt-5*`, so longest-literal-wins routes it to the cheap
 # lane, NOT the expensive `premium` catch-all). Comment these out if you don't front
 # any GPT clients.
+"gpt-5.6": gpt-5.6
+"gpt-5.6-sol": gpt-5.6-sol
+"gpt-5.6-sol-*": gpt-5.6-sol
+"gpt-5.6-terra": gpt-5.6-terra
+"gpt-5.6-terra-*": gpt-5.6-terra
+"gpt-5.6-luna": gpt-5.6-luna
+"gpt-5.6-luna-*": gpt-5.6-luna
+"gpt-5.6-*": gpt-5.6
 "gpt-5.5": gpt-5.5
 "gpt-5.4-mini": gpt-5.4-mini
 "gpt-5.4-mini-*": gpt-5.4-mini

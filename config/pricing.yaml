@@ -17,6 +17,26 @@
 # this manual layer, not the generated catalog (see capabilities.yaml header).
 # Cost telemetry only — never drives selection. (deepseek numbers carried over
 # from the prior relay entries; verify against official DeepSeek pricing.)
+openai-codex/gpt-5.6:
+  inputPerMTokUsd: 5.0
+  outputPerMTokUsd: 30.0
+  cacheReadPerMTokUsd: 0.5
+  cacheWritePerMTokUsd: 6.25
+openai-codex/gpt-5.6-sol:
+  inputPerMTokUsd: 5.0
+  outputPerMTokUsd: 30.0
+  cacheReadPerMTokUsd: 0.5
+  cacheWritePerMTokUsd: 6.25
+openai-codex/gpt-5.6-terra:
+  inputPerMTokUsd: 2.5
+  outputPerMTokUsd: 15.0
+  cacheReadPerMTokUsd: 0.25
+  cacheWritePerMTokUsd: 3.125
+openai-codex/gpt-5.6-luna:
+  inputPerMTokUsd: 1.0
+  outputPerMTokUsd: 6.0
+  cacheReadPerMTokUsd: 0.1
+  cacheWritePerMTokUsd: 1.25
 openai-codex/gpt-5.5:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0
@@ -43,6 +63,26 @@ openrouter/deepseek-v4-flash:
   outputPerMTokUsd: 0.18
 # Claude pricing now lives under the native `zenmux-anthropic/claude-*` aliases
 # (issue #217); the OpenAI-compat `zenmux/claude-*` entries were removed.
+openai/gpt-5.6:
+  inputPerMTokUsd: 5.0
+  outputPerMTokUsd: 30.0
+  cacheReadPerMTokUsd: 0.5
+  cacheWritePerMTokUsd: 6.25
+openai/gpt-5.6-sol:
+  inputPerMTokUsd: 5.0
+  outputPerMTokUsd: 30.0
+  cacheReadPerMTokUsd: 0.5
+  cacheWritePerMTokUsd: 6.25
+openai/gpt-5.6-terra:
+  inputPerMTokUsd: 2.5
+  outputPerMTokUsd: 15.0
+  cacheReadPerMTokUsd: 0.25
+  cacheWritePerMTokUsd: 3.125
+openai/gpt-5.6-luna:
+  inputPerMTokUsd: 1.0
+  outputPerMTokUsd: 6.0
+  cacheReadPerMTokUsd: 0.1
+  cacheWritePerMTokUsd: 1.25
 zenmux/gpt-5.5:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0

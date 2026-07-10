@@ -464,7 +464,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       updatedAt: 1,
     });
     await setAccountSettings(config, ENC_KEY, "openai-codex", "default", {
-      enabledModels: ["gpt-5.5", "gpt-5.4"],
+      enabledModels: ["gpt-5.6-sol", "gpt-5.6-luna"],
     });
     const { providers, poolClients } = await synthesizeOAuthProviders(
       [],
@@ -481,7 +481,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     expect(providers[0]?.type).toBe("openai-responses");
     expect(poolClients.has("openai-codex")).toBe(true);
     const aliases = (providers[0]?.models ?? []).map((m) => m.alias).sort();
-    expect(aliases).toEqual(["openai-codex/gpt-5.4", "openai-codex/gpt-5.5"]);
+    expect(aliases).toEqual(["openai-codex/gpt-5.6-luna", "openai-codex/gpt-5.6-sol"]);
   });
 
   it("threads per-account Fast mode into the synthesized Codex pool client", async () => {

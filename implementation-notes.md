@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-07-10 · GPT-5.6 family support in Helm defaults（Routing / provider catalog / cost telemetry，docs/03/04/07，原则 3/4/5/6）
+
+- **官方来源**：OpenAI latest-model docs 确认 `gpt-5.6` alias routes to `gpt-5.6-sol`，并给出 `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` 三档；OpenAI Models/Pricing docs 确认 1,050,000 context、128,000 max output、Responses/Chat/Batch 支持，以及标准价 input/cache-read/cache-write/output。
+- **路由决策**：quality lanes 升级为 Sol/Terra/Luna：`premium/coding/tool_use` 走 Sol，`balanced` 走 Terra，`economy` 走 Luna；同时新增 `gpt-5.6*` vendor-family lanes，让显式模型请求先走同家族再降级到既有质量 lane。
+- **供应链边界**：`openai/*` official API aliases 使用官方 1.05M context；`openai-codex/*` subscription aliases 继续保守使用 272K context cap，因为线上 Codex 订阅后端已有 `context_length_exceeded` 证据。这里优先避免 oversized 请求先打到必失败的订阅后端。
+- **价格决策**：telemetry pricing 使用官方标准 tier，不使用 priority tier；cache write 按 1.25x input 记录，cache read 使用折扣价。成本数据只用于观测，不参与路由选择。
+- **兼容性**：Codex OAuth 仍是 curated-only（无 live list endpoint），新 curated list 以 GPT-5.6 family 开头并保留 GPT-5.5/GPT-5.4/GPT-5.4-mini，管理员保存的 enabledModels 仍然是权威覆盖。
+
 ## 2026-07-09 · 个人门户（Self-Service Portal）完整实现 + 补齐 + 多语言（docs/12，原则 1/6/7）→ v0.26.0
 
 - **v0.26.0 发布范围**：整个 self-service portal（apps/portal 新 SvelteKit SPA）+ 6 个 bearer-scoped 端点 + 白名单脱敏 + Docker 集成 + admin/portal 7 语言 i18n。

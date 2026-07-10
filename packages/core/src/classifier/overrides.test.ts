@@ -148,7 +148,10 @@ describe("evaluateOverrides — cheap model low-risk current turn (set → simpl
   const cheapModelLowRisk = {
     requested_model_markers: [
       "economy",
+      "gpt-5.6-luna",
+      "gpt-5.6-luna-*",
       "gpt-5.4-mini",
+      "gpt-5.4-mini-*",
       "spark",
       "*deepseek-v4-flash",
       "claude-haiku",
@@ -190,6 +193,10 @@ describe("evaluateOverrides — cheap model low-risk current turn (set → simpl
 
   it.each([
     "economy",
+    "gpt-5.6-luna",
+    "gpt-5.6-luna-20260710",
+    "gpt-5.4-mini",
+    "gpt-5.4-mini-20260101",
     "deepseek-v4-flash",
     "deepseek/deepseek-v4-flash",
     "openrouter/deepseek-v4-flash",

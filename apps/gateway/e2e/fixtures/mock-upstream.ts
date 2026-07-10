@@ -42,14 +42,11 @@ export function echoResponse(model: string) {
 // gateway to fall forward to the next in-chain candidate. Exported so the spec
 // and the mock stay in lockstep.
 //
-// The economy lane head is the alias `deepseek/deepseek-v4-flash`, whose RESOLVED
-// provider_model is the BARE upstream id `deepseek-v4-flash` (alias != provider_
-// model — the upstream accepts the bare id). The gateway forwards that resolved
-// provider_model upstream as `model`, so the mock must match on the BARE id. Keep
-// in lockstep with config/providers.yaml's `provider_model` for config/lanes.yaml
-// `economy.primary`.
+// The e2e economy serving head is the official OpenAI GPT-5.6 Luna fallback
+// (`openai-codex/*` is skipped without a subscription). The gateway forwards the
+// resolved provider_model upstream as `model`, so the mock matches the bare wire id.
 export const FAIL_PRIMARY_SENTINEL = "__HELM_FAIL_PRIMARY__";
-export const FAIL_PRIMARY_MODEL = "deepseek-v4-flash";
+export const FAIL_PRIMARY_MODEL = "gpt-5.6-luna";
 
 // Image-lane fallback steering: a sentinel in the image prompt fails ONLY the
 // `gemini-image` lane's PRIMARY (gemini-3.1-flash-image) on the generateContent

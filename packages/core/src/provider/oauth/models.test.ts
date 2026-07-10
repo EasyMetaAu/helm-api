@@ -20,6 +20,18 @@ describe("discoverOAuthModels", () => {
     );
   });
 
+  it("keeps the Codex curated fallback on the GPT-5.6 family first", () => {
+    expect(CURATED_OAUTH_MODELS["openai-codex"]).toEqual([
+      "gpt-5.6",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
+      "gpt-5.4",
+      "gpt-5.4-mini",
+    ]);
+  });
+
   it("discovers Anthropic models LIVE from /v1/models when a token is present", async () => {
     vi.stubGlobal(
       "fetch",

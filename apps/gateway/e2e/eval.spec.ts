@@ -44,16 +44,12 @@ const AUTH = {
 // deliberately omits this and runs at the shipped default threshold.
 const UNCERTAIN = { ...AUTH, "x-helm-rules-threshold": "0.99" };
 
-// Shipped config/lanes.yaml candidate heads (alias-namespace alignment,
-// 2026-05-31). Keep in lockstep with config/lanes.yaml `balanced`/`premium`
-// primaries.
-// These e2e run with NO subscription connected, so a lane's nominal `openai-codex/*`
-// primary is SKIPPED (provider_unavailable) and the lane serves its first STATIC
-// fallback. balanced serves deepseek/deepseek-v4-pro; premium's first mock-backed
-// candidate is zenmux/gpt-5.5 (ZenMux is keyed in the e2e — it carries gpt-image-2),
-// so the two lanes serve DIFFERENT models (also told apart by the x-helm-lane header).
-const BALANCED_HEAD = "deepseek/deepseek-v4-pro";
-const PREMIUM_HEAD = "zenmux/gpt-5.5";
+// Shipped config/lanes.yaml candidate heads. These e2e run with no Codex
+// subscription connected, so `openai-codex/*` is skipped. The official OpenAI
+// provider is keyed with a dummy key and redirected to the mock, so the GPT-5.6
+// official fallbacks serve first.
+const BALANCED_HEAD = "openai/gpt-5.6-terra";
+const PREMIUM_HEAD = "openai/gpt-5.6-sol";
 
 // An intentionally ambiguous prompt: no strong Layer-1 keyword signal. Paired
 // with the UNCERTAIN header (rules threshold 0.99) the cascade is guaranteed to

@@ -29,7 +29,10 @@ function fullClassifier() {
         cheap_model_low_risk: {
           requested_model_markers: [
             "economy",
+            "gpt-5.6-luna",
+            "gpt-5.6-luna-*",
             "gpt-5.4-mini",
+            "gpt-5.4-mini-*",
             "spark",
             "*deepseek-v4-flash",
             "claude-haiku",
