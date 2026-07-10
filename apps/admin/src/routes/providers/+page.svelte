@@ -724,6 +724,13 @@
             {@const usageLimitRecovery = usageLimit ? autoRecoverIn(usageLimit.untilMs) : ''}
             {@const credentialFailed = row.account.credentialFailed === true}
             {@const additionalLimits = isCodex ? additionalLimitNames(quota) : []}
+            {@const hasCodexQuotaMetadata =
+              isCodex &&
+              Boolean(
+                quota?.planType ||
+                quota?.credits ||
+                rateLimitReachedLabel(quota?.rateLimitReachedType),
+              )}
             {@const hasCodexIdentity =
               isCodex &&
               Boolean(
@@ -942,7 +949,7 @@
                     {rateLimitReachedLabel(quota?.rateLimitReachedType)}
                   </div>
                 {/if}
-                {#if !(quota && quota.windows.length > 0) && additionalLimits.length === 0 && codexCredits == null && !quota?.individualLimit}
+                {#if !(quota && quota.windows.length > 0) && additionalLimits.length === 0 && codexCredits == null && !quota?.individualLimit && !hasCodexQuotaMetadata}
                   <span class="text-xs text-ink-muted">—</span>
                 {/if}
               </td>

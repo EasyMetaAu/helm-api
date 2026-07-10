@@ -38,11 +38,12 @@ export function codexWebSocketAgent(proxy: ProxyConfig | undefined): HttpAgent |
 
 class WsCodexConnection implements CodexResponsesWebSocketConnection {
   readonly responseHeaders: Headers;
-  private readonly pending: Array<string | null | Error> = [];
+  private readonly pending: string[] = [];
   private readonly waiters: Array<{
     resolve: (value: string | null) => void;
     reject: (error: Error) => void;
   }> = [];
+  private terminal: Error | null | undefined;
 
   constructor(
     private readonly socket: WebSocket,
@@ -55,10 +56,18 @@ class WsCodexConnection implements CodexResponsesWebSocketConnection {
   }
 
   private enqueue(value: string | null | Error): void {
+    if (this.terminal !== undefined) return;
+    if (value === null || value instanceof Error) {
+      this.terminal = value;
+      for (const waiter of this.waiters.splice(0)) {
+        if (value instanceof Error) waiter.reject(value);
+        else waiter.resolve(value);
+      }
+      return;
+    }
     const waiter = this.waiters.shift();
     if (waiter) {
-      if (value instanceof Error) waiter.reject(value);
-      else waiter.resolve(value);
+      waiter.resolve(value);
       return;
     }
     this.pending.push(value);
@@ -79,10 +88,9 @@ class WsCodexConnection implements CodexResponsesWebSocketConnection {
 
   async receive(): Promise<string | null> {
     const next = this.pending.shift();
-    if (next !== undefined) {
-      if (next instanceof Error) throw next;
-      return next;
-    }
+    if (next !== undefined) return next;
+    if (this.terminal instanceof Error) throw this.terminal;
+    if (this.terminal === null) return null;
     return await new Promise<string | null>((resolve, reject) => {
       this.waiters.push({ resolve, reject });
     });

@@ -1,11 +1,12 @@
 import { once } from "node:events";
-import type { IncomingMessage } from "node:http";
-import { createServer } from "node:http";
+import { createServer, IncomingMessage } from "node:http";
+import { Socket } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import {
   installResponsesWebSocketBridge,
   isResponsesWebSocketPath,
+  type ResponsesWebSocketUpgradeServer,
 } from "./responses-websocket.js";
 
 interface CapturedRequest {
@@ -132,6 +133,60 @@ describe("Responses websocket bridge", () => {
     "/v1/chat/completions",
   ])("rejects non-create path %s", (path) => {
     expect(isResponsesWebSocketPath(path)).toBe(false);
+  });
+
+  it("handles an upgrade socket reset while async preflight is pending", async () => {
+    let upgradeListener: Parameters<ResponsesWebSocketUpgradeServer["on"]>[1] | undefined;
+    const server: ResponsesWebSocketUpgradeServer = {
+      on(_event, listener) {
+        upgradeListener = listener;
+      },
+      off(_event, listener) {
+        if (upgradeListener === listener) upgradeListener = undefined;
+      },
+    };
+    let resolvePreflight!: (response: Response) => void;
+    let preflightStarted = false;
+    const preflight = new Promise<Response>((resolve) => {
+      resolvePreflight = resolve;
+    });
+    const bridge = installResponsesWebSocketBridge({
+      server,
+      fetch: () => {
+        preflightStarted = true;
+        return preflight;
+      },
+    });
+    openBridges.push(bridge);
+
+    const socket = new Socket();
+    const request = new IncomingMessage(socket);
+    request.method = "GET";
+    request.url = "/v1/responses";
+    upgradeListener?.(request, socket, Buffer.alloc(0));
+    expect(preflightStarted).toBe(true);
+
+    let unhandledError: unknown;
+    try {
+      socket.emit(
+        "error",
+        Object.assign(new Error("socket hang up"), {
+          code: "ECONNRESET",
+        }),
+      );
+    } catch (error) {
+      unhandledError = error;
+    } finally {
+      socket.destroy();
+      resolvePreflight(
+        new Response(JSON.stringify({ data: [] }), {
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    expect(unhandledError).toBeUndefined();
   });
 
   it("supports prewarm and a second response.create on the same connection", async () => {

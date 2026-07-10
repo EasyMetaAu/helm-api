@@ -7,7 +7,7 @@ import {
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { SocksProxyAgent } from "socks-proxy-agent";
 import { afterEach, describe, expect, it } from "vitest";
-import { WebSocketServer } from "ws";
+import { type WebSocket, WebSocketServer } from "ws";
 import {
   codexWebSocketAgent,
   createCodexResponsesWebSocketConnector,
@@ -31,6 +31,20 @@ async function listen(server: ReturnType<typeof createServer>): Promise<number> 
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("server did not bind");
   return address.port;
+}
+
+async function settlePromptly<T>(promise: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("receive did not settle promptly")), 1_000);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 describe("createCodexResponsesWebSocketConnector", () => {
@@ -66,6 +80,67 @@ describe("createCodexResponsesWebSocketConnector", () => {
     await connection.send('{"type":"response.create"}');
     expect(await connection.receive()).toContain("response.created");
     expect(await connection.receive()).toContain("response.completed");
+  });
+
+  it("keeps close terminal state stable for current and future receivers", async () => {
+    const server = createServer();
+    const websocketServer = new WebSocketServer({ noServer: true });
+    server.on("upgrade", (request, socket, head) => {
+      websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+        websocketServer.emit("connection", websocket, request);
+      });
+    });
+    const serverConnection = once(websocketServer, "connection");
+    const port = await listen(server);
+    const connector = createCodexResponsesWebSocketConnector({ timeoutMs: 2_000 });
+    const connection = await connector({
+      url: `ws://127.0.0.1:${port}/responses`,
+      headers: {},
+    });
+    connections.push(connection);
+    const [serverSocket] = (await serverConnection) as [WebSocket];
+    const currentReceiveA = connection.receive();
+    const currentReceiveB = connection.receive();
+
+    serverSocket.close(1000);
+
+    expect(await settlePromptly(currentReceiveA)).toBeNull();
+    expect(await settlePromptly(currentReceiveB)).toBeNull();
+    expect(await settlePromptly(connection.receive())).toBeNull();
+    expect(await settlePromptly(connection.receive())).toBeNull();
+  });
+
+  it("keeps error terminal state stable for current and future receivers", async () => {
+    const server = createServer();
+    const websocketServer = new WebSocketServer({ noServer: true });
+    server.on("upgrade", (request, socket, head) => {
+      websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+        websocketServer.emit("connection", websocket, request);
+      });
+    });
+    const serverConnection = once(websocketServer, "connection");
+    const port = await listen(server);
+    const connector = createCodexResponsesWebSocketConnector({ timeoutMs: 2_000 });
+    const connection = await connector({
+      url: `ws://127.0.0.1:${port}/responses`,
+      headers: {},
+    });
+    connections.push(connection);
+    const [serverSocket] = (await serverConnection) as [WebSocket];
+    const currentReceiveA = connection.receive();
+    const currentReceiveB = connection.receive();
+    const rawSocket = (
+      serverSocket as WebSocket & {
+        _socket: { write(data: Buffer): boolean };
+      }
+    )._socket;
+
+    rawSocket.write(Buffer.from([0xa1, 0x00]));
+
+    await expect(settlePromptly(currentReceiveA)).rejects.toThrow(Error);
+    await expect(settlePromptly(currentReceiveB)).rejects.toThrow(Error);
+    await expect(settlePromptly(connection.receive())).rejects.toThrow(Error);
+    await expect(settlePromptly(connection.receive())).rejects.toThrow(Error);
   });
 
   it("captures a non-101 response for account-scoped error mapping", async () => {

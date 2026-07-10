@@ -462,6 +462,10 @@ export function installResponsesWebSocketBridge({
       socket.destroy();
       return;
     }
+    const onPreflightSocketError = () => {
+      socket.destroy();
+    };
+    socket.on("error", onPreflightSocketError);
     void preflightUpgrade(request, fetch)
       .then(async ({ response, metadata }) => {
         if (closed || socket.destroyed) {
@@ -491,6 +495,9 @@ export function installResponsesWebSocketBridge({
             headers: { "content-type": "application/json" },
           }),
         );
+      })
+      .finally(() => {
+        socket.off("error", onPreflightSocketError);
       });
   };
   server.on("upgrade", onUpgrade);

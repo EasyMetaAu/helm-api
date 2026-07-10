@@ -114,7 +114,7 @@ async function automaticCodexModels(
     const snapshot = options.codexCatalog.snapshot(key);
     if (!snapshot) return undefined;
     return expandOpenAICodexModelAliases(
-      snapshot.models
+      [...snapshot.models]
         .sort((left, right) => left.priority - right.priority)
         .map((model) => model.slug),
     );

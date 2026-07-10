@@ -174,6 +174,34 @@ describe("effectiveOAuthAliases", () => {
 });
 
 describe("effectiveOAuthModelOptions", () => {
+  it("does not mutate the original Codex catalog snapshot model order", async () => {
+    const { tokens, config } = makeStores();
+    await bind(tokens, "openai-codex", "default", { accountId: "acc-default" });
+    const baseCatalog = codexCatalog({
+      default: [
+        { slug: "gpt-5.6-luna", priority: 20 },
+        { slug: "gpt-5.6-sol", priority: 1 },
+      ],
+    });
+    const snapshot = baseCatalog.snapshot({
+      providerId: "openai-codex",
+      account: "default",
+      accountIdentity: "acc-default",
+      clientVersion: "0.144.1",
+    });
+    if (!snapshot) throw new Error("expected catalog snapshot");
+    const catalog = {
+      ...baseCatalog,
+      snapshot: () => snapshot,
+    };
+
+    await effectiveOAuthModelOptions({ store: tokens, encKey: KEY }, config, ROUTABLE, {
+      codexCatalog: catalog,
+    });
+
+    expect(snapshot.models.map((model) => model.slug)).toEqual(["gpt-5.6-luna", "gpt-5.6-sol"]);
+  });
+
   it("groups the exposing account(s) under each alias (sorted, deduped)", async () => {
     const { tokens, config } = makeStores();
     // Two Codex accounts: both expose Sol; only `default` exposes Luna.
