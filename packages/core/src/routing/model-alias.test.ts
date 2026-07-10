@@ -53,6 +53,16 @@ describe("resolveModelAlias", () => {
     expect(resolveModelAlias("gpt-5x5", { "gpt-5.5": "premium" })).toBeNull();
   });
 
+  it("prefers GPT-5.6 tier-specific aliases over the broad GPT catch-all", () => {
+    const map = {
+      "gpt-5*": "premium",
+      "gpt-5.6-*": "gpt-5.6",
+      "gpt-5.6-luna-*": "gpt-5.6-luna",
+    };
+    expect(resolveModelAlias("gpt-5.6-luna-20260710", map)).toBe("gpt-5.6-luna");
+    expect(resolveModelAlias("gpt-5.6-preview", map)).toBe("gpt-5.6");
+  });
+
   it("a keyword-wrapped glob with more literals wins (flash-lite beats flash), order-independent", () => {
     // `gemini-*flash-lite*` (17 literals) is more specific than `gemini-*flash*` (12),
     // so a flash-lite id routes to the cheap tier while full-flash falls to the flash lane.

@@ -160,7 +160,7 @@ test.describe("OpenAI client → upstream", () => {
     });
     expect(engineRes.ok()).toBeTruthy();
     const upstream = await lastUpstreamRequest(request);
-    expect(upstream.body.model).toBe("deepseek-v4-flash");
+    expect(upstream.body.model).toBe("gpt-5.6-luna");
   });
 
   test("stream: first chunk carries role, last carries finish_reason, ends [DONE]", async ({

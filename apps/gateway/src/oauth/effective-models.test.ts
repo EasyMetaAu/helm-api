@@ -93,7 +93,7 @@ describe("effectiveOAuthAliases", () => {
     const { tokens, config } = makeStores();
     await bind(tokens, "openai-codex", "default");
     await setAccountSettings(config, KEY, "openai-codex", "default", {
-      enabledModels: ["gpt-5.5"],
+      enabledModels: ["gpt-5.6-sol"],
     });
     // Codex bound but not routable yet → no aliases.
     const aliases = await effectiveOAuthAliases(
@@ -104,7 +104,7 @@ describe("effectiveOAuthAliases", () => {
     expect(aliases).toEqual([]);
     // Once routable, it appears.
     const withCodex = await effectiveOAuthAliases({ store: tokens, encKey: KEY }, config, ROUTABLE);
-    expect(withCodex).toEqual(["openai-codex/gpt-5.5"]);
+    expect(withCodex).toEqual(["openai-codex/gpt-5.6-sol"]);
   });
 
   it("reflects a curation edit on the NEXT read (no caching/snapshot)", async () => {
@@ -127,14 +127,14 @@ describe("effectiveOAuthAliases", () => {
 describe("effectiveOAuthModelOptions", () => {
   it("groups the exposing account(s) under each alias (sorted, deduped)", async () => {
     const { tokens, config } = makeStores();
-    // Two Codex accounts: both expose gpt-5.5; only `default` exposes gpt-5.4.
+    // Two Codex accounts: both expose Sol; only `default` exposes Luna.
     await bind(tokens, "openai-codex", "default");
     await bind(tokens, "openai-codex", "mylukin");
     await setAccountSettings(config, KEY, "openai-codex", "default", {
-      enabledModels: ["gpt-5.5", "gpt-5.4"],
+      enabledModels: ["gpt-5.6-sol", "gpt-5.6-luna"],
     });
     await setAccountSettings(config, KEY, "openai-codex", "mylukin", {
-      enabledModels: ["gpt-5.5"],
+      enabledModels: ["gpt-5.6-sol"],
     });
     const options = await effectiveOAuthModelOptions(
       { store: tokens, encKey: KEY },
@@ -142,8 +142,8 @@ describe("effectiveOAuthModelOptions", () => {
       ROUTABLE,
     );
     expect(options).toEqual([
-      { alias: "openai-codex/gpt-5.4", accounts: ["default"] },
-      { alias: "openai-codex/gpt-5.5", accounts: ["default", "mylukin"] },
+      { alias: "openai-codex/gpt-5.6-luna", accounts: ["default"] },
+      { alias: "openai-codex/gpt-5.6-sol", accounts: ["default", "mylukin"] },
     ]);
   });
 });

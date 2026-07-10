@@ -130,20 +130,20 @@ describe("GET /v1/models", () => {
     // contain a hyphen (ROUTABLE_OAUTH keys, e.g. `openai-codex`). owned_by must be
     // the FULL prefix before the first slash, not a truncation.
     const res = await buildApp(record({ allow_custom_model: true }), () => [
-      "openai-codex/gpt-5.4",
+      "openai-codex/gpt-5.6-sol",
       "deepseek/pro", // overlaps a configured alias -> deduped, listed once
     ]).request("/v1/models", { headers: AUTH });
     const body = (await res.json()) as ModelsList;
     const ids = body.data.map((m) => m.id);
-    expect(ids).toContain("openai-codex/gpt-5.4");
+    expect(ids).toContain("openai-codex/gpt-5.6-sol");
     expect(ids.filter((id) => id === "deepseek/pro")).toHaveLength(1);
-    const codex = body.data.find((m) => m.id === "openai-codex/gpt-5.4");
+    const codex = body.data.find((m) => m.id === "openai-codex/gpt-5.6-sol");
     expect(codex?.type).toBe("model");
     expect(codex?.owned_by).toBe("openai-codex");
   });
 
   it("normal key: subscription aliases stay hidden (lane abstraction)", async () => {
-    const res = await buildApp(record(), () => ["openai-codex/gpt-5.4"]).request("/v1/models", {
+    const res = await buildApp(record(), () => ["openai-codex/gpt-5.6-sol"]).request("/v1/models", {
       headers: AUTH,
     });
     const body = (await res.json()) as ModelsList;

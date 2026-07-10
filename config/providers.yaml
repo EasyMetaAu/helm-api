@@ -34,16 +34,17 @@
 # HELM_PROVIDER_BASE_URL so the mock upstream serves all of them.
 #
 # ─────────────────────────────────────────────────────────────────────────────
-# PRIMARY = official DeepSeek; premium/coding lanes route through the openai-codex
-# SUBSCRIPTION channel (2026-06-03, task drop-openai-crs-relay). The former
-# self-built `openai-crs` relay (la.atmy.work) was deleted: it WAS just a proxy in
-# front of a ChatGPT/Codex subscription, which Helm now connects natively via the
-# built-in `openai-codex` OAuth preset (admin → Providers → Connect). That preset
-# is SYNTHESIZED at runtime — it exposes its models as `openai-codex/<model>`
-# aliases keyed by the OAuth provider id — so it must NOT be declared as a static
-# provider here, or the duplicate alias would fail-closed. Lanes may reference
-# `openai-codex/*` even before a subscription is connected: an unconnected alias
-# fails OPEN (Phase-0 back-fill / skip to the next fallback), never a 5xx.
+# PRIMARY STATIC FALLBACK = official DeepSeek. The quality lanes now lead with the
+# synthesized `openai-codex/*` subscription aliases and then the static official
+# OpenAI GPT-5.6 API aliases below. The former self-built `openai-crs` relay
+# (la.atmy.work) was deleted: it WAS just a proxy in front of a ChatGPT/Codex
+# subscription, which Helm now connects natively via the built-in `openai-codex`
+# OAuth preset (admin → Providers → Connect). That preset is SYNTHESIZED at
+# runtime — it exposes its models as `openai-codex/<model>` aliases keyed by the
+# OAuth provider id — so it must NOT be declared as a static provider here, or the
+# duplicate alias would fail-closed. Lanes may reference `openai-codex/*` even
+# before a subscription is connected: an unconnected alias fails OPEN (Phase-0
+# back-fill / skip to the next fallback), never a 5xx.
 providers:
   # PRIMARY provider (providers[0]). Backs the default path, the Layer-2 eval
   # call, and the Phase-0 passthrough; its credential (DEEPSEEK_API_KEY) is
@@ -83,8 +84,8 @@ providers:
       # `zenmux-anthropic` provider below (issue #217). The former OpenAI-compat
       # `zenmux/claude-*` aliases were removed: same upstream, but the native wire
       # preserves prompt-cache / tool-use and skips the lossy IR translation.
-      # openai/gpt-5.5 — premium fallback when no Codex subscription is connected
-      # (zenmux real id).
+      # openai/gpt-5.5 — legacy premium fallback when no Codex subscription or
+      # official OpenAI key is connected (zenmux real id).
       - alias: zenmux/gpt-5.5
         provider_model: openai/gpt-5.5
       # OpenAI IMAGE GENERATION (Images API). A bare alias so OpenAI clients can pin
@@ -185,12 +186,22 @@ providers:
   # (set OPENAI_API_KEY / GEMINI_API_KEY in the environment); an unset key just makes
   # that provider unavailable (the chain skips it), never a boot failure.
 
-  # OpenAI OFFICIAL — direct Images API for gpt-image-2.
+  # OpenAI OFFICIAL — direct Responses/Chat models for GPT-5.6, plus Images API
+  # for gpt-image-2. If OPENAI_API_KEY is unset, these aliases are simply
+  # unavailable and the lane chain skips to the next fallback.
   - name: openai
     type: openai
     base_url: https://api.openai.com/v1
     api_key_env: OPENAI_API_KEY
     models:
+      - alias: openai/gpt-5.6
+        provider_model: gpt-5.6
+      - alias: openai/gpt-5.6-sol
+        provider_model: gpt-5.6-sol
+      - alias: openai/gpt-5.6-terra
+        provider_model: gpt-5.6-terra
+      - alias: openai/gpt-5.6-luna
+        provider_model: gpt-5.6-luna
       - alias: openai/gpt-image-2
         provider_model: gpt-image-2
 
@@ -296,11 +307,11 @@ providers:
   #       provider_model: gpt-4o
   #
   # ChatGPT Plus/Pro — Codex (browser login + paste redirect URL).
-  # This is the default lane channel for premium/coding/tool_use (config/lanes.yaml
-  # references openai-codex/gpt-5.5, openai-codex/gpt-5.4, openai-codex/gpt-5.4-mini
-  # — the models the Codex subscription actually exposes). Just connect it in the
-  # admin UI (Providers → Connect) — the pool is SYNTHESIZED and its models become
-  # `openai-codex/<model>` aliases automatically; NO YAML needed.
+  # This is the default lane channel for the GPT-5.6-led quality/task lanes
+  # (config/lanes.yaml references openai-codex/gpt-5.6*, plus older GPT fallbacks).
+  # Just connect it in the admin UI (Providers → Connect) — the pool is
+  # SYNTHESIZED and its models become `openai-codex/<model>` aliases automatically;
+  # NO YAML needed.
   # Declare a static block ONLY to pin a custom alias to a specific upstream id:
   # - name: chatgpt-codex
   #   type: openai

@@ -49,19 +49,61 @@
 # stream-only relay), so no `requiresStreaming` constraint applies. `deepseek/*`
 # are the official DeepSeek API models (providers[0]).
 #
-# These three are EXACTLY the curated Codex set the subscription exposes
-# (packages/core/src/provider/oauth/models.ts — the ChatGPT-account Codex backend
-# 400s on legacy `*-codex`/`*-pro` slugs, verified live), so every exposed alias
-# an operator can pick has a capability + pricing entry here.
+# Every curated Codex model (packages/core/src/provider/oauth/models.ts) needs a
+# manual capability entry here because the subscription aliases are synthesized at
+# runtime and do not exist in LiteLLM's generated catalog.
 #
-# CONTEXT WINDOW = 272000 for ALL THREE. The ChatGPT/Codex SUBSCRIPTION caps the
-# effective window at 272K regardless of the underlying model's API window (the
-# API `gpt-5.5` is 1.05M — see zenmux/gpt-5.5 below — but the subscription is NOT).
-# Empirically the codex backend 400s `context_length_exceeded` above ~272K: on
-# la.atmy.work the max input it ever served was 271,529 over 5,919 calls, and every
-# request ≳272K (e.g. a 597K Claude Code passthrough) was rejected. The wrong 1.05M
-# value let the capability filter route oversized requests here, burning a guaranteed
-# upstream 400 before failing over (the whole point of the context_too_small gate).
+# CONTEXT WINDOW = 272000 for `openai-codex/*`. The ChatGPT/Codex SUBSCRIPTION
+# caps the effective window at 272K regardless of the underlying model's API window
+# (official GPT-5.6/GPT-5.5 are 1.05M, but the subscription is not). Empirically
+# the codex backend 400s `context_length_exceeded` above ~272K: on la.atmy.work the
+# max input it ever served was 271,529 over 5,919 calls, and every request ≳272K
+# (e.g. a 597K Claude Code passthrough) was rejected. The wrong 1.05M value would
+# route oversized requests here and burn a guaranteed upstream 400 before failover.
+openai-codex/gpt-5.6:
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  reasoningEffort:
+    openaiReasoning:
+      supported: true
+      levels: [none, low, medium, high, xhigh, max]
+  maxContextTokens: 272000
+  maxOutputTokens: 128000
+openai-codex/gpt-5.6-sol:
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  reasoningEffort:
+    openaiReasoning:
+      supported: true
+      levels: [none, low, medium, high, xhigh, max]
+  maxContextTokens: 272000
+  maxOutputTokens: 128000
+openai-codex/gpt-5.6-terra:
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  reasoningEffort:
+    openaiReasoning:
+      supported: true
+      levels: [none, low, medium, high, xhigh, max]
+  maxContextTokens: 272000
+  maxOutputTokens: 128000
+openai-codex/gpt-5.6-luna:
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  reasoningEffort:
+    openaiReasoning:
+      supported: true
+      levels: [none, low, medium, high, xhigh, max]
+  maxContextTokens: 272000
+  maxOutputTokens: 128000
 openai-codex/gpt-5.5:
   supportsTools: true
   jsonOutput: schema
@@ -133,6 +175,50 @@ openrouter/deepseek-v4-flash:
   maxOutputTokens: 65536 # OpenRouter /v1/models: deepseek-v4-flash max_completion_tokens=65536
 # Claude capabilities now live under the native `zenmux-anthropic/claude-*` aliases
 # below (issue #217); the OpenAI-compat `zenmux/claude-*` entries were removed.
+openai/gpt-5.6:
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  reasoningEffort:
+    openaiReasoning:
+      supported: true
+      levels: [none, low, medium, high, xhigh, max]
+  maxContextTokens: 1050000
+  maxOutputTokens: 128000
+openai/gpt-5.6-sol:
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  reasoningEffort:
+    openaiReasoning:
+      supported: true
+      levels: [none, low, medium, high, xhigh, max]
+  maxContextTokens: 1050000
+  maxOutputTokens: 128000
+openai/gpt-5.6-terra:
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  reasoningEffort:
+    openaiReasoning:
+      supported: true
+      levels: [none, low, medium, high, xhigh, max]
+  maxContextTokens: 1050000
+  maxOutputTokens: 128000
+openai/gpt-5.6-luna:
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  reasoningEffort:
+    openaiReasoning:
+      supported: true
+      levels: [none, low, medium, high, xhigh, max]
+  maxContextTokens: 1050000
+  maxOutputTokens: 128000
 zenmux/gpt-5.5:
   supportsTools: true
   jsonOutput: schema
