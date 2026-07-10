@@ -897,6 +897,21 @@ function stripReasoningEffort(body: Record<string, unknown>): Record<string, unk
   return next;
 }
 
+function hasOpenAIChatFunctionTools(body: Record<string, unknown>): boolean {
+  const tools = body.tools;
+  if (Array.isArray(tools)) {
+    for (const tool of tools) {
+      if (!isPlainRecord(tool)) continue;
+      if (tool.type === "function" || isPlainRecord(tool.function)) return true;
+    }
+  }
+  return Array.isArray(body.functions) && body.functions.length > 0;
+}
+
+function isGpt56FamilyModel(model: unknown): boolean {
+  return typeof model === "string" && /^gpt-5\.6(?:$|-)/.test(model);
+}
+
 function openAIReasoningEffort(body: Record<string, unknown>): string | null {
   if (!isPlainRecord(body.reasoning)) return null;
   return nonEmptyString(body.reasoning.effort);
@@ -938,6 +953,25 @@ function applyOpenAIReasoningPolicy(
     return next;
   }
   return body;
+}
+
+function applyOpenAIChatToolReasoningPolicy(
+  body: Record<string, unknown>,
+  mutations: NativePassthroughCarrier["mutations"],
+): Record<string, unknown> {
+  if (!isGpt56FamilyModel(body.model)) return body;
+  if (!hasOpenAIChatFunctionTools(body)) return body;
+  const hasReasoningEffort =
+    body.reasoning_effort !== undefined || openAIReasoningEffort(body) !== null;
+  if (!hasReasoningEffort) return body;
+
+  const withoutTopLevel = stripReasoningEffort(body);
+  const withoutNested =
+    openAIReasoningEffort(withoutTopLevel) !== null
+      ? applyOpenAIReasoningEffort(withoutTopLevel, { kind: "strip", mapped: false })
+      : withoutTopLevel;
+  appendReasoningPolicyShim(mutations, "reasoning_effort_stripped_for_chat_tools");
+  return withoutNested;
 }
 
 const STRIP_REASONING_EFFORT_POLICY: ReasoningEffortWireCapability = { supported: false };
@@ -1038,7 +1072,15 @@ function applyReasoningEffortPolicy(
   const crossProtocol = sourceProtocol !== targetProviderProtocol;
 
   switch (targetProviderProtocol) {
-    case "openai_chat":
+    case "openai_chat": {
+      const next = applyOpenAIReasoningPolicy(
+        body,
+        policy?.openaiReasoning ??
+          (caps !== undefined && crossProtocol ? STRIP_REASONING_EFFORT_POLICY : undefined),
+        mutations,
+      );
+      return applyOpenAIChatToolReasoningPolicy(next, mutations);
+    }
     case "openai_responses":
       return applyOpenAIReasoningPolicy(
         body,

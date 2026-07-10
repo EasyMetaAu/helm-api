@@ -355,6 +355,69 @@ describe("createExecute — gateway execution adapter", () => {
     expect(body).not.toHaveProperty("max_tokens");
   });
 
+  it("strips GPT-5.6 chat reasoning_effort when function tools are present", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: protocolRegistry({
+        "openai/gpt-5.6-luna": {
+          providerName: "mock",
+          providerModel: "gpt-5.6-luna",
+          targetProviderProtocol: "openai_chat",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map([
+        [
+          "openai/gpt-5.6-luna",
+          entry("openai/gpt-5.6-luna", {
+            reasoningEffort: {
+              openaiReasoning: {
+                supported: true,
+                levels: ["none", "low", "medium", "high", "xhigh", "max"],
+              },
+            },
+          }),
+        ],
+      ]),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const tool = {
+      type: "function",
+      function: {
+        name: "git_push",
+        description: "Push the current branch",
+        parameters: { type: "object", properties: {} },
+      },
+    };
+    const out = await execute(
+      plan(["openai/gpt-5.6-luna"]),
+      req({
+        protocol: "anthropic_messages",
+        reasoning_effort: "medium",
+        tools: [tool],
+      }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    const body = (provider.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(body.model).toBe("gpt-5.6-luna");
+    expect(body.tools).toEqual([tool]);
+    expect(body.reasoning_effort).toBeUndefined();
+    expect(out.attempts[0]?.request_mutations).toMatchObject({
+      body_shims_applied: ["reasoning_effort_stripped_for_chat_tools"],
+    });
+  });
+
   it.each([
     "openai_chat",
     "anthropic_messages",
