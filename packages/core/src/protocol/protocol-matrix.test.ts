@@ -921,6 +921,27 @@ describe("developer-role cross-path fold (issue #50)", () => {
   });
 });
 
+// Focused cross-path check for OpenAI GPT-5.6 output caps. The live failure was:
+// Responses max_output_tokens -> IR max_tokens -> official OpenAI GPT-5.6 chat wire
+// max_tokens, which upstream rejects; GPT-5.6 needs max_completion_tokens.
+describe("Responses -> OpenAI GPT-5.6 output cap render", () => {
+  it("renders max_output_tokens as max_completion_tokens for GPT-5.6 family models", async () => {
+    const ir = await requestOut.responses({
+      model: "gpt-5.6-luna",
+      input: [{ role: "user", content: "hi" }],
+      max_output_tokens: 32000,
+    });
+    const openai = (await requestIn.openai?.(ir)) as {
+      max_tokens?: number;
+      max_completion_tokens?: number;
+    };
+
+    expect(openai.max_completion_tokens).toBe(32000);
+    expect(openai).not.toHaveProperty("max_tokens");
+    expect(openai.max_tokens).toBeUndefined();
+  });
+});
+
 // Focused cross-path check for reasoning/thinking (P6). Intentionally NOT a new
 // matrix dimension — protocolMatrixDimensions stays untouched so the "every path
 // has every dimension" invariant above still holds. A single reasoning-bearing IR
