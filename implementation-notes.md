@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-07-10 · GPT-5.6 Chat tools strip reasoning_effort（Provider execution / protocol translation，docs/04/05/07，原则 3/5/8）
+
+- **背景（Lukin）**：生产请求 `fd9fb61e-7ed0-4950-aecc-a7966b1caf33` 从 Anthropic Messages 协议进入 `economy` lane，`openai-codex/gpt-5.6-luna` 404 后 fallback 到 official `openai/gpt-5.6-luna`。该 fallback 使用 `/v1/chat/completions`，请求同时带 function tools 与 lane-forced `reasoning_effort: medium`，OpenAI 返回 400：该组合只支持 `/v1/responses` 或 `reasoning_effort: none`。
+- **修复决策**：不把 GPT-5.6 的 reasoning 能力整体关闭；只在 `targetProviderProtocol === openai_chat`、resolved model 属于 `gpt-5.6*`、且请求带 function tools/functions 时剥离 Chat wire 上的 `reasoning_effort` / `reasoning.effort`。Responses 路径、无工具请求、以及非 GPT-5.6 模型不受影响。
+- **观测**：触发时写入 `request_mutations.body_shims_applied: ["reasoning_effort_stripped_for_chat_tools"]`，区别于“模型完全不支持 reasoning”的 `reasoning_effort_stripped_for_model`，方便 Admin 请求详情定位。
+- **验证**：新增 execute 回归测试复现 Anthropic→OpenAI Chat fallback + GPT-5.6 Luna + tools + reasoning 的组合，断言 tools 保留、reasoning_effort 不再发给上游。
+
 ## 2026-07-10 · GPT-5.6 family support in Helm defaults（Routing / provider catalog / cost telemetry，docs/03/04/07，原则 3/4/5/6）
 
 - **官方来源**：OpenAI latest-model docs 确认 `gpt-5.6` alias routes to `gpt-5.6-sol`，并给出 `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` 三档；OpenAI Models/Pricing docs 确认 1,050,000 context、128,000 max output、Responses/Chat/Batch 支持，以及标准价 input/cache-read/cache-write/output。
