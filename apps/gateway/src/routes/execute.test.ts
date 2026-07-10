@@ -355,7 +355,7 @@ describe("createExecute — gateway execution adapter", () => {
     expect(body).not.toHaveProperty("max_tokens");
   });
 
-  it("strips GPT-5.6 chat reasoning_effort when function tools are present", async () => {
+  it("sets GPT-5.6 chat reasoning_effort none when function tools are present", async () => {
     const provider = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
       chatCompletionStream: vi.fn(),
@@ -412,13 +412,13 @@ describe("createExecute — gateway execution adapter", () => {
     >;
     expect(body.model).toBe("gpt-5.6-luna");
     expect(body.tools).toEqual([tool]);
-    expect(body.reasoning_effort).toBeUndefined();
+    expect(body.reasoning_effort).toBe("none");
     expect(out.attempts[0]?.request_mutations).toMatchObject({
-      body_shims_applied: ["reasoning_effort_stripped_for_chat_tools"],
+      body_shims_applied: ["reasoning_effort_none_for_chat_tools"],
     });
   });
 
-  it("strips GPT-5.6 chat reasoning_effort for Anthropic-shaped tools without catalog data", async () => {
+  it("sets GPT-5.6 chat reasoning_effort none for Anthropic-shaped tools without catalog data", async () => {
     const provider = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
       chatCompletionStream: vi.fn(),
@@ -460,10 +460,54 @@ describe("createExecute — gateway execution adapter", () => {
     >;
     expect(body.model).toBe("gpt-5.6-luna");
     expect(body.tools).toEqual([tool]);
-    expect(body.reasoning_effort).toBeUndefined();
+    expect(body.reasoning_effort).toBe("none");
     expect(out.attempts[0]?.request_mutations).toMatchObject({
-      body_shims_applied: ["reasoning_effort_stripped_for_chat_tools"],
+      body_shims_applied: ["reasoning_effort_none_for_chat_tools"],
     });
+  });
+
+  it("sets GPT-5.6 chat reasoning_effort none for tools even when the client omits reasoning", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: protocolRegistry({
+        "openai/gpt-5.6-luna": {
+          providerName: "mock",
+          providerModel: "gpt-5.6-luna",
+          targetProviderProtocol: "openai_chat",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    await execute(
+      plan(["openai/gpt-5.6-luna"]),
+      req({
+        protocol: "anthropic_messages",
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "noop_tool",
+              parameters: { type: "object", properties: {} },
+            },
+          },
+        ],
+      }),
+    );
+
+    const body = (provider.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(body.reasoning_effort).toBe("none");
   });
 
   it.each([
