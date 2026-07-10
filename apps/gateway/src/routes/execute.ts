@@ -739,6 +739,26 @@ function hasResponsesHistoryGap(req: InternalRequest): boolean {
   return hasToolOutput && !hasLocalToolCall;
 }
 
+function hasResponsesReasoningHistory(req: InternalRequest): boolean {
+  if (req.protocol !== "openai_responses") return false;
+  if (Array.isArray(req.thinking) && req.thinking.length > 0) return true;
+  return Array.isArray(req.provider_raw?.reasoning) && req.provider_raw.reasoning.length > 0;
+}
+
+function candidateGuardSkipReason(
+  req: InternalRequest,
+  target: ResolvedAttemptTarget,
+): string | null {
+  if (
+    target.providerName === "deepseek" &&
+    target.targetProviderProtocol === "openai_chat" &&
+    hasResponsesReasoningHistory(req)
+  ) {
+    return "reasoning_history_incompatible";
+  }
+  return null;
+}
+
 function protocolGuardSkipReason(
   req: InternalRequest,
   targetProviderProtocol: TargetProviderProtocol,
@@ -1383,6 +1403,13 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       if (protocolSkip !== null) {
         capabilityPruned = true;
         attempts.push(skipRow(alias, protocolSkip, elapsed()));
+        continue;
+      }
+
+      const candidateSkip = candidateGuardSkipReason(req, target);
+      if (candidateSkip !== null) {
+        capabilityPruned = true;
+        attempts.push(skipRow(alias, candidateSkip, elapsed()));
         continue;
       }
 
