@@ -1,5 +1,7 @@
+import { CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER, UpstreamError } from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
+import { CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER } from "../responses-websocket-internal.js";
 import type { MessagesIdentity } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
 import type { RecordServedDeps } from "./payload-capture.js";
@@ -36,13 +38,18 @@ function makeDeps(
     collect?: () => Promise<unknown>;
     streamIR?: () => AsyncIterable<{ [k: string]: unknown }>;
     nativePassthrough?: boolean;
+    responseMetadata?: Record<string, string>;
     run?: ResponsesRouteDeps["pipeline"]["run"];
     rateLimiter?: ResponsesRouteDeps["rateLimiter"];
     concurrencyGate?: ResponsesRouteDeps["concurrencyGate"];
     identity?: MessagesIdentity;
     record?: RecordServedDeps;
     lifecycle?: ResponsesRouteDeps["lifecycle"];
+    budget?: ResponsesRouteDeps["budget"];
+    recordOAuthUsage?: ResponsesRouteDeps["recordOAuthUsage"];
     registry?: ResponsesRouteDeps["registry"];
+    modelsEtag?: string | null;
+    modelsEtagForKey?: ResponsesRouteDeps["modelsEtagForKey"];
   } = {},
 ): { deps: ResponsesRouteDeps; order: string[]; harness: { pipelineSawIR: unknown } } {
   const order: string[] = [];
@@ -52,7 +59,14 @@ function makeDeps(
     concurrencyGate: over.concurrencyGate,
     record: over.record,
     lifecycle: over.lifecycle,
+    budget: over.budget,
+    recordOAuthUsage: over.recordOAuthUsage,
     registry: over.registry,
+    ...(over.modelsEtagForKey !== undefined
+      ? { modelsEtagForKey: over.modelsEtagForKey }
+      : over.modelsEtag === undefined
+        ? {}
+        : { modelsEtagForKey: () => over.modelsEtag ?? null }),
     auth: {
       resolve: async (cred) => {
         order.push("auth");
@@ -87,6 +101,9 @@ function makeDeps(
           return {
             decision: FAKE_DECISION,
             ...(over.nativePassthrough === true ? { nativePassthrough: true } : {}),
+            ...(over.responseMetadata !== undefined
+              ? { responseMetadata: over.responseMetadata }
+              : {}),
             collect: over.collect ?? (async () => ({ id: "ir-resp", choices: [] })),
             streamIR:
               over.streamIR ??
@@ -195,6 +212,174 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     }
   });
 
+  it("returns request-scoped Codex response metadata for non-streaming requests", async () => {
+    const { deps } = makeDeps({
+      responseMetadata: {
+        "openai-model": "gpt-5.6-sol",
+        "x-codex-turn-state": "turn-state-1",
+        "x-models-etag": '"models-v2"',
+        "x-reasoning-included": "true",
+        "x-request-id": "req-upstream-1",
+        "x-codex-primary-used-percent": "25",
+        "set-cookie": "must-not-leak",
+      },
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+
+    expect(res.headers.get("openai-model")).toBe("gpt-5.6-sol");
+    expect(res.headers.get("x-codex-turn-state")).toBe("turn-state-1");
+    expect(res.headers.get("x-models-etag")).toBe('"models-v2"');
+    expect(res.headers.get("x-reasoning-included")).toBe("true");
+    expect(res.headers.get("x-request-id")).toBe("req-upstream-1");
+    expect(res.headers.get("x-codex-primary-used-percent")).toBe("25");
+    expect(res.headers.get("set-cookie")).toBeNull();
+  });
+
+  it("replaces the upstream account ETag with the key-filtered models ETag", async () => {
+    const { deps } = makeDeps({
+      responseMetadata: {
+        "x-models-etag": '"upstream-account-etag"',
+      },
+      modelsEtag: '"helm-key-filtered-etag"',
+    });
+    const res = await buildApp(deps).request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+
+    expect(res.headers.get("x-models-etag")).toBe('"helm-key-filtered-etag"');
+  });
+
+  it("selects the key-filtered models ETag by the inbound Codex version", async () => {
+    const modelsEtagForKey = vi.fn((keyId: string, clientVersion: string | null) =>
+      keyId === "k1" && clientVersion === "0.145.0" ? '"helm-0.145.0"' : null,
+    );
+    const { deps } = makeDeps({
+      responseMetadata: {
+        "x-models-etag": '"upstream-account-etag"',
+      },
+      modelsEtagForKey,
+    });
+    const res = await buildApp(deps).request("/v1/responses", {
+      method: "POST",
+      headers: { ...AUTH, version: "0.145.0" },
+      body: JSON.stringify(REQ),
+    });
+
+    expect(modelsEtagForKey).toHaveBeenCalledWith("k1", "0.145.0");
+    expect(res.headers.get("x-models-etag")).toBe('"helm-0.145.0"');
+  });
+
+  it("normalizes a prerelease Codex version for ETag lookup and upstream execution", async () => {
+    const modelsEtagForKey = vi.fn(() => '"helm-0.145.0"');
+    const { deps, harness } = makeDeps({ modelsEtagForKey });
+    const res = await buildApp(deps).request("/v1/responses", {
+      method: "POST",
+      headers: { ...AUTH, version: "0.145.0-alpha.4" },
+      body: JSON.stringify(REQ),
+    });
+
+    expect(res.status).toBe(200);
+    expect(modelsEtagForKey).toHaveBeenCalledWith("k1", "0.145.0");
+    const carrier = (
+      harness.pipelineSawIR as {
+        metadata?: { native_request?: { headers?: Record<string, string> } };
+      }
+    ).metadata?.native_request;
+    expect(carrier?.headers?.version).toBe("0.145.0");
+  });
+
+  it("rejects an invalid explicit Codex version before routing", async () => {
+    const run = vi.fn();
+    const { deps } = makeDeps({ run });
+    const res = await buildApp(deps).request("/v1/responses", {
+      method: "POST",
+      headers: { ...AUTH, version: "latest" },
+      body: JSON.stringify(REQ),
+    });
+
+    expect(res.status).toBe(400);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("does not reuse a models ETag when the request has no Codex version", async () => {
+    const modelsEtagForKey = vi.fn((_keyId: string, clientVersion: string | null) =>
+      clientVersion === null ? null : '"wrong-version"',
+    );
+    const { deps } = makeDeps({
+      responseMetadata: {
+        "x-models-etag": '"upstream-account-etag"',
+      },
+      modelsEtagForKey,
+    });
+    const res = await buildApp(deps).request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+
+    expect(modelsEtagForKey).toHaveBeenCalledWith("k1", null);
+    expect(res.headers.get("x-models-etag")).toBeNull();
+  });
+
+  it("suppresses the upstream models ETag before this key has listed its catalog", async () => {
+    const { deps } = makeDeps({
+      responseMetadata: {
+        "x-models-etag": '"upstream-account-etag"',
+      },
+      modelsEtag: null,
+    });
+    const res = await buildApp(deps).request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+
+    expect(res.headers.get("x-models-etag")).toBeNull();
+  });
+
+  it("opens the upstream stream and sets Codex metadata before returning HTTP headers", async () => {
+    let pipelineOpened = false;
+    const { deps } = makeDeps({
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      run: async () => {
+        pipelineOpened = true;
+        return {
+          decision: FAKE_DECISION,
+          responseMetadata: {
+            "openai-model": "gpt-5.6-sol",
+            "x-codex-turn-state": "stream-turn-state",
+            "x-request-id": "req-stream-1",
+          },
+          collect: async () => ({}),
+          streamIR: async function* () {
+            yield { type: "response.completed", sequence_number: 0 };
+          },
+        };
+      },
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+
+    expect(pipelineOpened).toBe(true);
+    expect(res.headers.get("openai-model")).toBe("gpt-5.6-sol");
+    expect(res.headers.get("x-codex-turn-state")).toBe("stream-turn-state");
+    expect(res.headers.get("x-request-id")).toBe("req-stream-1");
+    await res.text();
+  });
+
   it("authenticates Responses lifecycle endpoints before provider dispatch or local fallback", async () => {
     const lifecycle: ResponsesRouteDeps["lifecycle"] = {
       retrieve: vi.fn(),
@@ -272,7 +457,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(order).toEqual(["auth"]);
   });
 
-  it("/compact falls back to normal Responses routing when no provider lifecycle method exists", async () => {
+  it("/compact fails closed when no provider lifecycle method exists", async () => {
     const { deps, order } = makeDeps();
     const app = buildApp(deps);
 
@@ -282,11 +467,11 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       body: JSON.stringify(REQ),
     });
 
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { object: string; status: string };
-    expect(body.object).toBe("response");
-    expect(body.status).toBe("completed");
-    expect(order).toEqual(["auth", "translate-out", "route", "translate-back"]);
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("capability_unsatisfiable");
+    expect(body.error.message).toContain("compact");
+    expect(order).toEqual(["auth"]);
   });
 
   it("calls provider-supported Responses lifecycle endpoints", async () => {
@@ -362,10 +547,623 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       expect.any(AbortSignal),
     );
     expect(lifecycle.compact).toHaveBeenCalledWith(
-      REQ,
+      expect.objectContaining({
+        protocol: "openai_responses",
+        body: REQ,
+        raw_body: JSON.stringify(REQ),
+        headers: expect.objectContaining({
+          authorization: "Bearer helm_live_secret",
+          "content-type": "application/json",
+        }),
+      }),
       { keyId: "k1", accountId: "acct" },
       expect.any(AbortSignal),
+      expect.any(Function),
+      expect.any(Function),
     );
+  });
+
+  it("/compact forwards upstream Codex response metadata on the same request", async () => {
+    const compact = vi.fn(
+      async (
+        _body: unknown,
+        _identity: MessagesIdentity,
+        _signal: AbortSignal,
+        onResponseMeta?: (headers: Headers) => void,
+      ) => {
+        onResponseMeta?.(
+          new Headers({
+            "openai-model": "gpt-5.6-sol",
+            "x-codex-turn-state": "compact-turn-state",
+            "x-request-id": "req-compact-1",
+          }),
+        );
+        return { output: [] };
+      },
+    );
+    const { deps } = makeDeps({ lifecycle: { compact } });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses/compact", {
+      method: "POST",
+      headers: {
+        ...AUTH,
+        "session-id": "session-1",
+        "thread-id": "thread-1",
+        "x-codex-turn-state": "turn-before",
+      },
+      body: JSON.stringify(REQ),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("openai-model")).toBe("gpt-5.6-sol");
+    expect(res.headers.get("x-codex-turn-state")).toBe("compact-turn-state");
+    expect(res.headers.get("x-request-id")).toBe("req-compact-1");
+    expect(compact).toHaveBeenCalledWith(
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "session-id": "session-1",
+          "thread-id": "thread-1",
+          "x-codex-turn-state": "turn-before",
+        }),
+      }),
+      expect.anything(),
+      expect.any(AbortSignal),
+      expect.any(Function),
+      expect.any(Function),
+    );
+  });
+
+  it("/compact applies the same per-key RPM/TPM limiter before provider dispatch", async () => {
+    const compact = vi.fn().mockResolvedValue({ output: [] });
+    const check = vi.fn().mockResolvedValue({
+      allowed: false,
+      limitedBy: "tpm",
+      limit: 100,
+      remaining: 0,
+      resetSeconds: 12,
+      retryAfterSeconds: 12,
+    });
+    const { deps } = makeDeps({
+      lifecycle: { compact },
+      rateLimiter: { check },
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses/compact", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("12");
+    expect(check).toHaveBeenCalledWith(
+      expect.objectContaining({
+        keyId: "k1",
+        estimatedTokens: expect.any(Number),
+      }),
+    );
+    expect(compact).not.toHaveBeenCalled();
+  });
+
+  it("/compact holds and releases the same per-key concurrency lease", async () => {
+    const release = vi.fn();
+    const acquire = vi.fn().mockResolvedValue({ ok: true, release });
+    const compact = vi.fn().mockResolvedValue({ output: [] });
+    const { deps } = makeDeps({
+      lifecycle: { compact },
+      concurrencyGate: { acquire },
+      identity: {
+        keyId: "k1",
+        accountId: "acct",
+        caps: { concurrencyLimit: 2 },
+      },
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses/compact", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+
+    expect(res.status).toBe(200);
+    expect(acquire).toHaveBeenCalledWith({
+      keyId: "k1",
+      limit: 2,
+      signal: expect.any(AbortSignal),
+    });
+    expect(compact).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("/compact records telemetry and payloads for direct subscription execution", async () => {
+    const { record, insert, insertPayload } = makeRecord();
+    const compact = vi.fn().mockResolvedValue({
+      id: "resp_compact",
+      object: "response.compaction",
+      model: "gpt-5.6-sol",
+      output: [],
+      usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 },
+    });
+    const { deps } = makeDeps({ lifecycle: { compact }, record });
+    const app = buildApp(deps);
+    const rawRequest = '{\n  "model":"gpt-5.6-sol",\n  "input":"compact this"\n}';
+
+    const res = await app.request("/v1/responses/compact", {
+      method: "POST",
+      headers: AUTH,
+      body: rawRequest,
+    });
+
+    expect(res.status).toBe(200);
+    expect(insert).toHaveBeenCalledOnce();
+    expect(insertPayload).toHaveBeenCalledOnce();
+    const telemetry = insert.mock.calls[0]?.[0] as {
+      apiKeyId: string;
+      decision: {
+        protocol: string;
+        final: { status: string; provider_model: string };
+        usage: { prompt_tokens: number; completion_tokens: number };
+      };
+    };
+    expect(telemetry.apiKeyId).toBe("k1");
+    expect(telemetry.decision.protocol).toBe("openai_responses");
+    expect(telemetry.decision.final).toMatchObject({
+      status: "ok",
+      provider_model: "gpt-5.6-sol",
+    });
+    expect(telemetry.decision.usage).toMatchObject({
+      prompt_tokens: 12,
+      completion_tokens: 3,
+    });
+    expect(insertPayload.mock.calls[0]?.[0]).toMatchObject({
+      requestJson: rawRequest,
+      responseJson: expect.stringContaining('"resp_compact"'),
+    });
+  });
+
+  it("/compact rejects an exhausted per-key usage budget before subscription dispatch", async () => {
+    const compact = vi.fn().mockResolvedValue({ output: [] });
+    const check = vi.fn().mockResolvedValue({
+      overBudget: true,
+      limitedBy: "req",
+      behavior: "reject",
+      degradeLane: null,
+    });
+    const settle = vi.fn();
+    const { deps } = makeDeps({
+      lifecycle: { compact },
+      identity: {
+        keyId: "k1",
+        accountId: "acct",
+        caps: {
+          budget: {
+            requests: 10,
+            tokens: null,
+            spendUsd: null,
+            windowSeconds: 3600,
+            behavior: "reject",
+            degradeLane: null,
+          },
+        },
+      },
+      budget: {
+        gate: { check },
+        settle,
+        now: () => 1_000,
+      },
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses/compact", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+
+    expect(res.status).toBe(429);
+    expect(check).toHaveBeenCalledWith(expect.objectContaining({ keyId: "k1", nowMs: 1_000 }));
+    expect(compact).not.toHaveBeenCalled();
+    expect(settle).not.toHaveBeenCalled();
+  });
+
+  it("/compact applies a usage-budget degrade lane before resolving the provider model", async () => {
+    const compact = vi.fn().mockResolvedValue({ output: [] });
+    const { deps } = makeDeps({
+      lifecycle: { compact },
+      identity: {
+        keyId: "k1",
+        accountId: "acct",
+        caps: {
+          budget: {
+            requests: 10,
+            tokens: null,
+            spendUsd: null,
+            windowSeconds: 3600,
+            behavior: "degrade",
+            degradeLane: "economy",
+          },
+        },
+      },
+      budget: {
+        gate: {
+          check: vi.fn().mockResolvedValue({
+            overBudget: true,
+            limitedBy: "req",
+            behavior: "degrade",
+            degradeLane: "economy",
+          }),
+        },
+        settle: vi.fn(),
+        now: () => 1_000,
+      },
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses/compact", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ model: "gpt-5.6-sol", input: "compact this" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(compact).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({ model: "economy" }),
+      }),
+      expect.anything(),
+      expect.any(AbortSignal),
+      expect.any(Function),
+      expect.any(Function),
+    );
+  });
+
+  it("/compact settles budget and attributes usage to the actual OAuth account", async () => {
+    const { record, insert, insertPayload } = makeRecord();
+    const settle = vi.fn().mockResolvedValue(undefined);
+    const recordOAuthUsage = vi.fn();
+    const compact = vi.fn(
+      async (
+        _body: unknown,
+        _identity: MessagesIdentity,
+        _signal: AbortSignal,
+        _onResponseMeta?: (headers: Headers) => void,
+        onExecution?: (execution: {
+          modelAlias: string;
+          providerModel: string;
+          providerName: string;
+          upstreamRequest: string | null;
+          servingAccount: { providerId: string; account: string } | null;
+        }) => void,
+      ) => {
+        onExecution?.({
+          modelAlias: "openai-codex/gpt-5.6-terra",
+          providerModel: "gpt-5.6-terra",
+          providerName: "openai-codex",
+          upstreamRequest: '{"model":"gpt-5.6-terra","input":"compact this"}',
+          servingAccount: { providerId: "openai-codex", account: "docker-live" },
+        });
+        return {
+          id: "resp_compact",
+          model: "gpt-5.6-terra",
+          output: [],
+          usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 },
+        };
+      },
+    );
+    const budgetCaps = {
+      requests: 10,
+      tokens: 1_000,
+      spendUsd: null,
+      windowSeconds: 3600,
+      behavior: "reject" as const,
+      degradeLane: null,
+    };
+    const { deps } = makeDeps({
+      lifecycle: { compact },
+      identity: {
+        keyId: "k1",
+        keyPrefix: "helm_live_abcd",
+        accountId: "acct",
+        caps: { budget: budgetCaps },
+      },
+      record,
+      budget: {
+        gate: {
+          check: vi.fn().mockResolvedValue({
+            overBudget: false,
+            limitedBy: null,
+            behavior: "degrade",
+            degradeLane: null,
+          }),
+        },
+        settle,
+        costOf: () => null,
+        now: () => 2_000,
+      },
+      recordOAuthUsage,
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses/compact", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ model: "gpt-5.6-terra", input: "compact this" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(settle).toHaveBeenCalledWith(
+      "k1",
+      budgetCaps,
+      { requests: 1, tokens: 15, costUsd: null },
+      2_000,
+    );
+    expect(recordOAuthUsage).toHaveBeenCalledWith(
+      { providerId: "openai-codex", account: "docker-live" },
+      "openai-codex/gpt-5.6-terra",
+      { tokens: 15, costUsd: null },
+    );
+    expect(insert).toHaveBeenCalledOnce();
+    expect(insertPayload).toHaveBeenCalledOnce();
+    expect(insert.mock.calls[0]?.[0]).toMatchObject({
+      decision: {
+        final: {
+          model_alias: "openai-codex/gpt-5.6-terra",
+          provider_model: "gpt-5.6-terra",
+        },
+        serving_account: {
+          provider_id: "openai-codex",
+          account: "docker-live",
+        },
+      },
+    });
+    expect(insertPayload.mock.calls[0]?.[0]).toMatchObject({
+      upstreamRequestJson: '{"model":"gpt-5.6-terra","input":"compact this"}',
+    });
+  });
+
+  it("/compact aggregates usage carried by Codex compact output items", async () => {
+    const settle = vi.fn().mockResolvedValue(undefined);
+    const costOf = vi.fn().mockReturnValue(0.0042);
+    const recordOAuthUsage = vi.fn();
+    const compact = vi.fn(
+      async (
+        _body: unknown,
+        _identity: MessagesIdentity,
+        _signal: AbortSignal,
+        _onResponseMeta?: (headers: Headers) => void,
+        onExecution?: (execution: {
+          modelAlias: string;
+          providerModel: string;
+          providerName: string;
+          upstreamRequest: string | null;
+          servingAccount: { providerId: string; account: string } | null;
+        }) => void,
+      ) => {
+        onExecution?.({
+          modelAlias: "openai-codex/gpt-5.6-sol",
+          providerModel: "gpt-5.6-sol",
+          providerName: "openai-codex",
+          upstreamRequest: '{"model":"gpt-5.6-sol"}',
+          servingAccount: { providerId: "openai-codex", account: "docker-live" },
+        });
+        return {
+          output: [
+            {
+              type: "message",
+              usage: {
+                input_tokens: 12,
+                output_tokens: 3,
+                input_tokens_details: { cached_tokens: 2 },
+              },
+            },
+            {
+              type: "compaction_summary",
+              usage: {
+                input_tokens: 4,
+                output_tokens: 1,
+                input_tokens_details: { cached_tokens: 1, cache_creation_input_tokens: 2 },
+              },
+            },
+          ],
+        };
+      },
+    );
+    const budgetCaps = {
+      requests: 10,
+      tokens: 1_000,
+      spendUsd: 1,
+      windowSeconds: 3600,
+      behavior: "reject" as const,
+      degradeLane: null,
+    };
+    const { deps } = makeDeps({
+      lifecycle: { compact },
+      identity: {
+        keyId: "k1",
+        accountId: "acct",
+        caps: { budget: budgetCaps },
+      },
+      budget: {
+        gate: {
+          check: vi.fn().mockResolvedValue({
+            overBudget: false,
+            limitedBy: null,
+            behavior: "reject",
+            degradeLane: null,
+          }),
+        },
+        settle,
+        costOf,
+        now: () => 2_000,
+      },
+      recordOAuthUsage,
+    });
+
+    const res = await buildApp(deps).request("/v1/responses/compact", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ model: "gpt-5.6-sol", input: "compact this" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(costOf).toHaveBeenCalledWith("openai-codex/gpt-5.6-sol", {
+      prompt_tokens: 16,
+      completion_tokens: 4,
+      total_tokens: 20,
+      prompt_tokens_details: {
+        cached_tokens: 3,
+        cache_creation_tokens: 2,
+      },
+    });
+    expect(settle).toHaveBeenCalledOnce();
+    expect(settle).toHaveBeenCalledWith(
+      "k1",
+      budgetCaps,
+      { requests: 1, tokens: 20, costUsd: 0.0042 },
+      2_000,
+    );
+    expect(recordOAuthUsage).toHaveBeenCalledOnce();
+    expect(recordOAuthUsage).toHaveBeenCalledWith(
+      { providerId: "openai-codex", account: "docker-live" },
+      "openai-codex/gpt-5.6-sol",
+      { tokens: 20, costUsd: 0.0042 },
+    );
+  });
+
+  it("/compact prefers top-level usage and does not double-settle nested output usage", async () => {
+    const settle = vi.fn().mockResolvedValue(undefined);
+    const recordOAuthUsage = vi.fn();
+    const compact = vi.fn().mockResolvedValue({
+      usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+      output: [
+        {
+          type: "compaction_summary",
+          usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+        },
+      ],
+    });
+    const budgetCaps = {
+      requests: 10,
+      tokens: 1_000,
+      spendUsd: null,
+      windowSeconds: 3600,
+      behavior: "reject" as const,
+      degradeLane: null,
+    };
+    const { deps } = makeDeps({
+      lifecycle: { compact },
+      identity: {
+        keyId: "k1",
+        accountId: "acct",
+        caps: { budget: budgetCaps },
+      },
+      budget: {
+        gate: {
+          check: vi.fn().mockResolvedValue({
+            overBudget: false,
+            limitedBy: null,
+            behavior: "reject",
+            degradeLane: null,
+          }),
+        },
+        settle,
+        now: () => 3_000,
+      },
+      recordOAuthUsage,
+    });
+
+    const res = await buildApp(deps).request("/v1/responses/compact", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ model: "gpt-5.6-sol", input: "compact this" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(settle).toHaveBeenCalledOnce();
+    expect(settle).toHaveBeenCalledWith(
+      "k1",
+      budgetCaps,
+      { requests: 1, tokens: 12, costUsd: null },
+      3_000,
+    );
+    expect(recordOAuthUsage).toHaveBeenCalledOnce();
+    expect(recordOAuthUsage).toHaveBeenCalledWith(null, "openai-codex/gpt-5.6-sol", {
+      tokens: 12,
+      costUsd: null,
+    });
+  });
+
+  it("/compact records a failed direct subscription attempt before surfacing the error", async () => {
+    const { record, insert, insertPayload } = makeRecord();
+    const compact = vi.fn(
+      async (
+        _body: unknown,
+        _identity: MessagesIdentity,
+        _signal: AbortSignal,
+        _onResponseMeta?: (headers: Headers) => void,
+        onExecution?: (execution: {
+          modelAlias: string;
+          providerModel: string;
+          providerName: string;
+          upstreamRequest: string | null;
+          servingAccount: { providerId: string; account: string } | null;
+        }) => void,
+      ) => {
+        onExecution?.({
+          modelAlias: "openai-codex/gpt-5.6-luna",
+          providerModel: "gpt-5.6-luna",
+          providerName: "openai-codex",
+          upstreamRequest: '{"model":"gpt-5.6-luna","input":"compact this"}',
+          servingAccount: { providerId: "openai-codex", account: "docker-live" },
+        });
+        throw new UpstreamError(
+          "upstream_error",
+          "upstream returned 429",
+          { code: "rate_limit" },
+          429,
+        );
+      },
+    );
+    const { deps } = makeDeps({ lifecycle: { compact }, record });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses/compact", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ model: "gpt-5.6-luna", input: "compact this" }),
+    });
+
+    expect(res.status).toBe(502);
+    expect(insert).toHaveBeenCalledOnce();
+    expect(insertPayload).toHaveBeenCalledOnce();
+    expect(insert.mock.calls[0]?.[0]).toMatchObject({
+      decision: {
+        protocol: "openai_responses",
+        final: { status: "error", error_reason: "upstream_error" },
+        provider_attempts: [
+          expect.objectContaining({
+            alias: "openai-codex/gpt-5.6-luna",
+            status: "error",
+            error_detail: {
+              upstream_status: 429,
+              message: "upstream returned 429",
+              provider_raw: { code: "rate_limit" },
+            },
+          }),
+        ],
+        serving_account: {
+          provider_id: "openai-codex",
+          account: "docker-live",
+        },
+      },
+    });
+    expect(insertPayload.mock.calls[0]?.[0]).toMatchObject({
+      responseJson: null,
+      upstreamRequestJson: '{"model":"gpt-5.6-luna","input":"compact this"}',
+    });
   });
 
   it("records persistent Responses ids in the lifecycle registry after create", async () => {
@@ -622,7 +1420,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(frames.at(-1)?.event).toBe("response.completed");
   });
 
-  it("stream:true waits for routing before writing the first Responses SSE frame", async () => {
+  it("stream:true waits for routing before returning headers or writing the first SSE frame", async () => {
     let releaseRoute!: () => void;
     const routeStarted = deferred<void>();
     const routeMayFinish = new Promise<void>((resolve) => {
@@ -655,19 +1453,16 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       body: JSON.stringify({ ...REQ, stream: true }),
     });
 
-    const early = await Promise.race([responsePromise, shortTimeout()]);
-    expect(early).not.toBe("timeout");
-    const res = early as Response;
+    await routeStarted.promise;
+    const responseBeforeRoute = await Promise.race([responsePromise, shortTimeout()]);
+    expect(responseBeforeRoute).toBe("timeout");
+    releaseRoute();
+    const res = await responsePromise;
     expect(res.headers.get("content-type")).toContain("text/event-stream");
 
     const reader = res.body?.getReader();
     expect(reader).toBeDefined();
-    const pendingFirstRead = reader?.read();
-    const firstReadBeforeRoute = await Promise.race([pendingFirstRead, shortTimeout()]);
-    expect(firstReadBeforeRoute).toBe("timeout");
-    await routeStarted.promise;
-    releaseRoute();
-    const firstRead = await Promise.race([pendingFirstRead, shortTimeout()]);
+    const firstRead = await Promise.race([reader?.read(), shortTimeout()]);
     expect(firstRead).not.toBe("timeout");
     const decoder = new TextDecoder();
     const firstChunk = firstRead as { done: boolean; value?: Uint8Array };
@@ -1047,6 +1842,48 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     const meta = (harness.pipelineSawIR as { metadata?: { native_request?: unknown } } | null)
       ?.metadata;
     expectNativeCarrier(meta?.native_request, "openai_responses", REQ);
+  });
+
+  it("keeps the internal websocket session header only when the bridge proof matches", async () => {
+    const { deps, harness } = makeDeps();
+    deps.responsesWebSocketSessionProof = "proof-ok";
+    const app = buildApp(deps);
+
+    await app.request("/v1/responses", {
+      method: "POST",
+      headers: {
+        ...AUTH,
+        [CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER]: "session-ok",
+        [CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER]: "proof-ok",
+      },
+      body: JSON.stringify(REQ),
+    });
+
+    const native = (harness.pipelineSawIR as { metadata?: { native_request?: unknown } } | null)
+      ?.metadata?.native_request as { headers?: Record<string, string> } | undefined;
+    expect(native?.headers?.[CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER]).toBe("session-ok");
+    expect(native?.headers?.[CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER]).toBeUndefined();
+  });
+
+  it("strips spoofed websocket session headers from ordinary HTTP requests", async () => {
+    const { deps, harness } = makeDeps();
+    deps.responsesWebSocketSessionProof = "proof-ok";
+    const app = buildApp(deps);
+
+    await app.request("/v1/responses", {
+      method: "POST",
+      headers: {
+        ...AUTH,
+        [CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER]: "spoofed-session",
+        [CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER]: "wrong-proof",
+      },
+      body: JSON.stringify(REQ),
+    });
+
+    const native = (harness.pipelineSawIR as { metadata?: { native_request?: unknown } } | null)
+      ?.metadata?.native_request as { headers?: Record<string, string> } | undefined;
+    expect(native?.headers?.[CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER]).toBeUndefined();
+    expect(native?.headers?.[CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER]).toBeUndefined();
   });
 
   it("stamps native_request on a STREAMING request too (Codex is stream-only)", async () => {
@@ -1486,61 +2323,6 @@ describe("estimateResponsesInputTokens — number/boolean/object/array branches 
     expect(res.status).toBe(200);
     const body = (await res.json()) as { input_tokens: number; estimated: boolean };
     expect(body.input_tokens).toBeGreaterThanOrEqual(1);
-  });
-});
-
-describe("handleCompact — transformer throws and pipeline.run throws PipelineError (lines 338–339, 381–393)", () => {
-  it("returns 400 when transformRequestOut throws inside handleCompact (lines 338-339)", async () => {
-    // No lifecycle.compact → falls back to local pipeline path → transformer throws
-    const { deps } = makeDeps({
-      transformRequestOut: () => {
-        throw new Error("bad compact input");
-      },
-    });
-    const app = buildApp(deps);
-    const res = await app.request("/v1/responses/compact", {
-      method: "POST",
-      headers: AUTH,
-      body: JSON.stringify(REQ),
-    });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: { code: string; message: string } };
-    expect(body.error.code).toBe("invalid_request");
-    expect(body.error.message).toContain("bad compact input");
-  });
-
-  it("converts a PipelineError from pipeline.run inside handleCompact to a HelmHttpError (lines 391-393)", async () => {
-    // No lifecycle.compact → falls back to local pipeline path → pipeline.run throws
-    const { deps } = makeDeps({
-      run: async () => {
-        throw new PipelineError("all_providers_failed", "all providers failed for compact", "t1");
-      },
-    });
-    const app = buildApp(deps);
-    const res = await app.request("/v1/responses/compact", {
-      method: "POST",
-      headers: AUTH,
-      body: JSON.stringify(REQ),
-    });
-    expect(res.status).toBe(502);
-    const body = (await res.json()) as { error: { code: string } };
-    expect(body.error.code).toBe("all_providers_failed");
-  });
-
-  it("re-throws a non-PipelineError from pipeline.run inside handleCompact (line 392-393)", async () => {
-    // No lifecycle.compact → pipeline.run throws a plain Error → re-thrown to onError
-    const { deps } = makeDeps({
-      run: async () => {
-        throw new TypeError("unexpected compact error");
-      },
-    });
-    const app = buildApp(deps);
-    const res = await app.request("/v1/responses/compact", {
-      method: "POST",
-      headers: AUTH,
-      body: JSON.stringify(REQ),
-    });
-    expect(res.status).toBeGreaterThanOrEqual(500);
   });
 });
 

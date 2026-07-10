@@ -255,6 +255,29 @@ describe("usageFromResponsesResponse", () => {
     });
   });
 
+  it("normalizes Codex cache_write_tokens for cache-write pricing", () => {
+    expect(
+      usageFromResponsesResponse({
+        usage: {
+          input_tokens: 63,
+          output_tokens: 42,
+          input_tokens_details: {
+            cached_tokens: 7,
+            cache_write_tokens: 11,
+          },
+        },
+      }),
+    ).toEqual({
+      prompt_tokens: 63,
+      completion_tokens: 42,
+      total_tokens: 105,
+      prompt_tokens_details: {
+        cached_tokens: 7,
+        cache_creation_tokens: 11,
+      },
+    });
+  });
+
   it("returns null when the body has no usage object", () => {
     expect(usageFromResponsesResponse({ id: "resp" })).toBeNull();
     expect(usageFromResponsesResponse(null)).toBeNull();

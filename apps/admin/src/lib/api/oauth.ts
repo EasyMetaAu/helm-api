@@ -3,6 +3,12 @@
 // no secrets ever cross this boundary. Two flows: manual_paste (Anthropic /
 // Claude Pro-Max) and device_code (GitHub Copilot).
 
+import {
+  type CodexResetResult,
+  CodexResetResultSchema,
+  type OAuthQuotaSnapshot as SharedOAuthQuotaSnapshot,
+  OAuthQuotaSnapshotSchema,
+} from '@helm/shared';
 import { clientTzOffsetMinutes } from '$lib/requests-filters.js';
 
 export type OAuthFlow = 'manual_paste' | 'device_code';
@@ -10,6 +16,12 @@ export type OAuthSelectionStrategy = 'balanced' | 'manual_priority' | 'low_risk'
 
 export interface OAuthAccount {
   account: string;
+  // Codex identity claims copied from the ChatGPT subscription token. Optional
+  // because legacy records and non-Codex providers do not have these fields.
+  email?: string;
+  chatgptPlanType?: string;
+  chatgptAccountId?: string;
+  isFedramp?: boolean;
   expiresAt: number | null;
   updatedAt: number;
   // True when the account has a working durable credential (the gateway auto-renews
@@ -69,7 +81,8 @@ export async function listOAuthStatus(): Promise<{
   providers: OAuthProviderStatus[];
 }> {
   const res = await fetch(BASE, { headers: { accept: 'application/json' } });
-  if (res.status === 503) return { configured: false, selectionStrategy: 'balanced', providers: [] };
+  if (res.status === 503)
+    return { configured: false, selectionStrategy: 'balanced', providers: [] };
   const body = await asJson<{
     selectionStrategy?: OAuthSelectionStrategy;
     providers: OAuthProviderStatus[];
@@ -94,30 +107,15 @@ export interface OAuthUsageRow {
   rpm: number;
 }
 
-// One rate-limit window (Tier 3). `usedPercent` 0–100; `resetsAtMs` epoch ms (null =
-// unknown); `windowMinutes` set only when the provider reports it (Codex).
-export interface OAuthQuotaWindow {
-  key: string;
-  usedPercent: number;
-  resetsAtMs: number | null;
-  windowMinutes: number | null;
-}
-
-export interface OAuthQuotaSnapshot {
-  providerId: string;
-  account: string;
-  windows: OAuthQuotaWindow[];
-  capturedAt: number;
-  source: 'anthropic' | 'codex-headers' | 'codex';
-  // Auto-park cooldown: epoch ms until which the account is removed from the pool
-  // because it hit its usage limit (null = not limited). Drives the "Rate limited —
-  // auto-recovers in …" pill + the local "Retry account" button.
-  usageLimitedUntilMs: number | null;
-  // Codex only: how many rate-limit reset credits the account can consume right now
-  // (surfaced LIVE off the /quota PULL, never persisted). undefined = not a Codex
-  // account / unknown; a number (incl. 0) gates the "Reset limit" button.
-  resetCredits?: number | null;
-}
+// Quota wire types come exclusively from @helm/shared's Zod schema. Keep aliases
+// here so existing Admin imports stay stable without duplicating the contract.
+export type OAuthQuotaSnapshot = SharedOAuthQuotaSnapshot;
+export type OAuthQuotaWindow = OAuthQuotaSnapshot['windows'][number];
+export type CodexRateLimitReachedType = NonNullable<OAuthQuotaSnapshot['rateLimitReachedType']>;
+export type CodexCredits = NonNullable<OAuthQuotaSnapshot['credits']>;
+export type CodexIndividualLimit = NonNullable<OAuthQuotaSnapshot['individualLimit']>;
+export type CodexAdditionalLimit = NonNullable<OAuthQuotaSnapshot['additionalLimits']>[number];
+export type CodexResetCreditDetail = NonNullable<OAuthQuotaSnapshot['resetCreditDetails']>[number];
 
 // Observability reads block the providers-page load (Promise.all), so they carry a
 // hard client-side timeout: a slow/hung gateway (e.g. an Anthropic quota pull behind
@@ -151,7 +149,14 @@ export async function getOAuthQuota(): Promise<OAuthQuotaSnapshot[]> {
       signal: AbortSignal.timeout(OBSERVABILITY_TIMEOUT_MS),
     });
     if (!res.ok) return [];
-    return ((await res.json()) as { quota?: OAuthQuotaSnapshot[] }).quota ?? [];
+    const body: unknown = await res.json();
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) return [];
+    const quota = Reflect.get(body, 'quota');
+    if (!Array.isArray(quota)) return [];
+    return quota.flatMap((row) => {
+      const parsed = OAuthQuotaSnapshotSchema.safeParse(row);
+      return parsed.success ? [parsed.data] : [];
+    });
   } catch {
     return [];
   }
@@ -233,14 +238,34 @@ export async function resetUsageLimit(provider: string, account = 'default'): Pr
 
 // ── Codex rate-limit reset credit (the "reset usage limit" action) ───────────
 
-// The consume result surfaced to the operator: the upstream status `code` and how
-// many rate-limit windows were restored. Both null-tolerant (a drifted response
-// body degrades the toast, never the action).
-export interface CodexResetCreditResult {
-  code: string | null;
-  windowsReset: number | null;
-  redeemRequestId?: string;
-}
+// The consume result surfaced to the operator. A 2xx response can still be
+// noCredit or nothingToReset, so the Providers page must branch on `outcome`.
+type NormalizedCodexResetCreditResult = Required<
+  Pick<CodexResetResult, 'code' | 'outcome' | 'windowsReset'>
+> &
+  Pick<CodexResetResult, 'redeemRequestId'>;
+
+const CodexResetCreditResponseSchema = CodexResetResultSchema.superRefine((result, ctx) => {
+  if (
+    !Object.hasOwn(result, 'code') ||
+    result.outcome === undefined ||
+    !Object.hasOwn(result, 'windowsReset')
+  ) {
+    ctx.addIssue({
+      code: 'custom',
+      message: 'invalid normalized Codex reset-credit response',
+    });
+  }
+}).transform(
+  (result): NormalizedCodexResetCreditResult => ({
+    code: result.code ?? null,
+    outcome: result.outcome as NonNullable<CodexResetResult['outcome']>,
+    windowsReset: result.windowsReset ?? null,
+    ...(result.redeemRequestId === undefined ? {} : { redeemRequestId: result.redeemRequestId }),
+  }),
+);
+
+export type CodexResetCreditResult = ReturnType<typeof CodexResetCreditResponseSchema.parse>;
 
 // POST /oauth/:provider/reset-credit -> consume one rate-limit reset credit for the
 // account. Codex-only on the server; FAIL-CLOSED (the gateway 502s on any upstream
@@ -248,13 +273,14 @@ export interface CodexResetCreditResult {
 export async function consumeCodexResetCredit(
   provider: string,
   account = 'default',
+  options: { creditId?: string; idempotencyKey?: string } = {},
 ): Promise<CodexResetCreditResult> {
   const res = await fetch(`${BASE}/${encodeURIComponent(provider)}/reset-credit`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ account }),
+    body: JSON.stringify({ account, ...options }),
   });
-  return asJson(res);
+  return CodexResetCreditResponseSchema.parse(await asJson<unknown>(res));
 }
 
 // ── per-account connectivity test (providers page "Test" button) ─────────────
@@ -343,18 +369,22 @@ export async function* streamAccountTest(
 
 // ── per-account model curation ───────────────────────────────────────────────
 
+export type AccountModelsMode = 'auto' | 'manual';
+
 // The discovered models for one account + the operator's exposed subset.
 // `available` is the live/curated discovery; `enabled` is what reaches Lanes
 // (unset settings ⇒ all available).
 export interface AccountModels {
   available: string[];
   enabled: string[];
-  // True when the provider has a live list-models API (so "pull from provider"
-  // does something real). False for curated-only providers like Codex.
+  // Auto follows the account's remote catalog and receives new models. Manual
+  // persists an explicit operator-curated list.
+  modelsMode: AccountModelsMode;
+  // True when the provider has a live list-models API, including Codex.
   canPull: boolean;
 }
 
-// GET /oauth/:provider/models?account= -> { available, enabled }.
+// GET /oauth/:provider/models?account= -> { available, enabled, modelsMode, canPull }.
 export async function getAccountModels(
   provider: string,
   account = 'default',
@@ -365,16 +395,17 @@ export async function getAccountModels(
   return asJson(res);
 }
 
-// PUT /oauth/:provider/models { account, models } -> 204. Persists the exposed set.
+// PUT /oauth/:provider/models { account, mode, models } -> 204. Auto follows the
+// remote account catalog; manual persists the explicit exposed set.
 export async function setAccountModels(
   provider: string,
   account: string,
-  models: string[],
+  input: { mode: AccountModelsMode; models: string[] },
 ): Promise<void> {
   const res = await fetch(`${BASE}/${provider}/models`, {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ account, models }),
+    body: JSON.stringify({ account, mode: input.mode, models: input.models }),
   });
   if (!res.ok && res.status !== 204) await asJson(res);
 }

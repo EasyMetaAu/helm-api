@@ -53,13 +53,9 @@
 # manual capability entry here because the subscription aliases are synthesized at
 # runtime and do not exist in LiteLLM's generated catalog.
 #
-# CONTEXT WINDOW = 272000 for `openai-codex/*`. The ChatGPT/Codex SUBSCRIPTION
-# caps the effective window at 272K regardless of the underlying model's API window
-# (official GPT-5.6/GPT-5.5 are 1.05M, but the subscription is not). Empirically
-# the codex backend 400s `context_length_exceeded` above ~272K: on la.atmy.work the
-# max input it ever served was 271,529 over 5,919 calls, and every request ≳272K
-# (e.g. a 597K Claude Code passthrough) was rejected. The wrong 1.05M value would
-# route oversized requests here and burn a guaranteed upstream 400 before failover.
+# GPT-5.6 fallback metadata mirrors the bundled Codex model catalog. At runtime the
+# authenticated `/models` response is authoritative per account; these entries are
+# only the last-resort fallback when no fresh or last-known-good remote catalog exists.
 openai-codex/gpt-5.6:
   supportsTools: true
   jsonOutput: schema
@@ -69,7 +65,7 @@ openai-codex/gpt-5.6:
     openaiReasoning:
       supported: true
       levels: [none, low, medium, high, xhigh, max]
-  maxContextTokens: 272000
+  maxContextTokens: 372000
   maxOutputTokens: 128000
 openai-codex/gpt-5.6-sol:
   supportsTools: true
@@ -80,7 +76,7 @@ openai-codex/gpt-5.6-sol:
     openaiReasoning:
       supported: true
       levels: [none, low, medium, high, xhigh, max]
-  maxContextTokens: 272000
+  maxContextTokens: 372000
   maxOutputTokens: 128000
 openai-codex/gpt-5.6-terra:
   supportsTools: true
@@ -91,7 +87,7 @@ openai-codex/gpt-5.6-terra:
     openaiReasoning:
       supported: true
       levels: [none, low, medium, high, xhigh, max]
-  maxContextTokens: 272000
+  maxContextTokens: 372000
   maxOutputTokens: 128000
 openai-codex/gpt-5.6-luna:
   supportsTools: true
@@ -102,7 +98,7 @@ openai-codex/gpt-5.6-luna:
     openaiReasoning:
       supported: true
       levels: [none, low, medium, high, xhigh, max]
-  maxContextTokens: 272000
+  maxContextTokens: 372000
   maxOutputTokens: 128000
 openai-codex/gpt-5.5:
   supportsTools: true

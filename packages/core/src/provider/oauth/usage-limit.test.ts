@@ -86,6 +86,15 @@ describe("windowsToUsageLimit", () => {
     expect(isAccountWideQuotaWindow(win({ key: "7d-fable" }))).toBe(false);
     expect(isAccountWideQuotaWindow(win({ key: "7d-sonnet" }))).toBe(false);
     expect(isAccountWideQuotaWindow(win({ key: "7d-opus" }))).toBe(false);
+    expect(
+      isAccountWideQuotaWindow(
+        win({
+          key: "codex_spark-primary",
+          limitId: "codex_spark",
+          limitName: "GPT-5.6-Codex-Spark",
+        }),
+      ),
+    ).toBe(false);
   });
 });
 

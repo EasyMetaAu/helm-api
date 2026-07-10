@@ -50,6 +50,10 @@ export interface MessagesIdentity {
     concurrencyLimit?: number | null;
     /** Case-insensitive exact/glob model ids denied across direct requests and lane/fallback routes. */
     blockedModels?: string[] | null;
+    /** Enables explicit model/lane selection instead of the default lane abstraction. */
+    allowCustomModel?: boolean;
+    /** Optional whitelist for explicitly selected lanes. */
+    allowedLanes?: string[] | null;
     /** Per-key cap for client-requested Fast mode passthrough. Account-level Fast
      *  mode can still be forced by subscription account settings. */
     allowFastMode?: boolean;
@@ -105,6 +109,8 @@ export interface PipelineRunResult {
    *  model actually received. Null/absent on a routing failure (no served attempt). */
   readonly upstreamRequest?: string | null;
   readonly servingAccount?: ServingAccount | null;
+  /** Safe request-scoped upstream response metadata for protocol-native clients. */
+  readonly responseMetadata?: Readonly<Record<string, string>>;
   /** Drain the full (non-stream) result into ONE IR response object. */
   collect(): Promise<unknown>;
   /** The outbound-protocol event stream: one object per wire event. For Anthropic

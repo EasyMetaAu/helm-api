@@ -19,6 +19,7 @@
 
 import { decryptSecret, encryptSecret } from "../store/crypto/token-cipher.js";
 import type { OAuthTokenStore } from "../store/ports.js";
+import { OpenAICodexIdentityMismatchError } from "./oauth/openai-codex.js";
 import { OAuthHttpError } from "./oauth/runtime.js";
 import type { OAuthCredentials, OAuthProviderInterface } from "./oauth/types.js";
 
@@ -107,6 +108,8 @@ export interface TokenManager {
   getAuthHeader(): Promise<string>;
   /** Live access + refresh tokens, for redaction of echoed upstream bodies. */
   currentSecrets(): string[];
+  /** Persisted provider metadata loaded with the current preset credential. */
+  currentMetadata(): Readonly<Record<string, unknown>>;
   /** Force the next getAuthHeader() to refresh (e.g. after an upstream 401). */
   invalidate(): void;
 }
@@ -116,10 +119,16 @@ export interface TokenManager {
 // status (when there was a response) for the caller's diagnostics.
 export class TokenRefreshError extends Error {
   readonly httpStatus: number | null;
-  constructor(message: string, httpStatus: number | null = null) {
+  readonly permanentCredentialFailure: boolean;
+  constructor(
+    message: string,
+    httpStatus: number | null = null,
+    permanentCredentialFailure = false,
+  ) {
     super(message);
     this.name = "TokenRefreshError";
     this.httpStatus = httpStatus;
+    this.permanentCredentialFailure = permanentCredentialFailure;
   }
 }
 
@@ -227,7 +236,7 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
   // Split a credential into store fields. `meta` carries every key beyond the
   // canonical {access, refresh, expires} (e.g. copilot enterpriseUrl).
   function metaFrom(creds: OAuthCredentials): string | null {
-    const { access: _a, refresh: _r, expires: _e, ...rest } = creds;
+    const { access: _a, refresh: _r, expires: _e, idToken: _idToken, ...rest } = creds;
     return Object.keys(rest).length > 0 ? JSON.stringify(rest) : null;
   }
 
@@ -287,18 +296,22 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
       // "refresh failed" into a diagnosable one (e.g. 400 invalid_grant ⇒ re-login;
       // 429 ⇒ rate limited; 5xx ⇒ upstream down).
       const status = err instanceof OAuthHttpError ? err.httpStatus : null;
+      const identityMismatch = err instanceof OpenAICodexIdentityMismatchError;
       throw new TokenRefreshError(
-        status === null
-          ? `oauth refresh failed (${p.providerId})`
-          : `oauth refresh failed (${p.providerId}, status ${status})`,
+        identityMismatch
+          ? `oauth refresh identity changed (${p.providerId}); reconnect the account`
+          : status === null
+            ? `oauth refresh failed (${p.providerId})`
+            : `oauth refresh failed (${p.providerId}, status ${status})`,
         status,
+        identityMismatch,
       );
     }
     accessToken = provider.getApiKey(creds);
     refreshToken = creds.refresh;
     expiresAt = creds.expires;
     presetExtra = (() => {
-      const { access: _a, refresh: _r, expires: _e, ...rest } = creds;
+      const { access: _a, refresh: _r, expires: _e, idToken: _idToken, ...rest } = creds;
       return rest;
     })();
     await deps.tokenStore?.upsert({
@@ -385,6 +398,9 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
       if (accessToken !== null) out.push(accessToken);
       if (refreshToken !== undefined) out.push(refreshToken);
       return out;
+    },
+    currentMetadata(): Readonly<Record<string, unknown>> {
+      return { ...presetExtra };
     },
     invalidate(): void {
       // Force the next getAuthHeader() to refresh. Remember WHICH token was rejected

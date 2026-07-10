@@ -77,6 +77,9 @@
     account: string;
     credits: number;
     autoReset: boolean;
+    creditId?: string;
+    creditTitle?: string;
+    idempotencyKey: string;
   } | null>(null);
   // True while the confirmed consume is in flight (disables the dialog's buttons).
   let resettingLimit = $state<boolean>(false);
@@ -110,7 +113,8 @@
     {
       value: 'use_expiring',
       label: 'Avoid waste',
-      description: 'Prefer accounts with 5h or weekly quota resetting soon, plus Codex reset credits.',
+      description:
+        'Prefer accounts with 5h or weekly quota resetting soon, plus Codex reset credits.',
     },
   ];
 
@@ -134,6 +138,14 @@
     if (p.id === 'openai-codex') return `Codex · OAuth`;
     if (p.id === 'github-copilot') return `Copilot · ${$t('Device')}`;
     return p.flow === 'device_code' ? $t('Device') : 'OAuth';
+  }
+
+  function planLabel(plan: string): string {
+    return plan
+      .split(/[-_\s]+/)
+      .filter(Boolean)
+      .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1).toLowerCase()}`)
+      .join(' ');
   }
 
   // How many model pills to render inline before collapsing the rest into a "+N"
@@ -176,7 +188,7 @@
 
   function titleFromSlug(slug: string): string {
     return slug
-      .split('-')
+      .split(/[-_]+/)
       .filter(Boolean)
       .map((part) =>
         part.length <= 3 ? part.toUpperCase() : `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`,
@@ -185,7 +197,7 @@
   }
 
   // Friendly window labels (provider-specific keys → display).
-  function windowLabel(key: string): string {
+  function windowLabel(key: string, windowMinutes: number | null = null): string {
     const map: Record<string, string> = {
       '5h': '5h',
       '7d': '7d',
@@ -198,8 +210,24 @@
       secondary: $t('Weekly'),
     };
     if (map[key]) return map[key];
+    if (key.endsWith('-primary')) return windowMinutes ? `${windowMinutes}m` : $t('Primary');
+    if (key.endsWith('-secondary')) {
+      return windowMinutes === 10_080
+        ? $t('Weekly')
+        : windowMinutes
+          ? `${windowMinutes}m`
+          : $t('Secondary');
+    }
     if (key.startsWith('7d-')) return `7d · ${titleFromSlug(key.slice(3))}`;
     return key;
+  }
+
+  function quotaWindowLabel(window: OAuthQuotaWindow): string {
+    const base = windowLabel(window.key, window.windowMinutes);
+    const scope =
+      window.limitName?.trim() ||
+      (window.limitId && window.limitId !== 'codex' ? titleFromSlug(window.limitId) : null);
+    return scope ? `${scope} · ${base}` : base;
   }
 
   // Color ramp mirrors claude-relay: calm under 75%, warning to 90%, danger beyond.
@@ -210,6 +238,7 @@
   }
 
   function isAccountWideQuotaWindow(w: OAuthQuotaWindow): boolean {
+    if (w.limitId !== undefined && w.limitId !== 'codex') return false;
     return !w.key.startsWith('7d-');
   }
 
@@ -269,7 +298,7 @@
     );
     if (recoveryWindow?.resetsAtMs != null) {
       untilMs = recoveryWindow.resetsAtMs;
-      label = windowLabel(recoveryWindow.key);
+      label = quotaWindowLabel(recoveryWindow);
       return { untilMs, label, retryable: false };
     }
     if (untilMs != null && !allowLocalRetry && q?.windows.some(isAccountWideQuotaWindow)) {
@@ -280,7 +309,7 @@
 
   function codexWeeklyUsedPercent(q: OAuthQuotaSnapshot | undefined): number | null {
     const weekly = q?.windows
-      .filter((w) => w.key === 'secondary')
+      .filter((w) => w.key === 'secondary' && (w.limitId === undefined || w.limitId === 'codex'))
       .map((w) => w.usedPercent)
       .filter((pct) => Number.isFinite(pct));
     return weekly && weekly.length > 0 ? Math.max(...weekly) : null;
@@ -293,6 +322,7 @@
     return (
       credits != null &&
       credits > 0 &&
+      (q?.rateLimitReachedType == null || q.rateLimitReachedType === 'rate_limit_reached') &&
       (codexWeeklyUsedPercent(q) ?? -1) >= CODEX_RESET_MIN_WEEKLY_USED_PERCENT
     );
   }
@@ -301,11 +331,65 @@
     const weekly = codexWeeklyUsedPercent(q);
     if (credits == null) return $t('Reset-credit count unavailable');
     if (credits <= 0) return $t('No reset credits available');
+    if (q?.rateLimitReachedType != null && q.rateLimitReachedType !== 'rate_limit_reached') {
+      return $t('This limit cannot be restored with a Codex reset credit');
+    }
     if (weekly == null) return $t('Weekly quota snapshot unavailable');
     if (weekly < CODEX_RESET_MIN_WEEKLY_USED_PERCENT) {
       return $t('Weekly usage must reach 90% before reset credits can be used');
     }
     return $t('Consume one credit to restore the rate-limit window');
+  }
+
+  function rateLimitReachedLabel(type: OAuthQuotaSnapshot['rateLimitReachedType']): string | null {
+    switch (type) {
+      case 'rate_limit_reached':
+        return $t('Rate limit reached');
+      case 'workspace_owner_credits_depleted':
+      case 'workspace_member_credits_depleted':
+        return $t('Workspace credits depleted');
+      case 'workspace_owner_usage_limit_reached':
+      case 'workspace_member_usage_limit_reached':
+        return $t('Workspace usage limit reached');
+      default:
+        return null;
+    }
+  }
+
+  function resetRequestId(): string {
+    return globalThis.crypto?.randomUUID?.() ?? `reset-${Date.now().toString(36)}`;
+  }
+
+  function individualLimitUsedPercent(q: OAuthQuotaSnapshot | undefined): number | null {
+    const remaining = q?.individualLimit?.remainingPercent;
+    return typeof remaining === 'number' && Number.isFinite(remaining)
+      ? Math.min(100, Math.max(0, 100 - remaining))
+      : null;
+  }
+
+  function formatCreditAmount(value: string): string {
+    const number = Number(value);
+    return Number.isFinite(number) ? new Intl.NumberFormat().format(number) : value;
+  }
+
+  function additionalLimitNames(q: OAuthQuotaSnapshot | undefined): string[] {
+    if (!q?.additionalLimits?.length) return [];
+    const representedIds = new Set(q.windows.map((window) => window.limitId).filter(Boolean));
+    const representedNames = new Set(
+      q.windows.map((window) => window.limitName?.trim()).filter(Boolean),
+    );
+    return [
+      ...new Set(
+        q.additionalLimits
+          .filter(
+            (limit) =>
+              !representedIds.has(limit.limitId) &&
+              !(limit.limitName && representedNames.has(limit.limitName.trim())),
+          )
+          .map((limit) => limit.limitName?.trim() || titleFromSlug(limit.limitId))
+          .filter(Boolean),
+      ),
+    ];
   }
 
   // Countdown to auto-recovery for the rate-limited pill — same `durationParts`
@@ -439,7 +523,7 @@
   // refresh so the quota bars + the remaining-credit count reflect the consumed credit.
   async function confirmResetLimit(): Promise<void> {
     if (!confirmingReset) return;
-    const { providerId, account, autoReset } = confirmingReset;
+    const { providerId, account, autoReset, creditId, idempotencyKey } = confirmingReset;
     resettingLimit = true;
     error = null;
     resetNotice = null;
@@ -449,7 +533,24 @@
         error = $t('Reset limit requires weekly usage of at least 90%');
         return;
       }
-      const result = await consumeCodexResetCredit(providerId, account);
+      const result = await consumeCodexResetCredit(providerId, account, {
+        ...(creditId === undefined ? {} : { creditId }),
+        idempotencyKey,
+      });
+      if (result.outcome === 'nothingToReset') {
+        error = $t('No rate-limit window needed resetting');
+        return;
+      }
+      if (result.outcome === 'noCredit') {
+        error = $t('No reset credits available');
+        confirmingReset = null;
+        await invalidateAll();
+        return;
+      }
+      if (result.outcome !== 'reset' && result.outcome !== 'alreadyRedeemed') {
+        error = $t('Unexpected reset-credit outcome');
+        return;
+      }
       // Persist the auto-reset opt-in only after the scarce reset-credit consume
       // succeeds. A failed manual reset must not silently enable future auto-spends.
       try {
@@ -460,9 +561,11 @@
       confirmingReset = null;
       await invalidateAll();
       resetNotice =
-        result.windowsReset != null
-          ? $t('Reset {n} window(s)', { n: result.windowsReset })
-          : $t('Reset limit consumed');
+        result.outcome === 'alreadyRedeemed'
+          ? $t('Reset credit was already redeemed')
+          : result.windowsReset != null
+            ? $t('Reset {n} window(s)', { n: result.windowsReset })
+            : $t('Reset limit consumed');
     } catch (e) {
       error = e instanceof Error ? e.message : $t('Failed to reset limit');
     } finally {
@@ -561,14 +664,17 @@
     </div>
   {:else}
     {@const selectedStrategy =
-      strategyOptions.find((option) => option.value === data.selectionStrategy) ?? strategyOptions[0]}
+      strategyOptions.find((option) => option.value === data.selectionStrategy) ??
+      strategyOptions[0]}
     <div class="card flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
       <div class="min-w-0">
         <h2 class="field-label">
           {$t('Account usage strategy')}
         </h2>
         <p class="field-help mt-0.5 max-w-2xl leading-snug">
-          {$t('Applies to all connected subscription accounts. Per-account controls stay limited to priority and scheduling.')}
+          {$t(
+            'Applies to all connected subscription accounts. Per-account controls stay limited to priority and scheduling.',
+          )}
         </p>
         <p class="field-help mt-0.5 max-w-2xl leading-snug">
           {$t(selectedStrategy.description)}
@@ -617,11 +723,56 @@
             {@const usageLimit = usageLimitStatus(quota, isCodex)}
             {@const usageLimitRecovery = usageLimit ? autoRecoverIn(usageLimit.untilMs) : ''}
             {@const credentialFailed = row.account.credentialFailed === true}
+            {@const additionalLimits = isCodex ? additionalLimitNames(quota) : []}
+            {@const hasCodexQuotaMetadata =
+              isCodex &&
+              Boolean(
+                quota?.planType ||
+                quota?.credits ||
+                rateLimitReachedLabel(quota?.rateLimitReachedType),
+              )}
+            {@const hasCodexIdentity =
+              isCodex &&
+              Boolean(
+                row.account.email ||
+                row.account.chatgptPlanType ||
+                row.account.chatgptAccountId ||
+                row.account.isFedramp,
+              )}
             <tr class="align-top" data-testid="provider-account-row">
               <!-- Provider / account + type badge -->
               <td data-label={$t('Provider')} class="px-3 py-3">
                 <div class="font-medium text-ink-body">{row.provider.name}</div>
                 <code class="font-mono text-xs text-ink-strong">{row.account.account}</code>
+                {#if hasCodexIdentity}
+                  <div
+                    class="mt-1 flex max-w-64 flex-col items-start gap-1 text-xs"
+                    data-testid="codex-subscription-details"
+                  >
+                    {#if row.account.email}
+                      <span class="break-all text-ink-body">{row.account.email}</span>
+                    {/if}
+                    {#if row.account.chatgptPlanType || row.account.isFedramp}
+                      <div class="flex flex-wrap gap-1">
+                        {#if row.account.chatgptPlanType}
+                          <span class="badge-neutral">{planLabel(row.account.chatgptPlanType)}</span
+                          >
+                        {/if}
+                        {#if row.account.isFedramp}
+                          <span class="badge-neutral">{$t('FedRAMP')}</span>
+                        {/if}
+                      </div>
+                    {/if}
+                    {#if row.account.chatgptAccountId}
+                      <span
+                        class="break-all font-mono text-[10px] text-ink-muted"
+                        title={$t('ChatGPT account ID')}
+                      >
+                        {$t('ChatGPT ID: {id}', { id: row.account.chatgptAccountId })}
+                      </span>
+                    {/if}
+                  </div>
+                {/if}
                 <div class="mt-1 flex flex-wrap items-center gap-1">
                   <span class="badge-neutral">{typeBadge(row.provider)}</span>
                   {#if isCodex && row.account.autoReset}
@@ -707,13 +858,13 @@
               </td>
 
               <!-- Quota / session windows (+ Codex reset-credit count) -->
-              <td data-label={$t('Quota')} class="px-3 py-3">
+              <td data-label={$t('Quota')} class="px-3 py-3" data-testid="provider-quota-cell">
                 {#if quota && quota.windows.length > 0}
                   <div class="flex w-full flex-col gap-1.5 lg:w-40">
                     {#each quota.windows as w (w.key)}
                       <div>
                         <div class="flex items-center justify-between text-xs text-ink-muted">
-                          <span>{windowLabel(w.key)}</span>
+                          <span>{quotaWindowLabel(w)}</span>
                           <span>{Math.round(w.usedPercent)}%</span>
                         </div>
                         <div class="progress-track">
@@ -729,6 +880,48 @@
                     {/each}
                   </div>
                 {/if}
+                {#if additionalLimits.length > 0}
+                  <div class:mt-2={quota && quota.windows.length > 0}>
+                    <div class="text-[10px] font-medium text-ink-muted">
+                      {$t('Additional limits')}
+                    </div>
+                    <div class="mt-1 flex flex-wrap gap-1">
+                      {#each additionalLimits as limit (limit)}
+                        <span class="badge-neutral text-[10px]">{limit}</span>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+                {#if isCodex && quota?.individualLimit}
+                  {@const usedPercent = individualLimitUsedPercent(quota)}
+                  <div class="mt-2 min-w-0" data-testid="codex-individual-limit">
+                    <div class="flex items-center justify-between gap-2 text-xs text-ink-muted">
+                      <span>{$t('Monthly credit limit')}</span>
+                      {#if usedPercent != null}
+                        <span>{Math.round(usedPercent)}%</span>
+                      {/if}
+                    </div>
+                    {#if usedPercent != null}
+                      <div class="progress-track">
+                        <div
+                          class={`progress-bar ${barColor(usedPercent)}`}
+                          style={`width:${Math.min(100, Math.max(2, usedPercent))}%`}
+                        ></div>
+                      </div>
+                    {/if}
+                    <div class="text-[10px] text-ink-muted">
+                      {$t('{used} of {limit} credits used', {
+                        used: formatCreditAmount(quota.individualLimit.used),
+                        limit: formatCreditAmount(quota.individualLimit.limit),
+                      })}
+                    </div>
+                    {#if resetIn(quota.individualLimit.resetsAtMs)}
+                      <div class="text-[10px] text-ink-muted">
+                        {resetIn(quota.individualLimit.resetsAtMs)}
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
                 {#if codexCredits != null}
                   <div
                     class="text-[10px] text-ink-muted"
@@ -737,7 +930,26 @@
                     {$t('{n} reset credits', { n: codexCredits })}
                   </div>
                 {/if}
-                {#if !(quota && quota.windows.length > 0) && codexCredits == null}
+                {#if isCodex && quota?.planType}
+                  <div class="text-[10px] text-ink-muted">
+                    {$t('Plan: {plan}', { plan: planLabel(quota.planType) })}
+                  </div>
+                {/if}
+                {#if isCodex && quota?.credits}
+                  <div class="text-[10px] text-ink-muted">
+                    {$t('Credits: {balance}', {
+                      balance: quota.credits.unlimited
+                        ? $t('Unlimited')
+                        : (quota.credits.balance ?? '—'),
+                    })}
+                  </div>
+                {/if}
+                {#if isCodex && rateLimitReachedLabel(quota?.rateLimitReachedType)}
+                  <div class="text-[10px] text-ink-muted">
+                    {rateLimitReachedLabel(quota?.rateLimitReachedType)}
+                  </div>
+                {/if}
+                {#if !(quota && quota.windows.length > 0) && additionalLimits.length === 0 && codexCredits == null && !quota?.individualLimit && !hasCodexQuotaMetadata}
                   <span class="text-xs text-ink-muted">—</span>
                 {/if}
               </td>
@@ -838,12 +1050,21 @@
                       disabled={!canResetCodexLimit}
                       title={resetCreditTitle(quota, codexCredits)}
                       onclick={() =>
-                        (confirmingReset = {
-                          providerId: row.provider.id,
-                          account: row.account.account,
-                          credits: codexCredits ?? 0,
-                          autoReset: row.account.autoReset ?? false,
-                        })}
+                        (confirmingReset = (() => {
+                          const credit = quota?.resetCreditDetails?.find(
+                            (item) =>
+                              item.status === 'available' && item.resetType === 'codexRateLimits',
+                          );
+                          return {
+                            providerId: row.provider.id,
+                            account: row.account.account,
+                            credits: codexCredits ?? 0,
+                            autoReset: row.account.autoReset ?? false,
+                            ...(credit?.id ? { creditId: credit.id } : {}),
+                            ...(credit?.title ? { creditTitle: credit.title } : {}),
+                            idempotencyKey: resetRequestId(),
+                          };
+                        })())}
                       >{codexCredits != null && codexCredits > 0
                         ? $t('Reset limit ({n})', { n: codexCredits })
                         : $t('Reset limit')}</button
@@ -915,6 +1136,9 @@
           'This restores the rate-limit window for the entire ChatGPT account. Any other connected account using the same ChatGPT login will also be reset.',
         )}
       </p>
+      {#if confirmingReset.creditTitle}
+        <p class="mt-2 text-sm font-medium text-ink-body">{confirmingReset.creditTitle}</p>
+      {/if}
       <label class="checkbox-field mt-4" data-testid="reset-auto-reset-toggle">
         <input type="checkbox" class="checkbox" bind:checked={confirmingReset.autoReset} />
         <span class="text-sm text-ink-body"

@@ -1,9 +1,10 @@
-import type { LanesConfig } from "@helm/core";
+import type { LanesConfig, OpenAICodexModelsResult } from "@helm/core";
 import { buildModelsList } from "@helm/core";
 import { type CatalogEntry, makeHelmError } from "@helm/shared";
 import type { Context, Hono } from "hono";
 import type { AppEnv } from "../app.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
+import { normalizeOpenAICodexClientVersion } from "../oauth/codex-client-version.js";
 
 // GET /v1/models — OpenAI-compatible model discovery. Behind API-key auth (mounted
 // in server.ts) so the listing is KEY-AWARE: the authenticated identity's
@@ -24,6 +25,19 @@ export interface ModelsRouteDeps {
   // absent in headless/no-OAuth deployments. These are concrete aliases, so — like
   // providerAliases — they surface only for allow_custom_model keys (buildModelsList).
   oauthAliases?: () => Iterable<string>;
+  // Codex CLI content negotiation. Supplying `client_version` requests the native
+  // `{models: ModelInfo[]}` envelope instead of the OpenAI-compatible list. The
+  // callback receives the authenticated key caps so native discovery and compact
+  // enforce the same entitlement boundary.
+  codexModels?: (input: {
+    clientVersion: string;
+    allowCustomModel: boolean;
+    allowedLanes: readonly string[] | null;
+    blockedModels: readonly string[] | null;
+  }) => OpenAICodexModelsResult | null | Promise<OpenAICodexModelsResult | null>;
+  // Records the exact key-filtered ETag returned to Codex CLI. Responses can then
+  // replace the upstream account-wide ETag with this same key-scoped value.
+  onCodexModelsListed?: (keyId: string, clientVersion: string, etag: string) => void;
 }
 
 // ponytail: 30s TTL memo, per caps-fingerprint. A misbehaving client (seen in
@@ -64,7 +78,37 @@ export function registerModelsRoute(app: Hono<AppEnv>, deps: ModelsRouteDeps): v
     return value;
   };
 
-  app.get("/v1/models", (c) => c.json(build(c), 200));
+  app.get("/v1/models", async (c) => {
+    const rawClientVersion = c.req.query("client_version");
+    if (rawClientVersion !== undefined && deps.codexModels !== undefined) {
+      const clientVersion = normalizeOpenAICodexClientVersion(rawClientVersion);
+      if (clientVersion === null) {
+        throw new HelmHttpError(
+          makeHelmError({
+            error_class: "invalid_request",
+            message: "client_version must be a valid semantic version",
+            trace_id: c.get("trace_id"),
+          }),
+        );
+      }
+      const caps = c.get("identity").caps;
+      const result = await deps.codexModels({
+        clientVersion,
+        allowCustomModel: caps.allowCustomModel,
+        allowedLanes: caps.allowedLanes,
+        blockedModels: caps.blockedModels,
+      });
+      if (result?.etag !== undefined) {
+        c.header("ETag", result.etag);
+        deps.onCodexModelsListed?.(c.get("identity").keyId, clientVersion, result.etag);
+      }
+      if (result?.reasoningIncluded === true) {
+        c.header("x-reasoning-included", "true");
+      }
+      return c.json({ models: result?.models ?? [] }, 200);
+    }
+    return c.json(build(c), 200);
+  });
 
   // Retrieve a single model the key can use. An id outside the key's listing is
   // reported as invalid_request (the structured error taxonomy has no 404 class);

@@ -150,8 +150,8 @@ function baseReport(mode: Mode, dryRun: boolean): CliReport {
     version: null,
     helmBaseUrl: process.env.HELM_PASSTHROUGH_BASE_URL ?? null,
     traceId: null,
-    providerAlias: process.env[`HELM_PASSTHROUGH_${mode === "claude-cli" ? "CLAUDE" : "CODEX"}_PROVIDER_ALIAS`] ?? null,
-    providerModel: process.env[`HELM_PASSTHROUGH_${mode === "claude-cli" ? "CLAUDE" : "CODEX"}_MODEL`] ?? null,
+    providerAlias: null,
+    providerModel: null,
     nativePassthrough: null,
     mutationLedger: null,
     exitCode: null,
@@ -166,8 +166,24 @@ function addAssertion(report: CliReport, name: string, passed: boolean, details?
   report.assertions.push({ name, passed, ...(details ? { details } : {}) });
 }
 
+export function inferredAdminBaseUrl(
+  explicit: string | undefined,
+  apiBase: string | undefined,
+): string | null {
+  const value = explicit ?? apiBase;
+  if (!value) return null;
+  return value.replace(/\/+$/, "").replace(/\/v1$/, "");
+}
+
 function adminBaseUrl(): string | null {
-  return process.env.HELM_PASSTHROUGH_ADMIN_BASE_URL ?? process.env.HELM_PASSTHROUGH_BASE_URL ?? null;
+  return inferredAdminBaseUrl(
+    process.env.HELM_PASSTHROUGH_ADMIN_BASE_URL,
+    process.env.HELM_PASSTHROUGH_BASE_URL,
+  );
+}
+
+export function codexCommandPinsBaseUrl(command: string): boolean {
+  return command.includes("openai_base_url");
 }
 
 function adminHeaders(): Record<string, string> {
@@ -246,6 +262,13 @@ async function runMode(mode: Mode, dryRun: boolean): Promise<CliReport> {
   const missingEnv = COMMON_REQUIRED_ENV.filter((name) => !process.env[name]);
   const commandTemplate = process.env[config.commandEnv];
   if (!commandTemplate) missingEnv.push(config.commandEnv);
+  if (
+    mode === "codex-cli" &&
+    commandTemplate &&
+    !codexCommandPinsBaseUrl(commandTemplate)
+  ) {
+    missingEnv.push(`${config.commandEnv}:openai_base_url`);
+  }
   addAssertion(
     report,
     "required live environment is configured",
@@ -313,6 +336,25 @@ async function runMode(mode: Mode, dryRun: boolean): Promise<CliReport> {
     telemetryPassed,
     telemetryPassed ? undefined : `missing nativePassthrough:true evidence in ${ASSERTIONS_FILE_ENV}`,
   );
+  const expectedPrefix = mode === "claude-cli" ? "CLAUDE" : "CODEX";
+  const expectedAlias = process.env[`HELM_PASSTHROUGH_${expectedPrefix}_PROVIDER_ALIAS`];
+  const expectedModel = process.env[`HELM_PASSTHROUGH_${expectedPrefix}_MODEL`];
+  if (expectedAlias) {
+    addAssertion(
+      report,
+      "telemetry selected the expected provider alias",
+      report.providerAlias === expectedAlias,
+      `expected ${expectedAlias}; received ${report.providerAlias ?? "none"}`,
+    );
+  }
+  if (expectedModel) {
+    addAssertion(
+      report,
+      "telemetry selected the expected provider model",
+      report.providerModel === expectedModel,
+      `expected ${expectedModel}; received ${report.providerModel ?? "none"}`,
+    );
+  }
   const serializedEvidence = JSON.stringify(evidence ?? {});
   const leakedKey = process.env.HELM_PASSTHROUGH_API_KEY
     ? serializedEvidence.includes(process.env.HELM_PASSTHROUGH_API_KEY)

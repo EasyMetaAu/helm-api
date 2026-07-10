@@ -11,6 +11,10 @@ import ProvidersPage from './+page.svelte';
 
 const logoutOAuth = vi.fn();
 const resetUsageLimit = vi.fn();
+const getAccountModels = vi.fn();
+const getAccountProxy = vi.fn();
+const getAccountSchedule = vi.fn();
+const setAccountModels = vi.fn();
 const setAccountSchedule = vi.fn();
 const setSelectionStrategy = vi.fn();
 const streamAccountTest = vi.fn();
@@ -18,13 +22,13 @@ const consumeCodexResetCredit = vi.fn();
 vi.mock('$lib/api/oauth.js', () => ({
   completeManualPaste: vi.fn(),
   consumeCodexResetCredit: (...args: unknown[]) => consumeCodexResetCredit(...args),
-  getAccountModels: vi.fn(),
-  getAccountProxy: vi.fn(),
-  getAccountSchedule: vi.fn(),
+  getAccountModels: (...args: unknown[]) => getAccountModels(...args),
+  getAccountProxy: (...args: unknown[]) => getAccountProxy(...args),
+  getAccountSchedule: (...args: unknown[]) => getAccountSchedule(...args),
   logoutOAuth: (...args: unknown[]) => logoutOAuth(...args),
   pollDeviceCode: vi.fn(),
   resetUsageLimit: (...args: unknown[]) => resetUsageLimit(...args),
-  setAccountModels: vi.fn(),
+  setAccountModels: (...args: unknown[]) => setAccountModels(...args),
   setAccountProxy: vi.fn(),
   setAccountSchedule: (...args: unknown[]) => setAccountSchedule(...args),
   setSelectionStrategy: (...args: unknown[]) => setSelectionStrategy(...args),
@@ -108,12 +112,30 @@ function renderPage(
 describe('providers page', () => {
   beforeEach(() => {
     logoutOAuth.mockReset();
+    getAccountModels.mockReset();
+    getAccountProxy.mockReset();
+    getAccountSchedule.mockReset();
+    setAccountModels.mockReset();
     setAccountSchedule.mockReset();
     setSelectionStrategy.mockReset();
     streamAccountTest.mockReset();
     consumeCodexResetCredit.mockReset();
     invalidateAllMock.mockReset();
     logoutOAuth.mockResolvedValue(undefined);
+    getAccountModels.mockResolvedValue({
+      available: [],
+      enabled: [],
+      canPull: true,
+      modelsMode: 'auto',
+    });
+    getAccountProxy.mockResolvedValue(null);
+    getAccountSchedule.mockResolvedValue({
+      priority: 50,
+      schedulable: true,
+      autoReset: false,
+      fastMode: false,
+    });
+    setAccountModels.mockResolvedValue(undefined);
     setAccountSchedule.mockResolvedValue(undefined);
     setSelectionStrategy.mockResolvedValue(undefined);
   });
@@ -147,6 +169,134 @@ describe('providers page', () => {
     // Models column: each effective model as a pill (3 ≤ cap, so all show, no "+N").
     expect(within(row).getByText('claude-opus-4-6')).toBeInTheDocument();
     expect(within(row).getByText('claude-haiku-4-5')).toBeInTheDocument();
+  });
+
+  it('renders Codex subscription identity details only when present', () => {
+    renderPage({
+      providers: [
+        provider({
+          id: 'openai-codex',
+          name: 'Codex',
+          accounts: [
+            {
+              account: 'acct-codex',
+              email: 'lukin@example.com',
+              chatgptPlanType: 'plus',
+              chatgptAccountId: 'chatgpt-account-123',
+              isFedramp: true,
+              expiresAt: null,
+              updatedAt: Date.now(),
+              healthy: true,
+              priority: 50,
+              schedulable: true,
+              proxy: null,
+              models: ['gpt-5.6-sol'],
+            },
+          ],
+        }),
+      ],
+      usage: [],
+      quota: [],
+    });
+
+    const row = screen.getByTestId('provider-account-row');
+    const details = within(row).getByTestId('codex-subscription-details');
+    expect(within(details).getByText('lukin@example.com')).toBeInTheDocument();
+    expect(within(details).getByText('Plus')).toBeInTheDocument();
+    expect(within(details).getByText('ChatGPT ID: chatgpt-account-123')).toBeInTheDocument();
+    expect(within(details).getByText('FedRAMP')).toBeInTheDocument();
+  });
+
+  it('does not reserve subscription-detail space when Codex claims are absent', () => {
+    renderPage({
+      providers: [
+        provider({
+          id: 'openai-codex',
+          name: 'Codex',
+          accounts: [
+            {
+              account: 'acct-codex',
+              expiresAt: null,
+              updatedAt: Date.now(),
+              healthy: true,
+              priority: 50,
+              schedulable: true,
+              proxy: null,
+              models: ['gpt-5.6-sol'],
+            },
+          ],
+        }),
+      ],
+      usage: [],
+      quota: [],
+    });
+
+    expect(
+      within(screen.getByTestId('provider-account-row')).queryByTestId(
+        'codex-subscription-details',
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it('edits model lists only in manual mode and saves mode with models', async () => {
+    getAccountModels.mockResolvedValue({
+      available: ['gpt-5.6-sol', 'gpt-5.6-terra'],
+      enabled: ['gpt-5.6-sol'],
+      canPull: true,
+      modelsMode: 'auto',
+    });
+    renderPage({
+      providers: [
+        provider({
+          id: 'openai-codex',
+          name: 'Codex',
+          accounts: [
+            {
+              account: 'acct-codex',
+              expiresAt: null,
+              updatedAt: Date.now(),
+              healthy: true,
+              priority: 50,
+              schedulable: true,
+              proxy: null,
+              models: ['gpt-5.6-sol', 'gpt-5.6-terra'],
+            },
+          ],
+        }),
+      ],
+      usage: [],
+      quota: [],
+    });
+
+    await fireEvent.click(
+      within(screen.getByTestId('provider-account-row')).getByRole('button', {
+        name: /manage/i,
+      }),
+    );
+
+    const dialog = screen.getByRole('dialog', { name: /manage account/i });
+    const automatic = await within(dialog).findByRole('radio', { name: /automatic/i });
+    const manual = within(dialog).getByRole('radio', { name: /manual/i });
+    expect(automatic).toBeChecked();
+    expect(within(dialog).queryByPlaceholderText('Add a model id…')).not.toBeInTheDocument();
+    expect(within(dialog).getByText('gpt-5.6-terra')).toBeInTheDocument();
+
+    await fireEvent.click(manual);
+
+    expect(manual).toBeChecked();
+    expect(within(dialog).getByPlaceholderText('Add a model id…')).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole('button', { name: 'Pull from provider (2)' }),
+    ).toBeInTheDocument();
+
+    await fireEvent.click(within(dialog).getByRole('button', { name: /^save$/i }));
+
+    await waitFor(() =>
+      expect(setAccountModels).toHaveBeenCalledWith('openai-codex', 'acct-codex', {
+        mode: 'manual',
+        models: ['gpt-5.6-sol'],
+      }),
+    );
   });
 
   it('updates the global account selection strategy', async () => {
@@ -546,7 +696,12 @@ describe('providers page', () => {
 
   // ── Codex "Reset limit" (rate-limit reset credit) ──────────────────────────
   // One Codex account + a quota snapshot carrying the live reset-credit count.
-  function renderCodex(resetCredits: number | null, autoReset = false, weeklyUsedPercent = 95) {
+  function renderCodex(
+    resetCredits: number | null,
+    autoReset = false,
+    weeklyUsedPercent = 95,
+    rateLimitReachedType: OAuthQuotaSnapshot['rateLimitReachedType'] = 'rate_limit_reached',
+  ) {
     renderPage({
       providers: [
         provider({
@@ -591,6 +746,20 @@ describe('providers page', () => {
           source: 'codex',
           usageLimitedUntilMs: null,
           resetCredits,
+          planType: 'pro',
+          credits: { hasCredits: true, unlimited: false, balance: '9.99' },
+          rateLimitReachedType,
+          resetCreditDetails: [
+            {
+              id: 'credit-1',
+              resetType: 'codexRateLimits',
+              status: 'available',
+              grantedAt: Math.floor(Date.now() / 1000),
+              expiresAt: Math.floor(Date.now() / 1000) + 86_400,
+              title: 'Full reset',
+              description: 'Restore Codex rate limits',
+            },
+          ],
         },
       ],
     });
@@ -707,11 +876,19 @@ describe('providers page', () => {
   });
 
   it('confirms before consuming a Codex reset credit, then refreshes on success', async () => {
-    consumeCodexResetCredit.mockResolvedValue({ code: 'ok', windowsReset: 2 });
+    consumeCodexResetCredit.mockResolvedValue({
+      code: 'reset',
+      outcome: 'reset',
+      windowsReset: 2,
+      redeemRequestId: 'idem-1',
+    });
     renderCodex(2);
     const row = screen.getByTestId('provider-account-row');
     // The available reset-credit count renders in the Quota cell AND on the button.
     expect(within(row).getByText('2 reset credits')).toBeInTheDocument();
+    expect(within(row).getByText('Plan: Pro')).toBeInTheDocument();
+    expect(within(row).getByText('Credits: 9.99')).toBeInTheDocument();
+    expect(within(row).getByText('Rate limit reached')).toBeInTheDocument();
 
     // Clicking the row button only OPENS the confirm dialog — no consume yet (the
     // credit is a scarce, irreversible spend; a single click must never trigger it).
@@ -721,17 +898,257 @@ describe('providers page', () => {
     expect(consumeCodexResetCredit).not.toHaveBeenCalled();
 
     const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText('Full reset')).toBeInTheDocument();
     // Confirm from WITHIN the dialog (its button reads just "Reset limit").
     await fireEvent.click(within(dialog).getByRole('button', { name: /^reset limit$/i }));
 
     await waitFor(() =>
-      expect(consumeCodexResetCredit).toHaveBeenCalledWith('openai-codex', 'acct-codex'),
+      expect(consumeCodexResetCredit).toHaveBeenCalledWith(
+        'openai-codex',
+        'acct-codex',
+        expect.objectContaining({
+          creditId: 'credit-1',
+          idempotencyKey: expect.any(String),
+        }),
+      ),
     );
     expect(invalidateAllMock).toHaveBeenCalledTimes(1);
+    expect(setAccountSchedule).toHaveBeenCalledWith('openai-codex', 'acct-codex', {
+      autoReset: false,
+    });
     // Success banner reflects how many windows were restored.
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Reset 2 window(s)'));
     // Dialog is dismissed after a successful reset.
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('does not show success or save auto-reset when there is nothing to reset', async () => {
+    consumeCodexResetCredit.mockResolvedValue({
+      code: 'nothing_to_reset',
+      outcome: 'nothingToReset',
+      windowsReset: 0,
+      redeemRequestId: 'idem-1',
+    });
+    renderCodex(2);
+    const row = screen.getByTestId('provider-account-row');
+    await fireEvent.click(within(row).getByRole('button', { name: /reset limit \(2\)/i }));
+
+    const dialog = screen.getByRole('dialog');
+    await fireEvent.click(within(dialog).getByTestId('reset-auto-reset-toggle'));
+    await fireEvent.click(within(dialog).getByRole('button', { name: /^reset limit$/i }));
+
+    await waitFor(() => expect(consumeCodexResetCredit).toHaveBeenCalled());
+    expect(setAccountSchedule).not.toHaveBeenCalled();
+    expect(invalidateAllMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('No rate-limit window needed resetting');
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
+  it('refreshes quota after noCredit so stale positive credit is not left on screen', async () => {
+    consumeCodexResetCredit.mockResolvedValue({
+      code: 'no_credit',
+      outcome: 'noCredit',
+      windowsReset: 0,
+      redeemRequestId: 'idem-1',
+    });
+    renderCodex(2);
+    const row = screen.getByTestId('provider-account-row');
+    await fireEvent.click(within(row).getByRole('button', { name: /reset limit \(2\)/i }));
+
+    const dialog = screen.getByRole('dialog');
+    await fireEvent.click(within(dialog).getByTestId('reset-auto-reset-toggle'));
+    await fireEvent.click(within(dialog).getByRole('button', { name: /^reset limit$/i }));
+
+    await waitFor(() => expect(consumeCodexResetCredit).toHaveBeenCalled());
+    expect(setAccountSchedule).not.toHaveBeenCalled();
+    expect(invalidateAllMock).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('No reset credits available');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('shows an idempotent notice and saves auto-reset for alreadyRedeemed', async () => {
+    consumeCodexResetCredit.mockResolvedValue({
+      code: 'already_redeemed',
+      outcome: 'alreadyRedeemed',
+      windowsReset: 0,
+      redeemRequestId: 'idem-1',
+    });
+    renderCodex(2);
+    const row = screen.getByTestId('provider-account-row');
+    await fireEvent.click(within(row).getByRole('button', { name: /reset limit \(2\)/i }));
+
+    const dialog = screen.getByRole('dialog');
+    await fireEvent.click(within(dialog).getByTestId('reset-auto-reset-toggle'));
+    await fireEvent.click(within(dialog).getByRole('button', { name: /^reset limit$/i }));
+
+    await waitFor(() =>
+      expect(setAccountSchedule).toHaveBeenCalledWith('openai-codex', 'acct-codex', {
+        autoReset: true,
+      }),
+    );
+    expect(invalidateAllMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('status')).toHaveTextContent('Reset credit was already redeemed');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('renders model-scoped additional limits and the individual monthly credit limit', () => {
+    renderPage({
+      providers: [
+        provider({
+          id: 'openai-codex',
+          name: 'Codex',
+          accounts: [
+            {
+              account: 'acct-codex',
+              expiresAt: null,
+              updatedAt: Date.now(),
+              healthy: true,
+              priority: 50,
+              schedulable: true,
+              autoReset: false,
+              fastMode: false,
+              proxy: null,
+              models: ['gpt-5.6-codex-spark'],
+            },
+          ],
+        }),
+      ],
+      usage: [],
+      quota: [
+        {
+          providerId: 'openai-codex',
+          account: 'acct-codex',
+          windows: [
+            {
+              key: 'codex_spark-primary',
+              usedPercent: 88,
+              resetsAtMs: Date.now() + 3_600_000,
+              windowMinutes: 30,
+              limitId: 'codex_spark',
+              limitName: 'GPT-5.6-Codex-Spark',
+            },
+          ],
+          capturedAt: Date.now(),
+          source: 'codex',
+          usageLimitedUntilMs: null,
+          resetCredits: 0,
+          individualLimit: {
+            limit: '25000',
+            used: '8000',
+            remainingPercent: 68,
+            resetsAtMs: Date.now() + 86_400_000,
+          },
+        },
+      ],
+    });
+
+    const row = screen.getByTestId('provider-account-row');
+    expect(within(row).getByText('GPT-5.6-Codex-Spark · 30m')).toBeInTheDocument();
+    const individualLimit = within(row).getByTestId('codex-individual-limit');
+    expect(within(individualLimit).getByText('Monthly credit limit')).toBeInTheDocument();
+    expect(within(individualLimit).getByText('8,000 of 25,000 credits used')).toBeInTheDocument();
+    expect(within(individualLimit).getByText('32%')).toBeInTheDocument();
+  });
+
+  it('renders additional-limit names without fake usage bars when quota windows are absent', () => {
+    renderPage({
+      providers: [
+        provider({
+          id: 'openai-codex',
+          name: 'Codex',
+          accounts: [
+            {
+              account: 'acct-codex',
+              expiresAt: null,
+              updatedAt: Date.now(),
+              healthy: true,
+              priority: 50,
+              schedulable: true,
+              autoReset: false,
+              fastMode: false,
+              proxy: null,
+              models: ['gpt-5.6-codex-spark'],
+            },
+          ],
+        }),
+      ],
+      usage: [],
+      quota: [
+        {
+          providerId: 'openai-codex',
+          account: 'acct-codex',
+          windows: [],
+          additionalLimits: [
+            { limitId: 'codex_spark', limitName: 'GPT-5.6-Codex-Spark' },
+            { limitId: 'codex_terra', limitName: 'GPT-5.6-Codex-Terra' },
+          ],
+          capturedAt: Date.now(),
+          source: 'codex',
+          usageLimitedUntilMs: null,
+          resetCredits: null,
+        },
+      ],
+    });
+
+    const quotaCell = within(screen.getByTestId('provider-account-row')).getByTestId(
+      'provider-quota-cell',
+    );
+    expect(within(quotaCell).getByText('Additional limits')).toBeInTheDocument();
+    expect(within(quotaCell).getByText('GPT-5.6-Codex-Spark')).toBeInTheDocument();
+    expect(within(quotaCell).getByText('GPT-5.6-Codex-Terra')).toBeInTheDocument();
+    expect(within(quotaCell).queryByText('0%')).not.toBeInTheDocument();
+    expect(quotaCell.querySelector('.progress-track')).toBeNull();
+    expect(within(quotaCell).queryByText('—')).not.toBeInTheDocument();
+  });
+
+  it('does not render the empty quota marker alongside Codex metadata', () => {
+    renderPage({
+      providers: [
+        provider({
+          id: 'openai-codex',
+          name: 'Codex',
+          accounts: [
+            {
+              account: 'acct-codex',
+              expiresAt: null,
+              updatedAt: Date.now(),
+              healthy: true,
+              priority: 50,
+              schedulable: true,
+              autoReset: false,
+              fastMode: false,
+              proxy: null,
+              models: ['gpt-5.6-sol'],
+            },
+          ],
+        }),
+      ],
+      usage: [],
+      quota: [
+        {
+          providerId: 'openai-codex',
+          account: 'acct-codex',
+          windows: [],
+          capturedAt: Date.now(),
+          source: 'codex',
+          usageLimitedUntilMs: null,
+          resetCredits: null,
+          planType: 'pro',
+          credits: { hasCredits: true, unlimited: false, balance: '9.99' },
+          rateLimitReachedType: 'rate_limit_reached',
+        },
+      ],
+    });
+
+    const quotaCell = within(screen.getByTestId('provider-account-row')).getByTestId(
+      'provider-quota-cell',
+    );
+    expect(within(quotaCell).getByText('Plan: Pro')).toBeInTheDocument();
+    expect(within(quotaCell).getByText('Credits: 9.99')).toBeInTheDocument();
+    expect(within(quotaCell).getByText('Rate limit reached')).toBeInTheDocument();
+    expect(within(quotaCell).queryByText('—')).not.toBeInTheDocument();
   });
 
   it('does NOT consume when the reset confirmation is cancelled', async () => {
@@ -778,6 +1195,17 @@ describe('providers page', () => {
       'Weekly usage must reach 90% before reset credits can be used',
     );
     expect(consumeCodexResetCredit).not.toHaveBeenCalled();
+  });
+
+  it('disables "Reset limit" when the reached type is a workspace credit or spend limit', () => {
+    renderCodex(2, false, 100, 'workspace_member_usage_limit_reached');
+    const row = screen.getByTestId('provider-account-row');
+    const button = within(row).getByRole('button', { name: /reset limit \(2\)/i });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute(
+      'title',
+      'This limit cannot be restored with a Codex reset credit',
+    );
   });
 
   it('does not render "Reset limit" for non-Codex accounts', () => {

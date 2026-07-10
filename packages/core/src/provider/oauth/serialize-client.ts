@@ -155,5 +155,23 @@ export function createSerializingClient(deps: SerializeClientDeps): ProviderClie
       })();
   }
 
+  const innerCompact = deps.inner.responsesCompact;
+  if (innerCompact) {
+    client.responsesCompact = async (req, opts) => {
+      const lease = await admit(nativePassthroughBody(req), opts?.signal);
+      if (lease === null) return innerCompact(req, opts);
+      try {
+        return await innerCompact(req, opts);
+      } finally {
+        lease.release();
+      }
+    };
+  }
+
+  if (deps.inner.closeResponsesWebSocketSession) {
+    client.closeResponsesWebSocketSession = (sessionId) =>
+      deps.inner.closeResponsesWebSocketSession?.(sessionId) ?? Promise.resolve();
+  }
+
   return client;
 }

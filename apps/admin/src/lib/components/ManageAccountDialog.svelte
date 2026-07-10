@@ -1,5 +1,6 @@
 <script lang="ts">
   import {
+    type AccountModelsMode,
     type AccountProxyInput,
     type ProxyType,
     getAccountModels,
@@ -46,19 +47,17 @@
   }
 
   // ── Models ──────────────────────────────────────────────────────────────────
-  // An EDITABLE list of model ids this account exposes to Lanes. Discovery (live
-  // for Copilot/Anthropic, curated for Codex) only SEEDS suggestions — the saved
-  // list is authoritative, so the operator can add ids discovery missed (stale
-  // catalogs), edit, or remove. "Pull from provider" merges in current suggestions.
+  // Auto follows the account's live remote directory and receives new models.
+  // Manual exposes an explicit operator-curated list and is the only editable mode.
   let modelsLoading = $state<boolean>(true);
   let modelsSaving = $state<boolean>(false);
   let modelsSaved = $state<boolean>(false); // transient "Saved" confirmation next to Save
   let modelsError = $state<string | null>(null);
   let suggestions = $state<string[]>([]); // discovered — offered via "Pull"
   let models = $state<string[]>([]); // the authoritative, editable list
+  let modelsMode = $state<AccountModelsMode>('auto');
   let newModel = $state<string>('');
-  // Whether this provider has a live list-models API. Codex doesn't, so "Pull
-  // from provider" is hidden for it (there is nothing live to pull).
+  // Whether this provider has a live list-models API. Codex now does.
   let canPull = $state<boolean>(false);
 
   async function loadModels(): Promise<void> {
@@ -67,11 +66,13 @@
     modelsLoading = true;
     suggestions = [];
     models = [];
+    modelsMode = 'auto';
     canPull = false;
     try {
       const res = await getAccountModels(providerId, account);
       suggestions = res.available;
       models = [...res.enabled];
+      modelsMode = res.modelsMode;
       canPull = res.canPull;
     } catch (e) {
       modelsError = e instanceof Error ? e.message : $t('Failed to load models');
@@ -104,7 +105,7 @@
     modelsSaving = true;
     try {
       const clean = [...new Set(models.map((m) => m.trim()).filter((m) => m.length > 0))];
-      await setAccountModels(providerId, account, clean);
+      await setAccountModels(providerId, account, { mode: modelsMode, models: clean });
       models = clean;
       dirty = true;
       modelsSaved = true;
@@ -340,65 +341,126 @@
 
     {#if section === 'models'}
       <div class="flex flex-col gap-3">
-        <p class="field-help">
-          {$t(
-            'The models this account exposes to Lanes. This list is authoritative — add, edit, or remove ids freely. Use “Pull from provider” to seed it with what the provider currently reports.',
-          )}
-        </p>
         {#if modelsError}
           <p class="alert-error" role="alert">{modelsError}</p>
         {:else if modelsLoading}
           <p class="text-sm text-ink-muted">{$t('Loading models…')}</p>
         {:else}
-          <div class="flex flex-col gap-0.5">
-            {#each models as _model, i (i)}
-              <div
-                class="-mx-2 flex items-center gap-2 rounded-md px-2 py-1 transition-colors hover:bg-slate-100"
-              >
-                <input
-                  type="text"
-                  class="input flex-1 font-mono text-xs"
-                  bind:value={models[i]}
-                  spellcheck="false"
-                  autocomplete="off"
-                />
-                <button
-                  type="button"
-                  class="btn-danger-outline shrink-0"
-                  aria-label={$t('Remove model')}
-                  onclick={() => removeModel(i)}>{$t('Remove')}</button
-                >
-              </div>
-            {/each}
-            {#if models.length === 0}
-              <p class="text-sm text-ink-muted">
-                {$t('No models yet. Add one below or pull from the provider.')}
-              </p>
-            {/if}
-          </div>
-
-          <div class="flex items-center gap-2">
-            <input
-              type="text"
-              class="input flex-1 font-mono text-xs"
-              placeholder={$t('Add a model id…')}
-              bind:value={newModel}
-              spellcheck="false"
-              autocomplete="off"
-              onkeydown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  addModel();
-                }
-              }}
-            />
-            <button type="button" class="btn-secondary shrink-0" onclick={addModel}
-              >{$t('Add')}</button
+          <fieldset class="flex flex-col gap-2">
+            <legend class="field-label">{$t('Model selection')}</legend>
+            <label
+              class="flex cursor-pointer items-start gap-2 rounded-md border border-slate-200 px-3 py-2"
             >
-          </div>
+              <input
+                type="radio"
+                name="models-mode"
+                value="auto"
+                class="mt-0.5 h-4 w-4"
+                bind:group={modelsMode}
+                onchange={() => (modelsSaved = false)}
+              />
+              <span class="min-w-0">
+                <span class="block text-sm font-medium text-ink-body">{$t('Automatic')}</span>
+                <span class="field-help">
+                  {$t(
+                    'Always use this account’s remote model catalog and include newly available models automatically.',
+                  )}
+                </span>
+              </span>
+            </label>
+            <label
+              class="flex cursor-pointer items-start gap-2 rounded-md border border-slate-200 px-3 py-2"
+            >
+              <input
+                type="radio"
+                name="models-mode"
+                value="manual"
+                class="mt-0.5 h-4 w-4"
+                bind:group={modelsMode}
+                onchange={() => (modelsSaved = false)}
+              />
+              <span class="min-w-0">
+                <span class="block text-sm font-medium text-ink-body">{$t('Manual')}</span>
+                <span class="field-help">
+                  {$t(
+                    'Use an explicit model list. New remote models are not added until you choose them.',
+                  )}
+                </span>
+              </span>
+            </label>
+          </fieldset>
+
+          {#if modelsMode === 'auto'}
+            <div class="flex flex-col gap-2">
+              <p class="field-help">
+                {$t('Models currently reported by this account’s remote catalog.')}
+              </p>
+              {#if suggestions.length > 0}
+                <div class="flex flex-wrap gap-1.5">
+                  {#each suggestions as model (model)}
+                    <span class="badge-neutral font-mono text-[10px]">{model}</span>
+                  {/each}
+                </div>
+              {:else}
+                <p class="text-sm text-ink-muted">{$t('No models reported yet.')}</p>
+              {/if}
+            </div>
+          {:else}
+            <p class="field-help">
+              {$t(
+                'Only these models are exposed to Lanes. Add, edit, or remove ids, or pull the latest remote catalog into the list.',
+              )}
+            </p>
+            <div class="flex flex-col gap-0.5">
+              {#each models as _model, i (i)}
+                <div
+                  class="-mx-2 flex items-center gap-2 rounded-md px-2 py-1 transition-colors hover:bg-slate-100"
+                >
+                  <input
+                    type="text"
+                    class="input flex-1 font-mono text-xs"
+                    bind:value={models[i]}
+                    spellcheck="false"
+                    autocomplete="off"
+                  />
+                  <button
+                    type="button"
+                    class="btn-danger-outline shrink-0"
+                    aria-label={$t('Remove model')}
+                    onclick={() => removeModel(i)}>{$t('Remove')}</button
+                  >
+                </div>
+              {/each}
+              {#if models.length === 0}
+                <p class="text-sm text-ink-muted">
+                  {$t('No models yet. Add one below or pull from the provider.')}
+                </p>
+              {/if}
+            </div>
+
+            <div class="flex items-center gap-2">
+              <input
+                type="text"
+                class="input flex-1 font-mono text-xs"
+                placeholder={$t('Add a model id…')}
+                bind:value={newModel}
+                spellcheck="false"
+                autocomplete="off"
+                onkeydown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    addModel();
+                  }
+                }}
+              />
+              <button type="button" class="btn-secondary shrink-0" onclick={addModel}
+                >{$t('Add')}</button
+              >
+            </div>
+          {/if}
 
           <div class="card-actions">
-            {#if canPull}
+            {#if modelsMode === 'manual' && canPull}
               <button
                 type="button"
                 class="btn-secondary"

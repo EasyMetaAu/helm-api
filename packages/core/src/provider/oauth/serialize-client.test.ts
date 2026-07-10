@@ -47,10 +47,12 @@ function makeInner(chunks: string[] = ["a", "b"]): ProviderClient & {
 function makeNativeInner(chunks: string[] = ["c1", "c2", "c3"]): ProviderClient & {
   nativeCalls: number;
   nativeStreamCalls: number;
+  compactCalls: number;
 } {
   const inner = {
     nativeCalls: 0,
     nativeStreamCalls: 0,
+    compactCalls: 0,
     async chatCompletion() {
       return RESPONSE;
     },
@@ -64,6 +66,10 @@ function makeNativeInner(chunks: string[] = ["c1", "c2", "c3"]): ProviderClient 
     async *nativePassthroughStream() {
       inner.nativeStreamCalls += 1;
       for (const c of chunks) yield c;
+    },
+    async responsesCompact() {
+      inner.compactCalls += 1;
+      return { output: [] };
     },
   };
   return inner;
@@ -337,10 +343,35 @@ describe("createSerializingClient", () => {
     expect(inner.nativeStreamCalls).toBe(1);
   });
 
+  it("forwards and serializes Responses compact calls", async () => {
+    const inner = makeNativeInner();
+    const client = makeClient(inner, { enabled: true, delayMs: 200, timeoutMs: 5_000 });
+    const compact = {
+      model: "gpt-5.6-sol",
+      input: [{ type: "message", role: "user", content: "compact this" }],
+    };
+    expect(typeof client.responsesCompact).toBe("function");
+
+    const first = client.responsesCompact?.(compact);
+    let secondDone = false;
+    const second = client.responsesCompact?.(compact).then(() => {
+      secondDone = true;
+    });
+
+    await first;
+    expect(secondDone).toBe(false);
+    await vi.advanceTimersByTimeAsync(200);
+    await second;
+
+    expect(secondDone).toBe(true);
+    expect(inner.compactCalls).toBe(2);
+  });
+
   it("does NOT expose native passthrough when the inner member lacks it (honest feature-detect)", () => {
     const inner = makeInner(); // openai-style member: no native methods
     const client = makeClient(inner, { enabled: true, delayMs: 0, timeoutMs: 5_000 });
     expect(client.nativePassthrough).toBeUndefined();
     expect(client.nativePassthroughStream).toBeUndefined();
+    expect(client.responsesCompact).toBeUndefined();
   });
 });

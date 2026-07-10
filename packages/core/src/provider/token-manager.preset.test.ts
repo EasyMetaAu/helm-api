@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { encryptSecret } from "../store/crypto/token-cipher.js";
 import type { OAuthTokenRecord, OAuthTokenStore } from "../store/ports.js";
+import { OpenAICodexIdentityMismatchError } from "./oauth/openai-codex.js";
 import { OAuthHttpError } from "./oauth/runtime.js";
 import type { OAuthCredentials, OAuthProviderInterface } from "./oauth/types.js";
 import { createTokenManager, type PresetOAuth, TokenRefreshError } from "./token-manager.js";
@@ -120,6 +121,34 @@ describe("createTokenManager (preset kind)", () => {
     });
     expect(await tm.getAuthHeader()).toBe("Bearer at-stored");
     expect(provider.calls).toBe(0);
+  });
+
+  it("exposes persisted non-secret identity metadata after loading the credential", async () => {
+    const provider = stubProvider();
+    const tm = createTokenManager({
+      oauth: PRESET,
+      tokenStore: memStore(
+        seedRecord({
+          expiresAt: 1_000_000,
+          meta: JSON.stringify({
+            accountId: "workspace-9",
+            chatgptUserId: "user-7",
+            isFedramp: true,
+          }),
+        }),
+      ),
+      encKey: KEY,
+      oauthProvider: provider,
+      now: () => 0,
+    });
+
+    await tm.getAuthHeader();
+
+    expect(tm.currentMetadata()).toEqual({
+      accountId: "workspace-9",
+      chatgptUserId: "user-7",
+      isFedramp: true,
+    });
   });
 
   it("refreshes via the provider when the stored token is expired", async () => {
@@ -289,6 +318,43 @@ describe("createTokenManager (preset kind)", () => {
     );
     // Still scrubbed — no token material leaks into the diagnosable message.
     await expect(tm.getAuthHeader()).rejects.not.toThrow(/at-stored|rt-stored/);
+  });
+
+  it("preserves a permanent credential marker when Codex refresh changes account identity", async () => {
+    const provider: OAuthProviderInterface = {
+      id: "openai-codex",
+      name: "codex",
+      async login() {
+        throw new Error("not used");
+      },
+      async refreshToken() {
+        throw new OpenAICodexIdentityMismatchError();
+      },
+      getApiKey: (c) => c.access,
+    };
+    const tm = createTokenManager({
+      oauth: { kind: "preset", providerId: "openai-codex", account: "default" },
+      tokenStore: memStore(
+        seedRecord({
+          providerId: "openai-codex",
+          expiresAt: 100,
+          meta: JSON.stringify({
+            accountId: "acc-old",
+            chatgptUserId: "user-1",
+            chatgptPlanType: "plus",
+          }),
+        }),
+      ),
+      encKey: KEY,
+      oauthProvider: provider,
+      now: () => 1_000_000,
+    });
+
+    await expect(tm.getAuthHeader()).rejects.toMatchObject({
+      name: "TokenRefreshError",
+      httpStatus: null,
+      permanentCredentialFailure: true,
+    });
   });
 
   it("throws a scrubbed TokenRefreshError when no credential is stored", async () => {

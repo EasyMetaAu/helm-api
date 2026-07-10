@@ -12,7 +12,7 @@ export function nativeCarrierFromParsedBody(args: {
   protocol: NativePassthroughCarrier["protocol"];
   native: unknown;
   rawBody: string;
-  headers: Headers;
+  headers: Headers | Record<string, string | string[]>;
 }): NativePassthroughCarrier | null {
   if (args.native === null || typeof args.native !== "object" || Array.isArray(args.native)) {
     return null;
@@ -21,6 +21,6 @@ export function nativeCarrierFromParsedBody(args: {
     protocol: args.protocol,
     body: args.native as Record<string, unknown>,
     rawBody: args.rawBody,
-    headers: headersFromRequest(args.headers),
+    headers: args.headers instanceof Headers ? headersFromRequest(args.headers) : args.headers,
   });
 }

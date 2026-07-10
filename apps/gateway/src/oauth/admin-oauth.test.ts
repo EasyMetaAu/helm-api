@@ -10,6 +10,7 @@ import type { OAuthQuotaWindow } from "@helm/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getAccountSettings, loadAccountSettings, setAccountSettings } from "./account-settings.js";
 import { createOAuthAdmin } from "./admin-oauth.js";
+import type { CodexModelCatalog } from "./codex-model-catalog.js";
 
 const KEY = Buffer.alloc(32, 4);
 
@@ -44,6 +45,38 @@ function routeFetch(routes: Array<[RegExp, () => Response]>): typeof fetch {
     for (const [re, res] of routes) if (re.test(u)) return res();
     throw new Error(`unexpected fetch ${u}`);
   }) as unknown as typeof fetch;
+}
+
+function codexCatalog(
+  models: Array<{
+    slug: string;
+    priority?: number;
+    visibility?: "list" | "hide" | "none";
+  }>,
+  onKey?: (accountIdentity: string) => void,
+): CodexModelCatalog {
+  const snapshot = {
+    etag: "models-etag",
+    source: "network",
+    models: models.map((model) => ({
+      slug: model.slug,
+      priority: model.priority ?? 1,
+      visibility: model.visibility ?? "list",
+    })),
+  } as Awaited<ReturnType<CodexModelCatalog["load"]>>;
+  return {
+    load: async (key) => {
+      onKey?.(key.accountIdentity);
+      return snapshot;
+    },
+    snapshot: (key) => {
+      onKey?.(key.accountIdentity);
+      return snapshot ?? undefined;
+    },
+    resolve: () => undefined,
+    listRoutable: () => null,
+    observeEtag: async () => {},
+  };
 }
 
 afterEach(() => vi.unstubAllGlobals());
@@ -143,13 +176,29 @@ describe("createOAuthAdmin", () => {
     });
     // A Codex access token is a JWT; carry an account id claim so completion succeeds.
     const seg = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
-    const jwt = `${seg({ alg: "none" })}.${seg({ "https://api.openai.com/auth": { chatgpt_account_id: "acc_9" } })}.s`;
+    const identityClaims = {
+      email: "codex@example.com",
+      "https://api.openai.com/auth": {
+        chatgpt_plan_type: "pro",
+        chatgpt_user_id: "user_9",
+        chatgpt_account_id: "acc_9",
+        chatgpt_account_is_fedramp: true,
+      },
+    };
+    const jwt = `${seg({ alg: "none" })}.${seg(identityClaims)}.s`;
+    const idToken = `${seg({ alg: "none" })}.${seg(identityClaims)}.id`;
     vi.stubGlobal(
       "fetch",
       routeFetch([
         [
           /auth\.openai\.com\/oauth\/token/,
-          () => json({ access_token: jwt, refresh_token: "RTC", expires_in: 3600 }),
+          () =>
+            json({
+              id_token: idToken,
+              access_token: jwt,
+              refresh_token: "RTC",
+              expires_in: 3600,
+            }),
         ],
       ]),
     );
@@ -165,8 +214,25 @@ describe("createOAuthAdmin", () => {
     });
     const row = await store.get("openai-codex", "default");
     expect(decryptSecret(row?.refreshEnc ?? "", KEY)).toBe("RTC");
-    // accountId rides in the encrypted meta for execute-time use.
-    expect(JSON.parse(row?.meta ?? "{}")).toMatchObject({ accountId: "acc_9" });
+    const meta = JSON.parse(row?.meta ?? "{}") as Record<string, unknown>;
+    expect(meta).toMatchObject({
+      email: "codex@example.com",
+      chatgptPlanType: "pro",
+      chatgptUserId: "user_9",
+      accountId: "acc_9",
+      isFedramp: true,
+    });
+    expect(meta).not.toHaveProperty("idToken");
+    expect(row?.meta).not.toContain(idToken);
+    const account = (await admin.listStatus()).providers
+      .find((provider) => provider.id === "openai-codex")
+      ?.accounts.find((candidate) => candidate.account === "default");
+    expect(account).toMatchObject({
+      email: "codex@example.com",
+      chatgptPlanType: "pro",
+      chatgptAccountId: "acc_9",
+      isFedramp: true,
+    });
   });
 
   it("device-code: start -> poll(pending) -> poll(done) persists + stores enterprise meta", async () => {
@@ -237,6 +303,7 @@ describe("createOAuthAdmin", () => {
     await admin.setEnabledModels({
       providerId: "github-copilot",
       account: "other",
+      mode: "manual",
       models: ["gpt-4o"],
     });
 
@@ -245,6 +312,7 @@ describe("createOAuthAdmin", () => {
     const map = await loadAccountSettings(config, KEY);
     expect(getAccountSettings(map, "anthropic", "default")).toEqual({});
     expect(getAccountSettings(map, "github-copilot", "other")).toEqual({
+      modelsMode: "manual",
       enabledModels: ["gpt-4o"],
     });
     expect(decryptSecret((await config.get("oauth.account_settings")) ?? "", KEY)).not.toContain(
@@ -404,7 +472,7 @@ describe("createOAuthAdmin", () => {
     expect(canPull).toBe(true);
   });
 
-  it("listModels: a curated-only provider (Codex) reports canPull=false", async () => {
+  it("listModels: Codex uses the exact account catalog, derives gpt-5.6 from Sol, and fingerprints the full identity", async () => {
     const { tokens, config } = makeStores();
     await tokens.upsert({
       providerId: "openai-codex",
@@ -412,25 +480,107 @@ describe("createOAuthAdmin", () => {
       accessEnc: encryptSecret("AT", KEY),
       refreshEnc: encryptSecret("RT", KEY),
       expiresAt: Date.now() + 3_600_000,
-      meta: null,
+      meta: JSON.stringify({
+        accountId: "workspace-1",
+        chatgptUserId: "user-1",
+        chatgptPlanType: "business",
+        email: "codex@example.com",
+      }),
       updatedAt: 1,
     });
-    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
-    const { available, enabled, canPull } = await admin.listModels({
+    let accountIdentity = "";
+    const admin = createOAuthAdmin({
+      store: tokens,
+      encKey: KEY,
+      config,
+      codexCatalog: codexCatalog(
+        [
+          { slug: "gpt-5.6-sol", priority: 1 },
+          { slug: "codex-auto-review", priority: 2, visibility: "hide" },
+          { slug: "gpt-5.6-luna", priority: 3 },
+        ],
+        (value) => {
+          accountIdentity = value;
+        },
+      ),
+    });
+    const { available, enabled, canPull, modelsMode } = await admin.listModels({
       providerId: "openai-codex",
       account: "default",
     });
-    expect(available).toEqual([
-      "gpt-5.6-sol",
-      "gpt-5.6-terra",
-      "gpt-5.6-luna",
-      "gpt-5.5",
-      "gpt-5.4",
-      "gpt-5.4-mini",
-    ]);
-    expect(enabled).toEqual(available);
-    // No live list-models API → the UI hides "pull from provider".
-    expect(canPull).toBe(false);
+    expect(available).toEqual(["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6"]);
+    expect(enabled).toEqual(["gpt-5.6-sol", "codex-auto-review", "gpt-5.6-luna", "gpt-5.6"]);
+    expect(canPull).toBe(true);
+    expect(modelsMode).toBe("auto");
+    expect(accountIdentity).toBe(
+      JSON.stringify(["workspace-1", "user-1", true, "codex@example.com"]),
+    );
+  });
+
+  it("listModels: Codex manual mode can only narrow the full account entitlement", async () => {
+    const { tokens, config } = makeStores();
+    await tokens.upsert({
+      providerId: "openai-codex",
+      account: "default",
+      accessEnc: encryptSecret("AT", KEY),
+      refreshEnc: encryptSecret("RT", KEY),
+      expiresAt: Date.now() + 3_600_000,
+      meta: JSON.stringify({ accountId: "workspace-1" }),
+      updatedAt: 1,
+    });
+    await setAccountSettings(config, KEY, "openai-codex", "default", {
+      modelsMode: "manual",
+      enabledModels: ["gpt-5.6", "codex-auto-review", "gpt-never-entitled"],
+    });
+    const admin = createOAuthAdmin({
+      store: tokens,
+      encKey: KEY,
+      config,
+      codexCatalog: codexCatalog([
+        { slug: "gpt-5.6-sol", priority: 1 },
+        { slug: "codex-auto-review", priority: 2, visibility: "hide" },
+      ]),
+    });
+
+    await expect(
+      admin.listModels({ providerId: "openai-codex", account: "default" }),
+    ).resolves.toMatchObject({
+      available: ["gpt-5.6-sol", "gpt-5.6"],
+      enabled: ["gpt-5.6", "codex-auto-review"],
+      modelsMode: "manual",
+      canPull: true,
+    });
+  });
+
+  it("listStatus: Codex reports the account catalog and applies manual entitlement intersection", async () => {
+    const { tokens, config } = makeStores();
+    await tokens.upsert({
+      providerId: "openai-codex",
+      account: "default",
+      accessEnc: encryptSecret("AT", KEY),
+      refreshEnc: encryptSecret("RT", KEY),
+      expiresAt: Date.now() + 3_600_000,
+      meta: JSON.stringify({ accountId: "workspace-1" }),
+      updatedAt: 1,
+    });
+    await setAccountSettings(config, KEY, "openai-codex", "default", {
+      modelsMode: "manual",
+      enabledModels: ["gpt-5.6", "codex-auto-review", "gpt-never-entitled"],
+    });
+    const admin = createOAuthAdmin({
+      store: tokens,
+      encKey: KEY,
+      config,
+      codexCatalog: codexCatalog([
+        { slug: "gpt-5.6-sol", priority: 1 },
+        { slug: "codex-auto-review", priority: 2, visibility: "hide" },
+      ]),
+    });
+
+    const account = (await admin.listStatus()).providers
+      .find((provider) => provider.id === "openai-codex")
+      ?.accounts.find((candidate) => candidate.account === "default");
+    expect(account?.models).toEqual(["gpt-5.6", "codex-auto-review"]);
   });
 
   it("setEnabledModels persists a subset; listModels then returns it as `enabled`", async () => {
@@ -448,6 +598,7 @@ describe("createOAuthAdmin", () => {
     await admin.setEnabledModels({
       providerId: "anthropic",
       account: "default",
+      mode: "manual",
       models: ["claude-opus-4-6"],
     });
     const { available, enabled } = await admin.listModels({
@@ -480,6 +631,7 @@ describe("createOAuthAdmin", () => {
     await admin.setEnabledModels({
       providerId: "anthropic",
       account: "default",
+      mode: "manual",
       models: ["claude-future-9", "claude-opus-4-6"],
     });
     const { available, enabled } = await admin.listModels({
@@ -700,6 +852,7 @@ describe("createOAuthAdmin", () => {
     await admin.setEnabledModels({
       providerId: "anthropic",
       account: "proxied",
+      mode: "manual",
       models: ["claude-opus-4-6"],
     });
     const accts =
@@ -1136,10 +1289,16 @@ describe("createOAuthAdmin > fetchAnthropicQuota", () => {
 
 // ── Codex rate-limit reset credit (the "reset usage limit" action) ────────────
 describe("createOAuthAdmin > codex reset credit", () => {
-  // A Codex access token is a JWT; carry the account-id claim so login + the
-  // chatgpt-account-id header resolve (same shape the login test seeds).
+  // Persist the workspace identity from the id_token while the current access token
+  // is opaque. Quota/reset must keep using the stored account + FedRAMP identity.
   const seg = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
-  const CODEX_JWT = `${seg({ alg: "none" })}.${seg({ "https://api.openai.com/auth": { chatgpt_account_id: "acc_9" } })}.s`;
+  const CODEX_ACCESS_TOKEN = "opaque-codex-access";
+  const CODEX_ID_TOKEN = `${seg({ alg: "none" })}.${seg({
+    "https://api.openai.com/auth": {
+      chatgpt_account_id: "acc_9",
+      chatgpt_account_is_fedramp: true,
+    },
+  })}.id`;
 
   type Logs = Array<{ level: string; message: string; fields?: Record<string, unknown> }>;
 
@@ -1148,26 +1307,41 @@ describe("createOAuthAdmin > codex reset credit", () => {
   // the 5-min quota cache never elapses between calls.
   async function connectCodex(opts: {
     onUsage?: () => Response;
+    onDetails?: () => Response;
     onConsume?: () => Response;
   }): Promise<{
     admin: ReturnType<typeof createOAuthAdmin>;
     usageHits: () => number;
+    detailsHits: () => number;
+    usageCalls: () => Array<{ url: string; init?: RequestInit }>;
     consumeCalls: () => Array<{ url: string; init?: RequestInit }>;
     logs: Logs;
   }> {
     let usageHits = 0;
+    let detailsHits = 0;
+    const usageCalls: Array<{ url: string; init?: RequestInit }> = [];
     const consumeCalls: Array<{ url: string; init?: RequestInit }> = [];
     const fetchImpl = vi.fn(async (url: string | URL, init?: RequestInit) => {
       const u = String(url);
       if (/auth\.openai\.com\/oauth\/token/.test(u)) {
-        return json({ access_token: CODEX_JWT, refresh_token: "RTC", expires_in: 3600 });
+        return json({
+          id_token: CODEX_ID_TOKEN,
+          access_token: CODEX_ACCESS_TOKEN,
+          refresh_token: "RTC",
+          expires_in: 3600,
+        });
       }
       if (/wham\/rate-limit-reset-credits\/consume/.test(u)) {
         consumeCalls.push({ url: u, init });
-        return (opts.onConsume ?? (() => json({ code: "ok", windows_reset: 2 })))();
+        return (opts.onConsume ?? (() => json({ code: "reset", windows_reset: 2 })))();
+      }
+      if (/wham\/rate-limit-reset-credits$/.test(u)) {
+        detailsHits++;
+        return (opts.onDetails ?? (() => json({ credits: [], available_count: 0 })))();
       }
       if (/wham\/usage/.test(u)) {
         usageHits++;
+        usageCalls.push({ url: u, init });
         return (opts.onUsage ?? (() => json({})))();
       }
       throw new Error(`unexpected fetch ${u}`);
@@ -1192,50 +1366,126 @@ describe("createOAuthAdmin > codex reset credit", () => {
       redirectInput: `https://x/cb?code=C&state=${state}`,
       account: "default",
     });
-    return { admin, usageHits: () => usageHits, consumeCalls: () => consumeCalls, logs };
+    return {
+      admin,
+      usageHits: () => usageHits,
+      detailsHits: () => detailsHits,
+      usageCalls: () => usageCalls,
+      consumeCalls: () => consumeCalls,
+      logs,
+    };
   }
 
-  it("fetchCodexQuota returns windows AND the available reset-credit count from one PULL", async () => {
-    const { admin, usageHits } = await connectCodex({
+  it("fetchCodexQuota returns full Codex CLI quota metadata and reset-credit details", async () => {
+    const { admin, usageHits, detailsHits, usageCalls } = await connectCodex({
       onUsage: () =>
         json({
           rate_limit: { primary_window: { used_percent: 6, reset_after_seconds: 120 } },
-          rate_limit_reset_credits: { available_count: 2 },
+          credits: { has_credits: true, unlimited: false, balance: "9.99" },
+          spend_control: {
+            reached: false,
+            individual_limit: {
+              limit: "25000",
+              used: "8000",
+              remaining_percent: 68,
+              reset_at: 1_735_693_200,
+            },
+          },
+          rate_limit_reached_type: {
+            type: "workspace_member_usage_limit_reached",
+          },
+          additional_rate_limits: [
+            {
+              limit_name: "GPT-5.6-Codex-Spark",
+              metered_feature: "codex_spark",
+              rate_limit: { primary_window: { used_percent: 88 } },
+            },
+          ],
+          rate_limit_reset_credits: { available_count: 3 },
+        }),
+      onDetails: () =>
+        json({
+          available_count: 2,
+          credits: [
+            {
+              id: "credit-1",
+              reset_type: "codex_rate_limits",
+              status: "available",
+              granted_at: "2026-06-17T00:00:00Z",
+              expires_at: "2026-07-17T00:00:00Z",
+              title: "Full reset",
+              description: "Ready to redeem",
+            },
+          ],
         }),
     });
     const fetchQuota = admin.fetchCodexQuota;
     if (!fetchQuota) throw new Error("fetchCodexQuota not wired");
     const first = await fetchQuota({ account: "default" });
-    expect(first?.windows.map((w) => `${w.key}:${w.usedPercent}`)).toEqual(["primary:6"]);
+    expect(first?.windows.map((w) => `${w.key}:${w.usedPercent}`)).toEqual([
+      "primary:6",
+      "codex_spark-primary:88",
+    ]);
     expect(first?.resetCredits).toBe(2);
+    expect(first).toMatchObject({
+      credits: { hasCredits: true, unlimited: false, balance: "9.99" },
+      individualLimit: {
+        limit: "25000",
+        used: "8000",
+        remainingPercent: 68,
+        resetsAtMs: 1_735_693_200_000,
+      },
+      rateLimitReachedType: "workspace_member_usage_limit_reached",
+      resetCreditDetails: [
+        {
+          id: "credit-1",
+          resetType: "codexRateLimits",
+          status: "available",
+          grantedAt: 1_781_654_400,
+          expiresAt: 1_784_246_400,
+        },
+      ],
+    });
     // Second open is served from the warm cache — no second PULL.
     const second = await fetchQuota({ account: "default" });
     expect(second).toEqual(first);
     expect(usageHits()).toBe(1);
+    expect(detailsHits()).toBe(1);
+    const headers = usageCalls()[0]?.init?.headers as Record<string, string>;
+    expect(headers.authorization).toBe(`Bearer ${CODEX_ACCESS_TOKEN}`);
+    expect(headers["chatgpt-account-id"]).toBe("acc_9");
+    expect(headers["X-OpenAI-Fedramp"]).toBe("true");
   });
 
-  it("fetchCodexQuota reports resetCredits null when the account holds no grant", async () => {
+  it("fetchCodexQuota preserves usage count when reset-credit details fail", async () => {
     const { admin } = await connectCodex({
-      onUsage: () => json({ rate_limit: { primary_window: { used_percent: 1 } } }),
+      onUsage: () =>
+        json({
+          rate_limit: { primary_window: { used_percent: 1 } },
+          rate_limit_reset_credits: { available_count: 3 },
+        }),
+      onDetails: () => new Response("boom", { status: 500 }),
     });
     const result = await admin.fetchCodexQuota?.({ account: "default" });
     expect(result?.windows).toHaveLength(1);
-    expect(result?.resetCredits).toBeNull();
+    expect(result?.resetCredits).toBe(3);
+    expect(result).toMatchObject({ resetCreditDetails: null });
   });
 
   it("consumeCodexResetCredit POSTs and audits a redeem id with the bearer + account-id headers", async () => {
     const { admin, consumeCalls, logs } = await connectCodex({
-      onConsume: () => json({ code: "ok", credit: { id: "c_1" }, windows_reset: 2 }),
+      onConsume: () => json({ code: "reset", credit: { id: "c_1" }, windows_reset: 2 }),
     });
     const result = await admin.consumeCodexResetCredit?.({ account: "default" });
-    expect(result).toMatchObject({ code: "ok", windowsReset: 2 });
+    expect(result).toMatchObject({ code: "reset", outcome: "reset", windowsReset: 2 });
 
     expect(consumeCalls()).toHaveLength(1);
     const init = consumeCalls()[0]?.init;
     expect(init?.method).toBe("POST");
     const headers = init?.headers as Record<string, string>;
-    expect(headers.authorization).toBe(`Bearer ${CODEX_JWT}`);
+    expect(headers.authorization).toBe(`Bearer ${CODEX_ACCESS_TOKEN}`);
     expect(headers["chatgpt-account-id"]).toBe("acc_9");
+    expect(headers["X-OpenAI-Fedramp"]).toBe("true");
     expect(headers["content-type"]).toBe("application/json");
     const body = JSON.parse(String(init?.body)) as { redeem_request_id?: unknown };
     expect(typeof body.redeem_request_id).toBe("string");
@@ -1250,6 +1500,94 @@ describe("createOAuthAdmin > codex reset credit", () => {
           windows_reset: 2,
         }),
       }),
+    );
+  });
+
+  it("consumeCodexResetCredit forwards a selected credit_id", async () => {
+    const { admin, consumeCalls } = await connectCodex({});
+    const consume = admin.consumeCodexResetCredit as unknown as (input: {
+      account: string;
+      creditId?: string;
+    }) => Promise<unknown>;
+
+    await consume({ account: "default", creditId: "credit-123" });
+
+    const body = JSON.parse(String(consumeCalls()[0]?.init?.body)) as Record<string, unknown>;
+    expect(body.credit_id).toBe("credit-123");
+  });
+
+  it("consumeCodexResetCredit reuses a caller-provided idempotency key", async () => {
+    const { admin, consumeCalls } = await connectCodex({});
+    const consume = admin.consumeCodexResetCredit as unknown as (input: {
+      account: string;
+      idempotencyKey?: string;
+    }) => Promise<unknown>;
+
+    await consume({ account: "default", idempotencyKey: "stable-request-1" });
+
+    const body = JSON.parse(String(consumeCalls()[0]?.init?.body)) as Record<string, unknown>;
+    expect(body.redeem_request_id).toBe("stable-request-1");
+  });
+
+  it("consumeCodexResetCredit rejects empty credit and idempotency ids before fetch", async () => {
+    const { admin, consumeCalls } = await connectCodex({});
+    const consume = admin.consumeCodexResetCredit as unknown as (input: {
+      account: string;
+      creditId?: string;
+      idempotencyKey?: string;
+    }) => Promise<unknown>;
+
+    await expect(consume({ account: "default", creditId: "" })).rejects.toThrow(
+      /creditId must not be empty/,
+    );
+    await expect(consume({ account: "default", idempotencyKey: "" })).rejects.toThrow(
+      /idempotencyKey must not be empty/,
+    );
+    expect(consumeCalls()).toHaveLength(0);
+  });
+
+  it.each([
+    ["reset", "reset"],
+    ["nothing_to_reset", "nothingToReset"],
+    ["no_credit", "noCredit"],
+    ["already_redeemed", "alreadyRedeemed"],
+  ] as const)("maps consume code %s to outcome %s", async (code, outcome) => {
+    const { admin } = await connectCodex({
+      onConsume: () => json({ code, windows_reset: code === "reset" ? 2 : 0 }),
+    });
+    await expect(admin.consumeCodexResetCredit?.({ account: "default" })).resolves.toMatchObject({
+      code,
+      outcome,
+    });
+  });
+
+  it.each([
+    "nothing_to_reset",
+    "no_credit",
+  ] as const)("does not audit %s as a consumed reset credit", async (code) => {
+    const { admin, logs } = await connectCodex({
+      onConsume: () => json({ code, windows_reset: 0 }),
+    });
+
+    await admin.consumeCodexResetCredit?.({ account: "default" });
+
+    expect(logs.some((entry) => entry.message === "oauth.reset_credit.consumed")).toBe(false);
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        level: "info",
+        message: "oauth.reset_credit.not_consumed",
+        fields: expect.objectContaining({ code }),
+      }),
+    );
+  });
+
+  it("rejects an unknown successful consume body", async () => {
+    const { admin } = await connectCodex({
+      onConsume: () => json({ code: "future_code", windows_reset: 0 }),
+    });
+
+    await expect(admin.consumeCodexResetCredit?.({ account: "default" })).rejects.toThrow(
+      /unrecognized response/,
     );
   });
 

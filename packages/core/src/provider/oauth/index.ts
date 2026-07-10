@@ -11,12 +11,29 @@ export {
 } from "./anthropic.js";
 export { anthropicUsageToWindows, parseAnthropicUsageBody } from "./anthropic-quota.js";
 export {
+  type CodexModelInfo,
+  CodexModelInfoSchema,
+  type CodexModelsResponse,
+  CodexModelsResponseSchema,
+  type CodexReasoningEffortPreset,
+  CodexReasoningEffortPresetSchema,
+  type ReasoningEffort,
+  ReasoningEffortSchema,
+} from "./codex-model-info.js";
+export {
+  type CodexCreditsSnapshot,
+  type CodexQuotaDetails,
+  type CodexRateLimitReachedType,
+  codexActiveLimitIdFromProviderRaw,
   codexResetCreditsFromUsage,
   codexUsageToWindows,
+  parseCodexQuotaDetails,
+  parseCodexQuotaHeaderDetails,
   parseCodexQuotaHeaders,
   parseCodexResetCredits,
   parseCodexResetResult,
   parseCodexUsageBody,
+  selectCodexActiveLimitWindows,
 } from "./codex-quota.js";
 export {
   beginCopilotDeviceLogin,
@@ -31,12 +48,29 @@ export {
   pollCopilotDeviceOnce,
   refreshGitHubCopilotToken,
 } from "./github-copilot.js";
-export { CURATED_OAUTH_MODELS, discoverOAuthModels, hasLiveModelDiscovery } from "./models.js";
+export {
+  buildOpenAICodexUserAgent,
+  CURATED_OAUTH_MODELS,
+  DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
+  discoverOAuthModels,
+  expandOpenAICodexModelAliases,
+  hasLiveModelDiscovery,
+  listOpenAICodexModels,
+  OpenAICodexModelsError,
+  type OpenAICodexModelsOptions,
+  type OpenAICodexModelsResult,
+  resolveOpenAICodexClientVersion,
+  resolveOpenAICodexModelAlias,
+} from "./models.js";
 export {
   beginOpenAICodexLogin,
   type CodexLoginStart,
   completeOpenAICodexLogin,
+  isOpenAICodexWorkspacePlan,
+  OpenAICodexIdentityMismatchError,
+  openAICodexIdentityFingerprint,
   openaiCodexOAuthProvider,
+  parseOpenAICodexIdentity,
   refreshOpenAICodexToken,
 } from "./openai-codex.js";
 export {
@@ -72,6 +106,7 @@ export type {
   OAuthPrompt,
   OAuthProviderId,
   OAuthProviderInterface,
+  OpenAICodexIdentity,
 } from "./types.js";
 export {
   ACTIVE_LIMIT_RECOVERY_THRESHOLD,

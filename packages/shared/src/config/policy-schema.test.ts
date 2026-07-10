@@ -33,7 +33,7 @@ describe("policy-schema", () => {
   it("fail-closed: unknown policy reasoning_effort value throws", () => {
     expect(() =>
       parsePoliciesConfig({
-        policies: [{ match: { task_type: "coding" }, reasoning_effort: "ultra" }],
+        policies: [{ match: { task_type: "coding" }, reasoning_effort: "super" }],
       }),
     ).toThrow();
   });

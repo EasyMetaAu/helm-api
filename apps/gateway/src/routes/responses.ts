@@ -1,6 +1,22 @@
 import { randomUUID } from "node:crypto";
-import type { RateLimitProbe, RateLimitResult } from "@helm/core";
-import { type ErrorClass, ErrorClassSchema, makeHelmError } from "@helm/shared";
+import {
+  type BudgetCaps,
+  type BudgetCheckResult,
+  type BudgetProbe,
+  CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
+  type DecisionRecord,
+  type RateLimitProbe,
+  type RateLimitResult,
+  UpstreamError,
+} from "@helm/core";
+import {
+  cloneCarrierWithBody,
+  type ErrorClass,
+  ErrorClassSchema,
+  makeHelmError,
+  type NativePassthroughCarrier,
+} from "@helm/shared";
+
 import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../app.js";
@@ -8,13 +24,22 @@ import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware
 import { HelmHttpError } from "../middleware/error-handler.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
+import { normalizeOpenAICodexClientVersion } from "../oauth/codex-client-version.js";
+import { CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER } from "../responses-websocket-internal.js";
 import { stampServingAccount } from "../runtime/serving-account.js";
 import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
 import { nativeCarrierFromParsedBody } from "./native-carrier.js";
-import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-capture.js";
+import {
+  captureEnabled,
+  type RecordServedDeps,
+  recordServed,
+  type StreamUsage,
+  tokensFromUsage,
+  usageFromResponsesResponse,
+} from "./payload-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
 
 // POST /v1/responses — OpenAI Responses API inbound, translated to IR, routed
@@ -72,8 +97,42 @@ export interface ResponsesLifecyclePort {
     signal: AbortSignal,
     record?: ResponsesRegistryRecord,
   ): Promise<unknown>;
-  compact?(body: unknown, identity: MessagesIdentity, signal: AbortSignal): Promise<unknown>;
+  compact?(
+    body: NativePassthroughCarrier,
+    identity: MessagesIdentity,
+    signal: AbortSignal,
+    onResponseMeta?: (headers: Headers) => void,
+    onExecution?: (execution: ResponsesCompactExecution) => void,
+  ): Promise<unknown>;
   inputTokens?(body: unknown, identity: MessagesIdentity, signal: AbortSignal): Promise<unknown>;
+}
+
+export interface ResponsesCompactExecution {
+  modelAlias: string;
+  providerModel: string;
+  providerName: string;
+  upstreamRequest: string | null;
+  servingAccount: { providerId: string; account: string } | null;
+}
+
+export interface ResponsesBudgetPort {
+  gate: { check(probe: BudgetProbe): Promise<BudgetCheckResult> };
+  settle(
+    keyId: string,
+    caps: BudgetCaps,
+    usage: { requests: number; tokens: number; costUsd: number | null },
+    nowMs: number,
+  ): Promise<void>;
+  costOf?: (
+    alias: string,
+    usage: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      input_tokens?: number;
+      output_tokens?: number;
+    },
+  ) => number | null;
+  now(): number;
 }
 
 export interface ResponsesRegistryRecord {
@@ -109,6 +168,15 @@ export interface ResponsesRouteDeps {
   /** Optional provider-backed Responses lifecycle facade. Missing methods mean
    *  unsupported capability, except input_tokens which can be locally estimated. */
   lifecycle?: ResponsesLifecyclePort;
+  /** Direct compact does not enter the shared routing pipeline, so it receives the
+   *  same pre-route budget gate and post-served settlement explicitly. */
+  budget?: ResponsesBudgetPort;
+  /** Per-account subscription usage attribution for direct compact execution. */
+  recordOAuthUsage?: (
+    servingAccount: { providerId: string; account: string } | null,
+    servedAlias: string | null,
+    usage: { tokens: number; costUsd: number | null },
+  ) => void;
   /** Optional response object registry. When present, lifecycle methods first
    *  prove the response id belongs to the calling key/account and can dispatch to
    *  the provider that created it instead of the first global capable provider. */
@@ -136,6 +204,14 @@ export interface ResponsesRouteDeps {
   /** SSE keep-alive cadence (ms) for streaming responses; read fresh per request from
    *  runtime.sse_heartbeat_ms. Optional — absent/0 = no heartbeat. Inter-chunk only. */
   sseHeartbeatMs?: () => number;
+  // Exact key-filtered ETag most recently served by GET /v1/models?client_version.
+  // undefined = preserve legacy forwarding; null = suppress the account-wide
+  // upstream ETag because it does not describe this key's filtered catalog.
+  modelsEtagForKey?: (keyId: string, clientVersion: string | null) => string | null;
+  // Process-local proof injected only by the WebSocket bridge's internal self-call.
+  // Without it, a normal HTTP client could spoof x-helm-* session headers and
+  // accidentally create a long-lived upstream websocket.
+  responsesWebSocketSessionProof?: string;
 }
 
 // Client disconnect / abort detection — mirrors messages.ts. Used to suppress a
@@ -151,6 +227,74 @@ function extractCredential(auth: string | undefined): string | null {
     if (m?.[1]) return m[1];
   }
   return null;
+}
+
+const FORWARDED_RESPONSE_METADATA_HEADERS = new Set([
+  "openai-model",
+  "x-openai-model",
+  "x-models-etag",
+  "x-reasoning-included",
+  "x-request-id",
+]);
+
+function applyResponseMetadata(
+  c: Context<AppEnv>,
+  metadata: Readonly<Record<string, string>> | undefined,
+  modelsEtag: string | null | undefined,
+): void {
+  if (metadata === undefined) return;
+  for (const [name, value] of Object.entries(metadata)) {
+    const lower = name.toLowerCase();
+    if (lower === "x-models-etag" && modelsEtag !== undefined) {
+      if (modelsEtag !== null) c.header(lower, modelsEtag);
+      continue;
+    }
+    if (
+      FORWARDED_RESPONSE_METADATA_HEADERS.has(lower) ||
+      lower.startsWith("x-codex-") ||
+      lower.startsWith("x-ratelimit-")
+    ) {
+      c.header(lower, value);
+    }
+  }
+}
+
+function requestCodexClientVersion(c: Context<AppEnv>): string | null {
+  const raw =
+    c.req.header("version")?.trim() ?? c.req.header("x-codex-client-version")?.trim() ?? "";
+  if (raw.length === 0) return null;
+  const normalized = normalizeOpenAICodexClientVersion(raw);
+  if (normalized === null) {
+    throw helmError(
+      "invalid_request",
+      "version must be a valid semantic version",
+      c.get("trace_id"),
+    );
+  }
+  return normalized;
+}
+
+function modelsEtagForRequest(
+  c: Context<AppEnv>,
+  deps: ResponsesRouteDeps,
+  keyId: string,
+): string | null | undefined {
+  return deps.modelsEtagForKey?.(keyId, requestCodexClientVersion(c));
+}
+
+function responseMetadataFromHeaders(headers: Headers): Record<string, string> {
+  const metadata: Record<string, string> = {};
+  headers.forEach((value, name) => {
+    const lower = name.toLowerCase();
+    if (
+      FORWARDED_RESPONSE_METADATA_HEADERS.has(lower) ||
+      lower.startsWith("x-codex-") ||
+      lower.startsWith("x-ratelimit-")
+    ) {
+      metadata[lower] = value;
+    }
+  });
+  return metadata;
 }
 
 function helmError(
@@ -173,6 +317,45 @@ function responseNotFound(c: Context<AppEnv>, responseId: string, traceId: strin
     },
     404,
   );
+}
+
+function nativeHeadersForRequest(
+  headers: Headers,
+  responsesWebSocketSessionProof: string | undefined,
+  clientVersion: string | null,
+): Record<string, string | string[]> {
+  const out: Record<string, string | string[]> = {};
+  const proof = headers.get(CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER);
+  const keepSession =
+    responsesWebSocketSessionProof !== undefined && proof === responsesWebSocketSessionProof;
+  headers.forEach((value, name) => {
+    const lower = name.toLowerCase();
+    if (lower === CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER) return;
+    if (lower === CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER && !keepSession) return;
+    if (lower === "version" || lower === "x-codex-client-version") return;
+    out[name] = value;
+  });
+  if (clientVersion !== null) out.version = clientVersion;
+  return out;
+}
+
+function nativeCarrierForRequest(
+  c: Context<AppEnv>,
+  deps: ResponsesRouteDeps,
+  native: unknown,
+  rawBody: string,
+): NativePassthroughCarrier | null {
+  const clientVersion = requestCodexClientVersion(c);
+  return nativeCarrierFromParsedBody({
+    protocol: "openai_responses",
+    native,
+    rawBody,
+    headers: nativeHeadersForRequest(
+      c.req.raw.headers,
+      deps.responsesWebSocketSessionProof,
+      clientVersion,
+    ),
+  });
 }
 
 function successfulAttempt(decision: unknown): Record<string, unknown> | null {
@@ -311,12 +494,191 @@ function estimateResponsesInputTokens(value: unknown): number {
   return Math.max(1, Math.ceil(Buffer.byteLength(text, "utf8") / 4));
 }
 
+function compactModelFromBody(body: Record<string, unknown>): string {
+  return typeof body.model === "string" && body.model.length > 0 ? body.model : "unknown";
+}
+
+function compactAlias(model: string): string {
+  return model.includes("/") ? model : `openai-codex/${model}`;
+}
+
+function compactUsageFromResponse(body: Record<string, unknown> | null): StreamUsage | null {
+  const topLevel = usageFromResponsesResponse(body);
+  if (topLevel !== null) return topLevel;
+  if (!Array.isArray(body?.output)) return null;
+
+  const nested = body.output.flatMap((item) => {
+    const direct = usageFromResponsesResponse(item);
+    if (direct !== null) return [direct];
+    if (item === null || typeof item !== "object" || Array.isArray(item)) return [];
+    const response = (item as Record<string, unknown>).response;
+    const wrapped = usageFromResponsesResponse(response);
+    return wrapped === null ? [] : [wrapped];
+  });
+  if (nested.length === 0) return null;
+
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let cachedTokens = 0;
+  let cacheCreationTokens = 0;
+  for (const usage of nested) {
+    promptTokens += usage.prompt_tokens ?? usage.input_tokens ?? 0;
+    completionTokens += usage.completion_tokens ?? usage.output_tokens ?? 0;
+    const details = usage.prompt_tokens_details ?? usage.input_tokens_details;
+    cachedTokens += details?.cached_tokens ?? 0;
+    cacheCreationTokens +=
+      details?.cache_creation_tokens ??
+      details?.cache_creation_input_tokens ??
+      details?.cache_write_tokens ??
+      0;
+  }
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: promptTokens + completionTokens,
+    ...(cachedTokens > 0 || cacheCreationTokens > 0
+      ? {
+          prompt_tokens_details: {
+            ...(cachedTokens > 0 ? { cached_tokens: cachedTokens } : {}),
+            ...(cacheCreationTokens > 0 ? { cache_creation_tokens: cacheCreationTokens } : {}),
+          },
+        }
+      : {}),
+  };
+}
+
+function compactDecision(args: {
+  traceId: string;
+  keyPrefix: string | null;
+  requestedModel: string;
+  modelAlias: string;
+  providerModel: string;
+  providerName: string;
+  servingAccount: { providerId: string; account: string } | null;
+  latencyMs: number;
+  body: Record<string, unknown> | null;
+  error: unknown | null;
+  costUsd: number | null;
+}): DecisionRecord {
+  const usage = compactUsageFromResponse(args.body);
+  const inputDetails = usage?.prompt_tokens_details ?? usage?.input_tokens_details;
+  const ok = args.error === null;
+  const upstreamStatus = args.error instanceof UpstreamError ? args.error.upstreamStatus : null;
+  const errorClass =
+    args.error instanceof UpstreamError
+      ? args.error.errorClass
+      : args.error === null
+        ? null
+        : "upstream_error";
+  const providerRaw =
+    args.error instanceof UpstreamError &&
+    typeof args.error.providerRaw === "object" &&
+    args.error.providerRaw !== null &&
+    !Array.isArray(args.error.providerRaw)
+      ? (args.error.providerRaw as Record<string, unknown>)
+      : null;
+  return {
+    request_id: args.traceId,
+    trace_id: args.traceId,
+    requested_model: args.requestedModel,
+    protocol: "openai_responses",
+    key_prefix: args.keyPrefix,
+    classifier: {
+      task_type: "passthrough",
+      complexity: "passthrough",
+      confidence: 1,
+      decided_by: "default",
+      rules_confidence: null,
+      eval_cache_hit: null,
+      eval_model: null,
+      eval_latency_ms: null,
+      fallback_reason: null,
+      constraints: {},
+      explanation: [],
+    },
+    policy: { matched_policy_id: null, reason: "responses_compact" },
+    lane: { selected_lane: "responses_compact", candidate_chain: [args.modelAlias] },
+    provider_attempts: [
+      {
+        alias: args.modelAlias,
+        skipped: false,
+        skip_reason: null,
+        status: ok ? "ok" : "error",
+        error_class: errorClass,
+        latency_ms: args.latencyMs,
+        cost_usd: ok ? args.costUsd : null,
+        error_detail: ok
+          ? null
+          : {
+              upstream_status: upstreamStatus,
+              message:
+                args.error instanceof Error ? args.error.message : "Responses compact failed",
+              provider_raw: providerRaw,
+            },
+        passthrough_considered: true,
+        passthrough_used: true,
+        passthrough_disable_reason: null,
+        source_protocol: "openai_responses",
+        target_provider_protocol: "openai_responses",
+        response_protocol: "openai_responses",
+        provider_name: args.providerName,
+        provider_model: args.providerModel,
+      },
+    ],
+    final: ok
+      ? {
+          model_alias: args.modelAlias,
+          provider_model: args.providerModel,
+          status: "ok",
+          error_reason: null,
+        }
+      : {
+          model_alias: null,
+          provider_model: null,
+          status: "error",
+          error_reason: errorClass,
+        },
+    serving_account:
+      args.servingAccount === null
+        ? null
+        : {
+            provider_id: args.servingAccount.providerId,
+            account: args.servingAccount.account,
+          },
+    latency_total_ms: args.latencyMs,
+    fallback_count: 0,
+    cost_breakdown: {
+      eval_usd: null,
+      completion_usd: ok ? args.costUsd : null,
+      total_usd: ok ? args.costUsd : null,
+    },
+    memory: null,
+    usage:
+      usage === null
+        ? null
+        : {
+            prompt_tokens: usage.prompt_tokens ?? usage.input_tokens ?? null,
+            completion_tokens: usage.completion_tokens ?? usage.output_tokens ?? null,
+            cached_tokens: inputDetails?.cached_tokens ?? null,
+            cache_creation_tokens:
+              inputDetails?.cache_creation_tokens ??
+              inputDetails?.cache_creation_input_tokens ??
+              inputDetails?.cache_write_tokens ??
+              null,
+          },
+    generation_ms: null,
+  };
+}
+
 export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDeps): void {
   // Frees an unclaimed concurrency lease on every exit path — incl. a throw into
   // onError (the handler below acquires AFTER its self-auth).
   app.use("/v1/responses", concurrencyReleaseGuard());
+  app.use("/v1/responses/*", concurrencyReleaseGuard());
   app.use("/responses", concurrencyReleaseGuard());
+  app.use("/responses/*", concurrencyReleaseGuard());
   app.use("/openai/v1/responses", concurrencyReleaseGuard());
+  app.use("/openai/v1/responses/*", concurrencyReleaseGuard());
 
   const authenticateResponsesRequest = async (c: Context<AppEnv>): Promise<MessagesIdentity> => {
     const traceId = c.get("trace_id");
@@ -326,6 +688,61 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     return identity;
   };
 
+  const enforceRateLimit = async (
+    c: Context<AppEnv>,
+    identity: MessagesIdentity,
+  ): Promise<void> => {
+    if (deps.rateLimiter === undefined) return;
+    const traceId = c.get("trace_id");
+    const rl = await deps.rateLimiter.check({
+      keyId: identity.keyId,
+      estimatedTokens: estimateRequestTokens(c),
+      now: Date.now(),
+      override: identity.caps?.rateLimit
+        ? { rpm: identity.caps.rateLimit.rpm, tpm: identity.caps.rateLimit.tpm }
+        : undefined,
+    });
+    if (rl.allowed && rl.limit === 0) return;
+    c.header("x-ratelimit-limit", String(rl.limit));
+    c.header("x-ratelimit-remaining", String(rl.remaining));
+    c.header("x-ratelimit-reset", String(rl.resetSeconds));
+    if (rl.allowed) return;
+    c.header("retry-after", String(rl.retryAfterSeconds));
+    throw new HelmHttpError(
+      makeHelmError({
+        error_class: "rate_limited",
+        message: `rate limit exceeded (${rl.limitedBy})`,
+        trace_id: traceId,
+      }),
+    );
+  };
+
+  const acquireConcurrency = async (
+    c: Context<AppEnv>,
+    identity: MessagesIdentity,
+  ): Promise<void> => {
+    if (deps.concurrencyGate === undefined) return;
+    const acquired = await deps.concurrencyGate.acquire({
+      keyId: identity.keyId,
+      limit: identity.caps?.concurrencyLimit ?? null,
+      signal: requestSignal(c),
+    });
+    if (!acquired.ok) {
+      c.header("retry-after", String(acquired.retryAfterSeconds));
+      throw new HelmHttpError(
+        makeHelmError({
+          error_class: "rate_limited",
+          message:
+            acquired.reason === "queue_full"
+              ? "concurrency queue is full"
+              : "timed out waiting for a concurrency slot",
+          trace_id: c.get("trace_id"),
+        }),
+      );
+    }
+    c.set("concurrencyRelease", acquired.release);
+  };
+
   const lifecycleUnsupported = (operation: string, traceId: string): HelmHttpError =>
     helmError(
       "capability_unsatisfiable",
@@ -333,13 +750,20 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       traceId,
     );
 
-  const parseJsonBody = async (c: Context<AppEnv>, traceId: string): Promise<unknown> => {
+  const parseJsonBodyWithRaw = async (
+    c: Context<AppEnv>,
+    traceId: string,
+  ): Promise<{ native: unknown; rawBody: string }> => {
     try {
-      return JSON.parse(await c.req.text());
+      const rawBody = await c.req.text();
+      return { native: JSON.parse(rawBody), rawBody };
     } catch {
       throw helmError("invalid_request", "malformed JSON request body", traceId);
     }
   };
+
+  const parseJsonBody = async (c: Context<AppEnv>, traceId: string): Promise<unknown> =>
+    (await parseJsonBodyWithRaw(c, traceId)).native;
 
   const handleProviderLifecycle =
     (operation: "retrieve" | "delete" | "cancel" | "inputItems") => async (c: Context<AppEnv>) => {
@@ -373,29 +797,138 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
   const handleCompact = async (c: Context<AppEnv>) => {
     const traceId = c.get("trace_id");
     const identity = await authenticateResponsesRequest(c);
-    const native = await parseJsonBody(c, traceId);
+    await enforceRateLimit(c, identity);
+    await acquireConcurrency(c, identity);
+    const { native, rawBody } = await parseJsonBodyWithRaw(c, traceId);
     const method = deps.lifecycle?.compact;
-    if (method === undefined) {
-      let ir: ResponsesIRLike;
-      try {
-        ir = deps.transformer.transformRequestOut(native);
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : "invalid Responses compact request";
-        throw helmError("invalid_request", detail, traceId);
+    if (method === undefined) throw lifecycleUnsupported("compact", traceId);
+    let carrier = nativeCarrierForRequest(c, deps, native, rawBody);
+    if (carrier === null) {
+      throw helmError("invalid_request", "invalid Responses compact request body", traceId);
+    }
+    const budgetCaps = identity.caps?.budget;
+    if (deps.budget !== undefined && budgetCaps !== undefined) {
+      const check = await deps.budget.gate.check({
+        keyId: identity.keyId,
+        caps: budgetCaps,
+        nowMs: deps.budget.now(),
+      });
+      if (check.overBudget && check.behavior === "reject") {
+        throw new HelmHttpError(
+          makeHelmError({
+            error_class: "rate_limited",
+            message: "usage budget exceeded",
+            trace_id: traceId,
+          }),
+        );
       }
-      ir.metadata = { ...(ir.metadata ?? {}), trace_id: traceId };
-      let result: PipelineRunResult;
-      try {
-        result = await deps.pipeline.run(ir, identity, requestSignal(c));
-        const collected = await result.collect();
-        return c.json(deps.transformer.transformResponseOut(collected) as Record<string, unknown>);
-      } catch (err) {
-        if (err instanceof PipelineError) throw pipelineToHelm(err, traceId);
-        throw err;
+      if (check.overBudget && check.behavior === "degrade" && check.degradeLane !== null) {
+        carrier = cloneCarrierWithBody(carrier, { ...carrier.body, model: check.degradeLane });
       }
     }
-    const body = await method(native, identity, requestSignal(c));
-    return c.json(body as Record<string, unknown>);
+    let responseMetadata: Record<string, string> | undefined;
+    const executionState: { value: ResponsesCompactExecution | null } = { value: null };
+    const startedAt = Date.now();
+    let body: Record<string, unknown> | null = null;
+    try {
+      body = (await method(
+        carrier,
+        identity,
+        requestSignal(c),
+        (headers) => {
+          responseMetadata = responseMetadataFromHeaders(headers);
+        },
+        (value) => {
+          executionState.value = value;
+        },
+      )) as Record<string, unknown>;
+      const execution = executionState.value;
+      const requestedModel = compactModelFromBody(carrier.body);
+      const providerModel =
+        execution?.providerModel ??
+        (typeof body.model === "string" && body.model.length > 0 ? body.model : requestedModel);
+      const usage = compactUsageFromResponse(body);
+      const alias = execution?.modelAlias ?? compactAlias(providerModel);
+      const costUsd =
+        usage === null
+          ? null
+          : (deps.budget?.costOf?.(alias, usage) ?? deps.record?.costOf?.(alias, usage) ?? null);
+      const tokens = tokensFromUsage(usage);
+      if (deps.budget !== undefined && budgetCaps !== undefined) {
+        try {
+          await deps.budget.settle(
+            identity.keyId,
+            budgetCaps,
+            { requests: 1, tokens, costUsd },
+            deps.budget.now(),
+          );
+        } catch {
+          /* fail-open: a budget settle failure never breaks a served compact request */
+        }
+      }
+      deps.recordOAuthUsage?.(execution?.servingAccount ?? null, alias, { tokens, costUsd });
+      if (deps.record !== undefined) {
+        await recordServed(
+          deps.record,
+          {
+            requestId: traceId,
+            apiKeyId: identity.keyId,
+            decision: compactDecision({
+              traceId,
+              keyPrefix: typeof identity.keyPrefix === "string" ? identity.keyPrefix : null,
+              requestedModel,
+              modelAlias: alias,
+              providerModel,
+              providerName: execution?.providerName ?? "openai-codex",
+              servingAccount: execution?.servingAccount ?? null,
+              latencyMs: Date.now() - startedAt,
+              body,
+              error: null,
+              costUsd,
+            }),
+            requestJson: rawBody,
+            responseJson: captureEnabled(deps.record) ? JSON.stringify(body) : null,
+            timedOut: requestTimedOut(c),
+            upstreamRequestJson: execution?.upstreamRequest ?? null,
+          },
+          (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+        );
+      }
+      applyResponseMetadata(c, responseMetadata, modelsEtagForRequest(c, deps, identity.keyId));
+      return c.json(body);
+    } catch (err) {
+      if (deps.record !== undefined) {
+        const requestedModel = compactModelFromBody(carrier.body);
+        const execution = executionState.value;
+        const providerModel = execution?.providerModel ?? requestedModel;
+        await recordServed(
+          deps.record,
+          {
+            requestId: traceId,
+            apiKeyId: identity.keyId,
+            decision: compactDecision({
+              traceId,
+              keyPrefix: typeof identity.keyPrefix === "string" ? identity.keyPrefix : null,
+              requestedModel,
+              modelAlias: execution?.modelAlias ?? compactAlias(providerModel),
+              providerModel,
+              providerName: execution?.providerName ?? "openai-codex",
+              servingAccount: execution?.servingAccount ?? null,
+              latencyMs: Date.now() - startedAt,
+              body,
+              error: err,
+              costUsd: null,
+            }),
+            requestJson: rawBody,
+            responseJson: null,
+            timedOut: requestTimedOut(c),
+            upstreamRequestJson: execution?.upstreamRequest ?? null,
+          },
+          (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+        );
+      }
+      throw err;
+    }
   };
 
   const handleInputTokens = async (c: Context<AppEnv>) => {
@@ -420,59 +953,13 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     //     route. OpenAI surface → the structured rate_limited envelope via onError
     //     (+ retry-after / x-ratelimit-* headers). No-op when the limiter reports
     //     limit 0 (disabled). A store failure propagates (fail-CLOSED).
-    if (deps.rateLimiter !== undefined) {
-      const rl = await deps.rateLimiter.check({
-        keyId: identity.keyId,
-        // Content-Length/4 estimate so per-key TPM is metered here too.
-        estimatedTokens: estimateRequestTokens(c),
-        now: Date.now(),
-        // Per-key override carried by the resolver (null dims inherit the default).
-        override: identity.caps?.rateLimit
-          ? { rpm: identity.caps.rateLimit.rpm, tpm: identity.caps.rateLimit.tpm }
-          : undefined,
-      });
-      if (!(rl.allowed && rl.limit === 0)) {
-        c.header("x-ratelimit-limit", String(rl.limit));
-        c.header("x-ratelimit-remaining", String(rl.remaining));
-        c.header("x-ratelimit-reset", String(rl.resetSeconds));
-        if (!rl.allowed) {
-          c.header("retry-after", String(rl.retryAfterSeconds));
-          throw new HelmHttpError(
-            makeHelmError({
-              error_class: "rate_limited",
-              message: `rate limit exceeded (${rl.limitedBy})`,
-              trace_id: traceId,
-            }),
-          );
-        }
-      }
-    }
+    await enforceRateLimit(c, identity);
 
     // 1c) Concurrency overflow queue (issue #93) AFTER rate-limit: wait for a
     //     slot instead of an instant 429; queue-full / wait timeout → 429 via the
     //     OpenAI envelope (onError). Release parked on the context for the guard;
     //     the stream branch claims it and releases at true stream end.
-    if (deps.concurrencyGate !== undefined) {
-      const acquired = await deps.concurrencyGate.acquire({
-        keyId: identity.keyId,
-        limit: identity.caps?.concurrencyLimit ?? null,
-        signal: requestSignal(c),
-      });
-      if (!acquired.ok) {
-        c.header("retry-after", String(acquired.retryAfterSeconds));
-        throw new HelmHttpError(
-          makeHelmError({
-            error_class: "rate_limited",
-            message:
-              acquired.reason === "queue_full"
-                ? "concurrency queue is full"
-                : "timed out waiting for a concurrency slot",
-            trace_id: traceId,
-          }),
-        );
-      }
-      c.set("concurrencyRelease", acquired.release);
-    }
+    await acquireConcurrency(c, identity);
 
     // 2) Parse + translate inbound. A malformed JSON body OR a structurally invalid
     //    Responses request (the transformer's Zod parse throws) is a CLIENT error →
@@ -531,12 +1018,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     // real Codex CLI is stream-only (store:false + stream:true), so the same verbatim
     // body is the carrier on either branch — the guard + executor decide whether to
     // actually forward it.
-    const nativeCarrier = nativeCarrierFromParsedBody({
-      protocol: "openai_responses",
-      native,
-      rawBody: requestJson,
-      headers: c.req.raw.headers,
-    });
+    const nativeCarrier = nativeCarrierForRequest(c, deps, native, requestJson);
     if (nativeCarrier !== null) {
       ir.metadata.native_request = nativeCarrier;
     }
@@ -555,6 +1037,18 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       // body fully drains — release in the stream's own finally, not the guard.
       const releaseConcurrency = c.get("concurrencyRelease");
       c.set("concurrencyRelease", undefined);
+      let initialResult: PipelineRunResult | null = null;
+      let initialError: unknown = null;
+      try {
+        initialResult = await deps.pipeline.run(ir, identity, requestSignal(c));
+        applyResponseMetadata(
+          c,
+          initialResult.responseMetadata,
+          modelsEtagForRequest(c, deps, identity.keyId),
+        );
+      } catch (err) {
+        initialError = err;
+      }
       return streamSSE(c, async (sse) => {
         // Translate path: each IR event is serialized by the transformer's stream
         // mapping; the pipeline already ran the Responses state machine (principle 8 —
@@ -572,7 +1066,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         // Accumulate the serialized wire frames so the served response body can be
         // captured (verbatim) alongside the telemetry row in the finally below.
         const captured: string[] = [];
-        let result: PipelineRunResult | null = null;
+        const result = initialResult;
         // SSE keep-alive: emit a `:` comment during inter-chunk idle (wire-only, never
         // captured) so a proxy/client idle-timeout does not sever a long healthy stream.
         // Gated on an event boundary so it can never split a verbatim-relayed frame.
@@ -582,7 +1076,8 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         let streamResponseId: string | null = null;
         let streamStatus: string | null = null;
         try {
-          result = await deps.pipeline.run(ir, identity, requestSignal(c));
+          if (initialError !== null) throw initialError;
+          if (result === null) throw new Error("Responses pipeline did not return a result");
           for await (const item of withHeartbeat(result.streamIR(), {
             heartbeatMs,
             signal: requestSignal(c),
@@ -695,8 +1190,8 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     // 3) Route through the shared core. The pipeline throws a PipelineError when
     //    routing failed (all_providers_failed) or for an empty request
     //    (invalid_request) — surface it as the matching OpenAI envelope instead of
-    //    an empty 200. For streaming requests this wait happens inside streamSSE
-    //    after the Responses prelude has already reached the client.
+    //    an empty 200. Streaming requests run the pipeline before streamSSE so
+    //    request-scoped Codex headers are present before HTTP response commitment.
     let result: PipelineRunResult;
     try {
       result = await deps.pipeline.run(ir, identity, requestSignal(c));
@@ -785,6 +1280,11 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
       );
     }
+    applyResponseMetadata(
+      c,
+      result.responseMetadata,
+      modelsEtagForRequest(c, deps, identity.keyId),
+    );
     return c.json(body);
   };
 

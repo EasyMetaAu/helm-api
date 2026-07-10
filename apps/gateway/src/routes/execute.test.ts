@@ -908,6 +908,48 @@ describe("createExecute — gateway execution adapter", () => {
     expect(out.attempts[0]?.skip_reason).toBe("responses_background_cross_protocol_blocked");
   });
 
+  it.each([
+    [
+      "PTC input sequence",
+      {
+        responses_input_items: [
+          { type: "program", call_id: "call_program", code: "return 1" },
+          {
+            type: "function_call",
+            call_id: "call_tool",
+            name: "lookup",
+            arguments: "{}",
+            caller: { type: "program", caller_id: "call_program" },
+          },
+        ],
+      },
+    ],
+    ["future native items", { unknown_items: [{ type: "future_response_item", opaque: true }] }],
+  ])("blocks Responses %s on non-Responses targets", async (_label, providerRaw) => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "should-not-call" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ default_good_model: "gpt-x" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["default_good_model"]),
+      req({ protocol: "openai_responses", provider_raw: providerRaw }),
+    );
+
+    expect(provider.chatCompletion).not.toHaveBeenCalled();
+    expect(out.final.status).toBe("error");
+    expect(out.attempts[0]?.skip_reason).toBe("responses_native_items_cross_protocol_blocked");
+  });
+
   it("does not forward top-level cache_control to non-Anthropic target protocols", async () => {
     const provider = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
@@ -4210,7 +4252,7 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     expect(out.attempts[0]?.cost_usd).toBeCloseTo(0.0141, 12);
   });
 
-  it("records model/store mutations on an OpenAI Responses native carrier", async () => {
+  it("leaves model-aware Codex instructions shaping to the provider boundary", async () => {
     const responsesBody = {
       id: "resp_1",
       object: "response",
@@ -4257,19 +4299,15 @@ describe("createExecute — native protocol passthrough (#217)", () => {
 
     expect(out.final.status).toBe("ok");
     const forwarded = provider.nativePassthrough.mock.calls[0]?.[0] as typeof carrier;
-    // The Codex backend mandates non-empty `instructions`; a string-input body with no
-    // system content gets the default injected alongside the store shim.
     expect(forwarded.body).toEqual({
       model: "gpt-5-codex",
       input: "hi",
       store: false,
-      instructions: "You are a helpful assistant.",
     });
     expect(forwarded.raw_body).toBeUndefined();
     expect(forwarded.mutations).toMatchObject({
       model_rewritten: { from: "codex/gpt-5-codex", to: "gpt-5-codex" },
-      // appendMutationList sorts the ledger → alphabetical order
-      body_shims_applied: ["instructions_defaulted", "store_forced_false"],
+      body_shims_applied: ["store_forced_false"],
     });
     expect(out.attempts[0]?.passthrough_mutations).toMatchObject(forwarded.mutations);
   });
@@ -4467,7 +4505,7 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     });
   });
 
-  it("hoists a developer system item into Codex `instructions` on passthrough (pi-ai shape)", async () => {
+  it("preserves developer input until Codex ModelInfo is available at the provider boundary", async () => {
     const responsesBody = {
       id: "resp_hoist",
       object: "response",
@@ -4519,13 +4557,13 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     const forwarded = provider.nativePassthrough.mock.calls[0]?.[0] as typeof carrier;
     expect(forwarded.body).toEqual({
       model: "gpt-5.5",
-      instructions: "You are Mimi, an AI employee at AgentCrew.",
-      input: [{ role: "user", content: "hi" }],
+      input: [
+        { role: "developer", content: "You are Mimi, an AI employee at AgentCrew." },
+        { role: "user", content: "hi" },
+      ],
       store: false,
     });
-    expect((forwarded.mutations as Record<string, unknown>).body_shims_applied).toEqual([
-      "instructions_hoisted_from_input",
-    ]);
+    expect((forwarded.mutations as Record<string, unknown>).body_shims_applied).toBeUndefined();
   });
 
   it("sanitizes Codex passthrough bodies that came from stored Responses output items", async () => {
@@ -4604,6 +4642,8 @@ describe("createExecute — native protocol passthrough (#217)", () => {
         {
           type: "message",
           role: "assistant",
+          status: "completed",
+          phase: "final_answer",
           content: [{ type: "output_text", text: "NO_REPLY" }],
         },
         { role: "user", content: [{ type: "input_text", text: "next" }] },
@@ -5494,7 +5534,13 @@ describe("createExecute — onOAuthSubscription429 (auto-park)", () => {
       chatCompletion: vi.fn().mockRejectedValue(err),
       chatCompletionStream: vi.fn(),
     }) as unknown as ProviderClient;
-  const e429 = () => new UpstreamError("upstream_error", "rate limited", null, 429);
+  const e429 = () =>
+    new UpstreamError(
+      "upstream_error",
+      "rate limited",
+      { headers: { "x-codex-active-limit": "codex_luna" } },
+      429,
+    );
 
   it("fires once with the alias when a subscription attempt hits a genuine 429", async () => {
     const onOAuthSubscription429 = vi.fn();
@@ -5513,7 +5559,12 @@ describe("createExecute — onOAuthSubscription429 (auto-park)", () => {
     const out = await execute(plan(["openai-codex/gpt-5"]), req());
     expect(out.final.status).toBe("error"); // chain exhausted (single parked candidate)
     expect(onOAuthSubscription429).toHaveBeenCalledTimes(1);
-    expect(onOAuthSubscription429).toHaveBeenCalledWith("openai-codex/gpt-5");
+    expect(onOAuthSubscription429).toHaveBeenCalledWith(
+      "openai-codex/gpt-5",
+      expect.objectContaining({
+        providerRaw: { headers: { "x-codex-active-limit": "codex_luna" } },
+      }),
+    );
   });
 
   it("does NOT record an alias breaker failure for subscription account-local 429", async () => {

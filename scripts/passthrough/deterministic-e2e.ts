@@ -424,8 +424,9 @@ async function testResponsesStreamLifecycle(): Promise<void> {
       assert.equal(headers["x-api-key"], undefined);
       assert.equal(headers["x-helm-internal"], undefined);
       assert.equal(headers["x-session-id"], "sess-client");
-      assert.equal(headers["openai-beta"], "client-beta, responses=experimental");
+      assert.equal(headers["openai-beta"], undefined);
       assert.equal(carrier.mutations.auth_replaced, true);
+      assert.equal(carrier.mutations.headers_dropped?.includes("openai-beta"), true);
       assert.equal(JSON.stringify(carrier.mutations).includes("helm-client-key"), false);
     },
   );
@@ -488,10 +489,7 @@ async function testResponsesExecuteStoreForcedFalse(): Promise<void> {
       assert.equal(parsed.model, "gpt-5-codex");
       assert.equal(parsed.store, false);
       assert.deepEqual(parsed.future_field, { preserved: true });
-      assert.deepEqual(carrier.mutations.body_shims_applied, [
-        "instructions_defaulted",
-        "store_forced_false",
-      ]);
+      assert.deepEqual(carrier.mutations.body_shims_applied, ["store_forced_false"]);
       assert.equal(carrier.mutations.model_rewritten?.to, "gpt-5-codex");
       const headers = lowerHeaders(captured[0]?.headers ?? {});
       assert.equal(headers["x-helm-internal"], undefined);

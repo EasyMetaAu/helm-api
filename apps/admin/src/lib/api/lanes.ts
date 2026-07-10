@@ -20,7 +20,14 @@ export interface LaneConstraints {
 // admin deliberately re-types shapes rather than importing core/shared). When set
 // on a lane, the gateway overrides the client's reasoning effort for every request
 // on that lane; omitted = unforced (the request-driven default).
-export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type ReasoningEffort =
+  | 'none'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max';
 export const REASONING_EFFORTS: ReasoningEffort[] = [
   'none',
   'minimal',

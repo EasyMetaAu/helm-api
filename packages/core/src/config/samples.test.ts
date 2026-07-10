@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { HelmConfigSchema } from "@helm/shared";
+import { CapabilitiesOverrideSchema, HelmConfigSchema } from "@helm/shared";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 import { resolveModelAlias, validateModelAliasTargets } from "../routing/model-alias.js";
@@ -91,18 +91,19 @@ describe("checked-in config samples", () => {
     // GPT families route to their dedicated vendor-family lanes. The cheap mini must
     // NOT be swallowed by the broad `gpt-5*` -> premium catch-all (longest-literal
     // wins): a dated mini id still lands on the cheap gpt-5.4-mini lane.
-    expect(resolveModelAlias("gpt-5.6", aliases)).toBe("gpt-5.6");
+    expect(resolveModelAlias("gpt-5.6", aliases)).toBe("gpt-5.6-sol");
     expect(resolveModelAlias("gpt-5.6-sol", aliases)).toBe("gpt-5.6-sol");
     expect(resolveModelAlias("gpt-5.6-sol-20260710", aliases)).toBe("gpt-5.6-sol");
     expect(resolveModelAlias("gpt-5.6-terra", aliases)).toBe("gpt-5.6-terra");
     expect(resolveModelAlias("gpt-5.6-terra-20260710", aliases)).toBe("gpt-5.6-terra");
     expect(resolveModelAlias("gpt-5.6-luna", aliases)).toBe("gpt-5.6-luna");
     expect(resolveModelAlias("gpt-5.6-luna-20260710", aliases)).toBe("gpt-5.6-luna");
-    expect(resolveModelAlias("openai.gpt-5.6", aliases)).toBe("gpt-5.6");
+    expect(resolveModelAlias("gpt-5.6-20260710", aliases)).toBe("gpt-5.6-sol");
+    expect(resolveModelAlias("openai.gpt-5.6", aliases)).toBe("gpt-5.6-sol");
     expect(resolveModelAlias("openai.gpt-5.6-sol", aliases)).toBe("gpt-5.6-sol");
     expect(resolveModelAlias("openai.gpt-5.6-terra", aliases)).toBe("gpt-5.6-terra");
     expect(resolveModelAlias("openai.gpt-5.6-luna", aliases)).toBe("gpt-5.6-luna");
-    expect(resolveModelAlias("openai.gpt-5.6-20260710", aliases)).toBe("gpt-5.6");
+    expect(resolveModelAlias("openai.gpt-5.6-20260710", aliases)).toBe("gpt-5.6-sol");
     expect(resolveModelAlias("gpt-5.4", aliases)).toBe("gpt-5.4");
     expect(resolveModelAlias("gpt-5.4-mini", aliases)).toBe("gpt-5.4-mini");
     expect(resolveModelAlias("gpt-5.4-mini-2026-01-01", aliases)).toBe("gpt-5.4-mini");
@@ -127,6 +128,20 @@ describe("checked-in config samples", () => {
     expect(lanes["gpt-5.4"]?.fallback).toEqual(["premium"]);
     expect(lanes["gpt-5.4-mini"]?.primary).toBe("openai-codex/gpt-5.4-mini");
     expect(lanes["gpt-5.4-mini"]?.fallback).toEqual(["economy"]);
+  });
+
+  it("ships Codex GPT-5.6 fallback capabilities matching the Codex model catalog", () => {
+    const capabilities = CapabilitiesOverrideSchema.parse(readYaml("capabilities.yaml"));
+    const sol = capabilities["openai-codex/gpt-5.6-sol"];
+    const terra = capabilities["openai-codex/gpt-5.6-terra"];
+    const luna = capabilities["openai-codex/gpt-5.6-luna"];
+
+    expect(sol?.maxContextTokens).toBe(372_000);
+    expect(terra?.maxContextTokens).toBe(372_000);
+    expect(luna?.maxContextTokens).toBe(372_000);
+    expect(sol?.reasoningEffort?.openaiReasoning?.levels).not.toContain("ultra");
+    expect(terra?.reasoningEffort?.openaiReasoning?.levels).not.toContain("ultra");
+    expect(luna?.reasoningEffort?.openaiReasoning?.levels).not.toContain("ultra");
   });
 
   it("routes bare Gemini ids onto the gemini vendor-family lanes (pro vs flash vs catch-all)", () => {

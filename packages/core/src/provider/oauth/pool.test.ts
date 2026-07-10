@@ -416,6 +416,7 @@ describe("createOAuthPoolClient — account selection", () => {
     });
     const pool = createOAuthPoolClient({
       members: [responseMember("a"), responseMember("b")],
+      now: () => 1_000,
     });
 
     await pool.chatCompletion(REQ);
@@ -465,19 +466,7 @@ describe("createOAuthPoolClient — account selection", () => {
     expect(calls).toEqual(["a", "a"]);
   });
 
-  it("does not hash an unknown previous_response_id as a fake stable account key", async () => {
-    const calls: string[] = [];
-    const pool = createOAuthPoolClient({
-      members: [member("a", 50, true, calls), member("b", 50, true, calls)],
-    });
-
-    await pool.chatCompletion({ ...USER_REQ, previous_response_id: "resp-1" });
-    await pool.chatCompletion({ ...USER_REQ, previous_response_id: "resp-2" });
-
-    expect(calls).toEqual(["a", "b"]);
-  });
-
-  it("does not let previous_response_id override a stable chat user key", async () => {
+  it("fails a known previous_response_id when its original account is unavailable", async () => {
     const calls: string[] = [];
     const responseMember = (account: string): OAuthPoolMember => ({
       account,
@@ -496,6 +485,82 @@ describe("createOAuthPoolClient — account selection", () => {
     });
     const pool = createOAuthPoolClient({
       members: [responseMember("a"), responseMember("b")],
+      now: () => 1_000,
+    });
+
+    await pool.chatCompletion(REQ);
+    pool.setUsageLimit("a", 50_000);
+
+    await expect(
+      pool.chatCompletion({ ...USER_REQ, previous_response_id: "resp-a" }),
+    ).rejects.toThrow(/previous_response_id.*original account.*unavailable/i);
+    expect(calls).toEqual(["a"]);
+  });
+
+  it("never retries a known previous_response_id on a sibling account", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        {
+          account: "a",
+          priority: 50,
+          schedulable: true,
+          client: {
+            async chatCompletion(req: ChatCompletionRequest) {
+              calls.push("a");
+              if (req.previous_response_id) {
+                throw Object.assign(new Error("temporary"), { status: 503 });
+              }
+              return { id: "resp-a" };
+            },
+            async *chatCompletionStream() {
+              yield "data: a\n\n";
+            },
+          },
+        },
+        member("b", 50, true, calls),
+      ],
+    });
+
+    await pool.chatCompletion(REQ);
+    await expect(
+      pool.chatCompletion({ ...USER_REQ, previous_response_id: "resp-a" }),
+    ).rejects.toThrow("temporary");
+    expect(calls).toEqual(["a", "a"]);
+  });
+
+  it("does not hash an unknown previous_response_id as a fake stable account key", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [member("a", 50, true, calls), member("b", 50, true, calls)],
+    });
+
+    await pool.chatCompletion({ ...USER_REQ, previous_response_id: "resp-1" });
+    await pool.chatCompletion({ ...USER_REQ, previous_response_id: "resp-2" });
+
+    expect(calls).toEqual(["a", "b"]);
+  });
+
+  it("keeps a known previous_response_id on its original account even with a stable user key", async () => {
+    const calls: string[] = [];
+    const responseMember = (account: string): OAuthPoolMember => ({
+      account,
+      priority: 50,
+      schedulable: true,
+      client: {
+        async chatCompletion(_req: ChatCompletionRequest) {
+          calls.push(account);
+          return { id: `resp-${account}`, served_by: account };
+        },
+        async *chatCompletionStream(_req: ChatCompletionRequest) {
+          calls.push(account);
+          yield `data: ${account}\n\n`;
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [responseMember("a"), responseMember("b")],
+      now: () => 1_000,
     });
 
     await pool.chatCompletion(REQ);
@@ -505,7 +570,7 @@ describe("createOAuthPoolClient — account selection", () => {
       previous_response_id: "resp-a",
     });
 
-    expect(calls).toEqual(["a", "b"]);
+    expect(calls).toEqual(["a", "a"]);
   });
 
   it("keeps sticky hashing inside the lowest-priority eligible tier", async () => {
@@ -598,6 +663,52 @@ describe("createOAuthPoolClient — account selection", () => {
     await pool.chatCompletion(REQ);
     await pool.chatCompletion(REQ);
     expect(calls).toEqual(["live", "live"]);
+  });
+
+  it("routes Sol and Luna only to accounts whose model allowlists include them", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        { ...member("sol-only", 50, true, calls), models: ["gpt-5.6-sol"] },
+        { ...member("luna-only", 10, true, calls), models: ["gpt-5.6-luna"] },
+      ],
+    });
+
+    await pool.chatCompletion({ ...REQ, model: "gpt-5.6-sol" });
+    await pool.chatCompletion({ ...REQ, model: "gpt-5.6-luna" });
+
+    expect(calls).toEqual(["sol-only", "luna-only"]);
+  });
+
+  it("invalidates a sticky account when the next request uses a model it does not support", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        { ...member("sol-only", 10, true, calls), models: ["gpt-5.6-sol"] },
+        { ...member("luna-only", 50, true, calls), models: ["gpt-5.6-luna"] },
+      ],
+    });
+    const sticky = { ...USER_REQ, prompt_cache_key: "cross-model-session" };
+
+    await pool.chatCompletion({ ...sticky, model: "gpt-5.6-sol" });
+    await pool.chatCompletion({ ...sticky, model: "gpt-5.6-luna" });
+
+    expect(calls).toEqual(["sol-only", "luna-only"]);
+  });
+
+  it("fails explicitly when no account supports the requested model", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        { ...member("sol-only", 10, true, calls), models: ["gpt-5.6-sol"] },
+        { ...member("luna-only", 50, true, calls), models: ["gpt-5.6-luna"] },
+      ],
+    });
+
+    await expect(pool.chatCompletion({ ...REQ, model: "gpt-5.6-terra" })).rejects.toThrow(
+      'no account supports model "gpt-5.6-terra"',
+    );
+    expect(calls).toEqual([]);
   });
 
   it("throws fail-closed when no member is schedulable", async () => {
@@ -1049,6 +1160,167 @@ describe("createOAuthPoolClient — nativePassthroughStream", () => {
     expect(chunks).toEqual(["data: b\n\n"]);
   });
 
+  it("binds a streamed Responses response id to the account that produced it", async () => {
+    const calls: string[] = [];
+    const responseMember = (account: string): OAuthPoolMember => ({
+      account,
+      priority: 50,
+      schedulable: true,
+      client: {
+        async chatCompletion() {
+          return { served_by: account };
+        },
+        async *chatCompletionStream() {
+          yield `data: ${account}\n\n`;
+        },
+        async *nativePassthroughStream() {
+          calls.push(account);
+          yield 'event: response.created\ndata: {"type":"response.created","response":{"id":"resp-';
+          yield `${account}"}}\n\n`;
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [responseMember("a"), responseMember("b")],
+      now: () => 1_000,
+    });
+
+    const first = pool.nativePassthroughStream?.({
+      protocol: "openai_responses",
+      body: { model: "gpt-5.6-sol", stream: true, input: "first" },
+      headers: {},
+      mutations: {},
+    });
+    for await (const _chunk of first ?? []) {
+      // Drain the stream so the response.created frame can establish affinity.
+    }
+
+    const continuation = pool.nativePassthroughStream?.({
+      protocol: "openai_responses",
+      body: {
+        model: "gpt-5.6-sol",
+        stream: true,
+        input: "continue",
+        previous_response_id: "resp-a",
+      },
+      headers: {},
+      mutations: {},
+    });
+    for await (const _chunk of continuation ?? []) {
+      // Drain the continuation.
+    }
+
+    expect(calls).toEqual(["a", "a"]);
+  });
+
+  it("binds an upstream x-codex-turn-state to the account that produced it", async () => {
+    const calls: string[] = [];
+    const responseMember = (account: string): OAuthPoolMember => ({
+      account,
+      priority: 50,
+      schedulable: true,
+      client: {
+        async chatCompletion() {
+          return { served_by: account };
+        },
+        async *chatCompletionStream() {
+          yield `data: ${account}\n\n`;
+        },
+        async *nativePassthroughStream(_body, opts) {
+          calls.push(account);
+          opts?.onResponseMeta?.(
+            new Headers({
+              "x-codex-turn-state": "turn-state-b",
+              "x-request-id": `req-${account}`,
+            }),
+          );
+          yield `event: response.created\ndata: {"type":"response.created","response":{"id":"resp-${account}"}}\n\n`;
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [responseMember("a"), responseMember("b")],
+    });
+    const firstMeta: string[] = [];
+
+    const first = pool.nativePassthroughStream?.(
+      {
+        protocol: "openai_responses",
+        body: { model: "gpt-5.6-sol", stream: true, input: "first" },
+        headers: { "session-id": "session-stable" },
+        mutations: {},
+      },
+      {
+        onResponseMeta: (headers) => {
+          firstMeta.push(headers.get("x-request-id") ?? "");
+        },
+      },
+    );
+    for await (const _chunk of first ?? []) {
+      // Drain the stream so response metadata can establish account affinity.
+    }
+
+    const continuation = pool.nativePassthroughStream?.({
+      protocol: "openai_responses",
+      body: { model: "gpt-5.6-sol", stream: true, input: "continue" },
+      headers: { "x-codex-turn-state": "turn-state-b" },
+      mutations: {},
+    });
+    for await (const _chunk of continuation ?? []) {
+      // Drain the continuation.
+    }
+
+    expect(calls).toEqual(["a", "a"]);
+    expect(firstMeta).toEqual(["req-a"]);
+  });
+
+  it("fails a known x-codex-turn-state when its original account is unavailable", async () => {
+    const calls: string[] = [];
+    const responseMember = (account: string): OAuthPoolMember => ({
+      account,
+      priority: 50,
+      schedulable: true,
+      client: {
+        async chatCompletion() {
+          return { served_by: account };
+        },
+        async *chatCompletionStream() {
+          yield `data: ${account}\n\n`;
+        },
+        async *nativePassthroughStream(_body, opts) {
+          calls.push(account);
+          opts?.onResponseMeta?.(new Headers({ "x-codex-turn-state": "strict-turn-state" }));
+          yield `event: response.created\ndata: {"type":"response.created","response":{"id":"resp-${account}"}}\n\n`;
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [responseMember("a"), responseMember("b")],
+      now: () => 1_000,
+    });
+
+    const first = pool.nativePassthroughStream?.({
+      protocol: "openai_responses",
+      body: { model: "gpt-5.6-sol", stream: true, input: "first" },
+      headers: { "session-id": "session-stable" },
+      mutations: {},
+    });
+    for await (const _chunk of first ?? []) {
+      // Drain the stream so response metadata can establish account affinity.
+    }
+    pool.setUsageLimit("a", 50_000);
+
+    expect(() =>
+      pool.nativePassthroughStream?.({
+        protocol: "openai_responses",
+        body: { model: "gpt-5.6-sol", stream: true, input: "continue" },
+        headers: { "x-codex-turn-state": "strict-turn-state" },
+        mutations: {},
+      }),
+    ).toThrow(/x-codex-turn-state.*original account.*unavailable/i);
+    expect(calls).toEqual(["a"]);
+  });
+
   it("throws fail-closed when the selected member lacks nativePassthroughStream", async () => {
     const pt: string[] = [];
     const pool = createOAuthPoolClient({
@@ -1063,11 +1335,132 @@ describe("createOAuthPoolClient — nativePassthroughStream", () => {
   });
 });
 
+describe("createOAuthPoolClient — responsesCompact", () => {
+  function compactMember(account: string, calls: string[]): OAuthPoolMember {
+    return {
+      account,
+      priority: 50,
+      schedulable: true,
+      client: {
+        async chatCompletion() {
+          return { served_by: account };
+        },
+        async *chatCompletionStream() {
+          yield `data: ${account}\n\n`;
+        },
+        async responsesCompact() {
+          calls.push(account);
+          return { output: [{ type: "message", role: "assistant", content: account }] };
+        },
+      },
+    };
+  }
+
+  it("keeps compact requests with Codex session-id/thread-id headers on one account", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [compactMember("a", calls), compactMember("b", calls)],
+    });
+    const carrier = {
+      protocol: "openai_responses" as const,
+      body: { model: "gpt-5.6-sol", input: "compact me" },
+      headers: {
+        "session-id": "session-stable",
+        "thread-id": "thread-stable",
+      },
+      mutations: {},
+    };
+
+    await pool.responsesCompact?.(carrier);
+    await pool.responsesCompact?.(carrier);
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toBe(calls[0]);
+  });
+
+  it("filters compact account selection by the requested model entitlement", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        { ...compactMember("sol", calls), models: ["gpt-5.6-sol"] },
+        { ...compactMember("luna", calls), models: ["gpt-5.6-luna"] },
+      ],
+    });
+
+    await pool.responsesCompact?.({ model: "gpt-5.6-luna", input: "compact" });
+
+    expect(calls).toEqual(["luna"]);
+  });
+
+  it("uses compact response turn-state metadata to preserve account affinity", async () => {
+    const calls: string[] = [];
+    const compactMemberWithMeta = (account: string): OAuthPoolMember => ({
+      account,
+      priority: 50,
+      schedulable: true,
+      client: {
+        async chatCompletion() {
+          return { served_by: account };
+        },
+        async *chatCompletionStream() {
+          yield `data: ${account}\n\n`;
+        },
+        async responsesCompact(_req, opts) {
+          calls.push(account);
+          opts?.onResponseMeta?.(
+            new Headers({
+              "x-codex-turn-state": "compact-turn-state-b",
+              "x-request-id": `compact-${account}`,
+            }),
+          );
+          return { output: [] };
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [compactMemberWithMeta("a"), compactMemberWithMeta("b")],
+    });
+    const forwardedRequestIds: string[] = [];
+
+    await pool.responsesCompact?.(
+      {
+        protocol: "openai_responses",
+        body: { model: "gpt-5.6-sol", input: "first compact" },
+        headers: { "session-id": "session-stable" },
+        mutations: {},
+      },
+      {
+        onResponseMeta: (headers) => {
+          forwardedRequestIds.push(headers.get("x-request-id") ?? "");
+        },
+      },
+    );
+    await pool.responsesCompact?.({
+      protocol: "openai_responses",
+      body: { model: "gpt-5.6-sol", input: "next compact" },
+      headers: { "x-codex-turn-state": "compact-turn-state-b" },
+      mutations: {},
+    });
+
+    expect(calls).toEqual(["a", "a"]);
+    expect(forwardedRequestIds).toEqual(["compact-a"]);
+  });
+
+  it("does not advertise compact when pool members do not implement it", () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [member("a", 50, true, calls), member("b", 50, true, calls)],
+    });
+
+    expect(pool.responsesCompact).toBeUndefined();
+  });
+});
+
 // In-pool retry (the real fix for the Codex `all_providers_failed` on a single OpenAI
 // overload): when the picked account fails with a TRANSIENT, account-agnostic upstream
 // fault BEFORE the first chunk, try the next eligible sibling in the SAME pool before the
-// executor advances to the (cross-protocol-incompatible) next alias. A 429 / 4xx is NOT
-// retried (the executor parks the account / the request is deterministically bad).
+// executor advances to the (cross-protocol-incompatible) next alias. A 429 cools its
+// resolved account/model scope before retry; deterministic non-429 4xx errors are not retried.
 describe("createOAuthPoolClient — in-pool retry on transient upstream fault", () => {
   // Member whose complete/stream throws a chosen error (or serves) — `served` records
   // which account actually produced a result, so a test asserts who served vs was skipped.
@@ -1124,6 +1517,25 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     const res = await pool.chatCompletion(REQ);
     expect(res).toEqual({ served_by: "b" });
     expect(served).toEqual(["b"]); // a never served; b rescued the request
+  });
+
+  it("retries only sibling accounts that support the requested model", async () => {
+    const served: string[] = [];
+    const selected: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        { ...faultMember("sol-bad", 10, served, FIVE_XX), models: ["gpt-5.6-sol"] },
+        { ...faultMember("luna-only", 20, served, null), models: ["gpt-5.6-luna"] },
+        { ...faultMember("sol-good", 30, served, null), models: ["gpt-5.6-sol"] },
+      ],
+      onSelect: (account) => selected.push(account),
+    });
+
+    await expect(pool.chatCompletion({ ...REQ, model: "gpt-5.6-sol" })).resolves.toEqual({
+      served_by: "sol-good",
+    });
+    expect(selected).toEqual(["sol-bad", "sol-good"]);
+    expect(served).toEqual(["sol-good"]);
   });
 
   it("parks a rate-limited account and retries a sibling before surfacing to the alias breaker", async () => {
@@ -1225,6 +1637,116 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     expect(served).toEqual(["b", "a"]);
   });
 
+  it("cools a Codex model/limit scope without parking the account for sibling models", async () => {
+    const served: string[] = [];
+    const selected: string[] = [];
+    let nowMs = 1_000;
+    let lunaFailures = 1;
+    const scoped429 = new UpstreamError(
+      "upstream_error",
+      "usage limit",
+      { headers: { "x-codex-active-limit": "codex_luna" } },
+      429,
+    );
+    const scopedMember: OAuthPoolMember = {
+      account: "a",
+      priority: 10,
+      schedulable: true,
+      client: {
+        async chatCompletion(req: ChatCompletionRequest) {
+          if (req.model === "gpt-5.6-luna" && lunaFailures-- > 0) throw scoped429;
+          served.push(`a:${req.model}`);
+          return { served_by: "a" };
+        },
+        chatCompletionStream(_req: ChatCompletionRequest): AsyncIterable<string> {
+          return (async function* () {})();
+        },
+      },
+    };
+    const sibling: OAuthPoolMember = {
+      account: "b",
+      priority: 50,
+      schedulable: true,
+      client: {
+        async chatCompletion(req: ChatCompletionRequest) {
+          served.push(`b:${req.model}`);
+          return { served_by: "b" };
+        },
+        chatCompletionStream(_req: ChatCompletionRequest): AsyncIterable<string> {
+          return (async function* () {})();
+        },
+      },
+    };
+    const pool = createOAuthPoolClient({
+      members: [scopedMember, sibling],
+      now: () => nowMs,
+      accountRateLimitCooldownMs: 250,
+      resolveRateLimitScope: ({ model, error }) =>
+        error === scoped429
+          ? { scope: "model", model: model ?? "", limitId: "codex_luna" }
+          : { scope: "account" },
+      onSelect: (account) => selected.push(account),
+    });
+
+    await expect(pool.chatCompletion({ model: "gpt-5.6-luna", messages: [] })).resolves.toEqual({
+      served_by: "b",
+    });
+    await expect(pool.chatCompletion({ model: "gpt-5.6-luna", messages: [] })).resolves.toEqual({
+      served_by: "b",
+    });
+    await expect(pool.chatCompletion({ model: "gpt-5.6-terra", messages: [] })).resolves.toEqual({
+      served_by: "a",
+    });
+
+    expect(pool.getUsageLimit("a")).toBeNull();
+    expect(selected).toEqual(["a", "b", "b", "a"]);
+    expect(served).toEqual(["b:gpt-5.6-luna", "b:gpt-5.6-luna", "a:gpt-5.6-terra"]);
+
+    nowMs = 1_251;
+    await expect(pool.chatCompletion({ model: "gpt-5.6-luna", messages: [] })).resolves.toEqual({
+      served_by: "a",
+    });
+    expect(served.at(-1)).toBe("a:gpt-5.6-luna");
+  });
+
+  it("keeps the default Codex limit account-scoped", async () => {
+    const served: string[] = [];
+    const account429 = new UpstreamError(
+      "upstream_error",
+      "usage limit",
+      { headers: { "x-codex-active-limit": "codex" } },
+      429,
+    );
+    const pool = createOAuthPoolClient({
+      members: [
+        faultMember("a", 10, served, account429),
+        {
+          ...member("b", 50, true, served),
+          client: {
+            async chatCompletion(req: ChatCompletionRequest) {
+              served.push(`b:${req.model}`);
+              return { served_by: "b" };
+            },
+            chatCompletionStream(_req: ChatCompletionRequest): AsyncIterable<string> {
+              return (async function* () {})();
+            },
+          },
+        },
+      ],
+      now: () => 1_000,
+      accountRateLimitCooldownMs: 250,
+      resolveRateLimitScope: () => ({ scope: "account" }),
+    });
+
+    await expect(pool.chatCompletion({ model: "gpt-5.6-luna", messages: [] })).resolves.toEqual({
+      served_by: "b",
+    });
+    await expect(pool.chatCompletion({ model: "gpt-5.6-terra", messages: [] })).resolves.toEqual({
+      served_by: "b",
+    });
+    expect(pool.getUsageLimit("a")).toBe(1_250);
+  });
+
   it("parks a refresh-rate-limited account (TokenRefreshError 429) and retries a sibling", async () => {
     const served: string[] = [];
     const selected: string[] = [];
@@ -1299,6 +1821,34 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     expect(served).toEqual(["good", "good"]);
     expect(selected).toEqual(["bad", "good", "good"]);
     expect(credentialFailures).toEqual([{ account: "bad", error: REFRESH_401 }]);
+  });
+
+  it("parks a permanent identity-mismatch refresh failure even without an HTTP status", async () => {
+    const served: string[] = [];
+    const selected: string[] = [];
+    const identityMismatch = new TokenRefreshError(
+      "oauth refresh failed (openai-codex)",
+      null,
+      true,
+    );
+    const credentialFailures: Array<{ account: string; error: unknown }> = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        faultMember("bad", 10, served, identityMismatch),
+        faultMember("good", 50, served, null),
+      ],
+      onSelect: (account) => selected.push(account),
+      onAccountCredentialFailure: (account, error) => {
+        credentialFailures.push({ account, error });
+      },
+    });
+
+    await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "good" });
+    await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "good" });
+
+    expect(served).toEqual(["good", "good"]);
+    expect(selected).toEqual(["bad", "good", "good"]);
+    expect(credentialFailures).toEqual([{ account: "bad", error: identityMismatch }]);
   });
 
   it("parks a persistent upstream auth failure and retries a sibling", async () => {
@@ -1384,6 +1934,67 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     for await (const c of pool.nativePassthroughStream?.(NATIVE) ?? []) chunks.push(c);
     expect(chunks).toEqual(["data: b\n\n"]);
     expect(served).toEqual(["b"]);
+  });
+
+  it("cools a Codex model-scoped 429 on native streaming without parking sibling models", async () => {
+    const served: string[] = [];
+    let nowMs = 1_000;
+    let scopedFailures = 1;
+    const scoped429 = new UpstreamError(
+      "upstream_error",
+      "usage limit",
+      { headers: { "x-codex-active-limit": "codex_luna" } },
+      429,
+    );
+    const mk = (account: string, priority: number): OAuthPoolMember => ({
+      account,
+      priority,
+      schedulable: true,
+      client: {
+        async chatCompletion(_req: ChatCompletionRequest) {
+          return { served_by: account };
+        },
+        async *chatCompletionStream(_req: ChatCompletionRequest) {
+          yield `data: ${account}\n\n`;
+        },
+        nativePassthroughStream(body: Record<string, unknown>): AsyncIterable<string> {
+          return (async function* () {
+            const model = String(body.model ?? "");
+            if (account === "a" && model === "gpt-5.6-luna" && scopedFailures-- > 0) {
+              throw scoped429;
+            }
+            served.push(`${account}:${model}`);
+            yield `data: ${account}\n\n`;
+          })();
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [mk("a", 10), mk("b", 50)],
+      now: () => nowMs,
+      accountRateLimitCooldownMs: 250,
+      resolveRateLimitScope: ({ model, error }) =>
+        error === scoped429
+          ? { scope: "model", model: model ?? "", limitId: "codex_luna" }
+          : { scope: "account" },
+    });
+    const drain = async (model: string): Promise<void> => {
+      const stream = pool.nativePassthroughStream?.({ model, stream: true, input: "hi" });
+      for await (const _chunk of stream ?? []) {
+        // Drain the stream so pre-first-chunk retry and cooldown selection execute.
+      }
+    };
+
+    await drain("gpt-5.6-luna");
+    await drain("gpt-5.6-luna");
+    await drain("gpt-5.6-terra");
+
+    expect(pool.getUsageLimit("a")).toBeNull();
+    expect(served).toEqual(["b:gpt-5.6-luna", "b:gpt-5.6-luna", "a:gpt-5.6-terra"]);
+
+    nowMs = 1_251;
+    await drain("gpt-5.6-luna");
+    expect(served.at(-1)).toBe("a:gpt-5.6-luna");
   });
 
   it("treats a native stream queue timeout as sibling capacity failover", async () => {

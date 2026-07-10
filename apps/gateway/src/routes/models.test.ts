@@ -1,4 +1,10 @@
-import { type ApiKeyRecord, hashKey, parseLanesConfig } from "@helm/core";
+import {
+  type ApiKeyRecord,
+  type CodexModelInfo,
+  hashKey,
+  type OpenAICodexModelsResult,
+  parseLanesConfig,
+} from "@helm/core";
 import type { CatalogEntry, ModelsList } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
@@ -69,13 +75,22 @@ function buildApp(
   rec: ApiKeyRecord | null,
   oauthAliases?: () => Iterable<string>,
   lanesThunk: () => typeof lanes = () => lanes,
+  codexModels?: () => OpenAICodexModelsResult | null | Promise<OpenAICodexModelsResult | null>,
+  onCodexModelsListed?: (keyId: string, clientVersion: string, etag: string) => void,
 ) {
   const getByHash = vi.fn().mockResolvedValue(rec);
   const app = createApp({ logger: { log: () => {} } });
   const auth = authMiddleware({ keyStore: { getByHash }, log: () => {} });
   app.use("/v1/models", auth);
   app.use("/v1/models/*", auth);
-  registerModelsRoute(app, { lanes: lanesThunk, catalog, providerAliases, oauthAliases });
+  registerModelsRoute(app, {
+    lanes: lanesThunk,
+    catalog,
+    providerAliases,
+    oauthAliases,
+    codexModels,
+    onCodexModelsListed,
+  });
   return app;
 }
 
@@ -148,6 +163,163 @@ describe("GET /v1/models", () => {
     });
     const body = (await res.json()) as ModelsList;
     expect(body.data.map((m) => m.id)).toEqual(["economy", "balanced", "auto"]);
+  });
+
+  it("returns the Codex ModelInfo envelope and ETag when client_version is present", async () => {
+    const codexModel = {
+      slug: "gpt-5.6-sol",
+      display_name: "GPT-5.6 Sol",
+      priority: 1,
+      use_responses_lite: true,
+    } as CodexModelInfo;
+    const codexModels = vi.fn(
+      async (): Promise<OpenAICodexModelsResult> => ({
+        models: [codexModel],
+        etag: '"helm-codex-test"',
+        reasoningIncluded: true,
+      }),
+    );
+    const onCodexModelsListed = vi.fn();
+    const app = buildApp(
+      record({ allow_custom_model: true }),
+      () => ["openai-codex/gpt-5.6-sol"],
+      () => lanes,
+      codexModels,
+      onCodexModelsListed,
+    );
+
+    const res = await app.request("/v1/models?client_version=0.145.0", { headers: AUTH });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("etag")).toBe('"helm-codex-test"');
+    expect(res.headers.get("x-reasoning-included")).toBe("true");
+    expect(await res.json()).toEqual({ models: [codexModel] });
+    expect(codexModels).toHaveBeenCalledWith({
+      clientVersion: "0.145.0",
+      allowCustomModel: true,
+      allowedLanes: null,
+      blockedModels: null,
+    });
+    expect(onCodexModelsListed).toHaveBeenCalledWith("k1", "0.145.0", '"helm-codex-test"');
+  });
+
+  it("omits x-reasoning-included unless native discovery explicitly enables it", async () => {
+    const app = buildApp(
+      record({ allow_custom_model: true }),
+      undefined,
+      () => lanes,
+      () => ({
+        models: [{ slug: "gpt-5.6-sol" } as CodexModelInfo],
+        reasoningIncluded: false,
+      }),
+    );
+
+    const res = await app.request("/v1/models?client_version=0.145.0", { headers: AUTH });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-reasoning-included")).toBeNull();
+  });
+
+  it("normalizes prerelease client_version before discovery and ETag tracking", async () => {
+    const codexModels = vi.fn(
+      async (): Promise<OpenAICodexModelsResult> => ({
+        models: [],
+        etag: '"helm-codex-prerelease"',
+      }),
+    );
+    const onCodexModelsListed = vi.fn();
+    const app = buildApp(
+      record({ allow_custom_model: true }),
+      () => [],
+      () => lanes,
+      codexModels,
+      onCodexModelsListed,
+    );
+
+    const res = await app.request("/v1/models?client_version=0.145.0-alpha.4", {
+      headers: AUTH,
+    });
+
+    expect(res.status).toBe(200);
+    expect(codexModels).toHaveBeenCalledWith(expect.objectContaining({ clientVersion: "0.145.0" }));
+    expect(onCodexModelsListed).toHaveBeenCalledWith("k1", "0.145.0", '"helm-codex-prerelease"');
+  });
+
+  it("rejects an invalid client_version before model discovery", async () => {
+    const codexModels = vi.fn();
+    const app = buildApp(
+      record({ allow_custom_model: true }),
+      () => [],
+      () => lanes,
+      codexModels,
+    );
+
+    const res = await app.request("/v1/models?client_version=latest", { headers: AUTH });
+
+    expect(res.status).toBe(400);
+    expect(codexModels).not.toHaveBeenCalled();
+  });
+
+  it("passes key lane/model restrictions into native Codex discovery", async () => {
+    const codexModels = vi.fn(
+      (): OpenAICodexModelsResult => ({
+        models: [],
+      }),
+    );
+    const app = buildApp(
+      record({
+        allow_custom_model: true,
+        allowed_lanes: ["economy"],
+        blocked_models: ["openai-codex/gpt-5.6-sol"],
+      }),
+      () => ["openai-codex/gpt-5.6-sol"],
+      () => lanes,
+      codexModels,
+    );
+
+    const res = await app.request("/v1/models?client_version=0.145.0", { headers: AUTH });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ models: [] });
+    expect(codexModels).toHaveBeenCalledWith({
+      clientVersion: "0.145.0",
+      allowCustomModel: true,
+      allowedLanes: ["economy"],
+      blockedModels: ["openai-codex/gpt-5.6-sol"],
+    });
+  });
+
+  it("keeps the native Codex envelope when no model is available to the key", async () => {
+    const app = buildApp(
+      record(),
+      undefined,
+      () => lanes,
+      () => null,
+    );
+
+    const res = await app.request("/v1/models?client_version=0.145.0", { headers: AUTH });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("etag")).toBeNull();
+    expect(await res.json()).toEqual({ models: [] });
+  });
+
+  it("keeps the OpenAI model-list envelope when client_version is absent", async () => {
+    const codexModels = vi.fn(
+      (): OpenAICodexModelsResult => ({
+        models: [{ slug: "gpt-5.6-sol" } as CodexModelInfo],
+        etag: '"helm-codex-test"',
+      }),
+    );
+    const res = await buildApp(
+      record({ allow_custom_model: true }),
+      undefined,
+      () => lanes,
+      codexModels,
+    ).request("/v1/models", { headers: AUTH });
+
+    expect(((await res.json()) as ModelsList).object).toBe("list");
+    expect(codexModels).not.toHaveBeenCalled();
   });
 
   it("retrieve: GET /v1/models/:id returns one model", async () => {

@@ -22,10 +22,14 @@ export const ACTIVE_LIMIT_RECOVERY_THRESHOLD = 95;
 export const DEFAULT_429_COOLDOWN_MS = 60_000;
 
 // Anthropic scoped weekly model windows are named `7d-<model>` (for example
-// `7d-fable` / `7d-sonnet`). They mean "this model is capped", not "the whole
-// account is capped"; only account-wide windows may park the account globally.
+// `7d-fable` / `7d-sonnet`). Codex additional rate limits carry a non-default
+// `limitId` (and use keys such as `codex_spark-primary`). Both mean "this model is
+// capped", not "the whole account is capped"; only account-wide windows may park
+// the account globally.
 export function isAccountWideQuotaWindow(window: OAuthQuotaWindow): boolean {
-  return !window.key.startsWith("7d-");
+  if (window.key.startsWith("7d-")) return false;
+  if (window.limitId !== undefined && window.limitId !== "codex") return false;
+  return !/^codex_.+-(?:primary|secondary)$/.test(window.key);
 }
 
 // The cooldown end implied by a set of rate-limit windows, or null when none is

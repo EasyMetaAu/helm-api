@@ -16,8 +16,8 @@ import type { NativeRequest, NativeResponse, Transformer } from "./transformer.j
 // THIRD client presentation surface, structurally distinct from Chat Completions:
 // instead of `messages[]` (each row = role + content), the conversation is
 // flattened into a top-level `input[]` ITEM stream. user/assistant text,
-// `function_call`, `function_call_output`, and `reasoning` items all sit at the
-// same level — they are NOT nested inside a message. This transformer:
+// `function_call`, `custom_tool_call`, their output items, and `reasoning` items
+// all sit at the same level — they are NOT nested inside a message. This transformer:
 //   • inbound  (transformRequestOut): folds the item stream back into the
 //     OpenAI-Chat-shaped IR (message items -> messages[]; function_call ->
 //     assistant.tool_calls[]; function_call_output -> role:"tool"; reasoning ->
@@ -129,6 +129,28 @@ const ResponsesFunctionCallOutputItemSchema = z
   })
   .passthrough();
 
+const ResponsesCustomToolCallItemSchema = z
+  .object({
+    type: z.literal("custom_tool_call"),
+    id: z.string().optional(),
+    status: z.string().optional(),
+    call_id: z.string(),
+    name: z.string(),
+    namespace: z.string().optional(),
+    input: z.string(),
+  })
+  .passthrough();
+
+const ResponsesCustomToolCallOutputItemSchema = z
+  .object({
+    type: z.literal("custom_tool_call_output"),
+    id: z.string().optional(),
+    call_id: z.string(),
+    name: z.string().optional(),
+    output: z.union([z.string(), z.array(ResponsesContentPartSchema)]).optional(),
+  })
+  .passthrough();
+
 const ResponsesReasoningSummarySchema = z
   .object({ type: z.literal("summary_text"), text: z.string() })
   .passthrough();
@@ -152,6 +174,8 @@ const ResponsesInputItemSchema = z.union([
   ResponsesMessageItemSchema,
   ResponsesFunctionCallItemSchema,
   ResponsesFunctionCallOutputItemSchema,
+  ResponsesCustomToolCallItemSchema,
+  ResponsesCustomToolCallOutputItemSchema,
   ResponsesReasoningItemSchema,
   ResponsesUnknownItemSchema,
 ]);
@@ -198,6 +222,7 @@ const ResponsesRequestSchema = z
     service_tier: z.string().optional(),
     prompt_cache_key: z.string().optional(),
     prompt_cache_retention: z.string().optional(),
+    prompt_cache_options: z.unknown().optional(),
     web_search_options: z.unknown().optional(),
     context_management: z.unknown().optional(),
     include: z.array(z.string()).optional(),
@@ -375,10 +400,43 @@ function foldMessageContent(
   return content.map(foldContentPart);
 }
 
+type ResponsesToolCallItem =
+  | z.infer<typeof ResponsesFunctionCallItemSchema>
+  | z.infer<typeof ResponsesCustomToolCallItemSchema>;
+
+type ResponsesToolCallOutputItem =
+  | z.infer<typeof ResponsesFunctionCallOutputItemSchema>
+  | z.infer<typeof ResponsesCustomToolCallOutputItemSchema>;
+
+function toolCallItemToIR(item: ResponsesToolCallItem, fallbackIndex: number): IRToolCall {
+  return {
+    id: item.call_id ?? item.id ?? `call_${fallbackIndex}_${item.name}`,
+    type: "function",
+    function: {
+      name: item.name,
+      arguments: item.type === "custom_tool_call" ? item.input : item.arguments,
+    },
+  };
+}
+
+function foldToolCallOutput(item: ResponsesToolCallOutputItem): IRMessage {
+  const content: IRMessage["content"] =
+    item.output === undefined
+      ? ""
+      : typeof item.output === "string"
+        ? item.output
+        : item.output.map(foldContentPart);
+  return {
+    role: "tool",
+    content,
+    ...(item.call_id !== undefined ? { tool_call_id: item.call_id } : {}),
+  };
+}
+
 // —— Inbound: native Responses request -> IR. Folds the flat item stream into
-// messages[]: text items stay messages; function_call lifts into assistant
-// tool_calls; function_call_output becomes role:"tool"; reasoning collapses into
-// the IR thinking ext (status stripped) with the raw item preserved. ——————————————
+// messages[]: text items stay messages; function/custom calls lift into assistant
+// tool_calls; their output items become role:"tool"; reasoning collapses into the
+// IR thinking ext (status stripped) with the raw item preserved. ————————————————
 function toIRRequest(req: NativeRequest): IRRequest {
   // fail-closed: a structurally invalid request never enters the pipeline.
   const parsed = ResponsesRequestSchema.parse(req);
@@ -407,16 +465,9 @@ function toIRRequest(req: NativeRequest): IRRequest {
           messages.push({ role: m.role, content: foldMessageContent(m.content) });
           break;
         }
-        case "function_call": {
-          const fc = item as z.infer<typeof ResponsesFunctionCallItemSchema>;
-          // call_id is the correlation key; fall back to the item id, then a
-          // synthesized id so a tool call is NEVER silently dropped.
-          const id = fc.call_id ?? fc.id ?? `call_${messages.length}_${fc.name}`;
-          const call: IRToolCall = {
-            id,
-            type: "function",
-            function: { name: fc.name, arguments: fc.arguments },
-          };
+        case "function_call":
+        case "custom_tool_call": {
+          const call = toolCallItemToIR(item as ResponsesToolCallItem, messages.length);
           // Attach to a trailing assistant turn if it has no content, else open one.
           const prev = messages[messages.length - 1];
           if (prev?.role === "assistant" && prev.tool_calls !== undefined) {
@@ -426,20 +477,9 @@ function toIRRequest(req: NativeRequest): IRRequest {
           }
           break;
         }
-        case "function_call_output": {
-          const fco = item as z.infer<typeof ResponsesFunctionCallOutputItemSchema>;
-          const content: IRMessage["content"] =
-            fco.output === undefined
-              ? ""
-              : typeof fco.output === "string"
-                ? fco.output
-                : fco.output.map(foldContentPart);
-          messages.push({
-            role: "tool",
-            content,
-            // call_id correlates back to the function_call; tolerate omission.
-            ...(fco.call_id !== undefined ? { tool_call_id: fco.call_id } : {}),
-          });
+        case "function_call_output":
+        case "custom_tool_call_output": {
+          messages.push(foldToolCallOutput(item as ResponsesToolCallOutputItem));
           break;
         }
         case "reasoning": {
@@ -464,6 +504,23 @@ function toIRRequest(req: NativeRequest): IRRequest {
   const providerRaw: Record<string, unknown> = {};
   if (rawReasoning.length > 0) providerRaw.reasoning = rawReasoning;
   if (unknownItems.length > 0) providerRaw.unknown_items = unknownItems;
+  if (
+    Array.isArray(parsed.input) &&
+    (unknownItems.length > 0 ||
+      parsed.input.some((item) => {
+        if (item.type === "custom_tool_call" || item.type === "custom_tool_call_output")
+          return true;
+        return (
+          (item.type === "function_call" || item.type === "function_call_output") &&
+          isRecord(item.caller)
+        );
+      }))
+  ) {
+    // PTC continuation requires the exact top-level sequence and caller linkage.
+    // Native passthrough consumes the original carrier; this snapshot protects the
+    // Responses->IR->Responses fallback path without inventing lossy IR fields.
+    providerRaw.responses_input_items = parsed.input;
+  }
   // Responses-only request knobs with no IR home are preserved verbatim.
   if (parsed.store !== undefined) providerRaw.store = parsed.store;
   if (parsed.previous_response_id !== undefined)
@@ -474,6 +531,8 @@ function toIRRequest(req: NativeRequest): IRRequest {
     providerRaw.context_management = parsed.context_management;
   if (parsed.include !== undefined) providerRaw.include = parsed.include;
   if (parsed.background !== undefined) providerRaw.background = parsed.background;
+  if (parsed.prompt_cache_options !== undefined)
+    providerRaw.prompt_cache_options = parsed.prompt_cache_options;
   if (normalizedTools.rawTools !== undefined)
     providerRaw.responses_tools = normalizedTools.rawTools;
   if (normalizedTools.nativeTools !== undefined)
@@ -601,7 +660,7 @@ function toResponsesRequest(ir: IRRequest): NativeRequest {
   return {
     model: parsed.model,
     ...(instructions !== undefined ? { instructions } : {}),
-    input,
+    input: Array.isArray(raw?.responses_input_items) ? raw.responses_input_items : input,
     ...(text !== undefined ? { text } : {}),
     ...(Array.isArray(raw?.responses_tools)
       ? { tools: raw.responses_tools }
@@ -630,6 +689,9 @@ function toResponsesRequest(ir: IRRequest): NativeRequest {
     ...(parsed.prompt_cache_key !== undefined ? { prompt_cache_key: parsed.prompt_cache_key } : {}),
     ...(parsed.prompt_cache_retention !== undefined
       ? { prompt_cache_retention: parsed.prompt_cache_retention }
+      : {}),
+    ...(raw?.prompt_cache_options !== undefined
+      ? { prompt_cache_options: raw.prompt_cache_options }
       : {}),
     ...(parsed.web_search_options !== undefined
       ? { web_search_options: parsed.web_search_options }
@@ -922,13 +984,9 @@ function toIRResponse(res: NativeResponse): IRResponse {
         }
         break;
       }
-      case "function_call": {
-        const fc = item as z.infer<typeof ResponsesFunctionCallItemSchema>;
-        toolCalls.push({
-          id: fc.call_id ?? fc.id ?? `call_${toolCalls.length}_${fc.name}`,
-          type: "function",
-          function: { name: fc.name, arguments: fc.arguments },
-        });
+      case "function_call":
+      case "custom_tool_call": {
+        toolCalls.push(toolCallItemToIR(item as ResponsesToolCallItem, toolCalls.length));
         break;
       }
       case "reasoning": {

@@ -625,6 +625,73 @@ describe("responsesTransformer — request input items -> IR (folding)", () => {
     expect(toolMsg?.content).toBe("72F sunny");
   });
 
+  it("folds Codex custom_tool_call items and accepts an output-only continuation", async () => {
+    const call = await responsesTransformer.transformRequestOut({
+      model: "gpt-5.6-sol",
+      input: [
+        {
+          type: "custom_tool_call",
+          call_id: "call_exec",
+          name: "exec",
+          input: "await tools.exec_command({ cmd: 'printf HELM_TOOL_OK' })",
+        },
+      ],
+    });
+    expect(call.messages).toEqual([
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_exec",
+            type: "function",
+            function: {
+              name: "exec",
+              arguments: "await tools.exec_command({ cmd: 'printf HELM_TOOL_OK' })",
+            },
+          },
+        ],
+      },
+    ]);
+
+    const output = await responsesTransformer.transformRequestOut({
+      model: "gpt-5.6-sol",
+      input: [
+        {
+          type: "custom_tool_call_output",
+          call_id: "call_exec",
+          output: "HELM_TOOL_OK\n",
+        },
+      ],
+      previous_response_id: "resp-1",
+    });
+    expect(output.messages).toEqual([
+      {
+        role: "tool",
+        content: "HELM_TOOL_OK\n",
+        tool_call_id: "call_exec",
+      },
+    ]);
+    expect(output.provider_raw?.responses_input_items).toEqual([
+      {
+        type: "custom_tool_call_output",
+        call_id: "call_exec",
+        output: "HELM_TOOL_OK\n",
+      },
+    ]);
+
+    const replay = (await responsesTransformer.transformRequestIn(output)) as {
+      input: Array<Record<string, unknown>>;
+    };
+    expect(replay.input).toEqual([
+      {
+        type: "custom_tool_call_output",
+        call_id: "call_exec",
+        output: "HELM_TOOL_OK\n",
+      },
+    ]);
+  });
+
   it("round-trips multipart function_call_output output", async () => {
     const native = {
       model: "gpt-4o",
@@ -958,6 +1025,73 @@ describe("responsesTransformer — unknown item type (fail-open)", () => {
     expect(unknown?.[0]?.type).toBe("some_future_item");
     // the valid user message still survives
     expect(ir.messages.some((m) => m.role === "user")).toBe(true);
+  });
+
+  it("round-trips the complete PTC input sequence and persisted request controls", async () => {
+    const input = [
+      {
+        type: "program",
+        id: "prog_1",
+        call_id: "call_prog_1",
+        code: "const result = await tools.lookup({ id: 1 }); text(JSON.stringify(result));",
+        fingerprint: "opaque",
+      },
+      {
+        type: "function_call",
+        id: "fc_1",
+        call_id: "call_lookup_1",
+        name: "lookup",
+        arguments: '{"id":1}',
+        caller: { type: "program", caller_id: "call_prog_1" },
+      },
+      {
+        type: "function_call_output",
+        call_id: "call_lookup_1",
+        output: '{"ok":true}',
+        caller: { type: "program", caller_id: "call_prog_1" },
+      },
+      {
+        type: "program_output",
+        id: "prog_out_1",
+        call_id: "call_prog_1",
+        result: '{"ok":true}',
+        status: "completed",
+      },
+    ];
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-5.6-sol",
+      store: false,
+      input,
+      reasoning: {
+        effort: "high",
+        mode: "pro",
+        context: "all_turns",
+      },
+      prompt_cache_options: { mode: "explicit", ttl: "24h" },
+    });
+
+    expect(ir.provider_raw?.unknown_items).toEqual([input[0], input[3]]);
+    expect(ir.provider_raw?.responses_input_items).toEqual(input);
+    expect(ir.provider_raw?.prompt_cache_options).toEqual({
+      mode: "explicit",
+      ttl: "24h",
+    });
+
+    const native = (await responsesTransformer.transformRequestIn?.(ir)) as {
+      input?: unknown;
+      reasoning?: unknown;
+      prompt_cache_options?: unknown;
+    };
+    expect(native.input).toEqual(input);
+    expect(native.reasoning).toEqual({
+      effort: "high",
+      mode: "pro",
+      context: "all_turns",
+    });
+    expect(native.prompt_cache_options).toEqual({
+      mode: "explicit",
+      ttl: "24h",
+    });
   });
 });
 
@@ -1582,6 +1716,28 @@ describe("responsesTransformer — toIRResponse various branches (lines 808-1003
     expect(call?.id).toBe("call_abc");
     expect(call?.function.name).toBe("get_weather");
     expect(call?.function.arguments).toBe('{"city":"LA"}');
+  });
+
+  it("maps a custom_tool_call response item to a tool call in IR", async () => {
+    const ir = await responsesTransformer.transformResponseIn({
+      id: "r_custom",
+      model: "gpt-5.6-sol",
+      status: "completed",
+      output: [
+        {
+          type: "custom_tool_call",
+          call_id: "call_exec",
+          name: "exec",
+          input: "await tools.exec_command({ cmd: 'printf HELM_TOOL_OK' })",
+        },
+      ],
+    });
+    const call = ir.choices[0]?.message.tool_calls?.[0];
+    expect(call?.id).toBe("call_exec");
+    expect(call?.function.name).toBe("exec");
+    expect(call?.function.arguments).toBe(
+      "await tools.exec_command({ cmd: 'printf HELM_TOOL_OK' })",
+    );
   });
 
   it("synthesizes a call id for function_call when both call_id and id absent", async () => {

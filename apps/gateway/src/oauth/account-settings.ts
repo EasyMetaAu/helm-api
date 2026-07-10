@@ -37,6 +37,10 @@ const mutationQueues = new WeakMap<ConfigStore, Promise<void>>();
 // priority unset = the scheduler default; schedulable unset = true; proxy unset =
 // direct connection). Later stages (proxy / priority pool) read the same blob.
 export interface AccountSettings {
+  // Codex defaults to auto so newly entitled models appear without an operator
+  // edit. Manual preserves an explicit enabledModels allowlist. Legacy rows with
+  // an enabledModels list remain manual so an upgrade cannot widen operator access.
+  modelsMode?: "auto" | "manual";
   // Subset of discovered models the operator exposes to Lanes. Unset = expose all.
   enabledModels?: string[];
   // Lower = preferred; round-robin within an equal priority. Scheduler default 50.
@@ -71,6 +75,18 @@ export interface AccountSettings {
 // The whole map: internal composite key -> settings. Exported for the callers that
 // thread it (server synthesis, admin seam).
 export type AccountSettingsMap = Record<string, AccountSettings>;
+
+export type AccountModelsMode = "auto" | "manual";
+
+export function resolveAccountModelsMode(
+  _providerId: string,
+  settings: Pick<AccountSettings, "modelsMode" | "enabledModels">,
+): AccountModelsMode {
+  if (settings.modelsMode === "auto" || settings.modelsMode === "manual") {
+    return settings.modelsMode;
+  }
+  return settings.enabledModels === undefined ? "auto" : "manual";
+}
 
 export interface GlobalOAuthSettings {
   selectionStrategy?: OAuthSelectionStrategy;

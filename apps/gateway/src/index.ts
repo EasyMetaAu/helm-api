@@ -5,6 +5,7 @@
 import { serve } from "@hono/node-server";
 import { createApp } from "./app.js";
 import { createJsonLogger } from "./logging.js";
+import { installResponsesWebSocketBridge } from "./responses-websocket.js";
 import { configureEgress } from "./runtime/egress.js";
 import { type ClosableServer, closeServer } from "./runtime/shutdown.js";
 import { buildServer } from "./server.js";
@@ -21,6 +22,13 @@ export {
   type RateLimitMiddlewareDeps,
   rateLimitMiddleware,
 } from "./middleware/rate-limit.js";
+export {
+  installResponsesWebSocketBridge,
+  isResponsesWebSocketPath,
+  type ResponsesWebSocketBridge,
+  type ResponsesWebSocketBridgeOptions,
+  type ResponsesWebSocketUpgradeServer,
+} from "./responses-websocket.js";
 export { type ChatRouteDeps, registerChatRoutes } from "./routes/chat.js";
 export { type HealthDeps, registerHealthRoutes } from "./routes/health.js";
 export {
@@ -47,6 +55,12 @@ async function main(): Promise<void> {
     configureEgress(process.env);
     const handle = await buildServer({ logger });
     const server = serve({ fetch: handle.app.fetch, port: handle.port, hostname: handle.host });
+    const responsesWebSocket = installResponsesWebSocketBridge({
+      server,
+      fetch: (request) => handle.app.fetch(request),
+      closeSession: handle.closeResponsesWebSocketSession,
+      sessionProof: handle.responsesWebSocketSessionProof,
+    });
     logger.log("info", "gateway.listening", { host: handle.host, port: handle.port });
 
     // Graceful shutdown: FIRST stop accepting connections and wait for in-flight
@@ -63,6 +77,7 @@ async function main(): Promise<void> {
       shuttingDown = true;
       logger.log("info", "gateway.shutdown", { signal });
       try {
+        await responsesWebSocket.close();
         await closeServer(server as unknown as ClosableServer, drainMs);
         await handle.dispose?.();
       } catch (err) {

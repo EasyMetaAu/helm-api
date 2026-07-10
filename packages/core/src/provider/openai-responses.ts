@@ -6,9 +6,8 @@
 //
 // Why a native executor (not the OpenAI Chat client): the Codex subscription
 // endpoint speaks the OpenAI *Responses* protocol (a different request + SSE shape
-// from Chat Completions), is stream-only, and requires the ChatGPT identity headers
-// (`chatgpt-account-id`, `originator`, `OpenAI-Beta: responses=experimental`). So
-// this executor carries the Chat-IR ⇄ Responses translation both ways.
+// from Chat Completions), is stream-only, and requires ChatGPT identity headers.
+// This executor carries the Chat-IR ⇄ Responses translation both ways.
 //
 // The `chatgpt-account-id` is NOT plumbed separately: the OAuth access token is a
 // JWT carrying the `chatgpt_account_id` claim, so we decode it from the Bearer
@@ -17,13 +16,19 @@
 // ⚠️ ToS: reverse-engineered first-party Codex client; the operator opts in (issue
 // #38 README disclaimer). Request/SSE shapes + identity ported from openclaw (MIT).
 
+import { arch, platform, release } from "node:os";
 import {
   appendMutationList,
   cloneCarrierWithBody,
   isNativePassthroughCarrier,
   type NativePassthroughInput,
 } from "@helm/shared";
-import { prepareNativePassthroughRequest } from "./native-passthrough.js";
+import {
+  type PreparedNativePassthroughRequest,
+  prepareNativePassthroughRequest,
+} from "./native-passthrough.js";
+import type { CodexModelInfo } from "./oauth/codex-model-info.js";
+import { resolveOpenAICodexModelAlias } from "./oauth/models.js";
 import {
   type ChatCompletionRequest,
   type ChatCompletionResponse,
@@ -31,7 +36,7 @@ import {
   type ProviderConfig,
   UpstreamError,
 } from "./openai.js";
-import { withConnectionRetry } from "./retry.js";
+import { isTransientConnectionError, withConnectionRetry } from "./retry.js";
 import { readChunkWithIdle, StreamStalledError } from "./stream-idle.js";
 
 export interface CodexResponsesClientConfig {
@@ -41,10 +46,13 @@ export interface CodexResponsesClientConfig {
   currentSecrets?: () => string[]; // live token set for redaction
   timeoutMs?: number;
   // Stable per-account session id (anti-ban / cache coherence). When set it rides on
-  // `session_id` + `x-client-request-id` headers and `prompt_cache_key` — the official
-  // Codex client keys its prompt cache on a stable session, so reuse one per account
-  // rather than minting a new one per request.
+  // the canonical `session-id` header and `prompt_cache_key` — the official Codex
+  // client keys its prompt cache on a stable session, so reuse one per account rather
+  // than minting a new one per request.
   sessionId?: string;
+  // Optional request-scoped Codex thread identity. When present it rides on `thread-id`
+  // and is also the fallback for `x-client-request-id`, matching Codex CLI.
+  threadId?: string;
   // Overrides the default Codex-client User-Agent (openclaw proves a custom UA is
   // accepted by the backend; the real first-party value is not required).
   userAgent?: string;
@@ -59,11 +67,28 @@ export interface CodexResponsesClientConfig {
   // caller wraps its own fail-open); a throw here is swallowed so it never breaks a
   // served request.
   onResponseMeta?: (headers: Headers) => void;
+  // Account-scoped live model metadata. The caller owns refresh/cache policy; this
+  // client only consumes the resolved request-contract capabilities.
+  resolveModelInfo?: (
+    model: string,
+  ) => CodexModelInfo | undefined | Promise<CodexModelInfo | undefined>;
+  // Codex returns X-Models-Etag on inference responses when the account catalog has
+  // changed. The caller can force-refresh its model cache from this signal.
+  onModelsEtag?: (etag: string) => void;
+  // Persisted ChatGPT identity from the id_token/account manager. This is
+  // authoritative when refreshed access tokens omit workspace/FedRAMP claims.
+  getAccountIdentity?: () => { accountId?: string; isFedramp?: boolean };
+  // Backward-compatible static FedRAMP identity.
+  isFedramp?: boolean;
   // Transient-connection retry at the fetch boundary (provider/retry.ts). Optional —
   // omitted falls back to defaults (2 retries, [200,500] ms). Pre-first-byte, so the
   // retry is idempotent. See ProviderConfig for the rationale.
   connectRetries?: number;
   connectRetryBackoffMs?: readonly number[];
+  // Optional native Responses-over-WebSocket transport. The gateway injects this
+  // for ChatGPT subscription accounts; callers without a named ingress session
+  // continue using the existing HTTP transport.
+  responsesWebSocketConnector?: CodexResponsesWebSocketConnector;
 }
 
 export interface CodexResponsesClientDeps {
@@ -76,16 +101,57 @@ export interface GenericOpenAIResponsesClientDeps {
   fetch?: typeof globalThis.fetch;
 }
 
+export const CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER = "x-helm-codex-responses-websocket-session";
+
+export interface CodexResponsesWebSocketConnectInput {
+  url: string;
+  headers: Record<string, string>;
+  signal?: AbortSignal;
+}
+
+export interface CodexResponsesWebSocketConnection {
+  responseHeaders: Headers;
+  send(text: string): Promise<void>;
+  receive(): Promise<string | null>;
+  close(): Promise<void>;
+}
+
+export type CodexResponsesWebSocketConnector = (
+  input: CodexResponsesWebSocketConnectInput,
+) => Promise<CodexResponsesWebSocketConnection>;
+
+export class CodexResponsesWebSocketConnectError extends Error {
+  readonly status: number | null;
+  readonly headers: Headers;
+  readonly body: string;
+
+  constructor(
+    message: string,
+    options: {
+      status?: number | null;
+      headers?: Headers;
+      body?: string;
+      cause?: unknown;
+    } = {},
+  ) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.name = "CodexResponsesWebSocketConnectError";
+    this.status = options.status ?? null;
+    this.headers = new Headers(options.headers);
+    this.body = options.body ?? "";
+  }
+}
+
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_INSTRUCTIONS = "You are a helpful assistant.";
-const ORIGINATOR = "helm"; // matches the OAuth login `originator` (openai-codex.ts)
-// Codex-client User-Agent. openclaw sends its own `openclaw (...)` UA and the backend
-// accepts it, so a first-party `codex_cli_rs` value is not required — only a UA that
-// presents as a Codex client. Overridable via config.userAgent. (Verified live: the
-// ChatGPT-account model allowlist is gated by the account's Codex ENTITLEMENT, not by
-// originator/UA/body — impersonating codex_cli_rs changed nothing.)
-const DEFAULT_USER_AGENT = "helm-codex/1.0.0";
+const ORIGINATOR = "codex_cli_rs";
+const DEFAULT_CODEX_VERSION = "0.0.0";
 const CODEX_FAST_SERVICE_TIER = "priority";
+const RESPONSES_WEBSOCKET_BETA = "responses_websockets=2026-02-06";
+const RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite";
+const CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata";
+const CODEX_TURN_STATE_HEADER = "x-codex-turn-state";
+const MAX_CODEX_TURN_STATES = 128;
 
 const RESPONSES_REASONING_DELTA_TYPES = new Set([
   "response.reasoning_summary.delta",
@@ -169,29 +235,48 @@ function buildInstructions(messages: Array<Record<string, unknown>>): string {
 
 export type ResponsesInstructionsFix = "none" | "hoisted_from_input" | "defaulted";
 
-// Native-passthrough repair for the ChatGPT-account Codex backend, which MANDATES a
-// non-empty top-level `instructions` (the real Codex CLI always sends its base prompt
-// there). Standard-OpenAI Responses clients (e.g. pi-ai / pi-coding-agent) are spec-
-// compliant the OTHER way: they omit `instructions` and put the system prompt as a
-// leading `developer`/`system` item INSIDE `input`. The public OpenAI API treats the
-// two as equivalent, but the Codex subscription backend rejects the input-only shape
-// with HTTP 400 `{"detail":"Instructions are required"}`.
-//
-// The TRANSLATE path never hits this (buildInstructions injects a value), but the
-// VERBATIM passthrough path forwards the client body as-is. This pure shim repairs the
-// body WITHOUT abandoning passthrough (so prompt_cache_key / reasoning.encrypted_content
-// / SSE byte-relay all survive): it HOISTS the system/developer item content into
-// `instructions` and STRIPS those items from `input` — the SAME system→instructions
-// split buildInstructions/toResponsesInput already perform on the translate path, so the
-// forwarded body matches the real Codex CLI shape (instructions = system prompt, input =
-// conversation only). When `instructions` is already non-empty the body is returned
-// VERBATIM (same reference). When there is no system content to hoist, DEFAULT_INSTRUCTIONS
-// guarantees the backend never sees an empty value. Pure + deterministic (CLAUDE.md
-// principle 4); never mutates the input body.
-export function hoistResponsesInstructions(body: Record<string, unknown>): {
+function hasHeader(
+  headers: Record<string, string | string[]> | undefined,
+  name: string,
+  expected?: string,
+): boolean {
+  if (!headers) return false;
+  const value = Object.entries(headers).find(
+    ([key]) => key.toLowerCase() === name.toLowerCase(),
+  )?.[1];
+  if (value === undefined) return false;
+  const joined = Array.isArray(value) ? value.join(",") : value;
+  return expected === undefined ? true : joined.toLowerCase() === expected.toLowerCase();
+}
+
+function bodyUsesResponsesLite(body: Record<string, unknown>): boolean {
+  if (Array.isArray(body.input)) {
+    const first = body.input[0];
+    if (isRecord(first) && first.type === "additional_tools") return true;
+  }
+  return isRecord(body.reasoning) && body.reasoning.context === "all_turns";
+}
+
+// Legacy native clients need developer/system items hoisted. Responses Lite requires
+// those same items to remain in `input`, so callers must pass the carrier headers or
+// resolved model metadata when available.
+export function hoistResponsesInstructions(
+  body: Record<string, unknown>,
+  opts?: {
+    headers?: Record<string, string | string[]>;
+    modelInfo?: CodexModelInfo;
+  },
+): {
   body: Record<string, unknown>;
   fix: ResponsesInstructionsFix;
 } {
+  if (
+    opts?.modelInfo?.use_responses_lite === true ||
+    hasHeader(opts?.headers, RESPONSES_LITE_HEADER, "true") ||
+    bodyUsesResponsesLite(body)
+  ) {
+    return { body, fix: "none" };
+  }
   // Already carries instructions → forward byte-for-byte (verbatim passthrough).
   if (typeof body.instructions === "string" && body.instructions.trim().length > 0) {
     return { body, fix: "none" };
@@ -266,11 +351,9 @@ function sanitizeStoreFalseInputItems(input: unknown): {
       continue;
     }
     const sanitized = { ...item };
-    for (const key of ["id", "status", "phase"]) {
-      if (key in sanitized) {
-        delete sanitized[key];
-        referencesStripped = true;
-      }
+    if ("id" in sanitized) {
+      delete sanitized.id;
+      referencesStripped = true;
     }
     if (sanitized.type === "reasoning" && !hasUsefulReasoningPayload(sanitized)) {
       emptyReasoningDropped = true;
@@ -370,12 +453,124 @@ function chatToolChoiceToResponses(toolChoice: unknown): unknown {
   return typeof fn.name === "string" ? { type: "function", name: fn.name } : toolChoice;
 }
 
+function responsesToolsFromChat(tools: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(tools)) return [];
+  return (tools as Array<Record<string, unknown>>).flatMap((tool) => {
+    const fn = (tool.function ?? {}) as Record<string, unknown>;
+    if (!fn.name) return [];
+    return [
+      {
+        type: "function",
+        name: fn.name,
+        description: fn.description ?? "",
+        parameters: fn.parameters ?? { type: "object" },
+        strict: false,
+      },
+    ];
+  });
+}
+
+function supportedReasoningEfforts(modelInfo: CodexModelInfo): string[] {
+  return modelInfo.supported_reasoning_levels.flatMap((preset) =>
+    typeof preset.effort === "string" ? [preset.effort] : [],
+  );
+}
+
+function fallbackReasoningEffort(modelInfo: CodexModelInfo, supported: string[]): string | null {
+  return (
+    supported[Math.floor((supported.length - 1) / 2)] ?? modelInfo.default_reasoning_level ?? null
+  );
+}
+
+function reasoningEffortForRequest(effort: string): string {
+  return effort === "ultra" ? "max" : effort;
+}
+
+function buildCodexReasoning(
+  request: Record<string, unknown>,
+  modelInfo: CodexModelInfo | undefined,
+): Record<string, unknown> | undefined {
+  const preserved = isRecord(request.reasoning)
+    ? request.reasoning
+    : isRecord(request.reasoning_config)
+      ? request.reasoning_config
+      : {};
+  const requested =
+    typeof request.reasoning_effort === "string" && request.reasoning_effort.length > 0
+      ? request.reasoning_effort
+      : typeof preserved.effort === "string" && preserved.effort.length > 0
+        ? preserved.effort
+        : undefined;
+  const requestedWire = requested !== undefined ? reasoningEffortForRequest(requested) : undefined;
+  if (modelInfo === undefined) {
+    return requestedWire !== undefined ? { effort: requestedWire } : undefined;
+  }
+  const supported = supportedReasoningEfforts(modelInfo);
+  const effective =
+    requestedWire !== undefined &&
+    (supported.includes(requestedWire) ||
+      (requested !== undefined && supported.includes(requested)))
+      ? requestedWire
+      : fallbackReasoningEffort(modelInfo, supported);
+  const reasoning = {
+    ...preserved,
+    ...(typeof effective === "string" && effective.length > 0
+      ? { effort: reasoningEffortForRequest(effective) }
+      : {}),
+    ...(modelInfo.supports_reasoning_summaries && modelInfo.default_reasoning_summary !== "none"
+      ? { summary: modelInfo.default_reasoning_summary }
+      : {}),
+    ...(modelInfo.use_responses_lite ? { context: "all_turns" } : {}),
+  };
+  return Object.keys(reasoning).length > 0 ? reasoning : undefined;
+}
+
+function modelSupportsServiceTier(modelInfo: CodexModelInfo, tier: string): boolean {
+  return modelInfo.service_tiers.some((candidate) => candidate.id === tier);
+}
+
 export function openaiToResponsesRequest(
   req: ChatCompletionRequest,
-  opts?: { sessionId?: string },
+  opts?: { sessionId?: string; modelInfo?: CodexModelInfo },
 ): Record<string, unknown> {
   const r = req as Record<string, unknown>;
   const messages = Array.isArray(r.messages) ? (r.messages as Array<Record<string, unknown>>) : [];
+  const modelInfo = opts?.modelInfo;
+  const useResponsesLite = modelInfo?.use_responses_lite === true;
+  const tools = Array.isArray(r.responses_tools)
+    ? (r.responses_tools as Array<Record<string, unknown>>)
+    : responsesToolsFromChat(r.tools);
+  const instructions = buildInstructions(messages);
+  const input = Array.isArray(r.responses_input_items)
+    ? [...(r.responses_input_items as Array<Record<string, unknown>>)]
+    : toResponsesInput(messages);
+  if (useResponsesLite) {
+    const first = input[0];
+    if (!isRecord(first) || first.type !== "additional_tools") {
+      input.unshift({
+        type: "additional_tools",
+        role: "developer",
+        tools,
+      });
+    }
+    const developer = input[1];
+    if (instructions.length > 0 && (!isRecord(developer) || developer.role !== "developer")) {
+      input.splice(1, 0, {
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: instructions }],
+      });
+    }
+  }
+  const reasoning = buildCodexReasoning(r, modelInfo);
+  const requestedVerbosity =
+    typeof r.verbosity === "string" && r.verbosity.length > 0 ? r.verbosity : undefined;
+  const verbosity =
+    modelInfo === undefined
+      ? "low"
+      : modelInfo.support_verbosity
+        ? (requestedVerbosity ?? modelInfo.default_verbosity ?? undefined)
+        : undefined;
   const body: Record<string, unknown> = {
     model: r.model,
     // Codex backend constraints (ported from openclaw's known-good body): store MUST
@@ -387,13 +582,22 @@ export function openaiToResponsesRequest(
     // ChatGPT-account backend rejects them.
     store: false,
     stream: true,
-    instructions: buildInstructions(messages),
-    input: toResponsesInput(messages),
-    text: { verbosity: "low" },
-    include: ["reasoning.encrypted_content"],
+    input,
+    ...(verbosity !== undefined ? { text: { verbosity } } : {}),
+    include:
+      modelInfo === undefined
+        ? ["reasoning.encrypted_content"]
+        : reasoning !== undefined
+          ? ["reasoning.encrypted_content"]
+          : [],
     tool_choice: "auto",
-    parallel_tool_calls: true,
+    parallel_tool_calls: useResponsesLite
+      ? false
+      : modelInfo === undefined
+        ? true
+        : modelInfo.supports_parallel_tool_calls && r.parallel_tool_calls !== false,
   };
+  if (!useResponsesLite && instructions.length > 0) body.instructions = instructions;
   // Stable prompt cache key. Client-supplied keys preserve OpenAI/Codex cache
   // affinity; otherwise fall back to the per-account subscription session id.
   if (typeof r.prompt_cache_key === "string" && r.prompt_cache_key.length > 0)
@@ -401,29 +605,18 @@ export function openaiToResponsesRequest(
   else if (opts?.sessionId) body.prompt_cache_key = opts.sessionId;
   if (typeof r.prompt_cache_retention === "string")
     body.prompt_cache_retention = r.prompt_cache_retention;
-  // Forward the client's reasoning effort to the Codex backend (Responses speaks
-  // `reasoning.effort`). Without this the subscription always ran at its DEFAULT —
-  // a real Codex `model_reasoning_effort` (incl. high/xhigh/max) was silently
-  // dropped here. The IR has already normalized any unknown tier to a known one.
-  if (typeof r.reasoning_effort === "string" && r.reasoning_effort.length > 0)
-    body.reasoning = { effort: r.reasoning_effort };
-  if (r.tool_choice !== undefined) body.tool_choice = chatToolChoiceToResponses(r.tool_choice);
-  if (Array.isArray(r.tools)) {
-    const tools = (r.tools as Array<Record<string, unknown>>).flatMap((t) => {
-      const fn = (t.function ?? {}) as Record<string, unknown>;
-      if (!fn.name) return [];
-      return [
-        {
-          type: "function",
-          name: fn.name,
-          description: fn.description ?? "",
-          parameters: fn.parameters ?? { type: "object" },
-          strict: false,
-        },
-      ];
-    });
-    if (tools.length) body.tools = tools;
+  if (r.prompt_cache_options !== undefined) body.prompt_cache_options = r.prompt_cache_options;
+  if (reasoning !== undefined) body.reasoning = reasoning;
+  if (
+    modelInfo !== undefined &&
+    typeof r.service_tier === "string" &&
+    r.service_tier !== "default" &&
+    modelSupportsServiceTier(modelInfo, r.service_tier)
+  ) {
+    body.service_tier = r.service_tier;
   }
+  if (r.tool_choice !== undefined) body.tool_choice = chatToolChoiceToResponses(r.tool_choice);
+  if (!useResponsesLite && tools.length > 0) body.tools = tools;
   return body;
 }
 
@@ -446,22 +639,8 @@ export function openaiToGenericResponsesRequest(
     body.reasoning = { effort: r.reasoning_effort };
   }
   if (r.tool_choice !== undefined) body.tool_choice = chatToolChoiceToResponses(r.tool_choice);
-  if (Array.isArray(r.tools)) {
-    const tools = (r.tools as Array<Record<string, unknown>>).flatMap((t) => {
-      const fn = (t.function ?? {}) as Record<string, unknown>;
-      if (!fn.name) return [];
-      return [
-        {
-          type: "function",
-          name: fn.name,
-          description: fn.description ?? "",
-          parameters: fn.parameters ?? { type: "object" },
-          strict: false,
-        },
-      ];
-    });
-    if (tools.length) body.tools = tools;
-  }
+  const tools = responsesToolsFromChat(r.tools);
+  if (tools.length > 0) body.tools = tools;
   return body;
 }
 
@@ -550,13 +729,229 @@ function withTimeout(timeoutMs: number, external?: AbortSignal) {
   };
 }
 
-function forceCodexFastMode(input: NativePassthroughInput): NativePassthroughInput {
+function sanitizeUserAgentToken(value: string | undefined): string {
+  const sanitized = (value ?? "").trim().replace(/[^A-Za-z0-9!#$%&'*+\-.^_`|~/:]/g, "_");
+  return sanitized.length > 0 ? sanitized : "unknown";
+}
+
+function sanitizeUserAgentComment(value: string): string {
+  const sanitized = [...value.trim()]
+    .map((char) => {
+      const code = char.charCodeAt(0);
+      return code <= 0x1f || code === 0x7f || char === "(" || char === ")" || char === "\\"
+        ? "_"
+        : char;
+    })
+    .join("");
+  return sanitized.length > 0 ? sanitized : "unknown";
+}
+
+function codexOsType(): string {
+  switch (platform()) {
+    case "darwin":
+      return "Mac OS";
+    case "win32":
+      return "Windows";
+    case "linux":
+      return "Linux";
+    default:
+      return platform();
+  }
+}
+
+function terminalUserAgentToken(): string {
+  const program = process.env.TERM_PROGRAM?.trim();
+  if (program) {
+    const version = process.env.TERM_PROGRAM_VERSION?.trim();
+    return sanitizeUserAgentToken(version ? `${program}/${version}` : program);
+  }
+  return sanitizeUserAgentToken(process.env.TERM);
+}
+
+function buildDefaultCodexUserAgent(originator: string, version: string): string {
+  return `${sanitizeUserAgentToken(originator)}/${sanitizeUserAgentToken(version)} (${sanitizeUserAgentComment(codexOsType())} ${sanitizeUserAgentComment(release())}; ${sanitizeUserAgentComment(arch())}) ${terminalUserAgentToken()}`;
+}
+
+function codexUserAgent(configured: string | undefined): string {
+  if (
+    configured !== undefined &&
+    /^[^/\s]+\/[^\s(]+ \(.+ .+; .+\) \S+(?: .*)?$/.test(configured) &&
+    !/\snode\/v?\S+/i.test(configured)
+  ) {
+    return configured;
+  }
+  const match = /^([^/\s]+)\/([^\s(]+)/.exec(configured ?? "");
+  return buildDefaultCodexUserAgent(match?.[1] ?? ORIGINATOR, match?.[2] ?? DEFAULT_CODEX_VERSION);
+}
+
+function codexVersion(configuredUserAgent: string | undefined): string {
+  return /^([^/\s]+)\/([^\s(]+)/.exec(configuredUserAgent ?? "")?.[2] ?? DEFAULT_CODEX_VERSION;
+}
+
+function withCodexServiceTier(
+  input: NativePassthroughInput,
+  fastMode: boolean,
+  modelInfo: CodexModelInfo | undefined,
+): NativePassthroughInput {
   const body = isNativePassthroughCarrier(input) ? input.body : input;
-  if (body.service_tier === CODEX_FAST_SERVICE_TIER) return input;
-  const next = { ...body, service_tier: CODEX_FAST_SERVICE_TIER };
+  let nextTier = body.service_tier;
+  if (modelInfo === undefined) {
+    if (!fastMode) return input;
+    nextTier = CODEX_FAST_SERVICE_TIER;
+  } else if (fastMode && modelSupportsServiceTier(modelInfo, CODEX_FAST_SERVICE_TIER)) {
+    nextTier = CODEX_FAST_SERVICE_TIER;
+  } else if (
+    typeof nextTier === "string" &&
+    (nextTier === "default" || !modelSupportsServiceTier(modelInfo, nextTier))
+  ) {
+    nextTier = undefined;
+  }
+  if (nextTier === body.service_tier) return input;
+  const next = { ...body };
+  if (typeof nextTier === "string") next.service_tier = nextTier;
+  else delete next.service_tier;
   if (!isNativePassthroughCarrier(input)) return next;
   const carrier = cloneCarrierWithBody(input, next);
-  appendMutationList(carrier.mutations, "body_shims_applied", ["codex_fast_mode"]);
+  appendMutationList(carrier.mutations, "body_shims_applied", [
+    nextTier === CODEX_FAST_SERVICE_TIER ? "codex_fast_mode" : "unsupported_service_tier_removed",
+  ]);
+  return carrier;
+}
+
+function stripNativePassthroughHeader(
+  input: NativePassthroughInput,
+  headerName: string,
+): NativePassthroughInput {
+  if (!isNativePassthroughCarrier(input)) return input;
+  const nextHeaders = Object.fromEntries(
+    Object.entries(input.headers).filter(
+      ([name]) => name.toLowerCase() !== headerName.toLowerCase(),
+    ),
+  );
+  if (Object.keys(nextHeaders).length === Object.keys(input.headers).length) return input;
+  appendMutationList(input.mutations, "headers_dropped", [headerName.toLowerCase()]);
+  return { ...input, headers: nextHeaders };
+}
+
+function nativeInputModel(input: NativePassthroughInput): string {
+  const body = isNativePassthroughCarrier(input) ? input.body : input;
+  return typeof body.model === "string" ? body.model : "";
+}
+
+function nativeInputUsesResponsesLite(
+  input: NativePassthroughInput,
+  modelInfo: CodexModelInfo | undefined,
+): boolean {
+  if (modelInfo?.use_responses_lite === true) return true;
+  if (isNativePassthroughCarrier(input)) {
+    if (hasHeader(input.headers, RESPONSES_LITE_HEADER, "true")) return true;
+    return bodyUsesResponsesLite(input.body);
+  }
+  return bodyUsesResponsesLite(input);
+}
+
+function stripResponsesLiteImageDetails(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripResponsesLiteImageDetails);
+  if (!isRecord(value)) return value;
+  const next = Object.fromEntries(
+    Object.entries(value).map(([key, child]) => [key, stripResponsesLiteImageDetails(child)]),
+  );
+  if (next.type === "input_image") delete next.detail;
+  return next;
+}
+
+function canonicalizeCodexNativeInput(
+  input: NativePassthroughInput,
+  modelInfo: CodexModelInfo | undefined,
+  forceStore: boolean,
+): NativePassthroughInput {
+  const body = isNativePassthroughCarrier(input) ? input.body : input;
+  const useResponsesLite = nativeInputUsesResponsesLite(input, modelInfo);
+  const next: Record<string, unknown> = {
+    ...body,
+    model: typeof body.model === "string" ? resolveOpenAICodexModelAlias(body.model) : body.model,
+    ...(forceStore ? { store: false } : {}),
+  };
+  if (!forceStore) delete next.store;
+  const originalInput = Array.isArray(body.input) ? body.input : [];
+
+  if (useResponsesLite) {
+    const isIncrementalContinuation =
+      typeof body.previous_response_id === "string" && body.previous_response_id.length > 0;
+    if (isIncrementalContinuation) {
+      // Codex WebSocket v2 already compressed this request against the previous
+      // response. Re-inserting the Lite prefix here corrupts the delta
+      // (`additional_tools` must only appear in the full request baseline).
+      next.input = stripResponsesLiteImageDetails(originalInput);
+      next.parallel_tool_calls = false;
+      if (isRecord(next.reasoning)) {
+        next.reasoning = { ...next.reasoning, context: "all_turns" };
+      }
+      if (JSON.stringify(next) === JSON.stringify(body)) return input;
+      if (!isNativePassthroughCarrier(input)) return next;
+      const carrier = cloneCarrierWithBody(input, next);
+      appendMutationList(carrier.mutations, "body_shims_applied", [
+        "codex_native_request_canonicalized",
+      ]);
+      return carrier;
+    }
+    const first = originalInput[0];
+    const alreadyHasAdditionalTools = isRecord(first) && first.type === "additional_tools";
+    const tools = Array.isArray(body.tools)
+      ? body.tools
+      : alreadyHasAdditionalTools && Array.isArray(first.tools)
+        ? first.tools
+        : [];
+    const liteInput = alreadyHasAdditionalTools
+      ? [...originalInput]
+      : [{ type: "additional_tools", role: "developer", tools }, ...originalInput];
+    const instructions =
+      typeof body.instructions === "string" && body.instructions.length > 0
+        ? body.instructions
+        : "";
+    if (instructions.length > 0) {
+      liteInput.splice(alreadyHasAdditionalTools ? 1 : 1, 0, {
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: instructions }],
+      });
+    }
+    next.input = stripResponsesLiteImageDetails(liteInput);
+    next.parallel_tool_calls = false;
+    delete next.instructions;
+    delete next.tools;
+    if (isRecord(next.reasoning)) {
+      next.reasoning = { ...next.reasoning, context: "all_turns" };
+    }
+  } else {
+    const first = originalInput[0];
+    if (isRecord(first) && first.type === "additional_tools") {
+      const remaining = originalInput.slice(1);
+      if (!Array.isArray(next.tools) && Array.isArray(first.tools)) next.tools = first.tools;
+      const developer = remaining[0];
+      if (
+        (typeof next.instructions !== "string" || next.instructions.length === 0) &&
+        isRecord(developer) &&
+        developer.role === "developer"
+      ) {
+        const text = plainText(developer.content);
+        if (text.length > 0) {
+          next.instructions = text;
+          remaining.shift();
+        }
+      }
+      next.input = remaining;
+    }
+    if (next.instructions === "") delete next.instructions;
+    if (modelInfo?.supports_parallel_tool_calls === false) next.parallel_tool_calls = false;
+  }
+
+  if (JSON.stringify(next) === JSON.stringify(body)) return input;
+  if (!isNativePassthroughCarrier(input)) return next;
+  const carrier = cloneCarrierWithBody(input, next);
+  appendMutationList(carrier.mutations, "body_shims_applied", [
+    "codex_native_request_canonicalized",
+  ]);
   return carrier;
 }
 
@@ -568,29 +963,78 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
   const url = cfg.baseUrl.endsWith("/responses")
     ? cfg.baseUrl
     : `${cfg.baseUrl.replace(/\/$/, "")}/responses`;
+  const compactUrl = `${url}/compact`;
+  const turnStates = new Map<string, string>();
+  const websocketMetadataFired = new WeakSet<CodexResponsesWebSocketConnection>();
+  const websocketHttpFallbackSessions = new Set<string>();
+  const websocketSessions = new Map<
+    string,
+    {
+      connection: Promise<CodexResponsesWebSocketConnection>;
+      tail: Promise<void>;
+    }
+  >();
 
   if (cfg.getAuthHeader === undefined) {
     throw new Error("codex responses client requires `getAuthHeader`");
   }
   const getAuthHeader = cfg.getAuthHeader;
 
-  async function headers(): Promise<Record<string, string>> {
+  function nativeHeader(input: NativePassthroughInput, name: string): string | undefined {
+    if (!isNativePassthroughCarrier(input)) return undefined;
+    const target = name.toLowerCase();
+    for (const [key, value] of Object.entries(input.headers)) {
+      if (key.toLowerCase() !== target) continue;
+      const normalized = Array.isArray(value) ? value.join(", ") : value;
+      return normalized.length > 0 ? normalized : undefined;
+    }
+    return undefined;
+  }
+
+  function rememberTurnState(turnKey: string | undefined, state: string | undefined): void {
+    if (!turnKey || !state || turnStates.has(turnKey)) return;
+    if (turnStates.size >= MAX_CODEX_TURN_STATES) {
+      const oldest = turnStates.keys().next().value;
+      if (oldest !== undefined) turnStates.delete(oldest);
+    }
+    turnStates.set(turnKey, state);
+  }
+
+  async function resolveModelInfo(model: string): Promise<CodexModelInfo | undefined> {
+    if (!cfg.resolveModelInfo || model.length === 0) return undefined;
+    try {
+      return await cfg.resolveModelInfo(model);
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function headers(
+    useResponsesLite: boolean,
+    accept: "application/json" | "text/event-stream",
+  ): Promise<Record<string, string>> {
     const auth = await getAuthHeader();
     const token = auth.replace(/^Bearer /, "");
+    const persistedIdentity = cfg.getAccountIdentity?.() ?? {};
+    const accountId = persistedIdentity.accountId ?? codexAccountIdFromToken(token);
+    const isFedramp = persistedIdentity.isFedramp ?? cfg.isFedramp;
     const h: Record<string, string> = {
       "Content-Type": "application/json",
-      accept: "text/event-stream",
+      accept,
       Authorization: `Bearer ${token}`,
-      "chatgpt-account-id": codexAccountIdFromToken(token),
       originator: ORIGINATOR,
-      "User-Agent": cfg.userAgent ?? DEFAULT_USER_AGENT,
-      "OpenAI-Beta": "responses=experimental",
+      "User-Agent": codexUserAgent(cfg.userAgent),
+      version: codexVersion(cfg.userAgent),
+      ...(accountId.length > 0 ? { "chatgpt-account-id": accountId } : {}),
+      ...(isFedramp === true ? { "X-OpenAI-Fedramp": "true" } : {}),
+      ...(useResponsesLite ? { [RESPONSES_LITE_HEADER]: "true" } : {}),
     };
-    // The official Codex client carries a stable session id on both headers; reuse
-    // ours (per-account-stable) so the backend recognizes a coherent session.
     if (cfg.sessionId) {
-      h.session_id = cfg.sessionId;
-      h["x-client-request-id"] = cfg.sessionId;
+      h["session-id"] = cfg.sessionId;
+    }
+    if (cfg.threadId) {
+      h["thread-id"] = cfg.threadId;
+      h["x-client-request-id"] = cfg.threadId;
     }
     return h;
   }
@@ -616,98 +1060,631 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     return changed ? JSON.parse(value) : raw;
   }
 
+  type RequestTimeout = ReturnType<typeof withTimeout>;
+  interface CodexHttpResponse {
+    response: Response;
+    bodyTimeout?: RequestTimeout;
+    turnKey?: string;
+  }
+
+  async function prepareRequest(
+    input: NativePassthroughInput,
+    modelInfo: CodexModelInfo | undefined,
+    accept: "application/json" | "text/event-stream",
+    forceStore: boolean,
+  ): Promise<{
+    prepared: PreparedNativePassthroughRequest;
+    turnKey: string | undefined;
+  }> {
+    const canonicalInput = canonicalizeCodexNativeInput(input, modelInfo, forceStore);
+    const tieredInput = withCodexServiceTier(canonicalInput, cfg.fastMode === true, modelInfo);
+    const wireInput = stripNativePassthroughHeader(tieredInput, "openai-beta");
+    const useResponsesLite = nativeInputUsesResponsesLite(wireInput, modelInfo);
+    const turnKey = nativeHeader(input, CODEX_TURN_METADATA_HEADER);
+    const explicitTurnState = nativeHeader(input, CODEX_TURN_STATE_HEADER);
+    rememberTurnState(turnKey, explicitTurnState);
+    const providerHeaders = await headers(useResponsesLite, accept);
+    const turnState = explicitTurnState ?? (turnKey ? turnStates.get(turnKey) : undefined);
+    if (turnState) providerHeaders[CODEX_TURN_STATE_HEADER] = turnState;
+    const prepared = prepareNativePassthroughRequest(wireInput, providerHeaders, {
+      mergeHeaders: ["x-codex-beta-features"],
+      preserveClientHeaders: [
+        "accept",
+        "accept-language",
+        "originator",
+        "session-id",
+        "thread-id",
+        "user-agent",
+        "version",
+        "x-client-request-id",
+        "x-codex-beta-features",
+        "x-codex-installation-id",
+        CODEX_TURN_METADATA_HEADER,
+        "x-codex-turn-state",
+      ],
+    });
+    if (
+      isNativePassthroughCarrier(input) &&
+      prepared.carrier !== null &&
+      prepared.carrier !== input
+    ) {
+      Object.assign(input.mutations, prepared.carrier.mutations);
+    }
+    return { prepared, turnKey };
+  }
+
   async function request(
     input: NativePassthroughInput,
-    external?: AbortSignal,
-    capture?: (wireBody: string) => void,
-  ): Promise<Response> {
-    const wireInput = cfg.fastMode === true ? forceCodexFastMode(input) : input;
-    const providerHeaders = await headers();
-    if (isNativePassthroughCarrier(wireInput) && cfg.userAgent === undefined) {
-      const hasClientUserAgent = Object.keys(wireInput.headers).some(
-        (name) => name.toLowerCase() === "user-agent",
-      );
-      if (hasClientUserAgent) delete providerHeaders["User-Agent"];
-    }
-    const prepared = prepareNativePassthroughRequest(wireInput, providerHeaders, {
-      mergeHeaders: ["openai-beta"],
-    });
+    modelInfo: CodexModelInfo | undefined,
+    init: {
+      endpoint: string;
+      accept: "application/json" | "text/event-stream";
+      signal?: AbortSignal;
+      capture?: (wireBody: string) => void;
+      timeoutThroughBody?: boolean;
+    },
+  ): Promise<CodexHttpResponse> {
+    const { prepared, turnKey } = await prepareRequest(
+      input,
+      modelInfo,
+      init.accept,
+      init.endpoint !== compactUrl,
+    );
     // The exact Responses-native bytes POSTed upstream (translate path: OpenAI→Responses
     // re-serialization; native passthrough: verbatim, model patched) — surfaced for capture.
-    capture?.(prepared.bodyText);
+    init.capture?.(prepared.bodyText);
     // Retry transient connection blips at the fetch boundary (pre-first-byte → idempotent);
     // a timeout becomes a non-transient UpstreamError and a client abort rethrows as-is.
     return withConnectionRetry(
       async () => {
-        const t = withTimeout(timeoutMs, external);
+        const t = withTimeout(timeoutMs, init.signal);
         try {
-          return await doFetch(url, {
+          const response = await doFetch(init.endpoint, {
             method: "POST",
             headers: prepared.headers,
             body: prepared.bodyText,
             signal: t.signal,
           });
+          if (init.timeoutThroughBody === true) {
+            return { response, bodyTimeout: t, turnKey };
+          }
+          return { response, turnKey };
         } catch (err) {
           if (t.isTimeout() && !t.isExternalAbort()) {
             throw new UpstreamError("timeout", "upstream request timed out");
           }
           throw err;
         } finally {
-          t.cleanup();
+          if (init.timeoutThroughBody !== true) {
+            t.cleanup();
+          }
         }
       },
-      { retries: cfg.connectRetries, backoffMs: cfg.connectRetryBackoffMs, signal: external },
+      {
+        retries: cfg.connectRetries,
+        backoffMs: cfg.connectRetryBackoffMs,
+        signal: init.signal,
+      },
     );
+  }
+
+  async function readUnaryBody(result: CodexHttpResponse): Promise<string> {
+    try {
+      return await result.response.text();
+    } catch (err) {
+      if (result.bodyTimeout?.isTimeout() && !result.bodyTimeout.isExternalAbort()) {
+        throw new UpstreamError("timeout", "upstream request timed out");
+      }
+      throw err;
+    } finally {
+      if (result.bodyTimeout !== undefined) {
+        result.bodyTimeout.cleanup();
+      }
+    }
+  }
+
+  async function readUnaryJson(result: CodexHttpResponse): Promise<Record<string, unknown>> {
+    return JSON.parse(await readUnaryBody(result)) as Record<string, unknown>;
+  }
+
+  function fireMetadataHook(
+    hook: ((headers: Headers) => void) | undefined,
+    headers: Headers,
+  ): void {
+    if (!hook) return;
+    try {
+      hook(headers);
+    } catch {
+      /* fail-open: response metadata never breaks the served request */
+    }
   }
 
   // Scrape the upstream rate-limit window headers (providers page Tier 3) the moment
   // the response resolves — headers are available before any SSE chunk is read, so
   // this never buffers or perturbs the streamed body (Principle 8). Fail-open: a
   // throwing hook is swallowed (a quota-scrape must never break a served request).
-  function fireResponseMeta(res: Response): void {
-    if (!cfg.onResponseMeta) return;
-    try {
-      cfg.onResponseMeta(res.headers);
-    } catch {
-      /* fail-open: quota observability never breaks the request */
+  function fireResponseMeta(res: Response, onResponseMeta?: (headers: Headers) => void): void {
+    fireResponseMetaHeaders(res.headers, onResponseMeta);
+  }
+
+  function fireResponseMetaHeaders(
+    responseHeaders: Headers,
+    onResponseMeta?: (headers: Headers) => void,
+  ): void {
+    fireMetadataHook(cfg.onResponseMeta, responseHeaders);
+    fireMetadataHook(onResponseMeta, responseHeaders);
+    const modelsEtag = responseHeaders.get("X-Models-Etag");
+    if (cfg.onModelsEtag && modelsEtag) {
+      try {
+        cfg.onModelsEtag(modelsEtag);
+      } catch {
+        /* fail-open: catalog invalidation never breaks the served request */
+      }
     }
+  }
+
+  function captureTurnState(result: CodexHttpResponse): void {
+    const state = result.response.headers.get(CODEX_TURN_STATE_HEADER) ?? undefined;
+    rememberTurnState(result.turnKey, state);
   }
 
   async function requestWithRetry(
     body: NativePassthroughInput,
-    external?: AbortSignal,
-    capture?: (wireBody: string) => void,
-  ): Promise<Response> {
-    const res = await request(body, external, capture);
-    if (res.status === 401 && cfg.onUnauthorized !== undefined) {
-      await res.body?.cancel().catch(() => {});
+    modelInfo: CodexModelInfo | undefined,
+    init: {
+      endpoint?: string;
+      accept?: "application/json" | "text/event-stream";
+      signal?: AbortSignal;
+      capture?: (wireBody: string) => void;
+      onResponseMeta?: (headers: Headers) => void;
+      timeoutThroughBody?: boolean;
+    },
+  ): Promise<CodexHttpResponse> {
+    const requestInit = {
+      endpoint: init.endpoint ?? url,
+      accept: init.accept ?? "text/event-stream",
+      signal: init.signal,
+      capture: init.capture,
+      timeoutThroughBody: init.timeoutThroughBody,
+    };
+    const first = await request(body, modelInfo, requestInit);
+    if (first.response.status === 401 && cfg.onUnauthorized !== undefined) {
+      await first.response.body?.cancel().catch(() => {});
+      first.bodyTimeout?.cleanup();
       cfg.onUnauthorized();
-      const retried = await request(body, external, capture);
-      fireResponseMeta(retried);
+      const retried = await request(body, modelInfo, requestInit);
+      captureTurnState(retried);
+      fireResponseMeta(retried.response, init.onResponseMeta);
       return retried;
     }
-    fireResponseMeta(res);
-    return res;
+    captureTurnState(first);
+    fireResponseMeta(first.response, init.onResponseMeta);
+    return first;
   }
 
-  async function errorFromResponse(res: Response): Promise<UpstreamError> {
-    const providerRaw = await res
-      .text()
-      .then((t) => {
-        try {
-          return JSON.parse(t);
-        } catch {
-          return t;
-        }
-      })
-      .catch(() => null)
-      .then(scrub);
+  function codexErrorHeaders(headers: Headers): Record<string, string> {
+    const selected: Record<string, string> = {};
+    for (const [name, value] of headers) {
+      const lower = name.toLowerCase();
+      if (
+        lower.startsWith("x-codex-") ||
+        lower === "retry-after" ||
+        lower === "x-request-id" ||
+        lower === "x-oai-request-id" ||
+        lower === "cf-ray"
+      ) {
+        selected[lower] = value;
+      }
+    }
+    return selected;
+  }
+
+  async function errorFromResponse(result: CodexHttpResponse): Promise<UpstreamError> {
+    let providerRaw: unknown = null;
+    try {
+      const text = await readUnaryBody(result);
+      try {
+        providerRaw = JSON.parse(text);
+      } catch {
+        providerRaw = text;
+      }
+    } catch (err) {
+      if (err instanceof UpstreamError && err.errorClass === "timeout") throw err;
+    }
+    const scrubbedBody = scrub(providerRaw);
+    const selectedHeaders =
+      result.response.status === 429 ? codexErrorHeaders(result.response.headers) : {};
+    const structuredRaw =
+      Object.keys(selectedHeaders).length > 0
+        ? { body: scrubbedBody, headers: scrub(selectedHeaders) }
+        : scrubbedBody;
     return new UpstreamError(
       "upstream_error",
-      `upstream returned ${res.status}`,
-      providerRaw,
-      res.status,
+      `upstream returned ${result.response.status}`,
+      structuredRaw,
+      result.response.status,
     );
+  }
+
+  function websocketUrl(): string {
+    const endpoint = new URL(url);
+    if (endpoint.protocol === "https:") endpoint.protocol = "wss:";
+    else if (endpoint.protocol === "http:") endpoint.protocol = "ws:";
+    else throw new Error(`unsupported Codex Responses websocket protocol: ${endpoint.protocol}`);
+    return endpoint.toString();
+  }
+
+  function websocketErrorRaw(error: CodexResponsesWebSocketConnectError): unknown {
+    let body: unknown = error.body;
+    if (error.body.length > 0) {
+      try {
+        body = JSON.parse(error.body);
+      } catch {
+        body = error.body;
+      }
+    } else {
+      body = null;
+    }
+    const selectedHeaders =
+      error.status === 429 ? codexErrorHeaders(error.headers) : ({} as Record<string, string>);
+    const scrubbedBody = scrub(body);
+    return Object.keys(selectedHeaders).length > 0
+      ? { body: scrubbedBody, headers: scrub(selectedHeaders) }
+      : scrubbedBody;
+  }
+
+  function websocketUpstreamError(error: unknown): UpstreamError {
+    if (error instanceof UpstreamError) return error;
+    if (error instanceof CodexResponsesWebSocketConnectError) {
+      return new UpstreamError(
+        "upstream_error",
+        error.status === null ? error.message : `upstream websocket returned ${error.status}`,
+        websocketErrorRaw(error),
+        error.status,
+      );
+    }
+    return new UpstreamError(
+      "upstream_error",
+      error instanceof Error ? error.message : "Codex Responses websocket connection failed",
+    );
+  }
+
+  async function connectWebSocket(
+    prepared: PreparedNativePassthroughRequest,
+    signal: AbortSignal | undefined,
+  ): Promise<CodexResponsesWebSocketConnection> {
+    const connector = cfg.responsesWebSocketConnector;
+    if (!connector) throw new Error("Codex Responses websocket connector is unavailable");
+    const connectOnce = async (): Promise<CodexResponsesWebSocketConnection> => {
+      const connectHeaders: Record<string, string> = {
+        ...prepared.headers,
+        "openai-beta": RESPONSES_WEBSOCKET_BETA,
+      };
+      const authorization = await getAuthHeader();
+      const token = authorization.replace(/^Bearer /, "");
+      const persistedIdentity = cfg.getAccountIdentity?.() ?? {};
+      const accountId = persistedIdentity.accountId ?? codexAccountIdFromToken(token);
+      connectHeaders.Authorization = `Bearer ${token}`;
+      if (accountId.length > 0) connectHeaders["chatgpt-account-id"] = accountId;
+      else delete connectHeaders["chatgpt-account-id"];
+      delete connectHeaders.accept;
+      delete connectHeaders["Content-Type"];
+      delete connectHeaders["content-type"];
+      return await connector({
+        url: websocketUrl(),
+        headers: connectHeaders,
+        signal,
+      });
+    };
+    const connectWithRetry = async (): Promise<CodexResponsesWebSocketConnection> =>
+      await withConnectionRetry(connectOnce, {
+        retries: cfg.connectRetries,
+        backoffMs: cfg.connectRetryBackoffMs,
+        signal,
+        shouldRetry: (error) =>
+          error instanceof CodexResponsesWebSocketConnectError
+            ? error.status === null
+            : isTransientConnectionError(error),
+      });
+    try {
+      return await connectWithRetry();
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error;
+      if (
+        error instanceof CodexResponsesWebSocketConnectError &&
+        error.status === 401 &&
+        cfg.onUnauthorized !== undefined
+      ) {
+        cfg.onUnauthorized();
+        try {
+          return await connectWithRetry();
+        } catch (retryError) {
+          if (signal?.aborted) throw signal.reason ?? retryError;
+          throw websocketUpstreamError(retryError);
+        }
+      }
+      throw websocketUpstreamError(error);
+    }
+  }
+
+  function websocketRetryCount(): number {
+    const configured = cfg.connectRetries;
+    return configured === undefined || !Number.isFinite(configured)
+      ? 2
+      : Math.max(0, Math.floor(configured));
+  }
+
+  async function waitForWebsocketRetry(attempt: number, signal: AbortSignal | undefined) {
+    const backoff = cfg.connectRetryBackoffMs ?? [200, 500];
+    const delay = backoff[Math.min(attempt, backoff.length - 1)] ?? 0;
+    if (delay <= 0) return;
+    await new Promise<void>((resolve) => {
+      if (signal?.aborted) {
+        resolve();
+        return;
+      }
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, delay);
+      const onAbort = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+    if (signal?.aborted) throw signal.reason ?? new Error("client aborted");
+  }
+
+  function isWebsocketConnectionLimitError(error: UpstreamError): boolean {
+    if (!isRecord(error.providerRaw)) return false;
+    const nested = isRecord(error.providerRaw.error) ? error.providerRaw.error : {};
+    return nested.code === "websocket_connection_limit_reached";
+  }
+
+  function websocketSessionId(input: NativePassthroughInput): string | undefined {
+    return nativeHeader(input, CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER);
+  }
+
+  async function acquireWebSocketSession(
+    sessionId: string,
+    prepared: PreparedNativePassthroughRequest,
+    signal: AbortSignal | undefined,
+  ): Promise<{
+    connection: CodexResponsesWebSocketConnection;
+    release: () => void;
+  }> {
+    let state = websocketSessions.get(sessionId);
+    if (!state) {
+      const connection = connectWebSocket(prepared, signal);
+      state = { connection, tail: Promise.resolve() };
+      websocketSessions.set(sessionId, state);
+      connection.catch(() => {
+        if (websocketSessions.get(sessionId) === state) websocketSessions.delete(sessionId);
+      });
+    }
+    let release = () => {};
+    const previous = state.tail;
+    state.tail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return { connection: await state.connection, release };
+    } catch (error) {
+      release();
+      throw error;
+    }
+  }
+
+  async function closeWebSocketSession(sessionId: string): Promise<void> {
+    websocketHttpFallbackSessions.delete(sessionId);
+    const state = websocketSessions.get(sessionId);
+    if (!state) return;
+    websocketSessions.delete(sessionId);
+    try {
+      await (await state.connection).close();
+    } catch {
+      // Session teardown is best-effort; the socket may already be closed.
+    }
+  }
+
+  type ParsedWebSocketEvent =
+    | {
+        kind: "frame";
+        frame: string;
+        terminal: boolean;
+        reusable: boolean;
+      }
+    | {
+        kind: "rate_limits";
+        headers: Headers;
+      }
+    | {
+        kind: "error";
+        error: UpstreamError;
+        headers: Headers;
+      };
+
+  function websocketJsonHeaders(value: unknown): Headers {
+    const headers = new Headers();
+    if (!isRecord(value)) return headers;
+    for (const [name, rawValue] of Object.entries(value)) {
+      const headerValue =
+        typeof rawValue === "string"
+          ? rawValue
+          : typeof rawValue === "number" && Number.isFinite(rawValue)
+            ? String(rawValue)
+            : typeof rawValue === "boolean"
+              ? String(rawValue)
+              : null;
+      if (headerValue === null) continue;
+      try {
+        headers.set(name, headerValue);
+      } catch {
+        // Malformed server-provided header names/values are ignored like Codex CLI.
+      }
+    }
+    return headers;
+  }
+
+  function websocketRateLimitHeaders(event: Record<string, unknown>): Headers {
+    const headers = new Headers();
+    const rawLimitId =
+      typeof event.metered_limit_name === "string"
+        ? event.metered_limit_name
+        : typeof event.limit_name === "string"
+          ? event.limit_name
+          : "";
+    const normalizedLimitId = rawLimitId.trim().toLowerCase().replaceAll("_", "-");
+    const limitId = /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(normalizedLimitId)
+      ? normalizedLimitId
+      : "codex";
+    const rateLimits = isRecord(event.rate_limits) ? event.rate_limits : {};
+
+    const appendWindow = (kind: "primary" | "secondary", value: unknown): void => {
+      if (!isRecord(value)) return;
+      const usedPercent = value.used_percent;
+      if (typeof usedPercent !== "number" || !Number.isFinite(usedPercent)) return;
+      const prefix = `x-${limitId}-${kind}`;
+      headers.set(`${prefix}-used-percent`, String(usedPercent));
+      if (typeof value.window_minutes === "number" && Number.isFinite(value.window_minutes)) {
+        headers.set(`${prefix}-window-minutes`, String(value.window_minutes));
+      }
+      if (typeof value.reset_at === "number" && Number.isFinite(value.reset_at)) {
+        headers.set(`${prefix}-reset-at`, String(value.reset_at));
+      }
+    };
+
+    appendWindow("primary", rateLimits.primary);
+    appendWindow("secondary", rateLimits.secondary);
+
+    const credits = isRecord(event.credits) ? event.credits : null;
+    if (
+      credits &&
+      typeof credits.has_credits === "boolean" &&
+      typeof credits.unlimited === "boolean"
+    ) {
+      headers.set("x-codex-credits-has-credits", String(credits.has_credits));
+      headers.set("x-codex-credits-unlimited", String(credits.unlimited));
+      if (typeof credits.balance === "string") {
+        headers.set("x-codex-credits-balance", credits.balance);
+      }
+    }
+    if (typeof event.plan_type === "string" && event.plan_type.trim().length > 0) {
+      headers.set("x-codex-plan-type", event.plan_type.trim());
+    }
+    return headers;
+  }
+
+  function websocketWrappedError(
+    event: Record<string, unknown>,
+  ): { error: UpstreamError; headers: Headers } | null {
+    if (event.type !== "error") return null;
+    const nestedError = isRecord(event.error) ? event.error : {};
+    const message =
+      typeof nestedError.message === "string" && nestedError.message.length > 0
+        ? nestedError.message
+        : typeof event.message === "string" && event.message.length > 0
+          ? event.message
+          : "Codex Responses websocket error";
+    if (nestedError.code === "websocket_connection_limit_reached") {
+      return {
+        error: new UpstreamError("upstream_error", message, scrub(event)),
+        headers: websocketJsonHeaders(event.headers),
+      };
+    }
+    const rawStatus =
+      typeof event.status === "number"
+        ? event.status
+        : typeof event.status_code === "number"
+          ? event.status_code
+          : null;
+    if (
+      rawStatus === null ||
+      !Number.isInteger(rawStatus) ||
+      rawStatus < 100 ||
+      rawStatus > 599 ||
+      (rawStatus >= 200 && rawStatus < 300)
+    ) {
+      return null;
+    }
+    const headers = websocketJsonHeaders(event.headers);
+    const selectedHeaders = rawStatus === 429 ? codexErrorHeaders(headers) : {};
+    const body = scrub(event);
+    const providerRaw =
+      Object.keys(selectedHeaders).length > 0 ? { body, headers: scrub(selectedHeaders) } : body;
+    return {
+      error: new UpstreamError("upstream_error", message, providerRaw, rawStatus),
+      headers,
+    };
+  }
+
+  function websocketSseFrame(text: string): ParsedWebSocketEvent {
+    let event: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (!isRecord(parsed) || typeof parsed.type !== "string") {
+        throw new Error("websocket response is not a typed JSON event");
+      }
+      event = parsed;
+    } catch (error) {
+      throw new UpstreamError(
+        "upstream_error",
+        error instanceof Error ? error.message : "invalid Codex Responses websocket event",
+      );
+    }
+    const type = String(event.type);
+    if (type === "codex.rate_limits") {
+      return {
+        kind: "rate_limits",
+        headers: websocketRateLimitHeaders(event),
+      };
+    }
+    const wrappedError = websocketWrappedError(event);
+    if (wrappedError) {
+      return {
+        kind: "error",
+        ...wrappedError,
+      };
+    }
+    return {
+      kind: "frame",
+      frame: `event: ${type}\ndata: ${text}\n\n`,
+      terminal:
+        type === "response.completed" ||
+        type === "response.failed" ||
+        type === "response.incomplete" ||
+        type === "error",
+      reusable: type === "response.completed",
+    };
+  }
+
+  async function receiveWebSocketMessage(
+    connection: CodexResponsesWebSocketConnection,
+    signal: AbortSignal | undefined,
+  ): Promise<string | null> {
+    const timeout = withTimeout(timeoutMs, signal);
+    try {
+      return await Promise.race([
+        connection.receive(),
+        new Promise<never>((_, reject) => {
+          timeout.signal.addEventListener(
+            "abort",
+            () => {
+              if (timeout.isTimeout() && !timeout.isExternalAbort()) {
+                reject(new UpstreamError("timeout", "upstream websocket stream timed out"));
+              } else {
+                reject(signal?.reason ?? new Error("client aborted"));
+              }
+            },
+            { once: true },
+          );
+        }),
+      ]);
+    } finally {
+      timeout.cleanup();
+    }
   }
 
   return {
@@ -715,25 +1692,35 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
 
     async chatCompletion(req, opts) {
       const model = String((req as Record<string, unknown>).model ?? "");
-      const res = await requestWithRetry(
-        openaiToResponsesRequest(req, { sessionId: cfg.sessionId }),
-        opts?.signal,
-        opts?.captureUpstream,
+      const modelInfo = await resolveModelInfo(model);
+      const result = await requestWithRetry(
+        openaiToResponsesRequest(req, { sessionId: cfg.sessionId, modelInfo }),
+        modelInfo,
+        {
+          signal: opts?.signal,
+          capture: opts?.captureUpstream,
+          onResponseMeta: opts?.onResponseMeta,
+        },
       );
-      if (!res.ok) throw await errorFromResponse(res);
+      if (!result.response.ok) throw await errorFromResponse(result);
       // Codex is stream-only → aggregate the SSE into a single Chat response.
-      return await aggregateResponsesStream(res, model, timeoutMs);
+      return await aggregateResponsesStream(result.response, model, timeoutMs);
     },
 
     async *chatCompletionStream(req, opts) {
       const model = String((req as Record<string, unknown>).model ?? "");
-      const res = await requestWithRetry(
-        openaiToResponsesRequest(req, { sessionId: cfg.sessionId }),
-        opts?.signal,
-        opts?.captureUpstream,
+      const modelInfo = await resolveModelInfo(model);
+      const result = await requestWithRetry(
+        openaiToResponsesRequest(req, { sessionId: cfg.sessionId, modelInfo }),
+        modelInfo,
+        {
+          signal: opts?.signal,
+          capture: opts?.captureUpstream,
+          onResponseMeta: opts?.onResponseMeta,
+        },
       );
-      if (!res.ok) throw await errorFromResponse(res);
-      yield* translateResponsesSSE(res, model, timeoutMs);
+      if (!result.response.ok) throw await errorFromResponse(result);
+      yield* translateResponsesSSE(result.response, model, timeoutMs);
     },
 
     // Native protocol passthrough (issue #217, Phase 3): the inbound /v1/responses body
@@ -743,12 +1730,19 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     // 401-retry/scrub/errorFromResponse/onResponseMeta) but SKIPS both translators —
     // `openaiToResponsesRequest` (no instructions/input rewrite, no store/include
     // injection) and `aggregateResponsesStream` (no Responses→Chat folding). The ChatGPT
-    // identity headers (Bearer + chatgpt-account-id + originator + OpenAI-Beta) are applied
-    // by `headers()` inside the shared core, so they ride on the native body unchanged.
+    // Current identity headers (Bearer + chatgpt-account-id + originator) are applied by
+    // `headers()` inside the shared core, so they ride on the native body unchanged.
     async nativePassthrough(body, opts) {
-      const res = await requestWithRetry(body, opts?.signal, opts?.captureUpstream);
-      if (!res.ok) throw await errorFromResponse(res);
-      return (await res.json()) as Record<string, unknown>;
+      const modelInfo = await resolveModelInfo(nativeInputModel(body));
+      const result = await requestWithRetry(body, modelInfo, {
+        accept: "application/json",
+        signal: opts?.signal,
+        capture: opts?.captureUpstream,
+        onResponseMeta: opts?.onResponseMeta,
+        timeoutThroughBody: true,
+      });
+      if (!result.response.ok) throw await errorFromResponse(result);
+      return await readUnaryJson(result);
     },
 
     // Streaming native passthrough (issue #217, Phase 3). The native body from a STREAMING
@@ -758,9 +1752,130 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     // the upstream Responses SSE is BYTE-RELAYED unchanged via readResponsesSSERaw — no SSE
     // re-mapping state machine to mangle reasoning.encrypted_content / tools (principle 8).
     async *nativePassthroughStream(body, opts) {
-      const res = await requestWithRetry(body, opts?.signal, opts?.captureUpstream);
-      if (!res.ok) throw await errorFromResponse(res);
-      yield* readResponsesSSERaw(res, timeoutMs);
+      const modelInfo = await resolveModelInfo(nativeInputModel(body));
+      const sessionId = websocketSessionId(body);
+      if (
+        cfg.responsesWebSocketConnector &&
+        sessionId &&
+        !websocketHttpFallbackSessions.has(sessionId)
+      ) {
+        const { prepared, turnKey } = await prepareRequest(
+          body,
+          modelInfo,
+          "text/event-stream",
+          true,
+        );
+        const maxRetries = websocketRetryCount();
+        let retries = 0;
+        while (!websocketHttpFallbackSessions.has(sessionId)) {
+          let lease:
+            | {
+                connection: CodexResponsesWebSocketConnection;
+                release: () => void;
+              }
+            | undefined;
+          try {
+            lease = await acquireWebSocketSession(sessionId, prepared, opts?.signal);
+          } catch (error) {
+            if (
+              error instanceof UpstreamError &&
+              (error.upstreamStatus === 426 || error.upstreamStatus === null) &&
+              !opts?.signal?.aborted
+            ) {
+              websocketHttpFallbackSessions.add(sessionId);
+              break;
+            }
+            throw error;
+          }
+
+          let retryConnection = false;
+          let fallbackToHttp = false;
+          try {
+            if (!websocketMetadataFired.has(lease.connection)) {
+              websocketMetadataFired.add(lease.connection);
+              fireResponseMetaHeaders(lease.connection.responseHeaders, opts?.onResponseMeta);
+            }
+            const turnState =
+              lease.connection.responseHeaders.get(CODEX_TURN_STATE_HEADER) ?? undefined;
+            rememberTurnState(turnKey, turnState);
+            const requestText = JSON.stringify({ type: "response.create", ...prepared.body });
+            opts?.captureUpstream?.(requestText);
+            await lease.connection.send(requestText);
+            while (true) {
+              const message = await receiveWebSocketMessage(lease.connection, opts?.signal);
+              if (message === null) {
+                await closeWebSocketSession(sessionId);
+                throw new UpstreamError(
+                  "upstream_error",
+                  "upstream websocket closed before a terminal response event",
+                );
+              }
+              const event = websocketSseFrame(message);
+              if (event.kind === "rate_limits") {
+                fireResponseMetaHeaders(event.headers, opts?.onResponseMeta);
+                continue;
+              }
+              if (event.kind === "error") {
+                fireResponseMetaHeaders(event.headers, opts?.onResponseMeta);
+                if (isWebsocketConnectionLimitError(event.error)) {
+                  await closeWebSocketSession(sessionId);
+                  if (retries < maxRetries) {
+                    retryConnection = true;
+                  } else {
+                    websocketHttpFallbackSessions.add(sessionId);
+                    fallbackToHttp = true;
+                  }
+                  break;
+                }
+                await closeWebSocketSession(sessionId);
+                throw event.error;
+              }
+              if (event.terminal && !event.reusable) {
+                await closeWebSocketSession(sessionId);
+              }
+              yield event.frame;
+              if (event.terminal) {
+                return;
+              }
+            }
+          } catch (error) {
+            await closeWebSocketSession(sessionId);
+            throw error;
+          } finally {
+            lease.release();
+          }
+          if (fallbackToHttp) break;
+          if (retryConnection) {
+            await waitForWebsocketRetry(retries, opts?.signal);
+            retries += 1;
+            continue;
+          }
+          break;
+        }
+      }
+      const result = await requestWithRetry(body, modelInfo, {
+        signal: opts?.signal,
+        capture: opts?.captureUpstream,
+        onResponseMeta: opts?.onResponseMeta,
+      });
+      if (!result.response.ok) throw await errorFromResponse(result);
+      yield* readResponsesSSERaw(result.response, timeoutMs);
+    },
+
+    closeResponsesWebSocketSession: closeWebSocketSession,
+
+    async responsesCompact(body, opts) {
+      const modelInfo = await resolveModelInfo(nativeInputModel(body));
+      const result = await requestWithRetry(body, modelInfo, {
+        endpoint: compactUrl,
+        accept: "application/json",
+        signal: opts?.signal,
+        capture: opts?.captureUpstream,
+        onResponseMeta: opts?.onResponseMeta,
+        timeoutThroughBody: true,
+      });
+      if (!result.response.ok) throw await errorFromResponse(result);
+      return await readUnaryJson(result);
     },
   };
 }
@@ -937,7 +2052,7 @@ export function createGenericOpenAIResponsesClient(
         captureUpstream: opts?.captureUpstream,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      yield* translateResponsesSSE(res, model, timeoutMs);
+      yield* translateResponsesSSE(res, model, timeoutMs, { strictTerminal: false });
     },
 
     async nativePassthrough(body, opts) {
@@ -1058,6 +2173,11 @@ function splitCompleteSSEFrames(buffer: string): { frames: string[]; tail: strin
   return { frames: parts, tail };
 }
 
+function nextRawSSEFrameBoundary(buffer: string): { index: number; length: number } | null {
+  const match = /(?:\r\n|\r|\n)(?:\r\n|\r|\n)/.exec(buffer);
+  return match ? { index: match.index, length: match[0].length } : null;
+}
+
 export async function* readResponsesEvents(
   res: Response,
   // Inter-chunk liveness deadline (ms); 0 disables. Threaded from the client's
@@ -1118,9 +2238,48 @@ export async function* readResponsesSSERaw(
   idleMs = 0,
 ): AsyncGenerator<string> {
   const body = res.body;
-  if (!body) return;
+  if (!body) {
+    throw new UpstreamError("upstream_error", "stream closed before response.completed");
+  }
   const reader = body.getReader();
   const decoder = new TextDecoder();
+  let detectionBuffer = "";
+
+  function terminalEndInChunk(text: string, flush = false): number | null {
+    const previousTailLength = detectionBuffer.length;
+    let remaining = detectionBuffer + text;
+    let consumed = 0;
+    while (true) {
+      const boundary = nextRawSSEFrameBoundary(remaining);
+      if (!boundary) break;
+      const frameEnd = boundary.index + boundary.length;
+      const event = parseResponsesSSEFrame(remaining.slice(0, boundary.index));
+      consumed += frameEnd;
+      remaining = remaining.slice(frameEnd);
+      if (
+        event?.type === "response.completed" ||
+        event?.type === "response.failed" ||
+        event?.type === "response.incomplete"
+      ) {
+        detectionBuffer = "";
+        return Math.max(0, consumed - previousTailLength);
+      }
+    }
+    if (flush && remaining.trim() !== "") {
+      const event = parseResponsesSSEFrame(remaining);
+      detectionBuffer = "";
+      if (
+        event?.type === "response.completed" ||
+        event?.type === "response.failed" ||
+        event?.type === "response.incomplete"
+      ) {
+        return Math.max(0, previousTailLength + text.length - previousTailLength);
+      }
+    }
+    detectionBuffer = flush ? "" : remaining;
+    return null;
+  }
+
   try {
     while (true) {
       let read: { done: boolean; value?: Uint8Array };
@@ -1131,12 +2290,32 @@ export async function* readResponsesSSERaw(
         throw err;
       }
       const { done, value } = read;
-      if (done) break;
-      if (value) yield decoder.decode(value, { stream: true });
+      if (done) {
+        const tail = decoder.decode();
+        const terminalEnd = terminalEndInChunk(tail);
+        if (terminalEnd !== null) {
+          if (terminalEnd > 0) yield tail.slice(0, terminalEnd);
+          return;
+        }
+        if (tail.length > 0) yield tail;
+        if (terminalEndInChunk("", true) !== null) return;
+        break;
+      }
+      if (value) {
+        const text = decoder.decode(value, { stream: true });
+        const terminalEnd = terminalEndInChunk(text);
+        if (terminalEnd !== null) {
+          if (terminalEnd > 0) yield text.slice(0, terminalEnd);
+          await reader.cancel().catch(() => {});
+          return;
+        }
+        yield text;
+      }
     }
   } finally {
     reader.releaseLock();
   }
+  throw new UpstreamError("upstream_error", "stream closed before response.completed");
 }
 
 // ── streaming translation: Responses SSE -> OpenAI-Chat SSE strings ──────────
@@ -1192,40 +2371,163 @@ function openaiUsageChunk(model: string, usage: Record<string, unknown>): string
   return `data: ${JSON.stringify(chunk)}\n\n`;
 }
 
+function responseEventError(evt: Record<string, unknown>): UpstreamError {
+  if (evt.type === "response.incomplete") {
+    const response = isRecord(evt.response) ? evt.response : {};
+    const details = isRecord(response.incomplete_details) ? response.incomplete_details : {};
+    const reason =
+      typeof details.reason === "string" && details.reason.length > 0 ? details.reason : "unknown";
+    return new UpstreamError(
+      "upstream_error",
+      `Incomplete response returned, reason: ${reason}`,
+      evt,
+    );
+  }
+  const response = isRecord(evt.response) ? evt.response : {};
+  const nestedError = isRecord(response.error) ? response.error : {};
+  const code =
+    typeof evt.code === "string"
+      ? evt.code
+      : typeof nestedError.code === "string"
+        ? nestedError.code
+        : "";
+  const message =
+    typeof evt.message === "string"
+      ? evt.message
+      : typeof nestedError.message === "string"
+        ? nestedError.message
+        : "codex responses stream error";
+  const isQuota =
+    code === "rate_limit_exceeded" ||
+    code === "insufficient_quota" ||
+    code === "usage_not_included";
+  return new UpstreamError("upstream_error", message, evt, isQuota ? 429 : null);
+}
+
+interface ResponsesToolCallState {
+  index: number;
+  id: string;
+  name: string;
+  arguments: string;
+  started: boolean;
+  streamedArguments: boolean;
+}
+
+function responseToolCallId(item: Record<string, unknown>, fallback = ""): string {
+  if (typeof item.call_id === "string" && item.call_id.length > 0) return item.call_id;
+  if (typeof item.id === "string" && item.id.length > 0) return item.id;
+  return fallback;
+}
+
+function responseToolArguments(item: Record<string, unknown>): string {
+  if (typeof item.arguments === "string") return item.arguments;
+  if (typeof item.input === "string") return item.input;
+  return "";
+}
+
 export async function* translateResponsesSSE(
   res: Response,
   model: string,
   idleMs = 0,
+  options: { strictTerminal?: boolean } = {},
 ): AsyncGenerator<string> {
+  const strictTerminal = options.strictTerminal ?? true;
   let started = false;
-  let toolIndex = -1;
   let hadToolCall = false;
   let status: unknown = "completed";
+  let currentToolId = "";
+  const tools = new Map<string, ResponsesToolCallState>();
+  const pendingToolArguments = new Map<string, string>();
+
+  const ensureTool = (item: Record<string, unknown>, fallbackId = ""): ResponsesToolCallState => {
+    const id = responseToolCallId(item, fallbackId || `call_${tools.size}`);
+    const existing = tools.get(id);
+    if (existing) {
+      if (typeof item.name === "string" && item.name.length > 0) existing.name = item.name;
+      return existing;
+    }
+    const state: ResponsesToolCallState = {
+      index: tools.size,
+      id,
+      name: typeof item.name === "string" ? item.name : "",
+      arguments: pendingToolArguments.get(id) ?? "",
+      started: false,
+      streamedArguments: false,
+    };
+    tools.set(id, state);
+    return state;
+  };
+
   for await (const evt of readResponsesEvents(res, idleMs)) {
     const type = evt.type;
+    if (
+      type === "error" ||
+      type === "response.failed" ||
+      (strictTerminal && type === "response.incomplete")
+    ) {
+      throw responseEventError(evt);
+    }
     if (!started) {
       started = true;
       yield openaiChunk(model, { role: "assistant", content: "" }, null);
     }
     if (type === "response.output_item.added") {
       const item = (evt.item ?? {}) as Record<string, unknown>;
-      if (item.type === "function_call") {
+      if (item.type === "function_call" || item.type === "custom_tool_call") {
         hadToolCall = true;
-        toolIndex += 1;
+        const tool = ensureTool(item);
+        currentToolId = tool.id;
+        tool.started = true;
         yield openaiChunk(
           model,
           {
             tool_calls: [
               {
-                index: toolIndex,
-                id: String(item.call_id ?? ""),
+                index: tool.index,
+                id: tool.id,
                 type: "function",
-                function: { name: String(item.name ?? ""), arguments: "" },
+                function: { name: tool.name, arguments: "" },
               },
             ],
           },
           null,
         );
+      }
+    } else if (type === "response.output_item.done") {
+      const item = (evt.item ?? {}) as Record<string, unknown>;
+      if (item.type === "function_call" || item.type === "custom_tool_call") {
+        hadToolCall = true;
+        const tool = ensureTool(item, currentToolId);
+        currentToolId = tool.id;
+        const completeArguments =
+          responseToolArguments(item) || pendingToolArguments.get(tool.id) || tool.arguments;
+        if (!tool.started) {
+          tool.started = true;
+          tool.arguments = completeArguments;
+          yield openaiChunk(
+            model,
+            {
+              tool_calls: [
+                {
+                  index: tool.index,
+                  id: tool.id,
+                  type: "function",
+                  function: { name: tool.name, arguments: completeArguments },
+                },
+              ],
+            },
+            null,
+          );
+        } else if (!tool.streamedArguments && completeArguments.length > 0) {
+          tool.arguments = completeArguments;
+          yield openaiChunk(
+            model,
+            {
+              tool_calls: [{ index: tool.index, function: { arguments: completeArguments } }],
+            },
+            null,
+          );
+        }
       }
     } else if (type === "response.output_text.delta") {
       if (typeof evt.delta === "string") yield openaiChunk(model, { content: evt.delta }, null);
@@ -1233,17 +2535,34 @@ export async function* translateResponsesSSE(
       if (typeof evt.delta === "string") {
         yield openaiChunk(model, { reasoning_content: evt.delta }, null);
       }
-    } else if (type === "response.function_call_arguments.delta") {
+    } else if (
+      type === "response.function_call_arguments.delta" ||
+      type === "response.custom_tool_call_input.delta"
+    ) {
       if (typeof evt.delta === "string") {
-        yield openaiChunk(
-          model,
-          { tool_calls: [{ index: Math.max(0, toolIndex), function: { arguments: evt.delta } }] },
-          null,
-        );
+        const eventToolId =
+          typeof evt.call_id === "string"
+            ? evt.call_id
+            : typeof evt.item_id === "string"
+              ? evt.item_id
+              : currentToolId;
+        const tool = tools.get(eventToolId);
+        if (tool?.started) {
+          tool.arguments += evt.delta;
+          tool.streamedArguments = true;
+          yield openaiChunk(
+            model,
+            { tool_calls: [{ index: tool.index, function: { arguments: evt.delta } }] },
+            null,
+          );
+        } else if (eventToolId.length > 0) {
+          pendingToolArguments.set(
+            eventToolId,
+            `${pendingToolArguments.get(eventToolId) ?? ""}${evt.delta}`,
+          );
+        }
       }
     } else if (type === "response.completed" || type === "response.incomplete") {
-      // response.incomplete is terminal too (max_output_tokens / content filter); it
-      // carries the same response object (status + usage) and must finalize cleanly.
       const response = (evt.response ?? {}) as Record<string, unknown>;
       status = response.status ?? (type === "response.incomplete" ? "incomplete" : "completed");
       yield openaiChunk(model, {}, finishReason(status, hadToolCall));
@@ -1252,19 +2571,11 @@ export async function* translateResponsesSSE(
       yield openaiUsageChunk(model, usage);
       yield "data: [DONE]\n\n";
       return;
-    } else if (type === "error" || type === "response.failed") {
-      const msg =
-        typeof evt.message === "string"
-          ? evt.message
-          : (
-              (((evt.response ?? {}) as Record<string, unknown>).error ?? {}) as {
-                message?: string;
-              }
-            ).message;
-      throw new UpstreamError("upstream_error", msg || "codex responses stream error", evt);
     }
   }
-  // Stream ended without an explicit response.completed → close cleanly.
+  if (strictTerminal) {
+    throw new UpstreamError("upstream_error", "stream closed before response.completed");
+  }
   if (started) {
     yield openaiChunk(model, {}, finishReason(status, hadToolCall));
     yield "data: [DONE]\n\n";
@@ -1286,44 +2597,92 @@ export async function aggregateResponsesStream(
   let cacheRead = 0;
   let cacheCreation = 0;
   let reasoning = "";
+  let completed = false;
   // call_id -> accumulated arguments, preserving first-seen order.
   const toolOrder: string[] = [];
   const toolById = new Map<string, { id: string; name: string; arguments: string }>();
+  const pendingToolArguments = new Map<string, string>();
   let currentCallId = "";
+
+  const ensureTool = (
+    item: Record<string, unknown>,
+    fallbackId = "",
+  ): { id: string; name: string; arguments: string } => {
+    const callId = responseToolCallId(item, fallbackId || `call_${toolOrder.length}`);
+    const existing = toolById.get(callId);
+    if (existing) {
+      if (typeof item.name === "string" && item.name.length > 0) existing.name = item.name;
+      return existing;
+    }
+    const tool = {
+      id: callId,
+      name: typeof item.name === "string" ? item.name : "",
+      arguments: pendingToolArguments.get(callId) ?? "",
+    };
+    toolById.set(callId, tool);
+    toolOrder.push(callId);
+    return tool;
+  };
 
   for await (const evt of readResponsesEvents(res, idleMs)) {
     const type = evt.type;
+    if (type === "error" || type === "response.failed" || type === "response.incomplete") {
+      throw responseEventError(evt);
+    }
     if (type === "response.created") {
       const response = (evt.response ?? {}) as Record<string, unknown>;
       if (typeof response.id === "string") id = response.id;
     } else if (type === "response.output_item.added") {
       const item = (evt.item ?? {}) as Record<string, unknown>;
-      if (item.type === "function_call") {
-        currentCallId = String(item.call_id ?? "");
-        if (!toolById.has(currentCallId)) {
-          toolById.set(currentCallId, {
-            id: currentCallId,
-            name: String(item.name ?? ""),
-            arguments: typeof item.arguments === "string" ? item.arguments : "",
-          });
-          toolOrder.push(currentCallId);
-        }
+      if (item.type === "function_call" || item.type === "custom_tool_call") {
+        const tool = ensureTool(item);
+        currentCallId = tool.id;
+        const args = responseToolArguments(item);
+        if (args.length > 0) tool.arguments = args;
+      }
+    } else if (type === "response.output_item.done") {
+      const item = (evt.item ?? {}) as Record<string, unknown>;
+      if (item.type === "function_call" || item.type === "custom_tool_call") {
+        const tool = ensureTool(item, currentCallId);
+        currentCallId = tool.id;
+        tool.arguments =
+          responseToolArguments(item) || pendingToolArguments.get(tool.id) || tool.arguments;
       }
     } else if (type === "response.output_text.delta") {
       if (typeof evt.delta === "string") text += evt.delta;
     } else if (typeof type === "string" && RESPONSES_REASONING_DELTA_TYPES.has(type)) {
       if (typeof evt.delta === "string") reasoning += evt.delta;
-    } else if (type === "response.function_call_arguments.delta") {
-      const tc = toolById.get(currentCallId);
-      if (tc && typeof evt.delta === "string") tc.arguments += evt.delta;
+    } else if (
+      type === "response.function_call_arguments.delta" ||
+      type === "response.custom_tool_call_input.delta"
+    ) {
+      if (typeof evt.delta !== "string") continue;
+      const eventToolId =
+        typeof evt.call_id === "string"
+          ? evt.call_id
+          : typeof evt.item_id === "string"
+            ? evt.item_id
+            : currentCallId;
+      const tool = toolById.get(eventToolId);
+      if (tool) tool.arguments += evt.delta;
+      else if (eventToolId.length > 0) {
+        pendingToolArguments.set(
+          eventToolId,
+          `${pendingToolArguments.get(eventToolId) ?? ""}${evt.delta}`,
+        );
+      }
     } else if (type === "response.function_call_arguments.done") {
-      const tc = toolById.get(currentCallId);
+      const eventToolId =
+        typeof evt.call_id === "string"
+          ? evt.call_id
+          : typeof evt.item_id === "string"
+            ? evt.item_id
+            : currentCallId;
+      const tc = toolById.get(eventToolId);
       if (tc && typeof evt.arguments === "string") tc.arguments = evt.arguments;
-    } else if (type === "response.completed" || type === "response.incomplete") {
-      // response.incomplete is terminal too (truncation / content filter): capture its
-      // status + usage and stop, else the idle guard could turn it into a timeout.
+    } else if (type === "response.completed") {
       const response = (evt.response ?? {}) as Record<string, unknown>;
-      status = response.status ?? (type === "response.incomplete" ? "incomplete" : "completed");
+      status = response.status ?? "completed";
       const usage = (response.usage ?? {}) as Record<string, unknown>;
       if (typeof usage.input_tokens === "number") inTok = usage.input_tokens;
       if (typeof usage.output_tokens === "number") outTok = usage.output_tokens;
@@ -1333,18 +2692,13 @@ export async function aggregateResponsesStream(
         cacheCreation = details.cache_creation_input_tokens;
       // Terminal event: stop reading NOW so the idle guard cannot turn a completed
       // aggregation into a timeout if the upstream delays closing the body.
+      completed = true;
       break;
-    } else if (type === "error" || type === "response.failed") {
-      const msg =
-        typeof evt.message === "string"
-          ? evt.message
-          : (
-              (((evt.response ?? {}) as Record<string, unknown>).error ?? {}) as {
-                message?: string;
-              }
-            ).message;
-      throw new UpstreamError("upstream_error", msg || "codex responses stream error", evt);
     }
+  }
+
+  if (!completed) {
+    throw new UpstreamError("upstream_error", "stream closed before response.completed");
   }
 
   const toolCalls = toolOrder.map((cid) => {

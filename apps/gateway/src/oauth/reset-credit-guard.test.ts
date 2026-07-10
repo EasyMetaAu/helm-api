@@ -5,6 +5,8 @@ import { AUTO_RESET_COOLDOWN_MS } from "./auto-reset.js";
 import {
   createResetCreditGuard,
   resetCreditGuardConfigKey,
+  resetCreditGuardPendingConfigKey,
+  resetCreditGuardRedeemConfigKey,
   resetCreditGuardWindowConfigKey,
 } from "./reset-credit-guard.js";
 
@@ -42,24 +44,33 @@ const weeklyWindow = (
 const weekly = (usedPercent: number): OAuthQuotaWindow[] => [weeklyWindow(usedPercent)];
 
 describe("createResetCreditGuard", () => {
-  it("persists the one-hour cooldown by shared account so a restart cannot spend again", async () => {
+  it("persists cooldown and weekly-window markers only after the reservation commits", async () => {
     const config = new MemoryConfig();
     const resolveSharedKey = vi.fn(async () => "codex:shared-account");
     const now = 1_000_000;
     const first = createResetCreditGuard({ config, resolveSharedKey });
 
-    await expect(
-      first.reserve({
-        providerId: "openai-codex",
-        account: "work-a",
-        windows: weekly(100),
-        mode: "auto",
-        nowMs: now,
-      }),
-    ).resolves.toMatchObject({ ok: true });
-
+    const reservation = await first.reserve({
+      providerId: "openai-codex",
+      account: "work-a",
+      windows: weekly(100),
+      mode: "auto",
+      nowMs: now,
+    });
+    expect(reservation).toMatchObject({ ok: true });
+    if (!reservation.ok) throw new Error("expected reset-credit reservation");
     const persistedKey = resetCreditGuardConfigKey("codex:shared-account");
+    const windowKey = resetCreditGuardWindowConfigKey("codex:shared-account");
+    expect(config.values.get(persistedKey)).toBeUndefined();
+    expect(config.values.get(windowKey)).toBeUndefined();
+    expect(
+      config.values.get(resetCreditGuardPendingConfigKey("codex:shared-account")),
+    ).toBeDefined();
+
+    await reservation.commit();
+
     expect(config.values.get(persistedKey)).toBe(String(now));
+    expect(config.values.get(windowKey)).toMatch(/^secondary:/);
     expect(persistedKey).not.toContain("shared-account");
 
     const afterRestart = createResetCreditGuard({ config, resolveSharedKey });
@@ -77,6 +88,37 @@ describe("createResetCreditGuard", () => {
       code: "reset_credit_cooldown_active",
       retryAfterMs: AUTO_RESET_COOLDOWN_MS / 2,
     });
+  });
+
+  it("rolls back a non-consuming reservation so the same weekly window can retry immediately", async () => {
+    const config = new MemoryConfig();
+    const resolveSharedKey = vi.fn(async () => "codex:shared-account");
+    const now = 1_500_000;
+    const firstGuard = createResetCreditGuard({ config, resolveSharedKey });
+    const first = await firstGuard.reserve({
+      providerId: "openai-codex",
+      account: "work-a",
+      windows: weekly(100),
+      mode: "auto",
+      nowMs: now,
+    });
+    if (!first.ok) throw new Error("expected first reset-credit reservation");
+
+    await first.rollback();
+
+    expect(config.values.get(resetCreditGuardConfigKey("codex:shared-account"))).toBeUndefined();
+    expect(
+      config.values.get(resetCreditGuardWindowConfigKey("codex:shared-account")),
+    ).toBeUndefined();
+    await expect(
+      createResetCreditGuard({ config, resolveSharedKey }).reserve({
+        providerId: "openai-codex",
+        account: "work-b",
+        windows: weekly(100),
+        mode: "manual",
+        nowMs: now + 1,
+      }),
+    ).resolves.toMatchObject({ ok: true });
   });
 
   it("does not reserve or resolve the account when weekly usage is below 90%", async () => {
@@ -102,6 +144,29 @@ describe("createResetCreditGuard", () => {
     expect(config.setIfMissingOrNumericLte).not.toHaveBeenCalled();
   });
 
+  it("does not reserve when Codex reports a workspace credit or spend-control limit", async () => {
+    const config = new MemoryConfig();
+    const resolveSharedKey = vi.fn(async () => "codex:shared-account");
+    const guard = createResetCreditGuard({ config, resolveSharedKey });
+
+    const result = await guard.reserve({
+      providerId: "openai-codex",
+      account: "work",
+      windows: weekly(100),
+      mode: "manual",
+      rateLimitReachedType: "workspace_member_credits_depleted",
+      nowMs: 1_000,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      status: 409,
+      code: "reset_credit_not_applicable",
+    });
+    expect(resolveSharedKey).not.toHaveBeenCalled();
+    expect(config.setIfMissingOrNumericLte).not.toHaveBeenCalled();
+  });
+
   it("allows only one reset-credit reservation for the same weekly window", async () => {
     const config = new MemoryConfig();
     const resolveSharedKey = vi.fn(async () => "codex:shared-account");
@@ -109,15 +174,16 @@ describe("createResetCreditGuard", () => {
     const now = 4_000_000;
     const windowReset = now + 3 * 86_400_000;
 
-    await expect(
-      guard.reserve({
-        providerId: "openai-codex",
-        account: "work-a",
-        windows: [weeklyWindow(100, windowReset)],
-        mode: "auto",
-        nowMs: now,
-      }),
-    ).resolves.toMatchObject({ ok: true });
+    const first = await guard.reserve({
+      providerId: "openai-codex",
+      account: "work-a",
+      windows: [weeklyWindow(100, windowReset)],
+      mode: "auto",
+      nowMs: now,
+    });
+    expect(first).toMatchObject({ ok: true });
+    if (!first.ok) throw new Error("expected reset-credit reservation");
+    await first.commit();
 
     expect(config.values.get(resetCreditGuardWindowConfigKey("codex:shared-account"))).toBe(
       `secondary:${windowReset}`,
@@ -167,15 +233,16 @@ describe("createResetCreditGuard", () => {
     const now = 5_000_000;
     const windowReset = now + 3 * 86_400_000;
 
-    await expect(
-      guard.reserve({
-        providerId: "openai-codex",
-        account: "work-a",
-        windows: [weeklyWindow(100, windowReset)],
-        mode: "auto",
-        nowMs: now,
-      }),
-    ).resolves.toMatchObject({ ok: true });
+    const first = await guard.reserve({
+      providerId: "openai-codex",
+      account: "work-a",
+      windows: [weeklyWindow(100, windowReset)],
+      mode: "auto",
+      nowMs: now,
+    });
+    expect(first).toMatchObject({ ok: true });
+    if (!first.ok) throw new Error("expected reset-credit reservation");
+    await first.commit();
 
     const jitteredSameWindow = await guard.reserve({
       providerId: "openai-codex",
@@ -199,15 +266,16 @@ describe("createResetCreditGuard", () => {
     const now = 5_500_000;
     const windowReset = now + 3 * 86_400_000;
 
-    await expect(
-      guard.reserve({
-        providerId: "openai-codex",
-        account: "work-a",
-        windows: [weeklyWindow(100, windowReset)],
-        mode: "auto",
-        nowMs: now,
-      }),
-    ).resolves.toMatchObject({ ok: true });
+    const first = await guard.reserve({
+      providerId: "openai-codex",
+      account: "work-a",
+      windows: [weeklyWindow(100, windowReset)],
+      mode: "auto",
+      nowMs: now,
+    });
+    expect(first).toMatchObject({ ok: true });
+    if (!first.ok) throw new Error("expected reset-credit reservation");
+    await first.commit();
 
     await expect(
       guard.reserve({
@@ -272,13 +340,15 @@ describe("createResetCreditGuard", () => {
     const now = 2_000_000;
     const windowReset = now + 86_400_000;
 
-    await guard.reserve({
+    const first = await guard.reserve({
       providerId: "openai-codex",
       account: "work",
       windows: [weeklyWindow(100, windowReset)],
       mode: "manual",
       nowMs: now,
     });
+    if (!first.ok) throw new Error("expected reset-credit reservation");
+    await first.commit();
 
     await expect(
       guard.reserve({
@@ -320,9 +390,110 @@ describe("createResetCreditGuard", () => {
     const results = [a, b];
     expect(results.filter((r) => r.ok)).toHaveLength(1);
     expect(results.filter((r) => !r.ok)).toEqual([
-      expect.objectContaining({ status: 429, code: "reset_credit_cooldown_active" }),
+      expect.objectContaining({ status: 429, code: "reset_credit_reservation_active" }),
     ]);
     expect(config.setIfMissingOrNumericLte).toHaveBeenCalledTimes(2);
+  });
+
+  it("rechecks the durable cooldown after a delayed cross-instance lease acquisition", async () => {
+    const config = new MemoryConfig();
+    const sharedKey = "codex:shared-account";
+    const now = 8_000_000;
+    const baseAtomic = config.setIfMissingOrNumericLte.getMockImplementation();
+    let pendingClaimCount = 0;
+    let releaseSecondClaim!: () => void;
+    const secondClaimGate = new Promise<void>((resolve) => {
+      releaseSecondClaim = resolve;
+    });
+    let secondClaimStarted!: () => void;
+    const secondClaimStartedPromise = new Promise<void>((resolve) => {
+      secondClaimStarted = resolve;
+    });
+    config.setIfMissingOrNumericLte.mockImplementation(async (key, value, lte) => {
+      if (key === resetCreditGuardPendingConfigKey(sharedKey)) {
+        pendingClaimCount += 1;
+        if (pendingClaimCount === 2) {
+          secondClaimStarted();
+          await secondClaimGate;
+        }
+      }
+      return (await baseAtomic?.(key, value, lte)) ?? false;
+    });
+    const makeGuard = () =>
+      createResetCreditGuard({
+        config,
+        resolveSharedKey: vi.fn(async () => sharedKey),
+      });
+
+    const first = await makeGuard().reserve({
+      providerId: "openai-codex",
+      account: "work-a",
+      windows: [weeklyWindow(100, now + 86_400_000)],
+      mode: "manual",
+      nowMs: now,
+    });
+    if (!first.ok) throw new Error("expected first reset-credit reservation");
+
+    const delayed = makeGuard().reserve({
+      providerId: "openai-codex",
+      account: "work-b",
+      windows: [weeklyWindow(100, now + 2 * 86_400_000)],
+      mode: "auto",
+      nowMs: now + 1,
+    });
+    await secondClaimStartedPromise;
+    await first.commit();
+    releaseSecondClaim();
+
+    await expect(delayed).resolves.toMatchObject({
+      ok: false,
+      status: 429,
+      code: "reset_credit_cooldown_active",
+    });
+  });
+
+  it("releases the pending lease when redeem-id persistence fails before consume", async () => {
+    const config = new MemoryConfig();
+    const sharedKey = "codex:shared-account";
+    const redeemKey = resetCreditGuardRedeemConfigKey(sharedKey);
+    let failRedeemWrite = true;
+    config.set.mockImplementation(async (key, value) => {
+      if (key === redeemKey && failRedeemWrite) {
+        failRedeemWrite = false;
+        throw new Error("disk full");
+      }
+      config.values.set(key, value);
+    });
+    const makeGuard = () =>
+      createResetCreditGuard({
+        config,
+        resolveSharedKey: vi.fn(async () => sharedKey),
+      });
+
+    await expect(
+      makeGuard().reserve({
+        providerId: "openai-codex",
+        account: "work-a",
+        windows: weekly(100),
+        mode: "manual",
+        nowMs: 9_000_000,
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      status: 503,
+      code: "reset_credit_guard_failed",
+    });
+    expect(config.values.get(resetCreditGuardPendingConfigKey(sharedKey))).toBe("0");
+
+    await expect(
+      makeGuard().reserve({
+        providerId: "openai-codex",
+        account: "work-b",
+        windows: weekly(100),
+        mode: "manual",
+        nowMs: 9_000_001,
+      }),
+    ).resolves.toMatchObject({ ok: true });
   });
 
   it("fails closed when the durable store cannot reserve atomically", async () => {
@@ -378,5 +549,83 @@ describe("createResetCreditGuard", () => {
       status: 503,
       code: "reset_credit_guard_failed",
     });
+  });
+
+  it("reuses the durable redeem id after a consumed reset fails to persist its window marker", async () => {
+    const config = new MemoryConfig();
+    const sharedKey = "codex:shared-account";
+    const windowReset = 40_000_000;
+    const windowKey = resetCreditGuardWindowConfigKey(sharedKey);
+    config.set.mockImplementation(async (key, value) => {
+      if (key === windowKey) throw new Error("disk full");
+      config.values.set(key, value);
+    });
+
+    const firstGuard = createResetCreditGuard({
+      config,
+      resolveSharedKey: vi.fn(async () => sharedKey),
+    });
+    const first = await firstGuard.reserve({
+      providerId: "openai-codex",
+      account: "work-a",
+      windows: [weeklyWindow(100, windowReset)],
+      mode: "manual",
+      nowMs: 1_000,
+    });
+    if (!first.ok) throw new Error("expected first reset-credit reservation");
+
+    await expect(first.commit()).resolves.toBeUndefined();
+    expect(config.values.get(resetCreditGuardWindowConfigKey(sharedKey))).toBeUndefined();
+    expect(config.values.get(resetCreditGuardRedeemConfigKey(sharedKey))).toContain(
+      first.idempotencyKey,
+    );
+
+    config.set.mockImplementation(async (key, value) => {
+      config.values.set(key, value);
+    });
+    const retryGuard = createResetCreditGuard({
+      config,
+      resolveSharedKey: vi.fn(async () => sharedKey),
+    });
+    const retry = await retryGuard.reserve({
+      providerId: "openai-codex",
+      account: "work-b",
+      windows: [weeklyWindow(100, windowReset)],
+      mode: "auto",
+      nowMs: 1_000 + 3 * 60_000,
+    });
+
+    expect(retry).toMatchObject({
+      ok: true,
+      idempotencyKey: first.idempotencyKey,
+    });
+  });
+
+  it("treats a durable weekly marker as sufficient when cooldown persistence fails", async () => {
+    const config = new MemoryConfig();
+    const sharedKey = "codex:shared-account";
+    const cooldownKey = resetCreditGuardConfigKey(sharedKey);
+    config.set.mockImplementation(async (key, value) => {
+      if (key === cooldownKey) throw new Error("cooldown write failed");
+      config.values.set(key, value);
+    });
+    const guard = createResetCreditGuard({
+      config,
+      resolveSharedKey: vi.fn(async () => sharedKey),
+    });
+    const reservation = await guard.reserve({
+      providerId: "openai-codex",
+      account: "work",
+      windows: [weeklyWindow(100, 50_000_000)],
+      mode: "auto",
+      nowMs: 10_000_000,
+    });
+    if (!reservation.ok) throw new Error("expected reset-credit reservation");
+
+    await expect(reservation.commit()).resolves.toBeUndefined();
+    expect(config.values.get(resetCreditGuardWindowConfigKey(sharedKey))).toBe(
+      "secondary:50000000",
+    );
+    expect(config.values.get(resetCreditGuardPendingConfigKey(sharedKey))).toBe("0");
   });
 });

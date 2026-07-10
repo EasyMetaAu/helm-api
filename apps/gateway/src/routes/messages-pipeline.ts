@@ -871,6 +871,7 @@ export function createMessagesPipeline(
         // Concrete subscription account selected by the OAuth pool, or null for a
         // configured/non-OAuth provider. Routes stamp it just before telemetry write.
         servingAccount,
+        responseMetadata: result.responseMetadata,
         async collect(): Promise<unknown> {
           if (failure !== null) throw failure;
           // Native passthrough (#217): the upstream's response is already in the

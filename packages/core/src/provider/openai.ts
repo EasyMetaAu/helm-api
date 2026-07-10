@@ -71,6 +71,10 @@ export type NativeProtocolProfile =
 export interface ProviderCallOptions {
   signal?: AbortSignal;
   captureUpstream?: (wireBody: string) => void;
+  // Per-call response metadata channel. Codex Responses uses this for request-scoped
+  // headers such as x-codex-turn-state and x-request-id; provider-level observers may
+  // still subscribe separately. Hooks are fail-open and must not affect the response.
+  onResponseMeta?: (headers: Headers) => void;
   /** Anthropic-only post-translation optimizer. Called after an OpenAI/IR-shaped
    * request is rendered into Anthropic Messages wire format, just before the POST
    * body is captured/sent. Other providers ignore it. */
@@ -150,9 +154,12 @@ export interface ProviderClient {
     opts?: { signal?: AbortSignal },
   ): Promise<Record<string, unknown>>;
   responsesCompact?(
-    req: ChatCompletionRequest,
-    opts?: { signal?: AbortSignal },
+    req: NativePassthroughInput,
+    opts?: ProviderCallOptions,
   ): Promise<Record<string, unknown>>;
+  // Close a named native Responses WebSocket session. Used by the gateway when
+  // the corresponding inbound Codex WebSocket disconnects.
+  closeResponsesWebSocketSession?(sessionId: string): Promise<void>;
 }
 
 // Upstream non-2xx / network error / timeout. The gateway maps this to an

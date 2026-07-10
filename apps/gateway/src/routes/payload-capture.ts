@@ -270,9 +270,13 @@ function normalizeResponsesUsage(u: Record<string, unknown>): StreamUsage {
   const details = (u.input_tokens_details ?? {}) as Record<string, unknown>;
   const cacheRead = typeof details.cached_tokens === "number" ? details.cached_tokens : 0;
   const cacheCreation =
-    typeof details.cache_creation_input_tokens === "number"
-      ? details.cache_creation_input_tokens
-      : 0;
+    typeof details.cache_write_tokens === "number"
+      ? details.cache_write_tokens
+      : typeof details.cache_creation_tokens === "number"
+        ? details.cache_creation_tokens
+        : typeof details.cache_creation_input_tokens === "number"
+          ? details.cache_creation_input_tokens
+          : 0;
   const normalized: StreamUsage = {
     prompt_tokens: inTok,
     completion_tokens: outTok,

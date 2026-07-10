@@ -114,7 +114,9 @@ describe("parseLanesConfig", () => {
   });
 
   it("rejects an unknown reasoning_effort value (fail-closed, NOT normalized)", () => {
-    const raw = { balanced: { primary: "x", reasoning_effort: "ultra" } };
-    expect(() => parseLanesConfig(raw)).toThrow();
+    for (const effort of ["ultra", "super"]) {
+      const raw = { balanced: { primary: "x", reasoning_effort: effort } };
+      expect(() => parseLanesConfig(raw)).toThrow();
+    }
   });
 });
