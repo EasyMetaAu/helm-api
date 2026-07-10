@@ -15,7 +15,20 @@ export interface OAuthCredentials {
   refresh: string;
   access: string;
   expires: number;
+  email?: string;
+  chatgptPlanType?: string;
+  chatgptUserId?: string;
+  accountId?: string;
+  isFedramp?: boolean;
   [key: string]: unknown;
+}
+
+export interface OpenAICodexIdentity {
+  email?: string;
+  chatgptPlanType?: string;
+  chatgptUserId?: string;
+  accountId?: string;
+  isFedramp?: boolean;
 }
 
 export type OAuthProviderId = string;

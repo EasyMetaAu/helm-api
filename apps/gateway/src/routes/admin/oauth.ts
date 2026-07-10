@@ -6,6 +6,7 @@ import {
   CODEX_RESET_MIN_WEEKLY_USED_PERCENT,
   canConsumeResetCredit,
   codexWeeklyUsedPercent,
+  runResetCreditAttempt,
 } from "../../oauth/auto-reset.js";
 import {
   isPermanentOAuthCredentialFailure,
@@ -14,6 +15,7 @@ import {
 import type {
   AccountProxyInput,
   AdminApiDeps,
+  CodexQuotaResult,
   OAuthAdminAccess,
   OAuthSelectionStrategy,
 } from "./deps.js";
@@ -226,7 +228,16 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     let bound: Set<string> | null = null;
     // Codex reset-credit counts from the live usage PULL. They are persisted with the
     // latest snapshot for quota-aware strategy scoring, then folded onto the response.
-    const resetCredits = new Map<string, number | null>();
+    const codexMetadata = new Map<string, NonNullable<CodexQuotaResult>>();
+    const codexIdentities = new Map<
+      string,
+      {
+        email?: string;
+        chatgptPlanType?: string;
+        chatgptAccountId?: string;
+        isFedramp?: boolean;
+      }
+    >();
     const syncCooldownFromWindows = async (
       providerId: string,
       account: string,
@@ -257,6 +268,23 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         bound = new Set(
           status.providers.flatMap((p) => p.accounts.map((a) => acctKey(p.id, a.account))),
         );
+        const codexAccounts =
+          status.providers.find((provider) => provider.id === "openai-codex")?.accounts ?? [];
+        for (const account of codexAccounts) {
+          const identity = {
+            ...(account.email === undefined ? {} : { email: account.email }),
+            ...(account.chatgptPlanType === undefined
+              ? {}
+              : { chatgptPlanType: account.chatgptPlanType }),
+            ...(account.chatgptAccountId === undefined
+              ? {}
+              : { chatgptAccountId: account.chatgptAccountId }),
+            ...(account.isFedramp === undefined ? {} : { isFedramp: account.isFedramp }),
+          };
+          if (Object.keys(identity).length > 0) {
+            codexIdentities.set(acctKey("openai-codex", account.account), identity);
+          }
+        }
         // Refresh the usage-endpoint PULL for each connected account (cached in the
         // seam). Anthropic and Codex both expose one; the Codex `x-codex-*` header
         // PUSH still updates the same store on live traffic — the PULL covers
@@ -303,26 +331,26 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
               (async () => {
                 const result = await fetchCodex({ account: a.account });
                 if (!result) return;
-                resetCredits.set(acctKey("openai-codex", a.account), result.resetCredits);
-                if (result.windows.length > 0) {
-                  const capturedAt = Date.now();
-                  await store
-                    .upsert({
-                      providerId: "openai-codex",
-                      account: a.account,
-                      windows: result.windows,
-                      capturedAt,
-                      source: "codex",
-                      resetCredits: result.resetCredits,
-                    })
-                    .catch(() => {});
-                  deps.applyQuotaSnapshot?.(
-                    "openai-codex",
-                    a.account,
-                    result.windows,
+                codexMetadata.set(acctKey("openai-codex", a.account), result);
+                const capturedAt = Date.now();
+                await store
+                  .upsert({
+                    providerId: "openai-codex",
+                    account: a.account,
+                    windows: result.windows,
                     capturedAt,
-                    result.resetCredits,
-                  );
+                    source: "codex",
+                    resetCredits: result.resetCredits,
+                  })
+                  .catch(() => {});
+                deps.applyQuotaSnapshot?.(
+                  "openai-codex",
+                  a.account,
+                  result.windows,
+                  capturedAt,
+                  result.resetCredits,
+                );
+                if (result.windows.length > 0) {
                   await syncCooldownFromWindows("openai-codex", a.account, result.windows);
                 }
               })(),
@@ -334,15 +362,34 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         // fail-open: a refresh/listing failure still returns whatever is stored
       }
     }
-    // Fold the live codex reset-credit count onto its snapshot (no-op for others).
-    const withCredits = <T extends { providerId: string; account: string }>(q: T) => {
-      const credits = resetCredits.get(acctKey(q.providerId, q.account));
-      return credits === undefined ? q : { ...q, resetCredits: credits };
+    // Fold the complete live Codex subscription metadata onto its snapshot. Only
+    // resetCredits is persisted for pool scoring; the rest remains live/read-only.
+    const withCodexMetadata = <T extends { providerId: string; account: string }>(q: T) => {
+      const key = acctKey(q.providerId, q.account);
+      const metadata = codexMetadata.get(key);
+      const identity = codexIdentities.get(key);
+      return metadata === undefined && identity === undefined
+        ? q
+        : {
+            ...q,
+            ...(identity === undefined ? {} : { identity }),
+            ...(metadata === undefined
+              ? {}
+              : {
+                  resetCredits: metadata.resetCredits,
+                  resetCreditDetails: metadata.resetCreditDetails,
+                  credits: metadata.credits,
+                  individualLimit: metadata.individualLimit,
+                  additionalLimits: metadata.additionalLimits,
+                  planType: metadata.planType,
+                  rateLimitReachedType: metadata.rateLimitReachedType,
+                }),
+          };
     };
     try {
       const all = await store.getAll();
       // No binding view (no seam / listStatus failed) → fail-open, return everything.
-      if (!bound) return c.json({ quota: all.map(withCredits) });
+      if (!bound) return c.json({ quota: all.map(withCodexMetadata) });
       const live = all.filter((q) => bound.has(acctKey(q.providerId, q.account)));
       // Best-effort prune so orphans don't accumulate; never block the read on it.
       await Promise.all(
@@ -350,7 +397,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
           .filter((q) => !bound.has(acctKey(q.providerId, q.account)))
           .map((o) => store.delete(o.providerId, o.account).catch(() => {})),
       );
-      return c.json({ quota: live.map(withCredits) });
+      return c.json({ quota: live.map(withCodexMetadata) });
     } catch {
       return c.json({ quota: [] });
     }
@@ -359,21 +406,41 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
   // POST /oauth/:provider/reset-credit { account? } -> consume one rate-limit reset
   // credit for the account (the "reset usage limit" action). Codex-only. FAIL-CLOSED:
   // the seam THROWS on any upstream failure, surfaced here as a 502 so the operator
-  // sees a real error rather than a silent no-op. Returns { code, windowsReset }.
+  // sees a real error rather than a silent no-op. Returns the normalized four-way
+  // outcome together with the upstream code and restored-window count.
   app.post("/admin/api/oauth/:provider/reset-credit", async (c) => {
     const s = seam();
-    if (!s?.consumeCodexResetCredit) {
+    const consumeCodexResetCredit = s?.consumeCodexResetCredit;
+    if (!consumeCodexResetCredit) {
       return c.json({ error: "oauth login not configured" }, 503);
     }
     const providerId = c.req.param("provider");
     if (providerId !== "openai-codex") {
       return c.json({ error: "reset credit is only supported for openai-codex" }, 400);
     }
-    const body = (await c.req.json().catch(() => ({}))) as { account?: unknown };
+    const body = (await c.req.json().catch(() => ({}))) as {
+      account?: unknown;
+      creditId?: unknown;
+      idempotencyKey?: unknown;
+    };
     const account =
       typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT;
+    const creditId = typeof body.creditId === "string" ? body.creditId : undefined;
+    const idempotencyKey =
+      typeof body.idempotencyKey === "string" ? body.idempotencyKey : undefined;
+    if (creditId !== undefined && creditId.length === 0) {
+      return c.json({ error: "creditId must not be empty" }, 400);
+    }
+    if (idempotencyKey !== undefined && idempotencyKey.length === 0) {
+      return c.json({ error: "idempotencyKey must not be empty" }, 400);
+    }
     const snapshot = await deps.oauthQuota?.get(providerId, account).catch(() => null);
-    if (!snapshot) {
+    const liveQuota = await s.fetchCodexQuota?.({ account }).catch(() => null);
+    const windows =
+      snapshot?.windows && snapshot.windows.length > 0
+        ? snapshot.windows
+        : (liveQuota?.windows ?? []);
+    if (windows.length === 0) {
       return c.json(
         {
           error: "reset credit blocked: Codex weekly quota snapshot is unavailable",
@@ -382,12 +449,19 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         409,
       );
     }
-    const weeklyUsedPercent = codexWeeklyUsedPercent(snapshot.windows);
-    if (!canConsumeResetCredit(snapshot.windows)) {
+    const rateLimitReachedType = liveQuota?.rateLimitReachedType ?? null;
+    const weeklyUsedPercent = codexWeeklyUsedPercent(windows);
+    if (!canConsumeResetCredit(windows, rateLimitReachedType)) {
+      const reachedTypeBlocks =
+        rateLimitReachedType !== null && rateLimitReachedType !== "rate_limit_reached";
       return c.json(
         {
-          error: `reset credit blocked: Codex weekly usage must be at least ${CODEX_RESET_MIN_WEEKLY_USED_PERCENT}%`,
-          code: "weekly_usage_below_reset_threshold",
+          error: reachedTypeBlocks
+            ? "reset credit blocked: this Codex limit cannot be restored with a rate-limit reset credit"
+            : `reset credit blocked: Codex weekly usage must be at least ${CODEX_RESET_MIN_WEEKLY_USED_PERCENT}%`,
+          code: reachedTypeBlocks
+            ? "reset_credit_not_applicable"
+            : "weekly_usage_below_reset_threshold",
           weeklyUsedPercent,
           minWeeklyUsedPercent: CODEX_RESET_MIN_WEEKLY_USED_PERCENT,
         },
@@ -404,8 +478,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     const reservation = await guard.reserve({
       providerId,
       account,
-      windows: snapshot.windows,
+      windows,
       mode: "manual",
+      ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+      rateLimitReachedType,
     });
     if (!reservation.ok) {
       if (reservation.retryAfterMs !== undefined) {
@@ -423,7 +499,15 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       );
     }
     try {
-      const result = await s.consumeCodexResetCredit({ account });
+      const { result } = await runResetCreditAttempt({
+        reservation,
+        consume: () =>
+          consumeCodexResetCredit({
+            account,
+            ...(creditId === undefined ? {} : { creditId }),
+            idempotencyKey: reservation.idempotencyKey,
+          }),
+      });
       return c.json(result, 200);
     } catch (e) {
       // Upstream said no (no credits, expired token, network) — not a client error.
@@ -555,15 +639,20 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     if (!s) return c.json({ error: "oauth login not configured" }, 503);
     const body = (await c.req.json().catch(() => ({}))) as {
       account?: unknown;
+      mode?: unknown;
       models?: unknown;
     };
     if (!Array.isArray(body.models) || body.models.some((m) => typeof m !== "string")) {
       return c.json({ error: "models must be an array of strings" }, 400);
     }
+    if (body.mode !== undefined && body.mode !== "auto" && body.mode !== "manual") {
+      return c.json({ error: "mode must be 'auto' or 'manual'" }, 400);
+    }
     try {
       await s.setEnabledModels({
         providerId: c.req.param("provider"),
         account: typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT,
+        mode: body.mode === "auto" ? "auto" : "manual",
         models: body.models as string[],
       });
       if (!(await afterMutation())) return c.json(notApplied, 503);

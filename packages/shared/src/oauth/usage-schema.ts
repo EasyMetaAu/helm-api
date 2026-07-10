@@ -33,20 +33,97 @@ export type OAuthUsageRow = z.infer<typeof OAuthUsageRowSchema>;
 // ── Quota (Tier 3): latest rate-limit window snapshot per (provider, account) ─
 
 // One rate-limit window. `key` names the window (Claude: 5h / 7d / 7d-opus /
-// 7d-sonnet / 7d-fable; Codex: primary / secondary). `usedPercent` is 0–100.
+// 7d-sonnet / 7d-fable; Codex: primary / secondary). `usedPercent` is normally
+// 0–100, but Codex preserves the upstream number verbatim and can report values
+// above 100 while a limit is exceeded. The UI clamps only the progress-bar width.
 // `resetsAtMs` is the epoch ms the window resets (null when unknown).
 // `windowMinutes` is the window length when the provider reports it (Codex), else
 // null.
 export const OAuthQuotaWindowSchema = z
   .object({
     key: z.string(),
-    usedPercent: z.number().min(0).max(100),
+    usedPercent: z.number().min(0),
     resetsAtMs: z.number().int().nullable(),
     windowMinutes: z.number().int().positive().nullable().default(null),
+    // Codex additional_rate_limits only. The default Codex bucket and Anthropic
+    // windows omit these fields for backward compatibility.
+    limitId: z.string().optional(),
+    limitName: z.string().nullable().optional(),
   })
   .strict();
 
 export type OAuthQuotaWindow = z.infer<typeof OAuthQuotaWindowSchema>;
+
+// Codex subscription identity copied from the authenticated ChatGPT account.
+// Optional fields preserve legacy records and claims that some account types omit.
+// This is operator-facing metadata only; no token or secret material is allowed.
+export const CodexSubscriptionIdentitySchema = z
+  .object({
+    email: z.string().optional(),
+    chatgptPlanType: z.string().optional(),
+    chatgptAccountId: z.string().optional(),
+    isFedramp: z.boolean().optional(),
+  })
+  .strict();
+
+export type CodexSubscriptionIdentity = z.infer<typeof CodexSubscriptionIdentitySchema>;
+
+export const CodexQuotaCreditsSchema = z
+  .object({
+    hasCredits: z.boolean(),
+    unlimited: z.boolean(),
+    balance: z.string().nullable(),
+  })
+  .strict();
+
+export type CodexQuotaCredits = z.infer<typeof CodexQuotaCreditsSchema>;
+
+// Codex workspace spend-control limit normalized for Helm's gateway/Admin wire.
+// The upstream amounts are decimal strings and must remain strings to avoid losing
+// precision. `remainingPercent` is preserved verbatim; renderers clamp only the bar.
+export const CodexIndividualLimitSchema = z
+  .object({
+    limit: z.string(),
+    used: z.string(),
+    remainingPercent: z.number(),
+    resetsAtMs: z.number().int().nullable(),
+  })
+  .strict();
+
+export type CodexIndividualLimit = z.infer<typeof CodexIndividualLimitSchema>;
+
+export const CodexAdditionalLimitSchema = z
+  .object({
+    limitId: z.string(),
+    limitName: z.string().nullable(),
+  })
+  .strict();
+
+export type CodexAdditionalLimit = z.infer<typeof CodexAdditionalLimitSchema>;
+
+export const CodexResetCreditDetailSchema = z
+  .object({
+    id: z.string(),
+    resetType: z.enum(["codexRateLimits", "unknown"]),
+    status: z.enum(["available", "redeeming", "redeemed", "unknown"]),
+    grantedAt: z.number().int(),
+    expiresAt: z.number().int().nullable(),
+    title: z.string().nullable(),
+    description: z.string().nullable(),
+  })
+  .strict();
+
+export type CodexResetCreditDetail = z.infer<typeof CodexResetCreditDetailSchema>;
+
+export const CodexRateLimitReachedTypeSchema = z.enum([
+  "rate_limit_reached",
+  "workspace_owner_credits_depleted",
+  "workspace_member_credits_depleted",
+  "workspace_owner_usage_limit_reached",
+  "workspace_member_usage_limit_reached",
+]);
+
+export type CodexRateLimitReachedType = z.infer<typeof CodexRateLimitReachedTypeSchema>;
 
 // The latest snapshot for one account: its windows + when/how it was captured.
 // `source` records HOW the snapshot was obtained (anthropic = on-demand usage
@@ -68,6 +145,19 @@ export const OAuthQuotaSnapshotSchema = z
     // Codex only: how many rate-limit reset credits are available at capture time.
     // Optional because Anthropic has no equivalent and older rows predate this field.
     resetCredits: z.number().int().nonnegative().nullable().optional(),
+    // Codex-only live metadata folded onto the Admin quota response. These fields
+    // are intentionally optional because persisted snapshots contain only windows,
+    // cooldown state, and the reset-credit count used by account-pool scoring.
+    identity: CodexSubscriptionIdentitySchema.optional(),
+    planType: z.string().nullable().optional(),
+    credits: CodexQuotaCreditsSchema.nullable().optional(),
+    resetCreditDetails: z.array(CodexResetCreditDetailSchema).nullable().optional(),
+    // Codex only: the workspace/member monthly spend-control limit from the live
+    // usage PULL. It is not persisted by the quota stores, but may be attached by
+    // the Admin route to the returned snapshot.
+    individualLimit: CodexIndividualLimitSchema.nullable().optional(),
+    additionalLimits: z.array(CodexAdditionalLimitSchema).optional(),
+    rateLimitReachedType: CodexRateLimitReachedTypeSchema.nullable().optional(),
   })
   .strict();
 
@@ -140,15 +230,66 @@ export type AnthropicOAuthUsage = z.infer<typeof AnthropicOAuthUsageSchema>;
 // The (untrusted) shape ChatGPT's Codex usage endpoint returns — the same payload
 // the Codex CLI's /status display reads (active PULL counterpart of the
 // `x-codex-*` header PUSH). Parsed fail-open and `.loose()` throughout: the
-// endpoint also carries plan/credits/additional_rate_limits fields we ignore, and
-// any of them may appear/vanish without breaking the providers page. `reset_at`
-// is epoch SECONDS; `used_percent` is already 0–100.
+// endpoint carries plan, credits, additional limits, reached-type, and reset-credit
+// metadata, while unknown fields may appear/vanish without breaking the providers
+// page. `reset_at` is epoch SECONDS; `used_percent` is already 0–100.
 const CodexRateLimitWindowSchema = z
   .object({
     used_percent: z.number().optional(),
     limit_window_seconds: z.number().optional(),
     reset_after_seconds: z.number().optional(),
     reset_at: z.number().optional(),
+  })
+  .loose();
+
+const CodexRateLimitStatusSchema = z
+  .object({
+    allowed: z.boolean().optional(),
+    limit_reached: z.boolean().optional(),
+    primary_window: CodexRateLimitWindowSchema.nullish(),
+    secondary_window: CodexRateLimitWindowSchema.nullish(),
+  })
+  .loose();
+
+const CodexCreditsSchema = z
+  .object({
+    has_credits: z.boolean().optional(),
+    unlimited: z.boolean().optional(),
+    balance: z.string().nullish(),
+  })
+  .loose();
+
+const CodexSpendControlLimitSchema = z
+  .object({
+    source: z.string().nullish(),
+    limit: z.string().optional(),
+    used: z.string().optional(),
+    remaining: z.string().optional(),
+    used_percent: z.number().optional(),
+    remaining_percent: z.number().optional(),
+    reset_after_seconds: z.number().optional(),
+    reset_at: z.number().optional(),
+  })
+  .loose();
+
+const CodexSpendControlStatusSchema = z
+  .object({
+    reached: z.boolean().optional(),
+    individual_limit: CodexSpendControlLimitSchema.nullish(),
+  })
+  .loose();
+
+const CodexAdditionalRateLimitSchema = z
+  .object({
+    limit_name: z.string().optional(),
+    metered_feature: z.string().optional(),
+    rate_limit: CodexRateLimitStatusSchema.nullish(),
+  })
+  .loose();
+
+const CodexRateLimitReachedEnvelopeSchema = z
+  .object({
+    type: z.string(),
   })
   .loose();
 
@@ -160,18 +301,32 @@ const CodexRateLimitWindowSchema = z
 const CodexRateLimitResetCreditsSchema = z
   .object({
     available_count: z.number().optional(),
+    credits: z
+      .array(
+        z
+          .object({
+            id: z.string(),
+            reset_type: z.string(),
+            status: z.string(),
+            granted_at: z.string(),
+            expires_at: z.string().nullish(),
+            title: z.string().nullish(),
+            description: z.string().nullish(),
+          })
+          .loose(),
+      )
+      .optional(),
   })
   .loose();
 
 export const CodexOAuthUsageSchema = z
   .object({
-    rate_limit: z
-      .object({
-        primary_window: CodexRateLimitWindowSchema.nullish(),
-        secondary_window: CodexRateLimitWindowSchema.nullish(),
-      })
-      .loose()
-      .nullish(),
+    plan_type: z.string().optional(),
+    rate_limit: CodexRateLimitStatusSchema.nullish(),
+    credits: CodexCreditsSchema.nullish(),
+    spend_control: CodexSpendControlStatusSchema.nullish(),
+    additional_rate_limits: z.array(CodexAdditionalRateLimitSchema).nullish(),
+    rate_limit_reached_type: CodexRateLimitReachedEnvelopeSchema.nullish(),
     rate_limit_reset_credits: CodexRateLimitResetCreditsSchema.nullish(),
   })
   .loose();
@@ -180,14 +335,21 @@ export type CodexOAuthUsage = z.infer<typeof CodexOAuthUsageSchema>;
 
 // ── Codex reset-credit CONSUME response ──────────────────────────────────────
 // POST chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume returns the
-// redeemed-credit envelope. We only read `code` (status string) and
-// `windows_reset` (how many rate-limit windows were restored) for the operator
-// toast; the nested `credit` metadata is ignored. Untrusted → `.loose()` so a
-// shape drift on the fields we ignore never fails the parse.
+// redeemed-credit envelope. The Gateway adds the camelCase `outcome`,
+// `windowsReset`, and `redeemRequestId` projection for Admin. One shared schema
+// validates both stages; the nested upstream `credit` metadata remains ignored.
 export const CodexResetResultSchema = z
   .object({
-    code: z.string().optional(),
-    windows_reset: z.number().optional(),
+    code: z
+      .enum(["reset", "nothing_to_reset", "no_credit", "already_redeemed"])
+      .nullable()
+      .optional(),
+    windows_reset: z.number().default(0),
+    // Gateway-normalized Admin response. Optional here because the same schema also
+    // parses the upstream snake_case envelope before the Gateway projects it.
+    outcome: z.enum(["reset", "nothingToReset", "noCredit", "alreadyRedeemed"]).optional(),
+    windowsReset: z.number().nullable().optional(),
+    redeemRequestId: z.string().optional(),
   })
   .loose();
 

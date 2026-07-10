@@ -126,8 +126,8 @@ describe("IRRequestSchema — litellm parity request params (all optional)", () 
     expect(parsed.stop).toBe("END");
   });
 
-  it("accepts extended reasoning_effort tiers and clamps unknowns to high (litellm parity)", () => {
-    // Tolerant passthrough: known tiers (incl. none/xhigh/max) round-trip losslessly...
+  it("accepts protocol reasoning tiers and clamps Codex-local/future values to high", () => {
+    // Tolerant passthrough: protocol tiers (incl. none/xhigh/max) round-trip losslessly.
     for (const effort of ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const) {
       const parsed = IRRequestSchema.parse({
         model: "m",
@@ -136,14 +136,16 @@ describe("IRRequestSchema — litellm parity request params (all optional)", () 
       });
       expect(parsed.reasoning_effort).toBe(effort);
     }
-    // ...and an unrecognized FUTURE tier clamps to "high" instead of 400ing the request
-    // (the over-strict enum is exactly what broke Codex with effort:"xhigh").
-    const clamped = IRRequestSchema.parse({
-      model: "m",
-      messages: [{ role: "user", content: "x" }],
-      reasoning_effort: "ultra",
-    });
-    expect(clamped.reasoning_effort).toBe("high");
+    // `ultra` is a Codex-local mode, not a cross-provider wire capability. Both it and
+    // unknown future values normalize before Gemini/Anthropic/OpenAI protocol rendering.
+    for (const effort of ["ultra", "mega"]) {
+      const clamped = IRRequestSchema.parse({
+        model: "m",
+        messages: [{ role: "user", content: "x" }],
+        reasoning_effort: effort,
+      });
+      expect(clamped.reasoning_effort).toBe("high");
+    }
   });
 });
 

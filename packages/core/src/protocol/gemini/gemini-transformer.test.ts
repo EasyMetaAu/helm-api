@@ -942,6 +942,20 @@ describe("generationConfig param round-trip (litellm parity)", () => {
     expect(mk("minimal").generationConfig?.thinkingConfig).toBeDefined();
   });
 
+  it("normalizes Codex-local ultra before rendering Gemini thinkingConfig", () => {
+    const out = geminiTransformer.transformRequestIn({
+      model: "gemini-2.5-pro",
+      messages: [{ role: "user", content: "hi" }],
+      reasoning_effort: "ultra" as never,
+    }) as GeminiGenerateContentRequest;
+
+    expect(out.generationConfig?.thinkingConfig).toEqual({
+      thinkingBudget: 24576,
+      includeThoughts: true,
+    });
+    expect(JSON.stringify(out)).not.toContain("ultra");
+  });
+
   it("maps Gemini generationConfig -> IR params (Gemini -> IR)", () => {
     const native: GeminiGenerateContentRequest = {
       contents: [{ role: "user", parts: [{ text: "hi" }] }],

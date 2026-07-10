@@ -6,7 +6,11 @@ import {
   nativePassthroughMutations,
 } from "../../packages/shared/src/native-passthrough.js";
 import { prepareNativePassthroughRequest } from "../../packages/core/src/provider/native-passthrough.js";
-import { summarizeCliOutput } from "./live-cli.js";
+import {
+  codexCommandPinsBaseUrl,
+  inferredAdminBaseUrl,
+  summarizeCliOutput,
+} from "./live-cli.js";
 
 describe("native passthrough helper acceptance", () => {
   it("keeps the raw body when no body mutation is required", () => {
@@ -123,5 +127,23 @@ describe("native passthrough helper acceptance", () => {
       if (previousToken === undefined) delete process.env.PROVIDER_ACCESS_TOKEN;
       else process.env.PROVIDER_ACCESS_TOKEN = previousToken;
     }
+  });
+
+  it("requires Codex live commands to pin the Helm base URL through Codex config", () => {
+    expect(
+      codexCommandPinsBaseUrl(
+        `codex exec -c 'openai_base_url="http://127.0.0.1:18080/v1"' -m gpt-5.6-sol hi`,
+      ),
+    ).toBe(true);
+    expect(codexCommandPinsBaseUrl("codex exec -m gpt-5.6-sol hi")).toBe(false);
+  });
+
+  it("derives the admin origin from a /v1 API base without producing /v1/admin", () => {
+    expect(inferredAdminBaseUrl(undefined, "http://127.0.0.1:18080/v1")).toBe(
+      "http://127.0.0.1:18080",
+    );
+    expect(
+      inferredAdminBaseUrl("http://127.0.0.1:19090/", "http://127.0.0.1:18080/v1"),
+    ).toBe("http://127.0.0.1:19090");
   });
 });

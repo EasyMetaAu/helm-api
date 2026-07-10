@@ -139,6 +139,8 @@ export interface ExecuteOutcome {
   // it is the real wire body the model received, NOT the pre-translation adapter input.
   // null when no provider served. The gateway records it to the payload table; never logged.
   upstreamRequest?: string | null;
+  // Safe request-scoped upstream response headers captured on the served attempt.
+  responseMetadata?: Readonly<Record<string, string>>;
 }
 
 // The orchestrator's return value: the executor outcome enriched with the
@@ -157,6 +159,8 @@ export interface ExecutionResult {
   // upstream for the served attempt (post inject + translation). The gateway writes it
   // verbatim to the captured payload. Only set on the ok branch.
   upstreamRequest?: string | null;
+  // Forwarded request-scoped response headers from the served attempt.
+  responseMetadata?: Readonly<Record<string, string>>;
 }
 
 export interface RouteDeps {
@@ -1039,6 +1043,7 @@ export async function routeRequest(
       // Forward the exact body sent upstream so the gateway can capture it into the
       // payload table (what the model actually received, post inject + translation).
       upstreamRequest: outcome.upstreamRequest,
+      responseMetadata: outcome.responseMetadata,
     };
   }
   return {

@@ -119,4 +119,28 @@ describe("shipped config rules drive routing", () => {
     );
     expect(lane).toBe("json");
   });
+
+  it("routes the Codex gpt-5.6 alias directly to the subscription Sol lane", async () => {
+    const config = loadConfig({ configDir, env: {} });
+    if (config.lanes === undefined) throw new Error("config.lanes must be loaded from lanes.yaml");
+
+    const result = await routeRequest(
+      req({ protocol: "openai_responses", requested_model: "gpt-5.6" }),
+      {
+        classify: async () => classification(),
+        policies: config.policies,
+        lanes: config.lanes,
+        modelAliases: config.model_aliases,
+        execute: async (plan) => okExecute(plan),
+        now: () => new Date(0),
+        log: () => {},
+      },
+      { allowCustomModel: true },
+    );
+
+    expect(result.decision.lane.selected_lane).toBe("gpt-5.6-sol");
+    expect(result.decision.lane.candidate_chain[0]).toBe("openai-codex/gpt-5.6-sol");
+    expect(result.decision.lane.candidate_chain).not.toContain("openai/gpt-5.6");
+    expect(result.decision.requested_model).toBe("gpt-5.6");
+  });
 });

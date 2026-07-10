@@ -3,29 +3,24 @@
 // show up in the Lanes picker.
 //
 // Strategy (maintainer decision): discover live where an API exists, else fall
-// back to a curated list. GitHub Copilot exposes GET /models and Anthropic exposes
-// GET /v1/models — both are queried LIVE with the account's token. ChatGPT Codex
-// has no convenient list endpoint, so it uses a curated set. Any list is
+// back to a curated list. Copilot, Anthropic, and ChatGPT Codex are queried LIVE
+// with the account's token. Any list is
 // OVERRIDABLE by declaring the provider with its own models[] in providers.yaml
 // (that wins).
 
+import { arch, platform, release } from "node:os";
+import { type CodexModelInfo, CodexModelsResponseSchema } from "./codex-model-info.js";
 import { listGitHubCopilotModels } from "./github-copilot.js";
+import { parseOpenAICodexIdentity } from "./openai-codex.js";
 
 // Curated FALLBACK model ids — used when live discovery is unavailable or fails.
-// anthropic is normally live (GET /v1/models); these are only its safety net.
-// openai-codex has NO list-models endpoint (the ChatGPT Codex backend doesn't
-// expose one — confirmed against openclaw, whose Codex catalog is literally
-// `models: []`, and claude-relay-service, which only tracks usage). So Codex is
-// ALWAYS this curated set — the known Codex subscription models. Operators can
-// override via an explicit providers.yaml entry.
+// Anthropic and Codex are normally live; these are only their safety net.
 export const CURATED_OAUTH_MODELS: Record<string, string[]> = {
   anthropic: ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
-  // ChatGPT Codex set. Keep this to the subscription backend slugs that are known
-  // to execute through the ChatGPT Codex OAuth path. The public API `gpt-5.6`
-  // alias routes to Sol, but the subscription backend currently rejects the bare
-  // alias. Operators can still add/remove models via the Manage dialog (their
-  // saved list is authoritative).
+  // ChatGPT Codex set. The family alias is derived from Sol entitlement and is
+  // never an independent authorization source.
   "openai-codex": [
+    "gpt-5.6",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
@@ -34,6 +29,160 @@ export const CURATED_OAUTH_MODELS: Record<string, string[]> = {
     "gpt-5.4-mini",
   ],
 };
+
+const OPENAI_CODEX_MODEL_ALIASES: Readonly<Record<string, string>> = {
+  "gpt-5.6": "gpt-5.6-sol",
+};
+
+export function resolveOpenAICodexModelAlias(model: string): string {
+  return OPENAI_CODEX_MODEL_ALIASES[model] ?? model;
+}
+
+export function expandOpenAICodexModelAliases(models: readonly string[]): string[] {
+  const expanded = [...new Set(models)];
+  for (const [alias, target] of Object.entries(OPENAI_CODEX_MODEL_ALIASES)) {
+    if (expanded.includes(target) && !expanded.includes(alias)) expanded.push(alias);
+  }
+  return expanded;
+}
+
+// Codex sends the whole semver (major.minor.patch) to /models. The current main
+// branch is the 0.145.0 line; alpha suffixes are intentionally omitted, matching
+// codex-rs/models-manager::client_version_to_whole.
+export const DEFAULT_OPENAI_CODEX_CLIENT_VERSION = "0.145.0";
+export const OPENAI_CODEX_CLIENT_VERSION_ENV = "HELM_OPENAI_CODEX_CLIENT_VERSION";
+
+export interface OpenAICodexModelsOptions {
+  accountId?: string;
+  isFedramp?: boolean;
+  clientVersion?: string;
+  userAgent?: string;
+  fetchImpl?: typeof globalThis.fetch;
+}
+
+export interface OpenAICodexModelsResult {
+  models: CodexModelInfo[];
+  etag?: string;
+  reasoningIncluded?: boolean;
+}
+
+export class OpenAICodexModelsError extends Error {
+  readonly httpStatus: number;
+
+  constructor(httpStatus: number) {
+    super(`OpenAI Codex /models HTTP ${httpStatus}`);
+    this.name = "OpenAICodexModelsError";
+    this.httpStatus = httpStatus;
+  }
+}
+
+function assertSemanticClientVersion(version: string): void {
+  if (!/^\d+\.\d+\.\d+$/.test(version)) {
+    throw new Error(`OpenAI Codex client version must be an x.y.z semantic version: ${version}`);
+  }
+}
+
+function sanitizeUserAgentToken(value: string | undefined): string {
+  const sanitized = (value ?? "").trim().replace(/[^A-Za-z0-9!#$%&'*+\-.^_`|~/:]/g, "_");
+  return sanitized.length > 0 ? sanitized : "unknown";
+}
+
+function sanitizeUserAgentComment(value: string): string {
+  const sanitized = [...value.trim()]
+    .map((char) => {
+      const code = char.charCodeAt(0);
+      return code <= 0x1f || code === 0x7f || char === "(" || char === ")" || char === "\\"
+        ? "_"
+        : char;
+    })
+    .join("");
+  return sanitized.length > 0 ? sanitized : "unknown";
+}
+
+function codexOsType(): string {
+  switch (platform()) {
+    case "darwin":
+      return "Mac OS";
+    case "win32":
+      return "Windows";
+    case "linux":
+      return "Linux";
+    default:
+      return platform();
+  }
+}
+
+function terminalUserAgentToken(): string {
+  const program = process.env.TERM_PROGRAM?.trim();
+  if (program) {
+    const version = process.env.TERM_PROGRAM_VERSION?.trim();
+    return sanitizeUserAgentToken(version ? `${program}/${version}` : program);
+  }
+  return sanitizeUserAgentToken(process.env.TERM);
+}
+
+export function resolveOpenAICodexClientVersion(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): string {
+  const version =
+    env[OPENAI_CODEX_CLIENT_VERSION_ENV]?.trim() || DEFAULT_OPENAI_CODEX_CLIENT_VERSION;
+  assertSemanticClientVersion(version);
+  return version;
+}
+
+export function buildOpenAICodexUserAgent(clientVersion: string): string {
+  assertSemanticClientVersion(clientVersion);
+  return `codex_cli_rs/${clientVersion} (${sanitizeUserAgentComment(codexOsType())} ${sanitizeUserAgentComment(release())}; ${sanitizeUserAgentComment(arch())}) ${terminalUserAgentToken()}`;
+}
+
+export async function listOpenAICodexModels(
+  accessToken: string,
+  options: OpenAICodexModelsOptions = {},
+): Promise<OpenAICodexModelsResult> {
+  const clientVersion = options.clientVersion ?? resolveOpenAICodexClientVersion();
+  assertSemanticClientVersion(clientVersion);
+
+  const identity = parseOpenAICodexIdentity(accessToken);
+  const accountId = options.accountId ?? identity.accountId;
+  const isFedramp = options.isFedramp ?? identity.isFedramp;
+  const url = new URL("https://chatgpt.com/backend-api/codex/models");
+  url.searchParams.set("client_version", clientVersion);
+
+  const headers = new Headers({
+    Accept: "application/json",
+    Authorization: `Bearer ${accessToken}`,
+    originator: "codex_cli_rs",
+    version: clientVersion,
+    "user-agent": options.userAgent ?? buildOpenAICodexUserAgent(clientVersion),
+  });
+  if (accountId) headers.set("chatgpt-account-id", accountId);
+  if (isFedramp) headers.set("X-OpenAI-Fedramp", "true");
+
+  const response = await (options.fetchImpl ?? fetch)(url.toString(), { headers });
+  if (!response.ok) {
+    await response.text().catch(() => "");
+    throw new OpenAICodexModelsError(response.status);
+  }
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new Error("OpenAI Codex /models returned invalid JSON");
+  }
+  const parsed = CodexModelsResponseSchema.safeParse(body);
+  if (!parsed.success) {
+    throw new Error("OpenAI Codex /models returned invalid model metadata");
+  }
+
+  const etag = response.headers.get("etag") ?? undefined;
+  const reasoningIncluded = response.headers.has("x-reasoning-included");
+  return {
+    models: parsed.data.models,
+    ...(etag ? { etag } : {}),
+    ...(reasoningIncluded ? { reasoningIncluded: true } : {}),
+  };
+}
 
 // Live-list Anthropic (Claude Pro/Max) models via GET /v1/models with the OAuth
 // subscription identity (same Claude-Code headers the executor uses). Throws on a
@@ -60,16 +209,15 @@ export async function listAnthropicModels(
 }
 
 // Whether this provider has a LIVE list-models API that `discoverOAuthModels`
-// queries (Copilot GET /models, Anthropic GET /v1/models). Codex has none — its
-// list is the hand-curated set — so a "pull from provider" action is meaningless
-// for it (there is nothing live to pull). The admin UI uses this to hide that
-// button where it can't do anything real.
+// queries. The admin UI uses this to expose account-specific refresh actions.
 export function hasLiveModelDiscovery(providerId: string): boolean {
-  return providerId === "github-copilot" || providerId === "anthropic";
+  return (
+    providerId === "github-copilot" || providerId === "anthropic" || providerId === "openai-codex"
+  );
 }
 
 // Resolve the routable model ids for a bound provider. `accessToken` drives live
-// discovery (Copilot + Anthropic). Never throws — a discovery failure falls back
+// discovery. Never throws — a discovery failure falls back
 // to the curated list (or [] when none), so the composition root stays fail-open.
 // `fetchImpl` lets the caller route discovery through the account's egress proxy
 // (issue #38) so this leg of the flow leaves from the same hop as the rest.
@@ -96,6 +244,19 @@ export async function discoverOAuthModels(
       }
     }
     return CURATED_OAUTH_MODELS.anthropic ?? [];
+  }
+  if (providerId === "openai-codex") {
+    if (!accessToken) return [];
+    try {
+      const live = await listOpenAICodexModels(accessToken, { fetchImpl });
+      const visible = live.models
+        .filter((model) => model.visibility === "list")
+        .sort((left, right) => left.priority - right.priority)
+        .map((model) => model.slug);
+      return [...new Set(visible)];
+    } catch {
+      return [];
+    }
   }
   return CURATED_OAUTH_MODELS[providerId] ?? [];
 }

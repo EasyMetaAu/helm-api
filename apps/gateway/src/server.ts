@@ -6,11 +6,13 @@ import {
   anthropicTransformer,
   type BudgetCaps,
   bootstrapRootKey,
+  buildOpenAICodexUserAgent,
   COPILOT_HEADERS,
+  type CodexRateLimitReachedType,
   type ConfigStore,
   type CreateKeyInput,
   checkTlsTransportAvailable,
-  codexAccountIdFromToken,
+  codexActiveLimitIdFromProviderRaw,
   createAnthropicClient,
   createBudgetGate,
   createCachedKeyStore,
@@ -31,12 +33,14 @@ import {
   createTokenManager,
   DEFAULT_429_COOLDOWN_MS,
   DEFAULT_LANES,
+  DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
   type DecayDeps,
   decryptSecret,
   discoverOAuthModels,
   type EmbeddingJob,
   encryptSecret,
   expandLaneChain,
+  expandOpenAICodexModelAliases,
   type GeminiGenerateContentResponse,
   type GeneratedKey,
   geminiTransformer,
@@ -44,6 +48,7 @@ import {
   getGitHubCopilotBaseUrl,
   getOAuthProvider,
   hashKey,
+  hoistResponsesInstructions,
   type InjectDeps,
   type IRResponse,
   isUserMessageRequest,
@@ -51,6 +56,7 @@ import {
   type Lane,
   type LanesConfig,
   LocalVolumeSink,
+  listOpenAICodexModels,
   loadConfig,
   loadEncKeyFromEnv,
   loadRuntimeCatalog,
@@ -67,11 +73,16 @@ import {
   type OAuthTokenStore,
   type ObserveDeps,
   type ObserverDeps,
+  type OpenAICodexIdentity,
+  OpenAICodexModelsError,
+  type OpenAICodexModelsResult,
+  openAICodexIdentityFingerprint,
   type PoliciesConfig,
   type ProviderClient,
   type ProxyConfig,
-  parseCodexQuotaHeaders,
+  parseCodexQuotaHeaderDetails,
   parseLanesConfig,
+  parseOpenAICodexIdentity,
   preOutputClassifierFor,
   pruneRetainedMemory,
   type ReflectorDeps,
@@ -82,6 +93,7 @@ import {
   redact,
   resolveCompactionPricing,
   resolveCostUsd,
+  resolveOpenAICodexClientVersion,
   responsesTransformer,
   routeRequest,
   runCleanupPass,
@@ -106,19 +118,25 @@ import type {
   ClassifierConfig,
   ErrorClass,
   InternalRequest,
+  NativePassthroughInput,
   OAuthQuotaWindow,
   ProviderConfig as ProviderConfigShared,
   RuntimeSettings,
   TargetProviderProtocol,
 } from "@helm/shared";
 import {
+  appendMutationList,
+  cloneCarrierWithBody,
   ErrorClassSchema,
   effectiveMemoryProjectId,
+  isNativePassthroughCarrier,
   isOAuthPreset,
   makeHelmError,
+  nativePassthroughBody,
 } from "@helm/shared";
 import { createApp } from "./app.js";
 import { readBuildInfo } from "./build-info.js";
+import { createCodexResponsesWebSocketConnector } from "./codex-responses-websocket.js";
 import { INTERNAL_API_KEY_ID } from "./internal-key.js";
 import { createJsonLogger, type Logger } from "./logging.js";
 import { createMemoryEmbedder } from "./memory-embedder.js";
@@ -136,9 +154,21 @@ import {
   loadAccountSettings,
   loadGlobalOAuthSettings,
   markAccountCredentialFailure,
+  resolveAccountModelsMode,
 } from "./oauth/account-settings.js";
 import { createOAuthAdmin } from "./oauth/admin-oauth.js";
-import { weeklySaturated } from "./oauth/auto-reset.js";
+import { runResetCreditAttempt, weeklySaturated } from "./oauth/auto-reset.js";
+import { loadBundledCodexModels } from "./oauth/codex-bundled-models.js";
+import { normalizeOpenAICodexClientVersion } from "./oauth/codex-client-version.js";
+import { resolveCodexCompactModel } from "./oauth/codex-compact.js";
+import { type CodexModelCacheKey, createCodexModelCache } from "./oauth/codex-model-cache.js";
+import {
+  type CodexModelCatalog,
+  type CodexModelCatalogSnapshot,
+  createCodexModelCatalog,
+} from "./oauth/codex-model-catalog.js";
+import { createCodexModelsEtagTracker } from "./oauth/codex-model-etag-tracker.js";
+import { codexResetCreditSharedKey } from "./oauth/codex-reset-account-key.js";
 import { anthropicMetadataUserId, stableSessionId } from "./oauth/device-identity.js";
 import { effectiveOAuthModelOptions, type ModelOption } from "./oauth/effective-models.js";
 import { createResetCreditGuard, resetCreditGuardHash } from "./oauth/reset-credit-guard.js";
@@ -165,7 +195,11 @@ import { createMessagesPipeline } from "./routes/messages-pipeline.js";
 import { registerModelsRoute } from "./routes/models.js";
 import { registerPortalApi } from "./routes/portal/index.js";
 import { mountPortalStatic, PORTAL_BUILD_ROOT } from "./routes/portal-static.js";
-import { type ResponsesRouteDeps, registerResponsesRoute } from "./routes/responses.js";
+import {
+  type ResponsesCompactExecution,
+  type ResponsesRouteDeps,
+  registerResponsesRoute,
+} from "./routes/responses.js";
 import { registerUsageStatsRoute } from "./routes/usage.js";
 import {
   markServingAccount,
@@ -180,6 +214,8 @@ export interface ServerHandle {
   app: ReturnType<typeof createApp>;
   port: number;
   host: string;
+  closeResponsesWebSocketSession?: (sessionId: string) => Promise<void>;
+  responsesWebSocketSessionProof?: string;
   // Stop background workers (e.g. the Agentic Signals scheduler). Optional and
   // safe to skip — the timers are unref'd so they never block process exit.
   dispose?: () => void | Promise<void>;
@@ -296,6 +332,7 @@ type ProviderCredential =
       getAuthHeader: () => Promise<string>;
       onUnauthorized: () => void;
       currentSecrets: () => string[];
+      currentMetadata: () => Readonly<Record<string, unknown>>;
     };
 
 // Runtime context for PRESET subscription OAuth (issue #38): the persistent
@@ -305,6 +342,294 @@ type ProviderCredential =
 export interface OAuthRuntimeCtx {
   store: OAuthTokenStore;
   encKey: Buffer;
+}
+
+export interface CodexOAuthRuntime {
+  catalog: CodexModelCatalog;
+  clientVersion?: string;
+  userAgent?: string;
+  onCatalogChanged?: () => void;
+}
+
+interface CodexAccountRuntime {
+  key: CodexModelCacheKey;
+  catalog: CodexModelCatalog;
+  fetchModels: () => Promise<OpenAICodexModelsResult>;
+  accountIdentity: OpenAICodexIdentity;
+  clientVersion: string;
+  userAgent: string;
+  onCatalogChanged?: () => void;
+}
+
+function identityString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function codexIdentityFromMetadata(
+  metadata: Readonly<Record<string, unknown>>,
+): OpenAICodexIdentity {
+  const accountId = identityString(metadata.accountId);
+  const chatgptUserId = identityString(metadata.chatgptUserId);
+  const chatgptPlanType = identityString(metadata.chatgptPlanType);
+  const email = identityString(metadata.email);
+  return {
+    ...(accountId ? { accountId } : {}),
+    ...(chatgptUserId ? { chatgptUserId } : {}),
+    ...(chatgptPlanType ? { chatgptPlanType } : {}),
+    ...(email ? { email } : {}),
+    ...(typeof metadata.isFedramp === "boolean" ? { isFedramp: metadata.isFedramp } : {}),
+  };
+}
+
+function mergeCodexIdentity(
+  accessToken: string,
+  metadata: Readonly<Record<string, unknown>>,
+): OpenAICodexIdentity {
+  return {
+    ...parseOpenAICodexIdentity(accessToken),
+    ...codexIdentityFromMetadata(metadata),
+  };
+}
+
+function codexCacheIdentity(identity: OpenAICodexIdentity): string {
+  return openAICodexIdentityFingerprint(identity);
+}
+
+interface LoadedCodexAccountCatalog {
+  key: CodexModelCacheKey;
+  snapshot: CodexModelCatalogSnapshot;
+  runtime: CodexAccountRuntime;
+}
+
+async function loadCodexAccountCatalog(input: {
+  account: string;
+  tokenManager: ReturnType<typeof createTokenManager>;
+  proxyFetch?: typeof globalThis.fetch;
+  clientVersion: string;
+  catalog: CodexModelCatalog;
+  onCatalogChanged?: () => void;
+}): Promise<LoadedCodexAccountCatalog | null> {
+  const clientVersion = normalizeOpenAICodexClientVersion(input.clientVersion);
+  if (clientVersion === null) return null;
+  const userAgent = buildOpenAICodexUserAgent(clientVersion);
+  const accessToken = (await input.tokenManager.getAuthHeader()).replace(/^Bearer /, "");
+  const accountIdentity = mergeCodexIdentity(accessToken, input.tokenManager.currentMetadata());
+  const key: CodexModelCacheKey = {
+    providerId: "openai-codex",
+    account: input.account,
+    accountIdentity: codexCacheIdentity(accountIdentity),
+    clientVersion,
+  };
+  const fetchModelsOnce = async (): Promise<OpenAICodexModelsResult> => {
+    const currentAccess = (await input.tokenManager.getAuthHeader()).replace(/^Bearer /, "");
+    const currentIdentity = mergeCodexIdentity(currentAccess, input.tokenManager.currentMetadata());
+    return listOpenAICodexModels(currentAccess, {
+      accountId: currentIdentity.accountId,
+      isFedramp: currentIdentity.isFedramp,
+      clientVersion,
+      userAgent,
+      fetchImpl: input.proxyFetch,
+    });
+  };
+  const fetchModels = async (): Promise<OpenAICodexModelsResult> => {
+    try {
+      return await fetchModelsOnce();
+    } catch (error) {
+      if (!(error instanceof OpenAICodexModelsError) || error.httpStatus !== 401) {
+        throw error;
+      }
+      input.tokenManager.invalidate();
+      return fetchModelsOnce();
+    }
+  };
+  const snapshot = await input.catalog.load(key, fetchModels);
+  if (snapshot === null) return null;
+  return {
+    key,
+    snapshot,
+    runtime: {
+      key,
+      catalog: input.catalog,
+      fetchModels,
+      accountIdentity,
+      clientVersion,
+      userAgent,
+      onCatalogChanged: input.onCatalogChanged,
+    },
+  };
+}
+
+export interface CodexClientVersionCatalog {
+  keys: CodexModelCacheKey[];
+  models: string[];
+}
+
+export async function loadCodexCatalogForClientVersion(input: {
+  configured: ReadonlyArray<ProviderConfigShared>;
+  oauthCtx: OAuthRuntimeCtx;
+  config: ConfigStore;
+  catalog: CodexModelCatalog;
+  clientVersion: string;
+}): Promise<CodexClientVersionCatalog> {
+  const clientVersion = normalizeOpenAICodexClientVersion(input.clientVersion);
+  if (clientVersion === null) return { keys: [], models: [] };
+  const declared = new Set<string>(
+    input.configured.flatMap((provider) =>
+      provider.oauth && isOAuthPreset(provider.oauth) ? [provider.oauth.provider] : [],
+    ),
+  );
+  if (declared.has("openai-codex")) return { keys: [], models: [] };
+
+  const accountSettings = await loadAccountSettings(input.config, input.oauthCtx.encKey);
+  const keys: CodexModelCacheKey[] = [];
+  const models = new Set<string>();
+  const provider = getOAuthProvider("openai-codex");
+  if (!provider) return { keys, models: [] };
+
+  for (const binding of await input.oauthCtx.store.list()) {
+    if (binding.providerId !== "openai-codex") continue;
+    const settings = getAccountSettings(accountSettings, binding.providerId, binding.account);
+    if (typeof settings.credentialFailedAt === "number" || settings.schedulable === false) continue;
+    const accountConfig = {
+      oauth: { provider: binding.providerId, account: binding.account },
+    } as unknown as ProviderConfigShared;
+    const proxy = resolveProviderProxy(accountConfig, accountSettings);
+    const proxyFetch = proxy ? makeProxyFetch(proxy) : undefined;
+    const tokenManager = createTokenManager({
+      oauth: {
+        kind: "preset",
+        providerId: binding.providerId,
+        account: binding.account,
+      },
+      tokenStore: input.oauthCtx.store,
+      encKey: input.oauthCtx.encKey,
+      oauthProvider: provider,
+      fetch: proxyFetch,
+      now: () => Date.now(),
+    });
+    let loaded: LoadedCodexAccountCatalog | null;
+    try {
+      loaded = await loadCodexAccountCatalog({
+        account: binding.account,
+        tokenManager,
+        proxyFetch,
+        clientVersion,
+        catalog: input.catalog,
+      });
+    } catch {
+      continue;
+    }
+    if (loaded === null) continue;
+    keys.push(loaded.key);
+    let discovered = expandOpenAICodexModelAliases(
+      [...loaded.snapshot.models]
+        .sort((left, right) => left.priority - right.priority)
+        .map((model) => model.slug),
+    );
+    if (resolveAccountModelsMode(binding.providerId, settings) === "manual") {
+      const enabled = new Set(settings.enabledModels ?? []);
+      discovered = discovered.filter((model) => enabled.has(model));
+    }
+    for (const model of discovered) models.add(model);
+  }
+
+  return { keys, models: [...models] };
+}
+
+function nativeHeaderValue(
+  headers: Readonly<Record<string, string | string[]>>,
+  name: string,
+): string | undefined {
+  const target = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() !== target) continue;
+    const selected = Array.isArray(value) ? value[0] : value;
+    return selected?.trim() || undefined;
+  }
+  return undefined;
+}
+
+export function normalizeCodexNativeClientVersion(
+  input: NativePassthroughInput,
+): NativePassthroughInput {
+  if (!isNativePassthroughCarrier(input)) return input;
+  const explicit =
+    nativeHeaderValue(input.headers, "version") ??
+    nativeHeaderValue(input.headers, "x-codex-client-version");
+  if (explicit === undefined) return input;
+  const normalized = normalizeOpenAICodexClientVersion(explicit);
+  const headers = Object.fromEntries(
+    Object.entries(input.headers).filter(
+      ([name]) =>
+        name.toLowerCase() !== "version" && name.toLowerCase() !== "x-codex-client-version",
+    ),
+  );
+  if (normalized !== null) headers.version = normalized;
+  if (
+    normalized === explicit &&
+    nativeHeaderValue(input.headers, "x-codex-client-version") === undefined
+  ) {
+    return input;
+  }
+  return { ...input, headers };
+}
+
+export async function runCodexCompactProviderCall(input: {
+  execute(options: {
+    signal: AbortSignal;
+    onResponseMeta?: (headers: Headers) => void;
+    captureUpstream: (wireBody: string) => void;
+  }): Promise<unknown>;
+  signal: AbortSignal;
+  onResponseMeta?: (headers: Headers) => void;
+  onExecution?: (execution: ResponsesCompactExecution) => void;
+  modelAlias: string;
+  providerModel: string;
+  providerName: string;
+}): Promise<unknown> {
+  let upstreamRequest: string | null = null;
+  const holder: { selected: ServingAccount | null } = { selected: null };
+  const reportExecution = (): void => {
+    input.onExecution?.({
+      modelAlias: input.modelAlias,
+      providerModel: input.providerModel,
+      providerName: input.providerName,
+      upstreamRequest,
+      servingAccount: holder.selected,
+    });
+  };
+  try {
+    const result = await servingAccountStore.run(holder, () =>
+      input.execute({
+        signal: input.signal,
+        ...(input.onResponseMeta ? { onResponseMeta: input.onResponseMeta } : {}),
+        captureUpstream: (wireBody) => {
+          upstreamRequest = wireBody;
+        },
+      }),
+    );
+    reportExecution();
+    return result;
+  } catch (error) {
+    try {
+      reportExecution();
+    } catch {
+      // Preserve the provider failure if an optional observability callback misbehaves.
+    }
+    throw error;
+  }
+}
+
+export function createHotCodexCompactExecutor(
+  getClient: () => Pick<ProviderClient, "responsesCompact"> | null,
+  unavailable: () => Error,
+): NonNullable<ProviderClient["responsesCompact"]> {
+  return async (body, options) => {
+    const client = getClient();
+    const method = client?.responsesCompact;
+    if (method === undefined) throw unavailable();
+    return await method.call(client, body, options);
+  };
 }
 
 // Executor-ready subscription providers that a bound credential can AUTO-ROUTE to
@@ -373,8 +698,26 @@ function isAnthropicScopedWeeklyModel(model: string | null): boolean {
   );
 }
 
-function shouldParkOAuthRateLimit(providerId: string, model: string | null): boolean {
-  return !(providerId === "anthropic" && isAnthropicScopedWeeklyModel(model));
+function providerRawFromError(error: unknown): unknown {
+  if (error === null || typeof error !== "object" || Array.isArray(error)) return null;
+  return (error as { providerRaw?: unknown }).providerRaw ?? null;
+}
+
+function resolveOAuthRateLimitScope(
+  providerId: string,
+  model: string | null,
+  error: unknown,
+): { scope: "account" } | { scope: "model"; model: string; limitId: string | null } {
+  if (providerId === "openai-codex" && model !== null) {
+    const activeLimitId = codexActiveLimitIdFromProviderRaw(providerRawFromError(error));
+    if (activeLimitId !== null && activeLimitId !== "codex") {
+      return { scope: "model", model, limitId: activeLimitId };
+    }
+  }
+  if (providerId === "anthropic" && model !== null && isAnthropicScopedWeeklyModel(model)) {
+    return { scope: "model", model, limitId: null };
+  }
+  return { scope: "account" };
 }
 
 // The synthesis result (issue #38, Stage 3): one synthetic provider config per
@@ -389,6 +732,8 @@ export interface SynthesizedOAuth {
   // can park / un-park a single account in place on a usage-limit signal, without a
   // full pool rebuild.
   poolClients: Map<string, OAuthPoolClient>;
+  // Account/version-scoped Codex catalog keys represented by this synthesis.
+  codexKeys: CodexModelCacheKey[];
 }
 
 export interface OAuthQuotaSeed {
@@ -414,6 +759,7 @@ function buildOAuthAccountClient(
   fastMode: boolean,
   base: { baseUrl: string; timeoutMs: number },
   onResponseMeta?: (headers: Headers) => void,
+  codexRuntime?: CodexAccountRuntime,
 ): ProviderClient | null {
   const spec = ROUTABLE_OAUTH[providerId];
   if (!spec) return null;
@@ -446,6 +792,7 @@ function buildOAuthAccountClient(
     identity,
     onResponseMeta,
     fastMode,
+    codexRuntime,
   );
 }
 
@@ -490,8 +837,11 @@ export async function synthesizeOAuthProviders(
   // Pool-local credential failures are permanent until reconnect. Persist the
   // auto-disabled state so admin status, rebuilds, and restarts agree with the live pool.
   onAccountCredentialFailure?: (providerId: string, account: string, error: unknown) => void,
+  // Shared account-scoped Codex model catalog. When present, Codex synthesis uses
+  // complete ModelInfo snapshots instead of reducing discovery to static slugs.
+  codex?: CodexOAuthRuntime,
 ): Promise<SynthesizedOAuth> {
-  if (!oauthCtx) return { providers: [], poolClients: new Map() };
+  if (!oauthCtx) return { providers: [], poolClients: new Map(), codexKeys: [] };
   const declared = new Set<string>(
     configured.flatMap((p) => (p.oauth && isOAuthPreset(p.oauth) ? [p.oauth.provider] : [])),
   );
@@ -511,6 +861,7 @@ export async function synthesizeOAuthProviders(
   const selectionStrategy: OAuthSelectionStrategy = globalSettings.selectionStrategy ?? "balanced";
   const providers: ProviderConfigShared[] = [];
   const poolClients = new Map<string, OAuthPoolClient>();
+  const codexKeys: CodexModelCacheKey[] = [];
 
   for (const [providerId, accounts] of accountsByProvider) {
     const spec = ROUTABLE_OAUTH[providerId];
@@ -543,31 +894,60 @@ export async function synthesizeOAuthProviders(
         accountSettings,
       );
       const proxyFetch = proxy ? makeProxyFetch(proxy) : undefined;
+      const tm = createTokenManager({
+        oauth: { kind: "preset", providerId, account },
+        tokenStore: oauthCtx.store,
+        encKey: oauthCtx.encKey,
+        oauthProvider: provider,
+        fetch: proxyFetch,
+        now: () => Date.now(),
+      });
       let accessToken: string;
       try {
-        const tm = createTokenManager({
-          oauth: { kind: "preset", providerId, account },
-          tokenStore: oauthCtx.store,
-          encKey: oauthCtx.encKey,
-          oauthProvider: provider,
-          fetch: proxyFetch,
-          now: () => Date.now(),
-        });
         accessToken = (await tm.getAuthHeader()).replace(/^Bearer /, "");
       } catch {
         log("warn", "oauth.autoroute.skip", { providerId, account, reason: "refresh failed" });
         continue;
       }
       let discovered: string[];
-      try {
-        discovered = await discoverOAuthModels(providerId, accessToken, proxyFetch);
-      } catch {
-        discovered = [];
+      let accountCodexRuntime: CodexAccountRuntime | undefined;
+      if (providerId === "openai-codex" && codex) {
+        const clientVersion = codex.clientVersion ?? DEFAULT_OPENAI_CODEX_CLIENT_VERSION;
+        const loaded = await loadCodexAccountCatalog({
+          account,
+          tokenManager: tm,
+          proxyFetch,
+          clientVersion,
+          catalog: codex.catalog,
+          onCatalogChanged: codex.onCatalogChanged,
+        });
+        discovered = loaded
+          ? expandOpenAICodexModelAliases(
+              [...loaded.snapshot.models]
+                .sort((left, right) => left.priority - right.priority)
+                .map((model) => model.slug),
+            )
+          : [];
+        if (loaded) codexKeys.push(loaded.key);
+        accountCodexRuntime = loaded?.runtime;
+      } else {
+        try {
+          discovered = await discoverOAuthModels(providerId, accessToken, proxyFetch);
+        } catch {
+          discovered = [];
+        }
       }
-      // The operator's edited list is AUTHORITATIVE (verbatim) — it may include
-      // model ids that discovery missed (stale/incomplete catalogs). Unset ⇒ use
-      // the discovered seed. An explicit empty list ⇒ expose nothing.
-      if (s.enabledModels) discovered = s.enabledModels;
+      // Auto follows the authenticated account catalog. Manual is an explicit
+      // allowlist and remains authoritative even for ids discovery did not report.
+      const modelsMode = resolveAccountModelsMode(providerId, s);
+      if (modelsMode === "manual") {
+        if (providerId === "openai-codex") {
+          const enabled = new Set(s.enabledModels ?? []);
+          discovered = discovered.filter((model) => enabled.has(model));
+        } else {
+          discovered = s.enabledModels ?? [];
+        }
+      }
       if (discovered.length === 0) {
         log("warn", "oauth.autoroute.no_models", { providerId, account });
         continue;
@@ -590,6 +970,7 @@ export async function synthesizeOAuthProviders(
         s.fastMode === true,
         { baseUrl: fallbackBaseUrl, timeoutMs },
         onResponseMeta,
+        accountCodexRuntime,
       );
       if (!client) continue; // unreachable (token just refreshed) — fail-open guard
       // Serialize user-message requests per account (issue #93, feature B). The
@@ -611,6 +992,7 @@ export async function synthesizeOAuthProviders(
         account,
         priority: s.priority ?? 50,
         schedulable: true,
+        models: discovered,
         client: serialized,
         isAtCapacity: userMessageQueue
           ? () => {
@@ -662,7 +1044,8 @@ export async function synthesizeOAuthProviders(
       onAccountRateLimit: (account, untilMs) => onAccountRateLimit?.(providerId, account, untilMs),
       onAccountCredentialFailure: (account, error) =>
         onAccountCredentialFailure?.(providerId, account, error),
-      shouldParkRateLimit: ({ model }) => shouldParkOAuthRateLimit(providerId, model),
+      resolveRateLimitScope: ({ model, error }) =>
+        resolveOAuthRateLimitScope(providerId, model, error),
       // Let the in-pool retry fail over across accounts on an IN-BAND pre-output failure
       // (200-then-`response.failed`/overloaded after only the preamble): wrap each member's
       // SSE with the protocol's pre-output guard so the doomed stream rotates to a sibling
@@ -691,7 +1074,7 @@ export async function synthesizeOAuthProviders(
       selection_strategy: selectionStrategy,
     });
   }
-  return { providers, poolClients };
+  return { providers, poolClients, codexKeys };
 }
 
 // Per-account egress proxy resolver (issue #38 follow-up). A preset OAuth provider
@@ -805,6 +1188,7 @@ export function buildCredential(
         getAuthHeader: () => tm.getAuthHeader(),
         onUnauthorized: () => tm.invalidate(),
         currentSecrets: () => tm.currentSecrets(),
+        currentMetadata: () => tm.currentMetadata(),
       };
     }
     // ── CONFIDENTIAL-client OAuth (generic SSO / client_credentials): env secrets.
@@ -830,6 +1214,7 @@ export function buildCredential(
       getAuthHeader: () => tm.getAuthHeader(),
       onUnauthorized: () => tm.invalidate(),
       currentSecrets: () => tm.currentSecrets(),
+      currentMetadata: () => tm.currentMetadata(),
     };
   }
   // Static key path: env var NAME → plaintext key (or null when unset).
@@ -895,6 +1280,9 @@ function createProviderClient(
   // Per-account Fast mode for OAuth subscription providers. The provider client
   // forces the corresponding upstream request field when this account serves a call.
   fastMode = false,
+  // Account-scoped Codex catalog + identity contract. Present only for synthesized
+  // ChatGPT subscription accounts; generic Responses providers do not consume it.
+  codexRuntime?: CodexAccountRuntime,
 ): ProviderClient {
   // One proxy fetch per client (the executor keeps one client per account, so the
   // undici dispatcher is pooled per account). Built ONCE here, not per request.
@@ -915,10 +1303,102 @@ function createProviderClient(
   // ChatGPT identity headers, account-id decoded from the access-token JWT). Needs
   // the dynamic OAuth header; a static key never drives this path.
   if (p.type === "openai-responses" && "getAuthHeader" in cred) {
-    return createCodexResponsesClient({
-      config: { ...base, ...cred, sessionId: identity?.sessionId, onResponseMeta, fastMode },
+    const client = createCodexResponsesClient({
+      config: {
+        ...base,
+        ...cred,
+        sessionId: identity?.sessionId,
+        onResponseMeta,
+        fastMode,
+        userAgent: codexRuntime?.userAgent,
+        getAccountIdentity: () => ({
+          ...codexRuntime?.accountIdentity,
+          ...codexIdentityFromMetadata(cred.currentMetadata()),
+        }),
+        resolveModelInfo: codexRuntime
+          ? (model) => codexRuntime.catalog.resolve(codexRuntime.key, model)
+          : undefined,
+        onModelsEtag: codexRuntime
+          ? (etag) => {
+              void codexRuntime.catalog.observeEtag(
+                codexRuntime.key,
+                etag,
+                codexRuntime.fetchModels,
+                codexRuntime.onCatalogChanged,
+              );
+            }
+          : undefined,
+        responsesWebSocketConnector: createCodexResponsesWebSocketConnector({
+          proxy,
+          timeoutMs: base.timeoutMs,
+        }),
+      },
       fetch: providerFetch,
     });
+    const prepareNative = (input: NativePassthroughInput): NativePassthroughInput => {
+      const versionedInput = normalizeCodexNativeClientVersion(input);
+      const body = nativePassthroughBody(versionedInput);
+      const model = typeof body.model === "string" ? body.model : "";
+      const modelInfo =
+        codexRuntime && model.length > 0
+          ? codexRuntime.catalog.resolve(codexRuntime.key, model)
+          : undefined;
+      const hoisted = hoistResponsesInstructions(body, {
+        ...(isNativePassthroughCarrier(versionedInput) ? { headers: versionedInput.headers } : {}),
+        modelInfo,
+      });
+      let nextBody = hoisted.body;
+      let ultraMapped = false;
+      const reasoning = nextBody.reasoning;
+      if (
+        reasoning !== null &&
+        typeof reasoning === "object" &&
+        !Array.isArray(reasoning) &&
+        (reasoning as Record<string, unknown>).effort === "ultra"
+      ) {
+        nextBody = {
+          ...nextBody,
+          reasoning: { ...(reasoning as Record<string, unknown>), effort: "max" },
+        };
+        ultraMapped = true;
+      }
+      if (nextBody === body) return versionedInput;
+      if (!isNativePassthroughCarrier(versionedInput)) return nextBody;
+      if (hoisted.fix !== "none") {
+        appendMutationList(versionedInput.mutations, "body_shims_applied", [
+          hoisted.fix === "hoisted_from_input"
+            ? "instructions_hoisted_from_input"
+            : "instructions_defaulted",
+        ]);
+      }
+      if (ultraMapped) {
+        appendMutationList(versionedInput.mutations, "body_shims_applied", [
+          "codex_ultra_reasoning_mapped_to_max",
+        ]);
+      }
+      return cloneCarrierWithBody(versionedInput, nextBody);
+    };
+    return {
+      ...client,
+      async nativePassthrough(body, opts) {
+        if (!client.nativePassthrough) {
+          throw new Error("Codex native passthrough is unavailable");
+        }
+        return await client.nativePassthrough(prepareNative(body), opts);
+      },
+      nativePassthroughStream(body, opts) {
+        if (!client.nativePassthroughStream) {
+          throw new Error("Codex native passthrough streaming is unavailable");
+        }
+        return client.nativePassthroughStream(prepareNative(body), opts);
+      },
+      async responsesCompact(body, opts) {
+        if (!client.responsesCompact) {
+          throw new Error("Codex Responses compact is unavailable");
+        }
+        return await client.responsesCompact(prepareNative(body), opts);
+      },
+    };
   }
   if (
     p.type === "openai-responses" ||
@@ -995,6 +1475,7 @@ export async function buildServer(
   opts: { logger?: Logger; configDir?: string } = {},
 ): Promise<ServerHandle> {
   const logger = opts.logger ?? createJsonLogger();
+  const responsesWebSocketSessionProof = randomUUID();
   const config = loadConfig({ configDir: opts.configDir ?? "./config" });
 
   // Store adapter set, chosen by config (CLAUDE.md "DB abstraction layer"): sqlite (default,
@@ -1066,6 +1547,30 @@ export async function buildServer(
     ? { store: store.oauthTokens, encKey: oauthEncKey }
     : undefined;
   let rebuildOAuthPool: (() => Promise<{ applied: boolean }>) | undefined;
+  const codexModelsEtagTracker = createCodexModelsEtagTracker();
+  const codexModelCatalog = oauthCtx
+    ? createCodexModelCatalog({
+        cache: createCodexModelCache(store.config, oauthCtx.encKey),
+        bundledModels: loadBundledCodexModels(),
+        onRefresh: () => codexModelsEtagTracker.invalidate(),
+      })
+    : undefined;
+  const codexClientVersion = resolveOpenAICodexClientVersion(process.env);
+  const codexUserAgent = buildOpenAICodexUserAgent(codexClientVersion);
+  const codexRuntime: CodexOAuthRuntime | undefined = codexModelCatalog
+    ? {
+        catalog: codexModelCatalog,
+        clientVersion: codexClientVersion,
+        userAgent: codexUserAgent,
+        onCatalogChanged: () => {
+          void rebuildOAuthPool?.().catch((error) =>
+            logger.log("warn", "oauth.codex_catalog.rebuild_failed", {
+              line: error instanceof Error ? error.message : String(error),
+            }),
+          );
+        },
+      }
+    : undefined;
   const rebuildAfterOAuthCredentialFailure = async (
     providerId: string,
     account: string,
@@ -1089,6 +1594,9 @@ export async function buildServer(
         config: store.config,
         log: (lvl, msg, fields) => logger.log(lvl, msg, fields),
         onCredentialFailure: rebuildAfterOAuthCredentialFailure,
+        codexCatalog: codexModelCatalog,
+        codexClientVersion,
+        codexUserAgent,
       })
     : undefined;
 
@@ -1439,14 +1947,14 @@ export async function buildServer(
   // short re-probe window. Scoped Anthropic model caps are not account-wide. The precise
   // long cooldown for Codex/Anthropic arrives via the quota-window capture path; this is
   // the backstop (and the ONLY signal for Copilot).
-  const onOAuthSubscription429 = (alias: string): void => {
+  const onOAuthSubscription429 = (alias: string, error: unknown): void => {
     const acct = servingAccountStore.getStore()?.selected;
     if (!acct) return;
     const slash = alias.indexOf("/");
     const providerId = slash > 0 ? alias.slice(0, slash) : alias;
     const model = slash > 0 ? alias.slice(slash + 1) : null;
     if (acct.providerId !== providerId) return; // stale holder guard (different provider)
-    if (!shouldParkOAuthRateLimit(providerId, model)) return;
+    if (resolveOAuthRateLimitScope(providerId, model, error).scope === "model") return;
     parkAccountOnLimit(providerId, acct.account, Date.now() + DEFAULT_429_COOLDOWN_MS);
   };
 
@@ -1463,21 +1971,33 @@ export async function buildServer(
   // leaves parked state.
   const autoResetInFlight = new Set<string>(); // helm label -> a reset is being evaluated
 
-  // Resolve the SHARED reset-credit key for a Codex helm account: its chatgpt_account_id
-  // (`codex:<id>`), decoded from the STORED access token — no network/refresh, and the
-  // claim is stable even on an expired token. Falls back to the helm label when it can't
-  // be resolved (degrades to per-label guarding, never worse). Not memoized: a reconnect
-  // could re-point a label at a different login, and this only runs on the rare
-  // saturated-and-opted-in path.
+  // Resolve the SHARED reset-credit key for a Codex helm account from the persisted
+  // ChatGPT account identity. Metadata is authoritative because token refresh can leave
+  // an opaque/non-JWT access token while retaining the durable accountId discovered at
+  // login. Not memoized: reconnect can re-point a label at a different login.
   const resolveCodexAccountKey = async (providerId: string, account: string): Promise<string> => {
     const helmKey = `${providerId} ${account}`;
     if (!oauthEncKey) return helmKey;
     try {
       const rec = await store.oauthTokens.get(providerId, account);
-      if (rec?.accessEnc) {
-        const id = codexAccountIdFromToken(decryptSecret(rec.accessEnc, oauthEncKey));
-        if (id) return `codex:${id}`;
+      if (!rec) return helmKey;
+      let metadata: Readonly<Record<string, unknown>> = {};
+      if (rec.meta !== null) {
+        try {
+          const parsed: unknown = JSON.parse(rec.meta);
+          if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+            metadata = parsed as Record<string, unknown>;
+          }
+        } catch {
+          /* invalid metadata falls through to the token claim */
+        }
       }
+      return codexResetCreditSharedKey({
+        providerId,
+        account,
+        accessToken: rec.accessEnc === null ? null : decryptSecret(rec.accessEnc, oauthEncKey),
+        metadata,
+      });
     } catch {
       /* fail-safe: per-label key */
     }
@@ -1494,6 +2014,7 @@ export async function buildServer(
     providerId: string,
     account: string,
     windows: OAuthQuotaWindow[],
+    rateLimitReachedType: CodexRateLimitReachedType | null,
     nowMs: number,
   ): void => {
     const consumeCodexResetCredit = oauthAdmin?.consumeCodexResetCredit;
@@ -1514,6 +2035,7 @@ export async function buildServer(
           account,
           windows,
           mode: "auto",
+          rateLimitReachedType,
           nowMs,
         });
         if (!reservation.ok) {
@@ -1526,49 +2048,83 @@ export async function buildServer(
         }
         const sharedKey = reservation.sharedKey;
         const guardHash = resetCreditGuardHash(sharedKey).slice(0, 12);
-        let r: Awaited<ReturnType<typeof consumeCodexResetCredit>>;
+        let consumeFailed = false;
         try {
-          r = await consumeCodexResetCredit({ account });
+          const attempt = await runResetCreditAttempt({
+            reservation,
+            consume: async () => {
+              try {
+                return await consumeCodexResetCredit({
+                  account,
+                  idempotencyKey: reservation.idempotencyKey,
+                });
+              } catch (e) {
+                consumeFailed = true;
+                logger.log("error", "oauth.auto_reset.failed", {
+                  provider_id: providerId,
+                  account,
+                  guard: guardHash,
+                  stage: "consume",
+                  line: e instanceof Error ? e.message : String(e),
+                });
+                throw e;
+              }
+            },
+            onConsumed: async (r) => {
+              logger.log("info", "oauth.auto_reset.consumed", {
+                provider_id: providerId,
+                account,
+                guard: guardHash,
+                redeem_request_id: r.redeemRequestId ?? null,
+                code: r.code ?? null,
+                windows_reset: r.windowsReset ?? null,
+              });
+              // The consume restored the shared window for EVERY sibling on this login — unpark
+              // them all (the trigger account included), or a sibling parked by its own
+              // saturated reply would stay out of rotation until its window's natural reset.
+              const codexAccounts = (await store.oauthTokens.list()).filter(
+                (t) => t.providerId === providerId,
+              );
+              const unparkResults = await Promise.allSettled(
+                codexAccounts.map(async (t) => {
+                  if ((await resolveCodexAccountKey(t.providerId, t.account)) === sharedKey) {
+                    await applyUsageLimit(t.providerId, t.account, null);
+                  }
+                }),
+              );
+              const unparkFailed = unparkResults.filter((x) => x.status === "rejected").length;
+              if (unparkFailed > 0) {
+                logger.log("error", "oauth.auto_reset.unpark_failed", {
+                  provider_id: providerId,
+                  account,
+                  guard: guardHash,
+                  failed_accounts: unparkFailed,
+                  redeem_request_id: r.redeemRequestId ?? null,
+                });
+              }
+            },
+          });
+          if (!attempt.consumed) {
+            logger.log("info", "oauth.auto_reset.not_consumed", {
+              provider_id: providerId,
+              account,
+              guard: guardHash,
+              redeem_request_id: attempt.result.redeemRequestId ?? null,
+              code: attempt.result.code ?? null,
+              outcome: attempt.result.outcome,
+              windows_reset: attempt.result.windowsReset ?? null,
+            });
+          }
         } catch (e) {
-          logger.log("error", "oauth.auto_reset.failed", {
-            provider_id: providerId,
-            account,
-            guard: guardHash,
-            stage: "consume",
-            line: e instanceof Error ? e.message : String(e),
-          });
-          return;
-        }
-        logger.log("info", "oauth.auto_reset.consumed", {
-          provider_id: providerId,
-          account,
-          guard: guardHash,
-          redeem_request_id: r.redeemRequestId ?? null,
-          code: r.code ?? null,
-          windows_reset: r.windowsReset ?? null,
-        });
-        // The consume restored the shared window for EVERY sibling on this login — unpark
-        // them all (the trigger account included), or a sibling parked by its own
-        // saturated reply would stay out of rotation until its window's natural reset.
-        const codexAccounts = (await store.oauthTokens.list()).filter(
-          (t) => t.providerId === providerId,
-        );
-        const unparkResults = await Promise.allSettled(
-          codexAccounts.map(async (t) => {
-            if ((await resolveCodexAccountKey(t.providerId, t.account)) === sharedKey) {
-              await applyUsageLimit(t.providerId, t.account, null);
-            }
-          }),
-        );
-        const unparkFailed = unparkResults.filter((x) => x.status === "rejected").length;
-        if (unparkFailed > 0) {
-          logger.log("error", "oauth.auto_reset.unpark_failed", {
-            provider_id: providerId,
-            account,
-            guard: guardHash,
-            failed_accounts: unparkFailed,
-            redeem_request_id: r.redeemRequestId ?? null,
-          });
+          if (!consumeFailed) {
+            logger.log("error", "oauth.auto_reset.failed", {
+              provider_id: providerId,
+              account,
+              guard: guardHash,
+              stage: "post_consume",
+              line: e instanceof Error ? e.message : String(e),
+            });
+          }
         }
       } catch (e) {
         logger.log("error", "oauth.auto_reset.failed", {
@@ -1588,7 +2144,8 @@ export async function buildServer(
   // failure is swallowed (an observability scrape never breaks a served request).
   const captureCodexQuota = (providerId: string, account: string, headers: Headers): void => {
     const nowMs = Date.now();
-    const windows = parseCodexQuotaHeaders(headers, nowMs);
+    const details = parseCodexQuotaHeaderDetails(headers, nowMs);
+    const windows = details.windows;
     if (windows.length === 0) return; // no quota headers on this reply → nothing to store
     oauthPoolClients.get(providerId)?.setQuotaSnapshot(account, windows, nowMs);
     void store.oauthQuota
@@ -1600,7 +2157,9 @@ export async function buildServer(
     if (until !== null) parkAccountOnLimit(providerId, account, until);
     // Then, if the WEEKLY window is the one that saturated and the account opted in,
     // auto-consume a reset credit to restore it (guarded by a ≥1h per-account cooldown).
-    if (weeklySaturated(windows)) maybeAutoReset(providerId, account, windows, nowMs);
+    if (weeklySaturated(windows)) {
+      maybeAutoReset(providerId, account, windows, details.rateLimitReachedType, nowMs);
+    }
   };
   // Per-account user-message serial queue (issue #93, feature B). ONE long-lived
   // gate for the whole process: it must survive pool rebuilds so queued requests
@@ -1628,6 +2187,7 @@ export async function buildServer(
     await readQuotaSeeds(),
     parkAccountOnLimit,
     markOAuthCredentialFailureLater,
+    codexRuntime,
   );
   const routableProviders: ProviderConfigShared[] = [
     ...config.providers,
@@ -1734,6 +2294,7 @@ export async function buildServer(
           await readQuotaSeeds(), // re-seed cooldowns + quota windows for strategy scoring
           parkAccountOnLimit,
           markOAuthCredentialFailureLater,
+          codexRuntime,
         );
         oauthPoolClients = next.poolClients;
         oauthAliasSet = aliasSetOf(next);
@@ -1741,6 +2302,7 @@ export async function buildServer(
           ...configuredClients,
           ...oauthPoolClients,
         ]);
+        codexModelsEtagTracker.invalidate();
         logger.log("info", "oauth.pool.rebuilt", {
           providers: [...oauthPoolClients.keys()],
         });
@@ -2051,6 +2613,39 @@ export async function buildServer(
     // routes by (rebound on OAuth curation/connect/disconnect), so discovery and
     // routability never disagree.
     oauthAliases: () => oauthAliasSet,
+    codexModels: async ({ clientVersion, allowCustomModel, allowedLanes, blockedModels }) => {
+      if (!oauthCtx || !codexModelCatalog) return null;
+      const versionCatalog = await loadCodexCatalogForClientVersion({
+        configured: config.providers,
+        oauthCtx,
+        config: store.config,
+        catalog: codexModelCatalog,
+        clientVersion,
+      });
+      const versionOAuthAliases = new Set(
+        versionCatalog.models.map((model) => `openai-codex/${model}`),
+      );
+      const models = versionCatalog.models.filter(
+        (slug) =>
+          resolveCodexCompactModel({
+            requestedModel: slug,
+            lanes,
+            modelAliases,
+            oauthAliases: versionOAuthAliases,
+            allowCustomModel,
+            allowedLanes,
+            blockedModels,
+          }) !== null,
+      );
+      return (
+        codexModelCatalog?.listRoutable(models, {
+          keys: versionCatalog.keys,
+        }) ?? null
+      );
+    },
+    onCodexModelsListed: (keyId, clientVersion, etag) => {
+      codexModelsEtagTracker.record(keyId, clientVersion, etag);
+    },
   });
 
   // Machine-readable usage stats for API-key owners. Read-only and scoped by the
@@ -2352,7 +2947,10 @@ export async function buildServer(
     const configuredAliases = config.providers.flatMap((p) => p.models.map((m) => m.alias));
     const modelAliases = async (): Promise<ModelOption[]> => {
       const oauthOptions = oauthCtx
-        ? await effectiveOAuthModelOptions(oauthCtx, store.config, ROUTABLE_OAUTH_IDS)
+        ? await effectiveOAuthModelOptions(oauthCtx, store.config, ROUTABLE_OAUTH_IDS, {
+            codexCatalog: codexModelCatalog,
+            codexClientVersion,
+          })
         : [];
       const byAlias = new Map<string, ModelOption>();
       for (const alias of configuredAliases) byAlias.set(alias, { alias, accounts: [] });
@@ -2669,6 +3267,10 @@ export async function buildServer(
         trace_id: "responses_lifecycle",
       }),
     );
+  const executeCodexCompact = createHotCodexCompactExecutor(
+    () => providerClients.get("openai-codex") ?? null,
+    () => responsesLifecycleUnsupported("compact"),
+  );
   const responsesLifecycle: ResponsesRouteDeps["lifecycle"] = {};
   responsesLifecycle.retrieve = async (responseId, _identity, signal, record) => {
     const client = responsesClientWith("responsesRetrieve", record?.providerName);
@@ -2692,13 +3294,49 @@ export async function buildServer(
     }
     return await client.responsesInputItems(responseId, { signal });
   };
-  if (responsesClientWith("responsesCompact")?.responsesCompact) {
-    responsesLifecycle.compact = async (body, _identity, signal) => {
-      const client = responsesClientWith("responsesCompact");
-      if (!client?.responsesCompact) throw new Error("Responses compact provider unavailable");
-      return await client.responsesCompact(body as Record<string, unknown>, { signal });
-    };
-  }
+  responsesLifecycle.compact = async (body, identity, signal, onResponseMeta, onExecution) => {
+    const requestedModel = typeof body.body.model === "string" ? body.body.model : "";
+    const providerModel = resolveCodexCompactModel({
+      requestedModel,
+      lanes,
+      modelAliases,
+      oauthAliases: oauthAliasSet,
+      allowCustomModel: identity.caps?.allowCustomModel === true,
+      allowedLanes: identity.caps?.allowedLanes,
+      blockedModels: identity.caps?.blockedModels,
+    });
+    if (providerModel === null) {
+      throw new HelmHttpError(
+        makeHelmError({
+          error_class: "invalid_request",
+          message: `Responses compact model '${requestedModel}' is not available to this key`,
+          trace_id: "responses_compact",
+        }),
+      );
+    }
+    const upstreamBody =
+      providerModel === requestedModel
+        ? body
+        : cloneCarrierWithBody(body, { ...body.body, model: providerModel });
+    if (upstreamBody !== body) {
+      upstreamBody.mutations.model_rewritten = {
+        from: requestedModel || null,
+        to: providerModel,
+      };
+      appendMutationList(upstreamBody.mutations, "body_shims_applied", [
+        "codex_compact_model_resolved",
+      ]);
+    }
+    return await runCodexCompactProviderCall({
+      execute: (options) => executeCodexCompact(upstreamBody, options),
+      signal,
+      ...(onResponseMeta ? { onResponseMeta } : {}),
+      ...(onExecution ? { onExecution } : {}),
+      modelAlias: `openai-codex/${providerModel}`,
+      providerModel,
+      providerName: "openai-codex",
+    });
+  };
   if (responsesClientWith("responsesInputTokens")?.responsesInputTokens) {
     responsesLifecycle.inputTokens = async (body, _identity, signal) => {
       const client = responsesClientWith("responsesInputTokens");
@@ -2772,8 +3410,13 @@ export async function buildServer(
     },
     pipeline: responsesPipeline,
     lifecycle: responsesLifecycle,
+    budget: pipelineBudget,
+    recordOAuthUsage,
     registry: responsesRegistry,
     sseHeartbeatMs: () => config.runtime.sse_heartbeat_ms,
+    modelsEtagForKey: (keyId, clientVersion) =>
+      clientVersion === null ? null : codexModelsEtagTracker.forResponse(keyId, clientVersion),
+    responsesWebSocketSessionProof,
     // Telemetry + payload recorder (the /admin/requests fix): the SAME values the
     // chat route uses, so /v1/responses records served requests like /v1/chat does.
     record: {
@@ -2782,6 +3425,7 @@ export async function buildServer(
       redact: (payload) => redact(payload),
       now: () => Date.now(),
       capturePayloads: () => settings.capture_payloads,
+      costOf,
     },
   } as Parameters<typeof registerResponsesRoute>[1] & { rateLimiter: RateLimiterPort });
 
@@ -3171,6 +3815,14 @@ export async function buildServer(
     app,
     port: config.server.port,
     host: config.server.host,
+    responsesWebSocketSessionProof,
+    closeResponsesWebSocketSession: async (sessionId) => {
+      await Promise.all(
+        [...providerClients.values()].map(
+          (client) => client.closeResponsesWebSocketSession?.(sessionId) ?? Promise.resolve(),
+        ),
+      );
+    },
     dispose: async () => {
       signalScheduler?.stop();
       memoryWorker?.stop();

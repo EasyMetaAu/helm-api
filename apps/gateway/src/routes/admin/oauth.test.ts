@@ -22,7 +22,12 @@ function fullSeam(over: Partial<OAuthAdminAccess> = {}): OAuthAdminAccess {
     })),
     pollDeviceCode: vi.fn(async () => ({ status: "pending" as const })),
     logout: vi.fn(async () => {}),
-    listModels: vi.fn(async () => ({ available: ["m1", "m2"], enabled: ["m1"], canPull: true })),
+    listModels: vi.fn(async () => ({
+      available: ["m1", "m2"],
+      enabled: ["m1"],
+      modelsMode: "manual" as const,
+      canPull: true,
+    })),
     setEnabledModels: vi.fn(async () => {}),
     getAccountProxy: vi.fn(async () => null),
     setAccountProxy: vi.fn(async () => {}),
@@ -515,8 +520,15 @@ describe("admin OAuth routes — read endpoints", () => {
     expect(applyUsageLimit).not.toHaveBeenCalled();
   });
 
-  it("GET /oauth/quota folds the live codex reset-credit count onto its snapshot", async () => {
-    const window = { key: "primary", usedPercent: 40, resetsAtMs: null, windowMinutes: 300 };
+  it("GET /oauth/quota folds the complete live Codex subscription metadata onto its snapshot", async () => {
+    const window = {
+      key: "codex_spark-primary",
+      usedPercent: 40,
+      resetsAtMs: null,
+      windowMinutes: 30,
+      limitId: "codex_spark",
+      limitName: "GPT-5.6-Codex-Spark",
+    };
     const oauthQuota = {
       getAll: vi.fn(async () => [
         {
@@ -534,19 +546,90 @@ describe("admin OAuth routes — read endpoints", () => {
     const seam = fullSeam({
       listStatus: vi.fn(async () => ({
         selectionStrategy: "balanced",
-        providers: [{ id: "openai-codex", name: "Codex", accounts: [{ account: "default" }] }],
+        providers: [
+          {
+            id: "openai-codex",
+            name: "Codex",
+            accounts: [
+              {
+                account: "default",
+                email: "codex@example.com",
+                chatgptPlanType: "pro",
+                chatgptAccountId: "account-1",
+                isFedramp: false,
+              },
+            ],
+          },
+        ],
       })) as never,
-      fetchCodexQuota: vi.fn(async () => ({ windows: [window], resetCredits: 3 })) as never,
+      fetchCodexQuota: vi.fn(async () => ({
+        windows: [window],
+        resetCredits: 3,
+        resetCreditDetails: [
+          {
+            id: "credit-1",
+            resetType: "codexRateLimits",
+            status: "available",
+            grantedAt: 1,
+            expiresAt: 2,
+            title: "Full reset",
+            description: "Ready",
+          },
+        ],
+        credits: { hasCredits: true, unlimited: false, balance: "9.99" },
+        individualLimit: {
+          limit: "25000",
+          used: "8000",
+          remainingPercent: 68,
+          resetsAtMs: 1_735_693_200_000,
+        },
+        planType: "pro",
+        rateLimitReachedType: "rate_limit_reached",
+      })) as never,
     });
     const applyQuotaSnapshot = vi.fn();
     const res = await app({ oauth: seam, oauthQuota, applyQuotaSnapshot }).request(
       "/admin/api/oauth/quota",
     );
     const body = (await res.json()) as {
-      quota: Array<{ providerId: string; resetCredits?: number }>;
+      quota: Array<{
+        providerId: string;
+        windows: Array<{ limitId?: string; limitName?: string | null }>;
+        identity?: {
+          email?: string;
+          chatgptPlanType?: string;
+          chatgptAccountId?: string;
+          isFedramp?: boolean;
+        };
+        resetCredits?: number;
+        resetCreditDetails?: Array<{ id: string }>;
+        credits?: { balance: string | null };
+        individualLimit?: { limit: string; used: string; remainingPercent: number };
+        planType?: string | null;
+        rateLimitReachedType?: string | null;
+      }>;
     };
     expect(body.quota).toHaveLength(1);
+    expect(body.quota[0]?.identity).toEqual({
+      email: "codex@example.com",
+      chatgptPlanType: "pro",
+      chatgptAccountId: "account-1",
+      isFedramp: false,
+    });
     expect(body.quota[0]?.resetCredits).toBe(3);
+    expect(body.quota[0]?.resetCreditDetails?.[0]?.id).toBe("credit-1");
+    expect(body.quota[0]?.credits?.balance).toBe("9.99");
+    expect(body.quota[0]?.individualLimit).toMatchObject({
+      limit: "25000",
+      used: "8000",
+      remainingPercent: 68,
+    });
+    expect(body.quota[0]?.windows[0]).toMatchObject({
+      limitId: "codex_spark",
+      limitName: "GPT-5.6-Codex-Spark",
+    });
+    expect(body.quota[0]?.planType).toBe("pro");
+    expect(body.quota[0]?.rateLimitReachedType).toBe("rate_limit_reached");
     expect(upsert).toHaveBeenCalledWith(expect.objectContaining({ resetCredits: 3 }));
     expect(applyQuotaSnapshot).toHaveBeenCalledWith(
       "openai-codex",
@@ -555,6 +638,69 @@ describe("admin OAuth routes — read endpoints", () => {
       expect.any(Number),
       3,
     );
+  });
+
+  it("GET /oauth/quota persists and returns Codex metadata when every quota window is absent", async () => {
+    const rows: Array<Record<string, unknown>> = [];
+    const oauthQuota = {
+      getAll: vi.fn(async () => rows),
+      upsert: vi.fn(async (snapshot: Record<string, unknown>) => {
+        rows.splice(0, rows.length, { ...snapshot, usageLimitedUntilMs: null });
+      }),
+      delete: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const seam = fullSeam({
+      listStatus: vi.fn(async () => ({
+        selectionStrategy: "balanced",
+        providers: [{ id: "openai-codex", name: "Codex", accounts: [{ account: "default" }] }],
+      })) as never,
+      fetchCodexQuota: vi.fn(async () => ({
+        windows: [],
+        additionalLimits: [{ limitId: "codex_spark", limitName: "GPT-5.6-Codex-Spark" }],
+        resetCredits: 2,
+        resetCreditDetails: [],
+        credits: { hasCredits: true, unlimited: false, balance: "4.50" },
+        individualLimit: {
+          limit: "25000",
+          used: "8000",
+          remainingPercent: 68,
+          resetsAtMs: null,
+        },
+        planType: "pro",
+        rateLimitReachedType: null,
+      })) as never,
+    });
+
+    const res = await app({ oauth: seam, oauthQuota }).request("/admin/api/oauth/quota");
+    const body = (await res.json()) as {
+      quota: Array<{
+        windows: unknown[];
+        additionalLimits?: Array<{ limitId: string; limitName: string | null }>;
+        resetCredits?: number | null;
+        credits?: { balance: string | null };
+        individualLimit?: { limit: string };
+        planType?: string | null;
+      }>;
+    };
+
+    expect(oauthQuota?.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerId: "openai-codex",
+        account: "default",
+        windows: [],
+        resetCredits: 2,
+      }),
+    );
+    expect(body.quota).toEqual([
+      expect.objectContaining({
+        windows: [],
+        additionalLimits: [{ limitId: "codex_spark", limitName: "GPT-5.6-Codex-Spark" }],
+        resetCredits: 2,
+        credits: { hasCredits: true, unlimited: false, balance: "4.50" },
+        individualLimit: expect.objectContaining({ limit: "25000" }),
+        planType: "pro",
+      }),
+    ]);
   });
 
   it("GET /oauth/:provider/models returns available + enabled", async () => {
@@ -600,13 +746,22 @@ describe("admin OAuth routes — reset credit", () => {
         usageLimitedUntilMs: null,
       })),
     }) as unknown as AdminApiDeps["oauthQuota"];
-  const allowResetCredit = () => ({
-    reserve: vi.fn(async () => ({
-      ok: true as const,
-      sharedKey: "codex:shared-account",
-      windowId: "secondary:1",
-    })),
-  });
+  const allowResetCredit = () => {
+    const commit = vi.fn(async () => {});
+    const rollback = vi.fn(async () => {});
+    return {
+      commit,
+      rollback,
+      reserve: vi.fn(async (input: { idempotencyKey?: string }) => ({
+        ok: true as const,
+        sharedKey: "codex:shared-account",
+        windowId: "secondary:1",
+        idempotencyKey: input.idempotencyKey ?? "guard-idem-1",
+        commit,
+        rollback,
+      })),
+    };
+  };
 
   it("503 when the seam lacks consumeCodexResetCredit", async () => {
     const res = await app({ oauth: fullSeam() }).request(
@@ -668,6 +823,42 @@ describe("admin OAuth routes — reset credit", () => {
     expect(consume).not.toHaveBeenCalled();
   });
 
+  it("409 blocks reset-credit consumption for workspace credits or spend-control limits", async () => {
+    const consume = vi.fn(async () => ({
+      code: "reset",
+      outcome: "reset",
+      windowsReset: 2,
+      redeemRequestId: "idem-1",
+    }));
+    const guard = allowResetCredit();
+    const seam = fullSeam({
+      fetchCodexQuota: vi.fn(async () => ({
+        windows: codexWindows(100),
+        resetCredits: 1,
+        resetCreditDetails: [],
+        credits: { hasCredits: false, unlimited: false, balance: null },
+        planType: "team",
+        rateLimitReachedType: "workspace_member_usage_limit_reached",
+      })) as never,
+      consumeCodexResetCredit: consume as never,
+    });
+    const res = await app({
+      oauth: seam,
+      oauthQuota: quotaStore(codexWindows(100)),
+      resetCreditGuard: guard,
+    }).request("/admin/api/oauth/openai-codex/reset-credit", {
+      method: "POST",
+      headers: JSONH,
+      body: "{}",
+    });
+    expect(res.status).toBe(409);
+    expect((await res.json()) as { code: string }).toMatchObject({
+      code: "reset_credit_not_applicable",
+    });
+    expect(guard.reserve).not.toHaveBeenCalled();
+    expect(consume).not.toHaveBeenCalled();
+  });
+
   it("429 blocks reset-credit consumption when the one-hour guard is active", async () => {
     const consume = vi.fn(async () => ({ code: "ok", windowsReset: 2 }));
     const guard = {
@@ -694,10 +885,25 @@ describe("admin OAuth routes — reset credit", () => {
     expect(consume).not.toHaveBeenCalled();
   });
 
-  it("200 consumes a credit only after quota + guard allow it (defaults the account)", async () => {
-    const consume = vi.fn(async () => ({ code: "ok", windowsReset: 2 }));
+  it("200 consumes a selected credit with a reusable idempotency key after quota + guard allow it", async () => {
+    const consume = vi.fn(async () => ({
+      code: "reset",
+      outcome: "reset",
+      windowsReset: 2,
+      redeemRequestId: "idem-1",
+    }));
     const guard = allowResetCredit();
-    const seam = fullSeam({ consumeCodexResetCredit: consume as never });
+    const seam = fullSeam({
+      fetchCodexQuota: vi.fn(async () => ({
+        windows: codexWindows(100),
+        resetCredits: 1,
+        resetCreditDetails: [],
+        credits: { hasCredits: true, unlimited: false, balance: "5.00" },
+        planType: "pro",
+        rateLimitReachedType: "rate_limit_reached",
+      })) as never,
+      consumeCodexResetCredit: consume as never,
+    });
     const res = await app({
       oauth: seam,
       oauthQuota: quotaStore(),
@@ -705,10 +911,18 @@ describe("admin OAuth routes — reset credit", () => {
     }).request("/admin/api/oauth/openai-codex/reset-credit", {
       method: "POST",
       headers: JSONH,
-      body: "{}",
+      body: JSON.stringify({
+        creditId: "credit-1",
+        idempotencyKey: "idem-1",
+      }),
     });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ code: "ok", windowsReset: 2 });
+    expect(await res.json()).toEqual({
+      code: "reset",
+      outcome: "reset",
+      windowsReset: 2,
+      redeemRequestId: "idem-1",
+    });
     expect(guard.reserve).toHaveBeenCalledWith({
       providerId: "openai-codex",
       account: "default",
@@ -716,12 +930,64 @@ describe("admin OAuth routes — reset credit", () => {
         expect.objectContaining({ key: "secondary", usedPercent: 90 }),
       ]),
       mode: "manual",
+      idempotencyKey: "idem-1",
+      rateLimitReachedType: "rate_limit_reached",
     });
-    expect(consume).toHaveBeenCalledWith({ account: "default" });
+    expect(consume).toHaveBeenCalledWith({
+      account: "default",
+      creditId: "credit-1",
+      idempotencyKey: "idem-1",
+    });
+    expect(guard.commit).toHaveBeenCalledOnce();
+    expect(guard.rollback).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["nothing_to_reset", "nothingToReset", false],
+    ["no_credit", "noCredit", false],
+    ["already_redeemed", "alreadyRedeemed", true],
+  ] as const)("200 preserves the %s reset-credit outcome", async (code, outcome, consumed) => {
+    const guard = allowResetCredit();
+    const seam = fullSeam({
+      fetchCodexQuota: vi.fn(async () => ({
+        windows: codexWindows(100),
+        resetCredits: 1,
+        resetCreditDetails: [],
+        credits: null,
+        individualLimit: null,
+        planType: "pro",
+        rateLimitReachedType: "rate_limit_reached",
+      })) as never,
+      consumeCodexResetCredit: vi.fn(async () => ({
+        code,
+        outcome,
+        windowsReset: 0,
+        redeemRequestId: "idem-1",
+      })) as never,
+    });
+    const res = await app({
+      oauth: seam,
+      oauthQuota: quotaStore(codexWindows(100)),
+      resetCreditGuard: guard,
+    }).request("/admin/api/oauth/openai-codex/reset-credit", {
+      method: "POST",
+      headers: JSONH,
+      body: JSON.stringify({ idempotencyKey: "idem-1" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ code, outcome, windowsReset: 0 });
+    expect(guard.commit).toHaveBeenCalledTimes(consumed ? 1 : 0);
+    expect(guard.rollback).toHaveBeenCalledTimes(consumed ? 0 : 1);
   });
 
   it("passes an explicit account through to the seam", async () => {
-    const consume = vi.fn(async () => ({ code: "ok", windowsReset: 1 }));
+    const consume = vi.fn(async () => ({
+      code: "reset",
+      outcome: "reset",
+      windowsReset: 1,
+      redeemRequestId: "idem-1",
+    }));
     const guard = allowResetCredit();
     const seam = fullSeam({ consumeCodexResetCredit: consume as never });
     await app({ oauth: seam, oauthQuota: quotaStore(), resetCreditGuard: guard }).request(
@@ -735,7 +1001,10 @@ describe("admin OAuth routes — reset credit", () => {
     expect(guard.reserve).toHaveBeenCalledWith(
       expect.objectContaining({ providerId: "openai-codex", account: "work", mode: "manual" }),
     );
-    expect(consume).toHaveBeenCalledWith({ account: "work" });
+    expect(consume).toHaveBeenCalledWith({
+      account: "work",
+      idempotencyKey: "guard-idem-1",
+    });
   });
 
   it("502 when the seam throws (fail-closed upstream error)", async () => {
@@ -756,6 +1025,8 @@ describe("admin OAuth routes — reset credit", () => {
     });
     expect(res.status).toBe(502);
     expect(((await res.json()) as { error: string }).error).toContain("no credits");
+    expect(guard.commit).not.toHaveBeenCalled();
+    expect(guard.rollback).toHaveBeenCalledOnce();
   });
 });
 

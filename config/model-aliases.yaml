@@ -42,26 +42,28 @@
 # ── OpenAI-compatible clients (Codex, Cursor, …) ─────────────────────────────
 # Bare GPT ids → lanes (config/lanes.yaml). Each named family maps to its DEDICATED
 # vendor-family lane so the request LEADS with that family's real model; the `-*`
-# globs absorb any dated/suffixed id. The cheap `gpt-5.4-mini` needs its OWN mapping
+# globs absorb any dated/suffixed id. GPT-5.6's unsuffixed alias is defined by Codex
+# as Sol, so it maps directly to the Sol lane instead of passing through the generic
+# requested-model promotion step. The cheap `gpt-5.4-mini` needs its OWN mapping
 # (it is more literal than `gpt-5*`, so longest-literal-wins routes it to the cheap
 # lane, NOT the expensive `premium` catch-all). Comment these out if you don't front
 # any GPT clients.
-"gpt-5.6": gpt-5.6
+"gpt-5.6": gpt-5.6-sol
 "gpt-5.6-sol": gpt-5.6-sol
 "gpt-5.6-sol-*": gpt-5.6-sol
 "gpt-5.6-terra": gpt-5.6-terra
 "gpt-5.6-terra-*": gpt-5.6-terra
 "gpt-5.6-luna": gpt-5.6-luna
 "gpt-5.6-luna-*": gpt-5.6-luna
-"gpt-5.6-*": gpt-5.6
-"openai.gpt-5.6": gpt-5.6
+"gpt-5.6-*": gpt-5.6-sol
+"openai.gpt-5.6": gpt-5.6-sol
 "openai.gpt-5.6-sol": gpt-5.6-sol
 "openai.gpt-5.6-sol-*": gpt-5.6-sol
 "openai.gpt-5.6-terra": gpt-5.6-terra
 "openai.gpt-5.6-terra-*": gpt-5.6-terra
 "openai.gpt-5.6-luna": gpt-5.6-luna
 "openai.gpt-5.6-luna-*": gpt-5.6-luna
-"openai.gpt-5.6-*": gpt-5.6
+"openai.gpt-5.6-*": gpt-5.6-sol
 "gpt-5.5": gpt-5.5
 "gpt-5.4-mini": gpt-5.4-mini
 "gpt-5.4-mini-*": gpt-5.4-mini

@@ -98,6 +98,12 @@ export interface OAuthAdminStatus {
   // is informational; the gateway auto-renews it (so it is NOT an alarm signal).
   accounts: Array<{
     account: string;
+    // Codex subscription identity claims. Optional for legacy records and every
+    // non-Codex provider; no token or secret material crosses this boundary.
+    email?: string;
+    chatgptPlanType?: string;
+    chatgptAccountId?: string;
+    isFedramp?: boolean;
     expiresAt: number | null;
     updatedAt: number;
     healthy: boolean;
@@ -180,9 +186,19 @@ export interface OAuthAdminAccess {
     account: string;
     // `canPull` = the provider has a live list-models API, so a "pull from
     // provider" action is meaningful (false for curated-only providers e.g. Codex).
-  }): Promise<{ available: string[]; enabled: string[]; canPull: boolean }>;
+  }): Promise<{
+    available: string[];
+    enabled: string[];
+    modelsMode: "auto" | "manual";
+    canPull: boolean;
+  }>;
   // Persist the exposed-model subset for one account (replaces the prior list).
-  setEnabledModels(input: { providerId: string; account: string; models: string[] }): Promise<void>;
+  setEnabledModels(input: {
+    providerId: string;
+    account: string;
+    mode: "auto" | "manual";
+    models: string[];
+  }): Promise<void>;
   // Per-account egress proxy (issue #38 follow-up). Multiple accounts of one
   // provider must not share an egress IP (ban-correlation risk), so each account
   // may pin an http/https/socks5 proxy its upstream traffic tunnels through.
@@ -231,9 +247,49 @@ export interface OAuthAdminAccess {
   // Consume one Codex rate-limit reset credit for the account (the "reset usage
   // limit" operator action). FAIL-CLOSED, unlike the PULLs: the seam THROWS on any
   // upstream failure so the route returns an error rather than a false success.
-  // Returns the upstream `code` + how many windows were restored (`windowsReset`).
+  // Returns the normalized four-way outcome plus the upstream `code` and restored
+  // window count. A 2xx noCredit/nothingToReset response is not a successful reset.
   // Optional so unit-test seams can omit it; the route 503s when absent.
-  consumeCodexResetCredit?(input: { account: string }): Promise<CodexResetCreditResult>;
+  consumeCodexResetCredit?(input: {
+    account: string;
+    creditId?: string;
+    idempotencyKey?: string;
+  }): Promise<CodexResetCreditResult>;
+}
+
+export type CodexRateLimitReachedType =
+  | "rate_limit_reached"
+  | "workspace_owner_credits_depleted"
+  | "workspace_member_credits_depleted"
+  | "workspace_owner_usage_limit_reached"
+  | "workspace_member_usage_limit_reached";
+
+export interface CodexCreditsView {
+  hasCredits: boolean;
+  unlimited: boolean;
+  balance: string | null;
+}
+
+export interface CodexIndividualLimitView {
+  limit: string;
+  used: string;
+  remainingPercent: number;
+  resetsAtMs: number | null;
+}
+
+export interface CodexAdditionalLimitView {
+  limitId: string;
+  limitName: string | null;
+}
+
+export interface CodexResetCreditDetailView {
+  id: string;
+  resetType: "codexRateLimits" | "unknown";
+  status: "available" | "redeeming" | "redeemed" | "unknown";
+  grantedAt: number;
+  expiresAt: number | null;
+  title: string | null;
+  description: string | null;
 }
 
 // The Codex quota PULL result: rate-limit windows + the available reset-credit
@@ -242,15 +298,20 @@ export interface OAuthAdminAccess {
 // account holds no reset-credit grant (or the value was unparseable).
 export type CodexQuotaResult = {
   windows: OAuthQuotaWindow[];
+  additionalLimits: CodexAdditionalLimitView[];
   resetCredits: number | null;
+  resetCreditDetails: CodexResetCreditDetailView[] | null;
+  credits: CodexCreditsView | null;
+  individualLimit: CodexIndividualLimitView | null;
+  planType: string | null;
+  rateLimitReachedType: CodexRateLimitReachedType | null;
 } | null;
 
-// The Codex reset-credit CONSUME result surfaced to the operator: the upstream
-// status `code` and how many rate-limit windows were restored. Both null-tolerant
-// — the consume already succeeded (HTTP 2xx) by the time this is built, so a
-// drifted response body degrades the toast, never the action.
+// The Codex reset-credit CONSUME result surfaced to the operator. HTTP 2xx can
+// still mean noCredit or nothingToReset, so callers must branch on `outcome`.
 export interface CodexResetCreditResult {
   code: string | null;
+  outcome: "reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed";
   windowsReset: number | null;
   // Locally generated idempotency/audit id sent to upstream as redeem_request_id.
   redeemRequestId?: string;

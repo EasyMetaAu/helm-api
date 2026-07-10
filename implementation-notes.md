@@ -7,6 +7,22 @@
 
 ---
 
+## 2026-07-10–11 · Codex CLI GPT-5.6 subscription parity（OAuth subscription / Responses / model catalog，docs/04/05/11，原则 3/5/6/7/8）
+
+- **对齐基线**：实现逐项对照 OpenAI Codex `54c44b9ed4` 源码，而不是只增加三个模型字符串。Helm 现在使用原生 `GET /v1/models?client_version=...` 的 `{models}` envelope、Codex `ModelInfo` 字段、`minimal_client_version` 过滤和 key 权限过滤，并支持 `gpt-5.6-sol` / `terra` / `luna` 与裸 `gpt-5.6 -> gpt-5.6-sol` wire 规范化。
+- **模型目录与缓存**：订阅模型目录按 account identity + Codex client version 持久缓存，支持 fresh/network/stale last-known-good 与上游 ETag 观测。`/v1/models` 返回的是当前 API key 过滤后的稳定 ETag；Responses/compact 不再透传 account-wide 上游 `x-models-etag`，而是覆盖为同一 key 最近取得的目录 ETag，避免 Codex CLI 每轮误判目录变化。
+- **Responses parity**：原生 Responses 请求保留 Codex CLI body/header，补齐 compact、input tokens、response lifecycle、reasoning/tool/turn-state metadata、三种 SSE 终态（completed/failed/incomplete）和无终态 EOF fail-closed。compact 与普通 Responses 共用模型 alias、lane、allowed_lanes、blocked_models 和订阅 entitlement 边界。
+- **compact 结算与热重建**：compact 只走 Codex 原生 lifecycle，缺少订阅 executor 时返回 `capability_unsatisfiable`，绝不降级成普通 Responses。executor 每次请求读取当前 OAuth pool，所以运行中首次连接、重建或替换账号不需要重启。成功响应按真实顶层 `usage` 结算 token/cost/budget；失败仍保留实际 serving account 和已捕获的 upstream request。Responses usage 同时识别 `cache_write_tokens` / `cache_creation_tokens` / `cache_creation_input_tokens`，避免 cache-write 成本低估。
+- **Responses WebSocket parity**：`/v1/responses` 支持真实 `101` upgrade、per-message deflate、`response.create`、`generate:false` 预热、同连接串行复用和 `previous_response_id`。握手先复用 `/v1/models?client_version=...` 做 Helm key 鉴权，并返回 key-scoped `x-models-etag`；`x-reasoning-included` 按 Codex 的“header 存在即 true”语义处理，false-like 值必须省略。明确 `426` 会立即固定切 HTTP；无 HTTP status 的握手故障先按 Codex retry budget 重试，耗尽后固定切 HTTP；`websocket_connection_limit_reached` 会关闭旧连接并重发同一请求，预算耗尽后切 HTTP。`response.failed` / `response.incomplete` / `error`、wrapped HTTP error、非法帧和无终态断连都会销毁连接，只有 `response.completed` 的连接可复用。
+- **reasoning 计数握手**：账号/版本作用域的模型快照持久保存上游 `/codex/models` 是否带 `x-reasoning-included`。只有本次 key 可路由的所有快照都明确为真时，`/v1/models` 和 WebSocket upgrade 才返回该 header；旧缓存、bundled fallback 或混合未知账号均省略，避免 Codex CLI 重复或错误计算历史 reasoning token。
+- **Codex custom tool 续轮**：Responses Lite 增量帧不得重新注入空 `additional_tools`；协议 transformer 现在显式识别 `custom_tool_call` / `custom_tool_call_output`，映射到 IR tool call/tool message，并在 `provider_raw.responses_input_items` 保留原始 item 序列。这样 output-only continuation 不再变成空 messages，也不会在重放时降级成 `function_call_output`。
+- **裸 GPT-5.6 alias**：Codex 模型目录中的 `gpt-5.6` 是 Sol alias，`model-aliases.yaml` 因此直接映射到 `gpt-5.6-sol` lane。不能先进入通用 `gpt-5.6` lane，否则 requested-model promotion 会把未配置的 official `openai/gpt-5.6` 提升到订阅 Sol 前面，产生虚假的 `provider_unavailable` attempt。
+- **`ultra` 边界**：`ultra` 是 Codex CLI 本地模式，不是跨 provider 的 wire/config 能力。Helm 只在 Codex subscription 请求边界把它归一化为 wire `max`；共享 IR、Lane/Policy schema、Admin 配置、Anthropic 与 Gemini 均不暴露或发送 `ultra`，避免把 Codex 的 proactive multi-agent 开关扩散成全局协议字段。
+- **订阅与配额**：ChatGPT identity claims、plan、credits、reset-credit details、`rate_limit_reached_type`、默认与 additional model limits 都从 WHAM usage/headers 解析并贯通 Gateway/Admin。`x-codex-active-limit` 决定 429 只停车当前模型 entitlement 还是整个账号，quota snapshot 保留上游真实 `usedPercent`，不再把 429 人为改写成 100%。
+- **reset-credit 安全边界**：手动和自动 consume 共用 weekly threshold、shared ChatGPT account guard、每小时 cooldown 与 weekly-window 幂等门禁；workspace credits/spend-control 限制不会消耗 rate-limit reset credit。手动操作可选择具体 `credit_id` 并复用 `redeem_request_id`，Admin 明示 plan/balance/reached type 和具体 credit。
+- **reset-credit 身份后备**：shared guard 优先使用 `chatgpt_account_id`；缺失时使用稳定的 ChatGPT user ID，再后备到规范化 email，只有完全没有上游身份时才退回 Helm label。这样同一订阅绑定多个 label 不会重复消耗 credit，同时不同用户不会被合并。
+- **live 验证结果**：本地 Docker 数据卷中的真实 Codex 订阅账号可调度，Codex CLI `0.144.1` 通过完整 custom provider（command auth + Responses WebSocket）验证 `gpt-5.6-sol` / `terra` / `luna` / 裸 `gpt-5.6` 的 shell 工具调用、结果续轮、最终文本和 `turn.completed`。模型目录返回 9 项且包含四个 GPT-5.6 名称；裸 alias 的 3 个 Responses 轮次 telemetry 均为单次 `openai-codex/gpt-5.6-sol` attempt，无 skip/fallback/provider 漂移。本次未消费 reset credit。
+
 ## 2026-07-10 · Direct DeepSeek Responses reasoning history pre-skip（Provider execution / protocol translation，docs/04/05/07，原则 3/5/8）
 
 - **背景（Lukin）**：生产请求 `17de8e09-cd94-4aa4-ab67-d2bacf3e4318` 最终由 `openrouter/deepseek-v4-flash` 成功服务，但 direct `deepseek/deepseek-v4-flash` fallback 先返回 400：`The reasoning_content in the thinking mode must be passed back to the API.` 近 3 天统计显示这类 direct DeepSeek reasoning-history 400 共 89 次，均最终 fallback 成功；部署 `v0.26.13` 后新增 3 次，说明 GPT-5.6 Chat tools 修复后剩余红色 400 主要是这个兼容问题。
@@ -98,52 +114,6 @@
 - **观测决策**：触发时写入 passthrough mutation `body_shims_applied: ["anthropic_billing_cch_stabilized"]`，并清掉 raw_body 走重序列化，避免 telemetry 显示仍是旧的客户端 raw body。后续线上可按该 mutation 与 `cached_tokens/cache_creation_tokens` 验证成本改善。
 - **风险边界**：如果 Anthropic 将来开始强校验官方 `cch` 与整请求字节一致，这个 shim 可能引发上游拒绝；届时可通过 native passthrough flag 或后续 runtime setting 回滚。当前生产证据显示 `cch` 更像缓存/归因指纹而非认证字段。
 
-## 2026-07-06 · Admin 请求列表模型关键词搜索改走预计算列（Admin requests performance，docs/07/11，原则 1/7）
-
-- **背景（Lukin）**：线上 `/admin/api/requests?...&model=fable&key_id=...` 首字节约 5.26s。生产 SQLite 虽能用 `(api_key_id, created_at)` 索引把范围缩到当天该 key 的 7922 行，但 `model` 筛选仍要对每行 `decision_json` 做 `requested_model` / `final.model_alias` JSON 提取和 LIKE，`COUNT` 单独就约 2.36s。
-- **查询决策**：保持 `model=` 的既有语义（substring 匹配 requested model、served alias、selected lane；大小写不敏感），新增生成列 `model_search`：把三段文本 lower 后拼成一个小搜索面。SQLite 用 VIRTUAL generated column，Postgres 用 STORED generated column。
-- **索引决策**：新增 `idx_telemetry_admin_model_window(created_at, model_search)` 与 `idx_telemetry_admin_key_model_window(api_key_id, created_at, model_search)`，让 admin 列表和计数扫描小索引值，不再为候选行反复解析 JSON。
-- **保持不变**：不改 API 参数、不改 UI、不改 payload/telemetry retention；`payload_retention_days` 继续保持 3 天。
-- **验证计划**：覆盖 SQLite/Postgres 迁移、SQLite telemetry 查询、跨 adapter store contract；发布后用同一线上 URL 比较 TTFB/total，并确认 `EXPLAIN QUERY PLAN` 使用新索引。
-
-## 2026-07-06 · Admin 请求详情 payload 改为分段懒加载（Admin requests performance，docs/07/11，原则 1/7）
-
-- **背景（Lukin）**：线上 `/admin/requests/:traceId` 详情页会在首屏同时拉完整 request/response/upstream payload；部分记录超过 1MB，经公网和未压缩 JSON 传输后容易出现长时间白屏/卡顿。
-- **接口决策**：保留原 `/admin/api/requests/:traceId/payload` 全量兼容；新增 `?part=meta` 只返回捕获状态与三个分段是否存在，`?part=request|response|upstream_request` 只返回单段正文。SQLite/Postgres adapter 实现轻量读取，老 adapter 通过 `getPayload()` fallback。
-- **UI 决策**：详情页 loader 只取 meta；Conversation/Raw/Response/Forwarded upstream/Retry 在用户点击时才按需取对应分段。这样列表到详情的首屏不再被大 payload 阻塞，同时保留完整审计正文查看能力。
-- **memory stats 决策**：`/admin/api/memory/stats` 增加 10 秒按 scope 短缓存；管理员写入/编辑/删除 facts/reflections 后清缓存，避免重复刷新扫统计表。返回语义不变。
-- **保留策略**：`payload_retention_days` 继续保持 **3 天**；本次不把它降到 1 天（Lukin 明确要求）。
-- **验证计划**：覆盖 gateway payload meta/part、SQLite/Postgres store contract、admin loader 懒加载 UI、memory stats cache；发布后用线上 API timing、gzip 响应头和浏览器网络请求确认。
-
-## 2026-07-06 · 纯工具 turn 去掉空 header 行 + peek 收到 3 行（Admin conversation view，docs/11，原则 1）
-
-- **背景（Lukin）**：默认展开后，纯工具 turn 在工具块上方还多渲染一条近乎空的折叠 header 行（`▾ ● { }`：caret+role dot+空 preview+源码切换），很丑；另外 output peek 6 行太多。
-- **改动 1（删空 header）**：`ConversationTurn.svelte` 把折叠 header 行包在 `{#if !toolOnly}` 里——纯工具 turn 不再渲染它，工具块自己的 `● Name(args) ✓ ok` 行就是整条 row。把 per-turn 的 `{ }` view-source 切换挪到**第一个工具部分**那一行右侧（hover 显现，`toolOnly && firstToolPart === i` 只出现一次，不逐行重复）；非纯工具 turn 仍用原 header 里的 `{ }`（不重复）。`toolOnly`/`firstToolPart` 改 `$derived`，`open` 初值用 `untrack(() => isToolOnly(turn))` 消除 `state_referenced_locally` 警告。
-- **改动 2（peek 3 行）**：加 `PEEK_LINES = 3` 常量，两处 `toolOutputPeek(part.output, PEEK_LINES)` 传入（`toolOutputPeek` 默认仍 6，只在组件里收窄）。
-- **测试**：更新「peek」用例断言 3 行可见、第 4 行隐藏、`+5`（8 行输入）；新增「纯工具 turn 无 `conversation-row-toggle`，但 `conversation-source-toggle` 在工具行上」。97 conversation/render 测试绿、svelte-check 0/0/0。full-run 里 `requests.test.ts` 2 红是并发 PGlite flake（隔离跑 40/40 绿，非本次改动，见 [[pnpm-test-pglite-flake]]）。
-- **共享树坑（记）**：切回 main 时发现工作树带着 sibling session（Codex `codex/admin-perf-lazy-payload`）未提交的 `packages/core/src/store/*telemetry.ts` WIP——**没碰它**，直接开隔离 worktree（干净 checkout，不含 sibling 文件）。参见 [[git-add-explicit-not-all-shared-tree]]。
-- **发布**：v0.25.10。worktree `worktree-tool-row-cleaner`。
-
-## 2026-07-06 · 纯工具 turn 默认展开，去掉多一次点击（Admin conversation view，docs/11，原则 1）
-
-- **背景（Lukin）**：终端风格上线后，看一个工具的 output peek 要点**两次**——先点行展开 turn（row-toggle），再点 `… +N lines` 出完整 JSON。第一层折叠对「整条 turn 就是一个工具调用」的行是纯多余摩擦。Lukin 要求参考 Claude Code：peek 直接可见，不用先展开。
-- **确认方向（AskUserQuestion）**：**纯工具 turn 默认展开**（peek 直接显示），文本/混合 turn 仍默认折叠（保持长 trace 可扫）。
-- **实现**：`ConversationTurn.svelte` 加 `isToolOnly(turn)`（parts 非空且全为 `tool_exchange`/`tool_result`/`tool_call`）；`let open = $state(isToolOnly(turn))`。用**具名函数**在 initializer 里读 `turn`（避免 Svelte `state_referenced_locally` 警告——turn 不会原地变，mount 时算一次即可）。展开态 header/peek 逻辑不变；点 `+N lines` 仍出完整 JsonViewer（第二层保留）。`expandCommand`（全部展开/收起）照常覆盖。
-- **测试更新**：3 个旧断言「tool turn 默认 collapsed / 需点击」翻转为默认 `data-open==='true'` + peek 无点击可见；新增「混合（text+tool）turn 仍 collapsed」用例。670 admin 单测绿、`ConversationTurn.svelte` svelte-check 0 warning。
-- **可视验证坑（记）**：本 session 的 worktree 里有自动清理会**反复删掉未追踪的临时文件**（`/tmp/*.json`、`static/*` payload、`harness-data.json` 每次命令后消失），静态 harness 走不通；改用 live box 部署后截图验证（部署产物不被清理）。
-- **发布轨迹**：终端风格 = v0.25.8（PR #474）；本次默认展开为 v0.25.9。**worktree `worktree-tool-turn-auto-expand`**。
-
-## 2026-07-06 · 对话视图工具执行改为 Claude-Code 终端风格（inline peek，Admin requests / conversation view，docs/11，原则 1）
-
-- **背景（Lukin）**：原展开态工具块是重边框卡片（🔧 Tool ✓ ok + 两个 bordered JsonViewer 面板 Arguments/Result），boxy、不看展开就不知道工具做了什么。Lukin 给了 Claude Code 终端 transcript 截图，要求参考它做得更清晰。
-- **确认方向**：展开态 tool block 采用 CC 的 inline peek；**整个 timeline** 转成 borderless dot+indent 终端观感。折叠行 arg 预览（v0.25.7）保持不动。
-- **新纯函数**：`conversation.ts` 加 `toolOutputPeek(output, maxLines=6) → {lines, moreLines}`：output 归一成文本（字符串原样；JSON 串/对象/数组 → pretty JSON，与 JsonViewer 一致），split `\n`，剔尾部空行（防虚增 +N），截前 N 行报剩余数；纯、永不抛。`formatToolArgs` 加可选 `maxChars`（默认 72；展开态 header 传 160，`truncateDetail` 也接受 max）。
-- **组件重构**（`ConversationTurn.svelte` 为主）：展开体去掉 `rounded-lg border bg-*-50` 卡片；每个 turn 用 role dot（`●`）+ 单条淡 spine。tool_exchange = 行1 `●` + mono 粗体 `Name`(`formatToolArgs(...,160)` args) + 复用 `exchangeStatus` 状态字形；行下 `toolOutputPeek` 前几行挂在 `│` 左规则里；footer `… +N lines (click to expand)`（无更多行时 `⋯ view details`）——点开才 inline 挂**完整** JsonViewer（args+result，逃生舱不丢）+ `▾ Collapse`。reasoning 去紫盒改 `🧠` + muted 左规则文本。per-tool 展开用 `toolOpen: Set<number>`，各行独立。
-- **testid 保留**（e2e 硬断言，见 [[e2e-admin-specs-live-in-gateway]]）：`conversation-turn/-tool/-reasoning/-row-toggle/-source-toggle/-source`、`data-open`、`data-turn-role` 全留；新增 `conversation-tool-toggle/-expand/-collapse`。只改样式+内部结构。
-- **i18n**：新增 3 key `lines`/`click to expand`/`view details`，5 语手填（意译：点击展开/查看详情等），插在 `no result` 后（[[i18n-sync-incremental-empty-only]] / [[admin-test-i18n-gotchas]]）。
-- **ponytail**：无新库无新组件，restyle + 1 纯 helper；peek 是 `split('\n').slice()`，非语法高亮（标 `// ponytail:`）；peek 行数 6 硬编码（配置化是投机，跳过）。
-- **验证**：`toolOutputPeek`/`maxChars` 单测 + `Conversation.test.ts` 渲染契约（header `Bash(ls -la)` + peek `line1` + `+2` + 点开才出 Arguments/Result）；668 admin 单测绿、svelte-check 0 error。**真实数据可视验证**：临时 harness route 加载 box trace `2fb017ae` 全 743 turn 真 payload，Playwright 截图确认 `● Bash(ssh…) ✓ ok` + SQL 结果行 inline peek + `… +21 lines (click to expand)`，点开出完整 Tree/Formatted/Raw JsonViewer——与 CC 截图一致；harness 用后即删。**在 git worktree `worktree-cc-terminal-conversation` 开发（Lukin 要求不在 main 搞）。**
-
 ## 历史条目摘要（最近 5 条）
 
 - **2026-07-06 · 折叠会话行显示工具调用参数预览（Admin requests / conversation view，docs/11，原则 1）**：工具参数预览改为 whitelist-free，按 args 形状泛化提取 readable scalar，覆盖自定义/大小写不同工具并保留展开详情。
@@ -154,4 +124,4 @@
 
 ## 更早历史总览
 
-2026-07-04 更早条目还包括 cheap-model 当前轮低风险降级、视觉上下文压缩 observe/off 接入、Memory stats 队列索引优化、OAuth 会话亲和调度、idle-flush 碎片段优先压缩最大连续段、memory worker 受控并发追赶、记忆页只读运行状态面板、Claude scoped weekly quota 只影响对应模型、跨协议 reasoning-history 候选级跳过、memory idle-flush 防饥饿、策略级 reasoning_effort 覆盖 lane 默认值、cron monitor 低成本规则等。2026-06-30 及以前的工作主要围绕 Helm API 的协议面、路由执行、admin 可观测性与自托管部署逐步成型：补齐 Gemini/OpenAI/Anthropic/Responses 双向转换、SSE 流式正确性、tool-call/JSON schema/思考参数保真、per-model reasoning effort、模型别名与能力/成本目录、provider fallback 与熔断语义、OAuth subscription providers、多账户池与 quota 处理、memory observe/inject/forgetting/admin/MCP、请求 payload 捕获与 request detail UI、API key 治理、admin 表格/过滤/分页/i18n、Docker/CI/release/deploy 验证，以及早期 Phase 0 的 Hono + SvelteKit static admin + Store 端口 + SQLite/Supabase 架构决策。更早细节不再逐条保留在本文件；需要精确背景时回查 git history。
+2026-07-06 压缩条目还包括 Admin 模型搜索预计算列、payload 分段懒加载、纯工具 turn 去空 header/默认展开，以及 Claude Code 风格 inline tool peek。2026-07-04 更早条目还包括 cheap-model 当前轮低风险降级、视觉上下文压缩 observe/off 接入、Memory stats 队列索引优化、OAuth 会话亲和调度、idle-flush 碎片段优先压缩最大连续段、memory worker 受控并发追赶、记忆页只读运行状态面板、Claude scoped weekly quota 只影响对应模型、跨协议 reasoning-history 候选级跳过、memory idle-flush 防饥饿、策略级 reasoning_effort 覆盖 lane 默认值、cron monitor 低成本规则等。2026-06-30 及以前的工作主要围绕 Helm API 的协议面、路由执行、admin 可观测性与自托管部署逐步成型：补齐 Gemini/OpenAI/Anthropic/Responses 双向转换、SSE 流式正确性、tool-call/JSON schema/思考参数保真、per-model reasoning effort、模型别名与能力/成本目录、provider fallback 与熔断语义、OAuth subscription providers、多账户池与 quota 处理、memory observe/inject/forgetting/admin/MCP、请求 payload 捕获与 request detail UI、API key 治理、admin 表格/过滤/分页/i18n、Docker/CI/release/deploy 验证，以及早期 Phase 0 的 Hono + SvelteKit static admin + Store 端口 + SQLite/Supabase 架构决策。更早细节不再逐条保留在本文件；需要精确背景时回查 git history。

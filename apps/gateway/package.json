@@ -6,7 +6,7 @@
   "main": "./src/index.ts",
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && cp src/oauth/codex-models.json dist/oauth/codex-models.json",
     "test:e2e": "playwright test"
   },
   "dependencies": {
@@ -15,12 +15,16 @@
     "@hono/node-server": "^2.0.4",
     "@hono/swagger-ui": "^0.6.1",
     "hono": "^4.12.23",
+    "https-proxy-agent": "^9.1.0",
+    "socks-proxy-agent": "^10.1.0",
     "undici": "^8.3.0",
+    "ws": "^8.21.0",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@playwright/test": "^1.60.0",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.22.3"
   }
 }

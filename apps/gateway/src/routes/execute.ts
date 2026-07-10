@@ -16,7 +16,6 @@ import {
   canUseNativePassthrough,
   checkCapability,
   guardPreOutputFailure,
-  hoistResponsesInstructions,
   type NativePassthroughDisableReason,
   openaiTransformer,
   optimizeVisualContext,
@@ -54,6 +53,28 @@ import {
 const ANTHROPIC_BILLING_HEADER_PREFIX = "x-anthropic-billing-header:";
 const ANTHROPIC_BILLING_CCH_RE = /\bcch=([0-9a-f]{5});/i;
 const ANTHROPIC_BILLING_CCH_PLACEHOLDER = "cch=00000;";
+const FORWARDED_RESPONSE_METADATA_HEADERS = new Set([
+  "openai-model",
+  "x-openai-model",
+  "x-models-etag",
+  "x-reasoning-included",
+  "x-request-id",
+]);
+
+function safeResponseMetadata(headers: Headers): Record<string, string> {
+  const metadata: Record<string, string> = {};
+  for (const [name, value] of headers.entries()) {
+    const lower = name.toLowerCase();
+    if (
+      FORWARDED_RESPONSE_METADATA_HEADERS.has(lower) ||
+      lower.startsWith("x-codex-") ||
+      lower.startsWith("x-ratelimit-")
+    ) {
+      metadata[lower] = value;
+    }
+  }
+  return metadata;
+}
 
 // Gateway execution adapter — the `execute` injected into routeRequest. It walks
 // the resolved candidate chain (ExecutionPlan.candidate_chain) honoring the
@@ -136,7 +157,7 @@ export interface ExecuteAdapterDeps {
    *  (serving-account ALS) and parks it briefly so the pool routes around it. Absent
    *  → no auto-park (back-compat for tests / non-OAuth callers). The precise long
    *  cooldown for Codex/Anthropic still arrives via the quota-window capture path. */
-  onOAuthSubscription429?: (alias: string) => void;
+  onOAuthSubscription429?: (alias: string, error: unknown) => void;
 }
 
 interface ResolvedAttemptTarget {
@@ -638,24 +659,7 @@ function prepareNativeRequestForUpstream(
     }
   }
 
-  // The Codex backend MANDATES a non-empty top-level `instructions`. Standard-OpenAI
-  // Responses clients (pi-ai / pi-coding-agent) carry the system prompt as a leading
-  // developer/system item INSIDE `input` and omit `instructions`, so a verbatim forward
-  // 400s with "Instructions are required". Hoist that content into `instructions` (and
-  // strip it from `input`) so passthrough survives instead of burning a fallback hop.
   if (needsCodexResponsesShim) {
-    const hoist = hoistResponsesInstructions(body);
-    if (hoist.fix !== "none") {
-      body = hoist.body;
-      bodyChanged = true;
-      if (mutations) {
-        appendMutationList(mutations, "body_shims_applied", [
-          hoist.fix === "hoisted_from_input"
-            ? "instructions_hoisted_from_input"
-            : "instructions_defaulted",
-        ]);
-      }
-    }
     const sanitized = sanitizeCodexResponsesNativeBody(body);
     if (sanitized.fixes.length > 0) {
       body = sanitized.body;
@@ -769,6 +773,12 @@ function protocolGuardSkipReason(
   if (hasResponsesHistoryGap(req)) return "responses_previous_response_id_cross_protocol_blocked";
   if (Array.isArray(req.provider_raw?.responses_native_tools)) {
     return "responses_native_tools_cross_protocol_blocked";
+  }
+  if (
+    Array.isArray(req.provider_raw?.responses_input_items) ||
+    Array.isArray(req.provider_raw?.unknown_items)
+  ) {
+    return "responses_native_items_cross_protocol_blocked";
   }
   if (req.provider_raw?.background === true) return "responses_background_cross_protocol_blocked";
   return null;
@@ -1513,6 +1523,10 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         const captureUpstream = (wireBody: string): void => {
           capturedUpstream = wireBody;
         };
+        let capturedResponseMetadata: Record<string, string> | undefined;
+        const onResponseMeta = (headers: Headers): void => {
+          capturedResponseMetadata = safeResponseMetadata(headers);
+        };
         if (req.stream && passthrough.passthrough_used) {
           // Native STREAMING passthrough (issue #217, Phase 2): forward the client's
           // VERBATIM native body (which ALREADY carries stream:true) to the upstream and
@@ -1573,6 +1587,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                   const raw = passthroughStream(passthroughBody, {
                     signal: attemptSignal,
                     captureUpstream,
+                    onResponseMeta,
                   });
                   return passthroughClassifier
                     ? guardPreOutputFailure(raw, passthroughClassifier)
@@ -1593,6 +1608,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             stream,
             nativePassthrough: true,
             upstreamRequest: capturedUpstream,
+            responseMetadata: capturedResponseMetadata,
           };
         }
         if (req.stream) {
@@ -1617,6 +1633,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                   const raw = provider.chatCompletionStream(rendered.body, {
                     signal: attemptSignal,
                     captureUpstream,
+                    onResponseMeta,
                     optimizeAnthropicBody: optimizeAnthropicBodyForAttempt,
                   });
                   return translateClassifier
@@ -1645,6 +1662,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             body: null,
             stream,
             upstreamRequest: capturedUpstream,
+            responseMetadata: capturedResponseMetadata,
           };
         }
         if (passthrough.passthrough_used) {
@@ -1687,7 +1705,11 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             visualCompressionMutationLedger(visualCompressionMutation),
           );
           const body = await withAttemptDeadline(req.attempt_timeout_ms, signal, (attemptSignal) =>
-            passthroughInvoke(passthroughBody, { signal: attemptSignal, captureUpstream }),
+            passthroughInvoke(passthroughBody, {
+              signal: attemptSignal,
+              captureUpstream,
+              onResponseMeta,
+            }),
           );
           breaker.recordSuccess(alias);
           const usage =
@@ -1705,6 +1727,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             stream: null,
             nativePassthrough: true,
             upstreamRequest: capturedUpstream,
+            responseMetadata: capturedResponseMetadata,
           };
         }
         const bodyReq = stripInternal(req, providerModel, target.targetProviderProtocol, caps);
@@ -1712,6 +1735,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           provider.chatCompletion(bodyReq.body, {
             signal: attemptSignal,
             captureUpstream,
+            onResponseMeta,
             optimizeAnthropicBody: optimizeAnthropicBodyForAttempt,
           }),
         );
@@ -1730,6 +1754,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           body,
           stream: null,
           upstreamRequest: capturedUpstream,
+          responseMetadata: capturedResponseMetadata,
         };
       } catch (err) {
         // Client abort: non-provider fault. Terminate the chain WITHOUT marking a
@@ -1904,7 +1929,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         // is throttled — signal the gateway to park it so the pool routes around it.
         // Pure side-channel: chain advancement below is unchanged.
         if (upstreamStatusOf(err) === 429 && isOAuthSubscriptionAlias(alias)) {
-          onOAuthSubscription429?.(alias);
+          onOAuthSubscription429?.(alias, err);
         }
         attempts.push({
           alias,
@@ -2045,7 +2070,21 @@ const PROVIDER_RAW_FORWARD_KEYS_BY_PROTOCOL = {
     "speed",
     "output_config",
   ],
-  openai_responses: ["metadata", "store", "container"],
+  openai_responses: [
+    "metadata",
+    "store",
+    "container",
+    "responses_input_items",
+    "responses_tools",
+    "prompt_cache_options",
+    "reasoning_config",
+    "previous_response_id",
+    "include",
+    "text",
+    "truncation",
+    "logit_bias",
+    "context_management",
+  ],
   gemini: ["metadata"],
 } as const satisfies Record<TargetProviderProtocol, readonly string[]>;
 

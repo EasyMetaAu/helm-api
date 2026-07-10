@@ -6,6 +6,7 @@ import {
   loadAccountSettings,
   loadGlobalOAuthSettings,
   markAccountCredentialFailure,
+  resolveAccountModelsMode,
   setAccountSettings,
   setGlobalOAuthSettings,
 } from "./account-settings.js";
@@ -45,6 +46,30 @@ describe("account-settings", () => {
     const config = makeConfig();
     expect(await loadAccountSettings(config, KEY)).toEqual({});
     expect(getAccountSettings({}, "anthropic", "default")).toEqual({});
+  });
+
+  it("preserves a legacy Codex enabledModels allowlist as manual mode", () => {
+    expect(
+      resolveAccountModelsMode("openai-codex", {
+        enabledModels: ["gpt-5.5"],
+      }),
+    ).toBe("manual");
+    expect(
+      resolveAccountModelsMode("openai-codex", {
+        modelsMode: "manual",
+        enabledModels: ["gpt-5.5"],
+      }),
+    ).toBe("manual");
+    expect(resolveAccountModelsMode("openai-codex", {})).toBe("auto");
+  });
+
+  it("preserves legacy manual curation semantics for non-Codex providers", () => {
+    expect(
+      resolveAccountModelsMode("anthropic", {
+        enabledModels: ["claude-opus-4-6"],
+      }),
+    ).toBe("manual");
+    expect(resolveAccountModelsMode("anthropic", {})).toBe("auto");
   });
 
   it("round-trips an ENCRYPTED map (composite key is opaque)", async () => {

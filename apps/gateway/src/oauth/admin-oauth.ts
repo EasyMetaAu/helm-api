@@ -3,35 +3,47 @@ import {
   beginAnthropicLogin,
   beginCopilotDeviceLogin,
   beginOpenAICodexLogin,
+  buildOpenAICodexUserAgent,
   type ConfigStore,
   type CopilotDeviceStart,
-  codexAccountIdFromToken,
   completeAnthropicLogin,
   completeOpenAICodexLogin,
   createTokenManager,
+  DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
+  decryptSecret,
   discoverOAuthModels,
   encryptSecret,
+  expandOpenAICodexModelAliases,
   getOAuthProvider,
   hasLiveModelDiscovery,
+  listOpenAICodexModels,
   makeProxyFetch,
   type OAuthCredentials,
   type OAuthTokenStore,
+  type OpenAICodexIdentity,
+  openAICodexIdentityFingerprint,
   type ProxyConfig,
   parseAnthropicUsageBody,
+  parseCodexQuotaDetails,
   parseCodexResetCredits,
   parseCodexResetResult,
-  parseCodexUsageBody,
+  parseOpenAICodexIdentity,
   pollCopilotDeviceOnce,
   refreshGitHubCopilotToken,
   validateProxyConfig,
 } from "@helm/core";
-import type { OAuthQuotaWindow } from "@helm/shared";
+import { CodexOAuthUsageSchema, type OAuthQuotaWindow } from "@helm/shared";
 import type {
   AccountPoolStrategyView,
   AccountProxyInput,
   AccountProxyView,
   AccountScheduleView,
+  CodexAdditionalLimitView,
+  CodexCreditsView,
+  CodexIndividualLimitView,
   CodexQuotaResult,
+  CodexRateLimitReachedType,
+  CodexResetCreditDetailView,
   CodexResetCreditResult,
   OAuthAdminAccess,
   OAuthAdminStatusResponse,
@@ -43,9 +55,12 @@ import {
   loadAccountSettings,
   loadGlobalOAuthSettings,
   markAccountCredentialFailure,
+  resolveAccountModelsMode,
   setAccountSettings,
   setGlobalOAuthSettings,
 } from "./account-settings.js";
+import type { CodexModelCacheKey } from "./codex-model-cache.js";
+import type { CodexModelCatalog } from "./codex-model-catalog.js";
 import {
   isPermanentOAuthCredentialFailure,
   oauthCredentialFailureReason,
@@ -75,6 +90,8 @@ const QUOTA_TTL_MS = 5 * 60 * 1000;
 // Hard ceiling on the usage-endpoint fetch so a hung proxy/upstream never blocks the
 // providers page (the route is fail-open; this bounds the worst case).
 const QUOTA_FETCH_TIMEOUT_MS = 8_000;
+const RESET_CREDIT_DETAILS_TIMEOUT_MS = 5_000;
+const RESET_CREDIT_CONSUME_TIMEOUT_MS = 10_000;
 const ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const ANTHROPIC_USAGE_HEADERS = {
   "anthropic-beta": "oauth-2025-04-20",
@@ -98,8 +115,67 @@ const CODEX_USAGE_HEADERS = {
 // Codex "reset usage limit" CONSUME endpoint. Spends one rate-limit reset credit
 // (surfaced as `available_count` on the usage PULL) to immediately restore the
 // account's rate-limit windows. `redeem_request_id` is the upstream idempotency
-// key (a fresh uuid per click). Same auth + identity headers as the usage PULL.
+// key; callers may reuse one across retries, otherwise Helm generates a UUID.
+// Same auth + identity headers as the usage PULL.
 const CODEX_RESET_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
+const CODEX_RESET_DETAILS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
+
+interface CodexQuotaCacheValue {
+  at: number;
+  windows: OAuthQuotaWindow[] | null;
+  additionalLimits?: CodexAdditionalLimitView[];
+  resetCredits?: number | null;
+  resetCreditDetails?: CodexResetCreditDetailView[] | null;
+  credits?: CodexCreditsView | null;
+  individualLimit?: CodexIndividualLimitView | null;
+  planType?: string | null;
+  rateLimitReachedType?: CodexRateLimitReachedType | null;
+}
+
+function codexResetCreditDetails(body: unknown): {
+  availableCount: number;
+  credits: CodexResetCreditDetailView[];
+} | null {
+  const parsed = CodexOAuthUsageSchema.safeParse({ rate_limit_reset_credits: body });
+  if (!parsed.success) return null;
+  const summary = parsed.data.rate_limit_reset_credits;
+  if (
+    !summary ||
+    typeof summary.available_count !== "number" ||
+    !Number.isFinite(summary.available_count) ||
+    summary.available_count < 0 ||
+    !Array.isArray(summary.credits)
+  ) {
+    return null;
+  }
+  const credits: CodexResetCreditDetailView[] = [];
+  for (const credit of summary.credits) {
+    const grantedAt = Date.parse(credit.granted_at) / 1000;
+    const expiresAt =
+      typeof credit.expires_at === "string" ? Date.parse(credit.expires_at) / 1000 : null;
+    if (!Number.isFinite(grantedAt) || (expiresAt !== null && !Number.isFinite(expiresAt))) {
+      return null;
+    }
+    credits.push({
+      id: credit.id,
+      resetType: credit.reset_type === "codex_rate_limits" ? "codexRateLimits" : "unknown",
+      status:
+        credit.status === "available" ||
+        credit.status === "redeeming" ||
+        credit.status === "redeemed"
+          ? credit.status
+          : "unknown",
+      grantedAt: Math.floor(grantedAt),
+      expiresAt: expiresAt === null ? null : Math.floor(expiresAt),
+      title: typeof credit.title === "string" ? credit.title : null,
+      description: typeof credit.description === "string" ? credit.description : null,
+    });
+  }
+  return {
+    availableCount: Math.floor(summary.available_count),
+    credits,
+  };
+}
 
 // Manual-paste (authorization-code) providers and their begin/complete step-fns.
 // `complete` takes the egress-proxy fetch so the token exchange leaves through the
@@ -176,13 +252,102 @@ export interface OAuthAdminDeps {
     account: string,
     reason: string,
   ) => Promise<void> | void;
+  codexCatalog?: CodexModelCatalog;
+  codexClientVersion?: string;
+  codexUserAgent?: string;
 }
 
 // Split a credential into store fields. `meta` carries every key beyond the
 // canonical {access, refresh, expires} (e.g. copilot enterpriseUrl).
 function metaFrom(creds: OAuthCredentials): string | null {
-  const { access: _a, refresh: _r, expires: _e, ...rest } = creds;
+  const { access: _a, refresh: _r, expires: _e, idToken: _idToken, ...rest } = creds;
   return Object.keys(rest).length > 0 ? JSON.stringify(rest) : null;
+}
+
+function identityString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function codexIdentityFromMetadata(
+  metadata: Readonly<Record<string, unknown>>,
+): OpenAICodexIdentity {
+  const accountId = identityString(metadata.accountId);
+  const chatgptUserId = identityString(metadata.chatgptUserId);
+  const chatgptPlanType = identityString(metadata.chatgptPlanType);
+  const email = identityString(metadata.email);
+  return {
+    ...(accountId ? { accountId } : {}),
+    ...(chatgptUserId ? { chatgptUserId } : {}),
+    ...(chatgptPlanType ? { chatgptPlanType } : {}),
+    ...(email ? { email } : {}),
+    ...(typeof metadata.isFedramp === "boolean" ? { isFedramp: metadata.isFedramp } : {}),
+  };
+}
+
+function mergeCodexIdentity(
+  accessToken: string,
+  metadata: Readonly<Record<string, unknown>>,
+): OpenAICodexIdentity {
+  return {
+    ...parseOpenAICodexIdentity(accessToken),
+    ...codexIdentityFromMetadata(metadata),
+  };
+}
+
+function parseStoredMetadata(raw: string | null): Readonly<Record<string, unknown>> {
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+async function statusCodexIdentity(
+  store: OAuthTokenStore,
+  encKey: Buffer,
+  providerId: string,
+  account: string,
+): Promise<OpenAICodexIdentity> {
+  if (providerId !== CODEX) return {};
+  try {
+    const row = await store.get(providerId, account);
+    if (!row) return {};
+    const metadata = parseStoredMetadata(row.meta);
+    const storedIdentity = codexIdentityFromMetadata(metadata);
+    if (!row.accessEnc) return storedIdentity;
+    try {
+      return mergeCodexIdentity(decryptSecret(row.accessEnc, encKey), metadata);
+    } catch {
+      return storedIdentity;
+    }
+  } catch {
+    return {};
+  }
+}
+
+function codexModelSets(
+  models: ReadonlyArray<{ slug: string; priority: number; visibility: "list" | "hide" | "none" }>,
+): { entitled: string[]; visible: string[] } {
+  const ordered = [...models].sort((left, right) => left.priority - right.priority);
+  return {
+    entitled: expandOpenAICodexModelAliases(ordered.map((model) => model.slug)),
+    visible: expandOpenAICodexModelAliases(
+      ordered.filter((model) => model.visibility === "list").map((model) => model.slug),
+    ),
+  };
+}
+
+function codexEffectiveModels(
+  settings: Readonly<{ modelsMode?: "auto" | "manual"; enabledModels?: string[] }>,
+  entitled: readonly string[],
+): string[] {
+  if (resolveAccountModelsMode(CODEX, settings) !== "manual") return [...entitled];
+  const entitlement = new Set(entitled);
+  return (settings.enabledModels ?? []).filter((model) => entitlement.has(model));
 }
 
 export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
@@ -255,10 +420,29 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
   // `resetCredits` (Codex only) rides alongside the windows: both come from the
   // SAME /wham/usage PULL, so caching them together avoids a second round-trip.
   // undefined for the Anthropic path (which has no such grant).
-  const quotaCache = new Map<
-    string,
-    { at: number; windows: OAuthQuotaWindow[] | null; resetCredits?: number | null }
-  >();
+  const quotaCache = new Map<string, CodexQuotaCacheValue>();
+
+  async function codexCatalogModels(
+    account: string,
+  ): Promise<{ entitled: string[]; visible: string[] } | undefined> {
+    if (!deps.codexCatalog) return undefined;
+    const row = await deps.store.get(CODEX, account);
+    if (!row?.accessEnc) return undefined;
+    try {
+      const accessToken = decryptSecret(row.accessEnc, deps.encKey);
+      const identity = mergeCodexIdentity(accessToken, parseStoredMetadata(row.meta));
+      const key: CodexModelCacheKey = {
+        providerId: CODEX,
+        account,
+        accountIdentity: openAICodexIdentityFingerprint(identity),
+        clientVersion: deps.codexClientVersion ?? DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
+      };
+      const snapshot = deps.codexCatalog.snapshot(key);
+      return snapshot ? codexModelSets(snapshot.models) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
 
   function prune(): void {
     const cutoff = now() - SESSION_TTL_MS;
@@ -372,10 +556,24 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
               }
             : await ensureFresh(r.providerId, r.account, r, sch.proxy as ProxyConfig | undefined);
           const { credentialFailed, ...freshView } = fresh;
+          const models =
+            r.providerId === CODEX
+              ? codexEffectiveModels(sch, (await codexCatalogModels(r.account))?.entitled ?? [])
+              : effectiveAccountModels(sch, r.providerId);
+          const identity = await statusCodexIdentity(
+            deps.store,
+            deps.encKey,
+            r.providerId,
+            r.account,
+          );
           return {
             providerId: r.providerId,
             ...freshView,
             credentialFailed,
+            ...(identity.email ? { email: identity.email } : {}),
+            ...(identity.chatgptPlanType ? { chatgptPlanType: identity.chatgptPlanType } : {}),
+            ...(identity.accountId ? { chatgptAccountId: identity.accountId } : {}),
+            ...(typeof identity.isFedramp === "boolean" ? { isFedramp: identity.isFedramp } : {}),
             priority: sch.priority ?? 50,
             schedulable: credentialFailed ? false : (sch.schedulable ?? true),
             autoReset: sch.autoReset ?? false,
@@ -386,7 +584,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
             // (operator curation verbatim, else the curated fallback). Live discovery
             // stays in the Manage dialog; the list never fans out per account.
             proxy: redactProxy(sch.proxy),
-            models: effectiveAccountModels(sch, r.providerId),
+            models,
           };
         }),
       );
@@ -528,19 +726,49 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       // otherwise. Fail-open: any error (no credential, dead refresh, network)
       // yields [] so the providers page never breaks on a flaky discovery.
       let available: string[] = [];
+      let codexEntitled: string[] | undefined;
       const provider = getOAuthProvider(providerId);
       if (provider) {
         try {
+          const accountFetch = makeFetch(proxy);
           const tm = createTokenManager({
             oauth: { kind: "preset", providerId, account },
             tokenStore: deps.store,
             encKey: deps.encKey,
             oauthProvider: provider,
-            fetch: makeFetch(proxy),
+            fetch: accountFetch,
             now,
           });
           const accessToken = (await tm.getAuthHeader()).replace(/^Bearer /, "");
-          available = await discoverOAuthModels(providerId, accessToken, makeFetch(proxy));
+          if (providerId === CODEX && deps.codexCatalog) {
+            const clientVersion = deps.codexClientVersion ?? DEFAULT_OPENAI_CODEX_CLIENT_VERSION;
+            const userAgent = deps.codexUserAgent ?? buildOpenAICodexUserAgent(clientVersion);
+            const identity = mergeCodexIdentity(accessToken, tm.currentMetadata());
+            const key: CodexModelCacheKey = {
+              providerId,
+              account,
+              accountIdentity: openAICodexIdentityFingerprint(identity),
+              clientVersion,
+            };
+            const snapshot = await deps.codexCatalog.load(key, async () => {
+              const currentAccess = (await tm.getAuthHeader()).replace(/^Bearer /, "");
+              const currentIdentity = mergeCodexIdentity(currentAccess, tm.currentMetadata());
+              return listOpenAICodexModels(currentAccess, {
+                accountId: currentIdentity.accountId,
+                isFedramp: currentIdentity.isFedramp,
+                clientVersion,
+                userAgent,
+                fetchImpl: accountFetch,
+              });
+            });
+            if (snapshot) {
+              const modelSets = codexModelSets(snapshot.models);
+              available = modelSets.visible;
+              codexEntitled = modelSets.entitled;
+            }
+          } else {
+            available = await discoverOAuthModels(providerId, accessToken, accountFetch);
+          }
         } catch {
           available = [];
         }
@@ -549,16 +777,33 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       // `enabled` is the operator's AUTHORITATIVE list (verbatim, NOT intersected),
       // so a model the operator typed in by hand survives even when discovery is
       // stale / missing it. UNSET ⇒ seed with all available.
-      const enabled = settings.enabledModels ?? available;
+      const modelsMode = resolveAccountModelsMode(providerId, settings);
+      let entitled = available;
+      if (providerId === CODEX) {
+        entitled = codexEntitled ?? expandOpenAICodexModelAliases(entitled);
+        available = expandOpenAICodexModelAliases(available);
+      }
+      const enabled =
+        providerId === CODEX
+          ? codexEffectiveModels(settings, entitled)
+          : modelsMode === "auto"
+            ? available
+            : (settings.enabledModels ?? []);
       // `canPull` tells the UI whether a "pull from provider" action is meaningful:
       // true only where a LIVE list-models API exists (Copilot, Anthropic). Codex
       // has none — its list is curated — so the UI hides the button for it.
-      return { available, enabled, canPull: hasLiveModelDiscovery(providerId) };
+      return {
+        available,
+        enabled,
+        modelsMode,
+        canPull: hasLiveModelDiscovery(providerId),
+      };
     },
 
-    async setEnabledModels({ providerId, account, models }) {
+    async setEnabledModels({ providerId, account, mode, models }) {
       await setAccountSettings(deps.config, deps.encKey, providerId, account, {
-        enabledModels: models,
+        modelsMode: mode,
+        enabledModels: mode === "manual" ? models : undefined,
       });
     },
 
@@ -742,14 +987,29 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       const key = `${CODEX} ${account}`;
       const cached = quotaCache.get(key);
       if (cached && now() - cached.at < QUOTA_TTL_MS) {
-        return cached.windows === null
-          ? null
-          : { windows: cached.windows, resetCredits: cached.resetCredits ?? null };
+        if (cached.windows === null) return null;
+        const result = {
+          windows: cached.windows,
+          additionalLimits: cached.additionalLimits ?? [],
+          resetCredits: cached.resetCredits ?? null,
+          resetCreditDetails: cached.resetCreditDetails ?? null,
+          credits: cached.credits ?? null,
+          individualLimit: cached.individualLimit ?? null,
+          planType: cached.planType ?? null,
+          rateLimitReachedType: cached.rateLimitReachedType ?? null,
+        };
+        return result;
       }
       const provider = getOAuthProvider(CODEX);
       if (!provider) return null;
       let windows: OAuthQuotaWindow[] | null = null;
+      let additionalLimits: CodexAdditionalLimitView[] = [];
       let resetCredits: number | null = null;
+      let resetCreditDetails: CodexResetCreditDetailView[] | null = null;
+      let credits: CodexCreditsView | null = null;
+      let individualLimit: CodexIndividualLimitView | null = null;
+      let planType: string | null = null;
+      let rateLimitReachedType: CodexRateLimitReachedType | null = null;
       try {
         const proxy = getAccountSettings(
           await loadAccountSettings(deps.config, deps.encKey),
@@ -766,19 +1026,44 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           now,
         });
         const authorization = await tm.getAuthHeader(); // "Bearer <access>"
-        const accountId = codexAccountIdFromToken(authorization.replace(/^Bearer\s+/i, ""));
-        const res = await doFetch(CODEX_USAGE_URL, {
-          headers: {
-            ...CODEX_USAGE_HEADERS,
-            authorization,
-            ...(accountId ? { "chatgpt-account-id": accountId } : {}),
-          },
-          signal: AbortSignal.timeout(QUOTA_FETCH_TIMEOUT_MS),
-        });
+        const accessToken = authorization.replace(/^Bearer\s+/i, "");
+        const identity = mergeCodexIdentity(accessToken, tm.currentMetadata());
+        const headers = {
+          ...CODEX_USAGE_HEADERS,
+          authorization,
+          ...(identity.accountId ? { "chatgpt-account-id": identity.accountId } : {}),
+          ...(identity.isFedramp === true ? { "X-OpenAI-Fedramp": "true" } : {}),
+        };
+        const [res, detailsRes] = await Promise.all([
+          doFetch(CODEX_USAGE_URL, {
+            headers,
+            signal: AbortSignal.timeout(QUOTA_FETCH_TIMEOUT_MS),
+          }),
+          doFetch(CODEX_RESET_DETAILS_URL, {
+            headers,
+            signal: AbortSignal.timeout(RESET_CREDIT_DETAILS_TIMEOUT_MS),
+          }).catch(() => null),
+        ]);
         if (res.ok) {
           const body: unknown = await res.json();
-          windows = parseCodexUsageBody(body, now());
+          const quota = parseCodexQuotaDetails(body, now());
+          windows = quota?.windows ?? [];
+          additionalLimits = quota?.additionalLimits ?? [];
           resetCredits = parseCodexResetCredits(body); // null when the grant is absent
+          credits = quota?.credits ?? null;
+          individualLimit = quota?.individualLimit ?? null;
+          planType = quota?.planType ?? null;
+          rateLimitReachedType = quota?.rateLimitReachedType ?? null;
+          if (detailsRes?.ok) {
+            const detailsBody: unknown = await detailsRes.json().catch(() => null);
+            const details = codexResetCreditDetails(detailsBody);
+            if (details) {
+              resetCredits = details.availableCount;
+              resetCreditDetails = details.credits;
+            }
+          } else {
+            await detailsRes?.body?.cancel().catch(() => {});
+          }
           // Same tripwire as the Anthropic PULL: a 200 yielding zero windows would
           // otherwise freeze the stored snapshot silently.
           if (windows.length === 0) {
@@ -794,18 +1079,56 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         }
       } catch (e) {
         windows = null; // dead token / network / malformed body → page renders "—"
+        additionalLimits = [];
         resetCredits = null;
+        resetCreditDetails = null;
+        credits = null;
+        individualLimit = null;
+        planType = null;
+        rateLimitReachedType = null;
         log("warn", "oauth.quota.pull_failed", {
           provider_id: CODEX,
           account,
           error: e instanceof Error ? e.message : String(e),
         });
       }
-      quotaCache.set(key, { at: now(), windows, resetCredits });
-      return windows === null ? null : { windows, resetCredits };
+      quotaCache.set(key, {
+        at: now(),
+        windows,
+        additionalLimits,
+        resetCredits,
+        resetCreditDetails,
+        credits,
+        individualLimit,
+        planType,
+        rateLimitReachedType,
+      });
+      if (windows === null) return null;
+      const result = {
+        windows,
+        additionalLimits,
+        resetCredits,
+        resetCreditDetails,
+        credits,
+        individualLimit,
+        planType,
+        rateLimitReachedType,
+      };
+      return result;
     },
 
-    async consumeCodexResetCredit({ account }): Promise<CodexResetCreditResult> {
+    async consumeCodexResetCredit(input: {
+      account: string;
+      creditId?: string;
+      idempotencyKey?: string;
+    }): Promise<CodexResetCreditResult> {
+      const { account, creditId, idempotencyKey } = input;
+      if (creditId !== undefined && creditId.length === 0) {
+        throw new Error("creditId must not be empty");
+      }
+      if (idempotencyKey !== undefined && idempotencyKey.length === 0) {
+        throw new Error("idempotencyKey must not be empty");
+      }
       // The "reset usage limit" operator action: spend one rate-limit reset credit
       // to immediately restore the account's windows. Mirrors fetchCodexQuota's
       // setup (per-account proxy + preset token manager + chatgpt-account-id), but
@@ -828,18 +1151,23 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         now,
       });
       const authorization = await tm.getAuthHeader(); // "Bearer <access>"
-      const accountId = codexAccountIdFromToken(authorization.replace(/^Bearer\s+/i, ""));
-      const redeemRequestId = randomUUID();
+      const accessToken = authorization.replace(/^Bearer\s+/i, "");
+      const identity = mergeCodexIdentity(accessToken, tm.currentMetadata());
+      const redeemRequestId = idempotencyKey ?? randomUUID();
       const res = await doFetch(CODEX_RESET_URL, {
         method: "POST",
         headers: {
           ...CODEX_USAGE_HEADERS,
           authorization,
           "content-type": "application/json",
-          ...(accountId ? { "chatgpt-account-id": accountId } : {}),
+          ...(identity.accountId ? { "chatgpt-account-id": identity.accountId } : {}),
+          ...(identity.isFedramp === true ? { "X-OpenAI-Fedramp": "true" } : {}),
         },
-        body: JSON.stringify({ redeem_request_id: redeemRequestId }),
-        signal: AbortSignal.timeout(QUOTA_FETCH_TIMEOUT_MS),
+        body: JSON.stringify({
+          redeem_request_id: redeemRequestId,
+          ...(creditId === undefined ? {} : { credit_id: creditId }),
+        }),
+        signal: AbortSignal.timeout(RESET_CREDIT_CONSUME_TIMEOUT_MS),
       });
       if (!res.ok) {
         await res.body?.cancel().catch(() => {}); // never log/echo the body (principle 7)
@@ -853,11 +1181,22 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       }
       const body: unknown = await res.json().catch(() => null);
       const result = parseCodexResetResult(body);
-      log("info", "oauth.reset_credit.consumed", {
+      if (result.outcome === null) {
+        log("warn", "oauth.reset_credit.failed", {
+          provider_id: CODEX,
+          account,
+          redeem_request_id: redeemRequestId,
+          error: "unrecognized consume response",
+        });
+        throw new Error("codex reset-credit consume returned an unrecognized response");
+      }
+      const consumed = result.outcome === "reset" || result.outcome === "alreadyRedeemed";
+      log("info", consumed ? "oauth.reset_credit.consumed" : "oauth.reset_credit.not_consumed", {
         provider_id: CODEX,
         account,
         redeem_request_id: redeemRequestId,
         code: result.code,
+        outcome: result.outcome,
         windows_reset: result.windowsReset,
       });
       // The consume restored the windows AND decremented the credit count. The grant is
@@ -871,7 +1210,12 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       for (const key of [...quotaCache.keys()]) {
         if (key.startsWith(`${CODEX} `)) quotaCache.delete(key);
       }
-      return { ...result, redeemRequestId };
+      return {
+        code: result.code,
+        outcome: result.outcome,
+        windowsReset: result.windowsReset,
+        redeemRequestId,
+      };
     },
   };
 }

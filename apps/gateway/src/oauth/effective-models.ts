@@ -1,6 +1,21 @@
 import type { OAuthTokenStore } from "@helm/core";
-import { type ConfigStore, CURATED_OAUTH_MODELS } from "@helm/core";
-import { getAccountSettings, loadAccountSettings } from "./account-settings.js";
+import {
+  type ConfigStore,
+  CURATED_OAUTH_MODELS,
+  DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
+  decryptSecret,
+  expandOpenAICodexModelAliases,
+  openAICodexIdentityFingerprint,
+  parseOpenAICodexIdentity,
+} from "@helm/core";
+import {
+  type AccountSettings,
+  getAccountSettings,
+  loadAccountSettings,
+  resolveAccountModelsMode,
+} from "./account-settings.js";
+import type { CodexModelCacheKey } from "./codex-model-cache.js";
+import type { CodexModelCatalog } from "./codex-model-catalog.js";
 
 // THE single source of truth for "which subscription models are routable right
 // now" (issue #38 follow-up). One function, computed LIVE and NETWORK-FREE, so the
@@ -8,11 +23,9 @@ import { getAccountSettings, loadAccountSettings } from "./account-settings.js";
 // never disagree — and an operator's curation edit reflects everywhere on the next
 // read WITHOUT a restart.
 //
-// Effective set per account = the operator's AUTHORITATIVE `enabledModels`
-// (verbatim, may include ids discovery never reported) when set, else the curated
-// fallback. Discovery (Copilot /models, Anthropic /v1/models) only SEEDS the Manage
-// dialog's suggestions — it is deliberately NOT called here, so this stays a pure,
-// instant read of saved state (no per-request network fan-out across accounts).
+// Effective set per non-Codex account = the operator's `enabledModels` when set,
+// else the provider fallback. Codex is different: its account-scoped catalog is
+// the entitlement boundary, and manual mode may only narrow that catalog.
 //
 // `routableProviderIds` gates which providers route (the keys of server.ts's
 // ROUTABLE_OAUTH) — a provider with no wired executor never appears, so the catalog
@@ -26,10 +39,13 @@ export interface OAuthRuntimeCtxLike {
 // The effective enabled models for ONE account (no network): the saved
 // `enabledModels` verbatim, else the provider's curated fallback (else []).
 export function effectiveAccountModels(
-  settings: { enabledModels?: string[] },
+  settings: Pick<AccountSettings, "modelsMode" | "enabledModels">,
   providerId: string,
 ): string[] {
-  return settings.enabledModels ?? CURATED_OAUTH_MODELS[providerId] ?? [];
+  if (providerId === "openai-codex") return [];
+  return resolveAccountModelsMode(providerId, settings) === "manual"
+    ? (settings.enabledModels ?? [])
+    : (CURATED_OAUTH_MODELS[providerId] ?? []);
 }
 
 // Every routable `${providerId}/${model}` alias across all bound accounts, deduped
@@ -45,21 +61,94 @@ export interface ModelOption {
   accounts: string[];
 }
 
+export interface EffectiveOAuthModelOptions {
+  codexCatalog?: CodexModelCatalog;
+  codexClientVersion?: string;
+}
+
+function identityString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function parseMetadata(raw: string | null): Readonly<Record<string, unknown>> {
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+async function automaticCodexModels(
+  oauthCtx: OAuthRuntimeCtxLike,
+  providerId: string,
+  account: string,
+  options: EffectiveOAuthModelOptions,
+): Promise<string[] | undefined> {
+  if (!options.codexCatalog) return undefined;
+  const record = await oauthCtx.store.get(providerId, account);
+  if (!record?.accessEnc) return undefined;
+  try {
+    const accessToken = decryptSecret(record.accessEnc, oauthCtx.encKey);
+    const metadata = parseMetadata(record.meta);
+    const tokenIdentity = parseOpenAICodexIdentity(accessToken);
+    const accountId = identityString(metadata.accountId) ?? tokenIdentity.accountId;
+    const chatgptUserId = identityString(metadata.chatgptUserId) ?? tokenIdentity.chatgptUserId;
+    const email = identityString(metadata.email) ?? tokenIdentity.email;
+    const chatgptPlanType =
+      identityString(metadata.chatgptPlanType) ?? tokenIdentity.chatgptPlanType;
+    const key: CodexModelCacheKey = {
+      providerId,
+      account,
+      accountIdentity: openAICodexIdentityFingerprint({
+        ...(accountId ? { accountId } : {}),
+        ...(chatgptUserId ? { chatgptUserId } : {}),
+        ...(chatgptPlanType ? { chatgptPlanType } : {}),
+        ...(email ? { email } : {}),
+      }),
+      clientVersion: options.codexClientVersion ?? DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
+    };
+    const snapshot = options.codexCatalog.snapshot(key);
+    if (!snapshot) return undefined;
+    return expandOpenAICodexModelAliases(
+      snapshot.models
+        .sort((left, right) => left.priority - right.priority)
+        .map((model) => model.slug),
+    );
+  } catch {
+    return undefined;
+  }
+}
+
 // Every routable `${providerId}/${model}` alias WITH the set of accounts exposing
 // it, deduped + sorted by alias. The single source the catalog endpoint serves.
 export async function effectiveOAuthModelOptions(
   oauthCtx: OAuthRuntimeCtxLike,
   config: ConfigStore,
   routableProviderIds: ReadonlySet<string>,
+  options: EffectiveOAuthModelOptions = {},
 ): Promise<ModelOption[]> {
   const settings = await loadAccountSettings(config, oauthCtx.encKey);
   const aliasToAccounts = new Map<string, Set<string>>();
   for (const row of await oauthCtx.store.list()) {
     if (!routableProviderIds.has(row.providerId)) continue;
-    const models = effectiveAccountModels(
-      getAccountSettings(settings, row.providerId, row.account),
-      row.providerId,
-    );
+    const accountSettings = getAccountSettings(settings, row.providerId, row.account);
+    let models: string[];
+    if (row.providerId === "openai-codex") {
+      const entitled =
+        (await automaticCodexModels(oauthCtx, row.providerId, row.account, options)) ?? [];
+      if (resolveAccountModelsMode(row.providerId, accountSettings) === "manual") {
+        const allowed = new Set(accountSettings.enabledModels ?? []);
+        models = entitled.filter((model) => allowed.has(model));
+      } else {
+        models = entitled;
+      }
+    } else {
+      models = effectiveAccountModels(accountSettings, row.providerId);
+    }
     for (const m of models) {
       const alias = `${row.providerId}/${m}`;
       const accounts = aliasToAccounts.get(alias) ?? new Set<string>();
@@ -77,7 +166,8 @@ export async function effectiveOAuthAliases(
   oauthCtx: OAuthRuntimeCtxLike,
   config: ConfigStore,
   routableProviderIds: ReadonlySet<string>,
+  options: EffectiveOAuthModelOptions = {},
 ): Promise<string[]> {
-  const options = await effectiveOAuthModelOptions(oauthCtx, config, routableProviderIds);
-  return options.map((o) => o.alias);
+  const models = await effectiveOAuthModelOptions(oauthCtx, config, routableProviderIds, options);
+  return models.map((o) => o.alias);
 }

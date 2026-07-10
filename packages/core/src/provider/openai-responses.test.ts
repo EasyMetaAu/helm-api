@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
+import type { CodexModelInfo } from "./oauth/codex-model-info.js";
 import { UpstreamError } from "./openai.js";
 import {
   aggregateResponsesStream,
+  CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
+  CodexResponsesWebSocketConnectError,
+  type CodexResponsesWebSocketConnectInput,
+  type CodexResponsesWebSocketConnection,
   codexAccountIdFromToken,
   createCodexResponsesClient,
   createGenericOpenAIResponsesClient,
@@ -37,6 +42,37 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+function codexModelInfo(
+  overrides: Partial<{
+    use_responses_lite: boolean;
+    support_verbosity: boolean;
+    default_verbosity: string | null;
+    supports_reasoning_summaries: boolean;
+    default_reasoning_summary: "auto" | "concise" | "detailed" | "none";
+    default_reasoning_level: string | null;
+    supported_reasoning_levels: Array<{ effort: string; description: string }>;
+    service_tiers: Array<{ id: string; name: string; description: string }>;
+    supports_parallel_tool_calls: boolean;
+  }> = {},
+): CodexModelInfo {
+  return {
+    use_responses_lite: false,
+    support_verbosity: true,
+    default_verbosity: "low",
+    supports_reasoning_summaries: true,
+    default_reasoning_summary: "auto",
+    default_reasoning_level: "medium",
+    supported_reasoning_levels: [
+      { effort: "low", description: "low" },
+      { effort: "medium", description: "medium" },
+      { effort: "high", description: "high" },
+    ],
+    service_tiers: [{ id: "priority", name: "Fast", description: "Priority" }],
+    supports_parallel_tool_calls: true,
+    ...overrides,
+  } as CodexModelInfo;
 }
 
 describe("codexAccountIdFromToken", () => {
@@ -113,6 +149,154 @@ describe("openaiToResponsesRequest", () => {
     expect(without.text).toEqual({ verbosity: "low" });
   });
 
+  it("uses the Responses Lite input contract for GPT-5.6 model metadata", () => {
+    const body = openaiToResponsesRequest(
+      {
+        model: "gpt-5.6-sol",
+        messages: [
+          { role: "system", content: "Use the workspace carefully." },
+          { role: "user", content: "Fix it" },
+        ],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "exec_command",
+              description: "Run a command",
+              parameters: { type: "object" },
+            },
+          },
+        ],
+        reasoning_effort: "high",
+        verbosity: "medium",
+        service_tier: "priority",
+        parallel_tool_calls: true,
+      },
+      {
+        modelInfo: codexModelInfo({
+          use_responses_lite: true,
+          default_reasoning_level: "low",
+        }),
+      },
+    );
+
+    expect(body.instructions).toBeUndefined();
+    expect(body.tools).toBeUndefined();
+    expect(body.parallel_tool_calls).toBe(false);
+    expect(body.reasoning).toEqual({
+      effort: "high",
+      summary: "auto",
+      context: "all_turns",
+    });
+    expect(body.text).toEqual({ verbosity: "medium" });
+    expect(body.service_tier).toBe("priority");
+    expect(body.input).toEqual([
+      {
+        type: "additional_tools",
+        role: "developer",
+        tools: [
+          {
+            type: "function",
+            name: "exec_command",
+            description: "Run a command",
+            parameters: { type: "object" },
+            strict: false,
+          },
+        ],
+      },
+      {
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: "Use the workspace carefully." }],
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Fix it" }],
+      },
+    ]);
+  });
+
+  it("keeps effort independent from summary support and maps the ultra UI label to max", () => {
+    const body = openaiToResponsesRequest(
+      {
+        model: "gpt-5.6-terra",
+        messages: [{ role: "user", content: "Hi" }],
+        reasoning_effort: "ultra",
+        service_tier: "unsupported",
+        parallel_tool_calls: true,
+      },
+      {
+        modelInfo: codexModelInfo({
+          use_responses_lite: false,
+          default_reasoning_level: "medium",
+          supported_reasoning_levels: [
+            { effort: "medium", description: "medium" },
+            { effort: "max", description: "max" },
+          ],
+          supports_parallel_tool_calls: false,
+        }),
+      },
+    );
+    expect(body.reasoning).toEqual({ effort: "max", summary: "auto" });
+    expect(body.text).toEqual({ verbosity: "low" });
+    expect(body.service_tier).toBeUndefined();
+    expect(body.parallel_tool_calls).toBe(false);
+
+    const unsupported = openaiToResponsesRequest(
+      {
+        model: "no-reasoning",
+        messages: [{ role: "user", content: "Hi" }],
+        reasoning_effort: "high",
+        verbosity: "high",
+        service_tier: "default",
+      },
+      {
+        modelInfo: codexModelInfo({
+          supports_reasoning_summaries: false,
+          default_reasoning_summary: "detailed",
+          support_verbosity: false,
+          default_verbosity: null,
+          service_tiers: [],
+        }),
+      },
+    );
+    expect(unsupported.reasoning).toEqual({ effort: "high" });
+    expect(unsupported.text).toBeUndefined();
+    expect(unsupported.include).toEqual(["reasoning.encrypted_content"]);
+    expect(unsupported.service_tier).toBeUndefined();
+
+    const withoutMetadata = openaiToResponsesRequest({
+      model: "gpt-5.6",
+      messages: [{ role: "user", content: "Hi" }],
+      reasoning_effort: "ultra",
+    });
+    expect(withoutMetadata.reasoning).toEqual({ effort: "max" });
+  });
+
+  it("falls back unsupported reasoning effort to the lower median supported level", () => {
+    const body = openaiToResponsesRequest(
+      {
+        model: "gpt-5.6-terra",
+        messages: [{ role: "user", content: "Hi" }],
+        reasoning_effort: "max",
+      },
+      {
+        modelInfo: codexModelInfo({
+          default_reasoning_level: "high",
+          supported_reasoning_levels: [
+            { effort: "minimal", description: "minimal" },
+            { effort: "low", description: "low" },
+            { effort: "medium", description: "medium" },
+            { effort: "high", description: "high" },
+          ],
+        }),
+      },
+    );
+
+    expect(body.reasoning).toMatchObject({ effort: "low" });
+  });
+
   it("sets prompt_cache_key from a stable sessionId (omitted when absent)", () => {
     const withSession = openaiToResponsesRequest(
       { model: "gpt-5.5", messages: [{ role: "user", content: "Hi" }] },
@@ -138,6 +322,67 @@ describe("openaiToResponsesRequest", () => {
     );
     expect(body.prompt_cache_key).toBe("client-thread");
     expect(body.prompt_cache_retention).toBe("24h");
+  });
+
+  it("preserves complete PTC input, callers, tools, reasoning, and cache controls on translated Responses fallback", () => {
+    const input = [
+      {
+        type: "program",
+        id: "prog_1",
+        call_id: "call_program",
+        code: "const result = await tools.lookup({id: 1}); return result;",
+      },
+      {
+        type: "function_call",
+        call_id: "call_lookup",
+        name: "lookup",
+        arguments: '{"id":1}',
+        caller: { type: "program", caller_id: "call_program" },
+      },
+      {
+        type: "function_call_output",
+        call_id: "call_lookup",
+        output: '{"ok":true}',
+        caller: { type: "program", caller_id: "call_program" },
+      },
+      {
+        type: "program_output",
+        call_id: "call_program",
+        result: '{"ok":true}',
+      },
+    ];
+    const tools = [
+      { type: "programmatic_tool_calling" },
+      {
+        type: "function",
+        name: "lookup",
+        description: "Lookup one record",
+        parameters: { type: "object" },
+        allowed_callers: ["programmatic_tool_calling"],
+      },
+    ];
+
+    const body = openaiToResponsesRequest(
+      {
+        model: "gpt-5.6-sol",
+        messages: [{ role: "user", content: "continue" }],
+        responses_input_items: input,
+        responses_tools: tools,
+        reasoning_config: { effort: "high", mode: "pro", context: "all_turns" },
+        prompt_cache_options: { mode: "explicit", ttl: "30m" },
+      } as never,
+      { modelInfo: codexModelInfo({ use_responses_lite: false }) },
+    );
+
+    expect(body.input).toEqual(input);
+    expect(body.tools).toEqual(tools);
+    expect(body.reasoning).toEqual({
+      effort: "high",
+      mode: "pro",
+      context: "all_turns",
+      summary: "auto",
+    });
+    expect(body.prompt_cache_options).toEqual({ mode: "explicit", ttl: "30m" });
   });
 
   it("maps assistant tool_calls -> function_call items and tool results -> function_call_output", () => {
@@ -538,26 +783,25 @@ describe("translateResponsesSSE", () => {
     });
   });
 
-  it("closes cleanly with finish + [DONE] when the stream ends without response.completed (EOF path)", async () => {
-    // No response.completed/incomplete: after the events drain, the `if (started)` tail
-    // emits a finish chunk + [DONE] (lines 696-700).
+  it("throws when the stream ends without response.completed", async () => {
     const res = sseResponse([
       { type: "response.output_item.added", item: { type: "message", role: "assistant" } },
       { type: "response.output_text.delta", delta: "partial" },
     ]);
-    const chunks: string[] = [];
-    for await (const c of translateResponsesSSE(res, "gpt-5.5")) chunks.push(c);
-    const joined = chunks.join("");
-    expect(joined).toContain('"content":"partial"');
-    expect(joined).toContain('"finish_reason":"stop"');
-    expect(joined.trimEnd().endsWith("data: [DONE]")).toBe(true);
+    await expect(async () => {
+      for await (const _ of translateResponsesSSE(res, "gpt-5.5")) {
+        // drain
+      }
+    }).rejects.toMatchObject({ message: "stream closed before response.completed" });
   });
 
-  it("does not emit any chunk when the stream is empty (started stays false)", async () => {
+  it("throws when an empty stream reaches EOF without response.completed", async () => {
     const res = sseResponse([]);
-    const chunks: string[] = [];
-    for await (const c of translateResponsesSSE(res, "m")) chunks.push(c);
-    expect(chunks).toEqual([]);
+    await expect(async () => {
+      for await (const _ of translateResponsesSSE(res, "m")) {
+        // drain
+      }
+    }).rejects.toMatchObject({ message: "stream closed before response.completed" });
   });
 
   it("includes reasoning_tokens in the terminal usage chunk when reported by the backend", async () => {
@@ -605,30 +849,94 @@ describe("translateResponsesSSE", () => {
     }).rejects.toBe(boom);
   });
 
-  // Codex P1: response.incomplete is terminal too (truncation/content filter). It must
-  // finalize with finish_reason=length + a usage frame + [DONE], not fall to the EOF path.
-  it("treats response.incomplete as terminal (finish=length + usage + [DONE])", async () => {
+  it("treats response.incomplete as an upstream error", async () => {
     const res = sseResponse([
       { type: "response.created", response: { id: "r" } },
       { type: "response.output_text.delta", delta: "partial" },
       {
         type: "response.incomplete",
-        response: { status: "incomplete", usage: { input_tokens: 9, output_tokens: 4 } },
+        response: {
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+          usage: { input_tokens: 9, output_tokens: 4 },
+        },
       },
     ]);
-    const chunks: string[] = [];
-    for await (const c of translateResponsesSSE(res, "gpt-5.5")) chunks.push(c);
-    const joined = chunks.join("");
-    expect(joined).toContain('"finish_reason":"length"');
-    const dataFrames = joined
-      .trimEnd()
-      .split("\n\n")
-      .filter((f) => f.startsWith("data:"));
-    const doneIdx = dataFrames.findIndex((f) => f.includes("[DONE]"));
-    const usageFrame = dataFrames[doneIdx - 1] as string;
-    expect(JSON.parse(usageFrame.slice(5).trim())).toMatchObject({
-      usage: { prompt_tokens: 9, completion_tokens: 4 },
+    await expect(async () => {
+      for await (const _ of translateResponsesSSE(res, "gpt-5.5")) {
+        // drain
+      }
+    }).rejects.toMatchObject({
+      message: "Incomplete response returned, reason: max_output_tokens",
     });
+  });
+
+  it("maps output_item.done function calls and buffers custom tool input deltas", async () => {
+    const res = sseResponse([
+      {
+        type: "response.output_item.done",
+        item: {
+          type: "function_call",
+          call_id: "call_fn",
+          name: "lookup",
+          arguments: '{"q":"done"}',
+        },
+      },
+      {
+        type: "response.custom_tool_call_input.delta",
+        item_id: "ctc_1",
+        call_id: "call_custom",
+        delta: "*** Begin",
+      },
+      {
+        type: "response.custom_tool_call_input.delta",
+        item_id: "ctc_1",
+        call_id: "call_custom",
+        delta: " Patch",
+      },
+      {
+        type: "response.output_item.done",
+        item: {
+          type: "custom_tool_call",
+          id: "ctc_1",
+          call_id: "call_custom",
+          name: "apply_patch",
+          input: "*** Begin Patch",
+        },
+      },
+      { type: "response.completed", response: { status: "completed", usage: {} } },
+    ]);
+    const chunks: string[] = [];
+    for await (const chunk of translateResponsesSSE(res, "gpt-5.6-sol")) chunks.push(chunk);
+    const joined = chunks.join("");
+    expect(joined).toContain('"id":"call_fn"');
+    expect(joined).toContain('"name":"lookup"');
+    expect(joined).toContain('{\\"q\\":\\"done\\"}');
+    expect(joined).toContain('"id":"call_custom"');
+    expect(joined).toContain('"name":"apply_patch"');
+    expect(joined).toContain("*** Begin Patch");
+    expect(joined).toContain('"finish_reason":"tool_calls"');
+  });
+
+  it("marks in-band rate limits and quota failures with upstreamStatus 429", async () => {
+    for (const code of ["rate_limit_exceeded", "insufficient_quota"]) {
+      const res = sseResponse([
+        {
+          type: "response.failed",
+          response: { error: { code, message: `failed: ${code}` } },
+        },
+      ]);
+      let caught: unknown;
+      try {
+        for await (const _ of translateResponsesSSE(res, "m")) {
+          // drain
+        }
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(UpstreamError);
+      expect((caught as UpstreamError).upstreamStatus).toBe(429);
+    }
   });
 
   it("throws UpstreamError(timeout) and cancels when the stream stalls past idleMs", async () => {
@@ -694,20 +1002,22 @@ describe("aggregateResponsesStream", () => {
     }
   });
 
-  // Codex P1: the aggregator must also break on response.incomplete (truncation) and
-  // map it to finish_reason=length with the captured usage.
-  it("breaks on response.incomplete and maps finish_reason=length", async () => {
+  it("throws on response.incomplete instead of returning a truncated completion", async () => {
     const res = sseResponse([
       { type: "response.created", response: { id: "resp_i" } },
       { type: "response.output_text.delta", delta: "partial" },
       {
         type: "response.incomplete",
-        response: { status: "incomplete", usage: { input_tokens: 5, output_tokens: 2 } },
+        response: {
+          status: "incomplete",
+          incomplete_details: { reason: "content_filter" },
+          usage: { input_tokens: 5, output_tokens: 2 },
+        },
       },
     ]);
-    const out = await aggregateResponsesStream(res, "m");
-    expect((out.choices as Array<{ finish_reason: string }>)[0]?.finish_reason).toBe("length");
-    expect(out.usage).toMatchObject({ prompt_tokens: 5, completion_tokens: 2 });
+    await expect(aggregateResponsesStream(res, "m")).rejects.toMatchObject({
+      message: "Incomplete response returned, reason: content_filter",
+    });
   });
 
   it("folds text + usage into a single chat response (Codex is stream-only)", async () => {
@@ -782,6 +1092,64 @@ describe("aggregateResponsesStream", () => {
       function: { name: "run", arguments: '{"a":1}' },
     });
     expect((out.choices as Array<Record<string, unknown>>)[0]?.finish_reason).toBe("tool_calls");
+  });
+
+  it("folds output_item.done function/custom tool calls and custom input deltas", async () => {
+    const res = sseResponse([
+      {
+        type: "response.output_item.done",
+        item: {
+          type: "function_call",
+          call_id: "call_fn",
+          name: "lookup",
+          arguments: '{"q":"done"}',
+        },
+      },
+      {
+        type: "response.custom_tool_call_input.delta",
+        item_id: "ctc_1",
+        call_id: "call_custom",
+        delta: "*** Begin",
+      },
+      {
+        type: "response.custom_tool_call_input.delta",
+        item_id: "ctc_1",
+        call_id: "call_custom",
+        delta: " Patch",
+      },
+      {
+        type: "response.output_item.done",
+        item: {
+          type: "custom_tool_call",
+          id: "ctc_1",
+          call_id: "call_custom",
+          name: "apply_patch",
+          input: "*** Begin Patch",
+        },
+      },
+      { type: "response.completed", response: { status: "completed", usage: {} } },
+    ]);
+    const out = await aggregateResponsesStream(res, "gpt-5.6-sol");
+    const message = (out.choices as Array<{ message: Record<string, unknown> }>)[0]?.message;
+    expect(message?.tool_calls).toEqual([
+      {
+        id: "call_fn",
+        type: "function",
+        function: { name: "lookup", arguments: '{"q":"done"}' },
+      },
+      {
+        id: "call_custom",
+        type: "function",
+        function: { name: "apply_patch", arguments: "*** Begin Patch" },
+      },
+    ]);
+  });
+
+  it("throws when aggregation reaches EOF without response.completed", async () => {
+    const res = sseResponse([{ type: "response.output_text.delta", delta: "partial" }]);
+    await expect(aggregateResponsesStream(res, "m")).rejects.toMatchObject({
+      message: "stream closed before response.completed",
+    });
   });
 
   it("defaults a tool_call's arguments to '{}' when none were streamed", async () => {
@@ -920,7 +1288,7 @@ describe("readResponsesEvents", () => {
 });
 
 describe("createCodexResponsesClient", () => {
-  it("sends Bearer + chatgpt-account-id (from JWT) + originator + OpenAI-Beta; 401-retries once", async () => {
+  it("sends Bearer + account id + Codex originator without obsolete OpenAI-Beta; 401-retries once", async () => {
     let calls = 0;
     const seenAuth: string[] = [];
     let seenAccount = "";
@@ -930,8 +1298,8 @@ describe("createCodexResponsesClient", () => {
       const h = new Headers(init?.headers);
       seenAuth.push(h.get("Authorization") ?? "");
       seenAccount = h.get("chatgpt-account-id") ?? "";
-      expect(h.get("originator")).toBe("helm");
-      expect(h.get("OpenAI-Beta")).toBe("responses=experimental");
+      expect(h.get("originator")).toBe("codex_cli_rs");
+      expect(h.get("OpenAI-Beta")).toBeNull();
       const body = JSON.parse(String(init?.body)) as { store: boolean; stream: boolean };
       expect(body.store).toBe(false);
       expect(body.stream).toBe(true);
@@ -967,6 +1335,57 @@ describe("createCodexResponsesClient", () => {
     ).toBe("ok");
   });
 
+  it("resolves model metadata, sends Lite/FedRAMP headers, and reports X-Models-Etag", async () => {
+    let seenHeaders: Headers | null = null;
+    let seenBody: Record<string, unknown> | null = null;
+    const seenEtags: string[] = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      seenHeaders = new Headers(init?.headers);
+      seenBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(
+        [
+          `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "ok" })}\n\n`,
+          `data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: {} } })}\n\n`,
+        ].join(""),
+        {
+          status: 200,
+          headers: {
+            "Content-Type": "text/event-stream",
+            "X-Models-Etag": '"models-v2"',
+          },
+        },
+      );
+    });
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        resolveModelInfo: (model) =>
+          model === "gpt-5.6-sol"
+            ? codexModelInfo({ use_responses_lite: true, default_reasoning_level: "low" })
+            : undefined,
+        onModelsEtag: (etag) => seenEtags.push(etag),
+        isFedramp: true,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await client.chatCompletion({
+      model: "gpt-5.6-sol",
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    const headers = seenHeaders as unknown as Headers;
+    expect(headers.get("x-openai-internal-codex-responses-lite")).toBe("true");
+    expect(headers.get("x-openai-fedramp")).toBe("true");
+    expect(seenBody).toMatchObject({
+      parallel_tool_calls: false,
+      reasoning: { effort: "medium", context: "all_turns" },
+    });
+    expect(seenBody).not.toHaveProperty("instructions");
+    expect(seenEtags).toEqual(['"models-v2"']);
+  });
+
   it("forces service_tier=priority when per-account Fast mode is enabled", async () => {
     let sentBody: Record<string, unknown> | null = null;
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
@@ -995,7 +1414,7 @@ describe("createCodexResponsesClient", () => {
     expect(sentBody).toEqual(expect.objectContaining({ service_tier: "priority" }));
   });
 
-  it("onResponseMeta fires EXACTLY once with the response headers and never perturbs the streamed chunks (Principle 8)", async () => {
+  it("fires global and per-call response metadata exactly once without perturbing streamed chunks", async () => {
     const fetchMock = vi.fn(
       async () =>
         new Response(
@@ -1014,32 +1433,38 @@ describe("createCodexResponsesClient", () => {
           },
         ),
     );
-    const seen: Headers[] = [];
+    const globalSeen: Headers[] = [];
+    const callSeen: Headers[] = [];
     const client = createCodexResponsesClient({
       config: {
         baseUrl: "https://chatgpt.com/backend-api/codex",
         getAuthHeader: async () => `Bearer ${jwt("acct")}`,
-        onResponseMeta: (h) => seen.push(h),
+        onResponseMeta: (h) => globalSeen.push(h),
       },
       fetch: fetchMock as unknown as typeof fetch,
     });
     const chunks: string[] = [];
-    for await (const ch of client.chatCompletionStream({
-      model: "gpt-5.5",
-      messages: [{ role: "user", content: "hi" }],
-    })) {
+    for await (const ch of client.chatCompletionStream(
+      {
+        model: "gpt-5.5",
+        messages: [{ role: "user", content: "hi" }],
+      },
+      { onResponseMeta: (headers) => callSeen.push(headers) },
+    )) {
       chunks.push(ch);
     }
-    // The hook fired once, BEFORE/at stream open, with the live quota headers.
-    expect(seen).toHaveLength(1);
-    expect(seen[0]?.get("x-codex-primary-used-percent")).toBe("7");
+    // Both channels fire once, BEFORE/at stream open, with the live quota headers.
+    expect(globalSeen).toHaveLength(1);
+    expect(callSeen).toHaveLength(1);
+    expect(globalSeen[0]?.get("x-codex-primary-used-percent")).toBe("7");
+    expect(callSeen[0]?.get("x-codex-primary-used-percent")).toBe("7");
     // The streamed body is untouched: both deltas survive, in order.
     const joined = chunks.join("");
     expect(joined.indexOf("hel")).toBeGreaterThanOrEqual(0);
     expect(joined.indexOf("hel")).toBeLessThan(joined.indexOf("lo"));
   });
 
-  it("sends User-Agent + stable session_id / x-client-request-id headers when configured", async () => {
+  it("sends the Codex session-id/thread-id headers and derives x-client-request-id from thread-id", async () => {
     let seen: Headers | null = null;
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       seen = new Headers(init?.headers);
@@ -1053,15 +1478,84 @@ describe("createCodexResponsesClient", () => {
         baseUrl: "https://chatgpt.com/backend-api/codex",
         getAuthHeader: async () => `Bearer ${jwt("acct")}`,
         sessionId: "sess-abc",
+        threadId: "thread-abc",
         userAgent: "helm-codex/9.9.9",
       },
       fetch: fetchMock as unknown as typeof fetch,
     });
     await client.chatCompletion({ model: "gpt-5.5", messages: [{ role: "user", content: "hi" }] });
     const h = seen as unknown as Headers;
-    expect(h.get("user-agent")).toBe("helm-codex/9.9.9");
-    expect(h.get("session_id")).toBe("sess-abc");
-    expect(h.get("x-client-request-id")).toBe("sess-abc");
+    expect(h.get("user-agent")).toMatch(/^helm-codex\/9\.9\.9 \(.+ .+; .+\) \S+$/);
+    expect(h.get("user-agent")).not.toMatch(/\bnode\//i);
+    expect(h.get("session-id")).toBe("sess-abc");
+    expect(h.get("thread-id")).toBe("thread-abc");
+    expect(h.get("x-client-request-id")).toBe("thread-abc");
+    expect(h.get("session_id")).toBeNull();
+  });
+
+  it("keeps session-id independent from thread-id and x-client-request-id", async () => {
+    const seen: Headers[] = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      seen.push(new Headers(init?.headers));
+      return sseResponse([
+        { type: "response.output_text.delta", delta: "ok" },
+        { type: "response.completed", response: { status: "completed", usage: {} } },
+      ]);
+    });
+    const sessionOnly = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        sessionId: "session-only",
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const threadOnly = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        threadId: "thread-only",
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await sessionOnly.chatCompletion({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    await threadOnly.chatCompletion({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    expect(seen[0]?.get("session-id")).toBe("session-only");
+    expect(seen[0]?.get("thread-id")).toBeNull();
+    expect(seen[0]?.get("x-client-request-id")).toBeNull();
+    expect(seen[1]?.get("session-id")).toBeNull();
+    expect(seen[1]?.get("thread-id")).toBe("thread-only");
+    expect(seen[1]?.get("x-client-request-id")).toBe("thread-only");
+  });
+
+  it("emits a Codex-format default User-Agent without a Node.js token", async () => {
+    let seen = new Headers();
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+      },
+      fetch: (async (_url: string, init?: RequestInit) => {
+        seen = new Headers(init?.headers);
+        return sseResponse([
+          { type: "response.output_text.delta", delta: "ok" },
+          { type: "response.completed", response: { status: "completed", usage: {} } },
+        ]);
+      }) as unknown as typeof fetch,
+    });
+
+    await client.chatCompletion({ model: "gpt-5.5", messages: [{ role: "user", content: "hi" }] });
+
+    expect(seen.get("user-agent")).toMatch(/^codex_cli_rs\/0\.0\.0 \(.+ .+; .+\) \S+$/);
+    expect(seen.get("user-agent")).not.toMatch(/\bnode\//i);
   });
 
   it("redacts the access token from an echoed upstream error body", async () => {
@@ -1276,11 +1770,74 @@ describe("readResponsesSSERaw", () => {
     expect(joined).not.toContain("chat.completion.chunk");
   });
 
-  it("returns immediately on an empty body", async () => {
-    const res = new Response(null, { status: 200 });
+  it("stops after response.completed and discards trailing native frames", async () => {
+    const completed =
+      'data: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n';
+    const trailing = 'data: {"type":"response.output_text.delta","delta":"must-not-leak"}\n\n';
     const chunks: string[] = [];
-    for await (const c of readResponsesSSERaw(res)) chunks.push(c);
-    expect(chunks).toEqual([]);
+
+    for await (const chunk of readResponsesSSERaw(rawSSEResponse(completed + trailing))) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks.join("")).toBe(completed);
+  });
+
+  it("rejects an empty body because no response.completed event arrived", async () => {
+    const res = new Response(null, { status: 200 });
+    await expect(async () => {
+      for await (const _ of readResponsesSSERaw(res)) {
+        // drain
+      }
+    }).rejects.toMatchObject({ message: "stream closed before response.completed" });
+  });
+
+  it("rejects premature EOF after forwarding partial native events", async () => {
+    const partial =
+      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"partial"}\n\n';
+    const res = new Response(partial, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+    const chunks: string[] = [];
+    let caught: unknown;
+
+    try {
+      for await (const chunk of readResponsesSSERaw(res)) chunks.push(chunk);
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(chunks.join("")).toBe(partial);
+    expect(caught).toMatchObject({ message: "stream closed before response.completed" });
+  });
+
+  it("forwards response.failed as the single terminal frame and ends normally", async () => {
+    const created = 'data: {"type":"response.created","response":{"id":"resp_1"}}\n\n';
+    const failed =
+      'data: {"type":"response.failed","response":{"error":{"message":"subscription model failed"}}}\n\n';
+    const trailing =
+      'data: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n';
+    const chunks: string[] = [];
+
+    for await (const chunk of readResponsesSSERaw(rawSSEResponse(created + failed + trailing))) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks.join("")).toBe(created + failed);
+  });
+
+  it("forwards response.incomplete as the single terminal frame and ends normally", async () => {
+    const incomplete =
+      'data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}\n\n';
+    const trailing = 'data: {"type":"response.output_text.delta","delta":"must-not-leak"}\n\n';
+    const chunks: string[] = [];
+
+    for await (const chunk of readResponsesSSERaw(rawSSEResponse(incomplete + trailing))) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks.join("")).toBe(incomplete);
   });
 
   it("re-throws a non-stall reader error unchanged", async () => {
@@ -1336,8 +1893,8 @@ describe("readResponsesSSERaw", () => {
 // Responses body (the real Codex CLI supplies store:false + stream:true + include +
 // reasoning + tools …), so it is forwarded VERBATIM (NO openaiToResponsesRequest) and
 // the upstream's native Responses SSE / JSON is relayed untranslated. The ChatGPT
-// identity headers (Bearer + chatgpt-account-id + originator + OpenAI-Beta) still ride
-// via the shared HTTP core, applied automatically to both methods.
+// Current identity headers (Bearer + chatgpt-account-id + originator) still ride via
+// the shared HTTP core, applied automatically to both methods.
 describe("createCodexResponsesClient — nativePassthroughStream", () => {
   // A verbatim native Codex Responses STREAMING body, as the real Codex CLI sends it.
   // It carries store:false + stream:true + include + reasoning + tools — passthrough
@@ -1455,7 +2012,7 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
     expect(sentBody?.instructions).toBe("VERBATIM-INSTRUCTIONS-SENTINEL");
   });
 
-  it("applies the ChatGPT identity headers (Bearer + account-id + originator + beta) via the HTTP core", async () => {
+  it("applies the current ChatGPT identity headers via the HTTP core", async () => {
     let seen: Headers | null = null;
     let seenUrl = "";
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
@@ -1470,6 +2027,8 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
         baseUrl: "https://chatgpt.com/backend-api/codex",
         getAuthHeader: async () => `Bearer ${jwt("acct_codex")}`,
         sessionId: "sess-z",
+        threadId: "thread-z",
+        userAgent: "codex_cli_rs/4.5.6 (darwin 24.0; arm64) Apple_Terminal/455",
       },
       fetch: fetchMock as unknown as typeof fetch,
     });
@@ -1481,9 +2040,186 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
     expect(h.get("Authorization")).toContain("Bearer ");
     // account-id derived by the HTTP core from the access-token JWT claim.
     expect(h.get("chatgpt-account-id")).toBe("acct_codex");
-    expect(h.get("originator")).toBe("helm");
-    expect(h.get("OpenAI-Beta")).toBe("responses=experimental");
-    expect(h.get("session_id")).toBe("sess-z");
+    expect(h.get("originator")).toBe("codex_cli_rs");
+    expect(h.get("OpenAI-Beta")).toBeNull();
+    expect(h.get("session-id")).toBe("sess-z");
+    expect(h.get("thread-id")).toBe("thread-z");
+    expect(h.get("x-client-request-id")).toBe("thread-z");
+    expect(h.get("version")).toBe("4.5.6");
+    expect(h.get("session_id")).toBeNull();
+  });
+
+  it("uses persisted ChatGPT identity when the refreshed access token has no identity claims", async () => {
+    let seen: Headers | null = null;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      seen = new Headers(init?.headers);
+      return sseStreamResponse([
+        'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+      ]);
+    });
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => "Bearer opaque-access-token",
+        getAccountIdentity: () => ({ accountId: "workspace-42", isFedramp: true }),
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    for await (const _ of client.nativePassthroughStream?.(nativeStreamBody()) ?? []) {
+      // drain
+    }
+
+    const headers = seen as unknown as Headers;
+    expect(headers.get("chatgpt-account-id")).toBe("workspace-42");
+    expect(headers.get("X-OpenAI-Fedramp")).toBe("true");
+  });
+
+  it("preserves Lite developer items detected from a native header or model metadata", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const headers: Headers[] = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      headers.push(new Headers(init?.headers));
+      return sseStreamResponse([
+        'data: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+      ]);
+    });
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        resolveModelInfo: (model) =>
+          model === "gpt-5.6-terra" ? codexModelInfo({ use_responses_lite: true }) : undefined,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const liteBody = {
+      model: "gpt-5.6-terra",
+      input: [
+        { type: "additional_tools", role: "developer", tools: [] },
+        { type: "message", role: "developer", content: "Keep me in input." },
+        { type: "message", role: "user", content: "hi" },
+      ],
+      stream: true,
+      store: false,
+    };
+
+    for await (const _ of client.nativePassthroughStream?.({
+      protocol: "openai_responses",
+      body: liteBody,
+      headers: { "x-openai-internal-codex-responses-lite": "true" },
+      mutations: {},
+    }) ?? []) {
+      // drain
+    }
+    for await (const _ of client.nativePassthroughStream?.({
+      protocol: "openai_responses",
+      body: liteBody,
+      headers: {},
+      mutations: {},
+    }) ?? []) {
+      // drain
+    }
+
+    expect(bodies).toEqual([
+      { ...liteBody, parallel_tool_calls: false },
+      { ...liteBody, parallel_tool_calls: false },
+    ]);
+    expect(headers[0]?.get("x-openai-internal-codex-responses-lite")).toBe("true");
+    expect(headers[1]?.get("x-openai-internal-codex-responses-lite")).toBe("true");
+  });
+
+  it("canonicalizes a native GPT-5.6 alias request using dynamic Responses Lite metadata", async () => {
+    let sentBody: Record<string, unknown> | null = null;
+    let sentHeaders = new Headers();
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        resolveModelInfo: (model) =>
+          model === "gpt-5.6"
+            ? codexModelInfo({
+                use_responses_lite: true,
+                default_reasoning_level: "medium",
+              })
+            : undefined,
+      },
+      fetch: (async (_url: string, init?: RequestInit) => {
+        sentBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        sentHeaders = new Headers(init?.headers);
+        return rawSSEResponse(
+          'data: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+        );
+      }) as unknown as typeof fetch,
+    });
+    const input = {
+      model: "gpt-5.6",
+      instructions: "Use the repository instructions.",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_image",
+              image_url: "https://example.test/image.png",
+              detail: "high",
+            },
+          ],
+        },
+      ],
+      tools: [{ type: "function", name: "run", parameters: { type: "object" } }],
+      reasoning: {
+        effort: "high",
+        mode: "pro",
+        context: "current_turn",
+      },
+      prompt_cache_options: { mode: "explicit", ttl: "24h" },
+      parallel_tool_calls: true,
+      store: true,
+      stream: true,
+    };
+
+    for await (const _ of client.nativePassthroughStream?.(input) ?? []) {
+      // drain
+    }
+
+    const body = sentBody as unknown as Record<string, unknown>;
+    expect(body.model).toBe("gpt-5.6-sol");
+    expect(body.store).toBe(false);
+    expect(body).not.toHaveProperty("instructions");
+    expect(body).not.toHaveProperty("tools");
+    expect(body.parallel_tool_calls).toBe(false);
+    expect(body.reasoning).toEqual({
+      effort: "high",
+      mode: "pro",
+      context: "all_turns",
+    });
+    expect(body.prompt_cache_options).toEqual({ mode: "explicit", ttl: "24h" });
+    expect(body.input).toEqual([
+      {
+        type: "additional_tools",
+        role: "developer",
+        tools: [{ type: "function", name: "run", parameters: { type: "object" } }],
+      },
+      {
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: "Use the repository instructions." }],
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_image",
+            image_url: "https://example.test/image.png",
+          },
+        ],
+      },
+    ]);
+    expect(sentHeaders.get("x-openai-internal-codex-responses-lite")).toBe("true");
   });
 
   it("preserves client headers/raw body through the native carrier while replacing auth", async () => {
@@ -1501,8 +2237,12 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
         accept: "application/json",
         "openai-beta": "client-beta=1",
         "user-agent": "codex-client/9.9.9",
-        session_id: "client-session",
+        version: "1.2.3",
+        originator: "codex_vscode",
+        "session-id": "client-session",
+        "thread-id": "client-thread",
         "x-client-request-id": "client-request-id",
+        "x-codex-turn-state": "turn-state-1",
         "x-client-feature": "keep-me",
         "x-helm-trace": "internal",
         "content-length": "999",
@@ -1521,6 +2261,8 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
         baseUrl: "https://chatgpt.com/backend-api/codex",
         getAuthHeader: async () => `Bearer ${jwt("acct_carrier")}`,
         sessionId: "sess-z",
+        threadId: "thread-z",
+        userAgent: "codex_cli_rs/9.9.9 (darwin 24.0; arm64) node/v22.0.0",
       },
       fetch: fetchMock as unknown as typeof fetch,
     });
@@ -1536,26 +2278,35 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
     expect(h.get("Authorization")).not.toContain("client-secret");
     expect(h.get("chatgpt-account-id")).toBe("acct_carrier");
     expect(h.get("user-agent")).toBe("codex-client/9.9.9");
-    expect(h.get("session_id")).toBe("client-session");
+    expect(h.get("version")).toBe("1.2.3");
+    expect(h.get("originator")).toBe("codex_vscode");
+    expect(h.get("session-id")).toBe("client-session");
+    expect(h.get("thread-id")).toBe("client-thread");
     expect(h.get("x-client-request-id")).toBe("client-request-id");
+    expect(h.get("x-codex-turn-state")).toBe("turn-state-1");
+    expect(h.get("session_id")).toBeNull();
     expect(h.get("content-length")).toBeNull();
     expect(h.get("x-helm-trace")).toBeNull();
     expect(h.get("accept")).toBe("application/json");
-    const beta = h.get("openai-beta") ?? "";
-    expect(beta).toContain("client-beta=1");
-    expect(beta).toContain("responses=experimental");
+    expect(h.get("openai-beta")).toBeNull();
     expect(carrier.mutations).toMatchObject({
       auth_replaced: true,
       content_length_recomputed: true,
     });
     expect((carrier.mutations as Record<string, unknown>).headers_dropped).toEqual(
-      expect.arrayContaining(["authorization", "content-length", "x-helm-trace"]),
-    );
-    expect((carrier.mutations as Record<string, unknown>).headers_overwritten).toEqual(
-      expect.arrayContaining(["openai-beta"]),
+      expect.arrayContaining(["authorization", "content-length", "openai-beta", "x-helm-trace"]),
     );
     expect((carrier.mutations as Record<string, unknown>).headers_overwritten).not.toEqual(
-      expect.arrayContaining(["accept", "session_id", "x-client-request-id", "user-agent"]),
+      expect.arrayContaining([
+        "accept",
+        "originator",
+        "session-id",
+        "thread-id",
+        "user-agent",
+        "version",
+        "x-client-request-id",
+        "x-codex-turn-state",
+      ]),
     );
   });
 
@@ -1568,7 +2319,16 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
         currentSecrets: () => [token],
       },
       fetch: (async () =>
-        jsonResponse({ error: `rate_limit ${token}` }, 429)) as unknown as typeof fetch,
+        new Response(JSON.stringify({ error: `rate_limit ${token}` }), {
+          status: 429,
+          headers: {
+            "Content-Type": "application/json",
+            "Retry-After": "42",
+            "X-Codex-Primary-Used-Percent": "100",
+            "X-Request-Id": `req-${token}`,
+            "CF-Ray": "ray-429",
+          },
+        })) as unknown as typeof fetch,
     });
     let caught: unknown;
     try {
@@ -1581,8 +2341,15 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
     expect(caught).toBeInstanceOf(UpstreamError);
     const err = caught as UpstreamError;
     expect(err.upstreamStatus).toBe(429);
-    expect(JSON.stringify(err.providerRaw)).not.toContain(token);
-    expect(JSON.stringify(err.providerRaw)).toContain("[redacted]");
+    expect(err.providerRaw).toEqual({
+      body: { error: "rate_limit [redacted]" },
+      headers: {
+        "cf-ray": "ray-429",
+        "retry-after": "42",
+        "x-codex-primary-used-percent": "100",
+        "x-request-id": "req-[redacted]",
+      },
+    });
   });
 
   it("triggers onUnauthorized and replays once on a 401 before yielding", async () => {
@@ -1640,6 +2407,800 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
     }
     expect(seen).toHaveLength(1);
     expect(seen[0]?.get("x-codex-primary-used-percent")).toBe("11");
+  });
+
+  it("captures the first turn state, replays it within the same turn, and isolates new turns", async () => {
+    const seen: Headers[] = [];
+    const responseStates = ["turn-state-1", "turn-state-ignored", undefined, undefined];
+    let call = 0;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      seen.push(new Headers(init?.headers));
+      const state = responseStates[call];
+      call += 1;
+      return sseStreamResponse(
+        [
+          'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+        ],
+        state === undefined ? undefined : { "x-codex-turn-state": state },
+      );
+    });
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const carrier = (turnId: string) => ({
+      protocol: "openai_responses" as const,
+      body: nativeStreamBody(),
+      headers: {
+        "x-codex-turn-metadata": JSON.stringify({ turn_id: turnId }),
+      },
+      mutations: {},
+    });
+
+    for (const turnId of ["turn-a", "turn-a", "turn-b", "turn-a"]) {
+      for await (const _ of client.nativePassthroughStream?.(carrier(turnId)) ?? []) {
+        // drain
+      }
+    }
+
+    expect(seen.map((headers) => headers.get("x-codex-turn-state"))).toEqual([
+      null,
+      "turn-state-1",
+      null,
+      "turn-state-1",
+    ]);
+    expect(seen.map((headers) => headers.get("x-codex-turn-metadata"))).toEqual([
+      '{"turn_id":"turn-a"}',
+      '{"turn_id":"turn-a"}',
+      '{"turn_id":"turn-b"}',
+      '{"turn_id":"turn-a"}',
+    ]);
+  });
+});
+
+describe("createCodexResponsesClient — native Responses WebSocket", () => {
+  function carrier(
+    sessionId: string,
+    body: Record<string, unknown>,
+    headers: Record<string, string> = {},
+  ) {
+    return {
+      protocol: "openai_responses" as const,
+      body,
+      headers: {
+        [CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER]: sessionId,
+        "session-id": "client-session",
+        "thread-id": "client-thread",
+        "x-client-request-id": "client-thread",
+        ...headers,
+      },
+      mutations: {},
+    };
+  }
+
+  function fakeConnection(
+    replies: Array<Array<Record<string, unknown> | string>>,
+    responseHeaders = new Headers({
+      "x-models-etag": '"models-ws-1"',
+      "x-reasoning-included": "true",
+    }),
+  ): CodexResponsesWebSocketConnection & {
+    sent: string[];
+    closeCalls: number;
+  } {
+    const pending: string[] = [];
+    const waiters: Array<(value: string | null) => void> = [];
+    const connection = {
+      responseHeaders,
+      sent: [] as string[],
+      closeCalls: 0,
+      async send(text: string) {
+        connection.sent.push(text);
+        const events = replies[connection.sent.length - 1] ?? [];
+        for (const event of events) {
+          const payload = typeof event === "string" ? event : JSON.stringify(event);
+          const waiter = waiters.shift();
+          if (waiter) waiter(payload);
+          else pending.push(payload);
+        }
+      },
+      async receive() {
+        const next = pending.shift();
+        if (next !== undefined) return next;
+        return await new Promise<string | null>((resolve) => waiters.push(resolve));
+      },
+      async close() {
+        connection.closeCalls += 1;
+        for (const waiter of waiters.splice(0)) waiter(null);
+      },
+    };
+    return connection;
+  }
+
+  it("reuses one upstream websocket for prewarm and previous_response_id continuation", async () => {
+    const connection = fakeConnection([
+      [
+        { type: "response.created", response: { id: "warm-1" } },
+        {
+          type: "response.completed",
+          response: { id: "warm-1", status: "completed", usage: {} },
+        },
+      ],
+      [
+        { type: "response.created", response: { id: "resp-1" } },
+        {
+          type: "response.output_item.added",
+          item: { type: "function_call", call_id: "call-1", name: "exec_command" },
+        },
+        {
+          type: "response.completed",
+          response: { id: "resp-1", status: "completed", usage: {} },
+        },
+      ],
+      [
+        { type: "response.created", response: { id: "resp-2" } },
+        { type: "response.output_text.delta", delta: "done" },
+        {
+          type: "response.completed",
+          response: { id: "resp-2", status: "completed", usage: {} },
+        },
+      ],
+    ]);
+    const connect = vi.fn(async (_input: CodexResponsesWebSocketConnectInput) => connection);
+    const fetchMock = vi.fn();
+    const responseMetadata: Headers[] = [];
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_ws")}`,
+        responsesWebSocketConnector: connect,
+        onResponseMeta: (headers) => responseMetadata.push(headers),
+        userAgent: "codex_cli_rs/9.9.9",
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    const requests = [
+      carrier(
+        "ingress-1",
+        {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+          generate: false,
+        },
+        {
+          "user-agent": "codex_cli_rs/1.2.3 (Mac OS 15.5; arm64) Apple_Terminal/455",
+          version: "1.2.3",
+        },
+      ),
+      carrier("ingress-1", {
+        model: "gpt-5.6-sol",
+        input: [{ type: "message", role: "user", content: [] }],
+        stream: true,
+        store: false,
+        previous_response_id: "warm-1",
+      }),
+      carrier("ingress-1", {
+        model: "gpt-5.6-sol",
+        input: [{ type: "function_call_output", call_id: "call-1", output: "ok" }],
+        stream: true,
+        store: false,
+        previous_response_id: "resp-1",
+      }),
+    ];
+    const turns: string[] = [];
+    for (const request of requests) {
+      const chunks: string[] = [];
+      for await (const chunk of client.nativePassthroughStream?.(request) ?? []) {
+        chunks.push(chunk);
+      }
+      turns.push(chunks.join(""));
+    }
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(connect).toHaveBeenCalledTimes(1);
+    const connectArgs = connect.mock.calls[0]?.[0];
+    expect(connectArgs?.url).toBe("wss://chatgpt.com/backend-api/codex/responses");
+    expect(new Headers(connectArgs?.headers).get("authorization")).toContain("Bearer ");
+    expect(new Headers(connectArgs?.headers).get("chatgpt-account-id")).toBe("acct_ws");
+    expect(new Headers(connectArgs?.headers).get("openai-beta")).toBe(
+      "responses_websockets=2026-02-06",
+    );
+    expect(new Headers(connectArgs?.headers).get("user-agent")).toBe(
+      "codex_cli_rs/1.2.3 (Mac OS 15.5; arm64) Apple_Terminal/455",
+    );
+    expect(new Headers(connectArgs?.headers).get("version")).toBe("1.2.3");
+    expect(new Headers(connectArgs?.headers).get("session-id")).toBe("client-session");
+    expect(
+      new Headers(connectArgs?.headers).get(CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER),
+    ).toBeNull();
+    expect(connection.sent.map((text) => JSON.parse(text))).toEqual([
+      expect.objectContaining({
+        type: "response.create",
+        model: "gpt-5.6-sol",
+        generate: false,
+      }),
+      expect.objectContaining({
+        type: "response.create",
+        previous_response_id: "warm-1",
+      }),
+      expect.objectContaining({
+        type: "response.create",
+        previous_response_id: "resp-1",
+      }),
+    ]);
+    expect(turns[0]).toContain("response.completed");
+    expect(turns[1]).toContain("function_call");
+    expect(turns[2]).toContain('"delta":"done"');
+    expect(responseMetadata).toHaveLength(1);
+    expect(responseMetadata[0]?.get("x-models-etag")).toBe('"models-ws-1"');
+  });
+
+  it("falls back to HTTP after a websocket 426 and keeps the named session on HTTP", async () => {
+    const connect = vi.fn(async () => {
+      throw new CodexResponsesWebSocketConnectError("upgrade required", {
+        status: 426,
+        body: JSON.stringify({ error: { message: "websocket unavailable" } }),
+      });
+    });
+    const fetchMock = vi.fn(async () =>
+      rawSSEResponse(
+        'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+      ),
+    );
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_426")}`,
+        responsesWebSocketConnector: connect,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const request = carrier("ingress-426", {
+      model: "gpt-5.6-sol",
+      input: [],
+      stream: true,
+      store: false,
+    });
+
+    for (let turn = 0; turn < 2; turn += 1) {
+      const chunks: string[] = [];
+      for await (const chunk of client.nativePassthroughStream?.(request) ?? []) {
+        chunks.push(chunk);
+      }
+      expect(chunks.join("")).toContain("response.completed");
+    }
+
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    "response.failed",
+    "response.incomplete",
+    "error",
+  ] as const)("closes the upstream websocket before yielding %s and reconnects after iterator.return", async (terminalType) => {
+    const first = fakeConnection([
+      [
+        {
+          type: terminalType,
+          ...(terminalType === "error"
+            ? { code: "synthetic_error", message: "synthetic websocket error" }
+            : {
+                response: {
+                  status: terminalType === "response.failed" ? "failed" : "incomplete",
+                },
+              }),
+        },
+      ],
+      [
+        {
+          type: "response.completed",
+          response: { id: "unexpected-reuse", status: "completed", usage: {} },
+        },
+      ],
+    ]);
+    const second = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-next" } },
+        {
+          type: "response.completed",
+          response: { id: "resp-next", status: "completed", usage: {} },
+        },
+      ],
+    ]);
+    const connect = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_terminal")}`,
+        responsesWebSocketConnector: connect,
+      },
+    });
+    const request = carrier("ingress-terminal", {
+      model: "gpt-5.6-sol",
+      input: [],
+      stream: true,
+      store: false,
+    });
+
+    const firstIterator = client.nativePassthroughStream?.(request)[Symbol.asyncIterator]();
+    expect(firstIterator).toBeDefined();
+    const terminal = await firstIterator?.next();
+    expect(terminal).toMatchObject({ done: false });
+    expect(terminal?.value).toContain(terminalType);
+    expect(first.closeCalls).toBe(1);
+    await firstIterator?.return?.();
+
+    const secondTurn: string[] = [];
+    for await (const chunk of client.nativePassthroughStream?.(request) ?? []) {
+      secondTurn.push(chunk);
+    }
+
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(secondTurn.join("")).toContain("response.completed");
+  });
+
+  it.each([
+    ["status", 401],
+    ["status_code", 429],
+  ] as const)("closes and throws a wrapped websocket error carrying %s=%i", async (statusField, status) => {
+    const responseMetadata: Headers[] = [];
+    const connection = fakeConnection([
+      [
+        {
+          type: "error",
+          [statusField]: status,
+          error: {
+            code: status === 429 ? "rate_limit_exceeded" : "invalid_api_key",
+            message: status === 429 ? "quota exhausted" : "credential rejected",
+          },
+          headers: {
+            "retry-after": 17,
+            "x-codex-active-limit": "codex_luna",
+            "x-codex-luna-primary-used-percent": 100,
+          },
+        },
+      ],
+    ]);
+    const connect = vi.fn(async () => connection);
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_wrapped_error")}`,
+        responsesWebSocketConnector: connect,
+        onResponseMeta: (headers) => responseMetadata.push(headers),
+      },
+    });
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier(`ingress-wrapped-${status}`, {
+          model: "gpt-5.6-luna",
+          input: [],
+          stream: true,
+          store: false,
+        }),
+      )
+      [Symbol.asyncIterator]();
+
+    let caught: unknown;
+    try {
+      await iterator?.next();
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(UpstreamError);
+    expect((caught as UpstreamError).upstreamStatus).toBe(status);
+    expect((caught as UpstreamError).message).toBe(
+      status === 429 ? "quota exhausted" : "credential rejected",
+    );
+    expect(connection.closeCalls).toBe(1);
+    expect(connect).toHaveBeenCalledTimes(1);
+    if (status === 429) {
+      expect((caught as UpstreamError).providerRaw).toMatchObject({
+        headers: {
+          "retry-after": "17",
+          "x-codex-active-limit": "codex_luna",
+          "x-codex-luna-primary-used-percent": "100",
+        },
+      });
+      expect(
+        responseMetadata.some(
+          (headers) => headers.get("x-codex-luna-primary-used-percent") === "100",
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it("reconnects after websocket_connection_limit_reached and completes the same turn", async () => {
+    const first = fakeConnection([
+      [
+        {
+          type: "error",
+          status: 400,
+          error: {
+            code: "websocket_connection_limit_reached",
+            message: "Create a new websocket connection to continue.",
+          },
+        },
+      ],
+    ]);
+    const second = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-reconnected" } },
+        {
+          type: "response.completed",
+          response: { id: "resp-reconnected", status: "completed", usage: {} },
+        },
+      ],
+    ]);
+    const connect = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_connection_limit")}`,
+        responsesWebSocketConnector: connect,
+        connectRetries: 1,
+        connectRetryBackoffMs: [0],
+      },
+    });
+    const chunks: string[] = [];
+
+    for await (const chunk of client.nativePassthroughStream?.(
+      carrier("ingress-connection-limit", {
+        model: "gpt-5.6-sol",
+        input: [],
+        stream: true,
+        store: false,
+      }),
+    ) ?? []) {
+      chunks.push(chunk);
+    }
+
+    expect(first.closeCalls).toBe(1);
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(chunks.join("")).toContain("response.completed");
+  });
+
+  it("retries a status-less websocket handshake failure then keeps the session on HTTP", async () => {
+    const connect = vi.fn(async () => {
+      throw new CodexResponsesWebSocketConnectError("socket hang up");
+    });
+    const fetchMock = vi.fn(async () =>
+      rawSSEResponse(
+        'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+      ),
+    );
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_ws_fallback")}`,
+        responsesWebSocketConnector: connect,
+        connectRetries: 2,
+        connectRetryBackoffMs: [0],
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const request = carrier("ingress-network-fallback", {
+      model: "gpt-5.6-sol",
+      input: [],
+      stream: true,
+      store: false,
+    });
+
+    for (let turn = 0; turn < 2; turn += 1) {
+      const chunks: string[] = [];
+      for await (const chunk of client.nativePassthroughStream?.(request) ?? []) {
+        chunks.push(chunk);
+      }
+      expect(chunks.join("")).toContain("response.completed");
+    }
+
+    expect(connect).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("consumes codex.rate_limits events and publishes them through response metadata", async () => {
+    const connection = fakeConnection([
+      [
+        {
+          type: "codex.rate_limits",
+          plan_type: "plus",
+          rate_limits: {
+            allowed: true,
+            limit_reached: false,
+            primary: {
+              used_percent: 42,
+              window_minutes: 60,
+              reset_at: 1_700_000_000,
+            },
+            secondary: null,
+          },
+          credits: {
+            has_credits: true,
+            unlimited: false,
+            balance: "123",
+          },
+        },
+        { type: "response.created", response: { id: "resp-quota" } },
+        {
+          type: "response.completed",
+          response: { id: "resp-quota", status: "completed", usage: {} },
+        },
+      ],
+    ]);
+    const globalMetadata: Headers[] = [];
+    const callMetadata: Headers[] = [];
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_rate_limits")}`,
+        responsesWebSocketConnector: vi.fn(async () => connection),
+        onResponseMeta: (headers) => globalMetadata.push(headers),
+      },
+    });
+    const chunks: string[] = [];
+
+    for await (const chunk of client.nativePassthroughStream?.(
+      carrier("ingress-rate-limits", {
+        model: "gpt-5.6-sol",
+        input: [],
+        stream: true,
+        store: false,
+      }),
+      { onResponseMeta: (headers) => callMetadata.push(headers) },
+    ) ?? []) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks.join("")).not.toContain("codex.rate_limits");
+    expect(chunks.join("")).toContain("response.created");
+    expect(chunks.join("")).toContain("response.completed");
+    for (const metadata of [globalMetadata, callMetadata]) {
+      const quota = metadata.find(
+        (headers) => headers.get("x-codex-primary-used-percent") === "42",
+      );
+      expect(quota?.get("x-codex-primary-window-minutes")).toBe("60");
+      expect(quota?.get("x-codex-primary-reset-at")).toBe("1700000000");
+      expect(quota?.get("x-codex-credits-has-credits")).toBe("true");
+      expect(quota?.get("x-codex-credits-unlimited")).toBe("false");
+      expect(quota?.get("x-codex-credits-balance")).toBe("123");
+      expect(quota?.get("x-codex-plan-type")).toBe("plus");
+    }
+  });
+
+  it.each([
+    ["invalid JSON", "not-json"],
+    ["an untyped JSON event", JSON.stringify({ response: { status: "in_progress" } })],
+  ])("destroys the upstream websocket session after %s", async (_label, malformedEvent) => {
+    const first = fakeConnection([[malformedEvent]]);
+    const second = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-next" } },
+        {
+          type: "response.completed",
+          response: { id: "resp-next", status: "completed", usage: {} },
+        },
+      ],
+    ]);
+    const connect = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_malformed")}`,
+        responsesWebSocketConnector: connect,
+      },
+    });
+    const request = carrier("ingress-malformed", {
+      model: "gpt-5.6-sol",
+      input: [],
+      stream: true,
+      store: false,
+    });
+
+    const firstIterator = client.nativePassthroughStream?.(request)[Symbol.asyncIterator]();
+    await expect(firstIterator?.next()).rejects.toMatchObject({
+      name: "UpstreamError",
+      errorClass: "upstream_error",
+    });
+    const secondTurn: string[] = [];
+    for await (const chunk of client.nativePassthroughStream?.(request) ?? []) {
+      secondTurn.push(chunk);
+    }
+
+    expect(first.closeCalls).toBe(1);
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(secondTurn.join("")).toContain("response.completed");
+  });
+
+  it("preserves a Responses Lite incremental continuation without re-inserting tools", async () => {
+    const connection = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-2" } },
+        { type: "response.output_text.delta", delta: "done" },
+        {
+          type: "response.completed",
+          response: { id: "resp-2", status: "completed", usage: {} },
+        },
+      ],
+    ]);
+    const connect = vi.fn(async (_input: CodexResponsesWebSocketConnectInput) => connection);
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_ws_lite")}`,
+        responsesWebSocketConnector: connect,
+        resolveModelInfo: (model) =>
+          model === "gpt-5.6-sol" ? codexModelInfo({ use_responses_lite: true }) : undefined,
+      },
+    });
+    const output = {
+      type: "custom_tool_call_output",
+      call_id: "call-1",
+      output: "HELM_TOOL_OK\n",
+    };
+
+    for await (const _chunk of client.nativePassthroughStream?.(
+      carrier("ingress-lite-continuation", {
+        model: "gpt-5.6-sol",
+        input: [output],
+        stream: true,
+        store: false,
+        previous_response_id: "resp-1",
+        client_metadata: {
+          ws_request_header_x_openai_internal_codex_responses_lite: "true",
+        },
+      }),
+    ) ?? []) {
+      // drain
+    }
+
+    expect(connection.sent.map((text) => JSON.parse(text))).toEqual([
+      expect.objectContaining({
+        type: "response.create",
+        previous_response_id: "resp-1",
+        input: [output],
+      }),
+    ]);
+  });
+
+  it("closes a named websocket session and reconnects on its next request", async () => {
+    const first = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-1" } },
+        { type: "response.completed", response: { id: "resp-1", status: "completed" } },
+      ],
+    ]);
+    const second = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-2" } },
+        { type: "response.completed", response: { id: "resp-2", status: "completed" } },
+      ],
+    ]);
+    const connect = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        responsesWebSocketConnector: connect,
+        userAgent: "codex_cli_rs/7.8.9 (darwin 24.0; arm64) Apple_Terminal/455",
+      },
+    });
+    const request = carrier("ingress-close", {
+      model: "gpt-5.6-terra",
+      input: [],
+      stream: true,
+      store: false,
+    });
+
+    for await (const _chunk of client.nativePassthroughStream?.(request) ?? []) {
+      // drain
+    }
+    await client.closeResponsesWebSocketSession?.("ingress-close");
+    for await (const _chunk of client.nativePassthroughStream?.(request) ?? []) {
+      // drain
+    }
+
+    expect(first.closeCalls).toBe(1);
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(new Headers(connect.mock.calls[0]?.[0].headers).get("version")).toBe("7.8.9");
+  });
+
+  it("invalidates and retries the websocket handshake once after a 401", async () => {
+    let token = "expired-token";
+    const authHeaders: string[] = [];
+    const connection = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-ok" } },
+        { type: "response.completed", response: { id: "resp-ok", status: "completed" } },
+      ],
+    ]);
+    const connect = vi.fn(async (input: { headers: Record<string, string> }) => {
+      authHeaders.push(new Headers(input.headers).get("authorization") ?? "");
+      if (authHeaders.length === 1) {
+        throw new CodexResponsesWebSocketConnectError("unauthorized", {
+          status: 401,
+          body: JSON.stringify({ error: { message: "expired" } }),
+        });
+      }
+      return connection;
+    });
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${token}`,
+        onUnauthorized: () => {
+          token = jwt("acct_refreshed");
+        },
+        responsesWebSocketConnector: connect,
+      },
+    });
+
+    for await (const _chunk of client.nativePassthroughStream?.(
+      carrier("ingress-401", {
+        model: "gpt-5.6-luna",
+        input: [],
+        stream: true,
+        store: false,
+      }),
+    ) ?? []) {
+      // drain
+    }
+
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(authHeaders).toEqual(["Bearer expired-token", `Bearer ${jwt("acct_refreshed")}`]);
+  });
+
+  it("maps a websocket handshake 429 to an account-scoped UpstreamError", async () => {
+    const connect = vi.fn(async () => {
+      throw new CodexResponsesWebSocketConnectError("rate limited", {
+        status: 429,
+        headers: new Headers({
+          "retry-after": "17",
+          "x-codex-primary-used-percent": "100",
+        }),
+        body: JSON.stringify({ error: { message: "quota exhausted" } }),
+      });
+    });
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        responsesWebSocketConnector: connect,
+      },
+    });
+
+    let caught: unknown;
+    try {
+      for await (const _chunk of client.nativePassthroughStream?.(
+        carrier("ingress-429", {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+        }),
+      ) ?? []) {
+        // should not yield
+      }
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(UpstreamError);
+    expect((caught as UpstreamError).upstreamStatus).toBe(429);
+    expect((caught as UpstreamError).providerRaw).toEqual({
+      body: { error: { message: "quota exhausted" } },
+      headers: {
+        "retry-after": "17",
+        "x-codex-primary-used-percent": "100",
+      },
+    });
   });
 });
 
@@ -1728,6 +3289,202 @@ describe("createCodexResponsesClient — nativePassthrough", () => {
     expect(err.upstreamStatus).toBe(500);
     expect(JSON.stringify(err.providerRaw)).not.toContain(token);
     expect(JSON.stringify(err.providerRaw)).toContain("[redacted]");
+  });
+});
+
+describe("createCodexResponsesClient — responsesCompact", () => {
+  it("posts the native carrier to /responses/compact with Codex headers and per-call metadata", async () => {
+    const body = {
+      model: "gpt-5.6-sol",
+      input: [{ type: "message", role: "user", content: "compact this" }],
+      instructions: "Keep the useful context.",
+      parallel_tool_calls: false,
+      reasoning: { effort: "high", summary: "auto", context: "all_turns" },
+    };
+    const rawBody = JSON.stringify(body, null, 2);
+    const carrier = {
+      protocol: "openai_responses" as const,
+      body,
+      raw_body: rawBody,
+      headers: {
+        authorization: "Bearer client-secret",
+        accept: "application/json",
+        "user-agent": "codex_cli_rs/1.2.3 (Mac OS 15.5; arm64) Apple_Terminal/455",
+        version: "1.2.3",
+        originator: "codex_vscode",
+        "session-id": "client-session",
+        "thread-id": "client-thread",
+        "x-client-request-id": "client-request",
+        "x-codex-turn-state": "turn-before",
+        "x-codex-beta-features": "responses_lite_v2",
+        "x-codex-installation-id": "install-1",
+        "x-openai-internal-codex-responses-lite": "true",
+        "x-openai-fedramp": "true",
+        "x-helm-trace": "drop-me",
+        "content-length": "999",
+      },
+      mutations: {},
+    };
+    let seenUrl = "";
+    let seenHeaders = new Headers();
+    let seenBody = "";
+    const globalMetadata: Headers[] = [];
+    const callMetadata: Headers[] = [];
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex/responses",
+        getAuthHeader: async () => `Bearer ${jwt("acct_compact")}`,
+        sessionId: "provider-session",
+        threadId: "provider-thread",
+        userAgent: "codex_cli_rs/9.9.9 (darwin 24.0; arm64) node/v22.0.0",
+        isFedramp: true,
+        resolveModelInfo: () => codexModelInfo({ use_responses_lite: true }),
+        onResponseMeta: (headers) => globalMetadata.push(headers),
+      },
+      fetch: (async (url: string, init?: RequestInit) => {
+        seenUrl = String(url);
+        seenHeaders = new Headers(init?.headers);
+        seenBody = String(init?.body);
+        return new Response(JSON.stringify({ output: [{ type: "message", role: "assistant" }] }), {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+            "x-codex-turn-state": "turn-after",
+            "x-request-id": "req-compact",
+          },
+        });
+      }) as unknown as typeof fetch,
+    });
+
+    const output = await client.responsesCompact?.(carrier, {
+      onResponseMeta: (headers) => callMetadata.push(headers),
+    });
+
+    expect(output).toEqual({ output: [{ type: "message", role: "assistant" }] });
+    expect(seenUrl).toBe("https://chatgpt.com/backend-api/codex/responses/compact");
+    expect(JSON.parse(seenBody)).toEqual({
+      model: "gpt-5.6-sol",
+      input: [
+        { type: "additional_tools", role: "developer", tools: [] },
+        {
+          type: "message",
+          role: "developer",
+          content: [{ type: "input_text", text: "Keep the useful context." }],
+        },
+        { type: "message", role: "user", content: "compact this" },
+      ],
+      parallel_tool_calls: false,
+      reasoning: { effort: "high", summary: "auto", context: "all_turns" },
+    });
+    expect(seenHeaders.get("authorization")).toContain("Bearer ");
+    expect(seenHeaders.get("authorization")).not.toContain("client-secret");
+    expect(seenHeaders.get("chatgpt-account-id")).toBe("acct_compact");
+    expect(seenHeaders.get("accept")).toBe("application/json");
+    expect(seenHeaders.get("user-agent")).toBe(
+      "codex_cli_rs/1.2.3 (Mac OS 15.5; arm64) Apple_Terminal/455",
+    );
+    expect(seenHeaders.get("version")).toBe("1.2.3");
+    expect(seenHeaders.get("originator")).toBe("codex_vscode");
+    expect(seenHeaders.get("session-id")).toBe("client-session");
+    expect(seenHeaders.get("thread-id")).toBe("client-thread");
+    expect(seenHeaders.get("x-client-request-id")).toBe("client-request");
+    expect(seenHeaders.get("x-codex-turn-state")).toBe("turn-before");
+    expect(seenHeaders.get("x-codex-beta-features")).toBe("responses_lite_v2");
+    expect(seenHeaders.get("x-codex-installation-id")).toBe("install-1");
+    expect(seenHeaders.get("x-openai-internal-codex-responses-lite")).toBe("true");
+    expect(seenHeaders.get("x-openai-fedramp")).toBe("true");
+    expect(seenHeaders.get("session_id")).toBeNull();
+    expect(seenHeaders.get("x-helm-trace")).toBeNull();
+    expect(seenHeaders.get("content-length")).toBeNull();
+    expect(carrier.mutations).toMatchObject({
+      auth_replaced: true,
+      content_length_recomputed: true,
+      headers_dropped: expect.arrayContaining(["authorization", "content-length", "x-helm-trace"]),
+    });
+    expect(globalMetadata).toHaveLength(1);
+    expect(callMetadata).toHaveLength(1);
+    expect(globalMetadata[0]?.get("x-codex-turn-state")).toBe("turn-after");
+    expect(callMetadata[0]?.get("x-codex-turn-state")).toBe("turn-after");
+  });
+
+  it("uses a Codex-format configured fallback UA when a native carrier has no User-Agent", async () => {
+    let seen = new Headers();
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        userAgent: "codex_cli_rs/1.2.3 (darwin 24.0; arm64) node/v22.0.0",
+      },
+      fetch: (async (_url: string, init?: RequestInit) => {
+        seen = new Headers(init?.headers);
+        return jsonResponse({ output: [] });
+      }) as unknown as typeof fetch,
+    });
+
+    await client.responsesCompact?.({
+      protocol: "openai_responses",
+      body: { model: "gpt-5.5", input: [] },
+      headers: {},
+      mutations: {},
+    });
+
+    expect(seen.get("user-agent")).toMatch(/^codex_cli_rs\/1\.2\.3 \(.+ .+; .+\) \S+$/);
+    expect(seen.get("user-agent")).not.toMatch(/\bnode\//i);
+    expect(seen.get("version")).toBe("1.2.3");
+  });
+
+  it.each([
+    "nativePassthrough",
+    "responsesCompact",
+  ] as const)("keeps the timeout active while %s reads the complete unary response body", async (method) => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+        const signal = init?.signal;
+        const encoder = new TextEncoder();
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(encoder.encode('{"output":['));
+              const abort = () =>
+                controller.error(new DOMException("The operation was aborted", "AbortError"));
+              if (signal?.aborted) abort();
+              else signal?.addEventListener("abort", abort, { once: true });
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      });
+      const client = createCodexResponsesClient({
+        config: {
+          baseUrl: "https://chatgpt.com/backend-api/codex",
+          getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+          timeoutMs: 50,
+        },
+        fetch: fetchMock as unknown as typeof fetch,
+      });
+      const run =
+        method === "nativePassthrough"
+          ? client.nativePassthrough?.({ model: "gpt-5.5", input: [] })
+          : client.responsesCompact?.({ model: "gpt-5.5", input: [] });
+      let outcome: unknown = "pending";
+      void run?.then(
+        (value) => {
+          outcome = value;
+        },
+        (error: unknown) => {
+          outcome = error;
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(50);
+      await Promise.resolve();
+
+      expect(outcome).toBeInstanceOf(UpstreamError);
+      expect(outcome).toMatchObject({ errorClass: "timeout" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -2051,6 +3808,25 @@ describe("hoistResponsesInstructions", () => {
     expect("instructions" in original).toBe(false);
     expect(original.input).toHaveLength(2);
   });
+
+  it("does not hoist developer items when Responses Lite is detected", () => {
+    const original = {
+      model: "gpt-5.6-sol",
+      input: [
+        { type: "additional_tools", role: "developer", tools: [] },
+        { type: "message", role: "developer", content: "Stay in input." },
+        { role: "user", content: "q" },
+      ],
+    };
+    const fromHeader = hoistResponsesInstructions(original, {
+      headers: { "x-openai-internal-codex-responses-lite": "true" },
+    });
+    const fromMetadata = hoistResponsesInstructions(original, {
+      modelInfo: codexModelInfo({ use_responses_lite: true }),
+    });
+    expect(fromHeader).toEqual({ body: original, fix: "none" });
+    expect(fromMetadata).toEqual({ body: original, fix: "none" });
+  });
 });
 
 describe("sanitizeCodexResponsesNativeBody", () => {
@@ -2093,6 +3869,8 @@ describe("sanitizeCodexResponsesNativeBody", () => {
         {
           type: "message",
           role: "assistant",
+          status: "completed",
+          phase: "final_answer",
           content: [{ type: "output_text", text: "NO_REPLY" }],
         },
         { role: "user", content: [{ type: "input_text", text: "next" }] },
@@ -2245,6 +4023,59 @@ describe("createGenericOpenAIResponsesClient — chatCompletionStream", () => {
     }
     expect(caught).toBeInstanceOf(UpstreamError);
     expect((caught as UpstreamError).upstreamStatus).toBe(429);
+  });
+
+  it("preserves generic Responses incomplete and EOF terminal behavior", async () => {
+    const responses = [
+      sseResponse([
+        { type: "response.output_text.delta", delta: "partial" },
+        {
+          type: "response.incomplete",
+          response: {
+            status: "incomplete",
+            usage: { input_tokens: 3, output_tokens: 1 },
+          },
+        },
+      ]),
+      sseResponse([{ type: "response.output_text.delta", delta: "legacy eof" }]),
+      sseResponse([]),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift() as Response);
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://api.openai.test/v1", apiKey: "sk-test" },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    const incomplete: string[] = [];
+    for await (const chunk of client.chatCompletionStream({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+    })) {
+      incomplete.push(chunk);
+    }
+    expect(incomplete.join("")).toContain('"finish_reason":"length"');
+    expect(incomplete.join("")).toContain('"prompt_tokens":3');
+    expect(incomplete.join("")).toContain('"completion_tokens":1');
+    expect(incomplete.join("")).toContain("data: [DONE]");
+
+    const eof: string[] = [];
+    for await (const chunk of client.chatCompletionStream({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+    })) {
+      eof.push(chunk);
+    }
+    expect(eof.join("")).toContain('"finish_reason":"stop"');
+    expect(eof.join("")).toContain("data: [DONE]");
+
+    const emptyEof: string[] = [];
+    for await (const chunk of client.chatCompletionStream({
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+    })) {
+      emptyEof.push(chunk);
+    }
+    expect(emptyEof).toEqual([]);
   });
 });
 

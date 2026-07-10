@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   completeManualPaste,
+  consumeCodexResetCredit,
+  getAccountModels,
   getOAuthQuota,
   getOAuthUsage,
   listOAuthStatus,
   logoutOAuth,
-  setSelectionStrategy,
+  setAccountModels,
   setAccountSchedule,
+  setSelectionStrategy,
   startManualPaste,
 } from './oauth.js';
 
@@ -44,7 +47,9 @@ describe('admin oauth api client', () => {
   });
 
   it('treats a 503 status response as OAuth not configured', async () => {
-    const fetchFn = vi.fn(async () => resp({ error: 'not_configured' }, { ok: false, status: 503 }));
+    const fetchFn = vi.fn(async () =>
+      resp({ error: 'not_configured' }, { ok: false, status: 503 }),
+    );
     vi.stubGlobal('fetch', fetchFn);
 
     await expect(listOAuthStatus()).resolves.toEqual({
@@ -107,7 +112,10 @@ describe('admin oauth api client', () => {
   });
 
   it('fails open for usage and quota observability reads', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => resp({}, { ok: false, status: 500 })));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => resp({}, { ok: false, status: 500 })),
+    );
     await expect(getOAuthUsage()).resolves.toEqual([]);
     await expect(getOAuthQuota()).resolves.toEqual([]);
 
@@ -147,6 +155,32 @@ describe('admin oauth api client', () => {
               windows: [{ key: '5h', usedPercent: 42, resetsAtMs: 123, windowMinutes: 300 }],
               capturedAt: 99,
               source: 'anthropic',
+              identity: {
+                email: 'codex@example.com',
+                chatgptPlanType: 'pro',
+                chatgptAccountId: 'account-1',
+                isFedramp: false,
+              },
+              planType: 'pro',
+              credits: { hasCredits: true, unlimited: false, balance: '9.99' },
+              individualLimit: {
+                limit: '25000',
+                used: '8000',
+                remainingPercent: 68,
+                resetsAtMs: 456,
+              },
+              rateLimitReachedType: 'rate_limit_reached',
+              resetCreditDetails: [
+                {
+                  id: 'credit-1',
+                  resetType: 'codexRateLimits',
+                  status: 'available',
+                  grantedAt: 1,
+                  expiresAt: 2,
+                  title: 'Full reset',
+                  description: 'Ready',
+                },
+              ],
             },
           ],
         }),
@@ -157,8 +191,144 @@ describe('admin oauth api client', () => {
       expect.objectContaining({ providerId: 'anthropic', account: 'acct-a', requests: 12 }),
     ]);
     await expect(getOAuthQuota()).resolves.toEqual([
-      expect.objectContaining({ providerId: 'anthropic', account: 'acct-a', capturedAt: 99 }),
+      expect.objectContaining({
+        providerId: 'anthropic',
+        account: 'acct-a',
+        capturedAt: 99,
+        identity: {
+          email: 'codex@example.com',
+          chatgptPlanType: 'pro',
+          chatgptAccountId: 'account-1',
+          isFedramp: false,
+        },
+        planType: 'pro',
+        credits: { hasCredits: true, unlimited: false, balance: '9.99' },
+        individualLimit: {
+          limit: '25000',
+          used: '8000',
+          remainingPercent: 68,
+          resetsAtMs: 456,
+        },
+        rateLimitReachedType: 'rate_limit_reached',
+        resetCreditDetails: [
+          {
+            id: 'credit-1',
+            resetType: 'codexRateLimits',
+            status: 'available',
+            grantedAt: 1,
+            expiresAt: 2,
+            title: 'Full reset',
+            description: 'Ready',
+          },
+        ],
+      }),
     ]);
+  });
+
+  it('fails open when quota JSON does not match the shared schema', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        resp({
+          quota: [
+            {
+              providerId: 'openai-codex',
+              account: 'acct-a',
+              windows: [],
+              capturedAt: 99,
+              source: 'codex',
+              credits: {
+                hasCredits: true,
+                unlimited: false,
+                balance: 9.99,
+              },
+            },
+          ],
+        }),
+      ),
+    );
+
+    await expect(getOAuthQuota()).resolves.toEqual([]);
+  });
+
+  it('keeps valid quota rows when another account has malformed metadata', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        resp({
+          quota: [
+            {
+              providerId: 'openai-codex',
+              account: 'valid',
+              windows: [],
+              capturedAt: 99,
+              source: 'codex',
+            },
+            {
+              providerId: 'openai-codex',
+              account: 'invalid',
+              windows: [],
+              capturedAt: 99,
+              source: 'codex',
+              credits: {
+                hasCredits: true,
+                unlimited: false,
+                balance: 9.99,
+              },
+            },
+          ],
+        }),
+      ),
+    );
+
+    await expect(getOAuthQuota()).resolves.toEqual([
+      expect.objectContaining({ account: 'valid', usageLimitedUntilMs: null }),
+    ]);
+  });
+
+  it('posts a selected reset credit with a reusable idempotency key and returns the outcome', async () => {
+    const fetchFn = vi.fn<typeof fetch>(async () =>
+      resp({
+        code: 'already_redeemed',
+        outcome: 'alreadyRedeemed',
+        windowsReset: 0,
+        redeemRequestId: 'idem-1',
+      }),
+    );
+    vi.stubGlobal('fetch', fetchFn);
+
+    await expect(
+      consumeCodexResetCredit('openai-codex', 'acct-codex', {
+        creditId: 'credit-1',
+        idempotencyKey: 'idem-1',
+      }),
+    ).resolves.toMatchObject({
+      outcome: 'alreadyRedeemed',
+      redeemRequestId: 'idem-1',
+    });
+
+    const call = firstCall(fetchFn.mock.calls);
+    expect(JSON.parse(String(requestInit(call).body))).toEqual({
+      account: 'acct-codex',
+      creditId: 'credit-1',
+      idempotencyKey: 'idem-1',
+    });
+  });
+
+  it('rejects a malformed reset-credit success body instead of casting it', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>(async () =>
+        resp({
+          code: 'reset',
+          windowsReset: 2,
+        }),
+      ),
+    );
+
+    await expect(consumeCodexResetCredit('openai-codex')).rejects.toThrow(
+      'invalid normalized Codex reset-credit response',
+    );
   });
 
   it('posts manual-paste proxy settings to the gateway start endpoint', async () => {
@@ -214,6 +384,47 @@ describe('admin oauth api client', () => {
       priority: 5,
       schedulable: false,
       fastMode: true,
+    });
+  });
+
+  it('reads and saves the per-account model selection mode', async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        resp({
+          available: ['gpt-5.6-sol', 'gpt-5.6-terra'],
+          enabled: ['gpt-5.6-sol'],
+          canPull: true,
+          modelsMode: 'auto',
+        }),
+      )
+      .mockResolvedValueOnce(resp(null, { ok: true, status: 204 }));
+    vi.stubGlobal('fetch', fetchFn);
+
+    await expect(getAccountModels('openai-codex', 'acct-codex')).resolves.toEqual({
+      available: ['gpt-5.6-sol', 'gpt-5.6-terra'],
+      enabled: ['gpt-5.6-sol'],
+      canPull: true,
+      modelsMode: 'auto',
+    });
+
+    await setAccountModels('openai-codex', 'acct-codex', {
+      mode: 'manual',
+      models: ['gpt-5.6-sol'],
+    });
+
+    expect(fetchFn.mock.calls[0]?.[0]).toBe(
+      '/admin/api/oauth/openai-codex/models?account=acct-codex',
+    );
+    const saveCall = fetchFn.mock.calls[1];
+    if (!saveCall) throw new Error('expected model save request');
+    expect(saveCall[0]).toBe('/admin/api/oauth/openai-codex/models');
+    const init = requestInit(saveCall);
+    expect(init.method).toBe('PUT');
+    expect(JSON.parse(String(init.body))).toEqual({
+      account: 'acct-codex',
+      mode: 'manual',
+      models: ['gpt-5.6-sol'],
     });
   });
 

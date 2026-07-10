@@ -167,6 +167,14 @@ function providerClients(client: ProviderClient): Map<string, ProviderClient> {
 }
 
 describe("default config activates capability filter + cost (alias-namespace alignment)", () => {
+  it.each([
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+  ])("the shipped %s model lane preserves the Codex client's reasoning effort", (lane) => {
+    expect(lanes[lane]?.reasoning_effort).toBeUndefined();
+  });
+
   it("sanity: the shipped catalog is keyed by the SAME provider/model aliases the lanes use", () => {
     // Pre-alignment these were absent (lane aliases like `cheap_model` had no
     // catalog entry). Now every lane candidate alias resolves in the catalog.
@@ -312,6 +320,50 @@ describe("default config activates capability filter + cost (alias-namespace ali
     expect(out.upstreamRequest).toBe(fired);
     // … and it is the RESOLVED bare upstream model (post stripInternal), not the alias.
     expect(JSON.parse(out.upstreamRequest ?? "null").model).toBe("deepseek-v4-flash");
+  });
+
+  it("captures request-scoped upstream response metadata on the served attempt", async () => {
+    const client = {
+      chatCompletion: vi.fn(
+        async (
+          _body: Record<string, unknown>,
+          opts?: { onResponseMeta?: (headers: Headers) => void },
+        ) => {
+          opts?.onResponseMeta?.(
+            new Headers({
+              "x-codex-turn-state": "turn-state-1",
+              "openai-model": "gpt-5.6-sol",
+              "x-request-id": "req-upstream-1",
+            }),
+          );
+          return {
+            id: "chatcmpl-meta",
+            choices: [
+              { index: 0, message: { role: "assistant", content: "{}" }, finish_reason: "stop" },
+            ],
+            usage: { prompt_tokens: 1, completion_tokens: 1 },
+          };
+        },
+      ),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: client,
+      providers: providerClients(client),
+      registry: buildRegistry(),
+      breaker: breaker(),
+      catalog,
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["deepseek/deepseek-v4-flash"]), req({}));
+
+    expect(out.responseMetadata).toEqual({
+      "openai-model": "gpt-5.6-sol",
+      "x-codex-turn-state": "turn-state-1",
+      "x-request-id": "req-upstream-1",
+    });
   });
 
   it("the shipped `json` lane serves its json-capable primary and never reaches the */auto tail", async () => {

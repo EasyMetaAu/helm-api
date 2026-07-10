@@ -27,9 +27,11 @@ import { guardPreOutputFailure, type PreOutputClassifier } from "../failover-gua
 import {
   type ChatCompletionRequest,
   type ChatCompletionResponse,
+  type ProviderCallOptions,
   type ProviderClient,
   UpstreamError,
 } from "../openai.js";
+import { CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER } from "../openai-responses.js";
 import { TokenRefreshError } from "../token-manager.js";
 import { DEFAULT_429_COOLDOWN_MS } from "./usage-limit.js";
 
@@ -57,6 +59,7 @@ function isRetryableTransientError(err: unknown): boolean {
 // the request instead of letting the executor trip the alias-wide circuit breaker.
 function isCredentialAccountFailure(err: unknown): boolean {
   if (err instanceof TokenRefreshError) {
+    if (err.permanentCredentialFailure) return true;
     const status = err.httpStatus;
     return status === 400 || status === 401 || status === 403;
   }
@@ -91,6 +94,9 @@ export interface OAuthPoolMember {
   account: string;
   priority: number;
   schedulable: boolean;
+  // Optional per-account model entitlement. Undefined preserves the legacy
+  // "supports every routed model" behavior; an explicit empty list supports none.
+  models?: readonly string[];
   client: ProviderClient;
   // Optional live capacity probe. When true, the pool prefers another eligible account
   // before committing this request. If every eligible account is busy, selection falls
@@ -138,6 +144,10 @@ export interface OAuthRateLimitParkContext {
   error: unknown;
 }
 
+export type OAuthRateLimitScope =
+  | { scope: "account" }
+  | { scope: "model"; model: string; limitId: string | null };
+
 export interface OAuthPoolDeps {
   members: OAuthPoolMember[];
   // Injected clock (default Date.now) so the LRU cursor is testable.
@@ -158,6 +168,10 @@ export interface OAuthPoolDeps {
   // Optional model-aware guard for provider-specific scoped caps. Returning false
   // means "retry a sibling for this request, but do not globally park the account".
   shouldParkRateLimit?: (ctx: OAuthRateLimitParkContext) => boolean;
+  // Provider-specific 429 scope. Model-scoped limits cool only this account/model
+  // pair, while account-scoped limits use the durable global account park above.
+  // `shouldParkRateLimit` remains as a compatibility fallback for existing callers.
+  resolveRateLimitScope?: (ctx: OAuthRateLimitParkContext) => OAuthRateLimitScope;
   // Fires when a selected account's durable credential is rejected (refresh 400/401/403
   // or persistent upstream 401/403). The pool already removes that account from this
   // process; the hook lets the gateway persist the disabled state for admin status,
@@ -201,6 +215,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   const quotaFreshMs = deps.quotaFreshMs ?? 10 * 60 * 1000;
   const entries: PoolEntry[] = deps.members.map((member) => ({ member, lastUsedAt: 0 }));
   const stickySessions = new Map<string, { account: string; expiresAt: number }>();
+  const scopedRateLimits = new Map<
+    string,
+    { account: string; model: string; limitId: string | null; untilMs: number }
+  >();
   const credentialFailureReported = new Set<string>();
   let selectionCounter = 0;
 
@@ -210,6 +228,27 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   function usageLimited(member: OAuthPoolMember, nowMs: number): boolean {
     const until = member.usageLimitedUntilMs;
     return until != null && nowMs < until;
+  }
+
+  function supportsModel(member: OAuthPoolMember, model: string | null): boolean {
+    return model === null || member.models === undefined || member.models.includes(model);
+  }
+
+  function scopedRateLimitKey(account: string, model: string, limitId: string | null): string {
+    return `${account}\u0000${model}\u0000${limitId ?? ""}`;
+  }
+
+  function modelLimited(account: string, model: string | null, nowMs: number): boolean {
+    if (model === null) return false;
+    let limited = false;
+    for (const [key, cooldown] of scopedRateLimits) {
+      if (cooldown.untilMs <= nowMs) {
+        scopedRateLimits.delete(key);
+        continue;
+      }
+      if (cooldown.account === account && cooldown.model === model) limited = true;
+    }
+    return limited;
   }
 
   function headerValue(headers: Record<string, string | string[]>, name: string): string | null {
@@ -257,6 +296,16 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
 
   function stickyKeyFromNative(input: NativePassthroughInput): string | null {
     const body = nativePassthroughBody(input);
+    if (isNativePassthroughCarrier(input)) {
+      const websocketSession = headerValue(input.headers, CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER);
+      if (websocketSession !== null) return `responses_websocket_session:${websocketSession}`;
+    }
+    const previousResponseId = bodyString(body, "previous_response_id");
+    if (previousResponseId !== null) return `previous_response_id:${previousResponseId}`;
+    if (isNativePassthroughCarrier(input)) {
+      const turnState = headerValue(input.headers, "x-codex-turn-state");
+      if (turnState !== null) return `x-codex-turn-state:${turnState}`;
+    }
     const bodyDeviceKey = deviceAffinityKeyFromBody(body);
     if (bodyDeviceKey !== null) return bodyDeviceKey;
     if (isNativePassthroughCarrier(input)) {
@@ -264,7 +313,14 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         const value = headerValue(input.headers, header);
         if (value !== null) return `${header}:${value}`;
       }
-      for (const header of ["session_id", "x-session-id", "prompt_cache_key", "conversation_id"]) {
+      for (const header of [
+        "session-id",
+        "thread-id",
+        "session_id",
+        "x-session-id",
+        "prompt_cache_key",
+        "conversation_id",
+      ]) {
         const value = headerValue(input.headers, header);
         if (value !== null) return `${header}:${value}`;
       }
@@ -280,12 +336,12 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         if (value !== null) return `metadata.${key}:${value}`;
       }
     }
-    const previousResponseId = bodyString(body, "previous_response_id");
-    if (previousResponseId !== null) return `previous_response_id:${previousResponseId}`;
     return null;
   }
 
   function stickyKeyFromChat(req: ChatCompletionRequest): string | null {
+    const previousResponseId = bodyString(req, "previous_response_id");
+    if (previousResponseId !== null) return `previous_response_id:${previousResponseId}`;
     const deviceKey = deviceAffinityKeyFromBody(req);
     if (deviceKey !== null) return deviceKey;
     for (const key of [
@@ -305,8 +361,6 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         if (value !== null) return `metadata.${key}:${value}`;
       }
     }
-    const previousResponseId = bodyString(req, "previous_response_id");
-    if (previousResponseId !== null) return `previous_response_id:${previousResponseId}`;
     return null;
   }
 
@@ -337,10 +391,18 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     }
   }
 
-  function eligibleEntries(nowMs: number, exclude: ReadonlySet<string> | undefined): PoolEntry[] {
+  function eligibleEntries(
+    nowMs: number,
+    exclude: ReadonlySet<string> | undefined,
+    model: string | null,
+  ): PoolEntry[] {
     return entries.filter(
       (e) =>
-        e.member.schedulable && !usageLimited(e.member, nowMs) && !exclude?.has(e.member.account),
+        e.member.schedulable &&
+        supportsModel(e.member, model) &&
+        !usageLimited(e.member, nowMs) &&
+        !modelLimited(e.member.account, model, nowMs) &&
+        !exclude?.has(e.member.account),
     );
   }
 
@@ -592,16 +654,83 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   function rememberResponseAffinity(result: unknown, entry: PoolEntry): void {
     const id = responseIdFromResult(result);
     if (id === null) return;
+    rememberResponseIdAffinity(id, entry);
+  }
+
+  function rememberResponseIdAffinity(id: string, entry: PoolEntry): void {
     stickySessions.set(`previous_response_id:${id}`, {
       account: entry.member.account,
       expiresAt: now() + stickyTtlMs,
     });
   }
 
+  function rememberTurnStateAffinity(headers: Headers, entry: PoolEntry): void {
+    const turnState = headers.get("x-codex-turn-state")?.trim();
+    if (!turnState) return;
+    stickySessions.set(`x-codex-turn-state:${turnState}`, {
+      account: entry.member.account,
+      expiresAt: now() + stickyTtlMs,
+    });
+  }
+
+  function callOptionsForEntry(
+    opts: ProviderCallOptions | undefined,
+    entry: PoolEntry,
+  ): ProviderCallOptions {
+    return {
+      ...opts,
+      onResponseMeta: (headers) => {
+        rememberTurnStateAffinity(headers, entry);
+        try {
+          opts?.onResponseMeta?.(headers);
+        } catch {
+          // Request-scoped response metadata observers are fail-open.
+        }
+      },
+    };
+  }
+
+  function streamResponseAffinityTracker(entry: PoolEntry): (chunk: string) => void {
+    let buffer = "";
+    return (chunk: string): void => {
+      buffer += chunk.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary !== -1) {
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const data = frame
+          .split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).replace(/^ /, ""))
+          .join("\n")
+          .trim();
+        if (data !== "" && data !== "[DONE]") {
+          try {
+            const id = responseIdFromResult(JSON.parse(data) as unknown);
+            if (id !== null) rememberResponseIdAffinity(id, entry);
+          } catch {
+            // A malformed/non-JSON frame cannot establish response affinity.
+          }
+        }
+        boundary = buffer.indexOf("\n\n");
+      }
+      // The response.created frame is small. Bound malformed/non-SSE accumulation
+      // so an account-affinity side channel can never retain an unbounded stream.
+      if (buffer.length > 1_048_576) buffer = buffer.slice(-262_144);
+    };
+  }
+
   function affinityKeySource(stickyKey: string | null): string | null {
     if (stickyKey === null) return null;
     const separator = stickyKey.indexOf(":");
     return separator > 0 ? stickyKey.slice(0, separator) : "unknown";
+  }
+
+  function isStrictAccountSticky(stickyKey: string | null): boolean {
+    return (
+      stickyKey?.startsWith("previous_response_id:") === true ||
+      stickyKey?.startsWith("x-codex-turn-state:") === true
+    );
   }
 
   function commitSelection(
@@ -635,7 +764,8 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     opts: { avoidBusy?: boolean; model?: string | null } = {},
   ): PoolEntry {
     const nowMs = now();
-    const eligible = eligibleEntries(nowMs, exclude);
+    const model = opts.model ?? null;
+    const eligible = eligibleEntries(nowMs, exclude, model);
     const capacityTier = preferredCapacityTier(eligible, opts.avoidBusy === true);
     const selectionBase = {
       affinityKeySource: affinityKeySource(stickyKey ?? null),
@@ -646,10 +776,14 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       strategy: selectionStrategy,
     };
     let stickyEntry: PoolEntry | undefined;
+    let knownSticky = false;
+    const stickyOnly = isStrictAccountSticky(stickyKey ?? null);
     if (stickyKey) {
       const sticky = stickySessions.get(stickyKey);
       if (sticky !== undefined && sticky.expiresAt > nowMs) {
-        const entry = capacityTier.candidates.find(
+        knownSticky = true;
+        const stickyCandidates = stickyOnly ? eligible : capacityTier.candidates;
+        const entry = stickyCandidates.find(
           (candidate) => candidate.member.account === sticky.account,
         );
         if (entry !== undefined) {
@@ -657,39 +791,52 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
           stickyEntry = entry;
         }
       }
-      if (stickyEntry === undefined) stickySessions.delete(stickyKey);
+      if (!knownSticky) stickySessions.delete(stickyKey);
     }
 
-    const stickyOnly = stickyKey?.startsWith("previous_response_id:") === true;
     if (stickyOnly && stickyEntry) {
       return commitSelection(stickyEntry, null, nowMs, {
         ...selectionBase,
         reason: "sticky_hit",
       });
     }
+    if (stickyOnly && knownSticky) {
+      const source = affinityKeySource(stickyKey ?? null) ?? "stateful continuation";
+      throw new Error(`oauth pool: ${source} original account is unavailable`);
+    }
     const { entry: best, reason } = chooseByStrategy(
       capacityTier.candidates,
       stickyOnly ? null : (stickyKey ?? null),
       stickyEntry,
-      opts.model ?? null,
+      model,
       nowMs,
     );
-    if (!best) throw new Error("oauth pool has no schedulable account");
+    if (!best) {
+      if (model !== null && !entries.some((entry) => supportsModel(entry.member, model))) {
+        throw new Error(`oauth pool: no account supports model "${model}"`);
+      }
+      throw new Error("oauth pool has no schedulable account");
+    }
     return commitSelection(best, stickyOnly ? null : (stickyKey ?? null), nowMs, {
       ...selectionBase,
       reason,
     });
   }
 
-  function forgetStickyAccount(account: string): void {
+  function forgetStickyAccount(account: string, preservePreviousResponses = false): void {
     for (const [key, sticky] of stickySessions) {
-      if (sticky.account === account) stickySessions.delete(key);
+      if (
+        sticky.account === account &&
+        !(preservePreviousResponses && isStrictAccountSticky(key))
+      ) {
+        stickySessions.delete(key);
+      }
     }
   }
 
   function parkCredentialFailedAccount(entry: PoolEntry, err: unknown): void {
     entry.member.schedulable = false;
-    forgetStickyAccount(entry.member.account);
+    forgetStickyAccount(entry.member.account, true);
     if (credentialFailureReported.has(entry.member.account)) return;
     credentialFailureReported.add(entry.member.account);
     try {
@@ -699,23 +846,38 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     }
   }
 
-  function shouldParkRateLimitedAccount(
+  function rateLimitScope(
     entry: PoolEntry,
     err: unknown,
     model: string | null,
-  ): boolean {
+  ): OAuthRateLimitScope {
+    const context = { account: entry.member.account, model, error: err };
     try {
-      return (
-        deps.shouldParkRateLimit?.({ account: entry.member.account, model, error: err }) ?? true
-      );
+      const resolved = deps.resolveRateLimitScope?.(context);
+      if (resolved?.scope === "model" && resolved.model.length > 0) return resolved;
+      if (resolved?.scope === "account") return resolved;
+      if (deps.shouldParkRateLimit?.(context) === false && model !== null) {
+        return { scope: "model", model, limitId: null };
+      }
+      return { scope: "account" };
     } catch {
-      return true;
+      return { scope: "account" };
     }
   }
 
   function parkRateLimitedAccount(entry: PoolEntry, err: unknown, model: string | null): void {
-    if (!shouldParkRateLimitedAccount(entry, err, model)) {
-      forgetStickyAccount(entry.member.account);
+    const scope = rateLimitScope(entry, err, model);
+    if (scope.scope === "model") {
+      const key = scopedRateLimitKey(entry.member.account, scope.model, scope.limitId);
+      const candidate = now() + accountRateLimitCooldownMs;
+      const current = scopedRateLimits.get(key);
+      scopedRateLimits.set(key, {
+        account: entry.member.account,
+        model: scope.model,
+        limitId: scope.limitId,
+        untilMs: current && current.untilMs > candidate ? current.untilMs : candidate,
+      });
+      forgetStickyAccount(entry.member.account, true);
       return;
     }
     const candidate = now() + accountRateLimitCooldownMs;
@@ -726,7 +888,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     const current = entry.member.usageLimitedUntilMs;
     const untilMs = current != null && current > candidate ? current : candidate;
     entry.member.usageLimitedUntilMs = untilMs;
-    forgetStickyAccount(entry.member.account);
+    forgetStickyAccount(entry.member.account, true);
     try {
       deps.onAccountRateLimit?.(entry.member.account, untilMs);
     } catch {
@@ -742,9 +904,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     stickyKey: string | null,
     model: string | null,
     avoidBusy: boolean,
-    call: (client: ProviderClient) => Promise<R>,
+    call: (client: ProviderClient, entry: PoolEntry) => Promise<R>,
   ): Promise<R> {
     const tried = new Set<string>();
+    const statefulContinuation = isStrictAccountSticky(stickyKey);
     let lastErr: unknown;
     for (;;) {
       let entry: PoolEntry;
@@ -755,25 +918,29 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       }
       tried.add(entry.member.account);
       try {
-        const result = await call(entry.member.client);
+        const result = await call(entry.member.client, entry);
         rememberResponseAffinity(result, entry);
         return result;
       } catch (err) {
         if (isCredentialAccountFailure(err)) {
           parkCredentialFailedAccount(entry, err);
+          if (statefulContinuation) throw err;
           lastErr = err;
           continue;
         }
         if (isRateLimitAccountFailure(err)) {
           parkRateLimitedAccount(entry, err, model);
+          if (statefulContinuation) throw err;
           lastErr = err;
           continue;
         }
         if (isAccountBackpressureFailure(err)) {
+          if (statefulContinuation) throw err;
           lastErr = err;
           continue;
         }
         if (!isRetryableTransientError(err)) throw err;
+        if (statefulContinuation) throw err;
         lastErr = err;
       }
     }
@@ -789,7 +956,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     stickyKey: string | null,
     model: string | null,
     avoidBusy: boolean,
-    open: (client: ProviderClient) => AsyncIterable<string>,
+    open: (client: ProviderClient, entry: PoolEntry) => AsyncIterable<string>,
     // When set, each member's SSE is wrapped so a pre-output error frame (after only a
     // content-free preamble) throws BEFORE the first yielded chunk — turning "commit on
     // first raw chunk" into "commit on first real output", so the in-band failure fails
@@ -797,13 +964,14 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     preambleClassifier?: PreOutputClassifier | null,
   ): AsyncIterable<string> {
     const tried = new Set<string>([firstEntry.member.account]);
+    const statefulContinuation = isStrictAccountSticky(stickyKey);
     let entry = firstEntry;
     let lastErr: unknown;
     for (;;) {
       let iterator: AsyncIterator<string> | undefined;
       let first: IteratorResult<string>;
       try {
-        const raw = open(entry.member.client);
+        const raw = open(entry.member.client, entry);
         iterator = (preambleClassifier ? guardPreOutputFailure(raw, preambleClassifier) : raw)[
           Symbol.asyncIterator
         ]();
@@ -822,6 +990,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
           if (!isRetryableTransientError(err)) throw err;
           lastErr = err;
         }
+        if (statefulContinuation) throw lastErr;
         let next: PoolEntry;
         try {
           next = select(stickyKey, tried, { avoidBusy, model });
@@ -833,11 +1002,16 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         continue;
       }
       // First chunk obtained (or a clean empty stream) → COMMIT to this account.
+      const trackResponseAffinity = streamResponseAffinityTracker(entry);
       try {
-        if (!first.done) yield first.value;
+        if (!first.done) {
+          trackResponseAffinity(first.value);
+          yield first.value;
+        }
         while (true) {
           const chunk = await iterator.next();
           if (chunk.done) return;
+          trackResponseAffinity(chunk.value);
           yield chunk.value;
         }
       } finally {
@@ -853,6 +1027,11 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     setUsageLimit(account: string, untilMs: number | null): void {
       const entry = entries.find((e) => e.member.account === account);
       if (entry) entry.member.usageLimitedUntilMs = untilMs;
+      if (untilMs === null) {
+        for (const [key, cooldown] of scopedRateLimits) {
+          if (cooldown.account === account) scopedRateLimits.delete(key);
+        }
+      }
     },
     getUsageLimit(account: string): number | null {
       return entries.find((e) => e.member.account === account)?.member.usageLimitedUntilMs ?? null;
@@ -871,18 +1050,18 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     },
     async chatCompletion(
       req: ChatCompletionRequest,
-      opts?: { signal?: AbortSignal },
+      opts?: ProviderCallOptions,
     ): Promise<ChatCompletionResponse> {
       return completeWithRetry(
         stickyKeyFromChat(req),
         modelFromChat(req),
         isUserMessageRequest(req),
-        (client) => client.chatCompletion(req, opts),
+        (client, entry) => client.chatCompletion(req, callOptionsForEntry(opts, entry)),
       );
     },
     chatCompletionStream(
       req: ChatCompletionRequest,
-      opts?: { signal?: AbortSignal },
+      opts?: ProviderCallOptions,
     ): AsyncIterable<string> {
       // Pick SYNCHRONOUSLY (one pick per call) before opening the stream so rotation +
       // onSelect fire on the call turn; streamWithRetry only adds sibling fallbacks.
@@ -894,7 +1073,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         stickyKey,
         modelFromChat(req),
         avoidBusy,
-        (client) => client.chatCompletionStream(req, opts),
+        (client, entry) => client.chatCompletionStream(req, callOptionsForEntry(opts, entry)),
         deps.chatStreamPreambleClassifier,
       );
     },
@@ -909,7 +1088,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     // signals a real wiring fault, not a normal heterogeneous-chain case.
     async nativePassthrough(
       body: NativePassthroughInput,
-      opts?: { signal?: AbortSignal },
+      opts?: ProviderCallOptions,
     ): Promise<ChatCompletionResponse> {
       // completeWithRetry's first select() runs SYNCHRONOUSLY before its first await, so
       // rotation + onSelect fire on the call turn exactly like the other methods. A member
@@ -919,11 +1098,11 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         stickyKeyFromNative(body),
         modelFromNative(body),
         isUserMessageRequest(nativePassthroughBody(body)),
-        (client) => {
+        (client, entry) => {
           if (!client.nativePassthrough) {
             throw new Error("oauth pool member does not support native passthrough");
           }
-          return client.nativePassthrough(body, opts);
+          return client.nativePassthrough(body, callOptionsForEntry(opts, entry));
         },
       );
     },
@@ -934,7 +1113,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     // Fail-closed (principle 2) if the picked member lacks the method, on the call turn.
     nativePassthroughStream(
       body: NativePassthroughInput,
-      opts?: { signal?: AbortSignal },
+      opts?: ProviderCallOptions,
     ): AsyncIterable<string> {
       const stickyKey = stickyKeyFromNative(body);
       const avoidBusy = isUserMessageRequest(nativePassthroughBody(body));
@@ -949,13 +1128,43 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         stickyKey,
         modelFromNative(body),
         avoidBusy,
-        (client) => {
+        (client, entry) => {
           if (!client.nativePassthroughStream) {
             throw new Error("oauth pool member does not support native passthrough streaming");
           }
-          return client.nativePassthroughStream(body, opts);
+          return client.nativePassthroughStream(body, callOptionsForEntry(opts, entry));
         },
         deps.nativeStreamPreambleClassifier,
+      );
+    },
+    ...(entries.length > 0 &&
+    entries.every((entry) => typeof entry.member.client.responsesCompact === "function")
+      ? {
+          async responsesCompact(
+            req: NativePassthroughInput,
+            opts?: ProviderCallOptions,
+          ): Promise<Record<string, unknown>> {
+            return completeWithRetry(
+              stickyKeyFromNative(req),
+              modelFromNative(req),
+              isUserMessageRequest(nativePassthroughBody(req)),
+              (client, entry) => {
+                if (!client.responsesCompact) {
+                  throw new Error("oauth pool member does not support Responses compact");
+                }
+                return client.responsesCompact(req, callOptionsForEntry(opts, entry));
+              },
+            );
+          },
+        }
+      : {}),
+    async closeResponsesWebSocketSession(sessionId: string): Promise<void> {
+      stickySessions.delete(`responses_websocket_session:${sessionId}`);
+      await Promise.all(
+        entries.map(
+          (entry) =>
+            entry.member.client.closeResponsesWebSocketSession?.(sessionId) ?? Promise.resolve(),
+        ),
       );
     },
   };

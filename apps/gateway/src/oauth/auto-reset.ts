@@ -17,26 +17,74 @@ export const AUTO_RESET_COOLDOWN_MS = 60 * 60 * 1000;
 // must never justify spending a weekly reset credit.
 export const CODEX_RESET_MIN_WEEKLY_USED_PERCENT = 90;
 
+type CodexRateLimitReachedType =
+  | "rate_limit_reached"
+  | "workspace_owner_credits_depleted"
+  | "workspace_member_credits_depleted"
+  | "workspace_owner_usage_limit_reached"
+  | "workspace_member_usage_limit_reached";
+
+export type CodexResetCreditOutcome = "reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed";
+
+export interface ResetCreditReservationLifecycle {
+  commit(): Promise<void>;
+  rollback(): Promise<void>;
+}
+
+export async function runResetCreditAttempt<
+  TResult extends { outcome: CodexResetCreditOutcome },
+>(input: {
+  reservation: ResetCreditReservationLifecycle;
+  consume(): Promise<TResult>;
+  onConsumed?(result: TResult): void | Promise<void>;
+}): Promise<{ result: TResult; consumed: boolean }> {
+  let result: TResult;
+  try {
+    result = await input.consume();
+  } catch (error) {
+    await input.reservation.rollback();
+    throw error;
+  }
+
+  const consumed = result.outcome === "reset" || result.outcome === "alreadyRedeemed";
+  if (!consumed) {
+    await input.reservation.rollback();
+    return { result, consumed: false };
+  }
+
+  await input.reservation.commit();
+  await input.onConsumed?.(result);
+  return { result, consumed: true };
+}
+
 export function codexWeeklyUsedPercent(
-  windows: ReadonlyArray<{ key: string; usedPercent: number }>,
+  windows: ReadonlyArray<{ key: string; limitId?: string; usedPercent: number }>,
 ): number | null {
   const weekly = windows
-    .filter((w) => w.key === "secondary")
+    .filter((w) => w.key === "secondary" && (w.limitId === undefined || w.limitId === "codex"))
     .map((w) => w.usedPercent)
     .filter((pct) => Number.isFinite(pct));
   return weekly.length === 0 ? null : Math.max(...weekly);
 }
 
 export function canConsumeResetCredit(
-  windows: ReadonlyArray<{ key: string; usedPercent: number }>,
+  windows: ReadonlyArray<{ key: string; limitId?: string; usedPercent: number }>,
+  rateLimitReachedType?: CodexRateLimitReachedType | null,
 ): boolean {
+  if (
+    rateLimitReachedType !== undefined &&
+    rateLimitReachedType !== null &&
+    rateLimitReachedType !== "rate_limit_reached"
+  ) {
+    return false;
+  }
   return (codexWeeklyUsedPercent(windows) ?? -1) >= CODEX_RESET_MIN_WEEKLY_USED_PERCENT;
 }
 
 // True when the WEEKLY window is fully used. Codex keys the 7d window "secondary";
 // the 5h window ("primary") is deliberately ignored (it recovers on its own).
 export function weeklySaturated(
-  windows: ReadonlyArray<{ key: string; usedPercent: number }>,
+  windows: ReadonlyArray<{ key: string; limitId?: string; usedPercent: number }>,
 ): boolean {
   return (codexWeeklyUsedPercent(windows) ?? -1) >= 100;
 }

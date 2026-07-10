@@ -798,6 +798,18 @@ describe("anthropic transformRequestIn — P4 params", () => {
     expect(out.output_config).toEqual({ effort: "xhigh" });
   });
 
+  it("normalizes Codex-local ultra before rendering Anthropic wire fields", () => {
+    const out = transformRequestIn({
+      model: "claude-opus-4-8",
+      messages: [{ role: "user", content: "hi" }],
+      reasoning_effort: "ultra" as never,
+    });
+
+    expect(out.output_config).toEqual({ effort: "high" });
+    expect(out.thinking).toEqual({ type: "enabled", budget_tokens: 4096 });
+    expect(JSON.stringify(out)).not.toContain("ultra");
+  });
+
   it("keeps explicit Anthropic output_config over synthesized reasoning_effort", () => {
     const out = transformRequestIn({
       model: "claude-opus-4-8",
