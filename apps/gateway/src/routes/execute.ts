@@ -897,14 +897,9 @@ function stripReasoningEffort(body: Record<string, unknown>): Record<string, unk
   return next;
 }
 
-function hasOpenAIChatFunctionTools(body: Record<string, unknown>): boolean {
+function hasOpenAIChatTools(body: Record<string, unknown>): boolean {
   const tools = body.tools;
-  if (Array.isArray(tools)) {
-    for (const tool of tools) {
-      if (!isPlainRecord(tool)) continue;
-      if (tool.type === "function" || isPlainRecord(tool.function)) return true;
-    }
-  }
+  if (Array.isArray(tools) && tools.length > 0) return true;
   return Array.isArray(body.functions) && body.functions.length > 0;
 }
 
@@ -960,7 +955,7 @@ function applyOpenAIChatToolReasoningPolicy(
   mutations: NativePassthroughCarrier["mutations"],
 ): Record<string, unknown> {
   if (!isGpt56FamilyModel(body.model)) return body;
-  if (!hasOpenAIChatFunctionTools(body)) return body;
+  if (!hasOpenAIChatTools(body)) return body;
   const hasReasoningEffort =
     body.reasoning_effort !== undefined || openAIReasoningEffort(body) !== null;
   if (!hasReasoningEffort) return body;
