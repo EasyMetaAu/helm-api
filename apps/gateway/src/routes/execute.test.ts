@@ -1530,6 +1530,109 @@ describe("createExecute — gateway execution adapter", () => {
     expect(recordFailure).not.toHaveBeenCalled();
   });
 
+  it("pre-skips direct DeepSeek when Responses reasoning history cannot be represented", async () => {
+    const deepseekProvider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "should-not-call" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const tailProvider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "tail" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: tailProvider,
+      providers: new Map([
+        ["deepseek", deepseekProvider],
+        ["mock", tailProvider],
+      ]),
+      registry: protocolRegistry({
+        deepseek: {
+          providerName: "deepseek",
+          providerModel: "deepseek-v4-flash",
+          targetProviderProtocol: "openai_chat",
+        },
+        tail: {
+          providerName: "mock",
+          providerModel: "gpt-fallback",
+          targetProviderProtocol: "openai_chat",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["deepseek", "tail"]),
+      req({
+        protocol: "openai_responses",
+        thinking: [{ type: "thinking", text: "hidden reasoning" }],
+        provider_raw: {
+          reasoning: [{ type: "reasoning", id: "rs_1", summary: [] }],
+          reasoning_config: { effort: "medium" },
+        },
+      }),
+    );
+
+    expect(out.final).toEqual({ status: "ok", alias: "tail", providerModel: "gpt-fallback" });
+    expect(deepseekProvider.chatCompletion).not.toHaveBeenCalled();
+    expect(tailProvider.chatCompletion).toHaveBeenCalledOnce();
+    expect(out.attempts[0]).toMatchObject({
+      alias: "deepseek",
+      skipped: true,
+      skip_reason: "reasoning_history_incompatible",
+      status: "error",
+      error_class: null,
+    });
+  });
+
+  it("does not pre-skip OpenRouter-hosted DeepSeek for Responses reasoning history", async () => {
+    const openrouterProvider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: openrouterProvider,
+      providers: new Map([["openrouter", openrouterProvider]]),
+      registry: protocolRegistry({
+        openrouter: {
+          providerName: "openrouter",
+          providerModel: "deepseek/deepseek-v4-flash",
+          targetProviderProtocol: "openai_chat",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["openrouter"]),
+      req({
+        protocol: "openai_responses",
+        thinking: [{ type: "thinking", text: "hidden reasoning" }],
+        provider_raw: {
+          reasoning: [{ type: "reasoning", id: "rs_1", summary: [] }],
+          reasoning_config: { effort: "medium" },
+        },
+      }),
+    );
+
+    expect(out.final).toEqual({
+      status: "ok",
+      alias: "openrouter",
+      providerModel: "deepseek/deepseek-v4-flash",
+    });
+    expect(openrouterProvider.chatCompletion).toHaveBeenCalledOnce();
+    expect(out.attempts[0]).toMatchObject({
+      alias: "openrouter",
+      skipped: false,
+      status: "ok",
+    });
+  });
+
   it("still falls back and faults the breaker on a non-request upstream 5xx", async () => {
     // Control: a 5xx is a provider-HEALTH failure (not a request-shape rejection),
     // so the chain advances to the next candidate and the breaker records a fault.

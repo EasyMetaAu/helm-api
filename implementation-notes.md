@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-07-10 · Direct DeepSeek Responses reasoning history pre-skip（Provider execution / protocol translation，docs/04/05/07，原则 3/5/8）
+
+- **背景（Lukin）**：生产请求 `17de8e09-cd94-4aa4-ab67-d2bacf3e4318` 最终由 `openrouter/deepseek-v4-flash` 成功服务，但 direct `deepseek/deepseek-v4-flash` fallback 先返回 400：`The reasoning_content in the thinking mode must be passed back to the API.` 近 3 天统计显示这类 direct DeepSeek reasoning-history 400 共 89 次，均最终 fallback 成功；部署 `v0.26.13` 后新增 3 次，说明 GPT-5.6 Chat tools 修复后剩余红色 400 主要是这个兼容问题。
+- **修复决策**：Responses reasoning items 在 IR 中进入 `thinking` / `provider_raw.reasoning`，跨到 OpenAI Chat target 时会被剥离，无法还原成 direct DeepSeek thinking 模式要求的历史 `reasoning_content`。因此对 `providerName === "deepseek"` 且 `targetProviderProtocol === "openai_chat"` 的候选，在检测到 Responses reasoning history 时发送前直接 skip，使用既有 `reasoning_history_incompatible` skip reason。
+- **边界**：不跳过 OpenRouter 托管的 DeepSeek；线上同一请求证明 OpenRouter target 能接受 Helm 剥离 reasoning history 后的 OpenAI Chat body。该规则只避免 direct DeepSeek 的确定性 400，不改变最终 fallback 选择。
+- **验证**：新增 execute 正/负回归测试：direct DeepSeek 被预跳过且不会调用 provider；OpenRouter-hosted DeepSeek 仍会正常尝试。
+
 ## 2026-07-10 · GPT-5.6 Chat tools force reasoning_effort none（Provider execution / protocol translation，docs/04/05/07，原则 3/5/8）
 
 - **背景（Lukin）**：生产请求 `fd9fb61e-7ed0-4950-aecc-a7966b1caf33` 从 Anthropic Messages 协议进入 `economy` lane，`openai-codex/gpt-5.6-luna` 404 后 fallback 到 official `openai/gpt-5.6-luna`。该 fallback 使用 `/v1/chat/completions`，请求同时带 function tools 与 lane-forced `reasoning_effort: medium`，OpenAI 返回 400：该组合只支持 `/v1/responses` 或 `reasoning_effort: none`。
