@@ -7,12 +7,12 @@
 
 ---
 
-## 2026-07-10 · GPT-5.6 Chat tools strip reasoning_effort（Provider execution / protocol translation，docs/04/05/07，原则 3/5/8）
+## 2026-07-10 · GPT-5.6 Chat tools force reasoning_effort none（Provider execution / protocol translation，docs/04/05/07，原则 3/5/8）
 
 - **背景（Lukin）**：生产请求 `fd9fb61e-7ed0-4950-aecc-a7966b1caf33` 从 Anthropic Messages 协议进入 `economy` lane，`openai-codex/gpt-5.6-luna` 404 后 fallback 到 official `openai/gpt-5.6-luna`。该 fallback 使用 `/v1/chat/completions`，请求同时带 function tools 与 lane-forced `reasoning_effort: medium`，OpenAI 返回 400：该组合只支持 `/v1/responses` 或 `reasoning_effort: none`。
-- **修复决策**：不把 GPT-5.6 的 reasoning 能力整体关闭；只在 `targetProviderProtocol === openai_chat`、resolved model 属于 `gpt-5.6*`、且请求带 function tools/functions 时剥离 Chat wire 上的 `reasoning_effort` / `reasoning.effort`。Responses 路径、无工具请求、以及非 GPT-5.6 模型不受影响。
-- **观测**：触发时写入 `request_mutations.body_shims_applied: ["reasoning_effort_stripped_for_chat_tools"]`，区别于“模型完全不支持 reasoning”的 `reasoning_effort_stripped_for_model`，方便 Admin 请求详情定位。
-- **验证**：新增 execute 回归测试复现 Anthropic→OpenAI Chat fallback + GPT-5.6 Luna + tools + reasoning 的组合，断言 tools 保留、reasoning_effort 不再发给上游。
+- **修复决策**：不把 GPT-5.6 的 reasoning 能力整体关闭；只在 `targetProviderProtocol === openai_chat`、resolved model 属于 `gpt-5.6*`、且请求带 tools/functions 时把 Chat wire 显式设为 `reasoning_effort: "none"`，并剥离 nested `reasoning.effort`。单纯删除字段不够，因为 GPT-5.6 Chat+tools 仍会按上游默认 reasoning 触发同一个 400。
+- **观测**：触发时写入 `request_mutations.body_shims_applied: ["reasoning_effort_none_for_chat_tools"]`，区别于“模型完全不支持 reasoning”的 `reasoning_effort_stripped_for_model`，方便 Admin 请求详情定位。
+- **验证**：新增 execute 回归测试复现 Anthropic→OpenAI Chat fallback + GPT-5.6 Luna + tools + reasoning 的组合，并覆盖客户端完全不传 reasoning 的情况；断言 tools 保留、wire body 显式发送 `reasoning_effort: "none"`。
 
 ## 2026-07-10 · GPT-5.6 family support in Helm defaults（Routing / provider catalog / cost telemetry，docs/03/04/07，原则 3/4/5/6）
 

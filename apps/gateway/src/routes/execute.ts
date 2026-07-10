@@ -956,16 +956,14 @@ function applyOpenAIChatToolReasoningPolicy(
 ): Record<string, unknown> {
   if (!isGpt56FamilyModel(body.model)) return body;
   if (!hasOpenAIChatTools(body)) return body;
-  const hasReasoningEffort =
-    body.reasoning_effort !== undefined || openAIReasoningEffort(body) !== null;
-  if (!hasReasoningEffort) return body;
 
-  const withoutTopLevel = stripReasoningEffort(body);
+  const withoutTopLevel =
+    body.reasoning_effort === "none" ? body : { ...body, reasoning_effort: "none" };
   const withoutNested =
     openAIReasoningEffort(withoutTopLevel) !== null
       ? applyOpenAIReasoningEffort(withoutTopLevel, { kind: "strip", mapped: false })
       : withoutTopLevel;
-  appendReasoningPolicyShim(mutations, "reasoning_effort_stripped_for_chat_tools");
+  appendReasoningPolicyShim(mutations, "reasoning_effort_none_for_chat_tools");
   return withoutNested;
 }
 
