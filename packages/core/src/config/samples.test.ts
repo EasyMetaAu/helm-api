@@ -60,7 +60,7 @@ describe("checked-in config samples", () => {
     expect(lanes.economy).toBeDefined();
     expect(lanes.balanced).toBeDefined();
     expect(lanes.premium).toBeDefined();
-    expect(lanes.economy?.primary).toBe("openai-codex/gpt-5.6-luna");
+    expect(lanes.economy?.primary).toBe("openai/gpt-5.6-luna");
     expect(lanes.balanced?.primary).toBe("openai-codex/gpt-5.6-terra");
     expect(lanes.premium?.primary).toBe("openai-codex/gpt-5.6-sol");
     // task lanes
@@ -97,6 +97,11 @@ describe("checked-in config samples", () => {
     expect(resolveModelAlias("gpt-5.6-terra-20260710", aliases)).toBe("gpt-5.6-terra");
     expect(resolveModelAlias("gpt-5.6-luna", aliases)).toBe("gpt-5.6-luna");
     expect(resolveModelAlias("gpt-5.6-luna-20260710", aliases)).toBe("gpt-5.6-luna");
+    expect(resolveModelAlias("openai.gpt-5.6", aliases)).toBe("gpt-5.6");
+    expect(resolveModelAlias("openai.gpt-5.6-sol", aliases)).toBe("gpt-5.6-sol");
+    expect(resolveModelAlias("openai.gpt-5.6-terra", aliases)).toBe("gpt-5.6-terra");
+    expect(resolveModelAlias("openai.gpt-5.6-luna", aliases)).toBe("gpt-5.6-luna");
+    expect(resolveModelAlias("openai.gpt-5.6-20260710", aliases)).toBe("gpt-5.6");
     expect(resolveModelAlias("gpt-5.4", aliases)).toBe("gpt-5.4");
     expect(resolveModelAlias("gpt-5.4-mini", aliases)).toBe("gpt-5.4-mini");
     expect(resolveModelAlias("gpt-5.4-mini-2026-01-01", aliases)).toBe("gpt-5.4-mini");
@@ -109,14 +114,14 @@ describe("checked-in config samples", () => {
     const cfg = loadConfig({ configDir, env: {} });
     const lanes = cfg.lanes;
     if (lanes === undefined) throw new Error("config/lanes.yaml must load into config.lanes");
-    expect(lanes["gpt-5.6"]?.primary).toBe("openai-codex/gpt-5.6");
+    expect(lanes["gpt-5.6"]?.primary).toBe("openai-codex/gpt-5.6-sol");
     expect(lanes["gpt-5.6"]?.fallback).toEqual(["openai/gpt-5.6", "gpt-5.6-sol"]);
     expect(lanes["gpt-5.6-sol"]?.primary).toBe("openai-codex/gpt-5.6-sol");
     expect(lanes["gpt-5.6-sol"]?.fallback).toEqual(["openai/gpt-5.6-sol", "premium"]);
     expect(lanes["gpt-5.6-terra"]?.primary).toBe("openai-codex/gpt-5.6-terra");
     expect(lanes["gpt-5.6-terra"]?.fallback).toEqual(["openai/gpt-5.6-terra", "balanced"]);
-    expect(lanes["gpt-5.6-luna"]?.primary).toBe("openai-codex/gpt-5.6-luna");
-    expect(lanes["gpt-5.6-luna"]?.fallback).toEqual(["openai/gpt-5.6-luna", "economy"]);
+    expect(lanes["gpt-5.6-luna"]?.primary).toBe("openai/gpt-5.6-luna");
+    expect(lanes["gpt-5.6-luna"]?.fallback).toEqual(["economy"]);
     expect(lanes["gpt-5.4"]?.primary).toBe("openai-codex/gpt-5.4");
     expect(lanes["gpt-5.4"]?.fallback).toEqual(["premium"]);
     expect(lanes["gpt-5.4-mini"]?.primary).toBe("openai-codex/gpt-5.4-mini");

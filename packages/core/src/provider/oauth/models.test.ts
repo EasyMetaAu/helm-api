@@ -20,12 +20,10 @@ describe("discoverOAuthModels", () => {
     );
   });
 
-  it("keeps the Codex curated fallback on the GPT-5.6 family first", () => {
+  it("keeps the Codex curated fallback on currently verified subscription models", () => {
     expect(CURATED_OAUTH_MODELS["openai-codex"]).toEqual([
-      "gpt-5.6",
       "gpt-5.6-sol",
       "gpt-5.6-terra",
-      "gpt-5.6-luna",
       "gpt-5.5",
       "gpt-5.4",
       "gpt-5.4-mini",

@@ -162,6 +162,16 @@ describe("responsesTransformer — Tier D request/response fidelity (orders 17-2
     expect(ir.provider_raw?.reasoning_config).toEqual({ effort: "medium", summary: "auto" });
   });
 
+  it("accepts Codex CLI reasoning:null and omits the empty config", async () => {
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "o1",
+      input: "hi",
+      reasoning: null,
+    });
+    expect(ir.reasoning_effort).toBeUndefined();
+    expect(ir.provider_raw?.reasoning_config).toBeUndefined();
+  });
+
   it("reconstructs reasoning config on the outbound Responses request (order 17)", async () => {
     const ir = await responsesTransformer.transformRequestOut({
       model: "o1",
