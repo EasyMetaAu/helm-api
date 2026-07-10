@@ -346,6 +346,10 @@ function normalizeMessageContentToNative(message: IRMessage): IRMessage {
   };
 }
 
+function requiresMaxCompletionTokens(model: string): boolean {
+  return /^gpt-5\.6(?:$|-)/.test(model);
+}
+
 // —— Request: OpenAI native -> IR. Identity for everything EXCEPT multimodal content
 // parts, which are normalized into the IR's typed parts; fail-closed validated. ——————
 function toIRRequest(req: NativeRequest) {
@@ -362,9 +366,19 @@ function toIRRequest(req: NativeRequest) {
 // we strip only the IR-internal `provider_raw` bag (never a wire field). ————————
 function toOpenAIRequest(ir: z.infer<typeof IRRequestSchema>): NativeRequest {
   const { provider_raw: _provider_raw, ...wire } = IRRequestSchema.parse(ir);
+  const renderWire =
+    requiresMaxCompletionTokens(wire.model) && wire.max_tokens !== undefined
+      ? (({ max_tokens: _max_tokens, ...rest }) => ({
+          ...rest,
+          max_completion_tokens: wire.max_completion_tokens ?? wire.max_tokens,
+        }))(wire)
+      : wire;
   // Re-emit native OpenAI content parts (image_url/input_audio/file) so the wire
   // request a real OpenAI client/upstream expects is reconstructed losslessly (P7).
-  return { ...wire, messages: wire.messages.map(normalizeMessageContentToNative) };
+  return {
+    ...renderWire,
+    messages: renderWire.messages.map(normalizeMessageContentToNative),
+  };
 }
 
 // —— Response: upstream OpenAI -> IR. Stash raw stop_reason/usage in provider_raw

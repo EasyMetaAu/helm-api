@@ -5,9 +5,9 @@
 // Strategy (maintainer decision): discover live where an API exists, else fall
 // back to a curated list. GitHub Copilot exposes GET /models and Anthropic exposes
 // GET /v1/models — both are queried LIVE with the account's token. ChatGPT Codex
-// has no convenient list endpoint (and its execution isn't wired), so it uses a
-// curated set. Any list is OVERRIDABLE by declaring the provider with its own
-// models[] in providers.yaml (that wins).
+// has no convenient list endpoint, so it uses a curated set. Any list is
+// OVERRIDABLE by declaring the provider with its own models[] in providers.yaml
+// (that wins).
 
 import { listGitHubCopilotModels } from "./github-copilot.js";
 
@@ -23,10 +23,16 @@ export const CURATED_OAUTH_MODELS: Record<string, string[]> = {
   // ChatGPT Codex set. Keep this to the subscription backend slugs that are known
   // to execute through the ChatGPT Codex OAuth path. The public API `gpt-5.6`
   // alias routes to Sol, but the subscription backend currently rejects the bare
-  // alias; Luna is an official GPT-5.6/API model, but is not yet accepted by the
-  // subscription backend on this executor path. Operators can still add/remove
-  // models via the Manage dialog (their saved list is authoritative).
-  "openai-codex": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
+  // alias. Operators can still add/remove models via the Manage dialog (their
+  // saved list is authoritative).
+  "openai-codex": [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+  ],
 };
 
 // Live-list Anthropic (Claude Pro/Max) models via GET /v1/models with the OAuth
