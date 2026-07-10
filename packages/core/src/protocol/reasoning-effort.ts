@@ -126,9 +126,13 @@ export function applyForcedReasoningToNativeBody(
       };
     }
     case "openai_responses": {
+      const prev = isRecord(body.reasoning) ? body.reasoning : {};
+      const reasoning = { ...prev };
+      if (effort === "none") delete reasoning.effort;
+      else reasoning.effort = effort;
       const next = { ...body };
-      if (effort === "none") delete next.reasoning;
-      else next.reasoning = { effort };
+      if (Object.keys(reasoning).length > 0) next.reasoning = reasoning;
+      else delete next.reasoning;
       return { body: next, mutated: true };
     }
     case "anthropic_messages": {

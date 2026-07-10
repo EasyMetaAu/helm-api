@@ -80,15 +80,28 @@ describe("applyForcedReasoningToNativeBody — per protocol", () => {
     expect(tc.thinkingBudget).toBe(0);
   });
 
-  it("openai_responses: sets reasoning.effort, and `none` removes reasoning", () => {
-    const set = applyForcedReasoningToNativeBody({ input: [] }, "openai_responses", "high");
-    expect(set.body.reasoning).toEqual({ effort: "high" });
+  it("openai_responses: sets reasoning.effort without dropping native reasoning fields", () => {
+    const set = applyForcedReasoningToNativeBody(
+      { input: [], reasoning: { effort: "low", context: "all_turns" } },
+      "openai_responses",
+      "high",
+    );
+    expect(set.body.reasoning).toEqual({ effort: "high", context: "all_turns" });
+  });
+
+  it("openai_responses: `none` removes only effort and drops an empty reasoning object", () => {
     const none = applyForcedReasoningToNativeBody(
+      { input: [], reasoning: { effort: "low", context: "all_turns" } },
+      "openai_responses",
+      "none",
+    );
+    expect(none.body.reasoning).toEqual({ context: "all_turns" });
+    const empty = applyForcedReasoningToNativeBody(
       { input: [], reasoning: { effort: "low" } },
       "openai_responses",
       "none",
     );
-    expect(none.body.reasoning).toBeUndefined();
+    expect(empty.body.reasoning).toBeUndefined();
   });
 
   it("anthropic_messages: derives a thinking block with constraint fix-ups", () => {

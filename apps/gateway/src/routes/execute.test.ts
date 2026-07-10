@@ -4147,6 +4147,68 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     });
   });
 
+  it("native Codex Responses passthrough keeps reasoning.context when lane forces effort", async () => {
+    const responsesBody = {
+      id: "resp_codex",
+      object: "response",
+      status: "completed",
+      output: [],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const provider = {
+      nativeProtocolProfile: "codex_responses",
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockResolvedValue(responsesBody),
+    } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["codex", provider]]),
+      registry: protocolRegistry({
+        r: {
+          providerName: "codex",
+          providerModel: "gpt-5.6-sol",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const carrier = {
+      protocol: "openai_responses" as const,
+      body: {
+        model: "gpt-5.6-sol",
+        instructions: "Use the Codex native shape.",
+        input: [{ type: "message", role: "user", content: "hi" }],
+        store: false,
+        include: ["reasoning.encrypted_content"],
+        reasoning: { effort: "low", context: "all_turns" },
+      },
+      headers: {},
+      mutations: {},
+    };
+
+    const out = await execute(
+      plan(["r"]),
+      req({
+        protocol: "openai_responses",
+        native_request: carrier,
+        reasoning_effort: "high",
+        reasoning_effort_forced: true,
+      }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    const forwarded = provider.nativePassthrough.mock.calls[0]?.[0] as typeof carrier;
+    expect(forwarded.body.reasoning).toEqual({ effort: "high", context: "all_turns" });
+    expect(forwarded.mutations).toMatchObject({
+      body_shims_applied: ["reasoning_effort_forced"],
+    });
+  });
+
   it("hoists a developer system item into Codex `instructions` on passthrough (pi-ai shape)", async () => {
     const responsesBody = {
       id: "resp_hoist",
