@@ -2018,8 +2018,10 @@ function renderOpenAINativeBody(body: Record<string, unknown>): Record<string, u
   if (rendered && typeof (rendered as Promise<unknown>).then === "function") {
     throw new Error("OpenAI request renderer unexpectedly returned a Promise");
   }
-  const renderedMessages = (rendered as { messages?: unknown }).messages;
-  return Array.isArray(renderedMessages) ? { ...body, messages: renderedMessages } : body;
+  const renderedBody = rendered as Record<string, unknown>;
+  const out = { ...body, ...renderedBody };
+  if (!Object.hasOwn(renderedBody, "max_tokens")) delete out.max_tokens;
+  return out;
 }
 
 function withRequestMutations(

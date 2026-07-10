@@ -320,6 +320,41 @@ describe("createExecute — gateway execution adapter", () => {
     expect(body.store).toBe(false);
   });
 
+  it("renders Responses output caps as max_completion_tokens for GPT-5.6 OpenAI-chat targets", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: protocolRegistry({
+        "openai/gpt-5.6-luna": {
+          providerName: "mock",
+          providerModel: "gpt-5.6-luna",
+          targetProviderProtocol: "openai_chat",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["openai/gpt-5.6-luna"]),
+      req({ protocol: "openai_responses", max_tokens: 16 }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    const body = (provider.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(body.max_completion_tokens).toBe(16);
+    expect(body).not.toHaveProperty("max_tokens");
+  });
+
   it.each([
     "openai_chat",
     "anthropic_messages",
