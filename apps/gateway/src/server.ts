@@ -42,6 +42,7 @@ import {
   encryptSecret,
   expandLaneChain,
   expandOpenAICodexModelAliases,
+  filterRetiredOpenAICodexLimits,
   type GeminiGenerateContentResponse,
   type GeneratedKey,
   geminiTransformer,
@@ -1872,7 +1873,10 @@ export async function buildServer(
     try {
       for (const snap of await store.oauthQuota.getAll()) {
         seeds.set(`${snap.providerId} ${snap.account}`, {
-          windows: snap.windows,
+          windows:
+            snap.providerId === "openai-codex"
+              ? filterRetiredOpenAICodexLimits(snap.windows)
+              : snap.windows,
           capturedAt: snap.capturedAt,
           usageLimitedUntilMs: snap.usageLimitedUntilMs ?? null,
           resetCredits: snap.resetCredits ?? null,

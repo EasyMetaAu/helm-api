@@ -34,12 +34,36 @@ const OPENAI_CODEX_MODEL_ALIASES: Readonly<Record<string, string>> = {
   "gpt-5.6": "gpt-5.6-sol",
 };
 
+const RETIRED_OPENAI_CODEX_MODELS = new Set(["gpt-5.3-codex-spark"]);
+
+export function isRetiredOpenAICodexModel(model: string): boolean {
+  return RETIRED_OPENAI_CODEX_MODELS.has(model.trim().toLowerCase());
+}
+
+export function isRetiredOpenAICodexLimit(
+  limitId: string | null | undefined,
+  limitName: string | null | undefined,
+): boolean {
+  const normalizedId = limitId?.trim().toLowerCase().replaceAll("-", "_");
+  if (normalizedId === "codex_spark") return true;
+  const normalizedName = limitName?.trim().toLowerCase().replaceAll("_", "-");
+  return normalizedName?.endsWith("-codex-spark") === true;
+}
+
+export function filterRetiredOpenAICodexLimits<
+  T extends { limitId?: string | null; limitName?: string | null },
+>(limits: readonly T[] | null | undefined): T[] {
+  return (limits ?? []).filter(
+    (limit) => !isRetiredOpenAICodexLimit(limit.limitId, limit.limitName),
+  );
+}
+
 export function resolveOpenAICodexModelAlias(model: string): string {
   return OPENAI_CODEX_MODEL_ALIASES[model] ?? model;
 }
 
 export function expandOpenAICodexModelAliases(models: readonly string[]): string[] {
-  const expanded = [...new Set(models)];
+  const expanded = [...new Set(models.filter((model) => !isRetiredOpenAICodexModel(model)))];
   for (const [alias, target] of Object.entries(OPENAI_CODEX_MODEL_ALIASES)) {
     if (expanded.includes(target) && !expanded.includes(alias)) expanded.push(alias);
   }
@@ -178,7 +202,7 @@ export async function listOpenAICodexModels(
   const etag = response.headers.get("etag") ?? undefined;
   const reasoningIncluded = response.headers.has("x-reasoning-included");
   return {
-    models: parsed.data.models,
+    models: parsed.data.models.filter((model) => !isRetiredOpenAICodexModel(model.slug)),
     ...(etag ? { etag } : {}),
     ...(reasoningIncluded ? { reasoningIncluded: true } : {}),
   };

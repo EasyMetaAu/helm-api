@@ -33,6 +33,14 @@
 - **历史边界**：部署后新请求可正常估算成本；已有 `cost_usd = null` 的历史 telemetry 不自动回填。
 - **官方依据**：Anthropic Models overview、Pricing、What's new in Claude Sonnet 5、Effort 与 Structured outputs 文档，均于 2026-07-11 读取。
 
+## 2026-07-11 · 退休 GPT-5.3-Codex-Spark 及其订阅配额投影（OAuth subscription / model catalog / Admin providers，docs/04/11，原则 3/5/6/7）
+
+- **退休边界**：`gpt-5.3-codex-spark` 不再作为可用订阅模型。Codex live discovery、bundled fallback、持久 catalog cache 与手工 enabled-model 展开都会过滤该 slug，避免旧设置或 last-known-good 快照重新暴露已退休模型。
+- **配额边界**：WHAM body、Codex response headers、Gateway 持久 quota snapshot、live metadata 和 Admin 最终展示都会过滤 `codex_spark` / `*-Codex-Spark` model-scoped limits。旧快照不会再显示 Spark，也不会让退休窗口参与账号停车、恢复或 reset-credit 判断；若持久 snapshot 过滤后为空，reset-credit 会回退到本次实时 quota，而不是误报 quota unavailable。账号级窗口和 Luna/Sol/Terra 等有效模型窗口保持原语义。
+- **分类与 UI**：保留 cheap-model classifier 中的 `spark` 语义 marker；它用于识别低成本模型族，不等同于已退休的精确 Codex Spark 模型 ID。撤销仅为 Codex Spark 长标签添加的 9px quota 字号，恢复普通窗口标签字号。订阅 credits 继续只显示两位小数，零余额继续隐藏。
+- **兼容决策**：运行时仍保留最小的 Spark 识别常量，并在专门的防回归 fixture 中保留退休字符串；这是为了丢弃历史缓存和旧上游数据，不代表模型仍可配置或使用。
+- **验证**：覆盖 live/bundled/cached catalog、手工 alias 展开、header/WHAM quota、Gateway 读写投影与 Admin 历史快照；相关定向测试、workspace test/typecheck/lint/build 作为交付门禁。
+
 ## 2026-07-11 · Portal 请求详情对齐 Admin 查看器但保持供应链边界（Self-Service Portal / Requests，docs/12，原则 1/6/7/8）
 
 - **对齐范围**：Portal 请求详情复用本地已有的 Conversation / JsonViewer / ImagePreview，并移植 Admin 的 StreamViewer。请求/响应正文按 Admin 模式改为 metadata-first、用户打开时才分段加载；SSE 响应提供 Assembled / Chunks / Raw 三种视图，普通 JSON 继续提供 Tree / Formatted / Raw 与全屏。
@@ -90,46 +98,6 @@
 - **OpenAI wire 参数**：Responses `max_output_tokens` 经 IR 到 official OpenAI GPT-5.6 Chat wire 时必须渲染为 `max_completion_tokens`，不能沿用旧 `max_tokens`；否则 `openai/gpt-5.6-luna` 等官方 GPT-5.6 模型会返回 `unsupported_parameter`。
 - **兼容性**：Codex OAuth 仍是 curated-only（无 live list endpoint），默认 curated list 以 GPT-5.6 Sol/Terra/Luna 开头并保留 GPT-5.5/GPT-5.4/GPT-5.4-mini，管理员保存的 enabledModels 仍然是权威覆盖。`model-aliases.yaml` 同时接受 Codex App/CLI 内部 `openai.gpt-5.6-*` 名字；Responses 入口接受 Codex CLI 发出的 `reasoning:null` 并按未设置处理。
 
-## 2026-07-09 · 个人门户（Self-Service Portal）完整实现 + 补齐 + 多语言（docs/12，原则 1/6/7）→ v0.26.0
-
-- **v0.26.0 发布范围**：整个 self-service portal（apps/portal 新 SvelteKit SPA）+ 6 个 bearer-scoped 端点 + 白名单脱敏 + Docker 集成 + admin/portal 7 语言 i18n。
-- **补齐工作（第一版太简陋，对照 spec+admin 重做，Codex 执行我验收）**：Requests 列表补全筛选（RangeFilter today/yesterday/7d/30d/all + 自定义日期 + status + model 搜索 + RefreshControl + URL 同步，后端 `/portal/api/requests` 扩展 start/end/status/model 参数、apiKeyId 写死）；Overview 加环比 delta + 顶部 RangeFilter+RefreshControl（同 admin Dashboard）；Memory 从 128 行残废重做成完整 CRUD（复用 admin AddFactDialog/EditFactDialog/EditReflectionDialog 但改走 mcpTool，加搜索/状态筛选/分页/"什么是记忆"说明+隐私文案）；Connect 的 MCP tab 补全 ChatGPT OAuth 6 步/JSON config/Codex mcp-remote 桥（逐字移植 admin ConnectMcpDialog）。
-- **安全后端二次修复（by_model 泄漏）**：telemetry `served_model` 列存的是 `final.provider_model`（wire id）不是公开别名。portal usage `by_model` 直接透出会泄漏 provider wire model（原则 6/R7）。修复：`registerPortalApi` 加 `resolveModelLabel` dep（从 config.providers 构建 wire→alias 反查），unmappable→"other"。加 2 个防泄漏单测。
-- **UI 打磨（Lukin 反馈）**：① 导航当前页从淡底改**实心 indigo 胶囊+白字**（aria-current）；② Connect 客户端 tab 从失效的 `.tab-active`（无对应 CSS）改**分段控件**（白底胶囊+aria-selected）；③ Connect 代码块加分步注释（`# 1) Set env` / `# 2) Run`）消除孤立 `claude` 困惑；④ Memory 页 disabled 判断从 `memory.mode==='off'` 改成只看 MCP 是否可用（mode=off 仍能浏览/管理记忆）；⑤ 账户菜单下拉加 `clickOutside` action（`$lib/clickOutside.ts`，pointerdown capture）点空白关闭（Modal scrim + RefreshControl 本来就有 outside-click）。
-- **多语言（原用户明确要求）**：admin+portal 各加 es(Español)/pt(Português)，现 7 语言（en/zh-hans/zh-hant/ja/ko/es/pt）。languages.ts(LocaleCode+SUPPORTED+normalizeLocale)/loaders.ts/package.json i18n:update 都扩展。跑 i18n:extract 拉全 $t key，14 个 locale 文件全部 0 空值。技术术语/URL/CLI/代码/占位符{value}保持原文，中文意译。**注意**：`i18n:translate` 工具依赖 LAN relay(192.168.199.7)本机不可达，翻译由 Codex 手工做；代码块字符串是裸 template string 不走 $t()，天然不译。
-- **验收方式（关键）**：全程本地 Docker 部署验收（重建镜像→跑安全红线测试→Playwright 真浏览器三档屏幕走查）。seed 脚本造 143 条 8 天多模型 telemetry 让 Overview 图表/环比/donut 有数据。memory.mcp 需 config 开启（默认关，portal Memory 页才活）。**Dockerfile 必须加 apps/portal/package.json（install 阶段）+ portal build 拷贝**，否则 /portal 404。portal-static.ts 启动时从 built index.html 读 CSP script hash（SvelteKit adapter-static 注入内联 bootstrap script，强 CSP 会拦→白屏，用 hash 放行）。
-
-- **背景**：实现 docs/12 完整三迭代门户——key 持有者只能看/管自己那把 key 的接入/用量/请求/记忆。全新 `apps/portal` SvelteKit SPA + 6 个 bearer-scoped `/portal/api/*` 端点 + 白名单脱敏层，全程 TDD（安全红线测试先行）。
-- **后端决策**：
-  - `toPortalDecisionView`（`packages/shared/src/decision/portal-view.ts`，框架无关）**白名单**投影 DecisionRecord——只透 served_model(=final.model_alias)/lane/status/latency/cost/usage，剔除 provider_attempts、serving_account、classifier、lane.candidate_chain、final.provider_model（供应链/内部推理 = 核心 IP，原则 6）。单测扫描序列化输出确认 8 个 poison 字符串（provider 别名/wire model/eval model/账号 id）绝不出现。
-  - `assertOwnsTrace`（`apps/gateway/src/routes/portal/ownership.ts`）：traceId 详情/payload **先** `getApiKeyId==identity.keyId` 再取数据（R1）；miss 与"属于别人"同一 not_found 分支 → 404 而非 403（R2 防枚举）；keyId 缺失 **throw**（fail-closed，绝不 scopeless 查询，R5）。
-  - 6 端点（`routes/portal/index.ts`）全部照抄 `usage.ts` 范式：写死 `identity.keyId`/`accountId`，忽略调用方任何 key_id/account_id 入参。usage/stats 复用 `aggregate` 并**透出被 /v1 丢弃的 series+byModel+budget**。payload 端点白名单 `part∈{request,response}`，**拒 upstream_request**（400，原则 6）。
-- **memory 决策（关键省成本）**：**不做 memory REST**——前端直接打现有 `POST /mcp` JSON-RPC（docs/12 §4.2 endpoint 6，零新后端）。`accountId`/`projectId` 由 MCP ctx 从 bearer 派生，前端绝不传（R3/R4，已核实 tools.ts 服务端强制）。
-- **前端决策**：
-  - 明文 key + `sessionStorage` + 每请求 `Authorization: Bearer`（docs/12 §4.1）；否决 session token/localStorage/cookie。
-  - **复用 admin 资产**：app.css（设计系统）、i18n（改 STORAGE_KEY 为 helm_portal_locale）、format.ts、pagination.ts、LayerChart 图表配置、请求详情 viewer（Conversation/TokenUsage/CostBreakdown/JsonViewer）。**不复用 RequestsTable**（耦合 admin decision shape 的"过程视角"——attempt codes/decided_by），改写门户简表只显示白名单"结果视角"字段（比适配 RequestsTable 更省代码且语义正确）。
-  - `apps/portal/src/lib/api/requests.ts` 是**类型 shim**：只重声明 viewer 需要的 `TokenUsageView`/`RequestDetail['cost_breakdown']`，避免拖入整个 admin requests 解析器。
-- **踩坑（浏览器验证抓到的真 bug）**：SvelteKit adapter-static 往 index.html 注入一个内联 bootstrap `<script>`，被强 CSP `script-src 'self'` 拦截 → SPA 白屏不启动。修复：svelte.config 开 `kit.csp.mode:'hash'`（SvelteKit 算出该脚本 SHA256 并写进 HTML 的 `<meta>` CSP），`portal-static.ts` 启动时从 built index.html **读取该 hash 并折进响应头 CSP 的 script-src**——header 与 meta 携带同一 hash，浏览器求交集后放行。hash 每次 build 变，但运行时现读现折，永不脱同步。
-- **验证路径**：21 个后端单测（portal-view/ownership/routes/portal-static）+ typecheck + svelte-check 0 error + biome 干净；一次性 tsx 脚本 boot 真实 gateway 验证 21 条运行时红线（跨 key 详情/payload 404、upstream 拒绝、series/budget 透出、CSP 头），再用 Playwright 真浏览器走 login→Overview→Connect（base_url 无 /v1、Test connection→Connected）→Account 全流程通过。
-- **TODO/边界**：门户对 XSS 防护上限 = CSP 强度，sessionStorage 非 XSS 免疫（诚实边界写进登录页文案）；根治需门户专用只读 scope key（后续 key-scoping 特性，不在本次）。RefreshControl（自动刷新）门户未加，需要再补。
-
-## 2026-07-07 · 视觉压缩后收敛 cache_control 并保留客户端 billing identity（Provider execution / cost control，docs/04/05，原则 3/5/7/8）
-
-- **背景（Lukin）**：生产 Luke key 的 `claude-fable-5` / GSC 请求在 v0.25.18 后成本下降，但 cache-read share 没明显上升。线上 payload 复查显示 CCH 已从几乎每轮变化降到少数稳定桶；继续拆缓存的原因之一是压缩图片 anchor 后面仍残留动态文本上的 `cache_control`（例如 teammate 状态、短用户指令），导致 Anthropic 尝试更长但每轮变化的缓存前缀并产生额外 cache-write。
-- **cache_control 决策**：当 pxpipe 返回 `applied:true` 且 `ownsCacheControl:true` 时，Helm 只保留压缩图片上的 cache anchor，并剥离该 anchor 之后 message content blocks 的 `cache_control`。不改变图片、文本、工具或消息顺序；未压缩、observe/off、无图片 anchor 的请求完全不变。这样缓存断点回到稳定图片前缀，后续动态尾巴按普通 fresh input 计费，不再写成新的 prompt-cache 前缀。
-- **Telemetry 决策**：`visual_context_compression.marker_count` 记录最终发出的 marker 数；新增 `cache_control_markers_stripped` 只记录剥离数量，不记录正文或图片数据，便于上线后验证是否减少了无意义 cache-write。
-- **billing identity 决策**：入口已提取的 `metadata.client_billing_header` 现在会在 Anthropic compatibility translation body 中透传给 provider 翻译器。真实 Anthropic provider 只用它重建 billing block 和 User-Agent，不把 `client_billing_header` 当 Anthropic `metadata` 字段发给上游；provider_raw `metadata.user_id` 仍保留。
-- **风险边界**：该修复不尝试改写工具列表，也不删除图片 anchor 之前的调用方 cache marker，避免破坏官方/客户端有意设置的稳定早期断点。它解决的是“压缩接管缓存断点后，后置动态断点继续污染缓存前缀”的窄问题。
-- **验证路径**：新增 visual compression 单测覆盖后置动态 marker 剥离与 telemetry；新增 execute 单测覆盖 `client_billing_header` 合并到 Anthropic translation metadata。执行层 126 个测试、压缩层测试与 workspace typecheck 通过。
-
-## 2026-07-07 · Anthropic 兼容改写路径稳定 CCH 并接入视觉压缩（Provider execution / cost control，docs/04/05，原则 3/5/7/8）
-
-- **背景（Lukin）**：生产 Luke key 的 `claude-fable-5` 请求在 v0.25.17 后仍只有约三成 cache-read share。复查发现 `cch` 不是被删除：客户端原始 billing header 无 `cch`，上游 body 有 Helm 重建的 `cch`；但 OAuth strict fingerprint 会再按完整 body 签 CCH，messages/max_tokens 等非缓存前缀变化仍会让 `system[0]` 变化。另一半问题是这批请求大多因 `provider_requires_compatibility_rewrite` 走普通 `chatCompletion` 翻译路径，而 `visual_context_compression` 只挂在 native passthrough body 上，无法处理真正贵的兼容改写请求。
-- **执行决策**：strict Claude CLI shape 仍保留 header 顺序、tool cloak、runtime headers，但 CCH 改为只从 cache-prefix 材料（model/system/tools，排除 messages 和采样参数）计算，避免第一块 system 自己烧掉 prompt cache。再给 `ProviderCallOptions` 增加 Anthropic-only `optimizeAnthropicBody` 钩子；Anthropic provider 先按既有逻辑生成最终 Anthropic Messages body，再在 capture/POST 前调用该钩子。这样不绕过 provider 的 OAuth、签名、重试和响应转换，也不会影响 OpenAI/Gemini providers。
-- **Telemetry 决策**：execute 在 stream/non-stream 翻译路径都传入同一个 per-attempt optimizer，并把 `visual_context_compression` mutation 与既有 `request_mutations` 合并；provider 忽略/未调用时 mutation 为空，避免把没有实际压缩的请求误报成省钱。
-- **风险边界**：该钩子只优化 Anthropic-native wire body；`mode=off` 仍为 no-op，压缩器异常 fail-open 发原 body。实际节省依赖 pxpipe 对该请求形态是否 `applied:true`，上线后必须用 mutation + usage 验证，而不是只看功能开关。
-- **验证路径**：新增 execute 测试覆盖 `provider_requires_compatibility_rewrite` 仍调用 visual compression 并记录 mutation；新增 Anthropic provider 测试确认 translated body 在 capture/POST 前被优化。
-
 ## 历史条目摘要（最近 5 条）
 
 - **2026-07-06 · 请求总超时驱动下游 abort 与失败 telemetry（Gateway runtime / telemetry，docs/02/07，原则 3/5/7）**：总超时统一 abort 下游并把客户端可见终态固定为 timeout，晚到 provider 成功只保留为 attempt 事实，不得覆盖最终失败或 payload。
@@ -138,5 +106,7 @@
 - **2026-07-06 · 配额 PULL 的 100% 账号级窗口必须同步停车（OAuth provider pool / Admin providers，docs/04/11，原则 3/5/7）**：quota PULL 看到账号级 100% 窗口时立即写入 cooldown 并同步 live pool，scoped model 窗口不扩大成全账号停车。
 - **2026-07-05 · OAuth 凭证失效持久化为 needs reconnect（OAuth provider pool / Admin providers，docs/04/11，原则 3/5/7）**：refresh/持久 upstream 400/401/403 标记 credential failure、写入账号设置并摘出调度，reconnect 成功后按手动/自动停车边界恢复。
 ## 更早历史总览
+
+2026-07-07–09 压缩条目包括 self-service portal 完整实现与多语言、视觉压缩后的 cache-control 收敛和 Anthropic 兼容路径 CCH 稳定化。
 
 2026-07-06 压缩条目还包括 Anthropic native passthrough 稳定 Claude Code billing `cch`、Admin 模型搜索预计算列、payload 分段懒加载、纯工具 turn 去空 header/默认展开，以及 Claude Code 风格 inline tool peek。2026-07-04 更早条目还包括 cheap-model 当前轮低风险降级、视觉上下文压缩 observe/off 接入、Memory stats 队列索引优化、OAuth 会话亲和调度、idle-flush 碎片段优先压缩最大连续段、memory worker 受控并发追赶、记忆页只读运行状态面板、Claude scoped weekly quota 只影响对应模型、跨协议 reasoning-history 候选级跳过、memory idle-flush 防饥饿、策略级 reasoning_effort 覆盖 lane 默认值、cron monitor 低成本规则等。2026-06-30 及以前的工作主要围绕 Helm API 的协议面、路由执行、admin 可观测性与自托管部署逐步成型：补齐 Gemini/OpenAI/Anthropic/Responses 双向转换、SSE 流式正确性、tool-call/JSON schema/思考参数保真、per-model reasoning effort、模型别名与能力/成本目录、provider fallback 与熔断语义、OAuth subscription providers、多账户池与 quota 处理、memory observe/inject/forgetting/admin/MCP、请求 payload 捕获与 request detail UI、API key 治理、admin 表格/过滤/分页/i18n、Docker/CI/release/deploy 验证，以及早期 Phase 0 的 Hono + SvelteKit static admin + Store 端口 + SQLite/Supabase 架构决策。更早细节不再逐条保留在本文件；需要精确背景时回查 git history。

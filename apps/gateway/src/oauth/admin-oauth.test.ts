@@ -1486,8 +1486,8 @@ describe("createOAuthAdmin > codex reset credit", () => {
           },
           additional_rate_limits: [
             {
-              limit_name: "GPT-5.6-Codex-Spark",
-              metered_feature: "codex_spark",
+              limit_name: "GPT-5.6-Codex-Luna",
+              metered_feature: "codex_luna",
               rate_limit: { primary_window: { used_percent: 88 } },
             },
           ],
@@ -1514,7 +1514,7 @@ describe("createOAuthAdmin > codex reset credit", () => {
     const first = await fetchQuota({ account: "default" });
     expect(first?.windows.map((w) => `${w.key}:${w.usedPercent}`)).toEqual([
       "primary:6",
-      "codex_spark-primary:88",
+      "codex_luna-primary:88",
     ]);
     expect(first?.resetCredits).toBe(2);
     expect(first).toMatchObject({

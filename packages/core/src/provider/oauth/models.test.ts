@@ -4,6 +4,7 @@ import {
   DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
   discoverOAuthModels,
   expandOpenAICodexModelAliases,
+  filterRetiredOpenAICodexLimits,
   hasLiveModelDiscovery,
   listOpenAICodexModels,
   OpenAICodexModelsError,
@@ -86,6 +87,22 @@ describe("discoverOAuthModels", () => {
       "gpt-5.6-terra",
       "gpt-5.6",
     ]);
+  });
+
+  it("retires Codex Spark even when stale settings still contain it", () => {
+    expect(
+      expandOpenAICodexModelAliases(["gpt-5.3-codex-spark", "gpt-5.6-sol", "gpt-5.6-terra"]),
+    ).toEqual(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6"]);
+  });
+
+  it("filters retired Spark quota limits while preserving active and account-wide windows", () => {
+    const windows = [
+      { key: "primary", limitId: undefined, limitName: null },
+      { key: "codex_spark-primary", limitId: "codex_spark", limitName: "Spark" },
+      { key: "codex_luna-primary", limitId: "codex_luna", limitName: "GPT-5.6-Codex-Luna" },
+    ];
+
+    expect(filterRetiredOpenAICodexLimits(windows)).toEqual([windows[0], windows[2]]);
   });
 
   it("discovers Anthropic models LIVE from /v1/models when a token is present", async () => {
@@ -173,6 +190,7 @@ describe("discoverOAuthModels", () => {
         jsonResponse({
           models: [
             codexModel("gpt-hidden", 0, "hide"),
+            codexModel("gpt-5.3-codex-spark", 3),
             codexModel("gpt-5.6-terra", 2),
             codexModel("gpt-5.6-sol", 1),
           ],

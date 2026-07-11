@@ -1,4 +1,8 @@
-import { windowsToActiveUsageRecovery, windowsToUsageLimit } from "@helm/core";
+import {
+  filterRetiredOpenAICodexLimits,
+  windowsToActiveUsageRecovery,
+  windowsToUsageLimit,
+} from "@helm/core";
 import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../../app.js";
@@ -331,27 +335,32 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
               (async () => {
                 const result = await fetchCodex({ account: a.account });
                 if (!result) return;
-                codexMetadata.set(acctKey("openai-codex", a.account), result);
+                const activeResult = {
+                  ...result,
+                  windows: filterRetiredOpenAICodexLimits(result.windows),
+                  additionalLimits: filterRetiredOpenAICodexLimits(result.additionalLimits),
+                };
+                codexMetadata.set(acctKey("openai-codex", a.account), activeResult);
                 const capturedAt = Date.now();
                 await store
                   .upsert({
                     providerId: "openai-codex",
                     account: a.account,
-                    windows: result.windows,
+                    windows: activeResult.windows,
                     capturedAt,
                     source: "codex",
-                    resetCredits: result.resetCredits,
+                    resetCredits: activeResult.resetCredits,
                   })
                   .catch(() => {});
                 deps.applyQuotaSnapshot?.(
                   "openai-codex",
                   a.account,
-                  result.windows,
+                  activeResult.windows,
                   capturedAt,
-                  result.resetCredits,
+                  activeResult.resetCredits,
                 );
-                if (result.windows.length > 0) {
-                  await syncCooldownFromWindows("openai-codex", a.account, result.windows);
+                if (activeResult.windows.length > 0) {
+                  await syncCooldownFromWindows("openai-codex", a.account, activeResult.windows);
                 }
               })(),
             );
@@ -364,14 +373,26 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     }
     // Fold the complete live Codex subscription metadata onto its snapshot. Only
     // resetCredits is persisted for pool scoring; the rest remains live/read-only.
-    const withCodexMetadata = <T extends { providerId: string; account: string }>(q: T) => {
+    const withCodexMetadata = <
+      T extends {
+        providerId: string;
+        account: string;
+        windows: Array<{ limitId?: string; limitName?: string | null }>;
+      },
+    >(
+      q: T,
+    ) => {
       const key = acctKey(q.providerId, q.account);
       const metadata = codexMetadata.get(key);
       const identity = codexIdentities.get(key);
+      const snapshot =
+        q.providerId === "openai-codex"
+          ? { ...q, windows: filterRetiredOpenAICodexLimits(q.windows) }
+          : q;
       return metadata === undefined && identity === undefined
-        ? q
+        ? snapshot
         : {
-            ...q,
+            ...snapshot,
             ...(identity === undefined ? {} : { identity }),
             ...(metadata === undefined
               ? {}
@@ -436,10 +457,9 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     }
     const snapshot = await deps.oauthQuota?.get(providerId, account).catch(() => null);
     const liveQuota = await s.fetchCodexQuota?.({ account }).catch(() => null);
-    const windows =
-      snapshot?.windows && snapshot.windows.length > 0
-        ? snapshot.windows
-        : (liveQuota?.windows ?? []);
+    const snapshotWindows = filterRetiredOpenAICodexLimits(snapshot?.windows);
+    const liveWindows = filterRetiredOpenAICodexLimits(liveQuota?.windows);
+    const windows = snapshotWindows.length > 0 ? snapshotWindows : liveWindows;
     if (windows.length === 0) {
       return c.json(
         {

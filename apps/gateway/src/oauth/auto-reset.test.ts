@@ -27,7 +27,7 @@ describe("codex reset-credit eligibility", () => {
       canConsumeResetCredit([
         {
           key: "secondary",
-          limitId: "codex_spark",
+          limitId: "codex_luna",
           usedPercent: 100,
         },
       ]),

@@ -89,9 +89,9 @@ describe("windowsToUsageLimit", () => {
     expect(
       isAccountWideQuotaWindow(
         win({
-          key: "codex_spark-primary",
-          limitId: "codex_spark",
-          limitName: "GPT-5.6-Codex-Spark",
+          key: "codex_luna-primary",
+          limitId: "codex_luna",
+          limitName: "GPT-5.6-Codex-Luna",
         }),
       ),
     ).toBe(false);
