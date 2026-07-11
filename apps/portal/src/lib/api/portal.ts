@@ -95,6 +95,15 @@ export interface PayloadPart {
   created_at?: number;
 }
 
+export interface PayloadMeta {
+  captured: boolean;
+  created_at?: number;
+  parts?: {
+    request: boolean;
+    response: boolean;
+  };
+}
+
 export function getMe(): Promise<Me> {
   return apiGet<Me>("/me");
 }
@@ -159,5 +168,11 @@ export function getPayloadPart(
 ): Promise<PayloadPart> {
   return apiGet<PayloadPart>(
     `/requests/${encodeURIComponent(traceId)}/payload?part=${part}`,
+  );
+}
+
+export function getPayloadMeta(traceId: string): Promise<PayloadMeta> {
+  return apiGet<PayloadMeta>(
+    `/requests/${encodeURIComponent(traceId)}/payload?part=meta`,
   );
 }

@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-07-11 · Portal 请求详情对齐 Admin 查看器但保持供应链边界（Self-Service Portal / Requests，docs/12，原则 1/6/7/8）
+
+- **对齐范围**：Portal 请求详情复用本地已有的 Conversation / JsonViewer / ImagePreview，并移植 Admin 的 StreamViewer。请求/响应正文按 Admin 模式改为 metadata-first、用户打开时才分段加载；SSE 响应提供 Assembled / Chunks / Raw 三种视图，普通 JSON 继续提供 Tree / Formatted / Raw 与全屏。
+- **图片总览**：只扫描 bearer key 已获授权的 request/response 正文，按 Request、Response 分组显示缩略图；点击沿用 ImagePreview 的放大、缩放、1:1、适配与新标签页能力。图片遍历保持深度 24、总数 24、URL 去重上限，避免大正文生成无界 DOM/解码工作。
+- **性能与失败语义**：新增 `part=meta`，只返回 `{request,response}` availability flags；ownership 必须在 metadata/store read 前验证。单段加载失败只影响对应 viewer，不让详情摘要白屏；trace 切换时丢弃旧异步结果，避免跨详情串数据。
+- **安全边界**：没有照搬 Admin 的原始 `upstream_request`。该正文包含协议翻译结果、wire model 与注入后的 Memory 上下文，继续由 R7 在 store read 前拒绝。Portal metadata 也不得返回或暗示 upstream 是否存在；若未来要展示“模型实际看到的内容”，必须新增服务端白名单规范化投影，不能放开原始 part。
+- **验证**：TDD 增加 Portal payload meta ownership/whitelist/fallback 测试、图片 sniff/遍历/去重/上限测试、media-group 纯函数和页面组合 contract；再运行 Portal/Gateway tests、svelte-check、typecheck、lint/build 与真实浏览器交互检查。
+
 ## 2026-07-11 · API-key 门户自助 Memory 默认设置（Self-Service Portal / Memory，docs/06/08/12，原则 2/7）
 
 - **授权边界**：新增 `PATCH /portal/api/memory-settings`，只接受严格的 `memory_mode`、`memory_project_id` 与 `memory_thread_source`；目标 key 始终取 bearer identity 的 `keyId`，不能提交 `key_id/account_id`，也不能借此修改 lane、预算或限流。管理面 root key 继续强制只读、保持 memory inert。`memory_thread_source` 在服务端 schema 保持 optional，仅用于兼容仍打开着的 v0.26.16/17 旧 SPA；新 UI 始终显式发送。
@@ -105,24 +113,13 @@
 - **覆盖面**：OpenAI Chat 的自有 persist 路径和 `recordServed` 共享路径都覆盖；Messages / Responses / Gemini / Images / Interactions 都传入 request timeout state，防止协议面漂移。
 - **验证路径**：新增 timeout context 与 late-success telemetry 测试；覆盖 app/limits/chat/messages/responses/gemini/images/interactions/payload-capture targeted tests，并跑 gateway typecheck。
 
-## 2026-07-06 · API key 绝对模型黑名单（Key governance / routing / Admin keys，docs/04/06/11，原则 5/6/7）
-
-- **背景（Lukin）**：每个 API key 需要能禁止若干具体模型，语义是“这个用户无论通过 direct model、显式 lane、auto/classified lane、alias-to-lane 还是 execution fallback，都不能实际用到这些模型”。
-- **产品边界**：`blocked_models` 是具体模型 denylist，不是 lane denylist。请求若直接点名被禁的具体模型，立即返回结构化 `invalid_request`；请求若点名 lane 或走自动路由，则在执行前从 expanded candidate chain 中剥离被禁模型，fallback 会自然跳过它们。Chat/Messages/Responses/Gemini 走 `routeRequest`，Images/Interactions 入口在各自 image chain 执行前应用同一过滤。
-- **空链处理**：如果某个 lane 的所有候选都被当前 key 的 `blocked_models` 剥空，路由阶段直接返回 `invalid_request`，不进入 provider executor，也不把它伪装成 provider failure。Routing signal feedback 也会跳过被黑名单剥空的提升目标，避免把本来可用的 lane 误提升成拒绝。
-- **匹配语义**：`blocked_models` 每项先 `trim`，匹配时大小写不敏感；普通文本是精确模型 ID，包含 `*` 或 `?` 时按 glob 处理（`*` 任意长度，`?` 单个字符，正则特殊字符按字面量）。不按 provider 前缀隐式扩展；`auto`、空模型、lane 名本身不会作为模型命中，lane 内的具体模型 alias 会被过滤。
-- **数据与迁移**：API key schema 增加 nullable `blocked_models`；create/update 支持设置与清空。SQLite v38 用 JSON text，Postgres v37 用 JSONB；两个 store adapter 都做 round-trip，并保持旧 row 默认 `null`。
-- **可见性与 UI**：`/v1/models` 会按当前 key 隐藏被 block 的 concrete alias；若某 lane 过滤后没有任何可用候选，该 lane 也不展示。Admin keys 的共享 caps form 始终展示多行 `Blocked models` 输入，独立于 `allow_custom_model`，支持换行、逗号、分号分隔并去重。
-- **验证路径**：覆盖 shared schema、direct reject、classified/explicit/alias lane chain filtering、routing signal 提升过滤、空链拒绝、models list 过滤、SQLite/Postgres store contract、gateway auth/admin/chat/messages/replay/models threading，以及 admin create/edit/list 表单映射。
-
 ## 历史条目摘要（最近 5 条）
 
+- **2026-07-06 · API key 绝对模型黑名单（Key governance / routing / Admin keys，docs/04/06/11，原则 5/6/7）**：每把 key 的 exact/glob `blocked_models` 同时约束 direct、lane expansion、fallback、model list 与各协议入口，空链 fail-closed，SQLite/Postgres 与 Admin 表单保持一致。
 - **2026-07-06 · 折叠会话行显示工具调用参数预览（Admin requests / conversation view，docs/11，原则 1）**：工具参数预览改为 whitelist-free，按 args 形状泛化提取 readable scalar，覆盖自定义/大小写不同工具并保留展开详情。
 - **2026-07-06 · 配额 PULL 的 100% 账号级窗口必须同步停车（OAuth provider pool / Admin providers，docs/04/11，原则 3/5/7）**：quota PULL 看到账号级 100% 窗口时立即写入 cooldown 并同步 live pool，scoped model 窗口不扩大成全账号停车。
 - **2026-07-05 · OAuth 凭证失效持久化为 needs reconnect（OAuth provider pool / Admin providers，docs/04/11，原则 3/5/7）**：refresh/持久 upstream 400/401/403 标记 credential failure、写入账号设置并摘出调度，reconnect 成功后按手动/自动停车边界恢复。
 - **2026-07-05 · 避免浪费策略纳入周额度与 Codex reset credits（OAuth provider pool / quota，docs/04/11，原则 3/5/7）**：`use_expiring` 汇总短窗口、周额度与 reset credits 软评分，quota PULL 会刷新 live pool snapshot 但不自动消费 credit。
-- **2026-07-05 · Codex reset-credit 消费改为硬门禁（OAuth quota / Admin providers，docs/04/11，原则 3/5/7）**：手动/自动 reset credit 必须命中 weekly secondary 阈值与持久 guard，缺少 snapshot 时 fail-closed，避免烧稀缺额度。
-
 ## 更早历史总览
 
 2026-07-06 压缩条目还包括 Anthropic native passthrough 稳定 Claude Code billing `cch`、Admin 模型搜索预计算列、payload 分段懒加载、纯工具 turn 去空 header/默认展开，以及 Claude Code 风格 inline tool peek。2026-07-04 更早条目还包括 cheap-model 当前轮低风险降级、视觉上下文压缩 observe/off 接入、Memory stats 队列索引优化、OAuth 会话亲和调度、idle-flush 碎片段优先压缩最大连续段、memory worker 受控并发追赶、记忆页只读运行状态面板、Claude scoped weekly quota 只影响对应模型、跨协议 reasoning-history 候选级跳过、memory idle-flush 防饥饿、策略级 reasoning_effort 覆盖 lane 默认值、cron monitor 低成本规则等。2026-06-30 及以前的工作主要围绕 Helm API 的协议面、路由执行、admin 可观测性与自托管部署逐步成型：补齐 Gemini/OpenAI/Anthropic/Responses 双向转换、SSE 流式正确性、tool-call/JSON schema/思考参数保真、per-model reasoning effort、模型别名与能力/成本目录、provider fallback 与熔断语义、OAuth subscription providers、多账户池与 quota 处理、memory observe/inject/forgetting/admin/MCP、请求 payload 捕获与 request detail UI、API key 治理、admin 表格/过滤/分页/i18n、Docker/CI/release/deploy 验证，以及早期 Phase 0 的 Hono + SvelteKit static admin + Store 端口 + SQLite/Supabase 架构决策。更早细节不再逐条保留在本文件；需要精确背景时回查 git history。
