@@ -11,6 +11,10 @@ import { authMiddleware } from "../../middleware/auth.js";
 import { registerPortalApi } from "./index.js";
 
 const AUTH = { Authorization: "Bearer helm_live_secret" } as const;
+type MemoryPatch = {
+  memoryMode?: "off" | "observe" | "inject";
+  memoryProjectId?: string | null;
+};
 
 function record(overrides: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
   return {
@@ -173,11 +177,15 @@ function telemetry(over: Partial<PortalTelemetry> = {}): PortalTelemetry {
   };
 }
 
-function buildApp(rec: ApiKeyRecord | null, tel: PortalTelemetry = telemetry()) {
+function buildApp(
+  rec: ApiKeyRecord | null,
+  tel: PortalTelemetry = telemetry(),
+  updateKey: (keyId: string, patch: MemoryPatch) => Promise<void> = vi.fn(async () => {}),
+) {
   const getByHash = vi.fn().mockResolvedValue(rec);
   const app = createApp({ logger: { log: () => {} } });
   app.use("/portal/api/*", authMiddleware({ keyStore: { getByHash }, log: () => {} }));
-  registerPortalApi(app, { telemetry: tel, now: () => 10_000 });
+  registerPortalApi(app, { telemetry: tel, keyStore: { updateKey }, now: () => 10_000 });
   return app;
 }
 
@@ -186,6 +194,7 @@ describe("portal API", () => {
     const app = buildApp(record());
     for (const path of [
       "/portal/api/me",
+      "/portal/api/memory-settings",
       "/portal/api/usage/stats",
       "/portal/api/requests",
       "/portal/api/requests/trace_1",
@@ -210,6 +219,67 @@ describe("portal API", () => {
       expect(serialized).not.toContain(hashKey("helm_live_secret"));
       expect(serialized).not.toContain("helm_live_secret");
       expect(serialized.toLowerCase()).not.toContain("hash");
+    });
+  });
+
+  describe("PATCH /portal/api/memory-settings", () => {
+    it("updates only the authenticated key's memory defaults", async () => {
+      const updateKey = vi.fn(async () => {});
+      const res = await buildApp(record(), telemetry(), updateKey).request(
+        "/portal/api/memory-settings",
+        {
+          method: "PATCH",
+          headers: { ...AUTH, "content-type": "application/json" },
+          body: JSON.stringify({ memory_mode: "observe", memory_project_id: "project-a" }),
+        },
+      );
+
+      expect(res.status).toBe(200);
+      expect(updateKey).toHaveBeenCalledWith("k1", {
+        memoryMode: "observe",
+        memoryProjectId: "project-a",
+      });
+      await expect(res.json()).resolves.toEqual({
+        memory: { mode: "observe", project_id: "project-a", project_name: "project-a" },
+      });
+    });
+
+    it("clears the project and disables memory without accepting admin fields", async () => {
+      const updateKey = vi.fn(async () => {});
+      const app = buildApp(record(), telemetry(), updateKey);
+      const ok = await app.request("/portal/api/memory-settings", {
+        method: "PATCH",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ memory_mode: "off", memory_project_id: null }),
+      });
+      expect(ok.status).toBe(200);
+      expect(updateKey).toHaveBeenCalledWith("k1", {
+        memoryMode: "off",
+        memoryProjectId: null,
+      });
+
+      const invalid = await app.request("/portal/api/memory-settings", {
+        method: "PATCH",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ memory_mode: "inject", allowed_lanes: ["premium"] }),
+      });
+      expect(invalid.status).toBe(400);
+      expect(updateKey).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps the management-plane root key memory-inert", async () => {
+      const updateKey = vi.fn(async () => {});
+      const res = await buildApp(
+        record({ role: "root", memory_mode: "off" }),
+        telemetry(),
+        updateKey,
+      ).request("/portal/api/memory-settings", {
+        method: "PATCH",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ memory_mode: "inject", memory_project_id: "root-project" }),
+      });
+      expect(res.status).toBe(403);
+      expect(updateKey).not.toHaveBeenCalled();
     });
   });
 
@@ -241,6 +311,7 @@ describe("portal API", () => {
       const app = createApp({ logger: { log: () => {} } });
       app.use("/portal/api/*", authMiddleware({ keyStore: { getByHash }, log: () => {} }));
       registerPortalApi(app, {
+        keyStore: { updateKey: vi.fn(async () => {}) },
         telemetry: telemetry(),
         now: () => 10_000,
         resolveModelLabel: (wire: string) => (wire === "SECRET_WIRE_MODEL" ? "gpt-5.5" : null),
@@ -292,6 +363,7 @@ describe("portal API", () => {
       const app = createApp({ logger: { log: () => {} } });
       app.use("/portal/api/*", authMiddleware({ keyStore: { getByHash }, log: () => {} }));
       registerPortalApi(app, {
+        keyStore: { updateKey: vi.fn(async () => {}) },
         telemetry: tel,
         now: () => 10_000,
         resolveModelLabel: (wire: string) => (wire === "WIRE_A" ? "gpt-5.5" : null),

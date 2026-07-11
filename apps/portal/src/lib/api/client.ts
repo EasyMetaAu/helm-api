@@ -4,7 +4,8 @@ import { getKey, clearKey } from "$lib/auth";
 // The portal's single fetch wrapper. Injects Authorization: Bearer from the
 // sessionStorage key (never a query/body — R6). On 401 it clears the session and
 // bounces to /login (the key was revoked/disabled). Read-only GETs only in the
-// MVP; memory writes go through mcpFetch (POST /mcp), not here.
+// Memory content writes go through MCP; the narrow per-key settings mutation uses
+// the portal API because it updates key metadata, not memory content.
 const API_BASE = `${base}/api`;
 
 export class ApiError extends Error {
@@ -32,6 +33,29 @@ export async function apiGet<T>(path: string): Promise<T> {
   if (!res.ok) {
     throw new ApiError(res.status, `portal api ${res.status}`);
   }
+  return (await res.json()) as T;
+}
+
+export async function apiPatch<T>(path: string, body: unknown): Promise<T> {
+  const key = getKey();
+  if (!key) {
+    clearKey();
+    throw new ApiError(401, "no api key");
+  }
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "PATCH",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      Authorization: `Bearer ${key}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401) {
+    clearKey();
+    throw new ApiError(401, "unauthorized");
+  }
+  if (!res.ok) throw new ApiError(res.status, `portal api ${res.status}`);
   return (await res.json()) as T;
 }
 

@@ -52,7 +52,7 @@
 | **P0** | 「我用了多少、花了多少、还剩多少额度？会不会突然被限流/断供？」 | 自助门户的存在理由。`/v1/usage/stats` 安全模型天然就绪。 |
 | **P1** | 「我这条请求为什么失败/为什么慢/路由去哪了？」 | 高价值但边界最危险，必须重度脱敏（§4.3）。需新建 bearer-scoped 只读端点。 |
 | **P1** | 「Helm 记住了我什么？我能改吗？」 | 差异化能力。已按 key 硬隔离；优先前端直接打 `POST /mcp`，零新后端。 |
-| **P2（砍）** | 「让我在门户里改自己的预算/限流/换模型。」 | **YAGNI，明确砍掉。** 账户治理是管理员职权；自助提额破坏信任模型。门户只**读**配额不**改**。 |
+| **P2（砍）** | 「让我在门户里改自己的预算/限流/换模型。」 | **YAGNI，明确砍掉。** 账户治理是管理员职权；自助提额破坏信任模型。门户只**读**配额不**改**。Memory 的行为默认值属于 key 持有者自己的数据偏好，单独允许自助修改。 |
 
 **同样砍掉**（YAGNI）：自助轮换/吊销自己的 key、团队/多成员视图、自建子 key、Retry/replay。
 
@@ -75,7 +75,7 @@
 | **接入 Connect** | `/portal/connect` | **MVP（门户灵魂）** | 左侧客户端选择器 + 右侧分步指引 + 一键复制。见 §5。 |
 | **请求 Requests** | `/portal/requests` `/portal/requests/:traceId` | 迭代 2 | 列表（`RequestsTable` full 变体，去 key/lane/decided-by 列）+ **脱敏详情**（§4.3）。 |
 | **记忆 Memory** | `/portal/memory` | 迭代 3 | facts + reflections 浏览/增删改，复用 admin By-Key 布局但只显示「我的」、隐藏 scope 选择器。加「什么是记忆?」说明气泡 + 隐私文案。空状态引导。 |
-| 账户菜单 | 下拉（非独立页） | MVP | key prefix、只读 caps（可用 lanes/预算上限/速率/memory 模式，数据来自 `/portal/api/me`）、退出、语言。**不做独立配置页**（用户能改的为零，单列太空）。 |
+| **账户 Account** | `/portal/account` | MVP + Memory settings | key prefix、只读 caps（lanes/预算/速率）以及可编辑的 Memory 开关、模式和项目名。退出、语言仍在账户菜单。 |
 
 **IA 决策**：接入指南放导航第一/二位，不塞进设置角落。新用户第一眼看到「怎么接」，老用户日常看「概览」——这两个是门户双核心。
 
@@ -109,6 +109,7 @@
 | 4 | `GET /portal/api/requests/:traceId` | **先 ownership 校验**（§4.4）→ `getByRequestId` → **白名单脱敏投影**（§4.3） | `getApiKeyId` + `getByRequestId` | 迭代 2 |
 | 5 | `GET /portal/api/requests/:traceId/payload` | **先 ownership 校验** → 取正文，**白名单 `part ∈ {request,response}`，拒 upstream** | `getApiKeyId` + `getPayloadMeta/getPayloadPart` | 迭代 2 |
 | 6 | memory CRUD | **优先前端直接打 `POST /mcp`（零新后端）**；若必须 REST，则 `accountId: identity.accountId` + `projectId: identity.caps.memory.projectId` 全写死，逐字复用 MCP 隔离不变量，**绝不照搬 `/admin/api/memory/*`**（query 参数寻址 = 破隔离） | MCP tools / `MemoryStore` | 迭代 3 |
+| 7 | `PATCH /portal/api/memory-settings` | 严格只收 `memory_mode` / `memory_project_id`；更新目标写死 `identity.keyId`；root key 拒绝 | `KeyStore.updateKey` | 迭代 4 |
 
 memory REST（仅当 MCP 未启用/需 REST 语义时）：`GET /portal/api/memory/facts`、`GET/PATCH/DELETE .../facts/:id`、reflections 同构。
 
@@ -153,6 +154,7 @@ async function assertOwnsTrace(c, telemetry, traceId): Promise<"ok"|"not_found">
 - telemetry 隔离粒度 = **keyId**（key 级）；memory 隔离粒度 = **accountId**（账户级），key 级只是 projectId 软 scope。
 - 若 account 下多 key 且 `memory_project_id` 皆 null → `effectiveMemoryProjectId` 各落 key_id → 天然 key 级隔离，门户始终传 `projectId: identity.caps.memory.projectId` 即可。
 - 若运营方给多 key 设同一显式 `memory_project_id`（共享池）→ 同 project 的 key 互见 memory，**这是配置决定的预期共享，非 bug**，但门户 UI 须诚实标注「此 memory 池为 project xxx，可能与同 project 的其他 key 共享」。
+- 门户自助修改 project 只切换默认池，**不迁移**旧池里的 facts/reflections；UI 必须在输入框旁明示。`/portal/api/me` 同时返回 effective `project_id` 与原始 `project_name`，避免把 null→keyId 的私有回落误标成显式共享。
 
 ### 4.6 fail-open / 错误信封
 

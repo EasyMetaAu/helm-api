@@ -986,6 +986,8 @@
   "Your key stays in this browser tab only and is sent over HTTPS with each request. Closing the tab signs you out.": "你的密钥只保存在此浏览器标签页中，并会随每次请求通过 HTTPS 发送。关闭标签页即退出登录。",
   "Your new API key": "你的新 API 密钥",
   "Your requests, filtered by time, status, model, or lane.": "你的请求，可按时间、状态、模型或通道筛选。",
+  "Your key, its limits, and Memory defaults.": "你的密钥、使用限制和 Memory 默认设置。",
+  "Changing the project switches memory pools; existing memory is not moved. Keys in the same account using the same project share that pool.": "更改项目会切换 Memory 池，已有记忆不会迁移。同一账户中使用相同项目的密钥会共享该 Memory 池。",
   "Zoom in": "放大",
   "Zoom out": "缩小"
 }

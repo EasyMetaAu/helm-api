@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-07-11 · API-key 门户自助 Memory 默认设置（Self-Service Portal / Memory，docs/06/08/12，原则 2/7）
+
+- **授权边界**：新增 `PATCH /portal/api/memory-settings`，只接受严格的 `memory_mode` 与 `memory_project_id`；目标 key 始终取 bearer identity 的 `keyId`，不能提交 `key_id/account_id`，也不能借此修改 lane、预算或限流。管理面 root key 继续强制只读、保持 memory inert。
+- **交互**：Account 页提供 Memory 开关、`observe`（仅记录）/`inject`（记录并注入）模式和最多 100 字符的项目名；保存后同实例 auth cache 立即失效。显式 `x-memory-*` 请求头仍覆盖这些服务端默认值。
+- **scope 语义**：`memory_project_id` 是共享池选择器，不是纯展示标签；空值仍回落到 key 自身的私有 scope。更改项目只切换默认池，不迁移旧 Memory；同一 account 下采用相同显式项目名的 keys 会共享该池，UI 明示这一点。
+- **API 投影**：`/portal/api/me` 同时返回有效 `project_id` 与原始配置 `project_name`，避免把 null→key-id 的私有默认 scope 错画成显式共享项目。未新增 DB 字段或迁移，复用已有 KeyStore partial update。
+- **验证**：先增加 portal route 红测，覆盖 authenticated-key 强制、严格字段拒绝、disable/clear 和 root 拒绝；再实现后端与 UI，并运行 gateway portal tests、shared/gateway/portal typecheck、portal check/build 和 i18n 校验。
+
 ## 2026-07-10–11 · Codex CLI GPT-5.6 subscription parity（OAuth subscription / Responses / model catalog，docs/04/05/11，原则 3/5/6/7/8）
 
 - **对齐基线**：实现逐项对照 OpenAI Codex `54c44b9ed4` 源码，而不是只增加三个模型字符串。Helm 现在使用原生 `GET /v1/models?client_version=...` 的 `{models}` envelope、Codex `ModelInfo` 字段、`minimal_client_version` 过滤和 key 权限过滤，并支持 `gpt-5.6-sol` / `terra` / `luna` 与裸 `gpt-5.6 -> gpt-5.6-sol` wire 规范化。
@@ -107,14 +115,6 @@
 - **可见性与 UI**：`/v1/models` 会按当前 key 隐藏被 block 的 concrete alias；若某 lane 过滤后没有任何可用候选，该 lane 也不展示。Admin keys 的共享 caps form 始终展示多行 `Blocked models` 输入，独立于 `allow_custom_model`，支持换行、逗号、分号分隔并去重。
 - **验证路径**：覆盖 shared schema、direct reject、classified/explicit/alias lane chain filtering、routing signal 提升过滤、空链拒绝、models list 过滤、SQLite/Postgres store contract、gateway auth/admin/chat/messages/replay/models threading，以及 admin create/edit/list 表单映射。
 
-## 2026-07-06 · Anthropic native passthrough 稳定 Claude Code billing cch（Provider execution / prompt cache，docs/04/05，原则 3/5/7/8）
-
-- **背景（Lukin）**：线上 `claude-fable-5` 请求大多是 Anthropic native passthrough，理论上应保留 Claude Code 原始 body；但 production SQLite 样本显示同一会话里 `system[0]` 的 `x-anthropic-billing-header` 只有 `cch` 每轮变化（`cc_version`/`cc_entrypoint` 稳定），导致 Anthropic prompt cache 的严格前缀匹配被第一块内容打断，缓存读取只覆盖小前缀，成本显著偏高。
-- **问题归属**：这不是 Helm 协议转换 correctness bug；原样转发本身成立。这里是对 Claude Code 官方 billing header 与 Anthropic prompt cache 机制冲突的兼容性 workaround：为了自托管网关的成本边界，允许 native passthrough 做一个可审计的最小 body shim。
-- **修复边界**：只在 `protocol === anthropic_messages` 且 `system[0]` 明确是 `x-anthropic-billing-header`、含 5 位 hex `cch` 时触发；保留 `cc_version`、`cc_entrypoint`、system/messages/tools 正文和 cache_control，仅把 `cch` 替换成由稳定 cache-prefix 材料（resolved model、system、tools，排除 messages）计算出的 5 位值。没有该 header 的 native 请求完全不变。
-- **观测决策**：触发时写入 passthrough mutation `body_shims_applied: ["anthropic_billing_cch_stabilized"]`，并清掉 raw_body 走重序列化，避免 telemetry 显示仍是旧的客户端 raw body。后续线上可按该 mutation 与 `cached_tokens/cache_creation_tokens` 验证成本改善。
-- **风险边界**：如果 Anthropic 将来开始强校验官方 `cch` 与整请求字节一致，这个 shim 可能引发上游拒绝；届时可通过 native passthrough flag 或后续 runtime setting 回滚。当前生产证据显示 `cch` 更像缓存/归因指纹而非认证字段。
-
 ## 历史条目摘要（最近 5 条）
 
 - **2026-07-06 · 折叠会话行显示工具调用参数预览（Admin requests / conversation view，docs/11，原则 1）**：工具参数预览改为 whitelist-free，按 args 形状泛化提取 readable scalar，覆盖自定义/大小写不同工具并保留展开详情。
@@ -125,4 +125,4 @@
 
 ## 更早历史总览
 
-2026-07-06 压缩条目还包括 Admin 模型搜索预计算列、payload 分段懒加载、纯工具 turn 去空 header/默认展开，以及 Claude Code 风格 inline tool peek。2026-07-04 更早条目还包括 cheap-model 当前轮低风险降级、视觉上下文压缩 observe/off 接入、Memory stats 队列索引优化、OAuth 会话亲和调度、idle-flush 碎片段优先压缩最大连续段、memory worker 受控并发追赶、记忆页只读运行状态面板、Claude scoped weekly quota 只影响对应模型、跨协议 reasoning-history 候选级跳过、memory idle-flush 防饥饿、策略级 reasoning_effort 覆盖 lane 默认值、cron monitor 低成本规则等。2026-06-30 及以前的工作主要围绕 Helm API 的协议面、路由执行、admin 可观测性与自托管部署逐步成型：补齐 Gemini/OpenAI/Anthropic/Responses 双向转换、SSE 流式正确性、tool-call/JSON schema/思考参数保真、per-model reasoning effort、模型别名与能力/成本目录、provider fallback 与熔断语义、OAuth subscription providers、多账户池与 quota 处理、memory observe/inject/forgetting/admin/MCP、请求 payload 捕获与 request detail UI、API key 治理、admin 表格/过滤/分页/i18n、Docker/CI/release/deploy 验证，以及早期 Phase 0 的 Hono + SvelteKit static admin + Store 端口 + SQLite/Supabase 架构决策。更早细节不再逐条保留在本文件；需要精确背景时回查 git history。
+2026-07-06 压缩条目还包括 Anthropic native passthrough 稳定 Claude Code billing `cch`、Admin 模型搜索预计算列、payload 分段懒加载、纯工具 turn 去空 header/默认展开，以及 Claude Code 风格 inline tool peek。2026-07-04 更早条目还包括 cheap-model 当前轮低风险降级、视觉上下文压缩 observe/off 接入、Memory stats 队列索引优化、OAuth 会话亲和调度、idle-flush 碎片段优先压缩最大连续段、memory worker 受控并发追赶、记忆页只读运行状态面板、Claude scoped weekly quota 只影响对应模型、跨协议 reasoning-history 候选级跳过、memory idle-flush 防饥饿、策略级 reasoning_effort 覆盖 lane 默认值、cron monitor 低成本规则等。2026-06-30 及以前的工作主要围绕 Helm API 的协议面、路由执行、admin 可观测性与自托管部署逐步成型：补齐 Gemini/OpenAI/Anthropic/Responses 双向转换、SSE 流式正确性、tool-call/JSON schema/思考参数保真、per-model reasoning effort、模型别名与能力/成本目录、provider fallback 与熔断语义、OAuth subscription providers、多账户池与 quota 处理、memory observe/inject/forgetting/admin/MCP、请求 payload 捕获与 request detail UI、API key 治理、admin 表格/过滤/分页/i18n、Docker/CI/release/deploy 验证，以及早期 Phase 0 的 Hono + SvelteKit static admin + Store 端口 + SQLite/Supabase 架构决策。更早细节不再逐条保留在本文件；需要精确背景时回查 git history。

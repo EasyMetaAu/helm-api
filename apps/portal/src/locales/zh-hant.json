@@ -986,6 +986,8 @@
   "Your key stays in this browser tab only and is sent over HTTPS with each request. Closing the tab signs you out.": "你的金鑰只會保存在此瀏覽器分頁中，並隨每次請求透過 HTTPS 傳送。關閉分頁即會登出。",
   "Your new API key": "你的新 API 金鑰",
   "Your requests, filtered by time, status, model, or lane.": "你的請求，可依時間、狀態、模型或通道篩選。",
+  "Your key, its limits, and Memory defaults.": "你的金鑰、使用限制和 Memory 預設設定。",
+  "Changing the project switches memory pools; existing memory is not moved. Keys in the same account using the same project share that pool.": "變更專案會切換 Memory 池，既有記憶不會遷移。同一帳戶中使用相同專案的金鑰會共享該 Memory 池。",
   "Zoom in": "放大",
   "Zoom out": "縮小"
 }
