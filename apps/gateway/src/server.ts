@@ -11,6 +11,7 @@ import {
   type CodexRateLimitReachedType,
   type ConfigStore,
   type CreateKeyInput,
+  CURATED_OAUTH_MODELS,
   checkTlsTransportAvailable,
   codexActiveLimitIdFromProviderRaw,
   createAnthropicClient,
@@ -41,6 +42,7 @@ import {
   encryptSecret,
   expandLaneChain,
   expandOpenAICodexModelAliases,
+  filterRetiredOpenAICodexLimits,
   type GeminiGenerateContentResponse,
   type GeneratedKey,
   geminiTransformer,
@@ -171,6 +173,10 @@ import { createCodexModelsEtagTracker } from "./oauth/codex-model-etag-tracker.j
 import { codexResetCreditSharedKey } from "./oauth/codex-reset-account-key.js";
 import { anthropicMetadataUserId, stableSessionId } from "./oauth/device-identity.js";
 import { effectiveOAuthModelOptions, type ModelOption } from "./oauth/effective-models.js";
+import {
+  createOAuthModelDiscoveryCache,
+  type OAuthModelDiscoveryCache,
+} from "./oauth/model-discovery-cache.js";
 import { createResetCreditGuard, resetCreditGuardHash } from "./oauth/reset-credit-guard.js";
 import { createResponsesRegistry } from "./responses-registry.js";
 import { createArchiveFsAccess } from "./routes/admin/cleanup-fs.js";
@@ -840,6 +846,10 @@ export async function synthesizeOAuthProviders(
   // Shared account-scoped Codex model catalog. When present, Codex synthesis uses
   // complete ModelInfo snapshots instead of reducing discovery to static slugs.
   codex?: CodexOAuthRuntime,
+  // Shared account-scoped cache for non-Codex live discovery. The composition
+  // root also gives this instance to Admin so status reads and pool rebuilds do
+  // not independently call the provider's models endpoint.
+  modelDiscoveryCache?: OAuthModelDiscoveryCache,
 ): Promise<SynthesizedOAuth> {
   if (!oauthCtx) return { providers: [], poolClients: new Map(), codexKeys: [] };
   const declared = new Set<string>(
@@ -909,9 +919,12 @@ export async function synthesizeOAuthProviders(
         log("warn", "oauth.autoroute.skip", { providerId, account, reason: "refresh failed" });
         continue;
       }
+      const modelsMode = resolveAccountModelsMode(providerId, s);
       let discovered: string[];
       let accountCodexRuntime: CodexAccountRuntime | undefined;
-      if (providerId === "openai-codex" && codex) {
+      if (providerId !== "openai-codex" && modelsMode === "manual") {
+        discovered = s.enabledModels ?? [];
+      } else if (providerId === "openai-codex" && codex) {
         const clientVersion = codex.clientVersion ?? DEFAULT_OPENAI_CODEX_CLIENT_VERSION;
         const loaded = await loadCodexAccountCatalog({
           account,
@@ -931,22 +944,20 @@ export async function synthesizeOAuthProviders(
         if (loaded) codexKeys.push(loaded.key);
         accountCodexRuntime = loaded?.runtime;
       } else {
-        try {
-          discovered = await discoverOAuthModels(providerId, accessToken, proxyFetch);
-        } catch {
-          discovered = [];
-        }
+        const discoverExact = () =>
+          discoverOAuthModels(providerId, accessToken, proxyFetch, {
+            fallbackToCurated: false,
+          });
+        const exact = modelDiscoveryCache
+          ? await modelDiscoveryCache.load({ providerId, account }, discoverExact)
+          : await discoverExact();
+        discovered = exact.length > 0 ? exact : (CURATED_OAUTH_MODELS[providerId] ?? []);
       }
       // Auto follows the authenticated account catalog. Manual is an explicit
       // allowlist and remains authoritative even for ids discovery did not report.
-      const modelsMode = resolveAccountModelsMode(providerId, s);
-      if (modelsMode === "manual") {
-        if (providerId === "openai-codex") {
-          const enabled = new Set(s.enabledModels ?? []);
-          discovered = discovered.filter((model) => enabled.has(model));
-        } else {
-          discovered = s.enabledModels ?? [];
-        }
+      if (modelsMode === "manual" && providerId === "openai-codex") {
+        const enabled = new Set(s.enabledModels ?? []);
+        discovered = discovered.filter((model) => enabled.has(model));
       }
       if (discovered.length === 0) {
         log("warn", "oauth.autoroute.no_models", { providerId, account });
@@ -1548,6 +1559,7 @@ export async function buildServer(
     : undefined;
   let rebuildOAuthPool: (() => Promise<{ applied: boolean }>) | undefined;
   const codexModelsEtagTracker = createCodexModelsEtagTracker();
+  const oauthModelDiscoveryCache = createOAuthModelDiscoveryCache();
   const codexModelCatalog = oauthCtx
     ? createCodexModelCatalog({
         cache: createCodexModelCache(store.config, oauthCtx.encKey),
@@ -1597,6 +1609,7 @@ export async function buildServer(
         codexCatalog: codexModelCatalog,
         codexClientVersion,
         codexUserAgent,
+        modelDiscoveryCache: oauthModelDiscoveryCache,
       })
     : undefined;
 
@@ -1860,7 +1873,10 @@ export async function buildServer(
     try {
       for (const snap of await store.oauthQuota.getAll()) {
         seeds.set(`${snap.providerId} ${snap.account}`, {
-          windows: snap.windows,
+          windows:
+            snap.providerId === "openai-codex"
+              ? filterRetiredOpenAICodexLimits(snap.windows)
+              : snap.windows,
           capturedAt: snap.capturedAt,
           usageLimitedUntilMs: snap.usageLimitedUntilMs ?? null,
           resetCredits: snap.resetCredits ?? null,
@@ -2188,6 +2204,7 @@ export async function buildServer(
     parkAccountOnLimit,
     markOAuthCredentialFailureLater,
     codexRuntime,
+    oauthModelDiscoveryCache,
   );
   const routableProviders: ProviderConfigShared[] = [
     ...config.providers,
@@ -2295,6 +2312,7 @@ export async function buildServer(
           parkAccountOnLimit,
           markOAuthCredentialFailureLater,
           codexRuntime,
+          oauthModelDiscoveryCache,
         );
         oauthPoolClients = next.poolClients;
         oauthAliasSet = aliasSetOf(next);

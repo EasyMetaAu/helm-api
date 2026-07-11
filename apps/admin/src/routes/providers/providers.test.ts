@@ -993,7 +993,7 @@ describe('providers page', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
-  it('renders model-scoped additional limits and the individual monthly credit limit', () => {
+  it('renders active model-scoped limits and the individual monthly credit limit', () => {
     renderPage({
       providers: [
         provider({
@@ -1010,7 +1010,7 @@ describe('providers page', () => {
               autoReset: false,
               fastMode: false,
               proxy: null,
-              models: ['gpt-5.6-codex-spark'],
+              models: ['gpt-5.6-luna'],
             },
           ],
         }),
@@ -1022,12 +1022,20 @@ describe('providers page', () => {
           account: 'acct-codex',
           windows: [
             {
-              key: 'codex_spark-primary',
+              key: 'codex_luna-primary',
               usedPercent: 88,
               resetsAtMs: Date.now() + 3_600_000,
               windowMinutes: 30,
+              limitId: 'codex_luna',
+              limitName: 'GPT-5.6-Codex-Luna',
+            },
+            {
+              key: 'codex_spark-primary',
+              usedPercent: 99,
+              resetsAtMs: Date.now() + 7_200_000,
+              windowMinutes: 30,
               limitId: 'codex_spark',
-              limitName: 'GPT-5.3-Codex-Spark',
+              limitName: 'GPT-5.6-Codex-Spark',
             },
           ],
           capturedAt: Date.now(),
@@ -1045,7 +1053,8 @@ describe('providers page', () => {
     });
 
     const row = screen.getByTestId('provider-account-row');
-    expect(within(row).getByText('GPT-5.3-Codex-Spark · 30m')).toHaveClass('text-[9px]');
+    expect(within(row).getByText('GPT-5.6-Codex-Luna · 30m')).not.toHaveClass('text-[9px]');
+    expect(within(row).queryByText('GPT-5.6-Codex-Spark · 30m')).not.toBeInTheDocument();
     const individualLimit = within(row).getByTestId('codex-individual-limit');
     expect(within(individualLimit).getByText('Monthly credit limit')).toBeInTheDocument();
     expect(within(individualLimit).getByText('8,000 of 25,000 credits used')).toBeInTheDocument();
@@ -1069,7 +1078,7 @@ describe('providers page', () => {
               autoReset: false,
               fastMode: false,
               proxy: null,
-              models: ['gpt-5.6-codex-spark'],
+              models: ['gpt-5.6-terra'],
             },
           ],
         }),
@@ -1096,7 +1105,7 @@ describe('providers page', () => {
       'provider-quota-cell',
     );
     expect(within(quotaCell).getByText('Additional limits')).toBeInTheDocument();
-    expect(within(quotaCell).getByText('GPT-5.6-Codex-Spark')).toBeInTheDocument();
+    expect(within(quotaCell).queryByText('GPT-5.6-Codex-Spark')).not.toBeInTheDocument();
     expect(within(quotaCell).getByText('GPT-5.6-Codex-Terra')).toBeInTheDocument();
     expect(within(quotaCell).queryByText('0%')).not.toBeInTheDocument();
     expect(quotaCell.querySelector('.progress-track')).toBeNull();

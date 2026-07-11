@@ -427,6 +427,28 @@ anthropic/claude-sonnet-4-6:
   modalities: [document]
   maxContextTokens: 1000000
   maxOutputTokens: 128000
+# Claude Sonnet 5: 1M context, 128K synchronous output, adaptive thinking
+# enabled by default, and no manual budget_tokens mode. It supports the full
+# low/medium/high/xhigh/max effort set, structured outputs, tools, vision,
+# documents, and streaming.
+# https://platform.claude.com/docs/en/about-claude/models/whats-new-sonnet-5
+# https://platform.claude.com/docs/en/build-with-claude/effort
+anthropic/claude-sonnet-5:
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  reasoningEffort:
+    anthropicOutputConfig:
+      supported: true
+      levels: [low, medium, high, xhigh, max]
+      map:
+        minimal: low
+    anthropicThinking:
+      supported: false
+  modalities: [document]
+  maxContextTokens: 1000000
+  maxOutputTokens: 128000
 anthropic/claude-fable-5:
   supportsTools: true
   jsonOutput: schema

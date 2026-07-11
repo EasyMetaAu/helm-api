@@ -23,7 +23,7 @@ export const DEFAULT_429_COOLDOWN_MS = 60_000;
 
 // Anthropic scoped weekly model windows are named `7d-<model>` (for example
 // `7d-fable` / `7d-sonnet`). Codex additional rate limits carry a non-default
-// `limitId` (and use keys such as `codex_spark-primary`). Both mean "this model is
+// `limitId` (and use keys such as `codex_luna-primary`). Both mean "this model is
 // capped", not "the whole account is capped"; only account-wide windows may park
 // the account globally.
 export function isAccountWideQuotaWindow(window: OAuthQuotaWindow): boolean {

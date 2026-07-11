@@ -4,6 +4,7 @@ import {
   CodexResetResultSchema,
   type OAuthQuotaWindow,
 } from "@helm/shared";
+import { isRetiredOpenAICodexLimit } from "./models.js";
 
 // Codex (ChatGPT) rate-limit window headers (providers page Tier 3). The Codex
 // backend stamps one or more `x-<limit-id>-{primary,secondary}-*` families on
@@ -134,6 +135,7 @@ export function parseCodexQuotaHeaderDetails(headers: Headers, nowMs: number): C
     const windowMinutes = num(headers, `${family.prefix}-window-minutes`);
     const normalizedLimitId = family.limitId.replaceAll("-", "_");
     const limitName = headers.get(`x-${family.limitId}-limit-name`)?.trim() || null;
+    if (isRetiredOpenAICodexLimit(normalizedLimitId, limitName)) continue;
     out.push({
       key: family.key,
       usedPercent: Math.max(0, used),
@@ -243,7 +245,9 @@ export function codexUsageToWindows(usage: CodexOAuthUsage, nowMs: number): OAut
   for (const additional of usage.additional_rate_limits ?? []) {
     const limitId = additional.metered_feature?.trim().toLowerCase().replaceAll("-", "_");
     if (!limitId) continue;
-    appendWindows(additional.rate_limit, limitId, additional.limit_name?.trim() || null);
+    const limitName = additional.limit_name?.trim() || null;
+    if (isRetiredOpenAICodexLimit(limitId, limitName)) continue;
+    appendWindows(additional.rate_limit, limitId, limitName);
   }
   return out;
 }
@@ -296,9 +300,11 @@ function usageAdditionalLimits(usage: CodexOAuthUsage): CodexAdditionalLimitSnap
   for (const additional of usage.additional_rate_limits ?? []) {
     const limitId = additional.metered_feature?.trim().toLowerCase().replaceAll("-", "_");
     if (!limitId) continue;
+    const limitName = additional.limit_name?.trim() || null;
+    if (isRetiredOpenAICodexLimit(limitId, limitName)) continue;
     limits.set(limitId, {
       limitId,
-      limitName: additional.limit_name?.trim() || null,
+      limitName,
     });
   }
   return [...limits.values()];

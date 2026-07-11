@@ -58,7 +58,7 @@ describe("parseCodexQuotaHeaders", () => {
         "x-codex-luna-primary-used-percent": "25",
         "x-codex-luna-primary-window-minutes": "60",
         "x-codex-luna-primary-reset-at": "1704069000",
-        "x-codex-luna-limit-name": "GPT-5.6-Codex-Spark",
+        "x-codex-luna-limit-name": "GPT-5.6-Codex-Luna",
       }),
       NOW,
     );
@@ -70,7 +70,7 @@ describe("parseCodexQuotaHeaders", () => {
         resetsAtMs: 1_704_069_000_000,
         windowMinutes: 60,
         limitId: "codex_luna",
-        limitName: "GPT-5.6-Codex-Spark",
+        limitName: "GPT-5.6-Codex-Luna",
       },
       {
         key: "codex_sol-secondary",
@@ -160,6 +160,33 @@ describe("parseCodexQuotaHeaders", () => {
     ).toBe("codex_luna");
     expect(codexActiveLimitIdFromProviderRaw({ headers: {} })).toBeNull();
   });
+
+  it("drops retired Spark quota families while preserving active Codex models", () => {
+    expect(
+      parseCodexQuotaHeaderDetails(
+        headers({
+          "x-codex-spark-primary-used-percent": "88",
+          "x-codex-spark-limit-name": "GPT-5.3-Codex-Spark",
+          "x-codex-luna-primary-used-percent": "25",
+          "x-codex-luna-limit-name": "GPT-5.6-Codex-Luna",
+        }),
+        NOW,
+      ),
+    ).toMatchObject({
+      windows: [
+        expect.objectContaining({
+          limitId: "codex_luna",
+          limitName: "GPT-5.6-Codex-Luna",
+        }),
+      ],
+      additionalLimits: [
+        {
+          limitId: "codex_luna",
+          limitName: "GPT-5.6-Codex-Luna",
+        },
+      ],
+    });
+  });
 });
 
 describe("parseCodexUsageBody", () => {
@@ -186,7 +213,7 @@ describe("parseCodexUsageBody", () => {
       },
     },
     code_review_rate_limit: null,
-    additional_rate_limits: [{ limit_name: "GPT-5.3-Codex-Spark" }],
+    additional_rate_limits: [{ limit_name: "GPT-5.6-Codex-Terra" }],
     credits: { has_credits: true },
   };
 
@@ -197,13 +224,13 @@ describe("parseCodexUsageBody", () => {
     ]);
   });
 
-  it("maps additional_rate_limits into model-scoped windows with stable identities", () => {
+  it("maps active additional_rate_limits into model-scoped windows with stable identities", () => {
     const windows = parseCodexUsageBody(
       {
         additional_rate_limits: [
           {
-            limit_name: "GPT-5.6-Codex-Spark",
-            metered_feature: "codex_spark",
+            limit_name: "GPT-5.6-Codex-Luna",
+            metered_feature: "codex_luna",
             rate_limit: {
               primary_window: {
                 used_percent: 88,
@@ -219,12 +246,12 @@ describe("parseCodexUsageBody", () => {
 
     expect(windows).toEqual([
       {
-        key: "codex_spark-primary",
+        key: "codex_luna-primary",
         usedPercent: 88,
         resetsAtMs: 1_735_693_200_000,
         windowMinutes: 30,
-        limitId: "codex_spark",
-        limitName: "GPT-5.6-Codex-Spark",
+        limitId: "codex_luna",
+        limitName: "GPT-5.6-Codex-Luna",
       },
     ]);
   });
@@ -235,8 +262,8 @@ describe("parseCodexUsageBody", () => {
         {
           additional_rate_limits: [
             {
-              limit_name: "GPT-5.6-Codex-Spark",
-              metered_feature: "codex_spark",
+              limit_name: "GPT-5.6-Codex-Terra",
+              metered_feature: "codex_terra",
               rate_limit: null,
             },
           ],
@@ -247,8 +274,48 @@ describe("parseCodexUsageBody", () => {
       windows: [],
       additionalLimits: [
         {
-          limitId: "codex_spark",
-          limitName: "GPT-5.6-Codex-Spark",
+          limitId: "codex_terra",
+          limitName: "GPT-5.6-Codex-Terra",
+        },
+      ],
+    });
+  });
+
+  it("drops retired Spark additional limits from usage metadata", () => {
+    expect(
+      parseCodexQuotaDetails(
+        {
+          additional_rate_limits: [
+            {
+              limit_name: "GPT-5.3-Codex-Spark",
+              metered_feature: "codex_spark",
+              rate_limit: {
+                primary_window: {
+                  used_percent: 88,
+                  limit_window_seconds: 1800,
+                },
+              },
+            },
+            {
+              limit_name: "GPT-5.6-Codex-Terra",
+              metered_feature: "codex_terra",
+              rate_limit: {
+                primary_window: {
+                  used_percent: 40,
+                  limit_window_seconds: 1800,
+                },
+              },
+            },
+          ],
+        },
+        NOW,
+      ),
+    ).toMatchObject({
+      windows: [expect.objectContaining({ limitId: "codex_terra" })],
+      additionalLimits: [
+        {
+          limitId: "codex_terra",
+          limitName: "GPT-5.6-Codex-Terra",
         },
       ],
     });

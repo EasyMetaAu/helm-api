@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   type CodexModelInfo,
   CodexModelInfoSchema,
+  isRetiredOpenAICodexModel,
   type OpenAICodexModelsResult,
   resolveOpenAICodexModelAlias,
 } from "@helm/core";
@@ -62,6 +63,7 @@ function parseModels(models: readonly unknown[]): CodexModelInfo[] | null {
   for (const model of models) {
     const result = CodexModelInfoSchema.safeParse(model);
     if (!result.success) return null;
+    if (isRetiredOpenAICodexModel(result.data.slug)) continue;
     parsed.push(result.data);
   }
   return parsed;

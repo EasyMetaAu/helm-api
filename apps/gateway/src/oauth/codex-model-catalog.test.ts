@@ -108,6 +108,33 @@ describe("createCodexModelCatalog", () => {
     expect(catalog.resolve(KEY, "gpt-5.6-sol")?.slug).toBe("gpt-5.6-sol");
   });
 
+  it("removes retired Codex Spark models from bundled, cached, and remote catalogs", async () => {
+    const spark = model("gpt-5.3-codex-spark");
+    const cache = fakeCache({
+      entry: entry([spark, model("gpt-5.6-terra", 2)]),
+      fresh: true,
+    });
+    const cachedCatalog = createCodexModelCatalog({
+      cache,
+      bundledModels: [spark, model("gpt-5.6-sol", 2)],
+    });
+
+    await expect(cachedCatalog.load(KEY, remote([spark]))).resolves.toMatchObject({
+      models: [{ slug: "gpt-5.6-terra" }],
+    });
+    expect(cachedCatalog.resolve(KEY, "gpt-5.3-codex-spark")).toBeUndefined();
+
+    const networkCatalog = createCodexModelCatalog({
+      cache: fakeCache(null),
+      bundledModels: [spark],
+    });
+    await expect(
+      networkCatalog.load(KEY, remote([spark, model("gpt-5.6-luna", 2)])),
+    ).resolves.toMatchObject({
+      models: [{ slug: "gpt-5.6-luna" }],
+    });
+  });
+
   it("filters bundled fallback models by minimal_client_version", async () => {
     const oldKey = { ...KEY, clientVersion: "0.139.0" };
     const catalog = createCodexModelCatalog({

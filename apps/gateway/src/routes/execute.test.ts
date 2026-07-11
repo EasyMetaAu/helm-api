@@ -1256,6 +1256,173 @@ describe("createExecute — gateway execution adapter", () => {
     expect(recordFailure).not.toHaveBeenCalled();
   });
 
+  it("returns a compaction-compatible 400 when exact count_tokens exhausts the chain", async () => {
+    const provider = {
+      countTokens: vi.fn().mockResolvedValue({ input_tokens: 1_001_854 }),
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: protocolRegistry({
+        opus: {
+          providerName: "mock",
+          providerModel: "claude-opus-4-8",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["opus"]),
+      req({
+        protocol: "anthropic_messages",
+        requested_model: "claude-opus-4-8",
+        native_request: createNativePassthroughCarrier({
+          protocol: "anthropic_messages",
+          body: {
+            model: "claude-opus-4-8",
+            messages: [{ role: "user", content: "huge" }],
+            max_tokens: 64,
+          },
+          headers: {},
+        }),
+      }),
+    );
+
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected a terminal error");
+    expect(out.final.error).toMatchObject({
+      error_class: "invalid_request",
+      http_status: 400,
+      message: "prompt is too long: 1001854 tokens > 1000000 maximum",
+      provider_raw: null,
+    });
+    expect(out.attempts[0]).toMatchObject({
+      skipped: true,
+      skip_reason: "context_too_small",
+      error_class: null,
+    });
+    expect(provider.chatCompletion).not.toHaveBeenCalled();
+    expect(recordFailure).not.toHaveBeenCalled();
+  });
+
+  it("uses exact count_tokens instead of an earlier approximate context rejection", async () => {
+    const provider = {
+      countTokens: vi.fn().mockResolvedValue({ input_tokens: 21 }),
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: protocolRegistry({
+        opus: {
+          providerName: "mock",
+          providerModel: "claude-opus-4-8",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map([["opus", entry("opus", { maxContextTokens: 20 })]]),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["opus"]),
+      req({
+        protocol: "anthropic_messages",
+        messages: [{ role: "user", content: "x".repeat(100) }],
+        native_request: createNativePassthroughCarrier({
+          protocol: "anthropic_messages",
+          body: {
+            model: "claude-opus-4-8",
+            messages: [{ role: "user", content: "x".repeat(100) }],
+            max_tokens: 1,
+          },
+          headers: {},
+        }),
+      }),
+    );
+
+    expect(provider.countTokens).toHaveBeenCalledOnce();
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected a terminal error");
+    expect(out.final.error).toMatchObject({
+      error_class: "invalid_request",
+      message: "prompt is too long: 21 tokens > 20 maximum",
+    });
+  });
+
+  it("returns a compaction-compatible 400 for approximate context-only exhaustion", async () => {
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ small: "small-model" }),
+      breaker: breaker(),
+      catalog: new Map([["small", entry("small", { maxContextTokens: 20 })]]),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["small"]),
+      req({ messages: [{ role: "user", content: "x".repeat(100) }] }),
+    );
+
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected a terminal error");
+    expect(out.final.error).toMatchObject({
+      error_class: "invalid_request",
+      http_status: 400,
+      message: "prompt is too long: 25 tokens > 20 maximum",
+    });
+    expect(provider.chatCompletion).not.toHaveBeenCalled();
+  });
+
+  it("does not claim compaction will fix a chain that also has an unavailable provider", async () => {
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registryWithProviders({
+        small: { providerName: "mock", providerModel: "small-model" },
+        unavailable: { providerName: "missing", providerModel: "large-model" },
+      }),
+      breaker: breaker(),
+      catalog: new Map([["small", entry("small", { maxContextTokens: 20 })]]),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["small", "unavailable"]),
+      req({ messages: [{ role: "user", content: "x".repeat(100) }] }),
+    );
+
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected a terminal error");
+    expect(out.final.error).toMatchObject({
+      error_class: "all_providers_failed",
+      http_status: 502,
+    });
+  });
+
   it("skips a candidate on context_length_exceeded without tripping the breaker", async () => {
     // Some upstreams report model-window overflow as an in-band stream error without an
     // HTTP 400 status. That is a candidate capability miss, not provider health.
@@ -1319,9 +1486,169 @@ describe("createExecute — gateway execution adapter", () => {
       status: "error",
       error_class: null,
     });
-    expect(out.attempts[0]?.error_detail).toBeNull();
+    expect(out.attempts[0]?.error_detail).toMatchObject({
+      provider_raw: {
+        error: {
+          code: "context_length_exceeded",
+        },
+      },
+    });
     expect(out.attempts[1]?.status).toBe("ok");
     expect(recordFailure).not.toHaveBeenCalled();
+  });
+
+  it("preserves an upstream context error when every candidate is exhausted", async () => {
+    const raw = {
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        code: "context_length_exceeded",
+        message: "prompt is too long: 1200000 tokens > 1000000 maximum",
+      },
+    };
+    const provider = {
+      chatCompletion: vi
+        .fn()
+        .mockRejectedValue(new UpstreamError("upstream_error", "upstream returned 400", raw, 400)),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ opus: "claude-opus-4-8" }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["opus"]), req());
+
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected a terminal error");
+    expect(out.final.error).toMatchObject({
+      error_class: "invalid_request",
+      http_status: 400,
+      message: "prompt is too long: 1200000 tokens > 1000000 maximum",
+      provider_raw: raw,
+    });
+    expect(out.attempts[0]).toMatchObject({
+      skipped: true,
+      skip_reason: "context_too_small",
+      error_detail: {
+        upstream_status: 400,
+        provider_raw: raw,
+      },
+    });
+    expect(recordFailure).not.toHaveBeenCalled();
+  });
+
+  it("prefers an exact compaction message while retaining the first upstream context detail", async () => {
+    const raw = {
+      error: {
+        type: "invalid_request_error",
+        code: "context_length_exceeded",
+        message: "This model's context window is too small.",
+      },
+    };
+    const provider = {
+      countTokens: vi.fn().mockResolvedValue({ input_tokens: 1_001_854 }),
+      chatCompletion: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new UpstreamError("upstream_error", "upstream returned 400", raw, 400),
+        ),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: protocolRegistry({
+        codex: {
+          providerName: "mock",
+          providerModel: "gpt-5.6-sol",
+          targetProviderProtocol: "openai_responses",
+        },
+        opus: {
+          providerName: "mock",
+          providerModel: "claude-opus-4-8",
+          targetProviderProtocol: "anthropic_messages",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["codex", "opus"]),
+      req({
+        protocol: "anthropic_messages",
+        native_request: createNativePassthroughCarrier({
+          protocol: "anthropic_messages",
+          body: {
+            model: "claude-opus-4-8",
+            messages: [{ role: "user", content: "huge" }],
+            max_tokens: 64,
+          },
+          headers: {},
+        }),
+      }),
+    );
+
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected a terminal error");
+    expect(out.final.error).toMatchObject({
+      error_class: "invalid_request",
+      message: "prompt is too long: 1001854 tokens > 1000000 maximum",
+      provider_raw: raw,
+    });
+  });
+
+  it("does not misreport context overflow when another candidate has a provider failure", async () => {
+    const provider = {
+      chatCompletion: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new UpstreamError(
+            "upstream_error",
+            "upstream returned 400",
+            {
+              error: {
+                code: "context_length_exceeded",
+                message: "prompt is too long: 1200000 tokens > 1000000 maximum",
+              },
+            },
+            400,
+          ),
+        )
+        .mockRejectedValueOnce(
+          new UpstreamError("upstream_error", "upstream returned 500", {}, 500),
+        ),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ opus: "claude-opus-4-8", tail: "tail-model" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["opus", "tail"]), req());
+
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected a terminal error");
+    expect(out.final.error).toMatchObject({
+      error_class: "all_providers_failed",
+      http_status: 502,
+      provider_raw: null,
+    });
   });
 
   it("maps Anthropic output_config.effort through the target model policy instead of skipping", async () => {

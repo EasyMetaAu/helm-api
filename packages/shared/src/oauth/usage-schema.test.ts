@@ -93,8 +93,8 @@ describe("OAuthQuotaSnapshotSchema — usageLimitedUntilMs", () => {
       },
       additionalLimits: [
         {
-          limitId: "codex_spark",
-          limitName: "GPT-5.6-Codex-Spark",
+          limitId: "codex_luna",
+          limitName: "GPT-5.6-Codex-Luna",
         },
       ],
       rateLimitReachedType: "workspace_member_usage_limit_reached",
@@ -110,7 +110,7 @@ describe("OAuthQuotaSnapshotSchema — usageLimitedUntilMs", () => {
     expect(parsed.credits?.balance).toBe("9.99");
     expect(parsed.resetCreditDetails?.[0]?.resetType).toBe("codexRateLimits");
     expect(parsed.individualLimit?.remainingPercent).toBe(68);
-    expect(parsed.additionalLimits?.[0]?.limitId).toBe("codex_spark");
+    expect(parsed.additionalLimits?.[0]?.limitId).toBe("codex_luna");
     expect(parsed.rateLimitReachedType).toBe("workspace_member_usage_limit_reached");
   });
 
@@ -204,8 +204,8 @@ describe("CodexOAuthUsageSchema — Codex CLI quota fields", () => {
       },
       additional_rate_limits: [
         {
-          limit_name: "GPT-5.6-Codex-Spark",
-          metered_feature: "codex_spark",
+          limit_name: "GPT-5.6-Codex-Luna",
+          metered_feature: "codex_luna",
           rate_limit: {
             primary_window: {
               used_percent: 88,
@@ -231,8 +231,8 @@ describe("CodexOAuthUsageSchema — Codex CLI quota fields", () => {
     });
     expect(parsed.rate_limit_reached_type?.type).toBe("workspace_member_usage_limit_reached");
     expect(parsed.additional_rate_limits?.[0]).toMatchObject({
-      limit_name: "GPT-5.6-Codex-Spark",
-      metered_feature: "codex_spark",
+      limit_name: "GPT-5.6-Codex-Luna",
+      metered_feature: "codex_luna",
     });
   });
 });

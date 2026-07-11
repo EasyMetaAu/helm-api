@@ -379,6 +379,28 @@
     return number === 0 ? null : number.toFixed(2);
   }
 
+  function isRetiredCodexLimit(
+    limitId: string | undefined,
+    limitName: string | null | undefined,
+  ): boolean {
+    if (limitId?.trim().toLowerCase() === 'codex_spark') return true;
+    const normalizedName = limitName?.trim().toLowerCase().replaceAll('_', '-');
+    return normalizedName?.endsWith('-codex-spark') === true;
+  }
+
+  function activeCodexQuota(quota: OAuthQuotaSnapshot | undefined): OAuthQuotaSnapshot | undefined {
+    if (!quota) return undefined;
+    return {
+      ...quota,
+      windows: quota.windows.filter(
+        (window) => !isRetiredCodexLimit(window.limitId, window.limitName),
+      ),
+      additionalLimits: quota.additionalLimits?.filter(
+        (limit) => !isRetiredCodexLimit(limit.limitId, limit.limitName),
+      ),
+    };
+  }
+
   function additionalLimitNames(q: OAuthQuotaSnapshot | undefined): string[] {
     if (!q?.additionalLimits?.length) return [];
     const representedIds = new Set(q.windows.map((window) => window.limitId).filter(Boolean));
@@ -720,9 +742,9 @@
           {#each rows as row (keyOf(row.provider.id, row.account.account))}
             {@const k = keyOf(row.provider.id, row.account.account)}
             {@const usage = usageByKey.get(k)}
-            {@const quota = quotaByKey.get(k)}
-            {@const saving = savingSchedule[k] === true}
             {@const isCodex = row.provider.id === 'openai-codex'}
+            {@const quota = isCodex ? activeCodexQuota(quotaByKey.get(k)) : quotaByKey.get(k)}
+            {@const saving = savingSchedule[k] === true}
             {@const supportsFast =
               row.provider.id === 'anthropic' || row.provider.id === 'openai-codex'}
             {@const codexCredits = isCodex ? (quota?.resetCredits ?? null) : null}
@@ -833,7 +855,7 @@
                 {/if}
               </td>
 
-              <!-- Effective routable models (network-free; pills capped +N) -->
+              <!-- Account models (manual allowlist or auto discovery; pills capped +N) -->
               <td data-label={$t('Models')} class="px-3 py-3">
                 {#if row.account.models.length > 0}
                   {@const shown = row.account.models.slice(0, MODELS_SHOWN)}
@@ -875,7 +897,7 @@
                     {#each quota.windows as w (w.key)}
                       <div>
                         <div class="flex items-center justify-between gap-1 text-xs text-ink-muted">
-                          <span class="text-[9px]">{quotaWindowLabel(w)}</span>
+                          <span>{quotaWindowLabel(w)}</span>
                           <span class="shrink-0">{Math.round(w.usedPercent)}%</span>
                         </div>
                         <div class="progress-track">

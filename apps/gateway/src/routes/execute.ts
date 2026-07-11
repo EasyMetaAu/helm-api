@@ -1323,6 +1323,33 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     let capabilityPruned = false;
     let attemptedAny = false;
     let circuitSkipped = false;
+    // A terminal context error is actionable only when every other candidate was
+    // rejected for context/capability reasons. Availability and provider failures
+    // keep the existing retryable aggregate instead of falsely telling the client
+    // that compaction is guaranteed to fix the request.
+    let onlyContextOrCapabilitySkips = true;
+    let contextOverflow:
+      | {
+          message: string;
+          providerRaw: Record<string, unknown> | null;
+        }
+      | undefined;
+    const rememberContextOverflow = (
+      message: string,
+      providerRaw: Record<string, unknown> | null,
+    ): void => {
+      if (contextOverflow === undefined) {
+        contextOverflow = { message, providerRaw };
+        return;
+      }
+      const compactionPattern = /prompt is too long[^0-9]*\d+\s*tokens?\s*>\s*\d+/i;
+      if (!compactionPattern.test(contextOverflow.message) && compactionPattern.test(message)) {
+        contextOverflow.message = message;
+      }
+      if (contextOverflow.providerRaw === null && providerRaw !== null) {
+        contextOverflow.providerRaw = providerRaw;
+      }
+    };
 
     // Request-level modality detection (audio/video/document) — computed once and
     // applied to every candidate's capability gate (P7 capability-aware routing).
@@ -1360,6 +1387,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       });
       const { provider, providerModel } = target;
       if (!provider) {
+        onlyContextOrCapabilitySkips = false;
         attempts.push(skipRow(alias, "provider_unavailable", elapsed()));
         continue;
       }
@@ -1373,6 +1401,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       const gate = breaker.canAttempt(alias);
       if (!gate.allow) {
         circuitSkipped = true;
+        onlyContextOrCapabilitySkips = false;
         attempts.push(skipRow(alias, gate.reason ?? "circuit_open", elapsed()));
         continue;
       }
@@ -1382,12 +1411,19 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       // cached context handle, not an optional affinity hint.
       const catalogEntry = catalog.get(alias);
       const caps = catalogEntry?.capabilities;
+      const exactContextLimit = effectiveContextLimit(catalogEntry, providerModel);
+      const canUseExactContextPreflight =
+        target.targetProviderProtocol === "anthropic_messages" &&
+        req.native_request !== undefined &&
+        provider.countTokens !== undefined &&
+        exactContextLimit !== null;
       if (!caps && needsCachedContent) {
         capabilityPruned = true;
         attempts.push(skipRow(alias, "no_cached_content_support", elapsed()));
         continue;
       }
       if (caps) {
+        const estimatedPromptTokens = approxPromptTokens(req);
         const verdict = checkCapability(caps, {
           needsTools: Array.isArray(req.tools) && req.tools.length > 0,
           needsJson: isJson(req.response_format),
@@ -1396,7 +1432,10 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             (Array.isArray(req.attachments) && req.attachments.length > 0) || reqModalities.image,
           needsStreaming: req.stream,
           needsCachedContent,
-          estimatedPromptTokens: approxPromptTokens(req),
+          // Prefer Anthropic's exact native count when available. Passing zero only
+          // defers the approximate input gate; max_tokens and every other capability
+          // check still run here.
+          estimatedPromptTokens: canUseExactContextPreflight ? 0 : estimatedPromptTokens,
           maxTokens: req.max_tokens,
           needsAudio: reqModalities.audio,
           needsVideo: reqModalities.video,
@@ -1404,6 +1443,16 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         });
         if (!verdict.ok) {
           capabilityPruned = true;
+          if (verdict.skipReason === "context_too_small") {
+            const limit = exactContextLimit ?? caps.maxContextTokens;
+            const estimatedTotal = estimatedPromptTokens + (req.max_tokens ?? 0);
+            rememberContextOverflow(
+              `prompt is too long: ${Math.trunc(estimatedTotal)} tokens > ${Math.trunc(
+                limit,
+              )} maximum`,
+              null,
+            );
+          }
           attempts.push(skipRow(alias, verdict.skipReason ?? "capability", elapsed()));
           continue;
         }
@@ -1469,7 +1518,6 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           : optimizedNativeBody;
       };
 
-      const exactContextLimit = effectiveContextLimit(catalogEntry, providerModel);
       if (
         target.targetProviderProtocol === "anthropic_messages" &&
         req.native_request !== undefined &&
@@ -1494,6 +1542,12 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           const inputTokens = countTokensInputTokens(tokenCount);
           if (inputTokens !== null && inputTokens > exactContextLimit) {
             capabilityPruned = true;
+            rememberContextOverflow(
+              `prompt is too long: ${Math.trunc(inputTokens)} tokens > ${Math.trunc(
+                exactContextLimit,
+              )} maximum`,
+              null,
+            );
             attempts.push(skipRow(alias, "context_too_small", elapsed()));
             continue;
           }
@@ -1828,6 +1882,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         // throttling is not a provider-health signal). Distinct log field from
         // execution-fallback: skip_reason 'free_429', error_class 'rate_limited'.
         if (isFreeAlias(alias) && upstreamStatusOf(err) === 429) {
+          onlyContextOrCapabilitySkips = false;
           attempts.push({
             alias,
             skipped: true,
@@ -1848,6 +1903,11 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         // error row, and no execution-fallback count.
         if (isContextWindowRejection(err)) {
           capabilityPruned = true;
+          const detail = errorDetailOf(err);
+          rememberContextOverflow(
+            upstreamErrorMessage(detail.provider_raw) ?? detail.message,
+            detail.provider_raw,
+          );
           attempts.push({
             alias,
             skipped: true,
@@ -1856,7 +1916,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             error_class: null,
             latency_ms: elapsed(),
             cost_usd: null,
-            error_detail: null,
+            error_detail: detail,
             ...attemptTelemetry,
           });
           continue;
@@ -1924,6 +1984,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         if (!(isOAuthSubscriptionAlias(alias) && isAccountScopedFault(err))) {
           breaker.recordFailure(alias);
         }
+        onlyContextOrCapabilitySkips = false;
         // Auto-park a subscription account that hit its rate/usage limit. A genuine
         // (non-`:free`, handled above) 429 on an OAuth alias means the served account
         // is throttled — signal the gateway to park it so the pool routes around it.
@@ -1947,6 +2008,9 @@ export function createExecute(deps: ExecuteAdapterDeps) {
 
     // Chain exhausted (or empty). Pick the structured terminal error (docs/07):
     //   • empty chain                     → lane_unavailable (503)
+    //   • context overflow and every other rejection was a capability skip
+    //                                     → invalid_request (400), so native clients
+    //                                       can compact and retry
     //   • NO candidate was ever attempted AND ≥1 was capability-pruned AND none
     //     was merely circuit-open         → capability_unsatisfiable (422): the
     //     request's hard constraints (json/vision/tools/context) could not be met
@@ -1954,12 +2018,26 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     //     (retryable), so its presence keeps us on all_providers_failed.
     //   • otherwise                       → all_providers_failed (502): at least
     //     one candidate was attempted and failed, or skips were transient.
-    let errorClass: "lane_unavailable" | "capability_unsatisfiable" | "all_providers_failed";
+    let errorClass:
+      | "invalid_request"
+      | "lane_unavailable"
+      | "capability_unsatisfiable"
+      | "all_providers_failed";
     let message: string;
+    let providerRaw: Record<string, unknown> | null = null;
     if (plan.candidate_chain.length === 0) {
       errorClass = "lane_unavailable";
       message = "lane has no candidates";
-    } else if (!attemptedAny && capabilityPruned && !circuitSkipped) {
+    } else if (contextOverflow !== undefined && onlyContextOrCapabilitySkips) {
+      errorClass = "invalid_request";
+      message = contextOverflow.message;
+      providerRaw = contextOverflow.providerRaw;
+    } else if (
+      !attemptedAny &&
+      capabilityPruned &&
+      !circuitSkipped &&
+      onlyContextOrCapabilitySkips
+    ) {
       errorClass = "capability_unsatisfiable";
       message = "no candidate satisfies the request's capability constraints";
     } else {
@@ -1970,7 +2048,12 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       attempts,
       final: {
         status: "error",
-        error: makeHelmError({ error_class: errorClass, message, trace_id: req.request_id }),
+        error: makeHelmError({
+          error_class: errorClass,
+          message,
+          trace_id: req.request_id,
+          provider_raw: providerRaw,
+        }),
       },
       body: null,
       stream: null,

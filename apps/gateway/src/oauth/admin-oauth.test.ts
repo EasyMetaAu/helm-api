@@ -447,7 +447,7 @@ describe("createOAuthAdmin", () => {
 
   // ── per-account model curation (Stage 1) ───────────────────────────────────
 
-  it("listModels: an UNCURATED account reports enabled = all available (curated provider)", async () => {
+  it("listModels: an unconfigured auto account enables every live-discovered model", async () => {
     const { tokens, config } = makeStores();
     // A stored Anthropic credential whose access token refresh succeeds.
     await tokens.upsert({
@@ -459,13 +459,28 @@ describe("createOAuthAdmin", () => {
       meta: null,
       updatedAt: 1,
     });
+    vi.stubGlobal(
+      "fetch",
+      routeFetch([
+        [
+          /api\.anthropic\.com\/v1\/models/,
+          () =>
+            json({
+              data: [
+                { id: "claude-opus-4-8" },
+                { id: "claude-sonnet-4-7" },
+                { id: "claude-haiku-4-6" },
+              ],
+            }),
+        ],
+      ]),
+    );
     const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
     const { available, enabled, canPull } = await admin.listModels({
       providerId: "anthropic",
       account: "default",
     });
-    // Anthropic is a curated provider → available is the curated set.
-    expect(available).toEqual(["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"]);
+    expect(available).toEqual(["claude-haiku-4-6", "claude-opus-4-8", "claude-sonnet-4-7"]);
     // Unset settings ⇒ everything is enabled.
     expect(enabled).toEqual(available);
     // Anthropic has a live list-models API → the UI may offer "pull from provider".
@@ -583,6 +598,68 @@ describe("createOAuthAdmin", () => {
     expect(account?.models).toEqual(["gpt-5.6", "codex-auto-review"]);
   });
 
+  it("listStatus: auto mode reports the account's live-discovered models", async () => {
+    const { tokens, config } = makeStores();
+    await tokens.upsert({
+      providerId: "anthropic",
+      account: "default",
+      accessEnc: encryptSecret("AT", KEY),
+      refreshEnc: encryptSecret("RT", KEY),
+      expiresAt: Date.now() + 3_600_000,
+      meta: null,
+      updatedAt: 1,
+    });
+    const fetchMock = routeFetch([
+      [
+        /api\.anthropic\.com\/v1\/models/,
+        () =>
+          json({
+            data: [{ id: "claude-fable-5" }, { id: "claude-sonnet-4-7" }],
+          }),
+      ],
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
+
+    const account = (await admin.listStatus()).providers
+      .find((provider) => provider.id === "anthropic")
+      ?.accounts.find((candidate) => candidate.account === "default");
+
+    expect(account?.models).toEqual(["claude-fable-5", "claude-sonnet-4-7"]);
+    await expect(
+      admin.listModels({ providerId: "anthropic", account: "default" }),
+    ).resolves.toMatchObject({
+      available: ["claude-fable-5", "claude-sonnet-4-7"],
+      enabled: ["claude-fable-5", "claude-sonnet-4-7"],
+    });
+    await admin.listStatus();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("listStatus: auto discovery failure stays empty instead of showing curated defaults", async () => {
+    const { tokens, config } = makeStores();
+    await tokens.upsert({
+      providerId: "anthropic",
+      account: "default",
+      accessEnc: encryptSecret("AT", KEY),
+      refreshEnc: encryptSecret("RT", KEY),
+      expiresAt: Date.now() + 3_600_000,
+      meta: null,
+      updatedAt: 1,
+    });
+    vi.stubGlobal(
+      "fetch",
+      routeFetch([[/api\.anthropic\.com\/v1\/models/, () => json({ error: "unavailable" }, 503)]]),
+    );
+    const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
+
+    const account = (await admin.listStatus()).providers
+      .find((provider) => provider.id === "anthropic")
+      ?.accounts.find((candidate) => candidate.account === "default");
+
+    expect(account?.models).toEqual([]);
+  });
+
   it("setEnabledModels persists a subset; listModels then returns it as `enabled`", async () => {
     const { tokens, config } = makeStores();
     await tokens.upsert({
@@ -594,6 +671,15 @@ describe("createOAuthAdmin", () => {
       meta: null,
       updatedAt: 1,
     });
+    vi.stubGlobal(
+      "fetch",
+      routeFetch([
+        [
+          /api\.anthropic\.com\/v1\/models/,
+          () => json({ data: [{ id: "claude-opus-4-6" }, { id: "claude-sonnet-4-7" }] }),
+        ],
+      ]),
+    );
     const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
     await admin.setEnabledModels({
       providerId: "anthropic",
@@ -818,7 +904,7 @@ describe("createOAuthAdmin", () => {
     });
   });
 
-  it("listStatus surfaces each account's redacted proxy + effective models (network-free)", async () => {
+  it("listStatus surfaces each account's redacted proxy + mode-derived models", async () => {
     const { tokens, config } = makeStores();
     let seq = 0;
     const admin = createOAuthAdmin({
@@ -831,6 +917,10 @@ describe("createOAuthAdmin", () => {
       "fetch",
       routeFetch([
         [/oauth\/token/, () => json({ access_token: "AT", refresh_token: "RT", expires_in: 3600 })],
+        [
+          /api\.anthropic\.com\/v1\/models/,
+          () => json({ data: [{ id: "claude-fable-5" }, { id: "claude-sonnet-4-7" }] }),
+        ],
       ]),
     );
     for (const account of ["proxied", "bare"]) {
@@ -842,8 +932,8 @@ describe("createOAuthAdmin", () => {
         account,
       });
     }
-    // One account pins a proxy (with a password) + a curated model subset; the other
-    // is left untouched (direct connection, curated-fallback models).
+    // One account pins a proxy (with a password) + a manual model subset; the other
+    // is left untouched in auto mode.
     await admin.setAccountProxy({
       providerId: "anthropic",
       account: "proxied",
@@ -872,9 +962,9 @@ describe("createOAuthAdmin", () => {
     expect(proxied?.models).toEqual(["claude-opus-4-6"]);
 
     const bare = accts.find((a) => a.account === "bare");
-    // No proxy configured → null (direct connection); models fall back to curated.
+    // No proxy configured → null (direct connection); auto mode uses live discovery.
     expect(bare?.proxy).toBeNull();
-    expect(bare?.models).toEqual(["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"]);
+    expect(bare?.models).toEqual(["claude-fable-5", "claude-sonnet-4-7"]);
   });
 
   // ── per-account pool scheduling (Stage 3) ──────────────────────────────────
@@ -1396,8 +1486,8 @@ describe("createOAuthAdmin > codex reset credit", () => {
           },
           additional_rate_limits: [
             {
-              limit_name: "GPT-5.6-Codex-Spark",
-              metered_feature: "codex_spark",
+              limit_name: "GPT-5.6-Codex-Luna",
+              metered_feature: "codex_luna",
               rate_limit: { primary_window: { used_percent: 88 } },
             },
           ],
@@ -1424,7 +1514,7 @@ describe("createOAuthAdmin > codex reset credit", () => {
     const first = await fetchQuota({ account: "default" });
     expect(first?.windows.map((w) => `${w.key}:${w.usedPercent}`)).toEqual([
       "primary:6",
-      "codex_spark-primary:88",
+      "codex_luna-primary:88",
     ]);
     expect(first?.resetCredits).toBe(2);
     expect(first).toMatchObject({

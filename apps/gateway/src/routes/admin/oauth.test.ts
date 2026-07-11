@@ -1,3 +1,4 @@
+import type { OAuthQuotaWindow } from "@helm/shared";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../../app.js";
@@ -521,7 +522,7 @@ describe("admin OAuth routes — read endpoints", () => {
   });
 
   it("GET /oauth/quota folds the complete live Codex subscription metadata onto its snapshot", async () => {
-    const window = {
+    const sparkWindow = {
       key: "codex_spark-primary",
       usedPercent: 40,
       resetsAtMs: null,
@@ -529,12 +530,20 @@ describe("admin OAuth routes — read endpoints", () => {
       limitId: "codex_spark",
       limitName: "GPT-5.6-Codex-Spark",
     };
+    const lunaWindow = {
+      key: "codex_luna-primary",
+      usedPercent: 30,
+      resetsAtMs: null,
+      windowMinutes: 300,
+      limitId: "codex_luna",
+      limitName: "GPT-5.6-Codex-Luna",
+    };
     const oauthQuota = {
       getAll: vi.fn(async () => [
         {
           providerId: "openai-codex",
           account: "default",
-          windows: [window],
+          windows: [sparkWindow, lunaWindow],
           capturedAt: 1,
           source: "codex",
         },
@@ -563,7 +572,7 @@ describe("admin OAuth routes — read endpoints", () => {
         ],
       })) as never,
       fetchCodexQuota: vi.fn(async () => ({
-        windows: [window],
+        windows: [sparkWindow, lunaWindow],
         resetCredits: 3,
         resetCreditDetails: [
           {
@@ -624,17 +633,19 @@ describe("admin OAuth routes — read endpoints", () => {
       used: "8000",
       remainingPercent: 68,
     });
-    expect(body.quota[0]?.windows[0]).toMatchObject({
-      limitId: "codex_spark",
-      limitName: "GPT-5.6-Codex-Spark",
-    });
+    expect(body.quota[0]?.windows).toEqual([
+      expect.objectContaining({
+        limitId: "codex_luna",
+        limitName: "GPT-5.6-Codex-Luna",
+      }),
+    ]);
     expect(body.quota[0]?.planType).toBe("pro");
     expect(body.quota[0]?.rateLimitReachedType).toBe("rate_limit_reached");
     expect(upsert).toHaveBeenCalledWith(expect.objectContaining({ resetCredits: 3 }));
     expect(applyQuotaSnapshot).toHaveBeenCalledWith(
       "openai-codex",
       "default",
-      [window],
+      [lunaWindow],
       expect.any(Number),
       3,
     );
@@ -656,7 +667,10 @@ describe("admin OAuth routes — read endpoints", () => {
       })) as never,
       fetchCodexQuota: vi.fn(async () => ({
         windows: [],
-        additionalLimits: [{ limitId: "codex_spark", limitName: "GPT-5.6-Codex-Spark" }],
+        additionalLimits: [
+          { limitId: "codex_spark", limitName: "GPT-5.6-Codex-Spark" },
+          { limitId: "codex_terra", limitName: "GPT-5.6-Codex-Terra" },
+        ],
         resetCredits: 2,
         resetCreditDetails: [],
         credits: { hasCredits: true, unlimited: false, balance: "4.50" },
@@ -694,7 +708,7 @@ describe("admin OAuth routes — read endpoints", () => {
     expect(body.quota).toEqual([
       expect.objectContaining({
         windows: [],
-        additionalLimits: [{ limitId: "codex_spark", limitName: "GPT-5.6-Codex-Spark" }],
+        additionalLimits: [{ limitId: "codex_terra", limitName: "GPT-5.6-Codex-Terra" }],
         resetCredits: 2,
         credits: { hasCredits: true, unlimited: false, balance: "4.50" },
         individualLimit: expect.objectContaining({ limit: "25000" }),
@@ -727,7 +741,7 @@ describe("admin OAuth routes — read endpoints", () => {
 });
 
 describe("admin OAuth routes — reset credit", () => {
-  const codexWindows = (weeklyUsedPercent = 90) => [
+  const codexWindows = (weeklyUsedPercent = 90): OAuthQuotaWindow[] => [
     {
       key: "secondary",
       usedPercent: weeklyUsedPercent,
@@ -735,7 +749,7 @@ describe("admin OAuth routes — reset credit", () => {
       windowMinutes: 10_080,
     },
   ];
-  const quotaStore = (windows = codexWindows()): AdminApiDeps["oauthQuota"] =>
+  const quotaStore = (windows: OAuthQuotaWindow[] = codexWindows()): AdminApiDeps["oauthQuota"] =>
     ({
       get: vi.fn(async (providerId: string, account: string) => ({
         providerId,
@@ -799,6 +813,85 @@ describe("admin OAuth routes — reset credit", () => {
     expect((await res.json()) as { code: string }).toMatchObject({ code: "quota_unavailable" });
     expect(guard.reserve).not.toHaveBeenCalled();
     expect(consume).not.toHaveBeenCalled();
+  });
+
+  it("409 treats a stale Spark-only quota snapshot as unavailable", async () => {
+    const consume = vi.fn(async () => ({ code: "ok", windowsReset: 2 }));
+    const guard = allowResetCredit();
+    const seam = fullSeam({ consumeCodexResetCredit: consume as never });
+    const res = await app({
+      oauth: seam,
+      oauthQuota: quotaStore([
+        {
+          key: "codex_spark-primary",
+          usedPercent: 100,
+          resetsAtMs: Date.now() + 86_400_000,
+          windowMinutes: 10_080,
+          limitId: "codex_spark",
+          limitName: "GPT-5.3-Codex-Spark",
+        },
+      ]),
+      resetCreditGuard: guard,
+    }).request("/admin/api/oauth/openai-codex/reset-credit", {
+      method: "POST",
+      headers: JSONH,
+      body: "{}",
+    });
+
+    expect(res.status).toBe(409);
+    expect((await res.json()) as { code: string }).toMatchObject({ code: "quota_unavailable" });
+    expect(guard.reserve).not.toHaveBeenCalled();
+    expect(consume).not.toHaveBeenCalled();
+  });
+
+  it("falls back to live quota when the persisted snapshot only contains retired Spark limits", async () => {
+    const consume = vi.fn(async () => ({
+      code: "reset",
+      outcome: "reset",
+      windowsReset: 1,
+      redeemRequestId: "guard-idem-1",
+    }));
+    const guard = allowResetCredit();
+    const liveWindows = codexWindows(100);
+    const seam = fullSeam({
+      fetchCodexQuota: vi.fn(async () => ({
+        windows: liveWindows,
+        resetCredits: 1,
+        resetCreditDetails: [],
+        credits: null,
+        individualLimit: null,
+        planType: "pro",
+        rateLimitReachedType: "rate_limit_reached",
+      })) as never,
+      consumeCodexResetCredit: consume as never,
+    });
+    const res = await app({
+      oauth: seam,
+      oauthQuota: quotaStore([
+        {
+          key: "codex_spark-primary",
+          usedPercent: 100,
+          resetsAtMs: Date.now() + 86_400_000,
+          windowMinutes: 10_080,
+          limitId: "codex_spark",
+          limitName: "GPT-5.3-Codex-Spark",
+        },
+      ]),
+      resetCreditGuard: guard,
+    }).request("/admin/api/oauth/openai-codex/reset-credit", {
+      method: "POST",
+      headers: JSONH,
+      body: "{}",
+    });
+
+    expect(res.status).toBe(200);
+    expect(guard.reserve).toHaveBeenCalledWith(
+      expect.objectContaining({
+        windows: liveWindows,
+        rateLimitReachedType: "rate_limit_reached",
+      }),
+    );
+    expect(consume).toHaveBeenCalledOnce();
   });
 
   it("409 blocks reset-credit consumption when weekly usage is below 90%", async () => {
