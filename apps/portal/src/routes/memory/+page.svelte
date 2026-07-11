@@ -188,8 +188,10 @@
       <h1 class="page-title">{$t("Memory")}</h1>
       <button
         type="button"
-        class="btn-icon"
+        class="btn-help"
+        class:btn-help-open={showInfo}
         aria-label={$t("What is memory?")}
+        aria-expanded={showInfo}
         title={$t("What is memory?")}
         onclick={() => (showInfo = !showInfo)}
       >
