@@ -45,9 +45,7 @@ export interface OAuthAccount {
   // shows which proxy each account tunnels through without the per-account GET the
   // Manage dialog uses.
   proxy: AccountProxyView | null;
-  // The effective routable models for this account (network-free): the operator's
-  // curated subset, else the provider's curated default. The SAME set the Lanes
-  // catalog exposes, so the list never claims a model that won't route.
+  // Manual mode shows the saved allowlist; auto mode shows account discovery.
   models: string[];
 }
 
@@ -371,9 +369,9 @@ export async function* streamAccountTest(
 
 export type AccountModelsMode = 'auto' | 'manual';
 
-// The discovered models for one account + the operator's exposed subset.
-// `available` is the live/curated discovery; `enabled` is what reaches Lanes
-// (unset settings ⇒ all available).
+// The discovered models for one account + its management projection.
+// `available` is exact account discovery; `enabled` is the saved manual allowlist
+// or that exact discovery in auto mode.
 export interface AccountModels {
   available: string[];
   enabled: string[];

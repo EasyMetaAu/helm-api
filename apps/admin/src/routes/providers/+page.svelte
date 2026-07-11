@@ -833,7 +833,7 @@
                 {/if}
               </td>
 
-              <!-- Effective routable models (network-free; pills capped +N) -->
+              <!-- Account models (manual allowlist or auto discovery; pills capped +N) -->
               <td data-label={$t('Models')} class="px-3 py-3">
                 {#if row.account.models.length > 0}
                   {@const shown = row.account.models.slice(0, MODELS_SHOWN)}

@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { setAccountSettings } from "./oauth/account-settings.js";
 import { createCodexModelCache } from "./oauth/codex-model-cache.js";
 import { createCodexModelCatalog } from "./oauth/codex-model-catalog.js";
+import { createOAuthModelDiscoveryCache } from "./oauth/model-discovery-cache.js";
 import { markServingAccount } from "./runtime/serving-account.js";
 import {
   buildCredential,
@@ -503,6 +504,84 @@ function codexJwt(payload: Record<string, unknown>): string {
 
 describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
   const noop = () => {};
+
+  it("does not discover non-Codex models when manual mode is authoritative", async () => {
+    const { ctx, config } = oauthStores();
+    await seedAnthropic(ctx, "manual");
+    await setAccountSettings(config, ENC_KEY, "anthropic", "manual", {
+      modelsMode: "manual",
+      enabledModels: ["claude-custom"],
+    });
+    const modelsFetch = vi.spyOn(globalThis, "fetch");
+
+    const result = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+    );
+
+    expect(result.providers[0]?.models.map((model) => model.alias)).toEqual([
+      "anthropic/claude-custom",
+    ]);
+    expect(modelsFetch).not.toHaveBeenCalled();
+  });
+
+  it("reuses account discovery across pool synthesis with a shared cache", async () => {
+    const { ctx, config } = oauthStores();
+    await seedAnthropic(ctx, "auto");
+    await setAccountSettings(config, ENC_KEY, "anthropic", "auto", {
+      modelsMode: "auto",
+    });
+    const modelsFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ data: [{ id: "claude-fable-5" }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const discoveryCache = createOAuthModelDiscoveryCache();
+
+    const first = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      discoveryCache,
+    );
+    const second = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      discoveryCache,
+    );
+
+    expect(first.providers[0]?.models.map((model) => model.alias)).toEqual([
+      "anthropic/claude-fable-5",
+    ]);
+    expect(second.providers[0]?.models.map((model) => model.alias)).toEqual([
+      "anthropic/claude-fable-5",
+    ]);
+    expect(modelsFetch).toHaveBeenCalledOnce();
+  });
 
   it("pools MULTIPLE accounts into one provider exposing the UNION of enabled models", async () => {
     const { ctx, config } = oauthStores();

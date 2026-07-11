@@ -113,6 +113,18 @@ describe("discoverOAuthModels", () => {
     expect(await discoverOAuthModels("anthropic", "bad")).toEqual(CURATED_OAUTH_MODELS.anthropic);
   });
 
+  it("can preserve exact account discovery without curated fallback", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ error: "unavailable" }, 503)),
+    );
+    expect(
+      await discoverOAuthModels("anthropic", "bad", fetch, {
+        fallbackToCurated: false,
+      }),
+    ).toEqual([]);
+  });
+
   it("returns [] for an unknown provider", async () => {
     expect(await discoverOAuthModels("mystery", undefined)).toEqual([]);
   });

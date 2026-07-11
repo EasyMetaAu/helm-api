@@ -52,6 +52,7 @@ export {
   buildOpenAICodexUserAgent,
   CURATED_OAUTH_MODELS,
   DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
+  type DiscoverOAuthModelsOptions,
   discoverOAuthModels,
   expandOpenAICodexModelAliases,
   hasLiveModelDiscovery,

@@ -127,11 +127,8 @@ export interface OAuthAdminStatus {
     // SAME already-loaded settings blob as priority/schedulable, so the providers page
     // shows "which proxy" without the per-account GET the Manage dialog uses.
     proxy: AccountProxyView | null;
-    // The effective routable models for this account (network-FREE): the operator's
-    // curated `enabledModels` verbatim, else the provider's curated fallback. Mirrors
-    // exactly what synthesizeOAuthProviders exposes to Lanes, so the list never claims
-    // a model that won't route. Live discovery (Copilot /models) stays in the Manage
-    // dialog — never on this hot-ish page load (principle 1: no network fan-out here).
+    // Models shown for this account: the saved allowlist in manual mode, or the
+    // account-scoped discovery result in auto mode. Discovery fails open to [].
     models: string[];
   }>;
 }
@@ -176,16 +173,16 @@ export interface OAuthAdminAccess {
   // Remove a stored credential (admin "log out").
   logout(input: { providerId: string; account: string }): Promise<void>;
   // Per-account model curation: which discovered models are exposed to Lanes.
-  // `available` is the live/curated discovery for the account's current token
-  // (fail-open to [] when discovery fails); `enabled` is the operator's chosen
-  // subset (unset settings = ALL available, so a never-curated account exposes
-  // everything). Only the `enabled` models become routable `<provider>/<model>`
-  // aliases (server.ts synthesizeOAuthProviders applies the same filter).
+  // `available` is the exact discovery for the account's current token (fail-open
+  // to [] when discovery fails); `enabled` is the operator's chosen
+  // subset (unset settings = ALL available). Runtime composition follows the same
+  // account discovery when healthy, but separately retains its curated fail-open
+  // safety net when upstream discovery is unavailable.
   listModels(input: {
     providerId: string;
     account: string;
     // `canPull` = the provider has a live list-models API, so a "pull from
-    // provider" action is meaningful (false for curated-only providers e.g. Codex).
+    // provider" action is meaningful.
   }): Promise<{
     available: string[];
     enabled: string[];

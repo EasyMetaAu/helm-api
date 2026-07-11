@@ -49,6 +49,7 @@ import type {
   OAuthAdminStatusResponse,
 } from "../routes/admin/deps.js";
 import {
+  type AccountSettings,
   clearAccountCredentialFailure,
   clearAccountSettings,
   getAccountSettings,
@@ -65,7 +66,10 @@ import {
   isPermanentOAuthCredentialFailure,
   oauthCredentialFailureReason,
 } from "./credential-failure.js";
-import { effectiveAccountModels } from "./effective-models.js";
+import {
+  createOAuthModelDiscoveryCache,
+  type OAuthModelDiscoveryCache,
+} from "./model-discovery-cache.js";
 
 // Admin OAuth-login orchestration (issue #38) — the implementation behind the
 // OAuthAdminAccess seam the /admin/api/oauth routes call. Owns the ephemeral
@@ -255,6 +259,7 @@ export interface OAuthAdminDeps {
   codexCatalog?: CodexModelCatalog;
   codexClientVersion?: string;
   codexUserAgent?: string;
+  modelDiscoveryCache?: OAuthModelDiscoveryCache;
 }
 
 // Split a credential into store fields. `meta` carries every key beyond the
@@ -358,6 +363,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
   // flow — begin/complete/poll + token-manager refresh + quota — egresses alike.
   const makeFetch =
     deps.makeFetch ?? ((proxy?: ProxyConfig) => (proxy ? makeProxyFetch(proxy) : fetch));
+  const modelDiscoveryCache = deps.modelDiscoveryCache ?? createOAuthModelDiscoveryCache({ now });
   // Normalize + fail-closed-validate a connect-dialog proxy into a ProxyConfig held
   // for the whole login (issue #38). Mirrors setAccountProxy's field handling so the
   // shape persisted at bind matches a later Manage-dialog edit. Throws on a malformed
@@ -444,6 +450,88 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     }
   }
 
+  async function discoverAccountModels(
+    providerId: string,
+    account: string,
+    settings: AccountSettings,
+  ): Promise<{ available: string[]; entitled: string[] }> {
+    const provider = getOAuthProvider(providerId);
+    if (!provider) return { available: [], entitled: [] };
+    if (providerId !== CODEX) {
+      const available = await modelDiscoveryCache.load({ providerId, account }, async () => {
+        const accountFetch = makeFetch(settings.proxy as ProxyConfig | undefined);
+        const tm = createTokenManager({
+          oauth: { kind: "preset", providerId, account },
+          tokenStore: deps.store,
+          encKey: deps.encKey,
+          oauthProvider: provider,
+          fetch: accountFetch,
+          now,
+        });
+        const accessToken = (await tm.getAuthHeader()).replace(/^Bearer /, "");
+        return discoverOAuthModels(providerId, accessToken, accountFetch, {
+          fallbackToCurated: false,
+        });
+      });
+      return { available, entitled: available };
+    }
+    try {
+      const accountFetch = makeFetch(settings.proxy as ProxyConfig | undefined);
+      const tm = createTokenManager({
+        oauth: { kind: "preset", providerId, account },
+        tokenStore: deps.store,
+        encKey: deps.encKey,
+        oauthProvider: provider,
+        fetch: accountFetch,
+        now,
+      });
+      const accessToken = (await tm.getAuthHeader()).replace(/^Bearer /, "");
+      if (providerId === CODEX && deps.codexCatalog) {
+        const clientVersion = deps.codexClientVersion ?? DEFAULT_OPENAI_CODEX_CLIENT_VERSION;
+        const userAgent = deps.codexUserAgent ?? buildOpenAICodexUserAgent(clientVersion);
+        const identity = mergeCodexIdentity(accessToken, tm.currentMetadata());
+        const key: CodexModelCacheKey = {
+          providerId,
+          account,
+          accountIdentity: openAICodexIdentityFingerprint(identity),
+          clientVersion,
+        };
+        const snapshot = await deps.codexCatalog.load(key, async () => {
+          const currentAccess = (await tm.getAuthHeader()).replace(/^Bearer /, "");
+          const currentIdentity = mergeCodexIdentity(currentAccess, tm.currentMetadata());
+          return listOpenAICodexModels(currentAccess, {
+            accountId: currentIdentity.accountId,
+            isFedramp: currentIdentity.isFedramp,
+            clientVersion,
+            userAgent,
+            fetchImpl: accountFetch,
+          });
+        });
+        if (!snapshot) return { available: [], entitled: [] };
+        const modelSets = codexModelSets(snapshot.models);
+        return { available: modelSets.visible, entitled: modelSets.entitled };
+      }
+      const available = await discoverOAuthModels(providerId, accessToken, accountFetch, {
+        fallbackToCurated: false,
+      });
+      const expanded = expandOpenAICodexModelAliases(available);
+      return { available: expanded, entitled: expanded };
+    } catch {
+      return { available: [], entitled: [] };
+    }
+  }
+
+  function enabledAccountModels(
+    providerId: string,
+    settings: AccountSettings,
+    discovered: { available: string[]; entitled: string[] },
+  ): string[] {
+    if (providerId === CODEX) return codexEffectiveModels(settings, discovered.entitled);
+    return resolveAccountModelsMode(providerId, settings) === "auto"
+      ? discovered.available
+      : (settings.enabledModels ?? []);
+  }
+
   function prune(): void {
     const cutoff = now() - SESSION_TTL_MS;
     for (const [id, s] of sessions) if (s.createdAt < cutoff) sessions.delete(id);
@@ -470,6 +558,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       meta: metaFrom(creds),
       updatedAt: now(),
     });
+    modelDiscoveryCache.invalidate({ providerId, account });
   }
 
   // Ensure a stored account's access token is fresh — the SAME lazy refresh the
@@ -556,10 +645,17 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
               }
             : await ensureFresh(r.providerId, r.account, r, sch.proxy as ProxyConfig | undefined);
           const { credentialFailed, ...freshView } = fresh;
-          const models =
-            r.providerId === CODEX
-              ? codexEffectiveModels(sch, (await codexCatalogModels(r.account))?.entitled ?? [])
-              : effectiveAccountModels(sch, r.providerId);
+          const modelsMode = resolveAccountModelsMode(r.providerId, sch);
+          const discovered =
+            modelsMode === "auto" && fresh.healthy
+              ? await discoverAccountModels(r.providerId, r.account, sch)
+              : r.providerId === CODEX
+                ? {
+                    available: [],
+                    entitled: (await codexCatalogModels(r.account))?.entitled ?? [],
+                  }
+                : { available: [], entitled: [] };
+          const models = enabledAccountModels(r.providerId, sch, discovered);
           const identity = await statusCodexIdentity(
             deps.store,
             deps.encKey,
@@ -578,11 +674,8 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
             schedulable: credentialFailed ? false : (sch.schedulable ?? true),
             autoReset: sch.autoReset ?? false,
             fastMode: sch.fastMode ?? false,
-            // Both folded from the SAME settings blob (zero extra network): the
-            // redacted egress proxy (principle 7) and the effective routable models
-            // — the SAME network-free set synthesizeOAuthProviders exposes to Lanes
-            // (operator curation verbatim, else the curated fallback). Live discovery
-            // stays in the Manage dialog; the list never fans out per account.
+            // Manual mode comes from the saved allowlist. Auto mode comes from this
+            // account's discovery result and never substitutes curated fallback ids.
             proxy: redactProxy(sch.proxy),
             models,
           };
@@ -710,6 +803,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     async logout({ providerId, account }) {
       await deps.store.delete(providerId, account);
       await clearAccountSettings(deps.config, deps.encKey, providerId, account);
+      modelDiscoveryCache.invalidate({ providerId, account });
     },
 
     async listModels({ providerId, account }) {
@@ -720,80 +814,17 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         providerId,
         account,
       );
-      const proxy = settings.proxy as ProxyConfig | undefined;
-      // Discover the account's available models. Live where an API exists
-      // (Copilot GET /models) using the account's REFRESHED access token; curated
-      // otherwise. Fail-open: any error (no credential, dead refresh, network)
-      // yields [] so the providers page never breaks on a flaky discovery.
-      let available: string[] = [];
-      let codexEntitled: string[] | undefined;
-      const provider = getOAuthProvider(providerId);
-      if (provider) {
-        try {
-          const accountFetch = makeFetch(proxy);
-          const tm = createTokenManager({
-            oauth: { kind: "preset", providerId, account },
-            tokenStore: deps.store,
-            encKey: deps.encKey,
-            oauthProvider: provider,
-            fetch: accountFetch,
-            now,
-          });
-          const accessToken = (await tm.getAuthHeader()).replace(/^Bearer /, "");
-          if (providerId === CODEX && deps.codexCatalog) {
-            const clientVersion = deps.codexClientVersion ?? DEFAULT_OPENAI_CODEX_CLIENT_VERSION;
-            const userAgent = deps.codexUserAgent ?? buildOpenAICodexUserAgent(clientVersion);
-            const identity = mergeCodexIdentity(accessToken, tm.currentMetadata());
-            const key: CodexModelCacheKey = {
-              providerId,
-              account,
-              accountIdentity: openAICodexIdentityFingerprint(identity),
-              clientVersion,
-            };
-            const snapshot = await deps.codexCatalog.load(key, async () => {
-              const currentAccess = (await tm.getAuthHeader()).replace(/^Bearer /, "");
-              const currentIdentity = mergeCodexIdentity(currentAccess, tm.currentMetadata());
-              return listOpenAICodexModels(currentAccess, {
-                accountId: currentIdentity.accountId,
-                isFedramp: currentIdentity.isFedramp,
-                clientVersion,
-                userAgent,
-                fetchImpl: accountFetch,
-              });
-            });
-            if (snapshot) {
-              const modelSets = codexModelSets(snapshot.models);
-              available = modelSets.visible;
-              codexEntitled = modelSets.entitled;
-            }
-          } else {
-            available = await discoverOAuthModels(providerId, accessToken, accountFetch);
-          }
-        } catch {
-          available = [];
-        }
-      }
-      // `available` is the live/curated discovery — only SUGGESTIONS to seed from.
-      // `enabled` is the operator's AUTHORITATIVE list (verbatim, NOT intersected),
-      // so a model the operator typed in by hand survives even when discovery is
-      // stale / missing it. UNSET ⇒ seed with all available.
+      const discovered = await discoverAccountModels(providerId, account, settings);
+      // `available` is the exact account discovery — only SUGGESTIONS to seed from.
+      // In manual mode `enabled` is the operator's AUTHORITATIVE list (verbatim,
+      // NOT intersected), so a custom id survives stale discovery. In auto mode it
+      // is the exact discovery projection; runtime composition separately retains
+      // its curated fail-open safety net.
       const modelsMode = resolveAccountModelsMode(providerId, settings);
-      let entitled = available;
-      if (providerId === CODEX) {
-        entitled = codexEntitled ?? expandOpenAICodexModelAliases(entitled);
-        available = expandOpenAICodexModelAliases(available);
-      }
-      const enabled =
-        providerId === CODEX
-          ? codexEffectiveModels(settings, entitled)
-          : modelsMode === "auto"
-            ? available
-            : (settings.enabledModels ?? []);
-      // `canPull` tells the UI whether a "pull from provider" action is meaningful:
-      // true only where a LIVE list-models API exists (Copilot, Anthropic). Codex
-      // has none — its list is curated — so the UI hides the button for it.
+      const enabled = enabledAccountModels(providerId, settings, discovered);
+      // `canPull` tells the UI whether account-scoped model refresh is meaningful.
       return {
-        available,
+        available: discovered.available,
         enabled,
         modelsMode,
         canPull: hasLiveModelDiscovery(providerId),
@@ -824,6 +855,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         await setAccountSettings(deps.config, deps.encKey, providerId, account, {
           proxy: undefined,
         });
+        modelDiscoveryCache.invalidate({ providerId, account });
         return;
       }
       // An OMITTED password on an update preserves the stored one (so the operator
@@ -845,6 +877,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       // Fail-closed (principle 2): reject a malformed proxy here, never persist it.
       validateProxyConfig(next);
       await setAccountSettings(deps.config, deps.encKey, providerId, account, { proxy: next });
+      modelDiscoveryCache.invalidate({ providerId, account });
     },
 
     async getAccountSchedule({ providerId, account }): Promise<AccountScheduleView> {
