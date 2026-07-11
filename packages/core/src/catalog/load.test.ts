@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { resolveCostUsd } from "./cost.js";
 import { CatalogError } from "./index.js";
 import { loadRuntimeCatalog } from "./load.js";
 
@@ -108,6 +109,48 @@ describe("loadRuntimeCatalog", () => {
     });
     expect(fable?.capabilities.maxContextTokens).toBe(1_000_000);
     expect(fable?.capabilities.supportsStreaming).toBe(true);
+  });
+
+  it("loads complete native Claude Sonnet 5 pricing and capabilities from real config", () => {
+    const catalog = loadRuntimeCatalog({ configDir: "config" });
+    const sonnet = catalog.get("anthropic/claude-sonnet-5");
+
+    expect(sonnet?.source).toBe("override");
+    expect(sonnet?.pricing).toEqual({
+      inputPerMTokUsd: 2,
+      outputPerMTokUsd: 10,
+      cacheReadPerMTokUsd: 0.2,
+      cacheWritePerMTokUsd: 2.5,
+    });
+    expect(sonnet?.capabilities).toMatchObject({
+      supportsTools: true,
+      jsonOutput: "schema",
+      supportsVision: true,
+      supportsStreaming: true,
+      reasoningEffort: {
+        anthropicOutputConfig: {
+          supported: true,
+          levels: ["low", "medium", "high", "xhigh", "max"],
+          map: { minimal: "low" },
+        },
+        anthropicThinking: {
+          supported: false,
+        },
+      },
+      modalities: ["document"],
+      maxContextTokens: 1_000_000,
+      maxOutputTokens: 128_000,
+    });
+    expect(
+      resolveCostUsd(sonnet?.pricing, {
+        usage: {
+          input_tokens: 600,
+          cache_read_input_tokens: 300,
+          cache_creation_input_tokens: 100,
+          output_tokens: 200,
+        },
+      }),
+    ).toBeCloseTo((600 * 2 + 300 * 0.2 + 100 * 2.5 + 200 * 10) / 1_000_000, 12);
   });
 
   it("fails closed on an invalid override yaml (principle 2)", () => {

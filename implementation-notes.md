@@ -25,6 +25,14 @@
 - **缓存边界**：非 Codex live discovery 使用 Gateway 进程级账号缓存，按 `providerId + account` 隔离；正缓存 5 分钟、失败冷却 1 分钟、最多 128 个账号，并发刷新 singleflight。空结果/异常保留 last-known-good，重新绑定、断开账号或修改代理时精确失效。Admin 与 runtime synthesis 共用同一实例，避免页面读取和 pool rebuild 各请求一次；curated fallback 只在 runtime cache 之外应用，不能污染 Admin 的“账号实际返回”投影。Codex 继续使用其独立的持久 ModelInfo catalog cache。
 - **验证**：TDD 覆盖自动模式实时模型、发现失败不展示静态默认、手动模式保存值与跳过 discovery、Codex entitlement/alias、core fallback 开关，以及缓存 TTL、singleflight、last-known-good、精确失效和 Admin/runtime 共享复用；workspace typecheck/lint/build 全通过，完整 Vitest 为 352 files / 5631 tests 全绿。
 
+## 2026-07-11 · Claude Sonnet 5 订阅流量 API 等价成本与能力目录（Provider catalog / cost telemetry，docs/04/07/11，原则 2/5/7）
+
+- **成本定义**：`anthropic/claude-sonnet-5` 是 Claude Pro/Max OAuth 订阅别名，订阅本身不按请求扣费；Helm 的 `cost_usd` 使用官方 Claude API 等价估算，只用于 telemetry，不参与路由或订阅结算。
+- **当前价格**：按 Anthropic 官方 2026-07-11 价格表使用介绍期价格：input `$2/M`、output `$10/M`、5 分钟 cache write `$2.50/M`、cache read `$0.20/M`。介绍期于 2026-08-31 结束；静态 catalog 不支持生效日期，2026-09-01 必须更新为标准 `$3/$15/$3.75/$0.30`。
+- **能力边界**：与价格同一变更补齐 1M context、128K synchronous output、tools、vision、streaming、structured outputs、document input，以及 `low/medium/high/xhigh/max` adaptive-thinking effort。manual `budget_tokens` thinking 明确不支持，避免价格单独引入 `EMPTY_CAPABILITIES` 后被 `context_too_small` 错误过滤。
+- **历史边界**：部署后新请求可正常估算成本；已有 `cost_usd = null` 的历史 telemetry 不自动回填。
+- **官方依据**：Anthropic Models overview、Pricing、What's new in Claude Sonnet 5、Effort 与 Structured outputs 文档，均于 2026-07-11 读取。
+
 ## 2026-07-11 · Portal 请求详情对齐 Admin 查看器但保持供应链边界（Self-Service Portal / Requests，docs/12，原则 1/6/7/8）
 
 - **对齐范围**：Portal 请求详情复用本地已有的 Conversation / JsonViewer / ImagePreview，并移植 Admin 的 StreamViewer。请求/响应正文按 Admin 模式改为 metadata-first、用户打开时才分段加载；SSE 响应提供 Assembled / Chunks / Raw 三种视图，普通 JSON 继续提供 Tree / Formatted / Raw 与全屏。
