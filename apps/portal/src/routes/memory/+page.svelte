@@ -17,6 +17,7 @@
   import AddFactDialog from "$lib/components/AddFactDialog.svelte";
   import EditFactDialog from "$lib/components/EditFactDialog.svelte";
   import EditReflectionDialog from "$lib/components/EditReflectionDialog.svelte";
+  import MemorySettingsDialog from "$lib/components/MemorySettingsDialog.svelte";
   import Modal from "$lib/components/Modal.svelte";
   import RefreshControl from "$lib/components/RefreshControl.svelte";
 
@@ -35,12 +36,13 @@
   let factPage = $state(1);
   let showInfo = $state(false);
   let showAddFact = $state(false);
+  let showSettings = $state(false);
   let editingFact = $state<Fact | null>(null);
   let editingReflection = $state<Reflection | null>(null);
   let confirmingFactDelete = $state<Fact | null>(null);
   let confirmingReflectionDelete = $state<Reflection | null>(null);
 
-  const sharedPool = $derived(me?.memory.project_id ?? null);
+  const sharedPool = $derived(me?.memory.project_name ?? null);
 
   const filteredFacts = $derived.by(() => {
     const query = factSearch.trim().toLowerCase();
@@ -139,6 +141,15 @@
     notice = $t("Reflection updated.");
   }
 
+  function onSettingsSaved(memory: Me["memory"]): void {
+    if (me) me = { ...me, memory };
+    showSettings = false;
+    notice = $t("Saved");
+    // A project change selects a different memory pool. Reload immediately so
+    // the page never keeps showing facts/reflections from the previous pool.
+    void load();
+  }
+
   async function confirmDeleteFact(): Promise<void> {
     const fact = confirmingFactDelete;
     if (!fact) return;
@@ -189,7 +200,15 @@
       {$t("Review and curate what Helm remembers across sessions.")}
     </p>
   </div>
-  <div class="shrink-0">
+  <div class="flex shrink-0 items-center gap-2">
+    <button
+      type="button"
+      class="btn-secondary"
+      disabled={!me}
+      onclick={() => (showSettings = true)}
+    >
+      {$t("Settings")}
+    </button>
     <RefreshControl onRefresh={load} />
   </div>
 </header>
@@ -449,6 +468,14 @@
       </div>
     {/if}
   </section>
+{/if}
+
+{#if showSettings && me}
+  <MemorySettingsDialog
+    {me}
+    onsaved={onSettingsSaved}
+    onclose={() => (showSettings = false)}
+  />
 {/if}
 
 {#if showAddFact}

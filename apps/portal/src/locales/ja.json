@@ -988,6 +988,10 @@
   "Your requests, filtered by time, status, model, or lane.": "あなたのリクエストを、時間、ステータス、モデル、レーンで絞り込めます。",
   "Your key, its limits, and Memory defaults.": "キー、その上限、Memory のデフォルト設定です。",
   "Changing the project switches memory pools; existing memory is not moved. Keys in the same account using the same project share that pool.": "プロジェクトを変更するとメモリプールが切り替わります。既存のメモリは移動されません。同じアカウントで同じプロジェクトを使うキーは、そのプールを共有します。",
+  "Memory settings": "Memory 設定",
+  "These defaults control how this API key records and applies memory. Explicit x-memory-* request headers still override them.": "これらのデフォルト設定は、この API キーが Memory を記録して適用する方法を制御します。明示的な x-memory-* リクエストヘッダーが引き続き優先されます。",
+  "Record useful context across sessions": "セッションをまたいで有用なコンテキストを記録",
+  "Private to this key": "このキー専用",
   "Zoom in": "拡大",
   "Zoom out": "縮小"
 }

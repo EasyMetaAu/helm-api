@@ -74,8 +74,8 @@
 | **概览 Overview** | `/portal`（首页） | **MVP** | 4 张 stat 卡（请求数/成功率/总token/花费，含环比 delta）+「我的额度」进度条区块（admin 无）+ LayerChart 双图（用量趋势 area + by-model donut）+ 最近请求（`RequestsTable` `showKey=false`）。**去掉一切管理动作**（编辑/轮换/吊销）。**智能空状态**：零请求时整页替换成接入引导卡（客户端快捷入口 → 直达接入页对应 tab）。 |
 | **接入 Connect** | `/portal/connect` | **MVP（门户灵魂）** | 左侧客户端选择器 + 右侧分步指引 + 一键复制。见 §5。 |
 | **请求 Requests** | `/portal/requests` `/portal/requests/:traceId` | 迭代 2 | 列表（`RequestsTable` full 变体，去 key/lane/decided-by 列）+ **脱敏详情**（§4.3）。 |
-| **记忆 Memory** | `/portal/memory` | 迭代 3 | facts + reflections 浏览/增删改，复用 admin By-Key 布局但只显示「我的」、隐藏 scope 选择器。加「什么是记忆?」说明气泡 + 隐私文案。空状态引导。 |
-| **账户 Account** | `/portal/account` | MVP + Memory settings | key prefix、只读 caps（lanes/预算/速率）以及可编辑的 Memory 开关、模式和项目名。退出、语言仍在账户菜单。 |
+| **记忆 Memory** | `/portal/memory` | 迭代 3 + settings | facts + reflections 浏览/增删改；标题区 `Settings` 打开弹窗，编辑本 key 的 Memory 开关、模式和项目。加「什么是记忆?」说明气泡 + 隐私文案。空状态引导。 |
+| **账户 Account** | `/portal/account` | MVP | key prefix、只读 caps（lanes/预算/速率）与只读 Memory mode/project 摘要。退出、语言仍在账户菜单。 |
 
 **IA 决策**：接入指南放导航第一/二位，不塞进设置角落。新用户第一眼看到「怎么接」，老用户日常看「概览」——这两个是门户双核心。
 
@@ -155,6 +155,7 @@ async function assertOwnsTrace(c, telemetry, traceId): Promise<"ok"|"not_found">
 - 若 account 下多 key 且 `memory_project_id` 皆 null → `effectiveMemoryProjectId` 各落 key_id → 天然 key 级隔离，门户始终传 `projectId: identity.caps.memory.projectId` 即可。
 - 若运营方给多 key 设同一显式 `memory_project_id`（共享池）→ 同 project 的 key 互见 memory，**这是配置决定的预期共享，非 bug**，但门户 UI 须诚实标注「此 memory 池为 project xxx，可能与同 project 的其他 key 共享」。
 - 门户自助修改 project 只切换默认池，**不迁移**旧池里的 facts/reflections；UI 必须在输入框旁明示。`/portal/api/me` 同时返回 effective `project_id` 与原始 `project_name`，避免把 null→keyId 的私有回落误标成显式共享。
+- 设置保存后 Memory 页必须重新读取 facts/reflections；只更新 mode/project 标签而保留旧池列表会造成跨 scope 的错误展示。
 
 ### 4.6 fail-open / 错误信封
 

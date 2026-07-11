@@ -988,6 +988,10 @@
   "Your requests, filtered by time, status, model, or lane.": "Tus solicitudes, filtradas por hora, estado, modelo o lane.",
   "Your key, its limits, and Memory defaults.": "Tu clave, sus límites y los valores predeterminados de Memoria.",
   "Changing the project switches memory pools; existing memory is not moved. Keys in the same account using the same project share that pool.": "Cambiar el proyecto cambia el grupo de memoria; la memoria existente no se mueve. Las claves de la misma cuenta que usan el mismo proyecto comparten ese grupo.",
+  "Memory settings": "Configuración de Memoria",
+  "These defaults control how this API key records and applies memory. Explicit x-memory-* request headers still override them.": "Estos valores predeterminados controlan cómo esta clave API registra y aplica la memoria. Los encabezados explícitos x-memory-* todavía los sustituyen.",
+  "Record useful context across sessions": "Registrar contexto útil entre sesiones",
+  "Private to this key": "Privado para esta clave",
   "Zoom in": "Acercar",
   "Zoom out": "Alejar"
 }
