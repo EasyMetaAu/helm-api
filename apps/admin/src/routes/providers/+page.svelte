@@ -372,6 +372,13 @@
     return Number.isFinite(number) ? new Intl.NumberFormat().format(number) : value;
   }
 
+  function formatCreditBalance(value: string | null): string | null {
+    if (value == null) return '—';
+    const number = Number(value);
+    if (!Number.isFinite(number)) return value;
+    return number === 0 ? null : number.toFixed(2);
+  }
+
   function additionalLimitNames(q: OAuthQuotaSnapshot | undefined): string[] {
     if (!q?.additionalLimits?.length) return [];
     const representedIds = new Set(q.windows.map((window) => window.limitId).filter(Boolean));
@@ -724,6 +731,10 @@
             {@const usageLimitRecovery = usageLimit ? autoRecoverIn(usageLimit.untilMs) : ''}
             {@const credentialFailed = row.account.credentialFailed === true}
             {@const additionalLimits = isCodex ? additionalLimitNames(quota) : []}
+            {@const codexCreditBalance =
+              isCodex && quota?.credits && !quota.credits.unlimited
+                ? formatCreditBalance(quota.credits.balance)
+                : null}
             {@const hasCodexQuotaMetadata =
               isCodex &&
               Boolean(
@@ -863,9 +874,9 @@
                   <div class="flex w-full flex-col gap-1.5 lg:w-40">
                     {#each quota.windows as w (w.key)}
                       <div>
-                        <div class="flex items-center justify-between text-xs text-ink-muted">
-                          <span>{quotaWindowLabel(w)}</span>
-                          <span>{Math.round(w.usedPercent)}%</span>
+                        <div class="flex items-center justify-between gap-1 text-xs text-ink-muted">
+                          <span class="text-[9px]">{quotaWindowLabel(w)}</span>
+                          <span class="shrink-0">{Math.round(w.usedPercent)}%</span>
                         </div>
                         <div class="progress-track">
                           <div
@@ -935,12 +946,16 @@
                     {$t('Plan: {plan}', { plan: planLabel(quota.planType) })}
                   </div>
                 {/if}
-                {#if isCodex && quota?.credits}
+                {#if isCodex && quota?.credits?.unlimited}
                   <div class="text-[10px] text-ink-muted">
                     {$t('Credits: {balance}', {
-                      balance: quota.credits.unlimited
-                        ? $t('Unlimited')
-                        : (quota.credits.balance ?? '—'),
+                      balance: $t('Unlimited'),
+                    })}
+                  </div>
+                {:else if codexCreditBalance}
+                  <div class="text-[10px] text-ink-muted">
+                    {$t('Credits: {balance}', {
+                      balance: codexCreditBalance,
                     })}
                   </div>
                 {/if}
