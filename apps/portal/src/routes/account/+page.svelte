@@ -75,5 +75,13 @@
         >{me.memory.project_name ?? $t("Private to this key")}</span
       >
     </div>
+    <div class="flex justify-between">
+      <span class="section-desc">{$t("Thread source")}</span>
+      <span>
+        {me.memory.thread_source === "auto"
+          ? $t("Auto (derive from client signals)")
+          : $t("Header only (x-thread-id)")}
+      </span>
+    </div>
   </div>
 {/if}

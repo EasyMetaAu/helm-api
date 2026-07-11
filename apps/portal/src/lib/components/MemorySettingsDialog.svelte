@@ -21,6 +21,7 @@
   let enabled = $state(false);
   let activeMode = $state<ActiveMemoryMode>("inject");
   let projectName = $state("");
+  let threadSource = $state<"header" | "auto">("auto");
   let saving = $state(false);
   let error = $state("");
 
@@ -29,6 +30,7 @@
     enabled = form.enabled;
     activeMode = form.activeMode;
     projectName = form.projectName;
+    threadSource = form.threadSource;
   });
 
   async function save(): Promise<void> {
@@ -37,7 +39,12 @@
     error = "";
     try {
       const result = await updateMemorySettings(
-        toMemorySettingsRequest({ enabled, activeMode, projectName }),
+        toMemorySettingsRequest({
+          enabled,
+          activeMode,
+          projectName,
+          threadSource,
+        }),
       );
       onsaved(result.memory);
     } catch (e) {
@@ -92,6 +99,18 @@
       >
         <option value="observe">{$t("Observe (record only)")}</option>
         <option value="inject">{$t("Inject (record + hydrate)")}</option>
+      </select>
+    </label>
+
+    <label class="flex flex-col gap-1 text-sm">
+      <span class="field-label">{$t("Thread source")}</span>
+      <select
+        class="select"
+        bind:value={threadSource}
+        disabled={me.role === "root"}
+      >
+        <option value="auto">{$t("Auto (derive from client signals)")}</option>
+        <option value="header">{$t("Header only (x-thread-id)")}</option>
       </select>
     </label>
 
