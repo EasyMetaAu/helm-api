@@ -130,6 +130,13 @@
   .btn-icon {
     @apply inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-slate-500 md:h-7 md:w-7;
   }
+  /* Contextual help is intentionally visible at rest and stateful when open. */
+  .btn-help {
+    @apply inline-flex h-10 w-10 cursor-pointer items-center justify-center rounded-full border border-slate-200 bg-slate-100 font-semibold text-slate-600 transition-colors hover:border-slate-300 hover:bg-slate-200 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 md:h-7 md:w-7;
+  }
+  .btn-help-open {
+    @apply border-slate-300 bg-slate-200 text-slate-800;
+  }
 
   /* — Form controls — */
   .input {
