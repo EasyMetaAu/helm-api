@@ -197,3 +197,15 @@ export const UpdateKeyRequestSchema = z
   .strict();
 
 export type UpdateKeyRequest = z.infer<typeof UpdateKeyRequestSchema>;
+
+// Customer self-service subset. Deliberately separate from UpdateKeyRequestSchema:
+// a bearer-key holder may tune only this key's Memory behavior and project scope,
+// never lanes, budgets, role, or any other administrator-owned capability.
+export const PortalMemorySettingsRequestSchema = z
+  .object({
+    memory_mode: MemoryModeSchema,
+    memory_project_id: z.string().trim().min(1).max(100).nullable(),
+  })
+  .strict();
+
+export type PortalMemorySettingsRequest = z.infer<typeof PortalMemorySettingsRequestSchema>;

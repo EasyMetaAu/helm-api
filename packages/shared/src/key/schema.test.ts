@@ -4,6 +4,7 @@ import {
   CreateKeyRequestSchema,
   effectiveMemoryProjectId,
   KeyRoleSchema,
+  PortalMemorySettingsRequestSchema,
   UpdateKeyRequestSchema,
 } from "./schema.js";
 
@@ -407,5 +408,33 @@ describe("effectiveMemoryProjectId", () => {
     expect(effectiveMemoryProjectId({ memory_project_id: "team-pool", key_id: "k-abc" })).toBe(
       "team-pool",
     );
+  });
+});
+
+describe("PortalMemorySettingsRequestSchema", () => {
+  it("accepts only the self-service memory subset and normalizes the project", () => {
+    expect(
+      PortalMemorySettingsRequestSchema.parse({
+        memory_mode: "observe",
+        memory_project_id: "  project-a  ",
+      }),
+    ).toEqual({ memory_mode: "observe", memory_project_id: "project-a" });
+    expect(
+      PortalMemorySettingsRequestSchema.safeParse({
+        memory_mode: "inject",
+        memory_project_id: null,
+        budget_tokens: 1,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects invalid modes and blank or oversized project names", () => {
+    for (const input of [
+      { memory_mode: "on", memory_project_id: null },
+      { memory_mode: "off", memory_project_id: "   " },
+      { memory_mode: "off", memory_project_id: "x".repeat(101) },
+    ]) {
+      expect(PortalMemorySettingsRequestSchema.safeParse(input).success).toBe(false);
+    }
   });
 });

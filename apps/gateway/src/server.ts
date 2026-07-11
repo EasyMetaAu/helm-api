@@ -2674,6 +2674,7 @@ export async function buildServer(
       if (!wireToAlias.has(m.provider_model)) wireToAlias.set(m.provider_model, m.alias);
   }
   registerPortalApi(app, {
+    keyStore,
     telemetry,
     resolveModelLabel: (wire) => wireToAlias.get(wire) ?? null,
   });

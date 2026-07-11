@@ -198,6 +198,8 @@ export {
   MemoryThreadSourceSchema,
   type OverBudgetBehavior,
   OverBudgetBehaviorSchema,
+  type PortalMemorySettingsRequest,
+  PortalMemorySettingsRequestSchema,
   type UpdateKeyRequest,
   UpdateKeyRequestSchema,
 } from "./key/schema.js";

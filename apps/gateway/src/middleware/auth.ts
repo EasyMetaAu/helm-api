@@ -37,6 +37,9 @@ export interface AuthIdentity {
     memory: {
       mode: "off" | "observe" | "inject";
       projectId: string | null;
+      /** Raw user-configured project name. null means the effective scope falls
+       *  back to this key's id; kept separate from projectId for portal editing. */
+      projectName?: string | null;
       threadSource: "header" | "auto";
     };
   };
@@ -124,6 +127,7 @@ export function authMiddleware(deps: AuthDeps): MiddlewareHandler {
           // a pool across keys (effectiveMemoryProjectId). Resolved per request so
           // clearing the column reverts to isolated-by-self with no migration.
           projectId: effectiveMemoryProjectId(record),
+          projectName: record.memory_project_id,
           threadSource: record.memory_thread_source,
         },
       },

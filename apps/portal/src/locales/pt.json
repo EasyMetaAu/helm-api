@@ -986,6 +986,8 @@
   "Your key stays in this browser tab only and is sent over HTTPS with each request. Closing the tab signs you out.": "Sua key fica apenas nesta aba do navegador e é enviada por HTTPS em cada solicitação. Fechar a aba encerra sua sessão.",
   "Your new API key": "Sua nova API key",
   "Your requests, filtered by time, status, model, or lane.": "Suas solicitações, filtradas por hora, status, modelo ou lane.",
+  "Your key, its limits, and Memory defaults.": "Sua chave, seus limites e os padrões de Memória.",
+  "Changing the project switches memory pools; existing memory is not moved. Keys in the same account using the same project share that pool.": "Alterar o projeto troca o conjunto de memória; a memória existente não é movida. Chaves da mesma conta que usam o mesmo projeto compartilham esse conjunto.",
   "Zoom in": "Aproximar zoom",
   "Zoom out": "Afastar zoom"
 }

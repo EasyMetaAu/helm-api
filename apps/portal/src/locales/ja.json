@@ -986,6 +986,8 @@
   "Your key stays in this browser tab only and is sent over HTTPS with each request. Closing the tab signs you out.": "あなたのキーはこのブラウザータブ内だけに保存され、各リクエストで HTTPS 経由で送信されます。タブを閉じるとサインアウトします。",
   "Your new API key": "新しい API キー",
   "Your requests, filtered by time, status, model, or lane.": "あなたのリクエストを、時間、ステータス、モデル、レーンで絞り込めます。",
+  "Your key, its limits, and Memory defaults.": "キー、その上限、Memory のデフォルト設定です。",
+  "Changing the project switches memory pools; existing memory is not moved. Keys in the same account using the same project share that pool.": "プロジェクトを変更するとメモリプールが切り替わります。既存のメモリは移動されません。同じアカウントで同じプロジェクトを使うキーは、そのプールを共有します。",
   "Zoom in": "拡大",
   "Zoom out": "縮小"
 }

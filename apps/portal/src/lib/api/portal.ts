@@ -1,4 +1,4 @@
-import { apiGet } from "./client";
+import { apiGet, apiPatch } from "./client";
 
 // Portal API response contracts — mirror the /portal/api/* JSON the gateway emits.
 // These are customer-safe whitelist projections.
@@ -15,7 +15,11 @@ export interface Me {
     window_seconds: number | null;
     behavior: string;
   };
-  memory: { mode: "off" | "observe" | "inject"; project_id: string | null };
+  memory: {
+    mode: "off" | "observe" | "inject";
+    project_id: string | null;
+    project_name: string | null;
+  };
 }
 
 export interface UsageStats {
@@ -92,6 +96,13 @@ export interface PayloadPart {
 
 export function getMe(): Promise<Me> {
   return apiGet<Me>("/me");
+}
+
+export function updateMemorySettings(input: {
+  memory_mode: "off" | "observe" | "inject";
+  memory_project_id: string | null;
+}): Promise<{ memory: Me["memory"] }> {
+  return apiPatch<{ memory: Me["memory"] }>("/memory-settings", input);
 }
 
 export function getUsage(

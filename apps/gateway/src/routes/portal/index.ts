@@ -1,5 +1,15 @@
-import type { RequestPayload, RequestPayloadPartRecord, TelemetryStore } from "@helm/core";
-import { RequestsQuerySchema, StatsQuerySchema, toPortalDecisionView } from "@helm/shared";
+import type {
+  KeyStore,
+  RequestPayload,
+  RequestPayloadPartRecord,
+  TelemetryStore,
+} from "@helm/core";
+import {
+  PortalMemorySettingsRequestSchema,
+  RequestsQuerySchema,
+  StatsQuerySchema,
+  toPortalDecisionView,
+} from "@helm/shared";
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
 import { assertOwnsTrace } from "./ownership.js";
@@ -11,6 +21,7 @@ import { assertOwnsTrace } from "./ownership.js";
 // a scopeless read. Memory CRUD is deliberately absent: the SPA calls the existing
 // POST /mcp JSON-RPC directly (§4.2 endpoint 6 — zero new backend).
 export interface PortalApiDeps {
+  keyStore: Pick<KeyStore, "updateKey">;
   telemetry: Pick<
     TelemetryStore,
     "aggregate" | "queryPage" | "getByRequestId" | "getApiKeyId" | "getPayload" | "getPayloadPart"
@@ -44,7 +55,38 @@ export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void 
         window_seconds: b.windowSeconds,
         behavior: b.behavior,
       },
-      memory: { mode: identity.caps.memory.mode, project_id: identity.caps.memory.projectId },
+      memory: {
+        mode: identity.caps.memory.mode,
+        project_id: identity.caps.memory.projectId,
+        project_name: identity.caps.memory.projectName ?? null,
+      },
+    });
+  });
+
+  // The only customer-writable key settings. Scope is forced from the bearer
+  // identity and the strict schema rejects every administrator-owned field.
+  app.patch("/portal/api/memory-settings", async (c) => {
+    const identity = c.get("identity");
+    // Root is the management-plane key and must remain memory-inert.
+    if (identity.role === "root") {
+      return c.json({ error: "root key memory settings are read-only" }, 403);
+    }
+    const parsed = PortalMemorySettingsRequestSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      return c.json({ error: "invalid memory settings", issues: parsed.error.issues }, 400);
+    }
+    await deps.keyStore.updateKey(identity.keyId, {
+      memoryMode: parsed.data.memory_mode,
+      memoryProjectId: parsed.data.memory_project_id,
+    });
+    return c.json({
+      memory: {
+        mode: parsed.data.memory_mode,
+        project_id: parsed.data.memory_project_id ?? identity.keyId,
+        project_name: parsed.data.memory_project_id,
+      },
     });
   });
 
