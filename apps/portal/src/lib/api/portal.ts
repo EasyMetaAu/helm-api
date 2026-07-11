@@ -19,6 +19,7 @@ export interface Me {
     mode: "off" | "observe" | "inject";
     project_id: string | null;
     project_name: string | null;
+    thread_source: "header" | "auto";
   };
 }
 
@@ -101,6 +102,7 @@ export function getMe(): Promise<Me> {
 export function updateMemorySettings(input: {
   memory_mode: "off" | "observe" | "inject";
   memory_project_id: string | null;
+  memory_thread_source: "header" | "auto";
 }): Promise<{ memory: Me["memory"] }> {
   return apiPatch<{ memory: Me["memory"] }>("/memory-settings", input);
 }

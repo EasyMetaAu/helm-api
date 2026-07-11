@@ -205,6 +205,9 @@ export const PortalMemorySettingsRequestSchema = z
   .object({
     memory_mode: MemoryModeSchema,
     memory_project_id: z.string().trim().min(1).max(100).nullable(),
+    // Optional for backward compatibility with the first portal-settings SPA.
+    // New clients always send it; omitted means keep the current per-key value.
+    memory_thread_source: MemoryThreadSourceSchema.optional(),
   })
   .strict();
 

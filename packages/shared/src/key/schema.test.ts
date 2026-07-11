@@ -417,12 +417,18 @@ describe("PortalMemorySettingsRequestSchema", () => {
       PortalMemorySettingsRequestSchema.parse({
         memory_mode: "observe",
         memory_project_id: "  project-a  ",
+        memory_thread_source: "auto",
       }),
-    ).toEqual({ memory_mode: "observe", memory_project_id: "project-a" });
+    ).toEqual({
+      memory_mode: "observe",
+      memory_project_id: "project-a",
+      memory_thread_source: "auto",
+    });
     expect(
       PortalMemorySettingsRequestSchema.safeParse({
         memory_mode: "inject",
         memory_project_id: null,
+        memory_thread_source: "header",
         budget_tokens: 1,
       }).success,
     ).toBe(false);
@@ -431,8 +437,9 @@ describe("PortalMemorySettingsRequestSchema", () => {
   it("rejects invalid modes and blank or oversized project names", () => {
     for (const input of [
       { memory_mode: "on", memory_project_id: null },
-      { memory_mode: "off", memory_project_id: "   " },
-      { memory_mode: "off", memory_project_id: "x".repeat(101) },
+      { memory_mode: "off", memory_project_id: "   ", memory_thread_source: "auto" },
+      { memory_mode: "off", memory_project_id: "x".repeat(101), memory_thread_source: "auto" },
+      { memory_mode: "off", memory_project_id: null, memory_thread_source: "magic" },
     ]) {
       expect(PortalMemorySettingsRequestSchema.safeParse(input).success).toBe(false);
     }

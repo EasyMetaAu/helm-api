@@ -14,6 +14,7 @@ const AUTH = { Authorization: "Bearer helm_live_secret" } as const;
 type MemoryPatch = {
   memoryMode?: "off" | "observe" | "inject";
   memoryProjectId?: string | null;
+  memoryThreadSource?: "header" | "auto";
 };
 
 function record(overrides: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
@@ -215,6 +216,7 @@ describe("portal API", () => {
       expect(body.allowed_lanes).toEqual(["balanced", "coding"]);
       expect((body.budget as Record<string, unknown>).spend_usd).toBe(100);
       expect((body.memory as Record<string, unknown>).mode).toBe("inject");
+      expect((body.memory as Record<string, unknown>).thread_source).toBe("header");
       const serialized = JSON.stringify(body);
       expect(serialized).not.toContain(hashKey("helm_live_secret"));
       expect(serialized).not.toContain("helm_live_secret");
@@ -230,7 +232,11 @@ describe("portal API", () => {
         {
           method: "PATCH",
           headers: { ...AUTH, "content-type": "application/json" },
-          body: JSON.stringify({ memory_mode: "observe", memory_project_id: "project-a" }),
+          body: JSON.stringify({
+            memory_mode: "observe",
+            memory_project_id: "project-a",
+            memory_thread_source: "auto",
+          }),
         },
       );
 
@@ -238,9 +244,15 @@ describe("portal API", () => {
       expect(updateKey).toHaveBeenCalledWith("k1", {
         memoryMode: "observe",
         memoryProjectId: "project-a",
+        memoryThreadSource: "auto",
       });
       await expect(res.json()).resolves.toEqual({
-        memory: { mode: "observe", project_id: "project-a", project_name: "project-a" },
+        memory: {
+          mode: "observe",
+          project_id: "project-a",
+          project_name: "project-a",
+          thread_source: "auto",
+        },
       });
     });
 
@@ -250,21 +262,69 @@ describe("portal API", () => {
       const ok = await app.request("/portal/api/memory-settings", {
         method: "PATCH",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ memory_mode: "off", memory_project_id: null }),
+        body: JSON.stringify({
+          memory_mode: "off",
+          memory_project_id: null,
+          memory_thread_source: "header",
+        }),
       });
       expect(ok.status).toBe(200);
       expect(updateKey).toHaveBeenCalledWith("k1", {
         memoryMode: "off",
         memoryProjectId: null,
+        memoryThreadSource: "header",
       });
 
       const invalid = await app.request("/portal/api/memory-settings", {
         method: "PATCH",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ memory_mode: "inject", allowed_lanes: ["premium"] }),
+        body: JSON.stringify({
+          memory_mode: "inject",
+          memory_project_id: null,
+          memory_thread_source: "magic",
+        }),
       });
       expect(invalid.status).toBe(400);
       expect(updateKey).toHaveBeenCalledTimes(1);
+
+      const adminField = await app.request("/portal/api/memory-settings", {
+        method: "PATCH",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          memory_mode: "inject",
+          memory_project_id: null,
+          memory_thread_source: "auto",
+          allowed_lanes: ["premium"],
+        }),
+      });
+      expect(adminField.status).toBe(400);
+      expect(updateKey).toHaveBeenCalledTimes(1);
+    });
+
+    it("preserves the current thread source for an older portal request that omits it", async () => {
+      const updateKey = vi.fn(async () => {});
+      const res = await buildApp(
+        record({ memory_thread_source: "header" }),
+        telemetry(),
+        updateKey,
+      ).request("/portal/api/memory-settings", {
+        method: "PATCH",
+        headers: { ...AUTH, "content-type": "application/json" },
+        body: JSON.stringify({ memory_mode: "observe", memory_project_id: null }),
+      });
+      expect(res.status).toBe(200);
+      expect(updateKey).toHaveBeenCalledWith("k1", {
+        memoryMode: "observe",
+        memoryProjectId: null,
+      });
+      expect(await res.json()).toEqual({
+        memory: {
+          mode: "observe",
+          project_id: "k1",
+          project_name: null,
+          thread_source: "header",
+        },
+      });
     });
 
     it("keeps the management-plane root key memory-inert", async () => {
@@ -276,7 +336,11 @@ describe("portal API", () => {
       ).request("/portal/api/memory-settings", {
         method: "PATCH",
         headers: { ...AUTH, "content-type": "application/json" },
-        body: JSON.stringify({ memory_mode: "inject", memory_project_id: "root-project" }),
+        body: JSON.stringify({
+          memory_mode: "inject",
+          memory_project_id: "root-project",
+          memory_thread_source: "auto",
+        }),
       });
       expect(res.status).toBe(403);
       expect(updateKey).not.toHaveBeenCalled();

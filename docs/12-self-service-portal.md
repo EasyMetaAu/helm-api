@@ -74,8 +74,8 @@
 | **概览 Overview** | `/portal`（首页） | **MVP** | 4 张 stat 卡（请求数/成功率/总token/花费，含环比 delta）+「我的额度」进度条区块（admin 无）+ LayerChart 双图（用量趋势 area + by-model donut）+ 最近请求（`RequestsTable` `showKey=false`）。**去掉一切管理动作**（编辑/轮换/吊销）。**智能空状态**：零请求时整页替换成接入引导卡（客户端快捷入口 → 直达接入页对应 tab）。 |
 | **接入 Connect** | `/portal/connect` | **MVP（门户灵魂）** | 左侧客户端选择器 + 右侧分步指引 + 一键复制。见 §5。 |
 | **请求 Requests** | `/portal/requests` `/portal/requests/:traceId` | 迭代 2 | 列表（`RequestsTable` full 变体，去 key/lane/decided-by 列）+ **脱敏详情**（§4.3）。 |
-| **记忆 Memory** | `/portal/memory` | 迭代 3 + settings | facts + reflections 浏览/增删改；标题区 `Settings` 打开弹窗，编辑本 key 的 Memory 开关、模式和项目。加「什么是记忆?」说明气泡 + 隐私文案。空状态引导。 |
-| **账户 Account** | `/portal/account` | MVP | key prefix、只读 caps（lanes/预算/速率）与只读 Memory mode/project 摘要。退出、语言仍在账户菜单。 |
+| **记忆 Memory** | `/portal/memory` | 迭代 3 + settings | facts + reflections 浏览/增删改；标题区 `Settings` 打开弹窗，编辑本 key 的 Memory 开关、模式、项目和线程来源。加「什么是记忆?」说明气泡 + 隐私文案。空状态引导。 |
+| **账户 Account** | `/portal/account` | MVP | key prefix、只读 caps（lanes/预算/速率）与只读 Memory mode/project/thread source 摘要。退出、语言仍在账户菜单。 |
 
 **IA 决策**：接入指南放导航第一/二位，不塞进设置角落。新用户第一眼看到「怎么接」，老用户日常看「概览」——这两个是门户双核心。
 
@@ -109,7 +109,7 @@
 | 4 | `GET /portal/api/requests/:traceId` | **先 ownership 校验**（§4.4）→ `getByRequestId` → **白名单脱敏投影**（§4.3） | `getApiKeyId` + `getByRequestId` | 迭代 2 |
 | 5 | `GET /portal/api/requests/:traceId/payload` | **先 ownership 校验** → 取正文，**白名单 `part ∈ {request,response}`，拒 upstream** | `getApiKeyId` + `getPayloadMeta/getPayloadPart` | 迭代 2 |
 | 6 | memory CRUD | **优先前端直接打 `POST /mcp`（零新后端）**；若必须 REST，则 `accountId: identity.accountId` + `projectId: identity.caps.memory.projectId` 全写死，逐字复用 MCP 隔离不变量，**绝不照搬 `/admin/api/memory/*`**（query 参数寻址 = 破隔离） | MCP tools / `MemoryStore` | 迭代 3 |
-| 7 | `PATCH /portal/api/memory-settings` | 严格只收 `memory_mode` / `memory_project_id`；更新目标写死 `identity.keyId`；root key 拒绝 | `KeyStore.updateKey` | 迭代 4 |
+| 7 | `PATCH /portal/api/memory-settings` | 严格只收 `memory_mode` / `memory_project_id` / `memory_thread_source`；更新目标写死 `identity.keyId`；root key 拒绝 | `KeyStore.updateKey` | 迭代 4 |
 
 memory REST（仅当 MCP 未启用/需 REST 语义时）：`GET /portal/api/memory/facts`、`GET/PATCH/DELETE .../facts/:id`、reflections 同构。
 

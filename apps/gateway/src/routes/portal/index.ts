@@ -59,6 +59,7 @@ export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void 
         mode: identity.caps.memory.mode,
         project_id: identity.caps.memory.projectId,
         project_name: identity.caps.memory.projectName ?? null,
+        thread_source: identity.caps.memory.threadSource,
       },
     });
   });
@@ -77,15 +78,20 @@ export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void 
     if (!parsed.success) {
       return c.json({ error: "invalid memory settings", issues: parsed.error.issues }, 400);
     }
-    await deps.keyStore.updateKey(identity.keyId, {
+    const patch: Parameters<PortalApiDeps["keyStore"]["updateKey"]>[1] = {
       memoryMode: parsed.data.memory_mode,
       memoryProjectId: parsed.data.memory_project_id,
-    });
+    };
+    if (parsed.data.memory_thread_source !== undefined) {
+      patch.memoryThreadSource = parsed.data.memory_thread_source;
+    }
+    await deps.keyStore.updateKey(identity.keyId, patch);
     return c.json({
       memory: {
         mode: parsed.data.memory_mode,
         project_id: parsed.data.memory_project_id ?? identity.keyId,
         project_name: parsed.data.memory_project_id,
+        thread_source: parsed.data.memory_thread_source ?? identity.caps.memory.threadSource,
       },
     });
   });
