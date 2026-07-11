@@ -10,10 +10,10 @@
 ## 2026-07-11 · API-key 门户自助 Memory 默认设置（Self-Service Portal / Memory，docs/06/08/12，原则 2/7）
 
 - **授权边界**：新增 `PATCH /portal/api/memory-settings`，只接受严格的 `memory_mode` 与 `memory_project_id`；目标 key 始终取 bearer identity 的 `keyId`，不能提交 `key_id/account_id`，也不能借此修改 lane、预算或限流。管理面 root key 继续强制只读、保持 memory inert。
-- **交互**：Account 页提供 Memory 开关、`observe`（仅记录）/`inject`（记录并注入）模式和最多 100 字符的项目名；保存后同实例 auth cache 立即失效。显式 `x-memory-*` 请求头仍覆盖这些服务端默认值。
+- **交互**：Memory 页标题区提供 `Settings` 入口，弹窗内编辑 Memory 开关、`observe`（仅记录）/`inject`（记录并注入）模式和最多 100 字符的项目名；Account 页只保留只读摘要，避免两个可编辑入口。保存项目后立即重载 facts/reflections，不能继续显示旧池数据。显式 `x-memory-*` 请求头仍覆盖这些服务端默认值。
 - **scope 语义**：`memory_project_id` 是共享池选择器，不是纯展示标签；空值仍回落到 key 自身的私有 scope。更改项目只切换默认池，不迁移旧 Memory；同一 account 下采用相同显式项目名的 keys 会共享该池，UI 明示这一点。
 - **API 投影**：`/portal/api/me` 同时返回有效 `project_id` 与原始配置 `project_name`，避免把 null→key-id 的私有默认 scope 错画成显式共享项目。未新增 DB 字段或迁移，复用已有 KeyStore partial update。
-- **验证**：先增加 portal route 红测，覆盖 authenticated-key 强制、严格字段拒绝、disable/clear 和 root 拒绝；再实现后端与 UI，并运行 gateway portal tests、shared/gateway/portal typecheck、portal check/build 和 i18n 校验。
+- **验证**：先增加 portal route 红测，覆盖 authenticated-key 强制、严格字段拒绝、disable/clear 和 root 拒绝；设置弹窗再以纯函数红测覆盖 off→inject 编辑回退、observe/project 回填和请求 trim/null 映射；运行 gateway/portal tests、typecheck、portal check/build 和 i18n 校验。
 
 ## 2026-07-10–11 · Codex CLI GPT-5.6 subscription parity（OAuth subscription / Responses / model catalog，docs/04/05/11，原则 3/5/6/7/8）
 

@@ -988,6 +988,10 @@
   "Your requests, filtered by time, status, model, or lane.": "Your requests, filtered by time, status, model, or lane.",
   "Your key, its limits, and Memory defaults.": "Your key, its limits, and Memory defaults.",
   "Changing the project switches memory pools; existing memory is not moved. Keys in the same account using the same project share that pool.": "Changing the project switches memory pools; existing memory is not moved. Keys in the same account using the same project share that pool.",
+  "Memory settings": "Memory settings",
+  "These defaults control how this API key records and applies memory. Explicit x-memory-* request headers still override them.": "These defaults control how this API key records and applies memory. Explicit x-memory-* request headers still override them.",
+  "Record useful context across sessions": "Record useful context across sessions",
+  "Private to this key": "Private to this key",
   "Zoom in": "Zoom in",
   "Zoom out": "Zoom out"
 }

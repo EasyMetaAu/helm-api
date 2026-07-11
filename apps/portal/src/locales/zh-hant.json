@@ -988,6 +988,10 @@
   "Your requests, filtered by time, status, model, or lane.": "你的請求，可依時間、狀態、模型或通道篩選。",
   "Your key, its limits, and Memory defaults.": "你的金鑰、使用限制和 Memory 預設設定。",
   "Changing the project switches memory pools; existing memory is not moved. Keys in the same account using the same project share that pool.": "變更專案會切換 Memory 池，既有記憶不會遷移。同一帳戶中使用相同專案的金鑰會共享該 Memory 池。",
+  "Memory settings": "Memory 設定",
+  "These defaults control how this API key records and applies memory. Explicit x-memory-* request headers still override them.": "這些預設設定控制此 API 金鑰如何記錄和套用 Memory。明確的 x-memory-* 請求標頭仍會覆寫這些設定。",
+  "Record useful context across sessions": "跨工作階段記錄有用的內容",
+  "Private to this key": "僅此金鑰可用",
   "Zoom in": "放大",
   "Zoom out": "縮小"
 }
