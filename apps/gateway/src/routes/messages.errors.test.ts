@@ -354,6 +354,32 @@ describe("POST /v1/messages — run() raises a PipelineError", () => {
 });
 
 describe("POST /v1/messages — non-stream collect() failure", () => {
+  it("returns a compaction-compatible invalid_request_error for context overflow", async () => {
+    const { deps } = makeDeps({
+      collect: async () => {
+        throw new PipelineError(
+          "invalid_request",
+          "prompt is too long: 1001854 tokens > 1000000 maximum",
+          "t-context",
+        );
+      },
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { type: string; message: string } };
+    expect(body.error).toEqual({
+      type: "invalid_request_error",
+      message: "prompt is too long: 1001854 tokens > 1000000 maximum",
+    });
+  });
+
   it("records the failed request then surfaces the PipelineError envelope (non-stream)", async () => {
     const { record, insert, insertPayload } = makeRecord();
     const { deps } = makeDeps({
@@ -403,6 +429,31 @@ describe("POST /v1/messages — non-stream collect() failure", () => {
 });
 
 describe("POST /v1/messages — stream-catch error classification", () => {
+  it("emits a compaction-compatible invalid_request_error frame for context overflow", async () => {
+    // biome-ignore lint/correctness/useYield: pre-stream routing failure throws before any event
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      throw new PipelineError(
+        "invalid_request",
+        "prompt is too long: 1001854 tokens > 1000000 maximum",
+        "t-context-stream",
+      );
+    }
+    const { deps } = makeDeps({ isStream: true, streamEvents: events });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ_BODY, stream: true }),
+    });
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain("event: error");
+    expect(text).toContain('"type":"invalid_request_error"');
+    expect(text).toContain("prompt is too long: 1001854 tokens > 1000000 maximum");
+  });
+
   it("emits a PipelineError's class/message as the terminal error frame", async () => {
     async function* events(): AsyncIterable<Record<string, unknown>> {
       yield { type: "message_start" };
