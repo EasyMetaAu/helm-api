@@ -1,6 +1,7 @@
 import type {
   KeyStore,
   RequestPayload,
+  RequestPayloadMeta,
   RequestPayloadPartRecord,
   TelemetryStore,
 } from "@helm/core";
@@ -24,7 +25,13 @@ export interface PortalApiDeps {
   keyStore: Pick<KeyStore, "updateKey">;
   telemetry: Pick<
     TelemetryStore,
-    "aggregate" | "queryPage" | "getByRequestId" | "getApiKeyId" | "getPayload" | "getPayloadPart"
+    | "aggregate"
+    | "queryPage"
+    | "getByRequestId"
+    | "getApiKeyId"
+    | "getPayload"
+    | "getPayloadMeta"
+    | "getPayloadPart"
   >;
   now?: () => number;
   // Map a stored served-model value (which is the internal wire `provider_model`,
@@ -199,19 +206,32 @@ export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void 
     return c.json(toPortalDecisionView(rec));
   });
 
-  // GET /portal/api/requests/:traceId/payload?part=request|response — the caller's
-  // own request/response bodies. upstream_request is REJECTED (supply-chain, §4.3 R7).
+  // GET /portal/api/requests/:traceId/payload?part=meta|request|response — the caller's
+  // own request/response bodies. Metadata enables lazy loading without exposing the
+  // presence of upstream_request; that part stays rejected (supply-chain, §4.3 R7).
   app.get("/portal/api/requests/:traceId/payload", async (c) => {
     const identity = c.get("identity");
     const traceId = c.req.param("traceId");
     const part = c.req.query("part");
-    // Whitelist the two portal-visible parts. Reject BEFORE touching the store so
-    // upstream is never even read for a portal caller.
-    if (part !== "request" && part !== "response") {
-      return c.json({ error: "part must be 'request' or 'response'" }, 400);
+    // Whitelist metadata plus the two portal-visible parts. Reject BEFORE touching
+    // the store so upstream is never even read for a portal caller.
+    if (part !== "meta" && part !== "request" && part !== "response") {
+      return c.json({ error: "part must be 'meta', 'request', or 'response'" }, 400);
     }
     if ((await assertOwnsTrace(deps.telemetry, identity.keyId, traceId)) !== "ok") {
       return c.json({ error: "request not found" }, 404);
+    }
+    if (part === "meta") {
+      const meta = await getPortalPayloadMeta(deps, traceId);
+      if (!meta) return c.json({ captured: false });
+      return c.json({
+        captured: true,
+        created_at: meta.createdAt.getTime(),
+        parts: {
+          request: meta.parts.request,
+          response: meta.parts.response,
+        },
+      });
     }
     const p = await getPayloadPart(deps, traceId, part);
     if (!p) return c.json({ captured: false });
@@ -222,6 +242,24 @@ export function registerPortalApi(app: Hono<AppEnv>, deps: PortalApiDeps): void 
       created_at: p.createdAt.getTime(),
     });
   });
+}
+
+async function getPortalPayloadMeta(
+  deps: PortalApiDeps,
+  requestId: string,
+): Promise<RequestPayloadMeta | null> {
+  if (deps.telemetry.getPayloadMeta) return deps.telemetry.getPayloadMeta(requestId);
+  const payload = await deps.telemetry.getPayload(requestId);
+  if (!payload) return null;
+  return {
+    requestId: payload.requestId,
+    createdAt: payload.createdAt,
+    parts: {
+      request: payload.requestJson !== null,
+      response: payload.responseJson !== null,
+      upstreamRequest: false,
+    },
+  };
 }
 
 // Resolve each usage row to a public label and merge rows sharing it, so the

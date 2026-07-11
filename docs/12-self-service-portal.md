@@ -107,7 +107,7 @@
 | 2 | `GET /portal/api/usage/stats` | `aggregate(..., identity.keyId)`，**透出 series+byModel+budget**（复用/alias 现有 `/v1/usage/stats`，补透被丢弃的字段） | `TelemetryStore.aggregate` + `identity.caps.budget` | MVP |
 | 3 | `GET /portal/api/requests` | `queryPage({...filters, apiKeyId: identity.keyId})`，apiKeyId 写死 | `TelemetryStore.queryPage` | 迭代 2 |
 | 4 | `GET /portal/api/requests/:traceId` | **先 ownership 校验**（§4.4）→ `getByRequestId` → **白名单脱敏投影**（§4.3） | `getApiKeyId` + `getByRequestId` | 迭代 2 |
-| 5 | `GET /portal/api/requests/:traceId/payload` | **先 ownership 校验** → 取正文，**白名单 `part ∈ {request,response}`，拒 upstream** | `getApiKeyId` + `getPayloadMeta/getPayloadPart` | 迭代 2 |
+| 5 | `GET /portal/api/requests/:traceId/payload` | **先 ownership 校验** → `part=meta` 只回显 request/response 可用性，正文白名单 `part ∈ {request,response}`，**拒 upstream** | `getApiKeyId` + `getPayloadMeta/getPayloadPart` | 迭代 2 |
 | 6 | memory CRUD | **优先前端直接打 `POST /mcp`（零新后端）**；若必须 REST，则 `accountId: identity.accountId` + `projectId: identity.caps.memory.projectId` 全写死，逐字复用 MCP 隔离不变量，**绝不照搬 `/admin/api/memory/*`**（query 参数寻址 = 破隔离） | MCP tools / `MemoryStore` | 迭代 3 |
 | 7 | `PATCH /portal/api/memory-settings` | 严格只收 `memory_mode` / `memory_project_id` / `memory_thread_source`；更新目标写死 `identity.keyId`；root key 拒绝 | `KeyStore.updateKey` | 迭代 4 |
 
@@ -127,7 +127,7 @@ memory REST（仅当 MCP 未启用/需 REST 语义时）：`GET /portal/api/memo
 | Retry/replay | ❌ 砍 | 特权写操作 |
 
 - 折中：可给一行**脱敏「路由结果」**——「已路由至 `<served model>`（lane: balanced），耗时 1.2s」（served model 用户本就能从响应看到）。**不复用整个 `DecisionChain.svelte`**，只复用正文/token/cost 查看器。
-- **payload 端点**：默认只暴露 `request`+`response` 两段，**过滤 `upstream` 段**（供应链细节，admin 才看）。
+- **payload 端点**：只暴露 `request`+`response` 两段；`part=meta` 仅返回这两段的 availability flags，**不返回或暗示 `upstream` 段是否存在**（供应链细节，admin 才看）。
 
 **用量成本**：**显示 `$` 花费**（自托管场景成本透明是信任基石，是给自己人看真实消耗）。**不显示** provider 成本明细/内部计价/markup（principle 6）。额度用**进度条 + 剩余量 + 超支行为 + 重置时间**呈现；无预算上限显示「无限制」。
 

@@ -101,7 +101,13 @@ function decision(overrides: Partial<DecisionRecord> = {}): DecisionRecord {
 
 type PortalTelemetry = Pick<
   TelemetryStore,
-  "aggregate" | "queryPage" | "getByRequestId" | "getApiKeyId" | "getPayload" | "getPayloadPart"
+  | "aggregate"
+  | "queryPage"
+  | "getByRequestId"
+  | "getApiKeyId"
+  | "getPayload"
+  | "getPayloadMeta"
+  | "getPayloadPart"
 >;
 
 function telemetry(over: Partial<PortalTelemetry> = {}): PortalTelemetry {
@@ -163,6 +169,13 @@ function telemetry(over: Partial<PortalTelemetry> = {}): PortalTelemetry {
         requestJson: '{"body":"of request"}',
         responseJson: '{"body":"of response"}',
         upstreamRequestJson: '{"body":"of upstream_request"}',
+        createdAt: new Date(1000),
+      };
+    },
+    async getPayloadMeta() {
+      return {
+        requestId: "trace_1",
+        parts: { request: true, response: true, upstreamRequest: true },
         createdAt: new Date(1000),
       };
     },
@@ -574,6 +587,51 @@ describe("portal API", () => {
         expect(res.status, part).toBe(200);
         expect(await res.text()).toContain(`of ${part}`);
       }
+    });
+
+    it("serves customer-safe payload metadata without revealing upstream availability", async () => {
+      const res = await buildApp(record()).request(
+        "/portal/api/requests/trace_1/payload?part=meta",
+        { headers: AUTH },
+      );
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({
+        captured: true,
+        created_at: 1000,
+        parts: { request: true, response: true },
+      });
+    });
+
+    it("keeps the metadata whitelist when an adapter falls back to the full payload read", async () => {
+      const tel = telemetry({ getPayloadMeta: undefined });
+      const res = await buildApp(record(), tel).request(
+        "/portal/api/requests/trace_1/payload?part=meta",
+        { headers: AUTH },
+      );
+      expect(res.status).toBe(200);
+      const body = await res.text();
+      expect(JSON.parse(body).parts).toEqual({ request: true, response: true });
+      expect(body).not.toContain("upstream");
+    });
+
+    it("checks ownership before reading payload metadata", async () => {
+      const reads: string[] = [];
+      const tel = telemetry({
+        async getApiKeyId() {
+          reads.push("owner");
+          return "someone_else";
+        },
+        async getPayloadMeta() {
+          reads.push("meta");
+          return null;
+        },
+      });
+      const res = await buildApp(record(), tel).request(
+        "/portal/api/requests/trace_1/payload?part=meta",
+        { headers: AUTH },
+      );
+      expect(res.status).toBe(404);
+      expect(reads).toEqual(["owner"]);
     });
 
     it("REJECTS the upstream_request part — supply chain, admin-only (R7)", async () => {
