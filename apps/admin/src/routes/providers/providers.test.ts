@@ -1027,7 +1027,7 @@ describe('providers page', () => {
               resetsAtMs: Date.now() + 3_600_000,
               windowMinutes: 30,
               limitId: 'codex_spark',
-              limitName: 'GPT-5.6-Codex-Spark',
+              limitName: 'GPT-5.3-Codex-Spark',
             },
           ],
           capturedAt: Date.now(),
@@ -1045,7 +1045,7 @@ describe('providers page', () => {
     });
 
     const row = screen.getByTestId('provider-account-row');
-    expect(within(row).getByText('GPT-5.6-Codex-Spark · 30m')).toBeInTheDocument();
+    expect(within(row).getByText('GPT-5.3-Codex-Spark · 30m')).toHaveClass('text-[9px]');
     const individualLimit = within(row).getByTestId('codex-individual-limit');
     expect(within(individualLimit).getByText('Monthly credit limit')).toBeInTheDocument();
     expect(within(individualLimit).getByText('8,000 of 25,000 credits used')).toBeInTheDocument();
@@ -1136,7 +1136,7 @@ describe('providers page', () => {
           usageLimitedUntilMs: null,
           resetCredits: null,
           planType: 'pro',
-          credits: { hasCredits: true, unlimited: false, balance: '9.99' },
+          credits: { hasCredits: true, unlimited: false, balance: '24524.0366637500' },
           rateLimitReachedType: 'rate_limit_reached',
         },
       ],
@@ -1146,9 +1146,54 @@ describe('providers page', () => {
       'provider-quota-cell',
     );
     expect(within(quotaCell).getByText('Plan: Pro')).toBeInTheDocument();
-    expect(within(quotaCell).getByText('Credits: 9.99')).toBeInTheDocument();
+    expect(within(quotaCell).getByText('Credits: 24524.04')).toBeInTheDocument();
     expect(within(quotaCell).getByText('Rate limit reached')).toBeInTheDocument();
     expect(within(quotaCell).queryByText('—')).not.toBeInTheDocument();
+  });
+
+  it('hides a zero Codex credit balance', () => {
+    renderPage({
+      providers: [
+        provider({
+          id: 'openai-codex',
+          name: 'Codex',
+          accounts: [
+            {
+              account: 'acct-codex',
+              expiresAt: null,
+              updatedAt: Date.now(),
+              healthy: true,
+              priority: 50,
+              schedulable: true,
+              autoReset: false,
+              fastMode: false,
+              proxy: null,
+              models: ['gpt-5.6-sol'],
+            },
+          ],
+        }),
+      ],
+      usage: [],
+      quota: [
+        {
+          providerId: 'openai-codex',
+          account: 'acct-codex',
+          windows: [],
+          capturedAt: Date.now(),
+          source: 'codex',
+          usageLimitedUntilMs: null,
+          resetCredits: null,
+          planType: 'pro',
+          credits: { hasCredits: false, unlimited: false, balance: '0.0000000000' },
+        },
+      ],
+    });
+
+    const quotaCell = within(screen.getByTestId('provider-account-row')).getByTestId(
+      'provider-quota-cell',
+    );
+    expect(within(quotaCell).getByText('Plan: Pro')).toBeInTheDocument();
+    expect(within(quotaCell).queryByText(/^Credits:/)).not.toBeInTheDocument();
   });
 
   it('does NOT consume when the reset confirmation is cancelled', async () => {
