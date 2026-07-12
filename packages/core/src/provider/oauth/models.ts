@@ -12,6 +12,7 @@ import { arch, platform, release } from "node:os";
 import { type CodexModelInfo, CodexModelsResponseSchema } from "./codex-model-info.js";
 import { listGitHubCopilotModels } from "./github-copilot.js";
 import { parseOpenAICodexIdentity } from "./openai-codex.js";
+import { XAI_GROK_OAUTH_BASE_URL } from "./xai.js";
 
 // Curated FALLBACK model ids — used when live discovery is unavailable or fails.
 // Anthropic and Codex are normally live; these are only their safety net.
@@ -232,11 +233,130 @@ export async function listAnthropicModels(
   return [...new Set(ids)].sort();
 }
 
+// SuperGrok/X Premium OAuth uses the Grok CLI subscription proxy, not api.x.ai.
+// Its catalog is account/region dependent, so there is deliberately no curated
+// public-API fallback: a failed subscription discovery exposes no guessed models.
+const XAI_MODELS_TIMEOUT_MS = 30_000;
+const XAI_MODELS_MAX_RESPONSE_BYTES = 1024 * 1024;
+
+export interface XaiOAuthModelsOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+type XaiModelsStreamReadResult =
+  | { done: false; value: Uint8Array }
+  | { done: true; value?: Uint8Array };
+
+async function readWithSignal(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal,
+): Promise<XaiModelsStreamReadResult> {
+  if (signal.aborted) throw signal.reason;
+  return new Promise<XaiModelsStreamReadResult>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    reader
+      .read()
+      .then(resolve, reject)
+      .finally(() => {
+        signal.removeEventListener("abort", onAbort);
+      });
+  });
+}
+
+async function readXaiModelsJson(response: Response, signal: AbortSignal): Promise<unknown> {
+  const contentLength = response.headers.get("content-length");
+  if (contentLength !== null) {
+    const declaredLength = Number(contentLength);
+    if (Number.isFinite(declaredLength) && declaredLength > XAI_MODELS_MAX_RESPONSE_BYTES) {
+      await response.body?.cancel().catch(() => {});
+      throw new Error(`xAI OAuth /models response exceeds ${XAI_MODELS_MAX_RESPONSE_BYTES} bytes`);
+    }
+  }
+  if (!response.body) return null;
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await readWithSignal(reader, signal);
+      if (done) break;
+      total += value.byteLength;
+      if (total > XAI_MODELS_MAX_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw new Error(
+          `xAI OAuth /models response exceeds ${XAI_MODELS_MAX_RESPONSE_BYTES} bytes`,
+        );
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    throw new Error("xAI OAuth /models returned invalid JSON");
+  }
+}
+
+export async function listXaiOAuthModels(
+  accessToken: string,
+  fetchImpl: typeof globalThis.fetch = fetch,
+  options: XaiOAuthModelsOptions = {},
+): Promise<string[]> {
+  const timeoutMs =
+    typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs)
+      ? Math.max(1, Math.floor(options.timeoutMs))
+      : XAI_MODELS_TIMEOUT_MS;
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
+  const res = await fetchImpl(`${XAI_GROK_OAUTH_BASE_URL}/models`, {
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      "User-Agent": "helm-api/xai-oauth",
+    },
+    redirect: "error",
+    signal,
+  });
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => {});
+    throw new Error(`xAI OAuth /models HTTP ${res.status}`);
+  }
+  const body = (await readXaiModelsJson(res, signal)) as { data?: unknown; models?: unknown };
+  const rows = Array.isArray(body.data) ? body.data : Array.isArray(body.models) ? body.models : [];
+  const ids = rows
+    .map((row) => {
+      if (typeof row === "string") return row.trim();
+      if (!row || typeof row !== "object" || Array.isArray(row)) return "";
+      const value = (row as Record<string, unknown>).id ?? (row as Record<string, unknown>).model;
+      return typeof value === "string" ? value.trim() : "";
+    })
+    .filter((id) => id.length > 0 && id.length <= 200 && /^[A-Za-z0-9._:-]+$/.test(id));
+  return [...new Set(ids)].sort();
+}
+
 // Whether this provider has a LIVE list-models API that `discoverOAuthModels`
 // queries. The admin UI uses this to expose account-specific refresh actions.
 export function hasLiveModelDiscovery(providerId: string): boolean {
   return (
-    providerId === "github-copilot" || providerId === "anthropic" || providerId === "openai-codex"
+    providerId === "github-copilot" ||
+    providerId === "anthropic" ||
+    providerId === "openai-codex" ||
+    providerId === "xai"
   );
 }
 
@@ -289,6 +409,14 @@ export async function discoverOAuthModels(
         .sort((left, right) => left.priority - right.priority)
         .map((model) => model.slug);
       return [...new Set(visible)];
+    } catch {
+      return [];
+    }
+  }
+  if (providerId === "xai") {
+    if (!accessToken) return [];
+    try {
+      return await listXaiOAuthModels(accessToken, fetchImpl);
     } catch {
       return [];
     }

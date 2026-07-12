@@ -20,7 +20,7 @@ const navSubtitleKeys = [
   'How a request is matched to a lane',
   'Client keys and their lane limits',
   'Facts and reflections the gateway remembers',
-  'Connect Codex and Claude subscriptions',
+  'Connect AI subscriptions',
   'System Settings',
 ] as const;
 

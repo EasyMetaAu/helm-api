@@ -1,7 +1,7 @@
 // Admin OAuth-login API client (issue #38). The admin UI is a PURE consumer of
 // the gateway's /admin/api/oauth surface (CLAUDE.md Principle 1) — no core logic,
 // no secrets ever cross this boundary. Two flows: manual_paste (Anthropic /
-// Claude Pro-Max) and device_code (GitHub Copilot).
+// Claude Pro-Max) and device_code (GitHub Copilot / xAI).
 
 import {
   type CodexResetResult,
@@ -187,14 +187,20 @@ export async function completeManualPaste(
   if (!res.ok) await asJson(res); // throws with detail
 }
 
-// ── device-code (Copilot) ────────────────────────────────────────────────────
+// ── device-code (Copilot / xAI) ──────────────────────────────────────────────
 // `proxy` is pinned BEFORE the device-code POST (the flow's first call), so step 1
 // already egresses through it — no real-IP leak at bind time.
 export async function startDeviceCode(
   provider: string,
   enterprise?: string,
   proxy?: AccountProxyInput,
-): Promise<{ sessionId: string; userCode: string; verificationUri: string }> {
+): Promise<{
+  sessionId: string;
+  userCode: string;
+  verificationUri: string;
+  intervalMs: number;
+  expiresAt: number;
+}> {
   const res = await fetch(`${BASE}/${provider}/device/start`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

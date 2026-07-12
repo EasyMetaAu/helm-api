@@ -453,6 +453,18 @@ async function seedAnthropic(ctx: OAuthRuntimeCtx, account: string): Promise<voi
   });
 }
 
+async function seedXai(ctx: OAuthRuntimeCtx, account: string): Promise<void> {
+  await ctx.store.upsert({
+    providerId: "xai",
+    account,
+    accessEnc: encryptSecret(`xai-access-${account}`, ENC_KEY),
+    refreshEnc: encryptSecret(`xai-refresh-${account}`, ENC_KEY),
+    expiresAt: FAR_FUTURE,
+    meta: JSON.stringify({ tokenEndpoint: "https://auth.x.ai/oauth2/token" }),
+    updatedAt: 1,
+  });
+}
+
 function codexModel(slug: string, overrides: Partial<CodexModelInfo> = {}): CodexModelInfo {
   return {
     slug,
@@ -504,6 +516,67 @@ function codexJwt(payload: Record<string, unknown>): string {
 
 describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
   const noop = () => {};
+
+  it("routes xAI subscription OAuth through the generic Responses proxy by default", async () => {
+    const { ctx, config } = oauthStores();
+    await seedXai(ctx, "heavy");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (String(url).endsWith("/models")) {
+        return new Response(JSON.stringify({ data: [{ id: "grok-composer-2.5-fast" }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      expect(String(url)).toBe("https://cli-chat-proxy.grok.com/v1/responses");
+      const headers = new Headers(init?.headers);
+      expect(headers.get("Authorization")).toBe("Bearer xai-access-heavy");
+      expect(headers.get("chatgpt-account-id")).toBeNull();
+      expect(headers.get("X-XAI-Token-Auth")).toBe("xai-grok-cli");
+      expect(headers.get("x-authenticateresponse")).toBe("authenticate-response");
+      expect(headers.get("x-grok-client-version")).toBe("0.2.93");
+      expect(headers.get("x-grok-model-override")).toBe("grok-composer-2.5-fast");
+      expect(headers.get("Accept")).toBe("text/event-stream");
+      expect(JSON.parse(String(init?.body))).toEqual({
+        model: "grok-composer-2.5-fast",
+        input: "hello",
+        stream: true,
+        store: false,
+      });
+      return sseResponse([
+        { type: "response.created", response: { id: "resp-grok" } },
+        {
+          type: "response.completed",
+          response: { id: "resp-grok", object: "response", status: "completed", output: [] },
+        },
+      ]);
+    });
+
+    const enabled = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+    );
+    expect(enabled.providers[0]).toMatchObject({
+      name: "xai",
+      type: "openai-responses-generic",
+      base_url: "https://cli-chat-proxy.grok.com/v1",
+      targetProviderProtocol: "openai_responses",
+      models: [{ alias: "xai/grok-composer-2.5-fast", provider_model: "grok-composer-2.5-fast" }],
+    });
+    expect(enabled.poolClients.has("xai")).toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://cli-chat-proxy.grok.com/v1/models",
+      expect.any(Object),
+    );
+    await expect(
+      enabled.poolClients
+        .get("xai")
+        ?.nativePassthrough?.({ model: "grok-composer-2.5-fast", input: "hello" }),
+    ).resolves.toMatchObject({ id: "resp-grok", status: "completed" });
+  });
 
   it("does not discover non-Codex models when manual mode is authoritative", async () => {
     const { ctx, config } = oauthStores();

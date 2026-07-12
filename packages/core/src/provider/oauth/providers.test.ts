@@ -15,12 +15,18 @@ afterEach(() => {
 });
 
 describe("registry", () => {
-  it("exposes anthropic + github-copilot + openai-codex", () => {
-    expect(listOAuthProviderIds().sort()).toEqual(["anthropic", "github-copilot", "openai-codex"]);
+  it("exposes the built-in subscription providers", () => {
+    expect(listOAuthProviderIds().sort()).toEqual([
+      "anthropic",
+      "github-copilot",
+      "openai-codex",
+      "xai",
+    ]);
     expect(getOAuthProvider("anthropic")?.name).toContain("Claude");
     expect(getOAuthProvider("openai-codex")?.name).toContain("ChatGPT");
+    expect(getOAuthProvider("xai")?.name).toContain("Grok");
     expect(getOAuthProvider("unknown-provider")).toBeUndefined();
-    expect(getOAuthProviders()).toHaveLength(3);
+    expect(getOAuthProviders()).toHaveLength(4);
   });
 });
 

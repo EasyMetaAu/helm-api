@@ -146,6 +146,10 @@ never diverge.
     re-synthesizes the live provider pool and applies on the next request, no restart.
   - **Token storage** — tokens are stored encrypted and never returned to the UI
     (proxy passwords included: a read shows only `hasPassword`).
+  - **Experimental xAI OAuth** is available by default. It uses xAI's Grok CLI device-code flow and
+    subscription proxy, has no published third-party OAuth contract, and is labeled
+    for personal self-hosted evaluation. SuperGrok quota remains unknown rather than
+    being inferred from unrelated public API limits.
 
   See [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md) and the
   README's OAuth subscription section.

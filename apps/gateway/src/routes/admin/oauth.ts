@@ -586,7 +586,8 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     }
   });
 
-  // POST /oauth/:provider/device/start { enterprise?, proxy? } -> { sessionId, userCode, verificationUri }
+  // POST /oauth/:provider/device/start { enterprise?, proxy? }
+  //   -> { sessionId, userCode, verificationUri, intervalMs, expiresAt }
   // The proxy is pinned BEFORE the device-code POST (the flow's first call), so step
   // 1 already egresses through it — no real-IP leak at bind time (issue #38).
   app.post("/admin/api/oauth/:provider/device/start", async (c) => {

@@ -63,7 +63,7 @@ export interface OAuthLoginCallbacks {
 // returns credentials to persist; `refreshToken` mints a fresh access token from
 // the stored credentials; `getApiKey` extracts the bearer the gateway sends
 // upstream. `usesCallbackServer` documents whether login spins a localhost
-// redirect listener (anthropic/codex) vs a device-code flow (copilot).
+// redirect listener (anthropic/codex) vs a device-code flow (copilot/xAI).
 //
 // `refreshToken` accepts an optional `fetchImpl` (a drop-in for `fetch`, e.g. the
 // per-account egress proxy fetch from makeProxyFetch). The token manager threads

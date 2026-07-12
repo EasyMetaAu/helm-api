@@ -18,6 +18,7 @@ services:
       # Admin UI (docs/11; consumed in Phase 4)
       HELM_ADMIN_USER: ${HELM_ADMIN_USER:-admin}
       HELM_ADMIN_PASSWORD: ${HELM_ADMIN_PASSWORD:?set HELM_ADMIN_PASSWORD in .env}
+      HELM_OAUTH_ENC_KEY: ${HELM_OAUTH_ENC_KEY:-}
       # Upstream provider credential (env-injected, never in the repo). The PRIMARY
       # (deepseek) credential is mandatory — fail-closed if unset.
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in .env}

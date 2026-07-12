@@ -82,7 +82,7 @@ function codexCatalog(
 afterEach(() => vi.unstubAllGlobals());
 
 describe("createOAuthAdmin", () => {
-  it("lists the three built-in providers with no accounts initially", async () => {
+  it("lists all four built-in providers with xAI available by default", async () => {
     const admin = createOAuthAdmin({ store: makeStore(), encKey: KEY, config: makeConfig() });
     const status = await admin.listStatus();
     expect(status.selectionStrategy).toBe("balanced");
@@ -90,11 +90,101 @@ describe("createOAuthAdmin", () => {
       "anthropic",
       "github-copilot",
       "openai-codex",
+      "xai",
     ]);
     expect(status.providers.find((p) => p.id === "anthropic")?.flow).toBe("manual_paste");
     expect(status.providers.find((p) => p.id === "openai-codex")?.flow).toBe("manual_paste");
     expect(status.providers.find((p) => p.id === "github-copilot")?.flow).toBe("device_code");
+    expect(status.providers.find((p) => p.id === "xai")?.flow).toBe("device_code");
     expect(status.providers.every((p) => p.accounts.length === 0)).toBe(true);
+  });
+
+  it("xAI device-code: starts, polls, and persists rotating credentials encrypted", async () => {
+    const store = makeStore();
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        json({
+          token_endpoint: "https://auth.x.ai/oauth2/token",
+          device_authorization_endpoint: "https://auth.x.ai/oauth2/device/code",
+        }),
+      )
+      .mockResolvedValueOnce(
+        json({
+          device_code: "device-secret",
+          user_code: "ABCD-EFGH",
+          verification_uri: "https://auth.x.ai/activate",
+          expires_in: 600,
+          interval: 5,
+        }),
+      )
+      .mockResolvedValueOnce(json({ error: "authorization_pending" }, 400))
+      .mockResolvedValueOnce(json({ access_token: "AT", refresh_token: "RT", expires_in: 3600 }));
+    const admin = createOAuthAdmin({
+      store,
+      encKey: KEY,
+      config: makeConfig(),
+      makeFetch: () => fetchImpl,
+      now: () => 1_000,
+      genSessionId: () => "xai-session",
+    });
+
+    const start = await admin.startDeviceCode({ providerId: "xai" });
+    expect(start).toEqual({
+      sessionId: "xai-session",
+      userCode: "ABCD-EFGH",
+      verificationUri: "https://auth.x.ai/activate",
+      intervalMs: 5_000,
+      expiresAt: 601_000,
+    });
+    await expect(
+      admin.pollDeviceCode({ sessionId: start.sessionId, account: "heavy" }),
+    ).resolves.toEqual({ status: "pending" });
+    await expect(
+      admin.pollDeviceCode({ sessionId: start.sessionId, account: "heavy" }),
+    ).resolves.toEqual({ status: "done" });
+    const row = await store.get("xai", "heavy");
+    expect(decryptSecret(row?.accessEnc ?? "", KEY)).toBe("AT");
+    expect(decryptSecret(row?.refreshEnc ?? "", KEY)).toBe("RT");
+    expect(row?.meta).toContain("https://auth.x.ai/oauth2/token");
+  });
+
+  it("xAI device-code: rejects polling after the upstream device code expires", async () => {
+    let now = 1_000;
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        json({
+          token_endpoint: "https://auth.x.ai/oauth2/token",
+          device_authorization_endpoint: "https://auth.x.ai/oauth2/device/code",
+        }),
+      )
+      .mockResolvedValueOnce(
+        json({
+          device_code: "device-secret",
+          user_code: "ABCD-EFGH",
+          verification_uri: "https://auth.x.ai/activate",
+          expires_in: 10,
+          interval: 2,
+        }),
+      );
+    const admin = createOAuthAdmin({
+      store: makeStore(),
+      encKey: KEY,
+      config: makeConfig(),
+      makeFetch: () => fetchImpl,
+      now: () => now,
+      genSessionId: () => "xai-expiring-session",
+    });
+
+    const start = await admin.startDeviceCode({ providerId: "xai" });
+    expect(start).toMatchObject({ intervalMs: 2_000, expiresAt: 11_000 });
+    now = 11_000;
+
+    await expect(
+      admin.pollDeviceCode({ sessionId: start.sessionId, account: "heavy" }),
+    ).rejects.toThrow(/session not found or expired/);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
   it("manual-paste: start -> complete persists an ENCRYPTED credential", async () => {

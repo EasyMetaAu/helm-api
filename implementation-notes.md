@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-07-12 · SuperGrok/X Premium OAuth 实验性订阅 Provider（OAuth subscription / Responses / Admin providers，docs/04/09/10/11，原则 2/3/6/7/8）
+
+- **官方边界**：xAI 官方开发者 API 仍使用充值后的 `XAI_API_KEY` 与 `api.x.ai/v1`；SuperGrok 是独立的消费者订阅。官方 Grok CLI 支持 browser/device-code OAuth，公开 OIDC discovery 位于 `auth.x.ai`，但没有第三方 client registration，也没有承诺 `cli-chat-proxy.grok.com/v1` 是稳定的第三方合约。
+- **安全决策**：按用户决定不设置额外 feature flag，Provider 默认在 Admin 暴露，连接后立即参与模型目录与路由；UI 和文档仍明确标记 Experimental、仅限账户持有人个人自托管评估。不得把订阅凭证共享、转售或作为多租户公共后端；生产支持路径仍是 xAI API key，或向 xAI 申请 Helm 专用 client 与书面授权。
+- **协议实现**：clean-room 参考 MIT OpenClaw/OpenCode：OIDC discovery 结果只接受 HTTPS `x.ai`/`*.x.ai`，所有 discovery/device/token/refresh 请求禁用自动重定向，避免 `307/308` 把 device code 或 refresh token 带到非信任域。RFC 8628 device code 首次 poll 前等待上游 `interval`，`slow_down` 每次增加 5 秒，Admin/UI 透传 interval/expiry 且过期不再请求；refresh token rotation 保留未轮换旧 token，敏感响应正文不进入错误或日志。token 继续使用 Helm AES-GCM OAuthTokenStore、singleflight refresh、账号代理和 credential-failure 机制。
+- **执行与目录**：订阅 token 只发送到 `https://cli-chat-proxy.grok.com/v1`，使用 generic OpenAI Responses executor，不能继承 ChatGPT/Codex identity headers。对照本机官方 Grok CLI `0.2.93` 的运行配置与真实成功请求，推理必须发送 `X-XAI-Token-Auth: xai-grok-cli`、`x-authenticateresponse: authenticate-response`、`x-grok-client-version: 0.2.93` 和按最终 wire model 生成的 `x-grok-model-override`；缺 client version 时上游稳定返回 426。该代理多数内部模型仅接受 SSE，因此 Helm 上游固定 `stream:true/store:false`：客户端非流式 Chat/Responses 在内部聚合 SSE，对外合同不变；Chat 的合法 `response.incomplete`（例如 `max_output_tokens`）按流式/非流式一致映射为 `finish_reason:length`，native Responses 非流式仍只接受 `response.completed`。流式路径要求明确 terminal event，断流 fail-closed。模型从账号 `/models` 动态发现，禁用 redirect，并以 30 秒 timeout、外部 abort 和 1 MiB Content-Length/流式双重上限约束；发现失败返回空，不用 `api.x.ai` 公共目录伪造订阅 entitlement。没有公开 SuperGrok quota API，因此不造 Heavy 周额度或 Codex quota source。
+- **验证边界**：单元/组合测试覆盖 discovery allowlist、redirect 拒绝、bounded model discovery、device interval/expiry/slow_down、refresh rotation、加密持久化、默认 Provider 目录、动态模型、Bearer Responses 请求与无 Codex headers。真实 Docker 验证覆盖模型发现、Admin Connectivity Test、Responses 流式/非流式、tool call、`grok-4.5`、Composer、容器重启后的 token refresh 持久化，以及 Chat 流式/非流式 `response.incomplete → length`；浏览器走查确认 Providers 卡片与 Test 弹窗成功状态。Claude CLI Opus 循环审查发现并推动修复 Chat 两条 incomplete 路径，第三轮结论为 clean。
+
 ## 2026-07-11 · 上下文链耗尽恢复 Claude CLI 自动压缩信号（Provider execution / protocol errors，docs/04/05/07，原则 3/5/7/8）
 
 - **生产证据**：请求 `204c4380-b573-4556-a8c5-7be2772c2241` 的 Anthropic Messages body 为 11,152,406 bytes；所有可用候选均为 `context_too_small`，但执行层最终返回 `all_providers_failed / 502 api_error`。Claude CLI `2.1.201` 因收不到 `invalid_request_error` 和可识别的 token 上限消息，没有触发 reactive compaction。
@@ -88,18 +96,9 @@
 - **观测**：触发时写入 `request_mutations.body_shims_applied: ["reasoning_effort_none_for_chat_tools"]`，区别于“模型完全不支持 reasoning”的 `reasoning_effort_stripped_for_model`，方便 Admin 请求详情定位。
 - **验证**：新增 execute 回归测试复现 Anthropic→OpenAI Chat fallback + GPT-5.6 Luna + tools + reasoning 的组合，并覆盖客户端完全不传 reasoning 的情况；断言 tools 保留、wire body 显式发送 `reasoning_effort: "none"`。
 
-## 2026-07-10 · GPT-5.6 family support in Helm defaults（Routing / provider catalog / cost telemetry，docs/03/04/07，原则 3/4/5/6）
-
-- **官方来源**：OpenAI latest-model docs 确认 `gpt-5.6` alias routes to `gpt-5.6-sol`，并给出 `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` 三档；OpenAI Models/Pricing docs 确认 1,050,000 context、128,000 max output、Responses/Chat/Batch 支持，以及标准价 input/cache-read/cache-write/output。
-- **路由决策**：quality lanes 升级为 GPT-5.6 family：`premium/coding/tool_use` 走 verified subscription Sol，`balanced` 走 verified subscription Terra，`economy` 走 verified subscription Luna 并以 official OpenAI Luna（有 `OPENAI_API_KEY` 时）兜底，再降级到 subscription `gpt-5.4-mini` 与既有低成本链；同时新增 `gpt-5.6*` vendor-family lanes，让显式模型请求先走同家族再降级到既有质量 lane。
-- **供应链边界**：`gpt-5.6` 是 official API alias（routes to Sol），但 ChatGPT/Codex subscription backend 当前拒绝裸 `gpt-5.6`。Helm 默认 curated subscription list 包含 `openai-codex/gpt-5.6-sol` / `openai-codex/gpt-5.6-terra` / `openai-codex/gpt-5.6-luna`，显式 `gpt-5.6-luna` 与 `economy` 默认优先使用 Luna 的 OAuth 路径；operator 仍可手工增删并用 account test 验证。
-- **context 边界**：`openai/*` official API aliases 使用官方 1.05M context；`openai-codex/*` subscription aliases 继续保守使用 272K context cap，因为线上 Codex 订阅后端已有 `context_length_exceeded` 证据。这里优先避免 oversized 请求先打到必失败的订阅后端。
-- **价格决策**：telemetry pricing 使用官方标准 tier，不使用 priority tier；cache write 按 1.25x input 记录，cache read 使用折扣价。成本数据只用于观测，不参与路由选择。
-- **OpenAI wire 参数**：Responses `max_output_tokens` 经 IR 到 official OpenAI GPT-5.6 Chat wire 时必须渲染为 `max_completion_tokens`，不能沿用旧 `max_tokens`；否则 `openai/gpt-5.6-luna` 等官方 GPT-5.6 模型会返回 `unsupported_parameter`。
-- **兼容性**：Codex OAuth 仍是 curated-only（无 live list endpoint），默认 curated list 以 GPT-5.6 Sol/Terra/Luna 开头并保留 GPT-5.5/GPT-5.4/GPT-5.4-mini，管理员保存的 enabledModels 仍然是权威覆盖。`model-aliases.yaml` 同时接受 Codex App/CLI 内部 `openai.gpt-5.6-*` 名字；Responses 入口接受 Codex CLI 发出的 `reasoning:null` 并按未设置处理。
-
 ## 历史条目摘要（最近 5 条）
 
+- **2026-07-10 · GPT-5.6 family support in Helm defaults（Routing / provider catalog / cost telemetry，docs/03/04/07，原则 3/4/5/6）**：默认 lanes、能力/价格目录与 wire 参数升级到 Sol/Terra/Luna，同时保持 official API 与 Codex subscription 的 entitlement/context 边界。
 - **2026-07-06 · 请求总超时驱动下游 abort 与失败 telemetry（Gateway runtime / telemetry，docs/02/07，原则 3/5/7）**：总超时统一 abort 下游并把客户端可见终态固定为 timeout，晚到 provider 成功只保留为 attempt 事实，不得覆盖最终失败或 payload。
 - **2026-07-06 · API key 绝对模型黑名单（Key governance / routing / Admin keys，docs/04/06/11，原则 5/6/7）**：每把 key 的 exact/glob `blocked_models` 同时约束 direct、lane expansion、fallback、model list 与各协议入口，空链 fail-closed，SQLite/Postgres 与 Admin 表单保持一致。
 - **2026-07-06 · 折叠会话行显示工具调用参数预览（Admin requests / conversation view，docs/11，原则 1）**：工具参数预览改为 whitelist-free，按 args 形状泛化提取 readable scalar，覆盖自定义/大小写不同工具并保留展开详情。

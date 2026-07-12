@@ -975,5 +975,10 @@
   "Use an explicit model list. New remote models are not added until you choose them.": "Use an explicit model list. New remote models are not added until you choose them.",
   "Workspace credits depleted": "Workspace credits depleted",
   "Workspace usage limit reached": "Workspace usage limit reached",
-  "{used} of {limit} credits used": "{used} of {limit} credits used"
+  "{used} of {limit} credits used": "{used} of {limit} credits used",
+  "Authorize xAI with a one-time device code.": "Authorize xAI with a one-time device code.",
+  "Experimental": "Experimental",
+  "Experimental: use only with your own subscription. xAI does not publish a third-party OAuth contract for this flow.": "Experimental: use only with your own subscription. xAI does not publish a third-party OAuth contract for this flow.",
+  "Connect AI subscriptions": "Connect AI subscriptions",
+  "xAI/SuperGrok is also available.": "xAI/SuperGrok is also available."
 }

@@ -158,14 +158,21 @@ export interface OAuthAdminAccess {
     redirectInput: string;
     account: string;
   }): Promise<void>;
-  // Copilot device code: begin -> { userCode, verificationUri }; poll until done,
+  // Device code: begin -> { userCode, verificationUri, intervalMs, expiresAt };
+  // the client honors the provider's cadence and stops when the code expires. Poll until done,
   // then the seam mints the Copilot token and persists it. `proxy` is pinned BEFORE
   // the first device-code call so step 1 already egresses through it (issue #38).
   startDeviceCode(input: {
     providerId: string;
     enterprise?: string;
     proxy?: AccountProxyInput;
-  }): Promise<{ sessionId: string; userCode: string; verificationUri: string }>;
+  }): Promise<{
+    sessionId: string;
+    userCode: string;
+    verificationUri: string;
+    intervalMs: number;
+    expiresAt: number;
+  }>;
   pollDeviceCode(input: {
     sessionId: string;
     account: string;

@@ -20,6 +20,8 @@ function fullSeam(over: Partial<OAuthAdminAccess> = {}): OAuthAdminAccess {
       sessionId: "s2",
       userCode: "ABCD",
       verificationUri: "https://v",
+      intervalMs: 5_000,
+      expiresAt: 601_000,
     })),
     pollDeviceCode: vi.fn(async () => ({ status: "pending" as const })),
     logout: vi.fn(async () => {}),
@@ -1187,7 +1189,11 @@ describe("admin OAuth routes — connect flows", () => {
         body: JSON.stringify({ enterprise: "acme" }),
       },
     );
-    expect((await start.json()) as { userCode: string }).toMatchObject({ userCode: "ABCD" });
+    expect((await start.json()) as { userCode: string }).toMatchObject({
+      userCode: "ABCD",
+      intervalMs: 5_000,
+      expiresAt: 601_000,
+    });
     const noSess = await app({ oauth: fullSeam() }).request(
       "/admin/api/oauth/copilot/device/poll",
       {

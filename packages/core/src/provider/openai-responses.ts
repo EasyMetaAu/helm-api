@@ -99,6 +99,26 @@ export interface CodexResponsesClientDeps {
 export interface GenericOpenAIResponsesClientDeps {
   config: ProviderConfig;
   fetch?: typeof globalThis.fetch;
+  // Provider-neutral compatibility profile for Responses endpoints that only
+  // accept SSE inference requests (for example a subscription-backed proxy).
+  // Omitted by default, preserving the public OpenAI Responses contract.
+  requestContract?: GenericOpenAIResponsesRequestContract;
+}
+
+export interface GenericOpenAIResponsesRequestHeaderContext {
+  /** Final wire body after the request contract has applied its shims. */
+  body: Record<string, unknown>;
+  model: string;
+  /** Exact provider Authorization value, or an empty string when unauthenticated. */
+  authorization: string;
+}
+
+export interface GenericOpenAIResponsesRequestContract {
+  forceSse?: boolean;
+  forceStoreFalse?: boolean;
+  requestHeaders?: (
+    context: GenericOpenAIResponsesRequestHeaderContext,
+  ) => Record<string, string> | Promise<Record<string, string>>;
 }
 
 export const CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER = "x-helm-codex-responses-websocket-session";
@@ -1885,6 +1905,7 @@ export function createGenericOpenAIResponsesClient(
 ): ProviderClient {
   const doFetch = deps.fetch ?? globalThis.fetch;
   const cfg = deps.config;
+  const requestContract = deps.requestContract;
   const timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   const rootUrl = async (): Promise<string> => {
@@ -1895,19 +1916,49 @@ export function createGenericOpenAIResponsesClient(
 
   const endpoint = async (path: string): Promise<string> => `${await rootUrl()}/${path}`;
 
-  async function providerHeaders(accept = "application/json"): Promise<Record<string, string>> {
+  async function providerHeaders(
+    accept = "application/json",
+    body?: Record<string, unknown>,
+  ): Promise<Record<string, string>> {
     const authorization =
       cfg.getAuthHeader !== undefined
         ? await cfg.getAuthHeader()
         : cfg.apiKey !== undefined
           ? `Bearer ${cfg.apiKey}`
           : "";
+    const dynamicHeaders =
+      body !== undefined && requestContract?.requestHeaders !== undefined
+        ? await requestContract.requestHeaders({
+            body,
+            model: typeof body.model === "string" ? body.model : "",
+            authorization,
+          })
+        : {};
     return {
       "Content-Type": "application/json",
       accept,
       ...(authorization.length > 0 ? { Authorization: authorization } : {}),
       ...(cfg.extraHeaders ? cfg.extraHeaders() : {}),
+      ...dynamicHeaders,
     };
+  }
+
+  function applyResponsesRequestContract(body: NativePassthroughInput): NativePassthroughInput {
+    const contract = requestContract;
+    if (contract?.forceSse !== true && contract?.forceStoreFalse !== true) return body;
+    const source = isNativePassthroughCarrier(body) ? body.body : body;
+    const next = {
+      ...source,
+      ...(contract.forceSse === true ? { stream: true } : {}),
+      ...(contract.forceStoreFalse === true ? { store: false } : {}),
+    };
+    if (!isNativePassthroughCarrier(body)) return next;
+    const carrier = cloneCarrierWithBody(body, next);
+    appendMutationList(carrier.mutations, "body_shims_applied", [
+      ...(contract.forceSse === true ? ["generic_responses_force_stream"] : []),
+      ...(contract.forceStoreFalse === true ? ["generic_responses_force_store_false"] : []),
+    ]);
+    return carrier;
   }
 
   function scrub(raw: unknown): unknown {
@@ -1981,13 +2032,39 @@ export function createGenericOpenAIResponsesClient(
       accept?: string;
       signal?: AbortSignal;
       captureUpstream?: (wireBody: string) => void;
+      applyRequestContract?: boolean;
     },
   ): Promise<Response> {
-    const headers = await providerHeaders(init.accept);
+    const requestBody =
+      init.body !== undefined && init.applyRequestContract === true
+        ? applyResponsesRequestContract(init.body)
+        : init.body;
+    const finalBody =
+      requestBody === undefined
+        ? undefined
+        : isNativePassthroughCarrier(requestBody)
+          ? requestBody.body
+          : requestBody;
+    const headers = await providerHeaders(init.accept, finalBody);
     let bodyText: string | undefined;
     let requestHeaders = headers;
-    if (init.body !== undefined) {
-      const prepared = prepareNativePassthroughRequest(init.body, headers);
+    if (requestBody !== undefined) {
+      const prepared = prepareNativePassthroughRequest(requestBody, headers, {
+        // A stream-only profile must override a native carrier's stale JSON Accept.
+        ...(requestContract?.forceSse === true && init.applyRequestContract === true
+          ? {
+              preserveClientHeaders: [
+                "accept-language",
+                "originator",
+                "session_id",
+                "user-agent",
+                "x-client-request-id",
+                "x-session-id",
+              ],
+              providerProfileApplied: "generic_responses_stream_only",
+            }
+          : {}),
+      });
       requestHeaders = prepared.headers;
       bodyText = prepared.bodyText;
       // Exact Responses-native bytes POSTed upstream (post OpenAI→Responses translation
@@ -2005,11 +2082,25 @@ export function createGenericOpenAIResponsesClient(
       // Rebuild headers AFTER onUnauthorized so an OAuth provider's retry carries the
       // refreshed token — reusing the original headers would resend the expired one
       // and the refresh would never recover the request.
-      const refreshedHeaders = await providerHeaders(init.accept);
+      const refreshedHeaders = await providerHeaders(init.accept, finalBody);
       let retryHeaders = refreshedHeaders;
       let retryBodyText = bodyText;
-      if (init.body !== undefined) {
-        const prepared = prepareNativePassthroughRequest(init.body, refreshedHeaders);
+      if (requestBody !== undefined) {
+        const prepared = prepareNativePassthroughRequest(requestBody, refreshedHeaders, {
+          ...(requestContract?.forceSse === true && init.applyRequestContract === true
+            ? {
+                preserveClientHeaders: [
+                  "accept-language",
+                  "originator",
+                  "session_id",
+                  "user-agent",
+                  "x-client-request-id",
+                  "x-session-id",
+                ],
+                providerProfileApplied: "generic_responses_stream_only",
+              }
+            : {}),
+        });
         retryHeaders = prepared.headers;
         retryBodyText = prepared.bodyText;
         init.captureUpstream?.(retryBodyText);
@@ -2035,10 +2126,15 @@ export function createGenericOpenAIResponsesClient(
       const res = await requestJson("responses", {
         method: "POST",
         body: openaiToGenericResponsesRequest(req),
+        ...(requestContract?.forceSse === true ? { accept: "text/event-stream" } : {}),
         signal: opts?.signal,
         captureUpstream: opts?.captureUpstream,
+        applyRequestContract: true,
       });
       if (!res.ok) throw await errorFromResponse(res);
+      if (requestContract?.forceSse === true) {
+        return await aggregateResponsesStream(res, model, timeoutMs, { allowIncomplete: true });
+      }
       return responsesJsonToChatResponse((await res.json()) as Record<string, unknown>, model);
     },
 
@@ -2050,19 +2146,27 @@ export function createGenericOpenAIResponsesClient(
         accept: "text/event-stream",
         signal: opts?.signal,
         captureUpstream: opts?.captureUpstream,
+        applyRequestContract: true,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      yield* translateResponsesSSE(res, model, timeoutMs, { strictTerminal: false });
+      yield* translateResponsesSSE(res, model, timeoutMs, {
+        strictTerminal: requestContract?.forceSse === true,
+      });
     },
 
     async nativePassthrough(body, opts) {
       const res = await requestJson("responses", {
         method: "POST",
         body,
+        ...(requestContract?.forceSse === true ? { accept: "text/event-stream" } : {}),
         signal: opts?.signal,
         captureUpstream: opts?.captureUpstream,
+        applyRequestContract: true,
       });
       if (!res.ok) throw await errorFromResponse(res);
+      if (requestContract?.forceSse === true) {
+        return await aggregateNativeResponsesStream(res, timeoutMs);
+      }
       return (await res.json()) as Record<string, unknown>;
     },
 
@@ -2073,6 +2177,7 @@ export function createGenericOpenAIResponsesClient(
         accept: "text/event-stream",
         signal: opts?.signal,
         captureUpstream: opts?.captureUpstream,
+        applyRequestContract: true,
       });
       if (!res.ok) throw await errorFromResponse(res);
       yield* readResponsesSSERaw(res, timeoutMs);
@@ -2460,11 +2565,7 @@ export async function* translateResponsesSSE(
 
   for await (const evt of readResponsesEvents(res, idleMs)) {
     const type = evt.type;
-    if (
-      type === "error" ||
-      type === "response.failed" ||
-      (strictTerminal && type === "response.incomplete")
-    ) {
+    if (type === "error" || type === "response.failed") {
       throw responseEventError(evt);
     }
     if (!started) {
@@ -2584,11 +2685,40 @@ export async function* translateResponsesSSE(
 
 // ── aggregation: Responses SSE -> a single OpenAI-Chat response (non-stream) ──
 
+/** Aggregate a stream-only native Responses call without translating its payload.
+ * Only response.completed is a successful terminal event. Returning the embedded
+ * response object keeps native passthrough byte semantics for unary callers while
+ * still failing closed on truncated or unsuccessful streams. */
+export async function aggregateNativeResponsesStream(
+  res: Response,
+  idleMs = 0,
+): Promise<Record<string, unknown>> {
+  for await (const evt of readResponsesEvents(res, idleMs)) {
+    const type = evt.type;
+    if (type === "error" || type === "response.failed" || type === "response.incomplete") {
+      throw responseEventError(evt);
+    }
+    if (type === "response.completed") {
+      if (!isRecord(evt.response)) {
+        throw new UpstreamError(
+          "upstream_error",
+          "response.completed did not include a native response",
+          evt,
+        );
+      }
+      return evt.response;
+    }
+  }
+  throw new UpstreamError("upstream_error", "stream closed before response.completed");
+}
+
 export async function aggregateResponsesStream(
   res: Response,
   model: string,
   idleMs = 0,
+  options: { allowIncomplete?: boolean } = {},
 ): Promise<ChatCompletionResponse> {
+  const allowIncomplete = options.allowIncomplete ?? false;
   let text = "";
   let id = `chatcmpl-${Date.now()}`;
   let status: unknown = "completed";
@@ -2626,7 +2756,11 @@ export async function aggregateResponsesStream(
 
   for await (const evt of readResponsesEvents(res, idleMs)) {
     const type = evt.type;
-    if (type === "error" || type === "response.failed" || type === "response.incomplete") {
+    if (
+      type === "error" ||
+      type === "response.failed" ||
+      (type === "response.incomplete" && !allowIncomplete)
+    ) {
       throw responseEventError(evt);
     }
     if (type === "response.created") {
@@ -2680,9 +2814,9 @@ export async function aggregateResponsesStream(
             : currentCallId;
       const tc = toolById.get(eventToolId);
       if (tc && typeof evt.arguments === "string") tc.arguments = evt.arguments;
-    } else if (type === "response.completed") {
+    } else if (type === "response.completed" || type === "response.incomplete") {
       const response = (evt.response ?? {}) as Record<string, unknown>;
-      status = response.status ?? "completed";
+      status = response.status ?? (type === "response.incomplete" ? "incomplete" : "completed");
       const usage = (response.usage ?? {}) as Record<string, unknown>;
       if (typeof usage.input_tokens === "number") inTok = usage.input_tokens;
       if (typeof usage.output_tokens === "number") outTok = usage.output_tokens;

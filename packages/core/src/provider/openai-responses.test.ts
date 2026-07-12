@@ -849,7 +849,7 @@ describe("translateResponsesSSE", () => {
     }).rejects.toBe(boom);
   });
 
-  it("treats response.incomplete as an upstream error", async () => {
+  it("treats response.incomplete as a length terminal", async () => {
     const res = sseResponse([
       { type: "response.created", response: { id: "r" } },
       { type: "response.output_text.delta", delta: "partial" },
@@ -862,13 +862,15 @@ describe("translateResponsesSSE", () => {
         },
       },
     ]);
-    await expect(async () => {
-      for await (const _ of translateResponsesSSE(res, "gpt-5.5")) {
-        // drain
-      }
-    }).rejects.toMatchObject({
-      message: "Incomplete response returned, reason: max_output_tokens",
-    });
+    const chunks: string[] = [];
+    for await (const chunk of translateResponsesSSE(res, "gpt-5.5")) chunks.push(chunk);
+
+    const joined = chunks.join("");
+    expect(joined).toContain('"content":"partial"');
+    expect(joined).toContain('"finish_reason":"length"');
+    expect(joined).toContain('"prompt_tokens":9');
+    expect(joined).toContain('"completion_tokens":4');
+    expect(joined).toContain("data: [DONE]");
   });
 
   it("maps output_item.done function calls and buffers custom tool input deltas", async () => {
@@ -3506,6 +3508,262 @@ describe("createCodexResponsesClient — passthrough methods are defined (pool f
 });
 
 describe("createGenericOpenAIResponsesClient — native passthrough", () => {
+  it("adapts a unary chat call to a stream-only upstream and aggregates its SSE", async () => {
+    let seenHeaders = new Headers();
+    let seenBody: Record<string, unknown> = {};
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://stream-only.test/v1", apiKey: "sk-test" },
+      requestContract: { forceSse: true, forceStoreFalse: true },
+      fetch: (async (_url: string, init?: RequestInit) => {
+        seenHeaders = new Headers(init?.headers);
+        seenBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return sseResponse([
+          { type: "response.created", response: { id: "resp_stream_only" } },
+          { type: "response.output_text.delta", delta: "Hello" },
+          {
+            type: "response.completed",
+            response: {
+              id: "resp_stream_only",
+              status: "completed",
+              usage: { input_tokens: 2, output_tokens: 1 },
+            },
+          },
+        ]);
+      }) as unknown as typeof fetch,
+    });
+
+    const out = await client.chatCompletion({
+      model: "grok-composer",
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    expect(seenHeaders.get("accept")).toBe("text/event-stream");
+    expect(seenBody).toMatchObject({ model: "grok-composer", stream: true, store: false });
+    expect(out).toMatchObject({
+      id: "resp_stream_only",
+      choices: [{ message: { content: "Hello" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 2, completion_tokens: 1 },
+    });
+  });
+
+  it("aggregates a truncated unary chat response as finish_reason length", async () => {
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://stream-only.test/v1", apiKey: "sk-test" },
+      requestContract: { forceSse: true, forceStoreFalse: true },
+      fetch: (async () =>
+        sseResponse([
+          { type: "response.output_text.delta", delta: "partial" },
+          {
+            type: "response.incomplete",
+            response: {
+              status: "incomplete",
+              incomplete_details: { reason: "max_output_tokens" },
+              usage: { input_tokens: 3, output_tokens: 1 },
+            },
+          },
+        ])) as unknown as typeof fetch,
+    });
+
+    const out = await client.chatCompletion({
+      model: "grok-composer",
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    expect(out).toMatchObject({
+      choices: [{ message: { content: "partial" }, finish_reason: "length" }],
+      usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+    });
+  });
+
+  it("forces stream/store on both streaming methods and rebuilds model-aware headers after 401", async () => {
+    let token = "old";
+    const calls: Array<{ headers: Headers; body: Record<string, unknown> }> = [];
+    const requestHeaders = vi.fn(
+      ({ model, authorization }: { model: string; authorization: string }) => ({
+        "x-upstream-model": model,
+        "x-auth-snapshot": authorization,
+      }),
+    );
+    const client = createGenericOpenAIResponsesClient({
+      config: {
+        baseUrl: "https://stream-only.test/v1",
+        getAuthHeader: async () => `Bearer ${token}`,
+        onUnauthorized: () => {
+          token = "new";
+        },
+      },
+      requestContract: { forceSse: true, forceStoreFalse: true, requestHeaders },
+      fetch: (async (_url: string, init?: RequestInit) => {
+        const headers = new Headers(init?.headers);
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        calls.push({ headers, body });
+        if (headers.get("authorization") === "Bearer old") {
+          return jsonResponse({ error: "expired" }, 401);
+        }
+        return sseResponse([
+          { type: "response.created", response: { id: "r" } },
+          { type: "response.completed", response: { id: "r", status: "completed" } },
+        ]);
+      }) as unknown as typeof fetch,
+    });
+
+    for await (const _ of client.chatCompletionStream({
+      model: "grok-chat",
+      messages: [],
+      stream: false,
+      store: true,
+    })) {
+      // consume
+    }
+    for await (const _ of client.nativePassthroughStream?.({
+      model: "grok-native",
+      input: "hi",
+      stream: false,
+      store: true,
+    }) ?? []) {
+      // consume
+    }
+
+    expect(calls).toHaveLength(3);
+    expect(calls.map((call) => call.body)).toEqual([
+      expect.objectContaining({ model: "grok-chat", stream: true, store: false }),
+      expect.objectContaining({ model: "grok-chat", stream: true, store: false }),
+      expect.objectContaining({ model: "grok-native", stream: true, store: false }),
+    ]);
+    expect(calls[0]?.headers.get("x-auth-snapshot")).toBe("Bearer old");
+    expect(calls[1]?.headers.get("x-auth-snapshot")).toBe("Bearer new");
+    expect(calls[1]?.headers.get("x-upstream-model")).toBe("grok-chat");
+    expect(calls[2]?.headers.get("x-upstream-model")).toBe("grok-native");
+    expect(requestHeaders).toHaveBeenCalledTimes(3);
+    expect(requestHeaders).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        model: "grok-chat",
+        authorization: "Bearer old",
+        body: expect.objectContaining({ stream: true, store: false }),
+      }),
+    );
+  });
+
+  it("fails closed when a stream-only chat upstream ends without response.completed", async () => {
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://stream-only.test/v1", apiKey: "sk-test" },
+      requestContract: { forceSse: true, forceStoreFalse: true },
+      fetch: (async () =>
+        sseResponse([
+          { type: "response.output_text.delta", delta: "partial" },
+        ])) as unknown as typeof fetch,
+    });
+
+    const consume = async () => {
+      for await (const _ of client.chatCompletionStream({
+        model: "grok-chat",
+        messages: [{ role: "user", content: "hi" }],
+      })) {
+        // consume
+      }
+    };
+    await expect(consume()).rejects.toMatchObject({
+      message: "stream closed before response.completed",
+    });
+  });
+
+  it("finishes a stream-only chat with length when the upstream reports response.incomplete", async () => {
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://stream-only.test/v1", apiKey: "sk-test" },
+      requestContract: { forceSse: true, forceStoreFalse: true },
+      fetch: (async () =>
+        sseResponse([
+          { type: "response.output_text.delta", delta: "partial" },
+          {
+            type: "response.incomplete",
+            response: {
+              status: "incomplete",
+              incomplete_details: { reason: "max_output_tokens" },
+              usage: { input_tokens: 3, output_tokens: 1 },
+            },
+          },
+        ])) as unknown as typeof fetch,
+    });
+
+    const chunks: string[] = [];
+    for await (const chunk of client.chatCompletionStream({
+      model: "grok-chat",
+      messages: [{ role: "user", content: "hi" }],
+    })) {
+      chunks.push(chunk);
+    }
+
+    const joined = chunks.join("");
+    expect(joined).toContain('"content":"partial"');
+    expect(joined).toContain('"finish_reason":"length"');
+    expect(joined).toContain('"prompt_tokens":3');
+    expect(joined).toContain('"completion_tokens":1');
+    expect(joined).toContain("data: [DONE]");
+  });
+
+  it("aggregates native SSE and clears stale raw carrier bytes after body shims", async () => {
+    let seenBody: Record<string, unknown> = {};
+    let seenHeaders = new Headers();
+    const carrier = {
+      protocol: "openai_responses" as const,
+      body: { model: "grok-native", input: "hi", stream: false, store: true },
+      raw_body: '{"stale":true}',
+      headers: { accept: "application/json" },
+      mutations: {},
+    };
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://stream-only.test/v1", apiKey: "sk-test" },
+      requestContract: { forceSse: true, forceStoreFalse: true },
+      fetch: (async (_url: string, init?: RequestInit) => {
+        seenHeaders = new Headers(init?.headers);
+        seenBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return sseResponse([
+          { type: "response.created", response: { id: "r" } },
+          {
+            type: "response.completed",
+            response: { id: "r", object: "response", status: "completed", output: [] },
+          },
+        ]);
+      }) as unknown as typeof fetch,
+    });
+
+    const out = await client.nativePassthrough?.(carrier);
+
+    expect(seenBody).toEqual({
+      model: "grok-native",
+      input: "hi",
+      stream: true,
+      store: false,
+    });
+    expect(seenHeaders.get("accept")).toBe("text/event-stream");
+    expect(out).toEqual({
+      id: "r",
+      object: "response",
+      status: "completed",
+      output: [],
+    });
+    expect(carrier.raw_body).toBe('{"stale":true}');
+    expect(carrier.mutations).toEqual({});
+  });
+
+  it.each([
+    [[{ type: "error", message: "bad request" }]],
+    [[{ type: "response.failed", response: { error: { message: "failed" } } }]],
+    [[{ type: "response.incomplete", response: { incomplete_details: { reason: "limit" } } }]],
+    [[{ type: "response.created", response: { id: "no-terminal" } }]],
+  ])("fails closed when native stream has an error or no completed terminal event", async (events) => {
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://stream-only.test/v1", apiKey: "sk-test" },
+      requestContract: { forceSse: true, forceStoreFalse: true },
+      fetch: (async () => sseResponse(events)) as unknown as typeof fetch,
+    });
+
+    await expect(
+      client.nativePassthrough?.({ model: "grok-native", input: "hi" }),
+    ).rejects.toBeInstanceOf(UpstreamError);
+  });
+
   it("forwards generic Responses bodies without Codex-only defaults or headers", async () => {
     const body = {
       model: "gpt-5.5",

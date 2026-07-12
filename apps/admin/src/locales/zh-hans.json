@@ -975,5 +975,10 @@
   "Use an explicit model list. New remote models are not added until you choose them.": "使用明确的模型列表。新远程模型只有在你选择后才会添加。",
   "Workspace credits depleted": "工作区额度已用尽",
   "Workspace usage limit reached": "已达到工作区用量限制",
-  "{used} of {limit} credits used": "已使用 {used} / {limit} 额度"
+  "{used} of {limit} credits used": "已使用 {used} / {limit} 额度",
+  "Authorize xAI with a one-time device code.": "使用一次性设备代码授权 xAI。",
+  "Experimental": "实验性",
+  "Experimental: use only with your own subscription. xAI does not publish a third-party OAuth contract for this flow.": "实验性功能：仅限使用你自己的订阅。xAI 未公开此流程的第三方 OAuth 合约。",
+  "Connect AI subscriptions": "连接 AI 订阅",
+  "xAI/SuperGrok is also available.": "同时支持 xAI/SuperGrok。"
 }

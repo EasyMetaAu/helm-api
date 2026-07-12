@@ -10,6 +10,7 @@ import {
   setAccountModels,
   setAccountSchedule,
   setSelectionStrategy,
+  startDeviceCode,
   startManualPaste,
 } from './oauth.js';
 
@@ -108,6 +109,27 @@ describe('admin oauth api client', () => {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ selectionStrategy: 'use_expiring' }),
+    });
+  });
+
+  it('preserves the server device-code polling interval and expiry', async () => {
+    const fetchFn = vi.fn(async () =>
+      resp({
+        sessionId: 'xai-session',
+        userCode: 'ABCD-EFGH',
+        verificationUri: 'https://auth.x.ai/activate',
+        intervalMs: 7000,
+        expiresAt: 123456,
+      }),
+    );
+    vi.stubGlobal('fetch', fetchFn);
+
+    await expect(startDeviceCode('xai')).resolves.toEqual({
+      sessionId: 'xai-session',
+      userCode: 'ABCD-EFGH',
+      verificationUri: 'https://auth.x.ai/activate',
+      intervalMs: 7000,
+      expiresAt: 123456,
     });
   });
 

@@ -140,6 +140,34 @@ describe('providers page', () => {
     setSelectionStrategy.mockResolvedValue(undefined);
   });
 
+  it('labels the Grok subscription provider as experimental', () => {
+    renderPage({
+      providers: [
+        provider({
+          id: 'xai',
+          name: 'xAI (SuperGrok/X Premium) · Experimental',
+          flow: 'device_code',
+          accounts: [
+            {
+              account: 'heavy',
+              expiresAt: null,
+              updatedAt: Date.now(),
+              healthy: true,
+              priority: 50,
+              schedulable: true,
+              proxy: null,
+              models: ['grok-composer-2.5-fast'],
+            },
+          ],
+        }),
+      ],
+      usage: [],
+      quota: [],
+    });
+    expect(screen.getByText('Grok · OAuth · Experimental')).toBeInTheDocument();
+    expect(screen.queryByText('GitHub Enterprise domain (optional)')).not.toBeInTheDocument();
+  });
+
   it('renders connected subscription accounts with usage, quota, and scheduling controls', () => {
     renderPage();
 

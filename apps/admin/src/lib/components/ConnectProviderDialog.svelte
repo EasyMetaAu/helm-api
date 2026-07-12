@@ -73,6 +73,7 @@
   // code to copy (no dead-localhost redirect), so its copy/paste wording differs from
   // the other manual-paste provider (Codex), which still pastes a redirect URL.
   let isAnthropic = $derived(providerId === 'anthropic');
+  let isXai = $derived(providerId === 'xai');
 
   // Suggest a unique label for the chosen provider: first is "default", then
   // account-2, account-3… (used when the operator leaves the field blank).
@@ -106,14 +107,18 @@
         step = 'manual';
         window.open(s.authorizeUrl, '_blank', 'noopener');
       } else {
-        const s = await startDeviceCode(providerId, enterprise.trim() || undefined, proxy ?? undefined);
+        const s = await startDeviceCode(
+          providerId,
+          enterprise.trim() || undefined,
+          proxy ?? undefined,
+        );
         sessionId = s.sessionId;
         userCode = s.userCode;
         verificationUri = s.verificationUri;
         account = acct;
         step = 'device';
         window.open(s.verificationUri, '_blank', 'noopener');
-        void poll(s.sessionId);
+        void poll(s.sessionId, s.intervalMs, s.expiresAt);
       }
     } catch (e) {
       error = msg(e);
@@ -136,10 +141,14 @@
     }
   }
 
-  async function poll(sid: string): Promise<void> {
+  async function poll(sid: string, initialDelayMs: number, expiresAt: number): Promise<void> {
+    let delayMs = initialDelayMs;
     while (step === 'device' && sessionId === sid) {
-      await new Promise((r) => setTimeout(r, 5000));
+      const remainingMs = expiresAt - Date.now();
+      if (remainingMs <= 0) break;
+      await new Promise((r) => setTimeout(r, Math.min(delayMs, remainingMs)));
       if (step !== 'device' || sessionId !== sid) break;
+      if (Date.now() >= expiresAt) break;
       try {
         const { status } = await pollDeviceCode(providerId, { sessionId: sid, account });
         if (status === 'done') {
@@ -147,6 +156,7 @@
           onclose();
           break;
         }
+        if (status === 'slow_down') delayMs += 5000;
       } catch (e) {
         error = msg(e);
         break;
@@ -173,7 +183,9 @@
         </select>
         <span class="field-help">
           {#if selected?.flow !== 'manual_paste'}
-            {$t('Enter a one-time device code on GitHub to authorize.')}
+            {isXai
+              ? $t('Authorize xAI with a one-time device code.')
+              : $t('Enter a one-time device code on GitHub to authorize.')}
           {:else if isAnthropic}
             {$t('Sign in in your browser, then paste the authorization code back here.')}
           {:else}
@@ -181,6 +193,17 @@
           {/if}
         </span>
       </label>
+
+      {#if isXai}
+        <p
+          class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-900"
+          role="note"
+        >
+          {$t(
+            'Experimental: use only with your own subscription. xAI does not publish a third-party OAuth contract for this flow.',
+          )}
+        </p>
+      {/if}
 
       <label class="flex flex-col gap-1 text-sm">
         <span class="field-label">{$t('Account label')}</span>
@@ -190,7 +213,7 @@
         </span>
       </label>
 
-      {#if selected?.flow === 'device_code'}
+      {#if selected?.flow === 'device_code' && providerId === 'github-copilot'}
         <label class="flex flex-col gap-1 text-sm">
           <span class="field-label">{$t('GitHub Enterprise domain (optional)')}</span>
           <input
@@ -211,7 +234,9 @@
         </label>
         {#if useProxy}
           <span class="field-help">
-            {$t("Routes the gateway's calls to this provider (token exchange, refresh, API traffic) and is saved to this account. The sign-in page you open in your browser is not proxied.")}
+            {$t(
+              "Routes the gateway's calls to this provider (token exchange, refresh, API traffic) and is saved to this account. The sign-in page you open in your browser is not proxied.",
+            )}
           </span>
           <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <label class="flex flex-col gap-1 text-sm">
@@ -277,7 +302,9 @@
       class="input mt-2 font-mono text-xs"
       rows="2"
       bind:value={paste}
-      placeholder={isAnthropic ? $t('Paste the authorization code') : 'http://localhost/...?code=…&state=…'}
+      placeholder={isAnthropic
+        ? $t('Paste the authorization code')
+        : 'http://localhost/...?code=…&state=…'}
     ></textarea>
     <div class="mt-4 flex justify-end gap-2">
       <button type="button" class="btn-secondary" onclick={onclose}>{$t('Cancel')}</button>

@@ -60,6 +60,7 @@ export {
   isRetiredOpenAICodexLimit,
   isRetiredOpenAICodexModel,
   listOpenAICodexModels,
+  listXaiOAuthModels,
   OpenAICodexModelsError,
   type OpenAICodexModelsOptions,
   type OpenAICodexModelsResult,
@@ -120,3 +121,20 @@ export {
   windowsToActiveUsageRecovery,
   windowsToUsageLimit,
 } from "./usage-limit.js";
+export {
+  beginXaiDeviceLogin,
+  isTrustedXaiOAuthEndpoint,
+  loginXai,
+  pollXaiDeviceOnce,
+  refreshXaiOAuthToken,
+  XAI_GROK_CLIENT_VERSION,
+  XAI_GROK_OAUTH_BASE_URL,
+  XAI_OAUTH_CLIENT_ID,
+  XAI_OAUTH_DISCOVERY_URL,
+  XAI_OAUTH_ISSUER,
+  XAI_OAUTH_SCOPE,
+  type XaiDevicePollResult,
+  type XaiDeviceStart,
+  xaiGrokInferenceHeaders,
+  xaiOAuthProvider,
+} from "./xai.js";

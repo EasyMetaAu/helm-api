@@ -338,6 +338,14 @@ Quota signals are soft scoring inputs: stale or missing quota falls back to the 
 
 Everything hot-reloads — connect, disconnect, curation, proxy, scheduling — next request, no restart. Helm also mirrors each official client's identity headers and sends a **stable per-account device identity** (never rotated mid-stream) to reduce ban-correlation risk.
 
+#### Experimental SuperGrok/X Premium OAuth
+
+Helm exposes the device-code flow used by xAI's own Grok CLI. Set `HELM_OAUTH_ENC_KEY`, then choose **xAI (SuperGrok/X Premium) · Experimental** under **Providers → Connect**. Helm discovers OAuth endpoints from `https://auth.x.ai`, stores rotating tokens encrypted, discovers entitled models from `https://cli-chat-proxy.grok.com/v1/models`, and uses the generic Responses transport at that subscription proxy. No static `providers.yaml` entry or feature flag is required.
+
+xAI documents OAuth/device-code login for its own Grok CLI, but does **not** publish third-party OAuth client registration or a stable third-party contract for the CLI client ID and subscription proxy. SuperGrok is also separate from prepaid xAI API credits. The provider is available by default but remains visibly labeled **Experimental**. Use it only with your own account for personal self-hosted evaluation; do not share, resell, or expose it to unrelated tenants. For a supported production integration, use an `XAI_API_KEY` with `https://api.x.ai/v1`, or obtain a Helm-specific OAuth client and written permission from xAI.
+
+There is no public SuperGrok quota API contract, so Helm intentionally shows no fabricated quota window or Heavy allowance. A real account smoke test is required after every upstream contract change.
+
 > ⚠️ **Terms of service.** Routing a Claude/ChatGPT/Copilot **subscription** through a third-party gateway may violate the provider's ToS and can get accounts suspended. This is an opt-in feature for self-hosted personal use — **you are responsible** for compliance with your provider agreements. When in doubt, use a normal API key (`api_key_env`).
 
 ## Development

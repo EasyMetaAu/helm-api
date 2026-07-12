@@ -610,6 +610,20 @@ describe("HelmConfigSchema", () => {
     expect(oauth && isOAuthPreset(oauth) && oauth.account).toBe("work");
   });
 
+  it("accepts an xAI SuperGrok subscription preset", () => {
+    const cfg = fullConfig() as Record<string, unknown>;
+    cfg.providers = [
+      {
+        name: "grok-subscription",
+        type: "openai-responses-generic",
+        oauth: { provider: "xai", account: "heavy" },
+        models: [{ alias: "xai/grok", provider_model: "grok-composer-2.5-fast" }],
+      },
+    ];
+    const parsed = HelmConfigSchema.parse(cfg);
+    expect(parsed.providers[0]?.oauth).toEqual({ provider: "xai", account: "heavy" });
+  });
+
   it("rejects an unknown preset provider (fail-closed)", () => {
     const cfg = fullConfig() as Record<string, unknown>;
     cfg.providers = [{ name: "x", type: "openai", oauth: { provider: "midjourney" } }];
