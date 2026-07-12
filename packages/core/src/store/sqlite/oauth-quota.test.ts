@@ -103,6 +103,17 @@ describe("SqliteOAuthQuotaStore", () => {
     close();
   });
 
+  it("marks a synthetic xAI cooldown row with the honest source", async () => {
+    const { store, close } = freshStore();
+    await store.setUsageLimit("xai", "subscription", 5_000);
+    expect(await store.get("xai", "subscription")).toMatchObject({
+      source: "xai",
+      usageLimitedUntilMs: 5_000,
+      windows: [],
+    });
+    close();
+  });
+
   it("a window-snapshot upsert PRESERVES an active cooldown (does not clobber it)", async () => {
     const { store, close } = freshStore();
     await store.setUsageLimit("anthropic", "a", 9_000);

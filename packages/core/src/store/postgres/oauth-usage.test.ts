@@ -164,4 +164,16 @@ describe("PgOAuthQuotaStore (pglite)", () => {
     expect((await store.get("openai-codex", "fresh"))?.usageLimitedUntilMs).toBeNull();
     await db.$close();
   });
+
+  it("marks a synthetic xAI cooldown row with the honest source", async () => {
+    const db: PgDb = await createPgliteDb();
+    const store = new PgOAuthQuotaStore(db);
+    await store.setUsageLimit("xai", "subscription", 9_000);
+    expect(await store.get("xai", "subscription")).toMatchObject({
+      source: "xai",
+      usageLimitedUntilMs: 9_000,
+      windows: [],
+    });
+    await db.$close();
+  });
 });

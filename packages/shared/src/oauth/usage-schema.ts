@@ -127,7 +127,8 @@ export type CodexRateLimitReachedType = z.infer<typeof CodexRateLimitReachedType
 
 // The latest snapshot for one account: its windows + when/how it was captured.
 // `source` records HOW the snapshot was obtained (anthropic = on-demand usage
-// endpoint PULL; codex-headers = response-header PUSH) so the UI can show honest
+// endpoint PULL; xai = Grok website gRPC-Web PULL; codex-headers = response-header
+// PUSH) so the UI can show honest
 // "as of last request" staleness. `usageLimitedUntilMs` is the AUTO-PARK cooldown:
 // the epoch ms until which the account is removed from the scheduling pool because
 // it hit its usage/rate limit (null = not limited). It is the runtime twin of the
@@ -140,7 +141,7 @@ export const OAuthQuotaSnapshotSchema = z
     account: z.string(),
     windows: z.array(OAuthQuotaWindowSchema),
     capturedAt: z.number().int(), // epoch ms the snapshot was taken
-    source: z.enum(["anthropic", "codex-headers", "codex"]),
+    source: z.enum(["anthropic", "codex-headers", "codex", "xai"]),
     usageLimitedUntilMs: z.number().int().nullable().default(null),
     // Codex only: how many rate-limit reset credits are available at capture time.
     // Optional because Anthropic has no equivalent and older rows predate this field.

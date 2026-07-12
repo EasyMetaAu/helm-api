@@ -57,6 +57,10 @@ describe("OAuthQuotaSnapshotSchema — usageLimitedUntilMs", () => {
     expect(parsed.windows[0]?.usedPercent).toBe(125.5);
   });
 
+  it("accepts xAI website quota snapshots", () => {
+    expect(OAuthQuotaSnapshotSchema.parse({ ...base, source: "xai" }).source).toBe("xai");
+  });
+
   it("parses the complete Codex quota endpoint metadata", () => {
     const parsed = OAuthQuotaSnapshotSchema.parse({
       ...base,

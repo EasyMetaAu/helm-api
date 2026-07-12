@@ -5,6 +5,7 @@ import {
   beginOpenAICodexLogin,
   beginXaiDeviceLogin,
   buildOpenAICodexUserAgent,
+  buildXaiGrokCreditsRequest,
   type ConfigStore,
   type CopilotDeviceStart,
   completeAnthropicLogin,
@@ -29,6 +30,7 @@ import {
   parseCodexResetCredits,
   parseCodexResetResult,
   parseOpenAICodexIdentity,
+  parseXaiGrokCreditsResponse,
   pollCopilotDeviceOnce,
   pollXaiDeviceOnce,
   refreshGitHubCopilotToken,
@@ -101,6 +103,13 @@ const QUOTA_FETCH_TIMEOUT_MS = 8_000;
 const RESET_CREDIT_DETAILS_TIMEOUT_MS = 5_000;
 const RESET_CREDIT_CONSUME_TIMEOUT_MS = 10_000;
 const ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
+const XAI_GROK_CREDITS_URL = "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig";
+const XAI_GROK_CREDITS_HEADERS = {
+  accept: "application/grpc-web+proto",
+  "content-type": "application/grpc-web+proto",
+  "x-grpc-web": "1",
+} as const;
+const XAI_GROK_CREDITS_MAX_RESPONSE_BYTES = 1024 * 1024;
 const ANTHROPIC_USAGE_HEADERS = {
   "anthropic-beta": "oauth-2025-04-20",
   "user-agent": "claude-cli/2.0.53 (external, cli)",
@@ -138,6 +147,39 @@ interface CodexQuotaCacheValue {
   individualLimit?: CodexIndividualLimitView | null;
   planType?: string | null;
   rateLimitReachedType?: CodexRateLimitReachedType | null;
+}
+
+async function readBoundedBinaryResponse(
+  response: Response,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error(`quota response exceeds ${maxBytes} bytes`);
+  }
+  if (!response.body) return new Uint8Array();
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw new Error(`quota response exceeds ${maxBytes} bytes`);
+    }
+    chunks.push(value);
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
 }
 
 function codexResetCreditDetails(body: unknown): {
@@ -424,7 +466,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     };
   }
   const sessions = new Map<string, Session>();
-  // Per-account Anthropic quota cache (5-min TTL): key `anthropic <account>`.
+  // Per-account provider quota cache (5-min TTL): key `<provider> <account>`.
   // Caches the OUTCOME of a usage fetch — windows on success, `null` on failure —
   // so a rate-limited/erroring endpoint is NOT retried until the TTL lapses
   // (negative caching). The providers page is the only caller and triggers this on
@@ -433,6 +475,12 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
   // SAME /wham/usage PULL, so caching them together avoids a second round-trip.
   // undefined for the Anthropic path (which has no such grant).
   const quotaCache = new Map<string, CodexQuotaCacheValue>();
+  const quotaCacheEpoch = new Map<string, number>();
+  const invalidateQuotaCache = (providerId: string, account: string): void => {
+    const key = `${providerId} ${account}`;
+    quotaCache.delete(key);
+    quotaCacheEpoch.set(key, (quotaCacheEpoch.get(key) ?? 0) + 1);
+  };
 
   async function codexCatalogModels(
     account: string,
@@ -569,6 +617,10 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       meta: metaFrom(creds),
       updatedAt: now(),
     });
+    // A reconnect may reuse the same operator-facing label for a different
+    // upstream identity. Never let that new credential inherit the old identity's
+    // positive OR negative quota cache entry.
+    invalidateQuotaCache(providerId, account);
     modelDiscoveryCache.invalidate({ providerId, account });
   }
 
@@ -849,6 +901,10 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
 
     async logout({ providerId, account }) {
       await deps.store.delete(providerId, account);
+      // Invalidate immediately after the credential delete succeeds. A later
+      // settings cleanup failure must not leave quota attached to a logged-out
+      // identity or a future same-name reconnect.
+      invalidateQuotaCache(providerId, account);
       await clearAccountSettings(deps.config, deps.encKey, providerId, account);
       modelDiscoveryCache.invalidate({ providerId, account });
     },
@@ -995,6 +1051,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       const key = `${ANTHROPIC}${" "}${account}`;
       const cached = quotaCache.get(key);
       if (cached && now() - cached.at < QUOTA_TTL_MS) return cached.windows;
+      const epoch = quotaCacheEpoch.get(key) ?? 0;
       const provider = getOAuthProvider(ANTHROPIC);
       if (!provider) return null;
       let windows: OAuthQuotaWindow[] | null = null;
@@ -1053,6 +1110,66 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       }
       // Cache the outcome (success OR failure) so the next page open within the TTL
       // is served from memory rather than re-hitting the rate-limited endpoint.
+      if ((quotaCacheEpoch.get(key) ?? 0) !== epoch) return null;
+      quotaCache.set(key, { at: now(), windows });
+      return windows;
+    },
+
+    async fetchXaiQuota({ account }): Promise<OAuthQuotaWindow[] | null> {
+      const key = `${XAI} ${account}`;
+      const cached = quotaCache.get(key);
+      if (cached && now() - cached.at < QUOTA_TTL_MS) return cached.windows;
+      const epoch = quotaCacheEpoch.get(key) ?? 0;
+      const provider = getOAuthProvider(XAI);
+      if (!provider) return null;
+
+      let windows: OAuthQuotaWindow[] | null = null;
+      try {
+        const proxy = getAccountSettings(
+          await loadAccountSettings(deps.config, deps.encKey),
+          XAI,
+          account,
+        ).proxy as ProxyConfig | undefined;
+        const doFetch = makeFetch(proxy);
+        const tm = createTokenManager({
+          oauth: { kind: "preset", providerId: XAI, account },
+          tokenStore: deps.store,
+          encKey: deps.encKey,
+          oauthProvider: provider,
+          fetch: doFetch,
+          now,
+        });
+        const authorization = await tm.getAuthHeader();
+        const res = await doFetch(XAI_GROK_CREDITS_URL, {
+          method: "POST",
+          headers: { ...XAI_GROK_CREDITS_HEADERS, authorization },
+          body: buildXaiGrokCreditsRequest({ excludeLegacyMonthlyUsage: true }),
+          redirect: "error",
+          signal: AbortSignal.timeout(QUOTA_FETCH_TIMEOUT_MS),
+        });
+        if (res.ok) {
+          const body = await readBoundedBinaryResponse(res, XAI_GROK_CREDITS_MAX_RESPONSE_BYTES);
+          windows = parseXaiGrokCreditsResponse(body, now());
+          if (windows.length === 0) {
+            log("warn", "oauth.quota.pull_empty", { provider_id: XAI, account });
+          }
+        } else {
+          await res.body?.cancel().catch(() => {});
+          log("warn", "oauth.quota.pull_failed", {
+            provider_id: XAI,
+            account,
+            status: res.status,
+          });
+        }
+      } catch (e) {
+        windows = null;
+        log("warn", "oauth.quota.pull_failed", {
+          provider_id: XAI,
+          account,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+      if ((quotaCacheEpoch.get(key) ?? 0) !== epoch) return null;
       quotaCache.set(key, { at: now(), windows });
       return windows;
     },
@@ -1080,6 +1197,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         };
         return result;
       }
+      const epoch = quotaCacheEpoch.get(key) ?? 0;
       const provider = getOAuthProvider(CODEX);
       if (!provider) return null;
       let windows: OAuthQuotaWindow[] | null = null;
@@ -1172,6 +1290,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           error: e instanceof Error ? e.message : String(e),
         });
       }
+      if ((quotaCacheEpoch.get(key) ?? 0) !== epoch) return null;
       quotaCache.set(key, {
         at: now(),
         windows,
@@ -1288,7 +1407,9 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       // (Anthropic keys use a different prefix and are untouched.) Snapshot the keys
       // first to avoid mutating the Map mid-iteration.
       for (const key of [...quotaCache.keys()]) {
-        if (key.startsWith(`${CODEX} `)) quotaCache.delete(key);
+        if (key.startsWith(`${CODEX} `)) {
+          invalidateQuotaCache(CODEX, key.slice(CODEX.length + 1));
+        }
       }
       return {
         code: result.code,

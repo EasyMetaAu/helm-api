@@ -347,7 +347,7 @@ export const oauthQuota = pgTable(
     account: text("account").notNull(),
     windows: jsonb("windows").$type<unknown[]>().notNull(), // OAuthQuotaWindow[]
     capturedAt: bigint("captured_at", { mode: "number" }).notNull(),
-    source: text("source").notNull(), // 'anthropic' | 'codex' | 'codex-headers'
+    source: text("source").notNull(), // 'anthropic' | 'xai' | 'codex' | 'codex-headers'
     // Auto-park cooldown: epoch ms until which the account is removed from the
     // scheduling pool (null = not limited). Runtime twin of `windows`; the "Reset
     // usage" action sets it back to null.

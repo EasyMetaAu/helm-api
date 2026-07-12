@@ -164,6 +164,20 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     code: "not_applied",
   } as const;
 
+  // A credential replacement may keep the same operator-facing account label but
+  // represent a different upstream identity. Remove the old identity's durable
+  // windows/cooldown before rebuilding the live pool, otherwise startup/rebuild
+  // seeding can attach stale quota to the replacement credential.
+  const clearDurableQuota = async (providerId: string, account: string): Promise<boolean> => {
+    if (!deps.oauthQuota) return true;
+    try {
+      await deps.oauthQuota.delete(providerId, account);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   // GET /oauth -> provider catalog + which accounts are logged in (no secrets).
   app.get("/admin/api/oauth", async (c) => {
     const s = seam();
@@ -336,6 +350,39 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                     .catch(() => {});
                   deps.applyQuotaSnapshot?.("anthropic", a.account, windows, capturedAt);
                   await syncCooldownFromWindows("anthropic", a.account, windows);
+                }
+              })(),
+            );
+          }
+        }
+        // xAI: the Grok subscription usage endpoint also yields normalized windows
+        // only. Keep the same best-effort semantics as Anthropic: a missing/empty
+        // snapshot leaves the previous stored value intact, while a successful PULL
+        // feeds both the durable store and the live pool's quota/cooldown view.
+        const fetchXai = s.fetchXaiQuota;
+        if (fetchXai) {
+          for (const a of acctsOf("xai")) {
+            tasks.push(
+              (async () => {
+                try {
+                  const windows = await fetchXai({ account: a.account });
+                  if (windows && windows.length > 0) {
+                    const capturedAt = Date.now();
+                    await store
+                      .upsert({
+                        providerId: "xai",
+                        account: a.account,
+                        windows,
+                        capturedAt,
+                        source: "xai",
+                      })
+                      .catch(() => {});
+                    deps.applyQuotaSnapshot?.("xai", a.account, windows, capturedAt);
+                    await syncCooldownFromWindows("xai", a.account, windows);
+                  }
+                } catch {
+                  // One dead xAI token must not short-circuit refreshes for other
+                  // providers/accounts; the route returns the last stored snapshot.
                 }
               })(),
             );
@@ -587,11 +634,15 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       return c.json({ error: "sessionId and redirectInput are required" }, 400);
     }
     try {
+      const providerId = c.req.param("provider");
+      const account =
+        typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT;
       await s.completeManualPaste({
         sessionId: body.sessionId,
         redirectInput: body.redirectInput,
-        account: typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT,
+        account,
       });
+      if (!(await clearDurableQuota(providerId, account))) return c.json(notApplied, 503);
       // A completed login adds/refreshes an account → rebuild the routable pool.
       if (!(await afterMutation())) return c.json(notApplied, 503);
       return c.body(null, 204);
@@ -642,12 +693,18 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       return c.json({ error: "sessionId is required" }, 400);
     }
     try {
+      const providerId = c.req.param("provider");
+      const account =
+        typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT;
       const result = await s.pollDeviceCode({
         sessionId: body.sessionId,
-        account: typeof body.account === "string" && body.account ? body.account : DEFAULT_ACCOUNT,
+        account,
       });
       // Only a COMPLETED device login mutates the credential set → rebuild then.
-      if (result.status === "done") await afterMutation();
+      if (result.status === "done") {
+        if (!(await clearDurableQuota(providerId, account))) return c.json(notApplied, 503);
+        await afterMutation();
+      }
       return c.json(result);
     } catch (e) {
       return c.json({ error: errMessage(e), code: devicePollErrorCode(e) }, 400);
@@ -919,9 +976,30 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     const s = seam();
     if (!s) return c.json({ error: "oauth login not configured" }, 503);
     const account = c.req.query("account") || DEFAULT_ACCOUNT;
-    await s.logout({ providerId: c.req.param("provider"), account });
+    const providerId = c.req.param("provider");
+    let logoutError: unknown;
+    let logoutSucceeded = false;
+    try {
+      await s.logout({ providerId, account });
+      logoutSucceeded = true;
+    } catch (error) {
+      logoutError = error;
+    }
+    // Only a fully successful seam logout proves that the credential is absent.
+    // A failure may have happened before OR after token deletion, so preserve the
+    // durable quota until the next authoritative refresh instead of guessing.
+    const quotaCleared = logoutSucceeded ? await clearDurableQuota(providerId, account) : true;
     // Disconnect removes an account → rebuild so it leaves the pool immediately.
-    if (!(await afterMutation())) return c.json(notApplied, 503);
+    // This MUST run even when quota cleanup failed: the credential is already gone,
+    // while the old live member may still hold/refresh an in-memory access token.
+    // It also MUST run after an ambiguous logout failure: rebuilding from durable
+    // token truth either removes a partially-deleted account or safely retains one
+    // whose token deletion never happened.
+    const rebuilt = await afterMutation();
+    if (!logoutSucceeded) {
+      return c.json({ error: errMessage(logoutError), code: "logout_failed" }, 500);
+    }
+    if (!quotaCleared || !rebuilt) return c.json(notApplied, 503);
     return c.body(null, 204);
   });
 

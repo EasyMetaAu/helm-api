@@ -224,7 +224,7 @@ export const oauthQuota = sqliteTable(
     account: text("account").notNull(),
     windows: text("windows").notNull(), // JSON text: OAuthQuotaWindow[]
     capturedAt: integer("captured_at").notNull(),
-    source: text("source").notNull(), // 'anthropic' | 'codex' | 'codex-headers'
+    source: text("source").notNull(), // 'anthropic' | 'xai' | 'codex' | 'codex-headers'
     // Auto-park cooldown: epoch ms until which the account is removed from the
     // scheduling pool (null = not limited). The runtime twin of `windows` — the
     // scheduler gates on it; the "Reset usage" action sets it back to null.

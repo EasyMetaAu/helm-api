@@ -54,7 +54,8 @@ export class SqliteOAuthQuotaStore implements OAuthQuotaStore {
         account,
         windows: "[]",
         capturedAt: 0,
-        source: providerId === "anthropic" ? "anthropic" : "codex-headers",
+        source:
+          providerId === "anthropic" ? "anthropic" : providerId === "xai" ? "xai" : "codex-headers",
         usageLimitedUntilMs: untilMs,
         resetCredits: null,
       })

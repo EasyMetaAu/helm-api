@@ -141,3 +141,8 @@ export {
   xaiGrokProtocolHeaders,
   xaiOAuthProvider,
 } from "./xai.js";
+export {
+  buildXaiGrokCreditsRequest,
+  parseXaiGrokCreditsResponse,
+  type XaiGrokCreditsRequestOptions,
+} from "./xai-quota.js";

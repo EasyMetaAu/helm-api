@@ -184,6 +184,139 @@ describe("admin OAuth routes — read endpoints", () => {
     expect(upsert).toHaveBeenCalled(); // the PULL refreshed the store
   });
 
+  it("GET /oauth/quota refreshes xAI, updates the pool snapshot, and syncs cooldown", async () => {
+    const now = Date.now();
+    const resetAt = now + 3 * 86_400_000;
+    const windows: OAuthQuotaWindow[] = [
+      { key: "7d", usedPercent: 100, resetsAtMs: resetAt, windowMinutes: 10_080 },
+    ];
+    const rows: Array<Record<string, unknown>> = [];
+    const oauthQuota = {
+      get: vi.fn(async () => null),
+      getAll: vi.fn(async () => rows),
+      upsert: vi.fn(async (snapshot: Record<string, unknown>) => {
+        rows.splice(0, rows.length, { ...snapshot, usageLimitedUntilMs: null });
+      }),
+      delete: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const fetchXaiQuota = vi.fn(async () => windows);
+    const seam = fullSeam({
+      listStatus: vi.fn(async () => ({
+        selectionStrategy: "balanced",
+        providers: [
+          {
+            id: "xai",
+            name: "Grok",
+            accounts: [{ account: "subscription" }],
+          },
+        ],
+      })) as never,
+      fetchXaiQuota,
+    });
+    const applyQuotaSnapshot = vi.fn();
+    const applyUsageLimit = vi.fn(async () => {});
+
+    const res = await app({
+      oauth: seam,
+      oauthQuota,
+      applyQuotaSnapshot,
+      applyUsageLimit,
+    }).request("/admin/api/oauth/quota");
+
+    expect(res.status).toBe(200);
+    expect(fetchXaiQuota).toHaveBeenCalledWith({ account: "subscription" });
+    expect(oauthQuota?.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerId: "xai",
+        account: "subscription",
+        windows,
+        source: "xai",
+      }),
+    );
+    expect(applyQuotaSnapshot).toHaveBeenCalledWith(
+      "xai",
+      "subscription",
+      windows,
+      expect.any(Number),
+    );
+    expect(applyUsageLimit).toHaveBeenCalledWith("xai", "subscription", resetAt, "extend");
+    expect(await res.json()).toEqual({
+      quota: [
+        expect.objectContaining({
+          providerId: "xai",
+          account: "subscription",
+          windows,
+          source: "xai",
+        }),
+      ],
+    });
+  });
+
+  it("GET /oauth/quota fails open when xAI refresh rejects and still filters orphans", async () => {
+    const anthropicWindows: OAuthQuotaWindow[] = [
+      { key: "5h", usedPercent: 10, resetsAtMs: null, windowMinutes: 300 },
+    ];
+    const oauthQuota = {
+      get: vi.fn(async () => null),
+      getAll: vi.fn(async () => [
+        {
+          providerId: "xai",
+          account: "subscription",
+          windows: [],
+          capturedAt: 1,
+          source: "xai",
+        },
+        {
+          providerId: "xai",
+          account: "orphan",
+          windows: [],
+          capturedAt: 1,
+          source: "xai",
+        },
+      ]),
+      upsert: vi.fn(async () => {}),
+      delete: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const seam = fullSeam({
+      listStatus: vi.fn(async () => ({
+        selectionStrategy: "balanced",
+        providers: [
+          {
+            id: "anthropic",
+            name: "Anthropic",
+            accounts: [{ account: "default" }],
+          },
+          {
+            id: "xai",
+            name: "Grok",
+            accounts: [{ account: "subscription" }],
+          },
+        ],
+      })) as never,
+      fetchAnthropicQuota: vi.fn(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return anthropicWindows;
+      }) as never,
+      fetchXaiQuota: vi.fn(async () => {
+        throw new Error("upstream unavailable");
+      }),
+    });
+
+    const res = await app({ oauth: seam, oauthQuota }).request("/admin/api/oauth/quota");
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      quota: [expect.objectContaining({ providerId: "xai", account: "subscription" })],
+    });
+    expect(oauthQuota?.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: "anthropic", account: "default" }),
+    );
+    expect(oauthQuota?.upsert).not.toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: "xai" }),
+    );
+    expect(oauthQuota?.delete).toHaveBeenCalledWith("xai", "orphan");
+  });
+
   it("GET /oauth/quota extends an active cooldown to the saturated window reset", async () => {
     const now = Date.now();
     const shortCooldown = now + 60_000;
@@ -1167,6 +1300,37 @@ describe("admin OAuth routes — connect flows", () => {
     expect(seam.completeManualPaste).toHaveBeenCalledOnce();
   });
 
+  it("POST manual/complete deletes the old durable quota before rebuilding", async () => {
+    const events: string[] = [];
+    const seam = fullSeam({
+      completeManualPaste: vi.fn(async () => {
+        events.push("credential");
+      }),
+    });
+    const oauthQuota = {
+      delete: vi.fn(async () => {
+        events.push("quota-delete");
+      }),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const onOAuthMutation = vi.fn(async () => {
+      events.push("rebuild");
+      return { applied: true };
+    });
+
+    const res = await app({ oauth: seam, oauthQuota, onOAuthMutation }).request(
+      "/admin/api/oauth/anthropic/manual/complete",
+      {
+        method: "POST",
+        headers: JSONH,
+        body: JSON.stringify({ sessionId: "s1", redirectInput: "https://cb", account: "work" }),
+      },
+    );
+
+    expect(res.status).toBe(204);
+    expect(oauthQuota?.delete).toHaveBeenCalledWith("anthropic", "work");
+    expect(events).toEqual(["credential", "quota-delete", "rebuild"]);
+  });
+
   it("POST manual/complete returns 503 not_applied when the live rebuild fails", async () => {
     const onOAuthMutation = vi.fn(async () => ({ applied: false }));
     const res = await app({ oauth: fullSeam(), onOAuthMutation }).request(
@@ -1220,6 +1384,60 @@ describe("admin OAuth routes — connect flows", () => {
     );
     expect((await res.json()) as { status: string }).toEqual({ status: "done" });
     expect(onOAuthMutation).toHaveBeenCalledOnce();
+  });
+
+  it("POST device/poll done deletes the old durable quota before rebuilding", async () => {
+    const events: string[] = [];
+    const seam = fullSeam({
+      pollDeviceCode: vi.fn(async () => {
+        events.push("credential");
+        return { status: "done" as const };
+      }),
+    });
+    const oauthQuota = {
+      delete: vi.fn(async () => {
+        events.push("quota-delete");
+      }),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const onOAuthMutation = vi.fn(async () => {
+      events.push("rebuild");
+      return { applied: true };
+    });
+
+    const res = await app({ oauth: seam, oauthQuota, onOAuthMutation }).request(
+      "/admin/api/oauth/xai/device/poll",
+      {
+        method: "POST",
+        headers: JSONH,
+        body: JSON.stringify({ sessionId: "s2", account: "subscription" }),
+      },
+    );
+
+    expect(res.status).toBe(200);
+    expect(oauthQuota?.delete).toHaveBeenCalledWith("xai", "subscription");
+    expect(events).toEqual(["credential", "quota-delete", "rebuild"]);
+  });
+
+  it("does not rebuild when durable quota cleanup fails after a completed login", async () => {
+    const onOAuthMutation = vi.fn(async () => ({ applied: true }));
+    const oauthQuota = {
+      delete: vi.fn(async () => {
+        throw new Error("quota delete failed");
+      }),
+    } as unknown as AdminApiDeps["oauthQuota"];
+
+    const res = await app({ oauth: fullSeam(), oauthQuota, onOAuthMutation }).request(
+      "/admin/api/oauth/anthropic/manual/complete",
+      {
+        method: "POST",
+        headers: JSONH,
+        body: JSON.stringify({ sessionId: "s1", redirectInput: "https://cb" }),
+      },
+    );
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ code: "not_applied" });
+    expect(onOAuthMutation).not.toHaveBeenCalled();
   });
 
   it("POST device/poll returns a stable device error code", async () => {
@@ -1364,6 +1582,125 @@ describe("admin OAuth routes — mutations + validation", () => {
     expect(res.status).toBe(204);
     expect(seam.logout).toHaveBeenCalledWith({ providerId: "anthropic", account: "default" });
     expect(onOAuthMutation).toHaveBeenCalledOnce();
+  });
+
+  it("DELETE removes durable quota after logout and before rebuilding", async () => {
+    const events: string[] = [];
+    const seam = fullSeam({
+      logout: vi.fn(async () => {
+        events.push("credential");
+      }),
+    });
+    const oauthQuota = {
+      delete: vi.fn(async () => {
+        events.push("quota-delete");
+      }),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const onOAuthMutation = vi.fn(async () => {
+      events.push("rebuild");
+      return { applied: true };
+    });
+
+    const res = await app({ oauth: seam, oauthQuota, onOAuthMutation }).request(
+      "/admin/api/oauth/xai?account=subscription",
+      { method: "DELETE" },
+    );
+
+    expect(res.status).toBe(204);
+    expect(oauthQuota?.delete).toHaveBeenCalledWith("xai", "subscription");
+    expect(events).toEqual(["credential", "quota-delete", "rebuild"]);
+  });
+
+  it.each([
+    true,
+    false,
+  ])("DELETE still rebuilds after quota cleanup fails (rebuild applied: %s)", async (rebuildApplied) => {
+    const events: string[] = [];
+    const seam = fullSeam({
+      logout: vi.fn(async () => {
+        events.push("credential-delete");
+      }),
+    });
+    const oauthQuota = {
+      delete: vi.fn(async () => {
+        events.push("quota-delete");
+        throw new Error("quota delete failed");
+      }),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const onOAuthMutation = vi.fn(async () => {
+      events.push("rebuild");
+      return { applied: rebuildApplied };
+    });
+
+    const res = await app({ oauth: seam, oauthQuota, onOAuthMutation }).request(
+      "/admin/api/oauth/xai?account=subscription",
+      { method: "DELETE" },
+    );
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ code: "not_applied" });
+    expect(events).toEqual(["credential-delete", "quota-delete", "rebuild"]);
+    expect(onOAuthMutation).toHaveBeenCalledOnce();
+  });
+
+  it("DELETE rebuilds but does not clear quota when logout fails after token deletion", async () => {
+    const events: string[] = [];
+    const seam = fullSeam({
+      logout: vi.fn(async () => {
+        events.push("credential-delete");
+        throw new Error("account settings cleanup failed");
+      }),
+    });
+    const oauthQuota = {
+      delete: vi.fn(async () => {
+        events.push("quota-delete");
+      }),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const onOAuthMutation = vi.fn(async () => {
+      events.push("rebuild");
+      return { applied: false };
+    });
+
+    const res = await app({ oauth: seam, oauthQuota, onOAuthMutation }).request(
+      "/admin/api/oauth/anthropic?account=work",
+      { method: "DELETE" },
+    );
+
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({
+      error: "account settings cleanup failed",
+      code: "logout_failed",
+    });
+    expect(events).toEqual(["credential-delete", "rebuild"]);
+    expect(oauthQuota?.delete).not.toHaveBeenCalled();
+  });
+
+  it("DELETE rebuilds from durable truth when logout fails before token deletion", async () => {
+    const events: string[] = [];
+    const seam = fullSeam({
+      logout: vi.fn(async () => {
+        throw new Error("token store unavailable");
+      }),
+    });
+    const oauthQuota = {
+      delete: vi.fn(async () => {
+        events.push("quota-delete");
+      }),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const onOAuthMutation = vi.fn(async () => {
+      events.push("rebuild");
+      return { applied: true };
+    });
+
+    const res = await app({ oauth: seam, oauthQuota, onOAuthMutation }).request(
+      "/admin/api/oauth/anthropic?account=work",
+      { method: "DELETE" },
+    );
+
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "token store unavailable", code: "logout_failed" });
+    expect(events).toEqual(["rebuild"]);
+    expect(oauthQuota?.delete).not.toHaveBeenCalled();
   });
 
   it("a seam that throws maps to a 400 with the error message", async () => {

@@ -1,4 +1,5 @@
 import {
+  buildXaiGrokCreditsRequest,
   createSqliteDb,
   decryptSecret,
   encryptSecret,
@@ -1465,6 +1466,354 @@ describe("createOAuthAdmin > fetchAnthropicQuota", () => {
     expect(first?.map((w) => `${w.key}:${w.usedPercent}`)).toEqual(["5h:3", "7d:17", "7d-fable:5"]);
     expect(second).toEqual(first); // served from the warm cache
     expect(usageHits()).toBe(1);
+  });
+});
+
+describe("createOAuthAdmin > fetchXaiQuota", () => {
+  async function seedFreshXai(tokens: SqliteOAuthTokenStore): Promise<void> {
+    await tokens.upsert({
+      providerId: "xai",
+      account: "default",
+      accessEnc: encryptSecret("fresh-access", KEY),
+      refreshEnc: encryptSecret("refresh-token", KEY),
+      expiresAt: 1_000_000,
+      meta: JSON.stringify({ tokenEndpoint: "https://auth.x.ai/oauth2/token" }),
+      updatedAt: 1,
+    });
+  }
+
+  it("refreshes through the account proxy and sends Grok's gRPC-Web credits request", async () => {
+    const { tokens, config } = makeStores();
+    await tokens.upsert({
+      providerId: "xai",
+      account: "default",
+      accessEnc: encryptSecret("expired-access", KEY),
+      refreshEnc: encryptSecret("refresh-token", KEY),
+      expiresAt: 999,
+      meta: JSON.stringify({ tokenEndpoint: "https://auth.x.ai/oauth2/token" }),
+      updatedAt: 1,
+    });
+    const proxy: ProxyConfig = { type: "http", host: "proxy.test", port: 8080 };
+    await setAccountSettings(config, KEY, "xai", "default", { proxy });
+
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const routed = vi.fn(async (url: string | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      if (String(url).includes("/oauth2/token")) {
+        return json({ access_token: "fresh-access", expires_in: 3600 });
+      }
+      if (String(url).includes("GetGrokCreditsConfig")) {
+        return new Response(
+          Uint8Array.from(
+            Buffer.from(
+              "000000001b0a190d000048414212080212060880ccb5c3061a060880c1dac3068000000010677270632d7374617475733a20300d0a",
+              "hex",
+            ),
+          ),
+          {
+            headers: { "content-type": "application/grpc-web+proto" },
+          },
+        );
+      }
+      throw new Error(`unexpected fetch ${String(url)}`);
+    }) as typeof fetch;
+    const seenProxies: Array<ProxyConfig | undefined> = [];
+    const admin = createOAuthAdmin({
+      store: tokens,
+      config,
+      encKey: KEY,
+      now: () => 1_752_100_000_000,
+      makeFetch: (value) => {
+        seenProxies.push(value);
+        return routed;
+      },
+    });
+
+    const expected = [
+      {
+        key: "7d",
+        usedPercent: 12.5,
+        resetsAtMs: 1_752_604_800_000,
+        windowMinutes: 10_080,
+      },
+    ];
+    await expect(admin.fetchXaiQuota?.({ account: "default" })).resolves.toEqual(expected);
+    await expect(admin.fetchXaiQuota?.({ account: "default" })).resolves.toEqual(expected);
+    expect(seenProxies).toContainEqual(proxy);
+    expect(calls).toHaveLength(2);
+    const quota = calls[1];
+    expect(quota?.url).toBe("https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig");
+    expect(quota?.init).toMatchObject({ method: "POST", redirect: "error" });
+    expect(new Headers(quota?.init?.headers).get("authorization")).toBe("Bearer fresh-access");
+    expect(new Headers(quota?.init?.headers).get("content-type")).toBe(
+      "application/grpc-web+proto",
+    );
+    expect(new Headers(quota?.init?.headers).get("x-grpc-web")).toBe("1");
+    expect(Buffer.from(quota?.init?.body as Uint8Array).toString("hex")).toBe(
+      Buffer.from(buildXaiGrokCreditsRequest({ excludeLegacyMonthlyUsage: true })).toString("hex"),
+    );
+    expect(Buffer.from(quota?.init?.body as Uint8Array).toString("hex")).toBe("00000000020801");
+    expect(quota?.init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("fail-opens and negative-caches a rejected redirect response", async () => {
+    const { tokens, config } = makeStores();
+    await seedFreshXai(tokens);
+    let hits = 0;
+    const logs: Array<{ level: string; message: string; fields?: Record<string, unknown> }> = [];
+    const doFetch = vi.fn(async () => {
+      hits++;
+      return new Response(null, { status: 307, headers: { location: "https://evil.test" } });
+    }) as typeof fetch;
+    const admin = createOAuthAdmin({
+      store: tokens,
+      config,
+      encKey: KEY,
+      now: () => 1_000,
+      makeFetch: () => doFetch,
+      log: (level, message, fields) => logs.push({ level, message, fields }),
+    });
+
+    await expect(admin.fetchXaiQuota?.({ account: "default" })).resolves.toBeNull();
+    await expect(admin.fetchXaiQuota?.({ account: "default" })).resolves.toBeNull();
+    expect(hits).toBe(1);
+    expect(logs).toEqual([
+      {
+        level: "warn",
+        message: "oauth.quota.pull_failed",
+        fields: { provider_id: "xai", account: "default", status: 307 },
+      },
+    ]);
+  });
+
+  it("rejects an oversized declared response before buffering and negative-caches it", async () => {
+    const { tokens, config } = makeStores();
+    await seedFreshXai(tokens);
+    let cancelled = false;
+    let hits = 0;
+    const doFetch = vi.fn(async () => {
+      hits++;
+      return new Response(
+        new ReadableStream({
+          cancel: () => {
+            cancelled = true;
+          },
+        }),
+        { headers: { "content-length": String(1024 * 1024 + 1) } },
+      );
+    }) as typeof fetch;
+    const admin = createOAuthAdmin({
+      store: tokens,
+      config,
+      encKey: KEY,
+      now: () => 1_000,
+      makeFetch: () => doFetch,
+    });
+
+    await expect(admin.fetchXaiQuota?.({ account: "default" })).resolves.toBeNull();
+    await expect(admin.fetchXaiQuota?.({ account: "default" })).resolves.toBeNull();
+    expect(hits).toBe(1);
+    expect(cancelled).toBe(true);
+  });
+
+  it("stops reading a streamed response once it crosses the size limit", async () => {
+    const { tokens, config } = makeStores();
+    await seedFreshXai(tokens);
+    let cancelled = false;
+    const doFetch = vi.fn(
+      async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new Uint8Array(600 * 1024));
+              controller.enqueue(new Uint8Array(600 * 1024));
+            },
+            cancel: () => {
+              cancelled = true;
+            },
+          }),
+        ),
+    ) as typeof fetch;
+    const admin = createOAuthAdmin({
+      store: tokens,
+      config,
+      encKey: KEY,
+      now: () => 1_000,
+      makeFetch: () => doFetch,
+    });
+
+    await expect(admin.fetchXaiQuota?.({ account: "default" })).resolves.toBeNull();
+    expect(cancelled).toBe(true);
+  });
+});
+
+describe("createOAuthAdmin > quota cache credential lifecycle", () => {
+  async function harness(): Promise<{
+    admin: ReturnType<typeof createOAuthAdmin>;
+    connect: () => Promise<void>;
+    usageHits: () => number;
+    tokens: SqliteOAuthTokenStore;
+  }> {
+    const tokens = makeStore();
+    let usageHits = 0;
+    vi.stubGlobal(
+      "fetch",
+      routeFetch([
+        [/oauth\/token/, () => json({ access_token: "AT", refresh_token: "RT", expires_in: 3600 })],
+        [
+          /oauth\/usage/,
+          () => {
+            usageHits++;
+            return json({
+              five_hour: {
+                utilization: usageHits,
+                resets_at: "2026-06-04T12:00:00.000Z",
+              },
+            });
+          },
+        ],
+      ]),
+    );
+    let sequence = 0;
+    const admin = createOAuthAdmin({
+      store: tokens,
+      config: makeConfig(),
+      encKey: KEY,
+      now: () => 1_000,
+      genSessionId: () => `quota-lifecycle-${++sequence}`,
+    });
+    const connect = async () => {
+      const { sessionId, authorizeUrl } = await admin.startManualPaste({
+        providerId: "anthropic",
+      });
+      const state = new URL(authorizeUrl).searchParams.get("state");
+      await admin.completeManualPaste({
+        sessionId,
+        redirectInput: `https://x/cb?code=C&state=${state}`,
+        account: "same-name",
+      });
+    };
+    await connect();
+    return { admin, connect, usageHits: () => usageHits, tokens };
+  }
+
+  it("invalidates cached quota when the same account label reconnects", async () => {
+    const { admin, connect, usageHits } = await harness();
+    expect((await admin.fetchAnthropicQuota?.({ account: "same-name" }))?.[0]?.usedPercent).toBe(1);
+
+    await connect();
+
+    expect((await admin.fetchAnthropicQuota?.({ account: "same-name" }))?.[0]?.usedPercent).toBe(2);
+    expect(usageHits()).toBe(2);
+  });
+
+  it("invalidates cached quota on logout before a same-name credential is restored", async () => {
+    const { admin, usageHits, tokens } = await harness();
+    expect((await admin.fetchAnthropicQuota?.({ account: "same-name" }))?.[0]?.usedPercent).toBe(1);
+
+    await admin.logout({ providerId: "anthropic", account: "same-name" });
+    await tokens.upsert({
+      providerId: "anthropic",
+      account: "same-name",
+      accessEnc: encryptSecret("replacement-access", KEY),
+      refreshEnc: encryptSecret("replacement-refresh", KEY),
+      expiresAt: 1_000_000,
+      meta: null,
+      updatedAt: 2,
+    });
+
+    expect((await admin.fetchAnthropicQuota?.({ account: "same-name" }))?.[0]?.usedPercent).toBe(2);
+    expect(usageHits()).toBe(2);
+  });
+
+  it.each([
+    "reconnect",
+    "logout",
+  ] as const)("discards an in-flight old-identity pull when %s replaces its credential", async (lifecycle) => {
+    const tokens = makeStore();
+    await tokens.upsert({
+      providerId: "anthropic",
+      account: "same-name",
+      accessEnc: encryptSecret("old-access", KEY),
+      refreshEnc: encryptSecret("old-refresh", KEY),
+      expiresAt: 1_000_000,
+      meta: null,
+      updatedAt: 1,
+    });
+    let releaseOld: (() => void) | undefined;
+    const oldBlocked = new Promise<void>((resolve) => {
+      releaseOld = resolve;
+    });
+    let signalOldStarted: (() => void) | undefined;
+    const oldStarted = new Promise<void>((resolve) => {
+      signalOldStarted = resolve;
+    });
+    let usageHits = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL) => {
+        const value = String(url);
+        if (value.includes("/oauth/token")) {
+          return json({
+            access_token: "replacement-access",
+            refresh_token: "replacement-refresh",
+            expires_in: 3600,
+          });
+        }
+        if (value.includes("/oauth/usage")) {
+          usageHits++;
+          if (usageHits === 1) {
+            signalOldStarted?.();
+            await oldBlocked;
+          }
+          return json({
+            five_hour: {
+              utilization: usageHits,
+              resets_at: "2026-06-04T12:00:00.000Z",
+            },
+          });
+        }
+        throw new Error(`unexpected fetch ${value}`);
+      }),
+    );
+    let sequence = 0;
+    const admin = createOAuthAdmin({
+      store: tokens,
+      config: makeConfig(),
+      encKey: KEY,
+      now: () => 1_000,
+      genSessionId: () => `generation-${++sequence}`,
+    });
+
+    const stalePull = admin.fetchAnthropicQuota?.({ account: "same-name" });
+    await oldStarted;
+    if (lifecycle === "reconnect") {
+      const { sessionId, authorizeUrl } = await admin.startManualPaste({
+        providerId: "anthropic",
+      });
+      const state = new URL(authorizeUrl).searchParams.get("state");
+      await admin.completeManualPaste({
+        sessionId,
+        redirectInput: `https://x/cb?code=C&state=${state}`,
+        account: "same-name",
+      });
+    } else {
+      await admin.logout({ providerId: "anthropic", account: "same-name" });
+      await tokens.upsert({
+        providerId: "anthropic",
+        account: "same-name",
+        accessEnc: encryptSecret("replacement-access", KEY),
+        refreshEnc: encryptSecret("replacement-refresh", KEY),
+        expiresAt: 1_000_000,
+        meta: null,
+        updatedAt: 2,
+      });
+    }
+    releaseOld?.();
+
+    await expect(stalePull).resolves.toBeNull();
+    expect((await admin.fetchAnthropicQuota?.({ account: "same-name" }))?.[0]?.usedPercent).toBe(2);
+    expect(usageHits).toBe(2);
   });
 });
 

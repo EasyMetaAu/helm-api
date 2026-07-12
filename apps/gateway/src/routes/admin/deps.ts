@@ -243,6 +243,11 @@ export interface OAuthAdminAccess {
   // failure (dead token, network, malformed body) so the page renders "—" rather
   // than erroring. Optional so unit-test seams can omit it.
   fetchAnthropicQuota?(input: { account: string }): Promise<OAuthQuotaWindow[] | null>;
+  // Pull the consumer Grok subscription's weekly usage window from the same
+  // gRPC-Web method used by grok.com. The existing xAI OAuth bearer is sufficient;
+  // no browser cookie is persisted. Same proxy/refresh/cache/fail-open contract as
+  // the other quota PULLs.
+  fetchXaiQuota?(input: { account: string }): Promise<OAuthQuotaWindow[] | null>;
   // Same PULL for Codex (chatgpt.com/backend-api/wham/usage — what the Codex CLI
   // /status reads). Complements the `x-codex-*` header PUSH so quota renders even
   // before an account has served any traffic. Same TTL cache + fail-open contract.
