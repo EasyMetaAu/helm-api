@@ -43,6 +43,20 @@ function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : "oauth request failed";
 }
 
+type DevicePollErrorCode =
+  | "device_authorization_denied"
+  | "device_code_expired"
+  | "device_poll_failed";
+
+function devicePollErrorCode(e: unknown): DevicePollErrorCode {
+  const message = errMessage(e).toLowerCase();
+  if (message.includes("denied")) return "device_authorization_denied";
+  if (message.includes("expired") || message.includes("session not found")) {
+    return "device_code_expired";
+  }
+  return "device_poll_failed";
+}
+
 // A client disconnect / modal close surfaces as an aborted signal or an AbortError.
 // Treated as NOT a provider failure (Principle: client disconnect ≠ upstream fault),
 // so the /test stream ends silently instead of emitting a spurious error event.
@@ -586,7 +600,8 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     }
   });
 
-  // POST /oauth/:provider/device/start { enterprise?, proxy? } -> { sessionId, userCode, verificationUri }
+  // POST /oauth/:provider/device/start { enterprise?, proxy? }
+  //   -> { sessionId, userCode, verificationUri, intervalMs, expiresAt, serverNowMs }
   // The proxy is pinned BEFORE the device-code POST (the flow's first call), so step
   // 1 already egresses through it — no real-IP leak at bind time (issue #38).
   app.post("/admin/api/oauth/:provider/device/start", async (c) => {
@@ -635,7 +650,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       if (result.status === "done") await afterMutation();
       return c.json(result);
     } catch (e) {
-      return c.json({ error: errMessage(e) }, 400);
+      return c.json({ error: errMessage(e), code: devicePollErrorCode(e) }, 400);
     }
   });
 

@@ -310,6 +310,7 @@ Most-used environment variables (env wins over YAML; full list in [`.env.example
 | `HELM_STORE_URL_ENV` | For `supabase`: the **name** of the env var holding the Postgres DSN |
 | `HELM_RATE_LIMIT_ENABLED` | Turn rate limiting on (off by default) |
 | `HELM_OAUTH_ENC_KEY` | 32-byte key encrypting recoverable API keys and stored OAuth tokens (**required** if any subscription provider is configured; needed for later API-key reveal) |
+| `HELM_XAI_GROK_CLIENT_VERSION` | Optional semver override for xAI's Grok CLI proxy protocol; use only to recover from a confirmed upstream HTTP 426 minimum-version bump, then run a real-account smoke |
 
 > **Storage.** SQLite (`better-sqlite3`, a `helm.db` file under `./data`) is the default. For Postgres/Supabase, set `HELM_STORE_DRIVER=supabase` and point `HELM_STORE_URL_ENV` at the env var holding your DSN. Unknown drivers fail closed at startup.
 >
@@ -337,6 +338,16 @@ The account pool also has one **global usage strategy** that applies inside ever
 Quota signals are soft scoring inputs: stale or missing quota falls back to the balanced behavior, while hard cooldowns and manually parked accounts are still excluded. Codex reset credits are **never spent by selection**. They are consumed only by the explicit **Reset limit** action or by the guarded auto-reset flow, and only when a weekly Codex window is saturated enough.
 
 Everything hot-reloads — connect, disconnect, curation, proxy, scheduling — next request, no restart. Helm also mirrors each official client's identity headers and sends a **stable per-account device identity** (never rotated mid-stream) to reduce ban-correlation risk.
+
+#### Experimental SuperGrok/X Premium OAuth
+
+Helm exposes the device-code flow used by xAI's own Grok CLI. Set `HELM_OAUTH_ENC_KEY`, then choose **xAI (SuperGrok/X Premium) · Experimental** under **Providers → Connect**. Helm discovers OAuth endpoints from `https://auth.x.ai`, stores rotating tokens encrypted, discovers entitled models from `https://cli-chat-proxy.grok.com/v1/models`, and uses the generic Responses transport at that subscription proxy. No static `providers.yaml` entry or feature flag is required.
+
+xAI documents OAuth/device-code login for its own Grok CLI, but does **not** publish third-party OAuth client registration or a stable third-party contract for the CLI client ID and subscription proxy. SuperGrok is also separate from prepaid xAI API credits. The provider is available by default but remains visibly labeled **Experimental**. Use it only with your own account for personal self-hosted evaluation; do not share, resell, or expose it to unrelated tenants. For a supported production integration, use an `XAI_API_KEY` with `https://api.x.ai/v1`, or obtain a Helm-specific OAuth client and written permission from xAI.
+
+There is no public SuperGrok quota API contract, so Helm intentionally shows no fabricated quota window or Heavy allowance. A real account smoke test is required after every upstream contract change.
+
+Helm advertises the checked-in Grok CLI protocol version used by its live smoke. If the proxy later returns HTTP 426 with a newer minimum, temporarily set `HELM_XAI_GROK_CLIENT_VERSION` to that validated semver, repeat model discovery plus streaming/non-streaming/tool smokes, and upgrade Helm when a release updates the default. The authenticated catalog is filtered to text-capable `responses` / `chat` / `language` backends. Only live-verified Grok 4.5 and Composer capabilities are declared; unverified JSON, vision and extra-media support fails closed. Composer currently rejects an explicit `reasoning_effort` even though it may emit internal reasoning, so Helm strips that field for Composer. xAI does not expose a verified subscription output limit, so both entries keep `maxOutputTokens: null`: the 512-token connectivity smoke is not treated as a model ceiling, and Helm does not borrow the public API/OpenClaw 64k fallback. SuperGrok has no public per-token subscription price, so token usage is recorded while `cost_usd` remains `null` rather than borrowing public API pricing or reporting a misleading zero.
 
 > ⚠️ **Terms of service.** Routing a Claude/ChatGPT/Copilot **subscription** through a third-party gateway may violate the provider's ToS and can get accounts suspended. This is an opt-in feature for self-hosted personal use — **you are responsible** for compliance with your provider agreements. When in doubt, use a normal API key (`api_key_env`).
 

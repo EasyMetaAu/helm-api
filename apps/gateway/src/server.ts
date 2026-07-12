@@ -96,6 +96,7 @@ import {
   resolveCompactionPricing,
   resolveCostUsd,
   resolveOpenAICodexClientVersion,
+  resolveXaiGrokClientVersion,
   responsesTransformer,
   routeRequest,
   runCleanupPass,
@@ -114,6 +115,8 @@ import {
   toRegistryProviders,
   validateModelAliasTargets,
   windowsToUsageLimit,
+  XAI_GROK_OAUTH_BASE_URL,
+  xaiGrokInferenceHeaders,
 } from "@helm/core";
 import type {
   CatalogEntry,
@@ -674,6 +677,14 @@ const ROUTABLE_OAUTH: Record<
   "openai-codex": {
     type: "openai-responses",
     baseUrl: "https://chatgpt.com/backend-api/codex",
+    targetProviderProtocol: "openai_responses",
+    providerRequiresCompatibilityRewrite: false,
+  },
+  // SuperGrok/X Premium via the Grok CLI subscription proxy. This is a generic
+  // OpenAI Responses transport; it must not inherit ChatGPT/Codex headers.
+  xai: {
+    type: "openai-responses-generic",
+    baseUrl: XAI_GROK_OAUTH_BASE_URL,
     targetProviderProtocol: "openai_responses",
     providerRequiresCompatibilityRewrite: false,
   },
@@ -1416,8 +1427,21 @@ function createProviderClient(
     p.type === "openai-responses-generic" ||
     p.type === "openai_responses_generic"
   ) {
+    const isXaiOAuth =
+      p.oauth !== undefined && isOAuthPreset(p.oauth) && p.oauth.provider === "xai";
     return createGenericOpenAIResponsesClient({
       config: { ...base, ...cred },
+      ...(isXaiOAuth
+        ? {
+            requestContract: {
+              forceSse: true,
+              forceStoreFalse: true,
+              ensureInstructions: true,
+              rejectPreviousResponseId: true,
+              requestHeaders: ({ model }: { model: string }) => xaiGrokInferenceHeaders(model),
+            },
+          }
+        : {}),
       fetch: providerFetch,
     });
   }
@@ -1488,6 +1512,10 @@ export async function buildServer(
   const logger = opts.logger ?? createJsonLogger();
   const responsesWebSocketSessionProof = randomUUID();
   const config = loadConfig({ configDir: opts.configDir ?? "./config" });
+  // Validate the optional Grok proxy protocol override before opening stores or
+  // starting background work. Invalid runtime configuration must fail closed at
+  // startup even when no xAI account is connected yet.
+  resolveXaiGrokClientVersion(process.env);
 
   // Store adapter set, chosen by config (CLAUDE.md "DB abstraction layer"): sqlite (default,
   // local file) or supabase (hosted Postgres). The factory fails CLOSED on an

@@ -20,6 +20,9 @@ function fullSeam(over: Partial<OAuthAdminAccess> = {}): OAuthAdminAccess {
       sessionId: "s2",
       userCode: "ABCD",
       verificationUri: "https://v",
+      intervalMs: 5_000,
+      expiresAt: 601_000,
+      serverNowMs: 1_000,
     })),
     pollDeviceCode: vi.fn(async () => ({ status: "pending" as const })),
     logout: vi.fn(async () => {}),
@@ -1187,7 +1190,12 @@ describe("admin OAuth routes — connect flows", () => {
         body: JSON.stringify({ enterprise: "acme" }),
       },
     );
-    expect((await start.json()) as { userCode: string }).toMatchObject({ userCode: "ABCD" });
+    expect((await start.json()) as { userCode: string }).toMatchObject({
+      userCode: "ABCD",
+      intervalMs: 5_000,
+      expiresAt: 601_000,
+      serverNowMs: 1_000,
+    });
     const noSess = await app({ oauth: fullSeam() }).request(
       "/admin/api/oauth/copilot/device/poll",
       {
@@ -1212,6 +1220,25 @@ describe("admin OAuth routes — connect flows", () => {
     );
     expect((await res.json()) as { status: string }).toEqual({ status: "done" });
     expect(onOAuthMutation).toHaveBeenCalledOnce();
+  });
+
+  it("POST device/poll returns a stable device error code", async () => {
+    const seam = fullSeam({
+      pollDeviceCode: vi.fn(async () => {
+        throw new Error("xAI device authorization was denied");
+      }),
+    });
+    const res = await app({ oauth: seam }).request("/admin/api/oauth/xai/device/poll", {
+      method: "POST",
+      headers: JSONH,
+      body: JSON.stringify({ sessionId: "s2" }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "xAI device authorization was denied",
+      code: "device_authorization_denied",
+    });
   });
 });
 

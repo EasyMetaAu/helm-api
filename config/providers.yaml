@@ -320,3 +320,8 @@ providers:
   #   models:
   #     - alias: codex/gpt
   #       provider_model: gpt-5-codex
+  #
+  # xAI SuperGrok/X Premium — EXPERIMENTAL device-code login.
+  # xAI documents this client/proxy path for Grok CLI, not as a third-party OAuth
+  # contract. Connect it in Providers; the runtime synthesizes `xai/<live-model>` aliases from
+  # https://cli-chat-proxy.grok.com/v1/models; NO YAML block is required.

@@ -99,6 +99,33 @@ export interface CodexResponsesClientDeps {
 export interface GenericOpenAIResponsesClientDeps {
   config: ProviderConfig;
   fetch?: typeof globalThis.fetch;
+  // Provider-neutral compatibility profile for Responses endpoints that only
+  // accept SSE inference requests (for example a subscription-backed proxy).
+  // Omitted by default, preserving the public OpenAI Responses contract.
+  requestContract?: GenericOpenAIResponsesRequestContract;
+}
+
+export interface GenericOpenAIResponsesRequestHeaderContext {
+  /** Final wire body after the request contract has applied its shims. */
+  body: Record<string, unknown>;
+  model: string;
+  /** Exact provider Authorization value, or an empty string when unauthenticated. */
+  authorization: string;
+}
+
+export interface GenericOpenAIResponsesRequestContract {
+  forceSse?: boolean;
+  forceStoreFalse?: boolean;
+  // Some subscription proxies require a non-empty top-level instruction even for
+  // otherwise-valid native Responses requests.
+  ensureInstructions?: boolean;
+  // A stream-only/store:false proxy cannot persist response ids for server-side
+  // continuation. Reject deterministically before network I/O instead of surfacing
+  // the proxy's eventual 404 as an all-providers-failed 502.
+  rejectPreviousResponseId?: boolean;
+  requestHeaders?: (
+    context: GenericOpenAIResponsesRequestHeaderContext,
+  ) => Record<string, string> | Promise<Record<string, string>>;
 }
 
 export const CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER = "x-helm-codex-responses-websocket-session";
@@ -190,18 +217,67 @@ interface ResponsesItem {
   [k: string]: unknown;
 }
 
-// User/system content (array or string) -> Responses input_text / input_image parts.
-function inputPartsFromContent(content: unknown): ResponsesContentPart[] {
-  if (typeof content === "string") return content ? [{ type: "input_text", text: content }] : [];
+// IR/OpenAI content (array or string) -> native Responses content parts. Provider
+// clients receive the normalized IR shape (`image`/`audio`/`document`), but direct
+// unit callers and legacy paths may still carry Chat's `image_url`; support both.
+function inputPartsFromContent(
+  content: unknown,
+  textType: "input_text" | "output_text" = "input_text",
+): ResponsesContentPart[] {
+  if (typeof content === "string") return content ? [{ type: textType, text: content }] : [];
   if (Array.isArray(content)) {
     return content.flatMap((part): ResponsesContentPart[] => {
       if (part && typeof part === "object") {
         const p = part as Record<string, unknown>;
         if (p.type === "text" && typeof p.text === "string")
-          return [{ type: "input_text", text: p.text }];
+          return [{ type: textType, text: p.text }];
+        if ((p.type === "input_text" || p.type === "output_text") && typeof p.text === "string") {
+          return [{ type: textType, text: p.text }];
+        }
         if (p.type === "image_url" && p.image_url && typeof p.image_url === "object") {
           const urlVal = (p.image_url as Record<string, unknown>).url;
-          if (typeof urlVal === "string") return [{ type: "input_image", image_url: urlVal }];
+          if (typeof urlVal === "string") {
+            const detail = (p.image_url as Record<string, unknown>).detail;
+            return [
+              {
+                type: "input_image",
+                image_url: urlVal,
+                ...(typeof detail === "string" ? { detail } : {}),
+              },
+            ];
+          }
+        }
+        if (p.type === "image" && typeof p.url === "string") {
+          return [
+            {
+              type: "input_image",
+              image_url: p.url,
+              ...(typeof p.detail === "string" ? { detail: p.detail } : {}),
+            },
+          ];
+        }
+        if (p.type === "audio" && typeof p.data === "string" && typeof p.format === "string") {
+          return [{ type: "input_audio", input_audio: { data: p.data, format: p.format } }];
+        }
+        if (p.type === "document") {
+          const filename = typeof p.filename === "string" ? { filename: p.filename } : {};
+          if (typeof p.fileId === "string") {
+            return [{ type: "input_file", file_id: p.fileId, ...filename }];
+          }
+          if (typeof p.data === "string") {
+            const mediaType =
+              typeof p.mediaType === "string" ? p.mediaType : "application/octet-stream";
+            return [
+              {
+                type: "input_file",
+                ...filename,
+                file_data: `data:${mediaType};base64,${p.data}`,
+              },
+            ];
+          }
+          if (typeof p.url === "string") {
+            return [{ type: "input_file", file_url: p.url, ...filename }];
+          }
         }
       }
       return [];
@@ -224,11 +300,22 @@ function plainText(content: unknown): string {
   return "";
 }
 
+function responsesToolOutput(content: unknown): string | ResponsesContentPart[] {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const parts = inputPartsFromContent(content, "output_text");
+    return parts.length > 0 ? parts : "";
+  }
+  return JSON.stringify(content ?? "");
+}
+
 // The system prompt goes in the top-level `instructions`, NOT the input array. Join
 // every system message (the Codex backend has no system-spoof requirement).
 function buildInstructions(messages: Array<Record<string, unknown>>): string {
   const parts: string[] = [];
-  for (const m of messages) if (m.role === "system") parts.push(plainText(m.content));
+  for (const m of messages) {
+    if (m.role === "system" || m.role === "developer") parts.push(plainText(m.content));
+  }
   const joined = parts.filter((s) => s.length > 0).join("\n\n");
   return joined || DEFAULT_INSTRUCTIONS;
 }
@@ -400,26 +487,41 @@ export function sanitizeCodexResponsesNativeBody(body: Record<string, unknown>):
   return { body: next, fixes: [...fixes].sort() };
 }
 
-function toResponsesInput(messages: Array<Record<string, unknown>>): ResponsesItem[] {
+function toResponsesInput(
+  messages: Array<Record<string, unknown>>,
+  preserveInstructionRoles = false,
+): ResponsesItem[] {
   const out: ResponsesItem[] = [];
   for (const m of messages) {
     const role = m.role;
-    if (role === "system") continue;
+    if (role === "system" || role === "developer") {
+      if (preserveInstructionRoles) {
+        out.push({
+          type: "message",
+          role,
+          content: inputPartsFromContent(m.content),
+        });
+      }
+      continue;
+    }
     if (role === "tool") {
       out.push({
         type: "function_call_output",
         call_id: String(m.tool_call_id ?? ""),
-        output: typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? ""),
+        output: responsesToolOutput(m.content),
       });
       continue;
     }
     if (role === "assistant") {
+      const translated = inputPartsFromContent(m.content, "output_text");
+      const media = translated.filter((part) => part.type !== "output_text");
       const text = plainText(m.content);
-      if (text) {
+      const content = [...(text.length > 0 ? [{ type: "output_text", text }] : []), ...media];
+      if (content.length > 0) {
         out.push({
           type: "message",
           role: "assistant",
-          content: [{ type: "output_text", text }],
+          content,
         });
       }
       const toolCalls = Array.isArray(m.tool_calls) ? m.tool_calls : [];
@@ -464,10 +566,25 @@ function responsesToolsFromChat(tools: unknown): Array<Record<string, unknown>> 
         name: fn.name,
         description: fn.description ?? "",
         parameters: fn.parameters ?? { type: "object" },
-        strict: false,
+        strict: typeof fn.strict === "boolean" ? fn.strict : false,
       },
     ];
   });
+}
+
+function responsesTextFromChatResponseFormat(responseFormat: unknown): unknown {
+  if (!isRecord(responseFormat)) return undefined;
+  if (responseFormat.type === "json_object") return { format: { type: "json_object" } };
+  if (responseFormat.type !== "json_schema" || !isRecord(responseFormat.json_schema)) {
+    return undefined;
+  }
+  const schema = responseFormat.json_schema;
+  const format: Record<string, unknown> = { type: "json_schema" };
+  if (typeof schema.name === "string") format.name = schema.name;
+  if (typeof schema.description === "string") format.description = schema.description;
+  if (schema.schema !== undefined) format.schema = schema.schema;
+  if (typeof schema.strict === "boolean") format.strict = schema.strict;
+  return { format };
 }
 
 function supportedReasoningEfforts(modelInfo: CodexModelInfo): string[] {
@@ -627,8 +744,12 @@ export function openaiToGenericResponsesRequest(
   const messages = Array.isArray(r.messages) ? (r.messages as Array<Record<string, unknown>>) : [];
   const body: Record<string, unknown> = {
     model: r.model,
-    instructions: buildInstructions(messages),
-    input: toResponsesInput(messages),
+    // Generic Responses supports native system/developer input roles. Keep those
+    // roles intact instead of flattening their priority into one instruction string;
+    // the xAI Composer proxy demonstrably follows the native role item but may let a
+    // conflicting user message override the same text when sent only at top level.
+    instructions: DEFAULT_INSTRUCTIONS,
+    input: toResponsesInput(messages, true),
   };
   if (r.stream === true) body.stream = true;
   const maxOutput = r.max_output_tokens ?? r.max_completion_tokens ?? r.max_tokens;
@@ -638,6 +759,28 @@ export function openaiToGenericResponsesRequest(
   if (typeof r.reasoning_effort === "string" && r.reasoning_effort.length > 0) {
     body.reasoning = { effort: r.reasoning_effort };
   }
+  // A Responses-origin request keeps its native `text` object in the flattened
+  // fallback body. Prefer that lossless shape over a synthesized Chat format.
+  const text =
+    r.text !== undefined ? r.text : responsesTextFromChatResponseFormat(r.response_format);
+  if (text !== undefined) body.text = text;
+  if (typeof r.parallel_tool_calls === "boolean") {
+    body.parallel_tool_calls = r.parallel_tool_calls;
+  }
+  // Responses-only continuation/control fields are flattened back onto the Chat IR
+  // before provider execution when native passthrough is disabled. Re-emit them so
+  // the fallback path does not silently break stateful turns.
+  if (typeof r.previous_response_id === "string") {
+    body.previous_response_id = r.previous_response_id;
+  }
+  if (Array.isArray(r.include)) body.include = r.include;
+  if (isRecord(r.metadata)) body.metadata = r.metadata;
+  if (r.truncation === "auto" || r.truncation === "disabled") body.truncation = r.truncation;
+  if (typeof r.store === "boolean") body.store = r.store;
+  if (r.context_management !== undefined) body.context_management = r.context_management;
+  if (typeof r.background === "boolean") body.background = r.background;
+  if (r.prompt_cache_options !== undefined) body.prompt_cache_options = r.prompt_cache_options;
+  if (isRecord(r.logit_bias)) body.logit_bias = r.logit_bias;
   if (r.tool_choice !== undefined) body.tool_choice = chatToolChoiceToResponses(r.tool_choice);
   const tools = responsesToolsFromChat(r.tools);
   if (tools.length > 0) body.tools = tools;
@@ -1885,6 +2028,7 @@ export function createGenericOpenAIResponsesClient(
 ): ProviderClient {
   const doFetch = deps.fetch ?? globalThis.fetch;
   const cfg = deps.config;
+  const requestContract = deps.requestContract;
   const timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   const rootUrl = async (): Promise<string> => {
@@ -1895,19 +2039,79 @@ export function createGenericOpenAIResponsesClient(
 
   const endpoint = async (path: string): Promise<string> => `${await rootUrl()}/${path}`;
 
-  async function providerHeaders(accept = "application/json"): Promise<Record<string, string>> {
+  async function providerHeaders(
+    accept = "application/json",
+    body?: Record<string, unknown>,
+  ): Promise<Record<string, string>> {
     const authorization =
       cfg.getAuthHeader !== undefined
         ? await cfg.getAuthHeader()
         : cfg.apiKey !== undefined
           ? `Bearer ${cfg.apiKey}`
           : "";
+    const dynamicHeaders =
+      body !== undefined && requestContract?.requestHeaders !== undefined
+        ? await requestContract.requestHeaders({
+            body,
+            model: typeof body.model === "string" ? body.model : "",
+            authorization,
+          })
+        : {};
     return {
       "Content-Type": "application/json",
       accept,
       ...(authorization.length > 0 ? { Authorization: authorization } : {}),
       ...(cfg.extraHeaders ? cfg.extraHeaders() : {}),
+      ...dynamicHeaders,
     };
+  }
+
+  function applyResponsesRequestContract(body: NativePassthroughInput): NativePassthroughInput {
+    const contract = requestContract;
+    if (
+      contract?.forceSse !== true &&
+      contract?.forceStoreFalse !== true &&
+      contract?.ensureInstructions !== true &&
+      contract?.rejectPreviousResponseId !== true
+    ) {
+      return body;
+    }
+    const source = isNativePassthroughCarrier(body) ? body.body : body;
+    const next: Record<string, unknown> = {
+      ...source,
+      ...(contract.forceSse === true ? { stream: true } : {}),
+      ...(contract.forceStoreFalse === true ? { store: false } : {}),
+    };
+    if (
+      contract.rejectPreviousResponseId === true &&
+      typeof next.previous_response_id === "string" &&
+      next.previous_response_id.length > 0
+    ) {
+      const message =
+        "previous_response_id is not supported by this subscription provider; send the full conversation input instead";
+      throw new UpstreamError(
+        "upstream_error",
+        message,
+        { type: "invalid_request_error", code: "previous_response_id_unsupported", message },
+        400,
+      );
+    }
+    const instructionShims: string[] = [];
+    if (
+      contract.ensureInstructions === true &&
+      (typeof next.instructions !== "string" || next.instructions.trim().length === 0)
+    ) {
+      next.instructions = DEFAULT_INSTRUCTIONS;
+      instructionShims.push("generic_responses_default_instructions");
+    }
+    if (!isNativePassthroughCarrier(body)) return next;
+    const carrier = cloneCarrierWithBody(body, next);
+    appendMutationList(carrier.mutations, "body_shims_applied", [
+      ...(contract.forceSse === true ? ["generic_responses_force_stream"] : []),
+      ...(contract.forceStoreFalse === true ? ["generic_responses_force_store_false"] : []),
+      ...instructionShims,
+    ]);
+    return carrier;
   }
 
   function scrub(raw: unknown): unknown {
@@ -1981,13 +2185,39 @@ export function createGenericOpenAIResponsesClient(
       accept?: string;
       signal?: AbortSignal;
       captureUpstream?: (wireBody: string) => void;
+      applyRequestContract?: boolean;
     },
   ): Promise<Response> {
-    const headers = await providerHeaders(init.accept);
+    const requestBody =
+      init.body !== undefined && init.applyRequestContract === true
+        ? applyResponsesRequestContract(init.body)
+        : init.body;
+    const finalBody =
+      requestBody === undefined
+        ? undefined
+        : isNativePassthroughCarrier(requestBody)
+          ? requestBody.body
+          : requestBody;
+    const headers = await providerHeaders(init.accept, finalBody);
     let bodyText: string | undefined;
     let requestHeaders = headers;
-    if (init.body !== undefined) {
-      const prepared = prepareNativePassthroughRequest(init.body, headers);
+    if (requestBody !== undefined) {
+      const prepared = prepareNativePassthroughRequest(requestBody, headers, {
+        // A stream-only profile must override a native carrier's stale JSON Accept.
+        ...(requestContract?.forceSse === true && init.applyRequestContract === true
+          ? {
+              preserveClientHeaders: [
+                "accept-language",
+                "originator",
+                "session_id",
+                "user-agent",
+                "x-client-request-id",
+                "x-session-id",
+              ],
+              providerProfileApplied: "generic_responses_stream_only",
+            }
+          : {}),
+      });
       requestHeaders = prepared.headers;
       bodyText = prepared.bodyText;
       // Exact Responses-native bytes POSTed upstream (post OpenAI→Responses translation
@@ -2005,11 +2235,25 @@ export function createGenericOpenAIResponsesClient(
       // Rebuild headers AFTER onUnauthorized so an OAuth provider's retry carries the
       // refreshed token — reusing the original headers would resend the expired one
       // and the refresh would never recover the request.
-      const refreshedHeaders = await providerHeaders(init.accept);
+      const refreshedHeaders = await providerHeaders(init.accept, finalBody);
       let retryHeaders = refreshedHeaders;
       let retryBodyText = bodyText;
-      if (init.body !== undefined) {
-        const prepared = prepareNativePassthroughRequest(init.body, refreshedHeaders);
+      if (requestBody !== undefined) {
+        const prepared = prepareNativePassthroughRequest(requestBody, refreshedHeaders, {
+          ...(requestContract?.forceSse === true && init.applyRequestContract === true
+            ? {
+                preserveClientHeaders: [
+                  "accept-language",
+                  "originator",
+                  "session_id",
+                  "user-agent",
+                  "x-client-request-id",
+                  "x-session-id",
+                ],
+                providerProfileApplied: "generic_responses_stream_only",
+              }
+            : {}),
+        });
         retryHeaders = prepared.headers;
         retryBodyText = prepared.bodyText;
         init.captureUpstream?.(retryBodyText);
@@ -2035,10 +2279,15 @@ export function createGenericOpenAIResponsesClient(
       const res = await requestJson("responses", {
         method: "POST",
         body: openaiToGenericResponsesRequest(req),
+        ...(requestContract?.forceSse === true ? { accept: "text/event-stream" } : {}),
         signal: opts?.signal,
         captureUpstream: opts?.captureUpstream,
+        applyRequestContract: true,
       });
       if (!res.ok) throw await errorFromResponse(res);
+      if (requestContract?.forceSse === true) {
+        return await aggregateResponsesStream(res, model, timeoutMs, { allowIncomplete: true });
+      }
       return responsesJsonToChatResponse((await res.json()) as Record<string, unknown>, model);
     },
 
@@ -2050,19 +2299,27 @@ export function createGenericOpenAIResponsesClient(
         accept: "text/event-stream",
         signal: opts?.signal,
         captureUpstream: opts?.captureUpstream,
+        applyRequestContract: true,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      yield* translateResponsesSSE(res, model, timeoutMs, { strictTerminal: false });
+      yield* translateResponsesSSE(res, model, timeoutMs, {
+        strictTerminal: requestContract?.forceSse === true,
+      });
     },
 
     async nativePassthrough(body, opts) {
       const res = await requestJson("responses", {
         method: "POST",
         body,
+        ...(requestContract?.forceSse === true ? { accept: "text/event-stream" } : {}),
         signal: opts?.signal,
         captureUpstream: opts?.captureUpstream,
+        applyRequestContract: true,
       });
       if (!res.ok) throw await errorFromResponse(res);
+      if (requestContract?.forceSse === true) {
+        return await aggregateNativeResponsesStream(res, timeoutMs);
+      }
       return (await res.json()) as Record<string, unknown>;
     },
 
@@ -2073,6 +2330,7 @@ export function createGenericOpenAIResponsesClient(
         accept: "text/event-stream",
         signal: opts?.signal,
         captureUpstream: opts?.captureUpstream,
+        applyRequestContract: true,
       });
       if (!res.ok) throw await errorFromResponse(res);
       yield* readResponsesSSERaw(res, timeoutMs);
@@ -2460,11 +2718,7 @@ export async function* translateResponsesSSE(
 
   for await (const evt of readResponsesEvents(res, idleMs)) {
     const type = evt.type;
-    if (
-      type === "error" ||
-      type === "response.failed" ||
-      (strictTerminal && type === "response.incomplete")
-    ) {
+    if (type === "error" || type === "response.failed") {
       throw responseEventError(evt);
     }
     if (!started) {
@@ -2584,11 +2838,40 @@ export async function* translateResponsesSSE(
 
 // ── aggregation: Responses SSE -> a single OpenAI-Chat response (non-stream) ──
 
+/** Aggregate a stream-only native Responses call without translating its payload.
+ * Only response.completed is a successful terminal event. Returning the embedded
+ * response object keeps native passthrough byte semantics for unary callers while
+ * still failing closed on truncated or unsuccessful streams. */
+export async function aggregateNativeResponsesStream(
+  res: Response,
+  idleMs = 0,
+): Promise<Record<string, unknown>> {
+  for await (const evt of readResponsesEvents(res, idleMs)) {
+    const type = evt.type;
+    if (type === "error" || type === "response.failed" || type === "response.incomplete") {
+      throw responseEventError(evt);
+    }
+    if (type === "response.completed") {
+      if (!isRecord(evt.response)) {
+        throw new UpstreamError(
+          "upstream_error",
+          "response.completed did not include a native response",
+          evt,
+        );
+      }
+      return evt.response;
+    }
+  }
+  throw new UpstreamError("upstream_error", "stream closed before response.completed");
+}
+
 export async function aggregateResponsesStream(
   res: Response,
   model: string,
   idleMs = 0,
+  options: { allowIncomplete?: boolean } = {},
 ): Promise<ChatCompletionResponse> {
+  const allowIncomplete = options.allowIncomplete ?? false;
   let text = "";
   let id = `chatcmpl-${Date.now()}`;
   let status: unknown = "completed";
@@ -2626,7 +2909,11 @@ export async function aggregateResponsesStream(
 
   for await (const evt of readResponsesEvents(res, idleMs)) {
     const type = evt.type;
-    if (type === "error" || type === "response.failed" || type === "response.incomplete") {
+    if (
+      type === "error" ||
+      type === "response.failed" ||
+      (type === "response.incomplete" && !allowIncomplete)
+    ) {
       throw responseEventError(evt);
     }
     if (type === "response.created") {
@@ -2680,9 +2967,9 @@ export async function aggregateResponsesStream(
             : currentCallId;
       const tc = toolById.get(eventToolId);
       if (tc && typeof evt.arguments === "string") tc.arguments = evt.arguments;
-    } else if (type === "response.completed") {
+    } else if (type === "response.completed" || type === "response.incomplete") {
       const response = (evt.response ?? {}) as Record<string, unknown>;
-      status = response.status ?? "completed";
+      status = response.status ?? (type === "response.incomplete" ? "incomplete" : "completed");
       const usage = (response.usage ?? {}) as Record<string, unknown>;
       if (typeof usage.input_tokens === "number") inTok = usage.input_tokens;
       if (typeof usage.output_tokens === "number") outTok = usage.output_tokens;

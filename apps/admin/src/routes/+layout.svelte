@@ -99,7 +99,7 @@
     {
       seg: 'providers',
       label: 'Providers',
-      desc: 'Connect Codex and Claude subscriptions',
+      desc: 'Connect AI subscriptions',
       icon: 'M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z',
     },
     {
@@ -145,9 +145,7 @@
       : '-translate-x-full'}"
   >
     <div class="flex h-16 items-center gap-2.5 px-5">
-      <span
-        class="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-white"
-      >
+      <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-white">
         <svg viewBox="0 0 64 64" class="h-5 w-5" fill="none" aria-hidden="true">
           <g fill="currentColor">
             <rect x="15" y="16" width="7" height="32" rx="3.5" />

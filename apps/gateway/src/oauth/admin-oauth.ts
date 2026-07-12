@@ -3,6 +3,7 @@ import {
   beginAnthropicLogin,
   beginCopilotDeviceLogin,
   beginOpenAICodexLogin,
+  beginXaiDeviceLogin,
   buildOpenAICodexUserAgent,
   type ConfigStore,
   type CopilotDeviceStart,
@@ -29,8 +30,10 @@ import {
   parseCodexResetResult,
   parseOpenAICodexIdentity,
   pollCopilotDeviceOnce,
+  pollXaiDeviceOnce,
   refreshGitHubCopilotToken,
   validateProxyConfig,
+  type XaiDeviceStart,
 } from "@helm/core";
 import { CodexOAuthUsageSchema, type OAuthQuotaWindow } from "@helm/shared";
 import type {
@@ -73,8 +76,8 @@ import {
 
 // Admin OAuth-login orchestration (issue #38) — the implementation behind the
 // OAuthAdminAccess seam the /admin/api/oauth routes call. Owns the ephemeral
-// per-login session state (PKCE verifier/state for Anthropic; device code/domain
-// for Copilot), the upstream exchange (via the core OAuth kit), at-rest
+// per-login session state (PKCE verifier/state for manual flows; device code and
+// provider endpoint metadata for Copilot/xAI), the upstream exchange, at-rest
 // ENCRYPTION (token-cipher), and the OAuthTokenStore write-back.
 //
 // SECURITY (principle 7): the encryption key is resolved at the composition root
@@ -84,6 +87,7 @@ import {
 const ANTHROPIC = "anthropic";
 const COPILOT = "github-copilot";
 const CODEX = "openai-codex";
+const XAI = "xai";
 const SESSION_TTL_MS = 15 * 60 * 1000;
 
 // Anthropic OAuth usage endpoint (providers page Tier 3 quota PULL). Mirrors the
@@ -218,10 +222,12 @@ type Session =
       kind: "device";
       providerId: string;
       deviceCode: string;
-      domain: string;
+      domain?: string;
+      tokenEndpoint?: string;
       enterpriseDomain?: string;
       proxy?: ProxyConfig;
       createdAt: number;
+      expiresAt: number;
     };
 
 export interface OAuthAdminDeps {
@@ -533,8 +539,13 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
   }
 
   function prune(): void {
-    const cutoff = now() - SESSION_TTL_MS;
-    for (const [id, s] of sessions) if (s.createdAt < cutoff) sessions.delete(id);
+    const current = now();
+    const cutoff = current - SESSION_TTL_MS;
+    for (const [id, s] of sessions) {
+      if (s.createdAt < cutoff || (s.kind === "device" && s.expiresAt <= current)) {
+        sessions.delete(id);
+      }
+    }
   }
 
   function take(sessionId: string): Session {
@@ -704,6 +715,12 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
             flow: "device_code",
             accounts: accountsFor(COPILOT),
           },
+          {
+            id: XAI,
+            name: "xAI (SuperGrok/X Premium) · Experimental",
+            flow: "device_code",
+            accounts: accountsFor(XAI),
+          },
         ],
       };
     },
@@ -753,33 +770,63 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     },
 
     async startDeviceCode({ providerId, enterprise, proxy }) {
-      if (providerId !== COPILOT) {
+      if (providerId !== COPILOT && providerId !== XAI) {
         throw new Error(`provider '${providerId}' does not support the device-code flow`);
       }
       // CRITICAL: the device-code POST is the FIRST network call of the flow. Build
       // the proxy fetch BEFORE it so step 1 never leaves from the operator's real IP.
       const pinned = toProxy(proxy);
-      const start: CopilotDeviceStart = await beginCopilotDeviceLogin(
-        enterprise,
-        makeFetch(pinned),
-      );
+      const doFetch = makeFetch(pinned);
+      const start =
+        providerId === XAI
+          ? await beginXaiDeviceLogin(doFetch, now)
+          : await beginCopilotDeviceLogin(enterprise, doFetch);
       const sessionId = genId();
       sessions.set(sessionId, {
         kind: "device",
         providerId,
         deviceCode: start.deviceCode,
-        domain: start.domain,
-        enterpriseDomain: start.enterpriseDomain,
+        ...(providerId === XAI
+          ? { tokenEndpoint: (start as XaiDeviceStart).tokenEndpoint }
+          : {
+              domain: (start as CopilotDeviceStart).domain,
+              enterpriseDomain: (start as CopilotDeviceStart).enterpriseDomain,
+            }),
         proxy: pinned,
         createdAt: now(),
+        expiresAt: start.expiresAt,
       });
-      return { sessionId, userCode: start.userCode, verificationUri: start.verificationUri };
+      return {
+        sessionId,
+        userCode: start.userCode,
+        verificationUri: start.verificationUri,
+        intervalMs: start.intervalMs,
+        expiresAt: start.expiresAt,
+        // The browser converts the absolute upstream expiry into a relative TTL
+        // using this same-clock reference. Browser and gateway clocks need not agree.
+        serverNowMs: now(),
+      };
     },
 
     async pollDeviceCode({ sessionId, account }) {
       const s = take(sessionId);
       if (s.kind !== "device") throw new Error("wrong flow for this session");
       const doFetch = makeFetch(s.proxy);
+      if (s.providerId === XAI) {
+        if (!s.tokenEndpoint) throw new Error("xAI OAuth session is missing its token endpoint");
+        const xai = await pollXaiDeviceOnce(
+          { tokenEndpoint: s.tokenEndpoint, deviceCode: s.deviceCode },
+          doFetch,
+          now,
+        );
+        if (xai.status !== "done") return { status: xai.status };
+        await persistProxy(s.providerId, account, s.proxy);
+        await persist(s.providerId, account, xai.credentials);
+        await clearAccountCredentialFailure(deps.config, deps.encKey, s.providerId, account);
+        sessions.delete(sessionId);
+        return { status: "done" };
+      }
+      if (!s.domain) throw new Error("Copilot device session is missing its domain");
       const result = await pollCopilotDeviceOnce(
         { domain: s.domain, deviceCode: s.deviceCode },
         doFetch,

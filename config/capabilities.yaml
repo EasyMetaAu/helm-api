@@ -53,6 +53,44 @@
 # manual capability entry here because the subscription aliases are synthesized at
 # runtime and do not exist in LiteLLM's generated catalog.
 #
+# xAI subscription aliases are also synthesized. Only the two models observed from
+# the authenticated Grok CLI catalog and exercised by live Helm smokes are declared:
+# tools + SSE work for both; Grok 4.5 accepts explicit reasoning effort, while
+# Composer may emit internal reasoning but rejects an explicit reasoning_effort.
+# Their effective context limits are 500k and 200k respectively. Unverified
+# JSON/vision/extra-media abilities stay explicitly disabled (fail closed). The
+# output ceiling is unknown (`null`): the 512-token connectivity smoke is not an
+# upstream limit, and the unverified 64k public-API fallback must not be borrowed.
+# Subscription token pricing is
+# intentionally absent from pricing.yaml because SuperGrok publishes no per-token
+# contract; telemetry therefore records usage with cost_usd=null, never public API
+# list prices or a misleading $0.
+xai/grok-4.5:
+  supportsTools: true
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: true
+  supportsCachedContent: false
+  modalities: []
+  reasoningEffort:
+    openaiReasoning:
+      supported: true
+      levels: [low, medium, high]
+  maxContextTokens: 500000
+  maxOutputTokens: null
+xai/grok-composer-2.5-fast:
+  supportsTools: true
+  jsonOutput: none
+  supportsVision: false
+  supportsStreaming: true
+  supportsCachedContent: false
+  modalities: []
+  reasoningEffort:
+    openaiReasoning:
+      supported: false
+  maxContextTokens: 200000
+  maxOutputTokens: null
+#
 # GPT-5.6 fallback metadata mirrors the bundled Codex model catalog. At runtime the
 # authenticated `/models` response is authoritative per account; these entries are
 # only the last-resort fallback when no fresh or last-known-good remote catalog exists.

@@ -137,6 +137,7 @@
     if (p.id === 'anthropic') return `${$t('Claude Max')} · OAuth`;
     if (p.id === 'openai-codex') return `Codex · OAuth`;
     if (p.id === 'github-copilot') return `Copilot · ${$t('Device')}`;
+    if (p.id === 'xai') return `Grok · OAuth · ${$t('Experimental')}`;
     return p.flow === 'device_code' ? $t('Device') : 'OAuth';
   }
 
@@ -626,6 +627,7 @@
         {$t(
           'Connect Claude, ChatGPT, or GitHub Copilot subscriptions so Helm can route to them. You can connect several accounts per provider.',
         )}
+        {$t('xAI/SuperGrok is also available.')}
       </p>
     </div>
     <div class="flex w-full shrink-0 gap-2 sm:w-auto">
@@ -689,6 +691,7 @@
         {$t(
           'No subscriptions connected yet. Click Connect to link a Claude, ChatGPT, or Copilot account.',
         )}
+        {$t('xAI/SuperGrok is also available.')}
       </p>
     </div>
   {:else}

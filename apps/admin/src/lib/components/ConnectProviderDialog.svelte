@@ -33,6 +33,7 @@
   let error = $state<string | null>(null);
   let busy = $state<boolean>(false);
   let step = $state<'form' | 'manual' | 'device'>('form');
+  let deviceStatus = $state<'waiting' | 'expired' | 'denied' | 'failed'>('waiting');
 
   // flow state
   let sessionId = $state<string>('');
@@ -73,6 +74,7 @@
   // code to copy (no dead-localhost redirect), so its copy/paste wording differs from
   // the other manual-paste provider (Codex), which still pastes a redirect URL.
   let isAnthropic = $derived(providerId === 'anthropic');
+  let isXai = $derived(providerId === 'xai');
 
   // Suggest a unique label for the chosen provider: first is "default", then
   // account-2, account-3… (used when the operator leaves the field blank).
@@ -86,6 +88,25 @@
 
   function msg(e: unknown): string {
     return e instanceof Error ? e.message : String(e);
+  }
+
+  function oauthErrorCode(e: unknown): unknown {
+    return typeof e === 'object' && e !== null ? Reflect.get(e, 'code') : undefined;
+  }
+
+  function resetDeviceFlow(): void {
+    // Invalidating the id also stops any old async polling loop at its next boundary.
+    sessionId = '';
+    userCode = '';
+    verificationUri = '';
+    deviceStatus = 'waiting';
+    error = null;
+    step = 'form';
+  }
+
+  function close(): void {
+    sessionId = '';
+    onclose();
   }
 
   async function start(): Promise<void> {
@@ -106,14 +127,22 @@
         step = 'manual';
         window.open(s.authorizeUrl, '_blank', 'noopener');
       } else {
-        const s = await startDeviceCode(providerId, enterprise.trim() || undefined, proxy ?? undefined);
+        const s = await startDeviceCode(
+          providerId,
+          enterprise.trim() || undefined,
+          proxy ?? undefined,
+        );
         sessionId = s.sessionId;
         userCode = s.userCode;
         verificationUri = s.verificationUri;
         account = acct;
         step = 'device';
+        deviceStatus = 'waiting';
         window.open(s.verificationUri, '_blank', 'noopener');
-        void poll(s.sessionId);
+        // Convert the server-clock absolute expiry into a browser-clock deadline.
+        // This remains correct when the browser and gateway clocks differ.
+        const ttlMs = Math.max(0, s.expiresAt - s.serverNowMs);
+        void poll(s.sessionId, s.intervalMs, Date.now() + ttlMs);
       }
     } catch (e) {
       error = msg(e);
@@ -136,26 +165,45 @@
     }
   }
 
-  async function poll(sid: string): Promise<void> {
+  async function poll(sid: string, initialDelayMs: number, expiresAt: number): Promise<void> {
+    let delayMs = initialDelayMs;
     while (step === 'device' && sessionId === sid) {
-      await new Promise((r) => setTimeout(r, 5000));
+      const remainingMs = expiresAt - Date.now();
+      if (remainingMs <= 0) break;
+      await new Promise((r) => setTimeout(r, Math.min(delayMs, remainingMs)));
       if (step !== 'device' || sessionId !== sid) break;
+      if (Date.now() >= expiresAt) break;
       try {
         const { status } = await pollDeviceCode(providerId, { sessionId: sid, account });
         if (status === 'done') {
           onconnected();
-          onclose();
+          close();
           break;
         }
+        if (status === 'slow_down') delayMs += 5000;
       } catch (e) {
-        error = msg(e);
+        const detail = msg(e);
+        const code = oauthErrorCode(e);
+        if (code === 'device_authorization_denied') {
+          error = null;
+          deviceStatus = 'denied';
+        } else if (code === 'device_code_expired') {
+          error = null;
+          deviceStatus = 'expired';
+        } else {
+          error = detail;
+          deviceStatus = 'failed';
+        }
         break;
       }
+    }
+    if (step === 'device' && sessionId === sid && deviceStatus === 'waiting') {
+      deviceStatus = 'expired';
     }
   }
 </script>
 
-<Modal label={$t('Connect a subscription')} {onclose}>
+<Modal label={$t('Connect a subscription')} onclose={close}>
   <h2 class="section-header">{$t('Connect a subscription')}</h2>
 
   {#if error}
@@ -173,7 +221,9 @@
         </select>
         <span class="field-help">
           {#if selected?.flow !== 'manual_paste'}
-            {$t('Enter a one-time device code on GitHub to authorize.')}
+            {isXai
+              ? $t('Authorize xAI with a one-time device code.')
+              : $t('Enter a one-time device code on GitHub to authorize.')}
           {:else if isAnthropic}
             {$t('Sign in in your browser, then paste the authorization code back here.')}
           {:else}
@@ -181,6 +231,17 @@
           {/if}
         </span>
       </label>
+
+      {#if isXai}
+        <p
+          class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-900"
+          role="note"
+        >
+          {$t(
+            'Experimental: use only with your own subscription. xAI does not publish a third-party OAuth contract for this flow.',
+          )}
+        </p>
+      {/if}
 
       <label class="flex flex-col gap-1 text-sm">
         <span class="field-label">{$t('Account label')}</span>
@@ -190,7 +251,7 @@
         </span>
       </label>
 
-      {#if selected?.flow === 'device_code'}
+      {#if selected?.flow === 'device_code' && providerId === 'github-copilot'}
         <label class="flex flex-col gap-1 text-sm">
           <span class="field-label">{$t('GitHub Enterprise domain (optional)')}</span>
           <input
@@ -211,7 +272,9 @@
         </label>
         {#if useProxy}
           <span class="field-help">
-            {$t("Routes the gateway's calls to this provider (token exchange, refresh, API traffic) and is saved to this account. The sign-in page you open in your browser is not proxied.")}
+            {$t(
+              "Routes the gateway's calls to this provider (token exchange, refresh, API traffic) and is saved to this account. The sign-in page you open in your browser is not proxied.",
+            )}
           </span>
           <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <label class="flex flex-col gap-1 text-sm">
@@ -251,7 +314,7 @@
     </div>
 
     <div class="mt-4 flex justify-end gap-2">
-      <button type="button" class="btn-secondary" onclick={onclose}>{$t('Cancel')}</button>
+      <button type="button" class="btn-secondary" onclick={close}>{$t('Cancel')}</button>
       <button type="button" class="btn-primary" disabled={busy || !providerId} onclick={start}>
         {busy ? $t('Starting…') : $t('Start sign-in')}
       </button>
@@ -277,10 +340,12 @@
       class="input mt-2 font-mono text-xs"
       rows="2"
       bind:value={paste}
-      placeholder={isAnthropic ? $t('Paste the authorization code') : 'http://localhost/...?code=…&state=…'}
+      placeholder={isAnthropic
+        ? $t('Paste the authorization code')
+        : 'http://localhost/...?code=…&state=…'}
     ></textarea>
     <div class="mt-4 flex justify-end gap-2">
-      <button type="button" class="btn-secondary" onclick={onclose}>{$t('Cancel')}</button>
+      <button type="button" class="btn-secondary" onclick={close}>{$t('Cancel')}</button>
       <button
         type="button"
         class="btn-success"
@@ -302,12 +367,25 @@
     >
       {userCode}
     </p>
-    <div class="mt-4 flex items-center justify-between">
-      <span class="inline-flex items-center gap-2 text-xs text-ink-muted">
-        <span class="h-2 w-2 animate-pulse rounded-full bg-blue-500"></span>
-        {$t('Waiting for authorization…')}
-      </span>
-      <button type="button" class="btn-secondary" onclick={onclose}>{$t('Cancel')}</button>
+    <div class="mt-4 flex items-center justify-between gap-3">
+      {#if deviceStatus === 'waiting'}
+        <span class="inline-flex items-center gap-2 text-xs text-ink-muted" role="status">
+          <span class="h-2 w-2 animate-pulse rounded-full bg-blue-500"></span>
+          {$t('Waiting for authorization…')}
+        </span>
+        <button type="button" class="btn-secondary" onclick={close}>{$t('Cancel')}</button>
+      {:else}
+        <span class="flex-1 text-xs text-red-700" role="alert">
+          {deviceStatus === 'expired'
+            ? $t('This device code has expired.')
+            : deviceStatus === 'denied'
+              ? $t('Authorization was denied.')
+              : $t('Authorization failed. Start again to retry.')}
+        </span>
+        <button type="button" class="btn-primary shrink-0" onclick={resetDeviceFlow}>
+          {$t('Start again')}
+        </button>
+      {/if}
     </div>
   {/if}
 </Modal>

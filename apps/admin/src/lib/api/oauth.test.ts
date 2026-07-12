@@ -7,9 +7,12 @@ import {
   getOAuthUsage,
   listOAuthStatus,
   logoutOAuth,
+  OAuthApiError,
+  pollDeviceCode,
   setAccountModels,
   setAccountSchedule,
   setSelectionStrategy,
+  startDeviceCode,
   startManualPaste,
 } from './oauth.js';
 
@@ -62,6 +65,24 @@ describe('admin oauth api client', () => {
     });
   });
 
+  it('preserves a structured device polling error code', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        resp(
+          { error: 'xAI device authorization was denied', code: 'device_authorization_denied' },
+          { ok: false, status: 400 },
+        ),
+      ),
+    );
+
+    await expect(pollDeviceCode('xai', { sessionId: 's' })).rejects.toMatchObject({
+      name: 'OAuthApiError',
+      status: 400,
+      code: 'device_authorization_denied',
+    } satisfies Partial<OAuthApiError>);
+  });
+
   it('parses configured provider status without exposing secrets', async () => {
     const fetchFn = vi.fn(async () =>
       resp({
@@ -108,6 +129,29 @@ describe('admin oauth api client', () => {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ selectionStrategy: 'use_expiring' }),
+    });
+  });
+
+  it('preserves the server device-code polling interval and expiry', async () => {
+    const fetchFn = vi.fn(async () =>
+      resp({
+        sessionId: 'xai-session',
+        userCode: 'ABCD-EFGH',
+        verificationUri: 'https://auth.x.ai/activate',
+        intervalMs: 7000,
+        expiresAt: 123456,
+        serverNowMs: 100000,
+      }),
+    );
+    vi.stubGlobal('fetch', fetchFn);
+
+    await expect(startDeviceCode('xai')).resolves.toEqual({
+      sessionId: 'xai-session',
+      userCode: 'ABCD-EFGH',
+      verificationUri: 'https://auth.x.ai/activate',
+      intervalMs: 7000,
+      expiresAt: 123456,
+      serverNowMs: 100000,
     });
   });
 

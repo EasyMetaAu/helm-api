@@ -31,7 +31,8 @@
   {$t('How a request is matched to a lane')}
   {$t('Client keys and their lane limits')}
   {$t('Facts and reflections the gateway remembers')}
-  {$t('Connect Codex and Claude subscriptions')}
+  {$t('Connect AI subscriptions')}
+  {$t('xAI/SuperGrok is also available.')}
   {$t('System Settings')}
   <!-- dashboard quick-link descriptions -->
   {$t('See the full decision trail for every request the gateway handled.')}

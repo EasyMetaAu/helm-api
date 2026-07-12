@@ -88,6 +88,12 @@ and OpenAI Codex (ChatGPT):
 - **Hot-reload** of all of the above, with no restart, and fail-closed subscription
   routing.
 
+An experimental fourth channel, xAI SuperGrok/X Premium, is available by default.
+It uses OIDC discovery, RFC 8628 device code,
+rotating refresh tokens, live subscription model discovery, and the Grok CLI
+Responses proxy. It remains visibly labeled experimental until xAI publishes or
+grants a third-party OAuth client and endpoint contract.
+
 ### Platform & admin
 
 - **Per-key caps.** Allowed-lanes whitelist, `allow_custom_model`, RPM/TPM rate

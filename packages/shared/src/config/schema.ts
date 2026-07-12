@@ -102,11 +102,11 @@ export const OAuthConfigSchema = z
 // confidential block in the union below (a confidential object's token_url/
 // *_env keys are rejected here, so it can only match the confidential branch).
 //   - provider: which built-in subscription flow — anthropic (Claude Pro/Max),
-//     github-copilot, or openai-codex (ChatGPT Plus/Pro).
+//     github-copilot, openai-codex (ChatGPT Plus/Pro), or xai (SuperGrok/X Premium).
 //   - account: logical account label for multi-account installs (default 'default').
 export const OAuthPresetConfigSchema = z
   .object({
-    provider: z.enum(["anthropic", "github-copilot", "openai-codex"]),
+    provider: z.enum(["anthropic", "github-copilot", "openai-codex", "xai"]),
     account: z.string().min(1).default("default"),
   })
   .strict();

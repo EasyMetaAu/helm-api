@@ -153,6 +153,47 @@ describe("loadRuntimeCatalog", () => {
     ).toBeCloseTo((600 * 2 + 300 * 0.2 + 100 * 2.5 + 200 * 10) / 1_000_000, 12);
   });
 
+  it("loads verified xAI subscription capabilities without inventing token pricing", () => {
+    const catalog = loadRuntimeCatalog({ configDir: "config" });
+    const grok45 = catalog.get("xai/grok-4.5");
+    const composer = catalog.get("xai/grok-composer-2.5-fast");
+
+    expect(grok45?.capabilities).toMatchObject({
+      supportsTools: true,
+      jsonOutput: "none",
+      supportsVision: false,
+      supportsStreaming: true,
+      maxContextTokens: 500_000,
+      maxOutputTokens: null,
+      reasoningEffort: {
+        openaiReasoning: { supported: true, levels: ["low", "medium", "high"] },
+      },
+    });
+    expect(composer?.capabilities).toMatchObject({
+      supportsTools: true,
+      jsonOutput: "none",
+      supportsVision: false,
+      supportsStreaming: true,
+      maxContextTokens: 200_000,
+      maxOutputTokens: null,
+      reasoningEffort: {
+        openaiReasoning: { supported: false },
+      },
+    });
+    // SuperGrok is flat-fee and has no public per-token subscription price.
+    // Catalog presence must therefore remain honestly unpriced, not $0 or API-priced.
+    expect(grok45?.pricing).toEqual({
+      inputPerMTokUsd: null,
+      outputPerMTokUsd: null,
+      cacheReadPerMTokUsd: null,
+      cacheWritePerMTokUsd: null,
+    });
+    expect(composer?.pricing).toEqual(grok45?.pricing);
+    expect(
+      resolveCostUsd(grok45?.pricing, { usage: { input_tokens: 10, output_tokens: 5 } }),
+    ).toBeNull();
+  });
+
   it("fails closed on an invalid override yaml (principle 2)", () => {
     expect(() =>
       loadRuntimeCatalog({

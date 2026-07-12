@@ -1,7 +1,7 @@
 // Admin OAuth-login API client (issue #38). The admin UI is a PURE consumer of
 // the gateway's /admin/api/oauth surface (CLAUDE.md Principle 1) — no core logic,
 // no secrets ever cross this boundary. Two flows: manual_paste (Anthropic /
-// Claude Pro-Max) and device_code (GitHub Copilot).
+// Claude Pro-Max) and device_code (GitHub Copilot / xAI).
 
 import {
   type CodexResetResult,
@@ -58,15 +58,44 @@ export interface OAuthProviderStatus {
 
 const BASE = '/admin/api/oauth';
 
+export type OAuthApiErrorCode =
+  | 'device_authorization_denied'
+  | 'device_code_expired'
+  | 'device_poll_failed';
+
+export class OAuthApiError extends Error {
+  readonly status: number;
+  readonly code: OAuthApiErrorCode | undefined;
+
+  constructor(status: number, detail: string, code?: OAuthApiErrorCode) {
+    super(`oauth api ${status}${detail ? `: ${detail}` : ''}`);
+    this.name = 'OAuthApiError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
 async function asJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
     let detail = '';
+    let code: OAuthApiErrorCode | undefined;
     try {
-      detail = JSON.stringify(await res.json());
+      const body: unknown = await res.json();
+      detail = JSON.stringify(body);
+      if (typeof body === 'object' && body !== null && !Array.isArray(body)) {
+        const value = Reflect.get(body, 'code');
+        if (
+          value === 'device_authorization_denied' ||
+          value === 'device_code_expired' ||
+          value === 'device_poll_failed'
+        ) {
+          code = value;
+        }
+      }
     } catch {
       // not JSON; keep the status only
     }
-    throw new Error(`oauth api ${res.status}${detail ? `: ${detail}` : ''}`);
+    throw new OAuthApiError(res.status, detail, code);
   }
   return (await res.json()) as T;
 }
@@ -187,14 +216,21 @@ export async function completeManualPaste(
   if (!res.ok) await asJson(res); // throws with detail
 }
 
-// ── device-code (Copilot) ────────────────────────────────────────────────────
+// ── device-code (Copilot / xAI) ──────────────────────────────────────────────
 // `proxy` is pinned BEFORE the device-code POST (the flow's first call), so step 1
 // already egresses through it — no real-IP leak at bind time.
 export async function startDeviceCode(
   provider: string,
   enterprise?: string,
   proxy?: AccountProxyInput,
-): Promise<{ sessionId: string; userCode: string; verificationUri: string }> {
+): Promise<{
+  sessionId: string;
+  userCode: string;
+  verificationUri: string;
+  intervalMs: number;
+  expiresAt: number;
+  serverNowMs: number;
+}> {
   const res = await fetch(`${BASE}/${provider}/device/start`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

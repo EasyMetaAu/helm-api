@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import en from '../../locales/en.json';
+import es from '../../locales/es.json';
 import ja from '../../locales/ja.json';
 import ko from '../../locales/ko.json';
+import pt from '../../locales/pt.json';
 import zhHans from '../../locales/zh-hans.json';
 import zhHant from '../../locales/zh-hant.json';
 
@@ -20,7 +22,7 @@ const navSubtitleKeys = [
   'How a request is matched to a lane',
   'Client keys and their lane limits',
   'Facts and reflections the gateway remembers',
-  'Connect Codex and Claude subscriptions',
+  'Connect AI subscriptions',
   'System Settings',
 ] as const;
 
@@ -29,6 +31,8 @@ const translatedLocales = {
   'zh-hant': zhHant,
   ja,
   ko,
+  es,
+  pt,
 } as const;
 
 describe('sidebar nav subtitle locale coverage', () => {
