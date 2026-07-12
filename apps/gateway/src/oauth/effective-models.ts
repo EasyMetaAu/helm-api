@@ -36,6 +36,16 @@ export interface OAuthRuntimeCtxLike {
   encKey: Buffer;
 }
 
+// Network-free suggestions for a BOUND subscription account. xAI deliberately
+// stays out of core's CURATED_OAUTH_MODELS: runtime pool synthesis must continue
+// to fail closed when its live `/models` entitlement discovery has no result.
+// The picker fallback only repairs the Admin projection for the two models Helm
+// has already verified through the authenticated Grok CLI catalog.
+const ACCOUNT_MODEL_FALLBACKS: Readonly<Record<string, readonly string[]>> = {
+  ...CURATED_OAUTH_MODELS,
+  xai: ["grok-4.5", "grok-composer-2.5-fast"],
+};
+
 // The effective enabled models for ONE account (no network): the saved
 // `enabledModels` verbatim, else the provider's curated fallback (else []).
 export function effectiveAccountModels(
@@ -45,7 +55,7 @@ export function effectiveAccountModels(
   if (providerId === "openai-codex") return [];
   return resolveAccountModelsMode(providerId, settings) === "manual"
     ? (settings.enabledModels ?? [])
-    : (CURATED_OAUTH_MODELS[providerId] ?? []);
+    : [...(ACCOUNT_MODEL_FALLBACKS[providerId] ?? [])];
 }
 
 // Every routable `${providerId}/${model}` alias across all bound accounts, deduped
