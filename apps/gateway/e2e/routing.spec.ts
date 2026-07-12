@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { ADMIN_PASSWORD, ADMIN_USER, basicHeader } from "./fixtures/admin.js";
 import { FAIL_PRIMARY_SENTINEL } from "./fixtures/mock-upstream.js";
 
 // e2e.routing — black-box the WHOLE routing pipeline (Auth → Protocol →
@@ -19,23 +20,40 @@ import { FAIL_PRIMARY_SENTINEL } from "./fixtures/mock-upstream.js";
 const TEST_KEY = "helm_live_e2e_testkey";
 const AUTH = { Authorization: `Bearer ${TEST_KEY}`, "Content-Type": "application/json" };
 
-// NO-SUBSCRIPTION FAIL-OPEN (the CI reality). These e2e run with NO Codex
-// subscription connected, so the `openai-codex/*` lane heads are skipped with
-// provider_unavailable. The official OpenAI provider is keyed with a dummy key and
-// redirected to the local mock, so the GPT-5.6 official API fallback serves first.
-const ECONOMY_HEAD = "openai/gpt-5.6-luna";
-const PREMIUM_HEAD = "openai/gpt-5.6-sol";
-const BALANCED_HEAD = "openai/gpt-5.6-terra";
-// economy chain after a failed official Luna fallback skips Codex/Anthropic
-// subscription aliases and falls forward to the DeepSeek flash static fallback.
-const ECONOMY_NEXT = "deepseek/deepseek-v4-flash";
+// NO-SUBSCRIPTION FAIL-OPEN (the CI reality). Keep configured subscription
+// primaries distinct from the keyed static models that actually execute when no
+// OAuth account is bound.
+const ECONOMY_CONFIGURED_PRIMARY = "openai-codex/gpt-5.6-luna";
+const PREMIUM_CONFIGURED_PRIMARY = "openai-codex/gpt-5.6-sol";
+const BALANCED_CONFIGURED_PRIMARY = "openai-codex/gpt-5.6-terra";
+const ECONOMY_EXECUTION_FALLBACK = "deepseek/deepseek-v4-flash";
+const QUALITY_EXECUTION_FALLBACK = "deepseek/deepseek-v4-pro";
+// Paid OpenAI aliases are absent from shipped lanes but deliberately remain
+// available to a custom-model key as explicit, operator-controlled targets.
+const EXPLICIT_DIRECT_OPENAI_ALIAS = "openai/gpt-5.6-luna";
+const EXPLICIT_DIRECT_OPENAI_WIRE = "gpt-5.6-luna";
+// After the first executable economy candidate returns 5xx, the OpenRouter
+// mirror is the next keyed static candidate.
+const ECONOMY_NEXT = "openrouter/deepseek-v4-flash";
 
 // The upstream WIRE model ids the gateway sends (config/providers.yaml
 // `provider_model`), echoed back by the mock as `model`.
 // The routing ALIAS is surfaced separately via `x-helm-final-model`.
-const ECONOMY_HEAD_WIRE = "gpt-5.6-luna";
-const PREMIUM_HEAD_WIRE = "gpt-5.6-sol";
-const ECONOMY_NEXT_WIRE = "deepseek-v4-flash";
+const ECONOMY_EXECUTION_FALLBACK_WIRE = "deepseek-v4-flash";
+const QUALITY_EXECUTION_FALLBACK_WIRE = "deepseek-v4-pro";
+const ECONOMY_NEXT_WIRE = "deepseek/deepseek-v4-flash";
+
+async function expectConfiguredLanePrimary(
+  request: import("@playwright/test").APIRequestContext,
+  lane: string,
+  primary: string,
+): Promise<void> {
+  const res = await request.get(`/admin/api/lanes/${lane}`, {
+    headers: { Authorization: basicHeader(ADMIN_USER, ADMIN_PASSWORD) },
+  });
+  expect(res.status()).toBe(200);
+  expect((await res.json()).primary).toBe(primary);
+}
 
 function chat(content: string, extra: Record<string, unknown> = {}) {
   return {
@@ -48,10 +66,9 @@ function chat(content: string, extra: Record<string, unknown> = {}) {
 
 test.describe("routing e2e", () => {
   // ── Scenario 1: simple prompt → economy lane ────────────────────────────────
-  // The economy primary is openai-codex/gpt-5.6-luna. With no subscription
-  // connected in e2e, it is skipped and the json + non-stream capable official
-  // Luna fallback serves directly. Routing is asserted via the debug headers; the
-  // resolved bare wire id is surfaced as x-helm-provider-model.
+  // The configured economy primary remains Codex Luna. With no subscription
+  // connected in e2e, Codex/Anthropic aliases are skipped and DeepSeek Flash is
+  // the first executable static fallback.
   test("simple prompt -> economy lane", async ({ request }) => {
     const res = await request.post("/v1/chat/completions", {
       // Clearly-simple: strong simple-keyword signals (hi/thanks/ok) push the
@@ -61,16 +78,14 @@ test.describe("routing e2e", () => {
     });
     expect(res.status()).toBe(200);
     expect(res.headers()["x-helm-lane"]).toBe("economy");
-    // final model is the official economy fallback; its resolved provider_model is
-    // the bare id.
-    expect(res.headers()["x-helm-final-model"]).toBe(ECONOMY_HEAD);
-    expect(res.headers()["x-helm-provider-model"]).toBe(ECONOMY_HEAD_WIRE);
+    await expectConfiguredLanePrimary(request, "economy", ECONOMY_CONFIGURED_PRIMARY);
+    expect(res.headers()["x-helm-final-model"]).toBe(ECONOMY_EXECUTION_FALLBACK);
+    expect(res.headers()["x-helm-provider-model"]).toBe(ECONOMY_EXECUTION_FALLBACK_WIRE);
   });
 
   // ── Scenario 2: complex prompt → premium lane ───────────────────────────────
-  // Premium's nominal primary (openai-codex/gpt-5.6-sol) is the subscription
-  // channel; with no subscription connected it is skipped and premium serves the
-  // official OpenAI GPT-5.6 Sol fallback.
+  // Premium's configured primary is Codex Sol. With no OAuth accounts, its
+  // Codex/xAI/Anthropic candidates skip and DeepSeek Pro serves from balanced.
   test("complex prompt -> premium lane", async ({ request }) => {
     const res = await request.post("/v1/chat/completions", {
       data: chat(
@@ -80,8 +95,9 @@ test.describe("routing e2e", () => {
     });
     expect(res.status()).toBe(200);
     expect(res.headers()["x-helm-lane"]).toBe("premium");
-    expect(res.headers()["x-helm-final-model"]).toBe(PREMIUM_HEAD);
-    expect(res.headers()["x-helm-provider-model"]).toBe(PREMIUM_HEAD_WIRE);
+    await expectConfiguredLanePrimary(request, "premium", PREMIUM_CONFIGURED_PRIMARY);
+    expect(res.headers()["x-helm-final-model"]).toBe(QUALITY_EXECUTION_FALLBACK);
+    expect(res.headers()["x-helm-provider-model"]).toBe(QUALITY_EXECUTION_FALLBACK_WIRE);
   });
 
   // ── Scenario 3: response_format=json_object → json lane + valid JSON shape ───
@@ -111,19 +127,15 @@ test.describe("routing e2e", () => {
   });
 
   // ── Scenario 4: primary provider error → EXECUTION fallback serves ──────────
-  // Mock injects a one-shot 5xx for the official Luna fallback
-  // (`openai/gpt-5.6-luna`); the skipped codex/anthropic candidates never serve,
-  // so the first in-chain candidate that serves is `deepseek/deepseek-v4-flash`.
+  // Mock injects a 5xx for DeepSeek Flash, the first executable candidate after
+  // the unavailable subscription aliases. The OpenRouter mirror then serves.
   // Lane stays `economy` (execution fallback ≠ classification fallback, principle 5).
   test("primary provider error -> fallback model serves (execution fallback)", async ({
     request,
   }) => {
     // The prompt routes to economy (simple) AND carries the fail sentinel so the
-    // mock 5xxs the official Luna fallback. The gateway only forwards model+messages
-    // upstream, so the fault is steered through the prompt. The official Luna fallback
-    // is invoked (non-stream) and 5xxs, so the gateway falls forward past the skipped
-    // codex candidates to the next static one — the upstream-error fallback this
-    // scenario is about.
+    // mock 5xxs the first executable DeepSeek candidate. The gateway only forwards
+    // model+messages upstream, so the fault is steered through the prompt.
     const res = await request.post("/v1/chat/completions", {
       // Same clearly-simple economy prompt as scenario 1, plus the fail sentinel.
       data: chat(`hi thanks, translate to spanish: ok ${FAIL_PRIMARY_SENTINEL}`),
@@ -134,7 +146,7 @@ test.describe("routing e2e", () => {
     expect(res.headers()["x-helm-lane"]).toBe("economy");
     // final model is the in-chain NEXT candidate, not the failed primary.
     const finalModel = res.headers()["x-helm-final-model"];
-    expect(finalModel).not.toBe(ECONOMY_HEAD);
+    expect(finalModel).not.toBe(ECONOMY_EXECUTION_FALLBACK);
     expect(finalModel).toBe(ECONOMY_NEXT);
     expect(res.headers()["x-helm-provider-model"]).toBe(ECONOMY_NEXT_WIRE);
   });
@@ -161,8 +173,9 @@ test.describe("routing e2e", () => {
     });
     expect(res.status()).toBe(200);
     expect(res.headers()["x-helm-lane"]).toBe("economy");
-    expect(res.headers()["x-helm-final-model"]).toBe(ECONOMY_HEAD);
-    expect(res.headers()["x-helm-provider-model"]).toBe(ECONOMY_HEAD_WIRE);
+    await expectConfiguredLanePrimary(request, "economy", ECONOMY_CONFIGURED_PRIMARY);
+    expect(res.headers()["x-helm-final-model"]).toBe(ECONOMY_EXECUTION_FALLBACK);
+    expect(res.headers()["x-helm-provider-model"]).toBe(ECONOMY_EXECUTION_FALLBACK_WIRE);
   });
 
   test("explicit lane outside the key's allowed_lanes -> 400 invalid_request (no silent downgrade)", async ({
@@ -191,12 +204,12 @@ test.describe("routing e2e", () => {
 
   test("explicit KNOWN model alias still passes through verbatim", async ({ request }) => {
     const res = await request.post("/v1/chat/completions", {
-      data: chat("hi thanks, ok", { model: ECONOMY_HEAD }),
+      data: chat("hi thanks, ok", { model: EXPLICIT_DIRECT_OPENAI_ALIAS }),
       headers: CUSTOM_AUTH,
     });
     expect(res.status()).toBe(200);
-    expect(res.headers()["x-helm-final-model"]).toBe(ECONOMY_HEAD);
-    expect(res.headers()["x-helm-provider-model"]).toBe(ECONOMY_HEAD_WIRE);
+    expect(res.headers()["x-helm-final-model"]).toBe(EXPLICIT_DIRECT_OPENAI_ALIAS);
+    expect(res.headers()["x-helm-provider-model"]).toBe(EXPLICIT_DIRECT_OPENAI_WIRE);
   });
 
   // ── Scenario 5: unclassifiable prompt → balanced (classification fallback) ──
@@ -211,6 +224,8 @@ test.describe("routing e2e", () => {
     // fail-open: never a 5xx for a classification failure.
     expect(res.status()).toBe(200);
     expect(res.headers()["x-helm-lane"]).toBe("balanced");
-    expect(res.headers()["x-helm-final-model"]).toBe(BALANCED_HEAD);
+    await expectConfiguredLanePrimary(request, "balanced", BALANCED_CONFIGURED_PRIMARY);
+    expect(res.headers()["x-helm-final-model"]).toBe(QUALITY_EXECUTION_FALLBACK);
+    expect(res.headers()["x-helm-provider-model"]).toBe(QUALITY_EXECUTION_FALLBACK_WIRE);
   });
 });
