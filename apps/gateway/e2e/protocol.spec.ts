@@ -159,8 +159,12 @@ test.describe("OpenAI client → upstream", () => {
       },
     });
     expect(engineRes.ok()).toBeTruthy();
+    // The engine id still selects the configured GPT-5.4-mini vendor lane, but
+    // this hermetic gateway has no Codex OAuth account. Execution therefore
+    // fails open through economy to its first keyed static model.
+    expect(engineRes.headers()["x-helm-final-model"]).toBe("deepseek/deepseek-v4-flash");
     const upstream = await lastUpstreamRequest(request);
-    expect(upstream.body.model).toBe("gpt-5.6-luna");
+    expect(upstream.body.model).toBe("deepseek-v4-flash");
   });
 
   test("stream: first chunk carries role, last carries finish_reason, ends [DONE]", async ({

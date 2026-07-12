@@ -100,7 +100,10 @@ describe("shipped config rules drive routing", () => {
     const config = loadConfig({ configDir, env: {} });
     expect(config.lanes?.coding?.fallback).toEqual(["premium", "balanced"]);
     expect(config.lanes?.json?.constraints.require_json).toBe(true);
-    expect(config.lanes?.vision).toBeDefined();
+    expect(config.lanes?.vision).toMatchObject({
+      primary: "openai-codex/gpt-5.6-terra",
+      fallback: ["xai/grok-4.5", "anthropic/claude-sonnet-5", "anthropic/claude-opus-4-8"],
+    });
     expect(config.lanes?.tool_use).toBeDefined();
   });
 
@@ -142,5 +145,35 @@ describe("shipped config rules drive routing", () => {
     expect(result.decision.lane.candidate_chain[0]).toBe("openai-codex/gpt-5.6-sol");
     expect(result.decision.lane.candidate_chain).not.toContain("openai/gpt-5.6");
     expect(result.decision.requested_model).toBe("gpt-5.6");
+  });
+
+  it("expands the shipped premium chain with Grok before Claude Opus", async () => {
+    const config = loadConfig({ configDir, env: {} });
+    if (config.lanes === undefined) throw new Error("config.lanes must be loaded from lanes.yaml");
+
+    const result = await routeRequest(
+      req({ requested_model: "premium" }),
+      {
+        classify: async () => classification(),
+        policies: config.policies,
+        lanes: config.lanes,
+        modelAliases: config.model_aliases,
+        execute: async (plan) => okExecute(plan),
+        now: () => new Date(0),
+        log: () => {},
+      },
+      { allowCustomModel: true },
+    );
+
+    const chain = result.decision.lane.candidate_chain;
+    expect(result.decision.lane.selected_lane).toBe("premium");
+    expect(chain.slice(0, 5)).toEqual([
+      "openai-codex/gpt-5.6-sol",
+      "xai/grok-4.5",
+      "anthropic/claude-opus-4-8",
+      "openai-codex/gpt-5.6-terra",
+      "anthropic/claude-sonnet-5",
+    ]);
+    expect(new Set(chain).size).toBe(chain.length);
   });
 });

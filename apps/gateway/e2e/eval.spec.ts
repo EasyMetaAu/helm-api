@@ -44,12 +44,13 @@ const AUTH = {
 // deliberately omits this and runs at the shipped default threshold.
 const UNCERTAIN = { ...AUTH, "x-helm-rules-threshold": "0.99" };
 
-// Shipped config/lanes.yaml candidate heads. These e2e run with no Codex
-// subscription connected, so `openai-codex/*` is skipped. The official OpenAI
-// provider is keyed with a dummy key and redirected to the mock, so the GPT-5.6
-// official fallbacks serve first.
-const BALANCED_HEAD = "openai/gpt-5.6-terra";
-const PREMIUM_HEAD = "openai/gpt-5.6-sol";
+// Separate the configured subscription primary from the model that actually
+// executes in hermetic CI. No OAuth accounts are bound in this fixture, so the
+// subscription aliases fail open and both balanced/premium eventually serve the
+// keyed DeepSeek Pro fallback through the local mock.
+const BALANCED_CONFIGURED_PRIMARY = "openai-codex/gpt-5.6-terra";
+const PREMIUM_CONFIGURED_PRIMARY = "openai-codex/gpt-5.6-sol";
+const QUALITY_EXECUTION_FALLBACK = "deepseek/deepseek-v4-pro";
 
 // An intentionally ambiguous prompt: no strong Layer-1 keyword signal. Paired
 // with the UNCERTAIN header (rules threshold 0.99) the cascade is guaranteed to
@@ -81,6 +82,18 @@ async function resetEval(request: import("@playwright/test").APIRequestContext):
   await request.post(`${MOCK_BASE}${EVAL_RESET_PATH}`);
 }
 
+async function expectConfiguredLanePrimary(
+  request: import("@playwright/test").APIRequestContext,
+  lane: string,
+  primary: string,
+): Promise<void> {
+  const res = await request.get(`/admin/api/lanes/${lane}`, {
+    headers: { Authorization: basicHeader(ADMIN_USER, ADMIN_PASSWORD) },
+  });
+  expect(res.status()).toBe(200);
+  expect((await res.json()).primary).toBe(primary);
+}
+
 test.describe("eval cascade e2e", () => {
   test.beforeEach(async ({ request }) => {
     await resetEval(request);
@@ -107,8 +120,9 @@ test.describe("eval cascade e2e", () => {
     request,
   }) => {
     const res = await request.post("/v1/chat/completions", {
-      // The eval verdict picks the premium LANE; premium's openai-codex head is
-      // skipped (no subscription) so it serves the static fallback PREMIUM_HEAD.
+      // The eval verdict picks the premium LANE; its configured Codex/xAI/Claude
+      // subscription candidates are skipped because CI binds no OAuth accounts,
+      // so the request executes through the DeepSeek Pro fallback.
       // The internal eval call is a separate non-stream classify request.
       data: chat(ambiguous("s2")),
       headers: { ...UNCERTAIN, "x-helm-eval": "on" },
@@ -117,7 +131,8 @@ test.describe("eval cascade e2e", () => {
     // the eval stand-in returns complexity=reasoning -> premium lane (NOT balanced).
     expect(res.headers()["x-helm-decided-by"]).toBe("eval");
     expect(res.headers()["x-helm-lane"]).toBe("premium");
-    expect(res.headers()["x-helm-final-model"]).toBe(PREMIUM_HEAD);
+    await expectConfiguredLanePrimary(request, "premium", PREMIUM_CONFIGURED_PRIMARY);
+    expect(res.headers()["x-helm-final-model"]).toBe(QUALITY_EXECUTION_FALLBACK);
     expect(res.headers()["x-helm-eval-cache-hit"]).toBe("false");
     expect(await evalCalls(request)).toBe(1);
   });
@@ -181,7 +196,8 @@ test.describe("eval cascade e2e", () => {
     });
     expect(res.status()).toBe(200);
     expect(res.headers()["x-helm-lane"]).toBe("balanced");
-    expect(res.headers()["x-helm-final-model"]).toBe(BALANCED_HEAD);
+    await expectConfiguredLanePrimary(request, "balanced", BALANCED_CONFIGURED_PRIMARY);
+    expect(res.headers()["x-helm-final-model"]).toBe(QUALITY_EXECUTION_FALLBACK);
     expect(res.headers()["x-helm-decided-by"]).toBe("fallback");
     expect(res.headers()["x-helm-fallback-reason"]).toBe("eval_provider_error");
   });

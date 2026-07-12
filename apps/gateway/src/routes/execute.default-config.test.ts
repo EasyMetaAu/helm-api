@@ -219,6 +219,63 @@ describe("default config activates capability filter + cost (alias-namespace ali
     expect(calls).toEqual(["deepseek-v4-pro"]);
   });
 
+  it("prunes Grok from JSON requests before continuing the premium fallback chain", async () => {
+    const { client, calls } = stubProvider();
+    const execute = createExecute({
+      defaultProvider: client,
+      providers: providerClients(client),
+      registry: buildRegistry(),
+      breaker: breaker(),
+      catalog,
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["xai/grok-4.5", "openrouter/deepseek-v4-pro"]),
+      req({ response_format: { type: "json_object" } }),
+    );
+
+    expect(out.attempts[0]).toMatchObject({
+      alias: "xai/grok-4.5",
+      skipped: true,
+      skip_reason: "no_json_support",
+    });
+    expect(out.final.status).toBe("ok");
+    if (out.final.status === "ok") {
+      expect(out.final.alias).toBe("openrouter/deepseek-v4-pro");
+    }
+    expect(calls).toEqual(["deepseek/deepseek-v4-pro"]);
+  });
+
+  it("fails open when the shipped Grok OAuth candidate is not connected", async () => {
+    const { client, calls } = stubProvider();
+    const execute = createExecute({
+      defaultProvider: client,
+      providers: providerClients(client),
+      registry: buildRegistry(),
+      breaker: breaker(),
+      catalog,
+      now: clock(),
+      signal: new AbortController().signal,
+      knownOAuthPrefixes: new Set(["xai"]),
+      oauthAliases: () => new Set(),
+    });
+
+    const out = await execute(plan(["xai/grok-4.5", "openrouter/deepseek-v4-pro"]), req());
+
+    expect(out.attempts[0]).toMatchObject({
+      alias: "xai/grok-4.5",
+      skipped: true,
+      skip_reason: "provider_unavailable",
+    });
+    expect(out.final.status).toBe("ok");
+    if (out.final.status === "ok") {
+      expect(out.final.alias).toBe("openrouter/deepseek-v4-pro");
+    }
+    expect(calls).toEqual(["deepseek/deepseek-v4-pro"]);
+  });
+
   // Regression for the prod incident (Codex json_schema → official DeepSeek 400 →
   // fallback). A strict json_schema request must PRUNE the json_object-only official
   // deepseek (jsonOutput:object → no_response_schema_support) and land on the cheap,

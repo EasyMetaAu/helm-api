@@ -57,18 +57,18 @@
 # the authenticated Grok CLI catalog and exercised by live Helm smokes are declared:
 # tools + SSE work for both; Grok 4.5 accepts explicit reasoning effort, while
 # Composer may emit internal reasoning but rejects an explicit reasoning_effort.
-# Their effective context limits are 500k and 200k respectively. Unverified
-# JSON/vision/extra-media abilities stay explicitly disabled (fail closed). The
+# Their effective context limits are 500k and 200k respectively. Grok 4.5 vision
+# is enabled from a live subscription-proxy verification of native Responses
+# `input_image`; Composer rejected the same wire shape. Unverified JSON and
+# extra-media abilities stay explicitly disabled (fail closed). The
 # output ceiling is unknown (`null`): the 512-token connectivity smoke is not an
 # upstream limit, and the unverified 64k public-API fallback must not be borrowed.
-# Subscription token pricing is
-# intentionally absent from pricing.yaml because SuperGrok publishes no per-token
-# contract; telemetry therefore records usage with cost_usd=null, never public API
-# list prices or a misleading $0.
+# SuperGrok does not publish per-token subscription billing; pricing.yaml documents
+# the public-API-equivalent estimate used for Grok 4.5 telemetry and key budgets.
 xai/grok-4.5:
   supportsTools: true
   jsonOutput: none
-  supportsVision: false
+  supportsVision: true
   supportsStreaming: true
   supportsCachedContent: false
   modalities: []

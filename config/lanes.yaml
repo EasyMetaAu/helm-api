@@ -11,12 +11,13 @@
 #
 # PROVIDER MIX (2026-07-10, GPT-5.6): quality lanes lead with verified
 # `openai-codex` SUBSCRIPTION slugs where the ChatGPT/Codex backend accepts them
-# (connect it in admin → Providers) and fall back to official OpenAI GPT-5.6 API
-# aliases when OPENAI_API_KEY is configured. The official `gpt-5.6` alias routes
+# (connect it in admin → Providers). Official OpenAI GPT API aliases are deliberately
+# absent from every shipped lane because their per-token cost is too high. They remain
+# defined in providers/capabilities/pricing for explicit custom-model use. `gpt-5.6` routes
 # to Sol, but the subscription backend rejects the bare alias, so Helm routes to
 # the concrete Sol/Terra/Luna subscription slugs instead. DeepSeek/OpenRouter/ZenMux
-# remain static lower fallbacks so lanes degrade gracefully when Codex or OpenAI API
-# is unavailable. An unconnected candidate
+# remain static lower fallbacks so lanes degrade gracefully when subscriptions
+# are unavailable. An unconnected candidate
 # fails OPEN (Phase-0 back-fill / skip to the next fallback), never a 5xx. Each
 # lane still ends in a `*/auto` tail fallback; those auto aliases are deliberately
 # JSON-INCAPABLE (catalog jsonOutput:none), so a strict-JSON request prunes them
@@ -29,7 +30,6 @@ economy:
   reasoning_effort: medium
   primary: openai-codex/gpt-5.6-luna
   fallback:
-    - openai/gpt-5.6-luna
     - openai-codex/gpt-5.4-mini
     - anthropic/claude-haiku-4-5-20251001
     - deepseek/deepseek-v4-flash
@@ -42,11 +42,9 @@ balanced:
   reasoning_effort: medium
   primary: openai-codex/gpt-5.6-terra
   fallback:
-    - openai/gpt-5.6-terra
-    - anthropic/claude-sonnet-4-6
+    - anthropic/claude-sonnet-5
     - deepseek/deepseek-v4-pro
     - openrouter/deepseek-v4-pro
-    - zenmux-anthropic/claude-sonnet-4.6
     - zenmux/auto
     - openrouter/auto
 
@@ -55,10 +53,10 @@ premium:
   reasoning_effort: high
   primary: openai-codex/gpt-5.6-sol
   fallback:
-    - openai/gpt-5.6-sol
+    # Absorb premium fallback traffic before Claude Opus; an unbound or parked
+    # SuperGrok account fails open to the next candidate.
+    - xai/grok-4.5
     - anthropic/claude-opus-4-8
-    - zenmux-anthropic/claude-opus-4.8
-    - zenmux/gpt-5.5
     - balanced
 
 # —— task lanes (named after detected task_type; the lane resolver maps a
@@ -90,9 +88,14 @@ json:
 
 vision:
   purpose: Multimodal / image understanding
-  primary: zenmux-vertex/gemini-3.5-flash
+  # Subscription-first: Terra has the best everyday quality/quota balance; Grok
+  # image input has also been verified live. Claude subscriptions cover structured
+  # and long-context vision without automatically invoking a paid ZenMux model.
+  primary: openai-codex/gpt-5.6-terra
   fallback:
-    - premium
+    - xai/grok-4.5
+    - anthropic/claude-sonnet-5
+    - anthropic/claude-opus-4-8
   constraints:
     require_vision: true
 
@@ -110,7 +113,7 @@ tool_use:
 # SDK locked to `gpt-5.5`) has its `model` rewritten onto one of THESE lanes BEFORE
 # routing (model-aliases.yaml glob -> lane). Each LEADS with the requested family's
 # real model, so an explicit `claude-opus` lands on a Claude-Opus-led chain instead
-# of the GPT-led `premium` lane, then degrades through the matching generic lane.
+# of the generic `premium` lane, then degrades through the matching generic lane.
 # The lane abstraction still holds (principle 6): the client never names a provider
 # alias. Every chain inherits balanced's json-capable body + `*/auto` tail, so a
 # strict-JSON request still lands deterministically (the auto aliases get pruned).
@@ -118,19 +121,19 @@ tool_use:
 # The Claude lanes LEAD with the NATIVE Anthropic subscription alias (`anthropic/*`,
 # the Claude Pro/Max OAuth pool — connect it in admin → Providers). Like the
 # `openai-codex/*` primaries above, an unconnected `anthropic/*` candidate fails
-# OPEN (skip to the next fallback), never a 5xx — so each lane is backed by a static
-# `zenmux/*` key that keeps it serving without a subscription.
+# OPEN (skip to the next fallback), never a 5xx. Opus and Fable degrade through
+# `premium`; Sonnet and Haiku degrade through `balanced` and `economy` respectively.
 claude-opus:
   purpose: Anthropic Claude Opus tier — strongest Claude
   primary: anthropic/claude-opus-4-8
   fallback:
-    # When the native OAuth pool is parked/absent, degrade into the GPT-led premium chain.
+    # When the native OAuth pool is parked/absent, degrade into the generic premium chain.
     - premium
 
 # Claude Fable 5 — the Mythos-class Claude (autonomous knowledge work + coding),
 # 1M context. Mirrors claude-opus: LEADS with the native Anthropic OAuth alias (an
 # unconnected `anthropic/*` candidate fails OPEN to the next fallback) and degrades
-# straight into the GPT-led `premium` chain. No static Fable mirror is wired, so
+# straight into the generic `premium` chain. No static Fable mirror is wired, so
 # without a Claude subscription this lane serves via `premium`.
 claude-fable:
   purpose: Anthropic Claude Fable tier — Mythos-class autonomous work
@@ -140,13 +143,13 @@ claude-fable:
 
 claude-sonnet:
   purpose: Anthropic Claude Sonnet tier — balanced Claude
-  primary: anthropic/claude-sonnet-4-6
+  primary: anthropic/claude-sonnet-5
   fallback:
     # Native Anthropic OAuth pool, degrading to the generic balanced lane when parked.
     - balanced
 
-# Native Anthropic Haiku via the OAuth pool; degrades straight to `economy`
-# (deepseek-flash) when the subscription is parked.
+# Keep pinned Haiku traffic on the Anthropic subscription, then degrade directly
+# to `economy` without automatically invoking the paid ZenMux Haiku alias.
 claude-haiku:
   purpose: Anthropic Claude Haiku tier — cheap/fast
   primary: anthropic/claude-haiku-4-5-20251001
@@ -159,44 +162,38 @@ claude-haiku:
   purpose: OpenAI GPT-5.6 alias — routes to Sol upstream
   primary: openai-codex/gpt-5.6-sol
   fallback:
-    - openai/gpt-5.6
     - gpt-5.6-sol
 
 "gpt-5.6-sol":
   purpose: OpenAI GPT-5.6 Sol tier — flagship reasoning/coding
   primary: openai-codex/gpt-5.6-sol
   fallback:
-    - openai/gpt-5.6-sol
     - premium
 
 "gpt-5.6-terra":
   purpose: OpenAI GPT-5.6 Terra tier — balanced intelligence/cost
   primary: openai-codex/gpt-5.6-terra
   fallback:
-    - openai/gpt-5.6-terra
     - balanced
 
 "gpt-5.6-luna":
   purpose: OpenAI GPT-5.6 Luna tier — efficient/high-volume
   primary: openai-codex/gpt-5.6-luna
   fallback:
-    - openai/gpt-5.6-luna
     - economy
 
-# Stays on GPT-5.5 ACROSS providers (Codex subscription -> static ZenMux key) before
-# degrading to the GPT-led `premium` lane, so an explicit gpt-5.5 request is not
-# bumped onto Claude Opus on the first hiccup.
+# GPT-5.5 uses the Codex subscription only, then degrades to the subscription-led
+# `premium` lane without automatically spending through a ZenMux API key.
 "gpt-5.5":
   purpose: OpenAI GPT-5.5 tier
   primary: openai-codex/gpt-5.5
   fallback:
-    - anthropic/claude-opus-4-8
     - premium
 
 # GPT-5.4 — strong reasoning one tier below 5.5 ($2.5/$15 vs 5.5's $5/$30). Leads
 # with the Codex subscription's real gpt-5.4. ZenMux exposes NO 5.4 static key, so
-# it degrades to the GPT-led `premium` lane (gpt-5.5 -> static zenmux/gpt-5.5 ->
-# Opus) rather than dropping straight to the cheap tier on the first hiccup.
+# it degrades to the subscription-led `premium` lane rather than dropping straight
+# to the cheap tier on the first hiccup.
 "gpt-5.4":
   purpose: OpenAI GPT-5.4 tier — strong reasoning
   primary: openai-codex/gpt-5.4
@@ -244,15 +241,13 @@ gemini-flash:
 # the verbatim request params are uniform across providers (a 4xx param-shape error is
 # terminal and would mask a healthy fallback). Request the LANE NAME as `model`.
 #
-# Each lane LEADS with the DIRECT official upstream (providers.yaml: openai / google,
-# needing OPENAI_API_KEY / GEMINI_API_KEY) and falls over to the ZenMux relay. With
-# no official key set, the official primary is unavailable and the lane serves from
-# the relay leg. See docs/05 (image generation) + README.
+# `gpt-image` deliberately uses only the ZenMux relay because official OpenAI is
+# excluded from shipped lanes for cost. `gemini-image` still leads with Google direct
+# and falls over to ZenMux. See docs/05 (image generation) + README.
 gpt-image:
-  purpose: OpenAI gpt-image-2 — official primary, ZenMux fallback
-  primary: openai/gpt-image-2
-  fallback:
-    - gpt-image-2
+  purpose: OpenAI gpt-image-2 through ZenMux relay — official API excluded for cost
+  primary: gpt-image-2
+  fallback: []
 
 gemini-image:
   purpose: Gemini image — Google official → ZenMux Vertex flash → ZenMux pro

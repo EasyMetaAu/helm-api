@@ -153,7 +153,7 @@ describe("loadRuntimeCatalog", () => {
     ).toBeCloseTo((600 * 2 + 300 * 0.2 + 100 * 2.5 + 200 * 10) / 1_000_000, 12);
   });
 
-  it("loads verified xAI subscription capabilities without inventing token pricing", () => {
+  it("loads verified xAI capabilities with public-API-equivalent Grok 4.5 pricing", () => {
     const catalog = loadRuntimeCatalog({ configDir: "config" });
     const grok45 = catalog.get("xai/grok-4.5");
     const composer = catalog.get("xai/grok-composer-2.5-fast");
@@ -161,7 +161,7 @@ describe("loadRuntimeCatalog", () => {
     expect(grok45?.capabilities).toMatchObject({
       supportsTools: true,
       jsonOutput: "none",
-      supportsVision: false,
+      supportsVision: true,
       supportsStreaming: true,
       maxContextTokens: 500_000,
       maxOutputTokens: null,
@@ -180,18 +180,29 @@ describe("loadRuntimeCatalog", () => {
         openaiReasoning: { supported: false },
       },
     });
-    // SuperGrok is flat-fee and has no public per-token subscription price.
-    // Catalog presence must therefore remain honestly unpriced, not $0 or API-priced.
+    // SuperGrok itself is flat-fee. These are explicitly API-equivalent telemetry
+    // and budget estimates, while Composer stays unpriced because it has no verified rate.
     expect(grok45?.pricing).toEqual({
+      inputPerMTokUsd: 2,
+      outputPerMTokUsd: 6,
+      cacheReadPerMTokUsd: 0.5,
+      cacheWritePerMTokUsd: null,
+    });
+    expect(composer?.pricing).toEqual({
       inputPerMTokUsd: null,
       outputPerMTokUsd: null,
       cacheReadPerMTokUsd: null,
       cacheWritePerMTokUsd: null,
     });
-    expect(composer?.pricing).toEqual(grok45?.pricing);
     expect(
-      resolveCostUsd(grok45?.pricing, { usage: { input_tokens: 10, output_tokens: 5 } }),
-    ).toBeNull();
+      resolveCostUsd(grok45?.pricing, {
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5,
+          input_tokens_details: { cached_tokens: 4 },
+        },
+      }),
+    ).toBeCloseTo((6 * 2 + 4 * 0.5 + 5 * 6) / 1_000_000, 12);
   });
 
   it("fails closed on an invalid override yaml (principle 2)", () => {

@@ -78,7 +78,7 @@ describe("effectiveAccountModels", () => {
   it("falls back to the provider's curated set when enabledModels is unset", () => {
     expect(effectiveAccountModels({}, "anthropic")).toEqual([
       "claude-opus-4-6",
-      "claude-sonnet-4-6",
+      "claude-sonnet-5",
       "claude-haiku-4-5",
     ]);
   });
@@ -124,7 +124,7 @@ describe("effectiveOAuthAliases", () => {
     expect(aliases).toEqual([
       "anthropic/claude-haiku-4-5",
       "anthropic/claude-opus-4-6",
-      "anthropic/claude-sonnet-4-6",
+      "anthropic/claude-sonnet-5",
     ]);
   });
 

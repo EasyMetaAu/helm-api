@@ -42,11 +42,11 @@ export function echoResponse(model: string) {
 // gateway to fall forward to the next in-chain candidate. Exported so the spec
 // and the mock stay in lockstep.
 //
-// The e2e economy serving head is the official OpenAI GPT-5.6 Luna fallback
-// (`openai-codex/*` is skipped without a subscription). The gateway forwards the
-// resolved provider_model upstream as `model`, so the mock matches the bare wire id.
+// With no OAuth accounts, the e2e economy serving head is DeepSeek Flash. The
+// gateway forwards the resolved provider_model upstream as `model`, so the mock
+// matches the bare wire id and forces execution fallback to the OpenRouter mirror.
 export const FAIL_PRIMARY_SENTINEL = "__HELM_FAIL_PRIMARY__";
-export const FAIL_PRIMARY_MODEL = "gpt-5.6-luna";
+export const FAIL_PRIMARY_MODEL = "deepseek-v4-flash";
 
 // Image-lane fallback steering: a sentinel in the image prompt fails ONLY the
 // `gemini-image` lane's PRIMARY (gemini-3.1-flash-image) on the generateContent

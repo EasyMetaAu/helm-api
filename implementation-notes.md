@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-07-12 · Grok premium fallback 与 Composer 评估边界（Routing / provider evaluation，docs/04/07，原则 2/3/5/6/7）
+
+- **移除 official OpenAI 付费 lane 候选**：所有 `openai/gpt-*` 从 shipped lanes 删除，只保留 provider、能力与价格定义供显式 custom-model 使用；GPT vendor lanes 在 Codex subscription 不可用时进入通用订阅/静态 fallback，不再自动触发 official OpenAI 账单。`gpt-image` 改由 ZenMux relay 的 `gpt-image-2` 领衔，official Images API 同样不再被 lane 自动选择。
+- **Vision 订阅限定**：`vision` 改为 Codex Terra → Grok 4.5 → Claude Sonnet 5 → Claude Opus 4.8，全部为订阅 provider；`zenmux-vertex/gemini-3.5-flash` 从该 lane 移除，但 dedicated `gemini-flash` vendor lane 与底层 provider/catalog 保留供显式 Gemini 请求。链使用 concrete aliases，不再隐式展开 `premium`。
+- **路由调整**：`premium` 在 Claude Opus 前加入 `xai/grok-4.5`，使已连接且健康的 SuperGrok 账号吸收原本进入 Opus 的 fallback 流量；未连接、park 或 provider failure 继续 fail-open。Haiku 改为 Anthropic OAuth → economy，不再自动使用 ZenMux Haiku；GPT-5.5 改为 Codex GPT-5.5 → premium，不再自动使用 `zenmux/gpt-5.5`；GPT-5.4 继续由真实 Codex GPT-5.4 领衔。`zenmux-anthropic/claude-opus-4.8` 同样只从 lanes 移除，所有被移除的 provider/catalog 定义仍保留供显式调用。
+- **Composer 边界**：真实 A/B 暴露 200 + stop + 空正文与质量不足后，不进入 economy，也不再保留独立 canary lane；底层 OAuth 模型发现与 transport 兼容仍保留，避免把一次路由决策扩大成 provider 协议删除。
+- **真实 A/B**：本地 Docker 使用同一账号、总并发 2，Composer 与 Grok 4.5 各执行 30 个相同任务，覆盖 exact/factual/coding/long-context/speed/tool。Composer HTTP/模型命中 30/30、SSE `[DONE]` 30/30、工具参数 4/4、长上下文 6/6、长输出 TPS 中位数约 197，但事实仅 2/5、编码仅 1/4，6 次出现 200 + stop + 空正文，总质量 24/30（80%），可见 TTFT p95 约 1.59s；未达到 economy 晋升门槛。Grok 4.5 模型命中 29/30、质量 28/30、工具 4/4、长上下文 6/6、长输出 TPS 中位数约 138，但出现一次 504，成功率 96.7%、可见 TTFT p95 约 22.9s；速度达标但可靠性未达到 99%，因此只保留 premium fallback，不进入 balanced 或 primary。
+- **Docker 证据**：授权恢复后账号 `healthy:true` 且同时发现 `grok-4.5` / `grok-composer-2.5-fast`，真实 quota PULL 返回 `7d` 周窗口；三条预检分别真实命中 Composer、direct Grok 和 premium→Grok。授权前 premium 的 Grok 候选以 `provider_unavailable` 跳过并继续由 ZenMux Opus 成功，证明未连接边界 fail-open。测试 key 已全部禁用；容器限制 2 CPU / 2 GiB，结束时 healthy、restartCount 0。
+
 ## 2026-07-12 · SuperGrok 周配额使用现有 OAuth 读取私有 gRPC-Web credits（OAuth subscription / Admin providers，docs/04/09/11，原则 3/6/7）
 
 - **协议与认证证据**：grok.com 当前通过 `grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig` 读取消费者订阅 credits；官方 Grok CLI 同时暴露独立的 `/v1/billing` 私有接口。真实账号 A/B 验证确认 Helm 现有 `auth.x.ai` access bearer 可直接调用 credits RPC（无认证为 gRPC `UNAUTHENTICATED`，同一 Helm bearer 成功），因此不保存浏览器 Cookie、不引入 Management Key，也不申请额外 scope。token refresh 和请求继续复用账号代理。
@@ -22,6 +31,8 @@
 - **协议实现**：clean-room 参考 MIT OpenClaw/OpenCode：OIDC discovery 结果只接受 HTTPS `x.ai`/`*.x.ai`，所有 discovery/device/token/refresh 请求禁用自动重定向，避免 `307/308` 把 device code 或 refresh token 带到非信任域。RFC 8628 device code 首次 poll 前等待上游 `interval`，`slow_down` 每次增加 5 秒，Admin/UI 透传 interval/expiry 且过期不再请求；refresh token rotation 保留未轮换旧 token，敏感响应正文不进入错误或日志。token 继续使用 Helm AES-GCM OAuthTokenStore、singleflight refresh、账号代理和 credential-failure 机制。
 - **执行与目录**：订阅 token 只发送到受信任的 xAI/Grok 资源服务器，推理使用 `https://cli-chat-proxy.grok.com/v1` 的 generic OpenAI Responses executor，不能继承 ChatGPT/Codex identity headers。对照本机官方 Grok CLI `0.2.93` 的运行配置与真实成功请求，推理必须发送 `X-XAI-Token-Auth: xai-grok-cli`、`x-authenticateresponse: authenticate-response`、`x-grok-client-version: 0.2.93` 和按最终 wire model 生成的 `x-grok-model-override`；缺 client version 时上游稳定返回 426。默认版本随 Helm live smoke 维护；上游先提最低版本时可用严格 semver 的 `HELM_XAI_GROK_CLIENT_VERSION` 临时恢复，非法值在启动阶段 fail-closed。该代理只接受 SSE，因此 Helm 上游固定 `stream:true/store:false`：客户端非流式 Chat/Responses 在内部聚合 SSE，对外合同不变；Chat 的合法 `response.incomplete` 按流式/非流式一致映射为 `finish_reason:length`，native Responses 非流式仍只接受 `response.completed`。`store:false` 的 response id 无法用于服务端 continuation，真实第二轮返回 404 not found；Helm 因此在网络前把 `previous_response_id` 明确拒绝为 400 `invalid_request`，调用方必须发送完整会话 input，不能再退化成误导的 502。Chat 转 Responses 保留 system/developer 原生 input role（Composer 真实 precedence 需要这一形态），并保留 response format、tool strict/parallel、Responses-only control 字段与多模态 parts；xAI 自身未验证的 JSON/vision/audio/document 仍由 capability filter fail-closed。模型从账号 `/models` 动态发现，禁用 redirect，并以 30 秒 timeout、外部 abort 和 1 MiB Content-Length/流式双重上限约束；结构化目录行只接受 `responses/chat/language`，明确的 image/embedding/未知 backend fail-closed；发现失败返回空，不用 `api.x.ai` 公共目录伪造订阅 entitlement。仅为真实验证的 Grok 4.5 / Composer 声明 tools、stream 与 500k/200k context；Grok 4.5 接受显式 effort，Composer 的显式 effort capability 标为 unsupported 并在出站前剥离；output ceiling 未知并保持 `maxOutputTokens:null`。初始实现时尚未确认 SuperGrok quota 私有合同；后续发现与接入见上方 credits 条目。SuperGrok 仍无公开每 token 订阅价格，因此 usage 会记录而 `cost_usd` 保持 `null`。
 - **Admin 与验证边界**：device-code API 同时返回服务端时钟，浏览器用相对 TTL 换算本地 deadline；poll 错误通过稳定 code 贯穿 Gateway/Admin，expired/denied/failed 进入明确终态，停止等待动画并提供重新开始。单元/组合测试覆盖 discovery allowlist、模型 backend 过滤、device interval/expiry/slow_down、refresh rotation、加密持久化、默认 Provider 目录、能力与空 pricing、generic Responses 互译和 xAI request contract。真实 Docker 双模型矩阵覆盖 Chat/Anthropic/Gemini 流式与非流式、native Responses 默认 instructions、developer precedence、strict tool call + tool-result 往返、Composer effort 剥离、continuation 清晰 400、JSON/vision 422 fail-closed；浏览器走查覆盖桌面与 390px 宽度、xAI 警告及 Enterprise 字段隐藏。Claude CLI Opus 在不设 budget 上限的两轮最终 review 中先提出 4 个 P3（model header 源校验、device 分支、结构化 poll error、es/pt locale guard），修复后第二轮结论为 `CLEAN`。
+
+- **后续能力与成本更新**：上方初始实现中“vision 未验证 / `cost_usd=null`”的边界已被真实协议证据替代。Grok 4.5 原生 `input_image` 已通过四种入口验证并启用 vision；Composer 对同一 wire 返回 400，CLI 表面的看图来自 `grok-build` 先生成文字描述，因此继续关闭。按用户决定，Grok 4.5 使用公开 API 等价费率 input `$2/M`、cache read `$0.50/M`、output `$6/M` 参与 telemetry 与 API-key budget；这不是订阅账单，且当前固定 catalog 对 >200K 的 `$4/$1/$12` 档位会低估 50%。Composer 没有可验证公开费率，继续保持 `cost_usd=null`。
 
 ## 2026-07-11 · 上下文链耗尽恢复 Claude CLI 自动压缩信号（Provider execution / protocol errors，docs/04/05/07，原则 3/5/7/8）
 
@@ -43,6 +54,7 @@
 
 ## 2026-07-11 · Claude Sonnet 5 订阅流量 API 等价成本与能力目录（Provider catalog / cost telemetry，docs/04/07/11，原则 2/5/7）
 
+- **默认路由升级（2026-07-12）**：`balanced` 与 `claude-sonnet` 的 native Anthropic 候选从 Sonnet 4.6 切换到 `anthropic/claude-sonnet-5`，Anthropic live discovery 失败时的 curated fallback 同步改为 Sonnet 5。成本过高的 `zenmux-anthropic/claude-sonnet-4.6` 只从 shipped lanes 删除；provider、能力与价格定义继续保留，供历史 telemetry、显式 custom-model 和兼容性使用。
 - **成本定义**：`anthropic/claude-sonnet-5` 是 Claude Pro/Max OAuth 订阅别名，订阅本身不按请求扣费；Helm 的 `cost_usd` 使用官方 Claude API 等价估算，只用于 telemetry，不参与路由或订阅结算。
 - **当前价格**：按 Anthropic 官方 2026-07-11 价格表使用介绍期价格：input `$2/M`、output `$10/M`、5 分钟 cache write `$2.50/M`、cache read `$0.20/M`。介绍期于 2026-08-31 结束；静态 catalog 不支持生效日期，2026-09-01 必须更新为标准 `$3/$15/$3.75/$0.30`。
 - **能力边界**：与价格同一变更补齐 1M context、128K synchronous output、tools、vision、streaming、structured outputs、document input，以及 `low/medium/high/xhigh/max` adaptive-thinking effort。manual `budget_tokens` thinking 明确不支持，避免价格单独引入 `EMPTY_CAPABILITIES` 后被 `context_too_small` 错误过滤。
@@ -90,15 +102,9 @@
 - **Claude Fable 外部审查**：PR 按 8 个逻辑 diff 交给 Claude CLI `fable` 高强度只读审查，并逐条由 Helm 侧复核。确认并修复 4 个真实问题：upgrade async preflight 前缺少 raw socket error guard、出站 WebSocket close/error 终态不可重放、共享 catalog snapshot 被原地排序、Admin metadata-only quota 同时显示空占位。其余关于 372K Codex context、ETag CRLF、body reader lock、HTTP fallback session 泄漏、`gpt-5.6-*` 未来模型等结论因与上游源码/运行时或当前作用域证据不符而未改动。
 - **live 验证结果**：本地 Docker 数据卷中的真实 Codex 订阅账号可调度，Codex CLI `0.144.1` 通过完整 custom provider（command auth + Responses WebSocket）验证 `gpt-5.6-sol` / `terra` / `luna` / 裸 `gpt-5.6` 的 shell 工具调用、结果续轮、最终文本和 `turn.completed`。模型目录返回 9 项且包含四个 GPT-5.6 名称；裸 alias 的 3 个 Responses 轮次 telemetry 均为单次 `openai-codex/gpt-5.6-sol` attempt，无 skip/fallback/provider 漂移。本次未消费 reset credit。
 
-## 2026-07-10 · Direct DeepSeek Responses reasoning history pre-skip（Provider execution / protocol translation，docs/04/05/07，原则 3/5/8）
-
-- **背景（Lukin）**：生产请求 `17de8e09-cd94-4aa4-ab67-d2bacf3e4318` 最终由 `openrouter/deepseek-v4-flash` 成功服务，但 direct `deepseek/deepseek-v4-flash` fallback 先返回 400：`The reasoning_content in the thinking mode must be passed back to the API.` 近 3 天统计显示这类 direct DeepSeek reasoning-history 400 共 89 次，均最终 fallback 成功；部署 `v0.26.13` 后新增 3 次，说明 GPT-5.6 Chat tools 修复后剩余红色 400 主要是这个兼容问题。
-- **修复决策**：Responses reasoning items 在 IR 中进入 `thinking` / `provider_raw.reasoning`，跨到 OpenAI Chat target 时会被剥离，无法还原成 direct DeepSeek thinking 模式要求的历史 `reasoning_content`。因此对 `providerName === "deepseek"` 且 `targetProviderProtocol === "openai_chat"` 的候选，在检测到 Responses reasoning history 时发送前直接 skip，使用既有 `reasoning_history_incompatible` skip reason。
-- **边界**：不跳过 OpenRouter 托管的 DeepSeek；线上同一请求证明 OpenRouter target 能接受 Helm 剥离 reasoning history 后的 OpenAI Chat body。该规则只避免 direct DeepSeek 的确定性 400，不改变最终 fallback 选择。
-- **验证**：新增 execute 正/负回归测试：direct DeepSeek 被预跳过且不会调用 provider；OpenRouter-hosted DeepSeek 仍会正常尝试。
-
 ## 历史条目摘要（最近 5 条）
 
+- **2026-07-10 · Direct DeepSeek Responses reasoning history pre-skip（Provider execution / protocol translation，docs/04/05/07，原则 3/5/8）**：检测到 Responses reasoning history 时预跳过无法接收回传 `reasoning_content` 的 direct DeepSeek Chat 候选；OpenRouter mirror 保持可尝试，避免确定性 400 而不改变最终 fallback。
 - **2026-07-10 · GPT-5.6 Chat tools force reasoning_effort none（Provider execution / protocol translation，docs/04/05/07，原则 3/5/8）**：official GPT-5.6 Chat fallback 带 tools 时强制 wire `reasoning_effort:none`，保留 tools 并记录专用 body shim，避免 Responses-only 组合返回确定性 400。
 - **2026-07-10 · GPT-5.6 family support in Helm defaults（Routing / provider catalog / cost telemetry，docs/03/04/07，原则 3/4/5/6）**：默认 lanes、能力/价格目录与 wire 参数升级到 Sol/Terra/Luna，同时保持 official API 与 Codex subscription 的 entitlement/context 边界。
 - **2026-07-06 · 请求总超时驱动下游 abort 与失败 telemetry（Gateway runtime / telemetry，docs/02/07，原则 3/5/7）**：总超时统一 abort 下游并把客户端可见终态固定为 timeout，晚到 provider 成功只保留为 attempt 事实，不得覆盖最终失败或 payload。

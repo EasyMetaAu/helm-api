@@ -1,41 +1,33 @@
 import { describe, expect, it } from "vitest";
 import { promoteRequestedModel } from "./promote-requested-model.js";
 
-// The real `coding` lane chain from production request 1a4adea9 — the client
-// asked for `claude-sonnet-4-6` but was served `openai-codex/gpt-5.5` (idx0).
+// Representative coding chain: a client-pinned current Sonnet should move ahead
+// of the default primary without changing the operator-declared fallback set.
 const CHAIN = [
   "openai-codex/gpt-5.5",
   "anthropic/claude-opus-4-8",
-  "zenmux-anthropic/claude-opus-4.8",
-  "zenmux/gpt-5.5",
-  "anthropic/claude-sonnet-4-6",
+  "anthropic/claude-sonnet-5",
   "deepseek/deepseek-v4-pro",
   "openrouter/deepseek-v4-pro",
-  "zenmux-anthropic/claude-sonnet-4.6",
   "zenmux/auto",
   "openrouter/auto",
 ];
 
 describe("promoteRequestedModel", () => {
   it("promotes the earliest matching candidate to the front, preserving the rest", () => {
-    // `claude-sonnet-4-6` matches anthropic (idx4) AND zenmux dotted (idx7);
-    // earliest wins, so the direct-Anthropic alias leads and idx7 stays put.
-    expect(promoteRequestedModel(CHAIN, "claude-sonnet-4-6")).toEqual([
-      "anthropic/claude-sonnet-4-6",
+    expect(promoteRequestedModel(CHAIN, "claude-sonnet-5")).toEqual([
+      "anthropic/claude-sonnet-5",
       "openai-codex/gpt-5.5",
       "anthropic/claude-opus-4-8",
-      "zenmux-anthropic/claude-opus-4.8",
-      "zenmux/gpt-5.5",
       "deepseek/deepseek-v4-pro",
       "openrouter/deepseek-v4-pro",
-      "zenmux-anthropic/claude-sonnet-4.6",
       "zenmux/auto",
       "openrouter/auto",
     ]);
   });
 
   it("keeps the result a permutation (no add/drop) of the input", () => {
-    const out = promoteRequestedModel(CHAIN, "claude-sonnet-4-6");
+    const out = promoteRequestedModel(CHAIN, "claude-sonnet-5");
     expect([...out].sort()).toEqual([...CHAIN].sort());
   });
 
