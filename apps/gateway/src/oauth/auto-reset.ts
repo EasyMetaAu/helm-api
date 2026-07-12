@@ -2,10 +2,13 @@
 // so the (network-bound) wiring in server.ts can be unit-tested at the gate.
 //
 // Auto-reset consumes a SCARCE rate-limit reset credit (only a few per account),
-// so the trigger must be conservative: only the WEEKLY window (Codex `secondary`)
-// counts — the 5h window (`primary`) self-recovers and must never burn a credit —
+// so the trigger must be conservative: only the account-wide WEEKLY window counts.
+// Its primary/secondary position varies by plan, so duration is authoritative; the
+// 5h window self-recovers and must never burn a credit —
 // and at most ONE consume per account per hour (cooldown), so a burst of concurrent
 // saturated replies can't drain the grant.
+
+import { isCodexAccountWeeklyQuotaWindow } from "@helm/shared";
 
 // At least one hour between reset-credit consumes for the same shared ChatGPT
 // account. The runtime also persists this guard so a container restart cannot
@@ -58,17 +61,33 @@ export async function runResetCreditAttempt<
 }
 
 export function codexWeeklyUsedPercent(
-  windows: ReadonlyArray<{ key: string; limitId?: string; usedPercent: number }>,
+  windows: ReadonlyArray<{
+    key: string;
+    limitId?: string;
+    usedPercent: number;
+    windowMinutes?: number | null;
+  }>,
 ): number | null {
   const weekly = windows
-    .filter((w) => w.key === "secondary" && (w.limitId === undefined || w.limitId === "codex"))
+    .filter((w) =>
+      isCodexAccountWeeklyQuotaWindow({
+        key: w.key,
+        limitId: w.limitId,
+        windowMinutes: w.windowMinutes ?? null,
+      }),
+    )
     .map((w) => w.usedPercent)
     .filter((pct) => Number.isFinite(pct));
   return weekly.length === 0 ? null : Math.max(...weekly);
 }
 
 export function canConsumeResetCredit(
-  windows: ReadonlyArray<{ key: string; limitId?: string; usedPercent: number }>,
+  windows: ReadonlyArray<{
+    key: string;
+    limitId?: string;
+    usedPercent: number;
+    windowMinutes?: number | null;
+  }>,
   rateLimitReachedType?: CodexRateLimitReachedType | null,
 ): boolean {
   if (
@@ -81,10 +100,15 @@ export function canConsumeResetCredit(
   return (codexWeeklyUsedPercent(windows) ?? -1) >= CODEX_RESET_MIN_WEEKLY_USED_PERCENT;
 }
 
-// True when the WEEKLY window is fully used. Codex keys the 7d window "secondary";
-// the 5h window ("primary") is deliberately ignored (it recovers on its own).
+// True when the account-wide WEEKLY window is fully used. The reported duration
+// distinguishes it from the self-recovering 5h window across plan shapes.
 export function weeklySaturated(
-  windows: ReadonlyArray<{ key: string; limitId?: string; usedPercent: number }>,
+  windows: ReadonlyArray<{
+    key: string;
+    limitId?: string;
+    usedPercent: number;
+    windowMinutes?: number | null;
+  }>,
 ): boolean {
   return (codexWeeklyUsedPercent(windows) ?? -1) >= 100;
 }

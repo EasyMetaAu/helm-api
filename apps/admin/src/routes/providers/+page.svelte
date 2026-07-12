@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { invalidateAll } from '$app/navigation';
+  import { isCodexAccountWeeklyQuotaWindow } from '@helm/shared';
   import {
     consumeCodexResetCredit,
     logoutOAuth,
@@ -198,27 +199,41 @@
   }
 
   // Friendly window labels (provider-specific keys → display).
+  function durationWindowLabel(windowMinutes: number | null): string | null {
+    if (windowMinutes == null || !Number.isFinite(windowMinutes) || windowMinutes <= 0) return null;
+    if (windowMinutes === 300) return '5h';
+    if (windowMinutes === 10_080) return $t('Weekly');
+    if (windowMinutes % 1_440 === 0) return `${windowMinutes / 1_440}d`;
+    if (windowMinutes % 60 === 0) return `${windowMinutes / 60}h`;
+    return `${windowMinutes}m`;
+  }
+
   function windowLabel(key: string, windowMinutes: number | null = null): string {
+    // Codex plan shapes are not stable: some accounts now expose their weekly
+    // allowance as `primary` instead of `secondary`. The duration is authoritative;
+    // the primary/secondary key is only a neutral fallback when duration is absent.
+    const durationLabel = durationWindowLabel(windowMinutes);
+    if (
+      durationLabel &&
+      (key === 'primary' ||
+        key === 'secondary' ||
+        key.endsWith('-primary') ||
+        key.endsWith('-secondary'))
+    ) {
+      return durationLabel;
+    }
     const map: Record<string, string> = {
       '5h': '5h',
       '7d': '7d',
       '7d-opus': '7d · Opus',
       '7d-sonnet': '7d · Sonnet',
       '7d-fable': '7d · Fable',
-      // Codex windows: `primary` is the 5-hour rolling window (windowMinutes 300),
-      // `secondary` is the weekly limit (windowMinutes 10080) — matching the Codex UI.
-      primary: '5h',
-      secondary: $t('Weekly'),
+      primary: $t('Primary'),
+      secondary: $t('Secondary'),
     };
     if (map[key]) return map[key];
-    if (key.endsWith('-primary')) return windowMinutes ? `${windowMinutes}m` : $t('Primary');
-    if (key.endsWith('-secondary')) {
-      return windowMinutes === 10_080
-        ? $t('Weekly')
-        : windowMinutes
-          ? `${windowMinutes}m`
-          : $t('Secondary');
-    }
+    if (key.endsWith('-primary')) return $t('Primary');
+    if (key.endsWith('-secondary')) return $t('Secondary');
     if (key.startsWith('7d-')) return `7d · ${titleFromSlug(key.slice(3))}`;
     return key;
   }
@@ -310,7 +325,7 @@
 
   function codexWeeklyUsedPercent(q: OAuthQuotaSnapshot | undefined): number | null {
     const weekly = q?.windows
-      .filter((w) => w.key === 'secondary' && (w.limitId === undefined || w.limitId === 'codex'))
+      .filter(isCodexAccountWeeklyQuotaWindow)
       .map((w) => w.usedPercent)
       .filter((pct) => Number.isFinite(pct));
     return weekly && weekly.length > 0 ? Math.max(...weekly) : null;

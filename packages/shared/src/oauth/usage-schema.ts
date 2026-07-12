@@ -54,6 +54,21 @@ export const OAuthQuotaWindowSchema = z
 
 export type OAuthQuotaWindow = z.infer<typeof OAuthQuotaWindowSchema>;
 
+// Codex account plans do not consistently assign the short and weekly allowances
+// to `primary` / `secondary`. Prefer the reported duration and retain `secondary`
+// only as a compatibility fallback for older header snapshots without duration.
+// Model-scoped limits are deliberately excluded: reset credits target the default
+// account-wide allowance, not a single model family.
+export function isCodexAccountWeeklyQuotaWindow(
+  window: Pick<OAuthQuotaWindow, "key" | "windowMinutes" | "limitId">,
+): boolean {
+  if (window.limitId !== undefined && window.limitId !== "codex") return false;
+  if (window.windowMinutes != null && Number.isFinite(window.windowMinutes)) {
+    return window.windowMinutes >= 7 * 24 * 60;
+  }
+  return window.key === "secondary";
+}
+
 // Codex subscription identity copied from the authenticated ChatGPT account.
 // Optional fields preserve legacy records and claims that some account types omit.
 // This is operator-facing metadata only; no token or secret material is allowed.

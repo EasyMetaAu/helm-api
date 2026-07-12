@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ConfigStore } from "@helm/core";
-import type { OAuthQuotaWindow } from "@helm/shared";
+import { isCodexAccountWeeklyQuotaWindow, type OAuthQuotaWindow } from "@helm/shared";
 import {
   AUTO_RESET_COOLDOWN_MS,
   CODEX_RESET_MIN_WEEKLY_USED_PERCENT,
@@ -102,11 +102,13 @@ interface RedeemRequestMarker {
 
 function weeklyWindowMarker(windows: readonly OAuthQuotaWindow[]): WeeklyWindowMarker | null {
   const weekly = windows
-    .filter((w) => w.key === "secondary" && (w.limitId === undefined || w.limitId === "codex"))
+    .filter(isCodexAccountWeeklyQuotaWindow)
     .filter((w) => Number.isFinite(w.usedPercent))
     .sort((a, b) => b.usedPercent - a.usedPercent)[0];
   if (weekly?.resetsAtMs == null || !Number.isFinite(weekly.resetsAtMs)) return null;
   return {
+    // Keep the historical marker prefix canonical even when the live plan places
+    // its weekly allowance in `primary`; this preserves stored guard compatibility.
     windowId: `secondary:${weekly.resetsAtMs}`,
     resetAtMs: weekly.resetsAtMs,
   };

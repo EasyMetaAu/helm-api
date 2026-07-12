@@ -2,8 +2,41 @@ import { describe, expect, it } from "vitest";
 import {
   CodexOAuthUsageSchema,
   CodexResetResultSchema,
+  isCodexAccountWeeklyQuotaWindow,
   OAuthQuotaSnapshotSchema,
 } from "./usage-schema.js";
+
+describe("isCodexAccountWeeklyQuotaWindow", () => {
+  it("uses the reported duration before the unstable primary/secondary position", () => {
+    expect(
+      isCodexAccountWeeklyQuotaWindow({
+        key: "primary",
+        windowMinutes: 10_080,
+      }),
+    ).toBe(true);
+    expect(
+      isCodexAccountWeeklyQuotaWindow({
+        key: "secondary",
+        windowMinutes: 300,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps the legacy secondary fallback when duration metadata is absent", () => {
+    expect(isCodexAccountWeeklyQuotaWindow({ key: "secondary", windowMinutes: null })).toBe(true);
+    expect(isCodexAccountWeeklyQuotaWindow({ key: "primary", windowMinutes: null })).toBe(false);
+  });
+
+  it("never treats model-scoped limits as the account-wide weekly allowance", () => {
+    expect(
+      isCodexAccountWeeklyQuotaWindow({
+        key: "codex_terra-primary",
+        windowMinutes: 10_080,
+        limitId: "codex_terra",
+      }),
+    ).toBe(false);
+  });
+});
 
 // The auto-park cooldown (`usageLimitedUntilMs`) rides on the quota snapshot. It must
 // be OPTIONAL on the wire: legacy rows + unit fixtures written before the column existed

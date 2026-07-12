@@ -22,6 +22,15 @@ describe("codex reset-credit eligibility", () => {
     expect(canConsumeResetCredit([])).toBe(false);
   });
 
+  it("recognizes a primary account window as weekly when its duration is seven days", () => {
+    expect(
+      canConsumeResetCredit([{ key: "primary", usedPercent: 95, windowMinutes: 10_080 }]),
+    ).toBe(true);
+    expect(canConsumeResetCredit([{ key: "primary", usedPercent: 100, windowMinutes: 300 }])).toBe(
+      false,
+    );
+  });
+
   it("does not spend a reset credit for an additional model-specific secondary window", () => {
     expect(
       canConsumeResetCredit([
