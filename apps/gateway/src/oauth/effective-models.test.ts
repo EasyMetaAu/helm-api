@@ -14,7 +14,7 @@ import {
 } from "./effective-models.js";
 
 const KEY = Buffer.alloc(32, 7);
-const ROUTABLE = new Set(["anthropic", "github-copilot", "openai-codex"]);
+const ROUTABLE = new Set(["anthropic", "github-copilot", "openai-codex", "xai"]);
 
 function makeStores(): { tokens: SqliteOAuthTokenStore; config: SqliteConfigStore } {
   const db = createSqliteDb(":memory:");
@@ -83,6 +83,10 @@ describe("effectiveAccountModels", () => {
     ]);
   });
 
+  it("offers the verified xAI catalog when a bound account stays in auto mode", () => {
+    expect(effectiveAccountModels({}, "xai")).toEqual(["grok-4.5", "grok-composer-2.5-fast"]);
+  });
+
   it("returns [] for an unknown provider with no curated set + no enabled list", () => {
     expect(effectiveAccountModels({}, "mystery")).toEqual([]);
   });
@@ -99,6 +103,18 @@ describe("effectiveAccountModels", () => {
 });
 
 describe("effectiveOAuthAliases", () => {
+  it("exposes xAI auto-mode aliases to the Lanes model picker", async () => {
+    const { tokens, config } = makeStores();
+    await bind(tokens, "xai", "mylukin");
+
+    await expect(
+      effectiveOAuthModelOptions({ store: tokens, encKey: KEY }, config, ROUTABLE),
+    ).resolves.toEqual([
+      { alias: "xai/grok-4.5", accounts: ["mylukin"] },
+      { alias: "xai/grok-composer-2.5-fast", accounts: ["mylukin"] },
+    ]);
+  });
+
   it("emits provider/model aliases for every bound account's effective set, deduped + sorted", async () => {
     const { tokens, config } = makeStores();
     await bind(tokens, "anthropic", "default");
