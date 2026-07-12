@@ -207,6 +207,50 @@ describe('providers page', () => {
     expect(within(details).getByText('FedRAMP')).toBeInTheDocument();
   });
 
+  it('prefers the live Codex quota plan over a stale identity plan', () => {
+    renderPage({
+      providers: [
+        provider({
+          id: 'openai-codex',
+          name: 'ChatGPT Plus/Pro (Codex)',
+          accounts: [
+            {
+              account: 'acct-codex',
+              chatgptPlanType: 'pro',
+              expiresAt: null,
+              updatedAt: Date.now(),
+              healthy: true,
+              priority: 50,
+              schedulable: true,
+              proxy: null,
+              models: ['gpt-5.6-sol'],
+            },
+          ],
+        }),
+      ],
+      usage: [],
+      quota: [
+        {
+          providerId: 'openai-codex',
+          account: 'acct-codex',
+          windows: [],
+          capturedAt: Date.now(),
+          source: 'codex',
+          usageLimitedUntilMs: null,
+          resetCredits: null,
+          planType: 'plus',
+        },
+      ],
+    });
+
+    const row = screen.getByTestId('provider-account-row');
+    const details = within(row).getByTestId('codex-subscription-details');
+    const quotaCell = within(row).getByTestId('provider-quota-cell');
+    expect(within(details).getByText('Plus')).toBeInTheDocument();
+    expect(within(details).queryByText('Pro')).not.toBeInTheDocument();
+    expect(within(quotaCell).getByText('Plan: Plus')).toBeInTheDocument();
+  });
+
   it('does not reserve subscription-detail space when Codex claims are absent', () => {
     renderPage({
       providers: [
