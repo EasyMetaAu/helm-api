@@ -279,6 +279,65 @@ describe('providers page', () => {
     expect(within(quotaCell).getByText('Plan: Plus')).toBeInTheDocument();
   });
 
+  it('labels Codex quota windows by their real duration across plan shapes', () => {
+    renderPage({
+      providers: [
+        provider({
+          id: 'openai-codex',
+          name: 'Codex',
+          accounts: [
+            {
+              account: 'acct-codex',
+              chatgptPlanType: 'pro',
+              expiresAt: null,
+              updatedAt: Date.now(),
+              healthy: true,
+              priority: 50,
+              schedulable: true,
+              proxy: null,
+              models: ['gpt-5.6-sol'],
+            },
+          ],
+        }),
+      ],
+      usage: [],
+      quota: [
+        {
+          providerId: 'openai-codex',
+          account: 'acct-codex',
+          windows: [
+            {
+              // Some live plans now expose their weekly allowance as `primary`.
+              key: 'primary',
+              usedPercent: 7,
+              resetsAtMs: Date.now() + 6 * 86_400_000,
+              windowMinutes: 10_080,
+            },
+            {
+              // A key without duration must not invent a five-hour window.
+              key: 'secondary',
+              usedPercent: 2,
+              resetsAtMs: Date.now() + 3_600_000,
+              windowMinutes: null,
+            },
+          ],
+          capturedAt: Date.now(),
+          source: 'codex',
+          usageLimitedUntilMs: null,
+          resetCredits: 2,
+          planType: 'pro',
+        },
+      ],
+    });
+
+    const quotaCell = within(screen.getByTestId('provider-account-row')).getByTestId(
+      'provider-quota-cell',
+    );
+    expect(within(quotaCell).getByText('Weekly')).toBeInTheDocument();
+    expect(within(quotaCell).getByText('Secondary')).toBeInTheDocument();
+    expect(within(quotaCell).queryByText('5h')).not.toBeInTheDocument();
+  });
+
   it('does not reserve subscription-detail space when Codex claims are absent', () => {
     renderPage({
       providers: [
@@ -881,6 +940,23 @@ describe('providers page', () => {
     renderCodex(2, true);
     const row = screen.getByTestId('provider-account-row');
     expect(within(row).getByTestId('auto-reset-badge')).toBeInTheDocument();
+  });
+
+  it('recognizes a duration-backed primary window as the Codex weekly allowance', async () => {
+    renderCodexCooldown(
+      [
+        {
+          key: 'primary',
+          usedPercent: 95,
+          resetsAtMs: Date.now() + 3 * 86_400_000,
+          windowMinutes: 10_080,
+        },
+      ],
+      Date.now() + 60_000,
+    );
+
+    const row = screen.getByTestId('provider-account-row');
+    expect(within(row).getByRole('button', { name: /reset limit \(2\)/i })).toBeEnabled();
   });
 
   it('hides the Auto-reset badge when the account has not opted in', async () => {

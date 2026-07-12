@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-07-13 · Codex 周配额按真实窗口时长识别（OAuth quota / Admin providers / reset credits，docs/04/11，原则 3/5/7）
+
+- **生产证据与根因**：生产 `oauth_quota` 中四个 Codex 账号都出现 `primary + windowMinutes:10080`，截图中的唯一窗口虽显示 `5h`，重置倒计时却是 `6d 22h`。上游不同套餐不再保证 `primary=5h / secondary=7d`，Admin 的位置硬编码因此把真实周配额错标为 5h；同一假设还会让手动/自动 reset-credit 误报周快照不可用。
+- **统一判定**：账号级 Codex 周窗口以 provider 报告的 `windowMinutes >= 10080` 为权威；只有旧 header 快照缺少 duration 时才兼容回退到 `secondary`。带非默认 `limitId` 的 model-scoped 窗口绝不当作账号周配额。Admin 标签同样时长优先（300m→5h、10080m→Weekly），缺时长显示中性的 Primary/Secondary，不再猜测。
+- **账号边界**：规则完全 plan-agnostic，覆盖 Codex Plus/Pro/Team/Business/Enterprise/Edu 等实际窗口形态，不按套餐名维护分支。Claude 继续使用其 5h/7d keys；Copilot、SuperGrok 与普通 API-key provider 没有可验证的同类 Codex reset-credit 周窗口，不套用本规则或伪造数据。
+- **验证**：共享 predicate、Admin 单周窗口、reset-credit UI、自动重置与持久 guard 均增加 `primary + 10080m` 回归；同时覆盖 `secondary + 300m` 不误判、缺 duration 的 legacy fallback，以及 model-scoped 周窗口隔离。
+
 ## 2026-07-12 · Grok premium fallback 与 Composer 评估边界（Routing / provider evaluation，docs/04/07，原则 2/3/5/6/7）
 
 - **移除 official OpenAI 付费 lane 候选**：所有 `openai/gpt-*` 从 shipped lanes 删除，只保留 provider、能力与价格定义供显式 custom-model 使用；GPT vendor lanes 在 Codex subscription 不可用时进入通用订阅/静态 fallback，不再自动触发 official OpenAI 账单。`gpt-image` 改由 ZenMux relay 的 `gpt-image-2` 领衔，official Images API 同样不再被 lane 自动选择。
@@ -86,25 +93,9 @@
 - **API 投影**：`/portal/api/me` 同时返回有效 `project_id`、原始配置 `project_name` 与 `thread_source`，避免把 null→key-id 的私有默认 scope 错画成显式共享项目，并让弹窗准确回填线程策略。未新增 DB 字段或迁移，复用已有 KeyStore partial update。
 - **验证**：先增加 portal route 红测，覆盖 authenticated-key 强制、严格字段拒绝、disable/clear 和 root 拒绝；设置弹窗再以纯函数红测覆盖 off→inject 编辑回退、observe/project 回填和请求 trim/null 映射；运行 gateway/portal tests、typecheck、portal check/build 和 i18n 校验。
 
-## 2026-07-10–11 · Codex CLI GPT-5.6 subscription parity（OAuth subscription / Responses / model catalog，docs/04/05/11，原则 3/5/6/7/8）
-
-- **对齐基线**：实现逐项对照 OpenAI Codex `54c44b9ed4` 源码，而不是只增加三个模型字符串。Helm 现在使用原生 `GET /v1/models?client_version=...` 的 `{models}` envelope、Codex `ModelInfo` 字段、`minimal_client_version` 过滤和 key 权限过滤，并支持 `gpt-5.6-sol` / `terra` / `luna` 与裸 `gpt-5.6 -> gpt-5.6-sol` wire 规范化。
-- **模型目录与缓存**：订阅模型目录按 account identity + Codex client version 持久缓存，支持 fresh/network/stale last-known-good 与上游 ETag 观测。`/v1/models` 返回的是当前 API key 过滤后的稳定 ETag；Responses/compact 不再透传 account-wide 上游 `x-models-etag`，而是覆盖为同一 key 最近取得的目录 ETag，避免 Codex CLI 每轮误判目录变化。
-- **Responses parity**：原生 Responses 请求保留 Codex CLI body/header，补齐 compact、input tokens、response lifecycle、reasoning/tool/turn-state metadata、三种 SSE 终态（completed/failed/incomplete）和无终态 EOF fail-closed。compact 与普通 Responses 共用模型 alias、lane、allowed_lanes、blocked_models 和订阅 entitlement 边界。
-- **compact 结算与热重建**：compact 只走 Codex 原生 lifecycle，缺少订阅 executor 时返回 `capability_unsatisfiable`，绝不降级成普通 Responses。executor 每次请求读取当前 OAuth pool，所以运行中首次连接、重建或替换账号不需要重启。成功响应按真实顶层 `usage` 结算 token/cost/budget；失败仍保留实际 serving account 和已捕获的 upstream request。Responses usage 同时识别 `cache_write_tokens` / `cache_creation_tokens` / `cache_creation_input_tokens`，避免 cache-write 成本低估。
-- **Responses WebSocket parity**：`/v1/responses` 支持真实 `101` upgrade、per-message deflate、`response.create`、`generate:false` 预热、同连接串行复用和 `previous_response_id`。握手先复用 `/v1/models?client_version=...` 做 Helm key 鉴权，并返回 key-scoped `x-models-etag`；`x-reasoning-included` 按 Codex 的“header 存在即 true”语义处理，false-like 值必须省略。明确 `426` 会立即固定切 HTTP；无 HTTP status 的握手故障先按 Codex retry budget 重试，耗尽后固定切 HTTP；`websocket_connection_limit_reached` 会关闭旧连接并重发同一请求，预算耗尽后切 HTTP。`response.failed` / `response.incomplete` / `error`、wrapped HTTP error、非法帧和无终态断连都会销毁连接，只有 `response.completed` 的连接可复用。
-- **reasoning 计数握手**：账号/版本作用域的模型快照持久保存上游 `/codex/models` 是否带 `x-reasoning-included`。只有本次 key 可路由的所有快照都明确为真时，`/v1/models` 和 WebSocket upgrade 才返回该 header；旧缓存、bundled fallback 或混合未知账号均省略，避免 Codex CLI 重复或错误计算历史 reasoning token。
-- **Codex custom tool 续轮**：Responses Lite 增量帧不得重新注入空 `additional_tools`；协议 transformer 现在显式识别 `custom_tool_call` / `custom_tool_call_output`，映射到 IR tool call/tool message，并在 `provider_raw.responses_input_items` 保留原始 item 序列。这样 output-only continuation 不再变成空 messages，也不会在重放时降级成 `function_call_output`。
-- **裸 GPT-5.6 alias**：Codex 模型目录中的 `gpt-5.6` 是 Sol alias，`model-aliases.yaml` 因此直接映射到 `gpt-5.6-sol` lane。不能先进入通用 `gpt-5.6` lane，否则 requested-model promotion 会把未配置的 official `openai/gpt-5.6` 提升到订阅 Sol 前面，产生虚假的 `provider_unavailable` attempt。
-- **`ultra` 边界**：`ultra` 是 Codex CLI 本地模式，不是跨 provider 的 wire/config 能力。Helm 只在 Codex subscription 请求边界把它归一化为 wire `max`；共享 IR、Lane/Policy schema、Admin 配置、Anthropic 与 Gemini 均不暴露或发送 `ultra`，避免把 Codex 的 proactive multi-agent 开关扩散成全局协议字段。
-- **订阅与配额**：ChatGPT identity claims、plan、credits、reset-credit details、`rate_limit_reached_type`、默认与 additional model limits 都从 WHAM usage/headers 解析并贯通 Gateway/Admin。`x-codex-active-limit` 决定 429 只停车当前模型 entitlement 还是整个账号，quota snapshot 保留上游真实 `usedPercent`，不再把 429 人为改写成 100%。
-- **reset-credit 安全边界**：手动和自动 consume 共用 weekly threshold、shared ChatGPT account guard、每小时 cooldown 与 weekly-window 幂等门禁；workspace credits/spend-control 限制不会消耗 rate-limit reset credit。手动操作可选择具体 `credit_id` 并复用 `redeem_request_id`，Admin 明示 plan/balance/reached type 和具体 credit。
-- **reset-credit 身份后备**：shared guard 优先使用 `chatgpt_account_id`；缺失时使用稳定的 ChatGPT user ID，再后备到规范化 email，只有完全没有上游身份时才退回 Helm label。这样同一订阅绑定多个 label 不会重复消耗 credit，同时不同用户不会被合并。
-- **Claude Fable 外部审查**：PR 按 8 个逻辑 diff 交给 Claude CLI `fable` 高强度只读审查，并逐条由 Helm 侧复核。确认并修复 4 个真实问题：upgrade async preflight 前缺少 raw socket error guard、出站 WebSocket close/error 终态不可重放、共享 catalog snapshot 被原地排序、Admin metadata-only quota 同时显示空占位。其余关于 372K Codex context、ETag CRLF、body reader lock、HTTP fallback session 泄漏、`gpt-5.6-*` 未来模型等结论因与上游源码/运行时或当前作用域证据不符而未改动。
-- **live 验证结果**：本地 Docker 数据卷中的真实 Codex 订阅账号可调度，Codex CLI `0.144.1` 通过完整 custom provider（command auth + Responses WebSocket）验证 `gpt-5.6-sol` / `terra` / `luna` / 裸 `gpt-5.6` 的 shell 工具调用、结果续轮、最终文本和 `turn.completed`。模型目录返回 9 项且包含四个 GPT-5.6 名称；裸 alias 的 3 个 Responses 轮次 telemetry 均为单次 `openai-codex/gpt-5.6-sol` attempt，无 skip/fallback/provider 漂移。本次未消费 reset credit。
-
 ## 历史条目摘要（最近 5 条）
 
+- **2026-07-10–11 · Codex CLI GPT-5.6 subscription parity（OAuth subscription / Responses / model catalog，docs/04/05/11，原则 3/5/6/7/8）**：按 Codex 源码补齐 GPT-5.6 模型目录、Responses/WebSocket/compact、usage、订阅 entitlement 与 reset-credit 安全边界，并完成真实 CLI 验证。
 - **2026-07-10 · Direct DeepSeek Responses reasoning history pre-skip（Provider execution / protocol translation，docs/04/05/07，原则 3/5/8）**：检测到 Responses reasoning history 时预跳过无法接收回传 `reasoning_content` 的 direct DeepSeek Chat 候选；OpenRouter mirror 保持可尝试，避免确定性 400 而不改变最终 fallback。
 - **2026-07-10 · GPT-5.6 Chat tools force reasoning_effort none（Provider execution / protocol translation，docs/04/05/07，原则 3/5/8）**：official GPT-5.6 Chat fallback 带 tools 时强制 wire `reasoning_effort:none`，保留 tools 并记录专用 body shim，避免 Responses-only 组合返回确定性 400。
 - **2026-07-10 · GPT-5.6 family support in Helm defaults（Routing / provider catalog / cost telemetry，docs/03/04/07，原则 3/4/5/6）**：默认 lanes、能力/价格目录与 wire 参数升级到 Sol/Terra/Luna，同时保持 official API 与 Codex subscription 的 entitlement/context 边界。

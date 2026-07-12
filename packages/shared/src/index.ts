@@ -282,6 +282,7 @@ export {
   CodexOAuthUsageSchema,
   type CodexResetResult,
   CodexResetResultSchema,
+  isCodexAccountWeeklyQuotaWindow,
   type OAuthQuotaSnapshot,
   OAuthQuotaSnapshotSchema,
   type OAuthQuotaWindow,
