@@ -12,7 +12,7 @@ import { arch, platform, release } from "node:os";
 import { type CodexModelInfo, CodexModelsResponseSchema } from "./codex-model-info.js";
 import { listGitHubCopilotModels } from "./github-copilot.js";
 import { parseOpenAICodexIdentity } from "./openai-codex.js";
-import { XAI_GROK_OAUTH_BASE_URL } from "./xai.js";
+import { XAI_GROK_OAUTH_BASE_URL, xaiGrokProtocolHeaders } from "./xai.js";
 
 // Curated FALLBACK model ids — used when live discovery is unavailable or fails.
 // Anthropic and Codex are normally live; these are only their safety net.
@@ -328,6 +328,7 @@ export async function listXaiOAuthModels(
       Accept: "application/json",
       Authorization: `Bearer ${accessToken}`,
       "User-Agent": "helm-api/xai-oauth",
+      ...xaiGrokProtocolHeaders(),
     },
     redirect: "error",
     signal,
@@ -338,12 +339,23 @@ export async function listXaiOAuthModels(
   }
   const body = (await readXaiModelsJson(res, signal)) as { data?: unknown; models?: unknown };
   const rows = Array.isArray(body.data) ? body.data : Array.isArray(body.models) ? body.models : [];
+  const textBackends = new Set(["responses", "chat", "language"]);
+  const knownTextModels = new Set(["grok-4.5", "grok-composer-2.5-fast"]);
   const ids = rows
     .map((row) => {
       if (typeof row === "string") return row.trim();
       if (!row || typeof row !== "object" || Array.isArray(row)) return "";
-      const value = (row as Record<string, unknown>).id ?? (row as Record<string, unknown>).model;
-      return typeof value === "string" ? value.trim() : "";
+      const record = row as Record<string, unknown>;
+      const backend = record.api_backend ?? record.apiBackend ?? record.backend;
+      // String rows are the explicit legacy shape and remain accepted. Structured
+      // rows without a backend are accepted only for models whose text transport
+      // Helm has verified; otherwise an omitted type must not bypass fail-closed
+      // filtering. An explicit non-language backend is always incompatible.
+      if (typeof backend === "string" && !textBackends.has(backend.trim().toLowerCase())) return "";
+      const value = record.id ?? record.model;
+      const id = typeof value === "string" ? value.trim() : "";
+      if (backend === undefined && !knownTextModels.has(id)) return "";
+      return id;
     })
     .filter((id) => id.length > 0 && id.length <= 200 && /^[A-Za-z0-9._:-]+$/.test(id));
   return [...new Set(ids)].sort();

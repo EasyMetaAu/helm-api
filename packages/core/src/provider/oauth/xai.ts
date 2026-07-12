@@ -22,14 +22,51 @@ export const XAI_GROK_OAUTH_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
 // First-party protocol version observed from the installed Grok CLI release.
 // The subscription proxy rejects inference requests without this header (HTTP 426).
 export const XAI_GROK_CLIENT_VERSION = "0.2.93";
+export const XAI_GROK_CLIENT_VERSION_ENV = "HELM_XAI_GROK_CLIENT_VERSION";
 
-export function xaiGrokInferenceHeaders(wireModel: string): Record<string, string> {
-  const model = wireModel.trim();
-  if (model.length === 0) throw new Error("xAI inference request is missing its wire model");
+const SEMVER_PATTERN =
+  /^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/;
+
+/**
+ * Resolve the first-party protocol version advertised to the Grok CLI proxy.
+ * The checked-in default tracks the Grok CLI release used by Helm's live smoke.
+ * An operator may temporarily follow an upstream minimum-version bump without a
+ * Helm rebuild; strict semver validation prevents header injection/fake labels.
+ */
+export function resolveXaiGrokClientVersion(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const configured = env[XAI_GROK_CLIENT_VERSION_ENV]?.trim();
+  const version = configured || XAI_GROK_CLIENT_VERSION;
+  if (version.length > 64 || !SEMVER_PATTERN.test(version)) {
+    throw new Error(
+      `${XAI_GROK_CLIENT_VERSION_ENV} must be a semantic version (for example 0.2.93)`,
+    );
+  }
+  return version;
+}
+
+export function xaiGrokProtocolHeaders(
+  env: Record<string, string | undefined> = process.env,
+): Record<string, string> {
   return {
     "X-XAI-Token-Auth": "xai-grok-cli",
     "x-authenticateresponse": "authenticate-response",
-    "x-grok-client-version": XAI_GROK_CLIENT_VERSION,
+    "x-grok-client-version": resolveXaiGrokClientVersion(env),
+  };
+}
+
+export function xaiGrokInferenceHeaders(
+  wireModel: string,
+  env: Record<string, string | undefined> = process.env,
+): Record<string, string> {
+  const model = wireModel.trim();
+  if (model.length === 0) throw new Error("xAI inference request is missing its wire model");
+  if (model.length > 200 || !/^[A-Za-z0-9._:-]+$/.test(model)) {
+    throw new Error("xAI inference request has an invalid wire model");
+  }
+  return {
+    ...xaiGrokProtocolHeaders(env),
     "x-grok-model-override": model,
   };
 }

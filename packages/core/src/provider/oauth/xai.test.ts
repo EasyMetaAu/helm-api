@@ -6,7 +6,9 @@ import {
   loginXai,
   pollXaiDeviceOnce,
   refreshXaiOAuthToken,
+  resolveXaiGrokClientVersion,
   XAI_GROK_CLIENT_VERSION,
+  XAI_GROK_CLIENT_VERSION_ENV,
   XAI_OAUTH_CLIENT_ID,
   XAI_OAUTH_SCOPE,
   xaiGrokInferenceHeaders,
@@ -40,6 +42,27 @@ describe("xAI OAuth", () => {
       "x-grok-model-override": "grok-composer-2.5-fast",
     });
     expect(() => xaiGrokInferenceHeaders("   ")).toThrow(/wire model/);
+    expect(() => xaiGrokInferenceHeaders("grok-4.5\r\nx-injected: yes")).toThrow(
+      /invalid wire model/,
+    );
+  });
+
+  it("uses a validated operator override for the Grok CLI protocol version", () => {
+    expect(resolveXaiGrokClientVersion({})).toBe("0.2.93");
+    expect(resolveXaiGrokClientVersion({ [XAI_GROK_CLIENT_VERSION_ENV]: " 0.3.1 " })).toBe("0.3.1");
+    expect(
+      xaiGrokInferenceHeaders("grok-4.5", {
+        [XAI_GROK_CLIENT_VERSION_ENV]: "0.3.1",
+      })["x-grok-client-version"],
+    ).toBe("0.3.1");
+    expect(() =>
+      resolveXaiGrokClientVersion({
+        [XAI_GROK_CLIENT_VERSION_ENV]: "0.3.1\r\nx-unsafe: injected",
+      }),
+    ).toThrow(/semantic version/);
+    expect(() => resolveXaiGrokClientVersion({ [XAI_GROK_CLIENT_VERSION_ENV]: "latest" })).toThrow(
+      /semantic version/,
+    );
   });
 
   it("discovers endpoints and starts the device-code flow", async () => {
@@ -278,6 +301,13 @@ describe("xAI OAuth", () => {
         data: [
           { id: "grok-composer-2.5-fast", api_backend: "responses" },
           { id: "grok-4.3", api_backend: "language" },
+          { id: "grok-chat", api_backend: "chat" },
+          { id: "grok-imagine-image", api_backend: "image" },
+          { id: "grok-embed", api_backend: "embeddings" },
+          { id: "grok-unknown", api_backend: "future_backend" },
+          { id: "grok-legacy-without-backend" },
+          { id: "grok-4.5" },
+          "grok-legacy-string",
           { id: "" },
           { id: 42 },
         ],
@@ -285,7 +315,10 @@ describe("xAI OAuth", () => {
     );
     await expect(discoverOAuthModels("xai", "oauth-access", fetchImpl)).resolves.toEqual([
       "grok-4.3",
+      "grok-4.5",
+      "grok-chat",
       "grok-composer-2.5-fast",
+      "grok-legacy-string",
     ]);
     expect(hasLiveModelDiscovery("xai")).toBe(true);
     expect(fetchImpl).toHaveBeenCalledWith(
@@ -294,6 +327,11 @@ describe("xAI OAuth", () => {
         headers: expect.objectContaining({ Authorization: "Bearer oauth-access" }),
       }),
     );
+    const discoveryHeaders = new Headers(fetchImpl.mock.calls[0]?.[1]?.headers);
+    expect(discoveryHeaders.get("X-XAI-Token-Auth")).toBe("xai-grok-cli");
+    expect(discoveryHeaders.get("x-authenticateresponse")).toBe("authenticate-response");
+    expect(discoveryHeaders.get("x-grok-client-version")).toBe("0.2.93");
+    expect(discoveryHeaders.get("x-grok-model-override")).toBeNull();
   });
 
   it("aborts Grok model discovery after its request timeout", async () => {

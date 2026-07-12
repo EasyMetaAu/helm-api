@@ -33,6 +33,7 @@ import {
   pollXaiDeviceOnce,
   refreshGitHubCopilotToken,
   validateProxyConfig,
+  type XaiDeviceStart,
 } from "@helm/core";
 import { CodexOAuthUsageSchema, type OAuthQuotaWindow } from "@helm/shared";
 import type {
@@ -785,8 +786,8 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         kind: "device",
         providerId,
         deviceCode: start.deviceCode,
-        ...(providerId === XAI && "tokenEndpoint" in start
-          ? { tokenEndpoint: start.tokenEndpoint }
+        ...(providerId === XAI
+          ? { tokenEndpoint: (start as XaiDeviceStart).tokenEndpoint }
           : {
               domain: (start as CopilotDeviceStart).domain,
               enterpriseDomain: (start as CopilotDeviceStart).enterpriseDomain,
@@ -801,6 +802,9 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         verificationUri: start.verificationUri,
         intervalMs: start.intervalMs,
         expiresAt: start.expiresAt,
+        // The browser converts the absolute upstream expiry into a relative TTL
+        // using this same-clock reference. Browser and gateway clocks need not agree.
+        serverNowMs: now(),
       };
     },
 

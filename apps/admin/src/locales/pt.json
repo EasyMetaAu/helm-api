@@ -980,5 +980,9 @@
   "Experimental": "Experimental",
   "Experimental: use only with your own subscription. xAI does not publish a third-party OAuth contract for this flow.": "Experimental: use apenas com sua própria assinatura. A xAI não publica um contrato OAuth de terceiros para este fluxo.",
   "Connect AI subscriptions": "Conectar assinaturas de IA",
-  "xAI/SuperGrok is also available.": "xAI/SuperGrok também está disponível."
+  "xAI/SuperGrok is also available.": "xAI/SuperGrok também está disponível.",
+  "This device code has expired.": "Este código de dispositivo expirou.",
+  "Authorization was denied.": "A autorização foi negada.",
+  "Authorization failed. Start again to retry.": "A autorização falhou. Comece novamente para tentar outra vez.",
+  "Start again": "Começar novamente"
 }

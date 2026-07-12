@@ -538,6 +538,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       expect(headers.get("Accept")).toBe("text/event-stream");
       expect(JSON.parse(String(init?.body))).toEqual({
         model: "grok-composer-2.5-fast",
+        instructions: "You are a helpful assistant.",
         input: "hello",
         stream: true,
         store: false,
@@ -576,6 +577,52 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
         .get("xai")
         ?.nativePassthrough?.({ model: "grok-composer-2.5-fast", input: "hello" }),
     ).resolves.toMatchObject({ id: "resp-grok", status: "completed" });
+  });
+
+  it("rejects xAI native continuation before contacting the subscription proxy", async () => {
+    const { ctx, config } = oauthStores();
+    await seedXai(ctx, "heavy");
+    const inferenceBodies: Array<Record<string, unknown>> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (String(url).endsWith("/models")) {
+        return new Response(
+          JSON.stringify({ data: [{ id: "grok-4.5", api_backend: "responses" }] }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+      inferenceBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return sseResponse([
+        { type: "response.created", response: { id: "resp-next" } },
+        {
+          type: "response.completed",
+          response: { id: "resp-next", object: "response", status: "completed", output: [] },
+        },
+      ]);
+    });
+
+    const enabled = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+    );
+    await expect(
+      enabled.poolClients.get("xai")?.nativePassthrough?.({
+        model: "grok-4.5",
+        previous_response_id: "resp-prev",
+        instructions: "Follow the repository policy.",
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "next" }] }],
+      }),
+    ).rejects.toMatchObject({
+      upstreamStatus: 400,
+      providerRaw: expect.objectContaining({ code: "previous_response_id_unsupported" }),
+    });
+    expect(inferenceBodies).toEqual([]);
   });
 
   it("does not discover non-Codex models when manual mode is authoritative", async () => {

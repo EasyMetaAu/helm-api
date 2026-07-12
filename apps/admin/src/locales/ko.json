@@ -980,5 +980,9 @@
   "Experimental": "실험적",
   "Experimental: use only with your own subscription. xAI does not publish a third-party OAuth contract for this flow.": "실험적 기능입니다. 본인 구독에서만 사용하세요. xAI는 이 흐름에 대한 타사 OAuth 계약을 공개하지 않습니다.",
   "Connect AI subscriptions": "AI 구독 연결",
-  "xAI/SuperGrok is also available.": "xAI/SuperGrok도 사용할 수 있습니다."
+  "xAI/SuperGrok is also available.": "xAI/SuperGrok도 사용할 수 있습니다.",
+  "This device code has expired.": "이 장치 코드가 만료되었습니다.",
+  "Authorization was denied.": "인증이 거부되었습니다.",
+  "Authorization failed. Start again to retry.": "인증에 실패했습니다. 다시 시작하여 재시도하세요.",
+  "Start again": "다시 시작"
 }

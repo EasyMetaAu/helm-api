@@ -96,6 +96,7 @@ import {
   resolveCompactionPricing,
   resolveCostUsd,
   resolveOpenAICodexClientVersion,
+  resolveXaiGrokClientVersion,
   responsesTransformer,
   routeRequest,
   runCleanupPass,
@@ -1435,6 +1436,8 @@ function createProviderClient(
             requestContract: {
               forceSse: true,
               forceStoreFalse: true,
+              ensureInstructions: true,
+              rejectPreviousResponseId: true,
               requestHeaders: ({ model }: { model: string }) => xaiGrokInferenceHeaders(model),
             },
           }
@@ -1509,6 +1512,10 @@ export async function buildServer(
   const logger = opts.logger ?? createJsonLogger();
   const responsesWebSocketSessionProof = randomUUID();
   const config = loadConfig({ configDir: opts.configDir ?? "./config" });
+  // Validate the optional Grok proxy protocol override before opening stores or
+  // starting background work. Invalid runtime configuration must fail closed at
+  // startup even when no xAI account is connected yet.
+  resolveXaiGrokClientVersion(process.env);
 
   // Store adapter set, chosen by config (CLAUDE.md "DB abstraction layer"): sqlite (default,
   // local file) or supabase (hosted Postgres). The factory fails CLOSED on an

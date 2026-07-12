@@ -17,6 +17,9 @@
 # this manual layer, not the generated catalog (see capabilities.yaml header).
 # Cost telemetry only — never drives selection. (deepseek numbers carried over
 # from the prior relay entries; verify against official DeepSeek pricing.)
+# xai/grok-4.5 and xai/grok-composer-2.5-fast are deliberately absent: SuperGrok
+# is a flat-fee consumer subscription with no public per-token subscription price.
+# Missing pricing keeps cost_usd=null while usage tokens remain observable.
 openai-codex/gpt-5.6:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0

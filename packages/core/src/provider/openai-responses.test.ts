@@ -3508,6 +3508,67 @@ describe("createCodexResponsesClient — passthrough methods are defined (pool f
 });
 
 describe("createGenericOpenAIResponsesClient — native passthrough", () => {
+  it("injects default native instructions when the opt-in contract requires them", async () => {
+    let seenBody: Record<string, unknown> = {};
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://stream-only.test/v1", apiKey: "sk-test" },
+      requestContract: {
+        forceSse: true,
+        forceStoreFalse: true,
+        ensureInstructions: true,
+        rejectPreviousResponseId: true,
+      },
+      fetch: (async (_url: string, init?: RequestInit) => {
+        seenBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return sseResponse([
+          {
+            type: "response.completed",
+            response: { id: "r", object: "response", status: "completed", output: [] },
+          },
+        ]);
+      }) as unknown as typeof fetch,
+    });
+
+    await client.nativePassthrough?.({ model: "grok", input: "hello" });
+
+    expect(seenBody).toMatchObject({
+      instructions: "You are a helpful assistant.",
+      input: "hello",
+      stream: true,
+      store: false,
+    });
+  });
+
+  it("rejects unsupported native continuation before contacting the upstream", async () => {
+    const fetchMock = vi.fn();
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://stream-only.test/v1", apiKey: "sk-test" },
+      requestContract: {
+        forceSse: true,
+        forceStoreFalse: true,
+        ensureInstructions: true,
+        rejectPreviousResponseId: true,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await expect(
+      client.nativePassthrough?.({
+        model: "grok",
+        previous_response_id: "resp_prev",
+        instructions: "Follow the repository policy.",
+        input: [{ type: "message", role: "user", content: "next" }],
+      }),
+    ).rejects.toMatchObject({
+      upstreamStatus: 400,
+      providerRaw: expect.objectContaining({
+        type: "invalid_request_error",
+        code: "previous_response_id_unsupported",
+      }),
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("adapts a unary chat call to a stream-only upstream and aggregates its SSE", async () => {
     let seenHeaders = new Headers();
     let seenBody: Record<string, unknown> = {};
@@ -4181,6 +4242,215 @@ describe("sanitizeCodexResponsesNativeBody", () => {
 });
 
 describe("openaiToGenericResponsesRequest — tools and reasoning_effort", () => {
+  it("preserves system and developer as native input roles in their original order", () => {
+    const body = openaiToGenericResponsesRequest({
+      model: "grok",
+      messages: [
+        { role: "system", content: "System policy" },
+        { role: "developer", content: "Developer policy" },
+        { role: "user", content: "Hello" },
+      ],
+    } as unknown as Parameters<typeof openaiToGenericResponsesRequest>[0]);
+
+    expect(body.instructions).toBe("You are a helpful assistant.");
+    expect(body.input).toEqual([
+      {
+        type: "message",
+        role: "system",
+        content: [{ type: "input_text", text: "System policy" }],
+      },
+      {
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: "Developer policy" }],
+      },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Hello" }],
+      },
+    ]);
+  });
+
+  it.each([
+    [{ type: "json_object" }, { format: { type: "json_object" } }],
+    [
+      {
+        type: "json_schema",
+        json_schema: {
+          name: "answer",
+          description: "Structured answer",
+          schema: { type: "object", properties: { ok: { type: "boolean" } } },
+          strict: true,
+        },
+      },
+      {
+        format: {
+          type: "json_schema",
+          name: "answer",
+          description: "Structured answer",
+          schema: { type: "object", properties: { ok: { type: "boolean" } } },
+          strict: true,
+        },
+      },
+    ],
+  ])("maps Chat response_format %# to Responses text.format", (responseFormat, expected) => {
+    const body = openaiToGenericResponsesRequest({
+      model: "grok",
+      messages: [],
+      response_format: responseFormat,
+    } as unknown as Parameters<typeof openaiToGenericResponsesRequest>[0]);
+
+    expect(body.text).toEqual(expected);
+  });
+
+  it("re-emits Responses-only continuation fields after the IR fallback path", () => {
+    const nativeText = {
+      format: {
+        type: "json_schema",
+        name: "native_answer",
+        schema: { type: "string" },
+        strict: true,
+      },
+      verbosity: "low",
+    };
+    const body = openaiToGenericResponsesRequest({
+      model: "grok",
+      messages: [{ role: "tool", tool_call_id: "call_1", content: "done" }],
+      previous_response_id: "resp_prev",
+      include: ["reasoning.encrypted_content"],
+      metadata: { trace: "abc" },
+      truncation: "disabled",
+      store: true,
+      text: nativeText,
+      // A preserved native Responses `text` is lossless and must win over the
+      // synthesized Chat response_format when both survive normalization.
+      response_format: { type: "json_object" },
+    } as unknown as Parameters<typeof openaiToGenericResponsesRequest>[0]);
+
+    expect(body).toMatchObject({
+      previous_response_id: "resp_prev",
+      include: ["reasoning.encrypted_content"],
+      metadata: { trace: "abc" },
+      truncation: "disabled",
+      store: true,
+      text: nativeText,
+    });
+  });
+
+  it("preserves parallel_tool_calls:false and a strict function schema", () => {
+    const body = openaiToGenericResponsesRequest({
+      model: "grok",
+      messages: [],
+      parallel_tool_calls: false,
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "lookup",
+            parameters: { type: "object", additionalProperties: false },
+            strict: true,
+          },
+        },
+      ],
+    } as unknown as Parameters<typeof openaiToGenericResponsesRequest>[0]);
+
+    expect(body.parallel_tool_calls).toBe(false);
+    expect(body.tools).toEqual([
+      {
+        type: "function",
+        name: "lookup",
+        description: "",
+        parameters: { type: "object", additionalProperties: false },
+        strict: true,
+      },
+    ]);
+  });
+
+  it("preserves IR image, audio, and document parts in user input", () => {
+    const body = openaiToGenericResponsesRequest({
+      model: "grok",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Inspect these" },
+            { type: "image", url: "https://example.test/image.png", detail: "low" },
+            { type: "audio", data: "YXVkaW8=", format: "wav" },
+            { type: "document", fileId: "file_1", filename: "one.pdf" },
+            {
+              type: "document",
+              data: "cGRm",
+              mediaType: "application/pdf",
+              filename: "two.pdf",
+            },
+            {
+              type: "document",
+              url: "https://example.test/three.pdf",
+              filename: "three.pdf",
+            },
+          ],
+        },
+      ],
+    } as unknown as Parameters<typeof openaiToGenericResponsesRequest>[0]);
+
+    expect(body.input).toEqual([
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: "Inspect these" },
+          { type: "input_image", image_url: "https://example.test/image.png", detail: "low" },
+          { type: "input_audio", input_audio: { data: "YXVkaW8=", format: "wav" } },
+          { type: "input_file", file_id: "file_1", filename: "one.pdf" },
+          {
+            type: "input_file",
+            filename: "two.pdf",
+            file_data: "data:application/pdf;base64,cGRm",
+          },
+          {
+            type: "input_file",
+            file_url: "https://example.test/three.pdf",
+            filename: "three.pdf",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("preserves multipart tool results as native Responses output parts", () => {
+    const body = openaiToGenericResponsesRequest({
+      model: "grok",
+      messages: [
+        {
+          role: "tool",
+          tool_call_id: "call_1",
+          content: [
+            { type: "text", text: "chart:" },
+            { type: "image", url: "https://example.test/chart.png", detail: "high" },
+            { type: "document", url: "https://example.test/data.csv", filename: "data.csv" },
+          ],
+        },
+      ],
+    } as unknown as Parameters<typeof openaiToGenericResponsesRequest>[0]);
+
+    expect(body.input).toEqual([
+      {
+        type: "function_call_output",
+        call_id: "call_1",
+        output: [
+          { type: "output_text", text: "chart:" },
+          { type: "input_image", image_url: "https://example.test/chart.png", detail: "high" },
+          {
+            type: "input_file",
+            file_url: "https://example.test/data.csv",
+            filename: "data.csv",
+          },
+        ],
+      },
+    ]);
+  });
+
   it("maps reasoning_effort to body.reasoning.effort", () => {
     const body = openaiToGenericResponsesRequest({
       model: "gpt-5.5",

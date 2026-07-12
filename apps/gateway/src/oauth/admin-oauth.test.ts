@@ -136,6 +136,7 @@ describe("createOAuthAdmin", () => {
       verificationUri: "https://auth.x.ai/activate",
       intervalMs: 5_000,
       expiresAt: 601_000,
+      serverNowMs: 1_000,
     });
     await expect(
       admin.pollDeviceCode({ sessionId: start.sessionId, account: "heavy" }),

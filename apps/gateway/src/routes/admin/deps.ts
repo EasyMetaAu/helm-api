@@ -172,6 +172,7 @@ export interface OAuthAdminAccess {
     verificationUri: string;
     intervalMs: number;
     expiresAt: number;
+    serverNowMs: number;
   }>;
   pollDeviceCode(input: {
     sessionId: string;

@@ -980,5 +980,9 @@
   "Experimental": "实验性",
   "Experimental: use only with your own subscription. xAI does not publish a third-party OAuth contract for this flow.": "实验性功能：仅限使用你自己的订阅。xAI 未公开此流程的第三方 OAuth 合约。",
   "Connect AI subscriptions": "连接 AI 订阅",
-  "xAI/SuperGrok is also available.": "同时支持 xAI/SuperGrok。"
+  "xAI/SuperGrok is also available.": "同时支持 xAI/SuperGrok。",
+  "This device code has expired.": "此设备代码已过期。",
+  "Authorization was denied.": "授权已被拒绝。",
+  "Authorization failed. Start again to retry.": "授权失败，请重新开始后再试。",
+  "Start again": "重新开始"
 }

@@ -33,6 +33,7 @@
   let error = $state<string | null>(null);
   let busy = $state<boolean>(false);
   let step = $state<'form' | 'manual' | 'device'>('form');
+  let deviceStatus = $state<'waiting' | 'expired' | 'denied' | 'failed'>('waiting');
 
   // flow state
   let sessionId = $state<string>('');
@@ -89,6 +90,25 @@
     return e instanceof Error ? e.message : String(e);
   }
 
+  function oauthErrorCode(e: unknown): unknown {
+    return typeof e === 'object' && e !== null ? Reflect.get(e, 'code') : undefined;
+  }
+
+  function resetDeviceFlow(): void {
+    // Invalidating the id also stops any old async polling loop at its next boundary.
+    sessionId = '';
+    userCode = '';
+    verificationUri = '';
+    deviceStatus = 'waiting';
+    error = null;
+    step = 'form';
+  }
+
+  function close(): void {
+    sessionId = '';
+    onclose();
+  }
+
   async function start(): Promise<void> {
     error = null;
     const proxy = buildProxy();
@@ -117,8 +137,12 @@
         verificationUri = s.verificationUri;
         account = acct;
         step = 'device';
+        deviceStatus = 'waiting';
         window.open(s.verificationUri, '_blank', 'noopener');
-        void poll(s.sessionId, s.intervalMs, s.expiresAt);
+        // Convert the server-clock absolute expiry into a browser-clock deadline.
+        // This remains correct when the browser and gateway clocks differ.
+        const ttlMs = Math.max(0, s.expiresAt - s.serverNowMs);
+        void poll(s.sessionId, s.intervalMs, Date.now() + ttlMs);
       }
     } catch (e) {
       error = msg(e);
@@ -153,19 +177,33 @@
         const { status } = await pollDeviceCode(providerId, { sessionId: sid, account });
         if (status === 'done') {
           onconnected();
-          onclose();
+          close();
           break;
         }
         if (status === 'slow_down') delayMs += 5000;
       } catch (e) {
-        error = msg(e);
+        const detail = msg(e);
+        const code = oauthErrorCode(e);
+        if (code === 'device_authorization_denied') {
+          error = null;
+          deviceStatus = 'denied';
+        } else if (code === 'device_code_expired') {
+          error = null;
+          deviceStatus = 'expired';
+        } else {
+          error = detail;
+          deviceStatus = 'failed';
+        }
         break;
       }
+    }
+    if (step === 'device' && sessionId === sid && deviceStatus === 'waiting') {
+      deviceStatus = 'expired';
     }
   }
 </script>
 
-<Modal label={$t('Connect a subscription')} {onclose}>
+<Modal label={$t('Connect a subscription')} onclose={close}>
   <h2 class="section-header">{$t('Connect a subscription')}</h2>
 
   {#if error}
@@ -276,7 +314,7 @@
     </div>
 
     <div class="mt-4 flex justify-end gap-2">
-      <button type="button" class="btn-secondary" onclick={onclose}>{$t('Cancel')}</button>
+      <button type="button" class="btn-secondary" onclick={close}>{$t('Cancel')}</button>
       <button type="button" class="btn-primary" disabled={busy || !providerId} onclick={start}>
         {busy ? $t('Starting…') : $t('Start sign-in')}
       </button>
@@ -307,7 +345,7 @@
         : 'http://localhost/...?code=…&state=…'}
     ></textarea>
     <div class="mt-4 flex justify-end gap-2">
-      <button type="button" class="btn-secondary" onclick={onclose}>{$t('Cancel')}</button>
+      <button type="button" class="btn-secondary" onclick={close}>{$t('Cancel')}</button>
       <button
         type="button"
         class="btn-success"
@@ -329,12 +367,25 @@
     >
       {userCode}
     </p>
-    <div class="mt-4 flex items-center justify-between">
-      <span class="inline-flex items-center gap-2 text-xs text-ink-muted">
-        <span class="h-2 w-2 animate-pulse rounded-full bg-blue-500"></span>
-        {$t('Waiting for authorization…')}
-      </span>
-      <button type="button" class="btn-secondary" onclick={onclose}>{$t('Cancel')}</button>
+    <div class="mt-4 flex items-center justify-between gap-3">
+      {#if deviceStatus === 'waiting'}
+        <span class="inline-flex items-center gap-2 text-xs text-ink-muted" role="status">
+          <span class="h-2 w-2 animate-pulse rounded-full bg-blue-500"></span>
+          {$t('Waiting for authorization…')}
+        </span>
+        <button type="button" class="btn-secondary" onclick={close}>{$t('Cancel')}</button>
+      {:else}
+        <span class="flex-1 text-xs text-red-700" role="alert">
+          {deviceStatus === 'expired'
+            ? $t('This device code has expired.')
+            : deviceStatus === 'denied'
+              ? $t('Authorization was denied.')
+              : $t('Authorization failed. Start again to retry.')}
+        </span>
+        <button type="button" class="btn-primary shrink-0" onclick={resetDeviceFlow}>
+          {$t('Start again')}
+        </button>
+      {/if}
     </div>
   {/if}
 </Modal>

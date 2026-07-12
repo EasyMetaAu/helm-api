@@ -58,15 +58,44 @@ export interface OAuthProviderStatus {
 
 const BASE = '/admin/api/oauth';
 
+export type OAuthApiErrorCode =
+  | 'device_authorization_denied'
+  | 'device_code_expired'
+  | 'device_poll_failed';
+
+export class OAuthApiError extends Error {
+  readonly status: number;
+  readonly code: OAuthApiErrorCode | undefined;
+
+  constructor(status: number, detail: string, code?: OAuthApiErrorCode) {
+    super(`oauth api ${status}${detail ? `: ${detail}` : ''}`);
+    this.name = 'OAuthApiError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
 async function asJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
     let detail = '';
+    let code: OAuthApiErrorCode | undefined;
     try {
-      detail = JSON.stringify(await res.json());
+      const body: unknown = await res.json();
+      detail = JSON.stringify(body);
+      if (typeof body === 'object' && body !== null && !Array.isArray(body)) {
+        const value = Reflect.get(body, 'code');
+        if (
+          value === 'device_authorization_denied' ||
+          value === 'device_code_expired' ||
+          value === 'device_poll_failed'
+        ) {
+          code = value;
+        }
+      }
     } catch {
       // not JSON; keep the status only
     }
-    throw new Error(`oauth api ${res.status}${detail ? `: ${detail}` : ''}`);
+    throw new OAuthApiError(res.status, detail, code);
   }
   return (await res.json()) as T;
 }
@@ -200,6 +229,7 @@ export async function startDeviceCode(
   verificationUri: string;
   intervalMs: number;
   expiresAt: number;
+  serverNowMs: number;
 }> {
   const res = await fetch(`${BASE}/${provider}/device/start`, {
     method: 'POST',

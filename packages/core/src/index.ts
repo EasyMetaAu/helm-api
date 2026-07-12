@@ -576,11 +576,13 @@ export {
   refreshXaiOAuthToken,
   resolveOpenAICodexClientVersion,
   resolveOpenAICodexModelAlias,
+  resolveXaiGrokClientVersion,
   type SerializeClientDeps,
   selectCodexActiveLimitWindows,
   windowsToActiveUsageRecovery,
   windowsToUsageLimit,
   XAI_GROK_CLIENT_VERSION,
+  XAI_GROK_CLIENT_VERSION_ENV,
   XAI_GROK_OAUTH_BASE_URL,
   XAI_OAUTH_CLIENT_ID,
   XAI_OAUTH_DISCOVERY_URL,
@@ -589,6 +591,7 @@ export {
   type XaiDevicePollResult,
   type XaiDeviceStart,
   xaiGrokInferenceHeaders,
+  xaiGrokProtocolHeaders,
   xaiOAuthProvider,
 } from "./provider/oauth/index.js";
 export {

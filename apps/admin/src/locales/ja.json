@@ -980,5 +980,9 @@
   "Experimental": "試験運用",
   "Experimental: use only with your own subscription. xAI does not publish a third-party OAuth contract for this flow.": "試験運用機能です。ご自身のサブスクリプションでのみ使用してください。xAI はこのフローの第三者向け OAuth 契約を公開していません。",
   "Connect AI subscriptions": "AI サブスクリプションを接続",
-  "xAI/SuperGrok is also available.": "xAI/SuperGrok も利用できます。"
+  "xAI/SuperGrok is also available.": "xAI/SuperGrok も利用できます。",
+  "This device code has expired.": "このデバイスコードは期限切れです。",
+  "Authorization was denied.": "認証が拒否されました。",
+  "Authorization failed. Start again to retry.": "認証に失敗しました。最初からやり直してください。",
+  "Start again": "最初からやり直す"
 }
