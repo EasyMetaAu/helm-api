@@ -216,11 +216,11 @@ curl http://localhost:8080/v1/chat/completions \
 | 写死的厂商 id，如 `claude-opus-4-8`——**自定义模型 key** | 兼容垫片把它映射到一条 lane（`config/model-aliases.yaml`），并受 key 的 lane 白名单收口。 |
 | lane 名（`premium`）或具体别名（`deepseek/deepseek-v4-pro`）——**自定义模型 key** | 直接进入该 lane / 模型，跳过分类。 |
 
-> 标准 key 永远只需 `auto`。model 字段不会改变选中的 lane——但当你写的模型已经在那条 lane 的候选链里时，Helm 会把它提到链首（于是 Claude Code 钉 `claude-sonnet-4-6` 拿到的就是 Sonnet，而非该 lane 的 primary；失败再沿链回退）。要钉某条 lane、某个厂商家族或链外的具体模型，需要**自定义模型** key（`allow_custom_model`）。Lane 由运维方配置（`lanes.yaml` + 面板）。
+> 标准 key 永远只需 `auto`。model 字段不会改变选中的 lane——但当你写的模型已经在那条 lane 的候选链里时，Helm 会把它提到链首（于是 Claude Code 钉 `claude-sonnet-5` 拿到的就是 Sonnet，而非该 lane 的 primary；失败再沿链回退）。要钉某条 lane、某个厂商家族或链外的具体模型，需要**自定义模型** key（`allow_custom_model`）。Lane 由运维方配置（`lanes.yaml` + 面板）。
 
 ### 图片生成
 
-图片请求可以写具体图片模型，也可以写图片 **lane**（见下方[跨 provider 故障转移](#图片跨-provider-故障转移)），不经文本分类，且**任意有效 key 都能用**（无需 `allow_custom_model`；成本由该 key 的预算 / 限流约束）。可配置的模型：`gpt-image-2`（OpenAI）、`gemini-3.1-flash-image` / `gemini-3-pro-image`（Google「Nano Banana」）。每次调用按图片计量（output tokens × 该模型的图片费率），并和其他请求一样进入面板。三个入口——按你的 SDK 说哪种协议来选：
+图片请求可以写具体图片模型，也可以写图片 **lane**（见下方[图片 provider lanes](#图片-provider-lanes)），不经文本分类，且**任意有效 key 都能用**（无需 `allow_custom_model`；成本由该 key 的预算 / 限流约束）。可配置的模型：`gpt-image-2`（OpenAI）、`gemini-3.1-flash-image` / `gemini-3-pro-image`（Google「Nano Banana」）。每次调用按图片计量（output tokens × 该模型的图片费率），并和其他请求一样进入面板。三个入口——按你的 SDK 说哪种协议来选：
 
 **1. OpenAI Images API** —— `POST /v1/images/generations`（Bearer 鉴权），响应 `{ "created", "data": [{ "b64_json" }], "usage" }`：
 
@@ -250,16 +250,16 @@ curl http://localhost:8080/v1beta/interactions \
 
 > OpenAI Images 端点同时服务 OpenAI 和 Gemini 图片模型（Helm 把 Gemini 与 `generateContent` 双向互译）；两个 Gemini 原生入口只服务 Gemini 图片模型。在 `/v1beta/interactions` 上发 `gpt-image-2` 会返回 400 → 请改用 `/v1/images/generations`。
 
-#### 图片跨 provider 故障转移
+#### 图片 provider lanes
 
-同一个图片模型常常有多个 provider 可选（官方直连、ZenMux、OpenRouter……）。内置配置已经把它们组成了图片 **lane**——把 **lane 名**当作 `model` 来请求，Helm 先打 primary，遇到 provider 故障（超时、5xx、熔断打开）就自动 fallback 到下一个，用的是和聊天路由**同一套熔断器**。而确定性的客户端错误（4xx invalid request，比如尺寸非法、图片过大）会原样返回，**不**触发 fallback。
+内置配置把图片模型组成图片 **lane**。GPT 图片 lane 只使用 ZenMux relay，避免价格更高的 OpenAI 官方 API；任意有效 key 仍可用精确图片模型 alias 显式请求官方图片接口。Gemini 继续保留跨 provider fallback。确定性的客户端错误（4xx invalid request，比如尺寸非法、图片过大）会原样返回，**不**触发 fallback。
 
 ```yaml
-# config/lanes.yaml —— 内置的两条图片 lane 以官方上游为 primary，再回退到 ZenMux 中转。
-# 成员必须是图片模型（capabilities.outputImage）且类型单一（要么全 gpt-image-*，要么全 gemini-*-image）。
+# config/lanes.yaml —— GPT 图片只走 ZenMux；Gemini 以 Google 官方为 primary，再回退到 ZenMux。
+# 成员必须是图片模型（capabilities.outputImage）且类型单一。
 gpt-image:                          # 请求填 `model: "gpt-image"`
-  primary: openai/gpt-image-2       # OpenAI 官方 → ZenMux 中转
-  fallback: [gpt-image-2]
+  primary: gpt-image-2              # ZenMux relay；因成本排除 OpenAI 官方 API
+  fallback: []
 gemini-image:                       # 请求填 `model: "gemini-image"`
   primary: google/gemini-3.1-flash-image   # Google 官方 → ZenMux flash → pro
   fallback: [gemini-3.1-flash-image, gemini-3-pro-image]
@@ -302,7 +302,7 @@ gemini-image:                       # 请求填 `model: "gemini-image"`
 |---|---|
 | `DEEPSEEK_API_KEY` | 主供应商凭证（**必填**） |
 | `ZENMUX_API_KEY`、`OPENROUTER_API_KEY` | 可选供应商凭证（缺失则跳过该供应商） |
-| `OPENAI_API_KEY`、`GEMINI_API_KEY` | 可选——官方 OpenAI / Google **图片**供应商；内置的 `gpt-image` / `gemini-image` lane 以它们为 primary，再回退到 ZenMux |
+| `OPENAI_API_KEY`、`GEMINI_API_KEY` | 可选官方 provider。内置 lanes 不使用 direct OpenAI；任意有效 key 仍可精确请求 OpenAI 图片 alias。`gemini-image` 继续以 Google 为 primary、ZenMux 为 fallback。 |
 | `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD` | 面板登录（Basic auth） |
 | `HELM_HOST` / `HELM_PORT` | 服务绑定（默认 `0.0.0.0:8080`） |
 | `HELM_STORE_DRIVER` | `sqlite`（默认）或 `supabase` |

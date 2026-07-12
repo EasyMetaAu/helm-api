@@ -154,10 +154,10 @@ introduces a new candidate, so cost stays bounded by the operator-declared lane
 set, and the per-candidate Capability Filter + circuit breaker still gate every
 attempt (a promoted head that cannot serve is skipped and the chain falls through
 — never worse than the un-promoted order). Matching normalizes both sides to the
-official form (lowercase, `.`→`-` version separators), so `claude-sonnet-4.6` and
-`claude-sonnet-4-6` are the same model; the **earliest** in-chain match wins
-(preserving operator provider preference). The payoff: Claude Code pinning
-`claude-sonnet-4-6` on a **standard** key now serves the requested (cheaper)
+official form (lowercase, `.`→`-` version separators), so equivalent dotted and
+hyphenated version ids match; the **earliest** in-chain match wins (preserving
+operator provider preference). The payoff: Claude Code pinning
+`claude-sonnet-5` on a **standard** key now serves the requested
 Sonnet instead of the lane's primary.
 
 Promotion is **suppressed** wherever the routing brain deliberately overrode the
@@ -195,10 +195,9 @@ balanced:
   reasoning_effort: medium
   primary: openai-codex/gpt-5.5
   fallback:
-    - anthropic/claude-sonnet-4-6
+    - anthropic/claude-sonnet-5
     - deepseek/deepseek-v4-pro
     - openrouter/deepseek-v4-pro
-    - zenmux-anthropic/claude-sonnet-4.6
     - zenmux/auto
     - openrouter/auto
 
@@ -208,8 +207,6 @@ premium:
   primary: openai-codex/gpt-5.5
   fallback:
     - anthropic/claude-opus-4-8
-    - zenmux-anthropic/claude-opus-4.8
-    - zenmux/gpt-5.5
     - balanced
 ```
 
@@ -236,8 +233,11 @@ json:
 
 vision:
   purpose: Multimodal / image understanding
-  primary: zenmux-vertex/gemini-3.5-flash
-  fallback: [premium]
+  primary: openai-codex/gpt-5.6-terra
+  fallback:
+    - xai/grok-4.5
+    - anthropic/claude-sonnet-5
+    - anthropic/claude-opus-4-8
   constraints:
     require_vision: true
 

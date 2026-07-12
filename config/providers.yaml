@@ -84,8 +84,8 @@ providers:
       # `zenmux-anthropic` provider below (issue #217). The former OpenAI-compat
       # `zenmux/claude-*` aliases were removed: same upstream, but the native wire
       # preserves prompt-cache / tool-use and skips the lossy IR translation.
-      # openai/gpt-5.5 — legacy premium fallback when no Codex subscription or
-      # official OpenAI key is connected (zenmux real id).
+      # openai/gpt-5.5 — retained for explicit custom-model requests only; shipped
+      # lanes do not automatically spend through this ZenMux alias.
       - alias: zenmux/gpt-5.5
         provider_model: openai/gpt-5.5
       # OpenAI IMAGE GENERATION (Images API). A bare alias so OpenAI clients can pin
@@ -179,16 +179,16 @@ providers:
       - alias: openrouter/auto
         provider_model: openrouter/auto
 
-  # ─── OFFICIAL image-generation providers (cross-provider failover) ───
-  # The gpt-image-2 / gemini-*-image models are reachable via the ZenMux relays
-  # above AND via these DIRECT official upstreams, so an image LANE (lanes.yaml:
-  # gpt-image / gemini-image) fails over across providers. Keys are env-var NAMES
-  # (set OPENAI_API_KEY / GEMINI_API_KEY in the environment); an unset key just makes
-  # that provider unavailable (the chain skips it), never a boot failure.
+  # ─── OFFICIAL image-generation providers ───
+  # Direct aliases remain available for explicit requests. Text aliases require a
+  # custom-model key; exact image aliases accept any valid key. The shipped gpt-image
+  # lane excludes official OpenAI for cost; gemini-image still uses Google direct
+  # with ZenMux failover. Keys are env-var NAMES, never plaintext.
 
   # OpenAI OFFICIAL — direct Responses/Chat models for GPT-5.6, plus Images API
-  # for gpt-image-2. If OPENAI_API_KEY is unset, these aliases are simply
-  # unavailable and the lane chain skips to the next fallback.
+  # for gpt-image-2. Shipped lanes do not reference these paid OpenAI aliases;
+  # text aliases require explicit custom-model access; the exact image alias accepts
+  # any valid key through the dedicated image endpoint.
   - name: openai
     type: openai
     base_url: https://api.openai.com/v1

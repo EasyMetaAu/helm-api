@@ -216,11 +216,11 @@ curl http://localhost:8080/v1/chat/completions \
 | a pinned vendor id, e.g. `claude-opus-4-8` — **custom-model key** | The compatibility shim maps it onto a lane (`config/model-aliases.yaml`), cap-bounded by the key's lanes. |
 | a lane name (`premium`) or exact alias (`deepseek/deepseek-v4-pro`) — **custom-model key** | Routes straight into that lane / model, skipping classification. |
 
-> A standard key only ever needs `auto`. The `model` field never changes which lane is chosen — but when the named model already sits in that lane's chain, Helm promotes it to the front (so Claude Code pinning `claude-sonnet-4-6` gets Sonnet, not the lane's primary; it falls back to the rest of the chain on failure). Pinning a lane, a vendor family, or an out-of-lane model requires a **custom-model** key (`allow_custom_model`). Lanes are operator config (`lanes.yaml` + dashboard).
+> A standard key only ever needs `auto`. The `model` field never changes which lane is chosen — but when the named model already sits in that lane's chain, Helm promotes it to the front (so Claude Code pinning `claude-sonnet-5` gets Sonnet, not the lane's primary; it falls back to the rest of the chain on failure). Pinning a lane, a vendor family, or an out-of-lane model requires a **custom-model** key (`allow_custom_model`). Lanes are operator config (`lanes.yaml` + dashboard).
 
 ### Image generation
 
-Image requests name either an exact image model or an image **lane** — see [Failover](#image-failover-across-providers) below. They skip text classification, and **any valid key** works (no `allow_custom_model` needed; cost is bounded by the key's budget / rate limit). Operator-configured models: `gpt-image-2` (OpenAI), `gemini-3.1-flash-image` / `gemini-3-pro-image` (Google "Nano Banana"). Every call is metered per image (output tokens × the model's image rate) and appears in the dashboard like any other request. Three entrypoints — match the one your SDK speaks:
+Image requests name either an exact image model or an image **lane** — see [Image provider lanes](#image-provider-lanes) below. They skip text classification, and **any valid key** works (no `allow_custom_model` needed; cost is bounded by the key's budget / rate limit). Operator-configured models: `gpt-image-2` (OpenAI), `gemini-3.1-flash-image` / `gemini-3-pro-image` (Google "Nano Banana"). Every call is metered per image (output tokens × the model's image rate) and appears in the dashboard like any other request. Three entrypoints — match the one your SDK speaks:
 
 **1. OpenAI Images API** — `POST /v1/images/generations` (Bearer auth), `{ "created", "data": [{ "b64_json" }], "usage" }`:
 
@@ -250,17 +250,17 @@ curl http://localhost:8080/v1beta/interactions \
 
 > The OpenAI Images endpoint serves both OpenAI and Gemini image models (Helm translates Gemini to/from `generateContent`). The two Gemini-native entrypoints serve only Gemini image models. `gpt-image-2` on `/v1beta/interactions` is a 400 → use `/v1/images/generations`.
 
-#### Image failover across providers
+#### Image provider lanes
 
-The same image model is often available from several providers (official upstream, ZenMux, OpenRouter…). The shipped config already groups them into image **lanes** — name the **lane** as your `model` and Helm tries the primary, then on a provider fault (timeout, 5xx, circuit-open) falls over to the next, using the **same circuit breaker** as the chat router. A deterministic client error (a 4xx invalid request — bad size, oversized image) is returned verbatim and does **not** trigger failover.
+The shipped config groups image models into image **lanes**. The GPT image lane uses the ZenMux relay only, avoiding the higher-cost official OpenAI API; the direct official image alias remains available as an exact-model request to any valid key. Gemini keeps cross-provider failover. A deterministic client error (a 4xx invalid request — bad size, oversized image) is returned verbatim and does **not** trigger failover.
 
 ```yaml
-# config/lanes.yaml — the two shipped image lanes lead with the OFFICIAL upstream,
-# then fall over to the ZenMux relay. Members must be image models
+# config/lanes.yaml — GPT image uses ZenMux only; Gemini leads with Google direct
+# and falls over to ZenMux. Members must be image models
 # (capabilities.outputImage) and a single kind (all gpt-image-* OR all gemini-*-image).
 gpt-image:                          # request `model: "gpt-image"`
-  primary: openai/gpt-image-2       # OpenAI official → ZenMux relay
-  fallback: [gpt-image-2]
+  primary: gpt-image-2              # ZenMux relay; official OpenAI excluded for cost
+  fallback: []
 gemini-image:                       # request `model: "gemini-image"`
   primary: google/gemini-3.1-flash-image   # Google official → ZenMux flash → pro
   fallback: [gemini-3.1-flash-image, gemini-3-pro-image]
@@ -303,7 +303,7 @@ Most-used environment variables (env wins over YAML; full list in [`.env.example
 |---|---|
 | `DEEPSEEK_API_KEY` | Primary provider credential (**required**) |
 | `ZENMUX_API_KEY`, `OPENROUTER_API_KEY` | Optional provider credentials (provider skipped if missing) |
-| `OPENAI_API_KEY`, `GEMINI_API_KEY` | Optional — official OpenAI / Google **image** providers; the shipped `gpt-image` / `gemini-image` lanes lead with these and fail over to ZenMux |
+| `OPENAI_API_KEY`, `GEMINI_API_KEY` | Optional official providers. Shipped lanes do not use direct OpenAI; an exact OpenAI image alias still works with any valid key. `gemini-image` remains Google-first with ZenMux failover. |
 | `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD` | Dashboard login (Basic auth) |
 | `HELM_HOST` / `HELM_PORT` | Server binding (default `0.0.0.0:8080`) |
 | `HELM_STORE_DRIVER` | `sqlite` (default) or `supabase` |

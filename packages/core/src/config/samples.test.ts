@@ -60,10 +60,32 @@ describe("checked-in config samples", () => {
     expect(lanes.economy).toBeDefined();
     expect(lanes.balanced).toBeDefined();
     expect(lanes.premium).toBeDefined();
+    expect(lanes).not.toHaveProperty("grok-composer-canary");
+    expect(JSON.stringify(lanes)).not.toContain("zenmux-anthropic/claude-sonnet-4.6");
+    expect(JSON.stringify(lanes)).not.toContain("zenmux-anthropic/claude-opus-4.8");
+    expect(JSON.stringify(lanes)).not.toContain("zenmux/gpt-5.5");
+    expect(JSON.stringify(lanes)).not.toContain("openai/gpt-");
     expect(lanes.economy?.primary).toBe("openai-codex/gpt-5.6-luna");
-    expect(lanes.economy?.fallback[0]).toBe("openai/gpt-5.6-luna");
+    expect(lanes.economy?.fallback.slice(0, 4)).toEqual([
+      "openai-codex/gpt-5.4-mini",
+      "anthropic/claude-haiku-4-5-20251001",
+      "deepseek/deepseek-v4-flash",
+      "openrouter/deepseek-v4-flash",
+    ]);
     expect(lanes.balanced?.primary).toBe("openai-codex/gpt-5.6-terra");
+    expect(lanes.balanced?.fallback.slice(0, 4)).toEqual([
+      "anthropic/claude-sonnet-5",
+      "deepseek/deepseek-v4-pro",
+      "openrouter/deepseek-v4-pro",
+      "zenmux/auto",
+    ]);
+    expect(lanes.balanced?.fallback).not.toContain("anthropic/claude-sonnet-4-6");
     expect(lanes.premium?.primary).toBe("openai-codex/gpt-5.6-sol");
+    expect(lanes.premium?.fallback).toEqual([
+      "xai/grok-4.5",
+      "anthropic/claude-opus-4-8",
+      "balanced",
+    ]);
     // task lanes
     expect(lanes.coding?.fallback).toEqual(["premium", "balanced"]);
     expect(lanes.json?.constraints.require_json).toBe(true);
@@ -73,6 +95,12 @@ describe("checked-in config samples", () => {
     expect(lanes.json?.primary).toBe("deepseek/deepseek-v4-flash");
     expect(lanes.json?.fallback).toEqual(["openrouter/deepseek-v4-flash", "balanced"]);
     expect(lanes.vision?.constraints.require_vision).toBe(true);
+    expect(lanes.vision?.primary).toBe("openai-codex/gpt-5.6-terra");
+    expect(lanes.vision?.fallback).toEqual([
+      "xai/grok-4.5",
+      "anthropic/claude-sonnet-5",
+      "anthropic/claude-opus-4-8",
+    ]);
     expect(lanes.tool_use?.constraints.require_tools).toBe(true);
   });
 
@@ -84,6 +112,7 @@ describe("checked-in config samples", () => {
     const laneNames = Object.keys(cfg.lanes ?? {});
     const opusTarget = resolveModelAlias("claude-opus-4-8", aliases);
     expect(opusTarget && laneNames.includes(opusTarget)).toBe(true);
+    expect(resolveModelAlias("claude-sonnet-5", aliases)).toBe("claude-sonnet");
     // The small/fast background model maps to the dedicated claude-haiku lane even
     // with a date suffix (the common dated Haiku id shape) — the haiku-specific glob
     // wins over the broad claude-* catch-all (which still falls through to balanced).
@@ -117,13 +146,18 @@ describe("checked-in config samples", () => {
     const lanes = cfg.lanes;
     if (lanes === undefined) throw new Error("config/lanes.yaml must load into config.lanes");
     expect(lanes["gpt-5.6"]?.primary).toBe("openai-codex/gpt-5.6-sol");
-    expect(lanes["gpt-5.6"]?.fallback).toEqual(["openai/gpt-5.6", "gpt-5.6-sol"]);
+    expect(lanes["gpt-5.6"]?.fallback).toEqual(["gpt-5.6-sol"]);
     expect(lanes["gpt-5.6-sol"]?.primary).toBe("openai-codex/gpt-5.6-sol");
-    expect(lanes["gpt-5.6-sol"]?.fallback).toEqual(["openai/gpt-5.6-sol", "premium"]);
+    expect(lanes["gpt-5.6-sol"]?.fallback).toEqual(["premium"]);
     expect(lanes["gpt-5.6-terra"]?.primary).toBe("openai-codex/gpt-5.6-terra");
-    expect(lanes["gpt-5.6-terra"]?.fallback).toEqual(["openai/gpt-5.6-terra", "balanced"]);
+    expect(lanes["gpt-5.6-terra"]?.fallback).toEqual(["balanced"]);
     expect(lanes["gpt-5.6-luna"]?.primary).toBe("openai-codex/gpt-5.6-luna");
-    expect(lanes["gpt-5.6-luna"]?.fallback).toEqual(["openai/gpt-5.6-luna", "economy"]);
+    expect(lanes["gpt-5.6-luna"]?.fallback).toEqual(["economy"]);
+    expect(lanes["gpt-image"]).toMatchObject({ primary: "gpt-image-2", fallback: [] });
+    expect(lanes["claude-haiku"]?.fallback).toEqual(["economy"]);
+    expect(lanes["claude-sonnet"]?.primary).toBe("anthropic/claude-sonnet-5");
+    expect(lanes["gpt-5.5"]?.primary).toBe("openai-codex/gpt-5.5");
+    expect(lanes["gpt-5.5"]?.fallback).toEqual(["premium"]);
     expect(lanes["gpt-5.4"]?.primary).toBe("openai-codex/gpt-5.4");
     expect(lanes["gpt-5.4"]?.fallback).toEqual(["premium"]);
     expect(lanes["gpt-5.4-mini"]?.primary).toBe("openai-codex/gpt-5.4-mini");

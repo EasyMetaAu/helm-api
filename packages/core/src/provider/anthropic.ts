@@ -998,7 +998,7 @@ function buildClaudeCodeAgentPrompt(model: string): string {
     ` - OS Version: ${osType()} ${osRelease()}`,
     ` - You are powered by the model named ${model}. The exact model ID is ${model}.`,
     " - Assistant knowledge cutoff is January 2026.",
-    " - The most recent Claude models are Fable 5 and the Claude 4.X family. Model IDs — Fable 5: 'claude-fable-5', Opus 4.8: 'claude-opus-4-8', Sonnet 4.6: 'claude-sonnet-4-6', Haiku 4.5: 'claude-haiku-4-5-20251001'. When building AI applications, default to the latest and most capable Claude models.",
+    " - The most recent Claude models are Fable 5, Sonnet 5, and the Claude 4.X family. Model IDs — Fable 5: 'claude-fable-5', Sonnet 5: 'claude-sonnet-5', Opus 4.8: 'claude-opus-4-8', Haiku 4.5: 'claude-haiku-4-5-20251001'. When building AI applications, default to the latest and most capable Claude models.",
     " - Claude Code is available as a CLI in the terminal, desktop app (Mac/Windows), web app (claude.ai/code), and IDE extensions (VS Code, JetBrains).",
     " - Fast mode for Claude Code uses Claude Opus with faster output (it does not downgrade to a smaller model). It can be toggled with /fast and is available on Opus 4.8/4.7; Opus 4.6 requests with Fast mode are served as standard.",
     "",
