@@ -579,6 +579,105 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     ).resolves.toMatchObject({ id: "resp-grok", status: "completed" });
   });
 
+  it("preserves data and HTTPS image URLs when translating Chat input for Grok 4.5", async () => {
+    const { ctx, config } = oauthStores();
+    await seedXai(ctx, "heavy");
+    const inferenceBodies: Array<Record<string, unknown>> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (String(url).endsWith("/models")) {
+        return new Response(JSON.stringify({ data: [{ id: "grok-4.5" }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      expect(String(url)).toBe("https://cli-chat-proxy.grok.com/v1/responses");
+      expect(init?.method).toBe("POST");
+      const headers = new Headers(init?.headers);
+      expect(headers.get("Content-Type")).toBe("application/json");
+      expect(headers.get("Authorization")).toBe("Bearer xai-access-heavy");
+      expect(headers.get("X-XAI-Token-Auth")).toBe("xai-grok-cli");
+      expect(headers.get("x-grok-model-override")).toBe("grok-4.5");
+      expect(headers.get("chatgpt-account-id")).toBeNull();
+      expect(headers.get("OpenAI-Beta")).toBeNull();
+      expect(headers.get("session-id")).toBeNull();
+      expect(headers.get("thread-id")).toBeNull();
+      expect(headers.get("originator")).toBeNull();
+      inferenceBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return sseResponse([
+        { type: "response.created", response: { id: "resp-grok-vision" } },
+        {
+          type: "response.completed",
+          response: {
+            id: "resp-grok-vision",
+            object: "response",
+            status: "completed",
+            output: [],
+            usage: {
+              input_tokens: 10,
+              output_tokens: 5,
+              input_tokens_details: { cached_tokens: 4 },
+            },
+          },
+        },
+      ]);
+    });
+
+    const enabled = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+    );
+    const imageUrls = [
+      "data:image/png;base64,SU1H",
+      "https://cdn.example.test/images/diagram.png?version=2",
+    ];
+    for (const imageUrl of imageUrls) {
+      await expect(
+        enabled.poolClients.get("xai")?.chatCompletion({
+          model: "grok-4.5",
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: "Describe this image" },
+                { type: "image", url: imageUrl, detail: "auto" },
+              ],
+            },
+          ],
+        }),
+      ).resolves.toMatchObject({
+        id: "resp-grok-vision",
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 5,
+          prompt_tokens_details: { cached_tokens: 4 },
+        },
+      });
+    }
+
+    expect(inferenceBodies).toEqual(
+      imageUrls.map((imageUrl) => ({
+        model: "grok-4.5",
+        instructions: "You are a helpful assistant.",
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [
+              { type: "input_text", text: "Describe this image" },
+              { type: "input_image", image_url: imageUrl, detail: "auto" },
+            ],
+          },
+        ],
+        stream: true,
+        store: false,
+      })),
+    );
+  });
+
   it("rejects xAI native continuation before contacting the subscription proxy", async () => {
     const { ctx, config } = oauthStores();
     await seedXai(ctx, "heavy");

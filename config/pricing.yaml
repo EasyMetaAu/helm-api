@@ -17,9 +17,16 @@
 # this manual layer, not the generated catalog (see capabilities.yaml header).
 # Cost telemetry only — never drives selection. (deepseek numbers carried over
 # from the prior relay entries; verify against official DeepSeek pricing.)
-# xai/grok-4.5 and xai/grok-composer-2.5-fast are deliberately absent: SuperGrok
-# is a flat-fee consumer subscription with no public per-token subscription price.
-# Missing pricing keeps cost_usd=null while usage tokens remain observable.
+# SuperGrok is flat-fee and has no per-token subscription bill. Per the operator's
+# decision, Grok 4.5 uses xAI's public API rates as an API-equivalent estimate for
+# telemetry AND API-key budget settlement. These are the <=200K-token rates; the
+# current flat catalog cannot represent xAI's >200K tier ($4/$1/$12), so requests
+# above 200K are underestimated by 50% until tiered pricing is implemented.
+xai/grok-4.5:
+  inputPerMTokUsd: 2.0
+  outputPerMTokUsd: 6.0
+  cacheReadPerMTokUsd: 0.5
+# Composer has no verified public xAI price and therefore remains cost_usd=null.
 openai-codex/gpt-5.6:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0
