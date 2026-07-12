@@ -744,6 +744,10 @@
             {@const usage = usageByKey.get(k)}
             {@const isCodex = row.provider.id === 'openai-codex'}
             {@const quota = isCodex ? activeCodexQuota(quotaByKey.get(k)) : quotaByKey.get(k)}
+            <!-- The live WHAM quota plan can change before the OAuth identity claim refreshes. -->
+            {@const codexPlanType = isCodex
+              ? (quota?.planType ?? row.account.chatgptPlanType)
+              : undefined}
             {@const saving = savingSchedule[k] === true}
             {@const supportsFast =
               row.provider.id === 'anthropic' || row.provider.id === 'openai-codex'}
@@ -768,7 +772,7 @@
               isCodex &&
               Boolean(
                 row.account.email ||
-                row.account.chatgptPlanType ||
+                codexPlanType ||
                 row.account.chatgptAccountId ||
                 row.account.isFedramp,
               )}
@@ -785,11 +789,10 @@
                     {#if row.account.email}
                       <span class="break-all text-ink-body">{row.account.email}</span>
                     {/if}
-                    {#if row.account.chatgptPlanType || row.account.isFedramp}
+                    {#if codexPlanType || row.account.isFedramp}
                       <div class="flex flex-wrap gap-1">
-                        {#if row.account.chatgptPlanType}
-                          <span class="badge-neutral">{planLabel(row.account.chatgptPlanType)}</span
-                          >
+                        {#if codexPlanType}
+                          <span class="badge-neutral">{planLabel(codexPlanType)}</span>
                         {/if}
                         {#if row.account.isFedramp}
                           <span class="badge-neutral">{$t('FedRAMP')}</span>
