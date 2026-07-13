@@ -732,7 +732,7 @@ function contentToFunctionCallOutput(
   content: IRMessage["content"],
 ): string | Array<Record<string, unknown>> {
   if (content === null || typeof content === "string") return contentToText(content);
-  return contentToResponsesParts(content, true);
+  return contentToResponsesParts(content, false);
 }
 
 // IR content -> Responses content parts, PRESERVING multimodality (order 25): text ->

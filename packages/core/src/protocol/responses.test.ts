@@ -700,7 +700,7 @@ describe("responsesTransformer — request input items -> IR (folding)", () => {
           type: "function_call_output",
           call_id: "call_abc",
           output: [
-            { type: "output_text", text: "chart:" },
+            { type: "input_text", text: "chart:" },
             { type: "input_image", image_url: "https://x/chart.png", detail: "low" },
             { type: "input_file", file_url: "https://x/data.csv", filename: "data.csv" },
           ],
@@ -1903,7 +1903,7 @@ describe("responsesTransformer — contentToFunctionCallOutput paths (line 671-6
       ],
     })) as { input: Array<{ type: string; output?: unknown }> };
     const fco = native.input.find((i) => i.type === "function_call_output");
-    expect(Array.isArray(fco?.output)).toBe(true);
+    expect(fco?.output).toEqual([{ type: "input_text", text: "result" }]);
   });
 });
 

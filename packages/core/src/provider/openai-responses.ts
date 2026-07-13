@@ -303,7 +303,7 @@ function plainText(content: unknown): string {
 function responsesToolOutput(content: unknown): string | ResponsesContentPart[] {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
-    const parts = inputPartsFromContent(content, "output_text");
+    const parts = inputPartsFromContent(content, "input_text");
     return parts.length > 0 ? parts : "";
   }
   return JSON.stringify(content ?? "");

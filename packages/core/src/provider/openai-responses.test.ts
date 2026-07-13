@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { transformRequestOut as anthropicToIRRequest } from "../protocol/anthropic/request.js";
 import type { CodexModelInfo } from "./oauth/codex-model-info.js";
 import { UpstreamError } from "./openai.js";
 import {
@@ -4418,7 +4419,7 @@ describe("openaiToGenericResponsesRequest — tools and reasoning_effort", () =>
     ]);
   });
 
-  it("preserves multipart tool results as native Responses output parts", () => {
+  it("preserves multipart tool results as native Responses input parts", () => {
     const body = openaiToGenericResponsesRequest({
       model: "grok",
       messages: [
@@ -4439,7 +4440,7 @@ describe("openaiToGenericResponsesRequest — tools and reasoning_effort", () =>
         type: "function_call_output",
         call_id: "call_1",
         output: [
-          { type: "output_text", text: "chart:" },
+          { type: "input_text", text: "chart:" },
           { type: "input_image", image_url: "https://example.test/chart.png", detail: "high" },
           {
             type: "input_file",
@@ -4449,6 +4450,63 @@ describe("openaiToGenericResponsesRequest — tools and reasoning_effort", () =>
         ],
       },
     ]);
+  });
+
+  it("maps Anthropic multipart tool_result text to Responses input_text", () => {
+    const anthropicRequest = {
+      model: "claude-opus-4-8",
+      max_tokens: 1024,
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "toolu_1", name: "read_chart", input: {} }],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_1",
+              content: [
+                { type: "text", text: "chart:" },
+                {
+                  type: "image",
+                  source: {
+                    type: "url",
+                    url: "https://example.test/chart.png",
+                  },
+                },
+                {
+                  type: "document",
+                  source: {
+                    type: "url",
+                    url: "https://example.test/data.csv",
+                  },
+                  title: "data.csv",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const ir = anthropicToIRRequest(anthropicRequest);
+    const body = openaiToResponsesRequest(ir);
+
+    expect(body.input).toContainEqual({
+      type: "function_call_output",
+      call_id: "toolu_1",
+      output: [
+        { type: "input_text", text: "chart:" },
+        { type: "input_image", image_url: "https://example.test/chart.png" },
+        {
+          type: "input_file",
+          file_url: "https://example.test/data.csv",
+          filename: "data.csv",
+        },
+      ],
+    });
   });
 
   it("maps reasoning_effort to body.reasoning.effort", () => {
