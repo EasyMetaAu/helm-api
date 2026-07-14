@@ -1,5 +1,5 @@
 import type { DecisionRecord, TelemetryStore } from "@helm/core";
-import { usageFromBody as parseUsage } from "@helm/core";
+import { billedCostFromBody, usageFromBody as parseUsage } from "@helm/core";
 import type { TokenUsageBreakdown } from "@helm/shared";
 import type { WriteQueue } from "../runtime/write-queue.js";
 
@@ -33,8 +33,12 @@ export interface StreamUsage {
   output_tokens?: number;
   cache_read_input_tokens?: number;
   cache_creation_input_tokens?: number;
+  service_tier?: string;
+  inference_geo?: string;
   input_tokens_details?: {
     cached_tokens?: number;
+    audio_tokens?: number;
+    cached_audio_tokens?: number;
     cache_write_tokens?: number;
     cache_creation_tokens?: number;
     cache_creation_input_tokens?: number;
@@ -42,9 +46,19 @@ export interface StreamUsage {
   };
   prompt_tokens_details?: {
     cached_tokens?: number;
+    audio_tokens?: number;
+    cached_audio_tokens?: number;
     cache_write_tokens?: number;
     cache_creation_tokens?: number;
     cache_creation_input_tokens?: number;
+    [k: string]: unknown;
+  };
+  output_tokens_details?: {
+    image_tokens?: number;
+    [k: string]: unknown;
+  };
+  completion_tokens_details?: {
+    image_tokens?: number;
     [k: string]: unknown;
   };
   /** Upstream-billed cost, when the relay reports it in the usage chunk. OpenRouter
@@ -220,27 +234,47 @@ export function usageFromBody(body: unknown): StreamUsage | null {
 // anthropicToOpenAIResponse (anthropic.ts: prompt = input_tokens + cache_read +
 // cache_creation; completion = output_tokens; prompt_tokens_details carries the
 // cached/cache_creation split) so a passthrough attempt is priced identically to a
-// translated one. Tolerant of missing fields (each absent → 0); null when the body
-// carries no usage object at all.
+// translated one. Missing token counts stay absent so metadata-only usage remains
+// unmeasured; null when the body carries no usage object at all.
 export function usageFromAnthropicResponse(body: unknown): StreamUsage | null {
   const usage = (body as { usage?: unknown } | null)?.usage;
   if (!usage || typeof usage !== "object") return null;
   const u = usage as Record<string, unknown>;
-  const inTok = typeof u.input_tokens === "number" ? u.input_tokens : 0;
-  const outTok = typeof u.output_tokens === "number" ? u.output_tokens : 0;
-  const cacheRead = typeof u.cache_read_input_tokens === "number" ? u.cache_read_input_tokens : 0;
+  const count = (value: unknown): number | undefined =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+  const inTok = count(u.input_tokens);
+  const outTok = count(u.output_tokens);
+  const cacheRead = count(u.cache_read_input_tokens);
+  const cacheCreationDetails =
+    u.cache_creation && typeof u.cache_creation === "object"
+      ? (u.cache_creation as Record<string, unknown>)
+      : undefined;
+  const cacheCreation5m = count(cacheCreationDetails?.ephemeral_5m_input_tokens);
+  const cacheCreation1h = count(cacheCreationDetails?.ephemeral_1h_input_tokens);
   const cacheCreation =
-    typeof u.cache_creation_input_tokens === "number" ? u.cache_creation_input_tokens : 0;
-  const promptTokens = inTok + cacheRead + cacheCreation;
+    count(u.cache_creation_input_tokens) ??
+    (cacheCreation5m !== undefined || cacheCreation1h !== undefined
+      ? (cacheCreation5m ?? 0) + (cacheCreation1h ?? 0)
+      : undefined);
+  const promptTokens =
+    inTok !== undefined || cacheRead !== undefined || cacheCreation !== undefined
+      ? (inTok ?? 0) + (cacheRead ?? 0) + (cacheCreation ?? 0)
+      : undefined;
   const normalized: StreamUsage = {
-    prompt_tokens: promptTokens,
-    completion_tokens: outTok,
-    total_tokens: promptTokens + outTok,
+    ...(promptTokens !== undefined ? { prompt_tokens: promptTokens } : {}),
+    ...(outTok !== undefined ? { completion_tokens: outTok } : {}),
+    ...(promptTokens !== undefined || outTok !== undefined
+      ? { total_tokens: (promptTokens ?? 0) + (outTok ?? 0) }
+      : {}),
+    ...(typeof u.speed === "string" ? { service_tier: u.speed } : {}),
+    ...(typeof u.inference_geo === "string" ? { inference_geo: u.inference_geo } : {}),
   };
-  if (cacheRead > 0 || cacheCreation > 0) {
+  if (cacheRead !== undefined || cacheCreation !== undefined) {
     normalized.prompt_tokens_details = {
-      cached_tokens: cacheRead,
-      ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
+      cached_tokens: cacheRead ?? 0,
+      ...(cacheCreation !== undefined ? { cache_creation_tokens: cacheCreation } : {}),
+      ...(cacheCreation5m !== undefined ? { ephemeral_5m_input_tokens: cacheCreation5m } : {}),
+      ...(cacheCreation1h !== undefined ? { ephemeral_1h_input_tokens: cacheCreation1h } : {}),
     };
   }
   return normalized;
@@ -253,40 +287,73 @@ export function usageFromAnthropicResponse(body: unknown): StreamUsage | null {
 // COUNTS the cache hit INSIDE input_tokens (unlike Anthropic, where cache is separate),
 // so prompt_tokens = input_tokens directly; completion_tokens = output_tokens; the
 // cache split (cached_tokens / cache_creation_input_tokens) rides input_tokens_details
-// and is surfaced under prompt_tokens_details for the dashboard. Tolerant of missing
-// fields (each absent → 0); null when the body carries no usage object at all.
+// and is surfaced under prompt_tokens_details for the dashboard. Missing token counts
+// stay absent so metadata-only usage remains unmeasured; null when the body carries no
+// usage object at all.
 export function usageFromResponsesResponse(body: unknown): StreamUsage | null {
-  const usage = (body as { usage?: unknown } | null)?.usage;
+  const response = body as { usage?: unknown; service_tier?: unknown } | null;
+  const usage = response?.usage;
   if (!usage || typeof usage !== "object") return null;
-  return normalizeResponsesUsage(usage as Record<string, unknown>);
+  return normalizeResponsesUsage(
+    usage as Record<string, unknown>,
+    typeof response?.service_tier === "string" ? response.service_tier : undefined,
+  );
 }
 
 // Shared Responses-usage normalization for the non-stream body and the terminal SSE
 // event (both carry the identical `usage` shape). Cache is already included in
 // input_tokens, so the budget total is simply prompt + completion.
-function normalizeResponsesUsage(u: Record<string, unknown>): StreamUsage {
-  const inTok = typeof u.input_tokens === "number" ? u.input_tokens : 0;
-  const outTok = typeof u.output_tokens === "number" ? u.output_tokens : 0;
+function normalizeResponsesUsage(u: Record<string, unknown>, serviceTier?: string): StreamUsage {
+  const count = (value: unknown): number | undefined =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+  const inTok = count(u.input_tokens);
+  const outTok = count(u.output_tokens);
   const details = (u.input_tokens_details ?? {}) as Record<string, unknown>;
-  const cacheRead = typeof details.cached_tokens === "number" ? details.cached_tokens : 0;
+  const cacheRead = count(details.cached_tokens);
   const cacheCreation =
-    typeof details.cache_write_tokens === "number"
-      ? details.cache_write_tokens
-      : typeof details.cache_creation_tokens === "number"
-        ? details.cache_creation_tokens
-        : typeof details.cache_creation_input_tokens === "number"
-          ? details.cache_creation_input_tokens
-          : 0;
+    count(details.cache_write_tokens) ??
+    count(details.cache_creation_tokens) ??
+    count(details.cache_creation_input_tokens);
+  const cacheCreation5m = count(details.ephemeral_5m_input_tokens);
+  const cacheCreation1h = count(details.ephemeral_1h_input_tokens);
+  const audioPrompt = count(details.audio_tokens);
+  const cachedAudioPrompt = count(details.cached_audio_tokens);
+  const outputDetails =
+    u.output_tokens_details && typeof u.output_tokens_details === "object"
+      ? (u.output_tokens_details as Record<string, unknown>)
+      : undefined;
+  const imageOutput = count(outputDetails?.image_tokens);
+  const billedCost = count(u.cost);
+  const billedCostUsd = count(u.cost_usd);
   const normalized: StreamUsage = {
-    prompt_tokens: inTok,
-    completion_tokens: outTok,
-    total_tokens: inTok + outTok,
+    ...(inTok !== undefined ? { prompt_tokens: inTok } : {}),
+    ...(outTok !== undefined ? { completion_tokens: outTok } : {}),
+    ...(inTok !== undefined || outTok !== undefined
+      ? { total_tokens: (inTok ?? 0) + (outTok ?? 0) }
+      : {}),
+    ...(serviceTier !== undefined ? { service_tier: serviceTier } : {}),
+    ...(billedCost !== undefined ? { cost: billedCost } : {}),
+    ...(billedCostUsd !== undefined ? { cost_usd: billedCostUsd } : {}),
   };
-  if (cacheRead > 0 || cacheCreation > 0) {
+  if (
+    cacheRead !== undefined ||
+    cacheCreation !== undefined ||
+    cacheCreation5m !== undefined ||
+    cacheCreation1h !== undefined ||
+    audioPrompt !== undefined ||
+    cachedAudioPrompt !== undefined
+  ) {
     normalized.prompt_tokens_details = {
-      cached_tokens: cacheRead,
-      ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
+      cached_tokens: cacheRead ?? 0,
+      ...(cacheCreation !== undefined ? { cache_creation_tokens: cacheCreation } : {}),
+      ...(cacheCreation5m !== undefined ? { ephemeral_5m_input_tokens: cacheCreation5m } : {}),
+      ...(cacheCreation1h !== undefined ? { ephemeral_1h_input_tokens: cacheCreation1h } : {}),
+      ...(audioPrompt !== undefined ? { audio_tokens: audioPrompt } : {}),
+      ...(cachedAudioPrompt !== undefined ? { cached_audio_tokens: cachedAudioPrompt } : {}),
     };
+  }
+  if (imageOutput !== undefined) {
+    normalized.completion_tokens_details = { image_tokens: imageOutput };
   }
   return normalized;
 }
@@ -298,8 +365,8 @@ function normalizeResponsesUsage(u: Record<string, unknown>): StreamUsage {
 // ALREADY INCLUDES the cached slice (like Responses, unlike Anthropic), so
 // prompt_tokens = promptTokenCount and the cache rides prompt_tokens_details;
 // thoughtsTokenCount (reasoning) is billed as output, so it folds into
-// completion_tokens. Tolerant of missing fields (each absent → 0); null when the
-// body carries no usageMetadata object at all.
+// completion_tokens. Missing token counts stay absent so metadata-only usage remains
+// unmeasured; null when the body carries no usageMetadata object at all.
 export function usageFromGeminiResponse(body: unknown): StreamUsage | null {
   const um = (body as { usageMetadata?: unknown } | null)?.usageMetadata;
   if (!um || typeof um !== "object") return null;
@@ -310,18 +377,57 @@ export function usageFromGeminiResponse(body: unknown): StreamUsage | null {
 // cumulative usageMetadata (identical shape). Cache is already included in
 // promptTokenCount, so the budget total is simply prompt + completion.
 function normalizeGeminiUsage(um: Record<string, unknown>): StreamUsage {
-  const prompt = typeof um.promptTokenCount === "number" ? um.promptTokenCount : 0;
-  const candidates = typeof um.candidatesTokenCount === "number" ? um.candidatesTokenCount : 0;
-  const thoughts = typeof um.thoughtsTokenCount === "number" ? um.thoughtsTokenCount : 0;
-  const cached = typeof um.cachedContentTokenCount === "number" ? um.cachedContentTokenCount : 0;
-  const completion = candidates + thoughts;
-  const normalized: StreamUsage = {
-    prompt_tokens: prompt,
-    completion_tokens: completion,
-    total_tokens: prompt + completion,
+  const count = (value: unknown): number | undefined =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+  const prompt = count(um.promptTokenCount);
+  const candidates = count(um.candidatesTokenCount);
+  const thoughts = count(um.thoughtsTokenCount);
+  const cached = count(um.cachedContentTokenCount);
+  const completion =
+    candidates !== undefined || thoughts !== undefined
+      ? (candidates ?? 0) + (thoughts ?? 0)
+      : undefined;
+  const modalityDetails = (details: unknown): Record<string, number> | undefined => {
+    if (!Array.isArray(details)) return undefined;
+    const out: Record<string, number> = {};
+    for (const item of details) {
+      if (!item || typeof item !== "object") continue;
+      const row = item as { modality?: unknown; tokenCount?: unknown };
+      if (typeof row.modality !== "string" || typeof row.tokenCount !== "number") continue;
+      if (!Number.isFinite(row.tokenCount) || row.tokenCount < 0) continue;
+      const key = `${row.modality.toLowerCase()}_tokens`;
+      out[key] = (out[key] ?? 0) + row.tokenCount;
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
   };
-  if (cached > 0) {
-    normalized.prompt_tokens_details = { cached_tokens: cached };
+  const promptModalities = modalityDetails(um.promptTokensDetails);
+  const cacheModalities = modalityDetails(um.cacheTokensDetails);
+  const candidateModalities = modalityDetails(um.candidatesTokensDetails);
+  const promptAudio =
+    promptModalities !== undefined ? (promptModalities.audio_tokens ?? 0) : undefined;
+  const cachedAudio =
+    cacheModalities !== undefined ? (cacheModalities.audio_tokens ?? 0) : undefined;
+  const normalized: StreamUsage = {
+    ...(prompt !== undefined ? { prompt_tokens: prompt } : {}),
+    ...(completion !== undefined ? { completion_tokens: completion } : {}),
+    ...(prompt !== undefined || completion !== undefined
+      ? { total_tokens: (prompt ?? 0) + (completion ?? 0) }
+      : {}),
+    ...(typeof um.serviceTier === "string" ? { service_tier: um.serviceTier } : {}),
+  };
+  if (cached !== undefined || promptModalities !== undefined || cacheModalities !== undefined) {
+    normalized.prompt_tokens_details = {
+      ...(cached !== undefined ? { cached_tokens: cached } : {}),
+      ...(promptModalities ?? {}),
+      ...(promptAudio !== undefined ? { audio_tokens: promptAudio } : {}),
+      ...(cachedAudio !== undefined ? { cached_audio_tokens: cachedAudio } : {}),
+    };
+  }
+  if (candidateModalities !== undefined) {
+    normalized.completion_tokens_details = {
+      ...candidateModalities,
+      image_tokens: candidateModalities.image_tokens ?? 0,
+    };
   }
   return normalized;
 }
@@ -392,7 +498,10 @@ export function usageFromResponsesSSE(raw: string): StreamUsage | null {
     const response = (evt.response ?? {}) as Record<string, unknown>;
     const usage = response.usage;
     if (!usage || typeof usage !== "object") continue;
-    return normalizeResponsesUsage(usage as Record<string, unknown>);
+    return normalizeResponsesUsage(
+      usage as Record<string, unknown>,
+      typeof response.service_tier === "string" ? response.service_tier : undefined,
+    );
   }
   return null;
 }
@@ -439,9 +548,12 @@ export function usageFromSSE(raw: string): StreamUsage | null {
     const payload = line.slice("data:".length).trim();
     if (payload === "" || payload === "[DONE]") continue;
     try {
-      const obj = JSON.parse(payload) as { usage?: unknown };
+      const obj = JSON.parse(payload) as { usage?: unknown; service_tier?: unknown };
       if (obj && typeof obj === "object" && obj.usage && typeof obj.usage === "object") {
-        return obj.usage as StreamUsage;
+        return {
+          ...(obj.usage as StreamUsage),
+          ...(typeof obj.service_tier === "string" ? { service_tier: obj.service_tier } : {}),
+        };
       }
     } catch {
       // keepalive / non-JSON line — ignore
@@ -465,6 +577,10 @@ export function usageFromAnthropicSSE(raw: string): StreamUsage | null {
   let output = 0;
   let cacheRead = 0;
   let cacheCreation = 0;
+  let cacheCreation5m = 0;
+  let cacheCreation1h = 0;
+  let speed: string | undefined;
+  let inferenceGeo: string | undefined;
   for (const frame of raw.split("\n\n")) {
     // Each frame may have multiple lines (event:/data:); read the data line only.
     let payload: string | null = null;
@@ -489,6 +605,8 @@ export function usageFromAnthropicSSE(raw: string): StreamUsage | null {
         string,
         unknown
       >;
+      if (typeof u.speed === "string") speed = u.speed;
+      if (typeof u.inference_geo === "string") inferenceGeo = u.inference_geo;
       if (typeof u.input_tokens === "number") {
         input = u.input_tokens;
         seenUsage = true;
@@ -501,8 +619,22 @@ export function usageFromAnthropicSSE(raw: string): StreamUsage | null {
         cacheCreation = u.cache_creation_input_tokens;
         seenUsage = true;
       }
+      const creation =
+        u.cache_creation && typeof u.cache_creation === "object"
+          ? (u.cache_creation as Record<string, unknown>)
+          : undefined;
+      if (typeof creation?.ephemeral_5m_input_tokens === "number") {
+        cacheCreation5m = creation.ephemeral_5m_input_tokens;
+        seenUsage = true;
+      }
+      if (typeof creation?.ephemeral_1h_input_tokens === "number") {
+        cacheCreation1h = creation.ephemeral_1h_input_tokens;
+        seenUsage = true;
+      }
     } else if (evt.type === "message_delta") {
       const u = (evt.usage ?? {}) as Record<string, unknown>;
+      if (typeof u.speed === "string") speed = u.speed;
+      if (typeof u.inference_geo === "string") inferenceGeo = u.inference_geo;
       if (typeof u.output_tokens === "number") {
         output = Math.max(output, u.output_tokens);
         seenUsage = true;
@@ -515,6 +647,18 @@ export function usageFromAnthropicSSE(raw: string): StreamUsage | null {
         cacheCreation = Math.max(cacheCreation, u.cache_creation_input_tokens);
         seenUsage = true;
       }
+      const creation =
+        u.cache_creation && typeof u.cache_creation === "object"
+          ? (u.cache_creation as Record<string, unknown>)
+          : undefined;
+      if (typeof creation?.ephemeral_5m_input_tokens === "number") {
+        cacheCreation5m = Math.max(cacheCreation5m, creation.ephemeral_5m_input_tokens);
+        seenUsage = true;
+      }
+      if (typeof creation?.ephemeral_1h_input_tokens === "number") {
+        cacheCreation1h = Math.max(cacheCreation1h, creation.ephemeral_1h_input_tokens);
+        seenUsage = true;
+      }
     }
   }
   if (!seenUsage) return null;
@@ -523,6 +667,16 @@ export function usageFromAnthropicSSE(raw: string): StreamUsage | null {
     output_tokens: output,
     cache_read_input_tokens: cacheRead,
     cache_creation_input_tokens: cacheCreation,
+    ...(speed !== undefined ? { service_tier: speed } : {}),
+    ...(inferenceGeo !== undefined ? { inference_geo: inferenceGeo } : {}),
+    ...(cacheCreation5m > 0 || cacheCreation1h > 0
+      ? {
+          prompt_tokens_details: {
+            ...(cacheCreation5m > 0 ? { ephemeral_5m_input_tokens: cacheCreation5m } : {}),
+            ...(cacheCreation1h > 0 ? { ephemeral_1h_input_tokens: cacheCreation1h } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -531,13 +685,23 @@ export function usageFromAnthropicSSE(raw: string): StreamUsage | null {
 // the OpenAI/Anthropic cache-field precedence — so the gateway never re-implements
 // that parsing (its LOCAL usageFromBody only unwraps the raw usage object). Each
 // leaf is null when not reported, kept DISTINCT from a measured 0.
-function tokenBreakdownFromUsage(u: StreamUsage): TokenUsageBreakdown {
+export function tokenBreakdownFromUsage(
+  u: StreamUsage | Record<string, unknown>,
+): TokenUsageBreakdown {
   const t = parseUsage({ usage: u });
   return {
     prompt_tokens: t.promptTokens ?? null,
     completion_tokens: t.completionTokens ?? null,
     cached_tokens: t.cachedPromptTokens ?? null,
     cache_creation_tokens: t.cacheCreationPromptTokens ?? null,
+    service_tier: t.serviceTier ?? null,
+    inference_geo: t.inferenceGeo ?? null,
+    cache_creation_5m_tokens: t.cacheCreation5mPromptTokens ?? null,
+    cache_creation_1h_tokens: t.cacheCreation1hPromptTokens ?? null,
+    audio_prompt_tokens: t.audioPromptTokens ?? null,
+    cached_audio_prompt_tokens: t.cachedAudioPromptTokens ?? null,
+    image_output_tokens: t.imageOutputTokens ?? null,
+    billed_cost_usd: billedCostFromBody({ usage: u }),
   };
 }
 

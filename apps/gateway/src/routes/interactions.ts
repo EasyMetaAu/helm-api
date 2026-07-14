@@ -20,6 +20,7 @@ import {
   runImageChain,
 } from "./image-chain.js";
 import { buildImageDecision, numField } from "./image-telemetry.js";
+import { geminiImageUsageBody } from "./image-usage.js";
 import type { MessagesIdentity } from "./messages.js";
 import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-capture.js";
 
@@ -170,18 +171,7 @@ function nativeToInteractions(
 // generateContent usageMetadata → the OpenAI-ish usage body resolveCostUsd prices
 // (output_tokens = the image's candidatesTokenCount). Same shape the images route uses.
 function usageBodyFromNative(native: Record<string, unknown>): { usage: Record<string, unknown> } {
-  const um = (native.usageMetadata ?? {}) as Record<string, unknown>;
-  const inputTokens = typeof um.promptTokenCount === "number" ? um.promptTokenCount : undefined;
-  const outputTokens =
-    typeof um.candidatesTokenCount === "number" ? um.candidatesTokenCount : undefined;
-  return {
-    usage: {
-      ...(inputTokens !== undefined ? { input_tokens: inputTokens } : {}),
-      ...(outputTokens !== undefined
-        ? { output_tokens: outputTokens, output_tokens_details: { image_tokens: outputTokens } }
-        : {}),
-    },
-  };
+  return geminiImageUsageBody((native.usageMetadata ?? {}) as Record<string, unknown>);
 }
 
 export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsRouteDeps): void {

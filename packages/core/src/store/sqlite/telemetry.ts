@@ -40,10 +40,6 @@ export class SqliteTelemetryStore implements TelemetryStore {
   // Build one telemetry row (fresh id + denormalized status/cost). Shared by the
   // single and batch inserts so they can never drift.
   private toRow(input: InsertTelemetryInput): typeof telemetry.$inferInsert {
-    const finalCost = input.decision.provider_attempts.reduce<number | null>((acc, a) => {
-      if (a.cost_usd === null) return acc;
-      return (acc ?? 0) + a.cost_usd;
-    }, null);
     const usage = input.decision.usage;
     return {
       id: this.genId(),
@@ -51,7 +47,9 @@ export class SqliteTelemetryStore implements TelemetryStore {
       apiKeyId: input.apiKeyId,
       decisionJson: JSON.stringify(input.decision),
       finalStatus: input.decision.final.status,
-      costUsd: finalCost,
+      // The decision total includes BOTH Layer-2 eval and served-attempt spend.
+      // Re-summing attempts here silently dropped eval_usd from every dashboard.
+      costUsd: input.decision.cost_breakdown.total_usd,
       // Denormalized dashboard fields for cheap aggregation. NULL when the
       // gateway never stamped a field (forward-only / legacy rows).
       latencyTotalMs: input.decision.latency_total_ms,

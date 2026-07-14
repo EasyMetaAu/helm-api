@@ -143,6 +143,7 @@ export const GeminiGenerateContentRequestSchema = z
     generationConfig: GeminiGenerationConfigSchema.optional(),
     safetySettings: z.array(z.unknown()).optional(),
     cachedContent: z.string().optional(),
+    serviceTier: z.string().optional(),
     thinkingConfig: z.unknown().optional(),
   })
   .passthrough();
@@ -175,6 +176,8 @@ export const GeminiUsageMetadataSchema = z
     // aggregate cachedContentTokenCount). Without this the cached count is dropped
     // entirely when Gemini reports only the breakdown.
     cacheTokensDetails: z.array(GeminiModalityTokenCountSchema).optional(),
+    // Effective synchronous inference tier selected by Google for this request.
+    serviceTier: z.string().optional(),
   })
   .passthrough();
 export type GeminiUsageMetadata = z.infer<typeof GeminiUsageMetadataSchema>;
@@ -283,6 +286,7 @@ export const IRChunkUsageSchema = z
     cache_creation_tokens: z.number().int().nonnegative().optional(),
     prompt_tokens_details: IRTokenDetailsSchema.optional(),
     completion_tokens_details: IRTokenDetailsSchema.optional(),
+    inference_geo: z.string().optional(),
   })
   .partial();
 
@@ -291,5 +295,6 @@ export const IRChunkSchema = z.object({
   model: z.string().optional(),
   choices: z.array(IRChunkChoiceSchema).optional(),
   usage: IRChunkUsageSchema.nullable().optional(),
+  service_tier: z.string().optional(),
 });
 export type IRChunk = z.infer<typeof IRChunkSchema>;

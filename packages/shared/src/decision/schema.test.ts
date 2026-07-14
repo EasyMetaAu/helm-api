@@ -357,12 +357,28 @@ describe("DecisionRecordSchema", () => {
         completion_tokens: 340,
         cached_tokens: 800,
         cache_creation_tokens: 64,
+        service_tier: "priority",
+        inference_geo: "us",
+        cache_creation_5m_tokens: 40,
+        cache_creation_1h_tokens: 24,
+        audio_prompt_tokens: 300,
+        cached_audio_prompt_tokens: 100,
+        image_output_tokens: 1120,
+        billed_cost_usd: 0.0123,
       },
     });
     expect(parsed.usage?.prompt_tokens).toBe(1200);
     expect(parsed.usage?.completion_tokens).toBe(340);
     expect(parsed.usage?.cached_tokens).toBe(800);
     expect(parsed.usage?.cache_creation_tokens).toBe(64);
+    expect(parsed.usage?.service_tier).toBe("priority");
+    expect(parsed.usage?.inference_geo).toBe("us");
+    expect(parsed.usage?.cache_creation_5m_tokens).toBe(40);
+    expect(parsed.usage?.cache_creation_1h_tokens).toBe(24);
+    expect(parsed.usage?.audio_prompt_tokens).toBe(300);
+    expect(parsed.usage?.cached_audio_prompt_tokens).toBe(100);
+    expect(parsed.usage?.image_output_tokens).toBe(1120);
+    expect(parsed.usage?.billed_cost_usd).toBe(0.0123);
   });
 
   it("defaults absent usage leaves to null and rejects a negative count", () => {
@@ -373,12 +389,26 @@ describe("DecisionRecordSchema", () => {
     });
     expect(parsed.usage?.prompt_tokens).toBe(10);
     expect(parsed.usage?.completion_tokens).toBeNull();
+    expect(parsed.usage?.service_tier).toBeNull();
+    expect(parsed.usage?.inference_geo).toBeNull();
+    expect(parsed.usage?.cache_creation_5m_tokens).toBeNull();
+    expect(parsed.usage?.cache_creation_1h_tokens).toBeNull();
+    expect(parsed.usage?.audio_prompt_tokens).toBeNull();
+    expect(parsed.usage?.cached_audio_prompt_tokens).toBeNull();
+    expect(parsed.usage?.image_output_tokens).toBeNull();
+    expect(parsed.usage?.billed_cost_usd).toBeNull();
     // …but a negative token count is fail-closed.
     const bad = DecisionRecordSchema.safeParse({
       ...fullRecord(),
       usage: { prompt_tokens: -1 },
     });
     expect(bad.success).toBe(false);
+    expect(
+      DecisionRecordSchema.safeParse({
+        ...fullRecord(),
+        usage: { billed_cost_usd: -0.01 },
+      }).success,
+    ).toBe(false);
   });
 
   it("defaults generation_ms to null when omitted (legacy / non-streaming records)", () => {

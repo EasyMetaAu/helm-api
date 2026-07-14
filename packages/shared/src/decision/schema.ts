@@ -158,6 +158,19 @@ export const TokenUsageSchema = z.object({
   completion_tokens: z.number().int().nonnegative().nullable().default(null),
   cached_tokens: z.number().int().nonnegative().nullable().default(null),
   cache_creation_tokens: z.number().int().nonnegative().nullable().default(null),
+  // Provider-confirmed price dimensions retained for exact future repricing. Every
+  // field is nullable so legacy records and providers without rich usage metadata
+  // remain valid without inventing a value.
+  service_tier: z.string().nullable().default(null),
+  inference_geo: z.string().nullable().default(null),
+  cache_creation_5m_tokens: z.number().int().nonnegative().nullable().default(null),
+  cache_creation_1h_tokens: z.number().int().nonnegative().nullable().default(null),
+  audio_prompt_tokens: z.number().int().nonnegative().nullable().default(null),
+  cached_audio_prompt_tokens: z.number().int().nonnegative().nullable().default(null),
+  image_output_tokens: z.number().int().nonnegative().nullable().default(null),
+  // Authoritative relay-reported spend, distinct from the catalog estimate stamped
+  // into cost_breakdown. Preserving provenance prevents later backfills replacing it.
+  billed_cost_usd: z.number().nonnegative().nullable().default(null),
 });
 
 // Memory inject observability (docs/08 Phase 2 Step 10). Stamped onto the record

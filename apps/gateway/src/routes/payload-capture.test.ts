@@ -39,6 +39,16 @@ describe("usageFromSSE", () => {
     const sse = ': keepalive\n\ndata: {"usage":{"prompt_tokens":1,"completion_tokens":2}}\n\n';
     expect(usageFromSSE(sse)).toEqual({ prompt_tokens: 1, completion_tokens: 2 });
   });
+
+  it("preserves the provider-confirmed service tier from a streamed usage chunk", () => {
+    const sse =
+      'data: {"choices":[],"service_tier":"priority","usage":{"prompt_tokens":12,"completion_tokens":5}}\n\n';
+    expect(usageFromSSE(sse)).toEqual({
+      prompt_tokens: 12,
+      completion_tokens: 5,
+      service_tier: "priority",
+    });
+  });
 });
 
 // Native-protocol-passthrough cost (#217 C-cost): the upstream Anthropic NON-stream
@@ -85,6 +95,49 @@ describe("usageFromAnthropicResponse", () => {
       completion_tokens: 3,
       total_tokens: 12,
       prompt_tokens_details: { cached_tokens: 4 },
+    });
+  });
+
+  it("preserves the Anthropic 5-minute/1-hour cache-write split for costing", () => {
+    const body = {
+      usage: {
+        input_tokens: 10,
+        output_tokens: 7,
+        inference_geo: "us",
+        cache_creation_input_tokens: 5,
+        cache_creation: {
+          ephemeral_5m_input_tokens: 3,
+          ephemeral_1h_input_tokens: 2,
+        },
+      },
+    };
+    expect(usageFromAnthropicResponse(body)).toEqual({
+      prompt_tokens: 15,
+      completion_tokens: 7,
+      total_tokens: 22,
+      inference_geo: "us",
+      prompt_tokens_details: {
+        cached_tokens: 0,
+        cache_creation_tokens: 5,
+        ephemeral_5m_input_tokens: 3,
+        ephemeral_1h_input_tokens: 2,
+      },
+    });
+  });
+
+  it("preserves Anthropic's provider-confirmed Fast speed", () => {
+    expect(
+      usageFromAnthropicResponse({
+        usage: { input_tokens: 10, output_tokens: 7, speed: "fast" },
+      }),
+    ).toEqual({
+      prompt_tokens: 10,
+      completion_tokens: 7,
+      total_tokens: 17,
+      service_tier: "fast",
+    });
+    expect(usageFromAnthropicResponse({ usage: { speed: "fast" } })).toEqual({
+      service_tier: "fast",
     });
   });
 
@@ -136,7 +189,7 @@ describe("usageFromAnthropicSSE", () => {
 
   it("collects the cache split from message_start (cache_read + cache_creation)", () => {
     const sse = [
-      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":1000,"cache_read_input_tokens":200,"cache_creation_input_tokens":50}}}\n\n',
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":1000,"inference_geo":"us","cache_read_input_tokens":200,"cache_creation_input_tokens":50,"cache_creation":{"ephemeral_5m_input_tokens":30,"ephemeral_1h_input_tokens":20}}}}\n\n',
       'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":300}}\n\n',
     ].join("");
     const result = usageFromAnthropicSSE(sse);
@@ -145,9 +198,28 @@ describe("usageFromAnthropicSSE", () => {
       output_tokens: 300,
       cache_read_input_tokens: 200,
       cache_creation_input_tokens: 50,
+      inference_geo: "us",
+      prompt_tokens_details: {
+        ephemeral_5m_input_tokens: 30,
+        ephemeral_1h_input_tokens: 20,
+      },
     });
     // input + output + cache_read + cache_creation = 1000 + 300 + 200 + 50
     expect(tokensFromUsage(result)).toBe(1550);
+  });
+
+  it("preserves Anthropic Fast speed from streamed message_start usage", () => {
+    const sse = [
+      'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":10,"speed":"fast"}}}\n\n',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5,"speed":"fast"}}\n\n',
+    ].join("");
+    expect(usageFromAnthropicSSE(sse)).toEqual({
+      input_tokens: 10,
+      output_tokens: 5,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      service_tier: "fast",
+    });
   });
 
   it("takes the MAX output_tokens across multiple message_delta frames", () => {
@@ -278,6 +350,43 @@ describe("usageFromResponsesResponse", () => {
     });
   });
 
+  it("preserves Responses repricing dimensions and authoritative billed cost", () => {
+    expect(
+      usageFromResponsesResponse({
+        service_tier: "priority",
+        usage: {
+          input_tokens: 1_000,
+          output_tokens: 1_220,
+          cost_usd: 0.0456,
+          input_tokens_details: {
+            cached_tokens: 200,
+            cache_creation_tokens: 50,
+            ephemeral_5m_input_tokens: 30,
+            ephemeral_1h_input_tokens: 20,
+            audio_tokens: 300,
+            cached_audio_tokens: 100,
+          },
+          output_tokens_details: { image_tokens: 1_120 },
+        },
+      }),
+    ).toEqual({
+      prompt_tokens: 1_000,
+      completion_tokens: 1_220,
+      total_tokens: 2_220,
+      service_tier: "priority",
+      cost_usd: 0.0456,
+      prompt_tokens_details: {
+        cached_tokens: 200,
+        cache_creation_tokens: 50,
+        ephemeral_5m_input_tokens: 30,
+        ephemeral_1h_input_tokens: 20,
+        audio_tokens: 300,
+        cached_audio_tokens: 100,
+      },
+      completion_tokens_details: { image_tokens: 1_120 },
+    });
+  });
+
   it("returns null when the body has no usage object", () => {
     expect(usageFromResponsesResponse({ id: "resp" })).toBeNull();
     expect(usageFromResponsesResponse(null)).toBeNull();
@@ -306,6 +415,17 @@ describe("usageFromResponsesSSE", () => {
       prompt_tokens_details: { cached_tokens: 200, cache_creation_tokens: 50 },
     });
     expect(tokensFromUsage(usageFromResponsesSSE(sse))).toBe(1500);
+  });
+
+  it("preserves the actual Responses service tier for streamed cost selection", () => {
+    const sse =
+      'event: response.completed\ndata: {"type":"response.completed","response":{"service_tier":"priority","usage":{"input_tokens":10,"output_tokens":5}}}\n\n';
+    expect(usageFromResponsesSSE(sse)).toEqual({
+      prompt_tokens: 10,
+      completion_tokens: 5,
+      total_tokens: 15,
+      service_tier: "priority",
+    });
   });
 
   it("falls back to a response.incomplete terminal event (truncation / content filter)", () => {
@@ -361,12 +481,14 @@ describe("usageFromGeminiResponse", () => {
         candidatesTokenCount: 500,
         cachedContentTokenCount: 200,
         totalTokenCount: 1500,
+        serviceTier: "priority",
       },
     };
     expect(usageFromGeminiResponse(body)).toEqual({
       prompt_tokens: 1000, // cache already counted inside promptTokenCount
       completion_tokens: 500,
       total_tokens: 1500,
+      service_tier: "priority",
       prompt_tokens_details: { cached_tokens: 200 },
     });
     expect(tokensFromUsage(usageFromGeminiResponse(body))).toBe(1500);
@@ -380,6 +502,62 @@ describe("usageFromGeminiResponse", () => {
       prompt_tokens: 10,
       completion_tokens: 11, // candidates(7) + thoughts(4)
       total_tokens: 21,
+    });
+  });
+
+  it("preserves Gemini audio/cache/image modality details for exact costing", () => {
+    const body = {
+      usageMetadata: {
+        promptTokenCount: 1_000,
+        cachedContentTokenCount: 200,
+        candidatesTokenCount: 1_180,
+        thoughtsTokenCount: 40,
+        promptTokensDetails: [
+          { modality: "TEXT", tokenCount: 700 },
+          { modality: "AUDIO", tokenCount: 300 },
+        ],
+        cacheTokensDetails: [
+          { modality: "TEXT", tokenCount: 100 },
+          { modality: "AUDIO", tokenCount: 100 },
+        ],
+        candidatesTokensDetails: [
+          { modality: "TEXT", tokenCount: 60 },
+          { modality: "IMAGE", tokenCount: 1_120 },
+        ],
+      },
+    };
+    expect(usageFromGeminiResponse(body)).toEqual({
+      prompt_tokens: 1_000,
+      completion_tokens: 1_220,
+      total_tokens: 2_220,
+      prompt_tokens_details: {
+        cached_tokens: 200,
+        text_tokens: 700,
+        audio_tokens: 300,
+        cached_audio_tokens: 100,
+      },
+      completion_tokens_details: {
+        text_tokens: 60,
+        image_tokens: 1_120,
+      },
+    });
+  });
+
+  it("keeps metadata-only usage unmeasured and marks valid text-only input as zero audio", () => {
+    expect(usageFromGeminiResponse({ usageMetadata: {} })).toEqual({});
+    expect(
+      usageFromGeminiResponse({
+        usageMetadata: {
+          promptTokenCount: 1_000,
+          candidatesTokenCount: 10,
+          promptTokensDetails: [{ modality: "TEXT", tokenCount: 1_000 }],
+        },
+      }),
+    ).toEqual({
+      prompt_tokens: 1_000,
+      completion_tokens: 10,
+      total_tokens: 1_010,
+      prompt_tokens_details: { text_tokens: 1_000, audio_tokens: 0 },
     });
   });
 
@@ -409,13 +587,20 @@ describe("usageFromGeminiSSE", () => {
   it("extracts the final cumulative usageMetadata frame", () => {
     const sse = [
       'data: {"candidates":[{"content":{"parts":[{"text":"Hel"}]}}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":1}}\n\n',
-      'data: {"candidates":[{"content":{"parts":[{"text":"lo"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":500,"cachedContentTokenCount":200}}\n\n',
+      'data: {"candidates":[{"content":{"parts":[{"text":"lo"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":500,"cachedContentTokenCount":200,"serviceTier":"flex","promptTokensDetails":[{"modality":"TEXT","tokenCount":800},{"modality":"AUDIO","tokenCount":200}],"cacheTokensDetails":[{"modality":"AUDIO","tokenCount":100}],"candidatesTokensDetails":[{"modality":"IMAGE","tokenCount":400},{"modality":"TEXT","tokenCount":100}]}}\n\n',
     ].join("");
     expect(usageFromGeminiSSE(sse)).toEqual({
       prompt_tokens: 1000,
       completion_tokens: 500,
       total_tokens: 1500,
-      prompt_tokens_details: { cached_tokens: 200 },
+      service_tier: "flex",
+      prompt_tokens_details: {
+        cached_tokens: 200,
+        text_tokens: 800,
+        audio_tokens: 200,
+        cached_audio_tokens: 100,
+      },
+      completion_tokens_details: { image_tokens: 400, text_tokens: 100 },
     });
     expect(tokensFromUsage(usageFromGeminiSSE(sse))).toBe(1500);
   });
@@ -583,6 +768,14 @@ describe("backfillCompletionCost", () => {
       completion_tokens: 34,
       cached_tokens: 80,
       cache_creation_tokens: null,
+      service_tier: null,
+      inference_geo: null,
+      cache_creation_5m_tokens: null,
+      cache_creation_1h_tokens: null,
+      audio_prompt_tokens: null,
+      cached_audio_prompt_tokens: null,
+      image_output_tokens: null,
+      billed_cost_usd: null,
     });
     expect(d.cost_breakdown.completion_usd).toBe(0.01); // cost still stamped
   });
@@ -601,6 +794,49 @@ describe("backfillCompletionCost", () => {
       completion_tokens: 20,
       cached_tokens: 30,
       cache_creation_tokens: 10,
+      service_tier: null,
+      inference_geo: null,
+      cache_creation_5m_tokens: null,
+      cache_creation_1h_tokens: null,
+      audio_prompt_tokens: null,
+      cached_audio_prompt_tokens: null,
+      image_output_tokens: null,
+      billed_cost_usd: null,
+    });
+  });
+
+  it("stamps every future-repricing dimension and authoritative billed cost", () => {
+    const d = decision();
+    backfillCompletionCost(d, "google/gemini", null, {
+      prompt_tokens: 1_000,
+      completion_tokens: 1_220,
+      service_tier: "flex",
+      inference_geo: "us",
+      cost: 0.0456,
+      prompt_tokens_details: {
+        cached_tokens: 200,
+        cache_creation_tokens: 50,
+        ephemeral_5m_input_tokens: 30,
+        ephemeral_1h_input_tokens: 20,
+        audio_tokens: 300,
+        cached_audio_tokens: 100,
+      },
+      completion_tokens_details: { image_tokens: 1_120 },
+    });
+
+    expect(d.usage).toEqual({
+      prompt_tokens: 1_000,
+      completion_tokens: 1_220,
+      cached_tokens: 200,
+      cache_creation_tokens: 50,
+      service_tier: "flex",
+      inference_geo: "us",
+      cache_creation_5m_tokens: 30,
+      cache_creation_1h_tokens: 20,
+      audio_prompt_tokens: 300,
+      cached_audio_prompt_tokens: 100,
+      image_output_tokens: 1_120,
+      billed_cost_usd: 0.0456,
     });
   });
 

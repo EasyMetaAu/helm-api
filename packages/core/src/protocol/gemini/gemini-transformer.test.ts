@@ -797,6 +797,19 @@ describe("transformStreamOut (IR chunks -> Gemini SSE events)", () => {
     expect(terminal?.usageMetadata?.totalTokenCount).toBe(160);
   });
 
+  it("preserves the effective service tier on the terminal Gemini stream event", async () => {
+    const chunks: IRChunk[] = [
+      {
+        choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }],
+        service_tier: "priority",
+        usage: { prompt_tokens: 10, completion_tokens: 2 },
+      },
+    ];
+
+    const events = await collect(geminiTransformer.transformStreamOut(fromArray(chunks)));
+    expect(events.at(-1)?.usageMetadata?.serviceTier).toBe("priority");
+  });
+
   // test #4: outbound streaming must surface tool calls as a complete functionCall part
   // (one delta event), flushed once args are complete — never a half-parsed JSON.
   it("emits a single complete functionCall part from streamed tool_calls", async () => {
@@ -922,6 +935,19 @@ describe("generationConfig param round-trip (litellm parity)", () => {
     expect(nativeOut.safetySettings).toEqual(safetySettings);
   });
 
+  it("round-trips the official top-level Gemini serviceTier through IR", () => {
+    const nativeIn: GeminiGenerateContentRequest = {
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+      serviceTier: "priority",
+    };
+
+    const ir = geminiTransformer.transformRequestOut(nativeIn) as IRRequest;
+    expect(ir.service_tier).toBe("priority");
+
+    const nativeOut = geminiTransformer.transformRequestIn(ir) as GeminiGenerateContentRequest;
+    expect(nativeOut.serviceTier).toBe("priority");
+  });
+
   it("maps reasoning_effort -> thinkingConfig (low/medium/high), minimal allowed", () => {
     const mk = (effort: "minimal" | "low" | "medium" | "high"): GeminiGenerateContentRequest =>
       geminiTransformer.transformRequestIn({
@@ -987,6 +1013,23 @@ describe("generationConfig param round-trip (litellm parity)", () => {
 });
 
 describe("usage detail (thoughtsTokenCount + per-modality details)", () => {
+  it("round-trips usageMetadata.serviceTier through the IR response", () => {
+    const native: GeminiGenerateContentResponse = {
+      candidates: [{ content: { role: "model", parts: [{ text: "ok" }] } }],
+      usageMetadata: {
+        promptTokenCount: 10,
+        candidatesTokenCount: 2,
+        serviceTier: "flex",
+      },
+    };
+
+    const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
+    expect(ir.service_tier).toBe("flex");
+
+    const nativeOut = geminiTransformer.transformResponseOut(ir) as GeminiGenerateContentResponse;
+    expect(nativeOut.usageMetadata?.serviceTier).toBe("flex");
+  });
+
   it("maps thoughtsTokenCount -> reasoning_tokens and modality details (Gemini -> IR)", () => {
     const native: GeminiGenerateContentResponse = {
       candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }],
@@ -997,20 +1040,31 @@ describe("usage detail (thoughtsTokenCount + per-modality details)", () => {
         cachedContentTokenCount: 10,
         thoughtsTokenCount: 15,
         promptTokensDetails: [
-          { modality: "TEXT", tokenCount: 80 },
+          { modality: "TEXT", tokenCount: 60 },
+          { modality: "AUDIO", tokenCount: 20 },
           { modality: "IMAGE", tokenCount: 20 },
         ],
-        candidatesTokensDetails: [{ modality: "TEXT", tokenCount: 20 }],
+        cacheTokensDetails: [
+          { modality: "TEXT", tokenCount: 5 },
+          { modality: "AUDIO", tokenCount: 5 },
+        ],
+        candidatesTokensDetails: [
+          { modality: "TEXT", tokenCount: 10 },
+          { modality: "IMAGE", tokenCount: 10 },
+        ],
       },
     };
     const ir = geminiTransformer.transformResponseIn(native) as IRResponse;
     expect(ir.usage?.prompt_tokens).toBe(90); // 100 - 10 cached
-    expect(ir.usage?.completion_tokens).toBe(20);
+    expect(ir.usage?.completion_tokens).toBe(35); // candidates + billable thinking
     expect(ir.usage?.cached_tokens).toBe(10);
     expect(ir.usage?.reasoning_tokens).toBe(15);
-    expect(ir.usage?.prompt_tokens_details?.text_tokens).toBe(80);
+    expect(ir.usage?.prompt_tokens_details?.text_tokens).toBe(60);
+    expect(ir.usage?.prompt_tokens_details?.audio_tokens).toBe(20);
+    expect(ir.usage?.prompt_tokens_details?.cached_audio_tokens).toBe(5);
     expect(ir.usage?.prompt_tokens_details?.image_tokens).toBe(20);
-    expect(ir.usage?.completion_tokens_details?.text_tokens).toBe(20);
+    expect(ir.usage?.completion_tokens_details?.text_tokens).toBe(10);
+    expect(ir.usage?.completion_tokens_details?.image_tokens).toBe(10);
   });
 
   it("emits totalTokenCount/cachedContentTokenCount/thoughtsTokenCount (IR -> Gemini)", () => {
@@ -1028,9 +1082,9 @@ describe("usage detail (thoughtsTokenCount + per-modality details)", () => {
     };
     const native = geminiTransformer.transformResponseOut(ir) as GeminiGenerateContentResponse;
     const um = native.usageMetadata;
-    // prompt = prompt_tokens + cached + cache creation; total = prompt + completion.
+    // IR completion includes reasoning; Gemini splits it back into candidates + thoughts.
     expect(um?.promptTokenCount).toBe(37);
-    expect(um?.candidatesTokenCount).toBe(10);
+    expect(um?.candidatesTokenCount).toBe(6);
     expect(um?.totalTokenCount).toBe(47);
     expect(um?.cachedContentTokenCount).toBe(5);
     expect(um?.thoughtsTokenCount).toBe(4);
@@ -1532,12 +1586,33 @@ describe("Gemini Tier E fidelity (orders 26-31)", () => {
           promptTokenCount: 10,
           candidatesTokenCount: 5,
           thoughtsTokenCount: 8,
+          serviceTier: "flex",
+          promptTokensDetails: [
+            { modality: "TEXT", tokenCount: 6 },
+            { modality: "AUDIO", tokenCount: 4 },
+          ],
+          cacheTokensDetails: [{ modality: "AUDIO", tokenCount: 2 }],
+          candidatesTokensDetails: [
+            { modality: "TEXT", tokenCount: 3 },
+            { modality: "IMAGE", tokenCount: 2 },
+          ],
         },
       },
     ] as unknown as GeminiSSEEvent[];
     const chunks = await collect(geminiTransformer.transformStreamIn(fromArray(events)));
     const terminal = chunks.at(-1) as IRChunk;
     expect(terminal.usage?.reasoning_tokens).toBe(8);
+    expect(terminal.usage?.completion_tokens).toBe(13); // 5 candidates + 8 thinking
+    expect(terminal.usage?.cached_tokens).toBe(2);
+    expect(terminal.usage?.prompt_tokens_details).toMatchObject({
+      audio_tokens: 4,
+      cached_audio_tokens: 2,
+    });
+    expect(terminal.usage?.completion_tokens_details).toMatchObject({
+      text_tokens: 3,
+      image_tokens: 2,
+    });
+    expect(terminal.service_tier).toBe("flex");
     // Exactly one chunk carries usage (no mid-stream usage frames).
     expect(chunks.filter((c) => c.usage !== undefined)).toHaveLength(1);
   });
@@ -2542,7 +2617,9 @@ describe("Gemini transformer — residual coverage gaps", () => {
     ] as unknown as IRChunk[];
     const events = await collect(geminiTransformer.transformStreamOut(fromArray(irChunks)));
     const terminal = events.at(-1) as GeminiSSEEvent;
-    expect(terminal.usageMetadata?.candidatesTokenCount).toBe(6);
+    // Gemini excludes thinking tokens from candidatesTokenCount; its total still
+    // includes both the 4 visible candidate tokens and 2 thought tokens.
+    expect(terminal.usageMetadata?.candidatesTokenCount).toBe(4);
     expect(terminal.usageMetadata?.totalTokenCount).toBe(6);
     expect(terminal.usageMetadata?.thoughtsTokenCount).toBe(2);
     expect(terminal.usageMetadata?.promptTokenCount).toBeUndefined();

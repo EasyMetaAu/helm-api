@@ -71,6 +71,37 @@ describe("buildImageDecision (chain-aware)", () => {
     expect(d.usage).toBeNull();
   });
 
+  it("preserves image-token, service-tier, and billed-cost repricing evidence", () => {
+    const d = buildImageDecision({
+      traceId: "t-rich",
+      keyPrefix: null,
+      requested: "gemini-3-pro-image",
+      selectedLane: "image",
+      candidateChain: ["google/gemini-3-pro-image"],
+      attempts: [row({ alias: "google/gemini-3-pro-image", cost_usd: 0.24 })],
+      served: {
+        alias: "google/gemini-3-pro-image",
+        providerModel: "gemini-3-pro-image",
+      },
+      finalErrorClass: null,
+      usage: {
+        input_tokens: 560,
+        output_tokens: 2_000,
+        service_tier: "priority",
+        cost_usd: 0.24,
+        output_tokens_details: { image_tokens: 2_000 },
+      },
+    });
+
+    expect(d.usage).toMatchObject({
+      prompt_tokens: 560,
+      completion_tokens: 2_000,
+      service_tier: "priority",
+      image_output_tokens: 2_000,
+      billed_cost_usd: 0.24,
+    });
+  });
+
   it("a fully-failed chain → error final, null cost breakdown", () => {
     const attempts: ProviderAttempt[] = [
       row({ alias: "a", status: "error", error_class: "upstream_error" }),

@@ -90,6 +90,66 @@ export const CapabilitiesSchema = z.object({
   maxOutputTokens: z.number().int().nonnegative().nullable(),
 });
 
+const NullablePriceSchema = z.number().nonnegative().nullable();
+
+// A full-request rate card that becomes active once the request crosses an input
+// threshold. Providers such as OpenAI and Google price BOTH input and output at
+// the higher band when the prompt is over the boundary, so this cannot be modeled
+// as a marginal per-token surcharge. Tiers must be strictly ascending to keep
+// selection deterministic and config fail-closed.
+export const ContextPricingTierSchema = z
+  .strictObject({
+    minPromptTokens: z.number().int().positive(),
+    inputPerMTokUsd: z.number().nonnegative(),
+    outputPerMTokUsd: z.number().nonnegative(),
+    cacheReadPerMTokUsd: NullablePriceSchema.optional(),
+    cacheWritePerMTokUsd: NullablePriceSchema.optional(),
+    cacheWrite1hPerMTokUsd: NullablePriceSchema.optional(),
+    imageOutputPerMTokUsd: NullablePriceSchema.optional(),
+    audioInputPerMTokUsd: NullablePriceSchema.optional(),
+    audioCacheReadPerMTokUsd: NullablePriceSchema.optional(),
+  })
+  .strict();
+export type ContextPricingTier = z.infer<typeof ContextPricingTierSchema>;
+
+const ContextPricingTiersSchema = z.array(ContextPricingTierSchema).superRefine((tiers, ctx) => {
+  for (let index = 1; index < tiers.length; index += 1) {
+    const previous = tiers[index - 1];
+    const current = tiers[index];
+    if (
+      previous !== undefined &&
+      current !== undefined &&
+      current.minPromptTokens <= previous.minPromptTokens
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: [index, "minPromptTokens"],
+        message: "context pricing tiers must be strictly ascending",
+      });
+    }
+  }
+});
+
+// Alternative processing modes (for example OpenAI/xAI `priority` or `flex`).
+// The upstream-confirmed response tier selects one complete rate card. Some
+// providers do not publish a high-context price for a mode; maxPromptTokens makes
+// that boundary explicit so costing returns unknown instead of inventing a rate.
+export const ServicePricingTierSchema = z
+  .strictObject({
+    inputPerMTokUsd: z.number().nonnegative(),
+    outputPerMTokUsd: z.number().nonnegative(),
+    cacheReadPerMTokUsd: NullablePriceSchema.optional(),
+    cacheWritePerMTokUsd: NullablePriceSchema.optional(),
+    cacheWrite1hPerMTokUsd: NullablePriceSchema.optional(),
+    imageOutputPerMTokUsd: NullablePriceSchema.optional(),
+    audioInputPerMTokUsd: NullablePriceSchema.optional(),
+    audioCacheReadPerMTokUsd: NullablePriceSchema.optional(),
+    maxPromptTokens: z.number().int().nonnegative().optional(),
+    contextTiers: ContextPricingTiersSchema.optional(),
+  })
+  .strict();
+export type ServicePricingTier = z.infer<typeof ServicePricingTierSchema>;
+
 export const PricingSchema = z.object({
   inputPerMTokUsd: z.number().nonnegative().nullable(),
   outputPerMTokUsd: z.number().nonnegative().nullable(),
@@ -99,6 +159,23 @@ export const PricingSchema = z.object({
   // means "unpublished" and the consumer applies its own heuristic, NOT zero.
   cacheReadPerMTokUsd: z.number().nonnegative().nullable().default(null),
   cacheWritePerMTokUsd: z.number().nonnegative().nullable().default(null),
+  // Anthropic cache writes have two official TTL rates: 5m (the legacy field
+  // above) and 1h. Optional keeps old generated artifacts source-compatible.
+  cacheWrite1hPerMTokUsd: NullablePriceSchema.optional(),
+  // Image models can return text/thinking and image tokens in one response at
+  // different rates. outputPerMTokUsd prices non-image output; this prices IMAGE.
+  imageOutputPerMTokUsd: NullablePriceSchema.optional(),
+  // Gemini Flash-Lite prices AUDIO prompt/cache tokens differently from
+  // text/image/video. Optional rates fall back to the ordinary input/cache card.
+  audioInputPerMTokUsd: NullablePriceSchema.optional(),
+  audioCacheReadPerMTokUsd: NullablePriceSchema.optional(),
+  // Full-request long-context bands (not marginal bands).
+  contextTiers: ContextPricingTiersSchema.optional(),
+  serviceTiers: z.record(z.string().min(1), ServicePricingTierSchema).optional(),
+  // Response-confirmed inference geography multipliers (for example Anthropic's
+  // US-only data-residency premium). Kept on the model card so eligibility and
+  // rates remain config-as-code instead of model-name branches in the calculator.
+  inferenceGeoMultipliers: z.record(z.string().min(1), z.number().positive()).optional(),
 });
 
 export const CatalogSourceSchema = z.enum(["generated", "override"]);
@@ -147,6 +224,13 @@ export const PricingOverrideEntrySchema = z
     outputPerMTokUsd: z.number().nonnegative().nullable().optional(),
     cacheReadPerMTokUsd: z.number().nonnegative().nullable().optional(),
     cacheWritePerMTokUsd: z.number().nonnegative().nullable().optional(),
+    cacheWrite1hPerMTokUsd: NullablePriceSchema.optional(),
+    imageOutputPerMTokUsd: NullablePriceSchema.optional(),
+    audioInputPerMTokUsd: NullablePriceSchema.optional(),
+    audioCacheReadPerMTokUsd: NullablePriceSchema.optional(),
+    contextTiers: ContextPricingTiersSchema.optional(),
+    serviceTiers: z.record(z.string().min(1), ServicePricingTierSchema).optional(),
+    inferenceGeoMultipliers: z.record(z.string().min(1), z.number().positive()).optional(),
   })
   .strict();
 

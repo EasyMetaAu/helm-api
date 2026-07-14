@@ -1404,6 +1404,18 @@ export function anthropicToOpenAIResponse(
     typeof usage.cache_read_input_tokens === "number" ? usage.cache_read_input_tokens : 0;
   const cacheCreation =
     typeof usage.cache_creation_input_tokens === "number" ? usage.cache_creation_input_tokens : 0;
+  const cacheCreationDetails =
+    usage.cache_creation && typeof usage.cache_creation === "object"
+      ? (usage.cache_creation as Record<string, unknown>)
+      : undefined;
+  const cacheCreation5m =
+    typeof cacheCreationDetails?.ephemeral_5m_input_tokens === "number"
+      ? cacheCreationDetails.ephemeral_5m_input_tokens
+      : undefined;
+  const cacheCreation1h =
+    typeof cacheCreationDetails?.ephemeral_1h_input_tokens === "number"
+      ? cacheCreationDetails.ephemeral_1h_input_tokens
+      : undefined;
   const promptTokens = inTok + cacheRead + cacheCreation;
   const message: Record<string, unknown> = { role: "assistant", content: text || null };
   if (toolCalls.length) message.tool_calls = toolCalls;
@@ -1412,6 +1424,7 @@ export function anthropicToOpenAIResponse(
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
     model,
+    ...(typeof usage.speed === "string" ? { service_tier: usage.speed } : {}),
     choices: [
       {
         index: 0,
@@ -1423,11 +1436,18 @@ export function anthropicToOpenAIResponse(
       prompt_tokens: promptTokens,
       completion_tokens: outTok,
       total_tokens: promptTokens + outTok,
+      ...(typeof usage.inference_geo === "string" ? { inference_geo: usage.inference_geo } : {}),
       ...(cacheRead > 0 || cacheCreation > 0
         ? {
             prompt_tokens_details: {
               cached_tokens: cacheRead,
               ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
+              ...(cacheCreation5m !== undefined
+                ? { ephemeral_5m_input_tokens: cacheCreation5m }
+                : {}),
+              ...(cacheCreation1h !== undefined
+                ? { ephemeral_1h_input_tokens: cacheCreation1h }
+                : {}),
             },
           }
         : {}),
@@ -1819,7 +1839,16 @@ function openaiChunk(model: string, delta: Record<string, unknown>, finish: stri
 // OpenAI client (and the budget settle) depends on this frame being emitted.
 function openaiUsageChunk(
   model: string,
-  usage: { input: number; output: number; cacheRead: number; cacheCreation: number },
+  usage: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheCreation: number;
+    cacheCreation5m: number;
+    cacheCreation1h: number;
+    speed?: string;
+    inferenceGeo?: string;
+  },
 ): string {
   const promptTokens = usage.input + usage.cacheRead + usage.cacheCreation;
   const chunk = {
@@ -1827,16 +1856,24 @@ function openaiUsageChunk(
     object: "chat.completion.chunk",
     created: Math.floor(Date.now() / 1000),
     model,
+    ...(usage.speed !== undefined ? { service_tier: usage.speed } : {}),
     choices: [] as never[],
     usage: {
       prompt_tokens: promptTokens,
       completion_tokens: usage.output,
       total_tokens: promptTokens + usage.output,
+      ...(usage.inferenceGeo !== undefined ? { inference_geo: usage.inferenceGeo } : {}),
       ...(usage.cacheRead > 0 || usage.cacheCreation > 0
         ? {
             prompt_tokens_details: {
               cached_tokens: usage.cacheRead,
               ...(usage.cacheCreation > 0 ? { cache_creation_tokens: usage.cacheCreation } : {}),
+              ...(usage.cacheCreation5m > 0
+                ? { ephemeral_5m_input_tokens: usage.cacheCreation5m }
+                : {}),
+              ...(usage.cacheCreation1h > 0
+                ? { ephemeral_1h_input_tokens: usage.cacheCreation1h }
+                : {}),
             },
           }
         : {}),
@@ -1868,6 +1905,10 @@ export async function* translateAnthropicSSE(
   let usageOutput = 0;
   let usageCacheRead = 0;
   let usageCacheCreation = 0;
+  let usageCacheCreation5m = 0;
+  let usageCacheCreation1h = 0;
+  let usageSpeed: string | undefined;
+  let usageInferenceGeo: string | undefined;
   try {
     while (true) {
       let read: { done: boolean; value?: Uint8Array };
@@ -1898,11 +1939,21 @@ export async function* translateAnthropicSSE(
             string,
             unknown
           >;
+          if (typeof u.speed === "string") usageSpeed = u.speed;
+          if (typeof u.inference_geo === "string") usageInferenceGeo = u.inference_geo;
           if (typeof u.input_tokens === "number") usageInput = u.input_tokens;
           if (typeof u.cache_read_input_tokens === "number")
             usageCacheRead = u.cache_read_input_tokens;
           if (typeof u.cache_creation_input_tokens === "number")
             usageCacheCreation = u.cache_creation_input_tokens;
+          const creation =
+            u.cache_creation && typeof u.cache_creation === "object"
+              ? (u.cache_creation as Record<string, unknown>)
+              : undefined;
+          if (typeof creation?.ephemeral_5m_input_tokens === "number")
+            usageCacheCreation5m = creation.ephemeral_5m_input_tokens;
+          if (typeof creation?.ephemeral_1h_input_tokens === "number")
+            usageCacheCreation1h = creation.ephemeral_1h_input_tokens;
           yield openaiChunk(model, { role: "assistant", content: "" }, null);
         } else if (type === "content_block_start") {
           const block = (evt.content_block ?? {}) as Record<string, unknown>;
@@ -1947,11 +1998,27 @@ export async function* translateAnthropicSSE(
         } else if (type === "message_delta") {
           const d = (evt.delta ?? {}) as Record<string, unknown>;
           const u = (evt.usage ?? {}) as Record<string, unknown>;
+          if (typeof u.speed === "string") usageSpeed = u.speed;
+          if (typeof u.inference_geo === "string") usageInferenceGeo = u.inference_geo;
           if (typeof u.output_tokens === "number") usageOutput = u.output_tokens;
           if (typeof u.cache_read_input_tokens === "number")
             usageCacheRead = Math.max(usageCacheRead, u.cache_read_input_tokens);
           if (typeof u.cache_creation_input_tokens === "number")
             usageCacheCreation = Math.max(usageCacheCreation, u.cache_creation_input_tokens);
+          const creation =
+            u.cache_creation && typeof u.cache_creation === "object"
+              ? (u.cache_creation as Record<string, unknown>)
+              : undefined;
+          if (typeof creation?.ephemeral_5m_input_tokens === "number")
+            usageCacheCreation5m = Math.max(
+              usageCacheCreation5m,
+              creation.ephemeral_5m_input_tokens,
+            );
+          if (typeof creation?.ephemeral_1h_input_tokens === "number")
+            usageCacheCreation1h = Math.max(
+              usageCacheCreation1h,
+              creation.ephemeral_1h_input_tokens,
+            );
           if (typeof d.stop_reason === "string") {
             yield openaiChunk(model, {}, STOP_MAP[d.stop_reason] ?? "stop");
           }
@@ -1963,6 +2030,10 @@ export async function* translateAnthropicSSE(
             output: usageOutput,
             cacheRead: usageCacheRead,
             cacheCreation: usageCacheCreation,
+            cacheCreation5m: usageCacheCreation5m,
+            cacheCreation1h: usageCacheCreation1h,
+            ...(usageSpeed !== undefined ? { speed: usageSpeed } : {}),
+            ...(usageInferenceGeo !== undefined ? { inferenceGeo: usageInferenceGeo } : {}),
           });
           yield "data: [DONE]\n\n";
           // Terminal event: stop reading NOW. Otherwise the next read would block

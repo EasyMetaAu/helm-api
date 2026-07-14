@@ -62,6 +62,14 @@ function poisonedRecord(): DecisionRecord {
       completion_tokens: 50,
       cached_tokens: 0,
       cache_creation_tokens: 0,
+      service_tier: "SECRET_TIER",
+      inference_geo: "SECRET_GEO",
+      cache_creation_5m_tokens: 0,
+      cache_creation_1h_tokens: 0,
+      audio_prompt_tokens: 0,
+      cached_audio_prompt_tokens: 0,
+      image_output_tokens: 0,
+      billed_cost_usd: 0.01,
     },
     generation_ms: 800,
   };
@@ -76,6 +84,8 @@ const POISON = [
   "SECRET_WIRE_MODEL",
   "SECRET_PROVIDER_ID",
   "SECRET_ACCOUNT",
+  "SECRET_TIER",
+  "SECRET_GEO",
 ];
 
 describe("toPortalDecisionView", () => {

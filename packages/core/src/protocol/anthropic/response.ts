@@ -62,6 +62,8 @@ export const AnthropicUsageSchema = z.object({
   cache_creation_input_tokens: z.number().int().nonnegative().optional(),
   cache_creation: AnthropicCacheCreationSchema.optional(),
   output_tokens_details: AnthropicOutputTokensDetailsSchema.optional(),
+  speed: z.enum(["standard", "fast"]).optional(),
+  inference_geo: z.string().optional(),
 });
 export type AnthropicUsage = z.infer<typeof AnthropicUsageSchema>;
 
@@ -245,6 +247,7 @@ export function mapUsage(u: IRUsage): AnthropicUsage {
     ...(thinkingTokens !== undefined
       ? { output_tokens_details: { thinking_tokens: thinkingTokens } }
       : {}),
+    ...(u.inference_geo !== undefined ? { inference_geo: u.inference_geo } : {}),
   };
 }
 
@@ -413,7 +416,12 @@ export function transformResponseIn(ir: IRResponse): AnthropicMessagesResponse {
   const choice = ir.choices[0];
   const message = choice?.message ?? { role: "assistant" as const, content: null };
   const { stop_reason } = mapStopReason(choice?.finish_reason ?? "");
-  const usage = mapUsage(ir.usage ?? {});
+  const anthropicSpeed: "fast" | "standard" | undefined =
+    ir.service_tier === "fast" ? "fast" : ir.service_tier === "standard" ? "standard" : undefined;
+  const usage = {
+    ...mapUsage(ir.usage ?? {}),
+    ...(anthropicSpeed !== undefined ? { speed: anthropicSpeed } : {}),
+  };
   const toolNameMap = createAnthropicToolNameMap(
     (message.tool_calls ?? []).map((call) => call.function.name),
   );
@@ -500,6 +508,8 @@ const InboundUsageSchema = z
     cache_creation_input_tokens: z.number().int().nonnegative().optional(),
     cache_creation: AnthropicCacheCreationSchema.optional(),
     output_tokens_details: AnthropicOutputTokensDetailsSchema.optional(),
+    speed: z.string().optional(),
+    inference_geo: z.string().optional(),
   })
   .passthrough();
 
@@ -607,6 +617,7 @@ export function transformNativeResponseToIR(
     return sum > 0 ? sum : undefined;
   })();
   const thinkingTokens = u?.output_tokens_details?.thinking_tokens;
+  const cacheCreationDetails = u?.cache_creation;
   const usage: IRUsage | undefined =
     u !== undefined
       ? {
@@ -616,7 +627,24 @@ export function transformNativeResponseToIR(
             ? { cached_tokens: u.cache_read_input_tokens }
             : {}),
           ...(cacheCreation !== undefined ? { cache_creation_tokens: cacheCreation } : {}),
+          ...(cacheCreationDetails !== undefined
+            ? {
+                prompt_tokens_details: {
+                  ...(cacheCreationDetails.ephemeral_5m_input_tokens !== undefined
+                    ? {
+                        ephemeral_5m_input_tokens: cacheCreationDetails.ephemeral_5m_input_tokens,
+                      }
+                    : {}),
+                  ...(cacheCreationDetails.ephemeral_1h_input_tokens !== undefined
+                    ? {
+                        ephemeral_1h_input_tokens: cacheCreationDetails.ephemeral_1h_input_tokens,
+                      }
+                    : {}),
+                },
+              }
+            : {}),
           ...(thinkingTokens !== undefined ? { reasoning_tokens: thinkingTokens } : {}),
+          ...(u.inference_geo !== undefined ? { inference_geo: u.inference_geo } : {}),
         }
       : undefined;
 
@@ -624,6 +652,7 @@ export function transformNativeResponseToIR(
     id: res.id ?? `anthropic_${Date.now()}`,
     model: res.model ?? "anthropic",
     choices: [{ index: 0, message, finish_reason: finishReason }],
+    ...(u?.speed !== undefined ? { service_tier: u.speed } : {}),
     ...(usage !== undefined ? { usage } : {}),
     provider_raw: {
       ...(rawStop !== null ? { stop_reason: rawStop } : {}),
