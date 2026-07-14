@@ -152,7 +152,7 @@ CORE      packages/core · the routing brain (imports no web framework)
              ├─ gate        rate limit (off) · usage budget (off)        · fail-closed
              ├─ memory      inject remembered context (on by default)    · fail-open
              ├─ classify    L1 rules ─uncertain→ L2 eval (off) ─→ balanced · fail-open
-             ├─ resolve     alias shim · explicit model · first-match policy
+             ├─ resolve     exact lane/model · alias shim · first-match policy
              │                  └─▶ lane → caps (+ signals) → fallback chain
              ├─ execute     capability filter → circuit breaker → provider
              │                  └── on failure: advance to next model in the chain

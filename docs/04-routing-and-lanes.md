@@ -10,8 +10,10 @@ its ordered chain. The framework-agnostic orchestrator is `routeRequest`
 
 ```text
 image-output model             # exact image model → image lane, any key; suppressed while over-budget degrading
-model-alias shim               # fixed vendor id → lane / `auto`; cap-bounded; allow_custom_model keys only
-  > explicit model/lane        # concrete model/lane; skips classify + policy; allow_custom_model keys only
+  > exact lane name            # configured lane; full fallback chain; allow_custom_model keys only
+  > exact known model          # deployment-known model; single candidate; allow_custom_model keys only
+  > exact model-alias entry    # fixed vendor id → lane / `auto`; cap-bounded; allow_custom_model keys only
+  > model-alias wildcard       # most-specific matching glob; last-resort compatibility rewrite
   > classifier short-circuit   # decided_by 'default' | 'fallback' → straight to the default fallback lane (classified branch only)
   > server-side policy         # a policy pin (use_lane)
   > task-specific lane         # a lane named after the detected task_type
@@ -24,10 +26,10 @@ The **model-alias compatibility shim** and explicit model/lane passthrough are
 both **gated on `allow_custom_model`** (and suppressed while over-budget
 degrading). A key **without** `allow_custom_model` skips both — its `model` field
 is ignored and **every** request is classified (the `auto` path). For a
-custom-model key the shim runs first (priority 0; see
-[Model-alias compatibility shim](#model-alias-compatibility-shim) below), then
-explicit passthrough — a request naming a concrete model or lane skips
-classification and policy entirely and is executed directly.
+custom-model key, an exact configured lane or deployment-known model is
+authoritative and skips classification/policy. Only otherwise does the shim try
+an exact map entry and then the most-specific wildcard. This prevents a broad
+rule such as `claude-*` from capturing the exact `claude-opus` lane.
 
 Image-output models are the exception to the custom-model gate on the Gemini
 `generateContent` route: when the requested model is known to produce images,
@@ -68,10 +70,10 @@ and it never escapes policy/key caps.
 
 ### Model-alias compatibility shim
 
-For an `allow_custom_model` key, `plan()` runs a **priority-0** model-alias
-resolution step (route-request.ts steps 0 / 0a) ahead of explicit passthrough.
-Clients that pin a **fixed vendor model id** — Claude Code's `claude-opus-4-8`,
-or an SDK locked to `gpt-5.5` — know neither Helm's lanes nor its provider
+For an `allow_custom_model` key, `plan()` runs model-alias compatibility only
+after checking exact configured lanes and deployment-known models. Clients that
+pin a **fixed vendor model id** — Claude Code's `claude-opus-4-8`,
+or an SDK locked to `openai.gpt-5.6` — know neither Helm's lanes nor its provider
 aliases, so left alone they would get a `400 unknown model`. The shim rewrites
 that inbound `model` field onto a lane (or the `auto` sentinel) **before**
 routing, so a fixed-model client routes cleanly while Helm still only exposes the
@@ -80,12 +82,12 @@ key **without** `allow_custom_model` does not use the shim at all: its `model`
 field is ignored and the request is classified like `auto` (still no `400`).
 
 The map is [`config/model-aliases.yaml`](../config/model-aliases.yaml): a flat
-table of vendor model id → a lane name or `auto`. Keys are glob-matchable and
-**case-sensitive** — an exact key wins, otherwise the matching `*`-glob with the
-most literal characters wins (so `claude-opus-*` beats `claude-*` regardless of
-order; `*` absorbs any date/suffix). Targets are boot-validated to a configured
-lane or `auto` (fail-closed, principle 2); the file is optional — delete it for
-no rewrite.
+table of vendor model id → a lane name or `auto`. After exact configured names
+have had priority, map keys are **case-sensitive**: an exact map key wins;
+otherwise the matching `*`-glob with the most literal characters wins (so
+`claude-opus-*` beats `claude-*` regardless of order; `*` absorbs any
+date/suffix). Targets are boot-validated to a configured lane or `auto`
+(fail-closed, principle 2); the file is optional — delete it for no rewrite.
 
 The shim is **operator-authorized** (the operator owns the mapping) but is
 **gated on `allow_custom_model`** — honoring a pinned vendor id is a custom-model
@@ -96,8 +98,8 @@ capability:
    field, even a known vendor id, is **ignored** (never a 400) and the alias map
    is not consulted (see "Explicit client model" below — one rule covers explicit
    models, lanes, and alias-mapped ids).
-2. It runs **before** explicit-passthrough resolution (so a known vendor id maps
-   to a lane instead of 400ing as an unknown model), but it is **cap-bounded**,
+2. It runs only after exact lane/model resolution. An unknown fixed vendor id can
+   still map to a lane instead of 400ing, but the mapped lane is **cap-bounded**,
    not a bypass. Policy `allowed_lanes` and the key's own `allowed_lanes`
    whitelist both still clamp the resolved lane. The clamp is
    **silent** (the same `applyCaps` path classified routing uses), **not** the
@@ -132,7 +134,10 @@ For an `allow_custom_model` key the `model` field resolves in this order:
    registry ∪ live curated OAuth aliases ∪ `provider/`-prefixed aliases whose
    client is registered); an unknown name is rejected with `invalid_request`
    (400) instead of silently falling through to the default provider.
-3. Over-budget `degrade` (docs/06) suppresses BOTH forms of explicit passthrough
+3. **Compatibility map**: when neither exact form exists, an exact
+   `model-aliases.yaml` key is tried first, then the most-specific wildcard.
+   A mapped lane remains policy/key-cap bounded.
+4. Over-budget `degrade` (docs/06) suppresses all explicit and compatibility forms
    — the request is forced onto the degrade lane.
 
 Keys **without** `allow_custom_model` never let the `model` field steer the lane
@@ -255,22 +260,23 @@ quality/cost lanes by complexity (`simple → economy`, `medium → balanced`,
 
 ### Vendor-family lanes
 
-Beyond the 7 generic lanes above, `config/lanes.yaml` ships **9 vendor-family
+Beyond the 7 generic lanes above, `config/lanes.yaml` ships **13 vendor-family
 lanes** — the rewrite targets of the [model-alias compatibility
 shim](#model-alias-compatibility-shim):
 
 ```text
 claude-opus   claude-fable   claude-sonnet   claude-haiku
+gpt-5.6       gpt-5.6-sol    gpt-5.6-terra   gpt-5.6-luna
 gpt-5.5       gpt-5.4        gpt-5.4-mini
 gemini-pro    gemini-flash
 ```
 
-(18 lanes total when the two image-generation lanes below are included.) These
+(22 lanes total when the two image-generation lanes below are included.) These
 exist so a client that pins a fixed vendor id lands on that family's real model
 instead of the GPT-led `premium` lane. Each one
 **leads with the requested vendor's native/subscription alias** — the Claude
 lanes with the `anthropic/*` Claude OAuth pool, the GPT lanes with the
-`openai-codex/*` subscription, the Gemini lanes with the static `zenmux/*` key —
+`openai-codex/*` subscription, the Gemini lanes with native `zenmux-vertex/*` aliases —
 then **degrades into a generic quality lane** (e.g. `claude-opus → premium`,
 `gpt-5.4-mini → economy`). An unconnected subscription alias **fails OPEN** (skip
 to the next fallback), never a 5xx, so an unbound subscription just serves the

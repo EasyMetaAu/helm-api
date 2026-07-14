@@ -120,7 +120,7 @@ describe("checked-in config samples", () => {
     // GPT families route to their dedicated vendor-family lanes. The cheap mini must
     // NOT be swallowed by the broad `gpt-5*` -> premium catch-all (longest-literal
     // wins): a dated mini id still lands on the cheap gpt-5.4-mini lane.
-    expect(resolveModelAlias("gpt-5.6", aliases)).toBe("gpt-5.6-sol");
+    expect(resolveModelAlias("gpt-5.6", aliases)).toBe("gpt-5.6");
     expect(resolveModelAlias("gpt-5.6-sol", aliases)).toBe("gpt-5.6-sol");
     expect(resolveModelAlias("gpt-5.6-sol-20260710", aliases)).toBe("gpt-5.6-sol");
     expect(resolveModelAlias("gpt-5.6-terra", aliases)).toBe("gpt-5.6-terra");

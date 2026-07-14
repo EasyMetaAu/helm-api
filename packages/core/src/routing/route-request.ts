@@ -20,7 +20,7 @@ import { promoteRequestedModel } from "./promote-requested-model.js";
 // routeRequest — the SINGLE, framework-agnostic orchestrator for one request
 // (CLAUDE.md principle 1: NO web framework import here — Hono/SSE adaptation
 // lives only in apps/gateway). It wires the pipeline of docs/02:
-//   explicit-passthrough? → classify → policy → lane-resolver(+caps) → chain
+//   exact lane/model? → compatibility alias? → classify → policy → lane-resolver(+caps) → chain
 //   expansion → execute(capability filter + circuit breaker + fallback) →
 //   DecisionRecord → log.
 //
@@ -199,11 +199,11 @@ export interface RouteDeps {
    *  from the catalog; absent (headless core / tests) → no image pinning. */
   isImageModel?: (model: string) => boolean;
   /** Operator-configured virtual model-name map (docs/04 compatibility shim).
-   *  Rewrites an inbound VENDOR model id (e.g. Claude Code's "claude-opus-4-8",
-   *  which is neither a lane nor an internal alias) onto a LANE name or "auto"
-   *  BEFORE the allow_custom_model gate — so a fixed-model client routes without a
-   *  400 even on a default key. Targets are validated at boot (the gateway calls
-   *  validateModelAliasTargets) to be a known lane or "auto", fail-closed. Absent
+   *  After exact configured lanes and deployment-known models have had priority,
+   *  rewrites an inbound VENDOR model id (e.g. Claude Code's "claude-opus-4-8")
+   *  onto a LANE name or "auto" for an allow_custom_model key. Targets are validated
+   *  at boot (the gateway calls validateModelAliasTargets) to be a known lane or
+   *  "auto", fail-closed. Absent
    *  (headless core / tests) → no rewrite. See model-alias.resolveModelAlias for
    *  the exact/glob match order. */
   modelAliases?: ModelAliasMap;
@@ -580,6 +580,65 @@ function noPermittedModelsRejection(args: {
   };
 }
 
+function isExplicitRequestEligible(req: InternalRequest, opts: RouteOptions): boolean {
+  return (
+    opts.allowCustomModel === true &&
+    req.requested_model.length > 0 &&
+    req.requested_model !== "auto" &&
+    (opts.keyCaps?.degradeLane === undefined || opts.keyCaps.degradeLane === null)
+  );
+}
+
+function explicitLaneDecision(
+  req: InternalRequest,
+  deps: RouteDeps,
+  opts: RouteOptions,
+): PlanDecision | PlanRejection {
+  const lane = req.requested_model;
+  const allowed = opts.keyCaps?.allowedLanes;
+  if (allowed != null && allowed.length > 0 && !allowed.includes(lane)) {
+    return {
+      reject: makeHelmError({
+        error_class: "invalid_request",
+        message: `lane "${lane}" is not permitted for this key (allowed_lanes)`,
+        trace_id: req.request_id,
+      }),
+      selectedLane: lane,
+    };
+  }
+
+  const policy = { matched_policy_id: null, reason: "explicit lane passthrough" };
+  const chain = filterBlockedModels(expandChain(lane, deps.lanes), opts);
+  if (chain.length === 0) {
+    return noPermittedModelsRejection({
+      req,
+      selectedLane: lane,
+      classifier: passthroughClassifier(),
+      policy,
+      forcedReasoningEffort: null,
+      evalUsd: null,
+    });
+  }
+
+  return {
+    plan: { selected_lane: lane, candidate_chain: chain, explicit_model: null },
+    classifier: passthroughClassifier(),
+    policy,
+    forcedReasoningEffort: null,
+    evalUsd: null,
+  };
+}
+
+function explicitModelDecision(model: string): PlanDecision {
+  return {
+    plan: { selected_lane: model, candidate_chain: [model], explicit_model: model },
+    classifier: passthroughClassifier(),
+    policy: { matched_policy_id: null, reason: "explicit model passthrough" },
+    forcedReasoningEffort: null,
+    evalUsd: null,
+  };
+}
+
 // Compute the execution plan + the classifier/policy decision segments. Explicit
 // passthrough short-circuits classify/policy/resolver entirely (docs/04: highest
 // priority, gated by allow_custom_model).
@@ -631,14 +690,28 @@ async function plan(
     };
   }
 
-  // 0) Virtual model-alias resolution (docs/04 compatibility shim). An operator
-  //    map rewrites an inbound vendor model id (e.g. Claude Code's "claude-opus-4-8")
-  //    onto a LANE name or the "auto" sentinel so a fixed-model client routes
-  //    without a 400. Boot-validated to a lane or "auto".
+  // 0a) Exact configured names are authoritative. A concrete lane or deployment-known
+  //     model must never be swallowed by a broad compatibility glob such as
+  //     `claude-*` or `gpt-*`. Exact lanes keep their full fallback semantics and
+  //     loud allowed_lanes rejection; exact models remain single-candidate passthrough.
+  //     Both are suppressed while over-budget degrading, just like before.
+  const explicitEligible = isExplicitRequestEligible(req, opts);
+  if (explicitEligible && hasLane(deps.lanes, req.requested_model)) {
+    return explicitLaneDecision(req, deps, opts);
+  }
+  const exactModelKnown = explicitEligible ? deps.isKnownModel?.(req.requested_model) : undefined;
+  if (exactModelKnown === true) {
+    return explicitModelDecision(req.requested_model);
+  }
+
+  // 0b) Virtual model-alias resolution (docs/04 compatibility shim). Only after
+  //     exact lanes/models have had priority, an operator map rewrites an inbound
+  //     vendor model id (e.g. Claude Code's "claude-opus-4-8") onto a LANE name
+  //     or the "auto" sentinel. Boot-validated to a lane or "auto".
   const aliasTarget = resolveModelAlias(req.requested_model, deps.modelAliases);
   const aliasToAuto = aliasTarget === "auto";
 
-  // 0a) Alias -> LANE: a CAP-BOUNDED lane selection, GATED on allow_custom_model.
+  // 0c) Alias -> LANE: a CAP-BOUNDED lane selection, GATED on allow_custom_model.
   //     Honoring a pinned vendor id is a custom-model capability: a key WITHOUT
   //     allow_custom_model routes EVERYTHING through classification (auto) — its
   //     model field, even a known vendor id, is ignored (it falls through to Step 2;
@@ -702,9 +775,10 @@ async function plan(
     };
   }
 
-  // 1) Explicit passthrough — bypass the whole routing brain. The model field
-  //    may name a concrete MODEL (chain = [model]) or a LANE (chain = the lane's
-  //    expanded fallback chain, docs/04 "explicit model/lane").
+  // 1) Legacy/unchecked explicit MODEL passthrough. Exact lanes and deployment-known
+  //    models already returned before alias resolution. This remaining branch either
+  //    rejects a deployment-unknown model or preserves headless callers that do not
+  //    provide isKnownModel.
   //    `auto` is the canonical "let the router decide" sentinel and must NEVER be
   //    treated as an explicit model, even for an allow_custom_model key — otherwise
   //    it short-circuits classify/lane-resolve and gets sent upstream as the literal
@@ -716,62 +790,11 @@ async function plan(
   //    downgrade by naming an expensive explicit model OR lane — so suppress
   //    passthrough while degrading and fall through to the forced degrade lane
   //    below (docs/06).
-  if (
-    opts.allowCustomModel === true &&
-    !aliasToAuto &&
-    req.requested_model.length > 0 &&
-    req.requested_model !== "auto" &&
-    (opts.keyCaps?.degradeLane === undefined || opts.keyCaps.degradeLane === null)
-  ) {
+  if (explicitEligible && !aliasToAuto) {
     const model = req.requested_model;
-
-    // 1a) Explicit LANE — lanes shadow same-named model aliases. The lane runs
-    //     with full fallback semantics (expandChain), but must sit inside the
-    //     key's allowed_lanes whitelist: unlike classified routing (where
-    //     applyCaps silently clamps), an EXPLICIT ask for a forbidden lane is a
-    //     client error and is rejected loudly (no silent downgrade). An empty
-    //     allowedLanes array is inactive, mirroring applyCaps' activation rule.
-    if (Object.hasOwn(deps.lanes, model)) {
-      const allowed = opts.keyCaps?.allowedLanes;
-      if (allowed != null && allowed.length > 0 && !allowed.includes(model)) {
-        return {
-          reject: makeHelmError({
-            error_class: "invalid_request",
-            message: `lane "${model}" is not permitted for this key (allowed_lanes)`,
-            trace_id: req.request_id,
-          }),
-          selectedLane: model,
-        };
-      }
-      const policy = { matched_policy_id: null, reason: "explicit lane passthrough" };
-      const chain = filterBlockedModels(expandChain(model, deps.lanes), opts);
-      if (chain.length === 0) {
-        return noPermittedModelsRejection({
-          req,
-          selectedLane: model,
-          classifier: passthroughClassifier(),
-          policy,
-          forcedReasoningEffort: null,
-          evalUsd: null,
-        });
-      }
-      return {
-        plan: {
-          selected_lane: model,
-          candidate_chain: chain,
-          explicit_model: null,
-        },
-        classifier: passthroughClassifier(),
-        policy,
-        forcedReasoningEffort: null,
-        evalUsd: null,
-      };
-    }
-
-    // 1b) Explicit MODEL — strict validation when the deployment wired
-    //     isKnownModel: an unknown name is a client error (invalid_request),
-    //     NEVER a silent Phase-0 fall-through to the default provider.
-    if (deps.isKnownModel !== undefined && !deps.isKnownModel(model)) {
+    // Strict validation when the deployment wired isKnownModel: an unknown name
+    // is a client error (invalid_request), NEVER a silent Phase-0 fall-through.
+    if (deps.isKnownModel !== undefined) {
       return {
         reject: makeHelmError({
           error_class: "invalid_request",
@@ -781,13 +804,7 @@ async function plan(
         selectedLane: model,
       };
     }
-    return {
-      plan: { selected_lane: model, candidate_chain: [model], explicit_model: model },
-      classifier: passthroughClassifier(),
-      policy: { matched_policy_id: null, reason: "explicit model passthrough" },
-      forcedReasoningEffort: null,
-      evalUsd: null,
-    };
+    return explicitModelDecision(model);
   }
 
   // 2) Classify (fail-open) → policy → lane-resolver (+caps).
