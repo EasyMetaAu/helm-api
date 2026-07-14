@@ -506,7 +506,7 @@ describe('providers page', () => {
         startedAt: refreshedAt - 80,
         finishedAt: refreshedAt,
         lastSuccessAt: refreshedAt,
-        nextAllowedAt: refreshedAt + 60_000,
+        nextAllowedAt: refreshedAt + 90_000,
       },
     } satisfies OAuthOverview);
     renderPage();
@@ -515,7 +515,7 @@ describe('providers page', () => {
 
     await waitFor(() => expect(screen.getByText('99 req')).toBeInTheDocument());
     expect(screen.getByTestId('provider-refresh-status')).toHaveTextContent(
-      'Provider data refreshed',
+      'refresh available again in 1.5min',
     );
   });
 
@@ -869,7 +869,7 @@ describe('providers page', () => {
     streamAccountTest.mockImplementation(async function* () {
       yield { type: 'content', text: 'Hello' };
       yield { type: 'content', text: ' there' };
-      yield { type: 'done', durationMs: 12 };
+      yield { type: 'done', durationMs: 1200 };
     });
     renderPage();
     await fireEvent.click(
@@ -890,6 +890,7 @@ describe('providers page', () => {
       expect(within(dialog).getByTestId('test-response')).toHaveTextContent('Hello there'),
     );
     expect(within(dialog).getByText('Success')).toBeInTheDocument();
+    expect(within(dialog).getByText('Done in 1.2s')).toBeInTheDocument();
   });
 
   it('confirms and disconnects a stored account credential', async () => {

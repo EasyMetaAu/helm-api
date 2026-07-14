@@ -64,7 +64,7 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
         provider_model: 'claude-x',
         serving_account: { provider_id: 'anthropic', account: 'claude-team-a' },
         outcome: 'success',
-        latency_ms: 340,
+        latency_ms: 90_000,
         error_detail: null,
       },
       {
@@ -81,7 +81,14 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
     response_meta: { model_alias: 'claude-x' },
     error: null,
     cost_breakdown: { routing_usd: 0, eval_usd: 0, completion_usd: 0.01, total_usd: 0.01 },
-    usage: { input: 1200, output: 340, cached: 800, cacheCreation: 64, nonCached: 400, total: 1540 },
+    usage: {
+      input: 1200,
+      output: 340,
+      cached: 800,
+      cacheCreation: 64,
+      nonCached: 400,
+      total: 1540,
+    },
     tps: 200,
     generation_ms: 1700,
     ttfb_ms: 460,
@@ -112,7 +119,7 @@ describe('DecisionChain', () => {
     const evalSec = screen.getByTestId('chain-eval');
     // The eval model name + latency answer "which model evaluated, how long".
     expect(within(evalSec).getByText('gpt-4o-mini')).toBeInTheDocument();
-    expect(within(evalSec).getByText(/1234ms/)).toBeInTheDocument();
+    expect(within(evalSec).getByText(/1\.2s/)).toBeInTheDocument();
     // The eval verdict is restated here, attributed, so it is not mistaken for rules.
     const verdict = within(evalSec).getByTestId('eval-verdict');
     expect(verdict).toHaveTextContent('coding');
@@ -246,6 +253,7 @@ describe('DecisionChain', () => {
     expect(rows[0]).toHaveTextContent('120');
     expect(rows[1]).toHaveTextContent(/success/i);
     expect(rows[1]).toHaveTextContent('claude-team-a');
+    expect(rows[1]).toHaveTextContent('1.5min');
     expect(rows[2]).toHaveTextContent(/skipped/i);
     // Codes render as human labels; the raw code is preserved in the title tooltip.
     expect(rows[2]).toHaveTextContent('No compatible model');

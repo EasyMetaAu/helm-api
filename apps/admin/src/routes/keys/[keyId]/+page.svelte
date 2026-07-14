@@ -9,7 +9,14 @@
   import RangeFilter from '$lib/components/RangeFilter.svelte';
   import RequestsTable from '$lib/components/RequestsTable.svelte';
   import { formatTrendTick, trendAxisTicks, type TrendBucket } from '$lib/dashboard-chart.js';
-  import { durationParts, formatCount, formatTokens, formatTps, formatUsd } from '$lib/format.js';
+  import {
+    durationParts,
+    formatCount,
+    formatDurationMs,
+    formatTokens,
+    formatTps,
+    formatUsd,
+  } from '$lib/format.js';
   import {
     KEY_DETAIL_DEFAULT_RANGE,
     type KeyDetailFilters,
@@ -351,7 +358,7 @@
         {$t('Avg latency')}
       </div>
       <div class="mt-1 text-2xl font-semibold text-slate-900">
-        {stats.avgLatency === null ? '—' : `${stats.avgLatency}ms`}
+        {stats.avgLatency === null ? '—' : formatDurationMs(stats.avgLatency)}
       </div>
     </div>
     <div class="card">

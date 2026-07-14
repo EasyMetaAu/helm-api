@@ -116,6 +116,15 @@ describe('home dashboard loader', () => {
     expect(invalidateAll).toHaveBeenCalledTimes(1);
   });
 
+  it('formats average latency in seconds', () => {
+    const data = pageData();
+    data.stats.avgLatency = 6911;
+
+    render(HomePage, { data });
+
+    expect(screen.getByText('6.9s')).toBeInTheDocument();
+  });
+
   it('loads all-time stats with an explicit full-history window', async () => {
     const now = Date.UTC(2026, 5, 17, 12);
     vi.spyOn(Date, 'now').mockReturnValue(now);

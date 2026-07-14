@@ -1,6 +1,7 @@
 <script lang="ts">
   import { attemptCodeLabel } from '$lib/format/attempt-codes.js';
   import type { RequestDetail } from '$lib/api/requests.js';
+  import { formatDurationMs } from '$lib/format.js';
   import { t } from '$lib/i18n';
 
   // Visualises the recorded decision trail in order:
@@ -75,7 +76,9 @@
     }
   }
 
-  function accountTitle(account: RequestDetail['provider_attempts'][number]['serving_account']): string {
+  function accountTitle(
+    account: RequestDetail['provider_attempts'][number]['serving_account'],
+  ): string {
     return account ? `${account.provider_id}/${account.account}` : '';
   }
 </script>
@@ -163,7 +166,9 @@
               : $t('miss')}
         </span>
         {#if detail.eval_latency_ms !== null}
-          <span class="text-ink-muted">{$t('latency:')} {detail.eval_latency_ms}ms</span>
+          <span class="text-ink-muted"
+            >{$t('latency:')} {formatDurationMs(detail.eval_latency_ms)}</span
+          >
         {/if}
       </div>
       {#if cls.decided_by === 'eval'}
@@ -255,7 +260,7 @@
             <span class={outcomeBadge(a.outcome)} title={a.outcome}
               >{$t(attemptCodeLabel(a.outcome))}</span
             >
-            <span class="text-ink-muted">{a.latency_ms}ms</span>
+            <span class="text-ink-muted">{formatDurationMs(a.latency_ms)}</span>
             {#if a.error_class}<span class="text-red-600" title={a.error_class}
                 >{$t(attemptCodeLabel(a.error_class))}</span
               >{/if}

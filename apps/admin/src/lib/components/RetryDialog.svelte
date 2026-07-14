@@ -4,6 +4,7 @@
   import { base } from '$app/paths';
   import { replayRequest } from '$lib/api/requests.js';
   import Modal from '$lib/components/Modal.svelte';
+  import { formatDurationMs } from '$lib/format.js';
   import { t } from '$lib/i18n';
 
   // Retry dialog: shows the recorded request body in an EDITABLE textarea (e.g. to
@@ -137,7 +138,10 @@
       data-testid="retry-send"
       class="btn-primary"
       disabled={sending}
-      onclick={handleSend}>{sending ? $t('Sending… {s}s', { s: elapsed }) : $t('Send')}</button
+      onclick={handleSend}
+      >{sending
+        ? $t('Sending… {duration}', { duration: formatDurationMs(elapsed * 1000) })
+        : $t('Send')}</button
     >
   </div>
 </Modal>

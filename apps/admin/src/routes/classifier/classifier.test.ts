@@ -28,9 +28,9 @@ function config(overrides: Partial<ClassifierConfig> = {}): ClassifierConfig {
       model: 'deepseek/deepseek-v4-flash',
       temperature: 0,
       max_tokens: 256,
-      timeout_ms: 300,
+      timeout_ms: 6911,
       on_failure: 'balanced',
-      cache: { enabled: true, ttl_sec: 300 },
+      cache: { enabled: true, ttl_sec: 90 },
     },
     ...overrides,
   };
@@ -135,7 +135,8 @@ describe('classifier page', () => {
     const details = screen.getByTestId('eval-details');
     expect(within_text(details, 'deepseek/deepseek-v4-flash')).toBe(true);
     expect(within_text(details, 'balanced')).toBe(true);
-    expect(within_text(details, '300')).toBe(true);
+    expect(within_text(details, '6.9s')).toBe(true);
+    expect(within_text(details, 'ttl 1.5min')).toBe(true);
     // temperature is locked to 0 and surfaced.
     expect(within_text(details, '0')).toBe(true);
     // No editable controls in the read-only eval detail block.

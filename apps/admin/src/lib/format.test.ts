@@ -2,11 +2,30 @@ import { describe, expect, it } from 'vitest';
 import {
   durationParts,
   formatCount,
+  formatDurationMs,
   formatTimestamp,
   formatTokens,
   formatTps,
   formatUsd,
 } from './format.js';
+
+describe('formatDurationMs — compact duration', () => {
+  it('keeps sub-second durations in milliseconds', () => {
+    expect(formatDurationMs(0)).toBe('0ms');
+    expect(formatDurationMs(999)).toBe('999ms');
+  });
+
+  it('uses seconds from one second and trims trailing zeroes', () => {
+    expect(formatDurationMs(1000)).toBe('1s');
+    expect(formatDurationMs(6911)).toBe('6.9s');
+    expect(formatDurationMs(59_999)).toBe('60s');
+  });
+
+  it('uses minutes from one minute', () => {
+    expect(formatDurationMs(60_000)).toBe('1min');
+    expect(formatDurationMs(90_000)).toBe('1.5min');
+  });
+});
 
 describe('formatTokens — compact token counts for the dashboard', () => {
   it('renders not-measured (null/undefined/NaN) as an em dash', () => {

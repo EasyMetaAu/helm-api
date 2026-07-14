@@ -252,7 +252,7 @@
   "Disconnect": "Desconectar",
   "Disconnecting…": "Desconectando…",
   "Done": "Listo",
-  "Done in {ms} ms": "Listo en {ms} ms",
+  "Done in {duration}": "Listo en {duration}",
   "down": "caído",
   "drag to reorder policy": "arrastra para reordenar la política",
   "e.g. favorite number": "p. ej. número favorito",
@@ -760,7 +760,7 @@
   "Select a key…": "Selecciona una clave…",
   "Send": "Enviar",
   "Send a short message through this account and stream the reply.": "Envía un mensaje corto a través de esta cuenta y transmite la respuesta en streaming.",
-  "Sending… {s}s": "Enviando… {s}s",
+  "Sending… {duration}": "Enviando… {duration}",
   "Serialize user messages per subscription account": "Serializar mensajes de usuario por cuenta de suscripción",
   "Served model": "Modelo servido",
   "Server URL: paste the URL above (it must end in /mcp).": "URL del servidor: pega la URL anterior (debe terminar en /mcp).",
@@ -862,7 +862,7 @@
   "Time to first token": "Tiempo hasta el primer token",
   "timed out": "agotó el tiempo de espera",
   "Timed out": "Tiempo de espera agotado",
-  "Timeout (ms)": "Tiempo de espera (ms)",
+  "Timeout": "Tiempo de espera",
   "To": "Hasta",
   "Today": "Hoy",
   "tok": "tok",
@@ -993,5 +993,5 @@
   "Provider refresh failed: {error}": "Error al actualizar los proveedores: {error}",
   "Provider data refreshed": "Datos de proveedores actualizados",
   "Provider data refreshed at {time}": "Datos de proveedores actualizados a las {time}",
-  "refresh available again in {seconds}s": "se podrá actualizar de nuevo en {seconds}s"
+  "refresh available again in {duration}": "se podrá actualizar de nuevo en {duration}"
 }

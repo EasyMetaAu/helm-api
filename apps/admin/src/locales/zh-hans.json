@@ -252,7 +252,7 @@
   "Disconnect": "断开连接",
   "Disconnecting…": "正在断开连接…",
   "Done": "完成",
-  "Done in {ms} ms": "耗时 {ms} 毫秒",
+  "Done in {duration}": "耗时 {duration}",
   "down": "下行",
   "drag to reorder policy": "拖动以调整策略顺序",
   "e.g. favorite number": "例如：喜欢的数字",
@@ -760,7 +760,7 @@
   "Select a key…": "选择一个密钥…",
   "Send": "发送",
   "Send a short message through this account and stream the reply.": "通过该账号发送一条简短消息，并流式显示返回结果。",
-  "Sending… {s}s": "发送中… {s} 秒",
+  "Sending… {duration}": "发送中… {duration}",
   "Serialize user messages per subscription account": "按订阅账户串行处理用户消息",
   "Served model": "最终模型",
   "Server URL: paste the URL above (it must end in /mcp).": "服务器 URL：粘贴上面的地址（必须以 /mcp 结尾）。",
@@ -862,7 +862,7 @@
   "Time to first token": "首 Token 延迟",
   "timed out": "超时",
   "Timed out": "请求超时",
-  "Timeout (ms)": "超时（毫秒）",
+  "Timeout": "超时",
   "To": "结束",
   "Today": "今天",
   "tok": "tok",
@@ -993,5 +993,5 @@
   "Provider refresh failed: {error}": "提供商刷新失败：{error}",
   "Provider data refreshed": "提供商数据已刷新",
   "Provider data refreshed at {time}": "提供商数据已于 {time} 刷新",
-  "refresh available again in {seconds}s": "{seconds} 秒后可再次刷新"
+  "refresh available again in {duration}": "{duration} 后可再次刷新"
 }

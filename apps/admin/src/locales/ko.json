@@ -252,7 +252,7 @@
   "Disconnect": "연결 해제",
   "Disconnecting…": "연결 해제 중…",
   "Done": "완료",
-  "Done in {ms} ms": "{ms} ms 소요",
+  "Done in {duration}": "{duration} 소요",
   "down": "아래",
   "drag to reorder policy": "드래그하여 정책 순서 변경",
   "e.g. favorite number": "예: 좋아하는 숫자",
@@ -760,7 +760,7 @@
   "Select a key…": "키 선택…",
   "Send": "보내기",
   "Send a short message through this account and stream the reply.": "이 계정으로 짧은 메시지를 보내고 응답을 스트리밍합니다.",
-  "Sending… {s}s": "보내는 중… {s}초",
+  "Sending… {duration}": "보내는 중… {duration}",
   "Serialize user messages per subscription account": "구독 계정별로 사용자 메시지 직렬화",
   "Served model": "제공된 모델",
   "Server URL: paste the URL above (it must end in /mcp).": "서버 URL: 위의 URL을 붙여넣으세요(/mcp로 끝나야 합니다).",
@@ -862,7 +862,7 @@
   "Time to first token": "첫 토큰까지의 시간",
   "timed out": "시간 초과",
   "Timed out": "시간 초과",
-  "Timeout (ms)": "타임아웃 (ms)",
+  "Timeout": "타임아웃",
   "To": "종료",
   "Today": "오늘",
   "tok": "tok",
@@ -993,5 +993,5 @@
   "Provider refresh failed: {error}": "공급자 새로고침 실패: {error}",
   "Provider data refreshed": "공급자 데이터를 새로고침했습니다",
   "Provider data refreshed at {time}": "{time}에 공급자 데이터를 새로고침했습니다",
-  "refresh available again in {seconds}s": "{seconds}초 후 다시 새로고침할 수 있습니다"
+  "refresh available again in {duration}": "{duration} 후 다시 새로고침할 수 있습니다"
 }

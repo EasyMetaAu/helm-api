@@ -185,7 +185,7 @@ function pageData(
       ok: 40,
       errors: 2,
       successRate: 95,
-      avgLatency: 800,
+      avgLatency: 90_000,
       avgTps: 30,
       totalCost: 0.5,
       totalTokens: 1500,
@@ -211,6 +211,7 @@ describe('key detail page', () => {
     expect(screen.getByText(/^yes$/i)).toBeInTheDocument();
     // Headline request count from stats.
     expect(screen.getByText('42')).toBeInTheDocument();
+    expect(screen.getByText('1.5min')).toBeInTheDocument();
     // The scoped request row links to the shared request detail page, carrying THIS
     // key page as `from` so the detail's Back link returns here (not the global list).
     const link = screen.getByTestId('request-detail-link');

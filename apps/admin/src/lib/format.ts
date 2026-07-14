@@ -74,6 +74,19 @@ export function formatTokens(n: number | null | undefined): string {
 // to touch one signature.
 export const formatCount = formatTokens;
 
+// Compact durations for narrow UI surfaces. Preserve millisecond
+// precision below one second, then use one decimal at larger units so operators
+// can compare values quickly without scanning long raw millisecond numbers.
+export function formatDurationMs(ms: number): string {
+  const value = Math.max(0, ms);
+  if (value < 1000) return `${Math.round(value)}ms`;
+
+  const unit = value < 60_000 ? 's' : 'min';
+  const divisor = value < 60_000 ? 1000 : 60_000;
+  const scaled = (value / divisor).toFixed(1).replace(/\.0$/, '');
+  return `${scaled}${unit}`;
+}
+
 // True generation throughput (tokens/sec) for the dashboard "Avg TPS" card, the
 // request-list TPS column, and the detail card. The SINGLE source of truth for
 // rendering a TPS value — never re-divides tokens by time here, only formats the
