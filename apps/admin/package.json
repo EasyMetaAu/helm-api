@@ -15,6 +15,9 @@
     "i18n:translate": "./tools/translate-all.sh",
     "i18n:sync": "pnpm i18n:extract && pnpm i18n:update && pnpm i18n:translate"
   },
+  "dependencies": {
+    "@helm/shared": "workspace:*"
+  },
   "devDependencies": {
     "@mylukin/easy-i18n-js": "^0.1.2",
     "@sveltejs/adapter-static": "^3.0.10",

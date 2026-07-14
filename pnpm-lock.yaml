@@ -34,6 +34,10 @@ importers:
         version: 3.2.4(@types/node@22.19.19)(jiti@2.7.0)(jsdom@25.0.1)(lightningcss@1.32.0)(tsx@4.22.3)(yaml@2.9.0)
 
   apps/admin:
+    dependencies:
+      '@helm/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
     devDependencies:
       '@mylukin/easy-i18n-js':
         specifier: ^0.1.2
