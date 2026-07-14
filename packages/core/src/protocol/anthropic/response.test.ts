@@ -342,6 +342,17 @@ describe("transformResponseIn", () => {
 
 // —— P4: usage cache_creation breakdown + thinking_tokens ——————————————————————
 describe("transformResponseIn — P4 usage detail", () => {
+  it("maps an IR service tier to Anthropic usage.speed", () => {
+    const out = transformResponseIn(
+      makeIR({
+        service_tier: "fast",
+        usage: { prompt_tokens: 10, completion_tokens: 5, inference_geo: "us" },
+      }),
+    );
+    expect(out.usage.speed).toBe("fast");
+    expect(out.usage.inference_geo).toBe("us");
+  });
+
   it("maps IR.cache_creation_tokens -> Anthropic cache_creation_input_tokens", () => {
     const out = transformResponseIn(
       makeIR({
@@ -389,6 +400,18 @@ describe("transformResponseIn — P4 usage detail", () => {
 
 // —— P4 inbound: native Anthropic response -> IR usage / stop_reason parity ——————
 describe("transformNativeResponseToIR — P4 usage + stop_reason", () => {
+  it("maps Anthropic usage.speed to the IR service tier", () => {
+    const ir = transformNativeResponseToIR({
+      id: "m",
+      model: "claude-opus-4-8",
+      content: [{ type: "text", text: "ok" }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 5, output_tokens: 2, speed: "fast", inference_geo: "us" },
+    });
+    expect(ir.service_tier).toBe("fast");
+    expect(ir.usage?.inference_geo).toBe("us");
+  });
+
   it("maps cache_creation_input_tokens -> IR.cache_creation_tokens", () => {
     const ir = transformNativeResponseToIR({
       id: "m",
@@ -425,6 +448,10 @@ describe("transformNativeResponseToIR — P4 usage + stop_reason", () => {
     });
     // The aggregate ephemeral write count surfaces as cache_creation_tokens.
     expect(ir.usage?.cache_creation_tokens).toBe(64);
+    expect(ir.usage?.prompt_tokens_details).toMatchObject({
+      ephemeral_5m_input_tokens: 40,
+      ephemeral_1h_input_tokens: 24,
+    });
   });
 
   it("maps output_tokens_details.thinking_tokens -> IR.reasoning_tokens", () => {

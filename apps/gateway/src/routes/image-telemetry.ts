@@ -1,4 +1,5 @@
 import type { DecisionRecord, ProviderAttempt } from "@helm/shared";
+import { tokenBreakdownFromUsage } from "./payload-capture.js";
 
 // Shared telemetry helpers for the model-pinned image-generation routes
 // (POST /v1/images/generations and POST /v1beta/interactions). Both bypass the
@@ -48,8 +49,8 @@ export function buildImageDecision(p: {
   finalErrorClass: string | null; // the terminal error class (error case)
   usage: Record<string, unknown> | null; // the SERVED upstream body's usage
 }): DecisionRecord {
-  const promptTokens = numField(p.usage, "input_tokens", "prompt_tokens");
-  const completionTokens = numField(p.usage, "output_tokens", "completion_tokens");
+  const usage = p.usage === null ? null : tokenBreakdownFromUsage(p.usage);
+  const hasUsageEvidence = usage !== null && Object.values(usage).some((value) => value !== null);
   const attempted = p.attempts.filter((a) => !a.skipped);
   const costed = p.attempts.filter((a) => a.cost_usd !== null);
   const completionUsd =
@@ -85,15 +86,7 @@ export function buildImageDecision(p: {
         ? { eval_usd: null, completion_usd: completionUsd, total_usd: completionUsd }
         : { eval_usd: null, completion_usd: null, total_usd: null },
     memory: null,
-    usage:
-      promptTokens === null && completionTokens === null
-        ? null
-        : {
-            prompt_tokens: promptTokens,
-            completion_tokens: completionTokens,
-            cached_tokens: null,
-            cache_creation_tokens: null,
-          },
+    usage: hasUsageEvidence ? usage : null,
     generation_ms: null,
     serving_account: null,
   };

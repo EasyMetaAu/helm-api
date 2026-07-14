@@ -82,7 +82,27 @@ const drivers: Driver[] = [
   },
 ];
 
-function decision(requestId: string, overrides: Partial<DecisionRecord> = {}): DecisionRecord {
+const unreportedUsageDimensions = {
+  prompt_tokens: null,
+  completion_tokens: null,
+  cached_tokens: null,
+  cache_creation_tokens: null,
+  service_tier: null,
+  inference_geo: null,
+  cache_creation_5m_tokens: null,
+  cache_creation_1h_tokens: null,
+  audio_prompt_tokens: null,
+  cached_audio_prompt_tokens: null,
+  image_output_tokens: null,
+  billed_cost_usd: null,
+} as const;
+
+type DecisionOverrides = Omit<Partial<DecisionRecord>, "usage"> & {
+  usage?: Partial<NonNullable<DecisionRecord["usage"]>> | null;
+};
+
+function decision(requestId: string, overrides: DecisionOverrides = {}): DecisionRecord {
+  const { usage, ...rest } = overrides;
   return {
     request_id: requestId,
     trace_id: requestId,
@@ -133,7 +153,18 @@ function decision(requestId: string, overrides: Partial<DecisionRecord> = {}): D
     usage: null,
     generation_ms: null,
     serving_account: null,
-    ...overrides,
+    ...rest,
+    ...(usage !== undefined
+      ? {
+          usage:
+            usage === null
+              ? null
+              : {
+                  ...unreportedUsageDimensions,
+                  ...usage,
+                },
+        }
+      : {}),
   };
 }
 
@@ -734,6 +765,42 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(claude?.costUsd).toBeCloseTo(0.004, 10); // d0c only
     });
 
+    it("denormalizes the full request cost including Layer-2 eval spend", async () => {
+      ctx = await make();
+      const at = 12_345;
+      await ctx.stores.telemetry.insert({
+        decision: decision("eval-cost", {
+          cost_breakdown: { eval_usd: 0.001, completion_usd: 0.004, total_usd: 0.005 },
+        }),
+        apiKeyId: "k1",
+        createdAt: new Date(at),
+      });
+
+      const agg = await ctx.stores.telemetry.aggregate(0, at + 1, "hour");
+      expect(agg.totals.totalCostUsd).toBeCloseTo(0.005, 12);
+      expect(agg.series[0]?.costUsd).toBeCloseTo(0.005, 12);
+      expect(agg.byModel[0]?.costUsd).toBeCloseTo(0.005, 12);
+    });
+
+    it("preserves legacy attempt-cost aggregation when cost_breakdown is absent", async () => {
+      ctx = await make();
+      const at = 12_346;
+      const { cost_breakdown: _missingLegacyField, ...legacyDecision } = decision("legacy-cost");
+      await ctx.stores.telemetry.insert({
+        // Some operator fixtures and pre-default callers pass an unparsed legacy
+        // record. The store must retain the old attempt sum for that shape while
+        // preferring the canonical eval+completion total on current records.
+        decision: legacyDecision as DecisionRecord,
+        apiKeyId: "k1",
+        createdAt: new Date(at),
+      });
+
+      const agg = await ctx.stores.telemetry.aggregate(0, at + 1, "hour");
+      expect(agg.totals.totalCostUsd).toBeCloseTo(0.004, 12);
+      expect(agg.series[0]?.costUsd).toBeCloseTo(0.004, 12);
+      expect(agg.byModel[0]?.costUsd).toBeCloseTo(0.004, 12);
+    });
+
     // True-TPS dashboard average: an aggregate ratio Σcompletion / Σgeneration_ms ×
     // 1000, NOT a mean of per-request rates (which tiny requests would skew). The
     // numerator and denominator count the SAME rows — only streaming rows with a
@@ -944,6 +1011,11 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
             status,
             error_reason: status === "error" ? "upstream_error" : null,
           },
+          cost_breakdown: {
+            eval_usd: null,
+            completion_usd: cost,
+            total_usd: cost,
+          },
         });
       // k1: two rows (one ok, one error) inside [1000, 4000).
       await ctx.stores.telemetry.insert({
@@ -1006,6 +1078,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
               error_detail: null,
             },
           ],
+          cost_breakdown: { eval_usd: null, completion_usd: null, total_usd: null },
         }),
         apiKeyId: "kx",
         createdAt: new Date(1000),

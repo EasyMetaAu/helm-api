@@ -20,6 +20,7 @@ import {
   runImageChain,
 } from "./image-chain.js";
 import { buildImageDecision, numField } from "./image-telemetry.js";
+import { geminiImageUsageBody } from "./image-usage.js";
 import type { MessagesIdentity } from "./messages.js";
 import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-capture.js";
 
@@ -89,19 +90,11 @@ function mapGeminiToImages(native: Record<string, unknown>): Record<string, unkn
       if (inline && typeof inline.data === "string") data.push({ b64_json: inline.data });
     }
   }
-  const um = (native.usageMetadata ?? {}) as Record<string, unknown>;
-  const inputTokens = typeof um.promptTokenCount === "number" ? um.promptTokenCount : undefined;
-  const outputTokens =
-    typeof um.candidatesTokenCount === "number" ? um.candidatesTokenCount : undefined;
+  const usageBody = geminiImageUsageBody((native.usageMetadata ?? {}) as Record<string, unknown>);
   return {
     created: 0,
     data,
-    usage: {
-      ...(inputTokens !== undefined ? { input_tokens: inputTokens } : {}),
-      ...(outputTokens !== undefined
-        ? { output_tokens: outputTokens, output_tokens_details: { image_tokens: outputTokens } }
-        : {}),
-    },
+    usage: usageBody.usage,
   };
 }
 

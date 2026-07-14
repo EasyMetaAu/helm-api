@@ -62,6 +62,35 @@ describe("effectiveCompactionPrices — per-field heuristics for unpublished pri
     });
   });
 
+  it("selects the full-request long-context card from the active thread size", () => {
+    const p = effectiveCompactionPrices(
+      {
+        ...CLAUDE_PRICED,
+        modelKey: "openai/gpt-5.6-sol",
+        inputPerMtok: 5,
+        outputPerMtok: 30,
+        cacheReadPerMtok: 0.5,
+        cacheWritePerMtok: 6.25,
+        contextTiers: [
+          {
+            minPromptTokens: 272_001,
+            inputPerMTokUsd: 10,
+            outputPerMTokUsd: 45,
+            cacheReadPerMTokUsd: 1,
+            cacheWritePerMTokUsd: 12.5,
+          },
+        ],
+      },
+      300_000,
+    );
+    expect(p).toMatchObject({
+      inputPerMtok: 10,
+      outputPerMtok: 45,
+      cacheReadPerMtok: 1,
+      cacheWritePerMtok: 12.5,
+    });
+  });
+
   it("derives missing cache/output prices from input (read=0.1×, write=free, output=5×)", () => {
     const p = effectiveCompactionPrices({
       ...UNPRICED,

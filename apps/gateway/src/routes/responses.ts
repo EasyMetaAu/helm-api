@@ -37,6 +37,7 @@ import {
   type RecordServedDeps,
   recordServed,
   type StreamUsage,
+  tokenBreakdownFromUsage,
   tokensFromUsage,
   usageFromResponsesResponse,
 } from "./payload-capture.js";
@@ -561,7 +562,6 @@ function compactDecision(args: {
   costUsd: number | null;
 }): DecisionRecord {
   const usage = compactUsageFromResponse(args.body);
-  const inputDetails = usage?.prompt_tokens_details ?? usage?.input_tokens_details;
   const ok = args.error === null;
   const upstreamStatus = args.error instanceof UpstreamError ? args.error.upstreamStatus : null;
   const errorClass =
@@ -653,19 +653,7 @@ function compactDecision(args: {
       total_usd: ok ? args.costUsd : null,
     },
     memory: null,
-    usage:
-      usage === null
-        ? null
-        : {
-            prompt_tokens: usage.prompt_tokens ?? usage.input_tokens ?? null,
-            completion_tokens: usage.completion_tokens ?? usage.output_tokens ?? null,
-            cached_tokens: inputDetails?.cached_tokens ?? null,
-            cache_creation_tokens:
-              inputDetails?.cache_creation_tokens ??
-              inputDetails?.cache_creation_input_tokens ??
-              inputDetails?.cache_write_tokens ??
-              null,
-          },
+    usage: usage === null ? null : tokenBreakdownFromUsage(usage),
     generation_ms: null,
   };
 }

@@ -164,15 +164,24 @@ export interface EffectiveCompactionPrices {
 
 export function effectiveCompactionPrices(
   pricing: ResolvedCompactionPricing,
+  promptTokens = 0,
 ): EffectiveCompactionPrices {
-  const input = pricing.inputPerMtok;
+  const contextTier = pricing.contextTiers
+    ?.filter((tier) => promptTokens >= tier.minPromptTokens)
+    .at(-1);
+  const input = contextTier?.inputPerMTokUsd ?? pricing.inputPerMtok;
   return {
     inputPerMtok: input,
     outputPerMtok:
-      pricing.outputPerMtok ?? (input !== null ? input * AUTO_PRIORS.outputRatio : null),
+      contextTier?.outputPerMTokUsd ??
+      pricing.outputPerMtok ??
+      (input !== null ? input * AUTO_PRIORS.outputRatio : null),
     cacheReadPerMtok:
-      pricing.cacheReadPerMtok ?? (input !== null ? input * AUTO_PRIORS.cacheReadRatio : null),
-    cacheWritePerMtok: pricing.cacheWritePerMtok ?? (input !== null ? 0 : null),
+      contextTier?.cacheReadPerMTokUsd ??
+      pricing.cacheReadPerMtok ??
+      (input !== null ? input * AUTO_PRIORS.cacheReadRatio : null),
+    cacheWritePerMtok:
+      contextTier?.cacheWritePerMTokUsd ?? pricing.cacheWritePerMtok ?? (input !== null ? 0 : null),
     maxContextTokens: pricing.maxContextTokens ?? AUTO_PRIORS.fallbackMaxContextTokens,
   };
 }
@@ -253,7 +262,7 @@ export function chooseAutoCompaction(
   const n = segment.length;
   if (n === 0) return noop("nothing_to_compact", 0);
 
-  const prices = effectiveCompactionPrices(inputs.pricing);
+  const prices = effectiveCompactionPrices(inputs.pricing, inputs.threadTotalTokens);
   const retention = clamp(
     inputs.measuredRetention ?? AUTO_PRIORS.retentionPrior,
     AUTO_PRIORS.retentionFloor,

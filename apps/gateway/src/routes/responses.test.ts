@@ -685,7 +685,20 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       object: "response.compaction",
       model: "gpt-5.6-sol",
       output: [],
-      usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 },
+      service_tier: "priority",
+      usage: {
+        input_tokens: 12,
+        output_tokens: 3,
+        total_tokens: 15,
+        cost_usd: 0.0042,
+        input_tokens_details: {
+          cached_tokens: 2,
+          ephemeral_5m_input_tokens: 1,
+          audio_tokens: 4,
+          cached_audio_tokens: 1,
+        },
+        output_tokens_details: { image_tokens: 2 },
+      },
     });
     const { deps } = makeDeps({ lifecycle: { compact }, record });
     const app = buildApp(deps);
@@ -705,7 +718,16 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       decision: {
         protocol: string;
         final: { status: string; provider_model: string };
-        usage: { prompt_tokens: number; completion_tokens: number };
+        usage: {
+          prompt_tokens: number;
+          completion_tokens: number;
+          service_tier: string;
+          cache_creation_5m_tokens: number;
+          audio_prompt_tokens: number;
+          cached_audio_prompt_tokens: number;
+          image_output_tokens: number;
+          billed_cost_usd: number;
+        };
       };
     };
     expect(telemetry.apiKeyId).toBe("k1");
@@ -717,6 +739,12 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(telemetry.decision.usage).toMatchObject({
       prompt_tokens: 12,
       completion_tokens: 3,
+      service_tier: "priority",
+      cache_creation_5m_tokens: 1,
+      audio_prompt_tokens: 4,
+      cached_audio_prompt_tokens: 1,
+      image_output_tokens: 2,
+      billed_cost_usd: 0.0042,
     });
     expect(insertPayload.mock.calls[0]?.[0]).toMatchObject({
       requestJson: rawRequest,

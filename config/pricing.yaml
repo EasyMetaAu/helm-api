@@ -15,62 +15,228 @@
 # SUBSCRIPTION / AGGREGATOR MODEL PRICING (drop-openai-crs-relay 2026-06-03).
 # Keyed by the routing ALIAS (== catalog modelKey), USD per 1M tokens. Lives in
 # this manual layer, not the generated catalog (see capabilities.yaml header).
-# Cost telemetry only — never drives selection. (deepseek numbers carried over
-# from the prior relay entries; verify against official DeepSeek pricing.)
+# Cost telemetry only — never drives selection. DeepSeek rates were verified
+# against the official API price card on 2026-07-14.
 # SuperGrok is flat-fee and has no per-token subscription bill. Per the operator's
 # decision, Grok 4.5 uses xAI's public API rates as an API-equivalent estimate for
-# telemetry AND API-key budget settlement. These are the <=200K-token rates; the
-# current flat catalog cannot represent xAI's >200K tier ($4/$1/$12), so requests
-# above 200K are underestimated by 50% until tiered pricing is implemented.
+# telemetry AND API-key budget settlement. xAI currently publishes one flat rate
+# across Grok 4.5's full 500K context window (verified 2026-07-14).
 xai/grok-4.5:
   inputPerMTokUsd: 2.0
   outputPerMTokUsd: 6.0
   cacheReadPerMTokUsd: 0.5
+  serviceTiers:
+    priority:
+      inputPerMTokUsd: 4.0
+      outputPerMTokUsd: 12.0
+      cacheReadPerMTokUsd: 1.0
 # Composer has no verified public xAI price and therefore remains cost_usd=null.
+xai/grok-composer-2.5-fast:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+  cacheReadPerMTokUsd: null
+  cacheWritePerMTokUsd: null
+# Codex auto-review is a dynamic internal route with no published fixed API rate.
+openai-codex/codex-auto-review:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+  cacheReadPerMTokUsd: null
+  cacheWritePerMTokUsd: null
 openai-codex/gpt-5.6:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0
   cacheReadPerMTokUsd: 0.5
   cacheWritePerMTokUsd: 6.25
+  contextTiers:
+    - minPromptTokens: 272001
+      inputPerMTokUsd: 10.0
+      outputPerMTokUsd: 45.0
+      cacheReadPerMTokUsd: 1.0
+      cacheWritePerMTokUsd: 12.5
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 2.5
+      outputPerMTokUsd: 15.0
+      cacheReadPerMTokUsd: 0.25
+      cacheWritePerMTokUsd: 3.125
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 5.0
+          outputPerMTokUsd: 22.5
+          cacheReadPerMTokUsd: 0.5
+          cacheWritePerMTokUsd: 6.25
+    priority:
+      inputPerMTokUsd: 10.0
+      outputPerMTokUsd: 60.0
+      cacheReadPerMTokUsd: 1.0
+      cacheWritePerMTokUsd: 12.5
+      maxPromptTokens: 272000
 openai-codex/gpt-5.6-sol:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0
   cacheReadPerMTokUsd: 0.5
   cacheWritePerMTokUsd: 6.25
+  contextTiers:
+    - minPromptTokens: 272001
+      inputPerMTokUsd: 10.0
+      outputPerMTokUsd: 45.0
+      cacheReadPerMTokUsd: 1.0
+      cacheWritePerMTokUsd: 12.5
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 2.5
+      outputPerMTokUsd: 15.0
+      cacheReadPerMTokUsd: 0.25
+      cacheWritePerMTokUsd: 3.125
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 5.0
+          outputPerMTokUsd: 22.5
+          cacheReadPerMTokUsd: 0.5
+          cacheWritePerMTokUsd: 6.25
+    priority:
+      inputPerMTokUsd: 10.0
+      outputPerMTokUsd: 60.0
+      cacheReadPerMTokUsd: 1.0
+      cacheWritePerMTokUsd: 12.5
+      maxPromptTokens: 272000
 openai-codex/gpt-5.6-terra:
   inputPerMTokUsd: 2.5
   outputPerMTokUsd: 15.0
   cacheReadPerMTokUsd: 0.25
   cacheWritePerMTokUsd: 3.125
+  contextTiers:
+    - minPromptTokens: 272001
+      inputPerMTokUsd: 5.0
+      outputPerMTokUsd: 22.5
+      cacheReadPerMTokUsd: 0.5
+      cacheWritePerMTokUsd: 6.25
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 1.25
+      outputPerMTokUsd: 7.5
+      cacheReadPerMTokUsd: 0.125
+      cacheWritePerMTokUsd: 1.5625
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 2.5
+          outputPerMTokUsd: 11.25
+          cacheReadPerMTokUsd: 0.25
+          cacheWritePerMTokUsd: 3.125
+    priority:
+      inputPerMTokUsd: 5.0
+      outputPerMTokUsd: 30.0
+      cacheReadPerMTokUsd: 0.5
+      cacheWritePerMTokUsd: 6.25
+      maxPromptTokens: 272000
 openai-codex/gpt-5.6-luna:
   inputPerMTokUsd: 1.0
   outputPerMTokUsd: 6.0
   cacheReadPerMTokUsd: 0.1
   cacheWritePerMTokUsd: 1.25
+  contextTiers:
+    - minPromptTokens: 272001
+      inputPerMTokUsd: 2.0
+      outputPerMTokUsd: 9.0
+      cacheReadPerMTokUsd: 0.2
+      cacheWritePerMTokUsd: 2.5
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 0.5
+      outputPerMTokUsd: 3.0
+      cacheReadPerMTokUsd: 0.05
+      cacheWritePerMTokUsd: 0.625
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 1.0
+          outputPerMTokUsd: 4.5
+          cacheReadPerMTokUsd: 0.1
+          cacheWritePerMTokUsd: 1.25
+    priority:
+      inputPerMTokUsd: 2.0
+      outputPerMTokUsd: 12.0
+      cacheReadPerMTokUsd: 0.2
+      cacheWritePerMTokUsd: 2.5
+      maxPromptTokens: 272000
 openai-codex/gpt-5.5:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0
+  cacheReadPerMTokUsd: 0.5
+  contextTiers:
+    - minPromptTokens: 272001
+      inputPerMTokUsd: 10.0
+      outputPerMTokUsd: 45.0
+      cacheReadPerMTokUsd: 1.0
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 2.5
+      outputPerMTokUsd: 15.0
+      cacheReadPerMTokUsd: 0.25
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 5.0
+          outputPerMTokUsd: 22.5
+          cacheReadPerMTokUsd: 0.5
+    priority:
+      inputPerMTokUsd: 12.5
+      outputPerMTokUsd: 75.0
+      cacheReadPerMTokUsd: 1.25
+      maxPromptTokens: 272000
 openai-codex/gpt-5.4:
   inputPerMTokUsd: 2.5
   outputPerMTokUsd: 15.0
+  cacheReadPerMTokUsd: 0.25
+  contextTiers:
+    - minPromptTokens: 272001
+      inputPerMTokUsd: 5.0
+      outputPerMTokUsd: 22.5
+      cacheReadPerMTokUsd: 0.5
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 1.25
+      outputPerMTokUsd: 7.5
+      cacheReadPerMTokUsd: 0.13
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 2.5
+          outputPerMTokUsd: 11.25
+          cacheReadPerMTokUsd: 0.25
+    priority:
+      inputPerMTokUsd: 5.0
+      outputPerMTokUsd: 30.0
+      cacheReadPerMTokUsd: 0.5
+      maxPromptTokens: 272000
 openai-codex/gpt-5.4-mini:
   inputPerMTokUsd: 0.75
   outputPerMTokUsd: 4.5
+  cacheReadPerMTokUsd: 0.075
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 0.375
+      outputPerMTokUsd: 2.25
+      cacheReadPerMTokUsd: 0.0375
+    priority:
+      inputPerMTokUsd: 1.5
+      outputPerMTokUsd: 9.0
+      cacheReadPerMTokUsd: 0.15
 deepseek/deepseek-v4-pro:
   inputPerMTokUsd: 0.435
   outputPerMTokUsd: 0.87
+  cacheReadPerMTokUsd: 0.003625
 deepseek/deepseek-v4-flash:
-  inputPerMTokUsd: 0.1
-  outputPerMTokUsd: 0.2
-# OpenRouter-hosted DeepSeek mirrors + new zenmux fallbacks (lanes f0d0cc6).
-# Numbers from https://openrouter.ai/api/v1/models (2026-06-04); zenmux entries
-# use the OpenRouter list price as an approximation — verify against ZenMux.
+  inputPerMTokUsd: 0.14
+  outputPerMTokUsd: 0.28
+  cacheReadPerMTokUsd: 0.0028
+# OpenRouter-hosted DeepSeek mirrors use official DeepSeek API-equivalent rates.
+# When the relay returns usage.cost, that real upstream-billed value still wins.
 openrouter/deepseek-v4-pro:
   inputPerMTokUsd: 0.435
   outputPerMTokUsd: 0.87
+  cacheReadPerMTokUsd: 0.003625
 openrouter/deepseek-v4-flash:
-  inputPerMTokUsd: 0.09 # OpenRouter /v1/models 2026-06-23
-  outputPerMTokUsd: 0.18
+  inputPerMTokUsd: 0.14
+  outputPerMTokUsd: 0.28
+  cacheReadPerMTokUsd: 0.0028
 # Claude pricing now lives under the native `zenmux-anthropic/claude-*` aliases
 # (issue #217); the OpenAI-compat `zenmux/claude-*` entries were removed.
 openai/gpt-5.6:
@@ -78,76 +244,274 @@ openai/gpt-5.6:
   outputPerMTokUsd: 30.0
   cacheReadPerMTokUsd: 0.5
   cacheWritePerMTokUsd: 6.25
+  contextTiers:
+    - minPromptTokens: 272001
+      inputPerMTokUsd: 10.0
+      outputPerMTokUsd: 45.0
+      cacheReadPerMTokUsd: 1.0
+      cacheWritePerMTokUsd: 12.5
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 2.5
+      outputPerMTokUsd: 15.0
+      cacheReadPerMTokUsd: 0.25
+      cacheWritePerMTokUsd: 3.125
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 5.0
+          outputPerMTokUsd: 22.5
+          cacheReadPerMTokUsd: 0.5
+          cacheWritePerMTokUsd: 6.25
+    priority:
+      inputPerMTokUsd: 10.0
+      outputPerMTokUsd: 60.0
+      cacheReadPerMTokUsd: 1.0
+      cacheWritePerMTokUsd: 12.5
+      maxPromptTokens: 272000
 openai/gpt-5.6-sol:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0
   cacheReadPerMTokUsd: 0.5
   cacheWritePerMTokUsd: 6.25
+  contextTiers:
+    - minPromptTokens: 272001
+      inputPerMTokUsd: 10.0
+      outputPerMTokUsd: 45.0
+      cacheReadPerMTokUsd: 1.0
+      cacheWritePerMTokUsd: 12.5
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 2.5
+      outputPerMTokUsd: 15.0
+      cacheReadPerMTokUsd: 0.25
+      cacheWritePerMTokUsd: 3.125
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 5.0
+          outputPerMTokUsd: 22.5
+          cacheReadPerMTokUsd: 0.5
+          cacheWritePerMTokUsd: 6.25
+    priority:
+      inputPerMTokUsd: 10.0
+      outputPerMTokUsd: 60.0
+      cacheReadPerMTokUsd: 1.0
+      cacheWritePerMTokUsd: 12.5
+      maxPromptTokens: 272000
 openai/gpt-5.6-terra:
   inputPerMTokUsd: 2.5
   outputPerMTokUsd: 15.0
   cacheReadPerMTokUsd: 0.25
   cacheWritePerMTokUsd: 3.125
+  contextTiers:
+    - minPromptTokens: 272001
+      inputPerMTokUsd: 5.0
+      outputPerMTokUsd: 22.5
+      cacheReadPerMTokUsd: 0.5
+      cacheWritePerMTokUsd: 6.25
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 1.25
+      outputPerMTokUsd: 7.5
+      cacheReadPerMTokUsd: 0.125
+      cacheWritePerMTokUsd: 1.5625
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 2.5
+          outputPerMTokUsd: 11.25
+          cacheReadPerMTokUsd: 0.25
+          cacheWritePerMTokUsd: 3.125
+    priority:
+      inputPerMTokUsd: 5.0
+      outputPerMTokUsd: 30.0
+      cacheReadPerMTokUsd: 0.5
+      cacheWritePerMTokUsd: 6.25
+      maxPromptTokens: 272000
 openai/gpt-5.6-luna:
   inputPerMTokUsd: 1.0
   outputPerMTokUsd: 6.0
   cacheReadPerMTokUsd: 0.1
   cacheWritePerMTokUsd: 1.25
+  contextTiers:
+    - minPromptTokens: 272001
+      inputPerMTokUsd: 2.0
+      outputPerMTokUsd: 9.0
+      cacheReadPerMTokUsd: 0.2
+      cacheWritePerMTokUsd: 2.5
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 0.5
+      outputPerMTokUsd: 3.0
+      cacheReadPerMTokUsd: 0.05
+      cacheWritePerMTokUsd: 0.625
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 1.0
+          outputPerMTokUsd: 4.5
+          cacheReadPerMTokUsd: 0.1
+          cacheWritePerMTokUsd: 1.25
+    priority:
+      inputPerMTokUsd: 2.0
+      outputPerMTokUsd: 12.0
+      cacheReadPerMTokUsd: 0.2
+      cacheWritePerMTokUsd: 2.5
+      maxPromptTokens: 272000
 zenmux/gpt-5.5:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0
+  cacheReadPerMTokUsd: 0.5
+  contextTiers:
+    - minPromptTokens: 272001
+      inputPerMTokUsd: 10.0
+      outputPerMTokUsd: 45.0
+      cacheReadPerMTokUsd: 1.0
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 2.5
+      outputPerMTokUsd: 15.0
+      cacheReadPerMTokUsd: 0.25
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 5.0
+          outputPerMTokUsd: 22.5
+          cacheReadPerMTokUsd: 0.5
+    priority:
+      inputPerMTokUsd: 12.5
+      outputPerMTokUsd: 75.0
+      cacheReadPerMTokUsd: 1.25
+      maxPromptTokens: 272000
 # NATIVE-protocol passthrough aliases (issue #217); the OpenAI-compat
 # `zenmux/gemini-*` / `zenmux/claude-*` entries were removed. Cost is fail-open (a
 # missing key only nulls cost_usd, never blocks); the flash-lite/haiku rates have no
-# prior sibling — set to a safe estimate, verify against the ZenMux price sheet.
+# prior sibling. Values below follow Google's official Gemini API rate card.
 zenmux-vertex/gemini-3.5-flash:
   inputPerMTokUsd: 1.5
   outputPerMTokUsd: 9.0
+  cacheReadPerMTokUsd: 0.15
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 0.75
+      outputPerMTokUsd: 4.5
+      cacheReadPerMTokUsd: 0.08
+    priority:
+      inputPerMTokUsd: 2.7
+      outputPerMTokUsd: 16.2
+      cacheReadPerMTokUsd: 0.27
 zenmux-vertex/gemini-3.1-flash-lite:
-  inputPerMTokUsd: 0.25 # ZenMux /v1/models pricings: flash-lite is ~6x cheaper than flash, NOT equal
+  inputPerMTokUsd: 0.25
   outputPerMTokUsd: 1.5
+  cacheReadPerMTokUsd: 0.025
+  audioInputPerMTokUsd: 0.5
+  audioCacheReadPerMTokUsd: 0.05
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 0.125
+      outputPerMTokUsd: 0.75
+      cacheReadPerMTokUsd: 0.0125
+      audioInputPerMTokUsd: 0.25
+      audioCacheReadPerMTokUsd: 0.025
+    priority:
+      inputPerMTokUsd: 0.45
+      outputPerMTokUsd: 2.7
+      cacheReadPerMTokUsd: 0.045
+      audioInputPerMTokUsd: 0.9
+      audioCacheReadPerMTokUsd: 0.09
 zenmux-vertex/gemini-3.1-pro:
   inputPerMTokUsd: 2.0
   outputPerMTokUsd: 12.0
-# IMAGE models: Gemini bills the generated image as OUTPUT TOKENS (candidatesTokenCount,
-# modality IMAGE) at a per-Mtok IMAGE rate, and helm sets completion_tokens =
-# candidatesTokenCount — so outputPerMTokUsd = the ZenMux image rate yields the EXACT
-# per-image cost (a 1K–2K image = 1120 tokens → flash $0.067, pro $0.134). Rates verified
-# live on the ZenMux model pages 2026-06-28. outputPerMTokUsd is the IMAGE-output rate
-# (these are image models; the marginal text-output rate — flash $3, pro $12 — is unused).
+  cacheReadPerMTokUsd: 0.2
+  contextTiers:
+    - minPromptTokens: 200001
+      inputPerMTokUsd: 4.0
+      outputPerMTokUsd: 18.0
+      cacheReadPerMTokUsd: 0.4
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 1.0
+      outputPerMTokUsd: 6.0
+      cacheReadPerMTokUsd: 0.2
+      contextTiers:
+        - minPromptTokens: 200001
+          inputPerMTokUsd: 2.0
+          outputPerMTokUsd: 9.0
+          cacheReadPerMTokUsd: 0.4
+    priority:
+      inputPerMTokUsd: 3.6
+      outputPerMTokUsd: 21.6
+      cacheReadPerMTokUsd: 0.36
+      contextTiers:
+        - minPromptTokens: 200001
+          inputPerMTokUsd: 7.2
+          outputPerMTokUsd: 32.4
+          cacheReadPerMTokUsd: 0.72
+# IMAGE models: Gemini bills candidate TEXT/thinking and IMAGE output at different
+# rates. outputPerMTokUsd is text/thinking; imageOutputPerMTokUsd is IMAGE. The
+# response normalizer preserves candidatesTokensDetails so mixed responses are exact.
 gemini-3.1-flash-image:
   inputPerMTokUsd: 0.5
-  outputPerMTokUsd: 60.0
+  outputPerMTokUsd: 3.0
+  imageOutputPerMTokUsd: 60.0
 gemini-3-pro-image:
   inputPerMTokUsd: 2.0
-  outputPerMTokUsd: 120.0
+  outputPerMTokUsd: 12.0
+  imageOutputPerMTokUsd: 120.0
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 1.0
+      outputPerMTokUsd: 6.0
+      imageOutputPerMTokUsd: 60.0
+    priority:
+      inputPerMTokUsd: 3.6
+      outputPerMTokUsd: 21.6
+      imageOutputPerMTokUsd: 216.0
 # OpenAI gpt-image-2 (ZenMux, verified live 2026-06-28): text input $5/M, image
-# output $30/M. The generated image is billed as usage.output_tokens (image_tokens)
-# → outputPerMTokUsd is the image rate. Worked example: a 1024 image = 196 output
+# output $30/M. The generated image is billed as usage.output_tokens (image_tokens).
+# Worked example: a 1024 low-quality image = 196 output
 # tokens → 196 × $30/M + 15 × $5/M ≈ $0.006.
 gpt-image-2:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0
+  cacheReadPerMTokUsd: 1.25
 # OFFICIAL image providers (cross-provider failover). Same model = same rates as the
 # relay entries; OpenAI-direct gpt-image-2 verified live 196 out tok ≈ $0.006.
 openai/gpt-image-2:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0
+  cacheReadPerMTokUsd: 1.25
 google/gemini-3.1-flash-image:
   inputPerMTokUsd: 0.5
-  outputPerMTokUsd: 60.0
+  outputPerMTokUsd: 3.0
+  imageOutputPerMTokUsd: 60.0
 google/gemini-3-pro-image:
   inputPerMTokUsd: 2.0
-  outputPerMTokUsd: 120.0
+  outputPerMTokUsd: 12.0
+  imageOutputPerMTokUsd: 120.0
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 1.0
+      outputPerMTokUsd: 6.0
+      imageOutputPerMTokUsd: 60.0
+    priority:
+      inputPerMTokUsd: 3.6
+      outputPerMTokUsd: 21.6
+      imageOutputPerMTokUsd: 216.0
 zenmux-anthropic/claude-opus-4.8:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 25.0
+  cacheReadPerMTokUsd: 0.5
+  cacheWritePerMTokUsd: 6.25
+  cacheWrite1hPerMTokUsd: 10.0
 zenmux-anthropic/claude-sonnet-4.6:
   inputPerMTokUsd: 3.0
   outputPerMTokUsd: 15.0
+  cacheReadPerMTokUsd: 0.3
+  cacheWritePerMTokUsd: 3.75
+  cacheWrite1hPerMTokUsd: 6.0
 zenmux-anthropic/claude-haiku-4.5:
   inputPerMTokUsd: 1.0
   outputPerMTokUsd: 5.0
+  cacheReadPerMTokUsd: 0.1
+  cacheWritePerMTokUsd: 1.25
+  cacheWrite1hPerMTokUsd: 2.0
 # NATIVE Claude Pro/Max SUBSCRIPTION aliases (the `anthropic/*` OAuth pool — the
 # claude-* lanes' primaries). A flat-fee subscription has no per-request bill, so
 # these are IMPUTED API-equivalent rates (cost telemetry only — pricing never drives
@@ -164,11 +528,26 @@ anthropic/claude-opus-4-8:
   outputPerMTokUsd: 25.0
   cacheReadPerMTokUsd: 0.5
   cacheWritePerMTokUsd: 6.25
+  cacheWrite1hPerMTokUsd: 10.0
+  inferenceGeoMultipliers:
+    global: 1.0
+    us: 1.1
+  serviceTiers:
+    fast:
+      inputPerMTokUsd: 10.0
+      outputPerMTokUsd: 50.0
+      cacheReadPerMTokUsd: 1.0
+      cacheWritePerMTokUsd: 12.5
+      cacheWrite1hPerMTokUsd: 20.0
 anthropic/claude-sonnet-4-6:
   inputPerMTokUsd: 3.0
   outputPerMTokUsd: 15.0
   cacheReadPerMTokUsd: 0.3
   cacheWritePerMTokUsd: 3.75
+  cacheWrite1hPerMTokUsd: 6.0
+  inferenceGeoMultipliers:
+    global: 1.0
+    us: 1.1
 # Official Claude API-equivalent estimate for Pro/Max subscription traffic.
 # Introductory pricing is effective through 2026-08-31; Anthropic lists the
 # standard price from 2026-09-01 as $3 input / $15 output / $0.30 cache read /
@@ -179,27 +558,37 @@ anthropic/claude-sonnet-5:
   outputPerMTokUsd: 10.0
   cacheReadPerMTokUsd: 0.2
   cacheWritePerMTokUsd: 2.5
+  cacheWrite1hPerMTokUsd: 4.0
+  inferenceGeoMultipliers:
+    global: 1.0
+    us: 1.1
 anthropic/claude-fable-5:
   inputPerMTokUsd: 10.0
   outputPerMTokUsd: 50.0
   cacheReadPerMTokUsd: 1.0
   cacheWritePerMTokUsd: 12.5
+  cacheWrite1hPerMTokUsd: 20.0
+  inferenceGeoMultipliers:
+    global: 1.0
+    us: 1.1
 anthropic/claude-haiku-4-5-20251001:
   inputPerMTokUsd: 1.0
   outputPerMTokUsd: 5.0
   cacheReadPerMTokUsd: 0.1
   cacheWritePerMTokUsd: 1.25
+  cacheWrite1hPerMTokUsd: 2.0
 zenmux/auto:
-  inputPerMTokUsd: 2.5
-  outputPerMTokUsd: 15.0
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
 openrouter/auto:
-  inputPerMTokUsd: 2.5
-  outputPerMTokUsd: 15.0
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
 # Bare upstream id keyed for the Layer-2 EVAL self-cost (eval_usd): the eval
 # client (classifier.yaml `eval.model`) bypasses the registry and sends the wire
 # id `deepseek-v4-flash` directly to the primary (official DeepSeek), so eval_usd
 # resolves via this bare key (same numbers as deepseek/deepseek-v4-flash).
 # See classify.ts / route-request eval_usd.
 deepseek-v4-flash:
-  inputPerMTokUsd: 0.1
-  outputPerMTokUsd: 0.2
+  inputPerMTokUsd: 0.14
+  outputPerMTokUsd: 0.28
+  cacheReadPerMTokUsd: 0.0028

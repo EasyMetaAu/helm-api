@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { parse as parseYaml } from "yaml";
 import { resolveCostUsd } from "./cost.js";
 import { CatalogError } from "./index.js";
 import { loadRuntimeCatalog } from "./load.js";
@@ -121,6 +122,8 @@ describe("loadRuntimeCatalog", () => {
       outputPerMTokUsd: 10,
       cacheReadPerMTokUsd: 0.2,
       cacheWritePerMTokUsd: 2.5,
+      cacheWrite1hPerMTokUsd: 4,
+      inferenceGeoMultipliers: { global: 1, us: 1.1 },
     });
     expect(sonnet?.capabilities).toMatchObject({
       supportsTools: true,
@@ -187,6 +190,13 @@ describe("loadRuntimeCatalog", () => {
       outputPerMTokUsd: 6,
       cacheReadPerMTokUsd: 0.5,
       cacheWritePerMTokUsd: null,
+      serviceTiers: {
+        priority: {
+          inputPerMTokUsd: 4,
+          cacheReadPerMTokUsd: 1,
+          outputPerMTokUsd: 12,
+        },
+      },
     });
     expect(composer?.pricing).toEqual({
       inputPerMTokUsd: null,
@@ -205,6 +215,219 @@ describe("loadRuntimeCatalog", () => {
     ).toBeCloseTo((6 * 2 + 4 * 0.5 + 5 * 6) / 1_000_000, 12);
   });
 
+  it("loads current official cache and context-tier prices for routed models", () => {
+    const catalog = loadRuntimeCatalog({ configDir: "config" });
+
+    expect(catalog.get("deepseek/deepseek-v4-flash")?.pricing).toMatchObject({
+      inputPerMTokUsd: 0.14,
+      outputPerMTokUsd: 0.28,
+      cacheReadPerMTokUsd: 0.0028,
+    });
+    expect(catalog.get("deepseek/deepseek-v4-pro")?.pricing.cacheReadPerMTokUsd).toBe(0.003625);
+    expect(catalog.get("openai-codex/gpt-5.4-mini")?.pricing.cacheReadPerMTokUsd).toBe(0.075);
+    expect(catalog.get("zenmux-vertex/gemini-3.5-flash")?.pricing.cacheReadPerMTokUsd).toBe(0.15);
+    expect(catalog.get("zenmux-vertex/gemini-3.5-flash")?.pricing.serviceTiers).toEqual({
+      flex: {
+        inputPerMTokUsd: 0.75,
+        outputPerMTokUsd: 4.5,
+        cacheReadPerMTokUsd: 0.08,
+      },
+      priority: {
+        inputPerMTokUsd: 2.7,
+        outputPerMTokUsd: 16.2,
+        cacheReadPerMTokUsd: 0.27,
+      },
+    });
+    expect(catalog.get("zenmux-vertex/gemini-3.1-flash-lite")?.pricing.serviceTiers).toEqual({
+      flex: {
+        inputPerMTokUsd: 0.125,
+        outputPerMTokUsd: 0.75,
+        cacheReadPerMTokUsd: 0.0125,
+        audioInputPerMTokUsd: 0.25,
+        audioCacheReadPerMTokUsd: 0.025,
+      },
+      priority: {
+        inputPerMTokUsd: 0.45,
+        outputPerMTokUsd: 2.7,
+        cacheReadPerMTokUsd: 0.045,
+        audioInputPerMTokUsd: 0.9,
+        audioCacheReadPerMTokUsd: 0.09,
+      },
+    });
+    expect(catalog.get("openai-codex/gpt-5.6-sol")?.pricing.contextTiers).toEqual([
+      expect.objectContaining({
+        minPromptTokens: 272_001,
+        inputPerMTokUsd: 10,
+        outputPerMTokUsd: 45,
+      }),
+    ]);
+    expect(catalog.get("openai-codex/gpt-5.5")?.pricing.contextTiers).toEqual([
+      expect.objectContaining({
+        minPromptTokens: 272_001,
+        inputPerMTokUsd: 10,
+        outputPerMTokUsd: 45,
+        cacheReadPerMTokUsd: 1,
+      }),
+    ]);
+    expect(catalog.get("openai-codex/gpt-5.4")?.pricing.contextTiers).toEqual([
+      expect.objectContaining({
+        minPromptTokens: 272_001,
+        inputPerMTokUsd: 5,
+        outputPerMTokUsd: 22.5,
+        cacheReadPerMTokUsd: 0.5,
+      }),
+    ]);
+    expect(catalog.get("anthropic/claude-opus-4-8")?.pricing.serviceTiers?.fast).toEqual({
+      inputPerMTokUsd: 10,
+      outputPerMTokUsd: 50,
+      cacheReadPerMTokUsd: 1,
+      cacheWritePerMTokUsd: 12.5,
+      cacheWrite1hPerMTokUsd: 20,
+    });
+    for (const alias of [
+      "anthropic/claude-opus-4-8",
+      "anthropic/claude-sonnet-4-6",
+      "anthropic/claude-sonnet-5",
+      "anthropic/claude-fable-5",
+    ]) {
+      expect(catalog.get(alias)?.pricing.inferenceGeoMultipliers).toEqual({ global: 1, us: 1.1 });
+    }
+    expect(
+      catalog.get("anthropic/claude-haiku-4-5-20251001")?.pricing.inferenceGeoMultipliers,
+    ).toBeUndefined();
+    expect(
+      catalog.get("zenmux-anthropic/claude-opus-4.8")?.pricing.inferenceGeoMultipliers,
+    ).toBeUndefined();
+    expect(catalog.get("zenmux-vertex/gemini-3.1-pro")?.pricing.contextTiers).toEqual([
+      expect.objectContaining({
+        minPromptTokens: 200_001,
+        inputPerMTokUsd: 4,
+        outputPerMTokUsd: 18,
+      }),
+    ]);
+    expect(catalog.get("zenmux-vertex/gemini-3.1-pro")?.pricing.serviceTiers).toEqual({
+      flex: {
+        inputPerMTokUsd: 1,
+        outputPerMTokUsd: 6,
+        cacheReadPerMTokUsd: 0.2,
+        contextTiers: [
+          {
+            minPromptTokens: 200_001,
+            inputPerMTokUsd: 2,
+            outputPerMTokUsd: 9,
+            cacheReadPerMTokUsd: 0.4,
+          },
+        ],
+      },
+      priority: {
+        inputPerMTokUsd: 3.6,
+        outputPerMTokUsd: 21.6,
+        cacheReadPerMTokUsd: 0.36,
+        contextTiers: [
+          {
+            minPromptTokens: 200_001,
+            inputPerMTokUsd: 7.2,
+            outputPerMTokUsd: 32.4,
+            cacheReadPerMTokUsd: 0.72,
+          },
+        ],
+      },
+    });
+    expect(catalog.get("gemini-3.1-flash-image")?.pricing.serviceTiers).toBeUndefined();
+    expect(catalog.get("google/gemini-3.1-flash-image")?.pricing.serviceTiers).toBeUndefined();
+    expect(catalog.get("gemini-3-pro-image")?.pricing.serviceTiers).toEqual(
+      catalog.get("google/gemini-3-pro-image")?.pricing.serviceTiers,
+    );
+    expect(catalog.get("gemini-3-pro-image")?.pricing.serviceTiers).toEqual({
+      flex: {
+        inputPerMTokUsd: 1,
+        outputPerMTokUsd: 6,
+        imageOutputPerMTokUsd: 60,
+      },
+      priority: {
+        inputPerMTokUsd: 3.6,
+        outputPerMTokUsd: 21.6,
+        imageOutputPerMTokUsd: 216,
+      },
+    });
+
+    const geminiProPricing = catalog.get("zenmux-vertex/gemini-3.1-pro")?.pricing;
+    expect(
+      resolveCostUsd(geminiProPricing, {
+        service_tier: "priority",
+        usage: { prompt_tokens: 200_001, completion_tokens: 100 },
+      }),
+    ).toBeCloseTo((200_001 * 7.2 + 100 * 32.4) / 1_000_000, 12);
+
+    const flashLitePricing = catalog.get("zenmux-vertex/gemini-3.1-flash-lite")?.pricing;
+    expect(
+      resolveCostUsd(flashLitePricing, {
+        service_tier: "flex",
+        usage: {
+          prompt_tokens: 1_000,
+          completion_tokens: 100,
+          prompt_tokens_details: {
+            cached_tokens: 200,
+            audio_tokens: 400,
+            cached_audio_tokens: 100,
+          },
+        },
+      }),
+    ).toBeCloseTo(
+      (500 * 0.125 + 300 * 0.25 + 100 * 0.0125 + 100 * 0.025 + 100 * 0.75) / 1_000_000,
+      12,
+    );
+  });
+
+  it("keeps dynamic auto-route estimates unknown instead of assigning a fake fixed price", () => {
+    const catalog = loadRuntimeCatalog({ configDir: "config" });
+    for (const alias of ["zenmux/auto", "openrouter/auto"]) {
+      expect(catalog.get(alias)?.pricing.inputPerMTokUsd).toBeNull();
+      expect(catalog.get(alias)?.pricing.outputPerMTokUsd).toBeNull();
+    }
+  });
+
+  it("keeps every manually configured production alias covered by an explicit pricing decision", () => {
+    const capabilities = parseYaml(readFileSync("config/capabilities.yaml", "utf8")) as Record<
+      string,
+      unknown
+    >;
+    const pricing = parseYaml(readFileSync("config/pricing.yaml", "utf8")) as Record<
+      string,
+      unknown
+    >;
+    const catalog = loadRuntimeCatalog({ configDir: "config" });
+
+    // Subscription-only and dynamic routes are explicit null rate cards; every
+    // manually configured capability therefore has an intentional price decision.
+    expect(Object.keys(capabilities).filter((alias) => !(alias in pricing))).toEqual([]);
+    // Price-only keys are dynamic Codex auto-review plus the bare Layer-2 eval
+    // model id (which bypasses the provider registry).
+    expect(
+      Object.keys(pricing)
+        .filter((alias) => !(alias in capabilities))
+        .sort(),
+    ).toEqual(["deepseek-v4-flash", "openai-codex/codex-auto-review"]);
+
+    const intentionallyUnpriced = new Set([
+      "xai/grok-composer-2.5-fast",
+      "zenmux/auto",
+      "openrouter/auto",
+    ]);
+    const unexpectedUnpriced = Object.keys(capabilities).filter((alias) => {
+      const rates = catalog.get(alias)?.pricing;
+      return (
+        !intentionallyUnpriced.has(alias) &&
+        (rates?.inputPerMTokUsd == null || rates.outputPerMTokUsd == null)
+      );
+    });
+    expect(unexpectedUnpriced).toEqual([]);
+    expect(catalog.get("openai-codex/codex-auto-review")?.pricing).toMatchObject({
+      inputPerMTokUsd: null,
+      outputPerMTokUsd: null,
+    });
+  });
+
   it("fails closed on an invalid override yaml (principle 2)", () => {
     expect(() =>
       loadRuntimeCatalog({
@@ -213,6 +436,30 @@ describe("loadRuntimeCatalog", () => {
           if (p.endsWith("capabilities.yaml")) {
             // supportsTools must be a boolean → schema rejects.
             return '"x/y":\n  supportsTools: "yes"\n';
+          }
+          enoent();
+        }),
+      }),
+    ).toThrow(CatalogError);
+  });
+
+  it("fails closed when context pricing tiers are not strictly ascending", () => {
+    expect(() =>
+      loadRuntimeCatalog({
+        configDir: "/cfg",
+        readFile: reader((p) => {
+          if (p.endsWith("pricing.yaml")) {
+            return [
+              '"openai/gpt":',
+              "  contextTiers:",
+              "    - minPromptTokens: 300000",
+              "      inputPerMTokUsd: 10",
+              "      outputPerMTokUsd: 45",
+              "    - minPromptTokens: 200000",
+              "      inputPerMTokUsd: 5",
+              "      outputPerMTokUsd: 22.5",
+              "",
+            ].join("\n");
           }
           enoent();
         }),

@@ -490,6 +490,7 @@ function transformRequestOut(native: unknown): IRRequest {
     ...(reasoningEffort !== undefined ? { reasoning_effort: reasoningEffort } : {}),
     ...(responseFormat !== undefined ? { response_format: responseFormat } : {}),
     ...(req.cachedContent !== undefined ? { cached_content: req.cachedContent } : {}),
+    ...(req.serviceTier !== undefined ? { service_tier: req.serviceTier } : {}),
     ...(geminiToolConfigToToolChoice(req.toolConfig) !== undefined
       ? { tool_choice: geminiToolConfigToToolChoice(req.toolConfig) }
       : {}),
@@ -904,6 +905,7 @@ function transformRequestIn(ir: IRRequest): GeminiGenerateContentRequest {
     ...(toolConfig !== undefined ? { toolConfig } : {}),
     ...(generationConfig !== undefined ? { generationConfig } : {}),
     ...(parsed.cached_content !== undefined ? { cachedContent: parsed.cached_content } : {}),
+    ...(parsed.service_tier !== undefined ? { serviceTier: parsed.service_tier } : {}),
     ...(safetySettings !== undefined ? { safetySettings } : {}),
     ...(googleGenAI !== undefined ? googleGenAI : {}),
   };
@@ -911,17 +913,25 @@ function transformRequestIn(ir: IRRequest): GeminiGenerateContentRequest {
 
 // —— Outbound: IR response -> native Gemini response. ——————————————————————————————
 
-function irUsageToMetadata(usage: IRResponse["usage"]): GeminiUsageMetadata | undefined {
-  if (usage === undefined) return undefined;
+function irUsageToMetadata(
+  usage: IRResponse["usage"],
+  serviceTier?: string,
+): GeminiUsageMetadata | undefined {
+  if (usage === undefined) {
+    return serviceTier !== undefined ? { serviceTier } : undefined;
+  }
   const prompt =
     (usage.prompt_tokens ?? 0) + (usage.cached_tokens ?? 0) + (usage.cache_creation_tokens ?? 0);
-  const candidates = usage.completion_tokens ?? 0;
+  // IR/OpenAI completion_tokens includes reasoning. Gemini reports candidate and
+  // thinking counts separately, so subtract the mirrored reasoning slice on output.
+  const candidates = Math.max(0, (usage.completion_tokens ?? 0) - (usage.reasoning_tokens ?? 0));
   return {
     promptTokenCount: prompt,
     candidatesTokenCount: candidates,
-    totalTokenCount: prompt + candidates,
+    totalTokenCount: prompt + (usage.completion_tokens ?? 0),
     ...(usage.cached_tokens !== undefined ? { cachedContentTokenCount: usage.cached_tokens } : {}),
     ...(usage.reasoning_tokens !== undefined ? { thoughtsTokenCount: usage.reasoning_tokens } : {}),
+    ...(serviceTier !== undefined ? { serviceTier } : {}),
   };
 }
 
@@ -940,7 +950,9 @@ function transformResponseOut(ir: IRResponse): GeminiGenerateContentResponse {
 
   const out: GeminiGenerateContentResponse = {
     candidates: [candidate],
-    ...(parsed.usage !== undefined ? { usageMetadata: irUsageToMetadata(parsed.usage) } : {}),
+    ...(parsed.usage !== undefined || parsed.service_tier !== undefined
+      ? { usageMetadata: irUsageToMetadata(parsed.usage, parsed.service_tier) }
+      : {}),
   };
   return GeminiGenerateContentResponseSchema.parse(out);
 }
@@ -1024,6 +1036,7 @@ function transformResponseIn(native: unknown): IRResponse {
 
   const um = res.usageMetadata;
   const candidateDetails = modalityDetailsToIR(um?.candidatesTokensDetails);
+  const cacheDetails = modalityDetailsToIR(um?.cacheTokensDetails);
   // order 28: the effective cached count is the aggregate cachedContentTokenCount when
   // present, else the sum of the per-modality cacheTokensDetails (otherwise dropped).
   const cachedFromDetails = (um?.cacheTokensDetails ?? []).reduce(
@@ -1034,18 +1047,29 @@ function transformResponseIn(native: unknown): IRResponse {
     um?.cachedContentTokenCount ?? (cachedFromDetails > 0 ? cachedFromDetails : undefined);
   // Merge the cached count into prompt_tokens_details (alongside the modality split).
   const basePromptDetails = modalityDetailsToIR(um?.promptTokensDetails);
+  const promptAudioTokens =
+    basePromptDetails !== undefined ? (basePromptDetails.audio_tokens ?? 0) : undefined;
+  const cachedAudioTokens =
+    cacheDetails !== undefined ? (cacheDetails.audio_tokens ?? 0) : undefined;
   const promptDetails =
-    effectiveCached !== undefined
-      ? { ...(basePromptDetails ?? {}), cached_tokens: effectiveCached }
-      : basePromptDetails;
+    effectiveCached !== undefined || basePromptDetails !== undefined || cacheDetails !== undefined
+      ? {
+          ...(basePromptDetails ?? {}),
+          ...(promptAudioTokens !== undefined ? { audio_tokens: promptAudioTokens } : {}),
+          ...(effectiveCached !== undefined ? { cached_tokens: effectiveCached } : {}),
+          ...(cachedAudioTokens !== undefined ? { cached_audio_tokens: cachedAudioTokens } : {}),
+        }
+      : undefined;
   const usage =
     um !== undefined
       ? {
           ...(um.promptTokenCount !== undefined
             ? { prompt_tokens: Math.max(0, um.promptTokenCount - (effectiveCached ?? 0)) }
             : {}),
-          ...(um.candidatesTokenCount !== undefined
-            ? { completion_tokens: um.candidatesTokenCount }
+          ...(um.candidatesTokenCount !== undefined || um.thoughtsTokenCount !== undefined
+            ? {
+                completion_tokens: (um.candidatesTokenCount ?? 0) + (um.thoughtsTokenCount ?? 0),
+              }
             : {}),
           ...(effectiveCached !== undefined ? { cached_tokens: effectiveCached } : {}),
           // thoughtsTokenCount is the reasoning-token count (litellm parity).
@@ -1089,6 +1113,7 @@ function transformResponseIn(native: unknown): IRResponse {
       },
     ],
     ...(usage !== undefined ? { usage } : {}),
+    ...(um?.serviceTier !== undefined ? { service_tier: um.serviceTier } : {}),
     provider_raw: {
       ...(candidate?.finishReason !== undefined
         ? { stop_reason: candidate.finishReason }
@@ -1151,6 +1176,7 @@ async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIter
   let pendingFinish: string | null = null;
   let hasSeenToolCalls = false; // order 26: STOP + functionCalls -> tool_calls terminal
   let lastUsage: IRChunk["usage"];
+  let lastServiceTier: string | undefined;
   let groundingMeta: unknown; // latest grounding/citation metadata seen across frames
   let citationMeta: unknown;
   // Tool args are NOT append-only across Gemini snapshots: each snapshot carries the
@@ -1234,20 +1260,49 @@ async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIter
     if (finish !== null) pendingFinish = finish;
     if (event.usageMetadata !== undefined) {
       const um = event.usageMetadata;
+      if (um.serviceTier !== undefined) lastServiceTier = um.serviceTier;
+      const candidateDetails = modalityDetailsToIR(um.candidatesTokensDetails);
+      const promptModalityDetails = modalityDetailsToIR(um.promptTokensDetails);
+      const cacheModalityDetails = modalityDetailsToIR(um.cacheTokensDetails);
+      const cachedFromDetails = (um.cacheTokensDetails ?? []).reduce(
+        (sum, detail) => sum + (detail.tokenCount ?? 0),
+        0,
+      );
+      const effectiveCached =
+        um.cachedContentTokenCount ?? (cachedFromDetails > 0 ? cachedFromDetails : undefined);
+      const promptAudioTokens =
+        promptModalityDetails !== undefined ? (promptModalityDetails.audio_tokens ?? 0) : undefined;
+      const cachedAudioTokens =
+        cacheModalityDetails !== undefined ? (cacheModalityDetails.audio_tokens ?? 0) : undefined;
+      const promptDetails =
+        effectiveCached !== undefined ||
+        promptModalityDetails !== undefined ||
+        cacheModalityDetails !== undefined
+          ? {
+              ...(promptModalityDetails ?? {}),
+              ...(promptAudioTokens !== undefined ? { audio_tokens: promptAudioTokens } : {}),
+              ...(effectiveCached !== undefined ? { cached_tokens: effectiveCached } : {}),
+              ...(cachedAudioTokens !== undefined
+                ? { cached_audio_tokens: cachedAudioTokens }
+                : {}),
+            }
+          : undefined;
       // promptTokenCount is the FULL prompt incl. cached; subtract cached so the IR
       // prompt is the non-cached input and never double-billed (matches the non-stream
       // transformResponseIn path). cached is re-exposed when present.
       lastUsage = {
         ...(um.promptTokenCount !== undefined
-          ? { prompt_tokens: Math.max(0, um.promptTokenCount - (um.cachedContentTokenCount ?? 0)) }
+          ? { prompt_tokens: Math.max(0, um.promptTokenCount - (effectiveCached ?? 0)) }
           : {}),
-        ...(um.candidatesTokenCount !== undefined
-          ? { completion_tokens: um.candidatesTokenCount }
+        ...(um.candidatesTokenCount !== undefined || um.thoughtsTokenCount !== undefined
+          ? {
+              completion_tokens: (um.candidatesTokenCount ?? 0) + (um.thoughtsTokenCount ?? 0),
+            }
           : {}),
-        ...(um.cachedContentTokenCount !== undefined
-          ? { cached_tokens: um.cachedContentTokenCount }
-          : {}),
+        ...(effectiveCached !== undefined ? { cached_tokens: effectiveCached } : {}),
         ...(um.thoughtsTokenCount !== undefined ? { reasoning_tokens: um.thoughtsTokenCount } : {}),
+        ...(promptDetails !== undefined ? { prompt_tokens_details: promptDetails } : {}),
+        ...(candidateDetails !== undefined ? { completion_tokens_details: candidateDetails } : {}),
       };
     }
 
@@ -1312,6 +1367,7 @@ async function* transformStreamIn(src: AsyncIterable<GeminiSSEEvent>): AsyncIter
     ...(lastModel !== undefined ? { model: lastModel } : {}),
     choices: [{ index: 0, delta: {}, finish_reason: terminalFinish }],
     ...(lastUsage !== undefined ? { usage: lastUsage } : {}),
+    ...(lastServiceTier !== undefined ? { service_tier: lastServiceTier } : {}),
   };
 }
 
@@ -1361,13 +1417,16 @@ async function* transformStreamOut(src: AsyncIterable<IRChunk>): AsyncIterable<G
       usage.prompt_tokens !== undefined
         ? usage.prompt_tokens + (cached ?? 0) + (cacheCreation ?? 0)
         : undefined;
-    const candidates = usage.completion_tokens;
+    const candidates =
+      usage.completion_tokens !== undefined
+        ? Math.max(0, usage.completion_tokens - (usage.reasoning_tokens ?? 0))
+        : undefined;
     return {
       ...(prompt !== undefined ? { promptTokenCount: prompt } : {}),
       ...(candidates !== undefined ? { candidatesTokenCount: candidates } : {}),
       // The real Gemini wire always carries totalTokenCount on the terminal frame.
-      ...(prompt !== undefined || candidates !== undefined
-        ? { totalTokenCount: (prompt ?? 0) + (candidates ?? 0) }
+      ...(prompt !== undefined || usage.completion_tokens !== undefined
+        ? { totalTokenCount: (prompt ?? 0) + (usage.completion_tokens ?? 0) }
         : {}),
       ...(usage.reasoning_tokens !== undefined
         ? { thoughtsTokenCount: usage.reasoning_tokens }
@@ -1381,6 +1440,7 @@ async function* transformStreamOut(src: AsyncIterable<IRChunk>): AsyncIterable<G
   let terminalParts: GeminiPart[] | null = null;
   let terminalFinish: string | undefined;
   let latestUsage: GeminiUsageMetadata | undefined;
+  let latestServiceTier: string | undefined;
 
   for await (const chunk of src) {
     const choice = chunk.choices?.[0];
@@ -1399,6 +1459,7 @@ async function* transformStreamOut(src: AsyncIterable<IRChunk>): AsyncIterable<G
     }
 
     if (chunk.usage != null) latestUsage = toUsageMetadata(chunk.usage);
+    if (chunk.service_tier !== undefined) latestServiceTier = chunk.service_tier;
 
     if (choice?.finish_reason != null) {
       // Terminal chunk: assemble the final frame but hold it (usage may still trail).
@@ -1428,6 +1489,14 @@ async function* transformStreamOut(src: AsyncIterable<IRChunk>): AsyncIterable<G
     }
   }
 
+  const usageMetadata =
+    latestUsage !== undefined || latestServiceTier !== undefined
+      ? {
+          ...(latestUsage ?? {}),
+          ...(latestServiceTier !== undefined ? { serviceTier: latestServiceTier } : {}),
+        }
+      : undefined;
+
   if (terminalParts !== null) {
     yield {
       candidates: [
@@ -1437,7 +1506,7 @@ async function* transformStreamOut(src: AsyncIterable<IRChunk>): AsyncIterable<G
           index: 0,
         },
       ],
-      ...(latestUsage !== undefined ? { usageMetadata: latestUsage } : {}),
+      ...(usageMetadata !== undefined ? { usageMetadata } : {}),
     };
     return;
   }
@@ -1445,10 +1514,10 @@ async function* transformStreamOut(src: AsyncIterable<IRChunk>): AsyncIterable<G
   // Defensive: the IR stream ended WITHOUT a finish chunk (e.g. an abort). Still
   // surface any buffered tool calls + usage once so the client loses nothing.
   const parts = flushToolParts();
-  if (parts.length > 0 || latestUsage !== undefined) {
+  if (parts.length > 0 || usageMetadata !== undefined) {
     yield {
       candidates: [{ content: { role: "model", parts }, index: 0 }],
-      ...(latestUsage !== undefined ? { usageMetadata: latestUsage } : {}),
+      ...(usageMetadata !== undefined ? { usageMetadata } : {}),
     };
   }
 }

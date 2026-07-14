@@ -331,6 +331,7 @@ export const IRUsageSchema = z
     cache_creation_tokens: z.number().int().nonnegative().optional(),
     prompt_tokens_details: IRTokenDetailsSchema.optional(),
     completion_tokens_details: IRTokenDetailsSchema.optional(),
+    inference_geo: z.string().optional(),
   })
   .partial();
 export type IRUsage = z.infer<typeof IRUsageSchema>;

@@ -927,6 +927,19 @@ describe("anthropicToOpenAIResponse", () => {
     expect(out.usage).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
   });
 
+  it("maps Anthropic usage.speed to the OpenAI service tier", () => {
+    const out = anthropicToOpenAIResponse(
+      {
+        id: "msg_fast",
+        content: [{ type: "text", text: "fast" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 10, output_tokens: 5, speed: "fast" },
+      },
+      "claude-opus-4-8",
+    );
+    expect(out.service_tier).toBe("fast");
+  });
+
   it("maps tool_use -> tool_calls with finish_reason tool_calls", () => {
     const out = anthropicToOpenAIResponse(
       {
@@ -980,6 +993,11 @@ describe("anthropicToOpenAIResponse", () => {
           input_tokens: 100,
           cache_read_input_tokens: 40,
           cache_creation_input_tokens: 10,
+          cache_creation: {
+            ephemeral_5m_input_tokens: 6,
+            ephemeral_1h_input_tokens: 4,
+          },
+          inference_geo: "us",
           output_tokens: 5,
         },
       },
@@ -990,7 +1008,13 @@ describe("anthropicToOpenAIResponse", () => {
       prompt_tokens: 150,
       completion_tokens: 5,
       total_tokens: 155,
-      prompt_tokens_details: { cached_tokens: 40, cache_creation_tokens: 10 },
+      inference_geo: "us",
+      prompt_tokens_details: {
+        cached_tokens: 40,
+        cache_creation_tokens: 10,
+        ephemeral_5m_input_tokens: 6,
+        ephemeral_1h_input_tokens: 4,
+      },
     });
   });
 });
@@ -1035,8 +1059,14 @@ describe("translateAnthropicSSE", () => {
           usage: {
             input_tokens: 12,
             output_tokens: 1,
+            speed: "fast",
+            inference_geo: "us",
             cache_read_input_tokens: 3,
             cache_creation_input_tokens: 2,
+            cache_creation: {
+              ephemeral_5m_input_tokens: 1,
+              ephemeral_1h_input_tokens: 1,
+            },
           },
         },
       },
@@ -1058,19 +1088,28 @@ describe("translateAnthropicSSE", () => {
     expect(usageFrame).toBeDefined();
     const parsed = JSON.parse((usageFrame as string).slice(5).trim()) as {
       choices: unknown[];
+      service_tier?: string;
       usage?: {
         prompt_tokens?: number;
         completion_tokens?: number;
         total_tokens?: number;
+        inference_geo?: string;
         prompt_tokens_details?: { cached_tokens?: number; cache_creation_tokens?: number };
       };
     };
     expect(parsed.choices).toEqual([]);
+    expect(parsed.service_tier).toBe("fast");
     expect(parsed.usage).toMatchObject({
       prompt_tokens: 17,
       completion_tokens: 7,
       total_tokens: 24,
-      prompt_tokens_details: { cached_tokens: 3, cache_creation_tokens: 2 },
+      inference_geo: "us",
+      prompt_tokens_details: {
+        cached_tokens: 3,
+        cache_creation_tokens: 2,
+        ephemeral_5m_input_tokens: 1,
+        ephemeral_1h_input_tokens: 1,
+      },
     });
   });
 
