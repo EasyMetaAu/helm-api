@@ -218,7 +218,7 @@ describe("createOAuthPoolClient — account selection", () => {
         {
           ...member("no-credits", 50, true, calls),
           quotaWindows: [
-            { key: "primary", usedPercent: 0, resetsAtMs: 60 * 60 * 1000, windowMinutes: 300 },
+            { key: "primary", usedPercent: 10, resetsAtMs: 60 * 60 * 1000, windowMinutes: 300 },
           ],
           quotaCapturedAtMs: 1_000,
           quotaResetCredits: 0,
@@ -239,6 +239,46 @@ describe("createOAuthPoolClient — account selection", () => {
     await pool.chatCompletion(REQ);
 
     expect(calls).toEqual(["has-credits"]);
+  });
+
+  it("use_expiring does not let reset credits outweigh substantially more expiring weekly quota", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        {
+          ...member("plus-with-more-expiring-quota", 50, true, calls),
+          quotaWindows: [
+            {
+              key: "primary",
+              usedPercent: 2,
+              resetsAtMs: 7 * 24 * 60 * 60 * 1000,
+              windowMinutes: 10_080,
+            },
+          ],
+          quotaCapturedAtMs: 1_000,
+          quotaResetCredits: 0,
+        },
+        {
+          ...member("pro-with-reset-credits", 50, true, calls),
+          quotaWindows: [
+            {
+              key: "primary",
+              usedPercent: 31,
+              resetsAtMs: 7 * 24 * 60 * 60 * 1000,
+              windowMinutes: 10_080,
+            },
+          ],
+          quotaCapturedAtMs: 1_000,
+          quotaResetCredits: 3,
+        },
+      ],
+      selectionStrategy: "use_expiring",
+      now: () => 1_000,
+    });
+
+    await pool.chatCompletion(REQ);
+
+    expect(calls).toEqual(["plus-with-more-expiring-quota"]);
   });
 
   it("manual_priority keeps new sessions on priority/LRU instead of hash assignment", async () => {
