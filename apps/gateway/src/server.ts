@@ -160,6 +160,7 @@ import {
   loadGlobalOAuthSettings,
   markAccountCredentialFailure,
   resolveAccountModelsMode,
+  saveAccountDiscoveredModels,
 } from "./oauth/account-settings.js";
 import { createOAuthAdmin } from "./oauth/admin-oauth.js";
 import { runResetCreditAttempt, weeklySaturated } from "./oauth/auto-reset.js";
@@ -962,6 +963,22 @@ export async function synthesizeOAuthProviders(
         const exact = modelDiscoveryCache
           ? await modelDiscoveryCache.load({ providerId, account }, discoverExact)
           : await discoverExact();
+        const accepted = modelDiscoveryCache
+          ? modelDiscoveryCache.snapshot({ providerId, account })
+          : exact;
+        if (
+          accepted &&
+          accepted.length > 0 &&
+          !(await saveAccountDiscoveredModels(
+            config,
+            oauthCtx.encKey,
+            providerId,
+            account,
+            accepted,
+          ))
+        ) {
+          log("warn", "oauth.models.snapshot_write_failed", { providerId, account });
+        }
         discovered = exact.length > 0 ? exact : (CURATED_OAUTH_MODELS[providerId] ?? []);
       }
       // Auto follows the authenticated account catalog. Manual is an explicit
@@ -2997,6 +3014,7 @@ export async function buildServer(
         ? await effectiveOAuthModelOptions(oauthCtx, store.config, ROUTABLE_OAUTH_IDS, {
             codexCatalog: codexModelCatalog,
             codexClientVersion,
+            modelDiscoveryCache: oauthModelDiscoveryCache,
           })
         : [];
       const byAlias = new Map<string, ModelOption>();

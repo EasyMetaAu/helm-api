@@ -16,6 +16,7 @@ import {
 } from "./account-settings.js";
 import type { CodexModelCacheKey } from "./codex-model-cache.js";
 import type { CodexModelCatalog } from "./codex-model-catalog.js";
+import type { OAuthModelDiscoveryCache } from "./model-discovery-cache.js";
 
 // THE single source of truth for "which subscription models are routable right
 // now" (issue #38 follow-up). One function, computed LIVE and NETWORK-FREE, so the
@@ -46,16 +47,19 @@ const ACCOUNT_MODEL_FALLBACKS: Readonly<Record<string, readonly string[]>> = {
   xai: ["grok-4.5", "grok-composer-2.5-fast"],
 };
 
-// The effective enabled models for ONE account (no network): the saved
-// `enabledModels` verbatim, else the provider's curated fallback (else []).
+// The effective enabled models for ONE account (no network): Manual uses the
+// saved `enabledModels` verbatim; Auto uses the durable discovery snapshot when
+// available, then the provider's curated fallback (else []).
 export function effectiveAccountModels(
-  settings: Pick<AccountSettings, "modelsMode" | "enabledModels">,
+  settings: Pick<AccountSettings, "modelsMode" | "enabledModels" | "discoveredModels">,
   providerId: string,
 ): string[] {
   if (providerId === "openai-codex") return [];
   return resolveAccountModelsMode(providerId, settings) === "manual"
     ? (settings.enabledModels ?? [])
-    : [...(ACCOUNT_MODEL_FALLBACKS[providerId] ?? [])];
+    : settings.discoveredModels && settings.discoveredModels.length > 0
+      ? [...settings.discoveredModels]
+      : [...(ACCOUNT_MODEL_FALLBACKS[providerId] ?? [])];
 }
 
 // Every routable `${providerId}/${model}` alias across all bound accounts, deduped
@@ -74,6 +78,10 @@ export interface ModelOption {
 export interface EffectiveOAuthModelOptions {
   codexCatalog?: CodexModelCatalog;
   codexClientVersion?: string;
+  // Shared account-scoped discovery cache populated by Admin refreshes and
+  // runtime pool synthesis. The Lanes picker reads its last-known-good snapshot
+  // without performing upstream I/O of its own.
+  modelDiscoveryCache?: OAuthModelDiscoveryCache;
 }
 
 function identityString(value: unknown): string | undefined {
@@ -157,7 +165,21 @@ export async function effectiveOAuthModelOptions(
         models = entitled;
       }
     } else {
-      models = effectiveAccountModels(accountSettings, row.providerId);
+      const modelsMode = resolveAccountModelsMode(row.providerId, accountSettings);
+      const discovered =
+        modelsMode === "auto"
+          ? options.modelDiscoveryCache?.snapshot({
+              providerId: row.providerId,
+              account: row.account,
+            })
+          : undefined;
+      // Auto follows the exact account catalog when a successful discovery has
+      // populated the shared cache. A missing/negative snapshot keeps the existing
+      // curated fail-open projection; Manual remains the operator's saved list.
+      models =
+        discovered && discovered.length > 0
+          ? discovered
+          : effectiveAccountModels(accountSettings, row.providerId);
     }
     for (const m of models) {
       const alias = `${row.providerId}/${m}`;

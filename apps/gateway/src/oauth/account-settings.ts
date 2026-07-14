@@ -43,6 +43,10 @@ export interface AccountSettings {
   modelsMode?: "auto" | "manual";
   // Subset of discovered models the operator exposes to Lanes. Unset = expose all.
   enabledModels?: string[];
+  // Last non-empty remote catalog successfully discovered for this account.
+  // Auto mode uses it after a restart or transient discovery failure; live cache
+  // data still wins. Stored inside the existing encrypted settings blob.
+  discoveredModels?: string[];
   // Lower = preferred; round-robin within an equal priority. Scheduler default 50.
   priority?: number;
   // When false the account is skipped by the scheduler (kept connected, parked).
@@ -109,19 +113,34 @@ function serializeSettingsMutation<T>(config: ConfigStore, work: () => Promise<T
   return run;
 }
 
-// Load + decrypt the full settings map. FAIL-OPEN to {} on a missing/corrupt blob
-// so a bad write can never wedge routing or the providers page.
+function parseAccountSettings(blob: string, encKey: Buffer): AccountSettingsMap {
+  const parsed: unknown = JSON.parse(decryptSecret(blob, encKey));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("invalid OAuth account settings");
+  }
+  return parsed as AccountSettingsMap;
+}
+
+async function loadAccountSettingsForMutation(
+  config: ConfigStore,
+  encKey: Buffer,
+): Promise<AccountSettingsMap> {
+  const blob = await config.get(SETTINGS_KEY);
+  if (blob === null) return {};
+  return parseAccountSettings(blob, encKey);
+}
+
+// Read paths FAIL-OPEN to {} on a missing/corrupt blob so a bad write can never
+// wedge routing or the providers page. Mutation paths use the strict loader above:
+// corrupt/unreadable settings must never be replaced with a partial empty map.
 export async function loadAccountSettings(
   config: ConfigStore,
   encKey: Buffer,
 ): Promise<AccountSettingsMap> {
   try {
     const blob = await config.get(SETTINGS_KEY);
-    if (!blob) return {};
-    const json = decryptSecret(blob, encKey);
-    const parsed: unknown = JSON.parse(json);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    return parsed as AccountSettingsMap;
+    if (blob === null) return {};
+    return parseAccountSettings(blob, encKey);
   } catch {
     return {};
   }
@@ -190,11 +209,69 @@ export async function setAccountSettings(
   patch: AccountSettings,
 ): Promise<void> {
   await serializeSettingsMutation(config, async () => {
-    const map = await loadAccountSettings(config, encKey);
+    const map = await loadAccountSettingsForMutation(config, encKey);
     const key = composite(providerId, account);
     map[key] = { ...map[key], ...patch };
     await saveAccountSettings(config, encKey, map);
   });
+}
+
+// Persist one account's non-empty, last-known-good remote catalog. Empty/error
+// discovery must never erase a prior snapshot. Avoid rewriting the encrypted blob
+// when the normalized catalog is unchanged (refresh runs can be frequent).
+export async function saveAccountDiscoveredModels(
+  config: ConfigStore,
+  encKey: Buffer,
+  providerId: string,
+  account: string,
+  models: readonly string[],
+): Promise<boolean> {
+  const normalized = [...new Set(models.map((model) => model.trim()).filter(Boolean))];
+  if (normalized.length === 0) return true;
+  try {
+    await serializeSettingsMutation(config, async () => {
+      const map = await loadAccountSettingsForMutation(config, encKey);
+      const key = composite(providerId, account);
+      const current = map[key] ?? {};
+      if (
+        current.discoveredModels?.length === normalized.length &&
+        current.discoveredModels.every((model, index) => model === normalized[index])
+      ) {
+        return;
+      }
+      map[key] = { ...current, discoveredModels: normalized };
+      await saveAccountSettings(config, encKey, map);
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Credential replacement must remove the old identity's durable catalog BEFORE
+// the token row changes. Unlike background snapshot writes, a failed clear is a
+// hard stop for reconnect; callers use the boolean to keep the old credential.
+export async function clearAccountDiscoveredModels(
+  config: ConfigStore,
+  encKey: Buffer,
+  providerId: string,
+  account: string,
+): Promise<boolean> {
+  try {
+    await serializeSettingsMutation(config, async () => {
+      const map = await loadAccountSettingsForMutation(config, encKey);
+      const key = composite(providerId, account);
+      const current = map[key];
+      if (!current || current.discoveredModels === undefined) return;
+      const next = { ...current };
+      delete next.discoveredModels;
+      map[key] = next;
+      await saveAccountSettings(config, encKey, map);
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function markAccountCredentialFailure(
@@ -205,7 +282,7 @@ export async function markAccountCredentialFailure(
   failure: { at: number; reason: string },
 ): Promise<void> {
   await serializeSettingsMutation(config, async () => {
-    const map = await loadAccountSettings(config, encKey);
+    const map = await loadAccountSettingsForMutation(config, encKey);
     const key = composite(providerId, account);
     const current = map[key] ?? {};
     const wasOperatorParked =
@@ -228,7 +305,7 @@ export async function clearAccountCredentialFailure(
   account: string,
 ): Promise<void> {
   await serializeSettingsMutation(config, async () => {
-    const map = await loadAccountSettings(config, encKey);
+    const map = await loadAccountSettingsForMutation(config, encKey);
     const key = composite(providerId, account);
     const current = map[key];
     if (!current) return;
@@ -268,7 +345,7 @@ export async function clearAccountSettings(
   account: string,
 ): Promise<void> {
   await serializeSettingsMutation(config, async () => {
-    const map = await loadAccountSettings(config, encKey);
+    const map = await loadAccountSettingsForMutation(config, encKey);
     delete map[composite(providerId, account)];
     await saveAccountSettings(config, encKey, map);
   });
