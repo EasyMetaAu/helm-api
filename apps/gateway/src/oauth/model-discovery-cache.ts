@@ -8,7 +8,12 @@ export interface OAuthModelDiscoveryCacheKey {
 }
 
 export interface OAuthModelDiscoveryCache {
-  load(key: OAuthModelDiscoveryCacheKey, discover: () => Promise<string[]>): Promise<string[]>;
+  load(
+    key: OAuthModelDiscoveryCacheKey,
+    discover: () => Promise<string[]>,
+    options?: { force?: boolean },
+  ): Promise<string[]>;
+  snapshot(key: OAuthModelDiscoveryCacheKey): string[] | undefined;
   invalidate(key: OAuthModelDiscoveryCacheKey): void;
 }
 
@@ -68,11 +73,12 @@ export function createOAuthModelDiscoveryCache(
   }
 
   return {
-    async load(key, discover) {
+    async load(key, discover, loadOptions = {}) {
       const id = cacheKey(key);
       const currentTime = now();
       const hit = entries.get(id);
       if (
+        loadOptions.force !== true &&
         hit &&
         ((hit.models.length > 0 && currentTime - hit.fetchedAtMs < ttlMs) ||
           currentTime < hit.retryAtMs)
@@ -119,6 +125,11 @@ export function createOAuthModelDiscoveryCache(
       });
       refreshes.set(id, run);
       return run.then((models) => [...models]);
+    },
+
+    snapshot(key) {
+      const hit = entries.get(cacheKey(key));
+      return hit ? [...hit.models] : undefined;
     },
 
     invalidate(key) {

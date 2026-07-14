@@ -984,5 +984,14 @@
   "This device code has expired.": "Este código de dispositivo ha caducado.",
   "Authorization was denied.": "Se denegó la autorización.",
   "Authorization failed. Start again to retry.": "La autorización falló. Vuelve a empezar para intentarlo de nuevo.",
-  "Start again": "Volver a empezar"
+  "Start again": "Volver a empezar",
+  "Failed to load OAuth providers": "No se pudieron cargar los proveedores OAuth",
+  "Failed to refresh providers": "No se pudieron actualizar los proveedores",
+  "Provider refresh queued": "Actualización de proveedores en cola",
+  "Refreshing provider data…": "Actualizando datos de proveedores…",
+  "Provider refresh failed": "Error al actualizar los proveedores",
+  "Provider refresh failed: {error}": "Error al actualizar los proveedores: {error}",
+  "Provider data refreshed": "Datos de proveedores actualizados",
+  "Provider data refreshed at {time}": "Datos de proveedores actualizados a las {time}",
+  "refresh available again in {seconds}s": "se podrá actualizar de nuevo en {seconds}s"
 }

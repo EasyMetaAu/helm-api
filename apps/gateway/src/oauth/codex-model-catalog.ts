@@ -26,6 +26,7 @@ export interface CodexModelCatalog {
   load(
     key: CodexModelCacheKey,
     fetchModels: () => Promise<OpenAICodexModelsResult>,
+    options?: { force?: boolean },
   ): Promise<CodexModelCatalogSnapshot | null>;
   snapshot(key: CodexModelCacheKey): CodexModelCatalogSnapshot | undefined;
   resolve(key: CodexModelCacheKey, model: string): CodexModelInfo | undefined;
@@ -207,12 +208,12 @@ export function createCodexModelCatalog(options: CodexModelCatalogOptions): Code
   }
 
   return {
-    async load(key, fetchModels) {
+    async load(key, fetchModels, loadOptions = {}) {
       const normalized = normalizedKey(key);
       if (normalized === null) return null;
       const hit = await options.cache.get(normalized);
       const cachedModels = hit ? parseModels(hit.entry.models) : null;
-      if (hit?.fresh && cachedModels) {
+      if (loadOptions.force !== true && hit?.fresh && cachedModels) {
         const models = applyRemoteModels(normalized, cachedModels);
         if (models.length > 0) {
           return apply(

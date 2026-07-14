@@ -2,6 +2,8 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/sve
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invalidateAll } from '$app/navigation';
 import type {
+  OAuthAdminRefreshStatus,
+  OAuthOverview,
   OAuthProviderStatus,
   OAuthQuotaSnapshot,
   OAuthSelectionStrategy,
@@ -19,15 +21,19 @@ const setAccountSchedule = vi.fn();
 const setSelectionStrategy = vi.fn();
 const streamAccountTest = vi.fn();
 const consumeCodexResetCredit = vi.fn();
+const getOAuthOverview = vi.fn();
+const requestOAuthRefresh = vi.fn();
 vi.mock('$lib/api/oauth.js', () => ({
   completeManualPaste: vi.fn(),
   consumeCodexResetCredit: (...args: unknown[]) => consumeCodexResetCredit(...args),
   getAccountModels: (...args: unknown[]) => getAccountModels(...args),
   getAccountProxy: (...args: unknown[]) => getAccountProxy(...args),
   getAccountSchedule: (...args: unknown[]) => getAccountSchedule(...args),
+  getOAuthOverview: (...args: unknown[]) => getOAuthOverview(...args),
   logoutOAuth: (...args: unknown[]) => logoutOAuth(...args),
   pollDeviceCode: vi.fn(),
   resetUsageLimit: (...args: unknown[]) => resetUsageLimit(...args),
+  requestOAuthRefresh: (...args: unknown[]) => requestOAuthRefresh(...args),
   setAccountModels: (...args: unknown[]) => setAccountModels(...args),
   setAccountProxy: vi.fn(),
   setAccountSchedule: (...args: unknown[]) => setAccountSchedule(...args),
@@ -87,6 +93,17 @@ const quota: OAuthQuotaSnapshot[] = [
   },
 ];
 
+const idleRefresh: OAuthAdminRefreshStatus = {
+  state: 'idle',
+  jobId: null,
+  requestedAt: null,
+  startedAt: null,
+  finishedAt: null,
+  lastSuccessAt: null,
+  nextAllowedAt: null,
+  error: null,
+};
+
 function renderPage(
   overrides: Partial<{
     configured: boolean;
@@ -94,6 +111,7 @@ function renderPage(
     providers: OAuthProviderStatus[];
     usage: OAuthUsageRow[];
     quota: OAuthQuotaSnapshot[];
+    refresh: OAuthAdminRefreshStatus;
     loadError?: string;
   }> = {},
 ) {
@@ -104,6 +122,7 @@ function renderPage(
       providers: [provider()],
       usage,
       quota,
+      refresh: idleRefresh,
       ...overrides,
     },
   });
@@ -120,6 +139,8 @@ describe('providers page', () => {
     setSelectionStrategy.mockReset();
     streamAccountTest.mockReset();
     consumeCodexResetCredit.mockReset();
+    getOAuthOverview.mockReset();
+    requestOAuthRefresh.mockReset();
     invalidateAllMock.mockReset();
     logoutOAuth.mockResolvedValue(undefined);
     getAccountModels.mockResolvedValue({
@@ -138,6 +159,20 @@ describe('providers page', () => {
     setAccountModels.mockResolvedValue(undefined);
     setAccountSchedule.mockResolvedValue(undefined);
     setSelectionStrategy.mockResolvedValue(undefined);
+    getOAuthOverview.mockResolvedValue({
+      configured: true,
+      selectionStrategy: 'balanced',
+      providers: [provider()],
+      usage,
+      quota,
+      refresh: idleRefresh,
+    } satisfies OAuthOverview);
+    requestOAuthRefresh.mockResolvedValue({
+      accepted: true,
+      coalesced: false,
+      retryAfterMs: 0,
+      status: { ...idleRefresh, state: 'queued', jobId: 'refresh-1', requestedAt: Date.now() },
+    });
   });
 
   it('labels the Grok subscription provider as experimental', () => {
@@ -445,11 +480,57 @@ describe('providers page', () => {
     renderPage();
 
     await fireEvent.click(screen.getByTestId('refresh-now'));
-    expect(invalidateAllMock).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(requestOAuthRefresh).toHaveBeenCalledOnce());
+    await waitFor(() => expect(getOAuthOverview).toHaveBeenCalledOnce());
+    expect(invalidateAllMock).not.toHaveBeenCalled();
 
     await fireEvent.click(screen.getByTestId('refresh-toggle'));
     expect(screen.getByTestId('refresh-menu')).toBeInTheDocument();
     expect(screen.getByTestId('refresh-interval-10')).toHaveTextContent('10s');
+  });
+
+  it('shows the latest cached data after the queued refresh completes', async () => {
+    const refreshedAt = Date.now();
+    getOAuthOverview.mockResolvedValue({
+      configured: true,
+      selectionStrategy: 'balanced',
+      providers: [provider()],
+      usage: [{ ...usage[0]!, requests: 99 }],
+      quota,
+      refresh: {
+        ...idleRefresh,
+        state: 'succeeded',
+        jobId: 'refresh-1',
+        requestedAt: refreshedAt - 100,
+        startedAt: refreshedAt - 80,
+        finishedAt: refreshedAt,
+        lastSuccessAt: refreshedAt,
+        nextAllowedAt: refreshedAt + 60_000,
+      },
+    } satisfies OAuthOverview);
+    renderPage();
+
+    await fireEvent.click(screen.getByTestId('refresh-now'));
+
+    await waitFor(() => expect(screen.getByText('99 req')).toBeInTheDocument());
+    expect(screen.getByTestId('provider-refresh-status')).toHaveTextContent(
+      'Provider data refreshed',
+    );
+  });
+
+  it('keeps timer-driven auto refresh cache-only', async () => {
+    vi.useFakeTimers();
+    try {
+      renderPage();
+      await fireEvent.click(screen.getByTestId('refresh-toggle'));
+      await fireEvent.click(screen.getByTestId('refresh-interval-5'));
+      await vi.advanceTimersByTimeAsync(5000);
+
+      expect(getOAuthOverview).toHaveBeenCalledOnce();
+      expect(requestOAuthRefresh).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('labels the current Claude scoped weekly Fable quota window', () => {

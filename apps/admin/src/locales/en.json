@@ -984,5 +984,14 @@
   "This device code has expired.": "This device code has expired.",
   "Authorization was denied.": "Authorization was denied.",
   "Authorization failed. Start again to retry.": "Authorization failed. Start again to retry.",
-  "Start again": "Start again"
+  "Start again": "Start again",
+  "Failed to load OAuth providers": "Failed to load OAuth providers",
+  "Failed to refresh providers": "Failed to refresh providers",
+  "Provider refresh queued": "Provider refresh queued",
+  "Refreshing provider data…": "Refreshing provider data…",
+  "Provider refresh failed": "Provider refresh failed",
+  "Provider refresh failed: {error}": "Provider refresh failed: {error}",
+  "Provider data refreshed": "Provider data refreshed",
+  "Provider data refreshed at {time}": "Provider data refreshed at {time}",
+  "refresh available again in {seconds}s": "refresh available again in {seconds}s"
 }

@@ -59,6 +59,23 @@ describe('RefreshControl', () => {
     expect(onRefresh).toHaveBeenCalledTimes(2);
   });
 
+  it('can keep manual refresh separate from cache-only auto refresh', async () => {
+    const onRefresh = vi.fn();
+    const onAutoRefresh = vi.fn();
+    render(RefreshControl, { onRefresh, onAutoRefresh });
+
+    await fireEvent.click(screen.getByTestId('refresh-now'));
+    expect(onRefresh).toHaveBeenCalledOnce();
+    expect(onAutoRefresh).not.toHaveBeenCalled();
+
+    await fireEvent.click(screen.getByTestId('refresh-toggle'));
+    await fireEvent.click(screen.getByTestId('refresh-interval-5'));
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(onRefresh).toHaveBeenCalledOnce();
+    expect(onAutoRefresh).toHaveBeenCalledOnce();
+  });
+
   it('surfaces the active cadence and closes the menu after selecting', async () => {
     render(RefreshControl, { onRefresh: vi.fn() });
     await fireEvent.click(screen.getByTestId('refresh-toggle'));

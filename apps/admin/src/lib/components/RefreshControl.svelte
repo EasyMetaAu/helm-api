@@ -18,9 +18,13 @@
   // cadence is a single admin-wide preference so all pages stay in lockstep.
   let {
     onRefresh,
+    onAutoRefresh,
     storageKey = SHARED_STORAGE_KEY,
   }: {
     onRefresh: () => void | Promise<void>;
+    // Providers uses this to keep timer ticks cache-only while the explicit button
+    // enqueues one upstream refresh. Other pages omit it and retain prior behavior.
+    onAutoRefresh?: () => void | Promise<void>;
     // Mostly for tests/future embedded use. Admin routes should omit this so they
     // all share SHARED_STORAGE_KEY.
     storageKey?: string;
@@ -83,11 +87,11 @@
   }
 
   // Run a refresh, guarding against overlap so a slow load never stacks ticks.
-  async function runRefresh(): Promise<void> {
+  async function runRefresh(callback: () => void | Promise<void> = onRefresh): Promise<void> {
     if (refreshing) return;
     refreshing = true;
     try {
-      await onRefresh();
+      await callback();
     } finally {
       refreshing = false;
     }
@@ -106,7 +110,7 @@
     stopTimer();
     if (seconds > 0) {
       timer = setInterval(() => {
-        void runRefresh();
+        void runRefresh(onAutoRefresh ?? onRefresh);
       }, seconds * 1000);
     }
   }

@@ -76,6 +76,9 @@ export function expandOpenAICodexModelAliases(models: readonly string[]): string
 // codex-rs/models-manager::client_version_to_whole.
 export const DEFAULT_OPENAI_CODEX_CLIENT_VERSION = "0.145.0";
 export const OPENAI_CODEX_CLIENT_VERSION_ENV = "HELM_OPENAI_CODEX_CLIENT_VERSION";
+// Provider-model discovery is an admin observability action. It must never inherit
+// Node fetch's multi-minute default and block the providers page refresh worker.
+export const OAUTH_MODEL_DISCOVERY_TIMEOUT_MS = 10_000;
 
 export interface OpenAICodexModelsOptions {
   accountId?: string;
@@ -83,6 +86,7 @@ export interface OpenAICodexModelsOptions {
   clientVersion?: string;
   userAgent?: string;
   fetchImpl?: typeof globalThis.fetch;
+  timeoutMs?: number;
 }
 
 export interface OpenAICodexModelsResult {
@@ -183,7 +187,14 @@ export async function listOpenAICodexModels(
   if (accountId) headers.set("chatgpt-account-id", accountId);
   if (isFedramp) headers.set("X-OpenAI-Fedramp", "true");
 
-  const response = await (options.fetchImpl ?? fetch)(url.toString(), { headers });
+  const timeoutMs =
+    typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs)
+      ? Math.max(1, Math.floor(options.timeoutMs))
+      : OAUTH_MODEL_DISCOVERY_TIMEOUT_MS;
+  const response = await (options.fetchImpl ?? fetch)(url.toString(), {
+    headers,
+    signal: AbortSignal.timeout(timeoutMs),
+  });
   if (!response.ok) {
     await response.text().catch(() => "");
     throw new OpenAICodexModelsError(response.status);
@@ -215,7 +226,12 @@ export async function listOpenAICodexModels(
 export async function listAnthropicModels(
   accessToken: string,
   fetchImpl: typeof globalThis.fetch = fetch,
+  options: { timeoutMs?: number } = {},
 ): Promise<string[]> {
+  const timeoutMs =
+    typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs)
+      ? Math.max(1, Math.floor(options.timeoutMs))
+      : OAUTH_MODEL_DISCOVERY_TIMEOUT_MS;
   const res = await fetchImpl("https://api.anthropic.com/v1/models?limit=1000", {
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -224,6 +240,7 @@ export async function listAnthropicModels(
       "user-agent": "claude-cli/1.0.0",
       "x-app": "cli",
     },
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`anthropic /v1/models HTTP ${res.status}`);
   const body = (await res.json()) as { data?: Array<{ id?: unknown }> };

@@ -1,14 +1,18 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { invalidateAll } from '$app/navigation';
   import { isCodexAccountWeeklyQuotaWindow } from '@helm/shared';
   import {
     consumeCodexResetCredit,
+    getOAuthOverview,
     logoutOAuth,
+    requestOAuthRefresh,
     resetUsageLimit,
     setAccountSchedule,
     setSelectionStrategy,
     type OAuthAccount,
+    type OAuthAdminRefreshStatus,
+    type OAuthOverview,
     type OAuthProviderStatus,
     type OAuthQuotaSnapshot,
     type OAuthQuotaWindow,
@@ -32,16 +36,10 @@
   let {
     data,
   }: {
-    data: {
-      configured: boolean;
-      selectionStrategy: OAuthSelectionStrategy;
-      providers: OAuthProviderStatus[];
-      usage: OAuthUsageRow[];
-      quota: OAuthQuotaSnapshot[];
-      loadError?: string;
-    };
+    data: OAuthOverview & { loadError?: string };
   } = $props();
 
+  let overview = $state<OAuthOverview & { loadError?: string }>(untrack(() => ({ ...data })));
   let error = $state<string | null>(untrack(() => data.loadError ?? null));
   let showConnect = $state<boolean>(false);
   let managing = $state<{ providerId: string; providerName: string; account: string } | null>(null);
@@ -88,6 +86,13 @@
   // the next action. Errors continue to use the shared `error` banner.
   let resetNotice = $state<string | null>(null);
 
+  // Keep mutation-triggered SvelteKit invalidations compatible with the local
+  // cache snapshot used by manual/automatic refreshes.
+  $effect(() => {
+    overview = { ...data };
+    if (data.loadError) error = data.loadError;
+  });
+
   const keyOf = (providerId: string, account: string): string => `${providerId}/${account}`;
   const ACTIVE_LIMIT_RECOVERY_THRESHOLD = 95;
   const CODEX_RESET_MIN_WEEKLY_USED_PERCENT = 90;
@@ -121,14 +126,18 @@
 
   // One table row per connected account, flattened across providers, joined to its
   // usage + quota snapshot (both fail-open: a missing entry renders "—").
-  let usageByKey = $derived(new Map(data.usage.map((u) => [keyOf(u.providerId, u.account), u])));
-  let quotaByKey = $derived(new Map(data.quota.map((q) => [keyOf(q.providerId, q.account), q])));
+  let usageByKey = $derived(
+    new Map(overview.usage.map((u) => [keyOf(u.providerId, u.account), u])),
+  );
+  let quotaByKey = $derived(
+    new Map(overview.quota.map((q) => [keyOf(q.providerId, q.account), q])),
+  );
   let rows = $derived(
-    data.providers.flatMap((p) => p.accounts.map((account) => ({ provider: p, account }))),
+    overview.providers.flatMap((p) => p.accounts.map((account) => ({ provider: p, account }))),
   );
 
   function providerName(id: string): string {
-    return data.providers.find((p) => p.id === id)?.name ?? id;
+    return overview.providers.find((p) => p.id === id)?.name ?? id;
   }
 
   // A short "platform · auth" pill so the supply-chain shape is legible at a glance
@@ -454,15 +463,98 @@
     void invalidateAll();
   }
 
-  // Page refresh: re-run the page load (status + today's usage + quota windows in
-  // parallel). Usage counters are read live; the Anthropic quota PULL stays behind
-  // the gateway's 5-min debounce (the upstream endpoint rate-limits aggressively),
-  // so within that window the bars re-render from the cached snapshot. The load
-  // itself never throws (fail-open) — `loadError` carries the only failure signal.
+  const REFRESH_POLL_MS = 750;
+  const REFRESH_POLL_LIMIT = 160;
+  let destroyed = false;
+  let pollGeneration = 0;
+  onDestroy(() => {
+    destroyed = true;
+    pollGeneration += 1;
+  });
+
+  function refreshActive(status: OAuthAdminRefreshStatus): boolean {
+    return status.state === 'queued' || status.state === 'running';
+  }
+
+  function wait(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function refreshCachedOverview(): Promise<OAuthOverview | null> {
+    try {
+      const next = await getOAuthOverview();
+      if (!destroyed) {
+        overview = next;
+        error = null;
+      }
+      return next;
+    } catch (e) {
+      if (!destroyed) {
+        error = e instanceof Error ? e.message : $t('Failed to load OAuth providers');
+      }
+      return null;
+    }
+  }
+
+  // Poll only the cache-only overview after a job is accepted. One poller per page
+  // is enough; the gateway independently coalesces clicks across tabs/requests.
+  async function pollRefresh(jobId: string | null): Promise<void> {
+    const generation = ++pollGeneration;
+    for (let attempt = 0; attempt < REFRESH_POLL_LIMIT; attempt += 1) {
+      await wait(REFRESH_POLL_MS);
+      if (destroyed || generation !== pollGeneration) return;
+      const next = await refreshCachedOverview();
+      if (!next) return;
+      if (!refreshActive(next.refresh)) return;
+      if (jobId !== null && next.refresh.jobId !== jobId) return;
+    }
+  }
+
+  // Explicit click enqueues upstream work and returns immediately. The latest cache
+  // is rendered at once, then cache-only polling picks up the completed snapshot.
   async function refresh(): Promise<void> {
     error = null;
-    await invalidateAll();
-    error = data.loadError ?? null;
+    try {
+      const queued = await requestOAuthRefresh();
+      overview = { ...overview, refresh: queued.status };
+      const next = await refreshCachedOverview();
+      if (next && refreshActive(next.refresh)) void pollRefresh(next.refresh.jobId);
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t('Failed to refresh providers');
+    }
+  }
+
+  // Timer ticks are intentionally cache-only. They can observe a job started by
+  // another admin tab, but they never create provider traffic themselves.
+  async function autoRefresh(): Promise<void> {
+    await refreshCachedOverview();
+  }
+
+  function refreshStatusLabel(status: OAuthAdminRefreshStatus): string | null {
+    if (status.state === 'queued') return $t('Provider refresh queued');
+    if (status.state === 'running') return $t('Refreshing provider data…');
+    if (status.state === 'failed') {
+      return status.error
+        ? $t('Provider refresh failed: {error}', { error: status.error })
+        : $t('Provider refresh failed');
+    }
+    if (status.state === 'succeeded' || status.lastSuccessAt !== null) {
+      const refreshedAt = status.lastSuccessAt ?? status.finishedAt;
+      const time = refreshedAt === null ? null : new Date(refreshedAt).toLocaleTimeString();
+      const cooldownSeconds =
+        status.nextAllowedAt !== null && status.nextAllowedAt > Date.now()
+          ? Math.max(1, Math.ceil((status.nextAllowedAt - Date.now()) / 1000))
+          : null;
+      const refreshed = time
+        ? $t('Provider data refreshed at {time}', { time })
+        : $t('Provider data refreshed');
+      return cooldownSeconds === null
+        ? refreshed
+        : `${refreshed} · ${$t('refresh available again in {seconds}s', {
+            seconds: cooldownSeconds,
+          })}`;
+    }
+    return null;
   }
 
   function onManaged(): void {
@@ -647,16 +739,28 @@
     </div>
     <div class="flex w-full shrink-0 gap-2 sm:w-auto">
       <div class="flex-1 sm:flex-none">
-        <RefreshControl onRefresh={refresh} />
+        <RefreshControl onRefresh={refresh} onAutoRefresh={autoRefresh} />
       </div>
       <button
         type="button"
         class="btn-primary flex-1 sm:flex-none"
-        disabled={!data.configured}
+        disabled={!overview.configured}
         onclick={() => (showConnect = true)}>{$t('Connect')}</button
       >
     </div>
   </header>
+
+  {#if refreshStatusLabel(overview.refresh)}
+    <p
+      data-testid="provider-refresh-status"
+      class:alert-error={overview.refresh.state === 'failed'}
+      class:field-help={overview.refresh.state !== 'failed'}
+      role="status"
+      aria-live="polite"
+    >
+      {refreshStatusLabel(overview.refresh)}
+    </p>
+  {/if}
 
   {#if error}
     <p class="alert-error" role="alert">{error}</p>
@@ -666,7 +770,7 @@
     <p class="alert-success" role="status">{resetNotice}</p>
   {/if}
 
-  {#if !data.configured}
+  {#if !overview.configured}
     <p class="alert-warn">
       {$t('OAuth login is disabled. Set HELM_OAUTH_ENC_KEY (32 bytes) and restart to enable it.')}
     </p>
@@ -674,7 +778,7 @@
 
   {#if showConnect}
     <ConnectProviderDialog
-      providers={data.providers}
+      providers={overview.providers}
       onconnected={onConnected}
       onclose={() => (showConnect = false)}
     />
@@ -711,7 +815,7 @@
     </div>
   {:else}
     {@const selectedStrategy =
-      strategyOptions.find((option) => option.value === data.selectionStrategy) ??
+      strategyOptions.find((option) => option.value === overview.selectionStrategy) ??
       strategyOptions[0]}
     <div class="card flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
       <div class="min-w-0">
@@ -730,7 +834,7 @@
       <select
         class="select shrink-0 disabled:opacity-50 sm:w-56"
         aria-label={$t('Account usage strategy')}
-        value={data.selectionStrategy}
+        value={overview.selectionStrategy}
         disabled={savingStrategy}
         onchange={(e) => saveSelectionStrategy(e.currentTarget.value as OAuthSelectionStrategy)}
       >

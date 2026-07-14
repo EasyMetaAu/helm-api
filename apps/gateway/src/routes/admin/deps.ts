@@ -142,8 +142,15 @@ export interface OAuthAdminStatusResponse {
 }
 
 export interface OAuthAdminAccess {
-  // Built-in providers + which accounts are currently logged in (no secrets).
-  listStatus(): Promise<OAuthAdminStatusResponse>;
+  // Cache-only status is the providers page read path: local token/settings/model
+  // snapshots only, with no token refresh or upstream model discovery.
+  listCachedStatus(): Promise<OAuthAdminStatusResponse>;
+  // Explicit refresh path. `serial` bounds provider-account work to one account at
+  // a time; `forceRefresh` bypasses fresh model-discovery caches.
+  listStatus(options?: {
+    forceRefresh?: boolean;
+    serial?: boolean;
+  }): Promise<OAuthAdminStatusResponse>;
   // Anthropic manual-paste: begin -> { authorizeUrl }; the verifier/state are held
   // server-side keyed by sessionId. complete exchanges the pasted redirect URL.
   // `proxy` (optional, entered in the connect dialog's first step) is validated +
@@ -242,18 +249,24 @@ export interface OAuthAdminAccess {
   // an on-demand PULL behind a short TTL cache. FAIL-OPEN: returns null on any
   // failure (dead token, network, malformed body) so the page renders "—" rather
   // than erroring. Optional so unit-test seams can omit it.
-  fetchAnthropicQuota?(input: { account: string }): Promise<OAuthQuotaWindow[] | null>;
+  fetchAnthropicQuota?(input: {
+    account: string;
+    force?: boolean;
+  }): Promise<OAuthQuotaWindow[] | null>;
   // Pull the consumer Grok subscription's weekly usage window from the same
   // gRPC-Web method used by grok.com. The existing xAI OAuth bearer is sufficient;
   // no browser cookie is persisted. Same proxy/refresh/cache/fail-open contract as
   // the other quota PULLs.
-  fetchXaiQuota?(input: { account: string }): Promise<OAuthQuotaWindow[] | null>;
+  fetchXaiQuota?(input: { account: string; force?: boolean }): Promise<OAuthQuotaWindow[] | null>;
   // Same PULL for Codex (chatgpt.com/backend-api/wham/usage — what the Codex CLI
   // /status reads). Complements the `x-codex-*` header PUSH so quota renders even
   // before an account has served any traffic. Same TTL cache + fail-open contract.
   // Returns the windows AND the available rate-limit-reset-credit count (both off
   // the one PULL); null on any failure. `resetCredits` null = no grant / unknown.
-  fetchCodexQuota?(input: { account: string }): Promise<CodexQuotaResult>;
+  fetchCodexQuota?(input: { account: string; force?: boolean }): Promise<CodexQuotaResult>;
+  // Read the last in-process Codex quota result without refreshing an expired
+  // cache. Rich quota metadata is folded into the cache-only overview when present.
+  getCachedCodexQuota?(input: { account: string }): Promise<CodexQuotaResult>;
   // Consume one Codex rate-limit reset credit for the account (the "reset usage
   // limit" operator action). FAIL-CLOSED, unlike the PULLs: the seam THROWS on any
   // upstream failure so the route returns an error rather than a false success.

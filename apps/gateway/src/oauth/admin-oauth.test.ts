@@ -452,6 +452,46 @@ describe("createOAuthAdmin", () => {
     ).toContain("proxy-ep=proxy.y.com");
   });
 
+  it("listCachedStatus never refreshes an expired credential or discovers models upstream", async () => {
+    const { tokens, config } = makeStores();
+    await tokens.upsert({
+      providerId: "anthropic",
+      account: "cached",
+      accessEnc: encryptSecret("expired-access", KEY),
+      refreshEnc: encryptSecret("durable-refresh", KEY),
+      expiresAt: 1_000,
+      meta: null,
+      updatedAt: 500,
+    });
+    await setAccountSettings(config, KEY, "anthropic", "cached", {
+      modelsMode: "manual",
+      enabledModels: ["claude-opus-4-6"],
+    });
+    const fetchFn = vi.fn(async () => {
+      throw new Error("cached status must not access the network");
+    });
+    const admin = createOAuthAdmin({
+      store: tokens,
+      encKey: KEY,
+      config,
+      now: () => 10_000_000,
+      makeFetch: () => fetchFn as unknown as typeof fetch,
+    });
+
+    const account = (await admin.listCachedStatus()).providers
+      .find((provider) => provider.id === "anthropic")
+      ?.accounts.find((candidate) => candidate.account === "cached");
+
+    expect(account).toMatchObject({
+      account: "cached",
+      expiresAt: 1_000,
+      updatedAt: 500,
+      healthy: true,
+      models: ["claude-opus-4-6"],
+    });
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
   it("listStatus marks an account unhealthy when its refresh fails (needs reconnect)", async () => {
     const store = makeStore();
     const config = makeConfig();

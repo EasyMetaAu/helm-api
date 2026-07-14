@@ -11,6 +11,15 @@ import zhHans from '../../locales/zh-hans.json';
 import zhHant from '../../locales/zh-hant.json';
 
 const providerPageKeys = [
+  'Failed to load OAuth providers',
+  'Failed to refresh providers',
+  'Provider refresh queued',
+  'Refreshing provider data…',
+  'Provider refresh failed',
+  'Provider refresh failed: {error}',
+  'Provider data refreshed',
+  'Provider data refreshed at {time}',
+  'refresh available again in {seconds}s',
   'Reset-credit count unavailable',
   'No reset credits available',
   'Weekly quota snapshot unavailable',

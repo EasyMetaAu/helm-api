@@ -1536,6 +1536,256 @@ describe("admin.api request payload", () => {
   });
 });
 
+describe("admin.api oauth cached overview and refresh queue", () => {
+  const account = (name: string) => ({
+    account: name,
+    expiresAt: null,
+    updatedAt: 0,
+    healthy: true,
+    priority: 50,
+    schedulable: true,
+    autoReset: false,
+    fastMode: false,
+    proxy: null,
+    models: [],
+  });
+
+  const status = {
+    selectionStrategy: "balanced" as const,
+    providers: [
+      {
+        id: "anthropic",
+        name: "Anthropic",
+        flow: "manual_paste" as const,
+        accounts: [account("claude-a")],
+      },
+      {
+        id: "openai-codex",
+        name: "Codex",
+        flow: "manual_paste" as const,
+        accounts: [account("codex-a")],
+      },
+    ],
+  };
+  const quotaWindow = {
+    key: "5h",
+    usedPercent: 10,
+    resetsAtMs: Date.now() + 3_600_000,
+    windowMinutes: 300,
+  };
+
+  it("GET /oauth/overview reads cached local state without touching upstream refresh methods", async () => {
+    const listCachedStatus = vi.fn().mockResolvedValue(status);
+    const listStatus = vi.fn(() => Promise.reject(new Error("must not refresh on page open")));
+    const fetchAnthropicQuota = vi.fn(() =>
+      Promise.reject(new Error("must not pull quota on page open")),
+    );
+    const oauth = {
+      listCachedStatus,
+      listStatus,
+      fetchAnthropicQuota,
+      getCachedCodexQuota: async () => null,
+    } as unknown as AdminApiDeps["oauth"];
+    const oauthUsage = {
+      queryRange: async () => [
+        {
+          providerId: "anthropic",
+          account: "claude-a",
+          requests: 2,
+          tokens: 12,
+          costUsd: null,
+          firstSeenMs: Date.now() - 60_000,
+          updatedAt: Date.now(),
+        },
+      ],
+    } as unknown as AdminApiDeps["oauthUsage"];
+    const oauthQuota = {
+      getAll: async () => [
+        {
+          providerId: "anthropic",
+          account: "claude-a",
+          windows: [],
+          capturedAt: 123,
+          source: "anthropic" as const,
+          usageLimitedUntilMs: null,
+          resetCredits: null,
+        },
+      ],
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const app = buildApp(buildDeps({ oauth, oauthUsage, oauthQuota }));
+
+    const res = await app.request("/admin/api/oauth/overview?tzOffsetMinutes=480");
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      configured: true,
+      selectionStrategy: "balanced",
+      providers: status.providers,
+      usage: [{ providerId: "anthropic", account: "claude-a", requests: 2 }],
+      quota: [{ providerId: "anthropic", account: "claude-a", capturedAt: 123 }],
+      refresh: { state: "idle", jobId: null },
+    });
+    expect(listCachedStatus).toHaveBeenCalledOnce();
+    expect(listStatus).not.toHaveBeenCalled();
+    expect(fetchAnthropicQuota).not.toHaveBeenCalled();
+  });
+
+  it("POST /oauth/refresh coalesces concurrent clicks into one refresh job", async () => {
+    const gate = deferred();
+    const listStatus = vi.fn(async () => {
+      await gate.promise;
+      return status;
+    });
+    const oauth = {
+      listCachedStatus: async () => status,
+      listStatus,
+      fetchAnthropicQuota: async () => [quotaWindow],
+      fetchCodexQuota: async () => ({
+        windows: [quotaWindow],
+        additionalLimits: [],
+        resetCredits: null,
+        resetCreditDetails: null,
+        credits: null,
+        individualLimit: null,
+        planType: null,
+        rateLimitReachedType: null,
+      }),
+    } as unknown as AdminApiDeps["oauth"];
+    const oauthQuota = {
+      getAll: async () => [],
+      upsert: async () => {},
+      delete: async () => {},
+      get: async () => null,
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const app = buildApp(buildDeps({ oauth, oauthQuota }));
+
+    const responses = await Promise.all(
+      Array.from({ length: 20 }, () => app.request("/admin/api/oauth/refresh", { method: "POST" })),
+    );
+    await vi.waitFor(() => expect(listStatus).toHaveBeenCalledOnce());
+    const bodies = await Promise.all(
+      responses.map(
+        (response) => response.json() as Promise<{ coalesced: boolean; status: { jobId: string } }>,
+      ),
+    );
+
+    expect(responses.every((response) => response.status === 202)).toBe(true);
+    expect(bodies.filter((body) => !body.coalesced)).toHaveLength(1);
+    expect(new Set(bodies.map((body) => body.status.jobId)).size).toBe(1);
+
+    gate.resolve();
+    await vi.waitFor(async () => {
+      const overview = await app.request("/admin/api/oauth/overview");
+      expect(await overview.json()).toMatchObject({ refresh: { state: "succeeded" } });
+    });
+  });
+
+  it("runs account quota refreshes serially with force enabled", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const calls: string[] = [];
+    const run = async (label: string) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      calls.push(label);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      active -= 1;
+      return [];
+    };
+    const serialStatus = {
+      ...status,
+      providers: [
+        { ...status.providers[0], accounts: [account("claude-a"), account("claude-b")] },
+        { ...status.providers[1], accounts: [account("codex-a")] },
+      ],
+    };
+    const oauth = {
+      listCachedStatus: async () => serialStatus,
+      listStatus: async () => serialStatus,
+      fetchAnthropicQuota: async ({
+        account: name,
+        force,
+      }: {
+        account: string;
+        force?: boolean;
+      }) => {
+        expect(force).toBe(true);
+        await run(`anthropic/${name}`);
+        return [quotaWindow];
+      },
+      fetchCodexQuota: async ({ account: name, force }: { account: string; force?: boolean }) => {
+        expect(force).toBe(true);
+        await run(`openai-codex/${name}`);
+        return {
+          windows: [quotaWindow],
+          additionalLimits: [],
+          resetCredits: null,
+          resetCreditDetails: null,
+          credits: null,
+          individualLimit: null,
+          planType: null,
+          rateLimitReachedType: null,
+        };
+      },
+    } as unknown as AdminApiDeps["oauth"];
+    const oauthQuota = {
+      getAll: async () => [],
+      upsert: async () => {},
+      delete: async () => {},
+      get: async () => null,
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const app = buildApp(buildDeps({ oauth, oauthQuota }));
+
+    await app.request("/admin/api/oauth/refresh", { method: "POST" });
+    await vi.waitFor(async () => {
+      const overview = await app.request("/admin/api/oauth/overview");
+      expect(await overview.json()).toMatchObject({ refresh: { state: "succeeded" } });
+    });
+
+    expect(maxActive).toBe(1);
+    expect(calls).toEqual(["anthropic/claude-a", "anthropic/claude-b", "openai-codex/codex-a"]);
+  });
+
+  it("marks a partial upstream refresh failure while preserving stale cached quota", async () => {
+    const stale = {
+      providerId: "anthropic",
+      account: "claude-a",
+      windows: [{ key: "5h", usedPercent: 40, resetsAtMs: 123, windowMinutes: 300 }],
+      capturedAt: 100,
+      source: "anthropic" as const,
+      usageLimitedUntilMs: null,
+      resetCredits: null,
+    };
+    const oauth = {
+      listCachedStatus: async () => status,
+      listStatus: async () => status,
+      fetchAnthropicQuota: async () => {
+        throw new Error("anthropic quota timeout");
+      },
+      fetchCodexQuota: async () => null,
+      getCachedCodexQuota: async () => null,
+    } as unknown as AdminApiDeps["oauth"];
+    const oauthQuota = {
+      getAll: async () => [stale],
+      upsert: async () => {},
+      delete: async () => {},
+      get: async () => stale,
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const app = buildApp(buildDeps({ oauth, oauthQuota }));
+
+    const response = await app.request("/admin/api/oauth/refresh", { method: "POST" });
+    expect(response.status).toBe(202);
+
+    await vi.waitFor(async () => {
+      const overview = await app.request("/admin/api/oauth/overview");
+      expect(await overview.json()).toMatchObject({
+        quota: [{ providerId: "anthropic", account: "claude-a", capturedAt: 100 }],
+        refresh: { state: "failed", error: expect.stringContaining("anthropic quota timeout") },
+      });
+    });
+  });
+});
+
 describe("admin.api oauth usage", () => {
   it("GET /oauth/usage returns today's per-account rows + derived RPM", async () => {
     const oauthUsage = {
@@ -1601,7 +1851,7 @@ describe("admin.api oauth usage", () => {
       schedulable: true,
     });
     const oauth = {
-      listStatus: async () => ({
+      listCachedStatus: async () => ({
         selectionStrategy: "balanced",
         providers: [
           { id: "openai-codex", name: "C", flow: "manual_paste", accounts: [acct("mylukin")] },
@@ -1624,7 +1874,7 @@ describe("admin.api oauth usage", () => {
 });
 
 describe("admin.api oauth quota", () => {
-  it("GET /oauth/quota refreshes Anthropic, returns only BOUND accounts, and prunes orphans", async () => {
+  it("GET /oauth/quota returns only cached BOUND rows without pulling or pruning", async () => {
     const upserts: unknown[] = [];
     const deletes: Array<[string, string]> = [];
     const acct = (account: string) => ({
@@ -1663,7 +1913,7 @@ describe("admin.api oauth quota", () => {
     } as unknown as AdminApiDeps["oauthQuota"];
     // Bound accounts: anthropic/mylukin + openai-codex/mylukin (NOT codex/default).
     const oauth = {
-      listStatus: async () => ({
+      listCachedStatus: async () => ({
         selectionStrategy: "balanced",
         providers: [
           { id: "anthropic", name: "A", flow: "manual_paste", accounts: [acct("mylukin")] },
@@ -1677,21 +1927,15 @@ describe("admin.api oauth quota", () => {
     const app = buildApp(buildDeps({ oauthQuota, oauth }));
     const res = await app.request("/admin/api/oauth/quota");
     expect(res.status).toBe(200);
-    // The Anthropic pull was upserted with source "anthropic".
-    expect(upserts).toHaveLength(1);
-    expect(upserts[0]).toMatchObject({
-      providerId: "anthropic",
-      account: "mylukin",
-      source: "anthropic",
-    });
+    expect(upserts).toHaveLength(0);
     // Only BOUND snapshots are returned; the orphan codex/default is dropped.
     const body = (await res.json()) as { quota: Array<{ providerId: string; account: string }> };
     expect(body.quota.map((q) => `${q.providerId}/${q.account}`)).toEqual(["openai-codex/mylukin"]);
-    // …and the orphan row is pruned from the store.
-    expect(deletes).toEqual([["openai-codex", "default"]]);
+    // Cache reads are side-effect free; orphan cleanup belongs to the refresh job.
+    expect(deletes).toEqual([]);
   });
 
-  it("GET /oauth/quota also refreshes the Codex PULL (source 'codex')", async () => {
+  it("POST /oauth/refresh refreshes the Codex PULL (source 'codex')", async () => {
     const upserts: unknown[] = [];
     const oauthQuota = {
       upsert: async (s: unknown) => {
@@ -1701,27 +1945,29 @@ describe("admin.api oauth quota", () => {
       getAll: async () => [],
       delete: async () => {},
     } as unknown as AdminApiDeps["oauthQuota"];
+    const status = {
+      selectionStrategy: "balanced" as const,
+      providers: [
+        {
+          id: "openai-codex",
+          name: "C",
+          flow: "manual_paste" as const,
+          accounts: [
+            {
+              account: "mylukin",
+              expiresAt: null,
+              updatedAt: 0,
+              healthy: true,
+              priority: 50,
+              schedulable: true,
+            },
+          ],
+        },
+      ],
+    };
     const oauth = {
-      listStatus: async () => ({
-        selectionStrategy: "balanced",
-        providers: [
-          {
-            id: "openai-codex",
-            name: "C",
-            flow: "manual_paste",
-            accounts: [
-              {
-                account: "mylukin",
-                expiresAt: null,
-                updatedAt: 0,
-                healthy: true,
-                priority: 50,
-                schedulable: true,
-              },
-            ],
-          },
-        ],
-      }),
+      listCachedStatus: async () => status,
+      listStatus: async () => status,
       // The PULL twin of the x-codex-* header PUSH: windows + reset-credit count.
       fetchCodexQuota: async () => ({
         windows: [
@@ -1732,8 +1978,9 @@ describe("admin.api oauth quota", () => {
       }),
     } as unknown as AdminApiDeps["oauth"];
     const app = buildApp(buildDeps({ oauthQuota, oauth }));
-    const res = await app.request("/admin/api/oauth/quota");
-    expect(res.status).toBe(200);
+    const res = await app.request("/admin/api/oauth/refresh", { method: "POST" });
+    expect(res.status).toBe(202);
+    await vi.waitFor(() => expect(upserts).toHaveLength(1));
     expect(upserts).toHaveLength(1);
     expect(upserts[0]).toMatchObject({
       providerId: "openai-codex",
