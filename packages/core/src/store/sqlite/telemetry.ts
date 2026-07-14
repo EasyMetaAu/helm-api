@@ -21,6 +21,7 @@ import type {
   TelemetryStore,
 } from "../ports.js";
 import { likeContains } from "../sql-like.js";
+import { denormalizedDecisionCost } from "../telemetry-cost.js";
 import type { SqliteDb } from "./migrate.js";
 import { payloadBlobs, requestPayloads, telemetry } from "./schema.js";
 
@@ -49,7 +50,7 @@ export class SqliteTelemetryStore implements TelemetryStore {
       finalStatus: input.decision.final.status,
       // The decision total includes BOTH Layer-2 eval and served-attempt spend.
       // Re-summing attempts here silently dropped eval_usd from every dashboard.
-      costUsd: input.decision.cost_breakdown.total_usd,
+      costUsd: denormalizedDecisionCost(input.decision),
       // Denormalized dashboard fields for cheap aggregation. NULL when the
       // gateway never stamped a field (forward-only / legacy rows).
       latencyTotalMs: input.decision.latency_total_ms,

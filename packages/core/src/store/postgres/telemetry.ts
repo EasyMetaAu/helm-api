@@ -20,6 +20,7 @@ import type {
   TelemetryStore,
 } from "../ports.js";
 import { likeContains } from "../sql-like.js";
+import { denormalizedDecisionCost } from "../telemetry-cost.js";
 import type { PgDb } from "./migrate.js";
 import { payloadBlobs, requestPayloads, telemetry } from "./schema.js";
 
@@ -58,7 +59,7 @@ export class PgTelemetryStore implements TelemetryStore {
       decisionJson: input.decision,
       finalStatus: input.decision.final.status,
       // Keep SQL aggregates aligned with DecisionRecord's canonical eval+completion total.
-      costUsd: input.decision.cost_breakdown.total_usd,
+      costUsd: denormalizedDecisionCost(input.decision),
       // Denormalized dashboard fields for cheap aggregation. NULL when the
       // gateway never stamped a field (forward-only / legacy rows).
       latencyTotalMs: input.decision.latency_total_ms,

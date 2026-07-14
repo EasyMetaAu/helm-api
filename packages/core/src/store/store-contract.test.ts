@@ -782,6 +782,25 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(agg.byModel[0]?.costUsd).toBeCloseTo(0.005, 12);
     });
 
+    it("preserves legacy attempt-cost aggregation when cost_breakdown is absent", async () => {
+      ctx = await make();
+      const at = 12_346;
+      const { cost_breakdown: _missingLegacyField, ...legacyDecision } = decision("legacy-cost");
+      await ctx.stores.telemetry.insert({
+        // Some operator fixtures and pre-default callers pass an unparsed legacy
+        // record. The store must retain the old attempt sum for that shape while
+        // preferring the canonical eval+completion total on current records.
+        decision: legacyDecision as DecisionRecord,
+        apiKeyId: "k1",
+        createdAt: new Date(at),
+      });
+
+      const agg = await ctx.stores.telemetry.aggregate(0, at + 1, "hour");
+      expect(agg.totals.totalCostUsd).toBeCloseTo(0.004, 12);
+      expect(agg.series[0]?.costUsd).toBeCloseTo(0.004, 12);
+      expect(agg.byModel[0]?.costUsd).toBeCloseTo(0.004, 12);
+    });
+
     // True-TPS dashboard average: an aggregate ratio Σcompletion / Σgeneration_ms ×
     // 1000, NOT a mean of per-request rates (which tiny requests would skew). The
     // numerator and denominator count the SAME rows — only streaming rows with a
