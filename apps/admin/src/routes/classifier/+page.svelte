@@ -2,6 +2,7 @@
   import { untrack } from 'svelte';
   import { saveClassifier, type ClassifierConfig } from '$lib/api/classifier.js';
   import DimensionTable from '$lib/components/DimensionTable.svelte';
+  import { formatDurationMs } from '$lib/format.js';
   import { t } from '$lib/i18n';
 
   // Data comes from `+page.ts`'s load (mocked via the `data` prop in tests). The
@@ -198,13 +199,15 @@
       <dd class="tabular-nums text-ink-strong">{cfg.eval.temperature}</dd>
       <dt class="text-ink-muted">{$t('Max tokens')}</dt>
       <dd class="tabular-nums text-ink-strong">{cfg.eval.max_tokens}</dd>
-      <dt class="text-ink-muted">{$t('Timeout (ms)')}</dt>
-      <dd class="tabular-nums text-ink-strong">{cfg.eval.timeout_ms}</dd>
+      <dt class="text-ink-muted">{$t('Timeout')}</dt>
+      <dd class="tabular-nums text-ink-strong">{formatDurationMs(cfg.eval.timeout_ms)}</dd>
       <dt class="text-ink-muted">{$t('On failure')}</dt>
       <dd class="text-ink-strong">{cfg.eval.on_failure}</dd>
       <dt class="text-ink-muted">{$t('Cache')}</dt>
       <dd class="text-ink-strong">
-        {cfg.eval.cache.enabled ? $t('on') : $t('off')} · ttl {cfg.eval.cache.ttl_sec}s
+        {cfg.eval.cache.enabled ? $t('on') : $t('off')} · ttl {formatDurationMs(
+          cfg.eval.cache.ttl_sec * 1000,
+        )}
       </dd>
     </dl>
   </div>

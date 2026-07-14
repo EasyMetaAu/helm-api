@@ -2,7 +2,7 @@
   import { goto } from '$app/navigation';
   import type { RequestListItem } from '$lib/api/requests.js';
   import { attemptCodeLabel } from '$lib/format/attempt-codes.js';
-  import { formatTimestamp, formatTps, formatUsd } from '$lib/format.js';
+  import { formatDurationMs, formatTimestamp, formatTps, formatUsd } from '$lib/format.js';
   import { t } from '$lib/i18n';
   import TokensCell from './TokensCell.svelte';
 
@@ -195,7 +195,7 @@
 
 {#snippet performanceCell(r: RequestListItem)}
   <div data-testid="cell-performance" class="font-mono text-xs leading-tight">
-    <div>{r.latency_ms}ms</div>
+    <div>{formatDurationMs(r.latency_ms)}</div>
     <div data-testid="cell-tps" class="text-ink-muted">{formatTps(r.tps)}</div>
   </div>
 {/snippet}

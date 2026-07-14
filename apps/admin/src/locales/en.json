@@ -252,7 +252,7 @@
   "Disconnect": "Disconnect",
   "Disconnecting…": "Disconnecting…",
   "Done": "Done",
-  "Done in {ms} ms": "Done in {ms} ms",
+  "Done in {duration}": "Done in {duration}",
   "down": "down",
   "drag to reorder policy": "drag to reorder policy",
   "e.g. favorite number": "e.g. favorite number",
@@ -760,7 +760,7 @@
   "Select a key…": "Select a key…",
   "Send": "Send",
   "Send a short message through this account and stream the reply.": "Send a short message through this account and stream the reply.",
-  "Sending… {s}s": "Sending… {s}s",
+  "Sending… {duration}": "Sending… {duration}",
   "Serialize user messages per subscription account": "Serialize user messages per subscription account",
   "Served model": "Served model",
   "Server URL: paste the URL above (it must end in /mcp).": "Server URL: paste the URL above (it must end in /mcp).",
@@ -862,7 +862,7 @@
   "Time to first token": "Time to first token",
   "timed out": "timed out",
   "Timed out": "Timed out",
-  "Timeout (ms)": "Timeout (ms)",
+  "Timeout": "Timeout",
   "To": "To",
   "Today": "Today",
   "tok": "tok",
@@ -993,5 +993,5 @@
   "Provider refresh failed: {error}": "Provider refresh failed: {error}",
   "Provider data refreshed": "Provider data refreshed",
   "Provider data refreshed at {time}": "Provider data refreshed at {time}",
-  "refresh available again in {seconds}s": "refresh available again in {seconds}s"
+  "refresh available again in {duration}": "refresh available again in {duration}"
 }

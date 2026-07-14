@@ -306,8 +306,12 @@ describe('requests list page', () => {
       }),
     });
     const select = screen.getByTestId('filter-key');
-    expect(within(select).getByRole('option', { name: 'Prod / helm_live_prod' })).toBeInTheDocument();
-    expect(within(select).getByRole('option', { name: /helm_live_old.*revoked/i })).toBeInTheDocument();
+    expect(
+      within(select).getByRole('option', { name: 'Prod / helm_live_prod' }),
+    ).toBeInTheDocument();
+    expect(
+      within(select).getByRole('option', { name: /helm_live_old.*revoked/i }),
+    ).toBeInTheDocument();
 
     await fireEvent.change(select, { target: { value: 'k_42' } });
     expect(goto).toHaveBeenCalledWith('?key_id=k_42', expect.anything());
@@ -471,7 +475,11 @@ describe('requests detail page', () => {
 
   it('renders a Request summary card with key, provider/account, requested+served model, lane, status, latency', () => {
     render(DetailPage, {
-      data: { detail: detail(), payload: { captured: false }, traceId: 'tr_1' },
+      data: {
+        detail: detail({ latency_ms: 6911 }),
+        payload: { captured: false },
+        traceId: 'tr_1',
+      },
     });
     const summary = screen.getByTestId('request-summary');
     expect(summary).toHaveTextContent('Production backend'); // key name
@@ -481,7 +489,7 @@ describe('requests detail page', () => {
     expect(summary).toHaveTextContent('gpt-4o'); // requested model
     expect(summary).toHaveTextContent('claude-x'); // served model
     expect(summary).toHaveTextContent('premium'); // lane
-    expect(summary).toHaveTextContent('460ms'); // total latency
+    expect(summary).toHaveTextContent('6.9s'); // total latency
   });
 
   it('falls back to the prefix (and "—") in the summary for an unnamed/legacy record', () => {
@@ -501,12 +509,16 @@ describe('requests detail page', () => {
 
   it('renders the throughput card: true TPS, time-to-first-token, and the generation window', () => {
     render(DetailPage, {
-      data: { detail: detail(), payload: { captured: false }, traceId: 'tr_1' },
+      data: {
+        detail: detail({ ttfb_ms: 11_626, generation_ms: 90_000 }),
+        payload: { captured: false },
+        traceId: 'tr_1',
+      },
     });
     const tp = screen.getByTestId('throughput');
     expect(within(tp).getByTestId('tps')).toHaveTextContent('200 tok/s');
-    expect(within(tp).getByTestId('ttfb')).toHaveTextContent('460ms');
-    expect(within(tp).getByTestId('generation-ms')).toHaveTextContent('1700ms');
+    expect(within(tp).getByTestId('ttfb')).toHaveTextContent('11.6s');
+    expect(within(tp).getByTestId('generation-ms')).toHaveTextContent('1.5min');
   });
 
   it('renders the throughput card as not-measured for a non-streaming request', () => {

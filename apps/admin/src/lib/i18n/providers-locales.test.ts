@@ -19,7 +19,7 @@ const providerPageKeys = [
   'Provider refresh failed: {error}',
   'Provider data refreshed',
   'Provider data refreshed at {time}',
-  'refresh available again in {seconds}s',
+  'refresh available again in {duration}',
   'Reset-credit count unavailable',
   'No reset credits available',
   'Weekly quota snapshot unavailable',

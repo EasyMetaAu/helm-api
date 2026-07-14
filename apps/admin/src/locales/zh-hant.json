@@ -252,7 +252,7 @@
   "Disconnect": "中斷連線",
   "Disconnecting…": "正在中斷連線…",
   "Done": "完成",
-  "Done in {ms} ms": "耗時 {ms} 毫秒",
+  "Done in {duration}": "耗時 {duration}",
   "down": "下行",
   "drag to reorder policy": "拖動以調整策略順序",
   "e.g. favorite number": "例如：喜歡的數字",
@@ -760,7 +760,7 @@
   "Select a key…": "選擇一個金鑰…",
   "Send": "發送",
   "Send a short message through this account and stream the reply.": "透過此帳號傳送一則簡短訊息，並串流顯示回應。",
-  "Sending… {s}s": "發送中… {s} 秒",
+  "Sending… {duration}": "發送中… {duration}",
   "Serialize user messages per subscription account": "按訂閱帳戶串行處理使用者訊息",
   "Served model": "最終模型",
   "Server URL: paste the URL above (it must end in /mcp).": "伺服器 URL：貼上上面的位址（必須以 /mcp 結尾）。",
@@ -862,7 +862,7 @@
   "Time to first token": "首 Token 延遲",
   "timed out": "逾時",
   "Timed out": "請求逾時",
-  "Timeout (ms)": "逾時（毫秒）",
+  "Timeout": "逾時",
   "To": "結束",
   "Today": "今天",
   "tok": "tok",
@@ -993,5 +993,5 @@
   "Provider refresh failed: {error}": "提供商重新整理失敗：{error}",
   "Provider data refreshed": "提供商資料已重新整理",
   "Provider data refreshed at {time}": "提供商資料已於 {time} 重新整理",
-  "refresh available again in {seconds}s": "{seconds} 秒後可再次重新整理"
+  "refresh available again in {duration}": "{duration} 後可再次重新整理"
 }

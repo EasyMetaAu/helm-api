@@ -76,7 +76,11 @@ describe('RequestsTable key cell', () => {
 
 describe('RequestsTable variants', () => {
   it('renders the full request-audit columns as grouped cells', () => {
-    render(RequestsTable, { items: [item()], detailHref, variant: 'full' });
+    render(RequestsTable, {
+      items: [item({ latency_ms: 6911 })],
+      detailHref,
+      variant: 'full',
+    });
 
     const row = screen.getByTestId('request-row');
     expect(within(row).getByTestId('cell-result')).toHaveTextContent('ok');
@@ -86,8 +90,14 @@ describe('RequestsTable variants', () => {
     expect(within(row).getByTestId('cell-routing')).toHaveTextContent('coding');
     expect(within(row).getByTestId('cell-serving')).toHaveTextContent('anthropic');
     expect(within(row).getByTestId('cell-serving')).toHaveTextContent('exec +1');
-    expect(within(row).getByTestId('cell-performance')).toHaveTextContent('460ms');
+    expect(within(row).getByTestId('cell-performance')).toHaveTextContent('6.9s');
     expect(screen.getByText('Request ID')).toBeInTheDocument();
+  });
+
+  it('formats performance latency in minutes from sixty seconds', () => {
+    render(RequestsTable, { items: [item({ latency_ms: 90_000 })], detailHref });
+
+    expect(screen.getByTestId('cell-performance')).toHaveTextContent('1.5min');
   });
 
   it('keeps the request-list metric columns and hides only Request ID in the dashboard recent variant', () => {

@@ -27,7 +27,13 @@
   import Modal from '$lib/components/Modal.svelte';
   import RefreshControl from '$lib/components/RefreshControl.svelte';
   import TestAccountDialog from '$lib/components/TestAccountDialog.svelte';
-  import { durationParts, formatCount, formatTokens, formatUsd } from '$lib/format';
+  import {
+    durationParts,
+    formatCount,
+    formatDurationMs,
+    formatTokens,
+    formatUsd,
+  } from '$lib/format';
   import { t } from '$lib/i18n';
 
   // Subscription OAuth login (issue #38). Pure consumer (Principle 1): the gateway
@@ -545,17 +551,15 @@
     if (status.state === 'succeeded' || status.lastSuccessAt !== null) {
       const refreshedAt = status.lastSuccessAt ?? status.finishedAt;
       const time = refreshedAt === null ? null : new Date(refreshedAt).toLocaleTimeString();
-      const cooldownSeconds =
-        status.nextAllowedAt !== null && status.nextAllowedAt > Date.now()
-          ? Math.max(1, Math.ceil((status.nextAllowedAt - Date.now()) / 1000))
-          : null;
+      const remainingMs = status.nextAllowedAt === null ? 0 : status.nextAllowedAt - Date.now();
+      const cooldownMs = remainingMs > 0 ? remainingMs : null;
       const refreshed = time
         ? $t('Provider data refreshed at {time}', { time })
         : $t('Provider data refreshed');
-      return cooldownSeconds === null
+      return cooldownMs === null
         ? refreshed
-        : `${refreshed} · ${$t('refresh available again in {seconds}s', {
-            seconds: cooldownSeconds,
+        : `${refreshed} · ${$t('refresh available again in {duration}', {
+            duration: formatDurationMs(cooldownMs),
           })}`;
     }
     return null;

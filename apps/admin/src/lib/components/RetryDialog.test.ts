@@ -67,11 +67,15 @@ describe('RetryDialog sending state', () => {
     const note = screen.getByTestId('retry-progress');
     expect(note).toBeInTheDocument();
 
-    // The counter ticks: 0s -> 3s proves the UI is alive, not frozen.
-    expect(sendButton().textContent).toContain('0s');
+    // The counter ticks: 0ms -> 3s proves the UI is alive, not frozen.
+    expect(sendButton().textContent).toContain('0ms');
     vi.advanceTimersByTime(3000);
     await tick();
     expect(sendButton().textContent).toContain('3s');
+
+    vi.advanceTimersByTime(57_000);
+    await tick();
+    expect(sendButton().textContent).toContain('1min');
   });
 
   it('locks the body editor while sending and unlocks it on failure', async () => {

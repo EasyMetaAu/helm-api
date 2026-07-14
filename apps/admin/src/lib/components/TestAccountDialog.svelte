@@ -3,6 +3,7 @@
   import { invalidateAll } from '$app/navigation';
   import { streamAccountTest } from '$lib/api/oauth.js';
   import Modal from '$lib/components/Modal.svelte';
+  import { formatDurationMs } from '$lib/format.js';
   import { t } from '$lib/i18n';
 
   // Per-account connectivity test (providers page "Test" button). Streams a single
@@ -146,7 +147,9 @@
             <span class="badge-error">{$t('Failed')}</span>
           {/if}
           {#if durationMs !== null}
-            <span class="text-ink-muted">{$t('Done in {ms} ms', { ms: durationMs })}</span>
+            <span class="text-ink-muted"
+              >{$t('Done in {duration}', { duration: formatDurationMs(durationMs) })}</span
+            >
           {/if}
         </span>
         <span class="text-ink-muted">{$t('{n} chars', { n: response.length })}</span>

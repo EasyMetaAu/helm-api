@@ -9,7 +9,13 @@
   import RefreshControl from '$lib/components/RefreshControl.svelte';
   import RequestsTable from '$lib/components/RequestsTable.svelte';
   import { formatTrendTick, trendAxisTicks, type TrendBucket } from '$lib/dashboard-chart.js';
-  import { formatCount, formatTokens, formatTps, formatUsd } from '$lib/format.js';
+  import {
+    formatCount,
+    formatDurationMs,
+    formatTokens,
+    formatTps,
+    formatUsd,
+  } from '$lib/format.js';
   import {
     DEFAULT_PAGE_SIZE,
     filtersToSearch,
@@ -342,7 +348,7 @@
         {$t('Avg latency')}
       </div>
       <div class="mt-1 text-2xl font-semibold text-slate-900">
-        {stats.avgLatency === null ? '—' : `${stats.avgLatency}ms`}
+        {stats.avgLatency === null ? '—' : formatDurationMs(stats.avgLatency)}
       </div>
     </div>
     <div class="card">

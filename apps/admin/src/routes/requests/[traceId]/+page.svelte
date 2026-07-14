@@ -9,7 +9,7 @@
   } from '$lib/api/requests.js';
   import { deepEqual } from '$lib/deep-equal.js';
   import { attemptCodeLabel } from '$lib/format/attempt-codes.js';
-  import { formatTimestamp, formatTps } from '$lib/format.js';
+  import { formatDurationMs, formatTimestamp, formatTps } from '$lib/format.js';
   import { t } from '$lib/i18n';
   import Conversation from '$lib/components/Conversation.svelte';
   import CostBreakdown from '$lib/components/CostBreakdown.svelte';
@@ -67,7 +67,9 @@
     return {
       ...(hasOwn(payload, 'request') ? { request: payload.request } : {}),
       ...(hasOwn(payload, 'response') ? { response: payload.response } : {}),
-      ...(hasOwn(payload, 'upstream_request') ? { upstream_request: payload.upstream_request } : {}),
+      ...(hasOwn(payload, 'upstream_request')
+        ? { upstream_request: payload.upstream_request }
+        : {}),
     };
   }
 
@@ -150,7 +152,9 @@
   // differs from the inbound client body (memory injection / protocol translation /
   // model patch). When they are structurally identical — e.g. a no-memory request to
   // an OpenAI-shaped provider — a second panel is pure noise, so we collapse to one.
-  const hasUpstream = $derived(data.payload?.captured === true && hasPayloadPart('upstream_request'));
+  const hasUpstream = $derived(
+    data.payload?.captured === true && hasPayloadPart('upstream_request'),
+  );
   const requestLoaded = $derived(payloadStatus.request === 'loaded');
   const responseLoaded = $derived(payloadStatus.response === 'loaded');
   const upstreamLoaded = $derived(payloadStatus.upstream_request === 'loaded');
@@ -318,7 +322,7 @@
         <div>
           <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Latency')}</dt>
           <dd class="mt-0.5 font-mono text-ink-body">
-            {d.latency_ms === null ? '—' : `${d.latency_ms}ms`}
+            {d.latency_ms === null ? '—' : formatDurationMs(d.latency_ms)}
           </dd>
         </div>
       </dl>
@@ -388,7 +392,7 @@
             type="button"
             data-testid="request-view-raw"
             class={`rounded border px-3 py-1 text-sm ${reqView === 'raw' ? 'border-action bg-action text-white' : 'border-border bg-surface text-ink-muted hover:bg-canvas'}`}
-          onclick={() => (reqView = 'raw')}>{$t('Raw')}</button
+            onclick={() => (reqView = 'raw')}>{$t('Raw')}</button
           >
         </div>
         {#if reqView === 'chat'}
@@ -401,7 +405,8 @@
                 type="button"
                 data-testid="load-conversation"
                 class="btn-secondary"
-                disabled={payloadStatus.request === 'loading' || payloadStatus.response === 'loading'}
+                disabled={payloadStatus.request === 'loading' ||
+                  payloadStatus.response === 'loading'}
                 onclick={loadConversation}
                 >{payloadStatus.request === 'loading' || payloadStatus.response === 'loading'
                   ? $t('Loading')
@@ -420,29 +425,27 @@
               testid="conversation"
             />
           {/if}
+        {:else if !requestLoaded}
+          <div class="rounded border border-dashed border-border bg-canvas p-3">
+            <p class="field-help mb-2">
+              {$t('Load the raw request body only when you need to inspect it.')}
+            </p>
+            <button
+              type="button"
+              data-testid="load-request-body"
+              class="btn-secondary"
+              disabled={payloadStatus.request === 'loading'}
+              onclick={() => loadPayloadPart('request')}
+              >{payloadStatus.request === 'loading'
+                ? $t('Loading')
+                : $t('Load request body')}</button
+            >
+            {#if payloadErrors.request}
+              <p class="mt-2 text-sm text-red-600">{payloadErrors.request}</p>
+            {/if}
+          </div>
         {:else}
-          {#if !requestLoaded}
-            <div class="rounded border border-dashed border-border bg-canvas p-3">
-              <p class="field-help mb-2">
-                {$t('Load the raw request body only when you need to inspect it.')}
-              </p>
-              <button
-                type="button"
-                data-testid="load-request-body"
-                class="btn-secondary"
-                disabled={payloadStatus.request === 'loading'}
-                onclick={() => loadPayloadPart('request')}
-                >{payloadStatus.request === 'loading'
-                  ? $t('Loading')
-                  : $t('Load request body')}</button
-              >
-              {#if payloadErrors.request}
-                <p class="mt-2 text-sm text-red-600">{payloadErrors.request}</p>
-              {/if}
-            </div>
-          {:else}
-            <JsonViewer value={payloadValues.request} testid="request-body" />
-          {/if}
+          <JsonViewer value={payloadValues.request} testid="request-body" />
         {/if}
       {:else}
         <p class="field-help mb-2">
@@ -472,13 +475,16 @@
         {#if !upstreamLoaded || !requestLoaded}
           <div class="rounded border border-dashed border-border bg-canvas p-3">
             <p class="field-help mb-2">
-              {$t('Load this only when you need to compare the client body with the provider body.')}
+              {$t(
+                'Load this only when you need to compare the client body with the provider body.',
+              )}
             </p>
             <button
               type="button"
               data-testid="load-upstream-request"
               class="btn-secondary"
-              disabled={payloadStatus.upstream_request === 'loading' || payloadStatus.request === 'loading'}
+              disabled={payloadStatus.upstream_request === 'loading' ||
+                payloadStatus.request === 'loading'}
               onclick={loadUpstreamRequest}
               >{payloadStatus.upstream_request === 'loading' || payloadStatus.request === 'loading'
                 ? $t('Loading')
@@ -537,12 +543,12 @@
 
         <dt class="text-ink-muted">{$t('Time to first token')}</dt>
         <dd data-testid="ttfb" class="text-right font-mono text-ink-strong">
-          {d.ttfb_ms === null ? '—' : `${d.ttfb_ms}ms`}
+          {d.ttfb_ms === null ? '—' : formatDurationMs(d.ttfb_ms)}
         </dd>
 
         <dt class="text-ink-muted">{$t('Generation time')}</dt>
         <dd data-testid="generation-ms" class="text-right font-mono text-ink-strong">
-          {d.generation_ms === null ? '—' : `${d.generation_ms}ms`}
+          {d.generation_ms === null ? '—' : formatDurationMs(d.generation_ms)}
         </dd>
       </dl>
     </section>
