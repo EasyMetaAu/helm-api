@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ConfigStore } from "@helm/core";
-import { isCodexAccountWeeklyQuotaWindow, type OAuthQuotaWindow } from "@helm/shared";
+import { type OAuthQuotaWindow, selectCodexAccountWeeklyQuotaWindows } from "@helm/shared";
 import {
   AUTO_RESET_COOLDOWN_MS,
   CODEX_RESET_MIN_WEEKLY_USED_PERCENT,
@@ -101,8 +101,7 @@ interface RedeemRequestMarker {
 }
 
 function weeklyWindowMarker(windows: readonly OAuthQuotaWindow[]): WeeklyWindowMarker | null {
-  const weekly = windows
-    .filter(isCodexAccountWeeklyQuotaWindow)
+  const weekly = selectCodexAccountWeeklyQuotaWindows(windows)
     .filter((w) => Number.isFinite(w.usedPercent))
     .sort((a, b) => b.usedPercent - a.usedPercent)[0];
   if (weekly?.resetsAtMs == null || !Number.isFinite(weekly.resetsAtMs)) return null;

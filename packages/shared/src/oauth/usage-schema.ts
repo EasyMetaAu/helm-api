@@ -54,6 +54,50 @@ export const OAuthQuotaWindowSchema = z
 
 export type OAuthQuotaWindow = z.infer<typeof OAuthQuotaWindowSchema>;
 
+type CodexQuotaWindowCandidate = Pick<OAuthQuotaWindow, "key" | "usedPercent"> &
+  Partial<Pick<OAuthQuotaWindow, "windowMinutes" | "resetsAtMs" | "limitId">>;
+
+// Some Codex response-header families expose an empty positional window even
+// though the account has no second allowance: 0% used, no duration, and a reset
+// deadline that is already expired at capture time. It is transport padding, not
+// quota truth, so callers may discard it both before persistence and on cached
+// reads of snapshots written by older Helm versions.
+export function isCodexQuotaWindowPlaceholder(
+  window: CodexQuotaWindowCandidate,
+  capturedAtMs: number,
+): boolean {
+  return (
+    window.usedPercent === 0 &&
+    window.windowMinutes == null &&
+    (window.resetsAtMs == null || window.resetsAtMs <= capturedAtMs)
+  );
+}
+
+// Weekly selection is collection-level because an unknown-duration `secondary`
+// is only a legacy fallback when the same snapshot has no duration-backed weekly
+// account window. Model-scoped limits never participate in account reset credits.
+export function selectCodexAccountWeeklyQuotaWindows<T extends CodexQuotaWindowCandidate>(
+  windows: readonly T[],
+): T[] {
+  const accountWide = windows.filter(
+    (window) => window.limitId === undefined || window.limitId === "codex",
+  );
+  const explicit = accountWide.filter(
+    (window) =>
+      window.windowMinutes != null &&
+      Number.isFinite(window.windowMinutes) &&
+      window.windowMinutes >= 7 * 24 * 60,
+  );
+  if (explicit.length > 0) return explicit;
+  return accountWide.filter(
+    (window) =>
+      window.key === "secondary" &&
+      window.windowMinutes == null &&
+      Number.isFinite(window.usedPercent) &&
+      window.usedPercent > 0,
+  );
+}
+
 // Codex account plans do not consistently assign the short and weekly allowances
 // to `primary` / `secondary`. Prefer the reported duration and retain `secondary`
 // only as a compatibility fallback for older header snapshots without duration.

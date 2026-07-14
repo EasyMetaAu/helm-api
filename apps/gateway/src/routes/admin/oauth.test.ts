@@ -202,6 +202,58 @@ describe("admin OAuth routes — read endpoints", () => {
     expect(seam.fetchAnthropicQuota).not.toHaveBeenCalled();
   });
 
+  it("GET /oauth/quota hides persisted Codex header placeholders", async () => {
+    const capturedAt = 1_000_000;
+    const oauthQuota = {
+      getAll: vi.fn(async () => [
+        {
+          providerId: "openai-codex",
+          account: "default",
+          windows: [
+            {
+              key: "primary",
+              usedPercent: 37,
+              resetsAtMs: capturedAt + 500_000,
+              windowMinutes: 10_080,
+            },
+            {
+              key: "secondary",
+              usedPercent: 0,
+              resetsAtMs: capturedAt,
+              windowMinutes: null,
+            },
+          ],
+          capturedAt,
+          source: "codex-headers",
+          usageLimitedUntilMs: null,
+        },
+      ]),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const seam = fullSeam({
+      listCachedStatus: vi.fn(async () => ({
+        selectionStrategy: "balanced",
+        providers: [
+          {
+            id: "openai-codex",
+            name: "Codex",
+            accounts: [{ account: "default" }],
+          },
+        ],
+      })) as never,
+    });
+
+    const res = await app({ oauth: seam, oauthQuota }).request("/admin/api/oauth/quota");
+    const body = (await res.json()) as { quota: Array<{ windows: OAuthQuotaWindow[] }> };
+    expect(body.quota[0]?.windows).toEqual([
+      {
+        key: "primary",
+        usedPercent: 37,
+        resetsAtMs: capturedAt + 500_000,
+        windowMinutes: 10_080,
+      },
+    ]);
+  });
+
   it("POST /oauth/refresh refreshes xAI, updates the pool snapshot, and syncs cooldown", async () => {
     const now = Date.now();
     const resetAt = now + 3 * 86_400_000;

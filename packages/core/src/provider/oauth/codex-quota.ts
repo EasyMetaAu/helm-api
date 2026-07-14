@@ -2,6 +2,7 @@ import {
   type CodexOAuthUsage,
   CodexOAuthUsageSchema,
   CodexResetResultSchema,
+  isCodexQuotaWindowPlaceholder,
   type OAuthQuotaWindow,
 } from "@helm/shared";
 import { isRetiredOpenAICodexLimit } from "./models.js";
@@ -136,7 +137,7 @@ export function parseCodexQuotaHeaderDetails(headers: Headers, nowMs: number): C
     const normalizedLimitId = family.limitId.replaceAll("-", "_");
     const limitName = headers.get(`x-${family.limitId}-limit-name`)?.trim() || null;
     if (isRetiredOpenAICodexLimit(normalizedLimitId, limitName)) continue;
-    out.push({
+    const candidate: OAuthQuotaWindow = {
       key: family.key,
       usedPercent: Math.max(0, used),
       resetsAtMs:
@@ -152,7 +153,9 @@ export function parseCodexQuotaHeaderDetails(headers: Headers, nowMs: number): C
             limitId: normalizedLimitId,
             limitName,
           }),
-    });
+    };
+    if (isCodexQuotaWindowPlaceholder(candidate, nowMs)) continue;
+    out.push(candidate);
   }
   const additionalLimits = new Map<string, CodexAdditionalLimitSnapshot>();
   for (const window of out) {

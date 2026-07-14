@@ -315,6 +315,7 @@ describe('providers page', () => {
   });
 
   it('labels Codex quota windows by their real duration across plan shapes', () => {
+    const capturedAt = Date.now();
     renderPage({
       providers: [
         provider({
@@ -349,15 +350,15 @@ describe('providers page', () => {
               windowMinutes: 10_080,
             },
             {
-              // A key without duration must not invent a five-hour window.
+              // Live headers emit this already-expired zero-usage placeholder.
               key: 'secondary',
-              usedPercent: 2,
-              resetsAtMs: Date.now() + 3_600_000,
+              usedPercent: 0,
+              resetsAtMs: capturedAt,
               windowMinutes: null,
             },
           ],
-          capturedAt: Date.now(),
-          source: 'codex',
+          capturedAt,
+          source: 'codex-headers',
           usageLimitedUntilMs: null,
           resetCredits: 2,
           planType: 'pro',
@@ -369,7 +370,7 @@ describe('providers page', () => {
       'provider-quota-cell',
     );
     expect(within(quotaCell).getByText('Weekly')).toBeInTheDocument();
-    expect(within(quotaCell).getByText('Secondary')).toBeInTheDocument();
+    expect(within(quotaCell).queryByText('Secondary')).not.toBeInTheDocument();
     expect(within(quotaCell).queryByText('5h')).not.toBeInTheDocument();
   });
 

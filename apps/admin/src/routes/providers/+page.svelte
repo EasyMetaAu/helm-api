@@ -1,7 +1,10 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
   import { invalidateAll } from '$app/navigation';
-  import { isCodexAccountWeeklyQuotaWindow } from '@helm/shared';
+  import {
+    isCodexQuotaWindowPlaceholder,
+    selectCodexAccountWeeklyQuotaWindows,
+  } from '@helm/shared';
   import {
     consumeCodexResetCredit,
     getOAuthOverview,
@@ -333,8 +336,7 @@
   }
 
   function codexWeeklyUsedPercent(q: OAuthQuotaSnapshot | undefined): number | null {
-    const weekly = q?.windows
-      .filter(isCodexAccountWeeklyQuotaWindow)
+    const weekly = selectCodexAccountWeeklyQuotaWindows(q?.windows ?? [])
       .map((w) => w.usedPercent)
       .filter((pct) => Number.isFinite(pct));
     return weekly && weekly.length > 0 ? Math.max(...weekly) : null;
@@ -418,7 +420,9 @@
     return {
       ...quota,
       windows: quota.windows.filter(
-        (window) => !isRetiredCodexLimit(window.limitId, window.limitName),
+        (window) =>
+          !isRetiredCodexLimit(window.limitId, window.limitName) &&
+          !isCodexQuotaWindowPlaceholder(window, quota.capturedAt),
       ),
       additionalLimits: quota.additionalLimits?.filter(
         (limit) => !isRetiredCodexLimit(limit.limitId, limit.limitName),

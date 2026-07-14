@@ -35,6 +35,28 @@ describe("parseCodexQuotaHeaders", () => {
     ]);
   });
 
+  it("drops the live zero-duration secondary header placeholder", () => {
+    expect(
+      parseCodexQuotaHeaders(
+        headers({
+          "x-codex-primary-used-percent": "37",
+          "x-codex-primary-reset-after-seconds": "500000",
+          "x-codex-primary-window-minutes": "10080",
+          "x-codex-secondary-used-percent": "0",
+          "x-codex-secondary-reset-after-seconds": "0",
+        }),
+        NOW,
+      ),
+    ).toEqual([
+      {
+        key: "primary",
+        usedPercent: 37,
+        resetsAtMs: NOW + 500_000_000,
+        windowMinutes: 10_080,
+      },
+    ]);
+  });
+
   it("prefers reset-at epoch seconds over reset-after-seconds", () => {
     const out = parseCodexQuotaHeaders(
       headers({

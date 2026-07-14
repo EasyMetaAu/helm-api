@@ -358,6 +358,37 @@ describe("createResetCreditGuard", () => {
     ).resolves.toMatchObject({ ok: true, windowId: "secondary:86400000" });
   });
 
+  it("uses the duration-backed weekly window instead of a positional placeholder", async () => {
+    const config = new MemoryConfig();
+    const guard = createResetCreditGuard({
+      config,
+      resolveSharedKey: vi.fn(async () => "codex:shared-account"),
+    });
+
+    await expect(
+      guard.reserve({
+        providerId: "openai-codex",
+        account: "work",
+        windows: [
+          {
+            key: "secondary",
+            usedPercent: 100,
+            resetsAtMs: 1_000,
+            windowMinutes: null,
+          },
+          {
+            key: "primary",
+            usedPercent: 100,
+            resetsAtMs: 86_400_000,
+            windowMinutes: 10_080,
+          },
+        ],
+        mode: "manual",
+        nowMs: 500,
+      }),
+    ).resolves.toMatchObject({ ok: true, windowId: "secondary:86400000" });
+  });
+
   it("allows another reserve after the full cooldown has elapsed", async () => {
     const config = new MemoryConfig();
     const resolveSharedKey = vi.fn(async () => "codex:shared-account");

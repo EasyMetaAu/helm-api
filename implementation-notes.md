@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-07-14 · 丢弃 Codex 空 secondary 配额占位窗口（OAuth quota / Admin providers / reset credits，docs/04/11，原则 3/5/7）
+
+- **生产根因**：Codex 部分账号的响应头会同时返回真实 `primary + windowMinutes:10080` 周窗口，以及 `secondary + usedPercent:0 + 无 duration + reset-after:0`。后者只是空占位，但 header parser 将其作为配额写入；latest-wins snapshot 随后覆盖完整 PULL 数据，Admin 又把未知时长的 positional key 翻译成“次窗口”，造成看似存在第二个额度且 7 天用量消失。
+- **三层防御**：header parser 在入库前丢弃“0% + 无时长 + 截止采集时已重置”的窗口；Admin cache-only API 与 Providers 页面用 snapshot 自己的 `capturedAt` 过滤旧版本已写入的同类脏数据，部署后无需等待新请求或人工清库即可恢复展示。未来重置、非零用量或带真实 duration 的窗口继续保留，避免误删刚开始的新周期与 legacy 数据。
+- **周额度权威**：周窗口改为集合级选择：账号级 `windowMinutes >= 10080` 的明确时长窗口优先；只有整组没有明确周窗口时，才兼容使用非零的未知时长 `secondary`。model-scoped 窗口仍排除。Admin、自动重置和 reset-credit 幂等 guard 共用该选择，空 positional 数据不能再覆盖真实周用量或 reset marker。
+- **验证**：TDD 定向覆盖 live header 形态、durable cache 旧快照、Providers 标签、明确周窗口优先、legacy fallback 与 reset-credit guard；6 files / 219 tests 全绿。
+
 ## 2026-07-14 · Subscription Providers 改为缓存优先与全局串行刷新（OAuth Admin / provider observability，docs/04/11，原则 1/3/6/7）
 
 - **性能根因**：Providers 首屏过去并行请求 status、usage、quota；status 会刷新过期 token 并逐账号发现模型，quota 会逐账号拉取上游额度、写 snapshot、同步 cooldown 并清理 orphan。慢代理、上游限流或账号数增加会把页面打开直接绑定到外部网络，刷新按钮和自动刷新也会重复制造同一批工作。
@@ -30,7 +37,7 @@
 ## 2026-07-13 · Codex 周配额按真实窗口时长识别（OAuth quota / Admin providers / reset credits，docs/04/11，原则 3/5/7）
 
 - **生产证据与根因**：生产 `oauth_quota` 中四个 Codex 账号都出现 `primary + windowMinutes:10080`，截图中的唯一窗口虽显示 `5h`，重置倒计时却是 `6d 22h`。上游不同套餐不再保证 `primary=5h / secondary=7d`，Admin 的位置硬编码因此把真实周配额错标为 5h；同一假设还会让手动/自动 reset-credit 误报周快照不可用。
-- **统一判定**：账号级 Codex 周窗口以 provider 报告的 `windowMinutes >= 10080` 为权威；只有旧 header 快照缺少 duration 时才兼容回退到 `secondary`。带非默认 `limitId` 的 model-scoped 窗口绝不当作账号周配额。Admin 标签同样时长优先（300m→5h、10080m→Weekly），缺时长显示中性的 Primary/Secondary，不再猜测。
+- **统一判定**：账号级 Codex 周窗口以 provider 报告的 `windowMinutes >= 10080` 为权威；只有旧 header 快照缺少 duration 且窗口有真实用量时才兼容回退到 `secondary`。带非默认 `limitId` 的 model-scoped 窗口绝不当作账号周配额。Admin 标签同样时长优先（300m→5h、10080m→Weekly）；有意义的缺时长窗口显示中性的 Primary/Secondary，空的已过期占位窗口则直接过滤。
 - **账号边界**：规则完全 plan-agnostic，覆盖 Codex Plus/Pro/Team/Business/Enterprise/Edu 等实际窗口形态，不按套餐名维护分支。Claude 继续使用其 5h/7d keys；Copilot、SuperGrok 与普通 API-key provider 没有可验证的同类 Codex reset-credit 周窗口，不套用本规则或伪造数据。
 - **验证**：共享 predicate、Admin 单周窗口、reset-credit UI、自动重置与持久 guard 均增加 `primary + 10080m` 回归；同时覆盖 `secondary + 300m` 不误判、缺 duration 的 legacy fallback，以及 model-scoped 周窗口隔离。
 
@@ -80,17 +87,9 @@
 - **缓存边界**：非 Codex live discovery 使用 Gateway 进程级账号缓存，按 `providerId + account` 隔离；正缓存 5 分钟、失败冷却 1 分钟、最多 128 个账号，并发刷新 singleflight。空结果/异常保留 last-known-good，重新绑定、断开账号或修改代理时精确失效。Admin 与 runtime synthesis 共用同一实例，避免页面读取和 pool rebuild 各请求一次；curated fallback 只在 runtime cache 之外应用，不能污染 Admin 的“账号实际返回”投影。Codex 继续使用其独立的持久 ModelInfo catalog cache。
 - **验证**：TDD 覆盖自动模式实时模型、发现失败不展示静态默认、手动模式保存值与跳过 discovery、Codex entitlement/alias、core fallback 开关，以及缓存 TTL、singleflight、last-known-good、精确失效和 Admin/runtime 共享复用；workspace typecheck/lint/build 全通过，完整 Vitest 为 352 files / 5631 tests 全绿。
 
-## 2026-07-11 · Claude Sonnet 5 订阅流量 API 等价成本与能力目录（Provider catalog / cost telemetry，docs/04/07/11，原则 2/5/7）
-
-- **默认路由升级（2026-07-12）**：`balanced` 与 `claude-sonnet` 的 native Anthropic 候选从 Sonnet 4.6 切换到 `anthropic/claude-sonnet-5`，Anthropic live discovery 失败时的 curated fallback 同步改为 Sonnet 5。成本过高的 `zenmux-anthropic/claude-sonnet-4.6` 只从 shipped lanes 删除；provider、能力与价格定义继续保留，供历史 telemetry、显式 custom-model 和兼容性使用。
-- **成本定义**：`anthropic/claude-sonnet-5` 是 Claude Pro/Max OAuth 订阅别名，订阅本身不按请求扣费；Helm 的 `cost_usd` 使用官方 Claude API 等价估算，只用于 telemetry，不参与路由或订阅结算。
-- **当前价格**：按 Anthropic 官方 2026-07-11 价格表使用介绍期价格：input `$2/M`、output `$10/M`、5 分钟 cache write `$2.50/M`、cache read `$0.20/M`。介绍期于 2026-08-31 结束；静态 catalog 不支持生效日期，2026-09-01 必须更新为标准 `$3/$15/$3.75/$0.30`。
-- **能力边界**：与价格同一变更补齐 1M context、128K synchronous output、tools、vision、streaming、structured outputs、document input，以及 `low/medium/high/xhigh/max` adaptive-thinking effort。manual `budget_tokens` thinking 明确不支持，避免价格单独引入 `EMPTY_CAPABILITIES` 后被 `context_too_small` 错误过滤。
-- **历史边界**：部署后新请求可正常估算成本；已有 `cost_usd = null` 的历史 telemetry 不自动回填。
-- **官方依据**：Anthropic Models overview、Pricing、What's new in Claude Sonnet 5、Effort 与 Structured outputs 文档，均于 2026-07-11 读取。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-11 · Claude Sonnet 5 订阅流量 API 等价成本与能力目录（Provider catalog / cost telemetry，docs/04/07/11，原则 2/5/7）**：默认 Anthropic 订阅路由升级到 Sonnet 5，并按官方介绍期 API 等价费率记录 telemetry；补齐 1M context、128K output、tools/vision/stream/structured outputs/document 与 adaptive-thinking 能力，2026-09-01 需更新标准费率。
 - **2026-07-11 · 退休 GPT-5.3-Codex-Spark 及其订阅配额投影（OAuth subscription / model catalog / Admin providers，docs/04/11，原则 3/5/6/7）**：从 live/bundled/cached catalog 与手工设置过滤退休模型，并从 WHAM/header/durable/Admin quota 投影移除其 model-scoped 限额，保留最小历史识别以阻止旧缓存复活。
 - **2026-07-11 · Portal 请求详情对齐 Admin 查看器但保持供应链边界（Self-Service Portal / Requests，docs/12，原则 1/6/7/8）**：复用 Admin viewer 并按 metadata-first 懒加载请求/响应与图片，同时保持 ownership 和 `upstream_request` 隔离边界。
 - **2026-07-11 · API-key 门户自助 Memory 默认设置（Self-Service Portal / Memory，docs/06/08/12，原则 2/7）**：bearer key 可在 Portal 安全配置 observe/inject、共享项目与线程来源；root 只读，显式请求头仍覆盖默认值。

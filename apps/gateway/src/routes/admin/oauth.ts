@@ -3,6 +3,7 @@ import {
   windowsToActiveUsageRecovery,
   windowsToUsageLimit,
 } from "@helm/core";
+import { isCodexQuotaWindowPlaceholder } from "@helm/shared";
 import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../../app.js";
@@ -442,7 +443,11 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         result.push({
           ...row,
           ...(row.providerId === "openai-codex"
-            ? { windows: filterRetiredOpenAICodexLimits(row.windows) }
+            ? {
+                windows: filterRetiredOpenAICodexLimits(row.windows).filter(
+                  (window) => !isCodexQuotaWindowPlaceholder(window, row.capturedAt),
+                ),
+              }
             : {}),
           ...(identity === undefined ? {} : { identity }),
           ...(metadata === null || metadata === undefined
