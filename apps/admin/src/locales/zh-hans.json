@@ -984,5 +984,14 @@
   "This device code has expired.": "此设备代码已过期。",
   "Authorization was denied.": "授权已被拒绝。",
   "Authorization failed. Start again to retry.": "授权失败，请重新开始后再试。",
-  "Start again": "重新开始"
+  "Start again": "重新开始",
+  "Failed to load OAuth providers": "加载 OAuth 提供商失败",
+  "Failed to refresh providers": "刷新提供商失败",
+  "Provider refresh queued": "提供商刷新已排队",
+  "Refreshing provider data…": "正在刷新提供商数据…",
+  "Provider refresh failed": "提供商刷新失败",
+  "Provider refresh failed: {error}": "提供商刷新失败：{error}",
+  "Provider data refreshed": "提供商数据已刷新",
+  "Provider data refreshed at {time}": "提供商数据已于 {time} 刷新",
+  "refresh available again in {seconds}s": "{seconds} 秒后可再次刷新"
 }

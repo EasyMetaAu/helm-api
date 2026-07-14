@@ -3,12 +3,14 @@ import {
   completeManualPaste,
   consumeCodexResetCredit,
   getAccountModels,
+  getOAuthOverview,
   getOAuthQuota,
   getOAuthUsage,
   listOAuthStatus,
   logoutOAuth,
   OAuthApiError,
   pollDeviceCode,
+  requestOAuthRefresh,
   setAccountModels,
   setAccountSchedule,
   setSelectionStrategy,
@@ -50,7 +52,7 @@ describe('admin oauth api client', () => {
   });
 
   it('treats a 503 status response as OAuth not configured', async () => {
-    const fetchFn = vi.fn(async () =>
+    const fetchFn = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
       resp({ error: 'not_configured' }, { ok: false, status: 503 }),
     );
     vi.stubGlobal('fetch', fetchFn);
@@ -84,7 +86,7 @@ describe('admin oauth api client', () => {
   });
 
   it('parses configured provider status without exposing secrets', async () => {
-    const fetchFn = vi.fn(async () =>
+    const fetchFn = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
       resp({
         selectionStrategy: 'low_risk',
         providers: [
@@ -117,6 +119,80 @@ describe('admin oauth api client', () => {
     expect(status.providers[0]?.accounts[0]?.credentialFailed).toBe(false);
     expect(status.providers[0]?.accounts[0]?.fastMode).toBe(true);
     expect(JSON.stringify(status)).not.toMatch(/access_token|refresh_token|secret/i);
+  });
+
+  it('loads the providers overview in one cache-only request', async () => {
+    const fetchFn = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      resp({
+        configured: true,
+        selectionStrategy: 'balanced',
+        providers: [],
+        usage: [
+          {
+            providerId: 'anthropic',
+            account: 'acct-a',
+            requests: 2,
+            tokens: 12,
+            costUsd: null,
+            rpm: 0.1,
+          },
+        ],
+        quota: [
+          {
+            providerId: 'anthropic',
+            account: 'acct-a',
+            windows: [],
+            capturedAt: 123,
+            source: 'anthropic',
+          },
+        ],
+        refresh: {
+          state: 'idle',
+          jobId: null,
+          requestedAt: null,
+          startedAt: null,
+          finishedAt: null,
+          lastSuccessAt: null,
+          nextAllowedAt: null,
+          error: null,
+        },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchFn);
+
+    await expect(getOAuthOverview()).resolves.toMatchObject({
+      configured: true,
+      usage: [{ providerId: 'anthropic', account: 'acct-a', requests: 2 }],
+      quota: [{ providerId: 'anthropic', account: 'acct-a', capturedAt: 123 }],
+      refresh: { state: 'idle', jobId: null },
+    });
+    expect(fetchFn).toHaveBeenCalledOnce();
+    expect(String(firstCall(fetchFn.mock.calls)[0])).toContain('/admin/api/oauth/overview?');
+  });
+
+  it('enqueues a provider refresh without waiting for upstream work', async () => {
+    const fetchFn = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      resp(
+        {
+          accepted: true,
+          coalesced: false,
+          retryAfterMs: 0,
+          status: { state: 'queued', jobId: 'refresh-1' },
+        },
+        { status: 202 },
+      ),
+    );
+    vi.stubGlobal('fetch', fetchFn);
+
+    await expect(requestOAuthRefresh()).resolves.toMatchObject({
+      accepted: true,
+      coalesced: false,
+      status: { state: 'queued', jobId: 'refresh-1' },
+    });
+    expect(fetchFn).toHaveBeenCalledWith('/admin/api/oauth/refresh', {
+      method: 'POST',
+      headers: { accept: 'application/json' },
+    });
   });
 
   it('saves the global selection strategy', async () => {

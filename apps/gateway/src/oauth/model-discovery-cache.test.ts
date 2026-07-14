@@ -4,6 +4,17 @@ import { createOAuthModelDiscoveryCache } from "./model-discovery-cache.js";
 const KEY = { providerId: "anthropic", account: "default" };
 
 describe("createOAuthModelDiscoveryCache", () => {
+  it("exposes the last-known-good snapshot without running discovery", async () => {
+    const discover = vi.fn(async () => ["claude-fable-5"]);
+    const cache = createOAuthModelDiscoveryCache();
+
+    expect(cache.snapshot(KEY)).toBeUndefined();
+    await cache.load(KEY, discover);
+
+    expect(cache.snapshot(KEY)).toEqual(["claude-fable-5"]);
+    expect(discover).toHaveBeenCalledOnce();
+  });
+
   it("serves account discovery from cache until the positive TTL expires", async () => {
     let now = 1_000;
     const discover = vi.fn(async () => ["claude-fable-5"]);
@@ -40,6 +51,29 @@ describe("createOAuthModelDiscoveryCache", () => {
       ["claude-fable-5"],
     ]);
     expect(discover).toHaveBeenCalledTimes(1);
+  });
+
+  it("force refresh bypasses a fresh value while retaining single-flight", async () => {
+    let release: ((models: string[]) => void) | undefined;
+    const pending = new Promise<string[]>((resolve) => {
+      release = resolve;
+    });
+    const discover = vi
+      .fn<() => Promise<string[]>>()
+      .mockResolvedValueOnce(["claude-fable-5"])
+      .mockImplementationOnce(() => pending);
+    const cache = createOAuthModelDiscoveryCache();
+
+    await cache.load(KEY, discover);
+    const first = cache.load(KEY, discover, { force: true });
+    const second = cache.load(KEY, discover, { force: true });
+    release?.(["claude-opus-4-8"]);
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      ["claude-opus-4-8"],
+      ["claude-opus-4-8"],
+    ]);
+    expect(discover).toHaveBeenCalledTimes(2);
   });
 
   it("keeps last-known-good models and negative-caches an empty refresh", async () => {

@@ -134,6 +134,35 @@ export interface OAuthUsageRow {
   rpm: number;
 }
 
+export type OAuthAdminRefreshState = 'idle' | 'queued' | 'running' | 'succeeded' | 'failed';
+
+export interface OAuthAdminRefreshStatus {
+  state: OAuthAdminRefreshState;
+  jobId: string | null;
+  requestedAt: number | null;
+  startedAt: number | null;
+  finishedAt: number | null;
+  lastSuccessAt: number | null;
+  nextAllowedAt: number | null;
+  error: string | null;
+}
+
+export interface OAuthOverview {
+  configured: boolean;
+  selectionStrategy: OAuthSelectionStrategy;
+  providers: OAuthProviderStatus[];
+  usage: OAuthUsageRow[];
+  quota: OAuthQuotaSnapshot[];
+  refresh: OAuthAdminRefreshStatus;
+}
+
+export interface OAuthAdminRefreshEnqueueResult {
+  accepted: boolean;
+  coalesced: boolean;
+  retryAfterMs: number;
+  status: OAuthAdminRefreshStatus;
+}
+
 // Quota wire types come exclusively from @helm/shared's Zod schema. Keep aliases
 // here so existing Admin imports stay stable without duplicating the contract.
 export type OAuthQuotaSnapshot = SharedOAuthQuotaSnapshot;
@@ -144,11 +173,29 @@ export type CodexIndividualLimit = NonNullable<OAuthQuotaSnapshot['individualLim
 export type CodexAdditionalLimit = NonNullable<OAuthQuotaSnapshot['additionalLimits']>[number];
 export type CodexResetCreditDetail = NonNullable<OAuthQuotaSnapshot['resetCreditDetails']>[number];
 
-// Observability reads block the providers-page load (Promise.all), so they carry a
-// hard client-side timeout: a slow/hung gateway (e.g. an Anthropic quota pull behind
-// a stalled proxy) must never keep `/admin/providers` spinning — the AbortSignal
-// trips the catch and the page renders with [] for that section.
+// Cache-only observability reads are expected to be fast, but a DB lock or stalled
+// gateway must still not leave the Providers page spinning forever.
 const OBSERVABILITY_TIMEOUT_MS = 10_000;
+
+// GET /oauth/overview -> one cache-only page snapshot. The gateway guarantees this
+// route never performs provider discovery, token refresh, or quota pulls.
+export async function getOAuthOverview(): Promise<OAuthOverview> {
+  const res = await fetch(`${BASE}/overview?tzOffsetMinutes=${clientTzOffsetMinutes()}`, {
+    headers: { accept: 'application/json' },
+    signal: AbortSignal.timeout(OBSERVABILITY_TIMEOUT_MS),
+  });
+  return asJson(res);
+}
+
+// POST /oauth/refresh -> enqueue one global refresh job. The 202 response is
+// immediate; repeated clicks are coalesced by the gateway coordinator.
+export async function requestOAuthRefresh(): Promise<OAuthAdminRefreshEnqueueResult> {
+  const res = await fetch(`${BASE}/refresh`, {
+    method: 'POST',
+    headers: { accept: 'application/json' },
+  });
+  return asJson(res);
+}
 
 // GET /oauth/usage -> today's per-account usage, bucketed by the VIEWER's local day
 // (send the browser UTC offset so "today" matches the dashboard, not 00:00 UTC).
@@ -167,8 +214,8 @@ export async function getOAuthUsage(): Promise<OAuthUsageRow[]> {
   }
 }
 
-// GET /oauth/quota -> latest rate-limit window snapshot per account. FAIL-OPEN to []
-// (incl. timeout) so a hung Anthropic pull on the server never stalls the page.
+// GET /oauth/quota -> latest cached rate-limit window snapshot per account. FAIL-OPEN
+// to [] (incl. timeout) so an unavailable gateway never stalls the page.
 export async function getOAuthQuota(): Promise<OAuthQuotaSnapshot[]> {
   try {
     const res = await fetch(`${BASE}/quota`, {

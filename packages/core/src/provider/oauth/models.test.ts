@@ -6,6 +6,7 @@ import {
   expandOpenAICodexModelAliases,
   filterRetiredOpenAICodexLimits,
   hasLiveModelDiscovery,
+  listAnthropicModels,
   listOpenAICodexModels,
   OpenAICodexModelsError,
   resolveOpenAICodexClientVersion,
@@ -224,6 +225,15 @@ describe("hasLiveModelDiscovery", () => {
 });
 
 describe("listOpenAICodexModels", () => {
+  it("bounds the upstream request with an AbortSignal", async () => {
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return jsonResponse({ models: [codexModel("gpt-5.6-sol", 1)] });
+    });
+
+    await listOpenAICodexModels("token", { fetchImpl });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
   it("uses the current Codex whole client version and permits an environment override", () => {
     expect(DEFAULT_OPENAI_CODEX_CLIENT_VERSION).toBe("0.145.0");
     expect(resolveOpenAICodexClientVersion({})).toBe("0.145.0");
@@ -336,5 +346,17 @@ describe("listOpenAICodexModels", () => {
         fetchImpl: fetchMock as unknown as typeof globalThis.fetch,
       }),
     ).rejects.toBeInstanceOf(OpenAICodexModelsError);
+  });
+});
+
+describe("listAnthropicModels", () => {
+  it("bounds the upstream request with an AbortSignal", async () => {
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return jsonResponse({ data: [{ id: "claude-sonnet-4-7" }] });
+    });
+
+    await expect(listAnthropicModels("token", fetchImpl)).resolves.toEqual(["claude-sonnet-4-7"]);
+    expect(fetchImpl).toHaveBeenCalledOnce();
   });
 });

@@ -6,6 +6,7 @@ import {
 import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../../app.js";
+import { createOAuthAdminRefreshCoordinator } from "../../oauth/admin-refresh-coordinator.js";
 import {
   CODEX_RESET_MIN_WEEKLY_USED_PERCENT,
   canConsumeResetCredit,
@@ -19,8 +20,8 @@ import {
 import type {
   AccountProxyInput,
   AdminApiDeps,
-  CodexQuotaResult,
   OAuthAdminAccess,
+  OAuthAdminStatusResponse,
   OAuthSelectionStrategy,
 } from "./deps.js";
 
@@ -182,49 +183,34 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
   app.get("/admin/api/oauth", async (c) => {
     const s = seam();
     if (!s) return c.json({ error: "oauth login not configured (set HELM_OAUTH_ENC_KEY)" }, 503);
-    return c.json(await s.listStatus());
+    return c.json(await s.listCachedStatus());
   });
 
-  // GET /oauth/usage?tzOffsetMinutes -> today's per-account served traffic (providers
-  // page Tier 2). FAIL-OPEN: an absent store / read failure yields [] (the page
-  // renders zeros) — an observability read must never break the page. "Today" is the
-  // ADMIN's LOCAL day: the browser sends its UTC offset (east-positive minutes) and
-  // we roll the per-hour buckets up over [local-midnight, +24h) in UTC. A missing /
-  // out-of-range offset fails open to 0 (UTC day). RPM is the daily AVERAGE (requests
-  // / minutes since the day's first served call), derived here so the store stays a
-  // plain counter. No secrets — aggregate counters only (principle 7).
-  app.get("/admin/api/oauth/usage", async (c) => {
+  const acctKey = (providerId: string, account: string) => `${providerId}\u0000${account}`;
+  const boundKeys = (status: OAuthAdminStatusResponse): Set<string> =>
+    new Set(
+      status.providers.flatMap((provider) =>
+        provider.accounts.map((account) => acctKey(provider.id, account.account)),
+      ),
+    );
+
+  // Local-only usage aggregation. Binding metadata comes from cached token/settings
+  // state; this function never refreshes a token or calls a provider.
+  const readUsage = async (rawTz: unknown, status: OAuthAdminStatusResponse | null) => {
     const store = deps.oauthUsage;
-    if (!store) return c.json({ usage: [] });
+    if (!store) return [];
     const now = Date.now();
-    // Fail-open tz offset (east-positive minutes; UTC-12 … UTC+14). Then floor to the
-    // viewer's local midnight and express that boundary back in UTC for the query.
-    const rawTz = Number(c.req.query("tzOffsetMinutes"));
-    const tzOffsetMinutes = Number.isInteger(rawTz) && rawTz >= -720 && rawTz <= 840 ? rawTz : 0;
+    const parsedTz = Number(rawTz);
+    const tzOffsetMinutes =
+      Number.isInteger(parsedTz) && parsedTz >= -720 && parsedTz <= 840 ? parsedTz : 0;
     const offsetMs = tzOffsetMinutes * 60_000;
     const start = now + offsetMs - ((now + offsetMs) % 86_400_000) - offsetMs;
     const end = start + 86_400_000;
-    // Restrict to currently-bound accounts (listStatus = the OAuth tokens) so a
-    // renamed / re-bound account does NOT linger as a phantom usage row — the same
-    // guard the /quota route applies. Fail-open: no seam / a listing failure leaves
-    // `bound` null and every row is returned (never hide data behind the filter).
-    const usageKey = (providerId: string, account: string) => JSON.stringify([providerId, account]);
-    let bound: Set<string> | null = null;
-    const s = seam();
-    if (s) {
-      try {
-        const status = await s.listStatus();
-        bound = new Set(
-          status.providers.flatMap((p) => p.accounts.map((a) => usageKey(p.id, a.account))),
-        );
-      } catch {
-        // fail-open: a listing failure returns all rows rather than hiding data
-      }
-    }
+    const bound = status ? boundKeys(status) : null;
     try {
       const rows = await store.queryRange(start, end);
-      const usage = rows
-        .filter((r) => !bound || bound.has(usageKey(r.providerId, r.account)))
+      return rows
+        .filter((r) => !bound || bound.has(acctKey(r.providerId, r.account)))
         .map((r) => {
           const minutes = Math.max(1, (now - r.firstSeenMs) / 60_000);
           return {
@@ -236,21 +222,16 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
             rpm: Math.round((r.requests / minutes) * 100) / 100,
           };
         });
-      return c.json({ usage });
     } catch {
-      return c.json({ usage: [] });
+      return [];
     }
-  });
+  };
 
-  // GET /oauth/quota -> latest rate-limit window snapshot per account (providers
-  // page Tier 3). Sources merge in the quota store: Codex PUSHes `x-codex-*`
-  // headers on every reply, and BOTH Anthropic and Codex expose PULL usage
-  // endpoints we refresh on read (5-min cached in the seam) before returning.
-  // FAIL-OPEN throughout — a dead token / absent store yields fewer windows or
-  // [], never an error.
-  app.get("/admin/api/oauth/quota", async (c) => {
+  // Explicit refresh job body. All upstream work lives here, behind the refresh
+  // coordinator; cache-only GET routes never call it.
+  const refreshQuota = async (): Promise<void> => {
     const store = deps.oauthQuota;
-    if (!store) return c.json({ quota: [] });
+    if (!store) return;
     const s = seam();
     // listStatus (the bound OAuth tokens) is the source of truth for "which accounts
     // exist". We use it BOTH to refresh the Anthropic PULL and to drop ORPHANED
@@ -258,18 +239,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     // Codex push captured under an old label) that would show as a phantom account.
     const acctKey = (providerId: string, account: string) => `${providerId}\u0000${account}`;
     let bound: Set<string> | null = null;
-    // Codex reset-credit counts from the live usage PULL. They are persisted with the
-    // latest snapshot for quota-aware strategy scoring, then folded onto the response.
-    const codexMetadata = new Map<string, NonNullable<CodexQuotaResult>>();
-    const codexIdentities = new Map<
-      string,
-      {
-        email?: string;
-        chatgptPlanType?: string;
-        chatgptAccountId?: string;
-        isFedramp?: boolean;
-      }
-    >();
+    const failures: string[] = [];
     const syncCooldownFromWindows = async (
       providerId: string,
       account: string,
@@ -296,27 +266,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     };
     if (s) {
       try {
-        const status = await s.listStatus();
+        const status = await s.listStatus({ forceRefresh: true, serial: true });
         bound = new Set(
           status.providers.flatMap((p) => p.accounts.map((a) => acctKey(p.id, a.account))),
         );
-        const codexAccounts =
-          status.providers.find((provider) => provider.id === "openai-codex")?.accounts ?? [];
-        for (const account of codexAccounts) {
-          const identity = {
-            ...(account.email === undefined ? {} : { email: account.email }),
-            ...(account.chatgptPlanType === undefined
-              ? {}
-              : { chatgptPlanType: account.chatgptPlanType }),
-            ...(account.chatgptAccountId === undefined
-              ? {}
-              : { chatgptAccountId: account.chatgptAccountId }),
-            ...(account.isFedramp === undefined ? {} : { isFedramp: account.isFedramp }),
-          };
-          if (Object.keys(identity).length > 0) {
-            codexIdentities.set(acctKey("openai-codex", account.account), identity);
-          }
-        }
         // Refresh the usage-endpoint PULL for each connected account (cached in the
         // seam). Anthropic and Codex both expose one; the Codex `x-codex-*` header
         // PUSH still updates the same store on live traffic — the PULL covers
@@ -329,30 +282,30 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         // near-full accounts schedulable while preventing the UI from saying "limited"
         // as the pool continues to route to the same exhausted account.
         const acctsOf = (id: string) => status.providers.find((x) => x.id === id)?.accounts ?? [];
-        const tasks: Array<Promise<void>> = [];
+        const tasks: Array<{ label: string; run: () => Promise<void> }> = [];
         // Anthropic: windows only.
         const fetchAnthropic = s.fetchAnthropicQuota;
         if (fetchAnthropic) {
           for (const a of acctsOf("anthropic")) {
-            tasks.push(
-              (async () => {
-                const windows = await fetchAnthropic({ account: a.account });
-                if (windows && windows.length > 0) {
-                  const capturedAt = Date.now();
-                  await store
-                    .upsert({
-                      providerId: "anthropic",
-                      account: a.account,
-                      windows,
-                      capturedAt,
-                      source: "anthropic",
-                    })
-                    .catch(() => {});
-                  deps.applyQuotaSnapshot?.("anthropic", a.account, windows, capturedAt);
-                  await syncCooldownFromWindows("anthropic", a.account, windows);
+            tasks.push({
+              label: `anthropic/${a.account}`,
+              run: async () => {
+                const windows = await fetchAnthropic({ account: a.account, force: true });
+                if (!windows || windows.length === 0) {
+                  throw new Error("quota refresh returned no windows");
                 }
-              })(),
-            );
+                const capturedAt = Date.now();
+                await store.upsert({
+                  providerId: "anthropic",
+                  account: a.account,
+                  windows,
+                  capturedAt,
+                  source: "anthropic",
+                });
+                deps.applyQuotaSnapshot?.("anthropic", a.account, windows, capturedAt);
+                await syncCooldownFromWindows("anthropic", a.account, windows);
+              },
+            });
           }
         }
         // xAI: the Grok subscription usage endpoint also yields normalized windows
@@ -362,57 +315,50 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         const fetchXai = s.fetchXaiQuota;
         if (fetchXai) {
           for (const a of acctsOf("xai")) {
-            tasks.push(
-              (async () => {
-                try {
-                  const windows = await fetchXai({ account: a.account });
-                  if (windows && windows.length > 0) {
-                    const capturedAt = Date.now();
-                    await store
-                      .upsert({
-                        providerId: "xai",
-                        account: a.account,
-                        windows,
-                        capturedAt,
-                        source: "xai",
-                      })
-                      .catch(() => {});
-                    deps.applyQuotaSnapshot?.("xai", a.account, windows, capturedAt);
-                    await syncCooldownFromWindows("xai", a.account, windows);
-                  }
-                } catch {
-                  // One dead xAI token must not short-circuit refreshes for other
-                  // providers/accounts; the route returns the last stored snapshot.
+            tasks.push({
+              label: `xai/${a.account}`,
+              run: async () => {
+                const windows = await fetchXai({ account: a.account, force: true });
+                if (!windows || windows.length === 0) {
+                  throw new Error("quota refresh returned no windows");
                 }
-              })(),
-            );
+                const capturedAt = Date.now();
+                await store.upsert({
+                  providerId: "xai",
+                  account: a.account,
+                  windows,
+                  capturedAt,
+                  source: "xai",
+                });
+                deps.applyQuotaSnapshot?.("xai", a.account, windows, capturedAt);
+                await syncCooldownFromWindows("xai", a.account, windows);
+              },
+            });
           }
         }
         // Codex: windows (persisted) + reset-credit count (live, attached below).
         const fetchCodex = s.fetchCodexQuota;
         if (fetchCodex) {
           for (const a of acctsOf("openai-codex")) {
-            tasks.push(
-              (async () => {
-                const result = await fetchCodex({ account: a.account });
-                if (!result) return;
+            tasks.push({
+              label: `openai-codex/${a.account}`,
+              run: async () => {
+                const result = await fetchCodex({ account: a.account, force: true });
+                if (!result) throw new Error("quota refresh returned no snapshot");
                 const activeResult = {
                   ...result,
                   windows: filterRetiredOpenAICodexLimits(result.windows),
                   additionalLimits: filterRetiredOpenAICodexLimits(result.additionalLimits),
                 };
-                codexMetadata.set(acctKey("openai-codex", a.account), activeResult);
                 const capturedAt = Date.now();
-                await store
-                  .upsert({
-                    providerId: "openai-codex",
-                    account: a.account,
-                    windows: activeResult.windows,
-                    capturedAt,
-                    source: "codex",
-                    resetCredits: activeResult.resetCredits,
-                  })
-                  .catch(() => {});
+                await store.upsert({
+                  providerId: "openai-codex",
+                  account: a.account,
+                  windows: activeResult.windows,
+                  capturedAt,
+                  source: "codex",
+                  resetCredits: activeResult.resetCredits,
+                });
                 deps.applyQuotaSnapshot?.(
                   "openai-codex",
                   a.account,
@@ -423,66 +369,156 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                 if (activeResult.windows.length > 0) {
                   await syncCooldownFromWindows("openai-codex", a.account, activeResult.windows);
                 }
-              })(),
-            );
+              },
+            });
           }
         }
-        await Promise.all(tasks);
-      } catch {
-        // fail-open: a refresh/listing failure still returns whatever is stored
+        for (const task of tasks) {
+          try {
+            await task.run();
+          } catch (error) {
+            failures.push(`${task.label}: ${errMessage(error)}`);
+          }
+        }
+      } catch (error) {
+        failures.push(`provider status: ${errMessage(error)}`);
       }
     }
-    // Fold the complete live Codex subscription metadata onto its snapshot. Only
-    // resetCredits is persisted for pool scoring; the rest remains live/read-only.
-    const withCodexMetadata = <
-      T extends {
-        providerId: string;
-        account: string;
-        windows: Array<{ limitId?: string; limitName?: string | null }>;
-      },
-    >(
-      q: T,
-    ) => {
-      const key = acctKey(q.providerId, q.account);
-      const metadata = codexMetadata.get(key);
-      const identity = codexIdentities.get(key);
-      const snapshot =
-        q.providerId === "openai-codex"
-          ? { ...q, windows: filterRetiredOpenAICodexLimits(q.windows) }
-          : q;
-      return metadata === undefined && identity === undefined
-        ? snapshot
-        : {
-            ...snapshot,
-            ...(identity === undefined ? {} : { identity }),
-            ...(metadata === undefined
-              ? {}
-              : {
-                  resetCredits: metadata.resetCredits,
-                  resetCreditDetails: metadata.resetCreditDetails,
-                  credits: metadata.credits,
-                  individualLimit: metadata.individualLimit,
-                  additionalLimits: metadata.additionalLimits,
-                  planType: metadata.planType,
-                  rateLimitReachedType: metadata.rateLimitReachedType,
-                }),
-          };
-    };
-    try {
-      const all = await store.getAll();
-      // No binding view (no seam / listStatus failed) → fail-open, return everything.
-      if (!bound) return c.json({ quota: all.map(withCodexMetadata) });
-      const live = all.filter((q) => bound.has(acctKey(q.providerId, q.account)));
-      // Best-effort prune so orphans don't accumulate; never block the read on it.
+    const all = await store.getAll().catch((error: unknown) => {
+      failures.push(`quota cache: ${errMessage(error)}`);
+      return [];
+    });
+    if (bound) {
+      // Best-effort prune so orphans don't accumulate. A delete failure does not
+      // discard fresh rows or hide a successful provider pull.
       await Promise.all(
         all
           .filter((q) => !bound.has(acctKey(q.providerId, q.account)))
           .map((o) => store.delete(o.providerId, o.account).catch(() => {})),
       );
-      return c.json({ quota: live.map(withCodexMetadata) });
-    } catch {
-      return c.json({ quota: [] });
     }
+    if (failures.length > 0) {
+      throw new Error(`provider refresh failed (${failures.join("; ")})`);
+    }
+  };
+
+  // Read the durable quota rows plus any richer in-process Codex metadata. This is
+  // intentionally side-effect free: no upstream PULL, orphan pruning, or cooldown
+  // mutation happens on a page read.
+  const readCachedQuota = async (
+    status: OAuthAdminStatusResponse | null,
+  ): Promise<Array<Record<string, unknown>>> => {
+    const store = deps.oauthQuota;
+    if (!store) return [];
+    const bound = status ? boundKeys(status) : null;
+    const identities = new Map<string, Record<string, unknown>>();
+    for (const provider of status?.providers ?? []) {
+      for (const account of provider.accounts) {
+        const identity = {
+          ...(account.email === undefined ? {} : { email: account.email }),
+          ...(account.chatgptPlanType === undefined
+            ? {}
+            : { chatgptPlanType: account.chatgptPlanType }),
+          ...(account.chatgptAccountId === undefined
+            ? {}
+            : { chatgptAccountId: account.chatgptAccountId }),
+          ...(account.isFedramp === undefined ? {} : { isFedramp: account.isFedramp }),
+        };
+        if (Object.keys(identity).length > 0) {
+          identities.set(acctKey(provider.id, account.account), identity);
+        }
+      }
+    }
+    try {
+      const result: Array<Record<string, unknown>> = [];
+      for (const row of await store.getAll()) {
+        const key = acctKey(row.providerId, row.account);
+        if (bound && !bound.has(key)) continue;
+        const metadata =
+          row.providerId === "openai-codex"
+            ? await seam()?.getCachedCodexQuota?.({ account: row.account })
+            : null;
+        const identity = identities.get(key);
+        result.push({
+          ...row,
+          ...(row.providerId === "openai-codex"
+            ? { windows: filterRetiredOpenAICodexLimits(row.windows) }
+            : {}),
+          ...(identity === undefined ? {} : { identity }),
+          ...(metadata === null || metadata === undefined
+            ? {}
+            : {
+                resetCredits: metadata.resetCredits,
+                resetCreditDetails: metadata.resetCreditDetails,
+                credits: metadata.credits,
+                individualLimit: metadata.individualLimit,
+                additionalLimits: filterRetiredOpenAICodexLimits(metadata.additionalLimits),
+                planType: metadata.planType,
+                rateLimitReachedType: metadata.rateLimitReachedType,
+              }),
+        });
+      }
+      return result;
+    } catch {
+      return [];
+    }
+  };
+
+  const refreshCoordinator = createOAuthAdminRefreshCoordinator({
+    refresh: async () => {
+      await refreshQuota();
+    },
+  });
+
+  app.get("/admin/api/oauth/usage", async (c) => {
+    const status = await seam()
+      ?.listCachedStatus()
+      .catch(() => null);
+    return c.json({ usage: await readUsage(c.req.query("tzOffsetMinutes"), status ?? null) });
+  });
+
+  app.get("/admin/api/oauth/quota", async (c) => {
+    const status = await seam()
+      ?.listCachedStatus()
+      .catch(() => null);
+    return c.json({ quota: await readCachedQuota(status ?? null) });
+  });
+
+  // The providers page uses one cache-only round trip for account, usage, quota,
+  // and refresh-job state. A cold upstream or dead proxy cannot delay this route.
+  app.get("/admin/api/oauth/overview", async (c) => {
+    const s = seam();
+    if (!s) {
+      return c.json({
+        configured: false,
+        selectionStrategy: "balanced",
+        providers: [],
+        usage: [],
+        quota: [],
+        refresh: refreshCoordinator.status(),
+      });
+    }
+    const status = await s.listCachedStatus();
+    const [usage, quota] = await Promise.all([
+      readUsage(c.req.query("tzOffsetMinutes"), status),
+      readCachedQuota(status),
+    ]);
+    return c.json({
+      configured: true,
+      ...status,
+      usage,
+      quota,
+      refresh: refreshCoordinator.status(),
+    });
+  });
+
+  app.post("/admin/api/oauth/refresh", (c) => {
+    if (!seam()) return c.json({ error: "oauth login not configured" }, 503);
+    const result = refreshCoordinator.enqueue();
+    if (result.retryAfterMs > 0) {
+      c.header("Retry-After", String(Math.ceil(result.retryAfterMs / 1000)));
+    }
+    return c.json(result, 202);
   });
 
   // POST /oauth/:provider/reset-credit { account? } -> consume one rate-limit reset

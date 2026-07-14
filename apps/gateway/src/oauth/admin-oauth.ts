@@ -476,6 +476,20 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
   // undefined for the Anthropic path (which has no such grant).
   const quotaCache = new Map<string, CodexQuotaCacheValue>();
   const quotaCacheEpoch = new Map<string, number>();
+  const cachedCodexQuota = (account: string): CodexQuotaResult => {
+    const cached = quotaCache.get(`${CODEX} ${account}`);
+    if (!cached || cached.windows === null) return null;
+    return {
+      windows: cached.windows,
+      additionalLimits: cached.additionalLimits ?? [],
+      resetCredits: cached.resetCredits ?? null,
+      resetCreditDetails: cached.resetCreditDetails ?? null,
+      credits: cached.credits ?? null,
+      individualLimit: cached.individualLimit ?? null,
+      planType: cached.planType ?? null,
+      rateLimitReachedType: cached.rateLimitReachedType ?? null,
+    };
+  };
   const invalidateQuotaCache = (providerId: string, account: string): void => {
     const key = `${providerId} ${account}`;
     quotaCache.delete(key);
@@ -508,25 +522,30 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     providerId: string,
     account: string,
     settings: AccountSettings,
+    forceRefresh = false,
   ): Promise<{ available: string[]; entitled: string[] }> {
     const provider = getOAuthProvider(providerId);
     if (!provider) return { available: [], entitled: [] };
     if (providerId !== CODEX) {
-      const available = await modelDiscoveryCache.load({ providerId, account }, async () => {
-        const accountFetch = makeFetch(settings.proxy as ProxyConfig | undefined);
-        const tm = createTokenManager({
-          oauth: { kind: "preset", providerId, account },
-          tokenStore: deps.store,
-          encKey: deps.encKey,
-          oauthProvider: provider,
-          fetch: accountFetch,
-          now,
-        });
-        const accessToken = (await tm.getAuthHeader()).replace(/^Bearer /, "");
-        return discoverOAuthModels(providerId, accessToken, accountFetch, {
-          fallbackToCurated: false,
-        });
-      });
+      const available = await modelDiscoveryCache.load(
+        { providerId, account },
+        async () => {
+          const accountFetch = makeFetch(settings.proxy as ProxyConfig | undefined);
+          const tm = createTokenManager({
+            oauth: { kind: "preset", providerId, account },
+            tokenStore: deps.store,
+            encKey: deps.encKey,
+            oauthProvider: provider,
+            fetch: accountFetch,
+            now,
+          });
+          const accessToken = (await tm.getAuthHeader()).replace(/^Bearer /, "");
+          return discoverOAuthModels(providerId, accessToken, accountFetch, {
+            fallbackToCurated: false,
+          });
+        },
+        { force: forceRefresh },
+      );
       return { available, entitled: available };
     }
     try {
@@ -550,17 +569,21 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           accountIdentity: openAICodexIdentityFingerprint(identity),
           clientVersion,
         };
-        const snapshot = await deps.codexCatalog.load(key, async () => {
-          const currentAccess = (await tm.getAuthHeader()).replace(/^Bearer /, "");
-          const currentIdentity = mergeCodexIdentity(currentAccess, tm.currentMetadata());
-          return listOpenAICodexModels(currentAccess, {
-            accountId: currentIdentity.accountId,
-            isFedramp: currentIdentity.isFedramp,
-            clientVersion,
-            userAgent,
-            fetchImpl: accountFetch,
-          });
-        });
+        const snapshot = await deps.codexCatalog.load(
+          key,
+          async () => {
+            const currentAccess = (await tm.getAuthHeader()).replace(/^Bearer /, "");
+            const currentIdentity = mergeCodexIdentity(currentAccess, tm.currentMetadata());
+            return listOpenAICodexModels(currentAccess, {
+              accountId: currentIdentity.accountId,
+              isFedramp: currentIdentity.isFedramp,
+              clientVersion,
+              userAgent,
+              fetchImpl: accountFetch,
+            });
+          },
+          { force: forceRefresh },
+        );
         if (!snapshot) return { available: [], entitled: [] };
         const modelSets = codexModelSets(snapshot.models);
         return { available: modelSets.visible, entitled: modelSets.entitled };
@@ -682,99 +705,117 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     };
   }
 
-  return {
-    async listStatus(): Promise<OAuthAdminStatusResponse> {
-      const rows = await deps.store.list();
-      // Load the per-account settings blob ONCE for the whole page (a single decrypt)
-      // so the list carries each account's effective priority + schedulable without an
-      // N+1 per-account GET. Fail-open to {} (defaults applied below).
-      const settings = await loadAccountSettings(deps.config, deps.encKey);
-      const globalSettings = await loadGlobalOAuthSettings(deps.config, deps.encKey);
-      // Ensure-fresh every stored account in parallel so the page reflects live,
-      // auto-renewed expiries (and surfaces a dead credential as unhealthy).
-      const refreshed = await Promise.all(
-        rows.map(async (r) => {
-          // Same defaults as getAccountSchedule (priority 50, schedulable true) so a
-          // never-tuned account always renders a concrete value.
-          const sch = getAccountSettings(settings, r.providerId, r.account);
-          const hasCredentialFailure = typeof sch.credentialFailedAt === "number";
-          const fresh = hasCredentialFailure
-            ? {
-                account: r.account,
-                expiresAt: r.expiresAt,
-                updatedAt: r.updatedAt,
-                healthy: false,
-                credentialFailed: true,
-              }
-            : await ensureFresh(r.providerId, r.account, r, sch.proxy as ProxyConfig | undefined);
-          const { credentialFailed, ...freshView } = fresh;
-          const modelsMode = resolveAccountModelsMode(r.providerId, sch);
-          const discovered =
-            modelsMode === "auto" && fresh.healthy
-              ? await discoverAccountModels(r.providerId, r.account, sch)
-              : r.providerId === CODEX
-                ? {
-                    available: [],
-                    entitled: (await codexCatalogModels(r.account))?.entitled ?? [],
-                  }
-                : { available: [], entitled: [] };
-          const models = enabledAccountModels(r.providerId, sch, discovered);
-          const identity = await statusCodexIdentity(
-            deps.store,
-            deps.encKey,
-            r.providerId,
-            r.account,
-          );
-          return {
-            providerId: r.providerId,
-            ...freshView,
-            credentialFailed,
-            ...(identity.email ? { email: identity.email } : {}),
-            ...(identity.chatgptPlanType ? { chatgptPlanType: identity.chatgptPlanType } : {}),
-            ...(identity.accountId ? { chatgptAccountId: identity.accountId } : {}),
-            ...(typeof identity.isFedramp === "boolean" ? { isFedramp: identity.isFedramp } : {}),
-            priority: sch.priority ?? 50,
-            schedulable: credentialFailed ? false : (sch.schedulable ?? true),
-            autoReset: sch.autoReset ?? false,
-            fastMode: sch.fastMode ?? false,
-            // Manual mode comes from the saved allowlist. Auto mode comes from this
-            // account's discovery result and never substitutes curated fallback ids.
-            proxy: redactProxy(sch.proxy),
-            models,
-          };
-        }),
-      );
-      const accountsFor = (id: string) =>
-        refreshed.filter((x) => x.providerId === id).map(({ providerId: _p, ...rest }) => rest);
+  async function buildStatus(options: {
+    refresh: boolean;
+    forceRefresh: boolean;
+    serial: boolean;
+  }): Promise<OAuthAdminStatusResponse> {
+    const rows = await deps.store.list();
+    const settings = await loadAccountSettings(deps.config, deps.encKey);
+    const globalSettings = await loadGlobalOAuthSettings(deps.config, deps.encKey);
+    const project = async (r: (typeof rows)[number]) => {
+      const sch = getAccountSettings(settings, r.providerId, r.account);
+      const hasCredentialFailure = typeof sch.credentialFailedAt === "number";
+      const fresh =
+        options.refresh && !hasCredentialFailure
+          ? await ensureFresh(r.providerId, r.account, r, sch.proxy as ProxyConfig | undefined)
+          : {
+              account: r.account,
+              expiresAt: r.expiresAt,
+              updatedAt: r.updatedAt,
+              healthy: !hasCredentialFailure,
+              credentialFailed: hasCredentialFailure,
+            };
+      const { credentialFailed, ...freshView } = fresh;
+      const modelsMode = resolveAccountModelsMode(r.providerId, sch);
+      let discovered: { available: string[]; entitled: string[] };
+      if (options.refresh && modelsMode === "auto" && fresh.healthy) {
+        discovered = await discoverAccountModels(
+          r.providerId,
+          r.account,
+          sch,
+          options.forceRefresh,
+        );
+      } else if (r.providerId === CODEX) {
+        const cached = await codexCatalogModels(r.account);
+        discovered = { available: cached?.visible ?? [], entitled: cached?.entitled ?? [] };
+      } else if (modelsMode === "auto") {
+        const cached = modelDiscoveryCache.snapshot({
+          providerId: r.providerId,
+          account: r.account,
+        });
+        discovered = { available: cached ?? [], entitled: cached ?? [] };
+      } else {
+        discovered = { available: [], entitled: [] };
+      }
+      const models = enabledAccountModels(r.providerId, sch, discovered);
+      const identity = await statusCodexIdentity(deps.store, deps.encKey, r.providerId, r.account);
       return {
-        selectionStrategy: globalSettings.selectionStrategy ?? "balanced",
-        providers: [
-          {
-            id: ANTHROPIC,
-            name: "Anthropic (Claude Pro/Max)",
-            flow: "manual_paste",
-            accounts: accountsFor(ANTHROPIC),
-          },
-          {
-            id: CODEX,
-            name: "ChatGPT Plus/Pro (Codex)",
-            flow: "manual_paste",
-            accounts: accountsFor(CODEX),
-          },
-          {
-            id: COPILOT,
-            name: "GitHub Copilot",
-            flow: "device_code",
-            accounts: accountsFor(COPILOT),
-          },
-          {
-            id: XAI,
-            name: "xAI (SuperGrok/X Premium) · Experimental",
-            flow: "device_code",
-            accounts: accountsFor(XAI),
-          },
-        ],
+        providerId: r.providerId,
+        ...freshView,
+        credentialFailed,
+        ...(identity.email ? { email: identity.email } : {}),
+        ...(identity.chatgptPlanType ? { chatgptPlanType: identity.chatgptPlanType } : {}),
+        ...(identity.accountId ? { chatgptAccountId: identity.accountId } : {}),
+        ...(typeof identity.isFedramp === "boolean" ? { isFedramp: identity.isFedramp } : {}),
+        priority: sch.priority ?? 50,
+        schedulable: credentialFailed ? false : (sch.schedulable ?? true),
+        autoReset: sch.autoReset ?? false,
+        fastMode: sch.fastMode ?? false,
+        proxy: redactProxy(sch.proxy),
+        models,
       };
+    };
+    const refreshed: Array<Awaited<ReturnType<typeof project>>> = [];
+    if (options.serial) {
+      for (const row of rows) refreshed.push(await project(row));
+    } else {
+      refreshed.push(...(await Promise.all(rows.map(project))));
+    }
+    const accountsFor = (id: string) =>
+      refreshed.filter((x) => x.providerId === id).map(({ providerId: _p, ...rest }) => rest);
+    return {
+      selectionStrategy: globalSettings.selectionStrategy ?? "balanced",
+      providers: [
+        {
+          id: ANTHROPIC,
+          name: "Anthropic (Claude Pro/Max)",
+          flow: "manual_paste",
+          accounts: accountsFor(ANTHROPIC),
+        },
+        {
+          id: CODEX,
+          name: "ChatGPT Plus/Pro (Codex)",
+          flow: "manual_paste",
+          accounts: accountsFor(CODEX),
+        },
+        {
+          id: COPILOT,
+          name: "GitHub Copilot",
+          flow: "device_code",
+          accounts: accountsFor(COPILOT),
+        },
+        {
+          id: XAI,
+          name: "xAI (SuperGrok/X Premium) · Experimental",
+          flow: "device_code",
+          accounts: accountsFor(XAI),
+        },
+      ],
+    };
+  }
+
+  return {
+    async listCachedStatus(): Promise<OAuthAdminStatusResponse> {
+      return buildStatus({ refresh: false, forceRefresh: false, serial: false });
+    },
+
+    async listStatus(options = {}): Promise<OAuthAdminStatusResponse> {
+      return buildStatus({
+        refresh: true,
+        forceRefresh: options.forceRefresh === true,
+        serial: options.serial === true,
+      });
     },
 
     async startManualPaste({ providerId, proxy }) {
@@ -1043,14 +1084,14 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       await setGlobalOAuthSettings(deps.config, deps.encKey, { selectionStrategy });
     },
 
-    async fetchAnthropicQuota({ account }): Promise<OAuthQuotaWindow[] | null> {
+    async fetchAnthropicQuota({ account, force = false }): Promise<OAuthQuotaWindow[] | null> {
       // Serve from the 5-min cache when warm — INCLUDING a cached failure (null) —
       // so reopening the providers page or saving an account setting never re-hits
       // the upstream usage endpoint, which itself rate-limits aggressively. Refresh
       // is therefore page-open-driven AND debounced to at most once per TTL.
       const key = `${ANTHROPIC}${" "}${account}`;
       const cached = quotaCache.get(key);
-      if (cached && now() - cached.at < QUOTA_TTL_MS) return cached.windows;
+      if (!force && cached && now() - cached.at < QUOTA_TTL_MS) return cached.windows;
       const epoch = quotaCacheEpoch.get(key) ?? 0;
       const provider = getOAuthProvider(ANTHROPIC);
       if (!provider) return null;
@@ -1115,10 +1156,10 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       return windows;
     },
 
-    async fetchXaiQuota({ account }): Promise<OAuthQuotaWindow[] | null> {
+    async fetchXaiQuota({ account, force = false }): Promise<OAuthQuotaWindow[] | null> {
       const key = `${XAI} ${account}`;
       const cached = quotaCache.get(key);
-      if (cached && now() - cached.at < QUOTA_TTL_MS) return cached.windows;
+      if (!force && cached && now() - cached.at < QUOTA_TTL_MS) return cached.windows;
       const epoch = quotaCacheEpoch.get(key) ?? 0;
       const provider = getOAuthProvider(XAI);
       if (!provider) return null;
@@ -1174,7 +1215,11 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       return windows;
     },
 
-    async fetchCodexQuota({ account }): Promise<CodexQuotaResult> {
+    async getCachedCodexQuota({ account }): Promise<CodexQuotaResult> {
+      return cachedCodexQuota(account);
+    },
+
+    async fetchCodexQuota({ account, force = false }): Promise<CodexQuotaResult> {
       // Twin of fetchAnthropicQuota above — same 5-min cache (success AND failure),
       // same bounded timeout, same per-account proxy reuse. Codex-specific bits:
       // the endpoint keys on `chatgpt-account-id` (decoded from the access-token
@@ -1183,20 +1228,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       // one PULL) so the providers page can render quota + enable the reset button.
       const key = `${CODEX} ${account}`;
       const cached = quotaCache.get(key);
-      if (cached && now() - cached.at < QUOTA_TTL_MS) {
-        if (cached.windows === null) return null;
-        const result = {
-          windows: cached.windows,
-          additionalLimits: cached.additionalLimits ?? [],
-          resetCredits: cached.resetCredits ?? null,
-          resetCreditDetails: cached.resetCreditDetails ?? null,
-          credits: cached.credits ?? null,
-          individualLimit: cached.individualLimit ?? null,
-          planType: cached.planType ?? null,
-          rateLimitReachedType: cached.rateLimitReachedType ?? null,
-        };
-        return result;
-      }
+      if (!force && cached && now() - cached.at < QUOTA_TTL_MS) return cachedCodexQuota(account);
       const epoch = quotaCacheEpoch.get(key) ?? 0;
       const provider = getOAuthProvider(CODEX);
       if (!provider) return null;

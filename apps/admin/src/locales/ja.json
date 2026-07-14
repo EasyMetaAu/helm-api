@@ -984,5 +984,14 @@
   "This device code has expired.": "このデバイスコードは期限切れです。",
   "Authorization was denied.": "認証が拒否されました。",
   "Authorization failed. Start again to retry.": "認証に失敗しました。最初からやり直してください。",
-  "Start again": "最初からやり直す"
+  "Start again": "最初からやり直す",
+  "Failed to load OAuth providers": "OAuthプロバイダーの読み込みに失敗しました",
+  "Failed to refresh providers": "プロバイダーの更新に失敗しました",
+  "Provider refresh queued": "プロバイダーの更新をキューに追加しました",
+  "Refreshing provider data…": "プロバイダーデータを更新中…",
+  "Provider refresh failed": "プロバイダーの更新に失敗しました",
+  "Provider refresh failed: {error}": "プロバイダーの更新に失敗しました：{error}",
+  "Provider data refreshed": "プロバイダーデータを更新しました",
+  "Provider data refreshed at {time}": "{time} にプロバイダーデータを更新しました",
+  "refresh available again in {seconds}s": "{seconds}秒後に再度更新できます"
 }

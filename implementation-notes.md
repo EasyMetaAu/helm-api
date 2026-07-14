@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-07-14 · Subscription Providers 改为缓存优先与全局串行刷新（OAuth Admin / provider observability，docs/04/11，原则 1/3/6/7）
+
+- **性能根因**：Providers 首屏过去并行请求 status、usage、quota；status 会刷新过期 token 并逐账号发现模型，quota 会逐账号拉取上游额度、写 snapshot、同步 cooldown 并清理 orphan。慢代理、上游限流或账号数增加会把页面打开直接绑定到外部网络，刷新按钮和自动刷新也会重复制造同一批工作。
+- **缓存读边界**：新增单次 `GET /admin/api/oauth/overview`，只读取本地 token/settings、进程内模型/额度 snapshot、durable quota 与当日 usage；不得刷新 token、发现模型、请求 quota、删除 orphan 或修改 cooldown。原 `/oauth`、`/usage`、`/quota` 同样改为 cache-only，保持兼容但不再隐式产生上游流量；无需数据库迁移。
+- **刷新队列**：显式 `POST /admin/api/oauth/refresh` 立即返回 `202`，由 Gateway 进程级 coordinator 保证全局最多一个 active job；并发点击合并到同一 job，成功或失败后冷却 60 秒。job 内按账号串行刷新 token、模型目录与 quota，显式刷新可绕过正/负 TTL 缓存；Anthropic/Codex 模型发现增加 10 秒硬超时，避免死代理长期占住唯一 worker。
+- **失败与旧数据**：任一账号的 quota 超时、空/非法窗口或持久化失败会把 job 标为 `failed` 并记录安全错误摘要，但不会删除 last-known-good snapshot；其余账号仍继续串行刷新。页面展示 queued/running/succeeded/failed、最近成功时间与 cooldown，手动点击只入队一次并 cache-only 轮询，定时自动刷新永远只读缓存。
+- **验证**：TDD 覆盖 cache-only 首屏、20 次并发点击合并、账号刷新最大并发 1、失败保留旧 quota、force cache bypass、模型发现 timeout、前端单请求加载、手动/自动刷新分流与多语言状态文案；workspace 357 files / 5775 tests、typecheck、Biome、build 与 Admin check 全通过。
+
 ## 2026-07-14 · Avoid Waste 在 provider 池内限制 reset-credit 偏置（OAuth provider selection，docs/04/11，原则 3/5/6）
 
 - **生产根因**：`openai-codex` 的四个 Plus/Pro 账号已正确合并进同一 provider pool，套餐名没有参与分池或筛选；但 reset credit 的虚拟周容量乘数为 `10`，单个 credit 的加分远高于自然周窗口。生产中 31% 已用、3 credits 的 Pro 账号因此持续压过 2% 已用、0 credits 的 Plus 账号，形成看似按套餐分组的长期偏置。
@@ -81,16 +89,9 @@
 - **历史边界**：部署后新请求可正常估算成本；已有 `cost_usd = null` 的历史 telemetry 不自动回填。
 - **官方依据**：Anthropic Models overview、Pricing、What's new in Claude Sonnet 5、Effort 与 Structured outputs 文档，均于 2026-07-11 读取。
 
-## 2026-07-11 · 退休 GPT-5.3-Codex-Spark 及其订阅配额投影（OAuth subscription / model catalog / Admin providers，docs/04/11，原则 3/5/6/7）
-
-- **退休边界**：`gpt-5.3-codex-spark` 不再作为可用订阅模型。Codex live discovery、bundled fallback、持久 catalog cache 与手工 enabled-model 展开都会过滤该 slug，避免旧设置或 last-known-good 快照重新暴露已退休模型。
-- **配额边界**：WHAM body、Codex response headers、Gateway 持久 quota snapshot、live metadata 和 Admin 最终展示都会过滤 `codex_spark` / `*-Codex-Spark` model-scoped limits。旧快照不会再显示 Spark，也不会让退休窗口参与账号停车、恢复或 reset-credit 判断；若持久 snapshot 过滤后为空，reset-credit 会回退到本次实时 quota，而不是误报 quota unavailable。账号级窗口和 Luna/Sol/Terra 等有效模型窗口保持原语义。
-- **分类与 UI**：保留 cheap-model classifier 中的 `spark` 语义 marker；它用于识别低成本模型族，不等同于已退休的精确 Codex Spark 模型 ID。撤销仅为 Codex Spark 长标签添加的 9px quota 字号，恢复普通窗口标签字号。订阅 credits 继续只显示两位小数，零余额继续隐藏。
-- **兼容决策**：运行时仍保留最小的 Spark 识别常量，并在专门的防回归 fixture 中保留退休字符串；这是为了丢弃历史缓存和旧上游数据，不代表模型仍可配置或使用。
-- **验证**：覆盖 live/bundled/cached catalog、手工 alias 展开、header/WHAM quota、Gateway 读写投影与 Admin 历史快照；相关定向测试、workspace test/typecheck/lint/build 作为交付门禁。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-11 · 退休 GPT-5.3-Codex-Spark 及其订阅配额投影（OAuth subscription / model catalog / Admin providers，docs/04/11，原则 3/5/6/7）**：从 live/bundled/cached catalog 与手工设置过滤退休模型，并从 WHAM/header/durable/Admin quota 投影移除其 model-scoped 限额，保留最小历史识别以阻止旧缓存复活。
 - **2026-07-11 · Portal 请求详情对齐 Admin 查看器但保持供应链边界（Self-Service Portal / Requests，docs/12，原则 1/6/7/8）**：复用 Admin viewer 并按 metadata-first 懒加载请求/响应与图片，同时保持 ownership 和 `upstream_request` 隔离边界。
 - **2026-07-11 · API-key 门户自助 Memory 默认设置（Self-Service Portal / Memory，docs/06/08/12，原则 2/7）**：bearer key 可在 Portal 安全配置 observe/inject、共享项目与线程来源；root 只读，显式请求头仍覆盖默认值。
 - **2026-07-10–11 · Codex CLI GPT-5.6 subscription parity（OAuth subscription / Responses / model catalog，docs/04/05/11，原则 3/5/6/7/8）**：按 Codex 源码补齐 GPT-5.6 模型目录、Responses/WebSocket/compact、usage、订阅 entitlement 与 reset-credit 安全边界，并完成真实 CLI 验证。

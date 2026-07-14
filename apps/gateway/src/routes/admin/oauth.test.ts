@@ -9,11 +9,15 @@ import { registerOAuthRoutes } from "./oauth.js";
 // routes are thin validating wrappers around this seam, so exercising them with a
 // mock seam covers the route logic (validation, error mapping, afterMutation).
 function fullSeam(over: Partial<OAuthAdminAccess> = {}): OAuthAdminAccess {
-  return {
-    listStatus: vi.fn(async () => ({
-      selectionStrategy: "balanced",
+  const listStatus =
+    over.listStatus ??
+    vi.fn(async () => ({
+      selectionStrategy: "balanced" as const,
       providers: [{ id: "anthropic", name: "Anthropic", accounts: [{ account: "default" }] }],
-    })),
+    }));
+  return {
+    listCachedStatus: over.listCachedStatus ?? listStatus,
+    listStatus,
     startManualPaste: vi.fn(async () => ({ sessionId: "s1", authorizeUrl: "https://auth" })),
     completeManualPaste: vi.fn(async () => {}),
     startDeviceCode: vi.fn(async () => ({
@@ -52,6 +56,19 @@ function app(deps: Partial<AdminApiDeps>) {
   const a = new Hono<AppEnv>();
   registerOAuthRoutes(a, deps as AdminApiDeps);
   return a;
+}
+
+async function enqueueRefresh(
+  api: ReturnType<typeof app>,
+  expectedState: "succeeded" | "failed" = "succeeded",
+): Promise<void> {
+  const accepted = await api.request("/admin/api/oauth/refresh", { method: "POST" });
+  expect(accepted.status).toBe(202);
+  await vi.waitFor(async () => {
+    const overview = await api.request("/admin/api/oauth/overview");
+    const body = (await overview.json()) as { refresh: { state: string } };
+    expect(body.refresh.state).toBe(expectedState);
+  });
 }
 
 const JSONH = { "Content-Type": "application/json" };
@@ -163,7 +180,7 @@ describe("admin OAuth routes — read endpoints", () => {
     expect((start ?? 0) % 86_400_000).toBe(0); // offset 0 → UTC midnight
   });
 
-  it("GET /oauth/quota returns [] with no store and merges PULL windows with one", async () => {
+  it("GET /oauth/quota returns cached rows without pulling upstream", async () => {
     expect(
       (
         (await (await app({ oauth: fullSeam() }).request("/admin/api/oauth/quota")).json()) as {
@@ -181,10 +198,11 @@ describe("admin OAuth routes — read endpoints", () => {
     });
     const res = await app({ oauth: seam, oauthQuota }).request("/admin/api/oauth/quota");
     expect(res.status).toBe(200);
-    expect(upsert).toHaveBeenCalled(); // the PULL refreshed the store
+    expect(upsert).not.toHaveBeenCalled();
+    expect(seam.fetchAnthropicQuota).not.toHaveBeenCalled();
   });
 
-  it("GET /oauth/quota refreshes xAI, updates the pool snapshot, and syncs cooldown", async () => {
+  it("POST /oauth/refresh refreshes xAI, updates the pool snapshot, and syncs cooldown", async () => {
     const now = Date.now();
     const resetAt = now + 3 * 86_400_000;
     const windows: OAuthQuotaWindow[] = [
@@ -216,15 +234,17 @@ describe("admin OAuth routes — read endpoints", () => {
     const applyQuotaSnapshot = vi.fn();
     const applyUsageLimit = vi.fn(async () => {});
 
-    const res = await app({
+    const api = app({
       oauth: seam,
       oauthQuota,
       applyQuotaSnapshot,
       applyUsageLimit,
-    }).request("/admin/api/oauth/quota");
+    });
+    await enqueueRefresh(api);
+    const res = await api.request("/admin/api/oauth/quota");
 
     expect(res.status).toBe(200);
-    expect(fetchXaiQuota).toHaveBeenCalledWith({ account: "subscription" });
+    expect(fetchXaiQuota).toHaveBeenCalledWith({ account: "subscription", force: true });
     expect(oauthQuota?.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         providerId: "xai",
@@ -252,7 +272,7 @@ describe("admin OAuth routes — read endpoints", () => {
     });
   });
 
-  it("GET /oauth/quota fails open when xAI refresh rejects and still filters orphans", async () => {
+  it("POST /oauth/refresh reports xAI failure and still refreshes peers and prunes orphans", async () => {
     const anthropicWindows: OAuthQuotaWindow[] = [
       { key: "5h", usedPercent: 10, resetsAtMs: null, windowMinutes: 300 },
     ];
@@ -302,7 +322,9 @@ describe("admin OAuth routes — read endpoints", () => {
       }),
     });
 
-    const res = await app({ oauth: seam, oauthQuota }).request("/admin/api/oauth/quota");
+    const api = app({ oauth: seam, oauthQuota });
+    await enqueueRefresh(api, "failed");
+    const res = await api.request("/admin/api/oauth/quota");
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
@@ -317,7 +339,7 @@ describe("admin OAuth routes — read endpoints", () => {
     expect(oauthQuota?.delete).toHaveBeenCalledWith("xai", "orphan");
   });
 
-  it("GET /oauth/quota extends an active cooldown to the saturated window reset", async () => {
+  it("POST /oauth/refresh extends an active cooldown to the saturated window reset", async () => {
     const now = Date.now();
     const shortCooldown = now + 60_000;
     const weeklyReset = now + 8 * 60 * 60_000;
@@ -354,15 +376,15 @@ describe("admin OAuth routes — read endpoints", () => {
       fetchAnthropicQuota: vi.fn(async () => [saturatedWeekly]) as never,
     });
 
-    const res = await app({ oauth: seam, oauthQuota, applyUsageLimit }).request(
-      "/admin/api/oauth/quota",
-    );
+    const api = app({ oauth: seam, oauthQuota, applyUsageLimit });
+    await enqueueRefresh(api);
+    const res = await api.request("/admin/api/oauth/quota");
 
     expect(res.status).toBe(200);
     expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "default", weeklyReset, "replace");
   });
 
-  it("GET /oauth/quota clears a global cooldown when only scoped model windows are saturated", async () => {
+  it("POST /oauth/refresh clears a global cooldown when only scoped windows are saturated", async () => {
     const now = Date.now();
     const shortCooldown = now + 60_000;
     const windows = [
@@ -408,15 +430,15 @@ describe("admin OAuth routes — read endpoints", () => {
       fetchAnthropicQuota: vi.fn(async () => windows) as never,
     });
 
-    const res = await app({ oauth: seam, oauthQuota, applyUsageLimit }).request(
-      "/admin/api/oauth/quota",
-    );
+    const api = app({ oauth: seam, oauthQuota, applyUsageLimit });
+    await enqueueRefresh(api);
+    const res = await api.request("/admin/api/oauth/quota");
 
     expect(res.status).toBe(200);
     expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "default", null, "replace");
   });
 
-  it("GET /oauth/quota extends an active cooldown to a near-full 5h recovery reset", async () => {
+  it("POST /oauth/refresh extends an active cooldown to a near-full 5h recovery reset", async () => {
     const now = Date.now();
     const shortCooldown = now + 60_000;
     const fiveHourReset = now + 2 * 60 * 60_000 + 57 * 60_000;
@@ -459,15 +481,15 @@ describe("admin OAuth routes — read endpoints", () => {
       ]) as never,
     });
 
-    const res = await app({ oauth: seam, oauthQuota, applyUsageLimit }).request(
-      "/admin/api/oauth/quota",
-    );
+    const api = app({ oauth: seam, oauthQuota, applyUsageLimit });
+    await enqueueRefresh(api);
+    const res = await api.request("/admin/api/oauth/quota");
 
     expect(res.status).toBe(200);
     expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "default", fiveHourReset, "replace");
   });
 
-  it("GET /oauth/quota clears an active cooldown when fresh windows show no active limit", async () => {
+  it("POST /oauth/refresh clears an active cooldown when fresh windows show no active limit", async () => {
     const now = Date.now();
     const activeCooldown = now + 4 * 86_400_000;
     const cleanWindows = [
@@ -501,15 +523,15 @@ describe("admin OAuth routes — read endpoints", () => {
       fetchAnthropicQuota: vi.fn(async () => cleanWindows) as never,
     });
 
-    const res = await app({ oauth: seam, oauthQuota, applyUsageLimit }).request(
-      "/admin/api/oauth/quota",
-    );
+    const api = app({ oauth: seam, oauthQuota, applyUsageLimit });
+    await enqueueRefresh(api);
+    const res = await api.request("/admin/api/oauth/quota");
 
     expect(res.status).toBe(200);
     expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "default", null, "replace");
   });
 
-  it("GET /oauth/quota replaces a stale long cooldown with the active shorter recovery window", async () => {
+  it("POST /oauth/refresh replaces a stale cooldown with the active recovery window", async () => {
     const now = Date.now();
     const staleCooldown = now + 5 * 86_400_000;
     const fiveHourReset = now + 2 * 60 * 60_000;
@@ -544,15 +566,15 @@ describe("admin OAuth routes — read endpoints", () => {
       fetchAnthropicQuota: vi.fn(async () => windows) as never,
     });
 
-    const res = await app({ oauth: seam, oauthQuota, applyUsageLimit }).request(
-      "/admin/api/oauth/quota",
-    );
+    const api = app({ oauth: seam, oauthQuota, applyUsageLimit });
+    await enqueueRefresh(api);
+    const res = await api.request("/admin/api/oauth/quota");
 
     expect(res.status).toBe(200);
     expect(applyUsageLimit).toHaveBeenCalledWith("anthropic", "default", fiveHourReset, "replace");
   });
 
-  it("GET /oauth/quota parks an unparked account from a saturated account-wide PULL snapshot", async () => {
+  it("POST /oauth/refresh parks an unparked account from a saturated account-wide snapshot", async () => {
     const now = Date.now();
     const saturatedWeekly = {
       key: "secondary",
@@ -594,9 +616,9 @@ describe("admin OAuth routes — read endpoints", () => {
       })) as never,
     });
 
-    const res = await app({ oauth: seam, oauthQuota, applyUsageLimit }).request(
-      "/admin/api/oauth/quota",
-    );
+    const api = app({ oauth: seam, oauthQuota, applyUsageLimit });
+    await enqueueRefresh(api);
+    const res = await api.request("/admin/api/oauth/quota");
 
     expect(res.status).toBe(200);
     expect(applyUsageLimit).toHaveBeenCalledWith(
@@ -607,7 +629,7 @@ describe("admin OAuth routes — read endpoints", () => {
     );
   });
 
-  it("GET /oauth/quota does not newly park an unparked account from a near-full PULL snapshot", async () => {
+  it("POST /oauth/refresh does not newly park an account from a near-full snapshot", async () => {
     const now = Date.now();
     const nearFullFiveHour = {
       key: "primary",
@@ -649,15 +671,15 @@ describe("admin OAuth routes — read endpoints", () => {
       })) as never,
     });
 
-    const res = await app({ oauth: seam, oauthQuota, applyUsageLimit }).request(
-      "/admin/api/oauth/quota",
-    );
+    const api = app({ oauth: seam, oauthQuota, applyUsageLimit });
+    await enqueueRefresh(api);
+    const res = await api.request("/admin/api/oauth/quota");
 
     expect(res.status).toBe(200);
     expect(applyUsageLimit).not.toHaveBeenCalled();
   });
 
-  it("GET /oauth/quota folds the complete live Codex subscription metadata onto its snapshot", async () => {
+  it("POST /oauth/refresh makes complete Codex metadata available to cached reads", async () => {
     const sparkWindow = {
       key: "codex_spark-primary",
       usedPercent: 40,
@@ -673,6 +695,31 @@ describe("admin OAuth routes — read endpoints", () => {
       windowMinutes: 300,
       limitId: "codex_luna",
       limitName: "GPT-5.6-Codex-Luna",
+    };
+    const codexQuota = {
+      windows: [sparkWindow, lunaWindow],
+      additionalLimits: [],
+      resetCredits: 3,
+      resetCreditDetails: [
+        {
+          id: "credit-1",
+          resetType: "codexRateLimits",
+          status: "available",
+          grantedAt: 1,
+          expiresAt: 2,
+          title: "Full reset",
+          description: "Ready",
+        },
+      ],
+      credits: { hasCredits: true, unlimited: false, balance: "9.99" },
+      individualLimit: {
+        limit: "25000",
+        used: "8000",
+        remainingPercent: 68,
+        resetsAtMs: 1_735_693_200_000,
+      },
+      planType: "pro",
+      rateLimitReachedType: "rate_limit_reached" as const,
     };
     const oauthQuota = {
       getAll: vi.fn(async () => [
@@ -707,35 +754,13 @@ describe("admin OAuth routes — read endpoints", () => {
           },
         ],
       })) as never,
-      fetchCodexQuota: vi.fn(async () => ({
-        windows: [sparkWindow, lunaWindow],
-        resetCredits: 3,
-        resetCreditDetails: [
-          {
-            id: "credit-1",
-            resetType: "codexRateLimits",
-            status: "available",
-            grantedAt: 1,
-            expiresAt: 2,
-            title: "Full reset",
-            description: "Ready",
-          },
-        ],
-        credits: { hasCredits: true, unlimited: false, balance: "9.99" },
-        individualLimit: {
-          limit: "25000",
-          used: "8000",
-          remainingPercent: 68,
-          resetsAtMs: 1_735_693_200_000,
-        },
-        planType: "pro",
-        rateLimitReachedType: "rate_limit_reached",
-      })) as never,
+      fetchCodexQuota: vi.fn(async () => codexQuota) as never,
+      getCachedCodexQuota: vi.fn(async () => codexQuota) as never,
     });
     const applyQuotaSnapshot = vi.fn();
-    const res = await app({ oauth: seam, oauthQuota, applyQuotaSnapshot }).request(
-      "/admin/api/oauth/quota",
-    );
+    const api = app({ oauth: seam, oauthQuota, applyQuotaSnapshot });
+    await enqueueRefresh(api);
+    const res = await api.request("/admin/api/oauth/quota");
     const body = (await res.json()) as {
       quota: Array<{
         providerId: string;
@@ -787,8 +812,26 @@ describe("admin OAuth routes — read endpoints", () => {
     );
   });
 
-  it("GET /oauth/quota persists and returns Codex metadata when every quota window is absent", async () => {
+  it("POST /oauth/refresh persists Codex metadata when quota windows are absent", async () => {
     const rows: Array<Record<string, unknown>> = [];
+    const codexQuota = {
+      windows: [],
+      additionalLimits: [
+        { limitId: "codex_spark", limitName: "GPT-5.6-Codex-Spark" },
+        { limitId: "codex_terra", limitName: "GPT-5.6-Codex-Terra" },
+      ],
+      resetCredits: 2,
+      resetCreditDetails: [],
+      credits: { hasCredits: true, unlimited: false, balance: "4.50" },
+      individualLimit: {
+        limit: "25000",
+        used: "8000",
+        remainingPercent: 68,
+        resetsAtMs: null,
+      },
+      planType: "pro",
+      rateLimitReachedType: null,
+    };
     const oauthQuota = {
       getAll: vi.fn(async () => rows),
       upsert: vi.fn(async (snapshot: Record<string, unknown>) => {
@@ -801,27 +844,13 @@ describe("admin OAuth routes — read endpoints", () => {
         selectionStrategy: "balanced",
         providers: [{ id: "openai-codex", name: "Codex", accounts: [{ account: "default" }] }],
       })) as never,
-      fetchCodexQuota: vi.fn(async () => ({
-        windows: [],
-        additionalLimits: [
-          { limitId: "codex_spark", limitName: "GPT-5.6-Codex-Spark" },
-          { limitId: "codex_terra", limitName: "GPT-5.6-Codex-Terra" },
-        ],
-        resetCredits: 2,
-        resetCreditDetails: [],
-        credits: { hasCredits: true, unlimited: false, balance: "4.50" },
-        individualLimit: {
-          limit: "25000",
-          used: "8000",
-          remainingPercent: 68,
-          resetsAtMs: null,
-        },
-        planType: "pro",
-        rateLimitReachedType: null,
-      })) as never,
+      fetchCodexQuota: vi.fn(async () => codexQuota) as never,
+      getCachedCodexQuota: vi.fn(async () => codexQuota) as never,
     });
 
-    const res = await app({ oauth: seam, oauthQuota }).request("/admin/api/oauth/quota");
+    const api = app({ oauth: seam, oauthQuota });
+    await enqueueRefresh(api);
+    const res = await api.request("/admin/api/oauth/quota");
     const body = (await res.json()) as {
       quota: Array<{
         windows: unknown[];

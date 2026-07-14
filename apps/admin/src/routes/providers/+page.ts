@@ -1,53 +1,37 @@
 import {
-  getOAuthQuota,
-  getOAuthUsage,
-  listOAuthStatus,
-  type OAuthProviderStatus,
-  type OAuthQuotaSnapshot,
-  type OAuthSelectionStrategy,
-  type OAuthUsageRow,
+  getOAuthOverview,
+  type OAuthAdminRefreshStatus,
+  type OAuthOverview,
 } from '$lib/api/oauth.js';
 import type { PageLoad } from './$types.js';
 
-// SPA load: fetch the OAuth provider catalog + logged-in accounts, plus today's
-// per-account usage and the latest quota window snapshots — all in PARALLEL. Never
-// throws; the status load drives the error state (the page never white-screens),
-// while usage/quota are pure observability and FAIL-OPEN to [] (a slow/down stats
-// endpoint must never block or break the page).
-export const load: PageLoad = async (): Promise<{
-  configured: boolean;
-  selectionStrategy: OAuthSelectionStrategy;
-  providers: OAuthProviderStatus[];
-  usage: OAuthUsageRow[];
-  quota: OAuthQuotaSnapshot[];
-  loadError?: string;
-}> => {
-  const [statusRes, usage, quota] = await Promise.all([
-    listOAuthStatus().then(
-      (r) => ({ ok: true as const, ...r }),
-      (e) => ({ ok: false as const, error: e as unknown }),
-    ),
-    getOAuthUsage(), // already fail-open to []
-    getOAuthQuota(), // already fail-open to []
-  ]);
-  if (!statusRes.ok) {
+const IDLE_REFRESH: OAuthAdminRefreshStatus = {
+  state: 'idle',
+  jobId: null,
+  requestedAt: null,
+  startedAt: null,
+  finishedAt: null,
+  lastSuccessAt: null,
+  nextAllowedAt: null,
+  error: null,
+};
+
+export type ProvidersPageData = OAuthOverview & { loadError?: string };
+
+// The initial render is one cache-only gateway read. Provider discovery, token
+// renewal, and quota pulls only run behind POST /oauth/refresh.
+export const load: PageLoad = async (): Promise<ProvidersPageData> => {
+  try {
+    return await getOAuthOverview();
+  } catch (error) {
     return {
       configured: false,
       selectionStrategy: 'balanced',
       providers: [],
-      usage,
-      quota,
-      loadError:
-        statusRes.error instanceof Error
-          ? statusRes.error.message
-          : 'Failed to load OAuth providers',
+      usage: [],
+      quota: [],
+      refresh: IDLE_REFRESH,
+      loadError: error instanceof Error ? error.message : 'Failed to load OAuth providers',
     };
   }
-  return {
-    configured: statusRes.configured,
-    selectionStrategy: statusRes.selectionStrategy,
-    providers: statusRes.providers,
-    usage,
-    quota,
-  };
 };
