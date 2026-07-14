@@ -13,10 +13,12 @@
 # routes EVERYTHING through classification (auto) — the model field is ignored, never
 # a 400. A key's `allowed_lanes` whitelist still clamps the rewritten lane.
 #
-# MATCHING: an exact key wins; otherwise the matching `*`-glob with the most
-# literal characters wins (so `claude-opus-*` beats `claude-*` regardless of
-# order). `*` = any run of chars (incl. empty) — it absorbs the date suffix Claude
-# Code appends (`claude-opus-4-8-20260115`). Case-sensitive.
+# MATCHING: routeRequest first honors an exact configured lane or deployment-known
+# model. Only then does this compatibility map apply: an exact map key wins;
+# otherwise the matching `*`-glob with the most literal characters wins (so
+# `claude-opus-*` beats `claude-*` regardless of order). `*` = any run of chars
+# (incl. empty) — it absorbs the date suffix Claude Code appends
+# (`claude-opus-4-8-20260115`). Case-sensitive.
 #
 # FAIL-CLOSED (principle 2): every target must be a configured lane or "auto", or
 # the gateway refuses to boot. This file is OPTIONAL — delete it for no rewrite.
@@ -40,15 +42,14 @@
 "claude-*": balanced # catch-all for any other / future Claude id
 
 # ── OpenAI-compatible clients (Codex, Cursor, …) ─────────────────────────────
-# Bare GPT ids → lanes (config/lanes.yaml). Each named family maps to its DEDICATED
-# vendor-family lane so the request LEADS with that family's real model; the `-*`
-# globs absorb any dated/suffixed id. GPT-5.6's unsuffixed alias is defined by Codex
-# as Sol, so it maps directly to the Sol lane instead of passing through the generic
-# requested-model promotion step. The cheap `gpt-5.4-mini` needs its OWN mapping
+# Bare GPT ids → lanes (config/lanes.yaml). Exact bare names that are configured
+# lanes remain authoritative; the `-*` globs handle dated/suffixed vendor ids.
+# GPT-5.6's exact lane leads with Sol, while `openai.gpt-5.6` maps to the Sol-specific
+# compatibility lane. The cheap `gpt-5.4-mini` needs its OWN mapping
 # (it is more literal than `gpt-5*`, so longest-literal-wins routes it to the cheap
 # lane, NOT the expensive `premium` catch-all). Comment these out if you don't front
 # any GPT clients.
-"gpt-5.6": gpt-5.6-sol
+"gpt-5.6": gpt-5.6
 "gpt-5.6-sol": gpt-5.6-sol
 "gpt-5.6-sol-*": gpt-5.6-sol
 "gpt-5.6-terra": gpt-5.6-terra

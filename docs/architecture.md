@@ -247,19 +247,25 @@ results, so a transient upstream failure can't be amplified into a 300s outage.
 ## 7. Routing & lane resolution
 
 How a request becomes an ordered chain of concrete model aliases. See
-[04 Routing & Lanes](04-routing-and-lanes.md). The shipped config has **18 lanes**:
+[04 Routing & Lanes](04-routing-and-lanes.md). The shipped config has **22 lanes**:
 3 quality lanes (`economy`/`balanced`/`premium`), 4 task lanes
-(`coding`/`json`/`vision`/`tool_use`), 9 vendor-family lanes that are the
+(`coding`/`json`/`vision`/`tool_use`), 13 vendor-family lanes that are the
 rewrite targets of the model-alias compatibility shim, and 2 image-generation
 lanes (`gpt-image`, `gemini-image`).
 
 ```mermaid
 flowchart TD
-    A["IR.requested_model"] --> B{"model-alias map hit?<br/>(config/model-aliases.yaml)"}
-    B -- "yes → lane" --> C["rewrite to lane · cap-bounded (silent clamp)"]
-    B -- "yes → auto / no hit" --> D{"explicit passthrough?<br/>allow_custom_model · model ≠ auto · not over-budget"}
-    D -- "yes" --> P["use exact model / lane<br/>(HARD reject if outside key caps)"]
+    A["IR.requested_model"] --> I{"exact image-output model?"}
+    I -- "yes" --> IMG["pin exact image model"]
+    I -- "no" --> D{"explicit resolution eligible?<br/>allow_custom_model · model ≠ auto · not over-budget"}
     D -- "no" --> CL["classify (Layer 1/2)"]
+    D -- "yes" --> E{"exact configured lane<br/>or deployment-known model?"}
+    E -- "yes" --> P["use exact lane / model<br/>(HARD reject if outside key caps)"]
+    E -- "no" --> B{"compatibility map hit?<br/>exact key, then most-specific glob"}
+    B -- "lane" --> C["rewrite to lane · cap-bounded (silent clamp)"]
+    B -- "auto" --> CL
+    B -- "no" --> U["strict unknown-model reject<br/>(legacy headless: unchecked model)"]
+    IMG --> CH
     C --> EXP["expandLaneChain"]
     P --> EXP
     CL --> POL["policy engine:<br/>first-match PIN (use_lane)<br/>+ caps accumulate across ALL matches"]
@@ -273,9 +279,9 @@ flowchart TD
     CH --> EX["→ Executor"]
 ```
 
-Key subtleties the diagram encodes: the model-alias shim runs **before** the
-custom-model gate and needs no special permission (it's operator-authored, still
-clamped by the key's `allowed_lanes`); only the lane *pin* is first-match while
+Key subtleties the diagram encodes: exact configured lane/model names are checked
+before compatibility mappings, and both forms require `allow_custom_model`;
+mapped lanes remain clamped by policy/key `allowed_lanes`. Only the lane *pin* is first-match while
 *caps* accumulate across every matching policy; and Agentic Signals can only ever
 **upgrade** a degraded lane, never demote.
 

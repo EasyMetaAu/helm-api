@@ -917,9 +917,78 @@ describe("routeRequest — per-key blocked models", () => {
 });
 
 // Virtual model-alias map (docs/04): a vendor model id (e.g. Claude Code's
-// "claude-opus-4-8") is rewritten onto a lane / "auto" BEFORE the passthrough
-// gate, so a fixed-model client routes without a 400 even on a default key.
+// "claude-opus-4-8") is rewritten onto a lane / "auto" only after exact configured
+// lane/model names have had priority, so broad globs cannot swallow authoritative names.
 describe("routeRequest — virtual model aliases", () => {
+  it.each([
+    ["claude-opus", "opus_model"],
+    ["claude-fable", "fable_model"],
+    ["claude-sonnet", "sonnet_model"],
+    ["claude-haiku", "haiku_model"],
+    ["gpt-5.6", "gpt_5_6_model"],
+    ["gpt-5.6-sol", "sol_model"],
+    ["gpt-5.6-terra", "terra_model"],
+    ["gpt-5.6-luna", "luna_model"],
+    ["gpt-5.5", "gpt_5_5_model"],
+    ["gpt-5.4", "gpt_5_4_model"],
+    ["gpt-5.4-mini", "mini_model"],
+    ["gpt-image", "image_model"],
+    ["gemini-image", "gemini_image_model"],
+    ["gemini-pro", "gemini_pro_model"],
+    ["gemini-flash", "gemini_flash_model"],
+  ])("exact configured lane %s wins before exact and wildcard compatibility aliases", async (lane, primary) => {
+    const laneConfig = {
+      ...LANES,
+      [lane]: { primary, fallback: [], constraints: {} },
+    } as unknown as LanesConfig;
+    const familyGlob = lane.startsWith("claude-")
+      ? "claude-*"
+      : lane.startsWith("gemini-")
+        ? "gemini-*"
+        : "gpt-*";
+    const d = deps({
+      lanes: laneConfig,
+      modelAliases: {
+        [lane]: "balanced",
+        [familyGlob]: "balanced",
+      },
+    });
+
+    const result = await routeRequest(req({ requested_model: lane }), d, {
+      allowCustomModel: true,
+    });
+
+    expect(result.final.status).toBe("ok");
+    expect(d.classify).not.toHaveBeenCalled();
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe(lane);
+    expect(plan.explicit_model).toBeNull();
+    expect(plan.candidate_chain).toEqual([primary]);
+    const rec = (d.log as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(rec.policy.reason).toBe("explicit lane passthrough");
+  });
+
+  it("an exact known model wins before exact and wildcard compatibility aliases", async () => {
+    const model = "claude-opus-live";
+    const d = deps({
+      isKnownModel: (candidate) => candidate === model,
+      modelAliases: { [model]: "balanced", "claude-*": "balanced" },
+    });
+
+    const result = await routeRequest(req({ requested_model: model }), d, {
+      allowCustomModel: true,
+    });
+
+    expect(result.final.status).toBe("ok");
+    expect(d.classify).not.toHaveBeenCalled();
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe(model);
+    expect(plan.explicit_model).toBe(model);
+    expect(plan.candidate_chain).toEqual([model]);
+    const rec = (d.log as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(rec.policy.reason).toBe("explicit model passthrough");
+  });
+
   it("a DEFAULT key (no allow_custom_model) IGNORES a matching alias and routes via auto", async () => {
     // Honoring a pinned vendor id is a CUSTOM-MODEL capability. A key without
     // allow_custom_model routes EVERYTHING through classification — the alias map is

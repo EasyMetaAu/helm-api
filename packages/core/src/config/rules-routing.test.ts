@@ -123,7 +123,7 @@ describe("shipped config rules drive routing", () => {
     expect(lane).toBe("json");
   });
 
-  it("routes the Codex gpt-5.6 alias directly to the subscription Sol lane", async () => {
+  it("keeps the exact gpt-5.6 lane while leading with the subscription Sol model", async () => {
     const config = loadConfig({ configDir, env: {} });
     if (config.lanes === undefined) throw new Error("config.lanes must be loaded from lanes.yaml");
 
@@ -141,10 +141,35 @@ describe("shipped config rules drive routing", () => {
       { allowCustomModel: true },
     );
 
-    expect(result.decision.lane.selected_lane).toBe("gpt-5.6-sol");
+    expect(result.decision.lane.selected_lane).toBe("gpt-5.6");
     expect(result.decision.lane.candidate_chain[0]).toBe("openai-codex/gpt-5.6-sol");
     expect(result.decision.lane.candidate_chain).not.toContain("openai/gpt-5.6");
     expect(result.decision.requested_model).toBe("gpt-5.6");
+  });
+
+  it("keeps every exact shipped lane ahead of compatibility aliases and wildcards", async () => {
+    const config = loadConfig({ configDir, env: {} });
+    if (config.lanes === undefined) throw new Error("config.lanes must be loaded from lanes.yaml");
+
+    for (const lane of Object.keys(config.lanes)) {
+      const result = await routeRequest(
+        req({ requested_model: lane }),
+        {
+          classify: async () => classification(),
+          policies: config.policies,
+          lanes: config.lanes,
+          modelAliases: config.model_aliases,
+          execute: async (plan) => okExecute(plan),
+          now: () => new Date(0),
+          log: () => {},
+        },
+        { allowCustomModel: true },
+      );
+
+      expect(result.decision.lane.selected_lane, lane).toBe(lane);
+      expect(result.decision.policy.reason, lane).toBe("explicit lane passthrough");
+      expect(result.decision.lane.candidate_chain.length, lane).toBeGreaterThan(0);
+    }
   });
 
   it("expands the shipped premium chain with Grok before Claude Opus", async () => {

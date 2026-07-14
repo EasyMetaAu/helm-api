@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-14 · 确定模型名优先于兼容通配别名（Routing / model alias precedence，docs/04，原则 2/5/6）
+
+- **生产根因**：请求 `6becfc0f-9ce7-43c6-b604-322972f5aa59` 明确指定已配置 lane `claude-opus`，但兼容映射先执行；`claude-opus-*` 因字面连字符不匹配裸名，宽泛 `claude-*` 把请求改写到 `balanced`，最终首候选 `openai-codex/gpt-5.6-terra` 成功。telemetry 的分类 `passthrough` 仅表示跳过分类器；该次原生协议直通实际因 `anthropic_messages -> openai_responses` 不匹配而关闭。
+- **统一优先级**：`allow_custom_model` 且未触发 budget degrade 时，先识别精确配置 lane，再识别部署已知的精确 model alias；只有两者都不存在时才进入 `model-aliases.yaml`，并继续保持“精确映射键优先、最长字面量 glob 次之”。因此所有当前及未来 lane 都不会再被 `claude-*` / `gpt-*` / `gemini-*` 吞掉；固定 vendor id（如 `claude-opus-4-8`）仍通过兼容映射进入族 lane。
+- **行为边界与验证**：精确 lane 恢复 docs/04 既定的完整 fallback 与 `allowed_lanes` 显式 400 语义，精确 model 保持单候选；标准 key、`auto`、blocked models、image pre-pin、budget degrade、alias cap 与 headless legacy 均不变。`gpt-5.6` 的 telemetry lane 从兼容目标 `gpt-5.6-sol` 恢复为精确 `gpt-5.6`，首个实际模型仍为 Sol。路由单测覆盖 Claude/GPT/Gemini 全部碰撞族及精确 model，shipped-config 组合测试遍历全部 lane 防止未来回归；无需 schema 或配置迁移。
+
 ## 2026-07-14 · 通道模型选择器复用自动发现缓存（OAuth subscription / Admin lanes，docs/04/11，原则 1/3/6）
 
 - **生产根因**：账号管理弹窗与运行时 provider pool 已把非 Codex 自动模式的远程模型目录写入同一个账号级进程缓存，但 `/admin/api/models` 的通道选择器投影没有读取该缓存，也没有跨进程保存成功目录；Anthropic/xAI 因而只显示代码内静态 fallback，Copilot 在没有静态 fallback 时甚至不显示任何自动发现模型。
@@ -75,16 +81,9 @@
 
 - **后续能力与成本更新**：上方初始实现中“vision 未验证 / `cost_usd=null`”的边界已被真实协议证据替代。Grok 4.5 原生 `input_image` 已通过四种入口验证并启用 vision；Composer 对同一 wire 返回 400，CLI 表面的看图来自 `grok-build` 先生成文字描述，因此继续关闭。按用户决定，Grok 4.5 使用公开 API 等价费率 input `$2/M`、cache read `$0.50/M`、output `$6/M` 参与 telemetry 与 API-key budget；这不是订阅账单，且当前固定 catalog 对 >200K 的 `$4/$1/$12` 档位会低估 50%。Composer 没有可验证公开费率，继续保持 `cost_usd=null`。
 
-## 2026-07-11 · 上下文链耗尽恢复 Claude CLI 自动压缩信号（Provider execution / protocol errors，docs/04/05/07，原则 3/5/7/8）
-
-- **生产证据**：请求 `204c4380-b573-4556-a8c5-7be2772c2241` 的 Anthropic Messages body 为 11,152,406 bytes；所有可用候选均为 `context_too_small`，但执行层最终返回 `all_providers_failed / 502 api_error`。Claude CLI `2.1.201` 因收不到 `invalid_request_error` 和可识别的 token 上限消息，没有触发 reactive compaction。
-- **根因**：候选级上下文溢出改为继续 fallback 后，链耗尽聚合仍以 `attemptedAny` 判断 provider 故障；上游溢出曾经实际 invoke，因此被误归类为 `all_providers_failed`。精确 `count_tokens` 预检则被误归类为普通 `capability_unsatisfiable / 422`，且丢失实际 token 与上限。
-- **修复语义**：单个候选溢出继续作为 `context_too_small` skip，不计 breaker failure，也不阻止更大上下文模型成功；执行层保留首个上游 detail/provider_raw，并优先选择符合 Claude CLI matcher 的精确消息。只有整条链最终仅由上下文/能力 skip 构成时，才返回 `invalid_request / 400`；若还出现 5xx、429、circuit open 或 provider unavailable，仍保留原有失败分类。
-- **精确消息**：具备 Anthropic native `count_tokens` 时，catalog 的廉价输入估算不再提前 context-skip，而是保留其他能力门控并让精确计数裁决；已有 `inputTokens` 与 `exactContextLimit` 时，终态输出 `prompt is too long: <actual> tokens > <limit> maximum`。不具备精确计数的候选用现有估算生成同形消息。Anthropic 非流式响应为 HTTP 400 `invalid_request_error`；流式响应保持 HTTP SSE 语义并发送同类型 terminal error frame。
-- **验证**：执行层覆盖预检链耗尽、上游链耗尽、原始 detail 保留、精确消息优先、混合真实 provider failure，以及溢出后成功 fallback；Messages 路由覆盖非流式 400 与流式 terminal error frame。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-11 · 上下文链耗尽恢复 Claude CLI 自动压缩信号（Provider execution / protocol errors，docs/04/05/07，原则 3/5/7/8）**：候选级 context overflow 继续 fail-open fallback；仅上下文/能力 skip 的整链耗尽统一返回 Claude CLI 可识别的 `invalid_request / 400` 与精确 token 上限消息，混合真实 provider failure 保留原分类。
 - **2026-07-11 · Subscription Provider 自动模型展示使用账号级发现与共享缓存（OAuth subscription / Admin providers，docs/04/11，原则 1/3/6）**：Providers 表格与 Manage 弹窗改用账号实时发现；非 Codex 使用共享进程缓存与 last-known-good，手动 allowlist、Codex entitlement 和运行时 curated fail-open 边界保持不变。
 - **2026-07-11 · Claude Sonnet 5 订阅流量 API 等价成本与能力目录（Provider catalog / cost telemetry，docs/04/07/11，原则 2/5/7）**：默认 Anthropic 订阅路由升级到 Sonnet 5，并按官方介绍期 API 等价费率记录 telemetry；补齐 1M context、128K output、tools/vision/stream/structured outputs/document 与 adaptive-thinking 能力，2026-09-01 需更新标准费率。
 - **2026-07-11 · 退休 GPT-5.3-Codex-Spark 及其订阅配额投影（OAuth subscription / model catalog / Admin providers，docs/04/11，原则 3/5/6/7）**：从 live/bundled/cached catalog 与手工设置过滤退休模型，并从 WHAM/header/durable/Admin quota 投影移除其 model-scoped 限额，保留最小历史识别以阻止旧缓存复活。
