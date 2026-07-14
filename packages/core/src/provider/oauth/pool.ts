@@ -512,7 +512,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     // window that is about to reset with large unused quota.
     const cappedCredits = Math.min(Math.trunc(credits), 5);
     const virtualWeeklyValue = 100 / (7 * 24);
-    return cappedCredits * virtualWeeklyValue * 10;
+    // One credit contributes 5% of a full natural weekly window's weighted score.
+    // This keeps credits useful for close calls without letting plan-specific credit
+    // availability outweigh substantially more real quota inside the provider pool.
+    return cappedCredits * virtualWeeklyValue * 0.1;
   }
 
   function applicableQuotaWindows(

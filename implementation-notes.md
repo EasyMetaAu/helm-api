@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-14 · Avoid Waste 在 provider 池内限制 reset-credit 偏置（OAuth provider selection，docs/04/11，原则 3/5/6）
+
+- **生产根因**：`openai-codex` 的四个 Plus/Pro 账号已正确合并进同一 provider pool，套餐名没有参与分池或筛选；但 reset credit 的虚拟周容量乘数为 `10`，单个 credit 的加分远高于自然周窗口。生产中 31% 已用、3 credits 的 Pro 账号因此持续压过 2% 已用、0 credits 的 Plus 账号，形成看似按套餐分组的长期偏置。
+- **评分边界**：同一 provider 内继续按账号优先级、模型 entitlement、可调度/限流状态形成候选集；Avoid Waste 的主分数仍来自即将重置的真实 5h/周额度。reset credits 保留为弱的可恢复容量信号，每个 credit 只贡献完整自然周窗口加权分数的 5%，可打破接近分数，但不能压过明显更多的真实即将过期额度。Plus/Pro/Team/Business 等套餐标签仍只用于身份与配额展示，不进入选择逻辑。
+- **验证**：TDD 使用生产比例覆盖同一池内 `2% + 0 credits` 对 `31% + 3 credits`，并保留真实额度相同情况下 credits 参与选择的回归；定向 pool 测试、typecheck、lint 与 build 作为交付门禁。
+
 ## 2026-07-13 · Responses 工具结果的 multipart 文本使用 input_text（Protocol translation / provider execution，docs/05/07，原则 3/5/8）
 
 - **生产根因**：请求 `7963c4fa-c0ea-436f-aa4d-af0beb41615e` 从 Anthropic fallback 到 Codex Responses 时，数组形式的 `tool_result` 被编码为 `function_call_output.output[].output_text`；该 item 属于 Responses 请求输入，上游只接受 `input_text`，因此返回确定性 400 `invalid_request`。
@@ -83,16 +89,9 @@
 - **兼容决策**：运行时仍保留最小的 Spark 识别常量，并在专门的防回归 fixture 中保留退休字符串；这是为了丢弃历史缓存和旧上游数据，不代表模型仍可配置或使用。
 - **验证**：覆盖 live/bundled/cached catalog、手工 alias 展开、header/WHAM quota、Gateway 读写投影与 Admin 历史快照；相关定向测试、workspace test/typecheck/lint/build 作为交付门禁。
 
-## 2026-07-11 · Portal 请求详情对齐 Admin 查看器但保持供应链边界（Self-Service Portal / Requests，docs/12，原则 1/6/7/8）
-
-- **对齐范围**：Portal 请求详情复用本地已有的 Conversation / JsonViewer / ImagePreview，并移植 Admin 的 StreamViewer。请求/响应正文按 Admin 模式改为 metadata-first、用户打开时才分段加载；SSE 响应提供 Assembled / Chunks / Raw 三种视图，普通 JSON 继续提供 Tree / Formatted / Raw 与全屏。
-- **图片总览**：只扫描 bearer key 已获授权的 request/response 正文，按 Request、Response 分组显示缩略图；点击沿用 ImagePreview 的放大、缩放、1:1、适配与新标签页能力。图片遍历保持深度 24、总数 24、URL 去重上限，避免大正文生成无界 DOM/解码工作。
-- **性能与失败语义**：新增 `part=meta`，只返回 `{request,response}` availability flags；ownership 必须在 metadata/store read 前验证。单段加载失败只影响对应 viewer，不让详情摘要白屏；trace 切换时丢弃旧异步结果，避免跨详情串数据。
-- **安全边界**：没有照搬 Admin 的原始 `upstream_request`。该正文包含协议翻译结果、wire model 与注入后的 Memory 上下文，继续由 R7 在 store read 前拒绝。Portal metadata 也不得返回或暗示 upstream 是否存在；若未来要展示“模型实际看到的内容”，必须新增服务端白名单规范化投影，不能放开原始 part。
-- **验证**：TDD 增加 Portal payload meta ownership/whitelist/fallback 测试、图片 sniff/遍历/去重/上限测试、media-group 纯函数和页面组合 contract；再运行 Portal/Gateway tests、svelte-check、typecheck、lint/build 与真实浏览器交互检查。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-11 · Portal 请求详情对齐 Admin 查看器但保持供应链边界（Self-Service Portal / Requests，docs/12，原则 1/6/7/8）**：复用 Admin viewer 并按 metadata-first 懒加载请求/响应与图片，同时保持 ownership 和 `upstream_request` 隔离边界。
 - **2026-07-11 · API-key 门户自助 Memory 默认设置（Self-Service Portal / Memory，docs/06/08/12，原则 2/7）**：bearer key 可在 Portal 安全配置 observe/inject、共享项目与线程来源；root 只读，显式请求头仍覆盖默认值。
 - **2026-07-10–11 · Codex CLI GPT-5.6 subscription parity（OAuth subscription / Responses / model catalog，docs/04/05/11，原则 3/5/6/7/8）**：按 Codex 源码补齐 GPT-5.6 模型目录、Responses/WebSocket/compact、usage、订阅 entitlement 与 reset-credit 安全边界，并完成真实 CLI 验证。
 - **2026-07-10 · Direct DeepSeek Responses reasoning history pre-skip（Provider execution / protocol translation，docs/04/05/07，原则 3/5/8）**：检测到 Responses reasoning history 时预跳过无法接收回传 `reasoning_content` 的 direct DeepSeek Chat 候选；OpenRouter mirror 保持可尝试，避免确定性 400 而不改变最终 fallback。
