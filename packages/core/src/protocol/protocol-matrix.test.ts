@@ -1090,7 +1090,9 @@ describe("usage-detail cross-path normalization (P8)", () => {
         usageMetadata: {
           promptTokenCount: 13,
           cachedContentTokenCount: 3,
-          candidatesTokenCount: 9,
+          // Gemini reports visible candidate and thought tokens separately.
+          // Together they match the other protocols' 9 total output tokens.
+          candidatesTokenCount: 4,
           thoughtsTokenCount: 5,
           totalTokenCount: 22,
         },

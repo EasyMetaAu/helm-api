@@ -699,6 +699,14 @@ describe("runReplay (anthropic_messages / openai_responses / gemini)", () => {
       completion_tokens: 1,
       cached_tokens: null,
       cache_creation_tokens: null,
+      service_tier: null,
+      inference_geo: null,
+      cache_creation_5m_tokens: null,
+      cache_creation_1h_tokens: null,
+      audio_prompt_tokens: null,
+      cached_audio_prompt_tokens: null,
+      image_output_tokens: null,
+      billed_cost_usd: null,
     });
   });
 });
