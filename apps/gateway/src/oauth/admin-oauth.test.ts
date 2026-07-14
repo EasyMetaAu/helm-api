@@ -1,5 +1,6 @@
 import {
   buildXaiGrokCreditsRequest,
+  type ConfigStore,
   createSqliteDb,
   decryptSecret,
   encryptSecret,
@@ -12,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { getAccountSettings, loadAccountSettings, setAccountSettings } from "./account-settings.js";
 import { createOAuthAdmin } from "./admin-oauth.js";
 import type { CodexModelCatalog } from "./codex-model-catalog.js";
+import { createOAuthModelDiscoveryCache } from "./model-discovery-cache.js";
 
 const KEY = Buffer.alloc(32, 4);
 
@@ -758,6 +760,10 @@ describe("createOAuthAdmin", () => {
       ?.accounts.find((candidate) => candidate.account === "default");
 
     expect(account?.models).toEqual(["claude-fable-5", "claude-sonnet-4-7"]);
+    expect(
+      getAccountSettings(await loadAccountSettings(config, KEY), "anthropic", "default")
+        .discoveredModels,
+    ).toEqual(["claude-fable-5", "claude-sonnet-4-7"]);
     await expect(
       admin.listModels({ providerId: "anthropic", account: "default" }),
     ).resolves.toMatchObject({
@@ -790,6 +796,95 @@ describe("createOAuthAdmin", () => {
       ?.accounts.find((candidate) => candidate.account === "default");
 
     expect(account?.models).toEqual([]);
+  });
+
+  it("does not persist an old discovery result after its credential cache generation is invalidated", async () => {
+    const { tokens, config } = makeStores();
+    await tokens.upsert({
+      providerId: "anthropic",
+      account: "default",
+      accessEnc: encryptSecret("AT", KEY),
+      refreshEnc: encryptSecret("RT", KEY),
+      expiresAt: Date.now() + 3_600_000,
+      meta: null,
+      updatedAt: 1,
+    });
+    let resolveModels!: (response: Response) => void;
+    const pendingModels = new Promise<Response>((resolve) => {
+      resolveModels = resolve;
+    });
+    const fetchMock = vi.fn(async () => pendingModels);
+    vi.stubGlobal("fetch", fetchMock);
+    const modelDiscoveryCache = createOAuthModelDiscoveryCache();
+    const admin = createOAuthAdmin({
+      store: tokens,
+      encKey: KEY,
+      config,
+      modelDiscoveryCache,
+    });
+
+    const pending = admin.listModels({ providerId: "anthropic", account: "default" });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    modelDiscoveryCache.invalidate({ providerId: "anthropic", account: "default" });
+    resolveModels(json({ data: [{ id: "claude-old-identity" }] }));
+    await expect(pending).resolves.toMatchObject({ available: ["claude-old-identity"] });
+
+    expect(
+      getAccountSettings(await loadAccountSettings(config, KEY), "anthropic", "default")
+        .discoveredModels,
+    ).toBeUndefined();
+  });
+
+  it("keeps the old credential when its identity-bound model snapshot cannot be cleared", async () => {
+    const db = createSqliteDb(":memory:");
+    const tokens = new SqliteOAuthTokenStore(db);
+    const storedConfig = new SqliteConfigStore(db);
+    await tokens.upsert({
+      providerId: "anthropic",
+      account: "default",
+      accessEnc: encryptSecret("OLD", KEY),
+      refreshEnc: encryptSecret("OLD-RT", KEY),
+      expiresAt: Date.now() + 3_600_000,
+      meta: null,
+      updatedAt: 1,
+    });
+    await setAccountSettings(storedConfig, KEY, "anthropic", "default", {
+      discoveredModels: ["claude-old-identity"],
+    });
+    const failingConfig: ConfigStore = {
+      get: (key) => storedConfig.get(key),
+      set: async () => {
+        throw new Error("database unavailable");
+      },
+    };
+    vi.stubGlobal(
+      "fetch",
+      routeFetch([
+        [
+          /oauth\/token/,
+          () => json({ access_token: "NEW", refresh_token: "NEW-RT", expires_in: 3600 }),
+        ],
+      ]),
+    );
+    const admin = createOAuthAdmin({
+      store: tokens,
+      encKey: KEY,
+      config: failingConfig,
+      genSessionId: () => "replace",
+    });
+    const { authorizeUrl } = await admin.startManualPaste({ providerId: "anthropic" });
+    const state = new URL(authorizeUrl).searchParams.get("state");
+
+    await expect(
+      admin.completeManualPaste({
+        sessionId: "replace",
+        redirectInput: `https://x/cb?code=C&state=${state}`,
+        account: "default",
+      }),
+    ).rejects.toThrow();
+    expect(decryptSecret((await tokens.get("anthropic", "default"))?.accessEnc ?? "", KEY)).toBe(
+      "OLD",
+    );
   });
 
   it("setEnabledModels persists a subset; listModels then returns it as `enabled`", async () => {

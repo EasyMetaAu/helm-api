@@ -12,6 +12,7 @@ import {
   effectiveOAuthAliases,
   effectiveOAuthModelOptions,
 } from "./effective-models.js";
+import { createOAuthModelDiscoveryCache } from "./model-discovery-cache.js";
 
 const KEY = Buffer.alloc(32, 7);
 const ROUTABLE = new Set(["anthropic", "github-copilot", "openai-codex", "xai"]);
@@ -81,6 +82,15 @@ describe("effectiveAccountModels", () => {
       "claude-sonnet-5",
       "claude-haiku-4-5",
     ]);
+  });
+
+  it("uses the durable auto-discovery snapshot after the process cache is lost", () => {
+    expect(
+      effectiveAccountModels(
+        { modelsMode: "auto", discoveredModels: ["claude-fable-5", "claude-sonnet-4-7"] },
+        "anthropic",
+      ),
+    ).toEqual(["claude-fable-5", "claude-sonnet-4-7"]);
   });
 
   it("offers the verified xAI catalog when a bound account stays in auto mode", () => {
@@ -190,6 +200,42 @@ describe("effectiveOAuthAliases", () => {
 });
 
 describe("effectiveOAuthModelOptions", () => {
+  it.each([
+    ["anthropic", "claude-fable-5"],
+    ["github-copilot", "gpt-5.99-copilot"],
+    ["xai", "grok-next-preview"],
+  ])("uses the discovered %s auto catalog instead of hard-coded picker fallbacks", async (providerId, remoteModel) => {
+    const { tokens, config } = makeStores();
+    await bind(tokens, providerId, "default");
+    const modelDiscoveryCache = createOAuthModelDiscoveryCache();
+    await modelDiscoveryCache.load({ providerId, account: "default" }, async () => [remoteModel]);
+
+    await expect(
+      effectiveOAuthModelOptions({ store: tokens, encKey: KEY }, config, ROUTABLE, {
+        modelDiscoveryCache,
+      }),
+    ).resolves.toEqual([{ alias: `${providerId}/${remoteModel}`, accounts: ["default"] }]);
+  });
+
+  it("does not let an auto-discovery cache snapshot widen a manual allowlist", async () => {
+    const { tokens, config } = makeStores();
+    await bind(tokens, "anthropic", "default");
+    await setAccountSettings(config, KEY, "anthropic", "default", {
+      modelsMode: "manual",
+      enabledModels: ["claude-opus-4-6"],
+    });
+    const modelDiscoveryCache = createOAuthModelDiscoveryCache();
+    await modelDiscoveryCache.load({ providerId: "anthropic", account: "default" }, async () => [
+      "claude-fable-5",
+    ]);
+
+    await expect(
+      effectiveOAuthModelOptions({ store: tokens, encKey: KEY }, config, ROUTABLE, {
+        modelDiscoveryCache,
+      }),
+    ).resolves.toEqual([{ alias: "anthropic/claude-opus-4-6", accounts: ["default"] }]);
+  });
+
   it("does not mutate the original Codex catalog snapshot model order", async () => {
     const { tokens, config } = makeStores();
     await bind(tokens, "openai-codex", "default", { accountId: "acc-default" });

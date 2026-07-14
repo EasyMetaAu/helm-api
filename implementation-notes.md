@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-14 · 通道模型选择器复用自动发现缓存（OAuth subscription / Admin lanes，docs/04/11，原则 1/3/6）
+
+- **生产根因**：账号管理弹窗与运行时 provider pool 已把非 Codex 自动模式的远程模型目录写入同一个账号级进程缓存，但 `/admin/api/models` 的通道选择器投影没有读取该缓存，也没有跨进程保存成功目录；Anthropic/xAI 因而只显示代码内静态 fallback，Copilot 在没有静态 fallback 时甚至不显示任何自动发现模型。
+- **统一投影与存储**：通道目录继续保持 network-free（读取时不发上游请求），Anthropic、Copilot、xAI 自动模式依次使用共享进程缓存、现有加密账号设置中的 durable last-known-good 目录、curated fallback；Admin 刷新与 runtime pool synthesis 只持久化仍被当前 cache generation 接受的非空发现。同名账号重连先失效旧 generation、严格清理旧身份 snapshot，成功后才替换 credential；手动模式仍只使用持久 allowlist，Codex 仍使用独立的持久 ModelInfo catalog，不改变 entitlement 边界，也无需数据库迁移。
+- **失败语义与验证**：空目录或发现错误绝不覆盖 durable last-known-good；缓存和持久快照都不存在时才使用既有 curated fail-open fallback。后台 snapshot 写失败只告警、不阻断路由；但加密设置读取/解密/JSON shape 失败时严格拒绝任何 mutation，不能用空 map 覆盖 proxy、priority、allowlist 等既有状态。TDD 覆盖三种非 Codex provider、进程缓存丢失后的持久恢复、Manual 隔离、旧 credential 并发发现、重连清理顺序、损坏设置防覆盖与写失败 fail-open；定向 5 files / 153 tests 全绿。
+
 ## 2026-07-14 · 丢弃 Codex 空 secondary 配额占位窗口（OAuth quota / Admin providers / reset credits，docs/04/11，原则 3/5/7）
 
 - **生产根因**：Codex 部分账号的响应头会同时返回真实 `primary + windowMinutes:10080` 周窗口，以及 `secondary + usedPercent:0 + 无 duration + reset-after:0`。后者只是空占位，但 header parser 将其作为配额写入；latest-wins snapshot 随后覆盖完整 PULL 数据，Admin 又把未知时长的 positional key 翻译成“次窗口”，造成看似存在第二个额度且 7 天用量消失。
@@ -77,18 +83,9 @@
 - **精确消息**：具备 Anthropic native `count_tokens` 时，catalog 的廉价输入估算不再提前 context-skip，而是保留其他能力门控并让精确计数裁决；已有 `inputTokens` 与 `exactContextLimit` 时，终态输出 `prompt is too long: <actual> tokens > <limit> maximum`。不具备精确计数的候选用现有估算生成同形消息。Anthropic 非流式响应为 HTTP 400 `invalid_request_error`；流式响应保持 HTTP SSE 语义并发送同类型 terminal error frame。
 - **验证**：执行层覆盖预检链耗尽、上游链耗尽、原始 detail 保留、精确消息优先、混合真实 provider failure，以及溢出后成功 fallback；Messages 路由覆盖非流式 400 与流式 terminal error frame。
 
-## 2026-07-11 · Subscription Provider 自动模型展示使用账号级发现与共享缓存（OAuth subscription / Admin providers，docs/04/11，原则 1/3/6）
-
-- **根因**：Providers 表格读取 `listStatus().account.models`，但非 Codex 自动模式过去直接调用 `effectiveAccountModels()`，把 `CURATED_OAUTH_MODELS` 静态 fallback 当成该账号实时可用模型；因此多个 Claude 账号会重复显示同一组写死模型，和 Manage 弹窗、账号 token 的实际发现结果不一致。
-- **展示边界**：手动模式继续原样显示持久化的 `enabledModels`；自动模式改为使用该账号的刷新后 token、账号代理和 provider discovery。Anthropic/Copilot 取各自 live models，Codex 保留 account identity、entitlement、visibility 与 alias 扩展规则。
-- **请求边界**：非 Codex 手动模式的 allowlist 已是运行时权威值，pool synthesis 不再先调用 `/models` 再覆盖结果；只有自动模式使用 live discovery。Codex 手动模式仍读取账号 catalog 后与 allowlist 取交集，不能绕过订阅 entitlement。
-- **失败语义**：管理投影使用严格发现，网络/凭证/上游失败时返回空列表，不把 curated fallback 冒充账号返回。路由合成继续保留既有 curated fail-open 默认值，本次不扩大为全局路由策略变更；已持久化 credential failure 的账号也不会为页面展示再次刷新。
-- **复用**：`listStatus` 与 Manage 的 `listModels` 共用账号发现 helper，避免两套 token refresh、proxy 和 Codex catalog 逻辑漂移。core discovery 增加可选 `fallbackToCurated:false`，默认值保持现有运行时兼容。
-- **缓存边界**：非 Codex live discovery 使用 Gateway 进程级账号缓存，按 `providerId + account` 隔离；正缓存 5 分钟、失败冷却 1 分钟、最多 128 个账号，并发刷新 singleflight。空结果/异常保留 last-known-good，重新绑定、断开账号或修改代理时精确失效。Admin 与 runtime synthesis 共用同一实例，避免页面读取和 pool rebuild 各请求一次；curated fallback 只在 runtime cache 之外应用，不能污染 Admin 的“账号实际返回”投影。Codex 继续使用其独立的持久 ModelInfo catalog cache。
-- **验证**：TDD 覆盖自动模式实时模型、发现失败不展示静态默认、手动模式保存值与跳过 discovery、Codex entitlement/alias、core fallback 开关，以及缓存 TTL、singleflight、last-known-good、精确失效和 Admin/runtime 共享复用；workspace typecheck/lint/build 全通过，完整 Vitest 为 352 files / 5631 tests 全绿。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-11 · Subscription Provider 自动模型展示使用账号级发现与共享缓存（OAuth subscription / Admin providers，docs/04/11，原则 1/3/6）**：Providers 表格与 Manage 弹窗改用账号实时发现；非 Codex 使用共享进程缓存与 last-known-good，手动 allowlist、Codex entitlement 和运行时 curated fail-open 边界保持不变。
 - **2026-07-11 · Claude Sonnet 5 订阅流量 API 等价成本与能力目录（Provider catalog / cost telemetry，docs/04/07/11，原则 2/5/7）**：默认 Anthropic 订阅路由升级到 Sonnet 5，并按官方介绍期 API 等价费率记录 telemetry；补齐 1M context、128K output、tools/vision/stream/structured outputs/document 与 adaptive-thinking 能力，2026-09-01 需更新标准费率。
 - **2026-07-11 · 退休 GPT-5.3-Codex-Spark 及其订阅配额投影（OAuth subscription / model catalog / Admin providers，docs/04/11，原则 3/5/6/7）**：从 live/bundled/cached catalog 与手工设置过滤退休模型，并从 WHAM/header/durable/Admin quota 投影移除其 model-scoped 限额，保留最小历史识别以阻止旧缓存复活。
 - **2026-07-11 · Portal 请求详情对齐 Admin 查看器但保持供应链边界（Self-Service Portal / Requests，docs/12，原则 1/6/7/8）**：复用 Admin viewer 并按 metadata-first 懒加载请求/响应与图片，同时保持 ownership 和 `upstream_request` 隔离边界。

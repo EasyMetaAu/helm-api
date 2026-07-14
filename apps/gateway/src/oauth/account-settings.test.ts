@@ -1,4 +1,4 @@
-import { type ConfigStore, createSqliteDb, SqliteConfigStore } from "@helm/core";
+import { type ConfigStore, createSqliteDb, encryptSecret, SqliteConfigStore } from "@helm/core";
 import { describe, expect, it } from "vitest";
 import {
   clearAccountCredentialFailure,
@@ -7,6 +7,7 @@ import {
   loadGlobalOAuthSettings,
   markAccountCredentialFailure,
   resolveAccountModelsMode,
+  saveAccountDiscoveredModels,
   setAccountSettings,
   setGlobalOAuthSettings,
 } from "./account-settings.js";
@@ -46,6 +47,38 @@ describe("account-settings", () => {
     const config = makeConfig();
     expect(await loadAccountSettings(config, KEY)).toEqual({});
     expect(getAccountSettings({}, "anthropic", "default")).toEqual({});
+  });
+
+  it("fails open when an automatic discovery snapshot cannot be persisted", async () => {
+    const config: ConfigStore = {
+      get: async () => null,
+      set: async () => {
+        throw new Error("database unavailable");
+      },
+    };
+
+    await expect(
+      saveAccountDiscoveredModels(config, KEY, "anthropic", "default", ["claude-fable-5"]),
+    ).resolves.toBe(false);
+  });
+
+  it.each([
+    ["the settings read throws", async () => Promise.reject(new Error("database unavailable"))],
+    ["the ciphertext is invalid", async () => "not-encrypted"],
+    ["the decrypted JSON has the wrong shape", async () => encryptSecret("[]", KEY)],
+  ])("does not overwrite account settings when %s", async (_label, get) => {
+    let writes = 0;
+    const config: ConfigStore = {
+      get,
+      set: async () => {
+        writes += 1;
+      },
+    };
+
+    await expect(
+      saveAccountDiscoveredModels(config, KEY, "anthropic", "default", ["claude-fable-5"]),
+    ).resolves.toBe(false);
+    expect(writes).toBe(0);
   });
 
   it("preserves a legacy Codex enabledModels allowlist as manual mode", () => {

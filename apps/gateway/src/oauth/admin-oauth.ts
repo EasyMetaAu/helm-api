@@ -56,12 +56,14 @@ import type {
 import {
   type AccountSettings,
   clearAccountCredentialFailure,
+  clearAccountDiscoveredModels,
   clearAccountSettings,
   getAccountSettings,
   loadAccountSettings,
   loadGlobalOAuthSettings,
   markAccountCredentialFailure,
   resolveAccountModelsMode,
+  saveAccountDiscoveredModels,
   setAccountSettings,
   setGlobalOAuthSettings,
 } from "./account-settings.js";
@@ -527,8 +529,9 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     const provider = getOAuthProvider(providerId);
     if (!provider) return { available: [], entitled: [] };
     if (providerId !== CODEX) {
+      const discoveryKey = { providerId, account };
       const available = await modelDiscoveryCache.load(
-        { providerId, account },
+        discoveryKey,
         async () => {
           const accountFetch = makeFetch(settings.proxy as ProxyConfig | undefined);
           const tm = createTokenManager({
@@ -546,6 +549,20 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         },
         { force: forceRefresh },
       );
+      const accepted = modelDiscoveryCache.snapshot(discoveryKey);
+      if (
+        accepted &&
+        accepted.length > 0 &&
+        !(await saveAccountDiscoveredModels(
+          deps.config,
+          deps.encKey,
+          providerId,
+          account,
+          accepted,
+        ))
+      ) {
+        log("warn", "oauth.models.snapshot_write_failed", { providerId, account });
+      }
       return { available, entitled: available };
     }
     try {
@@ -631,6 +648,14 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     account: string,
     creds: OAuthCredentials,
   ): Promise<void> {
+    if (providerId !== CODEX) {
+      // Invalidate first so an old in-flight discovery cannot become the current
+      // cache generation, then strictly clear its durable identity-bound snapshot.
+      modelDiscoveryCache.invalidate({ providerId, account });
+      if (!(await clearAccountDiscoveredModels(deps.config, deps.encKey, providerId, account))) {
+        throw new Error("failed to clear the previous account model snapshot");
+      }
+    }
     await deps.store.upsert({
       providerId,
       account,
@@ -644,7 +669,6 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     // upstream identity. Never let that new credential inherit the old identity's
     // positive OR negative quota cache entry.
     invalidateQuotaCache(providerId, account);
-    modelDiscoveryCache.invalidate({ providerId, account });
   }
 
   // Ensure a stored account's access token is fresh — the SAME lazy refresh the
