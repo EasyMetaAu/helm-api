@@ -865,7 +865,7 @@
   "Timeout (ms)": "タイムアウト（ミリ秒）",
   "To": "終了",
   "Today": "今日",
-  "tok": "トークン",
+  "tok": "tok",
   "Token usage": "トークン使用量",
   "Token usage over time": "トークン使用量の推移",
   "Token usage: input / output, with cached input tokens.": "トークン使用量：入力 / 出力、キャッシュされた入力トークンを含む。",

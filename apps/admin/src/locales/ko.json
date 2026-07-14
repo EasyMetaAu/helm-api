@@ -865,7 +865,7 @@
   "Timeout (ms)": "타임아웃 (ms)",
   "To": "종료",
   "Today": "오늘",
-  "tok": "토큰",
+  "tok": "tok",
   "Token usage": "토큰 사용량",
   "Token usage over time": "토큰 사용량 추이",
   "Token usage: input / output, with cached input tokens.": "토큰 사용량: 입력 / 출력, 캐시된 입력 토큰 포함.",

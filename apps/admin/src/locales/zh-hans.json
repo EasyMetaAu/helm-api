@@ -865,7 +865,7 @@
   "Timeout (ms)": "超时（毫秒）",
   "To": "结束",
   "Today": "今天",
-  "tok": "词元",
+  "tok": "tok",
   "Token usage": "Token 用量",
   "Token usage over time": "Token 用量趋势",
   "Token usage: input / output, with cached input tokens.": "Token 用量：输入 / 输出，含缓存的输入 Token。",
