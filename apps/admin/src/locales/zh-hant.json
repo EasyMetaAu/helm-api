@@ -865,7 +865,7 @@
   "Timeout (ms)": "逾時（毫秒）",
   "To": "結束",
   "Today": "今天",
-  "tok": "詞元",
+  "tok": "tok",
   "Token usage": "權杖用量",
   "Token usage over time": "權杖用量趨勢",
   "Token usage: input / output, with cached input tokens.": "權杖用量：輸入 / 輸出，含快取的輸入權杖。",
