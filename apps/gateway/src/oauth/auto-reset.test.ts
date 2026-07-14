@@ -63,6 +63,16 @@ describe("codex reset-credit eligibility", () => {
     ).toBe(42);
     expect(codexWeeklyUsedPercent([{ key: "primary", usedPercent: 100 }])).toBeNull();
   });
+
+  it("prefers an explicit weekly duration and ignores empty positional placeholders", () => {
+    expect(
+      codexWeeklyUsedPercent([
+        { key: "secondary", usedPercent: 95 },
+        { key: "primary", usedPercent: 37, windowMinutes: 10_080 },
+      ]),
+    ).toBe(37);
+    expect(codexWeeklyUsedPercent([{ key: "secondary", usedPercent: 0 }])).toBeNull();
+  });
 });
 
 describe("weeklySaturated", () => {

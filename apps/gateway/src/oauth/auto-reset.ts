@@ -8,7 +8,7 @@
 // and at most ONE consume per account per hour (cooldown), so a burst of concurrent
 // saturated replies can't drain the grant.
 
-import { isCodexAccountWeeklyQuotaWindow } from "@helm/shared";
+import { selectCodexAccountWeeklyQuotaWindows } from "@helm/shared";
 
 // At least one hour between reset-credit consumes for the same shared ChatGPT
 // account. The runtime also persists this guard so a container restart cannot
@@ -68,14 +68,7 @@ export function codexWeeklyUsedPercent(
     windowMinutes?: number | null;
   }>,
 ): number | null {
-  const weekly = windows
-    .filter((w) =>
-      isCodexAccountWeeklyQuotaWindow({
-        key: w.key,
-        limitId: w.limitId,
-        windowMinutes: w.windowMinutes ?? null,
-      }),
-    )
+  const weekly = selectCodexAccountWeeklyQuotaWindows(windows)
     .map((w) => w.usedPercent)
     .filter((pct) => Number.isFinite(pct));
   return weekly.length === 0 ? null : Math.max(...weekly);

@@ -3,8 +3,83 @@ import {
   CodexOAuthUsageSchema,
   CodexResetResultSchema,
   isCodexAccountWeeklyQuotaWindow,
+  isCodexQuotaWindowPlaceholder,
   OAuthQuotaSnapshotSchema,
+  selectCodexAccountWeeklyQuotaWindows,
 } from "./usage-schema.js";
+
+describe("Codex normalized quota-window helpers", () => {
+  const capturedAt = 1_000_000;
+
+  it("recognizes only expired zero-usage windows without a reported duration as placeholders", () => {
+    expect(
+      isCodexQuotaWindowPlaceholder(
+        { key: "secondary", usedPercent: 0, windowMinutes: null, resetsAtMs: capturedAt },
+        capturedAt,
+      ),
+    ).toBe(true);
+    expect(
+      isCodexQuotaWindowPlaceholder(
+        { key: "secondary", usedPercent: 1, windowMinutes: null, resetsAtMs: capturedAt },
+        capturedAt,
+      ),
+    ).toBe(false);
+    expect(
+      isCodexQuotaWindowPlaceholder(
+        { key: "secondary", usedPercent: 0, windowMinutes: 10_080, resetsAtMs: capturedAt },
+        capturedAt,
+      ),
+    ).toBe(false);
+    expect(
+      isCodexQuotaWindowPlaceholder(
+        {
+          key: "secondary",
+          usedPercent: 0,
+          windowMinutes: null,
+          resetsAtMs: capturedAt + 60_000,
+        },
+        capturedAt,
+      ),
+    ).toBe(false);
+  });
+
+  it("prefers duration-backed weekly truth over positional legacy fallbacks", () => {
+    const explicit = {
+      key: "primary",
+      usedPercent: 37,
+      windowMinutes: 10_080,
+      resetsAtMs: capturedAt + 500_000,
+    };
+    expect(
+      selectCodexAccountWeeklyQuotaWindows([
+        { key: "secondary", usedPercent: 99, windowMinutes: null, resetsAtMs: null },
+        explicit,
+      ]),
+    ).toEqual([explicit]);
+  });
+
+  it("uses only meaningful account-wide secondary windows as a legacy fallback", () => {
+    const legacy = {
+      key: "secondary",
+      usedPercent: 42,
+      windowMinutes: null,
+      resetsAtMs: capturedAt + 500_000,
+    };
+    expect(selectCodexAccountWeeklyQuotaWindows([legacy])).toEqual([legacy]);
+    expect(
+      selectCodexAccountWeeklyQuotaWindows([
+        { key: "secondary", usedPercent: 0, windowMinutes: null, resetsAtMs: capturedAt },
+        {
+          key: "codex_terra-secondary",
+          limitId: "codex_terra",
+          usedPercent: 100,
+          windowMinutes: null,
+          resetsAtMs: capturedAt + 500_000,
+        },
+      ]),
+    ).toEqual([]);
+  });
+});
 
 describe("isCodexAccountWeeklyQuotaWindow", () => {
   it("uses the reported duration before the unstable primary/secondary position", () => {
