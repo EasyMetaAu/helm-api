@@ -268,6 +268,13 @@ export function shouldRunPreflight(stageBatches: number, recoveryRequired: boole
   return stageBatches === 0 || recoveryRequired;
 }
 
+export function resetStageAfterSafetyStop(): {
+  stageBatches: 0;
+  recoveryRequired: true;
+} {
+  return { stageBatches: 0, recoveryRequired: true };
+}
+
 export function evaluateRuntimeSafety(
   sample: SupervisorSample,
   previous: RuntimeSafetyState,
@@ -800,6 +807,7 @@ export async function runSupervisor(config = loadConfig()): Promise<void> {
             sample,
             reasons: preflight.reasons,
             lastError: null,
+            stageBatches,
           });
           if (preflight.safe) {
             runtimeState = {
@@ -837,12 +845,14 @@ export async function runSupervisor(config = loadConfig()): Promise<void> {
       const safety = evaluateRuntimeSafety(sample, runtimeState, config.thresholds);
       runtimeState = safety.state;
       if (safety.stop) {
-        stageBatches = 0;
-        recoveryRequired = true;
+        const reset = resetStageAfterSafetyStop();
+        stageBatches = reset.stageBatches;
+        recoveryRequired = reset.recoveryRequired;
         writeStatus({
           phase: "waiting_safety",
           sample,
           reasons: safety.reasons,
+          stageBatches,
           checkpoint: {
             nextRowIndex: checkpoint.nextRowIndex,
             totalRows: checkpoint.totalRows,
