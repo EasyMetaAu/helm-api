@@ -435,6 +435,46 @@ describe('admin oauth api client', () => {
     });
   });
 
+  it('shows a completed reset for the local cooldown response without retrying', async () => {
+    const fetchFn = vi.fn<typeof fetch>(async () =>
+      resp(
+        {
+          error: 'reset credit blocked: a reset credit was already consumed within the last hour',
+          code: 'reset_credit_cooldown_active',
+          retryAfterMs: 358_411,
+        },
+        { ok: false, status: 429 },
+      ),
+    );
+    vi.stubGlobal('fetch', fetchFn);
+
+    await expect(consumeCodexResetCredit('openai-codex', 'acct-codex')).resolves.toEqual({
+      code: 'already_redeemed',
+      outcome: 'alreadyRedeemed',
+      windowsReset: 0,
+    });
+    expect(fetchFn).toHaveBeenCalledOnce();
+  });
+
+  it('keeps unrelated reset-credit 429 responses as errors without retrying', async () => {
+    const fetchFn = vi.fn<typeof fetch>(async () =>
+      resp(
+        {
+          error: 'another reset-credit attempt is still in progress',
+          code: 'reset_credit_reservation_active',
+          retryAfterMs: 30_000,
+        },
+        { ok: false, status: 429 },
+      ),
+    );
+    vi.stubGlobal('fetch', fetchFn);
+
+    await expect(consumeCodexResetCredit('openai-codex', 'acct-codex')).rejects.toThrow(
+      'reset_credit_reservation_active',
+    );
+    expect(fetchFn).toHaveBeenCalledOnce();
+  });
+
   it('rejects a malformed reset-credit success body instead of casting it', async () => {
     vi.stubGlobal(
       'fetch',

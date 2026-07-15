@@ -61,7 +61,8 @@ const BASE = '/admin/api/oauth';
 export type OAuthApiErrorCode =
   | 'device_authorization_denied'
   | 'device_code_expired'
-  | 'device_poll_failed';
+  | 'device_poll_failed'
+  | 'reset_credit_cooldown_active';
 
 export class OAuthApiError extends Error {
   readonly status: number;
@@ -87,7 +88,8 @@ async function asJson<T>(res: Response): Promise<T> {
         if (
           value === 'device_authorization_denied' ||
           value === 'device_code_expired' ||
-          value === 'device_poll_failed'
+          value === 'device_poll_failed' ||
+          value === 'reset_credit_cooldown_active'
         ) {
           code = value;
         }
@@ -350,7 +352,8 @@ export type CodexResetCreditResult = ReturnType<typeof CodexResetCreditResponseS
 
 // POST /oauth/:provider/reset-credit -> consume one rate-limit reset credit for the
 // account. Codex-only on the server; FAIL-CLOSED (the gateway 502s on any upstream
-// failure), so a rejected promise here means the reset did NOT happen — surface it.
+// failure). A local cooldown means the account was already reset recently, so project
+// that one idempotent state as success without issuing another request.
 export async function consumeCodexResetCredit(
   provider: string,
   account = 'default',
@@ -361,7 +364,22 @@ export async function consumeCodexResetCredit(
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ account, ...options }),
   });
-  return CodexResetCreditResponseSchema.parse(await asJson<unknown>(res));
+  try {
+    return CodexResetCreditResponseSchema.parse(await asJson<unknown>(res));
+  } catch (error) {
+    if (
+      error instanceof OAuthApiError &&
+      error.status === 429 &&
+      error.code === 'reset_credit_cooldown_active'
+    ) {
+      return CodexResetCreditResponseSchema.parse({
+        code: 'already_redeemed',
+        outcome: 'alreadyRedeemed',
+        windowsReset: 0,
+      });
+    }
+    throw error;
+  }
 }
 
 // ── per-account connectivity test (providers page "Test" button) ─────────────

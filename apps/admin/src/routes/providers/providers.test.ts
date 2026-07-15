@@ -1199,7 +1199,7 @@ describe('providers page', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
-  it('shows an idempotent notice and saves auto-reset for alreadyRedeemed', async () => {
+  it('shows reset success and saves auto-reset for alreadyRedeemed', async () => {
     consumeCodexResetCredit.mockResolvedValue({
       code: 'already_redeemed',
       outcome: 'alreadyRedeemed',
@@ -1220,7 +1220,8 @@ describe('providers page', () => {
       }),
     );
     expect(invalidateAllMock).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole('status')).toHaveTextContent('Reset credit was already redeemed');
+    expect(screen.getByRole('status')).toHaveTextContent('Reset completed successfully');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 

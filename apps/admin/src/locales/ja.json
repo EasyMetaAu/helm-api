@@ -969,7 +969,7 @@
   "Only these models are exposed to Lanes. Add, edit, or remove ids, or pull the latest remote catalog into the list.": "これらのモデルだけを Lanes に公開します。ID の追加、編集、削除、または最新のリモートカタログの一覧への取り込みができます。",
   "Plan: {plan}": "プラン: {plan}",
   "Rate limit reached": "レート制限に達しました",
-  "Reset credit was already redeemed": "リセットクレジットはすでに使用済みです",
+  "Reset completed successfully": "リセットが正常に完了しました",
   "This limit cannot be restored with a Codex reset credit": "この制限は Codex リセットクレジットでは復元できません",
   "Unexpected reset-credit outcome": "リセットクレジットから予期しない結果が返されました",
   "Use an explicit model list. New remote models are not added until you choose them.": "明示的なモデル一覧を使用します。新しいリモートモデルは選択するまで追加されません。",
