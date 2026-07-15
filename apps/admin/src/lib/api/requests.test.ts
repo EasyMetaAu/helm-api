@@ -115,6 +115,7 @@ describe('toListItem', () => {
 
   it('maps the recorded token usage, deriving non-cached = prompt − cached and a prompt+completion total', () => {
     const row = toListItem(rawRecord());
+    expect(row.usage.measurement).toBe('reported');
     expect(row.usage.input).toBe(1200);
     expect(row.usage.output).toBe(340);
     expect(row.usage.cached).toBe(800);
@@ -139,6 +140,29 @@ describe('toListItem', () => {
     expect(u.cacheCreation).toBeNull();
     expect(u.nonCached).toBeNull();
     expect(u.total).toBeNull();
+    expect(u.measurement).toBe('unknown');
+  });
+
+  it('preserves estimated-partial provenance and stream termination separately from final status', () => {
+    const row = toListItem(
+      rawRecord({
+        stream_outcome: 'truncated',
+        final: {
+          model_alias: 'premium',
+          provider_model: 'claude-x',
+          status: 'error',
+          error_reason: 'upstream_error',
+        },
+        usage: {
+          prompt_tokens: 1200,
+          completion_tokens: 21,
+          measurement: 'estimated_partial',
+        },
+      }),
+    );
+    expect(row.status).toBe('error');
+    expect(row.stream_outcome).toBe('truncated');
+    expect(row.usage.measurement).toBe('estimated_partial');
   });
 });
 
@@ -162,7 +186,9 @@ describe('toDetail', () => {
     expect(d.key_name).toBeNull();
     // An error record maps status through (drives the summary badge).
     const errored = toDetail(
-      rawRecord({ final: { model_alias: null, status: 'error', error_reason: 'all_providers_failed' } }),
+      rawRecord({
+        final: { model_alias: null, status: 'error', error_reason: 'all_providers_failed' },
+      }),
     );
     expect(errored.status).toBe('error');
     expect(errored.final_model).toBeNull();
@@ -173,6 +199,43 @@ describe('toDetail', () => {
     expect(d.cost_breakdown.eval_usd).toBeCloseTo(0.0002);
     expect(d.cost_breakdown.completion_usd).toBeCloseTo(0.01);
     expect(d.cost_breakdown.total_usd).toBeCloseTo(0.0102);
+  });
+
+  it('keeps unknown detail costs null instead of turning them into a free $0', () => {
+    const d = toDetail(
+      rawRecord({
+        cost_breakdown: { eval_usd: null, completion_usd: null, total_usd: null },
+        provider_attempts: [
+          {
+            alias: 'premium',
+            status: 'ok',
+            skipped: false,
+            latency_ms: 340,
+            cost_usd: null,
+          },
+        ],
+      }),
+    );
+    expect(d.cost_breakdown.routing_usd).toBe(0);
+    expect(d.cost_breakdown.eval_usd).toBeNull();
+    expect(d.cost_breakdown.completion_usd).toBeNull();
+    expect(d.cost_breakdown.total_usd).toBeNull();
+  });
+
+  it('maps stream outcome onto detail without widening the binary provider result', () => {
+    const d = toDetail(
+      rawRecord({
+        stream_outcome: 'client_aborted',
+        final: {
+          model_alias: 'premium',
+          provider_model: 'claude-x',
+          status: 'error',
+          error_reason: 'client_abort',
+        },
+      }),
+    );
+    expect(d.status).toBe('error');
+    expect(d.stream_outcome).toBe('client_aborted');
   });
 
   it('surfaces the eval model, latency and decision source (decided_by) for an eval-decided request', () => {
@@ -243,13 +306,14 @@ describe('toDetail', () => {
     expect(d.eval_triggered).toBe(false);
   });
 
-  it('defaults cost parts to 0 when the record has no cost_breakdown (legacy record)', () => {
+  it('uses known attempt cost for a legacy record without inventing eval cost', () => {
     const legacy = rawRecord();
     delete legacy.cost_breakdown;
     const d = toDetail(legacy);
-    // completion derived from the summed attempts; eval unknown -> 0 (visible).
+    // Completion derives from the summed attempts; eval remains unknown.
     expect(d.cost_breakdown.completion_usd).toBeCloseTo(0.01);
-    expect(d.cost_breakdown.eval_usd).toBe(0);
+    expect(d.cost_breakdown.eval_usd).toBeNull();
+    expect(d.cost_breakdown.total_usd).toBeCloseTo(0.01);
   });
 
   it('surfaces a failed attempt error_detail (status + message + raw body); null elsewhere', () => {
@@ -376,7 +440,12 @@ describe('listRequests', () => {
   });
 
   it('maps the envelope rows and passes the totals through', async () => {
-    stubFetch({ items: [rawRecord({ created_at: 1717155600000 })], total: 7, page: 3, pageSize: 2 });
+    stubFetch({
+      items: [rawRecord({ created_at: 1717155600000 })],
+      total: 7,
+      page: 3,
+      pageSize: 2,
+    });
     const res = await listRequests({ page: 3, pageSize: 2 });
     expect(res.total).toBe(7);
     expect(res.page).toBe(3);

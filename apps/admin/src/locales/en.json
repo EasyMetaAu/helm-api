@@ -993,5 +993,14 @@
   "Provider refresh failed: {error}": "Provider refresh failed: {error}",
   "Provider data refreshed": "Provider data refreshed",
   "Provider data refreshed at {time}": "Provider data refreshed at {time}",
-  "refresh available again in {duration}": "refresh available again in {duration}"
+  "refresh available again in {duration}": "refresh available again in {duration}",
+  "API-equivalent": "API-equivalent",
+  "API-equivalent estimate; subscription has no per-request charge": "API-equivalent estimate; subscription has no per-request charge",
+  "Estimated from a partial stream.": "Estimated from a partial stream.",
+  "Provider-reported usage": "Provider-reported usage",
+  "estimated · partial stream": "estimated · partial stream",
+  "partial": "partial",
+  "client aborted": "client aborted",
+  "truncated": "truncated",
+  "incomplete": "incomplete"
 }

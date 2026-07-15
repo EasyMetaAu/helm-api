@@ -11,9 +11,19 @@
   const fmt = formatTokens;
 </script>
 
+{#if usage.measurement !== 'unknown'}
+  <p data-testid="usage-measurement" class="mb-2 text-xs text-ink-muted">
+    {usage.measurement === 'estimated_partial'
+      ? `≈ ${$t('Estimated from a partial stream.')}`
+      : $t('Provider-reported usage')}
+  </p>
+{/if}
+
 <dl data-testid="token-usage" class="grid grid-cols-2 gap-x-6 gap-y-1 text-sm">
   <dt class="text-ink-muted">{$t('Input tokens')}</dt>
-  <dd data-testid="tokens-input" class="text-right font-mono text-ink-strong">{fmt(usage.input)}</dd>
+  <dd data-testid="tokens-input" class="text-right font-mono text-ink-strong">
+    {fmt(usage.input)}
+  </dd>
 
   <dt class="text-ink-muted">{$t('Output tokens')}</dt>
   <dd data-testid="tokens-output" class="text-right font-mono text-ink-strong">

@@ -51,6 +51,9 @@ export interface RequestListItem {
   final_model: string | null;
   fallback_count: number; // execution fallback count (provider attempts - 1)
   status: 'ok' | 'error';
+  // Delivery outcome is separate from the provider attempt result. A provider can
+  // successfully emit bytes while the request later ends as a partial stream.
+  stream_outcome: StreamOutcome;
   latency_ms: number;
   // null = NOT measured (no pricing / usage unknown — e.g. an unpriced model),
   // rendered as '—'. A number is a real cost. Crucially distinct from 0 so an
@@ -72,6 +75,7 @@ export interface RequestListItem {
 // view; the gateway is the single source of the raw counts (Principle 1 — we only
 // render, never recompute the upstream figures).
 export interface TokenUsageView {
+  measurement: UsageMeasurement;
   input: number | null; // prompt_tokens (TOTAL input, includes cached)
   output: number | null; // completion_tokens
   cached: number | null; // cache-READ prompt tokens (served from cache)
@@ -81,6 +85,15 @@ export interface TokenUsageView {
   nonCached: number | null;
   total: number | null; // input + output when present; null when neither is measured
 }
+
+export type UsageMeasurement = 'reported' | 'estimated_partial' | 'unknown';
+export type StreamOutcome =
+  | 'completed'
+  | 'incomplete'
+  | 'failed'
+  | 'client_aborted'
+  | 'truncated'
+  | null;
 
 export interface ServingAccountView {
   provider_id: string;
@@ -125,6 +138,7 @@ export interface RequestDetail {
   final_model: string | null; // the served model alias (null = no provider served)
   lane: string; // selected lane ('' on a legacy record)
   status: 'ok' | 'error';
+  stream_outcome: StreamOutcome;
   // Total wall-clock latency (Σ attempt latency, ms); null on a legacy record.
   latency_ms: number | null;
   request_meta: Record<string, unknown>;
@@ -165,9 +179,9 @@ export interface RequestDetail {
   } | null;
   cost_breakdown: {
     routing_usd: number;
-    eval_usd: number;
-    completion_usd: number;
-    total_usd: number;
+    eval_usd: number | null;
+    completion_usd: number | null;
+    total_usd: number | null;
   };
   // Served-completion token accounting (see TokenUsageView). Every leaf is null on
   // a legacy/un-stamped record → the card renders '—'.
@@ -235,11 +249,13 @@ interface RawDecisionRecord {
   // tail is parsed (TokenUsageSchema). Each leaf is null when not reported; the
   // whole block is null/absent on a legacy (pre-feature) record.
   usage?: {
+    measurement?: string;
     prompt_tokens?: number | null;
     completion_tokens?: number | null;
     cached_tokens?: number | null;
     cache_creation_tokens?: number | null;
   } | null;
+  stream_outcome?: string | null;
   // Served-stream generation window (ms): first→last forwarded chunk, gateway-timed.
   // null/absent for non-streaming responses and legacy records. The true-TPS
   // denominator — paired with usage.completion_tokens to derive tokens/sec.
@@ -399,7 +415,27 @@ export function toUsage(raw: RawDecisionRecord): TokenUsageView {
   const nonCached = input !== null && cached !== null ? Math.max(0, input - cached) : null;
   // Sum the parts that ARE measured; all-unmeasured stays null (never a fake 0).
   const total = input !== null || output !== null ? (input ?? 0) + (output ?? 0) : null;
-  return { input, output, cached, cacheCreation, nonCached, total };
+  const measurement: UsageMeasurement =
+    u === undefined
+      ? 'unknown'
+      : u.measurement === 'estimated_partial'
+        ? 'estimated_partial'
+        : 'reported';
+  return { measurement, input, output, cached, cacheCreation, nonCached, total };
+}
+
+const STREAM_OUTCOMES = new Set<Exclude<StreamOutcome, null>>([
+  'completed',
+  'incomplete',
+  'failed',
+  'client_aborted',
+  'truncated',
+]);
+
+function normalizeStreamOutcome(value: unknown): StreamOutcome {
+  return STREAM_OUTCOMES.has(value as Exclude<StreamOutcome, null>)
+    ? (value as Exclude<StreamOutcome, null>)
+    : null;
 }
 
 // True generation TPS for one request: output tokens ÷ the served-stream generation
@@ -465,6 +501,7 @@ export function toListItem(raw: RawDecisionRecord): RequestListItem {
     fallback_count:
       typeof raw.fallback_count === 'number' ? raw.fallback_count : fallbackCount(attempts),
     status,
+    stream_outcome: normalizeStreamOutcome(raw.stream_outcome),
     latency_ms:
       typeof raw.latency_total_ms === 'number' ? raw.latency_total_ms : sumLatency(attempts),
     cost_usd: listCost(raw, attempts),
@@ -512,20 +549,34 @@ function buildRequestMeta(raw: RawDecisionRecord): Record<string, unknown> {
 // the recorded cost_breakdown.
 function buildCostBreakdown(
   raw: RawDecisionRecord,
-  completionFallback: number,
+  completionFallback: number | null,
 ): RequestDetail['cost_breakdown'] {
   const cb = raw.cost_breakdown;
-  const completion =
-    typeof cb?.completion_usd === 'number' ? cb.completion_usd : completionFallback;
-  const evalUsd = typeof cb?.eval_usd === 'number' ? cb.eval_usd : 0;
-  const total = typeof cb?.total_usd === 'number' ? cb.total_usd : evalUsd + completion;
+  // An explicit null is authoritative "unknown", not a free zero and not an
+  // invitation to recompute. Only truly legacy records without the block use the
+  // attempt-cost fallback.
+  if (cb !== undefined) {
+    return {
+      routing_usd: 0,
+      eval_usd: num(cb.eval_usd),
+      completion_usd: num(cb.completion_usd),
+      total_usd: num(cb.total_usd),
+    };
+  }
   // The backend does not bill a separate routing self-cost in the MVP.
-  return { routing_usd: 0, eval_usd: evalUsd, completion_usd: completion, total_usd: total };
+  return {
+    routing_usd: 0,
+    eval_usd: null,
+    completion_usd: completionFallback,
+    total_usd: completionFallback,
+  };
 }
 
 export function toDetail(raw: RawDecisionRecord): RequestDetail {
   const attempts = Array.isArray(raw.provider_attempts) ? raw.provider_attempts : [];
-  const completion = sumCost(attempts);
+  const completion = attempts.some((a) => typeof a.cost_usd === 'number')
+    ? sumCost(attempts)
+    : null;
   const status = raw.final?.status === 'error' ? 'error' : 'ok';
   const evalCacheHit = raw.classifier?.eval_cache_hit ?? null;
   const account = normalizeServingAccount(raw);
@@ -547,6 +598,7 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
     final_model: raw.final?.model_alias ?? null,
     lane: raw.lane?.selected_lane ?? '',
     status,
+    stream_outcome: normalizeStreamOutcome(raw.stream_outcome),
     latency_ms: typeof raw.latency_total_ms === 'number' ? raw.latency_total_ms : null,
     request_meta: buildRequestMeta(raw),
     // The backend does not persist a payload; we render a redaction placeholder so
@@ -566,8 +618,7 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
     },
     eval_triggered: raw.classifier?.decided_by === 'eval' || evalCacheHit !== null,
     eval_cache_hit: evalCacheHit,
-    eval_model:
-      typeof raw.classifier?.eval_model === 'string' ? raw.classifier.eval_model : null,
+    eval_model: typeof raw.classifier?.eval_model === 'string' ? raw.classifier.eval_model : null,
     eval_latency_ms:
       typeof raw.classifier?.eval_latency_ms === 'number' ? raw.classifier.eval_latency_ms : null,
     eval_fallback_reason:

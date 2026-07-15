@@ -955,6 +955,7 @@ export async function routeRequest(
       memory: null,
       // Token counts come from the served usage tail (gateway-stamped) — null here.
       usage: null,
+      stream_outcome: null,
       // Served-stream generation window is gateway-timed/stamped — null here.
       generation_ms: null,
       // Concrete subscription account is gateway-stamped after execution.
@@ -1039,6 +1040,7 @@ export async function routeRequest(
     memory: null,
     // Token counts come from the served usage tail (gateway-stamped) — null here.
     usage: null,
+    stream_outcome: null,
     // Served-stream generation window is gateway-timed/stamped — null here.
     generation_ms: null,
     // Concrete subscription account is gateway-stamped after execution.

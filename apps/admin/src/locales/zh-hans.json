@@ -993,5 +993,14 @@
   "Provider refresh failed: {error}": "提供商刷新失败：{error}",
   "Provider data refreshed": "提供商数据已刷新",
   "Provider data refreshed at {time}": "提供商数据已于 {time} 刷新",
-  "refresh available again in {duration}": "{duration} 后可再次刷新"
+  "refresh available again in {duration}": "{duration} 后可再次刷新",
+  "API-equivalent": "API 等值",
+  "API-equivalent estimate; subscription has no per-request charge": "API 等值估算；订阅没有单次请求费用",
+  "Estimated from a partial stream.": "根据部分流估算。",
+  "Provider-reported usage": "提供商报告的用量",
+  "estimated · partial stream": "估算 · 部分流",
+  "partial": "部分完成",
+  "client aborted": "客户端已中止",
+  "truncated": "已截断",
+  "incomplete": "未完成"
 }

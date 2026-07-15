@@ -1,6 +1,7 @@
 import type { DecisionRecord, TelemetryStore } from "@helm/core";
 import { billedCostFromBody, usageFromBody as parseUsage } from "@helm/core";
 import type { TokenUsageBreakdown } from "@helm/shared";
+import { countTokens as countO200kHarmonyTokens } from "gpt-tokenizer/encoding/o200k_harmony";
 import type { WriteQueue } from "../runtime/write-queue.js";
 
 // Shared full request/response capture + streamed-cost backfill helpers, used by
@@ -26,6 +27,10 @@ export interface PayloadCaptureDeps {
 }
 
 export interface StreamUsage {
+  /** Helm provenance for locally reconstructed partial-stream usage. Provider
+   * usage objects omit this and therefore remain authoritative `reported`. */
+  measurement?: "reported" | "estimated_partial";
+  cost_basis?: "catalog_api_equivalent_estimate";
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
@@ -65,6 +70,214 @@ export interface StreamUsage {
    *  uses `cost`; others `cost_usd`. resolveCostUsd prefers these over the estimate. */
   cost?: number;
   cost_usd?: number;
+}
+
+/** Inspect one native Responses event without retaining the whole SSE body. */
+export function inspectResponsesStreamEvent(data: string): {
+  delta: string | null;
+  outcome: "completed" | "incomplete" | "failed" | null;
+  sequenceNumber: number | null;
+  channel: string | null;
+} {
+  let event: {
+    type?: unknown;
+    delta?: unknown;
+    sequence_number?: unknown;
+    item_id?: unknown;
+    output_index?: unknown;
+    content_index?: unknown;
+  };
+  try {
+    event = JSON.parse(data) as { type?: unknown; delta?: unknown };
+  } catch {
+    return { delta: null, outcome: null, sequenceNumber: null, channel: null };
+  }
+  if (!event || typeof event !== "object" || typeof event.type !== "string") {
+    return { delta: null, outcome: null, sequenceNumber: null, channel: null };
+  }
+  const sequenceNumber =
+    typeof event.sequence_number === "number" && Number.isInteger(event.sequence_number)
+      ? event.sequence_number
+      : null;
+  if (event.type === "response.completed") {
+    return { delta: null, outcome: "completed", sequenceNumber, channel: null };
+  }
+  if (event.type === "response.incomplete") {
+    return { delta: null, outcome: "incomplete", sequenceNumber, channel: null };
+  }
+  if (
+    event.type === "response.failed" ||
+    event.type === "response.cancelled" ||
+    event.type === "error"
+  ) {
+    return { delta: null, outcome: "failed", sequenceNumber, channel: null };
+  }
+  const tokenBearingDelta =
+    event.type === "response.output_text.delta" ||
+    event.type === "response.refusal.delta" ||
+    event.type === "response.reasoning_text.delta" ||
+    event.type === "response.reasoning_summary_text.delta" ||
+    event.type === "response.function_call_arguments.delta" ||
+    event.type === "response.custom_tool_call_input.delta" ||
+    event.type === "response.code_interpreter_call_code.delta";
+  const channelIdentity = [
+    typeof event.item_id === "string" ? event.item_id : null,
+    typeof event.output_index === "number" ? `output-${event.output_index}` : null,
+    typeof event.content_index === "number" ? `content-${event.content_index}` : null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(":");
+  return {
+    delta: tokenBearingDelta && typeof event.delta === "string" ? event.delta : null,
+    outcome: null,
+    sequenceNumber,
+    channel: tokenBearingDelta ? `${event.type}:${channelIdentity || "default"}` : null,
+  };
+}
+
+export interface ResponsesDeltaAccumulator {
+  observe(data: string): void;
+  channels(): string[];
+  overflowBytes(): number;
+  outcome(): "completed" | "incomplete" | "failed" | null;
+}
+
+/** Collect semantic Responses deltas independently of network fragmentation. */
+export function createResponsesDeltaAccumulator(): ResponsesDeltaAccumulator {
+  const maxRetainedChars = 65_536;
+  const channels = new Map<string, string[]>();
+  let retainedChars = 0;
+  let droppedBytes = 0;
+  let lastSequenceNumber: number | null = null;
+  let terminalOutcome: "completed" | "incomplete" | "failed" | null = null;
+  return {
+    observe(data): void {
+      const inspected = inspectResponsesStreamEvent(data);
+      if (
+        inspected.sequenceNumber !== null &&
+        lastSequenceNumber !== null &&
+        inspected.sequenceNumber <= lastSequenceNumber
+      ) {
+        return;
+      }
+      if (inspected.sequenceNumber !== null) lastSequenceNumber = inspected.sequenceNumber;
+      if (inspected.delta !== null && inspected.channel !== null) {
+        const available = Math.max(0, maxRetainedChars - retainedChars);
+        const retained = inspected.delta.slice(0, available);
+        const dropped = inspected.delta.slice(available);
+        if (retained.length > 0) {
+          const chunks = channels.get(inspected.channel) ?? [];
+          chunks.push(retained);
+          channels.set(inspected.channel, chunks);
+          retainedChars += retained.length;
+        }
+        if (dropped.length > 0) droppedBytes += Buffer.byteLength(dropped, "utf8");
+      }
+      if (inspected.outcome !== null) terminalOutcome = inspected.outcome;
+    },
+    channels(): string[] {
+      return [...channels.values()].map((chunks) => chunks.join(""));
+    },
+    overflowBytes(): number {
+      return droppedBytes;
+    },
+    outcome(): "completed" | "incomplete" | "failed" | null {
+      return terminalOutcome;
+    },
+  };
+}
+
+function semanticResponsesRequestText(raw: string): string {
+  let request: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return raw;
+    request = parsed as Record<string, unknown>;
+  } catch {
+    return raw;
+  }
+
+  const sanitize = (value: unknown, key = ""): unknown => {
+    if (typeof value === "string") {
+      const binaryLikeKey = /(?:image|audio|file|data|base64)/i.test(key);
+      const dataUrl = value.startsWith("data:") && value.includes(";base64,");
+      return binaryLikeKey && (dataUrl || value.length > 4096) ? "[binary content]" : value;
+    }
+    if (Array.isArray(value)) return value.map((item) => sanitize(item, key));
+    if (value && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).map(([childKey, child]) => [
+          childKey,
+          sanitize(child, childKey),
+        ]),
+      );
+    }
+    return value;
+  };
+
+  // Token-bearing request dimensions only. Transport controls are excluded;
+  // opaque previous_response_id history remains unobservable, so this is an estimate.
+  return JSON.stringify({
+    instructions: sanitize(request.instructions, "instructions"),
+    input: sanitize(request.input, "input"),
+    tools: sanitize(request.tools, "tools"),
+    tool_choice: sanitize(request.tool_choice, "tool_choice"),
+    response_format: sanitize(request.response_format, "response_format"),
+  });
+}
+
+/**
+ * Reconstruct partial usage when a native Responses stream ends before a terminal
+ * usage event. Prompt tokens are an o200k-harmony estimate over the serialized
+ * upstream wire request. Completion tokens are estimated from the semantic
+ * text/reasoning/tool deltas Helm actually received. Cache hits, hidden
+ * reasoning and provider-side adjustments remain unknowable, hence
+ * `measurement="estimated_partial"` rather than an exact claim.
+ */
+export function estimateInterruptedResponsesUsage(
+  upstreamRequest: string | null | undefined,
+  observedDeltas: readonly string[],
+  observedOverflowBytes = 0,
+): StreamUsage | null {
+  const requestText = upstreamRequest ? semanticResponsesRequestText(upstreamRequest) : "";
+  if (
+    requestText.length === 0 &&
+    observedOverflowBytes === 0 &&
+    observedDeltas.every((delta) => delta.length === 0)
+  )
+    return null;
+
+  const estimate = (text: string): number => {
+    if (text.length === 0) return 0;
+    const byteEstimate = (): number => Math.max(1, Math.ceil(Buffer.byteLength(text, "utf8") / 4));
+    // gpt-tokenizer becomes disproportionately expensive on very large prompts.
+    // Interrupted streams must never turn accounting into an event-loop stall, so
+    // large semantic payloads use Helm's existing deterministic byte estimate.
+    if (text.length > 16_384) return byteEstimate();
+    try {
+      // Treat marker-looking user text as ordinary content, not tokenizer control
+      // tokens. An empty disallowed set disables special-token recognition.
+      return countO200kHarmonyTokens(text, { disallowedSpecial: new Set() });
+    } catch {
+      // The estimator itself must stay fail-open. UTF-8 bytes/4 is the same
+      // deterministic fallback used by the Responses /input_tokens surface.
+      return byteEstimate();
+    }
+  };
+  const promptTokens = estimate(requestText);
+  // Each entry is one semantic output channel after all of its network fragments
+  // were joined. Sum channels separately so unrelated text/tool/reasoning content
+  // cannot create artificial BPE merges at their boundaries.
+  const completionTokens =
+    observedDeltas.reduce((total, channel) => total + estimate(channel), 0) +
+    Math.ceil(observedOverflowBytes / 4);
+  return {
+    measurement: "estimated_partial",
+    cost_basis: "catalog_api_equivalent_estimate",
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: promptTokens + completionTokens,
+  };
 }
 
 export function captureEnabled(deps: PayloadCaptureDeps): boolean {
@@ -466,8 +679,8 @@ export function usageFromGeminiSSE(raw: string): StreamUsage | null {
 
 // Native-protocol-passthrough STREAMING cost for openai_responses (#217 Phase 3).
 // Unlike Anthropic (usage split across message_start/message_delta), the Codex
-// Responses SSE carries the totals on the TERMINAL event — `response.completed` or
-// `response.incomplete` (truncation / content filter) — under `response.usage`. The
+// Responses SSE carries the totals on a TERMINAL event — `response.completed`,
+// `response.incomplete`, or `response.failed` — under `response.usage`. The
 // byte-faithful passthrough forwards these frames VERBATIM, so cost extraction scans
 // the accumulated SSE for that event and normalizes its usage the SAME way as the
 // non-stream extractor (mirroring aggregateResponsesStream). Frames are split on the
@@ -494,7 +707,13 @@ export function usageFromResponsesSSE(raw: string): StreamUsage | null {
       continue;
     }
     if (!evt || typeof evt !== "object") continue;
-    if (evt.type !== "response.completed" && evt.type !== "response.incomplete") continue;
+    if (
+      evt.type !== "response.completed" &&
+      evt.type !== "response.incomplete" &&
+      evt.type !== "response.failed"
+    ) {
+      continue;
+    }
     const response = (evt.response ?? {}) as Record<string, unknown>;
     const usage = response.usage;
     if (!usage || typeof usage !== "object") continue;
@@ -690,6 +909,9 @@ export function tokenBreakdownFromUsage(
 ): TokenUsageBreakdown {
   const t = parseUsage({ usage: u });
   return {
+    measurement: u.measurement === "estimated_partial" ? "estimated_partial" : "reported",
+    cost_basis:
+      u.cost_basis === "catalog_api_equivalent_estimate" ? "catalog_api_equivalent_estimate" : null,
     prompt_tokens: t.promptTokens ?? null,
     completion_tokens: t.completionTokens ?? null,
     cached_tokens: t.cachedPromptTokens ?? null,

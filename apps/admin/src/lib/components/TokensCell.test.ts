@@ -11,6 +11,7 @@ import TokensCell from './TokensCell.svelte';
 
 function usage(overrides: Partial<TokenUsageView> = {}): TokenUsageView {
   return {
+    measurement: 'reported',
     input: 1200,
     output: 340,
     cached: 800,
@@ -56,5 +57,14 @@ describe('TokensCell', () => {
   it('renders a measured 0 as "0" (distinct from the unmeasured —)', () => {
     render(TokensCell, { usage: usage({ output: 0 }) });
     expect(screen.getByTestId('tokens-output')).toHaveTextContent('↓ 0');
+  });
+
+  it('marks estimated counts from a partial stream instead of presenting them as exact', () => {
+    render(TokensCell, { usage: usage({ measurement: 'estimated_partial' }) });
+    expect(screen.getByTestId('usage-measurement')).toHaveTextContent(/estimated/i);
+    expect(screen.getByTestId('tokens-cell')).toHaveAttribute(
+      'title',
+      expect.stringMatching(/partial stream/i),
+    );
   });
 });

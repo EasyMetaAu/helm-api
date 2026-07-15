@@ -58,6 +58,8 @@ function poisonedRecord(): DecisionRecord {
     cost_breakdown: { eval_usd: 0.0001, completion_usd: 0.01, total_usd: 0.0101 },
     memory: null,
     usage: {
+      measurement: "reported",
+      cost_basis: null,
       prompt_tokens: 100,
       completion_tokens: 50,
       cached_tokens: 0,
@@ -71,6 +73,7 @@ function poisonedRecord(): DecisionRecord {
       image_output_tokens: 0,
       billed_cost_usd: 0.01,
     },
+    stream_outcome: "completed",
     generation_ms: 800,
   };
 }

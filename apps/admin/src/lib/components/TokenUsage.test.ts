@@ -10,6 +10,7 @@ import TokenUsage from './TokenUsage.svelte';
 
 function usage(overrides: Partial<TokenUsageView> = {}): TokenUsageView {
   return {
+    measurement: 'reported',
     input: 1200,
     output: 340,
     cached: 800,
@@ -35,5 +36,11 @@ describe('TokenUsage', () => {
     render(TokenUsage, { usage: usage({ cached: null, output: 0 }) });
     expect(screen.getByTestId('tokens-cached')).toHaveTextContent('—');
     expect(screen.getByTestId('tokens-output')).toHaveTextContent('0');
+  });
+
+  it('labels estimated partial-stream usage clearly', () => {
+    render(TokenUsage, { usage: usage({ measurement: 'estimated_partial' }) });
+    expect(screen.getByTestId('usage-measurement')).toHaveTextContent(/estimated/i);
+    expect(screen.getByTestId('usage-measurement')).toHaveTextContent(/partial/i);
   });
 });

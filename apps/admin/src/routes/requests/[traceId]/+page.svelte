@@ -283,7 +283,16 @@
         <div>
           <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Status')}</dt>
           <dd class="mt-0.5">
-            {#if d.status === 'error'}
+            {#if d.stream_outcome === 'incomplete' || d.stream_outcome === 'client_aborted' || d.stream_outcome === 'truncated'}
+              <span class="badge-neutral">{$t('partial')}</span>
+              <span class="ml-1 text-xs text-ink-muted">
+                {d.stream_outcome === 'client_aborted'
+                  ? $t('client aborted')
+                  : d.stream_outcome === 'truncated'
+                    ? $t('truncated')
+                    : $t('incomplete')}
+              </span>
+            {:else if d.status === 'error'}
               <span class="badge-error">{$t('error')}</span>
             {:else}
               <span class="badge-ok">{$t('ok')}</span>
@@ -515,7 +524,11 @@
       <p class="field-help mb-2">
         {$t('What this single request cost, split across routing, optional eval, and completion.')}
       </p>
-      <CostBreakdown cost={d.cost_breakdown} />
+      <CostBreakdown
+        cost={d.cost_breakdown}
+        measurement={d.usage.measurement}
+        apiEquivalent={d.serving_account !== null}
+      />
     </section>
 
     <!-- Token usage: input / output / cached / non-cached split for this request -->

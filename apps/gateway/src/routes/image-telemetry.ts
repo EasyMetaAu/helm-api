@@ -87,6 +87,7 @@ export function buildImageDecision(p: {
         : { eval_usd: null, completion_usd: null, total_usd: null },
     memory: null,
     usage: hasUsageEvidence ? usage : null,
+    stream_outcome: null,
     generation_ms: null,
     serving_account: null,
   };

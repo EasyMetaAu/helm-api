@@ -159,9 +159,18 @@ function requestItem(traceId: string): RequestListItem {
     final_model: 'gpt-4o',
     fallback_count: 0,
     status: 'ok',
+    stream_outcome: 'completed',
     latency_ms: 1200,
     cost_usd: 0.004,
-    usage: { input: 100, output: 20, cached: 0, cacheCreation: 0, nonCached: 100, total: 120 },
+    usage: {
+      measurement: 'reported',
+      input: 100,
+      output: 20,
+      cached: 0,
+      cacheCreation: 0,
+      nonCached: 100,
+      total: 120,
+    },
     tps: 30,
   };
 }

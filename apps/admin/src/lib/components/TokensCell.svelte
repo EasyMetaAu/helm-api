@@ -21,12 +21,12 @@
 
   // The full breakdown, surfaced on hover so the headline cell stays compact.
   const tip = $derived(
-    $t('input {input} · output {output} · cached {cached} · non-cached {nonCached}', {
+    `${$t('input {input} · output {output} · cached {cached} · non-cached {nonCached}', {
       input: formatTokens(usage.input),
       output: formatTokens(usage.output),
       cached: formatTokens(usage.cached),
       nonCached: formatTokens(usage.nonCached),
-    }),
+    })}${usage.measurement === 'estimated_partial' ? ` · ${$t('Estimated from a partial stream.')}` : ''}`,
   );
 </script>
 
@@ -40,6 +40,11 @@
       {$t('cached')}
       {formatTokens(usage.cached)}
     </div>
+    {#if usage.measurement === 'estimated_partial'}
+      <div data-testid="usage-measurement" class="text-amber-700">
+        ≈ {$t('estimated · partial stream')}
+      </div>
+    {/if}
   </div>
 {:else}
   <span data-testid="tokens-cell" class="text-ink-muted">—</span>

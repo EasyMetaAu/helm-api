@@ -96,6 +96,31 @@ describe("DecisionRecordSchema", () => {
     expect(DecisionRecordSchema.safeParse(fullRecord()).success).toBe(true);
   });
 
+  it("defaults measured usage to reported and legacy stream outcome to null", () => {
+    const parsed = DecisionRecordSchema.parse({
+      ...fullRecord(),
+      usage: { prompt_tokens: 12, completion_tokens: 4 },
+    });
+
+    expect(parsed.usage?.measurement).toBe("reported");
+    expect(parsed.stream_outcome).toBeNull();
+  });
+
+  it("accepts partial-estimate provenance and a truncated stream outcome", () => {
+    const parsed = DecisionRecordSchema.parse({
+      ...fullRecord(),
+      usage: {
+        prompt_tokens: 12,
+        completion_tokens: 4,
+        measurement: "estimated_partial",
+      },
+      stream_outcome: "truncated",
+    });
+
+    expect(parsed.usage?.measurement).toBe("estimated_partial");
+    expect(parsed.stream_outcome).toBe("truncated");
+  });
+
   it("accepts a Phase 0 passthrough-shaped record", () => {
     const parsed = DecisionRecordSchema.parse(passthroughRecord());
     expect(parsed.classifier.decided_by).toBe("default");

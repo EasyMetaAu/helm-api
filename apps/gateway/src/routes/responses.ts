@@ -392,6 +392,43 @@ function streamStatusFromEventName(eventName: string): string | null {
   }
 }
 
+type ResponsesStreamOutcome = NonNullable<DecisionRecord["stream_outcome"]>;
+
+export function settleResponsesStreamOutcome(args: {
+  decision: DecisionRecord;
+  streamStatus: string | null;
+  caughtAbort: boolean;
+  caughtErrorReason: string | null;
+  timedOut: boolean;
+}): ResponsesStreamOutcome {
+  const outcome: ResponsesStreamOutcome = args.timedOut
+    ? "failed"
+    : args.caughtAbort
+      ? "client_aborted"
+      : args.caughtErrorReason !== null
+        ? "failed"
+        : args.streamStatus === "completed"
+          ? "completed"
+          : args.streamStatus === "incomplete"
+            ? "incomplete"
+            : args.streamStatus === "failed" || args.streamStatus === "cancelled"
+              ? "failed"
+              : "truncated";
+  args.decision.stream_outcome = outcome;
+  if (outcome === "client_aborted" || outcome === "truncated" || outcome === "failed") {
+    args.decision.final = {
+      ...args.decision.final,
+      status: "error",
+      error_reason: args.timedOut
+        ? "timeout"
+        : outcome === "client_aborted"
+          ? "client_abort"
+          : (args.caughtErrorReason ?? "upstream_error"),
+    };
+  }
+  return outcome;
+}
+
 function responseSnapshotFromStreamFrame(
   eventName: string,
   data: string,
@@ -654,6 +691,7 @@ function compactDecision(args: {
     },
     memory: null,
     usage: usage === null ? null : tokenBreakdownFromUsage(usage),
+    stream_outcome: null,
     generation_ms: null,
   };
 }
@@ -1063,6 +1101,8 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         let lastWrite: string | null = null;
         let streamResponseId: string | null = null;
         let streamStatus: string | null = null;
+        let caughtAbort = false;
+        let caughtErrorReason: string | null = null;
         try {
           if (initialError !== null) throw initialError;
           if (result === null) throw new Error("Responses pipeline did not return a result");
@@ -1105,7 +1145,15 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           // before the stream started — writes a SINGLE terminal Responses-shaped
           // error event DIRECTLY into the stream. We CANNOT throw here (the stream
           // has already started; onError would never see it).
-          if (!isAbort(err, c.req.raw.signal)) {
+          if (isAbort(err, c.req.raw.signal)) {
+            caughtAbort = true;
+          } else {
+            caughtErrorReason =
+              err instanceof PipelineError
+                ? err.error_class
+                : isUpstreamTimeout(err)
+                  ? "timeout"
+                  : "upstream_error";
             const body =
               err instanceof PipelineError
                 ? responsesStreamError({
@@ -1127,6 +1175,16 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           }
         } finally {
           releaseConcurrency?.();
+          const streamOutcome =
+            result === null
+              ? null
+              : settleResponsesStreamOutcome({
+                  decision: result.decision,
+                  streamStatus,
+                  caughtAbort,
+                  caughtErrorReason,
+                  timedOut: requestTimedOut(c),
+                });
           // Record AFTER releaseConcurrency so the bookkeeping never extends the
           // concurrency hold, and AFTER the for-await loop ended so the pipeline's
           // own streamIR finally (cost backfill) already mutated result.decision.
@@ -1168,7 +1226,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                   : null,
               createdAt: Date.now(),
               expiresAt: Date.now() + 86_400_000,
-              status: streamStatus ?? "completed",
+              status: streamOutcome ?? "truncated",
             });
           }
         }

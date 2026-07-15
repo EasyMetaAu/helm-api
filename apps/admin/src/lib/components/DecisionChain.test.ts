@@ -24,6 +24,7 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
     final_model: 'claude-x',
     lane: 'premium',
     status: 'ok',
+    stream_outcome: 'completed',
     latency_ms: 460,
     request_meta: {},
     payload_summary: 'payload withheld (redacted)',
@@ -82,6 +83,7 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
     error: null,
     cost_breakdown: { routing_usd: 0, eval_usd: 0, completion_usd: 0.01, total_usd: 0.01 },
     usage: {
+      measurement: 'reported',
       input: 1200,
       output: 340,
       cached: 800,

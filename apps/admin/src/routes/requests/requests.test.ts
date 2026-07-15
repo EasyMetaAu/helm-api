@@ -47,9 +47,11 @@ function item(traceId: string, overrides: Partial<RequestListItem> = {}): Reques
     final_model: 'claude-x',
     fallback_count: 1,
     status: 'ok',
+    stream_outcome: 'completed',
     latency_ms: 460,
     cost_usd: 0.0123,
     usage: {
+      measurement: 'reported',
       input: 1200,
       output: 340,
       cached: 800,
@@ -123,6 +125,7 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
     final_model: 'claude-x',
     lane: 'premium',
     status: 'ok',
+    stream_outcome: 'completed',
     latency_ms: 460,
     request_meta: { requested_model: 'gpt-4o' },
     payload_summary: 'payload withheld (redacted — only routing metadata is stored)',
@@ -162,6 +165,7 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
       total_usd: 0.0103,
     },
     usage: {
+      measurement: 'reported',
       input: 1200,
       output: 340,
       cached: 800,
@@ -490,6 +494,24 @@ describe('requests detail page', () => {
     expect(summary).toHaveTextContent('claude-x'); // served model
     expect(summary).toHaveTextContent('premium'); // lane
     expect(summary).toHaveTextContent('6.9s'); // total latency
+  });
+
+  it('shows a partial stream status and approximate cost/usage provenance on detail', () => {
+    render(DetailPage, {
+      data: {
+        detail: detail({
+          status: 'error',
+          stream_outcome: 'client_aborted',
+          usage: { ...detail().usage, measurement: 'estimated_partial' },
+        }),
+        payload: { captured: false },
+        traceId: 'tr_partial',
+      },
+    });
+
+    expect(screen.getByTestId('request-summary')).toHaveTextContent(/partial/i);
+    expect(screen.getByTestId('cost-completion')).toHaveTextContent('≈$0.01');
+    expect(screen.getAllByTestId('usage-measurement').at(-1)).toHaveTextContent(/estimated/i);
   });
 
   it('falls back to the prefix (and "—") in the summary for an unnamed/legacy record', () => {

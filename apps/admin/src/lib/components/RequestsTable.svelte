@@ -76,13 +76,35 @@
   }
 
   function servedModel(r: RequestListItem): string {
-    if (r.status === 'error') return $t('not served');
+    if (r.status === 'error' && !isPartial(r)) return $t('not served');
     return r.final_model ?? '—';
   }
 
   function servingProvider(r: RequestListItem): string {
     if (r.status === 'error' && !r.served_provider) return $t('not served');
     return r.served_provider ?? '—';
+  }
+
+  function isPartial(r: RequestListItem): boolean {
+    return (
+      r.stream_outcome === 'incomplete' ||
+      r.stream_outcome === 'client_aborted' ||
+      r.stream_outcome === 'truncated'
+    );
+  }
+
+  function outcomeLabel(r: RequestListItem): string {
+    if (r.stream_outcome === 'client_aborted') return $t('client aborted');
+    if (r.stream_outcome === 'truncated') return $t('truncated');
+    if (r.stream_outcome === 'incomplete') return $t('incomplete');
+    return '';
+  }
+
+  function requestCost(r: RequestListItem): string {
+    const rendered = formatUsd(r.cost_usd);
+    return r.cost_usd !== null && r.usage.measurement === 'estimated_partial'
+      ? `≈${rendered}`
+      : rendered;
   }
 </script>
 
@@ -115,7 +137,10 @@
 
 {#snippet resultCell(r: RequestListItem)}
   <div data-testid="cell-result" class="leading-tight">
-    {#if r.status === 'error'}
+    {#if isPartial(r)}
+      <span class="badge-neutral">{$t('partial')}</span>
+      <div class="mt-1 text-xs text-amber-700">{outcomeLabel(r)}</div>
+    {:else if r.status === 'error'}
       <span class="badge-error">{$t('error')}</span>
       {#if r.error_class}
         <div class="mt-1 max-w-[12rem] truncate text-xs text-red-600" title={r.error_class}>
@@ -301,8 +326,18 @@
           <td data-label={$t('Serving')} class="px-3 py-2">
             {@render servingCell(r)}
           </td>
-          <td data-label={$t('Cost')} class="px-3 py-2 font-mono text-ink-body">
-            {formatUsd(r.cost_usd)}
+          <td
+            data-testid="cell-cost"
+            data-label={$t('Cost')}
+            class="px-3 py-2 font-mono text-ink-body"
+            title={r.usage.measurement === 'estimated_partial' && r.serving_account
+              ? $t('API-equivalent estimate; subscription has no per-request charge')
+              : undefined}
+          >
+            {requestCost(r)}
+            {#if r.usage.measurement === 'estimated_partial' && r.serving_account}
+              <div class="text-[10px] text-ink-muted">{$t('API-equivalent')}</div>
+            {/if}
           </td>
           <td data-label={$t('Tokens')} class="px-3 py-2"><TokensCell usage={r.usage} /></td>
           <td data-label={$t('Performance')} class="px-3 py-2">

@@ -3,8 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 import { createWriteQueue } from "../runtime/write-queue.js";
 import {
   backfillCompletionCost,
+  createResponsesDeltaAccumulator,
   createSseCapture,
   createStreamGenerationTimer,
+  estimateInterruptedResponsesUsage,
   type PayloadCaptureDeps,
   persistPayload,
   type RecordServedDeps,
@@ -18,6 +20,134 @@ import {
   usageFromResponsesSSE,
   usageFromSSE,
 } from "./payload-capture.js";
+
+describe("estimateInterruptedResponsesUsage", () => {
+  it("aggregates fragmented channels once, dedupes sequence numbers, and ignores done snapshots", () => {
+    const accumulator = createResponsesDeltaAccumulator();
+    accumulator.observe(
+      JSON.stringify({
+        type: "response.function_call_arguments.delta",
+        sequence_number: 7,
+        item_id: "call_1",
+        delta: '{"pa',
+      }),
+    );
+    accumulator.observe(
+      JSON.stringify({
+        type: "response.function_call_arguments.delta",
+        sequence_number: 7,
+        item_id: "call_1",
+        delta: '{"pa',
+      }),
+    );
+    accumulator.observe(
+      JSON.stringify({
+        type: "response.function_call_arguments.delta",
+        sequence_number: 8,
+        item_id: "call_1",
+        delta: 'th":"/tmp"}',
+      }),
+    );
+    accumulator.observe(
+      JSON.stringify({
+        type: "response.function_call_arguments.delta",
+        sequence_number: 6,
+        item_id: "call_1",
+        delta: "replayed-old-event",
+      }),
+    );
+    accumulator.observe(
+      JSON.stringify({
+        type: "response.function_call_arguments.done",
+        sequence_number: 9,
+        item_id: "call_1",
+        arguments: '{"path":"/tmp"}',
+      }),
+    );
+
+    expect(accumulator.channels()).toEqual(['{"path":"/tmp"}']);
+    expect(accumulator.outcome()).toBeNull();
+  });
+
+  it("bounds retained deltas and accounts for overflow without retaining it", () => {
+    const accumulator = createResponsesDeltaAccumulator();
+    accumulator.observe(
+      JSON.stringify({
+        type: "response.output_text.delta",
+        sequence_number: 1,
+        item_id: "msg_1",
+        delta: "x".repeat(70_000),
+      }),
+    );
+
+    expect(accumulator.channels().join("").length).toBe(65_536);
+    expect(accumulator.overflowBytes()).toBe(4_464);
+    const usage = estimateInterruptedResponsesUsage(
+      null,
+      accumulator.channels(),
+      accumulator.overflowBytes(),
+    );
+    expect(usage?.completion_tokens).toBeGreaterThan(16_384);
+  });
+
+  it("estimates the semantic upstream request and observed Responses deltas", () => {
+    const upstreamRequest = JSON.stringify({
+      model: "gpt-5.6-sol",
+      input: [{ role: "user", content: "Explain the billing gap precisely." }],
+      stream: true,
+    });
+
+    const usage = estimateInterruptedResponsesUsage(upstreamRequest, [
+      "I inspected the stream.",
+      '{"path":"/tmp/report.json"}',
+    ]);
+
+    expect(usage).toMatchObject({
+      measurement: "estimated_partial",
+      cost_basis: "catalog_api_equivalent_estimate",
+      prompt_tokens: expect.any(Number),
+      completion_tokens: expect.any(Number),
+    });
+    expect(usage?.prompt_tokens).toBeGreaterThan(0);
+    expect(usage?.completion_tokens).toBeGreaterThan(0);
+    expect(usage?.total_tokens).toBe((usage?.prompt_tokens ?? 0) + (usage?.completion_tokens ?? 0));
+  });
+
+  it("does not tokenize embedded base64 bytes as prompt text", () => {
+    const usage = estimateInterruptedResponsesUsage(
+      JSON.stringify({
+        model: "gpt-5.6-sol",
+        input: [
+          {
+            role: "user",
+            content: [
+              { type: "input_text", text: "Describe this image." },
+              { type: "input_image", image_url: `data:image/png;base64,${"A".repeat(20_000)}` },
+            ],
+          },
+        ],
+        stream: true,
+      }),
+      [],
+    );
+
+    expect(usage?.prompt_tokens).toBeGreaterThan(0);
+    expect(usage?.prompt_tokens).toBeLessThan(100);
+  });
+
+  it("uses the bounded fallback for a very large semantic prompt", () => {
+    const usage = estimateInterruptedResponsesUsage(
+      JSON.stringify({ input: [{ role: "user", content: "x".repeat(100_000) }] }),
+      [],
+    );
+
+    expect(usage?.prompt_tokens).toBeGreaterThan(20_000);
+  });
+
+  it("returns null when neither a request nor an observed delta exists", () => {
+    expect(estimateInterruptedResponsesUsage(null, [])).toBeNull();
+  });
+});
 
 describe("usageFromSSE", () => {
   it("extracts the final usage chunk emitted with include_usage", () => {
@@ -397,7 +527,8 @@ describe("usageFromResponsesResponse", () => {
 
 // Native-protocol-passthrough STREAMING cost for openai_responses (#217 Phase 3
 // Stage 1): the upstream Codex Responses SSE carries the totals on the terminal
-// `response.completed` (or `response.incomplete`) event's `response.usage`. Byte-
+// `response.completed`, `response.incomplete`, or `response.failed` event's
+// `response.usage`. Byte-
 // faithful passthrough forwards these frames VERBATIM, so cost extraction scans the
 // accumulated SSE for that event. usageFromResponsesSSE returns the same OpenAI-shaped
 // StreamUsage as the non-stream extractor, mirroring aggregateResponsesStream.
@@ -437,6 +568,23 @@ describe("usageFromResponsesSSE", () => {
       prompt_tokens: 40,
       completion_tokens: 3,
       total_tokens: 43,
+    });
+  });
+
+  it("keeps explicit zero usage from response.failed as reported evidence", () => {
+    const sse =
+      'event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","usage":{"input_tokens":0,"output_tokens":0}}}\n\n';
+    const usage = usageFromResponsesSSE(sse);
+    expect(usage).toEqual({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
+    const d = decision();
+    backfillCompletionCost(d, "openai/gpt", null, usage);
+    expect(d.usage).toMatchObject({
+      measurement: "reported",
+      cost_basis: null,
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      cached_tokens: null,
+      cache_creation_tokens: null,
     });
   });
 
@@ -764,6 +912,8 @@ describe("backfillCompletionCost", () => {
       prompt_tokens_details: { cached_tokens: 80 },
     });
     expect(d.usage).toEqual({
+      measurement: "reported",
+      cost_basis: null,
       prompt_tokens: 120,
       completion_tokens: 34,
       cached_tokens: 80,
@@ -790,6 +940,8 @@ describe("backfillCompletionCost", () => {
     });
     // prompt = input + cache_read + cache_creation (core's Anthropic normalization).
     expect(d.usage).toEqual({
+      measurement: "reported",
+      cost_basis: null,
       prompt_tokens: 90,
       completion_tokens: 20,
       cached_tokens: 30,
@@ -825,6 +977,8 @@ describe("backfillCompletionCost", () => {
     });
 
     expect(d.usage).toEqual({
+      measurement: "reported",
+      cost_basis: null,
       prompt_tokens: 1_000,
       completion_tokens: 1_220,
       cached_tokens: 200,

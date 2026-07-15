@@ -1,11 +1,19 @@
-import { CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER, UpstreamError } from "@helm/core";
+import {
+  CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
+  type DecisionRecord,
+  UpstreamError,
+} from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
 import { CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER } from "../responses-websocket-internal.js";
 import type { MessagesIdentity } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
 import type { RecordServedDeps } from "./payload-capture.js";
-import { type ResponsesRouteDeps, registerResponsesRoute } from "./responses.js";
+import {
+  type ResponsesRouteDeps,
+  registerResponsesRoute,
+  settleResponsesStreamOutcome,
+} from "./responses.js";
 
 // POST /v1/responses contract: auth → translate(out) → route → translate(back),
 // OpenAI error envelope, non-streaming only. All business logic is stubbed; the
@@ -18,6 +26,27 @@ const AUTH = { Authorization: "Bearer helm_live_secret", "Content-Type": "applic
 // `model_alias` marker lets a test assert the redacted decision actually rode the
 // insert call.
 const FAKE_DECISION = { final: { status: "ok", model_alias: "gpt-4o" } } as never;
+
+describe("settleResponsesStreamOutcome", () => {
+  it("gives an overall request timeout precedence over an AbortError", () => {
+    const decision = {
+      final: { status: "ok", model_alias: "gpt-4o", error_reason: null },
+      stream_outcome: null,
+    } as unknown as DecisionRecord;
+
+    const outcome = settleResponsesStreamOutcome({
+      decision,
+      streamStatus: null,
+      caughtAbort: true,
+      caughtErrorReason: null,
+      timedOut: true,
+    });
+
+    expect(outcome).toBe("failed");
+    expect(decision.stream_outcome).toBe("failed");
+    expect(decision.final).toMatchObject({ status: "error", error_reason: "timeout" });
+  });
+});
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
@@ -1577,7 +1606,12 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
 
   it("client abort emits NO error frame (benign non-provider fault)", async () => {
     const ac = new AbortController();
+    const { record, insert } = makeRecord();
+    const decision = {
+      final: { status: "ok", model_alias: "gpt-4o", error_reason: null },
+    } as never;
     const { deps } = makeDeps({
+      record,
       transformRequestOut: () => ({
         stream: true,
         model: "auto",
@@ -1589,6 +1623,15 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
         ac.abort();
         throw new Error("aborted");
       },
+      run: async () => ({
+        decision,
+        collect: async () => ({}),
+        streamIR: async function* () {
+          yield { type: "response.created", sequence_number: 0 };
+          ac.abort();
+          throw new Error("aborted");
+        },
+      }),
     });
     const app = buildApp(deps);
     const res = await app.request("/v1/responses", {
@@ -1599,6 +1642,17 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     });
     const frames = parseSSE(await res.text());
     expect(frames.some((f) => f.event === "error")).toBe(false);
+    const recorded = insert.mock.calls[0]?.[0] as {
+      decision: {
+        final: { status: string; error_reason: string | null };
+        stream_outcome: string;
+      };
+    };
+    expect(recorded.decision.final).toMatchObject({
+      status: "error",
+      error_reason: "client_abort",
+    });
+    expect(recorded.decision.stream_outcome).toBe("client_aborted");
   });
 
   it("maps a structurally invalid Responses body (transformer throws) to 400", async () => {
@@ -1755,6 +1809,57 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(insert).toHaveBeenCalledOnce();
     const arg = insert.mock.calls[0]?.[0] as { apiKeyId: string };
     expect(arg.apiKeyId).toBe("k1");
+  });
+
+  it("records a clean terminal-less stream as truncated instead of ok", async () => {
+    const { record, insert } = makeRecord();
+    const put = vi.fn();
+    const decision = {
+      final: { status: "ok", model_alias: "gpt-4o", error_reason: null },
+      provider_attempts: [],
+    } as never;
+    const { deps } = makeDeps({
+      record,
+      registry: { put, get: vi.fn() },
+      transformRequestOut: () => ({
+        stream: true,
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: {},
+      }),
+      run: async () => ({
+        decision,
+        collect: async () => ({}),
+        streamIR: async function* () {
+          yield { type: "response.created", sequence_number: 0 };
+          yield {
+            type: "response.output_text.delta",
+            sequence_number: 1,
+            delta: "partial",
+          };
+        },
+      }),
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    await res.text();
+
+    const recorded = insert.mock.calls[0]?.[0] as {
+      decision: {
+        final: { status: string; error_reason: string | null };
+        stream_outcome: string;
+      };
+    };
+    expect(recorded.decision.final).toMatchObject({
+      status: "error",
+      error_reason: "upstream_error",
+    });
+    expect(recorded.decision.stream_outcome).toBe("truncated");
   });
 
   it("does not record when no record dep is wired (existing tests stay green)", async () => {
@@ -2208,7 +2313,7 @@ describe("streamStatusFromEventName — incomplete / failed / cancelled cases (l
     );
   });
 
-  it("records status='cancelled' when the stream emits a response.cancelled event", async () => {
+  it("normalizes response.cancelled to the failed stream outcome", async () => {
     const put = vi.fn();
     const cancelledData = JSON.stringify({
       type: "response.cancelled",
@@ -2231,7 +2336,7 @@ describe("streamStatusFromEventName — incomplete / failed / cancelled cases (l
     });
     await res.text();
     expect(put).toHaveBeenCalledWith(
-      expect.objectContaining({ responseId: "resp_cancel_1", status: "cancelled" }),
+      expect.objectContaining({ responseId: "resp_cancel_1", status: "failed" }),
     );
   });
 });
