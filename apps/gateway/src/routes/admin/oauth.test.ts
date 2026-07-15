@@ -196,10 +196,14 @@ describe("admin OAuth routes — read endpoints", () => {
     const seam = fullSeam({
       fetchAnthropicQuota: vi.fn(async () => [{ kind: "5h", utilization: 0.1 }]) as never,
     });
-    const res = await app({ oauth: seam, oauthQuota }).request("/admin/api/oauth/quota");
+    const onCodexQuotaSaturated = vi.fn(async () => false);
+    const api = app({ oauth: seam, oauthQuota, onCodexQuotaSaturated });
+    const res = await api.request("/admin/api/oauth/quota");
     expect(res.status).toBe(200);
     expect(upsert).not.toHaveBeenCalled();
     expect(seam.fetchAnthropicQuota).not.toHaveBeenCalled();
+    expect((await api.request("/admin/api/oauth/overview")).status).toBe(200);
+    expect(onCodexQuotaSaturated).not.toHaveBeenCalled();
   });
 
   it("GET /oauth/quota hides persisted Codex header placeholders", async () => {
@@ -629,12 +633,19 @@ describe("admin OAuth routes — read endpoints", () => {
   it("POST /oauth/refresh parks an unparked account from a saturated account-wide snapshot", async () => {
     const now = Date.now();
     const saturatedWeekly = {
-      key: "secondary",
+      key: "primary",
       usedPercent: 100,
       resetsAtMs: now + 8 * 60 * 60_000,
       windowMinutes: 10_080,
     };
-    const applyUsageLimit = vi.fn(async () => {});
+    const order: string[] = [];
+    const applyUsageLimit = vi.fn(async () => {
+      order.push("park");
+    });
+    const onCodexQuotaSaturated = vi.fn(async () => {
+      order.push("reset");
+      return false;
+    });
     const oauthQuota = {
       get: vi.fn(async () => ({
         providerId: "openai-codex",
@@ -665,10 +676,11 @@ describe("admin OAuth routes — read endpoints", () => {
       fetchCodexQuota: vi.fn(async () => ({
         windows: [saturatedWeekly],
         resetCredits: 0,
+        rateLimitReachedType: "rate_limit_reached",
       })) as never,
     });
 
-    const api = app({ oauth: seam, oauthQuota, applyUsageLimit });
+    const api = app({ oauth: seam, oauthQuota, applyUsageLimit, onCodexQuotaSaturated });
     await enqueueRefresh(api);
     const res = await api.request("/admin/api/oauth/quota");
 
@@ -679,17 +691,170 @@ describe("admin OAuth routes — read endpoints", () => {
       saturatedWeekly.resetsAtMs,
       "extend",
     );
+    expect(onCodexQuotaSaturated).toHaveBeenCalledWith(
+      "openai-codex",
+      "default",
+      [saturatedWeekly],
+      expect.any(Number),
+      "rate_limit_reached",
+    );
+    expect(order).toEqual(["park", "reset"]);
   });
 
-  it("POST /oauth/refresh does not newly park an account from a near-full snapshot", async () => {
+  it("re-pulls and publishes fresh quota after auto-reset consumes a credit", async () => {
     const now = Date.now();
-    const nearFullFiveHour = {
+    const saturatedWeekly = {
       key: "primary",
-      usedPercent: 98,
-      resetsAtMs: now + 2 * 60 * 60_000,
-      windowMinutes: 300,
+      usedPercent: 100,
+      resetsAtMs: now + 8 * 60 * 60_000,
+      windowMinutes: 10_080,
+    };
+    const refreshedWeekly = {
+      ...saturatedWeekly,
+      usedPercent: 1,
+      resetsAtMs: now + 7 * 86_400_000,
+    };
+    let row: Record<string, unknown> | null = null;
+    const oauthQuota = {
+      get: vi.fn(async () => row),
+      getAll: vi.fn(async () => (row ? [row] : [])),
+      upsert: vi.fn(async (snapshot: Record<string, unknown>) => {
+        row = { ...snapshot, usageLimitedUntilMs: row?.usageLimitedUntilMs ?? null };
+      }),
+      delete: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const applyUsageLimit = vi.fn(
+      async (_providerId: string, _account: string, until: number | null) => {
+        if (row) row = { ...row, usageLimitedUntilMs: until };
+      },
+    );
+    const applyQuotaSnapshot = vi.fn();
+    const fetchCodexQuota = vi
+      .fn()
+      .mockResolvedValueOnce({
+        windows: [saturatedWeekly],
+        resetCredits: 1,
+        rateLimitReachedType: "rate_limit_reached",
+      })
+      .mockResolvedValueOnce({
+        windows: [refreshedWeekly],
+        resetCredits: 0,
+        rateLimitReachedType: null,
+      });
+    const seam = fullSeam({
+      listStatus: vi.fn(async () => ({
+        selectionStrategy: "balanced",
+        providers: [{ id: "openai-codex", name: "Codex", accounts: [{ account: "default" }] }],
+      })) as never,
+      fetchCodexQuota: fetchCodexQuota as never,
+    });
+    const onCodexQuotaSaturated = vi.fn(async () => true);
+    const api = app({
+      oauth: seam,
+      oauthQuota,
+      applyUsageLimit: applyUsageLimit as never,
+      applyQuotaSnapshot,
+      onCodexQuotaSaturated: onCodexQuotaSaturated as never,
+    });
+
+    await enqueueRefresh(api);
+    const body = (await (await api.request("/admin/api/oauth/quota")).json()) as {
+      quota: Array<{ windows: OAuthQuotaWindow[]; resetCredits: number | null }>;
+    };
+
+    expect(fetchCodexQuota).toHaveBeenCalledTimes(2);
+    expect(fetchCodexQuota).toHaveBeenNthCalledWith(2, { account: "default", force: true });
+    expect(body.quota[0]).toMatchObject({ windows: [refreshedWeekly], resetCredits: 0 });
+    expect(applyQuotaSnapshot).toHaveBeenLastCalledWith(
+      "openai-codex",
+      "default",
+      [refreshedWeekly],
+      expect.any(Number),
+      0,
+    );
+    expect(applyUsageLimit).toHaveBeenLastCalledWith("openai-codex", "default", null, "replace");
+  });
+
+  it("waits for one shared-account reset before pulling the sibling label", async () => {
+    const now = Date.now();
+    const saturatedWeekly = {
+      key: "primary",
+      usedPercent: 100,
+      resetsAtMs: now + 8 * 60 * 60_000,
+      windowMinutes: 10_080,
+    };
+    let releaseFirstReset!: () => void;
+    const firstReset = new Promise<void>((resolve) => {
+      releaseFirstReset = resolve;
+    });
+    const fetchCodexQuota = vi.fn(async () => ({
+      windows: [saturatedWeekly],
+      resetCredits: 1,
+      rateLimitReachedType: "rate_limit_reached" as const,
+    }));
+    const onCodexQuotaSaturated = vi.fn(async (_providerId: string, account: string) => {
+      if (account === "label-a") await firstReset;
+      return false;
+    });
+    const oauthQuota = {
+      get: vi.fn(async () => null),
+      getAll: vi.fn(async () => []),
+      upsert: vi.fn(async () => {}),
+      delete: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const seam = fullSeam({
+      listStatus: vi.fn(async () => ({
+        selectionStrategy: "balanced",
+        providers: [
+          {
+            id: "openai-codex",
+            name: "Codex",
+            accounts: [{ account: "label-a" }, { account: "label-b" }],
+          },
+        ],
+      })) as never,
+      fetchCodexQuota: fetchCodexQuota as never,
+    });
+    const api = app({
+      oauth: seam,
+      oauthQuota,
+      applyUsageLimit: vi.fn(async () => {}),
+      onCodexQuotaSaturated,
+    });
+
+    expect((await api.request("/admin/api/oauth/refresh", { method: "POST" })).status).toBe(202);
+    await vi.waitFor(() => {
+      expect(onCodexQuotaSaturated).toHaveBeenCalledWith(
+        "openai-codex",
+        "label-a",
+        [saturatedWeekly],
+        expect.any(Number),
+        "rate_limit_reached",
+      );
+    });
+    expect(fetchCodexQuota).toHaveBeenCalledTimes(1);
+    expect(fetchCodexQuota).toHaveBeenLastCalledWith({ account: "label-a", force: true });
+
+    releaseFirstReset();
+    await vi.waitFor(async () => {
+      const overview = await api.request("/admin/api/oauth/overview");
+      const body = (await overview.json()) as { refresh: { state: string } };
+      expect(body.refresh.state).toBe("succeeded");
+    });
+    expect(fetchCodexQuota).toHaveBeenCalledTimes(2);
+    expect(fetchCodexQuota).toHaveBeenLastCalledWith({ account: "label-b", force: true });
+  });
+
+  it("POST /oauth/refresh does not park or auto-reset a 99% weekly snapshot", async () => {
+    const now = Date.now();
+    const nearFullWeekly = {
+      key: "primary",
+      usedPercent: 99,
+      resetsAtMs: now + 2 * 86_400_000,
+      windowMinutes: 10_080,
     };
     const applyUsageLimit = vi.fn(async () => {});
+    const onCodexQuotaSaturated = vi.fn(async () => false);
     const oauthQuota = {
       get: vi.fn(async () => ({
         providerId: "openai-codex",
@@ -703,7 +868,7 @@ describe("admin OAuth routes — read endpoints", () => {
         {
           providerId: "openai-codex",
           account: "default",
-          windows: [nearFullFiveHour],
+          windows: [nearFullWeekly],
           capturedAt: now,
           source: "codex",
           usageLimitedUntilMs: null,
@@ -718,17 +883,18 @@ describe("admin OAuth routes — read endpoints", () => {
         providers: [{ id: "openai-codex", name: "Codex", accounts: [{ account: "default" }] }],
       })) as never,
       fetchCodexQuota: vi.fn(async () => ({
-        windows: [nearFullFiveHour],
+        windows: [nearFullWeekly],
         resetCredits: 0,
       })) as never,
     });
 
-    const api = app({ oauth: seam, oauthQuota, applyUsageLimit });
+    const api = app({ oauth: seam, oauthQuota, applyUsageLimit, onCodexQuotaSaturated });
     await enqueueRefresh(api);
     const res = await api.request("/admin/api/oauth/quota");
 
     expect(res.status).toBe(200);
     expect(applyUsageLimit).not.toHaveBeenCalled();
+    expect(onCodexQuotaSaturated).not.toHaveBeenCalled();
   });
 
   it("POST /oauth/refresh makes complete Codex metadata available to cached reads", async () => {

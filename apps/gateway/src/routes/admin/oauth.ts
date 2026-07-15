@@ -13,6 +13,7 @@ import {
   canConsumeResetCredit,
   codexWeeklyUsedPercent,
   runResetCreditAttempt,
+  weeklySaturated,
 } from "../../oauth/auto-reset.js";
 import {
   isPermanentOAuthCredentialFailure,
@@ -21,6 +22,7 @@ import {
 import type {
   AccountProxyInput,
   AdminApiDeps,
+  CodexQuotaResult,
   OAuthAdminAccess,
   OAuthAdminStatusResponse,
   OAuthSelectionStrategy,
@@ -344,31 +346,53 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
             tasks.push({
               label: `openai-codex/${a.account}`,
               run: async () => {
+                const persistCodexQuota = async (fresh: NonNullable<CodexQuotaResult>) => {
+                  const activeResult = {
+                    ...fresh,
+                    windows: filterRetiredOpenAICodexLimits(fresh.windows),
+                    additionalLimits: filterRetiredOpenAICodexLimits(fresh.additionalLimits),
+                  };
+                  const capturedAt = Date.now();
+                  await store.upsert({
+                    providerId: "openai-codex",
+                    account: a.account,
+                    windows: activeResult.windows,
+                    capturedAt,
+                    source: "codex",
+                    resetCredits: activeResult.resetCredits,
+                  });
+                  deps.applyQuotaSnapshot?.(
+                    "openai-codex",
+                    a.account,
+                    activeResult.windows,
+                    capturedAt,
+                    activeResult.resetCredits,
+                  );
+                  if (activeResult.windows.length > 0) {
+                    await syncCooldownFromWindows("openai-codex", a.account, activeResult.windows);
+                  }
+                  return { activeResult, capturedAt };
+                };
+
                 const result = await fetchCodex({ account: a.account, force: true });
                 if (!result) throw new Error("quota refresh returned no snapshot");
-                const activeResult = {
-                  ...result,
-                  windows: filterRetiredOpenAICodexLimits(result.windows),
-                  additionalLimits: filterRetiredOpenAICodexLimits(result.additionalLimits),
-                };
-                const capturedAt = Date.now();
-                await store.upsert({
-                  providerId: "openai-codex",
-                  account: a.account,
-                  windows: activeResult.windows,
-                  capturedAt,
-                  source: "codex",
-                  resetCredits: activeResult.resetCredits,
-                });
-                deps.applyQuotaSnapshot?.(
-                  "openai-codex",
-                  a.account,
-                  activeResult.windows,
-                  capturedAt,
-                  activeResult.resetCredits,
-                );
-                if (activeResult.windows.length > 0) {
-                  await syncCooldownFromWindows("openai-codex", a.account, activeResult.windows);
+                const { activeResult, capturedAt } = await persistCodexQuota(result);
+                if (weeklySaturated(activeResult.windows)) {
+                  const consumed =
+                    (await deps.onCodexQuotaSaturated?.(
+                      "openai-codex",
+                      a.account,
+                      activeResult.windows,
+                      capturedAt,
+                      activeResult.rateLimitReachedType ?? null,
+                    )) ?? false;
+                  if (consumed) {
+                    const refreshed = await fetchCodex({ account: a.account, force: true });
+                    if (!refreshed) {
+                      throw new Error("post-reset quota refresh returned no snapshot");
+                    }
+                    await persistCodexQuota(refreshed);
+                  }
                 }
               },
             });

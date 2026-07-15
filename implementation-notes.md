@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-15 · Codex 配额 PULL 饱和后触发自动重置（OAuth quota / reset credits，docs/04/11，原则 3/5/7）
+
+- **生产根因**：账号已启用 `autoReset`、仍有 reset credit，显式刷新也从 Codex PULL 得到账号级周窗口 100%；但刷新链只持久化 snapshot、同步 live pool 并停车，自动重置仅由后续响应头 PUSH 触发。账号一旦因 PULL 饱和而停车，可能不再获得下一次响应头，形成“缓存页面持续显示 100%，自动重置没有入口”的延迟触发；生产实例最终在约 5 分钟后的新响应头到达时才成功消耗 credit，证明设置与 guard 本身正常。
+- **触发边界**：cache-only 的 `/oauth/quota` 与 `/oauth/overview` 继续严格无副作用，绝不因读取旧 snapshot 消耗 credit；只有显式 refresh job 的新鲜上游 PULL 和实际响应头 PUSH 属于权威输入。PULL 在完成 durable/live quota 更新和 cooldown 停车同步后，仅对账号级周窗口 `>=100%` 调用并等待同一 `maybeAutoReset` 入口，避免先解停后又被异步停车覆盖；同一 Helm label 的并发触发复用同一个 in-flight promise。credit 成功消费后立即强制再 PULL 一次并更新 durable snapshot、live pool、剩余 credits 与 cooldown，cache-only 页面不会继续显示重置前的 100%。低于 100%、5h 窗口和 model-scoped 饱和窗口不触发；是否有 credit、共享账号幂等 marker、每小时 cooldown 与 workspace spend-control 拒绝仍由既有 reset guard fail-closed 判定。
+- **验证**：TDD 先证明 fresh Codex PULL 没有传递自动重置信号，再覆盖真实 `primary + 10080m + 100%` PULL 必须按“停车 -> 触发”顺序执行、成功消费后 cache/live state 立即变为新窗口与新 credit 数、共享 ChatGPT 账号的第二个 Helm label 必须等待首个 reset/unpark 完成后才开始 PULL、99% 周窗口与 cache-only GET/overview 不触发。定向 4 files / 196 tests、Gateway typecheck、Biome 与 Gateway build 全绿。
+
 ## 2026-07-15 · Anthropic 不可用地域哨兵按全球基础卡计费（Catalog / telemetry accounting，docs/07/08，原则 2/3/5/7）
 
 - **生产根因**：Anthropic OAuth 原生流会返回 `usage.inference_geo=not_available`，表示未提供推理地域，不是新的计费地域。地域计费上线后把任意非空字符串都当作已确认地域；catalog 只有 `global` / `us`，该哨兵因此被当作未知费率并令已有完整 token usage 的成功请求得到 `cost_usd=null`。模型、能力和价格条目均未缺失。
@@ -68,14 +74,9 @@
 - **失败与旧数据**：任一账号的 quota 超时、空/非法窗口或持久化失败会把 job 标为 `failed` 并记录安全错误摘要，但不会删除 last-known-good snapshot；其余账号仍继续串行刷新。页面展示 queued/running/succeeded/failed、最近成功时间与 cooldown，手动点击只入队一次并 cache-only 轮询，定时自动刷新永远只读缓存。
 - **验证**：TDD 覆盖 cache-only 首屏、20 次并发点击合并、账号刷新最大并发 1、失败保留旧 quota、force cache bypass、模型发现 timeout、前端单请求加载、手动/自动刷新分流与多语言状态文案；workspace 357 files / 5775 tests、typecheck、Biome、build 与 Admin check 全通过。
 
-## 2026-07-14 · Avoid Waste 在 provider 池内限制 reset-credit 偏置（OAuth provider selection，docs/04/11，原则 3/5/6）
-
-- **生产根因**：`openai-codex` 的四个 Plus/Pro 账号已正确合并进同一 provider pool，套餐名没有参与分池或筛选；但 reset credit 的虚拟周容量乘数为 `10`，单个 credit 的加分远高于自然周窗口。生产中 31% 已用、3 credits 的 Pro 账号因此持续压过 2% 已用、0 credits 的 Plus 账号，形成看似按套餐分组的长期偏置。
-- **评分边界**：同一 provider 内继续按账号优先级、模型 entitlement、可调度/限流状态形成候选集；Avoid Waste 的主分数仍来自即将重置的真实 5h/周额度。reset credits 保留为弱的可恢复容量信号，每个 credit 只贡献完整自然周窗口加权分数的 5%，可打破接近分数，但不能压过明显更多的真实即将过期额度。Plus/Pro/Team/Business 等套餐标签仍只用于身份与配额展示，不进入选择逻辑。
-- **验证**：TDD 使用生产比例覆盖同一池内 `2% + 0 credits` 对 `31% + 3 credits`，并保留真实额度相同情况下 credits 参与选择的回归；定向 pool 测试、typecheck、lint 与 build 作为交付门禁。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-14 · Avoid Waste 在 provider 池内限制 reset-credit 偏置（OAuth provider selection，docs/04/11，原则 3/5/6）**：reset credits 只作为同一 provider 池内的弱恢复容量信号，不能压过明显更多的真实即将过期额度；套餐标签不参与分池或评分。
 - **2026-07-13 · Responses 工具结果的 multipart 文本使用 input_text（Protocol translation / provider execution，docs/05/07，原则 3/5/8）**：provider 与共享 transformer 统一把请求侧 multipart 工具结果文本编码为 `input_text`，保留字符串、图片、文件与助手输出的既有 wire shape。
 - **2026-07-13 · Codex 周配额按真实窗口时长识别（OAuth quota / Admin providers / reset credits，docs/04/11，原则 3/5/7）**：账号级 Codex 周窗口以 provider 报告的 `windowMinutes >= 10080` 为权威，旧快照仅在缺 duration 且有真实用量时回退 secondary；Admin、reset-credit 与 model-scoped 隔离共用同一规则。
 - **2026-07-12 · Grok premium fallback 与 Composer 评估边界（Routing / provider evaluation，docs/04/07，原则 2/3/5/6/7）**：移除 official OpenAI/ZenMux 自动付费候选，premium 以已验证的 SuperGrok Grok 4.5 作为订阅 fallback；Composer 因真实 A/B 的空响应与质量不足不进 lane，底层 transport/发现保留，xAI Admin 选择器补 curated 展示但运行时 entitlement 继续 fail-closed。

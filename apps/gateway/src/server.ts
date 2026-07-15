@@ -1990,18 +1990,6 @@ export async function buildServer(
       }),
     );
   };
-  const applyQuotaSnapshot = (
-    providerId: string,
-    account: string,
-    windows: OAuthQuotaWindow[],
-    capturedAtMs: number,
-    resetCredits?: number | null,
-  ): void => {
-    oauthPoolClients
-      .get(providerId)
-      ?.setQuotaSnapshot(account, windows, capturedAtMs, resetCredits);
-  };
-
   // Executor hook: an account-wide 429 on a subscription alias means the SERVED account
   // hit its limit. Resolve the provider from the alias prefix + the served account from
   // the ALS holder (set by the pool's onSelect for THIS attempt), then park it for a
@@ -2030,7 +2018,7 @@ export async function buildServer(
   // (keyed by the cheap helm label) only collapses a same-label burst before async
   // work, to avoid a token-read stampede. Fire-and-forget + fail-open: any failure
   // leaves parked state.
-  const autoResetInFlight = new Set<string>(); // helm label -> a reset is being evaluated
+  const autoResetInFlight = new Map<string, Promise<boolean>>(); // helm label -> joined evaluation
 
   // Resolve the SHARED reset-credit key for a Codex helm account from the persisted
   // ChatGPT account identity. Metadata is authoritative because token refresh can leave
@@ -2077,20 +2065,20 @@ export async function buildServer(
     windows: OAuthQuotaWindow[],
     rateLimitReachedType: CodexRateLimitReachedType | null,
     nowMs: number,
-  ): void => {
+  ): Promise<boolean> => {
     const consumeCodexResetCredit = oauthAdmin?.consumeCodexResetCredit;
-    if (!consumeCodexResetCredit || !oauthEncKey) return;
+    if (!consumeCodexResetCredit || !oauthEncKey) return Promise.resolve(false);
     const helmKey = `${providerId} ${account}`;
-    if (autoResetInFlight.has(helmKey)) return; // collapse a same-label burst (cheap, sync)
-    autoResetInFlight.add(helmKey);
-    void (async () => {
+    const existing = autoResetInFlight.get(helmKey);
+    if (existing) return existing; // collapse + join a same-label burst (cheap, sync)
+    const task = (async () => {
       try {
         const s = getAccountSettings(
           await loadAccountSettings(store.config, oauthEncKey),
           providerId,
           account,
         );
-        if (!s.autoReset) return; // opted out → never spend a credit
+        if (!s.autoReset) return false; // opted out → never spend a credit
         const reservation = await resetCreditGuard.reserve({
           providerId,
           account,
@@ -2105,7 +2093,7 @@ export async function buildServer(
             code: reservation.code,
             retry_after_ms: reservation.retryAfterMs ?? null,
           });
-          return;
+          return false;
         }
         const sharedKey = reservation.sharedKey;
         const guardHash = resetCreditGuardHash(sharedKey).slice(0, 12);
@@ -2176,6 +2164,7 @@ export async function buildServer(
               windows_reset: attempt.result.windowsReset ?? null,
             });
           }
+          return attempt.consumed;
         } catch (e) {
           if (!consumeFailed) {
             logger.log("error", "oauth.auto_reset.failed", {
@@ -2186,6 +2175,7 @@ export async function buildServer(
               line: e instanceof Error ? e.message : String(e),
             });
           }
+          return false;
         }
       } catch (e) {
         logger.log("error", "oauth.auto_reset.failed", {
@@ -2194,11 +2184,40 @@ export async function buildServer(
           stage: "post_consume",
           line: e instanceof Error ? e.message : String(e),
         });
+        return false;
       } finally {
         autoResetInFlight.delete(helmKey);
       }
     })();
+    autoResetInFlight.set(helmKey, task);
+    return task;
   };
+
+  const applyQuotaSnapshot = (
+    providerId: string,
+    account: string,
+    windows: OAuthQuotaWindow[],
+    capturedAtMs: number,
+    resetCredits?: number | null,
+  ): void => {
+    oauthPoolClients
+      .get(providerId)
+      ?.setQuotaSnapshot(account, windows, capturedAtMs, resetCredits);
+  };
+
+  // Every AUTHORITATIVE fresh Codex snapshot must feed the same auto-reset path.
+  // Header PUSHes and explicit upstream PULL refreshes are both fresh truth;
+  // cache-only admin reads never call this hook. Without the PULL trigger, a 100%
+  // snapshot can park the account before another response header arrives, leaving
+  // an opted-in account unable to trigger its own reset.
+  const onCodexQuotaSaturated = (
+    providerId: "openai-codex",
+    account: string,
+    windows: OAuthQuotaWindow[],
+    capturedAtMs: number,
+    rateLimitReachedType: CodexRateLimitReachedType | null,
+  ): Promise<boolean> =>
+    maybeAutoReset(providerId, account, windows, rateLimitReachedType, capturedAtMs);
 
   // Codex quota-window scrape (providers page Tier 3): parse the `x-codex-*` headers
   // off each Codex reply and snapshot them per account. FAIL-OPEN — a parse/store
@@ -2208,7 +2227,7 @@ export async function buildServer(
     const details = parseCodexQuotaHeaderDetails(headers, nowMs);
     const windows = details.windows;
     if (windows.length === 0) return; // no quota headers on this reply → nothing to store
-    oauthPoolClients.get(providerId)?.setQuotaSnapshot(account, windows, nowMs);
+    applyQuotaSnapshot(providerId, account, windows, nowMs);
     void store.oauthQuota
       .upsert({ providerId, account, windows, capturedAt: nowMs, source: "codex-headers" })
       .catch(() => logger.log("error", "oauth.quota.capture_failed", { provider_id: providerId }));
@@ -2216,10 +2235,14 @@ export async function buildServer(
     // long cooldown the 429 backstop can't know. Fire-and-forget (fail-open).
     const until = windowsToUsageLimit(windows, nowMs);
     if (until !== null) parkAccountOnLimit(providerId, account, until);
-    // Then, if the WEEKLY window is the one that saturated and the account opted in,
-    // auto-consume a reset credit to restore it (guarded by a ≥1h per-account cooldown).
     if (weeklySaturated(windows)) {
-      maybeAutoReset(providerId, account, windows, details.rateLimitReachedType, nowMs);
+      void onCodexQuotaSaturated(
+        "openai-codex",
+        account,
+        windows,
+        nowMs,
+        details.rateLimitReachedType,
+      );
     }
   };
   // Per-account user-message serial queue (issue #93, feature B). ONE long-lived
@@ -3123,6 +3146,7 @@ export async function buildServer(
       // persist, no rebuild. Never touches schedulable.
       applyUsageLimit,
       applyQuotaSnapshot,
+      onCodexQuotaSaturated,
       onOAuthCredentialFailure: markOAuthCredentialFailure,
     });
 
