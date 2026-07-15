@@ -3,14 +3,14 @@ import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
   renameSync,
   statfsSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const MIB = 1024 ** 2;
@@ -264,6 +264,10 @@ export function evaluatePreflight(
   return { safe: reasons.length === 0, reasons };
 }
 
+export function shouldRunPreflight(stageBatches: number, recoveryRequired: boolean): boolean {
+  return stageBatches === 0 || recoveryRequired;
+}
+
 export function evaluateRuntimeSafety(
   sample: SupervisorSample,
   previous: RuntimeSafetyState,
@@ -347,10 +351,9 @@ function runCommand(
       (error, stdout, stderr) => {
         if (error !== null) {
           reject(
-            new Error(
-              `${file} ${args.join(" ")} failed: ${stderr.trim() || error.message}`,
-              { cause: error },
-            ),
+            new Error(`${file} ${args.join(" ")} failed: ${stderr.trim() || error.message}`, {
+              cause: error,
+            }),
           );
           return;
         }
@@ -425,7 +428,10 @@ function parseCheckpoint(path: string, manifest: RepriceManifest): RepriceCheckp
   return checkpoint;
 }
 
-function appliedTotals(manifest: RepriceManifest, nextRowIndex: number): SupervisorStatus["totals"] {
+function appliedTotals(
+  manifest: RepriceManifest,
+  nextRowIndex: number,
+): SupervisorStatus["totals"] {
   let appliedOldUsd = 0;
   let appliedNewUsd = 0;
   for (const row of manifest.rows.slice(0, nextRowIndex)) {
@@ -447,15 +453,17 @@ function backupAggregateSha256(directory: string): string | null {
   if (names.length === 0) return null;
   const aggregate = createHash("sha256");
   for (const name of names) {
-    const digest = createHash("sha256").update(readFileSync(join(directory, name))).digest("hex");
+    const digest = createHash("sha256")
+      .update(readFileSync(join(directory, name)))
+      .digest("hex");
     aggregate.update(`${digest}  ${name}\n`);
   }
   return aggregate.digest("hex");
 }
 
 function loadConfig(): SupervisorConfig {
-  const hostStateDir = process.env.HELM_REPRICE_STATE_DIR ??
-    "/opt/helm-api/data/pricing-reprice-v0.27.5";
+  const hostStateDir =
+    process.env.HELM_REPRICE_STATE_DIR ?? "/opt/helm-api/data/pricing-reprice-v0.27.5";
   return {
     container: process.env.HELM_CONTAINER ?? "helm",
     hostDatabasePath: process.env.HELM_REPRICE_DB ?? "/opt/helm-api/data/helm.db",
@@ -593,7 +601,10 @@ class DockerHostOperations {
     );
   }
 
-  async applyBatch(window: HistoricalWindow, manifest: RepriceManifest): Promise<RepriceCheckpoint> {
+  async applyBatch(
+    window: HistoricalWindow,
+    manifest: RepriceManifest,
+  ): Promise<RepriceCheckpoint> {
     const tool = await this.discoverTool();
     const result = await this.docker(
       [
@@ -662,7 +673,10 @@ class DockerHostOperations {
   }
 }
 
-function windowPaths(config: SupervisorConfig, window: HistoricalWindow): {
+function windowPaths(
+  config: SupervisorConfig,
+  window: HistoricalWindow,
+): {
   manifest: string;
   checkpoint: string;
   backups: string;
@@ -677,7 +691,11 @@ function windowPaths(config: SupervisorConfig, window: HistoricalWindow): {
 function findActiveWindow(
   config: SupervisorConfig,
   windows: readonly HistoricalWindow[],
-): { window: HistoricalWindow; manifest: RepriceManifest | null; checkpoint: RepriceCheckpoint | null } | null {
+): {
+  window: HistoricalWindow;
+  manifest: RepriceManifest | null;
+  checkpoint: RepriceCheckpoint | null;
+} | null {
   for (const window of windows) {
     const paths = windowPaths(config, window);
     if (!existsSync(paths.manifest)) return { window, manifest: null, checkpoint: null };
@@ -688,7 +706,10 @@ function findActiveWindow(
   return null;
 }
 
-function completedWindowCount(config: SupervisorConfig, windows: readonly HistoricalWindow[]): number {
+function completedWindowCount(
+  config: SupervisorConfig,
+  windows: readonly HistoricalWindow[],
+): number {
   let count = 0;
   for (const window of windows) {
     const paths = windowPaths(config, window);
@@ -707,6 +728,7 @@ export async function runSupervisor(config = loadConfig()): Promise<void> {
   let stopping = false;
   let stageBatches = 0;
   let stageStartRowIndex = 0;
+  let recoveryRequired = true;
   let runtimeState: RuntimeSafetyState = {
     highCpuSamples: 0,
     slowHealthSamples: 0,
@@ -745,7 +767,9 @@ export async function runSupervisor(config = loadConfig()): Promise<void> {
     writeStatus({ phase: "complete", completedWindows: windows.length });
     return;
   }
-  runtimeState.baselineRestarts = (await operations.collectSample(new Date().toISOString())).restarts;
+  runtimeState.baselineRestarts = (
+    await operations.collectSample(new Date().toISOString())
+  ).restarts;
 
   while (!stopping) {
     try {
@@ -762,43 +786,51 @@ export async function runSupervisor(config = loadConfig()): Promise<void> {
         return;
       }
 
-      const preflightSamples: SupervisorSample[] = [];
-      while (!stopping) {
-        const since = new Date(Date.now() - 10 * 60_000).toISOString();
-        const sample = await operations.collectSample(since);
-        preflightSamples.push(sample);
-        if (preflightSamples.length > 3) preflightSamples.shift();
-        const preflight = evaluatePreflight(preflightSamples, config.thresholds);
-        writeStatus({
-          phase: "waiting_safety",
-          activeWindow: active.window.name,
-          sample,
-          reasons: preflight.reasons,
-          lastError: null,
-        });
-        if (preflight.safe) {
-          runtimeState = {
-            highCpuSamples: 0,
-            slowHealthSamples: 0,
-            baselineRestarts: sample.restarts,
-          };
-          break;
+      if (shouldRunPreflight(stageBatches, recoveryRequired)) {
+        const preflightSamples: SupervisorSample[] = [];
+        while (!stopping) {
+          const since = new Date(Date.now() - 10 * 60_000).toISOString();
+          const sample = await operations.collectSample(since);
+          preflightSamples.push(sample);
+          if (preflightSamples.length > 3) preflightSamples.shift();
+          const preflight = evaluatePreflight(preflightSamples, config.thresholds);
+          writeStatus({
+            phase: "waiting_safety",
+            activeWindow: active.window.name,
+            sample,
+            reasons: preflight.reasons,
+            lastError: null,
+          });
+          if (preflight.safe) {
+            runtimeState = {
+              highCpuSamples: 0,
+              slowHealthSamples: 0,
+              baselineRestarts: sample.restarts,
+            };
+            recoveryRequired = false;
+            break;
+          }
+          await sleep(preflightSamples.length < 3 ? config.sampleIntervalMs : config.unsafePollMs);
         }
-        await sleep(preflightSamples.length < 3 ? config.sampleIntervalMs : config.unsafePollMs);
+        if (stopping) break;
       }
-      if (stopping) break;
 
       if (active.manifest === null) {
         writeStatus({ phase: "planning", activeWindow: active.window.name, reasons: [] });
         await operations.planWindow(active.window);
         active = findActiveWindow(config, windows);
-        if (active === null || active.manifest === null || active.window.name !== status.activeWindow) {
+        if (
+          active === null ||
+          active.manifest === null ||
+          active.window.name !== status.activeWindow
+        ) {
           continue;
         }
       }
 
       const manifest = active.manifest;
-      let checkpoint = active.checkpoint ??
+      let checkpoint =
+        active.checkpoint ??
         parseCheckpoint(windowPaths(config, active.window).checkpoint, manifest);
       if (stageBatches === 0) stageStartRowIndex = checkpoint.nextRowIndex;
       const sample = await operations.collectSample(new Date(Date.now() - 15_000).toISOString());
@@ -806,6 +838,7 @@ export async function runSupervisor(config = loadConfig()): Promise<void> {
       runtimeState = safety.state;
       if (safety.stop) {
         stageBatches = 0;
+        recoveryRequired = true;
         writeStatus({
           phase: "waiting_safety",
           sample,
@@ -835,12 +868,7 @@ export async function runSupervisor(config = loadConfig()): Promise<void> {
         totals: appliedTotals(manifest, checkpoint.nextRowIndex),
       });
       checkpoint = await operations.applyBatch(active.window, manifest);
-      await operations.verifyRows(
-        active.window,
-        manifest,
-        beforeRowIndex,
-        checkpoint.nextRowIndex,
-      );
+      await operations.verifyRows(active.window, manifest, beforeRowIndex, checkpoint.nextRowIndex);
       stageBatches += 1;
       writeStatus({
         phase: checkpoint.completed ? "cooling" : "applying",
@@ -871,6 +899,7 @@ export async function runSupervisor(config = loadConfig()): Promise<void> {
           await sleep(Math.min(config.unsafePollMs, Math.max(0, cooldownEnd - Date.now())));
         }
         stageBatches = 0;
+        recoveryRequired = true;
         continue;
       }
 
@@ -894,11 +923,13 @@ export async function runSupervisor(config = loadConfig()): Promise<void> {
           await sleep(Math.min(config.unsafePollMs, Math.max(0, cooldownEnd - Date.now())));
         }
         stageBatches = 0;
+        recoveryRequired = true;
         continue;
       }
       await sleep(config.batchDelayMs);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      recoveryRequired = true;
       writeStatus({ phase: "waiting_safety", lastError: message, reasons: [message] });
       await sleep(config.unsafePollMs);
     }
@@ -923,7 +954,9 @@ if (entrypoint === fileURLToPath(import.meta.url)) {
     );
   } else {
     runSupervisor().catch((error: unknown) => {
-      process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+      process.stderr.write(
+        `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
+      );
       process.exitCode = 1;
     });
   }

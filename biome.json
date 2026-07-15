@@ -9,6 +9,7 @@
     "includes": [
       "apps/**/*.ts",
       "packages/**/*.ts",
+      "scripts/ops/**/*.ts",
       "!**/dist",
       "!**/.svelte-kit",
       "!apps/admin",
