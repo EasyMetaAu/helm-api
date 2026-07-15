@@ -22,6 +22,19 @@ export interface TokenUsage {
   inferenceGeo?: string;
 }
 
+// Anthropic can return this sentinel when it did not expose the serving region.
+// It is absence of geography evidence, not a new price region. Keep the raw value
+// in telemetry for provenance, but normalize it at the pricing boundary so live
+// and historical cost calculations use the normal global card.
+export function normalizeInferenceGeoForPricing(
+  value: string | null | undefined,
+): string | undefined {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === undefined || normalized === "" || normalized === "not_available"
+    ? undefined
+    : normalized;
+}
+
 // Compute the USD cost of one attempt/eval from its token usage and the model's
 // pricing. Returns null when pricing is unavailable (entry absent, or either
 // per-MTok rate is null). Absent token counts are treated as 0 (a measured
@@ -156,7 +169,7 @@ export function computeCostUsd(pricing: Pricing | undefined, usage: TokenUsage):
     (cacheWriteUnclassified * cacheWritePerMTok) / 1_000_000 +
     (regularOutput * outputPerMTokUsd) / 1_000_000 +
     (imageOutput * imageOutputPerMTok) / 1_000_000;
-  const inferenceGeo = usage.inferenceGeo?.trim().toLowerCase();
+  const inferenceGeo = normalizeInferenceGeoForPricing(usage.inferenceGeo);
   if (inferenceGeo === undefined) return baseCost;
   const geoMultiplier = pricing.inferenceGeoMultipliers?.[inferenceGeo];
   // A response-confirmed geo without a configured official multiplier is an

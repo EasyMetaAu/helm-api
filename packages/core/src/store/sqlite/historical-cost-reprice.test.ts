@@ -289,6 +289,22 @@ describe("historical cost repricing", () => {
       };
       insertTelemetry(db, { requestId: "us", alias, decision: us });
       insertTelemetry(db, { requestId: "missing-geo", alias });
+      const unavailable = decision(alias, 0.02);
+      unavailable.usage = {
+        prompt_tokens: 1_000,
+        completion_tokens: 100,
+        cached_tokens: 200,
+        cache_creation_tokens: 0,
+        service_tier: null,
+        inference_geo: "not_available",
+        cache_creation_5m_tokens: 0,
+        cache_creation_1h_tokens: 0,
+        audio_prompt_tokens: null,
+        cached_audio_prompt_tokens: null,
+        image_output_tokens: null,
+        billed_cost_usd: null,
+      };
+      insertTelemetry(db, { requestId: "unavailable-geo", alias, decision: unavailable });
       const entry = catalogEntry(alias, {
         inputPerMTokUsd: 2,
         outputPerMTokUsd: 10,
@@ -304,7 +320,7 @@ describe("historical cost repricing", () => {
         toMs: 10_000_000,
       });
       expect(exact.eligible).toBe(1);
-      expect(exact.skippedByReason).toEqual({ missing_inference_geo: 1 });
+      expect(exact.skippedByReason).toEqual({ missing_inference_geo: 2 });
       expect(exact.rows[0]?.newCompletionUsd).toBeCloseTo(0.002904, 12);
       expect(exact.rows[0]?.assumedGlobalInferenceGeo).toBe(false);
 
@@ -313,10 +329,14 @@ describe("historical cost repricing", () => {
         toMs: 10_000_000,
         mode: "best-evidence",
       });
-      expect(bestEvidence.eligible).toBe(2);
-      expect(bestEvidence.assumptions.globalInferenceGeo).toBe(1);
+      expect(bestEvidence.eligible).toBe(3);
+      expect(bestEvidence.assumptions.globalInferenceGeo).toBe(2);
       expect(
         bestEvidence.rows.find((row) => row.requestId === "missing-geo")?.assumedGlobalInferenceGeo,
+      ).toBe(true);
+      expect(
+        bestEvidence.rows.find((row) => row.requestId === "unavailable-geo")
+          ?.assumedGlobalInferenceGeo,
       ).toBe(true);
     } finally {
       db.close();

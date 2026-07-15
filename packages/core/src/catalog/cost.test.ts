@@ -248,6 +248,33 @@ describe("computeCostUsd — token usage × catalog pricing", () => {
     ).toBeNull();
   });
 
+  it("uses the global card when Anthropic reports that inference geo is unavailable", () => {
+    const pricing: Pricing = {
+      inputPerMTokUsd: 5,
+      outputPerMTokUsd: 25,
+      cacheReadPerMTokUsd: 0.5,
+      cacheWritePerMTokUsd: 6.25,
+      inferenceGeoMultipliers: { global: 1, us: 1.1 },
+    };
+
+    expect(
+      computeCostUsd(pricing, {
+        promptTokens: 467_556,
+        cachedPromptTokens: 466_435,
+        cacheCreationPromptTokens: 1_119,
+        completionTokens: 264,
+        inferenceGeo: " NOT_AVAILABLE ",
+      }),
+    ).toBeCloseTo(0.24682125, 12);
+    expect(
+      computeCostUsd(pricing, {
+        promptTokens: 100,
+        completionTokens: 10,
+        inferenceGeo: " ",
+      }),
+    ).toBeCloseTo((100 * 5 + 10 * 25) / 1_000_000, 12);
+  });
+
   it("keeps unsupported Gemini image service tiers unpriced", () => {
     const standardOnlyImage: Pricing = {
       inputPerMTokUsd: 0.5,

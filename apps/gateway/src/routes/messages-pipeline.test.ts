@@ -487,7 +487,7 @@ describe("createMessagesPipeline — native passthrough collect()", () => {
 // (input + cache) and the trailing message_delta (output). Split across odd byte
 // boundaries (NOT frame-aligned) to exercise the cross-chunk frame buffering.
 const NATIVE_SSE_FRAMES = [
-  'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_x","usage":{ "input_tokens":7 ,"cache_read_input_tokens":3,"cache_creation_input_tokens":2}}}\n\n',
+  'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_x","usage":{ "input_tokens":7 ,"cache_read_input_tokens":3,"cache_creation_input_tokens":2,"inference_geo":"not_available"}}}\n\n',
   'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
   'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}\n\n',
   'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" native"}}\n\n',
@@ -550,7 +550,7 @@ describe("createMessagesPipeline — native passthrough streamIR()", () => {
     // JSON.parse→stringify round-trip (which would have canonicalized it).
     const startFrame = frames[0];
     expect(startFrame?.data).toBe(
-      '{"type":"message_start","message":{"id":"msg_x","usage":{ "input_tokens":7 ,"cache_read_input_tokens":3,"cache_creation_input_tokens":2}}}',
+      '{"type":"message_start","message":{"id":"msg_x","usage":{ "input_tokens":7 ,"cache_read_input_tokens":3,"cache_creation_input_tokens":2,"inference_geo":"not_available"}}}',
     );
     // No `type` key — the passthrough path yields {event,data}, NOT the IR event bag.
     expect((frames[0] as unknown as { type?: unknown }).type).toBeUndefined();
@@ -601,6 +601,7 @@ describe("createMessagesPipeline — native passthrough streamIR()", () => {
       completion_tokens: 11,
       cached_tokens: 3,
       cache_creation_tokens: 2,
+      inference_geo: "not_available",
     });
   });
 

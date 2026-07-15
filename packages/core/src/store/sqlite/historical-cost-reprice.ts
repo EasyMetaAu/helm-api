@@ -14,7 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CatalogEntry } from "@helm/shared";
 import Database from "better-sqlite3";
-import { computeCostUsd } from "../../catalog/cost.js";
+import { computeCostUsd, normalizeInferenceGeoForPricing } from "../../catalog/cost.js";
 import { loadRuntimeCatalog } from "../../catalog/load.js";
 
 // Operator-only historical repair tool. Dry-run is the default:
@@ -372,7 +372,7 @@ function classifyPricingAmbiguity(
     pricing.inferenceGeoMultipliers !== undefined &&
     Object.keys(pricing.inferenceGeoMultipliers).length > 0
   ) {
-    const inferenceGeo = usage.inferenceGeo?.trim().toLowerCase();
+    const inferenceGeo = normalizeInferenceGeoForPricing(usage.inferenceGeo);
     if (inferenceGeo !== undefined) {
       if (pricing.inferenceGeoMultipliers[inferenceGeo] === undefined) {
         return answer("unknown_inference_geo");
@@ -510,7 +510,8 @@ export function planHistoricalCostReprice(
       imageOutputTokens: evidence.imageOutputTokens ?? undefined,
       serviceTier: evidence.serviceTier ?? undefined,
       inferenceGeo:
-        evidence.inferenceGeo ?? (ambiguity.assumedGlobalInferenceGeo ? "global" : undefined),
+        normalizeInferenceGeoForPricing(evidence.inferenceGeo) ??
+        (ambiguity.assumedGlobalInferenceGeo ? "global" : undefined),
     };
     const newCompletionUsd = computeCostUsd(entry.pricing, usage);
     if (newCompletionUsd === null) {
