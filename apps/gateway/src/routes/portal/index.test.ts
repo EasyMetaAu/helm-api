@@ -94,6 +94,8 @@ function decision(overrides: Partial<DecisionRecord> = {}): DecisionRecord {
     cost_breakdown: { eval_usd: null, completion_usd: 0.02, total_usd: 0.02 },
     memory: null,
     usage: {
+      measurement: "reported",
+      cost_basis: null,
       prompt_tokens: 10,
       completion_tokens: 5,
       cached_tokens: 0,
@@ -107,6 +109,7 @@ function decision(overrides: Partial<DecisionRecord> = {}): DecisionRecord {
       image_output_tokens: null,
       billed_cost_usd: null,
     },
+    stream_outcome: "completed",
     generation_ms: 300,
     ...overrides,
   };

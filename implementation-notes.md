@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-15 · 终端事件缺失的 Responses 流使用部分估算计费（Protocol streaming / telemetry accounting，docs/05/07，原则 3/5/7/8）
+
+- **终态语义**：provider 已产出首包仍保留成功 attempt，但 Responses 流只有收到 `response.completed` / `response.incomplete` / `response.failed` 才算有上游终态；无终态的自然 EOF 记为 `stream_outcome=truncated`、下游 abort 记为 `client_aborted`，request `final.status` 改为 error，分别使用 `upstream_error` / `client_abort`，不再把部分消费伪装成完整成功。`response.incomplete` 保留其独立终态；provider 明确报告的 usage（包括全 0）永远优先。
+- **估算边界**：只在原生 Responses 流缺少 usage 时，对去除 transport 字段与内嵌 binary/base64 的语义 upstream request，以及实际收到的 output/reasoning/tool-call semantic delta 做 `estimated_partial` 估算。16 KiB 内使用 o200k-harmony，超过后改用既有 UTF-8 bytes/4 确定性估算，避免大上下文在 stream finally 阻塞事件循环；sequence number 去重，同一 semantic channel 的碎片先拼接，done snapshot 与 encrypted/base64 数据不参与。cache、cache creation 与隐藏 reasoning 不猜测，保持 null。估算费用沿现有 catalog `costOf` 计算，并以 `cost_basis=catalog_api_equivalent_estimate` 标记，不能解释为 provider 实际账单。
+- **一致性边界**：同一份部分 usage/cost 同时写入 telemetry usage、成功 provider attempt、key budget 与实际 serving account 的 OAuth usage；每项只结算一次。stream generation window 与 usage 解耦，即使 usage 解析失败也保留 `generation_ms`。registry 使用同一 `stream_outcome`，不再把缺失终态默认成 completed。
+
 ## 2026-07-15 · 历史费用回填改由常驻 supervisor 持续推进（Catalog / telemetry repair operations，docs/07/08，原则 2/3/5/7）
 
 - **执行边界**：一次性 Codex automation 改为 host systemd 常驻 supervisor；它通过非阻塞 `flock` 保证唯一执行者，并把大阶段拆成每次最多 100 行的独立 CLI 进程。每批提交并落盘 checkpoint 后才进入下一批，因此 SIGTERM、容器短暂不可用或 supervisor 重启都只会从原子 checkpoint 恢复，不需要大事务、整库备份或 `kill -9`。
@@ -68,15 +74,9 @@
 - **修复边界**：provider 专用 Chat→Responses 与共享 IR→Responses 两条路径统一把 multipart 工具结果文本编码为 `input_text`；字符串工具结果仍保持字符串，`input_image` 与 `input_file` 保持原 wire shape。助手消息正文继续使用 `output_text`，不扩大成全局 content-part 改写，也不改变 `invalid_request` fallback 语义。
 - **验证**：TDD 红灯同时覆盖 provider、共享 transformer 与真实 Anthropic `tool_result`→Codex Responses 链路；定向 Vitest 绿灯为 2 files / 274 tests。
 
-## 2026-07-13 · Codex 周配额按真实窗口时长识别（OAuth quota / Admin providers / reset credits，docs/04/11，原则 3/5/7）
-
-- **生产证据与根因**：生产 `oauth_quota` 中四个 Codex 账号都出现 `primary + windowMinutes:10080`，截图中的唯一窗口虽显示 `5h`，重置倒计时却是 `6d 22h`。上游不同套餐不再保证 `primary=5h / secondary=7d`，Admin 的位置硬编码因此把真实周配额错标为 5h；同一假设还会让手动/自动 reset-credit 误报周快照不可用。
-- **统一判定**：账号级 Codex 周窗口以 provider 报告的 `windowMinutes >= 10080` 为权威；只有旧 header 快照缺少 duration 且窗口有真实用量时才兼容回退到 `secondary`。带非默认 `limitId` 的 model-scoped 窗口绝不当作账号周配额。Admin 标签同样时长优先（300m→5h、10080m→Weekly）；有意义的缺时长窗口显示中性的 Primary/Secondary，空的已过期占位窗口则直接过滤。
-- **账号边界**：规则完全 plan-agnostic，覆盖 Codex Plus/Pro/Team/Business/Enterprise/Edu 等实际窗口形态，不按套餐名维护分支。Claude 继续使用其 5h/7d keys；Copilot、SuperGrok 与普通 API-key provider 没有可验证的同类 Codex reset-credit 周窗口，不套用本规则或伪造数据。
-- **验证**：共享 predicate、Admin 单周窗口、reset-credit UI、自动重置与持久 guard 均增加 `primary + 10080m` 回归；同时覆盖 `secondary + 300m` 不误判、缺 duration 的 legacy fallback，以及 model-scoped 周窗口隔离。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-13 · Codex 周配额按真实窗口时长识别（OAuth quota / Admin providers / reset credits，docs/04/11，原则 3/5/7）**：账号级 Codex 周窗口以 provider 报告的 `windowMinutes >= 10080` 为权威，旧快照仅在缺 duration 且有真实用量时回退 secondary；Admin、reset-credit 与 model-scoped 隔离共用同一规则。
 - **2026-07-12 · Grok premium fallback 与 Composer 评估边界（Routing / provider evaluation，docs/04/07，原则 2/3/5/6/7）**：移除 official OpenAI/ZenMux 自动付费候选，premium 以已验证的 SuperGrok Grok 4.5 作为订阅 fallback；Composer 因真实 A/B 的空响应与质量不足不进 lane，底层 transport/发现保留，xAI Admin 选择器补 curated 展示但运行时 entitlement 继续 fail-closed。
 - **2026-07-12 · SuperGrok 周配额使用现有 OAuth 读取私有 gRPC-Web credits（OAuth subscription / Admin providers，docs/04/09/11，原则 3/6/7）**：复用现有 xAI OAuth bearer 严格读取 weekly gRPC-Web credits，按账号持久化 quota/cooldown 并以 cache epoch 隔离重连竞态；不保存 Cookie、不混用月度/public billing。
 - **2026-07-12 · SuperGrok/X Premium OAuth 实验性订阅 Provider（OAuth subscription / Responses / Admin providers，docs/04/09/10/11，原则 2/3/6/7/8）**：通过受限 device-code OAuth、加密 token、generic Responses executor 与严格 host/redirect/body-size 边界接入实验性 SuperGrok；动态 entitlement、SSE 聚合、Admin 状态及真实协议矩阵完成验证，Composer 保持 unpriced，Grok 4.5 后续按公开 API 等价费率计 telemetry。

@@ -993,5 +993,14 @@
   "Provider refresh failed: {error}": "プロバイダーの更新に失敗しました：{error}",
   "Provider data refreshed": "プロバイダーデータを更新しました",
   "Provider data refreshed at {time}": "{time} にプロバイダーデータを更新しました",
-  "refresh available again in {duration}": "{duration}後に再度更新できます"
+  "refresh available again in {duration}": "{duration}後に再度更新できます",
+  "API-equivalent": "API 相当",
+  "API-equivalent estimate; subscription has no per-request charge": "API 相当の推定値。サブスクリプションにはリクエスト単位の課金はありません",
+  "Estimated from a partial stream.": "部分的なストリームからの推定値です。",
+  "Provider-reported usage": "プロバイダー報告の使用量",
+  "estimated · partial stream": "推定 · 部分ストリーム",
+  "partial": "部分完了",
+  "client aborted": "クライアントが中止",
+  "truncated": "途中で終了",
+  "incomplete": "未完了"
 }

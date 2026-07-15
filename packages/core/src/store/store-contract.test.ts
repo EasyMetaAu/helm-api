@@ -83,6 +83,8 @@ const drivers: Driver[] = [
 ];
 
 const unreportedUsageDimensions = {
+  measurement: "reported",
+  cost_basis: null,
   prompt_tokens: null,
   completion_tokens: null,
   cached_tokens: null,
@@ -151,6 +153,7 @@ function decision(requestId: string, overrides: DecisionOverrides = {}): Decisio
     cost_breakdown: { eval_usd: null, completion_usd: 0.004, total_usd: 0.004 },
     memory: null,
     usage: null,
+    stream_outcome: null,
     generation_ms: null,
     serving_account: null,
     ...rest,

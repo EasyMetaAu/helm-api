@@ -24,9 +24,11 @@ function item(overrides: Partial<RequestListItem> = {}): RequestListItem {
     final_model: 'claude-x',
     fallback_count: 1,
     status: 'ok',
+    stream_outcome: 'completed',
     latency_ms: 460,
     cost_usd: 0.0123,
     usage: {
+      measurement: 'reported',
       input: 1200,
       output: 340,
       cached: 800,
@@ -100,6 +102,41 @@ describe('RequestsTable variants', () => {
     expect(screen.getByTestId('cell-performance')).toHaveTextContent('1.5min');
   });
 
+  it('shows a partial result and approximate cost for an estimated truncated stream', () => {
+    render(RequestsTable, {
+      items: [
+        item({
+          status: 'error',
+          stream_outcome: 'truncated',
+          usage: { ...item().usage, measurement: 'estimated_partial' },
+        }),
+      ],
+      detailHref,
+    });
+
+    expect(screen.getByTestId('cell-result')).toHaveTextContent(/partial/i);
+    expect(screen.getByTestId('cell-cost')).toHaveTextContent('≈$0.0123');
+    expect(screen.getByTestId('usage-measurement')).toHaveTextContent(/estimated/i);
+  });
+
+  it('keeps an unpriced estimated partial stream unknown instead of showing approximate zero', () => {
+    render(RequestsTable, {
+      items: [
+        item({
+          status: 'error',
+          stream_outcome: 'client_aborted',
+          cost_usd: null,
+          usage: { ...item().usage, measurement: 'estimated_partial' },
+        }),
+      ],
+      detailHref,
+    });
+
+    expect(screen.getByTestId('tokens-cell')).toHaveTextContent('1.2K');
+    expect(screen.getByTestId('cell-cost')).toHaveTextContent('—');
+    expect(screen.getByTestId('cell-cost')).not.toHaveTextContent('≈$0');
+  });
+
   it('keeps the request-list metric columns and hides only Request ID in the dashboard recent variant', () => {
     render(RequestsTable, { items: [item()], detailHref, variant: 'recent' });
 
@@ -139,6 +176,7 @@ describe('RequestsTable variants', () => {
       items: [
         item({
           usage: {
+            measurement: 'unknown',
             input: null,
             output: null,
             cached: null,

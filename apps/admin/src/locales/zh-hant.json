@@ -993,5 +993,14 @@
   "Provider refresh failed: {error}": "提供商重新整理失敗：{error}",
   "Provider data refreshed": "提供商資料已重新整理",
   "Provider data refreshed at {time}": "提供商資料已於 {time} 重新整理",
-  "refresh available again in {duration}": "{duration} 後可再次重新整理"
+  "refresh available again in {duration}": "{duration} 後可再次重新整理",
+  "API-equivalent": "API 等值",
+  "API-equivalent estimate; subscription has no per-request charge": "API 等值估算；訂閱沒有單次請求費用",
+  "Estimated from a partial stream.": "根據部分串流估算。",
+  "Provider-reported usage": "供應商回報的用量",
+  "estimated · partial stream": "估算 · 部分串流",
+  "partial": "部分完成",
+  "client aborted": "用戶端已中止",
+  "truncated": "已截斷",
+  "incomplete": "未完成"
 }

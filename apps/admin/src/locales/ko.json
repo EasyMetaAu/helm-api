@@ -993,5 +993,14 @@
   "Provider refresh failed: {error}": "공급자 새로고침 실패: {error}",
   "Provider data refreshed": "공급자 데이터를 새로고침했습니다",
   "Provider data refreshed at {time}": "{time}에 공급자 데이터를 새로고침했습니다",
-  "refresh available again in {duration}": "{duration} 후 다시 새로고침할 수 있습니다"
+  "refresh available again in {duration}": "{duration} 후 다시 새로고침할 수 있습니다",
+  "API-equivalent": "API 환산",
+  "API-equivalent estimate; subscription has no per-request charge": "API 환산 추정치; 구독은 요청별 비용이 없습니다",
+  "Estimated from a partial stream.": "부분 스트림에서 추정한 값입니다.",
+  "Provider-reported usage": "제공자가 보고한 사용량",
+  "estimated · partial stream": "추정 · 부분 스트림",
+  "partial": "부분 완료",
+  "client aborted": "클라이언트 중단",
+  "truncated": "중간 종료",
+  "incomplete": "미완료"
 }

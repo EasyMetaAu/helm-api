@@ -154,6 +154,13 @@ export const CostBreakdownSchema = z.object({
 // rename this block to anything containing "token" or the whole object is lost to
 // {redacted:true,kind:"object"}. Pinned by redaction.test.ts.
 export const TokenUsageSchema = z.object({
+  // Where the counts came from. A provider terminal usage block is authoritative;
+  // terminal-less Responses streams use an o200k estimate over the semantic upstream
+  // request and the deltas Helm actually received. It is intentionally called
+  // `estimated_partial` because provider-side cache/reasoning accounting is unavailable.
+  // Legacy non-null usage blocks predate this field and were provider-reported.
+  measurement: z.enum(["reported", "estimated_partial"]).default("reported"),
+  cost_basis: z.enum(["catalog_api_equivalent_estimate"]).nullable().default(null),
   prompt_tokens: z.number().int().nonnegative().nullable().default(null),
   completion_tokens: z.number().int().nonnegative().nullable().default(null),
   cached_tokens: z.number().int().nonnegative().nullable().default(null),
@@ -256,6 +263,14 @@ export const DecisionRecordSchema = z.object({
   // `.nullable().default(null)` keeps the core builders and all pre-existing
   // records valid without it.
   usage: TokenUsageSchema.nullable().default(null),
+  // Outcome of the streamed response lifecycle, kept orthogonal to the provider
+  // attempt's binary status. A provider may have successfully produced first-byte
+  // output (`provider_attempts[].status="ok"`) while the request stream later ends
+  // at a client abort or a terminal-less upstream EOF. null for non-stream/legacy.
+  stream_outcome: z
+    .enum(["completed", "incomplete", "failed", "client_aborted", "truncated"])
+    .nullable()
+    .default(null),
   // Wall-clock generation window of the SERVED stream (ms): the span from the
   // first to the last forwarded chunk. Stamped by the GATEWAY post-stream (same
   // place as `usage`, via backfillCompletionCost) — the routing core stays

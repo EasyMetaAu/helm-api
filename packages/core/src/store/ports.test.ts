@@ -363,6 +363,7 @@ describe("Store ports are implementable contracts", () => {
       cost_breakdown: { eval_usd: null, completion_usd: null, total_usd: null },
       memory: null,
       usage: null,
+      stream_outcome: null,
       generation_ms: null,
       serving_account: null,
     } satisfies DecisionRecord;

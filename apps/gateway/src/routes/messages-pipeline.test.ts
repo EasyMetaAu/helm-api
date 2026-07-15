@@ -824,6 +824,88 @@ describe("createMessagesPipeline — openai_responses native passthrough streamI
       prompt_tokens: 12,
       completion_tokens: 9,
       cached_tokens: 4,
+      measurement: "reported",
+    });
+    expect(decisionRef.stream_outcome).toBe("completed");
+  });
+
+  it("estimates and prices a terminal-less partial stream consistently", async () => {
+    const partialFrames = [
+      'event: response.created\ndata: {"type":"response.created","response":{"status":"in_progress"}}\n\n',
+      'event: response.reasoning_summary_text.delta\ndata: {"type":"response.reasoning_summary_text.delta","delta":"Inspecting usage"}\n\n',
+      'event: response.custom_tool_call_input.delta\ndata: {"type":"response.custom_tool_call_input.delta","delta":"{\\"path\\":\\"/tmp/report.json\\"}"}\n\n',
+    ];
+    const stream = (async function* (): AsyncIterable<string> {
+      for (const frame of partialFrames) yield frame;
+    })();
+    const upstreamRequest = JSON.stringify({
+      model: "gpt-5.6-sol",
+      input: [{ role: "user", content: "Inspect this request." }],
+      stream: true,
+    });
+    const decisionRef = passthroughResponsesStreamResult(stream).decision;
+    Object.assign(decisionRef, {
+      final: { status: "ok", model_alias: "openai-codex/gpt-5.6-sol" },
+      cost_breakdown: { total_usd: null, completion_usd: null, eval_usd: null },
+      provider_attempts: [
+        {
+          alias: "openai-codex/gpt-5.6-sol",
+          skipped: false,
+          skip_reason: null,
+          status: "ok",
+          error_class: null,
+          latency_ms: 10,
+          cost_usd: null,
+        },
+      ],
+    });
+    const costOf = vi.fn().mockReturnValue(0.0042);
+    let now = 0;
+    const budget: PipelineBudgetDeps = {
+      gate: { check: async () => ({ overBudget: false }) as never },
+      settle: async () => {},
+      now: () => (now += 5),
+      costOf,
+    };
+    const recordOAuthUsage = vi.fn();
+    const pipeline = createMessagesPipeline(
+      () =>
+        Promise.resolve({
+          ...passthroughResponsesStreamResult(stream),
+          decision: decisionRef,
+          upstreamRequest,
+        }),
+      "openai_responses",
+      undefined,
+      budget,
+      recordOAuthUsage,
+    );
+
+    const run = await pipeline.run(irOf({ stream: true }), IDENTITY, new AbortController().signal);
+    for await (const _ of run.streamIR()) {
+      // drain the clean-but-terminal-less upstream EOF
+    }
+
+    expect(decisionRef.stream_outcome).toBe("truncated");
+    expect(decisionRef.final).toMatchObject({
+      status: "error",
+      error_reason: "upstream_error",
+    });
+    expect(decisionRef.usage).toMatchObject({
+      measurement: "estimated_partial",
+      prompt_tokens: expect.any(Number),
+      completion_tokens: expect.any(Number),
+    });
+    expect(decisionRef.generation_ms).toBeGreaterThan(0);
+    expect(costOf).toHaveBeenCalledWith(
+      "openai-codex/gpt-5.6-sol",
+      expect.objectContaining({ measurement: "estimated_partial" }),
+    );
+    expect(decisionRef.cost_breakdown.completion_usd).toBe(0.0042);
+    expect(decisionRef.provider_attempts[0]?.cost_usd).toBe(0.0042);
+    expect(recordOAuthUsage).toHaveBeenCalledWith(null, "openai-codex/gpt-5.6-sol", {
+      tokens: (decisionRef.usage?.prompt_tokens ?? 0) + (decisionRef.usage?.completion_tokens ?? 0),
+      costUsd: 0.0042,
     });
   });
 

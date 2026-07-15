@@ -695,6 +695,8 @@ describe("runReplay (anthropic_messages / openai_responses / gemini)", () => {
     expect(rec.payloads[0]?.responseJson).toContain("event: response.");
     expect(rec.inserts).toHaveLength(1);
     expect(rec.inserts[0]?.decision.usage).toEqual({
+      measurement: "reported",
+      cost_basis: null,
       prompt_tokens: 3,
       completion_tokens: 1,
       cached_tokens: null,

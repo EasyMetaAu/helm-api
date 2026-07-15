@@ -41,7 +41,9 @@ import {
 } from "./native-memory-inject.js";
 import {
   backfillCompletionCost,
+  createResponsesDeltaAccumulator,
   createStreamGenerationTimer,
+  estimateInterruptedResponsesUsage,
   type StreamUsage,
   tokensFromUsage,
   usageFromAnthropicResponse,
@@ -1012,7 +1014,9 @@ export function createMessagesPipeline(
             // every frame (the last frame wins).
             const isUsageCarrierFrame = (data: string): boolean =>
               protocol === "openai_responses"
-                ? data.includes("response.completed") || data.includes("response.incomplete")
+                ? data.includes("response.completed") ||
+                  data.includes("response.incomplete") ||
+                  data.includes("response.failed")
                 : protocol === "gemini"
                   ? data.includes("usageMetadata")
                   : data.includes("message_start") || data.includes("message_delta");
@@ -1024,6 +1028,10 @@ export function createMessagesPipeline(
             // never retained, only its running concatenation in `assistant.text` which
             // observeOutbound consumes once.
             let usageBuffer = "";
+            // Only semantic token-bearing DELTAS are retained. Done snapshots and
+            // encrypted/base64 payloads are ignored, while fragments are joined
+            // before tokenization so network chunking cannot change the estimate.
+            const responsesDeltas = createResponsesDeltaAccumulator();
             const passthroughAssistant = { text: "" };
             try {
               for await (const frame of splitSSEFrames(passthroughStream)) {
@@ -1036,6 +1044,9 @@ export function createMessagesPipeline(
                   // (stays bounded). Anthropic/Responses need their distinct carriers
                   // appended (input on message_start, output on message_delta / terminal).
                   usageBuffer = protocol === "gemini" ? frame.raw : usageBuffer + frame.raw;
+                }
+                if (protocol === "openai_responses") {
+                  responsesDeltas.observe(frame.data);
                 }
                 if (memory !== undefined) {
                   if (protocol === "openai_responses") {
@@ -1061,14 +1072,38 @@ export function createMessagesPipeline(
               // budget settle, and per-account OAuth usage. All fail-open. The usage
               // extractor matches the inbound protocol (Responses totals on the terminal
               // event; Anthropic split across message_start/message_delta).
-              const nativeUsage =
+              const reportedUsage =
                 protocol === "openai_responses"
                   ? usageFromResponsesSSE(usageBuffer)
                   : protocol === "gemini"
                     ? usageFromGeminiSSE(usageBuffer)
                     : usageFromAnthropicSSE(usageBuffer);
+              // A provider terminal usage block, including explicit zeros, always
+              // wins. Any Responses stream without reported usage falls back to a
+              // partial estimate, including failed/incomplete terminals that omit it.
+              const nativeUsage =
+                reportedUsage ??
+                (protocol === "openai_responses"
+                  ? estimateInterruptedResponsesUsage(
+                      result.upstreamRequest,
+                      responsesDeltas.channels(),
+                      responsesDeltas.overflowBytes(),
+                    )
+                  : null);
               const finalAlias =
                 result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
+              if (protocol === "openai_responses") {
+                const outcome =
+                  responsesDeltas.outcome() ?? (signal.aborted ? "client_aborted" : "truncated");
+                result.decision.stream_outcome = outcome;
+                if (outcome === "client_aborted" || outcome === "truncated") {
+                  result.decision.final = {
+                    ...result.decision.final,
+                    status: "error",
+                    error_reason: outcome === "client_aborted" ? "client_abort" : "upstream_error",
+                  };
+                }
+              }
               if (memory !== undefined) {
                 const memoryObserve = memory.observe;
                 const responseMessages: IRMessage[] =
@@ -1088,20 +1123,22 @@ export function createMessagesPipeline(
                   ),
                 );
               }
-              if (nativeUsage) {
-                try {
-                  const cost =
-                    finalAlias && budget?.costOf ? budget.costOf(finalAlias, nativeUsage) : null;
-                  backfillCompletionCost(
-                    result.decision,
-                    finalAlias,
-                    cost,
-                    nativeUsage,
-                    genTimer.generationMs(),
-                  );
-                } catch {
-                  /* fail-open: leave cost/usage null on any mapping miss */
-                }
+              try {
+                const cost =
+                  nativeUsage && finalAlias && budget?.costOf
+                    ? budget.costOf(finalAlias, nativeUsage)
+                    : null;
+                // Generation time is independent of usage availability: even a
+                // malformed terminal frame must not erase the measured stream span.
+                backfillCompletionCost(
+                  result.decision,
+                  finalAlias,
+                  cost,
+                  nativeUsage,
+                  genTimer.generationMs(),
+                );
+              } catch {
+                /* fail-open: leave cost/usage null on any mapping miss */
               }
               await settleBudget(tokensFromUsage(nativeUsage));
               recordOAuthUsage?.(servingAccount, result.decision.final.model_alias, {
@@ -1207,20 +1244,20 @@ export function createMessagesPipeline(
             // wired costOf. Budget settlement remains gated inside settleBudget().
             const finalAlias =
               result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
-            if (lastUsage) {
-              try {
-                const cost =
-                  finalAlias && budget?.costOf ? budget.costOf(finalAlias, lastUsage) : null;
-                backfillCompletionCost(
-                  result.decision,
-                  finalAlias,
-                  cost,
-                  lastUsage,
-                  genTimer.generationMs(),
-                );
-              } catch {
-                /* fail-open: leave cost/usage null on any mapping miss */
-              }
+            try {
+              const cost =
+                lastUsage && finalAlias && budget?.costOf
+                  ? budget.costOf(finalAlias, lastUsage)
+                  : null;
+              backfillCompletionCost(
+                result.decision,
+                finalAlias,
+                cost,
+                lastUsage,
+                genTimer.generationMs(),
+              );
+            } catch {
+              /* fail-open: leave cost/usage null on any mapping miss */
             }
             await settleBudget(tokensFromUsage(lastUsage));
             // Per-account OAuth usage (providers page Tier 2) — recorded for every

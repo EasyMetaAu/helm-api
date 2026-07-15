@@ -209,6 +209,7 @@ export function buildDecisionRecord(parts: DecisionParts): DecisionRecord {
     // core (like streamed completion cost) — the gateway stamps them post-served
     // via backfillCompletionCost. The builder always emits null.
     usage: null,
+    stream_outcome: null,
     // Served-stream generation window is timed in the GATEWAY (first→last
     // forwarded chunk) and stamped post-stream alongside usage; the routing core
     // is headless about it, so the builder always emits null.
