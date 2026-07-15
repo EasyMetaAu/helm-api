@@ -531,6 +531,17 @@ export interface AdminApiDeps {
     capturedAtMs: number,
     resetCredits?: number | null,
   ) => void;
+  // A fresh Codex upstream PULL is authoritative quota truth, just like response
+  // headers. Notify the runtime after cooldown synchronization so an opted-in 100%
+  // account can auto-reset even if it was parked before another request served.
+  // Cache-only GET routes must never invoke this hook.
+  onCodexQuotaSaturated?: (
+    providerId: "openai-codex",
+    account: string,
+    windows: OAuthQuotaWindow[],
+    capturedAtMs: number,
+    rateLimitReachedType: CodexRateLimitReachedType | null,
+  ) => Promise<boolean>;
   // Durable OAuth credential failure. A refresh 400/401/403 or persistent upstream
   // 401/403 means the account needs reconnecting, not just a short cooldown. The
   // gateway persists that state and rebuilds the pool so admin status and routing agree.
