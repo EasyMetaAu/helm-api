@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-15 · 历史重算兼容旧版 completion-only 顶层费用（Catalog / telemetry repair，docs/07/08，原则 2/5/7）
+
+- **生产根因**：渐进回填在 June 29 manifest 的第 1,580 行 fail-closed；该 legacy telemetry 的 `provider_attempt.cost_usd` 与 `cost_breakdown.completion_usd` 都是 `$0.118735`，`cost_breakdown.total_usd` 是包含输入费用的 `$0.1193894`，但旧版顶层 `telemetry.cost_usd` 仍只保存 completion cost。planner 正确选择 breakdown total 作为 canonical old total，apply guard 却只接受顶层值已等于该 total 的新格式，导致合法旧格式无法应用；剩余 25,269 行只发现 3 行属于此精确形态，且没有其他 unmatched 状态。
+- **兼容边界**：apply 仍优先要求 canonical top-level total；仅当 old completion 与 old total 均非空且不同、顶层值与 attempt 都精确等于 old completion、breakdown completion/total 又分别精确等于 manifest 的 old completion/total 时，才接受 completion-only legacy 状态。任一字段漂移仍 fail-closed；更新后顶层与 breakdown 都统一写入新 canonical total，原行继续由每批 targeted backup 保留。
+- **验证**：TDD 回归先复现 `old values no longer match manifest`，再证明 legacy 行可完成单批更新；原有任意顶层费用冲突测试继续拒绝。生产回填在发布新版本前保持暂停，已提交的 1,500 行与全部微型恢复库另行完整校验。
+
 ## 2026-07-14 · 生产模型官方价格与多模态计费全量校准（Catalog / telemetry / protocol usage，docs/04/05/07/08，原则 1/2/3/5/7/8）
 
 - **生产与数据源边界**：只读核对 `la.atmy.work` 的 `0.27.4 / fd806a3`、bind-mounted `pricing.yaml` / `capabilities.yaml` / `providers.yaml` 与 37 个可路由 alias；价格在启动时载入进程内 catalog，不存在远程价格缓存，`oauth.codex_model_cache` 只保存模型发现/entitlement。官方对照仅使用 OpenAI、Anthropic、Google、DeepSeek、xAI 价格页；动态 `zenmux/auto` / `openrouter/auto`、没有公开费率的 `xai/grok-composer-2.5-fast` 与无固定公开价的 `openai-codex/codex-auto-review` 必须保持 `cost_usd=null`，不得伪造固定价。
@@ -73,16 +79,9 @@
 - **Docker 证据**：授权恢复后账号 `healthy:true` 且同时发现 `grok-4.5` / `grok-composer-2.5-fast`，真实 quota PULL 返回 `7d` 周窗口；三条预检分别真实命中 Composer、direct Grok 和 premium→Grok。授权前 premium 的 Grok 候选以 `provider_unavailable` 跳过并继续由 ZenMux Opus 成功，证明未连接边界 fail-open。测试 key 已全部禁用；容器限制 2 CPU / 2 GiB，结束时 healthy、restartCount 0。
 - **Lanes 模型选择器修复**：xAI 自动模式虽然能通过账号发现参与真实路由，但网络无关的 `/admin/api/models` 投影缺少 xAI picker fallback，导致选择器无 `xai/*` 建议。现将已验证的 `grok-4.5` 与 `grok-composer-2.5-fast` 加入仅供已绑定账号使用的 Admin 投影 fallback；它刻意不进入 core `CURATED_OAUTH_MODELS`，所以真实路由在 xAI `/models` entitlement 发现失败时仍 fail-closed。手动模式可按账号缩窄 allowlist，未连接账号不会凭空出现。
 
-## 2026-07-12 · SuperGrok 周配额使用现有 OAuth 读取私有 gRPC-Web credits（OAuth subscription / Admin providers，docs/04/09/11，原则 3/6/7）
-
-- **协议与认证证据**：grok.com 当前通过 `grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig` 读取消费者订阅 credits；官方 Grok CLI 同时暴露独立的 `/v1/billing` 私有接口。真实账号 A/B 验证确认 Helm 现有 `auth.x.ai` access bearer 可直接调用 credits RPC（无认证为 gRPC `UNAUTHENTICATED`，同一 Helm bearer 成功），因此不保存浏览器 Cookie、不引入 Management Key，也不申请额外 scope。token refresh 和请求继续复用账号代理。
-- **额度语义**：只把 `credit_usage_percent` 与 `current_period.type = WEEKLY`、有效 start/end 归一化成账号级 `7d` window；缺省 proto3 percentage 按 0，超过 100 的上游值原样保留。`/v1/billing` 的 `monthlyLimit/used` 属于另一套月度 billing 语义，绝不冒充周配额；public `api.x.ai` credits 也不参与 SuperGrok quota。
-- **安全与失败语义**：请求固定为 unary gRPC-Web、禁用 redirect、8 秒 timeout、1 MiB Content-Length 与流式双重上限；响应必须严格满足单个 data frame、单个最终 trailer、唯一 `grpc-status: 0` 与 EOF，并校验 protobuf wire type。周周期除 enum 外还必须具有 6–8 天的实际跨度且当前有效；malformed、stale、oversized、非周周期或上游失败均进入 5 分钟正/负缓存并 fail-open，保留旧 snapshot 或显示 `—`，不得影响推理请求。同名账号重连或 logout 成功后递增账号 cache epoch 并删除 durable snapshot；旧身份的并发 PULL 返回时不得写回缓存或存储，避免新身份继承旧 quota/cooldown。Logout 即使在 token 删除后发生设置/配额清理失败，也必须按 durable token truth 重建 live pool，不能让内存 token 继续路由。
-- **路由与存储**：成功 PULL 写入 `source: xai`，同步 durable quota store 与 live pool；100% 账号级周窗口沿用既有 cooldown 规则停到 reset，低于 100% 只作为 `low_risk` / `use_expiring` 的软评分信号。SQLite/Postgres 在 quota PULL 前先收到 xAI 429 时，synthetic cooldown row 也必须标记 `xai`，不能伪装成 `codex-headers`。无需数据库迁移，`source` 底层仍为 text。
-- **验证**：parser/shared/Gateway route/seam/SQLite/Postgres 定向测试共 197 个通过（含严格 trailer、周期跨度、并发身份切换、durable quota 生命周期与 logout partial-failure 回归）；真实已连接 xAI 账号通过现有 Helm bearer 返回并解析出 `7d / 0% / 10080m` 与准确 reset timestamp。workspace build、typecheck、Biome 全通过。完整 355-file Vitest 并发运行中 14 个无关 PGlite case 因 15 秒资源竞争超时；对应 4 个失败文件随后单 worker 重跑 161 个测试全部通过。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-12 · SuperGrok 周配额使用现有 OAuth 读取私有 gRPC-Web credits（OAuth subscription / Admin providers，docs/04/09/11，原则 3/6/7）**：复用现有 xAI OAuth bearer 严格读取 weekly gRPC-Web credits，按账号持久化 quota/cooldown 并以 cache epoch 隔离重连竞态；不保存 Cookie、不混用月度/public billing。
 - **2026-07-12 · SuperGrok/X Premium OAuth 实验性订阅 Provider（OAuth subscription / Responses / Admin providers，docs/04/09/10/11，原则 2/3/6/7/8）**：通过受限 device-code OAuth、加密 token、generic Responses executor 与严格 host/redirect/body-size 边界接入实验性 SuperGrok；动态 entitlement、SSE 聚合、Admin 状态及真实协议矩阵完成验证，Composer 保持 unpriced，Grok 4.5 后续按公开 API 等价费率计 telemetry。
 - **2026-07-11 · 上下文链耗尽恢复 Claude CLI 自动压缩信号（Provider execution / protocol errors，docs/04/05/07，原则 3/5/7/8）**：候选级 context overflow 继续 fail-open fallback；仅上下文/能力 skip 的整链耗尽统一返回 Claude CLI 可识别的 `invalid_request / 400` 与精确 token 上限消息，混合真实 provider failure 保留原分类。
 - **2026-07-11 · Subscription Provider 自动模型展示使用账号级发现与共享缓存（OAuth subscription / Admin providers，docs/04/11，原则 1/3/6）**：Providers 表格与 Manage 弹窗改用账号实时发现；非 Codex 使用共享进程缓存与 last-known-good，手动 allowlist、Codex entitlement 和运行时 curated fail-open 边界保持不变。

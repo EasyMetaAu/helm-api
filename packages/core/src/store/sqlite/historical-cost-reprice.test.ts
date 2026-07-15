@@ -583,6 +583,81 @@ describe("historical cost repricing", () => {
     }
   });
 
+  it("accepts a legacy completion-only top-level cost when the breakdown preserves the total", () => {
+    const db = openFixture();
+    const dir = mkdtempSync(join(tmpdir(), "helm-cost-reprice-legacy-total-"));
+    dirs.push(dir);
+    try {
+      const alias = "deepseek/deepseek-v4-pro";
+      insertTelemetry(db, { requestId: "legacy", alias, costUsd: 0.02 });
+      const entry = catalogEntry(alias, {
+        inputPerMTokUsd: 0.435,
+        outputPerMTokUsd: 0.87,
+        cacheReadPerMTokUsd: 0.003625,
+        cacheWritePerMTokUsd: null,
+      });
+      const manifest = planHistoricalCostReprice(db, new Map([[alias, entry]]), "pricing-sha", {
+        fromMs: 0,
+        toMs: 10_000_000,
+      });
+
+      expect(manifest.rows[0]?.oldCompletionUsd).toBe(0.02);
+      expect(manifest.rows[0]?.oldTotalUsd).toBe(0.021);
+      const applied = applyHistoricalCostRepriceManifest(db, manifest, {
+        checkpointPath: join(dir, "progress.json"),
+        backupDir: join(dir, "backups"),
+        batchSize: 1,
+        maxBatches: 1,
+        batchDelayMs: 0,
+      });
+
+      expect(applied.completed).toBe(true);
+      expect(applied.appliedRows).toBe(1);
+      expect(db.prepare("SELECT cost_usd FROM telemetry").pluck().get()).toBeCloseTo(
+        manifest.rows[0]?.newTotalUsd ?? 0,
+        12,
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  it("rejects a legacy completion-only top-level cost when its breakdown total drifts", () => {
+    const db = openFixture();
+    const dir = mkdtempSync(join(tmpdir(), "helm-cost-reprice-legacy-conflict-"));
+    dirs.push(dir);
+    try {
+      const alias = "deepseek/deepseek-v4-pro";
+      insertTelemetry(db, { requestId: "legacy-conflict", alias, costUsd: 0.02 });
+      const entry = catalogEntry(alias, {
+        inputPerMTokUsd: 0.435,
+        outputPerMTokUsd: 0.87,
+        cacheReadPerMTokUsd: 0.003625,
+        cacheWritePerMTokUsd: null,
+      });
+      const manifest = planHistoricalCostReprice(db, new Map([[alias, entry]]), "pricing-sha", {
+        fromMs: 0,
+        toMs: 10_000_000,
+      });
+      const stored = db.prepare("SELECT decision_json FROM telemetry").pluck().get() as string;
+      const changed = JSON.parse(stored) as Record<string, unknown>;
+      (changed.cost_breakdown as Record<string, unknown>).total_usd = 9;
+      db.prepare("UPDATE telemetry SET decision_json = ?").run(JSON.stringify(changed));
+
+      expect(() =>
+        applyHistoricalCostRepriceManifest(db, manifest, {
+          checkpointPath: join(dir, "progress.json"),
+          backupDir: join(dir, "backups"),
+          batchSize: 1,
+          maxBatches: 1,
+          batchDelayMs: 0,
+        }),
+      ).toThrow("old values no longer match manifest: legacy-conflict");
+    } finally {
+      db.close();
+    }
+  });
+
   it("rejects a row whose old values no longer match the manifest", () => {
     const db = openFixture();
     const dir = mkdtempSync(join(tmpdir(), "helm-cost-reprice-conflict-"));
