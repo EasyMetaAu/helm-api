@@ -8,6 +8,7 @@ import {
   applyHistoricalCostReprice,
   applyHistoricalCostRepriceManifest,
   planHistoricalCostReprice,
+  verifyHistoricalCostRepriceManifest,
 } from "./historical-cost-reprice.js";
 
 const dirs: string[] = [];
@@ -457,6 +458,65 @@ describe("historical cost repricing", () => {
           backup.close();
         }
       }
+    } finally {
+      db.close();
+    }
+  });
+
+  it("verifies only the requested applied manifest slice without mutating telemetry", () => {
+    const db = openFixture();
+    const dir = mkdtempSync(join(tmpdir(), "helm-cost-reprice-verify-"));
+    dirs.push(dir);
+    try {
+      const alias = "anthropic/claude-sonnet-5";
+      for (let index = 0; index < 3; index += 1) {
+        insertTelemetry(db, { requestId: `verify-${index}`, alias });
+      }
+      const manifest = planHistoricalCostReprice(
+        db,
+        new Map([
+          [
+            alias,
+            catalogEntry(alias, {
+              inputPerMTokUsd: 2,
+              outputPerMTokUsd: 10,
+              cacheReadPerMTokUsd: 0.2,
+              cacheWritePerMTokUsd: 2.5,
+              cacheWrite1hPerMTokUsd: 4,
+            }),
+          ],
+        ]),
+        "pricing-sha",
+        { fromMs: 0, toMs: 10_000_000 },
+      );
+
+      expect(() =>
+        verifyHistoricalCostRepriceManifest(db, manifest, {
+          startRowIndex: 0,
+          endRowIndex: 1,
+        }),
+      ).toThrow("manifest row is not applied");
+
+      applyHistoricalCostRepriceManifest(db, manifest, {
+        checkpointPath: join(dir, "progress.json"),
+        backupDir: join(dir, "backups"),
+        batchSize: 2,
+        maxBatches: 1,
+        batchDelayMs: 0,
+      });
+
+      expect(
+        verifyHistoricalCostRepriceManifest(db, manifest, {
+          startRowIndex: 0,
+          endRowIndex: 2,
+        }),
+      ).toEqual({ verifiedRows: 2, totalUsd: expect.any(Number) });
+      expect(() =>
+        verifyHistoricalCostRepriceManifest(db, manifest, {
+          startRowIndex: 0,
+          endRowIndex: 3,
+        }),
+      ).toThrow("manifest row is not applied");
     } finally {
       db.close();
     }

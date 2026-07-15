@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-15 · 历史费用回填改由常驻 supervisor 持续推进（Catalog / telemetry repair operations，docs/07/08，原则 2/3/5/7）
+
+- **执行边界**：一次性 Codex automation 改为 host systemd 常驻 supervisor；它通过非阻塞 `flock` 保证唯一执行者，并把大阶段拆成每次最多 100 行的独立 CLI 进程。每批提交并落盘 checkpoint 后才进入下一批，因此 SIGTERM、容器短暂不可用或 supervisor 重启都只会从原子 checkpoint 恢复，不需要大事务、整库备份或 `kill -9`。
+- **资源控制**：启动前必须连续取得 3 个有余量样本；运行中持续检查 host load/MemAvailable、Helm CPU/内存、health 延迟、WAL、磁盘、restart/OOM 与结构化 5xx/timeout/`SQLITE_BUSY`。硬阈值触发后 supervisor 留在 `waiting_safety` 并自动重试，不把辅助回填失败扩散为网关故障；每 5,000 行强制至少冷却 5 分钟。固定截止点为 `2026-07-15T13:28:46+08:00`，不追逐持续增长的新流量。
+- **验证与可观测性**：`pricing:reprice` 新增只读 manifest slice verifier，逐批验证 telemetry 顶层总价、attempt completion、breakdown、alias/status/timestamp 全部已成为 manifest new state；窗口完成后再全量验证。supervisor 原子写入 `supervisor.status.json`，记录 phase、窗口/checkpoint、最近指标、费用 delta、错误与备份聚合哈希；Codex 定时任务部署后只读该状态并汇报，不再直接写生产数据库。manifest 仍按 UTC 日窗、`best-evidence`、固定 pricing/plan hash 依次生成，歧义行保持不变。
+
 ## 2026-07-15 · 历史重算兼容旧版 completion-only 顶层费用（Catalog / telemetry repair，docs/07/08，原则 2/5/7）
 
 - **生产根因**：渐进回填在 June 29 manifest 的第 1,580 行 fail-closed；该 legacy telemetry 的 `provider_attempt.cost_usd` 与 `cost_breakdown.completion_usd` 都是 `$0.118735`，`cost_breakdown.total_usd` 是包含输入费用的 `$0.1193894`，但旧版顶层 `telemetry.cost_usd` 仍只保存 completion cost。planner 正确选择 breakdown total 作为 canonical old total，apply guard 却只接受顶层值已等于该 total 的新格式，导致合法旧格式无法应用；剩余 25,269 行只发现 3 行属于此精确形态，且没有其他 unmatched 状态。
@@ -69,18 +75,9 @@
 - **账号边界**：规则完全 plan-agnostic，覆盖 Codex Plus/Pro/Team/Business/Enterprise/Edu 等实际窗口形态，不按套餐名维护分支。Claude 继续使用其 5h/7d keys；Copilot、SuperGrok 与普通 API-key provider 没有可验证的同类 Codex reset-credit 周窗口，不套用本规则或伪造数据。
 - **验证**：共享 predicate、Admin 单周窗口、reset-credit UI、自动重置与持久 guard 均增加 `primary + 10080m` 回归；同时覆盖 `secondary + 300m` 不误判、缺 duration 的 legacy fallback，以及 model-scoped 周窗口隔离。
 
-## 2026-07-12 · Grok premium fallback 与 Composer 评估边界（Routing / provider evaluation，docs/04/07，原则 2/3/5/6/7）
-
-- **移除 official OpenAI 付费 lane 候选**：所有 `openai/gpt-*` 从 shipped lanes 删除，只保留 provider、能力与价格定义供显式 custom-model 使用；GPT vendor lanes 在 Codex subscription 不可用时进入通用订阅/静态 fallback，不再自动触发 official OpenAI 账单。`gpt-image` 改由 ZenMux relay 的 `gpt-image-2` 领衔，official Images API 同样不再被 lane 自动选择。
-- **Vision 订阅限定**：`vision` 改为 Codex Terra → Grok 4.5 → Claude Sonnet 5 → Claude Opus 4.8，全部为订阅 provider；`zenmux-vertex/gemini-3.5-flash` 从该 lane 移除，但 dedicated `gemini-flash` vendor lane 与底层 provider/catalog 保留供显式 Gemini 请求。链使用 concrete aliases，不再隐式展开 `premium`。
-- **路由调整**：`premium` 在 Claude Opus 前加入 `xai/grok-4.5`，使已连接且健康的 SuperGrok 账号吸收原本进入 Opus 的 fallback 流量；未连接、park 或 provider failure 继续 fail-open。Haiku 改为 Anthropic OAuth → economy，不再自动使用 ZenMux Haiku；GPT-5.5 改为 Codex GPT-5.5 → premium，不再自动使用 `zenmux/gpt-5.5`；GPT-5.4 继续由真实 Codex GPT-5.4 领衔。`zenmux-anthropic/claude-opus-4.8` 同样只从 lanes 移除，所有被移除的 provider/catalog 定义仍保留供显式调用。
-- **Composer 边界**：真实 A/B 暴露 200 + stop + 空正文与质量不足后，不进入 economy，也不再保留独立 canary lane；底层 OAuth 模型发现与 transport 兼容仍保留，避免把一次路由决策扩大成 provider 协议删除。
-- **真实 A/B**：本地 Docker 使用同一账号、总并发 2，Composer 与 Grok 4.5 各执行 30 个相同任务，覆盖 exact/factual/coding/long-context/speed/tool。Composer HTTP/模型命中 30/30、SSE `[DONE]` 30/30、工具参数 4/4、长上下文 6/6、长输出 TPS 中位数约 197，但事实仅 2/5、编码仅 1/4，6 次出现 200 + stop + 空正文，总质量 24/30（80%），可见 TTFT p95 约 1.59s；未达到 economy 晋升门槛。Grok 4.5 模型命中 29/30、质量 28/30、工具 4/4、长上下文 6/6、长输出 TPS 中位数约 138，但出现一次 504，成功率 96.7%、可见 TTFT p95 约 22.9s；速度达标但可靠性未达到 99%，因此只保留 premium fallback，不进入 balanced 或 primary。
-- **Docker 证据**：授权恢复后账号 `healthy:true` 且同时发现 `grok-4.5` / `grok-composer-2.5-fast`，真实 quota PULL 返回 `7d` 周窗口；三条预检分别真实命中 Composer、direct Grok 和 premium→Grok。授权前 premium 的 Grok 候选以 `provider_unavailable` 跳过并继续由 ZenMux Opus 成功，证明未连接边界 fail-open。测试 key 已全部禁用；容器限制 2 CPU / 2 GiB，结束时 healthy、restartCount 0。
-- **Lanes 模型选择器修复**：xAI 自动模式虽然能通过账号发现参与真实路由，但网络无关的 `/admin/api/models` 投影缺少 xAI picker fallback，导致选择器无 `xai/*` 建议。现将已验证的 `grok-4.5` 与 `grok-composer-2.5-fast` 加入仅供已绑定账号使用的 Admin 投影 fallback；它刻意不进入 core `CURATED_OAUTH_MODELS`，所以真实路由在 xAI `/models` entitlement 发现失败时仍 fail-closed。手动模式可按账号缩窄 allowlist，未连接账号不会凭空出现。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-12 · Grok premium fallback 与 Composer 评估边界（Routing / provider evaluation，docs/04/07，原则 2/3/5/6/7）**：移除 official OpenAI/ZenMux 自动付费候选，premium 以已验证的 SuperGrok Grok 4.5 作为订阅 fallback；Composer 因真实 A/B 的空响应与质量不足不进 lane，底层 transport/发现保留，xAI Admin 选择器补 curated 展示但运行时 entitlement 继续 fail-closed。
 - **2026-07-12 · SuperGrok 周配额使用现有 OAuth 读取私有 gRPC-Web credits（OAuth subscription / Admin providers，docs/04/09/11，原则 3/6/7）**：复用现有 xAI OAuth bearer 严格读取 weekly gRPC-Web credits，按账号持久化 quota/cooldown 并以 cache epoch 隔离重连竞态；不保存 Cookie、不混用月度/public billing。
 - **2026-07-12 · SuperGrok/X Premium OAuth 实验性订阅 Provider（OAuth subscription / Responses / Admin providers，docs/04/09/10/11，原则 2/3/6/7/8）**：通过受限 device-code OAuth、加密 token、generic Responses executor 与严格 host/redirect/body-size 边界接入实验性 SuperGrok；动态 entitlement、SSE 聚合、Admin 状态及真实协议矩阵完成验证，Composer 保持 unpriced，Grok 4.5 后续按公开 API 等价费率计 telemetry。
 - **2026-07-11 · 上下文链耗尽恢复 Claude CLI 自动压缩信号（Provider execution / protocol errors，docs/04/05/07，原则 3/5/7/8）**：候选级 context overflow 继续 fail-open fallback；仅上下文/能力 skip 的整链耗尽统一返回 Claude CLI 可识别的 `invalid_request / 400` 与精确 token 上限消息，混合真实 provider failure 保留原分类。
