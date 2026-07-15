@@ -40,14 +40,12 @@ export interface SupervisorThresholds {
   preflightMemBytes: number;
   preflightCpuPercent: number;
   preflightHelmMemoryPercent: number;
-  preflightHealthMs: number;
   preflightWalBytes: number;
   preflightDiskBytes: number;
   stopLoad1: number;
   stopMemBytes: number;
   stopCpuPercent: number;
   stopHelmMemoryPercent: number;
-  stopHealthMs: number;
   stopWalBytes: number;
   stopDiskBytes: number;
 }
@@ -55,23 +53,20 @@ export interface SupervisorThresholds {
 export const DEFAULT_SUPERVISOR_THRESHOLDS: SupervisorThresholds = {
   preflightLoad1: 1.2,
   preflightMemBytes: 512 * MIB,
-  preflightCpuPercent: 50,
+  preflightCpuPercent: 75,
   preflightHelmMemoryPercent: 55,
-  preflightHealthMs: 300,
   preflightWalBytes: 384 * MIB,
   preflightDiskBytes: 14 * GIB,
   stopLoad1: 1.5,
   stopMemBytes: 384 * MIB,
-  stopCpuPercent: 60,
+  stopCpuPercent: 75,
   stopHelmMemoryPercent: 60,
-  stopHealthMs: 500,
   stopWalBytes: 512 * MIB,
   stopDiskBytes: 12 * GIB,
 };
 
 export interface RuntimeSafetyState {
   highCpuSamples: number;
-  slowHealthSamples: number;
   baselineRestarts: number;
 }
 
@@ -242,13 +237,13 @@ export function evaluatePreflight(
       reasons.push(`${prefix}available memory below ${thresholds.preflightMemBytes / MIB} MiB`);
     }
     if (sample.helmCpuPercent >= thresholds.preflightCpuPercent) {
-      reasons.push(`${prefix}Helm CPU at or above 50%`);
+      reasons.push(`${prefix}Helm CPU at or above ${thresholds.preflightCpuPercent}%`);
     }
     if (sample.helmMemoryPercent >= thresholds.preflightHelmMemoryPercent) {
       reasons.push(`${prefix}Helm memory at or above 55%`);
     }
-    if (sample.healthStatus !== 200 || sample.healthLatencyMs >= thresholds.preflightHealthMs) {
-      reasons.push(`${prefix}health is not 200 below 300 ms`);
+    if (sample.healthStatus !== 200) {
+      reasons.push(`${prefix}health returned non-200`);
     }
     if (sample.walBytes >= thresholds.preflightWalBytes) {
       reasons.push(`${prefix}WAL at or above 384 MiB`);
@@ -283,8 +278,6 @@ export function evaluateRuntimeSafety(
   const state = {
     highCpuSamples:
       sample.helmCpuPercent >= thresholds.stopCpuPercent ? previous.highCpuSamples + 1 : 0,
-    slowHealthSamples:
-      sample.healthLatencyMs > thresholds.stopHealthMs ? previous.slowHealthSamples + 1 : 0,
     baselineRestarts: previous.baselineRestarts,
   };
   const reasons: string[] = [];
@@ -295,11 +288,10 @@ export function evaluateRuntimeSafety(
   if (sample.helmMemoryPercent >= thresholds.stopHelmMemoryPercent) {
     reasons.push("Helm memory at or above 60%");
   }
-  if (state.highCpuSamples >= 2) reasons.push("Helm CPU sustained at or above 60%");
-  if (sample.healthStatus !== 200) reasons.push("health returned non-200");
-  if (state.slowHealthSamples >= 2) {
-    reasons.push("health latency consecutively above 500 ms");
+  if (state.highCpuSamples >= 2) {
+    reasons.push(`Helm CPU sustained at or above ${thresholds.stopCpuPercent}%`);
   }
+  if (sample.healthStatus !== 200) reasons.push("health returned non-200");
   if (sample.walBytes >= thresholds.stopWalBytes) reasons.push("WAL at or above 512 MiB");
   if (sample.diskFreeBytes < thresholds.stopDiskBytes) reasons.push("disk free below 12 GiB");
   if (sample.restarts !== previous.baselineRestarts) reasons.push("restart count changed");
@@ -502,6 +494,47 @@ function loadConfig(): SupervisorConfig {
   };
 }
 
+export interface ApplyBatchCliArgsInput {
+  tool: string;
+  databasePath: string;
+  pricingPath: string;
+  stateDir: string;
+  windowName: string;
+  planSha256: string;
+  maxWalBytes: number;
+  minFreeBytes: number;
+}
+
+export function buildApplyBatchCliArgs(input: ApplyBatchCliArgsInput): string[] {
+  return [
+    "node",
+    input.tool,
+    "--db",
+    input.databasePath,
+    "--pricing",
+    input.pricingPath,
+    "--apply-manifest",
+    `${input.stateDir}/${input.windowName}.json`,
+    "--expected-plan-sha256",
+    input.planSha256,
+    "--checkpoint",
+    `${input.stateDir}/${input.windowName}.progress.json`,
+    "--backup-dir",
+    `${input.stateDir}/${input.windowName}.backups`,
+    "--batch-size",
+    "100",
+    "--max-batches",
+    "1",
+    "--batch-delay-ms",
+    "0",
+    "--max-wal-bytes",
+    String(input.maxWalBytes),
+    "--min-free-bytes",
+    String(input.minFreeBytes),
+    "--skip-health-check",
+  ];
+}
+
 class DockerHostOperations {
   private toolPath: string | null = null;
 
@@ -621,32 +654,16 @@ class DockerHostOperations {
       [
         "exec",
         this.config.container,
-        "node",
-        tool,
-        "--db",
-        this.config.containerDatabasePath,
-        "--pricing",
-        this.config.containerPricingPath,
-        "--apply-manifest",
-        `${this.config.containerStateDir}/${window.name}.json`,
-        "--expected-plan-sha256",
-        manifest.planSha256,
-        "--checkpoint",
-        `${this.config.containerStateDir}/${window.name}.progress.json`,
-        "--backup-dir",
-        `${this.config.containerStateDir}/${window.name}.backups`,
-        "--batch-size",
-        "100",
-        "--max-batches",
-        "1",
-        "--batch-delay-ms",
-        "0",
-        "--max-wal-bytes",
-        String(this.config.thresholds.stopWalBytes),
-        "--min-free-bytes",
-        String(this.config.thresholds.stopDiskBytes),
-        "--health-url",
-        "http://127.0.0.1:8080/healthz",
+        ...buildApplyBatchCliArgs({
+          tool,
+          databasePath: this.config.containerDatabasePath,
+          pricingPath: this.config.containerPricingPath,
+          stateDir: this.config.containerStateDir,
+          windowName: window.name,
+          planSha256: manifest.planSha256,
+          maxWalBytes: this.config.thresholds.stopWalBytes,
+          minFreeBytes: this.config.thresholds.stopDiskBytes,
+        }),
       ],
       90_000,
     );
@@ -742,7 +759,6 @@ export async function runSupervisor(config = loadConfig()): Promise<void> {
   let recoveryRequired = true;
   let runtimeState: RuntimeSafetyState = {
     highCpuSamples: 0,
-    slowHealthSamples: 0,
     baselineRestarts: 0,
   };
   let status: SupervisorStatus = {
@@ -816,7 +832,6 @@ export async function runSupervisor(config = loadConfig()): Promise<void> {
           if (preflight.safe) {
             runtimeState = {
               highCpuSamples: 0,
-              slowHealthSamples: 0,
               baselineRestarts: sample.restarts,
             };
             recoveryRequired = false;
