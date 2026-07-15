@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_SUPERVISOR_THRESHOLDS,
   buildUtcWindows,
+  DEFAULT_SUPERVISOR_THRESHOLDS,
   evaluatePreflight,
   evaluateRuntimeSafety,
   parseStructuredLogSignals,
   type SupervisorSample,
+  shouldRunPreflight,
 } from "./historical-reprice-supervisor.js";
 
 function healthySample(overrides: Partial<SupervisorSample> = {}): SupervisorSample {
@@ -77,10 +78,7 @@ describe("historical reprice supervisor", () => {
     expect(firstCpu.stop).toBe(false);
     expect(firstCpu.state.highCpuSamples).toBe(1);
 
-    const secondCpu = evaluateRuntimeSafety(
-      healthySample({ helmCpuPercent: 61 }),
-      firstCpu.state,
-    );
+    const secondCpu = evaluateRuntimeSafety(healthySample({ helmCpuPercent: 61 }), firstCpu.state);
     expect(secondCpu.stop).toBe(true);
     expect(secondCpu.reasons).toContain("Helm CPU sustained at or above 60%");
 
@@ -122,5 +120,12 @@ describe("historical reprice supervisor", () => {
     expect(DEFAULT_SUPERVISOR_THRESHOLDS.preflightDiskBytes).toBeGreaterThan(
       DEFAULT_SUPERVISOR_THRESHOLDS.stopDiskBytes,
     );
+  });
+
+  it("runs preflight once per stage instead of before every atomic batch", () => {
+    expect(shouldRunPreflight(0, false)).toBe(true);
+    expect(shouldRunPreflight(1, false)).toBe(false);
+    expect(shouldRunPreflight(49, false)).toBe(false);
+    expect(shouldRunPreflight(12, true)).toBe(true);
   });
 });
