@@ -52,6 +52,7 @@ function decision(requestId: string, overrides: Partial<DecisionRecord> = {}): D
     cost_breakdown: { eval_usd: null, completion_usd: 0.004, total_usd: 0.004 },
     memory: null,
     usage: null,
+    stream_outcome: null,
     generation_ms: null,
     serving_account: null,
     ...overrides,
