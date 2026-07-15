@@ -707,7 +707,7 @@
       await invalidateAll();
       resetNotice =
         result.outcome === 'alreadyRedeemed'
-          ? $t('Reset credit was already redeemed')
+          ? $t('Reset completed successfully')
           : result.windowsReset != null
             ? $t('Reset {n} window(s)', { n: result.windowsReset })
             : $t('Reset limit consumed');

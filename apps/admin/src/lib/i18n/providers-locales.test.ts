@@ -31,7 +31,7 @@ const providerPageKeys = [
   'Workspace usage limit reached',
   'No rate-limit window needed resetting',
   'Unexpected reset-credit outcome',
-  'Reset credit was already redeemed',
+  'Reset completed successfully',
   'Primary',
   'Secondary',
   'ChatGPT account ID',

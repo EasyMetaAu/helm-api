@@ -969,7 +969,7 @@
   "Only these models are exposed to Lanes. Add, edit, or remove ids, or pull the latest remote catalog into the list.": "Only these models are exposed to Lanes. Add, edit, or remove ids, or pull the latest remote catalog into the list.",
   "Plan: {plan}": "Plan: {plan}",
   "Rate limit reached": "Rate limit reached",
-  "Reset credit was already redeemed": "Reset credit was already redeemed",
+  "Reset completed successfully": "Reset completed successfully",
   "This limit cannot be restored with a Codex reset credit": "This limit cannot be restored with a Codex reset credit",
   "Unexpected reset-credit outcome": "Unexpected reset-credit outcome",
   "Use an explicit model list. New remote models are not added until you choose them.": "Use an explicit model list. New remote models are not added until you choose them.",

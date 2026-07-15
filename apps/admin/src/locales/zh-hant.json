@@ -969,7 +969,7 @@
   "Only these models are exposed to Lanes. Add, edit, or remove ids, or pull the latest remote catalog into the list.": "僅向 Lanes 公開這些模型。可新增、編輯或移除 ID，也可將最新遠端目錄拉取到清單中。",
   "Plan: {plan}": "方案：{plan}",
   "Rate limit reached": "已達速率限制",
-  "Reset credit was already redeemed": "重設額度已兌換",
+  "Reset completed successfully": "重設已成功完成",
   "This limit cannot be restored with a Codex reset credit": "此限制無法透過 Codex 重設額度恢復",
   "Unexpected reset-credit outcome": "重設額度傳回非預期結果",
   "Use an explicit model list. New remote models are not added until you choose them.": "使用明確的模型清單。新的遠端模型只有在你選取後才會加入。",

@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-07-15 · Codex 已重置冷却在 Admin 投影为成功（Admin providers UI，docs/11，原则 3/5/7）
+
+- **UI 边界**：Gateway 与 reset-credit guard 保持不变；Admin 客户端仅把本地 `429 + reset_credit_cooldown_active` 解释为“该账号最近已经完成重置”，复用既有 `alreadyRedeemed` 成功路径并显示“重置已成功完成”。该投影不会重试、不会产生第二次 fetch，也不会再次请求 OpenAI。
+- **错误边界**：进行中的 `reset_credit_reservation_active`、配额/资格问题、其他 429、guard 故障与真实上游失败继续作为错误显示，不能因本次 UI 修正被吞掉。定向测试同时断言 cooldown 只调用一次 fetch、相邻 429 仍拒绝，以及 Providers 成功状态不出现 error alert。
+
 ## 2026-07-15 · Codex 配额 PULL 饱和后触发自动重置（OAuth quota / reset credits，docs/04/11，原则 3/5/7）
 
 - **生产根因**：账号已启用 `autoReset`、仍有 reset credit，显式刷新也从 Codex PULL 得到账号级周窗口 100%；但刷新链只持久化 snapshot、同步 live pool 并停车，自动重置仅由后续响应头 PUSH 触发。账号一旦因 PULL 饱和而停车，可能不再获得下一次响应头，形成“缓存页面持续显示 100%，自动重置没有入口”的延迟触发；生产实例最终在约 5 分钟后的新响应头到达时才成功消耗 credit，证明设置与 guard 本身正常。
@@ -66,16 +71,9 @@
 - **周额度权威**：周窗口改为集合级选择：账号级 `windowMinutes >= 10080` 的明确时长窗口优先；只有整组没有明确周窗口时，才兼容使用非零的未知时长 `secondary`。model-scoped 窗口仍排除。Admin、自动重置和 reset-credit 幂等 guard 共用该选择，空 positional 数据不能再覆盖真实周用量或 reset marker。
 - **验证**：TDD 定向覆盖 live header 形态、durable cache 旧快照、Providers 标签、明确周窗口优先、legacy fallback 与 reset-credit guard；6 files / 219 tests 全绿。
 
-## 2026-07-14 · Subscription Providers 改为缓存优先与全局串行刷新（OAuth Admin / provider observability，docs/04/11，原则 1/3/6/7）
-
-- **性能根因**：Providers 首屏过去并行请求 status、usage、quota；status 会刷新过期 token 并逐账号发现模型，quota 会逐账号拉取上游额度、写 snapshot、同步 cooldown 并清理 orphan。慢代理、上游限流或账号数增加会把页面打开直接绑定到外部网络，刷新按钮和自动刷新也会重复制造同一批工作。
-- **缓存读边界**：新增单次 `GET /admin/api/oauth/overview`，只读取本地 token/settings、进程内模型/额度 snapshot、durable quota 与当日 usage；不得刷新 token、发现模型、请求 quota、删除 orphan 或修改 cooldown。原 `/oauth`、`/usage`、`/quota` 同样改为 cache-only，保持兼容但不再隐式产生上游流量；无需数据库迁移。
-- **刷新队列**：显式 `POST /admin/api/oauth/refresh` 立即返回 `202`，由 Gateway 进程级 coordinator 保证全局最多一个 active job；并发点击合并到同一 job，成功或失败后冷却 60 秒。job 内按账号串行刷新 token、模型目录与 quota，显式刷新可绕过正/负 TTL 缓存；Anthropic/Codex 模型发现增加 10 秒硬超时，避免死代理长期占住唯一 worker。
-- **失败与旧数据**：任一账号的 quota 超时、空/非法窗口或持久化失败会把 job 标为 `failed` 并记录安全错误摘要，但不会删除 last-known-good snapshot；其余账号仍继续串行刷新。页面展示 queued/running/succeeded/failed、最近成功时间与 cooldown，手动点击只入队一次并 cache-only 轮询，定时自动刷新永远只读缓存。
-- **验证**：TDD 覆盖 cache-only 首屏、20 次并发点击合并、账号刷新最大并发 1、失败保留旧 quota、force cache bypass、模型发现 timeout、前端单请求加载、手动/自动刷新分流与多语言状态文案；workspace 357 files / 5775 tests、typecheck、Biome、build 与 Admin check 全通过。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-14 · Subscription Providers 改为缓存优先与全局串行刷新（OAuth Admin / provider observability，docs/04/11，原则 1/3/6/7）**：Providers 首屏与兼容读 API 严格 cache-only；显式刷新由进程级单 worker 串行账号、合并并发点击并保留 last-known-good 数据。
 - **2026-07-14 · Avoid Waste 在 provider 池内限制 reset-credit 偏置（OAuth provider selection，docs/04/11，原则 3/5/6）**：reset credits 只作为同一 provider 池内的弱恢复容量信号，不能压过明显更多的真实即将过期额度；套餐标签不参与分池或评分。
 - **2026-07-13 · Responses 工具结果的 multipart 文本使用 input_text（Protocol translation / provider execution，docs/05/07，原则 3/5/8）**：provider 与共享 transformer 统一把请求侧 multipart 工具结果文本编码为 `input_text`，保留字符串、图片、文件与助手输出的既有 wire shape。
 - **2026-07-13 · Codex 周配额按真实窗口时长识别（OAuth quota / Admin providers / reset credits，docs/04/11，原则 3/5/7）**：账号级 Codex 周窗口以 provider 报告的 `windowMinutes >= 10080` 为权威，旧快照仅在缺 duration 且有真实用量时回退 secondary；Admin、reset-credit 与 model-scoped 隔离共用同一规则。
