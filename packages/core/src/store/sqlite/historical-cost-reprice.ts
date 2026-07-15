@@ -789,7 +789,15 @@ function plannedRowState(current: CurrentTelemetryRow, row: PlannedRow): Planned
     sameCost(attemptCost, row.oldCompletionUsd) &&
     (breakdownCompletion === null || sameCost(breakdownCompletion, row.oldCompletionUsd)) &&
     (breakdownTotal === null || sameCost(breakdownTotal, row.oldTotalUsd));
-  if (matchesOld) return "old";
+  const matchesLegacyCompletionOnlyTotal =
+    row.oldCompletionUsd !== null &&
+    row.oldTotalUsd !== null &&
+    !sameCost(row.oldCompletionUsd, row.oldTotalUsd) &&
+    sameCost(current.cost_usd, row.oldCompletionUsd) &&
+    sameCost(attemptCost, row.oldCompletionUsd) &&
+    sameCost(breakdownCompletion, row.oldCompletionUsd) &&
+    sameCost(breakdownTotal, row.oldTotalUsd);
+  if (matchesOld || matchesLegacyCompletionOnlyTotal) return "old";
   throw new Error(`old values no longer match manifest: ${row.requestId}`);
 }
 
