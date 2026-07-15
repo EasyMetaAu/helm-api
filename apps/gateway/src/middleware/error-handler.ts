@@ -86,6 +86,7 @@ export function handleError(err: unknown, c: Context<AppEnv>): Response {
     trace_id: traceId,
     error_class: errorClass,
     http_status: status,
+    fault_scope: helm === null ? "gateway_internal" : "request",
   });
 
   return c.json(body, status as ContentfulStatusCode);

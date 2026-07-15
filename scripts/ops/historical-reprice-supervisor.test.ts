@@ -25,6 +25,7 @@ function healthySample(overrides: Partial<SupervisorSample> = {}): SupervisorSam
     oomKilled: false,
     fiveXx: 0,
     timeouts: 0,
+    gatewayFaults: 0,
     sqliteBusy: 0,
     ...overrides,
   };
@@ -67,10 +68,16 @@ describe("historical reprice supervisor", () => {
       reasons: [],
     });
 
-    const lowMemory = healthySample({ memAvailableBytes: 767 * 1024 ** 2 });
+    const stableTwoGiBHost = healthySample({ memAvailableBytes: 588 * 1024 ** 2 });
+    expect(evaluatePreflight([healthySample(), stableTwoGiBHost, healthySample()])).toMatchObject({
+      safe: true,
+      reasons: [],
+    });
+
+    const lowMemory = healthySample({ memAvailableBytes: 511 * 1024 ** 2 });
     const result = evaluatePreflight([healthySample(), lowMemory, healthySample()]);
     expect(result.safe).toBe(false);
-    expect(result.reasons).toContain("sample 2: available memory below 768 MiB");
+    expect(result.reasons).toContain("sample 2: available memory below 512 MiB");
   });
 
   it("stops immediately on hard limits and only on sustained CPU or health latency", () => {
@@ -92,26 +99,115 @@ describe("historical reprice supervisor", () => {
     expect(secondSlow.reasons).toContain("health latency consecutively above 500 ms");
 
     const lowMemory = evaluateRuntimeSafety(
-      healthySample({ memAvailableBytes: 639 * 1024 ** 2 }),
+      healthySample({ memAvailableBytes: 383 * 1024 ** 2 }),
       initial,
     );
     expect(lowMemory.stop).toBe(true);
-    expect(lowMemory.reasons).toContain("available memory below 640 MiB");
+    expect(lowMemory.reasons).toContain("available memory below 384 MiB");
   });
 
-  it("parses structured failures without mistaking trace identifiers for status codes", () => {
+  it("observes all 5xx but scopes only explicit gateway-internal faults as blockers", () => {
+    const signals = parseStructuredLogSignals(
+      [
+        JSON.stringify({
+          trace_id: "normal-provider-failure",
+          http_status: 502,
+          message: "request.error",
+          error_class: "all_providers_failed",
+          fault_scope: "request",
+        }),
+        JSON.stringify({
+          trace_id: "normal-provider-failure",
+          status: 502,
+          message: "request.completed",
+          path: "/v1/responses",
+        }),
+        JSON.stringify({
+          trace_id: "internal-reprice-failure",
+          http_status: 500,
+          message: "request.error",
+          error_class: "upstream_error",
+          fault_scope: "gateway_internal",
+        }),
+        JSON.stringify({
+          trace_id: "internal-reprice-failure",
+          status: 500,
+          message: "request.completed",
+          path: "/internal/pricing/reprice",
+        }),
+      ].join("\n"),
+    );
+
+    expect(signals).toEqual({
+      fiveXx: 4,
+      timeouts: 0,
+      gatewayFaults: 1,
+      sqliteBusy: 0,
+    });
+  });
+
+  it("keeps unscoped/provider 5xx and timeouts observational while retaining SQLITE_BUSY", () => {
     const signals = parseStructuredLogSignals(
       [
         JSON.stringify({ status: 200, trace_id: "trace-502-timeout" }),
-        JSON.stringify({ http_status: 502, message: "request.error" }),
-        JSON.stringify({ status: 503, message: "request.completed" }),
+        JSON.stringify({
+          trace_id: "normal-provider-failure",
+          http_status: 502,
+          message: "request.error",
+          error_class: "all_providers_failed",
+        }),
+        JSON.stringify({
+          trace_id: "normal-provider-failure",
+          status: 502,
+          message: "request.completed",
+        }),
         JSON.stringify({ message: "stream.truncated", error_class: "timeout" }),
         JSON.stringify({ message: "write failed", error_class: "SQLITE_BUSY" }),
         "not-json",
       ].join("\n"),
     );
 
-    expect(signals).toEqual({ fiveXx: 2, timeouts: 1, sqliteBusy: 1 });
+    expect(signals).toEqual({ fiveXx: 2, timeouts: 1, gatewayFaults: 0, sqliteBusy: 1 });
+  });
+
+  it("blocks only actionable fault signals, not ordinary 5xx or timeout observations", () => {
+    const initial = { highCpuSamples: 0, slowHealthSamples: 0, baselineRestarts: 0 };
+    const observations = healthySample({ fiveXx: 12, timeouts: 4 });
+    expect(evaluatePreflight([observations, observations, observations])).toMatchObject({
+      safe: true,
+      reasons: [],
+    });
+    expect(evaluateRuntimeSafety(observations, initial)).toMatchObject({
+      stop: false,
+      reasons: [],
+    });
+
+    expect(evaluateRuntimeSafety(healthySample({ gatewayFaults: 1 }), initial).reasons).toContain(
+      "new gateway-internal 5xx detected",
+    );
+    expect(evaluateRuntimeSafety(healthySample({ sqliteBusy: 1 }), initial).reasons).toContain(
+      "new SQLITE_BUSY detected",
+    );
+  });
+
+  it.each<[string, Partial<SupervisorSample>, string]>([
+    ["host load", { load1: 1.5 }, "load1 at or above 1.5"],
+    ["Helm memory", { helmMemoryPercent: 60 }, "Helm memory at or above 60%"],
+    ["non-200 health", { healthStatus: 503 }, "health returned non-200"],
+    ["WAL growth", { walBytes: 512 * 1024 ** 2 }, "WAL at or above 512 MiB"],
+    ["low disk", { diskFreeBytes: 11 * 1024 ** 3 }, "disk free below 12 GiB"],
+    ["container restart", { restarts: 1 }, "restart count changed"],
+    ["OOM", { oomKilled: true }, "OOM flag is set"],
+    ["gateway-internal fault", { gatewayFaults: 1 }, "new gateway-internal 5xx detected"],
+    ["SQLite lock", { sqliteBusy: 1 }, "new SQLITE_BUSY detected"],
+  ])("retains the %s runtime safety guard", (_name, overrides, expectedReason) => {
+    const result = evaluateRuntimeSafety(healthySample(overrides), {
+      highCpuSamples: 0,
+      slowHealthSamples: 0,
+      baselineRestarts: 0,
+    });
+    expect(result.stop).toBe(true);
+    expect(result.reasons).toContain(expectedReason);
   });
 
   it("keeps production stop thresholds stricter than CLI hard limits", () => {

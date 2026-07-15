@@ -31,6 +31,7 @@ export interface SupervisorSample {
   oomKilled: boolean;
   fiveXx: number;
   timeouts: number;
+  gatewayFaults: number;
   sqliteBusy: number;
 }
 
@@ -53,14 +54,14 @@ export interface SupervisorThresholds {
 
 export const DEFAULT_SUPERVISOR_THRESHOLDS: SupervisorThresholds = {
   preflightLoad1: 1.2,
-  preflightMemBytes: 768 * MIB,
+  preflightMemBytes: 512 * MIB,
   preflightCpuPercent: 50,
   preflightHelmMemoryPercent: 55,
   preflightHealthMs: 300,
   preflightWalBytes: 384 * MIB,
   preflightDiskBytes: 14 * GIB,
   stopLoad1: 1.5,
-  stopMemBytes: 640 * MIB,
+  stopMemBytes: 384 * MIB,
   stopCpuPercent: 60,
   stopHelmMemoryPercent: 60,
   stopHealthMs: 500,
@@ -238,7 +239,7 @@ export function evaluatePreflight(
       reasons.push(`${prefix}load1 at or above ${thresholds.preflightLoad1}`);
     }
     if (sample.memAvailableBytes < thresholds.preflightMemBytes) {
-      reasons.push(`${prefix}available memory below 768 MiB`);
+      reasons.push(`${prefix}available memory below ${thresholds.preflightMemBytes / MIB} MiB`);
     }
     if (sample.helmCpuPercent >= thresholds.preflightCpuPercent) {
       reasons.push(`${prefix}Helm CPU at or above 50%`);
@@ -257,8 +258,7 @@ export function evaluatePreflight(
     }
     if (sample.restarts !== baselineRestarts) reasons.push(`${prefix}restart count changed`);
     if (sample.oomKilled) reasons.push(`${prefix}OOM flag is set`);
-    if (sample.fiveXx > 0) reasons.push(`${prefix}new 5xx detected`);
-    if (sample.timeouts > 0) reasons.push(`${prefix}new timeout detected`);
+    if (sample.gatewayFaults > 0) reasons.push(`${prefix}new gateway-internal 5xx detected`);
     if (sample.sqliteBusy > 0) reasons.push(`${prefix}new SQLITE_BUSY detected`);
   }
   return { safe: reasons.length === 0, reasons };
@@ -290,7 +290,7 @@ export function evaluateRuntimeSafety(
   const reasons: string[] = [];
   if (sample.load1 >= thresholds.stopLoad1) reasons.push("load1 at or above 1.5");
   if (sample.memAvailableBytes < thresholds.stopMemBytes) {
-    reasons.push("available memory below 640 MiB");
+    reasons.push(`available memory below ${thresholds.stopMemBytes / MIB} MiB`);
   }
   if (sample.helmMemoryPercent >= thresholds.stopHelmMemoryPercent) {
     reasons.push("Helm memory at or above 60%");
@@ -304,8 +304,7 @@ export function evaluateRuntimeSafety(
   if (sample.diskFreeBytes < thresholds.stopDiskBytes) reasons.push("disk free below 12 GiB");
   if (sample.restarts !== previous.baselineRestarts) reasons.push("restart count changed");
   if (sample.oomKilled) reasons.push("OOM flag is set");
-  if (sample.fiveXx > 0) reasons.push("new 5xx detected");
-  if (sample.timeouts > 0) reasons.push("new timeout detected");
+  if (sample.gatewayFaults > 0) reasons.push("new gateway-internal 5xx detected");
   if (sample.sqliteBusy > 0) reasons.push("new SQLITE_BUSY detected");
   return { stop: reasons.length > 0, reasons, state };
 }
@@ -313,10 +312,12 @@ export function evaluateRuntimeSafety(
 export function parseStructuredLogSignals(text: string): {
   fiveXx: number;
   timeouts: number;
+  gatewayFaults: number;
   sqliteBusy: number;
 } {
   let fiveXx = 0;
   let timeouts = 0;
+  let gatewayFaults = 0;
   let sqliteBusy = 0;
   for (const line of text.split("\n")) {
     if (line.trim().length === 0) continue;
@@ -330,7 +331,10 @@ export function parseStructuredLogSignals(text: string): {
     if (body === null) continue;
     const rawStatus = body.status ?? body.http_status ?? body.status_code;
     const status = typeof rawStatus === "number" ? rawStatus : Number(rawStatus);
-    if (Number.isFinite(status) && status >= 500 && status < 600) fiveXx += 1;
+    if (Number.isFinite(status) && status >= 500 && status < 600) {
+      fiveXx += 1;
+      if (body.fault_scope === "gateway_internal") gatewayFaults += 1;
+    }
     const selectedText = [body.message, body.error_class, body.error]
       .filter((value): value is string => typeof value === "string")
       .join(" ")
@@ -338,7 +342,7 @@ export function parseStructuredLogSignals(text: string): {
     if (/timeout|timed out/.test(selectedText)) timeouts += 1;
     if (/sqlite_busy|database is locked/.test(selectedText)) sqliteBusy += 1;
   }
-  return { fiveXx, timeouts, sqliteBusy };
+  return { fiveXx, timeouts, gatewayFaults, sqliteBusy };
 }
 
 function runCommand(

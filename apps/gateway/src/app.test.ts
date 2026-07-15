@@ -73,7 +73,7 @@ describe("createApp: trace_id, logging, error handling", () => {
   });
 
   it("serializes a thrown HelmError to an OpenAI-shaped body", async () => {
-    const { logger } = fakeLogger();
+    const { logger, lines } = fakeLogger();
     const app = createApp({ logger, genTraceId: () => "trace-xyz" });
     app.get("/boom", () => {
       throw new HelmHttpError(
@@ -86,6 +86,9 @@ describe("createApp: trace_id, logging, error handling", () => {
     expect(body.error.code).toBe("timeout");
     expect(body.error.type).toBe("api_error");
     expect(body.error.trace_id).toBe("trace-xyz");
+    expect(lines.find((line) => line.message === "request.error")?.fields.fault_scope).toBe(
+      "request",
+    );
   });
 
   it.each<[ErrorClass, number, string, string]>([
@@ -124,7 +127,10 @@ describe("createApp: trace_id, logging, error handling", () => {
     expect(text).not.toContain("boom-internal-detail");
     const body = JSON.parse(text) as { error: Record<string, string> };
     expect(body.error.code).toBe("upstream_error");
-    expect(lines.some((l) => l.level === "error")).toBe(true);
+    expect(lines.find((line) => line.message === "request.error")).toMatchObject({
+      level: "error",
+      fields: { fault_scope: "gateway_internal" },
+    });
   });
 
   it("marks the request context as timed out while late route work continues", async () => {
