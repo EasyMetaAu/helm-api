@@ -138,6 +138,11 @@ export interface HistoricalCostRepriceManifest {
   planSha256: string;
 }
 
+export interface HistoricalCostRepriceVerification {
+  verifiedRows: number;
+  totalUsd: number;
+}
+
 interface DecisionAttempt extends Record<string, unknown> {
   alias?: unknown;
   skipped?: unknown;
@@ -993,6 +998,41 @@ function sleep(milliseconds: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
 
+export function verifyHistoricalCostRepriceManifest(
+  db: Database.Database,
+  manifest: HistoricalCostRepriceManifest,
+  options: { startRowIndex?: number; endRowIndex?: number } = {},
+): HistoricalCostRepriceVerification {
+  validateManifest(manifest);
+  const startRowIndex = positiveInteger(options.startRowIndex ?? 0, "startRowIndex", true);
+  const endRowIndex = positiveInteger(
+    options.endRowIndex ?? manifest.rows.length,
+    "endRowIndex",
+    true,
+  );
+  if (endRowIndex < startRowIndex || endRowIndex > manifest.rows.length) {
+    throw new Error(
+      `invalid verification range: ${startRowIndex}..${endRowIndex} of ${manifest.rows.length}`,
+    );
+  }
+
+  const readTelemetry = db.prepare(
+    "SELECT decision_json, cost_usd, created_at FROM telemetry WHERE request_id = ?",
+  );
+  let totalUsd = 0;
+  for (let index = startRowIndex; index < endRowIndex; index += 1) {
+    const row = manifest.rows[index];
+    if (row === undefined) throw new Error(`manifest row disappeared at index ${index}`);
+    const current = readTelemetry.get(row.requestId) as CurrentTelemetryRow | undefined;
+    if (current === undefined) throw new Error(`telemetry row disappeared: ${row.requestId}`);
+    if (plannedRowState(current, row) !== "new") {
+      throw new Error(`manifest row is not applied: ${row.requestId}`);
+    }
+    totalUsd += current.cost_usd ?? 0;
+  }
+  return { verifiedRows: endRowIndex - startRowIndex, totalUsd };
+}
+
 export function applyHistoricalCostRepriceManifest(
   db: Database.Database,
   manifest: HistoricalCostRepriceManifest,
@@ -1125,7 +1165,10 @@ interface CliArgs {
   toMs?: number;
   mode: HistoricalCostRepriceMode;
   applyManifest?: string;
+  verifyManifest?: string;
   expectedPlanSha256?: string;
+  startRowIndex?: number;
+  endRowIndex?: number;
   manifest?: string;
   checkpoint?: string;
   backupDir?: string;
@@ -1147,7 +1190,10 @@ function parseCliArgs(argv: string[]): CliArgs {
     "--to-ms",
     "--mode",
     "--apply-manifest",
+    "--verify-manifest",
     "--expected-plan-sha256",
+    "--start-row-index",
+    "--end-row-index",
     "--manifest",
     "--checkpoint",
     "--backup-dir",
@@ -1185,8 +1231,15 @@ function parseCliArgs(argv: string[]): CliArgs {
     throw new Error("one-shot --apply is disabled; use --apply-manifest with bounded batches");
   }
   const applyManifest = values.get("--apply-manifest");
+  const verifyManifest = values.get("--verify-manifest");
+  if (applyManifest !== undefined && verifyManifest !== undefined) {
+    throw new Error("--apply-manifest and --verify-manifest are mutually exclusive");
+  }
   if (applyManifest !== undefined && (flags.has("--apply") || flags.has("--dry-run"))) {
     throw new Error("--apply-manifest cannot be combined with --apply or --dry-run");
+  }
+  if (verifyManifest !== undefined && (flags.has("--apply") || flags.has("--dry-run"))) {
+    throw new Error("--verify-manifest cannot be combined with --apply or --dry-run");
   }
   if (
     applyManifest !== undefined &&
@@ -1198,9 +1251,16 @@ function parseCliArgs(argv: string[]): CliArgs {
   if (applyManifest !== undefined && values.get("--expected-plan-sha256") === undefined) {
     throw new Error("--apply-manifest requires --expected-plan-sha256");
   }
+  if (verifyManifest !== undefined && values.get("--expected-plan-sha256") === undefined) {
+    throw new Error("--verify-manifest requires --expected-plan-sha256");
+  }
   const fromMs = values.get("--from-ms");
   const toMs = values.get("--to-ms");
-  if (applyManifest === undefined && (fromMs === undefined || toMs === undefined)) {
+  if (
+    applyManifest === undefined &&
+    verifyManifest === undefined &&
+    (fromMs === undefined || toMs === undefined)
+  ) {
     throw new Error("dry-run and one-shot apply require --from-ms and --to-ms");
   }
   return {
@@ -1210,8 +1270,15 @@ function parseCliArgs(argv: string[]): CliArgs {
     ...(toMs !== undefined ? { toMs: Number(toMs) } : {}),
     mode,
     ...(applyManifest !== undefined ? { applyManifest: resolve(applyManifest) } : {}),
+    ...(verifyManifest !== undefined ? { verifyManifest: resolve(verifyManifest) } : {}),
     ...(values.get("--expected-plan-sha256") !== undefined
       ? { expectedPlanSha256: values.get("--expected-plan-sha256") }
+      : {}),
+    ...(values.get("--start-row-index") !== undefined
+      ? { startRowIndex: Number(values.get("--start-row-index")) }
+      : {}),
+    ...(values.get("--end-row-index") !== undefined
+      ? { endRowIndex: Number(values.get("--end-row-index")) }
       : {}),
     ...(values.get("--manifest") !== undefined
       ? { manifest: resolve(values.get("--manifest") ?? "") }
@@ -1286,6 +1353,32 @@ if (!response.ok) throw new Error(\`health endpoint returned \${response.status}
         ...(healthCheck !== undefined ? { healthCheck } : {}),
       });
       process.stdout.write(`${JSON.stringify(checkpoint, null, 2)}\n`);
+      return;
+    }
+
+    if (args.verifyManifest !== undefined) {
+      if (args.manifest !== undefined) {
+        throw new Error("--manifest is only an output path for dry-run planning");
+      }
+      const manifest = JSON.parse(
+        readFileSync(args.verifyManifest, "utf8"),
+      ) as HistoricalCostRepriceManifest;
+      validateManifest(manifest);
+      if (manifest.planSha256 !== args.expectedPlanSha256) {
+        throw new Error(
+          `plan hash mismatch: expected ${args.expectedPlanSha256 ?? ""}, got ${manifest.planSha256}`,
+        );
+      }
+      if (manifest.pricingSha256 !== pricingSha256) {
+        throw new Error(
+          `pricing hash mismatch: manifest ${manifest.pricingSha256}, current ${pricingSha256}`,
+        );
+      }
+      const verification = verifyHistoricalCostRepriceManifest(db, manifest, {
+        ...(args.startRowIndex !== undefined ? { startRowIndex: args.startRowIndex } : {}),
+        ...(args.endRowIndex !== undefined ? { endRowIndex: args.endRowIndex } : {}),
+      });
+      process.stdout.write(`${JSON.stringify(verification, null, 2)}\n`);
       return;
     }
 

@@ -1,0 +1,8 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "../.."
+  },
+  "include": ["./historical-reprice-supervisor.ts", "./historical-reprice-supervisor.test.ts"]
+}

@@ -1,0 +1,22 @@
+[Unit]
+Description=Helm historical pricing reprice supervisor
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/helm-api
+Environment=HELM_REPRICE_CUTOFF=2026-07-15T13:28:46+08:00
+ExecStart=/usr/bin/flock -n /opt/helm-api/data/pricing-reprice-v0.27.5/supervisor.lock /usr/bin/node /opt/helm-api/bin/historical-reprice-supervisor.mjs
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=120
+KillSignal=SIGTERM
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
