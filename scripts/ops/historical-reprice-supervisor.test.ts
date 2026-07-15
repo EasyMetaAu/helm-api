@@ -5,6 +5,7 @@ import {
   evaluatePreflight,
   evaluateRuntimeSafety,
   parseStructuredLogSignals,
+  resetStageAfterSafetyStop,
   type SupervisorSample,
   shouldRunPreflight,
 } from "./historical-reprice-supervisor.js";
@@ -127,5 +128,12 @@ describe("historical reprice supervisor", () => {
     expect(shouldRunPreflight(1, false)).toBe(false);
     expect(shouldRunPreflight(49, false)).toBe(false);
     expect(shouldRunPreflight(12, true)).toBe(true);
+  });
+
+  it("resets both internal and reported stage progress after a safety stop", () => {
+    expect(resetStageAfterSafetyStop()).toEqual({
+      stageBatches: 0,
+      recoveryRequired: true,
+    });
   });
 });
