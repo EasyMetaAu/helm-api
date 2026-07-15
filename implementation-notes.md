@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-15 · Anthropic 不可用地域哨兵按全球基础卡计费（Catalog / telemetry accounting，docs/07/08，原则 2/3/5/7）
+
+- **生产根因**：Anthropic OAuth 原生流会返回 `usage.inference_geo=not_available`，表示未提供推理地域，不是新的计费地域。地域计费上线后把任意非空字符串都当作已确认地域；catalog 只有 `global` / `us`，该哨兵因此被当作未知费率并令已有完整 token usage 的成功请求得到 `cost_usd=null`。模型、能力和价格条目均未缺失。
+- **兼容边界**：计费边界只把空字符串和已确认的 `not_available` 规范化为“地域缺失”，使用既有全球基础卡；仍将真实但未配置的地域（如 `moon`）保持 unknown，避免猜价。原始哨兵继续保存在 telemetry 作为 provenance，不改写 provider 事实；实时响应与历史重算共用同一规范化函数，防止两套语义漂移。
+- **验证与修复边界**：TDD 以生产请求的 Opus 4.8 token/cache 数复现 `$0.24682125`，覆盖未知地域严格拒绝、Anthropic SSE 哨兵保真，以及历史重算仅在 `best-evidence` 下把该哨兵作为全球假设。生产历史数据修复仍须使用既有 manifest、逐批微型恢复库、health/WAL/disk 门禁和 OAuth delta 一致性保护。
+
 ## 2026-07-15 · 终端事件缺失的 Responses 流使用部分估算计费（Protocol streaming / telemetry accounting，docs/05/07，原则 3/5/7/8）
 
 - **终态语义**：provider 已产出首包仍保留成功 attempt，但 Responses 流只有收到 `response.completed` / `response.incomplete` / `response.failed` 才算有上游终态；无终态的自然 EOF 记为 `stream_outcome=truncated`、下游 abort 记为 `client_aborted`，request `final.status` 改为 error，分别使用 `upstream_error` / `client_abort`，不再把部分消费伪装成完整成功。`response.incomplete` 保留其独立终态；provider 明确报告的 usage（包括全 0）永远优先。
@@ -68,14 +74,9 @@
 - **评分边界**：同一 provider 内继续按账号优先级、模型 entitlement、可调度/限流状态形成候选集；Avoid Waste 的主分数仍来自即将重置的真实 5h/周额度。reset credits 保留为弱的可恢复容量信号，每个 credit 只贡献完整自然周窗口加权分数的 5%，可打破接近分数，但不能压过明显更多的真实即将过期额度。Plus/Pro/Team/Business 等套餐标签仍只用于身份与配额展示，不进入选择逻辑。
 - **验证**：TDD 使用生产比例覆盖同一池内 `2% + 0 credits` 对 `31% + 3 credits`，并保留真实额度相同情况下 credits 参与选择的回归；定向 pool 测试、typecheck、lint 与 build 作为交付门禁。
 
-## 2026-07-13 · Responses 工具结果的 multipart 文本使用 input_text（Protocol translation / provider execution，docs/05/07，原则 3/5/8）
-
-- **生产根因**：请求 `7963c4fa-c0ea-436f-aa4d-af0beb41615e` 从 Anthropic fallback 到 Codex Responses 时，数组形式的 `tool_result` 被编码为 `function_call_output.output[].output_text`；该 item 属于 Responses 请求输入，上游只接受 `input_text`，因此返回确定性 400 `invalid_request`。
-- **修复边界**：provider 专用 Chat→Responses 与共享 IR→Responses 两条路径统一把 multipart 工具结果文本编码为 `input_text`；字符串工具结果仍保持字符串，`input_image` 与 `input_file` 保持原 wire shape。助手消息正文继续使用 `output_text`，不扩大成全局 content-part 改写，也不改变 `invalid_request` fallback 语义。
-- **验证**：TDD 红灯同时覆盖 provider、共享 transformer 与真实 Anthropic `tool_result`→Codex Responses 链路；定向 Vitest 绿灯为 2 files / 274 tests。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-13 · Responses 工具结果的 multipart 文本使用 input_text（Protocol translation / provider execution，docs/05/07，原则 3/5/8）**：provider 与共享 transformer 统一把请求侧 multipart 工具结果文本编码为 `input_text`，保留字符串、图片、文件与助手输出的既有 wire shape。
 - **2026-07-13 · Codex 周配额按真实窗口时长识别（OAuth quota / Admin providers / reset credits，docs/04/11，原则 3/5/7）**：账号级 Codex 周窗口以 provider 报告的 `windowMinutes >= 10080` 为权威，旧快照仅在缺 duration 且有真实用量时回退 secondary；Admin、reset-credit 与 model-scoped 隔离共用同一规则。
 - **2026-07-12 · Grok premium fallback 与 Composer 评估边界（Routing / provider evaluation，docs/04/07，原则 2/3/5/6/7）**：移除 official OpenAI/ZenMux 自动付费候选，premium 以已验证的 SuperGrok Grok 4.5 作为订阅 fallback；Composer 因真实 A/B 的空响应与质量不足不进 lane，底层 transport/发现保留，xAI Admin 选择器补 curated 展示但运行时 entitlement 继续 fail-closed。
 - **2026-07-12 · SuperGrok 周配额使用现有 OAuth 读取私有 gRPC-Web credits（OAuth subscription / Admin providers，docs/04/09/11，原则 3/6/7）**：复用现有 xAI OAuth bearer 严格读取 weekly gRPC-Web credits，按账号持久化 quota/cooldown 并以 cache epoch 隔离重连竞态；不保存 Cookie、不混用月度/public billing。
