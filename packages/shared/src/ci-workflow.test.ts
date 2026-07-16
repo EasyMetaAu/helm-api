@@ -18,6 +18,7 @@ describe("CI workflow", () => {
 
   it("triggers on pull_request and on push to main", () => {
     expect(raw).toContain("pull_request");
+    expect(raw).toContain("pull_request_target");
     expect(raw).toMatch(/branches:\s*\[main\]/);
   });
 
@@ -48,7 +49,10 @@ describe("CI workflow", () => {
   it("keeps the docker job independent so the unit gates run on their own", () => {
     // The docker job must NOT block the four quality gates: no `needs: verify`
     // (or any needs) chaining it onto the unit-gate job.
-    const dockerJob = raw.slice(raw.indexOf("\n  docker:"));
+    const dockerJob = raw.slice(
+      raw.indexOf("\n  docker:"),
+      raw.indexOf("\n  report_pr_checks:"),
+    );
     expect(dockerJob).not.toMatch(/needs:/);
   });
 });

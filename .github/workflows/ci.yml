@@ -1,6 +1,9 @@
 name: CI
 
 on:
+  # Transitional bootstrap only: the follow-up hardening PR removes this branch-
+  # controlled trigger once pull_request_target exists on the default branch.
+  pull_request:
   # Keep the workflow definition under default-branch control. The test jobs
   # explicitly check out the PR merge ref below, on disposable hosted runners.
   pull_request_target:
@@ -21,7 +24,7 @@ jobs:
   verify:
     # Untrusted pull-request code must never reach the persistent runner pool.
     # Trusted main pushes retain the labelled self-hosted pool for throughput.
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request_target' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","docker"]') }}
+    runs-on: ${{ fromJSON(github.event_name != 'push' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","docker"]') }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -66,7 +69,7 @@ jobs:
   # passwordless sudo. GitHub-hosted pull-request runners provide it; trusted main
   # pushes retain the preconfigured self-hosted pool.
   e2e:
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request_target' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","docker"]') }}
+    runs-on: ${{ fromJSON(github.event_name != 'push' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","docker"]') }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -104,7 +107,7 @@ jobs:
   # independent of `verify` (no `needs`) so the unit gates run on their own and
   # neither job blocks the other.
   docker:
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request_target' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","docker"]') }}
+    runs-on: ${{ fromJSON(github.event_name != 'push' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","docker"]') }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
