@@ -3,9 +3,9 @@
 Deterministic checks do not require real provider credentials:
 
 ```bash
-pnpm test:passthrough:unit
-pnpm test:passthrough:e2e
-pnpm test:passthrough
+CI=true pnpm test:passthrough:unit
+CI=true pnpm test:passthrough:e2e
+CI=true pnpm test:passthrough
 ```
 
 Live checks are intentionally fail-closed. They create `artifacts/passthrough-live-report.json` and fail unless the real CLI binary and required local Helm environment are present:
@@ -19,5 +19,10 @@ Live checks are intentionally fail-closed. They create `artifacts/passthrough-li
 - `HELM_PASSTHROUGH_LIVE_ASSERTIONS_FILE` - optional telemetry JSON if admin access is not exposed to the script. It must contain either a top-level `claude-cli` / `codex-cli` object or a `reports[]` entry with `nativePassthrough: true`, plus optional `traceId`, `providerAlias`, `providerModel`, and `mutationLedger`.
 - Optional `HELM_PASSTHROUGH_EXPECTED_OUTPUT` - sentinel the CLI output must contain; default `HELM_LIVE_OK`.
 - Optional `HELM_PASSTHROUGH_LIVE_TIMEOUT_MS` - per-CLI timeout, default `120000`.
+- Optional `HELM_PASSTHROUGH_CLAUDE_PROVIDER_ALIAS` /
+  `HELM_PASSTHROUGH_CLAUDE_MODEL` and
+  `HELM_PASSTHROUGH_CODEX_PROVIDER_ALIAS` /
+  `HELM_PASSTHROUGH_CODEX_MODEL` - require telemetry to match the expected
+  selected provider alias/model for that CLI.
 
 For deterministic local development only, set `HELM_PASSTHROUGH_LIVE_DRY_RUN=1` to write the report without invoking the CLIs. Do not use dry-run for merge or release acceptance.

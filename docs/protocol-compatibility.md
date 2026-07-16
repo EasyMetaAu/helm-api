@@ -1,244 +1,254 @@
-# Protocol Compatibility & Data-Loss Matrix
+# Protocol Compatibility and Data-Loss Matrix
 
-Helm translates every client protocol through one central, OpenAI-Chat-shaped
-**IR** (`packages/core/src/protocol/ir.ts`): `nativeIn → IR → nativeOut`, never
-N×N. This page documents, per source→target pair, **what survives the round-trip
-losslessly, what degrades (and how), and what is preserved out-of-band** in the
-IR `provider_raw` bag. It is the companion reference to
-[05 · Protocol Translation](05-protocol-translation.md).
+Status: conservative implementation snapshot, source-checked on 2026-07-16.
 
-litellm (MIT, BerriAI/litellm) is the field-coverage reference. The matrix in
-`packages/core/src/protocol/protocol-matrix.test.ts` generates all 4×4 = 16
-round-trip paths and asserts each one's preservation or its **documented**
-degradation, so this page and the tests stay in lock-step.
+This page describes what the shipping transformer, route, executor, and provider
+layers do today. It intentionally avoids the old claim that every modeled field
+is lossless. A field can be accepted by a request schema yet still be narrowed by
+the IR, stripped for a target, reduced by a response converter, or preserved only
+by native passthrough.
 
----
+The companion route/transport contract is
+[05 · Protocol Translation](05-protocol-translation.md). Native carrier behavior
+is documented in
+[Native Passthrough Fidelity](native-passthrough-fidelity-spec.md).
 
-## The four inbound text protocols
+## Reading the tables
 
-Each translated text protocol is parsed by a named transformer
-(`nativeIn`/`nativeOut`), and all four are streaming-capable:
+The four translated text protocols are:
 
-| Protocol | Endpoint | Transformer | Auth header |
-|---|---|---|---|
-| OpenAI Chat | `POST /v1/chat/completions` | `openai` | `Authorization: Bearer` |
-| Anthropic Messages | `POST /v1/messages` | `anthropic` | `x-api-key` or `Authorization: Bearer` |
-| OpenAI Responses | `POST /v1/responses` | `openai-responses` | `Authorization: Bearer` |
-| Google Gemini | `POST /v1beta/models/{model}:generateContent` (+ `:streamGenerateContent?alt=sse`) | `gemini` | `x-goog-api-key` |
-| OpenAI Images | `POST /v1/images/generations` | (none — image model/lane chain, no text transformer) | `Authorization: Bearer` |
-| Gemini Interactions | `POST /v1beta/interactions` | (none — image model/lane chain, translated to `generateContent`) | `x-goog-api-key` |
+- **Chat**: OpenAI Chat Completions;
+- **Anthropic**: Anthropic Messages;
+- **Responses**: OpenAI Responses;
+- **Gemini**: Google GenerateContent.
 
-The Images and Interactions rows are **additional image-generation surfaces**, not
-fifth/sixth inbound text protocols: neither has a `nativeIn`/`nativeOut`
-transformer pair, so the **four inbound text-protocol** framing (and the 4×4
-matrix) above covers only the translated text ones. Image requests name either an
-exact image model or an image lane, skip text classification, and can fail over
-inside the configured image chain. The Interactions request (`{model, input,
-response_format}`) is translated internally to a Gemini `generateContent` call —
-upstream speaks `generateContent`, not interactions — and the response is mapped
-back to `{id, steps:[…]}`. The native `:generateContent` endpoint likewise now
-serves image models (`gemini-3.1-flash-image`, `gemini-3-pro-image`) via
-`capabilities.outputImage`, so `responseModalities` → `inlineData` survives.
+The implementation uses `native -> IR -> target` for translated attempts. The IR
+is OpenAI-Chat-shaped and extended with typed media, reasoning, usage detail,
+annotations, and `provider_raw`.
 
-Gemini is mounted as catch-alls under both `POST /v1beta/models/:rest{.+}` and
-`POST /models/:rest{.+}`. `generateContent` / `streamGenerateContent` run the
-full pipeline; `countTokens` returns a Gemini-shaped count (provider-native or a
-deterministic local estimate, the latter flagged `estimated: true`); any other
-operation returns 404 in the native Gemini error shape. The Gemini and Responses
-faces authenticate **inside** the handler so they can emit their own native error
-envelopes.
+Labels used below:
 
----
+- **modeled**: the named feature has an explicit IR mapping;
+- **native preferred**: same-protocol native passthrough provides the highest
+  fidelity when its per-attempt guard succeeds;
+- **guarded**: Helm skips an incompatible target instead of sending a known-lossy
+  request;
+- **degrades**: the request can run, but a documented detail is narrowed or lost.
 
-## How degradation works
+These labels are field-level evidence, not promises that arbitrary unknown
+provider fields survive.
 
-There are exactly two ways a value can fail to reach a target, and both are
-**observable** — Helm never silently drops data:
+## Source-to-target matrix
 
-1. **`n_capped` (reject-clean cap).** A backend that emits a single candidate
-   caps `n > 1` to `1` and records an `n_capped` warning. The request still runs;
-   it just returns one choice.
-2. **`data_loss` (no native surface).** A parameter the target has no place for
-   (e.g. token `logprobs` → Anthropic) records a `data_loss` warning and is
-   dropped from the wire request.
-
-Both warning kinds are appended to `provider_raw.warnings` on the IR and read off
-by the DecisionRecord and telemetry; they never reach the wire. A third,
-non-degrading mechanism is **`provider_raw` passthrough** (the lossless bag,
-[below](#provider_raw-passthrough-the-lossless-bag)). See
-`packages/core/src/protocol/protocol-guards.ts`.
-
-The guard table is target-specific. The `n_capped` cap and the
-`logprobs`/`top_logprobs`/`modalities` `data_loss` warnings fire **only for the
-Anthropic target**; the `openai` and `gemini` targets are intentionally no-ops in
-`TARGET_GUARDS`. Responses passes `n` through, and Gemini maps `n` →
-`candidateCount`, so neither caps.
-
----
-
-## Capability-gated input modalities
-
-Beyond the protocol translation itself, **routing** is modality-aware. A request
-carrying audio, video, or a document is only routed to a backend that advertises
-that modality in `capabilities.yaml` (`modalities: [audio|video|document]`);
-otherwise the candidate is skipped with an explicit
-`no_audio_support` / `no_video_support` / `no_document_support` reason (text and
-image are gated separately — image by `supportsVision`). This is a *routing*
-gate, not a translation loss: the request lands on a backend that can actually
-accept the modality, or fails over per the normal fallback chain.
-
-Built-in advertisements: **Gemini** = `audio, video, document`; **Claude** =
-`document`. See `packages/core/src/capability/filter.ts`.
-
----
-
-## The data-loss matrix
-
-Rows are the **source** protocol (what the client sent); columns are the
-**target** backend protocol. Each cell lists only what is *not* a clean
-round-trip. "lossless" means every IR-modeled field maps both ways.
-
-Legend: **cap** = `n>1` capped to 1 with an `n_capped` warning (Anthropic target
-only); **drop** = dropped with a `data_loss` warning (Anthropic target only);
-**raw** = preserved in `provider_raw` (recoverable, not on the target wire);
-**degrade** = mapped to the nearest native shape.
-
-| source ↓ \ target → | OpenAI Chat | Anthropic Messages | OpenAI Responses | Gemini |
+| source ↓ / target → | OpenAI Chat | Anthropic Messages | OpenAI Responses | Gemini |
 |---|---|---|---|---|
-| **OpenAI Chat** | lossless (identity) | `n>1`→**cap**; `logprobs`/`top_logprobs`→**drop**; `modalities`→**drop** (text-out only); audio/video input→routing-gated | reasoning ↔ reasoning summary; sampling knobs map | `logprobs`→`responseLogprobs`; reasoning_effort→`thinkingConfig`; remote http(s) image→**degrade** to text placeholder |
-| **Anthropic Messages** | thinking→`reasoning_content`; `cache_creation`/`thinking_tokens`→usage detail; `stop_details`→**raw** | lossless (identity) | thinking→reasoning summary; cache usage maps | thinking→thought parts; document input maps to `inlineData`/`fileData` |
-| **OpenAI Responses** | reasoning summary→`reasoning_content`; `store`/`previous_response_id`→**raw** (stateless) | `n>1`→**cap**; `logprobs`→**drop**; reasoning summary→thinking | lossless (identity) | reasoning→`thinkingConfig`; sampling knobs map |
-| **Gemini** | `groundingMetadata`→`annotations`; `logprobsResult`→`logprobs`; `safetyRatings`→**raw** | `n>1`→**cap**; `safetyRatings`→**raw**; thought→thinking | grounding→annotations; thought→reasoning summary | lossless (identity) |
+| **OpenAI Chat** | **Modeled identity.** Multiple `choices[]` are preserved. Unknown top-level request fields outside the IR are not guaranteed. | Text, tools, standard media, structured output, and reasoning are modeled. Anthropic returns one message; unsupported sampling knobs have no native home, and route-level warning propagation is incomplete. | Messages, function tools, supported media, reasoning, and structured output are modeled. The Responses response renderer uses only the first IR choice. | Contents, functions, structured output, thinking config, and supported media are modeled. The Gemini response renderer emits one candidate; remote media needs provider materialization. |
+| **Anthropic Messages** | Text/tool blocks and thinking map to Chat; cache/thinking usage maps to IR aggregates. Native signatures, redacted-thinking state, and Anthropic-only controls do not all have Chat wire homes. | **Native preferred.** If passthrough is disabled/ineligible, the transformer round-trip covers modeled fields and may apply compatibility rewrites. | Text, tools, thinking summaries, images/documents, and aggregate usage are modeled. Provider-native thinking state is not equivalent to Responses encrypted/native history. | Text/tools/media and thinking map to Gemini thought parts. Anthropic-only controls and citations have no general Gemini client rendering. |
+| **OpenAI Responses** | Standard messages, function calls/results, supported parts, reasoning summaries, and structured output are modeled. Native tools/items, `background`, and some stateful history are **guarded** cross-protocol. | The same Responses guards apply. Supported function/message content can translate, but the result is single-message and unsupported Anthropic target knobs are not reliably warned at route level. | **Native preferred.** Codex and generic Responses profiles preserve the widest surface. Translated non-stream output currently leaks top-level `provider_raw`. | Standard content/functions/reasoning/structured output are modeled. Native tools/items, `background`, and unsafe stateful history are **guarded**. Advanced Gemini-native request fields cannot be synthesized from Responses. |
+| **Gemini** | Only the first Gemini candidate is normalized. Text, functions, logprobs, thought, and grounding annotations map; safety/prompt-feedback data stays internal. | Only the first candidate is normalized. Text/tools/thought map; annotations are not rendered on the Anthropic client wire. | Only the first candidate is normalized. Grounding annotations can render on Responses `output_text`; translated output has the current `provider_raw` leak. | **Native preferred.** The translated round-trip covers modeled fields, but advanced Google GenAI fields are safest in the native carrier. |
 
-Notes (only what the table can't show):
+Identity cells are not byte identity. Native passthrough may still rewrite the
+model, append memory, replace credentials, apply provider-profile repairs, map
+reasoning policy, materialize media, or reframe a stream.
 
-- **`n > 1` is capped on the Anthropic target only.** Anthropic returns a single
-  message, so `n` is clamped to 1 with an `n_capped` warning. The other three
-  targets honor multiple candidates: OpenAI Chat and Responses pass `n` through,
-  Gemini maps it to `candidateCount`.
-- **Remote `http(s)` images → Gemini output.** Gemini's request shape wants
-  inline base64 or a `gs://` / Files-API URI. By default an arbitrary remote
-  image URL degrades to an explicit text placeholder — the pure core transformer
-  does no network I/O. An optional, default-off provider-layer media materializer
-  (`materializeGeminiRemoteMediaBody`, config-gated by `remoteMediaFetch` and
-  SSRF-guarded via `assertPublicHttpsTarget`) can fetch the `https` image into
-  `inlineData` when enabled. Inline base64 images round-trip cleanly.
-- **Responses statefulness → others.** `store` / `previous_response_id` describe
-  a server-side conversation that other protocols don't model; they ride
-  `provider_raw` so a Responses→Responses round-trip is lossless, but they are
-  not replayed as real session continuation on a different backend.
+## Feature support by client/target wire
 
----
+| Feature | OpenAI Chat | Anthropic Messages | OpenAI Responses | Gemini |
+|---|---|---|---|---|
+| Text/system roles | `messages[]` with system/developer roles | top-level `system` plus messages | `instructions` plus input items | `systemInstruction` plus contents |
+| Function tools | Native Chat tool shape; multiple tool calls | Native tools/tool-use/tool-result; translated names normalized to 64 chars with stable collision suffixes | Function/custom call items; non-function native tools guarded cross-protocol | Function declarations/calls/responses; Helm synthesizes IR call IDs |
+| Structured output | `response_format` | native output config/schema mapping where supported | `text.format` canonicalized to/from shared `response_format` | response MIME/schema generation config |
+| Input media | Modeled image, audio, and file/document parts; IR-shaped video is not a general OpenAI wire guarantee | Image and document blocks; no general audio/video request surface | `input_image`, `input_audio`, and `input_file`; translated renderer currently omits video | `inlineData`, `fileData`, and video metadata; provider capability and optional remote fetch still apply |
+| Generated media | Message audio/images where modeled | Native image blocks map to IR images | The translated response renderer emits text/reasoning/functions but currently does not emit IR image parts; native passthrough is safest | `inlineData` image/audio maps to IR output carriers |
+| Reasoning | flat `reasoning_content` plus IR thinking bridge | thinking/redacted-thinking blocks and signatures | reasoning items/config and summaries; encrypted/native state is safest via passthrough | thought parts and thinking config |
+| Citations | Renders `message.annotations` | Not rendered from IR annotations | Renders annotations on `output_text` | Grounding/citation metadata normalizes into IR, but IR annotations are not rendered back to Gemini |
+| Multiple candidates | End-to-end `choices[]` support in the Chat transformer | One message | Request `n` is modeled, but the current response renderer uses the first IR choice | `candidateCount` is modeled, but inbound/outbound response conversion uses the first candidate |
+| Finish/stop | Legal Chat finish values; raw first stop kept internally | Legal Anthropic stop reason; raw kept internally | completed/incomplete status mapping; native failures/cancellations can pass through | finish-reason map with raw value kept internally |
+| Usage | Prompt/completion, cache, reasoning, and modeled detail bags | Input/output, cache read/write, thinking, tier, geo where present | Input/output totals plus cache/cache-creation/reasoning projection; not every modality-detail field | Aggregate and inbound modality detail mapping; translated outbound projection is narrower |
+| Unknown provider fields | Not transparent; closed IR request surface | Same-protocol passthrough gives best fidelity | Same-protocol passthrough gives best fidelity | Same-protocol passthrough gives best fidelity; translated target allowlist is narrow |
 
-## Streaming shape
+## Explicit protocol and capability guards
 
-Each face emits its native SSE framing; standalone per-direction converters
-(e.g. `convertOpenAIStreamToAnthropic`, `convertOpenAIStreamToResponses`, and
-Gemini's `transformStreamIn` / `transformStreamOut`) bridge the IR delta stream.
-Of the four transformers only Gemini exposes **both** `transformStreamIn` and
-`transformStreamOut`; Anthropic exposes `transformStreamIn` only.
+The executor has hard guards for request shapes that cannot safely cross a
+protocol boundary. The attempt is recorded as skipped and fallback can continue:
 
-- **OpenAI Chat:** classic `data:` chunks terminated by a `[DONE]` sentinel.
-- **OpenAI Responses:** **no `[DONE]` sentinel** — every event instead carries a
-  strictly monotonic `sequence_number`; the client reads completion from the
-  typed terminal event.
-- **Anthropic Messages:** event-typed SSE ending with `message_stop`.
-- **Gemini:** delta-based both inbound and outbound.
-- **Synthesized streams** (a non-streaming upstream replayed as SSE via
-  `synthesizeSSE`) follow the target's own framing — the OpenAI/Anthropic
-  synthetic streams **do** append `[DONE]`.
-
----
-
-## Tool / function calling
-
-- **Anthropic** tool names are sanitized to `^[A-Za-z0-9_]+` — letters, digits,
-  and underscore only (hyphens and other characters become `_`) — with a max
-  length of 64; collisions are disambiguated with an FNV-1a hash suffix so
-  distinct source names stay distinct after sanitization.
-- **Gemini** tool calls have **no wire id**. Inbound, Helm synthesizes a
-  deterministic `call_<name>_<occurrence>` id; outbound, that synthetic id is
-  dropped (Gemini never sees it).
-- `parallel_tool_calls` maps both ways where the target supports it.
-
----
-
-## Reasoning budget mapping
-
-`reasoning_effort` (`minimal|low|medium|high`) maps to each backend's native
-thinking knob. The band values differ per target:
-
-| effort | Anthropic (thinking budget) | Gemini (`thinkingConfig`) |
-|---|---|---|
-| minimal | 1024 | 128 |
-| low | 1024 | 1024 |
-| medium | 2048 | 8192 |
-| high | 4096 | 24576 |
-
-The Anthropic column is exact litellm parity (`minimal`/`low` both floor at 1024,
-`medium` 2048, `high` 4096); the extended tiers `xhigh` → 8192 and `max` → 16384
-continue above the four standard bands.
-
-Anthropic Messages also defaults `max_tokens` to **4096** when the client omits
-it (the field is required upstream but optional on the Helm face).
-
----
-
-## Cross-cutting field coverage (translated text protocols)
-
-These IR fields map **both ways** on every protocol that has a native surface for
-them; where a protocol lacks one, the cell above shows the degradation.
-
-- **Sampling / control:** `temperature`, `top_p`, `top_k`, `frequency_penalty`,
-  `presence_penalty`, `seed`, `stop`, `n`, `logprobs`, `top_logprobs`,
-  `parallel_tool_calls`, `stream_options.include_usage`, `reasoning_effort`,
-  `user`, `service_tier`.
-- **Reasoning / thinking:** a single bridge keeps `{type:"thinking"}` content
-  parts and the flat `message.reasoning_content` / `thinking_blocks` in sync, so
-  reasoning survives OpenAI ↔ Anthropic ↔ Responses ↔ Gemini in both directions
-  (non-streaming and streaming).
-- **Usage detail:** `reasoning_tokens`, `cache_creation_tokens`,
-  `prompt_tokens_details`, `completion_tokens_details` (per-modality on Gemini).
-  Cache reads are never double-counted: `input = prompt − cached`.
-- **Multimodal I/O:** typed `image` / `audio` / `video` / `document` content
-  parts. Each protocol maps to/from its native shape (OpenAI `image_url` /
-  `input_audio` / `file`; Anthropic image / document blocks; Gemini `inlineData`
-  by MIME + `fileData` + `videoMetadata`).
-- **`finish_reason`:** stays a free string in the IR; each protocol completes the
-  enum map **both ways**, and the raw value is always kept in
-  `provider_raw.stop_reason`.
-
----
-
-## `provider_raw` passthrough: the lossless bag
-
-Upstream data with no IR home is carried verbatim in `provider_raw` and
-re-emitted on a same-protocol round-trip. It is **never** sent to a *different*
-target's wire — every transformer strips `provider_raw` before serialization
-(the matrix tests assert this no-leak invariant on all 16 paths).
-
-| Source | `provider_raw` keys |
+| Skip reason | Trigger |
 |---|---|
-| **All** | `stop_reason` (raw finish_reason), `usage` (raw upstream usage) |
-| **OpenAI Chat** | `system_fingerprint` |
-| **Anthropic** | `stop_details` (Sonnet 4+), request `metadata`, per-message thinking blocks |
-| **OpenAI Responses** | response `reasoning` / `text` / `tool_choice` echo; request `store` / `previous_response_id` / `metadata` / `logit_bias`; legacy `function_call` (mapped to tool calls) |
-| **Gemini** | `safety_ratings`, `prompt_feedback` (request-side `safetySettings` / `thinkingConfig` pass through to the wire) |
-| **Guards** | `warnings` (`n_capped` / `data_loss`) |
+| `responses_previous_response_id_cross_protocol_blocked` | A Responses request relies on `previous_response_id` plus a tool-output history that cannot be reconstructed locally. |
+| `responses_native_tools_cross_protocol_blocked` | The Responses request contains non-function/native tools. |
+| `responses_native_items_cross_protocol_blocked` | The request contains native/custom/caller-linked or unknown Responses input items whose sequence cannot be represented safely. |
+| `responses_background_cross_protocol_blocked` | A Responses request sets `background: true` and the target is not Responses. |
+| `reasoning_history_incompatible` | A Responses reasoning-history request targets direct DeepSeek over OpenAI Chat, whose wire cannot safely represent that history. |
 
-**Out of scope here:** litellm's Vertex-only knobs (`labels`, `inference_geo`,
-`container`) are not wired into Helm's Gemini face today — Gemini passes through
-`safetySettings` / `thinkingConfig` instead. The `anthropic-beta` header is a
-provider-execution (OAuth) concern, not protocol-translation `provider_raw`.
+The Responses guards apply only when the target protocol is not Responses.
+Same-protocol native passthrough can still run.
 
----
+Routing also checks provider capabilities before dispatch. Unsupported image,
+audio, video, or document input can skip a candidate with the corresponding
+capability reason (for example `no_audio_support`,
+`no_video_support`, or `no_document_support`). Context-window,
+reasoning-effort, and provider-specific candidate guards run in the executor as
+separate concerns from protocol transformation.
 
-## Remaining gaps
+## Sampling and target-only controls
 
-Field coverage is asserted path-by-path against the litellm reference in
-`protocol-matrix.test.ts`. The remaining gaps are provider-specific edges —
-litellm's Vertex-only fields and true Responses session continuation — each a
-documented non-goal above, not a silent loss. Remote-image fetch on the Gemini
-output path is no longer unconditional: it degrades to a text placeholder by
-default but can be materialized into `inlineData` by the optional, default-off
-provider-layer `remoteMediaFetch` materializer (SSRF-guarded).
+Common modeled controls include `temperature`, `top_p`, `top_k`,
+`frequency_penalty`, `presence_penalty`, `seed`, `stop`, `n`,
+`logprobs`, `top_logprobs`, `parallel_tool_calls`,
+`reasoning_effort`, `user`, and `service_tier`. A target only receives a
+field when its renderer/provider path has a native surface or an explicit shim.
+
+The standalone Anthropic renderer has a guard helper that:
+
+- caps `n > 1` to one and can produce an `n_capped` warning;
+- can produce `data_loss` warnings for `logprobs`, `top_logprobs`,
+  `modalities`, `frequency_penalty`, `presence_penalty`, and `seed`.
+
+The shipping executor does not currently call
+`transformRequestInWithWarnings`. Therefore those warnings are unit-tested
+transformer behavior, not a guaranteed route-level telemetry contract. The
+provider path can omit unsupported Anthropic controls without attaching those
+specific warning records.
+
+## Reasoning effort mapping
+
+The transformer-level effort bands are:
+
+| effort | Anthropic thinking budget | Gemini thinking budget |
+|---|---:|---:|
+| `none` | 0 | target policy may strip/disable |
+| `minimal` | 1024 | 128 |
+| `low` | 1024 | 1024 |
+| `medium` | 2048 | 8192 |
+| `high` | 4096 | 24576 |
+| `xhigh` | 8192 | model policy maps or strips when unsupported |
+| `max` | 16384 | model policy maps or strips when unsupported |
+
+The executor can override these transformer defaults with lane-forced effort and
+model capability policy. It records mapping/stripping shims in request mutation
+metadata. Forced tool choice can suppress a conflicting forced reasoning change.
+
+Reasoning text/summary is broadly portable. Signatures, encrypted content,
+provider item IDs, and full reasoning history are provider-native state and are
+not universally portable. Anthropic invalid-thinking-signature recovery
+(strip only the invalid blocks and retry once) is not implemented.
+
+## `provider_raw` is internal and target-aware
+
+`provider_raw` stores modeled-adjacent data that has no shared IR field. It is
+not a promise to replay every source value to every target.
+
+The shipping executor re-emits only this target-specific request allowlist:
+
+| Target protocol | `provider_raw` keys allowed into the translated provider body |
+|---|---|
+| OpenAI Chat | `metadata`, `store` |
+| Anthropic Messages | `metadata`, `store`, `context_management`, `mcp_servers`, `container`, `speed`, `output_config` |
+| OpenAI Responses | `metadata`, `store`, `container`, `responses_input_items`, `responses_tools`, `prompt_cache_options`, `reasoning_config`, `previous_response_id`, `include`, `text`, `truncation`, `logit_bias`, `context_management` |
+| Gemini | `metadata` |
+
+Other non-null keys are stripped and the executor records their names in request
+mutation metadata. This is why Gemini `safetySettings` and Google GenAI extras
+that can round-trip inside the standalone transformer still do not reliably
+reach a Gemini provider through the shipping translated executor. Native Gemini
+passthrough avoids that target-aware IR replay step.
+
+Most client response renderers remove internal `provider_raw`. One source-backed
+discrepancy remains: `responsesTransformer.transformResponseOut` currently
+adds a top-level `provider_raw` object, and the non-stream Responses route returns
+that object on the translated path. Native passthrough returns the provider's
+native response and does not add it.
+
+## Streaming compatibility
+
+| Client wire | Framing and terminal behavior |
+|---|---|
+| OpenAI Chat | `data:` chunks followed by `data: [DONE]`. |
+| Anthropic Messages | Named typed events ending in `message_stop`; no `[DONE]`. |
+| OpenAI Responses | Named `response.*` events, no `[DONE]`. Translated completion ends in `response.completed` or `response.incomplete`; native streams may carry failed/cancelled terminals; gateway failures use `error`. |
+| Gemini | Nameless incremental `data:` frames, no `event:` and no `[DONE]`. |
+
+Native-passthrough routes preserve raw SSE frames when available, including
+comments and keepalives. The mutation ledger marks streaming passthrough as
+`stream_reframed` because the HTTP framework boundary can reframe the transport
+even when event names and data payloads are unchanged.
+
+Responses WebSocket uses the same three create paths as HTTP and serializes
+sequential `response.create` messages through the HTTP/SSE route. The Codex
+provider can reuse an upstream WebSocket session and fall back to HTTP/SSE. The
+current WebSocket terminal classifier does not include
+`response.cancelled`; see the known gaps below.
+
+A native Responses stream without reported terminal usage is settled with a
+bounded `estimated_partial` telemetry/budget estimate. Helm does not add that
+estimate to the client stream as provider-reported usage.
+
+## Native passthrough versus translation
+
+| Concern | Native passthrough | Translated path |
+|---|---|---|
+| Eligibility | Same source/target protocol, native carrier, flag enabled, no required compatibility rewrite, matching unary/stream provider method | Used when passthrough is disabled, unavailable, mismatched, or unsafe |
+| Unknown native body fields | Usually preserved except documented mutations/profile contracts | Only modeled IR fields and the target-aware raw allowlist survive |
+| Headers | Anthropic/Responses preserve safe client headers and replace auth; Gemini builds provider headers | Provider client constructs target headers |
+| Body | Original shape plus model/memory/policy/profile mutations | Re-rendered from IR/provider request |
+| Response | Provider-native JSON/SSE shape | Provider result converted through IR into the client protocol |
+| Fallback | Per attempt; a later cross-protocol candidate translates | Normal execution fallback |
+| Telemetry/governance | Fully active | Fully active |
+
+## Known implementation and verification gaps
+
+The following are current source facts, not future guarantees:
+
+1. **Responses matrix drift.**
+   `protocol-matrix.fixtures.ts` still marks Responses-target multimodal and
+   JSON-schema request rendering as TODO. The current
+   `contentToResponsesParts` and structured-output canonicalization implement
+   those paths. The fixture declarations and executable assertions need to be
+   reconciled before the matrix can be called authoritative.
+2. **Candidate multiplicity.**
+   Responses and Gemini request controls can ask for multiple outputs, but current
+   response conversion uses the first IR choice/candidate. Only OpenAI Chat
+   preserves multiple choices end to end.
+3. **Anthropic warning integration.**
+   `n_capped`/`data_loss` warning helpers are not consumed by the shipping
+   executor.
+4. **Translated Responses internal-field leak.**
+   Non-stream translated Responses output includes top-level `provider_raw`.
+5. **Citation targets.**
+   IR annotations render to Chat and Responses, not Anthropic or Gemini.
+6. **Advanced Gemini translated fields.**
+   The standalone transformer retains several Google-native extras, but the
+   shipping translated executor does not re-emit them through its Gemini raw
+   allowlist.
+7. **Anthropic thinking-signature retry.**
+   The targeted strip-invalid-signature-and-retry-once behavior is absent.
+8. **Responses WebSocket cancellation.**
+   `response.cancelled` is not classified as terminal by the ingress bridge or
+   Codex upstream WebSocket parser.
+9. **OpenAI Chat unknown fields.**
+   OpenAI Chat is modeled-field identity, not transparent arbitrary-field
+   forwarding.
+10. **Usage detail symmetry.**
+    Aggregate cache/cache-creation/reasoning totals are covered, but every native
+    per-modality detail is not preserved across every target.
+11. **Translated Responses generated media.**
+    The current IR-to-Responses response renderer emits text, reasoning,
+    annotations, logprobs, and function calls, but treats image parts as
+    inbound-only and does not emit them on the Responses output wire.
+
+## Executable evidence
+
+The matrix fixture file enumerates 4×4 source/target paths and these dimensions:
+request, response, streaming, tool call, multimodal, JSON schema, error, and
+usage. It also contains focused tests for annotations and usage detail.
+
+The fixture set is useful regression evidence, but its stale Responses TODOs mean
+the documents, fixtures, and source are not currently in lock-step. Treat route
+and provider code as authoritative until that debt is fixed.
+
+Focused deterministic verification:
+
+```bash
+CI=true pnpm test:protocol-compat:ast
+CI=true pnpm vitest run packages/core/src/protocol/protocol-matrix.test.ts packages/core/src/protocol/responses.test.ts apps/gateway/src/responses-websocket.test.ts
+```

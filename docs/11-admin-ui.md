@@ -3,10 +3,11 @@
 > Status: **implemented.** A SvelteKit + Tailwind SPA (`adapter-static`),
 > built into `apps/admin/build` and served by the gateway under `/admin`.
 
-After it boots, Helm ships a web console for operating the gateway: keys, lanes,
-policies, classifier rules, OAuth subscription providers, memory, request
-debugging/replay, runtime settings, and data cleanup. It is meant for
-**internal** use and is gated by HTTP Basic credentials.
+After it boots, Helm can mount a web console for operating the gateway: keys,
+lanes, policies, classifier rules, OAuth subscription providers, memory, request
+debugging/replay, runtime settings, and data cleanup. It is meant for **internal**
+use and is gated by HTTP Basic credentials. API-key holders use the separate
+[self-service portal](12-self-service-portal.md), not this global surface.
 
 ## Authentication: HTTP Basic
 
@@ -16,16 +17,11 @@ credential source (config/env vs. the KeyStore), and no RBAC (see
 [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md)).
 
 Credentials are resolved by `resolveAdminAuth`
-(`apps/gateway/src/middleware/basic-auth.ts`), with environment variables taking
-priority over config:
-
-```yaml
-# config/auth.yaml — optional admin block (env overrides take priority)
-admin:
-  enabled: true
-  username: admin       # or HELM_ADMIN_USER
-  password: change-me   # or HELM_ADMIN_PASSWORD
-```
+(`apps/gateway/src/middleware/basic-auth.ts`). In the shipping composition root,
+admin configuration is **environment-only**: `loadConfig()` has no top-level
+`admin` schema/file path, so a YAML `admin:` block is not a supported deployment
+control. (`resolveAdminAuth` retains a config argument for direct/headless callers
+and tests, but `buildServer()` cannot populate it from `config/*.yaml`.)
 
 ```bash
 # Environment form (recommended for Docker)
@@ -36,11 +32,10 @@ HELM_ADMIN_ENABLED=true   # optional explicit toggle
 
 Enable / mount rules:
 
-- **Configuring credentials auto-enables the admin surface.** Setting
+- **Providing environment credentials auto-enables the admin surface.** Setting
   `HELM_ADMIN_USER` + `HELM_ADMIN_PASSWORD` is the obvious "protect admin" action,
-  so it turns the surface on. Precedence: an explicit env flag
-  (`HELM_ADMIN_ENABLED`) > an explicit config flag (`admin.enabled`) > "credentials
-  present".
+  so it turns the surface on. In the shipping server, an explicit
+  `HELM_ADMIN_ENABLED` value takes precedence over "credentials present".
 - **When admin is not enabled, it is not mounted at all** — both `/admin` and
   `/admin/api/*` return 404, so the key-management and telemetry endpoints can
   never be reached unauthenticated.
@@ -53,10 +48,20 @@ Enable / mount rules:
 
 ## Internationalization
 
-The SPA ships in five languages, English by default
+The SPA ships in seven languages, English by default
 (`apps/admin/src/lib/config/languages.ts`): English (`en`), Simplified Chinese
-(`zh-hans`), Traditional Chinese (`zh-hant`), Japanese (`ja`), and Korean (`ko`).
-An unrecognized browser/stored language tag falls back to `en`.
+(`zh-hans`), Traditional Chinese (`zh-hant`), Japanese (`ja`), Korean (`ko`),
+Spanish (`es`), and Portuguese (`pt`). An unrecognized browser/stored language
+tag falls back to `en`.
+
+> **Screenshot provenance.** The ten images below were captured on 2026-07-05
+> from v0.25.2 and are retained as historical layout examples. This chapter's
+> prose was source-audited on 2026-07-16 and is the current contract; do not infer
+> current labels, data windows, or version from the screenshots. Known visible
+> drift includes the Keys column (`Usage (today)` now, not `Usage (24h)`) and the
+> Providers subtitle (`Connect AI subscriptions` now). The repository does not
+> yet have the rich deterministic seed-and-capture fixture needed to reproduce
+> all ten representative views safely.
 
 ## What the admin UI can do
 
@@ -77,9 +82,10 @@ admin pages.
 
 - **Keys** (`/keys`) — create, reveal, rotate, revoke, and permanently delete API
   keys; open copyable **Connect Client** snippets; and edit the full per-key cap
-  set: allowed lanes, custom-model permission, rate limits (RPM/TPM), usage
-  budgets (requests / tokens / spend with a budget window plus the over-budget
-  behavior and degrade lane), the concurrency limit, and the memory mode
+  set: operator-facing name, allowed lanes, custom-model permission, exact/glob
+  blocked models, client-requested Fast-mode permission, rate limits (RPM/TPM),
+  usage budgets (requests / tokens / spend with a budget window plus the
+  over-budget behavior and degrade lane), the concurrency limit, and memory mode
   (`off` / `observe` / `inject` with project id and thread source). Backed by the
   KeyStore (`/admin/api/keys` `GET` / `POST` / `PATCH` / `DELETE`), never YAML.
   Full key reveal works only for rows with encrypted recovery material; older
@@ -112,7 +118,7 @@ applied on the very next request, no restart, and durable across restarts. A
 failed write rejects the edit with the live config unchanged, so file and memory
 never diverge.
 
-![API Keys — per-key role, caps, rate limit, budget, memory mode, and 24h usage](assets/screenshots/09-keys.png)
+![Historical API Keys layout — current page shows per-key role, caps, rate limit, budget, memory mode, and today's usage](assets/screenshots/09-keys.png)
 
 ![Lanes — primary model plus an ordered, reorderable fallback chain per lane](assets/screenshots/04-lanes.png)
 
@@ -123,12 +129,13 @@ never diverge.
 ### Providers (OAuth subscriptions)
 
 - **Providers** (`/providers`) — connect and manage **OAuth subscription** backends
-  (Claude Pro/Max, ChatGPT Codex, GitHub Copilot). This surface requires
+  (Claude Pro/Max, ChatGPT Codex, GitHub Copilot, and experimental xAI
+  SuperGrok/X Premium). This surface requires
   `HELM_OAUTH_ENC_KEY` (a 32-byte token-encryption key); without it the OAuth admin
   endpoints are disabled, and the gateway refuses to start if a subscription
   provider is configured without it.
   - **Connect** runs the login flow — manual paste-the-redirect for Claude/Codex,
-    device-code for Copilot.
+    device-code for Copilot and xAI.
   - **Manage** opens a per-account dialog with tabs for **Models** (curate the
     exposed set — a live allow-list, not just a display filter), **Proxy**
     (per-account HTTP/HTTPS/SOCKS5 egress), and **Schedule** (`priority`,
@@ -139,9 +146,15 @@ never diverge.
     Strategies use sticky sessions, priority, live quota windows, usage cooldowns,
     and reset-credit soft scoring without exposing account labels as client
     models.
-  - **Quota controls** — the page shows today's served traffic, live quota windows,
-    usage-limit cooldowns, Codex reset-credit count, **Test** account action,
-    local **Reset usage**, and guarded Codex **Reset limit**.
+  - **Quota controls** — the page opens from cache-only overview reads; an explicit
+    refresh is globally coordinated and serializes account pulls. It shows today's
+    served traffic, live quota windows, usage-limit cooldowns, Codex reset-credit
+    count, **Test** account action, local **Reset usage**, and guarded Codex
+    **Reset limit**. A fresh saturated Codex weekly PULL can enter guarded
+    auto-reset; ordinary page reads never consume a credit. A reset-credit
+    cooldown that proves the same account already completed reset is shown as a
+    successful completed state, while reservation and unrelated 429 errors remain
+    errors.
   - **Hot-reload** — every change (connect, disconnect, curation, proxy, scheduling)
     re-synthesizes the live provider pool and applies on the next request, no restart.
   - **Token storage** — tokens are stored encrypted and never returned to the UI
@@ -163,9 +176,10 @@ never diverge.
 - **Settings** (`/settings`) — the runtime-mutable settings the operator can
   change without a restart (`/admin/api/settings`, validated against
   `RuntimeSettingsSchema`, fail-closed on an invalid body). A representative set:
-  `default_lane`; `capture_payloads` (default on) and `payload_retention_days`;
+  `default_lane`; visual-context compression (`off` / `observe` / `enabled`);
+  `capture_payloads` (default on) and `payload_retention_days`;
   the rate-limit master switch (`rate_limit_enabled`) and system default quota
-  (`rate_limit_default_rpm` / `_tpm`); visual context compression; the concurrency
+  (`rate_limit_default_rpm` / `_tpm`); the concurrency
   overflow queue (`concurrency_queue_enabled` plus `min_size` /
   `size_multiplier` / `wait_timeout_ms`); the per-OAuth-account user-message
   serial queue (its `enabled` / `delay` / `timeout`); cleanup schedule,
@@ -173,6 +187,11 @@ never diverge.
   and archive download; and `log_level`. See [07 · Error Model &
   Observability](07-observability.md) and [06 · Auth, API Keys & Rate
   Limits](06-auth-and-rate-limits.md).
+
+  `RuntimeSettingsSchema` also persists
+  `native_protocol_passthrough` (default `true`), but the current page has no
+  dedicated editor for that field; API clients performing a full settings PUT
+  must preserve it.
 
 ![System settings — payload capture & retention, rate-limit defaults, concurrency queue, and database maintenance](assets/screenshots/10-settings.png)
 
@@ -185,7 +204,9 @@ never diverge.
   same store is also reachable over MCP at `/mcp`; the page includes a **Connect
   via MCP** dialog for connector/client setup when MCP is enabled. See [13 ·
   Memory Admin & MCP](13-memory-admin-and-mcp.md) and [14 · Memory: Deep
-  Recall](14-memory-deep-recall.md).
+  Recall](14-memory-deep-recall.md). The summary cards read maintained counters
+  from `memory_threads`; they do not rescan the raw message/observation tables on
+  each page load.
 
 ![Memory — facts and reflections grouped by scope, with counts and last-updated](assets/screenshots/07-memory.png)
 
@@ -220,6 +241,8 @@ never diverge.
 ## Boundaries
 
 - Internal operations console only — no multi-tenancy and no fine-grained RBAC.
+- API-key-holder usage, owned request details, connection help, and scoped memory
+  curation live in `/portal`; the portal never inherits admin visibility.
 - No agent orchestration in the admin UI. Memory **content** is browsable and
   editable on the Memory page (by scope or key); the per-key memory **mode** is
   configured on the Keys page.

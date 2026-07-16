@@ -7,7 +7,9 @@ deployment is **Docker**.
 ## Design principles
 
 - **Single container, config-as-code.** One image plus one config directory boots
-  the gateway; you change configuration and restart, like nginx.
+  the gateway. Boot-only provider/server/store/catalog changes need a restart;
+  admin-owned lanes, policies, classifier rules, runtime settings, keys, memory,
+  and OAuth-account settings apply live through their documented stores/APIs.
 - **Lightweight, self-hostable.** The default store is SQLite (`helm.db`, a local
   file under the data volume), so there is no hard dependency on an external
   database. Postgres/Supabase is available via the same store abstraction (see
@@ -23,18 +25,19 @@ The published image is `ghcr.io/easymetaau/helm-api`. It is built on **Node 22**
 ```bash
 docker run -d --name helm \
   -p 8080:8080 \
-  -v "$(pwd)/config:/app/config" \   # config tree (see Configuration sources)
-  -v "$(pwd)/data:/app/data" \       # telemetry, keys, sqlite — persisted
-  -e HELM_ADMIN_USER=admin \         # admin UI Basic auth (see 11)
+  -v "$(pwd)/config:/app/config" \
+  -v "$(pwd)/data:/app/data" \
+  -e HELM_ADMIN_USER=admin \
   -e HELM_ADMIN_PASSWORD=change-me \
-  -e DEEPSEEK_API_KEY=sk-... \       # primary provider credential (required)
+  -e DEEPSEEK_API_KEY=sk-... \
   ghcr.io/easymetaau/helm-api:latest
 ```
 
 The image bakes the default `config/*.yaml` so it boots standalone on first run.
 That is safe because `providers.yaml` references credentials by **env-var name
 only**, never a plaintext key (Principle 7). Operators override the defaults by
-mounting their own directory at `/app/config`.
+mounting their own directory at `/app/config`. The built admin and portal SPAs are
+also copied into the runtime image at `apps/admin/build` and `apps/portal/build`.
 
 ### docker-compose
 
@@ -61,12 +64,22 @@ services:
     restart: unless-stopped
 ```
 
+Compose's project `.env` file is used for **variable interpolation**; it does not
+automatically pass every entry into the container. The checked-in compose file
+forwards only the variables shown in its `environment:` block (admin credentials,
+the required DeepSeek credential, the OAuth encryption key, and the optional xAI
+client-version override). To use optional providers or runtime overrides from
+`.env.example`, add those names to `environment:` or use an explicit `env_file:` /
+`docker run --env-file` deployment. The gateway itself does not load `.env`.
+
 ## Volumes
 
 - `/app/config` — the YAML config tree (see [Configuration sources](#configuration-sources)).
 - `/app/data` — persisted state (the directory named by `HELM_DATA_DIR`, default
   `./data`): the SQLite database `helm.db`, telemetry, captured payloads, and the
-  bootstrapped key file (`./data/helm-keys.json`).
+  bootstrap recovery file (`./data/helm-keys.json`). That historical filename
+  contains the freshly minted **plaintext root key**, written once with mode
+  `0600`; move it into a secret manager or remove it after first boot.
 
 ## Configuration sources
 
@@ -82,9 +95,13 @@ Configuration comes from **files** and **environment variables**, and env vars
   by the runtime model catalog loader, not by the top-level `loadConfig()` merge,
   and override the checked-in generated catalog (`pnpm sync:catalog` output).
 - Environment variables — the common ones are in `.env.example`:
-  - `HELM_HOST`, `HELM_PORT`, `HELM_BASE_PATH`
-  - `HELM_ADMIN_USER`, `HELM_ADMIN_PASSWORD`, `HELM_ADMIN_ENABLED`
-  - `HELM_REQUIRE_API_KEY`, `HELM_RATE_LIMIT_ENABLED`,
+  - `HELM_HOST`, `HELM_PORT`. `HELM_BASE_PATH` is parsed and validated, but the
+    current gateway still mounts routes at `/`; keep it `/` until route-prefix
+    mounting is implemented.
+  - `HELM_ADMIN_USER`, `HELM_ADMIN_PASSWORD`, `HELM_ADMIN_ENABLED`. These are the
+    shipping server's admin controls; there is currently no loaded admin YAML path.
+  - `HELM_REQUIRE_API_KEY` must remain `true`; `false` is rejected at config load
+    because anonymous inference is not supported. `HELM_RATE_LIMIT_ENABLED`,
     `HELM_REQUEST_TIMEOUT_MS`, `HELM_MAX_REQUEST_BYTES`,
     `HELM_SSE_HEARTBEAT_MS`
   - `HELM_SIGNAL_FEEDBACK_ENABLED` — opt into Agentic Signals feedback for ranked
@@ -94,12 +111,13 @@ Configuration comes from **files** and **environment variables**, and env vars
   - `HELM_DATA_DIR` (data directory, default `./data`), `HELM_KEYS_PERSIST_TO`,
     `HELM_ARCHIVE_DIR` (cleanup archive output, default under the data dir)
   - `HELM_OAUTH_ENC_KEY` — a 32-byte key used to encrypt recoverable API keys and
-    stored OAuth subscription tokens. **Mandatory whenever any OAuth subscription
-    provider is connected**: the gateway refuses to start if one is configured
-    without it, and the admin OAuth surface stays disabled until it is set. API
-    keys minted or rotated without it still authenticate, but cannot be revealed
-    later. The optional MCP OAuth shim also derives its signing key from this env
-    var when `memory.mcp.oauth.enabled` is true.
+    stored OAuth subscription tokens. It enables the OAuth admin/pool runtime; a
+    statically configured preset-OAuth provider fails startup when the key is
+    absent. Without the key, existing encrypted accounts cannot be loaded and the
+    OAuth admin operations are unavailable. API keys minted or rotated without it
+    still authenticate, but cannot be revealed later. The optional MCP OAuth shim
+    also derives its signing key from this env var and fails startup when
+    `memory.mcp.oauth.enabled` is true without it.
   - Memory LLM overrides: `HELM_MEMORY_LLM_ENABLED`, `HELM_MEMORY_LLM_MODEL`,
     `HELM_MEMORY_LLM_OBSERVATION_MODEL`, `HELM_MEMORY_LLM_REFLECTION_MODEL`,
     `HELM_MEMORY_LLM_FACTS_MODEL`, `HELM_MEMORY_LLM_TIMEOUT_MS`,
@@ -130,6 +148,12 @@ Configuration comes from **files** and **environment variables**, and env vars
     This does not affect token refresh/model discovery. Optional tuning:
     `HELM_TLS_BROWSER_PROFILE`, `HELM_TLS_OS_PROFILE`,
     `HELM_TLS_TRANSPORT_TIMEOUT_MS`.
+  - Subscription-client compatibility overrides:
+    `HELM_OPENAI_CODEX_CLIENT_VERSION` and `HELM_XAI_GROK_CLIENT_VERSION` must be
+    semantic versions and should normally stay unset so the checked-in, tested
+    defaults are used. They are emergency recovery controls for an upstream
+    minimum-version change, not routine tuning. `HELM_OAUTH_CALLBACK_HOST`
+    changes the local callback helper host (default `127.0.0.1`).
   - Upstream credentials such as `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`,
     `ZENMUX_API_KEY`, `OPENROUTER_API_KEY` — each maps to a `providers.yaml`
     entry's `api_key_env`. `DEEPSEEK_API_KEY` is required (the primary
@@ -144,21 +168,27 @@ never runs in a half-broken state (Principle 2).
 ## Startup behavior
 
 1. Load configuration (files + environment variables, env wins).
-2. If no API key exists, **mint a root key and print it once** (see [06 · Auth,
-   API Keys & Rate Limits](06-auth-and-rate-limits.md)).
-3. Start the HTTP server (the API plus the admin UI when admin credentials are
-   configured; see [11 · Admin UI](11-admin-ui.md)).
-4. Start the two background workers — the **signal scheduler** and the **memory
-   worker** — unless disabled by their env vars (above). Each timer is unref'd
-   and fail-open. Signal collection itself is off-request-path; routing reads the
-   aggregated rows only when `runtime.signal_feedback.enabled` is on.
-5. Begin serving once the health endpoint reports ready.
+2. If no API key exists, **mint a root key, write the configured `0600` recovery
+   file, and print the key once** (see [06 · Auth, API Keys & Rate
+   Limits](06-auth-and-rate-limits.md)).
+3. Mint a dedicated in-process internal key for memory/eval self-calls (fail-open
+   to the direct/deterministic path if that mint fails).
+4. Start the HTTP server: inference/compatibility routes, the unconditional
+   self-service portal, optional Memory MCP, and the admin UI only when admin
+   credentials/config enable it. See [Self-Service Portal](12-self-service-portal.md)
+   and [11 · Admin UI](11-admin-ui.md).
+5. Start the signal scheduler, memory worker, scheduled cleanup runner, and
+   deferred write queue unless their controls disable them. Timers are unref'd and
+   background failures are logged rather than turned into request failures.
+6. Begin serving once the health endpoint reports ready.
 
 ## Health & version
 
-- `GET /healthz` — unauthenticated readiness probe. Returns `200` when ready,
-  `503` when degraded (fail-closed: a probe failure reports not-ready, never a
-  hang or 500). The container `HEALTHCHECK` hits this endpoint.
+- `GET /healthz` — unauthenticated process readiness probe. The current production
+  wiring reports the booted store as `ok`; it is not a live SQL query or an
+  upstream-provider check. Handler failures become `503`. The container
+  `HEALTHCHECK` hits this endpoint, so combine it with logs, restart count, and
+  business-route checks for incident diagnosis.
 - `GET /version` — unauthenticated build info (`version`, `gitSha`, `builtAt`),
   injected at build time via the `HELM_VERSION` / `HELM_GIT_SHA` / `HELM_BUILT_AT`
   Docker build-args (CI fills them from the package version, commit, and a UTC

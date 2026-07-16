@@ -41,6 +41,12 @@ Change the model behind a lane? Edit one YAML line — or click in the dashboard
 
 </div>
 
+> **Screenshot note:** the Admin images were captured on 2026-07-05 from
+> v0.25.2 and are retained as historical layout examples. The prose in this
+> README reflects the current source; screenshot labels, data windows, and the
+> visible version badge may differ. See [11 · Admin UI](docs/11-admin-ui.md) for
+> full provenance.
+
 ## Quickstart
 
 **Prerequisites:** [Docker](https://docs.docker.com/get-docker/), or **Node ≥ 22** + **pnpm 10** to build from source.
@@ -54,7 +60,7 @@ cp .env.example .env
 # 2. Start it
 docker compose up -d
 
-# 3. Copy the root API key — generated and printed once on first boot
+# 3. Copy the root API key — printed once and written to data/helm-keys.json (0600)
 docker compose logs helm | grep -i "root API key"
 ```
 
@@ -62,10 +68,16 @@ docker compose logs helm | grep -i "root API key"
 |---|---|
 | Gateway | `http://localhost:8080` (status landing page at `/`) |
 | Dashboard | `http://localhost:8080/admin` — `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD` |
+| Key-holder portal | `http://localhost:8080/portal` — sign in with a Helm API key |
 | API docs | `GET /docs` (Swagger UI) · `GET /openapi.json` (OpenAPI 3.1, generated from the same Zod schemas the gateway validates with) |
 | Health / version | `GET /healthz` · `GET /version` |
 
 `docker-compose.yml` mounts `./config` and `./data` — config and database survive restarts. Credentials enter via environment variables only, never the image.
+
+> Compose uses `.env` for interpolation; it does not automatically inject every
+> entry. The checked-in compose file passes only names listed in its
+> `environment:` block. Add optional providers/runtime overrides there or use an
+> explicit `env_file`. The gateway itself does not load `.env`.
 
 ## What you get
 
@@ -73,22 +85,23 @@ docker compose logs helm | grep -i "root API key"
 | :---: | :--- | :--- |
 | 🔀 | **Multi-protocol text routing** | OpenAI Chat, Anthropic Messages, OpenAI Responses, and Google Gemini — streaming + non-streaming. Text requests share one routing core, with native passthrough when the inbound protocol already matches the selected upstream. |
 | 🖼️ | **Image generation with failover** | OpenAI Images (`/v1/images/generations`), Gemini image models on `generateContent`, and Gemini Interactions (`/v1beta/interactions`). Image requests can name an image model or image lane and fail over across providers without text classification. |
-| 🧭 | **Three-layer classification** | Deterministic rules (pure, zero-network, unit-tested — always on) → optional small-model eval (`temperature: 0`, cached, off by default — needs a configured eval model) → `balanced` lane as the fail-open sink. |
+| 🧭 | **Three-layer classification** | Deterministic rules (pure, zero-network, unit-tested — always on) → optional small-model eval (`temperature: 0`, cached, off by default — needs a configured eval model) → configured `runtime.default_lane` as the fail-open sink (`balanced` in the shipped config). |
 | 🛣️ | **Lanes + policies** | Requests route through lanes (`economy`, `balanced`, `premium`, plus task lanes like `coding`, `json`, `vision`, `tool_use`), never raw provider names. First-match policies can force a lane, restrict allowed lanes in config, and override reasoning effort. Each lane is a primary model plus an ordered fallback chain. Opt-in Agentic Signals can promote weak ranked lanes without overriding explicit pins or key caps. |
 | 🪪 | **Drop-in for fixed-model clients** | A client that hard-codes a vendor model id (Claude Code's `claude-opus-4-8`, an SDK locked to `gpt-5.5`) just works — no *400 unknown model*. A **standard key** classifies it like `auto`; a **custom-model key** can map each vendor family onto a lane via `model-aliases.yaml` (cap-bounded). |
 | 🛡️ | **Resilient execution** | Circuit breaker (OPEN/HALF_OPEN + single probe), capability filter with explicit skip reasons, `:free`-tier 429 skipping, per-key concurrency queueing. Client disconnects are never counted as provider faults. |
-| 🔐 | **OAuth subscriptions** | Route your Claude Pro/Max, ChatGPT Codex, and GitHub Copilot subscriptions as backends — pooled accounts, per-account model curation / egress proxy / scheduling, global pool strategies, live quota windows, and guarded Codex reset-credit recovery. *(Opt-in; read the [ToS warning](#oauth-subscription-providers-claude-promax-chatgpt-codex-github-copilot).)* |
-| 🔑 | **Keys with teeth** | Mandatory auth; keys authenticate by SHA-256 hash; encrypted recovery material can be stored for admin reveal/rotation. Per key: lane whitelist, custom-model permission, RPM/TPM limits, usage budgets (degrade or reject), concurrency cap, memory mode. Rotate in place, revoke softly, then delete permanently. |
-| 🧠 | **Memory middleware** | On by default: remembered context is injected before routing as a trailing turn; a background worker compresses and consolidates — compaction is **auto-adaptive and zero-config** (prices and context windows resolve from the model catalog; size / idle / context-pressure triggers). Summarize/merge default to deterministic local logic, with an **opt-in LLM path** (`config.memory.llm`, off by default). A forgetting/tiering layer (decay, reinforcement, retention) keeps it honest. Opt out per key or per request (`x-memory-mode: off`). |
+| 🔐 | **OAuth subscriptions** | Route Claude Pro/Max, ChatGPT Codex, GitHub Copilot, and experimental xAI/SuperGrok subscriptions as backends — pooled accounts, per-account model curation / egress proxy / scheduling, global pool strategies, live quota windows, and guarded Codex reset-credit recovery. *(Opt-in; read the [ToS warning](#oauth-subscription-providers-claude-promax-chatgpt-codex-github-copilot).)* |
+| 🔑 | **Keys with teeth** | Mandatory auth; keys authenticate by SHA-256 hash; encrypted recovery material can be stored for admin reveal/rotation. Per key: name, lane whitelist, custom/blocked/Fast-model controls, RPM/TPM limits, usage budgets (degrade or reject), concurrency cap, and memory defaults. Rotate in place, revoke softly, then delete permanently. |
+| 🧠 | **Memory middleware** | Opt in per key (`observe` or `inject`; new keys default to `off`). When enabled, remembered context is injected before routing as a trailing turn and a background worker compresses/consolidates it. Compaction is auto-adaptive; deterministic local summarization is the default, with an optional LLM path. Forgetting/tiering and MCP `memory_recall` are config-gated; hybrid recall is not automatic per-turn injection. Explicit `x-memory-*` headers override key defaults. |
 | 📊 | **Total observability** | A redacted decision record per request — classifier, policy, lane, every provider attempt, latency, fallbacks, cost. Verbatim payload capture to a separate table (on by default, 30-day retention). A payload inspector reads long fields fullscreen, previews inline images, and an editable **Retry** button replays any captured request in its own protocol. |
-| 🖥️ | **Admin dashboard** | SvelteKit SPA at `/admin` behind HTTP Basic when admin is enabled: overview, request debugger, key CRUD, lane/policy/classifier editors, OAuth providers, memory, and system settings. Lanes/policies/classifier write back to YAML and rebind live; keys, settings, providers, and memory persist through their stores/APIs. Five languages. |
+| 🖥️ | **Admin dashboard** | SvelteKit SPA at `/admin` behind HTTP Basic when admin is enabled: overview, request debugger, key CRUD, lane/policy/classifier editors, OAuth providers, memory, and system settings. Lanes/policies/classifier write back to YAML and rebind live; keys, settings, providers, and memory persist through their stores/APIs. Seven languages. |
+| 👤 | **Self-service portal** | Static SPA at `/portal`, authenticated with the holder's Helm key: own usage/budgets, connection guides, owned request/payload inspection, and scoped memory curation. Ownership checks and allow-list projections hide every other key and all provider/eval topology. Seven languages. |
 | 💾 | **Storage** | SQLite by default (one local file). Postgres / Supabase behind the same Store-port abstraction — switch with one env var. |
 
 **Roadmap:** Account/customer billing is intentionally out of scope. See [09 Roadmap](docs/09-roadmap.md).
 
 ## Inside the dashboard
 
-The gateway ships a SvelteKit console at `/admin` (HTTP Basic, five languages) when admin is enabled. Everything here is live: route rules rebind on the next request, runtime settings apply without a restart, provider-pool edits rebuild the next request's pool, and key changes take effect immediately.
+The gateway ships a SvelteKit console at `/admin` (HTTP Basic, seven languages) when admin is enabled. Everything here is live: route rules rebind on the next request, runtime settings apply without a restart, provider-pool edits rebuild the next request's pool, and key changes take effect immediately.
 
 **Every request, fully explained.** Open any request to follow the whole trail: which layer classified it, the policy that applied, the lane's full candidate chain, each provider actually tried, and the cost split down to cached tokens.
 
@@ -129,10 +142,17 @@ Each screen is annotated in **[11 · Admin UI](docs/11-admin-ui.md)**.
 
 This is the design rule everything else hangs off:
 
-- **Config and credentials are fail-closed.** Invalid YAML, a missing required key, an unknown store driver — the gateway refuses to start. It never runs half-configured.
-- **The request path is fail-open.** Classification, eval, memory, cache — any optional step that stumbles degrades quietly to the `balanced` lane and gets logged. A client sees a structured error only when *every* provider in the chain is genuinely down.
+- **Configuration and trust boundaries are fail-closed.** Invalid YAML, a missing
+  primary credential, an unknown store driver, bad auth, hard caps, or an invalid
+  request never silently opens access or invents routing state.
+- **Optional request-path helpers are fail-open within their own boundary.** A
+  classifier/eval failure selects the configured default lane (`balanced` by
+  default); memory failure leaves the request unchanged; optional signal/quota/
+  cache reads use their documented fallback and log it. Provider execution walks
+  the candidate chain, while deterministic client errors and an exhausted chain
+  return protocol-shaped structured errors.
 
-And two fallbacks that are never conflated: *classification fallback* (undecided → `balanced` lane) and *execution fallback* (provider failed → next model in the chain). Separate mechanisms, separate decision-record fields — you can always tell which one fired.
+And two fallbacks that are never conflated: *classification fallback* (undecided → configured default lane) and *execution fallback* (provider failed → next model in the chain). Separate mechanisms, separate decision-record fields — you can always tell which one fired.
 
 ## Architecture
 
@@ -143,15 +163,15 @@ CLIENT ── OpenAI · Anthropic · OpenAI Responses · Google Gemini · Images
           one base_url + one Helm key · send model:"auto"
              │
              ▼
-GATEWAY   apps/gateway (Hono) · thin HTTP shell — also serves /admin SPA + /docs
+GATEWAY   apps/gateway (Hono) · HTTP shell — serves /admin, /portal, /docs, optional /mcp
              │   normalize any protocol  ──▶  one InternalRequest (IR)
              ▼
 CORE      packages/core · the routing brain (imports no web framework)
              │
              ├─ auth        resolve sha256 key, load per-key caps        · fail-closed
              ├─ gate        rate limit (off) · usage budget (off)        · fail-closed
-             ├─ memory      inject remembered context (on by default)    · fail-open
-             ├─ classify    L1 rules ─uncertain→ L2 eval (off) ─→ balanced · fail-open
+             ├─ memory      optional observe/inject per key              · fail-open
+             ├─ classify    L1 rules ─uncertain→ L2 eval (off) ─→ default_lane · fail-open
              ├─ resolve     exact lane/model · alias shim · first-match policy
              │                  └─▶ lane → caps (+ signals) → fallback chain
              ├─ execute     capability filter → circuit breaker → provider
@@ -174,7 +194,8 @@ The core is **headless by contract**: routing, classification, provider executio
 helm-api/
 ├─ apps/
 │  ├─ gateway/   # Hono API + serves the dashboard + /healthz, /version
-│  └─ admin/     # SvelteKit + Tailwind dashboard (static SPA)
+│  ├─ admin/     # SvelteKit + Tailwind operator dashboard (static SPA)
+│  └─ portal/    # SvelteKit key-holder self-service portal (static SPA)
 ├─ packages/
 │  ├─ core/      # routing, classification, providers, protocol translation, storage ports (no framework)
 │  └─ shared/    # Zod schemas + shared types (single source of truth)
@@ -212,11 +233,16 @@ curl http://localhost:8080/v1/chat/completions \
 | Value | What Helm does |
 |---|---|
 | `auto` *(recommended)* | Classifies the request and routes it to the best lane. |
-| any model/lane on a **standard key** | Helm still classifies and routes as if you'd sent `auto` (never a 400) — the `model` field doesn't pick the lane. But if the model you named is already in the chosen lane's chain, Helm serves *that* candidate first. |
+| any model/lane on a **standard key** | Helm normally classifies and routes as if you'd sent `auto`; the `model` field doesn't pick the lane. If that model is already in the chosen lane's chain, Helm serves it first. An exact id blocked by this key is rejected before classification. |
 | a pinned vendor id, e.g. `claude-opus-4-8` — **custom-model key** | The compatibility shim maps it onto a lane (`config/model-aliases.yaml`), cap-bounded by the key's lanes. |
 | a lane name (`premium`) or exact alias (`deepseek/deepseek-v4-pro`) — **custom-model key** | Routes straight into that lane / model, skipping classification. |
 
-> A standard key only ever needs `auto`. The `model` field never changes which lane is chosen — but when the named model already sits in that lane's chain, Helm promotes it to the front (so Claude Code pinning `claude-sonnet-5` gets Sonnet, not the lane's primary; it falls back to the rest of the chain on failure). Pinning a lane, a vendor family, or an out-of-lane model requires a **custom-model** key (`allow_custom_model`). Lanes are operator config (`lanes.yaml` + dashboard).
+> A standard key only ever needs `auto`. Except for the key's absolute
+> `blocked_models` guard and exact image-model pinning, its `model` field does not
+> choose the lane. When the named text model already sits in the selected lane's
+> chain, Helm promotes it to the front. Pinning a lane, vendor family, or
+> out-of-lane text model requires a **custom-model** key (`allow_custom_model`).
+> Lanes are operator config (`lanes.yaml` + dashboard).
 
 ### Image generation
 
@@ -268,7 +294,8 @@ gemini-image:                       # request `model: "gemini-image"`
 
 Image lanes work for **any key** on the two dedicated endpoints (`/v1/images/generations`, `/v1beta/interactions`). On the Gemini `:generateContent` path, naming a lane follows the normal lane rule — it requires an `allow_custom_model` key — so for the broadest reach, point image SDKs at the dedicated endpoints.
 
-**Other endpoints** (full interactive docs at `/docs`, raw spec at `/openapi.json`):
+**Other endpoints** (`/docs` and `/openapi.json` cover the headline public API;
+the compatibility/helper inventory is documented below and in [05](docs/05-protocol-translation.md)):
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
@@ -278,6 +305,7 @@ Image lanes work for **any key** on the two dedicated endpoints (`/v1/images/gen
 | `POST /v1/messages/count_tokens` | API key | Anthropic-shaped token-count helper |
 | `/v1/responses/*` lifecycle helpers | API key | `input_tokens`, `compact`, retrieve/delete/cancel/input-items for Responses-compatible clients |
 | `POST /mcp` + OAuth discovery | API key or optional MCP OAuth | Optional memory MCP tools when `memory.mcp.enabled` is on |
+| `/portal` · `/portal/api/*` | API key for data API | Key-holder usage, owned requests/payloads, connection help, and scoped memory |
 | `/admin` · `/admin/api/*` | Basic auth | Dashboard + its JSON backend (mounted only when admin is enabled) |
 
 ## Configuration
@@ -286,15 +314,15 @@ Boot-time behavior lives in `config/*.yaml`, Zod-validated on load. **Invalid co
 
 | File | Controls | Live-editable |
 |---|---|---|
-| `server.yaml` | Host / port / base path | — |
-| `auth.yaml` | API key requirement + first-run root key | — |
+| `server.yaml` | Host / port; `base_path` is parsed but currently must remain `/` | — |
+| `auth.yaml` | Mandatory API-key invariant + first-run root-key recovery controls | — |
 | `runtime.yaml` | Request limits, rate-limit defaults, storage driver, opt-in signal feedback | partial |
 | `providers.yaml` | Upstream providers + model aliases (credentials by env-var **name** only) | — |
 | `lanes.yaml` | Each lane's primary model + fallback chain (quality, task, and vendor-family lanes) | ✅ persists |
 | `policies.yaml` | First-match rules that force a lane, restrict allowed lanes, or force reasoning effort | ✅ persists |
 | `classifier.yaml` | Built-in rules + the optional eval model | ✅ persists |
 | `model-aliases.yaml` | Maps a pinned vendor model id → lane / `auto` (compatibility shim, optional) | — |
-| `memory.yaml` | Forgetting/tiering knobs (on in the shipped config) · optional compaction trigger overrides (`compaction:`) · optional LLM summarizer (`llm:`, off by default). A leftover `observer:` block from older configs refuses startup | partial |
+| `memory.yaml` | Background formation, forgetting/tiering, MCP/OAuth, eager facts, and hybrid recall. The shipped config enables forgetting, but new keys still default to memory mode `off`. Optional LLM summarization is off by default; a legacy `observer:` block refuses startup | partial |
 | `capabilities.yaml` / `pricing.yaml` | Manual overrides on the model catalog (incl. prompt-cache read/write prices) | — |
 
 Most-used environment variables (env wins over YAML; full list in [`.env.example`](.env.example)):
@@ -309,7 +337,8 @@ Most-used environment variables (env wins over YAML; full list in [`.env.example
 | `HELM_STORE_DRIVER` | `sqlite` (default) or `supabase` |
 | `HELM_STORE_URL_ENV` | For `supabase`: the **name** of the env var holding the Postgres DSN |
 | `HELM_RATE_LIMIT_ENABLED` | Turn rate limiting on (off by default) |
-| `HELM_OAUTH_ENC_KEY` | 32-byte key encrypting recoverable API keys and stored OAuth tokens (**required** if any subscription provider is configured; needed for later API-key reveal) |
+| `HELM_OAUTH_ENC_KEY` | 32-byte key encrypting recoverable API keys and OAuth tokens; required to connect/load subscription pools, for static preset config, and for later API-key reveal |
+| `HELM_OPENAI_CODEX_CLIENT_VERSION` | Optional `x.y.z` emergency override for Codex subscription model discovery/client identity; normally leave unset |
 | `HELM_XAI_GROK_CLIENT_VERSION` | Optional semver override for xAI's Grok CLI proxy protocol; use only to recover from a confirmed upstream HTTP 426 minimum-version bump, then run a real-account smoke |
 
 > **Storage.** SQLite (`better-sqlite3`, a `helm.db` file under `./data`) is the default. For Postgres/Supabase, set `HELM_STORE_DRIVER=supabase` and point `HELM_STORE_URL_ENV` at the env var holding your DSN. Unknown drivers fail closed at startup.
@@ -320,7 +349,7 @@ Most-used environment variables (env wins over YAML; full list in [`.env.example
 
 A provider can authenticate with an **OAuth subscription** instead of a static key: log in from the dashboard (**Providers → Connect**). Claude Pro/Max and ChatGPT Codex use an authorization-code paste; GitHub Copilot uses a device code. Helm stores the rotating refresh token **encrypted at rest** and refreshes access tokens automatically.
 
-Set **`HELM_OAUTH_ENC_KEY`** (32 bytes: base64 or 64 hex chars) — Helm refuses to start if a subscription provider is configured without it. The same key encrypts API-key recovery material used by the admin reveal/rotate flows. Then add an `oauth: { provider: anthropic | github-copilot | openai-codex }` block to the provider (commented examples in `config/providers.yaml`; for Claude use `type: anthropic`).
+Set **`HELM_OAUTH_ENC_KEY`** (32 bytes: base64 or 64 hex chars). The same key encrypts API-key recovery material used by the admin reveal/rotate flows. For the built-in Claude, Copilot, Codex, and xAI pools, connect accounts in the dashboard; the runtime synthesizes their aliases and no YAML block is required. A static `oauth: { provider: ... }` block is only needed when defining a custom provider/alias, and then startup fails closed if the encryption key is absent.
 
 Pool **several accounts per provider**. Each account (**Providers → Manage**) gets its own:
 
@@ -347,7 +376,7 @@ xAI documents OAuth/device-code login for its own Grok CLI, but does **not** pub
 
 There is no public SuperGrok quota API contract. Helm therefore reads the same undocumented `GetGrokCreditsConfig` gRPC-Web method used by grok.com, using the account's existing xAI OAuth bearer and egress proxy. A valid weekly period is normalized into the Providers-page quota window; malformed, stale, oversized, redirected, or failed responses are cached briefly and fail open to the last stored snapshot or `—`. Helm never substitutes public `api.x.ai` credit limits or the separate monthly billing payload for the consumer subscription's weekly pool. Because this is a private upstream contract, a real-account quota smoke is required after every protocol change.
 
-Helm advertises the checked-in Grok CLI protocol version used by its live smoke. If the proxy later returns HTTP 426 with a newer minimum, temporarily set `HELM_XAI_GROK_CLIENT_VERSION` to that validated semver, repeat model discovery plus streaming/non-streaming/tool smokes, and upgrade Helm when a release updates the default. The authenticated catalog is filtered to text-capable `responses` / `chat` / `language` backends. Only live-verified Grok 4.5 and Composer capabilities are declared; unverified JSON, vision and extra-media support fails closed. Composer currently rejects an explicit `reasoning_effort` even though it may emit internal reasoning, so Helm strips that field for Composer. xAI does not expose a verified subscription output limit, so both entries keep `maxOutputTokens: null`: the 512-token connectivity smoke is not treated as a model ceiling, and Helm does not borrow the public API/OpenClaw 64k fallback. SuperGrok has no public per-token subscription price, so token usage is recorded while `cost_usd` remains `null` rather than borrowing public API pricing or reporting a misleading zero.
+Helm advertises the checked-in Grok CLI protocol version used by its live smoke. If the proxy later returns HTTP 426 with a newer minimum, temporarily set `HELM_XAI_GROK_CLIENT_VERSION` to that validated semver, repeat model discovery plus streaming/non-streaming/tool smokes, and upgrade Helm when a release updates the default. The authenticated catalog is filtered to text-capable `responses` / `chat` / `language` backends. Only live-verified capabilities are declared: Grok 4.5 has tools, streaming, reasoning effort, and verified image input; Composer has tools/streaming but rejects explicit `reasoning_effort` and image input. Unverified JSON and extra-media support fail closed. xAI does not expose a verified subscription output limit, so both entries keep `maxOutputTokens: null`. SuperGrok has no per-token subscription bill: Grok 4.5 telemetry and key-budget settlement deliberately use the published xAI public-API rates as an `api-equivalent` estimate, while unpriced Composer keeps `cost_usd: null` rather than reporting a misleading zero.
 
 > ⚠️ **Terms of service.** Routing a Claude/ChatGPT/Copilot **subscription** through a third-party gateway may violate the provider's ToS and can get accounts suspended. This is an opt-in feature for self-hosted personal use — **you are responsible** for compliance with your provider agreements. When in doubt, use a normal API key (`api_key_env`).
 
@@ -358,21 +387,26 @@ Requires **Node ≥ 22** and **pnpm 10**.
 ```bash
 pnpm install
 pnpm dev          # admin dashboard dev server (Vite) — see note below
-pnpm test         # Vitest unit tests
-pnpm exec vitest run --coverage # unit coverage with source-only include/exclude + thresholds
-pnpm test:e2e     # Playwright end-to-end tests
+pnpm --filter @helm/portal dev # portal dev server
+CI=true pnpm exec vitest run path/to/relevant.test.ts # targeted unit test
+CI=true pnpm test:e2e     # Playwright end-to-end suite (also a CI gate)
 pnpm typecheck    # tsc --noEmit across the workspace
 pnpm lint         # Biome
-pnpm build        # build the gateway + dashboard
+pnpm build        # build gateway + admin + portal + ops bundle
 pnpm sync:catalog # refresh the generated model catalog (capabilities + pricing)
 ```
 
 > `pnpm dev` starts only the admin SPA. The gateway has no watch script — run it built (`pnpm build` then `node apps/gateway/dist/index.js`) or via Docker.
 
-Tests come first: Vitest for the core, Playwright for full flows. Design decisions live in [`implementation-notes.md`](implementation-notes.md). Before a PR:
+Tests come first: Vitest for focused logic/routes and Playwright for full flows.
+Design decisions live in [`implementation-notes.md`](implementation-notes.md).
+The repository CI runs typecheck, lint, build, unit tests, Playwright, and Docker
+smoke jobs. On a development machine, keep Vitest runs targeted and set `CI=true`.
 
 ```bash
-pnpm typecheck && pnpm lint && pnpm test && pnpm test:e2e
+CI=true pnpm typecheck
+CI=true pnpm lint
+CI=true pnpm exec vitest run path/to/relevant.test.ts
 ```
 
 ## Documentation
@@ -390,6 +424,7 @@ Start at [`docs/README.md`](docs/README.md). For a visual tour of the pipeline, 
 [09 Roadmap](docs/09-roadmap.md) ·
 [10 Deployment](docs/10-deployment.md) ·
 [11 Admin UI](docs/11-admin-ui.md) ·
+[Self-Service Portal](docs/12-self-service-portal.md) ·
 [12 Memory Forgetting & Tiering](docs/12-memory-forgetting-and-tiering.md) ·
 [13 Memory Admin & MCP](docs/13-memory-admin-and-mcp.md) ·
 [14 Memory Deep Recall](docs/14-memory-deep-recall.md) ·

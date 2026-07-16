@@ -1,12 +1,17 @@
 # 06 · Auth, API Keys & Rate Limits
 
-> Status: **implemented**. Mandatory API-key auth, root-key bootstrap, and
-> per-key rate limits all ship in the gateway.
+> Status: **implemented**. Mandatory API-key auth, root-key bootstrap, key
+> governance, rate limits, rolling budgets, concurrency caps, bearer-scoped
+> self-service, and OAuth-account quota controls all ship in the gateway.
 
-Helm never allows anonymous access. Every request to the API surface
+Helm never allows anonymous access to a protected data or inference surface.
+Every request to the API surface
 (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`,
 `/v1beta/models/...:generateContent`, `/v1/images/generations`,
-`/v1beta/interactions`) must carry a valid API key. The admin UI is a separate surface with its own HTTP Basic
+`/v1beta/interactions`, `/v1/models`, `/v1/usage`, `/portal/api`, and the
+optional `/mcp`) must carry a valid API key or the explicitly configured MCP
+OAuth token. The landing page, health/version probes, and headline OpenAPI/Swagger
+documents are public. The admin UI is a separate surface with its own HTTP Basic
 credentials (see [11 · Admin UI](11-admin-ui.md)).
 
 ## Authentication
@@ -55,6 +60,7 @@ captured payload tables. Logs reference a key by `key_id` or `keyPrefix` only.
 require_api_key: true
 bootstrap:
   generate_if_missing: true            # on first start with no keys, mint a root key
+  persist_to: ./data/helm-keys.json     # write the freshly minted plaintext, mode 0600
   print_once: true                     # plaintext printed to the boot log exactly once
 ```
 
@@ -64,10 +70,19 @@ On first start, if the `KeyStore` contains **no** keys, the gateway mints a
 single `role=root` key (`bootstrapRootKey` in
 `packages/core/src/auth/bootstrap.ts`):
 
-- Only the sha256 **hash** and the display **prefix** are persisted for bootstrap
-  keys — never the plaintext.
-- The plaintext is printed to the boot log **exactly once** for the operator to
-  capture. It is not recoverable afterward.
+- Only the sha256 **hash** and the display **prefix** are persisted in the
+  `KeyStore`; the store never receives plaintext.
+- The freshly minted plaintext is written once to `bootstrap.persist_to` with
+  file mode `0600`. With the shipped config this is
+  `./data/helm-keys.json` (despite the historical filename, its contents are the
+  key text, not a JSON record). Protect or remove this operator recovery file
+  after importing the key into a secret manager.
+- When `print_once` is true, the same plaintext is also printed to the boot log
+  exactly once. When it is false, a `persist_to` write failure rolls the new row
+  back and aborts startup so the key cannot become unrecoverable.
+- Setting `generate_if_missing: false` deliberately leaves an empty store empty;
+  the gateway starts but all protected requests remain fail-closed until a key is
+  provisioned out of band.
 - The check is idempotent: if any key already exists, bootstrap does nothing
   across restarts.
 - A store read failure aborts startup (fail-closed) — Helm never degrades to
@@ -92,9 +107,11 @@ The stored record (`ApiKeyRecord`, single source of truth in
   prefix: string,           // e.g. helm_live_ab12 — display/debug only
   account_id: string,
   role: "root" | "user",
+  name: string | null,      // operator-facing label; never an auth/routing input
   allowed_lanes: string[] | null,   // allow-list of lanes (empty/null = any lane)
   allow_custom_model: boolean,      // may the client pin a model OR lane directly?
   blocked_models: string[] | null,  // case-insensitive model denylist patterns; supports * and ?
+  allow_fast_mode: boolean,         // may client-requested subscription Fast mode pass through?
   disabled: boolean,
 
   // Rate limit (null = inherit system default; 0 = explicitly unlimited)
@@ -114,7 +131,7 @@ The stored record (`ApiKeyRecord`, single source of truth in
   concurrency_limit: number | null,
 
   // Per-key memory defaults (issue #97) — x-memory-* headers override these
-  memory_mode: "off" | "observe" | "inject",   // new keys mint "inject"; root key forced "off"; legacy rows parse-default "off"
+  memory_mode: "off" | "observe" | "inject",   // new keys + root key mint "off"
   memory_project_id: string | null,
   memory_thread_source: "header" | "auto",     // new keys mint "auto"; root key forced "header"; legacy rows parse-default "header"
 }
@@ -128,7 +145,8 @@ through the request — downstream code reads the caps, never the store.
   key. It may store `secret_enc`, an AES-GCM ciphertext encrypted with
   `HELM_OAUTH_ENC_KEY`, for admin-only reveal. Existing rows without `secret_enc`
   remain unrecoverable until rotated.
-- **Per-key caps.** `allowed_lanes`, `allow_custom_model`, and `blocked_models`
+- **Per-key caps.** `allowed_lanes`, `allow_custom_model`, `blocked_models`,
+  `allow_fast_mode`, rate/budget/concurrency controls, and memory defaults
   constrain how a key may route. `allow_custom_model` lets the `model` field name
   a concrete model alias or a lane (docs/04); an explicit lane is still bounded by
   `allowed_lanes` and a violation is a 400, not a silent downgrade.
@@ -141,13 +159,15 @@ through the request — downstream code reads the caps, never the store.
   blacklist: `auto` and lane names are not blocked directly; the concrete models
   inside those lanes are filtered. (A per-key `max_lane` ceiling was retired —
   lanes are parallel, not a strict hierarchy, so the whitelist subsumes it; see
-  implementation-notes.md.)
+  implementation-notes.md.) `allow_fast_mode` gates a client's Fast-mode request;
+  a provider account that is explicitly configured to force Fast mode is a
+  separate operator decision.
 - **Rotation preserves history.** `KeyStore.rotateKey` replaces only `hash`,
   `prefix`, and optional `secret_enc` on the same `key_id`; name, account, role,
   caps, usage, and telemetry history stay attached to that key. `KeyStore.disable`
   is a soft revoke (`disabled = true`). `KeyStore.updateKey` is a partial PATCH
-  that writes only the per-key cap columns present in the patch (rate limits,
-  allowed lanes, custom-model flag, budgets, concurrency, memory defaults),
+  that writes only the fields present in the patch (name, rate limits, allowed
+  lanes, custom/blocked/Fast-model controls, budgets, concurrency, memory defaults),
   leaving omitted columns untouched; it never mutates `role` or account identity.
 - **Permanent deletion is an explicit second step.** An already-**revoked** key
   may be physically removed via `KeyStore.deleteKey` (admin:
@@ -282,13 +302,22 @@ They never grant a client more API-key budget.
 Quota collection is intentionally fail-open:
 
 - Codex quota windows are captured from `x-codex-*` response headers on served
-  requests. A saturated live Codex window with a future reset can newly park that
-  account until the reset timestamp.
-- The Providers page can also pull Codex quota windows from the upstream usage
-  endpoint for display and strategy scoring. That admin pull does **not** newly
-  auto-park an otherwise active account; it only preserves/syncs an existing
-  usage-limit cooldown when one is already present.
+  requests. A saturated live account-level weekly window with a future reset can
+  park that account and may enter the guarded auto-reset path.
+- An explicit Providers **Refresh** job pulls fresh Codex quota windows from the
+  upstream usage endpoint. This PULL is authoritative just like a served-response
+  PUSH: Helm persists it, synchronizes the live pool/cooldown, and, for an opted-in
+  account whose account-level weekly window is at 100%, runs the same guarded
+  auto-reset path. After a successful reset it forces another PULL so cache-only
+  views do not keep showing the pre-reset 100% snapshot.
+- Cache-only reads (`/admin/api/oauth/quota` and `/admin/api/oauth/overview`) never
+  fetch upstream, park/unpark an account, or consume a reset credit. They only
+  project the last stored state.
 - Anthropic quota windows are pulled from the provider usage endpoint.
+- Experimental xAI/SuperGrok weekly quota is read from the private grok.com
+  gRPC-Web credits method using the account's existing OAuth bearer and proxy.
+  It is not treated as a stable public API contract and fails open to cached or
+  unknown state.
 - Missing, stale, or failed quota reads render as unknown in the UI and make
   quota-aware strategies fall back toward the balanced behavior.
 
@@ -318,10 +347,26 @@ error. Helm guards the mutation:
 - reset credits may influence the `use_expiring` strategy as discounted virtual
   capacity, but **selection never consumes them**.
 
+## Key-holder self-service is bearer-scoped
+
+The static portal at `/portal` uses the same API key as the model endpoints. Its
+`/portal/api/*` handlers derive `key_id` and `account_id` only from the authenticated
+identity; caller-supplied scope values are ignored. A key holder can inspect this
+key's caps/usage/requests and edit only its memory mode, project, and thread-source
+defaults. It cannot rotate/revoke the key, change lanes/rate limits/budgets, see
+provider topology, or replay requests.
+
+Trace-id reads check ownership **before** loading a decision or payload and return
+the same 404 for missing and foreign traces. See
+[Self-Service Portal](12-self-service-portal.md) for the full projection and
+trust boundary.
+
 ## Admin authentication is separate
 
-API-key auth (this chapter) governs API traffic. The admin UI is gated by HTTP
-Basic credentials from config/env — a different header, a different credential
-source, and no RBAC. The two never cross: the API path never consults the admin
+API-key auth (this chapter) governs API traffic. The shipping admin UI is gated
+by HTTP Basic credentials from `HELM_ADMIN_*` environment variables — a different
+header, a different credential source, and no RBAC. (`resolveAdminAuth` has a
+config argument for direct callers/tests, but `buildServer()` does not load an
+admin YAML path.) The two never cross: the API path never consults the admin
 credentials, and the admin path never consults the KeyStore. See [11 · Admin
 UI](11-admin-ui.md).

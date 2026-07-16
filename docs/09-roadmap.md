@@ -1,149 +1,193 @@
-# 09 · Roadmap
+# 09 · Delivery Status and Roadmap
 
-> Status: **shipped — production.** The core gateway (routing, classification, provider
-> execution, protocol translation, telemetry) runs in production, and several major
-> subsystems have landed since the early releases: a memory middleware (observe +
-> inject + background workers, on by default), per-key budgets / rate limits /
-> concurrency limiting, runtime hot-reload settings with admin YAML write-back,
-> verbatim payload capture, four streaming inbound protocols, full OAuth subscription
-> providers, Agentic Signals feedback into ranked-lane routing, image lanes with
-> failover, Memory MCP, an admin-UI overhaul, auto-adaptive memory compaction, and permanent delete of revoked keys. The
-> "deferred" list below is what is genuinely still out of scope or not yet wired.
+> Status: **production implementation**. This chapter is a current delivery map,
+> not the original phase plan. The running version is defined by
+> [`package.json`](../package.json); source, route wiring, schemas, and tests are
+> authoritative.
+
+Helm is no longer a gateway skeleton. The routing pipeline, four translated text
+faces, image generation, key governance, OAuth pools, memory subsystem, admin UI,
+self-service portal, two storage adapters, cleanup, and release automation all
+ship. The final sections list the remaining implementation boundaries explicitly
+so a design document is not mistaken for completed behavior.
 
 ## Delivered
 
-### Core gateway
+### Routing and execution
 
-- **Skeleton.** HTTP gateway + mandatory API-key auth (root-key bootstrap when the
-  key store is empty) + telemetry persistence + Docker deployment (config/data
-  volumes). See [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md) and
-  [10 · Deployment](10-deployment.md).
-- **Routing core.** Layer-1 deterministic rule classifier + the default lanes + the
-  provider executor + capability filtering + per-model circuit breaker + in-chain
-  execution fallback. An uncertain classification falls open to `balanced`. See
-  [03 · Classification Cascade](03-classification.md) and
-  [04 · Routing & Lanes](04-routing-and-lanes.md).
-- **Eval layer.** The Layer-2 small-model evaluator with a content-hash cache,
-  **off by default**. When enabled, it runs only when Layer-1 confidence is below
-  the threshold; identical requests hit the cache instead of re-evaluating.
+- Framework-independent `packages/core` with an architecture test preventing
+  Hono/SvelteKit imports.
+- Deterministic Layer-1 classification, optional cached Layer-2 eval (off by
+  default), and configurable default-lane fallback.
+- Declarative quality, task, vendor-family, and image lanes; recursive expansion,
+  deduplication, cycle protection, policies, per-key lane caps, absolute model
+  blocking, compatibility aliases, requested-model promotion, and opt-in Agentic
+  Signals promotion.
+- Capability filtering, circuit breaker with a single HALF_OPEN probe,
+  pre-first-byte retries, stream-idle watchdog, provider fallback, free-tier 429
+  skipping, and client-abort isolation.
+- Static API-key providers and pooled OAuth subscriptions for Anthropic,
+  OpenAI Codex, GitHub Copilot, and experimental xAI/SuperGrok, including live
+  curation, proxies, scheduling, quota/cooldown state, and guarded reset credits.
 
-### Protocol translation
+See [03 · Classification](03-classification.md) and
+[04 · Routing & Lanes](04-routing-and-lanes.md).
 
-The Protocol Adapter accepts **four translated text protocols, all with streaming**:
+### Public and compatibility surfaces
 
-- OpenAI Chat `POST /v1/chat/completions`
-- Anthropic Messages `POST /v1/messages`
-- OpenAI Responses `POST /v1/responses` — native `response.*` SSE stream, terminated
-  by `response.completed` with a strictly monotonic `sequence_number` (no `[DONE]`).
-- Google Gemini `POST /v1beta/models/{model}:generateContent` and
-  `:streamGenerateContent?alt=sse` — auth via `x-goog-api-key`, native incremental
-  delta frames.
+- OpenAI Chat Completions, including `/chat`, Azure deployment, and engine
+  compatibility aliases.
+- Anthropic Messages plus `count_tokens` and the Claude event-logging compatibility
+  sink.
+- OpenAI Responses over HTTP and inbound WebSocket, including input-token,
+  compaction, retrieve/delete/cancel/input-items lifecycle helpers where the
+  selected provider supports them.
+- Google Gemini `generateContent` / `streamGenerateContent` on both `/v1beta/models`
+  and `/models` compatibility paths.
+- OpenAI Images and Gemini Interactions image generation, with image-lane failover.
+- Key-aware model discovery and key-scoped usage statistics.
+- Same-protocol native passthrough, cross-protocol translation, streaming state
+  machines, tool/reasoning/media handling, mutation ledgers, and protocol-shaped
+  errors.
 
-Image generation is served by dedicated image surfaces (`/v1/images/generations`
-and `/v1beta/interactions`) plus Gemini image handling on `generateContent`. An
-image request names either an exact image model or an image lane, skips text
-classification, and can fail over inside the configured image chain.
+`/docs` and `/openapi.json` describe the headline public API; they are not a
+complete inventory of compatibility, lifecycle, admin, portal, or MCP routes.
+See [05 · Protocol Translation](05-protocol-translation.md) and
+[Protocol Compatibility](protocol-compatibility.md) for the complete contract.
 
-Clients can mix SDKs; cross-protocol SSE conversion is covered per direction. See
-[05 · Protocol Translation](05-protocol-translation.md).
+### Authentication, governance, and user surfaces
 
-### Memory middleware
+- Mandatory SHA-256 API-key authentication. A first-run root key can be generated,
+  written once to the configured `0600` recovery file, and printed once.
+- Key naming, rotation, reveal when encrypted recovery material exists, soft
+  revocation, explicit post-revocation deletion, lane/model/Fast-mode controls,
+  RPM/TPM limiting, rolling request/token/spend budgets, concurrency queues, and
+  per-key memory defaults.
+- Basic-authenticated admin SPA with global routing/provider/key/memory/telemetry/
+  settings/cleanup control.
+- Bearer-authenticated `/portal` SPA with own-key usage and budgets, connection
+  help, ownership-gated request/payload inspection, and scoped memory curation.
 
-Memory defaults to **inject** for new keys and for requests with no `x-memory-mode`
-header (memory-on-by-default since #107); send `x-memory-mode: off` or set a per-key
-default of `off` to opt out (zero DB touch):
+See [06 · Auth & Rate Limits](06-auth-and-rate-limits.md),
+[11 · Admin UI](11-admin-ui.md), and
+[Self-Service Portal](12-self-service-portal.md).
 
-- **`observe`** — write-only capture of inbound/outbound turns.
-- **`inject`** — synchronous read-back that full-replaces the message array before
-  routing, then also writes. Wired on the chat, Messages, Responses, and Gemini
-  text-generation surfaces.
-- **Background `MemoryWorker`** runs process-wide by default (disable via
-  `HELM_MEMORY_WORKER_DISABLED=1`), dispatching observer / reflector / decay jobs.
-- **Forgetting & tiering** (short / mid / long, see [12 · Memory Tiering](12-memory-forgetting-and-tiering.md))
-  has shipped, gated behind `config.memory.forgetting.enabled`. The Zod schema
-  default is `false` (fail-safe), but the shipped `config/memory.yaml` enables it
-  (`true`) since #106, so a default deployment runs decay/reinforcement; set it to
-  `false` to get pre-docs/12 byte-identical behavior.
-- The `DecisionRecord` carries a redacted `memory` block (counts / ids only, never
-  content). See [08 · Memory Middleware](08-memory-middleware.md).
+### Observability, storage, and operations
 
-> Note: the observer / reflector / fact-extraction summarizers default to
-> **deterministic local logic** (concatenate + truncate). An optional LLM-backed
-> path (`config.memory.llm.enabled`, default `false`) calls the configured small
-> model from background jobs and falls back to the deterministic output on
-> failure, invalid JSON, or unavailable model. The `enable_llm_supersede`
-> contradiction-path remains gated and not yet wired.
+- Redacted `DecisionRecord` with classification, policies, attempts, protocol/
+  passthrough metadata, final model/account, stream outcome, token provenance,
+  cost provenance, and memory metadata.
+- Separate full-payload parts with runtime capture control and scheduled retention.
+- Deferred/batched writes, maintained memory summary counters, admin
+  single-flight/stale caches, structured logs, graceful drain, and scheduled
+  data cleanup/archive controls.
+- SQLite by default and Postgres/Supabase through the same Store ports; migrations
+  for both, with SQLite VACUUM exposed as an explicit/off-hours operation.
+- Docker image with admin and portal static assets, health/version endpoints,
+  unit/type/lint/build/Playwright/Docker CI jobs, and automated GHCR/GitHub releases.
 
-### OAuth subscription providers
+See [07 · Observability](07-observability.md) and
+[10 · Deployment](10-deployment.md).
 
-Three built-in subscription channels — Anthropic (Claude Pro/Max), GitHub Copilot,
-and OpenAI Codex (ChatGPT):
+### Memory
 
-- **Interactive login** from the dashboard — authorization-code paste for Anthropic
-  and OpenAI Codex, device-code for GitHub Copilot.
-- **Encrypted token store** (AES-256-GCM, survives restarts; requires
-  `HELM_OAUTH_ENC_KEY`).
-- **Multi-account pools** with per-account model curation, egress proxy
-  (http/https/socks5), device identity, and priority.
-- **Hot-reload** of all of the above, with no restart, and fail-closed subscription
-  routing.
+- Per-key `off` / `observe` / `inject` modes; new and root keys default to `off`,
+  while explicit request headers can override user-key defaults.
+- Account/project/thread isolation, automatic thread-signal derivation when a key
+  opts into it, cache-friendly trailing-turn injection, observation/reflection
+  workers, adaptive compaction, deterministic summarization, and an optional
+  fail-open LLM path.
+- Deterministic forgetting, reinforcement, archive/retention, eager salient-fact
+  extraction, fact injection, and hybrid vector/full-text/score recall.
+- Admin memory management, bearer-scoped Memory MCP tools, and the optional MCP
+  OAuth 2.1 compatibility shim.
 
-An experimental fourth channel, xAI SuperGrok/X Premium, is available by default.
-It uses OIDC discovery, RFC 8628 device code,
-rotating refresh tokens, live subscription model discovery, and the Grok CLI
-Responses proxy. Its weekly quota projection uses grok.com's private gRPC-Web credits
-method with fail-open caching and the same account proxy. It remains visibly labeled
-experimental until xAI publishes or grants a third-party OAuth client and endpoint
-contract.
+See [08 · Memory Middleware](08-memory-middleware.md),
+[12 · Forgetting & Tiering](12-memory-forgetting-and-tiering.md),
+[13 · Memory Admin & MCP](13-memory-admin-and-mcp.md), and
+[14 · Deep Recall](14-memory-deep-recall.md).
 
-### Platform & admin
+## Remaining implementation gaps
 
-- **Per-key caps.** Allowed-lanes whitelist, `allow_custom_model`, RPM/TPM rate
-  limits, usage budgets (requests / tokens / spend over a rolling window with
-  degrade-to-cheaper-lane or reject), and concurrency limiting — all metered **per
-  API key**.
-- **Runtime hot-reload settings.** Lanes, policies, classifier, and system settings
-  re-bind the live config and apply on the next request — no restart. Since #115,
-  classifier/lanes/policies edits are also persisted back to `config/*.yaml`
-  (comment-preserving, atomic, fail-closed) before the live config rebinds, so they
-  survive restarts rather than being reverted on restart.
-- **Agentic Signals feedback.** The background collector aggregates redacted
-  per-(task type, lane) health signals from decision records. Opt-in
-  `runtime.signal_feedback` lets routing promote a degraded ranked lane to a
-  healthier stronger ranked lane, while preserving explicit passthrough, policy
-  pins, usage-budget degradation, and policy/key caps. Signal reads fail open.
-- **Verbatim payload capture.** Full request/response bodies recorded to a separate
-  `request_payloads` table (default on, 30-day retention), toggleable in System
-  Settings.
-- **Admin UI overhaul.** Unified Providers UI + modals (key create/edit,
-  connect/disconnect/manage), requests-list pagination + filters, and progressive
-  key-caps dialogs. See [11 · Admin UI](11-admin-ui.md).
+These are current code boundaries, not promises hidden behind optimistic prose:
 
-## Deferred / out of scope
+1. **Route base path.** `server.base_path` / `HELM_BASE_PATH` is parsed and
+   validated, but the gateway still mounts routes at `/`. Deploy behind a reverse
+   proxy for prefixing and keep the configured value `/` until mounting support is
+   implemented.
+2. **OpenAPI completeness.** The generated OpenAPI document covers the headline
+   inference, image, model, usage, health, and version routes. Responses lifecycle,
+   inbound WebSocket, Anthropic helper aliases, MCP/OAuth, portal, and admin routes
+   are documented in prose/tests but are not all emitted into OpenAPI.
+3. **Cluster-wide coordination.** Postgres makes durable stores shareable, but the
+   circuit breaker, model/quota caches, sticky maps, admin refresh coordinator,
+   write queue, and several schedulers are process-local. Auth cache invalidation
+   across replicas is TTL-bounded. Multi-replica operation therefore does not yet
+   provide a distributed breaker or one global refresh/scheduler lease.
+4. **Compose environment forwarding.** The checked-in Compose file forwards only
+   the variables listed in its `environment:` block. `.env` is interpolation, not
+   an automatic `env_file`; optional provider/runtime variables require explicit
+   forwarding.
+5. **Memory contradiction supersede.** The deterministic supersede/reconciliation
+   path ships, but `consolidate.enable_llm_supersede: true` is deliberately rejected
+   because the separate LLM contradiction-discovery path is not wired.
+6. **Recall reranking.** Hybrid fact recall ships; a cross-encoder reranker remains
+   out of scope. Vector recall also requires a configured embedding model and
+   driver support; otherwise recall intentionally uses full-text + score only.
+7. **Protocol/provider edges.** The 4x4 translation matrix is covered, but some
+   provider-specific lifecycle, remote-media, server-tool, and modality semantics
+   cannot be losslessly generalized. Current concrete gaps include: translated
+   non-stream Responses can expose top-level `provider_raw`; multiple
+   choices/candidates collapse to the first result on some target faces;
+   IR-generated images (for example, Gemini `inlineData` output) are not rendered
+   by the translated Responses response path;
+   Anthropic-target data-loss warnings are not consumed by the shipping executor;
+   annotations re-render only to Chat/Responses; advanced Gemini fields rely on
+   native passthrough for best fidelity; Responses WebSocket
+   `response.cancelled` is not treated as terminal; and Responses usage does not
+   preserve every modality-detail field. The canonical evidence is kept in
+   [Protocol Compatibility](protocol-compatibility.md) and the
+   [LiteLLM Gap Record](protocol-translation-litellm-gap-spec.md).
+8. **Parsed routing controls that are not fully active.** `lane.constraints` is
+   schema/admin-visible but is not carried into `ExecutionPlan`; capability gates
+   currently come from request-derived constraints. `classifier.rules.enabled`
+   does not disable Layer 1, and `eval.cache.enabled` does not disable the eval
+   cache. Policies accept `project_id`, but the live policy context always supplies
+   `null`, so a string project policy cannot match. Finally, `allowed_lanes` is
+   enforced only when the array is non-empty: `[]` (including a disjoint policy
+   intersection) currently behaves as unconstrained rather than deny-all.
+9. **Admin YAML configuration.** `resolveAdminAuth` accepts a config object for
+   direct callers/tests, but the shipping `loadConfig()` schema has no admin path.
+   `buildServer()` admin enablement and credentials are therefore effectively
+   `HELM_ADMIN_*` environment-only.
+10. **Memory recall/observability edges.** Hybrid P8 recall is exposed through
+    `memory_recall` MCP; it is not automatic per-turn fact retrieval in the inject
+    path. Manual fact mutations do not enqueue an embedding immediately, so the
+    vector leg can lag until the embedding worker discovers the row. The Postgres
+    vector path requires `pgvector` and currently has no ANN index. Memory worker
+    cost-sink interfaces are wired as no-ops in the composition root, and the
+    `DecisionRecord.memory` block does not report injected-fact ids/counts.
 
-Verified against the code and `implementation-notes.md`:
+## Deliberate non-goals
 
-- **Account-level credit accounting.** Per-key RPM/TPM and budgets have shipped.
-  Helm is an internal/self-hosted gateway with no account/customer billing subject,
-  so account-level / customer credit accounting is **out of scope** (not merely
-  deferred). See [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md).
+- No hosted SaaS control plane, customer billing ledger, markup, or account-level
+  credit system. Helm's budgets are per API key and operator-owned.
+- No multi-user admin RBAC. Admin Basic auth is one trusted operator boundary;
+  key holders use the isolated portal.
+- No Redis or mandatory external queue. This keeps a single-node deployment small,
+  with the process-local scaling tradeoffs stated above.
+- No promise that consumer subscription routing is permitted by a provider's
+  terms. Claude/ChatGPT/Copilot subscription use is opt-in; xAI remains explicitly
+  experimental until a stable third-party contract exists.
+- No silent best-effort for unsupported security/config knobs. Invalid config,
+  unknown fields on strict schemas, missing required secrets, and unsupported
+  enabled features fail closed.
 
-## Success criteria
+## Current acceptance boundary
 
-- A new client can point an OpenAI-compatible SDK at Helm and get usable routing
-  with no custom config.
-- The default economy / balanced / premium lanes work out of the box, with LLM
-  evaluation off by default.
-- On first start with no key, a root key is generated; requests without a key are
-  rejected.
-- Layer-1 rules route directly to the matching lane when classification is
-  certain; an uncertain request with eval off falls to `balanced`.
-- With eval on, the small model's verdict selects a lane, and an identical request
-  hits the cache instead of re-evaluating.
-- A coding request routes to a coding lane when one is configured, otherwise it
-  falls back to premium or balanced.
-- A request with a JSON constraint is never silently routed to a model that would
-  ignore that constraint.
-- Any surprising provider choice can be explained from the request log (which
-  layer, which rule, which provider attempt). See [07 · Error Model &
-  Observability](07-observability.md).
+A release is considered complete only when the relevant behavior is proven in the
+smallest appropriate layer (pure/core test, gateway route test, protocol matrix,
+or browser e2e), the workspace quality gates pass, the Docker image boots, and
+`/version` identifies the intended build. Production deployment additionally
+requires health, container, log, and changed-business-route evidence; a merged
+commit or published tag alone is not runtime proof.

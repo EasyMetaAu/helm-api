@@ -53,8 +53,9 @@ Translation](05-protocol-translation.md)).
 Two cases never become a generic 5xx leak (`apps/gateway/src/middleware/error-handler.ts`):
 
 - An **unknown / non-`HelmError` throw** falls back to a redacted
-  `upstream_error` (502) — fail-open (Principle 3), with no stack or raw message
-  leaked to the client.
+  `upstream_error` (502) at the global error boundary, with no stack or raw
+  message leaked to the client. This is not the classifier's fail-open path; an
+  unexpected request-handler failure still terminates that request.
 - A **client-initiated disconnect** is not a provider fault and not a server
   timeout: the handler detects the client's own abort signal and returns **499**
   (not a 5xx, no synthesized 504; see [02 · Architecture](02-architecture.md)).
@@ -81,14 +82,23 @@ plaintext key and no private payload. The record holds:
   `provider_model` when known, `skipped` + `skip_reason`, status, `error_class`,
   latency, cost, and `error_detail` (the real upstream status + redacted message
   + redacted `provider_raw`, captured even when a later candidate served the
-  request).
+  request). Native/translated execution also records body-free protocol metadata:
+  whether passthrough was considered/used, its disable reason, source/target/
+  response protocols, and mutation codes/counters. It never stores request values
+  in the decision record.
 - `final`: the served model alias / provider model, status, and error reason.
 - `serving_account`: the final OAuth subscription account (`provider_id` +
   account label) when an OAuth pool served the request; otherwise `null`.
 - `latency_total_ms`, `fallback_count` (execution-stage count), and
   `cost_breakdown` (`eval_usd` / `completion_usd` / `total_usd`). Where the
-  protocol exposes it, payload metadata also carries token usage, generation
-  time, and throughput fields for the request-detail page.
+  protocol exposes it, `usage` retains prompt/completion/cache counts plus the
+  provider-confirmed service tier, inference geography, cache-write TTL buckets,
+  audio/image token partitions, and relay-billed cost. `null` means unknown; a
+  measured zero remains `0`. The record also carries `generation_ms` for streamed
+  output and `stream_outcome` (`completed`, `incomplete`, `failed`,
+  `client_aborted`, or `truncated`). A terminal-less Responses stream may carry
+  `measurement: estimated_partial` and API-equivalent catalog cost; it is never
+  presented as provider-reported billing.
 - `memory`: stamped by the gateway **after** the inject phase ran (the routing
   core never touches memory); `null` when memory inject was off / skipped /
   failed. Counts and ids only — **never memory content** (Principle 7):
@@ -137,12 +147,19 @@ never bloats the decision JSON.
 - `capture_payloads` defaults to **ON** (`RuntimeSettingsSchema`) and is
   toggleable at runtime from the admin "System Settings" page; toggled off, the
   capture path is skipped entirely (zero storage).
+- Runtime settings are stored in `config_kv`. If that persisted blob is malformed
+  or no longer matches the schema, settings load fail-open to safe defaults with
+  **payload capture forced off** until the operator saves a valid object; an
+  unreadable convenience setting must not increase plaintext retention.
 - `payload_retention_days` (default 30) bounds the storage footprint and the
-  exposure window; older payloads are auto-pruned.
+  exposure window. The scheduled cleanup runner owns pruning independently of
+  whether capture is currently enabled or new traffic is arriving.
 - Capture is **not** redacted — it is the verbatim client request body plus the
-  assembled provider response. It still carries no plaintext API key, because the
-  bearer key lives in the `Authorization` header, never in the chat body that is
-  stored.
+  assembled provider response, with the exact post-injection/translation upstream
+  request stored as a separate part when available. Helm's bearer credential is
+  not copied from the Authorization header into these rows, but application
+  payloads may themselves contain secrets; protect and back up the database as
+  sensitive data.
 - Writes are idempotent (upsert by `request_id`): a streamed response may write
   the request first, then backfill the assembled response.
 
@@ -176,3 +193,21 @@ overview, compares client vs upstream request bodies, and shows SSE event stream
 when they were captured. The editable **Retry** action replays the captured body
 through its original protocol as a new trace and displays precise non-retryable
 states instead of hiding them behind a generic failure.
+
+The high-traffic admin summary reads use a small process-local
+single-flight/stale-while-revalidate cache. `/admin/api/stats` and
+`/admin/api/keys/usage` return `X-Helm-Cache: miss|coalesced|fresh|stale`; stale
+last-known-good data may be served while one refresh runs. Memory summary counts
+come from maintained `memory_threads` counters rather than scanning raw message
+and observation tables on every page load.
+
+## Self-service projection
+
+The key-holder portal is a narrower observability consumer, not another admin
+view. `/portal/api/requests*` forces every query to the authenticated `key_id`;
+trace detail and payload access check ownership before reading. Its whitelist
+projection exposes the selected lane, public served-model alias, terminal status,
+latency, total cost, and four basic token counts, but omits classifier/eval
+reasoning, policies, provider attempts, wire models, subscription accounts, and
+upstream payloads. Payload access is limited to the owned client request/response
+parts. See [Self-Service Portal](12-self-service-portal.md).

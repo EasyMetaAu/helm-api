@@ -9,7 +9,8 @@ its ordered chain. The framework-agnostic orchestrator is `routeRequest`
 ## Lane routing priority
 
 ```text
-image-output model             # exact image model → image lane, any key; suppressed while over-budget degrading
+blocked direct model           # per-key hard reject; lane names are not model patterns
+  > image-output model         # exact candidate (telemetry lane `image`), any key; suppressed while over-budget degrading
   > exact lane name            # configured lane; full fallback chain; allow_custom_model keys only
   > exact known model          # deployment-known model; single candidate; allow_custom_model keys only
   > exact model-alias entry    # fixed vendor id → lane / `auto`; cap-bounded; allow_custom_model keys only
@@ -18,8 +19,8 @@ image-output model             # exact image model → image lane, any key; supp
   > server-side policy         # a policy pin (use_lane)
   > task-specific lane         # a lane named after the detected task_type
   > complexity-fallback lane   # simple→economy / medium→balanced / complex→premium (NOT affected by default_lane)
-  > signal feedback (opt-in)   # promote degraded ranked lanes inside caps
   > default fallback lane      # System Settings `default_lane` (default `balanced`); used only if it exists, else `balanced`
+  > signal feedback (opt-in)   # post-selection promotion of degraded ranked lanes inside caps
 ```
 
 The **model-alias compatibility shim** and explicit model/lane passthrough are
@@ -39,6 +40,10 @@ model-alias shim. This pre-step is suppressed while a key is over-budget and
 forced to a degrade lane, so image requests cannot bypass budget enforcement. The
 two dedicated image endpoints use the same image-chain semantics outside the text
 router.
+
+A direct request that matches the key's `blocked_models` list is rejected before
+the image/explicit/classified branches above. Expanded lane chains are filtered by
+the same list later; see [Per-key model blocking](#per-key-model-blocking).
 
 Within the classified branch, the resolver applies its own priority-0
 short-circuit: if the classifier `decided_by` is `default` (classify() itself
@@ -147,12 +152,13 @@ Keys **without** `allow_custom_model` never let the `model` field steer the lane
 
 ### In-chain model promotion
 
-When a request is **classified** into a lane (any path that is *not* explicit
-passthrough — standard keys, and custom-model keys whose `model` mapped to
-`auto`), the router checks whether the client's requested model already appears
-in that lane's expanded candidate chain. If it does, that candidate is
-**promoted to the front**, so the client gets the exact model it asked for, with
-the rest of the chain still behind it as fallback.
+When a request reaches an expanded lane through classified routing or an
+alias-mapped lane, the router checks whether the client's requested model already
+appears in that candidate chain. If it does, that candidate is **promoted to the
+front**, so the client gets the exact model it asked for, with the rest of the
+chain still behind it as fallback. Alias-mapped family lanes normally already
+lead with the matching model, but broad compatibility mappings can benefit from
+the same reorder.
 
 This is **reorder-only** (route-request.ts, `promoteRequestedModel`): it never
 introduces a new candidate, so cost stays bounded by the operator-declared lane
@@ -167,8 +173,8 @@ Sonnet instead of the lane's primary.
 
 Promotion is **suppressed** wherever the routing brain deliberately overrode the
 client's choice: an over-budget `degrade` (the downgrade must not be bypassable by
-naming an in-chain expensive model) and an alias→`auto` rewrite. It does not run on
-explicit passthrough, where the named model already leads its own chain.
+naming an in-chain expensive model) and an alias→`auto` rewrite. It does not run
+on exact model or exact lane passthrough.
 
 ## Lanes
 
@@ -177,8 +183,15 @@ Lanes are defined in [`config/lanes.yaml`](../config/lanes.yaml) and validated b
 (principle 2). A lane is a declarative chain: a `primary` plus an ordered
 `fallback[]`, where each element is either a model **alias** (`provider/model`,
 resolved via `config/providers.yaml`) or the name of another lane (expanded
-recursively, deduped, cycle-safe). Optional `constraints` drive the Capability
-Filter (`require_tools` / `require_json` / `require_vision`).
+recursively, deduped, cycle-safe). `purpose` is descriptive and
+`reasoning_effort` is an active lane-level override.
+
+The optional `constraints` object (`require_tools`, `require_json`,
+`require_vision`, `min_context_tokens`, `max_latency_ms`) is schema-validated and
+visible to configuration tooling, but the current execution plan does **not**
+thread lane constraints into the Capability Filter. Runtime capability checks are
+derived from the normalized request and model catalog. Changing a lane constraint
+alone therefore does not alter candidate filtering today.
 
 The shipped quality/cost lanes (the three ranked lanes; `LANE_RANK` orders only
 these: economy=0 < balanced=1 < premium=2):
@@ -187,8 +200,9 @@ these: economy=0 < balanced=1 < premium=2):
 economy:
   purpose: Cheap and fast for simple tasks
   reasoning_effort: medium
-  primary: openai-codex/gpt-5.4-mini
+  primary: openai-codex/gpt-5.6-luna
   fallback:
+    - openai-codex/gpt-5.4-mini
     - anthropic/claude-haiku-4-5-20251001
     - deepseek/deepseek-v4-flash
     - openrouter/deepseek-v4-flash
@@ -198,7 +212,7 @@ economy:
 balanced:
   purpose: Default quality/cost tradeoff (classification fallback terminal)
   reasoning_effort: medium
-  primary: openai-codex/gpt-5.5
+  primary: openai-codex/gpt-5.6-terra
   fallback:
     - anthropic/claude-sonnet-5
     - deepseek/deepseek-v4-pro
@@ -209,14 +223,16 @@ balanced:
 premium:
   purpose: Strong reasoning and high quality
   reasoning_effort: high
-  primary: openai-codex/gpt-5.5
+  primary: openai-codex/gpt-5.6-sol
   fallback:
+    - xai/grok-4.5
     - anthropic/claude-opus-4-8
     - balanced
 ```
 
-`balanced` is **required** and must be healthy — it is the terminal of the
-classification fallback.
+`balanced` is schema-required as the last-resort floor. It is also the shipped
+`runtime.default_lane`; an operator may choose another existing terminal lane at
+runtime, but a missing/stale choice still falls back to `balanced`.
 
 The shipped task lanes (the lane resolver maps a classified `task_type` onto a
 same-named lane). These are **unranked** — incomparable to the quality/cost
@@ -226,7 +242,8 @@ lanes, so `applyCaps` treats an unrankable task lane conservatively when an
 ```yaml
 coding:
   purpose: Coding-capable models for code generation / editing
-  primary: openai-codex/gpt-5.5
+  reasoning_effort: high
+  primary: openai-codex/gpt-5.6-sol
   fallback: [premium, balanced]
 
 json:
@@ -248,7 +265,8 @@ vision:
 
 tool_use:
   purpose: Reliable function / tool calling
-  primary: openai-codex/gpt-5.5
+  reasoning_effort: high
+  primary: openai-codex/gpt-5.6-sol
   fallback: [premium]
   constraints:
     require_tools: true
@@ -287,8 +305,8 @@ request from the generic-lane backing.
 The shipped lanes deliberately mix subscription aliases and static API-key
 providers. Several quality and task lanes lead with subscription aliases such as
 `openai-codex/*` or `anthropic/*` (connect them in admin → Providers), but they
-also include static provider fallbacks such as DeepSeek, OpenRouter, ZenMux, and
-ZenMux Anthropic. An unconnected subscription alias is treated as an unavailable
+also include static provider fallbacks such as DeepSeek, OpenRouter, and ZenMux.
+An unconnected subscription alias is treated as an unavailable
 candidate and fails OPEN to the next fallback, never a 5xx by itself.
 
 The `*/auto` aliases (`zenmux/auto`, `openrouter/auto`) sit at the **tails of
@@ -301,10 +319,33 @@ request additionally prunes `object`-only backends (official DeepSeek →
 `openrouter/deepseek-v4-flash` mirror), while a bare `json_object` request still
 serves on the `object` tier.
 
+### Image-generation lanes
+
+The same file ships two image-only chains used by
+`POST /v1/images/generations` and `POST /v1beta/interactions`:
+
+```yaml
+gpt-image:
+  primary: gpt-image-2
+  fallback: []
+
+gemini-image:
+  primary: google/gemini-3.1-flash-image
+  fallback: [gemini-3.1-flash-image, gemini-3-pro-image]
+```
+
+These dedicated endpoints accept an exact image model or image-lane name for any
+valid API key, without `allow_custom_model` and without text classification. The
+normal per-key budget gate, `blocked_models` filter, provider resolution,
+capability checks, breaker, and in-chain failover still apply. OpenAI-compatible
+image requests and Gemini-native Interactions requests are adapted separately;
+the members of one lane should therefore use compatible request semantics.
+
 ### OAuth subscription account selection
 
 Lane routing stops at the provider/model alias. For OAuth subscription aliases
-(`anthropic/*`, `openai-codex/*`, `copilot/*` when connected through Providers),
+(`anthropic/*`, `openai-codex/*`, `github-copilot/*`, and experimental `xai/*`
+when connected through Providers),
 the provider pool performs a second, narrower choice: which concrete account
 serves this request. That choice is **not** a lane rewrite and does not expose the
 account as a client-facing model.
@@ -370,6 +411,18 @@ Caps behave differently from pins: while the **first** matching policy wins the
 pin and `reasoning_effort`, the `allowed_lanes` whitelist **accumulates**
 (intersection) across every matching policy, so a restrict policy placed after a
 pin policy still binds.
+
+Two current implementation details matter when authoring policies:
+
+- `project_id` remains in the schema for future trusted project routing, but the
+  live router always supplies `null`; a policy matching a string `project_id`
+  cannot currently match. Client-controlled memory project headers are
+  intentionally not trusted as routing authority.
+- `applyCaps` currently enforces an `allowed_lanes` result only when the array is
+  non-empty. An explicitly empty list—or disjoint matching policies whose
+  intersection becomes `[]`—therefore behaves as unconstrained today. Avoid empty
+  or disjoint cap sets; this is an implementation limitation, not a deny-all
+  representation.
 
 Reasoning effort precedence is explicit: `policy.reasoning_effort` overrides the
 selected lane's `reasoning_effort`, which overrides the client's request value.
@@ -443,6 +496,24 @@ Two cap layers apply, in order:
    to (for example) `[economy]` is honored even over a policy `use_lane` pin. See
    [06](06-auth-and-rate-limits.md).
 
+## Per-key model blocking
+
+`blocked_models` is independent of lane whitelisting. It matches concrete model
+ids/aliases case-insensitively, with `*` and `?` glob support:
+
+- a direct matching model request is rejected even when the key cannot use
+  explicit passthrough;
+- classified, alias-mapped, explicit-lane, and image-lane chains have matching
+  candidates removed before execution;
+- a lane name itself is not a model blacklist target; block the concrete aliases
+  produced by expansion;
+- if filtering removes every candidate, routing returns `invalid_request` without
+  calling a provider;
+- signal feedback will not promote into a lane whose whole expanded chain is
+  blocked for the key.
+
+The same cap is enforced by the dedicated Images and Interactions routes.
+
 ## Execution model and the two fallbacks
 
 The selected lane is expanded into an ordered candidate chain (primary →
@@ -450,19 +521,28 @@ fallback[], with lane references expanded recursively). The gateway execution
 adapter (`apps/gateway/src/routes/execute.ts`) then walks the chain, recording
 every attempt with its reason and latency:
 
-1. Try the primary.
-2. Skip a candidate the Capability Filter rejects (with an explicit skip reason).
-3. Skip a candidate whose circuit breaker is `OPEN`.
-4. On a provider error, timeout, or rate limit before the first valid chunk,
-   record the failure on the breaker and try the next candidate.
+1. Resolve the alias to its provider/client. An unavailable provider is recorded
+   as a skipped candidate.
+2. Ask the per-alias circuit breaker first; an `OPEN` circuit is skipped.
+3. Apply request-derived capability, protocol-history, candidate-compatibility,
+   and exact Anthropic context gates, each with an explicit skip reason.
+4. A genuine provider/transport failure before useful output normally records a
+   breaker failure and advances. Candidate-specific context/reasoning-history
+   rejections become capability skips; deterministic request-shape 4xx errors are
+   terminal `invalid_request`; OAuth credential/rate faults isolated to one pooled
+   account do not poison the alias-wide breaker.
 5. A `:free` alias that returns 429 is skipped without recording a breaker failure
    (free-tier throttling is not a health signal).
 6. A client abort terminates the chain as a non-provider fault — it records
    neither a failure nor a success and is **not** counted as
    `all_providers_failed`.
-7. If every candidate fails, return a structured `all_providers_failed` error; an
-   empty chain returns `lane_unavailable` (see
-   [07 · Error Model & Observability](07-observability.md)).
+7. Terminal errors preserve the reason: an actionable all-candidate context
+   overflow is `invalid_request` (400); no attempted candidate plus only hard
+   capability prunes is `capability_unsatisfiable` (422); an empty chain or an
+   enabled per-account user-message queue timeout is `lane_unavailable` (503);
+   other exhausted chains—including provider failures, unavailable providers, or
+   circuit-open candidates—are `all_providers_failed` (502). See
+   [07 · Error Model & Observability](07-observability.md).
 
 `fallback_count` counts only **non-skipped** attempts beyond the first (i.e.
 candidates actually attempted upstream, whether they succeeded or failed) —
@@ -470,7 +550,8 @@ candidates pruned by the Capability Filter or skipped for an OPEN breaker do not
 increment it.
 
 This in-chain model swap is the **execution fallback** — it never rewrites the
-lane. The **classification fallback** (→ `balanced`) is the separate mechanism
+lane. The **classification fallback** (→ the configured terminal lane, `balanced`
+by default) is the separate mechanism
 from [03](03-classification.md). Their fields in the decision record are distinct:
 classification fallback shows up as `classifier.decided_by` / `fallback_reason`,
 while execution fallback shows up as `provider_attempts` / `fallback_count`.

@@ -1,124 +1,311 @@
-# 13 — Memory Admin UI + Memory MCP Server
+# 13 · Memory Admin UI and Memory MCP Server
 
-> Status: **implemented**. The admin `/memory` page and optional `POST /mcp`
-> JSON-RPC memory server ship in the gateway. MCP is disabled by default and
-> enabled with `memory.mcp.enabled`.
-> Builds on [08 — memory middleware](08-memory-middleware.md), [11 — admin UI](11-admin-ui.md),
-> [12 — memory forgetting & tiering](12-memory-forgetting-and-tiering.md).
+> Current implementation reference, verified against the source on 2026-07-16.
+>
+> The Admin `/memory` page is implemented and mounted with the normal Admin
+> surface. The memory MCP endpoint is optional: `POST /mcp` exists only when
+> `memory.mcp.enabled=true` and the selected store implements the complete
+> management surface. MCP defaults off.
 
-## Problem
+Builds on [08 · Memory Middleware](08-memory-middleware.md),
+[12 · Forgetting and Tiering](12-memory-forgetting-and-tiering.md), and
+[14 · Memory Deep Recall](14-memory-deep-recall.md).
 
-The memory subsystem (threads → observations → reflections + facts) accumulates state. Operators and external agents need controlled ways to inspect and curate that state:
+## Management boundary
 
-- Operators cannot see, correct, or delete what the gateway has remembered. A wrong fact
-  ("user prefers X") lives until it is superseded by chance.
-- **External agents** (Claude Code, Codex, ChatGPT connectors, other tools) need a programmatic read/write surface without bypassing Helm's account isolation.
+The management surfaces expose the durable long tier:
 
-Helm exposes two surfaces over the **existing** `memory_facts` + `memory_reflections` tiers:
+- `memory_facts`;
+- `memory_reflections`.
 
-1. **Admin page** `/memory` — manage **facts + reflections**, with **By Key** and **By Scope** views.
-2. **Memory MCP server** `POST /mcp` — JSON-RPC MCP tools for CRUD, exact search, and deep recall; API-key authed by default, with an optional OAuth 2.1 shim for clients that cannot send raw API keys.
+They do not expose raw `memory_messages` or `memory_observations` content. The
+Admin page does show aggregate raw/observation counts and activity timestamps,
+but not those bodies.
 
-Raw `memory_messages` / `memory_observations` (the short/mid tiers) are intentionally **out of
-scope** — they are transient and internal; the long tier (facts + reflections) is the durable,
-human-meaningful memory worth managing.
+Admin is an operator surface protected by Admin HTTP Basic authentication. MCP
+is an account-scoped agent surface protected by a Helm API key or the optional
+MCP OAuth shim. Their authorization models are intentionally different:
 
-## Data model recap (no schema changes)
+- Admin may select `accountId` and manage multiple accounts in one deployment.
+- MCP always derives `accountId` from the authenticated identity; no tool
+  argument can override it.
 
-Memory is scoped by `ownerId = accountId` + optional `projectId / resourceId / threadId`. It is
-**not** keyed to an API Key. A Key resolves to an `accountId` and carries memory defaults
-(`memory_mode`, `memory_project_id`, `memory_thread_source`). **Multiple keys can share one
-account.** Therefore:
+## Scope and key semantics
 
-- **"By Key"** = facts/reflections for **(that key's account, that key's default project)**.
-  Two keys on the same account+project see the *same* memory; revoking a key does not isolate it.
-  The UI states this explicitly.
-- **"By Scope"** = browse the distinct `(account, project, resource, thread)` groups directly.
+The tenant boundary is `owner_id = accountId`. Project/resource/thread are
+in-account scopes.
 
-Bi-temporal fact fields stay as in doc 12: `validFrom` (became true), `invalidAt` (became false),
-`expiredAt` (system learned it was superseded), `status` (`active|archived|pruned`). The dedup
-boundary is `UNIQUE(owner_id, content_hash)` where `content_hash = sha256(normalized fact_text)`.
+A key's effective project is:
 
-## Surface 1 — Admin
+```text
+memory_project_id ?? key_id
+```
 
-### `MemoryStore` port methods (both SQLite + Postgres adapters)
+Consequences:
 
-These methods are additive on the port; routes fail closed when the active store does not implement the management surface.
+- keys are isolated by their own key id when no explicit project is configured;
+- several keys share memory only when they belong to the same account and are
+  configured with the same `memory_project_id`;
+- revoking a key does not delete its facts/reflections;
+- the Admin **By Key** view resolves the key to exactly this effective project,
+  not to an account-wide null project.
 
-| Method | Purpose |
+## `MemoryStore` management contract
+
+Both real adapters implement these optional port methods. The Admin route
+returns 503 when the active store lacks the required surface; `/mcp` is not
+mounted in that case.
+
+| Method | Current behavior |
 |---|---|
-| `listMemoryScopes({ accountId? })` | Enumerate `(account,project,resource,thread)` groups with fact/reflection counts + last-updated. **By Scope** tab. Facts ⊎ reflections via `UNION ALL` of grouped subqueries (SQLite has no `FULL OUTER JOIN`); reflections guarded `owner_id IS NOT NULL` (column is nullable). |
-| `getFactById / listFacts` | Read facts by scope, paginated, with an explicit `status` filter. **Admin reads must NOT blanket-apply `expired_at IS NULL`** — operators manage superseded/archived/pruned rows too. |
-| `updateFact` | Edit `factText` (→ recompute `contentHash`, **keep `subjectKey`**), `importance`, `status`, `invalidAt`. `UNIQUE(owner_id, content_hash)` collision → typed error → **409**, never a leaked 500. |
-| `deleteFact` | **Soft** delete: `status='pruned'` + stamp `expired_at`. The system's only hard delete remains retention. |
-| `listReflections / getReflectionById` | Read reflections (default latest active version per scope; `includeAllVersions` expands history). |
-| `updateReflectionText` | Edit reflection text **in place** — does **not** bump `version` (that stays the Reflector's machine-merge counter); recomputes `tokenEstimate`, stamps `updatedAt`. |
-| `deleteReflection` | **Soft** delete: `status='archived'` (so `getReflection(scope)` returns null → stops injection). |
+| `listMemoryScopes` | Groups active/unexpired facts and active reflections by `(account, project, resource, thread)`, with counts and latest activity. |
+| `getMemoryAdminStats` | Read-only storage, queue, stale-lease, and activity snapshot; no message bodies. |
+| `getFactById` | Account-guarded read by id, any status. |
+| `listFacts` | Paginated scope/search/status management read. `all` includes superseded/archived/pruned rows. |
+| `insertFactsReconciled` | Add/dedup/resurrect/supersede facts transactionally. |
+| `updateFact` | Edit text, importance, status, or `invalidAt`; text edit recomputes the hash but not `subjectKey`. |
+| `deleteFact` | Soft delete: `status='pruned'` and `expired_at=now`. |
+| `listReflections` | Paginated scope/status read; by default latest matching version per scope, with optional full version history. |
+| `getReflectionById` | Account-guarded read by id, any status. |
+| `updateReflectionText` | In-place text edit, token estimate refresh, and `updated_at` stamp; no version bump. |
+| `deleteReflection` | Two-stage: active scope versions become archived; deleting an already archived row hard-purges archived versions for that scope. |
+| `getReflectionVersionHighWater` | Maximum version across every status, used for monotonic new versions. |
 
-`insertFactsReconciled` gains an optional return `{ insertedIds, supersededIds } | void` (back-compat;
-existing callers ignore it) so the MCP `memory_add` tool can echo the new fact id.
+Fact text collisions raise `MemoryFactContentHashConflictError`; Admin maps this
+to HTTP 409 and MCP maps it to a tool-level error.
 
-### Admin API routes `/admin/api/memory/*` (HTTP Basic when admin is mounted)
+## Admin HTTP API
 
-`GET /scopes` · `GET /by-key/:keyId` (→ `{accountId, projectId}`) · `GET|… /facts` (list/get/patch/delete)
-· `GET|… /reflections` (list/get/patch/delete). Bodies Zod-validated (`.strict()`, fail-closed) before
-the store call; **400** bad body, **404** unknown id, **409** hash collision. `accountId` query param
-defaults to the composition-root account for single-account deploys.
+All routes are under `/admin/api/memory` and inherit Admin Basic Auth.
 
-### Admin SPA `/memory`
-
-`+page.svelte` + `+page.ts` + `lib/api/memory.ts`, reusing the Keys page patterns: `Modal.svelte`,
-the `.cards-table / .btn-* / .badge-* / .alert-*` recipes, `formatTimestamp`. A tab switcher
-(**By Key** / **By Scope**) over a shared Facts table + Reflections table; edit + soft-delete modals;
-status badges (`active / archived / pruned / superseded`). Nav entry added in `+layout.svelte`.
-
-## Surface 2 — Memory MCP server
-
-`POST /mcp`, **stateless JSON-RPC** (MCP Streamable-HTTP, non-streaming request/response), built on
-`@modelcontextprotocol/sdk` `Server` + `setRequestHandler('tools/list' | 'tools/call')`. CRUD tools
-need no SSE; this bridge is fully testable via Hono's `app.request()` (the SDK's Node-`req/res`
-`StreamableHTTPServerTransport` is not). Tool defs live in a transport-agnostic module so a later
-swap to the Web-standard transport is one file.
-
-- **Auth:** by default, the existing API-key auth (bearer → `identity.accountId` + memory defaults).
-- **Gating:** new config `memory.mcp.enabled` (default **false**, fail-closed). `/mcp` is mounted
-  only when enabled and a memory store exists; otherwise 404.
-- **Optional OAuth 2.1 shim:** `memory.mcp.oauth.enabled` exposes protected-resource and
-  authorization-server discovery plus authorize/token endpoints for ChatGPT-style MCP connectors.
-  The shim maps an OAuth token back to an existing API key/account and signs stateless access JWTs
-  with a key derived from `HELM_OAUTH_ENC_KEY`; startup fails if the shim is enabled without that key.
-- **Tenant isolation (non-negotiable):** every handler derives `accountId` from `identity` only.
-  Tool params may override `projectId/resourceId/threadId` but never the account; id-addressed
-  tools (`get/update/delete`) re-check `owner_id = accountId` → cross-tenant id returns not-found.
-
-### Tools (7, `type: "fact" | "reflection"` discriminator where applicable)
-
-| Tool | Maps to |
+| Method and path | Contract |
 |---|---|
-| `memory_add` | fact → `buildReconciledFactBatch` (cap 1) + `insertFactsReconciled` (gets dedup + same-subject supersede for free); reflection → `upsertReflection` at high-water+1 |
-| `memory_search` | `listFacts({ search })` / `listReflections` (active-only unless `includeInactive`) |
-| `memory_recall` | hybrid fact recall from docs/14: FTS/keyword + forgetting score, with an optional vector leg when embeddings are configured; fail-open to keyword/score if embeddings fail or are disabled |
-| `memory_list` | `listFacts` / `listReflections` (paginated) |
-| `memory_get` | `getFactById` / `getReflectionById` (account-guarded) |
-| `memory_update` | `updateFact` / `updateReflectionText` |
-| `memory_delete` | `deleteFact` (soft) / `deleteReflection` (soft) |
+| `GET /scopes` | Optional `accountId`; returns active scope summaries. |
+| `GET /stats` | Optional account/project/resource/thread filters; returns operational snapshot. Cached in-process for 10 seconds per exact scope. |
+| `GET /by-key/:keyId` | Resolves a key to `{key_id, accountId, effective projectId}`; 404 when absent. |
+| `GET /facts` | Filters: account/scope, `status`, `subjectKey`, `search`, `limit`, `offset`. Default status is `all`; default limit 50, max 200. |
+| `POST /facts` | Scope in query; strict body `{subjectText, factText, importance?}`. Returns created/resurrected row plus reconcile summary. |
+| `GET /facts/:id` | Account-guarded fact read. |
+| `PATCH /facts/:id` | Strict partial patch `{factText?, importance?, status?, invalidAt?}`. |
+| `DELETE /facts/:id` | Soft-prunes an active fact; 404 for unknown/cross-account/already-pruned id. |
+| `GET /reflections` | Filters: account/scope, `status=active|archived|all`, `includeAllVersions`, pagination. Default status is `all`. |
+| `GET /reflections/:id` | Account-guarded reflection read. |
+| `PATCH /reflections/:id` | Strict body `{reflectionText}`; edits in place. |
+| `DELETE /reflections/:id` | First call archives an active scope; call on archived row permanently purges archived versions. |
 
-## Decisions
+Bad strict Admin bodies return 400; unknown/cross-account ids return 404; fact
+hash collision returns 409. A store exception not explicitly mapped is allowed to
+surface as a management error; fail-open serving guarantees apply to model
+traffic, not privileged management mutations.
 
-- **MCP transport:** lightweight JSON-RPC bridge for the Streamable-HTTP MCP shape; the tool
-  implementation is transport-agnostic.
-- **Fact delete = soft (`pruned`).** Re-adding the same fact text resurrects the pruned fact rather
-  than silently deduping it away.
-- **Reflection edit edits text in place, no version bump.** `version` stays the Reflector's counter.
-- **MCP add reuses the reconcile path** (supersede preserved) rather than a raw insert.
-- **`memory.mcp.enabled` defaults false.** New port methods are optional; admin routes fail closed when the surface is missing, and `/mcp` is not mounted unless the MCP dependencies are available.
-- **`memory.mcp.oauth.enabled` defaults false.** The OAuth shim adds public discovery/authorize/token
-  endpoints, so operators must opt in explicitly and provide `HELM_OAUTH_ENC_KEY`.
+## Admin SPA `/memory`
 
-## Why this is safe (CLAUDE.md alignment)
+Current UI behavior:
 
-Admin + MCP are **management / agent** surfaces, distinct from the routing hot path, so they MAY
-return 4xx/5xx (the "routing never 5xx, degrade to balanced" rule is about `/v1` request handling,
-untouched here). Config is fail-closed (`.strict()` schema, default-off MCP). Zod schemas remain the
-single source of truth. The core memory logic stays framework-agnostic; only the gateway routes know
-Hono.
+- operational status cards for queue depth, oldest pending/running age, stale
+  running jobs, raw/derived row counts, and last activity;
+- shared refresh control and refresh cadence;
+- **By Scope** and **By Key** browsing;
+- reflections shown before facts for the selected scope;
+- fact text search, status filter, and pagination (25 rows per UI page);
+- status views for active, superseded, archived, pruned, and all facts;
+- add-fact flow using the same reconcile path as MCP;
+- in-place fact/reflection edits;
+- explicit soft-delete copy for facts and active reflections;
+- permanent-delete warning for an already archived reflection;
+- deep link `/memory?key=<keyId>` from key detail.
+
+The operational stats endpoint is important during incidents: raw message writes
+can be advancing while facts/reflections remain empty, and queue depth can show
+whether formation is delayed rather than disabled.
+
+## MCP HTTP transport
+
+The MCP route is a direct, stateless JSON-RPC 2.0 implementation of the
+non-streaming Streamable HTTP request/response shape. It does **not** currently
+use `@modelcontextprotocol/sdk` at runtime.
+
+Supported request methods:
+
+```text
+initialize
+ping
+tools/list
+tools/call
+```
+
+Supported protocol versions on initialize are `2025-11-25`, `2025-06-18`,
+`2025-03-26`, and `2024-11-05`. A supported requested version is echoed;
+otherwise the server falls back to `2025-06-18`.
+
+Transport details:
+
+- only `POST /mcp` is registered;
+- single messages and JSON-RPC batches are accepted;
+- notifications receive no JSON-RPC response; notification-only input returns
+  HTTP 202;
+- normal JSON-RPC and tool errors use HTTP 200 envelopes;
+- there is no SSE session, resumability, `Mcp-Session-Id`, GET stream, or DELETE
+  session endpoint;
+- resources, prompts, subscriptions, and completion methods are not exposed.
+
+The tool schemas use Zod validation, but unlike the strict Admin patch/create
+schemas they are ordinary `z.object(...)` schemas; unknown tool arguments are
+currently stripped rather than rejected.
+
+## MCP authentication and mounting
+
+With `memory.mcp.enabled=true`:
+
+1. the composition root checks the store with `supportsMemoryAdmin()`;
+2. it mounts auth before `/mcp`;
+3. it registers the MCP route only after both checks pass.
+
+When OAuth is off, the normal Helm Bearer API-key middleware is used. The MCP
+context receives:
+
+- `accountId` from the authenticated key;
+- `defaultProjectId` from the key's effective project;
+- no caller-controlled account field.
+
+Id-addressed reads/writes recheck `owner_id=accountId`, so a guessed foreign id
+is returned as not found.
+
+## MCP tools
+
+Seven tools are exposed.
+
+### `memory_add`
+
+```text
+{ type: fact|reflection, text, subject?, importance?, projectId?, resourceId?, threadId? }
+```
+
+- fact: normalizes through `buildReconciledFactBatch`, cap 1, then uses
+  `insertFactsReconciled`; returns `added`, `resurrected`, `superseded`, and
+  `deduped`;
+- reflection: writes a new row at scope high-water + 1.
+
+Scope defaults to the authenticated key's effective project.
+
+### `memory_search`
+
+Exact text-oriented search. Fact search uses the adapter's case-insensitive
+substring filter. Reflection search loads up to 1000 matching-scope rows and
+applies lowercase `includes()` in JavaScript before the requested limit.
+`includeInactive` switches management visibility on.
+
+### `memory_recall`
+
+Deep fact recall from doc 14. It uses hybrid fact retrieval when enabled and
+available, otherwise returns the ordinary fact substring result with
+`degraded:true`. A query embedding failure drops only the vector leg. Successful
+hybrid results receive a fire-and-forget fact reference bump.
+
+### `memory_list`
+
+Paginated fact or reflection list. Active only by default; `includeInactive`
+uses `all`.
+
+### `memory_get`
+
+Fetches one fact/reflection by id with an account guard. Missing ids are
+tool-level errors.
+
+### `memory_update`
+
+- fact: text, importance, status, and nullable ISO `invalidAt`;
+- reflection: `text` is required and edited in place without version bump.
+
+### `memory_delete`
+
+- fact: soft-prunes;
+- active reflection: archives its scope;
+- already archived reflection: the underlying store performs the second-stage
+  permanent purge.
+
+The tool returns `{deleted, id}` even when `deleted` is false; callers should
+inspect the boolean.
+
+## Optional MCP OAuth shim
+
+`memory.mcp.oauth.enabled=true` adds unauthenticated authorization-server
+endpoints in front of the protected MCP resource:
+
+```text
+GET  /.well-known/oauth-protected-resource
+GET  /.well-known/oauth-protected-resource/mcp
+GET  /.well-known/oauth-authorization-server
+GET  /.well-known/oauth-authorization-server/mcp
+GET  /authorize
+POST /authorize
+POST /token
+```
+
+Current config:
+
+```yaml
+mcp:
+  enabled: false
+  oauth:
+    enabled: false
+    # issuer: https://helm.example.com
+    access_token_ttl_seconds: 2592000
+    allowed_redirect_prefixes:
+      - https://chatgpt.com/connector/oauth/
+      - https://chat.openai.com/connector/oauth/
+```
+
+OAuth requires `HELM_OAUTH_ENC_KEY`; startup fails when OAuth is enabled without
+a valid key. A domain-separated HMAC derivation supplies the HS256 signing key.
+
+Flow and limits:
+
+- authorization code + PKCE S256 only;
+- the user pastes a Helm API key into the authorize form;
+- redirect URIs must be HTTPS and begin with an allowed prefix;
+- the authorization code is a stateless signed JWT valid for 60 seconds;
+- the access token is a stateless signed JWT; no refresh token is issued;
+- `/mcp` accepts either the access JWT or a raw Helm API key;
+- codes have no one-time-use store and are replayable inside their 60-second
+  lifetime;
+- access tokens have no denylist and cannot be individually revoked before
+  expiry; rotate `HELM_OAUTH_ENC_KEY` to invalidate all of them;
+- key account/project/mode claims are snapshotted into the token at authorize
+  time. Later key disable/settings changes are not re-read for an already issued
+  access token.
+
+These are accepted constraints of the current self-hosted shim, not a full
+general-purpose authorization server.
+
+## Configuration source of truth
+
+`MemoryMcpSchema` and `McpOAuthSchema` live in
+`packages/shared/src/config/memory-schema.ts`. Both objects are strict and both
+feature switches default false. Unknown config keys refuse startup.
+
+`/mcp` remaining 404 when disabled is intentional fail-closed behavior. Admin
+memory routes are independent of the MCP switch.
+
+## Current limitations
+
+- No raw-message or observation CRUD through Admin/MCP.
+- No audit-event table specifically recording Admin/MCP memory edits.
+- Admin can intentionally cross accounts; account authorization is the Admin
+  Basic-auth boundary, not per-route role filtering.
+- MCP transport is stateless JSON-RPC request/response, not a complete
+  sessionful Streamable HTTP implementation.
+- OAuth tokens are stateless and non-revocable individually.
+- Manual fact add/edit clears or creates vector state but does not itself enqueue
+  an embedding job; vector population waits for a later Observer/Reflector job
+  to enqueue account embedding work. FTS/substrings remain immediately usable.
+
+## Verification map
+
+- backend routes: `apps/gateway/src/routes/admin/memory.test.ts`
+- Admin UI: `apps/admin/src/routes/memory/memory.test.ts`
+- MCP transport/tools: `apps/gateway/src/routes/mcp/mcp.test.ts` and
+  `tools.test.ts`
+- OAuth: `apps/gateway/src/routes/mcp/oauth.test.ts`
+- adapter management parity: SQLite/Postgres `memory-admin.test.ts`
+- locale coverage: `apps/admin/src/lib/i18n/mcp-locales.test.ts`.

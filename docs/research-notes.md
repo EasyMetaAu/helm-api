@@ -1,8 +1,13 @@
 # Research Notes
 
-> Appendix / reference material: open-source projects studied while designing
-> Helm, with what to borrow and what to avoid. We do not copy code — we study the
-> approach and architecture and rewrite.
+> Historical research appendix, not an implementation/status specification.
+> These notes capture source surveys made during Helm's design; upstream projects,
+> URLs, thresholds, and internals may have changed since the survey. Runtime truth
+> must be taken from Helm's current code and numbered docs. The Helm mapping notes
+> below were refreshed against the repository on 2026-07-16.
+>
+> We do not copy reference code. We study the approach and architecture and
+> implement Helm's own framework-independent contracts.
 
 ## Manifest
 
@@ -306,7 +311,7 @@ Valuable ideas:
 - Gateway-level memory.
 - Observer and Reflector background agents.
 - A stable, cache-friendly memory context.
-- Replacing the full raw history with observations and reflections.
+- Separating raw history from compressed observations and stable reflections.
 
 Worth borrowing:
 
@@ -319,7 +324,21 @@ Do not copy blindly:
 - Putting memory in the MVP core path.
 - Making dynamic RAG the default memory strategy.
 
-> See [08 · Memory Middleware](08-memory-middleware.md) for how these ideas map to
-> Helm: observe and inject are both implemented end-to-end with a background
-> Observer/Reflector worker (opt-in); only the real LLM summarize/merge step
-> remains a deterministic stub.
+Current Helm outcome (not part of the original research snapshot):
+
+- observe/inject and the background Observer/Reflector worker are implemented on
+  all four text protocol surfaces;
+- API keys default memory mode to `off`; the feature is opt-in per key;
+- inject uses an additive trailing `<system-reminder>` and preserves the client's
+  live conversation instead of replacing it with compressed history;
+- LLM summarize/merge/fact extraction is implemented behind
+  `memory.llm.enabled`, with deterministic fallbacks for observation/reflection
+  formation and observation-fact extraction;
+- raw eager facts are a separate opt-in path and intentionally fall back to an
+  empty list when the LLM fails;
+- forgetting, facts, Admin/MCP management, and hybrid fact recall are implemented;
+  hybrid recall is an MCP tool, not default per-turn prompt RAG.
+
+See [08 · Memory Middleware](08-memory-middleware.md),
+[12 · Forgetting and Tiering](12-memory-forgetting-and-tiering.md), and
+[14 · Memory Deep Recall](14-memory-deep-recall.md) for maintained contracts.

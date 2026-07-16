@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-07-16 · 文档以当前源码为准完成全量运行时事实校准（docs/01–14 / README / operations，原则 1–8）
+
+- **审计边界**：以当前分支的路由注册、composition root、Zod schema、Store 端口与迁移、默认配置和定向测试为权威，逐章校准 README、`docs/01–14`、协议/Memory 专题、部署说明、Portal、历史复盘与 passthrough 运维文档；本次只修文档与 `.env.example`，不改变任何运行时行为。历史 incident、review、proposal、外部研究和 v0.25.2 Admin 截图保留原始证据，但必须显式标注为历史快照，不能继续充当当前契约。
+- **主要纠偏**：Portal 已完整实现且按 key ownership 隔离 request/payload/memory；新 key 的 Memory 默认值是 `off`；`/healthz` 只是浅层进程 readiness；Gateway 不自动加载 `.env`，Compose 也只转发 `environment:` 中显式列出的变量；root bootstrap 明文 key 只写一次到配置的 `0600` recovery file；OpenAPI 只覆盖主要公共路由；shipping Admin 配置实际上依赖 `HELM_ADMIN_*` 环境变量。
+- **诚实边界**：文档明确列出已解析但未完整生效的 `lane.constraints`、`classifier.rules.enabled`、`eval.cache.enabled`、policy `project_id` 与空/无交集 `allowed_lanes`，以及尚未挂载的 `HELM_BASE_PATH`、进程内多副本协调限制、Memory 观测/embedding 延迟和跨协议保真缺口。协议矩阵与 roadmap 以后必须把 native passthrough、可证明的翻译、结构化降级和未实现行为分开描述，避免把 schema 存在或测试 helper 能力写成已上线功能。
+- **中文文案边界**：`README.zh-CN.md` 保持与当前代码和英文技术事实一致，但作为独立中文文案按中文语序与读者习惯意译；命令、字段、端点、警告与链接不可改义，也不做逐句机械对照。
+
 ## 2026-07-16 · Admin 首次点击卡顿改为非投机加载与汇总读（Admin / Store performance，docs/08/11，原则 1/3/7）
 
 - **生产根因**：`la.atmy.work` 的 `/admin/api/memory/stats` 冷读实测最高约 10.2 秒；同步 `better-sqlite3` 在 Node 事件循环上对约 139 万 `memory_messages`、11.9k observations 及其他 memory 表执行 `COUNT/MAX`，扫描期间连 health completion 都暂停。Admin 又在 `app.html` 全局启用 `data-sveltekit-preload-data="hover"`，鼠标经过侧栏即可投机触发这些数据库查询；第一次点击因此等待冷扫描，第二次点击命中 10 秒应用缓存或 OS page cache，形成“再点一下马上出来”的假象。同期没有 VACUUM、cleanup、OOM、`SQLITE_BUSY` 或 payload capture 事件，不能把本次页面卡顿归因于这些路径。
@@ -64,14 +71,9 @@
 - **统一优先级**：`allow_custom_model` 且未触发 budget degrade 时，先识别精确配置 lane，再识别部署已知的精确 model alias；只有两者都不存在时才进入 `model-aliases.yaml`，并继续保持“精确映射键优先、最长字面量 glob 次之”。因此所有当前及未来 lane 都不会再被 `claude-*` / `gpt-*` / `gemini-*` 吞掉；固定 vendor id（如 `claude-opus-4-8`）仍通过兼容映射进入族 lane。
 - **行为边界与验证**：精确 lane 恢复 docs/04 既定的完整 fallback 与 `allowed_lanes` 显式 400 语义，精确 model 保持单候选；标准 key、`auto`、blocked models、image pre-pin、budget degrade、alias cap 与 headless legacy 均不变。`gpt-5.6` 的 telemetry lane 从兼容目标 `gpt-5.6-sol` 恢复为精确 `gpt-5.6`，首个实际模型仍为 Sol。路由单测覆盖 Claude/GPT/Gemini 全部碰撞族及精确 model，shipped-config 组合测试遍历全部 lane 防止未来回归；无需 schema 或配置迁移。
 
-## 2026-07-14 · 通道模型选择器复用自动发现缓存（OAuth subscription / Admin lanes，docs/04/11，原则 1/3/6）
-
-- **生产根因**：账号管理弹窗与运行时 provider pool 已把非 Codex 自动模式的远程模型目录写入同一个账号级进程缓存，但 `/admin/api/models` 的通道选择器投影没有读取该缓存，也没有跨进程保存成功目录；Anthropic/xAI 因而只显示代码内静态 fallback，Copilot 在没有静态 fallback 时甚至不显示任何自动发现模型。
-- **统一投影与存储**：通道目录继续保持 network-free（读取时不发上游请求），Anthropic、Copilot、xAI 自动模式依次使用共享进程缓存、现有加密账号设置中的 durable last-known-good 目录、curated fallback；Admin 刷新与 runtime pool synthesis 只持久化仍被当前 cache generation 接受的非空发现。同名账号重连先失效旧 generation、严格清理旧身份 snapshot，成功后才替换 credential；手动模式仍只使用持久 allowlist，Codex 仍使用独立的持久 ModelInfo catalog，不改变 entitlement 边界，也无需数据库迁移。
-- **失败语义与验证**：空目录或发现错误绝不覆盖 durable last-known-good；缓存和持久快照都不存在时才使用既有 curated fail-open fallback。后台 snapshot 写失败只告警、不阻断路由；但加密设置读取/解密/JSON shape 失败时严格拒绝任何 mutation，不能用空 map 覆盖 proxy、priority、allowlist 等既有状态。TDD 覆盖三种非 Codex provider、进程缓存丢失后的持久恢复、Manual 隔离、旧 credential 并发发现、重连清理顺序、损坏设置防覆盖与写失败 fail-open；定向 5 files / 153 tests 全绿。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-14 · 通道模型选择器复用自动发现缓存（OAuth subscription / Admin lanes，docs/04/11，原则 1/3/6）**：通道目录保持 network-free，依次复用共享进程缓存、加密账号设置中的 durable last-known-good 与 curated fallback；空目录/失败不覆盖旧快照，重连以 cache generation 隔离旧身份，并保持 Manual/Codex entitlement 边界。
 - **2026-07-14 · 丢弃 Codex 空 secondary 配额占位窗口（OAuth quota / Admin providers / reset credits，docs/04/11，原则 3/5/7）**：写入、cache-only API 与 UI 三层过滤 0%/无时长/已重置的空 positional 窗口；明确 `windowMinutes >= 10080` 的账号周窗口优先，避免脏 secondary 覆盖真实周额度与 reset marker。
 - **2026-07-14 · Subscription Providers 改为缓存优先与全局串行刷新（OAuth Admin / provider observability，docs/04/11，原则 1/3/6/7）**：Providers 首屏与兼容读 API 严格 cache-only；显式刷新由进程级单 worker 串行账号、合并并发点击并保留 last-known-good 数据。
 - **2026-07-14 · Avoid Waste 在 provider 池内限制 reset-credit 偏置（OAuth provider selection，docs/04/11，原则 3/5/6）**：reset credits 只作为同一 provider 池内的弱恢复容量信号，不能压过明显更多的真实即将过期额度；套餐标签不参与分池或评分。
