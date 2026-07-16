@@ -3,6 +3,7 @@ import { hashKey } from "@helm/core";
 import { HelmErrorSchema } from "@helm/shared";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
+import type { AppEnv } from "../app.js";
 import { type AuthDeps, authMiddleware } from "./auth.js";
 
 function record(overrides: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
@@ -138,7 +139,7 @@ describe("authMiddleware", () => {
   });
 
   it("uses the resolved request-context trace for auth errors", async () => {
-    const app = new Hono();
+    const app = new Hono<AppEnv>();
     app.use("*", async (c, next) => {
       c.set("trace_id", "resolved-x-request-id");
       await next();
