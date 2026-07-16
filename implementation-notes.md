@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-07-16 · 历史费用回填放宽 WAL 与磁盘恢复门槛（Catalog / telemetry repair operations，docs/07/08，原则 2/3/7）
+
+- **生产事实与新门槛**：常驻 supervisor 已在 `2026-07-08` UTC 窗口的 `22,100 / 31,400` 连续等待约 7 小时；CPU、内存、health、restart/OOM、Gateway/SQLite 信号均健康，唯一持续原因是磁盘低于 14 GiB，随后 WAL 增至约 583 MiB。主机当时仍有约 13.9 GiB 可用空间，全部历史回填目录约 1.55 GiB，当前窗口 221 个微型备份约 106 MiB，且 Docker 已无可回收镜像。为避免恢复门槛永久饿死任务，preflight 改为 WAL `<640 MiB`、磁盘 `>13 GiB`；runtime hard stop 改为 WAL `<768 MiB`，磁盘硬底线继续保持 `12 GiB`。这样当前状态可恢复，同时仍保留约 0.9 GiB 磁盘余量、约 185 MiB WAL 运行余量和独立硬上限。
+- **未放宽边界**：CPU `<75%`、load、可用内存、Helm 内存、non-200/5 秒 health probe timeout、restart、OOM、gateway-internal 5xx 与 `SQLITE_BUSY` 继续按原逻辑阻断；每批 100 行、每阶段最多 5,000 行、冷却、checkpoint、slice verification 与微型恢复库均不变。WAL/磁盘原因文案改为从配置阈值动态生成，避免以后阈值调整后状态继续报告旧数字。
+
 ## 2026-07-16 · 路由白名单改为真实交集并让分类开关兑现配置语义（Routing / classifier / CI，docs/03/04/06/09，原则 2/3/5/6/7）
 
 - **白名单边界**：Policy 与 API key 的 `allowed_lanes` 不再先后 clamp，而是先求真实交集；`null` 表示无约束，动态交集 `[]` 表示没有任何 lane 可执行并在 provider 前返回结构化 `invalid_request`。新建/更新 key 与静态 policy 拒绝显式空数组，清除 key 限制必须传 `null`；旧库中的 `[]` 继续可读但按 deny-all 解释，编辑其他字段时省略该字段并保留原值，不能顺手扩成无限制。显式 lane、兼容 alias、自动分类、预算 degrade、signal feedback 与 Codex compact 共用同一边界；预算降级只允许保持目标或向可证明更便宜的 ranked lane 收敛，白名单若只剩更贵 lane 就在 provider 前拒绝，绝不把成本保护反向升级。具体 model 仍只受 `allow_custom_model` / `blocked_models` 约束，并由 route、模型目录与 Codex compact 的空白名单用例共同锁定。模型列表在无可用 lane 时不再展示 `auto`，缓存指纹也明确区分 `null` 与 `[]`。
@@ -63,14 +68,9 @@
 - **估算边界**：只在原生 Responses 流缺少 usage 时，对去除 transport 字段与内嵌 binary/base64 的语义 upstream request，以及实际收到的 output/reasoning/tool-call semantic delta 做 `estimated_partial` 估算。16 KiB 内使用 o200k-harmony，超过后改用既有 UTF-8 bytes/4 确定性估算，避免大上下文在 stream finally 阻塞事件循环；sequence number 去重，同一 semantic channel 的碎片先拼接，done snapshot 与 encrypted/base64 数据不参与。cache、cache creation 与隐藏 reasoning 不猜测，保持 null。估算费用沿现有 catalog `costOf` 计算，并以 `cost_basis=catalog_api_equivalent_estimate` 标记，不能解释为 provider 实际账单。
 - **一致性边界**：同一份部分 usage/cost 同时写入 telemetry usage、成功 provider attempt、key budget 与实际 serving account 的 OAuth usage；每项只结算一次。stream generation window 与 usage 解耦，即使 usage 解析失败也保留 `generation_ms`。registry 使用同一 `stream_outcome`，不再把缺失终态默认成 completed。
 
-## 2026-07-15 · 历史费用回填改由常驻 supervisor 持续推进（Catalog / telemetry repair operations，docs/07/08，原则 2/3/5/7）
-
-- **执行边界**：一次性 Codex automation 改为 host systemd 常驻 supervisor；它通过非阻塞 `flock` 保证唯一执行者，并把大阶段拆成每次最多 100 行的独立 CLI 进程。每批提交并落盘 checkpoint 后才进入下一批，因此 SIGTERM、容器短暂不可用或 supervisor 重启都只会从原子 checkpoint 恢复，不需要大事务、整库备份或 `kill -9`。
-- **资源控制**：启动前必须连续取得 3 个有余量样本；运行中持续检查 host load/MemAvailable、Helm CPU/内存、health status、WAL、磁盘、restart/OOM 与结构化 5xx/timeout/`SQLITE_BUSY`。Helm CPU 的 preflight 与 runtime stop 阈值统一为 75%，runtime 仍要求连续 2 次达到阈值才暂停；HTTP 200 的 health latency 仅保留在状态中作观测，不再触发暂停，但 non-200 与 `collectSample` 的 5 秒 probe timeout 仍 fail-closed。supervisor 每批 apply 前已经完成该采样，因此 apply CLI 显式使用 `--skip-health-check`，避免在同一批次前重复调用 health endpoint。2GiB 主机的 MemAvailable 采用 512MiB preflight / 384MiB runtime stop，保留 128MiB hysteresis，并继续叠加容器内存比例与 health/CPU 保护，避免原 768MiB 固定门槛在约 588MiB 稳态可用内存下永久饿死。Gateway `request.error` 显式记录 `fault_scope`：可预期的结构化请求错误为 `request`，未知 throw 为 `gateway_internal`；5xx/timeout 总数继续写入状态作纯观测，只有 `gateway_internal` 5xx 与 `SQLITE_BUSY` 会触发 supervisor safety stop，因此正常 `all_providers_failed` 的 error/completed 双日志不能阻断回填，而真正内部故障仍 fail-closed。硬阈值触发后 supervisor 留在 `waiting_safety` 并自动重试，不把辅助回填失败扩散为网关故障；每 5,000 行强制至少冷却 5 分钟。固定截止点为 `2026-07-15T13:28:46+08:00`，不追逐持续增长的新流量。
-- **验证与可观测性**：`pricing:reprice` 新增只读 manifest slice verifier，逐批验证 telemetry 顶层总价、attempt completion、breakdown、alias/status/timestamp 全部已成为 manifest new state；窗口完成后再全量验证。supervisor 原子写入 `supervisor.status.json`，记录 phase、窗口/checkpoint、最近指标、费用 delta、错误与备份聚合哈希；Codex 定时任务部署后只读该状态并汇报，不再直接写生产数据库。manifest 仍按 UTC 日窗、`best-evidence`、固定 pricing/plan hash 依次生成，歧义行保持不变。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-15 · 历史费用回填改由常驻 supervisor 持续推进（Catalog / telemetry repair operations，docs/07/08，原则 2/3/5/7）**：systemd 常驻 supervisor 以单实例、100 行原子批次、checkpoint、slice verification、微型恢复库、资源门禁和 5,000 行冷却推进固定截止点前的历史修复；完整原文通过 git history 回溯。
 - **2026-07-15 · 历史重算兼容旧版 completion-only 顶层费用（Catalog / telemetry repair，docs/07/08，原则 2/5/7）**：仅在顶层、attempt 与 breakdown 同时精确证明旧版只保存 completion cost 时接受回填，任何其他漂移仍 fail-closed；完整原文通过 git history 回溯。
 - **2026-07-14 · 官方模型费率与多模态计费校准（Catalog / telemetry / protocol usage，docs/04/05/07/08，原则 1/2/3/5/7/8）**：以官方价格和响应中可证明的 tier、地域、缓存与 modality 证据计费；未知分价、动态 alias 与已丢失的历史证据保持 unknown，历史修复只经 manifest、微型恢复库和资源门禁渐进执行。
 - **2026-07-14 · 确定模型名优先于兼容通配别名（Routing / model alias precedence，docs/04，原则 2/5/6）**：精确 lane 与已配置 model 必须先于 `claude-*` / `gpt-*` / `gemini-*` 等宽泛兼容映射解析，避免显式模型被错误改写到其他 lane。
