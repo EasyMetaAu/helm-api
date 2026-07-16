@@ -97,6 +97,7 @@ describe("CI workflow", () => {
       expect(job).toContain('["ubuntu-24.04"]');
       expect(job).toContain('["self-hosted","Linux","X64","docker"]');
       expect(job).toContain("refs/pull/{0}/merge");
+      expect(job).toContain("fetch-depth: 2");
       expect(job).toContain("Verify PR merge ref matches event head");
       expect(job).toContain("github.event.pull_request.head.sha");
     }
