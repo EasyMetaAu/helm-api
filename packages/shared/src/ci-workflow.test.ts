@@ -149,10 +149,24 @@ describe("release workflow policy", () => {
 
   it("keeps the package-write Docker credential run-scoped on the persistent runner", () => {
     const publishJob = jobBlock(publishRaw, "publish");
-    expect(publishJob).toContain("DOCKER_CONFIG: ${{ runner.temp }}");
+    const jobHeader = publishJob.slice(0, publishJob.indexOf("\n    steps:"));
+    expect(jobHeader).not.toMatch(/\$\{\{\s*runner\./);
+
+    const setupStep = stepBlock(publishRaw, "Configure run-scoped registry credentials");
+    expect(setupStep).toContain("DOCKER_CONFIG=${RUNNER_TEMP}/helm-publish-docker-");
+    expect(setupStep).toContain("${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}");
+    expect(setupStep).toContain('>> "${GITHUB_ENV}"');
+
     const cleanupStep = stepBlock(publishRaw, "Remove run-scoped registry credentials");
     expect(cleanupStep).toContain("if: always()");
     expect(cleanupStep).toContain('rm -rf -- "${DOCKER_CONFIG}"');
+
+    const setupIndex = publishJob.indexOf("- name: Configure run-scoped registry credentials");
+    const loginIndex = publishJob.indexOf("- name: Log in to GHCR");
+    const cleanupIndex = publishJob.indexOf("- name: Remove run-scoped registry credentials");
+    expect(setupIndex).toBeGreaterThanOrEqual(0);
+    expect(setupIndex).toBeLessThan(loginIndex);
+    expect(cleanupIndex).toBeGreaterThan(publishJob.lastIndexOf("docker "));
   });
 
   it("publishes only after the CI workflow succeeds for a main push", () => {

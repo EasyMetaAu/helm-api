@@ -40,11 +40,12 @@ jobs:
     permissions:
       contents: write   # create the tag + GitHub Release on a version bump
       packages: write
-    env:
-      # Never leave the package-write credential in a persistent runner account's
-      # normal Docker config; the final always() step removes this run-scoped file.
-      DOCKER_CONFIG: ${{ runner.temp }}/helm-publish-docker-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      - name: Configure run-scoped registry credentials
+        # `runner` is unavailable in job-level env expressions. The runner exports
+        # RUNNER_TEMP before steps begin; GITHUB_ENV carries this path to every
+        # later step, and the final always() cleanup removes it.
+        run: echo "DOCKER_CONFIG=${RUNNER_TEMP}/helm-publish-docker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "${GITHUB_ENV}"
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0   # need full tag list to detect "already released"
