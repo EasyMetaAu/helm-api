@@ -685,6 +685,7 @@
   "Request (from client)": "요청(클라이언트에서)",
   "Request body": "요청 본문",
   "Request ID": "요청 ID",
+  "Client trace ID": "클라이언트 추적 ID",
   "Request logging": "요청 로깅",
   "Request metadata recorded for this call (redacted — no message content or secrets).": "이 호출에 대해 기록된 요청 메타데이터입니다(수정됨 — 메시지 내용이나 비밀 정보 없음).",
   "Request not found.": "요청을 찾을 수 없습니다.",

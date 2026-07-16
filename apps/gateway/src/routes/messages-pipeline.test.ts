@@ -1259,6 +1259,35 @@ describe("createMessagesPipeline — gemini native passthrough streamIR()", () =
 });
 
 describe("createMessagesPipeline — production IR params", () => {
+  it("generates an internal request_id instead of reusing a client trace_id", async () => {
+    const generatedRequestId = "11111111-1111-4111-8111-111111111111";
+    const randomUUID = vi
+      .spyOn(globalThis.crypto, "randomUUID")
+      .mockReturnValue(generatedRequestId);
+    let seen: InternalRequest | null = null;
+    const route: RouteFn = async (req) => {
+      seen = req;
+      return okResult({ id: "x" });
+    };
+
+    try {
+      const pipeline = createMessagesPipeline(route);
+      await pipeline.run(
+        irOf({ metadata: { trace_id: "client-controlled-trace" } }),
+        IDENTITY,
+        new AbortController().signal,
+      );
+
+      const captured = seen as unknown as InternalRequest;
+      expect(randomUUID).toHaveBeenCalledOnce();
+      expect(captured.request_id).toBe(generatedRequestId);
+      expect(captured.request_id).not.toBe("client-controlled-trace");
+      expect(captured.metadata?.trace_id).toBe("client-controlled-trace");
+    } finally {
+      randomUUID.mockRestore();
+    }
+  });
+
   it.each<Protocol>([
     "anthropic_messages",
     "openai_responses",

@@ -9,6 +9,7 @@ import RequestsTable from './RequestsTable.svelte';
 
 function item(overrides: Partial<RequestListItem> = {}): RequestListItem {
   return {
+    request_id: 'req_1',
     trace_id: 'tr_1',
     ts: '2026-05-31T10:00:00Z',
     key_id: 'k_42',
@@ -77,6 +78,22 @@ describe('RequestsTable key cell', () => {
 });
 
 describe('RequestsTable variants', () => {
+  it('uses request_id for row identity and navigation when client traces are duplicated', () => {
+    render(RequestsTable, {
+      items: [
+        item({ request_id: 'req_1', trace_id: 'shared-client-trace' }),
+        item({ request_id: 'req_2', trace_id: 'shared-client-trace' }),
+      ],
+      detailHref,
+      variant: 'full',
+    });
+
+    expect(screen.getAllByTestId('request-row')).toHaveLength(2);
+    expect(
+      screen.getAllByTestId('request-detail-link').map((link) => link.getAttribute('href')),
+    ).toEqual(['/requests/req_1', '/requests/req_2']);
+  });
+
   it('renders the full request-audit columns as grouped cells', () => {
     render(RequestsTable, {
       items: [item({ latency_ms: 6911 })],
@@ -154,7 +171,7 @@ describe('RequestsTable variants', () => {
     expect(within(row).getByTestId('cell-serving')).toHaveTextContent('claude-team-a');
     expect(within(row).getByTestId('request-detail-link')).toHaveAttribute(
       'href',
-      '/requests/tr_1',
+      '/requests/req_1',
     );
     expect(screen.queryByText('Request ID')).toBeNull();
   });
@@ -164,7 +181,7 @@ describe('RequestsTable variants', () => {
 
     expect(screen.queryByText('Key')).toBeNull();
     expect(screen.queryByText('Request ID')).toBeNull();
-    expect(screen.getByTestId('request-detail-link')).toHaveAttribute('href', '/requests/tr_1');
+    expect(screen.getByTestId('request-detail-link')).toHaveAttribute('href', '/requests/req_1');
     expect(screen.getByText('Cost')).toBeInTheDocument();
     expect(screen.getByText('Tokens')).toBeInTheDocument();
     expect(screen.getByText('Performance')).toBeInTheDocument();

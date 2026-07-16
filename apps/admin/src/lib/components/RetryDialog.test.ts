@@ -21,7 +21,7 @@ const BODY = { model: 'auto', messages: [{ role: 'user', content: 'hi' }] };
 
 function setup() {
   const onclose = vi.fn();
-  render(RetryDialog, { traceId: 'tr_orig', initialRequest: BODY, onclose });
+  render(RetryDialog, { requestId: 'req_orig', initialRequest: BODY, onclose });
   return { onclose };
 }
 

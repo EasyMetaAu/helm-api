@@ -81,6 +81,10 @@ export const NativePassthroughCarrierSchema = z.object({
 const NativeRequestSchema = z.union([NativePassthroughCarrierSchema, UnknownRecordSchema]);
 
 export const RequestMetadataSchema = z.object({
+  // Client-facing correlation id (X-Request-Id / X-Trace-Id). It is deliberately
+  // separate from the server-generated top-level request_id and must never be
+  // used as a telemetry/payload ownership key.
+  trace_id: z.string().min(1).optional(),
   conversation_id: z.string().nullable(),
   // Memory fields below are reserved-only in the MVP, not consumed (docs/08).
   thread_id: z.string().nullable(),

@@ -164,10 +164,10 @@
   // CURRENT list URL (filters + page) as `from` so the detail page's Back link
   // returns here exactly as it was — survives reload / new-tab (the state is in
   // the URL, not history).
-  function detailHref(traceId: string): string {
+  function detailHref(requestId: string): string {
     const search = filtersToSearch(data.filters);
     const from = `${base}/requests${search ? `?${search}` : ''}`;
-    return `${base}/requests/${traceId}?from=${encodeURIComponent(from)}`;
+    return `${base}/requests/${requestId}?from=${encodeURIComponent(from)}`;
   }
 </script>
 

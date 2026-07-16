@@ -14,22 +14,15 @@ const HOP_BY_HOP = new Set([
   "upgrade",
 ]);
 
-declare module "hono" {
-  interface ContextVariableMap {
-    request_id: string;
-  }
-}
-
-// Normalize request headers + request_id. request_id comes from X-Request-Id /
-// X-Trace-Id, falling back to the generated trace_id; it is written to the
-// context and echoed in the X-Request-Id response header. Hop-by-hop headers are
+// Normalize request headers and echo the client-facing correlation id. The
+// server-generated request_id was already set by traceIdMiddleware and MUST NOT
+// be replaced here: it keys telemetry/payload ownership. Hop-by-hop headers are
 // removed. Authorization is left untouched (auth owns it).
 export function normalizeHeaders(): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     const incoming = c.req.header("X-Request-Id") ?? c.req.header("X-Trace-Id");
-    const requestId = incoming && incoming.length > 0 ? incoming : c.get("trace_id");
-    c.set("request_id", requestId);
-    c.header("X-Request-Id", requestId);
+    const correlationId = incoming && incoming.length > 0 ? incoming : c.get("trace_id");
+    c.header("X-Request-Id", correlationId);
 
     for (const name of HOP_BY_HOP) {
       if (c.req.raw.headers.has(name)) {

@@ -154,6 +154,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
   // 404 (never a silent 200 on a mis-routed Gemini request).
   const handleGemini = async (c: Context<AppEnv>) => {
     const traceId = c.get("trace_id");
+    const requestId = c.get("request_id");
 
     // 0) Route parse FIRST (cheap, pure). The pathname is the part before '?'; the
     //    query carries `alt=sse`. parseGeminiPath returns null for any path that is
@@ -310,7 +311,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
     //     would always receive "gemini" and routing would degrade.
     ir.model = route.model;
     ir.stream = route.stream;
-    ir.metadata = { ...(ir.metadata ?? {}), trace_id: traceId };
+    ir.metadata = { ...(ir.metadata ?? {}), request_id: requestId, trace_id: traceId };
 
     // Memory scope (docs/08 Phase 1): parse the four memory headers and stamp them
     // onto the IR metadata bag (mirrors /v1/messages) so the SHARED pipeline's
@@ -436,7 +437,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
             await recordServed(
               deps.record,
               {
-                requestId: traceId,
+                requestId,
                 apiKeyId: identity.keyId,
                 decision: result.decision,
                 requestJson,
@@ -468,7 +469,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
         await recordServed(
           deps.record,
           {
-            requestId: traceId,
+            requestId,
             apiKeyId: identity.keyId,
             decision: result.decision,
             requestJson,
@@ -495,7 +496,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
       await recordServed(
         deps.record,
         {
-          requestId: traceId,
+          requestId,
           apiKeyId: identity.keyId,
           decision: result.decision,
           requestJson,

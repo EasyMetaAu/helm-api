@@ -5,8 +5,8 @@
 //
 // Real backend contract (apps/gateway/src/routes/admin/requests.ts):
 //   GET /admin/api/requests        -> RequestSummary[]  (most recent first;
-//                                     { trace_id, lane, status, cost })
-//   GET /admin/api/requests/:trace -> raw DecisionRecord (@helm/shared) | 404
+//                                     { request_id, trace_id, lane, status, cost })
+//   GET /admin/api/requests/:request_id -> raw DecisionRecord (@helm/shared) | 404
 //
 // Since admin.requests-richfields the DecisionRecord records the real telemetry
 // fields (key_prefix, latency_total_ms, fallback_count, cost_breakdown{eval/
@@ -26,6 +26,10 @@
 // ── UI-facing contract (docs/07) ─────────────────────────────────────────────
 
 export interface RequestListItem {
+  // Helm-generated unique storage/ownership id. This is the only value used for
+  // list keys, detail routes, payload lookup, and replay.
+  request_id: string;
+  // Client-facing correlation metadata. It may be reused by different requests.
   trace_id: string;
   ts: string; // timestamp
   // The internal api_key_id (keys-table UUID) this request authenticated with —
@@ -124,6 +128,7 @@ export interface ProviderAttempt {
 }
 
 export interface RequestDetail {
+  request_id: string;
   trace_id: string;
   ts: string;
   // Request identity/summary (same source as the list row) for the detail "Request
@@ -460,9 +465,17 @@ export function computeTtfbMs(raw: RawDecisionRecord): number | null {
   return typeof raw.latency_total_ms === 'number' ? raw.latency_total_ms : null;
 }
 
+function requireRequestId(raw: RawDecisionRecord): string {
+  if (typeof raw.request_id !== 'string' || raw.request_id.length === 0) {
+    throw new Error('Decision record is missing request_id');
+  }
+  return raw.request_id;
+}
+
 // Project the raw DecisionRecord -> the list row (docs/07 list fields). Fields the
 // record does not carry are derived or safely defaulted; NEVER fabricated.
 export function toListItem(raw: RawDecisionRecord): RequestListItem {
+  const requestId = requireRequestId(raw);
   const attempts = Array.isArray(raw.provider_attempts) ? raw.provider_attempts : [];
   const account = normalizeServingAccount(raw);
   const status: RequestListItem['status'] = raw.final?.status === 'error' ? 'error' : 'ok';
@@ -473,7 +486,8 @@ export function toListItem(raw: RawDecisionRecord): RequestListItem {
         undefined)
       : undefined;
   return {
-    trace_id: String(raw.trace_id ?? raw.request_id ?? ''),
+    request_id: requestId,
+    trace_id: String(raw.trace_id ?? requestId),
     // Real recorded timestamp (epoch ms) surfaced by the list endpoint, kept as an
     // ISO string so the row is deterministic/sortable; the view formats it for
     // display. '' when the record carries none (legacy) — never fabricated.
@@ -573,6 +587,7 @@ function buildCostBreakdown(
 }
 
 export function toDetail(raw: RawDecisionRecord): RequestDetail {
+  const requestId = requireRequestId(raw);
   const attempts = Array.isArray(raw.provider_attempts) ? raw.provider_attempts : [];
   const completion = attempts.some((a) => typeof a.cost_usd === 'number')
     ? sumCost(attempts)
@@ -581,7 +596,8 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
   const evalCacheHit = raw.classifier?.eval_cache_hit ?? null;
   const account = normalizeServingAccount(raw);
   return {
-    trace_id: String(raw.trace_id ?? raw.request_id ?? ''),
+    request_id: requestId,
+    trace_id: String(raw.trace_id ?? requestId),
     // Same source as the list "Time" column (created_at, flattened by the detail
     // endpoint). Legacy records without it stay empty → header shows the
     // "time not recorded" placeholder rather than a fabricated time.
@@ -745,9 +761,9 @@ export async function listRequests(params: RequestsQueryParams = {}): Promise<Re
   };
 }
 
-// GET /admin/api/requests/:traceId -> RequestDetail (full trail) | throws on 404.
-export async function getRequest(traceId: string): Promise<RequestDetail> {
-  const res = await fetch(`${BASE}/${encodeURIComponent(traceId)}`, {
+// GET /admin/api/requests/:requestId -> RequestDetail (full trail) | throws on 404.
+export async function getRequest(requestId: string): Promise<RequestDetail> {
+  const res = await fetch(`${BASE}/${encodeURIComponent(requestId)}`, {
     headers: { accept: 'application/json' },
   });
   const raw = await asJson<RawDecisionRecord>(res);
@@ -783,12 +799,12 @@ export interface RequestPayloadPartView {
   created_at?: number;
 }
 
-// GET /admin/api/requests/:traceId/payload -> the captured bodies. Resolves to
+// GET /admin/api/requests/:requestId/payload -> the captured bodies. Resolves to
 // { captured:false } on any error (missing row / capture off) so the detail page
 // degrades gracefully and never white-screens.
-export async function getRequestPayload(traceId: string): Promise<RequestPayloadView> {
+export async function getRequestPayload(requestId: string): Promise<RequestPayloadView> {
   try {
-    const res = await fetch(`${BASE}/${encodeURIComponent(traceId)}/payload`, {
+    const res = await fetch(`${BASE}/${encodeURIComponent(requestId)}/payload`, {
       headers: { accept: 'application/json' },
     });
     if (!res.ok) return { captured: false };
@@ -798,9 +814,9 @@ export async function getRequestPayload(traceId: string): Promise<RequestPayload
   }
 }
 
-export async function getRequestPayloadMeta(traceId: string): Promise<RequestPayloadView> {
+export async function getRequestPayloadMeta(requestId: string): Promise<RequestPayloadView> {
   try {
-    const res = await fetch(`${BASE}/${encodeURIComponent(traceId)}/payload?part=meta`, {
+    const res = await fetch(`${BASE}/${encodeURIComponent(requestId)}/payload?part=meta`, {
       headers: { accept: 'application/json' },
     });
     if (!res.ok) return { captured: false };
@@ -811,12 +827,12 @@ export async function getRequestPayloadMeta(traceId: string): Promise<RequestPay
 }
 
 export async function getRequestPayloadPart(
-  traceId: string,
+  requestId: string,
   part: RequestPayloadPartName,
 ): Promise<RequestPayloadPartView> {
   try {
     const res = await fetch(
-      `${BASE}/${encodeURIComponent(traceId)}/payload?part=${encodeURIComponent(part)}`,
+      `${BASE}/${encodeURIComponent(requestId)}/payload?part=${encodeURIComponent(part)}`,
       {
         headers: { accept: 'application/json' },
       },
@@ -828,7 +844,7 @@ export async function getRequestPayloadPart(
   }
 }
 
-// POST /admin/api/requests/:traceId/replay -> { trace_id } | throws. Re-issues the
+// POST /admin/api/requests/:requestId/replay -> { trace_id } | throws. Re-issues the
 // (optionally edited) request body through the gateway as an ISOLATED debug re-run
 // and returns the NEW trace id so the page can navigate to the recorded result.
 // The `request` is the full OpenAI chat body the operator confirmed in the dialog;
@@ -838,11 +854,11 @@ export async function getRequestPayloadPart(
 // `signal` lets the dialog's Cancel abort the wait — the gateway sees the request
 // abort and cancels the in-flight upstream run (the route forwards its own signal).
 export async function replayRequest(
-  traceId: string,
+  requestId: string,
   request: unknown,
   signal?: AbortSignal,
 ): Promise<{ trace_id: string }> {
-  const res = await fetch(`${BASE}/${encodeURIComponent(traceId)}/replay`, {
+  const res = await fetch(`${BASE}/${encodeURIComponent(requestId)}/replay`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ request }),

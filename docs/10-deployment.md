@@ -200,16 +200,77 @@ never runs in a half-broken state (Principle 2).
 Pull the new image → recreate the container → verify `/healthz` and `/version`.
 Keep the mounted `config/` and `data/` directories; they are not overwritten.
 
+The Memory project-scope migration (SQLite v40 / Postgres v39) is a stop-the-old-
+version upgrade boundary. Stop every older gateway replica before the first new
+replica runs migrations, then start only the upgraded version. A mixed-version
+rolling upgrade is unsupported: an old process can recreate legacy thread ids
+after the one-time migration ledger has advanced. Take a database backup first.
+The migration deliberately quarantines account-only parents and archives/expires
+all potentially derived long-tier rows for each affected owner; it does not guess
+which new key project should inherit mixed history. Current project-scoped Memory
+therefore starts clean. Operators can inspect the quarantined history, but should
+restore content only after establishing its provenance. Missing owners, target-id
+collisions, invalid foreign keys, and other partial failures roll back and abort
+startup; Postgres runs each version on one reserved transaction connection under
+a transaction-scoped advisory lock.
+
 > Note: telemetry and captured payloads persist on the `data` volume across
 > redeploys. When debugging, filter the request log by the container's start time
 > so rows written by an older image are not mistaken for current behavior.
 
 ## Publishing
 
-The GitHub publish workflow runs on pushes to `main`. Every successful publish
-pushes `ghcr.io/easymetaau/helm-api:latest` and a `sha-*` tag. When the pushed
-commit changes `package.json` to a package version that does not already have a
-matching GitHub release, the workflow also publishes the semver image tag and
-creates `v<version>` automatically. Normal release work therefore consists of
-reviewing the merged change scope, bumping `package.json`, merging to `main`, and
-waiting for the publish workflow before pulling the image on the remote host.
+The pull-request workflow is loaded from the default branch with
+`pull_request_target`, then explicitly checks out and validates the PR merge ref on
+disposable GitHub-hosted Ubuntu runners. PR code therefore cannot rewrite the
+workflow or reach the persistent runner pool; only trusted pushes to `main` use
+the labelled self-hosted runners. Jobs that execute repository code have read-only
+permissions and do not retain checkout credentials. A separate checkout-free job
+is the only job allowed to publish the immutable PR-head checks `PR / verify`,
+`PR / e2e`, and `PR / docker`.
+
+The privileged publish workflow starts from a successful, completed `CI` run for
+a `main` push—not from the push itself—and checks out that run's exact `head_sha`.
+Non-push `workflow_run` events use run-scoped concurrency groups, so a skipped PR
+completion cannot displace a legitimate `main` publisher waiting in the privileged
+writer group.
+All external Actions are pinned to audited 40-character commit SHAs, and repository
+settings enforce SHA pinning. `main` requires a pull request, the three `PR / …`
+checks above, and resolved review conversations; the rule also applies to
+administrators and disallows force-pushes and branch deletion.
+
+Every verified commit that is still the current `main` when publishing begins
+first gets one authoritative image tag:
+`ghcr.io/easymetaau/helm-api:sha-<full-40-character-SHA>`. The workflow checks
+GHCR before building. If the tag already exists, a rerun pulls it and verifies
+its full revision, version, deterministic commit-time build metadata, runtime
+environment, and registry digest; it never rebuilds or overwrites that tag. A
+first build uses the commit timestamp for `HELM_BUILT_AT` and
+`SOURCE_DATE_EPOCH`. This makes Helm's build identity deterministic, although the
+mutable upstream base image and package repositories mean the Docker build is
+not claimed to be generally reproducible after external dependencies change.
+
+Semver and `latest` are promoted by retagging the resolved immutable digest—not
+by rebuilding. A complete existing `v<version>` tag and GitHub Release must retain
+a matching semver image: legacy releases may prove their commit with the former
+short runtime SHA, while releases made by this workflow must match the full-SHA
+immutable digest. Tag/Release disagreement, missing artifacts, or conflicting
+metadata fails closed. If a prior run pushed semver but stopped before creating
+the Release, a later run may finish it only after proving that the image's full
+SHA is an ancestor of current `main`, contains the same `package.json` version,
+has exact deterministic metadata, and matches its full-SHA immutable digest.
+
+Publish jobs are serialized in this order: immutable image → semver image →
+GitHub Release → `latest`. Remote `main` is checked before semver and before
+`latest`. Once semver promotion has begun, the run completes the matching Release
+even if `main` advances, so it cannot intentionally leave a version image without
+its Release; it then refuses to promote stale `latest`. Normal release work is
+therefore: review the merged scope, bump `package.json`, merge to `main`, wait for
+all CI jobs, then wait for Publish image before pulling on the remote host.
+
+These checks deliberately narrow, but cannot make atomic, the boundary between a
+GitHub branch update and a GHCR tag write: `main` can move immediately after any
+check, and Docker push offers no cross-system compare-and-swap. Treat the full-SHA
+tag/digest as the authoritative deployment and rollback reference. A later
+verified publish converges `latest`; automation that requires exact release
+identity should never resolve `latest` at deployment time.

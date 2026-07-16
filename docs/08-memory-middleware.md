@@ -84,10 +84,33 @@ body metadata.thread_id / conversation_id
   -> metadata.user_id                    # Anthropic
 ```
 
-The chosen source is stored as `DecisionRecord.memory.thread_source`. All
-thread ids are owner-scoped before storage as
-`encodeURIComponent(accountId):encodeURIComponent(threadId)`, so identical
-client thread ids in different accounts do not collide.
+The chosen source is stored as `DecisionRecord.memory.thread_source`. Client
+thread ids are converted to a versioned physical id that includes the account
+and the **effective project** (`memory_project_id ?? key_id`). Therefore two
+default-isolated keys cannot collide even when they belong to the same account
+and reuse the same client thread id. Keys in the same account that explicitly
+select the same project still resolve to the same physical thread and share
+Memory by contract.
+
+SQLite migration v40 and Postgres migration v39 treat all pre-migration
+account-only history as **unattributable**, rather than guessing which key/project
+owned it. Every historical parent moves into an internal `v2:q:p:*` quarantine;
+its project/resource labels are cleared, while messages and observations follow
+the parent. All facts and reflections for an affected owner—including
+project/resource-only rows with no thread id—are de-scoped into a separate
+`v2:q:r:*` namespace. Reflections are archived; facts are archived and stamped
+invalid/expired, so none of this mixed history can be injected into a current
+project. Pending/running jobs that could consume it are failed. Malformed job
+scopes are rewritten to a valid synthetic quarantine scope so operational stats
+cannot be poisoned by invalid JSON.
+
+The quarantine ids are internal audit/storage values, not client thread ids.
+Management responses decode trusted rows for display, but request and MCP input
+always remains opaque. The migration ledger makes a second run a no-op; a missing
+owner, target-id collision, foreign-key violation, or other partial failure rolls
+back the whole migration and refuses startup. Historical content remains
+inspectable to operators, but restoring it requires a deliberate provenance
+review—it is never reassigned automatically.
 
 ## Mode contracts
 

@@ -63,6 +63,7 @@ export interface UsageStats {
 // The portal-projected request row/detail (toPortalDecisionView + created_at).
 export interface PortalRequestRow {
   request_id: string;
+  trace_id: string;
   requested_model: string;
   served_model: string | null;
   lane: string;
@@ -155,24 +156,24 @@ export function getRequests(
 }
 
 export function getRequestDetail(
-  traceId: string,
+  requestId: string,
 ): Promise<PortalRequestDetail> {
   return apiGet<PortalRequestDetail>(
-    `/requests/${encodeURIComponent(traceId)}`,
+    `/requests/${encodeURIComponent(requestId)}`,
   );
 }
 
 export function getPayloadPart(
-  traceId: string,
+  requestId: string,
   part: "request" | "response",
 ): Promise<PayloadPart> {
   return apiGet<PayloadPart>(
-    `/requests/${encodeURIComponent(traceId)}/payload?part=${part}`,
+    `/requests/${encodeURIComponent(requestId)}/payload?part=${part}`,
   );
 }
 
-export function getPayloadMeta(traceId: string): Promise<PayloadMeta> {
+export function getPayloadMeta(requestId: string): Promise<PayloadMeta> {
   return apiGet<PayloadMeta>(
-    `/requests/${encodeURIComponent(traceId)}/payload?part=meta`,
+    `/requests/${encodeURIComponent(requestId)}/payload?part=meta`,
   );
 }

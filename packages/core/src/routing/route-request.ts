@@ -11,6 +11,7 @@ import {
 import { expandLaneChain } from "../lanes/expand-chain.js";
 import type { LanesConfig } from "../lanes/schema.js";
 import { type BlockedModelMatcher, createBlockedModelMatcher } from "../model-blocking.js";
+import { correlationTraceId } from "../telemetry/decision.js";
 import { type Classification as ResolverClassification, resolveLane } from "./lane-resolver.js";
 import { type ModelAliasMap, resolveModelAlias } from "./model-alias.js";
 import { applyCaps, evaluatePolicies, LANE_RANK, type PolicyContext } from "./policy-engine.js";
@@ -569,7 +570,7 @@ function noPermittedModelsRejection(args: {
     reject: makeHelmError({
       error_class: "invalid_request",
       message: `all candidate models for lane "${args.selectedLane}" are blocked for this key`,
-      trace_id: args.req.request_id,
+      trace_id: correlationTraceId(args.req),
     }),
     selectedLane: args.selectedLane,
     candidateChain: [],
@@ -601,7 +602,7 @@ function explicitLaneDecision(
       reject: makeHelmError({
         error_class: "invalid_request",
         message: `lane "${lane}" is not permitted for this key (allowed_lanes)`,
-        trace_id: req.request_id,
+        trace_id: correlationTraceId(req),
       }),
       selectedLane: lane,
     };
@@ -652,7 +653,7 @@ async function plan(
       reject: makeHelmError({
         error_class: "invalid_request",
         message: `model "${req.requested_model}" is blocked for this key`,
-        trace_id: req.request_id,
+        trace_id: correlationTraceId(req),
       }),
       selectedLane: req.requested_model,
       candidateChain: [],
@@ -799,7 +800,7 @@ async function plan(
         reject: makeHelmError({
           error_class: "invalid_request",
           message: `unknown model or lane "${model}"`,
-          trace_id: req.request_id,
+          trace_id: correlationTraceId(req),
         }),
         selectedLane: model,
       };
@@ -926,7 +927,7 @@ export async function routeRequest(
   if (isRejection(planned)) {
     const decision: DecisionRecord = {
       request_id: req.request_id,
-      trace_id: req.request_id,
+      trace_id: correlationTraceId(req),
       requested_model: req.requested_model,
       protocol: req.protocol,
       key_prefix: opts.keyPrefix ?? null,
@@ -1019,7 +1020,7 @@ export async function routeRequest(
 
   const decision: DecisionRecord = {
     request_id: req.request_id,
-    trace_id: req.request_id,
+    trace_id: correlationTraceId(req),
     requested_model: req.requested_model,
     protocol: req.protocol,
     key_prefix: opts.keyPrefix ?? null,

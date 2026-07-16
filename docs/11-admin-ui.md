@@ -215,14 +215,17 @@ never diverge.
 ### Request debugging
 
 - **Requests** (`/requests`) — the URL-backed, paginated request list, plus a
-  per-request detail page (`/requests/[traceId]`), reading the read-only
+  per-request detail page, reading the read-only
   `/admin/api/requests` endpoints. This reuses the observability surface from
   [07 · Error Model & Observability](07-observability.md): key filters, the
   decided-by legend, classification stage, matched policy, lane candidate chain,
   provider attempts, final OAuth serving account, cost, token usage, true TPS,
-  throughput/timing, error, and `trace_id`. When `capture_payloads` is on,
-  the detail can load the full captured request/response bodies
-  (`/admin/api/requests/:traceId/payload`) plus upstream request metadata. The
+  throughput/timing, error, unique Helm `request_id`, and reusable client
+  `trace_id`. List rows, detail links, payload lookup, and Retry are all keyed by
+  `request_id`; `trace_id` is display/copy-only correlation metadata. If
+  that request was captured and the row has not been pruned, the detail can load
+  the full request/response bodies
+  (`/admin/api/requests/:requestId/payload`) plus upstream request metadata. The
   body viewer renders the payload as a collapsible tree (or Formatted / Raw), pops
   any oversized field — a system prompt, a tool schema, a continued-session
   summary — into a fullscreen, copyable reader, and previews inline base64/remote

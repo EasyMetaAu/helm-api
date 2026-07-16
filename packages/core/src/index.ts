@@ -279,6 +279,7 @@ export {
   observeInbound,
   observeOutbound,
   ownerScopedThreadId,
+  projectScopedThreadId,
   resolveMemoryMode,
   serializeContent,
 } from "./memory/observe.js";
@@ -319,6 +320,7 @@ export {
   type MemoryWorkerHandle,
   startMemoryWorker,
 } from "./memory/scheduler.js";
+export { clientThreadIdFromStorageId } from "./memory/thread-scope.js";
 export {
   type MemoryMeta,
   MemoryMetaSchema,
@@ -862,6 +864,7 @@ export { MemoryFactContentHashConflictError } from "./store/ports.js";
 export {
   buildDecisionRecord,
   type ClassifierOutput,
+  correlationTraceId,
   type DecisionParts,
   type FinalOutcome,
   type LaneSelection,

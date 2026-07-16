@@ -49,14 +49,16 @@ describe("createApp: trace_id, logging, error handling", () => {
 
   it("propagates an incoming X-Request-Id", async () => {
     const { logger, lines } = fakeLogger();
-    const app = createApp({ logger });
+    const app = createApp({ logger, genTraceId: () => "server-request-123" });
     app.get("/ping", (c) => c.json({ trace: c.get("trace_id") }));
     const res = await app.request("/ping", { headers: { "X-Request-Id": "abc-123" } });
     expect(res.headers.get("X-Trace-Id")).toBe("abc-123");
+    expect(res.headers.get("X-Helm-Request-Id")).toBe("server-request-123");
     const body = (await res.json()) as { trace: string };
     expect(body.trace).toBe("abc-123");
     const completed = lines.find((l) => l.message === "request.completed");
     expect(completed?.fields.trace_id).toBe("abc-123");
+    expect(completed?.fields.request_id).toBe("server-request-123");
   });
 
   it("emits one structured completion log with required fields", async () => {
@@ -68,6 +70,7 @@ describe("createApp: trace_id, logging, error handling", () => {
     expect(completed).toHaveLength(1);
     const f = completed[0]?.fields ?? {};
     expect(f).toMatchObject({ method: "GET", path: "/ping", status: 200 });
+    expect(typeof f.request_id).toBe("string");
     expect(typeof f.trace_id).toBe("string");
     expect(typeof f.duration_ms).toBe("number");
   });

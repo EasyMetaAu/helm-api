@@ -14,6 +14,7 @@ import DecisionChain from './DecisionChain.svelte';
 
 function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
   return {
+    request_id: 'req_1',
     trace_id: 'tr_1',
     ts: '',
     key_prefix: 'helm_live_ab12',

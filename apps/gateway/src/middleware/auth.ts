@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { type ApiKeyRecord, type BudgetCaps, hashKey, type KeyStore } from "@helm/core";
 import { effectiveMemoryProjectId, makeHelmError } from "@helm/shared";
 import type { MiddlewareHandler } from "hono";
+import type { AppEnv } from "../app.js";
 
 // Resolved request identity, attached to the Hono context for downstream
 // (rate limit / classify / route) consumers.
@@ -74,9 +75,17 @@ function extractKey(
 // structured auth_error(401), short-circuiting before any downstream handler.
 // Valid -> attach identity and continue. Plaintext keys are NEVER logged or
 // echoed in responses (principle 7). Registered BEFORE rate limiting (docs/06).
-export function authMiddleware(deps: AuthDeps): MiddlewareHandler {
+export function authMiddleware(deps: AuthDeps): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
-    const traceId = c.req.header("x-trace-id") ?? randomUUID();
+    // createApp resolves X-Request-Id / X-Trace-Id once, before auth. Reuse that
+    // canonical context value so 401 envelopes and completion logs correlate.
+    // The header/random fallback keeps this middleware safe in isolated Hono
+    // compositions that intentionally omit createApp's outer middleware.
+    const contextTraceId = c.get("trace_id");
+    const traceId =
+      typeof contextTraceId === "string" && contextTraceId.length > 0
+        ? contextTraceId
+        : (c.req.header("x-request-id") ?? c.req.header("x-trace-id") ?? randomUUID());
     const plaintext = extractKey(c.req.header("Authorization"), c.req.header("x-api-key"));
 
     const reject = () => {

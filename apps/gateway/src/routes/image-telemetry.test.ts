@@ -27,6 +27,7 @@ describe("buildImageDecision (chain-aware)", () => {
       row({ alias: "openai/gpt-image-2", status: "ok", cost_usd: 0.04, latency_ms: 70 }),
     ];
     const d = buildImageDecision({
+      requestId: "req-internal-1",
       traceId: "t1",
       keyPrefix: "helm_live_xy",
       requested: "gpt-image", // the LANE name the client sent
@@ -38,6 +39,8 @@ describe("buildImageDecision (chain-aware)", () => {
       usage: { input_tokens: 12, output_tokens: 200 },
     });
 
+    expect(d.request_id).toBe("req-internal-1");
+    expect(d.trace_id).toBe("t1");
     expect(d.lane.selected_lane).toBe("gpt-image");
     expect(d.lane.candidate_chain).toEqual(["zenmux/gpt-image-2", "openai/gpt-image-2"]);
     expect(d.final.model_alias).toBe("openai/gpt-image-2"); // SERVED leaf, not the lane name
@@ -56,6 +59,7 @@ describe("buildImageDecision (chain-aware)", () => {
       row({ alias: "b", status: "ok", cost_usd: 0.01 }),
     ];
     const d = buildImageDecision({
+      requestId: "req-internal-2",
       traceId: "t2",
       keyPrefix: null,
       requested: "img-lane",
@@ -73,6 +77,7 @@ describe("buildImageDecision (chain-aware)", () => {
 
   it("preserves image-token, service-tier, and billed-cost repricing evidence", () => {
     const d = buildImageDecision({
+      requestId: "req-internal-rich",
       traceId: "t-rich",
       keyPrefix: null,
       requested: "gemini-3-pro-image",
@@ -108,6 +113,7 @@ describe("buildImageDecision (chain-aware)", () => {
       row({ alias: "b", status: "error", error_class: "upstream_error" }),
     ];
     const d = buildImageDecision({
+      requestId: "req-internal-3",
       traceId: "t3",
       keyPrefix: null,
       requested: "img-lane",
@@ -129,6 +135,7 @@ describe("buildImageDecision (chain-aware)", () => {
       row({ alias: "gpt-image-2", status: "ok", cost_usd: 0.006 }),
     ];
     const d = buildImageDecision({
+      requestId: "req-internal-4",
       traceId: "t4",
       keyPrefix: null,
       requested: "gpt-image-2",

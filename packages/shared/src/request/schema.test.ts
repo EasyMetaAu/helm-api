@@ -38,6 +38,14 @@ describe("InternalRequestSchema", () => {
     expect(parsed.metadata.memory_mode).toBe("off");
   });
 
+  it("keeps optional client trace_id separate from the internal request_id", () => {
+    const base = validRequest();
+    const input = { ...base, metadata: { ...base.metadata, trace_id: "client-trace" } };
+    const parsed = InternalRequestSchema.parse(input);
+    expect(parsed.request_id).toBe("req_1");
+    expect(parsed.metadata.trace_id).toBe("client-trace");
+  });
+
   it.each([
     "request_id",
     "protocol",

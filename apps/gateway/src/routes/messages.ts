@@ -312,6 +312,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
 
   app.post("/v1/messages", async (c) => {
     const traceId = c.get("trace_id");
+    const requestId = c.get("request_id");
 
     // 1) Auth FIRST (docs/02 pipeline: Auth precedes the Protocol Adapter). A
     //    missing/invalid key never reaches the translator or the pipeline.
@@ -414,7 +415,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
       const detail = err instanceof Error ? err.message : "invalid Anthropic request";
       return sendError(c, { error_class: "invalid_request", message: detail, trace_id: traceId });
     }
-    ir.metadata = { ...(ir.metadata ?? {}), trace_id: traceId };
+    ir.metadata = { ...(ir.metadata ?? {}), request_id: requestId, trace_id: traceId };
 
     // Capture the real CLI's billing identity (version + entrypoint) from the native
     // system[0] block BEFORE transformRequestOut stripped it, and stamp it onto the IR
@@ -607,7 +608,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
             await recordServed(
               deps.record,
               {
-                requestId: traceId,
+                requestId,
                 apiKeyId: identity.keyId,
                 decision: result.decision,
                 requestJson,
@@ -646,7 +647,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
         await recordServed(
           deps.record,
           {
-            requestId: traceId,
+            requestId,
             apiKeyId: identity.keyId,
             decision: result.decision,
             requestJson,
@@ -673,7 +674,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
       await recordServed(
         deps.record,
         {
-          requestId: traceId,
+          requestId,
           apiKeyId: identity.keyId,
           decision: result.decision,
           requestJson,

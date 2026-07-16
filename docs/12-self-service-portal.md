@@ -47,7 +47,7 @@ identity provider: possession of the API key is the login credential.
 | `/portal/` | View request, success, token, cost, latency, and throughput totals; budget progress; time-series charts; model distribution; and recent requests. |
 | `/portal/connect` | Copy setup instructions for Claude Code, Codex, OpenAI-compatible SDKs, and Memory MCP when the MCP surface is available. |
 | `/portal/requests` | Filter and page through this key's requests by time, status, model, or lane. |
-| `/portal/requests/{traceId}` | View the customer-safe result, token/cost summary, and captured client request/response payload for an owned trace. |
+| `/portal/requests/{requestId}` | View the customer-safe result, token/cost summary, and captured client request/response payload for an owned Helm request. |
 | `/portal/memory` | Browse, search, add, edit, archive/restore, and delete facts; edit/delete reflections; and change this key's memory defaults. The content operations call `/mcp`. |
 | `/portal/account` | Inspect the key's lane/rate/budget/memory settings. Operator-owned settings remain read-only. |
 
@@ -65,28 +65,28 @@ Every handler derives scope from `c.get("identity")`. Caller-supplied `key_id` o
 | `PATCH /portal/api/memory-settings` | Changes only `memory_mode`, `memory_project_id`, and `memory_thread_source` for the current non-root key. Unknown/admin-owned fields are rejected. Root memory settings are read-only. |
 | `GET /portal/api/usage/stats` | Aggregates only the authenticated `key_id`; returns totals, hourly/daily series, public model labels, and budget caps. Internal wire-model names are mapped to a public alias or `other`. |
 | `GET /portal/api/requests` | Paginated, filtered request list with `apiKeyId` forced to the authenticated key. |
-| `GET /portal/api/requests/{traceId}` | Ownership-gated, whitelist-projected request detail. |
-| `GET /portal/api/requests/{traceId}/payload?part=meta\|request\|response` | Lazy access to the owned client request/response only. `upstream_request` is deliberately unavailable. |
+| `GET /portal/api/requests/{requestId}` | Ownership-gated, whitelist-projected request detail. The identifier is the unique value returned in `X-Helm-Request-Id`, not a reusable client trace. |
+| `GET /portal/api/requests/{requestId}/payload?part=meta\|request\|response` | Lazy access to the owned client request/response only. `upstream_request` is deliberately unavailable. |
 
 The portal does not expose an API for key rotation, revocation, budgets, rate
 limits, lane caps, provider accounts, runtime settings, cleanup, or replay.
 
 ## Request privacy and ownership
 
-Telemetry lookup by trace id is not self-scoping at the Store-port level, so the
+Telemetry lookup by request id is not self-scoping at the Store-port level, so the
 portal applies an explicit guard before reading a record or payload:
 
-1. read `getApiKeyId(traceId)`;
+1. read `getApiKeyId(requestId)`;
 2. compare it with `identity.keyId`;
-3. return the same `404 request not found` for a missing trace and a trace owned by
+3. return the same `404 request not found` for a missing request and a request owned by
    another key;
 4. only then read the decision record or payload.
 
-This ordering prevents both cross-key reads and trace-id existence probing.
+This ordering prevents both cross-key reads and request-id existence probing.
 
 `toPortalDecisionView()` is an allow-list projection. It exposes only:
 
-- request id and requested model;
+- unique Helm request id, client correlation trace id, and requested model;
 - public served-model alias and selected lane;
 - terminal status/error class;
 - total latency and cost;
@@ -98,8 +98,10 @@ service tier/region details, upstream errors, and upstream payloads. Adding a ne
 field to `DecisionRecord` therefore cannot silently add it to the portal.
 
 Captured client request/response bodies are still sensitive. They are available
-only when the operator has enabled payload capture and the authenticated key owns
-the trace. See [07 · Error Model & Observability](07-observability.md).
+only when capture was enabled for that request, the retained row has not been
+pruned, and the authenticated key owns the request. Disabling capture stops new
+writes but does not hide older retained rows. See
+[07 · Error Model & Observability](07-observability.md).
 
 ## Memory scope
 
@@ -133,7 +135,7 @@ registered even when the admin surface is disabled.
 The security contract is covered by targeted tests for:
 
 - cross-key list/detail/payload isolation and ownership-before-read ordering;
-- `404` equivalence for missing and foreign trace ids;
+- `404` equivalence for missing and foreign request ids;
 - whitelist projection of decision records and provider/wire-model non-disclosure;
 - strict writable memory settings and root-key rejection;
 - CSP/static routing and session-storage browser behavior;

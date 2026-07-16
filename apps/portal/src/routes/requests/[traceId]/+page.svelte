@@ -22,7 +22,7 @@
   type PayloadPartName = "request" | "response";
   type PartStatus = "idle" | "loading" | "loaded" | "error";
 
-  const traceId = $derived($page.params.traceId);
+  const requestId = $derived($page.params.traceId);
 
   let detail = $state<PortalRequestDetail | null>(null);
   let payloadMeta = $state<PayloadMeta>({ captured: false });
@@ -55,20 +55,20 @@
         getRequestDetail(id),
         getPayloadMeta(id).catch((): PayloadMeta => ({ captured: false })),
       ]);
-      if (traceId !== id) return;
+      if (requestId !== id) return;
       detail = nextDetail;
       payloadMeta = nextMeta;
     } catch (e) {
-      if (traceId !== id) return;
+      if (requestId !== id) return;
       if (e instanceof Error && e.message.includes("404")) notFound = true;
       else error = e instanceof Error ? e.message : "load failed";
     } finally {
-      if (traceId === id) loading = false;
+      if (requestId === id) loading = false;
     }
   }
 
   $effect(() => {
-    if (traceId) void load(traceId);
+    if (requestId) void load(requestId);
   });
 
   function hasPayloadPart(part: PayloadPartName): boolean {
@@ -76,7 +76,7 @@
   }
 
   async function loadPayloadPart(part: PayloadPartName): Promise<unknown> {
-    const id = traceId;
+    const id = requestId;
     if (!id) return null;
     if (!hasPayloadPart(part)) return null;
     if (payloadStatus[part] === "loaded") return payloadValues[part];
@@ -86,7 +86,7 @@
     payloadErrors[part] = undefined;
     try {
       const result = await getPayloadPart(id, part);
-      if (traceId !== id) return null;
+      if (requestId !== id) return null;
       if (result.captured !== true || result.part !== part) {
         payloadStatus[part] = "error";
         payloadErrors[part] = $t("Payload was not available.");
@@ -96,7 +96,7 @@
       payloadStatus[part] = "loaded";
       return payloadValues[part];
     } catch (e) {
-      if (traceId !== id) return null;
+      if (requestId !== id) return null;
       payloadStatus[part] = "error";
       payloadErrors[part] =
         e instanceof Error ? e.message : $t("Payload was not available.");
@@ -146,7 +146,18 @@
   <p class="alert-error mt-4">{error}</p>
 {:else if detail}
   <h1 class="page-title mb-1 mt-2">{$t("Request")}</h1>
-  <p class="section-desc mb-4 font-mono text-xs">{detail.request_id}</p>
+  <div class="section-desc mb-4 flex flex-wrap gap-x-4 gap-y-1 text-xs">
+    <span>
+      {$t("Request ID")}:
+      <code class="font-mono">{detail.request_id}</code>
+    </span>
+    {#if detail.trace_id !== detail.request_id}
+      <span>
+        {$t("Client trace ID")}:
+        <code class="font-mono">{detail.trace_id}</code>
+      </span>
+    {/if}
+  </div>
 
   <div class="card mb-4 grid grid-cols-2 gap-3 md:grid-cols-4">
     <div>

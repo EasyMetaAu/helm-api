@@ -685,6 +685,7 @@
   "Request (from client)": "Request (from client)",
   "Request body": "Request body",
   "Request ID": "Request ID",
+  "Client trace ID": "Client trace ID",
   "Request logging": "Request logging",
   "Request metadata recorded for this call (redacted — no message content or secrets).": "Request metadata recorded for this call (redacted — no message content or secrets).",
   "Request not found.": "Request not found.",

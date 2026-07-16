@@ -1,4 +1,5 @@
 import type { ExecutionResult, InjectDeps, ObserveDeps, RouteOptions } from "@helm/core";
+import { projectScopedThreadId } from "@helm/core";
 import type { InternalRequest } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
@@ -402,9 +403,11 @@ describe("gateway.inject — per-key defaults + metadata.user_id fallback (issue
           m.content.startsWith("<system-reminder>"),
       ),
     ).toBe(true);
-    // The derived thread is owner-scoped (account prefix) like an explicit one.
+    // The derived thread is account + effective-project scoped like an explicit one.
     expect(store.ensureThread).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "acct:cc-session-hash-1" }),
+      expect.objectContaining({
+        id: projectScopedThreadId("acct", "proj-key", "cc-session-hash-1"),
+      }),
     );
   });
 });

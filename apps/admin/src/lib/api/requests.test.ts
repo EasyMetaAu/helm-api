@@ -70,6 +70,22 @@ function rawRecord(overrides: Record<string, unknown> = {}): Record<string, unkn
 }
 
 describe('toListItem', () => {
+  it('keeps the unique storage request id separate from reusable client correlation', () => {
+    const raw = rawRecord({ request_id: 'req_internal_1', trace_id: 'client_shared_trace' });
+    const row = toListItem(raw);
+    const detail = toDetail(raw);
+    expect(row.request_id).toBe('req_internal_1');
+    expect(row.trace_id).toBe('client_shared_trace');
+    expect(detail.request_id).toBe('req_internal_1');
+    expect(detail.trace_id).toBe('client_shared_trace');
+  });
+
+  it('rejects records without the internal request id instead of using the client trace as a key', () => {
+    const raw = rawRecord({ request_id: undefined, trace_id: 'client_shared_trace' });
+    expect(() => toListItem(raw)).toThrow(/request_id/i);
+    expect(() => toDetail(raw)).toThrow(/request_id/i);
+  });
+
   it('reads the real key_prefix (prefix only), latency total and fallback_count', () => {
     const row = toListItem(rawRecord());
     expect(row.key_prefix).toBe('helm_live_ab12');

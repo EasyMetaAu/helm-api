@@ -16,6 +16,7 @@ import {
   applyForcedReasoningToNativeBody,
   canUseNativePassthrough,
   checkCapability,
+  correlationTraceId,
   guardPreOutputFailure,
   type NativePassthroughDisableReason,
   openaiTransformer,
@@ -1932,7 +1933,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 // failure. Matches the per-attempt row above (docs/02, docs/07).
                 error_class: "client_abort",
                 message: "client aborted request",
-                trace_id: req.request_id,
+                trace_id: correlationTraceId(req),
               }),
             },
             body: null,
@@ -1965,7 +1966,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               error: makeHelmError({
                 error_class: "lane_unavailable",
                 message: "user message queue wait timed out; retry shortly",
-                trace_id: req.request_id,
+                trace_id: correlationTraceId(req),
               }),
             },
             body: null,
@@ -2061,7 +2062,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               error: makeHelmError({
                 error_class: "invalid_request",
                 message: upstreamErrorMessage(detail.provider_raw) ?? detail.message,
-                trace_id: req.request_id,
+                trace_id: correlationTraceId(req),
                 provider_raw: detail.provider_raw,
               }),
             },
@@ -2146,7 +2147,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         error: makeHelmError({
           error_class: errorClass,
           message,
-          trace_id: req.request_id,
+          trace_id: correlationTraceId(req),
           provider_raw: providerRaw,
         }),
       },

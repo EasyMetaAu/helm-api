@@ -3,6 +3,7 @@ import { hashKey } from "@helm/core";
 import { HelmErrorSchema } from "@helm/shared";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
+import type { AppEnv } from "../app.js";
 import { type AuthDeps, authMiddleware } from "./auth.js";
 
 function record(overrides: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
@@ -135,5 +136,23 @@ describe("authMiddleware", () => {
     const body = (await res.json()) as Record<string, unknown>;
     expect(HelmErrorSchema.safeParse(body).success).toBe(true);
     expect(String(body.trace_id).length).toBeGreaterThan(0);
+  });
+
+  it("uses the resolved request-context trace for auth errors", async () => {
+    const app = new Hono<AppEnv>();
+    app.use("*", async (c, next) => {
+      c.set("trace_id", "resolved-x-request-id");
+      await next();
+    });
+    app.use("*", authMiddleware({ keyStore: { getByHash: vi.fn() }, log: () => {} }));
+    app.get("/protected", (c) => c.text("unexpected"));
+
+    const res = await app.request("/protected", {
+      headers: { "X-Request-Id": "raw-header-must-not-be-reread" },
+    });
+    const body = (await res.json()) as { trace_id: string };
+
+    expect(res.status).toBe(401);
+    expect(body.trace_id).toBe("resolved-x-request-id");
   });
 });

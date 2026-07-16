@@ -1,100 +1,654 @@
 name: Publish image
 
-# Builds the gateway image with real build info, pushes it to GHCR, and — when a
-# commit to main bumps package.json to a not-yet-released version — automatically
-# cuts the matching tag + GitHub Release.
-#   - push to main (normal commit)  -> :latest + :sha-<short>
-#   - push to main (version bump)   -> :latest + :sha-<short> + :<version>,
-#                                      plus tag v<version> + GitHub Release (auto notes)
-#   - push tag v1.2.3 (manual)      -> :latest + :1.2.3   (escape hatch; no Release)
-# Runs on the org self-hosted runners (same pool as CI). Build info is injected
-# via the Dockerfile build-args (docs/10) so GET /version reports real values.
+# Publishes only the exact main commit already accepted by the complete CI workflow.
+# Every commit gets an immutable :sha-<full-SHA> identity. Reruns validate and reuse
+# that image instead of rebuilding or overwriting it; semver and :latest are promoted
+# from the resolved immutable digest rather than from another build.
 #
-# The "version bump" path makes a release as soon as a PR bumping the root
-# package.json lands on main: no manual `git tag` / `gh release create` needed.
-# The GitHub Release (and its tag) are created with GITHUB_TOKEN, which by design
-# does NOT re-trigger this workflow's `tags: v*` path — so there is no double build.
+# GitHub and GHCR writes are not atomic. The workflow serializes writers, rechecks
+# main before mutable boundaries, and fails closed on inconsistent release state,
+# but it cannot make the remote main check and registry write atomic. Once semver
+# promotion starts, it completes the matching GitHub Release before considering
+# :latest so a main update cannot strand a half-created release. A later run may
+# reconcile an interrupted semver push only when its full-SHA metadata, immutable
+# digest, main ancestry, and package version all agree.
 on:
-  push:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches: [main]
-    tags: ['v*']
 
 concurrency:
-  group: publish-${{ github.ref }}
+  # Only eligible main-push runs share the privileged writer group. A completed
+  # PR CI run still emits workflow_run, but its unique group prevents that skipped
+  # run from replacing a legitimate pending publisher. Do not cancel an active
+  # publisher; the head checks below safely stop stale work at mutable boundaries.
+  group: >-
+    ${{ github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        'publish-main' ||
+        format('publish-ineligible-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:
   publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
     runs-on: [self-hosted, Linux, X64, docker]
     permissions:
       contents: write   # create the tag + GitHub Release on a version bump
       packages: write
+    env:
+      # Never leave the package-write credential in a persistent runner account's
+      # normal Docker config; the final always() step removes this run-scoped file.
+      DOCKER_CONFIG: ${{ runner.temp }}/helm-publish-docker-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0   # need full tag list to detect "already released"
-      - name: Resolve tags + build info
+          persist-credentials: false
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - name: Confirm verified commit is still main
+        id: head
+        env:
+          VERIFIED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          REMOTE_MAIN_SHA=$(git ls-remote --exit-code origin refs/heads/main | cut -f1)
+          if [ -z "${REMOTE_MAIN_SHA}" ]; then
+            echo "::error::origin returned no refs/heads/main SHA"
+            exit 1
+          fi
+          if [ "${REMOTE_MAIN_SHA}" != "${VERIFIED_SHA}" ]; then
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::skip stale CI run ${VERIFIED_SHA}; main is ${REMOTE_MAIN_SHA}"
+            exit 0
+          fi
+          echo "current=true" >> "$GITHUB_OUTPUT"
+      - name: Resolve release state + deterministic build info
+        if: steps.head.outputs.current == 'true'
         id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERIFIED_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           IMAGE=ghcr.io/easymetaau/helm-api
           VERSION=$(node -p "require('./package.json').version")
-          SHA=$(git rev-parse --short HEAD)
-          BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          RELEASE=false
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            VERSION="${GITHUB_REF_NAME#v}"            # v0.1.0 -> 0.1.0
-            TAGS="${IMAGE}:latest ${IMAGE}:${VERSION}"
-          else
-            TAGS="${IMAGE}:latest ${IMAGE}:sha-${SHA}"
-            # On main: a package.json version with no matching tag means this commit
-            # bumped the version -> also publish :<version> and cut a Release for it.
-            if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
-              echo "v${VERSION} already released; normal commit, no Release."
-            else
-              RELEASE=true
-              TAGS="${TAGS} ${IMAGE}:${VERSION}"
-            fi
+          FULL_SHA=$(git rev-parse HEAD)
+          node -e '
+            const [version, verifiedSha, fullSha] = process.argv.slice(1);
+            const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?$/;
+            const ociTag = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
+            const sha = /^[0-9a-f]{40}$/;
+            if (!semver.test(version) || !ociTag.test(version)) throw new Error(`unsafe package version: ${JSON.stringify(version)}`);
+            if (!sha.test(verifiedSha) || !sha.test(fullSha)) throw new Error("workflow and checkout SHAs must be 40 lowercase hex characters");
+          ' "${VERSION}" "${VERIFIED_SHA}" "${FULL_SHA}"
+          if [ "${FULL_SHA}" != "${VERIFIED_SHA}" ]; then
+            echo "::error::checked out ${FULL_SHA}, expected CI-verified ${VERIFIED_SHA}"
+            exit 1
           fi
-          {
-            echo "version=${VERSION}"
-            echo "sha=${SHA}"
-            echo "built_at=${BUILT_AT}"
-            echo "tags=${TAGS}"
-            echo "release=${RELEASE}"
-          } >> "$GITHUB_OUTPUT"
-      - name: Log in to GHCR
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-      - name: Build & push
-        run: |
-          args=()
-          for t in ${{ steps.meta.outputs.tags }}; do args+=( -t "$t" ); done
-          docker build \
-            --build-arg HELM_VERSION="${{ steps.meta.outputs.version }}" \
-            --build-arg HELM_GIT_SHA="${{ steps.meta.outputs.sha }}" \
-            --build-arg HELM_BUILT_AT="${{ steps.meta.outputs.built_at }}" \
-            "${args[@]}" .
-          for t in ${{ steps.meta.outputs.tags }}; do docker push "$t"; done
-      - name: Cut GitHub Release
-        if: steps.meta.outputs.release == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          V="${{ steps.meta.outputs.version }}"
-          # REST instead of `gh` so it works on runners without the gh CLI. Creating
-          # a release with target_commitish also creates the tag v<version>.
-          code=$(curl -sS -o /tmp/release.json -w '%{http_code}' -X POST \
+          COMMIT_EPOCH=$(git show -s --format=%ct "${FULL_SHA}")
+          BUILT_AT=$(node -e 'process.stdout.write(new Date(Number(process.argv[1]) * 1000).toISOString())' "${COMMIT_EPOCH}")
+          IMMUTABLE_TAG="${IMAGE}:sha-${FULL_SHA}"
+          VERSION_TAG="${IMAGE}:${VERSION}"
+          LATEST_TAG="${IMAGE}:latest"
+
+          TAG_EXISTS=false
+          TAG_SHA=""
+          if git show-ref --verify --quiet "refs/tags/v${VERSION}"; then
+            TAG_EXISTS=true
+            TAG_SHA=$(git rev-list -n 1 "v${VERSION}")
+          fi
+
+          RELEASE_HTTP=$(curl -sS -o "${RUNNER_TEMP}/helm-release-state.json" -w '%{http_code}' \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases" \
-            -d "{\"tag_name\":\"v${V}\",\"target_commitish\":\"${GITHUB_SHA}\",\"name\":\"v${V}\",\"generate_release_notes\":true}")
-          if [ "$code" != "201" ]; then
-            echo "::error::release create for v${V} failed (HTTP ${code})"
-            cat /tmp/release.json
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/v${VERSION}")
+          case "${RELEASE_HTTP}" in
+            200)
+              RELEASE_EXISTS=true
+              node -e '
+                const release = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+                if (release.tag_name !== process.argv[2]) throw new Error(`unexpected release tag ${release.tag_name}`);
+                if (release.draft) throw new Error(`draft Release ${process.argv[2]} is not a completed release`);
+              ' "${RUNNER_TEMP}/helm-release-state.json" "v${VERSION}"
+              ;;
+            404)
+              RELEASE_EXISTS=false
+              ;;
+            *)
+              echo "::error::cannot resolve GitHub Release v${VERSION} (HTTP ${RELEASE_HTTP})"
+              cat "${RUNNER_TEMP}/helm-release-state.json"
+              exit 1
+              ;;
+          esac
+
+          if [ "${TAG_EXISTS}" = "true" ] && [ "${RELEASE_EXISTS}" = "false" ]; then
+            echo "::error::v${VERSION} git tag exists but the GitHub Release is missing"
             exit 1
           fi
-          echo "Created GitHub Release v${V}"
-      - name: Summary
+          if [ "${TAG_EXISTS}" = "false" ] && [ "${RELEASE_EXISTS}" = "true" ]; then
+            echo "::error::v${VERSION} GitHub Release exists but its git tag is missing"
+            exit 1
+          fi
+
+          if [ "${TAG_EXISTS}" = "true" ]; then
+            if [ -z "${TAG_SHA}" ] || ! git merge-base --is-ancestor "${TAG_SHA}" "${FULL_SHA}"; then
+              echo "::error::released tag v${VERSION} is not an ancestor of verified main ${FULL_SHA}"
+              exit 1
+            fi
+            RELEASE=false
+            echo "v${VERSION} is a complete existing release at ${TAG_SHA}; no new release."
+          else
+            RELEASE=true
+            echo "v${VERSION} has no tag or Release; this commit starts a new release."
+          fi
+
+          {
+            echo "version=${VERSION}"
+            echo "full_sha=${FULL_SHA}"
+            echo "built_at=${BUILT_AT}"
+            echo "source_date_epoch=${COMMIT_EPOCH}"
+            echo "immutable_tag=${IMMUTABLE_TAG}"
+            echo "version_tag=${VERSION_TAG}"
+            echo "latest_tag=${LATEST_TAG}"
+            echo "release=${RELEASE}"
+            echo "release_tag_sha=${TAG_SHA}"
+          } >> "$GITHUB_OUTPUT"
+      - name: Log in to GHCR
+        if: steps.head.outputs.current == 'true'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Check immutable image
+        if: steps.head.outputs.current == 'true'
+        id: image
+        env:
+          IMMUTABLE_TAG: ${{ steps.meta.outputs.immutable_tag }}
         run: |
-          echo "Pushed: ${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "version=${{ steps.meta.outputs.version }} sha=${{ steps.meta.outputs.sha }} release=${{ steps.meta.outputs.release }}" >> "$GITHUB_STEP_SUMMARY"
+          CHECK_LOG="${RUNNER_TEMP}/helm-immutable-manifest.log"
+          if docker manifest inspect "${IMMUTABLE_TAG}" >"${CHECK_LOG}" 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Reusing existing immutable image ${IMMUTABLE_TAG}; metadata validation follows."
+          elif grep -Eiq 'manifest unknown|no such manifest' "${CHECK_LOG}"; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Immutable image ${IMMUTABLE_TAG} does not exist; it will be built once."
+          else
+            echo "::error::cannot determine whether ${IMMUTABLE_TAG} exists"
+            cat "${CHECK_LOG}"
+            exit 1
+          fi
+
+      - name: Build immutable image
+        if: steps.head.outputs.current == 'true' && steps.image.outputs.exists == 'false'
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.meta.outputs.source_date_epoch }}
+        run: |
+          docker build \
+            --build-arg SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" \
+            --build-arg HELM_VERSION="${{ steps.meta.outputs.version }}" \
+            --build-arg HELM_GIT_SHA="${{ steps.meta.outputs.full_sha }}" \
+            --build-arg HELM_BUILT_AT="${{ steps.meta.outputs.built_at }}" \
+            --label "org.opencontainers.image.revision=${{ steps.meta.outputs.full_sha }}" \
+            --label "org.opencontainers.image.version=${{ steps.meta.outputs.version }}" \
+            --label "org.opencontainers.image.created=${{ steps.meta.outputs.built_at }}" \
+            --tag "${{ steps.meta.outputs.immutable_tag }}" .
+
+      - name: Push immutable image
+        if: steps.head.outputs.current == 'true' && steps.image.outputs.exists == 'false'
+        env:
+          IMMUTABLE_TAG: ${{ steps.meta.outputs.immutable_tag }}
+        run: |
+          # Close most of the build-time check/write window. GHCR offers no CAS
+          # through `docker push`, so the remaining inspect/push race is reported
+          # as a known registry limitation rather than pretending it is atomic.
+          CHECK_LOG="${RUNNER_TEMP}/helm-immutable-pre-push.log"
+          if docker manifest inspect "${IMMUTABLE_TAG}" >"${CHECK_LOG}" 2>&1; then
+            echo "${IMMUTABLE_TAG} appeared while building; do not overwrite it."
+          elif grep -Eiq 'manifest unknown|no such manifest' "${CHECK_LOG}"; then
+            docker push "${IMMUTABLE_TAG}"
+          else
+            echo "::error::cannot safely publish ${IMMUTABLE_TAG}"
+            cat "${CHECK_LOG}"
+            exit 1
+          fi
+
+      - name: Verify immutable image
+        if: steps.head.outputs.current == 'true'
+        id: immutable
+        env:
+          BUILT_AT: ${{ steps.meta.outputs.built_at }}
+          FULL_SHA: ${{ steps.meta.outputs.full_sha }}
+          IMAGE: ghcr.io/easymetaau/helm-api
+          IMMUTABLE_TAG: ${{ steps.meta.outputs.immutable_tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          if ! PULL_OUTPUT=$(docker pull "${IMMUTABLE_TAG}" 2>&1); then
+            printf '%s\n' "${PULL_OUTPUT}"
+            echo "::error::cannot pull immutable image ${IMMUTABLE_TAG}"
+            exit 1
+          fi
+          printf '%s\n' "${PULL_OUTPUT}"
+          DIGEST=$(printf '%s\n' "${PULL_OUTPUT}" | awk '$1 == "Digest:" { print $2 }' | tail -n 1)
+          node -e 'if (!/^sha256:[0-9a-f]{64}$/.test(process.argv[1])) throw new Error("registry did not return a valid digest")' "${DIGEST}"
+
+          REVISION=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "${IMMUTABLE_TAG}")
+          IMAGE_VERSION=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "${IMMUTABLE_TAG}")
+          CREATED=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.created" }}' "${IMMUTABLE_TAG}")
+          if [ "${REVISION}" != "${FULL_SHA}" ] || [ "${IMAGE_VERSION}" != "${VERSION}" ] || [ "${CREATED}" != "${BUILT_AT}" ]; then
+            echo "::error::existing immutable image metadata does not match verified source"
+            echo "expected revision=${FULL_SHA} version=${VERSION} created=${BUILT_AT}"
+            echo "actual revision=${REVISION} version=${IMAGE_VERSION} created=${CREATED}"
+            exit 1
+          fi
+
+          IMAGE_ENV=$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${IMMUTABLE_TAG}")
+          for EXPECTED in "HELM_GIT_SHA=${FULL_SHA}" "HELM_VERSION=${VERSION}" "HELM_BUILT_AT=${BUILT_AT}"; do
+            if ! grep -Fqx -- "${EXPECTED}" <<<"${IMAGE_ENV}"; then
+              echo "::error::immutable image is missing expected runtime metadata ${EXPECTED}"
+              exit 1
+            fi
+          done
+
+          {
+            echo "digest=${DIGEST}"
+            echo "digest_ref=${IMAGE}@${DIGEST}"
+            echo "reused=${{ steps.image.outputs.exists }}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve effective release image
+        if: steps.head.outputs.current == 'true'
+        id: release_state
+        env:
+          CURRENT_DIGEST: ${{ steps.immutable.outputs.digest }}
+          CURRENT_REF: ${{ steps.immutable.outputs.digest_ref }}
+          CURRENT_SHA: ${{ steps.meta.outputs.full_sha }}
+          IMAGE: ghcr.io/easymetaau/helm-api
+          INITIAL_RELEASE: ${{ steps.meta.outputs.release }}
+          RELEASE_SHA: ${{ steps.meta.outputs.release_tag_sha }}
+          TARGET_TAG: ${{ steps.meta.outputs.version_tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          pull_digest() {
+            local ref="$1"
+            local output
+            local digest
+            if ! output=$(docker pull "${ref}" 2>&1); then
+              printf '%s\n' "${output}" >&2
+              return 2
+            fi
+            printf '%s\n' "${output}" >&2
+            digest=$(printf '%s\n' "${output}" | awk '$1 == "Digest:" { print $2 }' | tail -n 1)
+            if ! node -e 'if (!/^sha256:[0-9a-f]{64}$/.test(process.argv[1])) process.exit(1)' "${digest}"; then
+              echo "::error::registry returned no valid digest for ${ref}" >&2
+              return 2
+            fi
+            printf '%s' "${digest}"
+          }
+
+          emit_state() {
+            {
+              echo "release=$1"
+              echo "release_sha=$2"
+              echo "immutable_digest=$3"
+              echo "immutable_ref=$4"
+              echo "version_reused=$5"
+              echo "reconciled=$6"
+            } >> "$GITHUB_OUTPUT"
+          }
+
+          # A complete existing tag + Release must retain its semver artifact.
+          # Historical images had only a short runtime SHA and no OCI revision
+          # label; new images must retain full metadata and their immutable digest.
+          if [ "${INITIAL_RELEASE}" = "false" ]; then
+            if ! VERSION_DIGEST=$(pull_digest "${TARGET_TAG}"); then
+              echo "::error::complete Release v${VERSION} is missing its semver image ${TARGET_TAG}"
+              exit 1
+            fi
+            IMAGE_ENV=$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${TARGET_TAG}")
+            IMAGE_SHA=$(printf '%s\n' "${IMAGE_ENV}" | sed -n 's/^HELM_GIT_SHA=//p' | tail -n 1)
+            IMAGE_VERSION=$(printf '%s\n' "${IMAGE_ENV}" | sed -n 's/^HELM_VERSION=//p' | tail -n 1)
+            IMAGE_BUILT_AT=$(printf '%s\n' "${IMAGE_ENV}" | sed -n 's/^HELM_BUILT_AT=//p' | tail -n 1)
+            IMAGE_REVISION=$(docker image inspect --format '{{ with .Config.Labels }}{{ index . "org.opencontainers.image.revision" }}{{ end }}' "${TARGET_TAG}")
+            LABEL_VERSION=$(docker image inspect --format '{{ with .Config.Labels }}{{ index . "org.opencontainers.image.version" }}{{ end }}' "${TARGET_TAG}")
+            IMAGE_CREATED=$(docker image inspect --format '{{ with .Config.Labels }}{{ index . "org.opencontainers.image.created" }}{{ end }}' "${TARGET_TAG}")
+            if [ "${IMAGE_VERSION}" != "${VERSION}" ]; then
+              echo "::error::released image ${TARGET_TAG} reports version ${IMAGE_VERSION}, expected ${VERSION}"
+              exit 1
+            fi
+
+            if [ -z "${IMAGE_REVISION}" ]; then
+              if [ "${#IMAGE_SHA}" -lt 7 ] || ! [[ "${IMAGE_SHA}" =~ ^[0-9a-f]{7,40}$ ]]; then
+                echo "::error::legacy released image ${TARGET_TAG} has missing or truncated runtime revision metadata"
+                exit 1
+              fi
+              if ! RESOLVED_LEGACY_SHA=$(git rev-parse --verify "${IMAGE_SHA}^{commit}" 2>/dev/null); then
+                echo "::error::legacy released image revision ${IMAGE_SHA} is missing or ambiguous"
+                exit 1
+              fi
+              if [ "${RESOLVED_LEGACY_SHA}" != "${RELEASE_SHA}" ]; then
+                echo "::error::legacy released image ${TARGET_TAG} resolves to ${RESOLVED_LEGACY_SHA}, expected ${RELEASE_SHA}"
+                exit 1
+              fi
+            else
+              RELEASE_EPOCH=$(git show -s --format=%ct "${RELEASE_SHA}")
+              EXPECTED_BUILT_AT=$(node -e 'process.stdout.write(new Date(Number(process.argv[1]) * 1000).toISOString())' "${RELEASE_EPOCH}")
+              if [ "${IMAGE_SHA}" != "${RELEASE_SHA}" ] || [ "${IMAGE_REVISION}" != "${RELEASE_SHA}" ] || [ "${LABEL_VERSION}" != "${VERSION}" ] || [ "${IMAGE_BUILT_AT}" != "${EXPECTED_BUILT_AT}" ] || [ "${IMAGE_CREATED}" != "${EXPECTED_BUILT_AT}" ]; then
+                echo "::error::released image ${TARGET_TAG} has inconsistent full-SHA or deterministic OCI metadata"
+                exit 1
+              fi
+              IMMUTABLE_TAG="${IMAGE}:sha-${RELEASE_SHA}"
+              if ! IMMUTABLE_DIGEST=$(pull_digest "${IMMUTABLE_TAG}"); then
+                echo "::error::new-style Release v${VERSION} is missing ${IMMUTABLE_TAG}"
+                exit 1
+              fi
+              if [ "${VERSION_DIGEST}" != "${IMMUTABLE_DIGEST}" ]; then
+                echo "::error::released image ${TARGET_TAG}@${VERSION_DIGEST} differs from ${IMMUTABLE_TAG}@${IMMUTABLE_DIGEST}"
+                exit 1
+              fi
+            fi
+            emit_state false "${RELEASE_SHA}" "" "" true false
+            echo "Verified existing release image ${TARGET_TAG}@${VERSION_DIGEST}."
+            exit 0
+          fi
+
+          # No git tag or GitHub Release exists. A missing semver image is a new
+          # release. An existing one is an interrupted prior publish and may be
+          # reconciled only from strict, independently verifiable metadata.
+          CHECK_LOG="${RUNNER_TEMP}/helm-orphan-version-manifest.log"
+          if docker manifest inspect "${TARGET_TAG}" >"${CHECK_LOG}" 2>&1; then
+            VERSION_EXISTS=true
+          elif grep -Eiq 'manifest unknown|no such manifest' "${CHECK_LOG}"; then
+            VERSION_EXISTS=false
+          else
+            echo "::error::cannot inspect possible interrupted release ${TARGET_TAG}"
+            cat "${CHECK_LOG}"
+            exit 1
+          fi
+
+          if [ "${VERSION_EXISTS}" = "false" ]; then
+            emit_state true "${CURRENT_SHA}" "${CURRENT_DIGEST}" "${CURRENT_REF}" false false
+            exit 0
+          fi
+
+          VERSION_DIGEST=$(pull_digest "${TARGET_TAG}")
+          IMAGE_ENV=$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${TARGET_TAG}")
+          CANDIDATE_SHA=$(printf '%s\n' "${IMAGE_ENV}" | sed -n 's/^HELM_GIT_SHA=//p' | tail -n 1)
+          IMAGE_VERSION=$(printf '%s\n' "${IMAGE_ENV}" | sed -n 's/^HELM_VERSION=//p' | tail -n 1)
+          IMAGE_BUILT_AT=$(printf '%s\n' "${IMAGE_ENV}" | sed -n 's/^HELM_BUILT_AT=//p' | tail -n 1)
+          IMAGE_REVISION=$(docker image inspect --format '{{ with .Config.Labels }}{{ index . "org.opencontainers.image.revision" }}{{ end }}' "${TARGET_TAG}")
+          LABEL_VERSION=$(docker image inspect --format '{{ with .Config.Labels }}{{ index . "org.opencontainers.image.version" }}{{ end }}' "${TARGET_TAG}")
+          IMAGE_CREATED=$(docker image inspect --format '{{ with .Config.Labels }}{{ index . "org.opencontainers.image.created" }}{{ end }}' "${TARGET_TAG}")
+          if ! node -e 'if (!/^[0-9a-f]{40}$/.test(process.argv[1])) process.exit(1)' "${CANDIDATE_SHA}"; then
+            echo "::error::orphan semver image ${TARGET_TAG} does not contain a full git SHA"
+            exit 1
+          fi
+          if [ "${IMAGE_REVISION}" != "${CANDIDATE_SHA}" ] || [ "${IMAGE_VERSION}" != "${VERSION}" ]; then
+            echo "::error::orphan semver image metadata does not identify ${CANDIDATE_SHA} at version ${VERSION}"
+            exit 1
+          fi
+          if ! git cat-file -e "${CANDIDATE_SHA}^{commit}" || ! git merge-base --is-ancestor "${CANDIDATE_SHA}" "${CURRENT_SHA}"; then
+            echo "::error::orphan semver SHA ${CANDIDATE_SHA} is not an ancestor of current main ${CURRENT_SHA}"
+            exit 1
+          fi
+
+          CANDIDATE_EPOCH=$(git show -s --format=%ct "${CANDIDATE_SHA}")
+          EXPECTED_BUILT_AT=$(node -e 'process.stdout.write(new Date(Number(process.argv[1]) * 1000).toISOString())' "${CANDIDATE_EPOCH}")
+          if [ "${LABEL_VERSION}" != "${VERSION}" ] || [ "${IMAGE_BUILT_AT}" != "${EXPECTED_BUILT_AT}" ] || [ "${IMAGE_CREATED}" != "${EXPECTED_BUILT_AT}" ]; then
+            echo "::error::orphan semver image has inconsistent deterministic OCI metadata"
+            exit 1
+          fi
+
+          CANDIDATE_PACKAGE="${RUNNER_TEMP}/helm-orphan-package.json"
+          git show "${CANDIDATE_SHA}:package.json" > "${CANDIDATE_PACKAGE}"
+          CANDIDATE_VERSION=$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).version)' "${CANDIDATE_PACKAGE}")
+          if [ "${CANDIDATE_VERSION}" != "${VERSION}" ]; then
+            echo "::error::orphan semver SHA ${CANDIDATE_SHA} contains package version ${CANDIDATE_VERSION}, expected ${VERSION}"
+            exit 1
+          fi
+
+          CANDIDATE_TAG="${IMAGE}:sha-${CANDIDATE_SHA}"
+          if ! CANDIDATE_DIGEST=$(pull_digest "${CANDIDATE_TAG}"); then
+            echo "::error::orphan semver image has no matching immutable image ${CANDIDATE_TAG}"
+            exit 1
+          fi
+          if [ "${VERSION_DIGEST}" != "${CANDIDATE_DIGEST}" ]; then
+            echo "::error::orphan semver ${TARGET_TAG}@${VERSION_DIGEST} differs from ${CANDIDATE_TAG}@${CANDIDATE_DIGEST}"
+            exit 1
+          fi
+
+          CANDIDATE_REF="${IMAGE}@${CANDIDATE_DIGEST}"
+          emit_state true "${CANDIDATE_SHA}" "${CANDIDATE_DIGEST}" "${CANDIDATE_REF}" true true
+          echo "Reconcile interrupted Release v${VERSION} at ancestor ${CANDIDATE_SHA}."
+
+      - name: Promote release tag
+        if: steps.head.outputs.current == 'true' && steps.release_state.outputs.release == 'true'
+        id: version
+        env:
+          IMMUTABLE_DIGEST: ${{ steps.release_state.outputs.immutable_digest }}
+          IMMUTABLE_REF: ${{ steps.release_state.outputs.immutable_ref }}
+          TARGET_TAG: ${{ steps.meta.outputs.version_tag }}
+          VERIFIED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          manifest_exists() {
+            local ref="$1"
+            local log="${RUNNER_TEMP}/helm-version-manifest.log"
+            if docker manifest inspect "${ref}" >"${log}" 2>&1; then
+              return 0
+            fi
+            if grep -Eiq 'manifest unknown|no such manifest' "${log}"; then
+              return 1
+            fi
+            echo "::error::cannot inspect ${ref}"
+            cat "${log}"
+            return 2
+          }
+
+          pull_digest() {
+            local ref="$1"
+            local output
+            local digest
+            if ! output=$(docker pull "${ref}" 2>&1); then
+              printf '%s\n' "${output}" >&2
+              return 2
+            fi
+            printf '%s\n' "${output}" >&2
+            digest=$(printf '%s\n' "${output}" | awk '$1 == "Digest:" { print $2 }' | tail -n 1)
+            if ! node -e 'if (!/^sha256:[0-9a-f]{64}$/.test(process.argv[1])) process.exit(1)' "${digest}"; then
+              echo "::error::registry returned no valid digest for ${ref}" >&2
+              return 2
+            fi
+            printf '%s' "${digest}"
+          }
+
+          REMOTE_MAIN_SHA=$(git ls-remote --exit-code origin refs/heads/main | cut -f1)
+          if [ -z "${REMOTE_MAIN_SHA}" ]; then
+            echo "::error::origin returned no refs/heads/main SHA"
+            exit 1
+          fi
+          if [ "${REMOTE_MAIN_SHA}" != "${VERIFIED_SHA}" ]; then
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::skip release promotion for stale CI run ${VERIFIED_SHA}; main is ${REMOTE_MAIN_SHA}"
+            exit 0
+          fi
+
+          REUSED=false
+          if manifest_exists "${TARGET_TAG}"; then
+            TARGET_DIGEST=$(pull_digest "${TARGET_TAG}")
+            if [ "${TARGET_DIGEST}" != "${IMMUTABLE_DIGEST}" ]; then
+              echo "::error::refusing to overwrite ${TARGET_TAG}; it points to ${TARGET_DIGEST}, expected ${IMMUTABLE_DIGEST}"
+              exit 1
+            fi
+            REUSED=true
+            echo "${TARGET_TAG} already points at the immutable digest; reusing it."
+          else
+            STATUS=$?
+            if [ "${STATUS}" -ne 1 ]; then
+              exit "${STATUS}"
+            fi
+            docker pull "${IMMUTABLE_REF}"
+            docker tag "${IMMUTABLE_REF}" "${TARGET_TAG}"
+            docker push "${TARGET_TAG}"
+            TARGET_DIGEST=$(pull_digest "${TARGET_TAG}")
+            if [ "${TARGET_DIGEST}" != "${IMMUTABLE_DIGEST}" ]; then
+              echo "::error::${TARGET_TAG} resolved to ${TARGET_DIGEST} after promotion, expected ${IMMUTABLE_DIGEST}"
+              exit 1
+            fi
+          fi
+          {
+            echo "current=true"
+            echo "reused=${REUSED}"
+          } >> "$GITHUB_OUTPUT"
+      - name: Cut GitHub Release
+        if: steps.release_state.outputs.release == 'true' && steps.version.outputs.current == 'true'
+        id: release
+        env:
+          FULL_SHA: ${{ steps.release_state.outputs.release_sha }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          V="${{ steps.meta.outputs.version }}"
+          RELEASE_FILE="${RUNNER_TEMP}/helm-release-create.json"
+          # Semver already points at this immutable digest. Complete the GitHub
+          # half even if main advanced after the pre-promotion check; stopping now
+          # would leave a version image with no matching Release.
+          code=$(curl -sS -o "${RELEASE_FILE}" -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases" \
+            -d "{\"tag_name\":\"v${V}\",\"target_commitish\":\"${{ steps.release_state.outputs.release_sha }}\",\"name\":\"v${V}\",\"generate_release_notes\":true}")
+          if [ "$code" != "201" ]; then
+            echo "::error::release create for v${V} failed (HTTP ${code})"
+            cat "${RELEASE_FILE}"
+            exit 1
+          fi
+
+          node -e '
+            const release = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+            if (release.tag_name !== process.argv[2]) throw new Error(`unexpected release tag ${release.tag_name}`);
+            if (release.draft) throw new Error(`created Release ${process.argv[2]} is still a draft`);
+          ' "${RELEASE_FILE}" "v${V}"
+          git fetch --force origin "refs/tags/v${V}:refs/tags/v${V}"
+          PUBLISHED_TAG_SHA=$(git rev-list -n 1 "v${V}")
+          if [ "${PUBLISHED_TAG_SHA}" != "${FULL_SHA}" ]; then
+            echo "::error::Release v${V} tag points to ${PUBLISHED_TAG_SHA}, expected ${FULL_SHA}"
+            exit 1
+          fi
+          echo "created=true" >> "$GITHUB_OUTPUT"
+          echo "Created GitHub Release v${V}"
+
+      - name: Promote latest tag
+        if: >-
+          steps.head.outputs.current == 'true' &&
+          (steps.release_state.outputs.release != 'true' || steps.version.outputs.current == 'true')
+        id: latest
+        env:
+          IMMUTABLE_DIGEST: ${{ steps.immutable.outputs.digest }}
+          IMMUTABLE_REF: ${{ steps.immutable.outputs.digest_ref }}
+          TARGET_TAG: ${{ steps.meta.outputs.latest_tag }}
+          VERIFIED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          manifest_exists() {
+            local ref="$1"
+            local log="${RUNNER_TEMP}/helm-latest-manifest.log"
+            if docker manifest inspect "${ref}" >"${log}" 2>&1; then
+              return 0
+            fi
+            if grep -Eiq 'manifest unknown|no such manifest' "${log}"; then
+              return 1
+            fi
+            echo "::error::cannot inspect ${ref}"
+            cat "${log}"
+            return 2
+          }
+
+          pull_digest() {
+            local ref="$1"
+            local output
+            local digest
+            if ! output=$(docker pull "${ref}" 2>&1); then
+              printf '%s\n' "${output}" >&2
+              return 2
+            fi
+            printf '%s\n' "${output}" >&2
+            digest=$(printf '%s\n' "${output}" | awk '$1 == "Digest:" { print $2 }' | tail -n 1)
+            if ! node -e 'if (!/^sha256:[0-9a-f]{64}$/.test(process.argv[1])) process.exit(1)' "${digest}"; then
+              echo "::error::registry returned no valid digest for ${ref}" >&2
+              return 2
+            fi
+            printf '%s' "${digest}"
+          }
+
+          REMOTE_MAIN_SHA=$(git ls-remote --exit-code origin refs/heads/main | cut -f1)
+          if [ -z "${REMOTE_MAIN_SHA}" ]; then
+            echo "::error::origin returned no refs/heads/main SHA"
+            exit 1
+          fi
+          if [ "${REMOTE_MAIN_SHA}" != "${VERIFIED_SHA}" ]; then
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::skip latest for stale CI run ${VERIFIED_SHA}; main is ${REMOTE_MAIN_SHA}"
+            exit 0
+          fi
+
+          REUSED=false
+          PROMOTE=true
+          if manifest_exists "${TARGET_TAG}"; then
+            TARGET_DIGEST=$(pull_digest "${TARGET_TAG}")
+            if [ "${TARGET_DIGEST}" = "${IMMUTABLE_DIGEST}" ]; then
+              REUSED=true
+              PROMOTE=false
+              echo "${TARGET_TAG} already points at the immutable digest; reusing it."
+            fi
+          else
+            STATUS=$?
+            if [ "${STATUS}" -ne 1 ]; then
+              exit "${STATUS}"
+            fi
+          fi
+
+          if [ "${PROMOTE}" = "true" ]; then
+            docker pull "${IMMUTABLE_REF}"
+            docker tag "${IMMUTABLE_REF}" "${TARGET_TAG}"
+            docker push "${TARGET_TAG}"
+          fi
+          TARGET_DIGEST=$(pull_digest "${TARGET_TAG}")
+          if [ "${TARGET_DIGEST}" != "${IMMUTABLE_DIGEST}" ]; then
+            echo "::error::${TARGET_TAG} resolved to ${TARGET_DIGEST}, expected ${IMMUTABLE_DIGEST}"
+            exit 1
+          fi
+
+          # This detects, but cannot undo, a main update racing the GHCR write.
+          REMOTE_MAIN_SHA=$(git ls-remote --exit-code origin refs/heads/main | cut -f1)
+          if [ -z "${REMOTE_MAIN_SHA}" ]; then
+            echo "::error::origin returned no refs/heads/main SHA after latest promotion"
+            exit 1
+          fi
+          if [ "${REMOTE_MAIN_SHA}" != "${VERIFIED_SHA}" ]; then
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::main advanced during latest promotion; the queued verified run must converge latest"
+            exit 0
+          fi
+          {
+            echo "current=true"
+            echo "reused=${REUSED}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        if: steps.latest.outputs.current == 'true'
+        run: |
+          echo "immutable=${{ steps.immutable.outputs.digest_ref }} reused=${{ steps.immutable.outputs.reused }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "version=${{ steps.meta.outputs.version }} current_sha=${{ steps.meta.outputs.full_sha }} release_sha=${{ steps.release_state.outputs.release_sha }} release_created=${{ steps.release.outputs.created }} reconciled=${{ steps.release_state.outputs.reconciled }} version_reused=${{ steps.release_state.outputs.version_reused }} latest_reused=${{ steps.latest.outputs.reused }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Superseded summary
+        if: >-
+          always() &&
+          (steps.head.outputs.current == 'false' ||
+           steps.version.outputs.current == 'false' ||
+           steps.latest.outputs.current == 'false')
+        run: echo "A newer main commit stopped or raced mutable promotion; the full-SHA image remains authoritative and the queued verified run must converge latest." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove run-scoped registry credentials
+        if: always()
+        run: rm -rf -- "${DOCKER_CONFIG}"

@@ -4,7 +4,13 @@ import type { IRMessage } from "../protocol/ir.js";
 import type { MemoryStore } from "../store/ports.js";
 import { SqliteMemoryStore } from "../store/sqlite/memory-store.js";
 import { createSqliteDb } from "../store/sqlite/migrate.js";
-import { type ObserveDeps, observeInbound, observeOutbound, resolveMemoryMode } from "./observe.js";
+import {
+  type ObserveDeps,
+  observeInbound,
+  observeOutbound,
+  projectScopedThreadId,
+  resolveMemoryMode,
+} from "./observe.js";
 import type { MemoryScope } from "./types.js";
 
 // A recording fake MemoryStore — captures every ensureThread / appendMessage
@@ -81,6 +87,23 @@ const SAMPLE_MESSAGES: IRMessage[] = [
 ];
 
 describe("observeInbound", () => {
+  it("uses the effective project in the physical thread id while shared projects stay shared", async () => {
+    const { store, threads } = makeFakeStore();
+    const deps = makeDeps(store);
+
+    await observeInbound(deps, scope({ projectId: "key-a" }), SAMPLE_MESSAGES);
+    await observeInbound(deps, scope({ projectId: "key-b" }), SAMPLE_MESSAGES);
+    await observeInbound(deps, scope({ projectId: "shared-project" }), SAMPLE_MESSAGES);
+    await observeInbound(deps, scope({ projectId: "shared-project" }), SAMPLE_MESSAGES);
+
+    const ids = threads.map((thread) => thread.id);
+    expect(ids[0]).toBe(projectScopedThreadId("acct-a", "key-a", "thread-1"));
+    expect(ids[1]).toBe(projectScopedThreadId("acct-a", "key-b", "thread-1"));
+    expect(ids[0]).not.toBe(ids[1]);
+    expect(ids[2]).toBe(projectScopedThreadId("acct-a", "shared-project", "thread-1"));
+    expect(ids[3]).toBe(ids[2]);
+  });
+
   it("persists each raw message + thread when mode is observe", async () => {
     const { store, threads, messages } = makeFakeStore();
     const deps = makeDeps(store);
@@ -91,7 +114,7 @@ describe("observeInbound", () => {
     // Thread ensured once with the scope ids.
     expect(threads).toEqual([
       {
-        id: "acct-a:thread-1",
+        id: projectScopedThreadId("acct-a", "project-1", "thread-1"),
         ownerId: "acct-a",
         projectId: "project-1",
         resourceId: "resource-1",
@@ -101,7 +124,7 @@ describe("observeInbound", () => {
     // user turn is persisted.
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({
-      threadId: "acct-a:thread-1",
+      threadId: projectScopedThreadId("acct-a", "project-1", "thread-1"),
       messageIndex: 1,
       role: "user",
       content: "hello there",
@@ -266,7 +289,11 @@ describe("observeOutbound", () => {
     );
 
     expect(stamps).toEqual([
-      { accountId: "acct-a", threadId: "acct-a:thread-1", modelAlias: "anthropic/claude-x" },
+      {
+        accountId: "acct-a",
+        threadId: projectScopedThreadId("acct-a", "project-1", "thread-1"),
+        modelAlias: "anthropic/claude-x",
+      },
     ]);
   });
 
@@ -281,7 +308,11 @@ describe("observeOutbound", () => {
 
     expect(messages).toHaveLength(0); // nothing to persist
     expect(stamps).toEqual([
-      { accountId: "acct-a", threadId: "acct-a:thread-1", modelAlias: "openai/gpt-x" },
+      {
+        accountId: "acct-a",
+        threadId: projectScopedThreadId("acct-a", "project-1", "thread-1"),
+        modelAlias: "openai/gpt-x",
+      },
     ]);
   });
 
@@ -376,7 +407,7 @@ describe("observeInbound re-ingestion (real SqliteMemoryStore)", () => {
     ]);
 
     const msgs = await deps.memoryStore.listMessages({
-      threadId: "acct-a:thread-1",
+      threadId: projectScopedThreadId("acct-a", "project-1", "thread-1"),
       accountId: "acct-a",
     });
     // 4 distinct turns (u1,a1,u2,a2) — NOT 2+4+5=11 blind re-inserts.
@@ -395,7 +426,7 @@ describe("observeInbound re-ingestion (real SqliteMemoryStore)", () => {
     ]);
 
     const msgs = await deps.memoryStore.listMessages({
-      threadId: "acct-a:thread-1",
+      threadId: projectScopedThreadId("acct-a", "project-1", "thread-1"),
       accountId: "acct-a",
     });
     expect(msgs.map((m) => m.content)).toEqual(["yes", "ok", "yes"]);

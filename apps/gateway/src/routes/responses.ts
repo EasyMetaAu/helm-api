@@ -586,6 +586,7 @@ function compactUsageFromResponse(body: Record<string, unknown> | null): StreamU
 }
 
 function compactDecision(args: {
+  requestId: string;
   traceId: string;
   keyPrefix: string | null;
   requestedModel: string;
@@ -615,7 +616,7 @@ function compactDecision(args: {
       ? (args.error.providerRaw as Record<string, unknown>)
       : null;
   return {
-    request_id: args.traceId,
+    request_id: args.requestId,
     trace_id: args.traceId,
     requested_model: args.requestedModel,
     protocol: "openai_responses",
@@ -822,6 +823,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
 
   const handleCompact = async (c: Context<AppEnv>) => {
     const traceId = c.get("trace_id");
+    const requestId = c.get("request_id");
     const identity = await authenticateResponsesRequest(c);
     await enforceRateLimit(c, identity);
     await acquireConcurrency(c, identity);
@@ -897,9 +899,10 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         await recordServed(
           deps.record,
           {
-            requestId: traceId,
+            requestId,
             apiKeyId: identity.keyId,
             decision: compactDecision({
+              requestId,
               traceId,
               keyPrefix: typeof identity.keyPrefix === "string" ? identity.keyPrefix : null,
               requestedModel,
@@ -930,9 +933,10 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         await recordServed(
           deps.record,
           {
-            requestId: traceId,
+            requestId,
             apiKeyId: identity.keyId,
             decision: compactDecision({
+              requestId,
               traceId,
               keyPrefix: typeof identity.keyPrefix === "string" ? identity.keyPrefix : null,
               requestedModel,
@@ -971,6 +975,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
 
   const handleResponses = async (c: Context<AppEnv>) => {
     const traceId = c.get("trace_id");
+    const requestId = c.get("request_id");
 
     // 1) Auth FIRST (docs/02 pipeline order).
     const identity = await authenticateResponsesRequest(c);
@@ -1028,6 +1033,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     });
     ir.metadata = {
       ...(ir.metadata ?? {}),
+      request_id: requestId,
       trace_id: traceId,
       thread_id: memoryScope.threadId,
       resource_id: memoryScope.resourceId,
@@ -1057,7 +1063,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
 
     // 4) Outbound: stream vs non-stream, isomorphic shape.
     if (ir.stream === true) {
-      const responseId = responseStreamId(traceId);
+      const responseId = responseStreamId(requestId);
       ir.metadata = { ...(ir.metadata ?? {}), responses_stream_id: responseId };
       // Claim the concurrency lease (issue #93): hold the slot until the stream
       // body fully drains — release in the stream's own finally, not the guard.
@@ -1195,7 +1201,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
             await recordServed(
               deps.record,
               {
-                requestId: traceId,
+                requestId,
                 apiKeyId: identity.keyId,
                 decision: result.decision,
                 requestJson,
@@ -1273,7 +1279,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         await recordServed(
           deps.record,
           {
-            requestId: traceId,
+            requestId,
             apiKeyId: identity.keyId,
             decision: result.decision,
             requestJson,
@@ -1315,7 +1321,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       await recordServed(
         deps.record,
         {
-          requestId: traceId,
+          requestId,
           apiKeyId: identity.keyId,
           decision: result.decision,
           requestJson,

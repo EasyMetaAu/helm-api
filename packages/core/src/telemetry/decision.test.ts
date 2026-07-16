@@ -306,12 +306,17 @@ describe("buildDecisionRecord", () => {
     );
   });
 
-  it("7. trace_id is threaded from the request context", () => {
+  it("7. keeps the server request_id separate from client correlation trace_id", () => {
     const record = buildDecisionRecord(
-      parts({ request: baseRequest({ request_id: "trace_xyz" }) }),
+      parts({
+        request: baseRequest({
+          request_id: "server_request_xyz",
+          metadata: { ...baseRequest().metadata, trace_id: "client_trace_xyz" },
+        }),
+      }),
     );
-    expect(record.trace_id).toBe("trace_xyz");
-    expect(record.request_id).toBe("trace_xyz");
+    expect(record.trace_id).toBe("client_trace_xyz");
+    expect(record.request_id).toBe("server_request_xyz");
   });
 
   it("9. latency_total_ms is the sum of every attempt's latency", () => {

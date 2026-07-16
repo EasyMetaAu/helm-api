@@ -1,7 +1,10 @@
 import { type MemoryMessageInput, MemoryModeSchema, type MemoryRole } from "@helm/shared";
 import type { IRMessage } from "../protocol/ir.js";
 import type { MemoryStore } from "../store/ports.js";
+import { projectScopedThreadId } from "./thread-scope.js";
 import type { MemoryMeta, MemoryScope } from "./types.js";
+
+export { ownerScopedThreadId, projectScopedThreadId } from "./thread-scope.js";
 
 // observe mode (docs/08 Phase 1). Persists raw request/response/tool messages into
 // the memory_* tables but NEVER injects memory or changes routing — observe is a
@@ -94,12 +97,12 @@ async function persistMessages(store: MemoryStore, inputs: MemoryMessageInput[])
   for (const input of inputs) await store.appendMessage(input);
 }
 
-export function ownerScopedThreadId(accountId: string, threadId: string): string {
-  return `${encodeURIComponent(accountId)}:${encodeURIComponent(threadId)}`;
-}
-
-function storageThreadId(scope: Pick<MemoryScope, "accountId" | "threadId">): string | null {
-  return scope.threadId === null ? null : ownerScopedThreadId(scope.accountId, scope.threadId);
+function storageThreadId(
+  scope: Pick<MemoryScope, "accountId" | "projectId" | "threadId">,
+): string | null {
+  return scope.threadId === null
+    ? null
+    : projectScopedThreadId(scope.accountId, scope.projectId, scope.threadId);
 }
 
 function memoryMeta(scope: MemoryScope): MemoryMeta {
