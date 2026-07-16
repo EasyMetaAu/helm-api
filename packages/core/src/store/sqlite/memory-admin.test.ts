@@ -217,6 +217,87 @@ describe("SqliteMemoryStore.getMemoryAdminStats (docs/13)", () => {
     expect(stats.activity.lastMessageAt).toBeInstanceOf(Date);
     expect(stats.activity.lastObservationAt).toBeInstanceOf(Date);
   });
+
+  it("maintains denormalized thread activity across inserts and dedup conflicts", async () => {
+    let nowMs = 1_000;
+    const db = createSqliteDb(":memory:");
+    let seq = 0;
+    const store = new SqliteMemoryStore(
+      db,
+      () => `activity-${++seq}`,
+      () => new Date(nowMs),
+    );
+    await store.ensureThread({ id: "t1", ownerId: "a", projectId: "p1" });
+    await store.appendMessage({
+      threadId: "t1",
+      messageIndex: 0,
+      role: "user",
+      content: "same",
+      tokenEstimate: 1,
+    });
+    nowMs = 2_000;
+    await store.appendMessage({
+      threadId: "t1",
+      messageIndex: 0,
+      role: "user",
+      content: "same",
+      tokenEstimate: 1,
+    });
+    nowMs = 3_000;
+    await store.appendMessages([
+      { threadId: "t1", messageIndex: 0, role: "user", content: "same", tokenEstimate: 1 },
+      { threadId: "t1", messageIndex: 1, role: "assistant", content: "new", tokenEstimate: 1 },
+    ]);
+    await store.appendObservation({
+      threadId: "t1",
+      sourceMessageRange: ["activity-1", "activity-4"],
+      observationText: "summary",
+      observedAt: new Date(4_000),
+    });
+
+    const thread = db.$sqlite
+      .prepare(
+        `SELECT message_count, last_message_at, observation_count, last_observation_at
+           FROM memory_threads WHERE id = ?`,
+      )
+      .get("t1") as {
+      message_count: number;
+      last_message_at: number | null;
+      observation_count: number;
+      last_observation_at: number | null;
+    };
+    expect(thread).toEqual({
+      message_count: 2,
+      last_message_at: 3_001,
+      observation_count: 1,
+      last_observation_at: 4_000,
+    });
+    const stats = await store.getMemoryAdminStats({ accountId: "a", projectId: "p1", now: NOW });
+    expect(stats.storage).toMatchObject({ messages: 2, observations: 1 });
+    expect(stats.activity.lastMessageAt?.getTime()).toBe(3_001);
+    expect(stats.activity.lastObservationAt?.getTime()).toBe(4_000);
+    db.$sqlite.close();
+  });
+
+  it("uses only memory_threads for raw activity counts", () => {
+    const { db } = newStore(NOW);
+    const plan = db.$sqlite
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT COUNT(*) AS n,
+                COALESCE(SUM(message_count), 0) AS messages,
+                COALESCE(SUM(observation_count), 0) AS observations,
+                MAX(last_message_at) AS lastMessageAt,
+                MAX(last_observation_at) AS lastObservationAt
+           FROM memory_threads`,
+      )
+      .all() as Array<{ detail: string }>;
+    const detail = plan.map((row) => row.detail).join("\n");
+    expect(detail).toContain("memory_threads");
+    expect(detail).not.toContain("memory_messages");
+    expect(detail).not.toContain("memory_observations");
+    db.$sqlite.close();
+  });
 });
 
 describe("SqliteMemoryStore fact reads (docs/13)", () => {

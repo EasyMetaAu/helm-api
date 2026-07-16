@@ -20,8 +20,9 @@ describe("sqlite connection pragmas", () => {
       expect(raw.pragma("busy_timeout", { simple: true })).toBe(5000);
       // temp_store: 0=DEFAULT, 1=FILE, 2=MEMORY. We want MEMORY.
       expect(raw.pragma("temp_store", { simple: true })).toBe(2);
-      // cache_size negative => KiB. ~16MB headroom for the hot tables.
-      expect(raw.pragma("cache_size", { simple: true })).toBe(-16000);
+      // cache_size negative => KiB. 64 MiB keeps the hot admin indexes resident
+      // without putting meaningful pressure on a small self-hosted machine.
+      expect(raw.pragma("cache_size", { simple: true })).toBe(-65536);
     } finally {
       db.$sqlite.close();
     }

@@ -324,29 +324,47 @@ export class PgMemoryStore implements MemoryStore {
 
   async appendMessage(input: MemoryMessageInput): Promise<string> {
     const id = this.genId();
+    const createdAt = this.now().getTime();
     // Idempotent ingest (pg v20 mirror of sqlite v21): a re-sent
     // (thread_id, message_index, role, content) collapses to a no-op via the
     // UNIQUE index while repeated text at a new transcript position persists.
-    await this.db
-      .insert(memoryMessages)
-      .values({
-        id,
-        threadId: input.threadId,
-        messageIndex: input.messageIndex ?? 0,
-        role: input.role,
-        content: input.content,
-        tokenEstimate: input.tokenEstimate,
-        createdAt: this.now().getTime(),
-        contentHash: sha256Hex(input.content),
-      })
-      .onConflictDoNothing({
-        target: [
-          memoryMessages.threadId,
-          memoryMessages.messageIndex,
-          memoryMessages.role,
-          memoryMessages.contentHash,
-        ],
-      });
+    await this.db.transaction(async (tx) => {
+      const inserted = await tx
+        .insert(memoryMessages)
+        .values({
+          id,
+          threadId: input.threadId,
+          messageIndex: input.messageIndex ?? 0,
+          role: input.role,
+          content: input.content,
+          tokenEstimate: input.tokenEstimate,
+          createdAt,
+          contentHash: sha256Hex(input.content),
+        })
+        .onConflictDoNothing({
+          target: [
+            memoryMessages.threadId,
+            memoryMessages.messageIndex,
+            memoryMessages.role,
+            memoryMessages.contentHash,
+          ],
+        })
+        .returning();
+      // RETURNING is empty on the dedup conflict, so the summary remains exact.
+      if (inserted.length > 0) {
+        await tx
+          .update(memoryThreads)
+          .set({
+            messageCount: sql`${memoryThreads.messageCount} + 1`,
+            lastMessageAt: sql`CASE
+              WHEN ${memoryThreads.lastMessageAt} IS NULL OR ${memoryThreads.lastMessageAt} < ${createdAt}
+                THEN ${createdAt}
+              ELSE ${memoryThreads.lastMessageAt}
+            END`,
+          })
+          .where(eq(memoryThreads.id, input.threadId));
+      }
+    });
     return id;
   }
 
@@ -401,17 +419,41 @@ export class PgMemoryStore implements MemoryStore {
     // but guarding the insert keeps it robust if the dedup ever changes to drop the
     // first row too. Cheaper than making every future editor re-prove the invariant.
     if (rows.length === 0) return ids;
-    await this.db
-      .insert(memoryMessages)
-      .values(rows)
-      .onConflictDoNothing({
-        target: [
-          memoryMessages.threadId,
-          memoryMessages.messageIndex,
-          memoryMessages.role,
-          memoryMessages.contentHash,
-        ],
-      });
+    await this.db.transaction(async (tx) => {
+      const inserted = await tx
+        .insert(memoryMessages)
+        .values(rows)
+        .onConflictDoNothing({
+          target: [
+            memoryMessages.threadId,
+            memoryMessages.messageIndex,
+            memoryMessages.role,
+            memoryMessages.contentHash,
+          ],
+        })
+        .returning();
+      const activity = new Map<string, { count: number; lastAt: number }>();
+      for (const row of inserted) {
+        const current = activity.get(row.threadId);
+        activity.set(row.threadId, {
+          count: (current?.count ?? 0) + 1,
+          lastAt: Math.max(current?.lastAt ?? row.createdAt, row.createdAt),
+        });
+      }
+      for (const [threadId, summary] of activity) {
+        await tx
+          .update(memoryThreads)
+          .set({
+            messageCount: sql`${memoryThreads.messageCount} + ${summary.count}`,
+            lastMessageAt: sql`CASE
+              WHEN ${memoryThreads.lastMessageAt} IS NULL OR ${memoryThreads.lastMessageAt} < ${summary.lastAt}
+                THEN ${summary.lastAt}
+              ELSE ${memoryThreads.lastMessageAt}
+            END`,
+          })
+          .where(eq(memoryThreads.id, threadId));
+      }
+    });
     return ids;
   }
 
@@ -443,18 +485,32 @@ export class PgMemoryStore implements MemoryStore {
 
   async appendObservation(input: MemoryObservationInput): Promise<string> {
     const id = this.genId();
-    await this.db.insert(memoryObservations).values({
-      id,
-      threadId: input.threadId,
-      sourceMessageRange: input.sourceMessageRange,
-      observationText: input.observationText,
-      observedAt: input.observedAt.getTime(),
-      referencedAt: null,
-      // docs/12 (P5) — persist the Observer-resolved salience; absent ⇒ column
-      // default 0.5 (pg mirror of the sqlite adapter).
-      ...(input.importance !== undefined ? { importance: input.importance } : {}),
-      priority: input.priority ?? null,
-      tags: input.tags ?? null,
+    const observedAt = input.observedAt.getTime();
+    await this.db.transaction(async (tx) => {
+      await tx.insert(memoryObservations).values({
+        id,
+        threadId: input.threadId,
+        sourceMessageRange: input.sourceMessageRange,
+        observationText: input.observationText,
+        observedAt,
+        referencedAt: null,
+        // docs/12 (P5) — persist the Observer-resolved salience; absent ⇒ column
+        // default 0.5 (pg mirror of the sqlite adapter).
+        ...(input.importance !== undefined ? { importance: input.importance } : {}),
+        priority: input.priority ?? null,
+        tags: input.tags ?? null,
+      });
+      await tx
+        .update(memoryThreads)
+        .set({
+          observationCount: sql`${memoryThreads.observationCount} + 1`,
+          lastObservationAt: sql`CASE
+            WHEN ${memoryThreads.lastObservationAt} IS NULL OR ${memoryThreads.lastObservationAt} < ${observedAt}
+              THEN ${observedAt}
+            ELSE ${memoryThreads.lastObservationAt}
+          END`,
+        })
+        .where(eq(memoryThreads.id, input.threadId));
     });
     return id;
   }
@@ -1217,48 +1273,37 @@ export class PgMemoryStore implements MemoryStore {
     const noScopeFilter =
       accountId === null && projectId === null && resourceId === null && threadId === null;
     const jobScopeClauses = pgMemoryJobScopeClauses(input);
-    const threads = pgRows<{ n: number | string }>(
+    // Aggregate the denormalized parent-row activity. This avoids scanning the
+    // body-heavy memory_messages/memory_observations tables on an admin read.
+    const threadActivity = pgRows<{
+      n: number | string;
+      messages: number | string;
+      observations: number | string;
+      lastMessageAt: number | string | null;
+      lastObservationAt: number | string | null;
+    }>(
       await this.db.execute(
         noScopeFilter
-          ? sql`SELECT COUNT(*)::bigint AS n FROM memory_threads`
+          ? sql`
+              SELECT COUNT(*)::bigint AS n,
+                     COALESCE(SUM(message_count), 0)::bigint AS messages,
+                     COALESCE(SUM(observation_count), 0)::bigint AS observations,
+                     MAX(last_message_at)::bigint AS "lastMessageAt",
+                     MAX(last_observation_at)::bigint AS "lastObservationAt"
+                FROM memory_threads
+            `
           : sql`
-              SELECT COUNT(*)::bigint AS n
+              SELECT COUNT(*)::bigint AS n,
+                     COALESCE(SUM(t.message_count), 0)::bigint AS messages,
+                     COALESCE(SUM(t.observation_count), 0)::bigint AS observations,
+                     MAX(t.last_message_at)::bigint AS "lastMessageAt",
+                     MAX(t.last_observation_at)::bigint AS "lastObservationAt"
                 FROM memory_threads t
                WHERE (${accountId}::text IS NULL OR t.owner_id = ${accountId})
                  AND (${projectId}::text IS NULL OR t.project_id = ${projectId})
                  AND (${resourceId}::text IS NULL OR t.resource_id = ${resourceId})
                  AND (${threadId}::text IS NULL OR t.id = ${threadId})
-            `,
-      ),
-    )[0];
-    const messages = pgRows<{ n: number | string; lastAt: number | string | null }>(
-      await this.db.execute(
-        noScopeFilter
-          ? sql`SELECT COUNT(*)::bigint AS n, MAX(created_at)::bigint AS "lastAt" FROM memory_messages`
-          : sql`
-              SELECT COUNT(*)::bigint AS n, MAX(m.created_at)::bigint AS "lastAt"
-                FROM memory_messages m
-                JOIN memory_threads t ON t.id = m.thread_id
-               WHERE (${accountId}::text IS NULL OR t.owner_id = ${accountId})
-                 AND (${projectId}::text IS NULL OR t.project_id = ${projectId})
-                 AND (${resourceId}::text IS NULL OR t.resource_id = ${resourceId})
-                 AND (${threadId}::text IS NULL OR t.id = ${threadId})
-            `,
-      ),
-    )[0];
-    const observations = pgRows<{ n: number | string; lastAt: number | string | null }>(
-      await this.db.execute(
-        noScopeFilter
-          ? sql`SELECT COUNT(*)::bigint AS n, MAX(observed_at)::bigint AS "lastAt" FROM memory_observations`
-          : sql`
-              SELECT COUNT(*)::bigint AS n, MAX(o.observed_at)::bigint AS "lastAt"
-                FROM memory_observations o
-                JOIN memory_threads t ON t.id = o.thread_id
-               WHERE (${accountId}::text IS NULL OR t.owner_id = ${accountId})
-                 AND (${projectId}::text IS NULL OR t.project_id = ${projectId})
-                 AND (${resourceId}::text IS NULL OR t.resource_id = ${resourceId})
-                 AND (${threadId}::text IS NULL OR t.id = ${threadId})
-            `,
+          `,
       ),
     )[0];
     const facts = pgRows<{
@@ -1371,9 +1416,9 @@ export class PgMemoryStore implements MemoryStore {
         ...(input.threadId !== undefined ? { threadId: input.threadId } : {}),
       },
       storage: {
-        threads: numberOf(threads?.n),
-        messages: numberOf(messages?.n),
-        observations: numberOf(observations?.n),
+        threads: numberOf(threadActivity?.n),
+        messages: numberOf(threadActivity?.messages),
+        observations: numberOf(threadActivity?.observations),
         facts: numberOf(facts?.n),
         activeFacts: numberOf(facts?.active),
         reflections: numberOf(reflections?.n),
@@ -1390,8 +1435,8 @@ export class PgMemoryStore implements MemoryStore {
         byType,
       },
       activity: {
-        lastMessageAt: dateOrNull(messages?.lastAt),
-        lastObservationAt: dateOrNull(observations?.lastAt),
+        lastMessageAt: dateOrNull(threadActivity?.lastMessageAt),
+        lastObservationAt: dateOrNull(threadActivity?.lastObservationAt),
         lastFactUpdatedAt: dateOrNull(facts?.lastAt),
         lastReflectionUpdatedAt: dateOrNull(reflections?.lastAt),
       },
@@ -1685,11 +1730,56 @@ export class PgMemoryStore implements MemoryStore {
   }
 
   async pruneMessagesOlderThan(olderThanMs: number): Promise<number> {
-    const rows = await this.db
-      .delete(memoryMessages)
-      .where(lt(memoryMessages.createdAt, olderThanMs))
-      .returning();
-    return rows.length;
+    return this.db.transaction(async (tx) => {
+      // A session-local key table keeps the repair set bounded to affected threads
+      // without returning every deleted body row through the JS driver.
+      await tx.execute(sql`
+        CREATE TEMP TABLE IF NOT EXISTS _helm_pruned_message_threads (
+          thread_id TEXT PRIMARY KEY
+        ) ON COMMIT DELETE ROWS
+      `);
+      await tx.execute(sql`DELETE FROM _helm_pruned_message_threads`);
+      await tx.execute(sql`
+        INSERT INTO _helm_pruned_message_threads (thread_id)
+        SELECT DISTINCT thread_id FROM memory_messages WHERE created_at < ${olderThanMs}
+        ON CONFLICT (thread_id) DO NOTHING
+      `);
+      // Serialize summary maintenance with appendMessage/appendMessages, whose
+      // counter increments lock the same parent rows. The deterministic order
+      // also keeps concurrent multi-thread cleanup passes from lock-order drift.
+      // This lock MUST precede DELETE: a blocked locker gets a fresh snapshot for
+      // the later delete/recompute statements after the appender commits.
+      await tx.execute(sql`
+        SELECT t.id
+          FROM memory_threads t
+          JOIN _helm_pruned_message_threads a ON a.thread_id = t.id
+         ORDER BY t.id
+           FOR UPDATE
+      `);
+      const deleted = pgRows<{ n: number | string }>(
+        await tx.execute(sql`
+          WITH deleted AS (
+            DELETE FROM memory_messages
+             WHERE created_at < ${olderThanMs}
+             RETURNING 1
+          )
+          SELECT COUNT(*)::bigint AS n FROM deleted
+        `),
+      )[0];
+      await tx.execute(sql`
+        UPDATE memory_threads AS t
+           SET message_count = (
+                 SELECT COUNT(*)::integer FROM memory_messages m WHERE m.thread_id = t.id
+               ),
+               last_message_at = (
+                 SELECT MAX(m.created_at)::bigint FROM memory_messages m WHERE m.thread_id = t.id
+               )
+         WHERE EXISTS (
+           SELECT 1 FROM _helm_pruned_message_threads a WHERE a.thread_id = t.id
+         )
+      `);
+      return numberOf(deleted?.n);
+    });
   }
 
   async pruneFinishedJobsOlderThan(olderThanMs: number): Promise<number> {

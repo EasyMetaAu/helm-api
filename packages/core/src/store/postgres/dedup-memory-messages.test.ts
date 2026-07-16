@@ -15,7 +15,15 @@ async function seed(): Promise<PGlite> {
   const db = new PGlite();
   clients.push(db);
   await db.exec(`
-    CREATE TABLE memory_threads (id TEXT PRIMARY KEY, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL);
+    CREATE TABLE memory_threads (
+      id TEXT PRIMARY KEY,
+      message_count INTEGER NOT NULL DEFAULT 0,
+      last_message_at BIGINT,
+      observation_count INTEGER NOT NULL DEFAULT 0,
+      last_observation_at BIGINT,
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
     CREATE TABLE memory_messages (
       id TEXT PRIMARY KEY,
       thread_id TEXT NOT NULL,
@@ -83,5 +91,28 @@ describe("dedupMemoryPg ops helper", () => {
     expect(obs.rows[0]?.c).toBe(0);
     const jobs = await db.query<{ id: string }>("SELECT id FROM memory_jobs ORDER BY id");
     expect(jobs.rows.map((r) => r.id)).toEqual(["j-pending"]);
+
+    const summary = await db.query<{
+      message_count: number;
+      last_message_at: number | null;
+      observation_count: number;
+      last_observation_at: number | null;
+    }>(
+      "SELECT message_count, last_message_at, observation_count, last_observation_at FROM memory_threads WHERE id='t1'",
+    );
+    expect(summary.rows[0]).toEqual({
+      message_count: 2,
+      last_message_at: 3,
+      observation_count: 0,
+      last_observation_at: null,
+    });
+
+    const second = await dedupMemoryPg(db, {});
+    expect(second.deletedDuplicates).toBe(0);
+    expect(second.wipedObservations).toBe(0);
+    const summaryAfterSecondRun = await db.query(
+      "SELECT message_count, last_message_at, observation_count, last_observation_at FROM memory_threads WHERE id='t1'",
+    );
+    expect(summaryAfterSecondRun.rows[0]).toEqual(summary.rows[0]);
   });
 });

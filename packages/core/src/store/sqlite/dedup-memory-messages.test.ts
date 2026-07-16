@@ -92,7 +92,39 @@ describe("dedupMemory ops script", () => {
       expect(out.prunedJobs).toBe(1);
       const jobs = s.prepare("SELECT id FROM memory_jobs").all() as Array<{ id: string }>;
       expect(jobs.map((j) => j.id)).toEqual(["j-pending"]);
+      expect(
+        s
+          .prepare(
+            `SELECT message_count, last_message_at, observation_count, last_observation_at
+               FROM memory_threads WHERE id = 't1'`,
+          )
+          .get(),
+      ).toEqual({
+        message_count: 2,
+        last_message_at: 3,
+        observation_count: 0,
+        last_observation_at: null,
+      });
       expect(out.vacuumed).toBe(true);
+
+      // Re-running maintenance must preserve the repaired summaries without
+      // relying on the already-recorded schema migration to backfill again.
+      const second = dedupMemory(s, {});
+      expect(second.deletedDuplicates).toBe(0);
+      expect(second.wipedObservations).toBe(0);
+      expect(
+        s
+          .prepare(
+            `SELECT message_count, last_message_at, observation_count, last_observation_at
+               FROM memory_threads WHERE id = 't1'`,
+          )
+          .get(),
+      ).toEqual({
+        message_count: 2,
+        last_message_at: 3,
+        observation_count: 0,
+        last_observation_at: null,
+      });
     } finally {
       s.close();
     }

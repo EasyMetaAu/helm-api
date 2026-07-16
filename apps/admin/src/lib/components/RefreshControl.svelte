@@ -110,6 +110,10 @@
     stopTimer();
     if (seconds > 0) {
       timer = setInterval(() => {
+        // Background tabs must not multiply expensive dashboard/list queries. Skip
+        // hidden ticks rather than queueing a catch-up burst; the next visible tick
+        // resumes the normal cadence.
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
         void runRefresh(onAutoRefresh ?? onRefresh);
       }, seconds * 1000);
     }

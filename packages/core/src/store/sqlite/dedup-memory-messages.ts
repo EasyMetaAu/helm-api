@@ -120,14 +120,28 @@ export function dedupMemory(db: Database.Database, opts: DedupOptions = {}): Ded
     `backfilled ${summary.backfilled} messages, deleted ${summary.deletedDuplicates} collision duplicates`,
   );
 
-  // 3. Observations were built from duplicate-laden data — let the observer rebuild.
-  summary.wipedObservations = db.prepare("DELETE FROM memory_observations").run().changes;
+  // 3+4. Observations were built from duplicate-laden data, terminal jobs are
+  // pure history, and v39's parent summaries must describe the post-maintenance
+  // child rows. Keep all three changes atomic so an already-recorded migration
+  // never leaves the Admin stats permanently stale after this command runs.
+  db.transaction(() => {
+    summary.wipedObservations = db.prepare("DELETE FROM memory_observations").run().changes;
+    summary.prunedJobs = db
+      .prepare("DELETE FROM memory_jobs WHERE status IN ('done','failed')")
+      .run().changes;
+    db.exec(`
+      UPDATE memory_threads AS t
+         SET message_count = (
+               SELECT COUNT(*) FROM memory_messages m WHERE m.thread_id = t.id
+             ),
+             last_message_at = (
+               SELECT MAX(m.created_at) FROM memory_messages m WHERE m.thread_id = t.id
+             ),
+             observation_count = 0,
+             last_observation_at = NULL;
+    `);
+  })();
   log(`wiped ${summary.wipedObservations} observations (observer will rebuild)`);
-
-  // 4. Terminal jobs are pure history; drop them.
-  summary.prunedJobs = db
-    .prepare("DELETE FROM memory_jobs WHERE status IN ('done','failed')")
-    .run().changes;
   log(`pruned ${summary.prunedJobs} terminal jobs`);
 
   // 5. Reclaim space. VACUUM cannot run inside a transaction; it takes an

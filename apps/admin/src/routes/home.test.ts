@@ -66,6 +66,14 @@ type HomePageData = {
   compare: Record<string, { pct: number | null; base: number }> | null;
 };
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 function pageData(overrides: Partial<HomePageData> = {}): HomePageData {
   return {
     items: [],
@@ -152,6 +160,30 @@ describe('home dashboard loader', () => {
   function statsWith(totals: Partial<DashboardStats['totals']>): DashboardStats {
     return { ...EMPTY_STATS, totals: { ...EMPTY_STATS.totals, ...totals } };
   }
+
+  it('starts current stats, recent requests, and comparison stats concurrently', async () => {
+    const current = deferred<DashboardStats>();
+    const recent = deferred<{ items: RequestListItem[] }>();
+    const comparison = deferred<DashboardStats>();
+    mocks.getStats
+      .mockReset()
+      .mockReturnValueOnce(current.promise)
+      .mockReturnValueOnce(comparison.promise);
+    mocks.listRequests.mockReset().mockReturnValueOnce(recent.promise);
+
+    const loading = load({ url: new URL('https://admin.test/') } as never);
+    const callsBeforeAnyReadSettles = {
+      stats: mocks.getStats.mock.calls.length,
+      requests: mocks.listRequests.mock.calls.length,
+    };
+
+    current.resolve(statsWith({ requests: 20 }));
+    recent.resolve({ items: [] });
+    comparison.resolve(statsWith({ requests: 10 }));
+    await loading;
+
+    expect(callsBeforeAnyReadSettles).toEqual({ stats: 2, requests: 1 });
+  });
 
   it('computes vs-yesterday deltas (pct + baseline) on the today view', async () => {
     const now = Date.UTC(2026, 5, 17, 12);

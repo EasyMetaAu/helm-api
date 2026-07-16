@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-16 · Admin 首次点击卡顿改为非投机加载与汇总读（Admin / Store performance，docs/08/11，原则 1/3/7）
+
+- **生产根因**：`la.atmy.work` 的 `/admin/api/memory/stats` 冷读实测最高约 10.2 秒；同步 `better-sqlite3` 在 Node 事件循环上对约 139 万 `memory_messages`、11.9k observations 及其他 memory 表执行 `COUNT/MAX`，扫描期间连 health completion 都暂停。Admin 又在 `app.html` 全局启用 `data-sveltekit-preload-data="hover"`，鼠标经过侧栏即可投机触发这些数据库查询；第一次点击因此等待冷扫描，第二次点击命中 10 秒应用缓存或 OS page cache，形成“再点一下马上出来”的假象。同期没有 VACUUM、cleanup、OOM、`SQLITE_BUSY` 或 payload capture 事件，不能把本次页面卡顿归因于这些路径。
+- **稳定读模型**：SQLite v39 / Postgres v38 在 `memory_threads` 增加 `message_count`、`last_message_at`、`observation_count`、`last_observation_at`，迁移以每个子表一次 set-based `GROUP BY` 原子回填；单条/批量消息写入、dedup conflict、observation 写入与消息清理在同一事务维护汇总。Postgres prune 先按固定顺序锁定受影响的 thread 父行，避免并发 append 的增量被旧快照覆盖；既有 `memory:dedup` SQLite/Postgres 运维路径也在 wipe/prune 后原子重建四个汇总字段，重复运行保持幂等。Admin stats 之后只聚合较小的 thread 父表，不再扫描正文子表。首次升级仍会执行一次有界全量回填，生产发布必须预留启动迁移窗口并观察 WAL/磁盘；它不是每次页面读取的成本。
+- **缓存与前端边界**：SQLite page cache 从 16 MiB 提升到保守的 64 MiB；`/admin/api/stats` 与 `/admin/api/keys/usage` 使用 10 秒 fresh、5 分钟 last-known-good stale 的进程级 single-flight / stale-while-revalidate 缓存，并用 `X-Helm-Cache` 暴露 `miss/coalesced/fresh/stale`。动态 live window 使用稳定 cache key，历史闭合窗口仍按精确边界隔离。Admin 保留 hover code preload，但 data preload 改为 tap；dashboard 与 key detail 的独立读并行，隐藏 tab 不再执行自动刷新。当前生产库约 58.8 GB 且只有约 15 GB 可用、freelist 约 22.8 GiB，继续禁止在线 VACUUM；本次也不擅自开启 memory retention 或修改生产数据。
+
 ## 2026-07-15 · Codex 已重置冷却在 Admin 投影为成功（Admin providers UI，docs/11，原则 3/5/7）
 
 - **UI 边界**：Gateway 与 reset-credit guard 保持不变；Admin 客户端仅把本地 `429 + reset_credit_cooldown_active` 解释为“该账号最近已经完成重置”，复用既有 `alreadyRedeemed` 成功路径并显示“重置已成功完成”。该投影不会重试、不会产生第二次 fetch，也不会再次请求 OpenAI。
@@ -64,15 +70,9 @@
 - **统一投影与存储**：通道目录继续保持 network-free（读取时不发上游请求），Anthropic、Copilot、xAI 自动模式依次使用共享进程缓存、现有加密账号设置中的 durable last-known-good 目录、curated fallback；Admin 刷新与 runtime pool synthesis 只持久化仍被当前 cache generation 接受的非空发现。同名账号重连先失效旧 generation、严格清理旧身份 snapshot，成功后才替换 credential；手动模式仍只使用持久 allowlist，Codex 仍使用独立的持久 ModelInfo catalog，不改变 entitlement 边界，也无需数据库迁移。
 - **失败语义与验证**：空目录或发现错误绝不覆盖 durable last-known-good；缓存和持久快照都不存在时才使用既有 curated fail-open fallback。后台 snapshot 写失败只告警、不阻断路由；但加密设置读取/解密/JSON shape 失败时严格拒绝任何 mutation，不能用空 map 覆盖 proxy、priority、allowlist 等既有状态。TDD 覆盖三种非 Codex provider、进程缓存丢失后的持久恢复、Manual 隔离、旧 credential 并发发现、重连清理顺序、损坏设置防覆盖与写失败 fail-open；定向 5 files / 153 tests 全绿。
 
-## 2026-07-14 · 丢弃 Codex 空 secondary 配额占位窗口（OAuth quota / Admin providers / reset credits，docs/04/11，原则 3/5/7）
-
-- **生产根因**：Codex 部分账号的响应头会同时返回真实 `primary + windowMinutes:10080` 周窗口，以及 `secondary + usedPercent:0 + 无 duration + reset-after:0`。后者只是空占位，但 header parser 将其作为配额写入；latest-wins snapshot 随后覆盖完整 PULL 数据，Admin 又把未知时长的 positional key 翻译成“次窗口”，造成看似存在第二个额度且 7 天用量消失。
-- **三层防御**：header parser 在入库前丢弃“0% + 无时长 + 截止采集时已重置”的窗口；Admin cache-only API 与 Providers 页面用 snapshot 自己的 `capturedAt` 过滤旧版本已写入的同类脏数据，部署后无需等待新请求或人工清库即可恢复展示。未来重置、非零用量或带真实 duration 的窗口继续保留，避免误删刚开始的新周期与 legacy 数据。
-- **周额度权威**：周窗口改为集合级选择：账号级 `windowMinutes >= 10080` 的明确时长窗口优先；只有整组没有明确周窗口时，才兼容使用非零的未知时长 `secondary`。model-scoped 窗口仍排除。Admin、自动重置和 reset-credit 幂等 guard 共用该选择，空 positional 数据不能再覆盖真实周用量或 reset marker。
-- **验证**：TDD 定向覆盖 live header 形态、durable cache 旧快照、Providers 标签、明确周窗口优先、legacy fallback 与 reset-credit guard；6 files / 219 tests 全绿。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-14 · 丢弃 Codex 空 secondary 配额占位窗口（OAuth quota / Admin providers / reset credits，docs/04/11，原则 3/5/7）**：写入、cache-only API 与 UI 三层过滤 0%/无时长/已重置的空 positional 窗口；明确 `windowMinutes >= 10080` 的账号周窗口优先，避免脏 secondary 覆盖真实周额度与 reset marker。
 - **2026-07-14 · Subscription Providers 改为缓存优先与全局串行刷新（OAuth Admin / provider observability，docs/04/11，原则 1/3/6/7）**：Providers 首屏与兼容读 API 严格 cache-only；显式刷新由进程级单 worker 串行账号、合并并发点击并保留 last-known-good 数据。
 - **2026-07-14 · Avoid Waste 在 provider 池内限制 reset-credit 偏置（OAuth provider selection，docs/04/11，原则 3/5/6）**：reset credits 只作为同一 provider 池内的弱恢复容量信号，不能压过明显更多的真实即将过期额度；套餐标签不参与分池或评分。
 - **2026-07-13 · Responses 工具结果的 multipart 文本使用 input_text（Protocol translation / provider execution，docs/05/07，原则 3/5/8）**：provider 与共享 transformer 统一把请求侧 multipart 工具结果文本编码为 `input_text`，保留字符串、图片、文件与助手输出的既有 wire shape。

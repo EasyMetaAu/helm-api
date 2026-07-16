@@ -3,6 +3,7 @@ import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
 import { INTERNAL_API_KEY_ID } from "../../internal-key.js";
 import type { AdminApiDeps, KeySummary, KeyUsageSummary } from "./deps.js";
+import { adminWindowCacheKey, createAdminReadCache } from "./read-cache.js";
 
 // Default usage window for the list column when start is omitted: today in the
 // viewer's local day. The SPA sends an explicit local-midnight start; this fallback
@@ -74,6 +75,7 @@ function toSummary(rec: {
 }
 
 export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void {
+  const usageCache = createAdminReadCache<KeyUsageSummary[]>();
   // GET /keys -> KeySummary[] (no plaintext, no hash full-text).
   app.get("/admin/api/keys", async (c) => {
     const rows = await deps.keyStore.list();
@@ -88,11 +90,22 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
   // mean the viewer's local "today" instead of a rolling 24h window.
   app.get("/admin/api/keys/usage", async (c) => {
     const q = StatsQuerySchema.parse(c.req.query());
-    const end = q.end ?? Date.now();
+    const now = Date.now();
+    const end = q.end ?? now;
     const start = q.start ?? localDayStartMs(end, q.tzOffsetMinutes);
-    const usage = await deps.telemetry.usageByKey(start, end);
-    return c.json(
-      usage.map(
+    const key = adminWindowCacheKey({
+      start,
+      end,
+      now,
+      // The route's fallback is local calendar midnight, not a rolling duration;
+      // keep that absolute start in the key so repeated default reads can hit.
+      startWasDefault: false,
+      endWasDefault: q.end === undefined,
+      dimensions: [q.tzOffsetMinutes],
+    });
+    const result = await usageCache.get(key, async () => {
+      const usage = await deps.telemetry.usageByKey(start, end);
+      return usage.map(
         (u): KeyUsageSummary => ({
           key_id: u.apiKeyId,
           requests: u.requests,
@@ -100,8 +113,10 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
           cost_usd: u.totalCostUsd,
           total_tokens: u.totalTokens,
         }),
-      ),
-    );
+      );
+    });
+    c.header("X-Helm-Cache", result.status);
+    return c.json(result.value);
   });
 
   // GET /keys/:id/secret -> reveal the full key when this row has encrypted

@@ -59,6 +59,23 @@ describe('RefreshControl', () => {
     expect(onRefresh).toHaveBeenCalledTimes(2);
   });
 
+  it('pauses auto-refresh while the document is hidden', async () => {
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    const onRefresh = vi.fn();
+    render(RefreshControl, { onRefresh });
+    await fireEvent.click(screen.getByTestId('refresh-toggle'));
+    await fireEvent.click(screen.getByTestId('refresh-interval-5'));
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(onRefresh).not.toHaveBeenCalled();
+
+    visibility.mockReturnValue('visible');
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(onRefresh).toHaveBeenCalledOnce();
+    visibility.mockRestore();
+  });
+
   it('can keep manual refresh separate from cache-only auto refresh', async () => {
     const onRefresh = vi.fn();
     const onAutoRefresh = vi.fn();

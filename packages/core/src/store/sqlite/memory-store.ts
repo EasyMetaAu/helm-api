@@ -336,32 +336,53 @@ export class SqliteMemoryStore implements MemoryStore {
       .run();
   }
 
+  private bumpThreadMessageActivity(threadId: string, count: number, lastAt: number): void {
+    this.db.$sqlite
+      .prepare(
+        `UPDATE memory_threads
+            SET message_count = message_count + ?,
+                last_message_at = CASE
+                  WHEN last_message_at IS NULL OR last_message_at < ? THEN ?
+                  ELSE last_message_at
+                END
+          WHERE id = ?`,
+      )
+      .run(count, lastAt, lastAt, threadId);
+  }
+
   async appendMessage(input: MemoryMessageInput): Promise<string> {
     const id = this.genId();
+    const createdAt = this.now();
     // Idempotent ingest: a re-sent (thread_id, role, content) collapses to a
     // no-op via the v21 UNIQUE index (re-ingestion fix). Returned id is still
     // generated per call; on conflict it is inert (the row was left untouched).
-    this.db
-      .insert(memoryMessages)
-      .values({
-        id,
-        threadId: input.threadId,
-        messageIndex: input.messageIndex ?? 0,
-        role: input.role,
-        content: input.content,
-        tokenEstimate: input.tokenEstimate,
-        createdAt: this.now(),
-        contentHash: sha256Hex(input.content),
-      })
-      .onConflictDoNothing({
-        target: [
-          memoryMessages.threadId,
-          memoryMessages.messageIndex,
-          memoryMessages.role,
-          memoryMessages.contentHash,
-        ],
-      })
-      .run();
+    this.db.$sqlite.transaction(() => {
+      const inserted = this.db
+        .insert(memoryMessages)
+        .values({
+          id,
+          threadId: input.threadId,
+          messageIndex: input.messageIndex ?? 0,
+          role: input.role,
+          content: input.content,
+          tokenEstimate: input.tokenEstimate,
+          createdAt,
+          contentHash: sha256Hex(input.content),
+        })
+        .onConflictDoNothing({
+          target: [
+            memoryMessages.threadId,
+            memoryMessages.messageIndex,
+            memoryMessages.role,
+            memoryMessages.contentHash,
+          ],
+        })
+        .run();
+      // A dedup conflict has changes=0 and must not inflate the summary.
+      if (inserted.changes > 0) {
+        this.bumpThreadMessageActivity(input.threadId, 1, createdAt.getTime());
+      }
+    })();
     return id;
   }
 
@@ -375,10 +396,11 @@ export class SqliteMemoryStore implements MemoryStore {
     const base = this.now().getTime();
     const ids: string[] = [];
     const run = this.db.$sqlite.transaction(() => {
+      const activity = new Map<string, { count: number; lastAt: number }>();
       inputs.forEach((input, i) => {
         const id = this.genId();
         ids.push(id);
-        this.db
+        const inserted = this.db
           .insert(memoryMessages)
           .values({
             id,
@@ -399,7 +421,19 @@ export class SqliteMemoryStore implements MemoryStore {
             ],
           })
           .run();
+        if (inserted.changes > 0) {
+          const createdAt = base + i;
+          const current = activity.get(input.threadId);
+          activity.set(input.threadId, {
+            count: (current?.count ?? 0) + 1,
+            lastAt: Math.max(current?.lastAt ?? createdAt, createdAt),
+          });
+        }
       });
+      // One parent update per touched thread, not one per message in the turn.
+      for (const [threadId, summary] of activity) {
+        this.bumpThreadMessageActivity(threadId, summary.count, summary.lastAt);
+      }
     });
     run();
     return ids;
@@ -439,22 +473,35 @@ export class SqliteMemoryStore implements MemoryStore {
   // here so core/ports stay DB-agnostic.
   async appendObservation(input: MemoryObservationInput): Promise<string> {
     const id = this.genId();
-    this.db
-      .insert(memoryObservations)
-      .values({
-        id,
-        threadId: input.threadId,
-        sourceMessageRange: JSON.stringify(input.sourceMessageRange),
-        observationText: input.observationText,
-        observedAt: input.observedAt,
-        referencedAt: null,
-        // docs/12 (P5) — persist the Observer-resolved salience; absent ⇒ 0.5 so
-        // the column default and an explicit default agree (legacy/no-salience path).
-        ...(input.importance !== undefined ? { importance: input.importance } : {}),
-        priority: input.priority ?? null,
-        tags: input.tags !== undefined ? JSON.stringify(input.tags) : null,
-      })
-      .run();
+    this.db.$sqlite.transaction(() => {
+      this.db
+        .insert(memoryObservations)
+        .values({
+          id,
+          threadId: input.threadId,
+          sourceMessageRange: JSON.stringify(input.sourceMessageRange),
+          observationText: input.observationText,
+          observedAt: input.observedAt,
+          referencedAt: null,
+          // docs/12 (P5) — persist the Observer-resolved salience; absent ⇒ 0.5 so
+          // the column default and an explicit default agree (legacy/no-salience path).
+          ...(input.importance !== undefined ? { importance: input.importance } : {}),
+          priority: input.priority ?? null,
+          tags: input.tags !== undefined ? JSON.stringify(input.tags) : null,
+        })
+        .run();
+      this.db.$sqlite
+        .prepare(
+          `UPDATE memory_threads
+              SET observation_count = observation_count + 1,
+                  last_observation_at = CASE
+                    WHEN last_observation_at IS NULL OR last_observation_at < ? THEN ?
+                    ELSE last_observation_at
+                  END
+            WHERE id = ?`,
+        )
+        .run(input.observedAt.getTime(), input.observedAt.getTime(), input.threadId);
+    })();
     return id;
   }
 
@@ -1190,43 +1237,41 @@ export class SqliteMemoryStore implements MemoryStore {
       AND (? IS NULL OR thread_id = ?)
     `;
     const jobScope = sqliteMemoryJobScope(input);
-    const threads = (
-      noScopeFilter
-        ? this.db.$sqlite.prepare("SELECT COUNT(*) AS n FROM memory_threads").get()
-        : this.db.$sqlite
-            .prepare(`SELECT COUNT(*) AS n FROM memory_threads t WHERE ${threadWhere}`)
-            .get(...threadArgs)
-    ) as { n: number } | undefined;
-    const messages = (
+    // Raw message/observation bodies live in child tables that grow into millions
+    // of rows. Their count/latest activity is maintained on memory_threads, so this
+    // one narrow parent aggregation replaces the former three synchronous scans.
+    const threadActivity = (
       noScopeFilter
         ? this.db.$sqlite
-            .prepare("SELECT COUNT(*) AS n, MAX(created_at) AS lastAt FROM memory_messages")
+            .prepare(
+              `SELECT COUNT(*) AS n,
+                      COALESCE(SUM(message_count), 0) AS messages,
+                      COALESCE(SUM(observation_count), 0) AS observations,
+                      MAX(last_message_at) AS lastMessageAt,
+                      MAX(last_observation_at) AS lastObservationAt
+                 FROM memory_threads`,
+            )
             .get()
         : this.db.$sqlite
             .prepare(
-              `SELECT COUNT(*) AS n, MAX(m.created_at) AS lastAt
-          FROM memory_messages m
-           JOIN memory_threads t ON t.id = m.thread_id
-          WHERE ${threadWhere}
-        `,
+              `SELECT COUNT(*) AS n,
+                      COALESCE(SUM(t.message_count), 0) AS messages,
+                      COALESCE(SUM(t.observation_count), 0) AS observations,
+                      MAX(t.last_message_at) AS lastMessageAt,
+                      MAX(t.last_observation_at) AS lastObservationAt
+                 FROM memory_threads t
+                WHERE ${threadWhere}`,
             )
             .get(...threadArgs)
-    ) as { n: number; lastAt: number | null } | undefined;
-    const observations = (
-      noScopeFilter
-        ? this.db.$sqlite
-            .prepare("SELECT COUNT(*) AS n, MAX(observed_at) AS lastAt FROM memory_observations")
-            .get()
-        : this.db.$sqlite
-            .prepare(
-              `SELECT COUNT(*) AS n, MAX(o.observed_at) AS lastAt
-          FROM memory_observations o
-           JOIN memory_threads t ON t.id = o.thread_id
-          WHERE ${threadWhere}
-        `,
-            )
-            .get(...threadArgs)
-    ) as { n: number; lastAt: number | null } | undefined;
+    ) as
+      | {
+          n: number;
+          messages: number;
+          observations: number;
+          lastMessageAt: number | null;
+          lastObservationAt: number | null;
+        }
+      | undefined;
     const facts = (
       noScopeFilter
         ? this.db.$sqlite
@@ -1328,9 +1373,9 @@ export class SqliteMemoryStore implements MemoryStore {
         ...(input.threadId !== undefined ? { threadId: input.threadId } : {}),
       },
       storage: {
-        threads: countOf(threads),
-        messages: countOf(messages),
-        observations: countOf(observations),
+        threads: countOf(threadActivity),
+        messages: threadActivity?.messages ?? 0,
+        observations: threadActivity?.observations ?? 0,
         facts: countOf(facts),
         activeFacts: facts?.active ?? 0,
         reflections: countOf(reflections),
@@ -1347,8 +1392,8 @@ export class SqliteMemoryStore implements MemoryStore {
         byType,
       },
       activity: {
-        lastMessageAt: dateOrNull(messages?.lastAt),
-        lastObservationAt: dateOrNull(observations?.lastAt),
+        lastMessageAt: dateOrNull(threadActivity?.lastMessageAt),
+        lastObservationAt: dateOrNull(threadActivity?.lastObservationAt),
         lastFactUpdatedAt: dateOrNull(facts?.lastAt),
         lastReflectionUpdatedAt: dateOrNull(reflections?.lastAt),
       },
@@ -1919,11 +1964,39 @@ export class SqliteMemoryStore implements MemoryStore {
   }
 
   async pruneMessagesOlderThan(olderThanMs: number): Promise<number> {
-    const res = this.db
-      .delete(memoryMessages)
-      .where(lt(memoryMessages.createdAt, new Date(olderThanMs)))
-      .run();
-    return res.changes;
+    // Keep the summary exact in the SAME transaction. A TEMP key table avoids
+    // returning every deleted body row to JS and lets one set-based UPDATE repair
+    // only affected threads after the delete (including the new MAX timestamp).
+    return this.db.$sqlite.transaction(() => {
+      this.db.$sqlite.exec(`
+        CREATE TEMP TABLE IF NOT EXISTS _helm_pruned_message_threads (
+          thread_id TEXT PRIMARY KEY
+        ) WITHOUT ROWID;
+        DELETE FROM _helm_pruned_message_threads;
+      `);
+      this.db.$sqlite
+        .prepare(
+          `INSERT OR IGNORE INTO _helm_pruned_message_threads (thread_id)
+           SELECT thread_id FROM memory_messages WHERE created_at < ?`,
+        )
+        .run(olderThanMs);
+      const res = this.db
+        .delete(memoryMessages)
+        .where(lt(memoryMessages.createdAt, new Date(olderThanMs)))
+        .run();
+      this.db.$sqlite.exec(`
+        UPDATE memory_threads AS t
+           SET message_count = (
+                 SELECT COUNT(*) FROM memory_messages m WHERE m.thread_id = t.id
+               ),
+               last_message_at = (
+                 SELECT MAX(m.created_at) FROM memory_messages m WHERE m.thread_id = t.id
+               )
+         WHERE t.id IN (SELECT thread_id FROM _helm_pruned_message_threads);
+        DELETE FROM _helm_pruned_message_threads;
+      `);
+      return res.changes;
+    })();
   }
 
   async pruneFinishedJobsOlderThan(olderThanMs: number): Promise<number> {
