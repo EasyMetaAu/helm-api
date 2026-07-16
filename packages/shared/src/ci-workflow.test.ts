@@ -52,4 +52,8 @@ describe("CI workflow", () => {
     const dockerJob = raw.slice(raw.indexOf("\n  docker:"), raw.indexOf("\n  report_pr_checks:"));
     expect(dockerJob).not.toMatch(/needs:/);
   });
+
+  it("fetches both parents before validating a pull-request merge ref", () => {
+    expect(raw.match(/fetch-depth:\s*2/g)).toHaveLength(3);
+  });
 });
