@@ -150,12 +150,9 @@ These are current code boundaries, not promises hidden behind optimistic prose:
    [LiteLLM Gap Record](protocol-translation-litellm-gap-spec.md).
 8. **Parsed routing controls that are not fully active.** `lane.constraints` is
    schema/admin-visible but is not carried into `ExecutionPlan`; capability gates
-   currently come from request-derived constraints. `classifier.rules.enabled`
-   does not disable Layer 1, and `eval.cache.enabled` does not disable the eval
-   cache. Policies accept `project_id`, but the live policy context always supplies
-   `null`, so a string project policy cannot match. Finally, `allowed_lanes` is
-   enforced only when the array is non-empty: `[]` (including a disjoint policy
-   intersection) currently behaves as unconstrained rather than deny-all.
+   currently come from request-derived constraints. Policies accept `project_id`,
+   but the live policy context always supplies `null`, so a string project policy
+   cannot match.
 9. **Admin YAML configuration.** `resolveAdminAuth` accepts a config object for
    direct callers/tests, but the shipping `loadConfig()` schema has no admin path.
    `buildServer()` admin enablement and credentials are therefore effectively

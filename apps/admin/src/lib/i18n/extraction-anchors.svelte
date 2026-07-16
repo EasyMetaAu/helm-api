@@ -45,7 +45,7 @@
   <!-- DecisionChain: classifier decision-source labels (decidedBy().key) -->
   {$t('Decided by Layer-1 rules')}
   {$t('Decided by the Layer-2 eval model')}
-  {$t('Rules uncertain — fell back to the balanced lane')}
+  {$t('Classification used the terminal fallback lane')}
   {$t('Default (explicit passthrough or fail-open)')}
   <!-- DecisionChain: eval fail-open reasons (evalReasonKey()) -->
   {$t('timed out')}{$t('provider error')}{$t('circuit open')}

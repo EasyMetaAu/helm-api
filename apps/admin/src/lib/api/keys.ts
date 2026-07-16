@@ -15,7 +15,7 @@ export interface ApiKeyView {
   prefix: string; // e.g. helm_live_ab12 — display/debug only
   role: 'root' | 'user';
   name: string | null; // human-readable label; null = unnamed (cosmetic only)
-  allowed_lanes: string[] | null; // lane whitelist (empty/null = any lane)
+  allowed_lanes: string[] | null; // null = unrestricted; legacy [] = deny every lane
   allow_custom_model: boolean; // explicit client-model passthrough
   blocked_models: string[] | null; // case-insensitive exact/glob model ids denied across routes
   allow_fast_mode: boolean; // explicit client-requested Fast mode passthrough

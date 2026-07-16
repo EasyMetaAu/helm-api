@@ -14,7 +14,13 @@ import { type BlockedModelMatcher, createBlockedModelMatcher } from "../model-bl
 import { correlationTraceId } from "../telemetry/decision.js";
 import { type Classification as ResolverClassification, resolveLane } from "./lane-resolver.js";
 import { type ModelAliasMap, resolveModelAlias } from "./model-alias.js";
-import { applyCaps, evaluatePolicies, LANE_RANK, type PolicyContext } from "./policy-engine.js";
+import {
+  applyCaps,
+  evaluatePolicies,
+  intersectAllowedLanes,
+  LANE_RANK,
+  type PolicyContext,
+} from "./policy-engine.js";
 import type { PoliciesConfig } from "./policy-schema.js";
 import { promoteRequestedModel } from "./promote-requested-model.js";
 
@@ -445,17 +451,30 @@ function candidateAllowedByCaps(
   policyOutcome: ReturnType<typeof evaluatePolicies>,
   keyCaps: RouteOptions["keyCaps"],
 ): boolean {
-  if (applyCaps(candidateLane, policyOutcome) !== candidateLane) return false;
-  if (keyCaps === undefined) return true;
   const capped = applyCaps(candidateLane, {
-    matched_policy_id: null,
-    use_lane: null,
-    allowed_lanes: keyCaps.allowedLanes,
-    reasoning_effort: null,
-    reason: "key caps",
+    ...policyOutcome,
+    allowed_lanes: intersectAllowedLanes(policyOutcome.allowed_lanes, keyCaps?.allowedLanes),
   });
   if (capped !== candidateLane) return false;
   return laneHasPermittedModel(candidateLane, lanes, keyCaps);
+}
+
+// Budget degradation is a cost-control boundary, not ordinary lane selection.
+// Generic applyCaps may choose the weakest allowed lane even when it is stronger
+// than the requested candidate (valid for an entitlement whitelist, unsafe for a
+// cost downgrade). Keep the exact degrade lane, converge only to a ranked cheaper
+// lane, and fail closed when no non-stronger permitted target can be proven.
+function applyDegradeCaps(
+  lane: string,
+  outcome: ReturnType<typeof evaluatePolicies>,
+): string | null {
+  const capped = applyCaps(lane, outcome);
+  if (capped === null || capped === lane) return capped;
+  const candidateRank = LANE_RANK[lane];
+  const cappedRank = LANE_RANK[capped];
+  return candidateRank !== undefined && cappedRank !== undefined && cappedRank <= candidateRank
+    ? capped
+    : null;
 }
 
 async function maybeApplySignalFeedback(args: {
@@ -581,6 +600,30 @@ function noPermittedModelsRejection(args: {
   };
 }
 
+function noPermittedLanesRejection(args: {
+  req: InternalRequest;
+  selectedLane: string;
+  classifier: DecisionRecord["classifier"];
+  policy: DecisionRecord["policy"];
+  forcedReasoningEffort: ReasoningEffort | null;
+  evalUsd: number | null;
+  message?: string;
+}): PlanRejection {
+  return {
+    reject: makeHelmError({
+      error_class: "invalid_request",
+      message: args.message ?? "no lane is permitted by allowed_lanes restrictions",
+      trace_id: correlationTraceId(args.req),
+    }),
+    selectedLane: args.selectedLane,
+    candidateChain: [],
+    classifier: args.classifier,
+    policy: args.policy,
+    forcedReasoningEffort: args.forcedReasoningEffort,
+    evalUsd: args.evalUsd,
+  };
+}
+
 function isExplicitRequestEligible(req: InternalRequest, opts: RouteOptions): boolean {
   return (
     opts.allowCustomModel === true &&
@@ -597,7 +640,7 @@ function explicitLaneDecision(
 ): PlanDecision | PlanRejection {
   const lane = req.requested_model;
   const allowed = opts.keyCaps?.allowedLanes;
-  if (allowed != null && allowed.length > 0 && !allowed.includes(lane)) {
+  if (allowed != null && !allowed.includes(lane)) {
     return {
       reject: makeHelmError({
         error_class: "invalid_request",
@@ -732,14 +775,22 @@ async function plan(
     (opts.keyCaps?.degradeLane === undefined || opts.keyCaps.degradeLane === null)
   ) {
     const outcome = evaluatePolicies(aliasPolicyContext(), deps.policies);
-    let lane = applyCaps(aliasTarget, outcome);
-    if (opts.keyCaps !== undefined) {
-      lane = applyCaps(lane, {
-        matched_policy_id: null,
-        use_lane: null,
-        allowed_lanes: opts.keyCaps.allowedLanes,
-        reasoning_effort: null,
-        reason: "key caps",
+    const lane = applyCaps(aliasTarget, {
+      ...outcome,
+      allowed_lanes: intersectAllowedLanes(outcome.allowed_lanes, opts.keyCaps?.allowedLanes),
+    });
+    const basePolicy = {
+      matched_policy_id: outcome.matched_policy_id,
+      reason: `model alias "${req.requested_model}" -> lane "${aliasTarget}"`,
+    };
+    if (lane === null) {
+      return noPermittedLanesRejection({
+        req,
+        selectedLane: aliasTarget,
+        classifier: passthroughClassifier(),
+        policy: basePolicy,
+        forcedReasoningEffort: outcome.reasoning_effort,
+        evalUsd: null,
       });
     }
     const clamped = lane !== aliasTarget;
@@ -747,12 +798,9 @@ async function plan(
       promoteRequestedModel(expandChain(lane, deps.lanes), req.requested_model),
       opts,
     );
-    const policy = {
-      matched_policy_id: outcome.matched_policy_id,
-      reason: clamped
-        ? `model alias "${req.requested_model}" -> lane "${aliasTarget}" (capped to "${lane}")`
-        : `model alias "${req.requested_model}" -> lane "${aliasTarget}"`,
-    };
+    const policy = clamped
+      ? { ...basePolicy, reason: `${basePolicy.reason} (capped to "${lane}")` }
+      : basePolicy;
     if (chain.length === 0) {
       return noPermittedModelsRejection({
         req,
@@ -821,31 +869,54 @@ async function plan(
     lanes: deps.lanes,
     defaultLane: deps.defaultLane,
   });
-  // Policy caps first (the resolver's lane choice, narrowed by matched policies).
-  const policyCappedLane = applyCaps(laneDecision.selected_lane, outcome);
-  // Per-key lane caps LAST: the OUTER, non-negotiable bound from the API key's
-  // auth record. Applied after policy caps so the key wins even over a policy
-  // use_lane pin (principle 6: lanes are the user-facing abstraction; a key may
-  // be confined to a subset). keyCaps undefined => no-op.
+  const baseClassifier: DecisionRecord["classifier"] = {
+    task_type: cls.task_type,
+    complexity: cls.complexity,
+    confidence: cls.confidence,
+    decided_by: cls.decided_by,
+    rules_confidence: cls.rules_confidence ?? null,
+    eval_cache_hit: cls.eval_cache_hit ?? null,
+    eval_model: cls.eval_model ?? null,
+    eval_latency_ms: cls.eval_latency_ms ?? null,
+    fallback_reason: cls.fallback_reason ?? null,
+    constraints: cls.constraints as Record<string, unknown>,
+    explanation: cls.explanation,
+  };
+  const policy = { matched_policy_id: outcome.matched_policy_id, reason: outcome.reason };
+  // Policy and per-key lane caps are independent restrictions. Compute their
+  // actual intersection once: sequential clamping can let the later cap undo the
+  // earlier one. null means unconstrained; [] means deny every lane.
+  const allowedLanes = intersectAllowedLanes(outcome.allowed_lanes, opts.keyCaps?.allowedLanes);
   //
   // Over-budget degrade (docs/06): when `degradeLane` is set for this request, FORCE
   // the request onto it (a forced selection, not a rank ceiling) so it works for any
   // target lane — ranked OR a task lane — which a rank-based ceiling would silently
-  // ignore. The forced lane is then clamped to the key's `allowedLanes` whitelist
-  // (the harder security bound) via applyCaps, exactly as the normal lane is.
-  let cappedLane: string;
-  if (opts.keyCaps === undefined) {
-    cappedLane = policyCappedLane;
-  } else {
-    const base = opts.keyCaps.degradeLane ?? policyCappedLane;
-    cappedLane = applyCaps(base, {
-      matched_policy_id: null,
-      use_lane: null,
-      allowed_lanes: opts.keyCaps.allowedLanes,
-      reasoning_effort: null,
-      reason: "key caps",
+  // ignore. The effective policy/key whitelist may keep that lane or move to a
+  // provably cheaper ranked lane, but it must never turn a cost downgrade into an
+  // upgrade; a stronger-only whitelist fails closed before provider execution.
+  const degradeLane = opts.keyCaps?.degradeLane ?? null;
+  const baseLane = degradeLane ?? laneDecision.selected_lane;
+  const effectiveOutcome = { ...outcome, allowed_lanes: allowedLanes };
+  const initialCappedLane =
+    degradeLane === null
+      ? applyCaps(baseLane, effectiveOutcome)
+      : applyDegradeCaps(baseLane, effectiveOutcome);
+  if (initialCappedLane === null) {
+    return noPermittedLanesRejection({
+      req,
+      selectedLane: baseLane,
+      classifier: baseClassifier,
+      policy,
+      forcedReasoningEffort: outcome.reasoning_effort,
+      evalUsd: cls.eval_usd ?? null,
+      ...(degradeLane === null
+        ? {}
+        : {
+            message: `no permitted lane is at or below degrade lane "${degradeLane}"`,
+          }),
     });
   }
+  let cappedLane = initialCappedLane;
   const signalAdjustment = await maybeApplySignalFeedback({
     selectedLane: cappedLane,
     classification: cls,
@@ -875,23 +946,7 @@ async function plan(
       ? cls.explanation
       : [...cls.explanation, signalAdjustment.explanation];
 
-  const classifier: DecisionRecord["classifier"] = {
-    task_type: cls.task_type,
-    complexity: cls.complexity,
-    confidence: cls.confidence,
-    decided_by: cls.decided_by,
-    // Thread Layer-2 eval observability straight from the classify adapter
-    // (cascade). null/undefined collapse to null so the record never carries
-    // an ambiguous undefined (principle 5: classification fields only).
-    rules_confidence: cls.rules_confidence ?? null,
-    eval_cache_hit: cls.eval_cache_hit ?? null,
-    eval_model: cls.eval_model ?? null,
-    eval_latency_ms: cls.eval_latency_ms ?? null,
-    fallback_reason: cls.fallback_reason ?? null,
-    constraints: cls.constraints as Record<string, unknown>,
-    explanation,
-  };
-  const policy = { matched_policy_id: outcome.matched_policy_id, reason: outcome.reason };
+  const classifier: DecisionRecord["classifier"] = { ...baseClassifier, explanation };
 
   if (chain.length === 0) {
     return noPermittedModelsRejection({

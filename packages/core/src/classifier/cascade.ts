@@ -5,7 +5,7 @@ import type { TaskType } from "./taskdetect.js";
 import type { Complexity } from "./tiers.js";
 
 // eval.cascade — the THREE-layer classification cascade (docs/03 §Classification Cascade),
-// hit-stop: Layer 1 rules (always-on, zero-network, pure) → Layer 2 eval (ONLY
+// hit-stop: Layer 1 rules (when enabled, zero-network, pure) → Layer 2 eval (ONLY
 // when rules are uncertain AND eval is enabled) → Layer 3 `balanced` fail-open.
 // This is the eval module's "final assembly": the SINGLE place that references
 // the `lane` concept and that translates an eval `{decided:false}` into the
@@ -52,8 +52,8 @@ export interface ClassificationResult {
   // The LAYER-1 rules confidence — the gate value that decided whether Layer 2
   // ran. On decided_by==="eval" the `confidence` above is the EVAL model's (its
   // verdict replaces the rules one), so this is the only record of why the
-  // cascade escalated. Always known here (rules always run).
-  rules_confidence: number;
+  // cascade escalated. null when Layer 1 was disabled and did not run.
+  rules_confidence: number | null;
   decided_by: DecidedBy; // observable; never conflated with provider fallback
   eval_used: boolean; // did this request actually invoke/hit Layer-2 eval
   eval_cache_hit: boolean; // eval cache hit (always false when eval unused)
@@ -100,12 +100,13 @@ export async function classify(
 ): Promise<ClassificationResult> {
   const { runRules, runEvalCached, resolveLane, config } = deps;
 
-  // ── Layer 1: rules. Always runs, zero network. ─────────────────────────────
-  const r = runRules(input);
+  // ── Layer 1: rules. When disabled, skip it entirely — including momentum
+  // reads/writes in the injected rule engine — and continue directly to eval.
+  const r = config.rules.enabled ? runRules(input) : null;
 
   // Hit-stop: a high-confidence rules verdict ends here and NEVER touches eval,
   // even when eval is enabled — saving the cost and latency of a model call.
-  if (r.confidence >= config.rules.confidence_threshold) {
+  if (r !== null && r.confidence >= config.rules.confidence_threshold) {
     return {
       lane: resolveLane(r.complexity, r.task_type, input),
       complexity: r.complexity,
@@ -124,7 +125,7 @@ export async function classify(
   if (!config.eval.enabled) {
     // Uncertain but eval is off → balanced, distinctly tagged so this is NOT
     // confused with an eval that ran and failed. No eval ran → no latency.
-    return balancedFallback(r, "eval_disabled", {
+    return balancedFallback(r, r === null ? "rules_and_eval_disabled" : "eval_disabled", {
       eval_used: false,
       eval_cache_hit: false,
       eval_latency_ms: null,
@@ -141,7 +142,7 @@ export async function classify(
       confidence: e.output.confidence,
       // The eval verdict replaced the rules one above — keep the Layer-1 gate
       // value so "rules were uncertain → escalated" stays reconstructible.
-      rules_confidence: r.confidence,
+      rules_confidence: r?.confidence ?? null,
       decided_by: "eval",
       eval_used: true,
       eval_cache_hit: e.cache_hit,
@@ -163,16 +164,16 @@ export async function classify(
 // complexity/task_type/confidence for telemetry continuity, but the lane is
 // pinned to `balanced` and `decided_by` is "fallback" with a precise reason.
 function balancedFallback(
-  r: RulesResult,
+  r: RulesResult | null,
   fallbackReason: string,
   evalState: { eval_used: boolean; eval_cache_hit: boolean; eval_latency_ms: number | null },
 ): ClassificationResult {
   return {
     lane: BALANCED,
-    complexity: r.complexity,
-    task_type: r.task_type,
-    confidence: r.confidence,
-    rules_confidence: r.confidence,
+    complexity: r?.complexity ?? "standard",
+    task_type: r?.task_type ?? "chat",
+    confidence: r?.confidence ?? 0,
+    rules_confidence: r?.confidence ?? null,
     decided_by: "fallback",
     eval_used: evalState.eval_used,
     eval_cache_hit: evalState.eval_cache_hit,

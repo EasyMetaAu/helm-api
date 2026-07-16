@@ -122,6 +122,22 @@ describe("runEvalCached", () => {
     expect(runEval).toHaveBeenCalledTimes(1);
   });
 
+  it("bypasses existing entries and storage when cache.enabled is false", async () => {
+    const cache = createEvalCache({ ttlSec: 300, maxEntries: 10 });
+    cache.set("unrelated", OUTPUT, 1_000);
+    const { deps, runEval, getNow } = makeDeps();
+    deps.config = makeConfig({ cache: { ...deps.config.cache, enabled: false } });
+    const input = makeInput();
+
+    const first = await runEvalCached(input, { ...deps, cache, runEval, nowMs: getNow() });
+    const second = await runEvalCached(input, { ...deps, cache, runEval, nowMs: getNow() });
+
+    expect(first.cache_hit).toBe(false);
+    expect(second.cache_hit).toBe(false);
+    expect(runEval).toHaveBeenCalledTimes(2);
+    expect(cache.size).toBe(1);
+  });
+
   it("re-evaluates after the TTL window elapses", async () => {
     const cache = createEvalCache({ ttlSec: 300, maxEntries: 10 });
     const { deps, runEval } = makeDeps();

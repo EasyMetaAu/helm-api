@@ -412,17 +412,20 @@ pin and `reasoning_effort`, the `allowed_lanes` whitelist **accumulates**
 (intersection) across every matching policy, so a restrict policy placed after a
 pin policy still binds.
 
-Two current implementation details matter when authoring policies:
+Two implementation details matter when authoring policies:
 
 - `project_id` remains in the schema for future trusted project routing, but the
   live router always supplies `null`; a policy matching a string `project_id`
   cannot currently match. Client-controlled memory project headers are
   intentionally not trusted as routing authority.
-- `applyCaps` currently enforces an `allowed_lanes` result only when the array is
-  non-empty. An explicitly empty list—or disjoint matching policies whose
-  intersection becomes `[]`—therefore behaves as unconstrained today. Avoid empty
-  or disjoint cap sets; this is an implementation limitation, not a deny-all
-  representation.
+- Policy and API-key `allowed_lanes` are independent restrictions and are reduced
+  to one true intersection before lane selection. `null` means unconstrained;
+  `[]` means no lane is permitted and produces a structured `invalid_request`
+  without contacting a provider. New key/policy writes reject an explicitly empty
+  list (use `null` to clear a key cap), while a disjoint intersection still becomes
+  `[]` at runtime and fails closed. Direct concrete models remain governed by
+  `allow_custom_model` and `blocked_models`; lane restrictions do not silently
+  become a concrete-model denylist.
 
 Reasoning effort precedence is explicit: `policy.reasoning_effort` overrides the
 selected lane's `reasoning_effort`, which overrides the client's request value.
@@ -484,17 +487,18 @@ policies:
     allowed_lanes: [economy, balanced]
 ```
 
-## Caps: policy then key
+## Caps: policy intersected with key
 
-Two cap layers apply, in order:
+Two independent cap layers apply as one effective intersection:
 
 1. **Policy `allowed_lanes`** narrow the resolver's lane choice to a whitelist.
    An unranked task lane (not in `LANE_RANK`) is treated conservatively —
    degraded toward `balanced`, never escalated to the strongest allowed lane.
-2. **Per-key caps** apply **last** as the outer, non-negotiable bound from the
-   API key's auth record, so a key whose `allowed_lanes` whitelist is confined
-   to (for example) `[economy]` is honored even over a policy `use_lane` pin. See
-   [06](06-auth-and-rate-limits.md).
+2. **Per-key caps** are the other non-negotiable bound from the API key's auth
+   record. A lane must satisfy both restrictions; disjoint sets reject rather
+   than letting either whitelist overwrite the other. A key confined to, for
+   example, `[economy]` is therefore honored even over a policy `use_lane` pin.
+   See [06](06-auth-and-rate-limits.md).
 
 ## Per-key model blocking
 

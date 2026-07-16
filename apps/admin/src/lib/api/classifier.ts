@@ -17,7 +17,7 @@ export interface RuleDimension {
 
 export interface ClassifierConfig {
   rules: {
-    enabled: boolean; // read-only: Layer-1 is always on
+    enabled: boolean; // read-only display: runtime switch configured in classifier.yaml
     confidence_threshold: number; // editable, [0,1], default 0.45
     dimensions: RuleDimension[]; // read-only display
     boundaries?: Record<string, number>; // read-only: four-tier complexity boundaries

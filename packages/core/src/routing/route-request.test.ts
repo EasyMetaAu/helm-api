@@ -454,6 +454,30 @@ describe("routeRequest — orchestration", () => {
     expect(plan.selected_lane).toBe("balanced");
   });
 
+  it("rejects when policy and key allowedLanes have no common lane", async () => {
+    const d = deps({
+      classify: vi.fn(async () => classification({ task_type: "chat" })),
+      policies: { policies: [{ id: "policy-cap", match: {}, allowed_lanes: ["economy"] }] },
+    });
+    const result = await routeRequest(req(), d, {
+      keyCaps: { allowedLanes: ["premium"] },
+    });
+
+    expect(result.final.status).toBe("error");
+    expect(result.error?.error_class).toBe("invalid_request");
+    expect(result.error?.message).toContain("no lane is permitted");
+    expect(d.execute).not.toHaveBeenCalled();
+  });
+
+  it("rejects automatic routing when the key has an empty allowedLanes whitelist", async () => {
+    const d = deps();
+    const result = await routeRequest(req(), d, { keyCaps: { allowedLanes: [] } });
+
+    expect(result.final.status).toBe("error");
+    expect(result.error?.error_class).toBe("invalid_request");
+    expect(d.execute).not.toHaveBeenCalled();
+  });
+
   it("keyCaps.degradeLane forces an over-budget request onto the degrade lane", async () => {
     // A policy pins `premium`; the key is over budget so the gateway sets
     // degradeLane=economy for this request — it is FORCED onto economy.
@@ -463,6 +487,35 @@ describe("routeRequest — orchestration", () => {
     });
     await routeRequest(req(), d, { keyCaps: { allowedLanes: null, degradeLane: "economy" } });
 
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("economy");
+  });
+
+  it("rejects over-budget degrade when the effective whitelist only permits stronger lanes", async () => {
+    const d = deps({
+      classify: vi.fn(async () => classification({ task_type: "chat" })),
+      policies: { policies: [] },
+    });
+    const result = await routeRequest(req(), d, {
+      keyCaps: { allowedLanes: ["premium"], degradeLane: "economy" },
+    });
+
+    expect(result.final.status).toBe("error");
+    expect(result.error?.error_class).toBe("invalid_request");
+    expect(result.error?.message).toContain("degrade lane");
+    expect(d.execute).not.toHaveBeenCalled();
+  });
+
+  it("allows over-budget degrade to converge to a cheaper permitted lane", async () => {
+    const d = deps({
+      classify: vi.fn(async () => classification({ task_type: "chat" })),
+      policies: { policies: [] },
+    });
+    const result = await routeRequest(req(), d, {
+      keyCaps: { allowedLanes: ["economy"], degradeLane: "balanced" },
+    });
+
+    expect(result.final.status).toBe("ok");
     const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
     expect(plan.selected_lane).toBe("economy");
   });
@@ -733,15 +786,15 @@ describe("routeRequest — orchestration", () => {
     expect(result.final.status).toBe("ok");
   });
 
-  it("an EMPTY allowedLanes array is inactive for explicit lanes (mirrors applyCaps)", async () => {
+  it("an EMPTY allowedLanes array rejects every explicit lane", async () => {
     const d = deps();
     const result = await routeRequest(req({ requested_model: "premium" }), d, {
       allowCustomModel: true,
       keyCaps: { allowedLanes: [] },
     });
-    expect(result.final.status).toBe("ok");
-    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
-    expect(plan.selected_lane).toBe("premium");
+    expect(result.final.status).toBe("error");
+    expect(result.error?.error_class).toBe("invalid_request");
+    expect(d.execute).not.toHaveBeenCalled();
   });
 
   it("explicit lane works even when isKnownModel does not know it (lanes shadow model aliases)", async () => {
@@ -789,6 +842,20 @@ describe("routeRequest — orchestration", () => {
       allowCustomModel: true,
     });
     expect(okLegacy.final.status).toBe("ok");
+  });
+
+  it("keeps a known concrete-model passthrough available when allowedLanes is deny-all", async () => {
+    const d = deps({ isKnownModel: (alias) => alias === "deepseek/deepseek-v4-pro" });
+    const result = await routeRequest(req({ requested_model: "deepseek/deepseek-v4-pro" }), d, {
+      allowCustomModel: true,
+      keyCaps: { allowedLanes: [] },
+    });
+
+    expect(result.final.status).toBe("ok");
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan.selected_lane).toBe("deepseek/deepseek-v4-pro");
+    expect(plan.candidate_chain).toEqual(["deepseek/deepseek-v4-pro"]);
+    expect(plan.explicit_model).toBe("deepseek/deepseek-v4-pro");
   });
 
   it("keyCaps.degradeLane suppresses explicit LANE passthrough too (no over-budget bypass)", async () => {
@@ -1123,6 +1190,17 @@ describe("routeRequest — virtual model aliases", () => {
     expect(result.final.status).toBe("ok");
     const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
     expect(plan.selected_lane).toBe("economy");
+  });
+
+  it("rejects an alias-mapped lane when the key whitelist is empty", async () => {
+    const d = deps({ modelAliases: { "claude-opus-4-8": "premium" } });
+    const result = await routeRequest(req({ requested_model: "claude-opus-4-8" }), d, {
+      allowCustomModel: true,
+      keyCaps: { allowedLanes: [] },
+    });
+    expect(result.final.status).toBe("error");
+    expect(result.error?.error_class).toBe("invalid_request");
+    expect(d.execute).not.toHaveBeenCalled();
   });
 
   it("an alias-mapped lane is bounded by a POLICY cap — no cap bypass (review P1)", async () => {

@@ -235,7 +235,13 @@
       </div>
       <div>
         <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Allowed lanes')}</dt>
-        <dd class="mt-0.5 text-ink-body">{key.allowed_lanes?.join(', ') || $t('No cap')}</dd>
+        <dd class="mt-0.5 text-ink-body">
+          {key.allowed_lanes === null
+            ? $t('No cap')
+            : key.allowed_lanes.length === 0
+              ? $t('None')
+              : key.allowed_lanes.join(', ')}
+        </dd>
       </div>
       <div>
         <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Custom model')}</dt>

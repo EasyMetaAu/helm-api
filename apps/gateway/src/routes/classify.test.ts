@@ -56,6 +56,61 @@ function makeEvalProvider(
 }
 
 describe("classify adapter — admin classifier hot-apply", () => {
+  it("skips Layer 1 immediately when rules.enabled is turned off", async () => {
+    const cfg = baseClassifier();
+    cfg.rules.enabled = false;
+    cfg.eval.enabled = true;
+    const { provider, calls } = makeEvalProvider(() => ({
+      complexity: "complex",
+      task_type: "coding",
+      confidence: 0.9,
+    }));
+    const classify = buildClassifyAdapter({
+      getClassifierConfig: () => cfg,
+      lanes: LANES,
+      provider,
+      now: () => Date.now(),
+      log: () => {},
+    });
+
+    const result = await classify(req("hello"));
+    expect(calls.n).toBe(1);
+    expect(result.decided_by).toBe("eval");
+    expect(result.rules_confidence).toBeNull();
+  });
+
+  it("honors eval.cache.enabled changes without rebuilding the adapter", async () => {
+    let cfg = baseClassifier();
+    cfg.rules.enabled = false;
+    cfg.eval.enabled = true;
+    cfg.eval.cache.enabled = false;
+    const { provider, calls } = makeEvalProvider(() => ({
+      complexity: "standard",
+      task_type: "chat",
+      confidence: 0.9,
+    }));
+    const classify = buildClassifyAdapter({
+      getClassifierConfig: () => cfg,
+      lanes: LANES,
+      provider,
+      now: () => Date.now(),
+      log: () => {},
+    });
+    const prompt = req("same prompt");
+
+    expect((await classify(prompt)).eval_cache_hit).toBe(false);
+    expect((await classify(prompt)).eval_cache_hit).toBe(false);
+    expect(calls.n).toBe(2);
+
+    cfg = ClassifierConfigSchema.parse({
+      ...cfg,
+      eval: { ...cfg.eval, cache: { ...cfg.eval.cache, enabled: true } },
+    });
+    expect((await classify(prompt)).eval_cache_hit).toBe(false);
+    expect((await classify(prompt)).eval_cache_hit).toBe(true);
+    expect(calls.n).toBe(3);
+  });
+
   it("reads the CURRENT classifier config per request (eval toggled on without rebuild)", async () => {
     let cfg = baseClassifier();
     cfg.eval.enabled = false; // eval OFF initially

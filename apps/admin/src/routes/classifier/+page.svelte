@@ -64,10 +64,16 @@
     <p class="section-desc">
       {$t('The classifier decides which lane each request is routed to.')}
     </p>
-    <p class="section-desc">
-      {$t(
-        'Layer-1 rules are always on (deterministic, zero-cost). Toggle the optional Layer-2 eval and tune the confidence threshold below it.',
-      )}
+    <p class="section-desc" data-testid="rules-runtime-status">
+      {#if cfg.rules.enabled}
+        {$t(
+          'Layer-1 rules are enabled (deterministic, zero-cost). You can tune the confidence threshold below.',
+        )}
+      {:else}
+        {$t(
+          'Layer-1 rules are disabled; requests go directly to Layer-2 eval when it is enabled, otherwise they use the terminal fallback lane.',
+        )}
+      {/if}
     </p>
   </header>
 
@@ -93,8 +99,15 @@
     </label>
     <p class="field-help">
       {$t(
-        'Layer-2 runs a small model to classify requests that Layer-1 rules cannot decide confidently. Off by default. Results are cached, and if it fails the request falls back to the balanced lane.',
+        'Layer-2 runs a small model when Layer-1 is uncertain or disabled. It is off by default; failures use the terminal fallback lane.',
       )}
+    </p>
+    <p class="field-help" data-testid="eval-cache-runtime-status">
+      {#if cfg.eval.cache.enabled}
+        {$t('The eval cache is enabled; matching decisions may be reused.')}
+      {:else}
+        {$t('The eval cache is disabled; every Layer-2 decision runs fresh.')}
+      {/if}
     </p>
 
     <label class="flex flex-col gap-1">

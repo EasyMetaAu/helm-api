@@ -126,7 +126,7 @@ export function evaluatePolicies(ctx: PolicyContext, cfg: PoliciesConfig): Polic
 
     // ACCUMULATE caps from this match (regardless of whether it was the pin).
     if (policy.allowed_lanes != null) {
-      allowedLanes = intersectAllowed(allowedLanes, policy.allowed_lanes);
+      allowedLanes = intersectAllowedLanes(allowedLanes, policy.allowed_lanes);
     }
   }
 
@@ -142,8 +142,12 @@ export function evaluatePolicies(ctx: PolicyContext, cfg: PoliciesConfig): Polic
 
 // Intersect two allowed_lanes whitelists, preserving the incumbent's order. The
 // intersection is the strictest constraint (only lanes BOTH policies permit).
-function intersectAllowed(current: string[] | null, next: string[]): string[] {
-  if (current === null) return [...next];
+export function intersectAllowedLanes(
+  current: readonly string[] | null | undefined,
+  next: readonly string[] | null | undefined,
+): string[] | null {
+  if (current == null) return next == null ? null : [...next];
+  if (next == null) return [...current];
   const allow = new Set(next);
   return current.filter((lane) => allow.has(lane));
 }
@@ -168,11 +172,12 @@ function lowestRankedLane(lanes: string[]): string {
 // `coding`/`json`, or a vendor-family lane like `claude-opus`) has no cost rank, so
 // it is clamped as if it asked for the DEFAULT tier (`balanced`) — degrading toward
 // balanced, never escalating to the most expensive allowed lane (e.g. `premium`).
-export function applyCaps(lane: string, outcome: PolicyOutcome): string {
+export function applyCaps(lane: string, outcome: PolicyOutcome): string | null {
   let result = lane;
 
-  if (outcome.allowed_lanes != null && outcome.allowed_lanes.length > 0) {
+  if (outcome.allowed_lanes != null) {
     const allowed = outcome.allowed_lanes;
+    if (allowed.length === 0) return null;
     if (!allowed.includes(result)) {
       // Unrankable (task / vendor-family) candidate => treat as the `balanced`
       // tier so the clamp degrades toward balanced, not the strongest allowed.

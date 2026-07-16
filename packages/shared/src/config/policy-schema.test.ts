@@ -73,6 +73,10 @@ describe("policy-schema", () => {
     expect(cfg.policies[0]?.allowed_lanes).toEqual(["economy", "balanced"]);
   });
 
+  it("fail-closed: a written allowed_lanes whitelist cannot be empty", () => {
+    expect(() => parsePoliciesConfig({ policies: [{ match: {}, allowed_lanes: [] }] })).toThrow();
+  });
+
   it("fail-closed: the retired policy max_lane cap is rejected (.strict)", () => {
     // max_lane was removed — lanes are parallel, not a strict hierarchy; use
     // allowed_lanes (whitelist) instead. A leftover max_lane fails closed at boot.

@@ -165,7 +165,7 @@ describe('DecisionChain', () => {
     expect(esc).toHaveTextContent(/uncertain/i);
   });
 
-  it('legacy eval-decided record (no rules_confidence) still gets the qualitative escalation line', () => {
+  it('eval-decided record with no rules confidence does not pretend Layer 1 was uncertain', () => {
     render(DecisionChain, {
       detail: detail({
         classifier_output: {
@@ -180,11 +180,12 @@ describe('DecisionChain', () => {
       }),
     });
     const esc = screen.getByTestId('rules-escalation');
-    expect(esc).toHaveTextContent(/uncertain/i);
+    expect(esc).toHaveTextContent(/did not report confidence/i);
+    expect(esc).toHaveTextContent(/disabled or legacy/i);
     expect(esc).not.toHaveTextContent(/\d\.\d\d/); // no fabricated number
   });
 
-  it('explains the eval_disabled fallback in the eval section (uncertain + eval off -> balanced)', () => {
+  it('explains the eval_disabled fallback without assuming the terminal lane is balanced', () => {
     render(DecisionChain, {
       detail: detail({
         classifier_output: {
@@ -205,10 +206,47 @@ describe('DecisionChain', () => {
     });
     const evalSec = screen.getByTestId('chain-eval');
     expect(within(evalSec).getByText(/not triggered/i)).toBeInTheDocument();
-    expect(within(evalSec).getByTestId('eval-disabled-note')).toHaveTextContent(/disabled/i);
+    const note = within(evalSec).getByTestId('eval-disabled-note');
+    expect(note).toHaveTextContent(/disabled/i);
+    expect(note).toHaveTextContent(/terminal fallback lane/i);
+    expect(note).not.toHaveTextContent(/balanced/i);
   });
 
-  it('explains an eval that ran then failed open (reason + balanced fallback)', () => {
+  it('explains rules_and_eval_disabled without pretending rules were uncertain', () => {
+    render(DecisionChain, {
+      detail: detail({
+        classifier_output: {
+          task_type: 'chat',
+          complexity: 'standard',
+          confidence: 0,
+          decided_by: 'fallback',
+          rules_confidence: null,
+          matched_dimensions: [],
+          constraints: {},
+        },
+        eval_triggered: false,
+        eval_cache_hit: null,
+        eval_model: null,
+        eval_latency_ms: null,
+        eval_fallback_reason: 'rules_and_eval_disabled',
+      }),
+    });
+
+    const classifier = screen.getByTestId('chain-classifier');
+    expect(within(classifier).getByTestId('chain-decided-by')).toHaveTextContent(
+      /terminal fallback lane/i,
+    );
+    expect(within(classifier).getByTestId('chain-decided-by')).not.toHaveTextContent(/uncertain/i);
+    expect(within(classifier).getByTestId('chain-decided-by')).not.toHaveTextContent(/balanced/i);
+
+    const evalSec = screen.getByTestId('chain-eval');
+    const note = within(evalSec).getByTestId('classification-disabled-note');
+    expect(note).toHaveTextContent(/both Layer-1 rules and Layer-2 eval are disabled/i);
+    expect(note).toHaveTextContent(/terminal fallback lane/i);
+    expect(note).not.toHaveTextContent(/balanced/i);
+  });
+
+  it('explains an eval that ran then failed open without assuming a balanced fallback', () => {
     render(DecisionChain, {
       detail: detail({
         classifier_output: {
@@ -230,7 +268,8 @@ describe('DecisionChain', () => {
     const evalSec = screen.getByTestId('chain-eval');
     const failed = within(evalSec).getByTestId('eval-failed');
     expect(failed).toHaveTextContent(/timed out/i);
-    expect(failed).toHaveTextContent(/balanced/i);
+    expect(failed).toHaveTextContent(/terminal fallback lane/i);
+    expect(failed).not.toHaveTextContent(/balanced/i);
     // No verdict line on the failed-open path (eval produced no verdict).
     expect(within(evalSec).queryByTestId('eval-verdict')).toBeNull();
   });

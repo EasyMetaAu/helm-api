@@ -25,11 +25,18 @@ const INPUT: ClassifierInput = {
 
 const THRESHOLD = 0.45;
 
-function makeConfig(opts: { evalEnabled: boolean; threshold?: number }): ClassifierConfig {
+function makeConfig(opts: {
+  evalEnabled: boolean;
+  rulesEnabled?: boolean;
+  threshold?: number;
+}): ClassifierConfig {
   return {
-    rules: { confidence_threshold: opts.threshold ?? THRESHOLD },
+    rules: {
+      enabled: opts.rulesEnabled ?? true,
+      confidence_threshold: opts.threshold ?? THRESHOLD,
+    },
     eval: { enabled: opts.evalEnabled },
-    // The cascade only reads rules.confidence_threshold + eval.enabled; the rest
+    // The cascade only reads rules.enabled/confidence_threshold + eval.enabled; the rest
     // of the (large) ClassifierConfig is irrelevant here.
   } as unknown as ClassifierConfig;
 }
@@ -50,7 +57,11 @@ function makeDeps(over: {
   config: ClassifierConfig;
   runEvalCached?: CascadeDeps["runEvalCached"];
   resolveLane?: CascadeDeps["resolveLane"];
-}): { deps: CascadeDeps; runEvalCached: ReturnType<typeof vi.fn> } {
+}): {
+  deps: CascadeDeps;
+  runEvalCached: ReturnType<typeof vi.fn>;
+  runRules: ReturnType<typeof vi.fn>;
+} {
   const runEvalCached =
     (over.runEvalCached as ReturnType<typeof vi.fn>) ??
     vi.fn(
@@ -64,14 +75,16 @@ function makeDeps(over: {
     );
   const resolveLane =
     over.resolveLane ?? ((complexity, taskType) => `lane:${complexity}:${taskType}`);
+  const runRules = vi.fn(() => over.rules ?? rules());
   return {
     deps: {
-      runRules: () => over.rules ?? rules(),
+      runRules,
       runEvalCached,
       resolveLane,
       config: over.config,
     },
     runEvalCached,
+    runRules,
   };
 }
 
@@ -108,6 +121,32 @@ describe("classify — cascade control flow", () => {
     expect(res.eval_used).toBe(false);
     expect(res.eval_cache_hit).toBe(false);
     expect(runEvalCached).not.toHaveBeenCalled();
+  });
+
+  it("2b. rules disabled + eval enabled skips Layer 1 and runs eval directly", async () => {
+    const { deps, runRules, runEvalCached } = makeDeps({
+      config: makeConfig({ rulesEnabled: false, evalEnabled: true }),
+    });
+    const res = await classify(INPUT, deps);
+
+    expect(runRules).not.toHaveBeenCalled();
+    expect(runEvalCached).toHaveBeenCalledOnce();
+    expect(res.decided_by).toBe("eval");
+    expect(res.rules_confidence).toBeNull();
+  });
+
+  it("2c. rules and eval disabled skip both layers and use the balanced fallback", async () => {
+    const { deps, runRules, runEvalCached } = makeDeps({
+      config: makeConfig({ rulesEnabled: false, evalEnabled: false }),
+    });
+    const res = await classify(INPUT, deps);
+
+    expect(runRules).not.toHaveBeenCalled();
+    expect(runEvalCached).not.toHaveBeenCalled();
+    expect(res.lane).toBe("balanced");
+    expect(res.decided_by).toBe("fallback");
+    expect(res.fallback_reason).toBe("rules_and_eval_disabled");
+    expect(res.rules_confidence).toBeNull();
   });
 
   it("3. low confidence triggers eval -> eval decides the lane", async () => {

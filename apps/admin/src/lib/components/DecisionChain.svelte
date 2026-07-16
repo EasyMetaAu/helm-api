@@ -25,7 +25,7 @@
       case 'eval':
         return { badge: 'badge-eval', key: 'Decided by the Layer-2 eval model' };
       case 'fallback':
-        return { badge: 'badge-fallback', key: 'Rules uncertain — fell back to the balanced lane' };
+        return { badge: 'badge-fallback', key: 'Classification used the terminal fallback lane' };
       case 'default':
         return { badge: 'badge-neutral', key: 'Default (explicit passthrough or fail-open)' };
       default:
@@ -118,7 +118,7 @@
           )}
         {:else}
           {$t(
-            'Layer-1 rules were uncertain — escalated to the eval model; the verdict and confidence above are the eval model’s.',
+            'Layer-1 rules did not report confidence (disabled or legacy record); the verdict and confidence above are the eval model’s.',
           )}
         {/if}
       </p>
@@ -145,7 +145,7 @@
     <h3 class="text-sm font-semibold text-ink-strong">{$t('Eval')}</h3>
     <p class="field-help mb-2">
       {$t(
-        'Optional Layer-2 step: a small model double-checks the lane. Off by default; results are cached.',
+        'Optional Layer-2 step: a small model double-checks the lane. Off by default; caching follows runtime configuration.',
       )}
     </p>
     {#if detail.eval_triggered}
@@ -181,21 +181,27 @@
           <span class="text-ink-muted">{$t('confidence')} {cls.confidence.toFixed(2)}</span>
         </p>
       {:else if detail.eval_fallback_reason}
-        <!-- Eval ran but failed open → routing fell back to balanced; say why. -->
+        <!-- Eval ran but failed open → routing used the configured terminal; say why. -->
         <p data-testid="eval-failed" class="mt-2 text-amber-800">
-          {$t('Eval failed open ({reason}) — routing fell back to the balanced lane.', {
+          {$t('Eval failed open ({reason}) — routing used the terminal fallback lane.', {
             reason: $t(evalReasonKey(detail.eval_fallback_reason)),
           })}
         </p>
       {/if}
     {:else}
       <span class="text-ink-muted">{$t('not triggered')}</span>
-      {#if detail.eval_fallback_reason === 'eval_disabled'}
+      {#if detail.eval_fallback_reason === 'rules_and_eval_disabled'}
+        <span data-testid="classification-disabled-note" class="ml-2 text-ink-muted">
+          {$t(
+            '— both Layer-1 rules and Layer-2 eval are disabled, so routing used the terminal fallback lane.',
+          )}
+        </span>
+      {:else if detail.eval_fallback_reason === 'eval_disabled'}
         <!-- Rules were uncertain but Layer 2 is off — complete the causal chain
-             so the balanced fallback isn't mistaken for a confident decision. -->
+             so the terminal fallback isn't mistaken for a confident decision. -->
         <span data-testid="eval-disabled-note" class="ml-2 text-ink-muted">
           {$t(
-            '— eval is disabled; rules were uncertain, so routing fell back to the balanced lane.',
+            '— eval is disabled; rules were uncertain, so routing used the terminal fallback lane.',
           )}
         </span>
       {/if}

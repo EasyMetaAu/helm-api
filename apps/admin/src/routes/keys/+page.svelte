@@ -337,7 +337,14 @@
                 {/if}
               </td>
               <td data-label={$t('Caps')} class="px-3 py-2 text-ink-muted">
-                <div>{$t('Allowed lanes')}: {key.allowed_lanes?.join(', ') || $t('No cap')}</div>
+                <div>
+                  {$t('Allowed lanes')}:
+                  {key.allowed_lanes === null
+                    ? $t('No cap')
+                    : key.allowed_lanes.length === 0
+                      ? $t('None')
+                      : key.allowed_lanes.join(', ')}
+                </div>
                 <div>{$t('Custom model')}: {key.allow_custom_model ? $t('yes') : $t('no')}</div>
                 <div>{$t('Fast mode')}: {key.allow_fast_mode ? $t('yes') : $t('no')}</div>
               </td>
@@ -465,10 +472,8 @@
         )}
       </p>
       <div class="mt-4 flex justify-end gap-2">
-        <button
-          type="button"
-          class="btn-secondary"
-          onclick={() => (unavailableRevealKey = null)}>{$t('Cancel')}</button
+        <button type="button" class="btn-secondary" onclick={() => (unavailableRevealKey = null)}
+          >{$t('Cancel')}</button
         >
         <button type="button" class="btn-danger" onclick={rotateUnavailableKey}
           >{$t('Rotate this key')}</button
