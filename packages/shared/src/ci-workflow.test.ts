@@ -49,10 +49,7 @@ describe("CI workflow", () => {
   it("keeps the docker job independent so the unit gates run on their own", () => {
     // The docker job must NOT block the four quality gates: no `needs: verify`
     // (or any needs) chaining it onto the unit-gate job.
-    const dockerJob = raw.slice(
-      raw.indexOf("\n  docker:"),
-      raw.indexOf("\n  report_pr_checks:"),
-    );
+    const dockerJob = raw.slice(raw.indexOf("\n  docker:"), raw.indexOf("\n  report_pr_checks:"));
     expect(dockerJob).not.toMatch(/needs:/);
   });
 });
