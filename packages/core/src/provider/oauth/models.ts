@@ -12,7 +12,7 @@ import { arch, platform, release } from "node:os";
 import { type CodexModelInfo, CodexModelsResponseSchema } from "./codex-model-info.js";
 import { listGitHubCopilotModels } from "./github-copilot.js";
 import { parseOpenAICodexIdentity } from "./openai-codex.js";
-import { XAI_GROK_OAUTH_BASE_URL, xaiGrokProtocolHeaders } from "./xai.js";
+import { XAI_GROK_OAUTH_BASE_URL, xaiGrokCatalogHeaders } from "./xai.js";
 
 // Curated FALLBACK model ids — used when live discovery is unavailable or fails.
 // Anthropic and Codex are normally live; these are only their safety net.
@@ -255,10 +255,47 @@ export async function listAnthropicModels(
 // public-API fallback: a failed subscription discovery exposes no guessed models.
 const XAI_MODELS_TIMEOUT_MS = 30_000;
 const XAI_MODELS_MAX_RESPONSE_BYTES = 1024 * 1024;
+const XAI_DEFAULT_CONTEXT_WINDOW = 256_000;
+const XAI_U32_MAX = 4_294_967_295;
 
 export interface XaiOAuthModelsOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Persisted session identity wins; JWT claims are only a fallback for old rows. */
+  identity?: { userId?: string; email?: string };
+}
+
+// First-party grok-build model metadata. Keep the catalog key (`id`) separate
+// from the model slug sent on the inference wire (`model`): the upstream parser
+// deliberately gives `model` precedence and has a regression test for id != model.
+export type XaiApiBackend = "responses" | "chat_completions" | "messages";
+export type XaiReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
+export interface XaiReasoningEffortOption {
+  id: string;
+  value: XaiReasoningEffort;
+  label: string;
+  description?: string;
+  default?: boolean;
+}
+
+export interface XaiOAuthModel {
+  /** Account-catalog key exposed as Helm's model alias suffix. */
+  id: string;
+  /** Actual model slug sent in the Responses request and model-override header. */
+  model: string;
+  apiBackend: XaiApiBackend;
+  name?: string;
+  description?: string;
+  contextWindow: number;
+  maxCompletionTokens?: number;
+  maxRetries?: number;
+  hidden: boolean;
+  supportedInApi: boolean;
+  supportsReasoningEffort: boolean;
+  reasoningEffort?: XaiReasoningEffort;
+  reasoningEfforts: XaiReasoningEffortOption[];
+  streamToolCalls?: boolean;
 }
 
 type XaiModelsStreamReadResult =
@@ -329,11 +366,198 @@ async function readXaiModelsJson(response: Response, signal: AbortSignal): Promi
   }
 }
 
+const XAI_MODEL_TOKEN_RE = /^[A-Za-z0-9._:-]+$/;
+const XAI_REASONING_EFFORTS = new Set<XaiReasoningEffort>([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+]);
+
+function xaiString(record: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  }
+  return undefined;
+}
+
+function xaiBoolean(record: Record<string, unknown>, ...keys: string[]): boolean | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "boolean") return value;
+  }
+  return undefined;
+}
+
+function xaiArray(record: Record<string, unknown>, ...keys: string[]): unknown[] | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (Array.isArray(value)) return value;
+  }
+  return undefined;
+}
+
+function xaiNonNegativeInteger(
+  record: Record<string, unknown>,
+  ...keys: string[]
+): number | undefined {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return value;
+  }
+  return undefined;
+}
+
+function xaiU32(record: Record<string, unknown>, ...keys: string[]): number | undefined {
+  const value = xaiNonNegativeInteger(record, ...keys);
+  return value !== undefined && value <= XAI_U32_MAX ? value : undefined;
+}
+
+function xaiModelToken(value: string | undefined): string | undefined {
+  if (!value || value.length > 200 || !XAI_MODEL_TOKEN_RE.test(value)) return undefined;
+  return value;
+}
+
+function parseXaiReasoningEffort(value: unknown): XaiReasoningEffort | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "max") return "xhigh";
+  return XAI_REASONING_EFFORTS.has(normalized as XaiReasoningEffort)
+    ? (normalized as XaiReasoningEffort)
+    : undefined;
+}
+
+function humanizeXaiEffort(id: string): string {
+  return id.length > 0 ? `${id[0]?.toUpperCase()}${id.slice(1)}` : id;
+}
+
+function parseXaiReasoningEfforts(value: unknown): XaiReasoningEffortOption[] {
+  if (!Array.isArray(value)) return [];
+  const options: XaiReasoningEffortOption[] = [];
+  for (const raw of value) {
+    if (typeof raw === "string") {
+      const effort = parseXaiReasoningEffort(raw);
+      if (!effort) continue;
+      options.push({ id: effort, value: effort, label: humanizeXaiEffort(effort) });
+      continue;
+    }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const record = raw as Record<string, unknown>;
+    const effort = parseXaiReasoningEffort(record.value);
+    if (!effort) continue;
+    const id = xaiString(record, "id") ?? effort;
+    const label = xaiString(record, "label") ?? humanizeXaiEffort(id);
+    const description = xaiString(record, "description");
+    const isDefault = xaiBoolean(record, "default");
+    options.push({
+      id,
+      value: effort,
+      label,
+      ...(description ? { description } : {}),
+      ...(isDefault === true ? { default: true } : {}),
+    });
+  }
+  return options;
+}
+
+function parseXaiOAuthModel(row: unknown): XaiOAuthModel | null {
+  if (!row || typeof row !== "object" || Array.isArray(row)) return null;
+  const record = row as Record<string, unknown>;
+  const meta =
+    record._meta && typeof record._meta === "object" && !Array.isArray(record._meta)
+      ? (record._meta as Record<string, unknown>)
+      : {};
+  const declaredBackend = xaiString(record, "apiBackend", "api_backend");
+  const rawBackend = declaredBackend ?? "chat_completions";
+  if (
+    rawBackend !== "responses" &&
+    rawBackend !== "chat_completions" &&
+    rawBackend !== "messages"
+  ) {
+    return null;
+  }
+  const model = xaiModelToken(
+    xaiString(record, "model", "modelId") ??
+      xaiString(record, "id") ??
+      xaiString(meta, "model", "modelId"),
+  );
+  if (!model) return null;
+  const id = xaiModelToken(xaiString(record, "id") ?? model);
+  if (!id) return null;
+  const declaredContextWindow =
+    xaiNonNegativeInteger(record, "contextWindow", "context_window") ??
+    xaiNonNegativeInteger(meta, "contextWindow", "totalContextTokens");
+  if (declaredContextWindow === 0) return null;
+  const contextWindow = declaredContextWindow ?? XAI_DEFAULT_CONTEXT_WINDOW;
+  const reasoningEffort = parseXaiReasoningEffort(
+    xaiString(record, "reasoningEffort", "reasoning_effort") ?? xaiString(meta, "reasoningEffort"),
+  );
+  const reasoningEfforts = parseXaiReasoningEfforts(
+    xaiArray(record, "reasoningEfforts", "reasoning_efforts") ?? xaiArray(meta, "reasoningEfforts"),
+  );
+  const name = xaiString(record, "name");
+  const description = xaiString(record, "description");
+  const maxCompletionTokens = xaiU32(record, "maxCompletionTokens", "max_completion_tokens");
+  const maxRetries = xaiU32(record, "maxRetries", "max_retries");
+  const streamToolCalls = xaiBoolean(record, "streamToolCalls", "stream_tool_calls");
+  return {
+    id,
+    model,
+    apiBackend: rawBackend,
+    ...(name ? { name } : {}),
+    ...(description ? { description } : {}),
+    contextWindow,
+    ...(maxCompletionTokens !== undefined ? { maxCompletionTokens } : {}),
+    ...(maxRetries !== undefined ? { maxRetries } : {}),
+    hidden: xaiBoolean(record, "hidden") ?? xaiBoolean(meta, "hidden") ?? false,
+    supportedInApi:
+      xaiBoolean(record, "supportedInApi", "supported_in_api") ??
+      xaiBoolean(meta, "supportedInApi") ??
+      true,
+    supportsReasoningEffort:
+      xaiBoolean(record, "supportsReasoningEffort", "supports_reasoning_effort") ??
+      xaiBoolean(meta, "supportsReasoningEffort") ??
+      false,
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    reasoningEfforts,
+    ...(streamToolCalls !== undefined ? { streamToolCalls } : {}),
+  };
+}
+
+/**
+ * Revalidate a persisted first-party xAI catalog with the same parser used for
+ * live `/models` responses. `null` means the snapshot itself is malformed;
+ * a valid array may intentionally normalize to `[]` after invalid rows are
+ * discarded.
+ */
+export function parseXaiOAuthModels(value: unknown): XaiOAuthModel[] | null {
+  if (!Array.isArray(value)) return null;
+  const models = new Map<string, XaiOAuthModel>();
+  for (const row of value) {
+    const model = parseXaiOAuthModel(row);
+    if (!model) continue;
+    // Match grok-build's IndexMap::insert semantics: a duplicate id replaces the
+    // value without moving the key from its first insertion position.
+    models.set(model.id, model);
+  }
+  return [...models.values()];
+}
+
+/** Helm currently implements only the xAI Responses transport. */
+export function isRoutableXaiOAuthModel(model: XaiOAuthModel): boolean {
+  // `supportedInApi` limits API-key discovery only. grok-build's session-auth
+  // visibility rule is `!hidden`, so an OAuth subscription may route it.
+  return model.apiBackend === "responses" && !model.hidden;
+}
+
 export async function listXaiOAuthModels(
   accessToken: string,
   fetchImpl: typeof globalThis.fetch = fetch,
   options: XaiOAuthModelsOptions = {},
-): Promise<string[]> {
+): Promise<XaiOAuthModel[]> {
   const timeoutMs =
     typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs)
       ? Math.max(1, Math.floor(options.timeoutMs))
@@ -345,7 +569,7 @@ export async function listXaiOAuthModels(
       Accept: "application/json",
       Authorization: `Bearer ${accessToken}`,
       "User-Agent": "helm-api/xai-oauth",
-      ...xaiGrokProtocolHeaders(),
+      ...xaiGrokCatalogHeaders(accessToken, options.identity),
     },
     redirect: "error",
     signal,
@@ -356,26 +580,7 @@ export async function listXaiOAuthModels(
   }
   const body = (await readXaiModelsJson(res, signal)) as { data?: unknown; models?: unknown };
   const rows = Array.isArray(body.data) ? body.data : Array.isArray(body.models) ? body.models : [];
-  const textBackends = new Set(["responses", "chat", "language"]);
-  const knownTextModels = new Set(["grok-4.5", "grok-composer-2.5-fast"]);
-  const ids = rows
-    .map((row) => {
-      if (typeof row === "string") return row.trim();
-      if (!row || typeof row !== "object" || Array.isArray(row)) return "";
-      const record = row as Record<string, unknown>;
-      const backend = record.api_backend ?? record.apiBackend ?? record.backend;
-      // String rows are the explicit legacy shape and remain accepted. Structured
-      // rows without a backend are accepted only for models whose text transport
-      // Helm has verified; otherwise an omitted type must not bypass fail-closed
-      // filtering. An explicit non-language backend is always incompatible.
-      if (typeof backend === "string" && !textBackends.has(backend.trim().toLowerCase())) return "";
-      const value = record.id ?? record.model;
-      const id = typeof value === "string" ? value.trim() : "";
-      if (backend === undefined && !knownTextModels.has(id)) return "";
-      return id;
-    })
-    .filter((id) => id.length > 0 && id.length <= 200 && /^[A-Za-z0-9._:-]+$/.test(id));
-  return [...new Set(ids)].sort();
+  return parseXaiOAuthModels(rows) ?? [];
 }
 
 // Whether this provider has a LIVE list-models API that `discoverOAuthModels`
@@ -445,7 +650,10 @@ export async function discoverOAuthModels(
   if (providerId === "xai") {
     if (!accessToken) return [];
     try {
-      return await listXaiOAuthModels(accessToken, fetchImpl);
+      return (await listXaiOAuthModels(accessToken, fetchImpl))
+        .filter(isRoutableXaiOAuthModel)
+        .map((model) => model.id)
+        .sort();
     } catch {
       return [];
     }

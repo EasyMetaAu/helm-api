@@ -1633,6 +1633,23 @@ describe("admin OAuth routes — connect flows", () => {
     expect(onOAuthMutation).toHaveBeenCalledOnce();
   });
 
+  it("POST device/poll returns 503 not_applied when the completed login cannot rebuild", async () => {
+    const onOAuthMutation = vi.fn(async () => ({ applied: false }));
+    const seam = fullSeam({ pollDeviceCode: vi.fn(async () => ({ status: "done" as const })) });
+    const res = await app({ oauth: seam, onOAuthMutation }).request(
+      "/admin/api/oauth/xai/device/poll",
+      {
+        method: "POST",
+        headers: JSONH,
+        body: JSON.stringify({ sessionId: "s2" }),
+      },
+    );
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ code: "not_applied" });
+    expect(onOAuthMutation).toHaveBeenCalledOnce();
+  });
+
   it("POST device/poll done deletes the old durable quota before rebuilding", async () => {
     const events: string[] = [];
     const seam = fullSeam({

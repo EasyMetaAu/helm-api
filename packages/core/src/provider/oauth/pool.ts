@@ -43,8 +43,10 @@ import { DEFAULT_429_COOLDOWN_MS } from "./usage-limit.js";
 // timeout on one account says nothing about its siblings) and DELIBERATELY exclude
 // deterministic request-shape 4xx (400/413/422) — a sibling would hit those
 // identically, so surface them immediately for executor classification. Account-local
-// OAuth 401/403/429 is handled by the dedicated helpers below, because those statuses
-// say something about the selected subscription account, not about the model alias.
+// OAuth credential/rate-limit statuses are handled by the dedicated helpers below,
+// because those statuses can say something about the selected subscription account,
+// not about the model alias. The credential statuses are provider-configurable: for
+// example, xAI defines inference 403 as an authenticated policy/content denial.
 // Non-UpstreamError (client abort, programmer error) is never retried.
 function isRetryableTransientError(err: unknown): boolean {
   if (!(err instanceof UpstreamError)) return false;
@@ -57,14 +59,17 @@ function isRetryableTransientError(err: unknown): boolean {
 // Token refresh/auth failures are scoped to the selected subscription account.
 // If one account's stored refresh token is rejected, a healthy sibling should rescue
 // the request instead of letting the executor trip the alias-wide circuit breaker.
-function isCredentialAccountFailure(err: unknown): boolean {
+function isCredentialAccountFailure(
+  err: unknown,
+  upstreamCredentialFailureStatuses: ReadonlySet<number>,
+): boolean {
   if (err instanceof TokenRefreshError) {
     if (err.permanentCredentialFailure) return true;
     const status = err.httpStatus;
     return status === 400 || status === 401 || status === 403;
   }
   if (err instanceof UpstreamError) {
-    return err.upstreamStatus === 401 || err.upstreamStatus === 403;
+    return err.upstreamStatus !== null && upstreamCredentialFailureStatuses.has(err.upstreamStatus);
   }
   return false;
 }
@@ -165,6 +170,10 @@ export interface OAuthPoolDeps {
   accountRateLimitCooldownMs?: number;
   selectionStrategy?: OAuthSelectionStrategy;
   quotaFreshMs?: number;
+  // Provider-specific inference statuses that prove the stored credential is unusable.
+  // Defaults to the legacy 401/403 contract. This does not affect token-refresh errors,
+  // whose permanent-failure semantics are owned by TokenRefreshError above.
+  upstreamCredentialFailureStatuses?: readonly number[];
   // Optional model-aware guard for provider-specific scoped caps. Returning false
   // means "retry a sibling for this request, but do not globally park the account".
   shouldParkRateLimit?: (ctx: OAuthRateLimitParkContext) => boolean;
@@ -172,10 +181,10 @@ export interface OAuthPoolDeps {
   // pair, while account-scoped limits use the durable global account park above.
   // `shouldParkRateLimit` remains as a compatibility fallback for existing callers.
   resolveRateLimitScope?: (ctx: OAuthRateLimitParkContext) => OAuthRateLimitScope;
-  // Fires when a selected account's durable credential is rejected (refresh 400/401/403
-  // or persistent upstream 401/403). The pool already removes that account from this
-  // process; the hook lets the gateway persist the disabled state for admin status,
-  // rebuilds, and restarts.
+  // Fires when a selected account's durable credential is rejected (a permanent token
+  // refresh failure or an inference status selected by the provider-specific policy).
+  // The pool already removes that account from this process; the hook lets the gateway
+  // persist the disabled state for admin status, rebuilds, and restarts.
   onAccountCredentialFailure?: (account: string, error: unknown) => void;
   // Pre-output failover classifiers for the in-pool retry (issue: a native byte-relay
   // that 200s then fails IN-BAND after only a content-free preamble — e.g. a Responses
@@ -213,6 +222,9 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   const accountRateLimitCooldownMs = deps.accountRateLimitCooldownMs ?? DEFAULT_429_COOLDOWN_MS;
   const selectionStrategy = deps.selectionStrategy ?? "balanced";
   const quotaFreshMs = deps.quotaFreshMs ?? 10 * 60 * 1000;
+  const upstreamCredentialFailureStatuses = new Set(
+    deps.upstreamCredentialFailureStatuses ?? [401, 403],
+  );
   const entries: PoolEntry[] = deps.members.map((member) => ({ member, lastUsedAt: 0 }));
   const stickySessions = new Map<string, { account: string; expiresAt: number }>();
   const scopedRateLimits = new Map<
@@ -925,7 +937,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         rememberResponseAffinity(result, entry);
         return result;
       } catch (err) {
-        if (isCredentialAccountFailure(err)) {
+        if (isCredentialAccountFailure(err, upstreamCredentialFailureStatuses)) {
           parkCredentialFailedAccount(entry, err);
           if (statefulContinuation) throw err;
           lastErr = err;
@@ -981,7 +993,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         first = await iterator.next(); // pre-first-(real-)chunk fault surfaces HERE
       } catch (err) {
         if (iterator) await iterator.return?.().catch(() => {});
-        if (isCredentialAccountFailure(err)) {
+        if (isCredentialAccountFailure(err, upstreamCredentialFailureStatuses)) {
           parkCredentialFailedAccount(entry, err);
           lastErr = err;
         } else if (isRateLimitAccountFailure(err)) {

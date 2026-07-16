@@ -8,6 +8,7 @@ import type {
   RouteProviderAttempt,
   VisualContextCompressionMutation,
   VisualContextCompressor,
+  XaiOAuthModel,
 } from "@helm/core";
 import {
   anthropicNativeBodyRequiresSystemFold,
@@ -124,6 +125,11 @@ export interface ExecuteAdapterDeps {
    *  effect immediately: a subscription alias NOT in this set fails CLOSED
    *  (provider_unavailable), never routes stale. Rebuilt alongside the pool. */
   oauthAliases?: () => ReadonlySet<string>;
+  /** LIVE subscription alias -> provider wire-model mapping. Most providers use
+   *  the alias suffix verbatim; xAI's first-party catalog may have `id != model`. */
+  oauthWireModels?: () => ReadonlyMap<string, string>;
+  /** Structured first-party xAI catalog retained by OAuth synthesis. */
+  xaiOAuthModels?: () => ReadonlyMap<string, XaiOAuthModel>;
   /** Provider protocol metadata for OAuth subscription prefixes, keyed by provider id
    *  (native protocol passthrough, issue #217). The OAuth pool aliases never reach the
    *  registry, so the executor needs the prefix→protocol map here to know an
@@ -323,6 +329,7 @@ function resolveAttemptTarget(input: {
   registry: ProviderRegistry;
   knownOAuthPrefixes?: ReadonlySet<string>;
   oauthAliases?: () => ReadonlySet<string>;
+  oauthWireModels?: () => ReadonlyMap<string, string>;
   oauthProviderProtocols?: ReadonlyMap<string, ProviderProtocolMetadata>;
 }): ResolvedAttemptTarget {
   const {
@@ -332,6 +339,7 @@ function resolveAttemptTarget(input: {
     registry,
     knownOAuthPrefixes,
     oauthAliases,
+    oauthWireModels,
     oauthProviderProtocols,
   } = input;
   const slash = alias.indexOf("/");
@@ -350,7 +358,7 @@ function resolveAttemptTarget(input: {
     return {
       provider: exposed ? pool : undefined,
       providerName: prefix,
-      providerModel: slash > 0 ? alias.slice(slash + 1) : alias,
+      providerModel: oauthWireModels?.().get(alias) ?? (slash > 0 ? alias.slice(slash + 1) : alias),
       targetProviderProtocol: metadata?.targetProviderProtocol ?? "openai_chat",
       providerRequiresCompatibilityRewrite: metadata?.providerRequiresCompatibilityRewrite ?? false,
     };
@@ -1269,6 +1277,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
   } = deps;
   const knownOAuthPrefixes = deps.knownOAuthPrefixes;
   const oauthAliases = deps.oauthAliases;
+  const oauthWireModels = deps.oauthWireModels;
+  const xaiOAuthModels = deps.xaiOAuthModels;
   const oauthProviderProtocols = deps.oauthProviderProtocols;
   const onOAuthSubscription429 = deps.onOAuthSubscription429;
 
@@ -1278,6 +1288,81 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     const slash = alias.indexOf("/");
     const prefix = slash > 0 ? alias.slice(0, slash) : "";
     return prefix.length > 0 && (knownOAuthPrefixes?.has(prefix) ?? false);
+  };
+
+  const conservativeXaiCatalogEntry = (
+    alias: string,
+    model: XaiOAuthModel | undefined,
+  ): CatalogEntry | undefined => {
+    if (model?.apiBackend !== "responses" || model.hidden) return undefined;
+    const levels = [
+      ...new Set([
+        ...model.reasoningEfforts.map((option) => option.value),
+        ...(model.reasoningEffort ? [model.reasoningEffort] : []),
+      ]),
+    ];
+    return {
+      modelKey: alias,
+      capabilities: {
+        // The remote catalog proves text Responses transport only. Advanced
+        // capabilities stay closed until a live-verified manual override exists.
+        supportsTools: false,
+        jsonOutput: "none",
+        supportsVision: false,
+        supportsStreaming: true,
+        supportsCachedContent: false,
+        modalities: [],
+        reasoningEffort: {
+          openaiReasoning: {
+            supported: model.supportsReasoningEffort,
+            ...(model.supportsReasoningEffort && levels.length > 0 ? { levels } : {}),
+          },
+        },
+        maxContextTokens: model.contextWindow,
+        maxOutputTokens: model.maxCompletionTokens ?? null,
+      },
+      pricing: {
+        inputPerMTokUsd: null,
+        outputPerMTokUsd: null,
+        cacheReadPerMTokUsd: null,
+        cacheWritePerMTokUsd: null,
+      },
+      source: "generated",
+    };
+  };
+
+  const clampXaiCatalogEntry = (
+    entry: CatalogEntry,
+    model: XaiOAuthModel | undefined,
+  ): CatalogEntry => {
+    if (!model) return entry;
+    const maxContextTokens = Math.min(entry.capabilities.maxContextTokens, model.contextWindow);
+    const configuredMaxOutput = entry.capabilities.maxOutputTokens;
+    const maxOutputTokens =
+      model.maxCompletionTokens === undefined
+        ? configuredMaxOutput
+        : configuredMaxOutput === null
+          ? model.maxCompletionTokens
+          : Math.min(configuredMaxOutput, model.maxCompletionTokens);
+    return {
+      ...entry,
+      capabilities: {
+        ...entry.capabilities,
+        maxContextTokens,
+        maxOutputTokens,
+      },
+    };
+  };
+
+  const xaiCatalogEntry = (alias: string, providerModel: string): CatalogEntry | undefined => {
+    const exact = catalog.get(alias);
+    const isXai = isOAuthSubscriptionAlias(alias) && alias.startsWith("xai/");
+    if (!isXai) return exact;
+    const model = xaiOAuthModels?.().get(alias);
+    if (exact) return clampXaiCatalogEntry(exact, model);
+    const wireEntry = catalog.get(`xai/${providerModel}`);
+    if (wireEntry) return clampXaiCatalogEntry(wireEntry, model);
+    return conservativeXaiCatalogEntry(alias, model);
   };
 
   // Cost of one served attempt = provider usage × catalog pricing (docs/07).
@@ -1291,8 +1376,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
   // half-filled pricing row) → null ("not measured", distinct from a measured 0)
   // and a logged miss, NEVER a crash (principle 3). Streaming attempts have no
   // usage at peek time → null here, backfilled by the route from the usage chunk.
-  const costOf = (alias: string, body: unknown): number | null => {
-    const pricing = catalog.get(alias)?.pricing;
+  const costOf = (alias: string, providerModel: string, body: unknown): number | null => {
+    const pricing = xaiCatalogEntry(alias, providerModel)?.pricing;
     const cost = resolveCostUsd(pricing, body);
     if (cost === null) {
       log?.("info", "cost.pricing_missing", { alias });
@@ -1383,6 +1468,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         registry,
         knownOAuthPrefixes,
         oauthAliases,
+        oauthWireModels,
         oauthProviderProtocols,
       });
       const { provider, providerModel } = target;
@@ -1409,7 +1495,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       // 2) Capability filter. Missing catalog data remains fail-open for generic
       // requests, but not for cached_content: that field is a required Gemini/LiteLLM
       // cached context handle, not an optional affinity hint.
-      const catalogEntry = catalog.get(alias);
+      const catalogEntry = xaiCatalogEntry(alias, providerModel);
       const caps = catalogEntry?.capabilities;
       const exactContextLimit = effectiveContextLimit(catalogEntry, providerModel);
       const canUseExactContextPreflight =
@@ -1417,6 +1503,11 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         req.native_request !== undefined &&
         provider.countTokens !== undefined &&
         exactContextLimit !== null;
+      if (!caps && isOAuthSubscriptionAlias(alias) && alias.startsWith("xai/")) {
+        capabilityPruned = true;
+        attempts.push(skipRow(alias, "capability_metadata_missing", elapsed()));
+        continue;
+      }
       if (!caps && needsCachedContent) {
         capabilityPruned = true;
         attempts.push(skipRow(alias, "no_cached_content_support", elapsed()));
@@ -1773,7 +1864,9 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 ? usageFromGeminiResponse(body)
                 : usageFromAnthropicResponse(body);
           const pricedBody = usage ? { ...body, usage } : body;
-          attempts.push(okRow(alias, elapsed(), costOf(alias, pricedBody), attemptTelemetry));
+          attempts.push(
+            okRow(alias, elapsed(), costOf(alias, providerModel, pricedBody), attemptTelemetry),
+          );
           return {
             attempts,
             final: { status: "ok", alias, providerModel },
@@ -1801,7 +1894,9 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           ),
         );
         breaker.recordSuccess(alias);
-        attempts.push(okRow(alias, elapsed(), costOf(alias, body), attemptTelemetry));
+        attempts.push(
+          okRow(alias, elapsed(), costOf(alias, providerModel, body), attemptTelemetry),
+        );
         return {
           attempts,
           final: { status: "ok", alias, providerModel },

@@ -3,6 +3,8 @@ import {
   decryptSecret,
   encryptSecret,
   type OAuthSelectionStrategy,
+  parseXaiOAuthModels,
+  type XaiOAuthModel,
 } from "@helm/core";
 
 // Per-account OAuth subscription SETTINGS (issue #38 follow-up). These are
@@ -47,6 +49,10 @@ export interface AccountSettings {
   // Auto mode uses it after a restart or transient discovery failure; live cache
   // data still wins. Stored inside the existing encrypted settings blob.
   discoveredModels?: string[];
+  // xAI only: first-party structured catalog required to preserve the distinct
+  // catalog id / inference model mapping and per-model request defaults across
+  // transient discovery failures. Revalidated on every read.
+  xaiDiscoveredModels?: XaiOAuthModel[];
   // Lower = preferred; round-robin within an equal priority. Scheduler default 50.
   priority?: number;
   // When false the account is skipped by the scheduler (kept connected, parked).
@@ -118,7 +124,19 @@ function parseAccountSettings(blob: string, encKey: Buffer): AccountSettingsMap 
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("invalid OAuth account settings");
   }
-  return parsed as AccountSettingsMap;
+  const settings = parsed as Record<string, unknown>;
+  const normalized: AccountSettingsMap = {};
+  for (const [key, raw] of Object.entries(settings)) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const account = { ...(raw as AccountSettings) };
+    if ("xaiDiscoveredModels" in account) {
+      const models = parseXaiOAuthModels(account.xaiDiscoveredModels);
+      if (models === null) delete account.xaiDiscoveredModels;
+      else account.xaiDiscoveredModels = models;
+    }
+    normalized[key] = account;
+  }
+  return normalized;
 }
 
 async function loadAccountSettingsForMutation(
@@ -248,6 +266,38 @@ export async function saveAccountDiscoveredModels(
   }
 }
 
+// Persist the authoritative first-party xAI catalog, including a successful
+// empty result. The string ids remain in sync for the existing Manage dialog,
+// while routing consumes only the structured snapshot so id -> wire-model and
+// request-default metadata cannot be guessed after a restart.
+export async function saveAccountXaiDiscoveredModels(
+  config: ConfigStore,
+  encKey: Buffer,
+  account: string,
+  models: readonly XaiOAuthModel[],
+): Promise<boolean> {
+  const normalized = parseXaiOAuthModels(models) ?? [];
+  try {
+    await serializeSettingsMutation(config, async () => {
+      const map = await loadAccountSettingsForMutation(config, encKey);
+      const key = composite("xai", account);
+      const current = map[key] ?? {};
+      const next: AccountSettings = { ...current, xaiDiscoveredModels: normalized };
+      if (normalized.length > 0) {
+        next.discoveredModels = normalized.map((model) => model.id);
+      } else {
+        delete next.discoveredModels;
+      }
+      if (JSON.stringify(current) === JSON.stringify(next)) return;
+      map[key] = next;
+      await saveAccountSettings(config, encKey, map);
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Credential replacement must remove the old identity's durable catalog BEFORE
 // the token row changes. Unlike background snapshot writes, a failed clear is a
 // hard stop for reconnect; callers use the boolean to keep the old credential.
@@ -262,9 +312,15 @@ export async function clearAccountDiscoveredModels(
       const map = await loadAccountSettingsForMutation(config, encKey);
       const key = composite(providerId, account);
       const current = map[key];
-      if (!current || current.discoveredModels === undefined) return;
+      if (
+        !current ||
+        (current.discoveredModels === undefined && current.xaiDiscoveredModels === undefined)
+      ) {
+        return;
+      }
       const next = { ...current };
       delete next.discoveredModels;
+      delete next.xaiDiscoveredModels;
       map[key] = next;
       await saveAccountSettings(config, encKey, map);
     });

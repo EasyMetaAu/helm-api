@@ -253,8 +253,8 @@ export interface OAuthAdminAccess {
     account: string;
     force?: boolean;
   }): Promise<OAuthQuotaWindow[] | null>;
-  // Pull the consumer Grok subscription's weekly usage window from the same
-  // gRPC-Web method used by grok.com. The existing xAI OAuth bearer is sufficient;
+  // Pull the consumer Grok subscription's weekly usage window from Grok Build's
+  // authenticated JSON billing endpoint. The existing xAI OAuth bearer is sufficient;
   // no browser cookie is persisted. Same proxy/refresh/cache/fail-open contract as
   // the other quota PULLs.
   fetchXaiQuota?(input: { account: string; force?: boolean }): Promise<OAuthQuotaWindow[] | null>;

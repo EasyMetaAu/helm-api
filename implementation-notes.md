@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-07-16 · xAI 订阅协议跟随官方 grok-build 并收紧动态目录边界（OAuth subscription / model catalog / Responses / Admin providers，docs/04/05/06/11，原则 2/3/5/6/7/8）
+
+- **官方事实边界**：以 `xai-org/grok-build@c68e39f`、本机 Grok CLI `0.2.101` 和当前账号真实 wire 为准；OAuth issuer/client、Device Code 与 `/v1/responses` 主链保留，scope 补齐官方 personal conversation scopes，推理请求补充 headless/client identifier/user identity 并强制请求 `reasoning.encrypted_content`。当前 entitlement 仍只有 `grok-4.5` 与 `grok-composer-2.5-fast`，两者的真实 `/models` backend 均为 `responses`，目录分别报告 500k 与 200k context；官方静态 fallback 中的 `grok-build` 不是账号授权证据，不能自动加入 Helm。
+- **目录与能力边界**：`/models` 不再压缩成字符串；目录 `id` 与实际 wire `model` 分开保存，并保留官方 backend、context、max output/retry、reasoning、visibility 与 streamed-tool metadata。重复 id 与官方一致采用 last-wins，数值和 reasoning fallback 也按官方边界解析。结构化账号目录加密持久化为 last-known-good：上游失败复用，成功空目录则权威清空；换凭证会先清旧身份目录。Lane picker 只读取当前 synthesized pool 接受的 xAI alias/account，不能把被 metadata/wire conflict 剔除的账号继续显示为可路由。Helm 识别 `responses` / `chat_completions` / `messages`，但只路由当前已实现的 Responses transport；hidden 条目排除，`supportedInApi:false` 仍可用于 session auth。已验证 wire model 复用手工 capability/pricing，并以下游目录报告的 context/output 上限做更小值钳制；目录若将来提供 `maxCompletionTokens` / `streamToolCalls`，请求只在客户端未显式设置时应用。未知 Responses 模型只获得保守的纯文本/streaming 能力，tools/vision/JSON/media/cache 与价格保持关闭或 unknown。多账号同 alias 若目录 metadata 或 wire slug 冲突则拒绝冲突账号，不采用跨账号 last-write-wins。
+- **故障与配额边界**：按照官方明确语义，只有 xAI inference 401 才证明凭证失效；403 作为已认证的 policy/content/ZDR denial 进入正常执行 fallback，不停车、不持久化 credential failure。Device Code 完成后 pool rebuild 未应用必须返回 `503 not_applied`。SuperGrok quota 运行时迁移到官方 `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits`，使用 bearer、账号 identity、client version、headless mode 与同账号 proxy；有界 JSON 只投影当前 weekly period，忽略 prepaid/on-demand/monthly/history。真实响应证明 0% 时 proto3 JSON 会省略 `creditUsagePercent`，因此仅“缺失”解释为 0，显式 null/string 仍拒绝。
+- **延后项**：当前真实目录没有发布 `maxRetries`、`maxCompletionTokens` 或 `streamToolCalls`。后两项已具备未来兼容；`maxRetries` 暂不接入，因为 Helm 的账号 pool 与 lane fallback 已各自拥有重试边界，直接照搬会造成 `lane × account × retries` 放大，必须以后以 pool 为唯一共享预算再实现。通用 grok-build 客户端具备 JSON schema、额外 reasoning/retry、backend search 与其他工具扩展，不等于当前两个 SuperGrok entitlement 已验证这些 API 能力；Composer vision、订阅 JSON、额外媒体和未公开价格继续 fail-closed。后续若要开启，必须先做隔离真实请求与协议 fixture，不能仅凭通用 Rust 类型推断。
+
 ## 2026-07-16 · 文档以当前源码为准完成全量运行时事实校准（docs/01–14 / README / operations，原则 1–8）
 
 - **审计边界**：以当前分支的路由注册、composition root、Zod schema、Store 端口与迁移、默认配置和定向测试为权威，逐章校准 README、`docs/01–14`、协议/Memory 专题、部署说明、Portal、历史复盘与 passthrough 运维文档；本次只修文档与 `.env.example`，不改变任何运行时行为。历史 incident、review、proposal、外部研究和 v0.25.2 Admin 截图保留原始证据，但必须显式标注为历史快照，不能继续充当当前契约。
@@ -65,14 +72,9 @@
 - **渐进回填安全边界**：生产回填不得重新扫描 34GB telemetry 或使用整库备份；dry-run manifest 只生成一次，后续 `--apply-manifest` 默认每次最多执行 1 批、每批 100 行，并在多批模式间隔 5 秒。每批先校验线上 health、WAL 小于 1GiB、可用磁盘至少 10GiB，再校验旧值、创建只含该批 telemetry/OAuth 原行的微型恢复库并执行 `quick_check`；主库只在短 `BEGIN IMMEDIATE` 事务里更新该批 telemetry 与按 pending 行聚合的 OAuth delta，提交后原子推进 checkpoint。事务已提交但 checkpoint 未落盘时，下一次依据 new-value 状态跳过该批，不能重复扣加 OAuth。CLI 强制 manifest hash、当前 pricing hash、health URL（或显式跳过）并禁用整窗口 `--apply`；manifest 写入文件时 stdout 只输出摘要，避免终端复制 38 万行 JSON。
 - **非 token 附加费 TODO**：native Anthropic passthrough 可达官方 server tools；Web Search 另收 `$10/1,000` 次搜索，Code Execution 在组织免费额度后按 container-hour 计费，而普通 client-side tool call 与 Web Fetch 无额外调用费。当前 usage/telemetry 没有保存足以结算 Code Execution 免费池与容器时长的证据，因此本次只修模型 token 费与可由响应确认的 `inference_geo`（US data-residency 费率为对应模型 token/cache 卡的 `1.1x`），不把 server-tool 附加费伪装成可精确历史重算；后续需另增非 token usage ledger。
 
-## 2026-07-14 · 确定模型名优先于兼容通配别名（Routing / model alias precedence，docs/04，原则 2/5/6）
-
-- **生产根因**：请求 `6becfc0f-9ce7-43c6-b604-322972f5aa59` 明确指定已配置 lane `claude-opus`，但兼容映射先执行；`claude-opus-*` 因字面连字符不匹配裸名，宽泛 `claude-*` 把请求改写到 `balanced`，最终首候选 `openai-codex/gpt-5.6-terra` 成功。telemetry 的分类 `passthrough` 仅表示跳过分类器；该次原生协议直通实际因 `anthropic_messages -> openai_responses` 不匹配而关闭。
-- **统一优先级**：`allow_custom_model` 且未触发 budget degrade 时，先识别精确配置 lane，再识别部署已知的精确 model alias；只有两者都不存在时才进入 `model-aliases.yaml`，并继续保持“精确映射键优先、最长字面量 glob 次之”。因此所有当前及未来 lane 都不会再被 `claude-*` / `gpt-*` / `gemini-*` 吞掉；固定 vendor id（如 `claude-opus-4-8`）仍通过兼容映射进入族 lane。
-- **行为边界与验证**：精确 lane 恢复 docs/04 既定的完整 fallback 与 `allowed_lanes` 显式 400 语义，精确 model 保持单候选；标准 key、`auto`、blocked models、image pre-pin、budget degrade、alias cap 与 headless legacy 均不变。`gpt-5.6` 的 telemetry lane 从兼容目标 `gpt-5.6-sol` 恢复为精确 `gpt-5.6`，首个实际模型仍为 Sol。路由单测覆盖 Claude/GPT/Gemini 全部碰撞族及精确 model，shipped-config 组合测试遍历全部 lane 防止未来回归；无需 schema 或配置迁移。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-14 · 确定模型名优先于兼容通配别名（Routing / model alias precedence，docs/04，原则 2/5/6）**：精确 lane 与已配置 model 必须先于 `claude-*` / `gpt-*` / `gemini-*` 等宽泛兼容映射解析，避免显式模型被错误改写到其他 lane。
 - **2026-07-14 · 通道模型选择器复用自动发现缓存（OAuth subscription / Admin lanes，docs/04/11，原则 1/3/6）**：通道目录保持 network-free，依次复用共享进程缓存、加密账号设置中的 durable last-known-good 与 curated fallback；空目录/失败不覆盖旧快照，重连以 cache generation 隔离旧身份，并保持 Manual/Codex entitlement 边界。
 - **2026-07-14 · 丢弃 Codex 空 secondary 配额占位窗口（OAuth quota / Admin providers / reset credits，docs/04/11，原则 3/5/7）**：写入、cache-only API 与 UI 三层过滤 0%/无时长/已重置的空 positional 窗口；明确 `windowMinutes >= 10080` 的账号周窗口优先，避免脏 secondary 覆盖真实周额度与 reset marker。
 - **2026-07-14 · Subscription Providers 改为缓存优先与全局串行刷新（OAuth Admin / provider observability，docs/04/11，原则 1/3/6/7）**：Providers 首屏与兼容读 API 严格 cache-only；显式刷新由进程级单 worker 串行账号、合并并发点击并保留 last-known-good 数据。

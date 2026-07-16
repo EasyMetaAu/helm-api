@@ -1,5 +1,4 @@
 import {
-  buildXaiGrokCreditsRequest,
   type ConfigStore,
   createSqliteDb,
   decryptSecret,
@@ -7,15 +6,38 @@ import {
   type ProxyConfig,
   SqliteConfigStore,
   SqliteOAuthTokenStore,
+  XAI_GROK_CLIENT_VERSION,
+  type XaiOAuthModel,
 } from "@helm/core";
 import type { OAuthQuotaWindow } from "@helm/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getAccountSettings, loadAccountSettings, setAccountSettings } from "./account-settings.js";
+import {
+  type AccountSettings,
+  getAccountSettings,
+  loadAccountSettings,
+  setAccountSettings,
+} from "./account-settings.js";
 import { createOAuthAdmin } from "./admin-oauth.js";
 import type { CodexModelCatalog } from "./codex-model-catalog.js";
 import { createOAuthModelDiscoveryCache } from "./model-discovery-cache.js";
 
 const KEY = Buffer.alloc(32, 4);
+
+const XAI_STRUCTURED_MODEL: XaiOAuthModel = {
+  id: "display-grok",
+  model: "wire-grok",
+  apiBackend: "responses",
+  contextWindow: 500_000,
+  maxCompletionTokens: 32_768,
+  hidden: false,
+  supportedInApi: true,
+  supportsReasoningEffort: true,
+  reasoningEffort: "high",
+  reasoningEfforts: [{ id: "high", value: "high", label: "High" }],
+  streamToolCalls: true,
+};
+
+type XaiAccountSettings = AccountSettings & { xaiDiscoveredModels?: XaiOAuthModel[] };
 
 function makeStore(): SqliteOAuthTokenStore {
   return new SqliteOAuthTokenStore(createSqliteDb(":memory:"));
@@ -796,6 +818,165 @@ describe("createOAuthAdmin", () => {
       ?.accounts.find((candidate) => candidate.account === "default");
 
     expect(account?.models).toEqual([]);
+  });
+
+  it("xAI structured refresh persists metadata and treats an empty catalog as authoritative", async () => {
+    const { tokens, config } = makeStores();
+    await tokens.upsert({
+      providerId: "xai",
+      account: "heavy",
+      accessEnc: encryptSecret("xai-access", KEY),
+      refreshEnc: encryptSecret("xai-refresh", KEY),
+      expiresAt: Date.now() + 3_600_000,
+      meta: JSON.stringify({ accountId: "xai-user-heavy", email: "heavy@example.test" }),
+      updatedAt: 1,
+    });
+    await setAccountSettings(config, KEY, "xai", "heavy", {
+      discoveredModels: ["stale-string-model"],
+      xaiDiscoveredModels: [{ ...XAI_STRUCTURED_MODEL, id: "stale-structured" }],
+    } as XaiAccountSettings);
+    const responses = [
+      Response.json({
+        data: [
+          {
+            id: XAI_STRUCTURED_MODEL.id,
+            model: XAI_STRUCTURED_MODEL.model,
+            api_backend: XAI_STRUCTURED_MODEL.apiBackend,
+            context_window: XAI_STRUCTURED_MODEL.contextWindow,
+            max_completion_tokens: XAI_STRUCTURED_MODEL.maxCompletionTokens,
+            supports_reasoning_effort: true,
+            reasoning_effort: "high",
+            reasoning_efforts: [{ id: "high", value: "high", label: "High" }],
+            stream_tool_calls: true,
+          },
+        ],
+      }),
+      Response.json({ data: [] }),
+    ];
+    const seenHeaders: Headers[] = [];
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      seenHeaders.push(new Headers(init?.headers));
+      const response = responses.shift();
+      if (!response) throw new Error("unexpected xAI model refresh");
+      return response;
+    }) as typeof fetch;
+    const admin = createOAuthAdmin({
+      store: tokens,
+      encKey: KEY,
+      config,
+      makeFetch: () => fetchMock,
+    });
+
+    const live = (await admin.listStatus({ forceRefresh: true })).providers
+      .find((provider) => provider.id === "xai")
+      ?.accounts.find((account) => account.account === "heavy");
+    expect(live?.models).toEqual(["display-grok"]);
+    expect(
+      getAccountSettings(
+        await loadAccountSettings(config, KEY),
+        "xai",
+        "heavy",
+      ) as XaiAccountSettings,
+    ).toMatchObject({
+      discoveredModels: ["display-grok"],
+      xaiDiscoveredModels: [XAI_STRUCTURED_MODEL],
+    });
+
+    const empty = (await admin.listStatus({ forceRefresh: true })).providers
+      .find((provider) => provider.id === "xai")
+      ?.accounts.find((account) => account.account === "heavy");
+    expect(empty?.models).toEqual([]);
+    expect(
+      getAccountSettings(
+        await loadAccountSettings(config, KEY),
+        "xai",
+        "heavy",
+      ) as XaiAccountSettings,
+    ).toEqual({ xaiDiscoveredModels: [] });
+    expect(seenHeaders).toHaveLength(2);
+    for (const headers of seenHeaders) {
+      expect(headers.get("x-userid")).toBe("xai-user-heavy");
+      expect(headers.get("x-email")).toBe("heavy@example.test");
+    }
+  });
+
+  it("xAI structured refresh failure returns validated LKG instead of stale string fallbacks", async () => {
+    const { tokens, config } = makeStores();
+    await tokens.upsert({
+      providerId: "xai",
+      account: "heavy",
+      accessEnc: encryptSecret("xai-access", KEY),
+      refreshEnc: encryptSecret("xai-refresh", KEY),
+      expiresAt: Date.now() + 3_600_000,
+      meta: JSON.stringify({ accountId: "xai-user-heavy", email: "heavy@example.test" }),
+      updatedAt: 1,
+    });
+    await setAccountSettings(config, KEY, "xai", "heavy", {
+      discoveredModels: ["grok-4.5", "stale-string-model"],
+      xaiDiscoveredModels: [XAI_STRUCTURED_MODEL],
+    } as XaiAccountSettings);
+    const modelDiscoveryCache = createOAuthModelDiscoveryCache();
+    await modelDiscoveryCache.load({ providerId: "xai", account: "heavy" }, async () => [
+      "stale-generic-cache",
+    ]);
+    const fetchMock = vi.fn(async () => Response.json({ error: "unavailable" }, { status: 503 }));
+    const admin = createOAuthAdmin({
+      store: tokens,
+      encKey: KEY,
+      config,
+      modelDiscoveryCache,
+      makeFetch: () => fetchMock as typeof fetch,
+    });
+
+    const account = (await admin.listStatus({ forceRefresh: true })).providers
+      .find((provider) => provider.id === "xai")
+      ?.accounts.find((candidate) => candidate.account === "heavy");
+
+    expect(account?.models).toEqual(["display-grok"]);
+    expect(account?.models).not.toContain("stale-generic-cache");
+    expect(account?.models).not.toContain("stale-string-model");
+    expect(account?.models).not.toContain("grok-4.5");
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("xAI cached status projects the validated structured LKG without network or string-cache fallback", async () => {
+    const { tokens, config } = makeStores();
+    await tokens.upsert({
+      providerId: "xai",
+      account: "heavy",
+      accessEnc: encryptSecret("xai-access", KEY),
+      refreshEnc: encryptSecret("xai-refresh", KEY),
+      expiresAt: Date.now() + 3_600_000,
+      meta: JSON.stringify({ accountId: "xai-user-heavy", email: "heavy@example.test" }),
+      updatedAt: 1,
+    });
+    await setAccountSettings(config, KEY, "xai", "heavy", {
+      discoveredModels: ["stale-string-model"],
+      xaiDiscoveredModels: [XAI_STRUCTURED_MODEL],
+    } as XaiAccountSettings);
+    const modelDiscoveryCache = createOAuthModelDiscoveryCache();
+    await modelDiscoveryCache.load({ providerId: "xai", account: "heavy" }, async () => [
+      "stale-generic-cache",
+    ]);
+    const fetchMock = vi.fn(async () => {
+      throw new Error("cached status must not access the network");
+    });
+    const admin = createOAuthAdmin({
+      store: tokens,
+      encKey: KEY,
+      config,
+      modelDiscoveryCache,
+      makeFetch: () => fetchMock as unknown as typeof fetch,
+    });
+
+    const account = (await admin.listCachedStatus()).providers
+      .find((provider) => provider.id === "xai")
+      ?.accounts.find((candidate) => candidate.account === "heavy");
+
+    expect(account?.models).toEqual(["display-grok"]);
+    expect(account?.models).not.toContain("stale-string-model");
+    expect(account?.models).not.toContain("stale-generic-cache");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("does not persist an old discovery result after its credential cache generation is invalidated", async () => {
@@ -1612,12 +1793,15 @@ describe("createOAuthAdmin > fetchXaiQuota", () => {
       accessEnc: encryptSecret("fresh-access", KEY),
       refreshEnc: encryptSecret("refresh-token", KEY),
       expiresAt: 1_000_000,
-      meta: JSON.stringify({ tokenEndpoint: "https://auth.x.ai/oauth2/token" }),
+      meta: JSON.stringify({
+        tokenEndpoint: "https://auth.x.ai/oauth2/token",
+        accountId: "user-123",
+      }),
       updatedAt: 1,
     });
   }
 
-  it("refreshes through the account proxy and sends Grok's gRPC-Web credits request", async () => {
+  it("refreshes through the account proxy and sends Grok Build's official billing request", async () => {
     const { tokens, config } = makeStores();
     await tokens.upsert({
       providerId: "xai",
@@ -1625,7 +1809,10 @@ describe("createOAuthAdmin > fetchXaiQuota", () => {
       accessEnc: encryptSecret("expired-access", KEY),
       refreshEnc: encryptSecret("refresh-token", KEY),
       expiresAt: 999,
-      meta: JSON.stringify({ tokenEndpoint: "https://auth.x.ai/oauth2/token" }),
+      meta: JSON.stringify({
+        tokenEndpoint: "https://auth.x.ai/oauth2/token",
+        accountId: "user-123",
+      }),
       updatedAt: 1,
     });
     const proxy: ProxyConfig = { type: "http", host: "proxy.test", port: 8080 };
@@ -1637,18 +1824,18 @@ describe("createOAuthAdmin > fetchXaiQuota", () => {
       if (String(url).includes("/oauth2/token")) {
         return json({ access_token: "fresh-access", expires_in: 3600 });
       }
-      if (String(url).includes("GetGrokCreditsConfig")) {
-        return new Response(
-          Uint8Array.from(
-            Buffer.from(
-              "000000001b0a190d000048414212080212060880ccb5c3061a060880c1dac3068000000010677270632d7374617475733a20300d0a",
-              "hex",
-            ),
-          ),
-          {
-            headers: { "content-type": "application/grpc-web+proto" },
+      if (String(url).endsWith("/v1/billing?format=credits")) {
+        return Response.json({
+          config: {
+            creditUsagePercent: 12.5,
+            currentPeriod: {
+              type: "USAGE_PERIOD_TYPE_WEEKLY",
+              start: "2025-07-08T18:40:00Z",
+              end: "2025-07-15T18:40:00Z",
+            },
+            prepaidBalance: { val: 1_250 },
           },
-        );
+        });
       }
       throw new Error(`unexpected fetch ${String(url)}`);
     }) as typeof fetch;
@@ -1677,18 +1864,59 @@ describe("createOAuthAdmin > fetchXaiQuota", () => {
     expect(seenProxies).toContainEqual(proxy);
     expect(calls).toHaveLength(2);
     const quota = calls[1];
-    expect(quota?.url).toBe("https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig");
-    expect(quota?.init).toMatchObject({ method: "POST", redirect: "error" });
-    expect(new Headers(quota?.init?.headers).get("authorization")).toBe("Bearer fresh-access");
-    expect(new Headers(quota?.init?.headers).get("content-type")).toBe(
-      "application/grpc-web+proto",
-    );
-    expect(new Headers(quota?.init?.headers).get("x-grpc-web")).toBe("1");
-    expect(Buffer.from(quota?.init?.body as Uint8Array).toString("hex")).toBe(
-      Buffer.from(buildXaiGrokCreditsRequest({ excludeLegacyMonthlyUsage: true })).toString("hex"),
-    );
-    expect(Buffer.from(quota?.init?.body as Uint8Array).toString("hex")).toBe("00000000020801");
+    expect(quota?.url).toBe("https://cli-chat-proxy.grok.com/v1/billing?format=credits");
+    expect(quota?.init).toMatchObject({ method: "GET", redirect: "error" });
+    const quotaHeaders = new Headers(quota?.init?.headers);
+    expect(quotaHeaders.get("accept")).toBe("application/json");
+    expect(quotaHeaders.get("authorization")).toBe("Bearer fresh-access");
+    expect(quotaHeaders.get("X-XAI-Token-Auth")).toBe("xai-grok-cli");
+    expect(quotaHeaders.get("x-userid")).toBe("user-123");
+    expect(quotaHeaders.get("x-grok-client-version")).toBe(XAI_GROK_CLIENT_VERSION);
+    expect(quotaHeaders.get("x-grok-client-mode")).toBe("headless");
+    expect(quotaHeaders.get("content-type")).toBeNull();
+    expect(quota?.init?.body).toBeUndefined();
     expect(quota?.init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("fail-opens and negative-caches malformed successful JSON", async () => {
+    const { tokens, config } = makeStores();
+    await seedFreshXai(tokens);
+    const doFetch = vi.fn(async () => new Response("{", { status: 200 })) as typeof fetch;
+    const admin = createOAuthAdmin({
+      store: tokens,
+      config,
+      encKey: KEY,
+      now: () => 1_000,
+      makeFetch: () => doFetch,
+    });
+
+    await expect(admin.fetchXaiQuota?.({ account: "default" })).resolves.toBeNull();
+    await expect(admin.fetchXaiQuota?.({ account: "default" })).resolves.toBeNull();
+    expect(doFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails open before network I/O when the stored credential has no xAI user id", async () => {
+    const { tokens, config } = makeStores();
+    await tokens.upsert({
+      providerId: "xai",
+      account: "default",
+      accessEnc: encryptSecret("fresh-access", KEY),
+      refreshEnc: encryptSecret("refresh-token", KEY),
+      expiresAt: 1_000_000,
+      meta: JSON.stringify({ tokenEndpoint: "https://auth.x.ai/oauth2/token" }),
+      updatedAt: 1,
+    });
+    const doFetch = vi.fn() as unknown as typeof fetch;
+    const admin = createOAuthAdmin({
+      store: tokens,
+      config,
+      encKey: KEY,
+      now: () => 1_000,
+      makeFetch: () => doFetch,
+    });
+
+    await expect(admin.fetchXaiQuota?.({ account: "default" })).resolves.toBeNull();
+    expect(doFetch).not.toHaveBeenCalled();
   });
 
   it("fail-opens and negative-caches a rejected redirect response", async () => {

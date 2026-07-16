@@ -5753,6 +5753,144 @@ describe("createExecute — OAuth subscription alias guard (fail-closed)", () =>
     ).not.toHaveBeenCalled();
   });
 
+  it("fails closed when a dynamic xAI alias has no capability metadata", async () => {
+    const xai = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "must-not-run" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: xai,
+      providers: new Map([["xai", xai]]),
+      registry: registry({}),
+      knownOAuthPrefixes: new Set(["xai"]),
+      oauthAliases: () => new Set(["xai/grok-future"]),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["xai/grok-future"]), req());
+
+    expect(out.attempts[0]?.skip_reason).toBe("capability_metadata_missing");
+    expect(out.final.status).toBe("error");
+    expect(xai.chatCompletion).not.toHaveBeenCalled();
+  });
+
+  it("uses conservative live xAI metadata for basic text but keeps tools closed", async () => {
+    const xai = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "text-ok" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const model = {
+      id: "grok-future",
+      model: "grok-future-wire",
+      apiBackend: "responses" as const,
+      contextWindow: 100_000,
+      maxCompletionTokens: 4_096,
+      hidden: false,
+      supportedInApi: true,
+      supportsReasoningEffort: true,
+      reasoningEfforts: [{ id: "low", value: "low" as const, label: "Low" }],
+    };
+    const execute = createExecute({
+      defaultProvider: xai,
+      providers: new Map([["xai", xai]]),
+      registry: registry({}),
+      knownOAuthPrefixes: new Set(["xai"]),
+      oauthAliases: () => new Set(["xai/grok-future"]),
+      oauthWireModels: () => new Map([["xai/grok-future", "grok-future-wire"]]),
+      xaiOAuthModels: () => new Map([["xai/grok-future", model]]),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const text = await execute(plan(["xai/grok-future"]), req());
+    const tools = await execute(
+      plan(["xai/grok-future"]),
+      req({ tools: [{ type: "function", function: { name: "lookup", parameters: {} } }] }),
+    );
+
+    expect(text.final.status).toBe("ok");
+    expect(xai.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(tools.attempts[0]?.skip_reason).toBe("no_tool_support");
+    expect(tools.final.status).toBe("error");
+  });
+
+  it("uses the live OAuth alias-to-wire-model mapping when catalog id differs", async () => {
+    const xai = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "ok" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: xai,
+      providers: new Map([["xai", xai]]),
+      registry: registry({}),
+      knownOAuthPrefixes: new Set(["xai"]),
+      oauthAliases: () => new Set(["xai/grok-display-key"]),
+      oauthWireModels: () => new Map([["xai/grok-display-key", "grok-wire-model"]]),
+      xaiOAuthModels: () =>
+        new Map([
+          [
+            "xai/grok-display-key",
+            {
+              id: "grok-display-key",
+              model: "grok-wire-model",
+              apiBackend: "responses",
+              contextWindow: 80_000,
+              maxCompletionTokens: 4_096,
+              hidden: false,
+              supportedInApi: true,
+              supportsReasoningEffort: false,
+              reasoningEfforts: [],
+            },
+          ],
+        ]),
+      breaker: breaker(),
+      catalog: new Map([
+        [
+          "xai/grok-wire-model",
+          {
+            modelKey: "xai/grok-wire-model",
+            capabilities: {
+              supportsTools: true,
+              jsonOutput: "none",
+              supportsVision: false,
+              supportsStreaming: true,
+              maxContextTokens: 100_000,
+              maxOutputTokens: 8_192,
+            },
+            pricing: {
+              inputPerMTokUsd: null,
+              outputPerMTokUsd: null,
+              cacheReadPerMTokUsd: null,
+              cacheWritePerMTokUsd: null,
+            },
+            source: "override",
+          },
+        ],
+      ]),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["xai/grok-display-key"]), req());
+    const overRemoteContext = await execute(
+      plan(["xai/grok-display-key"]),
+      req({ max_tokens: 90_000 }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    expect(xai.chatCompletion).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "grok-wire-model" }),
+      expect.any(Object),
+    );
+    expect(overRemoteContext.attempts[0]?.skip_reason).toBe("context_too_small");
+    expect(xai.chatCompletion).toHaveBeenCalledTimes(1);
+  });
+
   it("fails CLOSED for a DE-CURATED subscription alias — never the registry, never defaultProvider", async () => {
     const pool = ok("pool");
     const dflt = ok("default");

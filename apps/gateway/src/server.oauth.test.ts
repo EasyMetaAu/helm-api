@@ -11,7 +11,11 @@ import {
 import type { ProviderConfig as ProviderConfigShared } from "@helm/shared";
 import { ProviderConfigSchema } from "@helm/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { setAccountSettings } from "./oauth/account-settings.js";
+import {
+  getAccountSettings,
+  loadAccountSettings,
+  setAccountSettings,
+} from "./oauth/account-settings.js";
 import { createCodexModelCache } from "./oauth/codex-model-cache.js";
 import { createCodexModelCatalog } from "./oauth/codex-model-catalog.js";
 import { createOAuthModelDiscoveryCache } from "./oauth/model-discovery-cache.js";
@@ -460,7 +464,11 @@ async function seedXai(ctx: OAuthRuntimeCtx, account: string): Promise<void> {
     accessEnc: encryptSecret(`xai-access-${account}`, ENC_KEY),
     refreshEnc: encryptSecret(`xai-refresh-${account}`, ENC_KEY),
     expiresAt: FAR_FUTURE,
-    meta: JSON.stringify({ tokenEndpoint: "https://auth.x.ai/oauth2/token" }),
+    meta: JSON.stringify({
+      tokenEndpoint: "https://auth.x.ai/oauth2/token",
+      accountId: `xai-user-${account}`,
+      email: `${account}@example.test`,
+    }),
     updatedAt: 1,
   });
 }
@@ -522,10 +530,22 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     await seedXai(ctx, "heavy");
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       if (String(url).endsWith("/models")) {
-        return new Response(JSON.stringify({ data: [{ id: "grok-composer-2.5-fast" }] }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
+        return new Response(
+          JSON.stringify({
+            data: [
+              {
+                id: "grok-composer-2.5-fast",
+                apiBackend: "responses",
+                streamToolCalls: true,
+                maxCompletionTokens: 32_768,
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
       }
       expect(String(url)).toBe("https://cli-chat-proxy.grok.com/v1/responses");
       const headers = new Headers(init?.headers);
@@ -533,13 +553,17 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       expect(headers.get("chatgpt-account-id")).toBeNull();
       expect(headers.get("X-XAI-Token-Auth")).toBe("xai-grok-cli");
       expect(headers.get("x-authenticateresponse")).toBe("authenticate-response");
-      expect(headers.get("x-grok-client-version")).toBe("0.2.93");
+      expect(headers.get("x-grok-client-version")).toBe("0.2.101");
+      expect(headers.get("x-grok-user-id")).toBe("xai-user-heavy");
       expect(headers.get("x-grok-model-override")).toBe("grok-composer-2.5-fast");
       expect(headers.get("Accept")).toBe("text/event-stream");
       expect(JSON.parse(String(init?.body))).toEqual({
         model: "grok-composer-2.5-fast",
         instructions: "You are a helpful assistant.",
         input: "hello",
+        include: ["reasoning.encrypted_content"],
+        stream_tool_calls: true,
+        max_output_tokens: 32_768,
         stream: true,
         store: false,
       });
@@ -579,16 +603,280 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     ).resolves.toMatchObject({ id: "resp-grok", status: "completed" });
   });
 
+  it("refreshes x-grok-user-id from current xAI credential metadata on a 401 retry", async () => {
+    const { ctx, config } = oauthStores();
+    await seedXai(ctx, "heavy");
+    const refreshedAccess = codexJwt({ sub: "xai-user-refreshed", email: "new@example.test" });
+    let inferenceAttempt = 0;
+    const inferenceBodies: Array<Record<string, unknown>> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const target = String(url);
+      if (target.endsWith("/models")) {
+        return Response.json({
+          data: [
+            {
+              id: "grok-4.5",
+              apiBackend: "responses",
+              streamToolCalls: true,
+              maxCompletionTokens: 16_384,
+            },
+          ],
+        });
+      }
+      if (target === "https://auth.x.ai/oauth2/token") {
+        return Response.json({
+          access_token: refreshedAccess,
+          refresh_token: "xai-refresh-rotated",
+          expires_in: 3_600,
+        });
+      }
+      expect(target).toBe("https://cli-chat-proxy.grok.com/v1/responses");
+      inferenceAttempt += 1;
+      inferenceBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      const headers = new Headers(init?.headers);
+      if (inferenceAttempt === 1) {
+        expect(headers.get("Authorization")).toBe("Bearer xai-access-heavy");
+        expect(headers.get("x-grok-user-id")).toBe("xai-user-heavy");
+        return new Response(null, { status: 401 });
+      }
+      expect(headers.get("Authorization")).toBe(`Bearer ${refreshedAccess}`);
+      expect(headers.get("x-grok-user-id")).toBe("xai-user-refreshed");
+      return sseResponse([
+        { type: "response.created", response: { id: "resp-refreshed" } },
+        {
+          type: "response.completed",
+          response: { id: "resp-refreshed", object: "response", status: "completed", output: [] },
+        },
+      ]);
+    });
+
+    const enabled = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+    );
+    await expect(
+      enabled.poolClients.get("xai")?.nativePassthrough?.({ model: "grok-4.5", input: "hello" }),
+    ).resolves.toMatchObject({ id: "resp-refreshed", status: "completed" });
+    expect(inferenceAttempt).toBe(2);
+    expect(inferenceBodies).toEqual([
+      expect.objectContaining({ stream_tool_calls: true, max_output_tokens: 16_384 }),
+      expect.objectContaining({ stream_tool_calls: true, max_output_tokens: 16_384 }),
+    ]);
+  });
+
+  it("routes an xAI catalog id with the distinct first-party wire model", async () => {
+    const { ctx, config } = oauthStores();
+    await seedXai(ctx, "heavy");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (String(url).endsWith("/models")) {
+        const headers = new Headers(init?.headers);
+        expect(headers.get("x-userid")).toBe("xai-user-heavy");
+        expect(headers.get("x-email")).toBe("heavy@example.test");
+        expect(headers.get("x-grok-client-mode")).toBe("headless");
+        expect(headers.get("x-authenticateresponse")).toBeNull();
+        expect(headers.get("x-grok-model-override")).toBeNull();
+        return Response.json({
+          data: [
+            {
+              id: "grok-display-key",
+              model: "grok-wire-model",
+              apiBackend: "responses",
+              contextWindow: 500_000,
+            },
+            { id: "grok-chat", model: "grok-chat-wire", apiBackend: "chat_completions" },
+          ],
+        });
+      }
+      expect(String(url)).toBe("https://cli-chat-proxy.grok.com/v1/responses");
+      expect(new Headers(init?.headers).get("x-grok-model-override")).toBe("grok-wire-model");
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      expect(body).toMatchObject({ model: "grok-wire-model" });
+      expect(body).not.toHaveProperty("stream_tool_calls");
+      expect(body).not.toHaveProperty("max_output_tokens");
+      return sseResponse([
+        { type: "response.created", response: { id: "resp-wire" } },
+        {
+          type: "response.completed",
+          response: { id: "resp-wire", object: "response", status: "completed", output: [] },
+        },
+      ]);
+    });
+
+    const enabled = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+    );
+
+    expect(enabled.providers[0]?.models).toEqual([
+      { alias: "xai/grok-display-key", provider_model: "grok-wire-model" },
+    ]);
+    expect(enabled.xaiModels.get("xai/grok-display-key")).toMatchObject({
+      id: "grok-display-key",
+      model: "grok-wire-model",
+      apiBackend: "responses",
+      contextWindow: 500_000,
+    });
+    await expect(
+      enabled.poolClients
+        .get("xai")
+        ?.nativePassthrough?.({ model: "grok-wire-model", input: "hello" }),
+    ).resolves.toMatchObject({ id: "resp-wire" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("persists xAI structured discovery and falls back to it after a transient restart failure", async () => {
+    const { ctx, config } = oauthStores();
+    await seedXai(ctx, "heavy");
+    let discoveryFails = false;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url) => {
+      expect(String(url)).toBe("https://cli-chat-proxy.grok.com/v1/models");
+      if (discoveryFails) throw new Error("temporary catalog outage");
+      return Response.json({
+        data: [
+          {
+            id: "grok-display-lkg",
+            model: "grok-wire-lkg",
+            apiBackend: "responses",
+            contextWindow: 500_000,
+            streamToolCalls: true,
+            maxCompletionTokens: 32_768,
+          },
+        ],
+      });
+    });
+
+    const live = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+    );
+    expect(live.providers[0]?.models).toEqual([
+      { alias: "xai/grok-display-lkg", provider_model: "grok-wire-lkg" },
+    ]);
+    expect(
+      getAccountSettings(await loadAccountSettings(config, ENC_KEY), "xai", "heavy")
+        .xaiDiscoveredModels,
+    ).toEqual([
+      expect.objectContaining({
+        id: "grok-display-lkg",
+        model: "grok-wire-lkg",
+        contextWindow: 500_000,
+      }),
+    ]);
+
+    discoveryFails = true;
+    const restarted = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+    );
+    expect(restarted.providers[0]?.models).toEqual([
+      { alias: "xai/grok-display-lkg", provider_model: "grok-wire-lkg" },
+    ]);
+    expect(restarted.xaiModelAccounts).toEqual(new Map([["xai/grok-display-lkg", ["heavy"]]]));
+  });
+
+  it("treats a successful empty xAI catalog as authoritative and clears stale LKG", async () => {
+    const { ctx, config } = oauthStores();
+    await seedXai(ctx, "heavy");
+    let models: unknown[] = [
+      { id: "grok-stale", model: "grok-stale-wire", apiBackend: "responses" },
+    ];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({ data: models }));
+
+    const seeded = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+    );
+    expect(seeded.providers).toHaveLength(1);
+
+    models = [];
+    const emptied = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+    );
+    expect(emptied.providers).toEqual([]);
+    expect(emptied.xaiModelAccounts).toEqual(new Map());
+    expect(getAccountSettings(await loadAccountSettings(config, ENC_KEY), "xai", "heavy")).toEqual({
+      xaiDiscoveredModels: [],
+    });
+  });
+
+  it("fails closed for a second xAI account whose metadata conflicts for the same alias", async () => {
+    const { ctx, config } = oauthStores();
+    await seedXai(ctx, "a");
+    await seedXai(ctx, "b");
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const authorization = new Headers(init?.headers).get("authorization");
+      return Response.json({
+        data: [
+          {
+            id: "shared-grok",
+            model: "shared-grok-wire",
+            apiBackend: "responses",
+            contextWindow: authorization?.endsWith("-a") ? 500_000 : 100_000,
+          },
+        ],
+      });
+    });
+    const logs: Array<{ msg: string; fields?: Record<string, unknown> }> = [];
+
+    const enabled = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      (_level, msg, fields) => logs.push({ msg, fields }),
+    );
+
+    expect(enabled.providers[0]?.models).toEqual([
+      { alias: "xai/shared-grok", provider_model: "shared-grok-wire" },
+    ]);
+    expect(logs).toContainEqual(
+      expect.objectContaining({ msg: "oauth.autoroute.model_metadata_conflict" }),
+    );
+    expect(logs).toContainEqual({
+      msg: "oauth.autoroute",
+      fields: expect.objectContaining({ providerId: "xai", accounts: 1, models: 1 }),
+    });
+  });
+
   it("preserves data and HTTPS image URLs when translating Chat input for Grok 4.5", async () => {
     const { ctx, config } = oauthStores();
     await seedXai(ctx, "heavy");
     const inferenceBodies: Array<Record<string, unknown>> = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       if (String(url).endsWith("/models")) {
-        return new Response(JSON.stringify({ data: [{ id: "grok-4.5" }] }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
+        return new Response(
+          JSON.stringify({ data: [{ id: "grok-4.5", apiBackend: "responses" }] }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
       }
       expect(String(url)).toBe("https://cli-chat-proxy.grok.com/v1/responses");
       expect(init?.method).toBe("POST");
@@ -662,6 +950,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       imageUrls.map((imageUrl) => ({
         model: "grok-4.5",
         instructions: "You are a helpful assistant.",
+        include: ["reasoning.encrypted_content"],
         input: [
           {
             type: "message",
@@ -890,7 +1179,13 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
   it("returns empty when no OAuth runtime is wired (no enc key)", async () => {
     const { config } = oauthStores();
     const out = await synthesizeOAuthProviders([], undefined, config, "https://f/v1", 60_000, noop);
-    expect(out).toEqual({ providers: [], poolClients: new Map(), codexKeys: [] });
+    expect(out).toEqual({
+      providers: [],
+      poolClients: new Map(),
+      codexKeys: [],
+      xaiModels: new Map(),
+      xaiModelAccounts: new Map(),
+    });
   });
 
   // Hot-reload data path (issue #38 follow-up): rebuildOAuthPool re-invokes

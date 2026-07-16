@@ -1,13 +1,16 @@
 import { type ConfigStore, createSqliteDb, encryptSecret, SqliteConfigStore } from "@helm/core";
 import { describe, expect, it } from "vitest";
 import {
+  type AccountSettings,
   clearAccountCredentialFailure,
+  clearAccountDiscoveredModels,
   getAccountSettings,
   loadAccountSettings,
   loadGlobalOAuthSettings,
   markAccountCredentialFailure,
   resolveAccountModelsMode,
   saveAccountDiscoveredModels,
+  saveAccountXaiDiscoveredModels,
   setAccountSettings,
   setGlobalOAuthSettings,
 } from "./account-settings.js";
@@ -43,6 +46,18 @@ class DelayedFirstSetConfig implements ConfigStore {
 }
 
 describe("account-settings", () => {
+  const xaiModel = {
+    id: "display-grok",
+    model: "wire-grok",
+    apiBackend: "responses" as const,
+    contextWindow: 500_000,
+    maxRetries: 0,
+    hidden: false,
+    supportedInApi: true,
+    supportsReasoningEffort: false,
+    reasoningEfforts: [],
+  };
+
   it("returns {} when nothing is stored (fail-open)", async () => {
     const config = makeConfig();
     expect(await loadAccountSettings(config, KEY)).toEqual({});
@@ -124,6 +139,52 @@ describe("account-settings", () => {
     });
     // A different account is independent.
     expect(getAccountSettings(map, "anthropic", "other")).toEqual({});
+  });
+
+  it("persists an encrypted structured xAI LKG and clears stale ids on authoritative empty", async () => {
+    const config = makeConfig();
+
+    await expect(saveAccountXaiDiscoveredModels(config, KEY, "heavy", [xaiModel])).resolves.toBe(
+      true,
+    );
+    const encrypted = await config.get("oauth.account_settings");
+    expect(encrypted).toContain("v1:");
+    expect(encrypted).not.toContain("wire-grok");
+    expect(
+      getAccountSettings(await loadAccountSettings(config, KEY), "xai", "heavy"),
+    ).toMatchObject({
+      discoveredModels: ["display-grok"],
+      xaiDiscoveredModels: [xaiModel],
+    });
+
+    await expect(saveAccountXaiDiscoveredModels(config, KEY, "heavy", [])).resolves.toBe(true);
+    expect(getAccountSettings(await loadAccountSettings(config, KEY), "xai", "heavy")).toEqual({
+      xaiDiscoveredModels: [],
+    });
+  });
+
+  it("revalidates structured xAI LKG rows at read time and drops invalid entries", async () => {
+    const config = makeConfig();
+    await setAccountSettings(config, KEY, "xai", "heavy", {
+      xaiDiscoveredModels: [
+        xaiModel,
+        { ...xaiModel, id: "invalid-zero", model: "invalid-zero", contextWindow: 0 },
+      ],
+    } as unknown as AccountSettings);
+
+    expect(
+      getAccountSettings(await loadAccountSettings(config, KEY), "xai", "heavy")
+        .xaiDiscoveredModels,
+    ).toEqual([xaiModel]);
+  });
+
+  it("clears both string and structured model snapshots before credential replacement", async () => {
+    const config = makeConfig();
+    await saveAccountXaiDiscoveredModels(config, KEY, "heavy", [xaiModel]);
+
+    await expect(clearAccountDiscoveredModels(config, KEY, "xai", "heavy")).resolves.toBe(true);
+
+    expect(getAccountSettings(await loadAccountSettings(config, KEY), "xai", "heavy")).toEqual({});
   });
 
   it("fails open to {} on a corrupt/undecryptable blob", async () => {

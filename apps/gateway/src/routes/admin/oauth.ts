@@ -768,7 +768,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       // Only a COMPLETED device login mutates the credential set → rebuild then.
       if (result.status === "done") {
         if (!(await clearDurableQuota(providerId, account))) return c.json(notApplied, 503);
-        await afterMutation();
+        if (!(await afterMutation())) return c.json(notApplied, 503);
       }
       return c.json(result);
     } catch (e) {

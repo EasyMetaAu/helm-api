@@ -1,5 +1,10 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { discoverOAuthModels, hasLiveModelDiscovery, listXaiOAuthModels } from "./models.js";
+import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
+import {
+  discoverOAuthModels,
+  hasLiveModelDiscovery,
+  listXaiOAuthModels,
+  type XaiOAuthModel,
+} from "./models.js";
 import {
   beginXaiDeviceLogin,
   isTrustedXaiOAuthEndpoint,
@@ -26,6 +31,10 @@ describe("xAI OAuth", () => {
     vi.unstubAllGlobals();
   });
 
+  it("requires every normalized catalog model to carry a context window", () => {
+    expectTypeOf<XaiOAuthModel["contextWindow"]>().toEqualTypeOf<number>();
+  });
+
   it("accepts only HTTPS x.ai discovery endpoints", () => {
     expect(isTrustedXaiOAuthEndpoint("https://auth.x.ai/oauth2/token")).toBe(true);
     expect(isTrustedXaiOAuthEndpoint("https://x.ai/oauth/token")).toBe(true);
@@ -34,11 +43,13 @@ describe("xAI OAuth", () => {
   });
 
   it("builds the first-party Grok CLI inference headers for the resolved wire model", () => {
-    expect(XAI_GROK_CLIENT_VERSION).toBe("0.2.93");
+    expect(XAI_GROK_CLIENT_VERSION).toBe("0.2.101");
     expect(xaiGrokInferenceHeaders("grok-composer-2.5-fast")).toEqual({
       "X-XAI-Token-Auth": "xai-grok-cli",
       "x-authenticateresponse": "authenticate-response",
-      "x-grok-client-version": "0.2.93",
+      "x-grok-client-version": "0.2.101",
+      "x-grok-client-identifier": "helm-api",
+      "x-grok-client-mode": "headless",
       "x-grok-model-override": "grok-composer-2.5-fast",
     });
     expect(() => xaiGrokInferenceHeaders("   ")).toThrow(/wire model/);
@@ -48,7 +59,7 @@ describe("xAI OAuth", () => {
   });
 
   it("uses a validated operator override for the Grok CLI protocol version", () => {
-    expect(resolveXaiGrokClientVersion({})).toBe("0.2.93");
+    expect(resolveXaiGrokClientVersion({})).toBe("0.2.101");
     expect(resolveXaiGrokClientVersion({ [XAI_GROK_CLIENT_VERSION_ENV]: " 0.3.1 " })).toBe("0.3.1");
     expect(
       xaiGrokInferenceHeaders("grok-4.5", {
@@ -62,6 +73,22 @@ describe("xAI OAuth", () => {
     ).toThrow(/semantic version/);
     expect(() => resolveXaiGrokClientVersion({ [XAI_GROK_CLIENT_VERSION_ENV]: "latest" })).toThrow(
       /semantic version/,
+    );
+  });
+
+  it("adds the current OAuth account identity without changing the env argument", () => {
+    expect(
+      xaiGrokInferenceHeaders(
+        "grok-4.5",
+        { [XAI_GROK_CLIENT_VERSION_ENV]: "0.3.1" },
+        { userId: "xai-user-current" },
+      ),
+    ).toMatchObject({
+      "x-grok-client-version": "0.3.1",
+      "x-grok-user-id": "xai-user-current",
+    });
+    expect(xaiGrokInferenceHeaders("grok-4.5", {}, { userId: "   " })).not.toHaveProperty(
+      "x-grok-user-id",
     );
   });
 
@@ -295,7 +322,7 @@ describe("xAI OAuth", () => {
     expect(xaiOAuthProvider.getApiKey({ access: "a", refresh: "r", expires: 1 })).toBe("a");
   });
 
-  it("discovers only valid text model ids from the Grok subscription proxy", async () => {
+  it("discovers only valid Responses model ids from the Grok subscription proxy", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
       Response.json({
         data: [
@@ -314,11 +341,7 @@ describe("xAI OAuth", () => {
       }),
     );
     await expect(discoverOAuthModels("xai", "oauth-access", fetchImpl)).resolves.toEqual([
-      "grok-4.3",
-      "grok-4.5",
-      "grok-chat",
       "grok-composer-2.5-fast",
-      "grok-legacy-string",
     ]);
     expect(hasLiveModelDiscovery("xai")).toBe(true);
     expect(fetchImpl).toHaveBeenCalledWith(
@@ -329,9 +352,129 @@ describe("xAI OAuth", () => {
     );
     const discoveryHeaders = new Headers(fetchImpl.mock.calls[0]?.[1]?.headers);
     expect(discoveryHeaders.get("X-XAI-Token-Auth")).toBe("xai-grok-cli");
-    expect(discoveryHeaders.get("x-authenticateresponse")).toBe("authenticate-response");
-    expect(discoveryHeaders.get("x-grok-client-version")).toBe("0.2.93");
+    expect(discoveryHeaders.get("x-authenticateresponse")).toBeNull();
+    expect(discoveryHeaders.get("x-grok-client-version")).toBe("0.2.101");
+    expect(discoveryHeaders.get("x-grok-client-mode")).toBe("headless");
     expect(discoveryHeaders.get("x-grok-model-override")).toBeNull();
+  });
+
+  it("preserves the first-party model catalog shape and exposes only routable Responses ids", async () => {
+    const payload = {
+      data: [
+        {
+          id: "catalog-grok",
+          model: "wire-grok-2026-07-16",
+          name: "Grok Catalog Entry",
+          apiBackend: "responses",
+          contextWindow: 500_000,
+          maxCompletionTokens: 32_768,
+          maxRetries: 0,
+          supportsReasoningEffort: true,
+          reasoningEfforts: [{ id: "quick", value: "low", label: "Quick" }, { value: "high" }],
+          streamToolCalls: true,
+        },
+        { id: "chat-only", model: "chat-wire", apiBackend: "chat_completions" },
+        { id: "messages-only", model: "messages-wire", apiBackend: "messages" },
+        { id: "hidden", model: "hidden-wire", apiBackend: "responses", hidden: true },
+        {
+          id: "unsupported",
+          model: "unsupported-wire",
+          apiBackend: "responses",
+          supportedInApi: false,
+        },
+        { id: "legacy-chat", model: "legacy-wire" },
+        { id: "invented", model: "invented-wire", apiBackend: "language" },
+      ],
+    };
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(Response.json(payload));
+
+    await expect(
+      listXaiOAuthModels("opaque-access-token", fetchImpl, {
+        identity: { userId: "user-123", email: "l@x.ai" },
+      }),
+    ).resolves.toEqual([
+      {
+        id: "catalog-grok",
+        model: "wire-grok-2026-07-16",
+        name: "Grok Catalog Entry",
+        apiBackend: "responses",
+        contextWindow: 500_000,
+        maxCompletionTokens: 32_768,
+        maxRetries: 0,
+        hidden: false,
+        supportedInApi: true,
+        supportsReasoningEffort: true,
+        reasoningEfforts: [
+          { id: "quick", value: "low", label: "Quick" },
+          { id: "high", value: "high", label: "High" },
+        ],
+        streamToolCalls: true,
+      },
+      {
+        id: "chat-only",
+        model: "chat-wire",
+        apiBackend: "chat_completions",
+        contextWindow: 256_000,
+        hidden: false,
+        supportedInApi: true,
+        supportsReasoningEffort: false,
+        reasoningEfforts: [],
+      },
+      {
+        id: "messages-only",
+        model: "messages-wire",
+        apiBackend: "messages",
+        contextWindow: 256_000,
+        hidden: false,
+        supportedInApi: true,
+        supportsReasoningEffort: false,
+        reasoningEfforts: [],
+      },
+      {
+        id: "hidden",
+        model: "hidden-wire",
+        apiBackend: "responses",
+        contextWindow: 256_000,
+        hidden: true,
+        supportedInApi: true,
+        supportsReasoningEffort: false,
+        reasoningEfforts: [],
+      },
+      {
+        id: "unsupported",
+        model: "unsupported-wire",
+        apiBackend: "responses",
+        contextWindow: 256_000,
+        hidden: false,
+        supportedInApi: false,
+        supportsReasoningEffort: false,
+        reasoningEfforts: [],
+      },
+      {
+        id: "legacy-chat",
+        model: "legacy-wire",
+        apiBackend: "chat_completions",
+        contextWindow: 256_000,
+        hidden: false,
+        supportedInApi: true,
+        supportsReasoningEffort: false,
+        reasoningEfforts: [],
+      },
+    ]);
+    const catalogHeaders = new Headers(fetchImpl.mock.calls[0]?.[1]?.headers);
+    expect(catalogHeaders.get("x-userid")).toBe("user-123");
+    expect(catalogHeaders.get("x-email")).toBe("l@x.ai");
+    expect(catalogHeaders.get("x-grok-client-mode")).toBe("headless");
+    expect(catalogHeaders.get("x-authenticateresponse")).toBeNull();
+    expect(catalogHeaders.get("x-grok-model-override")).toBeNull();
+
+    await expect(
+      discoverOAuthModels(
+        "xai",
+        "oauth-access",
+        vi.fn<typeof fetch>().mockResolvedValue(Response.json(payload)),
+      ),
+    ).resolves.toEqual(["catalog-grok", "unsupported"]);
   });
 
   it("aborts Grok model discovery after its request timeout", async () => {

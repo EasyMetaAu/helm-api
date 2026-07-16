@@ -161,10 +161,12 @@ never diverge.
     (proxy passwords included: a read shows only `hasPassword`).
   - **Experimental xAI OAuth** is available by default. It uses xAI's Grok CLI device-code flow and
     subscription proxy, has no published third-party OAuth contract, and is labeled
-    for personal self-hosted evaluation. The Providers page pulls the consumer weekly
-    window through grok.com's private `GetGrokCreditsConfig` gRPC-Web method with the
-    existing account bearer. It fails open and never infers quota from unrelated public
-    API credits or the separate monthly billing payload.
+    for personal self-hosted evaluation. The Providers page follows first-party
+    grok-build and pulls the consumer weekly window from
+    `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` with the existing
+    account bearer and identity. It projects only the current weekly period, fails open,
+    and never infers quota from unrelated public API credits, prepaid balance, or monthly
+    billing periods.
 
   See [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md) and the
   README's OAuth subscription section.
