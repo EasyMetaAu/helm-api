@@ -55,13 +55,13 @@ export const DEFAULT_SUPERVISOR_THRESHOLDS: SupervisorThresholds = {
   preflightMemBytes: 512 * MIB,
   preflightCpuPercent: 75,
   preflightHelmMemoryPercent: 55,
-  preflightWalBytes: 384 * MIB,
-  preflightDiskBytes: 14 * GIB,
+  preflightWalBytes: 640 * MIB,
+  preflightDiskBytes: 13 * GIB,
   stopLoad1: 1.5,
   stopMemBytes: 384 * MIB,
   stopCpuPercent: 75,
   stopHelmMemoryPercent: 60,
-  stopWalBytes: 512 * MIB,
+  stopWalBytes: 768 * MIB,
   stopDiskBytes: 12 * GIB,
 };
 
@@ -246,10 +246,10 @@ export function evaluatePreflight(
       reasons.push(`${prefix}health returned non-200`);
     }
     if (sample.walBytes >= thresholds.preflightWalBytes) {
-      reasons.push(`${prefix}WAL at or above 384 MiB`);
+      reasons.push(`${prefix}WAL at or above ${thresholds.preflightWalBytes / MIB} MiB`);
     }
     if (sample.diskFreeBytes <= thresholds.preflightDiskBytes) {
-      reasons.push(`${prefix}disk free at or below 14 GiB`);
+      reasons.push(`${prefix}disk free at or below ${thresholds.preflightDiskBytes / GIB} GiB`);
     }
     if (sample.restarts !== baselineRestarts) reasons.push(`${prefix}restart count changed`);
     if (sample.oomKilled) reasons.push(`${prefix}OOM flag is set`);
@@ -292,8 +292,12 @@ export function evaluateRuntimeSafety(
     reasons.push(`Helm CPU sustained at or above ${thresholds.stopCpuPercent}%`);
   }
   if (sample.healthStatus !== 200) reasons.push("health returned non-200");
-  if (sample.walBytes >= thresholds.stopWalBytes) reasons.push("WAL at or above 512 MiB");
-  if (sample.diskFreeBytes < thresholds.stopDiskBytes) reasons.push("disk free below 12 GiB");
+  if (sample.walBytes >= thresholds.stopWalBytes) {
+    reasons.push(`WAL at or above ${thresholds.stopWalBytes / MIB} MiB`);
+  }
+  if (sample.diskFreeBytes < thresholds.stopDiskBytes) {
+    reasons.push(`disk free below ${thresholds.stopDiskBytes / GIB} GiB`);
+  }
   if (sample.restarts !== previous.baselineRestarts) reasons.push("restart count changed");
   if (sample.oomKilled) reasons.push("OOM flag is set");
   if (sample.gatewayFaults > 0) reasons.push("new gateway-internal 5xx detected");

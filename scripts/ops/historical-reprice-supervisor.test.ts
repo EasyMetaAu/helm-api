@@ -107,6 +107,39 @@ describe("historical reprice supervisor", () => {
     ).toContain("sample 1: Helm CPU at or above 83%");
   });
 
+  it("uses recoverable disk and WAL thresholds with hard runtime floors", () => {
+    expect(DEFAULT_SUPERVISOR_THRESHOLDS.preflightWalBytes).toBe(640 * 1024 ** 2);
+    expect(DEFAULT_SUPERVISOR_THRESHOLDS.stopWalBytes).toBe(768 * 1024 ** 2);
+    expect(DEFAULT_SUPERVISOR_THRESHOLDS.preflightDiskBytes).toBe(13 * 1024 ** 3);
+    expect(DEFAULT_SUPERVISOR_THRESHOLDS.stopDiskBytes).toBe(12 * 1024 ** 3);
+
+    const recoverable = healthySample({
+      walBytes: 639 * 1024 ** 2,
+      diskFreeBytes: 13 * 1024 ** 3 + 1,
+    });
+    expect(evaluatePreflight([recoverable, recoverable, recoverable])).toMatchObject({
+      safe: true,
+      reasons: [],
+    });
+
+    const atPreflightLimits = healthySample({
+      walBytes: 640 * 1024 ** 2,
+      diskFreeBytes: 13 * 1024 ** 3,
+    });
+    expect(evaluatePreflight([atPreflightLimits, recoverable, recoverable]).reasons).toEqual([
+      "sample 1: WAL at or above 640 MiB",
+      "sample 1: disk free at or below 13 GiB",
+    ]);
+
+    const belowRuntimeLimits = healthySample({
+      walBytes: 768 * 1024 ** 2 - 1,
+      diskFreeBytes: 12 * 1024 ** 3,
+    });
+    expect(
+      evaluateRuntimeSafety(belowRuntimeLimits, { highCpuSamples: 0, baselineRestarts: 0 }),
+    ).toMatchObject({ stop: false, reasons: [] });
+  });
+
   it("stops immediately on hard limits and only on sustained CPU", () => {
     const initial = { highCpuSamples: 0, baselineRestarts: 0 };
     const firstCpu = evaluateRuntimeSafety(healthySample({ helmCpuPercent: 76 }), initial);
@@ -248,7 +281,7 @@ describe("historical reprice supervisor", () => {
     ["host load", { load1: 1.5 }, "load1 at or above 1.5"],
     ["Helm memory", { helmMemoryPercent: 60 }, "Helm memory at or above 60%"],
     ["non-200 health", { healthStatus: 503 }, "health returned non-200"],
-    ["WAL growth", { walBytes: 512 * 1024 ** 2 }, "WAL at or above 512 MiB"],
+    ["WAL growth", { walBytes: 768 * 1024 ** 2 }, "WAL at or above 768 MiB"],
     ["low disk", { diskFreeBytes: 11 * 1024 ** 3 }, "disk free below 12 GiB"],
     ["container restart", { restarts: 1 }, "restart count changed"],
     ["OOM", { oomKilled: true }, "OOM flag is set"],
@@ -294,7 +327,7 @@ describe("historical reprice supervisor", () => {
       stateDir: "/app/data/reprice",
       windowName: "2026-07-05",
       planSha256: "plan-sha256",
-      maxWalBytes: 512 * 1024 ** 2,
+      maxWalBytes: 768 * 1024 ** 2,
       minFreeBytes: 12 * 1024 ** 3,
     });
 
@@ -303,7 +336,7 @@ describe("historical reprice supervisor", () => {
     expect(args).not.toContain("http://127.0.0.1:8080/healthz");
     expect(
       args.slice(args.indexOf("--max-wal-bytes"), args.indexOf("--max-wal-bytes") + 2),
-    ).toEqual(["--max-wal-bytes", String(512 * 1024 ** 2)]);
+    ).toEqual(["--max-wal-bytes", String(768 * 1024 ** 2)]);
     expect(
       args.slice(args.indexOf("--min-free-bytes"), args.indexOf("--min-free-bytes") + 2),
     ).toEqual(["--min-free-bytes", String(12 * 1024 ** 3)]);
