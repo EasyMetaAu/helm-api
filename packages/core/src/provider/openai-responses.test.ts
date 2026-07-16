@@ -3517,6 +3517,7 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
         forceSse: true,
         forceStoreFalse: true,
         ensureInstructions: true,
+        ensureReasoningEncryptedContent: true,
         rejectPreviousResponseId: true,
       },
       fetch: (async (_url: string, init?: RequestInit) => {
@@ -3534,9 +3535,146 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
 
     expect(seenBody).toMatchObject({
       instructions: "You are a helpful assistant.",
+      include: ["reasoning.encrypted_content"],
       input: "hello",
       stream: true,
       store: false,
+    });
+  });
+
+  it("preserves requested include fields while requiring encrypted reasoning content", async () => {
+    let seenBody: Record<string, unknown> = {};
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://stream-only.test/v1", apiKey: "sk-test" },
+      requestContract: {
+        forceSse: true,
+        forceStoreFalse: true,
+        ensureReasoningEncryptedContent: true,
+      },
+      fetch: (async (_url: string, init?: RequestInit) => {
+        seenBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return sseResponse([
+          {
+            type: "response.completed",
+            response: { id: "r", object: "response", status: "completed", output: [] },
+          },
+        ]);
+      }) as unknown as typeof fetch,
+    });
+
+    await client.nativePassthrough?.({
+      model: "grok",
+      input: "hello",
+      include: ["file_search_call.results", "reasoning.encrypted_content"],
+    });
+
+    expect(seenBody.include).toEqual(["file_search_call.results", "reasoning.encrypted_content"]);
+  });
+
+  it("applies discovered model request defaults to Chat without overriding a client maximum", async () => {
+    const seenBodies: Array<Record<string, unknown>> = [];
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://stream-only.test/v1", apiKey: "sk-test" },
+      requestContract: {
+        forceSse: true,
+        resolveModelRequestDefaults: (model: string) =>
+          model === "grok-defaults"
+            ? { streamToolCalls: true, maxCompletionTokens: 32_768 }
+            : model === "grok-disabled"
+              ? { streamToolCalls: false }
+              : undefined,
+      },
+      fetch: (async (_url: string, init?: RequestInit) => {
+        seenBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return sseResponse([
+          {
+            type: "response.completed",
+            response: { id: "r", object: "response", status: "completed", output: [] },
+          },
+        ]);
+      }) as unknown as typeof fetch,
+    });
+
+    await client.chatCompletion({
+      model: "grok-defaults",
+      messages: [{ role: "user", content: "default" }],
+    });
+    await client.chatCompletion({
+      model: "grok-defaults",
+      messages: [{ role: "user", content: "explicit" }],
+      max_output_tokens: 1_024,
+    });
+    await client.chatCompletion({
+      model: "grok-disabled",
+      messages: [{ role: "user", content: "disabled" }],
+    });
+    await client.chatCompletion({
+      model: "grok-unknown",
+      messages: [{ role: "user", content: "unknown" }],
+    });
+
+    expect(seenBodies[0]).toMatchObject({
+      stream_tool_calls: true,
+      max_output_tokens: 32_768,
+    });
+    expect(seenBodies[1]).toMatchObject({
+      stream_tool_calls: true,
+      max_output_tokens: 1_024,
+    });
+    expect(seenBodies[2]).not.toHaveProperty("stream_tool_calls");
+    expect(seenBodies[2]).not.toHaveProperty("max_output_tokens");
+    expect(seenBodies[3]).not.toHaveProperty("stream_tool_calls");
+    expect(seenBodies[3]).not.toHaveProperty("max_output_tokens");
+  });
+
+  it("keeps discovered model defaults identical for native passthrough and its 401 retry", async () => {
+    const seenBodies: Array<Record<string, unknown>> = [];
+    let authorization = "Bearer old";
+    let unauthorizedCalls = 0;
+    const client = createGenericOpenAIResponsesClient({
+      config: {
+        baseUrl: "https://stream-only.test/v1",
+        getAuthHeader: async () => authorization,
+        onUnauthorized: () => {
+          unauthorizedCalls += 1;
+          authorization = "Bearer refreshed";
+        },
+      },
+      requestContract: {
+        forceSse: true,
+        resolveModelRequestDefaults: () => ({
+          streamToolCalls: true,
+          maxCompletionTokens: 32_768,
+        }),
+      },
+      fetch: (async (_url: string, init?: RequestInit) => {
+        seenBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        if (seenBodies.length === 1) return new Response(null, { status: 401 });
+        return sseResponse([
+          {
+            type: "response.completed",
+            response: { id: "r", object: "response", status: "completed", output: [] },
+          },
+        ]);
+      }) as unknown as typeof fetch,
+    });
+
+    await client.nativePassthrough?.({ model: "grok", input: "default" });
+    await client.nativePassthrough?.({
+      model: "grok",
+      input: "explicit",
+      max_output_tokens: 2_048,
+    });
+
+    expect(unauthorizedCalls).toBe(1);
+    expect(seenBodies[0]).toMatchObject({
+      stream_tool_calls: true,
+      max_output_tokens: 32_768,
+    });
+    expect(seenBodies[1]).toEqual(seenBodies[0]);
+    expect(seenBodies[2]).toMatchObject({
+      stream_tool_calls: true,
+      max_output_tokens: 2_048,
     });
   });
 

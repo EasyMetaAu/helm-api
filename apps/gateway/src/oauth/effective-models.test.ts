@@ -113,16 +113,28 @@ describe("effectiveAccountModels", () => {
 });
 
 describe("effectiveOAuthAliases", () => {
-  it("exposes xAI auto-mode aliases to the Lanes model picker", async () => {
+  it("uses only server-synthesized xAI aliases and account provenance in the Lanes picker", async () => {
     const { tokens, config } = makeStores();
-    await bind(tokens, "xai", "mylukin");
+    await bind(tokens, "xai", "heavy-a");
+    await bind(tokens, "xai", "heavy-b");
+    await bind(tokens, "xai", "connected-but-not-synthesized");
+    await setAccountSettings(config, KEY, "xai", "heavy-a", {
+      modelsMode: "auto",
+      discoveredModels: ["grok-stale-string-snapshot"],
+    });
+    const modelDiscoveryCache = createOAuthModelDiscoveryCache();
+    await modelDiscoveryCache.load({ providerId: "xai", account: "heavy-b" }, async () => [
+      "grok-stale-generic-cache",
+    ]);
 
     await expect(
-      effectiveOAuthModelOptions({ store: tokens, encKey: KEY }, config, ROUTABLE),
-    ).resolves.toEqual([
-      { alias: "xai/grok-4.5", accounts: ["mylukin"] },
-      { alias: "xai/grok-composer-2.5-fast", accounts: ["mylukin"] },
-    ]);
+      effectiveOAuthModelOptions({ store: tokens, encKey: KEY }, config, ROUTABLE, {
+        modelDiscoveryCache,
+        xaiRuntimeModelOptions: () => [
+          { alias: "xai/grok-runtime-only", accounts: ["heavy-b", "heavy-a"] },
+        ],
+      }),
+    ).resolves.toEqual([{ alias: "xai/grok-runtime-only", accounts: ["heavy-a", "heavy-b"] }]);
   });
 
   it("emits provider/model aliases for every bound account's effective set, deduped + sorted", async () => {
@@ -203,7 +215,6 @@ describe("effectiveOAuthModelOptions", () => {
   it.each([
     ["anthropic", "claude-fable-5"],
     ["github-copilot", "gpt-5.99-copilot"],
-    ["xai", "grok-next-preview"],
   ])("uses the discovered %s auto catalog instead of hard-coded picker fallbacks", async (providerId, remoteModel) => {
     const { tokens, config } = makeStores();
     await bind(tokens, providerId, "default");
@@ -215,6 +226,52 @@ describe("effectiveOAuthModelOptions", () => {
         modelDiscoveryCache,
       }),
     ).resolves.toEqual([{ alias: `${providerId}/${remoteModel}`, accounts: ["default"] }]);
+  });
+
+  it("does not synthesize xAI picker entries from durable strings, generic cache, or curated fallback", async () => {
+    const { tokens, config } = makeStores();
+    await bind(tokens, "xai", "durable");
+    await bind(tokens, "xai", "generic-cache");
+    await bind(tokens, "xai", "curated-fallback");
+    await setAccountSettings(config, KEY, "xai", "durable", {
+      modelsMode: "auto",
+      discoveredModels: ["grok-from-durable-string"],
+    });
+    const modelDiscoveryCache = createOAuthModelDiscoveryCache();
+    await modelDiscoveryCache.load({ providerId: "xai", account: "generic-cache" }, async () => [
+      "grok-from-generic-cache",
+    ]);
+
+    await expect(
+      effectiveOAuthModelOptions({ store: tokens, encKey: KEY }, config, ROUTABLE, {
+        modelDiscoveryCache,
+        xaiRuntimeModelOptions: () => [],
+      }),
+    ).resolves.toEqual([]);
+  });
+
+  it("keeps non-xAI discovery behavior while xAI comes from synthesized runtime truth", async () => {
+    const { tokens, config } = makeStores();
+    await bind(tokens, "anthropic", "claude-account");
+    await bind(tokens, "xai", "heavy");
+    const modelDiscoveryCache = createOAuthModelDiscoveryCache();
+    await modelDiscoveryCache.load(
+      { providerId: "anthropic", account: "claude-account" },
+      async () => ["claude-from-generic-cache"],
+    );
+    await modelDiscoveryCache.load({ providerId: "xai", account: "heavy" }, async () => [
+      "grok-must-not-come-from-generic-cache",
+    ]);
+
+    await expect(
+      effectiveOAuthModelOptions({ store: tokens, encKey: KEY }, config, ROUTABLE, {
+        modelDiscoveryCache,
+        xaiRuntimeModelOptions: () => [{ alias: "xai/grok-runtime", accounts: ["heavy"] }],
+      }),
+    ).resolves.toEqual([
+      { alias: "anthropic/claude-from-generic-cache", accounts: ["claude-account"] },
+      { alias: "xai/grok-runtime", accounts: ["heavy"] },
+    ]);
   });
 
   it("does not let an auto-discovery cache snapshot widen a manual allowlist", async () => {

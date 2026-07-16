@@ -1539,6 +1539,7 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
   const FIVE_XX = new UpstreamError("upstream_error", "bad gateway", null, 502);
   const RATE = new UpstreamError("upstream_error", "usage limit", null, 429);
   const AUTH_401 = new UpstreamError("upstream_error", "unauthorized", null, 401);
+  const AUTH_403 = new UpstreamError("upstream_error", "forbidden", null, 403);
   const BAD = new UpstreamError("upstream_error", "bad request", null, 400);
   const REFRESH_401 = new TokenRefreshError("oauth refresh failed (openai-codex, status 401)", 401);
   const REFRESH_429 = new TokenRefreshError("oauth refresh rate-limited (status 429)", 429);
@@ -1904,6 +1905,78 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
 
     expect(served).toEqual(["good", "good"]);
     expect(selected).toEqual(["bad", "good", "good"]);
+  });
+
+  it("lets a provider exclude inference 403 from permanent credential failures", async () => {
+    const served: string[] = [];
+    const selected: string[] = [];
+    const credentialFailures: Array<{ account: string; error: unknown }> = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        faultMember("first", 10, served, AUTH_403),
+        faultMember("second", 50, served, null),
+      ],
+      upstreamCredentialFailureStatuses: [401],
+      onSelect: (account) => selected.push(account),
+      onAccountCredentialFailure: (account, error) => {
+        credentialFailures.push({ account, error });
+      },
+    });
+
+    await expect(pool.chatCompletion(REQ)).rejects.toThrow(/forbidden/);
+    await expect(pool.chatCompletion(REQ)).rejects.toThrow(/forbidden/);
+
+    expect(served).toEqual([]);
+    expect(selected).toEqual(["first", "first"]);
+    expect(credentialFailures).toEqual([]);
+  });
+
+  it("keeps inference 403 as a permanent credential failure by default", async () => {
+    const served: string[] = [];
+    const selected: string[] = [];
+    const credentialFailures: Array<{ account: string; error: unknown }> = [];
+    const pool = createOAuthPoolClient({
+      members: [faultMember("bad", 10, served, AUTH_403), faultMember("good", 50, served, null)],
+      onSelect: (account) => selected.push(account),
+      onAccountCredentialFailure: (account, error) => {
+        credentialFailures.push({ account, error });
+      },
+    });
+
+    await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "good" });
+
+    expect(served).toEqual(["good"]);
+    expect(selected).toEqual(["bad", "good"]);
+    expect(credentialFailures).toEqual([{ account: "bad", error: AUTH_403 }]);
+  });
+
+  it("does not park a provider-excluded inference 403 on the streaming path", async () => {
+    const served: string[] = [];
+    const selected: string[] = [];
+    const credentialFailures: Array<{ account: string; error: unknown }> = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        faultMember("first", 10, served, AUTH_403),
+        faultMember("second", 50, served, null),
+      ],
+      upstreamCredentialFailureStatuses: [401],
+      onSelect: (account) => selected.push(account),
+      onAccountCredentialFailure: (account, error) => {
+        credentialFailures.push({ account, error });
+      },
+    });
+    const drain = async () => {
+      for await (const _chunk of pool.chatCompletionStream(REQ)) {
+        // A 403 fails before the first chunk.
+      }
+    };
+
+    await expect(drain()).rejects.toThrow(/forbidden/);
+    await expect(drain()).rejects.toThrow(/forbidden/);
+
+    expect(served).toEqual([]);
+    expect(selected).toEqual(["first", "first"]);
+    expect(credentialFailures).toEqual([]);
   });
 
   it("surfaces the upstream fault (not pool-empty) when every account fails transiently", async () => {

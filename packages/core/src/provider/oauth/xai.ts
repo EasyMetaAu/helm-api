@@ -15,13 +15,14 @@ import {
 import type { OAuthCredentials, OAuthLoginCallbacks, OAuthProviderInterface } from "./types.js";
 
 export const XAI_OAUTH_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828";
-export const XAI_OAUTH_SCOPE = "openid profile email offline_access grok-cli:access api:access";
+export const XAI_OAUTH_SCOPE =
+  "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write";
 export const XAI_OAUTH_ISSUER = "https://auth.x.ai";
 export const XAI_OAUTH_DISCOVERY_URL = `${XAI_OAUTH_ISSUER}/.well-known/openid-configuration`;
 export const XAI_GROK_OAUTH_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
 // First-party protocol version observed from the installed Grok CLI release.
 // The subscription proxy rejects inference requests without this header (HTTP 426).
-export const XAI_GROK_CLIENT_VERSION = "0.2.93";
+export const XAI_GROK_CLIENT_VERSION = "0.2.101";
 export const XAI_GROK_CLIENT_VERSION_ENV = "HELM_XAI_GROK_CLIENT_VERSION";
 
 const SEMVER_PATTERN =
@@ -40,7 +41,7 @@ export function resolveXaiGrokClientVersion(
   const version = configured || XAI_GROK_CLIENT_VERSION;
   if (version.length > 64 || !SEMVER_PATTERN.test(version)) {
     throw new Error(
-      `${XAI_GROK_CLIENT_VERSION_ENV} must be a semantic version (for example 0.2.93)`,
+      `${XAI_GROK_CLIENT_VERSION_ENV} must be a semantic version (for example 0.2.101)`,
     );
   }
   return version;
@@ -56,18 +57,43 @@ export function xaiGrokProtocolHeaders(
   };
 }
 
+/** Identity headers used by grok-build's authenticated model-catalog request. */
+export function xaiGrokCatalogHeaders(
+  accessToken: string,
+  explicitIdentity: { userId?: string; email?: string } = {},
+  env: Record<string, string | undefined> = process.env,
+): Record<string, string> {
+  const identity = decodeJwtPayload(accessToken);
+  const userId = nonEmptyString(explicitIdentity.userId) ?? nonEmptyString(identity.sub);
+  const email = nonEmptyString(explicitIdentity.email) ?? nonEmptyString(identity.email);
+  return {
+    // grok-build's /models request does not send the inference-only
+    // x-authenticateresponse or x-grok-model-override headers.
+    "X-XAI-Token-Auth": "xai-grok-cli",
+    "x-grok-client-version": resolveXaiGrokClientVersion(env),
+    "x-grok-client-mode": "headless",
+    ...(userId ? { "x-userid": userId } : {}),
+    ...(email ? { "x-email": email } : {}),
+  };
+}
+
 export function xaiGrokInferenceHeaders(
   wireModel: string,
   env: Record<string, string | undefined> = process.env,
+  identity: { userId?: string } = {},
 ): Record<string, string> {
   const model = wireModel.trim();
   if (model.length === 0) throw new Error("xAI inference request is missing its wire model");
   if (model.length > 200 || !/^[A-Za-z0-9._:-]+$/.test(model)) {
     throw new Error("xAI inference request has an invalid wire model");
   }
+  const userId = nonEmptyString(identity.userId);
   return {
     ...xaiGrokProtocolHeaders(env),
+    "x-grok-client-identifier": "helm-api",
+    "x-grok-client-mode": "headless",
     "x-grok-model-override": model,
+    ...(userId ? { "x-grok-user-id": userId } : {}),
   };
 }
 

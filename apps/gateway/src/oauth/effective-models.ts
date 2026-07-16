@@ -82,6 +82,10 @@ export interface EffectiveOAuthModelOptions {
   // runtime pool synthesis. The Lanes picker reads its last-known-good snapshot
   // without performing upstream I/O of its own.
   modelDiscoveryCache?: OAuthModelDiscoveryCache;
+  // xAI is entitlement- and metadata-sensitive: the picker must mirror only the
+  // aliases/accounts accepted by the currently synthesized pool. A thunk keeps
+  // hot-rebuild updates visible without upstream I/O or stale string fallbacks.
+  xaiRuntimeModelOptions?: () => readonly ModelOption[];
 }
 
 function identityString(value: unknown): string | undefined {
@@ -151,8 +155,18 @@ export async function effectiveOAuthModelOptions(
 ): Promise<ModelOption[]> {
   const settings = await loadAccountSettings(config, oauthCtx.encKey);
   const aliasToAccounts = new Map<string, Set<string>>();
+  for (const option of options.xaiRuntimeModelOptions?.() ?? []) {
+    if (!option.alias.startsWith("xai/")) continue;
+    const accounts = aliasToAccounts.get(option.alias) ?? new Set<string>();
+    for (const account of option.accounts) accounts.add(account);
+    aliasToAccounts.set(option.alias, accounts);
+  }
   for (const row of await oauthCtx.store.list()) {
     if (!routableProviderIds.has(row.providerId)) continue;
+    // xAI comes exclusively from the live synthesized pool above. Its catalog id,
+    // wire model and per-model defaults are inseparable, so generic string caches,
+    // durable id snapshots and curated fallbacks are not safe picker sources.
+    if (row.providerId === "xai") continue;
     const accountSettings = getAccountSettings(settings, row.providerId, row.account);
     let models: string[];
     if (row.providerId === "openai-codex") {

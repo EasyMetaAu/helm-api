@@ -354,9 +354,9 @@ Helm 默认提供 xAI 自家 Grok CLI 使用的设备码登录。设置 `HELM_OA
 
 xAI 只公开说明了 Grok CLI 自己的 OAuth/设备码登录方式，并未为第三方发布 OAuth client 注册机制，也没有承诺 CLI client ID 与订阅 proxy 是稳定的第三方接口。SuperGrok 订阅与预付费 xAI API credits 也不是同一种产品。因此，该 provider 虽然默认可用，但会始终明确标记为 **Experimental**。它只适合使用本人账号做个人、自托管评估；不要共享、转售或开放给无关租户。正式生产环境应使用 `XAI_API_KEY` 接入 `https://api.x.ai/v1`，或先取得 xAI 的书面许可和 Helm 专用 OAuth client。
 
-SuperGrok 没有公开的额度 API 合约。Helm 读取的是 grok.com 使用的未公开 `GetGrokCreditsConfig` gRPC-Web 方法，并沿用当前账号的 xAI OAuth bearer 与出口代理。有效的周额度会统一转换为管理面板中的额度窗口；对于格式错误、过期、体积异常、发生重定向或读取失败的响应，Helm 只会短暂缓存，并按 fail-open 原则回退到最后一次有效快照或 `—`。公开 `api.x.ai` 的 credits 和独立的月度账单不会被拿来冒充消费订阅的周额度。由于这是一项私有上游协议，每次改动协议后都必须使用真实账号做额度 smoke 验证。
+SuperGrok 没有公开的额度 API 合约。Helm 现在严格跟随官方 [`xai-org/grok-build`](https://github.com/xai-org/grok-build) 的实现，使用当前账号的 xAI OAuth bearer、账号身份、Grok 客户端请求头和出口代理，读取 `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits`。只有处于有效期内的周度 `config.currentPeriod` 及其 `creditUsagePercent` 会转换为管理面板中的额度窗口；预付余额、按需计费、月度周期和历史记录都会被明确忽略。对于格式错误、过期、体积异常、发生重定向或读取失败的响应，Helm 只会短暂缓存，并按 fail-open 原则回退到最后一次有效快照或 `—`。公开 `api.x.ai` 的 credits 不会被拿来冒充消费订阅的周额度。该端点仍属于第一方客户端协议，并非 xAI 承诺支持的第三方接口，因此每次改动协议后都必须使用真实账号做额度 smoke 验证。
 
-Helm 会上报仓库中固定、且已经 live smoke 验证的 Grok CLI 协议版本。如果 proxy 将来返回 HTTP 426 并要求更高版本，可暂时把 `HELM_XAI_GROK_CLIENT_VERSION` 设为已经验证的 semver，然后重新执行模型发现，以及流式、非流式和工具调用 smoke；待新版 Helm 更新默认值后应移除该覆盖。已鉴权的模型目录只保留文本型 `responses` / `chat` / `language` 后端，并且只声明真实账号验证过的能力：Grok 4.5 支持工具、流式、reasoning effort 和已验证的图片输入；Composer 支持工具与流式，但拒绝显式 `reasoning_effort` 和图片输入。未经验证的 JSON 与其他媒体能力按 fail-closed 处理。两者都没有可靠的订阅输出上限，因此 `maxOutputTokens` 保持 `null`。
+Helm 会上报仓库中固定、且已经 live smoke 验证的 Grok CLI 协议版本。如果 proxy 将来返回 HTTP 426 并要求更高版本，可暂时把 `HELM_XAI_GROK_CLIENT_VERSION` 设为已经验证的 semver，然后重新执行模型发现，以及流式、非流式和工具调用 smoke；待新版 Helm 更新默认值后应移除该覆盖。已鉴权的模型目录会保留官方定义的账号侧 `id` 与推理侧 `model` slug 的区别，排除上游标记为 hidden 的条目，并且只路由 Helm 已实现的 `responses` 后端；其他后端按 fail-closed 处理。能力声明仍以真实账号验证为准：Grok 4.5 支持工具、流式、reasoning effort 和已验证的图片输入；Composer 支持工具与流式，但拒绝显式 `reasoning_effort` 和图片输入。未经验证的 JSON 与其他媒体能力按 fail-closed 处理。两者都没有可靠的订阅输出上限，因此 `maxOutputTokens` 保持 `null`。
 
 SuperGrok 订阅没有逐 token 账单。Grok 4.5 的 telemetry 和 key budget 会明确采用 xAI 公布的 API 费率，作为 `api-equivalent` 估算；Composer 没有可靠的公开价格，因此 `cost_usd` 保持 `null`，不会用 0 制造「免费」的错觉。
 

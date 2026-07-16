@@ -186,7 +186,7 @@ export type CodexRateLimitReachedType = z.infer<typeof CodexRateLimitReachedType
 
 // The latest snapshot for one account: its windows + when/how it was captured.
 // `source` records HOW the snapshot was obtained (anthropic = on-demand usage
-// endpoint PULL; xai = Grok website gRPC-Web PULL; codex-headers = response-header
+// endpoint PULL; xai = Grok Build subscription billing PULL; codex-headers = response-header
 // PUSH) so the UI can show honest
 // "as of last request" staleness. `usageLimitedUntilMs` is the AUTO-PARK cooldown:
 // the epoch ms until which the account is removed from the scheduling pool because

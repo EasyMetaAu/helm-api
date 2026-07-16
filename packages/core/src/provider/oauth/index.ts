@@ -59,13 +59,19 @@ export {
   hasLiveModelDiscovery,
   isRetiredOpenAICodexLimit,
   isRetiredOpenAICodexModel,
+  isRoutableXaiOAuthModel,
   listOpenAICodexModels,
   listXaiOAuthModels,
   OpenAICodexModelsError,
   type OpenAICodexModelsOptions,
   type OpenAICodexModelsResult,
+  parseXaiOAuthModels,
   resolveOpenAICodexClientVersion,
   resolveOpenAICodexModelAlias,
+  type XaiApiBackend,
+  type XaiOAuthModel,
+  type XaiReasoningEffort,
+  type XaiReasoningEffortOption,
 } from "./models.js";
 export {
   beginOpenAICodexLogin,
@@ -137,12 +143,9 @@ export {
   XAI_OAUTH_SCOPE,
   type XaiDevicePollResult,
   type XaiDeviceStart,
+  xaiGrokCatalogHeaders,
   xaiGrokInferenceHeaders,
   xaiGrokProtocolHeaders,
   xaiOAuthProvider,
 } from "./xai.js";
-export {
-  buildXaiGrokCreditsRequest,
-  parseXaiGrokCreditsResponse,
-  type XaiGrokCreditsRequestOptions,
-} from "./xai-quota.js";
+export { parseXaiGrokCreditsResponse } from "./xai-quota.js";

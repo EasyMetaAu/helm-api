@@ -113,9 +113,17 @@ export interface GenericOpenAIResponsesRequestHeaderContext {
   authorization: string;
 }
 
+export interface GenericOpenAIResponsesModelRequestDefaults {
+  streamToolCalls?: boolean;
+  maxCompletionTokens?: number;
+}
+
 export interface GenericOpenAIResponsesRequestContract {
   forceSse?: boolean;
   forceStoreFalse?: boolean;
+  // xAI's first-party Responses client always asks the proxy to return opaque
+  // encrypted reasoning items so a full-history caller can replay them verbatim.
+  ensureReasoningEncryptedContent?: boolean;
   // Some subscription proxies require a non-empty top-level instruction even for
   // otherwise-valid native Responses requests.
   ensureInstructions?: boolean;
@@ -123,6 +131,11 @@ export interface GenericOpenAIResponsesRequestContract {
   // continuation. Reject deterministically before network I/O instead of surfacing
   // the proxy's eventual 404 as an all-providers-failed 502.
   rejectPreviousResponseId?: boolean;
+  // Account-scoped model metadata discovered from the upstream catalog. The
+  // resolver receives the final wire model; no provider-wide defaults are guessed.
+  resolveModelRequestDefaults?: (
+    model: string,
+  ) => GenericOpenAIResponsesModelRequestDefaults | undefined;
   requestHeaders?: (
     context: GenericOpenAIResponsesRequestHeaderContext,
   ) => Record<string, string> | Promise<Record<string, string>>;
@@ -2071,8 +2084,10 @@ export function createGenericOpenAIResponsesClient(
     if (
       contract?.forceSse !== true &&
       contract?.forceStoreFalse !== true &&
+      contract?.ensureReasoningEncryptedContent !== true &&
       contract?.ensureInstructions !== true &&
-      contract?.rejectPreviousResponseId !== true
+      contract?.rejectPreviousResponseId !== true &&
+      contract?.resolveModelRequestDefaults === undefined
     ) {
       return body;
     }
@@ -2082,6 +2097,33 @@ export function createGenericOpenAIResponsesClient(
       ...(contract.forceSse === true ? { stream: true } : {}),
       ...(contract.forceStoreFalse === true ? { store: false } : {}),
     };
+    const model = typeof next.model === "string" ? next.model : "";
+    const modelDefaults = contract.resolveModelRequestDefaults?.(model);
+    let streamToolCallsAdded = false;
+    if (modelDefaults?.streamToolCalls === true && next.stream_tool_calls !== true) {
+      next.stream_tool_calls = true;
+      streamToolCallsAdded = true;
+    }
+    let maxOutputTokensAdded = false;
+    if (
+      next.max_output_tokens === undefined &&
+      typeof modelDefaults?.maxCompletionTokens === "number" &&
+      Number.isSafeInteger(modelDefaults.maxCompletionTokens) &&
+      modelDefaults.maxCompletionTokens >= 0
+    ) {
+      next.max_output_tokens = modelDefaults.maxCompletionTokens;
+      maxOutputTokensAdded = true;
+    }
+    let reasoningIncludeAdded = false;
+    if (contract.ensureReasoningEncryptedContent === true) {
+      const includes = Array.isArray(next.include)
+        ? next.include.filter((value): value is string => typeof value === "string")
+        : [];
+      if (!includes.includes("reasoning.encrypted_content")) {
+        next.include = [...includes, "reasoning.encrypted_content"];
+        reasoningIncludeAdded = true;
+      }
+    }
     if (
       contract.rejectPreviousResponseId === true &&
       typeof next.previous_response_id === "string" &&
@@ -2109,6 +2151,9 @@ export function createGenericOpenAIResponsesClient(
     appendMutationList(carrier.mutations, "body_shims_applied", [
       ...(contract.forceSse === true ? ["generic_responses_force_stream"] : []),
       ...(contract.forceStoreFalse === true ? ["generic_responses_force_store_false"] : []),
+      ...(reasoningIncludeAdded ? ["generic_responses_include_encrypted_reasoning"] : []),
+      ...(streamToolCallsAdded ? ["generic_responses_stream_tool_calls_default"] : []),
+      ...(maxOutputTokensAdded ? ["generic_responses_max_output_tokens_default"] : []),
       ...instructionShims,
     ]);
     return carrier;

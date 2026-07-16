@@ -53,12 +53,14 @@ import {
   hoistResponsesInstructions,
   type InjectDeps,
   type IRResponse,
+  isRoutableXaiOAuthModel,
   isUserMessageRequest,
   type KeyedSerialGate,
   type Lane,
   type LanesConfig,
   LocalVolumeSink,
   listOpenAICodexModels,
+  listXaiOAuthModels,
   loadConfig,
   loadEncKeyFromEnv,
   loadRuntimeCatalog,
@@ -116,6 +118,7 @@ import {
   validateModelAliasTargets,
   windowsToUsageLimit,
   XAI_GROK_OAUTH_BASE_URL,
+  type XaiOAuthModel,
   xaiGrokInferenceHeaders,
 } from "@helm/core";
 import type {
@@ -161,6 +164,7 @@ import {
   markAccountCredentialFailure,
   resolveAccountModelsMode,
   saveAccountDiscoveredModels,
+  saveAccountXaiDiscoveredModels,
 } from "./oauth/account-settings.js";
 import { createOAuthAdmin } from "./oauth/admin-oauth.js";
 import { runResetCreditAttempt, weeklySaturated } from "./oauth/auto-reset.js";
@@ -369,6 +373,10 @@ interface CodexAccountRuntime {
   clientVersion: string;
   userAgent: string;
   onCatalogChanged?: () => void;
+}
+
+interface XaiAccountRuntime {
+  modelsByWireModel: ReadonlyMap<string, XaiOAuthModel>;
 }
 
 function identityString(value: unknown): string | undefined {
@@ -752,6 +760,11 @@ export interface SynthesizedOAuth {
   poolClients: Map<string, OAuthPoolClient>;
   // Account/version-scoped Codex catalog keys represented by this synthesis.
   codexKeys: CodexModelCacheKey[];
+  /** Live first-party xAI catalog keyed by Helm alias; retained for conservative
+   *  dynamic capability synthesis and id -> wire-model routing. */
+  xaiModels: Map<string, XaiOAuthModel>;
+  /** xAI aliases accepted by the live pool and the accounts backing each alias. */
+  xaiModelAccounts: Map<string, string[]>;
 }
 
 export interface OAuthQuotaSeed {
@@ -778,6 +791,7 @@ function buildOAuthAccountClient(
   base: { baseUrl: string; timeoutMs: number },
   onResponseMeta?: (headers: Headers) => void,
   codexRuntime?: CodexAccountRuntime,
+  xaiRuntime?: XaiAccountRuntime,
 ): ProviderClient | null {
   const spec = ROUTABLE_OAUTH[providerId];
   if (!spec) return null;
@@ -811,6 +825,7 @@ function buildOAuthAccountClient(
     onResponseMeta,
     fastMode,
     codexRuntime,
+    xaiRuntime,
   );
 }
 
@@ -863,7 +878,15 @@ export async function synthesizeOAuthProviders(
   // not independently call the provider's models endpoint.
   modelDiscoveryCache?: OAuthModelDiscoveryCache,
 ): Promise<SynthesizedOAuth> {
-  if (!oauthCtx) return { providers: [], poolClients: new Map(), codexKeys: [] };
+  if (!oauthCtx) {
+    return {
+      providers: [],
+      poolClients: new Map(),
+      codexKeys: [],
+      xaiModels: new Map(),
+      xaiModelAccounts: new Map(),
+    };
+  }
   const declared = new Set<string>(
     configured.flatMap((p) => (p.oauth && isOAuthPreset(p.oauth) ? [p.oauth.provider] : [])),
   );
@@ -884,6 +907,8 @@ export async function synthesizeOAuthProviders(
   const providers: ProviderConfigShared[] = [];
   const poolClients = new Map<string, OAuthPoolClient>();
   const codexKeys: CodexModelCacheKey[] = [];
+  const xaiModels = new Map<string, XaiOAuthModel>();
+  const xaiModelAccounts = new Map<string, string[]>();
 
   for (const [providerId, accounts] of accountsByProvider) {
     const spec = ROUTABLE_OAUTH[providerId];
@@ -894,6 +919,7 @@ export async function synthesizeOAuthProviders(
     // but never routes). Accumulate the UNION of enabled models across the members.
     const members: OAuthPoolMember[] = [];
     const unionModels = new Set<string>();
+    const unionWireModels = new Map<string, string>();
     for (const account of accounts) {
       const s = getAccountSettings(accountSettings, providerId, account);
       if (typeof s.credentialFailedAt === "number") {
@@ -933,8 +959,48 @@ export async function synthesizeOAuthProviders(
       }
       const modelsMode = resolveAccountModelsMode(providerId, s);
       let discovered: string[];
+      let discoveredWireModels = new Map<string, string>();
+      let discoveredXaiModels = new Map<string, XaiOAuthModel>();
       let accountCodexRuntime: CodexAccountRuntime | undefined;
-      if (providerId !== "openai-codex" && modelsMode === "manual") {
+      let accountXaiRuntime: XaiAccountRuntime | undefined;
+      if (providerId === "xai") {
+        // grok-build's catalog `id` is the directory key while `model` is the
+        // inference slug. Only Responses entries are routable because that is the
+        // sole xAI transport Helm implements today; every other backend stays visible
+        // in listXaiOAuthModels metadata but fails closed here.
+        let catalog: XaiOAuthModel[];
+        let discoverySucceeded = false;
+        try {
+          const metadata = tm.currentMetadata();
+          catalog = await listXaiOAuthModels(accessToken, proxyFetch, {
+            identity: {
+              userId: identityString(metadata.accountId),
+              email: identityString(metadata.email),
+            },
+          });
+          discoverySucceeded = true;
+        } catch {
+          // A validated account-scoped structured LKG preserves the catalog id,
+          // wire model and request defaults. Never fall back to guessed public API
+          // ids or the generic string discovery cache.
+          catalog = s.xaiDiscoveredModels ?? [];
+        }
+        if (
+          discoverySucceeded &&
+          !(await saveAccountXaiDiscoveredModels(config, oauthCtx.encKey, account, catalog))
+        ) {
+          log("warn", "oauth.models.snapshot_write_failed", { providerId, account });
+        }
+        const routable = catalog.filter(isRoutableXaiOAuthModel);
+        const enabled = modelsMode === "manual" ? new Set(s.enabledModels ?? []) : undefined;
+        const selected = enabled ? routable.filter((model) => enabled.has(model.id)) : routable;
+        discovered = selected.map((model) => model.id);
+        discoveredWireModels = new Map(selected.map((model) => [model.id, model.model]));
+        discoveredXaiModels = new Map(selected.map((model) => [model.id, model]));
+        accountXaiRuntime = {
+          modelsByWireModel: new Map(selected.map((model) => [model.model, model])),
+        };
+      } else if (providerId !== "openai-codex" && modelsMode === "manual") {
         discovered = s.enabledModels ?? [];
       } else if (providerId === "openai-codex" && codex) {
         const clientVersion = codex.clientVersion ?? DEFAULT_OPENAI_CODEX_CLIENT_VERSION;
@@ -991,7 +1057,55 @@ export async function synthesizeOAuthProviders(
         log("warn", "oauth.autoroute.no_models", { providerId, account });
         continue;
       }
-      for (const m of discovered) unionModels.add(m);
+      let memberModels = discovered;
+      if (providerId === "xai") {
+        const acceptedIds: string[] = [];
+        const acceptedWireModels: string[] = [];
+        for (const id of discovered) {
+          const wireModel = discoveredWireModels.get(id);
+          if (!wireModel) continue;
+          const alias = `${providerId}/${id}`;
+          const modelMetadata = discoveredXaiModels.get(id);
+          const existingMetadata = xaiModels.get(alias);
+          if (
+            modelMetadata &&
+            existingMetadata &&
+            JSON.stringify(existingMetadata) !== JSON.stringify(modelMetadata)
+          ) {
+            log("warn", "oauth.autoroute.model_metadata_conflict", {
+              providerId,
+              account,
+              model: id,
+            });
+            continue;
+          }
+          const existing = unionWireModels.get(id);
+          if (existing !== undefined && existing !== wireModel) {
+            log("warn", "oauth.autoroute.model_mapping_conflict", {
+              providerId,
+              account,
+              model: id,
+            });
+            continue;
+          }
+          unionModels.add(id);
+          unionWireModels.set(id, wireModel);
+          if (modelMetadata) xaiModels.set(alias, modelMetadata);
+          acceptedIds.push(id);
+          acceptedWireModels.push(wireModel);
+        }
+        discovered = acceptedIds;
+        memberModels = acceptedWireModels;
+      } else {
+        for (const model of discovered) {
+          unionModels.add(model);
+          unionWireModels.set(model, model);
+        }
+      }
+      if (discovered.length === 0) {
+        log("warn", "oauth.autoroute.no_models", { providerId, account });
+        continue;
+      }
       // Bind the quota-header scrape to THIS account (providers page Tier 3): the
       // Codex client invokes it with each reply's headers; synthesis closes over the
       // account so the snapshot is attributed correctly. undefined ⇒ no capture.
@@ -1010,6 +1124,7 @@ export async function synthesizeOAuthProviders(
         { baseUrl: fallbackBaseUrl, timeoutMs },
         onResponseMeta,
         accountCodexRuntime,
+        accountXaiRuntime,
       );
       if (!client) continue; // unreachable (token just refreshed) — fail-open guard
       // Serialize user-message requests per account (issue #93, feature B). The
@@ -1031,7 +1146,7 @@ export async function synthesizeOAuthProviders(
         account,
         priority: s.priority ?? 50,
         schedulable: true,
-        models: discovered,
+        models: memberModels,
         client: serialized,
         isAtCapacity: userMessageQueue
           ? () => {
@@ -1050,6 +1165,14 @@ export async function synthesizeOAuthProviders(
         quotaCapturedAtMs: quotaSeed?.capturedAt,
         quotaResetCredits: quotaSeed?.resetCredits ?? null,
       });
+      if (providerId === "xai") {
+        for (const id of discovered) {
+          const alias = `${providerId}/${id}`;
+          const accounts = xaiModelAccounts.get(alias) ?? [];
+          if (!accounts.includes(account)) accounts.push(account);
+          xaiModelAccounts.set(alias, accounts);
+        }
+      }
     }
 
     if (members.length === 0 || unionModels.size === 0) {
@@ -1062,6 +1185,10 @@ export async function synthesizeOAuthProviders(
       members,
       now: () => Date.now(),
       selectionStrategy,
+      // grok-build treats only inference 401 as an invalid xAI credential. A 403 can
+      // be a policy/content denial and must reach normal fallback without parking the
+      // subscription account. Other OAuth providers keep the legacy 401/403 policy.
+      upstreamCredentialFailureStatuses: providerId === "xai" ? [401] : undefined,
       onSelect: (account, selection) => {
         log("info", "oauth.pool.select", {
           providerId,
@@ -1102,7 +1229,10 @@ export async function synthesizeOAuthProviders(
       // The synthetic config keeps an oauth preset (informational); the pool
       // client below overrides any single-account client for this provider name.
       oauth: { provider: providerId, account: members[0]?.account ?? "default" },
-      models: [...unionModels].map((m) => ({ alias: `${providerId}/${m}`, provider_model: m })),
+      models: [...unionModels].map((model) => ({
+        alias: `${providerId}/${model}`,
+        provider_model: unionWireModels.get(model) ?? model,
+      })),
       targetProviderProtocol: spec.targetProviderProtocol,
       providerRequiresCompatibilityRewrite: spec.providerRequiresCompatibilityRewrite,
     } as unknown as ProviderConfigShared);
@@ -1113,7 +1243,7 @@ export async function synthesizeOAuthProviders(
       selection_strategy: selectionStrategy,
     });
   }
-  return { providers, poolClients, codexKeys };
+  return { providers, poolClients, codexKeys, xaiModels, xaiModelAccounts };
 }
 
 // Per-account egress proxy resolver (issue #38 follow-up). A preset OAuth provider
@@ -1322,6 +1452,9 @@ function createProviderClient(
   // Account-scoped Codex catalog + identity contract. Present only for synthesized
   // ChatGPT subscription accounts; generic Responses providers do not consume it.
   codexRuntime?: CodexAccountRuntime,
+  // Account-scoped xAI catalog metadata keyed by the actual inference wire model.
+  // Omitted for static providers and connectivity probes that did no discovery.
+  xaiRuntime?: XaiAccountRuntime,
 ): ProviderClient {
   // One proxy fetch per client (the executor keeps one client per account, so the
   // undici dispatcher is pooled per account). Built ONCE here, not per request.
@@ -1453,9 +1586,29 @@ function createProviderClient(
             requestContract: {
               forceSse: true,
               forceStoreFalse: true,
+              ensureReasoningEncryptedContent: true,
               ensureInstructions: true,
               rejectPreviousResponseId: true,
-              requestHeaders: ({ model }: { model: string }) => xaiGrokInferenceHeaders(model),
+              resolveModelRequestDefaults: (model: string) => {
+                const metadata = xaiRuntime?.modelsByWireModel.get(model);
+                return metadata
+                  ? {
+                      ...(metadata.streamToolCalls !== undefined
+                        ? { streamToolCalls: metadata.streamToolCalls }
+                        : {}),
+                      ...(metadata.maxCompletionTokens !== undefined
+                        ? { maxCompletionTokens: metadata.maxCompletionTokens }
+                        : {}),
+                    }
+                  : undefined;
+              },
+              requestHeaders: ({ model }: { model: string }) =>
+                xaiGrokInferenceHeaders(model, process.env, {
+                  userId:
+                    "currentMetadata" in cred
+                      ? identityString(cred.currentMetadata().accountId)
+                      : undefined,
+                }),
             },
           }
         : {}),
@@ -2348,10 +2501,19 @@ export async function buildServer(
   // set + the live pool.
   const aliasSetOf = (synth: SynthesizedOAuth): Set<string> =>
     new Set(synth.providers.flatMap((p) => p.models.map((m) => m.alias)));
+  const wireModelsOf = (synth: SynthesizedOAuth): Map<string, string> =>
+    new Map(
+      synth.providers.flatMap((provider) =>
+        provider.models.map((model) => [model.alias, model.provider_model] as const),
+      ),
+    );
   // Publish the synthesized pool into the live handle declared above (the park/reset
   // closures read it). Reassigned, not redeclared — same binding the rebuild swaps.
   oauthPoolClients = synthesizedOAuth.poolClients;
   let oauthAliasSet = aliasSetOf(synthesizedOAuth);
+  let oauthWireModelMap = wireModelsOf(synthesizedOAuth);
+  let xaiOAuthModelMap = synthesizedOAuth.xaiModels;
+  let xaiOAuthModelAccounts = synthesizedOAuth.xaiModelAccounts;
   let providerClients = new Map<string, ProviderClient>([
     ...configuredClients,
     ...oauthPoolClients,
@@ -2384,6 +2546,9 @@ export async function buildServer(
         );
         oauthPoolClients = next.poolClients;
         oauthAliasSet = aliasSetOf(next);
+        oauthWireModelMap = wireModelsOf(next);
+        xaiOAuthModelMap = next.xaiModels;
+        xaiOAuthModelAccounts = next.xaiModelAccounts;
         providerClients = new Map<string, ProviderClient>([
           ...configuredClients,
           ...oauthPoolClients,
@@ -2555,7 +2720,9 @@ export async function buildServer(
     if (prefix && ROUTABLE_OAUTH_IDS.has(prefix)) {
       if (!oauthAliasSet.has(alias)) return null;
       const client = providerClients.get(prefix);
-      return client ? { client, providerModel: alias.slice(slash + 1) } : null;
+      return client
+        ? { client, providerModel: oauthWireModelMap.get(alias) ?? alias.slice(slash + 1) }
+        : null;
     }
 
     const resolved = registry.resolve(alias);
@@ -2860,6 +3027,8 @@ export async function buildServer(
             // disconnect take effect immediately and never cross provider boundaries.
             knownOAuthPrefixes: ROUTABLE_OAUTH_IDS,
             oauthAliases: () => oauthAliasSet,
+            oauthWireModels: () => oauthWireModelMap,
+            xaiOAuthModels: () => xaiOAuthModelMap,
             // Native protocol passthrough (issue #217): the OAuth pool aliases never
             // reach the registry, so hand the executor the prefix→wire-protocol map
             // so it knows an Anthropic-subscription alias forwards on the
@@ -3038,6 +3207,11 @@ export async function buildServer(
             codexCatalog: codexModelCatalog,
             codexClientVersion,
             modelDiscoveryCache: oauthModelDiscoveryCache,
+            xaiRuntimeModelOptions: () =>
+              [...xaiOAuthModelAccounts.entries()].map(([alias, accounts]) => ({
+                alias,
+                accounts,
+              })),
           })
         : [];
       const byAlias = new Map<string, ModelOption>();

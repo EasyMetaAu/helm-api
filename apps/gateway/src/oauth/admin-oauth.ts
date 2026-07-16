@@ -5,7 +5,6 @@ import {
   beginOpenAICodexLogin,
   beginXaiDeviceLogin,
   buildOpenAICodexUserAgent,
-  buildXaiGrokCreditsRequest,
   type ConfigStore,
   type CopilotDeviceStart,
   completeAnthropicLogin,
@@ -18,7 +17,9 @@ import {
   expandOpenAICodexModelAliases,
   getOAuthProvider,
   hasLiveModelDiscovery,
+  isRoutableXaiOAuthModel,
   listOpenAICodexModels,
+  listXaiOAuthModels,
   makeProxyFetch,
   type OAuthCredentials,
   type OAuthTokenStore,
@@ -34,7 +35,9 @@ import {
   pollCopilotDeviceOnce,
   pollXaiDeviceOnce,
   refreshGitHubCopilotToken,
+  resolveXaiGrokClientVersion,
   validateProxyConfig,
+  XAI_GROK_OAUTH_BASE_URL,
   type XaiDeviceStart,
 } from "@helm/core";
 import { CodexOAuthUsageSchema, type OAuthQuotaWindow } from "@helm/shared";
@@ -64,6 +67,7 @@ import {
   markAccountCredentialFailure,
   resolveAccountModelsMode,
   saveAccountDiscoveredModels,
+  saveAccountXaiDiscoveredModels,
   setAccountSettings,
   setGlobalOAuthSettings,
 } from "./account-settings.js";
@@ -105,11 +109,13 @@ const QUOTA_FETCH_TIMEOUT_MS = 8_000;
 const RESET_CREDIT_DETAILS_TIMEOUT_MS = 5_000;
 const RESET_CREDIT_CONSUME_TIMEOUT_MS = 10_000;
 const ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
-const XAI_GROK_CREDITS_URL = "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig";
+const XAI_GROK_CREDITS_URL = `${XAI_GROK_OAUTH_BASE_URL}/billing?format=credits`;
 const XAI_GROK_CREDITS_HEADERS = {
-  accept: "application/grpc-web+proto",
-  "content-type": "application/grpc-web+proto",
-  "x-grpc-web": "1",
+  accept: "application/json",
+  "X-XAI-Token-Auth": "xai-grok-cli",
+  // Helm is a non-interactive gateway process; this is the official Grok Build
+  // process mode for headless requests.
+  "x-grok-client-mode": "headless",
 } as const;
 const XAI_GROK_CREDITS_MAX_RESPONSE_BYTES = 1024 * 1024;
 const ANTHROPIC_USAGE_HEADERS = {
@@ -182,6 +188,12 @@ async function readBoundedBinaryResponse(
     offset += chunk.byteLength;
   }
   return body;
+}
+
+async function readBoundedJsonResponse(response: Response, maxBytes: number): Promise<unknown> {
+  const bytes = await readBoundedBinaryResponse(response, maxBytes);
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  return JSON.parse(text) as unknown;
 }
 
 function codexResetCreditDetails(body: unknown): {
@@ -528,6 +540,37 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
   ): Promise<{ available: string[]; entitled: string[] }> {
     const provider = getOAuthProvider(providerId);
     if (!provider) return { available: [], entitled: [] };
+    if (providerId === XAI) {
+      const lkg = (settings.xaiDiscoveredModels ?? [])
+        .filter(isRoutableXaiOAuthModel)
+        .map((model) => model.id);
+      try {
+        const accountFetch = makeFetch(settings.proxy as ProxyConfig | undefined);
+        const tm = createTokenManager({
+          oauth: { kind: "preset", providerId, account },
+          tokenStore: deps.store,
+          encKey: deps.encKey,
+          oauthProvider: provider,
+          fetch: accountFetch,
+          now,
+        });
+        const accessToken = (await tm.getAuthHeader()).replace(/^Bearer /, "");
+        const metadata = tm.currentMetadata();
+        const live = await listXaiOAuthModels(accessToken, accountFetch, {
+          identity: {
+            userId: identityString(metadata.accountId),
+            email: identityString(metadata.email),
+          },
+        });
+        if (!(await saveAccountXaiDiscoveredModels(deps.config, deps.encKey, account, live))) {
+          log("warn", "oauth.models.snapshot_write_failed", { providerId, account });
+        }
+        const available = live.filter(isRoutableXaiOAuthModel).map((model) => model.id);
+        return { available, entitled: available };
+      } catch {
+        return { available: lkg, entitled: lkg };
+      }
+    }
     if (providerId !== CODEX) {
       const discoveryKey = { providerId, account };
       const available = await modelDiscoveryCache.load(
@@ -760,6 +803,16 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           sch,
           options.forceRefresh,
         );
+      } else if (r.providerId === XAI) {
+        // Runtime synthesis deliberately bypasses the generic string cache for xAI:
+        // catalog id, wire model, and per-model request defaults are inseparable.
+        // Cached Providers status must project that same validated structured LKG,
+        // otherwise it can show stale/empty models while the live pool and Lane
+        // picker correctly expose the account.
+        const cached = (sch.xaiDiscoveredModels ?? [])
+          .filter(isRoutableXaiOAuthModel)
+          .map((model) => model.id);
+        discovered = { available: cached, entitled: cached };
       } else if (r.providerId === CODEX) {
         const cached = await codexCatalogModels(r.account);
         discovered = { available: cached?.visible ?? [], entitled: cached?.entitled ?? [] };
@@ -1205,15 +1258,21 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           now,
         });
         const authorization = await tm.getAuthHeader();
+        const userId = identityString(tm.currentMetadata().accountId);
+        if (!userId) throw new Error("xAI OAuth credential is missing its user id");
         const res = await doFetch(XAI_GROK_CREDITS_URL, {
-          method: "POST",
-          headers: { ...XAI_GROK_CREDITS_HEADERS, authorization },
-          body: buildXaiGrokCreditsRequest({ excludeLegacyMonthlyUsage: true }),
+          method: "GET",
+          headers: {
+            ...XAI_GROK_CREDITS_HEADERS,
+            authorization,
+            "x-userid": userId,
+            "x-grok-client-version": resolveXaiGrokClientVersion(),
+          },
           redirect: "error",
           signal: AbortSignal.timeout(QUOTA_FETCH_TIMEOUT_MS),
         });
         if (res.ok) {
-          const body = await readBoundedBinaryResponse(res, XAI_GROK_CREDITS_MAX_RESPONSE_BYTES);
+          const body = await readBoundedJsonResponse(res, XAI_GROK_CREDITS_MAX_RESPONSE_BYTES);
           windows = parseXaiGrokCreditsResponse(body, now());
           if (windows.length === 0) {
             log("warn", "oauth.quota.pull_empty", { provider_id: XAI, account });

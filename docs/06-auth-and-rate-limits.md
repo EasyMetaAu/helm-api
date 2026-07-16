@@ -314,9 +314,11 @@ Quota collection is intentionally fail-open:
   fetch upstream, park/unpark an account, or consume a reset credit. They only
   project the last stored state.
 - Anthropic quota windows are pulled from the provider usage endpoint.
-- Experimental xAI/SuperGrok weekly quota is read from the private grok.com
-  gRPC-Web credits method using the account's existing OAuth bearer and proxy.
-  It is not treated as a stable public API contract and fails open to cached or
+- Experimental xAI/SuperGrok weekly quota follows the first-party grok-build
+  transport: `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits`
+  with the account's existing OAuth bearer, identity headers, client version,
+  headless mode, and proxy. Only the current weekly period is projected. This
+  is not treated as a stable public API contract and fails open to cached or
   unknown state.
 - Missing, stale, or failed quota reads render as unknown in the UI and make
   quota-aware strategies fall back toward the balanced behavior.
