@@ -45,7 +45,7 @@ export const PolicySchema = z
     id: z.string().min(1).optional(),
     match: PolicyMatchSchema,
     use_lane: z.string().min(1).optional(),
-    allowed_lanes: z.array(z.string().min(1)).optional(),
+    allowed_lanes: z.array(z.string().min(1)).min(1).optional(),
     // Policy-forced reasoning effort. Same strict config enum as lanes: unknown
     // values fail closed at config/API validation instead of normalizing.
     reasoning_effort: ReasoningEffortSchema.optional(),

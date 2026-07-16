@@ -40,11 +40,12 @@
   async function handleSave(): Promise<void> {
     error = null;
     saving = true;
-    // Send the WHOLE editable set (explicit null clears a cap) — overwrite intent.
+    // Send the editable set (explicit null clears a cap). allowed_lanes is the one
+    // tri-state exception: omit it when untouched so a legacy deny-all [] is not
+    // silently widened to unrestricted null while editing an unrelated field.
     // `?? null` also catches the `undefined` Svelte 5 gives an emptied number input.
     const patch: UpdateKeyInput = {
       name: name.trim().length > 0 ? name.trim() : null,
-      allowed_lanes: form.allowedLanes.length > 0 ? [...form.allowedLanes] : null,
       allow_custom_model: form.allowCustomModel,
       blocked_models: form.blockedModels.length > 0 ? [...form.blockedModels] : null,
       allow_fast_mode: form.allowFastMode,
@@ -61,13 +62,16 @@
       memory_project_id: form.memoryProject.length > 0 ? form.memoryProject : null,
       memory_thread_source: form.memoryThreadSource,
     };
+    if (form.allowedLanesTouched) {
+      patch.allowed_lanes = form.allowedLanes.length > 0 ? [...form.allowedLanes] : null;
+    }
     try {
       await updateKey(key.key_id, patch);
       // Project the updated redacted view (role/prefix carried over unchanged).
       onsaved({
         ...key,
         name: patch.name ?? null,
-        allowed_lanes: patch.allowed_lanes ?? null,
+        allowed_lanes: form.allowedLanesTouched ? (patch.allowed_lanes ?? null) : key.allowed_lanes,
         allow_custom_model: form.allowCustomModel,
         blocked_models: patch.blocked_models ?? null,
         allow_fast_mode: form.allowFastMode,

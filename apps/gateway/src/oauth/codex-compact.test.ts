@@ -69,6 +69,19 @@ describe("resolveCodexCompactModel", () => {
     ).toBe("gpt-5.6-luna");
   });
 
+  it("keeps a direct concrete Codex model available when allowed lanes are deny-all", () => {
+    expect(
+      resolveCodexCompactModel({
+        requestedModel: "openai-codex/gpt-5.6-luna",
+        lanes,
+        modelAliases,
+        oauthAliases,
+        allowCustomModel: true,
+        allowedLanes: [],
+      }),
+    ).toBe("gpt-5.6-luna");
+  });
+
   it("rejects unavailable, blocked, forbidden-lane, and non-custom requests", () => {
     expect(
       resolveCodexCompactModel({
@@ -87,6 +100,16 @@ describe("resolveCodexCompactModel", () => {
         oauthAliases,
         allowCustomModel: true,
         allowedLanes: ["gpt-5.6"],
+      }),
+    ).toBeNull();
+    expect(
+      resolveCodexCompactModel({
+        requestedModel: "balanced",
+        lanes,
+        modelAliases,
+        oauthAliases,
+        allowCustomModel: true,
+        allowedLanes: [],
       }),
     ).toBeNull();
     expect(

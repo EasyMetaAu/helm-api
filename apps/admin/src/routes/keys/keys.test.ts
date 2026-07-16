@@ -353,6 +353,32 @@ describe('keys page', () => {
     expect(row.textContent).not.toMatch(/\d{5,}/);
   });
 
+  it('shows a legacy empty allowed-lanes whitelist as deny-all, not no cap', () => {
+    renderPage([key('k1', { allowed_lanes: [] })]);
+    const row = screen.getByTestId('key-row');
+    expect(row).toHaveTextContent(/Allowed lanes:\s*None/i);
+    expect(row).not.toHaveTextContent(/Allowed lanes:\s*No cap/i);
+  });
+
+  it('preserves a legacy deny-all whitelist when another field is edited', async () => {
+    renderPage([key('k1', { name: 'Before', allowed_lanes: [] })]);
+    await fireEvent.click(
+      within(screen.getByTestId('key-row')).getByRole('button', { name: /^edit$/i }),
+    );
+    const dialog = screen.getByRole('dialog', { name: /edit key/i });
+    await fireEvent.input(within(dialog).getByLabelText('Name'), {
+      target: { value: 'After' },
+    });
+    await fireEvent.click(within(dialog).getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => expect(updateKey).toHaveBeenCalledOnce());
+    const patch = updateKey.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(patch).not.toHaveProperty('allowed_lanes');
+    await waitFor(() =>
+      expect(screen.getByTestId('key-row')).toHaveTextContent(/Allowed lanes:\s*None/i),
+    );
+  });
+
   it('Edit opens a dialog and PATCHes the full editable cap set via updateKey', async () => {
     renderPage([key('k1', { rate_limit_rpm: null, rate_limit_tpm: null })]);
     const row = screen.getByTestId('key-row');

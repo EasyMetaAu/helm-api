@@ -164,6 +164,31 @@ describe("buildModelsList", () => {
     expect(list.data.find((m) => m.id === "deepseek/pro")?.lanes).toEqual(["economy"]);
   });
 
+  it("does not advertise auto when an empty whitelist permits no lane", () => {
+    const list = buildModelsList({
+      lanes,
+      catalog,
+      providerAliases,
+      allowCustomModel: false,
+      allowedLanes: [],
+    });
+    expect(list.data).toEqual([]);
+  });
+
+  it("still advertises direct concrete models to a custom-model key with no allowed lanes", () => {
+    const list = buildModelsList({
+      lanes,
+      catalog,
+      providerAliases,
+      allowCustomModel: true,
+      allowedLanes: [],
+    });
+    const ids = list.data.map((model) => model.id);
+    expect(ids).toEqual(["deepseek/flash", "deepseek/pro", "openai/o"]);
+    expect(list.data.every((model) => model.type === "model")).toBe(true);
+    expect(list.data.every((model) => model.lanes?.length === 0)).toBe(true);
+  });
+
   it("an alias absent from the catalog still lists (no capabilities/pricing)", () => {
     const list = buildModelsList({
       lanes,

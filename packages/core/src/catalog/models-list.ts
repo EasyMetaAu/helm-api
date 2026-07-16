@@ -76,15 +76,18 @@ export function buildModelsList(input: BuildModelsListInput): ModelsList {
     });
   }
 
-  // 2) The `auto` directive — always selectable; the router picks within the
-  //    key's allowed lanes. Carries no lane membership.
-  data.push({
-    id: AUTO_ID,
-    object: "model",
-    created: CREATED,
-    owned_by: OWNER_HELM,
-    type: "lane",
-  });
+  // 2) The `auto` directive — selectable only when at least one lane is actually
+  // usable by this key. An empty allowed_lanes whitelist is deny-all and must not
+  // advertise a directive that deterministic routing will reject.
+  if (visibleLanes.length > 0) {
+    data.push({
+      id: AUTO_ID,
+      object: "model",
+      created: CREATED,
+      owned_by: OWNER_HELM,
+      type: "lane",
+    });
+  }
 
   // 3) Concrete aliases — only for keys allowed to name a model directly.
   if (allowCustomModel) {

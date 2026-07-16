@@ -108,7 +108,7 @@ The stored record (`ApiKeyRecord`, single source of truth in
   account_id: string,
   role: "root" | "user",
   name: string | null,      // operator-facing label; never an auth/routing input
-  allowed_lanes: string[] | null,   // allow-list of lanes (empty/null = any lane)
+  allowed_lanes: string[] | null,   // null = unrestricted; legacy [] = deny every lane
   allow_custom_model: boolean,      // may the client pin a model OR lane directly?
   blocked_models: string[] | null,  // case-insensitive model denylist patterns; supports * and ?
   allow_fast_mode: boolean,         // may client-requested subscription Fast mode pass through?
@@ -149,7 +149,9 @@ through the request — downstream code reads the caps, never the store.
   `allow_fast_mode`, rate/budget/concurrency controls, and memory defaults
   constrain how a key may route. `allow_custom_model` lets the `model` field name
   a concrete model alias or a lane (docs/04); an explicit lane is still bounded by
-  `allowed_lanes` and a violation is a 400, not a silent downgrade.
+  `allowed_lanes` and a violation is a 400, not a silent downgrade. Policy and key
+  lane whitelists are intersected; a disjoint result denies routing before any
+  provider call. New key writes reject `[]`; use `null` to remove the whitelist.
   `blocked_models` is independent of passthrough: direct requests for a blocked
   concrete model are rejected, while automatic routing, lane routing, and
   execution fallback chains filter blocked concrete aliases out before serving.
@@ -259,10 +261,11 @@ per key via `over_budget_behavior`:
   `degrade_lane`** (default `economy`), then served normally, so cost is bounded
   **without interrupting service**. This is a *forced lane selection*, not a rank
   ceiling, so it works even when the target is a task lane (`coding`, `json`, …).
-  The forced lane is
-  still clamped to the key's `allowed_lanes`, and explicit-model/lane passthrough
-  is **suppressed** while degrading — a degrading key cannot bypass the cap by
-  naming an expensive model or lane.
+  The effective policy/key whitelist may keep that target or move it to a
+  provably cheaper ranked lane. It can never upgrade a degrading request: if the
+  whitelist permits only stronger lanes, routing fails closed before contacting a
+  provider. Explicit-model/lane passthrough is **suppressed** while degrading — a
+  degrading key cannot bypass the cap by naming an expensive model or lane.
 - **`reject`** — a hard `429 rate_limited` (message `usage budget exceeded`),
   before classify/route.
 

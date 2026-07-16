@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { applyCaps, evaluatePolicies, LANE_RANK, type PolicyContext } from "./policy-engine.js";
+import {
+  applyCaps,
+  evaluatePolicies,
+  intersectAllowedLanes,
+  LANE_RANK,
+  type PolicyContext,
+} from "./policy-engine.js";
 import type { PoliciesConfig } from "./policy-schema.js";
 
 const baseCtx: PolicyContext = {
@@ -76,6 +82,17 @@ describe("evaluatePolicies — first-match", () => {
     const out = evaluatePolicies(baseCtx, c);
     expect(out.use_lane).toBe("premium");
     expect(out.allowed_lanes).toEqual(["economy", "balanced"]); // intersection
+  });
+
+  it("preserves an empty intersection so disjoint restrictions deny every lane", () => {
+    const out = evaluatePolicies(
+      baseCtx,
+      cfg([
+        { id: "cheap-only", match: { task_type: "coding" }, allowed_lanes: ["economy"] },
+        { id: "strong-only", match: { complexity: "complex" }, allowed_lanes: ["premium"] },
+      ]),
+    );
+    expect(out.allowed_lanes).toEqual([]);
   });
 
   it("returns all-null outcome when nothing matches", () => {
@@ -167,6 +184,10 @@ describe("applyCaps — allowed_lanes", () => {
     expect(applyCaps("economy", outcome)).toBe("economy");
   });
 
+  it("returns no lane for an explicit empty whitelist", () => {
+    expect(applyCaps("balanced", { ...outcome, allowed_lanes: [] })).toBeNull();
+  });
+
   it("falls back to the lowest-ranked allowed lane when no allowed lane is <= candidate", () => {
     const out = {
       matched_policy_id: "p",
@@ -192,6 +213,15 @@ describe("applyCaps — allowed_lanes", () => {
     };
     expect(applyCaps("coding", out)).toBe("balanced");
     expect(applyCaps("claude-opus", out)).toBe("balanced");
+  });
+});
+
+describe("intersectAllowedLanes", () => {
+  it("treats null as unconstrained and preserves a disjoint empty intersection", () => {
+    expect(intersectAllowedLanes(null, null)).toBeNull();
+    expect(intersectAllowedLanes(null, ["economy"])).toEqual(["economy"]);
+    expect(intersectAllowedLanes(["economy"], null)).toEqual(["economy"]);
+    expect(intersectAllowedLanes(["economy"], ["premium"])).toEqual([]);
   });
 });
 

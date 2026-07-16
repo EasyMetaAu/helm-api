@@ -123,7 +123,7 @@ export const CreateKeyRequestSchema = z
     role: KeyRoleSchema.default("user"),
     // Optional human-readable label at mint time (omitted => unnamed). Cosmetic only.
     name: KeyNameSchema.optional(),
-    allowed_lanes: z.array(z.string().min(1)).optional(),
+    allowed_lanes: z.array(z.string().min(1)).min(1).optional(),
     allow_custom_model: z.boolean().optional(),
     blocked_models: z.array(z.string().trim().min(1)).optional(),
     allow_fast_mode: z.boolean().optional(),
@@ -170,7 +170,7 @@ export const UpdateKeyRequestSchema = z
   .object({
     // Rename a key after mint. Omit = leave unchanged; null = clear back to unnamed.
     name: KeyNameSchema.nullable().optional(),
-    allowed_lanes: z.array(z.string().min(1)).nullable().optional(),
+    allowed_lanes: z.array(z.string().min(1)).min(1).nullable().optional(),
     allow_custom_model: z.boolean().optional(),
     blocked_models: BlockedModelsSchema.optional(),
     allow_fast_mode: z.boolean().optional(),

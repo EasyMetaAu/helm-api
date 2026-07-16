@@ -58,7 +58,7 @@ export function registerModelsRoute(app: Hono<AppEnv>, deps: ModelsRouteDeps): v
     const caps = identity.caps;
     // Fingerprint the only inputs that vary the output: the key's caps. lanes /
     // oauth aliases are process-wide, so TTL alone (not the key) covers their drift.
-    const fp = `${caps.allowCustomModel ? 1 : 0}|${(caps.allowedLanes ?? []).join(",")}|${[...(caps.blockedModels ?? [])].join(",")}`;
+    const fp = `${caps.allowCustomModel ? 1 : 0}|${JSON.stringify(caps.allowedLanes)}|${JSON.stringify(caps.blockedModels)}`;
     const now = Date.now();
     const hit = cache.get(fp);
     if (hit && now - hit.at < TTL_MS) return hit.value;

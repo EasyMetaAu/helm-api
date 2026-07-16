@@ -46,7 +46,7 @@ jobs:
         # RUNNER_TEMP before steps begin; GITHUB_ENV carries this path to every
         # later step, and the final always() cleanup removes it.
         run: echo "DOCKER_CONFIG=${RUNNER_TEMP}/helm-publish-docker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "${GITHUB_ENV}"
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0   # need full tag list to detect "already released"
           persist-credentials: false

@@ -95,6 +95,9 @@ function decide(c: PolicyContext): {
     lanes,
   });
   const cappedLane = applyCaps(laneDecision.selected_lane, outcome);
+  if (cappedLane === null) {
+    throw new Error("policy matrix row unexpectedly denied every lane");
+  }
   return {
     matched_policy_id: outcome.matched_policy_id,
     selected_lane: cappedLane,

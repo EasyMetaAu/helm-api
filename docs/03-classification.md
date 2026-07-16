@@ -159,15 +159,16 @@ touching code (principle 2). The shipped values are calibrated against a golden
 prompt set; rather than reproduce numbers that drift, read the live file. The
 salient defaults are `confidence_threshold: 0.42`, `sigmoid_k: 12`, and tier
 boundaries `{ standard: -0.06, complex: 0.30, reasoning: 0.85 }`. Treat
-`classifier.yaml` as the source of truth. Layer 1 is unconditionally executed in
-the current cascade: `rules.enabled` is accepted by the schema but is not read as
-a runtime off switch.
+`classifier.yaml` as the source of truth. `rules.enabled: false` skips Layer 1
+entirely, including momentum reads and writes. With eval enabled the request goes
+straight to Layer 2; with both layers disabled it uses the terminal fallback and
+records `rules_and_eval_disabled`.
 
 ## Layer 2: small-model eval
 
-When Layer 1 is uncertain (and `eval.enabled` is true), a cheap small model
-evaluates the content once, and its verdict decides the lane. It is **off by
-default**. The relevant block of `config/classifier.yaml`:
+When Layer 1 is uncertain—or deliberately disabled—and `eval.enabled` is true, a
+cheap small model evaluates the content and its verdict decides the lane. It is
+**off by default**. The relevant block of `config/classifier.yaml`:
 
 ```yaml
 classifier:
@@ -228,9 +229,10 @@ provider directly. In either case, eval token usage is converted to a separate
 
 Whenever the cascade falls to the terminal lane, the decision record distinguishes why:
 `eval_disabled` (uncertain but eval is off, so no Layer 2 ran) versus
+`rules_and_eval_disabled` (both classification layers were explicitly disabled) versus
 `eval_<timeout|provider_error|circuit_open|not_json|schema_invalid>` (eval ran but
 failed open).
 
-The cache is always used by the current classify adapter when Layer 2 runs.
-`eval.cache.enabled` is parsed but is not currently consulted as a runtime switch;
-the shipped value is `true`. TTL, key strategy, and LRU capacity are active.
+`eval.cache.enabled: false` bypasses key hashing plus cache reads and writes, so
+every Layer-2 decision is fresh and reports `eval_cache_hit: false`. With the
+shipped value `true`, TTL, content-hash keying, and LRU capacity remain active.

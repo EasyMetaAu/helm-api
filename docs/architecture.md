@@ -286,12 +286,14 @@ default**. The live terminal setting is `balanced` by default.
 
 ```mermaid
 flowchart TD
-    A["IR (last user turn + request shape)"] --> B["Layer 1 — local rules<br/>dimensions · session momentum · tiers · overrides · task detect"]
+    A["IR (last user turn + request shape)"] --> R{"rules.enabled?"}
+    R -- "yes" --> B["Layer 1 — local rules<br/>dimensions · session momentum · tiers · overrides · task detect"]
+    R -- "no" --> D
     B --> C{"rules confidence<br/>≥ threshold (0.42)?"}
     C -- "yes" --> RULES["decided_by = rules"]
     C -- "no" --> D{"eval.enabled?"}
-    D -- "no (shipped default)" --> FB["decided_by = fallback<br/>reason = eval_disabled"]
-    D -- "yes" --> E["Layer 2 — small-model eval<br/>temp 0 · cache (sha256 of 5 canonical fields)<br/>3s per candidate · 8s total shipped budgets"]
+    D -- "no (shipped default)" --> FB["decided_by = fallback<br/>reason = eval_disabled or rules_and_eval_disabled"]
+    D -- "yes" --> E["Layer 2 — small-model eval<br/>temp 0 · optional cache (sha256 of 5 canonical fields)<br/>3s per candidate · 8s total shipped budgets"]
     E --> F{"eval returned<br/>valid JSON verdict?"}
     F -- "yes" --> EVAL["decided_by = eval"]
     F -- "no (timeout / error / bad JSON)" --> FB
@@ -306,9 +308,10 @@ flowchart TD
 A high-confidence Layer-1 verdict **stops the cascade** — eval is never called,
 even when enabled. The eval cache is per-process and only stores *decided*
 results, so a transient upstream failure can't be amplified into a 300s outage.
-In the current adapter, `rules.enabled` and `eval.cache.enabled` are parsed but
-are not runtime off switches: rules always run and Layer-2 always uses its cache
-when eval itself is enabled.
+`rules.enabled: false` skips Layer 1 and routes directly to eval when available;
+if eval is also disabled, the cascade records `rules_and_eval_disabled` and uses
+the configured terminal lane. `eval.cache.enabled: false` runs every eval call
+fresh without hashing, reading, or populating the process cache.
 
 ---
 

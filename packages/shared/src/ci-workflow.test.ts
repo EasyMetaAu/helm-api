@@ -98,6 +98,9 @@ describe("CI workflow", () => {
       expect(job).toContain('["self-hosted","Linux","X64","docker"]');
       expect(job).toContain("refs/pull/{0}/merge");
       expect(job).toContain("fetch-depth: 2");
+      expect(job).toContain(
+        "allow-unsafe-pr-checkout: $" + "{{ github.event_name == 'pull_request_target' }}",
+      );
       expect(job).toContain("Verify PR merge ref matches event head");
       expect(job).toContain("github.event.pull_request.head.sha");
     }
@@ -115,6 +118,11 @@ describe("CI workflow", () => {
     }
     expect(report).not.toContain("actions/checkout@");
   });
+
+  it("disables package-manager caching explicitly without enabling pnpm cache", () => {
+    expect(raw.match(/package-manager-cache:\s*false/g)).toHaveLength(2);
+    expect(raw).not.toMatch(/^\s+cache:\s*(?:pnpm|true)\s*$/m);
+  });
 });
 
 describe("release workflow policy", () => {
@@ -123,9 +131,9 @@ describe("release workflow policy", () => {
 
   it("pins every external action and reusable workflow to an approved full commit SHA", () => {
     const expectedPins = new Map([
-      ["actions/checkout", "34e114876b0b11c390a56381ad16ebd13914f8d5"],
-      ["actions/setup-node", "49933ea5288caeca8642d1e84afbd3f7d6820020"],
-      ["pnpm/action-setup", "b906affcce14559ad1aafd4ab0e942779e9f58b1"],
+      ["actions/checkout", "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"],
+      ["actions/setup-node", "820762786026740c76f36085b0efc47a31fe5020"],
+      ["pnpm/action-setup", "0ebf47130e4866e96fce0953f49152a61190b271"],
     ]);
 
     const uses = [
@@ -145,6 +153,10 @@ describe("release workflow policy", () => {
       expect(matchingUses.length, `${action} must remain in the workflows`).toBeGreaterThan(0);
       expect(new Set(matchingUses)).toEqual(new Set([`${action}@${sha}`]));
     }
+  });
+
+  it("never enables unsafe PR checkout in the privileged publish workflow", () => {
+    expect(publishRaw).not.toContain("allow-unsafe-pr-checkout");
   });
 
   it("keeps the package-write Docker credential run-scoped on the persistent runner", () => {

@@ -6,6 +6,10 @@
   // can never drift apart. null = "leave unset" (inherit default / no cap).
   export type KeyCaps = {
     allowedLanes: string[];
+    // Distinguish an untouched legacy deny-all [] from an operator clearing a
+    // whitelist in this edit session. The API rejects new [], so an untouched
+    // legacy value must be omitted from PATCH rather than normalized to null.
+    allowedLanesTouched: boolean;
     allowCustomModel: boolean;
     blockedModels: string[];
     allowFastMode: boolean;
@@ -27,6 +31,7 @@
   export function emptyKeyCaps(): KeyCaps {
     return {
       allowedLanes: [],
+      allowedLanesTouched: false,
       allowCustomModel: false,
       blockedModels: [],
       allowFastMode: false,
@@ -51,6 +56,7 @@
   export function keyCapsFromView(key: ApiKeyView): KeyCaps {
     return {
       allowedLanes: [...(key.allowed_lanes ?? [])],
+      allowedLanesTouched: false,
       allowCustomModel: key.allow_custom_model,
       blockedModels: [...(key.blocked_models ?? [])],
       allowFastMode: key.allow_fast_mode,
@@ -124,6 +130,7 @@
   let openMemory = $state(untrack(() => expandConfigured && form.memoryMode !== 'off'));
 
   function toggleLane(lane: string, checked: boolean): void {
+    form.allowedLanesTouched = true;
     form.allowedLanes = checked
       ? [...form.allowedLanes, lane]
       : form.allowedLanes.filter((l) => l !== lane);

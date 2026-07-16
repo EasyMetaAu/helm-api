@@ -24,12 +24,7 @@ export function resolveCodexCompactModel(input: ResolveCodexCompactModelInput): 
   if (aliasTarget === "auto") return null;
   const target = aliasTarget ?? input.requestedModel;
   const isLane = Object.hasOwn(input.lanes, target);
-  if (
-    isLane &&
-    input.allowedLanes != null &&
-    input.allowedLanes.length > 0 &&
-    !input.allowedLanes.includes(target)
-  ) {
+  if (isLane && input.allowedLanes != null && !input.allowedLanes.includes(target)) {
     return null;
   }
   const candidates = isLane

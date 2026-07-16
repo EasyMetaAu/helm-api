@@ -63,6 +63,23 @@ describe('classifier page', () => {
     expect(evalToggle.checked).toBe(false);
   });
 
+  it('reports the live Layer-1 and eval-cache switches instead of claiming they are always on', () => {
+    const enabled = config();
+    const { unmount } = renderPage(enabled);
+    expect(screen.getByTestId('rules-runtime-status')).toHaveTextContent(/rules are enabled/i);
+    expect(screen.getByTestId('eval-cache-runtime-status')).toHaveTextContent(/cache is enabled/i);
+    unmount();
+
+    const disabled = config();
+    disabled.rules.enabled = false;
+    disabled.eval.cache.enabled = false;
+    renderPage(disabled);
+    expect(screen.getByTestId('rules-runtime-status')).toHaveTextContent(/rules are disabled/i);
+    expect(screen.getByTestId('rules-runtime-status')).toHaveTextContent(/terminal fallback lane/i);
+    expect(screen.getByTestId('eval-cache-runtime-status')).toHaveTextContent(/cache is disabled/i);
+    expect(screen.getByTestId('eval-cache-runtime-status')).toHaveTextContent(/runs fresh/i);
+  });
+
   it('toggling eval on then saving calls saveClassifier({ eval_enabled: true })', async () => {
     renderPage(config());
     const evalToggle = screen.getByRole('checkbox', { name: /eval/i });

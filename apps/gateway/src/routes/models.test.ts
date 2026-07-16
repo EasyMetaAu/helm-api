@@ -112,6 +112,39 @@ describe("GET /v1/models", () => {
     expect(body.data.every((m) => m.type === "lane")).toBe(true);
   });
 
+  it("keeps null and empty allowed_lanes in separate cache buckets", async () => {
+    const unrestrictedSecret = "helm_live_unrestricted";
+    const deniedSecret = "helm_live_denied";
+    const unrestricted = record({
+      key_id: "free",
+      hash: hashKey(unrestrictedSecret),
+      allowed_lanes: null,
+    });
+    const denied = record({ key_id: "denied", hash: hashKey(deniedSecret), allowed_lanes: [] });
+    const getByHash = vi.fn(async (hash: string) => {
+      if (hash === unrestricted.hash) return unrestricted;
+      if (hash === denied.hash) return denied;
+      return null;
+    });
+    const lanesSpy = vi.fn(() => lanes);
+    const app = createApp({ logger: { log: () => {} } });
+    app.use("/v1/models", authMiddleware({ keyStore: { getByHash }, log: () => {} }));
+    registerModelsRoute(app, { lanes: lanesSpy, catalog, providerAliases });
+
+    const free = (await (
+      await app.request("/v1/models", {
+        headers: { Authorization: `Bearer ${unrestrictedSecret}` },
+      })
+    ).json()) as ModelsList;
+    const none = (await (
+      await app.request("/v1/models", { headers: { Authorization: `Bearer ${deniedSecret}` } })
+    ).json()) as ModelsList;
+
+    expect(free.data.map((model) => model.id)).toEqual(["economy", "balanced", "auto"]);
+    expect(none.data).toEqual([]);
+    expect(lanesSpy).toHaveBeenCalledTimes(2);
+  });
+
   it("allow_custom_model key: appends aliases with capabilities + pricing", async () => {
     const res = await buildApp(record({ allow_custom_model: true })).request("/v1/models", {
       headers: AUTH,

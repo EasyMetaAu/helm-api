@@ -92,6 +92,10 @@ export async function runEvalCached(
   deps: EvalCachedDeps,
 ): Promise<EvalDecision & { cache_hit: boolean }> {
   const { cache, nowMs, runEval: runEvalImpl = runEval, ...clientDeps } = deps;
+  if (!clientDeps.config.cache.enabled) {
+    const decision = await runEvalImpl(input, clientDeps);
+    return { ...decision, cache_hit: false };
+  }
   const key = buildEvalCacheKey(input);
 
   const cached = cache.get(key, nowMs);

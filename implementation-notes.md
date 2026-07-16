@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-07-16 · 路由白名单改为真实交集并让分类开关兑现配置语义（Routing / classifier / CI，docs/03/04/06/09，原则 2/3/5/6/7）
+
+- **白名单边界**：Policy 与 API key 的 `allowed_lanes` 不再先后 clamp，而是先求真实交集；`null` 表示无约束，动态交集 `[]` 表示没有任何 lane 可执行并在 provider 前返回结构化 `invalid_request`。新建/更新 key 与静态 policy 拒绝显式空数组，清除 key 限制必须传 `null`；旧库中的 `[]` 继续可读但按 deny-all 解释，编辑其他字段时省略该字段并保留原值，不能顺手扩成无限制。显式 lane、兼容 alias、自动分类、预算 degrade、signal feedback 与 Codex compact 共用同一边界；预算降级只允许保持目标或向可证明更便宜的 ranked lane 收敛，白名单若只剩更贵 lane 就在 provider 前拒绝，绝不把成本保护反向升级。具体 model 仍只受 `allow_custom_model` / `blocked_models` 约束，并由 route、模型目录与 Codex compact 的空白名单用例共同锁定。模型列表在无可用 lane 时不再展示 `auto`，缓存指纹也明确区分 `null` 与 `[]`。
+- **分类开关边界**：`classifier.rules.enabled:false` 现在完全跳过 Layer 1，包括 momentum 读写；eval 开启时直接进入 Layer 2，eval 也关闭时以 `rules_and_eval_disabled` 进入运行时默认 lane，`rules_confidence` 为 `null`，不伪造规则分数。`eval.cache.enabled:false` 在构造 content hash 前直接调用 eval，不读写已有缓存，每次都记录 fresh latency/cost 与 `eval_cache_hit:false`；热更新开关会重建配置指纹，重新开启缓存后首个请求 miss、后续请求才 hit。
+- **CI 维护边界**：GitHub Actions 升级到经过签名验证并固定完整 SHA 的 checkout v7、setup-node v7 与 pnpm/action-setup v6，消除 Node 20 runtime 弃用；setup-node v7 正式支持 `package-manager-cache:false`。checkout v7 对 fork PR 的显式 opt-in 只存在于 `pull_request_target` 的三个代码执行 job，它们仍固定在一次性 GitHub-hosted runner、只读 token、无 secrets 且 `persist-credentials:false`；特权 Publish 不允许该选项。
+- **验证**：TDD 先复现空集放行、双重 clamp 越权、规则/缓存开关无效和旧 Action pin，再覆盖 core、Gateway、Admin 与 workflow policy；本地只运行 `CI=true` 定向 Vitest 且单 worker，最终结果和 hosted CI 另行记录在 PR。
+
 ## 2026-07-16 · xAI 订阅协议跟随官方 grok-build 并收紧动态目录边界（OAuth subscription / model catalog / Responses / Admin providers，docs/04/05/06/11，原则 2/3/5/6/7/8）
 
 - **官方事实边界**：以 `xai-org/grok-build@c68e39f`、本机 Grok CLI `0.2.101` 和当前账号真实 wire 为准；OAuth issuer/client、Device Code 与 `/v1/responses` 主链保留，scope 补齐官方 personal conversation scopes，推理请求补充 headless/client identifier/user identity 并强制请求 `reasoning.encrypted_content`。当前 entitlement 仍只有 `grok-4.5` 与 `grok-composer-2.5-fast`，两者的真实 `/models` backend 均为 `responses`，目录分别报告 500k 与 200k context；官方静态 fallback 中的 `grok-build` 不是账号授权证据，不能自动加入 Helm。
@@ -62,14 +69,9 @@
 - **资源控制**：启动前必须连续取得 3 个有余量样本；运行中持续检查 host load/MemAvailable、Helm CPU/内存、health status、WAL、磁盘、restart/OOM 与结构化 5xx/timeout/`SQLITE_BUSY`。Helm CPU 的 preflight 与 runtime stop 阈值统一为 75%，runtime 仍要求连续 2 次达到阈值才暂停；HTTP 200 的 health latency 仅保留在状态中作观测，不再触发暂停，但 non-200 与 `collectSample` 的 5 秒 probe timeout 仍 fail-closed。supervisor 每批 apply 前已经完成该采样，因此 apply CLI 显式使用 `--skip-health-check`，避免在同一批次前重复调用 health endpoint。2GiB 主机的 MemAvailable 采用 512MiB preflight / 384MiB runtime stop，保留 128MiB hysteresis，并继续叠加容器内存比例与 health/CPU 保护，避免原 768MiB 固定门槛在约 588MiB 稳态可用内存下永久饿死。Gateway `request.error` 显式记录 `fault_scope`：可预期的结构化请求错误为 `request`，未知 throw 为 `gateway_internal`；5xx/timeout 总数继续写入状态作纯观测，只有 `gateway_internal` 5xx 与 `SQLITE_BUSY` 会触发 supervisor safety stop，因此正常 `all_providers_failed` 的 error/completed 双日志不能阻断回填，而真正内部故障仍 fail-closed。硬阈值触发后 supervisor 留在 `waiting_safety` 并自动重试，不把辅助回填失败扩散为网关故障；每 5,000 行强制至少冷却 5 分钟。固定截止点为 `2026-07-15T13:28:46+08:00`，不追逐持续增长的新流量。
 - **验证与可观测性**：`pricing:reprice` 新增只读 manifest slice verifier，逐批验证 telemetry 顶层总价、attempt completion、breakdown、alias/status/timestamp 全部已成为 manifest new state；窗口完成后再全量验证。supervisor 原子写入 `supervisor.status.json`，记录 phase、窗口/checkpoint、最近指标、费用 delta、错误与备份聚合哈希；Codex 定时任务部署后只读该状态并汇报，不再直接写生产数据库。manifest 仍按 UTC 日窗、`best-evidence`、固定 pricing/plan hash 依次生成，歧义行保持不变。
 
-## 2026-07-15 · 历史重算兼容旧版 completion-only 顶层费用（Catalog / telemetry repair，docs/07/08，原则 2/5/7）
-
-- **生产根因**：渐进回填在 June 29 manifest 的第 1,580 行 fail-closed；该 legacy telemetry 的 `provider_attempt.cost_usd` 与 `cost_breakdown.completion_usd` 都是 `$0.118735`，`cost_breakdown.total_usd` 是包含输入费用的 `$0.1193894`，但旧版顶层 `telemetry.cost_usd` 仍只保存 completion cost。planner 正确选择 breakdown total 作为 canonical old total，apply guard 却只接受顶层值已等于该 total 的新格式，导致合法旧格式无法应用；剩余 25,269 行只发现 3 行属于此精确形态，且没有其他 unmatched 状态。
-- **兼容边界**：apply 仍优先要求 canonical top-level total；仅当 old completion 与 old total 均非空且不同、顶层值与 attempt 都精确等于 old completion、breakdown completion/total 又分别精确等于 manifest 的 old completion/total 时，才接受 completion-only legacy 状态。任一字段漂移仍 fail-closed；更新后顶层与 breakdown 都统一写入新 canonical total，原行继续由每批 targeted backup 保留。
-- **验证**：TDD 回归先复现 `old values no longer match manifest`，再证明 legacy 行可完成单批更新；原有任意顶层费用冲突测试继续拒绝。生产回填在发布新版本前保持暂停，已提交的 1,500 行与全部微型恢复库另行完整校验。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-15 · 历史重算兼容旧版 completion-only 顶层费用（Catalog / telemetry repair，docs/07/08，原则 2/5/7）**：仅在顶层、attempt 与 breakdown 同时精确证明旧版只保存 completion cost 时接受回填，任何其他漂移仍 fail-closed；完整原文通过 git history 回溯。
 - **2026-07-14 · 官方模型费率与多模态计费校准（Catalog / telemetry / protocol usage，docs/04/05/07/08，原则 1/2/3/5/7/8）**：以官方价格和响应中可证明的 tier、地域、缓存与 modality 证据计费；未知分价、动态 alias 与已丢失的历史证据保持 unknown，历史修复只经 manifest、微型恢复库和资源门禁渐进执行。
 - **2026-07-14 · 确定模型名优先于兼容通配别名（Routing / model alias precedence，docs/04，原则 2/5/6）**：精确 lane 与已配置 model 必须先于 `claude-*` / `gpt-*` / `gemini-*` 等宽泛兼容映射解析，避免显式模型被错误改写到其他 lane。
 - **2026-07-14 · 通道模型选择器复用自动发现缓存（OAuth subscription / Admin lanes，docs/04/11，原则 1/3/6）**：通道目录保持 network-free，依次复用共享进程缓存、加密账号设置中的 durable last-known-good 与 curated fallback；空目录/失败不覆盖旧快照，重连以 cache generation 隔离旧身份，并保持 Manual/Codex entitlement 边界。

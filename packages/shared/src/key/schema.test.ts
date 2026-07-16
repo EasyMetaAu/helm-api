@@ -299,6 +299,13 @@ describe("UpdateKeyRequestSchema", () => {
     expect(UpdateKeyRequestSchema.safeParse({ allowed_lanes: null }).success).toBe(true);
   });
 
+  it("rejects an empty allowed-lanes whitelist on create or update", () => {
+    expect(CreateKeyRequestSchema.safeParse({ role: "user", allowed_lanes: [] }).success).toBe(
+      false,
+    );
+    expect(UpdateKeyRequestSchema.safeParse({ allowed_lanes: [] }).success).toBe(false);
+  });
+
   it("rejects role (immutable — cannot escalate via edit)", () => {
     expect(UpdateKeyRequestSchema.safeParse({ role: "root" }).success).toBe(false);
   });
