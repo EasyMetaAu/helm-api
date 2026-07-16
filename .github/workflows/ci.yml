@@ -1,23 +1,45 @@
 name: CI
 
 on:
-  pull_request:
+  # Keep the workflow definition under default-branch control. The test jobs
+  # explicitly check out the PR merge ref below, on disposable hosted runners.
+  pull_request_target:
   push:
     branches: [main]
 
+# Jobs that execute repository code inherit this read-only permission. Only the
+# checkout-free reporter below narrows its own token to `checks: write`.
+permissions:
+  contents: read
+
 jobs:
-  # NOTE: actions/checkout + actions/setup-node are pinned to @v4 (node20 runtime).
+  # NOTE: actions/checkout + actions/setup-node are pinned to audited v4 commits
+  # (node20 runtime). pnpm/action-setup remains on the audited v4.3.0 commit.
   # Some self-hosted runners (e.g. machine 199-4, runner v2.321.0) are too old to
   # run v5's node24 runtime — they fail at "Set up job" with "'using: node24' is
   # not supported". Bump back to @v5 once every runner in the pool is updated.
   verify:
-    # Self-hosted runners (EasyMetaAu org, docker-runner-*); GitHub-hosted minutes
-    # are not used. All 9 runners carry these labels.
-    runs-on: [self-hosted, Linux, X64, docker]
+    # Untrusted pull-request code must never reach the persistent runner pool.
+    # Trusted main pushes retain the labelled self-hosted pool for throughput.
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request_target' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","docker"]') }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
+          persist-credentials: false
+      - name: Verify PR merge ref matches event head
+        if: github.event_name == 'pull_request_target'
+        env:
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          read -r base_sha actual_head_sha extra_parent <<<"$(git show -s --format='%P' HEAD)"
+          if [[ -z "${base_sha}" || -z "${actual_head_sha}" || -n "${extra_parent}" || "${actual_head_sha}" != "${EXPECTED_HEAD_SHA}" ]]; then
+            echo "::error::PR merge ref does not match the event head SHA"
+            exit 1
+          fi
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           # The self-hosted Docker runners keep /home/runner/_work on a host
@@ -25,6 +47,7 @@ jobs:
           # cache from GitHub on every run and costs 2+ minutes on 199.4.
           package-manager-cache: false
       - name: Use persistent pnpm store on runner
+        if: github.event_name == 'push'
         run: pnpm config set store-dir /home/runner/_work/.pnpm-store
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
@@ -40,18 +63,33 @@ jobs:
   # upstream (no network, fixed worker interval), so the suite is hermetic. Only
   # admin.spec drives a real browser; the rest use Playwright's HTTP request
   # context. NOTE: `--with-deps` apt-installs Chromium's system libs and needs
-  # passwordless sudo on the self-hosted runner — if that's unavailable, drop
-  # `--with-deps` and pre-bake the libs into the runner image.
+  # passwordless sudo. GitHub-hosted pull-request runners provide it; trusted main
+  # pushes retain the preconfigured self-hosted pool.
   e2e:
-    runs-on: [self-hosted, Linux, X64, docker]
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request_target' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","docker"]') }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
+          persist-credentials: false
+      - name: Verify PR merge ref matches event head
+        if: github.event_name == 'pull_request_target'
+        env:
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          read -r base_sha actual_head_sha extra_parent <<<"$(git show -s --format='%P' HEAD)"
+          if [[ -z "${base_sha}" || -z "${actual_head_sha}" || -n "${extra_parent}" || "${actual_head_sha}" != "${EXPECTED_HEAD_SHA}" ]]; then
+            echo "::error::PR merge ref does not match the event head SHA"
+            exit 1
+          fi
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           package-manager-cache: false
       - name: Use persistent pnpm store on runner
+        if: github.event_name == 'push'
         run: pnpm config set store-dir /home/runner/_work/.pnpm-store
       - run: pnpm install --frozen-lockfile
       # The e2e webServer runs the gateway via tsx, which resolves @helm/core and
@@ -66,9 +104,23 @@ jobs:
   # independent of `verify` (no `needs`) so the unit gates run on their own and
   # neither job blocks the other.
   docker:
-    runs-on: [self-hosted, Linux, X64, docker]
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request_target' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","docker"]') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
+          persist-credentials: false
+      - name: Verify PR merge ref matches event head
+        if: github.event_name == 'pull_request_target'
+        env:
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          read -r base_sha actual_head_sha extra_parent <<<"$(git show -s --format='%P' HEAD)"
+          if [[ -z "${base_sha}" || -z "${actual_head_sha}" || -n "${extra_parent}" || "${actual_head_sha}" != "${EXPECTED_HEAD_SHA}" ]]; then
+            echo "::error::PR merge ref does not match the event head SHA"
+            exit 1
+          fi
       - name: Build gateway image
         # Inject build info (docs/10) so GET /version reports real values instead
         # of "unknown": app version from package.json, the commit, and a UTC stamp.
@@ -116,3 +168,55 @@ jobs:
         if: always()
         continue-on-error: true
         run: docker stop helm-ci && docker rm helm-ci
+
+  # The three jobs above execute untrusted PR code with a read-only token. This
+  # separate default-branch-controlled job never checks out or executes PR code;
+  # it is the only job allowed to publish stable required checks on the PR head.
+  report_pr_checks:
+    if: always() && github.event_name == 'pull_request_target'
+    needs: [verify, e2e, docker]
+    runs-on: ubuntu-24.04
+    permissions:
+      checks: write
+    steps:
+      - name: Report PR-head quality gates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+          E2E_RESULT: ${{ needs.e2e.result }}
+          DOCKER_RESULT: ${{ needs.docker.result }}
+        run: |
+          set -euo pipefail
+
+          publish_check() {
+            local name="$1"
+            local result="$2"
+            local conclusion
+
+            case "${result}" in
+              success) conclusion="success" ;;
+              failure) conclusion="failure" ;;
+              cancelled) conclusion="cancelled" ;;
+              *) conclusion="failure" ;;
+            esac
+
+            payload=$(jq -n \
+              --arg name "${name}" \
+              --arg head_sha "${HEAD_SHA}" \
+              --arg conclusion "${conclusion}" \
+              --arg summary "CI job result: ${result}" \
+              '{name: $name, head_sha: $head_sha, status: "completed", conclusion: $conclusion, output: {title: $name, summary: $summary}}')
+
+            curl --fail-with-body --retry 3 \
+              --request POST \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/check-runs" \
+              --data "${payload}"
+          }
+
+          publish_check "PR / verify" "${VERIFY_RESULT}"
+          publish_check "PR / e2e" "${E2E_RESULT}"
+          publish_check "PR / docker" "${DOCKER_RESULT}"
