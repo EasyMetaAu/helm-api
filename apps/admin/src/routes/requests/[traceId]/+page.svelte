@@ -33,7 +33,7 @@
     data: {
       detail: RequestDetail | null;
       payload: RequestPayloadView;
-      traceId: string;
+      requestId: string;
       backTo?: string;
       loadError?: string;
     };
@@ -97,7 +97,7 @@
     if (payloadStatus[part] === 'loading') return payloadValues[part];
     payloadStatus[part] = 'loading';
     payloadErrors[part] = undefined;
-    const res = await getRequestPayloadPart(data.traceId, part);
+    const res = await getRequestPayloadPart(data.requestId, part);
     if (res.captured !== true || res.part !== part) {
       payloadStatus[part] = 'error';
       payloadErrors[part] = $t('Payload was not available.');
@@ -131,7 +131,9 @@
 
   async function copyTrace(): Promise<void> {
     try {
-      await navigator.clipboard?.writeText(data.traceId);
+      // The route parameter is the unique internal request_id used for lookup.
+      // The button is explicitly for the caller-facing trace_id shown beside it.
+      await navigator.clipboard?.writeText(data.detail?.trace_id ?? data.requestId);
       copied = true;
     } catch {
       // clipboard unavailable — degrade silently, never surface secrets in errors
@@ -252,7 +254,7 @@
 
     {#if showRetry && replayBody && typeof replayBody === 'object'}
       <RetryDialog
-        traceId={d.trace_id}
+        requestId={d.request_id}
         initialRequest={replayBody}
         onclose={() => (showRetry = false)}
       />

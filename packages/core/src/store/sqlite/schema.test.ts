@@ -5,6 +5,13 @@ import Database from "better-sqlite3";
 import { eq } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/sqlite-core";
 import { describe, expect, it } from "vitest";
+import {
+  MALFORMED_JOB_QUARANTINE_ACCOUNT_ID,
+  projectScopedThreadId,
+  quarantinedMalformedJobThreadId,
+  quarantinedParentThreadId,
+  quarantinedRawThreadId,
+} from "../../memory/thread-scope.js";
 import { createSqliteDb, runMigrations } from "./migrate.js";
 import { apiKeys, rateLimitBuckets, routingSignals } from "./schema.js";
 
@@ -244,20 +251,422 @@ describe("sqlite schema + migrations", () => {
         .all();
       expect(rows).toEqual([
         {
-          id: "empty",
+          id: quarantinedParentThreadId("a", "empty"),
           message_count: 0,
           last_message_at: null,
           observation_count: 0,
           last_observation_at: null,
         },
         {
-          id: "t1",
+          id: quarantinedParentThreadId("a", "t1"),
           message_count: 2,
           last_message_at: 2000,
           observation_count: 1,
           last_observation_at: 3000,
         },
       ]);
+      after.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("v40 rewrites legacy memory thread ids and every reference atomically", () => {
+    const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v40-memory-thread-scope-"));
+    const path = join(dir, "helm.db");
+    const existingV2 = projectScopedThreadId("acct", "existing-project", "existing-thread");
+    const expectedLegacy = quarantinedParentThreadId("acct", "acct:thread-one");
+    const expectedNull = quarantinedParentThreadId("acct", "acct:thread-null");
+    const expectedOpaqueV2 = quarantinedParentThreadId("acct", existingV2);
+    const expectedDerivedLegacy = quarantinedRawThreadId("acct", "acct:thread-one");
+    const expectedDerivedV2 = quarantinedRawThreadId("acct", existingV2);
+    const expectedRaw = quarantinedRawThreadId("acct", "acct:manual");
+    const expectedRawV2 = quarantinedRawThreadId("acct", "v2:n:manual");
+    const expectedBroad = quarantinedRawThreadId("acct", "");
+    try {
+      const seed = new Database(path);
+      seed.pragma("foreign_keys = ON");
+      seed.exec(
+        "CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);",
+      );
+      seed.exec(`
+        CREATE TABLE memory_threads (
+          id TEXT PRIMARY KEY,
+          project_id TEXT,
+          resource_id TEXT,
+          owner_id TEXT,
+          last_served_model TEXT,
+          message_count INTEGER NOT NULL DEFAULT 0,
+          last_message_at INTEGER,
+          observation_count INTEGER NOT NULL DEFAULT 0,
+          last_observation_at INTEGER,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE memory_messages (
+          id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL REFERENCES memory_threads(id),
+          role TEXT NOT NULL,
+          content TEXT NOT NULL,
+          token_estimate INTEGER NOT NULL,
+          created_at INTEGER NOT NULL,
+          message_index INTEGER,
+          content_hash TEXT
+        );
+        CREATE TABLE memory_observations (
+          id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL REFERENCES memory_threads(id),
+          source_message_range TEXT NOT NULL,
+          observation_text TEXT NOT NULL,
+          observed_at INTEGER NOT NULL
+        );
+        CREATE TABLE memory_reflections (
+          id TEXT PRIMARY KEY,
+          owner_id TEXT,
+          project_id TEXT,
+          resource_id TEXT,
+          thread_id TEXT,
+          status TEXT NOT NULL DEFAULT 'active',
+          updated_at INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE memory_facts (
+          id TEXT PRIMARY KEY,
+          owner_id TEXT NOT NULL,
+          project_id TEXT,
+          resource_id TEXT,
+          thread_id TEXT,
+          status TEXT NOT NULL DEFAULT 'active',
+          invalid_at INTEGER,
+          expired_at INTEGER,
+          updated_at INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE memory_jobs (
+          id TEXT PRIMARY KEY,
+          type TEXT NOT NULL,
+          scope_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          error TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        INSERT INTO memory_threads
+          (id, project_id, resource_id, owner_id, message_count, observation_count, created_at, updated_at)
+        VALUES
+          ('acct:thread-one', 'project-α', 'legacy-resource', 'acct', 1, 1, 1, 2),
+          ('acct:thread-null', NULL, NULL, 'acct', 1, 0, 3, 4),
+          ('${existingV2}', 'existing-project', 'existing-resource', 'acct', 0, 0, 5, 6);
+        INSERT INTO memory_messages
+          (id, thread_id, role, content, token_estimate, created_at)
+        VALUES
+          ('m1', 'acct:thread-one', 'user', 'one', 1, 10),
+          ('m2', 'acct:thread-null', 'user', 'null', 1, 11);
+        INSERT INTO memory_observations
+          (id, thread_id, source_message_range, observation_text, observed_at)
+        VALUES ('o1', 'acct:thread-one', '["m1","m1"]', 'summary', 12);
+        INSERT INTO memory_reflections (id, owner_id, project_id, resource_id, thread_id) VALUES
+          ('r1', 'acct', 'project-α', 'legacy-resource', 'acct:thread-one'),
+          ('r-raw', 'acct', 'project-α', 'manual-resource', 'acct:manual'),
+          ('r-v2', 'acct', 'existing-project', 'existing-resource', '${existingV2}'),
+          ('r-broad', 'acct', 'project-α', NULL, NULL),
+          ('r-other', 'other', 'other-project', NULL, 'acct:thread-one');
+        INSERT INTO memory_facts (id, owner_id, project_id, resource_id, thread_id) VALUES
+          ('f1', 'acct', 'project-α', 'legacy-resource', 'acct:thread-one'),
+          ('f-raw', 'acct', 'project-α', 'manual-resource', 'v2:n:manual'),
+          ('f-v2', 'acct', 'existing-project', 'existing-resource', '${existingV2}'),
+          ('f-broad', 'acct', 'project-α', NULL, NULL),
+          ('f-other', 'other', 'other-project', NULL, 'acct:thread-one');
+        INSERT INTO memory_jobs
+          (id, type, scope_id, status, error, created_at, updated_at)
+        VALUES
+          ('j1', 'observer', '{"accountId":"acct","projectId":"project-α","resourceId":"legacy-resource","threadId":"acct:thread-one"}', 'pending', NULL, 1, 1),
+          ('j2', 'observer', '{"accountId":"acct","threadId":"acct:thread-null"}', 'done', NULL, 1, 1),
+          ('j-target', 'observer', '{"accountId":"acct","threadId":"${expectedLegacy}"}', 'pending', NULL, 1, 1),
+          ('j-reflector', 'reflector', '{"accountId":"acct","projectId":"project-α"}', 'running', NULL, 1, 1),
+          ('j-corrupt', 'observer', 's1', 'pending', NULL, 1, 1),
+          ('j-corrupt-done', 'observer', '{bad', 'done', 'legacy error', 1, 1),
+          ('j-shape', 'observer', '{"accountId":42,"threadId":[]}', 'running', NULL, 1, 1),
+          ('j-other', 'observer', '{"accountId":"other","threadId":"acct:thread-one"}', 'pending', NULL, 1, 1);
+        CREATE UNIQUE INDEX uniq_memory_jobs_open_type_scope
+          ON memory_jobs (type, scope_id)
+          WHERE status IN ('pending', 'running');
+      `);
+      const rec = seed.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)");
+      for (let version = 1; version <= 39; version++) rec.run(version, 1000);
+      seed.close();
+
+      runMigrations(path);
+      runMigrations(path);
+
+      const after = new Database(path);
+      after.pragma("foreign_keys = ON");
+      expect(
+        after
+          .prepare("SELECT id, project_id, resource_id FROM memory_threads ORDER BY id")
+          .all(),
+      ).toEqual(
+        [
+          { id: expectedLegacy, project_id: null, resource_id: null },
+          { id: expectedNull, project_id: null, resource_id: null },
+          { id: expectedOpaqueV2, project_id: null, resource_id: null },
+        ].sort((a, b) => a.id.localeCompare(b.id)),
+      );
+      expect(after.prepare("SELECT id, thread_id FROM memory_messages ORDER BY id").all()).toEqual([
+        { id: "m1", thread_id: expectedLegacy },
+        { id: "m2", thread_id: expectedNull },
+      ]);
+      expect(
+        after.prepare("SELECT thread_id FROM memory_observations WHERE id='o1'").get(),
+      ).toEqual({
+        thread_id: expectedLegacy,
+      });
+      expect(
+        after
+          .prepare(
+            "SELECT id, project_id, resource_id, thread_id, status FROM memory_reflections ORDER BY id",
+          )
+          .all(),
+      ).toEqual([
+        {
+          id: "r-broad",
+          project_id: null,
+          resource_id: null,
+          thread_id: expectedBroad,
+          status: "archived",
+        },
+        {
+          id: "r-other",
+          project_id: "other-project",
+          resource_id: null,
+          thread_id: "acct:thread-one",
+          status: "active",
+        },
+        {
+          id: "r-raw",
+          project_id: null,
+          resource_id: null,
+          thread_id: expectedRaw,
+          status: "archived",
+        },
+        {
+          id: "r-v2",
+          project_id: null,
+          resource_id: null,
+          thread_id: expectedDerivedV2,
+          status: "archived",
+        },
+        {
+          id: "r1",
+          project_id: null,
+          resource_id: null,
+          thread_id: expectedDerivedLegacy,
+          status: "archived",
+        },
+      ]);
+      expect(
+        after
+          .prepare(
+            "SELECT id, project_id, resource_id, thread_id, status, invalid_at, expired_at FROM memory_facts ORDER BY id",
+          )
+          .all(),
+      ).toEqual([
+        {
+          id: "f-broad",
+          project_id: null,
+          resource_id: null,
+          thread_id: expectedBroad,
+          status: "archived",
+          invalid_at: expect.any(Number),
+          expired_at: expect.any(Number),
+        },
+        {
+          id: "f-other",
+          project_id: "other-project",
+          resource_id: null,
+          thread_id: "acct:thread-one",
+          status: "active",
+          invalid_at: null,
+          expired_at: null,
+        },
+        {
+          id: "f-raw",
+          project_id: null,
+          resource_id: null,
+          thread_id: expectedRawV2,
+          status: "archived",
+          invalid_at: expect.any(Number),
+          expired_at: expect.any(Number),
+        },
+        {
+          id: "f-v2",
+          project_id: null,
+          resource_id: null,
+          thread_id: expectedDerivedV2,
+          status: "archived",
+          invalid_at: expect.any(Number),
+          expired_at: expect.any(Number),
+        },
+        {
+          id: "f1",
+          project_id: null,
+          resource_id: null,
+          thread_id: expectedDerivedLegacy,
+          status: "archived",
+          invalid_at: expect.any(Number),
+          expired_at: expect.any(Number),
+        },
+      ]);
+      expect(
+        after
+          .prepare(
+            "SELECT COUNT(*) AS n FROM memory_facts WHERE owner_id = 'acct' AND status = 'archived' AND invalid_at = expired_at",
+          )
+          .get(),
+      ).toEqual({ n: 4 });
+      expect(
+        after
+          .prepare(
+            "SELECT id, scope_id, status, error FROM memory_jobs ORDER BY id",
+          )
+          .all(),
+      ).toEqual([
+        {
+          id: "j-corrupt",
+          scope_id: JSON.stringify({
+            accountId: MALFORMED_JOB_QUARANTINE_ACCOUNT_ID,
+            threadId: quarantinedMalformedJobThreadId("j-corrupt"),
+          }),
+          status: "failed",
+          error: "malformed legacy memory job scope quarantined during v40 migration",
+        },
+        {
+          id: "j-corrupt-done",
+          scope_id: JSON.stringify({
+            accountId: MALFORMED_JOB_QUARANTINE_ACCOUNT_ID,
+            threadId: quarantinedMalformedJobThreadId("j-corrupt-done"),
+          }),
+          status: "done",
+          error: "legacy error",
+        },
+        {
+          id: "j-other",
+          scope_id: '{"accountId":"other","threadId":"acct:thread-one"}',
+          status: "pending",
+          error: null,
+        },
+        {
+          id: "j-reflector",
+          scope_id: JSON.stringify({ accountId: "acct", threadId: expectedBroad }),
+          status: "failed",
+          error: "legacy thread scope quarantined during v40 migration",
+        },
+        {
+          id: "j-shape",
+          scope_id: JSON.stringify({
+            accountId: MALFORMED_JOB_QUARANTINE_ACCOUNT_ID,
+            threadId: quarantinedMalformedJobThreadId("j-shape"),
+          }),
+          status: "failed",
+          error: "malformed legacy memory job scope quarantined during v40 migration",
+        },
+        {
+          id: "j-target",
+          scope_id: JSON.stringify({ accountId: "acct", threadId: expectedLegacy }),
+          status: "failed",
+          error: "legacy thread scope quarantined during v40 migration",
+        },
+        {
+          id: "j1",
+          scope_id: JSON.stringify({ accountId: "acct", threadId: expectedLegacy }),
+          status: "failed",
+          error: "legacy thread scope quarantined during v40 migration",
+        },
+        {
+          id: "j2",
+          scope_id: JSON.stringify({ accountId: "acct", threadId: expectedNull }),
+          status: "done",
+          error: null,
+        },
+      ]);
+      expect(() =>
+        after
+          .prepare(
+            "SELECT COUNT(*) AS n FROM memory_jobs WHERE json_extract(scope_id, '$.accountId') = ?",
+          )
+          .get("acct"),
+      ).not.toThrow();
+      expect(after.pragma("foreign_key_check")).toEqual([]);
+      after.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("v40 rolls back the whole migration when a quarantine target already exists", () => {
+    const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v40-memory-thread-collision-"));
+    const path = join(dir, "helm.db");
+    const legacyId = "acct:thread";
+    const targetId = quarantinedParentThreadId("acct", legacyId);
+    try {
+      const seed = new Database(path);
+      seed.pragma("foreign_keys = ON");
+      seed.exec(`
+        CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
+        CREATE TABLE memory_threads (
+          id TEXT PRIMARY KEY,
+          project_id TEXT,
+          resource_id TEXT,
+          owner_id TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE memory_messages (
+          id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL REFERENCES memory_threads(id),
+          role TEXT NOT NULL,
+          content TEXT NOT NULL,
+          token_estimate INTEGER NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+      `);
+      seed
+        .prepare(
+          "INSERT INTO memory_threads (id, project_id, owner_id, created_at, updated_at) VALUES (?, ?, 'acct', 1, 1)",
+        )
+        .run(legacyId, "legacy-project");
+      seed
+        .prepare(
+          "INSERT INTO memory_threads (id, project_id, owner_id, created_at, updated_at) VALUES (?, ?, 'acct', 1, 1)",
+        )
+        .run(targetId, "collision-project");
+      seed
+        .prepare(
+          "INSERT INTO memory_messages (id, thread_id, role, content, token_estimate, created_at) VALUES ('m1', ?, 'user', 'body', 1, 1)",
+        )
+        .run(legacyId);
+      const record = seed.prepare(
+        "INSERT INTO _migrations (version, applied_at) VALUES (?, 1000)",
+      );
+      for (let version = 1; version <= 39; version++) record.run(version);
+      seed.close();
+
+      expect(() => runMigrations(path)).toThrow(/quarantine target already exists/);
+
+      const after = new Database(path);
+      after.pragma("foreign_keys = ON");
+      expect(after.prepare("SELECT version FROM _migrations WHERE version = 40").get()).toBe(
+        undefined,
+      );
+      expect(
+        after.prepare("SELECT id, project_id FROM memory_threads ORDER BY project_id").all(),
+      ).toEqual([
+        { id: targetId, project_id: "collision-project" },
+        { id: legacyId, project_id: "legacy-project" },
+      ]);
+      expect(after.prepare("SELECT thread_id FROM memory_messages WHERE id = 'm1'").get()).toEqual({
+        thread_id: legacyId,
+      });
+      expect(after.pragma("foreign_key_check")).toEqual([]);
       after.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });

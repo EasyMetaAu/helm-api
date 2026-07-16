@@ -685,6 +685,7 @@
   "Request (from client)": "请求（来自客户端）",
   "Request body": "请求体",
   "Request ID": "请求 ID",
+  "Client trace ID": "客户端关联 ID",
   "Request logging": "请求日志",
   "Request metadata recorded for this call (redacted — no message content or secrets).": "为本次调用记录的请求元数据（已脱敏——不含消息内容或密钥）。",
   "Request not found.": "未找到请求。",

@@ -124,6 +124,7 @@ import {
 import type {
   CatalogEntry,
   ClassifierConfig,
+  DecisionRecord,
   ErrorClass,
   InternalRequest,
   NativePassthroughInput,
@@ -247,6 +248,13 @@ export { estimateRequestTokens };
 function coerceErrorClass(value: string): ErrorClass {
   const parsed = ErrorClassSchema.safeParse(value);
   return parsed.success ? parsed.data : "upstream_error";
+}
+
+export function routeDecisionLogFields(record: Pick<DecisionRecord, "request_id" | "trace_id">): {
+  request_id: string;
+  trace_id: string;
+} {
+  return { request_id: record.request_id, trace_id: record.trace_id };
 }
 
 // Build the provider registry from the FULL multi-provider config (providers-
@@ -3052,7 +3060,7 @@ export async function buildServer(
             onOAuthSubscription429,
           }),
           now: () => new Date(),
-          log: (record) => logger.log("info", "route.decision", { trace_id: record.request_id }),
+          log: (record) => logger.log("info", "route.decision", routeDecisionLogFields(record)),
           // Strict explicit-model validation (docs/04): mirrors the executor's
           // resolvability rules so plan-time acceptance == execute-time routability.
           // Reads the LIVE oauthAliasSet/providerClients bindings (reassigned on

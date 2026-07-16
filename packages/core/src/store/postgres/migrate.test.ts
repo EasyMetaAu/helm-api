@@ -2,14 +2,23 @@ import { PGlite } from "@electric-sql/pglite";
 import { sql } from "drizzle-orm";
 import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { describe, expect, it } from "vitest";
+import {
+  MALFORMED_JOB_QUARANTINE_ACCOUNT_ID,
+  projectScopedThreadId,
+  quarantinedMalformedJobThreadId,
+  quarantinedParentThreadId,
+  quarantinedRawThreadId,
+} from "../../memory/thread-scope.js";
 import { createPgliteDb, runPgMigrations } from "./migrate.js";
 
-// A statement-recording RawExecutor stand-in. `failOn` makes one matching
-// statement throw, simulating a mid-migration failure so we can assert the
-// per-migration transaction rolls back (no half-applied ledger).
+// A statement-recording migration runner. The root execute path is tracked
+// separately from the transaction-bound executor so this contract proves that
+// pooled migrations never send lock/DDL/ledger statements outside the reserved
+// transaction connection. `failOn` simulates a mid-migration failure.
 function recorder(failOn?: (stmt: string) => boolean) {
   const stmts: string[] = [];
-  const execute = async (query: ReturnType<typeof sql.raw>): Promise<unknown> => {
+  let rootCalls = 0;
+  const sessionExecute = async (query: ReturnType<typeof sql.raw>): Promise<unknown> => {
     // drizzle's sql.raw wraps the raw string in queryChunks[0].value (string[]).
     const chunks = (query as unknown as { queryChunks: Array<{ value: string[] }> }).queryChunks;
     const text = (chunks[0]?.value ?? []).join("");
@@ -18,45 +27,82 @@ function recorder(failOn?: (stmt: string) => boolean) {
     if (failOn?.(text)) throw new Error(`boom: ${text}`);
     return [];
   };
-  return { stmts, execute };
+  const execute = async (query: ReturnType<typeof sql.raw>): Promise<unknown> => {
+    rootCalls += 1;
+    return sessionExecute(query);
+  };
+  const transaction = async <T>(
+    callback: (tx: { execute: typeof sessionExecute }) => Promise<T>,
+  ) => {
+    stmts.push("BEGIN");
+    try {
+      const result = await callback({ execute: sessionExecute });
+      stmts.push("COMMIT");
+      return result;
+    } catch (error) {
+      stmts.push("ROLLBACK");
+      throw error;
+    }
+  };
+  return {
+    stmts,
+    execute,
+    transaction,
+    get rootCalls() {
+      return rootCalls;
+    },
+  };
 }
 
 describe("runPgMigrations — per-migration atomicity", () => {
-  it("wraps the whole runner in a pg advisory lock", async () => {
+  it("acquires a transaction-scoped advisory lock on the reserved transaction connection", async () => {
     const rec = recorder();
     await runPgMigrations(rec);
 
-    const lock = rec.stmts.indexOf("SELECT pg_advisory_lock(1212501069, 1095780608)");
+    const firstBegin = rec.stmts.indexOf("BEGIN");
+    const lock = rec.stmts.indexOf("SELECT pg_advisory_xact_lock(1212501069, 1095780608)");
     const createLedger = rec.stmts.findIndex((s) =>
       s.startsWith("CREATE TABLE IF NOT EXISTS _migrations"),
     );
     const selectLedger = rec.stmts.indexOf("SELECT version FROM _migrations");
-    const firstBegin = rec.stmts.indexOf("BEGIN");
-    const lastCommit = rec.stmts.lastIndexOf("COMMIT");
-    const unlock = rec.stmts.lastIndexOf("SELECT pg_advisory_unlock(1212501069, 1095780608)");
 
-    expect(lock).toBe(0);
+    expect(firstBegin).toBe(0);
+    expect(firstBegin).toBeLessThan(lock);
     expect(lock).toBeLessThan(createLedger);
     expect(createLedger).toBeLessThan(selectLedger);
-    expect(selectLedger).toBeLessThan(firstBegin);
-    expect(lastCommit).toBeLessThan(unlock);
-    expect(unlock).toBe(rec.stmts.length - 1);
+    expect(selectLedger).toBeLessThan(rec.stmts.indexOf("COMMIT"));
+    expect(rec.stmts).not.toContain("SELECT pg_advisory_unlock(1212501069, 1095780608)");
+    expect(rec.rootCalls).toBe(0);
   });
 
-  it("wraps each migration's statements + ledger INSERT in a transaction", async () => {
+  it("wraps each migration's statements + ledger INSERT in one reserved transaction", async () => {
     const rec = recorder();
     await runPgMigrations(rec);
     // Every migration block must open with BEGIN and close with COMMIT, and the
     // ledger INSERT for that version must fall BETWEEN them.
     const begins = rec.stmts.filter((s) => s === "BEGIN").length;
     const commits = rec.stmts.filter((s) => s === "COMMIT").length;
+    const locks = rec.stmts.filter(
+      (s) => s === "SELECT pg_advisory_xact_lock(1212501069, 1095780608)",
+    ).length;
     expect(begins).toBeGreaterThan(0);
     expect(begins).toBe(commits);
-    const firstBegin = rec.stmts.indexOf("BEGIN");
+    expect(locks).toBe(begins);
     const firstInsert = rec.stmts.findIndex((s) => s.startsWith("INSERT INTO _migrations"));
-    const firstCommit = rec.stmts.indexOf("COMMIT");
-    expect(firstBegin).toBeLessThan(firstInsert);
-    expect(firstInsert).toBeLessThan(firstCommit);
+    const migrationBegin = rec.stmts.lastIndexOf("BEGIN", firstInsert);
+    const migrationCommit = rec.stmts.indexOf("COMMIT", firstInsert);
+    const migrationLock = rec.stmts.indexOf(
+      "SELECT pg_advisory_xact_lock(1212501069, 1095780608)",
+      migrationBegin,
+    );
+    const ledgerRecheck = rec.stmts.indexOf(
+      "SELECT version FROM _migrations WHERE version = 1",
+      migrationLock,
+    );
+    expect(migrationBegin).toBeLessThan(migrationLock);
+    expect(migrationLock).toBeLessThan(ledgerRecheck);
+    expect(ledgerRecheck).toBeLessThan(firstInsert);
+    expect(firstInsert).toBeLessThan(migrationCommit);
   });
 
   it("rolls back and never records the ledger row when a statement fails", async () => {
@@ -64,10 +110,7 @@ describe("runPgMigrations — per-migration atomicity", () => {
     const rec = recorder((s) => s.startsWith("CREATE TABLE IF NOT EXISTS api_keys"));
     await expect(runPgMigrations(rec)).rejects.toThrow(/boom/);
     expect(rec.stmts).toContain("ROLLBACK");
-    expect(rec.stmts.indexOf("ROLLBACK")).toBeLessThan(
-      rec.stmts.lastIndexOf("SELECT pg_advisory_unlock(1212501069, 1095780608)"),
-    );
-    expect(rec.stmts.at(-1)).toBe("SELECT pg_advisory_unlock(1212501069, 1095780608)");
+    expect(rec.stmts.at(-1)).toBe("ROLLBACK");
     // The version-1 ledger INSERT must NOT have been issued.
     expect(rec.stmts.some((s) => /INSERT INTO _migrations.*VALUES \(1,/.test(s))).toBe(false);
   });
@@ -319,20 +362,475 @@ describe("runPgMigrations — per-migration atomicity", () => {
     )) as { rows: Array<Record<string, unknown>> };
     expect(result.rows).toEqual([
       {
-        id: "empty",
+        id: quarantinedParentThreadId("a", "empty"),
         message_count: 0,
         last_message_at: null,
         observation_count: 0,
         last_observation_at: null,
       },
       {
-        id: "t1",
+        id: quarantinedParentThreadId("a", "t1"),
         message_count: 2,
         last_message_at: 2000,
         observation_count: 1,
         last_observation_at: 3000,
       },
     ]);
+    await db.$close();
+  });
+
+  it("v39 rewrites legacy memory thread ids and every reference atomically", async () => {
+    const client = new PGlite();
+    const db = Object.assign(drizzlePglite(client), { $close: () => client.close() });
+    const existingV2 = projectScopedThreadId("acct", "existing-project", "existing-thread");
+    await db.execute(
+      sql.raw("CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at BIGINT NOT NULL)"),
+    );
+    await db.execute(
+      sql.raw(`
+        CREATE TABLE memory_threads (
+          id TEXT PRIMARY KEY,
+          project_id TEXT,
+          resource_id TEXT,
+          owner_id TEXT,
+          last_served_model TEXT,
+          message_count INTEGER NOT NULL DEFAULT 0,
+          last_message_at BIGINT,
+          observation_count INTEGER NOT NULL DEFAULT 0,
+          last_observation_at BIGINT,
+          created_at BIGINT NOT NULL,
+          updated_at BIGINT NOT NULL
+        )
+      `),
+    );
+    await db.execute(
+      sql.raw(`
+        CREATE TABLE memory_messages (
+          id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL REFERENCES memory_threads(id),
+          role TEXT NOT NULL,
+          content TEXT NOT NULL,
+          token_estimate INTEGER NOT NULL,
+          created_at BIGINT NOT NULL,
+          message_index INTEGER,
+          content_hash TEXT
+        )
+      `),
+    );
+    await db.execute(
+      sql.raw(`
+        CREATE TABLE memory_observations (
+          id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL REFERENCES memory_threads(id),
+          source_message_range JSONB NOT NULL,
+          observation_text TEXT NOT NULL,
+          observed_at BIGINT NOT NULL
+        )
+      `),
+    );
+    await db.execute(
+      sql.raw(
+        "CREATE TABLE memory_reflections (id TEXT PRIMARY KEY, owner_id TEXT, project_id TEXT, resource_id TEXT, thread_id TEXT, status TEXT NOT NULL DEFAULT 'active', updated_at BIGINT NOT NULL DEFAULT 0)",
+      ),
+    );
+    await db.execute(
+      sql.raw(
+        "CREATE TABLE memory_facts (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, project_id TEXT, resource_id TEXT, thread_id TEXT, status TEXT NOT NULL DEFAULT 'active', invalid_at BIGINT, expired_at BIGINT, updated_at BIGINT NOT NULL DEFAULT 0)",
+      ),
+    );
+    await db.execute(
+      sql.raw(`
+        CREATE TABLE memory_jobs (
+          id TEXT PRIMARY KEY,
+          type TEXT NOT NULL,
+          scope_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          error TEXT,
+          created_at BIGINT NOT NULL,
+          updated_at BIGINT NOT NULL
+        )
+      `),
+    );
+    await db.execute(
+      sql.raw(`
+        INSERT INTO memory_threads
+          (id, project_id, resource_id, owner_id, message_count, observation_count, created_at, updated_at)
+        VALUES
+          ('acct:thread-one', 'project-α', 'legacy-resource', 'acct', 1, 1, 1, 2),
+          ('acct:thread-null', NULL, NULL, 'acct', 1, 0, 3, 4),
+          ('${existingV2}', 'existing-project', 'existing-resource', 'acct', 0, 0, 5, 6)
+      `),
+    );
+    await db.execute(
+      sql.raw(`
+        INSERT INTO memory_messages
+          (id, thread_id, role, content, token_estimate, created_at)
+        VALUES
+          ('m1', 'acct:thread-one', 'user', 'one', 1, 10),
+          ('m2', 'acct:thread-null', 'user', 'null', 1, 11)
+      `),
+    );
+    await db.execute(
+      sql.raw(`
+        INSERT INTO memory_observations
+          (id, thread_id, source_message_range, observation_text, observed_at)
+        VALUES ('o1', 'acct:thread-one', '["m1","m1"]'::jsonb, 'summary', 12)
+      `),
+    );
+    await db.execute(
+      sql.raw(`
+        INSERT INTO memory_reflections (id, owner_id, project_id, resource_id, thread_id) VALUES
+          ('r1', 'acct', 'project-α', 'legacy-resource', 'acct:thread-one'),
+          ('r-raw', 'acct', 'project-α', 'manual-resource', 'acct:manual'),
+          ('r-v2', 'acct', 'existing-project', 'existing-resource', '${existingV2}'),
+          ('r-broad', 'acct', 'project-α', NULL, NULL),
+          ('r-other', 'other', 'other-project', NULL, 'acct:thread-one')
+      `),
+    );
+    await db.execute(
+      sql.raw(`
+        INSERT INTO memory_facts (id, owner_id, project_id, resource_id, thread_id) VALUES
+          ('f1', 'acct', 'project-α', 'legacy-resource', 'acct:thread-one'),
+          ('f-raw', 'acct', 'project-α', 'manual-resource', 'v2:n:manual'),
+          ('f-v2', 'acct', 'existing-project', 'existing-resource', '${existingV2}'),
+          ('f-broad', 'acct', 'project-α', NULL, NULL),
+          ('f-other', 'other', 'other-project', NULL, 'acct:thread-one')
+      `),
+    );
+    await db.execute(
+      sql.raw(`
+        INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at)
+        VALUES
+          ('j1', 'observer', '{"accountId":"acct","projectId":"project-α","threadId":"acct:thread-one"}', 'pending', 1, 1),
+          ('j2', 'observer', '{"accountId":"acct","threadId":"acct:thread-null"}', 'done', 1, 1),
+          ('j-target', 'observer', '{"accountId":"acct","threadId":"${quarantinedParentThreadId("acct", "acct:thread-one")}"}', 'pending', 1, 1),
+          ('j-reflector', 'reflector', '{"accountId":"acct","projectId":"project-α"}', 'running', 1, 1),
+          ('j-corrupt', 'observer', 's1', 'pending', 1, 1),
+          ('j-corrupt-done', 'observer', '{bad', 'done', 1, 1),
+          ('j-shape', 'observer', '{"accountId":42,"threadId":[]}', 'running', 1, 1),
+          ('j-other', 'observer', '{"accountId":"other","threadId":"acct:thread-one"}', 'pending', 1, 1)
+      `),
+    );
+    await db.execute(
+      sql.raw(`
+        CREATE UNIQUE INDEX uniq_memory_jobs_open_type_scope
+          ON memory_jobs (type, scope_id)
+          WHERE status IN ('pending', 'running')
+      `),
+    );
+    for (let version = 1; version <= 38; version++) {
+      await db.execute(
+        sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),
+      );
+    }
+
+    await expect(runPgMigrations(db)).resolves.toBeUndefined();
+    await expect(runPgMigrations(db)).resolves.toBeUndefined();
+
+    const expectedLegacy = quarantinedParentThreadId("acct", "acct:thread-one");
+    const expectedNull = quarantinedParentThreadId("acct", "acct:thread-null");
+    const expectedOpaqueV2 = quarantinedParentThreadId("acct", existingV2);
+    const expectedDerivedLegacy = quarantinedRawThreadId("acct", "acct:thread-one");
+    const expectedDerivedV2 = quarantinedRawThreadId("acct", existingV2);
+    const expectedRaw = quarantinedRawThreadId("acct", "acct:manual");
+    const expectedRawV2 = quarantinedRawThreadId("acct", "v2:n:manual");
+    const expectedBroad = quarantinedRawThreadId("acct", "");
+    const threads = (await db.execute(
+      sql.raw("SELECT id, project_id, resource_id FROM memory_threads ORDER BY id"),
+    )) as { rows: Array<{ id: string; project_id: string | null; resource_id: string | null }> };
+    expect(threads.rows).toEqual(
+      [
+        { id: expectedOpaqueV2, project_id: null, resource_id: null },
+        { id: expectedLegacy, project_id: null, resource_id: null },
+        { id: expectedNull, project_id: null, resource_id: null },
+      ].sort((a, b) => a.id.localeCompare(b.id)),
+    );
+    const messages = (await db.execute(
+      sql.raw("SELECT id, thread_id FROM memory_messages ORDER BY id"),
+    )) as { rows: Array<{ id: string; thread_id: string }> };
+    expect(messages.rows).toEqual([
+      { id: "m1", thread_id: expectedLegacy },
+      { id: "m2", thread_id: expectedNull },
+    ]);
+    const observations = (await db.execute(
+      sql.raw("SELECT thread_id FROM memory_observations"),
+    )) as { rows: Array<{ thread_id: string }> };
+    expect(observations.rows).toEqual([{ thread_id: expectedLegacy }]);
+    const reflections = (await db.execute(
+      sql.raw(
+        "SELECT id, project_id, resource_id, thread_id, status FROM memory_reflections ORDER BY id",
+      ),
+    )) as {
+      rows: Array<{
+        id: string;
+        project_id: string | null;
+        resource_id: string | null;
+        thread_id: string;
+        status: string;
+      }>;
+    };
+    expect(reflections.rows).toEqual([
+      {
+        id: "r-broad",
+        project_id: null,
+        resource_id: null,
+        thread_id: expectedBroad,
+        status: "archived",
+      },
+      {
+        id: "r-other",
+        project_id: "other-project",
+        resource_id: null,
+        thread_id: "acct:thread-one",
+        status: "active",
+      },
+      {
+        id: "r-raw",
+        project_id: null,
+        resource_id: null,
+        thread_id: expectedRaw,
+        status: "archived",
+      },
+      {
+        id: "r-v2",
+        project_id: null,
+        resource_id: null,
+        thread_id: expectedDerivedV2,
+        status: "archived",
+      },
+      {
+        id: "r1",
+        project_id: null,
+        resource_id: null,
+        thread_id: expectedDerivedLegacy,
+        status: "archived",
+      },
+    ]);
+    const facts = (await db.execute(
+      sql.raw(
+        "SELECT id, project_id, resource_id, thread_id, status, invalid_at, expired_at FROM memory_facts ORDER BY id",
+      ),
+    )) as {
+      rows: Array<{
+        id: string;
+        project_id: string | null;
+        resource_id: string | null;
+        thread_id: string;
+        status: string;
+        invalid_at: number | null;
+        expired_at: number | null;
+      }>;
+    };
+    expect(facts.rows).toEqual([
+      {
+        id: "f-broad",
+        project_id: null,
+        resource_id: null,
+        thread_id: expectedBroad,
+        status: "archived",
+        invalid_at: expect.any(Number),
+        expired_at: expect.any(Number),
+      },
+      {
+        id: "f-other",
+        project_id: "other-project",
+        resource_id: null,
+        thread_id: "acct:thread-one",
+        status: "active",
+        invalid_at: null,
+        expired_at: null,
+      },
+      {
+        id: "f-raw",
+        project_id: null,
+        resource_id: null,
+        thread_id: expectedRawV2,
+        status: "archived",
+        invalid_at: expect.any(Number),
+        expired_at: expect.any(Number),
+      },
+      {
+        id: "f-v2",
+        project_id: null,
+        resource_id: null,
+        thread_id: expectedDerivedV2,
+        status: "archived",
+        invalid_at: expect.any(Number),
+        expired_at: expect.any(Number),
+      },
+      {
+        id: "f1",
+        project_id: null,
+        resource_id: null,
+        thread_id: expectedDerivedLegacy,
+        status: "archived",
+        invalid_at: expect.any(Number),
+        expired_at: expect.any(Number),
+      },
+    ]);
+    const invalidatedFacts = (await db.execute(
+      sql.raw(
+        "SELECT COUNT(*)::integer AS n FROM memory_facts WHERE owner_id = 'acct' AND status = 'archived' AND invalid_at = expired_at",
+      ),
+    )) as { rows: Array<{ n: number }> };
+    expect(invalidatedFacts.rows).toEqual([{ n: 4 }]);
+    const jobs = (await db.execute(
+      sql.raw("SELECT id, scope_id, status, error FROM memory_jobs ORDER BY id"),
+    )) as {
+      rows: Array<{
+        id: string;
+        scope_id: string;
+        status: string;
+        error: string | null;
+      }>;
+    };
+    expect(jobs.rows).toEqual([
+      {
+        id: "j-corrupt",
+        scope_id: JSON.stringify({
+          accountId: MALFORMED_JOB_QUARANTINE_ACCOUNT_ID,
+          threadId: quarantinedMalformedJobThreadId("j-corrupt"),
+        }),
+        status: "failed",
+        error: "malformed legacy memory job scope quarantined during v39 migration",
+      },
+      {
+        id: "j-corrupt-done",
+        scope_id: JSON.stringify({
+          accountId: MALFORMED_JOB_QUARANTINE_ACCOUNT_ID,
+          threadId: quarantinedMalformedJobThreadId("j-corrupt-done"),
+        }),
+        status: "done",
+        error: null,
+      },
+      {
+        id: "j-other",
+        scope_id: '{"accountId":"other","threadId":"acct:thread-one"}',
+        status: "pending",
+        error: null,
+      },
+      {
+        id: "j-reflector",
+        scope_id: JSON.stringify({ accountId: "acct", threadId: expectedBroad }),
+        status: "failed",
+        error: "legacy thread scope quarantined during v39 migration",
+      },
+      {
+        id: "j-shape",
+        scope_id: JSON.stringify({
+          accountId: MALFORMED_JOB_QUARANTINE_ACCOUNT_ID,
+          threadId: quarantinedMalformedJobThreadId("j-shape"),
+        }),
+        status: "failed",
+        error: "malformed legacy memory job scope quarantined during v39 migration",
+      },
+      {
+        id: "j-target",
+        scope_id: JSON.stringify({ accountId: "acct", threadId: expectedLegacy }),
+        status: "failed",
+        error: "legacy thread scope quarantined during v39 migration",
+      },
+      {
+        id: "j1",
+        scope_id: JSON.stringify({ accountId: "acct", threadId: expectedLegacy }),
+        status: "failed",
+        error: "legacy thread scope quarantined during v39 migration",
+      },
+      {
+        id: "j2",
+        scope_id: JSON.stringify({ accountId: "acct", threadId: expectedNull }),
+        status: "done",
+        error: null,
+      },
+    ]);
+    await expect(
+      db.execute(
+        sql.raw(
+          "SELECT COUNT(*) FROM memory_jobs WHERE scope_id::jsonb ->> 'accountId' = 'acct'",
+        ),
+      ),
+    ).resolves.toBeDefined();
+    const orphanCount = (await db.execute(
+      sql.raw(`
+        SELECT COUNT(*)::integer AS n
+          FROM memory_messages AS child
+          LEFT JOIN memory_threads AS parent ON parent.id = child.thread_id
+         WHERE parent.id IS NULL
+      `),
+    )) as { rows: Array<{ n: number }> };
+    expect(orphanCount.rows).toEqual([{ n: 0 }]);
+    await db.$close();
+  });
+
+  it("v39 rolls back the parent and ledger when a quarantine target already exists", async () => {
+    const client = new PGlite();
+    const db = Object.assign(drizzlePglite(client), { $close: () => client.close() });
+    const legacyId = "acct:thread";
+    const targetId = quarantinedParentThreadId("acct", legacyId);
+    await db.execute(
+      sql.raw("CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at BIGINT NOT NULL)"),
+    );
+    await db.execute(
+      sql.raw(`
+        CREATE TABLE memory_threads (
+          id TEXT PRIMARY KEY,
+          project_id TEXT,
+          resource_id TEXT,
+          owner_id TEXT,
+          last_served_model TEXT,
+          message_count INTEGER NOT NULL DEFAULT 0,
+          last_message_at BIGINT,
+          observation_count INTEGER NOT NULL DEFAULT 0,
+          last_observation_at BIGINT,
+          created_at BIGINT NOT NULL,
+          updated_at BIGINT NOT NULL
+        )
+      `),
+    );
+    await db.execute(
+      sql.raw(`
+        CREATE TABLE memory_messages (
+          id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL REFERENCES memory_threads(id),
+          role TEXT NOT NULL,
+          content TEXT NOT NULL,
+          token_estimate INTEGER NOT NULL,
+          created_at BIGINT NOT NULL
+        )
+      `),
+    );
+    await db.execute(sql`
+      INSERT INTO memory_threads (id, project_id, owner_id, created_at, updated_at)
+      VALUES (${legacyId}, 'legacy-project', 'acct', 1, 1),
+             (${targetId}, 'collision-project', 'acct', 1, 1)
+    `);
+    await db.execute(sql`
+      INSERT INTO memory_messages (id, thread_id, role, content, token_estimate, created_at)
+      VALUES ('m1', ${legacyId}, 'user', 'body', 1, 1)
+    `);
+    for (let version = 1; version <= 38; version++) {
+      await db.execute(
+        sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),
+      );
+    }
+
+    await expect(runPgMigrations(db)).rejects.toThrow(/quarantine target already exists/);
+
+    const ledger = (await db.execute(
+      sql.raw("SELECT version FROM _migrations WHERE version = 39"),
+    )) as { rows: Array<{ version: number }> };
+    expect(ledger.rows).toEqual([]);
+    const parents = (await db.execute(
+      sql.raw("SELECT id, project_id FROM memory_threads ORDER BY project_id"),
+    )) as { rows: Array<{ id: string; project_id: string }> };
+    expect(parents.rows).toEqual([
+      { id: targetId, project_id: "collision-project" },
+      { id: legacyId, project_id: "legacy-project" },
+    ]);
+    const child = (await db.execute(
+      sql.raw("SELECT thread_id FROM memory_messages WHERE id = 'm1'"),
+    )) as { rows: Array<{ thread_id: string }> };
+    expect(child.rows).toEqual([{ thread_id: legacyId }]);
     await db.$close();
   });
 

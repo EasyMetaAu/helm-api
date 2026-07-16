@@ -29,7 +29,7 @@
     variant = 'full',
   }: {
     items: RequestListItem[];
-    detailHref: (traceId: string) => string;
+    detailHref: (requestId: string) => string;
     onKeyFilter?: (keyId: string) => void;
     keyHref?: (keyId: string) => string;
     showKey?: boolean;
@@ -41,9 +41,9 @@
 
   // Navigate when the row is clicked, EXCEPT when the click originates on an inner
   // control (the request-id <a> and the key-filter <button> handle their own click).
-  function onRowClick(event: MouseEvent, traceId: string): void {
+  function onRowClick(event: MouseEvent, requestId: string): void {
     if ((event.target as HTMLElement).closest('a, button')) return;
-    void goto(detailHref(traceId));
+    void goto(detailHref(requestId));
   }
 
   function formatTs(ts: string): string {
@@ -127,8 +127,8 @@
     <a
       data-testid="request-detail-link"
       class="link-inline font-mono text-ink-strong"
-      href={detailHref(r.trace_id)}
-      title={r.trace_id}
+      href={detailHref(r.request_id)}
+      title={r.request_id}
     >
       {formatTs(r.ts)}
     </a>
@@ -265,21 +265,21 @@
           >{$t('Performance')}</th
         >
         {#if visibleRequestId}
-          <th class="px-3 py-2" title={$t('The unique trace ID recorded for this request.')}
+          <th class="px-3 py-2" title={$t('The unique Helm request ID recorded for this request.')}
             >{$t('Request ID')}</th
           >
         {/if}
       </tr>
     </thead>
     <tbody>
-      {#each items as r (r.trace_id)}
+      {#each items as r (r.request_id)}
         <!-- The whole row links to the detail page; full view keeps the request-id
              <a>, while compact views keep a real detail <a> in the time cell. -->
         <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
         <tr
           data-testid="request-row"
           class="cursor-pointer"
-          onclick={(e) => onRowClick(e, r.trace_id)}
+          onclick={(e) => onRowClick(e, r.request_id)}
         >
           <td data-label={$t('Time')} class="px-3 py-2 text-ink-body">
             {@render timeCell(r)}
@@ -348,8 +348,8 @@
               <a
                 data-testid="request-detail-link"
                 class="link-inline block max-w-[7rem] truncate font-mono text-ink-strong lg:max-w-none"
-                href={detailHref(r.trace_id)}
-                title={r.trace_id}>{r.trace_id}</a
+                href={detailHref(r.request_id)}
+                title={r.request_id}>{r.request_id}</a
               >
             </td>
           {/if}

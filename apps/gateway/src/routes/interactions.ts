@@ -178,7 +178,11 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
   app.use("/v1beta/interactions", concurrencyReleaseGuard());
 
   app.post("/v1beta/interactions", async (c) => {
-    const traceId = crypto.randomUUID();
+    // Production always receives both ids from createApp. The UUID fallback keeps
+    // this route safely usable in isolated/headless Hono composition tests without
+    // ever consulting a client header for the storage key.
+    const requestId = c.get("request_id") ?? crypto.randomUUID();
+    const traceId = c.get("trace_id") ?? requestId;
     const log = (msg: string) =>
       console.warn(JSON.stringify({ level: "warn", event: msg, trace_id: traceId }));
 
@@ -336,7 +340,7 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
         },
         { signal: requestSignal(c), captureUpstream },
       )) as Record<string, unknown>;
-      const interactionsBody = nativeToInteractions(native, `int_${traceId}`);
+      const interactionsBody = nativeToInteractions(native, `int_${requestId}`);
       const usageBody = usageBodyFromNative(native);
       return {
         clientBody: interactionsBody,
@@ -353,6 +357,7 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
       if (outcome.aborted) return errorJson(c, 400, "client disconnected", "CANCELLED");
       if (deps.record !== undefined) {
         const decision = buildImageDecision({
+          requestId,
           traceId,
           keyPrefix,
           requested: parsed.data.model,
@@ -366,7 +371,7 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
         await recordServed(
           deps.record,
           {
-            requestId: traceId,
+            requestId,
             apiKeyId: identity.keyId,
             decision,
             requestJson,
@@ -389,6 +394,7 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
     const { served, result } = outcome;
     if (deps.record !== undefined) {
       const decision = buildImageDecision({
+        requestId,
         traceId,
         keyPrefix,
         requested: parsed.data.model,
@@ -406,7 +412,7 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
       await recordServed(
         deps.record,
         {
-          requestId: traceId,
+          requestId,
           apiKeyId: identity.keyId,
           decision,
           requestJson,

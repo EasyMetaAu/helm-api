@@ -147,6 +147,33 @@ describe("routeRequest — orchestration", () => {
     expect(rec.final.model_alias).toBe("coder_a");
   });
 
+  it("keeps the storage request id separate from client correlation on success and rejection", async () => {
+    const metadata: InternalRequest["metadata"] = {
+      conversation_id: null,
+      thread_id: null,
+      resource_id: null,
+      project_id: null,
+      memory_mode: "off",
+      trace_id: "client-correlation-1",
+    };
+
+    const success = await routeRequest(req({ metadata }), deps());
+    expect(success.decision.request_id).toBe("req-1");
+    expect(success.decision.trace_id).toBe("client-correlation-1");
+
+    const rejected = await routeRequest(
+      req({ requested_model: "gpt-4o", metadata }),
+      deps({ isKnownModel: () => true }),
+      {
+        allowCustomModel: true,
+        keyCaps: { allowedLanes: null, blockedModels: ["gpt-4o"] },
+      },
+    );
+    expect(rejected.decision.request_id).toBe("req-1");
+    expect(rejected.decision.trace_id).toBe("client-correlation-1");
+    expect(rejected.error?.trace_id).toBe("client-correlation-1");
+  });
+
   it("forwards the executor's upstreamRequest onto the ExecutionResult (ok branch)", async () => {
     // The EXACT serialized wire body the provider captured (a string), forwarded verbatim.
     const upstreamRequest = JSON.stringify({
@@ -898,7 +925,9 @@ describe("routeRequest — per-key blocked models", () => {
 
   it("rejects a lane when blocked_models removes every candidate in its chain", async () => {
     const d = deps();
-    const result = await routeRequest(req({ requested_model: "premium" }), d, {
+    const input = req({ requested_model: "premium" });
+    input.metadata = { ...input.metadata, trace_id: "client-correlation-blocked-lane" };
+    const result = await routeRequest(input, d, {
       allowCustomModel: true,
       keyCaps: {
         allowedLanes: ["premium"],
@@ -909,8 +938,11 @@ describe("routeRequest — per-key blocked models", () => {
     expect(result.final.status).toBe("error");
     expect(result.error?.error_class).toBe("invalid_request");
     expect(result.error?.message).toContain('all candidate models for lane "premium"');
+    expect(result.error?.trace_id).toBe("client-correlation-blocked-lane");
     expect(d.execute).not.toHaveBeenCalled();
     const rec = (d.log as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(rec.request_id).toBe("req-1");
+    expect(rec.trace_id).toBe("client-correlation-blocked-lane");
     expect(rec.lane.selected_lane).toBe("premium");
     expect(rec.lane.candidate_chain).toEqual([]);
   });

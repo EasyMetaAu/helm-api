@@ -685,6 +685,7 @@
   "Request (from client)": "リクエスト（クライアントから）",
   "Request body": "リクエスト本文",
   "Request ID": "リクエスト ID",
+  "Client trace ID": "クライアント追跡 ID",
   "Request logging": "リクエストログ",
   "Request metadata recorded for this call (redacted — no message content or secrets).": "この呼び出しで記録されたリクエストメタデータ（編集済み — メッセージ内容やシークレットは含まれません）。",
   "Request not found.": "リクエストが見つかりません。",

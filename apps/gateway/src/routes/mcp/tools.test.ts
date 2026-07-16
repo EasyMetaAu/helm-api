@@ -9,7 +9,7 @@
 //             spread, searchFacts.undefined degrade, update fact not-found,
 //             update reflection no-text, unknown tool
 
-import { createSqliteDb, SqliteMemoryStore } from "@helm/core";
+import { createSqliteDb, projectScopedThreadId, SqliteMemoryStore } from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
 import { callMemoryTool, type MemoryToolContext, supportsMemoryAdmin } from "./tools.js";
 
@@ -92,6 +92,79 @@ describe("scopeInput scope fields", () => {
     expect(list.total).toBe(1);
     expect(added.added).toHaveLength(1);
   });
+
+  it("maps MCP client thread ids through the same effective-project storage scope", async () => {
+    const { ctxFor, store } = harness();
+    await callMemoryTool(
+      "memory_add",
+      { type: "fact", text: "private A", threadId: "same-thread" },
+      ctxFor("a", "key-a"),
+    );
+    await callMemoryTool(
+      "memory_add",
+      { type: "fact", text: "private B", threadId: "same-thread" },
+      ctxFor("a", "key-b"),
+    );
+    await callMemoryTool(
+      "memory_add",
+      { type: "fact", text: "shared C", threadId: "same-thread" },
+      ctxFor("a", "team"),
+    );
+    await callMemoryTool(
+      "memory_add",
+      { type: "fact", text: "shared D", threadId: "same-thread" },
+      ctxFor("a", "team"),
+    );
+
+    const rowsA = await store.listFacts({
+      accountId: "a",
+      projectId: "key-a",
+      status: "active",
+      limit: 10,
+      offset: 0,
+    });
+    const rowsB = await store.listFacts({
+      accountId: "a",
+      projectId: "key-b",
+      status: "active",
+      limit: 10,
+      offset: 0,
+    });
+    const shared = await store.listFacts({
+      accountId: "a",
+      projectId: "team",
+      status: "active",
+      limit: 10,
+      offset: 0,
+    });
+    expect(rowsA.rows[0]?.threadId).toBe(projectScopedThreadId("a", "key-a", "same-thread"));
+    expect(rowsB.rows[0]?.threadId).toBe(projectScopedThreadId("a", "key-b", "same-thread"));
+    expect(rowsA.rows[0]?.threadId).not.toBe(rowsB.rows[0]?.threadId);
+    expect(new Set(shared.rows.map((fact) => fact.threadId))).toEqual(
+      new Set([projectScopedThreadId("a", "team", "same-thread")]),
+    );
+  });
+
+  it("treats owner-like and v2-like client thread ids as opaque input", async () => {
+    const { ctxFor, store } = harness();
+    const ctx = ctxFor("a", "key-a");
+    const clientThreadIds = ["foo", "a:foo", "v2:n:a:foo", "v2:p:00:a:foo"];
+
+    for (const [index, threadId] of clientThreadIds.entries()) {
+      await callMemoryTool("memory_add", { type: "fact", text: `opaque ${index}`, threadId }, ctx);
+    }
+
+    const rows = await store.listFacts({
+      accountId: "a",
+      projectId: "key-a",
+      status: "active",
+      limit: 10,
+      offset: 0,
+    });
+    expect(new Set(rows.rows.map((fact) => fact.threadId))).toEqual(
+      new Set(clientThreadIds.map((threadId) => projectScopedThreadId("a", "key-a", threadId))),
+    );
+  });
 });
 
 // ---- reflectionView (lines 124-133) — exercised via reflection operations ----
@@ -119,6 +192,23 @@ describe("reflectionView fields", () => {
     const res = await callMemoryTool("memory_get", { type: "reflection", id: "ghost" }, ctx);
     expect(res.isError).toBe(true);
     expect(res.content[0]?.text).toContain("not found");
+  });
+
+  it("does not truncate an opaque reflection thread id that merely contains a colon", async () => {
+    const { ctxFor, store } = harness();
+    const id = await store.upsertReflection({
+      accountId: "a",
+      projectId: "p1",
+      threadId: "opaque:thread",
+      reflectionText: "opaque scope",
+      version: 1,
+      tokenEstimate: 2,
+      updatedAt: NOW,
+    });
+    const got = parse(
+      await callMemoryTool("memory_get", { type: "reflection", id }, ctxFor("a", "p1")),
+    );
+    expect((got.scope as { threadId: string }).threadId).toBe("opaque:thread");
   });
 });
 

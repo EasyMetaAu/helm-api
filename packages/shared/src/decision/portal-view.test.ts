@@ -10,7 +10,7 @@ import type { DecisionRecord } from "./schema.js";
 function poisonedRecord(): DecisionRecord {
   return {
     request_id: "req_1",
-    trace_id: "req_1",
+    trace_id: "trace_1",
     requested_model: "auto",
     protocol: "openai_chat",
     key_prefix: "helm_live_ab12",
@@ -103,6 +103,7 @@ describe("toPortalDecisionView", () => {
   it("exposes the lane/result view the user is entitled to", () => {
     const view = toPortalDecisionView(poisonedRecord());
     expect(view.request_id).toBe("req_1");
+    expect(view.trace_id).toBe("trace_1");
     expect(view.requested_model).toBe("auto");
     expect(view.served_model).toBe("gpt-5.5"); // final.model_alias — user-facing
     expect(view.lane).toBe("balanced");

@@ -1,6 +1,12 @@
+import { decodeScopeId, encodeScopeId } from "@helm/shared";
 import { sql } from "drizzle-orm";
 import { drizzle as drizzlePglite, type PgliteDatabase } from "drizzle-orm/pglite";
 import { drizzle as drizzlePostgres, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
+import {
+  MALFORMED_JOB_QUARANTINE_ACCOUNT_ID,
+  quarantinedMalformedJobThreadId,
+  quarantinedRawThreadId,
+} from "../../memory/thread-scope.js";
 import * as schema from "./schema.js";
 
 type Schema = typeof schema;
@@ -21,6 +27,14 @@ interface RawExecutor {
   execute(query: ReturnType<typeof sql.raw>): Promise<unknown>;
 }
 
+// Drizzle's transaction callback pins every statement to one physical
+// connection, including when postgres-js has a multi-connection runtime pool.
+// That session affinity is required for transaction-scoped advisory locks and
+// for atomic DDL + ledger writes.
+interface MigrationRunner extends RawExecutor {
+  transaction<T>(callback: (tx: RawExecutor) => Promise<T>): Promise<T>;
+}
+
 // Checked-in DDL for the Postgres dialect — the pg equivalent of the sqlite
 // migrations. Each statement is idempotent (IF NOT EXISTS) so re-running is safe;
 // a `_migrations` ledger records applied versions the same way the sqlite adapter
@@ -38,10 +52,9 @@ type Migration =
       readonly sql?: never;
     };
 
-// Session-level pg advisory lock for startup migrations. Two 32-bit keys spell
-// "HELM" and "API\0"; using the two-key form keeps the constants inside pg int4.
-const PG_MIGRATION_LOCK_SQL = "SELECT pg_advisory_lock(1212501069, 1095780608)";
-const PG_MIGRATION_UNLOCK_SQL = "SELECT pg_advisory_unlock(1212501069, 1095780608)";
+// Transaction-scoped startup lock. Two 32-bit keys spell "HELM" and "API\0";
+// the lock is released by COMMIT/ROLLBACK, so a failed process cannot leak it.
+const PG_MIGRATION_LOCK_SQL = "SELECT pg_advisory_xact_lock(1212501069, 1095780608)";
 
 const MIGRATIONS: readonly Migration[] = [
   {
@@ -847,6 +860,247 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // pg mirror of SQLite v40. Every parent present before this ledger row is
+    // historical, even if its opaque id resembles `v2:*`. Copy each one into a
+    // distinct owner-bound quarantine, move FK children, and delete the old
+    // parent atomically. All long-tier rows for affected owners are de-scoped and
+    // archived because project-only Observer/Reflector output can also have been
+    // derived from a mixed legacy parent.
+    version: 39,
+    run: async (db) => {
+      if (
+        !(await pgTableHasColumns(db, "memory_threads", [
+          "id",
+          "project_id",
+          "resource_id",
+          "owner_id",
+          "last_served_model",
+          "message_count",
+          "last_message_at",
+          "observation_count",
+          "last_observation_at",
+          "created_at",
+          "updated_at",
+        ]))
+      ) {
+        return;
+      }
+      const invalidOwner = resultRows<{ invalid: number }>(
+        await db.execute(
+          sql.raw(
+            "SELECT 1 AS invalid FROM memory_threads WHERE owner_id IS NULL OR owner_id = '' LIMIT 1",
+          ),
+        ),
+      )[0];
+      if (invalidOwner !== undefined) {
+        throw new Error("cannot quarantine legacy Memory threads: owner_id is missing");
+      }
+
+      const quarantinedAt = Date.now();
+      await db.execute(
+        sql.raw(`
+          CREATE TEMP TABLE helm_memory_thread_scope_v2 (
+            old_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            new_id TEXT NOT NULL UNIQUE
+          ) ON COMMIT DROP
+        `),
+      );
+      await db.execute(
+        sql.raw(`
+          INSERT INTO helm_memory_thread_scope_v2 (old_id, owner_id, new_id)
+          SELECT id,
+                 owner_id,
+                 'v2:q:p:' || encode(convert_to(owner_id, 'UTF8'), 'hex') || ':' ||
+                   encode(convert_to(id, 'UTF8'), 'hex')
+            FROM memory_threads
+        `),
+      );
+      const targetCollision = resultRows<{ collision: number }>(
+        await db.execute(
+          sql.raw(`
+            SELECT 1 AS collision
+              FROM helm_memory_thread_scope_v2 AS m
+              JOIN memory_threads AS existing ON existing.id = m.new_id
+             LIMIT 1
+          `),
+        ),
+      )[0];
+      if (targetCollision !== undefined) {
+        throw new Error("legacy Memory quarantine target already exists; migration rolled back");
+      }
+      await db.execute(
+        sql.raw(`
+          INSERT INTO memory_threads (
+            id, project_id, resource_id, owner_id, last_served_model,
+            message_count, last_message_at, observation_count,
+            last_observation_at, created_at, updated_at
+          )
+          SELECT m.new_id, NULL, NULL, t.owner_id, t.last_served_model,
+                 t.message_count, t.last_message_at, t.observation_count,
+                 t.last_observation_at, t.created_at, t.updated_at
+            FROM memory_threads t
+            JOIN helm_memory_thread_scope_v2 m ON m.old_id = t.id
+        `),
+      );
+      for (const table of ["memory_messages", "memory_observations"] as const) {
+        if (!(await pgTableHasColumns(db, table, ["thread_id"]))) continue;
+        await db.execute(
+          sql.raw(`
+            UPDATE ${table} AS child
+               SET thread_id = m.new_id
+              FROM helm_memory_thread_scope_v2 m
+             WHERE child.thread_id = m.old_id
+          `),
+        );
+      }
+
+      if (
+        await pgTableHasColumns(db, "memory_reflections", [
+          "owner_id",
+          "project_id",
+          "resource_id",
+          "thread_id",
+          "status",
+        ])
+      ) {
+        await db.execute(
+          sql.raw(`
+            UPDATE memory_reflections AS child
+               SET project_id = NULL,
+                   resource_id = NULL,
+                   thread_id = 'v2:q:r:' || encode(convert_to(child.owner_id, 'UTF8'), 'hex') || ':' ||
+                     encode(convert_to(COALESCE(child.thread_id, ''), 'UTF8'), 'hex'),
+                   status = 'archived'
+             WHERE owner_id IN (SELECT owner_id FROM helm_memory_thread_scope_v2)
+          `),
+        );
+      }
+      if (
+        await pgTableHasColumns(db, "memory_facts", [
+          "owner_id",
+          "project_id",
+          "resource_id",
+          "thread_id",
+          "status",
+          "invalid_at",
+          "expired_at",
+          "updated_at",
+        ])
+      ) {
+        await db.execute(
+          sql.raw(`
+            UPDATE memory_facts AS child
+               SET project_id = NULL,
+                   resource_id = NULL,
+                   thread_id = 'v2:q:r:' || encode(convert_to(child.owner_id, 'UTF8'), 'hex') || ':' ||
+                     encode(convert_to(COALESCE(child.thread_id, ''), 'UTF8'), 'hex'),
+                   invalid_at = COALESCE(invalid_at, ${quarantinedAt}),
+                   expired_at = COALESCE(expired_at, ${quarantinedAt}),
+                   updated_at = ${quarantinedAt},
+                   status = 'archived'
+             WHERE owner_id IN (SELECT owner_id FROM helm_memory_thread_scope_v2)
+          `),
+        );
+      }
+
+      if (
+        await pgTableHasColumns(db, "memory_jobs", [
+          "id",
+          "scope_id",
+          "status",
+          "error",
+          "updated_at",
+        ])
+      ) {
+        type MappingRow = { old_id: string; owner_id: string; new_id: string };
+        type JobRow = {
+          id: string;
+          scope_id: string;
+          status: string;
+          error: string | null;
+        };
+        const mappingRows = resultRows<MappingRow>(
+          await db.execute(
+            sql.raw("SELECT old_id, owner_id, new_id FROM helm_memory_thread_scope_v2"),
+          ),
+        );
+        const key = (ownerId: string, threadId: string): string =>
+          JSON.stringify([ownerId, threadId]);
+        const oldToNew = new Map(
+          mappingRows.map((row) => [key(row.owner_id, row.old_id), row.new_id]),
+        );
+        const existingTargets = new Set(
+          mappingRows.map((row) => key(row.owner_id, row.new_id)),
+        );
+        const affectedOwners = new Set(mappingRows.map((row) => row.owner_id));
+        const jobs = resultRows<JobRow>(
+          await db.execute(sql.raw("SELECT id, scope_id, status, error FROM memory_jobs")),
+        );
+        for (const job of jobs) {
+          let scope: ReturnType<typeof decodeScopeId>;
+          try {
+            scope = decodeScopeId(job.scope_id);
+          } catch {
+            const isOpen = job.status === "pending" || job.status === "running";
+            const nextScopeId = encodeScopeId({
+              accountId: MALFORMED_JOB_QUARANTINE_ACCOUNT_ID,
+              threadId: quarantinedMalformedJobThreadId(job.id),
+            });
+            const nextStatus = isOpen ? "failed" : job.status;
+            const nextError = isOpen
+              ? "malformed legacy memory job scope quarantined during v39 migration"
+              : job.error;
+            await db.execute(
+              sql`
+                UPDATE memory_jobs
+                   SET scope_id = ${nextScopeId},
+                       status = ${nextStatus},
+                       error = ${nextError},
+                       updated_at = ${quarantinedAt}
+                 WHERE id = ${job.id}
+              ` as ReturnType<typeof sql.raw>,
+            );
+            continue;
+          }
+          if (!affectedOwners.has(scope.accountId)) continue;
+          const currentThreadId = scope.threadId ?? "";
+          const nextThreadId =
+            oldToNew.get(key(scope.accountId, currentThreadId)) ??
+            (existingTargets.has(key(scope.accountId, currentThreadId))
+              ? currentThreadId
+              : quarantinedRawThreadId(scope.accountId, currentThreadId));
+          const nextScopeId = encodeScopeId({
+            accountId: scope.accountId,
+            threadId: nextThreadId,
+          });
+          const isOpen = job.status === "pending" || job.status === "running";
+          const nextStatus = isOpen ? "failed" : job.status;
+          const nextError = isOpen
+            ? "legacy thread scope quarantined during v39 migration"
+            : job.error;
+          await db.execute(
+            sql`
+              UPDATE memory_jobs
+                 SET scope_id = ${nextScopeId},
+                     status = ${nextStatus},
+                     error = ${nextError},
+                     updated_at = ${quarantinedAt}
+               WHERE id = ${job.id}
+            ` as ReturnType<typeof sql.raw>,
+          );
+        }
+      }
+      await db.execute(
+        sql.raw(`
+          DELETE FROM memory_threads AS t
+           USING helm_memory_thread_scope_v2 m
+           WHERE t.id = m.old_id
+        `),
+      );
+    },
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {
@@ -862,6 +1116,8 @@ async function pgTableHasColumns(
     | "memory_threads"
     | "memory_messages"
     | "memory_observations"
+    | "memory_reflections"
+    | "memory_facts"
     | "memory_jobs"
     | "oauth_quota",
   requiredColumns: readonly string[],
@@ -893,53 +1149,51 @@ function splitStatements(block: string): string[] {
     .filter((s) => s.length > 0);
 }
 
-// Apply pending migrations against an open drizzle pg handle. Idempotent: a
-// `_migrations` ledger records applied versions so re-running is a no-op. Throws
-// on failure so the caller fails-closed at startup. Statements run one at a time
-// (the pg wire protocol forbids multi-command prepared statements), but EACH
-// migration's statements + its ledger INSERT are wrapped in a single
-// BEGIN/COMMIT (rolled back on error) — mirroring the sqlite adapter's
-// db.transaction — so a partial failure can never leave the ledger lying about a
-// half-applied version.
-export async function runPgMigrations(db: RawExecutor): Promise<void> {
-  let locked = false;
-  await db.execute(sql.raw(PG_MIGRATION_LOCK_SQL));
-  locked = true;
-  try {
-    await db.execute(
+// Apply pending migrations against an open drizzle pg handle. Each Drizzle
+// transaction reserves one physical connection. Inside it we acquire the xact
+// advisory lock, re-read that version's ledger row, apply the migration, and
+// record the ledger entry. Concurrent gateway startups therefore serialize and
+// cannot execute a version twice, while a failure rolls back only that version
+// (previous versions stay committed). No manual BEGIN/COMMIT is issued through a
+// pooled executor.
+export async function runPgMigrations(db: MigrationRunner): Promise<void> {
+  const have = await db.transaction(async (tx) => {
+    await tx.execute(sql.raw(PG_MIGRATION_LOCK_SQL));
+    await tx.execute(
       sql.raw(
         "CREATE TABLE IF NOT EXISTS _migrations (version INTEGER PRIMARY KEY, applied_at BIGINT NOT NULL)",
       ),
     );
-    const applied = (await db.execute(sql.raw("SELECT version FROM _migrations"))) as
-      | { rows?: Array<{ version: number }> }
-      | Array<{ version: number }>;
-    const rows = Array.isArray(applied) ? applied : (applied.rows ?? []);
-    const have = new Set(rows.map((r) => Number(r.version)));
-    for (const m of MIGRATIONS) {
-      if (have.has(m.version)) continue;
-      await db.execute(sql.raw("BEGIN"));
-      try {
-        if (m.run) {
-          await m.run(db);
-        } else {
-          for (const stmt of splitStatements(m.sql)) {
-            await db.execute(sql.raw(stmt));
-          }
+    const applied = resultRows<{ version: number }>(
+      await tx.execute(sql.raw("SELECT version FROM _migrations")),
+    );
+    return new Set(applied.map((row) => Number(row.version)));
+  });
+
+  for (const migration of MIGRATIONS) {
+    if (have.has(migration.version)) continue;
+    await db.transaction(async (tx) => {
+      await tx.execute(sql.raw(PG_MIGRATION_LOCK_SQL));
+      const alreadyApplied = resultRows<{ version: number }>(
+        await tx.execute(
+          sql.raw(`SELECT version FROM _migrations WHERE version = ${migration.version}`),
+        ),
+      );
+      if (alreadyApplied.length > 0) return;
+
+      if (migration.run) {
+        await migration.run(tx);
+      } else {
+        for (const statement of splitStatements(migration.sql)) {
+          await tx.execute(sql.raw(statement));
         }
-        await db.execute(
-          sql.raw(
-            `INSERT INTO _migrations (version, applied_at) VALUES (${m.version}, ${Date.now()})`,
-          ),
-        );
-        await db.execute(sql.raw("COMMIT"));
-      } catch (err) {
-        await db.execute(sql.raw("ROLLBACK"));
-        throw err;
       }
-    }
-  } finally {
-    if (locked) await db.execute(sql.raw(PG_MIGRATION_UNLOCK_SQL));
+      await tx.execute(
+        sql.raw(
+          `INSERT INTO _migrations (version, applied_at) VALUES (${migration.version}, ${Date.now()})`,
+        ),
+      );
+    });
   }
 }
 
@@ -965,8 +1219,9 @@ export async function createPgliteDb(dataDir?: string): Promise<PgDb> {
 
 // Open a hosted Postgres (supabase) connection via postgres-js, run migrations,
 // and return a drizzle handle. The connection string is passed by the caller
-// (resolved from runtime.store.url_env) — NEVER logged. `max: 1`-style pooling is
-// left to the driver default; the gateway is single-process for the MVP.
+// (resolved from runtime.store.url_env) — NEVER logged. The runtime keeps the
+// driver's normal pool; runPgMigrations uses Drizzle transactions, which reserve
+// one physical connection for each lock + migration + ledger unit.
 export async function createPgDb(connectionString: string): Promise<PgDb> {
   const { default: postgres } = await import("postgres");
   const client = postgres(connectionString);

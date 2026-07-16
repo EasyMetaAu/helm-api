@@ -55,7 +55,8 @@ Built on Hono. Responsibilities:
   [05 · Protocol Translation](05-protocol-translation.md) lists them exactly.
 - Serve authenticated model discovery (`/v1/models`) and key-scoped usage
   (`/v1/usage/stats`).
-- Normalize request headers and the request/trace id.
+- Normalize request headers, generate Helm's internal `request_id`, and resolve
+  the independent client-facing `trace_id`.
 - Apply request-size and timeout limits (`runtime.max_request_bytes`,
   `runtime.request_timeout_ms`).
 - Dispatch to the correct protocol adapter.
@@ -295,6 +296,7 @@ provider_raw: object | omitted       # normalized passthrough-only fields
 native_request: object | omitted     # sanitized native carrier for same-protocol attempts
 stream: boolean
 metadata:
+  trace_id: string | omitted       # HTTP gateway stamps client correlation; headless may omit
   conversation_id: string | null   # from x-session-key; drives session momentum
   # memory-scope fields (docs/08), parsed from request headers:
   thread_id: string | null
@@ -322,7 +324,9 @@ cost breakdown, `serving_account` for the final OAuth subscription account when
 applicable, and a `memory` block of counts/ids only (never memory content).
 It also records source/target protocol and native-passthrough mutation metadata
 per attempt, redacted upstream error detail, served token/cost provenance,
-stream outcome, and streamed generation duration when available.
+stream outcome, and streamed generation duration when available. Its unique,
+server-generated `request_id` is the telemetry/payload ownership key; the
+independent `trace_id` is caller-facing correlation metadata and may repeat.
 Field-level detail lives in [07 · Error Model & Observability](07-observability.md).
 
 The classifier `decided_by` describes **only** the classification stage; the

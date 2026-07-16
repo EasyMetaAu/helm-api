@@ -685,6 +685,7 @@
   "Request (from client)": "Solicitud (del cliente)",
   "Request body": "Cuerpo de la solicitud",
   "Request ID": "ID de solicitud",
+  "Client trace ID": "ID de correlación del cliente",
   "Request logging": "Registro de solicitudes",
   "Request metadata recorded for this call (redacted — no message content or secrets).": "Metadatos de la solicitud registrados para esta llamada (ocultos: sin contenido de mensajes ni secretos).",
   "Request not found.": "Solicitud no encontrada.",

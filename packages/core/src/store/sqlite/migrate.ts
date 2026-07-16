@@ -1,6 +1,12 @@
 import Database from "better-sqlite3";
+import { decodeScopeId, encodeScopeId } from "@helm/shared";
 import { type BetterSQLite3Database, drizzle } from "drizzle-orm/better-sqlite3";
 import * as sqliteVec from "sqlite-vec";
+import {
+  MALFORMED_JOB_QUARANTINE_ACCOUNT_ID,
+  quarantinedMalformedJobThreadId,
+  quarantinedRawThreadId,
+} from "../../memory/thread-scope.js";
 import * as schema from "./schema.js";
 
 type Schema = typeof schema;
@@ -951,6 +957,203 @@ const MIGRATIONS: readonly Migration[] = [
            WHERE t.id = activity.thread_id;
         `);
       }
+    },
+  },
+  {
+    // Memory thread scope v2. The former physical id contained only
+    // account+client-thread, so two key-isolated effective projects in one
+    // account could attach messages/observations to the same parent. Every row
+    // present before this ledger entry is historical, including ids that happen
+    // to start with `v2:`. Move parents and their FK children into a dedicated
+    // NULL-project quarantine in one transaction. Long-tier rows are even more
+    // ambiguous: Observer/Reflector could derive project-only content from a
+    // mixed parent, so ALL derived rows for an affected owner are de-scoped,
+    // quarantined, and archived rather than trusted via sticky metadata.
+    version: 40,
+    run: (db) => {
+      if (
+        !sqliteTableHasColumns(db, "memory_threads", [
+          "id",
+          "project_id",
+          "resource_id",
+          "owner_id",
+        ])
+      ) {
+        return;
+      }
+      const invalidOwner = db
+        .prepare(
+          "SELECT 1 AS invalid FROM memory_threads WHERE owner_id IS NULL OR owner_id = '' LIMIT 1",
+        )
+        .get() as { invalid: number } | undefined;
+      if (invalidOwner !== undefined) {
+        throw new Error("cannot quarantine legacy Memory threads: owner_id is missing");
+      }
+
+      const quarantinedAt = Date.now();
+      db.exec("PRAGMA defer_foreign_keys = ON");
+      db.exec("DROP TABLE IF EXISTS temp.helm_memory_thread_scope_v2");
+      db.exec(`
+        CREATE TEMP TABLE helm_memory_thread_scope_v2 (
+          old_id TEXT PRIMARY KEY,
+          owner_id TEXT NOT NULL,
+          new_id TEXT NOT NULL UNIQUE
+        );
+        INSERT INTO helm_memory_thread_scope_v2 (old_id, owner_id, new_id)
+        SELECT id,
+               owner_id,
+               'v2:q:p:' || lower(hex(CAST(owner_id AS BLOB))) || ':' ||
+                 lower(hex(CAST(id AS BLOB)))
+          FROM memory_threads;
+      `);
+      const targetCollision = db
+        .prepare(`
+          SELECT 1 AS collision
+            FROM helm_memory_thread_scope_v2 AS m
+            JOIN memory_threads AS existing ON existing.id = m.new_id
+           LIMIT 1
+        `)
+        .get() as { collision: number } | undefined;
+      if (targetCollision !== undefined) {
+        throw new Error("legacy Memory quarantine target already exists; migration rolled back");
+      }
+      db.exec(`
+        UPDATE memory_threads
+           SET id = (SELECT new_id
+                       FROM helm_memory_thread_scope_v2 m
+                      WHERE m.old_id = memory_threads.id),
+               project_id = NULL,
+               resource_id = NULL
+         WHERE id IN (SELECT old_id FROM helm_memory_thread_scope_v2);
+      `);
+      for (const table of ["memory_messages", "memory_observations"] as const) {
+        if (!sqliteTableHasColumns(db, table, ["thread_id"])) continue;
+        db.exec(`
+          UPDATE ${table}
+             SET thread_id = (SELECT new_id
+                                FROM helm_memory_thread_scope_v2 m
+                               WHERE m.old_id = ${table}.thread_id)
+           WHERE thread_id IN (SELECT old_id FROM helm_memory_thread_scope_v2);
+          `);
+      }
+
+      if (
+        sqliteTableHasColumns(db, "memory_reflections", [
+          "owner_id",
+          "project_id",
+          "resource_id",
+          "thread_id",
+          "status",
+        ])
+      ) {
+        db.exec(`
+          UPDATE memory_reflections AS child
+             SET project_id = NULL,
+                 resource_id = NULL,
+                 thread_id = 'v2:q:r:' || lower(hex(CAST(child.owner_id AS BLOB))) || ':' ||
+                   lower(hex(CAST(COALESCE(child.thread_id, '') AS BLOB))),
+                 status = 'archived'
+           WHERE owner_id IN (SELECT owner_id FROM helm_memory_thread_scope_v2);
+        `);
+      }
+      if (
+        sqliteTableHasColumns(db, "memory_facts", [
+          "owner_id",
+          "project_id",
+          "resource_id",
+          "thread_id",
+          "status",
+          "invalid_at",
+          "expired_at",
+          "updated_at",
+        ])
+      ) {
+        db.exec(`
+          UPDATE memory_facts AS child
+             SET project_id = NULL,
+                 resource_id = NULL,
+                 thread_id = 'v2:q:r:' || lower(hex(CAST(child.owner_id AS BLOB))) || ':' ||
+                   lower(hex(CAST(COALESCE(child.thread_id, '') AS BLOB))),
+                 invalid_at = COALESCE(invalid_at, ${quarantinedAt}),
+                 expired_at = COALESCE(expired_at, ${quarantinedAt}),
+                 updated_at = ${quarantinedAt},
+                 status = 'archived'
+           WHERE owner_id IN (SELECT owner_id FROM helm_memory_thread_scope_v2);
+        `);
+      }
+
+      if (
+        sqliteTableHasColumns(db, "memory_jobs", [
+          "id",
+          "scope_id",
+          "status",
+          "error",
+          "updated_at",
+        ])
+      ) {
+        type MappingRow = { old_id: string; owner_id: string; new_id: string };
+        type JobRow = {
+          id: string;
+          scope_id: string;
+          status: string;
+          error: string | null;
+        };
+        const mappingRows = db
+          .prepare("SELECT old_id, owner_id, new_id FROM helm_memory_thread_scope_v2")
+          .all() as MappingRow[];
+        const key = (ownerId: string, threadId: string): string =>
+          JSON.stringify([ownerId, threadId]);
+        const oldToNew = new Map(
+          mappingRows.map((row) => [key(row.owner_id, row.old_id), row.new_id]),
+        );
+        const existingTargets = new Set(
+          mappingRows.map((row) => key(row.owner_id, row.new_id)),
+        );
+        const affectedOwners = new Set(mappingRows.map((row) => row.owner_id));
+        const update = db.prepare(
+          "UPDATE memory_jobs SET scope_id = ?, status = ?, error = ?, updated_at = ? WHERE id = ?",
+        );
+        const jobs = db
+          .prepare("SELECT id, scope_id, status, error FROM memory_jobs")
+          .all() as JobRow[];
+        for (const job of jobs) {
+          let scope: ReturnType<typeof decodeScopeId>;
+          try {
+            scope = decodeScopeId(job.scope_id);
+          } catch {
+            const isOpen = job.status === "pending" || job.status === "running";
+            update.run(
+              encodeScopeId({
+                accountId: MALFORMED_JOB_QUARANTINE_ACCOUNT_ID,
+                threadId: quarantinedMalformedJobThreadId(job.id),
+              }),
+              isOpen ? "failed" : job.status,
+              isOpen
+                ? "malformed legacy memory job scope quarantined during v40 migration"
+                : job.error,
+              quarantinedAt,
+              job.id,
+            );
+            continue;
+          }
+          if (!affectedOwners.has(scope.accountId)) continue;
+          const currentThreadId = scope.threadId ?? "";
+          const nextThreadId =
+            oldToNew.get(key(scope.accountId, currentThreadId)) ??
+            (existingTargets.has(key(scope.accountId, currentThreadId))
+              ? currentThreadId
+              : quarantinedRawThreadId(scope.accountId, currentThreadId));
+          const isOpen = job.status === "pending" || job.status === "running";
+          update.run(
+            encodeScopeId({ accountId: scope.accountId, threadId: nextThreadId }),
+            isOpen ? "failed" : job.status,
+            isOpen ? "legacy thread scope quarantined during v40 migration" : job.error,
+            quarantinedAt,
+            job.id,
+          );
+        }
+      }
+      db.exec("DROP TABLE helm_memory_thread_scope_v2");
     },
   },
 ];

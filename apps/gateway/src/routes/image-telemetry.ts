@@ -39,6 +39,9 @@ export function numField(o: Record<string, unknown> | null, ...keys: string[]): 
 // All derived fields (latency total, fallback count, cost) are computed FROM the
 // attempts array, mirroring how the chat executor's attempts become a DecisionRecord.
 export function buildImageDecision(p: {
+  /** Server-generated storage/audit id. Never sourced from client correlation headers. */
+  requestId: string;
+  /** Client-facing correlation id. */
   traceId: string;
   keyPrefix: string | null;
   requested: string; // the client-sent id (lane name OR bare model)
@@ -56,7 +59,7 @@ export function buildImageDecision(p: {
   const completionUsd =
     costed.length > 0 ? costed.reduce((sum, a) => sum + (a.cost_usd ?? 0), 0) : null;
   return {
-    request_id: p.traceId,
+    request_id: p.requestId,
     trace_id: p.traceId,
     requested_model: p.requested,
     protocol: null,

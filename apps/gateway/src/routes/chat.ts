@@ -20,7 +20,7 @@ import {
   observeInbound,
   observeOutbound,
   openaiTransformer,
-  ownerScopedThreadId,
+  projectScopedThreadId,
 } from "@helm/core";
 import {
   type HelmError,
@@ -239,6 +239,7 @@ interface ChatIdentity {
 // loose normalized shape; deeper per-protocol narrowing is the docs/05 tasks.
 function toInternalRequest(
   body: ChatCompletionRequest,
+  requestId: string,
   traceId: string,
   identity: ChatIdentity,
   sessionKey: string | null,
@@ -278,7 +279,7 @@ function toInternalRequest(
   const providerRaw = providerRawFromRequest(bodyRec);
 
   return {
-    request_id: traceId,
+    request_id: requestId,
     protocol: "openai_chat",
     account_id: identity.accountId,
     api_key_id: identity.keyId,
@@ -297,6 +298,7 @@ function toInternalRequest(
     ...(providerRaw !== undefined ? { provider_raw: providerRaw } : {}),
     stream: body.stream === true,
     metadata: {
+      trace_id: traceId,
       conversation_id: conversationId,
       // Memory scope (docs/08): resolved from the x-thread-id/x-resource-id/
       // x-project-id/x-memory-mode headers at the route boundary (core never
@@ -421,6 +423,7 @@ function flushOpenAIChunk(buffer: SSEAccumulator): void {
 export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void {
   const handleChat = async (c: Context<AppEnv>, pathModel?: string) => {
     const traceId = c.get("trace_id");
+    const requestId = c.get("request_id");
     const identity = c.get("identity") as unknown as ChatIdentity;
 
     // Boundary validation (docs/07, principle 2 fail-closed): a malformed JSON
@@ -474,7 +477,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       },
     });
 
-    let internal = toInternalRequest(body, traceId, identity, sessionKey, memoryScope);
+    let internal = toInternalRequest(body, requestId, traceId, identity, sessionKey, memoryScope);
     internal = downgradeClientFastModeIfDisallowed(internal, identity.caps.allowFastMode);
     // Per-candidate attempt timeout: a slow head model times out and the executor falls
     // back to the next candidate (instead of waiting out the global 90s connect timeout).
@@ -524,7 +527,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       if (deps.writes !== undefined) {
         if (!captureEnabled(deps)) return;
         deps.writes.enqueuePayload({
-          requestId: traceId,
+          requestId,
           requestJson,
           responseJson: capturedResponseJson,
           upstreamRequestJson,
@@ -535,7 +538,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       await persistPayload(
         deps,
         {
-          requestId: traceId,
+          requestId,
           requestJson,
           responseJson: capturedResponseJson,
           upstreamRequestJson,
@@ -675,7 +678,13 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
           ...(memoryScope.projectId !== null ? { projectId: memoryScope.projectId } : {}),
           ...(memoryScope.resourceId !== null ? { resourceId: memoryScope.resourceId } : {}),
           ...(memoryScope.threadId !== null
-            ? { threadId: ownerScopedThreadId(memoryScope.accountId, memoryScope.threadId) }
+            ? {
+                threadId: projectScopedThreadId(
+                  memoryScope.accountId,
+                  memoryScope.projectId,
+                  memoryScope.threadId,
+                ),
+              }
             : {}),
         },
         {

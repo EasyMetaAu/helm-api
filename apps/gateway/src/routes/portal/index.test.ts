@@ -562,13 +562,22 @@ describe("portal API", () => {
       expect(order).toEqual(["owner"]); // read never happened
     });
 
-    it("returns the whitelist projection for an owned trace, no supply chain", async () => {
-      const res = await buildApp(record()).request("/portal/api/requests/trace_1", {
+    it("returns request_id plus client trace correlation for an owned request, no supply chain", async () => {
+      const tel = telemetry({
+        async getByRequestId() {
+          return decision({ request_id: "req_internal_1", trace_id: "client_trace_1" });
+        },
+      });
+      const res = await buildApp(record(), tel).request("/portal/api/requests/req_internal_1", {
         headers: AUTH,
       });
       expect(res.status).toBe(200);
       const body = await res.text();
-      expect(JSON.parse(body).served_model).toBe("gpt-5.5");
+      expect(JSON.parse(body)).toMatchObject({
+        request_id: "req_internal_1",
+        trace_id: "client_trace_1",
+        served_model: "gpt-5.5",
+      });
       expect(body).not.toContain("SECRET_ALIAS");
       expect(body).not.toContain("SECRET_WIRE");
     });

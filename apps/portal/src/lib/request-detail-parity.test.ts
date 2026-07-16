@@ -15,7 +15,7 @@ describe("Portal request-detail parity", () => {
     expect(page).toContain('data-testid="load-conversation"');
     expect(page).toContain('data-testid="load-request-body"');
     expect(page).toContain('data-testid="load-response-body"');
-    expect(page.match(/if \(traceId !== id\) return/g)).toHaveLength(4);
+    expect(page.match(/if \(requestId !== id\) return/g)).toHaveLength(4);
   });
 
   it("uses the Admin-grade image gallery and stream-aware response viewer", () => {
@@ -31,5 +31,11 @@ describe("Portal request-detail parity", () => {
   it("keeps provider-forwarded payloads outside the Portal boundary", () => {
     expect(page).not.toContain("upstream_request");
     expect(api).not.toContain('part: "upstream_request"');
+  });
+
+  it("uses request_id for lookup while retaining client trace correlation", () => {
+    expect(api).toContain("trace_id: string");
+    expect(page).toContain("detail.request_id");
+    expect(page).toContain("detail.trace_id");
   });
 });

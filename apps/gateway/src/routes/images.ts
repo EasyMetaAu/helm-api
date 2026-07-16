@@ -102,7 +102,11 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
   app.use("/v1/images/generations", concurrencyReleaseGuard());
 
   app.post("/v1/images/generations", async (c) => {
-    const traceId = crypto.randomUUID();
+    // Production always receives both ids from createApp. The UUID fallback keeps
+    // this route safely usable in isolated/headless Hono composition tests without
+    // ever consulting a client header for the storage key.
+    const requestId = c.get("request_id") ?? crypto.randomUUID();
+    const traceId = c.get("trace_id") ?? requestId;
     const log = (msg: string) =>
       console.warn(JSON.stringify({ level: "warn", event: msg, trace_id: traceId }));
 
@@ -286,6 +290,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
       if (outcome.aborted) return errorJson(c, 400, "invalid_request_error", "client disconnected");
       if (deps.record !== undefined) {
         const decision = buildImageDecision({
+          requestId,
           traceId,
           keyPrefix,
           requested: parsed.data.model,
@@ -299,7 +304,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         await recordServed(
           deps.record,
           {
-            requestId: traceId,
+            requestId,
             apiKeyId: identity.keyId,
             decision,
             requestJson,
@@ -322,6 +327,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
     const { served, result } = outcome;
     if (deps.record !== undefined) {
       const decision = buildImageDecision({
+        requestId,
         traceId,
         keyPrefix,
         requested: parsed.data.model,
@@ -340,7 +346,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
       await recordServed(
         deps.record,
         {
-          requestId: traceId,
+          requestId,
           apiKeyId: identity.keyId,
           decision,
           requestJson,

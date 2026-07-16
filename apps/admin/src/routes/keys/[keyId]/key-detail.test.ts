@@ -173,6 +173,7 @@ describe('key detail loader', () => {
 
 function requestItem(traceId: string): RequestListItem {
   return {
+    request_id: traceId,
     trace_id: traceId,
     ts: new Date(1_700_000_000_000).toISOString(),
     key_prefix: 'helm_live_ab12',

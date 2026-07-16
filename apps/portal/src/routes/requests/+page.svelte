@@ -143,8 +143,8 @@
     return search ? `?${search}` : "?";
   }
 
-  function detailHref(traceId: string): string {
-    return `${base}/requests/${traceId}`;
+  function detailHref(requestId: string): string {
+    return `${base}/requests/${requestId}`;
   }
 </script>
 

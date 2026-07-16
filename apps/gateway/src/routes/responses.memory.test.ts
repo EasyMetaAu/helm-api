@@ -1,4 +1,5 @@
 import type { ExecutionResult, ObserveDeps, RouteOptions } from "@helm/core";
+import { projectScopedThreadId } from "@helm/core";
 import type { InternalRequest, MemoryMessageInput, MemoryThreadInput } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
@@ -147,10 +148,11 @@ describe("gateway.responses.memory — observe reaches /v1/responses", () => {
     expect(res.status).toBe(200);
     // The memory scope reached observe via ir.metadata (the route stamping fix).
     expect(store.ensureThread).toHaveBeenCalled();
-    expect(threads[0]?.id).toBe("acct:thread-1");
+    const storageThreadId = projectScopedThreadId("acct", "project-1", "thread-1");
+    expect(threads[0]?.id).toBe(storageThreadId);
     expect(threads[0]?.ownerId).toBe("acct");
     // Inbound user message + outbound assistant message both persisted to the thread.
-    expect(messages.some((m) => m.threadId === "acct:thread-1" && m.role === "user")).toBe(true);
+    expect(messages.some((m) => m.threadId === storageThreadId && m.role === "user")).toBe(true);
     expect(messages.some((m) => m.role === "assistant" && m.content === "hello")).toBe(true);
   });
 
@@ -172,9 +174,10 @@ describe("gateway.responses.memory — observe reaches /v1/responses", () => {
     expect(text).toContain("response.completed");
     // The streamed assistant text was accumulated and persisted (the FIRST time the
     // Responses surface exercises the streaming observe path). Thread ids are
-    // owner-scoped (`accountId:threadId`) so reused thread ids cannot cross accounts.
-    expect(threads[0]?.id).toBe("acct:thread-1");
-    expect(messages.some((m) => m.threadId === "acct:thread-1" && m.role === "user")).toBe(true);
+    // Account + effective-project scoped so reused thread ids cannot cross keys/projects.
+    const storageThreadId = projectScopedThreadId("acct", "project-1", "thread-1");
+    expect(threads[0]?.id).toBe(storageThreadId);
+    expect(messages.some((m) => m.threadId === storageThreadId && m.role === "user")).toBe(true);
     expect(messages.some((m) => m.role === "assistant" && m.content === "hello world")).toBe(true);
   });
 

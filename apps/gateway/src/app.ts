@@ -29,6 +29,11 @@ export interface AppDeps {
 // Per-request context variables (typed c.get/c.set).
 export type AppEnv = {
   Variables: {
+    // Server-generated storage/audit identity. This is never sourced from a
+    // client header and is the only id allowed to key telemetry/payload rows.
+    request_id: string;
+    // Client-facing correlation id. May come from X-Request-Id/X-Trace-Id and
+    // is safe for logs/response envelopes, but must never be a storage key.
     trace_id: string;
     logger: Logger;
     request_timeout?: RequestTimeoutState;
@@ -39,7 +44,8 @@ export type AppEnv = {
 // the entry file serves it so tests can call app.request() directly.
 //
 // Middleware order is a contract (outer -> inner):
-//   1. trace_id     (propagate/generate; must precede the logger)
+//   1. request_id + trace_id (generate internal id + resolve client correlation;
+//                             must precede the logger)
 //   2. logger ctx   (expose logger on the context)
 //   3. requestLogger(one structured completion log per request)
 //   4. [limits]     (gateway.limits mounts here)
@@ -57,7 +63,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   });
   app.use("*", requestLoggerMiddleware());
 
-  // Hygiene: normalize headers/request_id, then enforce body size + timeout.
+  // Hygiene: normalize hop-by-hop/correlation headers, then enforce body size + timeout.
   // Order: normalizeHeaders -> bodyLimit -> timeout (before auth/routes).
   app.use("*", normalizeHeaders());
   if (deps.limits) {

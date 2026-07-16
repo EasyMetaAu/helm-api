@@ -123,7 +123,7 @@ sequenceDiagram
     participant St as Store (writeQueue)
 
     Cl->>GW: HTTP request (one of 4 text protocols)
-    Note over GW: trace_id · body-limit · timeout
+    Note over GW: internal request_id · client trace_id · body-limit · timeout
     GW->>GW: auth → rate-limit → concurrency/budget gates
     Note right of GW: governance gates fail closed before model work
     GW->>GW: transformRequestOut → IR + optional native carrier

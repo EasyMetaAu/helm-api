@@ -41,7 +41,10 @@ const BUDGET_CAPS = {
   degradeLane: null,
 };
 
-function setup(over: Partial<InteractionsRouteDeps> = {}) {
+function setup(
+  over: Partial<InteractionsRouteDeps> = {},
+  contextIds?: { requestId: string; traceId: string },
+) {
   const nativePassthrough = vi.fn().mockResolvedValue(NATIVE);
   const client = { nativePassthrough } as unknown as ProviderClient;
   const enqueuePayload = vi.fn();
@@ -99,6 +102,13 @@ function setup(over: Partial<InteractionsRouteDeps> = {}) {
   };
 
   const app = new Hono<AppEnv>();
+  if (contextIds !== undefined) {
+    app.use("*", async (c, next) => {
+      c.set("request_id", contextIds.requestId);
+      c.set("trace_id", contextIds.traceId);
+      await next();
+    });
+  }
   registerInteractionsRoute(app, deps);
   return { app, nativePassthrough, enqueuePayload, enqueueTelemetry };
 }
@@ -156,6 +166,23 @@ describe("registerInteractionsRoute", () => {
     expect(decision.final.model_alias).toBe("gemini-3.1-flash-image");
     expect(decision.usage.completion_tokens).toBe(1120);
     expect(decision.provider_attempts[0].cost_usd).toBe(0.0672);
+  });
+
+  it("builds the interaction id from the internal request_id, not the client trace_id", async () => {
+    const { app } = setup(
+      {},
+      { requestId: "server-request-123", traceId: "client-controlled-trace" },
+    );
+
+    const res = await post(app, {
+      model: "gemini-3.1-flash-image",
+      input: "a red apple",
+    });
+    const json = (await res.json()) as { id: string };
+
+    expect(res.status).toBe(200);
+    expect(json.id).toBe("int_server-request-123");
+    expect(json.id).not.toBe("int_client-controlled-trace");
   });
 
   it("translates an array input with text + image blocks into generateContent parts", async () => {

@@ -6251,13 +6251,18 @@ describe("createExecute — empty candidate chain", () => {
       now: clock(),
       signal: new AbortController().signal,
     });
+    const input = req();
+    input.metadata = { ...input.metadata, trace_id: "client-correlation-1" };
     const out = await execute(
       { selected_lane: "balanced", candidate_chain: [], explicit_model: null },
-      req(),
+      input,
     );
     expect(out.final.status).toBe("error");
     expect(out.final).toMatchObject({
-      error: expect.objectContaining({ error_class: "lane_unavailable" }),
+      error: expect.objectContaining({
+        error_class: "lane_unavailable",
+        trace_id: "client-correlation-1",
+      }),
     });
   });
 });

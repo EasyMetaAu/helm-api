@@ -143,9 +143,15 @@ function providerAttemptRecord(a: AttemptRecord): DecisionRecord["provider_attem
   };
 }
 
+export function correlationTraceId(request: InternalRequest): string {
+  const traceId = request.metadata?.trace_id;
+  return typeof traceId === "string" && traceId.length > 0 ? traceId : request.request_id;
+}
+
 // Assemble the complete DecisionRecord, every field filled (explicit null where
-// the spec requires null — never omitted). The request is the source of the
-// trace id (the pipeline uses request_id as the trace id). The whole record is
+// the spec requires null — never omitted). request_id is the server-generated
+// storage identity; metadata.trace_id is independent client correlation metadata.
+// Legacy/headless callers without it safely fall back to request_id. The whole record is
 // passed through `redact` so no plaintext key / private payload survives even if
 // an upstream segment accidentally carried one (principle 7, last gate).
 export function buildDecisionRecord(parts: DecisionParts): DecisionRecord {
@@ -161,7 +167,7 @@ export function buildDecisionRecord(parts: DecisionParts): DecisionRecord {
 
   const record: DecisionRecord = {
     request_id: request.request_id,
-    trace_id: request.request_id,
+    trace_id: correlationTraceId(request),
     requested_model: request.requested_model,
     protocol: request.protocol,
     key_prefix: keyPrefix,

@@ -1,8 +1,10 @@
 import {
   buildReconciledFactBatch,
+  clientThreadIdFromStorageId,
   type Embedder,
   MemoryFactContentHashConflictError,
   type MemoryStore,
+  projectScopedThreadId,
   type ScoreConfig,
 } from "@helm/core";
 import type { Fact, Reflection } from "@helm/shared";
@@ -102,7 +104,11 @@ function scopeInput(
   const projectId = args.projectId ?? ctx.defaultProjectId ?? undefined;
   if (projectId != null) scope.projectId = projectId;
   if (args.resourceId !== undefined) scope.resourceId = args.resourceId;
-  if (args.threadId !== undefined) scope.threadId = args.threadId;
+  if (args.threadId !== undefined) {
+    // MCP input is an opaque client id. Decode helpers are reserved for trusted
+    // Store output; guessing by prefix would collapse valid ids such as `a:foo`.
+    scope.threadId = projectScopedThreadId(ctx.accountId, projectId ?? null, args.threadId);
+  }
   return scope;
 }
 
@@ -111,7 +117,11 @@ function factView(f: Fact) {
     id: f.id,
     subject: f.subjectKey,
     text: f.factText,
-    scope: { projectId: f.projectId, resourceId: f.resourceId, threadId: f.threadId },
+    scope: {
+      projectId: f.projectId,
+      resourceId: f.resourceId,
+      threadId: f.threadId === null ? null : clientThreadIdFromStorageId(f.threadId, f.ownerId),
+    },
     importance: f.importance,
     status: f.status,
     superseded: f.expiredAt !== null,
@@ -121,12 +131,16 @@ function factView(f: Fact) {
   };
 }
 
-function reflectionView(r: Reflection) {
+function reflectionView(r: Reflection, accountId: string) {
   return {
     id: r.id,
     text: r.reflectionText,
     version: r.version,
-    scope: { projectId: r.projectId, resourceId: r.resourceId, threadId: r.threadId },
+    scope: {
+      projectId: r.projectId,
+      resourceId: r.resourceId,
+      threadId: r.threadId === null ? null : clientThreadIdFromStorageId(r.threadId, accountId),
+    },
     status: r.status,
     updatedAt: r.updatedAt.toISOString(),
   };
@@ -263,7 +277,7 @@ async function handleSearch(
     out.reflections = rows
       .filter((r) => r.reflectionText.toLowerCase().includes(q))
       .slice(0, limit)
-      .map(reflectionView);
+      .map((reflection) => reflectionView(reflection, ctx.accountId));
   }
   return ok(out);
 }
@@ -368,7 +382,10 @@ async function handleList(
     limit,
     offset,
   });
-  return ok({ total, reflections: rows.map(reflectionView) });
+  return ok({
+    total,
+    reflections: rows.map((reflection) => reflectionView(reflection, ctx.accountId)),
+  });
 }
 
 async function handleGet(
@@ -380,7 +397,9 @@ async function handleGet(
     return f === null ? fail(`fact not found: ${args.id}`) : ok(factView(f));
   }
   const r = await ctx.store.getReflectionById({ accountId: ctx.accountId, id: args.id });
-  return r === null ? fail(`reflection not found: ${args.id}`) : ok(reflectionView(r));
+  return r === null
+    ? fail(`reflection not found: ${args.id}`)
+    : ok(reflectionView(r, ctx.accountId));
 }
 
 async function handleUpdate(
@@ -422,7 +441,9 @@ async function handleUpdate(
     tokenEstimate: ctx.estimateTokens(args.text),
     now: ctx.now(),
   });
-  return updated === null ? fail(`reflection not found: ${args.id}`) : ok(reflectionView(updated));
+  return updated === null
+    ? fail(`reflection not found: ${args.id}`)
+    : ok(reflectionView(updated, ctx.accountId));
 }
 
 async function handleDelete(

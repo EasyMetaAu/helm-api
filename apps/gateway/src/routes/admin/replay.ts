@@ -117,11 +117,14 @@ export async function runReplay(
   //    request of that protocol. Both paths force memory OFF + no budget (isolated
   //    debug re-run). A bad body → 400; a routing failure still records a viewable
   //    (failed) trace.
-  const traceId = deps.replay.genTraceId();
+  // Replay has no caller-selected id: this generator is server-owned and the
+  // result is the storage/audit request_id returned under the legacy trace_id
+  // response field so the Admin UI can navigate to it.
+  const requestId = deps.replay.genTraceId();
   const prepared =
     protocol === "openai_chat"
-      ? await replayOpenAIChat(deps, args, key, traceId)
-      : await replayViaPipeline(deps, args, key, traceId, protocol, original);
+      ? await replayOpenAIChat(deps, args, key, requestId)
+      : await replayViaPipeline(deps, args, key, requestId, protocol, original);
   if (!prepared.ok) return prepared;
 
   // 5. Persist payload + telemetry under the NEW id. Isolated: NO budget settle,
@@ -137,7 +140,7 @@ export async function runReplay(
   await persistPayload(
     captureDeps,
     {
-      requestId: traceId,
+      requestId,
       requestJson: prepared.requestJson,
       responseJson: prepared.responseJson,
       now: deps.replay.now(),
@@ -167,7 +170,7 @@ export async function runReplay(
     };
   }
 
-  return { ok: true, traceId };
+  return { ok: true, traceId: requestId };
 }
 
 // A built + routed replay ready to persist, or a 400 the route surfaces verbatim
@@ -195,7 +198,7 @@ async function replayOpenAIChat(
   deps: RunReplayDeps,
   args: { body: unknown; signal: AbortSignal; log: (msg: string) => void },
   key: ApiKeyRecord,
-  traceId: string,
+  requestId: string,
 ): Promise<PreparedReplay> {
   // Boundary guard (fail-closed, principle 2): a non-OpenAI shape is rejected here.
   const parsed = OpenAIChatRequestSchema.safeParse(args.body);
@@ -205,7 +208,7 @@ async function replayOpenAIChat(
     return { ok: false, status: 400, error: `${where}${issue?.message ?? "invalid request body"}` };
   }
   const internal = downgradeClientFastModeIfDisallowed(
-    buildInternal(parsed.data, traceId, key),
+    buildInternal(parsed.data, requestId, key),
     key.allow_fast_mode,
   );
   const result = await deps.replay.route(
@@ -312,7 +315,7 @@ async function replayViaPipeline(
   deps: RunReplayDeps,
   args: { body: unknown; signal: AbortSignal; log: (msg: string) => void },
   key: ApiKeyRecord,
-  traceId: string,
+  requestId: string,
   protocol: Exclude<Protocol, "openai_chat">,
   original: DecisionRecord | null,
 ): Promise<PreparedReplay> {
@@ -329,8 +332,9 @@ async function replayViaPipeline(
       error: err instanceof Error ? err.message : "invalid request",
     };
   }
-  // Stamp the NEW trace id; no memory headers → scope defaults OFF (isolated re-run).
-  ir.metadata = { ...(ir.metadata ?? {}), trace_id: traceId };
+  // Stamp the server-generated id in both fields. Replay has no separate client
+  // correlation id; no memory headers → scope defaults OFF (isolated re-run).
+  ir.metadata = { ...(ir.metadata ?? {}), request_id: requestId, trace_id: requestId };
   // Gemini's model + stream-ness ride the URL, not the body, so the captured body
   // carries neither: recover the model from the original decision (else "auto" =
   // re-classify) and replay NON-stream (a debug re-run wants the full response).
@@ -406,14 +410,14 @@ async function replayViaPipeline(
 // identity comes from the reconstructed key, and memory is forced off.
 function buildInternal(
   body: OpenAIChatRequest,
-  traceId: string,
+  requestId: string,
   key: ApiKeyRecord,
 ): InternalRequest {
   const bag = body as Record<string, unknown>;
   const model = typeof body.model === "string" && body.model.length > 0 ? body.model : "auto";
   const providerRaw = providerRawFromRequest(bag);
   return {
-    request_id: traceId,
+    request_id: requestId,
     protocol: "openai_chat",
     account_id: key.account_id,
     api_key_id: key.key_id,
@@ -432,6 +436,7 @@ function buildInternal(
     ...(providerRaw !== undefined ? { provider_raw: providerRaw } : {}),
     stream: body.stream === true,
     metadata: {
+      trace_id: requestId,
       conversation_id: null,
       thread_id: null,
       resource_id: null,

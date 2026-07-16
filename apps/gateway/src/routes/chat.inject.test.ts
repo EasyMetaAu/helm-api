@@ -7,7 +7,13 @@ import type {
   RouteOptions,
   TelemetryStore,
 } from "@helm/core";
-import { createSqliteDb, hashKey, runObserverJob, SqliteMemoryStore } from "@helm/core";
+import {
+  createSqliteDb,
+  hashKey,
+  projectScopedThreadId,
+  runObserverJob,
+  SqliteMemoryStore,
+} from "@helm/core";
 import type { InternalRequest } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
@@ -385,8 +391,10 @@ describe("gateway.chat.inject — assembled reminder reaches route()", () => {
       }
     }
 
+    const threadA = projectScopedThreadId("acct-a", "p1", "t1");
+    const threadB = projectScopedThreadId("acct-b", "p1", "t1");
     await runObserverJob(
-      { jobId: "worker-a", accountId: "acct-a", threadId: "acct-a:t1" },
+      { jobId: "worker-a", accountId: "acct-a", threadId: threadA },
       {
         memoryStore: store,
         summarize: async ({ messages }) => ({
@@ -406,7 +414,7 @@ describe("gateway.chat.inject — assembled reminder reaches route()", () => {
       },
     );
     await runObserverJob(
-      { jobId: "worker-b", accountId: "acct-b", threadId: "acct-b:t1" },
+      { jobId: "worker-b", accountId: "acct-b", threadId: threadB },
       {
         memoryStore: store,
         summarize: async ({ messages }) => ({
@@ -426,15 +434,15 @@ describe("gateway.chat.inject — assembled reminder reaches route()", () => {
       },
     );
 
-    const aMsgs = await store.listMessages({ accountId: "acct-a", threadId: "acct-a:t1" });
-    const bMsgs = await store.listMessages({ accountId: "acct-b", threadId: "acct-b:t1" });
+    const aMsgs = await store.listMessages({ accountId: "acct-a", threadId: threadA });
+    const bMsgs = await store.listMessages({ accountId: "acct-b", threadId: threadB });
     expect(aMsgs.map((m) => m.content)).toContain("secret A");
     expect(aMsgs.map((m) => m.content)).not.toContain("secret B");
     expect(bMsgs.map((m) => m.content)).toContain("secret B");
     expect(bMsgs.map((m) => m.content)).not.toContain("secret A");
 
-    const aObs = await store.listObservations({ accountId: "acct-a", threadId: "acct-a:t1" });
-    const bObs = await store.listObservations({ accountId: "acct-b", threadId: "acct-b:t1" });
+    const aObs = await store.listObservations({ accountId: "acct-a", threadId: threadA });
+    const bObs = await store.listObservations({ accountId: "acct-b", threadId: threadB });
     expect(aObs.map((o) => o.observationText).join("\n")).toContain("secret A");
     expect(aObs.map((o) => o.observationText).join("\n")).not.toContain("secret B");
     expect(bObs.map((o) => o.observationText).join("\n")).toContain("secret B");
@@ -457,6 +465,121 @@ describe("gateway.chat.inject — assembled reminder reaches route()", () => {
     const injectedText = last.map((m) => m.content).join("\n");
     expect(injectedText).toContain("secret A");
     expect(injectedText).not.toContain("secret B");
+    db.$sqlite.close();
+  });
+
+  it("isolates the same client thread by effective key project and preserves explicit project sharing", async () => {
+    const db = createSqliteDb(":memory:");
+    const store = new SqliteMemoryStore(
+      db,
+      (() => {
+        let i = 0;
+        return () => `scope-id-${++i}`;
+      })(),
+    );
+    const { deps, seen } = captureRouteDeps({
+      body: { choices: [{ index: 0, message: { role: "assistant", content: "ok" } }] },
+      memory: { observe: observeDeps(store), inject: injectWiring(store) },
+    });
+    const app = buildApp(deps, [
+      keyRecord({
+        key_id: "key-a",
+        hash: hashKey("helm_live_key_a"),
+        account_id: "acct-shared",
+        memory_mode: "inject",
+      }),
+      keyRecord({
+        key_id: "key-b",
+        hash: hashKey("helm_live_key_b"),
+        account_id: "acct-shared",
+        memory_mode: "inject",
+      }),
+      keyRecord({
+        key_id: "key-c",
+        hash: hashKey("helm_live_key_c"),
+        account_id: "acct-shared",
+        memory_mode: "inject",
+        memory_project_id: "team-project",
+      }),
+      keyRecord({
+        key_id: "key-d",
+        hash: hashKey("helm_live_key_d"),
+        account_id: "acct-shared",
+        memory_mode: "inject",
+        memory_project_id: "team-project",
+      }),
+    ]);
+    const headersFor = (token: string) => ({
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      "x-memory-mode": "inject",
+      "x-thread-id": "same-client-thread",
+    });
+    const send = async (token: string, content: string) => {
+      const res = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: headersFor(token),
+        body: JSON.stringify({ model: "auto", messages: [{ role: "user", content }] }),
+      });
+      expect(res.status).toBe(200);
+    };
+
+    await send("helm_live_key_a", "KEY_A_SECRET");
+    await send("helm_live_key_b", "KEY_B_SECRET");
+    await send("helm_live_key_c", "SHARED_FROM_C");
+    await send("helm_live_key_d", "SHARED_FROM_D");
+
+    const threadA = projectScopedThreadId("acct-shared", "key-a", "same-client-thread");
+    const threadB = projectScopedThreadId("acct-shared", "key-b", "same-client-thread");
+    const sharedThread = projectScopedThreadId("acct-shared", "team-project", "same-client-thread");
+    expect(threadA).not.toBe(threadB);
+
+    const messagesA = await store.listMessages({ accountId: "acct-shared", threadId: threadA });
+    const messagesB = await store.listMessages({ accountId: "acct-shared", threadId: threadB });
+    const sharedMessages = await store.listMessages({
+      accountId: "acct-shared",
+      threadId: sharedThread,
+    });
+    expect(messagesA.map((message) => message.content)).toContain("KEY_A_SECRET");
+    expect(messagesA.map((message) => message.content)).not.toContain("KEY_B_SECRET");
+    expect(messagesB.map((message) => message.content)).toContain("KEY_B_SECRET");
+    expect(messagesB.map((message) => message.content)).not.toContain("KEY_A_SECRET");
+    expect(sharedMessages.map((message) => message.content)).toEqual(
+      expect.arrayContaining(["SHARED_FROM_C", "SHARED_FROM_D"]),
+    );
+
+    await store.appendObservation({
+      threadId: threadA,
+      sourceMessageRange: [messagesA[0]?.id ?? "a", messagesA[0]?.id ?? "a"],
+      observationText: "ONLY_KEY_A_MEMORY",
+      observedAt: new Date("2026-01-02T00:00:00.000Z"),
+    });
+    await store.appendObservation({
+      threadId: threadB,
+      sourceMessageRange: [messagesB[0]?.id ?? "b", messagesB[0]?.id ?? "b"],
+      observationText: "ONLY_KEY_B_MEMORY",
+      observedAt: new Date("2026-01-02T00:00:00.000Z"),
+    });
+    await store.appendObservation({
+      threadId: sharedThread,
+      sourceMessageRange: [sharedMessages[0]?.id ?? "s", sharedMessages[0]?.id ?? "s"],
+      observationText: "TEAM_SHARED_MEMORY",
+      observedAt: new Date("2026-01-02T00:00:00.000Z"),
+    });
+
+    await send("helm_live_key_a", "next A");
+    const injectedA = JSON.stringify(seen.at(-1)?.messages);
+    expect(injectedA).toContain("ONLY_KEY_A_MEMORY");
+    expect(injectedA).not.toContain("ONLY_KEY_B_MEMORY");
+    await send("helm_live_key_b", "next B");
+    const injectedB = JSON.stringify(seen.at(-1)?.messages);
+    expect(injectedB).toContain("ONLY_KEY_B_MEMORY");
+    expect(injectedB).not.toContain("ONLY_KEY_A_MEMORY");
+    await send("helm_live_key_c", "next C");
+    expect(JSON.stringify(seen.at(-1)?.messages)).toContain("TEAM_SHARED_MEMORY");
+    await send("helm_live_key_d", "next D");
+    expect(JSON.stringify(seen.at(-1)?.messages)).toContain("TEAM_SHARED_MEMORY");
+
     db.$sqlite.close();
   });
 
@@ -581,9 +704,9 @@ describe("gateway.chat.inject — per-key defaults + signal fallback (issue #97)
     };
     expect(arg.decision.memory?.memory_hydrated).toBe(true);
     expect(arg.decision.memory?.thread_source).toBe("prompt_cache_key");
-    // The derived thread is owner-scoped like any explicit one.
+    // The derived thread is account + effective-project scoped like any explicit one.
     expect(store.ensureThread).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "acct:conv-abc" }),
+      expect.objectContaining({ id: projectScopedThreadId("acct", "proj-key", "conv-abc") }),
     );
   });
 

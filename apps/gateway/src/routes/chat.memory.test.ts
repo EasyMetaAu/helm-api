@@ -6,7 +6,7 @@ import type {
   RouteOptions,
   TelemetryStore,
 } from "@helm/core";
-import { hashKey } from "@helm/core";
+import { hashKey, projectScopedThreadId } from "@helm/core";
 import type { InternalRequest, MemoryMessageInput, MemoryThreadInput } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
@@ -211,7 +211,12 @@ describe("gateway.chat.memory — observe persists request/response", () => {
 
     expect(res.status).toBe(200);
     expect(threads).toEqual([
-      { id: "acct:thread-1", ownerId: "acct", projectId: "project-1", resourceId: "resource-1" },
+      {
+        id: projectScopedThreadId("acct", "project-1", "thread-1"),
+        ownerId: "acct",
+        projectId: "project-1",
+        resourceId: "resource-1",
+      },
     ]);
     // inbound user message persisted.
     expect(messages.some((m) => m.role === "user" && m.content === "hi")).toBe(true);

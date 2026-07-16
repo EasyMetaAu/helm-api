@@ -18,7 +18,7 @@ import {
   type ObserveDeps,
   observeInbound,
   observeOutbound,
-  ownerScopedThreadId,
+  projectScopedThreadId,
   type ResponsesSSEEvent,
   type RouteOptions,
   resolveMemoryMode,
@@ -160,6 +160,7 @@ export class PipelineError extends Error {
 function toInternalRequest(
   ir: PipelineIR,
   identity: MessagesIdentity,
+  requestId: string,
   traceId: string,
   protocol: Protocol,
 ): InternalRequest {
@@ -196,7 +197,7 @@ function toInternalRequest(
       : undefined;
 
   return {
-    request_id: traceId,
+    request_id: requestId,
     protocol,
     account_id: accountId,
     api_key_id: keyId,
@@ -216,6 +217,7 @@ function toInternalRequest(
     ...(nativeRequest !== undefined ? { native_request: nativeRequest } : {}),
     stream: ir.stream === true,
     metadata: {
+      trace_id: traceId,
       conversation_id: conversationId,
       thread_id: memoryScope.threadId,
       resource_id: memoryScope.resourceId,
@@ -650,6 +652,10 @@ export function createMessagesPipeline(
     async run(ir, identity, signal) {
       const meta = ir.metadata;
       const traceId = meta && typeof meta.trace_id === "string" ? meta.trace_id : "anthropic-req";
+      const requestId =
+        meta && typeof meta.request_id === "string" && meta.request_id.length > 0
+          ? meta.request_id
+          : crypto.randomUUID();
       // Empty/missing messages is a CLIENT error → invalid_request (mirrors the
       // OpenAI chat schema's messages.min(1)). Throw BEFORE routing so an empty
       // request is never billed or sent upstream as a synthesized placeholder
@@ -660,7 +666,7 @@ export function createMessagesPipeline(
         throw new PipelineError("invalid_request", "messages must be a non-empty array", traceId);
       }
       const internal = downgradeClientFastModeIfDisallowed(
-        toInternalRequest(ir, identity, traceId, protocol),
+        toInternalRequest(ir, identity, requestId, traceId, protocol),
         identity.caps?.allowFastMode === true,
       );
       const originalMessagesForMemory = [...(internal.messages as IRMessage[])];
@@ -702,7 +708,13 @@ export function createMessagesPipeline(
             ...(memoryScope.projectId !== null ? { projectId: memoryScope.projectId } : {}),
             ...(memoryScope.resourceId !== null ? { resourceId: memoryScope.resourceId } : {}),
             ...(memoryScope.threadId !== null
-              ? { threadId: ownerScopedThreadId(memoryScope.accountId, memoryScope.threadId) }
+              ? {
+                  threadId: projectScopedThreadId(
+                    memoryScope.accountId,
+                    memoryScope.projectId,
+                    memoryScope.threadId,
+                  ),
+                }
               : {}),
           },
           {

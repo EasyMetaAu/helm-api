@@ -10,7 +10,7 @@
   // Retry dialog: shows the recorded request body in an EDITABLE textarea (e.g. to
   // raise max_tokens after a truncated reasoning run), then re-sends it. The replay
   // is an isolated debug re-run server-side; on success we navigate to the NEW
-  // trace's detail page. The browser only ever handles the request BODY — never a
+  // request's detail page. The browser only ever handles the request BODY — never a
   // key (it lives in the Authorization header, reconstructed server-side).
   //
   // The replay endpoint runs the WHOLE upstream call (draining the full stream)
@@ -20,11 +20,11 @@
   // shown is exactly what was sent), and Cancel aborts the in-flight replay — the
   // fetch signal propagates to the gateway, which aborts the upstream run.
   let {
-    traceId,
+    requestId,
     initialRequest,
     onclose,
   }: {
-    traceId: string;
+    requestId: string;
     initialRequest: unknown;
     onclose: () => void;
   } = $props();
@@ -62,7 +62,7 @@
     elapsed = 0;
     controller = new AbortController();
     try {
-      const { trace_id } = await replayRequest(traceId, parsed, controller.signal);
+      const { trace_id } = await replayRequest(requestId, parsed, controller.signal);
       // Navigate to the freshly recorded re-run; the dialog unmounts with the page.
       await goto(`${base}/requests/${encodeURIComponent(trace_id)}`);
       onclose();

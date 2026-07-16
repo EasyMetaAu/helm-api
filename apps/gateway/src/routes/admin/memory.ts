@@ -1,15 +1,20 @@
 import {
   buildReconciledFactBatch,
+  clientThreadIdFromStorageId,
   type MemoryAdminStats,
   type MemoryAdminStatsScope,
   MemoryFactContentHashConflictError,
+  projectScopedThreadId,
 } from "@helm/core";
 import {
   effectiveMemoryProjectId,
+  type Fact,
   type FactListStatus,
   MemoryFactCreateSchema,
   MemoryFactPatchSchema,
   MemoryReflectionPatchSchema,
+  type MemoryScopeSummary,
+  type Reflection,
 } from "@helm/shared";
 import type { Context, Hono } from "hono";
 import type { AppEnv } from "../../app.js";
@@ -51,8 +56,40 @@ function intParam(value: string | undefined, def: number, max: number): number {
   return Math.min(n, max);
 }
 
-// Build the in-account scope filter from query params (each present-only).
-function scopeFromQuery(c: Context<AppEnv>): {
+function storageThreadId(
+  accountId: string,
+  projectId: string | undefined,
+  threadId: string,
+): string {
+  // Client thread ids are opaque. Never infer a physical/legacy id from their
+  // shape: values such as `acct:foo` or `v2:n:...` are valid client ids and must
+  // remain distinct. Only trusted rows read from the Store are decoded below.
+  return projectScopedThreadId(accountId, projectId ?? null, threadId);
+}
+
+function clientThreadId(threadId: string | null, accountId: string): string | null {
+  return threadId === null ? null : clientThreadIdFromStorageId(threadId, accountId);
+}
+
+function factForAdmin(fact: Fact): Fact {
+  return { ...fact, threadId: clientThreadId(fact.threadId, fact.ownerId) };
+}
+
+function reflectionForAdmin(reflection: Reflection, accountId: string): Reflection {
+  return { ...reflection, threadId: clientThreadId(reflection.threadId, accountId) };
+}
+
+function scopeForAdmin(scope: MemoryScopeSummary): MemoryScopeSummary {
+  return { ...scope, threadId: clientThreadId(scope.threadId, scope.accountId) };
+}
+
+// Build the in-account scope filter from query params (each present-only). The
+// HTTP boundary accepts client ids; stores only receive project-aware physical
+// ids. This is the inverse of the projections above.
+function scopeFromQuery(
+  c: Context<AppEnv>,
+  accountId: string,
+): {
   projectId?: string;
   resourceId?: string;
   threadId?: string;
@@ -63,15 +100,15 @@ function scopeFromQuery(c: Context<AppEnv>): {
   const t = c.req.query("threadId");
   if (p !== undefined && p !== "") scope.projectId = p;
   if (r !== undefined && r !== "") scope.resourceId = r;
-  if (t !== undefined && t !== "") scope.threadId = t;
+  if (t !== undefined && t !== "") scope.threadId = storageThreadId(accountId, scope.projectId, t);
   return scope;
 }
 
-function statsScopeFromQuery(c: Context<AppEnv>): MemoryAdminStatsScope {
+function statsScopeFromQuery(c: Context<AppEnv>, deps: AdminApiDeps): MemoryAdminStatsScope {
   const accountId = c.req.query("accountId");
   return {
     ...(accountId !== undefined && accountId !== "" ? { accountId } : {}),
-    ...scopeFromQuery(c),
+    ...scopeFromQuery(c, accountId !== undefined && accountId !== "" ? accountId : deps.accountId),
   };
 }
 
@@ -100,7 +137,7 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
     if (store instanceof Response) return store;
     const accountId = c.req.query("accountId") ?? undefined;
     const scopes = await store.listMemoryScopes(accountId !== undefined ? { accountId } : {});
-    return c.json(scopes);
+    return c.json(scopes.map(scopeForAdmin));
   });
 
   // GET /memory/stats — operational snapshot for the top status panels: queue
@@ -112,7 +149,7 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
     if (store.getMemoryAdminStats === undefined) {
       return c.json({ error: "memory stats unavailable" }, 503);
     }
-    const scope = statsScopeFromQuery(c);
+    const scope = statsScopeFromQuery(c, deps);
     const key = memoryStatsCacheKey(scope);
     const nowMs = Date.now();
     const cached = statsCache.get(key);
@@ -151,16 +188,17 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
     }
     const subjectKey = c.req.query("subjectKey");
     const search = c.req.query("search");
+    const accountId = accountOf(c, deps);
     const page = await store.listFacts({
-      accountId: accountOf(c, deps),
-      ...scopeFromQuery(c),
+      accountId,
+      ...scopeFromQuery(c, accountId),
       status: statusRaw as FactListStatus,
       ...(subjectKey !== undefined && subjectKey !== "" ? { subjectKey } : {}),
       ...(search !== undefined && search !== "" ? { search } : {}),
       limit: intParam(c.req.query("limit"), DEFAULT_LIMIT, MAX_LIMIT),
       offset: intParam(c.req.query("offset"), 0, Number.MAX_SAFE_INTEGER),
     });
-    return c.json(page);
+    return c.json({ ...page, rows: page.rows.map(factForAdmin) });
   });
 
   // POST /memory/facts — hand-add a fact (the operator authoring memory directly,
@@ -178,7 +216,7 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
       return c.json({ error: "invalid fact", issues: parsed.error.issues }, 400);
     }
     const accountId = accountOf(c, deps);
-    const scope = scopeFromQuery(c);
+    const scope = scopeFromQuery(c, accountId);
     const now = new Date();
     const facts = buildReconciledFactBatch({
       extracted: [
@@ -208,7 +246,7 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
     clearStatsCache();
     return c.json(
       {
-        fact,
+        fact: fact === null ? null : factForAdmin(fact),
         added: res.insertedIds,
         resurrected,
         superseded: res.supersededIds,
@@ -222,8 +260,9 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
   app.get("/admin/api/memory/facts/:id", async (c) => {
     const store = resolveStore(c, deps);
     if (store instanceof Response) return store;
-    const fact = await store.getFactById({ accountId: accountOf(c, deps), id: c.req.param("id") });
-    return fact === null ? c.json({ error: "fact not found" }, 404) : c.json(fact);
+    const accountId = accountOf(c, deps);
+    const fact = await store.getFactById({ accountId, id: c.req.param("id") });
+    return fact === null ? c.json({ error: "fact not found" }, 404) : c.json(factForAdmin(fact));
   });
 
   // PATCH /memory/facts/:id — edit (factText/importance/status/invalidAt). 409 on
@@ -243,7 +282,9 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
         now: new Date(),
       });
       if (updated !== null) clearStatsCache();
-      return updated === null ? c.json({ error: "fact not found" }, 404) : c.json(updated);
+      return updated === null
+        ? c.json({ error: "fact not found" }, 404)
+        : c.json(factForAdmin(updated));
     } catch (e) {
       if (e instanceof MemoryFactContentHashConflictError) {
         return c.json({ error: e.message }, 409);
@@ -271,26 +312,33 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
     if (!REFLECTION_STATUSES.has(statusRaw)) {
       return c.json({ error: `invalid status: ${statusRaw}` }, 400);
     }
+    const accountId = accountOf(c, deps);
     const page = await store.listReflections({
-      accountId: accountOf(c, deps),
-      ...scopeFromQuery(c),
+      accountId,
+      ...scopeFromQuery(c, accountId),
       status: statusRaw as "active" | "archived" | "all",
       includeAllVersions: c.req.query("includeAllVersions") === "true",
       limit: intParam(c.req.query("limit"), DEFAULT_LIMIT, MAX_LIMIT),
       offset: intParam(c.req.query("offset"), 0, Number.MAX_SAFE_INTEGER),
     });
-    return c.json(page);
+    return c.json({
+      ...page,
+      rows: page.rows.map((reflection) => reflectionForAdmin(reflection, accountId)),
+    });
   });
 
   // GET /memory/reflections/:id
   app.get("/admin/api/memory/reflections/:id", async (c) => {
     const store = resolveStore(c, deps);
     if (store instanceof Response) return store;
+    const accountId = accountOf(c, deps);
     const r = await store.getReflectionById({
-      accountId: accountOf(c, deps),
+      accountId,
       id: c.req.param("id"),
     });
-    return r === null ? c.json({ error: "reflection not found" }, 404) : c.json(r);
+    return r === null
+      ? c.json({ error: "reflection not found" }, 404)
+      : c.json(reflectionForAdmin(r, accountId));
   });
 
   // PATCH /memory/reflections/:id — edit text in place (no version bump).
@@ -309,7 +357,9 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
       now: new Date(),
     });
     if (updated !== null) clearStatsCache();
-    return updated === null ? c.json({ error: "reflection not found" }, 404) : c.json(updated);
+    return updated === null
+      ? c.json({ error: "reflection not found" }, 404)
+      : c.json(reflectionForAdmin(updated, accountOf(c, deps)));
   });
 
   // DELETE /memory/reflections/:id — two-stage: an active row soft-deletes

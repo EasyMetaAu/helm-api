@@ -1,4 +1,10 @@
-import { createSqliteDb, factContentHash, type MemoryStore, SqliteMemoryStore } from "@helm/core";
+import {
+  createSqliteDb,
+  factContentHash,
+  type MemoryStore,
+  projectScopedThreadId,
+  SqliteMemoryStore,
+} from "@helm/core";
 import type { ApiKeyRecord, Fact } from "@helm/shared";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
@@ -87,6 +93,120 @@ describe("/admin/api/memory routes (docs/13)", () => {
     const byProject = new Map(scopes.map((s) => [s.projectId, s]));
     expect(byProject.get("p1")?.factCount).toBe(1);
     expect(byProject.get("p2")?.reflectionCount).toBe(1);
+  });
+
+  it("round-trips client thread ids through By Scope", async () => {
+    const { store } = seededStore();
+    const physicalThreadId = projectScopedThreadId("acct", "p1", "client-thread");
+    await store.ensureThread({ id: physicalThreadId, ownerId: "acct", projectId: "p1" });
+    await store.insertFactsReconciled({
+      accountId: "acct",
+      scope: { projectId: "p1", threadId: physicalThreadId },
+      now: NOW,
+      facts: [
+        {
+          ownerId: "acct",
+          projectId: "p1",
+          threadId: physicalThreadId,
+          subjectKey: "scoped-fact",
+          factText: "Only this thread",
+          contentHash: factContentHash("Only this thread"),
+          validFrom: NOW,
+        },
+      ],
+    });
+    await store.upsertReflection({
+      accountId: "acct",
+      projectId: "p1",
+      threadId: physicalThreadId,
+      reflectionText: "Thread reflection",
+      version: 1,
+      tokenEstimate: 2,
+      updatedAt: NOW,
+    });
+    const app = buildApp(store);
+
+    const scopes = (await (
+      await app.request("/admin/api/memory/scopes?accountId=acct")
+    ).json()) as Array<{ projectId: string | null; threadId: string | null }>;
+    expect(scopes).toContainEqual(
+      expect.objectContaining({ projectId: "p1", threadId: "client-thread" }),
+    );
+
+    const clientQuery = new URLSearchParams({
+      accountId: "acct",
+      projectId: "p1",
+      threadId: "client-thread",
+    });
+    const facts = (await (await app.request(`/admin/api/memory/facts?${clientQuery}`)).json()) as {
+      rows: Fact[];
+      total: number;
+    };
+    expect(facts.total).toBe(1);
+    expect(facts.rows[0]?.threadId).toBe("client-thread");
+    const reflections = (await (
+      await app.request(`/admin/api/memory/reflections?${clientQuery}`)
+    ).json()) as { rows: Array<{ threadId: string | null }>; total: number };
+    expect(reflections.total).toBe(1);
+    expect(reflections.rows[0]?.threadId).toBe("client-thread");
+    const stats = (await (await app.request(`/admin/api/memory/stats?${clientQuery}`)).json()) as {
+      storage: { threads: number };
+    };
+    expect(stats.storage.threads).toBe(1);
+
+    const created = (await (
+      await app.request(`/admin/api/memory/facts?${clientQuery}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ subjectText: "second", factText: "Created by admin" }),
+      })
+    ).json()) as { fact: Fact };
+    expect(created.fact.threadId).toBe("client-thread");
+    const stored = await store.listFacts({
+      accountId: "acct",
+      projectId: "p1",
+      threadId: physicalThreadId,
+      status: "active",
+      limit: 10,
+      offset: 0,
+    });
+    expect(stored.rows.some((fact) => fact.factText === "Created by admin")).toBe(true);
+  });
+
+  it("treats owner-like and v2-like Admin thread query values as opaque client ids", async () => {
+    const { store } = seededStore();
+    const clientThreadIds = ["foo", "acct:foo", "v2:n:acct:foo", "v2:p:00:acct:foo"];
+    for (const [index, threadId] of clientThreadIds.entries()) {
+      const physicalThreadId = projectScopedThreadId("acct", "p1", threadId);
+      await store.insertFactsReconciled({
+        accountId: "acct",
+        scope: { projectId: "p1", threadId: physicalThreadId },
+        now: NOW,
+        facts: [
+          {
+            ownerId: "acct",
+            projectId: "p1",
+            threadId: physicalThreadId,
+            subjectKey: `opaque-${index}`,
+            factText: `Opaque ${index}`,
+            contentHash: factContentHash(`Opaque ${index}`),
+            validFrom: NOW,
+          },
+        ],
+      });
+    }
+    const app = buildApp(store);
+
+    for (const [index, threadId] of clientThreadIds.entries()) {
+      const query = new URLSearchParams({ accountId: "acct", projectId: "p1", threadId });
+      const page = (await (await app.request(`/admin/api/memory/facts?${query}`)).json()) as {
+        rows: Fact[];
+        total: number;
+      };
+      expect(page.total).toBe(1);
+      expect(page.rows[0]?.factText).toBe(`Opaque ${index}`);
+      expect(page.rows[0]?.threadId).toBe(threadId);
+    }
   });
 
   it("returns operational stats for the selected memory scope", async () => {
@@ -516,9 +636,10 @@ describe("/admin/api/memory routes (docs/13)", () => {
     // Covers the `r !== ""` and `t !== ""` branches in scopeFromQuery (lines 56-58)
     const { store } = seededStore();
     await addFact(store, "s", "resourced", "p1");
+    const physicalThreadId = projectScopedThreadId("acct", "p1", "thr1");
     await store.insertFactsReconciled({
       accountId: "acct",
-      scope: { projectId: "p1", resourceId: "res1", threadId: "thr1" },
+      scope: { projectId: "p1", resourceId: "res1", threadId: physicalThreadId },
       now: NOW,
       facts: [
         {
@@ -529,7 +650,7 @@ describe("/admin/api/memory routes (docs/13)", () => {
           validFrom: NOW,
           projectId: "p1",
           resourceId: "res1",
-          threadId: "thr1",
+          threadId: physicalThreadId,
         },
       ],
     });
@@ -546,7 +667,7 @@ describe("/admin/api/memory routes (docs/13)", () => {
     expect(scoped.total).toBe(1);
     // Non-empty threadId → filters to the scoped fact only
     const threaded = (await (
-      await app.request("/admin/api/memory/facts?threadId=thr1")
+      await app.request("/admin/api/memory/facts?projectId=p1&threadId=thr1")
     ).json()) as { total: number };
     expect(threaded.total).toBe(1);
   });

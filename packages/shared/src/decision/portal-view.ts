@@ -7,7 +7,10 @@ import type { DecisionRecord } from "./schema.js";
 // the classifier/eval reasoning chain, the candidate chain, upstream payload —
 // all routing topology / supply-chain IP (principle 6, §8 R7).
 export interface PortalDecisionView {
+  /** Unique Helm-generated lookup/ownership id returned as X-Helm-Request-Id. */
   request_id: string;
+  /** Caller-facing correlation metadata. It is safe to show but not to use for lookup. */
+  trace_id: string;
   requested_model: string;
   /** The lane-visible served model = final.model_alias (the user already sees this
    *  in their response). NEVER final.provider_model (the internal wire id). */
@@ -31,6 +34,7 @@ export interface PortalDecisionView {
 export function toPortalDecisionView(record: DecisionRecord): PortalDecisionView {
   return {
     request_id: record.request_id,
+    trace_id: record.trace_id,
     requested_model: record.requested_model,
     served_model: record.final.model_alias,
     lane: record.lane.selected_lane,

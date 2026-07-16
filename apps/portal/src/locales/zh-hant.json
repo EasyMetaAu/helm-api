@@ -685,6 +685,7 @@
   "Request (from client)": "請求（來自用戶端）",
   "Request body": "請求內容",
   "Request ID": "請求 ID",
+  "Client trace ID": "用戶端關聯 ID",
   "Request logging": "請求記錄",
   "Request metadata recorded for this call (redacted — no message content or secrets).": "為本次呼叫記錄的請求中繼資料（已脫敏——不含訊息內容或金鑰）。",
   "Request not found.": "找不到請求。",

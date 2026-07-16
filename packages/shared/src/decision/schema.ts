@@ -213,9 +213,10 @@ export const MemoryDecisionSchema = z.object({
 
 export const DecisionRecordSchema = z.object({
   request_id: z.string().min(1),
-  // Threaded end-to-end from the request context for cross-system correlation
-  // (Debug UI Trace ID column, structured logs). In the current pipeline this
-  // equals request_id (the orchestrator uses request_id as the trace id).
+  // Client-facing correlation metadata threaded end-to-end from the request
+  // context (Debug UI, error envelopes, and structured logs). It may be supplied
+  // and reused by the caller, so it is deliberately independent from the unique,
+  // server-generated request_id and must never be used as a storage/ownership key.
   trace_id: z.string().min(1),
   requested_model: z.string(),
   // Which client protocol this request arrived on (openai_chat / anthropic_messages

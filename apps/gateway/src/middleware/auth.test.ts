@@ -136,4 +136,22 @@ describe("authMiddleware", () => {
     expect(HelmErrorSchema.safeParse(body).success).toBe(true);
     expect(String(body.trace_id).length).toBeGreaterThan(0);
   });
+
+  it("uses the resolved request-context trace for auth errors", async () => {
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("trace_id", "resolved-x-request-id");
+      await next();
+    });
+    app.use("*", authMiddleware({ keyStore: { getByHash: vi.fn() }, log: () => {} }));
+    app.get("/protected", (c) => c.text("unexpected"));
+
+    const res = await app.request("/protected", {
+      headers: { "X-Request-Id": "raw-header-must-not-be-reread" },
+    });
+    const body = (await res.json()) as { trace_id: string };
+
+    expect(res.status).toBe(401);
+    expect(body.trace_id).toBe("resolved-x-request-id");
+  });
 });

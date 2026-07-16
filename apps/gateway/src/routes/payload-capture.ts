@@ -367,8 +367,16 @@ export async function recordServed(
   },
   log: (msg: string) => void,
 ): Promise<void> {
+  // Enforce the ownership join key at this shared persistence boundary. Route
+  // pipelines may carry a separate client trace_id for response/log correlation,
+  // but telemetry.request_id and request_payloads.request_id must always use the
+  // server-generated context request_id passed in args.
+  const storageDecision: DecisionRecord = {
+    ...args.decision,
+    request_id: args.requestId,
+  };
   const decision =
-    args.timedOut === true ? decisionForTimedOutRequest(args.decision) : args.decision;
+    args.timedOut === true ? decisionForTimedOutRequest(storageDecision) : storageDecision;
   const responseJson = args.timedOut === true ? null : args.responseJson;
   // Deferred + batched path: enqueue both writes to run AFTER the response, off the
   // hot path. The redaction is done HERE (synchronously) so the enqueued snapshot is

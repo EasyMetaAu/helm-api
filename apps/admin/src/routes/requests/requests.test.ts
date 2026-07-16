@@ -18,6 +18,7 @@ const getRequest = vi.fn();
 const getRequestPayload = vi.fn();
 const getRequestPayloadMeta = vi.fn();
 const getRequestPayloadPart = vi.fn();
+const replayRequest = vi.fn();
 const listRequests = vi.fn();
 const listKeys = vi.fn();
 vi.mock('$lib/api/requests.js', () => ({
@@ -26,6 +27,7 @@ vi.mock('$lib/api/requests.js', () => ({
   getRequestPayload: (...args: unknown[]) => getRequestPayload(...args),
   getRequestPayloadMeta: (...args: unknown[]) => getRequestPayloadMeta(...args),
   getRequestPayloadPart: (...args: unknown[]) => getRequestPayloadPart(...args),
+  replayRequest: (...args: unknown[]) => replayRequest(...args),
 }));
 vi.mock('$lib/api/keys.js', () => ({
   listKeys: (...args: unknown[]) => listKeys(...args),
@@ -33,6 +35,7 @@ vi.mock('$lib/api/keys.js', () => ({
 
 function item(traceId: string, overrides: Partial<RequestListItem> = {}): RequestListItem {
   return {
+    request_id: traceId,
     trace_id: traceId,
     ts: '2026-05-31T10:00:00Z',
     key_prefix: 'helm_live_ab12',
@@ -115,6 +118,7 @@ function apiKey(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView 
 
 function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
   return {
+    request_id: 'req_1',
     trace_id: 'tr_1',
     ts: '2026-05-31T10:00:00Z',
     key_prefix: 'helm_live_ab12',
@@ -435,6 +439,7 @@ describe('requests detail page', () => {
     getRequestPayload.mockReset();
     getRequestPayloadMeta.mockReset();
     getRequestPayloadPart.mockReset();
+    replayRequest.mockReset();
   });
 
   it('Back link returns to the originating page passed via the loader (backTo)', () => {
@@ -442,7 +447,7 @@ describe('requests detail page', () => {
       data: {
         detail: detail(),
         payload: { captured: false },
-        traceId: 'tr_1',
+        requestId: 'tr_1',
         backTo: '/requests?status=error&page=2',
       },
     });
@@ -452,16 +457,48 @@ describe('requests detail page', () => {
     );
   });
 
+  it('uses request_id for Replay while keeping the client trace visible and copyable', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    replayRequest.mockResolvedValue({ trace_id: 'req_replay_new' });
+    render(DetailPage, {
+      data: {
+        detail: detail({ request_id: 'req_internal_1', trace_id: 'client_shared_trace' }),
+        payload: {
+          captured: true,
+          request: { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] },
+        },
+        requestId: 'req_internal_1',
+      },
+    });
+
+    expect(screen.getByText('client_shared_trace')).toBeInTheDocument();
+    await fireEvent.click(screen.getByTestId('copy-trace'));
+    expect(writeText).toHaveBeenCalledWith('client_shared_trace');
+    await fireEvent.click(screen.getByTestId('retry-request'));
+    await fireEvent.click(screen.getByTestId('retry-send'));
+    await vi.waitFor(() =>
+      expect(replayRequest).toHaveBeenCalledWith(
+        'req_internal_1',
+        expect.any(Object),
+        expect.any(AbortSignal),
+      ),
+    );
+  });
+
   it('Back link falls back to the bare list when no backTo was provided', () => {
     render(DetailPage, {
-      data: { detail: detail(), payload: { captured: false }, traceId: 'tr_1' },
+      data: { detail: detail(), payload: { captured: false }, requestId: 'tr_1' },
     });
     expect(screen.getByTestId('back-to-requests')).toHaveAttribute('href', '/requests');
   });
 
   it('renders the decision chain, cost breakdown (incl. eval) and a not-recorded notice when capture is off', () => {
     render(DetailPage, {
-      data: { detail: detail(), payload: { captured: false }, traceId: 'tr_1' },
+      data: { detail: detail(), payload: { captured: false }, requestId: 'tr_1' },
     });
     // Decision chain present.
     expect(screen.getByTestId('chain-classifier')).toBeInTheDocument();
@@ -482,7 +519,7 @@ describe('requests detail page', () => {
       data: {
         detail: detail({ latency_ms: 6911 }),
         payload: { captured: false },
-        traceId: 'tr_1',
+        requestId: 'tr_1',
       },
     });
     const summary = screen.getByTestId('request-summary');
@@ -505,7 +542,7 @@ describe('requests detail page', () => {
           usage: { ...detail().usage, measurement: 'estimated_partial' },
         }),
         payload: { captured: false },
-        traceId: 'tr_partial',
+        requestId: 'tr_partial',
       },
     });
 
@@ -519,7 +556,7 @@ describe('requests detail page', () => {
       data: {
         detail: detail({ key_name: null, key_prefix: null, final_model: null, latency_ms: null }),
         payload: { captured: false },
-        traceId: 'tr_1',
+        requestId: 'tr_1',
       },
     });
     const summary = screen.getByTestId('request-summary');
@@ -534,7 +571,7 @@ describe('requests detail page', () => {
       data: {
         detail: detail({ ttfb_ms: 11_626, generation_ms: 90_000 }),
         payload: { captured: false },
-        traceId: 'tr_1',
+        requestId: 'tr_1',
       },
     });
     const tp = screen.getByTestId('throughput');
@@ -548,7 +585,7 @@ describe('requests detail page', () => {
       data: {
         detail: detail({ tps: null, generation_ms: null, ttfb_ms: null }),
         payload: { captured: false },
-        traceId: 'tr_1',
+        requestId: 'tr_1',
       },
     });
     const tp = screen.getByTestId('throughput');
@@ -562,7 +599,7 @@ describe('requests detail page', () => {
       data: {
         detail: detail(),
         payload: { captured: true, request: { model: 'auto' }, response: { ok: true } },
-        traceId: 'tr_1',
+        requestId: 'tr_1',
       },
     });
     // The Request panel now defaults to the Conversation lens; the raw JSON tree
@@ -587,7 +624,7 @@ describe('requests detail page', () => {
           parts: { request: true, response: false, upstream_request: false },
           created_at: 1234,
         },
-        traceId: 'tr_lazy',
+        requestId: 'tr_lazy',
       },
     });
 
@@ -620,7 +657,7 @@ describe('requests detail page', () => {
             ],
           },
         },
-        traceId: 'tr_img',
+        requestId: 'tr_img',
       },
     });
     const overview = screen.getByTestId('media-overview');
@@ -657,7 +694,7 @@ describe('requests detail page', () => {
             ],
           },
         },
-        traceId: 'tr_both',
+        requestId: 'tr_both',
       },
     });
     const groups = within(screen.getByTestId('media-overview')).getAllByTestId('media-group');
@@ -671,7 +708,7 @@ describe('requests detail page', () => {
       data: {
         detail: detail(),
         payload: { captured: true, request: { model: 'auto' }, response: { ok: true } },
-        traceId: 'tr_noimg',
+        requestId: 'tr_noimg',
       },
     });
     expect(screen.queryByTestId('media-overview')).not.toBeInTheDocument();
@@ -686,7 +723,7 @@ describe('requests detail page', () => {
       data: {
         detail: detail(),
         payload: { captured: true, request: { model: 'gpt-5.5', input: 'hi' }, response: {} },
-        traceId: 'tr_resp',
+        requestId: 'tr_resp',
       },
     });
     expect(screen.getByTestId('retry-request')).not.toBeDisabled();
@@ -700,7 +737,7 @@ describe('requests detail page', () => {
           request: { contents: [{ role: 'user', parts: [{ text: 'hi' }] }] },
           response: {},
         },
-        traceId: 'tr_gem',
+        requestId: 'tr_gem',
       },
     });
     expect(screen.getByTestId('retry-request')).not.toBeDisabled();
@@ -708,7 +745,7 @@ describe('requests detail page', () => {
 
     // Capture off → no body to re-issue → the button stays disabled.
     render(DetailPage, {
-      data: { detail: detail(), payload: { captured: false }, traceId: 'tr_off' },
+      data: { detail: detail(), payload: { captured: false }, requestId: 'tr_off' },
     });
     expect(screen.getByTestId('retry-request')).toBeDisabled();
   });
@@ -726,7 +763,7 @@ describe('requests detail page', () => {
           },
         } as Partial<RequestDetail>),
         payload: { captured: false },
-        traceId: 'tr_err',
+        requestId: 'tr_err',
       },
     });
     const err = screen.getByTestId('request-error');
@@ -742,7 +779,7 @@ describe('requests detail page', () => {
       data: {
         detail: null,
         payload: { captured: false },
-        traceId: 'missing',
+        requestId: 'missing',
         loadError: 'not found',
       },
     });
@@ -813,6 +850,8 @@ describe('requests detail loader (payload fails open, detail is fatal)', () => {
     expect(data.detail).not.toBeNull();
     expect(data.payload).toEqual({ captured: false });
     expect(data.loadError).toBeUndefined();
+    expect(data.requestId).toBe('tr_1');
+    expect('traceId' in data).toBe(false);
     expect(getRequestPayload).not.toHaveBeenCalled();
   });
 
