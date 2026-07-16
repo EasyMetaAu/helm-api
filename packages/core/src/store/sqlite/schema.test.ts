@@ -401,9 +401,7 @@ describe("sqlite schema + migrations", () => {
       const after = new Database(path);
       after.pragma("foreign_keys = ON");
       expect(
-        after
-          .prepare("SELECT id, project_id, resource_id FROM memory_threads ORDER BY id")
-          .all(),
+        after.prepare("SELECT id, project_id, resource_id FROM memory_threads ORDER BY id").all(),
       ).toEqual(
         [
           { id: expectedLegacy, project_id: null, resource_id: null },
@@ -524,11 +522,7 @@ describe("sqlite schema + migrations", () => {
           .get(),
       ).toEqual({ n: 4 });
       expect(
-        after
-          .prepare(
-            "SELECT id, scope_id, status, error FROM memory_jobs ORDER BY id",
-          )
-          .all(),
+        after.prepare("SELECT id, scope_id, status, error FROM memory_jobs ORDER BY id").all(),
       ).toEqual([
         {
           id: "j-corrupt",
@@ -644,9 +638,7 @@ describe("sqlite schema + migrations", () => {
           "INSERT INTO memory_messages (id, thread_id, role, content, token_estimate, created_at) VALUES ('m1', ?, 'user', 'body', 1, 1)",
         )
         .run(legacyId);
-      const record = seed.prepare(
-        "INSERT INTO _migrations (version, applied_at) VALUES (?, 1000)",
-      );
+      const record = seed.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, 1000)");
       for (let version = 1; version <= 39; version++) record.run(version);
       seed.close();
 

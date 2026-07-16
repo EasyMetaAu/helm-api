@@ -1,5 +1,5 @@
-import Database from "better-sqlite3";
 import { decodeScopeId, encodeScopeId } from "@helm/shared";
+import Database from "better-sqlite3";
 import { type BetterSQLite3Database, drizzle } from "drizzle-orm/better-sqlite3";
 import * as sqliteVec from "sqlite-vec";
 import {
@@ -1106,9 +1106,7 @@ const MIGRATIONS: readonly Migration[] = [
         const oldToNew = new Map(
           mappingRows.map((row) => [key(row.owner_id, row.old_id), row.new_id]),
         );
-        const existingTargets = new Set(
-          mappingRows.map((row) => key(row.owner_id, row.new_id)),
-        );
+        const existingTargets = new Set(mappingRows.map((row) => key(row.owner_id, row.new_id)));
         const affectedOwners = new Set(mappingRows.map((row) => row.owner_id));
         const update = db.prepare(
           "UPDATE memory_jobs SET scope_id = ?, status = ?, error = ?, updated_at = ? WHERE id = ?",

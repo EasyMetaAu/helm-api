@@ -40,15 +40,17 @@ describe("Memory physical thread scope", () => {
     expect(clientThreadIdFromStorageId(quarantined, "other")).toBe(quarantined);
   });
 
-  it.each(["acct:foo", "v2:n:acct:foo", "v2:p:00:acct:foo", "线程:一"])(
-    "preserves ambiguous raw long-tier id %s inside a separate quarantine namespace",
-    (rawClientId) => {
-      const quarantined = quarantinedRawThreadId("acct", rawClientId);
-      expect(quarantined).toMatch(/^v2:q:r:/);
-      expect(clientThreadIdFromStorageId(quarantined, "acct")).toBe(rawClientId);
-      expect(clientThreadIdFromStorageId(quarantined, "other")).toBe(quarantined);
-    },
-  );
+  it.each([
+    "acct:foo",
+    "v2:n:acct:foo",
+    "v2:p:00:acct:foo",
+    "线程:一",
+  ])("preserves ambiguous raw long-tier id %s inside a separate quarantine namespace", (rawClientId) => {
+    const quarantined = quarantinedRawThreadId("acct", rawClientId);
+    expect(quarantined).toMatch(/^v2:q:r:/);
+    expect(clientThreadIdFromStorageId(quarantined, "acct")).toBe(rawClientId);
+    expect(clientThreadIdFromStorageId(quarantined, "other")).toBe(quarantined);
+  });
 
   it("separates parent, raw, owner, and live-v2 namespaces deterministically", () => {
     const opaque = "v2:n:acct:同一线程";

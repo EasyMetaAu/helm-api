@@ -1031,9 +1031,7 @@ const MIGRATIONS: readonly Migration[] = [
         const oldToNew = new Map(
           mappingRows.map((row) => [key(row.owner_id, row.old_id), row.new_id]),
         );
-        const existingTargets = new Set(
-          mappingRows.map((row) => key(row.owner_id, row.new_id)),
-        );
+        const existingTargets = new Set(mappingRows.map((row) => key(row.owner_id, row.new_id)));
         const affectedOwners = new Set(mappingRows.map((row) => row.owner_id));
         const jobs = resultRows<JobRow>(
           await db.execute(sql.raw("SELECT id, scope_id, status, error FROM memory_jobs")),

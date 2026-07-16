@@ -745,9 +745,7 @@ describe("runPgMigrations — per-migration atomicity", () => {
     ]);
     await expect(
       db.execute(
-        sql.raw(
-          "SELECT COUNT(*) FROM memory_jobs WHERE scope_id::jsonb ->> 'accountId' = 'acct'",
-        ),
+        sql.raw("SELECT COUNT(*) FROM memory_jobs WHERE scope_id::jsonb ->> 'accountId' = 'acct'"),
       ),
     ).resolves.toBeDefined();
     const orphanCount = (await db.execute(
