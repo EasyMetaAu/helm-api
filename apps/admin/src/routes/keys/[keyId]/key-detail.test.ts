@@ -74,6 +74,14 @@ function keyView(overrides: Partial<ApiKeyView> = {}): ApiKeyView {
   };
 }
 
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 describe('key detail loader', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -104,6 +112,26 @@ describe('key detail loader', () => {
       end: now,
     });
     expect((result as { filters: KeyDetailFilters }).filters.range).toBe('today');
+  });
+
+  it('starts stats and recent requests concurrently after the key resolves', async () => {
+    const stats = deferred<DashboardStats>();
+    const requests = deferred<RequestsPage>();
+    mocks.getStats.mockReset().mockReturnValueOnce(stats.promise);
+    mocks.listRequests.mockReset().mockReturnValueOnce(requests.promise);
+
+    const loading = load({
+      params: { keyId: 'k1' },
+      url: new URL('https://admin.test/keys/k1'),
+    } as never);
+    await vi.waitFor(() => expect(mocks.getStats).toHaveBeenCalledOnce());
+    const requestCallsBeforeStatsSettles = mocks.listRequests.mock.calls.length;
+
+    stats.resolve(mocks.emptyStats);
+    requests.resolve({ items: [], total: 0, page: 1, pageSize: 25 });
+    await loading;
+
+    expect(requestCallsBeforeStatsSettles).toBe(1);
   });
 
   it('resolves a custom date range to [midnight(start), midnight(end)+1day)', async () => {

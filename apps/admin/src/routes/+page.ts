@@ -49,22 +49,43 @@ export const load: PageLoad = async ({ url }) => {
   // (not 00:00 UTC) — the fix for the "8am boundary" on UTC+8 dashboards.
   const tzOffsetMinutes = clientTzOffsetMinutes();
 
-  // The aggregate (cards + charts). Fail-soft to an empty aggregate.
-  let agg: DashboardStats = EMPTY_STATS;
-  try {
-    agg = await getStats({ ...statsWindow, bucket, tzOffsetMinutes });
-  } catch {
-    agg = EMPTY_STATS;
-  }
+  // These reads are independent. Start them together so navigation latency is the
+  // slowest read, not the sum of three reads. Each promise owns its fail-soft value
+  // so one admin-API hiccup still cannot sink the rest of the dashboard.
+  const aggPromise = (async (): Promise<DashboardStats> => {
+    try {
+      return await getStats({ ...statsWindow, bucket, tzOffsetMinutes });
+    } catch {
+      return EMPTY_STATS;
+    }
+  })();
+  const itemsPromise = (async (): Promise<RequestListItem[]> => {
+    try {
+      return (await listRequests({ start, end, pageSize: 10 })).items;
+    } catch {
+      return [];
+    }
+  })();
+  const comparisonTotalsPromise =
+    !custom && (range === 'today' || range === 'yesterday')
+      ? (async (): Promise<DashboardStats['totals'] | null> => {
+          try {
+            const cmp =
+              range === 'today'
+                ? resolveTodayComparisonWindow(now)
+                : resolveYesterdayComparisonWindow(now);
+            return (await getStats({ ...cmp, bucket, tzOffsetMinutes })).totals;
+          } catch {
+            return null;
+          }
+        })()
+      : Promise.resolve(null);
 
-  // The recent-requests table preview (first 10 rows shown). Fail-soft to [].
-  let items: RequestListItem[] = [];
-  try {
-    const res = await listRequests({ start, end, pageSize: 10 });
-    items = res.items;
-  } catch {
-    items = [];
-  }
+  const [agg, items, comparisonTotals] = await Promise.all([
+    aggPromise,
+    itemsPromise,
+    comparisonTotalsPromise,
+  ]);
 
   // Derive the headline card numbers from the SQL aggregate (the real totals over
   // the whole window, not a sample). Token totals: Input = prompt, Output =
@@ -87,36 +108,26 @@ export const load: PageLoad = async ({ url }) => {
   // little traffic. Fail-soft: a hiccup → no deltas, cards just omit them.
   const MIN_COMPARISON_BASELINE_REQUESTS = 10;
   let compare: Record<string, { pct: number | null; base: number }> | null = null;
-  if (!custom && (range === 'today' || range === 'yesterday')) {
-    try {
-      const cmp =
-        range === 'today'
-          ? resolveTodayComparisonWindow(now)
-          : resolveYesterdayComparisonWindow(now);
-      const y = (await getStats({ ...cmp, bucket, tzOffsetMinutes })).totals;
-      if (y.requests >= MIN_COMPARISON_BASELINE_REQUESTS) {
-        const yTotalTokens = y.promptTokens + y.completionTokens;
-        compare = {
-          requests: { pct: pctDelta(t.requests, y.requests), base: y.requests },
-          totalTokens: {
-            pct: pctDelta(t.promptTokens + t.completionTokens, yTotalTokens),
-            base: yTotalTokens,
-          },
-          inputTokens: { pct: pctDelta(t.promptTokens, y.promptTokens), base: y.promptTokens },
-          outputTokens: {
-            pct: pctDelta(t.completionTokens, y.completionTokens),
-            base: y.completionTokens,
-          },
-          cachedTokens: { pct: pctDelta(t.cachedTokens, y.cachedTokens), base: y.cachedTokens },
-          totalCost: {
-            pct: pctDelta(t.totalCostUsd ?? 0, y.totalCostUsd ?? 0),
-            base: y.totalCostUsd ?? 0,
-          },
-        };
-      }
-    } catch {
-      compare = null;
-    }
+  if (comparisonTotals && comparisonTotals.requests >= MIN_COMPARISON_BASELINE_REQUESTS) {
+    const y = comparisonTotals;
+    const yTotalTokens = y.promptTokens + y.completionTokens;
+    compare = {
+      requests: { pct: pctDelta(t.requests, y.requests), base: y.requests },
+      totalTokens: {
+        pct: pctDelta(t.promptTokens + t.completionTokens, yTotalTokens),
+        base: yTotalTokens,
+      },
+      inputTokens: { pct: pctDelta(t.promptTokens, y.promptTokens), base: y.promptTokens },
+      outputTokens: {
+        pct: pctDelta(t.completionTokens, y.completionTokens),
+        base: y.completionTokens,
+      },
+      cachedTokens: { pct: pctDelta(t.cachedTokens, y.cachedTokens), base: y.cachedTokens },
+      totalCost: {
+        pct: pctDelta(t.totalCostUsd ?? 0, y.totalCostUsd ?? 0),
+        base: y.totalCostUsd ?? 0,
+      },
+    };
   }
 
   return {

@@ -141,13 +141,39 @@ export async function dedupMemoryPg(
     }
   }
 
-  const wiped = await rows<{ id: string }>(db, "DELETE FROM memory_observations RETURNING id");
-  summary.wipedObservations = wiped.length;
-  const pruned = await rows<{ id: string }>(
+  // Wipe the invalid observations, prune terminal jobs, and repair the v38
+  // parent summaries in ONE statement. Besides being atomic, one statement is
+  // safe for the postgres-js CLI client without relying on connection affinity
+  // across separate BEGIN/COMMIT calls.
+  const finalized = await rows<{
+    wiped_observations: number | string;
+    pruned_jobs: number | string;
+  }>(
     db,
-    "DELETE FROM memory_jobs WHERE status IN ('done','failed') RETURNING id",
+    `WITH wiped AS (
+       DELETE FROM memory_observations RETURNING 1
+     ),
+     pruned AS (
+       DELETE FROM memory_jobs WHERE status IN ('done','failed') RETURNING 1
+     ),
+     repaired AS (
+       UPDATE memory_threads AS t
+          SET message_count = (
+                SELECT COUNT(*)::integer FROM memory_messages m WHERE m.thread_id = t.id
+              ),
+              last_message_at = (
+                SELECT MAX(m.created_at)::bigint FROM memory_messages m WHERE m.thread_id = t.id
+              ),
+              observation_count = 0,
+              last_observation_at = NULL
+        RETURNING 1
+     )
+     SELECT (SELECT COUNT(*) FROM wiped) AS wiped_observations,
+            (SELECT COUNT(*) FROM pruned) AS pruned_jobs,
+            (SELECT COUNT(*) FROM repaired) AS repaired_threads`,
   );
-  summary.prunedJobs = pruned.length;
+  summary.wipedObservations = firstNumber(finalized, "wiped_observations");
+  summary.prunedJobs = firstNumber(finalized, "pruned_jobs");
   log(
     `backfilled ${summary.backfilled} messages, deleted ${summary.deletedDuplicates} collision duplicates`,
   );

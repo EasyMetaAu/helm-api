@@ -97,6 +97,14 @@ describe.each(drivers)("Cleanup store contract — $name", ({ open }) => {
     expect(await q.pruneMessagesOlderThan(2000)).toBe(1);
     // The recent row (t=3000) survives.
     expect(await q.countMessagesOlderThan(9999)).toBe(1);
+    if (!q.getMemoryAdminStats) throw new Error("missing getMemoryAdminStats");
+    const stats = await q.getMemoryAdminStats({
+      accountId: "a",
+      threadId: "t",
+      now: new Date(4000),
+    });
+    expect(stats.storage.messages).toBe(1);
+    expect(stats.activity.lastMessageAt?.getTime()).toBe(3000);
   });
 
   it("memory_messages: keyset paging covers every eligible row exactly once", async () => {

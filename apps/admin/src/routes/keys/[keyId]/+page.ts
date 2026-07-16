@@ -34,35 +34,35 @@ export const load: PageLoad = async ({ params, url }) => {
   const bucket = bucketForWindow(start, end);
   const tzOffsetMinutes = clientTzOffsetMinutes();
 
-  // Stats scoped to THIS key (cards + charts). Fail-soft to an empty aggregate.
-  let agg: DashboardStats = EMPTY_STATS;
-  try {
-    agg = await getStats({ key_id: keyId, start, end, bucket, tzOffsetMinutes });
-  } catch {
-    agg = EMPTY_STATS;
-  }
-
-  // The key's own request list — only the most-recent page (no in-page pager; the
-  // "view all" link hands the full history off to the global requests list). Total
-  // is still the full filtered count, so the page knows whether there's more.
-  // Fail-soft to an empty page.
-  let requests = {
-    items: [] as RequestListItem[],
-    total: 0,
-    page: 1,
-    pageSize: DETAIL_PAGE_SIZE,
-  };
-  try {
-    requests = await listRequests({
-      keyId,
-      start,
-      end,
-      page: 1,
-      pageSize: DETAIL_PAGE_SIZE,
-    });
-  } catch {
-    // keep the empty page
-  }
+  // Stats and recent requests are independent once the key is known. Start both
+  // together so the page waits for the slower query rather than both in sequence;
+  // each read still fails soft to the same renderable empty state as before.
+  const aggPromise = (async (): Promise<DashboardStats> => {
+    try {
+      return await getStats({ key_id: keyId, start, end, bucket, tzOffsetMinutes });
+    } catch {
+      return EMPTY_STATS;
+    }
+  })();
+  const requestsPromise = (async () => {
+    try {
+      return await listRequests({
+        keyId,
+        start,
+        end,
+        page: 1,
+        pageSize: DETAIL_PAGE_SIZE,
+      });
+    } catch {
+      return {
+        items: [] as RequestListItem[],
+        total: 0,
+        page: 1,
+        pageSize: DETAIL_PAGE_SIZE,
+      };
+    }
+  })();
+  const [agg, requests] = await Promise.all([aggPromise, requestsPromise]);
 
   // Headline cards from the SQL aggregate (real totals over the window, not a
   // sample) — same derivation as the dashboard so the numbers read identically.

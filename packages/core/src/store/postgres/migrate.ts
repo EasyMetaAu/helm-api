@@ -790,6 +790,63 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // pg mirror of SQLite v39: keep the admin memory activity aggregates on the
+    // scoped parent row. The GROUP BY backfills are one-time ordered index scans;
+    // future insert/prune paths maintain the columns transactionally.
+    version: 38,
+    run: async (db) => {
+      // Several narrow migration tests intentionally seed only one legacy table.
+      // A missing memory subsystem is out of scope for this additive migration.
+      if (!(await pgTableHasColumns(db, "memory_threads", ["id"]))) return;
+      await db.execute(
+        sql.raw(
+          "ALTER TABLE memory_threads ADD COLUMN IF NOT EXISTS message_count INTEGER NOT NULL DEFAULT 0",
+        ),
+      );
+      await db.execute(
+        sql.raw("ALTER TABLE memory_threads ADD COLUMN IF NOT EXISTS last_message_at BIGINT"),
+      );
+      await db.execute(
+        sql.raw(
+          "ALTER TABLE memory_threads ADD COLUMN IF NOT EXISTS observation_count INTEGER NOT NULL DEFAULT 0",
+        ),
+      );
+      await db.execute(
+        sql.raw("ALTER TABLE memory_threads ADD COLUMN IF NOT EXISTS last_observation_at BIGINT"),
+      );
+      if (await pgTableHasColumns(db, "memory_messages", ["thread_id", "created_at"])) {
+        await db.execute(
+          sql.raw(`
+            UPDATE memory_threads AS t
+               SET message_count = activity.n,
+                   last_message_at = activity.last_at
+              FROM (
+                SELECT thread_id, COUNT(*)::integer AS n, MAX(created_at)::bigint AS last_at
+                  FROM memory_messages
+                 GROUP BY thread_id
+              ) AS activity
+             WHERE t.id = activity.thread_id
+          `),
+        );
+      }
+      if (await pgTableHasColumns(db, "memory_observations", ["thread_id", "observed_at"])) {
+        await db.execute(
+          sql.raw(`
+            UPDATE memory_threads AS t
+               SET observation_count = activity.n,
+                   last_observation_at = activity.last_at
+              FROM (
+                SELECT thread_id, COUNT(*)::integer AS n, MAX(observed_at)::bigint AS last_at
+                  FROM memory_observations
+                 GROUP BY thread_id
+              ) AS activity
+             WHERE t.id = activity.thread_id
+          `),
+        );
+      }
+    },
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {
@@ -800,7 +857,13 @@ function resultRows<T>(result: unknown): T[] {
 
 async function pgTableHasColumns(
   db: RawExecutor,
-  table: "api_keys" | "memory_threads" | "memory_messages" | "memory_jobs" | "oauth_quota",
+  table:
+    | "api_keys"
+    | "memory_threads"
+    | "memory_messages"
+    | "memory_observations"
+    | "memory_jobs"
+    | "oauth_quota",
   requiredColumns: readonly string[],
 ): Promise<boolean> {
   const rows = resultRows<{ column_name: string }>(

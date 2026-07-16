@@ -183,6 +183,87 @@ describe("sqlite schema + migrations", () => {
     raw.close();
   });
 
+  it("v39 adds and backfills per-thread admin activity summaries", () => {
+    const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v39-memory-activity-"));
+    const path = join(dir, "helm.db");
+    try {
+      const seed = new Database(path);
+      seed.exec(
+        "CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);",
+      );
+      seed.exec(`
+        CREATE TABLE memory_threads (
+          id TEXT PRIMARY KEY,
+          project_id TEXT,
+          resource_id TEXT,
+          owner_id TEXT,
+          last_served_model TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE memory_messages (
+          id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL,
+          role TEXT NOT NULL,
+          content TEXT NOT NULL,
+          token_estimate INTEGER NOT NULL,
+          created_at INTEGER NOT NULL,
+          message_index INTEGER,
+          content_hash TEXT
+        );
+        CREATE INDEX idx_memory_messages_thread ON memory_messages (thread_id, created_at);
+        CREATE TABLE memory_observations (
+          id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL,
+          source_message_range TEXT NOT NULL,
+          observation_text TEXT NOT NULL,
+          observed_at INTEGER NOT NULL
+        );
+        CREATE INDEX idx_memory_observations_thread ON memory_observations (thread_id, observed_at);
+        INSERT INTO memory_threads (id, owner_id, created_at, updated_at)
+          VALUES ('t1', 'a', 100, 100), ('empty', 'a', 100, 100);
+        INSERT INTO memory_messages (id, thread_id, role, content, token_estimate, created_at)
+          VALUES ('m1', 't1', 'user', 'one', 1, 1000),
+                 ('m2', 't1', 'assistant', 'two', 1, 2000);
+        INSERT INTO memory_observations
+          (id, thread_id, source_message_range, observation_text, observed_at)
+          VALUES ('o1', 't1', '["m1","m2"]', 'summary', 3000);
+      `);
+      const rec = seed.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)");
+      for (let version = 1; version <= 38; version++) rec.run(version, 1000);
+      seed.close();
+
+      runMigrations(path);
+
+      const after = new Database(path);
+      const rows = after
+        .prepare(
+          `SELECT id, message_count, last_message_at, observation_count, last_observation_at
+             FROM memory_threads ORDER BY id`,
+        )
+        .all();
+      expect(rows).toEqual([
+        {
+          id: "empty",
+          message_count: 0,
+          last_message_at: null,
+          observation_count: 0,
+          last_observation_at: null,
+        },
+        {
+          id: "t1",
+          message_count: 2,
+          last_message_at: 2000,
+          observation_count: 1,
+          last_observation_at: 3000,
+        },
+      ]);
+      after.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("v32 backfills telemetry latency and creates admin aggregate indexes", () => {
     const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v32-"));
     const path = join(dir, "helm.db");

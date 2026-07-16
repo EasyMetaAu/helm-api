@@ -17,6 +17,15 @@ export const memoryThreads = sqliteTable("memory_threads", {
   // best-effort by observeOutbound AFTER execution; the background observer
   // reads it to price the auto-compaction ledger. NULL = never stamped.
   lastServedModel: text("last_served_model"),
+  // Denormalized admin activity (v39). getMemoryAdminStats used to COUNT/MAX the
+  // raw message and observation tables on every cold page load. Those tables can
+  // hold millions of body rows, and better-sqlite3 blocks Node while scanning.
+  // Keep the small per-thread summary on the parent row instead; insert/prune
+  // paths update it transactionally and the migration backfills existing data.
+  messageCount: integer("message_count").notNull().default(0),
+  lastMessageAt: integer("last_message_at", { mode: "timestamp_ms" }),
+  observationCount: integer("observation_count").notNull().default(0),
+  lastObservationAt: integer("last_observation_at", { mode: "timestamp_ms" }),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });

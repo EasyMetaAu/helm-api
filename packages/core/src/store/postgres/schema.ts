@@ -154,6 +154,12 @@ export const memoryThreads = pgTable("memory_threads", {
   // best-effort by observeOutbound; read by the background observer to price
   // the auto-compaction ledger. NULL = never stamped.
   lastServedModel: text("last_served_model"),
+  // Denormalized admin activity (pg v38, SQLite v39 mirror). Admin stats aggregate
+  // these narrow parent-row fields instead of scanning body-heavy child tables.
+  messageCount: integer("message_count").notNull().default(0),
+  lastMessageAt: bigint("last_message_at", { mode: "number" }),
+  observationCount: integer("observation_count").notNull().default(0),
+  lastObservationAt: bigint("last_observation_at", { mode: "number" }),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
   updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
 });

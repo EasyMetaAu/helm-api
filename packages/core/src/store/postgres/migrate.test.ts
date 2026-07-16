@@ -239,6 +239,103 @@ describe("runPgMigrations — per-migration atomicity", () => {
     await db.$close();
   });
 
+  it("v38 adds and backfills per-thread admin activity summaries", async () => {
+    const client = new PGlite();
+    const db = Object.assign(drizzlePglite(client), { $close: () => client.close() });
+    await db.execute(
+      sql.raw("CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at BIGINT NOT NULL)"),
+    );
+    await db.execute(
+      sql.raw(`
+      CREATE TABLE memory_threads (
+        id TEXT PRIMARY KEY,
+        project_id TEXT,
+        resource_id TEXT,
+        owner_id TEXT,
+        last_served_model TEXT,
+        created_at BIGINT NOT NULL,
+        updated_at BIGINT NOT NULL
+      )
+    `),
+    );
+    await db.execute(
+      sql.raw(`
+      CREATE TABLE memory_messages (
+        id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        token_estimate INTEGER NOT NULL,
+        created_at BIGINT NOT NULL,
+        message_index INTEGER,
+        content_hash TEXT
+      )
+    `),
+    );
+    await db.execute(
+      sql.raw(`
+      CREATE TABLE memory_observations (
+        id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        source_message_range JSONB NOT NULL,
+        observation_text TEXT NOT NULL,
+        observed_at BIGINT NOT NULL
+      )
+    `),
+    );
+    await db.execute(
+      sql.raw(`
+      INSERT INTO memory_threads (id, owner_id, created_at, updated_at)
+      VALUES ('t1', 'a', 100, 100), ('empty', 'a', 100, 100)
+    `),
+    );
+    await db.execute(
+      sql.raw(`
+      INSERT INTO memory_messages (id, thread_id, role, content, token_estimate, created_at)
+      VALUES ('m1', 't1', 'user', 'one', 1, 1000),
+             ('m2', 't1', 'assistant', 'two', 1, 2000)
+    `),
+    );
+    await db.execute(
+      sql.raw(`
+      INSERT INTO memory_observations
+        (id, thread_id, source_message_range, observation_text, observed_at)
+      VALUES ('o1', 't1', '["m1","m2"]'::jsonb, 'summary', 3000)
+    `),
+    );
+    for (let version = 1; version <= 37; version++) {
+      await db.execute(
+        sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),
+      );
+    }
+
+    await expect(runPgMigrations(db)).resolves.toBeUndefined();
+
+    const result = (await db.execute(
+      sql.raw(`
+      SELECT id, message_count, last_message_at, observation_count, last_observation_at
+      FROM memory_threads ORDER BY id
+    `),
+    )) as { rows: Array<Record<string, unknown>> };
+    expect(result.rows).toEqual([
+      {
+        id: "empty",
+        message_count: 0,
+        last_message_at: null,
+        observation_count: 0,
+        last_observation_at: null,
+      },
+      {
+        id: "t1",
+        message_count: 2,
+        last_message_at: 2000,
+        observation_count: 1,
+        last_observation_at: 3000,
+      },
+    ]);
+    await db.$close();
+  });
+
   it("creates memory job admin-stats indexes", async () => {
     const db = await createPgliteDb();
     const indexes = (await db.execute(

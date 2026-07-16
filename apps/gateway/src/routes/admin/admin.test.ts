@@ -1084,6 +1084,29 @@ describe("admin.api keys", () => {
       const res = await app.request("/admin/api/keys/usage?tzOffsetMinutes=480");
       expect(res.status).toBe(200);
       expect(windows[0]).toEqual({ start: todayStartUtc, end: now });
+      expect(
+        (await app.request("/admin/api/keys/usage?tzOffsetMinutes=480")).headers.get(
+          "x-helm-cache",
+        ),
+      ).toBe("fresh");
+      expect(windows).toHaveLength(1);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("caches the live per-key usage window instead of regrouping telemetry on every read", async () => {
+    const now = Date.UTC(2026, 5, 1, 20, 0, 0);
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(now);
+    const usageByKey = vi.fn(async () => []);
+    const telemetry: TelemetryStore = { ...makeTelemetry(), usageByKey };
+    try {
+      const app = buildApp(buildDeps({ telemetry }));
+      const first = await app.request("/admin/api/keys/usage?start=1000");
+      const second = await app.request("/admin/api/keys/usage?start=1000");
+      expect(first.headers.get("x-helm-cache")).toBe("miss");
+      expect(second.headers.get("x-helm-cache")).toBe("fresh");
+      expect(usageByKey).toHaveBeenCalledTimes(1);
     } finally {
       nowSpy.mockRestore();
     }
@@ -1295,6 +1318,24 @@ describe("admin.api stats (dashboard token accounting)", () => {
     expect(await res.json()).toEqual(AGG);
     // The route parsed the explicit window + bucket and passed them through (tz → 0).
     expect(calls).toEqual([{ start: 1000, end: 5000, bucket: "hour", tz: 0 }]);
+  });
+
+  it("caches a live stats window instead of repeating three SQLite aggregates", async () => {
+    const now = Date.UTC(2026, 5, 1, 20, 0, 0);
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(now);
+    const calls: Array<{ start: number; end: number; bucket: string; tz: number; keyId?: string }> =
+      [];
+    try {
+      const app = buildApp(buildDeps({ telemetry: statsTelemetry(calls) }));
+      const url = `/admin/api/stats?start=1000&end=${now}&bucket=hour`;
+      const first = await app.request(url);
+      const second = await app.request(url);
+      expect(first.headers.get("x-helm-cache")).toBe("miss");
+      expect(second.headers.get("x-helm-cache")).toBe("fresh");
+      expect(calls).toHaveLength(1);
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it("forwards the client tz offset and fails open to 0 on junk", async () => {

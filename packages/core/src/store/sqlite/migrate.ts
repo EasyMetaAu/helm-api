@@ -891,6 +891,68 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // Admin memory-stats hot path. Counting/MAXing memory_messages (1M+ rows in
+    // production) synchronously blocked the Node event loop for seconds. Promote
+    // those four aggregate inputs to memory_threads, which is both much smaller
+    // and already carries the exact account/project/resource/thread scope.
+    //
+    // Backfill each child table with ONE ordered covering-index scan and update
+    // only threads that actually have children. SQLite ADD COLUMN with a constant
+    // default is metadata-only, so empty threads cost no rewrite. The migration is
+    // one-time and atomic; steady-state inserts/prunes maintain the fields.
+    version: 39,
+    run: (db) => {
+      if (!sqliteTableHasColumns(db, "memory_threads", ["id"])) return;
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(memory_threads)").all() as Array<{ name: string }>).map(
+          (column) => column.name,
+        ),
+      );
+      if (!columns.has("message_count")) {
+        db.exec("ALTER TABLE memory_threads ADD COLUMN message_count INTEGER NOT NULL DEFAULT 0");
+      }
+      if (!columns.has("last_message_at")) {
+        db.exec("ALTER TABLE memory_threads ADD COLUMN last_message_at INTEGER");
+      }
+      if (!columns.has("observation_count")) {
+        db.exec(
+          "ALTER TABLE memory_threads ADD COLUMN observation_count INTEGER NOT NULL DEFAULT 0",
+        );
+      }
+      if (!columns.has("last_observation_at")) {
+        db.exec("ALTER TABLE memory_threads ADD COLUMN last_observation_at INTEGER");
+      }
+      if (sqliteTableHasColumns(db, "memory_messages", ["thread_id", "created_at"])) {
+        db.exec(`
+          WITH activity AS (
+            SELECT thread_id, COUNT(*) AS n, MAX(created_at) AS last_at
+              FROM memory_messages
+             GROUP BY thread_id
+          )
+          UPDATE memory_threads AS t
+             SET message_count = activity.n,
+                 last_message_at = activity.last_at
+            FROM activity
+           WHERE t.id = activity.thread_id;
+        `);
+      }
+      if (sqliteTableHasColumns(db, "memory_observations", ["thread_id", "observed_at"])) {
+        db.exec(`
+          WITH activity AS (
+            SELECT thread_id, COUNT(*) AS n, MAX(observed_at) AS last_at
+              FROM memory_observations
+             GROUP BY thread_id
+          )
+          UPDATE memory_threads AS t
+             SET observation_count = activity.n,
+                 last_observation_at = activity.last_at
+            FROM activity
+           WHERE t.id = activity.thread_id;
+        `);
+      }
+    },
+  },
 ];
 
 function sqliteTableHasColumns(
@@ -944,13 +1006,15 @@ function applyMigrations(db: Database.Database): void {
 //                        instantly (defensive: migrations + the runtime handle can
 //                        briefly contend the same file).
 //   - temp_store=MEMORY  keep transient B-trees/sorts in RAM, off the disk path.
-//   - cache_size=-16000  ~16MB page cache (negative => KiB) for the hot tables.
+//   - cache_size=-65536  64MiB page cache (negative => KiB) for hot indexes. This
+//                        remains conservative on the supported small self-hosted
+//                        machines while avoiding needless cold-page churn.
 function applyPragmas(sqlite: Database.Database): void {
   sqlite.pragma("journal_mode = WAL");
   sqlite.pragma("synchronous = NORMAL");
   sqlite.pragma("busy_timeout = 5000");
   sqlite.pragma("temp_store = MEMORY");
-  sqlite.pragma("cache_size = -16000");
+  sqlite.pragma("cache_size = -65536");
 }
 
 // docs/14 — load the sqlite-vec extension on a connection so the vec0 virtual table
