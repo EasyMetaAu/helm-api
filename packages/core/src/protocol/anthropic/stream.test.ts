@@ -123,6 +123,267 @@ describe("convertOpenAIStreamToAnthropic — text event sequence", () => {
   });
 });
 
+describe("convertOpenAIStreamToAnthropic — leaked tool XML recovery", () => {
+  const invoke =
+    '<invoke name="Bash">\n<parameter name="command">git status</parameter>\n</invoke>';
+
+  function textDeltas(events: readonly AnthropicSSEEvent[]): string[] {
+    return events.flatMap((event) =>
+      event.type === "content_block_delta" && event.delta.type === "text_delta"
+        ? [event.delta.text]
+        : [],
+    );
+  }
+
+  it("recovers a whitelisted invoke split across deltas and preserves surrounding text order", async () => {
+    const events = await collect(
+      convertOpenAIStreamToAnthropic(
+        feed([
+          textChunk("before <inv"),
+          textChunk('oke name="Bash">\n<para'),
+          textChunk('meter name="command">git status</parameter>\n</invoke> after'),
+          textChunk("", "tool_calls"),
+        ]),
+        { toolNames: ["Bash"] },
+      ),
+    );
+
+    const starts = events.filter(
+      (event): event is Extract<AnthropicSSEEvent, { type: "content_block_start" }> =>
+        event.type === "content_block_start",
+    );
+    expect(starts.map((event) => [event.index, event.content_block.type])).toEqual([
+      [0, "text"],
+      [1, "tool_use"],
+      [2, "text"],
+    ]);
+    expect(textDeltas(events)).toEqual(["before ", " after"]);
+
+    const toolStart = starts[1];
+    expect(toolStart?.content_block).toMatchObject({
+      type: "tool_use",
+      id: "toolu_synthetic_1",
+      name: "Bash",
+      input: {},
+    });
+    const toolArgs = events
+      .filter(
+        (event): event is Extract<AnthropicSSEEvent, { type: "content_block_delta" }> =>
+          event.type === "content_block_delta" &&
+          event.index === 1 &&
+          event.delta.type === "input_json_delta",
+      )
+      .map((event) => (event.delta.type === "input_json_delta" ? event.delta.partial_json : ""))
+      .join("");
+    expect(JSON.parse(toolArgs)).toEqual({ command: "git status" });
+    expect(JSON.stringify(events)).not.toContain("<invoke");
+
+    const terminal = events.find((event) => event.type === "message_delta");
+    expect(terminal?.type).toBe("message_delta");
+    if (terminal?.type === "message_delta") {
+      expect(terminal.delta.stop_reason).toBe("tool_use");
+    }
+
+    const open = new Set<number>();
+    for (const event of events) {
+      if (event.type === "content_block_start") {
+        expect(open.has(event.index)).toBe(false);
+        open.add(event.index);
+      } else if (event.type === "content_block_delta") {
+        expect(open.has(event.index)).toBe(true);
+      } else if (event.type === "content_block_stop") {
+        expect(open.delete(event.index)).toBe(true);
+      }
+    }
+    expect(open.size).toBe(0);
+  });
+
+  it("flushes candidate XML verbatim when finish_reason does not map to tool_use", async () => {
+    const chunks = [
+      textChunk(`before ${invoke.slice(0, 17)}`),
+      textChunk(invoke.slice(17)),
+      textChunk("", "stop"),
+    ];
+    const events = await collect(
+      convertOpenAIStreamToAnthropic(feed(chunks), { toolNames: ["Bash"] }),
+    );
+
+    expect(textDeltas(events).join("")).toBe(`before ${invoke}`);
+    expect(
+      events.some(
+        (event) => event.type === "content_block_start" && event.content_block.type === "tool_use",
+      ),
+    ).toBe(false);
+    const terminal = events.find((event) => event.type === "message_delta");
+    if (terminal?.type === "message_delta") {
+      expect(terminal.delta.stop_reason).toBe("end_turn");
+    }
+  });
+
+  it.each([
+    ["an undeclared tool", invoke, ["Read"]],
+    [
+      "an unclosed invoke",
+      '<invoke name="Bash"><parameter name="command">git status</parameter>',
+      ["Bash"],
+    ],
+  ])("flushes %s verbatim", async (_label, text, toolNames) => {
+    const events = await collect(
+      convertOpenAIStreamToAnthropic(
+        feed([
+          textChunk(text.slice(0, 11)),
+          textChunk(text.slice(11)),
+          textChunk("", "tool_calls"),
+        ]),
+        { toolNames },
+      ),
+    );
+
+    expect(textDeltas(events).join("")).toBe(text);
+    expect(
+      events.some(
+        (event) => event.type === "content_block_start" && event.content_block.type === "tool_use",
+      ),
+    ).toBe(false);
+  });
+
+  it("flushes candidate XML verbatim when recovery is disabled", async () => {
+    const chunks = [
+      textChunk(invoke.slice(0, 8)),
+      textChunk(invoke.slice(8)),
+      textChunk("", "tool_calls"),
+    ];
+    const events = await collect(
+      convertOpenAIStreamToAnthropic(feed(chunks), {
+        toolNames: ["Bash"],
+        toolCallXmlRecoveryEnabled: false,
+      }),
+    );
+
+    expect(textDeltas(events)).toEqual([invoke.slice(0, 8), invoke.slice(8)]);
+    expect(
+      events.some(
+        (event) => event.type === "content_block_start" && event.content_block.type === "tool_use",
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps an ordinary stream event-for-event identical when recovery is eligible", async () => {
+    const chunks = [textChunk("Hel"), textChunk("lo"), textChunk("", "stop")];
+    const baseline = await collect(convertOpenAIStreamToAnthropic(feed(chunks)));
+    const eligible = await collect(
+      convertOpenAIStreamToAnthropic(feed(chunks), { toolNames: ["Bash"] }),
+    );
+    expect(eligible).toEqual(baseline);
+  });
+
+  it("flushes cached XML before a structured tool call and never recovers both", async () => {
+    const structured: OpenAIChunk = {
+      id: "chatcmpl-x",
+      model: "gpt-x",
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: "call_real",
+                type: "function",
+                function: { name: "Bash", arguments: '{"command":"pwd"}' },
+              },
+            ],
+          },
+          finish_reason: null,
+        },
+      ],
+    };
+    const events = await collect(
+      convertOpenAIStreamToAnthropic(
+        feed([
+          textChunk(invoke.slice(0, 13)),
+          textChunk(invoke.slice(13)),
+          structured,
+          textChunk("", "tool_calls"),
+        ]),
+        { toolNames: ["Bash"] },
+      ),
+    );
+
+    expect(textDeltas(events).join("")).toBe(invoke);
+    const toolStarts = events.filter(
+      (event): event is Extract<AnthropicSSEEvent, { type: "content_block_start" }> =>
+        event.type === "content_block_start" && event.content_block.type === "tool_use",
+    );
+    expect(toolStarts).toHaveLength(1);
+    expect(toolStarts[0]?.content_block).toMatchObject({
+      type: "tool_use",
+      id: "call_real",
+      name: "Bash",
+    });
+    const xmlTextIndex = events.findIndex(
+      (event) => event.type === "content_block_delta" && event.delta.type === "text_delta",
+    );
+    const structuredStartIndex = events.findIndex(
+      (event) =>
+        event.type === "content_block_start" &&
+        event.content_block.type === "tool_use" &&
+        event.content_block.id === "call_real",
+    );
+    expect(xmlTextIndex).toBeGreaterThanOrEqual(0);
+    expect(xmlTextIndex).toBeLessThan(structuredStartIndex);
+  });
+
+  it("caps an XML candidate at 1 MiB and disables recovery for the rest of the stream", async () => {
+    const opener = '<invoke name="Bash">';
+    const atLimit = opener + "x".repeat(1024 * 1024 - opener.length);
+    const laterInvoke =
+      '<invoke name="Bash"><parameter name="command">echo later</parameter></invoke>';
+    const events = await collect(
+      convertOpenAIStreamToAnthropic(
+        feed([
+          textChunk(atLimit),
+          textChunk("!"),
+          textChunk(laterInvoke),
+          textChunk("", "tool_calls"),
+        ]),
+        { toolNames: ["Bash"] },
+      ),
+    );
+
+    expect(textDeltas(events).join("") === `${atLimit}!${laterInvoke}`).toBe(true);
+    expect(
+      events.some(
+        (event) => event.type === "content_block_start" && event.content_block.type === "tool_use",
+      ),
+    ).toBe(false);
+  });
+
+  it("flushes a buffered XML candidate before rethrowing a source error", async () => {
+    const boom = new Error("translated stream broke");
+    async function* broken(): AsyncIterable<OpenAIChunk> {
+      yield textChunk(invoke);
+      throw boom;
+    }
+
+    const iterator = convertOpenAIStreamToAnthropic(broken(), {
+      toolNames: ["Bash"],
+    })[Symbol.asyncIterator]();
+
+    expect((await iterator.next()).value?.type).toBe("message_start");
+    const start = await iterator.next();
+    expect(start.value).toMatchObject({
+      type: "content_block_start",
+      content_block: { type: "text", text: "" },
+    });
+    expect((await iterator.next()).value).toMatchObject({
+      type: "content_block_delta",
+      delta: { type: "text_delta", text: invoke },
+    });
+    await expect(iterator.next()).rejects.toBe(boom);
+  });
+});
+
 // —— 2. parallel tool-call streaming ——————————————————————————————————————————
 
 describe("convertOpenAIStreamToAnthropic — parallel tool calls", () => {

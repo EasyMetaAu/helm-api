@@ -181,6 +181,97 @@ describe("transformResponseIn", () => {
     expect(out.stop_reason).toBe("tool_use");
   });
 
+  it("recovers a closed whitelisted XML invoke from a tool-use response", () => {
+    const xml =
+      '<invoke name="Bash">\n<parameter name="command">git status</parameter>\n' +
+      '<parameter name="timeout">600000</parameter>\n</invoke>';
+    const out = transformResponseIn(
+      makeIR({
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: `Before\n${xml}\nAfter` },
+            finish_reason: "tool_calls",
+          },
+        ],
+      }),
+      { toolNames: ["Bash"], toolCallXmlRecoveryEnabled: true },
+    );
+
+    expect(out.content).toEqual([
+      { type: "text", text: "Before\n" },
+      {
+        type: "tool_use",
+        id: "toolu_synthetic_1",
+        name: "Bash",
+        input: { command: "git status", timeout: 600000 },
+      },
+      { type: "text", text: "\nAfter" },
+    ]);
+    expect(out.stop_reason).toBe("tool_use");
+  });
+
+  it.each([
+    {
+      title: "finish reason is not tool_use",
+      finishReason: "stop",
+      tools: ["Bash"],
+      enabled: true,
+    },
+    { title: "tool is not declared", finishReason: "tool_calls", tools: ["Read"], enabled: true },
+    {
+      title: "feature flag is disabled",
+      finishReason: "tool_calls",
+      tools: ["Bash"],
+      enabled: false,
+    },
+  ])("keeps XML text untouched when $title", ({ finishReason, tools, enabled }) => {
+    const xml = '<invoke name="Bash"><parameter name="command">git status</parameter></invoke>';
+    const out = transformResponseIn(
+      makeIR({
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: xml },
+            finish_reason: finishReason,
+          },
+        ],
+      }),
+      { toolNames: tools, toolCallXmlRecoveryEnabled: enabled },
+    );
+
+    expect(out.content).toEqual([{ type: "text", text: xml }]);
+  });
+
+  it("does not recover XML when a structured tool call already exists", () => {
+    const xml = '<invoke name="Bash"><parameter name="command">echo prose</parameter></invoke>';
+    const out = transformResponseIn(
+      makeIR({
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: xml,
+              tool_calls: [
+                {
+                  id: "toolu_real",
+                  type: "function",
+                  function: { name: "Bash", arguments: '{"command":"pwd"}' },
+                },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+      }),
+      { toolNames: ["Bash"], toolCallXmlRecoveryEnabled: true },
+    );
+
+    expect(out.content).toContainEqual({ type: "text", text: xml });
+    expect(out.content.filter((block) => block.type === "tool_use")).toHaveLength(1);
+  });
+
   it("tolerates malformed tool_call arguments without failing the whole response", () => {
     const out = transformResponseIn(
       makeIR({

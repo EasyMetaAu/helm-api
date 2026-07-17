@@ -2296,6 +2296,127 @@ describe("createAnthropicClient — nativePassthrough", () => {
     };
   }
 
+  it("recovers a whitelisted XML tool call in a native JSON response when explicitly enabled", async () => {
+    const invoke = [
+      '<invoke name="Bash">',
+      '<parameter name="command">git status</parameter>',
+      '<parameter name="timeout">600000</parameter>',
+      "</invoke>",
+    ].join("\n");
+    const upstream = {
+      id: "msg_xml",
+      type: "message",
+      role: "assistant",
+      content: [{ type: "text", text: invoke }],
+      stop_reason: "tool_use",
+      usage: { input_tokens: 10, output_tokens: 5 },
+    };
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: (async () => jsonResponse(upstream)) as unknown as typeof fetch,
+    });
+
+    const out = await client.nativePassthrough?.(
+      {
+        ...nativeBody(),
+        tools: [{ name: "Bash", input_schema: { type: "object" } }],
+      },
+      { toolCallXmlRecovery: true },
+    );
+
+    expect(out).toMatchObject({
+      stop_reason: "tool_use",
+      content: [
+        {
+          type: "tool_use",
+          id: "toolu_synthetic_0",
+          name: "Bash",
+          input: { command: "git status", timeout: 600000 },
+        },
+      ],
+    });
+  });
+
+  it("does not recover XML when the native JSON already has a structured tool_use", async () => {
+    const upstream = {
+      id: "msg_mixed_tools",
+      type: "message",
+      role: "assistant",
+      content: [
+        { type: "tool_use", id: "toolu_real", name: "Read", input: { file_path: "/tmp/a" } },
+        {
+          type: "text",
+          text: '<invoke name="Bash"><parameter name="command">rm -rf /tmp/a</parameter></invoke>',
+        },
+      ],
+      stop_reason: "tool_use",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: (async () => jsonResponse(upstream)) as unknown as typeof fetch,
+    });
+
+    const out = await client.nativePassthrough?.(
+      {
+        ...nativeBody(),
+        tools: [
+          { name: "Read", input_schema: { type: "object" } },
+          { name: "Bash", input_schema: { type: "object" } },
+        ],
+      },
+      { toolCallXmlRecovery: true },
+    );
+
+    expect(out).toEqual(upstream);
+  });
+
+  it.each([
+    {
+      label: "the request-scoped flag is off",
+      stopReason: "tool_use",
+      toolName: "Bash",
+      flag: false,
+    },
+    {
+      label: "the stop reason is not tool_use",
+      stopReason: "end_turn",
+      toolName: "Bash",
+      flag: true,
+    },
+    {
+      label: "the leaked name is not declared",
+      stopReason: "tool_use",
+      toolName: "Read",
+      flag: true,
+    },
+  ])("leaves native XML JSON untouched when $label", async ({ stopReason, toolName, flag }) => {
+    const invoke = [
+      '<invoke name="Bash">',
+      '<parameter name="command">git status</parameter>',
+      "</invoke>",
+    ].join("\n");
+    const upstream = {
+      id: "msg_xml_guard",
+      type: "message",
+      role: "assistant",
+      content: [{ type: "text", text: invoke }],
+      stop_reason: stopReason,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: (async () => jsonResponse(upstream)) as unknown as typeof fetch,
+    });
+
+    const out = await client.nativePassthrough?.(
+      { ...nativeBody(), tools: [{ name: toolName, input_schema: { type: "object" } }] },
+      { toolCallXmlRecovery: flag },
+    );
+
+    expect(out).toEqual(upstream);
+  });
+
   it("forwards the native body VERBATIM (no spoof injection, no openai->anthropic mangling)", async () => {
     const body = nativeBody();
     let sentBody: unknown;
@@ -2658,6 +2779,624 @@ describe("createAnthropicClient — nativePassthroughStream", () => {
     });
     return new Response(stream, { status: 200 });
   }
+
+  function sseEvent(type: string, event: Record<string, unknown>): string {
+    return `event: ${type}\ndata: ${JSON.stringify(event)}\n\n`;
+  }
+
+  function parsedSSEEvents(raw: string): Array<Record<string, unknown>> {
+    return raw
+      .split("\n\n")
+      .map((frame) =>
+        frame
+          .split("\n")
+          .find((line) => line.startsWith("data: "))
+          ?.slice(6),
+      )
+      .filter((data): data is string => data !== undefined)
+      .map((data) => JSON.parse(data) as Record<string, unknown>);
+  }
+
+  function mixedEndingSseEvent(type: string, event: Record<string, unknown>): string {
+    // Legal mixed SSE line endings: CRLF closes `event`, LF closes `data`, then
+    // CRLF is the blank-line terminator. The parser must treat all combinations.
+    return `event: ${type}\r\ndata: ${JSON.stringify(event)}\n\r\n`;
+  }
+
+  it("does not buffer ordinary less-than text as an XML candidate", async () => {
+    vi.useFakeTimers();
+    try {
+      const ordinary = sseEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "if (a < b) return a" },
+      });
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(ordinary));
+          // Deliberately keep the transport open: a false candidate would wait for
+          // the idle timeout instead of releasing this complete ordinary frame.
+        },
+      });
+      const client = createAnthropicClient({
+        config: {
+          baseUrl: "https://api.anthropic.com",
+          apiKey: "sk-static",
+          timeoutMs: 500,
+        },
+        fetch: (async () => new Response(stream, { status: 200 })) as unknown as typeof fetch,
+      });
+      const iterable = client.nativePassthroughStream?.(
+        {
+          ...nativeStreamBody(),
+          tools: [{ name: "Bash", input_schema: { type: "object" } }],
+        },
+        { toolCallXmlRecovery: true },
+      );
+      if (iterable === undefined) throw new Error("native passthrough stream unavailable");
+      const iterator = iterable[Symbol.asyncIterator]();
+      const first = iterator.next();
+
+      await vi.advanceTimersByTimeAsync(500);
+      expect(await first).toEqual({ done: false, value: ordinary });
+      await iterator.return?.();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("recovers XML split across text deltas and network chunks after the late tool_use stop reason", async () => {
+    const wire = [
+      sseEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_xml_stream",
+          type: "message",
+          role: "assistant",
+          model: "claude-opus-4-8",
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 10, output_tokens: 1 },
+        },
+      }),
+      sseEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: "" },
+      }),
+      sseEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "before <in" },
+      }),
+      sseEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: {
+          type: "text_delta",
+          text: 'voke name="Bash"><parameter name="command">git status</parameter></invoke> after',
+        },
+      }),
+      sseEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+      sseEvent("content_block_start", {
+        type: "content_block_start",
+        index: 1,
+        content_block: { type: "text", text: "" },
+      }),
+      sseEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 1,
+        delta: { type: "text_delta", text: "later block" },
+      }),
+      sseEvent("content_block_stop", { type: "content_block_stop", index: 1 }),
+      sseEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "tool_use", stop_sequence: null },
+        usage: { output_tokens: 20 },
+      }),
+      sseEvent("message_stop", { type: "message_stop" }),
+    ].join("");
+    // Split in the middle of both the SSE JSON and the literal XML start token.
+    const cut1 = wire.indexOf("<in") + 2;
+    const cut2 = wire.indexOf("voke name") + 4;
+    const writes = [wire.slice(0, cut1), wire.slice(cut1, cut2), wire.slice(cut2)];
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: (async () => sseStreamResponse(writes)) as unknown as typeof fetch,
+    });
+
+    const chunks: string[] = [];
+    for await (const chunk of client.nativePassthroughStream?.(
+      {
+        ...nativeStreamBody(),
+        tools: [{ name: "Bash", input_schema: { type: "object" } }],
+      },
+      { toolCallXmlRecovery: true },
+    ) ?? []) {
+      chunks.push(chunk);
+    }
+
+    const raw = chunks.join("");
+    expect(raw).not.toContain("<invoke");
+    const events = parsedSSEEvents(raw);
+    const starts = events.filter((event) => event.type === "content_block_start");
+    expect(starts).toEqual([
+      expect.objectContaining({ index: 0, content_block: { type: "text", text: "" } }),
+      expect.objectContaining({
+        index: 1,
+        content_block: expect.objectContaining({
+          type: "tool_use",
+          id: "toolu_synthetic_1",
+          name: "Bash",
+          input: {},
+        }),
+      }),
+      expect.objectContaining({ index: 2, content_block: { type: "text", text: "" } }),
+      expect.objectContaining({ index: 3, content_block: { type: "text", text: "" } }),
+    ]);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "before " },
+        }),
+        expect.objectContaining({
+          type: "content_block_delta",
+          index: 1,
+          delta: { type: "input_json_delta", partial_json: '{"command":"git status"}' },
+        }),
+        expect.objectContaining({
+          type: "content_block_delta",
+          index: 2,
+          delta: { type: "text_delta", text: " after" },
+        }),
+        expect.objectContaining({
+          type: "content_block_delta",
+          index: 3,
+          delta: { type: "text_delta", text: "later block" },
+        }),
+      ]),
+    );
+    const stopIndexes = events
+      .filter((event) => event.type === "content_block_stop")
+      .map((event) => event.index);
+    expect(stopIndexes).toEqual([0, 1, 2, 3]);
+    expect(events.at(-2)).toMatchObject({
+      type: "message_delta",
+      delta: { stop_reason: "tool_use" },
+    });
+    expect(events.at(-1)).toEqual({ type: "message_stop" });
+  });
+
+  it("does not recover XML when the native stream already emitted structured tool_use", async () => {
+    const writes = [
+      sseEvent("message_start", {
+        type: "message_start",
+        message: { id: "m", stop_reason: null, usage: { input_tokens: 1, output_tokens: 1 } },
+      }),
+      sseEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "toolu_real", name: "Read", input: {} },
+      }),
+      sseEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: '{"file_path":"/tmp/a"}' },
+      }),
+      sseEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+      sseEvent("content_block_start", {
+        type: "content_block_start",
+        index: 1,
+        content_block: { type: "text", text: "" },
+      }),
+      sseEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 1,
+        delta: {
+          type: "text_delta",
+          text: '<invoke name="Bash"><parameter name="command">rm /tmp/a</parameter></invoke>',
+        },
+      }),
+      sseEvent("content_block_stop", { type: "content_block_stop", index: 1 }),
+      sseEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "tool_use", stop_sequence: null },
+        usage: { output_tokens: 2 },
+      }),
+      sseEvent("message_stop", { type: "message_stop" }),
+    ];
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: (async () => sseStreamResponse(writes)) as unknown as typeof fetch,
+    });
+
+    const chunks: string[] = [];
+    for await (const chunk of client.nativePassthroughStream?.(
+      {
+        ...nativeStreamBody(),
+        tools: [
+          { name: "Read", input_schema: { type: "object" } },
+          { name: "Bash", input_schema: { type: "object" } },
+        ],
+      },
+      { toolCallXmlRecovery: true },
+    ) ?? []) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual(writes);
+  });
+
+  it("does not recover XML when message_start already carries structured tool_use content", async () => {
+    const writes = [
+      sseEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "m",
+          content: [{ type: "tool_use", id: "toolu_real", name: "Read", input: {} }],
+          stop_reason: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      }),
+      sseEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 1,
+        delta: {
+          type: "text_delta",
+          text: '<invoke name="Bash"><parameter name="command">rm /tmp/a</parameter></invoke>',
+        },
+      }),
+      sseEvent("content_block_stop", { type: "content_block_stop", index: 1 }),
+      sseEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "tool_use", stop_sequence: null },
+        usage: { output_tokens: 2 },
+      }),
+      sseEvent("message_stop", { type: "message_stop" }),
+    ];
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: (async () => sseStreamResponse(writes)) as unknown as typeof fetch,
+    });
+
+    const chunks: string[] = [];
+    for await (const chunk of client.nativePassthroughStream?.(
+      {
+        ...nativeStreamBody(),
+        tools: [
+          { name: "Read", input_schema: { type: "object" } },
+          { name: "Bash", input_schema: { type: "object" } },
+        ],
+      },
+      { toolCallXmlRecovery: true },
+    ) ?? []) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual(writes);
+  });
+
+  it.each([
+    {
+      label: "message_stop is missing",
+      expectedChunks: 3,
+      terminal: [
+        sseEvent("message_delta", {
+          type: "message_delta",
+          delta: { stop_reason: "tool_use", stop_sequence: null },
+          usage: { output_tokens: 2 },
+        }),
+      ],
+    },
+    {
+      label: "the authorizing delta arrives after message_stop",
+      expectedChunks: 3,
+      terminal: [
+        sseEvent("message_stop", { type: "message_stop" }),
+        sseEvent("message_delta", {
+          type: "message_delta",
+          delta: { stop_reason: "tool_use", stop_sequence: null },
+          usage: { output_tokens: 2 },
+        }),
+      ],
+    },
+  ])("keeps XML raw when $label", async ({ terminal, expectedChunks }) => {
+    const writes = [
+      sseEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: {
+          type: "text_delta",
+          text: '<invoke name="Bash"><parameter name="command">pwd</parameter></invoke>',
+        },
+      }),
+      sseEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+      ...terminal,
+    ];
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: (async () => sseStreamResponse(writes)) as unknown as typeof fetch,
+    });
+
+    const chunks: string[] = [];
+    for await (const chunk of client.nativePassthroughStream?.(
+      {
+        ...nativeStreamBody(),
+        tools: [{ name: "Bash", input_schema: { type: "object" } }],
+      },
+      { toolCallXmlRecovery: true },
+    ) ?? []) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual(writes.slice(0, expectedChunks));
+  });
+
+  it("recovers a valid XML tool call across mixed SSE line endings", async () => {
+    const writes = [
+      mixedEndingSseEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: {
+          type: "text_delta",
+          text: '<invoke name="Bash"><parameter name="command">pwd</parameter></invoke>',
+        },
+      }),
+      mixedEndingSseEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+      mixedEndingSseEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "tool_use", stop_sequence: null },
+        usage: { output_tokens: 2 },
+      }),
+      mixedEndingSseEvent("message_stop", { type: "message_stop" }),
+    ];
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: (async () => sseStreamResponse(writes)) as unknown as typeof fetch,
+    });
+
+    const chunks: string[] = [];
+    for await (const chunk of client.nativePassthroughStream?.(
+      {
+        ...nativeStreamBody(),
+        tools: [{ name: "Bash", input_schema: { type: "object" } }],
+      },
+      { toolCallXmlRecovery: true },
+    ) ?? []) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks.join("")).not.toContain("<invoke");
+    expect(chunks.join("")).toContain('"type":"tool_use"');
+  });
+
+  it("finalizes recovery at message_stop without waiting for transport EOF", async () => {
+    vi.useFakeTimers();
+    try {
+      const events = [
+        sseEvent("content_block_delta", {
+          type: "content_block_delta",
+          index: 0,
+          delta: {
+            type: "text_delta",
+            text: '<invoke name="Bash"><parameter name="command">pwd</parameter></invoke>',
+          },
+        }),
+        sseEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+        sseEvent("message_delta", {
+          type: "message_delta",
+          delta: { stop_reason: "tool_use", stop_sequence: null },
+          usage: { output_tokens: 2 },
+        }),
+        sseEvent("message_stop", { type: "message_stop" }),
+      ];
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const event of events) controller.enqueue(new TextEncoder().encode(event));
+          // Deliberately hold the body open after the protocol terminal event.
+        },
+      });
+      const client = createAnthropicClient({
+        config: {
+          baseUrl: "https://api.anthropic.com",
+          apiKey: "sk-static",
+          timeoutMs: 500,
+        },
+        fetch: (async () => new Response(stream, { status: 200 })) as unknown as typeof fetch,
+      });
+      const chunks: string[] = [];
+      const run = (async () => {
+        for await (const chunk of client.nativePassthroughStream?.(
+          {
+            ...nativeStreamBody(),
+            tools: [{ name: "Bash", input_schema: { type: "object" } }],
+          },
+          { toolCallXmlRecovery: true },
+        ) ?? []) {
+          chunks.push(chunk);
+        }
+      })();
+
+      await vi.advanceTimersByTimeAsync(500);
+      await run;
+      expect(chunks.join("")).not.toContain("<invoke");
+      expect(chunks.join("")).toContain('"type":"tool_use"');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("flushes candidate chunks unchanged and permanently bypasses after the 1 MiB UTF-8 cap", async () => {
+    const candidate = sseEvent("content_block_delta", {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text: '<invoke name="Bash">' },
+    });
+    // Non-ASCII text proves the guard counts UTF-8 bytes, not UTF-16 code units.
+    const overflow = "界".repeat(350_000);
+    expect(Buffer.byteLength(candidate + overflow, "utf8")).toBeGreaterThan(1024 * 1024);
+    const terminal =
+      sseEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: {
+          type: "text_delta",
+          text: '<parameter name="command">echo safe</parameter></invoke>',
+        },
+      }) +
+      sseEvent("content_block_stop", { type: "content_block_stop", index: 0 }) +
+      sseEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "tool_use", stop_sequence: null },
+        usage: { output_tokens: 2 },
+      });
+    const writes = [candidate, overflow, terminal];
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: (async () => sseStreamResponse(writes)) as unknown as typeof fetch,
+    });
+
+    const chunks: string[] = [];
+    for await (const chunk of client.nativePassthroughStream?.(
+      {
+        ...nativeStreamBody(),
+        tools: [{ name: "Bash", input_schema: { type: "object" } }],
+      },
+      { toolCallXmlRecovery: true },
+    ) ?? []) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual(writes);
+  });
+
+  it("still finalizes at message_stop after the 1 MiB recovery bypass", async () => {
+    vi.useFakeTimers();
+    try {
+      const candidate = sseEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: '<invoke name="Bash">' },
+      });
+      const overflow = "界".repeat(350_000);
+      expect(Buffer.byteLength(candidate + overflow, "utf8")).toBeGreaterThan(1024 * 1024);
+      const messageStop = sseEvent("message_stop", { type: "message_stop" });
+      const splitAt = Math.floor(messageStop.length / 2);
+      const writes = [
+        candidate,
+        overflow,
+        messageStop.slice(0, splitAt),
+        messageStop.slice(splitAt),
+      ];
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const write of writes) controller.enqueue(new TextEncoder().encode(write));
+          // Deliberately keep the HTTP body open after the protocol terminal event.
+        },
+      });
+      const client = createAnthropicClient({
+        config: {
+          baseUrl: "https://api.anthropic.com",
+          apiKey: "sk-static",
+          timeoutMs: 500,
+        },
+        fetch: (async () => new Response(stream, { status: 200 })) as unknown as typeof fetch,
+      });
+      const chunks: string[] = [];
+      const run = (async () => {
+        for await (const chunk of client.nativePassthroughStream?.(
+          {
+            ...nativeStreamBody(),
+            tools: [{ name: "Bash", input_schema: { type: "object" } }],
+          },
+          { toolCallXmlRecovery: true },
+        ) ?? []) {
+          chunks.push(chunk);
+        }
+      })();
+
+      await vi.advanceTimersByTimeAsync(500);
+      await run;
+      expect(chunks).toEqual(writes);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("flushes pending candidate chunks before rethrowing a source error", async () => {
+    const candidate = sseEvent("content_block_delta", {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text: '<invoke name="Bash">' },
+    });
+    const boom = new Error("native stream broke");
+    let reads = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (reads++ === 0) {
+          controller.enqueue(new TextEncoder().encode(candidate));
+        } else {
+          controller.error(boom);
+        }
+      },
+    });
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: (async () => new Response(stream, { status: 200 })) as unknown as typeof fetch,
+    });
+    const iterable = client.nativePassthroughStream?.(
+      {
+        ...nativeStreamBody(),
+        tools: [{ name: "Bash", input_schema: { type: "object" } }],
+      },
+      { toolCallXmlRecovery: true },
+    );
+    if (iterable === undefined) throw new Error("native passthrough stream unavailable");
+    const iterator = iterable[Symbol.asyncIterator]();
+
+    expect(await iterator.next()).toEqual({ done: false, value: candidate });
+    await expect(iterator.next()).rejects.toBe(boom);
+  });
+
+  it("keeps every raw SSE network chunk unchanged when enabled but no XML is present", async () => {
+    const writes = [
+      sseEvent("message_start", {
+        type: "message_start",
+        message: { id: "m", stop_reason: null, usage: { input_tokens: 1, output_tokens: 1 } },
+      }),
+      sseEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "ordinary text" },
+      }) +
+        sseEvent("message_delta", {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn", stop_sequence: null },
+          usage: { output_tokens: 2 },
+        }),
+      sseEvent("message_stop", { type: "message_stop" }),
+    ];
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: (async () => sseStreamResponse(writes)) as unknown as typeof fetch,
+    });
+
+    const chunks: string[] = [];
+    for await (const chunk of client.nativePassthroughStream?.(
+      {
+        ...nativeStreamBody(),
+        tools: [{ name: "Bash", input_schema: { type: "object" } }],
+      },
+      { toolCallXmlRecovery: true },
+    ) ?? []) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual(writes);
+  });
 
   it("forwards the native body VERBATIM and yields upstream SSE chunks unchanged", async () => {
     const body = nativeStreamBody();

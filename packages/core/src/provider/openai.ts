@@ -71,6 +71,11 @@ export type NativeProtocolProfile =
 export interface ProviderCallOptions {
   signal?: AbortSignal;
   captureUpstream?: (wireBody: string) => void;
+  /** Request-scoped Anthropic defensive recovery switch. The gateway owns the live
+   * runtime setting and passes its current value per attempt; provider clients keep
+   * the default OFF when the option is absent so unrelated callers never opt in by
+   * accident. */
+  toolCallXmlRecovery?: boolean;
   // Per-call response metadata channel. Codex Responses uses this for request-scoped
   // headers such as x-codex-turn-state and x-request-id; provider-level observers may
   // still subscribe separately. Hooks are fail-open and must not affect the response.

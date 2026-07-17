@@ -3481,6 +3481,7 @@ describe("createExecute — native protocol passthrough (#217)", () => {
       now: clock(),
       signal: new AbortController().signal,
       nativeProtocolPassthroughEnabled: () => true,
+      toolCallXmlRecoveryEnabled: () => false,
     });
 
     const out = await execute(plan(["a"]), anthropicReq());
@@ -3490,6 +3491,9 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     // The native body is forwarded with `model` patched to the RESOLVED upstream id
     // (the client's routing alias would 404 upstream); everything else is verbatim.
     expect(provider.nativePassthrough.mock.calls[0]?.[0]).toEqual({ ...NATIVE, model: "claude-x" });
+    expect(provider.nativePassthrough.mock.calls[0]?.[1]).toMatchObject({
+      toolCallXmlRecovery: false,
+    });
     expect(out.body).toBe(NATIVE_RESP);
     expect(out.nativePassthrough).toBe(true);
     const okRow = out.attempts[0];
@@ -5231,6 +5235,7 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
       now: clock(),
       signal: new AbortController().signal,
       nativeProtocolPassthroughEnabled: () => true,
+      toolCallXmlRecoveryEnabled: () => false,
     });
 
     const out = await execute(plan(["a"]), anthropicStreamReq());
@@ -5240,6 +5245,9 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
     expect(provider.nativePassthroughStream.mock.calls[0]?.[0]).toEqual({
       ...NATIVE_STREAM,
       model: "claude-x",
+    });
+    expect(provider.nativePassthroughStream.mock.calls[0]?.[1]).toMatchObject({
+      toolCallXmlRecovery: false,
     });
     expect(provider.chatCompletionStream).not.toHaveBeenCalled();
     // recordSuccess fired on the first peeked chunk (breaker contract unchanged).

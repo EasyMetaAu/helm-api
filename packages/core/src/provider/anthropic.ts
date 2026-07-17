@@ -27,6 +27,13 @@ import {
   createAnthropicToolNameMap,
 } from "../protocol/anthropic/response.js";
 import {
+  hasInvokeStart,
+  invokeStartIndex,
+  invokeStartPrefixSuffixLength,
+  type RecoverySegment,
+  recoverToolCallsFromText,
+} from "../protocol/anthropic/tool-xml-recovery.js";
+import {
   applyForcedAnthropicThinking,
   reasoningEffortToAnthropicThinking,
 } from "../protocol/reasoning-effort.js";
@@ -1742,6 +1749,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     // beta/user-agent/auth from the native body's own system[0]/context_management/speed,
     // so the same closure works unchanged on a native body.
     async nativePassthrough(body, opts) {
+      const declaredTools = declaredNativeToolNames(body);
       const { res } = await requestWithRetry(
         body,
         opts?.signal,
@@ -1751,7 +1759,10 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         false,
       );
       if (!res.ok) throw await errorFromResponse(res);
-      return (await res.json()) as Record<string, unknown>;
+      const nativeResponse = (await res.json()) as Record<string, unknown>;
+      return opts?.toolCallXmlRecovery === true
+        ? recoverNativeAnthropicJSON(nativeResponse, declaredTools)
+        : nativeResponse;
     },
 
     async countTokens(req, opts) {
@@ -1769,6 +1780,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     // chatCompletionStream), then the upstream SSE is BYTE-RELAYED unchanged via
     // readAnthropicSSERaw — no SSE re-mapping state machine to mis-translate (principle 8).
     async *nativePassthroughStream(body, opts) {
+      const declaredTools = declaredNativeToolNames(body);
       const { res } = await requestWithRetry(
         body,
         opts?.signal,
@@ -1778,7 +1790,12 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         false,
       );
       if (!res.ok) throw await errorFromResponse(res);
-      yield* readAnthropicSSERaw(res, timeoutMs);
+      const raw = readAnthropicSSERaw(res, timeoutMs);
+      if (opts?.toolCallXmlRecovery !== true || declaredTools.size === 0) {
+        yield* raw;
+        return;
+      }
+      yield* recoverNativeAnthropicSSE(raw, declaredTools);
     },
   };
 }
@@ -1818,6 +1835,541 @@ export async function* readAnthropicSSERaw(
   } finally {
     reader.releaseLock();
   }
+}
+
+function declaredNativeToolNames(input: NativePassthroughInput): ReadonlySet<string> {
+  const tools = nativePassthroughBody(input).tools;
+  if (!Array.isArray(tools)) return new Set();
+  return new Set(
+    tools.flatMap((tool) => {
+      if (tool === null || typeof tool !== "object" || Array.isArray(tool)) return [];
+      const name = (tool as { name?: unknown }).name;
+      return typeof name === "string" && name.length > 0 ? [name] : [];
+    }),
+  );
+}
+
+function recoveredToolUseBlock(
+  segment: Extract<RecoverySegment, { type: "tool_use" }>,
+  ordinal: number,
+) {
+  return {
+    type: "tool_use" as const,
+    // Stable under replay/cache hits and aligned with stream.ts's existing
+    // `toolu_synthetic_<blockIndex>` convention.
+    id: `toolu_synthetic_${ordinal}`,
+    name: segment.call.name,
+    input: segment.call.input,
+  };
+}
+
+/**
+ * Recover the non-streaming sibling of native passthrough without weakening the
+ * byte-faithful common path. The caller has already proved the request-scoped flag;
+ * this helper additionally requires Anthropic's own tool_use terminal signal and a
+ * declared request tool before replacing any text block.
+ */
+function recoverNativeAnthropicJSON(
+  response: Record<string, unknown>,
+  declaredTools: ReadonlySet<string>,
+): Record<string, unknown> {
+  if (response.stop_reason !== "tool_use" || declaredTools.size === 0) return response;
+  const content = response.content;
+  if (!Array.isArray(content)) return response;
+  // `stop_reason` is message-scoped. If Anthropic already emitted a real tool_use,
+  // that block may be the reason for the terminal signal; converting XML-looking
+  // prose as a second call would create duplicate execution.
+  if (
+    content.some(
+      (block) =>
+        block !== null &&
+        typeof block === "object" &&
+        !Array.isArray(block) &&
+        (block as { type?: unknown }).type === "tool_use",
+    )
+  ) {
+    return response;
+  }
+
+  let recovered = false;
+  const nextContent: unknown[] = [];
+  for (const rawBlock of content) {
+    if (rawBlock === null || typeof rawBlock !== "object" || Array.isArray(rawBlock)) {
+      nextContent.push(rawBlock);
+      continue;
+    }
+    const block = rawBlock as Record<string, unknown>;
+    if (block.type !== "text" || typeof block.text !== "string") {
+      nextContent.push(rawBlock);
+      continue;
+    }
+    const segments = recoverToolCallsFromText(block.text, declaredTools);
+    if (segments === null) {
+      nextContent.push(rawBlock);
+      continue;
+    }
+    recovered = true;
+    for (const segment of segments) {
+      if (segment.type === "text") nextContent.push({ ...block, text: segment.text });
+      else nextContent.push(recoveredToolUseBlock(segment, nextContent.length));
+    }
+  }
+  return recovered ? { ...response, content: nextContent } : response;
+}
+
+interface ParsedRawSSEFrame {
+  raw: string;
+  start: number;
+  end: number;
+  event: Record<string, unknown> | null;
+}
+
+function nextSSEFrameEnd(raw: string, from: number): number {
+  const lineEndingLength = (index: number): number => {
+    if (raw[index] === "\r") return raw[index + 1] === "\n" ? 2 : 1;
+    return raw[index] === "\n" ? 1 : 0;
+  };
+  for (let i = from; i < raw.length; i++) {
+    const first = lineEndingLength(i);
+    if (first === 0) continue;
+    const second = lineEndingLength(i + first);
+    if (second > 0) return i + first + second;
+    i += first - 1;
+  }
+  return -1;
+}
+
+function eventFromRawSSEFrame(raw: string): Record<string, unknown> | null {
+  const dataLines: string[] = [];
+  for (const line of raw.replace(/(?:\r\n|\r|\n){2}$/, "").split(/\r\n|\r|\n/)) {
+    if (!line.startsWith("data:")) continue;
+    dataLines.push(line.slice(5).replace(/^ /, ""));
+  }
+  if (dataLines.length === 0) return null;
+  for (const candidate of [dataLines.join("\n"), dataLines.join("")]) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Try the legal compatibility concatenation before treating this as opaque SSE.
+    }
+  }
+  return null;
+}
+
+function completeRawSSEFrames(raw: string): { frames: ParsedRawSSEFrame[]; end: number } {
+  const frames: ParsedRawSSEFrame[] = [];
+  let start = 0;
+  while (start < raw.length) {
+    const end = nextSSEFrameEnd(raw, start);
+    if (end === -1) break;
+    const frameRaw = raw.slice(start, end);
+    frames.push({ raw: frameRaw, start, end, event: eventFromRawSSEFrame(frameRaw) });
+    start = end;
+  }
+  return { frames, end: start };
+}
+
+function textDeltaOf(event: Record<string, unknown> | null): string | null {
+  if (event?.type !== "content_block_delta") return null;
+  const delta = event.delta;
+  if (delta === null || typeof delta !== "object" || Array.isArray(delta)) return null;
+  const typed = delta as { type?: unknown; text?: unknown };
+  return typed.type === "text_delta" && typeof typed.text === "string" ? typed.text : null;
+}
+
+function containsStructuredToolUse(event: Record<string, unknown> | null): boolean {
+  if (event?.type === "content_block_start") {
+    const block = event.content_block;
+    return (
+      block !== null &&
+      typeof block === "object" &&
+      !Array.isArray(block) &&
+      (block as { type?: unknown }).type === "tool_use"
+    );
+  }
+  if (event?.type !== "message_start") return false;
+  const message = event.message;
+  if (message === null || typeof message !== "object" || Array.isArray(message)) return false;
+  const content = (message as { content?: unknown }).content;
+  return (
+    Array.isArray(content) &&
+    content.some(
+      (block) =>
+        block !== null &&
+        typeof block === "object" &&
+        !Array.isArray(block) &&
+        (block as { type?: unknown }).type === "tool_use",
+    )
+  );
+}
+
+type InvokeSignal =
+  | { kind: "none" }
+  | { kind: "probe"; start: number }
+  | { kind: "candidate"; start: number };
+
+// Scan complete text-delta frames for either a full invoke opener or only the
+// shortest trailing prefix that can still become one in the next delta. Ordinary
+// `<` text is not a signal and therefore remains on the immediate raw-chunk path.
+function invokeSignal(frames: readonly ParsedRawSSEFrame[]): InvokeSignal {
+  let suffix = "";
+  let probeStart = -1;
+  for (const frame of frames) {
+    const text = textDeltaOf(frame.event);
+    if (text === null) continue;
+    const combined = suffix + text;
+    const startIndex = invokeStartIndex(combined);
+    if (startIndex >= 0) {
+      return {
+        kind: "candidate",
+        start: probeStart >= 0 && startIndex < suffix.length ? probeStart : frame.start,
+      };
+    }
+    const suffixLength = invokeStartPrefixSuffixLength(combined);
+    if (suffixLength === 0) {
+      suffix = "";
+      probeStart = -1;
+      continue;
+    }
+    if (probeStart < 0 || suffixLength <= text.length) probeStart = frame.start;
+    suffix = combined.slice(-suffixLength);
+  }
+  return probeStart >= 0 ? { kind: "probe", start: probeStart } : { kind: "none" };
+}
+
+function flushableChunkCount(chunks: readonly string[], safeEnd: number): number {
+  let total = 0;
+  let count = 0;
+  for (const chunk of chunks) {
+    if (total + chunk.length > safeEnd) break;
+    total += chunk.length;
+    count += 1;
+  }
+  return count;
+}
+
+function chunkPrefixLength(chunks: readonly string[], count: number): number {
+  let total = 0;
+  for (let i = 0; i < count; i++) total += chunks[i]?.length ?? 0;
+  return total;
+}
+
+const BYPASS_TERMINAL_PROBE_MAX_CHARS = 64 * 1024;
+
+function boundedIncompleteSSETail(raw: string): string {
+  const parsed = completeRawSSEFrames(raw);
+  const incomplete = raw.slice(parsed.end);
+  // Recovery has already been disabled, so this buffer exists only to recognize a
+  // later protocol terminal frame. Keep enough trailing source for a split frame,
+  // but never let a malformed frame recreate the unbounded-buffer problem.
+  return incomplete.length > BYPASS_TERMINAL_PROBE_MAX_CHARS
+    ? incomplete.slice(-BYPASS_TERMINAL_PROBE_MAX_CHARS)
+    : incomplete;
+}
+
+function advanceBypassTerminalProbe(
+  incompleteTail: string,
+  chunk: string,
+): { incompleteTail: string; messageStopSeen: boolean } {
+  const raw = incompleteTail + chunk;
+  const parsed = completeRawSSEFrames(raw);
+  return {
+    incompleteTail: boundedIncompleteSSETail(raw),
+    messageStopSeen: parsed.frames.some((frame) => frame.event?.type === "message_stop"),
+  };
+}
+
+function numericEventIndex(event: Record<string, unknown>): number | null {
+  return typeof event.index === "number" && Number.isInteger(event.index) && event.index >= 0
+    ? event.index
+    : null;
+}
+
+function withEventIndex(event: Record<string, unknown>, index: number): Record<string, unknown> {
+  return { ...event, index };
+}
+
+function encodedSSEEvent(event: Record<string, unknown>): string {
+  const type = typeof event.type === "string" ? event.type : "message";
+  return `event: ${type}\ndata: ${JSON.stringify(event)}\n\n`;
+}
+
+function generatedTextDelta(index: number, text: string): string {
+  return encodedSSEEvent({
+    type: "content_block_delta",
+    index,
+    delta: { type: "text_delta", text },
+  });
+}
+
+function generatedBlockStop(index: number): string {
+  return encodedSSEEvent({ type: "content_block_stop", index });
+}
+
+function emitRecoveredSegments(
+  originalIndex: number,
+  segments: readonly RecoverySegment[],
+): { raw: string; extraBlocks: number } {
+  let raw = "";
+  let afterFirstTool = false;
+  let nextIndex = originalIndex + 1;
+
+  for (const segment of segments) {
+    if (segment.type === "text") {
+      if (!afterFirstTool) {
+        raw += generatedTextDelta(originalIndex, segment.text);
+      } else {
+        const index = nextIndex++;
+        raw += encodedSSEEvent({
+          type: "content_block_start",
+          index,
+          content_block: { type: "text", text: "" },
+        });
+        raw += generatedTextDelta(index, segment.text);
+        raw += generatedBlockStop(index);
+      }
+      continue;
+    }
+
+    if (!afterFirstTool) {
+      raw += generatedBlockStop(originalIndex);
+      afterFirstTool = true;
+    }
+    const index = nextIndex++;
+    const block = recoveredToolUseBlock(segment, index);
+    raw += encodedSSEEvent({
+      type: "content_block_start",
+      index,
+      content_block: { ...block, input: {} },
+    });
+    raw += encodedSSEEvent({
+      type: "content_block_delta",
+      index,
+      delta: { type: "input_json_delta", partial_json: JSON.stringify(block.input) },
+    });
+    raw += generatedBlockStop(index);
+  }
+
+  return { raw, extraBlocks: nextIndex - (originalIndex + 1) };
+}
+
+/** Return null unless the buffered tail proves every hard recovery signal. */
+function rewriteNativeAnthropicSSETail(
+  raw: string,
+  declaredTools: ReadonlySet<string>,
+  structuredToolUseAlreadySeen: boolean,
+): string | null {
+  const parsed = completeRawSSEFrames(raw);
+  // A partial/malformed transport tail is never a reason to alter bytes.
+  if (parsed.end !== raw.length) return null;
+  if (
+    structuredToolUseAlreadySeen ||
+    parsed.frames.some((frame) => containsStructuredToolUse(frame.event))
+  ) {
+    return null;
+  }
+
+  const messageStopIndex = parsed.frames.findIndex((frame) => frame.event?.type === "message_stop");
+  if (messageStopIndex < 0) return null;
+  // The first message_stop terminates this response. A later semantic frame must
+  // never authorize or be index-shifted as part of the earlier message.
+  if (
+    parsed.frames
+      .slice(messageStopIndex + 1)
+      .some((frame) => frame.event !== null && frame.event.type !== "ping")
+  ) {
+    return null;
+  }
+
+  let terminalToolUseDeltaIndex = -1;
+  for (let index = 0; index < messageStopIndex; index += 1) {
+    const event = parsed.frames[index]?.event;
+    if (event?.type !== "message_delta") continue;
+    const delta = event.delta;
+    if (
+      delta !== null &&
+      typeof delta === "object" &&
+      !Array.isArray(delta) &&
+      (delta as { stop_reason?: unknown }).stop_reason === "tool_use"
+    ) {
+      terminalToolUseDeltaIndex = index;
+    }
+  }
+  if (terminalToolUseDeltaIndex < 0) return null;
+  // Only ping/comment/opaque frames may sit between the terminal delta and stop.
+  if (
+    parsed.frames
+      .slice(terminalToolUseDeltaIndex + 1, messageStopIndex)
+      .some((frame) => frame.event !== null && frame.event.type !== "ping")
+  ) {
+    return null;
+  }
+  const lastBlockStopIndex = parsed.frames.findLastIndex(
+    (frame, index) =>
+      index < terminalToolUseDeltaIndex && frame.event?.type === "content_block_stop",
+  );
+  if (lastBlockStopIndex < 0) return null;
+
+  const textByIndex = new Map<number, string>();
+  const stoppedIndexes = new Set<number>();
+  for (const frame of parsed.frames) {
+    if (frame.event === null) continue;
+    const index = numericEventIndex(frame.event);
+    if (index === null) continue;
+    const text = textDeltaOf(frame.event);
+    if (text !== null) textByIndex.set(index, (textByIndex.get(index) ?? "") + text);
+    if (frame.event.type === "content_block_stop") stoppedIndexes.add(index);
+  }
+
+  const recoveredByIndex = new Map<number, RecoverySegment[]>();
+  for (const [index, text] of textByIndex) {
+    if (!stoppedIndexes.has(index) || (!hasInvokeStart(text) && !text.includes("<"))) continue;
+    const segments = recoverToolCallsFromText(text, declaredTools);
+    if (segments !== null) recoveredByIndex.set(index, segments);
+  }
+  if (recoveredByIndex.size === 0) return null;
+
+  let out = "";
+  let indexOffset = 0;
+  for (const frame of parsed.frames) {
+    const event = frame.event;
+    if (event === null) {
+      out += frame.raw;
+      continue;
+    }
+    const sourceIndex = numericEventIndex(event);
+    const recovered = sourceIndex === null ? undefined : recoveredByIndex.get(sourceIndex);
+    if (
+      recovered !== undefined &&
+      event.type === "content_block_delta" &&
+      textDeltaOf(event) !== null
+    ) {
+      continue;
+    }
+    if (sourceIndex !== null && recovered !== undefined && event.type === "content_block_stop") {
+      const emitted = emitRecoveredSegments(sourceIndex + indexOffset, recovered);
+      out += emitted.raw;
+      indexOffset += emitted.extraBlocks;
+      continue;
+    }
+    if (sourceIndex !== null && indexOffset > 0) {
+      out += encodedSSEEvent(withEventIndex(event, sourceIndex + indexOffset));
+    } else {
+      out += frame.raw;
+    }
+  }
+  return out;
+}
+
+/**
+ * Candidate-gated Anthropic SSE recovery. Complete safe frames are released in the
+ * exact original network chunks. Once a possible XML start appears, only that tail
+ * is held until Anthropic's later message_delta proves `stop_reason:tool_use`; a miss
+ * flushes the original chunks unchanged. The source remains readAnthropicSSERaw, so
+ * its upstream idle/stall deadline continues to guard every network read.
+ */
+async function* recoverNativeAnthropicSSE(
+  source: AsyncIterable<string>,
+  declaredTools: ReadonlySet<string>,
+): AsyncGenerator<string> {
+  const candidateBufferLimitBytes = 1024 * 1024;
+  let pendingChunks: string[] = [];
+  let pendingRaw = "";
+  let candidate = false;
+  let permanentlyBypassed = false;
+  let bypassTerminalProbe = "";
+  let structuredToolUseSeen = false;
+
+  try {
+    for await (const chunk of source) {
+      if (permanentlyBypassed) {
+        yield chunk;
+        const terminal = advanceBypassTerminalProbe(bypassTerminalProbe, chunk);
+        bypassTerminalProbe = terminal.incompleteTail;
+        if (terminal.messageStopSeen) return;
+        continue;
+      }
+
+      pendingChunks.push(chunk);
+      pendingRaw += chunk;
+      let messageStopSeen = false;
+      if (!candidate) {
+        const parsed = completeRawSSEFrames(pendingRaw);
+        if (parsed.frames.some((frame) => containsStructuredToolUse(frame.event))) {
+          structuredToolUseSeen = true;
+        }
+        messageStopSeen = parsed.frames.some((frame) => frame.event?.type === "message_stop");
+        const signal = invokeSignal(parsed.frames);
+        const safeEnd = signal.kind === "none" ? parsed.end : signal.start;
+        const flushCount = flushableChunkCount(pendingChunks, safeEnd);
+        if (flushCount > 0) {
+          const flushed = pendingChunks.slice(0, flushCount);
+          const consumed = chunkPrefixLength(pendingChunks, flushCount);
+          pendingChunks = pendingChunks.slice(flushCount);
+          pendingRaw = pendingRaw.slice(consumed);
+          for (const original of flushed) yield original;
+        }
+        if (signal.kind === "candidate") candidate = true;
+      } else {
+        messageStopSeen = completeRawSSEFrames(pendingRaw).frames.some(
+          (frame) => frame.event?.type === "message_stop",
+        );
+      }
+
+      if (Buffer.byteLength(pendingRaw, "utf8") > candidateBufferLimitBytes) {
+        // The response is provider-controlled but may still be adversarially induced.
+        // Bound both the partial-frame probe and a confirmed candidate; once exceeded,
+        // never attempt recovery again because retained bytes are forwarded verbatim.
+        bypassTerminalProbe = boundedIncompleteSSETail(pendingRaw);
+        for (const original of pendingChunks) yield original;
+        pendingChunks = [];
+        pendingRaw = "";
+        candidate = false;
+        permanentlyBypassed = true;
+        if (messageStopSeen) return;
+        continue;
+      }
+
+      // message_stop, not transport EOF, is Anthropic's terminal boundary. Finalize
+      // immediately so a provider that delays closing the HTTP body cannot turn a
+      // completed response into an idle timeout (same invariant as translateAnthropicSSE).
+      if (messageStopSeen) {
+        const rewritten = candidate
+          ? rewriteNativeAnthropicSSETail(pendingRaw, declaredTools, structuredToolUseSeen)
+          : null;
+        if (rewritten !== null) {
+          yield rewritten;
+        } else {
+          for (const original of pendingChunks) yield original;
+        }
+        return;
+      }
+    }
+  } catch (error) {
+    // The filter may have delayed complete network chunks while waiting for the
+    // terminal signal. Preserve byte delivery order before surfacing the same source
+    // failure; otherwise enabling recovery would silently eat already-received bytes.
+    for (const original of pendingChunks) yield original;
+    pendingChunks = [];
+    pendingRaw = "";
+    throw error;
+  }
+
+  if (candidate) {
+    const rewritten = rewriteNativeAnthropicSSETail(
+      pendingRaw,
+      declaredTools,
+      structuredToolUseSeen,
+    );
+    if (rewritten !== null) {
+      yield rewritten;
+      return;
+    }
+  }
+  for (const original of pendingChunks) yield original;
 }
 
 // ── streaming translation: Anthropic SSE -> OpenAI-Chat SSE strings ──────────

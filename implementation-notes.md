@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-17 · Anthropic XML 工具调用恢复边界（Protocol streaming / provider execution，docs/05/07，原则 3/5/8）
+
+- **恢复信号与实际出口**：只在上游终止原因已经明确为 `tool_use`、XML `<invoke>` 完整闭合、工具名精确命中本次请求声明的 function tools，且响应中不存在既有 structured `tool_use/tool_calls` 时恢复，避免把示例文本或真实结构化调用旁边的 XML 再执行一次。规格所称“三条路径”漏掉了默认 native passthrough 的非流式直返；实现因此覆盖四个实际出口：Anthropic native stream、native JSON、OpenAI→Anthropic translation stream、translation JSON。共享 parser 保持大小写精确、非白名单/未闭合内容逐字保留、JSON-looking 参数按规格转换，并用 null-prototype 字典隔离 `__proto__`。
+- **流式时序与资源边界**：Anthropic 的 message-level `stop_reason` 位于 `content_block_stop` 之后的 `message_delta`，无法按规格字面在 block stop 当场决策。实现只在发现候选起始标记后暂存尾部，等晚到终态再改写；任何非 `tool_use`、解析拒绝、已有 structured call、异常或超限都先按原顺序冲刷文本/原始 SSE。translation 与 native candidate 均设 1 MiB UTF-8 上限，超限后本流永久旁路恢复，防止未闭合 XML 造成无界内存；native 旁路仍以最多 64K 字符的未完成 SSE 尾部有界探测 `message_stop`，避免完整终态因 HTTP body 延迟关闭而误触 idle timeout。实际网络读取继续由 `readAnthropicSSERaw` 负责，其他 idle/stall timeout 语义不变。改写时使用确定性 `toolu_synthetic_*` id，并单调重映射后续 block index。
+- **运行时回滚与保真**：新增 `tool_call_xml_recovery` runtime setting，默认 `true`；Gateway route、pipeline、executor 与 provider 都按请求读取 live 值，Admin 保存模型显式 round-trip 该字段，运维可通过现有 settings API 立即关闭。无工具、无候选或 flag off 的普通路径不解析正文；native 无候选流继续逐 network chunk 原样转发，translated 无候选流保持既有事件机。TDD 覆盖 parser、四个出口、跨 network/delta 分片、晚到 stop reason、周边文本、多 invoke、白名单、structured-call 去重、flag off、缓冲上限、异常冲刷与 index/id 顺序；最终定向结果以本次交付报告为准。
+
 ## 2026-07-16 · 历史费用回填放宽 WAL 与磁盘恢复门槛（Catalog / telemetry repair operations，docs/07/08，原则 2/3/7）
 
 - **生产事实与新门槛**：常驻 supervisor 已在 `2026-07-08` UTC 窗口的 `22,100 / 31,400` 连续等待约 7 小时；CPU、内存、health、restart/OOM、Gateway/SQLite 信号均健康，唯一持续原因是磁盘低于 14 GiB，随后 WAL 增至约 583 MiB。主机当时仍有约 13.9 GiB 可用空间，全部历史回填目录约 1.55 GiB，当前窗口 221 个微型备份约 106 MiB，且 Docker 已无可回收镜像。为避免恢复门槛永久饿死任务，preflight 改为 WAL `<640 MiB`、磁盘 `>13 GiB`；runtime hard stop 改为 WAL `<768 MiB`，磁盘硬底线继续保持 `12 GiB`。这样当前状态可恢复，同时仍保留约 0.9 GiB 磁盘余量、约 185 MiB WAL 运行余量和独立硬上限。
@@ -62,14 +68,9 @@
 - **兼容边界**：计费边界只把空字符串和已确认的 `not_available` 规范化为“地域缺失”，使用既有全球基础卡；仍将真实但未配置的地域（如 `moon`）保持 unknown，避免猜价。原始哨兵继续保存在 telemetry 作为 provenance，不改写 provider 事实；实时响应与历史重算共用同一规范化函数，防止两套语义漂移。
 - **验证与修复边界**：TDD 以生产请求的 Opus 4.8 token/cache 数复现 `$0.24682125`，覆盖未知地域严格拒绝、Anthropic SSE 哨兵保真，以及历史重算仅在 `best-evidence` 下把该哨兵作为全球假设。生产历史数据修复仍须使用既有 manifest、逐批微型恢复库、health/WAL/disk 门禁和 OAuth delta 一致性保护。
 
-## 2026-07-15 · 终端事件缺失的 Responses 流使用部分估算计费（Protocol streaming / telemetry accounting，docs/05/07，原则 3/5/7/8）
-
-- **终态语义**：provider 已产出首包仍保留成功 attempt，但 Responses 流只有收到 `response.completed` / `response.incomplete` / `response.failed` 才算有上游终态；无终态的自然 EOF 记为 `stream_outcome=truncated`、下游 abort 记为 `client_aborted`，request `final.status` 改为 error，分别使用 `upstream_error` / `client_abort`，不再把部分消费伪装成完整成功。`response.incomplete` 保留其独立终态；provider 明确报告的 usage（包括全 0）永远优先。
-- **估算边界**：只在原生 Responses 流缺少 usage 时，对去除 transport 字段与内嵌 binary/base64 的语义 upstream request，以及实际收到的 output/reasoning/tool-call semantic delta 做 `estimated_partial` 估算。16 KiB 内使用 o200k-harmony，超过后改用既有 UTF-8 bytes/4 确定性估算，避免大上下文在 stream finally 阻塞事件循环；sequence number 去重，同一 semantic channel 的碎片先拼接，done snapshot 与 encrypted/base64 数据不参与。cache、cache creation 与隐藏 reasoning 不猜测，保持 null。估算费用沿现有 catalog `costOf` 计算，并以 `cost_basis=catalog_api_equivalent_estimate` 标记，不能解释为 provider 实际账单。
-- **一致性边界**：同一份部分 usage/cost 同时写入 telemetry usage、成功 provider attempt、key budget 与实际 serving account 的 OAuth usage；每项只结算一次。stream generation window 与 usage 解耦，即使 usage 解析失败也保留 `generation_ms`。registry 使用同一 `stream_outcome`，不再把缺失终态默认成 completed。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-15 · 终端事件缺失的 Responses 流使用部分估算计费（Protocol streaming / telemetry accounting，docs/05/07，原则 3/5/7/8）**：原生 Responses 流缺终态时按 truncated/client_aborted 记失败，仅对已收 semantic delta 做有界 partial usage/cost 估算，并让 telemetry、attempt、budget 与 OAuth 账号结算一致；完整原文通过 git history 回溯。
 - **2026-07-15 · 历史费用回填改由常驻 supervisor 持续推进（Catalog / telemetry repair operations，docs/07/08，原则 2/3/5/7）**：systemd 常驻 supervisor 以单实例、100 行原子批次、checkpoint、slice verification、微型恢复库、资源门禁和 5,000 行冷却推进固定截止点前的历史修复；完整原文通过 git history 回溯。
 - **2026-07-15 · 历史重算兼容旧版 completion-only 顶层费用（Catalog / telemetry repair，docs/07/08，原则 2/5/7）**：仅在顶层、attempt 与 breakdown 同时精确证明旧版只保存 completion cost 时接受回填，任何其他漂移仍 fail-closed；完整原文通过 git history 回溯。
 - **2026-07-14 · 官方模型费率与多模态计费校准（Catalog / telemetry / protocol usage，docs/04/05/07/08，原则 1/2/3/5/7/8）**：以官方价格和响应中可证明的 tier、地域、缓存与 modality 证据计费；未知分价、动态 alias 与已丢失的历史证据保持 unknown，历史修复只经 manifest、微型恢复库和资源门禁渐进执行。

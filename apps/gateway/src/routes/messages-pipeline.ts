@@ -88,6 +88,28 @@ interface PipelineIR {
   [k: string]: unknown;
 }
 
+// Tool XML recovery is request-path behavior, but its operator kill switch is
+// runtime mutable. Keep the getter live so an admin change applies to the next
+// translated Anthropic stream without rebuilding the shared pipeline closure.
+export interface PipelineRuntimeOptions {
+  toolCallXmlRecoveryEnabled?: () => boolean;
+}
+
+function irFunctionToolNames(tools: unknown): readonly string[] {
+  if (!Array.isArray(tools)) return [];
+  const names = new Set<string>();
+  for (const tool of tools) {
+    if (tool === null || typeof tool !== "object" || Array.isArray(tool)) continue;
+    const record = tool as Record<string, unknown>;
+    if (record.type !== "function") continue;
+    const fn = record.function;
+    if (fn === null || typeof fn !== "object" || Array.isArray(fn)) continue;
+    const name = (fn as Record<string, unknown>).name;
+    if (typeof name === "string" && name.length > 0) names.add(name);
+  }
+  return [...names];
+}
+
 // Gateway-side inject wiring (docs/08 Phase 2). Bundles the core InjectDeps with
 // the per-deployment token budget (D9). Optional so existing pipeline tests that
 // pass only `{ observe }` are unaffected (inject absent → inject is a no-op).
@@ -626,6 +648,9 @@ export function createMessagesPipeline(
   // observe writes are enqueued (FIFO, so inbound still settles before outbound) to
   // run AFTER the response. The budget settle is NEVER deferred (quota correctness).
   writes?: WriteQueue,
+  // Live runtime behavior switches. Optional for compatibility with existing callers;
+  // XML recovery defaults ON when the getter is absent, matching the settings schema.
+  runtime?: PipelineRuntimeOptions,
 ): {
   run(ir: PipelineIR, identity: MessagesIdentity, signal: AbortSignal): Promise<PipelineRunResult>;
 } {
@@ -1219,6 +1244,8 @@ export function createMessagesPipeline(
                           : typeof ir.model === "string"
                             ? ir.model
                             : undefined,
+                      toolNames: irFunctionToolNames(ir.tools),
+                      toolCallXmlRecoveryEnabled: runtime?.toolCallXmlRecoveryEnabled?.() ?? true,
                     });
               for await (const ev of events) {
                 genTimer.mark();
