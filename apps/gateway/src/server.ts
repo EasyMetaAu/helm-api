@@ -3054,6 +3054,7 @@ export async function buildServer(
             // route is the SAME `route` closure as chat.ts, so this one wiring edit
             // covers BOTH the OpenAI chat and Anthropic /v1/messages surfaces.
             nativeProtocolPassthroughEnabled: () => settings.native_protocol_passthrough,
+            toolCallXmlRecoveryEnabled: () => settings.tool_call_xml_recovery,
             visualContextCompressionMode: () => settings.visual_context_compression,
             // Auto-park: a genuine 429 on a subscription alias parks the served account
             // so the pool routes around it (account read from the serving-account ALS).
@@ -3373,6 +3374,7 @@ export async function buildServer(
     pipelineBudget,
     recordOAuthUsage,
     writeQueue,
+    { toolCallXmlRecoveryEnabled: () => settings.tool_call_xml_recovery },
   );
   const anthropicCountClient = (): ProviderClient | null => {
     for (const client of providerClients.values()) {
@@ -3461,7 +3463,8 @@ export async function buildServer(
         transformRequestOut: (native) => anthropicTransformer.transformRequestOut(native),
         // `collect()` contractually returns an IRResponse; the route hands it back
         // as `unknown`, so narrow at this single boundary.
-        transformResponseOut: (ir) => anthropicTransformer.transformResponseOut(ir as IRResponse),
+        transformResponseOut: (ir, options) =>
+          anthropicTransformer.transformResponseOut(ir as IRResponse, options),
         // The pipeline already produced Anthropic SSE events; here we only
         // serialize ONE event into its wire event/data pair.
         transformStreamOut: (event) => {
@@ -3487,6 +3490,7 @@ export async function buildServer(
     },
     pipeline: messagesPipeline,
     sseHeartbeatMs: () => config.runtime.sse_heartbeat_ms,
+    toolCallXmlRecoveryEnabled: () => settings.tool_call_xml_recovery,
     // Telemetry + payload recorder (the /admin/requests fix): the SAME values the
     // chat route uses, so /v1/messages records served requests like /v1/chat does.
     record: {

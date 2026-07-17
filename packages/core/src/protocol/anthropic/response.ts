@@ -8,6 +8,7 @@ import {
   type IRUsage,
 } from "../ir.js";
 import { liftReasoningToFlat, resolveReasoning } from "../reasoning.js";
+import { recoverToolCallsFromText } from "./tool-xml-recovery.js";
 
 // IR -> Anthropic Messages native response (docs/05, task protocol.anthropic-resp).
 // The outbound half of "nativeIn -> IR -> nativeOut, never N×N direct". Two
@@ -105,6 +106,13 @@ const AnthropicContentBlockSchema = z.discriminatedUnion("type", [
   AnthropicImageBlockSchema,
 ]);
 type AnthropicContentBlock = z.infer<typeof AnthropicContentBlockSchema>;
+
+export interface AnthropicResponseRenderOptions {
+  /** Request-scoped whitelist. Recovery is impossible without declared tool names. */
+  toolNames?: readonly string[];
+  /** Runtime rollback flag; true by default at the schema and direct-call boundaries. */
+  toolCallXmlRecoveryEnabled?: boolean;
+}
 
 export interface AnthropicToolNameMap {
   toAnthropic(name: string): string;
@@ -318,6 +326,7 @@ function repairJson(s: string): string | undefined {
 function toContentBlocks(
   message: IRResponse["choices"][number]["message"],
   toolNameMap: AnthropicToolNameMap,
+  recovery: { enabled: boolean; declaredTools: ReadonlySet<string> },
 ): AnthropicContentBlock[] {
   const blocks: AnthropicContentBlock[] = [];
   const { content } = message;
@@ -361,12 +370,35 @@ function toContentBlocks(
     }
   }
 
+  const pushText = (text: string): void => {
+    if (text === "") return;
+    const segments = recovery.enabled
+      ? recoverToolCallsFromText(text, recovery.declaredTools)
+      : null;
+    if (segments === null) {
+      blocks.push({ type: "text", text });
+      return;
+    }
+    for (const segment of segments) {
+      if (segment.type === "text") {
+        blocks.push(segment);
+      } else {
+        blocks.push({
+          type: "tool_use",
+          id: `toolu_synthetic_${blocks.length}`,
+          name: toolNameMap.toAnthropic(segment.call.name),
+          input: segment.call.input,
+        });
+      }
+    }
+  };
+
   if (typeof content === "string") {
-    if (content !== "") blocks.push({ type: "text", text: content });
+    pushText(content);
   } else if (Array.isArray(content)) {
     for (const part of content) {
       if (part.type === "text") {
-        blocks.push({ type: "text", text: part.text });
+        pushText(part.text);
       }
       // thinking parts were already emitted via resolveReasoning above.
     }
@@ -412,7 +444,10 @@ function toToolUseBlock(
  * stop_reason and a well-formed usage. Internal raw values remain available on the
  * IR/telemetry path; the public Anthropic response body never exposes provider_raw.
  */
-export function transformResponseIn(ir: IRResponse): AnthropicMessagesResponse {
+export function transformResponseIn(
+  ir: IRResponse,
+  options: AnthropicResponseRenderOptions = {},
+): AnthropicMessagesResponse {
   const choice = ir.choices[0];
   const message = choice?.message ?? { role: "assistant" as const, content: null };
   const { stop_reason } = mapStopReason(choice?.finish_reason ?? "");
@@ -422,16 +457,26 @@ export function transformResponseIn(ir: IRResponse): AnthropicMessagesResponse {
     ...mapUsage(ir.usage ?? {}),
     ...(anthropicSpeed !== undefined ? { speed: anthropicSpeed } : {}),
   };
-  const toolNameMap = createAnthropicToolNameMap(
-    (message.tool_calls ?? []).map((call) => call.function.name),
-  );
+  const toolNameMap = createAnthropicToolNameMap([
+    ...(message.tool_calls ?? []).map((call) => call.function.name),
+    ...(options.toolNames ?? []),
+  ]);
+  // A real structured call already explains stop_reason=tool_use. Recovering XML in
+  // that mixed response would create a second executable call from what may be prose.
+  const xmlRecoveryEnabled =
+    options.toolCallXmlRecoveryEnabled !== false &&
+    stop_reason === "tool_use" &&
+    (message.tool_calls?.length ?? 0) === 0;
 
   const out: AnthropicMessagesResponse = {
     id: ir.id,
     type: "message",
     role: "assistant",
     model: ir.model,
-    content: toContentBlocks(message, toolNameMap),
+    content: toContentBlocks(message, toolNameMap, {
+      enabled: xmlRecoveryEnabled,
+      declaredTools: new Set(options.toolNames ?? []),
+    }),
     stop_reason,
     stop_sequence: null,
     usage,

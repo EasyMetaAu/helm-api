@@ -154,6 +154,10 @@ export interface ExecuteAdapterDeps {
    *  This dep is OPTIONAL: when absent (a caller that never wires it) the executor treats
    *  passthrough as OFF — a defensive fallback, independent of the setting's own default. */
   nativeProtocolPassthroughEnabled?: () => boolean;
+  /** Runtime feature flag `tool_call_xml_recovery` (default ON). Read per native
+   * Anthropic attempt and forwarded request-scoped to the provider so operators can
+   * disable recovery live without rebuilding clients or restarting the gateway. */
+  toolCallXmlRecoveryEnabled?: () => boolean;
   /** Runtime feature flag for lossy visual context compression. Default OFF. */
   visualContextCompressionMode?: () => VisualContextCompressionMode;
   /** Test seam / alternate implementation for visual context compression. */
@@ -1273,6 +1277,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     signal,
     log,
     nativeProtocolPassthroughEnabled,
+    toolCallXmlRecoveryEnabled,
     visualContextCompressionMode,
     visualContextCompressor = optimizeVisualContext,
   } = deps;
@@ -1734,6 +1739,9 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                     signal: attemptSignal,
                     captureUpstream,
                     onResponseMeta,
+                    toolCallXmlRecovery:
+                      target.targetProviderProtocol === "anthropic_messages" &&
+                      (toolCallXmlRecoveryEnabled?.() ?? true),
                   });
                   return passthroughClassifier
                     ? guardPreOutputFailure(raw, passthroughClassifier)
@@ -1855,6 +1863,9 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               signal: attemptSignal,
               captureUpstream,
               onResponseMeta,
+              toolCallXmlRecovery:
+                target.targetProviderProtocol === "anthropic_messages" &&
+                (toolCallXmlRecoveryEnabled?.() ?? true),
             }),
           );
           breaker.recordSuccess(alias);

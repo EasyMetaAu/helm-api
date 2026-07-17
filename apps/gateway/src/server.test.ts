@@ -69,6 +69,13 @@ describe("native_protocol_passthrough runtime flag", () => {
   });
 });
 
+describe("tool_call_xml_recovery runtime flag", () => {
+  it("defaults ON so malformed upstream tool XML is recovered defensively", () => {
+    const parsed = RuntimeSettingsSchema.parse({});
+    expect(parsed.tool_call_xml_recovery).toBe(true);
+  });
+});
+
 describe("buildInternalLlmKeyInput", () => {
   it("mints an internal key that cannot self-observe or inherit user rate limits", () => {
     const input = buildInternalLlmKeyInput({

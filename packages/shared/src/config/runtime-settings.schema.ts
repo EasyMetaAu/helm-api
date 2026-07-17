@@ -34,6 +34,10 @@ export const RuntimeSettingsSchema = z.object({
   // back to translation for openai_chat (lingua franca) and cross-protocol attempts,
   // so a later heterogeneous fallback can translate if reached.
   native_protocol_passthrough: z.boolean().default(true),
+  // Recover malformed upstream tool calls leaked as literal Anthropic <invoke>
+  // XML. Default ON because the recovery is guarded by the upstream tool-use stop
+  // signal, a closed block, and the request's declared-tool whitelist.
+  tool_call_xml_recovery: z.boolean().default(true),
   // Visual context compression renders bulky Anthropic-native context into image
   // blocks before an upstream call. Default OFF because the technique is lossy:
   // dense images are useful for gist/context, not exact byte recall. `observe`

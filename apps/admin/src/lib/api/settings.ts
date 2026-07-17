@@ -19,6 +19,9 @@ export interface RuntimeSettings {
   // The admin toggle was removed in #236, but the field stays in the model so it
   // round-trips through Save unchanged (never reset to false — the #225 lesson).
   native_protocol_passthrough: boolean;
+  // Defensive recovery for upstream models that leak tool calls as literal
+  // Anthropic <invoke> XML. Kept in every save even if the UI surface changes.
+  tool_call_xml_recovery: boolean;
   // Lossy visual context compression for bulky Anthropic-native requests. Default
   // OFF; observe records would-apply telemetry while sending original text.
   visual_context_compression: VisualContextCompressionMode;
@@ -99,6 +102,7 @@ function normalize(raw: Record<string, unknown>): RuntimeSettings {
     // across an admin save. normalize() drops any key it doesn't name, so omitting
     // this would silently reset the flag on every save (the #225 lesson).
     native_protocol_passthrough: raw.native_protocol_passthrough !== false,
+    tool_call_xml_recovery: raw.tool_call_xml_recovery !== false,
     visual_context_compression: (
       VISUAL_CONTEXT_COMPRESSION_OPTIONS as readonly string[]
     ).includes(raw.visual_context_compression as string)

@@ -1,11 +1,17 @@
 import type { IRChunk } from "../gemini/gemini-types.js";
+import type { IRResponse } from "../ir.js";
 import type { Transformer } from "../transformer.js";
 import {
   type AnthropicOutboundRequest,
   transformRequestIn,
   transformRequestOut,
 } from "./request.js";
-import { transformNativeResponseToIR, transformResponseIn } from "./response.js";
+import {
+  type AnthropicMessagesResponse,
+  type AnthropicResponseRenderOptions,
+  transformNativeResponseToIR,
+  transformResponseIn,
+} from "./response.js";
 import { type AnthropicSSEEvent, convertAnthropicStreamToIR } from "./stream.js";
 
 // Anthropic Messages protocol barrel (docs/05). Re-exports the pure inbound/
@@ -39,6 +45,7 @@ export {
 export {
   type AnthropicMessagesResponse,
   AnthropicMessagesResponseSchema,
+  type AnthropicResponseRenderOptions,
   type AnthropicStopReason,
   AnthropicStopReasonSchema,
   type AnthropicToolNameMap,
@@ -69,16 +76,22 @@ export {
 //   • transformStreamIn:   native Anthropic SSE events -> IR chunks (provider-inbound)
 // transformResponseOut reuses the IR->native renderer (`transformResponseIn` in
 // response.ts is the IR->Anthropic direction, kept under its historical name).
-export const anthropicTransformer: Transformer & {
+export interface AnthropicTransformer extends Omit<Transformer, "transformResponseOut"> {
+  transformResponseOut: (
+    ir: IRResponse,
+    options?: AnthropicResponseRenderOptions,
+  ) => AnthropicMessagesResponse;
   transformStreamIn: (src: AsyncIterable<AnthropicSSEEvent>) => AsyncIterable<IRChunk>;
-} = {
+}
+
+export const anthropicTransformer: AnthropicTransformer = {
   name: "anthropic",
   endPoint: "/v1/messages",
   transformRequestOut(req) {
     return transformRequestOut(req);
   },
-  transformResponseOut(ir) {
-    return transformResponseIn(ir);
+  transformResponseOut(ir, options) {
+    return transformResponseIn(ir, options);
   },
   transformRequestIn(ir): AnthropicOutboundRequest {
     return transformRequestIn(ir);

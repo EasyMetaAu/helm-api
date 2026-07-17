@@ -157,7 +157,10 @@ export interface MessagesRouteDeps {
       /** Native Anthropic request → IR (inbound Protocol Adapter). */
       transformRequestOut(native: unknown): IRLike | Promise<IRLike>;
       /** IR response → native Anthropic response (outbound Protocol Adapter). */
-      transformResponseOut(ir: unknown): unknown | Promise<unknown>;
+      transformResponseOut(
+        ir: unknown,
+        options?: { toolNames: readonly string[]; toolCallXmlRecoveryEnabled: boolean },
+      ): unknown | Promise<unknown>;
       /** ONE IR stream event → ONE Anthropic SSE frame (state-machine mapped). */
       transformStreamOut(event: Record<string, unknown>): AnthropicSSEFrame;
       /** Structured internal error → Anthropic error envelope + status. */
@@ -173,6 +176,8 @@ export interface MessagesRouteDeps {
   /** SSE keep-alive cadence (ms) for streaming responses; read fresh per request from
    *  runtime.sse_heartbeat_ms. Optional — absent/0 = no heartbeat. Inter-chunk only. */
   sseHeartbeatMs?: () => number;
+  /** Live rollback switch for literal <invoke> recovery. Defaults ON when omitted. */
+  toolCallXmlRecoveryEnabled?: () => boolean;
 }
 
 // The route treats the IR as an opaque bag with the two fields it must read
@@ -181,6 +186,21 @@ interface IRLike {
   stream?: boolean;
   metadata?: Record<string, unknown>;
   [k: string]: unknown;
+}
+
+function declaredToolNames(ir: IRLike): string[] {
+  if (!Array.isArray(ir.tools)) return [];
+  const names: string[] = [];
+  for (const tool of ir.tools) {
+    if (tool === null || typeof tool !== "object" || Array.isArray(tool)) continue;
+    const record = tool as Record<string, unknown>;
+    if (record.type !== "function") continue;
+    const fn = record.function;
+    if (fn === null || typeof fn !== "object" || Array.isArray(fn)) continue;
+    const name = (fn as Record<string, unknown>).name;
+    if (typeof name === "string" && name.length > 0) names.push(name);
+  }
+  return names;
 }
 
 // Extract the plaintext credential from x-api-key (Anthropic SDK default) or the
@@ -636,7 +656,10 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
       body =
         result.nativePassthrough === true
           ? collected
-          : await anthropic.transformResponseOut(collected);
+          : await anthropic.transformResponseOut(collected, {
+              toolNames: declaredToolNames(ir),
+              toolCallXmlRecoveryEnabled: deps.toolCallXmlRecoveryEnabled?.() ?? true,
+            });
     } catch (err) {
       // Record the FAILED served request before surfacing the error (mirrors
       // chat.ts) so an all-providers-failed request still appears in

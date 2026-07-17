@@ -112,6 +112,17 @@ function sseTextStream(): AsyncIterable<string> {
   })();
 }
 
+function sseXmlToolStream(xml: string): AsyncIterable<string> {
+  const frames = [
+    `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: xml } }] })}\n\n`,
+    `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] })}\n\n`,
+    "data: [DONE]\n\n",
+  ];
+  return (async function* () {
+    for (const frame of frames) yield frame;
+  })();
+}
+
 function streamOkResult(stream: AsyncIterable<string>): ExecutionResult {
   return {
     decision: { lane: { selected_lane: "balanced" } } as unknown as ExecutionResult["decision"],
@@ -194,6 +205,144 @@ describe("createMessagesPipeline — streamIR protocol branch", () => {
       | undefined;
     expect(delta?.delta).toBe("hi");
     expect(events.at(-1)?.type).toBe("response.completed");
+  });
+
+  it("recovers whitelisted XML in the Anthropic translation stream when the live flag is true", async () => {
+    const xml = '<invoke name="Bash"><parameter name="command">git status</parameter></invoke>';
+    const route: RouteFn = async () => streamOkResult(sseXmlToolStream(xml));
+    let recoveryEnabled = false;
+    const pipeline = createMessagesPipeline(
+      route,
+      "anthropic_messages",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { toolCallXmlRecoveryEnabled: () => recoveryEnabled },
+    );
+    const run = await pipeline.run(
+      irOf({
+        stream: true,
+        tools: [
+          { type: "custom", function: { name: "NotAFunctionTool" } },
+          { type: "function", function: { name: 123 } },
+          { type: "function", function: { name: "Bash" } },
+        ],
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+
+    // The getter is live: changing it after run() but before stream consumption
+    // must affect this request without rebuilding the pipeline.
+    recoveryEnabled = true;
+    const events: Array<Record<string, unknown>> = [];
+    for await (const event of run.streamIR()) events.push(event);
+
+    const toolStart = events.find(
+      (event) =>
+        event.type === "content_block_start" &&
+        (event.content_block as { type?: unknown } | undefined)?.type === "tool_use",
+    );
+    expect(toolStart?.content_block).toMatchObject({ type: "tool_use", name: "Bash", input: {} });
+    const args = events.find(
+      (event) =>
+        event.type === "content_block_delta" &&
+        (event.delta as { type?: unknown } | undefined)?.type === "input_json_delta",
+    );
+    expect((args?.delta as { partial_json?: unknown } | undefined)?.partial_json).toBe(
+      JSON.stringify({ command: "git status" }),
+    );
+    expect(
+      events
+        .filter(
+          (event) =>
+            event.type === "content_block_delta" &&
+            (event.delta as { type?: unknown } | undefined)?.type === "text_delta",
+        )
+        .map((event) => (event.delta as { text?: unknown }).text)
+        .join(""),
+    ).not.toContain("<invoke");
+  });
+
+  it("keeps XML text unchanged in the Anthropic translation stream when the live flag is false", async () => {
+    const xml = '<invoke name="Bash"><parameter name="command">pwd</parameter></invoke>';
+    const route: RouteFn = async () => streamOkResult(sseXmlToolStream(xml));
+    const pipeline = createMessagesPipeline(
+      route,
+      "anthropic_messages",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { toolCallXmlRecoveryEnabled: () => false },
+    );
+    const run = await pipeline.run(
+      irOf({
+        stream: true,
+        tools: [{ type: "function", function: { name: "Bash" } }],
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    const events: Array<Record<string, unknown>> = [];
+    for await (const event of run.streamIR()) events.push(event);
+
+    expect(
+      events.some(
+        (event) =>
+          event.type === "content_block_start" &&
+          (event.content_block as { type?: unknown } | undefined)?.type === "tool_use",
+      ),
+    ).toBe(false);
+    expect(
+      events
+        .filter(
+          (event) =>
+            event.type === "content_block_delta" &&
+            (event.delta as { type?: unknown } | undefined)?.type === "text_delta",
+        )
+        .map((event) => (event.delta as { text?: unknown }).text)
+        .join(""),
+    ).toBe(xml);
+  });
+
+  it("defaults XML recovery to true but never whitelists non-function tool lookalikes", async () => {
+    const skipped = '<invoke name="Bash"><parameter name="command">pwd</parameter></invoke>';
+    const xml = `${skipped}<invoke name="Read"><parameter name="path">README.md</parameter></invoke>`;
+    const route: RouteFn = async () => streamOkResult(sseXmlToolStream(xml));
+    const pipeline = createMessagesPipeline(route);
+    const run = await pipeline.run(
+      irOf({
+        stream: true,
+        tools: [
+          { type: "custom", function: { name: "Bash" } },
+          { type: "function", function: { name: "Read" } },
+        ],
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+    const events: Array<Record<string, unknown>> = [];
+    for await (const event of run.streamIR()) events.push(event);
+
+    const toolStarts = events.filter(
+      (event) =>
+        event.type === "content_block_start" &&
+        (event.content_block as { type?: unknown } | undefined)?.type === "tool_use",
+    );
+    expect(toolStarts).toHaveLength(1);
+    expect(toolStarts[0]?.content_block).toMatchObject({ name: "Read" });
+    expect(
+      events
+        .filter(
+          (event) =>
+            event.type === "content_block_delta" &&
+            (event.delta as { type?: unknown } | undefined)?.type === "text_delta",
+        )
+        .map((event) => (event.delta as { text?: unknown }).text)
+        .join(""),
+    ).toBe(skipped);
   });
 });
 

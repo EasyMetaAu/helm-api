@@ -9,6 +9,7 @@ const FULL: RuntimeSettings = {
   capture_payloads: false,
   payload_retention_days: 7,
   native_protocol_passthrough: true,
+  tool_call_xml_recovery: false,
   visual_context_compression: 'observe',
   rate_limit_enabled: true,
   rate_limit_default_rpm: 60,
@@ -66,6 +67,7 @@ describe('settings api client', () => {
       capture_payloads: true,
       payload_retention_days: 30,
       native_protocol_passthrough: true,
+      tool_call_xml_recovery: true,
       visual_context_compression: 'off',
       rate_limit_enabled: false,
       rate_limit_default_rpm: 0,
@@ -127,6 +129,7 @@ describe('settings api client', () => {
     expect(JSON.parse(init.body as string)).toMatchObject({
       log_level: 'warn',
       native_protocol_passthrough: true,
+      tool_call_xml_recovery: false,
       visual_context_compression: 'observe',
     });
   });

@@ -15,6 +15,11 @@ import {
   mapStopReason,
   mapUsage,
 } from "./response.js";
+import {
+  invokeStartIndex,
+  invokeStartPrefixSuffixLength,
+  recoverToolCallsFromText,
+} from "./tool-xml-recovery.js";
 
 // OpenAI chunk → Anthropic SSE event stream: the EXPLICIT state machine that is
 // protocol translation's #1 risk (CLAUDE.md principle 8, docs/05). Streaming is
@@ -126,6 +131,10 @@ export interface OpenAIToAnthropicStreamOptions {
   id?: string;
   /** Fallback served model used when the upstream stream does not expose one. */
   model?: string;
+  /** Client-declared tool names. XML recovery is fail-closed when this whitelist is empty. */
+  toolNames?: readonly string[];
+  /** Runtime kill switch for leaked tool-call XML recovery. Default ON. */
+  toolCallXmlRecoveryEnabled?: boolean;
 }
 
 // —— Anthropic SSE event schemas (the output alphabet of the state machine). ————
@@ -350,6 +359,88 @@ function inputJSONDeltaEvent(index: number, partial: string): AnthropicSSEEvent 
   };
 }
 
+const MAX_XML_CANDIDATE_BYTES = 1024 * 1024;
+
+function utf8ByteLength(text: string): number {
+  let bytes = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code <= 0x7f) {
+      bytes += 1;
+    } else if (code <= 0x7ff) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = text.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
+function* emitText(state: StreamState, text: string): Generator<AnthropicSSEEvent> {
+  if (text === "") return;
+  if (state.textBlockIndex === null) {
+    const index = allocBlock(state);
+    state.textBlockIndex = index;
+    yield {
+      type: "content_block_start",
+      index,
+      content_block: { type: "text", text: "" },
+    };
+  }
+  yield textDeltaEvent(state.textBlockIndex, text);
+}
+
+function* closeText(state: StreamState): Generator<AnthropicSSEEvent> {
+  const index = state.textBlockIndex;
+  if (index === null) return;
+  if (state.openBlocks.delete(index)) yield { type: "content_block_stop", index };
+  state.textBlockIndex = null;
+}
+
+function* emitRecoveredToolXML(
+  state: StreamState,
+  text: string,
+  declaredTools: ReadonlySet<string>,
+): Generator<AnthropicSSEEvent, boolean> {
+  const segments = recoverToolCallsFromText(text, declaredTools);
+  if (segments === null) return false;
+
+  for (const segment of segments) {
+    if (segment.type === "text") {
+      yield* emitText(state, segment.text);
+      continue;
+    }
+
+    // Anthropic content blocks are ordered. End any surrounding text block before
+    // lifting the invoke, then allocate a fresh monotonic index for the tool block.
+    yield* closeText(state);
+    const blockIndex = allocBlock(state);
+    yield {
+      type: "content_block_start",
+      index: blockIndex,
+      content_block: {
+        type: "tool_use",
+        id: clientToolUseId({ id: tempId(blockIndex), blockIndex }),
+        name: segment.call.name,
+        input: {},
+      },
+    };
+    yield inputJSONDeltaEvent(blockIndex, JSON.stringify(segment.call.input));
+    if (state.openBlocks.delete(blockIndex)) {
+      yield { type: "content_block_stop", index: blockIndex };
+    }
+  }
+  return true;
+}
+
 function thinkingDeltaEvent(index: number, thinking: string): AnthropicSSEEvent {
   return { type: "content_block_delta", index, delta: { type: "thinking_delta", thinking } };
 }
@@ -396,129 +487,195 @@ export async function* convertOpenAIStreamToAnthropic(
   options: OpenAIToAnthropicStreamOptions = {},
 ): AsyncIterable<AnthropicSSEEvent> {
   const state = createState();
+  const declaredTools = new Set(options.toolNames ?? []);
+  let recoveryEnabled = options.toolCallXmlRecoveryEnabled !== false && declaredTools.size > 0;
+  let xmlCandidate: string | null = null;
+  let xmlCandidateBytes = 0;
+  let invokeProbeSuffix = "";
 
-  for await (const raw of chunks) {
-    const chunk = OpenAIChunkSchema.parse(raw);
+  try {
+    for await (const raw of chunks) {
+      const chunk = OpenAIChunkSchema.parse(raw);
 
-    if (!state.messageStarted) {
-      state.messageStarted = true;
-      yield messageStartEvent({
-        id: nonEmptyString(chunk.id) ?? nonEmptyString(options.id),
-        model: nonEmptyString(chunk.model) ?? nonEmptyString(options.model),
-      });
-    }
-
-    const choice = chunk.choices?.[0];
-    const delta = choice?.delta;
-
-    // —— reasoning: lazily open a thinking block (BEFORE the text block, since
-    // reasoning streams ahead of the answer), then stream thinking_delta. ——
-    if (delta?.reasoning_content) {
-      if (state.thinkingBlockIndex === null) {
-        const i = allocBlock(state);
-        state.thinkingBlockIndex = i;
-        yield {
-          type: "content_block_start",
-          index: i,
-          content_block: { type: "thinking", thinking: "" },
-        };
-      }
-      yield thinkingDeltaEvent(state.thinkingBlockIndex, delta.reasoning_content);
-    }
-
-    // —— redacted thinking: opaque block start/stop, no deltas. Used by synthesized
-    // Anthropic streams so native redacted history survives cache hits/non-stream relays.
-    for (const block of delta?.thinking_blocks ?? []) {
-      if (block.type !== "redacted_thinking" || typeof block.data !== "string") continue;
-      const i = allocBlock(state);
-      yield {
-        type: "content_block_start",
-        index: i,
-        content_block: { type: "redacted_thinking", data: block.data },
-      };
-    }
-
-    // —— text: lazily open the text block, then stream text_delta. ——
-    if (delta?.content) {
-      if (state.textBlockIndex === null) {
-        const i = allocBlock(state);
-        state.textBlockIndex = i;
-        yield {
-          type: "content_block_start",
-          index: i,
-          content_block: { type: "text", text: "" },
-        };
-      }
-      yield textDeltaEvent(state.textBlockIndex, delta.content);
-    }
-
-    // —— tool calls: integer index → stable block; temp id → real id upgrade. ——
-    for (const tc of delta?.tool_calls ?? []) {
-      let slot = state.toolIndexToBlock.get(tc.index);
-      if (slot === undefined) {
-        const blockIndex = allocBlock(state);
-        slot = {
-          blockIndex,
-          started: false,
-          id: tc.id ?? tempId(blockIndex),
-          name:
-            tc.function?.name !== undefined ? state.toolNameMap.toAnthropic(tc.function.name) : "",
-          argBuffer: "",
-        };
-        state.toolIndexToBlock.set(tc.index, slot);
-      } else {
-        // Upgrade a temp id to the real one and backfill a late-arriving name.
-        if (tc.id !== undefined && tc.id !== "") slot.id = tc.id;
-        if (tc.function?.name !== undefined && tc.function.name !== "")
-          slot.name = state.toolNameMap.toAnthropic(tc.function.name);
+      if (!state.messageStarted) {
+        state.messageStarted = true;
+        yield messageStartEvent({
+          id: nonEmptyString(chunk.id) ?? nonEmptyString(options.id),
+          model: nonEmptyString(chunk.model) ?? nonEmptyString(options.model),
+        });
       }
 
-      const args = tc.function?.arguments;
-      if (args !== undefined && args !== "") {
-        // First argument fragment: settle id/name and emit START before any delta
-        // (block start ALWAYS precedes its deltas — no orphan delta, pit #4).
-        if (!slot.started) {
-          slot.started = true;
+      const choice = chunk.choices?.[0];
+      const delta = choice?.delta;
+
+      // —— reasoning: lazily open a thinking block (BEFORE the text block, since
+      // reasoning streams ahead of the answer), then stream thinking_delta. ——
+      if (delta?.reasoning_content) {
+        if (state.thinkingBlockIndex === null) {
+          const i = allocBlock(state);
+          state.thinkingBlockIndex = i;
           yield {
             type: "content_block_start",
-            index: slot.blockIndex,
-            content_block: {
-              type: "tool_use",
-              id: clientToolUseId(slot),
-              name: slot.name,
-              input: {},
-            },
+            index: i,
+            content_block: { type: "thinking", thinking: "" },
           };
         }
-        slot.argBuffer += args;
-        yield inputJSONDeltaEvent(slot.blockIndex, args);
+        yield thinkingDeltaEvent(state.thinkingBlockIndex, delta.reasoning_content);
       }
-    }
 
-    // Buffer usage; never billed mid-stream (pit #2). Raw upstream `prompt_tokens` is
-    // the FULL prompt (cached + fresh + cache creation), but mapUsage() expects IR
-    // usage where prompt has ALREADY had cache read/write subtracted (the non-stream
-    // openai.ts path does the same). Read cache details from flat fields OR the real
-    // OpenAI prompt_tokens_details nesting.
-    if (chunk.usage) {
-      const u = chunk.usage;
-      const cached = u.cached_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
-      const cacheCreation =
-        u.cache_creation_tokens ??
-        tokenCount(u.prompt_tokens_details?.cache_creation_tokens) ??
-        tokenCount(u.prompt_tokens_details?.cache_creation_input_tokens) ??
-        tokenCount(u.prompt_tokens_details?.cache_write_tokens) ??
-        0;
-      state.usage = {
-        ...(u.prompt_tokens !== undefined
-          ? { prompt_tokens: Math.max(0, u.prompt_tokens - cached - cacheCreation) }
-          : {}),
-        ...(u.completion_tokens !== undefined ? { completion_tokens: u.completion_tokens } : {}),
-        ...(cached > 0 ? { cached_tokens: cached } : {}),
-        ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
-      };
+      // —— redacted thinking: opaque block start/stop, no deltas. Used by synthesized
+      // Anthropic streams so native redacted history survives cache hits/non-stream relays.
+      for (const block of delta?.thinking_blocks ?? []) {
+        if (block.type !== "redacted_thinking" || typeof block.data !== "string") continue;
+        const i = allocBlock(state);
+        yield {
+          type: "content_block_start",
+          index: i,
+          content_block: { type: "redacted_thinking", data: block.data },
+        };
+      }
+
+      // —— text: lazily open the text block, then stream text_delta. A potential
+      // leaked invoke is buffered until the terminal finish_reason supplies the
+      // third safety signal (it must map to Anthropic tool_use). ——
+      if (delta?.content) {
+        if (!recoveryEnabled) {
+          yield* emitText(state, delta.content);
+        } else if (xmlCandidate !== null) {
+          const deltaBytes = utf8ByteLength(delta.content);
+          if (xmlCandidateBytes + deltaBytes > MAX_XML_CANDIDATE_BYTES) {
+            // A malformed/unclosed invoke must not turn the streaming adapter into an
+            // unbounded response buffer. Flush in source order and permanently disable
+            // recovery for this stream; later XML remains ordinary text.
+            yield* emitText(state, xmlCandidate);
+            yield* emitText(state, delta.content);
+            xmlCandidate = null;
+            xmlCandidateBytes = 0;
+            recoveryEnabled = false;
+          } else {
+            xmlCandidate += delta.content;
+            xmlCandidateBytes += deltaBytes;
+          }
+        } else {
+          const probe = invokeProbeSuffix + delta.content;
+          invokeProbeSuffix = "";
+          const invokeStart = invokeStartIndex(probe);
+          if (invokeStart >= 0) {
+            yield* emitText(state, probe.slice(0, invokeStart));
+            const candidate = probe.slice(invokeStart);
+            const candidateBytes = utf8ByteLength(candidate);
+            if (candidateBytes > MAX_XML_CANDIDATE_BYTES) {
+              yield* emitText(state, candidate);
+              recoveryEnabled = false;
+            } else {
+              xmlCandidate = candidate;
+              xmlCandidateBytes = candidateBytes;
+            }
+          } else {
+            const suffixLength = invokeStartPrefixSuffixLength(probe);
+            const emitLength = probe.length - suffixLength;
+            yield* emitText(state, probe.slice(0, emitLength));
+            invokeProbeSuffix = probe.slice(emitLength);
+          }
+        }
+      }
+
+      // A real structured tool call is authoritative. Replaying both it and recovered
+      // XML could execute the same action twice, so flush any candidate BEFORE handling
+      // the structured delta and suppress XML recovery for the rest of this stream.
+      if ((delta?.tool_calls?.length ?? 0) > 0) {
+        if (xmlCandidate !== null) {
+          yield* emitText(state, xmlCandidate);
+          xmlCandidate = null;
+          xmlCandidateBytes = 0;
+        }
+        if (invokeProbeSuffix !== "") {
+          yield* emitText(state, invokeProbeSuffix);
+          invokeProbeSuffix = "";
+        }
+        recoveryEnabled = false;
+      }
+
+      // —— tool calls: integer index → stable block; temp id → real id upgrade. ——
+      for (const tc of delta?.tool_calls ?? []) {
+        let slot = state.toolIndexToBlock.get(tc.index);
+        if (slot === undefined) {
+          const blockIndex = allocBlock(state);
+          slot = {
+            blockIndex,
+            started: false,
+            id: tc.id ?? tempId(blockIndex),
+            name:
+              tc.function?.name !== undefined
+                ? state.toolNameMap.toAnthropic(tc.function.name)
+                : "",
+            argBuffer: "",
+          };
+          state.toolIndexToBlock.set(tc.index, slot);
+        } else {
+          // Upgrade a temp id to the real one and backfill a late-arriving name.
+          if (tc.id !== undefined && tc.id !== "") slot.id = tc.id;
+          if (tc.function?.name !== undefined && tc.function.name !== "")
+            slot.name = state.toolNameMap.toAnthropic(tc.function.name);
+        }
+
+        const args = tc.function?.arguments;
+        if (args !== undefined && args !== "") {
+          // First argument fragment: settle id/name and emit START before any delta
+          // (block start ALWAYS precedes its deltas — no orphan delta, pit #4).
+          if (!slot.started) {
+            slot.started = true;
+            yield {
+              type: "content_block_start",
+              index: slot.blockIndex,
+              content_block: {
+                type: "tool_use",
+                id: clientToolUseId(slot),
+                name: slot.name,
+                input: {},
+              },
+            };
+          }
+          slot.argBuffer += args;
+          yield inputJSONDeltaEvent(slot.blockIndex, args);
+        }
+      }
+
+      // Buffer usage; never billed mid-stream (pit #2). Raw upstream `prompt_tokens` is
+      // the FULL prompt (cached + fresh + cache creation), but mapUsage() expects IR
+      // usage where prompt has ALREADY had cache read/write subtracted (the non-stream
+      // openai.ts path does the same). Read cache details from flat fields OR the real
+      // OpenAI prompt_tokens_details nesting.
+      if (chunk.usage) {
+        const u = chunk.usage;
+        const cached = u.cached_tokens ?? u.prompt_tokens_details?.cached_tokens ?? 0;
+        const cacheCreation =
+          u.cache_creation_tokens ??
+          tokenCount(u.prompt_tokens_details?.cache_creation_tokens) ??
+          tokenCount(u.prompt_tokens_details?.cache_creation_input_tokens) ??
+          tokenCount(u.prompt_tokens_details?.cache_write_tokens) ??
+          0;
+        state.usage = {
+          ...(u.prompt_tokens !== undefined
+            ? { prompt_tokens: Math.max(0, u.prompt_tokens - cached - cacheCreation) }
+            : {}),
+          ...(u.completion_tokens !== undefined ? { completion_tokens: u.completion_tokens } : {}),
+          ...(cached > 0 ? { cached_tokens: cached } : {}),
+          ...(cacheCreation > 0 ? { cache_creation_tokens: cacheCreation } : {}),
+        };
+      }
+      if (choice?.finish_reason != null) state.finishReason = choice.finish_reason;
     }
-    if (choice?.finish_reason != null) state.finishReason = choice.finish_reason;
+  } catch (error) {
+    // Recovery may hold a candidate while waiting for the terminal finish reason.
+    // Never let an upstream failure swallow bytes already received: replay the
+    // candidate/probe as ordinary text before surfacing the same stream error.
+    if (xmlCandidate !== null) {
+      yield* emitText(state, xmlCandidate);
+    } else if (invokeProbeSuffix !== "") {
+      yield* emitText(state, invokeProbeSuffix);
+    }
+    throw error;
   }
 
   // Empty upstream stream (zero chunks): message_start is emitted lazily on the
@@ -532,6 +689,20 @@ export async function* convertOpenAIStreamToAnthropic(
       id: nonEmptyString(options.id),
       model: nonEmptyString(options.model),
     });
+  }
+
+  // Finish-reason is deliberately checked only after the whole OpenAI stream has
+  // drained: providers announce it after the content deltas. If it does not map to
+  // Anthropic tool_use, or parsing/whitelisting rejects the candidate, replay every
+  // buffered byte as text. Partial invoke-prefix probes are never swallowed either.
+  if (xmlCandidate !== null) {
+    const stopIsToolUse = mapStopReason(state.finishReason ?? "").stop_reason === "tool_use";
+    const recovered = stopIsToolUse
+      ? yield* emitRecoveredToolXML(state, xmlCandidate, declaredTools)
+      : false;
+    if (!recovered) yield* emitText(state, xmlCandidate);
+  } else if (invokeProbeSuffix !== "") {
+    yield* emitText(state, invokeProbeSuffix);
   }
 
   // —— Stream end: flush any tool block that never saw an argument fragment, close

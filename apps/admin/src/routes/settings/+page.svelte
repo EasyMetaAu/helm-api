@@ -35,6 +35,7 @@
     // a toggle (UI removed in #236) — kept in the working copy so it round-trips
     // through Save unchanged and is never reset to false (the #225 lesson).
     native_protocol_passthrough: true,
+    tool_call_xml_recovery: true,
     visual_context_compression: 'off',
     rate_limit_enabled: false,
     rate_limit_default_rpm: 0,

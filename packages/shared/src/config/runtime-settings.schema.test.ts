@@ -11,6 +11,7 @@ describe("RuntimeSettingsSchema", () => {
     const parsed = RuntimeSettingsSchema.parse({});
     expect(parsed.capture_payloads).toBe(true);
     expect(parsed.native_protocol_passthrough).toBe(true);
+    expect(parsed.tool_call_xml_recovery).toBe(true);
     expect(parsed.visual_context_compression).toBe("off");
     expect(parsed.payload_retention_days).toBe(30);
     expect(parsed.rate_limit_enabled).toBe(false);
@@ -23,6 +24,7 @@ describe("RuntimeSettingsSchema", () => {
     const parsed = RuntimeSettingsSchema.parse({
       capture_payloads: false,
       native_protocol_passthrough: false,
+      tool_call_xml_recovery: false,
       visual_context_compression: "observe",
       payload_retention_days: 7,
       rate_limit_enabled: true,
@@ -33,6 +35,7 @@ describe("RuntimeSettingsSchema", () => {
     expect(parsed).toEqual({
       capture_payloads: false,
       native_protocol_passthrough: false,
+      tool_call_xml_recovery: false,
       visual_context_compression: "observe",
       payload_retention_days: 7,
       rate_limit_enabled: true,

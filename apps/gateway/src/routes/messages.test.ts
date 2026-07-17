@@ -58,6 +58,7 @@ interface Harness {
   pipelineSawIR: Record<string, unknown> | null;
   pipelineSawAbort: boolean;
   classifyThrew: boolean;
+  responseOptions: unknown;
 }
 
 function makeDeps(
@@ -78,6 +79,7 @@ function makeDeps(
     // nativePassthrough so the route must return collect()'s body UNTOUCHED (skip
     // transformResponseOut). collect() should be set to return the verbatim native body.
     nativePassthrough?: boolean;
+    toolCallXmlRecoveryEnabled?: () => boolean;
   } = {},
 ): { deps: MessagesRouteDeps; harness: Harness } {
   const harness: Harness = {
@@ -85,6 +87,7 @@ function makeDeps(
     pipelineSawIR: null,
     pipelineSawAbort: false,
     classifyThrew: false,
+    responseOptions: undefined,
   };
 
   const deps: MessagesRouteDeps = {
@@ -92,6 +95,7 @@ function makeDeps(
     concurrencyGate: over.concurrencyGate,
     countTokens: over.countTokens,
     record: over.record,
+    toolCallXmlRecoveryEnabled: over.toolCallXmlRecoveryEnabled,
     auth: {
       resolve: async (_key: string | null) => {
         harness.order.push("auth");
@@ -111,8 +115,9 @@ function makeDeps(
           (ir as { __native?: unknown }).__native = native;
           return ir;
         },
-        transformResponseOut: (ir: unknown) => {
+        transformResponseOut: (ir: unknown, options?: unknown) => {
           harness.order.push("translate-back");
+          harness.responseOptions = options;
           return { ...ANTHROPIC_RESPONSE, __ir: ir };
         },
         transformStreamOut: (ev: { type: string }) => ({
@@ -345,6 +350,33 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     expect(body.content).toEqual([{ type: "text", text: "hello" }]);
     // The wiring order is a hard contract (docs/02 pipeline): auth FIRST.
     expect(harness.order).toEqual(["auth", "translate-out", "route", "translate-back"]);
+  });
+
+  it("threads the live XML-recovery flag and declared tool names into non-stream translation", async () => {
+    const { deps, harness } = makeDeps({
+      toolCallXmlRecoveryEnabled: () => false,
+      transformRequestOut: () => ({
+        ...fakeIR(false),
+        tools: [
+          { type: "function", function: { name: "Bash", parameters: {} } },
+          { type: "function", function: { name: 42, parameters: {} } },
+          { type: "other", name: "ignored" },
+        ],
+      }),
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    expect(harness.responseOptions).toEqual({
+      toolNames: ["Bash"],
+      toolCallXmlRecoveryEnabled: false,
+    });
   });
 
   it("rejects a missing/invalid key with a 401 Anthropic error and never routes", async () => {
