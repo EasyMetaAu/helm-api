@@ -950,6 +950,56 @@ describe("createExecute — gateway execution adapter", () => {
     expect(out.attempts[0]?.skip_reason).toBe("responses_native_items_cross_protocol_blocked");
   });
 
+  it("blocks Codex-native Responses items on xAI Responses targets", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "should-not-call" }),
+      chatCompletionStream: vi.fn(),
+      nativeProtocolProfile: "generic_openai_responses",
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["xai", provider]]),
+      registry: {
+        resolve(alias: string) {
+          if (alias !== "xai/grok-4.5") {
+            return { ok: false as const, error: { kind: "unknown_alias" as const, alias } };
+          }
+          return {
+            ok: true as const,
+            value: {
+              alias,
+              providerName: "xai",
+              providerModel: "grok-4.5",
+              baseUrl: "https://example.test",
+              apiKeyEnv: "XAI_API_KEY",
+              targetProviderProtocol: "openai_responses" as const,
+              providerRequiresCompatibilityRewrite: false,
+            },
+          };
+        },
+        list: () => ["xai/grok-4.5"],
+      },
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["xai/grok-4.5"]),
+      req({
+        protocol: "openai_responses",
+        provider_raw: {
+          unknown_items: [{ type: "agent_message", content: [] }],
+        },
+      }),
+    );
+
+    expect(provider.chatCompletion).not.toHaveBeenCalled();
+    expect(out.final.status).toBe("error");
+    expect(out.attempts[0]?.skip_reason).toBe("responses_native_items_provider_incompatible");
+  });
+
   it("does not forward top-level cache_control to non-Anthropic target protocols", async () => {
     const provider = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),

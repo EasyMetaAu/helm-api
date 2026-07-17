@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { preOutputClassifierFor } from "../failover-guard.js";
 import { type ChatCompletionRequest, type ProviderClient, UpstreamError } from "../openai.js";
+import { createCodexResponsesClient } from "../openai-responses.js";
 import { TokenRefreshError } from "../token-manager.js";
 import { createOAuthPoolClient, type OAuthPoolMember } from "./pool.js";
 
@@ -549,7 +550,7 @@ describe("createOAuthPoolClient — account selection", () => {
             async chatCompletion(req: ChatCompletionRequest) {
               calls.push("a");
               if (req.previous_response_id) {
-                throw Object.assign(new Error("temporary"), { status: 503 });
+                throw new UpstreamError("upstream_error", "temporary", null, null);
               }
               return { id: "resp-a" };
             },
@@ -1314,6 +1315,50 @@ describe("createOAuthPoolClient — nativePassthroughStream", () => {
     expect(firstMeta).toEqual(["req-a"]);
   });
 
+  it("never retries a known x-codex-turn-state on a sibling after a transient fault", async () => {
+    const calls: string[] = [];
+    let firstAccountCalls = 0;
+    const transient = new UpstreamError("upstream_error", "fetch failed", null, null);
+    const responseMember = (account: string, priority: number): OAuthPoolMember => ({
+      account,
+      priority,
+      schedulable: true,
+      client: {
+        async chatCompletion() {
+          return { served_by: account };
+        },
+        async *chatCompletionStream() {
+          yield `data: ${account}\n\n`;
+        },
+        async *nativePassthroughStream(_body, opts) {
+          calls.push(account);
+          if (account === "a" && firstAccountCalls++ > 0) throw transient;
+          opts?.onResponseMeta?.(new Headers({ "x-codex-turn-state": "strict-turn-state" }));
+          yield `event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-${account}"}}\n\n`;
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [responseMember("a", 10), responseMember("b", 50)],
+    });
+    const drain = async (headers: Record<string, string>): Promise<void> => {
+      const stream = pool.nativePassthroughStream?.({
+        protocol: "openai_responses",
+        body: { model: "gpt-5.6-sol", stream: true, input: "continue" },
+        headers,
+        mutations: {},
+      });
+      for await (const _chunk of stream ?? []) {
+        // Drain until the strict continuation either completes or fails.
+      }
+    };
+
+    await drain({ "session-id": "initial-session" });
+    await expect(drain({ "x-codex-turn-state": "strict-turn-state" })).rejects.toBe(transient);
+
+    expect(calls).toEqual(["a", "a"]);
+  });
+
   it("fails a known x-codex-turn-state when its original account is unavailable", async () => {
     const calls: string[] = [];
     const responseMember = (account: string): OAuthPoolMember => ({
@@ -2047,6 +2092,59 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     for await (const c of pool.nativePassthroughStream?.(NATIVE) ?? []) chunks.push(c);
     expect(chunks).toEqual(["data: b\n\n"]);
     expect(served).toEqual(["b"]);
+  });
+
+  it("rotates to a sibling Codex account after an exhausted raw fetch failure", async () => {
+    const selected: string[] = [];
+    const raw = Object.assign(new TypeError("fetch failed"), {
+      cause: Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" }),
+    });
+    const codexMember = (
+      account: string,
+      priority: number,
+      providerFetch: typeof fetch,
+    ): OAuthPoolMember => ({
+      account,
+      priority,
+      schedulable: true,
+      client: createCodexResponsesClient({
+        config: {
+          baseUrl: "https://chatgpt.com/backend-api/codex",
+          getAuthHeader: async () => `Bearer token-${account}`,
+          connectRetries: 0,
+        },
+        fetch: providerFetch,
+      }),
+    });
+    const pool = createOAuthPoolClient({
+      members: [
+        codexMember("a", 10, (async () => {
+          throw raw;
+        }) as unknown as typeof fetch),
+        codexMember(
+          "b",
+          50,
+          (async () =>
+            new Response(
+              'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-b","status":"completed"}}\n\n',
+              { status: 200, headers: { "content-type": "text/event-stream" } },
+            )) as unknown as typeof fetch,
+        ),
+      ],
+      onSelect: (account) => selected.push(account),
+    });
+    const request = {
+      protocol: "openai_responses" as const,
+      body: { model: "gpt-5.6-sol", input: "full stateless history", stream: true, store: false },
+      headers: { "session-id": "stateless-session" },
+      mutations: {},
+    };
+
+    const chunks: string[] = [];
+    for await (const chunk of pool.nativePassthroughStream?.(request) ?? []) chunks.push(chunk);
+
+    expect(selected).toEqual(["a", "b"]);
+    expect(chunks.join("")).toContain('"id":"resp-b"');
   });
 
   it("cools a Codex model-scoped 429 on native streaming without parking sibling models", async () => {

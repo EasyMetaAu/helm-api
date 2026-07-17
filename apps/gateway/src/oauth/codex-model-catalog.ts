@@ -15,6 +15,11 @@ import type {
 
 export const DEFAULT_CODEX_MODEL_CATALOG_MAX_ENTRIES = 64;
 
+// Codex core derives an omitted auto-compact limit as 90% of the resolved
+// context window. Materialize the same value for clients that consume Helm's
+// filtered catalog without reimplementing that fallback.
+export const DEFAULT_CODEX_AUTO_COMPACT_PERCENT = 90;
+
 export interface CodexModelCatalogSnapshot {
   models: CodexModelInfo[];
   etag: string | null;
@@ -68,6 +73,24 @@ function parseModels(models: readonly unknown[]): CodexModelInfo[] | null {
     parsed.push(result.data);
   }
   return parsed;
+}
+
+export function defaultCodexAutoCompactTokenLimit(contextWindow: number): number | null {
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) return null;
+  return Math.max(1, Math.floor((contextWindow * DEFAULT_CODEX_AUTO_COMPACT_PERCENT) / 100));
+}
+
+function withDefaultAutoCompactTokenLimit(model: CodexModelInfo): CodexModelInfo {
+  if (
+    model.auto_compact_token_limit != null ||
+    !model.context_window ||
+    model.context_window <= 0
+  ) {
+    return model;
+  }
+  const autoCompactTokenLimit = defaultCodexAutoCompactTokenLimit(model.context_window);
+  if (autoCompactTokenLimit === null) return model;
+  return { ...model, auto_compact_token_limit: autoCompactTokenLimit };
 }
 
 function sameCatalog(
@@ -289,9 +312,11 @@ export function createCodexModelCatalog(options: CodexModelCatalogOptions): Code
         if (source === undefined) continue;
         selected.set(slug, slug === source.slug ? source : { ...source, slug });
       }
-      const combined = [...selected.values()].sort(
-        (left, right) => left.priority - right.priority || left.slug.localeCompare(right.slug),
-      );
+      const combined = [...selected.values()]
+        .sort(
+          (left, right) => left.priority - right.priority || left.slug.localeCompare(right.slug),
+        )
+        .map(withDefaultAutoCompactTokenLimit);
       if (combined.length === 0) return null;
       const digest = createHash("sha256").update(JSON.stringify(combined)).digest("hex");
       return {

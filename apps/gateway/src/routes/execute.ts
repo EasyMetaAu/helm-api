@@ -767,6 +767,15 @@ function candidateGuardSkipReason(
   target: ResolvedAttemptTarget,
 ): string | null {
   if (
+    req.protocol === "openai_responses" &&
+    target.targetProviderProtocol === "openai_responses" &&
+    target.provider?.nativeProtocolProfile === "generic_openai_responses" &&
+    (Array.isArray(req.provider_raw?.responses_input_items) ||
+      Array.isArray(req.provider_raw?.unknown_items))
+  ) {
+    return "responses_native_items_provider_incompatible";
+  }
+  if (
     target.providerName === "deepseek" &&
     target.targetProviderProtocol === "openai_chat" &&
     hasResponsesReasoningHistory(req)
