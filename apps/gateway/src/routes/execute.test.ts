@@ -4,6 +4,7 @@ import {
   createCircuitBreaker,
   createGeminiClient,
   createGenericOpenAIResponsesClient,
+  createOAuthPoolClient,
   TokenRefreshError,
   UpstreamError,
 } from "@helm/core";
@@ -951,11 +952,21 @@ describe("createExecute — gateway execution adapter", () => {
   });
 
   it("blocks Codex-native Responses items on xAI Responses targets", async () => {
-    const provider = {
+    const memberClient = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "should-not-call" }),
       chatCompletionStream: vi.fn(),
       nativeProtocolProfile: "generic_openai_responses",
     } as unknown as ProviderClient;
+    const provider = createOAuthPoolClient({
+      members: [
+        {
+          account: "xai-account",
+          priority: 10,
+          schedulable: true,
+          client: memberClient,
+        },
+      ],
+    });
     const execute = createExecute({
       defaultProvider: provider,
       providers: new Map([["xai", provider]]),
@@ -995,7 +1006,7 @@ describe("createExecute — gateway execution adapter", () => {
       }),
     );
 
-    expect(provider.chatCompletion).not.toHaveBeenCalled();
+    expect(memberClient.chatCompletion).not.toHaveBeenCalled();
     expect(out.final.status).toBe("error");
     expect(out.attempts[0]?.skip_reason).toBe("responses_native_items_provider_incompatible");
   });

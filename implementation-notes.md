@@ -9,7 +9,7 @@
 
 ## 2026-07-18 · Codex 自动压缩目录与无状态传输故障切换（OAuth subscription / Responses / provider execution，docs/04/05/07，原则 3/5/7/8）
 
-- **压缩职责边界**：Codex 客户端拥有当前会话历史并负责在阈值到达时调用 `/v1/responses/compact`、用摘要更新本地 transcript 后重试；Gateway 不透明改写历史，也不把 auto-compact 触发点误当成模型硬输入上限。当前 Codex core 对缺失 `auto_compact_token_limit` 按 resolved context 的 90% 推导，因此 Helm 的 key-filtered `/v1/models?client_version=...` 只把 null/缺失字段物化成相同默认值（372K → 334,800），上游显式值保持不变。真正超过模型 context 的整链耗尽继续复用既有 compaction-compatible `400 invalid_request`，而不是在 90% 处提前拒绝仍可执行的请求。
+- **压缩职责边界**：Codex 客户端拥有当前会话历史并负责在阈值到达时调用 `/v1/responses/compact`、用摘要更新本地 transcript 后重试；Gateway 不透明改写历史，也不把 auto-compact 触发点误当成模型硬输入上限。当前 Codex core 对缺失 `auto_compact_token_limit` 按 resolved context（`context_window`，缺失时回退 `max_context_window`）的 90% 推导，并把上游显式阈值钳制到该上限，因此 Helm 的 key-filtered `/v1/models?client_version=...` 物化相同的有效值（372K → 334,800）。真正超过模型 context 的整链耗尽继续复用既有 compaction-compatible `400 invalid_request`，而不是在 90% 处提前拒绝仍可执行的请求。
 - **传输故障边界**：Codex fetch 在同账号短连接重试耗尽后，将原始 `TypeError: fetch failed` 归类为无 HTTP status 的 `UpstreamError`，并在脱敏后的 `provider_raw` 保留有界嵌套 `name/code/message`（例如 `UND_ERR_SOCKET`），使 OAuth pool 能对无状态请求尝试兄弟账号。客户端 abort 与显式 provider timeout 保持原分类；带 `previous_response_id` 或已知 `x-codex-turn-state` 的有状态 continuation 仍严格绑定原账号，不能跨账号重放。
 - **fallback 协议边界**：含 native/custom/caller-linked 或未知 Responses input sequence 的请求，只能交给 `codex_responses` profile；`generic_openai_responses` provider 在调用前按能力 profile 跳过，避免把 Codex 私有 items 发给 xAI 等兼容端点后得到确定性 422。判断不依赖 provider 名字，后续新增 generic provider 自动继承相同保护。
 

@@ -81,15 +81,19 @@ export function defaultCodexAutoCompactTokenLimit(contextWindow: number): number
 }
 
 function withDefaultAutoCompactTokenLimit(model: CodexModelInfo): CodexModelInfo {
-  if (
-    model.auto_compact_token_limit != null ||
-    !model.context_window ||
-    model.context_window <= 0
-  ) {
-    return model;
-  }
-  const autoCompactTokenLimit = defaultCodexAutoCompactTokenLimit(model.context_window);
+  const resolvedContextWindow =
+    typeof model.context_window === "number" && model.context_window > 0
+      ? model.context_window
+      : model.max_context_window;
+  if (typeof resolvedContextWindow !== "number" || resolvedContextWindow <= 0) return model;
+  const derivedLimit = defaultCodexAutoCompactTokenLimit(resolvedContextWindow);
+  if (derivedLimit === null) return model;
+  const autoCompactTokenLimit =
+    model.auto_compact_token_limit == null
+      ? derivedLimit
+      : Math.min(model.auto_compact_token_limit, derivedLimit);
   if (autoCompactTokenLimit === null) return model;
+  if (autoCompactTokenLimit === model.auto_compact_token_limit) return model;
   return { ...model, auto_compact_token_limit: autoCompactTokenLimit };
 }
 

@@ -36,6 +36,22 @@ const USER_REQ: ChatCompletionRequest = {
 };
 
 describe("createOAuthPoolClient — account selection", () => {
+  it("exposes a shared native protocol profile from homogeneous members", () => {
+    const calls: string[] = [];
+    const profileClient = (account: string): ProviderClient => ({
+      ...stubClient(account, calls),
+      nativeProtocolProfile: "generic_openai_responses",
+    });
+    const pool = createOAuthPoolClient({
+      members: [
+        { account: "a", priority: 10, schedulable: true, client: profileClient("a") },
+        { account: "b", priority: 20, schedulable: true, client: profileClient("b") },
+      ],
+    });
+
+    expect(pool.nativeProtocolProfile).toBe("generic_openai_responses");
+  });
+
   it("prefers the lowest priority (lower = preferred)", async () => {
     const calls: string[] = [];
     const selected: string[] = [];

@@ -226,6 +226,14 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     deps.upstreamCredentialFailureStatuses ?? [401, 403],
   );
   const entries: PoolEntry[] = deps.members.map((member) => ({ member, lastUsedAt: 0 }));
+  const firstNativeProtocolProfile = entries[0]?.member.client.nativeProtocolProfile;
+  const nativeProtocolProfile =
+    firstNativeProtocolProfile !== undefined &&
+    entries.every(
+      (entry) => entry.member.client.nativeProtocolProfile === firstNativeProtocolProfile,
+    )
+      ? firstNativeProtocolProfile
+      : undefined;
   const stickySessions = new Map<string, { account: string; expiresAt: number }>();
   const scopedRateLimits = new Map<
     string,
@@ -1036,6 +1044,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   }
 
   return {
+    ...(nativeProtocolProfile === undefined ? {} : { nativeProtocolProfile }),
     // Park / un-park ONE account's auto-park cooldown in place. The next select()
     // observes the new value without a pool rebuild; null clears it (the manual
     // "Reset usage" path). Unknown account = no-op.

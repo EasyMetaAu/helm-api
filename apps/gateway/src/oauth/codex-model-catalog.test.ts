@@ -360,7 +360,7 @@ describe("createCodexModelCatalog", () => {
     expect(catalog.listRoutable(["not-entitled"])).toBeNull();
   });
 
-  it("advertises a conservative compact threshold without replacing an upstream value", async () => {
+  it("advertises Codex-compatible derived and clamped compact thresholds", async () => {
     const catalog = createCodexModelCatalog({ cache: fakeCache(null) });
     await catalog.load(
       KEY,
@@ -373,6 +373,16 @@ describe("createCodexModelCatalog", () => {
           max_context_window: 80_000,
           auto_compact_token_limit: null,
         }),
+        model("max-window-only", 5, {
+          context_window: null,
+          max_context_window: 1_000_000,
+          auto_compact_token_limit: null,
+        }),
+        model("oversized-explicit-limit", 6, {
+          context_window: 100_000,
+          max_context_window: 100_000,
+          auto_compact_token_limit: 95_000,
+        }),
       ]),
     );
 
@@ -381,6 +391,8 @@ describe("createCodexModelCatalog", () => {
       "gpt-5.6-terra",
       "gpt-5.6-luna",
       "small-future-model",
+      "max-window-only",
+      "oversized-explicit-limit",
     ]);
 
     expect(
@@ -393,6 +405,8 @@ describe("createCodexModelCatalog", () => {
       { slug: "gpt-5.6-terra", auto_compact_token_limit: 334_800 },
       { slug: "gpt-5.6-luna", auto_compact_token_limit: 250_000 },
       { slug: "small-future-model", auto_compact_token_limit: 72_000 },
+      { slug: "max-window-only", auto_compact_token_limit: 900_000 },
+      { slug: "oversized-explicit-limit", auto_compact_token_limit: 90_000 },
     ]);
   });
 
