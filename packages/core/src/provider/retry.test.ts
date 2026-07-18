@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { isTransientConnectionError, withConnectionRetry } from "./retry.js";
+import { isFetchTransportError, isTransientConnectionError, withConnectionRetry } from "./retry.js";
 
 // A transient connection error is one safe to retry BEFORE any bytes reached the
 // client (idempotent: no upstream response consumed). The classifier is a strict
@@ -58,6 +58,26 @@ describe("isTransientConnectionError", () => {
     // must still be classified non-transient (name wins).
     const err = Object.assign(new Error("socket hang up"), { name: "AbortError" });
     expect(isTransientConnectionError(err)).toBe(false);
+  });
+});
+
+describe("isFetchTransportError", () => {
+  it("classifies an opaque undici fetch failure even when its cause code is not retry-allowlisted", () => {
+    const err = Object.assign(new TypeError("fetch failed"), {
+      cause: Object.assign(new Error("Connect Timeout Error"), {
+        code: "UND_ERR_CONNECT_TIMEOUT",
+      }),
+    });
+
+    expect(isTransientConnectionError(err)).toBe(false);
+    expect(isFetchTransportError(err)).toBe(true);
+  });
+
+  it("does not classify an abort or an already-classified timeout as a raw fetch transport error", () => {
+    expect(
+      isFetchTransportError(new DOMException("This operation was aborted", "AbortError")),
+    ).toBe(false);
+    expect(isFetchTransportError(new Error("upstream request timed out"))).toBe(false);
   });
 });
 

@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-18 · Codex 自动压缩目录与无状态传输故障切换（OAuth subscription / Responses / provider execution，docs/04/05/07，原则 3/5/7/8）
+
+- **压缩职责边界**：Codex 客户端拥有当前会话历史并负责在阈值到达时调用 `/v1/responses/compact`、用摘要更新本地 transcript 后重试；Gateway 不透明改写历史，也不把 auto-compact 触发点误当成模型硬输入上限。当前 Codex core 对缺失 `auto_compact_token_limit` 按 resolved context（`context_window`，缺失时回退 `max_context_window`）的 90% 推导，并把上游显式阈值钳制到该上限，因此 Helm 的 key-filtered `/v1/models?client_version=...` 物化相同的有效值（372K → 334,800）。真正超过模型 context 的整链耗尽继续复用既有 compaction-compatible `400 invalid_request`，而不是在 90% 处提前拒绝仍可执行的请求。
+- **传输故障边界**：Codex fetch 在同账号短连接重试耗尽后，将原始 `TypeError: fetch failed` 归类为无 HTTP status 的 `UpstreamError`，并在脱敏后的 `provider_raw` 保留有界嵌套 `name/code/message`（例如 `UND_ERR_SOCKET`），使 OAuth pool 能对无状态请求尝试兄弟账号。客户端 abort 与显式 provider timeout 保持原分类；带 `previous_response_id` 或已知 `x-codex-turn-state` 的有状态 continuation 仍严格绑定原账号，不能跨账号重放。
+- **fallback 协议边界**：含 native/custom/caller-linked 或未知 Responses input sequence 的请求，只能交给 `codex_responses` profile；`generic_openai_responses` provider 在调用前按能力 profile 跳过，避免把 Codex 私有 items 发给 xAI 等兼容端点后得到确定性 422。判断不依赖 provider 名字，后续新增 generic provider 自动继承相同保护。
+
 ## 2026-07-17 · Anthropic XML 工具调用恢复边界（Protocol streaming / provider execution，docs/05/07，原则 3/5/8）
 
 - **恢复信号与实际出口**：只在上游终止原因已经明确为 `tool_use`、XML `<invoke>` 完整闭合、工具名精确命中本次请求声明的 function tools，且响应中不存在既有 structured `tool_use/tool_calls` 时恢复，避免把示例文本或真实结构化调用旁边的 XML 再执行一次。规格所称“三条路径”漏掉了默认 native passthrough 的非流式直返；实现因此覆盖四个实际出口：Anthropic native stream、native JSON、OpenAI→Anthropic translation stream、translation JSON。共享 parser 保持大小写精确、非白名单/未闭合内容逐字保留、JSON-looking 参数按规格转换，并用 null-prototype 字典隔离 `__proto__`。
@@ -62,14 +68,9 @@
 - **触发边界**：cache-only 的 `/oauth/quota` 与 `/oauth/overview` 继续严格无副作用，绝不因读取旧 snapshot 消耗 credit；只有显式 refresh job 的新鲜上游 PULL 和实际响应头 PUSH 属于权威输入。PULL 在完成 durable/live quota 更新和 cooldown 停车同步后，仅对账号级周窗口 `>=100%` 调用并等待同一 `maybeAutoReset` 入口，避免先解停后又被异步停车覆盖；同一 Helm label 的并发触发复用同一个 in-flight promise。credit 成功消费后立即强制再 PULL 一次并更新 durable snapshot、live pool、剩余 credits 与 cooldown，cache-only 页面不会继续显示重置前的 100%。低于 100%、5h 窗口和 model-scoped 饱和窗口不触发；是否有 credit、共享账号幂等 marker、每小时 cooldown 与 workspace spend-control 拒绝仍由既有 reset guard fail-closed 判定。
 - **验证**：TDD 先证明 fresh Codex PULL 没有传递自动重置信号，再覆盖真实 `primary + 10080m + 100%` PULL 必须按“停车 -> 触发”顺序执行、成功消费后 cache/live state 立即变为新窗口与新 credit 数、共享 ChatGPT 账号的第二个 Helm label 必须等待首个 reset/unpark 完成后才开始 PULL、99% 周窗口与 cache-only GET/overview 不触发。定向 4 files / 196 tests、Gateway typecheck、Biome 与 Gateway build 全绿。
 
-## 2026-07-15 · Anthropic 不可用地域哨兵按全球基础卡计费（Catalog / telemetry accounting，docs/07/08，原则 2/3/5/7）
-
-- **生产根因**：Anthropic OAuth 原生流会返回 `usage.inference_geo=not_available`，表示未提供推理地域，不是新的计费地域。地域计费上线后把任意非空字符串都当作已确认地域；catalog 只有 `global` / `us`，该哨兵因此被当作未知费率并令已有完整 token usage 的成功请求得到 `cost_usd=null`。模型、能力和价格条目均未缺失。
-- **兼容边界**：计费边界只把空字符串和已确认的 `not_available` 规范化为“地域缺失”，使用既有全球基础卡；仍将真实但未配置的地域（如 `moon`）保持 unknown，避免猜价。原始哨兵继续保存在 telemetry 作为 provenance，不改写 provider 事实；实时响应与历史重算共用同一规范化函数，防止两套语义漂移。
-- **验证与修复边界**：TDD 以生产请求的 Opus 4.8 token/cache 数复现 `$0.24682125`，覆盖未知地域严格拒绝、Anthropic SSE 哨兵保真，以及历史重算仅在 `best-evidence` 下把该哨兵作为全球假设。生产历史数据修复仍须使用既有 manifest、逐批微型恢复库、health/WAL/disk 门禁和 OAuth delta 一致性保护。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-15 · Anthropic 不可用地域哨兵按全球基础卡计费（Catalog / telemetry accounting，docs/07/08，原则 2/3/5/7）**：仅把 `usage.inference_geo=not_available` 解释为地域缺失并使用全球基础卡，真实未知地域继续 unknown；实时与历史重算共用规范化且保留原始 provenance。
 - **2026-07-15 · 终端事件缺失的 Responses 流使用部分估算计费（Protocol streaming / telemetry accounting，docs/05/07，原则 3/5/7/8）**：原生 Responses 流缺终态时按 truncated/client_aborted 记失败，仅对已收 semantic delta 做有界 partial usage/cost 估算，并让 telemetry、attempt、budget 与 OAuth 账号结算一致；完整原文通过 git history 回溯。
 - **2026-07-15 · 历史费用回填改由常驻 supervisor 持续推进（Catalog / telemetry repair operations，docs/07/08，原则 2/3/5/7）**：systemd 常驻 supervisor 以单实例、100 行原子批次、checkpoint、slice verification、微型恢复库、资源门禁和 5,000 行冷却推进固定截止点前的历史修复；完整原文通过 git history 回溯。
 - **2026-07-15 · 历史重算兼容旧版 completion-only 顶层费用（Catalog / telemetry repair，docs/07/08，原则 2/5/7）**：仅在顶层、attempt 与 breakdown 同时精确证明旧版只保存 completion cost 时接受回填，任何其他漂移仍 fail-closed；完整原文通过 git history 回溯。

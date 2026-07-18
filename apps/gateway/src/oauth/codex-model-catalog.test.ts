@@ -360,6 +360,56 @@ describe("createCodexModelCatalog", () => {
     expect(catalog.listRoutable(["not-entitled"])).toBeNull();
   });
 
+  it("advertises Codex-compatible derived and clamped compact thresholds", async () => {
+    const catalog = createCodexModelCatalog({ cache: fakeCache(null) });
+    await catalog.load(
+      KEY,
+      remote([
+        model("gpt-5.6-sol", 1, { auto_compact_token_limit: null }),
+        model("gpt-5.6-terra", 2, { auto_compact_token_limit: undefined }),
+        model("gpt-5.6-luna", 3, { auto_compact_token_limit: 250_000 }),
+        model("small-future-model", 4, {
+          context_window: 80_000,
+          max_context_window: 80_000,
+          auto_compact_token_limit: null,
+        }),
+        model("max-window-only", 5, {
+          context_window: null,
+          max_context_window: 1_000_000,
+          auto_compact_token_limit: null,
+        }),
+        model("oversized-explicit-limit", 6, {
+          context_window: 100_000,
+          max_context_window: 100_000,
+          auto_compact_token_limit: 95_000,
+        }),
+      ]),
+    );
+
+    const result = catalog.listRoutable([
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "small-future-model",
+      "max-window-only",
+      "oversized-explicit-limit",
+    ]);
+
+    expect(
+      result?.models.map(({ slug, auto_compact_token_limit }) => ({
+        slug,
+        auto_compact_token_limit,
+      })),
+    ).toEqual([
+      { slug: "gpt-5.6-sol", auto_compact_token_limit: 334_800 },
+      { slug: "gpt-5.6-terra", auto_compact_token_limit: 334_800 },
+      { slug: "gpt-5.6-luna", auto_compact_token_limit: 250_000 },
+      { slug: "small-future-model", auto_compact_token_limit: 72_000 },
+      { slug: "max-window-only", auto_compact_token_limit: 900_000 },
+      { slug: "oversized-explicit-limit", auto_compact_token_limit: 90_000 },
+    ]);
+  });
+
   it("does not advertise reasoning-inclusive accounting when any routable account is unknown", async () => {
     const catalog = createCodexModelCatalog({ cache: fakeCache(null), bundledModels: [] });
     const secondKey = { ...KEY, account: "team", accountIdentity: "acc_2" };

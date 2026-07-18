@@ -1663,9 +1663,9 @@ describe("createCodexResponsesClient", () => {
     expect(caught).not.toBeInstanceOf(UpstreamError);
   });
 
-  it("retries a transient network error then re-throws it unchanged", async () => {
+  it("retries a transient network error then wraps it for account-pool failover", async () => {
     // ECONNREFUSED is transient → retried at the fetch boundary ([0,0] backoff keeps
-    // the test instant); the ORIGINAL error propagates once the budget is exhausted.
+    // the test instant); exhaustion is then classified for account-pool failover.
     const boom = new Error("ECONNREFUSED");
     const fetch = vi.fn(async () => {
       throw boom;
@@ -1680,7 +1680,11 @@ describe("createCodexResponsesClient", () => {
     });
     await expect(
       client.chatCompletion({ model: "m", messages: [{ role: "user", content: "x" }] }),
-    ).rejects.toBe(boom);
+    ).rejects.toMatchObject({
+      errorClass: "upstream_error",
+      upstreamStatus: null,
+      providerRaw: { error: { name: "Error", message: "ECONNREFUSED" } },
+    });
     expect(fetch).toHaveBeenCalledTimes(3); // 1 initial + 2 retries
   });
 
@@ -3292,6 +3296,75 @@ describe("createCodexResponsesClient — nativePassthrough", () => {
     expect(err.upstreamStatus).toBe(500);
     expect(JSON.stringify(err.providerRaw)).not.toContain(token);
     expect(JSON.stringify(err.providerRaw)).toContain("[redacted]");
+  });
+
+  it("wraps an exhausted raw fetch failure with scrubbed nested cause details", async () => {
+    const secret = "proxy-secret-1234";
+    const raw = Object.assign(new TypeError("fetch failed"), {
+      cause: Object.assign(new Error(`other side closed ${secret}`), {
+        code: "UND_ERR_SOCKET",
+      }),
+    });
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        currentSecrets: () => [secret],
+        connectRetries: 0,
+      },
+      fetch: (async () => {
+        throw raw;
+      }) as unknown as typeof fetch,
+    });
+
+    let caught: unknown;
+    try {
+      await client.nativePassthrough?.(nativeBody());
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(UpstreamError);
+    expect(caught).toMatchObject({
+      errorClass: "upstream_error",
+      upstreamStatus: null,
+      providerRaw: {
+        error: {
+          name: "TypeError",
+          message: "fetch failed",
+          cause: {
+            name: "Error",
+            code: "UND_ERR_SOCKET",
+            message: "other side closed [redacted]",
+          },
+        },
+      },
+    });
+  });
+
+  it("preserves a client abort instead of wrapping it as an upstream transport failure", async () => {
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        connectRetries: 0,
+      },
+      fetch: (async () => {
+        throw new DOMException("This operation was aborted", "AbortError");
+      }) as unknown as typeof fetch,
+    });
+    const controller = new AbortController();
+    controller.abort();
+
+    let caught: unknown;
+    try {
+      await client.nativePassthrough?.(nativeBody(), { signal: controller.signal });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).not.toBeInstanceOf(UpstreamError);
+    expect(caught).toMatchObject({ name: "AbortError" });
   });
 });
 

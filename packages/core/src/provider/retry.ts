@@ -58,6 +58,30 @@ export function isTransientConnectionError(err: unknown): boolean {
   return false;
 }
 
+/**
+ * True when a raw fetch-boundary failure should be surfaced as a status-less
+ * upstream transport error after same-account connection retries are exhausted.
+ *
+ * This is intentionally broader than `isTransientConnectionError`: undici can
+ * report DNS, TLS, connect-timeout, and socket failures as an opaque
+ * `TypeError("fetch failed")` whose nested code is not in the short-retry
+ * allowlist. Those errors should still reach the OAuth pool as transport faults
+ * so a stateless request can try a sibling account. Abort always wins.
+ */
+export function isFetchTransportError(err: unknown): boolean {
+  let cur: unknown = err;
+  for (let depth = 0; depth < 5 && cur != null; depth += 1) {
+    if (typeof cur !== "object") break;
+    const e = cur as { name?: unknown; cause?: unknown };
+    if (e.name === "AbortError") return false;
+    cur = e.cause;
+  }
+  if (isTransientConnectionError(err)) return true;
+  if (typeof err !== "object" || err === null) return false;
+  const e = err as { name?: unknown; message?: unknown };
+  return e.name === "TypeError" && e.message === "fetch failed";
+}
+
 export interface ConnectionRetryOptions {
   /** Max additional attempts after the first. Default 2. */
   retries?: number;

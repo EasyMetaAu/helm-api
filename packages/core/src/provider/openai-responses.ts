@@ -36,7 +36,7 @@ import {
   type ProviderConfig,
   UpstreamError,
 } from "./openai.js";
-import { isTransientConnectionError, withConnectionRetry } from "./retry.js";
+import { isFetchTransportError, isTransientConnectionError, withConnectionRetry } from "./retry.js";
 import { readChunkWithIdle, StreamStalledError } from "./stream-idle.js";
 
 export interface CodexResponsesClientConfig {
@@ -1216,6 +1216,45 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     return changed ? JSON.parse(value) : raw;
   }
 
+  function transportErrorNode(
+    error: unknown,
+    depth = 0,
+    seen = new WeakSet<object>(),
+  ): Record<string, unknown> {
+    if (typeof error !== "object" || error === null) return { message: String(error) };
+    if (seen.has(error)) return { message: "[circular cause]" };
+    seen.add(error);
+    const source = error as {
+      name?: unknown;
+      message?: unknown;
+      code?: unknown;
+      cause?: unknown;
+    };
+    const detail: Record<string, unknown> = {};
+    if (typeof source.name === "string" && source.name.length > 0) detail.name = source.name;
+    if (typeof source.code === "string" || typeof source.code === "number") {
+      detail.code = source.code;
+    }
+    if (typeof source.message === "string" && source.message.length > 0) {
+      detail.message = source.message;
+    }
+    if (source.cause !== undefined && depth < 4) {
+      detail.cause = transportErrorNode(source.cause, depth + 1, seen);
+    }
+    return detail;
+  }
+
+  function transportUpstreamError(error: unknown): UpstreamError {
+    const rawMessage = error instanceof Error ? error.message : "upstream fetch failed";
+    const scrubbedMessage = scrub(rawMessage);
+    return new UpstreamError(
+      "upstream_error",
+      typeof scrubbedMessage === "string" ? scrubbedMessage : "upstream fetch failed",
+      scrub({ error: transportErrorNode(error) }),
+      null,
+    );
+  }
+
   type RequestTimeout = ReturnType<typeof withTimeout>;
   interface CodexHttpResponse {
     response: Response;
@@ -1291,37 +1330,45 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     init.capture?.(prepared.bodyText);
     // Retry transient connection blips at the fetch boundary (pre-first-byte → idempotent);
     // a timeout becomes a non-transient UpstreamError and a client abort rethrows as-is.
-    return withConnectionRetry(
-      async () => {
-        const t = withTimeout(timeoutMs, init.signal);
-        try {
-          const response = await doFetch(init.endpoint, {
-            method: "POST",
-            headers: prepared.headers,
-            body: prepared.bodyText,
-            signal: t.signal,
-          });
-          if (init.timeoutThroughBody === true) {
-            return { response, bodyTimeout: t, turnKey };
+    try {
+      return await withConnectionRetry(
+        async () => {
+          const t = withTimeout(timeoutMs, init.signal);
+          try {
+            const response = await doFetch(init.endpoint, {
+              method: "POST",
+              headers: prepared.headers,
+              body: prepared.bodyText,
+              signal: t.signal,
+            });
+            if (init.timeoutThroughBody === true) {
+              return { response, bodyTimeout: t, turnKey };
+            }
+            return { response, turnKey };
+          } catch (err) {
+            if (t.isTimeout() && !t.isExternalAbort()) {
+              throw new UpstreamError("timeout", "upstream request timed out");
+            }
+            throw err;
+          } finally {
+            if (init.timeoutThroughBody !== true) {
+              t.cleanup();
+            }
           }
-          return { response, turnKey };
-        } catch (err) {
-          if (t.isTimeout() && !t.isExternalAbort()) {
-            throw new UpstreamError("timeout", "upstream request timed out");
-          }
-          throw err;
-        } finally {
-          if (init.timeoutThroughBody !== true) {
-            t.cleanup();
-          }
-        }
-      },
-      {
-        retries: cfg.connectRetries,
-        backoffMs: cfg.connectRetryBackoffMs,
-        signal: init.signal,
-      },
-    );
+        },
+        {
+          retries: cfg.connectRetries,
+          backoffMs: cfg.connectRetryBackoffMs,
+          signal: init.signal,
+        },
+      );
+    } catch (error) {
+      // An external abort is client-owned even when fetch happens to surface a
+      // transport-shaped TypeError. Explicit provider timeouts are already
+      // UpstreamError("timeout") and therefore fail this raw-transport guard.
+      if (init.signal?.aborted || !isFetchTransportError(error)) throw error;
+      throw transportUpstreamError(error);
+    }
   }
 
   async function readUnaryBody(result: CodexHttpResponse): Promise<string> {
