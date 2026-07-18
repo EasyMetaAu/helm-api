@@ -116,6 +116,14 @@ function deps(over: Partial<RouteDeps> = {}): RouteDeps {
 // ── tests ───────────────────────────────────────────────────────────────────
 
 describe("routeRequest — orchestration", () => {
+  it("records the effective reasoning effort in the body-free decision", async () => {
+    const d = deps();
+    const result = await routeRequest(req({ reasoning_effort: "high" }), d);
+
+    expect(result.decision.reasoning_effort).toBe("high");
+    expect((d.log as ReturnType<typeof vi.fn>).mock.calls[0]?.[0].reasoning_effort).toBe("high");
+  });
+
   it("routes by lane end-to-end (non-streaming) and logs a complete decision record", async () => {
     const d = deps();
     const result = await routeRequest(req(), d);
@@ -1272,10 +1280,11 @@ describe("routeRequest — lane-forced reasoning_effort", () => {
   it("overwrites the client's reasoning_effort + sets reasoning_effort_forced when the lane pins it", async () => {
     const d = deps({ lanes: lanesWithForce() });
     // client asked for LOW; the coding lane forces HIGH — force must win.
-    await routeRequest(req({ reasoning_effort: "low" }), d);
+    const result = await routeRequest(req({ reasoning_effort: "low" }), d);
     const passed = reqPassedToExecute(d);
     expect(passed.reasoning_effort).toBe("high");
     expect(passed.reasoning_effort_forced).toBe(true);
+    expect(result.decision.reasoning_effort).toBe("high");
   });
 
   it("leaves reasoning untouched when the selected lane does not force it", async () => {

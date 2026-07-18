@@ -327,6 +327,12 @@
           <dd class="mt-0.5 font-mono text-ink-body">{d.requested_model ?? '—'}</dd>
         </div>
         <div>
+          <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Reasoning effort')}</dt>
+          <dd data-testid="reasoning-effort" class="mt-0.5 font-mono text-ink-body">
+            {d.reasoning_effort ?? '—'}
+          </dd>
+        </div>
+        <div>
           <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Lane')}</dt>
           <dd class="mt-0.5 text-ink-body">{d.lane || '—'}</dd>
         </div>

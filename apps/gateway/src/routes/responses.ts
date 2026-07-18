@@ -536,6 +536,13 @@ function compactModelFromBody(body: Record<string, unknown>): string {
   return typeof body.model === "string" && body.model.length > 0 ? body.model : "unknown";
 }
 
+function compactReasoningEffortFromBody(body: Record<string, unknown>): string | null {
+  const reasoning = body.reasoning;
+  if (reasoning === null || typeof reasoning !== "object" || Array.isArray(reasoning)) return null;
+  const effort = (reasoning as Record<string, unknown>).effort;
+  return typeof effort === "string" && effort.length > 0 ? effort : null;
+}
+
 function compactAlias(model: string): string {
   return model.includes("/") ? model : `openai-codex/${model}`;
 }
@@ -590,6 +597,7 @@ function compactDecision(args: {
   traceId: string;
   keyPrefix: string | null;
   requestedModel: string;
+  reasoningEffort: string | null;
   modelAlias: string;
   providerModel: string;
   providerName: string;
@@ -619,6 +627,7 @@ function compactDecision(args: {
     request_id: args.requestId,
     trace_id: args.traceId,
     requested_model: args.requestedModel,
+    reasoning_effort: args.reasoningEffort,
     protocol: "openai_responses",
     key_prefix: args.keyPrefix,
     classifier: {
@@ -906,6 +915,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
               traceId,
               keyPrefix: typeof identity.keyPrefix === "string" ? identity.keyPrefix : null,
               requestedModel,
+              reasoningEffort: compactReasoningEffortFromBody(carrier.body),
               modelAlias: alias,
               providerModel,
               providerName: execution?.providerName ?? "openai-codex",
@@ -940,6 +950,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
               traceId,
               keyPrefix: typeof identity.keyPrefix === "string" ? identity.keyPrefix : null,
               requestedModel,
+              reasoningEffort: compactReasoningEffortFromBody(carrier.body),
               modelAlias: execution?.modelAlias ?? compactAlias(providerModel),
               providerModel,
               providerName: execution?.providerName ?? "openai-codex",

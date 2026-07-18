@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-07-18 · 关闭正文捕获时仍保留推理等级（Telemetry / Admin requests，docs/07/11，原则 1/7）
+
+- **存储边界**：`capture_payloads:false` 仍只禁止 `request_payloads` 中的完整请求、上游请求与响应正文；请求实际生效的 `reasoning_effort` 作为不含正文和密钥的独立字段写入既有 `DecisionRecord`，随 `decision_json` 持久化。策略或 lane 强制覆盖时记录覆盖后的有效值；请求未指定时记录 `null`，旧记录缺字段继续兼容，不新增 SQLite/Postgres 列或迁移。
+- **展示边界**：Admin 请求详情在正文未捕获时，通过既有脱敏 request metadata 面板展示 `reasoning_effort`；完整正文开启时仍以原始 payload 为事实来源。OpenAI Chat、Anthropic、Responses、Gemini 的共享路由链自动覆盖，`/v1/responses/compact` 的独立遥测构造也显式投影 `reasoning.effort`。
+
 ## 2026-07-18 · Codex 自动压缩目录与无状态传输故障切换（OAuth subscription / Responses / provider execution，docs/04/05/07，原则 3/5/7/8）
 
 - **压缩职责边界**：Codex 客户端拥有当前会话历史并负责在阈值到达时调用 `/v1/responses/compact`、用摘要更新本地 transcript 后重试；Gateway 不透明改写历史，也不把 auto-compact 触发点误当成模型硬输入上限。当前 Codex core 对缺失 `auto_compact_token_limit` 按 resolved context（`context_window`，缺失时回退 `max_context_window`）的 90% 推导，并把上游显式阈值钳制到该上限，因此 Helm 的 key-filtered `/v1/models?client_version=...` 物化相同的有效值（372K → 334,800）。真正超过模型 context 的整链耗尽继续复用既有 compaction-compatible `400 invalid_request`，而不是在 90% 处提前拒绝仍可执行的请求。
@@ -62,14 +67,9 @@
 - **UI 边界**：Gateway 与 reset-credit guard 保持不变；Admin 客户端仅把本地 `429 + reset_credit_cooldown_active` 解释为“该账号最近已经完成重置”，复用既有 `alreadyRedeemed` 成功路径并显示“重置已成功完成”。该投影不会重试、不会产生第二次 fetch，也不会再次请求 OpenAI。
 - **错误边界**：进行中的 `reset_credit_reservation_active`、配额/资格问题、其他 429、guard 故障与真实上游失败继续作为错误显示，不能因本次 UI 修正被吞掉。定向测试同时断言 cooldown 只调用一次 fetch、相邻 429 仍拒绝，以及 Providers 成功状态不出现 error alert。
 
-## 2026-07-15 · Codex 配额 PULL 饱和后触发自动重置（OAuth quota / reset credits，docs/04/11，原则 3/5/7）
-
-- **生产根因**：账号已启用 `autoReset`、仍有 reset credit，显式刷新也从 Codex PULL 得到账号级周窗口 100%；但刷新链只持久化 snapshot、同步 live pool 并停车，自动重置仅由后续响应头 PUSH 触发。账号一旦因 PULL 饱和而停车，可能不再获得下一次响应头，形成“缓存页面持续显示 100%，自动重置没有入口”的延迟触发；生产实例最终在约 5 分钟后的新响应头到达时才成功消耗 credit，证明设置与 guard 本身正常。
-- **触发边界**：cache-only 的 `/oauth/quota` 与 `/oauth/overview` 继续严格无副作用，绝不因读取旧 snapshot 消耗 credit；只有显式 refresh job 的新鲜上游 PULL 和实际响应头 PUSH 属于权威输入。PULL 在完成 durable/live quota 更新和 cooldown 停车同步后，仅对账号级周窗口 `>=100%` 调用并等待同一 `maybeAutoReset` 入口，避免先解停后又被异步停车覆盖；同一 Helm label 的并发触发复用同一个 in-flight promise。credit 成功消费后立即强制再 PULL 一次并更新 durable snapshot、live pool、剩余 credits 与 cooldown，cache-only 页面不会继续显示重置前的 100%。低于 100%、5h 窗口和 model-scoped 饱和窗口不触发；是否有 credit、共享账号幂等 marker、每小时 cooldown 与 workspace spend-control 拒绝仍由既有 reset guard fail-closed 判定。
-- **验证**：TDD 先证明 fresh Codex PULL 没有传递自动重置信号，再覆盖真实 `primary + 10080m + 100%` PULL 必须按“停车 -> 触发”顺序执行、成功消费后 cache/live state 立即变为新窗口与新 credit 数、共享 ChatGPT 账号的第二个 Helm label 必须等待首个 reset/unpark 完成后才开始 PULL、99% 周窗口与 cache-only GET/overview 不触发。定向 4 files / 196 tests、Gateway typecheck、Biome 与 Gateway build 全绿。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-15 · Codex 配额 PULL 饱和后触发自动重置（OAuth quota / reset credits，docs/04/11，原则 3/5/7）**：仅新鲜 PULL/PUSH 在账号级周窗口饱和后经共享幂等 guard 触发 reset credit，成功后强制回读并同步 durable/live quota；cache-only 读取始终无副作用。
 - **2026-07-15 · Anthropic 不可用地域哨兵按全球基础卡计费（Catalog / telemetry accounting，docs/07/08，原则 2/3/5/7）**：仅把 `usage.inference_geo=not_available` 解释为地域缺失并使用全球基础卡，真实未知地域继续 unknown；实时与历史重算共用规范化且保留原始 provenance。
 - **2026-07-15 · 终端事件缺失的 Responses 流使用部分估算计费（Protocol streaming / telemetry accounting，docs/05/07，原则 3/5/7/8）**：原生 Responses 流缺终态时按 truncated/client_aborted 记失败，仅对已收 semantic delta 做有界 partial usage/cost 估算，并让 telemetry、attempt、budget 与 OAuth 账号结算一致；完整原文通过 git history 回溯。
 - **2026-07-15 · 历史费用回填改由常驻 supervisor 持续推进（Catalog / telemetry repair operations，docs/07/08，原则 2/3/5/7）**：systemd 常驻 supervisor 以单实例、100 行原子批次、checkpoint、slice verification、微型恢复库、资源门禁和 5,000 行冷却推进固定截止点前的历史修复；完整原文通过 git history 回溯。

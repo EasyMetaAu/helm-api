@@ -781,6 +781,32 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     });
   });
 
+  it("/compact keeps reasoning effort telemetry when payload capture is off", async () => {
+    const { record, insert, insertPayload } = makeRecord({ capturePayloads: false });
+    const compact = vi.fn().mockResolvedValue({
+      id: "resp_compact",
+      model: "gpt-5.6-sol",
+      output: [],
+    });
+    const { deps } = makeDeps({ lifecycle: { compact }, record });
+
+    const res = await buildApp(deps).request("/v1/responses/compact", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({
+        model: "gpt-5.6-sol",
+        input: "compact this",
+        reasoning: { effort: "xhigh" },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(insertPayload).not.toHaveBeenCalled();
+    expect(insert.mock.calls[0]?.[0]).toMatchObject({
+      decision: { reasoning_effort: "xhigh" },
+    });
+  });
+
   it("/compact rejects an exhausted per-key usage budget before subscription dispatch", async () => {
     const compact = vi.fn().mockResolvedValue({ output: [] });
     const check = vi.fn().mockResolvedValue({

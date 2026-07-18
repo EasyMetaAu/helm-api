@@ -1034,10 +1034,11 @@ describe("POST /v1/chat/completions — payload capture + streamed cost", () => 
     await app.request("/v1/chat/completions", {
       method: "POST",
       headers: AUTH,
-      body: JSON.stringify(NONSTREAM_BODY),
+      body: JSON.stringify({ ...NONSTREAM_BODY, reasoning_effort: "high" }),
     });
     expect(cap.payloads).toHaveLength(0);
     expect(cap.telemetry.insert).toHaveBeenCalled(); // decision still persisted
+    expect((cap.inserted[0] as { reasoning_effort?: string }).reasoning_effort).toBe("high");
   });
 
   it("captures the non-stream response body verbatim when enabled", async () => {

@@ -124,6 +124,7 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
     key_prefix: 'helm_live_ab12',
     key_name: 'Production backend',
     requested_model: 'gpt-4o',
+    reasoning_effort: null,
     served_provider: 'anthropic',
     serving_account: { provider_id: 'anthropic', account: 'claude-team-a' },
     final_model: 'claude-x',
@@ -772,6 +773,27 @@ describe('requests detail page', () => {
     expect(err).toHaveTextContent(/all providers failed/);
     // trace_id is copyable.
     expect(screen.getByTestId('copy-trace')).toBeInTheDocument();
+  });
+
+  it('shows reasoning effort metadata when full payload capture is off', () => {
+    render(DetailPage, {
+      data: {
+        detail: detail({
+          reasoning_effort: 'xhigh',
+          request_meta: {
+            requested_model: 'gpt-4o',
+            reasoning_effort: 'xhigh',
+            policy_reason: null,
+          },
+        }),
+        payload: { captured: false },
+        requestId: 'tr_reasoning',
+      },
+    });
+
+    expect(screen.getByText('Reasoning effort')).toBeInTheDocument();
+    expect(screen.getByTestId('reasoning-effort')).toHaveTextContent('xhigh');
+    expect(screen.getByTestId('payload-summary')).toBeInTheDocument();
   });
 
   it('shows a friendly error state when the trace cannot be loaded (no white screen)', () => {
