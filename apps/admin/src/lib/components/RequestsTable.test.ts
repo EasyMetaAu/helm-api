@@ -16,6 +16,7 @@ function item(overrides: Partial<RequestListItem> = {}): RequestListItem {
     key_prefix: 'helm_live_ab12',
     key_name: 'Prod',
     requested_model: 'gpt-4o',
+    requested_reasoning_effort: null,
     reasoning_effort: null,
     task_type: 'coding',
     complexity: 'high',
@@ -97,7 +98,13 @@ describe('RequestsTable variants', () => {
 
   it('renders the full request-audit columns as grouped cells', () => {
     render(RequestsTable, {
-      items: [item({ latency_ms: 6911, reasoning_effort: 'xhigh' })],
+      items: [
+        item({
+          latency_ms: 6911,
+          requested_reasoning_effort: 'low',
+          reasoning_effort: 'xhigh',
+        }),
+      ],
       detailHref,
       variant: 'full',
     });
@@ -105,12 +112,11 @@ describe('RequestsTable variants', () => {
     const row = screen.getByTestId('request-row');
     expect(within(row).getByTestId('cell-result')).toHaveTextContent('ok');
     expect(within(row).getByTestId('cell-model')).toHaveTextContent('claude-x');
-    expect(within(row).getByTestId('cell-model')).toHaveTextContent('requested: gpt-4o');
+    expect(within(row).getByTestId('cell-model')).toHaveTextContent('requested: gpt-4o low');
     expect(within(row).getByTestId('cell-routing')).toHaveTextContent('premium');
     expect(within(row).getByTestId('cell-routing')).toHaveTextContent('coding');
-    expect(within(row).getByTestId('reasoning-effort')).toHaveTextContent(
-      'Reasoning effort: xhigh',
-    );
+    expect(within(row).getByTestId('reasoning-effort')).toHaveTextContent('xhigh');
+    expect(within(row).getByTestId('reasoning-effort')).not.toHaveTextContent('Reasoning effort');
     expect(within(row).getByTestId('cell-serving')).toHaveTextContent('anthropic');
     expect(within(row).getByTestId('cell-serving')).toHaveTextContent('exec +1');
     expect(within(row).getByTestId('cell-performance')).toHaveTextContent('6.9s');
@@ -124,7 +130,10 @@ describe('RequestsTable variants', () => {
   });
 
   it('keeps legacy rows compact when reasoning effort was not recorded', () => {
-    render(RequestsTable, { items: [item({ reasoning_effort: null })], detailHref });
+    render(RequestsTable, {
+      items: [item({ requested_reasoning_effort: null, reasoning_effort: null })],
+      detailHref,
+    });
 
     expect(screen.queryByTestId('reasoning-effort')).toBeNull();
   });

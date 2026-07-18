@@ -169,6 +169,8 @@ export function buildDecisionRecord(parts: DecisionParts): DecisionRecord {
     request_id: request.request_id,
     trace_id: correlationTraceId(request),
     requested_model: request.requested_model,
+    requested_reasoning_effort: request.reasoning_effort ?? null,
+    reasoning_effort: request.reasoning_effort ?? null,
     protocol: request.protocol,
     key_prefix: keyPrefix,
     classifier: {

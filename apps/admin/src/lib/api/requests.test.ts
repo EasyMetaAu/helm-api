@@ -12,6 +12,7 @@ function rawRecord(overrides: Record<string, unknown> = {}): Record<string, unkn
     request_id: 'tr_1',
     trace_id: 'tr_1',
     requested_model: 'gpt-4o',
+    requested_reasoning_effort: 'low',
     reasoning_effort: 'high',
     key_prefix: 'helm_live_ab12',
     classifier: {
@@ -106,6 +107,7 @@ describe('toListItem', () => {
     expect(row.fallback_count).toBe(1);
     expect(row.cost_usd).toBeCloseTo(0.01);
     expect(row.decided_by).toBe('eval');
+    expect(row.requested_reasoning_effort).toBe('low');
     expect(row.reasoning_effort).toBe('high');
   });
 

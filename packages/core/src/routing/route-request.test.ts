@@ -1284,6 +1284,7 @@ describe("routeRequest — lane-forced reasoning_effort", () => {
     const passed = reqPassedToExecute(d);
     expect(passed.reasoning_effort).toBe("high");
     expect(passed.reasoning_effort_forced).toBe(true);
+    expect(result.decision.requested_reasoning_effort).toBe("low");
     expect(result.decision.reasoning_effort).toBe("high");
   });
 

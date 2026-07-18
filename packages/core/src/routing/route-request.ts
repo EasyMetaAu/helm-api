@@ -973,6 +973,10 @@ export async function routeRequest(
   deps: RouteDeps,
   opts: RouteOptions = {},
 ): Promise<ExecutionResult> {
+  // Capture client intent before policy/lane routing can overwrite the mutable
+  // InternalRequest. This metadata is body-free and remains available when full
+  // payload capture is disabled.
+  const requestedReasoningEffort = req.reasoning_effort ?? null;
   const planned = await plan(req, deps, opts);
 
   // Rejected before execution (unknown model, lane not permitted, or every
@@ -984,6 +988,7 @@ export async function routeRequest(
       request_id: req.request_id,
       trace_id: correlationTraceId(req),
       requested_model: req.requested_model,
+      requested_reasoning_effort: requestedReasoningEffort,
       reasoning_effort: req.reasoning_effort ?? null,
       protocol: req.protocol,
       key_prefix: opts.keyPrefix ?? null,
@@ -1078,6 +1083,7 @@ export async function routeRequest(
     request_id: req.request_id,
     trace_id: correlationTraceId(req),
     requested_model: req.requested_model,
+    requested_reasoning_effort: requestedReasoningEffort,
     reasoning_effort: req.reasoning_effort ?? null,
     protocol: req.protocol,
     key_prefix: opts.keyPrefix ?? null,

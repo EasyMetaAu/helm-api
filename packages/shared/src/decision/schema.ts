@@ -219,6 +219,10 @@ export const DecisionRecordSchema = z.object({
   // server-generated request_id and must never be used as a storage/ownership key.
   trace_id: z.string().min(1),
   requested_model: z.string(),
+  // Reasoning level supplied by the client before any policy/lane override.
+  // Body-free metadata, kept separately from the effective value below so the
+  // Admin list can compare request intent with the routed execution decision.
+  requested_reasoning_effort: z.string().min(1).nullable().optional(),
   // Effective request reasoning level after policy/lane overrides. This is
   // deliberately body-free routing metadata so operators can inspect it even
   // when full request/response capture is disabled. Optional for stored legacy

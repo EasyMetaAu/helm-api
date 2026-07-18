@@ -95,9 +95,11 @@ describe("DecisionRecordSchema", () => {
   it("preserves body-free reasoning effort metadata", () => {
     const parsed = DecisionRecordSchema.parse({
       ...fullRecord(),
+      requested_reasoning_effort: "low",
       reasoning_effort: "high",
     });
 
+    expect(parsed.requested_reasoning_effort).toBe("low");
     expect(parsed.reasoning_effort).toBe("high");
   });
 

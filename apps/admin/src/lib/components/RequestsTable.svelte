@@ -168,6 +168,9 @@
       >
         {$t('requested:')}
         {r.requested_model}
+        {#if r.requested_reasoning_effort}
+          {r.requested_reasoning_effort}
+        {/if}
       </div>
     {/if}
   </div>
@@ -190,9 +193,12 @@
         · {r.complexity}{/if}
     </div>
     {#if r.reasoning_effort}
-      <div data-testid="reasoning-effort" class="mt-1 text-xs text-ink-muted">
-        {$t('Reasoning effort')}:
-        <span class="font-mono text-ink-body">{r.reasoning_effort}</span>
+      <div
+        data-testid="reasoning-effort"
+        class="mt-1 font-mono text-xs text-ink-body"
+        title={$t('Reasoning effort')}
+      >
+        {r.reasoning_effort}
       </div>
     {/if}
   </div>
