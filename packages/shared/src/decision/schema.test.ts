@@ -92,6 +92,15 @@ function passthroughRecord(model = "gpt-4o-mini") {
 }
 
 describe("DecisionRecordSchema", () => {
+  it("preserves body-free reasoning effort metadata", () => {
+    const parsed = DecisionRecordSchema.parse({
+      ...fullRecord(),
+      reasoning_effort: "high",
+    });
+
+    expect(parsed.reasoning_effort).toBe("high");
+  });
+
   it("accepts a full rules-decided record", () => {
     expect(DecisionRecordSchema.safeParse(fullRecord()).success).toBe(true);
   });

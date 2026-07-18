@@ -138,6 +138,7 @@ export interface RequestDetail {
   key_prefix: string | null;
   key_name: string | null;
   requested_model: string | null; // what the client asked for
+  reasoning_effort: string | null; // effective value after policy/lane overrides
   served_provider: string | null; // concrete provider that served the request
   serving_account: ServingAccountView | null; // final subscription account, if any
   final_model: string | null; // the served model alias (null = no provider served)
@@ -231,6 +232,7 @@ interface RawDecisionRecord {
   // row by GET /admin/api/requests). Absent on legacy records → ts stays ''.
   created_at?: number;
   requested_model?: string;
+  reasoning_effort?: string | null;
   // Display prefix only (helm_live_ab12) — the record NEVER carries the plaintext
   // key (Principle 7). Null/absent on legacy (pre-enrichment) records.
   key_prefix?: string | null;
@@ -553,6 +555,7 @@ function normalizeConstraints(raw: Record<string, unknown> | undefined): Record<
 function buildRequestMeta(raw: RawDecisionRecord): Record<string, unknown> {
   return {
     requested_model: raw.requested_model ?? null,
+    reasoning_effort: raw.reasoning_effort ?? null,
     policy_reason: raw.policy?.reason ?? null,
   };
 }
@@ -609,6 +612,7 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
       typeof raw.key_prefix === 'string' && raw.key_prefix.length > 0 ? raw.key_prefix : null,
     key_name: typeof raw.key_name === 'string' && raw.key_name.length > 0 ? raw.key_name : null,
     requested_model: raw.requested_model ?? null,
+    reasoning_effort: nonEmptyString(raw.reasoning_effort),
     served_provider: servedProvider(raw, attempts),
     serving_account: account,
     final_model: raw.final?.model_alias ?? null,

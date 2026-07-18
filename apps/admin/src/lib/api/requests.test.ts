@@ -12,6 +12,7 @@ function rawRecord(overrides: Record<string, unknown> = {}): Record<string, unkn
     request_id: 'tr_1',
     trace_id: 'tr_1',
     requested_model: 'gpt-4o',
+    reasoning_effort: 'high',
     key_prefix: 'helm_live_ab12',
     classifier: {
       task_type: 'coding',
@@ -68,6 +69,18 @@ function rawRecord(overrides: Record<string, unknown> = {}): Record<string, unkn
     ...overrides,
   };
 }
+
+describe('toDetail', () => {
+  it('surfaces body-free reasoning effort in redacted request metadata', () => {
+    const detail = toDetail(rawRecord());
+    expect(detail.reasoning_effort).toBe('high');
+    expect(detail.request_meta).toEqual({
+      requested_model: 'gpt-4o',
+      reasoning_effort: 'high',
+      policy_reason: 'matched',
+    });
+  });
+});
 
 describe('toListItem', () => {
   it('keeps the unique storage request id separate from reusable client correlation', () => {
