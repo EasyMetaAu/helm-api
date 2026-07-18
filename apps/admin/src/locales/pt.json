@@ -136,7 +136,7 @@
   "circuit open": "circuito aberto",
   "Circuit open": "Circuito aberto",
   "Classification failed safely and fell back to balanced.": "A classificação falhou com segurança e voltou para balanced.",
-  "Classification result: lane, decision source, task, and complexity.": "Resultado da classificação: lane, origem da decisão, tarefa e complexidade.",
+  "Classification result: lane, decision source, task, complexity, and reasoning effort.": "Resultado da classificação: lane, origem da decisão, tarefa, complexidade e esforço de raciocínio.",
   "Classification-stage decision source": "Origem da decisão da etapa de classificação",
   "Classifier": "Classificador",
   "Classifier (classification stage)": "Classificador (etapa de classificação)",

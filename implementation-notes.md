@@ -11,6 +11,7 @@
 
 - **存储边界**：`capture_payloads:false` 仍只禁止 `request_payloads` 中的完整请求、上游请求与响应正文；请求实际生效的 `reasoning_effort` 作为不含正文和密钥的独立字段写入既有 `DecisionRecord`，随 `decision_json` 持久化。策略或 lane 强制覆盖时记录覆盖后的有效值；请求未指定时记录 `null`，旧记录缺字段继续兼容，不新增 SQLite/Postgres 列或迁移。
 - **展示边界**：Admin 请求详情在正文未捕获时，通过既有脱敏 request metadata 面板展示 `reasoning_effort`；完整正文开启时仍以原始 payload 为事实来源。OpenAI Chat、Anthropic、Responses、Gemini 的共享路由链自动覆盖，`/v1/responses/compact` 的独立遥测构造也显式投影 `reasoning.effort`。
+- **列表投影**：共享 `RequestsTable` 的 Routing 单元格同步展示已记录的有效推理等级，因此主 Requests 列表、Dashboard recent 与 key-scoped 列表保持一致；旧记录缺字段时不渲染占位行。
 
 ## 2026-07-18 · Codex 自动压缩目录与无状态传输故障切换（OAuth subscription / Responses / provider execution，docs/04/05/07，原则 3/5/7/8）
 

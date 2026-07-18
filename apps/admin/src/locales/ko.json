@@ -136,7 +136,7 @@
   "circuit open": "서킷 오픈",
   "Circuit open": "서킷 오픈",
   "Classification failed safely and fell back to balanced.": "분류가 안전하게 실패하여 균형 레인으로 대체되었습니다.",
-  "Classification result: lane, decision source, task, and complexity.": "분류 결과: 레인, 결정 출처, 작업, 복잡도.",
+  "Classification result: lane, decision source, task, complexity, and reasoning effort.": "분류 결과: 레인, 결정 출처, 작업, 복잡도, 추론 수준.",
   "Classification-stage decision source": "분류 단계 결정 출처",
   "Classifier": "분류기",
   "Classifier (classification stage)": "분류기 (분류 단계)",
