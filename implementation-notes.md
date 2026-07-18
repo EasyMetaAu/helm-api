@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-07-18 · 请求推理等级与实际路由等级分开展示（Telemetry / Admin requests，docs/07/11，原则 1/7）
+
+- **事实边界**：`requested_reasoning_effort` 在进入路由、策略或 lane 覆盖前从客户端请求单独截取；既有 `reasoning_effort` 继续表示覆盖后的有效执行等级。两者都是不含正文与密钥的可选 `DecisionRecord` 元数据，因此关闭 `capture_payloads` 后仍可读取，旧记录缺少请求等级时保持空白，不用有效等级反推客户端意图。
+- **列表展示**：共享 `RequestsTable` 在“请求”模型后直接追加客户端等级（例如 `请求: gpt-5.6-sol high`），Routing 单元格只显示实际有效等级值，不再重复“推理等级”标签。Dashboard、主 Requests 与 key-scoped 列表共用该行为；请求详情现有的有效等级展示不变。
+
 ## 2026-07-18 · 关闭正文捕获时仍保留推理等级（Telemetry / Admin requests，docs/07/11，原则 1/7）
 
 - **存储边界**：`capture_payloads:false` 仍只禁止 `request_payloads` 中的完整请求、上游请求与响应正文；请求实际生效的 `reasoning_effort` 作为不含正文和密钥的独立字段写入既有 `DecisionRecord`，随 `decision_json` 持久化。策略或 lane 强制覆盖时记录覆盖后的有效值；请求未指定时记录 `null`，旧记录缺字段继续兼容，不新增 SQLite/Postgres 列或迁移。
@@ -62,11 +67,6 @@
 - **生产根因**：`la.atmy.work` 的 `/admin/api/memory/stats` 冷读实测最高约 10.2 秒；同步 `better-sqlite3` 在 Node 事件循环上对约 139 万 `memory_messages`、11.9k observations 及其他 memory 表执行 `COUNT/MAX`，扫描期间连 health completion 都暂停。Admin 又在 `app.html` 全局启用 `data-sveltekit-preload-data="hover"`，鼠标经过侧栏即可投机触发这些数据库查询；第一次点击因此等待冷扫描，第二次点击命中 10 秒应用缓存或 OS page cache，形成“再点一下马上出来”的假象。同期没有 VACUUM、cleanup、OOM、`SQLITE_BUSY` 或 payload capture 事件，不能把本次页面卡顿归因于这些路径。
 - **稳定读模型**：SQLite v39 / Postgres v38 在 `memory_threads` 增加 `message_count`、`last_message_at`、`observation_count`、`last_observation_at`，迁移以每个子表一次 set-based `GROUP BY` 原子回填；单条/批量消息写入、dedup conflict、observation 写入与消息清理在同一事务维护汇总。Postgres prune 先按固定顺序锁定受影响的 thread 父行，避免并发 append 的增量被旧快照覆盖；既有 `memory:dedup` SQLite/Postgres 运维路径也在 wipe/prune 后原子重建四个汇总字段，重复运行保持幂等。Admin stats 之后只聚合较小的 thread 父表，不再扫描正文子表。首次升级仍会执行一次有界全量回填，生产发布必须预留启动迁移窗口并观察 WAL/磁盘；它不是每次页面读取的成本。
 - **缓存与前端边界**：SQLite page cache 从 16 MiB 提升到保守的 64 MiB；`/admin/api/stats` 与 `/admin/api/keys/usage` 使用 10 秒 fresh、5 分钟 last-known-good stale 的进程级 single-flight / stale-while-revalidate 缓存，并用 `X-Helm-Cache` 暴露 `miss/coalesced/fresh/stale`。动态 live window 使用稳定 cache key，历史闭合窗口仍按精确边界隔离。Admin 保留 hover code preload，但 data preload 改为 tap；dashboard 与 key detail 的独立读并行，隐藏 tab 不再执行自动刷新。当前生产库约 58.8 GB 且只有约 15 GB 可用、freelist 约 22.8 GiB，继续禁止在线 VACUUM；本次也不擅自开启 memory retention 或修改生产数据。
-
-## 2026-07-15 · Codex 已重置冷却在 Admin 投影为成功（Admin providers UI，docs/11，原则 3/5/7）
-
-- **UI 边界**：Gateway 与 reset-credit guard 保持不变；Admin 客户端仅把本地 `429 + reset_credit_cooldown_active` 解释为“该账号最近已经完成重置”，复用既有 `alreadyRedeemed` 成功路径并显示“重置已成功完成”。该投影不会重试、不会产生第二次 fetch，也不会再次请求 OpenAI。
-- **错误边界**：进行中的 `reset_credit_reservation_active`、配额/资格问题、其他 429、guard 故障与真实上游失败继续作为错误显示，不能因本次 UI 修正被吞掉。定向测试同时断言 cooldown 只调用一次 fetch、相邻 429 仍拒绝，以及 Providers 成功状态不出现 error alert。
 
 ## 历史条目摘要（最新要点）
 

@@ -627,6 +627,7 @@ function compactDecision(args: {
     request_id: args.requestId,
     trace_id: args.traceId,
     requested_model: args.requestedModel,
+    requested_reasoning_effort: args.reasoningEffort,
     reasoning_effort: args.reasoningEffort,
     protocol: "openai_responses",
     key_prefix: args.keyPrefix,

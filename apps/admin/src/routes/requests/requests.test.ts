@@ -41,6 +41,7 @@ function item(traceId: string, overrides: Partial<RequestListItem> = {}): Reques
     key_prefix: 'helm_live_ab12',
     key_name: null,
     requested_model: 'gpt-4o',
+    requested_reasoning_effort: 'low',
     reasoning_effort: 'xhigh',
     task_type: 'coding',
     complexity: 'high',
