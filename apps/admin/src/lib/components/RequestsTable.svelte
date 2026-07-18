@@ -189,6 +189,12 @@
       {r.task_type || '—'}{#if r.complexity}
         · {r.complexity}{/if}
     </div>
+    {#if r.reasoning_effort}
+      <div data-testid="reasoning-effort" class="mt-1 text-xs text-ink-muted">
+        {$t('Reasoning effort')}:
+        <span class="font-mono text-ink-body">{r.reasoning_effort}</span>
+      </div>
+    {/if}
   </div>
 {/snippet}
 
@@ -249,8 +255,9 @@
         >
         <th
           class="px-3 py-2"
-          title={$t('Classification result: lane, decision source, task, and complexity.')}
-          >{$t('Routing')}</th
+          title={$t(
+            'Classification result: lane, decision source, task, complexity, and reasoning effort.',
+          )}>{$t('Routing')}</th
         >
         <th class="px-3 py-2" title={$t('Provider, account, and execution fallback count.')}
           >{$t('Serving')}</th

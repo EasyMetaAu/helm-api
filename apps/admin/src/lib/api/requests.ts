@@ -46,6 +46,7 @@ export interface RequestListItem {
   user_id?: string;
   org_id?: string;
   requested_model: string | null;
+  reasoning_effort: string | null;
   task_type: string;
   complexity: string;
   decided_by: 'rules' | 'eval' | 'default' | 'fallback'; // decision layer (classification stage)
@@ -505,6 +506,7 @@ export function toListItem(raw: RawDecisionRecord): RequestListItem {
     // back to the prefix (so an unnamed/deleted key still renders something).
     key_name: typeof raw.key_name === 'string' && raw.key_name.length > 0 ? raw.key_name : null,
     requested_model: raw.requested_model ?? null,
+    reasoning_effort: nonEmptyString(raw.reasoning_effort),
     task_type: raw.classifier?.task_type ?? '',
     complexity: raw.classifier?.complexity ?? '',
     decided_by: normalizeDecidedBy(raw.classifier?.decided_by),

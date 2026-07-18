@@ -136,7 +136,7 @@
   "circuit open": "熔断开启",
   "Circuit open": "熔断开启",
   "Classification failed safely and fell back to balanced.": "分类安全失败，已兜底到 balanced 通道。",
-  "Classification result: lane, decision source, task, and complexity.": "分类结果：lane、决策来源、任务和复杂度。",
+  "Classification result: lane, decision source, task, complexity, and reasoning effort.": "分类结果：lane、决策来源、任务、复杂度和推理等级。",
   "Classification-stage decision source": "分类阶段决策来源",
   "Classifier": "分类器",
   "Classifier (classification stage)": "分类器（分类阶段）",

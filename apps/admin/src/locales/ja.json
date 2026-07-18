@@ -136,7 +136,7 @@
   "circuit open": "サーキットオープン",
   "Circuit open": "サーキットオープン",
   "Classification failed safely and fell back to balanced.": "分類は安全に失敗し、バランスにフォールバックしました。",
-  "Classification result: lane, decision source, task, and complexity.": "分類結果: レーン、決定元、タスク、複雑度。",
+  "Classification result: lane, decision source, task, complexity, and reasoning effort.": "分類結果: レーン、決定元、タスク、複雑度、推論レベル。",
   "Classification-stage decision source": "分類段階の決定元",
   "Classifier": "分類器",
   "Classifier (classification stage)": "分類器（分類ステージ）",

@@ -41,6 +41,7 @@ function item(traceId: string, overrides: Partial<RequestListItem> = {}): Reques
     key_prefix: 'helm_live_ab12',
     key_name: null,
     requested_model: 'gpt-4o',
+    reasoning_effort: 'xhigh',
     task_type: 'coding',
     complexity: 'high',
     decided_by: 'rules',
@@ -205,6 +206,7 @@ describe('requests list page', () => {
     expect(first).toHaveTextContent('coding'); // task_type
     expect(first).toHaveTextContent('high'); // complexity
     expect(first).toHaveTextContent('rules'); // decided_by
+    expect(within(first).getByTestId('reasoning-effort')).toHaveTextContent('xhigh');
     expect(first).toHaveTextContent('premium'); // lane
     expect(within(first).getByTestId('cell-serving')).toHaveTextContent('anthropic'); // provider
     expect(within(first).getByTestId('cell-serving')).toHaveTextContent('claude-team-a'); // subscription account

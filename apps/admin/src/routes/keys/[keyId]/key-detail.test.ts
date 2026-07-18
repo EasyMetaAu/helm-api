@@ -179,6 +179,7 @@ function requestItem(traceId: string): RequestListItem {
     key_prefix: 'helm_live_ab12',
     key_name: 'Prod backend',
     requested_model: 'gpt-4o',
+    reasoning_effort: null,
     task_type: 'coding',
     complexity: 'complex',
     decided_by: 'rules',

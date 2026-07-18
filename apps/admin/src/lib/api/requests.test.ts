@@ -106,6 +106,7 @@ describe('toListItem', () => {
     expect(row.fallback_count).toBe(1);
     expect(row.cost_usd).toBeCloseTo(0.01);
     expect(row.decided_by).toBe('eval');
+    expect(row.reasoning_effort).toBe('high');
   });
 
   it('surfaces the served provider and final subscription account on list rows', () => {

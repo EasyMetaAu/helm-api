@@ -136,7 +136,7 @@
   "circuit open": "circuit open",
   "Circuit open": "Circuit open",
   "Classification failed safely and fell back to balanced.": "Classification failed safely and fell back to balanced.",
-  "Classification result: lane, decision source, task, and complexity.": "Classification result: lane, decision source, task, and complexity.",
+  "Classification result: lane, decision source, task, complexity, and reasoning effort.": "Classification result: lane, decision source, task, complexity, and reasoning effort.",
   "Classification-stage decision source": "Classification-stage decision source",
   "Classifier": "Classifier",
   "Classifier (classification stage)": "Classifier (classification stage)",
