@@ -211,10 +211,37 @@ describe("transformResponseIn", () => {
     expect(out.stop_reason).toBe("tool_use");
   });
 
+  it("recovers a terminal closed whitelisted XML invoke from an end-turn response", () => {
+    const xml = '<invoke name="Bash"><parameter name="command">git status</parameter></invoke>';
+    const out = transformResponseIn(
+      makeIR({
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: xml },
+            finish_reason: "stop",
+          },
+        ],
+      }),
+      { toolNames: ["Bash"], toolCallXmlRecoveryEnabled: true },
+    );
+
+    expect(out.content).toContainEqual(
+      expect.objectContaining({ type: "tool_use", name: "Bash", input: { command: "git status" } }),
+    );
+    expect(out.stop_reason).toBe("tool_use");
+  });
+
   it.each([
     {
-      title: "finish reason is not tool_use",
-      finishReason: "stop",
+      title: "finish reason is not tool_use or end_turn",
+      finishReason: "length",
+      tools: ["Bash"],
+      enabled: true,
+    },
+    {
+      title: "unknown finish reason maps to end_turn but is ineligible",
+      finishReason: "not_a_finish_reason",
       tools: ["Bash"],
       enabled: true,
     },

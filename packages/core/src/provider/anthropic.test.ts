@@ -2337,6 +2337,36 @@ describe("createAnthropicClient — nativePassthrough", () => {
     });
   });
 
+  it("recovers a terminal whitelisted XML tool call from a native end-turn JSON response", async () => {
+    const upstream = {
+      id: "msg_xml_end_turn",
+      type: "message",
+      role: "assistant",
+      content: [
+        {
+          type: "text",
+          text: '<invoke name="Bash"><parameter name="command">git status</parameter></invoke>',
+        },
+      ],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 10, output_tokens: 5 },
+    };
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: (async () => jsonResponse(upstream)) as unknown as typeof fetch,
+    });
+
+    const out = await client.nativePassthrough?.(
+      { ...nativeBody(), tools: [{ name: "Bash", input_schema: { type: "object" } }] },
+      { toolCallXmlRecovery: true },
+    );
+
+    expect(out).toMatchObject({
+      stop_reason: "tool_use",
+      content: [expect.objectContaining({ type: "tool_use", name: "Bash" })],
+    });
+  });
+
   it("does not recover XML when the native JSON already has a structured tool_use", async () => {
     const upstream = {
       id: "msg_mixed_tools",
@@ -2379,8 +2409,8 @@ describe("createAnthropicClient — nativePassthrough", () => {
       flag: false,
     },
     {
-      label: "the stop reason is not tool_use",
-      stopReason: "end_turn",
+      label: "the stop reason is not tool_use or end_turn",
+      stopReason: "max_tokens",
       toolName: "Bash",
       flag: true,
     },
@@ -2968,6 +2998,64 @@ describe("createAnthropicClient — nativePassthroughStream", () => {
       delta: { stop_reason: "tool_use" },
     });
     expect(events.at(-1)).toEqual({ type: "message_stop" });
+  });
+
+  it("recovers a terminal XML invoke and upgrades an end_turn native SSE terminal", async () => {
+    const writes = [
+      sseEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_xml_end_turn",
+          content: [],
+          stop_reason: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      }),
+      sseEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: "" },
+      }),
+      sseEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: {
+          type: "text_delta",
+          text: '<invoke name="Bash"><parameter name="command">git status</parameter></invoke>',
+        },
+      }),
+      sseEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+      sseEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: { output_tokens: 2 },
+      }),
+      sseEvent("message_stop", { type: "message_stop" }),
+    ];
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: (async () => sseStreamResponse(writes)) as unknown as typeof fetch,
+    });
+
+    const chunks: string[] = [];
+    for await (const chunk of client.nativePassthroughStream?.(
+      { ...nativeStreamBody(), tools: [{ name: "Bash", input_schema: { type: "object" } }] },
+      { toolCallXmlRecovery: true },
+    ) ?? []) {
+      chunks.push(chunk);
+    }
+
+    const events = parsedSSEEvents(chunks.join(""));
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "content_block_start",
+        content_block: expect.objectContaining({ type: "tool_use", name: "Bash" }),
+      }),
+    );
+    expect(events.at(-2)).toMatchObject({
+      type: "message_delta",
+      delta: { stop_reason: "tool_use" },
+    });
   });
 
   it("does not recover XML when the native stream already emitted structured tool_use", async () => {

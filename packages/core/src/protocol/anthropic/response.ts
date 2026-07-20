@@ -8,7 +8,7 @@ import {
   type IRUsage,
 } from "../ir.js";
 import { liftReasoningToFlat, resolveReasoning } from "../reasoning.js";
-import { recoverToolCallsFromText } from "./tool-xml-recovery.js";
+import { recoverTerminalToolCallsFromText, recoverToolCallsFromText } from "./tool-xml-recovery.js";
 
 // IR -> Anthropic Messages native response (docs/05, task protocol.anthropic-resp).
 // The outbound half of "nativeIn -> IR -> nativeOut, never N×N direct". Two
@@ -326,7 +326,7 @@ function repairJson(s: string): string | undefined {
 function toContentBlocks(
   message: IRResponse["choices"][number]["message"],
   toolNameMap: AnthropicToolNameMap,
-  recovery: { enabled: boolean; declaredTools: ReadonlySet<string> },
+  recovery: { enabled: boolean; terminalOnly: boolean; declaredTools: ReadonlySet<string> },
 ): AnthropicContentBlock[] {
   const blocks: AnthropicContentBlock[] = [];
   const { content } = message;
@@ -370,10 +370,14 @@ function toContentBlocks(
     }
   }
 
-  const pushText = (text: string): void => {
+  const pushText = (text: string, terminal: boolean): void => {
     if (text === "") return;
     const segments = recovery.enabled
-      ? recoverToolCallsFromText(text, recovery.declaredTools)
+      ? recovery.terminalOnly
+        ? terminal
+          ? recoverTerminalToolCallsFromText(text, recovery.declaredTools)
+          : null
+        : recoverToolCallsFromText(text, recovery.declaredTools)
       : null;
     if (segments === null) {
       blocks.push({ type: "text", text });
@@ -394,11 +398,13 @@ function toContentBlocks(
   };
 
   if (typeof content === "string") {
-    pushText(content);
+    pushText(content, true);
   } else if (Array.isArray(content)) {
-    for (const part of content) {
+    for (let index = 0; index < content.length; index += 1) {
+      const part = content[index];
+      if (part === undefined) continue;
       if (part.type === "text") {
-        pushText(part.text);
+        pushText(part.text, index === content.length - 1);
       }
       // thinking parts were already emitted via resolveReasoning above.
     }
@@ -450,7 +456,7 @@ export function transformResponseIn(
 ): AnthropicMessagesResponse {
   const choice = ir.choices[0];
   const message = choice?.message ?? { role: "assistant" as const, content: null };
-  const { stop_reason } = mapStopReason(choice?.finish_reason ?? "");
+  const { stop_reason: mappedStopReason } = mapStopReason(choice?.finish_reason ?? "");
   const anthropicSpeed: "fast" | "standard" | undefined =
     ir.service_tier === "fast" ? "fast" : ir.service_tier === "standard" ? "standard" : undefined;
   const usage = {
@@ -461,22 +467,31 @@ export function transformResponseIn(
     ...(message.tool_calls ?? []).map((call) => call.function.name),
     ...(options.toolNames ?? []),
   ]);
+  // Unknown upstream finish reasons map to the legal end_turn output enum, but do
+  // not earn the stricter end-turn recovery fallback.
+  const terminalOnly = choice?.finish_reason === "stop";
   // A real structured call already explains stop_reason=tool_use. Recovering XML in
   // that mixed response would create a second executable call from what may be prose.
   const xmlRecoveryEnabled =
     options.toolCallXmlRecoveryEnabled !== false &&
-    stop_reason === "tool_use" &&
+    (mappedStopReason === "tool_use" || terminalOnly) &&
     (message.tool_calls?.length ?? 0) === 0;
 
+  const content = toContentBlocks(message, toolNameMap, {
+    enabled: xmlRecoveryEnabled,
+    terminalOnly,
+    declaredTools: new Set(options.toolNames ?? []),
+  });
+  const stop_reason =
+    terminalOnly && xmlRecoveryEnabled && content.some((block) => block.type === "tool_use")
+      ? "tool_use"
+      : mappedStopReason;
   const out: AnthropicMessagesResponse = {
     id: ir.id,
     type: "message",
     role: "assistant",
     model: ir.model,
-    content: toContentBlocks(message, toolNameMap, {
-      enabled: xmlRecoveryEnabled,
-      declaredTools: new Set(options.toolNames ?? []),
-    }),
+    content,
     stop_reason,
     stop_sequence: null,
     usage,

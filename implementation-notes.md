@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-20 · `end_turn` XML 泄漏只按终态工具调用恢复（Protocol streaming / provider execution，docs/05/07，原则 3/5/8）
+
+- **恢复边界**：本机 2,520 个 Claude session JSONL 的匿名化扫描中，高置信完整泄漏有 85 个 `tool_use` 与 23 个 `end_turn`；后者是当前真实漏项。保留既有 `tool_use` 的宽松周边文本恢复；仅对 `end_turn` 增加收紧路径。共享 parser 只有在所有完整 invoke 都精确命中请求声明的工具、最后一个非空 segment 是已恢复的 tool、文本 segment 不含残留 `<invoke`，且 invoke 不在 Markdown 三反引号 fence 内时才接受；多个调用之间仅允许空白，避免把前置的无围栏 XML 示例一并执行。末尾空白可保留；无名、未闭合、未知尾巴、function-calls wrapper 和带转义引号的文档示例都不扩 grammar、不恢复。
+- **四出口一致性**：native Anthropic JSON/SSE 与 OpenAI→Anthropic translation JSON/SSE 都只在末个 terminal text 上调用该收紧路径，且没有既有 structured call 才可恢复；成功后分别将终态改为 `tool_use` / `tool_calls`。Translation SSE 与 JSON 复用同一份声明工具名映射，保证点号、碰撞等名称规范化一致。SSE 仍在 `message_delta` 证明终态后才改写，普通 `tool_use` 与非候选路径保持既有行为。
+- **验证**：TDD 先在共享 parser 和四个出口加入失败 case，再以 4 个定向 Vitest 文件、257 个用例覆盖完整 end-turn 恢复及拒绝 fence、尾随文本、调用间 prose、未闭合和未知 invoke；`pnpm typecheck`、`pnpm lint`、`pnpm build` 与 `git diff --check` 通过，不新增依赖或运行时配置。
+
 ## 2026-07-18 · 请求推理等级与实际路由等级分开展示（Telemetry / Admin requests，docs/07/11，原则 1/7）
 
 - **事实边界**：`requested_reasoning_effort` 在进入路由、策略或 lane 覆盖前从客户端请求单独截取；既有 `reasoning_effort` 继续表示覆盖后的有效执行等级。两者都是不含正文与密钥的可选 `DecisionRecord` 元数据，因此关闭 `capture_payloads` 后仍可读取，旧记录缺少请求等级时保持空白，不用有效等级反推客户端意图。
@@ -62,14 +68,9 @@
 - **诚实边界**：文档明确列出已解析但未完整生效的 `lane.constraints`、`classifier.rules.enabled`、`eval.cache.enabled`、policy `project_id` 与空/无交集 `allowed_lanes`，以及尚未挂载的 `HELM_BASE_PATH`、进程内多副本协调限制、Memory 观测/embedding 延迟和跨协议保真缺口。协议矩阵与 roadmap 以后必须把 native passthrough、可证明的翻译、结构化降级和未实现行为分开描述，避免把 schema 存在或测试 helper 能力写成已上线功能。
 - **中文文案边界**：`README.zh-CN.md` 保持与当前代码和英文技术事实一致，但作为独立中文文案按中文语序与读者习惯意译；命令、字段、端点、警告与链接不可改义，也不做逐句机械对照。
 
-## 2026-07-16 · Admin 首次点击卡顿改为非投机加载与汇总读（Admin / Store performance，docs/08/11，原则 1/3/7）
-
-- **生产根因**：`la.atmy.work` 的 `/admin/api/memory/stats` 冷读实测最高约 10.2 秒；同步 `better-sqlite3` 在 Node 事件循环上对约 139 万 `memory_messages`、11.9k observations 及其他 memory 表执行 `COUNT/MAX`，扫描期间连 health completion 都暂停。Admin 又在 `app.html` 全局启用 `data-sveltekit-preload-data="hover"`，鼠标经过侧栏即可投机触发这些数据库查询；第一次点击因此等待冷扫描，第二次点击命中 10 秒应用缓存或 OS page cache，形成“再点一下马上出来”的假象。同期没有 VACUUM、cleanup、OOM、`SQLITE_BUSY` 或 payload capture 事件，不能把本次页面卡顿归因于这些路径。
-- **稳定读模型**：SQLite v39 / Postgres v38 在 `memory_threads` 增加 `message_count`、`last_message_at`、`observation_count`、`last_observation_at`，迁移以每个子表一次 set-based `GROUP BY` 原子回填；单条/批量消息写入、dedup conflict、observation 写入与消息清理在同一事务维护汇总。Postgres prune 先按固定顺序锁定受影响的 thread 父行，避免并发 append 的增量被旧快照覆盖；既有 `memory:dedup` SQLite/Postgres 运维路径也在 wipe/prune 后原子重建四个汇总字段，重复运行保持幂等。Admin stats 之后只聚合较小的 thread 父表，不再扫描正文子表。首次升级仍会执行一次有界全量回填，生产发布必须预留启动迁移窗口并观察 WAL/磁盘；它不是每次页面读取的成本。
-- **缓存与前端边界**：SQLite page cache 从 16 MiB 提升到保守的 64 MiB；`/admin/api/stats` 与 `/admin/api/keys/usage` 使用 10 秒 fresh、5 分钟 last-known-good stale 的进程级 single-flight / stale-while-revalidate 缓存，并用 `X-Helm-Cache` 暴露 `miss/coalesced/fresh/stale`。动态 live window 使用稳定 cache key，历史闭合窗口仍按精确边界隔离。Admin 保留 hover code preload，但 data preload 改为 tap；dashboard 与 key detail 的独立读并行，隐藏 tab 不再执行自动刷新。当前生产库约 58.8 GB 且只有约 15 GB 可用、freelist 约 22.8 GiB，继续禁止在线 VACUUM；本次也不擅自开启 memory retention 或修改生产数据。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-16 · Admin 首次点击卡顿改为非投机加载与汇总读（Admin / Store performance，docs/08/11，原则 1/3/7）**：以 `memory_threads` 的事务维护汇总替代正文表冷扫描，Admin 改为非投机 data preload，并以有界 stale-while-revalidate 缓存保护统计读取；在线 VACUUM 继续禁止。
 - **2026-07-15 · Codex 配额 PULL 饱和后触发自动重置（OAuth quota / reset credits，docs/04/11，原则 3/5/7）**：仅新鲜 PULL/PUSH 在账号级周窗口饱和后经共享幂等 guard 触发 reset credit，成功后强制回读并同步 durable/live quota；cache-only 读取始终无副作用。
 - **2026-07-15 · Anthropic 不可用地域哨兵按全球基础卡计费（Catalog / telemetry accounting，docs/07/08，原则 2/3/5/7）**：仅把 `usage.inference_geo=not_available` 解释为地域缺失并使用全球基础卡，真实未知地域继续 unknown；实时与历史重算共用规范化且保留原始 provenance。
 - **2026-07-15 · 终端事件缺失的 Responses 流使用部分估算计费（Protocol streaming / telemetry accounting，docs/05/07，原则 3/5/7/8）**：原生 Responses 流缺终态时按 truncated/client_aborted 记失败，仅对已收 semantic delta 做有界 partial usage/cost 估算，并让 telemetry、attempt、budget 与 OAuth 账号结算一致；完整原文通过 git history 回溯。
