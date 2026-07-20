@@ -148,3 +148,51 @@ export function recoverToolCallsFromText(
   appendText(segments, text.slice(cursor));
   return segments;
 }
+
+/**
+ * The end_turn fallback is intentionally narrower than tool_use recovery: every
+ * invoke must be declared and outside a Markdown code fence, and the final
+ * meaningful segment must itself be a recovered tool call.
+ */
+export function recoverTerminalToolCallsFromText(
+  text: string,
+  declaredTools: ReadonlySet<string>,
+): RecoverySegment[] | null {
+  const segments = recoverToolCallsFromText(text, declaredTools);
+  if (segments === null) return null;
+
+  let fence = text.indexOf("```");
+  let fences = 0;
+  for (const match of text.matchAll(invokePattern())) {
+    const index = match.index;
+    if (index === undefined) return null;
+    while (fence >= 0 && fence < index) {
+      fences += 1;
+      fence = text.indexOf("```", fence + 3);
+    }
+    if (fences % 2 === 1) return null;
+  }
+
+  const residualToolXml = /<\/?(?:[A-Za-z_][\w.-]*:)?(?:invoke|function_calls)\b/i;
+  for (const segment of segments) {
+    if (segment.type === "text" && residualToolXml.test(segment.text)) return null;
+  }
+  let recoveredToolSeen = false;
+  for (const segment of segments) {
+    if (segment.type === "tool_use") {
+      recoveredToolSeen = true;
+      continue;
+    }
+    // Leading prose may explain the action, but once execution begins, separate
+    // recovered calls only with whitespace. This prevents an earlier un-fenced
+    // XML example from becoming executable alongside the real terminal call.
+    if (recoveredToolSeen && segment.text.trim() !== "") return null;
+  }
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const segment = segments[index];
+    if (segment === undefined) continue;
+    if (segment.type === "tool_use") return segments;
+    if (segment.text.trim() !== "") return null;
+  }
+  return null;
+}

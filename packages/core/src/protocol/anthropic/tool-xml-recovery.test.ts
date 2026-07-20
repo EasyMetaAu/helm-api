@@ -3,6 +3,7 @@ import {
   hasInvokeStart,
   invokeStartIndex,
   invokeStartPrefixSuffixLength,
+  recoverTerminalToolCallsFromText,
   recoverToolCallsFromText,
 } from "./tool-xml-recovery.js";
 
@@ -189,5 +190,30 @@ describe("recoverToolCallsFromText", () => {
     expect(call.call.input.__proto__).toEqual({ polluted: true });
     expect(Object.getPrototypeOf(call.call.input)).toBeNull();
     expect(({} as { polluted?: boolean }).polluted).toBeUndefined();
+  });
+});
+
+describe("recoverTerminalToolCallsFromText", () => {
+  const invoke = '<invoke name="Bash"><parameter name="command">git status</parameter></invoke>';
+
+  it("recovers a declared complete terminal invoke after leading prose and preserves whitespace", () => {
+    expect(recoverTerminalToolCallsFromText(`analysis\n${invoke}\n`, tools("Bash"))).toEqual([
+      { type: "text", text: "analysis\n" },
+      { type: "tool_use", call: { name: "Bash", input: { command: "git status" } } },
+      { type: "text", text: "\n" },
+    ]);
+  });
+
+  it.each([
+    ["an open code fence", `\`\`\`xml\n${invoke}`],
+    ["surrounding trailing text", `${invoke} done`],
+    ["an unclosed invoke tail", `${invoke}<invoke name="Bash">`],
+    ["an unknown invoke tail", `${invoke}<invoke name="Read"></invoke>`],
+    ["a nameless invoke prefix", `<invoke>${invoke}`],
+    ["a stray closing invoke prefix", `</invoke>${invoke}`],
+    ["an incomplete function_calls wrapper", `<function_calls>${invoke}`],
+    ["prose between multiple invokes", `${invoke}\nexample only\n${invoke}`],
+  ])("rejects $0", (_label, text) => {
+    expect(recoverTerminalToolCallsFromText(text, tools("Bash"))).toBeNull();
   });
 });

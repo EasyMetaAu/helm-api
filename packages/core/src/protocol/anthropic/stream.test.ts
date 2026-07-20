@@ -198,11 +198,45 @@ describe("convertOpenAIStreamToAnthropic — leaked tool XML recovery", () => {
     expect(open.size).toBe(0);
   });
 
-  it("flushes candidate XML verbatim when finish_reason does not map to tool_use", async () => {
+  it("recovers a terminal whitelisted invoke from an end-turn stream", async () => {
+    const events = await collect(
+      convertOpenAIStreamToAnthropic(feed([textChunk(invoke), textChunk("", "stop")]), {
+        toolNames: ["Bash"],
+      }),
+    );
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "content_block_start",
+        content_block: expect.objectContaining({ type: "tool_use", name: "Bash" }),
+      }),
+    );
+    const terminal = events.find((event) => event.type === "message_delta");
+    expect(terminal).toMatchObject({ type: "message_delta", delta: { stop_reason: "tool_use" } });
+  });
+
+  it("sanitizes a recovered tool name consistently with non-stream translation", async () => {
+    const dottedInvoke =
+      '<invoke name="fs.read"><parameter name="path">README.md</parameter></invoke>';
+    const events = await collect(
+      convertOpenAIStreamToAnthropic(feed([textChunk(dottedInvoke), textChunk("", "stop")]), {
+        toolNames: ["fs.read"],
+      }),
+    );
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "content_block_start",
+        content_block: expect.objectContaining({ type: "tool_use", name: "fs_read" }),
+      }),
+    );
+  });
+
+  it("flushes candidate XML verbatim when finish_reason is not tool_use or literal end_turn", async () => {
     const chunks = [
       textChunk(`before ${invoke.slice(0, 17)}`),
       textChunk(invoke.slice(17)),
-      textChunk("", "stop"),
+      textChunk("", "not_a_finish_reason"),
     ];
     const events = await collect(
       convertOpenAIStreamToAnthropic(feed(chunks), { toolNames: ["Bash"] }),

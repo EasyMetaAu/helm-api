@@ -18,6 +18,7 @@ import {
 import {
   invokeStartIndex,
   invokeStartPrefixSuffixLength,
+  recoverTerminalToolCallsFromText,
   recoverToolCallsFromText,
 } from "./tool-xml-recovery.js";
 
@@ -280,7 +281,7 @@ interface StreamState {
   usage: IRUsage | null; // buffered; flushed on the terminal event
 }
 
-function createState(): StreamState {
+function createState(toolNames: readonly string[] = []): StreamState {
   return {
     messageStarted: false,
     nextBlockIndex: 0,
@@ -288,7 +289,7 @@ function createState(): StreamState {
     thinkingBlockIndex: null,
     textBlockIndex: null,
     toolIndexToBlock: new Map(),
-    toolNameMap: createAnthropicToolNameMap(),
+    toolNameMap: createAnthropicToolNameMap(toolNames),
     finishReason: null,
     usage: null,
   };
@@ -409,8 +410,11 @@ function* emitRecoveredToolXML(
   state: StreamState,
   text: string,
   declaredTools: ReadonlySet<string>,
+  terminalOnly = false,
 ): Generator<AnthropicSSEEvent, boolean> {
-  const segments = recoverToolCallsFromText(text, declaredTools);
+  const segments = terminalOnly
+    ? recoverTerminalToolCallsFromText(text, declaredTools)
+    : recoverToolCallsFromText(text, declaredTools);
   if (segments === null) return false;
 
   for (const segment of segments) {
@@ -429,7 +433,7 @@ function* emitRecoveredToolXML(
       content_block: {
         type: "tool_use",
         id: clientToolUseId({ id: tempId(blockIndex), blockIndex }),
-        name: segment.call.name,
+        name: state.toolNameMap.toAnthropic(segment.call.name),
         input: {},
       },
     };
@@ -486,7 +490,7 @@ export async function* convertOpenAIStreamToAnthropic(
   chunks: AsyncIterable<OpenAIChunk>,
   options: OpenAIToAnthropicStreamOptions = {},
 ): AsyncIterable<AnthropicSSEEvent> {
-  const state = createState();
+  const state = createState(options.toolNames ?? []);
   const declaredTools = new Set(options.toolNames ?? []);
   let recoveryEnabled = options.toolCallXmlRecoveryEnabled !== false && declaredTools.size > 0;
   let xmlCandidate: string | null = null;
@@ -536,8 +540,8 @@ export async function* convertOpenAIStreamToAnthropic(
       }
 
       // —— text: lazily open the text block, then stream text_delta. A potential
-      // leaked invoke is buffered until the terminal finish_reason supplies the
-      // third safety signal (it must map to Anthropic tool_use). ——
+      // leaked invoke is buffered until the terminal finish_reason either confirms
+      // tool_use or permits the stricter terminal-only end_turn fallback. ——
       if (delta?.content) {
         if (!recoveryEnabled) {
           yield* emitText(state, delta.content);
@@ -692,14 +696,17 @@ export async function* convertOpenAIStreamToAnthropic(
   }
 
   // Finish-reason is deliberately checked only after the whole OpenAI stream has
-  // drained: providers announce it after the content deltas. If it does not map to
-  // Anthropic tool_use, or parsing/whitelisting rejects the candidate, replay every
-  // buffered byte as text. Partial invoke-prefix probes are never swallowed either.
+  // drained: providers announce it after the content deltas. If neither tool_use nor
+  // the stricter terminal end_turn fallback applies, replay every buffered byte as
+  // text. Partial invoke-prefix probes are never swallowed either.
   if (xmlCandidate !== null) {
-    const stopIsToolUse = mapStopReason(state.finishReason ?? "").stop_reason === "tool_use";
-    const recovered = stopIsToolUse
-      ? yield* emitRecoveredToolXML(state, xmlCandidate, declaredTools)
-      : false;
+    const stopReason = mapStopReason(state.finishReason ?? "").stop_reason;
+    const terminalOnly = state.finishReason === "stop" && stopReason === "end_turn";
+    const recovered =
+      stopReason === "tool_use" || terminalOnly
+        ? yield* emitRecoveredToolXML(state, xmlCandidate, declaredTools, terminalOnly)
+        : false;
+    if (recovered && terminalOnly) state.finishReason = "tool_calls";
     if (!recovered) yield* emitText(state, xmlCandidate);
   } else if (invokeProbeSuffix !== "") {
     yield* emitText(state, invokeProbeSuffix);

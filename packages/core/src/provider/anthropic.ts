@@ -31,6 +31,7 @@ import {
   invokeStartIndex,
   invokeStartPrefixSuffixLength,
   type RecoverySegment,
+  recoverTerminalToolCallsFromText,
   recoverToolCallsFromText,
 } from "../protocol/anthropic/tool-xml-recovery.js";
 import {
@@ -1866,14 +1867,16 @@ function recoveredToolUseBlock(
 /**
  * Recover the non-streaming sibling of native passthrough without weakening the
  * byte-faithful common path. The caller has already proved the request-scoped flag;
- * this helper additionally requires Anthropic's own tool_use terminal signal and a
- * declared request tool before replacing any text block.
+ * this helper additionally requires either Anthropic's tool_use signal or the strict
+ * terminal-only end_turn fallback, plus a declared request tool.
  */
 function recoverNativeAnthropicJSON(
   response: Record<string, unknown>,
   declaredTools: ReadonlySet<string>,
 ): Record<string, unknown> {
-  if (response.stop_reason !== "tool_use" || declaredTools.size === 0) return response;
+  const terminalOnly = response.stop_reason === "end_turn";
+  if ((!terminalOnly && response.stop_reason !== "tool_use") || declaredTools.size === 0)
+    return response;
   const content = response.content;
   if (!Array.isArray(content)) return response;
   // `stop_reason` is message-scoped. If Anthropic already emitted a real tool_use,
@@ -1893,7 +1896,8 @@ function recoverNativeAnthropicJSON(
 
   let recovered = false;
   const nextContent: unknown[] = [];
-  for (const rawBlock of content) {
+  for (let index = 0; index < content.length; index += 1) {
+    const rawBlock = content[index];
     if (rawBlock === null || typeof rawBlock !== "object" || Array.isArray(rawBlock)) {
       nextContent.push(rawBlock);
       continue;
@@ -1903,7 +1907,11 @@ function recoverNativeAnthropicJSON(
       nextContent.push(rawBlock);
       continue;
     }
-    const segments = recoverToolCallsFromText(block.text, declaredTools);
+    const segments = terminalOnly
+      ? index === content.length - 1
+        ? recoverTerminalToolCallsFromText(block.text, declaredTools)
+        : null
+      : recoverToolCallsFromText(block.text, declaredTools);
     if (segments === null) {
       nextContent.push(rawBlock);
       continue;
@@ -1914,7 +1922,9 @@ function recoverNativeAnthropicJSON(
       else nextContent.push(recoveredToolUseBlock(segment, nextContent.length));
     }
   }
-  return recovered ? { ...response, content: nextContent } : response;
+  return recovered
+    ? { ...response, content: nextContent, ...(terminalOnly ? { stop_reason: "tool_use" } : {}) }
+    : response;
 }
 
 interface ParsedRawSSEFrame {
@@ -2184,7 +2194,8 @@ function rewriteNativeAnthropicSSETail(
     return null;
   }
 
-  let terminalToolUseDeltaIndex = -1;
+  let terminalDeltaIndex = -1;
+  let terminalOnly = false;
   for (let index = 0; index < messageStopIndex; index += 1) {
     const event = parsed.frames[index]?.event;
     if (event?.type !== "message_delta") continue;
@@ -2193,25 +2204,28 @@ function rewriteNativeAnthropicSSETail(
       delta !== null &&
       typeof delta === "object" &&
       !Array.isArray(delta) &&
-      (delta as { stop_reason?: unknown }).stop_reason === "tool_use"
+      ((delta as { stop_reason?: unknown }).stop_reason === "tool_use" ||
+        (delta as { stop_reason?: unknown }).stop_reason === "end_turn")
     ) {
-      terminalToolUseDeltaIndex = index;
+      terminalDeltaIndex = index;
+      terminalOnly = (delta as { stop_reason?: unknown }).stop_reason === "end_turn";
     }
   }
-  if (terminalToolUseDeltaIndex < 0) return null;
+  if (terminalDeltaIndex < 0) return null;
   // Only ping/comment/opaque frames may sit between the terminal delta and stop.
   if (
     parsed.frames
-      .slice(terminalToolUseDeltaIndex + 1, messageStopIndex)
+      .slice(terminalDeltaIndex + 1, messageStopIndex)
       .some((frame) => frame.event !== null && frame.event.type !== "ping")
   ) {
     return null;
   }
   const lastBlockStopIndex = parsed.frames.findLastIndex(
-    (frame, index) =>
-      index < terminalToolUseDeltaIndex && frame.event?.type === "content_block_stop",
+    (frame, index) => index < terminalDeltaIndex && frame.event?.type === "content_block_stop",
   );
   if (lastBlockStopIndex < 0) return null;
+  const terminalTextIndex = numericEventIndex(parsed.frames[lastBlockStopIndex]?.event ?? {});
+  if (terminalOnly && terminalTextIndex === null) return null;
 
   const textByIndex = new Map<number, string>();
   const stoppedIndexes = new Set<number>();
@@ -2226,8 +2240,11 @@ function rewriteNativeAnthropicSSETail(
 
   const recoveredByIndex = new Map<number, RecoverySegment[]>();
   for (const [index, text] of textByIndex) {
+    if (terminalOnly && index !== terminalTextIndex) continue;
     if (!stoppedIndexes.has(index) || (!hasInvokeStart(text) && !text.includes("<"))) continue;
-    const segments = recoverToolCallsFromText(text, declaredTools);
+    const segments = terminalOnly
+      ? recoverTerminalToolCallsFromText(text, declaredTools)
+      : recoverToolCallsFromText(text, declaredTools);
     if (segments !== null) recoveredByIndex.set(index, segments);
   }
   if (recoveredByIndex.size === 0) return null;
@@ -2242,6 +2259,17 @@ function rewriteNativeAnthropicSSETail(
     }
     const sourceIndex = numericEventIndex(event);
     const recovered = sourceIndex === null ? undefined : recoveredByIndex.get(sourceIndex);
+    if (
+      terminalOnly &&
+      event.type === "message_delta" &&
+      frame === parsed.frames[terminalDeltaIndex]
+    ) {
+      const delta = event.delta;
+      if (delta !== null && typeof delta === "object" && !Array.isArray(delta)) {
+        out += encodedSSEEvent({ ...event, delta: { ...delta, stop_reason: "tool_use" } });
+        continue;
+      }
+    }
     if (
       recovered !== undefined &&
       event.type === "content_block_delta" &&
@@ -2267,9 +2295,10 @@ function rewriteNativeAnthropicSSETail(
 /**
  * Candidate-gated Anthropic SSE recovery. Complete safe frames are released in the
  * exact original network chunks. Once a possible XML start appears, only that tail
- * is held until Anthropic's later message_delta proves `stop_reason:tool_use`; a miss
- * flushes the original chunks unchanged. The source remains readAnthropicSSERaw, so
- * its upstream idle/stall deadline continues to guard every network read.
+ * is held until Anthropic's later message_delta either confirms tool_use or permits
+ * the stricter terminal-only end_turn fallback; a miss flushes the original chunks
+ * unchanged. The source remains readAnthropicSSERaw, so its upstream idle/stall
+ * deadline continues to guard every network read.
  */
 async function* recoverNativeAnthropicSSE(
   source: AsyncIterable<string>,
