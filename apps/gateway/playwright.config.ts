@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "@playwright/test";
-import { ADMIN_PASSWORD, ADMIN_USER, adminEnv } from "./e2e/fixtures/admin.js";
+import { ADMIN_PASSWORD, ADMIN_USER, adminEnv, basicHeader } from "./e2e/fixtures/admin.js";
 
 const GATEWAY_PORT = 8090;
 const MOCK_PORT = 8181;
@@ -77,22 +77,23 @@ export default defineConfig({
       testIgnore: /admin\.spec\.ts$/,
     },
     {
-      // Admin auth-gate cases (@noauth): run WITHOUT httpCredentials so the
-      // gateway's HTTP Basic challenge is observable. With credentials configured,
-      // Playwright would transparently answer the 401 challenge and retry, masking
-      // the gate — so these specs must run in a credential-less project.
+      // Admin auth-gate cases (@noauth): run without credentials so anonymous
+      // browser navigation exercises the first-party login redirect.
       name: "admin-noauth",
       testMatch: /admin\.spec\.ts$/,
       grep: /@noauth/,
     },
     {
-      // Admin UI flows: drive the SPA behind HTTP Basic. Playwright injects the
-      // credentials so the browser never sees the native auth dialog.
+      // Admin UI flows: drive the SPA with pre-emptive Basic credentials. Using an
+      // explicit header is intentional: the server omits WWW-Authenticate so real
+      // browsers show Helm's login page instead of a native Basic dialog.
       name: "admin",
       testMatch: /admin\.spec\.ts$/,
       grepInvert: /@noauth/,
       use: {
-        httpCredentials: { username: ADMIN_USER, password: ADMIN_PASSWORD },
+        extraHTTPHeaders: {
+          Authorization: basicHeader(ADMIN_USER, ADMIN_PASSWORD),
+        },
       },
     },
   ],

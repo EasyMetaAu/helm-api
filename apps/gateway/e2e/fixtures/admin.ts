@@ -4,12 +4,12 @@
 // (e2e/fixtures/test-server.ts), built from the adapter-static SPA in
 // apps/admin/build and served by Hono at /admin. We do NOT mock the front-end
 // and do NOT call core directly — every assertion goes through the real HTTP
-// surface behind HTTP Basic (docs/11).
+// authenticated Admin surface (docs/11).
 //
 // Credentials are injected into the gateway process via env (HELM_ADMIN_ENABLED
 // / HELM_ADMIN_USER / HELM_ADMIN_PASSWORD; env wins over config — docs/11). The
-// SAME values are mirrored here so the Playwright `httpCredentials` and the
-// seed requests authenticate. They are test-only constants, never real secrets,
+// SAME values are mirrored here so Playwright's pre-emptive Authorization header
+// and the seed requests authenticate. They are test-only constants, never real secrets,
 // and never the API-key auth credential (which is Bearer, separate surface).
 
 export const ADMIN_USER = "e2e-admin";
