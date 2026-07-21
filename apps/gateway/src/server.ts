@@ -193,6 +193,7 @@ import { registerAdminApi } from "./routes/admin/index.js";
 import { createOAuthAccountTester, type OAuthTester } from "./routes/admin/oauth-test.js";
 import { createRuntimeRuleStore } from "./routes/admin/rule-store.js";
 import { createYamlRulePersister } from "./routes/admin/yaml-writeback.js";
+import { mountAdminLogin } from "./routes/admin-login.js";
 import { ADMIN_BUILD_ROOT, mountAdminStatic } from "./routes/admin-static.js";
 import { registerChatRoutes } from "./routes/chat.js";
 import { buildClassifyAdapter } from "./routes/classify.js";
@@ -3220,7 +3221,8 @@ export async function buildServer(
   // `route`, behind a pipeline adapter that bridges IR ↔ the OpenAI executor and
   // produces the native Anthropic response / SSE events (docs/05). Self-auth so a
   // missing key is rejected as an Anthropic error envelope (docs/07).
-  // Admin API (/admin/api/*) behind HTTP Basic (admin.auth). DELIBERATELY separate
+  // Admin API (/admin/api/*) behind the signed browser session or pre-emptive HTTP
+  // Basic (admin.auth). DELIBERATELY separate
   // from API-key auth (different credential source, no RBAC). Rule edits go through
   // a runtime RuleStore that re-binds the live `lanes`/`policies` the router reads;
   // keys/requests go to the Store. The plaintext of a freshly minted key is the
@@ -3232,6 +3234,9 @@ export async function buildServer(
   // Otherwise it is NOT mounted at all (/admin and /admin/api → 404), so the
   // key-management + telemetry endpoints can never be reached unauthenticated.
   if (adminAuth.enabled) {
+    // Register the standalone login/logout routes before the protected catch-alls.
+    // The full Admin SPA bundle stays private until authentication succeeds.
+    app.route("/admin", mountAdminLogin(adminAuth));
     // Rule edits write back to the canonical config/*.yaml FIRST (comment-
     // preserving, atomic, fail-closed — see yaml-writeback.ts), THEN rebind the
     // live config. A failed write 500s with nothing changed, so the file always
@@ -3257,7 +3262,7 @@ export async function buildServer(
         classifierConfig = next;
       },
     });
-    app.use("/admin/api/*", basicAuth(adminAuth));
+    app.use("/admin/api/*", basicAuth(adminAuth, { allowSession: true }));
     // Routable model catalog for the Lanes admin combobox: each alias + the
     // subscription account(s) exposing it (so the picker can show the account under
     // each model). CONFIGURED-provider aliases are static (config is immutable) and
@@ -3392,7 +3397,8 @@ export async function buildServer(
     // Admin SPA static hosting (/admin). MUST be mounted AFTER registerAdminApi so
     // the more-specific /admin/api/* routes win (Hono matches in registration
     // order); the static catch-all would otherwise return index.html for them. The
-    // sub-app re-applies basicAuth so the page + assets are also gated. We never run
+    // sub-app accepts signed sessions or pre-emptive Basic so the page + assets are
+    // still gated. We never run
     // SvelteKit here — just serve the adapter-static build (CLAUDE.md Principle 1).
     if (!existsSync(ADMIN_BUILD_ROOT)) {
       logger.log("warn", "admin.static_missing", {

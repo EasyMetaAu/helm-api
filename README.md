@@ -104,7 +104,7 @@ static provider key are optional. Until a provider is usable, inference returns
 | 🔑 | **Keys with teeth** | Mandatory auth; keys authenticate by SHA-256 hash; encrypted recovery material can be stored for admin reveal/rotation. Per key: name, lane whitelist, custom/blocked/Fast-model controls, RPM/TPM limits, usage budgets (degrade or reject), concurrency cap, and memory defaults. Rotate in place, revoke softly, then delete permanently. |
 | 🧠 | **Memory middleware** | Opt in per key (`observe` or `inject`; new keys default to `off`). When enabled, remembered context is injected before routing as a trailing turn and a background worker compresses/consolidates it. Compaction is auto-adaptive; deterministic local summarization is the default, with an optional LLM path. Forgetting/tiering and MCP `memory_recall` are config-gated; hybrid recall is not automatic per-turn injection. Explicit `x-memory-*` headers override key defaults. |
 | 📊 | **Total observability** | A redacted decision record per request — classifier, policy, lane, every provider attempt, latency, fallbacks, cost. Verbatim payload capture to a separate table (on by default, 30-day retention). A payload inspector reads long fields fullscreen, previews inline images, and an editable **Retry** button replays any captured request in its own protocol. |
-| 🖥️ | **Admin dashboard** | SvelteKit SPA at `/admin` behind HTTP Basic when admin is enabled: overview, request debugger, key CRUD, lane/policy/classifier editors, OAuth providers, memory, and system settings. Lanes/policies/classifier write back to YAML and rebind live; keys, settings, providers, and memory persist through their stores/APIs. Seven languages. |
+| 🖥️ | **Admin dashboard** | SvelteKit SPA at `/admin` behind a first-party login page and signed HttpOnly session when admin is enabled; pre-emptive HTTP Basic remains available for scripts. It includes overview, request debugging, key CRUD, lane/policy/classifier editors, OAuth providers, memory, and system settings. Lanes/policies/classifier write back to YAML and rebind live; keys, settings, providers, and memory persist through their stores/APIs. Seven languages. |
 | 👤 | **Self-service portal** | Static SPA at `/portal`, authenticated with the holder's Helm key: own usage/budgets, connection guides, owned request/payload inspection, and scoped memory curation. Ownership checks and allow-list projections hide every other key and all provider/eval topology. Seven languages. |
 | 💾 | **Storage** | SQLite by default (one local file). Postgres / Supabase behind the same Store-port abstraction — switch with one env var. |
 
@@ -112,7 +112,7 @@ static provider key are optional. Until a provider is usable, inference returns
 
 ## Inside the dashboard
 
-The gateway ships a SvelteKit console at `/admin` (HTTP Basic, seven languages) when admin is enabled. Everything here is live: route rules rebind on the next request, runtime settings apply without a restart, provider-pool edits rebuild the next request's pool, and key changes take effect immediately.
+The gateway ships a seven-language SvelteKit console at `/admin` when admin is enabled. Browsers use Helm's login page and a signed HttpOnly session cookie instead of the native Basic popup; scripts may still send pre-emptive HTTP Basic credentials. Everything here is live: route rules rebind on the next request, runtime settings apply without a restart, provider-pool edits rebuild the next request's pool, and key changes take effect immediately.
 
 **Every request, fully explained.** Open any request to follow the whole trail: which layer classified it, the policy that applied, the lane's full candidate chain, each provider actually tried, and the cost split down to cached tokens.
 
@@ -317,7 +317,7 @@ the compatibility/helper inventory is documented below and in [05](docs/05-proto
 | `/v1/responses/*` lifecycle helpers | API key | `input_tokens`, `compact`, retrieve/delete/cancel/input-items for Responses-compatible clients |
 | `POST /mcp` + OAuth discovery | API key or optional MCP OAuth | Optional memory MCP tools when `memory.mcp.enabled` is on |
 | `/portal` · `/portal/api/*` | API key for data API | Key-holder usage, owned requests/payloads, connection help, and scoped memory |
-| `/admin` · `/admin/api/*` | Basic auth | Dashboard + its JSON backend (mounted only when admin is enabled) |
+| `/admin` · `/admin/api/*` | Admin session or Basic auth | Dashboard + its JSON backend (mounted only when admin is enabled) |
 
 ## Configuration
 

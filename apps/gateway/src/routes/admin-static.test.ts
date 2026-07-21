@@ -9,7 +9,7 @@ import { mountAdminStatic } from "./admin-static.js";
 //   1. With credentials, GET /admin -> 200 index.html (text/html)
 //   2. Static assets (_app/immutable/assets/*.css) -> 200 + correct MIME
 //   3. SPA fallback: a sub-route with no physical file (/admin/keys) -> 200 index.html, not 404
-//   4. Unauthenticated -> 401 + WWW-Authenticate, and leaks no static content
+//   4. Unauthenticated page navigation -> login redirect without a Basic popup
 //   5. The Phase 0 placeholder text no longer appears (catch-all static serving has taken over)
 //   6. /admin/api/* is not swallowed by the static fallback (API routes win when registered first)
 //   7. admin.enabled:false -> Basic does not block, /admin still serves static files
@@ -68,10 +68,13 @@ describe("mountAdminStatic", () => {
     expect(body).toContain('base: "/admin"');
   });
 
-  it("rejects unauthenticated requests with 401 and does not leak content", async () => {
-    const res = await appWith(ENABLED).request("/admin");
-    expect(res.status).toBe(401);
-    expect(res.headers.get("WWW-Authenticate")).toContain("Basic");
+  it("redirects unauthenticated page navigation without leaking content or prompting Basic", async () => {
+    const res = await appWith(ENABLED).request("/admin", {
+      headers: { Accept: "text/html" },
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe("/admin/login?next=%2Fadmin");
+    expect(res.headers.get("WWW-Authenticate")).toBeNull();
     const body = await res.text();
     expect(body).not.toContain("<!doctype html>");
     expect(body).not.toContain('base: "/admin"');
@@ -81,6 +84,7 @@ describe("mountAdminStatic", () => {
     const wrong = `Basic ${Buffer.from("admin:nope").toString("base64")}`;
     const res = await appWith(ENABLED).request("/admin", { headers: { Authorization: wrong } });
     expect(res.status).toBe(401);
+    expect(res.headers.get("WWW-Authenticate")).toBeNull();
   });
 
   it("no longer returns the Phase 0 placeholder text", async () => {

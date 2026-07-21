@@ -1,9 +1,12 @@
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import {
+  ADMIN_SESSION_COOKIE,
   type AdminAuthConfig,
   basicAuth,
+  createAdminSessionToken,
   resolveAdminAuth,
+  verifyAdminSessionToken,
   warnIfAdminUnconfigured,
 } from "./basic-auth.js";
 
@@ -204,5 +207,81 @@ describe("basicAuth middleware", () => {
     });
     const text = await res.text();
     expect(text).not.toContain(SECRET);
+  });
+
+  it("accepts a valid signed browser session while keeping Basic compatible", async () => {
+    const auth: AdminAuthConfig = { enabled: true, username: "admin", password: SECRET };
+    const now = 1_800_000_000_000;
+    const token = createAdminSessionToken(auth, now + 60_000);
+    const downstream = vi.fn();
+    const app = new Hono();
+    app.use("*", basicAuth(auth, { allowSession: true, now: () => now }));
+    app.get("/admin/api/keys", (c) => {
+      downstream();
+      return c.json({ ok: true });
+    });
+
+    const cookie = await app.request("/admin/api/keys", {
+      headers: { Cookie: `${ADMIN_SESSION_COOKIE}=${token}` },
+    });
+    expect(cookie.status).toBe(200);
+
+    const basicResponse = await app.request("/admin/api/keys", {
+      headers: { Authorization: basic("admin", SECRET) },
+    });
+    expect(basicResponse.status).toBe(200);
+    expect(downstream).toHaveBeenCalledTimes(2);
+  });
+
+  it("redirects HTML pages to the login page without triggering a Basic popup", async () => {
+    const auth: AdminAuthConfig = { enabled: true, username: "admin", password: SECRET };
+    const app = new Hono();
+    app.use("*", basicAuth(auth, { allowSession: true, redirectToLogin: true }));
+    app.get("/admin/providers", (c) => c.text("private"));
+
+    const res = await app.request("/admin/providers?from=setup", {
+      headers: { Accept: "text/html" },
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("Location")).toBe(
+      "/admin/login?next=%2Fadmin%2Fproviders%3Ffrom%3Dsetup",
+    );
+    expect(res.headers.get("WWW-Authenticate")).toBeNull();
+  });
+
+  it("returns a popup-free 401 for unauthenticated Admin API requests", async () => {
+    const auth: AdminAuthConfig = { enabled: true, username: "admin", password: SECRET };
+    const app = new Hono();
+    app.use("*", basicAuth(auth, { allowSession: true }));
+    app.get("/admin/api/keys", (c) => c.json({ ok: true }));
+
+    const res = await app.request("/admin/api/keys", { headers: { Accept: "application/json" } });
+    expect(res.status).toBe(401);
+    expect(res.headers.get("WWW-Authenticate")).toBeNull();
+  });
+});
+
+describe("admin session token", () => {
+  const auth: AdminAuthConfig = { enabled: true, username: "admin", password: SECRET };
+  const now = 1_800_000_000_000;
+
+  it("round-trips, expires, rejects tampering, and is invalidated by password rotation", () => {
+    const token = createAdminSessionToken(auth, now + 60_000);
+    expect(verifyAdminSessionToken(auth, token, now)).toBe(true);
+    expect(verifyAdminSessionToken(auth, token, now + 60_001)).toBe(false);
+    expect(verifyAdminSessionToken(auth, `${token}x`, now)).toBe(false);
+    expect(verifyAdminSessionToken({ ...auth, password: "rotated-password" }, token, now)).toBe(
+      false,
+    );
+  });
+
+  it("fails closed when credentials or the token are missing", () => {
+    expect(() =>
+      createAdminSessionToken({ enabled: true, username: null, password: null }, now + 60_000),
+    ).toThrow();
+    expect(verifyAdminSessionToken(auth, "", now)).toBe(false);
+    expect(
+      verifyAdminSessionToken({ enabled: true, username: null, password: null }, "v1.x.y", now),
+    ).toBe(false);
   });
 });

@@ -72,8 +72,10 @@ function setSpaCacheHeaders(c: Context): void {
 export function mountAdminStatic(auth: AdminAuthConfig): Hono {
   const admin = new Hono();
 
-  // 1) The whole /admin goes through Basic first (foremost): unauthenticated -> 401 + WWW-Authenticate, no content leaked.
-  admin.use("*", basicAuth(auth));
+  // 1) Browser sessions and pre-emptive Basic credentials are accepted. Anonymous
+  // page navigation goes to the first-party login page without emitting a browser
+  // Basic challenge; static assets remain private and fail with a plain 401.
+  admin.use("*", basicAuth(auth, { allowSession: true, redirectToLogin: true }));
 
   // 2) Cache policy, set BEFORE the static handlers build the body (see setSpaCacheHeaders).
   admin.use("/*", async (c, next) => {

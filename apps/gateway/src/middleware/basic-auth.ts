@@ -1,5 +1,6 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { MiddlewareHandler } from "hono";
+import { getCookie } from "hono/cookie";
 
 // Admin-UI authentication. This is DELIBERATELY separate from API-key auth
 // (docs/06): different header (HTTP Basic vs. Bearer helm_...), different
@@ -13,6 +14,13 @@ export interface AdminAuthConfig {
 }
 
 const REALM = 'Basic realm="Helm Admin"';
+export const ADMIN_SESSION_COOKIE = "helm_admin_session";
+
+export interface AdminAuthMiddlewareOptions {
+  allowSession?: boolean;
+  redirectToLogin?: boolean;
+  now?: () => number;
+}
 
 // Parse a truthy env flag (1/true/yes/on, case-insensitive). Anything else
 // (incl. undefined) is null so the caller can fall back to config.
@@ -71,6 +79,62 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(digA, digB);
 }
 
+export function verifyAdminCredentials(
+  auth: AdminAuthConfig,
+  username: string,
+  password: string,
+): boolean {
+  return (
+    auth.username !== null &&
+    auth.password !== null &&
+    safeEqual(username, auth.username) &&
+    safeEqual(password, auth.password)
+  );
+}
+
+function adminSessionKey(auth: AdminAuthConfig): Buffer | null {
+  if (auth.username === null || auth.password === null) return null;
+  return createHash("sha256")
+    .update("helm-admin-session\0", "utf8")
+    .update(auth.username, "utf8")
+    .update("\0", "utf8")
+    .update(auth.password, "utf8")
+    .digest();
+}
+
+export function createAdminSessionToken(auth: AdminAuthConfig, expiresAtMs: number): string {
+  const key = adminSessionKey(auth);
+  if (!key || !Number.isSafeInteger(expiresAtMs)) {
+    throw new Error("admin credentials are required to create a session");
+  }
+  const payload = `v1.${expiresAtMs}`;
+  const signature = createHmac("sha256", key).update(payload, "utf8").digest("base64url");
+  return `${payload}.${signature}`;
+}
+
+export function verifyAdminSessionToken(
+  auth: AdminAuthConfig,
+  token: string,
+  nowMs = Date.now(),
+): boolean {
+  const key = adminSessionKey(auth);
+  if (!key) return false;
+  const parts = token.split(".");
+  if (parts.length !== 3 || parts[0] !== "v1") return false;
+  const expiresAtMs = Number(parts[1]);
+  if (!Number.isSafeInteger(expiresAtMs) || expiresAtMs <= nowMs) return false;
+  const providedText = parts[2];
+  if (!providedText) return false;
+  let provided: Buffer;
+  try {
+    provided = Buffer.from(providedText, "base64url");
+  } catch {
+    return false;
+  }
+  const expected = createHmac("sha256", key).update(`v1.${parts[1]}`, "utf8").digest();
+  return provided.length === expected.length && timingSafeEqual(provided, expected);
+}
+
 // Parse `Authorization: Basic base64(user:pass)`. Returns null for any other
 // scheme (e.g. Bearer) or malformed input.
 function parseBasic(header: string | undefined): { user: string; pass: string } | null {
@@ -93,14 +157,35 @@ function parseBasic(header: string | undefined): { user: string; pass: string } 
 // - enabled:true, creds missing -> fail closed: every request 401 (never silently allowed)
 // - enabled:true, creds present -> validate Basic; mismatch -> 401 + WWW-Authenticate
 // Credentials are compared in constant time and the password is never logged.
-export function basicAuth(auth: AdminAuthConfig): MiddlewareHandler {
+export function basicAuth(
+  auth: AdminAuthConfig,
+  options: AdminAuthMiddlewareOptions = {},
+): MiddlewareHandler {
   return async (c, next) => {
     if (!auth.enabled) {
       await next();
       return;
     }
 
-    const reject = () => c.text("Unauthorized", 401, { "WWW-Authenticate": REALM });
+    const reject = () => {
+      const authorization = c.req.header("Authorization");
+      const acceptsHtml = c.req.header("Accept")?.includes("text/html") ?? false;
+      const pageLikePath = !/\.[a-z0-9]+$/i.test(c.req.path);
+      if (
+        options.redirectToLogin &&
+        authorization === undefined &&
+        (acceptsHtml || pageLikePath) &&
+        (c.req.method === "GET" || c.req.method === "HEAD")
+      ) {
+        const url = new URL(c.req.url);
+        return c.redirect(
+          `/admin/login?next=${encodeURIComponent(`${c.req.path}${url.search}`)}`,
+          302,
+        );
+      }
+      if (options.allowSession) return c.text("Unauthorized", 401);
+      return c.text("Unauthorized", 401, { "WWW-Authenticate": REALM });
+    };
 
     // Fail closed: enabled without credentials means we reject everything.
     if (auth.username === null || auth.password === null) {
@@ -108,15 +193,15 @@ export function basicAuth(auth: AdminAuthConfig): MiddlewareHandler {
     }
 
     const parsed = parseBasic(c.req.header("Authorization"));
-    if (parsed === null) {
-      return reject();
-    }
-
-    const userOk = safeEqual(parsed.user, auth.username);
-    const passOk = safeEqual(parsed.pass, auth.password);
-    if (!userOk || !passOk) {
-      return reject();
-    }
+    const basicOk = parsed !== null && verifyAdminCredentials(auth, parsed.user, parsed.pass);
+    const sessionOk =
+      options.allowSession === true &&
+      verifyAdminSessionToken(
+        auth,
+        getCookie(c, ADMIN_SESSION_COOKIE) ?? "",
+        options.now?.() ?? Date.now(),
+      );
+    if (!basicOk && !sessionOk) return reject();
 
     await next();
   };

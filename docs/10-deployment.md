@@ -108,6 +108,11 @@ precedence over this file. It is deliberately equivalent to a private `.env`
 inside the persistent data volume: protect the volume and backups; storing an
 encryption key beside ciphertext would not protect against full-volume theft.
 
+Opening `/admin` after setup now shows Helm's own login page instead of the
+browser's HTTP Basic prompt. A successful login creates a signed HttpOnly session
+for 12 hours; changing the configured Admin username or password invalidates it.
+Automation may continue to send pre-emptive HTTP Basic credentials directly.
+
 ## Volumes
 
 - `/app/config` — the YAML config tree (see [Configuration sources](#configuration-sources)).

@@ -99,7 +99,7 @@ Codex 和 SDK 的可复制接入配置；整个过程无需手动重启服务。
 | 🔑 | **可精细约束的 API Key** | 所有请求必须鉴权，API key 仅以 SHA-256 哈希参与验证；如需在管理面板中查看或轮转，可额外保存加密后的恢复材料。每把 key 都能独立设置名称、lane 白名单、自定义模型/禁用模型/Fast 模型权限、RPM/TPM 限流、用量预算（降级或拒绝）、并发上限和 Memory 默认值。支持原地轮转、软吊销和永久删除。 |
 | 🧠 | **Memory 中间件** | Memory 需按 key 主动开启，可选 `observe` 或 `inject`，新 key 默认为 `off`。启用后，Helm 会在路由前把相关记忆追加为末尾消息，并由后台 worker 自动压缩、归并；压缩策略会随内容自动调整。摘要默认采用确定性的本地实现，也可改用 LLM。遗忘/分层和 MCP `memory_recall` 均受配置开关控制，混合召回不会在每轮请求中自动注入。请求显式携带的 `x-memory-*` 头优先于 key 默认值。 |
 | 📊 | **完整的可观测链路** | 每个请求都会留下脱敏的决策记录，包括分类结果、命中策略、lane、历次供应商尝试、延迟、兜底和成本。完整请求/响应正文单独存表，默认开启并保留 30 天。正文查看器可全屏阅读长字段、预览内联图片；还可编辑正文后点击 **Retry**，按原协议重新发起已捕获的请求。 |
-| 🖥️ | **管理面板** | 启用 admin 后，`/admin` 会提供一个受 HTTP Basic 保护的 SvelteKit SPA，涵盖总览、请求调试、key 管理、lane / 策略 / 分类器编辑、OAuth provider、Memory 和系统设置。Lane、策略与分类器会写回 YAML 并立即重新绑定；key、设置、provider 和 Memory 则通过各自的 store/API 持久化。界面支持 7 种语言。 |
+| 🖥️ | **管理面板** | 启用 admin 后，`/admin` 会提供带站内登录页和 HttpOnly 签名会话的 SvelteKit SPA；脚本仍可主动发送 HTTP Basic。面板涵盖总览、请求调试、key 管理、lane / 策略 / 分类器编辑、OAuth provider、Memory 和系统设置。Lane、策略与分类器会写回 YAML 并立即重新绑定；key、设置、provider 和 Memory 则通过各自的 store/API 持久化。界面支持 7 种语言。 |
 | 👤 | **API Key 自助门户** | `/portal` 直接使用持有者的 key 鉴权，只展示该 key 自己的用量与预算、接入指南、所属请求及正文，以及限定作用域内的 Memory 管理。每个 trace 都先校验归属关系，响应也只返回白名单字段，因此不会泄露其他 key、provider 拓扑或 eval 内部信息。界面支持 7 种语言。 |
 | 💾 | **存储** | 默认使用单文件 SQLite。Postgres / Supabase 实现同一套 Store 端口；只需修改一个环境变量即可切换。 |
 
@@ -107,7 +107,7 @@ Codex 和 SDK 的可复制接入配置；整个过程无需手动重启服务。
 
 ## 管理面板一览
 
-启用 admin 后，网关会在 `/admin` 提供一个受 HTTP Basic 保护、支持 7 种语言的 SvelteKit 控制台。面板中的变更会直接作用于运行中的网关：路由规则从下一个请求开始重新绑定，运行时设置无需重启，provider 账号池会为下一个请求重建，key 的启停与权限限制也会立即生效。
+启用 admin 后，网关会在 `/admin` 提供一个支持 7 种语言的 SvelteKit 控制台。浏览器通过 Helm 自己的登录页建立 HttpOnly 签名会话，不再弹出原生 Basic 对话框；脚本仍可主动携带 HTTP Basic 凭据。面板中的变更会直接作用于运行中的网关：路由规则从下一个请求开始重新绑定，运行时设置无需重启，provider 账号池会为下一个请求重建，key 的启停与权限限制也会立即生效。
 
 **每一个请求都有据可查。** 打开任意请求，即可看到完整决策过程：由哪一层完成分类、命中了哪条策略、该 lane 有哪些候选、实际尝试过哪些供应商，以及细分到缓存 token 的成本。
 
@@ -299,7 +299,7 @@ gemini-image:                       # 请求填 `model: "gemini-image"`
 | `/v1/responses/*` 生命周期辅助接口 | API key | `input_tokens`、`compact`、retrieve/delete/cancel/input-items，供 Responses 兼容客户端使用 |
 | `POST /mcp` + OAuth discovery | API key 或可选 MCP OAuth | 开启 `memory.mcp.enabled` 后暴露的 Memory MCP 工具 |
 | `/portal` · `/portal/api/*` | 数据 API 使用 Helm key | 当前 key 的用量、预算、所属请求与正文、接入指南，以及限定作用域的 Memory |
-| `/admin` · `/admin/api/*` | Basic auth | 管理面板及其 JSON 后端；只有启用 admin 时才会挂载 |
+| `/admin` · `/admin/api/*` | Admin 会话或 Basic auth | 管理面板及其 JSON 后端；只有启用 admin 时才会挂载 |
 
 ## 配置
 
