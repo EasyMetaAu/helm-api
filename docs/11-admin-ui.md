@@ -23,6 +23,14 @@ admin configuration is **environment-only**: `loadConfig()` has no top-level
 control. (`resolveAdminAuth` retains a config argument for direct/headless callers
 and tests, but `buildServer()` cannot populate it from `config/*.yaml`.)
 
+On a new install, complete credentials do not need to exist before the process
+starts. The token-protected `/setup` surface collects them and atomically writes
+the resulting environment-shaped values to `data/helm-managed-env.json` with
+mode `0600`; the process then switches to the full gateway without a restart.
+On later boots that file is loaded before `buildServer()`, while any non-empty
+external environment variable still wins. Setup itself never mounts `/admin` or
+`/admin/api/*`, so there is no unauthenticated Admin interval.
+
 ```bash
 # Environment form (recommended for Docker)
 HELM_ADMIN_USER=admin

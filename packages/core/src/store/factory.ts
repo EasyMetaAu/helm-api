@@ -1,3 +1,4 @@
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { StoreConfig } from "@helm/shared";
 import type {
@@ -81,6 +82,7 @@ export async function createStore(opts: CreateStoreOptions): Promise<StoreSet> {
   switch (driver) {
     case "sqlite": {
       const dataDir = opts.dataDir ?? "./data";
+      await mkdir(dataDir, { recursive: true });
       const db = createSqliteDb(join(dataDir, "helm.db"));
       return {
         keys: new SqliteKeyStore(db),

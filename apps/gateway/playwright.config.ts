@@ -19,9 +19,9 @@ const e2eEnv = {
   // Resolved against the gateway CWD (repo root, set on the webServer below).
   HELM_DATA_DIR: "./apps/gateway/.e2e-data",
   HELM_TEST_KEY: "helm_live_e2e_testkey",
-  // PRIMARY (deepseek) provider credential — mandatory; the gateway fail-closes
-  // without it. A dummy value is enough: HELM_PROVIDER_BASE_URL points every
-  // provider at the offline mock, so no real key is ever used.
+  // Key the primary (deepseek) provider so routing tests exercise it. A dummy
+  // value is enough: HELM_PROVIDER_BASE_URL points every provider at the offline
+  // mock, so no real key is ever used.
   DEEPSEEK_API_KEY: "sk-upstream-mock-key",
   // OpenRouter is a real production fallback provider (the economy/balanced tails
   // route through it). Keyed so its mock-backed candidates serve — without it the

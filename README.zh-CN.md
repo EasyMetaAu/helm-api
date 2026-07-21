@@ -48,29 +48,42 @@ client.chat.completions.create(model="auto", messages=[...])   # Helm 负责分�
 **前置条件：** [Docker](https://docs.docker.com/get-docker/)；或 **Node ≥ 22** + **pnpm 10** 从源码构建。
 
 ```bash
-# 1. 克隆并创建环境变量文件
+# 克隆仓库，启动 Docker，然后在浏览器完成初始化
 git clone https://github.com/EasyMetaAu/helm-api.git && cd helm-api
-cp .env.example .env
-#    在 .env 里至少设好 HELM_ADMIN_PASSWORD 和 DEEPSEEK_API_KEY
-
-# 2. 启动
-docker compose up -d
-
-# 3. 复制 root API key —— 首次打印，并写入 data/helm-keys.json（0600）
-docker compose logs helm | grep -i "root API key"
+./scripts/quickstart.sh
 ```
+
+脚本会打印完整的 `/setup#token=...` 地址；保护令牌只留在浏览器 URL fragment
+中，页面会自动读取，无需理解或手工粘贴。向导第一步直接设置管理账号，
+随后可填写并测试可选的 Provider API key；也可以一把静态 key 都不填，
+先完成初始化，
+再到 **管理面板 → Providers** 连接 ChatGPT/Codex、Claude、Copilot 或 Grok
+订阅。完成页会一次性显示自动创建的管理员 API Token，并给出 Claude Code、
+Codex 和 SDK 的可复制接入配置；整个过程无需手动重启服务。
+
+默认脚本只会在私有 `.env` 中保存端口和 Linux UID/GID。向导填写的凭据
+保存在数据卷内的 `data/helm-managed-env.json`，权限为 `0600`；已有 `.env`
+不会被覆盖。需要纯命令行或自动化安装时，可运行
+`./scripts/quickstart.sh --cli`，也可以预先设置 `HELM_ADMIN_*` 与 Provider 环境变量。
 
 | 入口 | 地址 |
 |---|---|
-| 网关 | `http://localhost:8080`（`/` 是状态落地页） |
-| 管理面板 | `http://localhost:8080/admin` —— 用 `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD` 登录 |
-| API Key 自助门户 | `http://localhost:8080/portal` —— 用 Helm API key 登录 |
+| 网关 | 默认 `http://localhost:8080`（`/` 是状态落地页） |
+| 首次初始化 | 初始化完成前使用 `http://localhost:8080/setup` |
+| 管理面板 | 默认 `http://localhost:8080/admin`，使用向导中设置的账号密码 |
+| API Key 自助门户 | 默认 `http://localhost:8080/portal`，使用 Helm API key 登录 |
 | API 文档 | `GET /docs`（Swagger UI）· `GET /openapi.json`（OpenAPI 3.1，与网关校验所用为同一套 Zod schema） |
 | 健康 / 版本 | `GET /healthz` · `GET /version` |
 
-`docker-compose.yml` 会挂载 `./config` 和 `./data`，因此重启容器不会丢失配置或数据库。凭证只通过环境变量传入，不会写进镜像。
+`docker-compose.yml` 会挂载 `./config` 和 `./data`，因此重启容器不会丢失
+配置或数据库；它也会把 `.env` 注入容器，无需再为可选 provider 或运行时
+覆盖修改 Compose。`HELM_PORT` 会统一控制宿主机端口、Gateway 监听端口和健康检查。
 
-> Compose 只用 `.env` 做变量替换，不会把其中所有变量自动传入容器。仓库自带的 compose 文件仅转发 `environment:` 中明确列出的变量。若要启用其他 provider 或覆盖运行时配置，请把对应变量加入该段，或显式配置 `env_file`。网关进程本身不会读取 `.env`。
+手动使用 Compose 时，Linux 用户应先创建 `./data`，并把 `HELM_UID`、
+`HELM_GID` 设为 `id -u`、`id -g` 的输出，再执行
+`docker compose up -d --wait`；`.env` 和静态 Provider key 都不是首次启动的
+必需项。尚未接入任何 Provider 时，健康检查和管理面板仍可用，推理请求会
+明确返回 `503 lane_unavailable` 并提示完成 Provider 配置。
 
 ## 你能得到什么
 
@@ -309,15 +322,15 @@ gemini-image:                       # 请求填 `model: "gemini-image"`
 
 | 变量 | 用途 |
 |---|---|
-| `DEEPSEEK_API_KEY` | 主供应商凭证（**必填**） |
+| `DEEPSEEK_API_KEY` | 可选的 DeepSeek 官方凭证；未提供时会跳过该 provider |
 | `ZENMUX_API_KEY`、`OPENROUTER_API_KEY` | 可选供应商凭证（缺失则跳过该供应商） |
 | `OPENAI_API_KEY`、`GEMINI_API_KEY` | 可选的官方 provider 凭证。内置 lane 不会直接调用 OpenAI；但任意有效 key 仍可精确指定 OpenAI 官方图片 alias。`gemini-image` 会优先使用 Google 官方接口，失败后切换到 ZenMux。 |
-| `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD` | 面板登录（Basic auth） |
+| `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD` | 可选的预配置面板账号；未提供时由 `/setup` 收集 |
 | `HELM_HOST` / `HELM_PORT` | 服务绑定（默认 `0.0.0.0:8080`） |
 | `HELM_STORE_DRIVER` | `sqlite`（默认）或 `supabase` |
 | `HELM_STORE_URL_ENV` | 用 `supabase` 时：存放 Postgres DSN 的环境变量**名** |
 | `HELM_RATE_LIMIT_ENABLED` | 打开限流（默认关闭） |
-| `HELM_OAUTH_ENC_KEY` | 用于加密可恢复 API key 和 OAuth token 的 32 字节密钥。连接或加载订阅账号池、使用静态 preset 配置，以及以后查看完整 API key 都需要它 |
+| `HELM_OAUTH_ENC_KEY` | 用于加密可恢复 API key 和 OAuth token 的 32 字节密钥；未提供时由 `/setup` 自动生成 |
 | `HELM_OPENAI_CODEX_CLIENT_VERSION` | 可选的 Codex `x.y.z` 紧急兼容版本，用于覆盖订阅模型发现和客户端身份；通常不要设置 |
 | `HELM_XAI_GROK_CLIENT_VERSION` | 可选的 xAI Grok CLI proxy 协议版本。仅在确认上游因最低版本提高而返回 HTTP 426 时临时设置，随后必须使用真实账号做 smoke 验证 |
 
@@ -367,7 +380,9 @@ SuperGrok 订阅没有逐 token 账单。Grok 4.5 的 telemetry 和 key budget �
 需要 **Node ≥ 22** 和 **pnpm 10**。
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
+pnpm build
+pnpm start        # 启动后打开 /setup；如有 .env 会自动读取
 pnpm dev          # 启动管理面板开发服务器（Vite），见下方说明
 pnpm --filter @helm/portal dev # 启动 Portal 开发服务器
 CI=true pnpm exec vitest run path/to/relevant.test.ts # 运行指定 Vitest 用例
@@ -378,7 +393,9 @@ pnpm build        # 构建网关 + admin + portal + ops bundle
 pnpm sync:catalog # 刷新生成的模型目录（能力 + 定价）
 ```
 
-> `pnpm dev` 只会启动 admin SPA。网关没有 watch 脚本，请先执行 `pnpm build`，再运行 `node apps/gateway/dist/index.js`；也可以直接使用 Docker。
+> `pnpm dev` 只会启动 admin SPA。需要启动已构建的 Gateway 时请运行
+> `pnpm start`；它使用 Node 22 原生能力读取可选的 `.env`，没有现成配置时
+> 会进入与 Docker 相同的浏览器初始化流程。
 >
 > 规格文档目前仅有英文版。
 

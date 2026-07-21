@@ -9,7 +9,9 @@ import {
   buildInternalLlmKeyInput,
   buildProviderClients,
   buildRegistry,
+  createUnavailableProviderClient,
   estimateRequestTokens,
+  testStaticProviderKey,
 } from "./server.js";
 
 // A minimal Hono context whose request carries the given content-length header.
@@ -160,6 +162,56 @@ describe("buildProviderClients provider dispatch", () => {
       if (previous === undefined) delete process.env.GEMINI_API_KEY;
       else process.env.GEMINI_API_KEY = previous;
     }
+  });
+});
+
+describe("first-run provider availability", () => {
+  it("uses an explicit key for a live provider test without writing process.env", async () => {
+    const previous = process.env.DEEPSEEK_API_KEY;
+    delete process.env.DEEPSEEK_API_KEY;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: "ok", choices: [{ message: { content: "OK" } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const provider = {
+      name: "deepseek",
+      alias: "deepseek",
+      type: "openai" as const,
+      base_url: "https://api.deepseek.com/v1",
+      api_key_env: "DEEPSEEK_API_KEY",
+      models: [{ alias: "deepseek/test", provider_model: "deepseek-test" }],
+      targetProviderProtocol: "openai_chat" as const,
+      map_developer_role_to_system: false,
+      claude_cli_fingerprint_mode: "auto" as const,
+      transport_profile: "default" as const,
+      normalize_reasoning_delta_alias: false,
+      response_model_policy: "provider" as const,
+    };
+
+    try {
+      await testStaticProviderKey(provider, "sk-setup-only");
+      expect(process.env.DEEPSEEK_API_KEY).toBeUndefined();
+      const [, init] = fetchMock.mock.calls[0] ?? [];
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer sk-setup-only");
+      expect(init?.body).toContain('"max_tokens":1');
+    } finally {
+      if (previous === undefined) delete process.env.DEEPSEEK_API_KEY;
+      else process.env.DEEPSEEK_API_KEY = previous;
+    }
+  });
+
+  it("provides a deterministic fail-open client when no static provider is configured", async () => {
+    const client = createUnavailableProviderClient("deepseek");
+    await expect(client.chatCompletion({ model: "m" })).rejects.toThrow(
+      "provider deepseek is not configured",
+    );
+    await expect(async () => {
+      for await (const _chunk of client.chatCompletionStream({ model: "m" })) {
+        // no chunks are expected
+      }
+    }).rejects.toThrow("provider deepseek is not configured");
   });
 });
 

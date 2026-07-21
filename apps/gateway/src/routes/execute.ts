@@ -114,6 +114,10 @@ export interface ExecuteAdapterDeps {
    *  providers. Missing clients fail closed; defaultProvider is only for unknown
    *  aliases in Phase-0 passthrough. */
   providers?: Map<string, ProviderClient>;
+  /** Live installation-level availability. When explicitly false, chain
+   * exhaustion means the operator has not connected any provider yet (503), not
+   * that real upstream attempts failed (502). Omitted preserves legacy callers. */
+  hasUsableProviders?: () => boolean;
   registry: ProviderRegistry;
   /** Known OAuth subscription provider IDs (ROUTABLE_OAUTH keys). An alias whose
    *  `<prefix>/` is one of these is a SUBSCRIPTION alias and is gated authoritatively
@@ -2144,6 +2148,10 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     if (plan.candidate_chain.length === 0) {
       errorClass = "lane_unavailable";
       message = "lane has no candidates";
+    } else if (deps.hasUsableProviders?.() === false) {
+      errorClass = "lane_unavailable";
+      message =
+        "no provider is configured; add an API key or connect a subscription in Admin → Providers";
     } else if (contextOverflow !== undefined && onlyContextOrCapabilitySkips) {
       errorClass = "invalid_request";
       message = contextOverflow.message;

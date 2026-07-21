@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { StoreConfig } from "@helm/shared";
@@ -23,6 +23,13 @@ describe("createStore factory", () => {
     expect(store.rateLimit).toBeDefined();
     expect(store.memory).toBeDefined();
     expect(store.config).toBeDefined();
+    await store.close();
+  });
+
+  it("creates a missing sqlite data directory on first run", async () => {
+    const dataDir = join(mkdtempSync(join(tmpdir(), "helm-factory-parent-")), "new", "data");
+    const store = await createStore({ store: { driver: "sqlite" }, dataDir });
+    expect(existsSync(join(dataDir, "helm.db"))).toBe(true);
     await store.close();
   });
 

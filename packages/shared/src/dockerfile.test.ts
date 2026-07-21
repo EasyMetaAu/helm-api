@@ -25,6 +25,7 @@ describe("Dockerfile contract", () => {
     expect(dockerfile).toContain("EXPOSE 8080");
     expect(dockerfile).toContain("HEALTHCHECK");
     expect(dockerfile).toContain("/healthz");
+    expect(dockerfile).toContain("process.env.HELM_PORT??'8080'");
   });
 
   it("installs with a frozen lockfile", () => {

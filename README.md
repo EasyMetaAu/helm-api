@@ -52,32 +52,43 @@ Change the model behind a lane? Edit one YAML line — or click in the dashboard
 **Prerequisites:** [Docker](https://docs.docker.com/get-docker/), or **Node ≥ 22** + **pnpm 10** to build from source.
 
 ```bash
-# 1. Clone and create your env file
+# Clone, start Docker, then finish the guided setup in your browser
 git clone https://github.com/EasyMetaAu/helm-api.git && cd helm-api
-cp .env.example .env
-#    In .env, set HELM_ADMIN_PASSWORD and at least DEEPSEEK_API_KEY
-
-# 2. Start it
-docker compose up -d
-
-# 3. Copy the root API key — printed once and written to data/helm-keys.json (0600)
-docker compose logs helm | grep -i "root API key"
+./scripts/quickstart.sh
 ```
+
+Open the complete `/setup#token=...` URL printed by the script. The protected
+token stays in the browser URL fragment and is consumed automatically—there is
+nothing to paste. The wizard starts with the Admin login, then lets you test and
+save optional provider keys, or continue with no API key and connect a
+ChatGPT/Codex, Claude, Copilot, or Grok subscription in **Admin → Providers**.
+It finishes with the automatically created administrator API token and
+ready-to-copy Claude Code, Codex, and SDK settings. No restart is required.
+
+The script creates only a private port/UID/GID `.env`, starts Compose, and waits
+for setup readiness; credentials selected in the wizard live in the mounted
+`data/helm-managed-env.json` file with mode `0600`. Existing `.env` files are
+never overwritten. For a terminal/automation install instead, run
+`./scripts/quickstart.sh --cli` or provide `HELM_ADMIN_*` and provider variables.
 
 | What | Where |
 |---|---|
-| Gateway | `http://localhost:8080` (status landing page at `/`) |
-| Dashboard | `http://localhost:8080/admin` — `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD` |
-| Key-holder portal | `http://localhost:8080/portal` — sign in with a Helm API key |
+| Gateway | `http://localhost:8080` by default (status landing page at `/`) |
+| First-run setup | `http://localhost:8080/setup` until initialization is complete |
+| Dashboard | `http://localhost:8080/admin` by default — use the credentials chosen in setup |
+| Key-holder portal | `http://localhost:8080/portal` by default — sign in with a Helm API key |
 | API docs | `GET /docs` (Swagger UI) · `GET /openapi.json` (OpenAPI 3.1, generated from the same Zod schemas the gateway validates with) |
 | Health / version | `GET /healthz` · `GET /version` |
 
-`docker-compose.yml` mounts `./config` and `./data` — config and database survive restarts. Credentials enter via environment variables only, never the image.
+`docker-compose.yml` mounts `./config` and `./data` — config and database survive
+restarts. It passes `.env` into the container, so optional provider and runtime
+settings work without editing Compose. `HELM_PORT` controls the host port, the
+gateway bind port, and health checks together.
 
-> Compose uses `.env` for interpolation; it does not automatically inject every
-> entry. The checked-in compose file passes only names listed in its
-> `environment:` block. Add optional providers/runtime overrides there or use an
-> explicit `env_file`. The gateway itself does not load `.env`.
+For manual Docker setup, create `./data`, set `HELM_UID` / `HELM_GID` to
+`id -u` / `id -g` on Linux, and run `docker compose up -d --wait`; `.env` and a
+static provider key are optional. Until a provider is usable, inference returns
+`503 lane_unavailable` with a setup hint while health and Admin stay available.
 
 ## What you get
 
@@ -329,15 +340,15 @@ Most-used environment variables (env wins over YAML; full list in [`.env.example
 
 | Variable | Purpose |
 |---|---|
-| `DEEPSEEK_API_KEY` | Primary provider credential (**required**) |
+| `DEEPSEEK_API_KEY` | Optional direct DeepSeek credential; absent providers are skipped |
 | `ZENMUX_API_KEY`, `OPENROUTER_API_KEY` | Optional provider credentials (provider skipped if missing) |
 | `OPENAI_API_KEY`, `GEMINI_API_KEY` | Optional official providers. Shipped lanes do not use direct OpenAI; an exact OpenAI image alias still works with any valid key. `gemini-image` remains Google-first with ZenMux failover. |
-| `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD` | Dashboard login (Basic auth) |
+| `HELM_ADMIN_USER` / `HELM_ADMIN_PASSWORD` | Optional preconfigured Dashboard login; otherwise `/setup` collects it |
 | `HELM_HOST` / `HELM_PORT` | Server binding (default `0.0.0.0:8080`) |
 | `HELM_STORE_DRIVER` | `sqlite` (default) or `supabase` |
 | `HELM_STORE_URL_ENV` | For `supabase`: the **name** of the env var holding the Postgres DSN |
 | `HELM_RATE_LIMIT_ENABLED` | Turn rate limiting on (off by default) |
-| `HELM_OAUTH_ENC_KEY` | 32-byte key encrypting recoverable API keys and OAuth tokens; required to connect/load subscription pools, for static preset config, and for later API-key reveal |
+| `HELM_OAUTH_ENC_KEY` | 32-byte key encrypting recoverable API keys and OAuth tokens; `/setup` generates it when absent |
 | `HELM_OPENAI_CODEX_CLIENT_VERSION` | Optional `x.y.z` emergency override for Codex subscription model discovery/client identity; normally leave unset |
 | `HELM_XAI_GROK_CLIENT_VERSION` | Optional semver override for xAI's Grok CLI proxy protocol; use only to recover from a confirmed upstream HTTP 426 minimum-version bump, then run a real-account smoke |
 
@@ -385,7 +396,9 @@ Helm advertises the checked-in Grok CLI protocol version used by its live smoke.
 Requires **Node ≥ 22** and **pnpm 10**.
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
+pnpm build
+pnpm start        # open /setup; .env is optional and loaded when present
 pnpm dev          # admin dashboard dev server (Vite) — see note below
 pnpm --filter @helm/portal dev # portal dev server
 CI=true pnpm exec vitest run path/to/relevant.test.ts # targeted unit test
@@ -396,7 +409,9 @@ pnpm build        # build gateway + admin + portal + ops bundle
 pnpm sync:catalog # refresh the generated model catalog (capabilities + pricing)
 ```
 
-> `pnpm dev` starts only the admin SPA. The gateway has no watch script — run it built (`pnpm build` then `node apps/gateway/dist/index.js`) or via Docker.
+> `pnpm dev` starts only the admin SPA. Use `pnpm start` for the built gateway;
+> it loads `.env` through Node 22's native env-file support and otherwise starts
+> the same browser setup flow as Docker.
 
 Tests come first: Vitest for focused logic/routes and Playwright for full flows.
 Design decisions live in [`implementation-notes.md`](implementation-notes.md).
