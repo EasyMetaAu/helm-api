@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-07-21 · Grok Build 复用 OpenAI 模型发现接入 Helm（Admin client setup，docs/05/11，原则 2/5/6）
+
+- **官方契约**：以 `xai-org/grok-build@a881e67` 的 Custom Models 指南为准，Grok Build 设置 `GROK_MODELS_BASE_URL` 后从 `{base_url}/models` 发现模型，以 `XAI_API_KEY` 作为 Bearer key，并默认走 OpenAI Chat Completions。Admin「接入客户端」因此只新增可复制的 `GROK_MODELS_BASE_URL=<origin>/v1`、Helm key 与 `grok -m auto` 引导；`/v1/models` 继续按 key 暴露 `auto` / lanes，推理由既有 `/v1/chat/completions` 路由处理。
+- **最小边界**：不新增 Grok 专用 Gateway 路由、协议适配、依赖或运行时配置，也不要求 `grok login`；只扩展现有 Admin 对话框、七种现有语言文案与一个定向组件测试。
+
 ## 2026-07-20 · `end_turn` XML 泄漏只按终态工具调用恢复（Protocol streaming / provider execution，docs/05/07，原则 3/5/8）
 
 - **恢复边界**：本机 2,520 个 Claude session JSONL 的匿名化扫描中，高置信完整泄漏有 85 个 `tool_use` 与 23 个 `end_turn`；后者是当前真实漏项。保留既有 `tool_use` 的宽松周边文本恢复；仅对 `end_turn` 增加收紧路径。共享 parser 只有在所有完整 invoke 都精确命中请求声明的工具、最后一个非空 segment 是已恢复的 tool、文本 segment 不含残留 `<invoke`，且 invoke 不在 Markdown 三反引号 fence 内时才接受；多个调用之间仅允许空白，避免把前置的无围栏 XML 示例一并执行。末尾空白可保留；无名、未闭合、未知尾巴、function-calls wrapper 和带转义引号的文档示例都不扩 grammar、不恢复。
@@ -61,15 +66,9 @@
 - **请求归属边界**：入站 `X-Request-Id` / `X-Trace-Id` 继续作为可复用的客户端关联信息，不能再充当数据库主键；响应 `X-Trace-Id` 稳定回显该值，Responses 路径的 `X-Request-Id` 则按既有 Codex/OpenAI 兼容契约可能展示上游诊断 ID。Gateway 为每次请求生成不可覆盖的内部 `request_id`，通过 `X-Helm-Request-Id` 返回，并统一用于 telemetry、payload、replay 与 Portal ownership；Admin 列表 row key、详情链接、payload 与 Retry 也只按 `request_id` 寻址，`trace_id` 保留为展示/复制字段，重复 trace 不会再产生重复 keyed row。详情页“复制 Trace ID”读取展示中的客户端关联值，不再误复制 URL 里的内部 ID；Portal 的详情与 payload URL 明确使用 `request_id`，同时在安全投影中保留 `trace_id`，方便 key 持有者对照自己的日志。Interactions 响应体的 `id` 固定为 `int_<request_id>`，可与 `X-Helm-Request-Id` 对照，绝不从客户端可控的 `trace_id` 派生。鉴权失败也复用 middleware 已解析的 context trace，避免 401 错误体、响应头和完成日志各自生成不同 ID。`request.completed` 与 `route.decision` 都同时记录两者，便于从外部关联值定位唯一存储记录。`recordServed` 强制 DecisionRecord 与 payload 共用内部主键，避免攻击者复用 trace 值覆盖或读取其他请求；生产 routeRequest、执行错误与拒绝路径也统一从 metadata 保留客户端关联 ID。
 - **Memory 隔离与迁移**：物理 thread id 改为版本化编码，纳入 account、有效 project（`memory_project_id ?? key_id`）和客户端 thread id；同一账号下默认项目不同的 key 不再意外共享，显式选择同一项目的 key 仍按契约共享。Chat、Messages、Responses、observe/inject、worker、MCP 与 Admin 使用同一投影规则，对客户端和运维界面继续显示原始 thread id；输入始终按 opaque client id 处理，不能凭 `acct:` / `v2:` 外形猜测物理 ID。旧 account-only parent 无法证明归属，SQLite v40 / Postgres v39 因此不做猜测：parent 与子表进入 `v2:q:p:*` 隔离区并清除 project/resource，受影响 owner 的全部历史 fact/reflection（包括没有 thread 的项目级派生数据）进入 `v2:q:r:*`，reflection 归档，fact 同时归档并标记失效；可能继续消费混合历史的待处理或运行中任务一律标记失败，畸形 job scope 也改写成合法的合成隔离作用域，避免统计查询被坏 JSON 拖垮。`owner_id` 缺失、目标 ID 冲突或 FK 异常会让整版迁移回滚并拒绝启动；Postgres 每版迁移在 Drizzle 保留的单一事务连接内取得事务级 advisory lock，不能再用连接池上的分散 `BEGIN/COMMIT` 冒充原子事务。升级前必须停掉所有旧副本并备份数据库，混合版本滚动升级不受支持。
 
-## 2026-07-16 · 文档以当前源码为准完成全量运行时事实校准（docs/01–14 / README / operations，原则 1–8）
-
-- **审计边界**：以当前分支的路由注册、composition root、Zod schema、Store 端口与迁移、默认配置和定向测试为权威，逐章校准 README、`docs/01–14`、协议/Memory 专题、部署说明、Portal、历史复盘与 passthrough 运维文档；本次只修文档与 `.env.example`，不改变任何运行时行为。历史 incident、review、proposal、外部研究和 v0.25.2 Admin 截图保留原始证据，但必须显式标注为历史快照，不能继续充当当前契约。
-- **主要纠偏**：Portal 已完整实现且按 key ownership 隔离 request/payload/memory；新 key 的 Memory 默认值是 `off`；`/healthz` 只是浅层进程 readiness；Gateway 不自动加载 `.env`，Compose 也只转发 `environment:` 中显式列出的变量；root bootstrap 明文 key 只写一次到配置的 `0600` recovery file；OpenAPI 只覆盖主要公共路由；shipping Admin 配置实际上依赖 `HELM_ADMIN_*` 环境变量。
-- **诚实边界**：文档明确列出已解析但未完整生效的 `lane.constraints`、`classifier.rules.enabled`、`eval.cache.enabled`、policy `project_id` 与空/无交集 `allowed_lanes`，以及尚未挂载的 `HELM_BASE_PATH`、进程内多副本协调限制、Memory 观测/embedding 延迟和跨协议保真缺口。协议矩阵与 roadmap 以后必须把 native passthrough、可证明的翻译、结构化降级和未实现行为分开描述，避免把 schema 存在或测试 helper 能力写成已上线功能。
-- **中文文案边界**：`README.zh-CN.md` 保持与当前代码和英文技术事实一致，但作为独立中文文案按中文语序与读者习惯意译；命令、字段、端点、警告与链接不可改义，也不做逐句机械对照。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-16 · 文档以当前源码为准完成全量运行时事实校准（docs/01–14 / README / operations，原则 1–8）**：以当前路由、schema、Store、配置与测试校准全部当前文档和中英文 README，明确 Portal、部署、安全、Memory 与协议实现/缺口边界；完整原文通过 git history 回溯。
 - **2026-07-16 · Admin 首次点击卡顿改为非投机加载与汇总读（Admin / Store performance，docs/08/11，原则 1/3/7）**：以 `memory_threads` 的事务维护汇总替代正文表冷扫描，Admin 改为非投机 data preload，并以有界 stale-while-revalidate 缓存保护统计读取；在线 VACUUM 继续禁止。
 - **2026-07-15 · Codex 配额 PULL 饱和后触发自动重置（OAuth quota / reset credits，docs/04/11，原则 3/5/7）**：仅新鲜 PULL/PUSH 在账号级周窗口饱和后经共享幂等 guard 触发 reset credit，成功后强制回读并同步 durable/live quota；cache-only 读取始终无副作用。
 - **2026-07-15 · Anthropic 不可用地域哨兵按全球基础卡计费（Catalog / telemetry accounting，docs/07/08，原则 2/3/5/7）**：仅把 `usage.inference_geo=not_available` 解释为地域缺失并使用全球基础卡，真实未知地域继续 unknown；实时与历史重算共用规范化且保留原始 provenance。

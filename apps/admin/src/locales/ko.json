@@ -771,6 +771,7 @@
   "Server-side routing rules. Each is a condition → action (force a lane). Policies override task lanes but never the execution fallback chain.": "서버 측 라우팅 규칙. 각 규칙은 조건 → 동작(레인 강제)입니다. 정책은 작업 레인을 재정의하지만 실행 폴백 체인은 재정의하지 않습니다.",
   "Serving": "제공",
   "Set the primary model and fallback chain for each quality and cost tier.": "각 품질 및 비용 티어에 대한 기본 모델과 대체 체인을 설정하세요.",
+  "Set these environment variables. The base URL MUST end in /v1 so Grok Build can discover Helm models, then start with model \"auto\".": "다음 환경 변수를 설정하세요. Grok Build가 Helm 모델을 찾을 수 있도록 base URL은 /v1로 끝나야 하며, model “auto”로 시작하세요.",
   "Set these environment variables. The base URL is the bare origin — do NOT add /v1 (Anthropic clients append /v1/messages themselves).": "다음 환경 변수를 설정하세요. base URL은 오리진 그대로이며 /v1을 붙이지 마세요(Anthropic 클라이언트가 /v1/messages를 직접 붙입니다).",
   "Settings": "설정",
   "Show all {count} dimensions": "전체 {count}개 차원 보기",

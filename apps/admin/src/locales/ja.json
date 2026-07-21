@@ -771,6 +771,7 @@
   "Server-side routing rules. Each is a condition → action (force a lane). Policies override task lanes but never the execution fallback chain.": "サーバーサイドのルーティング規則。各規則は 条件 → アクション（レーンの強制）です。ポリシーはタスクレーンを上書きしますが、実行フォールバック チェーンは上書きしません。",
   "Serving": "提供元",
   "Set the primary model and fallback chain for each quality and cost tier.": "各品質およびコストティアのプライマリモデルとフォールバックチェーンを設定します。",
+  "Set these environment variables. The base URL MUST end in /v1 so Grok Build can discover Helm models, then start with model \"auto\".": "次の環境変数を設定します。Grok Build が Helm のモデルを検出できるよう、base URL は /v1 で終わらせ、model “auto” で起動します。",
   "Set these environment variables. The base URL is the bare origin — do NOT add /v1 (Anthropic clients append /v1/messages themselves).": "次の環境変数を設定します。base URL はオリジンそのままで——/v1 は付けないでください（Anthropic クライアントが自分で /v1/messages を付けます）。",
   "Settings": "設定",
   "Show all {count} dimensions": "全 {count} 件のディメンションを表示",

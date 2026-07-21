@@ -771,6 +771,7 @@
   "Server-side routing rules. Each is a condition → action (force a lane). Policies override task lanes but never the execution fallback chain.": "Server-side routing rules. Each is a condition → action (force a lane). Policies override task lanes but never the execution fallback chain.",
   "Serving": "Serving",
   "Set the primary model and fallback chain for each quality and cost tier.": "Set the primary model and fallback chain for each quality and cost tier.",
+  "Set these environment variables. The base URL MUST end in /v1 so Grok Build can discover Helm models, then start with model \"auto\".": "Set these environment variables. The base URL MUST end in /v1 so Grok Build can discover Helm models, then start with model \"auto\".",
   "Set these environment variables. The base URL is the bare origin — do NOT add /v1 (Anthropic clients append /v1/messages themselves).": "Set these environment variables. The base URL is the bare origin — do NOT add /v1 (Anthropic clients append /v1/messages themselves).",
   "Settings": "Settings",
   "Show all {count} dimensions": "Show all {count} dimensions",

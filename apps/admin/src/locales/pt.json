@@ -771,6 +771,7 @@
   "Server-side routing rules. Each is a condition → action (force a lane). Policies override task lanes but never the execution fallback chain.": "Regras de roteamento do lado do servidor. Cada uma é uma condição → ação (forçar uma lane). Políticas substituem lanes de tarefa, mas nunca a cadeia de fallback de execução.",
   "Serving": "Servindo",
   "Set the primary model and fallback chain for each quality and cost tier.": "Defina o modelo principal e a cadeia de fallback para cada nível de qualidade e custo.",
+  "Set these environment variables. The base URL MUST end in /v1 so Grok Build can discover Helm models, then start with model \"auto\".": "Defina estas variáveis de ambiente. A base URL DEVE terminar em /v1 para que o Grok Build descubra os modelos do Helm; depois inicie com o modelo “auto”.",
   "Set these environment variables. The base URL is the bare origin — do NOT add /v1 (Anthropic clients append /v1/messages themselves).": "Defina estas variáveis de ambiente. A base URL é a origem sem caminho: NÃO adicione /v1 (clientes Anthropic acrescentam /v1/messages por conta própria).",
   "Settings": "Configurações",
   "Show all {count} dimensions": "Mostrar todas as {count} dimensões",

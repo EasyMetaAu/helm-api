@@ -17,7 +17,7 @@
   // never persisted or re-fetched here (CLAUDE.md 原则7 / docs/06).
   let { plaintextKey, onclose }: { plaintextKey?: string; onclose: () => void } = $props();
 
-  type Tab = 'claude' | 'codex' | 'gemini' | 'openclaw' | 'sdk';
+  type Tab = 'claude' | 'codex' | 'grok' | 'gemini' | 'openclaw' | 'sdk';
   let tab = $state<Tab>('claude');
 
   // The gateway is same-origin with this SPA (Hono serves the admin at /admin), so
@@ -43,6 +43,9 @@
   );
   let codexToml = $derived(
     `# ~/.codex/config.toml\n[model_providers.helm]\nname = "Helm"\nbase_url = "${baseV1}"\nenv_key = "HELM_API_KEY"\nwire_api = "responses"\n\n# then, in your shell:\nexport HELM_API_KEY="${keyShown}"`,
+  );
+  let grokEnv = $derived(
+    `export GROK_MODELS_BASE_URL="${baseV1}"\nexport XAI_API_KEY="${keyShown}"\n\ngrok -m auto`,
   );
   // Gemini CLI / Google GenAI SDK read GOOGLE_GEMINI_BASE_URL and append the
   // /v1beta/models/{model}:generateContent path themselves — so this is the BARE
@@ -130,6 +133,13 @@
         type="button"
         role="tab"
         class="tab-btn shrink-0 whitespace-nowrap"
+        aria-selected={tab === 'grok'}
+        onclick={() => (tab = 'grok')}>Grok Build</button
+      >
+      <button
+        type="button"
+        role="tab"
+        class="tab-btn shrink-0 whitespace-nowrap"
         aria-selected={tab === 'gemini'}
         onclick={() => (tab = 'gemini')}>{$t('Gemini')}</button
       >
@@ -164,6 +174,13 @@
           )}
         </p>
         {@render codeBlock('codex-toml', codexToml, 'snippet-codex')}
+      {:else if tab === 'grok'}
+        <p class="mb-2 text-sm text-ink-body">
+          {$t(
+            'Set these environment variables. The base URL MUST end in /v1 so Grok Build can discover Helm models, then start with model "auto".',
+          )}
+        </p>
+        {@render codeBlock('grok-env', grokEnv, 'snippet-grok')}
       {:else if tab === 'gemini'}
         <p class="mb-2 text-sm text-ink-body">
           {$t(
