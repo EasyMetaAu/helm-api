@@ -203,6 +203,32 @@ describe("createExecute — empty candidate chain", () => {
     }
     expect(out.attempts).toHaveLength(0);
   });
+
+  it("returns lane_unavailable when the installation has no usable provider", async () => {
+    const unavailable = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: unavailable,
+      providers: new Map(),
+      hasUsableProviders: () => false,
+      registry: registry({ a: "m-a" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["a"]), req());
+
+    expect(out.final.status).toBe("error");
+    if (out.final.status === "error") {
+      expect(out.final.error.error_class).toBe("lane_unavailable");
+      expect(out.final.error.message).toContain("no provider is configured");
+    }
+    expect(unavailable.chatCompletion).not.toHaveBeenCalled();
+  });
 });
 
 describe("createExecute — circuit-open skip is transient (not capability_unsatisfiable)", () => {

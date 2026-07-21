@@ -2,13 +2,24 @@
 // Fail-closed: invalid config / missing credentials throw and the process exits
 // non-zero rather than starting in a degraded state.
 
+import { readFile } from "node:fs/promises";
+import { loadConfig } from "@helm/core";
 import { serve } from "@hono/node-server";
 import { createApp } from "./app.js";
 import { createJsonLogger } from "./logging.js";
-import { installResponsesWebSocketBridge } from "./responses-websocket.js";
+import {
+  installResponsesWebSocketBridge,
+  type ResponsesWebSocketBridge,
+} from "./responses-websocket.js";
 import { configureEgress } from "./runtime/egress.js";
 import { type ClosableServer, closeServer } from "./runtime/shutdown.js";
-import { buildServer } from "./server.js";
+import { buildServer, type ServerHandle, testStaticProviderKey } from "./server.js";
+import {
+  createSetupServer,
+  loadManagedEnvironment,
+  type SetupProvider,
+  setupRequired,
+} from "./setup.js";
 
 export { type AppDeps, type AppEnv, createApp } from "./app.js";
 export { type BuildInfo, readBuildInfo } from "./build-info.js";
@@ -53,15 +64,92 @@ async function main(): Promise<void> {
     // Tune the process-global undici dispatcher (keep-alive) BEFORE any upstream
     // call can be made — it is a process global, so it cannot live inside buildServer.
     configureEgress(process.env);
-    const handle = await buildServer({ logger });
-    const server = serve({ fetch: handle.app.fetch, port: handle.port, hostname: handle.host });
-    const responsesWebSocket = installResponsesWebSocketBridge({
-      server,
-      fetch: (request) => handle.app.fetch(request),
-      closeSession: handle.closeResponsesWebSocketSession,
-      sessionProof: handle.responsesWebSocketSessionProof,
+    const config = loadConfig({ configDir: "./config" });
+    const dataDir = process.env.HELM_DATA_DIR ?? "./data";
+    const staticProviders = config.providers.filter(
+      (provider): provider is typeof provider & { api_key_env: string } =>
+        !provider.oauth && typeof provider.api_key_env === "string" && provider.api_key_env !== "",
+    );
+    const providerEnvNames = [...new Set(staticProviders.map((provider) => provider.api_key_env))];
+    await loadManagedEnvironment({
+      dataDir,
+      env: process.env,
+      allowedProviderEnvNames: providerEnvNames,
     });
-    logger.log("info", "gateway.listening", { host: handle.host, port: handle.port });
+
+    let handle: ServerHandle;
+    let responsesWebSocket: ResponsesWebSocketBridge | undefined;
+    let server: ReturnType<typeof serve> | undefined;
+
+    const attachResponsesWebSocket = (next: ServerHandle): void => {
+      if (!server || responsesWebSocket) return;
+      responsesWebSocket = installResponsesWebSocketBridge({
+        server,
+        fetch: (request) => handle.app.fetch(request),
+        closeSession: next.closeResponsesWebSocketSession,
+        sessionProof: next.responsesWebSocketSessionProof,
+      });
+    };
+
+    if (setupRequired(process.env)) {
+      const representativeByEnv = new Map(
+        providerEnvNames.flatMap((envName) => {
+          const matching = staticProviders.filter((provider) => provider.api_key_env === envName);
+          const representative =
+            matching.find((provider) => provider.type === "openai") ?? matching[0];
+          return representative ? [[envName, representative] as const] : [];
+        }),
+      );
+      const setupProviders: SetupProvider[] = [...representativeByEnv].map(
+        ([envName, provider]) => ({
+          id: envName,
+          label: provider.name,
+          envName,
+          configured: Boolean(process.env[envName]),
+        }),
+      );
+      const setup = await createSetupServer({
+        dataDir,
+        host: config.server.host,
+        port: config.server.port,
+        providers: setupProviders,
+        env: process.env,
+        testProvider: async (providerId, apiKey) => {
+          const provider = representativeByEnv.get(providerId);
+          if (!provider) throw new Error(`unknown provider ${providerId}`);
+          await testStaticProviderKey(provider, apiKey);
+        },
+        buildFullServer: () => buildServer({ logger }),
+        activate: (next) => {
+          handle = next;
+          attachResponsesWebSocket(next);
+          logger.log("info", "gateway.setup_completed", { host: next.host, port: next.port });
+        },
+        readRootKey: async () => {
+          try {
+            return (await readFile(config.auth.bootstrap.persist_to, "utf8")).trim() || null;
+          } catch {
+            return null;
+          }
+        },
+        log: (line) => logger.log("warn", "gateway.setup", { line }),
+      });
+      handle = setup.handle;
+    } else {
+      handle = await buildServer({ logger });
+    }
+
+    server = serve({
+      fetch: (request) => handle.app.fetch(request),
+      port: handle.port,
+      hostname: handle.host,
+    });
+    if (!setupRequired(process.env)) attachResponsesWebSocket(handle);
+    logger.log("info", "gateway.listening", {
+      host: handle.host,
+      port: handle.port,
+      mode: setupRequired(process.env) ? "setup" : "gateway",
+    });
 
     // Graceful shutdown: FIRST stop accepting connections and wait for in-flight
     // requests to finish (so their post-response enqueue()s land while the queue is
@@ -77,7 +165,7 @@ async function main(): Promise<void> {
       shuttingDown = true;
       logger.log("info", "gateway.shutdown", { signal });
       try {
-        await responsesWebSocket.close();
+        await responsesWebSocket?.close();
         await closeServer(server as unknown as ClosableServer, drainMs);
         await handle.dispose?.();
       } catch (err) {

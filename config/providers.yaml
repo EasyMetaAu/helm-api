@@ -47,8 +47,8 @@
 # back-fill / skip to the next fallback), never a 5xx.
 providers:
   # PRIMARY provider (providers[0]). Backs the default path, the Layer-2 eval
-  # call, and the Phase-0 passthrough; its credential (DEEPSEEK_API_KEY) is
-  # mandatory (fail-closed if unset). Official DeepSeek OpenAI-compatible API
+  # call, and the Phase-0 passthrough when its optional DEEPSEEK_API_KEY is set.
+  # Without that key, its aliases are skipped. Official DeepSeek OpenAI-compatible API
   # (https://api.deepseek.com). alias == catalog/pricing key; provider_model is
   # the real upstream id sent on the wire.
   - name: deepseek

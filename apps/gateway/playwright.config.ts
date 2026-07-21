@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "@playwright/test";
-import { ADMIN_PASSWORD, ADMIN_USER, adminEnv } from "./e2e/fixtures/admin.js";
+import { ADMIN_PASSWORD, ADMIN_USER, adminEnv, basicHeader } from "./e2e/fixtures/admin.js";
 
 const GATEWAY_PORT = 8090;
 const MOCK_PORT = 8181;
@@ -19,9 +19,9 @@ const e2eEnv = {
   // Resolved against the gateway CWD (repo root, set on the webServer below).
   HELM_DATA_DIR: "./apps/gateway/.e2e-data",
   HELM_TEST_KEY: "helm_live_e2e_testkey",
-  // PRIMARY (deepseek) provider credential — mandatory; the gateway fail-closes
-  // without it. A dummy value is enough: HELM_PROVIDER_BASE_URL points every
-  // provider at the offline mock, so no real key is ever used.
+  // Key the primary (deepseek) provider so routing tests exercise it. A dummy
+  // value is enough: HELM_PROVIDER_BASE_URL points every provider at the offline
+  // mock, so no real key is ever used.
   DEEPSEEK_API_KEY: "sk-upstream-mock-key",
   // OpenRouter is a real production fallback provider (the economy/balanced tails
   // route through it). Keyed so its mock-backed candidates serve — without it the
@@ -77,22 +77,23 @@ export default defineConfig({
       testIgnore: /admin\.spec\.ts$/,
     },
     {
-      // Admin auth-gate cases (@noauth): run WITHOUT httpCredentials so the
-      // gateway's HTTP Basic challenge is observable. With credentials configured,
-      // Playwright would transparently answer the 401 challenge and retry, masking
-      // the gate — so these specs must run in a credential-less project.
+      // Admin auth-gate cases (@noauth): run without credentials so anonymous
+      // browser navigation exercises the first-party login redirect.
       name: "admin-noauth",
       testMatch: /admin\.spec\.ts$/,
       grep: /@noauth/,
     },
     {
-      // Admin UI flows: drive the SPA behind HTTP Basic. Playwright injects the
-      // credentials so the browser never sees the native auth dialog.
+      // Admin UI flows: drive the SPA with pre-emptive Basic credentials. Using an
+      // explicit header is intentional: the server omits WWW-Authenticate so real
+      // browsers show Helm's login page instead of a native Basic dialog.
       name: "admin",
       testMatch: /admin\.spec\.ts$/,
       grepInvert: /@noauth/,
       use: {
-        httpCredentials: { username: ADMIN_USER, password: ADMIN_PASSWORD },
+        extraHTTPHeaders: {
+          Authorization: basicHeader(ADMIN_USER, ADMIN_PASSWORD),
+        },
       },
     },
   ],

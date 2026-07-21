@@ -8,14 +8,14 @@ import {
 } from "./fixtures/admin.js";
 
 // e2e.admin — drive the REAL admin UI end-to-end: the Hono gateway serves the
-// adapter-static SvelteKit SPA at /admin behind HTTP Basic; the browser passes
-// auth, edits a lane (persisted to the runtime config), and inspects a seeded
+// adapter-static SvelteKit SPA at /admin behind Admin auth; the browser passes
+// pre-emptive Basic auth, edits a lane (persisted to the runtime config), and inspects a seeded
 // request's decision trail. No front-end stubbing, no direct core access — every
 // assertion goes through the built SPA + real gateway (docs/07, docs/11, docs/04).
 //
-// The `admin` Playwright project supplies httpCredentials so page.goto() is
-// pre-authenticated; the `@noauth` cases run in a credential-less project so the
-// HTTP Basic challenge is observable (a credentialed context would auto-answer it).
+// The `admin` Playwright project supplies a pre-emptive Authorization header so
+// page.goto() is authenticated without a browser challenge; the `@noauth` cases
+// run in a credential-less project and verify the first-party login redirect.
 
 const BASE = "http://127.0.0.1:8090";
 const SEED_MODEL_FILTER = "best_reasoning_model";
@@ -37,13 +37,17 @@ async function filterToSeededRequest(page: Page) {
     .filter({ has: page.locator(`a[href*="/requests/${SEED_TRACE_ID}"]`) });
 }
 
-// ── 1. Basic Auth gate: none / wrong / correct (@noauth project) ─────────────
-test.describe("admin basic auth gate @noauth", () => {
-  test("rejects with 401 when no credentials are supplied", async () => {
+// ── 1. Admin auth gate: none / wrong / correct (@noauth project) ─────────────
+test.describe("admin auth gate @noauth", () => {
+  test("redirects anonymous browser navigation to the login page", async () => {
     const ctx = await playwrightRequest.newContext();
-    const res = await ctx.get(`${BASE}/admin`);
-    expect(res.status()).toBe(401);
-    expect(res.headers()["www-authenticate"]).toContain("Basic");
+    const res = await ctx.get(`${BASE}/admin`, {
+      headers: { Accept: "text/html" },
+      maxRedirects: 0,
+    });
+    expect(res.status()).toBe(302);
+    expect(res.headers().location).toBe("/admin/login?next=%2Fadmin");
+    expect(res.headers()["www-authenticate"]).toBeUndefined();
     await ctx.dispose();
   });
 

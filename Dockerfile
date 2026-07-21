@@ -62,6 +62,6 @@ EXPOSE 8080
 
 # Built-in health check hits /healthz (provided by the gateway).
 HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=5 \
-  CMD node -e "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.HELM_PORT??'8080')+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 CMD ["node", "dist/index.js"]

@@ -6,15 +6,31 @@
 After it boots, Helm can mount a web console for operating the gateway: keys,
 lanes, policies, classifier rules, OAuth subscription providers, memory, request
 debugging/replay, runtime settings, and data cleanup. It is meant for **internal**
-use and is gated by HTTP Basic credentials. API-key holders use the separate
+use and is gated by Admin credentials through Helm's login page. API-key holders use the separate
 [self-service portal](12-self-service-portal.md), not this global surface.
 
-## Authentication: HTTP Basic
+## Authentication: browser session + Basic compatibility
 
 The admin UI's authentication is **deliberately separate** from the API-key auth
-used for API traffic — a different header (Basic vs. Bearer), a different
-credential source (config/env vs. the KeyStore), and no RBAC (see
+used for API traffic — different credentials, a different trust boundary
+(config/env vs. the KeyStore), and no RBAC (see
 [06 · Auth, API Keys & Rate Limits](06-auth-and-rate-limits.md)).
+
+Browser navigation to `/admin` without a valid session redirects to the
+Gateway-rendered `/admin/login` page. A successful login creates a stateless,
+HMAC-signed cookie scoped to `/admin` with `HttpOnly`, `SameSite=Strict`, and a
+12-hour expiry; HTTPS requests also receive `Secure`. The cookie contains only
+an expiry and signature, not the username or password. Its signing key is
+derived in memory from the configured Admin credentials, so changing either
+credential invalidates every existing session without a session table or extra
+secret. The Admin top bar provides a logout action that clears the cookie.
+
+Pre-emptive HTTP Basic remains accepted for scripts and headless operators.
+Session-enabled failures deliberately omit `WWW-Authenticate`, so browsers do
+not show the native Basic popup: HTML navigation redirects to the login page,
+while `/admin/api/*` returns a plain 401. Login submissions reject a mismatched
+`Origin`, compare both credentials in constant time, never log or echo the
+password, and prevent external `next` redirects.
 
 Credentials are resolved by `resolveAdminAuth`
 (`apps/gateway/src/middleware/basic-auth.ts`). In the shipping composition root,
@@ -22,6 +38,14 @@ admin configuration is **environment-only**: `loadConfig()` has no top-level
 `admin` schema/file path, so a YAML `admin:` block is not a supported deployment
 control. (`resolveAdminAuth` retains a config argument for direct/headless callers
 and tests, but `buildServer()` cannot populate it from `config/*.yaml`.)
+
+On a new install, complete credentials do not need to exist before the process
+starts. The token-protected `/setup` surface collects them and atomically writes
+the resulting environment-shaped values to `data/helm-managed-env.json` with
+mode `0600`; the process then switches to the full gateway without a restart.
+On later boots that file is loaded before `buildServer()`, while any non-empty
+external environment variable still wins. Setup itself never mounts `/admin` or
+`/admin/api/*`, so there is no unauthenticated Admin interval.
 
 ```bash
 # Environment form (recommended for Docker)
@@ -43,8 +67,9 @@ Enable / mount rules:
   a single explicit warning, and every admin request fails closed (401) — never
   silently open.
 - Credentials are compared in constant time and the password is never logged.
-- The Basic gate covers both the API (`/admin/api/*`) and the SPA page + assets
-  (`/admin`). Run the admin UI behind a reverse proxy / on an internal network.
+- The session/Basic gate covers both the API (`/admin/api/*`) and the SPA page +
+  assets (`/admin`). The standalone login HTML is the only public Admin content.
+- Run the admin UI behind HTTPS and preferably a reverse proxy / internal network.
 
 ## Internationalization
 

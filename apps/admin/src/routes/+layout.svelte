@@ -229,8 +229,31 @@
         </svg>
       </button>
       <h1 class="text-base font-semibold tracking-tight text-slate-900">{$t(activeLabel)}</h1>
-      <div class="ml-auto flex items-center">
+      <div class="ml-auto flex items-center gap-2">
         <StatusCluster />
+        <form method="post" action={`${base}/logout`}>
+          <button
+            type="submit"
+            class="flex h-10 w-10 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-500"
+            aria-label={$t('Sign out')}
+            title={$t('Sign out')}
+          >
+            <svg
+              class="h-5 w-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke-width="1.8"
+              stroke="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M15.75 9V5.25A2.25 2.25 0 0 0 13.5 3h-6A2.25 2.25 0 0 0 5.25 5.25v13.5A2.25 2.25 0 0 0 7.5 21h6a2.25 2.25 0 0 0 2.25-2.25V15m3-6 3 3m0 0-3 3m3-3H9"
+              />
+            </svg>
+          </button>
+        </form>
       </div>
     </header>
 

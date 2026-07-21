@@ -8,6 +8,7 @@
   },
   "packageManager": "pnpm@10.25.0",
   "scripts": {
+    "start": "node --env-file-if-exists=.env apps/gateway/dist/index.js",
     "dev": "pnpm --filter @helm/admin dev",
     "dev:admin": "pnpm --filter @helm/admin dev",
     "typecheck": "pnpm -r typecheck && pnpm typecheck:ops",

@@ -1,7 +1,7 @@
 services:
   helm:
     # Default to the published image; for local dev uncomment the `build` block.
-    image: ghcr.io/easymetaau/helm-api:latest
+    image: ${HELM_IMAGE:-ghcr.io/easymetaau/helm-api:latest}
     # build:
     #   context: .
     #   args: # surfaced by GET /version + the admin header (docs/10)
@@ -9,20 +9,34 @@ services:
     #     HELM_GIT_SHA: ${HELM_GIT_SHA:-dev}
     #     HELM_BUILT_AT: ${HELM_BUILT_AT:-dev}
     container_name: helm
+    env_file:
+      - path: .env
+        required: false
+    # New Linux installs use their host uid/gid so the non-root process can
+    # write the bind-mounted SQLite directory. Old installs keep uid 10001.
+    user: "${HELM_UID:-10001}:${HELM_GID:-10001}"
     ports:
-      - "8080:8080"
+      - "${HELM_PORT:-8080}:${HELM_PORT:-8080}"
     volumes:
       - ./config:/app/config # lanes/policies/classifier/providers... (config-as-code)
       - ./data:/app/data # telemetry, keys, sqlite — persisted
     environment:
       # Admin UI (docs/11; consumed in Phase 4)
-      HELM_ADMIN_USER: ${HELM_ADMIN_USER:-admin}
-      HELM_ADMIN_PASSWORD: ${HELM_ADMIN_PASSWORD:?set HELM_ADMIN_PASSWORD in .env}
+      HELM_ADMIN_ENABLED: ${HELM_ADMIN_ENABLED:-}
+      HELM_ADMIN_USER: ${HELM_ADMIN_USER:-}
+      HELM_ADMIN_PASSWORD: ${HELM_ADMIN_PASSWORD:-}
+      HELM_SETUP_DISABLED: ${HELM_SETUP_DISABLED:-}
+      HELM_PORT: ${HELM_PORT:-8080}
       HELM_OAUTH_ENC_KEY: ${HELM_OAUTH_ENC_KEY:-}
       HELM_XAI_GROK_CLIENT_VERSION: ${HELM_XAI_GROK_CLIENT_VERSION:-}
-      # Upstream provider credential (env-injected, never in the repo). The PRIMARY
-      # (deepseek) credential is mandatory — fail-closed if unset.
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in .env}
+      # Optional upstream credentials (env-injected, never in the repo). A new
+      # install may start with none and configure one through /setup, or connect a
+      # subscription later in Admin → Providers.
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      ZENMUX_API_KEY: ${ZENMUX_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     restart: unless-stopped
     healthcheck:
       test:
@@ -30,7 +44,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+          "fetch('http://127.0.0.1:'+(process.env.HELM_PORT??'8080')+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
         ]
       interval: 10s
       timeout: 3s

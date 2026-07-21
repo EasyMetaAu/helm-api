@@ -23,15 +23,19 @@ The published image is `ghcr.io/easymetaau/helm-api`. It is built on **Node 22**
 (`node:22-slim`), runs as a non-root `helm` user, and exposes port `8080`.
 
 ```bash
+docker volume create helm-data
 docker run -d --name helm \
   -p 8080:8080 \
   -v "$(pwd)/config:/app/config" \
-  -v "$(pwd)/data:/app/data" \
-  -e HELM_ADMIN_USER=admin \
-  -e HELM_ADMIN_PASSWORD=change-me \
-  -e DEEPSEEK_API_KEY=sk-... \
+  -v helm-data:/app/data \
   ghcr.io/easymetaau/helm-api:latest
 ```
+
+Then run `docker logs helm` and open the complete
+`http://localhost:8080/setup#token=...` URL it prints. The browser consumes the
+protected fragment automatically; there is no token field. Supplying complete `HELM_ADMIN_*` credentials
+skips the browser wizard for an automated/headless deployment; static provider
+keys are optional because subscription providers can be connected later.
 
 The image bakes the default `config/*.yaml` so it boots standalone on first run.
 That is safe because `providers.yaml` references credentials by **env-var name
@@ -41,36 +45,73 @@ also copied into the runtime image at `apps/admin/build` and `apps/portal/build`
 
 ### docker-compose
 
-A `docker-compose.yml` is provided. It defaults to the published image (uncomment
-the `build:` block for local builds), mounts the two volumes, and injects credentials from
-a `.env` file. `HELM_ADMIN_PASSWORD` and `DEEPSEEK_API_KEY` are required (compose
-fails fast if they are unset):
+A `docker-compose.yml` is provided. The shortest first install is:
+
+```bash
+./scripts/quickstart.sh
+```
+
+It creates a private `.env` containing only the port and current UID/GID, starts
+Compose, and waits for setup readiness. Open the complete printed `/setup#token=...`
+URL, choose the Admin credentials, and either test a static provider
+key or continue to a subscription-only install. Existing `.env` files are never
+overwritten. `./scripts/quickstart.sh --cli` retains a terminal/automation path.
+
+Compose defaults to the published image, mounts config and data, and injects an
+optional `.env`. No credential is required for the guarded setup mode:
 
 ```yaml
 services:
   helm:
-    image: ghcr.io/easymetaau/helm-api:latest
+    image: ${HELM_IMAGE:-ghcr.io/easymetaau/helm-api:latest}
     # build: .
     container_name: helm
+    env_file:
+      - path: .env
+        required: false
+    user: "${HELM_UID:-10001}:${HELM_GID:-10001}"
     ports:
-      - "8080:8080"
+      - "${HELM_PORT:-8080}:${HELM_PORT:-8080}"
     volumes:
       - ./config:/app/config
       - ./data:/app/data
     environment:
-      HELM_ADMIN_USER: ${HELM_ADMIN_USER:-admin}
-      HELM_ADMIN_PASSWORD: ${HELM_ADMIN_PASSWORD:?set HELM_ADMIN_PASSWORD in .env}
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in .env}
+      HELM_ADMIN_USER: ${HELM_ADMIN_USER:-}
+      HELM_ADMIN_PASSWORD: ${HELM_ADMIN_PASSWORD:-}
+      HELM_PORT: ${HELM_PORT:-8080}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
     restart: unless-stopped
 ```
 
-Compose's project `.env` file is used for **variable interpolation**; it does not
-automatically pass every entry into the container. The checked-in compose file
-forwards only the variables shown in its `environment:` block (admin credentials,
-the required DeepSeek credential, the OAuth encryption key, and the optional xAI
-client-version override). To use optional providers or runtime overrides from
-`.env.example`, add those names to `environment:` or use an explicit `env_file:` /
-`docker run --env-file` deployment. The gateway itself does not load `.env`.
+The checked-in Compose file uses `.env` both for interpolation and as `env_file`,
+so every documented optional provider/runtime setting reaches the container.
+`HELM_PORT` controls the published port, gateway bind, and health probes together.
+On Linux, `HELM_UID` / `HELM_GID` let the non-root process write `./data` without
+`sudo` or world-writable permissions; the initializer fills the exact current
+values. The `10001:10001` fallback preserves the image user for existing installs.
+
+### First-run security and persistence
+
+When Admin credentials are absent, Helm exposes only `/setup`, `/healthz`, and
+`/version`; inference, Admin, Portal, docs, and key-management routes remain
+unmounted. Setup requires a random 256-bit token written to
+`data/helm-setup-token` with mode `0600`. The operator log and quickstart output
+embed it in the `/setup#token=...` URL; the browser sends it only in protected
+setup API headers, so beginners never see a separate token field and the first
+public visitor still cannot claim the installation.
+
+On completion Helm atomically writes the chosen Admin credentials, a generated
+OAuth encryption key, and tested static provider keys to
+`data/helm-managed-env.json` (`0600`), deletes the setup token, and switches the
+same process to the full Gateway. External non-empty environment variables take
+precedence over this file. It is deliberately equivalent to a private `.env`
+inside the persistent data volume: protect the volume and backups; storing an
+encryption key beside ciphertext would not protect against full-volume theft.
+
+Opening `/admin` after setup now shows Helm's own login page instead of the
+browser's HTTP Basic prompt. A successful login creates a signed HttpOnly session
+for 12 hours; changing the configured Admin username or password invalidates it.
+Automation may continue to send pre-emptive HTTP Basic credentials directly.
 
 ## Volumes
 
@@ -98,6 +139,8 @@ Configuration comes from **files** and **environment variables**, and env vars
   - `HELM_HOST`, `HELM_PORT`. `HELM_BASE_PATH` is parsed and validated, but the
     current gateway still mounts routes at `/`; keep it `/` until route-prefix
     mounting is implemented.
+  - `HELM_UID`, `HELM_GID` are Compose-only Linux bind-mount ownership controls;
+    they do not enter the validated gateway config.
   - `HELM_ADMIN_USER`, `HELM_ADMIN_PASSWORD`, `HELM_ADMIN_ENABLED`. These are the
     shipping server's admin controls; there is currently no loaded admin YAML path.
   - `HELM_REQUIRE_API_KEY` must remain `true`; `false` is rejected at config load
@@ -156,31 +199,52 @@ Configuration comes from **files** and **environment variables**, and env vars
     changes the local callback helper host (default `127.0.0.1`).
   - Upstream credentials such as `DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`,
     `ZENMUX_API_KEY`, `OPENROUTER_API_KEY` — each maps to a `providers.yaml`
-    entry's `api_key_env`. `DEEPSEEK_API_KEY` is required (the primary
-    credential); the others are optional (their providers are skipped if absent).
-    Premium/coding lanes can instead route through the `openai-codex`
-    subscription — connect it in the admin UI (which needs `HELM_OAUTH_ENC_KEY`,
-    above), not an API key here.
+    entry's `api_key_env`. Every static key is optional; an absent provider is
+    skipped and may be added later. With no usable provider, Helm stays healthy
+    and returns `503 lane_unavailable` for inference. Premium/coding lanes can
+    instead route through the `openai-codex` subscription — connect it in Admin →
+    Providers (the wizard generates `HELM_OAUTH_ENC_KEY`).
 
 Invalid configuration is rejected at startup (Zod-validated, fail-closed) — Helm
 never runs in a half-broken state (Principle 2).
 
+## Run from source
+
+Use Node 22+ and the pinned pnpm 10 release:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm build
+pnpm start
+```
+
+`pnpm start` serves the built gateway, Admin, and Portal and loads `.env` with
+Node's native `--env-file-if-exists` flag. With no complete Admin credentials it
+opens the same `/setup` flow as Docker. `pnpm dev` starts only the Admin Vite
+server and is not a complete Helm runtime. For automation, pre-populate `.env`
+from `.env.example`; a provider key is still optional.
+
 ## Startup behavior
 
-1. Load configuration (files + environment variables, env wins).
-2. If no API key exists, **mint a root key, write the configured `0600` recovery
+1. Load configuration, then load `data/helm-managed-env.json` for values not
+   already supplied by the external environment.
+2. If Admin credentials are absent, start the token-protected setup-only surface.
+   Completing setup atomically persists its state and switches the same process
+   to the full server. An explicit `HELM_ADMIN_ENABLED=false` or
+   `HELM_SETUP_DISABLED=1` preserves headless operation.
+3. If no API key exists, **mint a root key, write the configured `0600` recovery
    file, and print the key once** (see [06 · Auth, API Keys & Rate
    Limits](06-auth-and-rate-limits.md)).
-3. Mint a dedicated in-process internal key for memory/eval self-calls (fail-open
+4. Mint a dedicated in-process internal key for memory/eval self-calls (fail-open
    to the direct/deterministic path if that mint fails).
-4. Start the HTTP server: inference/compatibility routes, the unconditional
+5. Start the HTTP server: inference/compatibility routes, the unconditional
    self-service portal, optional Memory MCP, and the admin UI only when admin
    credentials/config enable it. See [Self-Service Portal](12-self-service-portal.md)
    and [11 · Admin UI](11-admin-ui.md).
-5. Start the signal scheduler, memory worker, scheduled cleanup runner, and
+6. Start the signal scheduler, memory worker, scheduled cleanup runner, and
    deferred write queue unless their controls disable them. Timers are unref'd and
    background failures are logged rather than turned into request failures.
-6. Begin serving once the health endpoint reports ready.
+7. Begin serving once the health endpoint reports ready.
 
 ## Health & version
 

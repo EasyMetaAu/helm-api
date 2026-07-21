@@ -193,6 +193,7 @@ import { registerAdminApi } from "./routes/admin/index.js";
 import { createOAuthAccountTester, type OAuthTester } from "./routes/admin/oauth-test.js";
 import { createRuntimeRuleStore } from "./routes/admin/rule-store.js";
 import { createYamlRulePersister } from "./routes/admin/yaml-writeback.js";
+import { mountAdminLogin } from "./routes/admin-login.js";
 import { ADMIN_BUILD_ROOT, mountAdminStatic } from "./routes/admin-static.js";
 import { registerChatRoutes } from "./routes/chat.js";
 import { buildClassifyAdapter } from "./routes/classify.js";
@@ -1679,6 +1680,60 @@ function createProviderClient(
   });
 }
 
+// First-run connectivity probe for a static provider key. The key is injected
+// directly into a short-lived client — never written to process.env, config, the
+// Store, or logs. A one-token completion validates both authentication and actual
+// model access (a public /models endpoint would not prove either for every provider).
+export async function testStaticProviderKey(
+  provider: ProviderConfigShared,
+  apiKey: string,
+): Promise<void> {
+  if (provider.oauth) throw new Error("only static API-key providers can be tested here");
+  const model = provider.models[0]?.provider_model;
+  if (!model) throw new Error(`provider ${provider.name} has no model configured for testing`);
+  const client = createProviderClient(
+    provider,
+    {
+      baseUrl: provider.base_url ?? "https://api.openai.com/v1",
+      timeoutMs: 15_000,
+    },
+    { apiKey },
+  );
+  await client.chatCompletion(
+    {
+      model,
+      messages: [{ role: "user", content: "Reply with OK." }],
+      max_tokens: 1,
+      stream: false,
+    },
+    { signal: AbortSignal.timeout(15_000) },
+  );
+}
+
+// Auxiliary classifier/memory calls require a ProviderClient even before any
+// upstream is configured. This explicit unavailable client makes those optional
+// paths fail through their existing fail-open handlers without registering a fake
+// routable provider or weakening request-time availability checks.
+export function createUnavailableProviderClient(name: string): ProviderClient {
+  const unavailable = (): Error => new Error(`provider ${name} is not configured`);
+  return {
+    async chatCompletion() {
+      throw unavailable();
+    },
+    chatCompletionStream() {
+      return {
+        [Symbol.asyncIterator]() {
+          return {
+            next: async () => {
+              throw unavailable();
+            },
+          };
+        },
+      };
+    },
+  };
+}
+
 // Full wiring: config -> store -> bootstrap key -> provider -> routing pipeline.
 // Fail-closed: an invalid config throws (caller exits non-zero). The HTTP listen
 // is performed by the caller (index.ts) so this stays testable. Async because the
@@ -2028,26 +2083,24 @@ export async function buildServer(
   }
 
   // Provider(s): the configured upstreams (providers-multi). The PRIMARY provider
-  // (providers[0]) backs the default/eval path and the Phase-0 passthrough; its
-  // credential is mandatory (fail-closed). Additional providers each get their own
+  // (providers[0]) backs the default/eval path and the Phase-0 passthrough when it
+  // has a credential. Additional providers each get their own
   // OpenAI-compatible client so a fallback chain can CROSS providers. Credentials
   // come ONLY from the env var each api_key_env names (principle 7). The e2e/test
   // harness points every provider at the mock via HELM_PROVIDER_BASE_URL (used as
   // the shared fallback base_url when a provider omits one).
   const first = config.providers[0];
   if (!first) throw new Error("no provider configured");
-  // Primary credential is MANDATORY (fail-closed, principle 2): it backs the
-  // default/eval/passthrough path. Static key OR OAuth — buildCredential returns
-  // null only when a required secret env is unset, which is fatal for the primary.
+  // A primary credential is optional on a new install: configured candidates with
+  // no client are skipped by the executor, while an OAuth subscription connected
+  // later becomes routable through the hot pool. Invalid PRESENT credentials still
+  // fail closed in their own loaders; only an absent secret enters this state.
   // Resolve the primary's egress proxy ONCE and thread it into BOTH the credential
   // (so token refresh tunnels through it) and the client (so chat execution does) —
   // a preset-OAuth primary must not leak the real IP on the eval/default/401 path
   // (issue #38). Reused at the createProviderClient call below.
   const primaryProxy = resolveProviderProxy(first, accountSettings);
   const primaryCred = buildCredential(first, oauthCtx, primaryProxy);
-  if (!primaryCred) {
-    throw new Error(`missing provider credential for primary provider ${first.name}`);
-  }
   // HELM_PROVIDER_BASE_URL (test/e2e) overrides EVERY provider's base_url so the
   // mock upstream serves all of them; otherwise each provider uses its own.
   const baseUrlOverride = process.env.HELM_PROVIDER_BASE_URL;
@@ -2471,7 +2524,9 @@ export async function buildServer(
   // by type (anthropic native vs OpenAI-compatible). When the primary is OAuth this
   // SAME dynamic-header client backs the eval/classify path below, so eval auth
   // never silently fails (acceptance criterion 9).
-  const provider = createProviderClient(first, { baseUrl, timeoutMs }, primaryCred, primaryProxy);
+  const provider = primaryCred
+    ? createProviderClient(first, { baseUrl, timeoutMs }, primaryCred, primaryProxy)
+    : createUnavailableProviderClient(first.name);
   // Per-provider clients keyed by provider NAME. Only the CONFIGURED providers go
   // through buildProviderClients (one static/OAuth client each). When
   // HELM_PROVIDER_BASE_URL is set (test/e2e), force the override so cross-provider
@@ -2487,9 +2542,10 @@ export async function buildServer(
     oauthCtx,
     accountSettings,
   );
-  // Ensure the primary client is registered under its name (built above with the
-  // resolved baseUrl, which already honors the override).
-  configuredClients.set(first.name, provider);
+  // Register the primary only when it has a real credential. Leaving it out makes
+  // its configured aliases explicitly unavailable, so lane fallback can continue
+  // to another static or connected OAuth provider.
+  if (primaryCred) configuredClients.set(first.name, provider);
 
   // The synthesized OAuth subscription POOL clients (Stage 3): each subscription
   // provider is keyed by its providerId and served by ONE pool that rotates across
@@ -3030,6 +3086,7 @@ export async function buildServer(
           execute: createExecute({
             defaultProvider: provider,
             providers: providerClients,
+            hasUsableProviders: () => providerClients.size > 0,
             // Subscription aliases are gated authoritatively by the LIVE curation set +
             // pool (fail-closed), bypassing the startup registry — so de-curation /
             // disconnect take effect immediately and never cross provider boundaries.
@@ -3164,7 +3221,8 @@ export async function buildServer(
   // `route`, behind a pipeline adapter that bridges IR ↔ the OpenAI executor and
   // produces the native Anthropic response / SSE events (docs/05). Self-auth so a
   // missing key is rejected as an Anthropic error envelope (docs/07).
-  // Admin API (/admin/api/*) behind HTTP Basic (admin.auth). DELIBERATELY separate
+  // Admin API (/admin/api/*) behind the signed browser session or pre-emptive HTTP
+  // Basic (admin.auth). DELIBERATELY separate
   // from API-key auth (different credential source, no RBAC). Rule edits go through
   // a runtime RuleStore that re-binds the live `lanes`/`policies` the router reads;
   // keys/requests go to the Store. The plaintext of a freshly minted key is the
@@ -3176,6 +3234,9 @@ export async function buildServer(
   // Otherwise it is NOT mounted at all (/admin and /admin/api → 404), so the
   // key-management + telemetry endpoints can never be reached unauthenticated.
   if (adminAuth.enabled) {
+    // Register the standalone login/logout routes before the protected catch-alls.
+    // The full Admin SPA bundle stays private until authentication succeeds.
+    app.route("/admin", mountAdminLogin(adminAuth));
     // Rule edits write back to the canonical config/*.yaml FIRST (comment-
     // preserving, atomic, fail-closed — see yaml-writeback.ts), THEN rebind the
     // live config. A failed write 500s with nothing changed, so the file always
@@ -3201,7 +3262,7 @@ export async function buildServer(
         classifierConfig = next;
       },
     });
-    app.use("/admin/api/*", basicAuth(adminAuth));
+    app.use("/admin/api/*", basicAuth(adminAuth, { allowSession: true }));
     // Routable model catalog for the Lanes admin combobox: each alias + the
     // subscription account(s) exposing it (so the picker can show the account under
     // each model). CONFIGURED-provider aliases are static (config is immutable) and
@@ -3336,7 +3397,8 @@ export async function buildServer(
     // Admin SPA static hosting (/admin). MUST be mounted AFTER registerAdminApi so
     // the more-specific /admin/api/* routes win (Hono matches in registration
     // order); the static catch-all would otherwise return index.html for them. The
-    // sub-app re-applies basicAuth so the page + assets are also gated. We never run
+    // sub-app accepts signed sessions or pre-emptive Basic so the page + assets are
+    // still gated. We never run
     // SvelteKit here — just serve the adapter-static build (CLAUDE.md Principle 1).
     if (!existsSync(ADMIN_BUILD_ROOT)) {
       logger.log("warn", "admin.static_missing", {
