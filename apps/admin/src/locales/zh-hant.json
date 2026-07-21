@@ -771,6 +771,7 @@
   "Server-side routing rules. Each is a condition → action (force a lane). Policies override task lanes but never the execution fallback chain.": "伺服器端路由規則。每條都是 條件 → 動作（強制某條通道）。策略會覆蓋任務通道，但絕不覆蓋執行回退鏈。",
   "Serving": "服務",
   "Set the primary model and fallback chain for each quality and cost tier.": "為每個品質和成本層級設定主模型和備用鏈。",
+  "Set these environment variables. The base URL MUST end in /v1 so Grok Build can discover Helm models, then start with model \"auto\".": "設定這些環境變數。base URL 必須以 /v1 結尾，Grok Build 才能發現 Helm 模型；然後使用 “auto” 模型啟動。",
   "Set these environment variables. The base URL is the bare origin — do NOT add /v1 (Anthropic clients append /v1/messages themselves).": "設定下面這幾個環境變數。base URL 用裸網域即可——千萬別加 /v1（Anthropic 用戶端會自己補上 /v1/messages）。",
   "Settings": "設定",
   "Show all {count} dimensions": "展開查看全部 {count} 項",

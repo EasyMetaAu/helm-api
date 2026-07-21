@@ -63,6 +63,15 @@ describe('ConnectClientDialog', () => {
     expect(snippet).toContain('wire_api = "responses"');
   });
 
+  it('renders the Grok Build tab with Helm model discovery and bearer-key auth', async () => {
+    setup({ plaintextKey: 'helm_live_GROK' });
+    await fireEvent.click(screen.getByRole('tab', { name: /grok build/i }));
+    const snippet = screen.getByTestId('snippet-grok').textContent ?? '';
+    expect(snippet).toContain(`export GROK_MODELS_BASE_URL="${ORIGIN}/v1"`);
+    expect(snippet).toContain('export XAI_API_KEY="helm_live_GROK"');
+    expect(snippet).toContain('grok -m auto');
+  });
+
   it('renders the Gemini tab with the native /v1beta path and x-goog-api-key auth', async () => {
     setup();
     await fireEvent.click(screen.getByRole('tab', { name: /gemini/i }));
@@ -112,13 +121,16 @@ describe('ConnectClientDialog', () => {
     await fireEvent.click(copyBtn);
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
     expect(writeText.mock.calls[0][0]).toContain(`ANTHROPIC_BASE_URL="${ORIGIN}"`);
-    await waitFor(() => expect(screen.getAllByRole('button', { name: /copied/i }).length).toBeGreaterThan(0));
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: /copied/i }).length).toBeGreaterThan(0),
+    );
   });
 
-  it('exposes Claude Code, Codex, Gemini, OpenClaw and SDK tabs', () => {
+  it('exposes Claude Code, Codex, Grok Build, Gemini, OpenClaw and SDK tabs', () => {
     setup();
     expect(screen.getByRole('tab', { name: /claude code/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /codex/i })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /grok build/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /gemini/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /openclaw/i })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: /sdk/i })).toBeInTheDocument();
