@@ -35,13 +35,21 @@ describe("checked-in config samples", () => {
     expect(raw).not.toContain("sk-");
   });
 
-  it(".env.example documents required admin + provider variables (placeholders only)", () => {
+  it(".env.example documents Admin and blank optional provider variables", () => {
     const env = readFileSync(join(repoRoot, ".env.example"), "utf8");
     expect(env).toContain("HELM_ADMIN_USER");
     expect(env).toContain("HELM_ADMIN_PASSWORD");
-    expect(/[A-Z]+_API_KEY/.test(env)).toBe(true);
-    // placeholder, not a real key
-    expect(env).toContain("sk-...");
+    for (const name of [
+      "DEEPSEEK_API_KEY",
+      "ANTHROPIC_API_KEY",
+      "ZENMUX_API_KEY",
+      "OPENROUTER_API_KEY",
+      "OPENAI_API_KEY",
+      "GEMINI_API_KEY",
+    ]) {
+      expect(env).toMatch(new RegExp(`^${name}=$`, "m"));
+    }
+    expect(env).not.toMatch(/^(?!HELM_)[A-Z][A-Z0-9_]*_API_KEY=.+$/m);
   });
 
   it("loadConfig consumes the samples and returns a typed Config", () => {
