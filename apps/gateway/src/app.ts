@@ -3,12 +3,7 @@ import { Hono } from "hono";
 import { readBuildInfo } from "./build-info.js";
 import type { Logger } from "./logging.js";
 import { handleError } from "./middleware/error-handler.js";
-import {
-  bodyLimit,
-  type LimitsConfig,
-  type RequestTimeoutState,
-  timeout,
-} from "./middleware/limits.js";
+import { type LimitsConfig, type RequestTimeoutState, timeout } from "./middleware/limits.js";
 import { normalizeHeaders } from "./middleware/normalize-headers.js";
 import { requestLoggerMiddleware } from "./middleware/request-logger.js";
 import { traceIdMiddleware } from "./middleware/trace-id.js";
@@ -22,7 +17,7 @@ export interface AppDeps {
   // Health/version wiring. Optional so tests can build a bare app; defaults to a
   // ready probe + env-derived build info.
   health?: HealthDeps;
-  // Request size/timeout limits. Optional; omitted = no limits middleware.
+  // Request timeout. Optional; omitted = no timeout middleware.
   limits?: LimitsConfig;
 }
 
@@ -63,11 +58,9 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   });
   app.use("*", requestLoggerMiddleware());
 
-  // Hygiene: normalize hop-by-hop/correlation headers, then enforce body size + timeout.
-  // Order: normalizeHeaders -> bodyLimit -> timeout (before auth/routes).
+  // Hygiene: normalize hop-by-hop/correlation headers, then enforce timeout.
   app.use("*", normalizeHeaders());
   if (deps.limits) {
-    app.use("*", bodyLimit(deps.limits));
     app.use("*", timeout(deps.limits));
   }
 

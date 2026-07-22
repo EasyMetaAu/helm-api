@@ -35,7 +35,6 @@ function fullConfig() {
       },
     ],
     runtime: {
-      max_request_bytes: 1_000_000,
       request_timeout_ms: 30_000,
       rate_limit: {
         enabled: false,
@@ -139,7 +138,7 @@ describe("HelmConfigSchema", () => {
     expect(parsed.auth.require_api_key).toBe(true);
     expect(parsed.auth.bootstrap.generate_if_missing).toBe(true);
     expect(parsed.auth.bootstrap.print_once).toBe(true);
-    expect(parsed.runtime.max_request_bytes).toBe(20_000_000);
+    expect(parsed.runtime).not.toHaveProperty("max_request_bytes");
     expect(parsed.runtime.request_timeout_ms).toBe(60_000);
     expect(parsed.runtime.rate_limit.enabled).toBe(false);
     expect(parsed.runtime.rate_limit.default.rpm).toBe(0);

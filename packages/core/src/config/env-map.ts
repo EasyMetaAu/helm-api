@@ -21,11 +21,6 @@ export const ENV_MAPPINGS: readonly EnvMapping[] = [
   { env: "HELM_REQUIRE_API_KEY", path: ["auth", "require_api_key"], kind: "boolean" },
   { env: "HELM_KEYS_PERSIST_TO", path: ["auth", "bootstrap", "persist_to"], kind: "string" },
   {
-    env: "HELM_MAX_REQUEST_BYTES",
-    path: ["runtime", "max_request_bytes"],
-    kind: "number",
-  },
-  {
     env: "HELM_REQUEST_TIMEOUT_MS",
     path: ["runtime", "request_timeout_ms"],
     kind: "number",

@@ -140,7 +140,7 @@ describe("createApp: trace_id, logging, error handling", () => {
     const { logger } = fakeLogger();
     const app = createApp({
       logger,
-      limits: { maxBodyBytes: 1024, requestTimeoutMs: 5 },
+      limits: { requestTimeoutMs: 5 },
       genTraceId: () => "trace-timeout",
     });
     let lateTimedOut: boolean | null = null;

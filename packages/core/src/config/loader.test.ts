@@ -22,7 +22,7 @@ const VALID_YAML = {
   "config/providers.yaml":
     "providers:\n  - alias: openai\n    type: openai\n    base_url: https://api.openai.com/v1\n    api_key_env: OPENAI_API_KEY\n",
   "config/runtime.yaml":
-    "max_request_bytes: 2000000\nrequest_timeout_ms: 60000\nrate_limit:\n  enabled: false\n  default:\n    rpm: 0\n    tpm: 0\n",
+    "request_timeout_ms: 60000\nrate_limit:\n  enabled: false\n  default:\n    rpm: 0\n    tpm: 0\n",
 };
 
 describe("loadConfig", () => {

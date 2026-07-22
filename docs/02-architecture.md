@@ -57,8 +57,8 @@ Built on Hono. Responsibilities:
   (`/v1/usage/stats`).
 - Normalize request headers, generate Helm's internal `request_id`, and resolve
   the independent client-facing `trace_id`.
-- Apply request-size and timeout limits (`runtime.max_request_bytes`,
-  `runtime.request_timeout_ms`).
+- Apply the request timeout (`runtime.request_timeout_ms`); request-body size is
+  enforced by the deployment's reverse proxy.
 - Dispatch to the correct protocol adapter.
 
 It also serves the public landing page, `/healthz`, `/version`, `/openapi.json`,
