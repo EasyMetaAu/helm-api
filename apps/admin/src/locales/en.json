@@ -192,6 +192,7 @@
   "Context window too small": "Context window too small",
   "Conversation": "Conversation",
   "Conversation continuation blocked across protocols": "Conversation continuation blocked across protocols",
+  "Conversation continuation pinned to its original provider": "Conversation continuation pinned to its original provider",
   "Copied": "Copied",
   "Copy": "Copy",
   "Copy it now — key reveal encryption is not configured, so it cannot be recovered later.": "Copy it now — key reveal encryption is not configured, so it cannot be recovered later.",
