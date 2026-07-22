@@ -250,8 +250,8 @@ Helm exposes configured **lanes** (the abstraction clients steer toward; provide
 aliases stay internal). The checked-in file currently has 22: three ranked
 quality/cost lanes (`economy`, `balanced`, `premium`), four task lanes (`coding`,
 `json`, `vision`, `tool_use`), 13 vendor-family compatibility lanes, and two
-image lanes. `balanced` is schema-mandatory as the last-resort floor, although
-the live terminal fallback can be changed to another existing lane. Not every
+image lanes. The lane map must contain at least one lane, and the live terminal
+fallback must name one of them (`balanced` is only the shipped default). Not every
 task/image lane transitively includes `balanced`; the exact chains live in
 `config/lanes.yaml`. See
 [04 · Routing & Lanes](04-routing-and-lanes.md).

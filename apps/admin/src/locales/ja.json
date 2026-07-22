@@ -256,6 +256,7 @@
   "Done in {duration}": "{duration} で完了",
   "down": "下り",
   "drag to reorder policy": "ドラッグしてポリシーの順序を変更",
+  "drag to reorder fallback": "ドラッグしてフォールバックの順序を変更",
   "e.g. favorite number": "例：好きな数字",
   "e.g. premium": "例: premium",
   "e.g. The user's favorite number is 42.": "例：ユーザーの好きな数字は 42 です。",

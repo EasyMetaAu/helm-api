@@ -223,15 +223,14 @@ describe("loadConfig", () => {
     expect(cfg.policies.policies).toEqual([]);
   });
 
-  it("fail-closed: a lanes.yaml missing the balanced terminal throws ConfigError", () => {
-    const badLanes = "economy:\n  primary: cheap_model\n  fallback: [premium]\n";
-    expect(() =>
-      loadConfig({
-        configDir: "config",
-        env: {},
-        readFile: fakeReadFile({ ...VALID_YAML, "config/lanes.yaml": badLanes }),
-      }),
-    ).toThrow(ConfigError);
+  it("accepts lanes.yaml without balanced; runtime.default_lane is validated at composition", () => {
+    const lanes = "economy:\n  primary: cheap_model\n  fallback: [premium]\n";
+    const cfg = loadConfig({
+      configDir: "config",
+      env: {},
+      readFile: fakeReadFile({ ...VALID_YAML, "config/lanes.yaml": lanes }),
+    });
+    expect(cfg.lanes?.economy?.primary).toBe("cheap_model");
   });
 
   it("fail-closed: a policy with no action field throws ConfigError", () => {

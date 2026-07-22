@@ -256,6 +256,7 @@
   "Done in {duration}": "{duration} 소요",
   "down": "아래",
   "drag to reorder policy": "드래그하여 정책 순서 변경",
+  "drag to reorder fallback": "드래그하여 대체 순서 변경",
   "e.g. favorite number": "예: 좋아하는 숫자",
   "e.g. premium": "예: premium",
   "e.g. The user's favorite number is 42.": "예: 사용자가 좋아하는 숫자는 42입니다.",

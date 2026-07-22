@@ -28,12 +28,16 @@ describe("parseLanesConfig", () => {
     expect(balanced.fallback).toEqual(["premium", "economy"]);
   });
 
-  it("fails closed when balanced is missing", () => {
+  it("allows balanced to be absent when runtime.default_lane points elsewhere", () => {
     const raw = {
       economy: { primary: "cheap_model", fallback: ["premium"] },
       premium: { primary: "best_reasoning_model", fallback: [] },
     };
-    expect(() => parseLanesConfig(raw)).toThrow(/balanced/);
+    expect(Object.keys(parseLanesConfig(raw))).toEqual(["economy", "premium"]);
+  });
+
+  it("fails closed when no lanes are configured", () => {
+    expect(() => parseLanesConfig({})).toThrow();
   });
 
   it("fills defaults: missing constraints -> {} with false flags; missing fallback -> []", () => {

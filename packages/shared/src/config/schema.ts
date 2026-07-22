@@ -303,7 +303,7 @@ export const HelmConfigSchema = z.object({
   // Lanes (config/lanes.yaml). OPTIONAL at the config level: when lanes.yaml is
   // absent the gateway falls back to core's DEFAULT_LANES (principle 6, the lane
   // abstraction is always present). When PRESENT, it must be a valid LanesConfig
-  // (with a `balanced` terminal) or the loader fails closed (principle 2). Not
+  // (with at least one lane) or the loader fails closed (principle 2). Not
   // defaulted here so the server can distinguish "config provided none" (use
   // DEFAULT_LANES) from "config provided lanes".
   lanes: LanesConfigSchema.optional(),

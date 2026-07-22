@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-22 · Lanes 批量保存、拖拽回退与可配置默认通道删除边界（Routing / Admin lanes，docs/03/04/11，原则 2/3/5/6）
+
+- **整组写入**：Lanes 页面不再由每张卡分别 PUT；所有编辑、fallback 顺序和待删除 lane 由一个底部保存按钮通过 `PUT /admin/api/lanes` 一次提交，Gateway 用共享 `LanesConfigSchema` 校验完整 map 后原子写回 `lanes.yaml` 并热更新，失败时整组不落盘。单 lane API 保留兼容，不新增依赖。
+- **排序与删除**：fallback 的上下按钮改为复用 Policies 页交互语义的拖拽手柄，并保留方向键排序；每张 lane 卡提供删除按钮，删除先进入页面工作集，统一保存时才持久化。页面从 runtime settings 读取当前 `default_lane`，只保护当前默认 lane，不把 `balanced` 写死。
+- **配置边界修正**：`LanesConfigSchema` 改为要求至少一个有效 lane；`runtime.default_lane` 与 lane 集合的交叉约束在 Gateway 边界及启动组合层 fail-closed 校验。因而用户先把默认通道改成其他 lane 后可删除 `balanced`；Settings 选项与默认配置说明也不再把 `balanced` 当作强制终点。若手工配置令默认通道不存在，Gateway 拒绝启动；Resolver 仍对异常调用防御性地回退到存在的 `balanced` 或第一个 lane。
+
 ## 2026-07-21 · 首次安装改为令牌保护的浏览器向导并允许订阅-only 启动（Deployment / bootstrap / Admin，docs/10/11，原则 2/3/7）
 
 - **Admin 登录体验**：浏览器不再依赖 `WWW-Authenticate` 触发原生 Basic 弹窗；未登录页面跳转到 Gateway 自带的 `/admin/login`，成功后使用仅含过期时间与 HMAC 的 12 小时 `HttpOnly`、`SameSite=Strict`、`Path=/admin` Cookie，HTTPS 时加 `Secure`。签名密钥只由进程内现有 Admin 用户名/密码派生，凭据轮换自动让旧会话失效，不新增 session 表、JWT 依赖或独立 secret。Admin SPA 与静态资产仍在会话/Basic 双重认证之后，只有无脚本登录 HTML 公开；脚本可继续主动发送 HTTP Basic，失败响应不再带 challenge，避免浏览器弹窗。登录 POST 校验同源、常量时间比较并限制本地 `next`，顶栏提供退出入口。
@@ -60,14 +66,9 @@
 - **CI 维护边界**：GitHub Actions 升级到经过签名验证并固定完整 SHA 的 checkout v7、setup-node v7 与 pnpm/action-setup v6，消除 Node 20 runtime 弃用；setup-node v7 正式支持 `package-manager-cache:false`。checkout v7 对 fork PR 的显式 opt-in 只存在于 `pull_request_target` 的三个代码执行 job，它们仍固定在一次性 GitHub-hosted runner、只读 token、无 secrets 且 `persist-credentials:false`；特权 Publish 不允许该选项。
 - **验证**：TDD 先复现空集放行、双重 clamp 越权、规则/缓存开关无效和旧 Action pin，再覆盖 core、Gateway、Admin 与 workflow policy；本地只运行 `CI=true` 定向 Vitest 且单 worker，最终结果和 hosted CI 另行记录在 PR。
 
-## 2026-07-16 · xAI 订阅协议跟随官方 grok-build 并收紧动态目录边界（OAuth subscription / model catalog / Responses / Admin providers，docs/04/05/06/11，原则 2/3/5/6/7/8）
-
-- **官方事实边界**：以 `xai-org/grok-build@c68e39f`、本机 Grok CLI `0.2.101` 和当前账号真实 wire 为准；OAuth issuer/client、Device Code 与 `/v1/responses` 主链保留，scope 补齐官方 personal conversation scopes，推理请求补充 headless/client identifier/user identity 并强制请求 `reasoning.encrypted_content`。当前 entitlement 仍只有 `grok-4.5` 与 `grok-composer-2.5-fast`，两者的真实 `/models` backend 均为 `responses`，目录分别报告 500k 与 200k context；官方静态 fallback 中的 `grok-build` 不是账号授权证据，不能自动加入 Helm。
-- **目录与能力边界**：`/models` 不再压缩成字符串；目录 `id` 与实际 wire `model` 分开保存，并保留官方 backend、context、max output/retry、reasoning、visibility 与 streamed-tool metadata。重复 id 与官方一致采用 last-wins，数值和 reasoning fallback 也按官方边界解析。结构化账号目录加密持久化为 last-known-good：上游失败复用，成功空目录则权威清空；换凭证会先清旧身份目录。Lane picker 只读取当前 synthesized pool 接受的 xAI alias/account，不能把被 metadata/wire conflict 剔除的账号继续显示为可路由。Helm 识别 `responses` / `chat_completions` / `messages`，但只路由当前已实现的 Responses transport；hidden 条目排除，`supportedInApi:false` 仍可用于 session auth。已验证 wire model 复用手工 capability/pricing，并以下游目录报告的 context/output 上限做更小值钳制；目录若将来提供 `maxCompletionTokens` / `streamToolCalls`，请求只在客户端未显式设置时应用。未知 Responses 模型只获得保守的纯文本/streaming 能力，tools/vision/JSON/media/cache 与价格保持关闭或 unknown。多账号同 alias 若目录 metadata 或 wire slug 冲突则拒绝冲突账号，不采用跨账号 last-write-wins。
-- **故障与配额边界**：按照官方明确语义，只有 xAI inference 401 才证明凭证失效；403 作为已认证的 policy/content/ZDR denial 进入正常执行 fallback，不停车、不持久化 credential failure。Device Code 完成后 pool rebuild 未应用必须返回 `503 not_applied`。SuperGrok quota 运行时迁移到官方 `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits`，使用 bearer、账号 identity、client version、headless mode 与同账号 proxy；有界 JSON 只投影当前 weekly period，忽略 prepaid/on-demand/monthly/history。真实响应证明 0% 时 proto3 JSON 会省略 `creditUsagePercent`，因此仅“缺失”解释为 0，显式 null/string 仍拒绝。
-- **延后项**：当前真实目录没有发布 `maxRetries`、`maxCompletionTokens` 或 `streamToolCalls`。后两项已具备未来兼容；`maxRetries` 暂不接入，因为 Helm 的账号 pool 与 lane fallback 已各自拥有重试边界，直接照搬会造成 `lane × account × retries` 放大，必须以后以 pool 为唯一共享预算再实现。通用 grok-build 客户端具备 JSON schema、额外 reasoning/retry、backend search 与其他工具扩展，不等于当前两个 SuperGrok entitlement 已验证这些 API 能力；Composer vision、订阅 JSON、额外媒体和未公开价格继续 fail-closed。后续若要开启，必须先做隔离真实请求与协议 fixture，不能仅凭通用 Rust 类型推断。
 ## 历史条目摘要（最新要点）
 
+- **2026-07-16 · xAI 订阅协议跟随官方 grok-build 并收紧动态目录边界（OAuth subscription / model catalog / Responses / Admin providers，原则 2/3/5/6/7/8）**：按官方源码、真实 wire 与 entitlement 校准 xAI OAuth、动态目录、Responses、能力和 weekly credits；401/403、账号冲突、last-known-good 与未知能力继续 fail-closed，完整原文通过 git history 回溯。
 - **2026-07-16 · 收紧发布信任链、请求归属与 Memory 项目隔离（CI / observability / Memory，原则 1/3/7）**：PR 信任链固定到受核验 merge ref 与只读权限，发布绑定已验证 main SHA；内部 `request_id` 与客户端 trace 分离，Memory thread/project 迁移保持租户隔离与事务原子性；完整原文通过 git history 回溯。
 - **2026-07-16 · 文档以当前源码为准完成全量运行时事实校准（docs/01–14 / README / operations，原则 1–8）**：以当前路由、schema、Store、配置与测试校准全部当前文档和中英文 README，明确 Portal、部署、安全、Memory 与协议实现/缺口边界；完整原文通过 git history 回溯。
 - **2026-07-16 · Admin 首次点击卡顿改为非投机加载与汇总读（Admin / Store performance，docs/08/11，原则 1/3/7）**：以 `memory_threads` 的事务维护汇总替代正文表冷扫描，Admin 改为非投机 data preload，并以有界 stale-while-revalidate 缓存保护统计读取；在线 VACUUM 继续禁止。

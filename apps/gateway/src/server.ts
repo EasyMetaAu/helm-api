@@ -2643,6 +2643,11 @@ export async function buildServer(
   // an invalid lanes.yaml already failed the load above). policies default to []
   // via the schema, so an absent policies.yaml is a no-op.
   let lanes: LanesConfig = config.lanes ?? parseLanesConfig(DEFAULT_LANES);
+  if (!(settings.default_lane in lanes)) {
+    throw new Error(
+      `invalid runtime.default_lane '${settings.default_lane}': no matching lane is configured`,
+    );
+  }
   let policies: PoliciesConfig = config.policies;
   // Virtual model aliases (docs/04 compatibility shim): a fixed-model client
   // (Claude CLI, an SDK pinned to a vendor id like "claude-opus-4-8") has its

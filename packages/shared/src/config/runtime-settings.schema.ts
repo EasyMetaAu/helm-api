@@ -63,9 +63,9 @@ export const RuntimeSettingsSchema = z.object({
   log_level: LogLevelSchema.default("info"),
   // Terminal fallback lane — where a request lands when the classifier fails open
   // (decided_by "default"/"fallback") or nothing else resolves. Default "balanced"
-  // (the schema-guaranteed floor, so behaviour is unchanged when unset). The lane
-  // resolver only honours this if the named lane EXISTS, otherwise it falls back to
-  // "balanced" — so a stale/removed lane can never strand routing (no fail-close).
+  // for backward compatibility. The lane resolver only honours this if the named
+  // lane exists; otherwise it prefers "balanced" when present, then the first lane,
+  // so a stale/manual inconsistency cannot strand direct resolver callers.
   // Lane-existence is validated fail-closed at the admin PUT route. Only the
   // terminal sink is affected; the complexity tiers (simple→economy / medium→
   // balanced / complex→premium) are intentionally NOT changed by this setting.

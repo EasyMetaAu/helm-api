@@ -390,6 +390,43 @@ describe("admin.api lanes", () => {
     expect(names).toContain("balanced");
   });
 
+  it("PUT /lanes replaces the complete lane set atomically", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    const current = await rules.getLanes();
+    const body = {
+      balanced: { ...current.balanced, primary: "new-balanced" },
+      coding: { ...current.coding, primary: "new-coding" },
+    };
+
+    const res = await app.request("/admin/api/lanes", {
+      method: "PUT",
+      headers: JSON_HEADERS,
+      body: JSON.stringify(body),
+    });
+
+    expect(res.status).toBe(200);
+    const saved = await rules.getLanes();
+    expect(Object.keys(saved)).toEqual(["balanced", "coding"]);
+    expect(saved.balanced?.primary).toBe("new-balanced");
+    expect(saved.coding?.primary).toBe("new-coding");
+  });
+
+  it("PUT /lanes rejects a complete set without runtime.default_lane and writes nothing", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    const before = structuredClone(await rules.getLanes());
+
+    const res = await app.request("/admin/api/lanes", {
+      method: "PUT",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ economy: before.economy }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await rules.getLanes()).toEqual(before);
+  });
+
   it("rejects an invalid lane body with 400 and does not write", async () => {
     const deps = buildDeps();
     const app = buildApp(deps);
@@ -456,10 +493,7 @@ describe("admin.api lanes", () => {
     expect((await rules.getLanes()).economy).toBeUndefined();
   });
 
-  it("refuses to DELETE the `balanced` fallback terminal (409) and writes nothing", async () => {
-    // Principle 5: `balanced` is the classification-fallback terminal; deleting it would
-    // leave LanesConfigSchema unsatisfiable. The whole-map re-validation must catch
-    // this and leave config untouched (fail-closed).
+  it("refuses to DELETE the configured default lane (409) and writes nothing", async () => {
     const deps = buildDeps();
     const app = buildApp(deps);
     const before = await rules.getLanes();
@@ -467,6 +501,18 @@ describe("admin.api lanes", () => {
     expect(res.status).toBe(409);
     expect(await rules.getLanes()).toEqual(before); // nothing written
     expect((await rules.getLanes()).balanced).toBeDefined();
+  });
+
+  it("allows deleting balanced after another lane becomes runtime.default_lane", async () => {
+    const deps = buildDeps();
+    await deps.settings.save({ ...deps.settings.get(), default_lane: "premium" });
+    const app = buildApp(deps);
+
+    const res = await app.request("/admin/api/lanes/balanced", { method: "DELETE" });
+
+    expect(res.status).toBe(200);
+    expect((await deps.rules.getLanes()).balanced).toBeUndefined();
+    expect((await deps.rules.getLanes()).premium).toBeDefined();
   });
 });
 

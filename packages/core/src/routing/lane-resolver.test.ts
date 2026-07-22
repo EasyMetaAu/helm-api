@@ -158,7 +158,7 @@ describe("resolveLane — configurable terminal (defaultLane)", () => {
   it("classifier fail-open lands on the configured defaultLane when it exists", () => {
     const out = resolveLane(
       input({
-        lanes: lanes(["economy", "premium"]),
+        lanes: { economy: lane(), premium: lane() },
         defaultLane: "economy",
         classification: classification({ decided_by: "default" }),
       }),
@@ -166,6 +166,17 @@ describe("resolveLane — configurable terminal (defaultLane)", () => {
     expect(out.selected_lane).toBe("economy");
     expect(out.decided_by).toBe("complexity_fallback");
     expect(out.reason.toLowerCase()).toContain("economy");
+  });
+
+  it("uses the first configured lane defensively when both defaultLane and balanced are absent", () => {
+    const out = resolveLane(
+      input({
+        lanes: { premium: lane() },
+        defaultLane: "removed",
+        classification: classification({ decided_by: "fallback" }),
+      }),
+    );
+    expect(out.selected_lane).toBe("premium");
   });
 
   it("final unresolved lands on the configured defaultLane when it exists", () => {

@@ -16,7 +16,7 @@ function makeLane(overrides: Partial<Lane> = {}): Lane {
 
 describe('LaneEditor', () => {
   it('renders name (read-only), primary and ordered fallback', () => {
-    render(LaneEditor, { lane: makeLane(), onsave: vi.fn() });
+    render(LaneEditor, { lane: makeLane(), onchange: vi.fn() });
 
     expect(screen.getByText('coding')).toBeInTheDocument();
     const primary = screen.getByLabelText(/primary/i) as HTMLInputElement;
@@ -32,23 +32,20 @@ describe('LaneEditor', () => {
     expect(idxPremium).toBeLessThan(idxBalanced);
   });
 
-  it('edits primary and calls onsave with the new value', async () => {
-    const onsave = vi.fn();
-    render(LaneEditor, { lane: makeLane(), onsave });
+  it('emits the complete lane when primary changes', async () => {
+    const onchange = vi.fn();
+    render(LaneEditor, { lane: makeLane(), onchange });
 
     const primary = screen.getByLabelText(/primary/i) as HTMLInputElement;
     await fireEvent.input(primary, { target: { value: 'new_code_model' } });
-    await fireEvent.click(screen.getByRole('button', { name: /save/i }));
 
-    expect(onsave).toHaveBeenCalledTimes(1);
-    const [name, body] = onsave.mock.calls[0];
-    expect(name).toBe('coding');
-    expect(body.primary).toBe('new_code_model');
+    expect(onchange).toHaveBeenCalledTimes(1);
+    expect(onchange.mock.calls[0][0].primary).toBe('new_code_model');
   });
 
-  it('adds and removes a fallback entry, preserving order in the saved body', async () => {
-    const onsave = vi.fn();
-    render(LaneEditor, { lane: makeLane({ fallback: ['premium'] }), onsave });
+  it('adds and removes a fallback entry, preserving order in emitted state', async () => {
+    const onchange = vi.fn();
+    render(LaneEditor, { lane: makeLane({ fallback: ['premium'] }), onchange });
 
     await fireEvent.input(screen.getByTestId('fallback-add-input'), {
       target: { value: 'economy' },
@@ -56,32 +53,50 @@ describe('LaneEditor', () => {
     await fireEvent.click(screen.getByRole('button', { name: /add fallback/i }));
     expect(screen.getAllByTestId('fallback-item')).toHaveLength(2);
 
-    await fireEvent.click(screen.getByRole('button', { name: /save/i }));
-    expect(onsave.mock.calls[0][1].fallback).toEqual(['premium', 'economy']);
+    expect(onchange.mock.lastCall?.[0].fallback).toEqual(['premium', 'economy']);
 
     // remove the first
-    onsave.mockClear();
+    onchange.mockClear();
     const firstItem = screen.getAllByTestId('fallback-item')[0];
     await fireEvent.click(within(firstItem).getByRole('button', { name: /remove/i }));
     expect(screen.getAllByTestId('fallback-item')).toHaveLength(1);
-    await fireEvent.click(screen.getByRole('button', { name: /save/i }));
-    expect(onsave.mock.calls[0][1].fallback).toEqual(['economy']);
+    expect(onchange.mock.lastCall?.[0].fallback).toEqual(['economy']);
   });
 
-  it('toggles require_json into the saved constraints', async () => {
-    const onsave = vi.fn();
-    render(LaneEditor, { lane: makeLane(), onsave });
+  it('toggles require_json into the emitted constraints', async () => {
+    const onchange = vi.fn();
+    render(LaneEditor, { lane: makeLane(), onchange });
 
     await fireEvent.click(screen.getByLabelText(/require json/i));
-    await fireEvent.click(screen.getByRole('button', { name: /save/i }));
 
-    expect(onsave.mock.calls[0][1].constraints.require_json).toBe(true);
+    expect(onchange.mock.lastCall?.[0].constraints.require_json).toBe(true);
+  });
+
+  it('reorders fallback by dragging its handle and supports keyboard fallback', async () => {
+    const onchange = vi.fn();
+    render(LaneEditor, { lane: makeLane({ fallback: ['premium', 'balanced'] }), onchange });
+    const items = screen.getAllByTestId('fallback-item');
+    const secondHandle = within(items[1]).getByRole('button', {
+      name: /drag to reorder fallback/i,
+    });
+
+    await fireEvent.dragStart(secondHandle);
+    await fireEvent.dragOver(items[0]);
+    await fireEvent.drop(items[0]);
+    expect(onchange.mock.lastCall?.[0].fallback).toEqual(['balanced', 'premium']);
+
+    onchange.mockClear();
+    const firstHandle = within(screen.getAllByTestId('fallback-item')[0]).getByRole('button', {
+      name: /drag to reorder fallback/i,
+    });
+    await fireEvent.keyDown(firstHandle, { key: 'ArrowDown' });
+    expect(onchange.mock.lastCall?.[0].fallback).toEqual(['premium', 'balanced']);
   });
 
   it('offers the model catalog as combobox suggestions on primary + fallback inputs', () => {
     const aliases = ['deepseek/deepseek-v4-flash', 'openai-codex/gpt-5.5', 'zenmux/auto'];
     const models = aliases.map((alias) => ({ alias, accounts: [] }));
-    const { container } = render(LaneEditor, { lane: makeLane(), models, onsave: vi.fn() });
+    const { container } = render(LaneEditor, { lane: makeLane(), models, onchange: vi.fn() });
 
     // A <datalist> with one <option> per alias is rendered…
     const datalist = container.querySelector('datalist');
@@ -106,7 +121,7 @@ describe('LaneEditor', () => {
       lane: makeLane({ name: 'coding' }),
       models,
       laneNames,
-      onsave: vi.fn(),
+      onchange: vi.fn(),
     });
 
     const options = Array.from(
@@ -134,7 +149,7 @@ describe('LaneEditor', () => {
       { alias: 'openai-codex/gpt-5.5', accounts: ['default', 'mylukin'] },
       { alias: 'deepseek/deepseek-v4-flash', accounts: [] }, // configured → provider as label
     ];
-    const { container } = render(LaneEditor, { lane: makeLane(), models, onsave: vi.fn() });
+    const { container } = render(LaneEditor, { lane: makeLane(), models, onchange: vi.fn() });
     const options = Array.from(
       container.querySelectorAll('datalist option'),
     ) as HTMLOptionElement[];
@@ -145,7 +160,7 @@ describe('LaneEditor', () => {
   });
 
   it('still works as a plain text input when no models are provided (graceful default)', () => {
-    const { container } = render(LaneEditor, { lane: makeLane(), onsave: vi.fn() });
+    const { container } = render(LaneEditor, { lane: makeLane(), onchange: vi.fn() });
     const datalist = container.querySelector('datalist');
     // datalist exists but is empty; the input is still typeable (combobox falls back to text).
     expect(datalist?.querySelectorAll('option')).toHaveLength(0);
@@ -153,23 +168,38 @@ describe('LaneEditor', () => {
     expect(primary.value).toBe('best_code_model');
   });
 
-  it('balanced guard: clearing primary disables save and shows a validation hint', async () => {
-    const onsave = vi.fn();
+  it('clearing primary emits invalid state and shows a validation hint', async () => {
+    const onchange = vi.fn();
     render(LaneEditor, {
       lane: makeLane({ name: 'balanced', primary: 'default_good_model' }),
-      onsave,
+      onchange,
     });
 
     const primary = screen.getByLabelText(/primary/i) as HTMLInputElement;
     await fireEvent.input(primary, { target: { value: '' } });
 
-    const save = screen.getByRole('button', { name: /save/i });
-    expect(save).toBeDisabled();
     const alert = screen.getByRole('alert');
-    expect(alert).toHaveTextContent(/balanced/i);
     expect(alert).toHaveTextContent(/cannot be empty|required/i);
+    expect(onchange.mock.lastCall?.[0].primary).toBe('');
+  });
 
-    await fireEvent.click(save);
-    expect(onsave).not.toHaveBeenCalled();
+  it('can delete optional lanes and protects only the configured default lane', async () => {
+    const ondelete = vi.fn();
+    const { unmount } = render(LaneEditor, {
+      lane: makeLane({ name: 'coding' }),
+      onchange: vi.fn(),
+      ondelete,
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /^delete$/i }));
+    expect(ondelete).toHaveBeenCalledWith('coding');
+
+    unmount();
+    render(LaneEditor, {
+      lane: makeLane({ name: 'premium' }),
+      onchange: vi.fn(),
+      ondelete,
+      canDelete: false,
+    });
+    expect(screen.getByRole('button', { name: /^delete$/i })).toBeDisabled();
   });
 });

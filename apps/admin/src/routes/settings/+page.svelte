@@ -74,11 +74,11 @@
   let saving = $state(false);
   let saved = $state(false);
 
-  // Lane options for the default-lane dropdown: the loaded lanes, always including
-  // `balanced` (the guaranteed floor) and the current value (so a still-set lane
-  // that no longer loads doesn't vanish from the picker).
+  // Lane options for the default-lane dropdown: only configured lanes plus the
+  // current value (so a stale manually-edited value remains visible and can be
+  // corrected). No lane name is special-cased here.
   const laneOptions = $derived(
-    Array.from(new Set([...(data.lanes ?? []), 'balanced', form.default_lane])),
+    Array.from(new Set([...(data.lanes ?? []), form.default_lane])),
   );
 
   async function handleSave(): Promise<void> {

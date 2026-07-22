@@ -27,6 +27,24 @@ export function registerLanesRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     return c.json(list);
   });
 
+  // PUT /lanes <- complete lane map (validated as one atomic config write).
+  app.put("/admin/api/lanes", async (c) => {
+    const parsed = LanesConfigSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      return c.json({ error: "invalid lanes config", issues: parsed.error.issues }, 400);
+    }
+    const defaultLane = deps.settings.get().default_lane;
+    if (!(defaultLane in parsed.data)) {
+      return c.json({ error: `cannot remove the default lane '${defaultLane}'` }, 409);
+    }
+    try {
+      await deps.rules.setLanes(parsed.data);
+    } catch (err) {
+      return rulePersistErrorResponse(c, err);
+    }
+    return c.json(Object.entries(parsed.data).map(([name, lane]) => ({ name, ...lane })));
+  });
+
   // GET /lanes/:name -> Lane | 404
   app.get("/admin/api/lanes/:name", async (c) => {
     const lanes = await deps.rules.getLanes();
@@ -45,10 +63,8 @@ export function registerLanesRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     try {
       await deps.rules.updateLanes((current) => {
         const lanes = { ...current, [name]: parsed.data };
-        // Re-validate the WHOLE map before writing: a single-lane edit can still break
-        // the map-level invariant (LanesConfigSchema requires `balanced`, the
-        // classification-fallback terminal — Principle 5). Fail-closed: nothing written on a
-        // violation (Principle 2).
+        // Re-validate the WHOLE map before writing. Fail-closed: nothing is written
+        // when any lane makes the complete config invalid.
         const map = LanesConfigSchema.safeParse(lanes);
         if (!map.success) {
           throw new LaneMutationHttpError(400, {
@@ -69,14 +85,17 @@ export function registerLanesRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
   // DELETE /lanes/:name
   app.delete("/admin/api/lanes/:name", async (c) => {
     const name = c.req.param("name");
+    const defaultLane = deps.settings.get().default_lane;
+    if (name === defaultLane) {
+      return c.json({ error: `cannot delete the default lane '${defaultLane}'` }, 409);
+    }
     try {
       await deps.rules.updateLanes((current) => {
         const lanes = { ...current };
         if (!(name in lanes)) throw new LaneMutationHttpError(404, { error: "lane not found" });
         delete lanes[name];
-        // Re-validate the mutated map BEFORE writing. Deleting `balanced` (or any edit
-        // that breaks the map-level invariant) must be rejected with nothing written —
-        // it is the classification-fallback terminal (Principle 5, fail-closed Principle 2).
+        // Re-validate the mutated map BEFORE writing. The configured default lane
+        // is protected above; the schema still requires at least one valid lane.
         const map = LanesConfigSchema.safeParse(lanes);
         if (!map.success) {
           throw new LaneMutationHttpError(409, {
