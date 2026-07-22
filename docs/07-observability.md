@@ -159,20 +159,20 @@ persisted or logged. It is pure (never mutates its input) and framework-agnostic
 - Non-sensitive fields (`trace_id`, latency, cost, status, …) pass through
   verbatim.
 
-## Full payload capture
+## Request content capture
 
-Separately from the redacted decision record, Helm can record the **complete,
-verbatim** request and response bodies into a dedicated `request_payloads` table
-(`InsertPayloadInput` / `getPayload` / `prunePayloads` on the `TelemetryStore`).
-This is deliberately split from the decision record so it prunes independently and
-never bloats the decision JSON.
+Separately from the redacted decision record, Helm records either an incremental
+Session transcript in `sessions` / `session_revisions`, or **complete, verbatim**
+request and response bodies in `request_payloads`. These stores prune independently
+and never bloat the decision JSON.
 
-- `capture_payloads` defaults to **ON** (`RuntimeSettingsSchema`) and is
-  toggleable at runtime from the admin "System Settings" page; toggled off, the
-  capture path is skipped entirely (zero storage).
+- `capture_sessions` defaults to **ON** and stores an incremental transcript per
+  Session. `capture_payloads` defaults to **OFF** and stores complete per-request
+  bodies when exact inspection or Retry is required. The two modes are mutually
+  exclusive; operators can also select metadata-only.
 - Runtime settings are stored in `config_kv`. If that persisted blob is malformed
   or no longer matches the schema, settings load fail-open to safe defaults with
-  **payload capture forced off** until the operator saves a valid object; an
+  **both content modes forced off** until the operator saves a valid object; an
   unreadable convenience setting must not increase plaintext retention.
 - `payload_retention_days` (default 30) bounds the storage footprint and the
   exposure window. The scheduled cleanup runner owns pruning independently of
@@ -189,7 +189,7 @@ never bloats the decision JSON.
 ## Debug UI
 
 The admin Debug UI ([11 · Admin UI](11-admin-ui.md)) is a pure consumer of the
-redacted decision record plus the optional captured payload.
+redacted decision record plus optional captured or Session-recovered content.
 
 The request **list** keys rows and detail links by the unique Helm `request_id`;
 the reusable client `trace_id` remains display/copy-only correlation metadata.

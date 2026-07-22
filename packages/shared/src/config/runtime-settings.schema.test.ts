@@ -9,8 +9,8 @@ import { type RuntimeSettings, RuntimeSettingsSchema } from "./runtime-settings.
 describe("RuntimeSettingsSchema", () => {
   it("backfills documented defaults from an empty object", () => {
     const parsed = RuntimeSettingsSchema.parse({});
-    expect(parsed.capture_payloads).toBe(true);
-    expect(parsed.capture_sessions).toBe(false);
+    expect(parsed.capture_payloads).toBe(false);
+    expect(parsed.capture_sessions).toBe(true);
     expect(parsed.native_protocol_passthrough).toBe(true);
     expect(parsed.tool_call_xml_recovery).toBe(true);
     expect(parsed.visual_context_compression).toBe("off");
@@ -80,6 +80,12 @@ describe("RuntimeSettingsSchema", () => {
     expect(
       RuntimeSettingsSchema.safeParse({ capture_payloads: true, capture_sessions: true }).success,
     ).toBe(false);
+  });
+
+  it("preserves a legacy explicit full-payload choice when capture_sessions is absent", () => {
+    const parsed = RuntimeSettingsSchema.parse({ capture_payloads: true });
+    expect(parsed.capture_payloads).toBe(true);
+    expect(parsed.capture_sessions).toBe(false);
   });
 
   it("backfills cleanup defaults (master on, archive OFF, raw/derived memory opt-in)", () => {

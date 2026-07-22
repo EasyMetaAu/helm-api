@@ -15,7 +15,7 @@ import type { WriteQueue } from "../runtime/write-queue.js";
 // BOTH the OpenAI (chat.ts) and Anthropic (messages-pipeline.ts) routes.
 //
 // Capture is gated by the runtime setting `capture_payloads` (admin "System
-// Settings", default ON). When off, nothing is written. The stored bodies are
+// Settings", default OFF). When off, nothing is written. The stored bodies are
 // VERBATIM (not redacted) — they carry no plaintext API key because the bearer
 // lives in the request's Authorization header, never in the chat body.
 //

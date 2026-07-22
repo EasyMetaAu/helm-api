@@ -207,7 +207,7 @@ const MIGRATIONS: readonly Migration[] = [
   },
   {
     // Full request/response body capture (admin "System Settings" →
-    // capture_payloads, default ON). SEPARATE table so it prunes independently
+    // capture_payloads). SEPARATE table so it prunes independently
     // (payload_retention_days) and never bloats the decision JSON. NOT redacted
     // — verbatim client request + assembled response. NO plaintext key (the
     // bearer lives in the Authorization header, never in the stored chat body).

@@ -1489,7 +1489,8 @@ describe("admin.api settings (System Settings)", () => {
     const res = await app.request("/admin/api/settings");
     expect(res.status).toBe(200);
     const body = (await res.json()) as RuntimeSettings;
-    expect(body.capture_payloads).toBe(true); // factory default ON
+    expect(body.capture_payloads).toBe(false);
+    expect(body.capture_sessions).toBe(true); // factory content mode
     expect(body.log_level).toBe("info");
   });
 

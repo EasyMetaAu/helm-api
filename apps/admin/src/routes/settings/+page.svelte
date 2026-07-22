@@ -29,8 +29,8 @@
     $props();
 
   const DEFAULTS: RuntimeSettings = {
-    capture_payloads: true,
-    capture_sessions: false,
+    capture_payloads: false,
+    capture_sessions: true,
     payload_retention_days: 30,
     // Native protocol passthrough (issue #217): default ON. No longer surfaced as
     // a toggle (UI removed in #236) — kept in the working copy so it round-trips

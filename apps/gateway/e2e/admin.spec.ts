@@ -202,9 +202,9 @@ test.describe("admin system settings", () => {
     await expect(page.getByTestId("capture-mode")).toBeVisible();
     await expect(page.getByTestId("log-level")).toBeVisible();
 
-    // Full payload capture is the default; switch to metadata only and save.
+    // Session transcript capture is the default; switch to metadata only and save.
     const captureMode = page.getByTestId("capture-mode");
-    await expect(captureMode).toHaveValue("payload");
+    await expect(captureMode).toHaveValue("session");
     await captureMode.selectOption("none");
     await page.getByRole("button", { name: /save settings/i }).click();
     await expect(page.getByRole("status")).toBeVisible(); // "Saved" badge
@@ -214,7 +214,7 @@ test.describe("admin system settings", () => {
     await expect(page.getByTestId("capture-mode")).toHaveValue("none");
 
     // Restore the default so the throwaway DB doesn't affect other specs.
-    await page.getByTestId("capture-mode").selectOption("payload");
+    await page.getByTestId("capture-mode").selectOption("session");
     await page.getByRole("button", { name: /save settings/i }).click();
     await expect(page.getByRole("status")).toBeVisible();
   });

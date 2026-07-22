@@ -144,10 +144,10 @@ no memory reads or writes. See [08 · Memory Middleware](08-memory-middleware.md
    terminal lane (`balanced` by default).
 3. Route through configurable lanes rather than exposing raw provider aliases.
 4. Execute each lane through a primary plus fallback providers.
-5. Record every routing decision and provider attempt for debugging. Full
-   request/response bodies are also captured to a separate `request_payloads`
-   table (capture is on by default and a scheduled retention sweep prunes aged
-   rows) — distinct from the redacted `DecisionRecord`.
+5. Record every routing decision and provider attempt for debugging. Incremental
+   Session transcripts are the default content mode; optional full request/response
+   bodies use a separate `request_payloads` table. Both are distinct from the
+   redacted `DecisionRecord` and subject to scheduled retention cleanup.
 6. Work out of the box: ship three quality/cost lanes, four task lanes,
    vendor-family compatibility lanes, and two image lanes, with Layer-2 eval
    **off** by default. `config/lanes.yaml` is the exact current inventory.

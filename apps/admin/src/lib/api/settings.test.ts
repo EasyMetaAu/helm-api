@@ -65,8 +65,8 @@ describe('settings api client', () => {
     );
     const s = await getSettings();
     expect(s).toEqual({
-      capture_payloads: true,
-      capture_sessions: false,
+      capture_payloads: false,
+      capture_sessions: true,
       payload_retention_days: 30,
       native_protocol_passthrough: true,
       tool_call_xml_recovery: true,
@@ -104,6 +104,15 @@ describe('settings api client', () => {
       vacuum_enabled: false,
       vacuum_hour: 4,
     });
+  });
+
+  it('preserves a legacy explicit full-payload choice when Session is absent', async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(JSON.stringify({ capture_payloads: true }), { status: 200 }),
+    );
+    const settings = await getSettings();
+    expect(settings.capture_payloads).toBe(true);
+    expect(settings.capture_sessions).toBe(false);
   });
 
   it('saveSettings PUTs the whole settings object', async () => {

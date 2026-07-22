@@ -95,9 +95,13 @@ async function asJson<T>(res: Response): Promise<T> {
 // legacy/partial response still renders a complete form.
 function normalize(raw: Record<string, unknown>): RuntimeSettings {
   const level = raw.log_level;
+  const hasLegacyPayloadChoice = typeof raw.capture_payloads === 'boolean';
   return {
-    capture_payloads: raw.capture_payloads !== false,
-    capture_sessions: raw.capture_sessions === true,
+    capture_payloads: hasLegacyPayloadChoice ? raw.capture_payloads === true : false,
+    capture_sessions:
+      typeof raw.capture_sessions === 'boolean'
+        ? raw.capture_sessions
+        : !hasLegacyPayloadChoice,
     payload_retention_days:
       typeof raw.payload_retention_days === 'number' ? raw.payload_retention_days : 30,
     // Default ON (a missing field reads as true), and — critically — KEEP it

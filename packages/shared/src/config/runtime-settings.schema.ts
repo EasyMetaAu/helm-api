@@ -11,26 +11,22 @@ import { z } from "zod";
 // closed): the admin PUT validates against this schema and rejects (400) on any
 // invalid field — the live closure is never re-bound to an invalid object.
 //
-// NOTE on `capture_payloads`: factory default is TRUE — the gateway records the
-// full request/response bodies into the request_payloads store. This is a
-// deliberate operator choice for a self-hosted gateway (data stays on the
-// operator's own box) and can be turned off here. It does NOT relax the API-key
-// rule: keys are still stored as sha256 only and never logged in plaintext (the
-// bearer key lives in the Authorization header, never in the chat body we store).
+// Session transcripts are the factory-default content mode: they retain one
+// incremental history per client session instead of duplicating the full request
+// body on every call. Operators can still select full payloads or metadata-only.
 
 export const LogLevelSchema = z.enum(["debug", "info", "warn", "error"]);
 export const VisualContextCompressionModeSchema = z.enum(["off", "observe", "enabled"]);
 
-export const RuntimeSettingsSchema = z
+const RuntimeSettingsObjectSchema = z
   .object({
-    // Record full request/response bodies for each call. Default ON (operator
-    // owns the data on a self-hosted box); toggle off for a stricter privacy
-    // posture. When off, the capture path is skipped entirely (zero storage).
-    capture_payloads: z.boolean().default(true),
+    // Record full request/response bodies for each call. Default OFF because
+    // incremental Session transcripts are the factory-default content mode.
+    capture_payloads: z.boolean().default(false),
     // Store one incremental transcript per client session instead of duplicating
     // the full conversation in every request payload. Mutually exclusive with
     // capture_payloads; the Admin presents the pair as one three-state control.
-    capture_sessions: z.boolean().default(false),
+    capture_sessions: z.boolean().default(true),
     // Forward a same-protocol request body verbatim to the native upstream,
     // bypassing the lossy IR translation round-trip. Default ON: when the inbound
     // protocol already equals the upstream wire protocol (e.g. Anthropic
@@ -171,6 +167,19 @@ export const RuntimeSettingsSchema = z
     message: "capture_payloads and capture_sessions are mutually exclusive",
     path: ["capture_sessions"],
   });
+
+export const RuntimeSettingsSchema = z.preprocess((value) => {
+  if (
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.hasOwn(value, "capture_payloads") &&
+    !Object.hasOwn(value, "capture_sessions")
+  ) {
+    return { ...value, capture_sessions: false };
+  }
+  return value;
+}, RuntimeSettingsObjectSchema);
 
 export type LogLevel = z.infer<typeof LogLevelSchema>;
 export type VisualContextCompressionMode = z.infer<typeof VisualContextCompressionModeSchema>;
