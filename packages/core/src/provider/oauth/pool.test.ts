@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { preOutputClassifierFor } from "../failover-guard.js";
 import { type ChatCompletionRequest, type ProviderClient, UpstreamError } from "../openai.js";
-import { createCodexResponsesClient } from "../openai-responses.js";
+import {
+  CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
+  createCodexResponsesClient,
+} from "../openai-responses.js";
 import { TokenRefreshError } from "../token-manager.js";
 import { createOAuthPoolClient, type OAuthPoolMember } from "./pool.js";
 
@@ -1268,6 +1271,67 @@ describe("createOAuthPoolClient — nativePassthroughStream", () => {
     }
 
     expect(calls).toEqual(["a", "a"]);
+  });
+
+  it("prioritizes previous_response_id affinity over websocket session affinity", async () => {
+    const calls: string[] = [];
+    const responseMember = (account: string): OAuthPoolMember => ({
+      account,
+      priority: 50,
+      schedulable: true,
+      client: {
+        async chatCompletion() {
+          return { served_by: account };
+        },
+        async *chatCompletionStream() {
+          yield `data: ${account}\n\n`;
+        },
+        async *nativePassthroughStream() {
+          calls.push(account);
+          yield `event: response.created\ndata: {"type":"response.created","response":{"id":"resp-${account}"}}\n\n`;
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [responseMember("a"), responseMember("b")],
+      selectionStrategy: "manual_priority",
+      now: () => 1_000,
+    });
+
+    const first = pool.nativePassthroughStream?.({
+      protocol: "openai_responses",
+      body: { model: "gpt-5.6-sol", stream: true, input: "first" },
+      headers: {},
+      mutations: {},
+    });
+    for await (const _chunk of first ?? []) {
+      // Drain so resp-a is bound to account a.
+    }
+    const websocketWarmup = pool.nativePassthroughStream?.({
+      protocol: "openai_responses",
+      body: { model: "gpt-5.6-sol", stream: true, input: "warmup" },
+      headers: { [CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER]: "session-b" },
+      mutations: {},
+    });
+    for await (const _chunk of websocketWarmup ?? []) {
+      // Drain so session-b is bound to account b.
+    }
+    const continuation = pool.nativePassthroughStream?.({
+      protocol: "openai_responses",
+      body: {
+        model: "gpt-5.6-sol",
+        stream: true,
+        input: "continue",
+        previous_response_id: "resp-a",
+      },
+      headers: { [CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER]: "session-b" },
+      mutations: {},
+    });
+    for await (const _chunk of continuation ?? []) {
+      // Drain the continuation.
+    }
+
+    expect(calls).toEqual(["a", "b", "a"]);
   });
 
   it("binds an upstream x-codex-turn-state to the account that produced it", async () => {

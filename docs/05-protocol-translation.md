@@ -173,10 +173,11 @@ The request transformer folds native Responses input into the IR:
 
 Known function tools translate cross-protocol. Native-only tools (for example
 MCP/file-search-like tool objects), native/unknown input items,
-`background: true`, and some `previous_response_id` histories cannot be
+`background: true`, and every `previous_response_id` continuation cannot be
 safely reconstructed on a non-Responses backend. The executor skips such
 cross-protocol candidates with an explicit reason instead of silently dropping
-the state. Same-protocol passthrough remains eligible.
+the state. A continuation is also pinned to the provider alias recorded for the
+referenced response; same-provider Responses passthrough remains eligible.
 
 Translated non-stream output expands one IR choice into Responses `output[]`
 message, reasoning, and function-call items. It renders citations on

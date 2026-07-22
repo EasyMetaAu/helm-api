@@ -42,7 +42,7 @@
     `export ANTHROPIC_BASE_URL="${baseBare}"\nexport ANTHROPIC_AUTH_TOKEN="${keyShown}"`,
   );
   let codexToml = $derived(
-    `# ~/.codex/config.toml\n[model_providers.helm]\nname = "Helm"\nbase_url = "${baseV1}"\nenv_key = "HELM_API_KEY"\nwire_api = "responses"\n\n# then, in your shell:\nexport HELM_API_KEY="${keyShown}"`,
+    `# ~/.codex/config.toml\n[model_providers.helm]\nname = "Helm"\nbase_url = "${baseV1}"\nenv_key = "HELM_API_KEY"\nwire_api = "responses"\nsupports_websockets = true\n\n# then, in your shell:\nexport HELM_API_KEY="${keyShown}"`,
   );
   let grokEnv = $derived(
     `export GROK_MODELS_BASE_URL="${baseV1}"\nexport XAI_API_KEY="${keyShown}"\n\ngrok -m auto`,

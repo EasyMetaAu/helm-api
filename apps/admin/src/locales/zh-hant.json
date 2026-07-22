@@ -192,6 +192,7 @@
   "Context window too small": "上下文視窗過小",
   "Conversation": "對話",
   "Conversation continuation blocked across protocols": "跨協定下對話續接遭封鎖",
+  "Conversation continuation pinned to its original provider": "對話續接固定到原始供應商",
   "Copied": "已複製",
   "Copy": "複製",
   "Copy it now — key reveal encryption is not configured, so it cannot be recovered later.": "請立即複製——金鑰查看所需的加密未設定，之後無法恢復。",

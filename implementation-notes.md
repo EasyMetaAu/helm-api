@@ -13,6 +13,18 @@
 - **排序与删除**：fallback 的上下按钮改为复用 Policies 页交互语义的拖拽手柄，并保留方向键排序；每张 lane 卡提供删除按钮，删除先进入页面工作集，统一保存时才持久化。页面从 runtime settings 读取当前 `default_lane`，只保护当前默认 lane，不把 `balanced` 写死。
 - **配置边界修正**：`LanesConfigSchema` 改为要求至少一个有效 lane；`runtime.default_lane` 与 lane 集合的交叉约束在 Gateway 边界及启动组合层 fail-closed 校验。因而用户先把默认通道改成其他 lane 后可删除 `balanced`；Settings 选项与默认配置说明也不再把 `balanced` 当作强制终点。若手工配置令默认通道不存在，Gateway 拒绝启动；Resolver 仍对异常调用防御性地回退到存在的 `balanced` 或第一个 lane。
 
+## 2026-07-22 · Responses 状态续接严格绑定原 provider 与账号（Protocol translation / provider execution，docs/04/05/07，原则 2/3/5/8）
+
+- **状态引用边界**：`previous_response_id` 引用的是上游保存、Helm 无法从当前增量请求重建的隐藏历史。Responses create 入口复用既有 lifecycle registry，按同一 account/key 查出产生该 ID 的 provider alias；未知 ID、registry 不可用、或由非 Responses 翻译路径生成的 ID 在路由前返回 `400 invalid_request`，要求客户端发送完整 conversation input，不猜测也不静默丢历史。
+- **路由与协议边界**：可信 provider pin 只作为 Gateway 内部 metadata 进入共享执行器；候选不等于原 alias 时记录 `responses_previous_response_id_provider_mismatch` 并跳过，任何非 Responses 候选统一记录 `responses_previous_response_id_cross_protocol_blocked`。无状态首请求仍保留原有跨协议 fallback，只有有状态 continuation 被收紧。
+- **账号绑定边界**：OAuth pool 同时收到 WebSocket session 与 `previous_response_id` 时以后者优先，复用现有 response-id → account affinity，使续接在原账号不可用或首输出前故障时直接失败，不切换兄弟账号。没有新增存储、配置、依赖或客户端协议。
+
+## 2026-07-22 · Codex 客户端默认启用 Responses WebSocket，并补齐反向代理边界（Deployment / Protocol / Admin client setup，docs/05/10/11，原则 3/5/8）
+
+- **客户端契约**：Admin「接入客户端」现有 Codex TOML 直接增加 `supports_websockets = true`，复用 Helm 已实现的三个 Responses WebSocket 入口及 Codex 自身的 HTTP fallback；不新增 Gateway 路由、媒体服务、客户端 npm shim 或缓存层。该优化只减少同一 Codex turn 内后续模型调用的重复 input，跨 turn 首次请求仍会发送完整历史。
+- **部署边界**：WebSocket 可用性取决于整条反向代理链，不是 Gateway 代码存在即代表现网可用。nginx 只在真实 Upgrade 请求上转发 `Upgrade` / `Connection`，普通 HTTP/SSE 不注入 hop-by-hop header；若前置 HAProxy 另有 catch-all WebSocket backend，必须先按 Helm hostname 路由到 web backend，避免 Upgrade 在到达 nginx 前被截走。
+- **延后项**：Claude Code 没有可依赖的图片 URL / `file_id` 客户端契约，因此暂不建设本地 npm shim；不可变媒体引用留待自有客户端或明确协议需求出现后再做。
+
 ## 2026-07-21 · 首次安装改为令牌保护的浏览器向导并允许订阅-only 启动（Deployment / bootstrap / Admin，docs/10/11，原则 2/3/7）
 
 - **Admin 登录体验**：浏览器不再依赖 `WWW-Authenticate` 触发原生 Basic 弹窗；未登录页面跳转到 Gateway 自带的 `/admin/login`，成功后使用仅含过期时间与 HMAC 的 12 小时 `HttpOnly`、`SameSite=Strict`、`Path=/admin` Cookie，HTTPS 时加 `Secure`。签名密钥只由进程内现有 Admin 用户名/密码派生，凭据轮换自动让旧会话失效，不新增 session 表、JWT 依赖或独立 secret。Admin SPA 与静态资产仍在会话/Basic 双重认证之后，只有无脚本登录 HTML 公开；脚本可继续主动发送 HTTP Basic，失败响应不再带 challenge，避免浏览器弹窗。登录 POST 校验同源、常量时间比较并限制本地 `next`，顶栏提供退出入口。
@@ -54,21 +66,11 @@
 - **流式时序与资源边界**：Anthropic 的 message-level `stop_reason` 位于 `content_block_stop` 之后的 `message_delta`，无法按规格字面在 block stop 当场决策。实现只在发现候选起始标记后暂存尾部，等晚到终态再改写；任何非 `tool_use`、解析拒绝、已有 structured call、异常或超限都先按原顺序冲刷文本/原始 SSE。translation 与 native candidate 均设 1 MiB UTF-8 上限，超限后本流永久旁路恢复，防止未闭合 XML 造成无界内存；native 旁路仍以最多 64K 字符的未完成 SSE 尾部有界探测 `message_stop`，避免完整终态因 HTTP body 延迟关闭而误触 idle timeout。实际网络读取继续由 `readAnthropicSSERaw` 负责，其他 idle/stall timeout 语义不变。改写时使用确定性 `toolu_synthetic_*` id，并单调重映射后续 block index。
 - **运行时回滚与保真**：新增 `tool_call_xml_recovery` runtime setting，默认 `true`；Gateway route、pipeline、executor 与 provider 都按请求读取 live 值，Admin 保存模型显式 round-trip 该字段，运维可通过现有 settings API 立即关闭。无工具、无候选或 flag off 的普通路径不解析正文；native 无候选流继续逐 network chunk 原样转发，translated 无候选流保持既有事件机。TDD 覆盖 parser、四个出口、跨 network/delta 分片、晚到 stop reason、周边文本、多 invoke、白名单、structured-call 去重、flag off、缓冲上限、异常冲刷与 index/id 顺序；最终定向结果以本次交付报告为准。
 
-## 2026-07-16 · 历史费用回填放宽 WAL 与磁盘恢复门槛（Catalog / telemetry repair operations，docs/07/08，原则 2/3/7）
-
-- **生产事实与新门槛**：常驻 supervisor 已在 `2026-07-08` UTC 窗口的 `22,100 / 31,400` 连续等待约 7 小时；CPU、内存、health、restart/OOM、Gateway/SQLite 信号均健康，唯一持续原因是磁盘低于 14 GiB，随后 WAL 增至约 583 MiB。主机当时仍有约 13.9 GiB 可用空间，全部历史回填目录约 1.55 GiB，当前窗口 221 个微型备份约 106 MiB，且 Docker 已无可回收镜像。为避免恢复门槛永久饿死任务，preflight 改为 WAL `<640 MiB`、磁盘 `>13 GiB`；runtime hard stop 改为 WAL `<768 MiB`，磁盘硬底线继续保持 `12 GiB`。这样当前状态可恢复，同时仍保留约 0.9 GiB 磁盘余量、约 185 MiB WAL 运行余量和独立硬上限。
-- **未放宽边界**：CPU `<75%`、load、可用内存、Helm 内存、non-200/5 秒 health probe timeout、restart、OOM、gateway-internal 5xx 与 `SQLITE_BUSY` 继续按原逻辑阻断；每批 100 行、每阶段最多 5,000 行、冷却、checkpoint、slice verification 与微型恢复库均不变。WAL/磁盘原因文案改为从配置阈值动态生成，避免以后阈值调整后状态继续报告旧数字。
-
-## 2026-07-16 · 路由白名单改为真实交集并让分类开关兑现配置语义（Routing / classifier / CI，docs/03/04/06/09，原则 2/3/5/6/7）
-
-- **白名单边界**：Policy 与 API key 的 `allowed_lanes` 不再先后 clamp，而是先求真实交集；`null` 表示无约束，动态交集 `[]` 表示没有任何 lane 可执行并在 provider 前返回结构化 `invalid_request`。新建/更新 key 与静态 policy 拒绝显式空数组，清除 key 限制必须传 `null`；旧库中的 `[]` 继续可读但按 deny-all 解释，编辑其他字段时省略该字段并保留原值，不能顺手扩成无限制。显式 lane、兼容 alias、自动分类、预算 degrade、signal feedback 与 Codex compact 共用同一边界；预算降级只允许保持目标或向可证明更便宜的 ranked lane 收敛，白名单若只剩更贵 lane 就在 provider 前拒绝，绝不把成本保护反向升级。具体 model 仍只受 `allow_custom_model` / `blocked_models` 约束，并由 route、模型目录与 Codex compact 的空白名单用例共同锁定。模型列表在无可用 lane 时不再展示 `auto`，缓存指纹也明确区分 `null` 与 `[]`。
-- **分类开关边界**：`classifier.rules.enabled:false` 现在完全跳过 Layer 1，包括 momentum 读写；eval 开启时直接进入 Layer 2，eval 也关闭时以 `rules_and_eval_disabled` 进入运行时默认 lane，`rules_confidence` 为 `null`，不伪造规则分数。`eval.cache.enabled:false` 在构造 content hash 前直接调用 eval，不读写已有缓存，每次都记录 fresh latency/cost 与 `eval_cache_hit:false`；热更新开关会重建配置指纹，重新开启缓存后首个请求 miss、后续请求才 hit。
-- **CI 维护边界**：GitHub Actions 升级到经过签名验证并固定完整 SHA 的 checkout v7、setup-node v7 与 pnpm/action-setup v6，消除 Node 20 runtime 弃用；setup-node v7 正式支持 `package-manager-cache:false`。checkout v7 对 fork PR 的显式 opt-in 只存在于 `pull_request_target` 的三个代码执行 job，它们仍固定在一次性 GitHub-hosted runner、只读 token、无 secrets 且 `persist-credentials:false`；特权 Publish 不允许该选项。
-- **验证**：TDD 先复现空集放行、双重 clamp 越权、规则/缓存开关无效和旧 Action pin，再覆盖 core、Gateway、Admin 与 workflow policy；本地只运行 `CI=true` 定向 Vitest 且单 worker，最终结果和 hosted CI 另行记录在 PR。
-
 ## 历史条目摘要（最新要点）
 
-- **2026-07-16 · xAI 订阅协议跟随官方 grok-build 并收紧动态目录边界（OAuth subscription / model catalog / Responses / Admin providers，原则 2/3/5/6/7/8）**：按官方源码、真实 wire 与 entitlement 校准 xAI OAuth、动态目录、Responses、能力和 weekly credits；401/403、账号冲突、last-known-good 与未知能力继续 fail-closed，完整原文通过 git history 回溯。
+- **2026-07-16 · 历史费用回填放宽 WAL 与磁盘恢复门槛（Catalog / telemetry repair operations，原则 2/3/7）**：在既有 100 行原子批次、资源门禁和 12 GiB 硬底线不变的前提下，按健康实测放宽 preflight WAL/磁盘恢复门槛，避免任务永久饥饿；完整原文通过 git history 回溯。
+- **2026-07-16 · 路由白名单改为真实交集并让分类开关兑现配置语义（Routing / classifier / CI，原则 2/3/5/6/7）**：Policy 与 key 白名单求真实交集并让空集 fail-closed；rules/eval cache 开关兑现配置语义，CI Actions 固定到核验 SHA；完整原文通过 git history 回溯。
+- **2026-07-16 · xAI 订阅协议跟随官方 grok-build 并收紧动态目录边界（OAuth subscription / model catalog / Responses / Admin providers，原则 2/3/6/7/8）**：以真实 wire 和账号 entitlement 分离模型目录 ID、执行 slug、能力与配额，未知能力保持 fail-closed，跨账号冲突拒绝；完整原文通过 git history 回溯。
 - **2026-07-16 · 收紧发布信任链、请求归属与 Memory 项目隔离（CI / observability / Memory，原则 1/3/7）**：PR 信任链固定到受核验 merge ref 与只读权限，发布绑定已验证 main SHA；内部 `request_id` 与客户端 trace 分离，Memory thread/project 迁移保持租户隔离与事务原子性；完整原文通过 git history 回溯。
 - **2026-07-16 · 文档以当前源码为准完成全量运行时事实校准（docs/01–14 / README / operations，原则 1–8）**：以当前路由、schema、Store、配置与测试校准全部当前文档和中英文 README，明确 Portal、部署、安全、Memory 与协议实现/缺口边界；完整原文通过 git history 回溯。
 - **2026-07-16 · Admin 首次点击卡顿改为非投机加载与汇总读（Admin / Store performance，docs/08/11，原则 1/3/7）**：以 `memory_threads` 的事务维护汇总替代正文表冷扫描，Admin 改为非投机 data preload，并以有界 stale-while-revalidate 缓存保护统计读取；在线 VACUUM 继续禁止。

@@ -90,6 +90,31 @@ On Linux, `HELM_UID` / `HELM_GID` let the non-root process write `./data` withou
 `sudo` or world-writable permissions; the initializer fills the exact current
 values. The `10001:10001` fallback preserves the image user for existing installs.
 
+### Reverse proxy WebSocket forwarding
+
+Codex can reuse the Responses WebSocket transport only when every reverse proxy
+forwards HTTP/1.1 upgrades to Helm. For nginx, keep normal HTTP requests free of
+hop-by-hop headers and forward them only for an actual upgrade:
+
+```nginx
+map $http_upgrade $helm_connection_upgrade {
+    default upgrade;
+    ''      '';
+}
+
+location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $helm_connection_upgrade;
+}
+```
+
+If another proxy routes WebSocket traffic before nginx, route the Helm hostname
+to this HTTP backend before any catch-all WebSocket backend. Codex providers
+using Helm can then set `supports_websockets = true`; connection failures still
+fall back to the normal Responses HTTP/SSE path.
+
 ### First-run security and persistence
 
 When Admin credentials are absent, Helm exposes only `/setup`, `/healthz`, and

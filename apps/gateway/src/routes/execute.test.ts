@@ -816,7 +816,7 @@ describe("createExecute — gateway execution adapter", () => {
     });
   });
 
-  it("blocks Responses previous_response_id tool-output continuations on non-Responses targets", async () => {
+  it("blocks every Responses previous_response_id continuation on non-Responses targets", async () => {
     const provider = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "should-not-call" }),
       chatCompletionStream: vi.fn(),
@@ -835,7 +835,7 @@ describe("createExecute — gateway execution adapter", () => {
       plan(["default_good_model"]),
       req({
         protocol: "openai_responses",
-        messages: [{ role: "tool", content: "done", tool_call_id: "call_1" }],
+        messages: [{ role: "user", content: "continue" }],
         provider_raw: { previous_response_id: "resp_prev" },
       }),
     );
@@ -847,6 +847,52 @@ describe("createExecute — gateway execution adapter", () => {
     expect(out.attempts[0]?.skip_reason).toBe(
       "responses_previous_response_id_cross_protocol_blocked",
     );
+  });
+
+  it("keeps a previous_response_id continuation on its recorded provider alias", async () => {
+    const first = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "wrong-provider" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const pinned = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "right-provider" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: first,
+      providers: new Map([
+        ["first", first],
+        ["pinned", pinned],
+      ]),
+      registry: protocolRegistry({
+        "first/gpt": {
+          providerName: "first",
+          providerModel: "gpt",
+          targetProviderProtocol: "openai_responses",
+        },
+        "pinned/gpt": {
+          providerName: "pinned",
+          providerModel: "gpt",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+    const request = req({
+      protocol: "openai_responses",
+      provider_raw: { previous_response_id: "resp_prev" },
+    });
+    (request.metadata as Record<string, unknown>).stateful_provider_alias = "pinned/gpt";
+
+    const out = await execute(plan(["first/gpt", "pinned/gpt"]), request);
+
+    expect(out.final).toMatchObject({ status: "ok", alias: "pinned/gpt" });
+    expect(first.chatCompletion).not.toHaveBeenCalled();
+    expect(pinned.chatCompletion).toHaveBeenCalledOnce();
+    expect(out.attempts[0]?.skip_reason).toBe("responses_previous_response_id_provider_mismatch");
   });
 
   it.each([

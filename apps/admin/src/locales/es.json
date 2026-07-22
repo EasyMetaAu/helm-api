@@ -192,6 +192,7 @@
   "Context window too small": "Ventana de contexto demasiado pequeña",
   "Conversation": "Conversación",
   "Conversation continuation blocked across protocols": "Continuación de conversación bloqueada entre protocolos",
+  "Conversation continuation pinned to its original provider": "Continuación de la conversación fijada al proveedor original",
   "Copied": "Copiado",
   "Copy": "Copiar",
   "Copy it now — key reveal encryption is not configured, so it cannot be recovered later.": "Cópiala ahora: el cifrado de revelación de claves no está configurado, así que no podrá recuperarse después.",

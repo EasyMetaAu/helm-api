@@ -55,12 +55,13 @@ describe('ConnectClientDialog', () => {
     expect(snippet).toContain('ANTHROPIC_AUTH_TOKEN');
   });
 
-  it('renders the Codex tab with base_url ending in /v1 and wire_api = "responses"', async () => {
+  it('renders the Codex tab with Responses WebSocket support enabled', async () => {
     setup();
     await fireEvent.click(screen.getByRole('tab', { name: /codex/i }));
     const snippet = screen.getByTestId('snippet-codex').textContent ?? '';
     expect(snippet).toContain(`base_url = "${ORIGIN}/v1"`);
     expect(snippet).toContain('wire_api = "responses"');
+    expect(snippet).toContain('supports_websockets = true');
   });
 
   it('renders the Grok Build tab with Helm model discovery and bearer-key auth', async () => {
