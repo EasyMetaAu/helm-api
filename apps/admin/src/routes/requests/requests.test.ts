@@ -40,6 +40,7 @@ function item(traceId: string, overrides: Partial<RequestListItem> = {}): Reques
     ts: '2026-05-31T10:00:00Z',
     key_prefix: 'helm_live_ab12',
     key_name: null,
+    session: null,
     requested_model: 'gpt-4o',
     requested_reasoning_effort: 'low',
     reasoning_effort: 'xhigh',
@@ -274,19 +275,26 @@ describe('requests list page', () => {
 
   it('groups high-signal request fields into semantic cells, with trace ID at the end', () => {
     render(ListPage, {
-      data: listData([item('tr_first', { ts: '2026-05-31T10:00:00Z' })]),
+      data: listData([
+        item('tr_first', {
+          ts: '2026-05-31T10:00:00Z',
+          session: { ref: 'session_abc', label: 'Support case 42', source: 'header' },
+        }),
+      ]),
     });
     const cells = screen.getByTestId('request-row').querySelectorAll('td');
     expect(cells[0]).toHaveTextContent('2026'); // time first
     expect(cells[1]).toHaveTextContent('ok'); // result before diagnostics
-    expect(cells[3]).toHaveTextContent('claude-x'); // served model
-    expect(cells[3]).toHaveTextContent('requested: gpt-4o'); // requested model drift
-    expect(cells[4]).toHaveTextContent('premium'); // routing lane
-    expect(cells[4]).toHaveTextContent('coding'); // classifier task
-    expect(cells[4]).toHaveTextContent('high'); // classifier complexity
-    expect(cells[5]).toHaveTextContent('anthropic'); // concrete provider
-    expect(cells[5]).toHaveTextContent('claude-team-a'); // concrete subscription account
-    expect(cells[5]).toHaveTextContent('exec +1'); // execution fallback count
+    expect(cells[3]).toHaveTextContent('Support case 42'); // session label
+    expect(cells[3]).toHaveTextContent('session_abc'); // session ref
+    expect(cells[4]).toHaveTextContent('claude-x'); // served model
+    expect(cells[4]).toHaveTextContent('requested: gpt-4o'); // requested model drift
+    expect(cells[5]).toHaveTextContent('premium'); // routing lane
+    expect(cells[5]).toHaveTextContent('coding'); // classifier task
+    expect(cells[5]).toHaveTextContent('high'); // classifier complexity
+    expect(cells[6]).toHaveTextContent('anthropic'); // concrete provider
+    expect(cells[6]).toHaveTextContent('claude-team-a'); // concrete subscription account
+    expect(cells[6]).toHaveTextContent('exec +1'); // execution fallback count
     expect(cells[cells.length - 1]).toHaveTextContent('tr_first'); // trace id still available
     // The trailing "view" link is gone — the whole row is the link now.
     expect(screen.queryByText('view')).not.toBeInTheDocument();
@@ -349,6 +357,44 @@ describe('requests list page', () => {
     await fireEvent.input(screen.getByTestId('filter-model'), { target: { value: 'gpt-5' } });
     await fireEvent.submit(screen.getByTestId('filter-model').closest('form') as HTMLFormElement);
     expect(goto).toHaveBeenCalledWith('?model=gpt-5', expect.anything());
+  });
+
+  it('submits the session filter as session_ref', async () => {
+    vi.mocked(goto).mockClear();
+    render(ListPage, { data: listData([item('tr_session')]) });
+    await fireEvent.input(screen.getByTestId('filter-session'), {
+      target: { value: 'session_abc' },
+    });
+    await fireEvent.submit(screen.getByTestId('filter-session').closest('form') as HTMLFormElement);
+    expect(goto).toHaveBeenCalledWith('?session_ref=session_abc', expect.anything());
+  });
+
+  it('filters a clicked Session across the full retention window and exposes a clear chip', async () => {
+    vi.mocked(goto).mockClear();
+    const initial = render(ListPage, {
+      data: listData([
+        item('tr_session', {
+          session: { ref: 'session_abc', label: 'Support case 42', source: 'x-thread-id' },
+        }),
+      ]),
+    });
+    await fireEvent.click(screen.getByTestId('session-filter'));
+    expect(goto).toHaveBeenCalledWith(
+      '?range=all&session_ref=session_abc',
+      expect.anything(),
+    );
+    initial.unmount();
+
+    vi.mocked(goto).mockClear();
+    const active = render(ListPage, {
+      data: listData([item('tr_session')], {
+        filters: { ...DEFAULT_FILTERS, range: 'all', sessionRef: 'session_abc' },
+      }),
+    });
+    expect(screen.getByTestId('session-filter-chip')).toHaveTextContent('session_abc');
+    await fireEvent.click(screen.getByTestId('session-filter-clear'));
+    expect(goto).toHaveBeenCalledWith('?range=all', expect.anything());
+    active.unmount();
   });
 
   it('shows and clears legacy exact lane filters without hiding the active scope', async () => {
@@ -718,7 +764,7 @@ describe('requests detail page', () => {
     expect(screen.queryByTestId('media-overview')).not.toBeInTheDocument();
   });
 
-  it('enables Retry for any captured protocol body, disabled only when nothing was captured', () => {
+  it('enables Retry for exact captured protocol bodies and disables it when nothing was captured', () => {
     // Responses (input[]) and Gemini (contents[]) bodies have NO `messages` array —
     // the old gate wrongly disabled Retry for them. The server now recovers the
     // protocol and re-issues natively, so the button is enabled whenever a body was
@@ -751,6 +797,27 @@ describe('requests detail page', () => {
     render(DetailPage, {
       data: { detail: detail(), payload: { captured: false }, requestId: 'tr_off' },
     });
+    expect(screen.getByTestId('retry-request')).toBeDisabled();
+  });
+
+  it('marks a session-recovered request as non-exact and keeps Retry disabled', () => {
+    render(DetailPage, {
+      data: {
+        detail: detail(),
+        payload: {
+          captured: true,
+          source: 'session',
+          exact: false,
+          fidelity: 'semantic',
+          request: { model: 'auto', messages: [{ role: 'user', content: 'hi' }] },
+          response: null,
+          upstream_request: null,
+        },
+        requestId: 'tr_session',
+      },
+    });
+
+    expect(screen.getByTestId('session-recovery-warning')).toBeInTheDocument();
     expect(screen.getByTestId('retry-request')).toBeDisabled();
   });
 

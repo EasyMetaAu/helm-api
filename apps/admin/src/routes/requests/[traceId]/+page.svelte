@@ -145,10 +145,14 @@
   // Gemini `contents[]`). The server recovers the original protocol and re-issues in
   // its NATIVE shape, returning a precise 400 if a body genuinely can't be replayed —
   // so the client doesn't enumerate shapes here (that would wrongly disable e.g. a
-  // string-`input` Responses body). Disabled only when nothing was captured (capture
-  // off, or the payload was pruned).
+  // string-`input` Responses body). Session-derived semantic recovery is explicitly
+  // excluded because only the original captured body is safe for exact Retry.
   const replayBody = $derived(payloadValues.request);
-  const canRetry = $derived(data.payload?.captured === true && hasPayloadPart('request'));
+  const canRetry = $derived(
+    data.payload?.captured === true &&
+      data.payload.source !== 'session' &&
+      hasPayloadPart('request'),
+  );
 
   // The forwarded-upstream body is worth a SEPARATE panel only when it actually
   // differs from the inbound client body (memory injection / protocol translation /
@@ -383,6 +387,16 @@
         {upstreamDiffers ? $t('Request (from client)') : $t('Request')}
       </h2>
       {#if data.payload?.captured}
+        {#if data.payload.source === 'session'}
+          <p
+            data-testid="session-recovery-warning"
+            class="mb-3 rounded border border-amber-200 bg-amber-50 p-3 text-amber-800"
+          >
+            {$t(
+              'This content was recovered from the session transcript. It is not the original HTTP request and cannot be retried exactly.',
+            )}
+          </p>
+        {/if}
         <p class="field-help mb-2">
           {#if upstreamDiffers}
             {$t(
@@ -472,7 +486,15 @@
         </p>
         <JsonViewer value={d.request_meta} />
         <p data-testid="payload-summary" class="mt-2 italic text-ink-muted">
-          {$t('Full request/response not recorded (payload capture was off for this request).')}
+          {#if data.payload?.reason === 'session_unavailable'}
+            {$t('The session transcript is unavailable or has been cleaned up.')}
+          {:else if data.payload?.reason === 'session_incomplete'}
+            {$t('The session transcript is incomplete and this request cannot be recovered.')}
+          {:else if data.payload?.reason === 'no_session'}
+            {$t('This request has no captured Session ID, so no session transcript is available.')}
+          {:else}
+            {$t('Full request/response not recorded (payload capture was off for this request).')}
+          {/if}
         </p>
       {/if}
     </section>

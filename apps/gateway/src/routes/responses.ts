@@ -33,14 +33,17 @@ import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
 import { nativeCarrierFromParsedBody } from "./native-carrier.js";
 import {
+  capturedResponsesResponse,
   captureEnabled,
   type RecordServedDeps,
   recordServed,
   type StreamUsage,
+  sessionCaptureEnabled,
   tokenBreakdownFromUsage,
   tokensFromUsage,
   usageFromResponsesResponse,
 } from "./payload-capture.js";
+import { resolveSessionCapture, stampSessionCapture } from "./session-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
 
 // POST /v1/responses — OpenAI Responses API inbound, translated to IR, routed
@@ -1029,6 +1032,10 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     // with observe deps but never received a scope → memory was dead on this
     // surface. Absent/illegal headers → off + null (default-safe).
     const nativeRec = (native ?? {}) as Record<string, unknown>;
+    const sessionCapture = resolveSessionCapture((name) => c.req.header(name), native, {
+      accountId: identity.accountId,
+      apiKeyId: identity.keyId,
+    });
     const nativeMetaBag =
       nativeRec.metadata && typeof nativeRec.metadata === "object"
         ? (nativeRec.metadata as Record<string, unknown>)
@@ -1093,6 +1100,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     // stops long/concurrent streams from accumulating the full body when capture is
     // off (review P2).
     const captureBodies = deps.record !== undefined && captureEnabled(deps.record);
+    const captureSessionResponse = deps.record !== undefined && sessionCaptureEnabled(deps.record);
 
     // 4) Outbound: stream vs non-stream, isomorphic shape.
     if (ir.stream === true) {
@@ -1106,6 +1114,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       let initialError: unknown = null;
       try {
         initialResult = await deps.pipeline.run(ir, identity, requestSignal(c));
+        stampSessionCapture(initialResult.decision, sessionCapture);
         applyResponseMetadata(
           c,
           initialResult.responseMetadata,
@@ -1115,6 +1124,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         initialError = err;
       }
       return streamSSE(c, async (sse) => {
+        let sessionResponseJson: string | null = null;
         // Translate path: each IR event is serialized by the transformer's stream
         // mapping; the pipeline already ran the Responses state machine (principle 8 —
         // we never forward a raw upstream chunk through a blind re-mapper). There is NO
@@ -1167,6 +1177,10 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
             const snapshot = responseSnapshotFromStreamFrame(frame.event, frame.data);
             if (snapshot.responseId !== null) streamResponseId = snapshot.responseId;
             if (snapshot.status !== null) streamStatus = snapshot.status;
+            if (captureSessionResponse && !captureBodies) {
+              const captured = capturedResponsesResponse("openai_responses", frame.data);
+              if (captured.responseJson !== null) sessionResponseJson = captured.responseJson;
+            }
             const raw = frame.raw;
             if (captureBodies)
               captured.push(raw ?? `event: ${frame.event}\ndata: ${frame.data}\n\n`);
@@ -1235,10 +1249,11 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
               deps.record,
               {
                 requestId,
+                accountId: identity.accountId,
                 apiKeyId: identity.keyId,
                 decision: result.decision,
                 requestJson,
-                responseJson: captureBodies ? captured.join("") : null,
+                responseJson: captureBodies ? captured.join("") : sessionResponseJson,
                 timedOut: requestTimedOut(c),
                 upstreamRequestJson: result.upstreamRequest ?? null,
               },
@@ -1280,6 +1295,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     let result: PipelineRunResult;
     try {
       result = await deps.pipeline.run(ir, identity, requestSignal(c));
+      stampSessionCapture(result.decision, sessionCapture);
     } catch (err) {
       if (err instanceof PipelineError) throw pipelineToHelm(err, traceId);
       throw err;
@@ -1313,6 +1329,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           deps.record,
           {
             requestId,
+            accountId: identity.accountId,
             apiKeyId: identity.keyId,
             decision: result.decision,
             requestJson,
@@ -1355,10 +1372,11 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         deps.record,
         {
           requestId,
+          accountId: identity.accountId,
           apiKeyId: identity.keyId,
           decision: result.decision,
           requestJson,
-          responseJson: captureBodies ? JSON.stringify(body) : null,
+          responseJson: captureBodies || captureSessionResponse ? JSON.stringify(body) : null,
           timedOut: requestTimedOut(c),
           upstreamRequestJson: result.upstreamRequest ?? null,
         },

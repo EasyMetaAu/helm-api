@@ -49,10 +49,13 @@ import {
   decisionForTimedOutRequest,
   type PayloadCaptureDeps,
   persistPayload,
+  queueOrPersistSessionRequest,
+  redactDecisionForTelemetry,
   tokensFromUsage,
   usageFromBody,
   usageFromSSE,
 } from "./payload-capture.js";
+import { resolveSessionCapture, stampSessionCapture } from "./session-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
 
 // POST /v1/chat/completions — Phase 1 routing pipeline wiring. This file is
@@ -102,6 +105,7 @@ export interface ChatRouteDeps {
    *  test deps can omit it; when present, governs payload storage (capture_payloads)
    *  and streamed completion-cost backfill (#6). */
   capturePayloads?: PayloadCaptureDeps["capturePayloads"];
+  captureSessions?: PayloadCaptureDeps["captureSessions"];
   costOf?: PayloadCaptureDeps["costOf"];
   /** When true, honor the e2e-only `x-helm-eval` / `x-helm-rules-threshold`
    *  headers to toggle Layer-2 eval and raise the Layer-1 gate per request.
@@ -449,6 +453,10 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       throw invalidRequest(`${where}${issue?.message ?? "invalid request"}`, traceId);
     }
     const body = parsed.data as ChatCompletionRequest;
+    const sessionCapture = resolveSessionCapture((name) => c.req.header(name), body, {
+      accountId: identity.accountId,
+      apiKeyId: identity.keyId,
+    });
 
     // `x-session-key` is the conversation-dimension key clients send to opt into
     // session momentum; it maps into metadata.conversation_id (never logged — it
@@ -499,14 +507,42 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     const persist = async (decision: DecisionRecord) => {
       const decisionSnapshot = requestTimedOut(c) ? decisionForTimedOutRequest(decision) : decision;
       const input: InsertTelemetryInput = {
-        decision: deps.redact(decisionSnapshot) as DecisionRecord,
+        decision: redactDecisionForTelemetry(deps.redact, decisionSnapshot),
         apiKeyId: identity.keyId,
         createdAt: new Date(),
       };
       if (deps.writes !== undefined) {
         deps.writes.enqueueTelemetry(input);
+        await queueOrPersistSessionRequest(
+          deps,
+          {
+            requestId,
+            accountId: identity.accountId,
+            apiKeyId: identity.keyId,
+            decision: decisionSnapshot,
+            requestJson,
+            responseId: null,
+            responseJson: null,
+            now: deps.now(),
+          },
+          (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+        );
         return;
       }
+      await queueOrPersistSessionRequest(
+        deps,
+        {
+          requestId,
+          accountId: identity.accountId,
+          apiKeyId: identity.keyId,
+          decision: decisionSnapshot,
+          requestJson,
+          responseId: null,
+          responseJson: null,
+          now: deps.now(),
+        },
+        (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+      );
       try {
         await deps.telemetry.insert(input);
       } catch {
@@ -742,6 +778,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       requestSignal(c),
       classifyOverrides,
     );
+    stampSessionCapture(result.decision, sessionCapture);
     // The subscription the pool selected (null for a configured/non-OAuth provider),
     // threaded out on the result so the settle path can attribute usage (Tier 2).
     servingAccount = result.servingAccount ?? null;

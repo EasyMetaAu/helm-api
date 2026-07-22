@@ -43,6 +43,9 @@ export interface RequestListItem {
   // null when the key is unnamed (or was since deleted) — the view then falls back
   // to key_prefix. Cosmetic label only, never key material (Principle 7).
   key_name: string | null;
+  // Body-free session metadata recorded by the gateway. Null for legacy or
+  // sessionless requests; never reconstructed from payload content.
+  session: SessionView | null;
   user_id?: string;
   org_id?: string;
   requested_model: string | null;
@@ -104,6 +107,12 @@ export type StreamOutcome =
 export interface ServingAccountView {
   provider_id: string;
   account: string;
+}
+
+export interface SessionView {
+  ref: string;
+  label: string;
+  source: string;
 }
 
 // Redacted per-attempt upstream failure detail (admin-debug-error-detail).
@@ -246,6 +255,11 @@ interface RawDecisionRecord {
   // Operator-assigned key name, joined onto the row by GET /admin/api/requests
   // (api_key_id -> keystore). Absent/null when the key is unnamed or was deleted.
   key_name?: string | null;
+  session?: {
+    ref?: string | null;
+    label?: string | null;
+    source?: string | null;
+  } | null;
   // Enriched telemetry (admin.requests-richfields): Σ attempt latency, execution
   // fallback count, and the eval/completion cost split. Absent on legacy records.
   latency_total_ms?: number;
@@ -387,6 +401,13 @@ function normalizeServingAccount(raw: RawDecisionRecord): ServingAccountView | n
   return providerId && account ? { provider_id: providerId, account } : null;
 }
 
+function normalizeSession(raw: RawDecisionRecord): SessionView | null {
+  const ref = nonEmptyString(raw.session?.ref);
+  const label = nonEmptyString(raw.session?.label) ?? (ref ? `${ref.slice(0, 12)}…` : null);
+  const source = nonEmptyString(raw.session?.source);
+  return ref && label && source ? { ref, label, source } : null;
+}
+
 function successfulAttempt(raw: RawDecisionRecord, attempts: RawAttempt[]): RawAttempt | null {
   const finalAlias = nonEmptyString(raw.final?.model_alias);
   if (finalAlias) {
@@ -507,6 +528,7 @@ export function toListItem(raw: RawDecisionRecord): RequestListItem {
     // The key's display NAME when the backend resolved one; null lets the view fall
     // back to the prefix (so an unnamed/deleted key still renders something).
     key_name: typeof raw.key_name === 'string' && raw.key_name.length > 0 ? raw.key_name : null,
+    session: normalizeSession(raw),
     requested_model: raw.requested_model ?? null,
     requested_reasoning_effort: nonEmptyString(raw.requested_reasoning_effort),
     reasoning_effort: nonEmptyString(raw.reasoning_effort),
@@ -719,6 +741,9 @@ export interface RequestsQueryParams {
   // Exact api_key_id scope (the key detail page's request list). Serialized as
   // `key_id` to match the backend schema.
   keyId?: string;
+  // Exact session reference. Serialized as `session_ref` so the browser URL
+  // matches the gateway query contract without exposing a raw internal field name.
+  sessionRef?: string;
   start?: number;
   end?: number;
 }
@@ -743,6 +768,7 @@ function buildRequestsQuery(params: RequestsQueryParams): string {
   if (params.lane) qs.set('lane', params.lane);
   if (params.model) qs.set('model', params.model);
   if (params.keyId) qs.set('key_id', params.keyId);
+  if (params.sessionRef) qs.set('session_ref', params.sessionRef);
   if (params.start !== undefined) qs.set('start', String(params.start));
   if (params.end !== undefined) qs.set('end', String(params.end));
   return qs.toString();
@@ -785,6 +811,10 @@ export async function getRequest(requestId: string): Promise<RequestDetail> {
 // "not recorded" notice instead of the bodies.
 export interface RequestPayloadView {
   captured: boolean;
+  source?: 'payload' | 'session' | 'unavailable';
+  reason?: 'no_session' | 'session_unavailable' | 'session_incomplete';
+  exact?: boolean;
+  fidelity?: 'exact' | 'semantic' | 'partial' | string;
   request?: unknown;
   response?: unknown;
   // The EXACT body forwarded upstream — AFTER memory injection + protocol
@@ -803,6 +833,10 @@ export type RequestPayloadPartName = 'request' | 'response' | 'upstream_request'
 
 export interface RequestPayloadPartView {
   captured: boolean;
+  source?: 'payload' | 'session' | 'unavailable';
+  reason?: 'no_session' | 'session_unavailable' | 'session_incomplete';
+  exact?: boolean;
+  fidelity?: 'exact' | 'semantic' | 'partial' | string;
   part?: RequestPayloadPartName;
   value?: unknown;
   created_at?: number;

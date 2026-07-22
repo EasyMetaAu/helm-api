@@ -33,6 +33,7 @@ describe("defaultSettingsFromConfig", () => {
   it("seeds rate_limit_enabled from runtime config, schema defaults for the rest", () => {
     expect(defaultSettingsFromConfig(cfg(true))).toEqual({
       capture_payloads: true,
+      capture_sessions: false,
       native_protocol_passthrough: true,
       tool_call_xml_recovery: true,
       visual_context_compression: "off",
@@ -113,7 +114,11 @@ describe("loadRuntimeSettings", () => {
     const store = fakeConfigStore({ [RUNTIME_SETTINGS_KEY]: "{not json" });
     const log = vi.fn();
     const out = await loadRuntimeSettings(store, cfg(false), log);
-    expect(out).toEqual({ ...defaultSettingsFromConfig(cfg(false)), capture_payloads: false });
+    expect(out).toEqual({
+      ...defaultSettingsFromConfig(cfg(false)),
+      capture_payloads: false,
+      capture_sessions: false,
+    });
     expect(log).toHaveBeenCalledWith("warn", "settings.load_fallback", { reason: "invalid_json" });
   });
 
@@ -123,7 +128,11 @@ describe("loadRuntimeSettings", () => {
     });
     const log = vi.fn();
     const out = await loadRuntimeSettings(store, cfg(true), log);
-    expect(out).toEqual({ ...defaultSettingsFromConfig(cfg(true)), capture_payloads: false });
+    expect(out).toEqual({
+      ...defaultSettingsFromConfig(cfg(true)),
+      capture_payloads: false,
+      capture_sessions: false,
+    });
     expect(log).toHaveBeenCalledWith("warn", "settings.load_fallback", {
       reason: "schema_mismatch",
     });

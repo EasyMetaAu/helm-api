@@ -1,6 +1,8 @@
 import {
   CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
   type DecisionRecord,
+  type TelemetryStore,
+  type UpsertSessionRevisionInput,
   UpstreamError,
 } from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
@@ -1975,6 +1977,72 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
 
     expect(insert).toHaveBeenCalledOnce();
     expect(insertPayload).not.toHaveBeenCalled();
+  });
+
+  it("captures the terminal Responses output for Session recovery without storing a full payload", async () => {
+    const insert = vi.fn().mockResolvedValue({ id: "1" });
+    const insertPayload = vi.fn().mockResolvedValue(undefined);
+    const upsertSessionRevision = vi.fn(async (_input: UpsertSessionRevisionInput) => {});
+    const telemetry = {
+      insert,
+      insertPayload,
+      getSessionByRef: vi.fn(async () => null),
+      listSessionRevisions: vi.fn(async () => []),
+      getSessionRevisionByResponseId: vi.fn(async () => null),
+      upsertSessionRevision,
+    } as unknown as TelemetryStore;
+    const record: RecordServedDeps = {
+      telemetry,
+      redact: (value) => value,
+      now: () => 1000,
+      capturePayloads: () => false,
+      captureSessions: () => true,
+    };
+    const terminalResponse = {
+      id: "resp_session",
+      output: [
+        { type: "reasoning", id: "reason_1", summary: [] },
+        { type: "function_call", id: "call_1", call_id: "fc_1", name: "lookup" },
+      ],
+    };
+    const { deps } = makeDeps({
+      record,
+      transformRequestOut: () => ({
+        stream: true,
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: {},
+      }),
+      run: async () => ({
+        decision: {
+          protocol: "openai_responses",
+          final: { status: "ok", model_alias: "gpt-4o" },
+        } as DecisionRecord,
+        collect: async () => ({}),
+        streamIR: async function* () {
+          yield {
+            type: "response.completed",
+            sequence_number: 1,
+            response: terminalResponse,
+          };
+        },
+      }),
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: { ...AUTH, "x-thread-id": "thread-session" },
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    await res.text();
+
+    expect(insertPayload).not.toHaveBeenCalled();
+    expect(upsertSessionRevision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        responseId: "resp_session",
+        responseJson: JSON.stringify(terminalResponse),
+      }),
+    );
   });
 
   // ── Terminal stream error frame must be appended to the captured body (review

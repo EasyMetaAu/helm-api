@@ -4,6 +4,7 @@ import type {
   RequestPayloadPart,
   RequestPayloadPartRecord,
 } from "@helm/core";
+import { restoreSessionRevisionJson } from "@helm/core";
 import { RequestsQuerySchema } from "@helm/shared";
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
@@ -46,6 +47,7 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
       // Exact key scope (the key detail page's request list). Omitted in the
       // global Debug list → no api_key_id filter.
       apiKeyId: q.key_id,
+      sessionRef: q.session_ref,
     });
     // Resolve each row's recorded api_key_id (key_id) to the key's human NAME so the
     // SPA can show a recognizable label instead of the opaque prefix. The redacted
@@ -56,9 +58,26 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
     // unnamed OR was since deleted, so the SPA falls back to the prefix.
     const keys = await deps.keyStore.list();
     const nameById = new Map(keys.map((k) => [k.key_id, k.name]));
+    const sessionRefs = [
+      ...new Set(rows.flatMap((row) => (row.record.session ? [row.record.session.ref] : []))),
+    ];
+    const sessionRows = deps.telemetry.listSessionsByRefs
+      ? await deps.telemetry.listSessionsByRefs(sessionRefs)
+      : [];
+    const sessionLabelByRef = new Map(
+      sessionRows.map((session) => [session.sessionRef, session.externalSessionId]),
+    );
     return c.json({
       items: rows.map((r) => ({
         ...r.record,
+        ...(r.record.session
+          ? {
+              session: {
+                ...r.record.session,
+                label: sessionLabelByRef.get(r.record.session.ref),
+              },
+            }
+          : {}),
         created_at: r.createdAt.getTime(),
         key_name: nameById.get(r.apiKeyId) ?? null,
         // The recorded api_key_id (internal UUID), so the SPA can offer "filter by
@@ -91,8 +110,13 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
     const keyName = apiKeyId
       ? ((await deps.keyStore.list()).find((k) => k.key_id === apiKeyId)?.name ?? null)
       : null;
+    const sessionRow =
+      rec.session && deps.telemetry.getSessionByRef
+        ? await deps.telemetry.getSessionByRef(rec.session.ref)
+        : null;
     return c.json({
       ...rec,
+      ...(rec.session ? { session: { ...rec.session, label: sessionRow?.externalSessionId } } : {}),
       ...(createdAt ? { created_at: createdAt.getTime() } : {}),
       key_name: keyName,
     });
@@ -110,9 +134,24 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
     if (part === "invalid") return c.json({ error: "invalid payload part" }, 400);
     if (part === "meta") {
       const meta = await getPayloadMeta(deps, traceId);
-      if (!meta) return c.json({ captured: false });
+      if (!meta) {
+        const recovered = await getSessionRequest(deps, traceId);
+        if (recovered.status === "unavailable")
+          return c.json({ captured: false, source: "unavailable", reason: recovered.reason });
+        return c.json({
+          captured: true,
+          source: "session",
+          exact: false,
+          fidelity: recovered.fidelity,
+          created_at: recovered.createdAt.getTime(),
+          parts: { request: true, response: false, upstream_request: false },
+        });
+      }
       return c.json({
         captured: true,
+        source: "payload",
+        exact: true,
+        fidelity: "exact",
         created_at: meta.createdAt.getTime(),
         parts: {
           request: meta.parts.request,
@@ -123,9 +162,27 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
     }
     if (part !== "full") {
       const p = await getPayloadPart(deps, traceId, part);
-      if (!p) return c.json({ captured: false });
+      if (!p) {
+        const recovered = part === "request" ? await getSessionRequest(deps, traceId) : null;
+        if (!recovered)
+          return c.json({ captured: false, source: "unavailable", reason: "no_session" });
+        if (recovered.status === "unavailable")
+          return c.json({ captured: false, source: "unavailable", reason: recovered.reason });
+        return c.json({
+          captured: true,
+          source: "session",
+          exact: false,
+          fidelity: recovered.fidelity,
+          part: "request",
+          value: parseMaybeJson(recovered.requestJson),
+          created_at: recovered.createdAt.getTime(),
+        });
+      }
       return c.json({
         captured: true,
+        source: "payload",
+        exact: true,
+        fidelity: "exact",
         part,
         value: p.json === null ? null : parseMaybeJson(p.json),
         created_at: p.createdAt.getTime(),
@@ -133,9 +190,26 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
     }
 
     const p = await deps.telemetry.getPayload(traceId);
-    if (!p) return c.json({ captured: false });
+    if (!p) {
+      const recovered = await getSessionRequest(deps, traceId);
+      if (recovered.status === "unavailable")
+        return c.json({ captured: false, source: "unavailable", reason: recovered.reason });
+      return c.json({
+        captured: true,
+        source: "session",
+        exact: false,
+        fidelity: recovered.fidelity,
+        request: parseMaybeJson(recovered.requestJson),
+        response: null,
+        upstream_request: null,
+        created_at: recovered.createdAt.getTime(),
+      });
+    }
     return c.json({
       captured: true,
+      source: "payload",
+      exact: true,
+      fidelity: "exact",
       request: parseMaybeJson(p.requestJson),
       response: p.responseJson === null ? null : parseMaybeJson(p.responseJson),
       // The EXACT body forwarded upstream (post memory-inject + protocol-translation)
@@ -145,6 +219,36 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
       created_at: p.createdAt.getTime(),
     });
   });
+}
+
+async function getSessionRequest(
+  deps: AdminApiDeps,
+  requestId: string,
+): Promise<
+  | { status: "recovered"; requestJson: string; fidelity: string; createdAt: Date }
+  | {
+      status: "unavailable";
+      reason: "no_session" | "session_unavailable" | "session_incomplete";
+    }
+> {
+  const list = deps.telemetry.listSessionRevisions;
+  const decision = await deps.telemetry.getByRequestId(requestId);
+  const sessionRef = decision?.session?.ref;
+  if (!sessionRef) return { status: "unavailable", reason: "no_session" };
+  if (!list) return { status: "unavailable", reason: "session_unavailable" };
+  try {
+    const revisions = await list.call(deps.telemetry, sessionRef);
+    const target = revisions.find((revision) => revision.requestId === requestId);
+    if (!target) return { status: "unavailable", reason: "session_unavailable" };
+    return {
+      status: "recovered",
+      requestJson: restoreSessionRevisionJson(revisions, requestId),
+      fidelity: target.fidelity,
+      createdAt: target.createdAt,
+    };
+  } catch {
+    return { status: "unavailable", reason: "session_incomplete" };
+  }
 }
 
 type PayloadPartQuery = "full" | "meta" | RequestPayloadPart | "invalid";

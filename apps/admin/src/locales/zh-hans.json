@@ -1010,5 +1010,22 @@
   "partial": "部分完成",
   "client aborted": "客户端已中止",
   "truncated": "已截断",
-  "incomplete": "未完成"
+  "incomplete": "未完成",
+  "Body-free session context for this request.": "此请求关联的不含正文的会话信息。",
+  "Full payload for every request": "为每个请求保存完整载荷",
+  "Incremental transcript per session": "按会话保存增量转录",
+  "Metadata only": "仅保存元数据",
+  "Privacy note: full payload and session modes store message content. Choose metadata only to store no bodies.": "隐私提示：完整载荷和会话模式都会保存消息内容。如不希望保存正文，请选择仅保存元数据。",
+  "Request content storage": "请求内容存储",
+  "Session": "会话",
+  "Session mode stores repeated conversation history once and reconstructs each request semantically.": "会话模式只保存一次重复的对话历史，并按语义恢复每个请求。",
+  "Session reference": "会话引用",
+  "This content was recovered from the session transcript. It is not the original HTTP request and cannot be retried exactly.": "此内容由会话转录恢复，并非原始 HTTP 请求，无法用于精确重试。",
+  "Keep request/session content for (days)": "请求/会话内容保留天数",
+  "Full payloads expire by request age; whole session transcripts expire after their last activity.": "完整载荷按请求时间到期；整份会话转录在最后活动后到期。",
+  "Request payloads and session transcripts": "请求载荷与会话转录",
+  "uses the content window above · full payloads archived, inactive sessions deleted": "使用上方内容保留期 · 完整载荷归档，非活跃会话删除",
+  "The session transcript is unavailable or has been cleaned up.": "会话转录不可用或已被清理。",
+  "The session transcript is incomplete and this request cannot be recovered.": "会话转录不完整，无法恢复此请求。",
+  "This request has no captured Session ID, so no session transcript is available.": "此请求没有捕获到 Session ID，因此没有可用的会话转录。"
 }

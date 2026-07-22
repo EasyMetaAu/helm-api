@@ -33,6 +33,8 @@ export interface RequestsFilters {
   // (or arriving via the key detail page's "view more" link) and shown as a
   // removable chip. Serialized as `key_id` to match the backend schema.
   keyId?: string;
+  // Exact session scope, carried as `session_ref` in the URL/API.
+  sessionRef?: string;
   page: number;
   pageSize: number;
 }
@@ -78,6 +80,7 @@ export function parseFilters(sp: URLSearchParams): RequestsFilters {
   const lane = sp.get('lane')?.trim();
   const model = sp.get('model')?.trim();
   const keyId = sp.get('key_id')?.trim();
+  const sessionRef = sp.get('session_ref')?.trim();
   const pageRaw = Number(sp.get('page'));
   const pageSizeRaw = Number(sp.get('pageSize'));
   return {
@@ -97,6 +100,7 @@ export function parseFilters(sp: URLSearchParams): RequestsFilters {
     lane: lane || undefined,
     model: model || undefined,
     keyId: keyId || undefined,
+    sessionRef: sessionRef || undefined,
     page: Number.isInteger(pageRaw) && pageRaw > 1 ? pageRaw : 1,
     // Only the offered sizes are accepted; anything else (junk, a hand-typed value)
     // degrades to the default so a stale bookmark always renders.
@@ -124,6 +128,7 @@ export function filtersToSearch(f: RequestsFilters): string {
   if (f.lane?.trim()) qs.set('lane', f.lane.trim());
   if (f.model?.trim()) qs.set('model', f.model.trim());
   if (f.keyId?.trim()) qs.set('key_id', f.keyId.trim());
+  if (f.sessionRef?.trim()) qs.set('session_ref', f.sessionRef.trim());
   if (f.page > 1) qs.set('page', String(f.page));
   if (f.pageSize && f.pageSize !== DEFAULT_PAGE_SIZE) qs.set('pageSize', String(f.pageSize));
   return qs.toString();

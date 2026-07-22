@@ -18,9 +18,13 @@ export type {
   RateLimitConsumeResult,
   RateLimitStore,
   RequestPayload,
+  SessionRecord,
+  SessionRevisionRecord,
   SignalStore,
   TelemetryStore,
+  UpsertSessionRevisionInput,
 } from "./ports.js";
+export { SESSION_MAX_REVISIONS, SESSION_MAX_STORED_BYTES } from "./ports.js";
 // Postgres (supabase) adapters + migration helpers. supabase == hosted Postgres,
 // reached via postgres-js; the same adapters run against in-process PGlite in
 // tests (drizzle pg dialect), validating the supabase path without a server.
@@ -40,6 +44,10 @@ export { PgOAuthUsageStore } from "./postgres/oauth-usage.js";
 export { PgRateLimitStore } from "./postgres/rate-limit.js";
 export { PgSignalStore } from "./postgres/signals.js";
 export { PgTelemetryStore } from "./postgres/telemetry.js";
+export {
+  restoreSessionRevisionJson,
+  splitSessionRequestJson,
+} from "./session-delta.js";
 export { SqliteBudgetStore } from "./sqlite/budget.js";
 export { SqliteConfigStore } from "./sqlite/config-store.js";
 export { SqliteKeyStore } from "./sqlite/keystore.js";

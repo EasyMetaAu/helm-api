@@ -3206,6 +3206,7 @@ export async function buildServer(
     // LIVE runtime setting so the admin toggle applies without a restart. Payload
     // retention is owned by the scheduled cleanup runner, not the capture path.
     capturePayloads: () => settings.capture_payloads,
+    captureSessions: () => settings.capture_sessions,
     costOf,
     // Per-key usage budgets (docs/06): the pre-route gate (degrade/reject) + the
     // post-served settle, threaded from the composition root.
@@ -3565,6 +3566,7 @@ export async function buildServer(
       redact: (payload) => redact(payload),
       now: () => Date.now(),
       capturePayloads: () => settings.capture_payloads,
+      captureSessions: () => settings.capture_sessions,
     },
   } as Parameters<typeof registerMessagesRoute>[1] & { rateLimiter: RateLimiterPort });
 
@@ -3766,6 +3768,7 @@ export async function buildServer(
       redact: (payload) => redact(payload),
       now: () => Date.now(),
       capturePayloads: () => settings.capture_payloads,
+      captureSessions: () => settings.capture_sessions,
       costOf,
     },
   } as Parameters<typeof registerResponsesRoute>[1] & { rateLimiter: RateLimiterPort });
@@ -3874,6 +3877,7 @@ export async function buildServer(
       redact: (payload) => redact(payload),
       now: () => Date.now(),
       capturePayloads: () => settings.capture_payloads,
+      captureSessions: () => settings.capture_sessions,
     },
   } as Parameters<typeof registerGeminiRoute>[1] & { rateLimiter: RateLimiterPort });
 
@@ -3954,6 +3958,7 @@ export async function buildServer(
       redact: (payload) => redact(payload),
       now: () => Date.now(),
       capturePayloads: () => settings.capture_payloads,
+      captureSessions: () => settings.capture_sessions,
     },
   });
 
@@ -3975,6 +3980,7 @@ export async function buildServer(
       redact: (payload) => redact(payload),
       now: () => Date.now(),
       capturePayloads: () => settings.capture_payloads,
+      captureSessions: () => settings.capture_sessions,
     },
   });
 

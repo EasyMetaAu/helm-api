@@ -88,6 +88,12 @@ describe('filtersToSearch', () => {
     expect(filtersToSearch(f)).toBe('range=all&key_id=k_abc123');
     expect(parseFilters(new URLSearchParams(filtersToSearch(f)))).toEqual(f);
   });
+
+  it('round-trips the session scope as session_ref', () => {
+    const f = { range: 'all', sessionRef: 'session_abc', page: 1, pageSize: 50 } as const;
+    expect(filtersToSearch(f)).toBe('range=all&session_ref=session_abc');
+    expect(parseFilters(new URLSearchParams(filtersToSearch(f)))).toEqual(f);
+  });
 });
 
 describe('custom calendar-day range', () => {

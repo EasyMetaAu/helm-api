@@ -18,6 +18,7 @@ describe("RequestsQuerySchema", () => {
     expect(q.lane).toBeUndefined();
     expect(q.model).toBeUndefined();
     expect(q.key_id).toBeUndefined();
+    expect(q.session_ref).toBeUndefined();
     expect(q.start).toBeUndefined();
     expect(q.end).toBeUndefined();
   });
@@ -56,5 +57,10 @@ describe("RequestsQuerySchema", () => {
   it("parses key_id (exact key scope) and treats empty as unset", () => {
     expect(RequestsQuerySchema.parse({ key_id: "  key_abc  " }).key_id).toBe("key_abc");
     expect(RequestsQuerySchema.parse({ key_id: "" }).key_id).toBeUndefined();
+  });
+
+  it("parses opaque session_ref and treats empty as unset", () => {
+    expect(RequestsQuerySchema.parse({ session_ref: "  abc123  " }).session_ref).toBe("abc123");
+    expect(RequestsQuerySchema.parse({ session_ref: "" }).session_ref).toBeUndefined();
   });
 });

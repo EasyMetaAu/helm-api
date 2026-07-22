@@ -25,6 +25,8 @@
     detailHref,
     onKeyFilter,
     keyHref,
+    onSessionFilter,
+    sessionHref,
     showKey,
     variant = 'full',
   }: {
@@ -32,12 +34,17 @@
     detailHref: (requestId: string) => string;
     onKeyFilter?: (keyId: string) => void;
     keyHref?: (keyId: string) => string;
+    onSessionFilter?: (sessionRef: string) => void;
+    sessionHref?: (sessionRef: string) => string;
     showKey?: boolean;
     variant?: 'recent' | 'full' | 'key';
   } = $props();
 
   const visibleKey = $derived(showKey ?? variant !== 'key');
   const visibleRequestId = $derived(variant === 'full');
+  // The dashboard's dense recent view keeps its current columns. Global and
+  // key-scoped request history show the body-free session context.
+  const visibleSession = $derived(variant !== 'recent');
 
   // Navigate when the row is clicked, EXCEPT when the click originates on an inner
   // control (the request-id <a> and the key-filter <button> handle their own click).
@@ -230,6 +237,42 @@
   </div>
 {/snippet}
 
+{#snippet sessionCell(r: RequestListItem)}
+  <div data-testid="cell-session" class="max-w-[12rem] leading-tight">
+    {#if r.session}
+      {#if onSessionFilter}
+        <button
+          type="button"
+          data-testid="session-filter"
+          class="block max-w-full text-left hover:underline"
+          title={r.session.ref}
+          onclick={() => onSessionFilter(r.session!.ref)}
+        >
+          <span class="block truncate text-ink-strong">{r.session.label}</span>
+          <code class="block truncate font-mono text-xs text-ink-muted">{r.session.ref}</code>
+        </button>
+      {:else if sessionHref}
+        <a
+          data-testid="session-filter"
+          class="block max-w-full text-left hover:underline"
+          title={r.session.ref}
+          href={sessionHref(r.session.ref)}
+        >
+          <span class="block truncate text-ink-strong">{r.session.label}</span>
+          <code class="block truncate font-mono text-xs text-ink-muted">{r.session.ref}</code>
+        </a>
+      {:else}
+        <div class="truncate text-ink-strong" title={r.session.label}>{r.session.label}</div>
+        <code class="block truncate font-mono text-xs text-ink-muted" title={r.session.ref}
+          >{r.session.ref}</code
+        >
+      {/if}
+    {:else}
+      <span class="text-ink-muted">—</span>
+    {/if}
+  </div>
+{/snippet}
+
 {#snippet performanceCell(r: RequestListItem)}
   <div data-testid="cell-performance" class="font-mono text-xs leading-tight">
     <div>{formatDurationMs(r.latency_ms)}</div>
@@ -252,6 +295,11 @@
             class="px-3 py-2"
             title={$t('The API key that authenticated the client, shown by prefix only.')}
             >{$t('Key')}</th
+          >
+        {/if}
+        {#if visibleSession}
+          <th class="px-3 py-2" title={$t('Body-free session context for this request.')}
+            >{$t('Session')}</th
           >
         {/if}
         <th
@@ -329,6 +377,9 @@
                 {@render keyLabel(r)}
               {/if}
             </td>
+          {/if}
+          {#if visibleSession}
+            <td data-label="Session" class="px-3 py-2">{@render sessionCell(r)}</td>
           {/if}
           <td data-label={$t('Model')} class="px-3 py-2">
             {@render modelCell(r)}

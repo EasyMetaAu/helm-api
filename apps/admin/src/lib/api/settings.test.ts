@@ -7,6 +7,7 @@ import { getSettings, type RuntimeSettings, saveSettings } from './settings.js';
 
 const FULL: RuntimeSettings = {
   capture_payloads: false,
+  capture_sessions: true,
   payload_retention_days: 7,
   native_protocol_passthrough: true,
   tool_call_xml_recovery: false,
@@ -65,6 +66,7 @@ describe('settings api client', () => {
     const s = await getSettings();
     expect(s).toEqual({
       capture_payloads: true,
+      capture_sessions: false,
       payload_retention_days: 30,
       native_protocol_passthrough: true,
       tool_call_xml_recovery: true,

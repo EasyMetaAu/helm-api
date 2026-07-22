@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { type DecisionRecord, DecisionRecordSchema } from "@helm/shared";
-import { and, asc, count, desc, eq, gt, gte, lt, type SQL, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, inArray, lt, type SQL, sql } from "drizzle-orm";
 import { shapeTelemetryAggregate, shapeTelemetryKeyUsage } from "../aggregate-shape.js";
 import { externalizeImages, type PayloadBlob, rehydrateImages } from "../payload-blobs.js";
 import { decodePayloadValue, encodePayloadText } from "../payload-codec.js";
@@ -13,17 +13,21 @@ import type {
   RequestPayloadMeta,
   RequestPayloadPart,
   RequestPayloadPartRecord,
+  SessionRecord,
+  SessionRevisionRecord,
   TelemetryAggregate,
   TelemetryArchiveRow,
   TelemetryKeyUsage,
   TelemetryPage,
   TelemetryPageQuery,
   TelemetryStore,
+  UpsertSessionRevisionInput,
 } from "../ports.js";
+import { SESSION_MAX_REVISIONS, SESSION_MAX_STORED_BYTES } from "../ports.js";
 import { likeContains } from "../sql-like.js";
 import { denormalizedDecisionCost } from "../telemetry-cost.js";
 import type { SqliteDb } from "./migrate.js";
-import { payloadBlobs, requestPayloads, telemetry } from "./schema.js";
+import { payloadBlobs, requestPayloads, sessionRevisions, sessions, telemetry } from "./schema.js";
 
 type TelemetryRow = typeof telemetry.$inferSelect;
 
@@ -83,6 +87,189 @@ export class SqliteTelemetryStore implements TelemetryStore {
       .run();
   }
 
+  async upsertSessionRevision(input: UpsertSessionRevisionInput): Promise<void> {
+    const at = input.createdAt;
+    const atMs = at.getTime();
+    const storedBytes = Buffer.byteLength(
+      input.requestDeltaJson + input.requestEnvelopeJson + (input.responseJson ?? ""),
+      "utf8",
+    );
+    this.db.$sqlite.transaction(() => {
+      this.db
+        .insert(sessions)
+        .values({
+          sessionRef: input.sessionRef,
+          accountId: input.accountId,
+          apiKeyId: input.apiKeyId,
+          source: input.source,
+          externalSessionId: input.externalSessionId,
+          createdAt: at,
+          lastSeenAt: at,
+        })
+        .onConflictDoNothing()
+        .run();
+
+      const existing = this.db
+        .select({
+          requestId: sessionRevisions.requestId,
+          sessionRef: sessionRevisions.sessionRef,
+          responseJson: sessionRevisions.responseJson,
+        })
+        .from(sessionRevisions)
+        .where(eq(sessionRevisions.requestId, input.requestId))
+        .get();
+      if (existing) {
+        if (existing.sessionRef !== input.sessionRef) throw new Error("request session mismatch");
+        const responseBytes =
+          input.responseJson !== null && existing.responseJson === null
+            ? Buffer.byteLength(input.responseJson, "utf8")
+            : 0;
+        if (responseBytes === 0) return;
+        const session = this.db
+          .select({ storedBytes: sessions.storedBytes })
+          .from(sessions)
+          .where(eq(sessions.sessionRef, input.sessionRef))
+          .get();
+        if (!session) throw new Error("session row missing after insert");
+        if (session.storedBytes + responseBytes > SESSION_MAX_STORED_BYTES)
+          throw new Error("session capture limit exceeded");
+        this.db
+          .update(sessions)
+          .set({
+            storedBytes: sql`${sessions.storedBytes} + ${responseBytes}`,
+            lastSeenAt: sql`max(${sessions.lastSeenAt}, ${atMs})`,
+          })
+          .where(eq(sessions.sessionRef, input.sessionRef))
+          .run();
+        this.db
+          .update(sessionRevisions)
+          .set({
+            responseId: input.responseId ?? null,
+            responseJson: input.responseJson,
+            fidelity: input.fidelity,
+          })
+          .where(eq(sessionRevisions.requestId, input.requestId))
+          .run();
+        return;
+      }
+
+      if (input.parentRequestId !== null) {
+        const parent = this.db
+          .select({ sessionRef: sessionRevisions.sessionRef })
+          .from(sessionRevisions)
+          .where(eq(sessionRevisions.requestId, input.parentRequestId))
+          .get();
+        if (!parent || parent.sessionRef !== input.sessionRef)
+          throw new Error("session parent mismatch");
+      }
+
+      const session = this.db
+        .select({ revisionCount: sessions.revisionCount, storedBytes: sessions.storedBytes })
+        .from(sessions)
+        .where(eq(sessions.sessionRef, input.sessionRef))
+        .get();
+      if (!session) throw new Error("session row missing after insert");
+      if (
+        session.revisionCount >= SESSION_MAX_REVISIONS ||
+        session.storedBytes + storedBytes > SESSION_MAX_STORED_BYTES
+      ) {
+        throw new Error("session capture limit exceeded");
+      }
+      const sequence = session.revisionCount + 1;
+      this.db
+        .insert(sessionRevisions)
+        .values({
+          requestId: input.requestId,
+          sessionRef: input.sessionRef,
+          sequence,
+          parentRequestId: input.parentRequestId,
+          retainCount: input.retainCount,
+          requestDeltaJson: input.requestDeltaJson,
+          requestEnvelopeJson: input.requestEnvelopeJson,
+          responseId: input.responseId ?? null,
+          responseJson: input.responseJson,
+          fidelity: input.fidelity,
+          createdAt: at,
+        })
+        .run();
+      this.db
+        .update(sessions)
+        .set({
+          headRequestId: input.requestId,
+          revisionCount: sequence,
+          storedBytes: sql`${sessions.storedBytes} + ${storedBytes}`,
+          lastSeenAt: sql`max(${sessions.lastSeenAt}, ${atMs})`,
+        })
+        .where(eq(sessions.sessionRef, input.sessionRef))
+        .run();
+    })();
+  }
+
+  async getSessionByRef(sessionRef: string): Promise<SessionRecord | null> {
+    const row = this.db.select().from(sessions).where(eq(sessions.sessionRef, sessionRef)).get();
+    return row
+      ? {
+          sessionRef: row.sessionRef,
+          accountId: row.accountId,
+          apiKeyId: row.apiKeyId,
+          source: row.source,
+          externalSessionId: row.externalSessionId,
+          createdAt: row.createdAt,
+          lastSeenAt: row.lastSeenAt,
+          headRequestId: row.headRequestId,
+          revisionCount: row.revisionCount,
+          storedBytes: row.storedBytes,
+        }
+      : null;
+  }
+
+  async listSessionsByRefs(sessionRefs: readonly string[]): Promise<SessionRecord[]> {
+    if (sessionRefs.length === 0) return [];
+    return this.db
+      .select()
+      .from(sessions)
+      .where(inArray(sessions.sessionRef, [...sessionRefs]))
+      .all()
+      .map((row) => ({ ...row }));
+  }
+
+  async listSessionRevisions(sessionRef: string): Promise<SessionRevisionRecord[]> {
+    return this.db
+      .select()
+      .from(sessionRevisions)
+      .where(eq(sessionRevisions.sessionRef, sessionRef))
+      .orderBy(asc(sessionRevisions.sequence))
+      .all()
+      .map((row) => ({ ...row }));
+  }
+
+  async getSessionRevisionByResponseId(
+    sessionRef: string,
+    responseId: string,
+  ): Promise<SessionRevisionRecord | null> {
+    const row = this.db
+      .select()
+      .from(sessionRevisions)
+      .where(
+        and(
+          eq(sessionRevisions.sessionRef, sessionRef),
+          eq(sessionRevisions.responseId, responseId),
+        ),
+      )
+      .get();
+    return row ? { ...row } : null;
+  }
+
+  async pruneInactiveSessions(olderThanMs: number): Promise<number> {
+    const db = this.db.$sqlite;
+    return db.transaction(() => {
+      db.prepare(
+        "DELETE FROM session_revisions WHERE session_ref IN (SELECT session_ref FROM sessions WHERE last_seen_at < ?)",
+      ).run(olderThanMs);
+      return db.prepare("DELETE FROM sessions WHERE last_seen_at < ?").run(olderThanMs).changes;
+    })();
+  }
+
   async queryRecent(limit: number): Promise<RecentDecisionRecord[]> {
     return this.db
       .select()
@@ -121,6 +308,10 @@ export class SqliteTelemetryStore implements TelemetryStore {
     if (query.endMs !== undefined) conds.push(lt(telemetry.createdAt, new Date(query.endMs)));
     if (query.status !== undefined) conds.push(eq(telemetry.finalStatus, query.status));
     if (query.apiKeyId !== undefined) conds.push(eq(telemetry.apiKeyId, query.apiKeyId));
+    if (query.sessionRef !== undefined)
+      conds.push(
+        sql`json_extract(${telemetry.decisionJson}, '$.session.ref') = ${query.sessionRef}`,
+      );
     // lane + decided_by hit the migration-v30 generated columns (indexed) instead
     // of json_extract — an index seek, no per-row JSON parse.
     if (query.decidedBy !== undefined) conds.push(sql`decided_by = ${query.decidedBy}`);

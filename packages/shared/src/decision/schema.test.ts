@@ -107,6 +107,19 @@ describe("DecisionRecordSchema", () => {
     expect(DecisionRecordSchema.safeParse(fullRecord()).success).toBe(true);
   });
 
+  it("round-trips body-free session linkage and keeps legacy rows valid", () => {
+    expect(DecisionRecordSchema.parse(fullRecord()).session).toBeUndefined();
+    const parsed = DecisionRecordSchema.parse({
+      ...fullRecord(),
+      session: { ref: "session-ref", label: "thread-123", source: "x-thread-id" },
+    });
+    expect(parsed.session).toEqual({
+      ref: "session-ref",
+      label: "thread-123",
+      source: "x-thread-id",
+    });
+  });
+
   it("defaults measured usage to reported and legacy stream outcome to null", () => {
     const parsed = DecisionRecordSchema.parse({
       ...fullRecord(),

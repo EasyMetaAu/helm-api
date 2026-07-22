@@ -1010,5 +1010,22 @@
   "partial": "parcial",
   "client aborted": "abortado pelo cliente",
   "truncated": "truncado",
-  "incomplete": "incompleto"
+  "incomplete": "incompleto",
+  "Body-free session context for this request.": "Contexto de sessão sem corpos para esta solicitação.",
+  "Full payload for every request": "Payload completo para cada solicitação",
+  "Incremental transcript per session": "Transcrição incremental por sessão",
+  "Metadata only": "Somente metadados",
+  "Privacy note: full payload and session modes store message content. Choose metadata only to store no bodies.": "Nota de privacidade: os modos de payload completo e sessão armazenam o conteúdo das mensagens. Escolha somente metadados para não armazenar corpos.",
+  "Request content storage": "Armazenamento do conteúdo das solicitações",
+  "Session": "Sessão",
+  "Session mode stores repeated conversation history once and reconstructs each request semantically.": "O modo de sessão armazena uma única vez o histórico repetido da conversa e reconstrói semanticamente cada solicitação.",
+  "Session reference": "Referência da sessão",
+  "This content was recovered from the session transcript. It is not the original HTTP request and cannot be retried exactly.": "Este conteúdo foi recuperado da transcrição da sessão. Ele não é a solicitação HTTP original e não pode ser repetido de forma exata.",
+  "Keep request/session content for (days)": "Manter o conteúdo de solicitações/sessões por (dias)",
+  "Full payloads expire by request age; whole session transcripts expire after their last activity.": "Os payloads completos expiram pela idade da solicitação; as transcrições completas expiram após a última atividade.",
+  "Request payloads and session transcripts": "Payloads de solicitações e transcrições de sessão",
+  "uses the content window above · full payloads archived, inactive sessions deleted": "usa o período acima · payloads completos arquivados, sessões inativas excluídas",
+  "The session transcript is unavailable or has been cleaned up.": "A transcrição da sessão não está disponível ou foi limpa.",
+  "The session transcript is incomplete and this request cannot be recovered.": "A transcrição da sessão está incompleta e esta solicitação não pode ser recuperada.",
+  "This request has no captured Session ID, so no session transcript is available.": "Esta solicitação não possui um Session ID capturado, portanto não há transcrição disponível."
 }

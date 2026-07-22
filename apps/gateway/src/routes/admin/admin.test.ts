@@ -1198,6 +1198,42 @@ describe("admin.api requests", () => {
     expect(detail.created_at).toBe(1_700_000_000_000);
   });
 
+  it("keeps the raw Session ID out of telemetry and enriches it from the Session store", async () => {
+    const rec = decision("trace-session", "balanced");
+    rec.session = { ref: "opaque-session-ref", source: "x-thread-id" };
+    const session = {
+      sessionRef: "opaque-session-ref",
+      accountId: "acct",
+      apiKeyId: "k1",
+      source: "x-thread-id",
+      externalSessionId: "customer@example.com",
+      createdAt: new Date(1000),
+      lastSeenAt: new Date(2000),
+      headRequestId: "trace-session",
+      revisionCount: 1,
+      storedBytes: 100,
+    };
+    const telemetry = {
+      ...makeTelemetry([rec]),
+      listSessionsByRefs: vi.fn(async () => [session]),
+      getSessionByRef: vi.fn(async () => session),
+    } as unknown as TelemetryStore;
+    const app = buildApp(buildDeps({ telemetry }));
+
+    const page = (await (await app.request("/admin/api/requests")).json()) as {
+      items: Array<{ session?: { ref: string; label?: string } }>;
+    };
+    expect(rec.session).toEqual({ ref: "opaque-session-ref", source: "x-thread-id" });
+    expect(page.items[0]?.session).toMatchObject({
+      ref: "opaque-session-ref",
+      label: "customer@example.com",
+    });
+    const detail = (await (await app.request("/admin/api/requests/trace-session")).json()) as {
+      session: { label: string };
+    };
+    expect(detail.session.label).toBe("customer@example.com");
+  });
+
   it("forwards filters + pagination to the store and returns the page envelope", async () => {
     const ok1 = decision("ok-1", "premium");
     const err = decision("err-1", "balanced");
@@ -1525,7 +1561,11 @@ describe("admin.api request payload", () => {
     const app = buildApp(buildDeps());
     const res = await app.request("/admin/api/requests/req_x/payload");
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ captured: false });
+    expect(await res.json()).toEqual({
+      captured: false,
+      source: "unavailable",
+      reason: "no_session",
+    });
   });
 
   it("returns the parsed request/response when a payload exists", async () => {
@@ -1547,6 +1587,9 @@ describe("admin.api request payload", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       captured: true,
+      source: "payload",
+      exact: true,
+      fidelity: "exact",
       request: { model: "auto" },
       response: { ok: true },
       upstream_request: { model: "gpt-resolved", injected: true },
@@ -1594,6 +1637,9 @@ describe("admin.api request payload", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       captured: true,
+      source: "payload",
+      exact: true,
+      fidelity: "exact",
       created_at: 1234,
       parts: { request: true, response: false, upstream_request: true },
     });
@@ -1617,9 +1663,125 @@ describe("admin.api request payload", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       captured: true,
+      source: "payload",
+      exact: true,
+      fidelity: "exact",
       part: "upstream_request",
       value: { model: "gpt-resolved" },
       created_at: 1234,
+    });
+  });
+
+  it("recovers a semantic request from the session when no full payload exists", async () => {
+    const rec = {
+      ...decision("req_session", "balanced"),
+      session: { ref: "session-ref", label: "thread-1", source: "x-thread-id" as const },
+    };
+    const telemetry = {
+      ...makeTelemetry([rec]),
+      getPayload: async () => null,
+      listSessionRevisions: async () => [
+        {
+          sessionRef: "session-ref",
+          requestId: "req_session",
+          parentRequestId: null,
+          retainCount: 0,
+          requestDeltaJson: '[{"role":"user","content":"hello"}]',
+          requestEnvelopeJson: '{"model":"auto","messages":[]}',
+          responseJson: null,
+          fidelity: "semantic",
+          createdAt: new Date(1234),
+        },
+      ],
+    } as unknown as TelemetryStore;
+    const app = buildApp(buildDeps({ telemetry }));
+    const res = await app.request("/admin/api/requests/req_session/payload");
+    expect(await res.json()).toEqual({
+      captured: true,
+      source: "session",
+      exact: false,
+      fidelity: "semantic",
+      request: { model: "auto", messages: [{ role: "user", content: "hello" }] },
+      response: null,
+      upstream_request: null,
+      created_at: 1234,
+    });
+  });
+
+  it("distinguishes a cleaned session from a corrupt session chain", async () => {
+    const rec = {
+      ...decision("req_session", "balanced"),
+      session: { ref: "session-ref", source: "x-thread-id" as const },
+    };
+    const unavailable = {
+      ...makeTelemetry([rec]),
+      getPayload: async () => null,
+      listSessionRevisions: async () => [],
+    } as unknown as TelemetryStore;
+    const unavailableApp = buildApp(buildDeps({ telemetry: unavailable }));
+    expect(
+      await (await unavailableApp.request("/admin/api/requests/req_session/payload")).json(),
+    ).toEqual({
+      captured: false,
+      source: "unavailable",
+      reason: "session_unavailable",
+    });
+
+    const incomplete = {
+      ...makeTelemetry([rec]),
+      getPayload: async () => null,
+      listSessionRevisions: async () => [
+        {
+          sessionRef: "session-ref",
+          requestId: "req_session",
+          sequence: 1,
+          parentRequestId: "req_session",
+          retainCount: 0,
+          requestDeltaJson: "[]",
+          requestEnvelopeJson: '{"messages":[]}',
+          responseJson: null,
+          fidelity: "semantic",
+          createdAt: new Date(1234),
+        },
+      ],
+    } as unknown as TelemetryStore;
+    const incompleteApp = buildApp(buildDeps({ telemetry: incomplete }));
+    expect(
+      await (await incompleteApp.request("/admin/api/requests/req_session/payload")).json(),
+    ).toEqual({
+      captured: false,
+      source: "unavailable",
+      reason: "session_incomplete",
+    });
+
+    const unknownContinuation = {
+      ...makeTelemetry([rec]),
+      getPayload: async () => null,
+      listSessionRevisions: async () => [
+        {
+          sessionRef: "session-ref",
+          requestId: "req_session",
+          sequence: 1,
+          parentRequestId: null,
+          retainCount: 0,
+          requestDeltaJson: '[{"role":"user","content":"child"}]',
+          requestEnvelopeJson: '{"previous_response_id":"resp_missing","input":[]}',
+          responseId: "resp_child",
+          responseJson: '{"id":"resp_child","output":[]}',
+          fidelity: "partial",
+          createdAt: new Date(1234),
+        },
+      ],
+    } as unknown as TelemetryStore;
+    const unknownContinuationApp = buildApp(buildDeps({ telemetry: unknownContinuation }));
+    expect(
+      await (
+        await unknownContinuationApp.request("/admin/api/requests/req_session/payload")
+      ).json(),
+    ).toEqual({
+      captured: false,
+      source: "unavailable",
+      reason: "session_incomplete",
     });
   });
 });

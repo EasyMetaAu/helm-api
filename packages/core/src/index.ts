@@ -817,8 +817,11 @@ export {
   PgRateLimitStore,
   PgSignalStore,
   PgTelemetryStore,
+  restoreSessionRevisionJson,
   runMigrations,
   runPgMigrations,
+  SESSION_MAX_REVISIONS,
+  SESSION_MAX_STORED_BYTES,
   SqliteBudgetStore,
   SqliteConfigStore,
   type SqliteDb,
@@ -831,6 +834,7 @@ export {
   SqliteSignalStore,
   SqliteTelemetryStore,
   type StoreSet,
+  splitSessionRequestJson,
 } from "./store/index.js";
 export type {
   BudgetDim,
@@ -855,8 +859,11 @@ export type {
   RequestPayloadMeta,
   RequestPayloadPart,
   RequestPayloadPartRecord,
+  SessionRecord,
+  SessionRevisionRecord,
   SignalStore,
   TelemetryStore,
+  UpsertSessionRevisionInput,
 } from "./store/ports.js";
 // docs/13 — thrown by MemoryStore.updateFact on a content_hash collision (value
 // export: it's a class the admin/MCP routes catch to return 409, not just a type).

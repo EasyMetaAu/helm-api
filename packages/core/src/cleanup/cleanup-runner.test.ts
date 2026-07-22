@@ -24,6 +24,7 @@ function telemetryFake(over: Partial<TelemetryStore> = {}): TelemetryStore {
       after === undefined ? [{ id: "p1" }, { id: "p2" }] : [],
     ),
     prunePayloads: vi.fn(async () => {}),
+    pruneInactiveSessions: vi.fn(async () => 1),
     ...over,
   } as unknown as TelemetryStore;
 }
@@ -335,6 +336,20 @@ describe("runCleanup", () => {
     // prune wrapper: count was 2 (for the pre-count), prunePayloads called once.
     expect(telemetry.prunePayloads).toHaveBeenCalledWith(300);
     expect(report.ok).toBe(true);
+  });
+
+  it("sessions: deletes whole inactive transcripts without archiving them", async () => {
+    const telemetry = telemetryFake({ pruneInactiveSessions: vi.fn(async () => 4) });
+    const report = await runCleanup({
+      actions: [{ table: "sessions", cutoffMs: 300, archive: false }],
+      telemetry,
+      memory: memoryFake(),
+      oauthUsage: usageFake(),
+      runId: "run1",
+      now: clock(),
+    });
+    expect(telemetry.pruneInactiveSessions).toHaveBeenCalledWith(300);
+    expect(report.tables[0]).toMatchObject({ table: "sessions", deletedRows: 4 });
   });
 
   it("memory_messages archive-first: archives then prunes via pruneMessagesOlderThan", async () => {

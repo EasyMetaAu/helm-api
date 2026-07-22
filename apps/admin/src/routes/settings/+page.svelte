@@ -30,6 +30,7 @@
 
   const DEFAULTS: RuntimeSettings = {
     capture_payloads: true,
+    capture_sessions: false,
     payload_retention_days: 30,
     // Native protocol passthrough (issue #217): default ON. No longer surfaced as
     // a toggle (UI removed in #236) — kept in the working copy so it round-trips
@@ -77,9 +78,7 @@
   // Lane options for the default-lane dropdown: only configured lanes plus the
   // current value (so a stale manually-edited value remains visible and can be
   // corrected). No lane name is special-cased here.
-  const laneOptions = $derived(
-    Array.from(new Set([...(data.lanes ?? []), form.default_lane])),
-  );
+  const laneOptions = $derived(Array.from(new Set([...(data.lanes ?? []), form.default_lane])));
 
   async function handleSave(): Promise<void> {
     error = null;
@@ -93,6 +92,17 @@
     } finally {
       saving = false;
     }
+  }
+
+  function captureMode(): 'none' | 'payload' | 'session' {
+    if (form.capture_payloads) return 'payload';
+    if (form.capture_sessions) return 'session';
+    return 'none';
+  }
+
+  function setCaptureMode(mode: string): void {
+    form.capture_payloads = mode === 'payload';
+    form.capture_sessions = mode === 'session';
   }
 
   // ——— Data cleanup runtime actions (independent of the settings form Save) ———
@@ -414,30 +424,34 @@
           </label>
 
           <div class="flex flex-col gap-3">
-            <label class="flex items-start gap-3">
-              <input
-                type="checkbox"
-                data-testid="capture-payloads"
-                class="checkbox mt-0.5"
-                bind:checked={form.capture_payloads}
-              />
+            <label class="flex flex-col gap-1">
               <span>
-                <span class="font-medium">{$t('Record full request and response bodies')}</span>
+                <span class="font-medium">{$t('Request content storage')}</span>
+                <select
+                  data-testid="capture-mode"
+                  class="select mt-1 min-h-11 w-full md:min-h-0"
+                  value={captureMode()}
+                  onchange={(event) => setCaptureMode(event.currentTarget.value)}
+                >
+                  <option value="none">{$t('Metadata only')}</option>
+                  <option value="payload">{$t('Full payload for every request')}</option>
+                  <option value="session">{$t('Incremental transcript per session')}</option>
+                </select>
                 <span class="field-help block"
                   >{$t(
-                    'When on, the complete request and response of every call are stored so you can view them here.',
+                    'Session mode stores repeated conversation history once and reconstructs each request semantically.',
                   )}</span
                 >
                 <span class="field-help mt-1 block text-amber-600"
                   >{$t(
-                    'Privacy note: this stores message content in plaintext. Turn it off to keep only routing metadata.',
+                    'Privacy note: full payload and session modes store message content. Choose metadata only to store no bodies.',
                   )}</span
                 >
               </span>
             </label>
 
             <label class="flex flex-col gap-1 border-l-2 border-slate-100 pl-3">
-              <span class="font-medium">{$t('Keep recorded bodies for (days)')}</span>
+              <span class="font-medium">{$t('Keep request/session content for (days)')}</span>
               <input
                 type="number"
                 min="1"
@@ -446,7 +460,9 @@
                 class="input-sm min-h-11 w-32 md:min-h-0"
                 bind:value={form.payload_retention_days}
               />
-              <span class="field-help">{$t('Older bodies are deleted automatically.')}</span>
+              <span class="field-help"
+                >{$t('Full payloads expire by request age; whole session transcripts expire after their last activity.')}</span
+              >
             </label>
           </div>
         </div>
@@ -559,9 +575,9 @@
 
           <label class="flex flex-wrap items-center gap-2 border-l-2 border-slate-100 pl-3">
             <input type="checkbox" class="checkbox" bind:checked={form.payloads_cleanup_enabled} />
-            <span class="font-medium">{$t('Full request/response bodies')}</span>
+            <span class="font-medium">{$t('Request payloads and session transcripts')}</span>
             <span class="field-help"
-              >{$t('uses the “keep bodies for” window above · archived')}</span
+              >{$t('uses the content window above · full payloads archived, inactive sessions deleted')}</span
             >
           </label>
 

@@ -12,17 +12,21 @@ import type {
   RequestPayloadMeta,
   RequestPayloadPart,
   RequestPayloadPartRecord,
+  SessionRecord,
+  SessionRevisionRecord,
   TelemetryAggregate,
   TelemetryArchiveRow,
   TelemetryKeyUsage,
   TelemetryPage,
   TelemetryPageQuery,
   TelemetryStore,
+  UpsertSessionRevisionInput,
 } from "../ports.js";
+import { SESSION_MAX_REVISIONS, SESSION_MAX_STORED_BYTES } from "../ports.js";
 import { likeContains } from "../sql-like.js";
 import { denormalizedDecisionCost } from "../telemetry-cost.js";
 import type { PgDb } from "./migrate.js";
-import { payloadBlobs, requestPayloads, telemetry } from "./schema.js";
+import { payloadBlobs, requestPayloads, sessionRevisions, sessions, telemetry } from "./schema.js";
 
 // Sentinel left in the slimmed text by externalizeImages; we scan for these to
 // know which blobs a stored payload references, so we can pre-fetch them before
@@ -88,6 +92,200 @@ export class PgTelemetryStore implements TelemetryStore {
     await this.db.insert(telemetry).values(inputs.map((input) => this.toRow(input)));
   }
 
+  async upsertSessionRevision(input: UpsertSessionRevisionInput): Promise<void> {
+    const at = input.createdAt.getTime();
+    const storedBytes = Buffer.byteLength(
+      input.requestDeltaJson + input.requestEnvelopeJson + (input.responseJson ?? ""),
+      "utf8",
+    );
+    await this.db.transaction(async (tx) => {
+      await tx
+        .insert(sessions)
+        .values({
+          sessionRef: input.sessionRef,
+          accountId: input.accountId,
+          apiKeyId: input.apiKeyId,
+          source: input.source,
+          externalSessionId: input.externalSessionId,
+          createdAt: at,
+          lastSeenAt: at,
+        })
+        .onConflictDoNothing();
+
+      const lockedSessions = await tx
+        .select({
+          revisionCount: sessions.revisionCount,
+          storedBytes: sessions.storedBytes,
+        })
+        .from(sessions)
+        .where(eq(sessions.sessionRef, input.sessionRef))
+        .limit(1)
+        .for("update");
+      const lockedSession = lockedSessions[0];
+      if (!lockedSession) throw new Error("session row missing after insert");
+
+      const existing = await tx
+        .select({
+          requestId: sessionRevisions.requestId,
+          sessionRef: sessionRevisions.sessionRef,
+          responseJson: sessionRevisions.responseJson,
+        })
+        .from(sessionRevisions)
+        .where(eq(sessionRevisions.requestId, input.requestId))
+        .limit(1);
+      if (existing.length > 0) {
+        if (existing[0]?.sessionRef !== input.sessionRef)
+          throw new Error("request session mismatch");
+        const responseBytes =
+          input.responseJson !== null && existing[0]?.responseJson === null
+            ? Buffer.byteLength(input.responseJson, "utf8")
+            : 0;
+        if (responseBytes === 0) return;
+        if (lockedSession.storedBytes + responseBytes > SESSION_MAX_STORED_BYTES)
+          throw new Error("session capture limit exceeded");
+        await tx
+          .update(sessions)
+          .set({
+            storedBytes: sql`${sessions.storedBytes} + ${responseBytes}`,
+            lastSeenAt: sql`GREATEST(${sessions.lastSeenAt}, ${at})`,
+          })
+          .where(eq(sessions.sessionRef, input.sessionRef));
+        await tx
+          .update(sessionRevisions)
+          .set({
+            responseId: input.responseId ?? null,
+            responseJson: input.responseJson,
+            fidelity: input.fidelity,
+          })
+          .where(eq(sessionRevisions.requestId, input.requestId));
+        return;
+      }
+
+      if (input.parentRequestId !== null) {
+        const parent = await tx
+          .select({ sessionRef: sessionRevisions.sessionRef })
+          .from(sessionRevisions)
+          .where(eq(sessionRevisions.requestId, input.parentRequestId))
+          .limit(1);
+        if (!parent[0] || parent[0].sessionRef !== input.sessionRef)
+          throw new Error("session parent mismatch");
+      }
+
+      const updated = await tx
+        .update(sessions)
+        .set({
+          headRequestId: input.requestId,
+          revisionCount: sql`${sessions.revisionCount} + 1`,
+          storedBytes: sql`${sessions.storedBytes} + ${storedBytes}`,
+          lastSeenAt: sql`GREATEST(${sessions.lastSeenAt}, ${at})`,
+        })
+        .where(
+          and(
+            eq(sessions.sessionRef, input.sessionRef),
+            lt(sessions.revisionCount, SESSION_MAX_REVISIONS),
+            sql`${sessions.storedBytes} + ${storedBytes} <= ${SESSION_MAX_STORED_BYTES}`,
+          ),
+        )
+        .returning();
+      const sequence = updated[0]?.revisionCount;
+      if (sequence === undefined) throw new Error("session row missing after insert");
+      await tx.insert(sessionRevisions).values({
+        requestId: input.requestId,
+        sessionRef: input.sessionRef,
+        sequence,
+        parentRequestId: input.parentRequestId,
+        retainCount: input.retainCount,
+        requestDeltaJson: input.requestDeltaJson,
+        requestEnvelopeJson: input.requestEnvelopeJson,
+        responseId: input.responseId ?? null,
+        responseJson: input.responseJson,
+        fidelity: input.fidelity,
+        createdAt: at,
+      });
+    });
+  }
+
+  async getSessionByRef(sessionRef: string): Promise<SessionRecord | null> {
+    const rows = await this.db
+      .select()
+      .from(sessions)
+      .where(eq(sessions.sessionRef, sessionRef))
+      .limit(1);
+    const row = rows[0];
+    return row
+      ? {
+          sessionRef: row.sessionRef,
+          accountId: row.accountId,
+          apiKeyId: row.apiKeyId,
+          source: row.source,
+          externalSessionId: row.externalSessionId,
+          createdAt: new Date(row.createdAt),
+          lastSeenAt: new Date(row.lastSeenAt),
+          headRequestId: row.headRequestId,
+          revisionCount: row.revisionCount,
+          storedBytes: row.storedBytes,
+        }
+      : null;
+  }
+
+  async listSessionsByRefs(sessionRefs: readonly string[]): Promise<SessionRecord[]> {
+    if (sessionRefs.length === 0) return [];
+    const rows = await this.db
+      .select()
+      .from(sessions)
+      .where(inArray(sessions.sessionRef, [...sessionRefs]));
+    return rows.map((row) => ({
+      sessionRef: row.sessionRef,
+      accountId: row.accountId,
+      apiKeyId: row.apiKeyId,
+      source: row.source,
+      externalSessionId: row.externalSessionId,
+      createdAt: new Date(row.createdAt),
+      lastSeenAt: new Date(row.lastSeenAt),
+      headRequestId: row.headRequestId,
+      revisionCount: row.revisionCount,
+      storedBytes: row.storedBytes,
+    }));
+  }
+
+  async listSessionRevisions(sessionRef: string): Promise<SessionRevisionRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(sessionRevisions)
+      .where(eq(sessionRevisions.sessionRef, sessionRef))
+      .orderBy(asc(sessionRevisions.sequence));
+    return rows.map((row) => ({
+      ...row,
+      createdAt: new Date(row.createdAt),
+    }));
+  }
+
+  async getSessionRevisionByResponseId(
+    sessionRef: string,
+    responseId: string,
+  ): Promise<SessionRevisionRecord | null> {
+    const rows = await this.db
+      .select()
+      .from(sessionRevisions)
+      .where(
+        and(
+          eq(sessionRevisions.sessionRef, sessionRef),
+          eq(sessionRevisions.responseId, responseId),
+        ),
+      )
+      .limit(1);
+    const row = rows[0];
+    return row ? { ...row, createdAt: new Date(row.createdAt) } : null;
+  }
+
+  async pruneInactiveSessions(olderThanMs: number): Promise<number> {
+    const rows = await this.db
+      .delete(sessions)
+      .where(lt(sessions.lastSeenAt, olderThanMs))
+      .returning();
+    return rows.length;
+  }
+
   async queryRecent(limit: number): Promise<RecentDecisionRecord[]> {
     const rows = await this.db
       .select()
@@ -133,6 +331,8 @@ export class PgTelemetryStore implements TelemetryStore {
     if (query.endMs !== undefined) conds.push(lt(telemetry.createdAt, query.endMs));
     if (query.status !== undefined) conds.push(eq(telemetry.finalStatus, query.status));
     if (query.apiKeyId !== undefined) conds.push(eq(telemetry.apiKeyId, query.apiKeyId));
+    if (query.sessionRef !== undefined)
+      conds.push(sql`${telemetry.decisionJson} -> 'session' ->> 'ref' = ${query.sessionRef}`);
     // lane + decided_by hit the migration-v29 STORED generated columns (indexed)
     // instead of a jsonb extract — an index seek, no per-row jsonb scan.
     if (query.decidedBy !== undefined) conds.push(sql`decided_by = ${query.decidedBy}`);

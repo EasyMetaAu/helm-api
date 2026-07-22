@@ -49,6 +49,9 @@ export const RequestsQuerySchema = z.object({
   // `model` (substring), the store matches this with equality — it is an internal
   // id, not free text. Same fail-open trim-empty→unset handling.
   key_id: optionalText,
+  // Opaque tenant-scoped session reference. Raw client Session IDs never enter
+  // query strings, access logs, or browser history.
+  session_ref: optionalText,
   start: optionalEpochMs,
   end: optionalEpochMs,
 });

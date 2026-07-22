@@ -15,6 +15,7 @@ function item(overrides: Partial<RequestListItem> = {}): RequestListItem {
     key_id: 'k_42',
     key_prefix: 'helm_live_ab12',
     key_name: 'Prod',
+    session: null,
     requested_model: 'gpt-4o',
     requested_reasoning_effort: null,
     reasoning_effort: null,
@@ -80,6 +81,57 @@ describe('RequestsTable key cell', () => {
 });
 
 describe('RequestsTable variants', () => {
+  it('makes Session a filter button or canonical link when the caller provides one', async () => {
+    const session = { ref: 'session_abc', label: 'Support case 42', source: 'header' };
+    const onSessionFilter = vi.fn();
+    const first = render(RequestsTable, {
+      items: [item({ session })],
+      detailHref,
+      onSessionFilter,
+      variant: 'full',
+    });
+    const button = screen.getByTestId('session-filter');
+    expect(button.tagName).toBe('BUTTON');
+    await fireEvent.click(button);
+    expect(onSessionFilter).toHaveBeenCalledWith('session_abc');
+    first.unmount();
+
+    render(RequestsTable, {
+      items: [item({ session })],
+      detailHref,
+      sessionHref: (ref: string) => `/requests?range=all&session_ref=${ref}`,
+      variant: 'key',
+    });
+    expect(screen.getByTestId('session-filter')).toHaveAttribute(
+      'href',
+      '/requests?range=all&session_ref=session_abc',
+    );
+  });
+
+  it('shows Session on global and key-scoped lists, but not the dashboard', () => {
+    const session = { ref: 'session_abc', label: 'Support case 42', source: 'header' };
+    const { unmount } = render(RequestsTable, {
+      items: [item({ session })],
+      detailHref,
+      variant: 'full',
+    });
+    expect(screen.getByText('Session')).toBeInTheDocument();
+    expect(screen.getByTestId('cell-session')).toHaveTextContent('Support case 42');
+    expect(screen.getByTestId('cell-session')).toHaveTextContent('session_abc');
+    unmount();
+
+    const keyScoped = render(RequestsTable, {
+      items: [item({ session })],
+      detailHref,
+      variant: 'key',
+    });
+    expect(screen.getByText('Session')).toBeInTheDocument();
+    keyScoped.unmount();
+
+    render(RequestsTable, { items: [item({ session })], detailHref, variant: 'recent' });
+    expect(screen.queryByText('Session')).toBeNull();
+  });
+
   it('uses request_id for row identity and navigation when client traces are duplicated', () => {
     render(RequestsTable, {
       items: [

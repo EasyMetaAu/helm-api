@@ -10,6 +10,7 @@ export type VisualContextCompressionMode = 'off' | 'observe' | 'enabled';
 
 export interface RuntimeSettings {
   capture_payloads: boolean;
+  capture_sessions: boolean;
   payload_retention_days: number;
   // Native protocol passthrough (issue #217). When ON, a same-protocol request
   // (e.g. Anthropic /v1/messages → an Anthropic subscription) forwards the
@@ -96,6 +97,7 @@ function normalize(raw: Record<string, unknown>): RuntimeSettings {
   const level = raw.log_level;
   return {
     capture_payloads: raw.capture_payloads !== false,
+    capture_sessions: raw.capture_sessions === true,
     payload_retention_days:
       typeof raw.payload_retention_days === 'number' ? raw.payload_retention_days : 30,
     // Default ON (a missing field reads as true), and — critically — KEEP it

@@ -27,7 +27,7 @@ export function defaultSettingsFromConfig(config: HelmConfig): RuntimeSettings {
 }
 
 function privacySafeFallback(defaults: RuntimeSettings): RuntimeSettings {
-  return { ...defaults, capture_payloads: false };
+  return { ...defaults, capture_payloads: false, capture_sessions: false };
 }
 
 // Read the persisted runtime settings, overlaying them on the config-seeded

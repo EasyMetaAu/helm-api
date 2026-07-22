@@ -1,4 +1,13 @@
-import { blob, integer, primaryKey, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import {
+  blob,
+  index,
+  integer,
+  primaryKey,
+  real,
+  sqliteTable,
+  text,
+  uniqueIndex,
+} from "drizzle-orm/sqlite-core";
 
 // SQLite (Drizzle) table definitions for the sqlite Store adapter. Columns align
 // with docs/06 (api_keys) and docs/02 (telemetry / decision record). Dialect
@@ -70,6 +79,55 @@ export const telemetry = sqliteTable("telemetry", {
   generationMs: integer("generation_ms"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });
+
+export const sessions = sqliteTable(
+  "sessions",
+  {
+    sessionRef: text("session_ref").primaryKey(),
+    accountId: text("account_id").notNull(),
+    apiKeyId: text("api_key_id").notNull(),
+    source: text("source").notNull(),
+    externalSessionId: text("external_session_id").notNull(),
+    headRequestId: text("head_request_id"),
+    revisionCount: integer("revision_count").notNull().default(0),
+    storedBytes: integer("stored_bytes").notNull().default(0),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    lastSeenAt: integer("last_seen_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("uniq_sessions_owner_source_external").on(
+      t.accountId,
+      t.apiKeyId,
+      t.source,
+      t.externalSessionId,
+    ),
+    index("idx_sessions_last_seen_at").on(t.lastSeenAt),
+  ],
+);
+
+export const sessionRevisions = sqliteTable(
+  "session_revisions",
+  {
+    requestId: text("request_id").primaryKey(),
+    sessionRef: text("session_ref")
+      .notNull()
+      .references(() => sessions.sessionRef, { onDelete: "cascade" }),
+    sequence: integer("sequence").notNull(),
+    parentRequestId: text("parent_request_id"),
+    retainCount: integer("retain_count").notNull(),
+    requestDeltaJson: text("request_delta_json").notNull(),
+    requestEnvelopeJson: text("request_envelope_json").notNull(),
+    responseId: text("response_id"),
+    responseJson: text("response_json"),
+    fidelity: text("fidelity").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("uniq_session_revisions_sequence").on(t.sessionRef, t.sequence),
+    uniqueIndex("uniq_session_revisions_response").on(t.sessionRef, t.responseId),
+    index("idx_session_revisions_session_created").on(t.sessionRef, t.createdAt),
+  ],
+);
 
 // Per-key rate-limit token buckets (one row per key_id + dimension). Counters
 // live in the store — NOT process memory — so windows survive restarts and span
