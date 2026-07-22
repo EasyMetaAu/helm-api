@@ -197,9 +197,7 @@ test.describe("admin redaction smoke", () => {
 
 // ── 5. System Settings: read + persist a runtime-mutable setting ─────────────
 test.describe("admin system settings", () => {
-  test("renders the settings page and persists a capture mode across reloads", async ({
-    page,
-  }) => {
+  test("renders the settings page and persists a capture mode across reloads", async ({ page }) => {
     await page.goto(`${BASE}/admin/settings`);
     await expect(page.getByTestId("capture-mode")).toBeVisible();
     await expect(page.getByTestId("log-level")).toBeVisible();
@@ -224,9 +222,7 @@ test.describe("admin system settings", () => {
 
 // ── 6. Payload view: the seeded request was stored WITHOUT a captured body ────
 test.describe("admin request payload view", () => {
-  test("shows a no-session notice when no payload or Session ID was captured", async ({
-    page,
-  }) => {
+  test("shows a no-session notice when no payload or Session ID was captured", async ({ page }) => {
     // The seed uses telemetry.insert only (no insertPayload), so the detail page
     // must surface the explicit no-Session notice rather than a body.
     await page.goto(`${BASE}/admin/requests/${SEED_TRACE_ID}`);
