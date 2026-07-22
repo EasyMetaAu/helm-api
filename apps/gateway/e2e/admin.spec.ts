@@ -87,10 +87,10 @@ test.describe("admin lane editing", () => {
 
     const primary = card.locator("input[name='primary']");
     await primary.fill(newPrimary);
-    await card.getByRole("button", { name: /save/i }).click();
+    await page.getByRole("button", { name: /^save$/i }).click();
 
-    // A per-card success indicator must appear after the write-back succeeds.
-    await expect(card.getByTestId("lane-saved")).toBeVisible();
+    // The one page-level success indicator appears after the atomic write-back.
+    await expect(page.getByTestId("lanes-saved")).toBeVisible();
 
     // Reload from the gateway: the runtime config kept the edit (docs/04).
     await page.reload();
