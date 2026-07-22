@@ -12,7 +12,7 @@ Helm API 是一个**开源、自托管**的 LLM 路由网关（"LLM 世界的 ng
 4. **确定性优先**：第 1 层规则是纯函数、零网络、可单测；eval（第 2 层）`temperature:0`、默认关闭、带缓存。
 5. **两种 fallback 分清楚**：分类兜底（→ `runtime.default_lane`）与执行兜底（→ 链内下一个 model）是两套机制、两套日志字段，绝不混淆（见 docs/03、04）。
 6. **暴露 lane 抽象，不暴露模型市场**；provider 别名是内部供应链细节。
-7. **密钥安全 + 正文可观测**：API key 鉴权只依赖 **sha256 哈希**；如配置了 at-rest 加密密钥，可额外保存 `secret_enc`（AES-GCM 密文）供管理后台查看/轮转。Key Store、遥测、payload 表与常规日志绝不保存明文 key；唯一例外是首次 bootstrap 可把 root key 打印一次，并原子写入配置的 `0600` recovery file，之后不会再次显示。**完整 request/response 正文按运行时设置 `capture_payloads`（默认开）记录到独立的 `request_payloads` 表**，便于调试与审计；可在管理界面「系统设置」随时关闭，并按 `payload_retention_days` 自动清理。`DecisionRecord` 仍保持脱敏（不含正文）作为纵深防御。
+7. **密钥安全 + 正文可观测**：API key 鉴权只依赖 **sha256 哈希**；如配置了 at-rest 加密密钥，可额外保存 `secret_enc`（AES-GCM 密文）供管理后台查看/轮转。Key Store、遥测、payload 表与常规日志绝不保存明文 key；唯一例外是首次 bootstrap 可把 root key 打印一次，并原子写入配置的 `0600` recovery file，之后不会再次显示。**默认按 Session 增量保存会话转录；完整 request/response 正文仅在运行时设置 `capture_payloads` 开启时记录到独立的 `request_payloads` 表**。两种模式互斥，可在管理界面「系统设置」切换，并按 `payload_retention_days` 自动清理。`DecisionRecord` 仍保持脱敏（不含正文）作为纵深防御。
 8. **流式正确性是头号风险**：协议互译的 SSE 事件映射（见 docs/05）必须有针对性测试覆盖。
 
 ---

@@ -316,6 +316,58 @@ export interface RequestPayloadPartRecord {
   createdAt: Date;
 }
 
+// Incremental, session-scoped transcript storage. This is deliberately separate
+// from request_payloads: capture_payloads may be off, while a session must still
+// be recoverable without storing the client's full re-sent transcript per request.
+export interface UpsertSessionRevisionInput {
+  sessionRef: string;
+  accountId: string;
+  apiKeyId: string;
+  source: string;
+  // Original client id. Keep this out of DecisionRecord; only a body-level reader
+  // should expose it.
+  externalSessionId: string;
+  requestId: string;
+  parentRequestId: string | null;
+  retainCount: number;
+  requestDeltaJson: string;
+  requestEnvelopeJson: string;
+  responseId?: string | null;
+  responseJson: string | null;
+  fidelity: string;
+  createdAt: Date;
+}
+
+export interface SessionRecord {
+  sessionRef: string;
+  accountId: string;
+  apiKeyId: string;
+  source: string;
+  externalSessionId: string;
+  createdAt: Date;
+  lastSeenAt: Date;
+  headRequestId: string | null;
+  revisionCount: number;
+  storedBytes: number;
+}
+
+export const SESSION_MAX_REVISIONS = 10_000;
+export const SESSION_MAX_STORED_BYTES = 64 * 1024 * 1024;
+
+export interface SessionRevisionRecord {
+  sessionRef: string;
+  requestId: string;
+  sequence: number;
+  parentRequestId: string | null;
+  retainCount: number;
+  requestDeltaJson: string;
+  requestEnvelopeJson: string;
+  responseId: string | null;
+  responseJson: string | null;
+  fidelity: string;
+  createdAt: Date;
+}
+
 // One telemetry row as exported by the archive scan — engine-neutral and
 // JSON-serializable (createdAt is epoch ms, the decision is the parsed record),
 // so both the sqlite and pg adapters yield byte-identical archive lines. `id` is
@@ -380,6 +432,9 @@ export interface TelemetryPageQuery {
   // Exact api_key_id scope (the key detail page's request list). Matched with
   // EQUALITY on the denormalized column — not a JSON extract, not a substring.
   apiKeyId?: string;
+  // Exact session reference lives in the redacted DecisionRecord rather than a
+  // telemetry column; it is only an operator filter, never a session body lookup.
+  sessionRef?: string;
 }
 
 // One queryPage row: a recent decision record + the recorded api_key_id (key_id).
@@ -473,6 +528,17 @@ export interface TelemetryStore {
   // An empty array is a no-op.
   insertMany?(inputs: InsertTelemetryInput[]): Promise<void>;
   insertPayloads?(inputs: InsertPayloadInput[]): Promise<void>;
+  upsertSessionRevision?(input: UpsertSessionRevisionInput): Promise<void>;
+  getSessionByRef?(sessionRef: string): Promise<SessionRecord | null>;
+  listSessionsByRefs?(sessionRefs: readonly string[]): Promise<SessionRecord[]>;
+  listSessionRevisions?(sessionRef: string): Promise<SessionRevisionRecord[]>;
+  getSessionRevisionByResponseId?(
+    sessionRef: string,
+    responseId: string,
+  ): Promise<SessionRevisionRecord | null>;
+  // Deletes whole sessions whose last activity is strictly older than the cutoff;
+  // revisions follow through their FK, so no orphan transcript rows survive.
+  pruneInactiveSessions?(olderThanMs: number): Promise<number>;
   queryRecent(limit: number): Promise<RecentDecisionRecord[]>; // most recent N, createdAt desc
   // Filtered + paginated recent list for the admin Debug UI. Same createdAt DESC
   // ordering as queryRecent; returns the page plus the full filtered total.

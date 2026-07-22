@@ -207,7 +207,7 @@ const MIGRATIONS: readonly Migration[] = [
   },
   {
     // Full request/response body capture (admin "System Settings" →
-    // capture_payloads, default ON). SEPARATE table so it prunes independently
+    // capture_payloads). SEPARATE table so it prunes independently
     // (payload_retention_days) and never bloats the decision JSON. NOT redacted
     // — verbatim client request + assembled response. NO plaintext key (the
     // bearer lives in the Authorization header, never in the stored chat body).
@@ -1152,6 +1152,58 @@ const MIGRATIONS: readonly Migration[] = [
         }
       }
       db.exec("DROP TABLE helm_memory_thread_scope_v2");
+    },
+  },
+  {
+    // Incremental session transcript. It is intentionally independent from
+    // request_payloads: sessions keep working when capture_payloads is disabled.
+    version: 41,
+    run(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sessions (
+          session_ref TEXT PRIMARY KEY,
+          account_id TEXT NOT NULL,
+          api_key_id TEXT NOT NULL,
+          source TEXT NOT NULL,
+          external_session_id TEXT NOT NULL,
+          head_request_id TEXT,
+          revision_count INTEGER NOT NULL DEFAULT 0,
+          stored_bytes INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          last_seen_at INTEGER NOT NULL,
+          UNIQUE (account_id, api_key_id, source, external_session_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_sessions_last_seen_at ON sessions (last_seen_at);
+
+        CREATE TABLE IF NOT EXISTS session_revisions (
+          request_id TEXT PRIMARY KEY,
+          session_ref TEXT NOT NULL REFERENCES sessions(session_ref) ON DELETE CASCADE,
+          sequence INTEGER NOT NULL,
+          parent_request_id TEXT,
+          retain_count INTEGER NOT NULL CHECK (retain_count >= 0 AND retain_count = CAST(retain_count AS INTEGER)),
+          request_delta_json TEXT NOT NULL,
+          request_envelope_json TEXT NOT NULL,
+          response_id TEXT,
+          response_json TEXT,
+          fidelity TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_revisions_session_created
+          ON session_revisions (session_ref, created_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS uniq_session_revisions_sequence
+          ON session_revisions (session_ref, sequence);
+        CREATE UNIQUE INDEX IF NOT EXISTS uniq_session_revisions_response
+          ON session_revisions (session_ref, response_id);
+      `);
+      // Scoped legacy-migration fixtures may intentionally omit telemetry. Real
+      // prior Helm databases always have it; index it when present without making
+      // the independent session tables depend on that fixture detail.
+      if (sqliteTableHasColumns(db, "telemetry", ["decision_json", "created_at"])) {
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_telemetry_session_window
+            ON telemetry (json_extract(decision_json, '$.session.ref'), created_at DESC)
+        `);
+      }
     },
   },
 ];

@@ -48,6 +48,7 @@
   let lane = $state(untrack(() => data.filters.lane ?? ''));
   let model = $state(untrack(() => data.filters.model ?? ''));
   let keyId = $state(untrack(() => data.filters.keyId ?? ''));
+  let sessionRef = $state(untrack(() => data.filters.sessionRef ?? ''));
   let pageSize = $state(untrack(() => data.filters.pageSize));
   // Custom calendar-day window (From/To). The active window lives in the URL
   // (?start=&end=) and OVERRIDES the preset; these mirror it, re-synced below.
@@ -64,6 +65,7 @@
     lane = f.lane ?? '';
     model = f.model ?? '';
     keyId = f.keyId ?? '';
+    sessionRef = f.sessionRef ?? '';
     pageSize = f.pageSize;
     customStart = f.startDate ?? '';
     customEnd = f.endDate ?? '';
@@ -95,6 +97,7 @@
       lane: lane.trim() || undefined,
       model: model.trim() || undefined,
       keyId: keyId || undefined,
+      sessionRef: sessionRef.trim() || undefined,
       pageSize,
       page: 1,
       ...next,
@@ -135,6 +138,7 @@
       lane: lane.trim() || undefined,
       model: model.trim() || undefined,
       keyId: keyId || undefined,
+      sessionRef: sessionRef.trim() || undefined,
       pageSize,
       page: n,
     });
@@ -148,6 +152,7 @@
     lane = '';
     model = '';
     keyId = '';
+    sessionRef = '';
     customStart = '';
     customEnd = '';
     go({ keyId: undefined });
@@ -156,6 +161,14 @@
   function keyOptionLabel(key: ApiKeyView): string {
     const baseLabel = key.name ? `${key.name} / ${key.prefix}` : key.prefix;
     return key.disabled ? `${baseLabel} (${$t('revoked')})` : baseLabel;
+  }
+
+  function filterSession(ref: string): void {
+    range = 'all';
+    customStart = '';
+    customEnd = '';
+    sessionRef = ref;
+    go({ range: 'all', startDate: undefined, endDate: undefined, sessionRef: ref });
   }
 
   // Detail route for a row. The whole row is clickable (below); we also keep a
@@ -240,12 +253,7 @@
   >
     <label class="flex flex-col gap-1 text-xs font-medium text-ink-muted">
       {$t('API Key')}
-      <select
-        data-testid="filter-key"
-        class="select"
-        bind:value={keyId}
-        onchange={() => go()}
-      >
+      <select data-testid="filter-key" class="select" bind:value={keyId} onchange={() => go()}>
         <option value="">{$t('All')}</option>
         {#each keyOptions as key (key.key_id)}
           <option value={key.key_id}>{keyOptionLabel(key)}</option>
@@ -266,13 +274,20 @@
     </label>
 
     <label class="flex flex-col gap-1 text-xs font-medium text-ink-muted">
+      {$t('Session')}
+      <input
+        data-testid="filter-session"
+        class="input"
+        type="search"
+        autocomplete="off"
+        bind:value={sessionRef}
+        placeholder={$t('Session reference')}
+      />
+    </label>
+
+    <label class="flex flex-col gap-1 text-xs font-medium text-ink-muted">
       {$t('Status')}
-      <select
-        data-testid="filter-status"
-        class="select"
-        bind:value={status}
-        onchange={() => go()}
-      >
+      <select data-testid="filter-status" class="select" bind:value={status} onchange={() => go()}>
         <option value="">{$t('All')}</option>
         <option value="ok">{$t('ok')}</option>
         <option value="error">{$t('error')}</option>
@@ -324,6 +339,24 @@
     </div>
   {/if}
 
+  {#if data.filters.sessionRef}
+    <div data-testid="session-filter-chip" class="flex items-center gap-2 text-sm">
+      <span class="text-ink-muted">{$t('Session')}:</span>
+      <span
+        class="inline-flex items-center gap-1.5 rounded-full border border-slate-300 bg-slate-50 px-2.5 py-0.5 font-mono font-medium text-ink-strong"
+      >
+        {data.filters.sessionRef}
+        <button
+          type="button"
+          data-testid="session-filter-clear"
+          class="text-ink-muted hover:text-ink-strong"
+          aria-label={$t('Clear')}
+          onclick={() => go({ sessionRef: undefined })}>&times;</button
+        >
+      </span>
+    </div>
+  {/if}
+
   <div class="card flex flex-col gap-2 lg:flex-row lg:items-center lg:gap-6">
     <span class="text-xs font-medium uppercase tracking-wide text-ink-muted"
       >{$t('Decided by')}</span
@@ -358,6 +391,7 @@
       items={data.items}
       {detailHref}
       onKeyFilter={(keyId) => go({ keyId })}
+      onSessionFilter={filterSession}
       variant="full"
     />
 

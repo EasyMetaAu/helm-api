@@ -3,6 +3,7 @@ import {
   boolean,
   customType,
   doublePrecision,
+  index,
   integer,
   jsonb,
   pgTable,
@@ -89,6 +90,55 @@ export const telemetry = pgTable("telemetry", {
   generationMs: integer("generation_ms"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(), // epoch ms
 });
+
+export const sessions = pgTable(
+  "sessions",
+  {
+    sessionRef: text("session_ref").primaryKey(),
+    accountId: text("account_id").notNull(),
+    apiKeyId: text("api_key_id").notNull(),
+    source: text("source").notNull(),
+    externalSessionId: text("external_session_id").notNull(),
+    headRequestId: text("head_request_id"),
+    revisionCount: integer("revision_count").notNull().default(0),
+    storedBytes: bigint("stored_bytes", { mode: "number" }).notNull().default(0),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    lastSeenAt: bigint("last_seen_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("uniq_sessions_owner_source_external").on(
+      t.accountId,
+      t.apiKeyId,
+      t.source,
+      t.externalSessionId,
+    ),
+    index("idx_sessions_last_seen_at").on(t.lastSeenAt),
+  ],
+);
+
+export const sessionRevisions = pgTable(
+  "session_revisions",
+  {
+    requestId: text("request_id").primaryKey(),
+    sessionRef: text("session_ref")
+      .notNull()
+      .references(() => sessions.sessionRef, { onDelete: "cascade" }),
+    sequence: integer("sequence").notNull(),
+    parentRequestId: text("parent_request_id"),
+    retainCount: integer("retain_count").notNull(),
+    requestDeltaJson: text("request_delta_json").notNull(),
+    requestEnvelopeJson: text("request_envelope_json").notNull(),
+    responseId: text("response_id"),
+    responseJson: text("response_json"),
+    fidelity: text("fidelity").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("uniq_session_revisions_sequence").on(t.sessionRef, t.sequence),
+    uniqueIndex("uniq_session_revisions_response").on(t.sessionRef, t.responseId),
+    index("idx_session_revisions_session_created").on(t.sessionRef, t.createdAt),
+  ],
+);
 
 // Per-key rate-limit token buckets (one row per key_id + dimension). Counters
 // live in the store so windows survive restarts / span instances (docs/06).

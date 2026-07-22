@@ -32,7 +32,8 @@ function cfg(rateLimitEnabled: boolean, dflt: { rpm: number; tpm: number } = { r
 describe("defaultSettingsFromConfig", () => {
   it("seeds rate_limit_enabled from runtime config, schema defaults for the rest", () => {
     expect(defaultSettingsFromConfig(cfg(true))).toEqual({
-      capture_payloads: true,
+      capture_payloads: false,
+      capture_sessions: true,
       native_protocol_passthrough: true,
       tool_call_xml_recovery: true,
       visual_context_compression: "off",
@@ -91,10 +92,20 @@ describe("loadRuntimeSettings", () => {
     });
     const out = await loadRuntimeSettings(store, cfg(true));
     expect(out.capture_payloads).toBe(false);
+    expect(out.capture_sessions).toBe(false);
     expect(out.log_level).toBe("debug");
     // Untouched fields fall back to the config-seeded defaults.
     expect(out.rate_limit_enabled).toBe(true);
     expect(out.payload_retention_days).toBe(30);
+  });
+
+  it("preserves a legacy explicit full-payload choice when capture_sessions is absent", async () => {
+    const store = fakeConfigStore({
+      [RUNTIME_SETTINGS_KEY]: JSON.stringify({ capture_payloads: true }),
+    });
+    const out = await loadRuntimeSettings(store, cfg(true));
+    expect(out.capture_payloads).toBe(true);
+    expect(out.capture_sessions).toBe(false);
   });
 
   it("defaults default_lane to 'balanced' and lets a persisted row override it", async () => {
@@ -113,7 +124,11 @@ describe("loadRuntimeSettings", () => {
     const store = fakeConfigStore({ [RUNTIME_SETTINGS_KEY]: "{not json" });
     const log = vi.fn();
     const out = await loadRuntimeSettings(store, cfg(false), log);
-    expect(out).toEqual({ ...defaultSettingsFromConfig(cfg(false)), capture_payloads: false });
+    expect(out).toEqual({
+      ...defaultSettingsFromConfig(cfg(false)),
+      capture_payloads: false,
+      capture_sessions: false,
+    });
     expect(log).toHaveBeenCalledWith("warn", "settings.load_fallback", { reason: "invalid_json" });
   });
 
@@ -123,7 +138,11 @@ describe("loadRuntimeSettings", () => {
     });
     const log = vi.fn();
     const out = await loadRuntimeSettings(store, cfg(true), log);
-    expect(out).toEqual({ ...defaultSettingsFromConfig(cfg(true)), capture_payloads: false });
+    expect(out).toEqual({
+      ...defaultSettingsFromConfig(cfg(true)),
+      capture_payloads: false,
+      capture_sessions: false,
+    });
     expect(log).toHaveBeenCalledWith("warn", "settings.load_fallback", {
       reason: "schema_mismatch",
     });

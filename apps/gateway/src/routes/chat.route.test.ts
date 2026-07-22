@@ -5,6 +5,7 @@ import type {
   ExecutionResult,
   RouteDeps,
   TelemetryStore,
+  UpsertSessionRevisionInput,
 } from "@helm/core";
 import { hashKey, routeRequest, UpstreamError } from "@helm/core";
 import { type InternalRequest, makeHelmError } from "@helm/shared";
@@ -726,6 +727,48 @@ describe("POST /v1/chat/completions (routing pipeline)", () => {
     const arg = (d.telemetry.insert as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
     expect(arg.apiKeyId).toBe("k1");
     expect(JSON.stringify(arg)).not.toContain("helm_live_secret");
+  });
+
+  it("persists an explicit x-thread-id as a scoped session revision", async () => {
+    const upsertSessionRevision = vi.fn(async (_input: UpsertSessionRevisionInput) => {});
+    const telemetry = {
+      insert: vi.fn(async () => ({ id: "1" })),
+      getSessionByRef: vi.fn(async () => null),
+      listSessionRevisions: vi.fn(async () => []),
+      upsertSessionRevision,
+    } as unknown as TelemetryStore;
+    const { deps: d, harness } = deps({
+      telemetry,
+      captureSessions: () => true,
+    });
+    harness.execute.mockResolvedValue(nonStreamOutcome({ ok: true }));
+    const app = buildApp(d);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { ...AUTH, "x-thread-id": "thread-123" },
+      body: JSON.stringify(NONSTREAM_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    expect(upsertSessionRevision).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountId: "acct",
+        apiKeyId: "k1",
+        source: "x-thread-id",
+        externalSessionId: "thread-123",
+      }),
+    );
+    const stored = (telemetry.insert as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
+      decision: { session: unknown };
+    };
+    expect(stored.decision.session).toEqual(
+      expect.objectContaining({
+        ref: upsertSessionRevision.mock.calls[0]?.[0].sessionRef,
+        source: "x-thread-id",
+      }),
+    );
+    expect(stored.decision.session).not.toHaveProperty("label");
   });
 
   it("rejects unauthenticated requests without routing", async () => {

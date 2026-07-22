@@ -17,6 +17,7 @@ import type { MessagesIdentity, PipelineRunResult, RouteError } from "./messages
 import { PipelineError } from "./messages-pipeline.js";
 import { nativeCarrierFromParsedBody } from "./native-carrier.js";
 import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-capture.js";
+import { resolveSessionCapture, stampSessionCapture } from "./session-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
 
 // POST /v1beta/models/{model}:generateContent / :streamGenerateContent and
@@ -304,6 +305,10 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
       const detail = err instanceof Error ? err.message : "invalid Gemini request";
       return sendError(c, { error_class: "invalid_request", message: detail, trace_id: traceId });
     }
+    const sessionCapture = resolveSessionCapture((name) => c.req.header(name), native, {
+      accountId: identity.accountId,
+      apiKeyId: identity.keyId,
+    });
 
     // 2b) Backfill the PATH model + the parsed stream flag onto the IR. The
     //     transformer defaults model:"gemini" (the path-derived model is supplied
@@ -343,6 +348,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
     let result: PipelineRunResult;
     try {
       result = await deps.pipeline.run(ir, identity, requestSignal(c));
+      stampSessionCapture(result.decision, sessionCapture);
     } catch (err) {
       if (err instanceof PipelineError) {
         return sendError(c, {
@@ -438,6 +444,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
               deps.record,
               {
                 requestId,
+                accountId: identity.accountId,
                 apiKeyId: identity.keyId,
                 decision: result.decision,
                 requestJson,
@@ -470,6 +477,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
           deps.record,
           {
             requestId,
+            accountId: identity.accountId,
             apiKeyId: identity.keyId,
             decision: result.decision,
             requestJson,
@@ -497,6 +505,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
         deps.record,
         {
           requestId,
+          accountId: identity.accountId,
           apiKeyId: identity.keyId,
           decision: result.decision,
           requestJson,

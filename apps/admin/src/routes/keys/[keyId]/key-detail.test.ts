@@ -178,6 +178,7 @@ function requestItem(traceId: string): RequestListItem {
     ts: new Date(1_700_000_000_000).toISOString(),
     key_prefix: 'helm_live_ab12',
     key_name: 'Prod backend',
+    session: null,
     requested_model: 'gpt-4o',
     requested_reasoning_effort: null,
     reasoning_effort: null,

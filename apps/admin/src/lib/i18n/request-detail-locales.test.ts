@@ -19,6 +19,7 @@ const requestDetailPayloadKeys = [
   'Payload capture is available for this call. Large bodies are loaded on demand.',
   'Payload capture is available for this call. Large bodies are loaded only when you open a section.',
   'Payload was not available.',
+  'This content was recovered from the session transcript. It is not the original HTTP request and cannot be retried exactly.',
   'The forwarded upstream body matched the client request body.',
 ] as const;
 

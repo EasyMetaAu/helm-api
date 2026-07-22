@@ -20,6 +20,7 @@ import { type MemoryKeyDefaults, resolveMemoryScope } from "./memory-scope.js";
 import { PipelineError } from "./messages-pipeline.js";
 import { nativeCarrierFromParsedBody } from "./native-carrier.js";
 import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-capture.js";
+import { resolveSessionCapture, stampSessionCapture } from "./session-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
 
 // POST /v1/messages — Anthropic Messages inbound, translated to IR, routed, and
@@ -421,6 +422,10 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     }
     const normalizedNative = normalizeClaudeCodeDateFingerprintInAnthropicRequest(native);
     const nativeForPipeline = normalizedNative.body;
+    const sessionCapture = resolveSessionCapture((name) => c.req.header(name), nativeForPipeline, {
+      accountId: identity.accountId,
+      apiKeyId: identity.keyId,
+    });
     const nativeCarrierRawBody = normalizedNative.normalized
       ? (JSON.stringify(nativeForPipeline) ?? requestJson)
       : requestJson;
@@ -529,6 +534,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
       }
       throw err;
     }
+    stampSessionCapture(result.decision, sessionCapture);
 
     // Capture the verbatim request/response bodies only when capture_payloads is ON
     // (the telemetry row is always written regardless). Gating the buffering here
@@ -629,6 +635,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
               deps.record,
               {
                 requestId,
+                accountId: identity.accountId,
                 apiKeyId: identity.keyId,
                 decision: result.decision,
                 requestJson,
@@ -671,6 +678,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
           deps.record,
           {
             requestId,
+            accountId: identity.accountId,
             apiKeyId: identity.keyId,
             decision: result.decision,
             requestJson,
@@ -698,6 +706,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
         deps.record,
         {
           requestId,
+          accountId: identity.accountId,
           apiKeyId: identity.keyId,
           decision: result.decision,
           requestJson,

@@ -1,9 +1,11 @@
-import type { DecisionRecord, InsertPayloadInput } from "@helm/core";
+import type { DecisionRecord, InsertPayloadInput, UpsertSessionRevisionInput } from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
 import { createWriteQueue } from "../runtime/write-queue.js";
 import {
   backfillCompletionCost,
+  capturedResponsesResponse,
   createResponsesDeltaAccumulator,
+  createSessionHeadCache,
   createSseCapture,
   createStreamGenerationTimer,
   estimateInterruptedResponsesUsage,
@@ -20,6 +22,67 @@ import {
   usageFromResponsesSSE,
   usageFromSSE,
 } from "./payload-capture.js";
+
+describe("session head cache", () => {
+  it("evicts by retained UTF-8 bytes, not only by Session count", () => {
+    const cache = createSessionHeadCache(1_000, 20);
+    cache.set("one", { requestId: "r1", requestJson: "123456789012345" });
+    cache.set("two", { requestId: "r2", requestJson: "abcdefghijklmno" });
+    expect(cache.get("one")).toBeUndefined();
+    expect(cache.get("two")?.requestId).toBe("r2");
+    expect(cache.retainedBytes).toBeLessThanOrEqual(20);
+  });
+
+  it("tracks replacement bytes, touches LRU order, and resets on clear", () => {
+    const cache = createSessionHeadCache(10, 20);
+    cache.set("one", { requestId: "r1", requestJson: "11111111" });
+    cache.set("two", { requestId: "r2", requestJson: "22222222" });
+    expect(cache.retainedBytes).toBe(16);
+    expect(cache.get("one")?.requestId).toBe("r1");
+    cache.set("three", { requestId: "r3", requestJson: "33333333" });
+    expect(cache.get("two")).toBeUndefined();
+    cache.set("one", { requestId: "r1-new", requestJson: "1" });
+    expect(cache.retainedBytes).toBe(9);
+    expect(cache.get("one")?.requestId).toBe("r1-new");
+    cache.clear();
+    expect(cache.retainedBytes).toBe(0);
+    expect(cache.get("one")).toBeUndefined();
+    expect(cache.get("three")).toBeUndefined();
+  });
+});
+
+describe("Responses session response capture", () => {
+  const response = {
+    id: "resp_1",
+    object: "response",
+    output: [
+      { type: "reasoning", id: "reason_1", summary: [] },
+      { type: "function_call", id: "call_1", call_id: "fc_1", name: "lookup", arguments: "{}" },
+    ],
+  };
+
+  it("normalizes a JSON response while retaining reasoning and tool-call output", () => {
+    expect(capturedResponsesResponse("openai_responses", JSON.stringify(response))).toEqual({
+      responseId: "resp_1",
+      responseJson: JSON.stringify(response),
+    });
+    expect(capturedResponsesResponse("openai_chat", JSON.stringify(response))).toEqual({
+      responseId: null,
+      responseJson: null,
+    });
+  });
+
+  it("extracts the terminal response from SSE", () => {
+    const raw = [
+      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+      `event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response })}\n\n`,
+    ].join("");
+    expect(capturedResponsesResponse("openai_responses", raw)).toEqual({
+      responseId: "resp_1",
+      responseJson: JSON.stringify(response),
+    });
+  });
+});
 
 describe("estimateInterruptedResponsesUsage", () => {
   it("aggregates fragmented channels once, dedupes sequence numbers, and ignores done snapshots", () => {
@@ -1169,5 +1232,261 @@ describe("recordServed — deferred write queue (the three pipeline faces)", () 
     expect(s.inserted[0]?.serving_account).toBeNull();
     expect(s.payloads[0]?.responseJson).toBeNull();
     expect(args.decision.final.status).toBe("ok");
+  });
+
+  it("stores an incremental session revision when full payload capture is off", async () => {
+    const s = sink();
+    const revisions: unknown[] = [];
+    const telemetry = {
+      ...s.telemetry,
+      getSessionByRef: vi.fn(async () => null),
+      listSessionRevisions: vi.fn(async () => []),
+      upsertSessionRevision: vi.fn(async (input: UpsertSessionRevisionInput) => {
+        revisions.push(input);
+      }),
+    } as unknown as RecordServedDeps["telemetry"];
+    const sessionDecision = decision();
+    sessionDecision.session = {
+      ref: "session-ref",
+      label: "thread-1",
+      source: "x-thread-id",
+    };
+    await recordServed(
+      {
+        telemetry,
+        redact: (x) => x,
+        now: () => 5000,
+        capturePayloads: () => false,
+        captureSessions: () => true,
+      },
+      {
+        ...args,
+        accountId: "account-1",
+        decision: sessionDecision,
+        requestJson: '{"model":"auto","messages":[{"role":"user","content":"hi"}]}',
+      },
+      () => {},
+    );
+    expect(s.payloads).toHaveLength(0);
+    expect(revisions).toHaveLength(1);
+    expect(revisions[0]).toMatchObject({
+      sessionRef: "session-ref",
+      accountId: "account-1",
+      requestDeltaJson: '[{"role":"user","content":"hi"}]',
+      retainCount: 0,
+      responseJson: null,
+      fidelity: "semantic",
+    });
+  });
+
+  it("builds Responses continuation branches from response ids instead of the latest head", async () => {
+    const s = sink();
+    const revisions: UpsertSessionRevisionInput[] = [];
+    const telemetry = {
+      ...s.telemetry,
+      getSessionByRef: vi.fn(async () => {
+        const last = revisions.at(-1);
+        return last
+          ? {
+              sessionRef: "session-ref",
+              accountId: "account-1",
+              apiKeyId: "k1",
+              source: "x-thread-id",
+              externalSessionId: "thread-1",
+              createdAt: new Date(1),
+              lastSeenAt: new Date(1),
+              headRequestId: last.requestId,
+              revisionCount: revisions.length,
+              storedBytes: 1,
+            }
+          : null;
+      }),
+      listSessionRevisions: vi.fn(async () =>
+        revisions.map((revision, sequence) => ({
+          ...revision,
+          responseId: revision.responseId ?? null,
+          sequence: sequence + 1,
+        })),
+      ),
+      getSessionRevisionByResponseId: vi.fn(async (_sessionRef: string, responseId: string) => {
+        const revision = revisions.find((item) => item.responseId === responseId);
+        if (!revision) return null;
+        return {
+          ...revision,
+          responseId: revision.responseId ?? null,
+          sequence: revisions.indexOf(revision) + 1,
+        };
+      }),
+      upsertSessionRevision: vi.fn(async (input: UpsertSessionRevisionInput) => {
+        revisions.push(input);
+      }),
+    } as unknown as RecordServedDeps["telemetry"];
+    const sessionDecision = (): DecisionRecord => {
+      const value = decision();
+      value.protocol = "openai_responses";
+      value.session = { ref: "session-ref", label: "thread-1", source: "x-thread-id" };
+      return value;
+    };
+    const deps: RecordServedDeps = {
+      telemetry,
+      redact: (value) => value,
+      now: () => 5000,
+      capturePayloads: () => false,
+      captureSessions: () => true,
+    };
+    const rootResponse = {
+      id: "resp_root",
+      output: [{ type: "reasoning", id: "reason_root", summary: [] }],
+    };
+    await recordServed(
+      deps,
+      {
+        ...args,
+        requestId: "root",
+        accountId: "account-1",
+        decision: sessionDecision(),
+        requestJson: '{"model":"gpt","input":[{"role":"user","content":"root"}]}',
+        responseJson: JSON.stringify(rootResponse),
+      },
+      () => {},
+    );
+    await recordServed(
+      deps,
+      {
+        ...args,
+        requestId: "child",
+        accountId: "account-1",
+        decision: sessionDecision(),
+        requestJson:
+          '{"model":"gpt","previous_response_id":"resp_root","input":[{"role":"user","content":"child"}]}',
+        responseJson: JSON.stringify({ id: "resp_child", output: [] }),
+      },
+      () => {},
+    );
+    await recordServed(
+      deps,
+      {
+        ...args,
+        requestId: "branch",
+        accountId: "account-1",
+        decision: sessionDecision(),
+        requestJson:
+          '{"model":"gpt","previous_response_id":"resp_root","input":[{"role":"user","content":"branch"}]}',
+        responseJson: JSON.stringify({ id: "resp_branch", output: [] }),
+      },
+      () => {},
+    );
+
+    expect(revisions).toHaveLength(3);
+    expect(revisions[0]).toMatchObject({
+      requestId: "root",
+      parentRequestId: null,
+      responseId: "resp_root",
+      responseJson: JSON.stringify(rootResponse),
+    });
+    expect(revisions[1]).toMatchObject({ requestId: "child", parentRequestId: "root" });
+    expect(revisions[2]).toMatchObject({ requestId: "branch", parentRequestId: "root" });
+  });
+
+  it("marks an unknown Responses continuation as partial instead of linking it to the head", async () => {
+    const s = sink();
+    const revisions: UpsertSessionRevisionInput[] = [];
+    const telemetry = {
+      ...s.telemetry,
+      getSessionByRef: vi.fn(async () => ({
+        sessionRef: "session-ref",
+        accountId: "account-1",
+        apiKeyId: "k1",
+        source: "x-thread-id",
+        externalSessionId: "thread-1",
+        createdAt: new Date(1),
+        lastSeenAt: new Date(1),
+        headRequestId: "unrelated-head",
+        revisionCount: 1,
+        storedBytes: 1,
+      })),
+      listSessionRevisions: vi.fn(async () => []),
+      getSessionRevisionByResponseId: vi.fn(async () => null),
+      upsertSessionRevision: vi.fn(async (input: UpsertSessionRevisionInput) => {
+        revisions.push(input);
+      }),
+    } as unknown as RecordServedDeps["telemetry"];
+    const sessionDecision = decision();
+    sessionDecision.protocol = "openai_responses";
+    sessionDecision.session = {
+      ref: "session-ref",
+      label: "thread-1",
+      source: "x-thread-id",
+    };
+    await recordServed(
+      {
+        telemetry,
+        redact: (value) => value,
+        now: () => 5000,
+        capturePayloads: () => false,
+        captureSessions: () => true,
+      },
+      {
+        ...args,
+        requestId: "unknown-child",
+        accountId: "account-1",
+        decision: sessionDecision,
+        requestJson:
+          '{"previous_response_id":"resp_missing","input":[{"role":"user","content":"child"}]}',
+        responseJson: JSON.stringify({ id: "resp_child", output: [] }),
+      },
+      () => {},
+    );
+    expect(revisions[0]).toMatchObject({
+      parentRequestId: null,
+      responseId: "resp_child",
+      fidelity: "partial",
+    });
+  });
+
+  it("charges retained Responses output to the deferred Session byte budget", async () => {
+    const upsertSessionRevision = vi.fn(async (_input: UpsertSessionRevisionInput) => {});
+    const insert = vi.fn(async () => ({ id: "1" }));
+    const telemetry = {
+      insert,
+      getSessionByRef: vi.fn(async () => null),
+      listSessionRevisions: vi.fn(async () => []),
+      getSessionRevisionByResponseId: vi.fn(async () => null),
+      upsertSessionRevision,
+    } as unknown as RecordServedDeps["telemetry"];
+    const writes = createWriteQueue({
+      telemetry,
+      log: () => {},
+      flushIntervalMs: 10_000,
+      maxBytes: 1_000,
+    });
+    const sessionDecision = decision();
+    sessionDecision.protocol = "openai_responses";
+    sessionDecision.session = {
+      ref: "session-ref-budget",
+      label: "thread-budget",
+      source: "x-thread-id",
+    };
+    await recordServed(
+      {
+        telemetry,
+        writes,
+        redact: (value) => value,
+        now: () => 5000,
+        capturePayloads: () => false,
+        captureSessions: () => true,
+      },
+      {
+        ...args,
+        requestId: "budgeted",
+        decision: sessionDecision,
+        requestJson: '{"input":"small"}',
+        responseJson: JSON.stringify({ id: "resp_budget", output: ["x".repeat(2_000)] }),
+      },
+      () => {},
+    );
+    await writes.flush();
+    expect(insert).toHaveBeenCalledOnce();
+    expect(upsertSessionRevision).not.toHaveBeenCalled();
   });
 });

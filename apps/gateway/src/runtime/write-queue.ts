@@ -44,6 +44,10 @@ export interface WriteQueue {
   enqueueTelemetry(input: InsertTelemetryInput): void;
   // Defer a payload upsert (batched, fail-open).
   enqueuePayload(input: InsertPayloadInput): void;
+  // Defer a session transcript write while charging the retained request body
+  // against the same byte/depth budget. Payload rows are shed first; if that is
+  // insufficient, the session write itself is rejected before audit telemetry.
+  enqueueSession(task: () => Promise<void>, bytes: number): void;
   // Defer a fail-open side-effect (memory observe, retention prune, …). Tasks run
   // sequentially in FIFO order, so callers can rely on inbound-before-outbound.
   // `wakeOnSettle` fires onTaskDrain after THIS task settles — set it only on the
@@ -100,6 +104,7 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
   // Side-effect tasks run on their own serial FIFO chain.
   let taskChain: Promise<void> = Promise.resolve();
   let pendingTasks = 0;
+  let pendingSessionBytes = 0;
 
   const depth = (): number => telemetryBuf.length + payloadBuf.length + pendingTasks;
 
@@ -223,7 +228,16 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
   // stalled writer's queued-but-uncommitted batches still count — one 7MB row must not
   // overshoot the budget, and a write stall must not pile up batches past the cap.
   const overBudget = (incomingBytes: number): boolean =>
-    depth() >= maxDepth || bufferedBytes + inFlightBytes + incomingBytes > maxBytes;
+    depth() >= maxDepth ||
+    bufferedBytes + inFlightBytes + pendingSessionBytes + incomingBytes > maxBytes;
+
+  const shedPayload = (): boolean => {
+    if (payloadBuf.length === 0) return false;
+    payloadBuf.shift();
+    bufferedBytes -= payloadBytes.shift() ?? 0;
+    log("writequeue.overflow");
+    return true;
+  };
 
   // Drop the oldest buffered insert to relieve a depth/byte overflow. Tasks are never
   // dropped mid-chain (they're already scheduled); only buffered inserts are shed.
@@ -233,10 +247,8 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
   // reclaims the most heap per shed. Byte counts are decremented in lock-step so the
   // running total never drifts.
   const shedBufferedWrite = (): boolean => {
-    if (payloadBuf.length > 0) {
-      payloadBuf.shift();
-      bufferedBytes -= payloadBytes.shift() ?? 0;
-    } else if (telemetryBuf.length > 0) {
+    if (shedPayload()) return true;
+    if (telemetryBuf.length > 0) {
       telemetryBuf.shift();
       bufferedBytes -= telemetryBytes.shift() ?? 0;
     } else {
@@ -282,6 +294,30 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
       bufferedBytes += cost;
       if (payloadBuf.length >= maxBatch || bufferedBytes >= flushBytes) void doFlush();
       else scheduleTimer();
+    },
+
+    enqueueSession(task: () => Promise<void>, bytes: number): void {
+      if (stopped) return;
+      const cost = Math.max(0, bytes);
+      while (overBudget(cost) && shedPayload()) {
+        /* payload is less valuable than a semantic session transcript */
+      }
+      if (overBudget(cost)) {
+        log("writequeue.session_overflow");
+        return;
+      }
+      pendingTasks++;
+      pendingSessionBytes += cost;
+      taskChain = taskChain.then(async () => {
+        try {
+          await task();
+        } catch {
+          log("writequeue.session_failed");
+        } finally {
+          pendingTasks--;
+          pendingSessionBytes -= cost;
+        }
+      });
     },
 
     enqueueTask(task: () => Promise<void>, opts?: { wakeOnSettle?: boolean }): void {

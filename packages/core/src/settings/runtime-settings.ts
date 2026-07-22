@@ -17,7 +17,7 @@ export type SettingsLog = (
 // default rpm/tpm quota mirror runtime.rate_limit.{enabled,default} so the admin
 // "System Settings" surface starts in sync with yaml/env (the operator can then
 // tune the fleet-wide fallback live without a restart). All other fields take
-// their schema defaults (capture_payloads:true etc).
+// their schema defaults (capture_sessions:true etc).
 export function defaultSettingsFromConfig(config: HelmConfig): RuntimeSettings {
   return RuntimeSettingsSchema.parse({
     rate_limit_enabled: config.runtime.rate_limit.enabled,
@@ -27,7 +27,7 @@ export function defaultSettingsFromConfig(config: HelmConfig): RuntimeSettings {
 }
 
 function privacySafeFallback(defaults: RuntimeSettings): RuntimeSettings {
-  return { ...defaults, capture_payloads: false };
+  return { ...defaults, capture_payloads: false, capture_sessions: false };
 }
 
 // Read the persisted runtime settings, overlaying them on the config-seeded
@@ -53,7 +53,15 @@ export async function loadRuntimeSettings(
     return privacySafeFallback(defaults);
   }
 
-  const overlay = parsedJson && typeof parsedJson === "object" ? parsedJson : {};
+  const overlay: Record<string, unknown> =
+    parsedJson && typeof parsedJson === "object" && !Array.isArray(parsedJson)
+      ? { ...parsedJson }
+      : {};
+  // Pre-Session releases persisted only capture_payloads. Preserve that explicit
+  // operator choice instead of combining it with the new Session default.
+  if (Object.hasOwn(overlay, "capture_payloads") && !Object.hasOwn(overlay, "capture_sessions")) {
+    overlay.capture_sessions = false;
+  }
   const merged = RuntimeSettingsSchema.safeParse({ ...defaults, ...overlay });
   if (!merged.success) {
     log?.("warn", "settings.load_fallback", { reason: "schema_mismatch" });

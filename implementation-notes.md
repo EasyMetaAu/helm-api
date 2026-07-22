@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-07-22 · 按会话增量保存请求正文并诚实区分恢复保真度（Telemetry / Admin requests / Store，docs/07/11，原则 1/3/7/8）
+
+- **互斥留存模式**：运行时新增 `capture_sessions`，与既有 `capture_payloads` 组成「仅元数据 / 每请求完整载荷 / 按会话增量转录」三种互斥模式；新安装默认按 Session 增量保存，完整载荷默认关闭。两项同时为 `true` 时配置校验 fail-closed；旧实例若明确保存过 `capture_payloads`，缺少新字段时保持原选择，设置损坏时的隐私安全回退会同时关闭两种正文捕获。本次目标 Remote 在部署时显式切换为 Session 模式，不用升级逻辑覆盖其他自托管 operator 的隐私选择。
+- **身份与隐私边界**：只从客户端入口解析高置信信号：`x-thread-id`、两个明确 metadata 字段、`x-session-key`、Codex 入站 `thread-id` / `session-id`，以及严格 JSON object 形式的 Claude Code `metadata.user_id.session_id`；不读取 Helm 注入上游的 provider/OAuth 身份。ID 限制 256 UTF-8 字节并按 account、API key、来源和原值生成不可猜测 `session_ref`。原始 Session ID 仅写入受正文留存策略控制的 Session 表，写 telemetry 前剥离 `label`；Admin 列表用批量 Session 查询回填显示值，避免每页 N+1 与正文关闭时的 PII 泄漏。
+- **存储与并发边界**：SQLite/Postgres 使用 Session head + 单调 sequence + 不可变 revision，按最长公共前缀只保存新增 request suffix，显式 parent 保留编辑/并发分支；重复 request 只允许在原 response 为空时回填一次，新增 UTF-8 字节计入 `stored_bytes` 并在同一事务内执行上限，已有 response 的后续重写为 no-op。写入进入受字节预算保护的异步 Session lane，request 与 Responses output 都计入队列预算，优先牺牲完整 payload、保留脱敏 telemetry；Store 原子执行 10,000 revisions / 64 MiB 上限。常规追加使用 1,000 项且总计不超过 64 MiB 的 byte-bounded LRU，关闭 Session capture 时立即失效；恢复采用迭代父链、拒绝 cycle、负数/小数 `retain_count` 与非数组 delta，损坏记录不会静默生成错误请求。
+- **Responses 续接与保真边界**：普通多轮请求只存客户端 request 增量；OpenAI Responses 为展开 `previous_response_id` 的隐藏状态，额外保存产生该 ID 的规范 response output，并以 Session 内唯一 `response_id → request_id` 建真实父边。chain、fork 与并发分支因此不会误借最新 head；恢复按「父请求 input + 父 response output + 当前 input」展开，保留 reasoning/tool-call items、删除已展开的 opaque ID，且当前顶层 instructions 不继承旧值。找不到父 response 的 revision 会以 `partial` 留痕，但恢复必须 fail-closed 为 `session_incomplete`；父 ID 不匹配、continuation 的 `retain_count` 非零、response output 缺失或损坏同样拒绝恢复，不猜测历史。
+- **清理与运维边界**：Session 恢复是语义等价 JSON，不保留原始空白、headers 或翻译后的 upstream body；完整 payload 仍是唯一可精确 Retry 的来源，Admin 明示 `source=session`、`exact=false` 并禁用 Retry。Session 是 cleanup 报告中的独立 action，但 MVP 与完整 payload 共用 `payloads_cleanup_enabled` / `payload_retention_days` 这组“内容留存”设置；payload 可归档，Session 不归档并在最后活动超过窗口后整组删除。列表 Session 可一键切到 `range=all` 的 opaque-ref 筛选；恢复失败明确区分无 Session ID、转录不可用/已清理、转录链损坏。
+
 ## 2026-07-22 · Lanes 批量保存、拖拽回退与可配置默认通道删除边界（Routing / Admin lanes，docs/03/04/11，原则 2/3/5/6）
 
 - **整组写入**：Lanes 页面不再由每张卡分别 PUT；所有编辑、fallback 顺序和待删除 lane 由一个底部保存按钮通过 `PUT /admin/api/lanes` 一次提交，Gateway 用共享 `LanesConfigSchema` 校验完整 map 后原子写回 `lanes.yaml` 并热更新，失败时整组不落盘。单 lane API 保留兼容，不新增依赖。
@@ -60,14 +68,9 @@
 - **传输故障边界**：Codex fetch 在同账号短连接重试耗尽后，将原始 `TypeError: fetch failed` 归类为无 HTTP status 的 `UpstreamError`，并在脱敏后的 `provider_raw` 保留有界嵌套 `name/code/message`（例如 `UND_ERR_SOCKET`），使 OAuth pool 能对无状态请求尝试兄弟账号。客户端 abort 与显式 provider timeout 保持原分类；带 `previous_response_id` 或已知 `x-codex-turn-state` 的有状态 continuation 仍严格绑定原账号，不能跨账号重放。
 - **fallback 协议边界**：含 native/custom/caller-linked 或未知 Responses input sequence 的请求，只能交给 `codex_responses` profile；`generic_openai_responses` provider 在调用前按能力 profile 跳过，避免把 Codex 私有 items 发给 xAI 等兼容端点后得到确定性 422。判断不依赖 provider 名字，后续新增 generic provider 自动继承相同保护。
 
-## 2026-07-17 · Anthropic XML 工具调用恢复边界（Protocol streaming / provider execution，docs/05/07，原则 3/5/8）
-
-- **恢复信号与实际出口**：只在上游终止原因已经明确为 `tool_use`、XML `<invoke>` 完整闭合、工具名精确命中本次请求声明的 function tools，且响应中不存在既有 structured `tool_use/tool_calls` 时恢复，避免把示例文本或真实结构化调用旁边的 XML 再执行一次。规格所称“三条路径”漏掉了默认 native passthrough 的非流式直返；实现因此覆盖四个实际出口：Anthropic native stream、native JSON、OpenAI→Anthropic translation stream、translation JSON。共享 parser 保持大小写精确、非白名单/未闭合内容逐字保留、JSON-looking 参数按规格转换，并用 null-prototype 字典隔离 `__proto__`。
-- **流式时序与资源边界**：Anthropic 的 message-level `stop_reason` 位于 `content_block_stop` 之后的 `message_delta`，无法按规格字面在 block stop 当场决策。实现只在发现候选起始标记后暂存尾部，等晚到终态再改写；任何非 `tool_use`、解析拒绝、已有 structured call、异常或超限都先按原顺序冲刷文本/原始 SSE。translation 与 native candidate 均设 1 MiB UTF-8 上限，超限后本流永久旁路恢复，防止未闭合 XML 造成无界内存；native 旁路仍以最多 64K 字符的未完成 SSE 尾部有界探测 `message_stop`，避免完整终态因 HTTP body 延迟关闭而误触 idle timeout。实际网络读取继续由 `readAnthropicSSERaw` 负责，其他 idle/stall timeout 语义不变。改写时使用确定性 `toolu_synthetic_*` id，并单调重映射后续 block index。
-- **运行时回滚与保真**：新增 `tool_call_xml_recovery` runtime setting，默认 `true`；Gateway route、pipeline、executor 与 provider 都按请求读取 live 值，Admin 保存模型显式 round-trip 该字段，运维可通过现有 settings API 立即关闭。无工具、无候选或 flag off 的普通路径不解析正文；native 无候选流继续逐 network chunk 原样转发，translated 无候选流保持既有事件机。TDD 覆盖 parser、四个出口、跨 network/delta 分片、晚到 stop reason、周边文本、多 invoke、白名单、structured-call 去重、flag off、缓冲上限、异常冲刷与 index/id 顺序；最终定向结果以本次交付报告为准。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-17 · Anthropic XML 工具调用恢复边界（Protocol streaming / provider execution，原则 3/5/8）**：只在终态、完整、白名单且无既有结构化调用时恢复 XML 工具调用；四个实际出口共用边界并以有界缓冲保持流式保真，完整原文通过 git history 回溯。
 - **2026-07-16 · 历史费用回填放宽 WAL 与磁盘恢复门槛（Catalog / telemetry repair operations，原则 2/3/7）**：在既有 100 行原子批次、资源门禁和 12 GiB 硬底线不变的前提下，按健康实测放宽 preflight WAL/磁盘恢复门槛，避免任务永久饥饿；完整原文通过 git history 回溯。
 - **2026-07-16 · 路由白名单改为真实交集并让分类开关兑现配置语义（Routing / classifier / CI，原则 2/3/5/6/7）**：Policy 与 key 白名单求真实交集并让空集 fail-closed；rules/eval cache 开关兑现配置语义，CI Actions 固定到核验 SHA；完整原文通过 git history 回溯。
 - **2026-07-16 · xAI 订阅协议跟随官方 grok-build 并收紧动态目录边界（OAuth subscription / model catalog / Responses / Admin providers，原则 2/3/6/7/8）**：以真实 wire 和账号 entitlement 分离模型目录 ID、执行 slug、能力与配额，未知能力保持 fail-closed，跨账号冲突拒绝；完整原文通过 git history 回溯。

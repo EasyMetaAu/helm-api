@@ -225,6 +225,11 @@ function opsFor(table: CleanupTable, deps: CleanupRunnerDeps): TableOps | null {
             }
           : undefined,
       };
+    case "sessions":
+      return {
+        archivable: false,
+        prune: t.pruneInactiveSessions?.bind(t),
+      };
     case "memory_messages":
       return {
         archivable: true,

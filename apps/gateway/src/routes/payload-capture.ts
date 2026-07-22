@@ -1,5 +1,12 @@
 import type { DecisionRecord, TelemetryStore } from "@helm/core";
-import { billedCostFromBody, usageFromBody as parseUsage } from "@helm/core";
+import {
+  billedCostFromBody,
+  usageFromBody as parseUsage,
+  restoreSessionRevisionJson,
+  SESSION_MAX_REVISIONS,
+  SESSION_MAX_STORED_BYTES,
+  splitSessionRequestJson,
+} from "@helm/core";
 import type { TokenUsageBreakdown } from "@helm/shared";
 import { countTokens as countO200kHarmonyTokens } from "gpt-tokenizer/encoding/o200k_harmony";
 import type { WriteQueue } from "../runtime/write-queue.js";
@@ -8,7 +15,7 @@ import type { WriteQueue } from "../runtime/write-queue.js";
 // BOTH the OpenAI (chat.ts) and Anthropic (messages-pipeline.ts) routes.
 //
 // Capture is gated by the runtime setting `capture_payloads` (admin "System
-// Settings", default ON). When off, nothing is written. The stored bodies are
+// Settings", default OFF). When off, nothing is written. The stored bodies are
 // VERBATIM (not redacted) — they carry no plaintext API key because the bearer
 // lives in the request's Authorization header, never in the chat body.
 //
@@ -19,6 +26,8 @@ export interface PayloadCaptureDeps {
   telemetry: TelemetryStore;
   /** Live getter for the capture_payloads runtime setting. */
   capturePayloads?: () => boolean;
+  /** Live getter for the incremental per-session request transcript setting. */
+  captureSessions?: () => boolean;
   /** Resolve the served attempt's USD cost from the trailing usage chunk: an
    *  upstream-BILLED cost in it (`cost_usd` / OpenRouter `cost`) OVERRIDES the
    *  catalog estimate, else tokens × `alias`'s pricing; null when neither is
@@ -284,6 +293,265 @@ export function captureEnabled(deps: PayloadCaptureDeps): boolean {
   return deps.capturePayloads?.() === true;
 }
 
+export function sessionCaptureEnabled(deps: PayloadCaptureDeps): boolean {
+  return deps.captureSessions?.() === true;
+}
+
+function capturedResponseObject(value: unknown): {
+  responseId: string;
+  responseJson: string;
+} | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  const response =
+    (candidate.type === "response.completed" ||
+      candidate.type === "response.incomplete" ||
+      candidate.type === "response.failed") &&
+    candidate.response &&
+    typeof candidate.response === "object" &&
+    !Array.isArray(candidate.response)
+      ? (candidate.response as Record<string, unknown>)
+      : candidate;
+  if (typeof response.id !== "string" || response.id.trim() === "") return null;
+  if (!Array.isArray(response.output)) return null;
+  return { responseId: response.id, responseJson: JSON.stringify(response) };
+}
+
+/** Retain only a usable native Responses snapshot for continuation recovery. */
+export function capturedResponsesResponse(
+  protocol: DecisionRecord["protocol"],
+  raw: string | null,
+): { responseId: string | null; responseJson: string | null } {
+  if (protocol !== "openai_responses" || raw === null) {
+    return { responseId: null, responseJson: null };
+  }
+  try {
+    const direct = capturedResponseObject(JSON.parse(raw) as unknown);
+    if (direct) return direct;
+  } catch {
+    // A streamed response is SSE, not one JSON document; inspect data lines below.
+  }
+  const lines = raw.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]?.trim() ?? "";
+    if (!line.startsWith("data:")) continue;
+    const data = line.slice("data:".length).trim();
+    if (data === "" || data === "[DONE]") continue;
+    try {
+      const captured = capturedResponseObject(JSON.parse(data) as unknown);
+      if (captured) return captured;
+    } catch {
+      // Ignore keepalives and malformed non-terminal frames.
+    }
+  }
+  return { responseId: null, responseJson: null };
+}
+
+function previousResponseIdFromRequest(requestJson: string): string | null {
+  const value = JSON.parse(requestJson) as unknown;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const previous = (value as Record<string, unknown>).previous_response_id;
+  return typeof previous === "string" && previous.trim() !== "" ? previous : null;
+}
+
+function hasResponsesOutput(raw: string | null | undefined): boolean {
+  if (!raw) return false;
+  try {
+    const value = JSON.parse(raw) as unknown;
+    return (
+      value !== null &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      Array.isArray((value as Record<string, unknown>).output)
+    );
+  } catch {
+    return false;
+  }
+}
+
+const MAX_SESSION_REQUEST_BYTES = 16 * 1024 * 1024;
+const MAX_CACHED_SESSION_HEADS = 1_000;
+const MAX_CACHED_SESSION_HEAD_BYTES = 64 * 1024 * 1024;
+
+export interface SessionHeadCache {
+  get(sessionRef: string): { requestId: string; requestJson: string } | undefined;
+  set(sessionRef: string, head: { requestId: string; requestJson: string }): void;
+  clear(): void;
+  readonly retainedBytes: number;
+}
+
+export function createSessionHeadCache(
+  maxEntries = MAX_CACHED_SESSION_HEADS,
+  maxBytes = MAX_CACHED_SESSION_HEAD_BYTES,
+): SessionHeadCache {
+  const entries = new Map<
+    string,
+    { requestId: string; requestJson: string; retainedBytes: number }
+  >();
+  let retainedBytes = 0;
+  return {
+    get(sessionRef) {
+      const value = entries.get(sessionRef);
+      if (!value) return undefined;
+      entries.delete(sessionRef);
+      entries.set(sessionRef, value);
+      return { requestId: value.requestId, requestJson: value.requestJson };
+    },
+    set(sessionRef, head) {
+      const previous = entries.get(sessionRef);
+      if (previous) retainedBytes -= previous.retainedBytes;
+      entries.delete(sessionRef);
+      const bytes = Buffer.byteLength(head.requestJson, "utf8");
+      entries.set(sessionRef, { ...head, retainedBytes: bytes });
+      retainedBytes += bytes;
+      while (entries.size > maxEntries || retainedBytes > maxBytes) {
+        const oldest = entries.entries().next().value as
+          | [string, { retainedBytes: number }]
+          | undefined;
+        if (!oldest) break;
+        entries.delete(oldest[0]);
+        retainedBytes -= oldest[1].retainedBytes;
+      }
+    },
+    clear() {
+      entries.clear();
+      retainedBytes = 0;
+    },
+    get retainedBytes() {
+      return retainedBytes;
+    },
+  };
+}
+
+const sessionHeadCaches = new WeakMap<TelemetryStore, SessionHeadCache>();
+
+function sessionHeadCache(store: TelemetryStore): SessionHeadCache {
+  const existing = sessionHeadCaches.get(store);
+  if (existing) return existing;
+  const created = createSessionHeadCache();
+  sessionHeadCaches.set(store, created);
+  return created;
+}
+
+function cacheSessionHead(
+  store: TelemetryStore,
+  sessionRef: string,
+  head: { requestId: string; requestJson: string },
+): void {
+  sessionHeadCache(store).set(sessionRef, head);
+}
+
+export async function persistSessionRequest(
+  deps: PayloadCaptureDeps,
+  args: {
+    requestId: string;
+    accountId: string;
+    apiKeyId: string;
+    decision: DecisionRecord;
+    requestJson: string;
+    responseId: string | null;
+    responseJson: string | null;
+    now: number;
+  },
+  log: (msg: string) => void,
+): Promise<void> {
+  const session = args.decision.session;
+  const get = deps.telemetry.getSessionByRef;
+  const list = deps.telemetry.listSessionRevisions;
+  const getByResponseId = deps.telemetry.getSessionRevisionByResponseId;
+  const upsert = deps.telemetry.upsertSessionRevision;
+  if (!sessionCaptureEnabled(deps)) {
+    sessionHeadCaches.delete(deps.telemetry);
+    return;
+  }
+  if (!session?.label || !get || !list || !upsert) return;
+  try {
+    if (Buffer.byteLength(args.requestJson, "utf8") > MAX_SESSION_REQUEST_BYTES) {
+      log("session.capture_limited");
+      return;
+    }
+    const head = await get.call(deps.telemetry, session.ref);
+    if (
+      head &&
+      (head.revisionCount >= SESSION_MAX_REVISIONS || head.storedBytes >= SESSION_MAX_STORED_BYTES)
+    ) {
+      log("session.capture_limited");
+      return;
+    }
+    const previousResponseId = previousResponseIdFromRequest(args.requestJson);
+    const currentBase = splitSessionRequestJson(args.requestJson);
+    let parentRequestId: string | null = null;
+    let previousEvents: string | undefined;
+    let fidelity: "semantic" | "partial" = "semantic";
+    if (previousResponseId !== null) {
+      const parent = getByResponseId
+        ? await getByResponseId.call(deps.telemetry, session.ref, previousResponseId)
+        : null;
+      parentRequestId = parent?.requestId ?? null;
+      if (!hasResponsesOutput(parent?.responseJson)) fidelity = "partial";
+    } else {
+      parentRequestId = head?.headRequestId ?? null;
+      const cached = sessionHeadCache(deps.telemetry).get(session.ref);
+      const parentRequest =
+        parentRequestId === null
+          ? null
+          : cached?.requestId === parentRequestId
+            ? cached.requestJson
+            : restoreSessionRevisionJson(
+                await list.call(deps.telemetry, session.ref),
+                parentRequestId,
+              );
+      const parentDelta = parentRequest ? splitSessionRequestJson(parentRequest) : null;
+      previousEvents =
+        parentDelta?.eventKey === currentBase.eventKey ? parentDelta.eventsJson : undefined;
+    }
+    const delta = splitSessionRequestJson(args.requestJson, previousEvents);
+    const deltaBytes = Buffer.byteLength(delta.eventsJson + delta.envelopeJson, "utf8");
+    if ((head?.storedBytes ?? 0) + deltaBytes > SESSION_MAX_STORED_BYTES) {
+      log("session.capture_limited");
+      return;
+    }
+    await upsert.call(deps.telemetry, {
+      sessionRef: session.ref,
+      accountId: args.accountId,
+      apiKeyId: args.apiKeyId,
+      source: session.source,
+      externalSessionId: session.label,
+      requestId: args.requestId,
+      parentRequestId,
+      retainCount: delta.retainCount,
+      requestDeltaJson: delta.eventsJson,
+      requestEnvelopeJson: delta.envelopeJson,
+      responseId: args.responseId,
+      responseJson: args.responseJson,
+      fidelity: fidelity === "partial" ? fidelity : delta.fidelity,
+      createdAt: new Date(args.now),
+    });
+    cacheSessionHead(deps.telemetry, session.ref, {
+      requestId: args.requestId,
+      requestJson: args.requestJson,
+    });
+  } catch {
+    log("session.capture_failed");
+  }
+}
+
+export async function queueOrPersistSessionRequest(
+  deps: PayloadCaptureDeps & { writes?: WriteQueue },
+  args: Parameters<typeof persistSessionRequest>[1],
+  log: (msg: string) => void,
+): Promise<void> {
+  if (deps.writes && sessionCaptureEnabled(deps) && args.decision.session?.label) {
+    deps.writes.enqueueSession(
+      () => persistSessionRequest(deps, args, log),
+      Buffer.byteLength(args.requestJson, "utf8") +
+        (args.responseJson === null ? 0 : Buffer.byteLength(args.responseJson, "utf8")),
+    );
+    return;
+  }
+  await persistSessionRequest(deps, args, log);
+}
+
 // Default retained-tail size (chars) when NOT persisting the body. The trailing
 // usage frame (include_usage) is tiny and always last, so a few KB is ample for
 // usageFromSSE; this caps per-stream memory instead of pinning the whole response.
@@ -346,6 +614,20 @@ export function decisionForTimedOutRequest(decision: DecisionRecord): DecisionRe
   };
 }
 
+/** Removes the potentially identifying raw client Session ID before telemetry persistence. */
+export function redactDecisionForTelemetry(
+  redact: (decision: DecisionRecord) => unknown,
+  decision: DecisionRecord,
+): DecisionRecord {
+  const bodyFreeDecision = decision.session
+    ? {
+        ...decision,
+        session: { ref: decision.session.ref, source: decision.session.source },
+      }
+    : decision;
+  return redact(bodyFreeDecision) as DecisionRecord;
+}
+
 // Record ONE served request: the telemetry row (always — this is what makes the
 // request appear in /admin/requests) plus the verbatim request/response payload
 // (gated by capture_payloads). Shared by the three pipeline faces (/v1/responses,
@@ -356,6 +638,7 @@ export async function recordServed(
   deps: RecordServedDeps,
   args: {
     requestId: string;
+    accountId?: string;
     apiKeyId: string;
     decision: DecisionRecord;
     requestJson: string;
@@ -378,11 +661,28 @@ export async function recordServed(
   const decision =
     args.timedOut === true ? decisionForTimedOutRequest(storageDecision) : storageDecision;
   const responseJson = args.timedOut === true ? null : args.responseJson;
+  const sessionResponse = capturedResponsesResponse(decision.protocol, responseJson);
+  const sessionArgs = {
+    requestId: args.requestId,
+    accountId: args.accountId ?? args.apiKeyId,
+    apiKeyId: args.apiKeyId,
+    decision,
+    requestJson: args.requestJson,
+    responseId: sessionResponse.responseId,
+    responseJson: sessionResponse.responseJson,
+    now: deps.now(),
+  };
   // Deferred + batched path: enqueue both writes to run AFTER the response, off the
   // hot path. The redaction is done HERE (synchronously) so the enqueued snapshot is
   // independent of anything that touches the decision later.
   const w = deps.writes;
   if (w !== undefined) {
+    w.enqueueTelemetry({
+      decision: redactDecisionForTelemetry(deps.redact, decision),
+      apiKeyId: args.apiKeyId,
+      createdAt: new Date(deps.now()),
+    });
+    await queueOrPersistSessionRequest(deps, sessionArgs, log);
     if (captureEnabled(deps)) {
       w.enqueuePayload({
         requestId: args.requestId,
@@ -394,15 +694,11 @@ export async function recordServed(
       // Retention is NOT pruned on the request path — the scheduled cleanup runner
       // owns payload retention (archive-first), governed by the cleanup settings.
     }
-    w.enqueueTelemetry({
-      decision: deps.redact(decision),
-      apiKeyId: args.apiKeyId,
-      createdAt: new Date(deps.now()),
-    });
     return;
   }
 
   // Inline path (no write queue): today's behavior, byte-for-byte.
+  await queueOrPersistSessionRequest(deps, sessionArgs, log);
   await persistPayload(
     deps,
     {
@@ -416,7 +712,7 @@ export async function recordServed(
   );
   try {
     await deps.telemetry.insert({
-      decision: deps.redact(decision),
+      decision: redactDecisionForTelemetry(deps.redact, decision),
       apiKeyId: args.apiKeyId,
       createdAt: new Date(deps.now()),
     });

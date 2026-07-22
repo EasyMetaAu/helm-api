@@ -384,6 +384,61 @@ describe("createWriteQueue", () => {
     expect(received.length).toBeLessThanOrEqual(5);
   });
 
+  it("runs admitted session writes fail-open on the deferred task chain", async () => {
+    const sink = fakeSink();
+    const ran: string[] = [];
+    const q = createWriteQueue({
+      telemetry: sink,
+      log: () => {},
+      flushIntervalMs: 10_000,
+      maxBytes: 1_000,
+    });
+    q.enqueueSession(async () => {
+      ran.push("session");
+    }, 100);
+    expect(q.depth).toBe(1);
+    await q.flush();
+    expect(ran).toEqual(["session"]);
+    expect(q.depth).toBe(0);
+  });
+
+  it("rejects an oversized session without dropping audit telemetry", async () => {
+    const sink = fakeSink();
+    const logs: string[] = [];
+    const ran: string[] = [];
+    const q = createWriteQueue({
+      telemetry: sink,
+      log: (message) => logs.push(message),
+      flushIntervalMs: 10_000,
+      maxBytes: 500,
+    });
+    q.enqueueTelemetry(tele("audit"));
+    q.enqueueSession(async () => {
+      ran.push("session");
+    }, 1_000);
+    await q.flush();
+    expect(ran).toEqual([]);
+    expect(sink.inserts).toHaveLength(1);
+    expect(logs).toContain("writequeue.session_overflow");
+  });
+
+  it("sheds full payload before admitting a semantic session transcript", async () => {
+    const sink = fakeSink();
+    const q = createWriteQueue({
+      telemetry: sink,
+      log: () => {},
+      flushIntervalMs: 10_000,
+      maxBytes: 1_000,
+      flushBytes: 10_000,
+    });
+    q.enqueueTelemetry(tele("audit"));
+    q.enqueuePayload(bigPayload("payload", 700));
+    q.enqueueSession(async () => {}, 400);
+    await q.flush();
+    expect(sink.inserts).toHaveLength(1);
+    expect(sink.payloadCalls).toHaveLength(0);
+  });
+
   it("stop() flushes pending writes and stops the timer", async () => {
     const sink = fakeSink();
     const q = createWriteQueue({ telemetry: sink, log: () => {}, flushIntervalMs: 10_000 });

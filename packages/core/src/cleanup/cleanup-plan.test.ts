@@ -40,9 +40,11 @@ describe("buildCleanupPlan", () => {
   it("default settings sweep the ON categories with their windows; opt-in ones are absent", () => {
     const plan = buildCleanupPlan(settings(), NOW);
     const byTable = new Map(plan.map((a) => [a.table, a] as const));
-    // Defaults ON: telemetry(90), payloads(reuse 30), oauth_usage(180), memory_jobs(30).
+    // Defaults ON: telemetry(90), payloads + sessions(reuse 30), oauth_usage(180), memory_jobs(30).
     expect(byTable.get("telemetry")?.cutoffMs).toBe(NOW - 90 * DAY);
     expect(byTable.get("request_payloads")?.cutoffMs).toBe(NOW - 30 * DAY);
+    expect(byTable.get("sessions")?.cutoffMs).toBe(NOW - 30 * DAY);
+    expect(byTable.get("sessions")?.archive).toBe(false);
     expect(byTable.get("oauth_usage")?.cutoffMs).toBe(NOW - 180 * DAY);
     expect(byTable.get("memory_jobs")?.cutoffMs).toBe(NOW - 30 * DAY);
     // Defaults OFF: raw + derived memory require opt-in.
@@ -62,6 +64,7 @@ describe("buildCleanupPlan", () => {
     // oauth_usage / memory_jobs are delete-only regardless.
     expect(on.find((a) => a.table === "oauth_usage")?.archive).toBe(false);
     expect(on.find((a) => a.table === "memory_jobs")?.archive).toBe(false);
+    expect(on.find((a) => a.table === "sessions")?.archive).toBe(false);
 
     const off = buildCleanupPlan(settings({ cleanup_archive_enabled: false }), NOW);
     expect(off.every((a) => a.archive === false)).toBe(true);

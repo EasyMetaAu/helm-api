@@ -80,6 +80,11 @@
     const qs = keyDetailFiltersToSearch(next);
     void goto(qs ? `?${qs}` : '?', { keepFocus: true, noScroll: true });
   }
+
+  function sessionHref(sessionRef: string): string {
+    const search = filtersToSearch({ range: 'all', sessionRef, page: 1, pageSize: DEFAULT_PAGE_SIZE });
+    return `${base}/requests?${search}`;
+  }
   // Picking a preset clears any custom range and resets to page 1.
   function selectRange(range: RangeKey): void {
     applyFilters({ range, page: 1 });
@@ -525,7 +530,13 @@
     {#if data.requests.items.length === 0}
       <div class="empty-state">{$t('No requests for this key in the selected window.')}</div>
     {:else}
-      <RequestsTable items={data.requests.items} {detailHref} showKey={false} variant="key" />
+      <RequestsTable
+        items={data.requests.items}
+        {detailHref}
+        {sessionHref}
+        showKey={false}
+        variant="key"
+      />
 
       {#if hasMore}
         <!-- Only the most-recent page is shown here. The full current window lives

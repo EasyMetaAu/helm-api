@@ -240,6 +240,26 @@ export const DecisionRecordSchema = z.object({
   // (principle 7). Null when the key/prefix is unknown. `.default(null)` keeps
   // pre-existing (pre-enrichment) records valid.
   key_prefix: z.string().nullable().default(null),
+  // High-confidence client session linkage. `ref` is the tenant-scoped opaque
+  // identifier persisted in body-free telemetry. `label` is present only on the
+  // in-memory capture decision and is removed before telemetry persistence; the
+  // Admin API resolves it from the body-retention-governed Session table.
+  session: z
+    .object({
+      ref: z.string().min(1),
+      label: z.string().min(1).max(256).optional(),
+      source: z.enum([
+        "x-thread-id",
+        "metadata.thread_id",
+        "metadata.conversation_id",
+        "x-session-key",
+        "thread-id",
+        "metadata.user_id.session_id",
+        "session-id",
+      ]),
+    })
+    .nullable()
+    .optional(),
   classifier: ClassifierDecisionSchema,
   policy: PolicyDecisionSchema,
   lane: LaneDecisionSchema,

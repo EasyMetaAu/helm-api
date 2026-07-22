@@ -7,6 +7,7 @@ import type { RuntimeSettings } from "@helm/shared";
 export type CleanupTable =
   | "telemetry"
   | "request_payloads"
+  | "sessions"
   | "memory_messages"
   | "oauth_usage"
   | "memory_jobs"
@@ -65,6 +66,13 @@ export function buildCleanupPlan(settings: RuntimeSettings, nowMs: number): Clea
   if (settings.payloads_cleanup_enabled) {
     // Window REUSES payload_retention_days (single source of truth with the legacy knob).
     actions.push(archiveAction("request_payloads", settings.payload_retention_days));
+    // Session transcripts contain request bodies too, but are never archived:
+    // delete the whole session after its last activity crosses the same window.
+    actions.push({
+      table: "sessions",
+      cutoffMs: cutoff(settings.payload_retention_days),
+      archive: false,
+    });
   }
   if (settings.memory_messages_cleanup_enabled) {
     actions.push(archiveAction("memory_messages", settings.memory_messages_retention_days));

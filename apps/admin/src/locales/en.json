@@ -1010,5 +1010,22 @@
   "partial": "partial",
   "client aborted": "client aborted",
   "truncated": "truncated",
-  "incomplete": "incomplete"
+  "incomplete": "incomplete",
+  "Body-free session context for this request.": "Body-free session context for this request.",
+  "Full payload for every request": "Full payload for every request",
+  "Incremental transcript per session": "Incremental transcript per session",
+  "Metadata only": "Metadata only",
+  "Privacy note: full payload and session modes store message content. Choose metadata only to store no bodies.": "Privacy note: full payload and session modes store message content. Choose metadata only to store no bodies.",
+  "Request content storage": "Request content storage",
+  "Session": "Session",
+  "Session mode stores repeated conversation history once and reconstructs each request semantically.": "Session mode stores repeated conversation history once and reconstructs each request semantically.",
+  "Session reference": "Session reference",
+  "This content was recovered from the session transcript. It is not the original HTTP request and cannot be retried exactly.": "This content was recovered from the session transcript. It is not the original HTTP request and cannot be retried exactly.",
+  "Keep request/session content for (days)": "Keep request/session content for (days)",
+  "Full payloads expire by request age; whole session transcripts expire after their last activity.": "Full payloads expire by request age; whole session transcripts expire after their last activity.",
+  "Request payloads and session transcripts": "Request payloads and session transcripts",
+  "uses the content window above · full payloads archived, inactive sessions deleted": "uses the content window above · full payloads archived, inactive sessions deleted",
+  "The session transcript is unavailable or has been cleaned up.": "The session transcript is unavailable or has been cleaned up.",
+  "The session transcript is incomplete and this request cannot be recovered.": "The session transcript is incomplete and this request cannot be recovered.",
+  "This request has no captured Session ID, so no session transcript is available.": "This request has no captured Session ID, so no session transcript is available."
 }

@@ -111,6 +111,15 @@ describe('toListItem', () => {
     expect(row.reasoning_effort).toBe('high');
   });
 
+  it('maps optional body-free session metadata without fabricating legacy values', () => {
+    expect(
+      toListItem(
+        rawRecord({ session: { ref: 'session_abc', label: 'Support case 42', source: 'header' } }),
+      ).session,
+    ).toEqual({ ref: 'session_abc', label: 'Support case 42', source: 'header' });
+    expect(toListItem(rawRecord()).session).toBeNull();
+  });
+
   it('surfaces the served provider and final subscription account on list rows', () => {
     const row = toListItem(rawRecord());
     expect(row.served_provider).toBe('anthropic');
@@ -448,6 +457,7 @@ describe('listRequests', () => {
       lane: 'premium',
       model: 'gpt-4o',
       keyId: 'key_abc',
+      sessionRef: 'session_abc',
       start: 1000,
       end: 2000,
     });
@@ -461,6 +471,7 @@ describe('listRequests', () => {
     expect(url.searchParams.get('model')).toBe('gpt-4o');
     // keyId is serialized as key_id to match the backend schema (exact key scope).
     expect(url.searchParams.get('key_id')).toBe('key_abc');
+    expect(url.searchParams.get('session_ref')).toBe('session_abc');
     expect(url.searchParams.get('start')).toBe('1000');
     expect(url.searchParams.get('end')).toBe('2000');
   });

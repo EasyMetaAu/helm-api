@@ -496,6 +496,173 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
 
   // --- TelemetryStore -----------------------------------------------------
   describe("TelemetryStore", () => {
+    it("stores incremental session revisions across prefixes and branches", async () => {
+      ctx = await make();
+      const t = ctx.stores.telemetry;
+      if (
+        !t.upsertSessionRevision ||
+        !t.getSessionByRef ||
+        !t.listSessionRevisions ||
+        !t.getSessionRevisionByResponseId
+      )
+        throw new Error("session revision methods required");
+      const base = {
+        sessionRef: "s_1",
+        accountId: "acct_1",
+        apiKeyId: "key_1",
+        source: "codex",
+        externalSessionId: "external-1",
+      };
+      await t.upsertSessionRevision({
+        ...base,
+        requestId: "r1",
+        parentRequestId: null,
+        retainCount: 0,
+        requestDeltaJson: '["one"]',
+        requestEnvelopeJson: '{"model":"x"}',
+        responseId: "resp_1",
+        responseJson: '{"output":["one"]}',
+        fidelity: "verbatim",
+        createdAt: new Date(1000),
+      });
+      await t.upsertSessionRevision({
+        ...base,
+        requestId: "r2",
+        parentRequestId: "r1",
+        retainCount: 1,
+        requestDeltaJson: '["two"]',
+        requestEnvelopeJson: '{"model":"x"}',
+        responseId: "resp_2",
+        responseJson: '{"output":["two"]}',
+        fidelity: "verbatim",
+        createdAt: new Date(2000),
+      });
+      await t.upsertSessionRevision({
+        ...base,
+        requestId: "r3",
+        parentRequestId: "r1",
+        retainCount: 1,
+        requestDeltaJson: '["branch"]',
+        requestEnvelopeJson: '{"model":"x"}',
+        responseJson: null,
+        fidelity: "partial",
+        createdAt: new Date(3000),
+      });
+      const beforeBackfill = await t.getSessionByRef("s_1");
+      const responseBackfill = '{"output":["branch"]}';
+      // Same request id is a response backfill, not a second turn.
+      await t.upsertSessionRevision({
+        ...base,
+        requestId: "r3",
+        parentRequestId: "r2",
+        retainCount: 999,
+        requestDeltaJson: '["malicious-rewrite"]',
+        requestEnvelopeJson: '{"model":"rewritten"}',
+        responseId: "resp_3",
+        responseJson: responseBackfill,
+        fidelity: "verbatim",
+        createdAt: new Date(4000),
+      });
+      const afterBackfill = await t.getSessionByRef("s_1");
+      expect(afterBackfill?.storedBytes).toBe(
+        (beforeBackfill?.storedBytes ?? 0) + Buffer.byteLength(responseBackfill, "utf8"),
+      );
+      await t.upsertSessionRevision({
+        ...base,
+        requestId: "r3",
+        parentRequestId: "r2",
+        retainCount: 999,
+        requestDeltaJson: '["second-malicious-rewrite"]',
+        requestEnvelopeJson: '{"model":"second-rewrite"}',
+        responseId: "resp_malicious",
+        responseJson: '{"output":["malicious"]}',
+        fidelity: "partial",
+        createdAt: new Date(4500),
+      });
+      await t.upsertSessionRevision({
+        ...base,
+        requestId: "r2",
+        parentRequestId: null,
+        retainCount: 0,
+        requestDeltaJson: '["late-rewrite"]',
+        requestEnvelopeJson: '{"model":"late"}',
+        responseJson: null,
+        fidelity: "partial",
+        createdAt: new Date(500),
+      });
+
+      expect(await t.getSessionByRef("s_1")).toMatchObject({
+        sessionRef: "s_1",
+        accountId: "acct_1",
+        apiKeyId: "key_1",
+        source: "codex",
+        externalSessionId: "external-1",
+        lastSeenAt: new Date(4000),
+        revisionCount: 3,
+        storedBytes: afterBackfill?.storedBytes,
+      });
+      expect(await t.getSessionRevisionByResponseId("s_1", "resp_1")).toMatchObject({
+        requestId: "r1",
+        responseId: "resp_1",
+      });
+      expect(await t.getSessionRevisionByResponseId("s_1", "resp_malicious")).toBeNull();
+      expect(await t.listSessionRevisions("s_1")).toEqual([
+        expect.objectContaining({
+          requestId: "r1",
+          sequence: 1,
+          parentRequestId: null,
+          retainCount: 0,
+        }),
+        expect.objectContaining({
+          requestId: "r2",
+          sequence: 2,
+          parentRequestId: "r1",
+          retainCount: 1,
+        }),
+        expect.objectContaining({
+          requestId: "r3",
+          sequence: 3,
+          parentRequestId: "r1",
+          responseId: "resp_3",
+          responseJson: responseBackfill,
+          fidelity: "verbatim",
+          retainCount: 1,
+          requestDeltaJson: '["branch"]',
+          requestEnvelopeJson: '{"model":"x"}',
+          createdAt: new Date(3000),
+        }),
+      ]);
+    });
+
+    it("prunes an entire inactive session without touching a recent one", async () => {
+      ctx = await make();
+      const t = ctx.stores.telemetry;
+      if (!t.upsertSessionRevision || !t.getSessionByRef || !t.pruneInactiveSessions)
+        throw new Error("session revision methods required");
+      const upsert = t.upsertSessionRevision.bind(t);
+      const put = (sessionRef: string, at: number) =>
+        upsert({
+          sessionRef,
+          accountId: "acct_1",
+          apiKeyId: "key_1",
+          source: "codex",
+          externalSessionId: sessionRef,
+          requestId: `${sessionRef}_r1`,
+          parentRequestId: null,
+          retainCount: 0,
+          requestDeltaJson: "[]",
+          requestEnvelopeJson: "{}",
+          responseJson: null,
+          fidelity: "verbatim",
+          createdAt: new Date(at),
+        });
+      await put("old", 1000);
+      await put("fresh", 2000);
+      expect(await t.pruneInactiveSessions(2000)).toBe(1);
+      expect(await t.getSessionByRef("old")).toBeNull();
+      expect(await t.getSessionByRef("fresh")).not.toBeNull();
+    });
+
     it("round-trips insert -> queryRecent without losing nested structure", async () => {
       ctx = await make();
       await ctx.stores.telemetry.insert({
@@ -1261,6 +1428,31 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(
         (await ctx.stores.telemetry.queryPage({ limit: 50, offset: 0, apiKeyId: "nope" })).total,
       ).toBe(0);
+    });
+
+    it("queryPage filters by the opaque session reference", async () => {
+      ctx = await make();
+      const insert = (requestId: string, sessionRef?: string) =>
+        ctx.stores.telemetry.insert({
+          decision: decision(requestId, {
+            session: sessionRef
+              ? { ref: sessionRef, label: "client-visible", source: "x-thread-id" }
+              : null,
+          }),
+          apiKeyId: "key_a",
+          createdAt: new Date(),
+        });
+      await insert("session-a", "opaque-a");
+      await insert("session-b", "opaque-b");
+      await insert("no-session");
+
+      const scoped = await ctx.stores.telemetry.queryPage({
+        limit: 50,
+        offset: 0,
+        sessionRef: "opaque-a",
+      });
+      expect(scoped.total).toBe(1);
+      expect(scoped.rows[0]?.record.request_id).toBe("session-a");
     });
 
     it("rejects a duplicate request_id (unique constraint)", async () => {

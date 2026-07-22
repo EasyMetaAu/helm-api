@@ -140,6 +140,10 @@ describe("sqlite schema + migrations", () => {
       .prepare("PRAGMA table_xinfo(telemetry)")
       .all()
       .map((c) => (c as { name: string }).name);
+    const sessionRevisionCols = raw
+      .prepare("PRAGMA table_info(session_revisions)")
+      .all()
+      .map((c) => (c as { name: string }).name);
 
     for (const c of [
       "key_id",
@@ -179,6 +183,19 @@ describe("sqlite schema + migrations", () => {
     ]) {
       expect(telCols).toContain(c);
     }
+    for (const c of [
+      "request_id",
+      "session_ref",
+      "parent_request_id",
+      "retain_count",
+      "request_delta_json",
+      "request_envelope_json",
+      "response_id",
+      "response_json",
+      "fidelity",
+    ]) {
+      expect(sessionRevisionCols).toContain(c);
+    }
     const telemetryIndexes = raw
       .prepare("PRAGMA index_list(telemetry)")
       .all()
@@ -187,6 +204,18 @@ describe("sqlite schema + migrations", () => {
     expect(telemetryIndexes).toContain("idx_telemetry_admin_key_window_cover");
     expect(telemetryIndexes).toContain("idx_telemetry_admin_model_window");
     expect(telemetryIndexes).toContain("idx_telemetry_admin_key_model_window");
+    expect(telemetryIndexes).toContain("idx_telemetry_session_window");
+    raw
+      .prepare(
+        "INSERT INTO sessions (session_ref, account_id, api_key_id, source, external_session_id, created_at, last_seen_at) VALUES ('s-check', 'acct', 'key', 'test', 'external', 1, 1)",
+      )
+      .run();
+    const insertRevision = raw.prepare(
+      "INSERT INTO session_revisions (request_id, session_ref, sequence, retain_count, request_delta_json, request_envelope_json, fidelity, created_at) VALUES (?, 's-check', ?, ?, '[]', '{}', 'semantic', 1)",
+    );
+    expect(() => insertRevision.run("r-valid", 1, 0)).not.toThrow();
+    expect(() => insertRevision.run("r-negative", 2, -1)).toThrow();
+    expect(() => insertRevision.run("r-fractional", 2, 1.5)).toThrow();
     raw.close();
   });
 

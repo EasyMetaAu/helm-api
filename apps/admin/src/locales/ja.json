@@ -1010,5 +1010,22 @@
   "partial": "部分完了",
   "client aborted": "クライアントが中止",
   "truncated": "途中で終了",
-  "incomplete": "未完了"
+  "incomplete": "未完了",
+  "Body-free session context for this request.": "このリクエストに紐づく本文を含まないセッション情報です。",
+  "Full payload for every request": "リクエストごとに完全なペイロードを保存",
+  "Incremental transcript per session": "セッションごとに差分トランスクリプトを保存",
+  "Metadata only": "メタデータのみ",
+  "Privacy note: full payload and session modes store message content. Choose metadata only to store no bodies.": "プライバシーに関する注意: 完全なペイロードとセッションのモードではメッセージ本文を保存します。本文を保存しない場合はメタデータのみを選択してください。",
+  "Request content storage": "リクエスト内容の保存",
+  "Session": "セッション",
+  "Session mode stores repeated conversation history once and reconstructs each request semantically.": "セッションモードでは、繰り返される会話履歴を一度だけ保存し、各リクエストを意味的に復元します。",
+  "Session reference": "セッション参照",
+  "This content was recovered from the session transcript. It is not the original HTTP request and cannot be retried exactly.": "この内容はセッショントランスクリプトから復元されました。元の HTTP リクエストではないため、正確な再試行には使用できません。",
+  "Keep request/session content for (days)": "リクエスト/セッション内容の保持日数",
+  "Full payloads expire by request age; whole session transcripts expire after their last activity.": "完全なペイロードはリクエスト日時で期限切れになり、セッショントランスクリプト全体は最終アクティビティ後に期限切れになります。",
+  "Request payloads and session transcripts": "リクエストペイロードとセッショントランスクリプト",
+  "uses the content window above · full payloads archived, inactive sessions deleted": "上記の保持期間を使用 · 完全なペイロードはアーカイブ、非アクティブなセッションは削除",
+  "The session transcript is unavailable or has been cleaned up.": "セッショントランスクリプトは利用できないか、クリーンアップ済みです。",
+  "The session transcript is incomplete and this request cannot be recovered.": "セッショントランスクリプトが不完全なため、このリクエストは復元できません。",
+  "This request has no captured Session ID, so no session transcript is available.": "このリクエストには取得済みの Session ID がないため、セッショントランスクリプトは利用できません。"
 }

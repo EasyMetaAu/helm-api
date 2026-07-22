@@ -1099,6 +1099,55 @@ const MIGRATIONS: readonly Migration[] = [
       );
     },
   },
+  {
+    // Incremental session transcript, independent of request_payloads so turning
+    // payload capture off does not turn off session recovery.
+    version: 40,
+    run: async (db) => {
+      const ddl = `
+        CREATE TABLE IF NOT EXISTS sessions (
+          session_ref TEXT PRIMARY KEY,
+          account_id TEXT NOT NULL,
+          api_key_id TEXT NOT NULL,
+          source TEXT NOT NULL,
+          external_session_id TEXT NOT NULL,
+          head_request_id TEXT,
+          revision_count INTEGER NOT NULL DEFAULT 0,
+          stored_bytes BIGINT NOT NULL DEFAULT 0,
+          created_at BIGINT NOT NULL,
+          last_seen_at BIGINT NOT NULL,
+          UNIQUE (account_id, api_key_id, source, external_session_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_sessions_last_seen_at ON sessions (last_seen_at);
+        CREATE TABLE IF NOT EXISTS session_revisions (
+          request_id TEXT PRIMARY KEY,
+          session_ref TEXT NOT NULL REFERENCES sessions(session_ref) ON DELETE CASCADE,
+          sequence INTEGER NOT NULL,
+          parent_request_id TEXT,
+          retain_count INTEGER NOT NULL CHECK (retain_count >= 0),
+          request_delta_json TEXT NOT NULL,
+          request_envelope_json TEXT NOT NULL,
+          response_id TEXT,
+          response_json TEXT,
+          fidelity TEXT NOT NULL,
+          created_at BIGINT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_revisions_session_created
+          ON session_revisions (session_ref, created_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS uniq_session_revisions_sequence
+          ON session_revisions (session_ref, sequence);
+        CREATE UNIQUE INDEX IF NOT EXISTS uniq_session_revisions_response
+          ON session_revisions (session_ref, response_id);
+      `;
+      for (const statement of splitStatements(ddl)) await db.execute(sql.raw(statement));
+      if (await pgTableHasColumns(db, "telemetry", ["decision_json", "created_at"])) {
+        await db.execute(
+          sql.raw(`CREATE INDEX IF NOT EXISTS idx_telemetry_session_window
+            ON telemetry ((decision_json -> 'session' ->> 'ref'), created_at DESC)`),
+        );
+      }
+    },
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {
@@ -1117,7 +1166,8 @@ async function pgTableHasColumns(
     | "memory_reflections"
     | "memory_facts"
     | "memory_jobs"
-    | "oauth_quota",
+    | "oauth_quota"
+    | "telemetry",
   requiredColumns: readonly string[],
 ): Promise<boolean> {
   const rows = resultRows<{ column_name: string }>(

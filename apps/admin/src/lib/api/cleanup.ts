@@ -5,6 +5,7 @@
 export type CleanupTable =
   | 'telemetry'
   | 'request_payloads'
+  | 'sessions'
   | 'memory_messages'
   | 'oauth_usage'
   | 'memory_jobs'

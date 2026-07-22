@@ -1010,5 +1010,22 @@
   "partial": "부분 완료",
   "client aborted": "클라이언트 중단",
   "truncated": "중간 종료",
-  "incomplete": "미완료"
+  "incomplete": "미완료",
+  "Body-free session context for this request.": "이 요청에 연결된 본문 없는 세션 정보입니다.",
+  "Full payload for every request": "요청마다 전체 페이로드 저장",
+  "Incremental transcript per session": "세션별 증분 대화 기록",
+  "Metadata only": "메타데이터만",
+  "Privacy note: full payload and session modes store message content. Choose metadata only to store no bodies.": "개인정보 참고: 전체 페이로드 및 세션 모드는 메시지 내용을 저장합니다. 본문을 저장하지 않으려면 메타데이터만을 선택하세요.",
+  "Request content storage": "요청 내용 저장",
+  "Session": "세션",
+  "Session mode stores repeated conversation history once and reconstructs each request semantically.": "세션 모드는 반복되는 대화 기록을 한 번만 저장하고 각 요청을 의미적으로 복원합니다.",
+  "Session reference": "세션 참조",
+  "This content was recovered from the session transcript. It is not the original HTTP request and cannot be retried exactly.": "이 내용은 세션 대화 기록에서 복원되었습니다. 원본 HTTP 요청이 아니므로 정확하게 다시 시도할 수 없습니다.",
+  "Keep request/session content for (days)": "요청/세션 콘텐츠 보관 기간(일)",
+  "Full payloads expire by request age; whole session transcripts expire after their last activity.": "전체 페이로드는 요청 시점을 기준으로 만료되고, 전체 세션 기록은 마지막 활동 후 만료됩니다.",
+  "Request payloads and session transcripts": "요청 페이로드 및 세션 기록",
+  "uses the content window above · full payloads archived, inactive sessions deleted": "위 보관 기간 사용 · 전체 페이로드 보관, 비활성 세션 삭제",
+  "The session transcript is unavailable or has been cleaned up.": "세션 기록을 사용할 수 없거나 이미 정리되었습니다.",
+  "The session transcript is incomplete and this request cannot be recovered.": "세션 기록이 불완전하여 이 요청을 복원할 수 없습니다.",
+  "This request has no captured Session ID, so no session transcript is available.": "이 요청에는 캡처된 Session ID가 없어 사용할 수 있는 세션 기록이 없습니다."
 }

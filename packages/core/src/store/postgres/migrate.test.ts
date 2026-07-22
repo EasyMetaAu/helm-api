@@ -119,6 +119,44 @@ describe("runPgMigrations — per-migration atomicity", () => {
     const db = await createPgliteDb();
     // Re-running is a no-op (ledger already full); must not throw.
     await runPgMigrations(db);
+    const revisionColumns = (await db.execute(
+      sql.raw(`
+        SELECT column_name
+          FROM information_schema.columns
+         WHERE table_name = 'session_revisions'
+         ORDER BY ordinal_position
+      `),
+    )) as { rows: Array<{ column_name: string }> };
+    expect(revisionColumns.rows.map((row) => row.column_name)).toEqual(
+      expect.arrayContaining([
+        "request_id",
+        "session_ref",
+        "parent_request_id",
+        "retain_count",
+        "request_delta_json",
+        "request_envelope_json",
+        "response_id",
+        "response_json",
+        "fidelity",
+      ]),
+    );
+    await db.execute(
+      sql.raw(`
+        INSERT INTO sessions
+          (session_ref, account_id, api_key_id, source, external_session_id, created_at, last_seen_at)
+        VALUES ('s-check', 'acct', 'key', 'test', 'external', 1, 1)
+      `),
+    );
+    await expect(
+      db.execute(
+        sql.raw(`
+          INSERT INTO session_revisions
+            (request_id, session_ref, sequence, retain_count, request_delta_json,
+             request_envelope_json, fidelity, created_at)
+          VALUES ('r-negative', 's-check', 1, -1, '[]', '{}', 'semantic', 1)
+        `),
+      ),
+    ).rejects.toThrow();
     await db.$close();
   });
 
