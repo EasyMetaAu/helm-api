@@ -197,24 +197,26 @@ test.describe("admin redaction smoke", () => {
 
 // ── 5. System Settings: read + persist a runtime-mutable setting ─────────────
 test.describe("admin system settings", () => {
-  test("renders the settings page and persists a toggle across reloads", async ({ page }) => {
+  test("renders the settings page and persists a capture mode across reloads", async ({
+    page,
+  }) => {
     await page.goto(`${BASE}/admin/settings`);
-    await expect(page.getByTestId("capture-payloads")).toBeVisible();
+    await expect(page.getByTestId("capture-mode")).toBeVisible();
     await expect(page.getByTestId("log-level")).toBeVisible();
 
-    // Capture is ON by default; toggle it OFF and save.
-    const capture = page.getByTestId("capture-payloads");
-    await expect(capture).toBeChecked();
-    await capture.uncheck();
+    // Full payload capture is the default; switch to metadata only and save.
+    const captureMode = page.getByTestId("capture-mode");
+    await expect(captureMode).toHaveValue("payload");
+    await captureMode.selectOption("none");
     await page.getByRole("button", { name: /save settings/i }).click();
     await expect(page.getByRole("status")).toBeVisible(); // "Saved" badge
 
-    // Re-load: the persisted (config_kv) value is reflected → toggle stays OFF.
+    // Re-load: the persisted (config_kv) value is reflected.
     await page.goto(`${BASE}/admin/settings`);
-    await expect(page.getByTestId("capture-payloads")).not.toBeChecked();
+    await expect(page.getByTestId("capture-mode")).toHaveValue("none");
 
     // Restore the default so the throwaway DB doesn't affect other specs.
-    await page.getByTestId("capture-payloads").check();
+    await page.getByTestId("capture-mode").selectOption("payload");
     await page.getByRole("button", { name: /save settings/i }).click();
     await expect(page.getByRole("status")).toBeVisible();
   });
@@ -222,10 +224,12 @@ test.describe("admin system settings", () => {
 
 // ── 6. Payload view: the seeded request was stored WITHOUT a captured body ────
 test.describe("admin request payload view", () => {
-  test("shows a not-recorded notice when no payload was captured", async ({ page }) => {
+  test("shows a no-session notice when no payload or Session ID was captured", async ({
+    page,
+  }) => {
     // The seed uses telemetry.insert only (no insertPayload), so the detail page
-    // must surface the explicit "not recorded" notice rather than a body.
+    // must surface the explicit no-Session notice rather than a body.
     await page.goto(`${BASE}/admin/requests/${SEED_TRACE_ID}`);
-    await expect(page.getByTestId("payload-summary")).toContainText(/not recorded/i);
+    await expect(page.getByTestId("payload-summary")).toContainText(/no captured Session ID/i);
   });
 });
