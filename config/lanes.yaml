@@ -38,7 +38,7 @@ economy:
     - zenmux/auto
 
 balanced:
-  purpose: Default quality/cost tradeoff (classification fallback terminal)
+  purpose: Default quality/cost tradeoff
   reasoning_effort: medium
   primary: openai-codex/gpt-5.6-terra
   fallback:

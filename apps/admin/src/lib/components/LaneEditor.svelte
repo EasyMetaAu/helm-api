@@ -6,8 +6,7 @@
 
   // Single-lane editor. Pure form: it owns NO routing/classification logic
   // (that lives in headless core) — only client-side form validation:
-  // non-empty primary, numeric latency, and the `balanced` guard from docs/04
-  // (the classification-fallback terminal must always have a primary).
+  // non-empty primary and numeric latency.
   // `models` is the routable-alias catalog (config.providers[].models[].alias),
   // offered as combobox suggestions on the primary + fallback inputs so the
   // operator picks a real alias instead of hand-typing one (a typo would silently
@@ -23,17 +22,21 @@
     lane,
     models = [],
     laneNames = [],
-    onsave,
+    canDelete = true,
+    onchange,
+    ondelete = () => {},
   }: {
     lane: Lane;
     models?: ModelOption[];
     laneNames?: string[];
-    onsave: (name: string, body: Lane) => void | Promise<void>;
+    canDelete?: boolean;
+    onchange: (lane: Lane) => void;
+    ondelete?: (name: string) => void;
   } = $props();
 
-  // Local editable copy so a failed save never dirties the parent's data. We
-  // intentionally seed from the prop's INITIAL value only (untrack) — the editor
-  // then owns its own state; the parent re-keys on save to feed fresh props.
+  // Local editable copy seeded from the prop's initial value. Each edit emits a
+  // complete lane into the page-level working set; a failed save leaves those
+  // unsaved values visible so the operator can correct or retry them.
   const initial = untrack(() => lane);
   let primary = $state(initial.primary);
   let fallback = $state<string[]>([...initial.fallback]);
@@ -43,11 +46,10 @@
   // Lane-forced reasoning effort; '' = unforced (the request-driven default).
   let reasoningEffort = $state<ReasoningEffort | ''>(initial.reasoning_effort ?? '');
   let newFallback = $state('');
-  // Per-card success flag: set when the parent's save resolves without throwing.
-  // It is the visible "success notice" the operator (and the e2e) waits for.
-  let saved = $state(false);
+  let draggingIndex = $state<number | null>(null);
+  let stopPointerDrag: (() => void) | null = null;
+  let fallbackList: HTMLUListElement | undefined;
 
-  const isBalanced = initial.name === 'balanced';
   // Per-card <datalist> id (each lane renders its own editor). Drives the
   // combobox on both the primary and fallback-add inputs.
   const modelsListId = `lane-models-${initial.name}`;
@@ -64,41 +66,12 @@
     return slash > 0 ? alias.slice(0, slash) : undefined;
   }
 
-  // Validation. `balanced` must keep a primary (docs/04 hard line); other lanes also
-  // need a non-empty primary to be coherent. The hint text differs so ops sees
-  // *why* balanced is special.
+  // Every lane needs a non-empty primary to be coherent; no lane name is special.
   const trimmedPrimary = $derived(primary.trim());
   const primaryEmpty = $derived(trimmedPrimary.length === 0);
-  const valid = $derived(!primaryEmpty);
 
-  function addFallback(): void {
-    const v = newFallback.trim();
-    if (v.length === 0) return;
-    fallback = [...fallback, v];
-    newFallback = '';
-  }
-
-  function removeFallback(i: number): void {
-    fallback = fallback.filter((_, idx) => idx !== i);
-  }
-
-  function moveUp(i: number): void {
-    if (i <= 0) return;
-    const next = [...fallback];
-    [next[i - 1], next[i]] = [next[i], next[i - 1]];
-    fallback = next;
-  }
-
-  function moveDown(i: number): void {
-    if (i >= fallback.length - 1) return;
-    const next = [...fallback];
-    [next[i], next[i + 1]] = [next[i + 1], next[i]];
-    fallback = next;
-  }
-
-  async function handleSave(): Promise<void> {
-    if (!valid) return;
-    const body: Lane = {
+  function emit(): void {
+    const next: Lane = {
       ...initial,
       primary: trimmedPrimary,
       fallback: [...fallback],
@@ -109,42 +82,130 @@
         max_latency_ms: maxLatency,
       },
     };
-    // Forced reasoning effort: set when chosen, OMIT when '' so the server (and the
-    // YAML write-back) treat it as unforced and prune the key (a strictObject would
-    // also reject an explicit invalid value).
-    if (reasoningEffort) body.reasoning_effort = reasoningEffort;
-    else delete body.reasoning_effort;
-    saved = false;
-    // The parent owns user-facing error handling (page-level alert). It re-throws
-    // on failure so the per-card success flag is flipped ONLY on a real success;
-    // a rejected save leaves `saved` false (fail-closed UX).
-    try {
-      await onsave(initial.name, body);
-      saved = true;
-    } catch {
-      saved = false;
+    if (reasoningEffort) next.reasoning_effort = reasoningEffort;
+    else delete next.reasoning_effort;
+    onchange(next);
+  }
+
+  function addFallback(): void {
+    const v = newFallback.trim();
+    if (v.length === 0) return;
+    fallback = [...fallback, v];
+    newFallback = '';
+    emit();
+  }
+
+  function removeFallback(i: number): void {
+    fallback = fallback.filter((_, idx) => idx !== i);
+    emit();
+  }
+
+  function moveFallback(from: number, to: number): void {
+    if (from === to || from < 0 || from >= fallback.length || to < 0 || to >= fallback.length) {
+      return;
+    }
+    const next = [...fallback];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    fallback = next;
+    emit();
+  }
+
+  function handleDragStart(index: number, event: DragEvent): void {
+    draggingIndex = index;
+    event.dataTransfer?.setData('text/plain', String(index));
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+  }
+
+  function finishDrag(): void {
+    stopPointerDrag?.();
+    stopPointerDrag = null;
+    draggingIndex = null;
+  }
+
+  function handleDrop(index: number, event: DragEvent): void {
+    event.preventDefault();
+    const from = draggingIndex ?? Number(event.dataTransfer?.getData('text/plain'));
+    if (Number.isInteger(from)) moveFallback(from, index);
+    finishDrag();
+  }
+
+  function targetIndex(clientY: number): number {
+    const items = Array.from(fallbackList?.children ?? []);
+    for (let i = 0; i < items.length; i += 1) {
+      const rect = items[i].getBoundingClientRect();
+      if (clientY < rect.top + rect.height / 2) return i;
+    }
+    return items.length - 1;
+  }
+
+  function handlePointerStart(index: number, event: PointerEvent): void {
+    if (event.button !== 0 || fallback.length < 2) return;
+    finishDrag();
+    event.preventDefault();
+    draggingIndex = index;
+    const pointerId = event.pointerId;
+    const onMove = (next: PointerEvent) => {
+      if (next.pointerId !== pointerId || draggingIndex === null) return;
+      next.preventDefault();
+      const to = targetIndex(next.clientY);
+      if (to >= 0 && to !== draggingIndex) {
+        moveFallback(draggingIndex, to);
+        draggingIndex = to;
+      }
+    };
+    const onUp = (next: PointerEvent) => {
+      if (next.pointerId === pointerId) finishDrag();
+    };
+    window.addEventListener('pointermove', onMove, { passive: false });
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    stopPointerDrag = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+  }
+
+  function handleDragKeydown(index: number, event: KeyboardEvent): void {
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      moveFallback(index, index - 1);
+    } else if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      moveFallback(index, index + 1);
     }
   }
 </script>
 
-<form
-  class="card flex flex-col gap-3"
-  data-testid="lane-card"
-  onsubmit={(e) => {
-    e.preventDefault();
-    handleSave();
-  }}
->
-  <header class="flex items-baseline justify-between">
+<section class="card flex flex-col gap-3" data-testid="lane-card">
+  <header class="flex items-center justify-between gap-3">
     <h2 class="section-header">{lane.name}</h2>
-    {#if lane.purpose}
-      <span class="badge-neutral">{lane.purpose}</span>
-    {/if}
+    <div class="flex items-center gap-2">
+      {#if lane.purpose}
+        <span class="badge-neutral">{lane.purpose}</span>
+      {/if}
+      <button
+        type="button"
+        class="btn-danger-outline"
+        disabled={!canDelete}
+        onclick={() => ondelete(initial.name)}>{$t('Delete')}</button
+      >
+    </div>
   </header>
 
   <label class="flex flex-col gap-1">
     <span class="field-label">{$t('Primary')}</span>
-    <input name="primary" class="input" list={modelsListId} bind:value={primary} />
+    <input
+      name="primary"
+      class="input"
+      list={modelsListId}
+      value={primary}
+      oninput={(event) => {
+        primary = event.currentTarget.value;
+        emit();
+      }}
+    />
     <span class="field-help">
       {$t('The model this lane uses first. Tried before any fallback.')}
     </span>
@@ -170,28 +231,34 @@
     <span class="field-help">
       {$t('Tried top to bottom when the primary fails. Order is the try order.')}
     </span>
-    <ul class="flex flex-col gap-1">
+    <ul class="flex flex-col gap-1" bind:this={fallbackList}>
       {#each fallback as f, i (i + ':' + f)}
         <li
-          class="flex items-center gap-2 rounded bg-slate-50 px-2 py-1 text-sm"
+          class={`flex items-center gap-2 rounded bg-slate-50 px-2 py-1 text-sm ${draggingIndex === i ? 'opacity-60 ring-2 ring-slate-300' : ''}`}
           data-testid="fallback-item"
+          ondragover={(event) => event.preventDefault()}
+          ondrop={(event) => handleDrop(i, event)}
         >
+          <button
+            type="button"
+            class="btn-icon shrink-0 cursor-grab text-slate-400 hover:text-slate-700 active:cursor-grabbing"
+            aria-label={$t('drag to reorder fallback')}
+            title={$t('drag to reorder fallback')}
+            disabled={fallback.length < 2}
+            draggable={fallback.length > 1}
+            ondragstart={(event) => handleDragStart(i, event)}
+            ondragend={finishDrag}
+            onpointerdown={(event) => handlePointerStart(i, event)}
+            onkeydown={(event) => handleDragKeydown(i, event)}
+          >
+            <svg viewBox="0 0 20 20" class="h-4 w-4" fill="currentColor" aria-hidden="true">
+              <path
+                d="M7 5.25a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Zm0 4.75a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Zm-1.25 6a1.25 1.25 0 1 0 0-2.5 1.25 1.25 0 0 0 0 2.5Zm9.75-10.75a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0ZM14.25 11.25a1.25 1.25 0 1 0 0-2.5 1.25 1.25 0 0 0 0 2.5Zm1.25 3.5a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Z"
+              />
+            </svg>
+          </button>
           <span class="badge-fallback">{i + 1}</span>
           <span class="flex-1">{f}</span>
-          <button
-            type="button"
-            class="btn-icon"
-            aria-label={`move ${f} up`}
-            onclick={() => moveUp(i)}
-            disabled={i === 0}>↑</button
-          >
-          <button
-            type="button"
-            class="btn-icon"
-            aria-label={`move ${f} down`}
-            onclick={() => moveDown(i)}
-            disabled={i === fallback.length - 1}>↓</button
-          >
           <button
             type="button"
             class="btn-icon"
@@ -226,11 +293,27 @@
     </span>
     <div class="flex flex-wrap items-center gap-x-6 gap-y-2">
       <label class="checkbox-field">
-        <input type="checkbox" class="checkbox" bind:checked={requireTools} />
+        <input
+          type="checkbox"
+          class="checkbox"
+          checked={requireTools}
+          onchange={(event) => {
+            requireTools = event.currentTarget.checked;
+            emit();
+          }}
+        />
         <span>{$t('Require tools')}</span>
       </label>
       <label class="checkbox-field">
-        <input type="checkbox" class="checkbox" bind:checked={requireJson} />
+        <input
+          type="checkbox"
+          class="checkbox"
+          checked={requireJson}
+          onchange={(event) => {
+            requireJson = event.currentTarget.checked;
+            emit();
+          }}
+        />
         <span>{$t('Require JSON')}</span>
       </label>
     </div>
@@ -244,6 +327,7 @@
         oninput={(e) => {
           const v = (e.currentTarget as HTMLInputElement).value;
           maxLatency = v === '' ? null : Number(v);
+          emit();
         }}
       />
     </label>
@@ -251,7 +335,15 @@
 
   <label class="field flex flex-col gap-1">
     <span class="field-label">{$t('Forced reasoning effort')}</span>
-    <select class="input-sm w-44" data-testid="reasoning-effort" bind:value={reasoningEffort}>
+    <select
+      class="input-sm w-44"
+      data-testid="reasoning-effort"
+      value={reasoningEffort}
+      onchange={(event) => {
+        reasoningEffort = event.currentTarget.value as ReasoningEffort | '';
+        emit();
+      }}
+    >
       <option value="">{$t('Unset (client decides)')}</option>
       {#each REASONING_EFFORTS as eff (eff)}
         <option value={eff}>{eff}</option>
@@ -264,22 +356,7 @@
 
   {#if primaryEmpty}
     <p class="alert-error" role="alert">
-      {#if isBalanced}
-        {$t('The')}
-        <strong>balanced</strong>
-        {$t(
-          'lane is the classification fallback terminal — its primary is required and cannot be empty.',
-        )}
-      {:else}
-        {$t('Primary is required and cannot be empty.')}
-      {/if}
+      {$t('Primary is required and cannot be empty.')}
     </p>
   {/if}
-
-  <div class="card-actions">
-    {#if saved}
-      <span data-testid="lane-saved" role="status" class="badge-ok">{$t('Saved')}</span>
-    {/if}
-    <button type="submit" class="btn-primary" disabled={!valid}>{$t('Save')}</button>
-  </div>
-</form>
+</section>

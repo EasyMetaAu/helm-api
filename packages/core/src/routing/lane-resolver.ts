@@ -1,9 +1,8 @@
 import type { LanesConfig } from "../lanes/schema.js";
 
 // Lane Resolver — collapses the classifier + policy outcome into exactly ONE
-// lane name, defaulting to `balanced`. Pure, deterministic, zero-network
-// (CLAUDE.md principle 4); `balanced` is the terminal of the *classification*
-// fallback (principle 5) and is guaranteed to exist by `lanes.schema`. It does
+// lane name, defaulting to the configured runtime terminal. Pure, deterministic,
+// zero-network (CLAUDE.md principle 4). It does
 // NOT expand primary->fallback chains, trip circuit breakers, or call providers
 // — that EXECUTION fallback belongs to `executor.fallback`, a separate
 // mechanism with separate log fields (principle 5). See
@@ -45,8 +44,8 @@ export interface ResolveLaneInput {
   // Operator-chosen terminal fallback lane (admin "System Settings"). Used ONLY at
   // the fail-open terminal (classifier `default`/`fallback`, or fully-unresolved) —
   // NOT for the complexity tiers. Honoured only if the lane EXISTS; otherwise the
-  // resolver uses the literal `balanced` floor (guaranteed by lanes.schema), so a
-  // stale/removed lane can never strand routing. Omitted ⇒ `balanced` (back-compat).
+  // resolver prefers `balanced`, then the first configured lane, so a stale setting
+  // can never strand routing. Omitted ⇒ `balanced` when present (back-compat).
   defaultLane?: string;
 }
 
@@ -76,16 +75,20 @@ function has(lanes: LanesConfig, name: string): boolean {
 //   3. complexity fallback lane (if it exists)                     -> complexity_fallback
 //   4. otherwise / classifier self-fallback / missing lane         -> balanced
 // Any selected name that is absent from `lanes` is skipped (fail-open,
-// principle 3); the terminal `balanced` is guaranteed present by lanes.schema.
+// principle 3); the terminal is always chosen from the configured lane set.
 export function resolveLane(input: ResolveLaneInput): LaneDecision {
   const { classification, policy, lanes } = input;
 
   // Terminal fallback lane: the operator-chosen `defaultLane` if it names an
-  // existing lane, else the literal `balanced` floor (guaranteed by lanes.schema).
+  // existing lane, else balanced for back-compat, else the first configured lane.
   // This affects ONLY the two fail-open terminals below — never the complexity
   // tiers (COMPLEXITY_FALLBACK), which keep their fixed economy/balanced/premium.
   const terminal =
-    input.defaultLane && has(lanes, input.defaultLane) ? input.defaultLane : BALANCED;
+    input.defaultLane && has(lanes, input.defaultLane)
+      ? input.defaultLane
+      : has(lanes, BALANCED)
+        ? BALANCED
+        : (Object.keys(lanes)[0] ?? BALANCED);
 
   // The classifier already fell back to its terminal (hard fail-open `default`,
   // or Layer-3 cascade `fallback`) — do not re-derive a lane from

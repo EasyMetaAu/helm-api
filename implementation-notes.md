@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-22 · Lanes 批量保存、拖拽回退与可配置默认通道删除边界（Routing / Admin lanes，docs/03/04/11，原则 2/3/5/6）
+
+- **整组写入**：Lanes 页面不再由每张卡分别 PUT；所有编辑、fallback 顺序和待删除 lane 由一个底部保存按钮通过 `PUT /admin/api/lanes` 一次提交，Gateway 用共享 `LanesConfigSchema` 校验完整 map 后原子写回 `lanes.yaml` 并热更新，失败时整组不落盘。单 lane API 保留兼容，不新增依赖。
+- **排序与删除**：fallback 的上下按钮改为复用 Policies 页交互语义的拖拽手柄，并保留方向键排序；每张 lane 卡提供删除按钮，删除先进入页面工作集，统一保存时才持久化。页面从 runtime settings 读取当前 `default_lane`，只保护当前默认 lane，不把 `balanced` 写死。
+- **配置边界修正**：`LanesConfigSchema` 改为要求至少一个有效 lane；`runtime.default_lane` 与 lane 集合的交叉约束在 Gateway 边界及启动组合层 fail-closed 校验。因而用户先把默认通道改成其他 lane 后可删除 `balanced`；Settings 选项与默认配置说明也不再把 `balanced` 当作强制终点。若手工配置令默认通道不存在，Gateway 拒绝启动；Resolver 仍对异常调用防御性地回退到存在的 `balanced` 或第一个 lane。
+
 ## 2026-07-22 · Responses 状态续接严格绑定原 provider 与账号（Protocol translation / provider execution，docs/04/05/07，原则 2/3/5/8）
 
 - **状态引用边界**：`previous_response_id` 引用的是上游保存、Helm 无法从当前增量请求重建的隐藏历史。Responses create 入口复用既有 lifecycle registry，按同一 account/key 查出产生该 ID 的 provider alias；未知 ID、registry 不可用、或由非 Responses 翻译路径生成的 ID 在路由前返回 `400 invalid_request`，要求客户端发送完整 conversation input，不猜测也不静默丢历史。
@@ -60,13 +66,9 @@
 - **流式时序与资源边界**：Anthropic 的 message-level `stop_reason` 位于 `content_block_stop` 之后的 `message_delta`，无法按规格字面在 block stop 当场决策。实现只在发现候选起始标记后暂存尾部，等晚到终态再改写；任何非 `tool_use`、解析拒绝、已有 structured call、异常或超限都先按原顺序冲刷文本/原始 SSE。translation 与 native candidate 均设 1 MiB UTF-8 上限，超限后本流永久旁路恢复，防止未闭合 XML 造成无界内存；native 旁路仍以最多 64K 字符的未完成 SSE 尾部有界探测 `message_stop`，避免完整终态因 HTTP body 延迟关闭而误触 idle timeout。实际网络读取继续由 `readAnthropicSSERaw` 负责，其他 idle/stall timeout 语义不变。改写时使用确定性 `toolu_synthetic_*` id，并单调重映射后续 block index。
 - **运行时回滚与保真**：新增 `tool_call_xml_recovery` runtime setting，默认 `true`；Gateway route、pipeline、executor 与 provider 都按请求读取 live 值，Admin 保存模型显式 round-trip 该字段，运维可通过现有 settings API 立即关闭。无工具、无候选或 flag off 的普通路径不解析正文；native 无候选流继续逐 network chunk 原样转发，translated 无候选流保持既有事件机。TDD 覆盖 parser、四个出口、跨 network/delta 分片、晚到 stop reason、周边文本、多 invoke、白名单、structured-call 去重、flag off、缓冲上限、异常冲刷与 index/id 顺序；最终定向结果以本次交付报告为准。
 
-## 2026-07-16 · 历史费用回填放宽 WAL 与磁盘恢复门槛（Catalog / telemetry repair operations，docs/07/08，原则 2/3/7）
-
-- **生产事实与新门槛**：常驻 supervisor 已在 `2026-07-08` UTC 窗口的 `22,100 / 31,400` 连续等待约 7 小时；CPU、内存、health、restart/OOM、Gateway/SQLite 信号均健康，唯一持续原因是磁盘低于 14 GiB，随后 WAL 增至约 583 MiB。主机当时仍有约 13.9 GiB 可用空间，全部历史回填目录约 1.55 GiB，当前窗口 221 个微型备份约 106 MiB，且 Docker 已无可回收镜像。为避免恢复门槛永久饿死任务，preflight 改为 WAL `<640 MiB`、磁盘 `>13 GiB`；runtime hard stop 改为 WAL `<768 MiB`，磁盘硬底线继续保持 `12 GiB`。这样当前状态可恢复，同时仍保留约 0.9 GiB 磁盘余量、约 185 MiB WAL 运行余量和独立硬上限。
-- **未放宽边界**：CPU `<75%`、load、可用内存、Helm 内存、non-200/5 秒 health probe timeout、restart、OOM、gateway-internal 5xx 与 `SQLITE_BUSY` 继续按原逻辑阻断；每批 100 行、每阶段最多 5,000 行、冷却、checkpoint、slice verification 与微型恢复库均不变。WAL/磁盘原因文案改为从配置阈值动态生成，避免以后阈值调整后状态继续报告旧数字。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-16 · 历史费用回填放宽 WAL 与磁盘恢复门槛（Catalog / telemetry repair operations，原则 2/3/7）**：在既有 100 行原子批次、资源门禁和 12 GiB 硬底线不变的前提下，按健康实测放宽 preflight WAL/磁盘恢复门槛，避免任务永久饥饿；完整原文通过 git history 回溯。
 - **2026-07-16 · 路由白名单改为真实交集并让分类开关兑现配置语义（Routing / classifier / CI，原则 2/3/5/6/7）**：Policy 与 key 白名单求真实交集并让空集 fail-closed；rules/eval cache 开关兑现配置语义，CI Actions 固定到核验 SHA；完整原文通过 git history 回溯。
 - **2026-07-16 · xAI 订阅协议跟随官方 grok-build 并收紧动态目录边界（OAuth subscription / model catalog / Responses / Admin providers，原则 2/3/6/7/8）**：以真实 wire 和账号 entitlement 分离模型目录 ID、执行 slug、能力与配额，未知能力保持 fail-closed，跨账号冲突拒绝；完整原文通过 git history 回溯。
 - **2026-07-16 · 收紧发布信任链、请求归属与 Memory 项目隔离（CI / observability / Memory，原则 1/3/7）**：PR 信任链固定到受核验 merge ref 与只读权限，发布绑定已验证 main SHA；内部 `request_id` 与客户端 trace 分离，Memory thread/project 迁移保持租户隔离与事务原子性；完整原文通过 git history 回溯。

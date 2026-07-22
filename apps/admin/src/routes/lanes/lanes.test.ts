@@ -5,10 +5,10 @@ import type { ModelOption } from '$lib/api/models.js';
 import LanesPage from './+page.svelte';
 
 // The page consumes data from `load` (mocked via the `data` prop) and writes
-// through the `saveLane` API client, which we mock here.
-const saveLane = vi.fn();
+// through the whole-set `saveLanes` API client, which we mock here.
+const saveLanes = vi.fn();
 vi.mock('$lib/api/lanes.js', () => ({
-  saveLane: (...args: unknown[]) => saveLane(...args),
+  saveLanes: (...args: unknown[]) => saveLanes(...args),
   // LaneEditor imports this value from the same module; the mock must expose it.
   REASONING_EFFORTS: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
 }));
@@ -24,15 +24,14 @@ function lane(name: string, overrides: Partial<Lane> = {}): Lane {
   };
 }
 
-function renderPage(lanes: Lane[], models: ModelOption[] = []) {
-  return render(LanesPage, { data: { lanes, models } });
+function renderPage(lanes: Lane[], models: ModelOption[] = [], defaultLane = 'balanced') {
+  return render(LanesPage, { data: { lanes, models, defaultLane } });
 }
 
 describe('lanes page', () => {
   beforeEach(() => {
-    saveLane.mockReset();
-    // Mirror the real client: echo the persisted lane back.
-    saveLane.mockImplementation((name: string, body: Lane) => Promise.resolve(body));
+    saveLanes.mockReset();
+    saveLanes.mockImplementation((lanes: Lane[]) => Promise.resolve(lanes));
   });
 
   it('renders one card per lane with primary + fallback', () => {
@@ -81,51 +80,67 @@ describe('lanes page', () => {
     expect(idxPremium).toBeLessThan(idxEconomy);
   });
 
-  it('editing a lane primary and saving calls saveLane with the new value', async () => {
-    renderPage([lane('coding', { primary: 'old_model' })]);
-    const card = screen.getByTestId('lane-card');
-    const primary = card.querySelector("input[name='primary']") as HTMLInputElement;
-    await fireEvent.input(primary, { target: { value: 'new_model' } });
-    await fireEvent.click(within(card).getByRole('button', { name: /save/i }));
+  it('saves edits from multiple cards in one request', async () => {
+    renderPage([lane('balanced', { primary: 'old-balanced' }), lane('coding')]);
+    const cards = screen.getAllByTestId('lane-card');
+    await fireEvent.input(cards[0].querySelector("input[name='primary']") as HTMLInputElement, {
+      target: { value: 'new-balanced' },
+    });
+    await fireEvent.change(within(cards[1]).getByTestId('reasoning-effort'), {
+      target: { value: 'medium' },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
 
-    await waitFor(() => expect(saveLane).toHaveBeenCalledTimes(1));
-    expect(saveLane.mock.calls[0][0]).toBe('coding');
-    expect(saveLane.mock.calls[0][1].primary).toBe('new_model');
+    await waitFor(() => expect(saveLanes).toHaveBeenCalledTimes(1));
+    expect(saveLanes.mock.calls[0][0]).toEqual([
+      expect.objectContaining({ name: 'balanced', primary: 'new-balanced' }),
+      expect.objectContaining({ name: 'coding', reasoning_effort: 'medium' }),
+    ]);
   });
 
   it('on save failure shows an error and keeps the original value (fail-closed)', async () => {
-    saveLane.mockRejectedValue(new Error('400 invalid lane'));
-    renderPage([lane('coding', { primary: 'old_model' })]);
+    saveLanes.mockRejectedValue(new Error('400 invalid lanes'));
+    renderPage([lane('balanced', { primary: 'old_model' })]);
     const card = screen.getByTestId('lane-card');
     const primary = card.querySelector("input[name='primary']") as HTMLInputElement;
     await fireEvent.input(primary, { target: { value: 'broken_model' } });
-    await fireEvent.click(within(card).getByRole('button', { name: /save/i }));
+    await fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
 
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
     // The other lanes' data is untouched; the page did not crash.
-    expect(screen.getByText('coding')).toBeInTheDocument();
-  });
-
-  it('selecting a forced reasoning effort and saving sends it to saveLane', async () => {
-    renderPage([lane('coding')]);
-    const card = screen.getByTestId('lane-card');
-    const select = within(card).getByTestId('reasoning-effort') as HTMLSelectElement;
-    await fireEvent.change(select, { target: { value: 'medium' } });
-    await fireEvent.click(within(card).getByRole('button', { name: /save/i }));
-
-    await waitFor(() => expect(saveLane).toHaveBeenCalledTimes(1));
-    expect(saveLane.mock.calls[0][1].reasoning_effort).toBe('medium');
+    expect(screen.getByText('balanced')).toBeInTheDocument();
   });
 
   it('seeds the dropdown from the lane and omits the field when set back to Unset', async () => {
-    renderPage([lane('coding', { reasoning_effort: 'high' })]);
+    renderPage([lane('balanced', { reasoning_effort: 'high' })]);
     const card = screen.getByTestId('lane-card');
     const select = within(card).getByTestId('reasoning-effort') as HTMLSelectElement;
     expect(select.value).toBe('high'); // seeded from the lane's forced value
     await fireEvent.change(select, { target: { value: '' } }); // Unset
-    await fireEvent.click(within(card).getByRole('button', { name: /save/i }));
+    await fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
 
-    await waitFor(() => expect(saveLane).toHaveBeenCalledTimes(1));
-    expect(saveLane.mock.calls[0][1].reasoning_effort).toBeUndefined();
+    await waitFor(() => expect(saveLanes).toHaveBeenCalledTimes(1));
+    expect(saveLanes.mock.calls[0][0][0].reasoning_effort).toBeUndefined();
+  });
+
+  it('removes a lane from the working set and persists the deletion with Save lanes', async () => {
+    renderPage([lane('balanced'), lane('economy')]);
+    const cards = screen.getAllByTestId('lane-card');
+    await fireEvent.click(within(cards[1]).getByRole('button', { name: /^delete$/i }));
+
+    expect(screen.getAllByTestId('lane-card')).toHaveLength(1);
+    expect(within(cards[0]).getByRole('button', { name: /^delete$/i })).toBeDisabled();
+    await fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
+
+    await waitFor(() =>
+      expect(saveLanes).toHaveBeenCalledWith([expect.objectContaining({ name: 'balanced' })]),
+    );
+  });
+
+  it('protects the configured default lane instead of hard-coding balanced', () => {
+    renderPage([lane('balanced'), lane('premium')], [], 'premium');
+    const cards = screen.getAllByTestId('lane-card');
+    expect(within(cards[0]).getByRole('button', { name: /^delete$/i })).toBeEnabled();
+    expect(within(cards[1]).getByRole('button', { name: /^delete$/i })).toBeDisabled();
   });
 });

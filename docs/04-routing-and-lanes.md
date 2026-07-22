@@ -55,15 +55,17 @@ The terminal fallback lane is operator-configurable via the admin **System
 Settings** (`runtime.default_lane`, hot-applied, default `balanced`). It is used at
 **both** fail-open terminals — the classifier short-circuit above and the final
 "nothing resolved" sink — **but only if the named lane exists**; otherwise the
-resolver falls back to the literal `balanced`. It does **not** change the
+resolver defensively prefers `balanced` when present, then the first configured
+lane. It does **not** change the
 complexity-fallback tiers (`simple→economy / medium→balanced / complex→premium`),
 which keep their fixed targets. An unknown lane is rejected (400) at the settings
-write boundary, so a stale value can only arise if a lane is deleted afterwards —
-in which case the `balanced` floor takes over.
+write boundary, and the current default lane cannot be deleted through the Admin
+API. The resolver fallback only protects direct callers or manually inconsistent
+configuration; Gateway composition rejects that inconsistency at startup.
 
 Default lanes are deliberately few and easy to reason about. Any selected lane
-name that does not exist is skipped (fail-open); the terminal `balanced` is
-guaranteed to exist.
+name that does not exist is skipped (fail-open); the configured terminal must be
+one of the lanes in the set.
 
 When `runtime.signal_feedback.enabled` is true, the router performs one
 fail-open read of aggregated Agentic Signals after policy/key caps are applied
@@ -210,7 +212,7 @@ economy:
     - zenmux/auto
 
 balanced:
-  purpose: Default quality/cost tradeoff (classification fallback terminal)
+  purpose: Default quality/cost tradeoff
   reasoning_effort: medium
   primary: openai-codex/gpt-5.6-terra
   fallback:
@@ -230,9 +232,9 @@ premium:
     - balanced
 ```
 
-`balanced` is schema-required as the last-resort floor. It is also the shipped
-`runtime.default_lane`; an operator may choose another existing terminal lane at
-runtime, but a missing/stale choice still falls back to `balanced`.
+The lane map must contain at least one lane. `balanced` is the shipped
+`runtime.default_lane`, not a schema-mandatory name; an operator may choose another
+existing terminal lane and then delete `balanced`.
 
 The shipped task lanes (the lane resolver maps a classified `task_type` onto a
 same-named lane). These are **unranked** — incomparable to the quality/cost

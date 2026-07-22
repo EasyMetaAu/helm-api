@@ -72,13 +72,12 @@ export const LaneSchema = z.strictObject({
 });
 export type Lane = z.infer<typeof LaneSchema>;
 
-// lanes.yaml top level: lane name -> Lane, with `balanced` enforced present —
-// it is the terminal of the classification fallback (docs/04, principle 5).
+// lanes.yaml top level: lane name -> Lane. At least one lane must exist; the
+// runtime.default_lane cross-reference is validated where both values are available.
 export const LanesConfigSchema = z
   .record(z.string().min(1), LaneSchema)
-  .refine((m) => "balanced" in m, {
-    message: "lanes.yaml must define a `balanced` lane (classification fallback terminal)",
-    path: ["balanced"],
+  .refine((m) => Object.keys(m).length > 0, {
+    message: "lanes.yaml must define at least one lane",
   });
 export type LanesConfig = z.infer<typeof LanesConfigSchema>;
 

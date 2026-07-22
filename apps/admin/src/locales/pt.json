@@ -257,6 +257,7 @@
   "Done in {duration}": "Concluído em {duration}",
   "down": "fora do ar",
   "drag to reorder policy": "arraste para reordenar a política",
+  "drag to reorder fallback": "arraste para reordenar o fallback",
   "e.g. favorite number": "ex.: número favorito",
   "e.g. premium": "ex.: premium",
   "e.g. The user's favorite number is 42.": "ex.: O número favorito do usuário é 42.",

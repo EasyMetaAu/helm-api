@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Lane } from './lanes.js';
-import { listLanes, saveLane } from './lanes.js';
+import { listLanes, saveLane, saveLanes } from './lanes.js';
 
 // The admin UI talks to the gateway ONLY over /admin/api/* HTTP (DoD: no core
 // import). These tests pin the client contract against a mocked fetch.
@@ -58,6 +58,26 @@ describe('lanes api client', () => {
     expect(body.primary).toBe('best_code_model');
     expect(body.name).toBeUndefined(); // strictObject on the server: name must NOT be sent
     expect(body.fallback).toEqual(['premium']);
+  });
+
+  it('saveLanes PUTs the complete lane map in one request', async () => {
+    const lanes = [
+      laneRow('balanced'),
+      laneRow('coding', { fallback: ['balanced'] }),
+    ] as unknown as Lane[];
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(JSON.stringify(lanes), { status: 200 }),
+    );
+
+    await saveLanes(lanes);
+
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toBe('/admin/api/lanes');
+    expect(init.method).toBe('PUT');
+    const body = JSON.parse(init.body as string);
+    expect(Object.keys(body)).toEqual(['balanced', 'coding']);
+    expect(body.coding.name).toBeUndefined();
+    expect(body.coding.fallback).toEqual(['balanced']);
   });
 
   it('saveLane rejects when the server returns a non-2xx (fail-closed)', async () => {

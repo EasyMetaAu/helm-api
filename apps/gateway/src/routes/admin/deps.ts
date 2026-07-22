@@ -39,8 +39,7 @@ export type UsageLimitWriteMode = "extend" | "replace";
 // A typed read/write seam for the rule configs. Each accessor returns/accepts an
 // already-validated config object — the routes Zod-validate the inbound body
 // BEFORE calling `set*` so an invalid config is rejected (400) and never written
-// (fail-closed, Principle 2). `lanes` is a name->Lane map matching LanesConfig minus the
-// `balanced`-required refinement concern (the route enforces shape via LaneSchema).
+// (fail-closed, Principle 2). `lanes` is a name->Lane map matching LanesConfig.
 export interface RuleStore {
   getLanes(): Promise<Record<string, Lane>>;
   setLanes(lanes: Record<string, Lane>): Promise<void>;

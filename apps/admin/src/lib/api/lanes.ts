@@ -20,14 +20,7 @@ export interface LaneConstraints {
 // admin deliberately re-types shapes rather than importing core/shared). When set
 // on a lane, the gateway overrides the client's reasoning effort for every request
 // on that lane; omitted = unforced (the request-driven default).
-export type ReasoningEffort =
-  | 'none'
-  | 'minimal'
-  | 'low'
-  | 'medium'
-  | 'high'
-  | 'xhigh'
-  | 'max';
+export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export const REASONING_EFFORTS: ReasoningEffort[] = [
   'none',
   'minimal',
@@ -109,6 +102,18 @@ export async function listLanes(): Promise<Lane[]> {
   const res = await fetch(BASE, { headers: { accept: 'application/json' } });
   const rows = await asJson<Record<string, unknown>[]>(res);
   return rows.map(normalizeLane);
+}
+
+// PUT /admin/api/lanes <- complete lane map (one validated, atomic write).
+export async function saveLanes(list: Lane[]): Promise<Lane[]> {
+  const body = Object.fromEntries(list.map((lane) => [lane.name, toServerBody(lane)]));
+  const res = await fetch(BASE, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const saved = await asJson<Record<string, unknown>[]>(res);
+  return saved.map(normalizeLane);
 }
 
 // PUT /admin/api/lanes/:name <- Lane (sans `name`; server fail-closed on extras).

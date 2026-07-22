@@ -257,6 +257,7 @@
   "Done in {duration}": "耗时 {duration}",
   "down": "下行",
   "drag to reorder policy": "拖动以调整策略顺序",
+  "drag to reorder fallback": "拖动以调整回退顺序",
   "e.g. favorite number": "例如：喜欢的数字",
   "e.g. premium": "例如 premium",
   "e.g. The user's favorite number is 42.": "例如：用户喜欢的数字是 42。",
