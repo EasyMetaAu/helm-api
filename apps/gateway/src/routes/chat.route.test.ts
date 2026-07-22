@@ -757,6 +757,7 @@ describe("POST /v1/chat/completions (routing pipeline)", () => {
         apiKeyId: "k1",
         source: "x-thread-id",
         externalSessionId: "thread-123",
+        responseJson: JSON.stringify({ ok: true }),
       }),
     );
     const stored = (telemetry.insert as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {

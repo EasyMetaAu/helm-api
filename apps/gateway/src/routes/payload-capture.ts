@@ -370,6 +370,8 @@ function hasResponsesOutput(raw: string | null | undefined): boolean {
 }
 
 const MAX_SESSION_REQUEST_BYTES = 16 * 1024 * 1024;
+// Per revision: prevents one response from consuming the separate 64 MiB whole-Session budget.
+const MAX_SESSION_RESPONSE_BYTES = 16 * 1024 * 1024;
 const MAX_CACHED_SESSION_HEADS = 1_000;
 const MAX_CACHED_SESSION_HEAD_BYTES = 64 * 1024 * 1024;
 
@@ -511,6 +513,13 @@ export async function persistSessionRequest(
       log("session.capture_limited");
       return;
     }
+    const responseBytes =
+      args.responseJson === null ? 0 : Buffer.byteLength(args.responseJson, "utf8");
+    const responseJson =
+      (head?.storedBytes ?? 0) + deltaBytes + responseBytes <= SESSION_MAX_STORED_BYTES
+        ? args.responseJson
+        : null;
+    if (args.responseJson !== null && responseJson === null) log("session.response_limited");
     await upsert.call(deps.telemetry, {
       sessionRef: session.ref,
       accountId: args.accountId,
@@ -523,7 +532,7 @@ export async function persistSessionRequest(
       requestDeltaJson: delta.eventsJson,
       requestEnvelopeJson: delta.envelopeJson,
       responseId: args.responseId,
-      responseJson: args.responseJson,
+      responseJson,
       fidelity: fidelity === "partial" ? fidelity : delta.fidelity,
       createdAt: new Date(args.now),
     });
@@ -541,15 +550,22 @@ export async function queueOrPersistSessionRequest(
   args: Parameters<typeof persistSessionRequest>[1],
   log: (msg: string) => void,
 ): Promise<void> {
+  const responseJson =
+    args.responseJson !== null &&
+    Buffer.byteLength(args.responseJson, "utf8") > MAX_SESSION_RESPONSE_BYTES
+      ? null
+      : args.responseJson;
+  if (args.responseJson !== null && responseJson === null) log("session.response_limited");
+  const boundedArgs = responseJson === args.responseJson ? args : { ...args, responseJson };
   if (deps.writes && sessionCaptureEnabled(deps) && args.decision.session?.label) {
     deps.writes.enqueueSession(
-      () => persistSessionRequest(deps, args, log),
+      () => persistSessionRequest(deps, boundedArgs, log),
       Buffer.byteLength(args.requestJson, "utf8") +
-        (args.responseJson === null ? 0 : Buffer.byteLength(args.responseJson, "utf8")),
+        (responseJson === null ? 0 : Buffer.byteLength(responseJson, "utf8")),
     );
     return;
   }
-  await persistSessionRequest(deps, args, log);
+  await persistSessionRequest(deps, boundedArgs, log);
 }
 
 // Default retained-tail size (chars) when NOT persisting the body. The trailing
@@ -661,7 +677,10 @@ export async function recordServed(
   const decision =
     args.timedOut === true ? decisionForTimedOutRequest(storageDecision) : storageDecision;
   const responseJson = args.timedOut === true ? null : args.responseJson;
-  const sessionResponse = capturedResponsesResponse(decision.protocol, responseJson);
+  const sessionResponse =
+    decision.protocol === "openai_responses"
+      ? capturedResponsesResponse(decision.protocol, responseJson)
+      : { responseId: null, responseJson };
   const sessionArgs = {
     requestId: args.requestId,
     accountId: args.accountId ?? args.apiKeyId,

@@ -1274,9 +1274,49 @@ describe("recordServed — deferred write queue (the three pipeline faces)", () 
       accountId: "account-1",
       requestDeltaJson: '[{"role":"user","content":"hi"}]',
       retainCount: 0,
-      responseJson: null,
+      responseJson: "{}",
       fidelity: "semantic",
     });
+  });
+
+  it("keeps the request revision but omits a Session response larger than 16 MiB", async () => {
+    const s = sink();
+    const revisions: UpsertSessionRevisionInput[] = [];
+    const telemetry = {
+      ...s.telemetry,
+      getSessionByRef: vi.fn(async () => null),
+      listSessionRevisions: vi.fn(async () => []),
+      upsertSessionRevision: vi.fn(async (input: UpsertSessionRevisionInput) => {
+        revisions.push(input);
+      }),
+    } as unknown as RecordServedDeps["telemetry"];
+    const sessionDecision = decision();
+    sessionDecision.session = {
+      ref: "session-ref-large-response",
+      label: "thread-large-response",
+      source: "x-thread-id",
+    };
+    const log = vi.fn();
+    await recordServed(
+      {
+        telemetry,
+        redact: (value) => value,
+        now: () => 5000,
+        capturePayloads: () => false,
+        captureSessions: () => true,
+      },
+      {
+        ...args,
+        requestId: "large-response",
+        decision: sessionDecision,
+        requestJson: '{"model":"auto","messages":[{"role":"user","content":"hi"}]}',
+        responseJson: "x".repeat(16 * 1024 * 1024 + 1),
+      },
+      log,
+    );
+    expect(revisions).toHaveLength(1);
+    expect(revisions[0]?.responseJson).toBeNull();
+    expect(log).toHaveBeenCalledWith("session.response_limited");
   });
 
   it("builds Responses continuation branches from response ids instead of the latest head", async () => {

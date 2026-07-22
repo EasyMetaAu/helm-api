@@ -19,7 +19,12 @@ import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.j
 import { type MemoryKeyDefaults, resolveMemoryScope } from "./memory-scope.js";
 import { PipelineError } from "./messages-pipeline.js";
 import { nativeCarrierFromParsedBody } from "./native-carrier.js";
-import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-capture.js";
+import {
+  captureEnabled,
+  type RecordServedDeps,
+  recordServed,
+  sessionCaptureEnabled,
+} from "./payload-capture.js";
 import { resolveSessionCapture, stampSessionCapture } from "./session-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
 
@@ -541,6 +546,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     // stops long/concurrent streams from accumulating the full body when capture is
     // off (review P2).
     const captureBodies = deps.record !== undefined && captureEnabled(deps.record);
+    const captureSessionResponse = deps.record !== undefined && sessionCaptureEnabled(deps.record);
 
     // 4) Protocol Adapter (outbound): stream vs non-stream, isomorphic shape.
     if (ir.stream === true) {
@@ -710,7 +716,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
           apiKeyId: identity.keyId,
           decision: result.decision,
           requestJson,
-          responseJson: captureBodies ? JSON.stringify(body) : null,
+          responseJson: captureBodies || captureSessionResponse ? JSON.stringify(body) : null,
           timedOut: requestTimedOut(c),
           upstreamRequestJson: result.upstreamRequest ?? null,
         },

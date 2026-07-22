@@ -11,11 +11,11 @@ const settingsKeys = [
   'Full payload for every request',
   'Incremental transcript per session',
   'Metadata only',
-  'Privacy note: full payload and session modes store message content. Choose metadata only to store no bodies.',
+  'Privacy note: full payload and session modes store request and response content, which may include tool arguments, reasoning, and media. Choose metadata only to store no bodies.',
   'Request content storage',
   'Run at hour (0-23, server local time)',
   'Runs VACUUM once a day to reclaim deleted disk space. The database is briefly locked while it runs.',
-  'Session mode stores repeated conversation history once and reconstructs each request semantically.',
+  'Session mode stores repeated conversation history once, reconstructs each request semantically, and keeps available response snapshots.',
 ] as const;
 
 const translatedLocales = {

@@ -1,3 +1,4 @@
+import type { TelemetryStore, UpsertSessionRevisionInput } from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
 import { type GeminiRouteDeps, registerGeminiRoute } from "./gemini.js";
@@ -129,22 +130,31 @@ function buildApp(deps: GeminiRouteDeps) {
 
 // Recording dep with insert + insertPayload spies (mirrors the chat telemetry
 // harness). redact is the identity so a test can assert it ran on the decision.
-function makeRecord(over: { capturePayloads?: boolean } = {}): {
+function makeRecord(over: { capturePayloads?: boolean; captureSessions?: boolean } = {}): {
   record: RecordServedDeps;
   insert: ReturnType<typeof vi.fn>;
   insertPayload: ReturnType<typeof vi.fn>;
+  upsertSessionRevision: ReturnType<typeof vi.fn>;
   redact: ReturnType<typeof vi.fn>;
 } {
   const insert = vi.fn().mockResolvedValue({ id: "1" });
   const insertPayload = vi.fn().mockResolvedValue(undefined);
+  const upsertSessionRevision = vi.fn(async (_input: UpsertSessionRevisionInput) => {});
   const redact = vi.fn((x: unknown) => x);
   const record: RecordServedDeps = {
-    telemetry: { insert, insertPayload } as never,
+    telemetry: {
+      insert,
+      insertPayload,
+      getSessionByRef: vi.fn(async () => null),
+      listSessionRevisions: vi.fn(async () => []),
+      upsertSessionRevision,
+    } as unknown as TelemetryStore,
     redact: redact as never,
     now: () => 1000,
     capturePayloads: () => over.capturePayloads ?? true,
+    captureSessions: () => over.captureSessions ?? false,
   };
-  return { record, insert, insertPayload, redact };
+  return { record, insert, insertPayload, upsertSessionRevision, redact };
 }
 
 function expectGeminiCarrier(value: unknown, body: unknown, rawBody?: string): void {
@@ -523,6 +533,25 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
       body: JSON.stringify(REQ_BODY),
     });
     expect(res.status).toBe(200);
+  });
+
+  it("stores the successful non-stream response in the Session when payload capture is off", async () => {
+    const { record, insertPayload, upsertSessionRevision } = makeRecord({
+      capturePayloads: false,
+      captureSessions: true,
+    });
+    const { deps } = makeDeps({ record });
+    const app = buildApp(deps);
+    const res = await app.request("/v1beta/models/gemini-2.0-flash:generateContent", {
+      method: "POST",
+      headers: { ...GEMINI_AUTH, "x-thread-id": "thread-response" },
+      body: JSON.stringify(REQ_BODY),
+    });
+    expect(res.status).toBe(200);
+    expect(insertPayload).not.toHaveBeenCalled();
+    expect(upsertSessionRevision).toHaveBeenCalledWith(
+      expect.objectContaining({ responseJson: expect.stringContaining('"candidates"') }),
+    );
   });
 
   // ── Capture-payloads gating (review P2). With capture_payloads OFF the route

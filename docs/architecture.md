@@ -614,7 +614,7 @@ flowchart LR
     REQ["served request"] --> BD["buildDecisionRecord<br/>classifier · policy · lane · every attempt · cost · latency"]
     BD --> RD["redact() — keys matching api_key/authorization/secret/token<br/>fingerprinted; numbers pass through"]
     RD --> WQ["writeQueue (FIFO-batched, 25ms default flush)"]
-    REQ -->|"if capture_sessions (default)"| ST["sessions + revisions — incremental transcript"]
+    REQ -->|"if capture_sessions (default)"| ST["sessions + revisions — incremental transcript + response snapshots"]
     REQ -->|"if capture_payloads"| PL["request_payloads — VERBATIM, not redacted"]
     ST --> WQ
     PL --> WQ

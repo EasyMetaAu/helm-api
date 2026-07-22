@@ -166,10 +166,16 @@ Session transcript in `sessions` / `session_revisions`, or **complete, verbatim*
 request and response bodies in `request_payloads`. These stores prune independently
 and never bloat the decision JSON.
 
-- `capture_sessions` defaults to **ON** and stores an incremental transcript per
-  Session. `capture_payloads` defaults to **OFF** and stores complete per-request
-  bodies when exact inspection or Retry is required. The two modes are mutually
-  exclusive; operators can also select metadata-only.
+- `capture_sessions` defaults to **ON** and stores an incremental request transcript
+  plus an available response snapshot per Session. Successful non-stream responses
+  are stored in the client protocol shape. A completed OpenAI Responses stream keeps
+  its terminal response object so `previous_response_id` continuation remains
+  reconstructable; Chat, Anthropic, and Gemini streams remain response-unavailable
+  rather than buffering an unbounded SSE body. Session recovery is semantic and is
+  always reported as `exact=false`, so it cannot be used for Retry.
+- `capture_payloads` defaults to **OFF** and stores complete per-request bodies when
+  exact inspection or Retry is required. The two modes are mutually exclusive;
+  operators can also select metadata-only.
 - Runtime settings are stored in `config_kv`. If that persisted blob is malformed
   or no longer matches the schema, settings load fail-open to safe defaults with
   **both content modes forced off** until the operator saves a valid object; an
@@ -177,9 +183,14 @@ and never bloat the decision JSON.
 - `payload_retention_days` (default 30) bounds the storage footprint and the
   exposure window. The scheduled cleanup runner owns pruning independently of
   whether capture is currently enabled or new traffic is arriving.
-- Capture is **not** redacted — it is the verbatim client request body plus the
-  assembled provider response, with the exact post-injection/translation upstream
-  request stored as a separate part when available. Helm's bearer credential is
+- One Session response snapshot is limited to 16 MiB. An oversized snapshot is
+  omitted while the request revision is still retained; the whole Session remains
+  bounded by the Store's 64 MiB / 10,000 revision limits.
+- Captured content is **not** redacted. Full-payload mode stores the verbatim client
+  request body plus the assembled provider response, with the exact
+  post-injection/translation upstream request as a separate part when available;
+  Session mode can retain request messages and response snapshots, including tool
+  arguments, reasoning, and media. Helm's bearer credential is
   not copied from the Authorization header into these rows, but application
   payloads may themselves contain secrets; protect and back up the database as
   sensitive data.

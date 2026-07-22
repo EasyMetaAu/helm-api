@@ -16,7 +16,12 @@ import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult, RouteError } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
 import { nativeCarrierFromParsedBody } from "./native-carrier.js";
-import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-capture.js";
+import {
+  captureEnabled,
+  type RecordServedDeps,
+  recordServed,
+  sessionCaptureEnabled,
+} from "./payload-capture.js";
 import { resolveSessionCapture, stampSessionCapture } from "./session-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
 
@@ -365,6 +370,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
     // stops long/concurrent streams from accumulating the full body when capture is
     // off (review P2).
     const captureBodies = deps.record !== undefined && captureEnabled(deps.record);
+    const captureSessionResponse = deps.record !== undefined && sessionCaptureEnabled(deps.record);
 
     // 4) Protocol Adapter (outbound). Gemini streaming events are incremental deltas,
     //    written as nameless `data:` frames — NO `event:` name, NO `[DONE]`.
@@ -509,7 +515,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
           apiKeyId: identity.keyId,
           decision: result.decision,
           requestJson,
-          responseJson: captureBodies ? JSON.stringify(body) : null,
+          responseJson: captureBodies || captureSessionResponse ? JSON.stringify(body) : null,
           timedOut: requestTimedOut(c),
           upstreamRequestJson: result.upstreamRequest ?? null,
         },

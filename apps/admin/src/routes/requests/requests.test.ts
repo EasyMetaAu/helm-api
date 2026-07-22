@@ -379,10 +379,7 @@ describe('requests list page', () => {
       ]),
     });
     await fireEvent.click(screen.getByTestId('session-filter'));
-    expect(goto).toHaveBeenCalledWith(
-      '?range=all&session_ref=session_abc',
-      expect.anything(),
-    );
+    expect(goto).toHaveBeenCalledWith('?range=all&session_ref=session_abc', expect.anything());
     initial.unmount();
 
     vi.mocked(goto).mockClear();
@@ -772,7 +769,12 @@ describe('requests detail page', () => {
     const responses = render(DetailPage, {
       data: {
         detail: detail(),
-        payload: { captured: true, request: { model: 'gpt-5.5', input: 'hi' }, response: {} },
+        payload: {
+          captured: true,
+          exact: true,
+          request: { model: 'gpt-5.5', input: 'hi' },
+          response: {},
+        },
         requestId: 'tr_resp',
       },
     });
@@ -784,6 +786,7 @@ describe('requests detail page', () => {
         detail: detail(),
         payload: {
           captured: true,
+          exact: true,
           request: { contents: [{ role: 'user', parts: [{ text: 'hi' }] }] },
           response: {},
         },

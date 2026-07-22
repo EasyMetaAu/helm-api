@@ -144,7 +144,11 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
           exact: false,
           fidelity: recovered.fidelity,
           created_at: recovered.createdAt.getTime(),
-          parts: { request: true, response: false, upstream_request: false },
+          parts: {
+            request: true,
+            response: recovered.responseJson !== null,
+            upstream_request: false,
+          },
         });
       }
       return c.json({
@@ -163,18 +167,22 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
     if (part !== "full") {
       const p = await getPayloadPart(deps, traceId, part);
       if (!p) {
-        const recovered = part === "request" ? await getSessionRequest(deps, traceId) : null;
+        const recovered =
+          part === "request" || part === "response" ? await getSessionRequest(deps, traceId) : null;
         if (!recovered)
           return c.json({ captured: false, source: "unavailable", reason: "no_session" });
         if (recovered.status === "unavailable")
           return c.json({ captured: false, source: "unavailable", reason: recovered.reason });
+        const json = part === "request" ? recovered.requestJson : recovered.responseJson;
+        if (json === null)
+          return c.json({ captured: false, source: "unavailable", reason: "response_unavailable" });
         return c.json({
           captured: true,
           source: "session",
           exact: false,
           fidelity: recovered.fidelity,
-          part: "request",
-          value: parseMaybeJson(recovered.requestJson),
+          part,
+          value: parseMaybeJson(json),
           created_at: recovered.createdAt.getTime(),
         });
       }
@@ -200,7 +208,7 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
         exact: false,
         fidelity: recovered.fidelity,
         request: parseMaybeJson(recovered.requestJson),
-        response: null,
+        response: recovered.responseJson === null ? null : parseMaybeJson(recovered.responseJson),
         upstream_request: null,
         created_at: recovered.createdAt.getTime(),
       });
@@ -225,7 +233,13 @@ async function getSessionRequest(
   deps: AdminApiDeps,
   requestId: string,
 ): Promise<
-  | { status: "recovered"; requestJson: string; fidelity: string; createdAt: Date }
+  | {
+      status: "recovered";
+      requestJson: string;
+      responseJson: string | null;
+      fidelity: string;
+      createdAt: Date;
+    }
   | {
       status: "unavailable";
       reason: "no_session" | "session_unavailable" | "session_incomplete";
@@ -243,6 +257,7 @@ async function getSessionRequest(
     return {
       status: "recovered",
       requestJson: restoreSessionRevisionJson(revisions, requestId),
+      responseJson: decision.final.status === "ok" ? target.responseJson : null,
       fidelity: target.fidelity,
       createdAt: target.createdAt,
     };

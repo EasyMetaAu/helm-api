@@ -98,7 +98,7 @@ Codex 和 SDK 的可复制接入配置；整个过程无需手动重启服务。
 | 🔐 | **OAuth 订阅账号池** | Claude Pro/Max、ChatGPT Codex、GitHub Copilot，以及实验性的 xAI/SuperGrok 订阅都可作为上游。Helm 支持同一供应商接入多个账号，并分别管理可用模型、出口代理和调度；账号池还提供全局使用策略、实时额度窗口，以及受保护的 Codex reset-credit 恢复机制。*（此功能需主动启用；使用前请阅读 [ToS 警告](#oauth-订阅类供应商claude-promaxchatgpt-codexgithub-copilot)。）* |
 | 🔑 | **可精细约束的 API Key** | 所有请求必须鉴权，API key 仅以 SHA-256 哈希参与验证；如需在管理面板中查看或轮转，可额外保存加密后的恢复材料。每把 key 都能独立设置名称、lane 白名单、自定义模型/禁用模型/Fast 模型权限、RPM/TPM 限流、用量预算（降级或拒绝）、并发上限和 Memory 默认值。支持原地轮转、软吊销和永久删除。 |
 | 🧠 | **Memory 中间件** | Memory 需按 key 主动开启，可选 `observe` 或 `inject`，新 key 默认为 `off`。启用后，Helm 会在路由前把相关记忆追加为末尾消息，并由后台 worker 自动压缩、归并；压缩策略会随内容自动调整。摘要默认采用确定性的本地实现，也可改用 LLM。遗忘/分层和 MCP `memory_recall` 均受配置开关控制，混合召回不会在每轮请求中自动注入。请求显式携带的 `x-memory-*` 头优先于 key 默认值。 |
-| 📊 | **完整的可观测链路** | 每个请求都会留下脱敏的决策记录，包括分类结果、命中策略、lane、历次供应商尝试、延迟、兜底和成本。默认按 Session 增量保存会话转录并保留 30 天；可选的完整正文模式支持精确查看和 **Retry**。 |
+| 📊 | **完整的可观测链路** | 每个请求都会留下脱敏的决策记录，包括分类结果、命中策略、lane、历次供应商尝试、延迟、兜底和成本。默认按 Session 增量保存会话转录与可用的响应快照并保留 30 天；可选的完整正文模式支持精确查看和 **Retry**。 |
 | 🖥️ | **管理面板** | 启用 admin 后，`/admin` 会提供带站内登录页和 HttpOnly 签名会话的 SvelteKit SPA；脚本仍可主动发送 HTTP Basic。面板涵盖总览、请求调试、key 管理、lane / 策略 / 分类器编辑、OAuth provider、Memory 和系统设置。Lane、策略与分类器会写回 YAML 并立即重新绑定；key、设置、provider 和 Memory 则通过各自的 store/API 持久化。界面支持 7 种语言。 |
 | 👤 | **API Key 自助门户** | `/portal` 直接使用持有者的 key 鉴权，只展示该 key 自己的用量与预算、接入指南、所属请求及正文，以及限定作用域内的 Memory 管理。每个 trace 都先校验归属关系，响应也只返回白名单字段，因此不会泄露其他 key、provider 拓扑或 eval 内部信息。界面支持 7 种语言。 |
 | 💾 | **存储** | 默认使用单文件 SQLite。Postgres / Supabase 实现同一套 Store 端口；只需修改一个环境变量即可切换。 |

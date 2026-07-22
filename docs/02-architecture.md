@@ -235,9 +235,10 @@ fallback, because doing so would bypass the operator's throttle.
 Persists the routing decision, the provider-attempt chain, the auth/key identity,
 the final OAuth serving account when a subscription pool served the request, and
 cost & latency. Secrets are redacted; the decision record carries no message
-bodies. Incremental Session transcripts are the default content mode; full
-request/response payloads are optional and governed by the mutually exclusive
-`capture_sessions` / `capture_payloads` runtime settings. Both are aged out by
+bodies. Incremental Session transcripts and available semantic response snapshots
+are the default content mode; full request/response payloads are optional and
+governed by the mutually exclusive `capture_sessions` / `capture_payloads` runtime
+settings. Both are aged out by
 the independent scheduled cleanup runner when payload cleanup is enabled
 (`payload_retention_days`, 30 by default). Redacted telemetry has its own
 cleanup switch/window (90 days by default). The deferred write queue batches

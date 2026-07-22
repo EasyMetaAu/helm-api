@@ -204,8 +204,9 @@ never diverge.
   change without a restart (`/admin/api/settings`, validated against
   `RuntimeSettingsSchema`, fail-closed on an invalid body). A representative set:
   `default_lane`; visual-context compression (`off` / `observe` / `enabled`);
-  request content mode (`capture_sessions` is the default; full payload and
-  metadata-only remain available) and `payload_retention_days`;
+  request content mode (`capture_sessions` is the default and retains incremental
+  request history plus available response snapshots; full payload and metadata-only
+  remain available) and `payload_retention_days`;
   the rate-limit master switch (`rate_limit_enabled`) and system default quota
   (`rate_limit_default_rpm` / `_tpm`); the concurrency
   overflow queue (`concurrency_queue_enabled` plus `min_size` /
