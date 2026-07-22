@@ -4,7 +4,7 @@
 # Pipeline: extract $t() keys -> en.json, propagate keys to every locale,
 # then AI-translate each target with the `translator` CLI against an
 # OpenAI-compatible endpoint. Already-translated keys are left untouched
-# (incremental). Helm admin ships 5 locales: en, zh-hans, zh-hant, ja, ko.
+# (incremental). Helm admin ships 7 locales: en, zh-hans, zh-hant, ja, ko, es, pt.
 
 # API config (override via env). Default points at the self-hosted relay.
 export OPENAI_API_ENDPOINT="${OPENAI_API_ENDPOINT:-http://192.168.199.7:3001/v1}"
@@ -58,6 +58,8 @@ declare -a languages=(
   "zh-hans:zh-hant" # Simplified -> Traditional Chinese
   "en:ja"           # Japanese
   "en:ko"           # Korean
+  "en:es"           # Spanish
+  "en:pt"           # Portuguese
 )
 
 translate_language() {

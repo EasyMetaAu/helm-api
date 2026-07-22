@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-22 · 全项目文案审查补齐多语言维护闭环（Admin / Portal / Setup，docs/11/12，原则 1/2）
+
+- **审查边界**：Claude CLI Opus 对 Admin、Portal、Gateway 公开页面、README、当前 docs、脚本输出和客户端可见错误做了只读审查；不改协议字段、配置键、模型 ID、命令或历史事实。README 中文版已是自然意译，当前 docs 没有值得用大范围重写换取的明确收益。
+- **维护闭环**：Admin 与 Portal 的翻译脚本补齐西班牙语和葡萄牙语，根级 `i18n:*` 命令同时覆盖两套应用；Portal 为仅动态引用的四个 key 增加静态 extraction anchors。新增结构测试统一验证两套应用七种语言的 key 集、非空值、placeholder、多语言脚本与动态 key，避免同步后静默回退英文。
+- **术语取舍**：简繁中文用户界面的 `lane` 统一意译为「通道」，不改真实 lane ID 或代码字段；分类失败继续使用「系统兜底通道」，执行 fallback 在简体统一为「兜底」、繁体按本地习惯统一为「備援」。首次设置页维持英文单语，移除唯一一处中英混排。
+
 ## 2026-07-22 · Session 恢复补齐响应快照并限制默认留存范围（Telemetry / Admin requests，docs/07/11，原则 1/3/7/8）
 
 - **复用既有存储**：`session_revisions.response_json` 已为 OpenAI Responses continuation 保存带 `output` 的终态对象，指定线上记录也已证实响应存在；本次不新增表、列或迁移。Admin 的 Session fallback 改为从目标 revision 返回响应，`meta`、完整正文和 `part=response` 三种读取保持 payload 优先，Session 来源始终标记 `exact=false`，因此 Retry 继续禁用。
@@ -62,20 +68,10 @@
 - **事实边界**：`requested_reasoning_effort` 在进入路由、策略或 lane 覆盖前从客户端请求单独截取；既有 `reasoning_effort` 继续表示覆盖后的有效执行等级。两者都是不含正文与密钥的可选 `DecisionRecord` 元数据，因此关闭 `capture_payloads` 后仍可读取，旧记录缺少请求等级时保持空白，不用有效等级反推客户端意图。
 - **列表展示**：共享 `RequestsTable` 在“请求”模型后直接追加客户端等级（例如 `请求: gpt-5.6-sol high`），Routing 单元格只显示实际有效等级值，不再重复“推理等级”标签。Dashboard、主 Requests 与 key-scoped 列表共用该行为；请求详情现有的有效等级展示不变。
 
-## 2026-07-18 · 关闭正文捕获时仍保留推理等级（Telemetry / Admin requests，docs/07/11，原则 1/7）
-
-- **存储边界**：`capture_payloads:false` 仍只禁止 `request_payloads` 中的完整请求、上游请求与响应正文；请求实际生效的 `reasoning_effort` 作为不含正文和密钥的独立字段写入既有 `DecisionRecord`，随 `decision_json` 持久化。策略或 lane 强制覆盖时记录覆盖后的有效值；请求未指定时记录 `null`，旧记录缺字段继续兼容，不新增 SQLite/Postgres 列或迁移。
-- **展示边界**：Admin 请求详情在正文未捕获时，通过既有脱敏 request metadata 面板展示 `reasoning_effort`；完整正文开启时仍以原始 payload 为事实来源。OpenAI Chat、Anthropic、Responses、Gemini 的共享路由链自动覆盖，`/v1/responses/compact` 的独立遥测构造也显式投影 `reasoning.effort`。
-- **列表投影**：共享 `RequestsTable` 的 Routing 单元格同步展示已记录的有效推理等级，因此主 Requests 列表、Dashboard recent 与 key-scoped 列表保持一致；旧记录缺字段时不渲染占位行。
-
-## 2026-07-18 · Codex 自动压缩目录与无状态传输故障切换（OAuth subscription / Responses / provider execution，docs/04/05/07，原则 3/5/7/8）
-
-- **压缩职责边界**：Codex 客户端拥有当前会话历史并负责在阈值到达时调用 `/v1/responses/compact`、用摘要更新本地 transcript 后重试；Gateway 不透明改写历史，也不把 auto-compact 触发点误当成模型硬输入上限。当前 Codex core 对缺失 `auto_compact_token_limit` 按 resolved context（`context_window`，缺失时回退 `max_context_window`）的 90% 推导，并把上游显式阈值钳制到该上限，因此 Helm 的 key-filtered `/v1/models?client_version=...` 物化相同的有效值（372K → 334,800）。真正超过模型 context 的整链耗尽继续复用既有 compaction-compatible `400 invalid_request`，而不是在 90% 处提前拒绝仍可执行的请求。
-- **传输故障边界**：Codex fetch 在同账号短连接重试耗尽后，将原始 `TypeError: fetch failed` 归类为无 HTTP status 的 `UpstreamError`，并在脱敏后的 `provider_raw` 保留有界嵌套 `name/code/message`（例如 `UND_ERR_SOCKET`），使 OAuth pool 能对无状态请求尝试兄弟账号。客户端 abort 与显式 provider timeout 保持原分类；带 `previous_response_id` 或已知 `x-codex-turn-state` 的有状态 continuation 仍严格绑定原账号，不能跨账号重放。
-- **fallback 协议边界**：含 native/custom/caller-linked 或未知 Responses input sequence 的请求，只能交给 `codex_responses` profile；`generic_openai_responses` provider 在调用前按能力 profile 跳过，避免把 Codex 私有 items 发给 xAI 等兼容端点后得到确定性 422。判断不依赖 provider 名字，后续新增 generic provider 自动继承相同保护。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-18 · 关闭正文捕获时仍保留推理等级（Telemetry / Admin requests，原则 1/7）**：完整正文关闭时仍把实际生效的 `reasoning_effort` 作为脱敏 DecisionRecord 元数据保存并显示；完整原文通过 git history 回溯。
+- **2026-07-18 · Codex 自动压缩目录与无状态传输故障切换（OAuth subscription / Responses / provider execution，原则 3/5/7/8）**：对齐 Codex 自动压缩阈值，并只允许无状态 transport failure 在兄弟账号间切换；有状态续接与私有 Responses items 保持 fail-closed，完整原文通过 git history 回溯。
 - **2026-07-17 · Anthropic XML 工具调用恢复边界（Protocol streaming / provider execution，原则 3/5/8）**：只在终态、完整、白名单且无既有结构化调用时恢复 XML 工具调用；四个实际出口共用边界并以有界缓冲保持流式保真，完整原文通过 git history 回溯。
 - **2026-07-16 · 历史费用回填放宽 WAL 与磁盘恢复门槛（Catalog / telemetry repair operations，原则 2/3/7）**：在既有 100 行原子批次、资源门禁和 12 GiB 硬底线不变的前提下，按健康实测放宽 preflight WAL/磁盘恢复门槛，避免任务永久饥饿；完整原文通过 git history 回溯。
 - **2026-07-16 · 路由白名单改为真实交集并让分类开关兑现配置语义（Routing / classifier / CI，原则 2/3/5/6/7）**：Policy 与 key 白名单求真实交集并让空集 fail-closed；rules/eval cache 开关兑现配置语义，CI Actions 固定到核验 SHA；完整原文通过 git history 回溯。
