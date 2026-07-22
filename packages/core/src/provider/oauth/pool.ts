@@ -316,12 +316,12 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
 
   function stickyKeyFromNative(input: NativePassthroughInput): string | null {
     const body = nativePassthroughBody(input);
+    const previousResponseId = bodyString(body, "previous_response_id");
+    if (previousResponseId !== null) return `previous_response_id:${previousResponseId}`;
     if (isNativePassthroughCarrier(input)) {
       const websocketSession = headerValue(input.headers, CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER);
       if (websocketSession !== null) return `responses_websocket_session:${websocketSession}`;
     }
-    const previousResponseId = bodyString(body, "previous_response_id");
-    if (previousResponseId !== null) return `previous_response_id:${previousResponseId}`;
     if (isNativePassthroughCarrier(input)) {
       const turnState = headerValue(input.headers, "x-codex-turn-state");
       if (turnState !== null) return `x-codex-turn-state:${turnState}`;

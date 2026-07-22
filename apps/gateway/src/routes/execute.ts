@@ -748,16 +748,12 @@ function prepareNativeRequestForUpstream(
     : cloneCarrierWithBody(carrier, body, { preserveRawBody: true });
 }
 
-function hasResponsesHistoryGap(req: InternalRequest): boolean {
-  if (req.protocol !== "openai_responses") return false;
-  if (typeof req.provider_raw?.previous_response_id !== "string") return false;
-  let hasToolOutput = false;
-  let hasLocalToolCall = false;
-  for (const message of req.messages) {
-    if (message.role === "tool") hasToolOutput = true;
-    if (Array.isArray((message as { tool_calls?: unknown }).tool_calls)) hasLocalToolCall = true;
-  }
-  return hasToolOutput && !hasLocalToolCall;
+function hasResponsesContinuation(req: InternalRequest): boolean {
+  return (
+    req.protocol === "openai_responses" &&
+    typeof req.provider_raw?.previous_response_id === "string" &&
+    req.provider_raw.previous_response_id.length > 0
+  );
 }
 
 function hasResponsesReasoningHistory(req: InternalRequest): boolean {
@@ -769,7 +765,15 @@ function hasResponsesReasoningHistory(req: InternalRequest): boolean {
 function candidateGuardSkipReason(
   req: InternalRequest,
   target: ResolvedAttemptTarget,
+  alias: string,
 ): string | null {
+  if (
+    hasResponsesContinuation(req) &&
+    typeof req.metadata.stateful_provider_alias === "string" &&
+    alias !== req.metadata.stateful_provider_alias
+  ) {
+    return "responses_previous_response_id_provider_mismatch";
+  }
   if (
     req.protocol === "openai_responses" &&
     target.targetProviderProtocol === "openai_responses" &&
@@ -796,7 +800,9 @@ function protocolGuardSkipReason(
   if (req.protocol !== "openai_responses" || targetProviderProtocol === "openai_responses") {
     return null;
   }
-  if (hasResponsesHistoryGap(req)) return "responses_previous_response_id_cross_protocol_blocked";
+  if (hasResponsesContinuation(req)) {
+    return "responses_previous_response_id_cross_protocol_blocked";
+  }
   if (Array.isArray(req.provider_raw?.responses_native_tools)) {
     return "responses_native_tools_cross_protocol_blocked";
   }
@@ -1575,7 +1581,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         continue;
       }
 
-      const candidateSkip = candidateGuardSkipReason(req, target);
+      const candidateSkip = candidateGuardSkipReason(req, target, alias);
       if (candidateSkip !== null) {
         capabilityPruned = true;
         attempts.push(skipRow(alias, candidateSkip, elapsed()));
@@ -1725,7 +1731,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               req.reasoning_effort,
             ),
           );
-          if (hasResponsesHistoryGap(req)) {
+          if (hasResponsesContinuation(req)) {
             const mutations = nativePassthroughMutations(passthroughBody);
             if (mutations) mutations.responses_previous_response_id_native_passthrough = true;
           }
@@ -1862,7 +1868,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               req.reasoning_effort,
             ),
           );
-          if (hasResponsesHistoryGap(req)) {
+          if (hasResponsesContinuation(req)) {
             const mutations = nativePassthroughMutations(passthroughBody);
             if (mutations) mutations.responses_previous_response_id_native_passthrough = true;
           }

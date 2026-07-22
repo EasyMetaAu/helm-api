@@ -74,7 +74,8 @@ protocol boundary. The attempt is recorded as skipped and fallback can continue:
 
 | Skip reason | Trigger |
 |---|---|
-| `responses_previous_response_id_cross_protocol_blocked` | A Responses request relies on `previous_response_id` plus a tool-output history that cannot be reconstructed locally. |
+| `responses_previous_response_id_cross_protocol_blocked` | A Responses request uses `previous_response_id`, whose hidden history cannot be reconstructed by a non-Responses target. |
+| `responses_previous_response_id_provider_mismatch` | A continuation candidate is not the provider alias recorded for the referenced response. |
 | `responses_native_tools_cross_protocol_blocked` | The Responses request contains non-function/native tools. |
 | `responses_native_items_cross_protocol_blocked` | The request contains native/custom/caller-linked or unknown Responses input items whose sequence cannot be represented safely. |
 | `responses_background_cross_protocol_blocked` | A Responses request sets `background: true` and the target is not Responses. |

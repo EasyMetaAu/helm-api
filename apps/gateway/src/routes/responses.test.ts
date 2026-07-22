@@ -1297,6 +1297,57 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     );
   });
 
+  it("pins previous_response_id continuations to the provider that created the response", async () => {
+    const registryRecord = {
+      responseId: "resp_previous",
+      accountId: "acct",
+      keyId: "k1",
+      providerAlias: "openai-codex/gpt-5.6-sol",
+      providerName: "openai-codex",
+      providerModel: "gpt-5.6-sol",
+      providerProtocol: "openai_responses" as const,
+      createdAt: 1,
+      expiresAt: Date.now() + 60_000,
+      status: "completed",
+    };
+    const get = vi.fn().mockResolvedValue(registryRecord);
+    const { deps, harness } = makeDeps({ registry: { put: vi.fn(), get } });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, previous_response_id: "resp_previous" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(get).toHaveBeenCalledWith("resp_previous", { keyId: "k1", accountId: "acct" });
+    expect(harness.pipelineSawIR).toMatchObject({
+      metadata: { stateful_provider_alias: "openai-codex/gpt-5.6-sol" },
+    });
+  });
+
+  it("rejects an unknown previous_response_id instead of routing it without history", async () => {
+    const run = vi.fn();
+    const { deps } = makeDeps({
+      run,
+      registry: { put: vi.fn(), get: vi.fn().mockResolvedValue(null) },
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, previous_response_id: "resp_unknown" }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: Record<string, string> };
+    expect(body.error.code).toBe("invalid_request");
+    expect(body.error.message).toContain("send the full conversation input");
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("returns an OpenAI-shaped 404 for unknown registry response ids without provider dispatch", async () => {
     const retrieve = vi.fn();
     const registry = { put: vi.fn(), get: vi.fn().mockResolvedValue(null) };

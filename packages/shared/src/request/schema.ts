@@ -91,6 +91,9 @@ export const RequestMetadataSchema = z.object({
   resource_id: z.string().nullable(),
   project_id: z.string().nullable(),
   memory_mode: MemoryModeSchema,
+  // Trusted gateway-only pin resolved from the Responses registry. Stateful
+  // previous_response_id turns may use only the provider alias that created the id.
+  stateful_provider_alias: z.string().min(1).optional(),
   // The inbound client's Claude-Code billing-attribution prefix —
   // "cc_version=<v>.<3hex>; cc_entrypoint=<entry>" with the per-request `cch` dropped
   // — captured at the Anthropic route from the real CLI's system[0] block before it

@@ -1054,6 +1054,27 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       memory_thread_source: memoryScope.threadSource,
     };
 
+    const previousResponseId =
+      typeof nativeRec.previous_response_id === "string" &&
+      nativeRec.previous_response_id.length > 0
+        ? nativeRec.previous_response_id
+        : null;
+    if (previousResponseId !== null) {
+      const previous =
+        deps.registry === undefined ? null : await deps.registry.get(previousResponseId, identity);
+      if (previous?.providerAlias === null || previous?.providerProtocol !== "openai_responses") {
+        throw helmError(
+          "invalid_request",
+          `previous_response_id '${previousResponseId}' cannot be continued safely; send the full conversation input instead`,
+          traceId,
+        );
+      }
+      ir.metadata = {
+        ...ir.metadata,
+        stateful_provider_alias: previous.providerAlias,
+      };
+    }
+
     // Native protocol passthrough carrier (#217 Phase 3). Stamp the VERBATIM parsed
     // inbound Responses body onto the IR metadata bag (same HTTP→core hand-off as the
     // /v1/messages route); the pipeline reads it into InternalRequest.native_request and

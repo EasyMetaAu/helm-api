@@ -1826,6 +1826,30 @@ describe("createMessagesPipeline — memory inject additive trailing reminder", 
 // ── Additional coverage: uncovered branches / lines ────────────────────────
 
 describe("createMessagesPipeline — toInternalRequest metadata branches", () => {
+  it("threads a trusted stateful Responses provider pin into execution", async () => {
+    let seen: InternalRequest | null = null;
+    const route: RouteFn = async (req) => {
+      seen = req;
+      return okResult({ id: "x" });
+    };
+    const pipeline = createMessagesPipeline(route, "openai_responses");
+
+    await pipeline.run(
+      irOf({
+        metadata: {
+          trace_id: "t1",
+          stateful_provider_alias: "openai-codex/gpt-5.6-sol",
+        },
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+
+    expect((seen as InternalRequest | null)?.metadata.stateful_provider_alias).toBe(
+      "openai-codex/gpt-5.6-sol",
+    );
+  });
+
   it("forwards conversation_id when it is a non-empty string (line 172 truthy branch)", async () => {
     let seen: Record<string, unknown> | null = null;
     const route: RouteFn = async (req) => {

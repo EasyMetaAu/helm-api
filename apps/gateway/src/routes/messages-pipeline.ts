@@ -245,6 +245,10 @@ function toInternalRequest(
       resource_id: memoryScope.resourceId,
       project_id: memoryScope.projectId,
       memory_mode: memoryScope.mode,
+      ...(typeof ir.metadata?.stateful_provider_alias === "string" &&
+      ir.metadata.stateful_provider_alias.length > 0
+        ? { stateful_provider_alias: ir.metadata.stateful_provider_alias }
+        : {}),
       // The CLI's captured billing identity (anthropic route stamps it; absent on the
       // OpenAI/Gemini surfaces). The native-Anthropic executor reads it to re-emit the
       // client's own version. Length-capped: it is re-emitted into the upstream header.
