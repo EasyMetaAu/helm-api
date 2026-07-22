@@ -192,6 +192,7 @@
   "Context window too small": "コンテキストウィンドウが不足",
   "Conversation": "会話",
   "Conversation continuation blocked across protocols": "プロトコル跨ぎで会話の継続を遮断",
+  "Conversation continuation pinned to its original provider": "会話の継続を元のプロバイダーに固定",
   "Copied": "コピーしました",
   "Copy": "コピー",
   "Copy it now — key reveal encryption is not configured, so it cannot be recovered later.": "今すぐコピーしてください。キー表示用の暗号化が未設定のため、後から復元できません。",

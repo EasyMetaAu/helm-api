@@ -38,6 +38,8 @@ export const ATTEMPT_CODE_LABELS: Record<string, string> = {
   responses_native_tools_cross_protocol_blocked: 'Native tools blocked across protocols',
   responses_previous_response_id_cross_protocol_blocked:
     'Conversation continuation blocked across protocols',
+  responses_previous_response_id_provider_mismatch:
+    'Conversation continuation pinned to its original provider',
 
   // ── error classes / outcomes (also used as attempt outcomes where noted) ──
   upstream_error: 'Provider error',

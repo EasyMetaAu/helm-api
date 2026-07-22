@@ -192,6 +192,7 @@
   "Context window too small": "컨텍스트 윈도우 부족",
   "Conversation": "대화",
   "Conversation continuation blocked across protocols": "프로토콜 간 대화 이어가기 차단",
+  "Conversation continuation pinned to its original provider": "대화 이어가기를 원래 제공업체에 고정",
   "Copied": "복사됨",
   "Copy": "복사",
   "Copy it now — key reveal encryption is not configured, so it cannot be recovered later.": "지금 복사하세요. 키 표시용 암호화가 설정되어 있지 않아 나중에 복구할 수 없습니다.",
