@@ -168,7 +168,7 @@ function setupPage(
 </style>
 </head>
 <body><main>
-  <div class="brand"><span class="logo">H</span><span><strong>Helm API</strong><br><small>First-run setup / 首次初始化</small></span></div>
+  <div class="brand"><span class="logo">H</span><span><strong>Helm API</strong><br><small>First-run setup</small></span></div>
   <div id="setup-ui">
     <h1>Set up Helm</h1><p class="lead">Create the administrator, optionally add OpenRouter or DeepSeek, then copy the automatically generated administrator token.</p>
     <div class="steps"><span class="step on"></span><span class="step on"></span><span class="step"></span></div>
