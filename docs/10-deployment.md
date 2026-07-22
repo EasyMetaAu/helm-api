@@ -145,8 +145,7 @@ Configuration comes from **files** and **environment variables**, and env vars
     shipping server's admin controls; there is currently no loaded admin YAML path.
   - `HELM_REQUIRE_API_KEY` must remain `true`; `false` is rejected at config load
     because anonymous inference is not supported. `HELM_RATE_LIMIT_ENABLED`,
-    `HELM_REQUEST_TIMEOUT_MS`, `HELM_MAX_REQUEST_BYTES`,
-    `HELM_SSE_HEARTBEAT_MS`
+    `HELM_REQUEST_TIMEOUT_MS`, `HELM_SSE_HEARTBEAT_MS`
   - `HELM_SIGNAL_FEEDBACK_ENABLED` — opt into Agentic Signals feedback for ranked
     lane promotion (disabled by default; detailed thresholds live in
     `config/runtime.yaml`).

@@ -41,7 +41,7 @@ function writeConfig(dir: string): void {
   );
   writeFileSync(
     join(dir, "runtime.yaml"),
-    "max_request_bytes: 2000000\nrequest_timeout_ms: 60000\nrate_limit:\n  enabled: false\n  default:\n    rpm: 0\n    tpm: 0\n",
+    "request_timeout_ms: 60000\nrate_limit:\n  enabled: false\n  default:\n    rpm: 0\n    tpm: 0\n",
   );
   // PRIMARY provider authenticates via OAuth (env NAMEs only). base_url is
   // overridden by HELM_PROVIDER_BASE_URL at boot to point at the mock; token_url

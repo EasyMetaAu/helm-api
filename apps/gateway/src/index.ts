@@ -26,7 +26,7 @@ export { type BuildInfo, readBuildInfo } from "./build-info.js";
 export { createJsonLogger, type Logger } from "./logging.js";
 export { type AuthDeps, type AuthIdentity, authMiddleware } from "./middleware/auth.js";
 export { HelmHttpError } from "./middleware/error-handler.js";
-export { bodyLimit, type LimitsConfig, timeout } from "./middleware/limits.js";
+export { type LimitsConfig, timeout } from "./middleware/limits.js";
 export { normalizeHeaders } from "./middleware/normalize-headers.js";
 export {
   type RateLimiterPort,

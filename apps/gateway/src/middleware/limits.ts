@@ -4,7 +4,6 @@ import type { AppEnv } from "../app.js";
 import { HelmHttpError } from "./error-handler.js";
 
 export interface LimitsConfig {
-  maxBodyBytes: number;
   requestTimeoutMs: number;
 }
 
@@ -19,42 +18,6 @@ export function requestSignal(c: Context<AppEnv>): AbortSignal {
 
 export function requestTimedOut(c: Context<AppEnv>): boolean {
   return c.get("request_timeout")?.timedOut === true;
-}
-
-function tooLarge(traceId: string): HelmHttpError {
-  return new HelmHttpError(
-    makeHelmError({
-      error_class: "invalid_request",
-      message: "request body too large",
-      trace_id: traceId,
-    }),
-  );
-}
-
-// Body size limit. Prefers Content-Length; falls back to counting actual stream
-// bytes so a small declared length cannot smuggle a large body. Over limit ->
-// invalid_request(400) via onError.
-export function bodyLimit(cfg: LimitsConfig): MiddlewareHandler<AppEnv> {
-  return async (c, next) => {
-    const traceId = c.get("trace_id");
-    const declared = c.req.header("Content-Length");
-    if (declared !== undefined) {
-      const n = Number(declared);
-      if (Number.isFinite(n) && n > cfg.maxBodyBytes) {
-        throw tooLarge(traceId);
-      }
-    }
-    // Stream-count fallback: buffer the body, enforce the real byte count, and
-    // re-attach it so downstream handlers can still read it.
-    const raw = c.req.raw;
-    if (raw.body) {
-      const buf = new Uint8Array(await raw.clone().arrayBuffer());
-      if (buf.byteLength > cfg.maxBodyBytes) {
-        throw tooLarge(traceId);
-      }
-    }
-    await next();
-  };
 }
 
 // Overall request timeout. Aborts downstream work via an AbortController and maps

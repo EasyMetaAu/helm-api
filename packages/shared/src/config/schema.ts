@@ -253,7 +253,6 @@ export const RoutingSignalFeedbackConfigSchema = z
   .strict();
 
 export const RuntimeConfigSchema = z.object({
-  max_request_bytes: z.number().int().positive().default(20_000_000),
   request_timeout_ms: z.number().int().positive().default(60_000),
   // SSE keep-alive heartbeat (ms). While a STREAMING response idles between upstream
   // chunks, emit an SSE comment (`:\n\n` — ignored by every compliant SSE parser) at

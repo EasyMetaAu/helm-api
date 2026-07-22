@@ -2862,7 +2862,6 @@ export async function buildServer(
       buildInfo: readBuildInfo(),
     },
     limits: {
-      maxBodyBytes: config.runtime.max_request_bytes,
       requestTimeoutMs: config.runtime.request_timeout_ms,
     },
   });
