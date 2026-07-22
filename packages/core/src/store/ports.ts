@@ -319,6 +319,8 @@ export interface RequestPayloadPartRecord {
 // Incremental, session-scoped transcript storage. This is deliberately separate
 // from request_payloads: capture_payloads may be off, while a session must still
 // be recoverable without storing the client's full re-sent transcript per request.
+// responseJson is an optional semantic client-protocol snapshot, not proof that
+// every byte reached the client; Admin therefore exposes Session recovery as non-exact.
 export interface UpsertSessionRevisionInput {
   sessionRef: string;
   accountId: string;

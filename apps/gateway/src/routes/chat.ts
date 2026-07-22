@@ -504,8 +504,10 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // redaction is done HERE (synchronously) so the enqueued snapshot can never be
     // affected by anything that touches the decision after the response returns.
     // With a write queue wired, the insert is deferred + batched off the hot path.
-    const persist = async (decision: DecisionRecord) => {
-      const decisionSnapshot = requestTimedOut(c) ? decisionForTimedOutRequest(decision) : decision;
+    const persist = async (decision: DecisionRecord, responseJson: string | null = null) => {
+      const timedOut = requestTimedOut(c);
+      const decisionSnapshot = timedOut ? decisionForTimedOutRequest(decision) : decision;
+      const sessionResponseJson = timedOut ? null : responseJson;
       const input: InsertTelemetryInput = {
         decision: redactDecisionForTelemetry(deps.redact, decisionSnapshot),
         apiKeyId: identity.keyId,
@@ -522,7 +524,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
             decision: decisionSnapshot,
             requestJson,
             responseId: null,
-            responseJson: null,
+            responseJson: sessionResponseJson,
             now: deps.now(),
           },
           (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
@@ -538,7 +540,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
           decision: decisionSnapshot,
           requestJson,
           responseId: null,
-          responseJson: null,
+          responseJson: sessionResponseJson,
           now: deps.now(),
         },
         (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
@@ -973,12 +975,19 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
         c.get("logger").log("warn", "tokens.backfill_failed", { trace_id: traceId });
       }
     }
-    await capturePayload(
-      result.body !== null ? JSON.stringify(result.body) : null,
-      result.upstreamRequest ?? null,
-    );
+    const clientBody =
+      result.body === null
+        ? null
+        : applyResponseModelPolicy(
+            result.body as Record<string, unknown>,
+            internal.requested_model,
+            deps.responseModelPolicy ?? "provider",
+          );
+    const responseJson =
+      result.final.status === "ok" && clientBody !== null ? JSON.stringify(clientBody) : null;
+    await capturePayload(responseJson, result.upstreamRequest ?? null);
     stampServingAccount(result.decision, servingAccount);
-    await persist(result.decision);
+    await persist(result.decision, responseJson);
     if (result.final.status === "error" || result.body === null) {
       const error =
         result.error ??
@@ -1009,13 +1018,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // Usage-budget settle (non-stream, success): cost is already on the decision;
     // tokens from the body's usage. Fail-open.
     await settle(result.decision, tokensFromUsage(usageFromBody(result.body)));
-    return c.json(
-      applyResponseModelPolicy(
-        result.body as Record<string, unknown>,
-        internal.requested_model,
-        deps.responseModelPolicy ?? "provider",
-      ),
-    );
+    return c.json(clientBody as Record<string, unknown>);
   };
 
   app.post("/v1/chat/completions", (c) => handleChat(c));

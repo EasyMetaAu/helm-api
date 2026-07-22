@@ -149,9 +149,7 @@
   // excluded because only the original captured body is safe for exact Retry.
   const replayBody = $derived(payloadValues.request);
   const canRetry = $derived(
-    data.payload?.captured === true &&
-      data.payload.source !== 'session' &&
-      hasPayloadPart('request'),
+    data.payload?.captured === true && data.payload.exact === true && hasPayloadPart('request'),
   );
 
   // The forwarded-upstream body is worth a SEPARATE panel only when it actually

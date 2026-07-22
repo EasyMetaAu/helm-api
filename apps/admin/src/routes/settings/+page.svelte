@@ -439,12 +439,12 @@
                 </select>
                 <span class="field-help block"
                   >{$t(
-                    'Session mode stores repeated conversation history once and reconstructs each request semantically.',
+                    'Session mode stores repeated conversation history once, reconstructs each request semantically, and keeps available response snapshots.',
                   )}</span
                 >
                 <span class="field-help mt-1 block text-amber-600"
                   >{$t(
-                    'Privacy note: full payload and session modes store message content. Choose metadata only to store no bodies.',
+                    'Privacy note: full payload and session modes store request and response content, which may include tool arguments, reasoning, and media. Choose metadata only to store no bodies.',
                   )}</span
                 >
               </span>
@@ -461,7 +461,9 @@
                 bind:value={form.payload_retention_days}
               />
               <span class="field-help"
-                >{$t('Full payloads expire by request age; whole session transcripts expire after their last activity.')}</span
+                >{$t(
+                  'Full payloads expire by request age; whole session transcripts expire after their last activity.',
+                )}</span
               >
             </label>
           </div>
@@ -577,7 +579,9 @@
             <input type="checkbox" class="checkbox" bind:checked={form.payloads_cleanup_enabled} />
             <span class="font-medium">{$t('Request payloads and session transcripts')}</span>
             <span class="field-help"
-              >{$t('uses the content window above · full payloads archived, inactive sessions deleted')}</span
+              >{$t(
+                'uses the content window above · full payloads archived, inactive sessions deleted',
+              )}</span
             >
           </label>
 

@@ -1673,7 +1673,9 @@ describe("admin.api request payload", () => {
     });
   });
 
-  it("recovers a semantic request from the session when no full payload exists", async () => {
+  it("recovers a semantic request and response from the session when no full payload exists", async () => {
+    let responseJson: string | null =
+      '{"choices":[{"message":{"role":"assistant","content":"hello back"}}]}';
     const rec = {
       ...decision("req_session", "balanced"),
       session: { ref: "session-ref", label: "thread-1", source: "x-thread-id" as const },
@@ -1689,7 +1691,7 @@ describe("admin.api request payload", () => {
           retainCount: 0,
           requestDeltaJson: '[{"role":"user","content":"hello"}]',
           requestEnvelopeJson: '{"model":"auto","messages":[]}',
-          responseJson: null,
+          responseJson,
           fidelity: "semantic",
           createdAt: new Date(1234),
         },
@@ -1703,9 +1705,36 @@ describe("admin.api request payload", () => {
       exact: false,
       fidelity: "semantic",
       request: { model: "auto", messages: [{ role: "user", content: "hello" }] },
-      response: null,
+      response: {
+        choices: [{ message: { role: "assistant", content: "hello back" } }],
+      },
       upstream_request: null,
       created_at: 1234,
+    });
+
+    const meta = await app.request("/admin/api/requests/req_session/payload?part=meta");
+    expect(await meta.json()).toMatchObject({
+      captured: true,
+      source: "session",
+      exact: false,
+      parts: { request: true, response: true, upstream_request: false },
+    });
+
+    const response = await app.request("/admin/api/requests/req_session/payload?part=response");
+    expect(await response.json()).toMatchObject({
+      captured: true,
+      source: "session",
+      exact: false,
+      part: "response",
+      value: { choices: [{ message: { role: "assistant", content: "hello back" } }] },
+    });
+
+    responseJson = null;
+    const unavailable = await app.request("/admin/api/requests/req_session/payload?part=response");
+    expect(await unavailable.json()).toEqual({
+      captured: false,
+      source: "unavailable",
+      reason: "response_unavailable",
     });
   });
 

@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-22 · Session 恢复补齐响应快照并限制默认留存范围（Telemetry / Admin requests，docs/07/11，原则 1/3/7/8）
+
+- **复用既有存储**：`session_revisions.response_json` 已为 OpenAI Responses continuation 保存带 `output` 的终态对象，指定线上记录也已证实响应存在；本次不新增表、列或迁移。Admin 的 Session fallback 改为从目标 revision 返回响应，`meta`、完整正文和 `part=response` 三种读取保持 payload 优先，Session 来源始终标记 `exact=false`，因此 Retry 继续禁用。
+- **协议与流式边界**：OpenAI Chat、Anthropic Messages、Gemini 和 Responses 的成功非流式请求都保存客户端协议形态的响应快照；Chat 会在 response-model policy 生效后再保存，避免记录值与客户端看到的模型名不同。Responses 成功流继续只保存 terminal response object，保持 `previous_response_id` 展开所需的 `{ output: [...] }` 语义。Chat、Anthropic 与 Gemini 流不为 Session 新增整段 SSE 缓冲；在没有独立有界 accumulator 与 partial fidelity 前，响应保持不可用，避免默认开启的 Session capture 形成并发内存放大或把截断内容误报为完整响应。
+- **容量与隐私边界**：单个 Session response snapshot 以 UTF-8 计限制为 16 MiB；超过上限或会让 Session 超过 64 MiB 时只省略响应，仍保留请求 revision，并记录 `session.response_limited`。设置页、七种语言、README 与 docs 明确披露 Session 模式会保存可用的模型响应，可能包含工具参数、reasoning 与媒体；Session 仍按最后活动时间整组清理、不归档，并与完整 payload 共用内容留存窗口。
+
 ## 2026-07-22 · 按会话增量保存请求正文并诚实区分恢复保真度（Telemetry / Admin requests / Store，docs/07/11，原则 1/3/7/8）
 
 - **互斥留存模式**：运行时新增 `capture_sessions`，与既有 `capture_payloads` 组成「仅元数据 / 每请求完整载荷 / 按会话增量转录」三种互斥模式；新安装默认按 Session 增量保存，完整载荷默认关闭。两项同时为 `true` 时配置校验 fail-closed；旧实例若明确保存过 `capture_payloads`，缺少新字段时保持原选择，设置损坏时的隐私安全回退会同时关闭两种正文捕获。本次目标 Remote 在部署时显式切换为 Session 模式，不用升级逻辑覆盖其他自托管 operator 的隐私选择。

@@ -145,8 +145,9 @@ no memory reads or writes. See [08 · Memory Middleware](08-memory-middleware.md
 3. Route through configurable lanes rather than exposing raw provider aliases.
 4. Execute each lane through a primary plus fallback providers.
 5. Record every routing decision and provider attempt for debugging. Incremental
-   Session transcripts are the default content mode; optional full request/response
-   bodies use a separate `request_payloads` table. Both are distinct from the
+   Session transcripts plus available semantic response snapshots are the default
+   content mode; optional full request/response bodies use a separate
+   `request_payloads` table. Both are distinct from the
    redacted `DecisionRecord` and subject to scheduled retention cleanup.
 6. Work out of the box: ship three quality/cost lanes, four task lanes,
    vendor-family compatibility lanes, and two image lanes, with Layer-2 eval
