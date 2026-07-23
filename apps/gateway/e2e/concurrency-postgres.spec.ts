@@ -1,31 +1,61 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import {
+  type AnthropicSSEEvent,
+  anthropicTransformer,
+  type CircuitBreaker,
   createCircuitBreaker,
   createDistributedKeyedSemaphore,
   createPgDb,
+  type DecisionRecord,
   type DistributedKeyedSemaphore,
   type ExecutionPlan,
+  geminiTransformer,
+  type IRResponse,
+  makeAnthropicError,
+  makeGeminiError,
   PgConcurrencyLeaseStore,
   type PgDb,
   type ProviderClient,
   type ProviderRegistry,
+  type ResponsesSSEEvent,
+  type RouteDeps,
+  type RouteOptions,
+  responsesTransformer,
+  routeRequest,
+  type TelemetryStore,
 } from "@helm/core";
-import { ERROR_CLASS_HTTP_STATUS, type InternalRequest } from "@helm/shared";
+import {
+  ERROR_CLASS_HTTP_STATUS,
+  ErrorClassSchema,
+  type InternalRequest,
+  type Protocol,
+} from "@helm/shared";
 import { expect, test } from "@playwright/test";
 import type { Hono } from "hono";
 import { type AppEnv, createApp } from "../src/app.js";
+import type { AuthIdentity } from "../src/middleware/auth.js";
 import {
   type ConcurrencyGateConfig,
   concurrencyMiddleware,
   createConcurrencyGate,
 } from "../src/middleware/concurrency.js";
 import { requestSignal, timeout } from "../src/middleware/limits.js";
+import { registerChatRoutes } from "../src/routes/chat.js";
 import { createExecute } from "../src/routes/execute.js";
+import { registerGeminiRoute } from "../src/routes/gemini.js";
 import {
   type ImageAttempt,
   type ImageChainTarget,
   runImageChain,
 } from "../src/routes/image-chain.js";
+import {
+  type MessagesIdentity,
+  type RouteError,
+  registerMessagesRoute,
+} from "../src/routes/messages.js";
+import { createMessagesPipeline } from "../src/routes/messages-pipeline.js";
+import type { RecordServedDeps } from "../src/routes/payload-capture.js";
+import { registerResponsesRoute } from "../src/routes/responses.js";
 
 // This is intentionally request-level E2E rather than another PGlite contract test:
 // two independent Hono app dependency graphs and two independent postgres-js pools
@@ -330,7 +360,423 @@ function streamApp(replica: Replica): {
   return { app, ready: ready.promise, finish: finish.resolve };
 }
 
+type ProductionRouteProtocol = Extract<
+  Protocol,
+  "openai_chat" | "anthropic_messages" | "openai_responses" | "gemini"
+>;
+
+interface BreakerObservations {
+  failures: number;
+  cooldowns: number;
+}
+
+interface ProductionRouteResult {
+  wire: string;
+  decision: DecisionRecord;
+  primaryCalls: number;
+  fallbackCalls: number;
+  breakerState: ReturnType<CircuitBreaker["getState"]>;
+  breaker: BreakerObservations;
+}
+
+function trackedBreaker(): {
+  breaker: CircuitBreaker;
+  observations: BreakerObservations;
+} {
+  const inner = createCircuitBreaker({
+    config: { failureThreshold: 1, cooldownMs: 60_000 },
+    now: Date.now,
+  });
+  const observations: BreakerObservations = { failures: 0, cooldowns: 0 };
+  return {
+    observations,
+    breaker: {
+      canAttempt(model) {
+        const decision = inner.canAttempt(model);
+        if (!decision.allow && decision.reason === "circuit_open") observations.cooldowns += 1;
+        return decision;
+      },
+      recordFailure(model) {
+        observations.failures += 1;
+        inner.recordFailure(model);
+      },
+      recordSuccess: (model) => inner.recordSuccess(model),
+      recordAbort: (model) => inner.recordAbort(model),
+      getState: (model) => inner.getState(model),
+    },
+  };
+}
+
+function routeIdentity(keyId: string): {
+  chat: AuthIdentity;
+  pipeline: MessagesIdentity;
+} {
+  const commonCaps = {
+    allowedLanes: null,
+    allowCustomModel: true,
+    blockedModels: null,
+    allowFastMode: true,
+    rateLimit: { rpm: null, tpm: null },
+    concurrencyLimit: 1,
+    budget: {
+      requests: null,
+      tokens: null,
+      spendUsd: null,
+      windowSeconds: null,
+      behavior: "degrade" as const,
+      degradeLane: null,
+    },
+    memory: {
+      mode: "off" as const,
+      projectId: null,
+      threadSource: "header" as const,
+    },
+  };
+  return {
+    chat: {
+      keyId,
+      keyPrefix: "helm_test_route",
+      accountId: "acct",
+      orgId: null,
+      userId: null,
+      role: "user",
+      caps: commonCaps,
+    },
+    pipeline: {
+      keyId,
+      keyPrefix: "helm_test_route",
+      accountId: "acct",
+      orgId: null,
+      userId: null,
+      role: "user",
+      caps: commonCaps,
+    },
+  };
+}
+
+function errorClass(error: RouteError) {
+  const parsed = ErrorClassSchema.safeParse(error.error_class);
+  return parsed.success ? parsed.data : ("upstream_error" as const);
+}
+
+async function runProductionRouteLeaseLoss(
+  protocol: ProductionRouteProtocol,
+): Promise<ProductionRouteResult> {
+  const state = providerState();
+  const replica = await createReplica({
+    name: `route-${protocol}`,
+    state,
+    ttlMs: 400,
+    heartbeatMs: 40,
+  });
+  const keyId = `route-${protocol}-${crypto.randomUUID()}`;
+  const identity = routeIdentity(keyId);
+  const primaryAlias = `${protocol}-primary`;
+  const fallbackAlias = `${protocol}-fallback`;
+  const providerWaiting = deferred();
+  const persisted = deferred();
+  const persistedDecisions: DecisionRecord[] = [];
+  let primaryCalls = 0;
+  let fallbackCalls = 0;
+  let executionSignal: AbortSignal | null = null;
+  const { breaker, observations } = trackedBreaker();
+
+  async function* primaryStream(): AsyncGenerator<string> {
+    yield `data: ${JSON.stringify({
+      id: "chatcmpl-route-lease-loss",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "wire/route-primary",
+      choices: [
+        {
+          index: 0,
+          delta: { role: "assistant", content: "first-visible-chunk" },
+          finish_reason: null,
+        },
+      ],
+    })}\n\n`;
+    providerWaiting.resolve();
+    if (executionSignal === null) throw new Error("production route did not bind its signal");
+    await waitForAbort(executionSignal);
+    throw abortError();
+  }
+
+  const primary = {
+    chatCompletion: async () => ({ id: "unexpected-non-stream" }),
+    chatCompletionStream: () => {
+      primaryCalls += 1;
+      return primaryStream();
+    },
+  } as unknown as ProviderClient;
+  const fallback = {
+    chatCompletion: async () => {
+      fallbackCalls += 1;
+      return { id: "unexpected-fallback" };
+    },
+    chatCompletionStream: () => {
+      fallbackCalls += 1;
+      return (async function* () {
+        yield "data: [DONE]\n\n";
+      })();
+    },
+  } as unknown as ProviderClient;
+  const providers = new Map([
+    [primaryAlias, primary],
+    [fallbackAlias, fallback],
+  ]);
+  const registry = leaseLossRegistry([primaryAlias, fallbackAlias]);
+  const routingDeps = {
+    classify: async () => ({
+      task_type: "general",
+      complexity: "medium" as const,
+      confidence: 1,
+      decided_by: "rules" as const,
+      constraints: {},
+      explanation: [],
+    }),
+    policies: { policies: [] },
+    lanes: {
+      balanced: {
+        primary: primaryAlias,
+        fallback: [fallbackAlias],
+        constraints: {},
+      },
+    },
+    now: () => new Date(),
+    log: () => {},
+  } as RouteDeps;
+  const route = (request: InternalRequest, options: RouteOptions, signal: AbortSignal) => {
+    executionSignal = signal;
+    return routeRequest(
+      request,
+      {
+        ...routingDeps,
+        execute: createExecute({
+          defaultProvider: primary,
+          providers,
+          registry,
+          breaker,
+          catalog: new Map(),
+          now: Date.now,
+          signal,
+        }),
+      },
+      options,
+    );
+  };
+
+  const telemetry = {
+    insert: async (input: { decision: DecisionRecord }) => {
+      persistedDecisions.push(input.decision);
+      persisted.resolve();
+      return { id: "route-lease-loss" };
+    },
+  } as unknown as TelemetryStore;
+  const record: RecordServedDeps = {
+    telemetry,
+    redact: (decision) => decision,
+    now: Date.now,
+    capturePayloads: () => false,
+    captureSessions: () => false,
+  };
+  const gate = createConcurrencyGate({
+    semaphore: replica.manager,
+    getConfig: () => ({
+      enabled: true,
+      minSize: 2,
+      multiplier: 0,
+      waitTimeoutMs: 2_000,
+    }),
+  });
+  const routeLogs: Array<{
+    level: string;
+    message: string;
+    fields: Record<string, unknown> | undefined;
+  }> = [];
+  const app = createApp({
+    logger: {
+      log: (level, message, fields) => routeLogs.push({ level, message, fields }),
+    },
+  });
+
+  try {
+    let path: string;
+    let headers: Record<string, string>;
+    let body: Record<string, unknown>;
+    if (protocol === "openai_chat") {
+      path = "/v1/chat/completions";
+      headers = { "content-type": "application/json" };
+      body = {
+        model: "auto",
+        messages: [{ role: "user", content: "hello" }],
+        stream: true,
+      };
+      app.use(path, async (c, next) => {
+        c.set("identity", identity.chat);
+        await next();
+      });
+      app.use(path, concurrencyMiddleware(gate));
+      registerChatRoutes(app, {
+        route,
+        telemetry,
+        redact: (decision) => decision,
+        now: Date.now,
+      });
+    } else if (protocol === "anthropic_messages") {
+      path = "/v1/messages";
+      headers = { "content-type": "application/json", "x-api-key": "route-test-key" };
+      body = {
+        model: "auto",
+        max_tokens: 32,
+        messages: [{ role: "user", content: "hello" }],
+        stream: true,
+      };
+      registerMessagesRoute(app, {
+        concurrencyGate: gate,
+        record,
+        auth: { resolve: async () => identity.pipeline },
+        transformers: {
+          anthropic: {
+            transformRequestOut: (native) => anthropicTransformer.transformRequestOut(native),
+            transformResponseOut: (ir, options) =>
+              anthropicTransformer.transformResponseOut(ir as IRResponse, options),
+            transformStreamOut: (event) => {
+              const typed = event as AnthropicSSEEvent & { type: string };
+              return { event: typed.type, data: JSON.stringify(typed) };
+            },
+            transformErrorOut: (error) =>
+              makeAnthropicError({
+                error_class: errorClass(error),
+                message: error.message,
+                trace_id: error.trace_id,
+              }),
+          },
+        },
+        pipeline: createMessagesPipeline(route, protocol),
+      });
+    } else if (protocol === "openai_responses") {
+      path = "/v1/responses";
+      headers = {
+        authorization: "Bearer route-test-key",
+        "content-type": "application/json",
+      };
+      body = { model: "auto", input: "hello", stream: true };
+      registerResponsesRoute(app, {
+        concurrencyGate: gate,
+        record,
+        auth: { resolve: async () => identity.pipeline },
+        transformer: {
+          transformRequestOut: (native) => responsesTransformer.transformRequestOut(native),
+          transformResponseOut: (ir) => responsesTransformer.transformResponseOut(ir as IRResponse),
+          transformStreamOut: (event) => {
+            const typed = event as ResponsesSSEEvent & { type: string };
+            return { event: typed.type, data: JSON.stringify(typed) };
+          },
+        },
+        pipeline: createMessagesPipeline(route, protocol),
+      });
+    } else {
+      path = "/v1beta/models/auto:streamGenerateContent?alt=sse";
+      headers = {
+        "content-type": "application/json",
+        "x-goog-api-key": "route-test-key",
+      };
+      body = {
+        contents: [{ role: "user", parts: [{ text: "hello" }] }],
+      };
+      registerGeminiRoute(app, {
+        concurrencyGate: gate,
+        record,
+        auth: { resolve: async () => identity.pipeline },
+        transformer: {
+          transformRequestOut: (native) => geminiTransformer.transformRequestOut(native),
+          transformResponseOut: (ir) => geminiTransformer.transformResponseOut(ir as IRResponse),
+          transformErrorOut: (error) =>
+            makeGeminiError({
+              error_class: errorClass(error),
+              message: error.message,
+              trace_id: error.trace_id,
+            }),
+        },
+        pipeline: createMessagesPipeline(route, protocol),
+      });
+    }
+
+    const response = await app.request(path, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+    if (response.status !== 200) {
+      throw new Error(
+        `${protocol} route returned HTTP ${response.status}: ${await response.text()}; logs=${JSON.stringify(routeLogs)}`,
+      );
+    }
+    const wirePromise = response.text();
+    await providerWaiting.promise;
+    await replica.deleteCurrentLease(keyId);
+    const wire = await wirePromise;
+    await persisted.promise;
+    expect(persistedDecisions).toHaveLength(1);
+    return {
+      wire,
+      decision: persistedDecisions[0] as DecisionRecord,
+      primaryCalls,
+      fallbackCalls,
+      breakerState: breaker.getState(primaryAlias),
+      breaker: observations,
+    };
+  } finally {
+    await replica.shutdown();
+  }
+}
+
+function assertProductionRouteLeaseLoss(
+  result: ProductionRouteResult,
+  normalTerminals: readonly string[],
+): void {
+  expect(result.wire).toContain("first-visible-chunk");
+  for (const terminal of normalTerminals) expect(result.wire).not.toContain(terminal);
+  expect(result.decision.fallback_count).toBe(0);
+  expect(result.decision.provider_attempts).toHaveLength(1);
+  expect(result.primaryCalls).toBe(1);
+  expect(result.fallbackCalls).toBe(0);
+  expect(result.breakerState).toBe("CLOSED");
+  expect(result.breaker.failures).toBe(0);
+  expect(result.breaker.cooldowns).toBe(0);
+  expect(result.decision.final.status).toBe("error");
+  expect(result.decision.stream_outcome).toBe("truncated");
+  expect(result.decision.final.error_reason).toBe("concurrency_lease_lost");
+}
+
 test.describe("real PostgreSQL distributed concurrency leases", () => {
+  test("persists Chat started-stream concurrency lease loss through the production route", async () => {
+    test.setTimeout(20_000);
+    assertProductionRouteLeaseLoss(await runProductionRouteLeaseLoss("openai_chat"), ["[DONE]"]);
+  });
+
+  test("persists Messages started-stream concurrency lease loss through the production route", async () => {
+    test.setTimeout(20_000);
+    assertProductionRouteLeaseLoss(await runProductionRouteLeaseLoss("anthropic_messages"), [
+      "event: message_stop",
+    ]);
+  });
+
+  test("persists Responses started-stream concurrency lease loss through the production route", async () => {
+    test.setTimeout(20_000);
+    assertProductionRouteLeaseLoss(await runProductionRouteLeaseLoss("openai_responses"), [
+      "event: response.completed",
+    ]);
+  });
+
+  test("persists Gemini started-stream concurrency lease loss through the production route", async () => {
+    test.setTimeout(20_000);
+    assertProductionRouteLeaseLoss(await runProductionRouteLeaseLoss("gemini"), [
+      '"finishReason":"STOP"',
+      "[DONE]",
+    ]);
+  });
+
   test("enforces one global slot across two replicas and 100 concurrent requests", async () => {
     test.setTimeout(20_000);
     const state = providerState();

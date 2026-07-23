@@ -15,6 +15,10 @@ import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
 import {
+  markStartedStreamCancellation,
+  requestCancellationReason,
+} from "../request-cancellation.js";
+import {
   type BodyMemoryAdmission,
   memoryAdmissionReleaseGuard,
   RequestAdmissionError,
@@ -252,13 +256,6 @@ function estimateAnthropicInputTokens(value: unknown): number {
     .filter((s) => s.length > 0)
     .join("\n");
   return Math.max(1, Math.ceil(Buffer.byteLength(text, "utf8") / 4));
-}
-
-// Client disconnect / abort detection — mirrors chat.ts. Used to suppress a
-// terminal error frame for a benign disconnect (NOT a provider fault, docs/02).
-function isAbort(err: unknown, signal: AbortSignal): boolean {
-  if (signal.aborted) return true;
-  return err instanceof Error && (err.name === "AbortError" || err.message.includes("aborted"));
 }
 
 function markStreamDecisionError(decision: DecisionRecord, errorClass: string): void {
@@ -649,11 +646,10 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
             }
           }
         } catch (err) {
-          // A client disconnect / abort is a benign non-provider fault (docs/02):
-          // emit NO error frame. Any other throw — incl. a PipelineError when all
-          // providers failed before the stream started — emits a TERMINAL Anthropic
-          // error event so the client never sees a silently truncated stream.
-          if (!isAbort(err, requestSignal(c))) {
+          const cancellation = requestCancellationReason(requestSignal(c), err);
+          if (cancellation !== null) {
+            markStartedStreamCancellation(result.decision, cancellation);
+          } else {
             const errorClass =
               err instanceof PipelineError
                 ? err.error_class

@@ -25,6 +25,13 @@ import { HelmHttpError } from "../middleware/error-handler.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
 import { normalizeOpenAICodexClientVersion } from "../oauth/codex-client-version.js";
+import {
+  CONCURRENCY_LEASE_LOST_REASON,
+  markStartedStreamCancellation,
+  REQUEST_TIMEOUT_REASON,
+  type RequestCancellationReason,
+  requestCancellationReason,
+} from "../request-cancellation.js";
 import { CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER } from "../responses-websocket-internal.js";
 import {
   type BodyMemoryAdmission,
@@ -228,13 +235,6 @@ export interface ResponsesRouteDeps {
   sseCaptureFactory?: (full: boolean) => SseCapture;
 }
 
-// Client disconnect / abort detection — mirrors messages.ts. Used to suppress a
-// terminal error frame for a benign disconnect (NOT a provider fault, docs/02).
-function isAbort(err: unknown, signal: AbortSignal): boolean {
-  if (signal.aborted) return true;
-  return err instanceof Error && (err.name === "AbortError" || err.message.includes("aborted"));
-}
-
 function extractCredential(auth: string | undefined): string | null {
   if (auth) {
     const m = /^Bearer\s+(.+)$/.exec(auth);
@@ -418,33 +418,48 @@ type ResponsesStreamOutcome = NonNullable<DecisionRecord["stream_outcome"]>;
 export function settleResponsesStreamOutcome(args: {
   decision: DecisionRecord;
   streamStatus: string | null;
-  caughtAbort: boolean;
+  cancellationReason: RequestCancellationReason | null;
   caughtErrorReason: string | null;
   timedOut: boolean;
 }): ResponsesStreamOutcome {
-  const outcome: ResponsesStreamOutcome = args.timedOut
-    ? "failed"
-    : args.caughtAbort
+  if (
+    args.decision.stream_outcome === "truncated" &&
+    args.decision.final?.error_reason === CONCURRENCY_LEASE_LOST_REASON
+  ) {
+    return "truncated";
+  }
+  if (args.cancellationReason === CONCURRENCY_LEASE_LOST_REASON) {
+    markStartedStreamCancellation(args.decision, CONCURRENCY_LEASE_LOST_REASON);
+    return "truncated";
+  }
+  if (args.timedOut) {
+    markStartedStreamCancellation(args.decision, REQUEST_TIMEOUT_REASON);
+    return "failed";
+  }
+  if (args.cancellationReason !== null) {
+    markStartedStreamCancellation(args.decision, args.cancellationReason);
+    return args.cancellationReason === "client_abort"
       ? "client_aborted"
-      : args.caughtErrorReason !== null
+      : args.cancellationReason === REQUEST_TIMEOUT_REASON
         ? "failed"
-        : args.streamStatus === "completed"
-          ? "completed"
-          : args.streamStatus === "incomplete"
-            ? "incomplete"
-            : args.streamStatus === "failed" || args.streamStatus === "cancelled"
-              ? "failed"
-              : "truncated";
+        : "truncated";
+  }
+  const outcome: ResponsesStreamOutcome =
+    args.caughtErrorReason !== null
+      ? "failed"
+      : args.streamStatus === "completed"
+        ? "completed"
+        : args.streamStatus === "incomplete"
+          ? "incomplete"
+          : args.streamStatus === "failed" || args.streamStatus === "cancelled"
+            ? "failed"
+            : "truncated";
   args.decision.stream_outcome = outcome;
-  if (outcome === "client_aborted" || outcome === "truncated" || outcome === "failed") {
+  if (outcome === "truncated" || outcome === "failed") {
     args.decision.final = {
       ...args.decision.final,
       status: "error",
-      error_reason: args.timedOut
-        ? "timeout"
-        : outcome === "client_aborted"
-          ? "client_abort"
-          : (args.caughtErrorReason ?? "upstream_error"),
+      error_reason: args.caughtErrorReason ?? "upstream_error",
     };
   }
   return outcome;
@@ -1193,7 +1208,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         let lastWrite: string | null = null;
         let streamResponseId: string | null = null;
         let streamStatus: string | null = null;
-        let caughtAbort = false;
+        let cancellationReason: RequestCancellationReason | null = null;
         let caughtErrorReason: string | null = null;
         try {
           if (initialError !== null) throw initialError;
@@ -1247,8 +1262,9 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           // before the stream started — writes a SINGLE terminal Responses-shaped
           // error event DIRECTLY into the stream. We CANNOT throw here (the stream
           // has already started; onError would never see it).
-          if (isAbort(err, requestSignal(c))) {
-            caughtAbort = true;
+          cancellationReason = requestCancellationReason(requestSignal(c), err);
+          if (cancellationReason !== null) {
+            // Cancellation ends the wire without a fabricated terminal event.
           } else {
             caughtErrorReason =
               err instanceof PipelineError
@@ -1283,7 +1299,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
               : settleResponsesStreamOutcome({
                   decision: result.decision,
                   streamStatus,
-                  caughtAbort,
+                  cancellationReason,
                   caughtErrorReason,
                   timedOut: requestTimedOut(c),
                 });

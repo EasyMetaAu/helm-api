@@ -36,6 +36,10 @@ import { INTERNAL_API_KEY_ID } from "../internal-key.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
 import {
+  markStartedStreamCancellation,
+  requestCancellationReason,
+} from "../request-cancellation.js";
+import {
   type BodyMemoryAdmission,
   memoryAdmissionReleaseGuard,
   RequestAdmissionError,
@@ -335,13 +339,6 @@ function invalidRequest(message: string, traceId: string): HelmHttpError {
   return new HelmHttpError(
     makeHelmError({ error_class: "invalid_request", message, trace_id: traceId }),
   );
-}
-
-// Client disconnect / abort detection — mirrors the executor + error-handler
-// semantics. Used only to suppress an error frame for a benign disconnect.
-function isAbort(err: unknown, signal: AbortSignal): boolean {
-  if (signal.aborted) return true;
-  return err instanceof Error && (err.name === "AbortError" || err.message.includes("aborted"));
 }
 
 // Extract the assistant message (+ any tool messages) from a non-stream OpenAI
@@ -928,9 +925,10 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
             lastWrite = tail;
           }
         } catch (err) {
-          // A client disconnect / abort is NOT a provider fault: do not 5xx, do
-          // not surface an error frame — the executor layer already recorded it.
-          if (!isAbort(err, requestSignal(c))) {
+          const cancellation = requestCancellationReason(requestSignal(c), err);
+          if (cancellation !== null) {
+            markStartedStreamCancellation(result.decision, cancellation);
+          } else {
             // Preserve a mid-stream idle timeout (UpstreamError("timeout")) instead
             // of flattening it to a generic upstream_error frame.
             const timedOut = isUpstreamTimeout(err);

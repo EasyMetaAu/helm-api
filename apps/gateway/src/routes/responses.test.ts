@@ -40,7 +40,7 @@ describe("settleResponsesStreamOutcome", () => {
     const outcome = settleResponsesStreamOutcome({
       decision,
       streamStatus: null,
-      caughtAbort: true,
+      cancellationReason: "client_abort",
       caughtErrorReason: null,
       timedOut: true,
     });
