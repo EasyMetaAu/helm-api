@@ -1852,12 +1852,13 @@ describe("admin.api request payload", () => {
     });
   });
 
-  it("reserves the shared recovery budget before materializing a Session page", async () => {
+  it("allows two bounded Session recoveries while a third fails before reading", async () => {
     const rec = {
       ...decision("req_session", "balanced"),
       session: { ref: "session-ref", source: "x-thread-id" as const },
     };
     const pageEntered = deferred();
+    const secondPageEntered = deferred();
     const releasePage = deferred();
     let pageReads = 0;
     const telemetry = {
@@ -1866,6 +1867,7 @@ describe("admin.api request payload", () => {
       listSessionRevisionsPage: async () => {
         pageReads++;
         pageEntered.resolve();
+        if (pageReads === 2) secondPageEntered.resolve();
         await releasePage.promise;
         return {
           revisions: [
@@ -1891,6 +1893,8 @@ describe("admin.api request payload", () => {
     const app = buildApp(buildDeps({ telemetry }));
     const first = app.request("/admin/api/requests/req_session/payload");
     await pageEntered.promise;
+    const second = app.request("/admin/api/requests/req_session/payload");
+    await secondPageEntered.promise;
 
     const competing = await app.request("/admin/api/requests/req_session/payload");
     expect(await competing.json()).toEqual({
@@ -1898,10 +1902,11 @@ describe("admin.api request payload", () => {
       source: "unavailable",
       reason: "session_recovery_limited",
     });
-    expect(pageReads).toBe(1);
+    expect(pageReads).toBe(2);
 
     releasePage.resolve();
     expect(await (await first).json()).toMatchObject({ captured: true, source: "session" });
+    expect(await (await second).json()).toMatchObject({ captured: true, source: "session" });
   });
 
   it("distinguishes a cleaned session from a corrupt session chain", async () => {

@@ -7,6 +7,10 @@
 
 ---
 
+## 2026-07-23 · Session 恢复与在线响应共享内存池（Admin requests，docs/07/11，原则 3/7）
+
+- **恢复窗口**：Admin Session 恢复单次最多预占 response-work 池的一半，允许两次有界恢复并行，也为在线 API 响应保留容量；第三次并发恢复或超过半窗口的会话继续返回 `session_recovery_limited`。保留先准入、后物化正文的顺序，不新增队列、配置或独立内存池。
+
 ## 2026-07-23 · Codex Responses 按运行时容量准入并让夜间 SQLite 维护收缩内存（Gateway / Session / Store，docs/02/05/07/10，原则 2/3/7/8）
 
 - **功能边界不降级**：按 operator 要求保留正文/Session 捕获、自动 cleanup/VACUUM 和不限 key 并发；不再用关闭正文、关闭维护或固定并发作为稳定手段。Node 启动时从 V8 heap limit 与 cgroup/process constrained memory 推导活动请求、response work、单条 wire message、写队列、Session head cache、SQLite page cache 与维护 cache；活动请求和 response work 各占动态可分配容量的 20%，部署值随机器容量自动缩放，不写死 MiB。
@@ -64,13 +68,9 @@
 - **凭据与边界**：向导可对静态 Provider 发起一次 1-token 真实请求，只有测试通过的新增 key 才可保存；也允许零静态 key 完成。默认只展开 OpenRouter 与 DeepSeek 并提供官方注册入口，其他静态 Provider 收进可选折叠区；订阅绑定直接复用既有 Admin Providers 页面，不复制 OAuth 流程。Admin、自动生成的 OAuth encryption key 与静态 key 原子写入 `data/helm-managed-env.json`（`0600`），外部非空环境变量优先。该文件等同数据卷内私有 `.env`，没有把同盘密钥与密文包装成虚假的整盘泄露防护；不得记录、回显或写入数据库。零可用 Provider 时服务保持健康，推理明确返回 `503 lane_unavailable`，真实上游全部失败仍是 `502 all_providers_failed`。
 - **两种安装方式与 Linux 实测**：`quickstart.sh` 默认只写端口/UID/GID 后进入浏览器向导，`--cli` 保留终端自动配置；`pnpm start` 使用 Node 22 原生 env-file，无新增依赖。Compose 的 `.env` 为可选，`HELM_PORT` 统一控制宿主、容器监听和 healthcheck；脚本按安装者 UID/GID 运行非 root 容器，SQLite 自动创建缺失数据目录。Ubuntu x86_64 上已验证 Docker build、无 `.env` 启动、OAuth-only 完成、Admin/Models、`0600`、重启持久化、19096→19097 端口切换与 8080 关闭。
 
-## 2026-07-21 · Grok Build 复用 OpenAI 模型发现接入 Helm（Admin client setup，docs/05/11，原则 2/5/6）
-
-- **官方契约**：以 `xai-org/grok-build@a881e67` 的 Custom Models 指南为准，Grok Build 设置 `GROK_MODELS_BASE_URL` 后从 `{base_url}/models` 发现模型，以 `XAI_API_KEY` 作为 Bearer key，并默认走 OpenAI Chat Completions。Admin「接入客户端」因此只新增可复制的 `GROK_MODELS_BASE_URL=<origin>/v1`、Helm key 与 `grok -m auto` 引导；`/v1/models` 继续按 key 暴露 `auto` / lanes，推理由既有 `/v1/chat/completions` 路由处理。
-- **最小边界**：不新增 Grok 专用 Gateway 路由、协议适配、依赖或运行时配置，也不要求 `grok login`；只扩展现有 Admin 对话框、七种现有语言文案与一个定向组件测试。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-21 · Grok Build 复用 OpenAI 模型发现接入 Helm（Admin client setup，docs/05/11，原则 2/5/6）**：Grok Build 复用现有 `/v1/models` 与 Chat Completions，只新增七语言客户端配置引导，不引入专用路由或依赖；完整原文通过 git history 回溯。
 - **2026-07-20 · `end_turn` XML 泄漏只按终态工具调用恢复（Protocol streaming / provider execution，原则 3/5/8）**：仅在终态、完整、白名单且无既有结构化调用时恢复 `end_turn` XML 工具调用，四个出口共用收紧边界；完整原文通过 git history 回溯。
 - **2026-07-18 · 请求推理等级与实际路由等级分开展示（Telemetry / Admin requests，原则 1/7）**：单独保存客户端请求等级与覆盖后的实际执行等级，共享列表分别展示且不从旧记录反推；完整原文通过 git history 回溯。
 - **2026-07-18 · 关闭正文捕获时仍保留推理等级（Telemetry / Admin requests，原则 1/7）**：完整正文关闭时仍把实际生效的 `reasoning_effort` 作为脱敏 DecisionRecord 元数据保存并显示；完整原文通过 git history 回溯。
