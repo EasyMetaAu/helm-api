@@ -24,6 +24,12 @@ import {
   type NativePassthroughInput,
 } from "@helm/shared";
 import {
+  consumeResponseTextWithinBudget,
+  ResponseBodyTooLargeError,
+} from "../runtime/bounded-response.js";
+import { runtimeMemoryBudget } from "../runtime/memory-budget.js";
+import { ResponseWorkCapacityError } from "../runtime/response-work-admission.js";
+import {
   type PreparedNativePassthroughRequest,
   prepareNativePassthroughRequest,
 } from "./native-passthrough.js";
@@ -149,10 +155,16 @@ export interface CodexResponsesWebSocketConnectInput {
   signal?: AbortSignal;
 }
 
+export interface CodexResponsesWebSocketReceivedMessage {
+  text: string;
+  release(): void;
+}
+
 export interface CodexResponsesWebSocketConnection {
   responseHeaders: Headers;
   send(text: string): Promise<void>;
   receive(): Promise<string | null>;
+  receiveWithWork?(): Promise<CodexResponsesWebSocketReceivedMessage | null>;
   close(): Promise<void>;
 }
 
@@ -192,6 +204,18 @@ const RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite";
 const CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata";
 const CODEX_TURN_STATE_HEADER = "x-codex-turn-state";
 const MAX_CODEX_TURN_STATES = 128;
+
+function responseBodyTooLargeUpstreamError(error: ResponseBodyTooLargeError): UpstreamError {
+  return new UpstreamError("upstream_error", error.message, {
+    error: { code: "response_body_too_large", limit_bytes: error.limitBytes },
+  });
+}
+
+function responseWorkCapacityUpstreamError(error: ResponseWorkCapacityError): UpstreamError {
+  return new UpstreamError("upstream_error", error.message, {
+    error: { code: "response_work_capacity_exhausted", limit_bytes: error.capacityBytes },
+  });
+}
 
 const RESPONSES_REASONING_DELTA_TYPES = new Set([
   "response.reasoning_summary.delta",
@@ -1371,12 +1395,25 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     }
   }
 
-  async function readUnaryBody(result: CodexHttpResponse): Promise<string> {
+  async function consumeUnaryBody<T>(
+    result: CodexHttpResponse,
+    consume: (text: string) => T | Promise<T>,
+  ): Promise<T> {
     try {
-      return await result.response.text();
+      return await consumeResponseTextWithinBudget(
+        result.response,
+        runtimeMemoryBudget().maxWireBytes,
+        consume,
+      );
     } catch (err) {
       if (result.bodyTimeout?.isTimeout() && !result.bodyTimeout.isExternalAbort()) {
         throw new UpstreamError("timeout", "upstream request timed out");
+      }
+      if (err instanceof ResponseBodyTooLargeError) {
+        throw responseBodyTooLargeUpstreamError(err);
+      }
+      if (err instanceof ResponseWorkCapacityError) {
+        throw responseWorkCapacityUpstreamError(err);
       }
       throw err;
     } finally {
@@ -1387,7 +1424,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
   }
 
   async function readUnaryJson(result: CodexHttpResponse): Promise<Record<string, unknown>> {
-    return JSON.parse(await readUnaryBody(result)) as Record<string, unknown>;
+    return await consumeUnaryBody(result, (text) => JSON.parse(text) as Record<string, unknown>);
   }
 
   function fireMetadataHook(
@@ -1485,16 +1522,19 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
   async function errorFromResponse(result: CodexHttpResponse): Promise<UpstreamError> {
     let providerRaw: unknown = null;
     try {
-      const text = await readUnaryBody(result);
-      try {
-        providerRaw = JSON.parse(text);
-      } catch {
-        providerRaw = text;
-      }
+      providerRaw = await consumeUnaryBody(result, (text) => {
+        let raw: unknown;
+        try {
+          raw = JSON.parse(text);
+        } catch {
+          raw = text;
+        }
+        return scrub(raw);
+      });
     } catch (err) {
       if (err instanceof UpstreamError && err.errorClass === "timeout") throw err;
     }
-    const scrubbedBody = scrub(providerRaw);
+    const scrubbedBody = providerRaw;
     const selectedHeaders =
       result.response.status === 429 ? codexErrorHeaders(result.response.headers) : {};
     const structuredRaw =
@@ -1866,25 +1906,39 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
   async function receiveWebSocketMessage(
     connection: CodexResponsesWebSocketConnection,
     signal: AbortSignal | undefined,
-  ): Promise<string | null> {
+  ): Promise<CodexResponsesWebSocketReceivedMessage | null> {
     const timeout = withTimeout(timeoutMs, signal);
+    const receive =
+      connection.receiveWithWork?.() ??
+      connection.receive().then((text) =>
+        text === null
+          ? null
+          : {
+              text,
+              release() {},
+            },
+      );
     try {
       return await Promise.race([
-        connection.receive(),
+        receive,
         new Promise<never>((_, reject) => {
-          timeout.signal.addEventListener(
-            "abort",
-            () => {
-              if (timeout.isTimeout() && !timeout.isExternalAbort()) {
-                reject(new UpstreamError("timeout", "upstream websocket stream timed out"));
-              } else {
-                reject(signal?.reason ?? new Error("client aborted"));
-              }
-            },
-            { once: true },
-          );
+          const rejectAbort = () => {
+            if (timeout.isTimeout() && !timeout.isExternalAbort()) {
+              reject(new UpstreamError("timeout", "upstream websocket stream timed out"));
+            } else {
+              reject(signal?.reason ?? new Error("client aborted"));
+            }
+          };
+          if (timeout.signal.aborted) rejectAbort();
+          else timeout.signal.addEventListener("abort", rejectAbort, { once: true });
         }),
       ]);
+    } catch (error) {
+      void receive.then(
+        (message) => message?.release(),
+        () => {},
+      );
+      throw error;
     } finally {
       timeout.cleanup();
     }
@@ -2005,40 +2059,44 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
             opts?.captureUpstream?.(requestText);
             await lease.connection.send(requestText);
             while (true) {
-              const message = await receiveWebSocketMessage(lease.connection, opts?.signal);
-              if (message === null) {
+              const received = await receiveWebSocketMessage(lease.connection, opts?.signal);
+              if (received === null) {
                 await closeWebSocketSession(sessionId);
                 throw new UpstreamError(
                   "upstream_error",
                   "upstream websocket closed before a terminal response event",
                 );
               }
-              const event = websocketSseFrame(message);
-              if (event.kind === "rate_limits") {
-                fireResponseMetaHeaders(event.headers, opts?.onResponseMeta);
-                continue;
-              }
-              if (event.kind === "error") {
-                fireResponseMetaHeaders(event.headers, opts?.onResponseMeta);
-                if (isWebsocketConnectionLimitError(event.error)) {
-                  await closeWebSocketSession(sessionId);
-                  if (retries < maxRetries) {
-                    retryConnection = true;
-                  } else {
-                    websocketHttpFallbackSessions.add(sessionId);
-                    fallbackToHttp = true;
-                  }
-                  break;
+              try {
+                const event = websocketSseFrame(received.text);
+                if (event.kind === "rate_limits") {
+                  fireResponseMetaHeaders(event.headers, opts?.onResponseMeta);
+                  continue;
                 }
-                await closeWebSocketSession(sessionId);
-                throw event.error;
-              }
-              if (event.terminal && !event.reusable) {
-                await closeWebSocketSession(sessionId);
-              }
-              yield event.frame;
-              if (event.terminal) {
-                return;
+                if (event.kind === "error") {
+                  fireResponseMetaHeaders(event.headers, opts?.onResponseMeta);
+                  if (isWebsocketConnectionLimitError(event.error)) {
+                    await closeWebSocketSession(sessionId);
+                    if (retries < maxRetries) {
+                      retryConnection = true;
+                    } else {
+                      websocketHttpFallbackSessions.add(sessionId);
+                      fallbackToHttp = true;
+                    }
+                    break;
+                  }
+                  await closeWebSocketSession(sessionId);
+                  throw event.error;
+                }
+                if (event.terminal && !event.reusable) {
+                  await closeWebSocketSession(sessionId);
+                }
+                yield event.frame;
+                if (event.terminal) {
+                  return;
+                }
+              } finally {
+                received.release();
               }
             }
           } catch (error) {
@@ -2250,23 +2308,41 @@ export function createGenericOpenAIResponsesClient(
   }
 
   async function errorFromResponse(res: Response): Promise<UpstreamError> {
-    const providerRaw = await res
-      .text()
-      .then((t) => {
+    const providerRaw = await consumeResponseTextWithinBudget(
+      res,
+      runtimeMemoryBudget().maxWireBytes,
+      (text) => {
         try {
-          return JSON.parse(t);
+          return scrub(JSON.parse(text));
         } catch {
-          return t;
+          return scrub(text);
         }
-      })
-      .catch(() => null)
-      .then(scrub);
+      },
+    ).catch(() => null);
     return new UpstreamError(
       "upstream_error",
       `upstream returned ${res.status}`,
       providerRaw,
       res.status,
     );
+  }
+
+  async function readUnaryJson(res: Response): Promise<Record<string, unknown>> {
+    try {
+      return await consumeResponseTextWithinBudget(
+        res,
+        runtimeMemoryBudget().maxWireBytes,
+        (text) => JSON.parse(text) as Record<string, unknown>,
+      );
+    } catch (error) {
+      if (error instanceof ResponseBodyTooLargeError) {
+        throw responseBodyTooLargeUpstreamError(error);
+      }
+      if (error instanceof ResponseWorkCapacityError) {
+        throw responseWorkCapacityUpstreamError(error);
+      }
+      throw error;
+    }
   }
 
   async function requestJson(
@@ -2380,7 +2456,7 @@ export function createGenericOpenAIResponsesClient(
       if (requestContract?.forceSse === true) {
         return await aggregateResponsesStream(res, model, timeoutMs, { allowIncomplete: true });
       }
-      return responsesJsonToChatResponse((await res.json()) as Record<string, unknown>, model);
+      return responsesJsonToChatResponse(await readUnaryJson(res), model);
     },
 
     async *chatCompletionStream(req, opts) {
@@ -2412,7 +2488,7 @@ export function createGenericOpenAIResponsesClient(
       if (requestContract?.forceSse === true) {
         return await aggregateNativeResponsesStream(res, timeoutMs);
       }
-      return (await res.json()) as Record<string, unknown>;
+      return await readUnaryJson(res);
     },
 
     async *nativePassthroughStream(body, opts) {
@@ -2434,7 +2510,7 @@ export function createGenericOpenAIResponsesClient(
         signal: opts?.signal,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      return (await res.json()) as Record<string, unknown>;
+      return await readUnaryJson(res);
     },
 
     async responsesDelete(responseId, opts) {
@@ -2443,7 +2519,7 @@ export function createGenericOpenAIResponsesClient(
         signal: opts?.signal,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      return (await res.json()) as Record<string, unknown>;
+      return await readUnaryJson(res);
     },
 
     async responsesCancel(responseId, opts) {
@@ -2452,7 +2528,7 @@ export function createGenericOpenAIResponsesClient(
         signal: opts?.signal,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      return (await res.json()) as Record<string, unknown>;
+      return await readUnaryJson(res);
     },
 
     async responsesInputItems(responseId, opts) {
@@ -2461,7 +2537,7 @@ export function createGenericOpenAIResponsesClient(
         signal: opts?.signal,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      return (await res.json()) as Record<string, unknown>;
+      return await readUnaryJson(res);
     },
 
     async responsesCompact(req, opts) {
@@ -2471,7 +2547,7 @@ export function createGenericOpenAIResponsesClient(
         signal: opts?.signal,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      return (await res.json()) as Record<string, unknown>;
+      return await readUnaryJson(res);
     },
 
     async responsesInputTokens(req, opts) {
@@ -2481,7 +2557,7 @@ export function createGenericOpenAIResponsesClient(
         signal: opts?.signal,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      return (await res.json()) as Record<string, unknown>;
+      return await readUnaryJson(res);
     },
   };
 }

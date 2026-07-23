@@ -8,6 +8,7 @@ import {
   isResponsesWebSocketPath,
   type ResponsesWebSocketUpgradeServer,
 } from "./responses-websocket.js";
+import { createBodyMemoryAdmission } from "./runtime/memory-admission.js";
 
 interface CapturedRequest {
   body: Record<string, unknown>;
@@ -77,6 +78,8 @@ async function startBridge(
     }),
   options: {
     closeSession?: (sessionId: string) => void | Promise<void>;
+    memoryAdmission?: ReturnType<typeof createBodyMemoryAdmission>;
+    ingressAdmission?: ReturnType<typeof createBodyMemoryAdmission>;
   } = {},
 ) {
   const server = createServer((_req, res) => {
@@ -93,6 +96,8 @@ async function startBridge(
       return fetch(request);
     },
     closeSession: options.closeSession,
+    memoryAdmission: options.memoryAdmission,
+    ingressAdmission: options.ingressAdmission,
   });
   openBridges.push(bridge);
   server.listen(0, "127.0.0.1");
@@ -117,6 +122,96 @@ async function connect(url: string, headers: Record<string, string> = {}): Promi
 }
 
 describe("Responses websocket bridge", () => {
+  it("reserves shared ingress capacity before websocket upgrade and releases it on close", async () => {
+    const ingressAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 20,
+      maxWireBytes: 10,
+      jsonAmplification: 1,
+      minRequestChargeBytes: 10,
+    });
+    let resolvePreflight!: (response: Response) => void;
+    let preflightCalls = 0;
+    const preflight = new Promise<Response>((resolve) => {
+      resolvePreflight = resolve;
+    });
+    const baseUrl = await startBridge(
+      () => {
+        throw new Error("response fetch should not run");
+      },
+      () => {
+        preflightCalls += 1;
+        return preflight;
+      },
+      { ingressAdmission },
+    );
+    const first = new WebSocket(`${baseUrl}/v1/responses`);
+    openSockets.push(first);
+    for (let attempt = 0; attempt < 20 && preflightCalls === 0; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(preflightCalls).toBe(1);
+
+    const second = new WebSocket(`${baseUrl}/v1/responses`);
+    openSockets.push(second);
+    for (let attempt = 0; attempt < 20 && preflightCalls < 2; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(preflightCalls).toBe(2);
+    const third = new WebSocket(`${baseUrl}/v1/responses`);
+    openSockets.push(third);
+    const [, rejected] = (await once(third, "unexpected-response")) as [
+      IncomingMessage,
+      IncomingMessage,
+    ];
+    rejected.resume();
+    expect(rejected.statusCode).toBe(503);
+    expect(rejected.headers["retry-after"]).toBe("1");
+    expect(preflightCalls).toBe(2);
+
+    resolvePreflight(
+      new Response(JSON.stringify({ data: [] }), {
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await once(first, "open");
+    await once(second, "open");
+    expect(ingressAdmission.reservedBytes).toBe(20);
+    first.terminate();
+    await once(first, "close");
+    for (let attempt = 0; attempt < 20 && ingressAdmission.reservedBytes !== 10; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(ingressAdmission.reservedBytes).toBe(10);
+    second.terminate();
+    await once(second, "close");
+    for (let attempt = 0; attempt < 20 && ingressAdmission.reservedBytes !== 0; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(ingressAdmission.reservedBytes).toBe(0);
+  });
+
+  it("uses the shared machine-derived limit before parsing a websocket message", async () => {
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 60,
+      maxWireBytes: 10,
+      jsonAmplification: 6,
+    });
+    const baseUrl = await startBridge(
+      () => {
+        throw new Error("fetch should not run");
+      },
+      undefined,
+      { memoryAdmission },
+    );
+    const socket = await connect(`${baseUrl}/v1/responses`);
+    const closed = once(socket, "close");
+    socket.send(JSON.stringify({ type: "response.create", input: "too large" }));
+    const [code] = await closed;
+
+    expect(code).toBe(1009);
+    expect(memoryAdmission.reservedBytes).toBe(0);
+  });
+
   it.each([
     "/v1/responses",
     "/responses",
@@ -250,6 +345,36 @@ describe("Responses websocket bridge", () => {
     expect(captured[0]?.headers.get("accept")).toBe("text/event-stream");
   });
 
+  it("closes a connection that pipelines a second active response without injecting an error", async () => {
+    let started!: () => void;
+    const requestStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const baseUrl = await startBridge((request) => {
+      started();
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            request.signal.addEventListener("abort", () => controller.close(), { once: true });
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+    const socket = await connect(`${baseUrl}/v1/responses`);
+    const messages: string[] = [];
+    socket.on("message", (data) => messages.push(data.toString()));
+    socket.send(JSON.stringify({ type: "response.create", input: [], stream: true }));
+    await requestStarted;
+
+    const closed = once(socket, "close");
+    socket.send(JSON.stringify({ type: "response.create", input: [], stream: true }));
+    const [code] = await closed;
+
+    expect(code).toBe(1008);
+    expect(messages).toEqual([]);
+  });
+
   it("returns the models ETag without inventing reasoning capability on the 101 handshake", async () => {
     const baseUrl = await startBridge(
       () => {
@@ -277,7 +402,7 @@ describe("Responses websocket bridge", () => {
     expect(response.statusCode).toBe(101);
     expect(response.headers["x-models-etag"]).toBe('"models-1"');
     expect(response.headers["x-reasoning-included"]).toBeUndefined();
-    expect(response.headers["sec-websocket-extensions"]).toContain("permessage-deflate");
+    expect(response.headers["sec-websocket-extensions"]).toBeUndefined();
   });
 
   it("prefers the standard version header for the models preflight cache key", async () => {
@@ -375,6 +500,44 @@ describe("Responses websocket bridge", () => {
 
     expect(response.statusCode).toBe(400);
     expect(modelsCalled).toBe(false);
+  });
+
+  it("forwards a protocol-shaped maintenance response from models preflight", async () => {
+    const body = {
+      error: {
+        message: "database maintenance in progress",
+        type: "api_error",
+        code: "database_maintenance",
+        trace_id: "trace-maintenance",
+      },
+    };
+    const baseUrl = await startBridge(
+      () => {
+        throw new Error("response fetch should not run");
+      },
+      () =>
+        new Response(JSON.stringify(body), {
+          status: 503,
+          headers: { "content-type": "application/json", "retry-after": "1" },
+        }),
+    );
+    const socket = new WebSocket(`${baseUrl}/v1/responses`, {
+      headers: { authorization: "Bearer helm-test-key" },
+    });
+    socket.on("error", () => {});
+    openSockets.push(socket);
+
+    const [, response] = (await once(socket, "unexpected-response")) as [
+      IncomingMessage,
+      IncomingMessage,
+    ];
+    let payload = "";
+    response.setEncoding("utf8");
+    for await (const chunk of response) payload += chunk;
+
+    expect(response.statusCode).toBe(503);
+    expect(response.headers["retry-after"]).toBe("1");
+    expect(JSON.parse(payload)).toEqual(body);
   });
 
   it("omits a false x-reasoning-included value because Codex treats presence as true", async () => {
@@ -571,7 +734,7 @@ describe("Responses websocket bridge", () => {
     ]);
   });
 
-  it("stops at the terminal event and cancels the internal HTTP stream", async () => {
+  it("drains the internal HTTP stream after the terminal event without forwarding trailing data", async () => {
     let cancelled = false;
     let trailingTimer: ReturnType<typeof setTimeout> | null = null;
     const encoder = new TextEncoder();
@@ -619,59 +782,13 @@ describe("Responses websocket bridge", () => {
     await once(socket, "message");
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    expect(cancelled).toBe(true);
+    expect(cancelled).toBe(false);
     expect(events).toEqual([
       {
         type: "response.completed",
         response: { id: "resp-terminal", status: "completed" },
       },
     ]);
-  });
-
-  it("does not wait for internal stream cancellation before handling the next turn", async () => {
-    let requestCount = 0;
-    let cancelled = false;
-    const encoder = new TextEncoder();
-    const completedFrame =
-      'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-completed","status":"completed"}}\n\n';
-    const baseUrl = await startBridge(() => {
-      requestCount += 1;
-      return new Response(
-        new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(encoder.encode(completedFrame));
-            if (requestCount > 1) controller.close();
-          },
-          cancel() {
-            cancelled = true;
-            return new Promise<void>(() => {});
-          },
-        }),
-        { headers: { "content-type": "text/event-stream" } },
-      );
-    });
-    const socket = await connect(`${baseUrl}/v1/responses`);
-
-    await collectTurn(socket, {
-      type: "response.create",
-      model: "gpt-5.6-sol",
-      input: [],
-      stream: true,
-    });
-    socket.send(
-      JSON.stringify({
-        type: "response.create",
-        model: "gpt-5.6-sol",
-        input: [],
-        stream: true,
-      }),
-    );
-    for (let attempt = 0; attempt < 20 && requestCount < 2; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-
-    expect(cancelled).toBe(true);
-    expect(requestCount).toBe(2);
   });
 
   it.each([

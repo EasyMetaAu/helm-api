@@ -1,4 +1,11 @@
-import type { CreateKeyInput, KeyStore, Lane, PoliciesConfig, TelemetryStore } from "@helm/core";
+import type {
+  CreateKeyInput,
+  KeyStore,
+  Lane,
+  PoliciesConfig,
+  SessionRevisionRecord,
+  TelemetryStore,
+} from "@helm/core";
 import { DEFAULT_LANES, parseLanesConfig } from "@helm/core";
 import type { ApiKeyRecord, ClassifierConfig, DecisionRecord, RuntimeSettings } from "@helm/shared";
 import { ClassifierConfigSchema, RuntimeSettingsSchema } from "@helm/shared";
@@ -69,6 +76,10 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
     resolve = r;
   });
   return { promise, resolve };
+}
+
+function singleSessionRevisionPage(revisions: SessionRevisionRecord[]) {
+  return async () => ({ revisions, nextSequence: null, limited: false });
 }
 
 type TestKeyRecord = ApiKeyRecord & { secret_enc: string | null };
@@ -1683,19 +1694,25 @@ describe("admin.api request payload", () => {
     const telemetry = {
       ...makeTelemetry([rec]),
       getPayload: async () => null,
-      listSessionRevisions: async () => [
-        {
-          sessionRef: "session-ref",
-          requestId: "req_session",
-          parentRequestId: null,
-          retainCount: 0,
-          requestDeltaJson: '[{"role":"user","content":"hello"}]',
-          requestEnvelopeJson: '{"model":"auto","messages":[]}',
-          responseJson,
-          fidelity: "semantic",
-          createdAt: new Date(1234),
-        },
-      ],
+      listSessionRevisionsPage: async () => ({
+        revisions: [
+          {
+            sessionRef: "session-ref",
+            requestId: "req_session",
+            sequence: 1,
+            parentRequestId: null,
+            retainCount: 0,
+            requestDeltaJson: '[{"role":"user","content":"hello"}]',
+            requestEnvelopeJson: '{"model":"auto","messages":[]}',
+            responseId: null,
+            responseJson,
+            fidelity: "semantic",
+            createdAt: new Date(1234),
+          },
+        ],
+        nextSequence: null,
+        limited: false,
+      }),
     } as unknown as TelemetryStore;
     const app = buildApp(buildDeps({ telemetry }));
     const res = await app.request("/admin/api/requests/req_session/payload");
@@ -1738,6 +1755,155 @@ describe("admin.api request payload", () => {
     });
   });
 
+  it("recovers Session revisions through bounded keyset pages without listing the whole Session", async () => {
+    const rec = {
+      ...decision("req_child", "balanced"),
+      session: { ref: "session-ref", label: "thread-1", source: "x-thread-id" as const },
+    };
+    const pages: Array<{ afterSequence?: number; limit: number; maxBytes: number }> = [];
+    const root = {
+      sessionRef: "session-ref",
+      requestId: "req_root",
+      sequence: 1,
+      parentRequestId: null,
+      retainCount: 0,
+      requestDeltaJson: '[{"role":"user","content":"root"}]',
+      requestEnvelopeJson: '{"model":"auto","messages":[]}',
+      responseId: null,
+      responseJson: null,
+      fidelity: "semantic",
+      createdAt: new Date(1000),
+    };
+    const child = {
+      ...root,
+      requestId: "req_child",
+      sequence: 2,
+      parentRequestId: "req_root",
+      retainCount: 1,
+      requestDeltaJson: '[{"role":"user","content":"child"}]',
+      responseJson: '{"choices":[]}',
+      createdAt: new Date(2000),
+    };
+    const telemetry = {
+      ...makeTelemetry([rec]),
+      getPayload: async () => null,
+      listSessionRevisions: async () => {
+        throw new Error("unbounded Session read must not be used");
+      },
+      listSessionRevisionsPage: async (
+        _sessionRef: string,
+        options: { afterSequence?: number; limit: number; maxBytes: number },
+      ) => {
+        pages.push(options);
+        return options.afterSequence === undefined
+          ? { revisions: [root], nextSequence: 1, limited: false }
+          : { revisions: [child], nextSequence: null, limited: false };
+      },
+    } as unknown as TelemetryStore;
+    const response = await buildApp(buildDeps({ telemetry })).request(
+      "/admin/api/requests/req_child/payload",
+    );
+
+    expect(await response.json()).toMatchObject({
+      captured: true,
+      source: "session",
+      exact: false,
+      request: {
+        model: "auto",
+        messages: [
+          { role: "user", content: "root" },
+          { role: "user", content: "child" },
+        ],
+      },
+    });
+    expect(pages).toHaveLength(2);
+    expect(pages[0]?.limit).toBeGreaterThan(0);
+    expect(pages[0]?.maxBytes).toBeGreaterThan(0);
+    expect(pages[1]?.afterSequence).toBe(1);
+    expect(pages[1]?.maxBytes).toBeLessThan(pages[0]?.maxBytes ?? 0);
+  });
+
+  it("returns an honest limited result when Session recovery exceeds the runtime byte budget", async () => {
+    const rec = {
+      ...decision("req_session", "balanced"),
+      session: { ref: "session-ref", source: "x-thread-id" as const },
+    };
+    let maxBytes = 0;
+    const telemetry = {
+      ...makeTelemetry([rec]),
+      getPayload: async () => null,
+      listSessionRevisionsPage: async (
+        _sessionRef: string,
+        options: { afterSequence?: number; limit: number; maxBytes: number },
+      ) => {
+        maxBytes = options.maxBytes;
+        return { revisions: [], nextSequence: null, limited: true };
+      },
+    } as unknown as TelemetryStore;
+    const response = await buildApp(buildDeps({ telemetry })).request(
+      "/admin/api/requests/req_session/payload",
+    );
+
+    expect(maxBytes).toBeGreaterThan(0);
+    expect(await response.json()).toEqual({
+      captured: false,
+      source: "unavailable",
+      reason: "session_recovery_limited",
+    });
+  });
+
+  it("reserves the shared recovery budget before materializing a Session page", async () => {
+    const rec = {
+      ...decision("req_session", "balanced"),
+      session: { ref: "session-ref", source: "x-thread-id" as const },
+    };
+    const pageEntered = deferred();
+    const releasePage = deferred();
+    let pageReads = 0;
+    const telemetry = {
+      ...makeTelemetry([rec]),
+      getPayload: async () => null,
+      listSessionRevisionsPage: async () => {
+        pageReads++;
+        pageEntered.resolve();
+        await releasePage.promise;
+        return {
+          revisions: [
+            {
+              sessionRef: "session-ref",
+              requestId: "req_session",
+              sequence: 1,
+              parentRequestId: null,
+              retainCount: 0,
+              requestDeltaJson: '[{"role":"user","content":"hello"}]',
+              requestEnvelopeJson: '{"model":"auto","messages":[]}',
+              responseId: null,
+              responseJson: null,
+              fidelity: "semantic",
+              createdAt: new Date(1234),
+            },
+          ],
+          nextSequence: null,
+          limited: false,
+        };
+      },
+    } as unknown as TelemetryStore;
+    const app = buildApp(buildDeps({ telemetry }));
+    const first = app.request("/admin/api/requests/req_session/payload");
+    await pageEntered.promise;
+
+    const competing = await app.request("/admin/api/requests/req_session/payload");
+    expect(await competing.json()).toEqual({
+      captured: false,
+      source: "unavailable",
+      reason: "session_recovery_limited",
+    });
+    expect(pageReads).toBe(1);
+
+    releasePage.resolve();
+    expect(await (await first).json()).toMatchObject({ captured: true, source: "session" });
+  });
+
   it("distinguishes a cleaned session from a corrupt session chain", async () => {
     const rec = {
       ...decision("req_session", "balanced"),
@@ -1746,7 +1912,7 @@ describe("admin.api request payload", () => {
     const unavailable = {
       ...makeTelemetry([rec]),
       getPayload: async () => null,
-      listSessionRevisions: async () => [],
+      listSessionRevisionsPage: singleSessionRevisionPage([]),
     } as unknown as TelemetryStore;
     const unavailableApp = buildApp(buildDeps({ telemetry: unavailable }));
     expect(
@@ -1760,7 +1926,7 @@ describe("admin.api request payload", () => {
     const incomplete = {
       ...makeTelemetry([rec]),
       getPayload: async () => null,
-      listSessionRevisions: async () => [
+      listSessionRevisionsPage: singleSessionRevisionPage([
         {
           sessionRef: "session-ref",
           requestId: "req_session",
@@ -1769,11 +1935,12 @@ describe("admin.api request payload", () => {
           retainCount: 0,
           requestDeltaJson: "[]",
           requestEnvelopeJson: '{"messages":[]}',
+          responseId: null,
           responseJson: null,
           fidelity: "semantic",
           createdAt: new Date(1234),
         },
-      ],
+      ]),
     } as unknown as TelemetryStore;
     const incompleteApp = buildApp(buildDeps({ telemetry: incomplete }));
     expect(
@@ -1787,7 +1954,7 @@ describe("admin.api request payload", () => {
     const unknownContinuation = {
       ...makeTelemetry([rec]),
       getPayload: async () => null,
-      listSessionRevisions: async () => [
+      listSessionRevisionsPage: singleSessionRevisionPage([
         {
           sessionRef: "session-ref",
           requestId: "req_session",
@@ -1801,7 +1968,7 @@ describe("admin.api request payload", () => {
           fidelity: "partial",
           createdAt: new Date(1234),
         },
-      ],
+      ]),
     } as unknown as TelemetryStore;
     const unknownContinuationApp = buildApp(buildDeps({ telemetry: unknownContinuation }));
     expect(

@@ -12,6 +12,12 @@ import type { AppEnv } from "../app.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
+import {
+  type BodyMemoryAdmission,
+  memoryAdmissionReleaseGuard,
+  RequestAdmissionError,
+  readAdmittedRequestBody,
+} from "../runtime/memory-admission.js";
 import type { GeminiRateLimiterPort } from "./gemini.js";
 import {
   type ImageAttempt,
@@ -35,6 +41,8 @@ import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-c
 export interface ImagesRouteDeps {
   rateLimiter?: GeminiRateLimiterPort;
   concurrencyGate?: ConcurrencyGatePort;
+  /** Machine-derived request-body budget shared by every AI ingress surface. */
+  memoryAdmission?: BodyMemoryAdmission;
   auth: { resolve(credential: string | null): Promise<MessagesIdentity | null> };
   /** Resolve the client id (bare model OR image lane) → the ordered provider chain.
    *  Both upstream KINDS ride through: `openai` → OpenAI Images API
@@ -100,6 +108,7 @@ function mapGeminiToImages(native: Record<string, unknown>): Record<string, unkn
 
 export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): void {
   app.use("/v1/images/generations", concurrencyReleaseGuard());
+  app.use("/v1/images/generations", memoryAdmissionReleaseGuard());
 
   app.post("/v1/images/generations", async (c) => {
     // Production always receives both ids from createApp. The UUID fallback keeps
@@ -170,9 +179,24 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
     let requestJson = "";
     let raw: unknown;
     try {
-      requestJson = await c.req.text();
+      const admitted =
+        deps.memoryAdmission === undefined
+          ? null
+          : await readAdmittedRequestBody(c.req.raw, deps.memoryAdmission);
+      requestJson = admitted?.text ?? (await c.req.text());
+      if (admitted !== null) c.set("requestMemoryRelease", admitted.release);
       raw = JSON.parse(requestJson);
-    } catch {
+    } catch (error) {
+      if (error instanceof RequestAdmissionError) {
+        if (error.status === 503) c.header("retry-after", "1");
+        return errorJson(
+          c,
+          error.status,
+          error.status === 413 ? "invalid_request_error" : "server_error",
+          error.message,
+          error.code,
+        );
+      }
       return errorJson(c, 400, "invalid_request_error", "malformed JSON request body");
     }
     const parsed = ImageGenerationRequestSchema.safeParse(raw);

@@ -35,6 +35,12 @@ import type { AppEnv } from "../app.js";
 import { INTERNAL_API_KEY_ID } from "../internal-key.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
+import {
+  type BodyMemoryAdmission,
+  memoryAdmissionReleaseGuard,
+  RequestAdmissionError,
+  readAdmittedRequestBody,
+} from "../runtime/memory-admission.js";
 import { type ServingAccount, stampServingAccount } from "../runtime/serving-account.js";
 import type { WriteQueue } from "../runtime/write-queue.js";
 import { downgradeClientFastModeIfDisallowed } from "./fast-mode.js";
@@ -54,6 +60,7 @@ import {
   tokensFromUsage,
   usageFromBody,
   usageFromSSE,
+  withSseCaptureRelease,
 } from "./payload-capture.js";
 import { resolveSessionCapture, stampSessionCapture } from "./session-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
@@ -68,6 +75,8 @@ import { isUpstreamTimeout } from "./stream-error.js";
 // use()s auth, so `identity` is present.
 
 export interface ChatRouteDeps {
+  /** Machine-derived request-body budget shared by every AI ingress surface. */
+  memoryAdmission?: BodyMemoryAdmission;
   /** Bound core orchestrator: routeRequest(req, coreDeps) with deps closed over.
    *  `signal` is the per-request client-disconnect signal — the gateway binds
    *  the per-request `execute` (provider invoke) to it. */
@@ -425,6 +434,14 @@ function flushOpenAIChunk(buffer: SSEAccumulator): void {
 }
 
 export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void {
+  const chatPaths = [
+    "/v1/chat/completions",
+    "/chat/completions",
+    "/engines/:model{.+}/chat/completions",
+    "/openai/deployments/:model{.+}/chat/completions",
+  ];
+  for (const path of chatPaths) app.use(path, memoryAdmissionReleaseGuard());
+
   const handleChat = async (c: Context<AppEnv>, pathModel?: string) => {
     const traceId = c.get("trace_id");
     const requestId = c.get("request_id");
@@ -438,9 +455,28 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     let requestJson = "";
     let raw: unknown;
     try {
-      requestJson = await c.req.text();
+      const admitted =
+        deps.memoryAdmission === undefined
+          ? null
+          : await readAdmittedRequestBody(c.req.raw, deps.memoryAdmission);
+      requestJson = admitted?.text ?? (await c.req.text());
+      if (admitted !== null) c.set("requestMemoryRelease", admitted.release);
       raw = JSON.parse(requestJson);
-    } catch {
+    } catch (error) {
+      if (error instanceof RequestAdmissionError) {
+        if (error.status === 503) c.header("retry-after", "1");
+        return c.json(
+          {
+            error: {
+              message: error.message,
+              type: error.status === 413 ? "invalid_request_error" : "api_error",
+              code: error.code,
+              param: null,
+            },
+          },
+          error.status,
+        );
+      }
       throw invalidRequest("malformed JSON request body", traceId);
     }
     if (pathModel !== undefined && raw !== null && typeof raw === "object") {
@@ -595,13 +631,17 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // drained until the OUTBOUND turn is persisted (else the assistant turn is dropped
     // from this run). Outbound observes use the default → the worker wakes once the
     // whole turn has landed.
+    // The raw JSON is already retained by the parsed request/observe closure. Pass its
+    // exact wire size to the queue; the queue applies the runtime-derived JSON/V8
+    // amplification instead of a fixed per-task memory limit.
+    const observeRetainedBytes = Buffer.byteLength(requestJson, "utf8");
     const runObserve = async (task: () => Promise<unknown>, wake = true) => {
       if (deps.writes !== undefined) {
         deps.writes.enqueueTask(
           async () => {
             await task();
           },
-          { wakeOnSettle: wake },
+          { wakeOnSettle: wake, retainedBytes: observeRetainedBytes },
         );
         return;
       }
@@ -850,6 +890,8 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       // middleware and release it in the stream's OWN finally — the slot stays
       // held until the bytes are fully drained (or the client disconnects).
       const releaseConcurrency = c.get("concurrencyClaim")?.();
+      const releaseRequestMemory = c.get("requestMemoryRelease");
+      c.set("requestMemoryRelease", undefined);
       // SSE keep-alive: emit a `:` comment during inter-chunk idle so a proxy/client
       // idle-timeout does not sever a long but healthy stream. The comment is wire-only
       // (never captured, accumulated, or priced) and is gated on an event boundary so it
@@ -903,62 +945,71 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
           // Free the concurrency slot FIRST — the bytes are done; the
           // persist/settle bookkeeping below must not extend the hold.
           releaseConcurrency?.();
-          // Streamed completion-cost backfill (#6): parse the trailing usage and
-          // price it at the served alias. Fail-open — leave cost null on any miss.
-          const rawSse = captured.value();
-          const finalAlias =
-            result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
           try {
-            const usage = usageFromSSE(rawSse);
-            if (usage) {
-              // Cost backfill needs the served alias + pricing closure; the TOKEN
-              // stamp does not. Stamp usage whenever the tail has it (dashboard
-              // accounting) and price the cost only when costOf is wired.
-              const cost = finalAlias && deps.costOf ? deps.costOf(finalAlias, usage) : null;
-              backfillCompletionCost(
-                result.decision,
-                finalAlias,
-                cost,
-                usage,
-                genTimer.generationMs(),
-              );
-            }
-          } catch {
-            c.get("logger").log("warn", "cost.stream_backfill_failed", { trace_id: traceId });
-          }
-          await capturePayload(captureOn ? rawSse : null, result.upstreamRequest ?? null);
-          stampServingAccount(result.decision, servingAccount);
-          await persist(result.decision);
-          // Usage-budget settle (streamed): runs HERE — after the usage tail
-          // backfilled the streamed cost — so the spend dimension settles the real
-          // total. Tokens come from the same usage tail. Fail-open. NEVER deferred
-          // (quota correctness): the next request's pre-route gate must see this spend.
-          await settle(result.decision, tokensFromUsage(usageFromSSE(rawSse)));
-          // Memory observe (outbound, streamed): persist the reconstructed
-          // assistant turn AFTER the bytes were forwarded. Fail-open inside core.
-          // Called UNCONDITIONALLY (even with no reconstructed text — e.g. a
-          // tool-call-only turn) so the served-model stamp still lands; the empty
-          // responseMessages just persist nothing while the stamp records the
-          // model auto-compaction prices itself from.
-          if (deps.memory !== undefined) {
-            // Flush the last partial event the \n\n-split loop held back, so a
-            // final frame without a trailing \n\n is not dropped.
-            flushOpenAIChunk(assistant);
-            const memoryObserve = deps.memory.observe;
-            const responseMessages: IRMessage[] =
-              assistant.text.length > 0 ? [{ role: "assistant", content: assistant.text }] : [];
-            await runObserve(() =>
-              observeOutbound(
-                memoryObserve,
-                memoryScope,
-                {
-                  responseMessages,
-                  toolResults: [],
-                  messageIndexOffset: originalMessagesForMemory.length,
-                },
-                finalAlias,
-              ),
-            );
+            await withSseCaptureRelease(captured, async () => {
+              // Streamed completion-cost backfill (#6): parse the trailing usage and
+              // price it at the served alias. Fail-open — leave cost null on any miss.
+              const rawSse = captured.value();
+              if (captured.limited()) {
+                c.get("logger").log("warn", "payload.capture_limited", { trace_id: traceId });
+              }
+              const finalAlias =
+                result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
+              try {
+                const usage = usageFromSSE(rawSse);
+                if (usage) {
+                  // Cost backfill needs the served alias + pricing closure; the TOKEN
+                  // stamp does not. Stamp usage whenever the tail has it (dashboard
+                  // accounting) and price the cost only when costOf is wired.
+                  const cost = finalAlias && deps.costOf ? deps.costOf(finalAlias, usage) : null;
+                  backfillCompletionCost(
+                    result.decision,
+                    finalAlias,
+                    cost,
+                    usage,
+                    genTimer.generationMs(),
+                  );
+                }
+              } catch {
+                c.get("logger").log("warn", "cost.stream_backfill_failed", { trace_id: traceId });
+              }
+              await capturePayload(captured.payloadValue(), result.upstreamRequest ?? null);
+              stampServingAccount(result.decision, servingAccount);
+              await persist(result.decision);
+              // Usage-budget settle (streamed): runs HERE — after the usage tail
+              // backfilled the streamed cost — so the spend dimension settles the real
+              // total. Tokens come from the same usage tail. Fail-open. NEVER deferred
+              // (quota correctness): the next request's pre-route gate must see this spend.
+              await settle(result.decision, tokensFromUsage(usageFromSSE(rawSse)));
+              // Memory observe (outbound, streamed): persist the reconstructed
+              // assistant turn AFTER the bytes were forwarded. Fail-open inside core.
+              // Called UNCONDITIONALLY (even with no reconstructed text — e.g. a
+              // tool-call-only turn) so the served-model stamp still lands; the empty
+              // responseMessages just persist nothing while the stamp records the
+              // model auto-compaction prices itself from.
+              if (deps.memory !== undefined) {
+                // Flush the last partial event the \n\n-split loop held back, so a
+                // final frame without a trailing \n\n is not dropped.
+                flushOpenAIChunk(assistant);
+                const memoryObserve = deps.memory.observe;
+                const responseMessages: IRMessage[] =
+                  assistant.text.length > 0 ? [{ role: "assistant", content: assistant.text }] : [];
+                await runObserve(() =>
+                  observeOutbound(
+                    memoryObserve,
+                    memoryScope,
+                    {
+                      responseMessages,
+                      toolResults: [],
+                      messageIndexOffset: originalMessagesForMemory.length,
+                    },
+                    finalAlias,
+                  ),
+                );
+              }
+            });
+          } finally {
+            releaseRequestMemory?.();
           }
         }
       });

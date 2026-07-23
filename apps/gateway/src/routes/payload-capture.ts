@@ -1,10 +1,10 @@
 import type { DecisionRecord, TelemetryStore } from "@helm/core";
 import {
   billedCostFromBody,
+  PERSISTED_SESSION_MAX_REVISIONS,
+  PERSISTED_SESSION_MAX_STORED_BYTES,
   usageFromBody as parseUsage,
-  restoreSessionRevisionJson,
-  SESSION_MAX_REVISIONS,
-  SESSION_MAX_STORED_BYTES,
+  runtimeMemoryBudget,
   splitSessionRequestJson,
 } from "@helm/core";
 import type { TokenUsageBreakdown } from "@helm/shared";
@@ -28,6 +28,10 @@ export interface PayloadCaptureDeps {
   capturePayloads?: () => boolean;
   /** Live getter for the incremental per-session request transcript setting. */
   captureSessions?: () => boolean;
+  /** Optional test/embedding override. Production derives this from the V8 heap. */
+  captureBodyLimitBytes?: number;
+  /** Optional test/embedding override. Production derives this from the V8 heap. */
+  sessionCacheBytes?: number;
   /** Resolve the served attempt's USD cost from the trailing usage chunk: an
    *  upstream-BILLED cost in it (`cost_usd` / OpenRouter `cost`) OVERRIDES the
    *  catalog estimate, else tokens × `alias`'s pricing; null when neither is
@@ -347,13 +351,6 @@ export function capturedResponsesResponse(
   return { responseId: null, responseJson: null };
 }
 
-function previousResponseIdFromRequest(requestJson: string): string | null {
-  const value = JSON.parse(requestJson) as unknown;
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const previous = (value as Record<string, unknown>).previous_response_id;
-  return typeof previous === "string" && previous.trim() !== "" ? previous : null;
-}
-
 function hasResponsesOutput(raw: string | null | undefined): boolean {
   if (!raw) return false;
   try {
@@ -369,11 +366,15 @@ function hasResponsesOutput(raw: string | null | undefined): boolean {
   }
 }
 
-const MAX_SESSION_REQUEST_BYTES = 16 * 1024 * 1024;
-// Per revision: prevents one response from consuming the separate 64 MiB whole-Session budget.
-const MAX_SESSION_RESPONSE_BYTES = 16 * 1024 * 1024;
-const MAX_CACHED_SESSION_HEADS = 1_000;
-const MAX_CACHED_SESSION_HEAD_BYTES = 64 * 1024 * 1024;
+const defaultMemoryBudget = runtimeMemoryBudget();
+
+function captureBodyLimitBytes(deps: PayloadCaptureDeps): number {
+  return deps.captureBodyLimitBytes ?? defaultMemoryBudget.maxWireBytes;
+}
+
+function sessionCacheBytes(deps: PayloadCaptureDeps): number {
+  return deps.sessionCacheBytes ?? defaultMemoryBudget.sessionCacheBytes;
+}
 
 export interface SessionHeadCache {
   get(sessionRef: string): { requestId: string; requestJson: string } | undefined;
@@ -383,8 +384,8 @@ export interface SessionHeadCache {
 }
 
 export function createSessionHeadCache(
-  maxEntries = MAX_CACHED_SESSION_HEADS,
-  maxBytes = MAX_CACHED_SESSION_HEAD_BYTES,
+  maxEntries = Math.max(1, Math.floor(defaultMemoryBudget.sessionCacheBytes / 1024)),
+  maxBytes = defaultMemoryBudget.sessionCacheBytes,
 ): SessionHeadCache {
   const entries = new Map<
     string,
@@ -426,11 +427,32 @@ export function createSessionHeadCache(
 }
 
 const sessionHeadCaches = new WeakMap<TelemetryStore, SessionHeadCache>();
+const saturatedSessionRefs = new WeakMap<TelemetryStore, Set<string>>();
 
-function sessionHeadCache(store: TelemetryStore): SessionHeadCache {
+function saturatedSessions(store: TelemetryStore): Set<string> {
+  const existing = saturatedSessionRefs.get(store);
+  if (existing) return existing;
+  const created = new Set<string>();
+  saturatedSessionRefs.set(store, created);
+  return created;
+}
+
+function markSaturatedSession(store: TelemetryStore, sessionRef: string, maxBytes: number): void {
+  const refs = saturatedSessions(store);
+  refs.delete(sessionRef);
+  refs.add(sessionRef);
+  const maxEntries = Math.max(1, Math.floor(maxBytes / 1024));
+  while (refs.size > maxEntries) {
+    const oldest = refs.values().next().value;
+    if (oldest === undefined) break;
+    refs.delete(oldest);
+  }
+}
+
+function sessionHeadCache(store: TelemetryStore, maxBytes: number): SessionHeadCache {
   const existing = sessionHeadCaches.get(store);
   if (existing) return existing;
-  const created = createSessionHeadCache();
+  const created = createSessionHeadCache(Math.max(1, Math.floor(maxBytes / 1024)), maxBytes);
   sessionHeadCaches.set(store, created);
   return created;
 }
@@ -439,8 +461,14 @@ function cacheSessionHead(
   store: TelemetryStore,
   sessionRef: string,
   head: { requestId: string; requestJson: string },
+  maxBytes: number,
 ): void {
-  sessionHeadCache(store).set(sessionRef, head);
+  sessionHeadCache(store, maxBytes).set(sessionRef, head);
+}
+
+export function clearSessionCaptureCache(store: TelemetryStore): void {
+  sessionHeadCaches.delete(store);
+  saturatedSessionRefs.delete(store);
 }
 
 export async function persistSessionRequest(
@@ -459,29 +487,30 @@ export async function persistSessionRequest(
 ): Promise<void> {
   const session = args.decision.session;
   const get = deps.telemetry.getSessionByRef;
-  const list = deps.telemetry.listSessionRevisions;
   const getByResponseId = deps.telemetry.getSessionRevisionByResponseId;
   const upsert = deps.telemetry.upsertSessionRevision;
   if (!sessionCaptureEnabled(deps)) {
-    sessionHeadCaches.delete(deps.telemetry);
+    clearSessionCaptureCache(deps.telemetry);
     return;
   }
-  if (!session?.label || !get || !list || !upsert) return;
+  if (!session?.label || !get || !upsert) return;
   try {
-    if (Buffer.byteLength(args.requestJson, "utf8") > MAX_SESSION_REQUEST_BYTES) {
+    if (Buffer.byteLength(args.requestJson, "utf8") > captureBodyLimitBytes(deps)) {
       log("session.capture_limited");
       return;
     }
     const head = await get.call(deps.telemetry, session.ref);
     if (
       head &&
-      (head.revisionCount >= SESSION_MAX_REVISIONS || head.storedBytes >= SESSION_MAX_STORED_BYTES)
+      (head.revisionCount >= PERSISTED_SESSION_MAX_REVISIONS ||
+        head.storedBytes >= PERSISTED_SESSION_MAX_STORED_BYTES)
     ) {
+      markSaturatedSession(deps.telemetry, session.ref, sessionCacheBytes(deps));
       log("session.capture_limited");
       return;
     }
-    const previousResponseId = previousResponseIdFromRequest(args.requestJson);
     const currentBase = splitSessionRequestJson(args.requestJson);
+    const previousResponseId = currentBase.previousResponseId;
     let parentRequestId: string | null = null;
     let previousEvents: string | undefined;
     let fidelity: "semantic" | "partial" = "semantic";
@@ -493,30 +522,31 @@ export async function persistSessionRequest(
       if (!hasResponsesOutput(parent?.responseJson)) fidelity = "partial";
     } else {
       parentRequestId = head?.headRequestId ?? null;
-      const cached = sessionHeadCache(deps.telemetry).get(session.ref);
+      const cached = sessionHeadCache(deps.telemetry, sessionCacheBytes(deps)).get(session.ref);
       const parentRequest =
         parentRequestId === null
           ? null
           : cached?.requestId === parentRequestId
             ? cached.requestJson
-            : restoreSessionRevisionJson(
-                await list.call(deps.telemetry, session.ref),
-                parentRequestId,
-              );
+            : null;
       const parentDelta = parentRequest ? splitSessionRequestJson(parentRequest) : null;
       previousEvents =
         parentDelta?.eventKey === currentBase.eventKey ? parentDelta.eventsJson : undefined;
     }
-    const delta = splitSessionRequestJson(args.requestJson, previousEvents);
+    const delta =
+      previousEvents === undefined
+        ? currentBase
+        : splitSessionRequestJson(args.requestJson, previousEvents);
     const deltaBytes = Buffer.byteLength(delta.eventsJson + delta.envelopeJson, "utf8");
-    if ((head?.storedBytes ?? 0) + deltaBytes > SESSION_MAX_STORED_BYTES) {
+    if ((head?.storedBytes ?? 0) + deltaBytes > PERSISTED_SESSION_MAX_STORED_BYTES) {
+      markSaturatedSession(deps.telemetry, session.ref, sessionCacheBytes(deps));
       log("session.capture_limited");
       return;
     }
     const responseBytes =
       args.responseJson === null ? 0 : Buffer.byteLength(args.responseJson, "utf8");
     const responseJson =
-      (head?.storedBytes ?? 0) + deltaBytes + responseBytes <= SESSION_MAX_STORED_BYTES
+      (head?.storedBytes ?? 0) + deltaBytes + responseBytes <= PERSISTED_SESSION_MAX_STORED_BYTES
         ? args.responseJson
         : null;
     if (args.responseJson !== null && responseJson === null) log("session.response_limited");
@@ -536,10 +566,22 @@ export async function persistSessionRequest(
       fidelity: fidelity === "partial" ? fidelity : delta.fidelity,
       createdAt: new Date(args.now),
     });
-    cacheSessionHead(deps.telemetry, session.ref, {
-      requestId: args.requestId,
-      requestJson: args.requestJson,
-    });
+    if (
+      (head?.revisionCount ?? 0) + 1 >= PERSISTED_SESSION_MAX_REVISIONS ||
+      (head?.storedBytes ?? 0) + deltaBytes + (responseJson === null ? 0 : responseBytes) >=
+        PERSISTED_SESSION_MAX_STORED_BYTES
+    ) {
+      markSaturatedSession(deps.telemetry, session.ref, sessionCacheBytes(deps));
+    }
+    cacheSessionHead(
+      deps.telemetry,
+      session.ref,
+      {
+        requestId: args.requestId,
+        requestJson: args.requestJson,
+      },
+      sessionCacheBytes(deps),
+    );
   } catch {
     log("session.capture_failed");
   }
@@ -550,9 +592,18 @@ export async function queueOrPersistSessionRequest(
   args: Parameters<typeof persistSessionRequest>[1],
   log: (msg: string) => void,
 ): Promise<void> {
+  if (Buffer.byteLength(args.requestJson, "utf8") > captureBodyLimitBytes(deps)) {
+    log("session.capture_limited");
+    return;
+  }
+  const sessionRef = args.decision.session?.ref;
+  if (sessionRef && saturatedSessions(deps.telemetry).has(sessionRef)) {
+    log("session.capture_limited");
+    return;
+  }
   const responseJson =
     args.responseJson !== null &&
-    Buffer.byteLength(args.responseJson, "utf8") > MAX_SESSION_RESPONSE_BYTES
+    Buffer.byteLength(args.responseJson, "utf8") > captureBodyLimitBytes(deps)
       ? null
       : args.responseJson;
   if (args.responseJson !== null && responseJson === null) log("session.response_limited");
@@ -568,16 +619,28 @@ export async function queueOrPersistSessionRequest(
   await persistSessionRequest(deps, boundedArgs, log);
 }
 
-// Default retained-tail size (chars) when NOT persisting the body. The trailing
-// usage frame (include_usage) is tiny and always last, so a few KB is ample for
-// usageFromSSE; this caps per-stream memory instead of pinning the whole response.
-const SSE_TAIL_CHARS = 16_384;
-
 export interface SseCapture {
   push(chunk: string): void;
   /** The retained text: the FULL body when capturing, else a bounded trailing tail. */
   value(): string;
+  /** Exact payload body, or null when capture is off / exceeded the runtime budget. */
+  payloadValue(): string | null;
+  limited(): boolean;
+  release(): void;
 }
+
+export async function withSseCaptureRelease<T>(
+  capture: SseCapture | null,
+  bookkeeping: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await bookkeeping();
+  } finally {
+    capture?.release();
+  }
+}
+
+let retainedSseCaptureBytes = 0;
 
 // Accumulate forwarded SSE chunks for end-of-stream use (verbatim capture +
 // streamed-cost backfill) WITHOUT pinning the whole response in memory when capture
@@ -586,22 +649,95 @@ export interface SseCapture {
 // END — so a large stream under high concurrency costs O(tail), not O(response). The
 // caller always feeds a COPY after writing the chunk downstream, so this never
 // touches the bytes forwarded to the client (principle 8).
-export function createSseCapture(full: boolean, tailChars: number = SSE_TAIL_CHARS): SseCapture {
+export function createSseCapture(
+  full: boolean,
+  tailChars: number = runtimeMemoryBudget().sseTailChars,
+  maxFullBytes: number = Math.max(1, Math.floor(runtimeMemoryBudget().responseCaptureBytes / 2)),
+  totalCaptureBytes: number = runtimeMemoryBudget().responseCaptureBytes,
+): SseCapture {
   const parts: string[] = [];
-  let size = 0;
+  const tailLimit = Math.max(0, Math.floor(tailChars));
+  const captureLimit = Math.max(0, Math.floor(totalCaptureBytes));
+  let tail = "";
+  let tailReservation = 0;
+  let fullBytes = 0;
+  let fullReservation = 0;
+  let captureLimited = false;
+  let fullValue: string | undefined;
+  let released = false;
+  const releaseFullReservation = () => {
+    retainedSseCaptureBytes -= fullReservation;
+    fullReservation = 0;
+    fullBytes = 0;
+    parts.length = 0;
+    fullValue = undefined;
+  };
+  const releaseTailReservation = () => {
+    retainedSseCaptureBytes -= tailReservation;
+    tailReservation = 0;
+    tail = "";
+  };
+  const joinedFullValue = () => {
+    if (fullValue === undefined) fullValue = parts.join("");
+    return fullValue;
+  };
   return {
     push(chunk: string): void {
-      parts.push(chunk);
-      if (full) return;
-      size += chunk.length;
-      // Drop oldest parts while over budget, but always retain at least the last one.
-      while (size > tailChars && parts.length > 1) {
-        const dropped = parts.shift();
-        if (dropped !== undefined) size -= dropped.length;
+      if (released) return;
+      const slicedTail =
+        tailLimit === 0
+          ? ""
+          : chunk.length >= tailLimit
+            ? chunk.slice(-tailLimit)
+            : `${tail}${chunk}`.slice(-tailLimit);
+      // V8 may represent `slice()` as a SlicedString that keeps the entire source
+      // chunk alive. Round-trip the bounded suffix through an owned Buffer so the
+      // retained JS string has independent backing storage. UTF-16LE preserves exact
+      // JS code units even when the character limit lands between a surrogate pair.
+      const nextTail =
+        slicedTail === "" ? "" : Buffer.from(slicedTail, "utf16le").toString("utf16le");
+      // A JS string can retain two bytes per code unit, and replacing/reading the
+      // tail can briefly keep both old and new strings alive. Reserve that peak.
+      const nextTailReservation = nextTail.length * 4;
+      const tailDelta = nextTailReservation - tailReservation;
+      if (tailDelta <= 0 || retainedSseCaptureBytes + tailDelta <= captureLimit) {
+        retainedSseCaptureBytes += tailDelta;
+        tailReservation = nextTailReservation;
+        tail = nextTail;
       }
+      if (!full || captureLimited) return;
+      const nextBytes = Buffer.byteLength(chunk, "utf8");
+      const nextReservation = nextBytes * 2;
+      if (
+        fullBytes + nextBytes > maxFullBytes ||
+        retainedSseCaptureBytes + nextReservation > captureLimit
+      ) {
+        captureLimited = true;
+        releaseFullReservation();
+        return;
+      }
+      parts.push(chunk);
+      fullBytes += nextBytes;
+      fullReservation += nextReservation;
+      retainedSseCaptureBytes += nextReservation;
+      fullValue = undefined;
     },
     value(): string {
-      return parts.join("");
+      if (full && !captureLimited) return joinedFullValue();
+      return tail;
+    },
+    payloadValue(): string | null {
+      if (!full || captureLimited) return null;
+      return joinedFullValue();
+    },
+    limited(): boolean {
+      return captureLimited;
+    },
+    release(): void {
+      if (released) return;
+      released = true;
+      releaseFullReservation();
+      releaseTailReservation();
     },
   };
 }

@@ -66,6 +66,7 @@ services:
     image: ${HELM_IMAGE:-ghcr.io/easymetaau/helm-api:latest}
     # build: .
     container_name: helm
+    stop_grace_period: ${HELM_STOP_GRACE_PERIOD:-30m}
     env_file:
       - path: .env
         required: false
@@ -89,6 +90,9 @@ so every documented optional provider/runtime setting reaches the container.
 On Linux, `HELM_UID` / `HELM_GID` let the non-root process write `./data` without
 `sudo` or world-writable permissions; the initializer fills the exact current
 values. The `10001:10001` fallback preserves the image user for existing installs.
+Compose also gives graceful shutdown 30 minutes by default so active streams,
+queued Store writes, and an in-flight SQLite maintenance pass can drain before
+Docker sends SIGKILL. Large databases can raise `HELM_STOP_GRACE_PERIOD` in `.env`.
 
 ### Reverse proxy WebSocket forwarding
 

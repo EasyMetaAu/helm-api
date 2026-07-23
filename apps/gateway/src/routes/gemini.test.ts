@@ -1,6 +1,7 @@
 import type { TelemetryStore, UpsertSessionRevisionInput } from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
+import { createBodyMemoryAdmission } from "../runtime/memory-admission.js";
 import { type GeminiRouteDeps, registerGeminiRoute } from "./gemini.js";
 import type { MessagesIdentity } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
@@ -48,6 +49,7 @@ function makeDeps(
     concurrencyGate?: GeminiRouteDeps["concurrencyGate"];
     countTokens?: GeminiRouteDeps["countTokens"];
     record?: RecordServedDeps;
+    memoryAdmission?: GeminiRouteDeps["memoryAdmission"];
   } = {},
 ): { deps: GeminiRouteDeps; harness: Harness } {
   const harness: Harness = { order: [], pipelineSawIR: null, pipelineSawAbort: false };
@@ -57,6 +59,7 @@ function makeDeps(
     concurrencyGate: over.concurrencyGate,
     countTokens: over.countTokens,
     record: over.record,
+    memoryAdmission: over.memoryAdmission,
     auth: {
       resolve: async (cred) => {
         harness.order.push(`auth:${cred ?? "null"}`);
@@ -171,6 +174,50 @@ function expectGeminiCarrier(value: unknown, body: unknown, rawBody?: string): v
 }
 
 describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
+  it.each([
+    "generateContent",
+    "streamGenerateContent",
+    "countTokens",
+  ])("rejects oversized %s bodies before JSON.parse", async (operation) => {
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 1024,
+      maxWireBytes: 1,
+      jsonAmplification: 1,
+    });
+    const { deps, harness } = makeDeps({ memoryAdmission });
+    const app = buildApp(deps);
+
+    const res = await app.request(`/v1beta/models/gemini-2.0-flash:${operation}`, {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(413);
+    expect(harness.order).toEqual(["auth:helm_live_secret"]);
+    expect(memoryAdmission.reservedBytes).toBe(0);
+  });
+
+  it("returns 503 with Retry-After when the shared body budget is occupied", async () => {
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 1,
+      maxWireBytes: 1024,
+      jsonAmplification: 1,
+    });
+    const { deps, harness } = makeDeps({ memoryAdmission });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1beta/models/gemini-2.0-flash:generateContent", {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("retry-after")).toBe("1");
+    expect(harness.order).toEqual(["auth:helm_live_secret"]);
+  });
+
   it("non-stream: auth → translate-out → route → translate-back, returns Gemini JSON", async () => {
     const { deps, harness } = makeDeps();
     const app = buildApp(deps);

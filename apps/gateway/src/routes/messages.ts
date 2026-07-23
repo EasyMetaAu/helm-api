@@ -14,6 +14,12 @@ import type { AppEnv } from "../app.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
+import {
+  type BodyMemoryAdmission,
+  memoryAdmissionReleaseGuard,
+  RequestAdmissionError,
+  readAdmittedRequestBody,
+} from "../runtime/memory-admission.js";
 import { type ServingAccount, stampServingAccount } from "../runtime/serving-account.js";
 import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.js";
 import { type MemoryKeyDefaults, resolveMemoryScope } from "./memory-scope.js";
@@ -21,9 +27,11 @@ import { PipelineError } from "./messages-pipeline.js";
 import { nativeCarrierFromParsedBody } from "./native-carrier.js";
 import {
   captureEnabled,
+  createSseCapture,
   type RecordServedDeps,
   recordServed,
   sessionCaptureEnabled,
+  withSseCaptureRelease,
 } from "./payload-capture.js";
 import { resolveSessionCapture, stampSessionCapture } from "./session-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
@@ -135,6 +143,8 @@ export interface MessagesRateLimiterPort {
 }
 
 export interface MessagesRouteDeps {
+  /** Machine-derived request-body budget shared by every AI ingress surface. */
+  memoryAdmission?: BodyMemoryAdmission;
   rateLimiter?: MessagesRateLimiterPort;
   /** Per-key concurrency overflow queue (issue #93). The SAME process-wide gate
    *  the chat middleware uses, so a key's in-flight count spans every surface.
@@ -267,10 +277,21 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     const out = anthropic.transformErrorOut(err);
     return c.json(out.body as Record<string, unknown>, out.status as ContentfulStatusCode);
   };
+  const sendAdmissionError = (c: Context<AppEnv>, error: RequestAdmissionError): Response => {
+    if (error.status === 503) c.header("retry-after", "1");
+    const out = anthropic.transformErrorOut({
+      error_class: error.status === 413 ? "invalid_request" : "lane_unavailable",
+      message: error.message,
+      trace_id: c.get("trace_id"),
+    });
+    return c.json(out.body as Record<string, unknown>, error.status as ContentfulStatusCode);
+  };
 
   // Frees an unclaimed concurrency lease on every exit path (the handler below
   // acquires AFTER its self-auth, so the slot cannot be taken by middleware).
   app.use("/v1/messages", concurrencyReleaseGuard());
+  app.use("/v1/messages", memoryAdmissionReleaseGuard());
+  app.use("/v1/messages/count_tokens", memoryAdmissionReleaseGuard());
 
   const resolveIdentity = async (c: Context<AppEnv>): Promise<MessagesIdentity | null> => {
     const credential = extractCredential(c.req.header("x-api-key"), c.req.header("Authorization"));
@@ -302,8 +323,15 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     }
     let native: unknown;
     try {
-      native = JSON.parse(await c.req.text());
-    } catch {
+      const admitted =
+        deps.memoryAdmission === undefined
+          ? null
+          : await readAdmittedRequestBody(c.req.raw, deps.memoryAdmission);
+      const requestJson = admitted?.text ?? (await c.req.text());
+      if (admitted !== null) c.set("requestMemoryRelease", admitted.release);
+      native = JSON.parse(requestJson);
+    } catch (error) {
+      if (error instanceof RequestAdmissionError) return sendAdmissionError(c, error);
       return sendError(c, {
         error_class: "invalid_request",
         message: "malformed JSON request body",
@@ -416,9 +444,15 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     let requestJson = "";
     let native: unknown;
     try {
-      requestJson = await c.req.text();
+      const admitted =
+        deps.memoryAdmission === undefined
+          ? null
+          : await readAdmittedRequestBody(c.req.raw, deps.memoryAdmission);
+      requestJson = admitted?.text ?? (await c.req.text());
+      if (admitted !== null) c.set("requestMemoryRelease", admitted.release);
       native = JSON.parse(requestJson);
-    } catch {
+    } catch (error) {
+      if (error instanceof RequestAdmissionError) return sendAdmissionError(c, error);
       return sendError(c, {
         error_class: "invalid_request",
         message: "malformed JSON request body",
@@ -555,10 +589,12 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
       // the stream body fully drains — release in the stream's own finally.
       const releaseConcurrency = c.get("concurrencyRelease");
       c.set("concurrencyRelease", undefined);
+      const releaseRequestMemory = c.get("requestMemoryRelease");
+      c.set("requestMemoryRelease", undefined);
       return streamSSE(c, async (sse) => {
         // Accumulate the serialized wire frames so the served response body can be
         // captured (verbatim) alongside the telemetry row in the finally below.
-        const captured: string[] = [];
+        const captured = captureBodies ? createSseCapture(true) : null;
         // Translate path: every IR event is mapped by the transformer's explicit
         // state machine; we NEVER forward a raw upstream chunk through the
         // convertOpenAIStreamToAnthropic machine blind (CLAUDE.md principle 8). The
@@ -592,8 +628,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
                 ? (event as { event: string; data: string; raw?: string })
                 : { ...anthropic.transformStreamOut(event), raw: undefined };
             const raw = frame.raw;
-            if (captureBodies)
-              captured.push(raw ?? `event: ${frame.event}\ndata: ${frame.data}\n\n`);
+            captured?.push(raw ?? `event: ${frame.event}\ndata: ${frame.data}\n\n`);
             if (raw !== undefined) {
               await sse.write(raw);
               lastWrite = raw;
@@ -626,31 +661,40 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
             markStreamDecisionError(result.decision, errorClass);
             const out = anthropic.transformErrorOut(re);
             const data = JSON.stringify(out.body);
-            if (captureBodies) captured.push(`event: error\ndata: ${data}\n\n`);
+            captured?.push(`event: error\ndata: ${data}\n\n`);
             await sse.writeSSE({ event: "error", data });
           }
         } finally {
           releaseConcurrency?.();
-          // Record AFTER releaseConcurrency (never extend the hold) and AFTER the
-          // for-await loop ended so the pipeline's own streamIR finally (cost
-          // backfill) already mutated result.decision. result.decision exists even
-          // on a pre-stream failure, so a failed stream still records. Fail-open.
-          if (deps.record) {
-            stampServingAccount(result.decision, result.servingAccount ?? null);
-            await recordServed(
-              deps.record,
-              {
-                requestId,
-                accountId: identity.accountId,
-                apiKeyId: identity.keyId,
-                decision: result.decision,
-                requestJson,
-                responseJson: captureBodies ? captured.join("") : null,
-                timedOut: requestTimedOut(c),
-                upstreamRequestJson: result.upstreamRequest ?? null,
-              },
-              (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
-            );
+          try {
+            await withSseCaptureRelease(captured, async () => {
+              // Record AFTER releaseConcurrency (never extend the hold) and AFTER the
+              // for-await loop ended so the pipeline's own streamIR finally (cost
+              // backfill) already mutated result.decision. result.decision exists even
+              // on a pre-stream failure, so a failed stream still records. Fail-open.
+              if (deps.record) {
+                stampServingAccount(result.decision, result.servingAccount ?? null);
+                if (captured?.limited()) {
+                  c.get("logger").log("warn", "payload.capture_limited", { trace_id: traceId });
+                }
+                await recordServed(
+                  deps.record,
+                  {
+                    requestId,
+                    accountId: identity.accountId,
+                    apiKeyId: identity.keyId,
+                    decision: result.decision,
+                    requestJson,
+                    responseJson: captured?.payloadValue() ?? null,
+                    timedOut: requestTimedOut(c),
+                    upstreamRequestJson: result.upstreamRequest ?? null,
+                  },
+                  (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+                );
+              }
+            });
+          } finally {
+            releaseRequestMemory?.();
           }
         }
       });

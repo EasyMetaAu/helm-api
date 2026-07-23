@@ -10,6 +10,10 @@ import { traceIdMiddleware } from "./middleware/trace-id.js";
 import { type HealthDeps, registerHealthRoutes } from "./routes/health.js";
 import { registerLandingRoute } from "./routes/landing.js";
 import { registerOpenApiRoutes } from "./routes/openapi.js";
+import {
+  type MaintenanceActivityGate,
+  maintenanceActivityMiddleware,
+} from "./runtime/maintenance-gate.js";
 
 export interface AppDeps {
   logger: Logger;
@@ -19,6 +23,7 @@ export interface AppDeps {
   health?: HealthDeps;
   // Request timeout. Optional; omitted = no timeout middleware.
   limits?: LimitsConfig;
+  maintenanceGate?: MaintenanceActivityGate;
 }
 
 // Per-request context variables (typed c.get/c.set).
@@ -62,6 +67,9 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   app.use("*", normalizeHeaders());
   if (deps.limits) {
     app.use("*", timeout(deps.limits));
+  }
+  if (deps.maintenanceGate) {
+    app.use("*", maintenanceActivityMiddleware(deps.maintenanceGate));
   }
 
   // Health/version routes (unauthenticated, registered before auth).

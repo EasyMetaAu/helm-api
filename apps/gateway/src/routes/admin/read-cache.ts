@@ -11,6 +11,7 @@ export interface AdminReadCacheOptions {
   maxEntries?: number;
   now?: () => number;
   schedule?: (run: () => void) => void;
+  runInBackground?: (task: () => Promise<unknown>, onError?: (error: unknown) => void) => boolean;
 }
 
 interface CacheEntry<T> {
@@ -39,6 +40,7 @@ export function createAdminReadCache<T>(options: AdminReadCacheOptions = {}) {
   const maxEntries = Math.max(1, options.maxEntries ?? DEFAULT_MAX_ENTRIES);
   const now = options.now ?? Date.now;
   const schedule = options.schedule ?? defer;
+  const runInBackground = options.runInBackground;
   const entries = new Map<string, CacheEntry<T>>();
   const inFlight = new Map<string, Promise<T>>();
   const scheduled = new Set<string>();
@@ -80,7 +82,10 @@ export function createAdminReadCache<T>(options: AdminReadCacheOptions = {}) {
     scheduled.add(key);
     schedule(() => {
       scheduled.delete(key);
-      void loadOnce(key, load).promise.catch(() => {
+      const refresh = () => loadOnce(key, load).promise;
+      if (runInBackground?.(refresh, () => {}) === true) return;
+      if (runInBackground !== undefined) return;
+      void refresh().catch(() => {
         // Keep the last-known-good stale snapshot. The next read may retry; an
         // auxiliary Admin refresh failure must not become an unhandled rejection.
       });

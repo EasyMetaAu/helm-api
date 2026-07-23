@@ -1,9 +1,12 @@
+import { isDeepStrictEqual } from "node:util";
+
 export interface SessionRequestDelta {
   eventKey: "messages" | "contents" | "input";
   retainCount: number;
   eventsJson: string;
   envelopeJson: string;
   fidelity: "verbatim" | "semantic";
+  previousResponseId: string | null;
 }
 
 const EVENT_KEYS = ["messages", "contents", "input"] as const;
@@ -26,11 +29,7 @@ function array(value: unknown): unknown[] {
 
 function prefixLength(previous: unknown[], current: unknown[]): number {
   let n = 0;
-  while (
-    n < previous.length &&
-    n < current.length &&
-    JSON.stringify(previous[n]) === JSON.stringify(current[n])
-  )
+  while (n < previous.length && n < current.length && isDeepStrictEqual(previous[n], current[n]))
     n++;
   return n;
 }
@@ -46,6 +45,7 @@ export function splitSessionRequestJson(
   const current = array(request[key]);
   const hasPreviousResponse =
     typeof request.previous_response_id === "string" && request.previous_response_id.trim() !== "";
+  const previousResponseId = hasPreviousResponse ? (request.previous_response_id as string) : null;
   const previous = previousEventsJson === undefined ? [] : array(JSON.parse(previousEventsJson));
   const retainCount = hasPreviousResponse ? 0 : prefixLength(previous, current);
   // Keep the carrier with an empty array so recovery can identify its protocol
@@ -57,6 +57,7 @@ export function splitSessionRequestJson(
     eventsJson: JSON.stringify(current.slice(retainCount)),
     envelopeJson: JSON.stringify(envelope),
     fidelity: "semantic",
+    previousResponseId,
   };
 }
 

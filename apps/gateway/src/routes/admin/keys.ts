@@ -75,7 +75,9 @@ function toSummary(rec: {
 }
 
 export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void {
-  const usageCache = createAdminReadCache<KeyUsageSummary[]>();
+  const usageCache = createAdminReadCache<KeyUsageSummary[]>({
+    ...(deps.runInBackground !== undefined ? { runInBackground: deps.runInBackground } : {}),
+  });
   // GET /keys -> KeySummary[] (no plaintext, no hash full-text).
   app.get("/admin/api/keys", async (c) => {
     const rows = await deps.keyStore.list();

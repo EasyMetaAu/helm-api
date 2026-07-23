@@ -1,5 +1,6 @@
 import type { DecisionRecord, InsertPayloadInput, UpsertSessionRevisionInput } from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
+import type { WriteQueue } from "../runtime/write-queue.js";
 import { createWriteQueue } from "../runtime/write-queue.js";
 import {
   backfillCompletionCost,
@@ -11,6 +12,8 @@ import {
   estimateInterruptedResponsesUsage,
   type PayloadCaptureDeps,
   persistPayload,
+  persistSessionRequest,
+  queueOrPersistSessionRequest,
   type RecordServedDeps,
   recordServed,
   tokensFromUsage,
@@ -21,6 +24,7 @@ import {
   usageFromResponsesResponse,
   usageFromResponsesSSE,
   usageFromSSE,
+  withSseCaptureRelease,
 } from "./payload-capture.js";
 
 describe("session head cache", () => {
@@ -48,6 +52,83 @@ describe("session head cache", () => {
     expect(cache.retainedBytes).toBe(0);
     expect(cache.get("one")).toBeUndefined();
     expect(cache.get("three")).toBeUndefined();
+  });
+});
+
+describe("Session queue admission", () => {
+  it("rejects an oversized retained body before creating the deferred closure", async () => {
+    const enqueueSession = vi.fn();
+    const writes = { enqueueSession } as unknown as WriteQueue;
+    const sessionDecision = {
+      session: { ref: "session-capacity", label: "thread-capacity", source: "x-session-key" },
+    } as unknown as DecisionRecord;
+    const log = vi.fn();
+
+    await queueOrPersistSessionRequest(
+      {
+        telemetry: {} as PayloadCaptureDeps["telemetry"],
+        writes,
+        captureSessions: () => true,
+        captureBodyLimitBytes: 10,
+      },
+      {
+        requestId: "request-capacity",
+        accountId: "account-1",
+        apiKeyId: "key-1",
+        decision: sessionDecision,
+        requestJson: "x".repeat(11),
+        responseId: null,
+        responseJson: null,
+        now: 1,
+      },
+      log,
+    );
+
+    expect(enqueueSession).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith("session.capture_limited");
+  });
+
+  it("bounds saturated Session metadata by the dynamic cache capacity", async () => {
+    const telemetry = {
+      getSessionByRef: vi.fn(async () => ({
+        revisionCount: Number.MAX_SAFE_INTEGER,
+        storedBytes: 0,
+      })),
+      upsertSessionRevision: vi.fn(),
+    } as unknown as PayloadCaptureDeps["telemetry"];
+    const deps = {
+      telemetry,
+      captureSessions: () => true,
+      captureBodyLimitBytes: 1_024,
+      sessionCacheBytes: 2_048,
+    } satisfies PayloadCaptureDeps;
+    const args = (sessionRef: string) => ({
+      requestId: `request-${sessionRef}`,
+      accountId: "account-1",
+      apiKeyId: "key-1",
+      decision: {
+        session: { ref: sessionRef, label: sessionRef, source: "x-session-key" },
+      } as unknown as DecisionRecord,
+      requestJson: '{"input":"hello"}',
+      responseId: null,
+      responseJson: null,
+      now: 1,
+    });
+
+    for (const sessionRef of ["session-one", "session-two", "session-three"]) {
+      await persistSessionRequest(deps, args(sessionRef), vi.fn());
+    }
+
+    const enqueueSession = vi.fn();
+    const queuedDeps = {
+      ...deps,
+      writes: { enqueueSession } as unknown as WriteQueue,
+    };
+    await queueOrPersistSessionRequest(queuedDeps, args("session-one"), vi.fn());
+    await queueOrPersistSessionRequest(queuedDeps, args("session-three"), vi.fn());
+
+    expect(enqueueSession).toHaveBeenCalledTimes(1);
+    expect(enqueueSession).toHaveBeenCalledWith(expect.any(Function), expect.any(Number));
   });
 });
 
@@ -850,6 +931,20 @@ describe("createSseCapture", () => {
     ];
     for (const c of chunks) cap.push(c);
     expect(cap.value()).toBe(chunks.join(""));
+    expect(cap.payloadValue()).toBe(chunks.join(""));
+    expect(cap.limited()).toBe(false);
+    cap.release();
+  });
+
+  it("drops an oversized full capture but keeps a bounded tail for accounting", () => {
+    const cap = createSseCapture(true, 32, 16);
+    cap.push("0123456789");
+    cap.push("abcdefghijklmnop");
+
+    expect(cap.limited()).toBe(true);
+    expect(cap.payloadValue()).toBeNull();
+    expect(cap.value()).toContain("abcdefghijklmnop");
+    cap.release();
   });
 
   it("keeps only a bounded tail when NOT capturing, still enough for usageFromSSE", () => {
@@ -865,12 +960,79 @@ describe("createSseCapture", () => {
     expect(tail.length).toBeLessThan(4000);
     // ...yet cost backfill still finds the usage (it scans from the end).
     expect(usageFromSSE(tail)).toEqual({ prompt_tokens: 100, completion_tokens: 50 });
+    expect(cap.payloadValue()).toBeNull();
+    cap.release();
   });
 
-  it("never drops the only/last chunk even if it exceeds the tail budget", () => {
+  it("strictly truncates a single chunk to the dynamic tail budget", () => {
     const cap = createSseCapture(false, 8);
     cap.push(usageFrame); // single chunk larger than the budget
-    expect(usageFromSSE(cap.value())).toEqual({ prompt_tokens: 100, completion_tokens: 50 });
+    expect(cap.value()).toBe(usageFrame.slice(-8));
+    expect(cap.value().length).toBeLessThanOrEqual(8);
+    cap.release();
+  });
+
+  it("copies a large sliced tail into independent storage", () => {
+    const bufferFrom = vi.spyOn(Buffer, "from");
+    const cap = createSseCapture(false, 8);
+    const chunk = `${"x".repeat(1_000_000)}tail-end`;
+
+    try {
+      cap.push(chunk);
+      expect(cap.value()).toBe("tail-end");
+      expect(bufferFrom).toHaveBeenCalledWith("tail-end", "utf16le");
+    } finally {
+      cap.release();
+      bufferFrom.mockRestore();
+    }
+  });
+
+  it("reserves two UTF-8 copies for retained full parts plus their joined value", () => {
+    const first = createSseCapture(true, 0, 4, 8);
+    const blocked = createSseCapture(true, 0, 4, 8);
+    const afterRelease = createSseCapture(true, 0, 4, 8);
+
+    first.push("👋"); // 4 UTF-8 bytes; parts + joined value reserve 8 bytes.
+    expect(first.limited()).toBe(false);
+    expect(first.payloadValue()).toBe("👋");
+
+    blocked.push("x");
+    expect(blocked.limited()).toBe(true);
+    first.release();
+
+    afterRelease.push("👋");
+    expect(afterRelease.limited()).toBe(false);
+    expect(afterRelease.payloadValue()).toBe("👋");
+    blocked.release();
+    afterRelease.release();
+  });
+
+  it("charges tail retention to the global capture budget and releases it", () => {
+    const first = createSseCapture(false, 8, 1, 32);
+    const second = createSseCapture(false, 8, 1, 32);
+
+    first.push("12345678");
+    second.push("abcdefgh");
+    expect(first.value()).toBe("12345678");
+    expect(second.value()).toBe("");
+
+    first.release();
+    second.push("abcdefgh");
+    expect(second.value()).toBe("abcdefgh");
+    second.release();
+  });
+
+  it("releases the capture reservation when post-stream bookkeeping throws", async () => {
+    const release = vi.fn();
+    const failure = new Error("bookkeeping failed");
+
+    await expect(
+      withSseCaptureRelease({ release } as never, async () => {
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+
+    expect(release).toHaveBeenCalledOnce();
   });
 });
 
@@ -1279,7 +1441,7 @@ describe("recordServed — deferred write queue (the three pipeline faces)", () 
     });
   });
 
-  it("keeps the request revision but omits a Session response larger than 16 MiB", async () => {
+  it("keeps the request revision but omits a Session response beyond the runtime limit", async () => {
     const s = sink();
     const revisions: UpsertSessionRevisionInput[] = [];
     const telemetry = {
@@ -1304,13 +1466,14 @@ describe("recordServed — deferred write queue (the three pipeline faces)", () 
         now: () => 5000,
         capturePayloads: () => false,
         captureSessions: () => true,
+        captureBodyLimitBytes: 1024,
       },
       {
         ...args,
         requestId: "large-response",
         decision: sessionDecision,
         requestJson: '{"model":"auto","messages":[{"role":"user","content":"hi"}]}',
-        responseJson: "x".repeat(16 * 1024 * 1024 + 1),
+        responseJson: "x".repeat(1025),
       },
       log,
     );
@@ -1484,7 +1647,7 @@ describe("recordServed — deferred write queue (the three pipeline faces)", () 
     });
   });
 
-  it("charges retained Responses output to the deferred Session byte budget", async () => {
+  it("charges retained Responses output to the persisted Session byte quota", async () => {
     const upsertSessionRevision = vi.fn(async (_input: UpsertSessionRevisionInput) => {});
     const insert = vi.fn(async () => ({ id: "1" }));
     const telemetry = {

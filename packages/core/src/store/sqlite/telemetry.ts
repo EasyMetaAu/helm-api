@@ -14,6 +14,8 @@ import type {
   RequestPayloadPart,
   RequestPayloadPartRecord,
   SessionRecord,
+  SessionRevisionPage,
+  SessionRevisionPageOptions,
   SessionRevisionRecord,
   TelemetryAggregate,
   TelemetryArchiveRow,
@@ -23,13 +25,26 @@ import type {
   TelemetryStore,
   UpsertSessionRevisionInput,
 } from "../ports.js";
-import { SESSION_MAX_REVISIONS, SESSION_MAX_STORED_BYTES } from "../ports.js";
+import { PERSISTED_SESSION_MAX_REVISIONS, PERSISTED_SESSION_MAX_STORED_BYTES } from "../ports.js";
 import { likeContains } from "../sql-like.js";
 import { denormalizedDecisionCost } from "../telemetry-cost.js";
 import type { SqliteDb } from "./migrate.js";
 import { payloadBlobs, requestPayloads, sessionRevisions, sessions, telemetry } from "./schema.js";
 
 type TelemetryRow = typeof telemetry.$inferSelect;
+
+function boundedSessionPageLimit(options: SessionRevisionPageOptions): number {
+  if (!Number.isSafeInteger(options.limit) || options.limit <= 0)
+    throw new Error("session revision page limit must be a positive integer");
+  if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 0)
+    throw new Error("session revision page maxBytes must be a non-negative integer");
+  if (
+    options.afterSequence !== undefined &&
+    (!Number.isSafeInteger(options.afterSequence) || options.afterSequence < 0)
+  )
+    throw new Error("session revision page cursor must be a non-negative integer");
+  return Math.min(options.limit, 500);
+}
 
 // SQLite adapter for the TelemetryStore port. Persists a redacted DecisionRecord
 // as JSON text (SQLite has no native jsonb); denormalizes final_status/cost for
@@ -131,7 +146,7 @@ export class SqliteTelemetryStore implements TelemetryStore {
           .where(eq(sessions.sessionRef, input.sessionRef))
           .get();
         if (!session) throw new Error("session row missing after insert");
-        if (session.storedBytes + responseBytes > SESSION_MAX_STORED_BYTES)
+        if (session.storedBytes + responseBytes > PERSISTED_SESSION_MAX_STORED_BYTES)
           throw new Error("session capture limit exceeded");
         this.db
           .update(sessions)
@@ -170,8 +185,8 @@ export class SqliteTelemetryStore implements TelemetryStore {
         .get();
       if (!session) throw new Error("session row missing after insert");
       if (
-        session.revisionCount >= SESSION_MAX_REVISIONS ||
-        session.storedBytes + storedBytes > SESSION_MAX_STORED_BYTES
+        session.revisionCount >= PERSISTED_SESSION_MAX_REVISIONS ||
+        session.storedBytes + storedBytes > PERSISTED_SESSION_MAX_STORED_BYTES
       ) {
         throw new Error("session capture limit exceeded");
       }
@@ -241,6 +256,64 @@ export class SqliteTelemetryStore implements TelemetryStore {
       .orderBy(asc(sessionRevisions.sequence))
       .all()
       .map((row) => ({ ...row }));
+  }
+
+  async listSessionRevisionsPage(
+    sessionRef: string,
+    options: SessionRevisionPageOptions,
+  ): Promise<SessionRevisionPage> {
+    const limit = boundedSessionPageLimit(options);
+    const afterSequence = options.afterSequence ?? 0;
+    const rowBytes = sql<number>`
+      length(CAST(${sessionRevisions.sessionRef} AS BLOB)) +
+      length(CAST(${sessionRevisions.requestId} AS BLOB)) +
+      coalesce(length(CAST(${sessionRevisions.parentRequestId} AS BLOB)), 0) +
+      length(CAST(${sessionRevisions.requestDeltaJson} AS BLOB)) +
+      length(CAST(${sessionRevisions.requestEnvelopeJson} AS BLOB)) +
+      coalesce(length(CAST(${sessionRevisions.responseId} AS BLOB)), 0) +
+      coalesce(length(CAST(${sessionRevisions.responseJson} AS BLOB)), 0) +
+      length(CAST(${sessionRevisions.fidelity} AS BLOB)) + 64
+    `;
+    const metadata = this.db
+      .select({ sequence: sessionRevisions.sequence, bytes: rowBytes })
+      .from(sessionRevisions)
+      .where(
+        and(
+          eq(sessionRevisions.sessionRef, sessionRef),
+          gt(sessionRevisions.sequence, afterSequence),
+        ),
+      )
+      .orderBy(asc(sessionRevisions.sequence))
+      .limit(limit + 1)
+      .all();
+    const selected: number[] = [];
+    let usedBytes = 0;
+    for (const row of metadata.slice(0, limit)) {
+      const bytes = Number(row.bytes);
+      if (!Number.isSafeInteger(bytes) || bytes < 0 || usedBytes + bytes > options.maxBytes) {
+        return { revisions: [], nextSequence: null, limited: true };
+      }
+      selected.push(row.sequence);
+      usedBytes += bytes;
+    }
+    if (selected.length === 0) return { revisions: [], nextSequence: null, limited: false };
+    const revisions = this.db
+      .select()
+      .from(sessionRevisions)
+      .where(
+        and(
+          eq(sessionRevisions.sessionRef, sessionRef),
+          inArray(sessionRevisions.sequence, selected),
+        ),
+      )
+      .orderBy(asc(sessionRevisions.sequence))
+      .all()
+      .map((row) => ({ ...row }));
+    return {
+      revisions,
+      nextSequence: metadata.length > selected.length ? (selected.at(-1) ?? null) : null,
+      limited: false,
+    };
   }
 
   async getSessionRevisionByResponseId(

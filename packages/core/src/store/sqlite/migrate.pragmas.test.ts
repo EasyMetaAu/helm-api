@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { runtimeMemoryBudget } from "../../runtime/memory-budget.js";
 import { createSqliteDb, runMigrations } from "./migrate.js";
 
 // Performance contract (perf-sqlite-fastpath): better-sqlite3 is SYNCHRONOUS, so
@@ -20,9 +21,10 @@ describe("sqlite connection pragmas", () => {
       expect(raw.pragma("busy_timeout", { simple: true })).toBe(5000);
       // temp_store: 0=DEFAULT, 1=FILE, 2=MEMORY. We want MEMORY.
       expect(raw.pragma("temp_store", { simple: true })).toBe(2);
-      // cache_size negative => KiB. 64 MiB keeps the hot admin indexes resident
-      // without putting meaningful pressure on a small self-hosted machine.
-      expect(raw.pragma("cache_size", { simple: true })).toBe(-65536);
+      // cache_size negative => KiB, scaled from the process memory constraint.
+      expect(raw.pragma("cache_size", { simple: true })).toBe(
+        -Math.floor(runtimeMemoryBudget().sqlitePageCacheBytes / 1024),
+      );
     } finally {
       db.$sqlite.close();
     }

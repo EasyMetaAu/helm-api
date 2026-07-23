@@ -26,6 +26,7 @@ export interface OAuthAdminRefreshCoordinator {
 
 export interface OAuthAdminRefreshCoordinatorOptions {
   refresh: () => Promise<void>;
+  runInBackground?: (task: () => Promise<unknown>, onError?: (error: unknown) => void) => boolean;
   cooldownMs?: number;
   now?: () => number;
   generateJobId?: () => string;
@@ -47,6 +48,12 @@ export function createOAuthAdminRefreshCoordinator(
   const now = options.now ?? (() => Date.now());
   const cooldownMs = Math.max(0, options.cooldownMs ?? DEFAULT_COOLDOWN_MS);
   const generateJobId = options.generateJobId ?? (() => crypto.randomUUID());
+  const runInBackground =
+    options.runInBackground ??
+    ((task: () => Promise<unknown>) => {
+      void Promise.resolve().then(task);
+      return true;
+    });
   let active: Promise<void> | null = null;
   let current: OAuthAdminRefreshStatus = {
     state: "idle",
@@ -88,8 +95,13 @@ export function createOAuthAdminRefreshCoordinator(
         nextAllowedAt: null,
         error: null,
       };
-      active = Promise.resolve()
-        .then(async () => {
+      let settle!: () => void;
+      const pending = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      active = pending;
+      const accepted = runInBackground(async () => {
+        try {
           current = { ...current, state: "running", startedAt: now() };
           await options.refresh();
           const finishedAt = now();
@@ -101,8 +113,7 @@ export function createOAuthAdminRefreshCoordinator(
             nextAllowedAt: finishedAt + cooldownMs,
             error: null,
           };
-        })
-        .catch((error: unknown) => {
+        } catch (error: unknown) {
           const finishedAt = now();
           current = {
             ...current,
@@ -111,10 +122,22 @@ export function createOAuthAdminRefreshCoordinator(
             nextAllowedAt: finishedAt + cooldownMs,
             error: safeErrorMessage(error),
           };
-        })
-        .finally(() => {
-          active = null;
-        });
+        } finally {
+          if (active === pending) active = null;
+          settle();
+        }
+      });
+      if (!accepted) {
+        active = null;
+        current = {
+          ...current,
+          state: "failed",
+          finishedAt: now(),
+          error: "refresh queue unavailable",
+        };
+        settle();
+        return result(false, false);
+      }
       return result(true, false);
     },
 

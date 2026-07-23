@@ -26,6 +26,11 @@ import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
 import { normalizeOpenAICodexClientVersion } from "../oauth/codex-client-version.js";
 import { CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER } from "../responses-websocket-internal.js";
+import {
+  type BodyMemoryAdmission,
+  memoryAdmissionReleaseGuard,
+  readAdmittedRequestBody,
+} from "../runtime/memory-admission.js";
 import { stampServingAccount } from "../runtime/serving-account.js";
 import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.js";
 import { resolveMemoryScope } from "./memory-scope.js";
@@ -35,8 +40,10 @@ import { nativeCarrierFromParsedBody } from "./native-carrier.js";
 import {
   capturedResponsesResponse,
   captureEnabled,
+  createSseCapture,
   type RecordServedDeps,
   recordServed,
+  type SseCapture,
   type StreamUsage,
   sessionCaptureEnabled,
   tokenBreakdownFromUsage,
@@ -216,6 +223,9 @@ export interface ResponsesRouteDeps {
   // Without it, a normal HTTP client could spoof x-helm-* session headers and
   // accidentally create a long-lived upstream websocket.
   responsesWebSocketSessionProof?: string;
+  memoryAdmission?: BodyMemoryAdmission;
+  /** Optional test/embedding override; production uses the machine-derived capture budget. */
+  sseCaptureFactory?: (full: boolean) => SseCapture;
 }
 
 // Client disconnect / abort detection — mirrors messages.ts. Used to suppress a
@@ -393,6 +403,14 @@ function streamStatusFromEventName(eventName: string): string | null {
     default:
       return null;
   }
+}
+
+function isResponsesTerminalEvent(eventName: string): boolean {
+  return (
+    eventName === "response.completed" ||
+    eventName === "response.incomplete" ||
+    eventName === "response.failed"
+  );
 }
 
 type ResponsesStreamOutcome = NonNullable<DecisionRecord["stream_outcome"]>;
@@ -719,6 +737,12 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
   app.use("/responses/*", concurrencyReleaseGuard());
   app.use("/openai/v1/responses", concurrencyReleaseGuard());
   app.use("/openai/v1/responses/*", concurrencyReleaseGuard());
+  app.use("/v1/responses", memoryAdmissionReleaseGuard());
+  app.use("/v1/responses/*", memoryAdmissionReleaseGuard());
+  app.use("/responses", memoryAdmissionReleaseGuard());
+  app.use("/responses/*", memoryAdmissionReleaseGuard());
+  app.use("/openai/v1/responses", memoryAdmissionReleaseGuard());
+  app.use("/openai/v1/responses/*", memoryAdmissionReleaseGuard());
 
   const authenticateResponsesRequest = async (c: Context<AppEnv>): Promise<MessagesIdentity> => {
     const traceId = c.get("trace_id");
@@ -794,8 +818,16 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     c: Context<AppEnv>,
     traceId: string,
   ): Promise<{ native: unknown; rawBody: string }> => {
+    const trustedWebSocketSelfCall =
+      deps.responsesWebSocketSessionProof !== undefined &&
+      c.req.header(CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER) === deps.responsesWebSocketSessionProof;
+    const admitted =
+      deps.memoryAdmission === undefined || trustedWebSocketSelfCall
+        ? null
+        : await readAdmittedRequestBody(c.req.raw, deps.memoryAdmission);
+    const rawBody = admitted?.text ?? (await c.req.text());
+    if (admitted !== null) c.set("requestMemoryRelease", admitted.release);
     try {
-      const rawBody = await c.req.text();
       return { native: JSON.parse(rawBody), rawBody };
     } catch {
       throw helmError("invalid_request", "malformed JSON request body", traceId);
@@ -1010,14 +1042,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     // 2) Parse + translate inbound. A malformed JSON body OR a structurally invalid
     //    Responses request (the transformer's Zod parse throws) is a CLIENT error →
     //    400 invalid_request, before routing (docs/07, principle 2 fail-closed).
-    let requestJson = "";
-    let native: unknown;
-    try {
-      requestJson = await c.req.text();
-      native = JSON.parse(requestJson);
-    } catch {
-      throw helmError("invalid_request", "malformed JSON request body", traceId);
-    }
+    const { native, rawBody: requestJson } = await parseJsonBodyWithRaw(c, traceId);
     let ir: ResponsesIRLike;
     try {
       ir = deps.transformer.transformRequestOut(native);
@@ -1110,6 +1135,8 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       // body fully drains — release in the stream's own finally, not the guard.
       const releaseConcurrency = c.get("concurrencyRelease");
       c.set("concurrencyRelease", undefined);
+      const releaseMemory = c.get("requestMemoryRelease");
+      c.set("requestMemoryRelease", undefined);
       let initialResult: PipelineRunResult | null = null;
       let initialError: unknown = null;
       try {
@@ -1140,7 +1167,10 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         let nextErrorSequence = 0;
         // Accumulate the serialized wire frames so the served response body can be
         // captured (verbatim) alongside the telemetry row in the finally below.
-        const captured: string[] = [];
+        const makeSseCapture = deps.sseCaptureFactory ?? createSseCapture;
+        const captured = captureBodies ? makeSseCapture(true) : null;
+        const sessionTerminalCapture =
+          captureSessionResponse && !captureBodies ? makeSseCapture(true) : null;
         const result = initialResult;
         // SSE keep-alive: emit a `:` comment during inter-chunk idle (wire-only, never
         // captured) so a proxy/client idle-timeout does not sever a long healthy stream.
@@ -1174,16 +1204,22 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                     raw: (event as { raw?: string }).raw,
                   }
                 : { ...deps.transformer.transformStreamOut(event), raw: undefined };
+            const raw = frame.raw;
+            const serializedFrame = raw ?? `event: ${frame.event}\ndata: ${frame.data}\n\n`;
+            captured?.push(serializedFrame);
+            const terminalEvent = isResponsesTerminalEvent(frame.event);
+            if (terminalEvent) sessionTerminalCapture?.push(serializedFrame);
             const snapshot = responseSnapshotFromStreamFrame(frame.event, frame.data);
             if (snapshot.responseId !== null) streamResponseId = snapshot.responseId;
             if (snapshot.status !== null) streamStatus = snapshot.status;
-            if (captureSessionResponse && !captureBodies) {
-              const captured = capturedResponsesResponse("openai_responses", frame.data);
-              if (captured.responseJson !== null) sessionResponseJson = captured.responseJson;
+            if (captureSessionResponse && terminalEvent && !captureBodies) {
+              if (sessionTerminalCapture?.limited()) {
+                c.get("logger").log("warn", "session.response_limited", { trace_id: traceId });
+              } else if (sessionTerminalCapture !== null) {
+                const terminal = capturedResponsesResponse("openai_responses", frame.data);
+                if (terminal.responseJson !== null) sessionResponseJson = terminal.responseJson;
+              }
             }
-            const raw = frame.raw;
-            if (captureBodies)
-              captured.push(raw ?? `event: ${frame.event}\ndata: ${frame.data}\n\n`);
             if (raw !== undefined) {
               await sse.write(raw);
               lastWrite = raw;
@@ -1223,7 +1259,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                     sequenceNumber: nextErrorSequence,
                   });
             const data = JSON.stringify(body);
-            if (captureBodies) captured.push(`event: error\ndata: ${data}\n\n`);
+            captured?.push(`event: error\ndata: ${data}\n\n`);
             await sse.writeSSE({ event: "error", data });
           }
         } finally {
@@ -1243,45 +1279,59 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           // own streamIR finally (cost backfill) already mutated result.decision.
           // result.decision exists even on a pre-stream failure, so a failed stream
           // still records. Fail-open inside recordServed.
-          if (deps.record && result !== null) {
-            stampServingAccount(result.decision, result.servingAccount ?? null);
-            await recordServed(
-              deps.record,
-              {
-                requestId,
-                accountId: identity.accountId,
-                apiKeyId: identity.keyId,
-                decision: result.decision,
-                requestJson,
-                responseJson: captureBodies ? captured.join("") : sessionResponseJson,
-                timedOut: requestTimedOut(c),
-                upstreamRequestJson: result.upstreamRequest ?? null,
-              },
-              (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
-            );
-          }
-          if (deps.registry !== undefined && result !== null && streamResponseId !== null) {
-            const attempt = successfulAttempt(result.decision);
-            await deps.registry.put({
-              responseId: streamResponseId,
-              accountId: identity.accountId,
-              keyId: identity.keyId,
-              providerAlias: typeof attempt?.alias === "string" ? attempt.alias : null,
-              providerName:
-                typeof attempt?.provider_name === "string" ? attempt.provider_name : null,
-              providerModel:
-                typeof attempt?.provider_model === "string" ? attempt.provider_model : null,
-              providerProtocol:
-                attempt?.target_provider_protocol === "openai_chat" ||
-                attempt?.target_provider_protocol === "anthropic_messages" ||
-                attempt?.target_provider_protocol === "openai_responses" ||
-                attempt?.target_provider_protocol === "gemini"
-                  ? attempt.target_provider_protocol
-                  : null,
-              createdAt: Date.now(),
-              expiresAt: Date.now() + 86_400_000,
-              status: streamOutcome ?? "truncated",
-            });
+          try {
+            if (deps.record && result !== null) {
+              stampServingAccount(result.decision, result.servingAccount ?? null);
+              if (captured?.limited()) {
+                c.get("logger").log("warn", "payload.capture_limited", { trace_id: traceId });
+              }
+              await recordServed(
+                deps.record,
+                {
+                  requestId,
+                  accountId: identity.accountId,
+                  apiKeyId: identity.keyId,
+                  decision: result.decision,
+                  requestJson,
+                  responseJson: captureBodies
+                    ? (captured?.payloadValue() ?? null)
+                    : sessionResponseJson,
+                  timedOut: requestTimedOut(c),
+                  upstreamRequestJson: result.upstreamRequest ?? null,
+                },
+                (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+              );
+            }
+          } finally {
+            try {
+              if (deps.registry !== undefined && result !== null && streamResponseId !== null) {
+                const attempt = successfulAttempt(result.decision);
+                await deps.registry.put({
+                  responseId: streamResponseId,
+                  accountId: identity.accountId,
+                  keyId: identity.keyId,
+                  providerAlias: typeof attempt?.alias === "string" ? attempt.alias : null,
+                  providerName:
+                    typeof attempt?.provider_name === "string" ? attempt.provider_name : null,
+                  providerModel:
+                    typeof attempt?.provider_model === "string" ? attempt.provider_model : null,
+                  providerProtocol:
+                    attempt?.target_provider_protocol === "openai_chat" ||
+                    attempt?.target_provider_protocol === "anthropic_messages" ||
+                    attempt?.target_provider_protocol === "openai_responses" ||
+                    attempt?.target_provider_protocol === "gemini"
+                      ? attempt.target_provider_protocol
+                      : null,
+                  createdAt: Date.now(),
+                  expiresAt: Date.now() + 86_400_000,
+                  status: streamOutcome ?? "truncated",
+                });
+              }
+            } finally {
+              captured?.release();
+              sessionTerminalCapture?.release();
+              releaseMemory?.();
+            }
           }
         }
       });

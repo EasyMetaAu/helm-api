@@ -503,6 +503,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         !t.upsertSessionRevision ||
         !t.getSessionByRef ||
         !t.listSessionRevisions ||
+        !("listSessionRevisionsPage" in t) ||
         !t.getSessionRevisionByResponseId
       )
         throw new Error("session revision methods required");
@@ -632,6 +633,56 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
           createdAt: new Date(3000),
         }),
       ]);
+      const firstPage = await (
+        t as TelemetryStore & {
+          listSessionRevisionsPage(
+            sessionRef: string,
+            options: { afterSequence?: number; limit: number; maxBytes: number },
+          ): Promise<{
+            revisions: Array<{ requestId: string; sequence: number }>;
+            nextSequence: number | null;
+            limited: boolean;
+          }>;
+        }
+      ).listSessionRevisionsPage("s_1", { limit: 1, maxBytes: 1024 });
+      expect(firstPage).toMatchObject({
+        revisions: [{ requestId: "r1", sequence: 1 }],
+        nextSequence: 1,
+        limited: false,
+      });
+      const secondPage = await (
+        t as TelemetryStore & {
+          listSessionRevisionsPage(
+            sessionRef: string,
+            options: { afterSequence?: number; limit: number; maxBytes: number },
+          ): Promise<{
+            revisions: Array<{ requestId: string; sequence: number }>;
+            nextSequence: number | null;
+            limited: boolean;
+          }>;
+        }
+      ).listSessionRevisionsPage("s_1", {
+        afterSequence: firstPage.nextSequence ?? undefined,
+        limit: 2,
+        maxBytes: 1024,
+      });
+      expect(secondPage).toMatchObject({
+        revisions: [
+          { requestId: "r2", sequence: 2 },
+          { requestId: "r3", sequence: 3 },
+        ],
+        nextSequence: null,
+        limited: false,
+      });
+      const limited = await (
+        t as TelemetryStore & {
+          listSessionRevisionsPage(
+            sessionRef: string,
+            options: { afterSequence?: number; limit: number; maxBytes: number },
+          ): Promise<{ revisions: unknown[]; nextSequence: number | null; limited: boolean }>;
+        }
+      ).listSessionRevisionsPage("s_1", { limit: 10, maxBytes: 1 });
+      expect(limited).toEqual({ revisions: [], nextSequence: null, limited: true });
     });
 
     it("prunes an entire inactive session without touching a recent one", async () => {

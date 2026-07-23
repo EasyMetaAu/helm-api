@@ -84,6 +84,9 @@ never overwritten. For a terminal/automation install instead, run
 restarts. It passes `.env` into the container, so optional provider and runtime
 settings work without editing Compose. `HELM_PORT` controls the host port, the
 gateway bind port, and health checks together.
+Compose waits up to 30 minutes for graceful shutdown by default so queued writes
+and SQLite maintenance are not cut off; override `HELM_STOP_GRACE_PERIOD` in `.env`
+for a larger database.
 
 For manual Docker setup, create `./data`, set `HELM_UID` / `HELM_GID` to
 `id -u` / `id -g` on Linux, and run `docker compose up -d --wait`; `.env` and a

@@ -3,16 +3,23 @@ import {
   CodexResponsesWebSocketConnectError,
   type CodexResponsesWebSocketConnection,
   type CodexResponsesWebSocketConnector,
+  type CodexResponsesWebSocketReceivedMessage,
   type ProxyConfig,
   proxyConfigToUrl,
+  type ResponseWorkAdmission,
+  runtimeMemoryBudget,
+  runtimeResponseWorkAdmission,
 } from "@helm/core";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { SocksProxyAgent } from "socks-proxy-agent";
-import WebSocket from "ws";
+import WebSocket, { type RawData } from "ws";
 
 export interface CodexResponsesWebSocketConnectorOptions {
   proxy?: ProxyConfig;
   timeoutMs?: number;
+  maxPayloadBytes?: number;
+  maxPendingBytes?: number;
+  responseWorkAdmission?: ResponseWorkAdmission;
 }
 
 function responseHeaders(response: IncomingMessage): Headers {
@@ -38,9 +45,10 @@ export function codexWebSocketAgent(proxy: ProxyConfig | undefined): HttpAgent |
 
 class WsCodexConnection implements CodexResponsesWebSocketConnection {
   readonly responseHeaders: Headers;
-  private readonly pending: string[] = [];
+  private readonly pending: Array<CodexResponsesWebSocketReceivedMessage & { bytes: number }> = [];
+  private pendingBytes = 0;
   private readonly waiters: Array<{
-    resolve: (value: string | null) => void;
+    resolve: (value: CodexResponsesWebSocketReceivedMessage | null) => void;
     reject: (error: Error) => void;
   }> = [];
   private terminal: Error | null | undefined;
@@ -48,29 +56,74 @@ class WsCodexConnection implements CodexResponsesWebSocketConnection {
   constructor(
     private readonly socket: WebSocket,
     headers: Headers,
+    private readonly maxPendingBytes: number,
+    private readonly responseWorkAdmission: ResponseWorkAdmission,
   ) {
     this.responseHeaders = headers;
-    socket.on("message", (data) => this.enqueue(data.toString()));
-    socket.on("close", () => this.enqueue(null));
-    socket.on("error", (error) => this.enqueue(error));
+    socket.on("message", (data) => this.enqueueMessage(data));
+    socket.on("close", () => this.terminate(null));
+    socket.on("error", (error) => this.terminate(error));
   }
 
-  private enqueue(value: string | null | Error): void {
+  private terminate(value: Error | null): void {
     if (this.terminal !== undefined) return;
-    if (value === null || value instanceof Error) {
-      this.terminal = value;
-      for (const waiter of this.waiters.splice(0)) {
-        if (value instanceof Error) waiter.reject(value);
-        else waiter.resolve(value);
-      }
+    this.terminal = value;
+    for (const pending of this.pending.splice(0)) pending.release();
+    this.pendingBytes = 0;
+    for (const waiter of this.waiters.splice(0)) {
+      if (value instanceof Error) waiter.reject(value);
+      else waiter.resolve(value);
+    }
+  }
+
+  private capacityError(): Error {
+    return Object.assign(new Error("Codex websocket pending response capacity exceeded"), {
+      name: "QueueTimeoutError",
+      queueTimeout: true as const,
+    });
+  }
+
+  private failCapacity(currentRelease?: () => void): void {
+    currentRelease?.();
+    const error = this.capacityError();
+    this.terminate(error);
+    this.socket.close(1013, "response capacity exceeded");
+  }
+
+  private enqueueMessage(data: RawData): void {
+    if (this.terminal !== undefined) return;
+    const bytes = Array.isArray(data)
+      ? data.reduce((total, chunk) => total + chunk.byteLength, 0)
+      : data.byteLength;
+    const acquired = this.responseWorkAdmission.acquire(bytes);
+    if (!acquired.ok) {
+      this.failCapacity();
       return;
     }
+    let text: string;
+    try {
+      text = Array.isArray(data)
+        ? Buffer.concat(data, bytes).toString("utf8")
+        : data instanceof ArrayBuffer
+          ? Buffer.from(data).toString("utf8")
+          : data.toString("utf8");
+    } catch (error) {
+      acquired.lease.release();
+      this.terminate(error instanceof Error ? error : new Error("invalid websocket message"));
+      return;
+    }
+    const message = { text, bytes, release: () => acquired.lease.release() };
     const waiter = this.waiters.shift();
     if (waiter) {
-      waiter.resolve(value);
+      waiter.resolve(message);
       return;
     }
-    this.pending.push(value);
+    if (this.pendingBytes + bytes > this.maxPendingBytes) {
+      this.failCapacity(message.release);
+      return;
+    }
+    this.pending.push(message);
+    this.pendingBytes += bytes;
   }
 
   async send(text: string): Promise<void> {
@@ -87,11 +140,24 @@ class WsCodexConnection implements CodexResponsesWebSocketConnection {
   }
 
   async receive(): Promise<string | null> {
+    const message = await this.receiveWithWork();
+    if (message === null) return null;
+    try {
+      return message.text;
+    } finally {
+      message.release();
+    }
+  }
+
+  async receiveWithWork(): Promise<CodexResponsesWebSocketReceivedMessage | null> {
     const next = this.pending.shift();
-    if (next !== undefined) return next;
+    if (next !== undefined) {
+      this.pendingBytes -= next.bytes;
+      return next;
+    }
     if (this.terminal instanceof Error) throw this.terminal;
     if (this.terminal === null) return null;
-    return await new Promise<string | null>((resolve, reject) => {
+    return await new Promise<CodexResponsesWebSocketReceivedMessage | null>((resolve, reject) => {
       this.waiters.push({ resolve, reject });
     });
   }
@@ -114,30 +180,72 @@ class WsCodexConnection implements CodexResponsesWebSocketConnection {
   }
 }
 
-async function unexpectedResponseBody(response: IncomingMessage): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of response) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+class UnexpectedResponseBodyError extends Error {
+  constructor(
+    readonly reason: "too_large" | "timeout",
+    message: string,
+  ) {
+    super(message);
+    this.name = "UnexpectedResponseBodyError";
   }
-  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function unexpectedResponseBody(
+  response: IncomingMessage,
+  maxBytes: number,
+  timeoutMs: number,
+): Promise<string> {
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  const timeoutError = new UnexpectedResponseBodyError(
+    "timeout",
+    `Codex Responses websocket unexpected response body timed out after ${timeoutMs} ms`,
+  );
+  const timer = setTimeout(() => response.destroy(timeoutError), timeoutMs);
+  timer.unref?.();
+  try {
+    for await (const chunk of response) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bytes += buffer.byteLength;
+      if (bytes > maxBytes) {
+        const error = new UnexpectedResponseBodyError(
+          "too_large",
+          `Codex Responses websocket unexpected response body exceeded ${maxBytes} bytes`,
+        );
+        response.destroy(error);
+        throw error;
+      }
+      chunks.push(buffer);
+    }
+    return Buffer.concat(chunks, bytes).toString("utf8");
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export function createCodexResponsesWebSocketConnector(
   options: CodexResponsesWebSocketConnectorOptions = {},
 ): CodexResponsesWebSocketConnector {
   const agent = codexWebSocketAgent(options.proxy);
-  const timeoutMs = options.timeoutMs ?? 60_000;
+  const timeoutMs = Math.max(1, Math.floor(options.timeoutMs ?? 60_000));
+  const maxPayloadBytes = Math.max(
+    1,
+    Math.floor(options.maxPayloadBytes ?? runtimeMemoryBudget().maxWireBytes),
+  );
+  const maxPendingBytes = Math.max(1, Math.floor(options.maxPendingBytes ?? maxPayloadBytes));
+  const responseWorkAdmission = options.responseWorkAdmission ?? runtimeResponseWorkAdmission();
 
   return async ({ url, headers, signal }) =>
     await new Promise<CodexResponsesWebSocketConnection>((resolve, reject) => {
       let settled = false;
+      let readingUnexpectedResponse = false;
       let upgradeHeaders = new Headers();
       const socket = new WebSocket(url, {
         headers,
         agent,
-        perMessageDeflate: true,
+        perMessageDeflate: false,
         handshakeTimeout: timeoutMs,
-        maxPayload: 64 * 1024 * 1024,
+        maxPayload: maxPayloadBytes,
       });
 
       const fail = (error: unknown): void => {
@@ -171,25 +279,40 @@ export function createCodexResponsesWebSocketConnector(
         if (settled) return;
         settled = true;
         cleanup();
-        resolve(new WsCodexConnection(socket, upgradeHeaders));
+        resolve(
+          new WsCodexConnection(socket, upgradeHeaders, maxPendingBytes, responseWorkAdmission),
+        );
       });
       socket.once("unexpected-response", (_request, response) => {
-        void unexpectedResponseBody(response)
+        readingUnexpectedResponse = true;
+        const status = response.statusCode ?? null;
+        const headers = responseHeaders(response);
+        void unexpectedResponseBody(response, maxPayloadBytes, timeoutMs)
           .then((body) => {
             fail(
               new CodexResponsesWebSocketConnectError(
-                `Codex Responses websocket returned HTTP ${response.statusCode ?? 0}`,
+                `Codex Responses websocket returned HTTP ${status ?? 0}`,
                 {
-                  status: response.statusCode ?? null,
-                  headers: responseHeaders(response),
+                  status,
+                  headers,
                   body,
                 },
               ),
             );
           })
-          .catch((error) => fail(error));
+          .catch((error) => {
+            fail(
+              new CodexResponsesWebSocketConnectError(
+                error instanceof UnexpectedResponseBodyError
+                  ? error.message
+                  : "Codex Responses websocket unexpected response body failed",
+                { status, headers, cause: error },
+              ),
+            );
+          });
       });
       socket.once("error", (error) => {
+        if (readingUnexpectedResponse) return;
         fail(
           new CodexResponsesWebSocketConnectError("Codex Responses websocket connection failed", {
             cause: error,

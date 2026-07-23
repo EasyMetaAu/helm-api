@@ -14,6 +14,74 @@ function fakeCollector(): SignalCollector & { calls: Array<[number, number]> } {
 }
 
 describe("startSignalScheduler", () => {
+  it("stop waits for an active collection before resolving", async () => {
+    vi.useFakeTimers();
+    try {
+      let finish = () => {};
+      const handle = startSignalScheduler({
+        collector: {
+          collect: () =>
+            new Promise((resolve) => {
+              finish = () => resolve({ written: 0, ok: true });
+            }),
+        },
+        intervalMs: 1_000,
+        now: () => Date.now(),
+      });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      let stopped = false;
+      const stopping = handle.stop().then(() => {
+        stopped = true;
+      });
+      await Promise.resolve();
+      expect(stopped).toBe(false);
+      finish();
+      await stopping;
+      expect(stopped).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("pauseAndWait blocks new ticks and waits for the active collection", async () => {
+    vi.useFakeTimers();
+    try {
+      let finish = () => {};
+      const collect = vi.fn(
+        () =>
+          new Promise<{ written: number; ok: true }>((resolve) => {
+            finish = () => resolve({ written: 0, ok: true });
+          }),
+      );
+      const handle = startSignalScheduler({
+        collector: { collect },
+        intervalMs: 1_000,
+        now: () => Date.now(),
+      });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      let paused = false;
+      const waiting = handle.pauseAndWait().then(() => {
+        paused = true;
+      });
+      await Promise.resolve();
+      expect(paused).toBe(false);
+      finish();
+      await waiting;
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(collect).toHaveBeenCalledTimes(1);
+      handle.resume();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(collect).toHaveBeenCalledTimes(2);
+      finish();
+      await Promise.resolve();
+      handle.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("runs collect once per interval over the just-elapsed window, and stop() halts it", async () => {
     vi.useFakeTimers();
     try {

@@ -3,6 +3,7 @@ import { type ErrorClass, type HelmError, HelmErrorSchema } from "@helm/shared";
 import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
+import { RequestAdmissionError } from "../runtime/memory-admission.js";
 
 // The OpenAI error wire shape (type/code/status) lives in ONE place —
 // @helm/core's openai-error transformer (OPENAI_ERROR_SHAPE) — so the gateway's
@@ -61,6 +62,26 @@ function asHelmError(err: unknown): HelmError | null {
 export function handleError(err: unknown, c: Context<AppEnv>): Response {
   const traceId = c.get("trace_id") ?? "unknown";
   const logger = c.get("logger");
+
+  if (err instanceof RequestAdmissionError) {
+    if (err.status === 503) c.header("retry-after", "1");
+    logger.log("warn", "request.memory_rejected", {
+      trace_id: traceId,
+      http_status: err.status,
+      code: err.code,
+    });
+    return c.json(
+      {
+        error: {
+          message: err.message,
+          type: err.status === 413 ? "invalid_request_error" : "server_error",
+          code: err.code,
+          trace_id: traceId,
+        },
+      },
+      err.status as ContentfulStatusCode,
+    );
+  }
 
   if (isClientDisconnect(err)) {
     // Client went away — do not map to 5xx, do not record a provider fault.

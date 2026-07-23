@@ -71,6 +71,7 @@ export interface MemoryToolContext {
   store: MemoryAdminStore;
   now: () => Date;
   estimateTokens: (text: string) => number;
+  runInBackground?: (task: () => Promise<unknown>, onError?: (error: unknown) => void) => boolean;
   // docs/14 — hybrid recall (memory_recall). embedder is OPTIONAL: absent ⇒ the vector
   // leg is skipped (FTS+score). scoreConfig is the forgetting curve for the score
   // signal. recall carries the gate + top-K (memory.forgetting.facts_retrieval).
@@ -341,18 +342,21 @@ async function handleRecall(
     return degradeToLike();
   }
 
-  // Reinforcement bump — recalled facts are "used". Fire-and-forget: never awaited,
-  // never blocks or throws the tool response.
-  if (facts.length > 0 && ctx.store.bumpReferences !== undefined) {
-    void ctx.store
-      .bumpReferences({
+  // Reinforcement bump — recalled facts are "used". It never blocks or throws the
+  // tool response, but the runtime tracks it so maintenance/shutdown can drain it.
+  const bumpReferences = ctx.store.bumpReferences;
+  if (facts.length > 0 && bumpReferences !== undefined) {
+    const bump = () =>
+      bumpReferences.call(ctx.store, {
         accountId: ctx.accountId,
         observationIds: [],
         reflectionIds: [],
         factIds: facts.map((f) => f.id),
         now: ctx.now(),
-      })
-      .catch(() => {});
+      });
+    if (ctx.runInBackground?.(bump, () => {}) !== true && ctx.runInBackground === undefined) {
+      void bump().catch(() => {});
+    }
   }
 
   return ok({ facts: facts.map(factView) });

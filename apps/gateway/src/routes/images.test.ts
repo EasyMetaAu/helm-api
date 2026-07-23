@@ -3,6 +3,7 @@ import { UpstreamError } from "@helm/core";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../app.js";
+import { createBodyMemoryAdmission } from "../runtime/memory-admission.js";
 import { type ImagesRouteDeps, registerImagesRoute } from "./images.js";
 import type { MessagesIdentity } from "./messages.js";
 import type { RecordServedDeps } from "./payload-capture.js";
@@ -136,6 +137,73 @@ describe("registerImagesRoute", () => {
     const { app } = setup();
     const res = await post(app, { model: "gpt-image-2", prompt: "x" }, "Bearer wrong");
     expect(res.status).toBe(401);
+  });
+
+  it("rejects an over-capacity body before JSON parsing and releases its lease", async () => {
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 60,
+      maxWireBytes: 10,
+      jsonAmplification: 6,
+    });
+    const { app, imageGeneration } = setup({ memoryAdmission });
+
+    const res = await post(app, { model: "gpt-image-2", prompt: "a cat" });
+
+    expect(res.status).toBe(413);
+    expect((await res.json()) as unknown).toMatchObject({
+      error: { type: "invalid_request_error", code: "request_too_large" },
+    });
+    expect(imageGeneration).not.toHaveBeenCalled();
+    expect(memoryAdmission.reservedBytes).toBe(0);
+  });
+
+  it("returns an OpenAI 503 with Retry-After when runtime request capacity is busy", async () => {
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 1,
+      maxWireBytes: 1000,
+      jsonAmplification: 1,
+    });
+    const { app, imageGeneration } = setup({ memoryAdmission });
+
+    const res = await post(app, { model: "gpt-image-2", prompt: "a cat" });
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("retry-after")).toBe("1");
+    expect((await res.json()) as unknown).toMatchObject({
+      error: { type: "server_error", code: "server_overloaded" },
+    });
+    expect(imageGeneration).not.toHaveBeenCalled();
+    expect(memoryAdmission.reservedBytes).toBe(0);
+  });
+
+  it("releases its memory lease after a successful image request", async () => {
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 1000,
+      maxWireBytes: 1000,
+      jsonAmplification: 1,
+    });
+    const { app } = setup({ memoryAdmission });
+
+    expect((await post(app, { model: "gpt-image-2", prompt: "a cat" })).status).toBe(200);
+    expect(memoryAdmission.reservedBytes).toBe(0);
+  });
+
+  it("releases its memory lease when image JSON is malformed", async () => {
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 1000,
+      maxWireBytes: 1000,
+      jsonAmplification: 1,
+    });
+    const { app } = setup({ memoryAdmission });
+
+    const res = await app.request("/v1/images/generations", {
+      method: "POST",
+      headers: { Authorization: "Bearer k", "Content-Type": "application/json" },
+      body: "{",
+    });
+
+    expect(res.status).toBe(400);
+    expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
   it("rejects a direct image model that is blocked for the key", async () => {

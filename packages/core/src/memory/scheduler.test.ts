@@ -574,6 +574,65 @@ describe("startMemoryWorker wake()", () => {
   // backstop is verified separately by the describe above).
   const WAKE_DEPS = { coalesceMs: 8000, intervalMs: 60_000 } as const;
 
+  it("stop waits for an active drain before resolving", async () => {
+    let finish = () => {};
+    const { store } = makeStore([
+      { jobId: "j1", type: "observer", scope: { accountId: "a", threadId: "t1" } },
+    ]);
+    const runObserver = vi.fn(
+      () =>
+        new Promise<ObserverResult>((resolve) => {
+          finish = () => resolve(OBS_NOOP);
+        }),
+    );
+    const handle = startMemoryWorker(makeDeps(store, { ...WAKE_DEPS, coalesceMs: 1, runObserver }));
+
+    handle.wake();
+    await vi.advanceTimersByTimeAsync(1);
+    let stopped = false;
+    const stopping = handle.stop().then(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    finish();
+    await stopping;
+    expect(stopped).toBe(true);
+  });
+
+  it("pauseAndWait cancels pending wakes and waits for the active drain", async () => {
+    let finish = () => {};
+    const { store } = makeStore([
+      { jobId: "j1", type: "observer", scope: { accountId: "a", threadId: "t1" } },
+    ]);
+    const runObserver = vi.fn(
+      () =>
+        new Promise<ObserverResult>((resolve) => {
+          finish = () => resolve(OBS_NOOP);
+        }),
+    );
+    const handle = startMemoryWorker(makeDeps(store, { ...WAKE_DEPS, coalesceMs: 1, runObserver }));
+
+    handle.wake();
+    await vi.advanceTimersByTimeAsync(1);
+    let paused = false;
+    const waiting = handle.pauseAndWait().then(() => {
+      paused = true;
+    });
+    await Promise.resolve();
+    expect(paused).toBe(false);
+    finish();
+    await waiting;
+    handle.wake();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(runObserver).toHaveBeenCalledTimes(1);
+    handle.resume();
+    handle.wake();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(store.claimPendingJobs).toHaveBeenCalledTimes(2);
+    handle.stop();
+  });
+
   it("debounces the drain by coalesceMs (no drain before the window elapses)", async () => {
     const { store } = makeStore([
       { jobId: "j1", type: "observer", scope: { accountId: "a", threadId: "t1" } },

@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-23 · Codex Responses 按运行时容量准入并让夜间 SQLite 维护收缩内存（Gateway / Session / Store，docs/02/05/07/10，原则 2/3/7/8）
+
+- **功能边界不降级**：按 operator 要求保留正文/Session 捕获、自动 cleanup/VACUUM 和不限 key 并发；不再用关闭正文、关闭维护或固定并发作为稳定手段。Node 启动时从 V8 heap limit 与 cgroup/process constrained memory 推导活动请求、response work、单条 wire message、写队列、Session head cache、SQLite page cache 与维护 cache；活动请求和 response work 各占动态可分配容量的 20%，部署值随机器容量自动缩放，不写死 MiB。
+- **请求、输出与 Session 热路径**：所有 JSON 入口在 `JSON.parse` 前按真实流式字节申请进程级预算，超出单请求容量返回结构化 413，暂时无余量返回 503；`maxPayload` 与上游 Codex connector 同样随运行时容量变化。客户端 WebSocket 另从 cgroup 或 `RSS + availableMemory` 扣除未来 heap 增长和 SQLite 预留，得到 native ingress 池；每连接只预留一个最坏帧、不按 key 或固定连接数限流。WS 每连接只保留一个正在执行的 `response.create`，terminal 后排空内部流再释放 lease；所有上游 Codex WS 会话共用 response-work 池，每条消息从入队、等待、`JSON.parse` 到 frame 被消费全程持有 lease。四种 SSE 出口共用有界正文捕获器，容量耗尽只省略该响应 payload、记录 `payload.capture_limited` 并继续转发与保存 telemetry。Session 热写不再重建完整历史；Admin Session 恢复由 SQLite/Postgres 先查行字节元数据、再按 sequence 分页物化，并占用共享 recovery window。Store 的 64 MiB/10,000 revision 仍是跨实例一致的持久数据完整性上限，不是运行时内存值。
+- **夜间维护**：自动 cleanup、自动 VACUUM 与 Admin 手工维护复用同一 Promise 串行链；VACUUM 前进程级 gate 暂停新工作并依次等待 HTTP/body、Memory/Signal producer、OAuth/MCP/Admin cache 后台任务与正文写队列静止，结束或失败都逆序恢复。维护期间除 `/healthz`、`/version` 外的新请求统一返回带 `Retry-After` 的 503，并按 OpenAI、Anthropic、Gemini 或普通 Admin 路径输出对应错误形状；维护 drain 上限为 `min(request_timeout_ms, 120s)`。自动任务每 10 分钟检查一次，只有整段成功才记录当日完成。SQLite 仅在 freelist 至少占总页数 5% 时执行全库重写；worker 启动前要求 `availableMemory()` 至少为动态 process limit 的 25%，并按数据库与 WAL 实际大小检查磁盘。worker 使用独立连接、`temp_store=FILE` 与机器推导的低维护 cache；Compose 默认给 shutdown 30 分钟 grace。未引入守护进程、Redis、消息队列或新依赖。
+
 ## 2026-07-22 · 全项目文案审查补齐多语言维护闭环（Admin / Portal / Setup，docs/11/12，原则 1/2）
 
 - **审查边界**：Claude CLI Opus 对 Admin、Portal、Gateway 公开页面、README、当前 docs、脚本输出和客户端可见错误做了只读审查；不改协议字段、配置键、模型 ID、命令或历史事实。README 中文版已是自然意译，当前 docs 没有值得用大范围重写换取的明确收益。
@@ -63,13 +69,9 @@
 - **四出口一致性**：native Anthropic JSON/SSE 与 OpenAI→Anthropic translation JSON/SSE 都只在末个 terminal text 上调用该收紧路径，且没有既有 structured call 才可恢复；成功后分别将终态改为 `tool_use` / `tool_calls`。Translation SSE 与 JSON 复用同一份声明工具名映射，保证点号、碰撞等名称规范化一致。SSE 仍在 `message_delta` 证明终态后才改写，普通 `tool_use` 与非候选路径保持既有行为。
 - **验证**：TDD 先在共享 parser 和四个出口加入失败 case，再以 4 个定向 Vitest 文件、257 个用例覆盖完整 end-turn 恢复及拒绝 fence、尾随文本、调用间 prose、未闭合和未知 invoke；`pnpm typecheck`、`pnpm lint`、`pnpm build` 与 `git diff --check` 通过，不新增依赖或运行时配置。
 
-## 2026-07-18 · 请求推理等级与实际路由等级分开展示（Telemetry / Admin requests，docs/07/11，原则 1/7）
-
-- **事实边界**：`requested_reasoning_effort` 在进入路由、策略或 lane 覆盖前从客户端请求单独截取；既有 `reasoning_effort` 继续表示覆盖后的有效执行等级。两者都是不含正文与密钥的可选 `DecisionRecord` 元数据，因此关闭 `capture_payloads` 后仍可读取，旧记录缺少请求等级时保持空白，不用有效等级反推客户端意图。
-- **列表展示**：共享 `RequestsTable` 在“请求”模型后直接追加客户端等级（例如 `请求: gpt-5.6-sol high`），Routing 单元格只显示实际有效等级值，不再重复“推理等级”标签。Dashboard、主 Requests 与 key-scoped 列表共用该行为；请求详情现有的有效等级展示不变。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-18 · 请求推理等级与实际路由等级分开展示（Telemetry / Admin requests，原则 1/7）**：单独保存客户端请求等级与覆盖后的实际执行等级，共享列表分别展示且不从旧记录反推；完整原文通过 git history 回溯。
 - **2026-07-18 · 关闭正文捕获时仍保留推理等级（Telemetry / Admin requests，原则 1/7）**：完整正文关闭时仍把实际生效的 `reasoning_effort` 作为脱敏 DecisionRecord 元数据保存并显示；完整原文通过 git history 回溯。
 - **2026-07-18 · Codex 自动压缩目录与无状态传输故障切换（OAuth subscription / Responses / provider execution，原则 3/5/7/8）**：对齐 Codex 自动压缩阈值，并只允许无状态 transport failure 在兄弟账号间切换；有状态续接与私有 Responses items 保持 fail-closed，完整原文通过 git history 回溯。
 - **2026-07-17 · Anthropic XML 工具调用恢复边界（Protocol streaming / provider execution，原则 3/5/8）**：只在终态、完整、白名单且无既有结构化调用时恢复 XML 工具调用；四个实际出口共用边界并以有界缓冲保持流式保真，完整原文通过 git history 回溯。

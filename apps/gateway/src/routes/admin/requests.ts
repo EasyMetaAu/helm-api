@@ -3,8 +3,13 @@ import type {
   RequestPayloadMeta,
   RequestPayloadPart,
   RequestPayloadPartRecord,
+  SessionRevisionRecord,
 } from "@helm/core";
-import { restoreSessionRevisionJson } from "@helm/core";
+import {
+  restoreSessionRevisionJson,
+  runtimeMemoryBudget,
+  runtimeResponseWorkAdmission,
+} from "@helm/core";
 import { RequestsQuerySchema } from "@helm/shared";
 import type { Hono } from "hono";
 import type { AppEnv } from "../../app.js";
@@ -138,18 +143,22 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
         const recovered = await getSessionRequest(deps, traceId);
         if (recovered.status === "unavailable")
           return c.json({ captured: false, source: "unavailable", reason: recovered.reason });
-        return c.json({
-          captured: true,
-          source: "session",
-          exact: false,
-          fidelity: recovered.fidelity,
-          created_at: recovered.createdAt.getTime(),
-          parts: {
-            request: true,
-            response: recovered.responseJson !== null,
-            upstream_request: false,
-          },
-        });
+        try {
+          return c.json({
+            captured: true,
+            source: "session",
+            exact: false,
+            fidelity: recovered.fidelity,
+            created_at: recovered.createdAt.getTime(),
+            parts: {
+              request: true,
+              response: recovered.responseJson !== null,
+              upstream_request: false,
+            },
+          });
+        } finally {
+          recovered.release();
+        }
       }
       return c.json({
         captured: true,
@@ -173,18 +182,26 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
           return c.json({ captured: false, source: "unavailable", reason: "no_session" });
         if (recovered.status === "unavailable")
           return c.json({ captured: false, source: "unavailable", reason: recovered.reason });
-        const json = part === "request" ? recovered.requestJson : recovered.responseJson;
-        if (json === null)
-          return c.json({ captured: false, source: "unavailable", reason: "response_unavailable" });
-        return c.json({
-          captured: true,
-          source: "session",
-          exact: false,
-          fidelity: recovered.fidelity,
-          part,
-          value: parseMaybeJson(json),
-          created_at: recovered.createdAt.getTime(),
-        });
+        try {
+          const json = part === "request" ? recovered.requestJson : recovered.responseJson;
+          if (json === null)
+            return c.json({
+              captured: false,
+              source: "unavailable",
+              reason: "response_unavailable",
+            });
+          return c.json({
+            captured: true,
+            source: "session",
+            exact: false,
+            fidelity: recovered.fidelity,
+            part,
+            value: parseMaybeJson(json),
+            created_at: recovered.createdAt.getTime(),
+          });
+        } finally {
+          recovered.release();
+        }
       }
       return c.json({
         captured: true,
@@ -202,16 +219,20 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
       const recovered = await getSessionRequest(deps, traceId);
       if (recovered.status === "unavailable")
         return c.json({ captured: false, source: "unavailable", reason: recovered.reason });
-      return c.json({
-        captured: true,
-        source: "session",
-        exact: false,
-        fidelity: recovered.fidelity,
-        request: parseMaybeJson(recovered.requestJson),
-        response: recovered.responseJson === null ? null : parseMaybeJson(recovered.responseJson),
-        upstream_request: null,
-        created_at: recovered.createdAt.getTime(),
-      });
+      try {
+        return c.json({
+          captured: true,
+          source: "session",
+          exact: false,
+          fidelity: recovered.fidelity,
+          request: parseMaybeJson(recovered.requestJson),
+          response: recovered.responseJson === null ? null : parseMaybeJson(recovered.responseJson),
+          upstream_request: null,
+          created_at: recovered.createdAt.getTime(),
+        });
+      } finally {
+        recovered.release();
+      }
     }
     return c.json({
       captured: true,
@@ -239,31 +260,89 @@ async function getSessionRequest(
       responseJson: string | null;
       fidelity: string;
       createdAt: Date;
+      release: () => void;
     }
   | {
       status: "unavailable";
-      reason: "no_session" | "session_unavailable" | "session_incomplete";
+      reason:
+        | "no_session"
+        | "session_unavailable"
+        | "session_incomplete"
+        | "session_recovery_limited";
     }
 > {
-  const list = deps.telemetry.listSessionRevisions;
+  const listPage = deps.telemetry.listSessionRevisionsPage;
   const decision = await deps.telemetry.getByRequestId(requestId);
   const sessionRef = decision?.session?.ref;
   if (!sessionRef) return { status: "unavailable", reason: "no_session" };
-  if (!list) return { status: "unavailable", reason: "session_unavailable" };
+  if (!listPage) return { status: "unavailable", reason: "session_unavailable" };
+  const budget = runtimeMemoryBudget();
+  // Reserve one whole safe recovery window before the adapter materializes even
+  // the first page. Reserving after listPage() would let concurrent readers each
+  // allocate a large page before either one became visible to the shared budget.
+  const acquired = runtimeResponseWorkAdmission().acquire(budget.maxWireBytes);
+  if (!acquired.ok) return { status: "unavailable", reason: "session_recovery_limited" };
+  const revisions: SessionRevisionRecord[] = [];
+  let afterSequence: number | undefined;
+  let wireBytes = 0;
+  let releaseTransferred = false;
   try {
-    const revisions = await list.call(deps.telemetry, sessionRef);
-    const target = revisions.find((revision) => revision.requestId === requestId);
-    if (!target) return { status: "unavailable", reason: "session_unavailable" };
-    return {
-      status: "recovered",
-      requestJson: restoreSessionRevisionJson(revisions, requestId),
-      responseJson: decision.final.status === "ok" ? target.responseJson : null,
-      fidelity: target.fidelity,
-      createdAt: target.createdAt,
-    };
+    for (;;) {
+      const remainingBytes = budget.maxWireBytes - wireBytes;
+      if (remainingBytes <= 0) return { status: "unavailable", reason: "session_recovery_limited" };
+      const page = await listPage.call(deps.telemetry, sessionRef, {
+        afterSequence,
+        limit: 100,
+        maxBytes: remainingBytes,
+      });
+      if (page.limited) return { status: "unavailable", reason: "session_recovery_limited" };
+      if (page.revisions.length === 0)
+        return { status: "unavailable", reason: "session_unavailable" };
+      for (const revision of page.revisions) wireBytes += sessionRevisionWireBytes(revision);
+      if (wireBytes > budget.maxWireBytes)
+        return { status: "unavailable", reason: "session_recovery_limited" };
+      revisions.push(...page.revisions);
+      const target = page.revisions.find((revision) => revision.requestId === requestId);
+      if (target) {
+        const recovered = {
+          status: "recovered" as const,
+          requestJson: restoreSessionRevisionJson(revisions, requestId),
+          responseJson: decision.final.status === "ok" ? target.responseJson : null,
+          fidelity: target.fidelity,
+          createdAt: target.createdAt,
+          release: acquired.lease.release,
+        };
+        releaseTransferred = true;
+        return recovered;
+      }
+      if (page.nextSequence === null)
+        return { status: "unavailable", reason: "session_unavailable" };
+      if (afterSequence !== undefined && page.nextSequence <= afterSequence)
+        return { status: "unavailable", reason: "session_incomplete" };
+      afterSequence = page.nextSequence;
+    }
   } catch {
     return { status: "unavailable", reason: "session_incomplete" };
+  } finally {
+    if (!releaseTransferred) acquired.lease.release();
   }
+}
+
+function sessionRevisionWireBytes(revision: SessionRevisionRecord): number {
+  const values = [
+    revision.sessionRef,
+    revision.requestId,
+    revision.parentRequestId,
+    revision.requestDeltaJson,
+    revision.requestEnvelopeJson,
+    revision.responseId,
+    revision.responseJson,
+    revision.fidelity,
+  ];
+  return values.reduce(
+    (bytes, value) => bytes + (value === null ? 0 : Buffer.byteLength(value, "utf8")),
+    64,
+  );
 }
 
 type PayloadPartQuery = "full" | "meta" | RequestPayloadPart | "invalid";

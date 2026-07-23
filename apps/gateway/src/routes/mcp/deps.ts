@@ -8,6 +8,7 @@ export interface McpDeps {
   memoryStore: MemoryStore;
   now: () => Date;
   estimateTokens: (text: string) => number;
+  runInBackground: (task: () => Promise<unknown>, onError?: (error: unknown) => void) => boolean;
   // Server version reported in the MCP `initialize` handshake (serverInfo.version).
   serverVersion?: string;
   log?: (line: string) => void;

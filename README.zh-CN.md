@@ -78,6 +78,8 @@ Codex 和 SDK 的可复制接入配置；整个过程无需手动重启服务。
 `docker-compose.yml` 会挂载 `./config` 和 `./data`，因此重启容器不会丢失
 配置或数据库；它也会把 `.env` 注入容器，无需再为可选 provider 或运行时
 覆盖修改 Compose。`HELM_PORT` 会统一控制宿主机端口、Gateway 监听端口和健康检查。
+Compose 默认给优雅停止预留 30 分钟，避免队列写入或 SQLite 维护被 Docker 强制中断；
+数据库更大时可在 `.env` 中提高 `HELM_STOP_GRACE_PERIOD`。
 
 手动使用 Compose 时，Linux 用户应先创建 `./data`，并把 `HELM_UID`、
 `HELM_GID` 设为 `id -u`、`id -g` 的输出，再执行
