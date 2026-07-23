@@ -58,7 +58,7 @@ describe("Admin login page", () => {
     expect(cookie).toContain("HttpOnly");
     expect(cookie).toContain("SameSite=Strict");
     expect(cookie).toContain("Path=/admin");
-    expect(cookie).toContain("Max-Age=43200");
+    expect(cookie).toContain("Max-Age=2592000");
     expect(cookie).not.toContain("Secure");
   });
 
@@ -72,7 +72,8 @@ describe("Admin login page", () => {
 
   it("uses a login-issued session cookie on the protected Admin API", async () => {
     const app = appWithLogin();
-    app.use("/admin/api/*", basicAuth(AUTH, { allowSession: true, now: () => NOW }));
+    let now = NOW + 30 * 24 * 60 * 60 * 1000 - 1;
+    app.use("/admin/api/*", basicAuth(AUTH, { allowSession: true, now: () => now }));
     app.get("/admin/api/ping", (c) => c.json({ ok: true }));
 
     const login = await app.request(
@@ -85,6 +86,10 @@ describe("Admin login page", () => {
     const api = await app.request("/admin/api/ping", { headers: { Cookie: cookie ?? "" } });
     expect(api.status).toBe(200);
     await expect(api.json()).resolves.toEqual({ ok: true });
+
+    now += 1;
+    const expired = await app.request("/admin/api/ping", { headers: { Cookie: cookie ?? "" } });
+    expect(expired.status).toBe(401);
   });
 
   it("shows a generic inline error without echoing credentials", async () => {

@@ -11,7 +11,7 @@ import {
   verifyAdminSessionToken,
 } from "../middleware/basic-auth.js";
 
-const SESSION_SECONDS = 12 * 60 * 60;
+const SESSION_SECONDS = 30 * 24 * 60 * 60;
 const LoginSchema = z.object({
   username: z.string().max(128),
   password: z.string().max(512),
