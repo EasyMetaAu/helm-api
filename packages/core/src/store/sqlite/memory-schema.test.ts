@@ -143,6 +143,45 @@ describe("sqlite memory schema + migrations", () => {
     db.$sqlite.close();
   });
 
+  it("stores large messages as gzip BLOBs and reads mixed legacy TEXT", async () => {
+    const db = createSqliteDb(":memory:");
+    const store = new SqliteMemoryStore(
+      db,
+      () => "compressed-message",
+      () => new Date(1_000),
+    );
+    await store.ensureThread({ id: "t1", ownerId: "o1" });
+    const content = "compressible memory content ".repeat(1_000);
+    await store.appendMessage({
+      threadId: "t1",
+      messageIndex: 0,
+      role: "assistant",
+      content,
+      tokenEstimate: 3,
+    });
+
+    expect(
+      db.$sqlite
+        .prepare("SELECT typeof(content) AS type FROM memory_messages WHERE id = ?")
+        .get("compressed-message"),
+    ).toEqual({ type: "blob" });
+    db.$sqlite
+      .prepare(
+        `INSERT INTO memory_messages
+           (id, thread_id, message_index, role, content, token_estimate, created_at, content_hash)
+         VALUES ('legacy-message', 't1', 1, 'user', 'legacy text', 2, 2000, 'legacy-hash')`,
+      )
+      .run();
+
+    expect(
+      (await store.listMessages({ accountId: "o1", threadId: "t1" })).map((m) => m.content),
+    ).toEqual([content, "legacy text"]);
+    expect((await store.selectMessagesOlderThan(3_000, 10)).map((m) => m.content).sort()).toEqual(
+      [content, "legacy text"].sort(),
+    );
+    db.$sqlite.close();
+  });
+
   it("ensureThread is idempotent (re-ensure does not throw or duplicate)", async () => {
     const db = createSqliteDb(":memory:");
     const store = new SqliteMemoryStore(db);

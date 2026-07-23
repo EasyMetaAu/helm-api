@@ -25,4 +25,8 @@ describe("payload-codec", () => {
   it("non-gzip buffer is read as utf8 (defensive)", () => {
     expect(decodePayloadValue(Buffer.from("raw", "utf8"))).toBe("raw");
   });
+
+  it("treats a truncated gzip BLOB as unavailable instead of throwing", () => {
+    expect(decodePayloadValue(Buffer.from([0x1f, 0x8b, 0x08]))).toBeNull();
+  });
 });

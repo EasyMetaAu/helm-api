@@ -24,7 +24,11 @@ export function decodePayloadValue(value: unknown): string | null {
   if (typeof value === "string") return value; // legacy uncompressed row
   const buf = Buffer.isBuffer(value) ? value : Buffer.from(value as Uint8Array);
   if (buf.length >= 2 && buf[0] === GZIP_MAGIC_0 && buf[1] === GZIP_MAGIC_1) {
-    return gunzipSync(buf).toString("utf8");
+    try {
+      return gunzipSync(buf).toString("utf8");
+    } catch {
+      return null;
+    }
   }
   return buf.toString("utf8"); // defensive: raw bytes stored without gzip
 }

@@ -38,6 +38,7 @@ import { factContentHash } from "../../memory/forgetting/facts.js";
 import { forgettingScore, type ScoreConfig } from "../../memory/forgetting/score.js";
 import { sha256Hex } from "../../memory/message-hash.js";
 import { reciprocalRankFusion } from "../../memory/recall/rrf.js";
+import { decodePayloadValue, encodePayloadText } from "../payload-codec.js";
 import {
   type MemoryAdminStats,
   type MemoryAdminStatsScope,
@@ -81,6 +82,18 @@ function reflectionScopeWhere(scope: ReflectionScope): SQL {
 // and re-claims it — without this, the enqueue dedupe against running rows would
 // block the scope's queue FOREVER. 5 min is far beyond any real tick's work.
 const RUNNING_LEASE_MS = 5 * 60_000;
+const MEMORY_GZIP_MIN_BYTES = 256;
+
+function encodeMemoryContent(content: string): string | Buffer {
+  const bytes = Buffer.byteLength(content, "utf8");
+  if (bytes < MEMORY_GZIP_MIN_BYTES) return content;
+  const compressed = encodePayloadText(content);
+  return compressed.length < bytes ? compressed : content;
+}
+
+function decodeMemoryContent(content: unknown): string {
+  return decodePayloadValue(content) ?? "";
+}
 
 function dateOrNull(ms: number | null | undefined): Date | null {
   return ms === null || ms === undefined ? null : new Date(ms);
@@ -263,6 +276,21 @@ export class SqliteMemoryStore implements MemoryStore {
     private readonly now: () => Date = () => new Date(),
   ) {}
 
+  private preparedMessageInsert: ReturnType<SqliteMemoryStore["buildMessageInsert"]> | undefined;
+  private buildMessageInsert() {
+    return this.db.$sqlite.prepare(
+      `INSERT INTO memory_messages
+         (id, thread_id, message_index, role, content, token_estimate, created_at, content_hash)
+       VALUES
+         (@id, @threadId, @messageIndex, @role, @content, @tokenEstimate, @createdAt, @contentHash)
+       ON CONFLICT(thread_id, message_index, role, content_hash) DO NOTHING`,
+    );
+  }
+  private messageInsert() {
+    if (!this.preparedMessageInsert) this.preparedMessageInsert = this.buildMessageInsert();
+    return this.preparedMessageInsert;
+  }
+
   async ensureThread(input: MemoryThreadInput): Promise<void> {
     const ts = this.now();
     const tsMs = ts.getTime();
@@ -357,27 +385,16 @@ export class SqliteMemoryStore implements MemoryStore {
     // no-op via the v21 UNIQUE index (re-ingestion fix). Returned id is still
     // generated per call; on conflict it is inert (the row was left untouched).
     this.db.$sqlite.transaction(() => {
-      const inserted = this.db
-        .insert(memoryMessages)
-        .values({
-          id,
-          threadId: input.threadId,
-          messageIndex: input.messageIndex ?? 0,
-          role: input.role,
-          content: input.content,
-          tokenEstimate: input.tokenEstimate,
-          createdAt,
-          contentHash: sha256Hex(input.content),
-        })
-        .onConflictDoNothing({
-          target: [
-            memoryMessages.threadId,
-            memoryMessages.messageIndex,
-            memoryMessages.role,
-            memoryMessages.contentHash,
-          ],
-        })
-        .run();
+      const inserted = this.messageInsert().run({
+        id,
+        threadId: input.threadId,
+        messageIndex: input.messageIndex ?? 0,
+        role: input.role,
+        content: encodeMemoryContent(input.content),
+        tokenEstimate: input.tokenEstimate,
+        createdAt: createdAt.getTime(),
+        contentHash: sha256Hex(input.content),
+      });
       // A dedup conflict has changes=0 and must not inflate the summary.
       if (inserted.changes > 0) {
         this.bumpThreadMessageActivity(input.threadId, 1, createdAt.getTime());
@@ -400,27 +417,16 @@ export class SqliteMemoryStore implements MemoryStore {
       inputs.forEach((input, i) => {
         const id = this.genId();
         ids.push(id);
-        const inserted = this.db
-          .insert(memoryMessages)
-          .values({
-            id,
-            threadId: input.threadId,
-            messageIndex: input.messageIndex ?? i,
-            role: input.role,
-            content: input.content,
-            tokenEstimate: input.tokenEstimate,
-            createdAt: new Date(base + i),
-            contentHash: sha256Hex(input.content),
-          })
-          .onConflictDoNothing({
-            target: [
-              memoryMessages.threadId,
-              memoryMessages.messageIndex,
-              memoryMessages.role,
-              memoryMessages.contentHash,
-            ],
-          })
-          .run();
+        const inserted = this.messageInsert().run({
+          id,
+          threadId: input.threadId,
+          messageIndex: input.messageIndex ?? i,
+          role: input.role,
+          content: encodeMemoryContent(input.content),
+          tokenEstimate: input.tokenEstimate,
+          createdAt: base + i,
+          contentHash: sha256Hex(input.content),
+        });
         if (inserted.changes > 0) {
           const createdAt = base + i;
           const current = activity.get(input.threadId);
@@ -462,7 +468,7 @@ export class SqliteMemoryStore implements MemoryStore {
       threadId: row.threadId,
       // Stored role is the IR-aligned enum; widen back to the shared union.
       role: row.role as RawMessage["role"],
-      content: row.content,
+      content: decodeMemoryContent(row.content),
       tokenEstimate: row.tokenEstimate,
       createdAt: row.createdAt,
     }));
@@ -1955,7 +1961,7 @@ export class SqliteMemoryStore implements MemoryStore {
         id: r.id,
         threadId: r.threadId,
         role: r.role,
-        content: r.content,
+        content: decodeMemoryContent(r.content),
         tokenEstimate: r.tokenEstimate,
         messageIndex: r.messageIndex ?? null,
         contentHash: r.contentHash ?? null,
