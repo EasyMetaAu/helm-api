@@ -2,6 +2,7 @@ import type { OAuthQuotaWindow } from "@helm/shared";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../../app.js";
+import { createTrackedBackgroundTasks } from "../../runtime/maintenance-gate.js";
 import type { AdminApiDeps, OAuthAdminAccess } from "./deps.js";
 import { registerOAuthRoutes } from "./oauth.js";
 
@@ -1120,6 +1121,46 @@ describe("admin OAuth routes — read endpoints", () => {
       priority: 50,
       schedulable: true,
     });
+  });
+});
+
+describe("admin OAuth routes — tracked refresh lifecycle", () => {
+  it("returns 202 while maintenance still waits for the refresh database work", async () => {
+    const background = createTrackedBackgroundTasks();
+    let releaseStatus!: () => void;
+    const statusGate = new Promise<void>((resolve) => {
+      releaseStatus = resolve;
+    });
+    const seam = fullSeam({
+      listStatus: vi.fn(async () => {
+        await statusGate;
+        return { selectionStrategy: "balanced", providers: [] };
+      }) as never,
+    });
+    const oauthQuota = {
+      get: vi.fn(async () => null),
+      getAll: vi.fn(async () => []),
+      upsert: vi.fn(async () => {}),
+      delete: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const api = app({
+      oauth: seam,
+      oauthQuota,
+      runInBackground: background.run,
+    });
+
+    expect((await api.request("/admin/api/oauth/refresh", { method: "POST" })).status).toBe(202);
+    await vi.waitFor(() => expect(seam.listStatus).toHaveBeenCalledOnce());
+    let paused = false;
+    const waiting = background.pauseAndWait().then(() => {
+      paused = true;
+    });
+    await Promise.resolve();
+    expect(paused).toBe(false);
+
+    releaseStatus();
+    await waiting;
+    expect(paused).toBe(true);
   });
 });
 

@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import {
   CodexResponsesWebSocketConnectError,
   type CodexResponsesWebSocketConnector,
+  createResponseWorkAdmission,
 } from "@helm/core";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { SocksProxyAgent } from "socks-proxy-agent";
@@ -54,6 +55,7 @@ describe("createCodexResponsesWebSocketConnector", () => {
     server.on("upgrade", (request, socket, head) => {
       expect(request.headers.authorization).toBe("Bearer subscription-token");
       expect(request.headers["openai-beta"]).toBe("responses_websockets=2026-02-06");
+      expect(request.headers["sec-websocket-extensions"]).toBeUndefined();
       websocketServer.handleUpgrade(request, socket, head, (websocket) => {
         websocketServer.emit("connection", websocket, request);
       });
@@ -143,6 +145,111 @@ describe("createCodexResponsesWebSocketConnector", () => {
     await expect(settlePromptly(connection.receive())).rejects.toThrow(Error);
   });
 
+  it("closes an upstream connection when unread messages exceed the dynamic pending budget", async () => {
+    const server = createServer();
+    const websocketServer = new WebSocketServer({ noServer: true });
+    server.on("upgrade", (request, socket, head) => {
+      websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+        websocketServer.emit("connection", websocket, request);
+      });
+    });
+    websocketServer.on("connection", (socket) => {
+      socket.send("0123456789");
+      socket.send("abcdefghij");
+    });
+    const port = await listen(server);
+    const connector = createCodexResponsesWebSocketConnector({
+      timeoutMs: 2_000,
+      maxPayloadBytes: 100,
+      maxPendingBytes: 15,
+    });
+    const connection = await connector({
+      url: `ws://127.0.0.1:${port}/responses`,
+      headers: {},
+    });
+    connections.push(connection);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    let caught: unknown;
+    try {
+      await connection.receive();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({ queueTimeout: true });
+  });
+
+  it("holds one shared response-work lease through receive and rejects another session when full", async () => {
+    const server = createServer();
+    const websocketServer = new WebSocketServer({ noServer: true });
+    server.on("upgrade", (request, socket, head) => {
+      websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+        websocketServer.emit("connection", websocket, request);
+      });
+    });
+    websocketServer.on("connection", (socket) => socket.send("0123456789"));
+    const port = await listen(server);
+    const responseWorkAdmission = createResponseWorkAdmission({
+      capacityBytes: 15,
+      jsonAmplification: 1,
+      minChargeBytes: 1,
+    });
+    const connector = createCodexResponsesWebSocketConnector({
+      timeoutMs: 2_000,
+      maxPayloadBytes: 100,
+      maxPendingBytes: 100,
+      responseWorkAdmission,
+    });
+    const first = await connector({ url: `ws://127.0.0.1:${port}/responses`, headers: {} });
+    connections.push(first);
+    const firstMessage = await settlePromptly(first.receiveWithWork?.() ?? Promise.resolve(null));
+    expect(firstMessage?.text).toBe("0123456789");
+    expect(responseWorkAdmission.reservedBytes).toBe(10);
+
+    const second = await connector({ url: `ws://127.0.0.1:${port}/responses`, headers: {} });
+    connections.push(second);
+    await expect(settlePromptly(second.receive())).rejects.toMatchObject({ queueTimeout: true });
+    expect(responseWorkAdmission.reservedBytes).toBe(10);
+
+    firstMessage?.release();
+    expect(responseWorkAdmission.reservedBytes).toBe(0);
+  });
+
+  it("releases shared response-work held by unread messages when the connection closes", async () => {
+    const server = createServer();
+    const websocketServer = new WebSocketServer({ noServer: true });
+    server.on("upgrade", (request, socket, head) => {
+      websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+        websocketServer.emit("connection", websocket, request);
+      });
+    });
+    websocketServer.on("connection", (socket) => socket.send("0123456789"));
+    const port = await listen(server);
+    const responseWorkAdmission = createResponseWorkAdmission({
+      capacityBytes: 20,
+      jsonAmplification: 1,
+      minChargeBytes: 1,
+    });
+    const connector = createCodexResponsesWebSocketConnector({
+      timeoutMs: 2_000,
+      maxPayloadBytes: 100,
+      responseWorkAdmission,
+    });
+    const connection = await connector({
+      url: `ws://127.0.0.1:${port}/responses`,
+      headers: {},
+    });
+    connections.push(connection);
+    for (let attempt = 0; attempt < 20 && responseWorkAdmission.reservedBytes === 0; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(responseWorkAdmission.reservedBytes).toBe(10);
+
+    await connection.close();
+
+    expect(responseWorkAdmission.reservedBytes).toBe(0);
+  });
+
   it("captures a non-101 response for account-scoped error mapping", async () => {
     const server = createServer((_request, response) => {
       response.writeHead(429, {
@@ -171,6 +278,70 @@ describe("createCodexResponsesWebSocketConnector", () => {
     expect((caught as CodexResponsesWebSocketConnectError).status).toBe(429);
     expect((caught as CodexResponsesWebSocketConnectError).headers.get("retry-after")).toBe("17");
     expect((caught as CodexResponsesWebSocketConnectError).body).toContain("quota exhausted");
+  });
+
+  it("destroys an unexpected response whose body exceeds the dynamic websocket limit", async () => {
+    let responseClosed = false;
+    const server = createServer((_request, response) => {
+      response.on("close", () => {
+        responseClosed = true;
+      });
+      response.writeHead(429, { "content-type": "application/json" });
+      response.write("12345678");
+      setImmediate(() => {
+        response.write("abcdefgh");
+        response.end();
+      });
+    });
+    const port = await listen(server);
+    const connector = createCodexResponsesWebSocketConnector({
+      timeoutMs: 2_000,
+      maxPayloadBytes: 10,
+    });
+
+    let caught: unknown;
+    try {
+      await connector({ url: `ws://127.0.0.1:${port}/responses`, headers: {} });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(CodexResponsesWebSocketConnectError);
+    expect(caught).toMatchObject({ status: 429 });
+    expect((caught as Error).message).toContain("exceeded");
+    expect(responseClosed).toBe(true);
+  });
+
+  it("destroys an unexpected response whose body does not finish within the handshake timeout", async () => {
+    let responseClosed = false;
+    const server = createServer((_request, response) => {
+      response.on("close", () => {
+        responseClosed = true;
+      });
+      response.writeHead(503, { "content-type": "text/plain" });
+      response.write("still waiting");
+      setTimeout(() => response.end(), 100).unref?.();
+    });
+    const port = await listen(server);
+    const connector = createCodexResponsesWebSocketConnector({
+      timeoutMs: 25,
+      maxPayloadBytes: 100,
+    });
+
+    let caught: unknown;
+    try {
+      await settlePromptly(connector({ url: `ws://127.0.0.1:${port}/responses`, headers: {} }));
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(CodexResponsesWebSocketConnectError);
+    expect(caught).toMatchObject({ status: 503 });
+    expect((caught as Error).message).toContain("timed out");
+    for (let attempt = 0; attempt < 20 && !responseClosed; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(responseClosed).toBe(true);
   });
 
   it("builds proxy-aware agents for HTTP, HTTPS, and SOCKS5 accounts", () => {

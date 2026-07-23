@@ -353,8 +353,15 @@ export interface SessionRecord {
   storedBytes: number;
 }
 
-export const SESSION_MAX_REVISIONS = 10_000;
-export const SESSION_MAX_STORED_BYTES = 64 * 1024 * 1024;
+// Persistent per-Session database quotas. These bound retained revision history;
+// they are not runtime heap, request-admission, or cache-memory limits.
+export const PERSISTED_SESSION_MAX_REVISIONS = 10_000;
+export const PERSISTED_SESSION_MAX_STORED_BYTES = 64 * 1024 * 1024;
+
+/** @deprecated Use PERSISTED_SESSION_MAX_REVISIONS. */
+export const SESSION_MAX_REVISIONS = PERSISTED_SESSION_MAX_REVISIONS;
+/** @deprecated Use PERSISTED_SESSION_MAX_STORED_BYTES. */
+export const SESSION_MAX_STORED_BYTES = PERSISTED_SESSION_MAX_STORED_BYTES;
 
 export interface SessionRevisionRecord {
   sessionRef: string;
@@ -368,6 +375,22 @@ export interface SessionRevisionRecord {
   responseJson: string | null;
   fidelity: string;
   createdAt: Date;
+}
+
+export interface SessionRevisionPageOptions {
+  afterSequence?: number;
+  limit: number;
+  // Maximum UTF-8 bytes of revision data the adapter may materialize for this page.
+  maxBytes: number;
+}
+
+export interface SessionRevisionPage {
+  revisions: SessionRevisionRecord[];
+  // Last returned sequence when another page exists; null when this is the final page.
+  nextSequence: number | null;
+  // True when the next row would exceed maxBytes. Callers must not treat a partial
+  // page as a recoverable Session chain.
+  limited: boolean;
 }
 
 // One telemetry row as exported by the archive scan — engine-neutral and
@@ -534,6 +557,10 @@ export interface TelemetryStore {
   getSessionByRef?(sessionRef: string): Promise<SessionRecord | null>;
   listSessionsByRefs?(sessionRefs: readonly string[]): Promise<SessionRecord[]>;
   listSessionRevisions?(sessionRef: string): Promise<SessionRevisionRecord[]>;
+  listSessionRevisionsPage?(
+    sessionRef: string,
+    options: SessionRevisionPageOptions,
+  ): Promise<SessionRevisionPage>;
   getSessionRevisionByResponseId?(
     sessionRef: string,
     responseId: string,

@@ -1,4 +1,9 @@
-import type { InsertPayloadInput, InsertTelemetryInput, TelemetryStore } from "@helm/core";
+import {
+  type InsertPayloadInput,
+  type InsertTelemetryInput,
+  runtimeMemoryBudget,
+  type TelemetryStore,
+} from "@helm/core";
 
 // The slice of TelemetryStore the queue drives. Batch methods are optional (the
 // queue falls back to per-row writes when an adapter lacks them).
@@ -24,7 +29,7 @@ export interface WriteQueueDeps {
   // Past this budget the queue sheds buffered writes (payload first — see
   // shedBufferedWrite) so a downstream stall (e.g. the 4am VACUUM holding the write
   // lock) can never balloon the heap. maxDepth stays as a row-count backstop; EITHER
-  // limit tripping triggers a shed/reject. Default 256MiB.
+  // limit tripping triggers a shed/reject. Default scales from the V8 heap limit.
   maxBytes?: number;
   // Flush a buffer eagerly once its accumulated bytes reach this, so a few giant
   // payloads can't coalesce into a multi-hundred-MB single transaction (maxBatch=256
@@ -53,9 +58,15 @@ export interface WriteQueue {
   // `wakeOnSettle` fires onTaskDrain after THIS task settles — set it only on the
   // turn's FINAL write (the outbound observe) so the memory worker is woken once the
   // whole turn is persisted, never mid-turn after the inbound-only write.
-  enqueueTask(task: () => Promise<void>, opts?: { wakeOnSettle?: boolean }): void;
+  enqueueTask(
+    task: () => Promise<void>,
+    opts?: { wakeOnSettle?: boolean; retainedBytes?: number },
+  ): void;
   // Drain everything currently buffered/queued and resolve when the DB has it.
   flush(): Promise<void>;
+  // Maintenance barrier: reject new deferred writes, then drain everything admitted.
+  pauseAndFlush(): Promise<void>;
+  resume(): void;
   // Stop the idle timer and flush once. Idempotent. For graceful shutdown.
   stop(): Promise<void>;
   // Current backlog size (for tests / metrics).
@@ -76,8 +87,9 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
   const flushIntervalMs = deps.flushIntervalMs ?? 25;
   const maxBatch = deps.maxBatch ?? 256;
   const maxDepth = deps.maxDepth ?? 10_000;
-  const maxBytes = deps.maxBytes ?? 256 * 1024 * 1024;
+  const maxBytes = deps.maxBytes ?? runtimeMemoryBudget().writeQueueBytes;
   const flushBytes = deps.flushBytes ?? Math.floor(maxBytes / 4);
+  const jsonAmplification = runtimeMemoryBudget().jsonAmplification;
 
   let telemetryBuf: InsertTelemetryInput[] = [];
   let payloadBuf: InsertPayloadInput[] = [];
@@ -98,6 +110,7 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
   let inFlightBytes = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
+  let paused = false;
   // All DB writes (batch flushes) run on this serial chain so two flushes can never
   // interleave; flush()/stop() await its tail.
   let writeChain: Promise<void> = Promise.resolve();
@@ -105,29 +118,33 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
   let taskChain: Promise<void> = Promise.resolve();
   let pendingTasks = 0;
   let pendingSessionBytes = 0;
+  let pendingTaskBytes = 0;
 
   const depth = (): number => telemetryBuf.length + payloadBuf.length + pendingTasks;
 
-  // Cheap, allocation-free byte estimate of a payload row: the serialized fields are
-  // already strings, so summing their .length is O(1)-per-row and dominates the
-  // footprint (the payload IS the request/response/upstream JSON). UTF-16 .length
-  // slightly under-counts multi-byte chars, but we only need a consistent proxy to
-  // bound the heap, not an exact byte tally.
+  // Cheap, allocation-free worst-case V8 estimate: retained JS strings may occupy
+  // two bytes per UTF-16 code unit. Object/array overhead is small beside the bodies.
   const payloadCost = (input: InsertPayloadInput): number =>
-    input.requestJson.length +
-    (input.responseJson?.length ?? 0) +
-    (input.upstreamRequestJson?.length ?? 0);
+    2 *
+    (input.requestJson.length +
+      (input.responseJson?.length ?? 0) +
+      (input.upstreamRequestJson?.length ?? 0));
 
   // Telemetry rows are tiny vs payloads, but a redacted decision can still be a few KB.
   // Approximate it once at enqueue with a single stringify of the decision (the bulk
   // of the row) — never recomputed afterward; the cached cost rides the byte arrays.
   const telemetryCost = (input: InsertTelemetryInput): number => {
     try {
-      return JSON.stringify(input.decision).length;
+      return JSON.stringify(input.decision).length * 2;
     } catch {
       return 0; // a non-serializable decision can't bloat the heap as a string anyway
     }
   };
+
+  // Deferred closures retain parsed/stringified request data as well as the original
+  // strings. Charge their wire-size estimate using the process-derived multiplier.
+  const retainedTaskCost = (bytes: number): number =>
+    Number.isFinite(bytes) && bytes > 0 ? Math.ceil(bytes * jsonAmplification) : 0;
 
   const clearTimer = (): void => {
     if (timer !== null) {
@@ -229,7 +246,8 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
   // overshoot the budget, and a write stall must not pile up batches past the cap.
   const overBudget = (incomingBytes: number): boolean =>
     depth() >= maxDepth ||
-    bufferedBytes + inFlightBytes + pendingSessionBytes + incomingBytes > maxBytes;
+    bufferedBytes + inFlightBytes + pendingSessionBytes + pendingTaskBytes + incomingBytes >
+      maxBytes;
 
   const shedPayload = (): boolean => {
     if (payloadBuf.length === 0) return false;
@@ -274,6 +292,10 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
   return {
     enqueueTelemetry(input: InsertTelemetryInput): void {
       if (stopped) return;
+      if (paused) {
+        log("writequeue.paused");
+        return;
+      }
       const cost = telemetryCost(input);
       if (!admitBufferedWrite(cost)) return;
       telemetryBuf.push(input);
@@ -287,6 +309,10 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
 
     enqueuePayload(input: InsertPayloadInput): void {
       if (stopped) return;
+      if (paused) {
+        log("writequeue.paused");
+        return;
+      }
       const cost = payloadCost(input);
       if (!admitBufferedWrite(cost)) return;
       payloadBuf.push(input);
@@ -298,7 +324,11 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
 
     enqueueSession(task: () => Promise<void>, bytes: number): void {
       if (stopped) return;
-      const cost = Math.max(0, bytes);
+      if (paused) {
+        log("writequeue.paused");
+        return;
+      }
+      const cost = retainedTaskCost(bytes);
       while (overBudget(cost) && shedPayload()) {
         /* payload is less valuable than a semantic session transcript */
       }
@@ -320,14 +350,26 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
       });
     },
 
-    enqueueTask(task: () => Promise<void>, opts?: { wakeOnSettle?: boolean }): void {
+    enqueueTask(
+      task: () => Promise<void>,
+      opts?: { wakeOnSettle?: boolean; retainedBytes?: number },
+    ): void {
       if (stopped) return;
-      if (pendingTasks >= maxDepth) {
-        log("writequeue.overflow");
+      if (paused) {
+        log("writequeue.paused");
+        return;
+      }
+      const cost = retainedTaskCost(opts?.retainedBytes ?? 0);
+      while (overBudget(cost) && shedPayload()) {
+        /* payload capture is less valuable than a deferred semantic write */
+      }
+      if (overBudget(cost)) {
+        log("writequeue.task_overflow");
         return;
       }
       const wakeOnSettle = opts?.wakeOnSettle === true;
       pendingTasks++;
+      pendingTaskBytes += cost;
       taskChain = taskChain.then(async () => {
         try {
           await task();
@@ -335,6 +377,7 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
           log("writequeue.task_failed");
         } finally {
           pendingTasks--;
+          pendingTaskBytes -= cost;
           // Fire the post-task hook (memory-worker wake) ONLY for tasks that opted in
           // — the turn's final/outbound observe. Waking after the inbound-only write
           // could drain the observer job before the assistant turn is persisted.
@@ -356,6 +399,18 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
       await doFlush();
       await writeChain;
       await taskChain;
+    },
+
+    async pauseAndFlush(): Promise<void> {
+      paused = true;
+      clearTimer();
+      await doFlush();
+      await writeChain;
+      await taskChain;
+    },
+
+    resume(): void {
+      if (!stopped) paused = false;
     },
 
     async stop(): Promise<void> {

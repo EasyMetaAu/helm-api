@@ -150,7 +150,11 @@ export {
   type ArchiveManifest,
   type ArchiveSink,
 } from "./cleanup/archive/types.js";
-export { shouldAutoVacuum } from "./cleanup/auto-vacuum.js";
+export {
+  AUTO_VACUUM_CHECK_INTERVAL_MS,
+  createAutoVacuumRunner,
+  shouldAutoVacuum,
+} from "./cleanup/auto-vacuum.js";
 export { buildCleanupPlan, type CleanupAction, type CleanupTable } from "./cleanup/cleanup-plan.js";
 export {
   type CleanupReport,
@@ -623,6 +627,7 @@ export {
   type CodexResponsesWebSocketConnectInput,
   type CodexResponsesWebSocketConnection,
   type CodexResponsesWebSocketConnector,
+  type CodexResponsesWebSocketReceivedMessage,
   codexAccountIdFromToken,
   createCodexResponsesClient,
   createGenericOpenAIResponsesClient,
@@ -763,6 +768,19 @@ export {
   type RoutingSignalFeedbackDeps,
   routeRequest,
 } from "./routing/route-request.js";
+export {
+  deriveRuntimeMemoryBudget,
+  type RuntimeMemoryBudget,
+  runtimeMemoryBudget,
+} from "./runtime/memory-budget.js";
+export {
+  acquireResponseWork,
+  createResponseWorkAdmission,
+  type ResponseWorkAdmission,
+  ResponseWorkCapacityError,
+  type ResponseWorkLease,
+  runtimeResponseWorkAdmission,
+} from "./runtime/response-work-admission.js";
 // Runtime-mutable settings (admin "System Settings") — load/seed/persist the
 // operator-facing config subset that can change at runtime without a restart.
 export {
@@ -806,6 +824,8 @@ export {
   createStore,
   InMemoryRateLimitStore,
   InMemorySignalStore,
+  PERSISTED_SESSION_MAX_REVISIONS,
+  PERSISTED_SESSION_MAX_STORED_BYTES,
   PgBudgetStore,
   PgConfigStore,
   type PgDb,
@@ -860,6 +880,8 @@ export type {
   RequestPayloadPart,
   RequestPayloadPartRecord,
   SessionRecord,
+  SessionRevisionPage,
+  SessionRevisionPageOptions,
   SessionRevisionRecord,
   SignalStore,
   TelemetryStore,

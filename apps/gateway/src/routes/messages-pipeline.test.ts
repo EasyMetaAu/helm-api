@@ -1,4 +1,10 @@
-import type { ExecutionResult, InjectDeps, ObserveDeps, RouteOptions } from "@helm/core";
+import {
+  createResponseWorkAdmission,
+  type ExecutionResult,
+  type InjectDeps,
+  type ObserveDeps,
+  type RouteOptions,
+} from "@helm/core";
 import {
   createNativePassthroughCarrier,
   type InternalRequest,
@@ -15,6 +21,7 @@ import {
   type PipelineBudgetDeps,
   PipelineError,
   type RouteFn,
+  splitSSEFrames,
 } from "./messages-pipeline.js";
 
 // messages-pipeline — the framework-agnostic bridge injected into both
@@ -677,6 +684,53 @@ function passthroughStreamResult(
 }
 
 describe("createMessagesPipeline — native passthrough streamIR()", () => {
+  it("rejects both terminated and unterminated native frames beyond the dynamic budget", async () => {
+    const frame = `data: ${"x".repeat(17)}`;
+    for (const oversized of [frame, `${frame}\n\n`]) {
+      async function* stream(): AsyncIterable<string> {
+        yield oversized;
+      }
+
+      await expect(
+        (async () => {
+          for await (const _ of splitSSEFrames(stream(), 16)) {
+            // drain
+          }
+        })(),
+      ).rejects.toMatchObject({
+        name: "UpstreamError",
+        errorClass: "upstream_error",
+        upstreamStatus: null,
+      });
+    }
+  });
+
+  it("shares response-work capacity while a native frame is being consumed", async () => {
+    const wire = "data: one\n\n";
+    const admission = createResponseWorkAdmission({
+      capacityBytes: Buffer.byteLength(wire) * 2,
+      jsonAmplification: 2,
+      minChargeBytes: 2,
+    });
+    async function* stream(): AsyncIterable<string> {
+      yield wire;
+    }
+    const first = splitSSEFrames(stream(), 64, admission)[Symbol.asyncIterator]();
+
+    await expect(first.next()).resolves.toMatchObject({ done: false, value: { data: "one" } });
+    expect(admission.reservedBytes).toBe(Buffer.byteLength(wire) * 2);
+    await expect(
+      (async () => {
+        for await (const _ of splitSSEFrames(stream(), 64, admission)) {
+          // drain
+        }
+      })(),
+    ).rejects.toMatchObject({ name: "UpstreamError", errorClass: "upstream_error" });
+
+    await first.return?.();
+    expect(admission.reservedBytes).toBe(0);
+  });
+
   it("byte-relays the upstream SSE: yields {event,data} with the VERBATIM data string", async () => {
     const route: RouteFn = async () => passthroughStreamResult();
     const pipeline = createMessagesPipeline(route);
@@ -2069,9 +2123,14 @@ describe("createMessagesPipeline — recordOAuthUsage (lines 960-963, 917-920)",
 describe("createMessagesPipeline — writes queue (line 635-641)", () => {
   it("enqueues memory tasks onto the write queue instead of inline-awaiting", async () => {
     const tasks: Array<() => Promise<void>> = [];
+    const options: Array<{ wakeOnSettle?: boolean; retainedBytes?: number }> = [];
     const writes = {
-      enqueueTask: (task: () => Promise<void>, _opts?: { wakeOnSettle?: boolean }) => {
+      enqueueTask: (
+        task: () => Promise<void>,
+        opts?: { wakeOnSettle?: boolean; retainedBytes?: number },
+      ) => {
         tasks.push(task);
+        options.push(opts ?? {});
       },
       depth: 0,
     } as never;
@@ -2097,6 +2156,7 @@ describe("createMessagesPipeline — writes queue (line 635-641)", () => {
     await run.collect();
     // With write queue wired, tasks are enqueued (not awaited inline)
     expect(tasks.length).toBeGreaterThan(0);
+    expect(options.every((opts) => (opts.retainedBytes ?? 0) > 0)).toBe(true);
   });
 });
 

@@ -12,6 +12,7 @@ import { type InternalRequest, makeHelmError } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
 import { authMiddleware } from "../middleware/auth.js";
+import { createBodyMemoryAdmission } from "../runtime/memory-admission.js";
 import { createWriteQueue } from "../runtime/write-queue.js";
 import { type ChatRouteDeps, registerChatRoutes } from "./chat.js";
 
@@ -164,6 +165,51 @@ const BUDGET_RECORD: Partial<ApiKeyRecord> = {
 };
 
 describe("POST /v1/chat/completions — usage budgets + OAuth usage + eval overrides", () => {
+  it.each([
+    "/v1/chat/completions",
+    "/chat/completions",
+    "/engines/azure-deployment/chat/completions",
+    "/openai/deployments/azure-deployment/chat/completions",
+  ])("rejects an oversized body before JSON.parse on %s", async (path) => {
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 1024,
+      maxWireBytes: 1,
+      jsonAmplification: 1,
+    });
+    const { deps: d, harness } = deps({ memoryAdmission });
+    const app = buildApp(d);
+
+    const res = await app.request(path, {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(NONSTREAM_BODY),
+    });
+
+    expect(res.status).toBe(413);
+    expect(harness.execute).not.toHaveBeenCalled();
+    expect(memoryAdmission.reservedBytes).toBe(0);
+  });
+
+  it("returns 503 with Retry-After when the shared body budget is occupied", async () => {
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 1,
+      maxWireBytes: 1024,
+      jsonAmplification: 1,
+    });
+    const { deps: d, harness } = deps({ memoryAdmission });
+    const app = buildApp(d);
+
+    const res = await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(NONSTREAM_BODY),
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("retry-after")).toBe("1");
+    expect(harness.execute).not.toHaveBeenCalled();
+  });
+
   it("rejects an over-budget request with 429 before routing (behavior=reject)", async () => {
     const budgetGate = {
       check: vi.fn(async () => ({

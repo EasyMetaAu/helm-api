@@ -10,6 +10,12 @@ import type { AppEnv } from "../app.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
+import {
+  type BodyMemoryAdmission,
+  memoryAdmissionReleaseGuard,
+  RequestAdmissionError,
+  readAdmittedRequestBody,
+} from "../runtime/memory-admission.js";
 import { stampServingAccount } from "../runtime/serving-account.js";
 import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.js";
 import { resolveMemoryScope } from "./memory-scope.js";
@@ -18,9 +24,11 @@ import { PipelineError } from "./messages-pipeline.js";
 import { nativeCarrierFromParsedBody } from "./native-carrier.js";
 import {
   captureEnabled,
+  createSseCapture,
   type RecordServedDeps,
   recordServed,
   sessionCaptureEnabled,
+  withSseCaptureRelease,
 } from "./payload-capture.js";
 import { resolveSessionCapture, stampSessionCapture } from "./session-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
@@ -67,6 +75,8 @@ interface GeminiIRLike {
 }
 
 export interface GeminiRouteDeps {
+  /** Machine-derived request-body budget shared by every AI ingress surface. */
+  memoryAdmission?: BodyMemoryAdmission;
   rateLimiter?: GeminiRateLimiterPort;
   /** Per-key concurrency overflow queue (issue #93) — the SAME process-wide gate
    *  as the chat middleware. Optional — omitted = no gating. */
@@ -148,11 +158,26 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
     const out = transformer.transformErrorOut(err);
     return c.json(out.body as Record<string, unknown>, out.status as 400 | 401 | 404 | 429 | 502);
   };
+  const sendAdmissionError = (c: Context<AppEnv>, error: RequestAdmissionError): Response => {
+    if (error.status === 503) c.header("retry-after", "1");
+    const out = transformer.transformErrorOut({
+      error_class: error.status === 413 ? "invalid_request" : "lane_unavailable",
+      message: error.message,
+      trace_id: c.get("trace_id"),
+    });
+    const body = out.body as { error?: Record<string, unknown> };
+    return c.json(
+      body.error === undefined ? body : { ...body, error: { ...body.error, code: error.status } },
+      error.status as 413 | 503,
+    );
+  };
 
   // Frees an unclaimed concurrency lease on every exit path (the handler below
   // acquires AFTER its self-auth).
   app.use("/v1beta/models/*", concurrencyReleaseGuard());
   app.use("/models/*", concurrencyReleaseGuard());
+  app.use("/v1beta/models/*", memoryAdmissionReleaseGuard());
+  app.use("/models/*", memoryAdmissionReleaseGuard());
 
   // Hono cannot match the literal ':' in `{model}:generateContent` with a named
   // param, so we mount catch-alls under both Gemini path families and hand the
@@ -255,9 +280,15 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
       let requestJson = "";
       let native: unknown;
       try {
-        requestJson = await c.req.text();
+        const admitted =
+          deps.memoryAdmission === undefined
+            ? null
+            : await readAdmittedRequestBody(c.req.raw, deps.memoryAdmission);
+        requestJson = admitted?.text ?? (await c.req.text());
+        if (admitted !== null) c.set("requestMemoryRelease", admitted.release);
         native = JSON.parse(requestJson);
-      } catch {
+      } catch (error) {
+        if (error instanceof RequestAdmissionError) return sendAdmissionError(c, error);
         return sendError(c, {
           error_class: "invalid_request",
           message: "malformed JSON request body",
@@ -294,9 +325,15 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
     let requestJson = "";
     let native: unknown;
     try {
-      requestJson = await c.req.text();
+      const admitted =
+        deps.memoryAdmission === undefined
+          ? null
+          : await readAdmittedRequestBody(c.req.raw, deps.memoryAdmission);
+      requestJson = admitted?.text ?? (await c.req.text());
+      if (admitted !== null) c.set("requestMemoryRelease", admitted.release);
       native = JSON.parse(requestJson);
-    } catch {
+    } catch (error) {
+      if (error instanceof RequestAdmissionError) return sendAdmissionError(c, error);
       return sendError(c, {
         error_class: "invalid_request",
         message: "malformed JSON request body",
@@ -379,11 +416,13 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
       // body fully drains — release in the stream's own finally, not the guard.
       const releaseConcurrency = c.get("concurrencyRelease");
       c.set("concurrencyRelease", undefined);
+      const releaseRequestMemory = c.get("requestMemoryRelease");
+      c.set("requestMemoryRelease", undefined);
       return streamSSE(c, async (sse) => {
         // Accumulate the serialized wire frames so the served response body can be
         // captured (verbatim) alongside the telemetry row in the finally below.
         // Gemini frames are nameless `data:` frames (no `event:` name, no [DONE]).
-        const captured: string[] = [];
+        const captured = captureBodies ? createSseCapture(true) : null;
         // SSE keep-alive: emit a `:` comment during inter-chunk idle (wire-only, never
         // captured) so a proxy/client idle-timeout does not sever a long healthy stream.
         // Gemini frames are whole `data:` frames (writeSSE) → always at a boundary.
@@ -403,18 +442,18 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
             if (result.nativePassthrough === true) {
               const frame = snapshot as { data?: unknown; raw?: unknown };
               if (typeof frame.raw === "string") {
-                if (captureBodies) captured.push(frame.raw);
+                captured?.push(frame.raw);
                 await sse.write(frame.raw);
                 lastWrite = frame.raw; // verbatim bytes may end mid-frame
               } else {
                 const data = typeof frame.data === "string" ? frame.data : JSON.stringify(snapshot);
-                if (captureBodies) captured.push(`data: ${data}\n\n`);
+                captured?.push(`data: ${data}\n\n`);
                 await sse.writeSSE({ data });
                 lastWrite = "\n\n";
               }
             } else {
               const data = JSON.stringify(snapshot);
-              if (captureBodies) captured.push(`data: ${data}\n\n`);
+              captured?.push(`data: ${data}\n\n`);
               await sse.writeSSE({ data });
               lastWrite = "\n\n"; // writeSSE emits a complete frame — always a boundary
             }
@@ -435,31 +474,40 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
                   };
             const out = transformer.transformErrorOut(re);
             const data = JSON.stringify(out.body);
-            if (captureBodies) captured.push(`data: ${data}\n\n`);
+            captured?.push(`data: ${data}\n\n`);
             await sse.writeSSE({ data });
           }
         } finally {
           releaseConcurrency?.();
-          // Record AFTER releaseConcurrency (never extend the hold) and AFTER the
-          // for-await loop ended so the pipeline's own streamIR finally (cost
-          // backfill) already mutated result.decision. result.decision exists even
-          // on a pre-stream failure, so a failed stream still records. Fail-open.
-          if (deps.record) {
-            stampServingAccount(result.decision, result.servingAccount ?? null);
-            await recordServed(
-              deps.record,
-              {
-                requestId,
-                accountId: identity.accountId,
-                apiKeyId: identity.keyId,
-                decision: result.decision,
-                requestJson,
-                responseJson: captureBodies ? captured.join("") : null,
-                timedOut: requestTimedOut(c),
-                upstreamRequestJson: result.upstreamRequest ?? null,
-              },
-              (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
-            );
+          try {
+            await withSseCaptureRelease(captured, async () => {
+              // Record AFTER releaseConcurrency (never extend the hold) and AFTER the
+              // for-await loop ended so the pipeline's own streamIR finally (cost
+              // backfill) already mutated result.decision. result.decision exists even
+              // on a pre-stream failure, so a failed stream still records. Fail-open.
+              if (deps.record) {
+                stampServingAccount(result.decision, result.servingAccount ?? null);
+                if (captured?.limited()) {
+                  c.get("logger").log("warn", "payload.capture_limited", { trace_id: traceId });
+                }
+                await recordServed(
+                  deps.record,
+                  {
+                    requestId,
+                    accountId: identity.accountId,
+                    apiKeyId: identity.keyId,
+                    decision: result.decision,
+                    requestJson,
+                    responseJson: captured?.payloadValue() ?? null,
+                    timedOut: requestTimedOut(c),
+                    upstreamRequestJson: result.upstreamRequest ?? null,
+                  },
+                  (msg) => c.get("logger").log("warn", msg, { trace_id: traceId }),
+                );
+              }
+            });
+          } finally {
+            releaseRequestMemory?.();
           }
         }
       });

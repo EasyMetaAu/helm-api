@@ -13,6 +13,8 @@ import type {
   RequestPayloadPart,
   RequestPayloadPartRecord,
   SessionRecord,
+  SessionRevisionPage,
+  SessionRevisionPageOptions,
   SessionRevisionRecord,
   TelemetryAggregate,
   TelemetryArchiveRow,
@@ -22,7 +24,7 @@ import type {
   TelemetryStore,
   UpsertSessionRevisionInput,
 } from "../ports.js";
-import { SESSION_MAX_REVISIONS, SESSION_MAX_STORED_BYTES } from "../ports.js";
+import { PERSISTED_SESSION_MAX_REVISIONS, PERSISTED_SESSION_MAX_STORED_BYTES } from "../ports.js";
 import { likeContains } from "../sql-like.js";
 import { denormalizedDecisionCost } from "../telemetry-cost.js";
 import type { PgDb } from "./migrate.js";
@@ -40,6 +42,19 @@ const BLOB_SHA_RE = /helm-blob:sha256:([0-9a-f]{64})/g;
 type PgWriter = Pick<PgDb, "insert">;
 
 type TelemetryRow = typeof telemetry.$inferSelect;
+
+function boundedSessionPageLimit(options: SessionRevisionPageOptions): number {
+  if (!Number.isSafeInteger(options.limit) || options.limit <= 0)
+    throw new Error("session revision page limit must be a positive integer");
+  if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 0)
+    throw new Error("session revision page maxBytes must be a non-negative integer");
+  if (
+    options.afterSequence !== undefined &&
+    (!Number.isSafeInteger(options.afterSequence) || options.afterSequence < 0)
+  )
+    throw new Error("session revision page cursor must be a non-negative integer");
+  return Math.min(options.limit, 500);
+}
 
 // Postgres adapter for the TelemetryStore port — the supabase implementation.
 // Same contract as SqliteTelemetryStore, but async and storing the redacted
@@ -141,7 +156,7 @@ export class PgTelemetryStore implements TelemetryStore {
             ? Buffer.byteLength(input.responseJson, "utf8")
             : 0;
         if (responseBytes === 0) return;
-        if (lockedSession.storedBytes + responseBytes > SESSION_MAX_STORED_BYTES)
+        if (lockedSession.storedBytes + responseBytes > PERSISTED_SESSION_MAX_STORED_BYTES)
           throw new Error("session capture limit exceeded");
         await tx
           .update(sessions)
@@ -182,8 +197,8 @@ export class PgTelemetryStore implements TelemetryStore {
         .where(
           and(
             eq(sessions.sessionRef, input.sessionRef),
-            lt(sessions.revisionCount, SESSION_MAX_REVISIONS),
-            sql`${sessions.storedBytes} + ${storedBytes} <= ${SESSION_MAX_STORED_BYTES}`,
+            lt(sessions.revisionCount, PERSISTED_SESSION_MAX_REVISIONS),
+            sql`${sessions.storedBytes} + ${storedBytes} <= ${PERSISTED_SESSION_MAX_STORED_BYTES}`,
           ),
         )
         .returning();
@@ -258,6 +273,61 @@ export class PgTelemetryStore implements TelemetryStore {
       ...row,
       createdAt: new Date(row.createdAt),
     }));
+  }
+
+  async listSessionRevisionsPage(
+    sessionRef: string,
+    options: SessionRevisionPageOptions,
+  ): Promise<SessionRevisionPage> {
+    const limit = boundedSessionPageLimit(options);
+    const afterSequence = options.afterSequence ?? 0;
+    const rowBytes = sql<number>`
+      octet_length(${sessionRevisions.sessionRef}) +
+      octet_length(${sessionRevisions.requestId}) +
+      octet_length(coalesce(${sessionRevisions.parentRequestId}, '')) +
+      octet_length(${sessionRevisions.requestDeltaJson}) +
+      octet_length(${sessionRevisions.requestEnvelopeJson}) +
+      octet_length(coalesce(${sessionRevisions.responseId}, '')) +
+      octet_length(coalesce(${sessionRevisions.responseJson}, '')) +
+      octet_length(${sessionRevisions.fidelity}) + 64
+    `;
+    const metadata = await this.db
+      .select({ sequence: sessionRevisions.sequence, bytes: rowBytes })
+      .from(sessionRevisions)
+      .where(
+        and(
+          eq(sessionRevisions.sessionRef, sessionRef),
+          gt(sessionRevisions.sequence, afterSequence),
+        ),
+      )
+      .orderBy(asc(sessionRevisions.sequence))
+      .limit(limit + 1);
+    const selected: number[] = [];
+    let usedBytes = 0;
+    for (const row of metadata.slice(0, limit)) {
+      const bytes = Number(row.bytes);
+      if (!Number.isSafeInteger(bytes) || bytes < 0 || usedBytes + bytes > options.maxBytes) {
+        return { revisions: [], nextSequence: null, limited: true };
+      }
+      selected.push(row.sequence);
+      usedBytes += bytes;
+    }
+    if (selected.length === 0) return { revisions: [], nextSequence: null, limited: false };
+    const rows = await this.db
+      .select()
+      .from(sessionRevisions)
+      .where(
+        and(
+          eq(sessionRevisions.sessionRef, sessionRef),
+          inArray(sessionRevisions.sequence, selected),
+        ),
+      )
+      .orderBy(asc(sessionRevisions.sequence));
+    return {
+      revisions: rows.map((row) => ({ ...row, createdAt: new Date(row.createdAt) })),
+      nextSequence: metadata.length > selected.length ? (selected.at(-1) ?? null) : null,
+      limited: false,
+    };
   }
 
   async getSessionRevisionByResponseId(

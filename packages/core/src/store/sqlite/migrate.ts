@@ -7,6 +7,7 @@ import {
   quarantinedMalformedJobThreadId,
   quarantinedRawThreadId,
 } from "../../memory/thread-scope.js";
+import { runtimeMemoryBudget } from "../../runtime/memory-budget.js";
 import * as schema from "./schema.js";
 
 type Schema = typeof schema;
@@ -1259,15 +1260,14 @@ function applyMigrations(db: Database.Database): void {
 //                        instantly (defensive: migrations + the runtime handle can
 //                        briefly contend the same file).
 //   - temp_store=MEMORY  keep transient B-trees/sorts in RAM, off the disk path.
-//   - cache_size=-65536  64MiB page cache (negative => KiB) for hot indexes. This
-//                        remains conservative on the supported small self-hosted
-//                        machines while avoiding needless cold-page churn.
+//   - cache_size         page cache scaled from the process memory constraint.
 function applyPragmas(sqlite: Database.Database): void {
+  const cacheKiB = Math.max(1, Math.floor(runtimeMemoryBudget().sqlitePageCacheBytes / 1024));
   sqlite.pragma("journal_mode = WAL");
   sqlite.pragma("synchronous = NORMAL");
   sqlite.pragma("busy_timeout = 5000");
   sqlite.pragma("temp_store = MEMORY");
-  sqlite.pragma("cache_size = -65536");
+  sqlite.pragma(`cache_size = -${cacheKiB}`);
 }
 
 // docs/14 — load the sqlite-vec extension on a connection so the vec0 virtual table

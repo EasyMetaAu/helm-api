@@ -3,6 +3,7 @@ import { UpstreamError } from "@helm/core";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../app.js";
+import { createBodyMemoryAdmission } from "../runtime/memory-admission.js";
 import { type InteractionsRouteDeps, registerInteractionsRoute } from "./interactions.js";
 import type { MessagesIdentity } from "./messages.js";
 import type { RecordServedDeps } from "./payload-capture.js";
@@ -183,6 +184,75 @@ describe("registerInteractionsRoute", () => {
     expect(res.status).toBe(200);
     expect(json.id).toBe("int_server-request-123");
     expect(json.id).not.toBe("int_client-controlled-trace");
+  });
+
+  it("rejects an over-capacity body before JSON parsing and releases its lease", async () => {
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 60,
+      maxWireBytes: 10,
+      jsonAmplification: 6,
+    });
+    const { app, nativePassthrough } = setup({ memoryAdmission });
+
+    const res = await post(app, { model: "gemini-3.1-flash-image", input: "a red apple" });
+
+    expect(res.status).toBe(413);
+    expect((await res.json()) as unknown).toMatchObject({
+      error: { status: "INVALID_ARGUMENT" },
+    });
+    expect(nativePassthrough).not.toHaveBeenCalled();
+    expect(memoryAdmission.reservedBytes).toBe(0);
+  });
+
+  it("returns a Gemini 503 with Retry-After when runtime request capacity is busy", async () => {
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 1,
+      maxWireBytes: 1000,
+      jsonAmplification: 1,
+    });
+    const { app, nativePassthrough } = setup({ memoryAdmission });
+
+    const res = await post(app, { model: "gemini-3.1-flash-image", input: "a red apple" });
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("retry-after")).toBe("1");
+    expect((await res.json()) as unknown).toMatchObject({
+      error: { status: "UNAVAILABLE" },
+    });
+    expect(nativePassthrough).not.toHaveBeenCalled();
+    expect(memoryAdmission.reservedBytes).toBe(0);
+  });
+
+  it("releases its memory lease after a successful interactions request", async () => {
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 1000,
+      maxWireBytes: 1000,
+      jsonAmplification: 1,
+    });
+    const { app } = setup({ memoryAdmission });
+
+    expect(
+      (await post(app, { model: "gemini-3.1-flash-image", input: "a red apple" })).status,
+    ).toBe(200);
+    expect(memoryAdmission.reservedBytes).toBe(0);
+  });
+
+  it("releases its memory lease when interactions JSON is malformed", async () => {
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 1000,
+      maxWireBytes: 1000,
+      jsonAmplification: 1,
+    });
+    const { app } = setup({ memoryAdmission });
+
+    const res = await app.request("/v1beta/interactions", {
+      method: "POST",
+      headers: { "x-goog-api-key": "k", "Content-Type": "application/json" },
+      body: "{",
+    });
+
+    expect(res.status).toBe(400);
+    expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
   it("translates an array input with text + image blocks into generateContent parts", async () => {

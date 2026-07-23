@@ -88,6 +88,7 @@ async function main(): Promise<void> {
         fetch: (request) => handle.app.fetch(request),
         closeSession: next.closeResponsesWebSocketSession,
         sessionProof: next.responsesWebSocketSessionProof,
+        memoryAdmission: next.responsesMemoryAdmission,
       });
     };
 

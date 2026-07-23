@@ -19,12 +19,19 @@ export type {
   RateLimitStore,
   RequestPayload,
   SessionRecord,
+  SessionRevisionPage,
+  SessionRevisionPageOptions,
   SessionRevisionRecord,
   SignalStore,
   TelemetryStore,
   UpsertSessionRevisionInput,
 } from "./ports.js";
-export { SESSION_MAX_REVISIONS, SESSION_MAX_STORED_BYTES } from "./ports.js";
+export {
+  PERSISTED_SESSION_MAX_REVISIONS,
+  PERSISTED_SESSION_MAX_STORED_BYTES,
+  SESSION_MAX_REVISIONS,
+  SESSION_MAX_STORED_BYTES,
+} from "./ports.js";
 // Postgres (supabase) adapters + migration helpers. supabase == hosted Postgres,
 // reached via postgres-js; the same adapters run against in-process PGlite in
 // tests (drizzle pg dialect), validating the supabase path without a server.

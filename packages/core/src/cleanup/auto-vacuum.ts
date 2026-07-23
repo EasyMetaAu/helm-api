@@ -1,5 +1,5 @@
-// Pure decision for the off-hours auto-VACUUM scheduler. The gateway runs a plain
-// hourly tick (mirroring the cleanup scheduler); each tick this answers "should I
+// Pure decision for the off-hours auto-VACUUM scheduler. The gateway checks more
+// than once during the selected hour so a failed preflight can retry; each tick asks "should I
 // VACUUM right now?" from the live settings + the wall clock. Kept pure (no Date, no
 // store) so the once-a-day, right-hour, opt-in logic is unit-testable: the tick
 // supplies the clock (currentHour/todayKey) and remembers lastRunDayKey across ticks.
@@ -10,6 +10,8 @@
 //   - not the configured hour → wait (the operator picks a low-traffic local hour);
 //   - already ran today       → skip (at most once per day, even if the hour ticks
 //                               twice from setInterval drift).
+export const AUTO_VACUUM_CHECK_INTERVAL_MS = 10 * 60 * 1_000;
+
 export function shouldAutoVacuum(args: {
   enabled: boolean;
   vacuumHour: number;
@@ -20,4 +22,20 @@ export function shouldAutoVacuum(args: {
   if (!args.enabled) return false;
   if (args.currentHour !== args.vacuumHour) return false;
   return args.lastRunDayKey !== args.todayKey;
+}
+
+export function createAutoVacuumRunner() {
+  let lastSuccessfulDayKey: string | null = null;
+
+  return {
+    async run(
+      args: Omit<Parameters<typeof shouldAutoVacuum>[0], "lastRunDayKey">,
+      maintenance: () => Promise<void>,
+    ): Promise<boolean> {
+      if (!shouldAutoVacuum({ ...args, lastRunDayKey: lastSuccessfulDayKey })) return false;
+      await maintenance();
+      lastSuccessfulDayKey = args.todayKey;
+      return true;
+    },
+  };
 }

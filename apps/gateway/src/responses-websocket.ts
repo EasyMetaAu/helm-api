@@ -1,10 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { type IncomingMessage, STATUS_CODES } from "node:http";
 import type { Duplex } from "node:stream";
-import { CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER, readSSE } from "@helm/core";
+import { CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER, readSSE, runtimeMemoryBudget } from "@helm/core";
 import WebSocket, { WebSocketServer } from "ws";
 import { normalizeOpenAICodexClientVersion } from "./oauth/codex-client-version.js";
 import { CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER } from "./responses-websocket-internal.js";
+import {
+  type BodyMemoryAdmission,
+  createBodyMemoryAdmission,
+  RequestAdmissionError,
+} from "./runtime/memory-admission.js";
 
 const RESPONSES_WEBSOCKET_PATHS = new Set(["/v1/responses", "/responses", "/openai/v1/responses"]);
 
@@ -43,6 +48,9 @@ export interface ResponsesWebSocketBridgeOptions {
   fetch: AppFetch;
   closeSession?: (sessionId: string) => void | Promise<void>;
   sessionProof?: string;
+  memoryAdmission?: BodyMemoryAdmission;
+  /** Optional test/embedding override for bytes retained by `ws` before `message`. */
+  ingressAdmission?: BodyMemoryAdmission;
 }
 
 export interface ResponsesWebSocketUpgradeServer {
@@ -221,6 +229,19 @@ async function responseErrorEnvelope(response: Response): Promise<Record<string,
 }
 
 function localErrorEnvelope(error: unknown): Record<string, unknown> {
+  if (error instanceof RequestAdmissionError) {
+    return {
+      type: "error",
+      status: error.status,
+      status_code: error.status,
+      error: {
+        type: error.status === 413 ? "invalid_request_error" : "server_error",
+        code: error.code,
+        message: error.message,
+      },
+      headers: error.status === 503 ? { "retry-after": "1" } : {},
+    };
+  }
   if (error instanceof WebSocketRequestError) {
     return {
       type: "error",
@@ -320,6 +341,7 @@ async function forwardResponse(
 
   let terminalType: unknown;
   for await (const frame of readSSE(body)) {
+    if (terminalType !== undefined) continue;
     const payload = websocketPayload(frame.event, frame.data);
     if (payload === null) continue;
     await sendText(socket, payload);
@@ -336,11 +358,9 @@ async function forwardResponse(
       type === "error"
     ) {
       terminalType = type;
-      break;
     }
   }
   if (terminalType !== undefined) {
-    void body.cancel().catch(() => {});
     return terminalType !== "response.completed";
   }
   if (!signal.aborted) {
@@ -387,11 +407,13 @@ async function rejectUpgrade(socket: Duplex, response: Response): Promise<void> 
   const payload =
     body.length > 0 ? body : JSON.stringify({ error: { message: "upgrade rejected" } });
   const statusText = STATUS_CODES[response.status] ?? "Error";
+  const retryAfter = response.headers.get("retry-after");
   socket.end(
     [
       `HTTP/1.1 ${response.status} ${statusText}`,
       "Connection: close",
       "Content-Type: application/json",
+      ...(retryAfter === null ? [] : [`Retry-After: ${retryAfter}`]),
       `Content-Length: ${Buffer.byteLength(payload)}`,
       "",
       payload,
@@ -404,12 +426,39 @@ export function installResponsesWebSocketBridge({
   fetch,
   closeSession,
   sessionProof,
+  memoryAdmission,
+  ingressAdmission,
 }: ResponsesWebSocketBridgeOptions): ResponsesWebSocketBridge {
+  const memoryBudget = runtimeMemoryBudget();
+  const admission =
+    memoryAdmission ??
+    createBodyMemoryAdmission({
+      activeRequestBytes: memoryBudget.activeRequestBytes,
+      maxWireBytes: memoryBudget.maxWireBytes,
+      jsonAmplification: memoryBudget.jsonAmplification,
+    });
+  const ingress =
+    ingressAdmission ??
+    createBodyMemoryAdmission({
+      activeRequestBytes: memoryBudget.websocketIngressBytes,
+      maxWireBytes: Math.min(admission.maxWireBytes, memoryBudget.websocketMaxPayloadBytes),
+      jsonAmplification: 1,
+      // Reserve one whole permitted frame before `ws` can inflate/materialize it.
+      // A one-byte charge makes true zero-headroom budgets reject every upgrade.
+      minRequestChargeBytes: Math.max(
+        1,
+        Math.min(admission.maxWireBytes, memoryBudget.websocketMaxPayloadBytes),
+      ),
+    });
+  const websocketMaxPayloadBytes = Math.max(
+    1,
+    Math.min(admission.maxWireBytes, ingress.maxWireBytes),
+  );
   const metadataByRequest = new WeakMap<IncomingMessage, UpgradeMetadata>();
   const websocketServer = new WebSocketServer({
     noServer: true,
-    perMessageDeflate: true,
-    maxPayload: 64 * 1024 * 1024,
+    perMessageDeflate: false,
+    maxPayload: websocketMaxPayloadBytes,
   });
   let closed = false;
 
@@ -423,7 +472,7 @@ export function installResponsesWebSocketBridge({
     const controller = new AbortController();
     const sessionId = randomUUID();
     let sessionClosed = false;
-    let pending = Promise.resolve();
+    let processing = false;
     const closeUpstreamSession = async () => {
       await Promise.resolve(closeSession?.(sessionId)).catch(() => {});
     };
@@ -436,8 +485,37 @@ export function installResponsesWebSocketBridge({
     socket.on("close", abort);
     socket.on("error", abort);
     socket.on("message", (data) => {
-      pending = pending
-        .then(async () => {
+      if (processing) {
+        socket.close(1008, "one active response per connection");
+        return;
+      }
+      const bytes = Array.isArray(data)
+        ? data.reduce((total, chunk) => total + chunk.byteLength, 0)
+        : data.byteLength;
+      const acquired = admission.acquire(bytes);
+      if (!acquired.ok) {
+        const error =
+          acquired.reason === "too_large"
+            ? new RequestAdmissionError(
+                413,
+                "request_too_large",
+                `websocket message exceeds the runtime capacity limit of ${admission.maxWireBytes} bytes`,
+              )
+            : new RequestAdmissionError(
+                503,
+                "server_overloaded",
+                "request memory capacity is temporarily exhausted",
+              );
+        void sendEnvelope(socket, localErrorEnvelope(error))
+          .catch(() => {})
+          .finally(() => {
+            if (error.status === 413) socket.close(1009, "message too big");
+          });
+        return;
+      }
+      processing = true;
+      void (async () => {
+        try {
           const invalidatesSession = await forwardResponse(
             socket,
             request,
@@ -448,12 +526,15 @@ export function installResponsesWebSocketBridge({
             sessionProof,
           );
           if (invalidatesSession) await closeUpstreamSession();
-        })
-        .catch(async (error: unknown) => {
+        } catch (error) {
           if (controller.signal.aborted || socket.readyState !== WebSocket.OPEN) return;
-          await sendEnvelope(socket, localErrorEnvelope(error));
+          await sendEnvelope(socket, localErrorEnvelope(error)).catch(() => {});
           await closeUpstreamSession();
-        });
+        } finally {
+          processing = false;
+          acquired.lease.release();
+        }
+      })();
     });
   });
 
@@ -462,10 +543,35 @@ export function installResponsesWebSocketBridge({
       socket.destroy();
       return;
     }
+    const ingressLease = ingress.acquire(0);
+    if (!ingressLease.ok) {
+      const error = new RequestAdmissionError(
+        503,
+        "server_overloaded",
+        "websocket ingress memory capacity is temporarily exhausted",
+      );
+      const onRejectedSocketError = () => socket.destroy();
+      socket.once("error", onRejectedSocketError);
+      void rejectUpgrade(
+        socket,
+        new Response(JSON.stringify(localErrorEnvelope(error)), {
+          status: error.status,
+          headers: { "content-type": "application/json", "retry-after": "1" },
+        }),
+      )
+        .catch(() => socket.destroy())
+        .finally(() => socket.off("error", onRejectedSocketError));
+      return;
+    }
+    let handedOff = false;
+    const releaseIngress = ingressLease.lease.release;
     const onPreflightSocketError = () => {
+      releaseIngress();
       socket.destroy();
     };
+    const onPreflightSocketClose = () => releaseIngress();
     socket.on("error", onPreflightSocketError);
+    socket.once("close", onPreflightSocketClose);
     void preflightUpgrade(request, fetch)
       .then(async ({ response, metadata }) => {
         if (closed || socket.destroyed) {
@@ -478,6 +584,9 @@ export function installResponsesWebSocketBridge({
         }
         metadataByRequest.set(request, metadata);
         websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+          handedOff = true;
+          websocket.once("close", releaseIngress);
+          websocket.once("error", releaseIngress);
           websocketServer.emit("connection", websocket, request);
         });
       })
@@ -498,6 +607,8 @@ export function installResponsesWebSocketBridge({
       })
       .finally(() => {
         socket.off("error", onPreflightSocketError);
+        socket.off("close", onPreflightSocketClose);
+        if (!handedOff) releaseIngress();
       });
   };
   server.on("upgrade", onUpgrade);

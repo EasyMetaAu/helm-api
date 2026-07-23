@@ -9,6 +9,9 @@ services:
     #     HELM_GIT_SHA: ${HELM_GIT_SHA:-dev}
     #     HELM_BUILT_AT: ${HELM_BUILT_AT:-dev}
     container_name: helm
+    # Let shutdown drain active streams, detached Store work, and an in-flight
+    # SQLite maintenance pass instead of Docker's short default SIGKILL window.
+    stop_grace_period: ${HELM_STOP_GRACE_PERIOD:-30m}
     env_file:
       - path: .env
         required: false

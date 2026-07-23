@@ -48,6 +48,11 @@ describe("docker-compose contract", () => {
     expect(compose).toContain("/healthz");
   });
 
+  it("gives graceful shutdown enough time to drain maintenance and queued writes", () => {
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: Docker Compose interpolation is literal.
+    expect(compose).toContain("stop_grace_period: ${HELM_STOP_GRACE_PERIOD:-30m}");
+  });
+
   it("declares a single service (no extra Redis/DB containers in MVP)", () => {
     const serviceCount = (compose.match(/^\s{2}\w[\w-]*:/gm) ?? []).length;
     expect(serviceCount).toBe(1);

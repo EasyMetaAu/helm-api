@@ -3,6 +3,8 @@ import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../../app.js";
 import { authMiddleware } from "../../middleware/auth.js";
+import { createTrackedBackgroundTasks } from "../../runtime/maintenance-gate.js";
+import type { McpDeps } from "./deps.js";
 import { registerMcpServer } from "./index.js";
 import {
   callMemoryTool,
@@ -192,6 +194,55 @@ describe("memory MCP tools (docs/13)", () => {
     expect(got?.referenceCount).toBe(1);
   });
 
+  it("registers the recall reference bump so maintenance waits for it", async () => {
+    const { ctxFor, store } = harness();
+    const background = createTrackedBackgroundTasks();
+    const runInBackground = vi.fn(background.run);
+    const ctx = ctxFor("a", null, { runInBackground });
+    await callMemoryTool(
+      "memory_add",
+      { type: "fact", text: "maintenance-safe recall", subject: "runtime" },
+      ctx,
+    );
+    let finishBump = () => {};
+    store.bumpReferences = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishBump = resolve;
+        }),
+    );
+
+    await callMemoryTool("memory_recall", { query: "maintenance-safe" }, ctx);
+    expect(runInBackground).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(store.bumpReferences).toHaveBeenCalledOnce());
+    let paused = false;
+    const waiting = background.pauseAndWait().then(() => {
+      paused = true;
+    });
+    await Promise.resolve();
+    expect(paused).toBe(false);
+
+    finishBump();
+    await waiting;
+    expect(paused).toBe(true);
+  });
+
+  it("keeps recall fail-open without writing when maintenance rejects the bump", async () => {
+    const { ctxFor, store } = harness();
+    const ctx = ctxFor("a", null, { runInBackground: () => false });
+    await callMemoryTool(
+      "memory_add",
+      { type: "fact", text: "reject unsafe background write", subject: "runtime" },
+      ctx,
+    );
+    store.bumpReferences = vi.fn(async () => {});
+
+    const result = await callMemoryTool("memory_recall", { query: "unsafe background" }, ctx);
+
+    expect(result.isError).toBeFalsy();
+    expect(store.bumpReferences).not.toHaveBeenCalled();
+  });
+
   it("memory_add(reflection) returns id + version", async () => {
     const { ctxFor } = harness();
     const res = parse(
@@ -296,7 +347,13 @@ describe("memory MCP tools (docs/13)", () => {
 
 // ---- route / JSON-RPC / auth -----------------------------------------------
 
-function mcpApp(rec: ApiKeyRecord | null) {
+function mcpApp(
+  rec: ApiKeyRecord | null,
+  runInBackground: McpDeps["runInBackground"] = (task) => {
+    void task();
+    return true;
+  },
+) {
   const db = createSqliteDb(":memory:");
   let seq = 0;
   const store = new SqliteMemoryStore(
@@ -313,6 +370,7 @@ function mcpApp(rec: ApiKeyRecord | null) {
     memoryStore: store,
     now: () => NOW,
     estimateTokens: (t) => Math.ceil(t.length / 4),
+    runInBackground,
     scoreConfig: {
       half_life_s: 86400,
       importance_floor: 0.1,
@@ -396,6 +454,29 @@ describe("POST /mcp JSON-RPC route (docs/13)", () => {
     ).json()) as { result: { content: Array<{ text: string }> } };
     const facts = JSON.parse(search.result.content[0]?.text ?? "{}") as { facts: unknown[] };
     expect(facts.facts).toHaveLength(1);
+  });
+
+  it("passes the runtime background runner to memory_recall", async () => {
+    const runInBackground = vi.fn((_task: () => Promise<unknown>) => true);
+    const app = mcpApp(record(), runInBackground);
+    await app.request(
+      "/mcp",
+      rpc("tools/call", {
+        name: "memory_add",
+        arguments: { type: "fact", text: "tracked route recall" },
+      }),
+    );
+
+    const response = await app.request(
+      "/mcp",
+      rpc("tools/call", {
+        name: "memory_recall",
+        arguments: { query: "tracked route" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(runInBackground).toHaveBeenCalledOnce();
   });
 
   it("returns 202 with no body for a notification", async () => {

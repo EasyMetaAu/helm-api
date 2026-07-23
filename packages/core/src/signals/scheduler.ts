@@ -21,7 +21,9 @@ export interface SignalSchedulerDeps {
 }
 
 export interface SignalSchedulerHandle {
-  stop(): void;
+  stop(): Promise<void>;
+  pauseAndWait(): Promise<void>;
+  resume(): void;
 }
 
 export function startSignalScheduler(deps: SignalSchedulerDeps): SignalSchedulerHandle {
@@ -29,9 +31,11 @@ export function startSignalScheduler(deps: SignalSchedulerDeps): SignalScheduler
   let prevTick = deps.now();
   let retryWindow: [number, number] | null = null;
   let inFlight = false;
+  let paused = false;
+  const idleWaiters: Array<() => void> = [];
 
   const timer = setInterval(() => {
-    if (inFlight) return;
+    if (paused || inFlight) return;
     const [windowStart, windowEnd] = retryWindow ?? [prevTick, deps.now()];
     inFlight = true;
     // Fire-and-forget; collect() is fail-open in normal operation, but the scheduler
@@ -58,6 +62,7 @@ export function startSignalScheduler(deps: SignalSchedulerDeps): SignalScheduler
       })
       .finally(() => {
         inFlight = false;
+        for (const resolve of idleWaiters.splice(0)) resolve();
       });
   }, deps.intervalMs);
 
@@ -65,8 +70,19 @@ export function startSignalScheduler(deps: SignalSchedulerDeps): SignalScheduler
   (timer as { unref?: () => void }).unref?.();
 
   return {
-    stop() {
+    async stop() {
       clearInterval(timer);
+      paused = true;
+      if (!inFlight) return;
+      await new Promise<void>((resolve) => idleWaiters.push(resolve));
+    },
+    async pauseAndWait() {
+      paused = true;
+      if (!inFlight) return;
+      await new Promise<void>((resolve) => idleWaiters.push(resolve));
+    },
+    resume() {
+      paused = false;
     },
   };
 }

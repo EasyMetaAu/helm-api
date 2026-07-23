@@ -264,7 +264,7 @@ describe("createWriteQueue", () => {
       log: (m) => logs.push(m),
       flushIntervalMs: 10_000,
       maxDepth: 10_000, // far out of reach
-      maxBytes: 1_000, // ~1KB budget: two 600B payloads must not both fit
+      maxBytes: 1_500, // one retained 600-char payload fits; two do not
       flushBytes: 10_000_000, // park eager byte-flush so we observe shedding, not flushing
     });
 
@@ -277,6 +277,30 @@ describe("createWriteQueue", () => {
     expect(logs.some((l) => l.includes("overflow"))).toBe(true);
   });
 
+  it("charges retained strings by worst-case V8 bytes instead of UTF-16 code units", async () => {
+    const sink = fakeSink();
+    const logs: string[] = [];
+    const q = createWriteQueue({
+      telemetry: sink,
+      log: (message) => logs.push(message),
+      flushIntervalMs: 10_000,
+      maxBytes: 10,
+      flushBytes: 10_000,
+    });
+
+    q.enqueuePayload({
+      requestId: "unicode",
+      requestJson: "😀😀😀",
+      responseJson: null,
+      upstreamRequestJson: null,
+      createdAt: new Date(0),
+    });
+    await q.flush();
+
+    expect(sink.payloadCalls).toHaveLength(0);
+    expect(logs).toContain("writequeue.overflow");
+  });
+
   it("on byte overflow, sheds PAYLOAD (debug) first and keeps TELEMETRY (audit)", async () => {
     const sink = fakeSink();
     const q = createWriteQueue({
@@ -284,7 +308,7 @@ describe("createWriteQueue", () => {
       log: () => {},
       flushIntervalMs: 10_000,
       maxDepth: 10_000,
-      maxBytes: 1_000,
+      maxBytes: 1_500,
       flushBytes: 10_000_000,
     });
 
@@ -309,7 +333,7 @@ describe("createWriteQueue", () => {
       log: () => {},
       flushIntervalMs: 10_000,
       maxDepth: 10_000,
-      maxBytes: 1_000,
+      maxBytes: 1_500,
       flushBytes: 10_000_000, // never byte-flush; force the budget to hold via shedding alone
     });
 
@@ -391,7 +415,7 @@ describe("createWriteQueue", () => {
       telemetry: sink,
       log: () => {},
       flushIntervalMs: 10_000,
-      maxBytes: 1_000,
+      maxBytes: 1_500,
     });
     q.enqueueSession(async () => {
       ran.push("session");
@@ -400,6 +424,73 @@ describe("createWriteQueue", () => {
     await q.flush();
     expect(ran).toEqual(["session"]);
     expect(q.depth).toBe(0);
+  });
+
+  it("charges retained task closures until they settle, then releases their dynamic budget", async () => {
+    const sink = fakeSink();
+    const logs: string[] = [];
+    let release!: () => void;
+    const blocker = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const q = createWriteQueue({
+      telemetry: sink,
+      log: (message) => logs.push(message),
+      flushIntervalMs: 10_000,
+      // The explicit budget keeps this test independent of the host memory limit.
+      // 100 wire bytes are charged at the runtime JSON-amplification multiplier.
+      maxBytes: 1_000,
+    });
+    const ran: string[] = [];
+
+    q.enqueueTask(
+      async () => {
+        await blocker;
+        ran.push("first");
+      },
+      { retainedBytes: 100 },
+    );
+    await Promise.resolve(); // let the first task become active
+    q.enqueueTask(
+      async () => {
+        ran.push("rejected");
+      },
+      { retainedBytes: 100 },
+    );
+    expect(logs).toContain("writequeue.task_overflow");
+
+    release();
+    await q.flush();
+    q.enqueueTask(
+      async () => {
+        ran.push("after-release");
+      },
+      { retainedBytes: 100 },
+    );
+    await q.flush();
+    expect(ran).toEqual(["first", "after-release"]);
+  });
+
+  it("sheds payload capture before admitting a retained side-effect task", async () => {
+    const sink = fakeSink();
+    const q = createWriteQueue({
+      telemetry: sink,
+      log: () => {},
+      flushIntervalMs: 10_000,
+      maxBytes: 1_500,
+      flushBytes: 10_000,
+    });
+    const ran: string[] = [];
+    q.enqueuePayload(bigPayload("payload", 700));
+    q.enqueueTask(
+      async () => {
+        ran.push("observe");
+      },
+      { retainedBytes: 200 },
+    );
+    await q.flush();
+    expect(ran).toEqual(["observe"]);
+    expect(sink.payloadCalls).toHaveLength(0);
   });
 
   it("rejects an oversized session without dropping audit telemetry", async () => {
@@ -428,7 +519,7 @@ describe("createWriteQueue", () => {
       telemetry: sink,
       log: () => {},
       flushIntervalMs: 10_000,
-      maxBytes: 1_000,
+      maxBytes: 1_500,
       flushBytes: 10_000,
     });
     q.enqueueTelemetry(tele("audit"));
@@ -446,6 +537,28 @@ describe("createWriteQueue", () => {
     q.enqueueTask(async () => {});
     await q.stop();
     expect(sink.inserts).toHaveLength(1);
+  });
+
+  it("pauses new writes while maintenance drains the existing queue", async () => {
+    const sink = fakeSink();
+    const logs: string[] = [];
+    const q = createWriteQueue({
+      telemetry: sink,
+      log: (message) => logs.push(message),
+      flushIntervalMs: 10_000,
+    });
+    q.enqueueTelemetry(tele("before"));
+
+    await q.pauseAndFlush();
+    q.enqueueTelemetry(tele("during"));
+    q.resume();
+    q.enqueueTelemetry(tele("after"));
+    await q.flush();
+
+    expect(
+      sink.inserts.map((input) => (input.decision as { request_id: string }).request_id),
+    ).toEqual(["before", "after"]);
+    expect(logs).toContain("writequeue.paused");
   });
 
   it("fires onTaskDrain ONLY for tasks flagged wakeOnSettle (inbound observe must not wake)", async () => {

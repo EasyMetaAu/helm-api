@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import {
   type AnthropicSSEEvent,
+  AUTO_VACUUM_CHECK_INTERVAL_MS,
   anthropicTransformer,
   type BudgetCaps,
   bootstrapRootKey,
@@ -15,6 +16,7 @@ import {
   checkTlsTransportAvailable,
   codexActiveLimitIdFromProviderRaw,
   createAnthropicClient,
+  createAutoVacuumRunner,
   createBudgetGate,
   createCachedKeyStore,
   createCircuitBreaker,
@@ -106,10 +108,10 @@ import {
   runEmbeddingJob,
   runObserverJob,
   runReflectorJob,
+  runtimeMemoryBudget,
   type StoreSet,
   saveRuntimeSettings,
   settleBudget,
-  shouldAutoVacuum,
   startCleanupScheduler,
   startMemoryWorker,
   startSignalScheduler,
@@ -209,6 +211,7 @@ import type { MessagesIdentity, RouteError } from "./routes/messages.js";
 import { registerMessagesRoute } from "./routes/messages.js";
 import { createMessagesPipeline } from "./routes/messages-pipeline.js";
 import { registerModelsRoute } from "./routes/models.js";
+import { clearSessionCaptureCache } from "./routes/payload-capture.js";
 import { registerPortalApi } from "./routes/portal/index.js";
 import { mountPortalStatic, PORTAL_BUILD_ROOT } from "./routes/portal-static.js";
 import {
@@ -217,6 +220,15 @@ import {
   registerResponsesRoute,
 } from "./routes/responses.js";
 import { registerUsageStatsRoute } from "./routes/usage.js";
+import {
+  createMaintenanceActivityGate,
+  createSerializedMaintenanceQueue,
+  createTrackedBackgroundTasks,
+  maintenanceDrainTimeoutMs,
+  type PausableActivity,
+  withPausedActivities,
+} from "./runtime/maintenance-gate.js";
+import { type BodyMemoryAdmission, createBodyMemoryAdmission } from "./runtime/memory-admission.js";
 import {
   markServingAccount,
   type ServingAccount,
@@ -232,6 +244,7 @@ export interface ServerHandle {
   host: string;
   closeResponsesWebSocketSession?: (sessionId: string) => Promise<void>;
   responsesWebSocketSessionProof?: string;
+  responsesMemoryAdmission?: BodyMemoryAdmission;
   // Stop background workers (e.g. the Agentic Signals scheduler). Optional and
   // safe to skip — the timers are unref'd so they never block process exit.
   dispose?: () => void | Promise<void>;
@@ -369,6 +382,7 @@ export interface OAuthRuntimeCtx {
 
 export interface CodexOAuthRuntime {
   catalog: CodexModelCatalog;
+  runInBackground: (task: () => Promise<unknown>, onError?: (error: unknown) => void) => boolean;
   clientVersion?: string;
   userAgent?: string;
   onCatalogChanged?: () => void;
@@ -381,6 +395,7 @@ interface CodexAccountRuntime {
   accountIdentity: OpenAICodexIdentity;
   clientVersion: string;
   userAgent: string;
+  runInBackground: CodexOAuthRuntime["runInBackground"];
   onCatalogChanged?: () => void;
 }
 
@@ -435,6 +450,7 @@ async function loadCodexAccountCatalog(input: {
   clientVersion: string;
   catalog: CodexModelCatalog;
   onCatalogChanged?: () => void;
+  runInBackground: CodexOAuthRuntime["runInBackground"];
 }): Promise<LoadedCodexAccountCatalog | null> {
   const clientVersion = normalizeOpenAICodexClientVersion(input.clientVersion);
   if (clientVersion === null) return null;
@@ -481,6 +497,7 @@ async function loadCodexAccountCatalog(input: {
       accountIdentity,
       clientVersion,
       userAgent,
+      runInBackground: input.runInBackground,
       onCatalogChanged: input.onCatalogChanged,
     },
   };
@@ -542,6 +559,7 @@ export async function loadCodexCatalogForClientVersion(input: {
         proxyFetch,
         clientVersion,
         catalog: input.catalog,
+        runInBackground: () => false,
       });
     } catch {
       continue;
@@ -1019,6 +1037,7 @@ export async function synthesizeOAuthProviders(
           proxyFetch,
           clientVersion,
           catalog: codex.catalog,
+          runInBackground: codex.runInBackground,
           onCatalogChanged: codex.onCatalogChanged,
         });
         discovered = loaded
@@ -1501,11 +1520,13 @@ function createProviderClient(
           : undefined,
         onModelsEtag: codexRuntime
           ? (etag) => {
-              void codexRuntime.catalog.observeEtag(
-                codexRuntime.key,
-                etag,
-                codexRuntime.fetchModels,
-                codexRuntime.onCatalogChanged,
+              codexRuntime.runInBackground(() =>
+                codexRuntime.catalog.observeEtag(
+                  codexRuntime.key,
+                  etag,
+                  codexRuntime.fetchModels,
+                  codexRuntime.onCatalogChanged,
+                ),
               );
             }
           : undefined,
@@ -1744,6 +1765,28 @@ export async function buildServer(
 ): Promise<ServerHandle> {
   const logger = opts.logger ?? createJsonLogger();
   const responsesWebSocketSessionProof = randomUUID();
+  const memoryBudget = runtimeMemoryBudget();
+  const maintenanceActivityGate = createMaintenanceActivityGate();
+  const backgroundTasks = createTrackedBackgroundTasks();
+  const requestBodyMemoryAdmission = createBodyMemoryAdmission({
+    activeRequestBytes: memoryBudget.activeRequestBytes,
+    maxWireBytes: memoryBudget.maxWireBytes,
+    jsonAmplification: memoryBudget.jsonAmplification,
+    minRequestChargeBytes: memoryBudget.minRequestChargeBytes,
+  });
+  logger.log("info", "runtime.memory_budget", {
+    heap_limit_bytes: memoryBudget.heapLimitBytes,
+    process_limit_bytes: memoryBudget.processLimitBytes,
+    active_request_bytes: memoryBudget.activeRequestBytes,
+    max_wire_bytes: memoryBudget.maxWireBytes,
+    min_request_charge_bytes: memoryBudget.minRequestChargeBytes,
+    write_queue_bytes: memoryBudget.writeQueueBytes,
+    session_cache_bytes: memoryBudget.sessionCacheBytes,
+    response_capture_bytes: memoryBudget.responseCaptureBytes,
+    sse_tail_chars: memoryBudget.sseTailChars,
+    sqlite_page_cache_bytes: memoryBudget.sqlitePageCacheBytes,
+    sqlite_maintenance_cache_bytes: memoryBudget.sqliteMaintenanceCacheBytes,
+  });
   const config = loadConfig({ configDir: opts.configDir ?? "./config" });
   // Validate the optional Grok proxy protocol override before opening stores or
   // starting background work. Invalid runtime configuration must fail closed at
@@ -1833,13 +1876,18 @@ export async function buildServer(
   const codexRuntime: CodexOAuthRuntime | undefined = codexModelCatalog
     ? {
         catalog: codexModelCatalog,
+        runInBackground: backgroundTasks.run,
         clientVersion: codexClientVersion,
         userAgent: codexUserAgent,
         onCatalogChanged: () => {
-          void rebuildOAuthPool?.().catch((error) =>
-            logger.log("warn", "oauth.codex_catalog.rebuild_failed", {
-              line: error instanceof Error ? error.message : String(error),
-            }),
+          backgroundTasks.run(
+            async () => {
+              await rebuildOAuthPool?.();
+            },
+            (error) =>
+              logger.log("warn", "oauth.codex_catalog.rebuild_failed", {
+                line: error instanceof Error ? error.message : String(error),
+              }),
           );
         },
       }
@@ -1908,6 +1956,8 @@ export async function buildServer(
   };
   let cleanupScheduler: ReturnType<typeof startCleanupScheduler> | null = null;
   let vacuumScheduler: ReturnType<typeof startCleanupScheduler> | null = null;
+  let signalScheduler: ReturnType<typeof startSignalScheduler> | null = null;
+  let memoryWorker: ReturnType<typeof startMemoryWorker> | null = null;
   // Apply a new settings object live: re-bind `settings`, push the log level into
   // the logger, flip the rate-limit master switch, and retune the system-default
   // quota. Cleanup cadence is also rescheduled live so the admin setting is not
@@ -1930,8 +1980,9 @@ export async function buildServer(
   const archiveDir = process.env.HELM_ARCHIVE_DIR ?? `${dataDir}/archive`;
   const archiveSink = new LocalVolumeSink(archiveDir);
   const archiveFs = createArchiveFsAccess(archiveDir);
-  const runCleanupPassNow = (trigger: "scheduled" | "manual") =>
-    runCleanupPass({
+  const maintenanceQueue = createSerializedMaintenanceQueue();
+  const executeCleanupPass = async (trigger: "scheduled" | "manual") => {
+    const report = await runCleanupPass({
       settings,
       telemetry,
       memory: store.memory,
@@ -1943,6 +1994,45 @@ export async function buildServer(
       trigger,
       log: (line, meta) => logger.log("info", line, meta as Record<string, unknown> | undefined),
     });
+    clearSessionCaptureCache(telemetry);
+    return report;
+  };
+  const runCleanupPassNow = (trigger: "scheduled" | "manual") =>
+    maintenanceQueue.run(() => executeCleanupPass(trigger));
+  const executeVacuum = async () => {
+    const activities: PausableActivity[] = [
+      maintenanceActivityGate,
+      {
+        pauseAndWait: async () => {
+          requestBodyMemoryAdmission.pause();
+          await requestBodyMemoryAdmission.waitForIdle();
+        },
+        resume: requestBodyMemoryAdmission.resume,
+      },
+      {
+        pauseAndWait: async () => await memoryWorker?.pauseAndWait(),
+        resume: () => memoryWorker?.resume(),
+      },
+      {
+        pauseAndWait: async () => await signalScheduler?.pauseAndWait(),
+        resume: () => signalScheduler?.resume(),
+      },
+      backgroundTasks,
+      { pauseAndWait: writeQueue.pauseAndFlush, resume: writeQueue.resume },
+    ];
+    await withPausedActivities(
+      activities,
+      async () => {
+        clearSessionCaptureCache(telemetry);
+        await store.vacuum();
+      },
+      { pauseTimeoutMs: maintenanceDrainTimeoutMs(config.runtime.request_timeout_ms) },
+    );
+  };
+  const runVacuumNow = () => {
+    maintenanceActivityGate.releaseCurrent();
+    return maintenanceQueue.run(executeVacuum);
+  };
   // Agentic Signals (docs/02). The collector consumes ALREADY-persisted telemetry
   // and writes aggregated, REDACTED signals in the background. The optional
   // routing feedback consumer below reads only those aggregates and remains
@@ -2171,11 +2261,13 @@ export async function buildServer(
 
   // Fire-and-forget park (detection hot path): never blocks / fails a served request.
   const parkAccountOnLimit = (providerId: string, account: string, untilMs: number): void => {
-    void applyUsageLimit(providerId, account, untilMs).catch((e) =>
-      logger.log("error", "oauth.usage_limit.park_failed", {
-        provider_id: providerId,
-        line: e instanceof Error ? e.message : String(e),
-      }),
+    backgroundTasks.run(
+      () => applyUsageLimit(providerId, account, untilMs),
+      (e) =>
+        logger.log("error", "oauth.usage_limit.park_failed", {
+          provider_id: providerId,
+          line: e instanceof Error ? e.message : String(e),
+        }),
     );
   };
   const markOAuthCredentialFailure = async (
@@ -2196,12 +2288,14 @@ export async function buildServer(
     error: unknown,
   ): void => {
     const reason = error instanceof Error ? error.message : "oauth credential failed";
-    void markOAuthCredentialFailure(providerId, account, reason).catch((e) =>
-      logger.log("error", "oauth.credential_failure.persist_failed", {
-        provider_id: providerId,
-        account,
-        line: e instanceof Error ? e.message : String(e),
-      }),
+    backgroundTasks.run(
+      () => markOAuthCredentialFailure(providerId, account, reason),
+      (e) =>
+        logger.log("error", "oauth.credential_failure.persist_failed", {
+          provider_id: providerId,
+          account,
+          line: e instanceof Error ? e.message : String(e),
+        }),
     );
   };
   // Executor hook: an account-wide 429 on a subscription alias means the SERVED account
@@ -2442,20 +2536,30 @@ export async function buildServer(
     const windows = details.windows;
     if (windows.length === 0) return; // no quota headers on this reply → nothing to store
     applyQuotaSnapshot(providerId, account, windows, nowMs);
-    void store.oauthQuota
-      .upsert({ providerId, account, windows, capturedAt: nowMs, source: "codex-headers" })
-      .catch(() => logger.log("error", "oauth.quota.capture_failed", { provider_id: providerId }));
+    backgroundTasks.run(
+      () =>
+        store.oauthQuota.upsert({
+          providerId,
+          account,
+          windows,
+          capturedAt: nowMs,
+          source: "codex-headers",
+        }),
+      () => logger.log("error", "oauth.quota.capture_failed", { provider_id: providerId }),
+    );
     // Auto-park when a window is saturated (≥100% with a future reset): the precise
     // long cooldown the 429 backstop can't know. Fire-and-forget (fail-open).
     const until = windowsToUsageLimit(windows, nowMs);
     if (until !== null) parkAccountOnLimit(providerId, account, until);
     if (weeklySaturated(windows)) {
-      void onCodexQuotaSaturated(
-        "openai-codex",
-        account,
-        windows,
-        nowMs,
-        details.rateLimitReachedType,
+      backgroundTasks.run(() =>
+        onCodexQuotaSaturated(
+          "openai-codex",
+          account,
+          windows,
+          nowMs,
+          details.rateLimitReachedType,
+        ),
       );
     }
   };
@@ -2862,6 +2966,7 @@ export async function buildServer(
   });
   const app = createApp({
     logger,
+    maintenanceGate: maintenanceActivityGate,
     health: {
       checkReadiness: async () => ({ ready: true, checks: { store: "ok" } }),
       buildInfo: readBuildInfo(),
@@ -3041,6 +3146,7 @@ export async function buildServer(
         memoryStore: store.memory,
         now: () => new Date(),
         estimateTokens: estimateMemoryTokens,
+        runInBackground: backgroundTasks.run,
         log: (line) => logger.log("warn", "mcp", { line }),
         // docs/14 — hybrid recall config for memory_recall. The embedder (vector leg)
         // is wired just below from memory.llm.embedding_model; absent ⇒ FTS+score only.
@@ -3177,23 +3283,25 @@ export async function buildServer(
   ): void => {
     if (!servingAccount || !servedByAccount(servingAccount, servedAlias)) return;
     const nowMs = Date.now();
-    void store.oauthUsage
-      .record({
-        providerId: servingAccount.providerId,
-        account: servingAccount.account,
-        bucketMs: nowMs - (nowMs % 3_600_000),
-        tokens: usage.tokens,
-        costUsd: usage.costUsd,
-        nowMs,
-      })
-      .catch(() =>
+    backgroundTasks.run(
+      () =>
+        store.oauthUsage.record({
+          providerId: servingAccount.providerId,
+          account: servingAccount.account,
+          bucketMs: nowMs - (nowMs % 3_600_000),
+          tokens: usage.tokens,
+          costUsd: usage.costUsd,
+          nowMs,
+        }),
+      () =>
         logger.log("error", "oauth.usage.record_failed", {
           provider_id: servingAccount.providerId,
         }),
-      );
+    );
   };
 
   registerChatRoutes(app, {
+    memoryAdmission: requestBodyMemoryAdmission,
     route,
     telemetry,
     writes: writeQueue,
@@ -3323,11 +3431,12 @@ export async function buildServer(
       rules: ruleStore,
       keyStore,
       telemetry,
+      runInBackground: backgroundTasks.run,
       // Data cleanup / retention / archival surface (admin "Data cleanup").
       cleanup: {
         runNow: () => runCleanupPassNow("manual"),
         lastReport: () => readLastCleanupReport(store.config),
-        vacuum: () => store.vacuum(),
+        vacuum: runVacuumNow,
         listArchives: archiveFs.listArchives,
         resolveArchive: archiveFs.resolveArchive,
       },
@@ -3464,6 +3573,7 @@ export async function buildServer(
   // shape === RateLimiterPort (limiter.check(probe)). Wave2 adds the field to the
   // interfaces and the cast becomes a no-op at the final gate.
   registerMessagesRoute(app, {
+    memoryAdmission: requestBodyMemoryAdmission,
     // See note above: attached via cast until Wave2 adds `rateLimiter` to the deps
     // interface (the cast then becomes a no-op).
     rateLimiter,
@@ -3760,6 +3870,7 @@ export async function buildServer(
     modelsEtagForKey: (keyId, clientVersion) =>
       clientVersion === null ? null : codexModelsEtagTracker.forResponse(keyId, clientVersion),
     responsesWebSocketSessionProof,
+    memoryAdmission: requestBodyMemoryAdmission,
     // Telemetry + payload recorder (the /admin/requests fix): the SAME values the
     // chat route uses, so /v1/responses records served requests like /v1/chat does.
     record: {
@@ -3839,6 +3950,7 @@ export async function buildServer(
   };
 
   registerGeminiRoute(app, {
+    memoryAdmission: requestBodyMemoryAdmission,
     rateLimiter,
     concurrencyGate,
     ...(geminiCountProvider?.countTokens
@@ -3942,6 +4054,7 @@ export async function buildServer(
   };
 
   registerImagesRoute(app, {
+    memoryAdmission: requestBodyMemoryAdmission,
     rateLimiter,
     concurrencyGate,
     auth: { resolve: resolveIdentity },
@@ -3966,6 +4079,7 @@ export async function buildServer(
   // client.interactions.create). Same chain resolver + breaker + budget + telemetry as
   // the images route; translates the interactions request ↔ generateContent.
   registerInteractionsRoute(app, {
+    memoryAdmission: requestBodyMemoryAdmission,
     rateLimiter,
     concurrencyGate,
     auth: { resolve: resolveIdentity },
@@ -3990,7 +4104,6 @@ export async function buildServer(
   // is logged, never thrown). DELIBERATELY started here, OUTSIDE every middleware
   // / route registration, so no request ever touches signal code (zero added
   // latency). Disabled when HELM_SIGNALS_DISABLED is set (e.g. unit/e2e runs).
-  let signalScheduler: { stop: () => void } | null = null;
   if (process.env.HELM_SIGNALS_DISABLED !== "1") {
     const intervalMs = Number(process.env.HELM_SIGNALS_INTERVAL_MS ?? 60_000);
     signalScheduler = startSignalScheduler({
@@ -4008,7 +4121,6 @@ export async function buildServer(
   // outside every route, so no request touches it (zero added latency). Disabled
   // when HELM_MEMORY_WORKER_DISABLED=1 (tests default to OFF); interval is an
   // env tunable (fail-safe default + guard, mirroring the signals scheduler).
-  let memoryWorker: { stop: () => void; wake: () => void } | null = null;
   if (process.env.HELM_MEMORY_WORKER_DISABLED !== "1") {
     const intervalRaw = Number(process.env.HELM_MEMORY_WORKER_INTERVAL_MS ?? 60_000);
     const intervalMs = Number.isFinite(intervalRaw) && intervalRaw > 0 ? intervalRaw : 60_000;
@@ -4130,29 +4242,29 @@ export async function buildServer(
     // is on (default off — VACUUM holds an exclusive lock for the whole rewrite). The
     // live `settings` closure means a toggle/hour change takes effect without a
     // restart. store.vacuum() is a no-op on postgres (autovacuum), so this is inert
-    // there. lastRunDayKey is in-memory: a restart at the vacuum hour may run one
-    // extra VACUUM (harmless — it just reclaims nothing the second time).
-    let lastVacuumDayKey: string | null = null;
+    // there. The last successful day is in-memory: failures remain retryable if a
+    // later tick is still eligible, while a restart may harmlessly run it once more.
+    const autoVacuum = createAutoVacuumRunner();
     vacuumScheduler = startCleanupScheduler({
-      intervalMs: 3_600_000,
+      intervalMs: AUTO_VACUUM_CHECK_INTERVAL_MS,
       runTick: async () => {
         const now = new Date();
         const todayKey = now.toDateString();
-        if (
-          !shouldAutoVacuum({
+        await autoVacuum.run(
+          {
             enabled: settings.vacuum_enabled,
             vacuumHour: settings.vacuum_hour,
             currentHour: now.getHours(),
-            lastRunDayKey: lastVacuumDayKey,
             todayKey,
-          })
-        ) {
-          return;
-        }
-        lastVacuumDayKey = todayKey; // mark BEFORE the slow rewrite so a retry can't double-run
-        logger.log("info", "vacuum.auto_start", { hour: settings.vacuum_hour });
-        await store.vacuum();
-        logger.log("info", "vacuum.auto_done", {});
+          },
+          () =>
+            maintenanceQueue.run(async () => {
+              logger.log("info", "vacuum.auto_start", { hour: settings.vacuum_hour });
+              if (settings.cleanup_enabled) await executeCleanupPass("scheduled");
+              await executeVacuum();
+              logger.log("info", "vacuum.auto_done", {});
+            }),
+        );
       },
       log: (level, msg, fields) => logger.log(level, msg, fields),
     });
@@ -4163,6 +4275,7 @@ export async function buildServer(
     port: config.server.port,
     host: config.server.host,
     responsesWebSocketSessionProof,
+    responsesMemoryAdmission: requestBodyMemoryAdmission,
     closeResponsesWebSocketSession: async (sessionId) => {
       await Promise.all(
         [...providerClients.values()].map(
@@ -4171,10 +4284,13 @@ export async function buildServer(
       );
     },
     dispose: async () => {
-      signalScheduler?.stop();
-      memoryWorker?.stop();
+      const signalStopped = signalScheduler?.stop();
+      const memoryStopped = memoryWorker?.stop();
+      const backgroundStopped = backgroundTasks.closeAndWait();
       cleanupScheduler?.stop();
       vacuumScheduler?.stop();
+      await maintenanceQueue.closeAndWait();
+      await Promise.all([signalStopped, memoryStopped, backgroundStopped]);
       // Drain the deferred write queue BEFORE closing the DB so a graceful shutdown
       // persists every buffered telemetry/payload/observe write (no loss on deploy).
       await writeQueue.stop();

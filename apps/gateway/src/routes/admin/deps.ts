@@ -438,6 +438,7 @@ export interface AdminApiDeps {
   rules: RuleStore;
   keyStore: KeyStore;
   telemetry: TelemetryStore;
+  runInBackground?: (task: () => Promise<unknown>, onError?: (error: unknown) => void) => boolean;
   // Automatic data cleanup / retention / archival (admin "Data cleanup"). Optional —
   // absent in unit tests; the cleanup routes 503 when not wired.
   cleanup?: CleanupAccess;

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { transformRequestOut as anthropicToIRRequest } from "../protocol/anthropic/request.js";
+import { runtimeMemoryBudget } from "../runtime/memory-budget.js";
 import type { CodexModelInfo } from "./oauth/codex-model-info.js";
 import { UpstreamError } from "./openai.js";
 import {
@@ -2527,6 +2528,178 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     return connection;
   }
 
+  it("holds a websocket response-work lease until the yielded frame is consumed", async () => {
+    let releaseCalls = 0;
+    const connection: CodexResponsesWebSocketConnection = {
+      responseHeaders: new Headers(),
+      async send() {},
+      async receive() {
+        throw new Error("legacy receive should not be used");
+      },
+      async receiveWithWork() {
+        return {
+          text: JSON.stringify({ type: "response.created", response: { id: "resp-held" } }),
+          release() {
+            releaseCalls += 1;
+          },
+        };
+      },
+      async close() {},
+    };
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_work_lease")}`,
+        responsesWebSocketConnector: vi.fn(async () => connection),
+      },
+    });
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier("ingress-work-lease", {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+        }),
+      )
+      [Symbol.asyncIterator]();
+
+    const yielded = await iterator?.next();
+
+    expect(yielded?.value).toContain("response.created");
+    expect(releaseCalls).toBe(0);
+    await iterator?.return?.();
+    expect(releaseCalls).toBe(1);
+  });
+
+  it("releases websocket response-work after malformed JSON", async () => {
+    let releaseCalls = 0;
+    const connection: CodexResponsesWebSocketConnection = {
+      responseHeaders: new Headers(),
+      async send() {},
+      async receive() {
+        throw new Error("legacy receive should not be used");
+      },
+      async receiveWithWork() {
+        return {
+          text: "not-json",
+          release() {
+            releaseCalls += 1;
+          },
+        };
+      },
+      async close() {},
+    };
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_bad_work")}`,
+        responsesWebSocketConnector: vi.fn(async () => connection),
+      },
+    });
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier("ingress-bad-work", {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+        }),
+      )
+      [Symbol.asyncIterator]();
+
+    await expect(iterator?.next()).rejects.toMatchObject({ name: "UpstreamError" });
+    expect(releaseCalls).toBe(1);
+  });
+
+  it("releases a late websocket response when the receive timeout wins", async () => {
+    let resolveReceive: ((value: { text: string; release(): void } | null) => void) | undefined;
+    let releaseCalls = 0;
+    const connection: CodexResponsesWebSocketConnection = {
+      responseHeaders: new Headers(),
+      async send() {},
+      async receive() {
+        throw new Error("legacy receive should not be used");
+      },
+      async receiveWithWork() {
+        return await new Promise<{ text: string; release(): void } | null>((resolve) => {
+          resolveReceive = resolve;
+        });
+      },
+      async close() {},
+    };
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_late_work")}`,
+        responsesWebSocketConnector: vi.fn(async () => connection),
+        timeoutMs: 5,
+      },
+    });
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier("ingress-late-work", {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+        }),
+      )
+      [Symbol.asyncIterator]();
+
+    await expect(iterator?.next()).rejects.toMatchObject({
+      name: "UpstreamError",
+      errorClass: "timeout",
+    });
+    resolveReceive?.({
+      text: JSON.stringify({ type: "response.created" }),
+      release() {
+        releaseCalls += 1;
+      },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(releaseCalls).toBe(1);
+  });
+
+  it("rejects an abort that happens during websocket send before receive starts", async () => {
+    const controller = new AbortController();
+    let closeCalls = 0;
+    const connection: CodexResponsesWebSocketConnection = {
+      responseHeaders: new Headers(),
+      async send() {
+        controller.abort(new Error("client aborted during send"));
+      },
+      async receive() {
+        return await new Promise<string | null>(() => {});
+      },
+      async close() {
+        closeCalls += 1;
+      },
+    };
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_abort_send")}`,
+        responsesWebSocketConnector: vi.fn(async () => connection),
+        timeoutMs: 10,
+      },
+    });
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier("ingress-abort-send", {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+        }),
+        { signal: controller.signal },
+      )
+      [Symbol.asyncIterator]();
+
+    await expect(iterator?.next()).rejects.toThrow("client aborted during send");
+    expect(closeCalls).toBe(1);
+  });
+
   it("reuses one upstream websocket for prewarm and previous_response_id continuation", async () => {
     const connection = fakeConnection([
       [
@@ -3275,6 +3448,31 @@ describe("createCodexResponsesClient — nativePassthrough", () => {
     expect(out).toEqual(upstream);
   });
 
+  it.each([
+    "nativePassthrough",
+    "responsesCompact",
+  ] as const)("maps an oversized unary %s body into fallback-eligible UpstreamError", async (method) => {
+    const limit = runtimeMemoryBudget().maxWireBytes;
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+      },
+      fetch: (async () =>
+        new Response("{}", { headers: { "content-length": String(limit + 1) } })) as typeof fetch,
+    });
+
+    const run =
+      method === "nativePassthrough"
+        ? client.nativePassthrough?.(nativeBody())
+        : client.responsesCompact?.(nativeBody());
+    await expect(run).rejects.toMatchObject({
+      errorClass: "upstream_error",
+      upstreamStatus: null,
+      providerRaw: { error: { code: "response_body_too_large", limit_bytes: limit } },
+    });
+  });
+
   it("throws UpstreamError with upstreamStatus + scrubbed body on a non-2xx", async () => {
     const token = jwt("acct_secret_value_1234");
     const client = createCodexResponsesClient({
@@ -3582,6 +3780,30 @@ describe("createCodexResponsesClient — passthrough methods are defined (pool f
 });
 
 describe("createGenericOpenAIResponsesClient — native passthrough", () => {
+  it("maps every JSON unary Responses endpoint over the dynamic body budget to UpstreamError", async () => {
+    const limit = runtimeMemoryBudget().maxWireBytes;
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://api.openai.test/v1", apiKey: "sk-test" },
+      fetch: (async () =>
+        new Response("{}", { headers: { "content-length": String(limit + 1) } })) as typeof fetch,
+    });
+    const expectTooLarge = (run: Promise<unknown> | undefined) =>
+      expect(run).rejects.toMatchObject({
+        errorClass: "upstream_error",
+        upstreamStatus: null,
+        providerRaw: { error: { code: "response_body_too_large", limit_bytes: limit } },
+      });
+
+    await expectTooLarge(client.chatCompletion({ model: "m", messages: [] }));
+    await expectTooLarge(client.nativePassthrough?.({ model: "m", input: [] }));
+    await expectTooLarge(client.responsesRetrieve?.("resp_1"));
+    await expectTooLarge(client.responsesDelete?.("resp_1"));
+    await expectTooLarge(client.responsesCancel?.("resp_1"));
+    await expectTooLarge(client.responsesInputItems?.("resp_1"));
+    await expectTooLarge(client.responsesCompact?.({ model: "m", input: [] }));
+    await expectTooLarge(client.responsesInputTokens?.({ model: "m", input: [] }));
+  });
+
   it("injects default native instructions when the opt-in contract requires them", async () => {
     let seenBody: Record<string, unknown> = {};
     const client = createGenericOpenAIResponsesClient({

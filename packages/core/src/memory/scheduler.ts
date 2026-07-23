@@ -69,7 +69,9 @@ export interface MemoryWorkerDeps {
 }
 
 export interface MemoryWorkerHandle {
-  stop(): void;
+  stop(): Promise<void>;
+  pauseAndWait(): Promise<void>;
+  resume(): void;
   // Request-path trigger: schedule a drain after coalesceMs of quiet (debounced).
   // Coalesced, non-blocking, fail-open — the caller (a write-queue task settle) is
   // never blocked and a wake can never throw. Does NOT run the onTick housekeeping
@@ -317,10 +319,26 @@ export function startMemoryWorker(deps: MemoryWorkerDeps): MemoryWorkerHandle {
     await drainCoalesced();
   };
 
+  let wakeTimer: ReturnType<typeof setTimeout> | null = null;
+  let stopped = false;
+  let paused = false;
+  let activeRuns = 0;
+  const idleWaiters: Array<() => void> = [];
+  const runWhileActive = async (run: () => Promise<void>): Promise<void> => {
+    if (paused || stopped) return;
+    activeRuns += 1;
+    try {
+      await run();
+    } finally {
+      activeRuns -= 1;
+      if (activeRuns === 0) for (const resolve of idleWaiters.splice(0)) resolve();
+    }
+  };
+
   const timer = setInterval(() => {
     // Fire-and-forget; tick is fail-open, but guard the promise so a rejection can
     // never become an unhandled rejection on the timer.
-    void tick().catch((err: unknown) => {
+    void runWhileActive(tick).catch((err: unknown) => {
       deps.log("memory.worker.tick_failed", {
         error: err instanceof Error ? err.message : String(err),
       });
@@ -332,29 +350,37 @@ export function startMemoryWorker(deps: MemoryWorkerDeps): MemoryWorkerHandle {
 
   // Trailing-edge debounce timer for wake(): re-armed on every wake, fires one
   // jobs-only drain after coalesceMs of quiet.
-  let wakeTimer: ReturnType<typeof setTimeout> | null = null;
-  // Latched by stop(): a wake() arriving afterwards (e.g. a write-queue task that
-  // settles while the queue drains on shutdown — stop() runs before that drain) must
-  // not arm a fresh timer that later claims jobs against an already-closed store.
-  let stopped = false;
-
   return {
-    stop() {
+    async stop() {
       stopped = true;
       clearInterval(timer);
       if (wakeTimer !== null) {
         clearTimeout(wakeTimer);
         wakeTimer = null;
       }
+      if (activeRuns === 0) return;
+      await new Promise<void>((resolve) => idleWaiters.push(resolve));
+    },
+    async pauseAndWait() {
+      paused = true;
+      if (wakeTimer !== null) {
+        clearTimeout(wakeTimer);
+        wakeTimer = null;
+      }
+      if (activeRuns === 0) return;
+      await new Promise<void>((resolve) => idleWaiters.push(resolve));
+    },
+    resume() {
+      paused = false;
     },
     wake() {
-      if (stopped) return;
+      if (stopped || paused) return;
       if (wakeTimer !== null) clearTimeout(wakeTimer);
       wakeTimer = setTimeout(() => {
         wakeTimer = null;
         // Jobs-only drain (no onTick). Fail-open: a rejection is logged, never an
         // unhandled rejection on the timer.
-        void drainCoalesced().catch((err: unknown) => {
+        void runWhileActive(drainCoalesced).catch((err: unknown) => {
           deps.log("memory.worker.wake_drain_failed", {
             error: err instanceof Error ? err.message : String(err),
           });

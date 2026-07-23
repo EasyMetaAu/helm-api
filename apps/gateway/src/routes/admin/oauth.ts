@@ -497,6 +497,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     refresh: async () => {
       await refreshQuota();
     },
+    ...(deps.runInBackground !== undefined ? { runInBackground: deps.runInBackground } : {}),
   });
 
   app.get("/admin/api/oauth/usage", async (c) => {

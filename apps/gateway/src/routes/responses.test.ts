@@ -8,9 +8,10 @@ import {
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
 import { CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER } from "../responses-websocket-internal.js";
+import { createBodyMemoryAdmission } from "../runtime/memory-admission.js";
 import type { MessagesIdentity } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
-import type { RecordServedDeps } from "./payload-capture.js";
+import type { RecordServedDeps, SseCapture } from "./payload-capture.js";
 import {
   type ResponsesRouteDeps,
   registerResponsesRoute,
@@ -81,6 +82,8 @@ function makeDeps(
     registry?: ResponsesRouteDeps["registry"];
     modelsEtag?: string | null;
     modelsEtagForKey?: ResponsesRouteDeps["modelsEtagForKey"];
+    memoryAdmission?: ResponsesRouteDeps["memoryAdmission"];
+    sseCaptureFactory?: ResponsesRouteDeps["sseCaptureFactory"];
   } = {},
 ): { deps: ResponsesRouteDeps; order: string[]; harness: { pipelineSawIR: unknown } } {
   const order: string[] = [];
@@ -93,6 +96,8 @@ function makeDeps(
     budget: over.budget,
     recordOAuthUsage: over.recordOAuthUsage,
     registry: over.registry,
+    memoryAdmission: over.memoryAdmission,
+    sseCaptureFactory: over.sseCaptureFactory,
     ...(over.modelsEtagForKey !== undefined
       ? { modelsEtagForKey: over.modelsEtagForKey }
       : over.modelsEtag === undefined
@@ -215,6 +220,28 @@ function expectNativeCarrier(
 }
 
 describe("POST /v1/responses (OpenAI Responses inbound)", () => {
+  it("rejects a body beyond the machine-derived admission limit before translation", async () => {
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 60,
+      maxWireBytes: 10,
+      jsonAmplification: 6,
+    });
+    const { deps, order } = makeDeps({ memoryAdmission });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+
+    expect(res.status).toBe(413);
+    expect((await res.json()) as unknown).toMatchObject({
+      error: { type: "invalid_request_error", code: "request_too_large" },
+    });
+    expect(order).toEqual(["auth"]);
+    expect(memoryAdmission.reservedBytes).toBe(0);
+  });
+
   it("non-stream: auth → translate-out → route → translate-back, returns Responses JSON", async () => {
     const { deps, order } = makeDeps();
     const app = buildApp(deps);
@@ -2043,6 +2070,70 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
         responseJson: JSON.stringify(terminalResponse),
       }),
     );
+  });
+
+  it("budgets a Session-only terminal frame before parsing and releases a limited capture", async () => {
+    const push = vi.fn();
+    const release = vi.fn();
+    const capture: SseCapture = {
+      push,
+      value: () => "",
+      payloadValue: () => null,
+      limited: () => true,
+      release,
+    };
+    const upsertSessionRevision = vi.fn(async (_input: UpsertSessionRevisionInput) => {});
+    const record: RecordServedDeps = {
+      telemetry: {
+        insert: vi.fn().mockResolvedValue({ id: "1" }),
+        getSessionByRef: vi.fn(async () => null),
+        getSessionRevisionByResponseId: vi.fn(async () => null),
+        upsertSessionRevision,
+      } as unknown as TelemetryStore,
+      redact: (value) => value,
+      now: () => 1000,
+      capturePayloads: () => false,
+      captureSessions: () => true,
+    };
+    const { deps } = makeDeps({
+      record,
+      sseCaptureFactory: () => capture,
+      transformRequestOut: () => ({
+        stream: true,
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: {},
+      }),
+      streamIR: async function* () {
+        yield { type: "response.created", sequence_number: 0 };
+        yield {
+          type: "response.completed",
+          sequence_number: 1,
+          response: { id: "resp_limited", output: [{ type: "message" }] },
+        };
+      },
+    });
+    const log = vi.fn();
+    const app = createApp({ logger: { log } });
+    registerResponsesRoute(app, deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: { ...AUTH, "x-thread-id": "thread-limited" },
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    await res.text();
+
+    expect(push).toHaveBeenCalledOnce();
+    expect(push.mock.calls[0]?.[0]).toContain("event: response.completed");
+    expect(log).toHaveBeenCalledWith(
+      "warn",
+      "session.response_limited",
+      expect.objectContaining({ trace_id: expect.any(String) }),
+    );
+    expect(upsertSessionRevision).toHaveBeenCalledWith(
+      expect.objectContaining({ responseId: null, responseJson: null }),
+    );
+    expect(release).toHaveBeenCalledOnce();
   });
 
   // ── Terminal stream error frame must be appended to the captured body (review

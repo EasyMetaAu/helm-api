@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createTrackedBackgroundTasks } from "../../runtime/maintenance-gate.js";
 import { adminWindowCacheKey, createAdminReadCache } from "./read-cache.js";
 
 describe("createAdminReadCache", () => {
@@ -51,6 +52,68 @@ describe("createAdminReadCache", () => {
     await vi.waitFor(async () =>
       expect(await cache.get("stats", load)).toEqual({ value: "new", status: "fresh" }),
     );
+  });
+
+  it("registers a stale refresh so maintenance waits for its database read", async () => {
+    let now = 1_000;
+    const scheduled: Array<() => void> = [];
+    const background = createTrackedBackgroundTasks();
+    const runInBackground = vi.fn(background.run);
+    let finishRefresh!: (value: string) => void;
+    const load = vi
+      .fn<() => Promise<string>>()
+      .mockResolvedValueOnce("old")
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishRefresh = resolve;
+          }),
+      );
+    const cache = createAdminReadCache<string>({
+      freshTtlMs: 10_000,
+      staleTtlMs: 300_000,
+      now: () => now,
+      schedule: (run) => scheduled.push(run),
+      runInBackground,
+    });
+
+    await cache.get("stats", load);
+    now += 10_001;
+    await expect(cache.get("stats", load)).resolves.toMatchObject({ status: "stale" });
+    scheduled[0]?.();
+    expect(runInBackground).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    let paused = false;
+    const waiting = background.pauseAndWait().then(() => {
+      paused = true;
+    });
+    await Promise.resolve();
+    expect(paused).toBe(false);
+
+    finishRefresh("new");
+    await waiting;
+    expect(paused).toBe(true);
+  });
+
+  it("keeps stale data and retries later when maintenance rejects a refresh", async () => {
+    let now = 1_000;
+    const scheduled: Array<() => void> = [];
+    const load = vi.fn().mockResolvedValue("old");
+    const cache = createAdminReadCache<string>({
+      freshTtlMs: 10_000,
+      staleTtlMs: 300_000,
+      now: () => now,
+      schedule: (run) => scheduled.push(run),
+      runInBackground: () => false,
+    });
+
+    await cache.get("stats", load);
+    now += 10_001;
+    await expect(cache.get("stats", load)).resolves.toEqual({ value: "old", status: "stale" });
+    scheduled.shift()?.();
+    expect(load).toHaveBeenCalledOnce();
+    await expect(cache.get("stats", load)).resolves.toEqual({ value: "old", status: "stale" });
+    expect(scheduled).toHaveLength(1);
   });
 
   it("does not retain a failed cold load", async () => {

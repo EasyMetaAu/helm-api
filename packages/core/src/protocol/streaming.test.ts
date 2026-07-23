@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createResponseWorkAdmission } from "../runtime/response-work-admission.js";
 import type { IRResponse } from "./ir.js";
 import {
   type Controller,
@@ -118,6 +119,40 @@ describe("readSSE — generic SSE splitter", () => {
     expect(events).toEqual([{ data: '{"text":"你好👋"}' }]);
     // Round-trips through JSON with no replacement-char corruption.
     expect(JSON.parse(nth(events, 0).data).text).toBe("你好👋");
+  });
+
+  it("rejects both terminated and unterminated frames beyond the dynamic frame budget", async () => {
+    const frame = `data: ${"x".repeat(17)}`;
+    for (const oversized of [frame, `${frame}\n\n`]) {
+      await expect(collect(readSSE(streamOf([enc.encode(oversized)]), 16))).rejects.toMatchObject({
+        name: "UpstreamError",
+        errorClass: "upstream_error",
+        upstreamStatus: null,
+      });
+    }
+  });
+
+  it("holds a shared response-work lease while the consumer parses a yielded frame", async () => {
+    const wire = "data: one\n\n";
+    const admission = createResponseWorkAdmission({
+      capacityBytes: enc.encode(wire).byteLength * 2,
+      jsonAmplification: 2,
+      minChargeBytes: 2,
+    });
+    const first = readSSE(streamOf([enc.encode(wire)]), 64, admission)[Symbol.asyncIterator]();
+
+    await expect(first.next()).resolves.toMatchObject({ done: false, value: { data: "one" } });
+    expect(admission.reservedBytes).toBe(enc.encode(wire).byteLength * 2);
+    await expect(
+      collect(readSSE(streamOf([enc.encode(wire)]), 64, admission)),
+    ).rejects.toMatchObject({ name: "UpstreamError", errorClass: "upstream_error" });
+
+    await first.return?.();
+    expect(admission.reservedBytes).toBe(0);
+    await expect(collect(readSSE(streamOf([enc.encode(wire)]), 64, admission))).resolves.toEqual([
+      { data: "one" },
+    ]);
+    expect(admission.reservedBytes).toBe(0);
   });
 });
 

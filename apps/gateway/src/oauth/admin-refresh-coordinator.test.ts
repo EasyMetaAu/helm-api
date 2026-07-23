@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createTrackedBackgroundTasks } from "../runtime/maintenance-gate.js";
 import { createOAuthAdminRefreshCoordinator } from "./admin-refresh-coordinator.js";
 
 function deferred(): {
@@ -16,6 +17,47 @@ function deferred(): {
 }
 
 describe("OAuth admin refresh coordinator", () => {
+  it("registers refresh work so maintenance waits after enqueue returns", async () => {
+    const background = createTrackedBackgroundTasks();
+    const gate = deferred();
+    const runInBackground = vi.fn(background.run);
+    const coordinator = createOAuthAdminRefreshCoordinator({
+      refresh: () => gate.promise,
+      runInBackground,
+    });
+
+    expect(coordinator.enqueue().accepted).toBe(true);
+    expect(runInBackground).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(coordinator.status().state).toBe("running"));
+    let paused = false;
+    const waiting = background.pauseAndWait().then(() => {
+      paused = true;
+    });
+    await Promise.resolve();
+    expect(paused).toBe(false);
+
+    gate.resolve();
+    await waiting;
+    expect(paused).toBe(true);
+  });
+
+  it("fails cleanly when the runtime no longer accepts background work", async () => {
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    const coordinator = createOAuthAdminRefreshCoordinator({
+      refresh,
+      runInBackground: () => false,
+    });
+
+    expect(coordinator.enqueue()).toMatchObject({
+      accepted: false,
+      coalesced: false,
+      status: { state: "failed", error: "refresh queue unavailable" },
+    });
+    await coordinator.waitForIdle();
+    expect(refresh).not.toHaveBeenCalled();
+    expect(coordinator.enqueue()).toMatchObject({ accepted: false, coalesced: false });
+  });
+
   it("coalesces concurrent refresh clicks into one running job", async () => {
     const gate = deferred();
     const refresh = vi.fn(() => gate.promise);

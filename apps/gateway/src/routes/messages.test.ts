@@ -1,6 +1,7 @@
 import type { TelemetryStore, UpsertSessionRevisionInput } from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
+import { createBodyMemoryAdmission } from "../runtime/memory-admission.js";
 import {
   type MessagesIdentity,
   type MessagesRouteDeps,
@@ -76,6 +77,7 @@ function makeDeps(
     concurrencyGate?: MessagesRouteDeps["concurrencyGate"];
     identity?: MessagesIdentity;
     record?: RecordServedDeps;
+    memoryAdmission?: MessagesRouteDeps["memoryAdmission"];
     // Native passthrough (#217 C3): when true the stubbed pipeline run reports
     // nativePassthrough so the route must return collect()'s body UNTOUCHED (skip
     // transformResponseOut). collect() should be set to return the verbatim native body.
@@ -96,6 +98,7 @@ function makeDeps(
     concurrencyGate: over.concurrencyGate,
     countTokens: over.countTokens,
     record: over.record,
+    memoryAdmission: over.memoryAdmission,
     toolCallXmlRecoveryEnabled: over.toolCallXmlRecoveryEnabled,
     auth: {
       resolve: async (_key: string | null) => {
@@ -242,6 +245,47 @@ function expectNativeCarrier(
 }
 
 describe("POST /v1/messages (Anthropic inbound)", () => {
+  it("rejects oversized message and count-token bodies before JSON.parse", async () => {
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 1024,
+      maxWireBytes: 1,
+      jsonAmplification: 1,
+    });
+    const { deps, harness } = makeDeps({ memoryAdmission });
+    const app = buildApp(deps);
+
+    for (const path of ["/v1/messages", "/v1/messages/count_tokens"]) {
+      const res = await app.request(path, {
+        method: "POST",
+        headers: AUTH,
+        body: JSON.stringify(REQ_BODY),
+      });
+      expect(res.status).toBe(413);
+    }
+    expect(harness.order).toEqual(["auth", "auth"]);
+    expect(memoryAdmission.reservedBytes).toBe(0);
+  });
+
+  it("returns 503 with Retry-After when the shared body budget is occupied", async () => {
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 1,
+      maxWireBytes: 1024,
+      jsonAmplification: 1,
+    });
+    const { deps, harness } = makeDeps({ memoryAdmission });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("retry-after")).toBe("1");
+    expect(harness.order).toEqual(["auth"]);
+  });
+
   it("accepts the Claude Code event logging compatibility endpoint after auth", async () => {
     const { deps, harness } = makeDeps();
     const app = buildApp(deps);

@@ -14,7 +14,9 @@ import { adminWindowCacheKey, createAdminReadCache } from "./read-cache.js";
 const DAY_MS = 86_400_000;
 
 export function registerStatsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void {
-  const cache = createAdminReadCache<Awaited<ReturnType<typeof deps.telemetry.aggregate>>>();
+  const cache = createAdminReadCache<Awaited<ReturnType<typeof deps.telemetry.aggregate>>>({
+    ...(deps.runInBackground !== undefined ? { runInBackground: deps.runInBackground } : {}),
+  });
   // GET /stats?start&end&bucket&tzOffsetMinutes -> TelemetryAggregate. The window
   // defaults to the last 24h when start/end are omitted (a live dashboard cares
   // about recent traffic); bucket defaults to "day". `tzOffsetMinutes` (the admin

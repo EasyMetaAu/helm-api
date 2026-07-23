@@ -524,6 +524,10 @@ function codexJwt(payload: Record<string, unknown>): string {
 
 describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
   const noop = () => {};
+  const runInBackground = (task: () => Promise<unknown>) => {
+    void task();
+    return true;
+  };
 
   it("routes xAI subscription OAuth through the generic Responses proxy by default", async () => {
     const { ctx, config } = oauthStores();
@@ -1265,7 +1269,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       undefined,
       undefined,
       undefined,
-      { catalog },
+      { catalog, runInBackground },
     );
     // Codex is now routable: one synthetic provider keyed by providerId, executor
     // type `openai-responses`, served by ONE pool client.
@@ -1349,6 +1353,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       {
         catalog,
         clientVersion: DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
+        runInBackground,
         userAgent: "codex_cli_rs/test",
       },
     );
@@ -1528,7 +1533,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       undefined,
       undefined,
       undefined,
-      { catalog },
+      { catalog, runInBackground },
     );
     const client = poolClients.get("openai-codex");
     if (!client?.nativePassthrough) throw new Error("Codex native passthrough is unavailable");
@@ -1668,7 +1673,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       undefined,
       undefined,
       undefined,
-      { catalog },
+      { catalog, runInBackground },
     );
     const client = poolClients.get("openai-codex");
     if (!client) throw new Error("Codex pool is unavailable");
@@ -1728,7 +1733,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       undefined,
       undefined,
       undefined,
-      { catalog },
+      { catalog, runInBackground },
     );
 
     expect(result.providers).toEqual([]);
@@ -1808,7 +1813,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       undefined,
       undefined,
       undefined,
-      { catalog },
+      { catalog, runInBackground },
     );
 
     expect(modelCalls).toBe(2);
@@ -1858,7 +1863,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       undefined,
       undefined,
       undefined,
-      { catalog },
+      { catalog, runInBackground },
     );
 
     expect((result.providers[0]?.models ?? []).map((model) => model.alias)).toEqual([
@@ -1916,7 +1921,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       undefined,
       undefined,
       undefined,
-      { catalog },
+      { catalog, runInBackground },
     );
     await poolClients.get("openai-codex")?.chatCompletion({
       model: "gpt-5.6-luna",
@@ -1990,7 +1995,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       undefined,
       undefined,
       undefined,
-      { catalog },
+      { catalog, runInBackground },
     );
 
     await poolClients.get("openai-codex")?.chatCompletion({
@@ -2065,7 +2070,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       undefined,
       undefined,
       undefined,
-      { catalog },
+      { catalog, runInBackground },
     );
 
     await poolClients.get("openai-codex")?.chatCompletion({
@@ -2153,7 +2158,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       undefined,
       undefined,
       undefined,
-      { catalog },
+      { catalog, runInBackground },
     );
 
     await poolClients.get("openai-codex")?.chatCompletion({

@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import {
   type AnthropicSSEEvent,
   assembleInjectedContext,
@@ -20,8 +21,12 @@ import {
   observeOutbound,
   projectScopedThreadId,
   type ResponsesSSEEvent,
+  type ResponseWorkAdmission,
   type RouteOptions,
   resolveMemoryMode,
+  runtimeMemoryBudget,
+  runtimeResponseWorkAdmission,
+  UpstreamError,
 } from "@helm/core";
 import type { InternalRequest, MemoryDecision, Protocol } from "@helm/shared";
 import {
@@ -108,6 +113,40 @@ function irFunctionToolNames(tools: unknown): readonly string[] {
     if (typeof name === "string" && name.length > 0) names.add(name);
   }
   return [...names];
+}
+
+// Count strings already held by the normalized request without serializing or
+// copying its complete object graph. Native carriers preserve their exact raw body;
+// translated requests retain message content/tool arguments directly.
+function retainedRequestBytes(request: InternalRequest): number {
+  let bytes = 0;
+  if (isNativePassthroughCarrier(request.native_request)) {
+    bytes += Buffer.byteLength(request.native_request.raw_body ?? "", "utf8");
+  }
+  const add = (value: unknown): void => {
+    if (typeof value === "string") bytes += Buffer.byteLength(value, "utf8");
+  };
+  for (const message of request.messages) {
+    add(message.role);
+    add(message.content);
+    add(message.name);
+    add(message.tool_call_id);
+    add(message.reasoning_content);
+    for (const part of Array.isArray(message.content) ? message.content : []) {
+      for (const value of Object.values(part)) add(value);
+    }
+    for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
+      if (call === null || typeof call !== "object") continue;
+      const record = call as {
+        id?: unknown;
+        function?: { name?: unknown; arguments?: unknown };
+      };
+      add(record.id);
+      add(record.function?.name);
+      add(record.function?.arguments);
+    }
+  }
+  return bytes;
 }
 
 // Gateway-side inject wiring (docs/08 Phase 2). Bundles the core InjectDeps with
@@ -469,7 +508,7 @@ function parseFrame(event: string): Record<string, unknown> | null {
 // writeSSE (semantically identical). This ELIMINATES the per-protocol SSE re-mapping
 // state machine (the #221/#222 reasoning/tool mangling source) instead of replacing
 // it (principle 8).
-interface RawSSEFrame {
+export interface RawSSEFrame {
   /** The verbatim `event:` line value (empty when the frame carries no event line). */
   event: string;
   /** The verbatim `data:` payload string (the exact upstream JSON), unparsed. */
@@ -505,21 +544,54 @@ function nextSSEBoundary(buffer: string): { index: number; length: number } | nu
   return candidates[0] ?? null;
 }
 
-async function* splitSSEFrames(raw: AsyncIterable<string>): AsyncIterable<RawSSEFrame> {
-  let buffer = "";
-  for await (const piece of raw) {
-    buffer += piece;
-    let sep = nextSSEBoundary(buffer);
-    while (sep !== null) {
-      const rawFrame = buffer.slice(0, sep.index + sep.length);
-      const frame = parseRawSSEFrame(buffer.slice(0, sep.index), rawFrame);
-      buffer = buffer.slice(sep.index + sep.length);
-      if (frame !== null) yield frame;
-      sep = nextSSEBoundary(buffer);
-    }
+function assertNativeSSEFrameFits(frame: string, maxFrameBytes: number): void {
+  if (Buffer.byteLength(frame) <= maxFrameBytes) return;
+  throw new UpstreamError("upstream_error", "upstream SSE frame exceeds the runtime memory budget");
+}
+
+export async function* splitSSEFrames(
+  raw: AsyncIterable<string>,
+  maxFrameBytes = runtimeMemoryBudget().maxWireBytes,
+  workAdmission: ResponseWorkAdmission = runtimeResponseWorkAdmission(),
+): AsyncIterable<RawSSEFrame> {
+  const acquired = workAdmission.acquire(0);
+  if (!acquired.ok) {
+    throw new UpstreamError(
+      "upstream_error",
+      "upstream response memory capacity is temporarily exhausted",
+    );
   }
-  const tail = parseRawSSEFrame(buffer, buffer);
-  if (tail !== null) yield tail;
+  const { lease } = acquired;
+  let buffer = "";
+  const resize = (wireBytes: number): void => {
+    if (lease.resize(wireBytes).ok) return;
+    throw new UpstreamError(
+      "upstream_error",
+      "upstream response memory capacity is temporarily exhausted",
+    );
+  };
+  try {
+    for await (const piece of raw) {
+      resize(Buffer.byteLength(buffer) + Buffer.byteLength(piece));
+      buffer += piece;
+      let sep = nextSSEBoundary(buffer);
+      while (sep !== null) {
+        const rawFrame = buffer.slice(0, sep.index + sep.length);
+        assertNativeSSEFrameFits(rawFrame, maxFrameBytes);
+        const frame = parseRawSSEFrame(buffer.slice(0, sep.index), rawFrame);
+        buffer = buffer.slice(sep.index + sep.length);
+        if (frame !== null) yield frame;
+        resize(Buffer.byteLength(buffer));
+        sep = nextSSEBoundary(buffer);
+      }
+      assertNativeSSEFrameFits(buffer, maxFrameBytes);
+    }
+    assertNativeSSEFrameFits(buffer, maxFrameBytes);
+    const tail = parseRawSSEFrame(buffer, buffer);
+    if (tail !== null) yield tail;
+  } finally {
+    lease.release();
+  }
 }
 
 // Accumulate assistant text from a VERBATIM Anthropic content_block_delta data
@@ -658,25 +730,6 @@ export function createMessagesPipeline(
 ): {
   run(ir: PipelineIR, identity: MessagesIdentity, signal: AbortSignal): Promise<PipelineRunResult>;
 } {
-  // Run a fail-open memory observe: deferred (FIFO) when a write queue is wired, else
-  // inline await (today). FIFO ordering keeps inbound before outbound per thread.
-  // `wake` (default true) asks the write queue to nudge the memory worker after this
-  // observe settles. The INBOUND observe passes false: the observer job must not be
-  // drained until the OUTBOUND turn is persisted (else the assistant turn is dropped
-  // from this run). Outbound observes use the default → the worker wakes once the
-  // whole turn has landed.
-  const runObserve = async (task: () => Promise<unknown>, wake = true): Promise<void> => {
-    if (writes !== undefined) {
-      writes.enqueueTask(
-        async () => {
-          await task();
-        },
-        { wakeOnSettle: wake },
-      );
-      return;
-    }
-    await task();
-  };
   return {
     async run(ir, identity, signal) {
       const meta = ir.metadata;
@@ -699,6 +752,22 @@ export function createMessagesPipeline(
         identity.caps?.allowFastMode === true,
       );
       const originalMessagesForMemory = [...(internal.messages as IRMessage[])];
+      const observeRetainedBytes = retainedRequestBytes(internal);
+      // Deferred observe closures retain normalized request strings. Their exact
+      // string-byte estimate is charged by WriteQueue with the runtime-derived JSON
+      // amplification; inline mode remains unchanged.
+      const runObserve = async (task: () => Promise<unknown>, wake = true): Promise<void> => {
+        if (writes !== undefined) {
+          writes.enqueueTask(
+            async () => {
+              await task();
+            },
+            { wakeOnSettle: wake, retainedBytes: observeRetainedBytes },
+          );
+          return;
+        }
+        await task();
+      };
 
       // Memory scope rides ir.metadata, already stamped by the route from the
       // request headers. Inject runs before inbound observe so this turn cannot

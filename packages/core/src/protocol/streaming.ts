@@ -1,3 +1,10 @@
+import { Buffer } from "node:buffer";
+import { UpstreamError } from "../provider/openai.js";
+import { runtimeMemoryBudget } from "../runtime/memory-budget.js";
+import {
+  type ResponseWorkAdmission,
+  runtimeResponseWorkAdmission,
+} from "../runtime/response-work-admission.js";
 import type { IRResponse } from "./ir.js";
 
 // Streaming primitives for the protocol layer (docs/05). Streaming correctness is
@@ -31,6 +38,18 @@ export interface SSEFrame {
   data: string;
 }
 
+function assertSSEFrameFits(frame: string, maxFrameBytes: number): void {
+  if (Buffer.byteLength(frame) <= maxFrameBytes) return;
+  throw new UpstreamError("upstream_error", "upstream SSE frame exceeds the runtime memory budget");
+}
+
+function responseWorkError(): UpstreamError {
+  return new UpstreamError(
+    "upstream_error",
+    "upstream response memory capacity is temporarily exhausted",
+  );
+}
+
 // Per the SSE spec a frame ends at a BLANK line. `data:`/`event:` fields may
 // repeat; multiple `data:` lines join with "\n". A leading single space after the
 // colon is stripped. `[DONE]` is just another data payload (the caller decides).
@@ -57,14 +76,29 @@ function parseFrame(block: string): SSEFrame | null {
  * byte (half-lines across chunks), CRLF/LF mixes, and multiple events packed into
  * one chunk. Yields one `SSEFrame` per blank-line-delimited block.
  */
-export async function* readSSE(stream: ReadableStream<Uint8Array>): AsyncIterable<SSEFrame> {
+export async function* readSSE(
+  stream: ReadableStream<Uint8Array>,
+  maxFrameBytes = runtimeMemoryBudget().maxWireBytes,
+  workAdmission: ResponseWorkAdmission = runtimeResponseWorkAdmission(),
+): AsyncIterable<SSEFrame> {
   const reader = stream.getReader();
+  const acquired = workAdmission.acquire(0);
+  if (!acquired.ok) {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+    throw responseWorkError();
+  }
+  const { lease } = acquired;
   const decoder = new TextDecoder();
   let buffer = "";
+  const resize = (wireBytes: number): void => {
+    if (!lease.resize(wireBytes).ok) throw responseWorkError();
+  };
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      resize(Buffer.byteLength(buffer) + value.byteLength);
       // `stream: true` keeps multibyte chars split across chunks intact.
       buffer += decoder.decode(value, { stream: true });
       // Normalize CRLF so we can split on a single blank line.
@@ -73,18 +107,29 @@ export async function* readSSE(stream: ReadableStream<Uint8Array>): AsyncIterabl
       while (sep !== -1) {
         const block = buffer.slice(0, sep);
         buffer = buffer.slice(sep + 2);
+        assertSSEFrameFits(block, maxFrameBytes);
         const frame = parseFrame(block);
         if (frame !== null) yield frame;
+        resize(Buffer.byteLength(buffer));
         sep = buffer.indexOf("\n\n");
       }
+      assertSSEFrameFits(buffer, maxFrameBytes);
     }
     // Flush any trailing frame that wasn't terminated by a blank line.
-    buffer += decoder.decode();
-    const tail = parseFrame(buffer.replace(/\r\n/g, "\n"));
+    const decodedTail = decoder.decode();
+    resize(Buffer.byteLength(buffer) + Buffer.byteLength(decodedTail));
+    buffer += decodedTail;
+    buffer = buffer.replace(/\r\n/g, "\n");
+    assertSSEFrameFits(buffer, maxFrameBytes);
+    const tail = parseFrame(buffer);
     if (tail !== null) yield tail;
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
   } finally {
     // Abort / client-disconnect cleanup: release the lock without throwing.
     reader.releaseLock();
+    lease.release();
   }
 }
 

@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { StoreConfig } from "@helm/shared";
+import { runtimeMemoryBudget } from "../runtime/memory-budget.js";
 import type {
   BudgetStore,
   ConfigStore,
@@ -35,6 +36,9 @@ import { SqliteOAuthUsageStore } from "./sqlite/oauth-usage.js";
 import { SqliteRateLimitStore } from "./sqlite/rate-limit.js";
 import { SqliteSignalStore } from "./sqlite/signals.js";
 import { SqliteTelemetryStore } from "./sqlite/telemetry.js";
+import { vacuumSqlite } from "./sqlite/vacuum.js";
+
+export { vacuumSqlite } from "./sqlite/vacuum.js";
 
 // The full set of Store-port implementations the gateway needs, plus a `close`
 // lifecycle hook. The driver (sqlite vs supabase) is chosen ONCE here by config;
@@ -54,9 +58,8 @@ export interface StoreSet {
   readonly oauthUsage: OAuthUsageStore;
   readonly oauthQuota: OAuthQuotaStore;
   // Reclaim on-disk space after a cleanup sweep. sqlite runs VACUUM (rewrites the
-  // file under an EXCLUSIVE lock — manual/off-hours only); postgres is a no-op (it
-  // autovacuums). Optional + driver-specific; the admin "Compact database" button
-  // calls it, never the scheduled runner.
+  // file under an EXCLUSIVE lock in the gateway's serialized off-hours maintenance
+  // window); postgres is a no-op because it autovacuums.
   readonly vacuum: () => Promise<void>;
   readonly close: () => Promise<void>;
 }
@@ -95,11 +98,12 @@ export async function createStore(opts: CreateStoreOptions): Promise<StoreSet> {
         oauthTokens: new SqliteOAuthTokenStore(db),
         oauthUsage: new SqliteOAuthUsageStore(db),
         oauthQuota: new SqliteOAuthQuotaStore(db),
-        // VACUUM cannot run inside a transaction; it takes an exclusive lock and
-        // rewrites the whole file. Manual "Compact database" only — never scheduled.
-        vacuum: async () => {
-          db.$sqlite.exec("VACUUM");
-        },
+        // VACUUM cannot run inside a transaction. The helper checkpoints WAL, sheds
+        // SQLite cache memory, uses file-backed temp storage, then restores pragmas.
+        vacuum: () =>
+          vacuumSqlite(db.$sqlite, {
+            maintenanceCacheBytes: runtimeMemoryBudget().sqliteMaintenanceCacheBytes,
+          }),
         close: async () => {
           db.$sqlite.close();
         },
