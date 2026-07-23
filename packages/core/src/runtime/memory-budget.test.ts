@@ -56,6 +56,18 @@ describe("deriveRuntimeMemoryBudget", () => {
     expect(budget.websocketMaxPayloadBytes).toBeGreaterThan(0);
   });
 
+  it("ignores the no-limit sentinel returned by process.constrainedMemory", () => {
+    const budget = deriveRuntimeMemoryBudget({
+      heapLimitBytes: 1_000,
+      constrainedMemoryBytes: Number.MAX_SAFE_INTEGER + 1,
+      rssBytes: 400,
+      heapTotalBytes: 300,
+      availableMemoryBytes: 1_600,
+    });
+
+    expect(budget.processLimitBytes).toBe(2_000);
+  });
+
   it("reduces websocket ingress capacity as non-heap RSS grows", () => {
     const quiet = deriveRuntimeMemoryBudget({
       heapLimitBytes: 1_000,

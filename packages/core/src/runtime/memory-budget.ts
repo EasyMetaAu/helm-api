@@ -31,7 +31,7 @@ export function deriveRuntimeMemoryBudget(input: {
     throw new Error("heapLimitBytes must be positive");
   }
   const constrained = input.constrainedMemoryBytes ?? 0;
-  const hasConstrainedLimit = Number.isFinite(constrained) && constrained > 0;
+  const hasConstrainedLimit = Number.isSafeInteger(constrained) && constrained > 0;
   const rssBytes =
     Number.isFinite(input.rssBytes) && (input.rssBytes ?? -1) >= 0
       ? Math.floor(input.rssBytes ?? 0)
