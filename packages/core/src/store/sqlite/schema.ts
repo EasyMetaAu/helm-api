@@ -117,6 +117,7 @@ export const sessionRevisions = sqliteTable(
     retainCount: integer("retain_count").notNull(),
     requestDeltaJson: text("request_delta_json").notNull(),
     requestEnvelopeJson: text("request_envelope_json").notNull(),
+    bodyBytes: integer("body_bytes"),
     responseId: text("response_id"),
     responseJson: text("response_json"),
     fidelity: text("fidelity").notNull(),

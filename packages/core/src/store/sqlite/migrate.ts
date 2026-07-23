@@ -1207,6 +1207,15 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // New rows record logical bytes before gzip. NULL marks legacy TEXT so reads can
+    // use SQLite length() without a deployment-time scan of a potentially huge table.
+    version: 42,
+    sql: `
+      ALTER TABLE session_revisions
+        ADD COLUMN body_bytes INTEGER;
+    `,
+  },
 ];
 
 function sqliteTableHasColumns(

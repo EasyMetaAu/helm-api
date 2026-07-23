@@ -32,6 +32,17 @@ import type { SqliteDb } from "./migrate.js";
 import { payloadBlobs, requestPayloads, sessionRevisions, sessions, telemetry } from "./schema.js";
 
 type TelemetryRow = typeof telemetry.$inferSelect;
+type SessionRevisionRow = typeof sessionRevisions.$inferSelect;
+
+function decodeSessionRevisionRow(row: SessionRevisionRow): SessionRevisionRecord {
+  const { bodyBytes: _, ...revision } = row;
+  return {
+    ...revision,
+    requestDeltaJson: decodePayloadValue(row.requestDeltaJson) ?? "",
+    requestEnvelopeJson: decodePayloadValue(row.requestEnvelopeJson) ?? "",
+    responseJson: decodePayloadValue(row.responseJson),
+  };
+}
 
 function boundedSessionPageLimit(options: SessionRevisionPageOptions): number {
   if (!Number.isSafeInteger(options.limit) || options.limit <= 0)
@@ -56,6 +67,41 @@ export class SqliteTelemetryStore implements TelemetryStore {
     private readonly db: SqliteDb,
     private readonly genId: () => string = randomUUID,
   ) {}
+
+  private sessionPreparedStmts:
+    | ReturnType<SqliteTelemetryStore["buildSessionWriteStmts"]>
+    | undefined;
+  private buildSessionWriteStmts() {
+    const db = this.db.$sqlite;
+    return {
+      insert: db.prepare(
+        `INSERT INTO session_revisions
+           (request_id, session_ref, sequence, parent_request_id, retain_count,
+            request_delta_json, request_envelope_json, body_bytes, response_id, response_json,
+            fidelity, created_at)
+         VALUES
+           (@requestId, @sessionRef, @sequence, @parentRequestId, @retainCount,
+            @requestDeltaJson, @requestEnvelopeJson, @bodyBytes, @responseId, @responseJson,
+            @fidelity, @createdAt)`,
+      ),
+      updateResponse: db.prepare(
+        `UPDATE session_revisions
+            SET response_id = @responseId,
+                response_json = @responseJson,
+                body_bytes = coalesce(
+                  body_bytes,
+                  length(CAST(request_delta_json AS BLOB)) +
+                  length(CAST(request_envelope_json AS BLOB))
+                ) + @responseBytes,
+                fidelity = @fidelity
+          WHERE request_id = @requestId`,
+      ),
+    };
+  }
+  private sessionWriteStmts() {
+    if (!this.sessionPreparedStmts) this.sessionPreparedStmts = this.buildSessionWriteStmts();
+    return this.sessionPreparedStmts;
+  }
 
   // Build one telemetry row (fresh id + denormalized status/cost). Shared by the
   // single and batch inserts so they can never drift.
@@ -135,11 +181,12 @@ export class SqliteTelemetryStore implements TelemetryStore {
         .get();
       if (existing) {
         if (existing.sessionRef !== input.sessionRef) throw new Error("request session mismatch");
+        const responseJson = input.responseJson;
         const responseBytes =
-          input.responseJson !== null && existing.responseJson === null
-            ? Buffer.byteLength(input.responseJson, "utf8")
+          responseJson !== null && existing.responseJson === null
+            ? Buffer.byteLength(responseJson, "utf8")
             : 0;
-        if (responseBytes === 0) return;
+        if (responseBytes === 0 || responseJson === null) return;
         const session = this.db
           .select({ storedBytes: sessions.storedBytes })
           .from(sessions)
@@ -156,15 +203,13 @@ export class SqliteTelemetryStore implements TelemetryStore {
           })
           .where(eq(sessions.sessionRef, input.sessionRef))
           .run();
-        this.db
-          .update(sessionRevisions)
-          .set({
-            responseId: input.responseId ?? null,
-            responseJson: input.responseJson,
-            fidelity: input.fidelity,
-          })
-          .where(eq(sessionRevisions.requestId, input.requestId))
-          .run();
+        this.sessionWriteStmts().updateResponse.run({
+          requestId: input.requestId,
+          responseId: input.responseId ?? null,
+          responseJson: encodePayloadText(responseJson),
+          responseBytes,
+          fidelity: input.fidelity,
+        });
         return;
       }
 
@@ -191,22 +236,20 @@ export class SqliteTelemetryStore implements TelemetryStore {
         throw new Error("session capture limit exceeded");
       }
       const sequence = session.revisionCount + 1;
-      this.db
-        .insert(sessionRevisions)
-        .values({
-          requestId: input.requestId,
-          sessionRef: input.sessionRef,
-          sequence,
-          parentRequestId: input.parentRequestId,
-          retainCount: input.retainCount,
-          requestDeltaJson: input.requestDeltaJson,
-          requestEnvelopeJson: input.requestEnvelopeJson,
-          responseId: input.responseId ?? null,
-          responseJson: input.responseJson,
-          fidelity: input.fidelity,
-          createdAt: at,
-        })
-        .run();
+      this.sessionWriteStmts().insert.run({
+        requestId: input.requestId,
+        sessionRef: input.sessionRef,
+        sequence,
+        parentRequestId: input.parentRequestId,
+        retainCount: input.retainCount,
+        requestDeltaJson: encodePayloadText(input.requestDeltaJson),
+        requestEnvelopeJson: encodePayloadText(input.requestEnvelopeJson),
+        bodyBytes: storedBytes,
+        responseId: input.responseId ?? null,
+        responseJson: input.responseJson === null ? null : encodePayloadText(input.responseJson),
+        fidelity: input.fidelity,
+        createdAt: atMs,
+      });
       this.db
         .update(sessions)
         .set({
@@ -255,7 +298,7 @@ export class SqliteTelemetryStore implements TelemetryStore {
       .where(eq(sessionRevisions.sessionRef, sessionRef))
       .orderBy(asc(sessionRevisions.sequence))
       .all()
-      .map((row) => ({ ...row }));
+      .map(decodeSessionRevisionRow);
   }
 
   async listSessionRevisionsPage(
@@ -268,10 +311,13 @@ export class SqliteTelemetryStore implements TelemetryStore {
       length(CAST(${sessionRevisions.sessionRef} AS BLOB)) +
       length(CAST(${sessionRevisions.requestId} AS BLOB)) +
       coalesce(length(CAST(${sessionRevisions.parentRequestId} AS BLOB)), 0) +
-      length(CAST(${sessionRevisions.requestDeltaJson} AS BLOB)) +
-      length(CAST(${sessionRevisions.requestEnvelopeJson} AS BLOB)) +
+      coalesce(
+        ${sessionRevisions.bodyBytes},
+        length(CAST(${sessionRevisions.requestDeltaJson} AS BLOB)) +
+        length(CAST(${sessionRevisions.requestEnvelopeJson} AS BLOB)) +
+        coalesce(length(CAST(${sessionRevisions.responseJson} AS BLOB)), 0)
+      ) +
       coalesce(length(CAST(${sessionRevisions.responseId} AS BLOB)), 0) +
-      coalesce(length(CAST(${sessionRevisions.responseJson} AS BLOB)), 0) +
       length(CAST(${sessionRevisions.fidelity} AS BLOB)) + 64
     `;
     const metadata = this.db
@@ -308,7 +354,7 @@ export class SqliteTelemetryStore implements TelemetryStore {
       )
       .orderBy(asc(sessionRevisions.sequence))
       .all()
-      .map((row) => ({ ...row }));
+      .map(decodeSessionRevisionRow);
     return {
       revisions,
       nextSequence: metadata.length > selected.length ? (selected.at(-1) ?? null) : null,
@@ -330,7 +376,7 @@ export class SqliteTelemetryStore implements TelemetryStore {
         ),
       )
       .get();
-    return row ? { ...row } : null;
+    return row ? decodeSessionRevisionRow(row) : null;
   }
 
   async pruneInactiveSessions(olderThanMs: number): Promise<number> {

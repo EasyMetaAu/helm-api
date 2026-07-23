@@ -64,6 +64,142 @@ function freshStore() {
 }
 
 describe("SqliteTelemetryStore", () => {
+  it("stores session bodies as gzip BLOBs and still reads legacy TEXT", async () => {
+    const db = createSqliteDb(":memory:");
+    const store = new SqliteTelemetryStore(db);
+    const requestDeltaJson = JSON.stringify(["event ".repeat(2_000)]);
+    const requestEnvelopeJson = JSON.stringify({ model: "x", instructions: "rule ".repeat(2_000) });
+    const responseJson = JSON.stringify({ output: "answer ".repeat(2_000) });
+
+    const revision = {
+      sessionRef: "s1",
+      accountId: "a1",
+      apiKeyId: "k1",
+      source: "header",
+      externalSessionId: "external-1",
+      requestId: "r1",
+      parentRequestId: null,
+      retainCount: 0,
+      requestDeltaJson,
+      requestEnvelopeJson,
+      responseId: "resp_1",
+      responseJson: null,
+      fidelity: "semantic",
+      createdAt: new Date(1_000),
+    } as const;
+    await store.upsertSessionRevision(revision);
+    await store.upsertSessionRevision({ ...revision, responseJson });
+
+    expect(
+      db.$sqlite
+        .prepare(
+          `SELECT typeof(request_delta_json) AS delta,
+                  typeof(request_envelope_json) AS envelope,
+                  typeof(response_json) AS response
+             FROM session_revisions WHERE request_id = 'r1'`,
+        )
+        .get(),
+    ).toEqual({ delta: "blob", envelope: "blob", response: "blob" });
+    expect(await store.listSessionRevisions("s1")).toEqual([
+      expect.objectContaining({ requestDeltaJson, requestEnvelopeJson, responseJson }),
+    ]);
+    expect(await store.getSessionRevisionByResponseId("s1", "resp_1")).toEqual(
+      expect.objectContaining({ requestDeltaJson, requestEnvelopeJson, responseJson }),
+    );
+    expect((await store.getSessionByRef("s1"))?.storedBytes).toBe(
+      Buffer.byteLength(requestDeltaJson + requestEnvelopeJson + responseJson, "utf8"),
+    );
+    await expect(
+      store.listSessionRevisionsPage("s1", { limit: 10, maxBytes: 1_024 }),
+    ).resolves.toEqual({ revisions: [], nextSequence: null, limited: true });
+    await expect(
+      store.listSessionRevisionsPage("s1", { limit: 10, maxBytes: 100_000 }),
+    ).resolves.toEqual({
+      revisions: [expect.objectContaining({ requestDeltaJson, requestEnvelopeJson, responseJson })],
+      nextSequence: null,
+      limited: false,
+    });
+
+    const legacy = '["legacy text"]';
+    db.$sqlite
+      .prepare("UPDATE session_revisions SET request_delta_json = ? WHERE request_id = 'r1'")
+      .run(legacy);
+    expect((await store.listSessionRevisions("s1"))[0]?.requestDeltaJson).toBe(legacy);
+    db.$sqlite.close();
+  });
+
+  it("pages mixed Session rows by uncompressed bytes and returns decoded text", async () => {
+    const db = createSqliteDb(":memory:");
+    const store = new SqliteTelemetryStore(db);
+    const put = (requestId: string, parentRequestId: string | null, body: string, at: number) =>
+      store.upsertSessionRevision({
+        sessionRef: "s-page",
+        accountId: "a1",
+        apiKeyId: "k1",
+        source: "header",
+        externalSessionId: "external-page",
+        requestId,
+        parentRequestId,
+        retainCount: 0,
+        requestDeltaJson: body,
+        requestEnvelopeJson: "{}",
+        responseId: null,
+        responseJson: null,
+        fidelity: "semantic",
+        createdAt: new Date(at),
+      });
+    const firstBody = JSON.stringify(["first ".repeat(1_000)]);
+    const secondBody = JSON.stringify(["second ".repeat(1_000)]);
+    await put("r1", null, firstBody, 1_000);
+    await put("r2", "r1", secondBody, 2_000);
+    db.$sqlite
+      .prepare(
+        "UPDATE session_revisions SET request_delta_json = ?, body_bytes = NULL WHERE request_id = 'r2'",
+      )
+      .run(secondBody);
+
+    const first = await store.listSessionRevisionsPage("s-page", {
+      limit: 1,
+      maxBytes: Buffer.byteLength(firstBody, "utf8") + 256,
+    });
+    expect(first).toEqual({
+      revisions: [
+        expect.objectContaining({
+          requestId: "r1",
+          requestDeltaJson: firstBody,
+          responseJson: null,
+        }),
+      ],
+      nextSequence: 1,
+      limited: false,
+    });
+    await expect(
+      store.listSessionRevisionsPage("s-page", {
+        afterSequence: first.nextSequence ?? undefined,
+        limit: 1,
+        maxBytes: 1,
+      }),
+    ).resolves.toEqual({ revisions: [], nextSequence: null, limited: true });
+    await expect(
+      store.listSessionRevisionsPage("s-page", {
+        afterSequence: first.nextSequence ?? undefined,
+        limit: 1,
+        maxBytes: Buffer.byteLength(secondBody, "utf8") + 256,
+      }),
+    ).resolves.toEqual({
+      revisions: [
+        expect.objectContaining({
+          requestId: "r2",
+          requestDeltaJson: secondBody,
+          responseJson: null,
+        }),
+      ],
+      nextSequence: null,
+      limited: false,
+    });
+    db.$sqlite.close();
+  });
+
   it("denormalizes latency for dashboard aggregates instead of reading decision_json", async () => {
     const db = createSqliteDb(":memory:");
     const store = new SqliteTelemetryStore(db);

@@ -190,6 +190,7 @@ describe("sqlite schema + migrations", () => {
       "retain_count",
       "request_delta_json",
       "request_envelope_json",
+      "body_bytes",
       "response_id",
       "response_json",
       "fidelity",
@@ -217,6 +218,54 @@ describe("sqlite schema + migrations", () => {
     expect(() => insertRevision.run("r-negative", 2, -1)).toThrow();
     expect(() => insertRevision.run("r-fractional", 2, 1.5)).toThrow();
     raw.close();
+  });
+
+  it("v42 adds Session body-byte metadata without scanning old bodies", () => {
+    const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v42-session-bytes-"));
+    const path = join(dir, "helm.db");
+    try {
+      const seed = new Database(path);
+      seed.exec(`
+        CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
+        CREATE TABLE session_revisions (
+          request_id TEXT PRIMARY KEY,
+          session_ref TEXT NOT NULL,
+          sequence INTEGER NOT NULL,
+          parent_request_id TEXT,
+          retain_count INTEGER NOT NULL,
+          request_delta_json TEXT NOT NULL,
+          request_envelope_json TEXT NOT NULL,
+          response_id TEXT,
+          response_json TEXT,
+          fidelity TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+        INSERT INTO session_revisions
+          (request_id, session_ref, sequence, retain_count, request_delta_json,
+           request_envelope_json, response_json, fidelity, created_at)
+        VALUES ('r1', 's1', 1, 0, '["\u4f60\u597d"]', '{"model":"x"}', NULL, 'semantic', 1);
+      `);
+      const record = seed.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)");
+      for (let version = 1; version <= 41; version++) record.run(version, 1);
+      seed.close();
+
+      runMigrations(path);
+
+      const after = new Database(path);
+      expect(after.prepare("SELECT body_bytes AS bodyBytes FROM session_revisions").get()).toEqual({
+        bodyBytes: null,
+      });
+      const schemaSql = (
+        after.prepare("SELECT sql FROM sqlite_master WHERE name = 'session_revisions'").get() as {
+          sql: string;
+        }
+      ).sql;
+      expect(schemaSql).toContain("body_bytes INTEGER");
+      expect(schemaSql).not.toContain("body_bytes INTEGER CHECK");
+      after.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("v39 adds and backfills per-thread admin activity summaries", () => {
