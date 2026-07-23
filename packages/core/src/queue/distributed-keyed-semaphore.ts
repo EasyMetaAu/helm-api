@@ -85,8 +85,8 @@ export function createDistributedKeyedSemaphore(
         return;
       }
       const leaseId = waiter.leaseId;
-      let acquired: { acquired: boolean; expiresAtMs: number };
-      const acquireStartedAt = Date.now();
+      let acquired: { acquired: boolean; expiresAtMs: number; reclaimedCount: number };
+      const acquireStartedAt = performance.now();
       try {
         acquired = await options.store.tryAcquire({
           keyId: key,
@@ -96,12 +96,27 @@ export function createDistributedKeyedSemaphore(
           ttlMs,
         });
       } catch {
+        options.log?.("warn", "concurrency.store_unavailable", {
+          key_id: key,
+          lease_id: leaseId,
+          owner_id: options.ownerId,
+          reason: "acquire_error",
+          wait_ms: Math.max(0, Math.round(performance.now() - acquireStartedAt)),
+        });
         if (queues.get(key)?.[0] === waiter) {
           removeWaiter(key, waiter);
           waiter.cleanup();
           waiter.resolve({ ok: false, reason: "unavailable" });
         }
         return;
+      }
+      if (acquired.reclaimedCount > 0) {
+        options.log?.("info", "concurrency.expired_reclaimed", {
+          key_id: key,
+          owner_id: options.ownerId,
+          reason: "expired_reclaimed",
+          reclaimed_count: acquired.reclaimedCount,
+        });
       }
       // Timeout, abort, or shutdown may remove this waiter while DB transaction is
       // in flight. If it acquired anyway, delete orphan immediately; never create a
@@ -111,7 +126,7 @@ export function createDistributedKeyedSemaphore(
           try {
             await options.store.release({ keyId: key, leaseId, ownerId: options.ownerId });
           } catch {
-            options.log?.("warn", "concurrency.lease.release_failed", {
+            options.log?.("warn", "concurrency.lease_release_failed", {
               key_id: key,
               lease_id: leaseId,
               owner_id: options.ownerId,
@@ -122,7 +137,20 @@ export function createDistributedKeyedSemaphore(
         return;
       }
       if (!acquired.acquired) {
-        retry = true;
+        options.log?.("info", "concurrency.lease_acquire_failed", {
+          key_id: key,
+          lease_id: leaseId,
+          owner_id: options.ownerId,
+          reason: "capacity_unavailable",
+          wait_ms: Math.max(0, Math.round(performance.now() - acquireStartedAt)),
+        });
+        if (args.maxQueue === 0) {
+          removeWaiter(key, waiter);
+          waiter.cleanup();
+          waiter.resolve({ ok: false, reason: "queue_full" });
+        } else {
+          retry = true;
+        }
         return;
       }
       removeWaiter(key, waiter);
@@ -143,7 +171,7 @@ export function createDistributedKeyedSemaphore(
             try {
               await options.store.release({ keyId: key, leaseId, ownerId: options.ownerId });
             } catch {
-              options.log?.("warn", "concurrency.lease.release_failed", {
+              options.log?.("warn", "concurrency.lease_release_failed", {
                 key_id: key,
                 lease_id: leaseId,
                 owner_id: options.ownerId,
@@ -158,42 +186,51 @@ export function createDistributedKeyedSemaphore(
         },
       };
       holders.add(holder);
-      const loseOwnership = (): void => {
-        if (released) return;
-        controller.abort("lease_lost");
+      let ownershipLost = false;
+      const loseOwnership = (reason: string): void => {
+        if (released || ownershipLost) return;
+        ownershipLost = true;
+        options.log?.("warn", "concurrency.lease_lost", {
+          key_id: key,
+          lease_id: leaseId,
+          owner_id: options.ownerId,
+          reason,
+        });
+        controller.abort("concurrency_lease_lost");
         void holder.release();
       };
-      const armOwnershipDeadline = (expiresAtMs: number): void => {
+      const armOwnershipDeadline = (operationStartedAt: number): void => {
         if (ownershipDeadline) clearTimeout(ownershipDeadline);
-        const remainingMs = expiresAtMs - Date.now();
+        // PostgreSQL remains authoritative for absolute expiry. The replica only
+        // enforces a conservative local bound using monotonic elapsed time, so Node
+        // wall-clock skew cannot immediately invalidate a freshly acquired lease.
+        const remainingMs = ttlMs - (performance.now() - operationStartedAt);
         if (remainingMs <= 0) {
-          loseOwnership();
+          loseOwnership("ownership_deadline");
           return;
         }
-        ownershipDeadline = setTimeout(loseOwnership, remainingMs);
+        ownershipDeadline = setTimeout(() => loseOwnership("ownership_deadline"), remainingMs);
         ownershipDeadline.unref?.();
       };
-      // DB timestamp is authoritative, but replica/DB clocks may differ. Never trust
-      // more than one local TTL from request start; response latency consumes TTL.
-      armOwnershipDeadline(Math.min(acquired.expiresAtMs, acquireStartedAt + ttlMs));
+      armOwnershipDeadline(acquireStartedAt);
       heartbeat = setInterval(() => {
         if (renewInFlight || released) return;
         renewInFlight = true;
-        const renewStartedAt = Date.now();
+        const renewStartedAt = performance.now();
         void options.store
           .renew({ keyId: key, leaseId, ownerId: options.ownerId, ttlMs })
           .then((renewed) => {
             renewInFlight = false;
             if (released) return;
             if (!renewed.renewed) {
-              loseOwnership();
+              loseOwnership("renew_rejected");
               return;
             }
-            armOwnershipDeadline(Math.min(renewed.expiresAtMs, renewStartedAt + ttlMs));
+            armOwnershipDeadline(renewStartedAt);
           })
           .catch(() => {
             renewInFlight = false;
-            loseOwnership();
+            loseOwnership("renew_error");
           });
       }, heartbeatMs);
       heartbeat.unref?.();
@@ -237,7 +274,9 @@ export function createDistributedKeyedSemaphore(
       if (args.signal?.aborted) return { ok: false, reason: "aborted" };
       const queue = queues.get(args.key) ?? [];
       queues.set(args.key, queue);
-      if (queue.length >= args.maxQueue) return { ok: false, reason: "queue_full" };
+      // One pending entry is the polling head. maxQueue counts only overflow
+      // waiters behind it, matching the local semaphore's queue-capacity contract.
+      if (queue.length > args.maxQueue) return { ok: false, reason: "queue_full" };
       return new Promise<DistributedAcquireResult>((resolve) => {
         const waiter: Waiter = {
           args,

@@ -1,10 +1,16 @@
+import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import {
+  createCircuitBreaker,
   createDistributedKeyedSemaphore,
   createPgDb,
   type DistributedKeyedSemaphore,
+  type ExecutionPlan,
   PgConcurrencyLeaseStore,
   type PgDb,
+  type ProviderClient,
+  type ProviderRegistry,
 } from "@helm/core";
+import { ERROR_CLASS_HTTP_STATUS, type InternalRequest } from "@helm/shared";
 import { expect, test } from "@playwright/test";
 import type { Hono } from "hono";
 import { type AppEnv, createApp } from "../src/app.js";
@@ -13,7 +19,13 @@ import {
   concurrencyMiddleware,
   createConcurrencyGate,
 } from "../src/middleware/concurrency.js";
-import { requestSignal } from "../src/middleware/limits.js";
+import { requestSignal, timeout } from "../src/middleware/limits.js";
+import { createExecute } from "../src/routes/execute.js";
+import {
+  type ImageAttempt,
+  type ImageChainTarget,
+  runImageChain,
+} from "../src/routes/image-chain.js";
 
 // This is intentionally request-level E2E rather than another PGlite contract test:
 // two independent Hono app dependency graphs and two independent postgres-js pools
@@ -38,6 +50,7 @@ interface Replica {
   manager: DistributedKeyedSemaphore;
   store: PgConcurrencyLeaseStore;
   ownerId: string;
+  deleteCurrentLease: (keyId: string) => Promise<void>;
   closeDb: () => Promise<void>;
   shutdown: () => Promise<void>;
 }
@@ -81,13 +94,17 @@ async function createReplica(options: ReplicaOptions): Promise<Replica> {
   const store = new PgConcurrencyLeaseStore(db);
   const ownerId = `e2e-${options.name}-${crypto.randomUUID()}`;
   let leaseSequence = 0;
+  let currentLeaseId = "";
   const manager = createDistributedKeyedSemaphore({
     store,
     ownerId,
     leaseTtlMs: options.ttlMs ?? 2_000,
     heartbeatIntervalMs: options.heartbeatMs ?? 500,
     random: () => 0,
-    createLeaseId: () => `${ownerId}-lease-${++leaseSequence}`,
+    createLeaseId: () => {
+      currentLeaseId = `${ownerId}-lease-${++leaseSequence}`;
+      return currentLeaseId;
+    },
   });
   const config: ConcurrencyGateConfig = {
     enabled: true,
@@ -130,6 +147,10 @@ async function createReplica(options: ReplicaOptions): Promise<Replica> {
     manager,
     store,
     ownerId,
+    deleteCurrentLease: async (keyId: string) => {
+      if (currentLeaseId === "") throw new Error("replica has no current lease to delete");
+      await store.release({ keyId, leaseId: currentLeaseId, ownerId });
+    },
     closeDb,
     shutdown: async () => {
       await manager.shutdown();
@@ -147,6 +168,124 @@ async function work(replica: Replica, keyId: string, workMs = 2, limit = 1): Pro
       "x-test-work-ms": String(workMs),
     },
   });
+}
+
+function leaseLossRegistry(aliases: string[]): ProviderRegistry {
+  const known = new Set(aliases);
+  return {
+    resolve(alias: string) {
+      if (!known.has(alias)) return { ok: false, error: { kind: "unknown_alias", alias } };
+      return {
+        ok: true,
+        value: {
+          alias,
+          providerName: alias,
+          providerModel: `wire/${alias}`,
+          baseUrl: "http://lease-loss.invalid",
+          apiKeyEnv: "LEASE_LOSS_TEST",
+          targetProviderProtocol: "openai_chat" as const,
+          providerRequiresCompatibilityRewrite: false,
+        },
+      };
+    },
+    list: () => aliases,
+  };
+}
+
+function leaseLossPlan(aliases: string[]): ExecutionPlan {
+  return { selected_lane: "balanced", candidate_chain: aliases, explicit_model: null };
+}
+
+function leaseLossRequest(stream = false): InternalRequest {
+  return {
+    request_id: `lease-loss-${crypto.randomUUID()}`,
+    protocol: "openai_chat",
+    account_id: "acct",
+    api_key_id: "key",
+    user_id: null,
+    org_id: null,
+    requested_model: "auto",
+    messages: [{ role: "user", content: "hello" }],
+    tools: null,
+    response_format: null,
+    attachments: null,
+    max_tokens: null,
+    stream,
+    metadata: {
+      conversation_id: null,
+      thread_id: null,
+      resource_id: null,
+      project_id: null,
+      memory_mode: "off",
+    },
+  };
+}
+
+function abortError(): Error {
+  return Object.assign(new Error("lease lost"), { name: "AbortError" });
+}
+
+async function waitForAbort(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return;
+  await new Promise<void>((resolve) =>
+    signal.addEventListener("abort", () => resolve(), { once: true }),
+  );
+}
+
+async function spawnLeaseHolderChild(
+  keyId: string,
+  ttlMs: number,
+): Promise<ChildProcessWithoutNullStreams> {
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", new URL("./lease-holder-child.ts", import.meta.url).pathname],
+    {
+      env: {
+        ...process.env,
+        PG_TEST_URL: requirePostgresUrl(),
+        LEASE_TEST_KEY_ID: keyId,
+        LEASE_TEST_TTL_MS: String(ttlMs),
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+  await new Promise<void>((resolve, reject) => {
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(
+      () => reject(new Error(`child replica readiness timeout: ${stderr}`)),
+      5_000,
+    );
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+      if (stdout.includes('"event":"lease-held"')) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      reject(
+        new Error(`child replica exited before ready: code=${code} signal=${signal} ${stderr}`),
+      );
+    });
+  });
+  return child;
+}
+
+async function acquireLease(replica: Replica, keyId: string) {
+  const held = await replica.manager.acquire({
+    key: keyId,
+    limit: 1,
+    maxQueue: 2,
+    timeoutMs: 2_000,
+  });
+  expect(held.ok).toBe(true);
+  if (!held.ok) throw new Error(`failed to acquire test lease: ${held.reason}`);
+  return held;
 }
 
 function streamApp(replica: Replica): {
@@ -244,17 +383,10 @@ test.describe("real PostgreSQL distributed concurrency leases", () => {
     }
   });
 
-  test("recovers capacity after replica crash within TTL plus five seconds", async () => {
+  test("recovers capacity after a child replica holding the lease is SIGKILLed", async () => {
     test.setTimeout(10_000);
     const ttlMs = 250;
     const state = providerState();
-    const replicaA = await createReplica({
-      name: "crash-a",
-      state,
-      ttlMs,
-      heartbeatMs: 1_000,
-      waitTimeoutMs: ttlMs + 5_000,
-    });
     const replicaB = await createReplica({
       name: "crash-b",
       state,
@@ -263,17 +395,17 @@ test.describe("real PostgreSQL distributed concurrency leases", () => {
       waitTimeoutMs: ttlMs + 5_000,
     });
     const keyId = `crash-${crypto.randomUUID()}`;
+    let child: ChildProcessWithoutNullStreams | undefined;
     try {
-      const crashedLease = await replicaA.manager.acquire({
-        key: keyId,
-        limit: 1,
-        maxQueue: 2,
-        timeoutMs: 1_000,
-      });
-      expect(crashedLease.ok).toBe(true);
-
+      child = await spawnLeaseHolderChild(keyId, ttlMs);
       const crashedAt = Date.now();
-      await replicaA.closeDb();
+      expect(child.kill("SIGKILL")).toBe(true);
+      const [exitCode, exitSignal] = await new Promise<[number | null, NodeJS.Signals | null]>(
+        (resolve) => child?.once("exit", (code, signal) => resolve([code, signal])),
+      );
+      expect(exitCode).toBeNull();
+      expect(exitSignal).toBe("SIGKILL");
+
       const recovered = await replicaB.manager.acquire({
         key: keyId,
         limit: 1,
@@ -283,10 +415,11 @@ test.describe("real PostgreSQL distributed concurrency leases", () => {
       const recoveryMs = Date.now() - crashedAt;
       expect(recovered.ok).toBe(true);
       expect(recoveryMs).toBeLessThanOrEqual(ttlMs + 5_000);
-      console.info(`[real-pg] crash_recovery_ms=${recoveryMs} ttl_ms=${ttlMs}`);
+      console.info(`[real-pg] child_sigkill=true crash_recovery_ms=${recoveryMs} ttl_ms=${ttlMs}`);
       if (recovered.ok) await recovered.release();
     } finally {
-      await Promise.all([replicaA.shutdown(), replicaB.shutdown()]);
+      if (child?.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await replicaB.shutdown();
     }
   });
 
@@ -321,60 +454,302 @@ test.describe("real PostgreSQL distributed concurrency leases", () => {
     }
   });
 
-  test("aborts the unified upstream signal on lease loss without provider cooldown", async () => {
-    test.setTimeout(10_000);
+  test("routes real-PG lease loss through production execute and runImageChain semantics", async () => {
+    test.setTimeout(20_000);
     const state = providerState();
     const replica = await createReplica({
-      name: "lease-loss-a",
+      name: "lease-loss-production",
       state,
       ttlMs: 400,
-      heartbeatMs: 50,
+      heartbeatMs: 40,
     });
-    const tamperDb = await createPgDb(requirePostgresUrl());
-    const tamperStore = new PgConcurrencyLeaseStore(tamperDb);
-    const keyId = `lease-loss-${crypto.randomUUID()}`;
+    try {
+      const textKey = `lease-loss-text-${crypto.randomUUID()}`;
+      const textLease = await acquireLease(replica, textKey);
+      const textEntered = deferred();
+      let primaryCalls = 0;
+      let fallbackCalls = 0;
+      const primary = {
+        chatCompletion: async (_request: unknown, options: { signal: AbortSignal }) => {
+          primaryCalls += 1;
+          textEntered.resolve();
+          await waitForAbort(options.signal);
+          throw abortError();
+        },
+        chatCompletionStream: () => {
+          throw new Error("unexpected stream call");
+        },
+      } as unknown as ProviderClient;
+      const fallback = {
+        chatCompletion: async () => {
+          fallbackCalls += 1;
+          return { id: "unexpected-fallback" };
+        },
+        chatCompletionStream: () => {
+          throw new Error("unexpected fallback stream call");
+        },
+      } as unknown as ProviderClient;
+      const textBreaker = createCircuitBreaker({
+        config: { failureThreshold: 1, cooldownMs: 60_000 },
+        now: Date.now,
+      });
+      const executeText = createExecute({
+        defaultProvider: primary,
+        providers: new Map([
+          ["primary", primary],
+          ["fallback", fallback],
+        ]),
+        registry: leaseLossRegistry(["primary", "fallback"]),
+        breaker: textBreaker,
+        catalog: new Map(),
+        now: Date.now,
+        signal: textLease.signal,
+      });
+      const textOutcomePromise = executeText(
+        leaseLossPlan(["primary", "fallback"]),
+        leaseLossRequest(),
+      );
+      await textEntered.promise;
+      await replica.deleteCurrentLease(textKey);
+      const textOutcome = await textOutcomePromise;
+      expect(textOutcome.final.status).toBe("error");
+      if (textOutcome.final.status !== "error") throw new Error("expected terminal text error");
+      expect(textOutcome.final.error.error_class).toBe("lane_unavailable");
+      expect(ERROR_CLASS_HTTP_STATUS[textOutcome.final.error.error_class]).toBe(503);
+      expect(textOutcome.attempts[0]).toMatchObject({
+        skip_reason: "concurrency_lease_lost",
+        error_class: "lane_unavailable",
+      });
+      expect(primaryCalls).toBe(1);
+      expect(fallbackCalls).toBe(0);
+      expect(textBreaker.getState("primary")).toBe("CLOSED");
+
+      for (const kind of ["openai", "gemini"] as const) {
+        const keyId = `lease-loss-${kind}-${crypto.randomUUID()}`;
+        const held = await acquireLease(replica, keyId);
+        const entered = deferred();
+        let calls = 0;
+        const imageBreaker = createCircuitBreaker({
+          config: { failureThreshold: 1, cooldownMs: 60_000 },
+          now: Date.now,
+        });
+        const targets: ImageChainTarget[] = [
+          {
+            alias: `${kind}-primary`,
+            providerModel: `${kind}-wire-primary`,
+            kind,
+            client: {} as ProviderClient,
+          },
+          {
+            alias: `${kind}-fallback`,
+            providerModel: `${kind}-wire-fallback`,
+            kind,
+            client: {} as ProviderClient,
+          },
+        ];
+        const attempt: ImageAttempt = async () => {
+          calls += 1;
+          entered.resolve();
+          await waitForAbort(held.signal);
+          throw abortError();
+        };
+        const outcomePromise = runImageChain(targets, imageBreaker, attempt, held.signal);
+        await entered.promise;
+        await replica.deleteCurrentLease(keyId);
+        const outcome = await outcomePromise;
+        expect(outcome.ok).toBe(false);
+        if (outcome.ok) throw new Error("expected terminal image error");
+        expect(outcome.aborted).toBe(false);
+        expect(outcome.errorClass).toBe("lane_unavailable");
+        expect(outcome.httpStatus).toBe(503);
+        expect(outcome.attempts[0]).toMatchObject({
+          skip_reason: "concurrency_lease_lost",
+          error_class: "lane_unavailable",
+        });
+        expect(calls).toBe(1);
+        expect(imageBreaker.getState(`${kind}-primary`)).toBe("CLOSED");
+      }
+
+      const streamKey = `lease-loss-stream-${crypto.randomUUID()}`;
+      const streamLease = await acquireLease(replica, streamKey);
+      const streamWaiting = deferred();
+      const streamLogs: Array<{ msg: string; fields: Record<string, unknown> }> = [];
+      async function* productionStream(): AsyncGenerator<string> {
+        yield 'data: {"choices":[{"delta":{"content":"first"}}]}\n\n';
+        streamWaiting.resolve();
+        await waitForAbort(streamLease.signal);
+        throw abortError();
+      }
+      const streamProvider = {
+        chatCompletion: async () => ({ id: "unexpected-non-stream" }),
+        chatCompletionStream: () => productionStream(),
+      } as unknown as ProviderClient;
+      const streamBreaker = createCircuitBreaker({
+        config: { failureThreshold: 1, cooldownMs: 60_000 },
+        now: Date.now,
+      });
+      const executeStream = createExecute({
+        defaultProvider: streamProvider,
+        providers: new Map([["stream-primary", streamProvider]]),
+        registry: leaseLossRegistry(["stream-primary"]),
+        breaker: streamBreaker,
+        catalog: new Map(),
+        now: Date.now,
+        signal: streamLease.signal,
+        log: (_level, msg, fields) => streamLogs.push({ msg, fields }),
+      });
+      const streamOutcome = await executeStream(
+        leaseLossPlan(["stream-primary"]),
+        leaseLossRequest(true),
+      );
+      expect(streamOutcome.final.status).toBe("ok");
+      const chunks: string[] = [];
+      let streamError: unknown;
+      const consume = (async () => {
+        try {
+          for await (const chunk of streamOutcome.stream as AsyncIterable<string>)
+            chunks.push(chunk);
+        } catch (error) {
+          streamError = error;
+        }
+      })();
+      await streamWaiting.promise;
+      await replica.deleteCurrentLease(streamKey);
+      await consume;
+      expect(streamError).toBeInstanceOf(Error);
+      expect(chunks.join("")).not.toContain("[DONE]");
+      expect(streamLogs).toContainEqual({
+        msg: "stream.truncated",
+        fields: {
+          alias: "stream-primary",
+          error_class: "lane_unavailable",
+          reason: "concurrency_lease_lost",
+        },
+      });
+      expect(streamBreaker.getState("stream-primary")).toBe("CLOSED");
+      console.info(
+        "[real-pg] production lease-loss text/image/interaction/stream failure=0 cooldown=0",
+      );
+    } finally {
+      await replica.shutdown();
+    }
+  });
+
+  test("leaves zero real-PG leases after provider error timeout client abort and stream error", async () => {
+    test.setTimeout(15_000);
+    const state = providerState();
+    const replica = await createReplica({
+      name: "exit-matrix",
+      state,
+      ttlMs: 500,
+      heartbeatMs: 100,
+      waitTimeoutMs: 2_000,
+    });
     const gate = createConcurrencyGate({
       semaphore: replica.manager,
       getConfig: () => ({ enabled: true, minSize: 2, multiplier: 0, waitTimeoutMs: 2_000 }),
     });
     const app = createApp({ logger: { log: () => {} } });
-    app.use("/upstream", async (c, next) => {
+    const keyFor = (path: string) => `exit-${path}-${crypto.randomUUID()}`;
+    const keys = new Map<string, string>();
+    app.use("/exit/*", async (c, next) => {
+      const path = c.req.path.split("/").at(-1) ?? "unknown";
+      const keyId = c.req.header("x-test-key") ?? keyFor(path);
+      keys.set(path, keyId);
       // biome-ignore lint/suspicious/noExplicitAny: request-level test identity seam
       (c as any).set("identity", { keyId, caps: { concurrencyLimit: 1 } });
       await next();
     });
-    app.use("/upstream", concurrencyMiddleware(gate));
-    const entered = deferred();
-    app.get("/upstream", async (c) => {
-      state.calls += 1;
-      entered.resolve();
-      const signal = requestSignal(c);
-      await new Promise<void>((resolve) =>
-        signal.addEventListener("abort", () => resolve(), { once: true }),
-      );
-      if (String(signal.reason).includes("lease_lost")) {
-        return c.json({ error: "lease_lost" }, 503);
-      }
-      state.failures += 1;
-      state.cooldowns += 1;
-      return c.json({ error: "provider_failure" }, 502);
+    app.use("/exit/request-timeout", timeout({ requestTimeoutMs: 25 }));
+    app.use("/exit/*", concurrencyMiddleware(gate));
+    app.get("/exit/provider-error", () => {
+      throw new Error("provider failed");
     });
-    try {
-      const responsePromise = app.request("/upstream");
-      await entered.promise;
-      await tamperStore.release({
-        keyId,
-        leaseId: `${replica.ownerId}-lease-1`,
-        ownerId: replica.ownerId,
+    app.get("/exit/request-timeout", async (c) => {
+      await waitForAbort(requestSignal(c));
+      await delay(10);
+      return c.text("late timeout completion");
+    });
+    const clientEntered = deferred();
+    app.get("/exit/client-abort", async (c) => {
+      clientEntered.resolve();
+      await waitForAbort(requestSignal(c));
+      throw Object.assign(new Error("client abort"), { name: "AbortError" });
+    });
+    app.get("/exit/stream-error", (c) => {
+      const release = c.get("concurrencyClaim")?.();
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode("first"));
+          setTimeout(() => {
+            void release?.().finally(() => controller.error(new Error("stream failed")));
+          }, 10);
+        },
+        async cancel() {
+          await release?.();
+        },
       });
-      const response = await responsePromise;
-      expect(response.status).toBe(503);
-      expect(state.calls).toBe(1);
-      expect(state.failures).toBe(0);
-      expect(state.cooldowns).toBe(0);
-      console.info("[real-pg] lease_loss provider_failures=0 provider_cooldowns=0");
+      return new Response(body);
+    });
+
+    const assertNoResidual = async (path: string): Promise<void> => {
+      const keyId = keys.get(path);
+      expect(keyId).toBeTruthy();
+      const probe = await replica.manager.acquire({
+        key: keyId as string,
+        limit: 1,
+        maxQueue: 0,
+        timeoutMs: 1_000,
+      });
+      expect(probe.ok).toBe(true);
+      if (probe.ok) await probe.release();
+    };
+
+    try {
+      const providerKey = keyFor("provider-error");
+      expect(
+        (
+          await app.request("/exit/provider-error", {
+            headers: { "x-test-key": providerKey },
+          })
+        ).status,
+      ).toBe(502);
+      await assertNoResidual("provider-error");
+
+      const timeoutKey = keyFor("request-timeout");
+      expect(
+        (
+          await app.request("/exit/request-timeout", {
+            headers: { "x-test-key": timeoutKey },
+          })
+        ).status,
+      ).toBe(504);
+      await delay(20);
+      await assertNoResidual("request-timeout");
+
+      const abortKey = keyFor("client-abort");
+      const controller = new AbortController();
+      const abortedRequest = app
+        .request("/exit/client-abort", {
+          headers: { "x-test-key": abortKey },
+          signal: controller.signal,
+        })
+        .catch(() => null);
+      await clientEntered.promise;
+      controller.abort("client_disconnect");
+      await abortedRequest;
+      await assertNoResidual("client-abort");
+
+      const streamKey = keyFor("stream-error");
+      const streamResponse = await app.request("/exit/stream-error", {
+        headers: { "x-test-key": streamKey },
+      });
+      await expect(streamResponse.text()).rejects.toThrow("stream failed");
+      await assertNoResidual("stream-error");
+      console.info(
+        "[real-pg] exit_matrix provider_error/timeout/client_abort/stream_error residual=0",
+      );
     } finally {
-      await tamperDb.$close();
       await replica.shutdown();
     }
   });

@@ -5,6 +5,7 @@ set -euo pipefail
 #   1. PG_TEST_URL (canonical CI/test harness input)
 #   2. HELM_TEST_POSTGRES_URL (backward-compatible local input)
 #   3. a hermetic digest-pinned PostgreSQL 17 + pgvector container
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PGVECTOR_IMAGE="pgvector/pgvector:0.8.1-pg17@sha256:3e8b3adfd27b5707128f60956f62a793c3c9326ea8cfaf0eab7adccb5d700b21"
 CONTAINER_ID=""
 CONTAINER_NAME="helm-api-e2e-pg-${$}-${RANDOM}"
@@ -67,9 +68,13 @@ else
   echo "[real-pg] hermetic PostgreSQL is ready"
 fi
 
-# Export both names so the Playwright real-PG suite and the older Vitest store
+# Export both names so the Playwright suite and the dedicated no-skip Vitest
 # contract use the same ephemeral database without logging credentials.
 export PG_TEST_URL="${TEST_POSTGRES_URL}"
 export HELM_TEST_POSTGRES_URL="${TEST_POSTGRES_URL}"
+
+REPOSITORY_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+pnpm --dir "$REPOSITORY_ROOT" exec vitest run \
+  --config apps/gateway/e2e/vitest.real-postgres.config.ts
 
 pnpm exec playwright test "$@"

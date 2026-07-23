@@ -1,6 +1,7 @@
 import { makeHelmError } from "@helm/shared";
 import type { Context, MiddlewareHandler } from "hono";
 import type { AppEnv } from "../app.js";
+import { REQUEST_TIMEOUT_REASON } from "../request-cancellation.js";
 import { HelmHttpError } from "./error-handler.js";
 
 export interface LimitsConfig {
@@ -34,7 +35,7 @@ export function timeout(cfg: LimitsConfig): MiddlewareHandler<AppEnv> {
     c.set("request_timeout", state);
     const timer = setTimeout(() => {
       state.timedOut = true;
-      controller.abort();
+      controller.abort(REQUEST_TIMEOUT_REASON);
     }, cfg.requestTimeoutMs);
     try {
       await Promise.race([
@@ -57,7 +58,30 @@ export function timeout(cfg: LimitsConfig): MiddlewareHandler<AppEnv> {
       ]);
     } catch (error) {
       clearTimeout(timer);
+      // The downstream abort listener can reject in the same turn as the timeout
+      // promise. Keep the timeout classification authoritative instead of letting
+      // that race surface a generic AbortError/client-abort 499.
+      if (state.timedOut && !c.req.raw.signal.aborted) {
+        throw new HelmHttpError(
+          makeHelmError({
+            error_class: "timeout",
+            message: "request timed out",
+            trace_id: traceId,
+          }),
+        );
+      }
       throw error;
+    }
+
+    if (state.timedOut && !c.req.raw.signal.aborted) {
+      clearTimeout(timer);
+      throw new HelmHttpError(
+        makeHelmError({
+          error_class: "timeout",
+          message: "request timed out",
+          trace_id: traceId,
+        }),
+      );
     }
 
     const response = c.res;

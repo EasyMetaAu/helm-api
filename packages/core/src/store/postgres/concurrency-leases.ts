@@ -21,7 +21,7 @@ export class PgConcurrencyLeaseStore implements ConcurrencyLeaseStore {
     ownerId: string;
     limit: number;
     ttlMs: number;
-  }): Promise<{ acquired: boolean; expiresAtMs: number }> {
+  }): Promise<{ acquired: boolean; expiresAtMs: number; reclaimedCount: number }> {
     return this.db.transaction(async (tx) => {
       await tx.execute(sql`
         INSERT INTO api_key_concurrency_state (key_id) VALUES (${input.keyId})
@@ -31,10 +31,12 @@ export class PgConcurrencyLeaseStore implements ConcurrencyLeaseStore {
         SELECT key_id FROM api_key_concurrency_state
         WHERE key_id = ${input.keyId} FOR UPDATE
       `);
-      await tx.execute(sql`
+      const reclaimed = await tx.execute(sql`
         DELETE FROM api_key_concurrency_leases
         WHERE key_id = ${input.keyId} AND expires_at <= clock_timestamp()
+        RETURNING lease_id
       `);
+      const reclaimedCount = resultRows<{ lease_id: string }>(reclaimed).length;
       const active = await tx.execute(sql`
         SELECT count(*)::integer AS count
         FROM api_key_concurrency_leases
@@ -45,14 +47,22 @@ export class PgConcurrencyLeaseStore implements ConcurrencyLeaseStore {
         const now = await tx.execute(
           sql`SELECT (extract(epoch FROM clock_timestamp()) * 1000)::bigint AS expires_at_ms`,
         );
-        return { acquired: false, expiresAtMs: epochMs(resultRows<TimestampRow>(now)[0]) };
+        return {
+          acquired: false,
+          expiresAtMs: epochMs(resultRows<TimestampRow>(now)[0]),
+          reclaimedCount,
+        };
       }
       const inserted = await tx.execute(sql`
         INSERT INTO api_key_concurrency_leases (lease_id, key_id, owner_id, expires_at)
         VALUES (${input.leaseId}, ${input.keyId}, ${input.ownerId}, clock_timestamp() + (${input.ttlMs} * interval '1 millisecond'))
         RETURNING (extract(epoch FROM expires_at) * 1000)::bigint AS expires_at_ms
       `);
-      return { acquired: true, expiresAtMs: epochMs(resultRows<TimestampRow>(inserted)[0]) };
+      return {
+        acquired: true,
+        expiresAtMs: epochMs(resultRows<TimestampRow>(inserted)[0]),
+        reclaimedCount,
+      };
     });
   }
 

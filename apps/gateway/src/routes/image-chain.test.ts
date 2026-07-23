@@ -125,6 +125,39 @@ describe("runImageChain", () => {
     expect(attempt).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    "openai",
+    "gemini",
+  ] as const)("lease loss is terminal 503 for the production %s image chain without fallback or breaker fault", async (kind) => {
+    const ac = new AbortController();
+    ac.abort("concurrency_lease_lost");
+    const breaker = fakeBreaker();
+    const attempt: ImageAttempt = vi
+      .fn()
+      .mockRejectedValue(Object.assign(new Error("lease lost"), { name: "AbortError" }));
+
+    const res = await runImageChain(
+      [target("primary", kind), target("fallback", kind)],
+      breaker,
+      attempt,
+      ac.signal,
+    );
+
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("expected terminal");
+    expect(res.aborted).toBe(false);
+    expect(res.errorClass).toBe("lane_unavailable");
+    expect(res.httpStatus).toBe(503);
+    expect(res.attempts[0]).toMatchObject({
+      alias: "primary",
+      skip_reason: "concurrency_lease_lost",
+      error_class: "lane_unavailable",
+    });
+    expect(breaker.recordAbort).toHaveBeenCalledWith("primary");
+    expect(breaker.recordFailure).not.toHaveBeenCalled();
+    expect(attempt).toHaveBeenCalledTimes(1);
+  });
+
   it("all providers failing → all_providers_failed (502)", async () => {
     const breaker = fakeBreaker();
     const attempt: ImageAttempt = vi

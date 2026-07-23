@@ -89,7 +89,7 @@ export interface ConcurrencyLeaseStore {
     ownerId: string;
     limit: number;
     ttlMs: number;
-  }): Promise<{ acquired: boolean; expiresAtMs: number }>;
+  }): Promise<{ acquired: boolean; expiresAtMs: number; reclaimedCount: number }>;
   renew(input: {
     keyId: string;
     leaseId: string;

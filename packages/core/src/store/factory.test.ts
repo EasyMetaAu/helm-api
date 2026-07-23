@@ -22,6 +22,7 @@ describe("createStore factory", () => {
     expect(store.telemetry).toBeDefined();
     expect(store.signals).toBeDefined();
     expect(store.rateLimit).toBeDefined();
+    expect(store.concurrencyLeases).toBeNull();
     expect(store.memory).toBeDefined();
     expect(store.config).toBeDefined();
     await store.close();

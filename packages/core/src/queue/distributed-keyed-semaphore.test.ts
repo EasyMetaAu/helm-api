@@ -8,7 +8,7 @@ interface LeaseStore {
     ownerId: string;
     limit: number;
     ttlMs: number;
-  }): Promise<{ acquired: boolean; expiresAtMs: number }>;
+  }): Promise<{ acquired: boolean; expiresAtMs: number; reclaimedCount?: number }>;
   renew(input: {
     keyId: string;
     leaseId: string;
@@ -41,6 +41,7 @@ interface FactoryOptions {
   pollIntervalMs: number;
   createLeaseId: () => string;
   random?: () => number;
+  log?: (level: "warn" | "info", message: string, fields: Record<string, unknown>) => void;
 }
 
 type DistributedSemaphoreFactory = (options: FactoryOptions) => DistributedSemaphore;
@@ -65,16 +66,32 @@ class FakeLeaseStore implements LeaseStore {
   releaseThrows = false;
   acquireDelayMs = 0;
   acquireResponseDelayMs = 0;
+  reclaimedCount = 0;
+  dbNow = () => Date.now();
 
   async tryAcquire(input: Parameters<LeaseStore["tryAcquire"]>[0]) {
     this.tryAcquireCalls.push(input);
     if (this.acquireDelayMs > 0) await delay(this.acquireDelayMs);
-    if (this.throwAcquire) throw new Error("database unavailable");
+    if (this.throwAcquire) {
+      throw new Error(
+        "database unavailable Authorization: Bearer plaintext-key secret_enc prompt response",
+      );
+    }
     const active = this.active.get(input.keyId) ?? new Set<string>();
     this.active.set(input.keyId, active);
-    if (active.size >= input.limit) return { acquired: false, expiresAtMs: Date.now() };
+    if (active.size >= input.limit) {
+      return {
+        acquired: false,
+        expiresAtMs: this.dbNow(),
+        reclaimedCount: this.reclaimedCount,
+      };
+    }
     active.add(input.leaseId);
-    const result = { acquired: true, expiresAtMs: Date.now() + input.ttlMs };
+    const result = {
+      acquired: true,
+      expiresAtMs: this.dbNow() + input.ttlMs,
+      reclaimedCount: this.reclaimedCount,
+    };
     if (this.acquireResponseDelayMs > 0) await delay(this.acquireResponseDelayMs);
     return result;
   }
@@ -82,7 +99,7 @@ class FakeLeaseStore implements LeaseStore {
   async renew(input: Parameters<LeaseStore["renew"]>[0]) {
     this.renewCalls.push(input);
     if (this.hangRenew) await new Promise<never>(() => {});
-    return { renewed: this.renews, expiresAtMs: Date.now() + input.ttlMs };
+    return { renewed: this.renews, expiresAtMs: this.dbNow() + input.ttlMs };
   }
 
   async release(input: Parameters<LeaseStore["release"]>[0]): Promise<void> {
@@ -94,6 +111,7 @@ class FakeLeaseStore implements LeaseStore {
 }
 
 const openManagers: DistributedSemaphore[] = [];
+const realDateNow = Date.now.bind(Date);
 let nextLeaseId = 0;
 
 function manager(store = new FakeLeaseStore(), overrides: Partial<FactoryOptions> = {}) {
@@ -125,6 +143,7 @@ async function delay(ms: number): Promise<void> {
 describe("createDistributedKeyedSemaphore", () => {
   afterEach(async () => {
     await Promise.all(openManagers.splice(0).map((semaphore) => semaphore.shutdown()));
+    vi.restoreAllMocks();
   });
 
   it("does not touch the lease store when disabled by an unlimited limit", async () => {
@@ -137,6 +156,85 @@ describe("createDistributedKeyedSemaphore", () => {
     expect(store.tryAcquireCalls).toEqual([]);
     expect(store.renewCalls).toEqual([]);
     expect(store.releaseCalls).toEqual([]);
+  });
+
+  it.each([
+    5 * 60_000,
+    -5 * 60_000,
+  ])("uses a monotonic local TTL after acquire with Node wall-clock skew %i ms", async (skewMs) => {
+    const store = new FakeLeaseStore();
+    store.dbNow = realDateNow;
+    vi.spyOn(Date, "now").mockImplementation(() => realDateNow() + skewMs);
+    const { semaphore } = manager(store, {
+      leaseTtlMs: 60,
+      heartbeatIntervalMs: 1_000,
+    });
+
+    const held = await semaphore.acquire(args());
+    expect(held.ok).toBe(true);
+    if (!held.ok) return;
+
+    await delay(5);
+    expect(held.signal.aborted).toBe(false);
+    await delay(70);
+    expect(held.signal.aborted).toBe(true);
+    expect(held.signal.reason).toBe("concurrency_lease_lost");
+  });
+
+  it.each([
+    5 * 60_000,
+    -5 * 60_000,
+  ])("uses a monotonic local TTL after renew with Node wall-clock skew %i ms", async (skewMs) => {
+    const store = new FakeLeaseStore();
+    store.dbNow = realDateNow;
+    const { semaphore } = manager(store, {
+      leaseTtlMs: 80,
+      heartbeatIntervalMs: 15,
+    });
+    const held = await semaphore.acquire(args());
+    expect(held.ok).toBe(true);
+    if (!held.ok) return;
+
+    vi.spyOn(Date, "now").mockImplementation(() => realDateNow() + skewMs);
+    await delay(25);
+
+    expect(store.renewCalls.length).toBeGreaterThan(0);
+    expect(held.signal.aborted).toBe(false);
+    await held.release();
+  });
+
+  it("lets maxQueue=0 perform one immediate probe without continuous polling", async () => {
+    const store = new FakeLeaseStore();
+    store.active.set("key-one", new Set(["other-replica-lease"]));
+    const { semaphore } = manager(store);
+
+    expect(await semaphore.acquire(args({ maxQueue: 0, timeoutMs: 100 }))).toEqual({
+      ok: false,
+      reason: "queue_full",
+    });
+    expect(store.tryAcquireCalls).toHaveLength(1);
+    await delay(30);
+    expect(store.tryAcquireCalls).toHaveLength(1);
+  });
+
+  it("counts one polling head separately from maxQueue=1 FIFO waiters", async () => {
+    const store = new FakeLeaseStore();
+    store.acquireDelayMs = 20;
+    const { semaphore } = manager(store);
+
+    const firstPromise = semaphore.acquire(args({ maxQueue: 1 }));
+    await delay(2);
+    const secondPromise = semaphore.acquire(args({ maxQueue: 1 }));
+    const third = await semaphore.acquire(args({ maxQueue: 1 }));
+    expect(third).toEqual({ ok: false, reason: "queue_full" });
+
+    const first = await firstPromise;
+    expect(first.ok).toBe(true);
+    if (first.ok) await first.release();
+
+    const second = await secondPromise;
+    expect(second.ok).toBe(true);
+    if (second.ok) await second.release();
   });
 
   it("keeps a per-replica FIFO and lets only its queue head poll the database", async () => {
@@ -228,6 +326,83 @@ describe("createDistributedKeyedSemaphore", () => {
     store.throwAcquire = true;
     const { semaphore } = manager(store);
     expect(await semaphore.acquire(args())).toEqual({ ok: false, reason: "unavailable" });
+  });
+
+  it("emits the exact lease event contract with whitelisted secret-safe fields", async () => {
+    const logs: Array<{
+      level: "warn" | "info";
+      message: string;
+      fields: Record<string, unknown>;
+    }> = [];
+    const log: NonNullable<FactoryOptions["log"]> = (level, message, fields) => {
+      logs.push({ level, message, fields });
+    };
+
+    const fullStore = new FakeLeaseStore();
+    fullStore.active.set("key-one", new Set(["other-lease"]));
+    const full = manager(fullStore, { log }).semaphore;
+    expect(await full.acquire(args({ maxQueue: 0 }))).toEqual({
+      ok: false,
+      reason: "queue_full",
+    });
+
+    const unavailableStore = new FakeLeaseStore();
+    unavailableStore.throwAcquire = true;
+    const unavailable = manager(unavailableStore, { log }).semaphore;
+    expect(await unavailable.acquire(args({ key: "key-unavailable" }))).toEqual({
+      ok: false,
+      reason: "unavailable",
+    });
+
+    const lifecycleStore = new FakeLeaseStore();
+    lifecycleStore.reclaimedCount = 2;
+    lifecycleStore.releaseThrows = true;
+    const lifecycle = manager(lifecycleStore, { log }).semaphore;
+    const held = await lifecycle.acquire(args({ key: "key-lifecycle" }));
+    expect(held.ok).toBe(true);
+    if (!held.ok) return;
+    lifecycleStore.renews = false;
+    await delay(25);
+    expect(held.signal.reason).toBe("concurrency_lease_lost");
+    await held.release();
+
+    const expectedEvents = new Set([
+      "concurrency.lease_acquire_failed",
+      "concurrency.lease_lost",
+      "concurrency.expired_reclaimed",
+      "concurrency.store_unavailable",
+      "concurrency.lease_release_failed",
+    ]);
+    expect(new Set(logs.map((entry) => entry.message))).toEqual(expectedEvents);
+
+    const allowedFields = new Set([
+      "key_id",
+      "lease_id",
+      "owner_id",
+      "reason",
+      "wait_ms",
+      "reclaimed_count",
+    ]);
+    for (const entry of logs) {
+      expect(expectedEvents.has(entry.message)).toBe(true);
+      expect(Object.keys(entry.fields).every((field) => allowedFields.has(field))).toBe(true);
+      expect(entry.fields.reason).toEqual(expect.any(String));
+    }
+    expect(
+      logs.find((entry) => entry.message === "concurrency.expired_reclaimed")?.fields,
+    ).toMatchObject({ key_id: "key-lifecycle", owner_id: "replica-a", reclaimed_count: 2 });
+
+    const serialized = JSON.stringify(logs);
+    for (const forbidden of [
+      "plaintext-key",
+      "secret_enc",
+      "Authorization",
+      "prompt",
+      "response",
+      "Bearer",
+    ]) {
+      expect(serialized).not.toContain(forbidden);
+    }
   });
 
   it("makes concurrent release callers await the same asynchronous DB release", async () => {

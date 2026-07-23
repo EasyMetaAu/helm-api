@@ -19,6 +19,11 @@ export default defineConfig({
             // `$lib`/`$app` aliases, no .svelte imports) run in the node project.
             "apps/portal/src/lib/**/*.test.ts",
           ],
+          exclude: [
+            "**/node_modules/**",
+            "**/dist/**",
+            "packages/core/src/store/postgres/concurrency-leases.real-postgres.test.ts",
+          ],
           // The postgres store suite opens an in-process PGlite (WASM Postgres)
           // per test. Under a full parallel run, many WASM cold-starts contend for
           // CPU and the default 5s ceiling is occasionally exceeded — a load flake,

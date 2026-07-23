@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as storeExports from "../index.js";
 import type { PgDb } from "./migrate.js";
-import { createPgDb, createPgliteDb, runPgMigrations } from "./migrate.js";
+import { createPgliteDb, runPgMigrations } from "./migrate.js";
 
 interface LeaseStore {
   tryAcquire(input: {
@@ -11,7 +11,7 @@ interface LeaseStore {
     ownerId: string;
     limit: number;
     ttlMs: number;
-  }): Promise<{ acquired: boolean; expiresAtMs: number }>;
+  }): Promise<{ acquired: boolean; expiresAtMs: number; reclaimedCount?: number }>;
   renew(input: {
     keyId: string;
     leaseId: string;
@@ -50,9 +50,6 @@ async function close(db: PgDb): Promise<void> {
 }
 
 // Canonical e2e input wins; keep the original local-test variable compatible.
-const realPostgresUrl = process.env.PG_TEST_URL ?? process.env.HELM_TEST_POSTGRES_URL;
-const realPostgresIt = realPostgresUrl ? it : it.skip;
-
 describe("PgConcurrencyLeaseStore", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -170,47 +167,6 @@ describe("PgConcurrencyLeaseStore", () => {
     }
   });
 
-  realPostgresIt(
-    "bases expiry on statement time after waiting for a row lock across two pools",
-    async () => {
-      const dbA = await createPgDb(realPostgresUrl as string);
-      const dbB = await createPgDb(realPostgresUrl as string);
-      const keyId = `clock-lock-${crypto.randomUUID()}`;
-      try {
-        const lockHeld = dbA.transaction(async (tx) => {
-          await tx.execute(sql`
-            INSERT INTO api_key_concurrency_state (key_id) VALUES (${keyId})
-            ON CONFLICT (key_id) DO NOTHING
-          `);
-          await tx.execute(sql`
-            SELECT key_id FROM api_key_concurrency_state
-            WHERE key_id = ${keyId} FOR UPDATE
-          `);
-          await new Promise((resolve) => setTimeout(resolve, 150));
-        });
-        await new Promise((resolve) => setTimeout(resolve, 25));
-        const startedAt = Date.now();
-        const attempt = leaseStore(dbB).tryAcquire({
-          keyId,
-          leaseId: "delayed-lease",
-          ownerId: "replica-b",
-          limit: 1,
-          ttlMs: 200,
-        });
-        await lockHeld;
-        const acquired = await attempt;
-
-        expect(acquired.acquired).toBe(true);
-        expect(acquired.expiresAtMs).toBeGreaterThanOrEqual(startedAt + 300);
-      } finally {
-        await dbA.execute(sql`DELETE FROM api_key_concurrency_leases WHERE key_id = ${keyId}`);
-        await dbA.execute(sql`DELETE FROM api_key_concurrency_state WHERE key_id = ${keyId}`);
-        await Promise.all([close(dbA), close(dbB)]);
-      }
-    },
-    30_000,
-  );
-
   it("reclaims an expired lease before counting active holders", async () => {
     const db = await createPgliteDb();
     try {
@@ -228,17 +184,15 @@ describe("PgConcurrencyLeaseStore", () => {
       ).toBe(true);
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      expect(
-        (
-          await store.tryAcquire({
-            keyId: "reclaim-key",
-            leaseId: "replacement-lease",
-            ownerId: "live-replica",
-            limit: 1,
-            ttlMs: 30_000,
-          })
-        ).acquired,
-      ).toBe(true);
+      const replacement = await store.tryAcquire({
+        keyId: "reclaim-key",
+        leaseId: "replacement-lease",
+        ownerId: "live-replica",
+        limit: 1,
+        ttlMs: 30_000,
+      });
+      expect(replacement.acquired).toBe(true);
+      expect(replacement.reclaimedCount).toBe(1);
     } finally {
       await close(db);
     }
