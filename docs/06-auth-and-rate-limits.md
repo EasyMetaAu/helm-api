@@ -140,6 +140,17 @@ The stored record (`ApiKeyRecord`, single source of truth in
 All of these are resolved at auth time onto `AuthIdentity.caps` and threaded
 through the request — downstream code reads the caps, never the store.
 
+### Distributed concurrency leases
+
+SQLite keeps process-local FIFO concurrency enforcement. With `store.driver: supabase`,
+PostgreSQL leases make each `key_id` limit cluster-global across gateway replicas. A
+lease is owned by one replica, renewed every 10s, and expires after 30s by default;
+expiry and reclamation use PostgreSQL time, not replica clocks. A crash can therefore
+hold capacity until TTL expiry. Lease-store acquisition failure fails closed with 503
+before provider routing; it never falls back to local admission. Lowering a limit does
+not revoke existing leases. Roll back gateway code only after all replicas are stopped;
+the additive lease tables may remain safely and expire stale rows automatically.
+
 - **Hash-auth + encrypted recovery.** The store port's `CreateKeyInput` has no
   plaintext field, so the persistence layer is structurally unable to store a raw
   key. It may store `secret_enc`, an AES-GCM ciphertext encrypted with

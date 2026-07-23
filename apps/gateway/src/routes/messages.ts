@@ -423,6 +423,13 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
         signal: requestSignal(c),
       });
       if (!acquired.ok) {
+        if (acquired.reason === "unavailable") {
+          return sendError(c, {
+            error_class: "lane_unavailable",
+            message: "concurrency lease unavailable",
+            trace_id: traceId,
+          });
+        }
         c.header("retry-after", String(acquired.retryAfterSeconds));
         return sendError(c, {
           error_class: "rate_limited",
@@ -433,6 +440,10 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
           trace_id: traceId,
         });
       }
+      c.set(
+        "concurrency_signal",
+        AbortSignal.any([requestSignal(c), acquired.signal ?? requestSignal(c)]),
+      );
       c.set("concurrencyRelease", acquired.release);
     }
 
@@ -642,7 +653,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
           // emit NO error frame. Any other throw — incl. a PipelineError when all
           // providers failed before the stream started — emits a TERMINAL Anthropic
           // error event so the client never sees a silently truncated stream.
-          if (!isAbort(err, c.req.raw.signal)) {
+          if (!isAbort(err, requestSignal(c))) {
             const errorClass =
               err instanceof PipelineError
                 ? err.error_class
@@ -665,7 +676,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
             await sse.writeSSE({ event: "error", data });
           }
         } finally {
-          releaseConcurrency?.();
+          await releaseConcurrency?.();
           try {
             await withSseCaptureRelease(captured, async () => {
               // Record AFTER releaseConcurrency (never extend the hold) and AFTER the

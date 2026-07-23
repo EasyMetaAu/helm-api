@@ -1519,6 +1519,33 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(order).not.toContain("route");
   });
 
+  it("returns a Responses-shaped 503 when the concurrency lease store is unavailable, without routing", async () => {
+    const acquire = vi.fn().mockResolvedValue({
+      ok: false as const,
+      reason: "unavailable" as const,
+      retryAfterSeconds: 0,
+    });
+    const { deps, order } = makeDeps({ concurrencyGate: { acquire } });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+
+    expect(res.status).toBe(503);
+    expect((await res.json()) as unknown).toMatchObject({
+      error: {
+        type: "api_error",
+        code: "lane_unavailable",
+        message: "concurrency lease unavailable",
+      },
+    });
+    expect(acquire).toHaveBeenCalledOnce();
+    expect(order).not.toContain("route");
+  });
+
   it("rejects a malformed JSON body with 400 invalid_request, without routing", async () => {
     const { deps, order } = makeDeps();
     const app = buildApp(deps);
@@ -1554,6 +1581,35 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(frames.at(-1)?.event).toBe("response.completed");
     // No [DONE] sentinel on the Responses surface.
     expect(frames.some((f) => f.data === "[DONE]")).toBe(false);
+  });
+
+  it("awaits asynchronous concurrency release after a streaming response closes", async () => {
+    const releaseStarted = deferred<void>();
+    let finishRelease!: () => void;
+    const releaseMayFinish = new Promise<void>((resolve) => {
+      finishRelease = resolve;
+    });
+    const release = vi.fn(async () => {
+      releaseStarted.resolve(undefined);
+      await releaseMayFinish;
+    });
+    const { deps } = makeDeps({
+      concurrencyGate: { acquire: async () => ({ ok: true as const, release }) },
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+
+    const bodyDone = res.text();
+    await releaseStarted.promise;
+    expect(await Promise.race([bodyDone, shortTimeout()])).toBe("timeout");
+    finishRelease();
+    await bodyDone;
+    expect(release).toHaveBeenCalledOnce();
   });
 
   it("stream:true does not duplicate the Responses prelude produced by the pipeline", async () => {

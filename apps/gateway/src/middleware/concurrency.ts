@@ -1,6 +1,9 @@
-import type { KeyedSemaphore } from "@helm/core";
-import type { MiddlewareHandler } from "hono";
+import type { DistributedKeyedSemaphore, KeyedSemaphore } from "@helm/core";
+import type { Context, MiddlewareHandler } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
+import type { AppEnv } from "../app.js";
+import { openAIErrorEnvelope } from "./error-handler.js";
+import { requestSignal } from "./limits.js";
 
 // Per-API-key concurrency overflow queue (issue #93, feature A). Glue ONLY: the
 // counting semaphore (FIFO handoff, timeout, abort, watchdog) lives in core;
@@ -21,8 +24,12 @@ export interface ConcurrencyGateConfig {
 }
 
 export type ConcurrencyAcquireResult =
-  | { ok: true; release: () => void }
-  | { ok: false; reason: "queue_full" | "timeout" | "aborted"; retryAfterSeconds: number };
+  | { ok: true; signal?: AbortSignal; release: () => void | Promise<void> }
+  | {
+      ok: false;
+      reason: "queue_full" | "timeout" | "aborted" | "unavailable";
+      retryAfterSeconds: number;
+    };
 
 // Injected into the self-auth routes (messages / responses / gemini) the same
 // way their RateLimiterPort is — and consumed by concurrencyMiddleware for the
@@ -36,13 +43,17 @@ export interface ConcurrencyGatePort {
 }
 
 export interface ConcurrencyGateDeps {
-  semaphore: KeyedSemaphore;
+  semaphore: KeyedSemaphore | DistributedKeyedSemaphore;
   // Live settings thunk (re-bound by the admin PUT) — read fresh on every
   // acquire so the toggle/knobs apply without a restart.
   getConfig: () => ConcurrencyGateConfig;
 }
 
-const NOOP_LEASE = { ok: true as const, release: (): void => {} };
+const NOOP_LEASE = {
+  ok: true as const,
+  signal: new AbortController().signal,
+  release: async (): Promise<void> => {},
+};
 
 export function createConcurrencyGate(deps: ConcurrencyGateDeps): ConcurrencyGatePort {
   return {
@@ -61,10 +72,17 @@ export function createConcurrencyGate(deps: ConcurrencyGateDeps): ConcurrencyGat
         timeoutMs: cfg.waitTimeoutMs,
         signal,
       });
-      if (result.ok) return result;
-      // queue_full: the queue itself is saturated — retry almost immediately
-      // (slots churn fast). timeout: the key is persistently over capacity —
-      // suggest a slightly longer backoff.
+      if (result.ok) {
+        return {
+          ok: true,
+          signal: "signal" in result ? result.signal : signal,
+          release: async () => {
+            await result.release();
+          },
+        };
+      }
+      // queue_full: queue itself saturated. PostgreSQL unavailability is a
+      // fail-closed boundary, rendered as 503 before provider execution.
       return {
         ok: false,
         reason: result.reason,
@@ -82,13 +100,13 @@ declare module "hono" {
     // before returning streamSSE and releases it inside the stream's finally;
     // an unclaimed lease (non-stream, or a throw before the stream started) is
     // released by the middleware. Releases are idempotent either way.
-    concurrencyClaim?: () => () => void;
+    concurrencyClaim?: () => () => void | Promise<void>;
     // Self-auth surfaces (messages / responses / gemini): the HANDLER acquires
     // (auth happens inside it) and parks the release here; the route-scoped
     // concurrencyReleaseGuard frees an unclaimed lease on ANY exit path. A
     // stream handler claims by clearing this var and releasing in its own
     // finally instead.
-    concurrencyRelease?: (() => void) | undefined;
+    concurrencyRelease?: (() => void | Promise<void>) | undefined;
   }
 }
 
@@ -99,12 +117,18 @@ declare module "hono" {
 // onError. Stream handlers claim the lease (clear the var) and release in their
 // own finally, since this guard runs as soon as the Response is returned —
 // before the stream body has finished. Releases are idempotent.
-export function concurrencyReleaseGuard(): MiddlewareHandler {
+async function releaseClaim(c: Context<AppEnv>): Promise<void> {
+  const release = c.get("concurrencyRelease");
+  c.set("concurrencyRelease", undefined);
+  await release?.();
+}
+
+export function concurrencyReleaseGuard(): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     try {
       await next();
     } finally {
-      c.get("concurrencyRelease")?.();
+      await releaseClaim(c);
     }
   };
 }
@@ -123,9 +147,17 @@ export function concurrencyMiddleware(gate: ConcurrencyGatePort): MiddlewareHand
     const acquired = await gate.acquire({
       keyId,
       limit: identity?.caps?.concurrencyLimit ?? null,
-      signal: c.req.raw.signal,
+      signal: requestSignal(c as never),
     });
     if (!acquired.ok) {
+      if (acquired.reason === "unavailable") {
+        const { status, body } = openAIErrorEnvelope({
+          error_class: "lane_unavailable",
+          message: "concurrency lease unavailable",
+          trace_id: c.get("trace_id") ?? "unknown",
+        });
+        return c.json(body, status as ContentfulStatusCode);
+      }
       c.header("retry-after", String(acquired.retryAfterSeconds));
       return c.json(
         {
@@ -142,6 +174,12 @@ export function concurrencyMiddleware(gate: ConcurrencyGatePort): MiddlewareHand
         429 as ContentfulStatusCode,
       );
     }
+    // The lease manager's signal includes ownership loss. Compose it with the
+    // preexisting timeout/client signal so all downstream paths use one signal.
+    c.set(
+      "concurrency_signal",
+      AbortSignal.any([requestSignal(c as never), acquired.signal ?? c.req.raw.signal]),
+    );
     let claimed = false;
     c.set("concurrencyClaim", () => {
       claimed = true;
@@ -150,7 +188,7 @@ export function concurrencyMiddleware(gate: ConcurrencyGatePort): MiddlewareHand
     try {
       await next();
     } finally {
-      if (!claimed) acquired.release();
+      if (!claimed) await acquired.release();
     }
   };
 }

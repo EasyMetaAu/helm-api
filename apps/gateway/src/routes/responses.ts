@@ -792,6 +792,15 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       signal: requestSignal(c),
     });
     if (!acquired.ok) {
+      if (acquired.reason === "unavailable") {
+        throw new HelmHttpError(
+          makeHelmError({
+            error_class: "lane_unavailable",
+            message: "concurrency lease unavailable",
+            trace_id: c.get("trace_id"),
+          }),
+        );
+      }
       c.header("retry-after", String(acquired.retryAfterSeconds));
       throw new HelmHttpError(
         makeHelmError({
@@ -804,6 +813,10 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         }),
       );
     }
+    c.set(
+      "concurrency_signal",
+      AbortSignal.any([requestSignal(c), acquired.signal ?? requestSignal(c)]),
+    );
     c.set("concurrencyRelease", acquired.release);
   };
 
@@ -1234,7 +1247,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           // before the stream started — writes a SINGLE terminal Responses-shaped
           // error event DIRECTLY into the stream. We CANNOT throw here (the stream
           // has already started; onError would never see it).
-          if (isAbort(err, c.req.raw.signal)) {
+          if (isAbort(err, requestSignal(c))) {
             caughtAbort = true;
           } else {
             caughtErrorReason =
@@ -1263,7 +1276,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
             await sse.writeSSE({ event: "error", data });
           }
         } finally {
-          releaseConcurrency?.();
+          await releaseConcurrency?.();
           const streamOutcome =
             result === null
               ? null

@@ -684,6 +684,13 @@ export {
   type TokenManagerDeps,
   TokenRefreshError,
 } from "./provider/token-manager.js";
+export {
+  createDistributedKeyedSemaphore,
+  type DistributedAcquireArgs,
+  type DistributedAcquireResult,
+  type DistributedKeyedSemaphore,
+  type DistributedKeyedSemaphoreOptions,
+} from "./queue/distributed-keyed-semaphore.js";
 // In-memory request queueing primitives (issue #93): per-key counting semaphore
 // with FIFO overflow queue (feature A), per-key serial gate with inter-request
 // delay (feature B), and the user-turn detector. Single-process by design.
@@ -827,6 +834,7 @@ export {
   PERSISTED_SESSION_MAX_REVISIONS,
   PERSISTED_SESSION_MAX_STORED_BYTES,
   PgBudgetStore,
+  PgConcurrencyLeaseStore,
   PgConfigStore,
   type PgDb,
   PgKeyStore,
@@ -860,6 +868,7 @@ export type {
   BudgetDim,
   BudgetPeekResult,
   BudgetStore,
+  ConcurrencyLeaseStore,
   ConfigStore,
   CreateKeyInput,
   InsertPayloadInput,

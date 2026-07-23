@@ -13,7 +13,7 @@ export interface RequestTimeoutState {
 }
 
 export function requestSignal(c: Context<AppEnv>): AbortSignal {
-  return c.get("request_timeout")?.signal ?? c.req.raw.signal;
+  return c.get("concurrency_signal") ?? c.get("request_timeout")?.signal ?? c.req.raw.signal;
 }
 
 export function requestTimedOut(c: Context<AppEnv>): boolean {
@@ -55,8 +55,52 @@ export function timeout(cfg: LimitsConfig): MiddlewareHandler<AppEnv> {
           });
         }),
       ]);
-    } finally {
+    } catch (error) {
       clearTimeout(timer);
+      throw error;
     }
+
+    const response = c.res;
+    if (response.body === null) {
+      clearTimeout(timer);
+      return;
+    }
+    const reader = response.body.getReader();
+    let finished = false;
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      reader.releaseLock();
+    };
+    const body = new ReadableStream<Uint8Array>({
+      async pull(streamController) {
+        try {
+          const chunk = await reader.read();
+          if (chunk.done) {
+            finish();
+            streamController.close();
+          } else {
+            streamController.enqueue(chunk.value);
+          }
+        } catch (error) {
+          finish();
+          streamController.error(error);
+        }
+      },
+      async cancel(reason) {
+        clearTimeout(timer);
+        try {
+          await reader.cancel(reason);
+        } finally {
+          finish();
+        }
+      },
+    });
+    c.res = new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
   };
 }

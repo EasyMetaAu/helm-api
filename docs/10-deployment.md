@@ -16,6 +16,13 @@ deployment is **Docker**.
   [02 · Architecture](02-architecture.md)).
 - **No extra services required.** Helm needs no Redis or message queue; rate
   limiting, caches, and the background workers are in-process / store-backed.
+- **Replica topology.** SQLite concurrency caps are single-container/process only.
+  Multiple gateway replicas require `store.driver: supabase`: PostgreSQL leases then
+  enforce API-key concurrency cluster-wide. A dead replica's slots expire after the
+  lease TTL (30s default), so plan rollout/crash capacity for that window. Lease DB
+  failure rejects new limited requests with 503 rather than degrading to per-replica
+  limits. Lease schema is additive; rollback gateway binaries after draining/stopping
+  replicas, while leaving tables in place is safe.
 
 ## Docker
 
@@ -251,6 +258,19 @@ Node's native `--env-file-if-exists` flag. With no complete Admin credentials it
 opens the same `/setup` flow as Docker. `pnpm dev` starts only the Admin Vite
 server and is not a complete Helm runtime. For automation, pre-populate `.env`
 from `.env.example`; a provider key is still optional.
+
+### Real PostgreSQL E2E
+
+`pnpm test:e2e` always runs the distributed-concurrency acceptance suite against
+real PostgreSQL; PGlite does not satisfy that gate. The harness resolves its test
+URL in this order: `PG_TEST_URL`, then the backward-compatible
+`HELM_TEST_POSTGRES_URL`. If neither is set, it starts a disposable PostgreSQL 17
++ pgvector container on a random local port using the immutable image
+`pgvector/pgvector:0.8.1-pg17@sha256:3e8b3adfd27b5707128f60956f62a793c3c9326ea8cfaf0eab7adccb5d700b21`,
+waits for `pg_isready`, and removes the container on every exit path. With no
+external URL and no usable Docker daemon, the suite fails explicitly instead of
+skipping real-PostgreSQL coverage. Test URLs and generated credentials are never
+printed.
 
 ## Startup behavior
 

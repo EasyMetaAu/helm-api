@@ -260,6 +260,13 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
         signal: requestSignal(c),
       });
       if (!acquired.ok) {
+        if (acquired.reason === "unavailable") {
+          return sendError(c, {
+            error_class: "lane_unavailable",
+            message: "concurrency lease unavailable",
+            trace_id: traceId,
+          });
+        }
         c.header("retry-after", String(acquired.retryAfterSeconds));
         return sendError(c, {
           error_class: "rate_limited",
@@ -270,6 +277,10 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
           trace_id: traceId,
         });
       }
+      c.set(
+        "concurrency_signal",
+        AbortSignal.any([requestSignal(c), acquired.signal ?? requestSignal(c)]),
+      );
       c.set("concurrencyRelease", acquired.release);
     }
 
@@ -462,7 +473,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
           // A client disconnect / abort is a benign non-provider fault (docs/02):
           // emit NO error frame. Any other throw emits ONE terminal Gemini error
           // frame so the client never sees a silently truncated stream.
-          if (!isAbort(err, c.req.raw.signal)) {
+          if (!isAbort(err, requestSignal(c))) {
             const re: RouteError =
               err instanceof PipelineError
                 ? { error_class: err.error_class, message: err.message, trace_id: traceId }
@@ -478,7 +489,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
             await sse.writeSSE({ data });
           }
         } finally {
-          releaseConcurrency?.();
+          await releaseConcurrency?.();
           try {
             await withSseCaptureRelease(captured, async () => {
               // Record AFTER releaseConcurrency (never extend the hold) and AFTER the

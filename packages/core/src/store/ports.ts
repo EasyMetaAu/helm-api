@@ -80,6 +80,25 @@ export interface RateLimitConsumeResult {
   resetSeconds: number;
 }
 
+// Global API-key concurrency leases. PostgreSQL adapters use the database clock for
+// every expiry decision; callers never pass a Node timestamp.
+export interface ConcurrencyLeaseStore {
+  tryAcquire(input: {
+    keyId: string;
+    leaseId: string;
+    ownerId: string;
+    limit: number;
+    ttlMs: number;
+  }): Promise<{ acquired: boolean; expiresAtMs: number }>;
+  renew(input: {
+    keyId: string;
+    leaseId: string;
+    ownerId: string;
+    ttlMs: number;
+  }): Promise<{ renewed: boolean; expiresAtMs: number }>;
+  release(input: { keyId: string; leaseId: string; ownerId: string }): Promise<void>;
+}
+
 export interface RateLimitStore {
   // Atomically refill + try to consume `cost` tokens from the (keyId, dim)
   // bucket. `state` is the caller's last-known state hint; adapters that persist

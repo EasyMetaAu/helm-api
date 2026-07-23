@@ -930,7 +930,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
         } catch (err) {
           // A client disconnect / abort is NOT a provider fault: do not 5xx, do
           // not surface an error frame — the executor layer already recorded it.
-          if (!isAbort(err, c.req.raw.signal)) {
+          if (!isAbort(err, requestSignal(c))) {
             // Preserve a mid-stream idle timeout (UpstreamError("timeout")) instead
             // of flattening it to a generic upstream_error frame.
             const timedOut = isUpstreamTimeout(err);
@@ -944,7 +944,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
         } finally {
           // Free the concurrency slot FIRST — the bytes are done; the
           // persist/settle bookkeeping below must not extend the hold.
-          releaseConcurrency?.();
+          await releaseConcurrency?.();
           try {
             await withSseCaptureRelease(captured, async () => {
               // Streamed completion-cost backfill (#6): parse the trailing usage and
