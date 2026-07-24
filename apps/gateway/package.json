@@ -7,7 +7,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "build": "tsc -p tsconfig.build.json && cp src/oauth/codex-models.json dist/oauth/codex-models.json",
-    "test:e2e": "playwright test"
+    "test:e2e": "bash e2e/run-with-postgres.sh"
   },
   "dependencies": {
     "@helm/core": "workspace:*",

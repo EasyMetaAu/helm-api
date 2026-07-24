@@ -47,6 +47,10 @@ import {
   nativePassthroughMutations,
 } from "@helm/shared";
 import {
+  CONCURRENCY_LEASE_LOST_REASON,
+  requestCancellationReason,
+} from "../request-cancellation.js";
+import {
   usageFromAnthropicResponse,
   usageFromGeminiResponse,
   usageFromResponsesResponse,
@@ -1937,6 +1941,36 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           responseMetadata: capturedResponseMetadata,
         };
       } catch (err) {
+        const cancellation = requestCancellationReason(signal);
+        if (cancellation === CONCURRENCY_LEASE_LOST_REASON || cancellation === "request_timeout") {
+          const leaseLost = cancellation === CONCURRENCY_LEASE_LOST_REASON;
+          const errorClass = leaseLost ? "lane_unavailable" : "timeout";
+          breaker.recordAbort(alias);
+          attempts.push({
+            alias,
+            skipped: false,
+            skip_reason: cancellation,
+            status: "error",
+            error_class: errorClass,
+            latency_ms: elapsed(),
+            cost_usd: null,
+            error_detail: null,
+            ...defaultPassthroughTelemetry(),
+          });
+          return {
+            attempts,
+            final: {
+              status: "error",
+              error: makeHelmError({
+                error_class: errorClass,
+                message: leaseLost ? "concurrency lease lost" : "request timed out",
+                trace_id: correlationTraceId(req),
+              }),
+            },
+            body: null,
+            stream: null,
+          };
+        }
         // Client abort: non-provider fault. Terminate the chain WITHOUT marking a
         // breaker failure or counting it as all_providers_failed.
         if (isAbort(err, signal)) {
@@ -2229,8 +2263,17 @@ async function peekStream(
       // Truncated stream: the attempt was already recorded ok (success fires on
       // the first chunk — breaker semantics unchanged). Emit a structured log so
       // the truncation is observable despite the clean telemetry row. Safe fields
-      // only — alias + error_class, NEVER key/payload/raw error (principle 7).
-      log?.("warn", "stream.truncated", { alias, error_class: errorClassOf(err) });
+      // only — alias + classification, NEVER key/payload/raw error (principle 7).
+      const cancellation = requestCancellationReason(_signal);
+      if (cancellation === CONCURRENCY_LEASE_LOST_REASON) {
+        log?.("warn", "stream.truncated", {
+          alias,
+          error_class: "lane_unavailable",
+          reason: CONCURRENCY_LEASE_LOST_REASON,
+        });
+      } else {
+        log?.("warn", "stream.truncated", { alias, error_class: errorClassOf(err) });
+      }
       throw err;
     }
   })();

@@ -16,6 +16,12 @@
 - **根因与修复**：机器推导的 native ingress 池原本在 Upgrade 时为每条连接预留一个完整最大帧，导致空闲/预热连接达到 `floor(ingressBytes / maxPayload)` 后稳定返回 503。Upgrade 现在只瞬时探测零容量或暂停状态，空闲连接不保留 ingress lease；收到 `response.create` 后按消息真实 wire bytes 申请 ingress 与既有 JSON amplification 两级预算，并在请求结束时一起释放。
 - **安全边界**：`ws.maxPayload` 继续按运行时机器容量动态限制单帧，超限仍以 1009/413 失败；活动消息超过 native ingress 池仍返回结构化 503，超过共享请求池也继续拒绝。没有新增固定连接数、队列、配置或依赖；定向测试同时覆盖“第三条空闲连接可建立”和“第三条并发活动消息被预算拒绝”。
 
+## 2026-07-23 · PostgreSQL API-key 分布式并发 lease（Phase 1，docs/06/10，原则 1/3/7）
+
+- **一致性边界**：仅 `supabase`/PostgreSQL 使用 state-row `FOR UPDATE` + DB `clock_timestamp()` 的 lease 表实现跨 replica 上限；SQLite 保持既有 process-local FIFO。statement-time clock 避免等待 row lock 后仍使用事务开始时间；lease 过期回收不依赖 Node clock，也不维护独立 active counter。
+- **本地调度边界**：每 replica/key 只让本地队首轮询 DB；默认 TTL 30s、heartbeat 10s，失败轮询使用可注入的 100–250ms jitter。manager 同时以 DB 返回 `expiresAtMs` 和本地 RPC 开始时间 + TTL 的较早值作为 ownership deadline，防止 acquire/renew 响应延迟或挂起越过已知租期。renew 失败使持有者 signal 以 `concurrency_lease_lost` abort，release 为 async/idempotent best-effort，gateway 将它与 client abort/request timeout 合并；流 lease 到 body final close/cancel 才释放。shutdown 会等待正在进行的 acquire，并在返回前清理 late-success orphan。
+- **真实 PG 验收**：`apps/gateway/e2e/concurrency-postgres.spec.ts` 用两个独立 postgres-js pool、两个 distributed manager 和两个请求级 Hono app 验证 100 并发全局上限、key 隔离、TTL crash recovery、heartbeat、lease-loss no-cooldown、stream final/cancel 与 DB-unavailable 503。`pnpm test:e2e` 的 launcher 按 `PG_TEST_URL` > `HELM_TEST_POSTGRES_URL` 取外部测试库；无 URL 时自动启动 digest-pinned PostgreSQL 17 + pgvector 并 finally 清理，Docker 不可用则明确失败。PGlite 仍只算 SQL/contract coverage，不计真实多 pool AC。
+
 ## 2026-07-23 · Session 恢复与在线响应共享内存池（Admin requests，docs/07/11，原则 3/7）
 
 - **恢复窗口**：Admin Session 恢复单次最多预占 response-work 池的一半，允许两次有界恢复并行，也为在线 API 响应保留容量；第三次并发恢复或超过半窗口的会话继续返回 `session_recovery_limited`。保留先准入、后物化正文的顺序，不新增队列、配置或独立内存池。
@@ -58,14 +64,9 @@
 - **排序与删除**：fallback 的上下按钮改为复用 Policies 页交互语义的拖拽手柄，并保留方向键排序；每张 lane 卡提供删除按钮，删除先进入页面工作集，统一保存时才持久化。页面从 runtime settings 读取当前 `default_lane`，只保护当前默认 lane，不把 `balanced` 写死。
 - **配置边界修正**：`LanesConfigSchema` 改为要求至少一个有效 lane；`runtime.default_lane` 与 lane 集合的交叉约束在 Gateway 边界及启动组合层 fail-closed 校验。因而用户先把默认通道改成其他 lane 后可删除 `balanced`；Settings 选项与默认配置说明也不再把 `balanced` 当作强制终点。若手工配置令默认通道不存在，Gateway 拒绝启动；Resolver 仍对异常调用防御性地回退到存在的 `balanced` 或第一个 lane。
 
-## 2026-07-22 · Responses 状态续接严格绑定原 provider 与账号（Protocol translation / provider execution，docs/04/05/07，原则 2/3/5/8）
-
-- **状态引用边界**：`previous_response_id` 引用的是上游保存、Helm 无法从当前增量请求重建的隐藏历史。Responses create 入口复用既有 lifecycle registry，按同一 account/key 查出产生该 ID 的 provider alias；未知 ID、registry 不可用、或由非 Responses 翻译路径生成的 ID 在路由前返回 `400 invalid_request`，要求客户端发送完整 conversation input，不猜测也不静默丢历史。
-- **路由与协议边界**：可信 provider pin 只作为 Gateway 内部 metadata 进入共享执行器；候选不等于原 alias 时记录 `responses_previous_response_id_provider_mismatch` 并跳过，任何非 Responses 候选统一记录 `responses_previous_response_id_cross_protocol_blocked`。无状态首请求仍保留原有跨协议 fallback，只有有状态 continuation 被收紧。
-- **账号绑定边界**：OAuth pool 同时收到 WebSocket session 与 `previous_response_id` 时以后者优先，复用现有 response-id → account affinity，使续接在原账号不可用或首输出前故障时直接失败，不切换兄弟账号。没有新增存储、配置、依赖或客户端协议。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-22 · Responses 状态续接严格绑定原 provider 与账号（Protocol translation / provider execution，docs/04/05/07，原则 2/3/5/8）**：`previous_response_id` 只允许同 account/key、原 provider 与原账号继续执行；未知、跨协议或不可用状态 fail-closed，完整原文通过 git history 回溯。
 - **2026-07-22 · Codex 客户端默认启用 Responses WebSocket，并补齐反向代理边界（Deployment / Protocol / Admin client setup，docs/05/10/11，原则 3/5/8）**：Admin 的 Codex 配置复用既有 Responses WebSocket；代理只在真实 Upgrade 时转发 hop-by-hop header，Claude 图片 shim 延后，完整原文通过 git history 回溯。
 - **2026-07-21 · 首次安装改为令牌保护的浏览器向导并允许订阅-only 启动（Deployment / bootstrap / Admin，docs/10/11，原则 2/3/7）**：无完整 Admin 凭据时只开放令牌保护的浏览器向导与健康端点，完成后同进程启用 Gateway；凭据保存到 `0600` managed env，CLI/无 `.env`/OAuth-only Linux 安装路径均完成实测，完整原文通过 git history 回溯。
 - **2026-07-21 · Grok Build 复用 OpenAI 模型发现接入 Helm（Admin client setup，docs/05/11，原则 2/5/6）**：Grok Build 复用现有 `/v1/models` 与 Chat Completions，只新增七语言客户端配置引导，不引入专用路由或依赖；完整原文通过 git history 回溯。

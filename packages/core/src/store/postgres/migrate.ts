@@ -1148,6 +1148,27 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // PostgreSQL-only cluster-wide API-key concurrency leases. Expiry timestamps
+    // deliberately use timestamptz and are evaluated with the database clock.
+    // No FK: key deletion must not block lease expiry/reclamation.
+    version: 41,
+    sql: `
+      CREATE TABLE IF NOT EXISTS api_key_concurrency_state (
+        key_id TEXT PRIMARY KEY
+      );
+      CREATE TABLE IF NOT EXISTS api_key_concurrency_leases (
+        lease_id TEXT PRIMARY KEY,
+        key_id TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        expires_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_api_key_concurrency_leases_key_expires
+        ON api_key_concurrency_leases (key_id, expires_at);
+    `,
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {

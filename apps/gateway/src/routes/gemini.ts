@@ -11,6 +11,10 @@ import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
 import {
+  markStartedStreamCancellation,
+  requestCancellationReason,
+} from "../request-cancellation.js";
+import {
   type BodyMemoryAdmission,
   memoryAdmissionReleaseGuard,
   RequestAdmissionError,
@@ -144,13 +148,6 @@ function extractCredential(googKey: string | undefined, auth: string | undefined
   return null;
 }
 
-// Client disconnect / abort detection — mirrors messages.ts. Used to suppress a
-// terminal error frame for a benign disconnect (NOT a provider fault, docs/02).
-function isAbort(err: unknown, signal: AbortSignal): boolean {
-  if (signal.aborted) return true;
-  return err instanceof Error && (err.name === "AbortError" || err.message.includes("aborted"));
-}
-
 export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): void {
   const { transformer } = deps;
 
@@ -260,6 +257,13 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
         signal: requestSignal(c),
       });
       if (!acquired.ok) {
+        if (acquired.reason === "unavailable") {
+          return sendError(c, {
+            error_class: "lane_unavailable",
+            message: "concurrency lease unavailable",
+            trace_id: traceId,
+          });
+        }
         c.header("retry-after", String(acquired.retryAfterSeconds));
         return sendError(c, {
           error_class: "rate_limited",
@@ -270,6 +274,10 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
           trace_id: traceId,
         });
       }
+      c.set(
+        "concurrency_signal",
+        AbortSignal.any([requestSignal(c), acquired.signal ?? requestSignal(c)]),
+      );
       c.set("concurrencyRelease", acquired.release);
     }
 
@@ -459,10 +467,10 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
             }
           }
         } catch (err) {
-          // A client disconnect / abort is a benign non-provider fault (docs/02):
-          // emit NO error frame. Any other throw emits ONE terminal Gemini error
-          // frame so the client never sees a silently truncated stream.
-          if (!isAbort(err, c.req.raw.signal)) {
+          const cancellation = requestCancellationReason(requestSignal(c), err);
+          if (cancellation !== null) {
+            markStartedStreamCancellation(result.decision, cancellation);
+          } else {
             const re: RouteError =
               err instanceof PipelineError
                 ? { error_class: err.error_class, message: err.message, trace_id: traceId }
@@ -478,7 +486,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
             await sse.writeSSE({ data });
           }
         } finally {
-          releaseConcurrency?.();
+          await releaseConcurrency?.();
           try {
             await withSseCaptureRelease(captured, async () => {
               // Record AFTER releaseConcurrency (never extend the hold) and AFTER the

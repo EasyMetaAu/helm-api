@@ -21,6 +21,7 @@ import {
   createCachedKeyStore,
   createCircuitBreaker,
   createCodexResponsesClient,
+  createDistributedKeyedSemaphore,
   createGeminiClient,
   createGenericOpenAIResponsesClient,
   createKeyedSemaphore,
@@ -3005,10 +3006,19 @@ export async function buildServer(
   // ONE process-wide gate shared with the self-auth routes (messages / responses
   // / gemini) so a key's in-flight count spans every entrypoint. No-op while
   // concurrency_queue_enabled is OFF or for keys without a concurrency_limit.
+  const distributedSemaphore = store.concurrencyLeases
+    ? createDistributedKeyedSemaphore({
+        store: store.concurrencyLeases,
+        ownerId: `${process.env.HOSTNAME ?? "gateway"}:${process.pid}:${randomUUID()}`,
+        log: (lvl, msg, fields) => logger.log(lvl, msg, fields),
+      })
+    : null;
   const concurrencyGate = createConcurrencyGate({
-    semaphore: createKeyedSemaphore({
-      log: (lvl, msg, fields) => logger.log(lvl, msg, fields),
-    }),
+    semaphore:
+      distributedSemaphore ??
+      createKeyedSemaphore({
+        log: (lvl, msg, fields) => logger.log(lvl, msg, fields),
+      }),
     getConfig: () => ({
       enabled: settings.concurrency_queue_enabled,
       minSize: settings.concurrency_queue_min_size,
@@ -4294,6 +4304,7 @@ export async function buildServer(
       // Drain the deferred write queue BEFORE closing the DB so a graceful shutdown
       // persists every buffered telemetry/payload/observe write (no loss on deploy).
       await writeQueue.stop();
+      await distributedSemaphore?.shutdown();
       // Close the underlying DB connection (sqlite file handle / pg pool). Best
       // effort: a close error must not mask a clean shutdown.
       await store.close().catch(() => {});

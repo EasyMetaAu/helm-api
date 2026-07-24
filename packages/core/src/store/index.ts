@@ -4,6 +4,7 @@ export type {
   BudgetDim,
   BudgetPeekResult,
   BudgetStore,
+  ConcurrencyLeaseStore,
   ConfigStore,
   CreateKeyInput,
   InsertPayloadInput,
@@ -36,6 +37,7 @@ export {
 // reached via postgres-js; the same adapters run against in-process PGlite in
 // tests (drizzle pg dialect), validating the supabase path without a server.
 export { PgBudgetStore } from "./postgres/budget.js";
+export { PgConcurrencyLeaseStore } from "./postgres/concurrency-leases.js";
 export { PgConfigStore } from "./postgres/config-store.js";
 export { PgKeyStore } from "./postgres/keystore.js";
 export { PgMemoryStore } from "./postgres/memory-store.js";

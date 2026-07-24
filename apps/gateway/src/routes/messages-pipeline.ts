@@ -34,6 +34,10 @@ import {
   isNativePassthroughCarrier,
   nativePassthroughBody,
 } from "@helm/shared";
+import {
+  markStartedStreamCancellation,
+  requestCancellationReason,
+} from "../request-cancellation.js";
 import type { ServingAccount } from "../runtime/serving-account.js";
 import type { WriteQueue } from "../runtime/write-queue.js";
 import { downgradeClientFastModeIfDisallowed } from "./fast-mode.js";
@@ -1203,15 +1207,19 @@ export function createMessagesPipeline(
               const finalAlias =
                 result.decision.final?.status === "ok" ? result.decision.final.model_alias : null;
               if (protocol === "openai_responses") {
-                const outcome =
-                  responsesDeltas.outcome() ?? (signal.aborted ? "client_aborted" : "truncated");
-                result.decision.stream_outcome = outcome;
-                if (outcome === "client_aborted" || outcome === "truncated") {
-                  result.decision.final = {
-                    ...result.decision.final,
-                    status: "error",
-                    error_reason: outcome === "client_aborted" ? "client_abort" : "upstream_error",
-                  };
+                const cancellation = requestCancellationReason(signal);
+                if (cancellation !== null) {
+                  markStartedStreamCancellation(result.decision, cancellation);
+                } else {
+                  const settledOutcome = responsesDeltas.outcome() ?? "truncated";
+                  result.decision.stream_outcome = settledOutcome;
+                  if (settledOutcome === "truncated") {
+                    result.decision.final = {
+                      ...result.decision.final,
+                      status: "error",
+                      error_reason: "upstream_error",
+                    };
+                  }
                 }
               }
               if (memory !== undefined) {
@@ -1326,6 +1334,12 @@ export function createMessagesPipeline(
               }
             }
           } finally {
+            if (protocol === "openai_responses") {
+              const cancellation = requestCancellationReason(signal);
+              if (cancellation !== null) {
+                markStartedStreamCancellation(result.decision, cancellation);
+              }
+            }
             // Called UNCONDITIONALLY (even when no assistant text was
             // reconstructed — e.g. a tool-call-only stream) so the served-model
             // stamp still lands for auto-compaction pricing; empty

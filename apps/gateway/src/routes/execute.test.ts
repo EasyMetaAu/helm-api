@@ -11,6 +11,7 @@ import {
 import {
   type CatalogEntry,
   createNativePassthroughCarrier,
+  ERROR_CLASS_HTTP_STATUS,
   type InternalRequest,
   type NativePassthroughCarrier,
   nativePassthroughBody,
@@ -6655,5 +6656,90 @@ describe("createExecute — stripEmptyAnthropicTextBlocks null/primitive message
       (callArg as Record<string, unknown>).messages) as unknown[];
     // null and array entries pass through verbatim; the real message is unchanged
     expect(msgs.length).toBe(3);
+  });
+});
+
+describe("createExecute — concurrency lease loss", () => {
+  it("classifies pre-response lease loss as terminal 503 without fallback or breaker failure", async () => {
+    const controller = new AbortController();
+    const provider = {
+      chatCompletion: vi.fn().mockImplementation(async () => {
+        controller.abort("concurrency_lease_lost");
+        throw Object.assign(new Error("lease lost"), { name: "AbortError" });
+      }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordAbort = vi.spyOn(cb, "recordAbort");
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ primary: "m-primary", fallback: "m-fallback" }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: controller.signal,
+    });
+
+    const out = await execute(plan(["primary", "fallback"]), req());
+
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected terminal error");
+    expect(out.final.error.error_class).toBe("lane_unavailable");
+    expect(ERROR_CLASS_HTTP_STATUS[out.final.error.error_class]).toBe(503);
+    expect(out.attempts[0]).toMatchObject({
+      alias: "primary",
+      skip_reason: "concurrency_lease_lost",
+      error_class: "lane_unavailable",
+    });
+    expect(recordAbort).toHaveBeenCalledWith("primary");
+    expect(recordFailure).not.toHaveBeenCalled();
+    expect(provider.chatCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  it("terminates a started stream without a normal terminal event and logs structured lease loss", async () => {
+    const controller = new AbortController();
+    async function* leaseLostStream(): AsyncGenerator<string> {
+      yield 'data: {"choices":[{"delta":{"content":"first"}}]}\n\n';
+      controller.abort("concurrency_lease_lost");
+      throw Object.assign(new Error("lease lost"), { name: "AbortError" });
+    }
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn().mockReturnValue(leaseLostStream()),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const logs: Array<{ msg: string; fields: Record<string, unknown> }> = [];
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ primary: "m-primary" }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: controller.signal,
+      log: (_level, msg, fields) => logs.push({ msg, fields }),
+    });
+
+    const out = await execute(plan(["primary"]), req({ stream: true }));
+    expect(out.final.status).toBe("ok");
+    const chunks: string[] = [];
+    await expect(async () => {
+      for await (const chunk of out.stream as AsyncIterable<string>) chunks.push(chunk);
+    }).rejects.toThrow("lease lost");
+
+    expect(chunks).toEqual(['data: {"choices":[{"delta":{"content":"first"}}]}\n\n']);
+    expect(chunks.join("")).not.toContain("[DONE]");
+    expect(recordFailure).not.toHaveBeenCalled();
+    expect(logs).toContainEqual({
+      msg: "stream.truncated",
+      fields: {
+        alias: "primary",
+        error_class: "lane_unavailable",
+        reason: "concurrency_lease_lost",
+      },
+    });
   });
 });

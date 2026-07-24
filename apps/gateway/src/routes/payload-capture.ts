@@ -9,6 +9,7 @@ import {
 } from "@helm/core";
 import type { TokenUsageBreakdown } from "@helm/shared";
 import { countTokens as countO200kHarmonyTokens } from "gpt-tokenizer/encoding/o200k_harmony";
+import { CONCURRENCY_LEASE_LOST_REASON } from "../request-cancellation.js";
 import type { WriteQueue } from "../runtime/write-queue.js";
 
 // Shared full request/response capture + streamed-cost backfill helpers, used by
@@ -755,6 +756,12 @@ export interface RecordServedDeps extends PayloadCaptureDeps {
 }
 
 export function decisionForTimedOutRequest(decision: DecisionRecord): DecisionRecord {
+  if (
+    decision.stream_outcome === "truncated" &&
+    decision.final.error_reason === CONCURRENCY_LEASE_LOST_REASON
+  ) {
+    return decision;
+  }
   return {
     ...decision,
     final: {

@@ -4,6 +4,7 @@ import type { StoreConfig } from "@helm/shared";
 import { runtimeMemoryBudget } from "../runtime/memory-budget.js";
 import type {
   BudgetStore,
+  ConcurrencyLeaseStore,
   ConfigStore,
   KeyStore,
   MemoryStore,
@@ -15,6 +16,7 @@ import type {
   TelemetryStore,
 } from "./ports.js";
 import { PgBudgetStore } from "./postgres/budget.js";
+import { PgConcurrencyLeaseStore } from "./postgres/concurrency-leases.js";
 import { PgConfigStore } from "./postgres/config-store.js";
 import { PgKeyStore } from "./postgres/keystore.js";
 import { PgMemoryStore } from "./postgres/memory-store.js";
@@ -52,6 +54,8 @@ export interface StoreSet {
   readonly budget: BudgetStore;
   readonly memory: MemoryStore;
   readonly config: ConfigStore;
+  // Null for SQLite: only PostgreSQL coordinates leases across replicas.
+  readonly concurrencyLeases: ConcurrencyLeaseStore | null;
   readonly oauthTokens: OAuthTokenStore;
   // Per-account OAuth subscription observability (providers page). usage = today's
   // served traffic; quota = latest rate-limit window snapshot. Both fail-open.
@@ -95,6 +99,7 @@ export async function createStore(opts: CreateStoreOptions): Promise<StoreSet> {
         budget: new SqliteBudgetStore(db),
         memory: new SqliteMemoryStore(db),
         config: new SqliteConfigStore(db),
+        concurrencyLeases: null,
         oauthTokens: new SqliteOAuthTokenStore(db),
         oauthUsage: new SqliteOAuthUsageStore(db),
         oauthQuota: new SqliteOAuthQuotaStore(db),
@@ -125,6 +130,7 @@ export async function createStore(opts: CreateStoreOptions): Promise<StoreSet> {
         budget: new PgBudgetStore(db),
         memory: new PgMemoryStore(db),
         config: new PgConfigStore(db),
+        concurrencyLeases: new PgConcurrencyLeaseStore(db),
         oauthTokens: new PgOAuthTokenStore(db),
         oauthUsage: new PgOAuthUsageStore(db),
         oauthQuota: new PgOAuthQuotaStore(db),

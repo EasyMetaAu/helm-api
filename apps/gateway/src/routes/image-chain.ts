@@ -1,5 +1,9 @@
 import type { CircuitBreaker, ProviderClient } from "@helm/core";
 import { ERROR_CLASS_HTTP_STATUS, type ProviderAttempt } from "@helm/shared";
+import {
+  CONCURRENCY_LEASE_LOST_REASON,
+  requestCancellationReason,
+} from "../request-cancellation.js";
 import { errorClassOf, errorDetailOf, isAbort, isUpstreamRequestRejection } from "./execute.js";
 
 // Image-generation candidate-chain executor. The model-pinned image routes
@@ -116,6 +120,31 @@ export async function runImageChain(
       });
       return { ok: true, served: target, result, attempts };
     } catch (err) {
+      const cancellation = requestCancellationReason(signal);
+      if (cancellation === CONCURRENCY_LEASE_LOST_REASON || cancellation === "request_timeout") {
+        const leaseLost = cancellation === CONCURRENCY_LEASE_LOST_REASON;
+        const errorClass = leaseLost ? "lane_unavailable" : "timeout";
+        breaker.recordAbort(target.alias);
+        attempts.push({
+          alias: target.alias,
+          skipped: false,
+          skip_reason: cancellation,
+          status: "error",
+          error_class: errorClass,
+          latency_ms: Date.now() - started,
+          cost_usd: null,
+          error_detail: null,
+        });
+        return {
+          ok: false,
+          errorClass,
+          httpStatus: ERROR_CLASS_HTTP_STATUS[errorClass],
+          message: leaseLost ? "concurrency lease lost" : "request timed out",
+          providerRaw: null,
+          aborted: false,
+          attempts,
+        };
+      }
       // Client abort: NON-provider fault — terminate WITHOUT a breaker failure and
       // WITHOUT recording it as a provider error (mirrors execute.ts's recordAbort).
       if (isAbort(err, signal)) {

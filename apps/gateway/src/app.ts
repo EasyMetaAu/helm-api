@@ -37,6 +37,9 @@ export type AppEnv = {
     trace_id: string;
     logger: Logger;
     request_timeout?: RequestTimeoutState;
+    // Added by concurrency gate after lease acquisition. Combines timeout/client
+    // disconnect with distributed lease ownership loss for every route.
+    concurrency_signal?: AbortSignal;
   };
 };
 

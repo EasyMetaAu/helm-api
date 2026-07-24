@@ -6,6 +6,7 @@ import {
   concurrencyMiddleware,
   createConcurrencyGate,
 } from "./concurrency.js";
+import { requestSignal } from "./limits.js";
 
 // Per-key concurrency overflow queue (issue #93, feature A). Real semaphore +
 // real timers: the waits in play are tiny (handler-controlled), no fake clock.
@@ -168,6 +169,89 @@ describe("concurrencyMiddleware", () => {
     expect((await app.request("/boom")).status).toBe(500);
     // The slot must have been released by the middleware finally.
     expect((await app.request("/ok")).status).toBe(200);
+  });
+
+  it("acquires chat concurrency with the composed request timeout signal", async () => {
+    const timeoutController = new AbortController();
+    let acquiredSignal: AbortSignal | undefined;
+    const gate = {
+      acquire: async ({ signal }: { signal: AbortSignal }) => {
+        acquiredSignal = signal;
+        return { ok: true as const, signal, release: async () => {} };
+      },
+    };
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      // biome-ignore lint/suspicious/noExplicitAny: minimal context stubs for test
+      (c as any).set("identity", { keyId: "k1", caps: { concurrencyLimit: 1 } });
+      // biome-ignore lint/suspicious/noExplicitAny: minimal context stubs for test
+      (c as any).set("request_timeout", { signal: timeoutController.signal, timedOut: false });
+      await next();
+    });
+    app.use("*", concurrencyMiddleware(gate));
+    app.get("/signal", (c) => c.json({ ok: true }));
+
+    expect((await app.request("/signal")).status).toBe(200);
+    expect(acquiredSignal).toBe(timeoutController.signal);
+  });
+
+  it("combines request timeout/client abort with a lease-loss signal", async () => {
+    const gate = {
+      acquire: async () => {
+        const controller = new AbortController();
+        queueMicrotask(() => controller.abort("lease_lost"));
+        return { ok: true as const, signal: controller.signal, release: async () => {} };
+      },
+    };
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      // biome-ignore lint/suspicious/noExplicitAny: minimal identity stub for test
+      (c as any).set("identity", { keyId: "k1", caps: { concurrencyLimit: 1 } });
+      await next();
+    });
+    app.use("*", concurrencyMiddleware(gate));
+    let downstreamSignal: AbortSignal | undefined;
+    app.get("/signal", async (c) => {
+      downstreamSignal = requestSignal(c as never);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return c.json({ aborted: downstreamSignal.aborted, reason: String(downstreamSignal.reason) });
+    });
+    const response = await app.request("/signal");
+    expect(await response.json()).toEqual({ aborted: true, reason: "lease_lost" });
+  });
+
+  it("returns fail-closed 503 without calling downstream when lease store unavailable", async () => {
+    const gate = {
+      acquire: async () => ({
+        ok: false as const,
+        reason: "unavailable" as const,
+        retryAfterSeconds: 5,
+      }),
+    };
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      // biome-ignore lint/suspicious/noExplicitAny: minimal identity stub for test
+      (c as any).set("identity", { keyId: "k1", caps: { concurrencyLimit: 1 } });
+      await next();
+    });
+    app.use("*", concurrencyMiddleware(gate));
+    const provider = { called: false };
+    app.get("/provider", (c) => {
+      provider.called = true;
+      return c.json({ ok: true });
+    });
+    const response = await app.request("/provider");
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as {
+      error: { type: string; code: string; trace_id: string };
+    };
+    expect(body.error).toEqual({
+      message: "concurrency lease unavailable",
+      type: "api_error",
+      code: "lane_unavailable",
+      trace_id: "unknown",
+    });
+    expect(provider.called).toBe(false);
   });
 
   it("a claimed lease is NOT released by the middleware (stream handoff)", async () => {

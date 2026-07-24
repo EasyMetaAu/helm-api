@@ -233,6 +233,9 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
         signal: requestSignal(c),
       });
       if (!acquired.ok) {
+        if (acquired.reason === "unavailable") {
+          return errorJson(c, 503, "concurrency lease unavailable", "UNAVAILABLE");
+        }
         c.header("retry-after", String(acquired.retryAfterSeconds));
         return errorJson(
           c,
@@ -243,6 +246,10 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
           "RESOURCE_EXHAUSTED",
         );
       }
+      c.set(
+        "concurrency_signal",
+        AbortSignal.any([requestSignal(c), acquired.signal ?? requestSignal(c)]),
+      );
       c.set("concurrencyRelease", acquired.release);
     }
 

@@ -1,6 +1,7 @@
 import { makeHelmError } from "@helm/shared";
 import type { Context, MiddlewareHandler } from "hono";
 import type { AppEnv } from "../app.js";
+import { REQUEST_TIMEOUT_REASON } from "../request-cancellation.js";
 import { HelmHttpError } from "./error-handler.js";
 
 export interface LimitsConfig {
@@ -13,7 +14,7 @@ export interface RequestTimeoutState {
 }
 
 export function requestSignal(c: Context<AppEnv>): AbortSignal {
-  return c.get("request_timeout")?.signal ?? c.req.raw.signal;
+  return c.get("concurrency_signal") ?? c.get("request_timeout")?.signal ?? c.req.raw.signal;
 }
 
 export function requestTimedOut(c: Context<AppEnv>): boolean {
@@ -34,7 +35,7 @@ export function timeout(cfg: LimitsConfig): MiddlewareHandler<AppEnv> {
     c.set("request_timeout", state);
     const timer = setTimeout(() => {
       state.timedOut = true;
-      controller.abort();
+      controller.abort(REQUEST_TIMEOUT_REASON);
     }, cfg.requestTimeoutMs);
     try {
       await Promise.race([
@@ -55,8 +56,75 @@ export function timeout(cfg: LimitsConfig): MiddlewareHandler<AppEnv> {
           });
         }),
       ]);
-    } finally {
+    } catch (error) {
       clearTimeout(timer);
+      // The downstream abort listener can reject in the same turn as the timeout
+      // promise. Keep the timeout classification authoritative instead of letting
+      // that race surface a generic AbortError/client-abort 499.
+      if (state.timedOut && !c.req.raw.signal.aborted) {
+        throw new HelmHttpError(
+          makeHelmError({
+            error_class: "timeout",
+            message: "request timed out",
+            trace_id: traceId,
+          }),
+        );
+      }
+      throw error;
     }
+
+    if (state.timedOut && !c.req.raw.signal.aborted) {
+      clearTimeout(timer);
+      throw new HelmHttpError(
+        makeHelmError({
+          error_class: "timeout",
+          message: "request timed out",
+          trace_id: traceId,
+        }),
+      );
+    }
+
+    const response = c.res;
+    if (response.body === null) {
+      clearTimeout(timer);
+      return;
+    }
+    const reader = response.body.getReader();
+    let finished = false;
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      reader.releaseLock();
+    };
+    const body = new ReadableStream<Uint8Array>({
+      async pull(streamController) {
+        try {
+          const chunk = await reader.read();
+          if (chunk.done) {
+            finish();
+            streamController.close();
+          } else {
+            streamController.enqueue(chunk.value);
+          }
+        } catch (error) {
+          finish();
+          streamController.error(error);
+        }
+      },
+      async cancel(reason) {
+        clearTimeout(timer);
+        try {
+          await reader.cancel(reason);
+        } finally {
+          finish();
+        }
+      },
+    });
+    c.res = new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
   };
 }

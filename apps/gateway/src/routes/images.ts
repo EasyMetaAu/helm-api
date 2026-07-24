@@ -162,6 +162,9 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         signal: requestSignal(c),
       });
       if (!acquired.ok) {
+        if (acquired.reason === "unavailable") {
+          return errorJson(c, 503, "server_error", "concurrency lease unavailable");
+        }
         c.header("retry-after", String(acquired.retryAfterSeconds));
         return errorJson(
           c,
@@ -172,6 +175,10 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
             : "timed out waiting for a concurrency slot",
         );
       }
+      c.set(
+        "concurrency_signal",
+        AbortSignal.any([requestSignal(c), acquired.signal ?? requestSignal(c)]),
+      );
       c.set("concurrencyRelease", acquired.release);
     }
 
