@@ -4,6 +4,7 @@
 // injected config (env-sourced) and are never logged or echoed. See docs/02.
 
 import type { NativePassthroughInput } from "@helm/shared";
+import type { ProxyConfig } from "./proxy.js";
 // Provider credential: EXACTLY ONE of a static `apiKey` or a dynamic
 // `getAuthHeader` (issue #38 OAuth). The dynamic path also accepts:
 //   - `onUnauthorized`: invoked once on an upstream 401 to force a token refresh
@@ -45,6 +46,8 @@ export interface ProviderConfig {
   // does not burn a candidate or 502 a single-candidate chain.
   connectRetries?: number;
   connectRetryBackoffMs?: readonly number[];
+  // Realtime sideband WebSockets must use the same egress hop as the HTTP call.
+  realtimeProxy?: ProxyConfig;
 }
 
 export interface OpenAIClientDeps {
@@ -54,6 +57,42 @@ export interface OpenAIClientDeps {
 
 export type ChatCompletionRequest = Record<string, unknown>;
 export type ChatCompletionResponse = Record<string, unknown>;
+export type ImageEditInput =
+  | { kind: "json"; body: Record<string, unknown> }
+  | { kind: "multipart"; fields: readonly ImageEditMultipartField[] };
+export type ImageEditMultipartField =
+  | { name: string; value: string }
+  | {
+      name: string;
+      value: Uint8Array;
+      filename: string;
+      contentType: string;
+    };
+
+export interface RealtimeCallRequest {
+  endpoint: "realtime" | "live";
+  query: string;
+  sdp: string;
+  session: Record<string, unknown>;
+  /** Already allowlisted client metadata; never contains the Helm credential. */
+  headers: Record<string, string>;
+}
+
+export interface RealtimeSidebandTarget {
+  url: string;
+  headers(): Promise<Record<string, string>>;
+  onUnauthorized?: () => void;
+  proxy?: ProxyConfig;
+}
+
+export interface RealtimeCallResult {
+  status: number;
+  sdp: string;
+  contentType: string | null;
+  location: string;
+  callId: string;
+  sideband: RealtimeSidebandTarget;
+}
 export type NativeProtocolProfile =
   | "anthropic_messages"
   | "codex_responses"
@@ -138,6 +177,8 @@ export interface ProviderClient {
     req: Record<string, unknown>,
     opts?: ProviderCallOptions,
   ): Promise<Record<string, unknown>>;
+  imageEdit?(req: ImageEditInput, opts?: ProviderCallOptions): Promise<Record<string, unknown>>;
+  realtimeCall?(req: RealtimeCallRequest, opts?: ProviderCallOptions): Promise<RealtimeCallResult>;
   responsesInputTokens?(
     req: ChatCompletionRequest,
     opts?: { signal?: AbortSignal },
@@ -287,6 +328,11 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
     return `${base}/images/generations`;
   }
 
+  async function imageEditsUrl(): Promise<string> {
+    const base = cfg.resolveBaseUrl ? await cfg.resolveBaseUrl() : cfg.baseUrl;
+    return `${base}/images/edits`;
+  }
+
   // Fail-closed credential guard (principle 2): EXACTLY ONE of static apiKey or
   // dynamic getAuthHeader. A client built with both / neither cannot resolve an
   // unambiguous auth header, so refuse construction rather than silently pick one.
@@ -310,6 +356,12 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
       "Content-Type": "application/json",
       ...(cfg.extraHeaders ? cfg.extraHeaders() : {}),
     };
+  }
+
+  async function headersWithoutContentType(): Promise<Record<string, string>> {
+    const next = await headers();
+    delete next["Content-Type"];
+    return next;
   }
 
   function prepareRequest(req: ChatCompletionRequest): ChatCompletionRequest {
@@ -420,6 +472,45 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
     return res;
   }
 
+  async function rawRequestWithAuthRetry(options: {
+    url: () => Promise<string>;
+    body: () => NonNullable<RequestInit["body"]>;
+    headers: () => Promise<Record<string, string>>;
+    signal?: AbortSignal;
+  }): Promise<Response> {
+    const attempt = async (): Promise<Response> =>
+      withConnectionRetry(
+        async () => {
+          const t = withTimeout(timeoutMs, options.signal);
+          try {
+            return await doFetch(await options.url(), {
+              method: "POST",
+              headers: await options.headers(),
+              body: options.body(),
+              signal: t.signal,
+            });
+          } catch (error) {
+            if (t.isTimeout() && !t.isExternalAbort()) {
+              throw new UpstreamError("timeout", "upstream request timed out");
+            }
+            throw error;
+          } finally {
+            t.cleanup();
+          }
+        },
+        {
+          retries: cfg.connectRetries,
+          backoffMs: cfg.connectRetryBackoffMs,
+          signal: options.signal,
+        },
+      );
+    const response = await attempt();
+    if (response.status !== 401 || cfg.onUnauthorized === undefined) return response;
+    await response.body?.cancel().catch(() => {});
+    cfg.onUnauthorized();
+    return await attempt();
+  }
+
   async function errorFromResponse(res: Response): Promise<UpstreamError> {
     const providerRaw = await res
       .json()
@@ -454,6 +545,100 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
       );
       if (!res.ok) throw await errorFromResponse(res);
       return (await res.json()) as Record<string, unknown>;
+    },
+
+    async imageEdit(req, opts) {
+      let captured = false;
+      const body = (): NonNullable<RequestInit["body"]> => {
+        if (req.kind === "json") {
+          const wire = JSON.stringify(req.body);
+          if (!captured) {
+            captured = true;
+            opts?.captureUpstream?.(wire);
+          }
+          return wire;
+        }
+        const form = new FormData();
+        for (const field of req.fields) {
+          if (!("filename" in field)) form.append(field.name, field.value);
+          else {
+            form.append(
+              field.name,
+              new Blob([field.value], { type: field.contentType }),
+              field.filename,
+            );
+          }
+        }
+        return form;
+      };
+      const res = await rawRequestWithAuthRetry({
+        url: imageEditsUrl,
+        body,
+        headers: req.kind === "json" ? headers : headersWithoutContentType,
+        signal: opts?.signal,
+      });
+      if (!res.ok) throw await errorFromResponse(res);
+      return (await res.json()) as Record<string, unknown>;
+    },
+
+    async realtimeCall(req, opts) {
+      const base = cfg.resolveBaseUrl ? await cfg.resolveBaseUrl() : cfg.baseUrl;
+      const backendShape = base.includes("/backend-api/");
+      const callPath = backendShape || req.endpoint === "realtime" ? "realtime/calls" : "live";
+      const query = req.query.length > 0 ? `?${req.query}` : "";
+      const url = `${base}/${callPath}${query}`;
+      const forwardedHeaders = async (): Promise<Record<string, string>> => ({
+        ...(await headersWithoutContentType()),
+        ...req.headers,
+      });
+      const body = (): NonNullable<RequestInit["body"]> => {
+        if (backendShape) return JSON.stringify({ sdp: req.sdp, session: req.session });
+        const form = new FormData();
+        form.append("sdp", new Blob([req.sdp], { type: "application/sdp" }), "sdp");
+        form.append(
+          "session",
+          new Blob([JSON.stringify(req.session)], { type: "application/json" }),
+          "session.json",
+        );
+        return form;
+      };
+      const response = await rawRequestWithAuthRetry({
+        url: async () => url,
+        body,
+        headers: backendShape
+          ? async () => ({ ...(await forwardedHeaders()), "Content-Type": "application/json" })
+          : forwardedHeaders,
+        signal: opts?.signal,
+      });
+      if (!response.ok) throw await errorFromResponse(response);
+      const sdp = await response.text();
+      const location = response.headers.get("location") ?? "";
+      const callId = location.split("/").filter(Boolean).at(-1) ?? "";
+      if (callId.length === 0) {
+        throw new UpstreamError("upstream_error", "upstream Realtime response omitted call id");
+      }
+      const sideband = new URL(base);
+      sideband.protocol = sideband.protocol === "http:" ? "ws:" : "wss:";
+      if (!backendShape) sideband.pathname = req.endpoint === "live" ? "/v1/live" : "/v1/realtime";
+      if (req.endpoint === "live") {
+        sideband.pathname = `${sideband.pathname.replace(/\/$/, "")}/${callId}`;
+      } else {
+        sideband.search = req.query;
+        sideband.searchParams.set("call_id", callId);
+      }
+      return {
+        status: response.status,
+        sdp,
+        contentType: response.headers.get("content-type"),
+        location,
+        callId,
+        sideband: {
+          url: sideband.toString(),
+          headers: forwardedHeaders,
+          ...(cfg.onUnauthorized ? { onUnauthorized: cfg.onUnauthorized } : {}),
+          ...(cfg.realtimeProxy ? { proxy: cfg.realtimeProxy } : {}),
+        },
+      };
     },
 
     async *chatCompletionStream(req, opts) {

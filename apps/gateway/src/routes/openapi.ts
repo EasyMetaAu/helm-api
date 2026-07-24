@@ -1,4 +1,5 @@
 import {
+  ImageEditRequestSchema,
   ImageGenerationRequestSchema,
   ImageGenerationResponseSchema,
   InteractionsRequestSchema,
@@ -6,6 +7,7 @@ import {
   ModelObjectSchema,
   ModelsListSchema,
   OpenAIChatRequestSchema,
+  RealtimeSessionSchema,
 } from "@helm/shared";
 import { swaggerUI } from "@hono/swagger-ui";
 import type { Hono } from "hono";
@@ -115,10 +117,12 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
         ModelsList: component(ModelsListSchema),
         ModelObject: component(ModelObjectSchema),
         ChatCompletionRequest: component(OpenAIChatRequestSchema),
+        ImageEditRequest: component(ImageEditRequestSchema),
         ImageGenerationRequest: component(ImageGenerationRequestSchema),
         ImageGenerationResponse: component(ImageGenerationResponseSchema),
         InteractionsRequest: component(InteractionsRequestSchema),
         InteractionsResponse: component(InteractionsResponseSchema),
+        RealtimeSession: component(RealtimeSessionSchema),
         UsageStats: {
           type: "object",
           properties: {
@@ -417,6 +421,109 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
             "401": errorResponse("Missing or invalid API key"),
             "404": errorResponse("Model is not a configured image model"),
             "503": errorResponse("Image provider unavailable (missing credential)"),
+          },
+        },
+      },
+      "/v1/images/edits": {
+        post: {
+          tags: ["Inference"],
+          summary: "OpenAI-compatible image edit",
+          description:
+            "Edit one or more images through the same authenticated image provider chain. " +
+            "Codex JSON `images[].image_url` carriers and OpenAI multipart `image` files are supported.",
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/ImageEditRequest" },
+              },
+              "multipart/form-data": {
+                schema: {
+                  type: "object",
+                  required: ["model", "prompt", "image"],
+                  properties: {
+                    model: { type: "string" },
+                    prompt: { type: "string" },
+                    image: { type: "array", items: { type: "string", format: "binary" } },
+                    mask: { type: "string", format: "binary" },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Edited image(s).",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/ImageGenerationResponse" },
+                },
+              },
+            },
+            "400": errorResponse("Invalid image edit request"),
+            "401": errorResponse("Missing or invalid API key"),
+            "404": errorResponse("Model is not a configured image model"),
+          },
+        },
+      },
+      "/v1/realtime/calls": {
+        post: {
+          tags: ["Inference"],
+          summary: "Create a Realtime V1/V2 WebRTC call",
+          description:
+            "Returns the answer SDP and binds the call id to this Helm key. Join the sideband at " +
+            "`wss://<helm>/v1/realtime?call_id=<id>` with the same key.",
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "multipart/form-data": {
+                schema: {
+                  type: "object",
+                  required: ["sdp", "session"],
+                  properties: {
+                    sdp: { type: "string", contentMediaType: "application/sdp" },
+                    session: { $ref: "#/components/schemas/RealtimeSession" },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "201": { description: "Answer SDP", content: { "application/sdp": {} } },
+            "400": errorResponse("Invalid call request"),
+            "401": errorResponse("Missing or invalid API key"),
+          },
+        },
+      },
+      "/v1/live": {
+        post: {
+          tags: ["Inference"],
+          summary: "Create a Realtime V3 Frameless call",
+          description:
+            "Creates a Frameless call. Join its sideband at `wss://<helm>/v1/live/<call_id>` " +
+            "with the same Helm key.",
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "multipart/form-data": {
+                schema: {
+                  type: "object",
+                  required: ["sdp", "session"],
+                  properties: {
+                    sdp: { type: "string", contentMediaType: "application/sdp" },
+                    session: { $ref: "#/components/schemas/RealtimeSession" },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "201": { description: "Answer SDP", content: { "application/sdp": {} } },
+            "400": errorResponse("Invalid call request"),
+            "401": errorResponse("Missing or invalid API key"),
           },
         },
       },

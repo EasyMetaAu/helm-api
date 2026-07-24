@@ -29,6 +29,8 @@ import {
   type ChatCompletionResponse,
   type ProviderCallOptions,
   type ProviderClient,
+  type RealtimeCallRequest,
+  type RealtimeCallResult,
   UpstreamError,
 } from "../openai.js";
 import { CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER } from "../openai-responses.js";
@@ -1161,6 +1163,24 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         deps.nativeStreamPreambleClassifier,
       );
     },
+    ...(entries.length > 0 &&
+    entries.every((entry) => typeof entry.member.client.realtimeCall === "function")
+      ? {
+          async realtimeCall(
+            req: RealtimeCallRequest,
+            opts?: ProviderCallOptions,
+          ): Promise<RealtimeCallResult> {
+            // Realtime models are selected by the voice endpoint, not the Codex
+            // text-model catalog used for per-account entitlement filtering.
+            return completeWithRetry(null, null, false, (client, entry) => {
+              if (!client.realtimeCall) {
+                throw new Error("oauth pool member does not support Realtime calls");
+              }
+              return client.realtimeCall(req, callOptionsForEntry(opts, entry));
+            });
+          },
+        }
+      : {}),
     ...(entries.length > 0 &&
     entries.every((entry) => typeof entry.member.client.responsesCompact === "function")
       ? {

@@ -1,5 +1,28 @@
 import { describe, expect, it } from "vitest";
-import { ImageGenerationRequestSchema, ImageGenerationResponseSchema } from "./images-schema.js";
+import {
+  ImageEditRequestSchema,
+  ImageGenerationRequestSchema,
+  ImageGenerationResponseSchema,
+} from "./images-schema.js";
+
+describe("ImageEditRequestSchema", () => {
+  it("accepts the Codex JSON image_url carrier", () => {
+    expect(
+      ImageEditRequestSchema.safeParse({
+        model: "gpt-image-2",
+        prompt: "add a hat",
+        images: [{ image_url: "data:image/png;base64,AAA=" }],
+      }).success,
+    ).toBe(true);
+  });
+
+  it("requires at least one image", () => {
+    expect(
+      ImageEditRequestSchema.safeParse({ model: "gpt-image-2", prompt: "add a hat", images: [] })
+        .success,
+    ).toBe(false);
+  });
+});
 
 describe("ImageGenerationRequestSchema", () => {
   it("parses a minimal {model, prompt}", () => {

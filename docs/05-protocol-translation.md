@@ -62,6 +62,8 @@ unknown top-level request fields are not guaranteed to survive schema parsing.
 | Anthropic token count | `POST /v1/messages/count_tokens` | JSON |
 | Anthropic CLI event acknowledgement | `POST /api/event_logging/batch` | JSON |
 | OpenAI Responses | `POST /v1/responses`, `POST /responses`, `POST /openai/v1/responses` | JSON, Responses SSE, or WebSocket upgrade |
+| OpenAI Realtime V1/V2 | `POST /v1/realtime/calls`, then `/v1/realtime?call_id=...` | WebRTC SDP + WebSocket sideband |
+| OpenAI Realtime V3 | `POST /v1/live`, then `/v1/live/{call_id}` | WebRTC SDP + Frameless WebSocket sideband |
 | Gemini GenerateContent | `POST /v1beta/models/{model}:generateContent` and `POST /models/{model}:generateContent` | JSON |
 | Gemini StreamGenerateContent | the same two prefixes with `:streamGenerateContent` | Gemini SSE |
 | Gemini token count | the same two prefixes with `:countTokens` | JSON |
@@ -97,6 +99,7 @@ Image generation is routed separately from the four-protocol text IR:
 | Route | Client shape | Provider behavior |
 |---|---|---|
 | `POST /v1/images/generations` | OpenAI Images | Uses an image model or homogeneous image lane; Gemini image providers are adapted to/from `generateContent`. |
+| `POST /v1/images/edits` | OpenAI Images | Accepts Codex JSON `images[].image_url` and OpenAI multipart `image`/`mask`; edit-capable OpenAI targets use the existing image fallback chain. |
 | `POST /v1beta/interactions` | Gemini Interactions | Converts `{model,input,response_format}` to Gemini `generateContent` and maps generated text/images to `steps[].content[]`. |
 | Gemini `:generateContent` with an output-image model | Native Gemini | Uses native Gemini generation, including `responseModalities` and returned `inlineData`. |
 

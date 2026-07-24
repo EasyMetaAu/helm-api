@@ -238,8 +238,10 @@ curl http://localhost:8080/v1/chat/completions \
 | `POST /v1/chat/completions` | OpenAI Chat Completions | ✅ |
 | `POST /v1/messages` | Anthropic Messages | ✅ |
 | `POST /v1/responses` | OpenAI Responses | ✅ |
+| `POST /v1/realtime/calls` · `POST /v1/live` | OpenAI Realtime Voice (V1/V2 · V3) | ✅ WebRTC + WebSocket sideband |
 | `POST /v1beta/models/{model}:generateContent` | Google Gemini | ✅ (via `:streamGenerateContent`; auth via `x-goog-api-key`) |
 | `POST /v1/images/generations` | OpenAI Images API ([image generation](#image-generation)) | — (image model/lane, any key) |
+| `POST /v1/images/edits` | OpenAI Images API (JSON or multipart edits) | — (image model/lane, any key) |
 | `POST /v1beta/interactions` | Gemini Interactions API ([image generation](#image-generation)) | — (image model/lane, any key) |
 
 **What to put in `model`:**

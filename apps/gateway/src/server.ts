@@ -190,6 +190,7 @@ import {
   type OAuthModelDiscoveryCache,
 } from "./oauth/model-discovery-cache.js";
 import { createResetCreditGuard, resetCreditGuardHash } from "./oauth/reset-credit-guard.js";
+import { createRealtimeCallRegistry, type RealtimeCallRegistry } from "./realtime-call-registry.js";
 import { createResponsesRegistry } from "./responses-registry.js";
 import { createArchiveFsAccess } from "./routes/admin/cleanup-fs.js";
 import { registerAdminApi } from "./routes/admin/index.js";
@@ -215,6 +216,7 @@ import { registerModelsRoute } from "./routes/models.js";
 import { clearSessionCaptureCache } from "./routes/payload-capture.js";
 import { registerPortalApi } from "./routes/portal/index.js";
 import { mountPortalStatic, PORTAL_BUILD_ROOT } from "./routes/portal-static.js";
+import { registerRealtimeRoutes } from "./routes/realtime.js";
 import {
   type ResponsesCompactExecution,
   type ResponsesRouteDeps,
@@ -246,6 +248,9 @@ export interface ServerHandle {
   closeResponsesWebSocketSession?: (sessionId: string) => Promise<void>;
   responsesWebSocketSessionProof?: string;
   responsesMemoryAdmission?: BodyMemoryAdmission;
+  websocketIngressAdmission?: BodyMemoryAdmission;
+  realtimeCallRegistry?: RealtimeCallRegistry;
+  resolveRealtimeKey?: (credential: string | null) => Promise<string | null>;
   // Stop background workers (e.g. the Agentic Signals scheduler). Optional and
   // safe to skip — the timers are unref'd so they never block process exit.
   dispose?: () => void | Promise<void>;
@@ -1538,6 +1543,21 @@ function createProviderClient(
       },
       fetch: providerFetch,
     });
+    const realtimeClient = createOpenAIClient({
+      config: {
+        ...base,
+        ...cred,
+        realtimeProxy: proxy,
+        extraHeaders: (): Record<string, string> => {
+          const identity = {
+            ...codexRuntime?.accountIdentity,
+            ...codexIdentityFromMetadata(cred.currentMetadata()),
+          };
+          return identity.accountId ? { "chatgpt-account-id": identity.accountId } : {};
+        },
+      },
+      fetch: providerFetch,
+    });
     const prepareNative = (input: NativePassthroughInput): NativePassthroughInput => {
       const versionedInput = normalizeCodexNativeClientVersion(input);
       const body = nativePassthroughBody(versionedInput);
@@ -1583,6 +1603,7 @@ function createProviderClient(
     };
     return {
       ...client,
+      realtimeCall: realtimeClient.realtimeCall,
       async nativePassthrough(body, opts) {
         if (!client.nativePassthrough) {
           throw new Error("Codex native passthrough is unavailable");
@@ -1695,6 +1716,7 @@ function createProviderClient(
     config: {
       ...base,
       ...cred,
+      realtimeProxy: proxy,
       mapDeveloperRoleToSystem: p.map_developer_role_to_system,
       normalizeReasoningDeltaAlias: p.normalize_reasoning_delta_alias,
     },
@@ -1784,6 +1806,12 @@ export async function buildServer(
     protectedHeapBytes: requestProtectedHeapBytes,
     heapUsedBytes: () => process.memoryUsage().heapUsed,
   });
+  const websocketIngressAdmission = createBodyMemoryAdmission({
+    activeRequestBytes: memoryBudget.websocketIngressBytes,
+    maxWireBytes: memoryBudget.websocketMaxPayloadBytes,
+    jsonAmplification: 1,
+    minRequestChargeBytes: 1,
+  });
   logger.log("info", "runtime.memory_budget", {
     heap_limit_bytes: memoryBudget.heapLimitBytes,
     process_limit_bytes: memoryBudget.processLimitBytes,
@@ -1797,6 +1825,8 @@ export async function buildServer(
     sse_tail_chars: memoryBudget.sseTailChars,
     sqlite_page_cache_bytes: memoryBudget.sqlitePageCacheBytes,
     sqlite_maintenance_cache_bytes: memoryBudget.sqliteMaintenanceCacheBytes,
+    websocket_ingress_bytes: memoryBudget.websocketIngressBytes,
+    websocket_max_payload_bytes: memoryBudget.websocketMaxPayloadBytes,
   });
   const config = loadConfig({ configDir: opts.configDir ?? "./config" });
   // Validate the optional Grok proxy protocol override before opening stores or
@@ -3969,6 +3999,58 @@ export async function buildServer(
     };
   };
 
+  const realtimeCallRegistry = createRealtimeCallRegistry();
+  const resolveRealtimeTarget = (
+    requestedModel: string,
+  ): { client: ProviderClient; providerModel: string; alias: string } | null => {
+    const bareModel = requestedModel.includes("/")
+      ? requestedModel.slice(requestedModel.indexOf("/") + 1)
+      : requestedModel;
+    if (!(bareModel.startsWith("gpt-realtime") || bareModel.startsWith("gpt-live-"))) return null;
+
+    const oauthAlias = requestedModel.startsWith("openai-codex/")
+      ? requestedModel
+      : `openai-codex/${bareModel}`;
+    const oauthClient = providerClients.get("openai-codex");
+    if (oauthClient?.realtimeCall) {
+      return {
+        client: oauthClient,
+        providerModel: oauthWireModelMap.get(oauthAlias) ?? bareModel,
+        alias: oauthAlias,
+      };
+    }
+
+    const staticAlias = requestedModel.startsWith("openai/")
+      ? requestedModel
+      : `openai/${bareModel}`;
+    const resolved = registry.resolve(staticAlias);
+    if (!resolved.ok) return null;
+    const client = providerClients.get(resolved.value.providerName);
+    return client?.realtimeCall
+      ? { client, providerModel: resolved.value.providerModel, alias: resolved.value.alias }
+      : null;
+  };
+  registerRealtimeRoutes(app, {
+    memoryAdmission: requestBodyMemoryAdmission,
+    rateLimiter,
+    concurrencyGate,
+    registry: realtimeCallRegistry,
+    resolve: resolveRealtimeTarget,
+    auth: {
+      resolve: async (credential) => {
+        const identity = await resolveIdentity(credential);
+        return identity
+          ? {
+              keyId: identity.keyId,
+              blockedModels: identity.caps?.blockedModels,
+              concurrencyLimit: identity.caps?.concurrencyLimit,
+              rateLimit: identity.caps?.rateLimit,
+            }
+          : null;
+      },
+    },
+  });
+
   registerGeminiRoute(app, {
     memoryAdmission: requestBodyMemoryAdmission,
     rateLimiter,
@@ -4296,6 +4378,9 @@ export async function buildServer(
     host: config.server.host,
     responsesWebSocketSessionProof,
     responsesMemoryAdmission: requestBodyMemoryAdmission,
+    websocketIngressAdmission,
+    realtimeCallRegistry,
+    resolveRealtimeKey: async (credential) => (await resolveIdentity(credential))?.keyId ?? null,
     closeResponsesWebSocketSession: async (sessionId) => {
       await Promise.all(
         [...providerClients.values()].map(

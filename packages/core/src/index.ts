@@ -612,9 +612,14 @@ export {
   type ChatCompletionRequest,
   type ChatCompletionResponse,
   createOpenAIClient,
+  type ImageEditInput,
+  type ImageEditMultipartField,
   type OpenAIClientDeps,
   type ProviderClient,
   type ProviderConfig,
+  type RealtimeCallRequest,
+  type RealtimeCallResult,
+  type RealtimeSidebandTarget,
   UpstreamError,
 } from "./provider/openai.js";
 export {

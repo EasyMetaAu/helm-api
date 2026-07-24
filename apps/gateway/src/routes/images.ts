@@ -4,8 +4,9 @@ import {
   type BudgetProbe,
   type CircuitBreaker,
   createBlockedModelMatcher,
+  type ImageEditInput,
 } from "@helm/core";
-import { ImageGenerationRequestSchema } from "@helm/shared";
+import { ImageEditRequestSchema, ImageGenerationRequestSchema } from "@helm/shared";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
@@ -107,10 +108,13 @@ function mapGeminiToImages(native: Record<string, unknown>): Record<string, unkn
 }
 
 export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): void {
-  app.use("/v1/images/generations", concurrencyReleaseGuard());
-  app.use("/v1/images/generations", memoryAdmissionReleaseGuard());
+  for (const path of ["/v1/images/generations", "/v1/images/edits"]) {
+    app.use(path, concurrencyReleaseGuard());
+    app.use(path, memoryAdmissionReleaseGuard());
+  }
 
-  app.post("/v1/images/generations", async (c) => {
+  const handle = async (c: Context<AppEnv>): Promise<Response> => {
+    const editing = c.req.path === "/v1/images/edits";
     // Production always receives both ids from createApp. The UUID fallback keeps
     // this route safely usable in isolated/headless Hono composition tests without
     // ever consulting a client header for the storage key.
@@ -182,17 +186,89 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
       c.set("concurrencyRelease", acquired.release);
     }
 
-    // 4) Parse + validate. Malformed JSON / invalid body → 400 (client error).
+    // 4) Parse + validate. Edits support both the Codex JSON carrier and the public
+    // multipart carrier. The admitted bytes make multipart fallback attempts replayable.
     let requestJson = "";
-    let raw: unknown;
+    let model = "";
+    let prompt = "";
+    let generationBody: Record<string, unknown> | null = null;
+    let editInput: ImageEditInput | null = null;
     try {
       const admitted =
         deps.memoryAdmission === undefined
           ? null
           : await readAdmittedRequestBody(c.req.raw, deps.memoryAdmission);
-      requestJson = admitted?.text ?? (await c.req.text());
+      const bytes = admitted?.bytes ?? new Uint8Array(await c.req.arrayBuffer());
+      requestJson = admitted?.text ?? Buffer.from(bytes).toString("utf8");
       if (admitted !== null) c.set("requestMemoryRelease", admitted.release);
-      raw = JSON.parse(requestJson);
+      const contentType = c.req.header("Content-Type")?.toLowerCase() ?? "";
+      if (editing && contentType.startsWith("multipart/form-data")) {
+        const form = await new Request("http://helm.internal/v1/images/edits", {
+          method: "POST",
+          headers: { "content-type": c.req.header("Content-Type") ?? "" },
+          body: Buffer.from(bytes),
+        }).formData();
+        const fields: ImageEditInput & { kind: "multipart" } = {
+          kind: "multipart",
+          fields: await Promise.all(
+            [...form.entries()].map(async ([name, value]) =>
+              typeof value === "string"
+                ? { name, value }
+                : {
+                    name,
+                    value: new Uint8Array(await value.arrayBuffer()),
+                    filename: value.name,
+                    contentType: value.type || "application/octet-stream",
+                  },
+            ),
+          ),
+        };
+        model = form.get("model")?.toString().trim() ?? "";
+        prompt = form.get("prompt")?.toString().trim() ?? "";
+        const hasImage = fields.fields.some(
+          (field) =>
+            (field.name === "image" || field.name === "image[]") &&
+            typeof field.value !== "string" &&
+            field.value.byteLength > 0,
+        );
+        if (model.length === 0 || prompt.length === 0 || !hasImage) {
+          return errorJson(
+            c,
+            400,
+            "invalid_request_error",
+            "multipart image edit requires model, prompt, and at least one image file",
+          );
+        }
+        editInput = fields;
+        requestJson = JSON.stringify({
+          model,
+          prompt,
+          files: fields.fields
+            .filter((field) => typeof field.value !== "string")
+            .map((field) => ({
+              name: field.name,
+              filename: "filename" in field ? field.filename : "",
+            })),
+        });
+      } else {
+        const raw = JSON.parse(requestJson) as unknown;
+        const parsed = (editing ? ImageEditRequestSchema : ImageGenerationRequestSchema).safeParse(
+          raw,
+        );
+        if (!parsed.success) {
+          return errorJson(
+            c,
+            400,
+            "invalid_request_error",
+            parsed.error.issues[0]?.message ??
+              `invalid image ${editing ? "edit" : "generation"} request`,
+          );
+        }
+        model = parsed.data.model;
+        prompt = parsed.data.prompt;
+        if (editing) editInput = { kind: "json", body: parsed.data };
+        else generationBody = parsed.data;
+      }
     } catch (error) {
       if (error instanceof RequestAdmissionError) {
         if (error.status === 503) c.header("retry-after", "1");
@@ -204,56 +280,62 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
           error.code,
         );
       }
-      return errorJson(c, 400, "invalid_request_error", "malformed JSON request body");
-    }
-    const parsed = ImageGenerationRequestSchema.safeParse(raw);
-    if (!parsed.success) {
-      return errorJson(
-        c,
-        400,
-        "invalid_request_error",
-        parsed.error.issues[0]?.message ?? "invalid image generation request",
-      );
+      return errorJson(c, 400, "invalid_request_error", "malformed image request body");
     }
 
     // 5) Resolve the model/lane → the ordered provider chain.
-    const chain = deps.resolveImageChain(parsed.data.model);
+    const chain = deps.resolveImageChain(model);
     if (!chain.ok) {
       return chain.status === 404
         ? errorJson(
             c,
             404,
             "invalid_request_error",
-            `model '${parsed.data.model}' is not a configured image model`,
+            `model '${model}' is not a configured image model`,
             "model_not_found",
           )
         : errorJson(
             c,
             503,
             "api_error",
-            `image provider for '${parsed.data.model}' is unavailable (missing credential)`,
+            `image provider for '${model}' is unavailable (missing credential)`,
             "provider_unavailable",
           );
+    }
+    const operationTargets = editing
+      ? chain.targets.filter(
+          (target) => target.kind === "openai" && typeof target.client.imageEdit === "function",
+        )
+      : chain.targets;
+    if (operationTargets.length === 0) {
+      return errorJson(
+        c,
+        400,
+        "invalid_request_error",
+        `model '${model}' does not support image edits`,
+        "unsupported_operation",
+      );
     }
     const blockedModels = createBlockedModelMatcher(identity.caps?.blockedModels);
     const permittedTargets =
       blockedModels === null
-        ? chain.targets
-        : chain.targets.filter((target) => !blockedModels.matches(target.alias));
+        ? operationTargets
+        : operationTargets.filter((target) => !blockedModels.matches(target.alias));
     const permittedCandidateChain =
       blockedModels === null
-        ? chain.candidateChain
-        : chain.candidateChain.filter((alias) => !blockedModels.matches(alias));
+        ? operationTargets.map((target) => target.alias)
+        : operationTargets
+            .map((target) => target.alias)
+            .filter((alias) => !blockedModels.matches(alias));
     if (permittedTargets.length === 0) {
-      const directBlocked =
-        chain.laneName !== parsed.data.model && blockedModels?.matches(parsed.data.model) === true;
+      const directBlocked = chain.laneName !== model && blockedModels?.matches(model) === true;
       return errorJson(
         c,
         400,
         "invalid_request_error",
         directBlocked
-          ? `model '${parsed.data.model}' is blocked for this key`
-          : `all image candidate models for '${parsed.data.model}' are blocked for this key`,
+          ? `model '${model}' is blocked for this key`
+          : `all image candidate models for '${model}' are blocked for this key`,
         "model_blocked",
       );
     }
@@ -284,11 +366,30 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         upstreamRequestJson = b;
       };
       let upstream: Record<string, unknown>;
-      if (target.kind === "gemini") {
+      if (editing) {
+        if (!editInput || !target.client.imageEdit) {
+          throw new Error("image edit provider is unavailable");
+        }
+        const providerInput: ImageEditInput =
+          editInput.kind === "json"
+            ? { kind: "json", body: { ...editInput.body, model: target.providerModel } }
+            : {
+                kind: "multipart",
+                fields: editInput.fields.map((field) =>
+                  field.name === "model" && typeof field.value === "string"
+                    ? { name: field.name, value: target.providerModel }
+                    : field,
+                ),
+              };
+        upstream = await target.client.imageEdit(providerInput, {
+          signal: requestSignal(c),
+          captureUpstream,
+        });
+      } else if (target.kind === "gemini") {
         const native = await target.client.nativePassthrough?.(
           {
             model: target.providerModel,
-            contents: [{ role: "user", parts: [{ text: parsed.data.prompt }] }],
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
             generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
           },
           { signal: requestSignal(c), captureUpstream },
@@ -296,7 +397,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         upstream = mapGeminiToImages((native ?? {}) as Record<string, unknown>);
       } else {
         upstream = (await target.client.imageGeneration?.(
-          { ...parsed.data, model: target.providerModel },
+          { ...generationBody, model: target.providerModel },
           { signal: requestSignal(c), captureUpstream },
         )) as Record<string, unknown>;
       }
@@ -324,7 +425,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
           requestId,
           traceId,
           keyPrefix,
-          requested: parsed.data.model,
+          requested: model,
           selectedLane: permittedChain.laneName,
           candidateChain: permittedChain.candidateChain,
           attempts: outcome.attempts,
@@ -361,7 +462,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         requestId,
         traceId,
         keyPrefix,
-        requested: parsed.data.model,
+        requested: model,
         selectedLane: permittedChain.laneName,
         candidateChain: permittedChain.candidateChain,
         attempts: outcome.attempts,
@@ -412,5 +513,8 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
     c.header("x-helm-final-model", served.alias);
     c.header("x-helm-provider-model", served.providerModel);
     return c.json(result.clientBody);
-  });
+  };
+
+  app.post("/v1/images/generations", handle);
+  app.post("/v1/images/edits", handle);
 }

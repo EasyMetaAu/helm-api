@@ -115,7 +115,7 @@ export const CodexModelInfoSchema = z
     comp_hash: z.string().nullable().optional(),
     effective_context_window_percent: z.number().int().default(95),
     experimental_supported_tools: z.array(z.string()),
-    input_modalities: z.array(z.enum(["text", "image"])).default(["text", "image"]),
+    input_modalities: z.array(z.enum(["text", "image", "audio"])).default(["text", "image"]),
     supports_search_tool: z.boolean().default(false),
     use_responses_lite: z.boolean().default(false),
     auto_review_model_override: z.string().nullable().optional(),

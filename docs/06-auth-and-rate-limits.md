@@ -7,7 +7,8 @@
 Helm never allows anonymous access to a protected data or inference surface.
 Every request to the API surface
 (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`,
-`/v1beta/models/...:generateContent`, `/v1/images/generations`,
+`/v1/realtime/calls`, `/v1/live`, their WebSocket sidebands,
+`/v1beta/models/...:generateContent`, `/v1/images/generations`, `/v1/images/edits`,
 `/v1beta/interactions`, `/v1/models`, `/v1/usage`, `/portal/api`, and the
 optional `/mcp`) must carry a valid API key or the explicitly configured MCP
 OAuth token. The landing page, health/version probes, and headline OpenAPI/Swagger
@@ -39,10 +40,15 @@ shared middleware, so they can emit their own error envelopes: `/v1/messages`,
 their native protocol shape. The Anthropic face accepts either `x-api-key` or
 `Authorization: Bearer`.
 
-`/v1/images/generations` is likewise a self-authenticating route: it runs the
+`/v1/images/generations` and `/v1/images/edits` are likewise self-authenticating routes: they run the
 same key lookup using `Authorization: Bearer` (like the OpenAI Chat face). It
 does **not** require `allow_custom_model` — a standard key can call it even
 though it names an exact image model or image lane.
+
+Realtime call creation uses the same Bearer lookup. The returned `call_id` is
+stored briefly with the creating key id and its exact provider/account sideband;
+the WebSocket upgrade must present the same Helm key. Helm never forwards that
+credential upstream and never reselects an OAuth account after call creation.
 
 `/v1beta/interactions` (the Gemini Interactions image-generation surface)
 self-authenticates the same way, but using `x-goog-api-key` (the Gemini SDK

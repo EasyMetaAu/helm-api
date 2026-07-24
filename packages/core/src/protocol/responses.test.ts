@@ -79,6 +79,30 @@ describe("responsesTransformer — input_audio content (RESP-01)", () => {
     expect(parts).toContainEqual({ type: "audio", data: "AUDIO64", format: "mp3" });
   });
 
+  it("accepts Codex input_audio.audio_url and preserves the data URL on render", async () => {
+    const audioUrl = "data:audio/wav;base64,AUDIO64";
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-5.6-sol",
+      input: [
+        {
+          role: "user",
+          content: [{ type: "input_audio", audio_url: audioUrl }],
+        },
+      ],
+    });
+    const userMsg = ir.messages.find((message) => message.role === "user");
+    const parts = Array.isArray(userMsg?.content) ? userMsg.content : [];
+    expect(parts).toContainEqual({ type: "audio", data: "AUDIO64", format: "wav" });
+
+    const native = (await responsesTransformer.transformRequestIn(ir)) as {
+      input: Array<{ content?: Array<Record<string, unknown>> }>;
+    };
+    expect(native.input[0]?.content).toContainEqual({
+      type: "input_audio",
+      audio_url: audioUrl,
+    });
+  });
+
   it("renders an IR audio part back to native Responses input_audio", async () => {
     const native = (await responsesTransformer.transformRequestIn({
       model: "gpt-4o-audio",

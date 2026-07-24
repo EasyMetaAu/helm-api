@@ -141,7 +141,7 @@ function admissionError(reason: "too_large" | "busy", maxWireBytes: number) {
 export async function readAdmittedRequestBody(
   request: Request,
   admission: BodyMemoryAdmission,
-): Promise<{ text: string; release: () => void }> {
+): Promise<{ text: string; bytes: Uint8Array; release: () => void }> {
   const declared = Number(request.headers.get("content-length"));
   const initialBytes =
     request.headers.has("transfer-encoding") || !Number.isFinite(declared) || declared < 0
@@ -172,8 +172,10 @@ export async function readAdmittedRequestBody(
     }
     const resized = lease.resize(bytes);
     if (!resized.ok) throw admissionError(resized.reason, admission.maxWireBytes);
+    const body = Buffer.concat(chunks, bytes);
     return {
-      text: Buffer.concat(chunks).toString("utf8"),
+      text: body.toString("utf8"),
+      bytes: body,
       release: lease.release,
     };
   } catch (error) {
