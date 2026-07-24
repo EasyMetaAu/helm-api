@@ -443,12 +443,8 @@ export function installResponsesWebSocketBridge({
       activeRequestBytes: memoryBudget.websocketIngressBytes,
       maxWireBytes: Math.min(admission.maxWireBytes, memoryBudget.websocketMaxPayloadBytes),
       jsonAmplification: 1,
-      // Reserve one whole permitted frame before `ws` can inflate/materialize it.
-      // A one-byte charge makes true zero-headroom budgets reject every upgrade.
-      minRequestChargeBytes: Math.max(
-        1,
-        Math.min(admission.maxWireBytes, memoryBudget.websocketMaxPayloadBytes),
-      ),
+      // Keep zero-headroom upgrades fail-closed without charging idle sockets for a full frame.
+      minRequestChargeBytes: 1,
     });
   const websocketMaxPayloadBytes = Math.max(
     1,
@@ -492,8 +488,30 @@ export function installResponsesWebSocketBridge({
       const bytes = Array.isArray(data)
         ? data.reduce((total, chunk) => total + chunk.byteLength, 0)
         : data.byteLength;
+      const ingressAcquired = ingress.acquire(bytes);
+      if (!ingressAcquired.ok) {
+        const error =
+          ingressAcquired.reason === "too_large"
+            ? new RequestAdmissionError(
+                413,
+                "request_too_large",
+                `websocket message exceeds the runtime capacity limit of ${ingress.maxWireBytes} bytes`,
+              )
+            : new RequestAdmissionError(
+                503,
+                "server_overloaded",
+                "websocket ingress memory capacity is temporarily exhausted",
+              );
+        void sendEnvelope(socket, localErrorEnvelope(error))
+          .catch(() => {})
+          .finally(() => {
+            if (error.status === 413) socket.close(1009, "message too big");
+          });
+        return;
+      }
       const acquired = admission.acquire(bytes);
       if (!acquired.ok) {
+        ingressAcquired.lease.release();
         const error =
           acquired.reason === "too_large"
             ? new RequestAdmissionError(
@@ -533,6 +551,7 @@ export function installResponsesWebSocketBridge({
         } finally {
           processing = false;
           acquired.lease.release();
+          ingressAcquired.lease.release();
         }
       })();
     });
@@ -563,15 +582,11 @@ export function installResponsesWebSocketBridge({
         .finally(() => socket.off("error", onRejectedSocketError));
       return;
     }
-    let handedOff = false;
-    const releaseIngress = ingressLease.lease.release;
+    ingressLease.lease.release();
     const onPreflightSocketError = () => {
-      releaseIngress();
       socket.destroy();
     };
-    const onPreflightSocketClose = () => releaseIngress();
     socket.on("error", onPreflightSocketError);
-    socket.once("close", onPreflightSocketClose);
     void preflightUpgrade(request, fetch)
       .then(async ({ response, metadata }) => {
         if (closed || socket.destroyed) {
@@ -584,9 +599,6 @@ export function installResponsesWebSocketBridge({
         }
         metadataByRequest.set(request, metadata);
         websocketServer.handleUpgrade(request, socket, head, (websocket) => {
-          handedOff = true;
-          websocket.once("close", releaseIngress);
-          websocket.once("error", releaseIngress);
           websocketServer.emit("connection", websocket, request);
         });
       })
@@ -607,8 +619,6 @@ export function installResponsesWebSocketBridge({
       })
       .finally(() => {
         socket.off("error", onPreflightSocketError);
-        socket.off("close", onPreflightSocketClose);
-        if (!handedOff) releaseIngress();
       });
   };
   server.on("upgrade", onUpgrade);
