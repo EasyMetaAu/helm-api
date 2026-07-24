@@ -28,6 +28,7 @@
 ## 2026-07-24 · Responses WebSocket ingress 改为按活动消息计费（Gateway / Protocol，docs/02/05/07，原则 3/8）
 
 - **根因与修复**：机器推导的 native ingress 池原本在 Upgrade 时为每条连接预留一个完整最大帧，导致空闲/预热连接达到 `floor(ingressBytes / maxPayload)` 后稳定返回 503。Upgrade 现在只瞬时探测零容量或暂停状态，空闲连接不保留 ingress lease；收到 `response.create` 后按消息真实 wire bytes 申请 ingress 与既有 JSON amplification 两级预算，并在请求结束时一起释放。
+- **握手错误正文**：一旦上游已经返回非 101 HTTP response，关闭 `ws` 的 opening-handshake socket timeout，改由既有的有界 response-body timeout 接管；避免两个同期限时器竞争，把确定性 timeout 偶发误报为 generic body failure。正文大小上限、socket 销毁与客户端错误形状保持不变。
 - **安全边界**：`ws.maxPayload` 继续按运行时机器容量动态限制单帧，超限仍以 1009/413 失败；活动消息超过 native ingress 池仍返回结构化 503，超过共享请求池也继续拒绝。没有新增固定连接数、队列、配置或依赖；定向测试同时覆盖“第三条空闲连接可建立”和“第三条并发活动消息被预算拒绝”。
 
 ## 2026-07-23 · PostgreSQL API-key 分布式并发 lease（Phase 1，docs/06/10，原则 1/3/7）

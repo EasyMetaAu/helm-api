@@ -283,8 +283,9 @@ export function createCodexResponsesWebSocketConnector(
           new WsCodexConnection(socket, upgradeHeaders, maxPendingBytes, responseWorkAdmission),
         );
       });
-      socket.once("unexpected-response", (_request, response) => {
+      socket.once("unexpected-response", (request, response) => {
         readingUnexpectedResponse = true;
+        request.setTimeout(0);
         const status = response.statusCode ?? null;
         const headers = responseHeaders(response);
         void unexpectedResponseBody(response, maxPayloadBytes, timeoutMs)
