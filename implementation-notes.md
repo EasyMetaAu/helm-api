@@ -7,6 +7,10 @@
 
 ---
 
+## 2026-07-24 · Admin 登录在 Host 被代理改写时复用浏览器同源证明（Admin auth，docs/10/11，原则 3/7）
+
+- **根因与修复**：Admin 登录/登出的 CSRF 校验原本只比较 `Origin` 与请求 `Host` / `X-Forwarded-Host`；部分反向代理或 NAT 会把 `Host` 改成内部地址且不补 `X-Forwarded-Host`，导致浏览器从同一外部 origin 提交表单也稳定返回 403。校验现在优先接受浏览器提供的 `Sec-Fetch-Site: same-origin`，再保留原有 Host 比较与 opaque-origin 边界；`cross-site` 仍拒绝。该 header 不能由网页脚本伪造，而无 `Origin` 的非浏览器客户端原本就允许，因此不新增配置、代理白名单或信任任意 forwarded header。
+
 ## 2026-07-24 · Responses WebSocket ingress 改为按活动消息计费（Gateway / Protocol，docs/02/05/07，原则 3/8）
 
 - **根因与修复**：机器推导的 native ingress 池原本在 Upgrade 时为每条连接预留一个完整最大帧，导致空闲/预热连接达到 `floor(ingressBytes / maxPayload)` 后稳定返回 503。Upgrade 现在只瞬时探测零容量或暂停状态，空闲连接不保留 ingress lease；收到 `response.create` 后按消息真实 wire bytes 申请 ingress 与既有 JSON amplification 两级预算，并在请求结束时一起释放。
@@ -60,14 +64,9 @@
 - **路由与协议边界**：可信 provider pin 只作为 Gateway 内部 metadata 进入共享执行器；候选不等于原 alias 时记录 `responses_previous_response_id_provider_mismatch` 并跳过，任何非 Responses 候选统一记录 `responses_previous_response_id_cross_protocol_blocked`。无状态首请求仍保留原有跨协议 fallback，只有有状态 continuation 被收紧。
 - **账号绑定边界**：OAuth pool 同时收到 WebSocket session 与 `previous_response_id` 时以后者优先，复用现有 response-id → account affinity，使续接在原账号不可用或首输出前故障时直接失败，不切换兄弟账号。没有新增存储、配置、依赖或客户端协议。
 
-## 2026-07-22 · Codex 客户端默认启用 Responses WebSocket，并补齐反向代理边界（Deployment / Protocol / Admin client setup，docs/05/10/11，原则 3/5/8）
-
-- **客户端契约**：Admin「接入客户端」现有 Codex TOML 直接增加 `supports_websockets = true`，复用 Helm 已实现的三个 Responses WebSocket 入口及 Codex 自身的 HTTP fallback；不新增 Gateway 路由、媒体服务、客户端 npm shim 或缓存层。该优化只减少同一 Codex turn 内后续模型调用的重复 input，跨 turn 首次请求仍会发送完整历史。
-- **部署边界**：WebSocket 可用性取决于整条反向代理链，不是 Gateway 代码存在即代表现网可用。nginx 只在真实 Upgrade 请求上转发 `Upgrade` / `Connection`，普通 HTTP/SSE 不注入 hop-by-hop header；若前置 HAProxy 另有 catch-all WebSocket backend，必须先按 Helm hostname 路由到 web backend，避免 Upgrade 在到达 nginx 前被截走。
-- **延后项**：Claude Code 没有可依赖的图片 URL / `file_id` 客户端契约，因此暂不建设本地 npm shim；不可变媒体引用留待自有客户端或明确协议需求出现后再做。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-22 · Codex 客户端默认启用 Responses WebSocket，并补齐反向代理边界（Deployment / Protocol / Admin client setup，docs/05/10/11，原则 3/5/8）**：Admin 的 Codex 配置复用既有 Responses WebSocket；代理只在真实 Upgrade 时转发 hop-by-hop header，Claude 图片 shim 延后，完整原文通过 git history 回溯。
 - **2026-07-21 · 首次安装改为令牌保护的浏览器向导并允许订阅-only 启动（Deployment / bootstrap / Admin，docs/10/11，原则 2/3/7）**：无完整 Admin 凭据时只开放令牌保护的浏览器向导与健康端点，完成后同进程启用 Gateway；凭据保存到 `0600` managed env，CLI/无 `.env`/OAuth-only Linux 安装路径均完成实测，完整原文通过 git history 回溯。
 - **2026-07-21 · Grok Build 复用 OpenAI 模型发现接入 Helm（Admin client setup，docs/05/11，原则 2/5/6）**：Grok Build 复用现有 `/v1/models` 与 Chat Completions，只新增七语言客户端配置引导，不引入专用路由或依赖；完整原文通过 git history 回溯。
 - **2026-07-20 · `end_turn` XML 泄漏只按终态工具调用恢复（Protocol streaming / provider execution，原则 3/5/8）**：仅在终态、完整、白名单且无既有结构化调用时恢复 `end_turn` XML 工具调用，四个出口共用收紧边界；完整原文通过 git history 回溯。
