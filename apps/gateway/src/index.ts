@@ -106,6 +106,7 @@ async function main(): Promise<void> {
           closeSession: next.closeResponsesWebSocketSession,
           sessionProof: next.responsesWebSocketSessionProof,
           memoryAdmission: next.responsesMemoryAdmission,
+          ingressAdmission: next.websocketIngressAdmission,
         });
       }
       if (!realtimeWebSocket && next.realtimeCallRegistry && next.resolveRealtimeKey) {
@@ -113,7 +114,7 @@ async function main(): Promise<void> {
           server,
           registry: next.realtimeCallRegistry,
           resolveKey: next.resolveRealtimeKey,
-          memoryAdmission: next.responsesMemoryAdmission,
+          memoryAdmission: next.websocketIngressAdmission,
         });
       }
       if (!rejectUnknownUpgrade) {

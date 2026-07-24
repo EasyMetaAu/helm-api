@@ -248,6 +248,7 @@ export interface ServerHandle {
   closeResponsesWebSocketSession?: (sessionId: string) => Promise<void>;
   responsesWebSocketSessionProof?: string;
   responsesMemoryAdmission?: BodyMemoryAdmission;
+  websocketIngressAdmission?: BodyMemoryAdmission;
   realtimeCallRegistry?: RealtimeCallRegistry;
   resolveRealtimeKey?: (credential: string | null) => Promise<string | null>;
   // Stop background workers (e.g. the Agentic Signals scheduler). Optional and
@@ -1805,6 +1806,12 @@ export async function buildServer(
     protectedHeapBytes: requestProtectedHeapBytes,
     heapUsedBytes: () => process.memoryUsage().heapUsed,
   });
+  const websocketIngressAdmission = createBodyMemoryAdmission({
+    activeRequestBytes: memoryBudget.websocketIngressBytes,
+    maxWireBytes: memoryBudget.websocketMaxPayloadBytes,
+    jsonAmplification: 1,
+    minRequestChargeBytes: 1,
+  });
   logger.log("info", "runtime.memory_budget", {
     heap_limit_bytes: memoryBudget.heapLimitBytes,
     process_limit_bytes: memoryBudget.processLimitBytes,
@@ -1818,6 +1825,8 @@ export async function buildServer(
     sse_tail_chars: memoryBudget.sseTailChars,
     sqlite_page_cache_bytes: memoryBudget.sqlitePageCacheBytes,
     sqlite_maintenance_cache_bytes: memoryBudget.sqliteMaintenanceCacheBytes,
+    websocket_ingress_bytes: memoryBudget.websocketIngressBytes,
+    websocket_max_payload_bytes: memoryBudget.websocketMaxPayloadBytes,
   });
   const config = loadConfig({ configDir: opts.configDir ?? "./config" });
   // Validate the optional Grok proxy protocol override before opening stores or
@@ -4369,6 +4378,7 @@ export async function buildServer(
     host: config.server.host,
     responsesWebSocketSessionProof,
     responsesMemoryAdmission: requestBodyMemoryAdmission,
+    websocketIngressAdmission,
     realtimeCallRegistry,
     resolveRealtimeKey: async (credential) => (await resolveIdentity(credential))?.keyId ?? null,
     closeResponsesWebSocketSession: async (sessionId) => {
