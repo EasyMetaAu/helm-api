@@ -58,7 +58,7 @@ describe("registerRealtimeRoutes", () => {
       headers: {
         Authorization: "Bearer helm-key",
         "openai-alpha": "quicksilver=v1",
-        "session-id": "sess-1",
+        "x-session-id": "sess-1",
         "x-secret": "do-not-forward",
       },
       body: multipart({ model: "gpt-realtime-1.5", type: "quicksilver" }),
@@ -75,7 +75,7 @@ describe("registerRealtimeRoutes", () => {
         session: expect.objectContaining({ model: "gpt-realtime-1.5" }),
         headers: {
           "openai-alpha": "quicksilver=v1",
-          "session-id": "sess-1",
+          "x-session-id": "sess-1",
         },
       }),
       expect.anything(),

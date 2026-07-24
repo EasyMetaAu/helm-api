@@ -53,7 +53,7 @@ describe("createOpenAIClient.realtimeCall", () => {
     });
   });
 
-  it("translates ChatGPT OAuth calls to JSON and keeps Frameless sideband on the bound account", async () => {
+  it("uses the required AVAS query for ChatGPT Frameless calls and keeps its Codex identity", async () => {
     const fetch = vi.fn().mockResolvedValue(
       new Response("v=answer\r\n", {
         status: 201,
@@ -65,14 +65,17 @@ describe("createOpenAIClient.realtimeCall", () => {
       config: {
         baseUrl: "https://chatgpt.com/backend-api/codex",
         getAuthHeader,
-        extraHeaders: () => ({ "chatgpt-account-id": "acct-1" }),
+        extraHeaders: () => ({
+          "chatgpt-account-id": "acct-1",
+          "User-Agent": "codex_cli_rs/0.145.0",
+        }),
       },
       fetch,
     });
 
     const result = await client.realtimeCall?.({
       endpoint: "live",
-      query: "intent=quicksilver&architecture=avas",
+      query: "",
       sdp: "v=offer\r\n",
       session: { ...SESSION, delegation: { type: "client" } },
       headers: { "openai-alpha": "quicksilver=v2" },
@@ -86,6 +89,7 @@ describe("createOpenAIClient.realtimeCall", () => {
       "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas",
     );
     expect(init.headers["Content-Type"]).toBe("application/json");
+    expect(init.headers["User-Agent"]).toBe("codex_cli_rs/0.145.0");
     expect(JSON.parse(init.body as string)).toEqual({
       sdp: "v=offer\r\n",
       session: { ...SESSION, delegation: { type: "client" } },

@@ -585,7 +585,12 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
       const base = cfg.resolveBaseUrl ? await cfg.resolveBaseUrl() : cfg.baseUrl;
       const backendShape = base.includes("/backend-api/");
       const callPath = backendShape || req.endpoint === "realtime" ? "realtime/calls" : "live";
-      const query = req.query.length > 0 ? `?${req.query}` : "";
+      const query =
+        req.query.length > 0
+          ? `?${req.query}`
+          : backendShape && req.endpoint === "live"
+            ? "?intent=quicksilver&architecture=avas"
+            : "";
       const url = `${base}/${callPath}${query}`;
       const forwardedHeaders = async (): Promise<Record<string, string>> => ({
         ...(await headersWithoutContentType()),
