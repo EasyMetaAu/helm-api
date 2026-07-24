@@ -7,6 +7,10 @@
 
 ---
 
+## 2026-07-24 · Admin 登录在 Host 被代理改写时复用浏览器同源证明（Admin auth，docs/10/11，原则 3/7）
+
+- **根因与修复**：Admin 登录/登出的 CSRF 校验原本只比较 `Origin` 与请求 `Host` / `X-Forwarded-Host`；部分反向代理或 NAT 会把 `Host` 改成内部地址且不补 `X-Forwarded-Host`，导致浏览器从同一外部 origin 提交表单也稳定返回 403。校验现在优先接受浏览器提供的 `Sec-Fetch-Site: same-origin`，再保留原有 Host 比较与 opaque-origin 边界；`cross-site` 仍拒绝。该 header 不能由网页脚本伪造，而无 `Origin` 的非浏览器客户端原本就允许，因此不新增配置、代理白名单或信任任意 forwarded header。
+
 ## 2026-07-24 · Responses WebSocket ingress 改为按活动消息计费（Gateway / Protocol，docs/02/05/07，原则 3/8）
 
 - **根因与修复**：机器推导的 native ingress 池原本在 Upgrade 时为每条连接预留一个完整最大帧，导致空闲/预热连接达到 `floor(ingressBytes / maxPayload)` 后稳定返回 503。Upgrade 现在只瞬时探测零容量或暂停状态，空闲连接不保留 ingress lease；收到 `response.create` 后按消息真实 wire bytes 申请 ingress 与既有 JSON amplification 两级预算，并在请求结束时一起释放。
@@ -60,15 +64,10 @@
 - **排序与删除**：fallback 的上下按钮改为复用 Policies 页交互语义的拖拽手柄，并保留方向键排序；每张 lane 卡提供删除按钮，删除先进入页面工作集，统一保存时才持久化。页面从 runtime settings 读取当前 `default_lane`，只保护当前默认 lane，不把 `balanced` 写死。
 - **配置边界修正**：`LanesConfigSchema` 改为要求至少一个有效 lane；`runtime.default_lane` 与 lane 集合的交叉约束在 Gateway 边界及启动组合层 fail-closed 校验。因而用户先把默认通道改成其他 lane 后可删除 `balanced`；Settings 选项与默认配置说明也不再把 `balanced` 当作强制终点。若手工配置令默认通道不存在，Gateway 拒绝启动；Resolver 仍对异常调用防御性地回退到存在的 `balanced` 或第一个 lane。
 
-## 2026-07-22 · Responses 状态续接严格绑定原 provider 与账号（Protocol translation / provider execution，docs/04/05/07，原则 2/3/5/8）
-
-- **状态引用边界**：`previous_response_id` 引用的是上游保存、Helm 无法从当前增量请求重建的隐藏历史。Responses create 入口复用既有 lifecycle registry，按同一 account/key 查出产生该 ID 的 provider alias；未知 ID、registry 不可用、或由非 Responses 翻译路径生成的 ID 在路由前返回 `400 invalid_request`，要求客户端发送完整 conversation input，不猜测也不静默丢历史。
-- **路由与协议边界**：可信 provider pin 只作为 Gateway 内部 metadata 进入共享执行器；候选不等于原 alias 时记录 `responses_previous_response_id_provider_mismatch` 并跳过，任何非 Responses 候选统一记录 `responses_previous_response_id_cross_protocol_blocked`。无状态首请求仍保留原有跨协议 fallback，只有有状态 continuation 被收紧。
-- **账号绑定边界**：OAuth pool 同时收到 WebSocket session 与 `previous_response_id` 时以后者优先，复用现有 response-id → account affinity，使续接在原账号不可用或首输出前故障时直接失败，不切换兄弟账号。没有新增存储、配置、依赖或客户端协议。
-
 ## 历史条目摘要（最新要点）
 
-- **2026-07-22 · Codex 客户端默认启用 Responses WebSocket，并补齐反向代理边界（Deployment / Protocol / Admin client setup，docs/05/10/11，原则 3/5/8）**：Admin 客户端配置复用现有 Responses WebSocket 与 HTTP fallback；反向代理只转发真实 Upgrade，Claude Code 媒体 shim 延后到明确协议出现，完整原文通过 git history 回溯。
+- **2026-07-22 · Responses 状态续接严格绑定原 provider 与账号（Protocol translation / provider execution，docs/04/05/07，原则 2/3/5/8）**：`previous_response_id` 只允许同 account/key、原 provider 与原账号继续执行；未知、跨协议或不可用状态 fail-closed，完整原文通过 git history 回溯。
+- **2026-07-22 · Codex 客户端默认启用 Responses WebSocket，并补齐反向代理边界（Deployment / Protocol / Admin client setup，docs/05/10/11，原则 3/5/8）**：Admin 的 Codex 配置复用既有 Responses WebSocket；代理只在真实 Upgrade 时转发 hop-by-hop header，Claude 图片 shim 延后，完整原文通过 git history 回溯。
 - **2026-07-21 · 首次安装改为令牌保护的浏览器向导并允许订阅-only 启动（Deployment / bootstrap / Admin，docs/10/11，原则 2/3/7）**：无完整 Admin 凭据时只开放令牌保护的浏览器向导与健康端点，完成后同进程启用 Gateway；凭据保存到 `0600` managed env，CLI/无 `.env`/OAuth-only Linux 安装路径均完成实测，完整原文通过 git history 回溯。
 - **2026-07-21 · Grok Build 复用 OpenAI 模型发现接入 Helm（Admin client setup，docs/05/11，原则 2/5/6）**：Grok Build 复用现有 `/v1/models` 与 Chat Completions，只新增七语言客户端配置引导，不引入专用路由或依赖；完整原文通过 git history 回溯。
 - **2026-07-20 · `end_turn` XML 泄漏只按终态工具调用恢复（Protocol streaming / provider execution，原则 3/5/8）**：仅在终态、完整、白名单且无既有结构化调用时恢复 `end_turn` XML 工具调用，四个出口共用收紧边界；完整原文通过 git history 回溯。
