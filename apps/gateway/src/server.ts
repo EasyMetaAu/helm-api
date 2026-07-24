@@ -1553,7 +1553,10 @@ function createProviderClient(
             ...codexRuntime?.accountIdentity,
             ...codexIdentityFromMetadata(cred.currentMetadata()),
           };
-          return identity.accountId ? { "chatgpt-account-id": identity.accountId } : {};
+          return {
+            ...(identity.accountId ? { "chatgpt-account-id": identity.accountId } : {}),
+            ...(codexRuntime?.userAgent ? { "User-Agent": codexRuntime.userAgent } : {}),
+          };
         },
       },
       fetch: providerFetch,

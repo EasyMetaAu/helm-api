@@ -18,6 +18,7 @@ const FORWARDED_HEADERS = [
   "openai-alpha",
   "originator",
   "session-id",
+  "x-session-id",
   "thread-id",
   "version",
   "x-client-request-id",

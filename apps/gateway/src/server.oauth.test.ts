@@ -1304,6 +1304,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     });
     const modelRequests: Headers[] = [];
     const responseRequests: Array<{ headers: Headers; body: Record<string, unknown> }> = [];
+    const realtimeRequests: Headers[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.toString();
       const headers = new Headers(init?.headers);
@@ -1327,6 +1328,13 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
             headers: { "Content-Type": "application/json", ETag: '"catalog-v1"' },
           },
         );
+      }
+      if (url.includes("/realtime/calls")) {
+        realtimeRequests.push(headers);
+        return new Response("v=answer\\r\\n", {
+          status: 201,
+          headers: { Location: "/v1/live/rtc-1" },
+        });
       }
       responseRequests.push({
         headers,
@@ -1378,6 +1386,17 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     expect(responseRequests[0]?.headers.get("X-OpenAI-Fedramp")).toBe("true");
     expect(responseRequests[0]?.headers.get("x-openai-internal-codex-responses-lite")).toBe("true");
     expect(responseRequests[0]?.body.parallel_tool_calls).toBe(false);
+
+    await poolClients.get("openai-codex")?.realtimeCall?.({
+      endpoint: "live",
+      query: "",
+      sdp: "v=offer\\r\\n",
+      session: { type: "quicksilver", model: "gpt-live-1-boulder-alpha" },
+      headers: {},
+    });
+    expect(realtimeRequests[0]?.get("user-agent")).toContain(
+      `codex_cli_rs/${DEFAULT_OPENAI_CODEX_CLIENT_VERSION}`,
+    );
   });
 
   it("normalizes prerelease discovery to the Codex whole version and reuses its cache", async () => {
