@@ -130,6 +130,23 @@ describe("Admin login page", () => {
     expect(res.headers.get("Location")).toBe("/admin");
   });
 
+  it("accepts browser-proven same-origin login when a proxy rewrites Host", async () => {
+    const request = form({
+      username: "admin",
+      password: AUTH.password ?? "",
+      next: "/admin",
+    });
+    request.headers = {
+      ...request.headers,
+      Host: "gateway.internal",
+      Origin: "https://helm.example",
+      "Sec-Fetch-Site": "same-origin",
+    };
+    const res = await appWithLogin().request("http://gateway.internal/admin/login", request);
+    expect(res.status).toBe(303);
+    expect(res.headers.get("Location")).toBe("/admin");
+  });
+
   it("accepts an opaque browser origin only when Fetch Metadata proves it is same-origin", async () => {
     const sameOriginRequest = form({
       username: "admin",
