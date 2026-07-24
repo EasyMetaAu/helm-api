@@ -122,71 +122,78 @@ async function connect(url: string, headers: Record<string, string> = {}): Promi
 }
 
 describe("Responses websocket bridge", () => {
-  it("reserves shared ingress capacity before websocket upgrade and releases it on close", async () => {
+  it("does not reserve a maximum frame for idle websocket connections", async () => {
     const ingressAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 20,
       maxWireBytes: 10,
       jsonAmplification: 1,
       minRequestChargeBytes: 10,
     });
-    let resolvePreflight!: (response: Response) => void;
-    let preflightCalls = 0;
-    const preflight = new Promise<Response>((resolve) => {
-      resolvePreflight = resolve;
-    });
     const baseUrl = await startBridge(
       () => {
         throw new Error("response fetch should not run");
       },
-      () => {
-        preflightCalls += 1;
-        return preflight;
-      },
+      undefined,
       { ingressAdmission },
     );
-    const first = new WebSocket(`${baseUrl}/v1/responses`);
-    openSockets.push(first);
-    for (let attempt = 0; attempt < 20 && preflightCalls === 0; attempt += 1) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
-    expect(preflightCalls).toBe(1);
 
-    const second = new WebSocket(`${baseUrl}/v1/responses`);
-    openSockets.push(second);
-    for (let attempt = 0; attempt < 20 && preflightCalls < 2; attempt += 1) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
-    expect(preflightCalls).toBe(2);
-    const third = new WebSocket(`${baseUrl}/v1/responses`);
-    openSockets.push(third);
-    const [, rejected] = (await once(third, "unexpected-response")) as [
-      IncomingMessage,
-      IncomingMessage,
-    ];
-    rejected.resume();
-    expect(rejected.statusCode).toBe(503);
-    expect(rejected.headers["retry-after"]).toBe("1");
-    expect(preflightCalls).toBe(2);
+    await Promise.all([
+      connect(`${baseUrl}/v1/responses`),
+      connect(`${baseUrl}/v1/responses`),
+      connect(`${baseUrl}/v1/responses`),
+    ]);
 
-    resolvePreflight(
-      new Response(JSON.stringify({ data: [] }), {
-        headers: { "content-type": "application/json" },
-      }),
+    expect(ingressAdmission.reservedBytes).toBe(0);
+  });
+
+  it("limits materialized websocket messages instead of idle connections", async () => {
+    const ingressAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 200,
+      maxWireBytes: 100,
+      jsonAmplification: 1,
+      minRequestChargeBytes: 100,
+    });
+    const pendingResponses: Array<(response: Response) => void> = [];
+    const baseUrl = await startBridge(
+      () => new Promise<Response>((resolve) => pendingResponses.push(resolve)),
+      undefined,
+      { ingressAdmission },
     );
-    await once(first, "open");
-    await once(second, "open");
-    expect(ingressAdmission.reservedBytes).toBe(20);
-    first.terminate();
-    await once(first, "close");
-    for (let attempt = 0; attempt < 20 && ingressAdmission.reservedBytes !== 10; attempt += 1) {
+    const [first, second, third] = await Promise.all([
+      connect(`${baseUrl}/v1/responses`),
+      connect(`${baseUrl}/v1/responses`),
+      connect(`${baseUrl}/v1/responses`),
+    ]);
+    const request = {
+      type: "response.create",
+      model: "gpt-5.6-sol",
+      input: [],
+      stream: true,
+    };
+
+    const firstTurn = collectTurn(first, request);
+    const secondTurn = collectTurn(second, request);
+    for (let attempt = 0; attempt < 20 && pendingResponses.length < 2; attempt += 1) {
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
-    expect(ingressAdmission.reservedBytes).toBe(10);
-    second.terminate();
-    await once(second, "close");
-    for (let attempt = 0; attempt < 20 && ingressAdmission.reservedBytes !== 0; attempt += 1) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
+    expect(pendingResponses).toHaveLength(2);
+    expect(ingressAdmission.reservedBytes).toBe(200);
+
+    await expect(collectTurn(third, request)).resolves.toMatchObject([
+      {
+        type: "error",
+        status: 503,
+        error: { code: "server_overloaded" },
+      },
+    ]);
+
+    const completed = () =>
+      new Response(
+        'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    for (const resolve of pendingResponses) resolve(completed());
+    await Promise.all([firstTurn, secondTurn]);
     expect(ingressAdmission.reservedBytes).toBe(0);
   });
 

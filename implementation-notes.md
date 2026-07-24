@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-07-24 · Responses WebSocket ingress 改为按活动消息计费（Gateway / Protocol，docs/02/05/07，原则 3/8）
+
+- **根因与修复**：机器推导的 native ingress 池原本在 Upgrade 时为每条连接预留一个完整最大帧，导致空闲/预热连接达到 `floor(ingressBytes / maxPayload)` 后稳定返回 503。Upgrade 现在只瞬时探测零容量或暂停状态，空闲连接不保留 ingress lease；收到 `response.create` 后按消息真实 wire bytes 申请 ingress 与既有 JSON amplification 两级预算，并在请求结束时一起释放。
+- **安全边界**：`ws.maxPayload` 继续按运行时机器容量动态限制单帧，超限仍以 1009/413 失败；活动消息超过 native ingress 池仍返回结构化 503，超过共享请求池也继续拒绝。没有新增固定连接数、队列、配置或依赖；定向测试同时覆盖“第三条空闲连接可建立”和“第三条并发活动消息被预算拒绝”。
+
 ## 2026-07-23 · Session 恢复与在线响应共享内存池（Admin requests，docs/07/11，原则 3/7）
 
 - **恢复窗口**：Admin Session 恢复单次最多预占 response-work 池的一半，允许两次有界恢复并行，也为在线 API 响应保留容量；第三次并发恢复或超过半窗口的会话继续返回 `session_recovery_limited`。保留先准入、后物化正文的顺序，不新增队列、配置或独立内存池。
@@ -14,7 +19,7 @@
 ## 2026-07-23 · Codex Responses 按运行时容量准入并让夜间 SQLite 维护收缩内存（Gateway / Session / Store，docs/02/05/07/10，原则 2/3/7/8）
 
 - **功能边界不降级**：按 operator 要求保留正文/Session 捕获、自动 cleanup/VACUUM 和不限 key 并发；不再用关闭正文、关闭维护或固定并发作为稳定手段。Node 启动时从 V8 heap limit 与 cgroup/process constrained memory 推导活动请求、response work、单条 wire message、写队列、Session head cache、SQLite page cache 与维护 cache；活动请求和 response work 各占动态可分配容量的 20%，部署值随机器容量自动缩放，不写死 MiB。
-- **请求、输出与 Session 热路径**：所有 JSON 入口在 `JSON.parse` 前按真实流式字节申请进程级预算，超出单请求容量返回结构化 413，暂时无余量返回 503；`maxPayload` 与上游 Codex connector 同样随运行时容量变化。客户端 WebSocket 另从 cgroup 或 `RSS + availableMemory` 扣除未来 heap 增长和 SQLite 预留，得到 native ingress 池；每连接只预留一个最坏帧、不按 key 或固定连接数限流。WS 每连接只保留一个正在执行的 `response.create`，terminal 后排空内部流再释放 lease；所有上游 Codex WS 会话共用 response-work 池，每条消息从入队、等待、`JSON.parse` 到 frame 被消费全程持有 lease。四种 SSE 出口共用有界正文捕获器，容量耗尽只省略该响应 payload、记录 `payload.capture_limited` 并继续转发与保存 telemetry。Session 热写不再重建完整历史；Admin Session 恢复由 SQLite/Postgres 先查行字节元数据、再按 sequence 分页物化，并占用共享 recovery window。Store 的 64 MiB/10,000 revision 仍是跨实例一致的持久数据完整性上限，不是运行时内存值。
+- **请求、输出与 Session 热路径**：所有 JSON 入口在 `JSON.parse` 前按真实流式字节申请进程级预算，超出单请求容量返回结构化 413，暂时无余量返回 503；`maxPayload` 与上游 Codex connector 同样随运行时容量变化。客户端 WebSocket 另从 cgroup 或 `RSS + availableMemory` 扣除未来 heap 增长和 SQLite 预留，得到 native ingress 池；本条最初采用的连接生命周期最坏帧预留已由 2026-07-24 条目修正为活动消息真实字节计费。WS 每连接只保留一个正在执行的 `response.create`，terminal 后排空内部流再释放 lease；所有上游 Codex WS 会话共用 response-work 池，每条消息从入队、等待、`JSON.parse` 到 frame 被消费全程持有 lease。四种 SSE 出口共用有界正文捕获器，容量耗尽只省略该响应 payload、记录 `payload.capture_limited` 并继续转发与保存 telemetry。Session 热写不再重建完整历史；Admin Session 恢复由 SQLite/Postgres 先查行字节元数据、再按 sequence 分页物化，并占用共享 recovery window。Store 的 64 MiB/10,000 revision 仍是跨实例一致的持久数据完整性上限，不是运行时内存值。
 - **夜间维护**：自动 cleanup、自动 VACUUM 与 Admin 手工维护复用同一 Promise 串行链；VACUUM 前进程级 gate 暂停新工作并依次等待 HTTP/body、Memory/Signal producer、OAuth/MCP/Admin cache 后台任务与正文写队列静止，结束或失败都逆序恢复。维护期间除 `/healthz`、`/version` 外的新请求统一返回带 `Retry-After` 的 503，并按 OpenAI、Anthropic、Gemini 或普通 Admin 路径输出对应错误形状；维护 drain 上限为 `min(request_timeout_ms, 120s)`。自动任务每 10 分钟检查一次，只有整段成功才记录当日完成。SQLite 仅在 freelist 至少占总页数 5% 时执行全库重写；worker 启动前要求 `availableMemory()` 至少为动态 process limit 的 25%，并按数据库与 WAL 实际大小检查磁盘。worker 使用独立连接、`temp_store=FILE` 与机器推导的低维护 cache；Compose 默认给 shutdown 30 分钟 grace。未引入守护进程、Redis、消息队列或新依赖。
 
 ## 2026-07-23 · SQLite Session 与 Memory 正文使用兼容 gzip 存储（Store / Memory，docs/07/08，原则 1/3/7）
@@ -61,15 +66,9 @@
 - **部署边界**：WebSocket 可用性取决于整条反向代理链，不是 Gateway 代码存在即代表现网可用。nginx 只在真实 Upgrade 请求上转发 `Upgrade` / `Connection`，普通 HTTP/SSE 不注入 hop-by-hop header；若前置 HAProxy 另有 catch-all WebSocket backend，必须先按 Helm hostname 路由到 web backend，避免 Upgrade 在到达 nginx 前被截走。
 - **延后项**：Claude Code 没有可依赖的图片 URL / `file_id` 客户端契约，因此暂不建设本地 npm shim；不可变媒体引用留待自有客户端或明确协议需求出现后再做。
 
-## 2026-07-21 · 首次安装改为令牌保护的浏览器向导并允许订阅-only 启动（Deployment / bootstrap / Admin，docs/10/11，原则 2/3/7）
-
-- **Admin 登录体验**：浏览器不再依赖 `WWW-Authenticate` 触发原生 Basic 弹窗；未登录页面跳转到 Gateway 自带的 `/admin/login`，成功后使用仅含过期时间与 HMAC 的 12 小时 `HttpOnly`、`SameSite=Strict`、`Path=/admin` Cookie，HTTPS 时加 `Secure`。签名密钥只由进程内现有 Admin 用户名/密码派生，凭据轮换自动让旧会话失效，不新增 session 表、JWT 依赖或独立 secret。Admin SPA 与静态资产仍在会话/Basic 双重认证之后，只有无脚本登录 HTML 公开；脚本可继续主动发送 HTTP Basic，失败响应不再带 challenge，避免浏览器弹窗。登录 POST 校验同源、常量时间比较并限制本地 `next`，顶栏提供退出入口。
-- **安全状态机**：缺少完整 Admin 凭据时，只挂载 `/setup`、`/healthz`、`/version`；推理、Admin、Portal 与文档均不暴露。随机 256-bit setup token 写入 `0600` 文件并嵌入脚本/日志打印的 URL fragment，由页面自动读取且不再要求用户填写，既避免公网首访者抢占，也不把安全机制变成新手表单。完成后同一进程切换完整 Gateway 并一次性显示自动创建的管理员 API Token，不要求重启；脚本/无人值守部署可直接提供环境变量，显式 `HELM_ADMIN_ENABLED=false` 或 `HELM_SETUP_DISABLED=1` 保留 headless 行为。
-- **凭据与边界**：向导可对静态 Provider 发起一次 1-token 真实请求，只有测试通过的新增 key 才可保存；也允许零静态 key 完成。默认只展开 OpenRouter 与 DeepSeek 并提供官方注册入口，其他静态 Provider 收进可选折叠区；订阅绑定直接复用既有 Admin Providers 页面，不复制 OAuth 流程。Admin、自动生成的 OAuth encryption key 与静态 key 原子写入 `data/helm-managed-env.json`（`0600`），外部非空环境变量优先。该文件等同数据卷内私有 `.env`，没有把同盘密钥与密文包装成虚假的整盘泄露防护；不得记录、回显或写入数据库。零可用 Provider 时服务保持健康，推理明确返回 `503 lane_unavailable`，真实上游全部失败仍是 `502 all_providers_failed`。
-- **两种安装方式与 Linux 实测**：`quickstart.sh` 默认只写端口/UID/GID 后进入浏览器向导，`--cli` 保留终端自动配置；`pnpm start` 使用 Node 22 原生 env-file，无新增依赖。Compose 的 `.env` 为可选，`HELM_PORT` 统一控制宿主、容器监听和 healthcheck；脚本按安装者 UID/GID 运行非 root 容器，SQLite 自动创建缺失数据目录。Ubuntu x86_64 上已验证 Docker build、无 `.env` 启动、OAuth-only 完成、Admin/Models、`0600`、重启持久化、19096→19097 端口切换与 8080 关闭。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-21 · 首次安装改为令牌保护的浏览器向导并允许订阅-only 启动（Deployment / bootstrap / Admin，docs/10/11，原则 2/3/7）**：无完整 Admin 凭据时只开放令牌保护的浏览器向导与健康端点，完成后同进程启用 Gateway；凭据保存到 `0600` managed env，CLI/无 `.env`/OAuth-only Linux 安装路径均完成实测，完整原文通过 git history 回溯。
 - **2026-07-21 · Grok Build 复用 OpenAI 模型发现接入 Helm（Admin client setup，docs/05/11，原则 2/5/6）**：Grok Build 复用现有 `/v1/models` 与 Chat Completions，只新增七语言客户端配置引导，不引入专用路由或依赖；完整原文通过 git history 回溯。
 - **2026-07-20 · `end_turn` XML 泄漏只按终态工具调用恢复（Protocol streaming / provider execution，原则 3/5/8）**：仅在终态、完整、白名单且无既有结构化调用时恢复 `end_turn` XML 工具调用，四个出口共用收紧边界；完整原文通过 git history 回溯。
 - **2026-07-18 · 请求推理等级与实际路由等级分开展示（Telemetry / Admin requests，原则 1/7）**：单独保存客户端请求等级与覆盖后的实际执行等级，共享列表分别展示且不从旧记录反推；完整原文通过 git history 回溯。
