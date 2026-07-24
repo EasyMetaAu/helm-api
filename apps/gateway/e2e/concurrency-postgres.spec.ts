@@ -40,6 +40,7 @@ import {
   createConcurrencyGate,
 } from "../src/middleware/concurrency.js";
 import { requestSignal, timeout } from "../src/middleware/limits.js";
+import { CONCURRENCY_LEASE_LOST_REASON } from "../src/request-cancellation.js";
 import { registerChatRoutes } from "../src/routes/chat.js";
 import { createExecute } from "../src/routes/execute.js";
 import { registerGeminiRoute } from "../src/routes/gemini.js";
@@ -370,6 +371,8 @@ interface BreakerObservations {
   cooldowns: number;
 }
 
+type PersistenceRaceStep = "lease_loss" | "timeout" | "persist";
+
 interface ProductionRouteResult {
   wire: string;
   decision: DecisionRecord;
@@ -377,6 +380,7 @@ interface ProductionRouteResult {
   fallbackCalls: number;
   breakerState: ReturnType<CircuitBreaker["getState"]>;
   breaker: BreakerObservations;
+  persistenceOrder: PersistenceRaceStep[];
 }
 
 function trackedBreaker(): {
@@ -474,8 +478,10 @@ async function runProductionRouteLeaseLoss(
   const primaryAlias = `${protocol}-primary`;
   const fallbackAlias = `${protocol}-fallback`;
   const providerWaiting = deferred();
+  const timeoutObserved = deferred();
   const persisted = deferred();
   const persistedDecisions: DecisionRecord[] = [];
+  const persistenceOrder: PersistenceRaceStep[] = [];
   let primaryCalls = 0;
   let fallbackCalls = 0;
   let executionSignal: AbortSignal | null = null;
@@ -498,6 +504,12 @@ async function runProductionRouteLeaseLoss(
     providerWaiting.resolve();
     if (executionSignal === null) throw new Error("production route did not bind its signal");
     await waitForAbort(executionSignal);
+    if (executionSignal.reason !== CONCURRENCY_LEASE_LOST_REASON) {
+      throw new Error(
+        `expected lease loss to win cancellation race, got ${executionSignal.reason}`,
+      );
+    }
+    persistenceOrder.push("lease_loss");
     throw abortError();
   }
 
@@ -567,6 +579,7 @@ async function runProductionRouteLeaseLoss(
 
   const telemetry = {
     insert: async (input: { decision: DecisionRecord }) => {
+      persistenceOrder.push("persist");
       persistedDecisions.push(input.decision);
       persisted.resolve();
       return { id: "route-lease-loss" };
@@ -579,8 +592,23 @@ async function runProductionRouteLeaseLoss(
     capturePayloads: () => false,
     captureSessions: () => false,
   };
+  const releaseAfterTimeoutSemaphore: DistributedKeyedSemaphore = {
+    async acquire(args) {
+      const acquired = await replica.manager.acquire(args);
+      if (!acquired.ok) return acquired;
+      let releasePromise: Promise<void> | null = null;
+      return {
+        ...acquired,
+        release: () => {
+          releasePromise ??= timeoutObserved.promise.then(() => acquired.release());
+          return releasePromise;
+        },
+      };
+    },
+    shutdown: () => replica.manager.shutdown(),
+  };
   const gate = createConcurrencyGate({
-    semaphore: replica.manager,
+    semaphore: releaseAfterTimeoutSemaphore,
     getConfig: () => ({
       enabled: true,
       minSize: 2,
@@ -597,6 +625,21 @@ async function runProductionRouteLeaseLoss(
     logger: {
       log: (level, message, fields) => routeLogs.push({ level, message, fields }),
     },
+    limits: { requestTimeoutMs: 2_000 },
+  });
+  app.use("*", async (c, next) => {
+    const timeoutState = c.get("request_timeout");
+    if (timeoutState === undefined) throw new Error("production route did not install limits");
+    timeoutState.signal.addEventListener(
+      "abort",
+      () => {
+        if (!timeoutState.timedOut) return;
+        persistenceOrder.push("timeout");
+        timeoutObserved.resolve();
+      },
+      { once: true },
+    );
+    await next();
   });
 
   try {
@@ -725,6 +768,7 @@ async function runProductionRouteLeaseLoss(
       fallbackCalls,
       breakerState: breaker.getState(primaryAlias),
       breaker: observations,
+      persistenceOrder,
     };
   } finally {
     await replica.shutdown();
@@ -744,32 +788,33 @@ function assertProductionRouteLeaseLoss(
   expect(result.breakerState).toBe("CLOSED");
   expect(result.breaker.failures).toBe(0);
   expect(result.breaker.cooldowns).toBe(0);
+  expect(result.persistenceOrder).toEqual(["lease_loss", "timeout", "persist"]);
   expect(result.decision.final.status).toBe("error");
   expect(result.decision.stream_outcome).toBe("truncated");
   expect(result.decision.final.error_reason).toBe("concurrency_lease_lost");
 }
 
 test.describe("real PostgreSQL distributed concurrency leases", () => {
-  test("persists Chat started-stream concurrency lease loss through the production route", async () => {
+  test("preserves Chat lease loss when timeout follows lease loss before independent persistence", async () => {
     test.setTimeout(20_000);
     assertProductionRouteLeaseLoss(await runProductionRouteLeaseLoss("openai_chat"), ["[DONE]"]);
   });
 
-  test("persists Messages started-stream concurrency lease loss through the production route", async () => {
+  test("preserves Messages lease loss when timeout follows lease loss before shared persistence", async () => {
     test.setTimeout(20_000);
     assertProductionRouteLeaseLoss(await runProductionRouteLeaseLoss("anthropic_messages"), [
       "event: message_stop",
     ]);
   });
 
-  test("persists Responses started-stream concurrency lease loss through the production route", async () => {
+  test("preserves Responses lease loss when timeout follows lease loss before shared persistence", async () => {
     test.setTimeout(20_000);
     assertProductionRouteLeaseLoss(await runProductionRouteLeaseLoss("openai_responses"), [
       "event: response.completed",
     ]);
   });
 
-  test("persists Gemini started-stream concurrency lease loss through the production route", async () => {
+  test("preserves Gemini lease loss when timeout follows lease loss before shared persistence", async () => {
     test.setTimeout(20_000);
     assertProductionRouteLeaseLoss(await runProductionRouteLeaseLoss("gemini"), [
       '"finishReason":"STOP"',

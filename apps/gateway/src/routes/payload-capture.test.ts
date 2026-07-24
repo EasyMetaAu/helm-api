@@ -9,6 +9,7 @@ import {
   createSessionHeadCache,
   createSseCapture,
   createStreamGenerationTimer,
+  decisionForTimedOutRequest,
   estimateInterruptedResponsesUsage,
   type PayloadCaptureDeps,
   persistPayload,
@@ -1320,6 +1321,26 @@ describe("persistPayload", () => {
   });
 });
 
+describe("timeout-after-lease-loss persistence classification", () => {
+  it("decisionForTimedOutRequest preserves an authoritative truncated concurrency lease loss", () => {
+    const leaseLostDecision = decision();
+    leaseLostDecision.stream_outcome = "truncated";
+    leaseLostDecision.final = {
+      ...leaseLostDecision.final,
+      status: "error",
+      error_reason: "concurrency_lease_lost",
+    };
+
+    expect(decisionForTimedOutRequest(leaseLostDecision)).toMatchObject({
+      stream_outcome: "truncated",
+      final: {
+        status: "error",
+        error_reason: "concurrency_lease_lost",
+      },
+    });
+  });
+});
+
 describe("recordServed — deferred write queue (the three pipeline faces)", () => {
   function sink() {
     const inserted: DecisionRecord[] = [];
@@ -1394,6 +1415,42 @@ describe("recordServed — deferred write queue (the three pipeline faces)", () 
     expect(s.inserted[0]?.serving_account).toBeNull();
     expect(s.payloads[0]?.responseJson).toBeNull();
     expect(args.decision.final.status).toBe("ok");
+  });
+
+  it("preserves an authoritative truncated concurrency lease loss when timeout follows lease loss before persistence", async () => {
+    const s = sink();
+    const leaseLostDecision = decision();
+    leaseLostDecision.stream_outcome = "truncated";
+    leaseLostDecision.final = {
+      ...leaseLostDecision.final,
+      status: "error",
+      error_reason: "concurrency_lease_lost",
+    };
+    const d: RecordServedDeps = {
+      telemetry: s.telemetry,
+      redact: (x) => x,
+      now: () => 5000,
+      capturePayloads: () => false,
+    };
+
+    await recordServed(
+      d,
+      {
+        ...args,
+        requestId: "req_lease_loss_then_timeout",
+        decision: leaseLostDecision,
+        timedOut: true,
+      },
+      () => {},
+    );
+
+    expect(s.inserted[0]).toMatchObject({
+      stream_outcome: "truncated",
+      final: {
+        status: "error",
+        error_reason: "concurrency_lease_lost",
+      },
+    });
   });
 
   it("stores an incremental session revision when full payload capture is off", async () => {
