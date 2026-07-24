@@ -89,6 +89,9 @@ export function registerRealtimeRoutes(app: Hono<AppEnv>, deps: RealtimeRouteDep
         signal: requestSignal(c),
       });
       if (!acquired.ok) {
+        if (acquired.reason === "unavailable") {
+          return error(c, 503, "concurrency lease unavailable", "server_overloaded");
+        }
         c.header("retry-after", String(acquired.retryAfterSeconds));
         return error(
           c,
@@ -97,6 +100,10 @@ export function registerRealtimeRoutes(app: Hono<AppEnv>, deps: RealtimeRouteDep
           "rate_limit_exceeded",
         );
       }
+      c.set(
+        "concurrency_signal",
+        AbortSignal.any([requestSignal(c), acquired.signal ?? requestSignal(c)]),
+      );
       c.set("concurrencyRelease", acquired.release);
     }
 

@@ -2,6 +2,7 @@ import type { ProviderClient, RealtimeCallResult } from "@helm/core";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../app.js";
+import type { ConcurrencyGatePort } from "../middleware/concurrency.js";
 import { createRealtimeCallRegistry } from "../realtime-call-registry.js";
 import { registerRealtimeRoutes } from "./realtime.js";
 
@@ -16,7 +17,7 @@ function multipart(session: Record<string, unknown>): FormData {
   return body;
 }
 
-function setup(blockedModels: string[] = []) {
+function setup(blockedModels: string[] = [], concurrencyGate?: ConcurrencyGatePort) {
   const sideband = {
     url: "wss://upstream.test/v1/realtime?call_id=rtc_1",
     headers: async () => ({ Authorization: "Bearer upstream" }),
@@ -44,6 +45,7 @@ function setup(blockedModels: string[] = []) {
           ? { client, providerModel: model, alias: `openai-codex/${model}` }
           : null,
     registry,
+    concurrencyGate,
   });
   return { app, realtimeCall, registry, sideband };
 }
@@ -118,5 +120,47 @@ describe("registerRealtimeRoutes", () => {
     });
     expect(response.status).toBe(400);
     expect(realtimeCall).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the distributed concurrency lease store is unavailable", async () => {
+    const concurrencyGate: ConcurrencyGatePort = {
+      acquire: vi.fn().mockResolvedValue({
+        ok: false,
+        reason: "unavailable",
+        retryAfterSeconds: 5,
+      }),
+    };
+    const { app, realtimeCall } = setup([], concurrencyGate);
+    const response = await app.request("/v1/realtime/calls", {
+      method: "POST",
+      headers: { Authorization: "Bearer helm-key" },
+      body: multipart({ model: "gpt-realtime-1.5" }),
+    });
+
+    expect(response.status).toBe(503);
+    expect(realtimeCall).not.toHaveBeenCalled();
+  });
+
+  it("forwards distributed lease loss through the call-create signal", async () => {
+    const controller = new AbortController();
+    controller.abort("concurrency_lease_lost");
+    const concurrencyGate: ConcurrencyGatePort = {
+      acquire: vi.fn().mockResolvedValue({
+        ok: true,
+        signal: controller.signal,
+        release: vi.fn(),
+      }),
+    };
+    const { app, realtimeCall } = setup([], concurrencyGate);
+    const response = await app.request("/v1/realtime/calls", {
+      method: "POST",
+      headers: { Authorization: "Bearer helm-key" },
+      body: multipart({ model: "gpt-realtime-1.5" }),
+    });
+
+    expect(response.status).toBe(201);
+    const options = realtimeCall.mock.calls[0]?.[1];
+    expect(options?.signal?.aborted).toBe(true);
+    expect(options?.signal?.reason).toBe("concurrency_lease_lost");
   });
 });
