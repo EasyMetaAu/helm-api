@@ -241,11 +241,18 @@ gemini-flash:
 # the verbatim request params are uniform across providers (a 4xx param-shape error is
 # terminal and would mask a healthy fallback). Request the LANE NAME as `model`.
 #
-# `gpt-image` deliberately uses only the ZenMux relay because official OpenAI is
-# excluded from shipped lanes for cost. `gemini-image` still leads with Google direct
-# and falls over to ZenMux. See docs/05 (image generation) + README.
+# `gpt-image-2` keeps ZenMux first for generation cost and falls back to official
+# OpenAI when the relay cannot serve an operation such as image edits. `gpt-image`
+# preserves the generic client alias by expanding that same chain. `gemini-image`
+# still leads with Google direct and falls over to ZenMux. See docs/05 + README.
+gpt-image-2:
+  purpose: OpenAI gpt-image-2 — ZenMux relay → official OpenAI
+  primary: zenmux/gpt-image-2
+  fallback:
+    - openai/gpt-image-2
+
 gpt-image:
-  purpose: OpenAI gpt-image-2 through ZenMux relay — official API excluded for cost
+  purpose: Generic OpenAI image lane
   primary: gpt-image-2
   fallback: []
 

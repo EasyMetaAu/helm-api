@@ -276,15 +276,19 @@ curl http://localhost:8080/v1beta/interactions \
 
 #### 图片 Provider Lane
 
-内置配置会把图片模型组织成图片 **lane**。GPT 图片 lane 只经过 ZenMux relay，以避开成本更高的 OpenAI 官方 API；但任意有效 key 仍可精确指定官方图片模型 alias，直接调用官方接口。Gemini 图片 lane 保留跨 provider 的故障切换。若请求本身确定无效，例如尺寸不支持或图片过大，Helm 会原样返回对应的 4xx invalid request，**不会**继续尝试其他 provider。
+内置配置会把图片模型组织成图片 **lane**。客户端指定 `gpt-image-2` 时会优先使用 ZenMux；如果 relay 无法处理图片编辑等操作，再回退到 OpenAI 官方接口。Gemini 图片 lane 继续保留跨 provider 故障切换。若请求本身确定无效，例如尺寸不支持或图片过大，Helm 会原样返回对应的 4xx invalid request，**不会**继续尝试其他 provider。
 
 ```yaml
-# config/lanes.yaml —— GPT 图片只走 ZenMux；Gemini 先走 Google 官方，再回退到 ZenMux。
+# config/lanes.yaml —— GPT 图片先走 ZenMux，再回退到 OpenAI 官方；Gemini 先走
+# Google 官方，再回退到 ZenMux。
 # 成员必须具备 capabilities.outputImage，且同一 lane 中只能有一种图片模型家族：
 # 要么全部为 gpt-image-*，要么全部为 gemini-*-image。
 gpt-image:                          # 请求填 `model: "gpt-image"`
-  primary: gpt-image-2              # ZenMux relay；因成本排除 OpenAI 官方 API
+  primary: gpt-image-2
   fallback: []
+gpt-image-2:                        # 请求填 `model: "gpt-image-2"`
+  primary: zenmux/gpt-image-2       # 低成本图片生成路径
+  fallback: [openai/gpt-image-2]    # 操作级回退，包含图片编辑
 gemini-image:                       # 请求填 `model: "gemini-image"`
   primary: google/gemini-3.1-flash-image   # Google 官方 → ZenMux flash → pro
   fallback: [gemini-3.1-flash-image, gemini-3-pro-image]
