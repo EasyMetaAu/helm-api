@@ -57,6 +57,29 @@ describe("body memory admission", () => {
     expect(admission.reservedBytes).toBe(0);
   });
 
+  it("rejects new bodies when live heap pressure has consumed protected headroom", () => {
+    let heapUsedBytes = 71;
+    const admission = createBodyMemoryAdmission({
+      activeRequestBytes: 100,
+      maxWireBytes: 100,
+      jsonAmplification: 2,
+      minRequestChargeBytes: 10,
+      heapLimitBytes: 100,
+      protectedHeapBytes: 20,
+      heapUsedBytes: () => heapUsedBytes,
+    });
+
+    expect(admission.acquire(1)).toMatchObject({ ok: false, reason: "busy" });
+    heapUsedBytes = 60;
+    const admitted = admission.acquire(1);
+    expect(admitted.ok).toBe(true);
+    if (admitted.ok) {
+      heapUsedBytes = 71;
+      expect(admitted.lease.resize(1)).toMatchObject({ ok: false, reason: "busy" });
+      admitted.lease.release();
+    }
+  });
+
   it("bounds a streaming body before JSON parsing and returns its lease", async () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 120,

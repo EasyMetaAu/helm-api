@@ -1767,6 +1767,12 @@ export async function buildServer(
   const logger = opts.logger ?? createJsonLogger();
   const responsesWebSocketSessionProof = randomUUID();
   const memoryBudget = runtimeMemoryBudget();
+  const requestProtectedHeapBytes =
+    memoryBudget.responseWorkBytes +
+    memoryBudget.writeQueueBytes +
+    memoryBudget.sessionCacheBytes +
+    memoryBudget.responseCaptureBytes +
+    Math.floor(memoryBudget.heapLimitBytes * 0.05);
   const maintenanceActivityGate = createMaintenanceActivityGate();
   const backgroundTasks = createTrackedBackgroundTasks();
   const requestBodyMemoryAdmission = createBodyMemoryAdmission({
@@ -1774,6 +1780,9 @@ export async function buildServer(
     maxWireBytes: memoryBudget.maxWireBytes,
     jsonAmplification: memoryBudget.jsonAmplification,
     minRequestChargeBytes: memoryBudget.minRequestChargeBytes,
+    heapLimitBytes: memoryBudget.heapLimitBytes,
+    protectedHeapBytes: requestProtectedHeapBytes,
+    heapUsedBytes: () => process.memoryUsage().heapUsed,
   });
   logger.log("info", "runtime.memory_budget", {
     heap_limit_bytes: memoryBudget.heapLimitBytes,
@@ -1781,6 +1790,7 @@ export async function buildServer(
     active_request_bytes: memoryBudget.activeRequestBytes,
     max_wire_bytes: memoryBudget.maxWireBytes,
     min_request_charge_bytes: memoryBudget.minRequestChargeBytes,
+    request_heap_ceiling_bytes: memoryBudget.heapLimitBytes - requestProtectedHeapBytes,
     write_queue_bytes: memoryBudget.writeQueueBytes,
     session_cache_bytes: memoryBudget.sessionCacheBytes,
     response_capture_bytes: memoryBudget.responseCaptureBytes,
