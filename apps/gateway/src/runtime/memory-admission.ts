@@ -17,6 +17,9 @@ export function createBodyMemoryAdmission(options: {
   maxWireBytes: number;
   jsonAmplification: number;
   minRequestChargeBytes?: number;
+  heapLimitBytes?: number;
+  protectedHeapBytes?: number;
+  heapUsedBytes?: () => number;
 }) {
   let reservedBytes = 0;
   let paused = false;
@@ -29,6 +32,19 @@ export function createBodyMemoryAdmission(options: {
     options.minRequestChargeBytes ?? Math.max(1, Math.floor(options.activeRequestBytes * 0.01));
   const charge = (wireBytes: number): number =>
     Math.max(minRequestChargeBytes, Math.ceil(Math.max(0, wireBytes) * options.jsonAmplification));
+  const heapCeilingBytes = Math.max(
+    0,
+    (options.heapLimitBytes ?? Number.POSITIVE_INFINITY) - (options.protectedHeapBytes ?? 0),
+  );
+  const exceedsLiveHeap = (nextReservedBytes: number): boolean => {
+    const heapUsedBytes = options.heapUsedBytes?.();
+    return (
+      heapUsedBytes !== undefined &&
+      Number.isFinite(heapUsedBytes) &&
+      heapUsedBytes >= 0 &&
+      heapUsedBytes + nextReservedBytes > heapCeilingBytes
+    );
+  };
   const rejection = (wireBytes: number) =>
     wireBytes > options.maxWireBytes
       ? { ok: false as const, reason: "too_large" as const }
@@ -39,7 +55,11 @@ export function createBodyMemoryAdmission(options: {
     acquire(wireBytes: number) {
       if (paused) return { ok: false as const, reason: "busy" as const };
       let held = charge(wireBytes);
-      if (wireBytes > options.maxWireBytes || reservedBytes + held > options.activeRequestBytes) {
+      if (
+        wireBytes > options.maxWireBytes ||
+        reservedBytes + held > options.activeRequestBytes ||
+        exceedsLiveHeap(reservedBytes + held)
+      ) {
         return rejection(wireBytes);
       }
       reservedBytes += held;
@@ -52,7 +72,8 @@ export function createBodyMemoryAdmission(options: {
             const next = charge(nextWireBytes);
             if (
               nextWireBytes > options.maxWireBytes ||
-              reservedBytes - held + next > options.activeRequestBytes
+              reservedBytes - held + next > options.activeRequestBytes ||
+              exceedsLiveHeap(reservedBytes - held + next)
             ) {
               return rejection(nextWireBytes);
             }
