@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { preOutputClassifierFor } from "../failover-guard.js";
-import { type ChatCompletionRequest, type ProviderClient, UpstreamError } from "../openai.js";
+import {
+  type ChatCompletionRequest,
+  type ProviderClient,
+  type RealtimeCallResult,
+  UpstreamError,
+} from "../openai.js";
 import {
   CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
   createCodexResponsesClient,
@@ -37,6 +42,51 @@ const USER_REQ: ChatCompletionRequest = {
   model: "m",
   messages: [{ role: "user", content: "hi" }],
 };
+
+describe("createOAuthPoolClient — Realtime account binding", () => {
+  it("returns the sideband target from the account that created each call", async () => {
+    const served: string[] = [];
+    const realtimeClient = (account: string): ProviderClient => ({
+      ...stubClient(account, served),
+      async realtimeCall(_req): Promise<RealtimeCallResult> {
+        served.push(account);
+        return {
+          status: 201,
+          sdp: `answer-${account}`,
+          contentType: "application/sdp",
+          location: `/v1/realtime/calls/rtc_${account}`,
+          callId: `rtc_${account}`,
+          sideband: {
+            url: `wss://${account}.test/v1/realtime?call_id=rtc_${account}`,
+            headers: async () => ({ Authorization: `Bearer ${account}` }),
+          },
+        };
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [
+        { account: "a", priority: 10, schedulable: true, client: realtimeClient("a") },
+        { account: "b", priority: 10, schedulable: true, client: realtimeClient("b") },
+      ],
+      now: () => 1,
+    });
+    const request = {
+      endpoint: "realtime" as const,
+      query: "",
+      sdp: "offer",
+      session: { model: "gpt-realtime-1.5" },
+      headers: {},
+    };
+
+    const first = await pool.realtimeCall?.(request);
+    const second = await pool.realtimeCall?.(request);
+
+    expect(served).toEqual(["a", "b"]);
+    expect(first?.sideband.url).toContain("a.test");
+    expect(await first?.sideband.headers()).toEqual({ Authorization: "Bearer a" });
+    expect(second?.sideband.url).toContain("b.test");
+  });
+});
 
 describe("createOAuthPoolClient — account selection", () => {
   it("exposes a shared native protocol profile from homogeneous members", () => {

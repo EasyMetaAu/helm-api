@@ -558,10 +558,7 @@ export function installResponsesWebSocketBridge({
   });
 
   const onUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer) => {
-    if (!isResponsesWebSocketPath(request.url)) {
-      socket.destroy();
-      return;
-    }
+    if (!isResponsesWebSocketPath(request.url)) return;
     const ingressLease = ingress.acquire(0);
     if (!ingressLease.ok) {
       const error = new RequestAdmissionError(

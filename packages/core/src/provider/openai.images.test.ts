@@ -55,3 +55,55 @@ describe("createOpenAIClient.imageGeneration", () => {
     });
   });
 });
+
+describe("createOpenAIClient.imageEdit", () => {
+  it("forwards the Codex JSON edit body to /images/edits", async () => {
+    const upstream = { created: 0, data: [{ b64_json: "EDITED" }] };
+    const fetch = vi.fn().mockResolvedValue(jsonResponse(upstream));
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+    const body = {
+      model: "gpt-image-2",
+      prompt: "add a red hat",
+      images: [{ image_url: "data:image/png;base64,AAA=" }],
+    };
+
+    const out = await client.imageEdit?.({ kind: "json", body });
+
+    expect(out).toEqual(upstream);
+    const [url, init] = fetch.mock.calls[0] as [
+      string,
+      RequestInit & { headers: Record<string, string> },
+    ];
+    expect(url).toBe("https://upstream.test/v1/images/edits");
+    expect(init.headers["Content-Type"]).toBe("application/json");
+    expect(JSON.parse(init.body as string)).toEqual(body);
+  });
+
+  it("rebuilds a repeatable multipart edit with binary files", async () => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({ data: [] }));
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+
+    await client.imageEdit?.({
+      kind: "multipart",
+      fields: [
+        { name: "model", value: "gpt-image-2" },
+        { name: "prompt", value: "add snow" },
+        {
+          name: "image[]",
+          value: new Uint8Array([1, 2, 3]),
+          filename: "source.png",
+          contentType: "image/png",
+        },
+      ],
+    });
+
+    const [url, init] = fetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://upstream.test/v1/images/edits");
+    expect(init.body).toBeInstanceOf(FormData);
+    const form = init.body as FormData;
+    expect(form.get("prompt")).toBe("add snow");
+    const image = form.get("image[]") as File;
+    expect(image.name).toBe("source.png");
+    expect([...new Uint8Array(await image.arrayBuffer())]).toEqual([1, 2, 3]);
+  });
+});

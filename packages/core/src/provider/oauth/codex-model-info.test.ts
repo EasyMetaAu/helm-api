@@ -139,6 +139,14 @@ describe("CodexModelInfoSchema", () => {
     expect(parsed.use_responses_lite).toBe(false);
   });
 
+  it("accepts audio in the Codex model input modalities", () => {
+    const parsed = CodexModelInfoSchema.parse(
+      modelInfo({ input_modalities: ["text", "image", "audio"] }),
+    );
+
+    expect(parsed.input_modalities).toEqual(["text", "image", "audio"]);
+  });
+
   it("treats future tool selectors as omitted like Codex", () => {
     const parsed = CodexModelInfoSchema.parse(
       modelInfo({

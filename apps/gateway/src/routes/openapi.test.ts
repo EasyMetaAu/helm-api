@@ -27,6 +27,9 @@ describe("OpenAPI docs", () => {
       "/v1/messages",
       "/v1/responses",
       "/v1/images/generations",
+      "/v1/images/edits",
+      "/v1/realtime/calls",
+      "/v1/live",
       "/v1beta/interactions",
       "/v1beta/models/{model}:generateContent",
     ]) {
@@ -39,9 +42,11 @@ describe("OpenAPI docs", () => {
     // Image/interactions bodies reuse their Zod schemas (single source of truth).
     for (const name of [
       "ImageGenerationRequest",
+      "ImageEditRequest",
       "ImageGenerationResponse",
       "InteractionsRequest",
       "InteractionsResponse",
+      "RealtimeSession",
     ]) {
       expect(doc.components.schemas[name]).toBeDefined();
     }

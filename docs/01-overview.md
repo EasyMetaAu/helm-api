@@ -68,13 +68,17 @@ governance:
   on the creation endpoint), plus the implemented compact, input-token, retrieve,
   input-items, cancel, and delete lifecycle routes. `/responses` and
   `/openai/v1/responses` are compatibility prefixes for the same surface.
+- **OpenAI Realtime Voice** — WebRTC call creation on `POST /v1/realtime/calls`
+  (V1/V2) or `POST /v1/live` (V3 Frameless), followed by an authenticated
+  WebSocket sideband on `/v1/realtime?call_id=...` or `/v1/live/{call_id}`.
 - **Google Gemini** — `POST /v1beta/models/{model}:generateContent` (non-streaming)
   and `:streamGenerateContent` (streaming via `?alt=sse`); `/models/{model}:...`
   is also accepted for Gemini SDK compatibility.
 
 Alongside those four translated text protocols, Helm exposes separate **image-generation**
 surfaces. The first is **OpenAI-Images-compatible** — `POST /v1/images/generations`
-(non-streaming). Image generation is also available natively to **Gemini SDK
+and `POST /v1/images/edits` (JSON `image_url` or multipart files, non-streaming).
+Image generation is also available natively to **Gemini SDK
 clients**: the existing `:generateContent` endpoint now serves image models
 (`gemini-3.1-flash-image`, `gemini-3-pro-image`), and a dedicated
 **`POST /v1beta/interactions`** endpoint (the Gemini Interactions API) is translated

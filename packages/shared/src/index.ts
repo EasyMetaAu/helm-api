@@ -293,6 +293,8 @@ export {
   selectCodexAccountWeeklyQuotaWindows,
 } from "./oauth/usage-schema.js";
 export {
+  type ImageEditRequest,
+  ImageEditRequestSchema,
   type ImageGenerationRequest,
   ImageGenerationRequestSchema,
   type ImageGenerationResponse,
@@ -309,6 +311,10 @@ export {
   type InteractionsResponse,
   InteractionsResponseSchema,
 } from "./request/interactions-schema.js";
+export {
+  type RealtimeSession,
+  RealtimeSessionSchema,
+} from "./request/realtime-schema.js";
 // Internal request structure (docs/02).
 export {
   type InternalRequest,

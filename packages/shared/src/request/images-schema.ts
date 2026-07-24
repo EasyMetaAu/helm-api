@@ -21,6 +21,24 @@ export const ImageGenerationRequestSchema = z.looseObject({
   user: z.string().optional(),
 });
 
+export const ImageEditRequestSchema = z.looseObject({
+  model: z.string().min(1),
+  prompt: z.string().min(1),
+  images: z
+    .array(
+      z.union([
+        z.looseObject({ image_url: z.string().min(1) }),
+        z.looseObject({ file_id: z.string().min(1) }),
+      ]),
+    )
+    .min(1),
+  n: z.number().int().positive().optional(),
+  size: z.string().optional(),
+  quality: z.string().optional(),
+  background: z.string().optional(),
+  output_format: z.string().optional(),
+});
+
 // Upstream usage shape (OpenAI Images): the generated image is billed as
 // output_tokens (= output_tokens_details.image_tokens). Loose — typing only for
 // the cost path; the route forwards the upstream body verbatim, never reshapes it.
@@ -39,4 +57,5 @@ export const ImageGenerationResponseSchema = z.looseObject({
 });
 
 export type ImageGenerationRequest = z.infer<typeof ImageGenerationRequestSchema>;
+export type ImageEditRequest = z.infer<typeof ImageEditRequestSchema>;
 export type ImageGenerationResponse = z.infer<typeof ImageGenerationResponseSchema>;

@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-07-24 · Codex Voice、Responses 音频与图片编辑补齐代理面（Gateway / Protocol / Provider，docs/01/05/06，原则 1/2/3/7/8）
+
+- **Realtime V1/V2/V3**：新增 `/v1/realtime/calls`、`/v1/live` 与对应 WebSocket sideband。Call-create 复用现有 static/OpenAI-Codex provider client、OAuth pool、账号 token 与 egress proxy；ChatGPT backend 继续使用 JSON call shape，官方 OpenAI 使用 multipart。`call_id` 以进程内短 TTL 绑定创建它的 Helm key 与实际 provider/account sideband，WebSocket 必须使用同一 key，且不会重新选账号；OAuth HTTP/WS 401 各只刷新重试一次。双向文本/二进制帧按实际字节占用动态内存预算，关闭压缩并保留 close code。当前部署为单 gateway replica；水平扩容前必须把 registry 换成支持原子 claim 的共享存储。
+- **Responses 与模型目录**：Responses `input_audio.audio_url` data URL 进入统一 audio IR；provider 明确声明 `responses_audio_url` 时恢复同一 carrier，旧 `input_audio:{data,format}` 保持兼容。Codex 模型目录的 `input_modalities` 接受 `audio`，不再因新目录字段丢弃模型。
+- **Images edits**：`/v1/images/edits` 复用现有 Images 的鉴权、限流、并发、预算、blocked-model、breaker/fallback、成本与 payload/telemetry 链；支持 Codex JSON `images[].image_url|file_id` 和 OpenAI multipart `image`/`image[]`、`mask`，binary bytes 在 fallback 间可重放。Gemini edit 未发现兼容契约，确定性返回 unsupported，不做有损转换。
+- **暂缓边界**：按用户确认不代理 `alpha/search` 与 `memories/trace_summarize`；未引入新依赖、媒体存储、共享 registry 或第二套路由器。
+
 ## 2026-07-24 · 请求准入增加实时 V8 堆高水位（Gateway runtime，docs/02/07/10，原则 3/7）
 
 - **线上根因**：`v0.28.7` 已限制请求、响应、写队列、Session cache 与 SSE capture 各自的静态容量，但生产容器仍在 12 小时内因 V8 heap OOM 重启 8 次；崩溃前 Mark-Compact 后仍有约 647 MiB live heap，而 heap limit 约 674 MiB。分池上限没有把当前 live heap 与其他分池尚可增长的容量合并判断，因此下一次 UTF-8 请求正文转换仍可触发进程级 OOM。
@@ -64,14 +71,9 @@
 - **Responses 续接与保真边界**：普通多轮请求只存客户端 request 增量；OpenAI Responses 为展开 `previous_response_id` 的隐藏状态，额外保存产生该 ID 的规范 response output，并以 Session 内唯一 `response_id → request_id` 建真实父边。chain、fork 与并发分支因此不会误借最新 head；恢复按「父请求 input + 父 response output + 当前 input」展开，保留 reasoning/tool-call items、删除已展开的 opaque ID，且当前顶层 instructions 不继承旧值。找不到父 response 的 revision 会以 `partial` 留痕，但恢复必须 fail-closed 为 `session_incomplete`；父 ID 不匹配、continuation 的 `retain_count` 非零、response output 缺失或损坏同样拒绝恢复，不猜测历史。
 - **清理与运维边界**：Session 恢复是语义等价 JSON，不保留原始空白、headers 或翻译后的 upstream body；完整 payload 仍是唯一可精确 Retry 的来源，Admin 明示 `source=session`、`exact=false` 并禁用 Retry。Session 是 cleanup 报告中的独立 action，但 MVP 与完整 payload 共用 `payloads_cleanup_enabled` / `payload_retention_days` 这组“内容留存”设置；payload 可归档，Session 不归档并在最后活动超过窗口后整组删除。列表 Session 可一键切到 `range=all` 的 opaque-ref 筛选；恢复失败明确区分无 Session ID、转录不可用/已清理、转录链损坏。
 
-## 2026-07-22 · Lanes 批量保存、拖拽回退与可配置默认通道删除边界（Routing / Admin lanes，docs/03/04/11，原则 2/3/5/6）
-
-- **整组写入**：Lanes 页面不再由每张卡分别 PUT；所有编辑、fallback 顺序和待删除 lane 由一个底部保存按钮通过 `PUT /admin/api/lanes` 一次提交，Gateway 用共享 `LanesConfigSchema` 校验完整 map 后原子写回 `lanes.yaml` 并热更新，失败时整组不落盘。单 lane API 保留兼容，不新增依赖。
-- **排序与删除**：fallback 的上下按钮改为复用 Policies 页交互语义的拖拽手柄，并保留方向键排序；每张 lane 卡提供删除按钮，删除先进入页面工作集，统一保存时才持久化。页面从 runtime settings 读取当前 `default_lane`，只保护当前默认 lane，不把 `balanced` 写死。
-- **配置边界修正**：`LanesConfigSchema` 改为要求至少一个有效 lane；`runtime.default_lane` 与 lane 集合的交叉约束在 Gateway 边界及启动组合层 fail-closed 校验。因而用户先把默认通道改成其他 lane 后可删除 `balanced`；Settings 选项与默认配置说明也不再把 `balanced` 当作强制终点。若手工配置令默认通道不存在，Gateway 拒绝启动；Resolver 仍对异常调用防御性地回退到存在的 `balanced` 或第一个 lane。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-22 · Lanes 批量保存、拖拽回退与可配置默认通道删除边界（Routing / Admin lanes，docs/03/04/11，原则 2/3/5/6）**：Lanes 整组原子保存、拖拽排序并只保护当前默认通道，非法默认配置 fail-closed，完整原文通过 git history 回溯。
 - **2026-07-22 · Responses 状态续接严格绑定原 provider 与账号（Protocol translation / provider execution，docs/04/05/07，原则 2/3/5/8）**：`previous_response_id` 只允许同 account/key、原 provider 与原账号继续执行；未知、跨协议或不可用状态 fail-closed，完整原文通过 git history 回溯。
 - **2026-07-22 · Codex 客户端默认启用 Responses WebSocket，并补齐反向代理边界（Deployment / Protocol / Admin client setup，docs/05/10/11，原则 3/5/8）**：Admin 的 Codex 配置复用既有 Responses WebSocket；代理只在真实 Upgrade 时转发 hop-by-hop header，Claude 图片 shim 延后，完整原文通过 git history 回溯。
 - **2026-07-21 · 首次安装改为令牌保护的浏览器向导并允许订阅-only 启动（Deployment / bootstrap / Admin，docs/10/11，原则 2/3/7）**：无完整 Admin 凭据时只开放令牌保护的浏览器向导与健康端点，完成后同进程启用 Gateway；凭据保存到 `0600` managed env，CLI/无 `.env`/OAuth-only Linux 安装路径均完成实测，完整原文通过 git history 回溯。

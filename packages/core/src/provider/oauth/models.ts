@@ -28,6 +28,9 @@ export const CURATED_OAUTH_MODELS: Record<string, string[]> = {
     "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-mini",
+    "gpt-realtime",
+    "gpt-realtime-1.5",
+    "gpt-live-1-boulder-alpha",
   ],
 };
 

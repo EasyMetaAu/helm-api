@@ -91,6 +91,7 @@ describe("body memory admission", () => {
       admission,
     );
     expect(admitted.text).toBe('{"ok":true}');
+    expect(Buffer.from(admitted.bytes).toString("utf8")).toBe('{"ok":true}');
     expect(admission.reservedBytes).toBeGreaterThan(0);
     admitted.release();
     expect(admission.reservedBytes).toBe(0);

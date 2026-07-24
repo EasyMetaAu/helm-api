@@ -78,6 +78,7 @@ const ResponsesInputFileSchema = z
 const ResponsesInputAudioSchema = z
   .object({
     type: z.literal("input_audio"),
+    audio_url: z.string().optional(),
     input_audio: z
       .object({ data: z.string().optional(), format: z.string().optional() })
       .passthrough()
@@ -371,10 +372,25 @@ function foldContentPart(part: z.infer<typeof ResponsesContentPartSchema>): IRCo
     case "input_audio": {
       const p = part as z.infer<typeof ResponsesInputAudioSchema>;
       const ia = p.input_audio ?? {};
+      const audioUrl = typeof p.audio_url === "string" ? p.audio_url : null;
+      const dataUrl =
+        audioUrl === null ? null : /^data:audio\/([^;,]+)(?:;[^,]*)?;base64,(.*)$/s.exec(audioUrl);
       return {
         type: "audio",
-        data: typeof ia.data === "string" ? ia.data : "",
-        format: typeof ia.format === "string" ? ia.format : "wav",
+        data:
+          typeof ia.data === "string"
+            ? ia.data
+            : dataUrl?.[2] !== undefined
+              ? dataUrl[2]
+              : (audioUrl ?? ""),
+        format:
+          typeof ia.format === "string"
+            ? ia.format
+            : dataUrl?.[1] !== undefined
+              ? dataUrl[1]
+              : audioUrl === null
+                ? "wav"
+                : "url",
       };
     }
     case "input_file": {
@@ -502,6 +518,19 @@ function toIRRequest(req: NativeRequest): IRRequest {
   }
 
   const providerRaw: Record<string, unknown> = {};
+  if (
+    Array.isArray(parsed.input) &&
+    parsed.input.some(
+      (item) =>
+        item.type === "message" &&
+        Array.isArray(item.content) &&
+        item.content.some(
+          (part) => part.type === "input_audio" && typeof part.audio_url === "string",
+        ),
+    )
+  ) {
+    providerRaw.responses_audio_url = true;
+  }
   if (rawReasoning.length > 0) providerRaw.reasoning = rawReasoning;
   if (unknownItems.length > 0) providerRaw.unknown_items = unknownItems;
   if (
@@ -597,6 +626,7 @@ function toResponsesRequest(ir: IRRequest): NativeRequest {
   const parsed = IRRequestSchema.parse(ir);
   const input: Array<Record<string, unknown>> = [];
   let instructions: string | undefined;
+  const raw = parsed.provider_raw;
 
   const rawReasoning = parsed.provider_raw?.reasoning;
   if (Array.isArray(rawReasoning)) {
@@ -647,11 +677,14 @@ function toResponsesRequest(ir: IRRequest): NativeRequest {
     input.push({
       type: "message",
       role: m.role,
-      content: contentToResponsesParts(m.content, m.role === "assistant"),
+      content: contentToResponsesParts(
+        m.content,
+        m.role === "assistant",
+        raw?.responses_audio_url === true,
+      ),
     });
   }
 
-  const raw = parsed.provider_raw;
   // Structured output: prefer the lossless raw Responses `text` (responses origin);
   // else synthesize it from the canonical IR.response_format (chat/anthropic/gemini
   // origin) so structured output is honored on the Responses wire either way.
@@ -743,6 +776,7 @@ function contentToFunctionCallOutput(
 function contentToResponsesParts(
   content: IRMessage["content"],
   isAssistant: boolean,
+  useAudioUrl = false,
 ): Array<Record<string, unknown>> {
   const textType = isAssistant ? "output_text" : "input_text";
   if (content === null) return [{ type: textType, text: "" }];
@@ -757,10 +791,17 @@ function contentToResponsesParts(
         ...(p.detail !== undefined ? { detail: p.detail } : {}),
       });
     } else if (p.type === "audio") {
-      parts.push({
-        type: "input_audio",
-        input_audio: { data: p.data, format: p.format },
-      });
+      parts.push(
+        useAudioUrl
+          ? {
+              type: "input_audio",
+              audio_url: p.format === "url" ? p.data : `data:audio/${p.format};base64,${p.data}`,
+            }
+          : {
+              type: "input_audio",
+              input_audio: { data: p.data, format: p.format },
+            },
+      );
     } else if (p.type === "document") {
       const name = p.filename !== undefined ? { filename: p.filename } : {};
       if (p.fileId !== undefined) parts.push({ type: "input_file", file_id: p.fileId, ...name });

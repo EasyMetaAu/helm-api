@@ -225,8 +225,10 @@ curl http://localhost:8080/v1/chat/completions \
 | `POST /v1/chat/completions` | OpenAI Chat Completions | ✅ |
 | `POST /v1/messages` | Anthropic Messages | ✅ |
 | `POST /v1/responses` | OpenAI Responses | ✅ |
+| `POST /v1/realtime/calls` · `POST /v1/live` | OpenAI Realtime Voice（V1/V2 · V3） | ✅ WebRTC + WebSocket sideband |
 | `POST /v1beta/models/{model}:generateContent` | Google Gemini | ✅（走 `:streamGenerateContent`；用 `x-goog-api-key` 鉴权） |
 | `POST /v1/images/generations` | OpenAI Images API（[图片生成](#图片生成)） | —（图片模型/lane，任意 key 可用） |
+| `POST /v1/images/edits` | OpenAI Images API（JSON 或 multipart 编辑） | —（图片模型/lane，任意 key 可用） |
 | `POST /v1beta/interactions` | Gemini Interactions API（[图片生成](#图片生成)） | —（图片模型/lane，任意 key 可用） |
 
 **如何填写 `model`：**

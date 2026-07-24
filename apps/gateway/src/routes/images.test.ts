@@ -38,7 +38,8 @@ const BUDGET_CAPS = {
 
 function setup(over: Partial<ImagesRouteDeps> = {}) {
   const imageGeneration = vi.fn().mockResolvedValue(UPSTREAM);
-  const client = { imageGeneration } as unknown as ProviderClient;
+  const imageEdit = vi.fn().mockResolvedValue(UPSTREAM);
+  const client = { imageGeneration, imageEdit } as unknown as ProviderClient;
   const enqueuePayload = vi.fn();
   const enqueueTelemetry = vi.fn();
   const record = {
@@ -80,7 +81,7 @@ function setup(over: Partial<ImagesRouteDeps> = {}) {
 
   const app = new Hono<AppEnv>();
   registerImagesRoute(app, deps);
-  return { app, imageGeneration, enqueuePayload, enqueueTelemetry };
+  return { app, imageGeneration, imageEdit, enqueuePayload, enqueueTelemetry };
 }
 
 function post(app: Hono<AppEnv>, body: unknown, auth = "Bearer k") {
@@ -118,6 +119,57 @@ describe("registerImagesRoute", () => {
     expect(decision.cost_breakdown.total_usd).toBe(0.006);
     expect(decision.usage.completion_tokens).toBe(196);
     expect(decision.usage.prompt_tokens).toBe(15);
+  });
+
+  it("forwards Codex JSON image edits through the existing image chain", async () => {
+    const { app, imageEdit } = setup();
+    const res = await app.request("/v1/images/edits", {
+      method: "POST",
+      headers: { Authorization: "Bearer k", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-image-2",
+        prompt: "add a red hat",
+        images: [{ image_url: "data:image/png;base64,AAA=" }],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(imageEdit).toHaveBeenCalledWith(
+      {
+        kind: "json",
+        body: expect.objectContaining({ model: "openai/gpt-image-2", prompt: "add a red hat" }),
+      },
+      expect.anything(),
+    );
+  });
+
+  it("forwards multipart image edits without losing binary bytes", async () => {
+    const { app, imageEdit } = setup();
+    const body = new FormData();
+    body.set("model", "gpt-image-2");
+    body.set("prompt", "add snow");
+    body.append("image[]", new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" }), "a.png");
+
+    const res = await app.request("/v1/images/edits", {
+      method: "POST",
+      headers: { Authorization: "Bearer k" },
+      body,
+    });
+
+    expect(res.status).toBe(200);
+    const edit = imageEdit.mock.calls[0]?.[0] as {
+      kind: string;
+      fields: Array<{ name: string; value: string | Uint8Array }>;
+    };
+    expect(edit.kind).toBe("multipart");
+    expect(edit.fields).toEqual(
+      expect.arrayContaining([
+        { name: "model", value: "openai/gpt-image-2" },
+        expect.objectContaining({ name: "image[]", filename: "a.png" }),
+      ]),
+    );
+    const image = edit.fields.find((field) => field.name === "image[]");
+    expect([...((image?.value as Uint8Array) ?? [])]).toEqual([1, 2, 3]);
   });
 
   it("captures the FULL image verbatim (the store externalizes it to payload_blobs)", async () => {

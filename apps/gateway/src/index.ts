@@ -3,12 +3,20 @@
 // non-zero rather than starting in a degraded state.
 
 import { readFile } from "node:fs/promises";
+import type { IncomingMessage } from "node:http";
+import type { Duplex } from "node:stream";
 import { loadConfig } from "@helm/core";
 import { serve } from "@hono/node-server";
 import { createApp } from "./app.js";
 import { createJsonLogger } from "./logging.js";
 import {
+  installRealtimeWebSocketBridge,
+  isRealtimeWebSocketPath,
+  type RealtimeWebSocketBridge,
+} from "./realtime-websocket.js";
+import {
   installResponsesWebSocketBridge,
+  isResponsesWebSocketPath,
   type ResponsesWebSocketBridge,
 } from "./responses-websocket.js";
 import { configureEgress } from "./runtime/egress.js";
@@ -33,6 +41,12 @@ export {
   type RateLimitMiddlewareDeps,
   rateLimitMiddleware,
 } from "./middleware/rate-limit.js";
+export {
+  installRealtimeWebSocketBridge,
+  isRealtimeWebSocketPath,
+  type RealtimeWebSocketBridge,
+  type RealtimeWebSocketBridgeOptions,
+} from "./realtime-websocket.js";
 export {
   installResponsesWebSocketBridge,
   isResponsesWebSocketPath,
@@ -79,17 +93,37 @@ async function main(): Promise<void> {
 
     let handle: ServerHandle;
     let responsesWebSocket: ResponsesWebSocketBridge | undefined;
+    let realtimeWebSocket: RealtimeWebSocketBridge | undefined;
     let server: ReturnType<typeof serve> | undefined;
+    let rejectUnknownUpgrade: ((request: IncomingMessage, socket: Duplex) => void) | undefined;
 
-    const attachResponsesWebSocket = (next: ServerHandle): void => {
-      if (!server || responsesWebSocket) return;
-      responsesWebSocket = installResponsesWebSocketBridge({
-        server,
-        fetch: (request) => handle.app.fetch(request),
-        closeSession: next.closeResponsesWebSocketSession,
-        sessionProof: next.responsesWebSocketSessionProof,
-        memoryAdmission: next.responsesMemoryAdmission,
-      });
+    const attachWebSockets = (next: ServerHandle): void => {
+      if (!server) return;
+      if (!responsesWebSocket) {
+        responsesWebSocket = installResponsesWebSocketBridge({
+          server,
+          fetch: (request) => handle.app.fetch(request),
+          closeSession: next.closeResponsesWebSocketSession,
+          sessionProof: next.responsesWebSocketSessionProof,
+          memoryAdmission: next.responsesMemoryAdmission,
+        });
+      }
+      if (!realtimeWebSocket && next.realtimeCallRegistry && next.resolveRealtimeKey) {
+        realtimeWebSocket = installRealtimeWebSocketBridge({
+          server,
+          registry: next.realtimeCallRegistry,
+          resolveKey: next.resolveRealtimeKey,
+          memoryAdmission: next.responsesMemoryAdmission,
+        });
+      }
+      if (!rejectUnknownUpgrade) {
+        rejectUnknownUpgrade = (request, socket) => {
+          if (!isResponsesWebSocketPath(request.url) && !isRealtimeWebSocketPath(request.url)) {
+            socket.destroy();
+          }
+        };
+        server.on("upgrade", rejectUnknownUpgrade);
+      }
     };
 
     if (setupRequired(process.env)) {
@@ -123,7 +157,7 @@ async function main(): Promise<void> {
         buildFullServer: () => buildServer({ logger }),
         activate: (next) => {
           handle = next;
-          attachResponsesWebSocket(next);
+          attachWebSockets(next);
           logger.log("info", "gateway.setup_completed", { host: next.host, port: next.port });
         },
         readRootKey: async () => {
@@ -145,7 +179,7 @@ async function main(): Promise<void> {
       port: handle.port,
       hostname: handle.host,
     });
-    if (!setupRequired(process.env)) attachResponsesWebSocket(handle);
+    if (!setupRequired(process.env)) attachWebSockets(handle);
     logger.log("info", "gateway.listening", {
       host: handle.host,
       port: handle.port,
@@ -167,6 +201,8 @@ async function main(): Promise<void> {
       logger.log("info", "gateway.shutdown", { signal });
       try {
         await responsesWebSocket?.close();
+        await realtimeWebSocket?.close();
+        if (rejectUnknownUpgrade) server?.off("upgrade", rejectUnknownUpgrade);
         await closeServer(server as unknown as ClosableServer, drainMs);
         await handle.dispose?.();
       } catch (err) {
