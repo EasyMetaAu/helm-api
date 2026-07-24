@@ -128,6 +128,40 @@ describe("createSerializingClient", () => {
     expect(gate.acquire).not.toHaveBeenCalled();
   });
 
+  it("preserves Realtime capability without entering the user-message queue", async () => {
+    const result = {
+      status: 201,
+      sdp: "v=answer\r\n",
+      contentType: "application/sdp",
+      location: "/v1/live/rtc_1",
+      callId: "rtc_1",
+      sideband: { url: "wss://upstream.test/rtc_1", headers: async () => ({}) },
+    };
+    const realtimeCall = vi.fn(async () => result);
+    const gate = { acquire: vi.fn() };
+    const client = createSerializingClient({
+      inner: { ...makeInner(), realtimeCall },
+      gate,
+      key: "k",
+      getConfig: () => ({ enabled: true, delayMs: 200, timeoutMs: 5_000 }),
+      isUserMessage: isUserMessageRequest,
+    });
+    const request = {
+      endpoint: "live" as const,
+      query: "",
+      sdp: "v=offer\r\n",
+      session: { model: "gpt-live-1-boulder-alpha" },
+      headers: {},
+    };
+
+    await expect(client.realtimeCall?.(request)).resolves.toBe(result);
+    expect(realtimeCall).toHaveBeenCalledWith(request, undefined);
+    expect(gate.acquire).not.toHaveBeenCalled();
+    expect(makeClient(makeInner(), { enabled: true, delayMs: 0, timeoutMs: 1 }).realtimeCall).toBe(
+      undefined,
+    );
+  });
+
   it("serializes two user-message chatCompletions with the configured delay", async () => {
     const inner = makeInner();
     const client = makeClient(inner, { enabled: true, delayMs: 200, timeoutMs: 5_000 });

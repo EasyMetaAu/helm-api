@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { CapabilitiesOverrideSchema, HelmConfigSchema } from "@helm/shared";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
+import { expandLaneChain } from "../lanes/expand-chain.js";
 import { resolveModelAlias, validateModelAliasTargets } from "../routing/model-alias.js";
 import { loadConfig } from "./loader.js";
 
@@ -72,7 +73,7 @@ describe("checked-in config samples", () => {
     expect(JSON.stringify(lanes)).not.toContain("zenmux-anthropic/claude-sonnet-4.6");
     expect(JSON.stringify(lanes)).not.toContain("zenmux-anthropic/claude-opus-4.8");
     expect(JSON.stringify(lanes)).not.toContain("zenmux/gpt-5.5");
-    expect(JSON.stringify(lanes)).not.toContain("openai/gpt-");
+    expect(JSON.stringify(lanes)).not.toContain("openai/gpt-5");
     expect(lanes.economy?.primary).toBe("openai-codex/gpt-5.6-luna");
     expect(lanes.economy?.fallback.slice(0, 4)).toEqual([
       "openai-codex/gpt-5.4-mini",
@@ -162,6 +163,19 @@ describe("checked-in config samples", () => {
     expect(lanes["gpt-5.6-luna"]?.primary).toBe("openai-codex/gpt-5.6-luna");
     expect(lanes["gpt-5.6-luna"]?.fallback).toEqual(["economy"]);
     expect(lanes["gpt-image"]).toMatchObject({ primary: "gpt-image-2", fallback: [] });
+    expect(lanes["gpt-image-2"]).toMatchObject({
+      primary: "zenmux/gpt-image-2",
+      fallback: ["openai/gpt-image-2"],
+    });
+    expect(expandLaneChain("gpt-image", lanes)).toEqual([
+      "zenmux/gpt-image-2",
+      "openai/gpt-image-2",
+    ]);
+    const zenmux = cfg.providers.find((provider) => provider.name === "zenmux");
+    expect(zenmux?.models).toContainEqual({
+      alias: "zenmux/gpt-image-2",
+      provider_model: "openai/gpt-image-2",
+    });
     expect(lanes["claude-haiku"]?.fallback).toEqual(["economy"]);
     expect(lanes["claude-sonnet"]?.primary).toBe("anthropic/claude-sonnet-5");
     expect(lanes["gpt-5.5"]?.primary).toBe("openai-codex/gpt-5.5");

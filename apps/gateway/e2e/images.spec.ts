@@ -24,10 +24,10 @@ test.describe("images e2e", () => {
     expect((body.data[0]?.b64_json ?? "").length).toBeGreaterThan(0);
     expect(body.usage.output_tokens).toBe(196);
 
-    // The client-facing `gpt-image-2` resolved to the zenmux wire id, lane `image`.
-    expect(res.headers()["x-helm-final-model"]).toBe("gpt-image-2");
+    // The client-facing `gpt-image-2` lane resolved to the ZenMux leaf first.
+    expect(res.headers()["x-helm-final-model"]).toBe("zenmux/gpt-image-2");
     expect(res.headers()["x-helm-provider-model"]).toBe("openai/gpt-image-2");
-    expect(res.headers()["x-helm-lane"]).toBe("image");
+    expect(res.headers()["x-helm-lane"]).toBe("gpt-image-2");
   });
 
   test("serves a Gemini image model via the SAME endpoint (unified, no allow_custom_model)", async ({

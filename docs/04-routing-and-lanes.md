@@ -331,6 +331,10 @@ gpt-image:
   primary: gpt-image-2
   fallback: []
 
+gpt-image-2:
+  primary: zenmux/gpt-image-2
+  fallback: [openai/gpt-image-2]
+
 gemini-image:
   primary: google/gemini-3.1-flash-image
   fallback: [gemini-3.1-flash-image, gemini-3-pro-image]
@@ -342,6 +346,10 @@ normal per-key budget gate, `blocked_models` filter, provider resolution,
 capability checks, breaker, and in-chain failover still apply. OpenAI-compatible
 image requests and Gemini-native Interactions requests are adapted separately;
 the members of one lane should therefore use compatible request semantics.
+
+The client-facing `gpt-image-2` chain keeps ZenMux first for generation, while
+official OpenAI provides an operation fallback for image edits that the relay may
+reject even when it advertises the model in `/models`.
 
 ### OAuth subscription account selection
 

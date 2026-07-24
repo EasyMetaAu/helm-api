@@ -294,15 +294,18 @@ curl http://localhost:8080/v1beta/interactions \
 
 #### Image provider lanes
 
-The shipped config groups image models into image **lanes**. The GPT image lane uses the ZenMux relay only, avoiding the higher-cost official OpenAI API; the direct official image alias remains available as an exact-model request to any valid key. Gemini keeps cross-provider failover. A deterministic client error (a 4xx invalid request — bad size, oversized image) is returned verbatim and does **not** trigger failover.
+The shipped config groups image models into image **lanes**. The client-facing `gpt-image-2` chain uses ZenMux first and falls back to official OpenAI when the relay cannot serve an operation such as image edits. Gemini keeps cross-provider failover. A deterministic client error (a 4xx invalid request — bad size, oversized image) is returned verbatim and does **not** trigger failover.
 
 ```yaml
-# config/lanes.yaml — GPT image uses ZenMux only; Gemini leads with Google direct
-# and falls over to ZenMux. Members must be image models
+# config/lanes.yaml — GPT image uses ZenMux first, then official OpenAI; Gemini
+# leads with Google direct and falls over to ZenMux. Members must be image models
 # (capabilities.outputImage) and a single kind (all gpt-image-* OR all gemini-*-image).
 gpt-image:                          # request `model: "gpt-image"`
-  primary: gpt-image-2              # ZenMux relay; official OpenAI excluded for cost
+  primary: gpt-image-2
   fallback: []
+gpt-image-2:                        # request `model: "gpt-image-2"`
+  primary: zenmux/gpt-image-2       # low-cost generation path
+  fallback: [openai/gpt-image-2]    # operation fallback, including image edits
 gemini-image:                       # request `model: "gemini-image"`
   primary: google/gemini-3.1-flash-image   # Google official → ZenMux flash → pro
   fallback: [gemini-3.1-flash-image, gemini-3-pro-image]

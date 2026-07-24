@@ -467,7 +467,7 @@ gemini-3-pro-image:
 # output $30/M. The generated image is billed as usage.output_tokens (image_tokens).
 # Worked example: a 1024 low-quality image = 196 output
 # tokens → 196 × $30/M + 15 × $5/M ≈ $0.006.
-gpt-image-2:
+zenmux/gpt-image-2:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0
   cacheReadPerMTokUsd: 1.25

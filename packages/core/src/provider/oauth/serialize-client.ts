@@ -168,6 +168,11 @@ export function createSerializingClient(deps: SerializeClientDeps): ProviderClie
     };
   }
 
+  const innerRealtime = deps.inner.realtimeCall;
+  if (innerRealtime) {
+    client.realtimeCall = (req, opts) => innerRealtime(req, opts);
+  }
+
   if (deps.inner.closeResponsesWebSocketSession) {
     client.closeResponsesWebSocketSession = (sessionId) =>
       deps.inner.closeResponsesWebSocketSession?.(sessionId) ?? Promise.resolve();
