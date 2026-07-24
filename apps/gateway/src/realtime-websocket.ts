@@ -118,8 +118,9 @@ async function openUpstream(
             stopQueue: () => socket.off("message", queue),
           }),
         );
-        socket.once("unexpected-response", (_request, response) => {
+        socket.once("unexpected-response", (request, response) => {
           response.resume();
+          request.socket?.destroy();
           reject(new UpstreamUpgradeError(response.statusCode ?? 502));
         });
         socket.once("error", reject);

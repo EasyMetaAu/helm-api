@@ -1,5 +1,6 @@
 import { once } from "node:events";
 import { createServer } from "node:http";
+import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket, { WebSocketServer } from "ws";
 import { createRealtimeCallRegistry } from "./realtime-call-registry.js";
@@ -107,12 +108,19 @@ describe("Realtime websocket bridge", () => {
     const upstream = new WebSocketServer({ noServer: true, perMessageDeflate: false });
     let upgrades = 0;
     let refreshed = 0;
+    let rejectedSocketEnded = Promise.resolve(false);
     const authHeaders: Array<string | undefined> = [];
     upstreamHttp.server.on("upgrade", (request, socket, head) => {
       upgrades += 1;
       authHeaders.push(request.headers.authorization);
       if (upgrades === 1) {
-        socket.end("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+        rejectedSocketEnded = once(socket, "end").then(() => true);
+        closers.push(async () => {
+          socket.destroy();
+        });
+        socket.write(
+          "HTTP/1.1 401 Unauthorized\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n",
+        );
         return;
       }
       upstream.handleUpgrade(request, socket, head, (websocket) => {
@@ -154,5 +162,6 @@ describe("Realtime websocket bridge", () => {
     expect(refreshed).toBe(1);
     expect(authHeaders).toEqual(["Bearer token-1", "Bearer token-2"]);
     client.terminate();
+    expect(await Promise.race([rejectedSocketEnded, delay(500, false)])).toBe(true);
   });
 });
