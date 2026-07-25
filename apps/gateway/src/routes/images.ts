@@ -450,8 +450,9 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
       return errorJson(
         c,
         outcome.httpStatus as ContentfulStatusCode,
-        "upstream_error",
+        outcome.errorClass === "invalid_request" ? "invalid_request_error" : "upstream_error",
         outcome.message,
+        outcome.errorClass === "invalid_request" ? "invalid_request" : null,
       );
     }
 

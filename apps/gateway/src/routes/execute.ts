@@ -1202,7 +1202,7 @@ function upstreamErrorCode(raw: unknown): string | null {
 
 // Human-readable upstream error message (for surfacing to the client verbatim), if
 // the provider nested one under `error.message`.
-function upstreamErrorMessage(raw: unknown): string | null {
+export function upstreamErrorMessage(raw: unknown): string | null {
   if (raw === null || typeof raw !== "object") return null;
   const inner = (raw as { error?: unknown }).error;
   if (inner !== null && typeof inner === "object") {
@@ -1243,7 +1243,8 @@ export function isUpstreamRequestRejection(err: unknown): boolean {
   const status = err.upstreamStatus;
   if (status !== 400 && status !== 413 && status !== 422) return false;
   if (isReasoningHistoryRejection(err)) return false;
-  if (upstreamErrorType(err.providerRaw) === "invalid_request_error") return true;
+  const type = upstreamErrorType(err.providerRaw);
+  if (type === "invalid_request_error" || type === "invalid_params") return true;
   // 413 is "payload too large" by definition; some providers omit a typed body, so
   // also honor the unambiguous phrasings real upstreams use for shape errors.
   if (status === 413) return true;

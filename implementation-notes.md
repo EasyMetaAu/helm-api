@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-25 · 图片上游参数拒绝保持客户端 400（Gateway / Provider execution，docs/05/07，原则 3/5）
+
+- **根因**：OpenAI provider 已把 ZenMux 的真实 HTTP `400` 保存到 `UpstreamError.upstreamStatus`，但共享请求拒绝分类只识别 `invalid_request_error`、`413` 与超大图片提示，遗漏 ZenMux 的结构化 `invalid_params`，导致图片链继续按 provider 故障耗尽并返回 `all_providers_failed / 502`。
+- **修复**：共享 `isUpstreamRequestRejection` 在原有 `400/413/422` 状态白名单内识别 `invalid_params`；图片链复用现有上游消息提取，Images 路由返回 OpenAI 形状的 `invalid_request_error / invalid_request / 400`。不按错误字符串或具体参数名特判，也不删除客户端字段。
+- **边界不变**：`401/403/404/429`、provider `5xx`、网络/超时、熔断与真实链耗尽仍走原有认证、重试、breaker、fallback 和 `5xx` 语义；回归测试覆盖 ZenMux 形状、provider `500`、网络失败与链耗尽。
+
 ## 2026-07-25 · 上游过载（529/503）在 fetch 边界退避重试（Provider，docs/02/04，原则 3/5/8）
 
 - **根因**：`provider/retry.ts` 的重试分类是严格白名单，只覆盖裸 socket/连接失败；HTTP 529（Anthropic Overloaded）/503 直接变成 `UpstreamError` 抛出，**零延迟零重试**。OAuth 账号池确实把 `status >= 500` 当作可换兄弟账号的瞬时故障，但那也是立即换、无退避；单账号或普通 API key 的 provider 根本没有这条通路，一次 529 就烧掉一个候选，单候选链直接 502 给客户端——而同样的请求体隔一秒重发通常就成功。
@@ -65,14 +71,9 @@
 - **请求、输出与 Session 热路径**：所有 JSON 入口在 `JSON.parse` 前按真实流式字节申请进程级预算，超出单请求容量返回结构化 413，暂时无余量返回 503；`maxPayload` 与上游 Codex connector 同样随运行时容量变化。客户端 WebSocket 另从 cgroup 或 `RSS + availableMemory` 扣除未来 heap 增长和 SQLite 预留，得到 native ingress 池；本条最初采用的连接生命周期最坏帧预留已由 2026-07-24 条目修正为活动消息真实字节计费，terminal 后 drain 的实现也已由 2026-07-25 条目修正为立即停止并取消内部流。WS 每连接只保留一个正在执行的 `response.create`；所有上游 Codex WS 会话共用 response-work 池，每条消息从入队、等待、`JSON.parse` 到 frame 被消费全程持有 lease。四种 SSE 出口共用有界正文捕获器，容量耗尽只省略该响应 payload、记录 `payload.capture_limited` 并继续转发与保存 telemetry。Session 热写不再重建完整历史；Admin Session 恢复由 SQLite/Postgres 先查行字节元数据、再按 sequence 分页物化，并占用共享 recovery window。Store 的 64 MiB/10,000 revision 仍是跨实例一致的持久数据完整性上限，不是运行时内存值。
 - **夜间维护**：自动 cleanup、自动 VACUUM 与 Admin 手工维护复用同一 Promise 串行链；VACUUM 前进程级 gate 暂停新工作并依次等待 HTTP/body、Memory/Signal producer、OAuth/MCP/Admin cache 后台任务与正文写队列静止，结束或失败都逆序恢复。维护期间除 `/healthz`、`/version` 外的新请求统一返回带 `Retry-After` 的 503，并按 OpenAI、Anthropic、Gemini 或普通 Admin 路径输出对应错误形状；维护 drain 上限为 `min(request_timeout_ms, 120s)`。自动任务每 10 分钟检查一次，只有整段成功才记录当日完成。SQLite 仅在 freelist 至少占总页数 5% 时执行全库重写；worker 启动前要求 `availableMemory()` 至少为动态 process limit 的 25%，并按数据库与 WAL 实际大小检查磁盘。worker 使用独立连接、`temp_store=FILE` 与机器推导的低维护 cache；Compose 默认给 shutdown 30 分钟 grace。未引入守护进程、Redis、消息队列或新依赖。
 
-## 2026-07-23 · SQLite Session 与 Memory 正文使用兼容 gzip 存储（Store / Memory，docs/07/08，原则 1/3/7）
-
-- **Session 存储**：SQLite 复用既有 payload gzip codec，把 `session_revisions` 的 request delta、request envelope 与 response 保存为 BLOB；读取按 SQLite value type 与 gzip magic 同时兼容旧 TEXT。v42 只增加可空的逻辑字节列，不扫描历史正文；新行写入未压缩大小，旧 TEXT 行读取时由 SQLite `length()` 计算。分页先按逻辑字节执行内存准入，再读取并解压正文；`sessions.stored_bytes` 与 64 MiB 重建安全上限不变。Postgres 保持 TEXT，继续依赖 TOAST；不新增配置、依赖或正文回写迁移。
-- **Memory 存储**：SQLite 仅对不少于 256 UTF-8 字节且 gzip 后确实更小的 `memory_messages.content` 保存 BLOB；短消息和不可压缩正文仍保存 TEXT。去重 hash 始终基于原文，常规读取与归档出口统一解码，Memory 注入、Observer、租户范围和归档格式不变。生产小样本显示该门槛保留约 71.5% 的正文节省，同时避免小消息膨胀。
-- **历史数据边界**：代码不在启动或请求路径回写历史正文，也不在线执行 VACUUM。旧 Session、完整 payload 与关联图片 blob 的删除继续暂停；SQLite 物理文件缩减必须另行安排维护窗口。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-23 · SQLite Session 与 Memory 正文使用兼容 gzip 存储（Store / Memory，docs/07/08，原则 1/3/7）**：SQLite 以 value type + gzip magic 兼容压缩 Session/Memory 正文，不回写历史数据、不在线 VACUUM，完整原文通过 git history 回溯。
 - **2026-07-22 · 全项目文案审查补齐多语言维护闭环（Admin / Portal / Setup，docs/11/12，原则 1/2）**：以 Opus 只读审查和七语言结构测试补齐 Admin、Portal、Setup 文案维护闭环，完整原文通过 git history 回溯。
 - **2026-07-22 · Session 恢复补齐响应快照并限制默认留存范围（Telemetry / Admin requests，docs/07/11，原则 1/3/7/8）**：复用 `session_revisions.response_json` 不新增迁移，四种协议的成功非流式请求保存客户端形态响应快照，流式不新增 SSE 缓冲；单快照 16 MiB、Session 64 MiB 上限，来源恒为 `exact=false` 故 Retry 禁用，完整原文通过 git history 回溯。
 - **2026-07-22 · 按会话增量保存请求正文并诚实区分恢复保真度（Telemetry / Admin requests / Store，docs/07/11，原则 1/3/7/8）**：新增 `capture_sessions` 与 `capture_payloads` 构成三种互斥留存模式（同时为 true 则 fail-closed），只解析高置信客户端会话信号并以不可猜测 `session_ref` 存储；Session head + 单调 sequence + 不可变 revision 按最长公共前缀存增量，Responses 续接建真实 `response_id → request_id` 父边、找不到父 response 时恢复 fail-closed 为 `session_incomplete`，完整原文通过 git history 回溯。
