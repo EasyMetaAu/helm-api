@@ -86,6 +86,92 @@ describe("createOAuthPoolClient — Realtime account binding", () => {
     expect(await first?.sideband.headers()).toEqual({ Authorization: "Bearer a" });
     expect(second?.sideband.url).toContain("b.test");
   });
+
+  it("does not disable a text-capable account when Realtime voice access is denied", async () => {
+    const denied = new UpstreamError("upstream_error", "Voice session access denied.", null, 403);
+    const credentialFailures: string[] = [];
+    const calls: string[] = [];
+    const client = (account: string, allowed: boolean): ProviderClient => ({
+      ...stubClient(account, calls),
+      async realtimeCall() {
+        calls.push(account);
+        if (!allowed) throw denied;
+        return {
+          status: 201,
+          sdp: `answer-${account}`,
+          contentType: "application/sdp",
+          location: `/v1/realtime/calls/rtc_${account}`,
+          callId: `rtc_${account}`,
+          sideband: {
+            url: `wss://${account}.test/v1/realtime?call_id=rtc_${account}`,
+            headers: async () => ({ Authorization: `Bearer ${account}` }),
+          },
+        };
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [
+        { account: "a", priority: 10, schedulable: true, client: client("a", false) },
+        { account: "b", priority: 10, schedulable: true, client: client("b", true) },
+      ],
+      now: () => 1,
+      onAccountCredentialFailure: (account) => credentialFailures.push(account),
+    });
+
+    await expect(
+      pool.realtimeCall?.({
+        endpoint: "realtime",
+        query: "",
+        sdp: "offer",
+        session: { model: "gpt-realtime-1.5" },
+        headers: {},
+      }),
+    ).resolves.toMatchObject({ callId: "rtc_b" });
+
+    expect(calls).toEqual(["a", "b"]);
+    expect(credentialFailures).toEqual([]);
+  });
+
+  it("parks the selected account when sideband token refresh permanently fails", async () => {
+    const credentialFailures: string[] = [];
+    const refreshFailure = new TokenRefreshError("oauth refresh failed (status 401)", 401);
+    const client = (account: string): ProviderClient => ({
+      ...stubClient(account, []),
+      async realtimeCall() {
+        return {
+          status: 201,
+          sdp: "answer",
+          contentType: "application/sdp",
+          location: `/v1/realtime/calls/rtc_${account}`,
+          callId: `rtc_${account}`,
+          sideband: {
+            url: `wss://${account}.test/v1/realtime?call_id=rtc_${account}`,
+            headers: async () => {
+              throw refreshFailure;
+            },
+          },
+        };
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [
+        { account: "a", priority: 10, schedulable: true, client: client("a") },
+        { account: "b", priority: 10, schedulable: true, client: client("b") },
+      ],
+      onAccountCredentialFailure: (account) => credentialFailures.push(account),
+    });
+
+    const result = await pool.realtimeCall?.({
+      endpoint: "realtime",
+      query: "",
+      sdp: "offer",
+      session: { model: "gpt-realtime-1.5" },
+      headers: {},
+    });
+    await expect(result?.sideband.headers()).rejects.toBe(refreshFailure);
+
+    expect(credentialFailures).toEqual(["a"]);
+  });
 });
 
 describe("createOAuthPoolClient — account selection", () => {
@@ -649,6 +735,35 @@ describe("createOAuthPoolClient — account selection", () => {
     await pool.chatCompletion({ ...USER_REQ, previous_response_id: "resp-2" });
 
     expect(calls).toEqual(["a", "b"]);
+  });
+
+  it("restores a persisted previous_response_id account pin after pool restart", async () => {
+    const calls: string[] = [];
+    const nativeMember = (account: string): OAuthPoolMember => ({
+      account,
+      priority: 50,
+      schedulable: true,
+      client: {
+        ...stubClient(account, calls),
+        async nativePassthrough() {
+          calls.push(account);
+          return { id: `resp-${account}` };
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({ members: [nativeMember("a"), nativeMember("b")] });
+
+    await pool.nativePassthrough?.(
+      {
+        protocol: "openai_responses",
+        body: { model: "gpt", input: [], previous_response_id: "resp-old" },
+        headers: {},
+        mutations: {},
+      },
+      { statefulAccount: "b" },
+    );
+
+    expect(calls).toEqual(["b"]);
   });
 
   it("keeps a known previous_response_id on its original account even with a stable user key", async () => {

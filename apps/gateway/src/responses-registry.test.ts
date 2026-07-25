@@ -28,6 +28,8 @@ function record(over: Partial<ResponsesRegistryRecord> = {}): ResponsesRegistryR
     providerName: "openai",
     providerModel: "gpt-5.5",
     providerProtocol: "openai_responses",
+    providerAccount: "oauth-a",
+    selectedLane: "coding",
     createdAt: 1000,
     expiresAt: 2000,
     status: "completed",
@@ -45,6 +47,8 @@ describe("createResponsesRegistry", () => {
       responseId: "resp_1",
       providerName: "openai",
       providerProtocol: "openai_responses",
+      providerAccount: "oauth-a",
+      selectedLane: "coding",
     });
   });
 

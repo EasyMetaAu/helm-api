@@ -135,6 +135,9 @@ async function openUpstream(
         target.onUnauthorized();
         continue;
       }
+      if (cause instanceof UpstreamUpgradeError && cause.status === 401) {
+        target.onCredentialFailure?.(401);
+      }
       throw cause;
     }
   }

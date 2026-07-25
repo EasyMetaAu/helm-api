@@ -319,6 +319,8 @@ export {
 export {
   type InternalRequest,
   InternalRequestSchema,
+  isEmptyNativeResponsesContinuation,
+  isEmptyNativeResponsesPrewarm,
   type MemoryMode,
   MemoryModeSchema,
   type NativePassthroughCarrier,
@@ -331,6 +333,7 @@ export {
   ProtocolSchema,
   type RequestMetadata,
   RequestMetadataSchema,
+  responsesContinuationId,
   type TargetProviderProtocol,
   TargetProviderProtocolSchema,
 } from "./request/schema.js";

@@ -1333,7 +1333,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
         realtimeRequests.push(headers);
         return new Response("v=answer\\r\\n", {
           status: 201,
-          headers: { Location: "/v1/live/rtc-1" },
+          headers: { Location: "/v1/live/rtc_1" },
         });
       }
       responseRequests.push({

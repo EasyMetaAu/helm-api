@@ -336,12 +336,12 @@ async function forwardResponse(
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
   const body = response.body;
   if (body === null || !contentType.includes("text/event-stream")) {
+    if (body !== null) void body.cancel().catch(() => {});
     throw new Error("Responses websocket bridge expected a text/event-stream response");
   }
 
   let terminalType: unknown;
   for await (const frame of readSSE(body)) {
-    if (terminalType !== undefined) continue;
     const payload = websocketPayload(frame.event, frame.data);
     if (payload === null) continue;
     await sendText(socket, payload);
@@ -358,9 +358,11 @@ async function forwardResponse(
       type === "error"
     ) {
       terminalType = type;
+      break;
     }
   }
   if (terminalType !== undefined) {
+    void body.cancel().catch(() => {});
     return terminalType !== "response.completed";
   }
   if (!signal.aborted) {
@@ -469,19 +471,25 @@ export function installResponsesWebSocketBridge({
     const sessionId = randomUUID();
     let sessionClosed = false;
     let processing = false;
+    let activeTurnController: AbortController | null = null;
     const closeUpstreamSession = async () => {
-      await Promise.resolve(closeSession?.(sessionId)).catch(() => {});
+      if (sessionClosed) return;
+      sessionClosed = true;
+      await Promise.resolve()
+        .then(() => closeSession?.(sessionId))
+        .catch(() => {});
     };
     const abort = () => {
       controller.abort();
-      if (sessionClosed) return;
-      sessionClosed = true;
+      activeTurnController?.abort();
       void closeUpstreamSession();
     };
     socket.on("close", abort);
     socket.on("error", abort);
     socket.on("message", (data) => {
+      if (controller.signal.aborted || socket.readyState !== WebSocket.OPEN) return;
       if (processing) {
+        abort();
         socket.close(1008, "one active response per connection");
         return;
       }
@@ -532,6 +540,10 @@ export function installResponsesWebSocketBridge({
         return;
       }
       processing = true;
+      const turnController = new AbortController();
+      activeTurnController = turnController;
+      const abortTurn = () => turnController.abort();
+      controller.signal.addEventListener("abort", abortTurn, { once: true });
       void (async () => {
         try {
           const invalidatesSession = await forwardResponse(
@@ -539,16 +551,23 @@ export function installResponsesWebSocketBridge({
             request,
             fetch,
             data,
-            controller.signal,
+            turnController.signal,
             sessionId,
             sessionProof,
           );
-          if (invalidatesSession) await closeUpstreamSession();
+          if (invalidatesSession) {
+            socket.close(1000, "upstream session reset");
+            void closeUpstreamSession();
+          }
         } catch (error) {
           if (controller.signal.aborted || socket.readyState !== WebSocket.OPEN) return;
           await sendEnvelope(socket, localErrorEnvelope(error)).catch(() => {});
-          await closeUpstreamSession();
+          socket.close(1000, "upstream session reset");
+          void closeUpstreamSession();
         } finally {
+          turnController.abort();
+          controller.signal.removeEventListener("abort", abortTurn);
+          if (activeTurnController === turnController) activeTurnController = null;
           processing = false;
           acquired.lease.release();
           ingressAcquired.lease.release();

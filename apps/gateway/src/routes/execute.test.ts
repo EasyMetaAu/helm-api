@@ -896,6 +896,48 @@ describe("createExecute — gateway execution adapter", () => {
     expect(out.attempts[0]?.skip_reason).toBe("responses_previous_response_id_provider_mismatch");
   });
 
+  it("rejects generate:false when native Responses passthrough is unavailable", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "must-not-generate" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["responses", provider]]),
+      registry: protocolRegistry({
+        "responses/gpt": {
+          providerName: "responses",
+          providerModel: "gpt",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["responses/gpt"]),
+      req({
+        protocol: "openai_responses",
+        provider_raw: { generate: false },
+        native_request: {
+          protocol: "openai_responses",
+          body: { model: "gpt", input: [], generate: false, stream: false },
+          headers: {},
+          mutations: {},
+        },
+      }),
+    );
+
+    expect(provider.chatCompletion).not.toHaveBeenCalled();
+    expect(out.final.status).toBe("error");
+    expect(out.attempts[0]?.skip_reason).toBe(
+      "responses_generate_false_requires_native_passthrough",
+    );
+  });
+
   it.each([
     ["mcp", { type: "mcp", server_label: "local" }],
     ["file_search", { type: "file_search", vector_store_ids: ["vs_1"] }],
@@ -2369,6 +2411,43 @@ describe("createExecute — gateway execution adapter", () => {
     // Safe fields only — no key/payload/raw error object leaked.
     const serialized = JSON.stringify(truncated?.fields);
     expect(serialized).not.toContain("connection reset");
+  });
+
+  it("classifies a post-first-chunk AbortError as a client abort without breaker failure", async () => {
+    async function* aborted(): AsyncGenerator<string> {
+      yield 'data: {"a":1}\n\n';
+      throw Object.assign(new Error("stream aborted"), { name: "AbortError" });
+    }
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn().mockReturnValue(aborted()),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const logs: Array<{ msg: string; fields: Record<string, unknown> }> = [];
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ a: "m-a" }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      log: (_level, msg, fields) => logs.push({ msg, fields }),
+    });
+
+    const out = await execute(plan(["a"]), req({ stream: true }));
+    await expect(async () => {
+      for await (const _ of out.stream as AsyncIterable<string>) {
+        // drain
+      }
+    }).rejects.toThrow("stream aborted");
+
+    expect(recordFailure).not.toHaveBeenCalled();
+    expect(logs).toContainEqual({
+      msg: "stream.truncated",
+      fields: { alias: "a", error_class: "client_abort", reason: "client_abort" },
+    });
   });
 
   it("crosses providers: a fallback chain spanning two providers invokes both in order", async () => {

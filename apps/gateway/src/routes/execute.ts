@@ -48,6 +48,7 @@ import {
 } from "@helm/shared";
 import {
   CONCURRENCY_LEASE_LOST_REASON,
+  REQUEST_TIMEOUT_REASON,
   requestCancellationReason,
 } from "../request-cancellation.js";
 import {
@@ -1600,6 +1601,13 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         target,
         enabled: nativeProtocolPassthroughEnabled?.() === true,
       });
+      if (req.provider_raw?.generate === false && !passthrough.passthrough_used) {
+        capabilityPruned = true;
+        attempts.push(
+          skipRow(alias, "responses_generate_false_requires_native_passthrough", elapsed()),
+        );
+        continue;
+      }
       let visualCompressionMutation: VisualContextCompressionMutation | undefined;
       let optimizedNativeBody: Record<string, unknown> | null = null;
       const optimizeAnthropicBodyForAttempt = async (
@@ -1760,6 +1768,9 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 () => {
                   const raw = passthroughStream(passthroughBody, {
                     signal: attemptSignal,
+                    ...(req.metadata.stateful_provider_account
+                      ? { statefulAccount: req.metadata.stateful_provider_account }
+                      : {}),
                     captureUpstream,
                     onResponseMeta,
                     toolCallXmlRecovery:
@@ -1809,6 +1820,9 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 () => {
                   const raw = provider.chatCompletionStream(rendered.body, {
                     signal: attemptSignal,
+                    ...(req.metadata.stateful_provider_account
+                      ? { statefulAccount: req.metadata.stateful_provider_account }
+                      : {}),
                     captureUpstream,
                     onResponseMeta,
                     optimizeAnthropicBody: optimizeAnthropicBodyForAttempt,
@@ -1884,6 +1898,9 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           const body = await withAttemptDeadline(req.attempt_timeout_ms, signal, (attemptSignal) =>
             passthroughInvoke(passthroughBody, {
               signal: attemptSignal,
+              ...(req.metadata.stateful_provider_account
+                ? { statefulAccount: req.metadata.stateful_provider_account }
+                : {}),
               captureUpstream,
               onResponseMeta,
               toolCallXmlRecovery:
@@ -1916,6 +1933,9 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         const body = await withAttemptDeadline(req.attempt_timeout_ms, signal, (attemptSignal) =>
           provider.chatCompletion(bodyReq.body, {
             signal: attemptSignal,
+            ...(req.metadata.stateful_provider_account
+              ? { statefulAccount: req.metadata.stateful_provider_account }
+              : {}),
             captureUpstream,
             onResponseMeta,
             optimizeAnthropicBody: optimizeAnthropicBodyForAttempt,
@@ -2264,12 +2284,18 @@ async function peekStream(
       // the first chunk — breaker semantics unchanged). Emit a structured log so
       // the truncation is observable despite the clean telemetry row. Safe fields
       // only — alias + classification, NEVER key/payload/raw error (principle 7).
-      const cancellation = requestCancellationReason(_signal);
+      const cancellation = requestCancellationReason(_signal, err);
       if (cancellation === CONCURRENCY_LEASE_LOST_REASON) {
         log?.("warn", "stream.truncated", {
           alias,
           error_class: "lane_unavailable",
           reason: CONCURRENCY_LEASE_LOST_REASON,
+        });
+      } else if (cancellation !== null) {
+        log?.("warn", "stream.truncated", {
+          alias,
+          error_class: cancellation === REQUEST_TIMEOUT_REASON ? "timeout" : "client_abort",
+          reason: cancellation,
         });
       } else {
         log?.("warn", "stream.truncated", { alias, error_class: errorClassOf(err) });

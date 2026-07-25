@@ -15,7 +15,7 @@ describe("createOpenAIClient.realtimeCall", () => {
       }),
     );
     const client = createOpenAIClient({
-      config: { baseUrl: "https://api.openai.test/v1", apiKey: "sk-secret" },
+      config: { baseUrl: "https://api.openai.test/openai/v1", apiKey: "sk-secret" },
       fetch,
     });
 
@@ -33,12 +33,12 @@ describe("createOpenAIClient.realtimeCall", () => {
       location: "/v1/realtime/calls/rtc_public",
       callId: "rtc_public",
       sideband: {
-        url: "wss://api.openai.test/v1/realtime?intent=quicksilver&architecture=avas&call_id=rtc_public",
+        url: "wss://api.openai.test/openai/v1/realtime?intent=quicksilver&call_id=rtc_public",
       },
     });
     const [url, init] = fetch.mock.calls[0] as [string, RequestInit];
     expect(url).toBe(
-      "https://api.openai.test/v1/realtime/calls?intent=quicksilver&architecture=avas",
+      "https://api.openai.test/openai/v1/realtime/calls?intent=quicksilver&architecture=avas",
     );
     expect(init.method).toBe("POST");
     expect(init.body).toBeInstanceOf(FormData);
@@ -54,11 +54,12 @@ describe("createOpenAIClient.realtimeCall", () => {
   });
 
   it("uses the required AVAS query for ChatGPT Frameless calls and keeps its Codex identity", async () => {
-    const fetch = vi.fn().mockResolvedValue(
-      new Response("v=answer\r\n", {
-        status: 201,
-        headers: { location: "/v1/live/rtc_backend", "content-type": "application/sdp" },
-      }),
+    const fetch = vi.fn().mockImplementation(
+      async () =>
+        new Response("v=answer\r\n", {
+          status: 201,
+          headers: { location: "/v1/live/rtc_backend", "content-type": "application/sdp" },
+        }),
     );
     const getAuthHeader = vi.fn().mockResolvedValue("Bearer oauth-token");
     const client = createOpenAIClient({
@@ -94,11 +95,99 @@ describe("createOpenAIClient.realtimeCall", () => {
       sdp: "v=offer\r\n",
       session: { ...SESSION, delegation: { type: "client" } },
     });
-    expect(result?.sideband.url).toBe("wss://chatgpt.com/backend-api/codex/rtc_backend");
+    expect(result?.sideband.url).toBe("wss://api.openai.com/v1/live/rtc_backend");
     expect(await result?.sideband.headers()).toMatchObject({
       Authorization: "Bearer oauth-token",
       "chatgpt-account-id": "acct-1",
     });
+
+    const v1 = await client.realtimeCall?.({
+      endpoint: "realtime",
+      query: "intent=quicksilver&architecture=avas",
+      sdp: "v=offer\r\n",
+      session: SESSION,
+      headers: { "openai-alpha": "quicksilver=v1" },
+    });
+    expect(v1?.sideband.url).toBe(
+      "wss://api.openai.com/v1/realtime?intent=quicksilver&call_id=rtc_backend",
+    );
+  });
+
+  it("fills missing backend AVAS parameters without dropping client query values", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      new Response("v=answer\r\n", {
+        status: 201,
+        headers: { location: "/v1/realtime/calls/rtc_backend" },
+      }),
+    );
+    const client = createOpenAIClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => "Bearer oauth-token",
+      },
+      fetch,
+    });
+
+    await client.realtimeCall?.({
+      endpoint: "realtime",
+      query: "trace=1",
+      sdp: "v=offer\r\n",
+      session: SESSION,
+      headers: {},
+    });
+
+    expect(fetch.mock.calls[0]?.[0]).toBe(
+      "https://chatgpt.com/backend-api/codex/realtime/calls?trace=1&intent=quicksilver&architecture=avas",
+    );
+  });
+
+  it("strips call-create-only AVAS architecture from public V1 sideband URLs", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      new Response("v=answer\r\n", {
+        status: 201,
+        headers: { location: "/v1/realtime/calls/rtc_public" },
+      }),
+    );
+    const client = createOpenAIClient({
+      config: { baseUrl: "https://api.openai.test/openai/v1", apiKey: "sk-secret" },
+      fetch,
+    });
+
+    const result = await client.realtimeCall?.({
+      endpoint: "realtime",
+      query: "intent=quicksilver&architecture=avas&trace=1",
+      sdp: "v=offer\r\n",
+      session: SESSION,
+      headers: {},
+    });
+
+    expect(result?.sideband.url).toBe(
+      "wss://api.openai.test/openai/v1/realtime?intent=quicksilver&trace=1&call_id=rtc_public",
+    );
+  });
+
+  it("parses and validates the call id independently of Location query parameters", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      new Response("v=answer\r\n", {
+        status: 201,
+        headers: { location: "/v1/live/rtc_query?trace=1#fragment" },
+      }),
+    );
+    const client = createOpenAIClient({
+      config: { baseUrl: "https://api.openai.test/v1", apiKey: "sk-secret" },
+      fetch,
+    });
+
+    const result = await client.realtimeCall?.({
+      endpoint: "live",
+      query: "",
+      sdp: "v=offer\r\n",
+      session: SESSION,
+      headers: {},
+    });
+
+    expect(result?.callId).toBe("rtc_query");
+    expect(result?.sideband.url).toBe("wss://api.openai.test/v1/live/rtc_query");
   });
 
   it("preserves a non-2xx upstream response as an UpstreamError", async () => {
@@ -122,6 +211,29 @@ describe("createOpenAIClient.realtimeCall", () => {
         headers: {},
       }),
     ).rejects.toMatchObject({ name: "UpstreamError", upstreamStatus: 400 });
+  });
+
+  it("surfaces the scrubbed Realtime upstream error message", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: { message: "Voice session access denied." } }), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const client = createOpenAIClient({
+      config: { baseUrl: "https://api.openai.test/v1", apiKey: "sk-secret" },
+      fetch,
+    });
+
+    await expect(
+      client.realtimeCall?.({
+        endpoint: "realtime",
+        query: "",
+        sdp: "v=offer\r\n",
+        session: SESSION,
+        headers: {},
+      }),
+    ).rejects.toMatchObject({ message: "Voice session access denied.", upstreamStatus: 403 });
   });
 
   it("refreshes OAuth once after a 401 call-create response", async () => {
@@ -160,5 +272,9 @@ describe("createOpenAIClient.realtimeCall", () => {
     expect(
       fetch.mock.calls.map((call) => (call[1]?.headers as Record<string, string>).Authorization),
     ).toEqual(["Bearer token-1", "Bearer token-2"]);
+    expect(fetch.mock.calls.map((call) => call[0])).toEqual([
+      "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas",
+      "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas",
+    ]);
   });
 });

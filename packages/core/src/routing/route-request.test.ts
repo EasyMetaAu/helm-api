@@ -116,6 +116,145 @@ function deps(over: Partial<RouteDeps> = {}): RouteDeps {
 // ── tests ───────────────────────────────────────────────────────────────────
 
 describe("routeRequest — orchestration", () => {
+  it("pins a registry-validated Responses continuation before classification", async () => {
+    const d = deps();
+    const input = req({
+      protocol: "openai_responses",
+      requested_model: "gpt-5.6-sol",
+      messages: [],
+      provider_raw: { previous_response_id: "resp-1" },
+      metadata: {
+        conversation_id: null,
+        thread_id: null,
+        resource_id: null,
+        project_id: null,
+        memory_mode: "off",
+        stateful_provider_alias: "openai-codex/gpt-5.6-sol",
+      },
+    });
+
+    await routeRequest(input, d, { allowCustomModel: false });
+
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan).toEqual({
+      selected_lane: "openai-codex/gpt-5.6-sol",
+      candidate_chain: ["openai-codex/gpt-5.6-sol"],
+      explicit_model: "openai-codex/gpt-5.6-sol",
+    });
+    expect(d.classify).not.toHaveBeenCalled();
+  });
+
+  it("rejects a pinned Responses continuation outside the key lane cap", async () => {
+    const d = deps();
+    const input = req({
+      protocol: "openai_responses",
+      provider_raw: { previous_response_id: "resp-1" },
+      metadata: {
+        conversation_id: null,
+        thread_id: null,
+        resource_id: null,
+        project_id: null,
+        memory_mode: "off",
+        stateful_provider_alias: "openai-codex/gpt-5.6-sol",
+        stateful_lane: "coding",
+      },
+    });
+
+    const result = await routeRequest(input, d, {
+      keyCaps: { allowedLanes: ["economy"] },
+    });
+
+    expect(result.final.status).toBe("error");
+    expect(result.error?.error_class).toBe("invalid_request");
+    expect(d.execute).not.toHaveBeenCalled();
+    expect(d.classify).not.toHaveBeenCalled();
+  });
+
+  it("preserves an allowed custom-model continuation whose selected lane is the model alias", async () => {
+    const d = deps();
+    const alias = "openai-codex/gpt-custom";
+    const input = req({
+      protocol: "openai_responses",
+      requested_model: alias,
+      messages: [],
+      provider_raw: { previous_response_id: "resp-1" },
+      metadata: {
+        conversation_id: null,
+        thread_id: null,
+        resource_id: null,
+        project_id: null,
+        memory_mode: "off",
+        stateful_provider_alias: alias,
+        stateful_lane: alias,
+      },
+    });
+
+    await routeRequest(input, d, {
+      allowCustomModel: true,
+      keyCaps: { allowedLanes: ["coding"] },
+    });
+
+    const plan = (d.execute as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as ExecutionPlan;
+    expect(plan).toEqual({
+      selected_lane: alias,
+      candidate_chain: [alias],
+      explicit_model: alias,
+    });
+    expect(d.classify).not.toHaveBeenCalled();
+  });
+
+  it("rejects a pinned Responses continuation whose provider is blocked", async () => {
+    const d = deps();
+    const input = req({
+      protocol: "openai_responses",
+      provider_raw: { previous_response_id: "resp-1" },
+      metadata: {
+        conversation_id: null,
+        thread_id: null,
+        resource_id: null,
+        project_id: null,
+        memory_mode: "off",
+        stateful_provider_alias: "openai-codex/gpt-5.6-sol",
+        stateful_lane: "coding",
+      },
+    });
+
+    const result = await routeRequest(input, d, {
+      keyCaps: { allowedLanes: null, blockedModels: ["openai-codex/*"] },
+    });
+
+    expect(result.final.status).toBe("error");
+    expect(result.error?.error_class).toBe("invalid_request");
+    expect(d.execute).not.toHaveBeenCalled();
+    expect(d.classify).not.toHaveBeenCalled();
+  });
+
+  it("rejects a pinned Responses continuation that cannot honor budget degradation", async () => {
+    const d = deps();
+    const input = req({
+      protocol: "openai_responses",
+      provider_raw: { previous_response_id: "resp-1" },
+      metadata: {
+        conversation_id: null,
+        thread_id: null,
+        resource_id: null,
+        project_id: null,
+        memory_mode: "off",
+        stateful_provider_alias: "openai-codex/gpt-5.6-sol",
+        stateful_lane: "coding",
+      },
+    });
+
+    const result = await routeRequest(input, d, {
+      keyCaps: { allowedLanes: null, degradeLane: "economy" },
+    });
+
+    expect(result.final.status).toBe("error");
+    expect(result.error?.error_class).toBe("invalid_request");
+    expect(d.execute).not.toHaveBeenCalled();
+    expect(d.classify).not.toHaveBeenCalled();
+  });
+
   it("records the effective reasoning effort in the body-free decision", async () => {
     const d = deps();
     const result = await routeRequest(req({ reasoning_effort: "high" }), d);

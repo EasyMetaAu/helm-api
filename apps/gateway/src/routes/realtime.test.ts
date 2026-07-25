@@ -1,4 +1,4 @@
-import type { ProviderClient, RealtimeCallResult } from "@helm/core";
+import { type ProviderClient, type RealtimeCallResult, UpstreamError } from "@helm/core";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../app.js";
@@ -58,6 +58,7 @@ describe("registerRealtimeRoutes", () => {
       headers: {
         Authorization: "Bearer helm-key",
         "openai-alpha": "quicksilver=v1",
+        "x-oai-attestation": "v1.test-attestation",
         "x-session-id": "sess-1",
         "x-secret": "do-not-forward",
       },
@@ -75,6 +76,7 @@ describe("registerRealtimeRoutes", () => {
         session: expect.objectContaining({ model: "gpt-realtime-1.5" }),
         headers: {
           "openai-alpha": "quicksilver=v1",
+          "x-oai-attestation": "v1.test-attestation",
           "x-session-id": "sess-1",
         },
       }),
@@ -109,6 +111,23 @@ describe("registerRealtimeRoutes", () => {
     });
     expect(response.status).toBe(401);
     expect(realtimeCall).not.toHaveBeenCalled();
+  });
+
+  it("preserves a deterministic upstream voice-access denial", async () => {
+    const { app, realtimeCall } = setup();
+    realtimeCall.mockRejectedValue(
+      new UpstreamError("upstream_error", "Voice session access denied.", null, 403),
+    );
+    const response = await app.request("/v1/realtime/calls", {
+      method: "POST",
+      headers: { Authorization: "Bearer helm-key" },
+      body: multipart({ model: "gpt-realtime-1.5" }),
+    });
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({
+      error: { code: "upstream_error", message: "Voice session access denied." },
+    });
   });
 
   it("enforces blocked_models against the resolved provider alias", async () => {

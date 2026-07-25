@@ -751,11 +751,16 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     return separator > 0 ? stickyKey.slice(0, separator) : "unknown";
   }
 
-  function isStrictAccountSticky(stickyKey: string | null): boolean {
+  function isStrictAccountSticky(stickyKey: string | null): stickyKey is string {
     return (
       stickyKey?.startsWith("previous_response_id:") === true ||
       stickyKey?.startsWith("x-codex-turn-state:") === true
     );
+  }
+
+  function restorePersistedAffinity(stickyKey: string | null, account: string | undefined): void {
+    if (!isStrictAccountSticky(stickyKey) || !account) return;
+    stickySessions.set(stickyKey, { account, expiresAt: now() + stickyTtlMs });
   }
 
   function commitSelection(
@@ -930,6 +935,8 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     model: string | null,
     avoidBusy: boolean,
     call: (client: ProviderClient, entry: PoolEntry) => Promise<R>,
+    credentialFailureStatuses = upstreamCredentialFailureStatuses,
+    retryForbiddenWithoutParking = false,
   ): Promise<R> {
     const tried = new Set<string>();
     const statefulContinuation = isStrictAccountSticky(stickyKey);
@@ -947,9 +954,17 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         rememberResponseAffinity(result, entry);
         return result;
       } catch (err) {
-        if (isCredentialAccountFailure(err, upstreamCredentialFailureStatuses)) {
+        if (isCredentialAccountFailure(err, credentialFailureStatuses)) {
           parkCredentialFailedAccount(entry, err);
           if (statefulContinuation) throw err;
+          lastErr = err;
+          continue;
+        }
+        if (
+          retryForbiddenWithoutParking &&
+          err instanceof UpstreamError &&
+          err.upstreamStatus === 403
+        ) {
           lastErr = err;
           continue;
         }
@@ -1078,8 +1093,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       req: ChatCompletionRequest,
       opts?: ProviderCallOptions,
     ): Promise<ChatCompletionResponse> {
+      const stickyKey = stickyKeyFromChat(req);
+      restorePersistedAffinity(stickyKey, opts?.statefulAccount);
       return completeWithRetry(
-        stickyKeyFromChat(req),
+        stickyKey,
         modelFromChat(req),
         isUserMessageRequest(req),
         (client, entry) => client.chatCompletion(req, callOptionsForEntry(opts, entry)),
@@ -1092,6 +1109,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       // Pick SYNCHRONOUSLY (one pick per call) before opening the stream so rotation +
       // onSelect fire on the call turn; streamWithRetry only adds sibling fallbacks.
       const stickyKey = stickyKeyFromChat(req);
+      restorePersistedAffinity(stickyKey, opts?.statefulAccount);
       const avoidBusy = isUserMessageRequest(req);
       const first = select(stickyKey, undefined, { avoidBusy, model: modelFromChat(req) });
       return streamWithRetry(
@@ -1120,8 +1138,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       // rotation + onSelect fire on the call turn exactly like the other methods. A member
       // missing the method throws a NON-transient error → surfaced at once (fail-closed,
       // never silently routed to a translating sibling), not retried.
+      const stickyKey = stickyKeyFromNative(body);
+      restorePersistedAffinity(stickyKey, opts?.statefulAccount);
       return completeWithRetry(
-        stickyKeyFromNative(body),
+        stickyKey,
         modelFromNative(body),
         isUserMessageRequest(nativePassthroughBody(body)),
         (client, entry) => {
@@ -1142,6 +1162,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       opts?: ProviderCallOptions,
     ): AsyncIterable<string> {
       const stickyKey = stickyKeyFromNative(body);
+      restorePersistedAffinity(stickyKey, opts?.statefulAccount);
       const avoidBusy = isUserMessageRequest(nativePassthroughBody(body));
       // Pick + fail-closed check SYNCHRONOUSLY on the call turn (rotation + onSelect, and a
       // synchronous throw if the picked member can't passthrough-stream), exactly as before.
@@ -1172,12 +1193,51 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
           ): Promise<RealtimeCallResult> {
             // Realtime models are selected by the voice endpoint, not the Codex
             // text-model catalog used for per-account entitlement filtering.
-            return completeWithRetry(null, null, false, (client, entry) => {
-              if (!client.realtimeCall) {
-                throw new Error("oauth pool member does not support Realtime calls");
-              }
-              return client.realtimeCall(req, callOptionsForEntry(opts, entry));
-            });
+            return completeWithRetry(
+              null,
+              null,
+              false,
+              (client, entry) => {
+                if (!client.realtimeCall) {
+                  throw new Error("oauth pool member does not support Realtime calls");
+                }
+                return client.realtimeCall(req, callOptionsForEntry(opts, entry)).then((result) => {
+                  const target = result.sideband;
+                  return {
+                    ...result,
+                    sideband: {
+                      ...target,
+                      headers: async () => {
+                        try {
+                          return await target.headers();
+                        } catch (error) {
+                          if (isCredentialAccountFailure(error, new Set([401]))) {
+                            parkCredentialFailedAccount(entry, error);
+                          }
+                          throw error;
+                        }
+                      },
+                      onCredentialFailure: (status: number) => {
+                        target.onCredentialFailure?.(status);
+                        if (status === 401) {
+                          parkCredentialFailedAccount(
+                            entry,
+                            new UpstreamError(
+                              "upstream_error",
+                              "realtime sideband authentication failed",
+                              null,
+                              status,
+                            ),
+                          );
+                        }
+                      },
+                    },
+                  };
+                });
+              },
+              new Set([401]),
+              true,
+            );
           },
         }
       : {}),
@@ -1188,8 +1248,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
             req: NativePassthroughInput,
             opts?: ProviderCallOptions,
           ): Promise<Record<string, unknown>> {
+            const stickyKey = stickyKeyFromNative(req);
+            restorePersistedAffinity(stickyKey, opts?.statefulAccount);
             return completeWithRetry(
-              stickyKeyFromNative(req),
+              stickyKey,
               modelFromNative(req),
               isUserMessageRequest(nativePassthroughBody(req)),
               (client, entry) => {

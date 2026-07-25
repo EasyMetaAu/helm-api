@@ -741,7 +741,39 @@ describe("Responses websocket bridge", () => {
     ]);
   });
 
-  it("drains the internal HTTP stream after the terminal event without forwarding trailing data", async () => {
+  it("cancels an unexpected successful non-SSE response body", async () => {
+    let cancelled = false;
+    const baseUrl = await startBridge(
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('{"unexpected":true}'));
+            },
+            cancel() {
+              cancelled = true;
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    );
+    const socket = await connect(`${baseUrl}/v1/responses`);
+
+    const events = await collectTurn(socket, {
+      type: "response.create",
+      model: "gpt-5.6-sol",
+      input: [],
+      stream: true,
+    });
+
+    expect(events.at(-1)).toMatchObject({
+      type: "error",
+      error: { code: "websocket_bridge_error" },
+    });
+    expect(cancelled).toBe(true);
+  });
+
+  it("stops at the terminal event and cancels the internal HTTP stream", async () => {
     let cancelled = false;
     let trailingTimer: ReturnType<typeof setTimeout> | null = null;
     const encoder = new TextEncoder();
@@ -789,7 +821,7 @@ describe("Responses websocket bridge", () => {
     await once(socket, "message");
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    expect(cancelled).toBe(false);
+    expect(cancelled).toBe(true);
     expect(events).toEqual([
       {
         type: "response.completed",
@@ -798,12 +830,66 @@ describe("Responses websocket bridge", () => {
     ]);
   });
 
+  it("does not wait for internal stream cancellation before handling the next turn", async () => {
+    let requestCount = 0;
+    let cancelled = false;
+    let turnAborted = false;
+    const encoder = new TextEncoder();
+    const completedFrame =
+      'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-completed","status":"completed"}}\n\n';
+    const baseUrl = await startBridge((request) => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        request.signal.addEventListener("abort", () => {
+          turnAborted = true;
+        });
+      }
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(completedFrame));
+            if (requestCount > 1) controller.close();
+          },
+          cancel() {
+            cancelled = true;
+            return new Promise<void>(() => {});
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+    const socket = await connect(`${baseUrl}/v1/responses`);
+
+    await collectTurn(socket, {
+      type: "response.create",
+      model: "gpt-5.6-sol",
+      input: [],
+      stream: true,
+    });
+    socket.send(
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.6-sol",
+        input: [],
+        stream: true,
+      }),
+    );
+    for (let attempt = 0; attempt < 20 && requestCount < 2; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(cancelled).toBe(true);
+    expect(turnAborted).toBe(true);
+    expect(requestCount).toBe(2);
+  });
+
   it.each([
     "response.failed",
     "response.incomplete",
     "error",
-  ] as const)("destroys the internal upstream session after %s", async (terminalType) => {
+  ] as const)("closes downstream normally without waiting for session cleanup after %s", async (terminalType) => {
     let closedSessionId = "";
+    let closeSessionCalls = 0;
     let resolveClosed!: () => void;
     const closed = new Promise<void>((resolve) => {
       resolveClosed = resolve;
@@ -822,12 +908,15 @@ describe("Responses websocket bridge", () => {
       undefined,
       {
         closeSession: (sessionId) => {
+          closeSessionCalls += 1;
           closedSessionId = sessionId;
           resolveClosed();
+          return new Promise<void>(() => {});
         },
       },
     );
     const socket = await connect(`${baseUrl}/v1/responses`);
+    const socketClosed = once(socket, "close");
 
     const events = await collectTurn(socket, {
       type: "response.create",
@@ -843,6 +932,41 @@ describe("Responses websocket bridge", () => {
     expect(events.at(-1)?.type).toBe(terminalType);
     expect(closeResult).toBe("closed");
     expect(closedSessionId).not.toBe("");
+    const [code] = (await Promise.race([
+      socketClosed,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("downstream close waited for session cleanup")), 100),
+      ),
+    ])) as [number, Buffer];
+    expect(code).toBe(1000);
+    expect(closeSessionCalls).toBe(1);
+  });
+
+  it("swallows a synchronous session cleanup failure", async () => {
+    const baseUrl = await startBridge(
+      () =>
+        new Response(
+          'event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed"}}\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+      undefined,
+      {
+        closeSession: () => {
+          throw new Error("synthetic synchronous cleanup failure");
+        },
+      },
+    );
+    const socket = await connect(`${baseUrl}/v1/responses`);
+    const socketClosed = once(socket, "close");
+
+    await collectTurn(socket, {
+      type: "response.create",
+      model: "gpt-5.6-sol",
+      input: [],
+      stream: true,
+    });
+    await socketClosed;
+    await new Promise((resolve) => setImmediate(resolve));
   });
 
   it("returns a structured 400 for malformed websocket messages", async () => {

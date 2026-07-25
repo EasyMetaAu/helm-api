@@ -45,6 +45,8 @@ function parseRecord(value: unknown): ResponsesRegistryRecord | null {
     providerName: stringOrNull(row.providerName),
     providerModel: stringOrNull(row.providerModel),
     providerProtocol: row.providerProtocol,
+    providerAccount: stringOrNull(row.providerAccount),
+    selectedLane: stringOrNull(row.selectedLane),
     createdAt: row.createdAt,
     expiresAt: row.expiresAt,
     status: row.status,

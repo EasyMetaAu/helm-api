@@ -1149,12 +1149,13 @@ describe("responsesTransformer — request sampling/control params (litellm pari
     expect(ir.web_search_options).toEqual({ search_context_size: "low" });
   });
 
-  it("stashes Responses-only params (store/previous_response_id/metadata/logit_bias/context_management/include/background) in provider_raw", async () => {
+  it("stashes Responses-only params (store/previous_response_id/generate/metadata/logit_bias/context_management/include/background) in provider_raw", async () => {
     const ir = await responsesTransformer.transformRequestOut({
       model: "gpt-4o",
       input: "hi",
       store: true,
       previous_response_id: "resp_prev",
+      generate: false,
       metadata: { trace: "abc" },
       logit_bias: { "123": -100 },
       context_management: { truncation: "auto" },
@@ -1163,6 +1164,7 @@ describe("responsesTransformer — request sampling/control params (litellm pari
     });
     expect(ir.provider_raw?.store).toBe(true);
     expect(ir.provider_raw?.previous_response_id).toBe("resp_prev");
+    expect(ir.provider_raw?.generate).toBe(false);
     expect(ir.provider_raw?.metadata).toEqual({ trace: "abc" });
     expect(ir.provider_raw?.logit_bias).toEqual({ "123": -100 });
     expect(ir.provider_raw?.context_management).toEqual({ truncation: "auto" });

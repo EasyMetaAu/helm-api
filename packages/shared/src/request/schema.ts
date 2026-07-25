@@ -94,6 +94,13 @@ export const RequestMetadataSchema = z.object({
   // Trusted gateway-only pin resolved from the Responses registry. Stateful
   // previous_response_id turns may use only the provider alias that created the id.
   stateful_provider_alias: z.string().min(1).optional(),
+  // Durable OAuth-account affinity for a registry-validated Responses continuation.
+  // Trusted gateway metadata only; provider pools use it to restore the original
+  // subscription account after a restart instead of rotating opaque state to a sibling.
+  stateful_provider_account: z.string().min(1).optional(),
+  // The lane that originally served the response, retained so current allowed_lanes
+  // can still fail closed before the continuation is provider-pinned.
+  stateful_lane: z.string().min(1).optional(),
   // The inbound client's Claude-Code billing-attribution prefix —
   // "cc_version=<v>.<3hex>; cc_entrypoint=<entry>" with the per-request `cch` dropped
   // — captured at the Anthropic route from the real CLI's system[0] block before it
@@ -105,7 +112,7 @@ export const RequestMetadataSchema = z.object({
   client_billing_header: z.string().nullish(),
 });
 
-export const InternalRequestSchema = z.object({
+const InternalRequestObjectSchema = z.object({
   request_id: z.string().min(1),
   protocol: ProtocolSchema,
   account_id: z.string().min(1),
@@ -113,7 +120,7 @@ export const InternalRequestSchema = z.object({
   user_id: z.string().nullable(),
   org_id: z.string().nullable(),
   requested_model: z.string().min(1),
-  messages: z.array(MessageSchema).min(1),
+  messages: z.array(MessageSchema),
   tools: z.array(z.unknown()).nullable(),
   response_format: z.record(z.string(), z.unknown()).nullable(),
   attachments: z.array(z.unknown()).nullable(),
@@ -173,6 +180,68 @@ export const InternalRequestSchema = z.object({
   native_request: NativeRequestSchema.optional(),
   stream: z.boolean(),
   metadata: RequestMetadataSchema,
+});
+
+type ResponsesContinuationLike = {
+  protocol?: unknown;
+  messages?: unknown;
+  provider_raw?: unknown;
+  native_request?: unknown;
+  metadata?: unknown;
+};
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/** Return the trusted opaque response id only when every normalized/native pin agrees. */
+export function responsesContinuationId(request: ResponsesContinuationLike): string | null {
+  if (request.protocol !== "openai_responses") return null;
+  const providerRaw = record(request.provider_raw);
+  const normalizedId = providerRaw?.previous_response_id;
+  const native = record(request.native_request);
+  const nativeBody = native?.protocol === "openai_responses" ? record(native.body) : null;
+  const nativeId = nativeBody?.previous_response_id;
+  const metadata = record(request.metadata);
+  const alias = metadata?.stateful_provider_alias;
+  return typeof normalizedId === "string" &&
+    normalizedId.length > 0 &&
+    nativeId === normalizedId &&
+    typeof alias === "string" &&
+    alias.length > 0
+    ? normalizedId
+    : null;
+}
+
+/** Empty input is legal only for a fully pinned native Responses continuation. */
+export function isEmptyNativeResponsesContinuation(request: ResponsesContinuationLike): boolean {
+  if (!Array.isArray(request.messages) || request.messages.length !== 0) return false;
+  if (responsesContinuationId(request) === null) return false;
+  const native = record(request.native_request);
+  const body = record(native?.body);
+  return Array.isArray(body?.input) && body.input.length === 0;
+}
+
+/** Empty input is also legal for the exact native Responses generate:false prewarm. */
+export function isEmptyNativeResponsesPrewarm(request: ResponsesContinuationLike): boolean {
+  if (request.protocol !== "openai_responses") return false;
+  if (!Array.isArray(request.messages) || request.messages.length !== 0) return false;
+  if (record(request.provider_raw)?.generate !== false) return false;
+  const native = record(request.native_request);
+  const body = native?.protocol === "openai_responses" ? record(native.body) : null;
+  return body?.generate === false && Array.isArray(body.input) && body.input.length === 0;
+}
+
+export const InternalRequestSchema = InternalRequestObjectSchema.superRefine((request, ctx) => {
+  if (request.messages.length > 0) return;
+  if (isEmptyNativeResponsesContinuation(request) || isEmptyNativeResponsesPrewarm(request)) return;
+  ctx.addIssue({
+    code: "custom",
+    path: ["messages"],
+    message: "messages must be a non-empty array",
+  });
 });
 
 // ── Inbound OpenAI Chat Completions request validation (boundary guard) ─────────

@@ -228,6 +228,9 @@ const ResponsesRequestSchema = z
     context_management: z.unknown().optional(),
     include: z.array(z.string()).optional(),
     background: z.boolean().optional(),
+    // Responses WebSocket prewarm control. It is safe only on native passthrough;
+    // the executor fails closed instead of translating it into a billable generation.
+    generate: z.boolean().optional(),
     store: z.boolean().optional(),
     previous_response_id: z.string().optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
@@ -560,6 +563,7 @@ function toIRRequest(req: NativeRequest): IRRequest {
     providerRaw.context_management = parsed.context_management;
   if (parsed.include !== undefined) providerRaw.include = parsed.include;
   if (parsed.background !== undefined) providerRaw.background = parsed.background;
+  if (parsed.generate !== undefined) providerRaw.generate = parsed.generate;
   if (parsed.prompt_cache_options !== undefined)
     providerRaw.prompt_cache_options = parsed.prompt_cache_options;
   if (normalizedTools.rawTools !== undefined)

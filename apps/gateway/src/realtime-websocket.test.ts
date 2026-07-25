@@ -164,4 +164,41 @@ describe("Realtime websocket bridge", () => {
     client.terminate();
     expect(await Promise.race([rejectedSocketEnded, delay(500, false)])).toBe(true);
   });
+
+  it("reports a second upstream sideband 401 as a permanent credential failure", async () => {
+    const upstreamHttp = await listeningServer();
+    let upgrades = 0;
+    upstreamHttp.server.on("upgrade", (_request, socket) => {
+      upgrades += 1;
+      socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+    });
+
+    const gateway = await listeningServer();
+    const registry = createRealtimeCallRegistry();
+    const failures: number[] = [];
+    registry.put("rtc_1", "key-1", {
+      url: `ws://127.0.0.1:${upstreamHttp.port}/v1/realtime?call_id=rtc_1`,
+      headers: async () => ({ Authorization: "Bearer token" }),
+      onUnauthorized: () => {},
+      onCredentialFailure: (status) => failures.push(status),
+    });
+    const bridge = installRealtimeWebSocketBridge({
+      server: gateway.server,
+      registry,
+      resolveKey: async () => "key-1",
+    });
+    closers.push(() => bridge.close());
+
+    const client = new WebSocket(`ws://127.0.0.1:${gateway.port}/v1/realtime?call_id=rtc_1`, {
+      headers: { Authorization: "Bearer helm-key" },
+    });
+    const [, response] = (await once(client, "unexpected-response")) as [
+      unknown,
+      { statusCode: number },
+    ];
+
+    expect(response.statusCode).toBe(502);
+    expect(upgrades).toBe(2);
+    expect(failures).toEqual([401]);
+  });
 });
