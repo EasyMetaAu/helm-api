@@ -17,6 +17,7 @@
 
   // Mobile slide-over state. Desktop (md+) keeps the sidebar pinned.
   let navOpen = $state(false);
+  let sidebarCollapsed = $state(false);
 
   // Page-to-page skeleton. While a navigation to a DIFFERENT route is in flight we
   // show a content skeleton instead of the frozen previous page — but only after a
@@ -140,12 +141,18 @@
 
   <!-- Sidebar -->
   <aside
-    class="fixed inset-y-0 left-0 z-30 flex w-64 transform flex-col border-r border-slate-200 bg-white transition-transform duration-200 ease-out md:static md:translate-x-0 {navOpen
-      ? 'translate-x-0'
-      : '-translate-x-full'}"
+    class="fixed inset-y-0 left-0 z-30 flex w-64 transform flex-col border-r border-slate-200 bg-white transition-[width,transform] duration-200 ease-out md:static md:translate-x-0 {sidebarCollapsed
+      ? 'md:w-16'
+      : 'md:w-64'} {navOpen ? 'translate-x-0' : '-translate-x-full'}"
   >
-    <div class="flex h-16 items-center gap-2.5 px-5">
-      <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-white">
+    <div
+      class="flex h-16 items-center gap-2.5 px-5 {sidebarCollapsed
+        ? 'md:justify-center md:px-0'
+        : ''}"
+    >
+      <span
+        class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-indigo-600 text-white"
+      >
         <svg viewBox="0 0 64 64" class="h-5 w-5" fill="none" aria-hidden="true">
           <g fill="currentColor">
             <rect x="15" y="16" width="7" height="32" rx="3.5" />
@@ -163,22 +170,26 @@
           </g>
         </svg>
       </span>
-      <div class="leading-tight">
+      <div class="leading-tight {sidebarCollapsed ? 'md:hidden' : ''}">
         <div class="text-sm font-semibold tracking-tight">Helm</div>
         <div class="text-xs text-slate-400">{$t('LLM Gateway')}</div>
       </div>
     </div>
 
-    <nav class="flex-1 space-y-1 px-3 py-2">
+    <nav
+      id="admin-sidebar-navigation"
+      class="min-h-0 flex-1 space-y-1 overflow-y-auto px-3 py-2 {sidebarCollapsed ? 'md:px-2' : ''}"
+    >
       {#each nav as item (item.seg)}
         <a
           href={hrefFor(item.seg)}
           aria-current={isActive(item.seg) ? 'page' : undefined}
-          title={$t(item.desc)}
+          aria-label={$t(item.label)}
+          title={$t(sidebarCollapsed ? item.label : item.desc)}
           onclick={() => (navOpen = false)}
-          class="group flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors {isActive(
-            item.seg,
-          )
+          class="group flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors {sidebarCollapsed
+            ? 'md:justify-center md:px-0'
+            : ''} {isActive(item.seg)
             ? 'bg-indigo-50 text-indigo-700'
             : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'}"
         >
@@ -194,13 +205,45 @@
           >
             <path stroke-linecap="round" stroke-linejoin="round" d={item.icon} />
           </svg>
-          <span class="min-w-0 leading-tight">
+          <span class="min-w-0 leading-tight {sidebarCollapsed ? 'md:hidden' : ''}">
             <span class="block truncate">{$t(item.label)}</span>
             <span class="block truncate text-xs font-normal text-slate-400">{$t(item.desc)}</span>
           </span>
         </a>
       {/each}
     </nav>
+
+    <div class="hidden shrink-0 border-t border-slate-200 p-2 md:block">
+      <button
+        type="button"
+        class="flex w-full items-center gap-3 rounded-lg py-2 text-sm font-medium text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-500 {sidebarCollapsed
+          ? 'justify-center px-0'
+          : 'px-3'}"
+        aria-label={$t(sidebarCollapsed ? 'Expand' : 'Collapse')}
+        aria-controls="admin-sidebar-navigation"
+        aria-expanded={!sidebarCollapsed}
+        title={$t(sidebarCollapsed ? 'Expand' : 'Collapse')}
+        onclick={() => (sidebarCollapsed = !sidebarCollapsed)}
+      >
+        <svg
+          class="h-5 w-5 shrink-0"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke-width="1.6"
+          stroke="currentColor"
+          aria-hidden="true"
+        >
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            d={sidebarCollapsed
+              ? 'M3.75 3.75h16.5v16.5H3.75V3.75Zm5.25 0v16.5m2.25-10.5L15 12l-2.25 2.25'
+              : 'M3.75 3.75h16.5v16.5H3.75V3.75Zm5.25 0v16.5m4.5-10.5L11.25 12l2.25 2.25'}
+          />
+        </svg>
+        {#if !sidebarCollapsed}<span>{$t('Collapse')}</span>{/if}
+      </button>
+    </div>
   </aside>
 
   <!-- Main column -->
