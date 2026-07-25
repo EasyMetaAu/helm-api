@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { isFetchTransportError, isTransientConnectionError, withConnectionRetry } from "./retry.js";
+import {
+  isFetchTransportError,
+  isTransientConnectionError,
+  overloadRetryDelayMs,
+  withConnectionRetry,
+} from "./retry.js";
 
 // A transient connection error is one safe to retry BEFORE any bytes reached the
 // client (idempotent: no upstream response consumed). The classifier is a strict
@@ -151,5 +156,41 @@ describe("withConnectionRetry", () => {
     });
     await expect(withConnectionRetry(fn, { sleep: async () => {} })).rejects.toThrow("ECONNRESET");
     expect(fn).toHaveBeenCalledTimes(3); // default retries = 2
+  });
+});
+
+// An upstream 529/503 "overloaded" is TRANSIENT capacity pressure, not a request
+// fault: the same body a moment later usually succeeds. It must be re-issued against
+// the SAME upstream after a real pause before the chain burns its other candidates.
+describe("overloadRetryDelayMs", () => {
+  it("returns a backoff for overload statuses only", () => {
+    expect(overloadRetryDelayMs({ status: 529, attempt: 0 })).toBeGreaterThan(0);
+    expect(overloadRetryDelayMs({ status: 503, attempt: 0 })).toBeGreaterThan(0);
+    expect(overloadRetryDelayMs({ status: 500, attempt: 0 })).toBeNull();
+    expect(overloadRetryDelayMs({ status: 502, attempt: 0 })).toBeNull();
+    expect(overloadRetryDelayMs({ status: 429, attempt: 0 })).toBeNull();
+    expect(overloadRetryDelayMs({ status: 400, attempt: 0 })).toBeNull();
+  });
+
+  it("grows the delay with each attempt and stops after the budget", () => {
+    const first = overloadRetryDelayMs({ status: 529, attempt: 0 });
+    const second = overloadRetryDelayMs({ status: 529, attempt: 1 });
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(second as number).toBeGreaterThan(first as number);
+    expect(overloadRetryDelayMs({ status: 529, attempt: 2 })).toBeNull();
+  });
+
+  it("honors a numeric Retry-After (seconds) over the default backoff", () => {
+    expect(overloadRetryDelayMs({ status: 529, attempt: 0, retryAfter: "2" })).toBe(2000);
+  });
+
+  it("clamps an absurd Retry-After so one upstream cannot stall the request", () => {
+    expect(overloadRetryDelayMs({ status: 529, attempt: 0, retryAfter: "600" })).toBe(10_000);
+  });
+
+  it("ignores an unparseable Retry-After and falls back to the default backoff", () => {
+    const parsed = overloadRetryDelayMs({ status: 529, attempt: 0, retryAfter: "soon" });
+    expect(parsed).toBe(overloadRetryDelayMs({ status: 529, attempt: 0 }));
   });
 });

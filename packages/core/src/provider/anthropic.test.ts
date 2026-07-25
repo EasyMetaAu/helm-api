@@ -2240,6 +2240,109 @@ describe("createAnthropicClient", () => {
     expect(fetch).toHaveBeenCalledTimes(3); // 1 initial + 2 retries
   });
 
+  // Anthropic 529 "Overloaded" is the loudest source of transient capacity failures.
+  // Surfacing the first one burns a fallback candidate (or 502s a single-candidate
+  // chain) for a blip the client would have survived with a short pause.
+  it("sleeps and re-issues the SAME request on a 529 overload, then serves the retry", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetch = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ error: { type: "overloaded_error" } }), { status: 529 }),
+        )
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              id: "msg_1",
+              content: [{ type: "text", text: "hi" }],
+              usage: { input_tokens: 1, output_tokens: 1 },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      const client = createAnthropicClient({
+        config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+        fetch: fetch as unknown as typeof globalThis.fetch,
+      });
+      const call = client.chatCompletion({
+        model: "m",
+        messages: [{ role: "user", content: "x" }],
+      });
+      // The retry only fires AFTER a real pause — no busy-loop hammering the upstream.
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(call).resolves.toMatchObject({ id: "msg_1" });
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(fetch.mock.calls[1]?.[1]?.body).toBe(fetch.mock.calls[0]?.[1]?.body);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("surfaces the 529 as UpstreamError once the overload retry budget is exhausted", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetch = vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: { type: "overloaded_error" } }), { status: 529 }),
+      );
+      const client = createAnthropicClient({
+        config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+        fetch: fetch as unknown as typeof globalThis.fetch,
+      });
+      const call = client.chatCompletion({
+        model: "m",
+        messages: [{ role: "user", content: "x" }],
+      });
+      const assertion = expect(call).rejects.toMatchObject({
+        errorClass: "upstream_error",
+        upstreamStatus: 529, // real status preserved for the executor + telemetry
+      });
+      await vi.advanceTimersByTimeAsync(4_000); // 1s + 3s backoff schedule
+      await assertion;
+      expect(fetch).toHaveBeenCalledTimes(3); // 1 initial + 2 overload retries
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not retry a 500 — an unspecified server fault is not capacity pressure", async () => {
+    const fetch = vi.fn(
+      async () => new Response(JSON.stringify({ error: "boom" }), { status: 500 }),
+    );
+    const client = createAnthropicClient({
+      config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+      fetch: fetch as unknown as typeof globalThis.fetch,
+    });
+    await expect(
+      client.chatCompletion({ model: "m", messages: [{ role: "user", content: "x" }] }),
+    ).rejects.toMatchObject({ upstreamStatus: 500 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("abandons the overload retry when the client disconnects during the backoff", async () => {
+    vi.useFakeTimers();
+    try {
+      const ac = new AbortController();
+      const fetch = vi.fn(async () => new Response("overloaded", { status: 529 }));
+      const client = createAnthropicClient({
+        config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
+        fetch: fetch as unknown as typeof globalThis.fetch,
+      });
+      const call = client.chatCompletion(
+        { model: "m", messages: [{ role: "user", content: "x" }] },
+        { signal: ac.signal },
+      );
+      const assertion = expect(call).rejects.toMatchObject({ upstreamStatus: 529 });
+      ac.abort();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await assertion;
+      expect(fetch).toHaveBeenCalledTimes(1); // no attempt burned after the disconnect
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does NOT convert an external client abort into a timeout (client disconnect is not a provider failure)", async () => {
     // Real timers: the internal timeout is huge so it never fires; the CLIENT aborts.
     // isExternalAbort() is then true, so the catch re-throws the raw abort error, NOT

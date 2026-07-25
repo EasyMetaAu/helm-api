@@ -11,6 +11,7 @@ import {
   type ProviderClient,
   UpstreamError,
 } from "./openai.js";
+import { withOverloadRetry } from "./retry.js";
 import { readChunkWithIdle, StreamStalledError } from "./stream-idle.js";
 
 // Resolve a hostname to its candidate addresses. Injectable so the SSRF guard can be
@@ -541,7 +542,8 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
     return changed ? JSON.parse(value) : raw;
   }
 
-  async function request(
+  // One upstream attempt: fresh timeout, fresh media materialization, fresh headers.
+  async function requestOnce(
     operation: "generateContent" | "streamGenerateContent" | "countTokens",
     input: NativePassthroughInput,
     external?: AbortSignal,
@@ -575,6 +577,20 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
     } finally {
       t.cleanup();
     }
+  }
+
+  // A 529/503 is transient upstream capacity pressure, not a request fault: pause and
+  // re-issue the SAME body (pre-first-byte → idempotent) before the executor burns
+  // another candidate. Any other status falls straight through to errorFromResponse.
+  async function request(
+    operation: "generateContent" | "streamGenerateContent" | "countTokens",
+    input: NativePassthroughInput,
+    external?: AbortSignal,
+    capture?: (wireBody: string) => void,
+  ): Promise<Response> {
+    return withOverloadRetry(() => requestOnce(operation, input, external, capture), {
+      signal: external,
+    });
   }
 
   async function requestWithAuthRetry(

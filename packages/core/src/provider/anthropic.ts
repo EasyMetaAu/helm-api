@@ -45,7 +45,7 @@ import {
   type ProviderClient,
   UpstreamError,
 } from "./openai.js";
-import { withConnectionRetry } from "./retry.js";
+import { withConnectionRetry, withOverloadRetry } from "./retry.js";
 import { readChunkWithIdle, StreamStalledError } from "./stream-idle.js";
 
 export interface AnthropicClientConfig {
@@ -1625,26 +1625,33 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     capture?.(wireBody);
     // Retry transient connection blips at the fetch boundary (pre-first-byte → idempotent);
     // a timeout becomes a non-transient UpstreamError and a client abort rethrows as-is.
-    const res = await withConnectionRetry(
-      async () => {
-        const t = withTimeout(timeoutMs, external);
-        try {
-          return await doFetch(endpointUrl, {
-            method: "POST",
-            headers: wireHeaders,
-            body: wireBody,
-            signal: t.signal,
-          });
-        } catch (err) {
-          if (t.isTimeout() && !t.isExternalAbort()) {
-            throw new UpstreamError("timeout", "upstream request timed out");
-          }
-          throw err;
-        } finally {
-          t.cleanup();
-        }
-      },
-      { retries: cfg.connectRetries, backoffMs: cfg.connectRetryBackoffMs, signal: external },
+    // The overload wrapper sits OUTSIDE: a 529 answer is a valid Response (no throw), so
+    // it re-issues the whole connection-retried attempt after a pause. Anthropic's 529 is
+    // the single loudest source of this — a raw one here 502s the client for a blip.
+    const res = await withOverloadRetry(
+      () =>
+        withConnectionRetry(
+          async () => {
+            const t = withTimeout(timeoutMs, external);
+            try {
+              return await doFetch(endpointUrl, {
+                method: "POST",
+                headers: wireHeaders,
+                body: wireBody,
+                signal: t.signal,
+              });
+            } catch (err) {
+              if (t.isTimeout() && !t.isExternalAbort()) {
+                throw new UpstreamError("timeout", "upstream request timed out");
+              }
+              throw err;
+            } finally {
+              t.cleanup();
+            }
+          },
+          { retries: cfg.connectRetries, backoffMs: cfg.connectRetryBackoffMs, signal: external },
+        ),
+      { signal: external },
     );
     return toolNameMap ? { res, toolNameMap } : { res };
   }

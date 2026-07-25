@@ -912,10 +912,12 @@ describe("createGeminiClient — errorFromResponse (non-JSON body)", () => {
   it("wraps a plain-text error body in UpstreamError.providerRaw as a string", async () => {
     const client = createGeminiClient({
       config: { baseUrl: "https://generativelanguage.googleapis.com/v1beta", apiKey: "g" },
+      // 500, not 503: an overload status is deliberately re-issued after a backoff
+      // (provider/retry.ts). The subject here is non-JSON body preservation.
       fetch: vi.fn(
         async () =>
           new Response("Service Unavailable", {
-            status: 503,
+            status: 500,
             headers: { "Content-Type": "text/plain" },
           }),
       ),
@@ -927,7 +929,7 @@ describe("createGeminiClient — errorFromResponse (non-JSON body)", () => {
       caught = e;
     }
     expect(caught).toBeInstanceOf(UpstreamError);
-    expect((caught as UpstreamError).upstreamStatus).toBe(503);
+    expect((caught as UpstreamError).upstreamStatus).toBe(500);
     expect((caught as UpstreamError).providerRaw).toBe("Service Unavailable");
   });
 });

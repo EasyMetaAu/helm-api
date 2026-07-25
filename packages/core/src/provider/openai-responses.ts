@@ -42,7 +42,12 @@ import {
   type ProviderConfig,
   UpstreamError,
 } from "./openai.js";
-import { isFetchTransportError, isTransientConnectionError, withConnectionRetry } from "./retry.js";
+import {
+  isFetchTransportError,
+  isTransientConnectionError,
+  withConnectionRetry,
+  withOverloadRetry,
+} from "./retry.js";
 import { readChunkWithIdle, StreamStalledError } from "./stream-idle.js";
 
 export interface CodexResponsesClientConfig {
@@ -1355,35 +1360,47 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     // Retry transient connection blips at the fetch boundary (pre-first-byte → idempotent);
     // a timeout becomes a non-transient UpstreamError and a client abort rethrows as-is.
     try {
-      return await withConnectionRetry(
-        async () => {
-          const t = withTimeout(timeoutMs, init.signal);
-          try {
-            const response = await doFetch(init.endpoint, {
-              method: "POST",
-              headers: prepared.headers,
-              body: prepared.bodyText,
-              signal: t.signal,
-            });
-            if (init.timeoutThroughBody === true) {
-              return { response, bodyTimeout: t, turnKey };
-            }
-            return { response, turnKey };
-          } catch (err) {
-            if (t.isTimeout() && !t.isExternalAbort()) {
-              throw new UpstreamError("timeout", "upstream request timed out");
-            }
-            throw err;
-          } finally {
-            if (init.timeoutThroughBody !== true) {
-              t.cleanup();
-            }
-          }
-        },
+      // withOverloadRetry wraps the connection retry: an overloaded 529/503 answer is a
+      // normal Response (never a throw), so it re-issues the whole attempt after a pause
+      // rather than burning a candidate on transient upstream capacity pressure. A
+      // discarded attempt's deferred body-timeout timer is released explicitly.
+      return await withOverloadRetry(
+        () =>
+          withConnectionRetry(
+            async () => {
+              const t = withTimeout(timeoutMs, init.signal);
+              try {
+                const response = await doFetch(init.endpoint, {
+                  method: "POST",
+                  headers: prepared.headers,
+                  body: prepared.bodyText,
+                  signal: t.signal,
+                });
+                if (init.timeoutThroughBody === true) {
+                  return { response, bodyTimeout: t, turnKey };
+                }
+                return { response, turnKey };
+              } catch (err) {
+                if (t.isTimeout() && !t.isExternalAbort()) {
+                  throw new UpstreamError("timeout", "upstream request timed out");
+                }
+                throw err;
+              } finally {
+                if (init.timeoutThroughBody !== true) {
+                  t.cleanup();
+                }
+              }
+            },
+            {
+              retries: cfg.connectRetries,
+              backoffMs: cfg.connectRetryBackoffMs,
+              signal: init.signal,
+            },
+          ),
         {
-          retries: cfg.connectRetries,
-          backoffMs: cfg.connectRetryBackoffMs,
           signal: init.signal,
+          pick: (value) => value.response,
+          release: (value) => value.bodyTimeout?.cleanup(),
         },
       );
     } catch (error) {
@@ -2294,17 +2311,25 @@ export function createGenericOpenAIResponsesClient(
     init: RequestInit,
     external?: AbortSignal,
   ): Promise<Response> {
-    const t = withTimeout(timeoutMs, external);
-    try {
-      return await doFetch(url, { ...init, signal: t.signal });
-    } catch (err) {
-      if (t.isTimeout() && !t.isExternalAbort()) {
-        throw new UpstreamError("timeout", "upstream request timed out");
-      }
-      throw err;
-    } finally {
-      t.cleanup();
-    }
+    // A 529/503 is transient upstream capacity pressure, not a request fault — pause
+    // and re-issue the SAME body (pre-first-byte → idempotent) before the executor
+    // burns another candidate on it.
+    return withOverloadRetry(
+      async () => {
+        const t = withTimeout(timeoutMs, external);
+        try {
+          return await doFetch(url, { ...init, signal: t.signal });
+        } catch (err) {
+          if (t.isTimeout() && !t.isExternalAbort()) {
+            throw new UpstreamError("timeout", "upstream request timed out");
+          }
+          throw err;
+        } finally {
+          t.cleanup();
+        }
+      },
+      { signal: external },
+    );
   }
 
   async function errorFromResponse(res: Response): Promise<UpstreamError> {

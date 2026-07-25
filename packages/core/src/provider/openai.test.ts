@@ -435,7 +435,10 @@ describe("createOpenAIClient (OAuth dynamic credential)", () => {
   it("streaming non-401 error throws before any chunk (breaker contract intact)", async () => {
     const onUnauthorized = vi.fn();
     const getAuthHeader = vi.fn().mockResolvedValue("Bearer t");
-    const fetch = vi.fn().mockImplementation(async () => jsonRes({ error: "boom" }, 503));
+    // 500, not 503: an overload status is deliberately re-issued after a backoff
+    // (provider/retry.ts), which would make this single-attempt assertion wrong. The
+    // subject here is the 401-vs-other branch, so any non-retryable 5xx serves.
+    const fetch = vi.fn().mockImplementation(async () => jsonRes({ error: "boom" }, 500));
     const client = createOpenAIClient({
       config: { ...OAUTH_BASE, getAuthHeader, onUnauthorized },
       fetch,
@@ -443,7 +446,7 @@ describe("createOpenAIClient (OAuth dynamic credential)", () => {
     const iter = client.chatCompletionStream({ model: "m", stream: true });
     await expect(iter[Symbol.asyncIterator]().next()).rejects.toMatchObject({
       errorClass: "upstream_error",
-      upstreamStatus: 503,
+      upstreamStatus: 500,
     });
     expect(onUnauthorized).not.toHaveBeenCalled();
     expect(fetch).toHaveBeenCalledTimes(1);
