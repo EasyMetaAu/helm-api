@@ -395,6 +395,112 @@ describe("createMessagesPipeline — failure surfaces", () => {
     ).rejects.toMatchObject({ error_class: "invalid_request" });
   });
 
+  it("routes an empty native Responses continuation without inventing a placeholder", async () => {
+    let routed: InternalRequest | null = null;
+    const route: RouteFn = async (request) => {
+      routed = request;
+      return okResult({ id: "x" });
+    };
+    const pipeline = createMessagesPipeline(route, "openai_responses");
+    const native = createNativePassthroughCarrier({
+      protocol: "openai_responses",
+      body: { model: "gpt-5.6-sol", input: [], previous_response_id: "resp-1", stream: true },
+      headers: {},
+    });
+
+    await pipeline.run(
+      irOf({
+        messages: [],
+        stream: true,
+        provider_raw: { previous_response_id: "resp-1" },
+        metadata: {
+          trace_id: "trace-1",
+          native_request: native,
+          stateful_provider_alias: "openai-codex/gpt-5.6-sol",
+        },
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+
+    expect((routed as InternalRequest | null)?.messages).toEqual([]);
+    expect((routed as InternalRequest | null)?.metadata.stateful_provider_alias).toBe(
+      "openai-codex/gpt-5.6-sol",
+    );
+  });
+
+  it("routes a strict empty native Responses prewarm without inventing a placeholder", async () => {
+    let routed: InternalRequest | null = null;
+    const route: RouteFn = async (request) => {
+      routed = request;
+      return okResult({ id: "x" });
+    };
+    const pipeline = createMessagesPipeline(route, "openai_responses");
+    const native = createNativePassthroughCarrier({
+      protocol: "openai_responses",
+      body: { model: "gpt-5.6-sol", input: [], generate: false, stream: true },
+      headers: {},
+    });
+
+    await pipeline.run(
+      irOf({
+        messages: [],
+        stream: true,
+        provider_raw: { generate: false },
+        metadata: { trace_id: "trace-1", native_request: native },
+      }),
+      IDENTITY,
+      new AbortController().signal,
+    );
+
+    expect((routed as InternalRequest | null)?.messages).toEqual([]);
+    expect((routed as InternalRequest | null)?.provider_raw?.generate).toBe(false);
+  });
+
+  it("rejects an empty continuation whose native and normalized ids disagree", async () => {
+    const route: RouteFn = async () => okResult({ id: "x" });
+    const pipeline = createMessagesPipeline(route, "openai_responses");
+    const native = createNativePassthroughCarrier({
+      protocol: "openai_responses",
+      body: { model: "gpt-5.6-sol", input: [], previous_response_id: "resp-1", stream: true },
+      headers: {},
+    });
+
+    await expect(
+      pipeline.run(
+        irOf({
+          messages: [],
+          provider_raw: { previous_response_id: "resp-other" },
+          metadata: {
+            trace_id: "trace-1",
+            native_request: native,
+            stateful_provider_alias: "openai-codex/gpt-5.6-sol",
+          },
+        }),
+        IDENTITY,
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ error_class: "invalid_request" });
+  });
+
+  it("rejects an empty native Responses request without a continuation id", async () => {
+    const route: RouteFn = async () => okResult({ id: "x" });
+    const pipeline = createMessagesPipeline(route, "openai_responses");
+    const native = createNativePassthroughCarrier({
+      protocol: "openai_responses",
+      body: { model: "gpt-5.6-sol", input: [], stream: true },
+      headers: {},
+    });
+
+    await expect(
+      pipeline.run(
+        irOf({ messages: [], metadata: { trace_id: "trace-1", native_request: native } }),
+        IDENTITY,
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ error_class: "invalid_request" });
+  });
+
   it("threads per-key lane caps from identity.caps into the route options", async () => {
     let sawOpts: RouteOptions | null = null;
     const route: RouteFn = async (_req, opts) => {

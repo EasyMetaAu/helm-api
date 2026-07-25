@@ -43,6 +43,10 @@ export function codexWebSocketAgent(proxy: ProxyConfig | undefined): HttpAgent |
     : (new HttpsProxyAgent(proxyUrl) as HttpAgent);
 }
 
+export function codexWebSocketConnectTimeoutMs(timeoutMs: number | undefined): number {
+  return Math.min(60_000, Math.max(1, Math.floor(timeoutMs ?? 60_000)));
+}
+
 class WsCodexConnection implements CodexResponsesWebSocketConnection {
   readonly responseHeaders: Headers;
   private readonly pending: Array<CodexResponsesWebSocketReceivedMessage & { bytes: number }> = [];
@@ -227,7 +231,7 @@ export function createCodexResponsesWebSocketConnector(
   options: CodexResponsesWebSocketConnectorOptions = {},
 ): CodexResponsesWebSocketConnector {
   const agent = codexWebSocketAgent(options.proxy);
-  const timeoutMs = Math.max(1, Math.floor(options.timeoutMs ?? 60_000));
+  const connectTimeoutMs = codexWebSocketConnectTimeoutMs(options.timeoutMs);
   const maxPayloadBytes = Math.max(
     1,
     Math.floor(options.maxPayloadBytes ?? runtimeMemoryBudget().maxWireBytes),
@@ -244,7 +248,7 @@ export function createCodexResponsesWebSocketConnector(
         headers,
         agent,
         perMessageDeflate: false,
-        handshakeTimeout: timeoutMs,
+        handshakeTimeout: connectTimeoutMs,
         maxPayload: maxPayloadBytes,
       });
 
@@ -288,7 +292,7 @@ export function createCodexResponsesWebSocketConnector(
         request.setTimeout(0);
         const status = response.statusCode ?? null;
         const headers = responseHeaders(response);
-        void unexpectedResponseBody(response, maxPayloadBytes, timeoutMs)
+        void unexpectedResponseBody(response, maxPayloadBytes, connectTimeoutMs)
           .then((body) => {
             fail(
               new CodexResponsesWebSocketConnectError(

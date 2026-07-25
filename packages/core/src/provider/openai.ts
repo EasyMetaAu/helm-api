@@ -82,6 +82,8 @@ export interface RealtimeSidebandTarget {
   url: string;
   headers(): Promise<Record<string, string>>;
   onUnauthorized?: () => void;
+  /** Called only after a refreshed sideband still returns an auth failure. */
+  onCredentialFailure?: (status: number) => void;
   proxy?: ProxyConfig;
 }
 
@@ -109,6 +111,8 @@ export type NativeProtocolProfile =
 // across connection / 401 retries — same body). MUST NOT throw (capture is fail-open).
 export interface ProviderCallOptions {
   signal?: AbortSignal;
+  /** Trusted persisted account pin for opaque stateful Responses continuations. */
+  statefulAccount?: string;
   captureUpstream?: (wireBody: string) => void;
   /** Request-scoped Anthropic defensive recovery switch. The gateway owns the live
    * runtime setting and passes its current value per attempt; provider clients keep
@@ -531,6 +535,42 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
     );
   }
 
+  async function realtimeErrorFromResponse(res: Response): Promise<UpstreamError> {
+    const providerRaw = await res
+      .json()
+      .catch(() => null)
+      .then(scrub);
+    const outer =
+      providerRaw !== null && typeof providerRaw === "object" && !Array.isArray(providerRaw)
+        ? (providerRaw as Record<string, unknown>)
+        : null;
+    const nested =
+      outer?.error !== null && typeof outer?.error === "object" && !Array.isArray(outer.error)
+        ? (outer.error as Record<string, unknown>)
+        : null;
+    const message =
+      typeof nested?.message === "string" && nested.message.length > 0
+        ? nested.message
+        : `upstream returned ${res.status}`;
+    return new UpstreamError("upstream_error", message, providerRaw, res.status);
+  }
+
+  function realtimeCallId(location: string): string | null {
+    let path: string;
+    try {
+      path = new URL(location, "https://realtime.invalid").pathname;
+    } catch {
+      return null;
+    }
+    for (const segment of path.split("/").reverse()) {
+      if (segment.startsWith("rtc_") && segment.length > 4) return segment;
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(segment)) {
+        return segment;
+      }
+    }
+    return null;
+  }
+
   return {
     ...(cfg.normalizeReasoningDeltaAlias ? { streamReframed: true } : {}),
 
@@ -592,12 +632,13 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
       const base = cfg.resolveBaseUrl ? await cfg.resolveBaseUrl() : cfg.baseUrl;
       const backendShape = base.includes("/backend-api/");
       const callPath = backendShape || req.endpoint === "realtime" ? "realtime/calls" : "live";
-      const query =
-        req.query.length > 0
-          ? `?${req.query}`
-          : backendShape && req.endpoint === "live"
-            ? "?intent=quicksilver&architecture=avas"
-            : "";
+      const callQuery = new URLSearchParams(req.query);
+      if (backendShape) {
+        if (!callQuery.has("intent")) callQuery.set("intent", "quicksilver");
+        if (!callQuery.has("architecture")) callQuery.set("architecture", "avas");
+      }
+      const queryText = callQuery.toString();
+      const query = queryText.length > 0 ? `?${queryText}` : "";
       const url = `${base}/${callPath}${query}`;
       const forwardedHeaders = async (): Promise<Record<string, string>> => ({
         ...(await headersWithoutContentType()),
@@ -622,20 +663,25 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
           : forwardedHeaders,
         signal: opts?.signal,
       });
-      if (!response.ok) throw await errorFromResponse(response);
+      if (!response.ok) throw await realtimeErrorFromResponse(response);
       const sdp = await response.text();
       const location = response.headers.get("location") ?? "";
-      const callId = location.split("/").filter(Boolean).at(-1) ?? "";
-      if (callId.length === 0) {
+      const callId = realtimeCallId(location);
+      if (callId === null) {
         throw new UpstreamError("upstream_error", "upstream Realtime response omitted call id");
       }
-      const sideband = new URL(base);
+      const sideband = new URL(backendShape ? "https://api.openai.com/v1" : base);
       sideband.protocol = sideband.protocol === "http:" ? "ws:" : "wss:";
-      if (!backendShape) sideband.pathname = req.endpoint === "live" ? "/v1/live" : "/v1/realtime";
+      sideband.pathname = `${sideband.pathname.replace(/\/$/, "")}/${
+        req.endpoint === "live" ? "live" : "realtime"
+      }`;
       if (req.endpoint === "live") {
         sideband.pathname = `${sideband.pathname.replace(/\/$/, "")}/${callId}`;
       } else {
-        sideband.search = req.query;
+        const sidebandQuery = new URLSearchParams(backendShape ? "" : req.query);
+        sidebandQuery.delete("architecture");
+        sidebandQuery.set("intent", "quicksilver");
+        sideband.search = sidebandQuery.toString();
         sideband.searchParams.set("call_id", callId);
       }
       return {

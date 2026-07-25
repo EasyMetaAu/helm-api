@@ -1,6 +1,8 @@
 import {
   CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
   type DecisionRecord,
+  type ExecutionResult,
+  responsesTransformer,
   type TelemetryStore,
   type UpsertSessionRevisionInput,
   UpstreamError,
@@ -10,7 +12,7 @@ import { createApp } from "../app.js";
 import { CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER } from "../responses-websocket-internal.js";
 import { createBodyMemoryAdmission } from "../runtime/memory-admission.js";
 import type { MessagesIdentity } from "./messages.js";
-import { PipelineError } from "./messages-pipeline.js";
+import { createMessagesPipeline, PipelineError, type RouteFn } from "./messages-pipeline.js";
 import type { RecordServedDeps, SseCapture } from "./payload-capture.js";
 import {
   type ResponsesRouteDeps,
@@ -48,6 +50,25 @@ describe("settleResponsesStreamOutcome", () => {
     expect(outcome).toBe("failed");
     expect(decision.stream_outcome).toBe("failed");
     expect(decision.final).toMatchObject({ status: "error", error_reason: "timeout" });
+  });
+
+  it("keeps an observed terminal failure when the bridge aborts during teardown", () => {
+    const decision = {
+      final: { status: "ok", model_alias: "gpt-4o", error_reason: null },
+      stream_outcome: null,
+    } as unknown as DecisionRecord;
+
+    const outcome = settleResponsesStreamOutcome({
+      decision,
+      streamStatus: "failed",
+      cancellationReason: "client_abort",
+      caughtErrorReason: null,
+      timedOut: false,
+    });
+
+    expect(outcome).toBe("failed");
+    expect(decision.stream_outcome).toBe("failed");
+    expect(decision.final).toMatchObject({ status: "error", error_reason: "upstream_error" });
   });
 });
 
@@ -1297,6 +1318,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       collect: async () => ({ id: "resp_persisted", object: "response", status: "completed" }),
       run: async () => ({
         decision,
+        servingAccount: { providerId: "openai-codex", account: "stale-oauth-account" },
         nativePassthrough: true,
         collect: async () => ({ id: "resp_persisted", object: "response", status: "completed" }),
         streamIR: async function* () {},
@@ -1321,6 +1343,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
         providerName: "openai",
         providerModel: "gpt-5.5",
         providerProtocol: "openai_responses",
+        providerAccount: null,
         status: "completed",
       }),
     );
@@ -1354,6 +1377,174 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(harness.pipelineSawIR).toMatchObject({
       metadata: { stateful_provider_alias: "openai-codex/gpt-5.6-sol" },
     });
+  });
+
+  it("serves a native WebSocket-style continuation whose incremental input is empty", async () => {
+    const routeHarness: { routed: Parameters<RouteFn>[0] | null } = { routed: null };
+    const route: RouteFn = async (request) => {
+      routeHarness.routed = request;
+      return {
+        decision: FAKE_DECISION,
+        final: { status: "ok", alias: "openai-codex/gpt-5.6-sol" },
+        body: null,
+        stream: (async function* () {
+          yield 'event: response.created\ndata: {"type":"response.created","response":{"id":"resp-next"}}\n\n';
+          yield 'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-next","status":"completed"}}\n\n';
+        })(),
+        error: null,
+        nativePassthrough: true,
+      } as ExecutionResult;
+    };
+    const pipeline = createMessagesPipeline(route, "openai_responses");
+    const registryRecord = {
+      responseId: "resp_previous",
+      accountId: "acct",
+      keyId: "k1",
+      providerAlias: "openai-codex/gpt-5.6-sol",
+      providerName: "openai-codex",
+      providerModel: "gpt-5.6-sol",
+      providerProtocol: "openai_responses" as const,
+      createdAt: 1,
+      expiresAt: Date.now() + 60_000,
+      status: "completed",
+    };
+    const { deps } = makeDeps({
+      transformRequestOut: (native) =>
+        responsesTransformer.transformRequestOut(native) as {
+          stream?: boolean;
+          metadata?: Record<string, unknown>;
+        },
+      run: pipeline.run,
+      registry: { put: vi.fn(), get: vi.fn().mockResolvedValue(registryRecord) },
+    });
+    const app = buildApp(deps);
+    const body = {
+      model: "gpt-5.6-sol",
+      input: [],
+      previous_response_id: "resp_previous",
+      stream: true,
+      store: false,
+    };
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(body),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("response.completed");
+    expect(routeHarness.routed?.messages).toEqual([]);
+    expect(routeHarness.routed?.metadata.stateful_provider_alias).toBe("openai-codex/gpt-5.6-sol");
+    expect((routeHarness.routed?.native_request as { body?: unknown } | undefined)?.body).toEqual(
+      body,
+    );
+  });
+
+  it("serves a native WebSocket prewarm with empty input and generate:false", async () => {
+    const routeHarness: { routed: Parameters<RouteFn>[0] | null } = { routed: null };
+    const route: RouteFn = async (request) => {
+      routeHarness.routed = request;
+      return {
+        decision: FAKE_DECISION,
+        final: { status: "ok", alias: "openai-codex/gpt-5.6-sol" },
+        body: null,
+        stream: (async function* () {
+          yield 'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-warm","status":"completed"}}\n\n';
+        })(),
+        error: null,
+        nativePassthrough: true,
+      } as ExecutionResult;
+    };
+    const pipeline = createMessagesPipeline(route, "openai_responses");
+    const { deps } = makeDeps({
+      transformRequestOut: (native) =>
+        responsesTransformer.transformRequestOut(native) as {
+          stream?: boolean;
+          metadata?: Record<string, unknown>;
+        },
+      run: pipeline.run,
+    });
+    const app = buildApp(deps);
+    const body = {
+      model: "gpt-5.6-sol",
+      input: [],
+      generate: false,
+      reasoning: { effort: "medium", context: "all_turns" },
+      stream: true,
+      store: false,
+    };
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(body),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("response.completed");
+    expect(routeHarness.routed?.messages).toEqual([]);
+    expect(routeHarness.routed?.provider_raw?.generate).toBe(false);
+  });
+
+  it("commits a streamed response binding before exposing its terminal frame", async () => {
+    const saved = deferred<void>();
+    const put = vi.fn(() => saved.promise);
+    const decision = {
+      lane: { selected_lane: "coding", candidate_chain: ["openai-codex/gpt-5.6-sol"] },
+      provider_attempts: [
+        {
+          alias: "openai-codex/gpt-5.6-sol",
+          provider_name: "openai-codex",
+          provider_model: "gpt-5.6-sol",
+          target_provider_protocol: "openai_responses",
+          status: "ok",
+          skipped: false,
+        },
+      ],
+      final: { status: "ok", model_alias: "openai-codex/gpt-5.6-sol" },
+      stream_outcome: null,
+    } as unknown as DecisionRecord;
+    const { deps } = makeDeps({
+      registry: { put, get: vi.fn() },
+      transformRequestOut: () => ({ stream: true, metadata: {} }),
+      run: async () => ({
+        decision,
+        servingAccount: { providerId: "openai-codex", account: "oauth-a" },
+        collect: async () => ({}),
+        streamIR: async function* () {
+          yield {
+            type: "response.completed",
+            response: { id: "resp-fast", status: "completed" },
+            sequence_number: 0,
+          };
+        },
+      }),
+    });
+    const app = buildApp(deps);
+    const response = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("missing response stream");
+    const firstRead = reader.read();
+    const firstResult = await Promise.race([
+      firstRead.then(() => "frame" as const),
+      shortTimeout(),
+    ]);
+    saved.resolve(undefined);
+
+    expect(firstResult).toBe("timeout");
+    expect(put).toHaveBeenCalledWith(
+      expect.objectContaining({
+        responseId: "resp-fast",
+        providerAccount: "oauth-a",
+        selectedLane: "coding",
+      }),
+    );
+    expect(new TextDecoder().decode((await firstRead).value)).toContain("response.completed");
   });
 
   it("rejects an unknown previous_response_id instead of routing it without history", async () => {

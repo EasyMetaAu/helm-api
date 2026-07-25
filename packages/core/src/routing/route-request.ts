@@ -707,6 +707,70 @@ async function plan(
     };
   }
 
+  const previousResponseId = req.provider_raw?.previous_response_id;
+  const statefulAlias = req.metadata.stateful_provider_alias;
+  if (
+    req.protocol === "openai_responses" &&
+    typeof previousResponseId === "string" &&
+    previousResponseId.length > 0 &&
+    typeof statefulAlias === "string" &&
+    statefulAlias.length > 0
+  ) {
+    const statefulLane = req.metadata.stateful_lane ?? null;
+    const allowed = opts.keyCaps?.allowedLanes;
+    const explicitStatefulModel =
+      opts.allowCustomModel === true &&
+      statefulLane === statefulAlias &&
+      !Object.hasOwn(deps.lanes, statefulLane);
+    if (
+      allowed != null &&
+      !explicitStatefulModel &&
+      (statefulLane === null || !allowed.includes(statefulLane))
+    ) {
+      return noPermittedLanesRejection({
+        req,
+        selectedLane: statefulLane ?? statefulAlias,
+        classifier: passthroughClassifier(),
+        policy: { matched_policy_id: null, reason: "stateful continuation rejected" },
+        forcedReasoningEffort: null,
+        evalUsd: null,
+      });
+    }
+    const degradeLane = opts.keyCaps?.degradeLane;
+    if (degradeLane != null && statefulLane !== degradeLane) {
+      return noPermittedLanesRejection({
+        req,
+        selectedLane: statefulLane ?? statefulAlias,
+        classifier: passthroughClassifier(),
+        policy: { matched_policy_id: null, reason: "stateful continuation rejected" },
+        forcedReasoningEffort: null,
+        evalUsd: null,
+        message: `stateful continuation cannot move to required degrade lane "${degradeLane}"`,
+      });
+    }
+    if (filterBlockedModels([statefulAlias], opts).length === 0) {
+      return noPermittedModelsRejection({
+        req,
+        selectedLane: statefulLane ?? statefulAlias,
+        classifier: passthroughClassifier(),
+        policy: { matched_policy_id: null, reason: "stateful continuation rejected" },
+        forcedReasoningEffort: null,
+        evalUsd: null,
+      });
+    }
+    return {
+      plan: {
+        selected_lane: statefulLane ?? statefulAlias,
+        candidate_chain: [statefulAlias],
+        explicit_model: statefulAlias,
+      },
+      classifier: passthroughClassifier(),
+      policy: { matched_policy_id: null, reason: "stateful Responses continuation" },
+      forcedReasoningEffort: null,
+      evalUsd: null,
+    };
+  }
+
   // 0pre) IMAGE-GENERATION models are ALWAYS model-pinned to their exact alias —
   //    for ANY key, regardless of allow_custom_model, and AHEAD of the alias-glob
   //    shim (§0a) and classification (§2). An image model has no "auto"/classify

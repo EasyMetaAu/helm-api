@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { type WebSocket, WebSocketServer } from "ws";
 import {
   codexWebSocketAgent,
+  codexWebSocketConnectTimeoutMs,
   createCodexResponsesWebSocketConnector,
 } from "./codex-responses-websocket.js";
 
@@ -49,6 +50,11 @@ async function settlePromptly<T>(promise: Promise<T>): Promise<T> {
 }
 
 describe("createCodexResponsesWebSocketConnector", () => {
+  it("caps handshake and unexpected-response body waits without shortening smaller timeouts", () => {
+    expect(codexWebSocketConnectTimeoutMs(900_000)).toBe(60_000);
+    expect(codexWebSocketConnectTimeoutMs(25)).toBe(25);
+  });
+
   it("connects with Codex headers and relays multiple text events", async () => {
     const server = createServer();
     const websocketServer = new WebSocketServer({ noServer: true });

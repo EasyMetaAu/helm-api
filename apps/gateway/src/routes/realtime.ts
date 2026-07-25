@@ -23,6 +23,7 @@ const FORWARDED_HEADERS = [
   "version",
   "x-client-request-id",
   "x-codex-client-version",
+  "x-oai-attestation",
 ] as const;
 
 export interface RealtimeRouteDeps {
@@ -48,7 +49,7 @@ function bearer(value: string | undefined): string | null {
 
 function error(
   c: Context<AppEnv>,
-  status: 400 | 401 | 404 | 413 | 429 | 502 | 503,
+  status: 400 | 401 | 403 | 404 | 413 | 429 | 502 | 503,
   message: string,
   code: string,
 ) {
@@ -206,6 +207,7 @@ export function registerRealtimeRoutes(app: Hono<AppEnv>, deps: RealtimeRouteDep
         c,
         status === 400 ||
           status === 401 ||
+          status === 403 ||
           status === 404 ||
           status === 413 ||
           status === 429 ||

@@ -38,7 +38,7 @@ import {
   memoryAdmissionReleaseGuard,
   readAdmittedRequestBody,
 } from "../runtime/memory-admission.js";
-import { stampServingAccount } from "../runtime/serving-account.js";
+import { servedByAccount, stampServingAccount } from "../runtime/serving-account.js";
 import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
@@ -161,6 +161,8 @@ export interface ResponsesRegistryRecord {
   providerName: string | null;
   providerModel: string | null;
   providerProtocol: "openai_chat" | "anthropic_messages" | "openai_responses" | "gemini" | null;
+  providerAccount?: string | null;
+  selectedLane?: string | null;
   createdAt: number;
   expiresAt: number;
   status: string;
@@ -382,6 +384,42 @@ function successfulAttempt(decision: unknown): Record<string, unknown> | null {
   return attempts.find((attempt) => attempt.status === "ok" && attempt.skipped !== true) ?? null;
 }
 
+function responsesRegistryRecord(args: {
+  responseId: string;
+  identity: MessagesIdentity;
+  result: PipelineRunResult;
+  status: string;
+}): ResponsesRegistryRecord {
+  const attempt = successfulAttempt(args.result.decision);
+  const providerAlias = typeof attempt?.alias === "string" ? attempt.alias : null;
+  const servingAccount = args.result.servingAccount ?? null;
+  const selectedLane = (args.result.decision as { lane?: { selected_lane?: unknown } }).lane
+    ?.selected_lane;
+  const now = Date.now();
+  return {
+    responseId: args.responseId,
+    accountId: args.identity.accountId,
+    keyId: args.identity.keyId,
+    providerAlias,
+    providerName: typeof attempt?.provider_name === "string" ? attempt.provider_name : null,
+    providerModel: typeof attempt?.provider_model === "string" ? attempt.provider_model : null,
+    providerProtocol:
+      attempt?.target_provider_protocol === "openai_chat" ||
+      attempt?.target_provider_protocol === "anthropic_messages" ||
+      attempt?.target_provider_protocol === "openai_responses" ||
+      attempt?.target_provider_protocol === "gemini"
+        ? attempt.target_provider_protocol
+        : null,
+    providerAccount: servedByAccount(servingAccount, providerAlias)
+      ? (servingAccount?.account ?? null)
+      : null,
+    selectedLane: typeof selectedLane === "string" ? selectedLane : null,
+    createdAt: now,
+    expiresAt: now + 86_400_000,
+    status: args.status,
+  };
+}
+
 function statusFromResponseBody(body: Record<string, unknown>): string {
   return typeof body.status === "string" && body.status.length > 0 ? body.status : "completed";
 }
@@ -422,6 +460,12 @@ export function settleResponsesStreamOutcome(args: {
   caughtErrorReason: string | null;
   timedOut: boolean;
 }): ResponsesStreamOutcome {
+  const terminalObserved =
+    args.streamStatus === "completed" ||
+    args.streamStatus === "incomplete" ||
+    args.streamStatus === "failed" ||
+    args.streamStatus === "cancelled";
+  const teardownAbortAfterTerminal = terminalObserved && args.cancellationReason === "client_abort";
   if (
     args.decision.stream_outcome === "truncated" &&
     args.decision.final?.error_reason === CONCURRENCY_LEASE_LOST_REASON
@@ -436,7 +480,7 @@ export function settleResponsesStreamOutcome(args: {
     markStartedStreamCancellation(args.decision, REQUEST_TIMEOUT_REASON);
     return "failed";
   }
-  if (args.cancellationReason !== null) {
+  if (args.cancellationReason !== null && !teardownAbortAfterTerminal) {
     markStartedStreamCancellation(args.decision, args.cancellationReason);
     return args.cancellationReason === "client_abort"
       ? "client_aborted"
@@ -444,8 +488,13 @@ export function settleResponsesStreamOutcome(args: {
         ? "failed"
         : "truncated";
   }
-  const outcome: ResponsesStreamOutcome =
-    args.caughtErrorReason !== null
+  const outcome: ResponsesStreamOutcome = teardownAbortAfterTerminal
+    ? args.streamStatus === "completed"
+      ? "completed"
+      : args.streamStatus === "incomplete"
+        ? "incomplete"
+        : "failed"
+    : args.caughtErrorReason !== null
       ? "failed"
       : args.streamStatus === "completed"
         ? "completed"
@@ -1132,6 +1181,10 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       ir.metadata = {
         ...ir.metadata,
         stateful_provider_alias: previous.providerAlias,
+        ...(previous.providerAccount
+          ? { stateful_provider_account: previous.providerAccount }
+          : {}),
+        ...(previous.selectedLane ? { stateful_lane: previous.selectedLane } : {}),
       };
     }
 
@@ -1210,6 +1263,32 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         let streamStatus: string | null = null;
         let cancellationReason: RequestCancellationReason | null = null;
         let caughtErrorReason: string | null = null;
+        let registryCommitted = false;
+        const commitRegistry = async (status: string): Promise<void> => {
+          if (
+            registryCommitted ||
+            deps.registry === undefined ||
+            result === null ||
+            streamResponseId === null
+          ) {
+            return;
+          }
+          registryCommitted = true;
+          try {
+            await deps.registry.put(
+              responsesRegistryRecord({
+                responseId: streamResponseId,
+                identity,
+                result,
+                status,
+              }),
+            );
+          } catch {
+            c.get("logger").log("warn", "responses.registry_put_failed", {
+              trace_id: traceId,
+            });
+          }
+        };
         try {
           if (initialError !== null) throw initialError;
           if (result === null) throw new Error("Responses pipeline did not return a result");
@@ -1248,6 +1327,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                 if (terminal.responseJson !== null) sessionResponseJson = terminal.responseJson;
               }
             }
+            if (terminalEvent) await commitRegistry(streamStatus ?? "truncated");
             if (raw !== undefined) {
               await sse.write(raw);
               lastWrite = raw;
@@ -1333,29 +1413,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
             }
           } finally {
             try {
-              if (deps.registry !== undefined && result !== null && streamResponseId !== null) {
-                const attempt = successfulAttempt(result.decision);
-                await deps.registry.put({
-                  responseId: streamResponseId,
-                  accountId: identity.accountId,
-                  keyId: identity.keyId,
-                  providerAlias: typeof attempt?.alias === "string" ? attempt.alias : null,
-                  providerName:
-                    typeof attempt?.provider_name === "string" ? attempt.provider_name : null,
-                  providerModel:
-                    typeof attempt?.provider_model === "string" ? attempt.provider_model : null,
-                  providerProtocol:
-                    attempt?.target_provider_protocol === "openai_chat" ||
-                    attempt?.target_provider_protocol === "anthropic_messages" ||
-                    attempt?.target_provider_protocol === "openai_responses" ||
-                    attempt?.target_provider_protocol === "gemini"
-                      ? attempt.target_provider_protocol
-                      : null,
-                  createdAt: Date.now(),
-                  expiresAt: Date.now() + 86_400_000,
-                  status: streamOutcome ?? "truncated",
-                });
-              }
+              await commitRegistry(streamOutcome ?? "truncated");
             } finally {
               captured?.release();
               sessionTerminalCapture?.release();
@@ -1423,25 +1481,18 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       throw err;
     }
     if (deps.registry !== undefined && typeof body.id === "string" && body.id.length > 0) {
-      const attempt = successfulAttempt(result.decision);
-      await deps.registry.put({
-        responseId: body.id,
-        accountId: identity.accountId,
-        keyId: identity.keyId,
-        providerAlias: typeof attempt?.alias === "string" ? attempt.alias : null,
-        providerName: typeof attempt?.provider_name === "string" ? attempt.provider_name : null,
-        providerModel: typeof attempt?.provider_model === "string" ? attempt.provider_model : null,
-        providerProtocol:
-          attempt?.target_provider_protocol === "openai_chat" ||
-          attempt?.target_provider_protocol === "anthropic_messages" ||
-          attempt?.target_provider_protocol === "openai_responses" ||
-          attempt?.target_provider_protocol === "gemini"
-            ? attempt.target_provider_protocol
-            : null,
-        createdAt: Date.now(),
-        expiresAt: Date.now() + 86_400_000,
-        status: statusFromResponseBody(body),
-      });
+      try {
+        await deps.registry.put(
+          responsesRegistryRecord({
+            responseId: body.id,
+            identity,
+            result,
+            status: statusFromResponseBody(body),
+          }),
+        );
+      } catch {
+        c.get("logger").log("warn", "responses.registry_put_failed", { trace_id: traceId });
+      }
     }
     // Record the served (non-stream) request: telemetry row (→ /admin/requests) +
     // verbatim request/response body. Mirrors chat.ts. Fail-open inside recordServed.

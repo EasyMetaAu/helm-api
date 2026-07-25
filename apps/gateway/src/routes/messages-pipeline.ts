@@ -31,6 +31,8 @@ import {
 import type { InternalRequest, MemoryDecision, Protocol } from "@helm/shared";
 import {
   cloneCarrierWithBody,
+  isEmptyNativeResponsesContinuation,
+  isEmptyNativeResponsesPrewarm,
   isNativePassthroughCarrier,
   nativePassthroughBody,
 } from "@helm/shared";
@@ -229,8 +231,8 @@ function toInternalRequest(
   traceId: string,
   protocol: Protocol,
 ): InternalRequest {
-  // `run` already rejected an empty/non-array messages with invalid_request, so
-  // this is a non-empty array here (no placeholder synthesis — see PipelineError).
+  // `run` already rejected empty messages except a pinned Responses continuation or
+  // strict generate:false prewarm; no path synthesizes a placeholder (see PipelineError).
   const messages = ir.messages as InternalRequest["messages"];
   const model = typeof ir.model === "string" && ir.model.length > 0 ? ir.model : "auto";
   const accountId = typeof identity.accountId === "string" ? identity.accountId : "";
@@ -291,6 +293,13 @@ function toInternalRequest(
       ...(typeof ir.metadata?.stateful_provider_alias === "string" &&
       ir.metadata.stateful_provider_alias.length > 0
         ? { stateful_provider_alias: ir.metadata.stateful_provider_alias }
+        : {}),
+      ...(typeof ir.metadata?.stateful_provider_account === "string" &&
+      ir.metadata.stateful_provider_account.length > 0
+        ? { stateful_provider_account: ir.metadata.stateful_provider_account }
+        : {}),
+      ...(typeof ir.metadata?.stateful_lane === "string" && ir.metadata.stateful_lane.length > 0
+        ? { stateful_lane: ir.metadata.stateful_lane }
         : {}),
       // The CLI's captured billing identity (anthropic route stamps it; absent on the
       // OpenAI/Gemini surfaces). The native-Anthropic executor reads it to re-emit the
@@ -748,7 +757,23 @@ export function createMessagesPipeline(
       // (principle 2 fail-closed); the route maps it to a 400 in the right
       // protocol envelope. Raised here (not in toInternalRequest) so it carries
       // the request trace_id.
-      if (!Array.isArray(ir.messages) || ir.messages.length === 0) {
+      if (
+        !Array.isArray(ir.messages) ||
+        (ir.messages.length === 0 &&
+          !isEmptyNativeResponsesContinuation({
+            protocol,
+            messages: ir.messages,
+            provider_raw: ir.provider_raw,
+            native_request: ir.metadata?.native_request,
+            metadata: ir.metadata,
+          }) &&
+          !isEmptyNativeResponsesPrewarm({
+            protocol,
+            messages: ir.messages,
+            provider_raw: ir.provider_raw,
+            native_request: ir.metadata?.native_request,
+          }))
+      ) {
         throw new PipelineError("invalid_request", "messages must be a non-empty array", traceId);
       }
       const internal = downgradeClientFastModeIfDisallowed(

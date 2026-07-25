@@ -106,6 +106,97 @@ describe("InternalRequestSchema", () => {
       expect(res.error.issues[0]?.path).toEqual(["messages"]);
     }
   });
+
+  it("accepts an empty native Responses continuation", () => {
+    const continuation = {
+      ...validRequest(),
+      protocol: "openai_responses",
+      messages: [],
+      provider_raw: { previous_response_id: "resp-1" },
+      metadata: {
+        ...validRequest().metadata,
+        stateful_provider_alias: "openai-codex/gpt-5.6-sol",
+      },
+      native_request: {
+        protocol: "openai_responses",
+        body: { model: "gpt-5.6-sol", input: [], previous_response_id: "resp-1" },
+        headers: {},
+        mutations: {},
+      },
+    };
+
+    expect(InternalRequestSchema.safeParse(continuation).success).toBe(true);
+  });
+
+  it("accepts a strict empty native Responses prewarm", () => {
+    const prewarm = {
+      ...validRequest(),
+      protocol: "openai_responses",
+      messages: [],
+      provider_raw: { generate: false },
+      native_request: {
+        protocol: "openai_responses",
+        body: { model: "gpt-5.6-sol", input: [], generate: false },
+        headers: {},
+        mutations: {},
+      },
+    };
+
+    expect(InternalRequestSchema.safeParse(prewarm).success).toBe(true);
+  });
+
+  it("rejects an empty continuation whose native and normalized ids disagree", () => {
+    const bad = {
+      ...validRequest(),
+      protocol: "openai_responses",
+      messages: [],
+      provider_raw: { previous_response_id: "resp-other" },
+      metadata: {
+        ...validRequest().metadata,
+        stateful_provider_alias: "openai-codex/gpt-5.6-sol",
+      },
+      native_request: {
+        protocol: "openai_responses",
+        body: { model: "gpt-5.6-sol", input: [], previous_response_id: "resp-1" },
+        headers: {},
+        mutations: {},
+      },
+    };
+
+    expect(InternalRequestSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it("rejects an empty native Responses request without a continuation id", () => {
+    const bad = {
+      ...validRequest(),
+      protocol: "openai_responses",
+      messages: [],
+      native_request: {
+        protocol: "openai_responses",
+        body: { model: "gpt-5.6-sol", input: [] },
+        headers: {},
+        mutations: {},
+      },
+    };
+
+    expect(InternalRequestSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it("rejects an empty prewarm whose normalized generate flag is missing", () => {
+    const bad = {
+      ...validRequest(),
+      protocol: "openai_responses",
+      messages: [],
+      native_request: {
+        protocol: "openai_responses",
+        body: { model: "gpt-5.6-sol", input: [], generate: false },
+        headers: {},
+        mutations: {},
+      },
+    };
+
+    expect(InternalRequestSchema.safeParse(bad).success).toBe(false);
+  });
 });
 
 describe("TargetProviderProtocolSchema", () => {
