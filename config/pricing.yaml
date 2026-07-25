@@ -494,6 +494,12 @@ google/gemini-3-pro-image:
       inputPerMTokUsd: 3.6
       outputPerMTokUsd: 21.6
       imageOutputPerMTokUsd: 216.0
+zenmux-anthropic/claude-opus-5:
+  inputPerMTokUsd: 5.0
+  outputPerMTokUsd: 25.0
+  cacheReadPerMTokUsd: 0.5
+  cacheWritePerMTokUsd: 6.25
+  cacheWrite1hPerMTokUsd: 10.0
 zenmux-anthropic/claude-opus-4.8:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 25.0
@@ -523,6 +529,27 @@ zenmux-anthropic/claude-haiku-4.5:
 # output, $1/M cache hit, $12.50/M 5-min cache write). Load-bearing: Claude Code
 # caches heavily, and without these computeCostUsd bills cached tokens at full
 # input rate (large over-estimate). MUST stay in sync with the capabilities.yaml caps.
+# Claude Opus 5: a drop-in upgrade at Opus 4.8's pricing — $5/M input, $25/M output,
+# $0.50/M cache read, $6.25/M 5-min cache write, $10/M 1h cache write, and the same
+# $10/$50 fast-mode tier. Verified 2026-07-25 against the ZenMux catalog
+# (anthropic/claude-opus-5) and the Anthropic pricing page; identical to the 4.8 block
+# below, so any future divergence must be applied to BOTH.
+anthropic/claude-opus-5:
+  inputPerMTokUsd: 5.0
+  outputPerMTokUsd: 25.0
+  cacheReadPerMTokUsd: 0.5
+  cacheWritePerMTokUsd: 6.25
+  cacheWrite1hPerMTokUsd: 10.0
+  inferenceGeoMultipliers:
+    global: 1.0
+    us: 1.1
+  serviceTiers:
+    fast:
+      inputPerMTokUsd: 10.0
+      outputPerMTokUsd: 50.0
+      cacheReadPerMTokUsd: 1.0
+      cacheWritePerMTokUsd: 12.5
+      cacheWrite1hPerMTokUsd: 20.0
 anthropic/claude-opus-4-8:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 25.0

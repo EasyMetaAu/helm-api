@@ -370,6 +370,22 @@ google/gemini-3-pro-image:
   outputImage: true
   maxContextTokens: 32768
   maxOutputTokens: 32768
+zenmux-anthropic/claude-opus-5:
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  reasoningEffort:
+    anthropicOutputConfig:
+      supported: true
+      levels: [low, medium, high, xhigh, max]
+      map:
+        minimal: low
+    anthropicThinking:
+      supported: false
+  modalities: [document]
+  maxContextTokens: 1000000
+  maxOutputTokens: 128000
 zenmux-anthropic/claude-opus-4.8:
   supportsTools: true
   jsonOutput: schema
@@ -431,6 +447,28 @@ zenmux-anthropic/claude-haiku-4.5:
 # (maxContextTokens: 0) and the filter would prune EVERY request as context_too_small
 # (catalog/index.ts). So caps + pricing must be added together. Limits are the real
 # per-model Anthropic figures (Opus/Sonnet/Fable 1M; Haiku 200K).
+# Claude Opus 5: same request surface as Opus 4.8 — 1M context, 128K output, the full
+# low/medium/high/xhigh/max effort set, no manual budget_tokens mode. Thinking is ON by
+# default (omitting `thinking` runs adaptive, unlike 4.8), and `{type:"disabled"}` is
+# accepted only at effort high or below, so `anthropicThinking.supported` stays false —
+# helm routes effort through anthropicOutputConfig exactly as for 4.8.
+# https://platform.claude.com/docs/en/about-claude/models/overview
+anthropic/claude-opus-5:
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  reasoningEffort:
+    anthropicOutputConfig:
+      supported: true
+      levels: [low, medium, high, xhigh, max]
+      map:
+        minimal: low
+    anthropicThinking:
+      supported: false
+  modalities: [document]
+  maxContextTokens: 1000000
+  maxOutputTokens: 128000
 anthropic/claude-opus-4-8:
   supportsTools: true
   jsonOutput: schema
