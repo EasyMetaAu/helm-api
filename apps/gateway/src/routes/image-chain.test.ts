@@ -107,6 +107,32 @@ describe("runImageChain", () => {
     expect(breaker.recordFailure).not.toHaveBeenCalled(); // request is wrong, upstream is healthy
   });
 
+  it("a ZenMux invalid_params 400 is terminal with the upstream message", async () => {
+    const breaker = fakeBreaker();
+    const raw = {
+      error: {
+        code: "400",
+        type: "invalid_params",
+        message: "Unknown parameter: 'response_format'.",
+      },
+    };
+    const attempt: ImageAttempt = vi
+      .fn()
+      .mockRejectedValue(new UpstreamError("upstream_error", "upstream returned 400", raw, 400));
+
+    const res = await runImageChain([target("a"), target("b")], breaker, attempt, signal);
+
+    expect(res).toMatchObject({
+      ok: false,
+      errorClass: "invalid_request",
+      httpStatus: 400,
+      message: "Unknown parameter: 'response_format'.",
+      providerRaw: raw,
+    });
+    expect(attempt).toHaveBeenCalledTimes(1);
+    expect(breaker.recordFailure).not.toHaveBeenCalled();
+  });
+
   it("a client abort is terminal: recordAbort, no fault, aborted flag set", async () => {
     const ac = new AbortController();
     ac.abort();
@@ -158,11 +184,24 @@ describe("runImageChain", () => {
     expect(attempt).toHaveBeenCalledTimes(1);
   });
 
-  it("all providers failing → all_providers_failed (502)", async () => {
+  it.each([
+    ["provider 401", new UpstreamError("upstream_error", "unauthorized", null, 401)],
+    ["provider 403", new UpstreamError("upstream_error", "forbidden", null, 403)],
+    [
+      "provider 404 invalid_model",
+      new UpstreamError(
+        "upstream_error",
+        "upstream returned 404",
+        { error: { code: "404", type: "invalid_model", message: "Requested model is not valid" } },
+        404,
+      ),
+    ],
+    ["provider 429", new UpstreamError("upstream_error", "rate limited", null, 429)],
+    ["provider 500", new UpstreamError("upstream_error", "boom", null, 500)],
+    ["network error", new TypeError("fetch failed")],
+  ])("%s exhausts the chain as all_providers_failed (502)", async (_name, error) => {
     const breaker = fakeBreaker();
-    const attempt: ImageAttempt = vi
-      .fn()
-      .mockRejectedValue(new UpstreamError("upstream_error", "boom", null, 500));
+    const attempt: ImageAttempt = vi.fn().mockRejectedValue(error);
     const res = await runImageChain([target("a"), target("b")], breaker, attempt, signal);
 
     expect(res.ok).toBe(false);

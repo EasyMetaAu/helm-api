@@ -4,7 +4,13 @@ import {
   CONCURRENCY_LEASE_LOST_REASON,
   requestCancellationReason,
 } from "../request-cancellation.js";
-import { errorClassOf, errorDetailOf, isAbort, isUpstreamRequestRejection } from "./execute.js";
+import {
+  errorClassOf,
+  errorDetailOf,
+  isAbort,
+  isUpstreamRequestRejection,
+  upstreamErrorMessage,
+} from "./execute.js";
 
 // Image-generation candidate-chain executor. The model-pinned image routes
 // (/v1/images/generations, /v1beta/interactions) historically resolved a model to a
@@ -179,7 +185,7 @@ export async function runImageChain(
           ok: false,
           errorClass: "invalid_request",
           httpStatus: ERROR_CLASS_HTTP_STATUS.invalid_request,
-          message: detail.message,
+          message: upstreamErrorMessage(detail.provider_raw) ?? detail.message,
           providerRaw: detail.provider_raw,
           aborted: false,
           attempts,

@@ -366,6 +366,45 @@ describe("registerImagesRoute", () => {
     expect(decision.provider_attempts[0].cost_usd).toBeNull();
   });
 
+  it("maps a ZenMux invalid_params 400 to an OpenAI invalid-request response", async () => {
+    const { app, imageGeneration, enqueueTelemetry } = setup();
+    const raw = {
+      error: {
+        code: "400",
+        type: "invalid_params",
+        message: "Unknown parameter: 'response_format'.",
+      },
+    };
+    imageGeneration.mockRejectedValueOnce(
+      new UpstreamError("upstream_error", "upstream returned 400", raw, 400),
+    );
+
+    const res = await post(app, {
+      model: "gpt-image-2",
+      prompt: "x",
+      response_format: "b64_json",
+    });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: {
+        message: "Unknown parameter: 'response_format'.",
+        type: "invalid_request_error",
+        code: "invalid_request",
+        param: null,
+      },
+    });
+    expect(enqueueTelemetry.mock.calls[0]?.[0].decision).toMatchObject({
+      final: { status: "error", error_reason: "invalid_request" },
+      provider_attempts: [
+        {
+          error_class: "invalid_request",
+          error_detail: { upstream_status: 400, provider_raw: raw },
+        },
+      ],
+    });
+  });
+
   it("enforces the per-key budget: over budget (reject) → 429, no upstream call", async () => {
     const { app, imageGeneration } = setup({
       budgetGate: {
