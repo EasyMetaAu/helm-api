@@ -1696,9 +1696,11 @@ describe("createCodexResponsesClient", () => {
         baseUrl: "https://chatgpt.com/backend-api/codex",
         getAuthHeader: async () => `Bearer ${jwt("acct")}`,
       },
+      // 500, not 503: an overload status is deliberately re-issued after a backoff
+      // (provider/retry.ts). The subject here is non-JSON body preservation.
       fetch: (async () =>
         new Response("Service Unavailable (plain text)", {
-          status: 503,
+          status: 500,
         })) as unknown as typeof fetch,
     });
     let caught: unknown;
@@ -1709,7 +1711,7 @@ describe("createCodexResponsesClient", () => {
     }
     expect(caught).toBeInstanceOf(UpstreamError);
     const err = caught as UpstreamError;
-    expect(err.upstreamStatus).toBe(503);
+    expect(err.upstreamStatus).toBe(500);
     expect(err.providerRaw).toBe("Service Unavailable (plain text)");
   });
 
@@ -5136,7 +5138,9 @@ describe("createGenericOpenAIResponsesClient — nativePassthroughStream", () =>
   it("throws UpstreamError before first chunk on non-2xx", async () => {
     const client = createGenericOpenAIResponsesClient({
       config: { baseUrl: "https://api.openai.test/v1", apiKey: "sk-test" },
-      fetch: (async () => jsonResponse({ error: "server error" }, 503)) as unknown as typeof fetch,
+      // 500, not 503: an overload status is deliberately re-issued after a backoff
+      // (provider/retry.ts). The subject here is the pre-first-chunk throw.
+      fetch: (async () => jsonResponse({ error: "server error" }, 500)) as unknown as typeof fetch,
     });
     let caught: unknown;
     try {
@@ -5148,7 +5152,7 @@ describe("createGenericOpenAIResponsesClient — nativePassthroughStream", () =>
       caught = e;
     }
     expect(caught).toBeInstanceOf(UpstreamError);
-    expect((caught as UpstreamError).upstreamStatus).toBe(503);
+    expect((caught as UpstreamError).upstreamStatus).toBe(500);
   });
 });
 

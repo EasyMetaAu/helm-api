@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-07-25 · 上游过载（529/503）在 fetch 边界退避重试（Provider，docs/02/04，原则 3/5/8）
+
+- **根因**：`provider/retry.ts` 的重试分类是严格白名单，只覆盖裸 socket/连接失败；HTTP 529（Anthropic Overloaded）/503 直接变成 `UpstreamError` 抛出，**零延迟零重试**。OAuth 账号池确实把 `status >= 500` 当作可换兄弟账号的瞬时故障，但那也是立即换、无退避；单账号或普通 API key 的 provider 根本没有这条通路，一次 529 就烧掉一个候选，单候选链直接 502 给客户端——而同样的请求体隔一秒重发通常就成功。
+- **修复**：新增 `overloadRetryDelayMs` + `withOverloadRetry`，包在四个 provider client 的 fetch 边界外层（anthropic、openai、codex-responses、generic-responses、gemini）。过载答复是**正常 Response 而非 throw**，所以过载重试必须套在 `withConnectionRetry` 外面，而不是塞进它的 `shouldRetry`。首字节前才重试、body 从未消费，因此幂等（原则 8）；被丢弃的 response 会 `body.cancel()` 释放 socket，codex 那条延迟到 body 的 timeout 定时器通过 `release` 钩子显式清理。
+- **刻意收窄**：只认 **529 + 503**。500/502 是不明服务端故障，重试只是拖延真正的失败；429 是真限流，账号池 park 账号后走链才对。退避 **1s → 3s**（共 2 次重试）；上游给出数字 `Retry-After` 则优先，但**钳制在 10s**——一个上游不该占住客户端 socket 十分钟，那时换候选才是更快的答案路径。HTTP-date 形式的 `Retry-After` 不解析，退回默认表。
+- **下游不变**：重试耗尽后仍抛原来的 `UpstreamError(upstreamStatus: 529)`，账号池换号、熔断计数、fallback 链、遥测字段**逻辑一行未改**——只是现在它们只在真的持续过载时才启动。客户端断连时立刻停止，不再多烧一次上游（此时返回的 response body 已被 drain，error detail 退化为 null；无人在听，可接受）。
+- **测试影响**：三个老测试用 503 当"随便一个 5xx"占位（openai 401 分支、gemini/codex 非 JSON body 保留、generic 首 chunk 前抛错），503 现在会触发重试，已改成 500 并注明原因；意图不变，provider 套件同时从 9s 回到 2.5s。
+- **TODO / 边界**：退避参数目前是代码常量，未做成配置（与原则 2 的"会撒谎的旋钮比没有旋钮更糟"一致，先观察线上真实 529 分布再决定）；OAuth 池**换账号之间**仍无延迟，本次未动——换号本身就是在换容量，加睡眠反而拖慢。
+
 ## 2026-07-24 · Codex Voice、Responses 音频与图片编辑补齐代理面（Gateway / Protocol / Provider，docs/01/05/06，原则 1/2/3/7/8）
 
 - **Realtime V1/V2/V3**：新增 `/v1/realtime/calls`、`/v1/live` 与对应 WebSocket sideband。Call-create 复用现有 static/OpenAI-Codex provider client、OAuth pool、账号 token 与 egress proxy；ChatGPT backend 继续使用 JSON call shape，官方 OpenAI 使用 multipart。`call_id` 以进程内短 TTL 绑定创建它的 Helm key 与实际 provider/account sideband，WebSocket 必须使用同一 key，且不会重新选账号；OAuth HTTP/WS 401 各只刷新重试一次。Call-create 接入现有进程内或 PostgreSQL 分布式并发 lease，DB 不可用时 fail-closed 为 503，持有期间 lease 丢失会中止上游请求。双向文本/二进制帧按实际字节占用动态内存预算，关闭压缩并保留 close code。当前部署为单 gateway replica；水平扩容前必须把 registry 换成支持原子 claim 的共享存储。
@@ -59,22 +68,10 @@
 - **维护闭环**：Admin 与 Portal 的翻译脚本补齐西班牙语和葡萄牙语，根级 `i18n:*` 命令同时覆盖两套应用；Portal 为仅动态引用的四个 key 增加静态 extraction anchors。新增结构测试统一验证两套应用七种语言的 key 集、非空值、placeholder、多语言脚本与动态 key，避免同步后静默回退英文。
 - **术语取舍**：简繁中文用户界面的 `lane` 统一意译为「通道」，不改真实 lane ID 或代码字段；分类失败继续使用「系统兜底通道」，执行 fallback 在简体统一为「兜底」、繁体按本地习惯统一为「備援」。首次设置页维持英文单语，移除唯一一处中英混排。
 
-## 2026-07-22 · Session 恢复补齐响应快照并限制默认留存范围（Telemetry / Admin requests，docs/07/11，原则 1/3/7/8）
-
-- **复用既有存储**：`session_revisions.response_json` 已为 OpenAI Responses continuation 保存带 `output` 的终态对象，指定线上记录也已证实响应存在；本次不新增表、列或迁移。Admin 的 Session fallback 改为从目标 revision 返回响应，`meta`、完整正文和 `part=response` 三种读取保持 payload 优先，Session 来源始终标记 `exact=false`，因此 Retry 继续禁用。
-- **协议与流式边界**：OpenAI Chat、Anthropic Messages、Gemini 和 Responses 的成功非流式请求都保存客户端协议形态的响应快照；Chat 会在 response-model policy 生效后再保存，避免记录值与客户端看到的模型名不同。Responses 成功流继续只保存 terminal response object，保持 `previous_response_id` 展开所需的 `{ output: [...] }` 语义。Chat、Anthropic 与 Gemini 流不为 Session 新增整段 SSE 缓冲；在没有独立有界 accumulator 与 partial fidelity 前，响应保持不可用，避免默认开启的 Session capture 形成并发内存放大或把截断内容误报为完整响应。
-- **容量与隐私边界**：单个 Session response snapshot 以 UTF-8 计限制为 16 MiB；超过上限或会让 Session 超过 64 MiB 时只省略响应，仍保留请求 revision，并记录 `session.response_limited`。设置页、七种语言、README 与 docs 明确披露 Session 模式会保存可用的模型响应，可能包含工具参数、reasoning 与媒体；Session 仍按最后活动时间整组清理、不归档，并与完整 payload 共用内容留存窗口。
-
-## 2026-07-22 · 按会话增量保存请求正文并诚实区分恢复保真度（Telemetry / Admin requests / Store，docs/07/11，原则 1/3/7/8）
-
-- **互斥留存模式**：运行时新增 `capture_sessions`，与既有 `capture_payloads` 组成「仅元数据 / 每请求完整载荷 / 按会话增量转录」三种互斥模式；新安装默认按 Session 增量保存，完整载荷默认关闭。两项同时为 `true` 时配置校验 fail-closed；旧实例若明确保存过 `capture_payloads`，缺少新字段时保持原选择，设置损坏时的隐私安全回退会同时关闭两种正文捕获。本次目标 Remote 在部署时显式切换为 Session 模式，不用升级逻辑覆盖其他自托管 operator 的隐私选择。
-- **身份与隐私边界**：只从客户端入口解析高置信信号：`x-thread-id`、两个明确 metadata 字段、`x-session-key`、Codex 入站 `thread-id` / `session-id`，以及严格 JSON object 形式的 Claude Code `metadata.user_id.session_id`；不读取 Helm 注入上游的 provider/OAuth 身份。ID 限制 256 UTF-8 字节并按 account、API key、来源和原值生成不可猜测 `session_ref`。原始 Session ID 仅写入受正文留存策略控制的 Session 表，写 telemetry 前剥离 `label`；Admin 列表用批量 Session 查询回填显示值，避免每页 N+1 与正文关闭时的 PII 泄漏。
-- **存储与并发边界**：SQLite/Postgres 使用 Session head + 单调 sequence + 不可变 revision，按最长公共前缀只保存新增 request suffix，显式 parent 保留编辑/并发分支；重复 request 只允许在原 response 为空时回填一次，新增 UTF-8 字节计入 `stored_bytes` 并在同一事务内执行上限，已有 response 的后续重写为 no-op。写入进入受字节预算保护的异步 Session lane，request 与 Responses output 都计入队列预算，优先牺牲完整 payload、保留脱敏 telemetry；Store 原子执行 10,000 revisions / 64 MiB 上限。常规追加使用 1,000 项且总计不超过 64 MiB 的 byte-bounded LRU，关闭 Session capture 时立即失效；恢复采用迭代父链、拒绝 cycle、负数/小数 `retain_count` 与非数组 delta，损坏记录不会静默生成错误请求。
-- **Responses 续接与保真边界**：普通多轮请求只存客户端 request 增量；OpenAI Responses 为展开 `previous_response_id` 的隐藏状态，额外保存产生该 ID 的规范 response output，并以 Session 内唯一 `response_id → request_id` 建真实父边。chain、fork 与并发分支因此不会误借最新 head；恢复按「父请求 input + 父 response output + 当前 input」展开，保留 reasoning/tool-call items、删除已展开的 opaque ID，且当前顶层 instructions 不继承旧值。找不到父 response 的 revision 会以 `partial` 留痕，但恢复必须 fail-closed 为 `session_incomplete`；父 ID 不匹配、continuation 的 `retain_count` 非零、response output 缺失或损坏同样拒绝恢复，不猜测历史。
-- **清理与运维边界**：Session 恢复是语义等价 JSON，不保留原始空白、headers 或翻译后的 upstream body；完整 payload 仍是唯一可精确 Retry 的来源，Admin 明示 `source=session`、`exact=false` 并禁用 Retry。Session 是 cleanup 报告中的独立 action，但 MVP 与完整 payload 共用 `payloads_cleanup_enabled` / `payload_retention_days` 这组“内容留存”设置；payload 可归档，Session 不归档并在最后活动超过窗口后整组删除。列表 Session 可一键切到 `range=all` 的 opaque-ref 筛选；恢复失败明确区分无 Session ID、转录不可用/已清理、转录链损坏。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-22 · Session 恢复补齐响应快照并限制默认留存范围（Telemetry / Admin requests，docs/07/11，原则 1/3/7/8）**：复用 `session_revisions.response_json` 不新增迁移，四种协议的成功非流式请求保存客户端形态响应快照，流式不新增 SSE 缓冲；单快照 16 MiB、Session 64 MiB 上限，来源恒为 `exact=false` 故 Retry 禁用，完整原文通过 git history 回溯。
+- **2026-07-22 · 按会话增量保存请求正文并诚实区分恢复保真度（Telemetry / Admin requests / Store，docs/07/11，原则 1/3/7/8）**：新增 `capture_sessions` 与 `capture_payloads` 构成三种互斥留存模式（同时为 true 则 fail-closed），只解析高置信客户端会话信号并以不可猜测 `session_ref` 存储；Session head + 单调 sequence + 不可变 revision 按最长公共前缀存增量，Responses 续接建真实 `response_id → request_id` 父边、找不到父 response 时恢复 fail-closed 为 `session_incomplete`，完整原文通过 git history 回溯。
 - **2026-07-22 · Lanes 批量保存、拖拽回退与可配置默认通道删除边界（Routing / Admin lanes，docs/03/04/11，原则 2/3/5/6）**：Lanes 整组原子保存、拖拽排序并只保护当前默认通道，非法默认配置 fail-closed，完整原文通过 git history 回溯。
 - **2026-07-22 · Responses 状态续接严格绑定原 provider 与账号（Protocol translation / provider execution，docs/04/05/07，原则 2/3/5/8）**：`previous_response_id` 只允许同 account/key、原 provider 与原账号继续执行；未知、跨协议或不可用状态 fail-closed，完整原文通过 git history 回溯。
 - **2026-07-22 · Codex 客户端默认启用 Responses WebSocket，并补齐反向代理边界（Deployment / Protocol / Admin client setup，docs/05/10/11，原则 3/5/8）**：Admin 的 Codex 配置复用既有 Responses WebSocket；代理只在真实 Upgrade 时转发 hop-by-hop header，Claude 图片 shim 延后，完整原文通过 git history 回溯。

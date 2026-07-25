@@ -14,7 +14,7 @@ import type { ProxyConfig } from "./proxy.js";
 //   - `currentSecrets`: live access + refresh tokens, used by `scrub()` to strip
 //     any echoed credential from an upstream error body (principle 7).
 // Credentials are runtime-only: from env, never persisted/logged.
-import { withConnectionRetry } from "./retry.js";
+import { withConnectionRetry, withOverloadRetry } from "./retry.js";
 import { readChunkWithIdle, StreamStalledError } from "./stream-idle.js";
 
 export interface ProviderConfig {
@@ -427,27 +427,34 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
     // idempotent). A timeout is rethrown as UpstreamError (non-transient → no retry,
     // the chain falls back); a client abort rethrows as-is. Each attempt gets a fresh
     // timeout + freshly resolved url/headers (tracks a rotating token).
-    return withConnectionRetry(
-      async () => {
-        const t = withTimeout(timeoutMs, external);
-        try {
-          return await doFetch(await urlFn(), {
-            method: "POST",
-            headers: await headers(),
-            body: bodyText,
-            signal: t.signal,
-          });
-        } catch (err) {
-          if (t.isTimeout() && !t.isExternalAbort()) {
-            throw new UpstreamError("timeout", "upstream request timed out");
-          }
-          // Client abort is NOT a provider fault — rethrow as-is for the caller.
-          throw err;
-        } finally {
-          t.cleanup();
-        }
-      },
-      { retries: cfg.connectRetries, backoffMs: cfg.connectRetryBackoffMs, signal: external },
+    // withOverloadRetry wraps it: an overloaded 529/503 is a normal Response (never a
+    // throw), so it re-issues the whole attempt after a pause instead of burning a
+    // candidate on transient upstream capacity pressure.
+    return withOverloadRetry(
+      () =>
+        withConnectionRetry(
+          async () => {
+            const t = withTimeout(timeoutMs, external);
+            try {
+              return await doFetch(await urlFn(), {
+                method: "POST",
+                headers: await headers(),
+                body: bodyText,
+                signal: t.signal,
+              });
+            } catch (err) {
+              if (t.isTimeout() && !t.isExternalAbort()) {
+                throw new UpstreamError("timeout", "upstream request timed out");
+              }
+              // Client abort is NOT a provider fault — rethrow as-is for the caller.
+              throw err;
+            } finally {
+              t.cleanup();
+            }
+          },
+          { retries: cfg.connectRetries, backoffMs: cfg.connectRetryBackoffMs, signal: external },
+        ),
+      { signal: external },
     );
   }
 

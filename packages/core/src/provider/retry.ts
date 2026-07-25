@@ -82,6 +82,47 @@ export function isFetchTransportError(err: unknown): boolean {
   return e.name === "TypeError" && e.message === "fetch failed";
 }
 
+// ── Upstream overload (529 / 503) ────────────────────────────────────────────
+// A 529 "Overloaded" (Anthropic) or 503 "Service Unavailable" is TRANSIENT capacity
+// pressure at the upstream, not a fault in the request: the identical body sent a
+// moment later usually succeeds. Surfacing it immediately makes the executor burn its
+// whole fallback chain — or, on a single-candidate chain, 502 the client — for a blip
+// a short sleep would have absorbed. So the fetch boundary re-issues the SAME request
+// after a real pause before anyone else sees the failure.
+//
+// Deliberately NARROW: only 529/503. A 500/502 is an unspecified server fault that
+// says nothing about capacity (retrying just delays a real failure), and 429 is
+// genuine rate limiting — the OAuth pool parks that account and the chain moves on.
+// Retrying pre-first-byte is idempotent (no response consumed, nothing on the wire).
+const OVERLOAD_STATUSES = new Set([503, 529]);
+const OVERLOAD_BACKOFF_MS = [1_000, 3_000] as const;
+// Upper bound on an upstream-supplied Retry-After. A provider asking for 10 minutes
+// must not hold the client's socket open — past this we give up and let the executor
+// fall back to another candidate, which is the faster path to an answer.
+const OVERLOAD_MAX_DELAY_MS = 10_000;
+
+/**
+ * Backoff (ms) before re-issuing an overloaded upstream request, or null when this
+ * status/attempt is not retryable. `attempt` is 0-based (0 = the delay before the
+ * FIRST retry); beyond the budget it returns null so the caller stops. A numeric
+ * `Retry-After` header (seconds) wins over the default schedule, clamped to
+ * `OVERLOAD_MAX_DELAY_MS`; an HTTP-date or garbage value is ignored.
+ */
+export function overloadRetryDelayMs(args: {
+  status: number;
+  attempt: number;
+  retryAfter?: string | null;
+}): number | null {
+  if (!OVERLOAD_STATUSES.has(args.status)) return null;
+  const fallback = OVERLOAD_BACKOFF_MS[args.attempt];
+  if (fallback === undefined) return null;
+  const seconds = Number(args.retryAfter?.trim());
+  if (Number.isFinite(seconds) && seconds > 0) {
+    return Math.min(seconds * 1000, OVERLOAD_MAX_DELAY_MS);
+  }
+  return fallback;
+}
+
 export interface ConnectionRetryOptions {
   /** Max additional attempts after the first. Default 2. */
   retries?: number;
@@ -115,6 +156,56 @@ function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
     }, ms);
     signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+export interface OverloadRetryOptions<T> {
+  signal?: AbortSignal;
+  /** Injected for tests; default sleeps real time and resolves early on abort. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /** Extract the HTTP response from `fn`'s result. Default: the result IS the Response. */
+  pick?: (value: T) => Response;
+  /** Release a DISCARDED attempt's non-body resources (e.g. a deferred timeout timer). */
+  release?: (value: T) => void;
+}
+
+/**
+ * Re-issue `fn` while it answers with an overloaded status (529/503), sleeping
+ * `overloadRetryDelayMs` between attempts. Returns the first non-overloaded result,
+ * or the last overloaded one when the budget is exhausted / the client aborts — so
+ * the caller's existing `!res.ok` path still turns it into the same UpstreamError.
+ * Each discarded response's body is cancelled so no socket is leaked.
+ *
+ * Pre-first-byte only: the response is never consumed here, so re-sending is idempotent.
+ */
+export async function withOverloadRetry<T = Response>(
+  fn: () => Promise<T>,
+  opts: OverloadRetryOptions<T> = {},
+): Promise<T> {
+  const sleep = opts.sleep ?? defaultSleep;
+  const pick = opts.pick ?? ((value: T) => value as unknown as Response);
+  let attempt = 0;
+  let result = await fn();
+  for (;;) {
+    const res = pick(result);
+    if (res.ok || opts.signal?.aborted) return result;
+    const delay = overloadRetryDelayMs({
+      status: res.status,
+      attempt,
+      retryAfter: res.headers.get("retry-after"),
+    });
+    if (delay === null) return result;
+    // Discard the overloaded attempt — an un-drained body pins a socket, and a deferred
+    // per-attempt timeout would otherwise keep running against nothing.
+    await res.body?.cancel().catch(() => {});
+    opts.release?.(result);
+    await sleep(delay, opts.signal);
+    // A disconnect during the backoff means the client is gone; don't burn another
+    // upstream attempt. The caller sees the last overloaded response — with a drained
+    // body, so its error detail degrades to null. Acceptable: nobody is listening.
+    if (opts.signal?.aborted) return result;
+    attempt += 1;
+    result = await fn();
+  }
 }
 
 /**
