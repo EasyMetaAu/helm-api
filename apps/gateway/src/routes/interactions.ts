@@ -256,13 +256,17 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
     // 4) Parse + validate.
     let requestJson = "";
     let raw: unknown;
+    let requestBodyMaterialized: (() => void) | undefined;
     try {
       const admitted =
         deps.memoryAdmission === undefined
           ? null
           : await readAdmittedRequestBody(c.req.raw, deps.memoryAdmission);
       requestJson = admitted?.text ?? (await c.req.text());
-      if (admitted !== null) c.set("requestMemoryRelease", admitted.release);
+      if (admitted !== null) {
+        c.set("requestMemoryRelease", admitted.release);
+        requestBodyMaterialized = admitted.materialized;
+      }
       raw = JSON.parse(requestJson);
     } catch (error) {
       if (error instanceof RequestAdmissionError) {
@@ -285,6 +289,7 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
         "INVALID_ARGUMENT",
       );
     }
+    requestBodyMaterialized?.();
 
     // 5) Resolve the model/lane → the chain, then keep only gemini-kind targets (this
     //    endpoint translates to generateContent). An openai-only id → 400 (→ images).

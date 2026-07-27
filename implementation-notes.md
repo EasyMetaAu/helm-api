@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-07-27 · 请求内存准入只计算未物化 headroom（Gateway runtime，docs/02/05/07/10，原则 3/7/8）
+
+- **根因**：实时 V8 高水位把 `heapUsed + active reservations` 相加，但长 Responses SSE/WebSocket 请求在 `JSON.parse` 后已进入 `heapUsed`，其 reservation 仍持有到流结束，导致同一请求被重复计账并高频误拒为 503。
+- **修复**：活动请求总额度继续由 `reservedBytes` 和 `activeRequestBytes` 限制；live heap 只叠加尚未完成正文读取、schema 校验与同步协议物化的 `pendingBytes`。lease 物化后仍占活动额度，但不再占 pending；重复物化/释放幂等，物化后禁止 resize。所有 HTTP JSON/multipart 入口与 Responses WebSocket 共用该语义。
+- **安全边界**：heap ceiling 仍全额扣除 response work、write queue、Session cache、response capture 与 5% GC 余量；未新增配置、队列、依赖或阈值放宽。413/503 客户端协议形状保持不变。
+- **可观测性**：`request.memory_rejected` 增加拒绝原因、wire/charge、active/pending 与 heap/ceiling 数值；不记录正文、header 或密钥。
+
 ## 2026-07-25 · 图片上游参数拒绝保持客户端 400（Gateway / Provider execution，docs/05/07，原则 3/5）
 
 - **根因**：OpenAI provider 已把 ZenMux 的真实 HTTP `400` 保存到 `UpstreamError.upstreamStatus`，但共享请求拒绝分类只识别 `invalid_request_error`、`413` 与超大图片提示，遗漏 ZenMux 的结构化 `invalid_params`，导致图片链继续按 provider 故障耗尽并返回 `all_providers_failed / 502`。
@@ -65,14 +72,9 @@
 
 - **恢复窗口**：Admin Session 恢复单次最多预占 response-work 池的一半，允许两次有界恢复并行，也为在线 API 响应保留容量；第三次并发恢复或超过半窗口的会话继续返回 `session_recovery_limited`。保留先准入、后物化正文的顺序，不新增队列、配置或独立内存池。
 
-## 2026-07-23 · Codex Responses 按运行时容量准入并让夜间 SQLite 维护收缩内存（Gateway / Session / Store，docs/02/05/07/10，原则 2/3/7/8）
-
-- **功能边界不降级**：按 operator 要求保留正文/Session 捕获、自动 cleanup/VACUUM 和不限 key 并发；不再用关闭正文、关闭维护或固定并发作为稳定手段。Node 启动时从 V8 heap limit 与 cgroup/process constrained memory 推导活动请求、response work、单条 wire message、写队列、Session head cache、SQLite page cache 与维护 cache；活动请求和 response work 各占动态可分配容量的 20%，部署值随机器容量自动缩放，不写死 MiB。
-- **请求、输出与 Session 热路径**：所有 JSON 入口在 `JSON.parse` 前按真实流式字节申请进程级预算，超出单请求容量返回结构化 413，暂时无余量返回 503；`maxPayload` 与上游 Codex connector 同样随运行时容量变化。客户端 WebSocket 另从 cgroup 或 `RSS + availableMemory` 扣除未来 heap 增长和 SQLite 预留，得到 native ingress 池；本条最初采用的连接生命周期最坏帧预留已由 2026-07-24 条目修正为活动消息真实字节计费，terminal 后 drain 的实现也已由 2026-07-25 条目修正为立即停止并取消内部流。WS 每连接只保留一个正在执行的 `response.create`；所有上游 Codex WS 会话共用 response-work 池，每条消息从入队、等待、`JSON.parse` 到 frame 被消费全程持有 lease。四种 SSE 出口共用有界正文捕获器，容量耗尽只省略该响应 payload、记录 `payload.capture_limited` 并继续转发与保存 telemetry。Session 热写不再重建完整历史；Admin Session 恢复由 SQLite/Postgres 先查行字节元数据、再按 sequence 分页物化，并占用共享 recovery window。Store 的 64 MiB/10,000 revision 仍是跨实例一致的持久数据完整性上限，不是运行时内存值。
-- **夜间维护**：自动 cleanup、自动 VACUUM 与 Admin 手工维护复用同一 Promise 串行链；VACUUM 前进程级 gate 暂停新工作并依次等待 HTTP/body、Memory/Signal producer、OAuth/MCP/Admin cache 后台任务与正文写队列静止，结束或失败都逆序恢复。维护期间除 `/healthz`、`/version` 外的新请求统一返回带 `Retry-After` 的 503，并按 OpenAI、Anthropic、Gemini 或普通 Admin 路径输出对应错误形状；维护 drain 上限为 `min(request_timeout_ms, 120s)`。自动任务每 10 分钟检查一次，只有整段成功才记录当日完成。SQLite 仅在 freelist 至少占总页数 5% 时执行全库重写；worker 启动前要求 `availableMemory()` 至少为动态 process limit 的 25%，并按数据库与 WAL 实际大小检查磁盘。worker 使用独立连接、`temp_store=FILE` 与机器推导的低维护 cache；Compose 默认给 shutdown 30 分钟 grace。未引入守护进程、Redis、消息队列或新依赖。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-23 · Codex Responses 按运行时容量准入并让夜间 SQLite 维护收缩内存（Gateway / Session / Store，docs/02/05/07/10，原则 2/3/7/8）**：机器推导的共享请求/响应/缓存预算、活动消息准入和维护 drain 保留正文捕获与自动维护能力；后续物化重复计账、WebSocket ingress 与 terminal 生命周期修正见顶部更新条目，完整原文通过 git history 回溯。
 - **2026-07-23 · SQLite Session 与 Memory 正文使用兼容 gzip 存储（Store / Memory，docs/07/08，原则 1/3/7）**：SQLite 以 value type + gzip magic 兼容压缩 Session/Memory 正文，不回写历史数据、不在线 VACUUM，完整原文通过 git history 回溯。
 - **2026-07-22 · 全项目文案审查补齐多语言维护闭环（Admin / Portal / Setup，docs/11/12，原则 1/2）**：以 Opus 只读审查和七语言结构测试补齐 Admin、Portal、Setup 文案维护闭环，完整原文通过 git history 回溯。
 - **2026-07-22 · Session 恢复补齐响应快照并限制默认留存范围（Telemetry / Admin requests，docs/07/11，原则 1/3/7/8）**：复用 `session_revisions.response_json` 不新增迁移，四种协议的成功非流式请求保存客户端形态响应快照，流式不新增 SSE 缓冲；单快照 16 MiB、Session 64 MiB 上限，来源恒为 `exact=false` 故 Retry 禁用，完整原文通过 git history 回溯。

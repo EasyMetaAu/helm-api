@@ -263,6 +263,57 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
+  it("admits a safe request while a parsed streaming request remains active", async () => {
+    let heapUsedBytes = 0;
+    const finish = deferred<void>();
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 1_000,
+      maxWireBytes: 1_000,
+      jsonAmplification: 1,
+      minRequestChargeBytes: 1,
+      heapLimitBytes: 220,
+      heapUsedBytes: () => heapUsedBytes,
+    });
+    const { deps } = makeDeps({
+      memoryAdmission,
+      transformRequestOut: (native) => {
+        expect(memoryAdmission.pendingBytes).toBeGreaterThan(0);
+        return {
+          stream: (native as { stream?: unknown }).stream === true,
+          model: "auto",
+          metadata: {},
+        };
+      },
+      streamIR: async function* () {
+        yield { type: "response.created", sequence_number: 0 };
+        await finish.promise;
+        yield { type: "response.completed", sequence_number: 1 };
+      },
+    });
+    const app = buildApp(deps);
+
+    const active = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    expect(active.status).toBe(200);
+    expect(memoryAdmission.reservedBytes).toBeGreaterThan(0);
+    expect(memoryAdmission.pendingBytes).toBe(0);
+
+    heapUsedBytes = 140;
+    const next = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+    expect(next.status).toBe(200);
+
+    finish.resolve(undefined);
+    await active.text();
+    expect(memoryAdmission.reservedBytes).toBe(0);
+  });
+
   it("non-stream: auth → translate-out → route → translate-back, returns Responses JSON", async () => {
     const { deps, order } = makeDeps();
     const app = buildApp(deps);

@@ -6,6 +6,7 @@ import { createApp } from "./app.js";
 import type { LogFields, Logger, LogLevel } from "./logging.js";
 import { HelmHttpError, handleError, openAIErrorEnvelope } from "./middleware/error-handler.js";
 import { requestTimedOut } from "./middleware/limits.js";
+import { RequestAdmissionError } from "./runtime/memory-admission.js";
 
 interface Captured {
   level: LogLevel;
@@ -26,6 +27,7 @@ function mockCtx(logger: Logger, traceId: string): Context<AppEnv> {
   const store: Record<string, unknown> = { trace_id: traceId, logger };
   return {
     get: (k: string) => store[k],
+    header: () => {},
     json: (body: unknown, status?: number) =>
       new Response(JSON.stringify(body), {
         status: status ?? 200,
@@ -134,6 +136,38 @@ describe("createApp: trace_id, logging, error handling", () => {
       level: "error",
       fields: { fault_scope: "gateway_internal" },
     });
+  });
+
+  it("logs the request-memory rejection predicate without request payload data", async () => {
+    const { logger, lines } = fakeLogger();
+    const c = mockCtx(logger, "trace-memory");
+    const res = handleError(
+      new RequestAdmissionError(503, "server_overloaded", "memory busy", {
+        cause: "live_heap",
+        wireBytes: 12,
+        requestedChargeBytes: 72,
+        activeReservedBytes: 144,
+        activeCapacityBytes: 256,
+        pendingBytes: 24,
+        heapUsedBytes: 300,
+        heapCeilingBytes: 350,
+      }),
+      c,
+    );
+
+    expect(res.status).toBe(503);
+    expect(lines.find((line) => line.message === "request.memory_rejected")?.fields).toMatchObject({
+      trace_id: "trace-memory",
+      admission_reason: "live_heap",
+      wire_bytes: 12,
+      requested_charge_bytes: 72,
+      active_reserved_bytes: 144,
+      active_capacity_bytes: 256,
+      pending_bytes: 24,
+      heap_used_bytes: 300,
+      heap_ceiling_bytes: 350,
+    });
+    expect(JSON.stringify(lines)).not.toContain("payload");
   });
 
   it("marks the request context as timed out while late route work continues", async () => {

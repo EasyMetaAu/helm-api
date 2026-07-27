@@ -15,7 +15,11 @@ describe("body memory admission", () => {
     expect(first.ok).toBe(true);
     expect(second.ok).toBe(true);
     expect(admission.reservedBytes).toBe(80);
-    expect(admission.acquire(1)).toMatchObject({ ok: false, reason: "busy" });
+    expect(admission.acquire(1)).toMatchObject({
+      ok: false,
+      reason: "busy",
+      cause: "active_capacity",
+    });
     if (first.ok) first.lease.release();
     if (second.ok) second.lease.release();
     expect(admission.reservedBytes).toBe(0);
@@ -30,7 +34,7 @@ describe("body memory admission", () => {
     const active = admission.acquire(5);
     expect(active.ok).toBe(true);
     admission.pause();
-    expect(admission.acquire(1)).toMatchObject({ ok: false, reason: "busy" });
+    expect(admission.acquire(1)).toMatchObject({ ok: false, reason: "busy", cause: "paused" });
     let idle = false;
     const waiting = admission.waitForIdle().then(() => {
       idle = true;
@@ -69,7 +73,11 @@ describe("body memory admission", () => {
       heapUsedBytes: () => heapUsedBytes,
     });
 
-    expect(admission.acquire(1)).toMatchObject({ ok: false, reason: "busy" });
+    expect(admission.acquire(1)).toMatchObject({
+      ok: false,
+      reason: "busy",
+      cause: "live_heap",
+    });
     heapUsedBytes = 60;
     const admitted = admission.acquire(1);
     expect(admitted.ok).toBe(true);
@@ -78,6 +86,41 @@ describe("body memory admission", () => {
       expect(admitted.lease.resize(1)).toMatchObject({ ok: false, reason: "busy" });
       admitted.lease.release();
     }
+  });
+
+  it("does not double count materialized requests against the live heap", () => {
+    let heapUsedBytes = 61;
+    const admission = createBodyMemoryAdmission({
+      activeRequestBytes: 100,
+      maxWireBytes: 100,
+      jsonAmplification: 2,
+      minRequestChargeBytes: 10,
+      heapLimitBytes: 100,
+      protectedHeapBytes: 20,
+      heapUsedBytes: () => heapUsedBytes,
+    });
+
+    const active = admission.acquire(1);
+    expect(active.ok).toBe(true);
+    if (!active.ok) return;
+    active.lease.materialized();
+    active.lease.materialized();
+    expect(admission.reservedBytes).toBe(10);
+    expect(admission.pendingBytes).toBe(0);
+    expect(active.lease.resize(2)).toMatchObject({
+      ok: false,
+      reason: "busy",
+      cause: "materialized",
+    });
+
+    heapUsedBytes = 69;
+    const next = admission.acquire(1);
+    expect(next.ok).toBe(true);
+    if (next.ok) next.lease.release();
+    active.lease.release();
+    active.lease.release();
+    expect(admission.reservedBytes).toBe(0);
+    expect(admission.pendingBytes).toBe(0);
   });
 
   it("bounds a streaming body before JSON parsing and returns its lease", async () => {
@@ -93,6 +136,9 @@ describe("body memory admission", () => {
     expect(admitted.text).toBe('{"ok":true}');
     expect(Buffer.from(admitted.bytes).toString("utf8")).toBe('{"ok":true}');
     expect(admission.reservedBytes).toBeGreaterThan(0);
+    expect(admission.pendingBytes).toBe(admission.reservedBytes);
+    admitted.materialized();
+    expect(admission.pendingBytes).toBe(0);
     admitted.release();
     expect(admission.reservedBytes).toBe(0);
 

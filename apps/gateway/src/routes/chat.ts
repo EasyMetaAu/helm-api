@@ -451,13 +451,17 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // violations both map to the same structured invalid_request.
     let requestJson = "";
     let raw: unknown;
+    let requestBodyMaterialized: (() => void) | undefined;
     try {
       const admitted =
         deps.memoryAdmission === undefined
           ? null
           : await readAdmittedRequestBody(c.req.raw, deps.memoryAdmission);
       requestJson = admitted?.text ?? (await c.req.text());
-      if (admitted !== null) c.set("requestMemoryRelease", admitted.release);
+      if (admitted !== null) {
+        c.set("requestMemoryRelease", admitted.release);
+        requestBodyMaterialized = admitted.materialized;
+      }
       raw = JSON.parse(requestJson);
     } catch (error) {
       if (error instanceof RequestAdmissionError) {
@@ -531,6 +535,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       if (Number.isFinite(ms) && ms > 0) internal.attempt_timeout_ms = Math.floor(ms);
     }
     const originalMessagesForMemory = [...(internal.messages as IRMessage[])];
+    requestBodyMaterialized?.();
 
     // Persist a (redacted) telemetry record. Fail-open: a telemetry failure must
     // never turn a successful request into a 5xx or break an in-flight stream. The
