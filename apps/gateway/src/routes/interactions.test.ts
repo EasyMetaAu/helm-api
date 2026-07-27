@@ -186,7 +186,7 @@ describe("registerInteractionsRoute", () => {
     expect(json.id).not.toBe("int_client-controlled-trace");
   });
 
-  it("admits bodies even when historical maxWireBytes would have rejected", async () => {
+  it("keeps the hard body limit before JSON parsing", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
       maxWireBytes: 10,
@@ -196,8 +196,11 @@ describe("registerInteractionsRoute", () => {
 
     const res = await post(app, { model: "gemini-3.1-flash-image", input: "a red apple" });
 
-    expect(res.status).toBe(200);
-    expect(nativePassthrough).toHaveBeenCalled();
+    expect(res.status).toBe(413);
+    expect((await res.json()) as unknown).toMatchObject({
+      error: { status: "INVALID_ARGUMENT" },
+    });
+    expect(nativePassthrough).not.toHaveBeenCalled();
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 

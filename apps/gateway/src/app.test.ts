@@ -138,35 +138,33 @@ describe("createApp: trace_id, logging, error handling", () => {
     });
   });
 
-  it("logs the request-memory rejection predicate without request payload data", async () => {
+  it("logs the hard body rejection without stale capacity fields or request payload data", async () => {
     const { logger, lines } = fakeLogger();
     const c = mockCtx(logger, "trace-memory");
     const res = handleError(
-      new RequestAdmissionError(503, "server_overloaded", "memory busy", {
-        cause: "live_heap",
+      new RequestAdmissionError(413, "request_too_large", "body too large", {
+        cause: "wire_limit",
         wireBytes: 12,
         requestedChargeBytes: 72,
+        maxWireBytes: 10,
         activeReservedBytes: 144,
-        activeCapacityBytes: 256,
         pendingBytes: 24,
-        heapUsedBytes: 300,
-        heapCeilingBytes: 350,
       }),
       c,
     );
 
-    expect(res.status).toBe(503);
-    expect(lines.find((line) => line.message === "request.memory_rejected")?.fields).toMatchObject({
+    expect(res.status).toBe(413);
+    expect(lines.find((line) => line.message === "request.body_rejected")?.fields).toMatchObject({
       trace_id: "trace-memory",
-      admission_reason: "live_heap",
+      admission_reason: "wire_limit",
       wire_bytes: 12,
       requested_charge_bytes: 72,
+      max_wire_bytes: 10,
       active_reserved_bytes: 144,
-      active_capacity_bytes: 256,
       pending_bytes: 24,
-      heap_used_bytes: 300,
-      heap_ceiling_bytes: 350,
     });
+    expect(JSON.stringify(lines)).not.toContain("active_capacity_bytes");
+    expect(JSON.stringify(lines)).not.toContain("heap_used_bytes");
     expect(JSON.stringify(lines)).not.toContain("payload");
   });
 

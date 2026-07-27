@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createBodyMemoryAdmission, readAdmittedRequestBody } from "./memory-admission.js";
 
-describe("body memory admission (unlimited capacity, maintenance pause)", () => {
+describe("body memory admission (hard wire limit, unlimited aggregate capacity)", () => {
   it("never rejects for active capacity, even when charge exceeds the historical pool", () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 100,
@@ -70,36 +70,12 @@ describe("body memory admission (unlimited capacity, maintenance pause)", () => 
     expect(admission.reservedBytes).toBe(0);
   });
 
-  it("never rejects for live heap pressure", () => {
-    let heapUsedBytes = 71;
-    const admission = createBodyMemoryAdmission({
-      activeRequestBytes: 100,
-      maxWireBytes: 100,
-      jsonAmplification: 2,
-      minRequestChargeBytes: 10,
-      heapLimitBytes: 100,
-      protectedHeapBytes: 20,
-      heapUsedBytes: () => heapUsedBytes,
-    });
-
-    const admitted = admission.acquire(1);
-    expect(admitted.ok).toBe(true);
-    if (admitted.ok) {
-      heapUsedBytes = 99;
-      expect(admitted.lease.resize(50).ok).toBe(true);
-      admitted.lease.release();
-    }
-  });
-
   it("stops counting pending after materialize and still allows more acquires", () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 100,
       maxWireBytes: 100,
       jsonAmplification: 2,
       minRequestChargeBytes: 10,
-      heapLimitBytes: 100,
-      protectedHeapBytes: 20,
-      heapUsedBytes: () => 90,
     });
 
     const active = admission.acquire(1);
@@ -119,7 +95,7 @@ describe("body memory admission (unlimited capacity, maintenance pause)", () => 
     expect(admission.pendingBytes).toBe(0);
   });
 
-  it("reads any streaming body size without capacity rejection", async () => {
+  it("keeps a deterministic hard wire limit without restoring capacity rejection", async () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 120,
       maxWireBytes: 20,
@@ -138,31 +114,39 @@ describe("body memory admission (unlimited capacity, maintenance pause)", () => 
     admitted.release();
     expect(admission.reservedBytes).toBe(0);
 
-    const large = await readAdmittedRequestBody(
-      new Request("http://helm.test/v1/responses", { method: "POST", body: "x".repeat(21) }),
-      admission,
-    );
-    expect(large.text).toBe("x".repeat(21));
-    large.release();
+    await expect(
+      readAdmittedRequestBody(
+        new Request("http://helm.test/v1/responses", { method: "POST", body: "x".repeat(21) }),
+        admission,
+      ),
+    ).rejects.toMatchObject({ status: 413, code: "request_too_large" });
     expect(admission.reservedBytes).toBe(0);
   });
 
-  it("admits Content-Length beyond historical maxWireBytes and reads the body", async () => {
+  it("rejects Content-Length beyond the hard wire limit before reading", async () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
       maxWireBytes: 10,
       jsonAmplification: 6,
     });
-    const payload = "x".repeat(11);
+    let canceled = false;
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        canceled = true;
+      },
+    });
     const request = new Request("http://helm.test/v1/responses", {
       method: "POST",
-      headers: { "content-length": String(payload.length) },
-      body: payload,
-    });
+      headers: { "content-length": "11" },
+      body,
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
 
-    const admitted = await readAdmittedRequestBody(request, admission);
-    expect(admitted.text).toBe(payload);
-    admitted.release();
+    await expect(readAdmittedRequestBody(request, admission)).rejects.toMatchObject({
+      status: 413,
+      code: "request_too_large",
+    });
+    expect(canceled).toBe(true);
     expect(admission.reservedBytes).toBe(0);
   });
 
@@ -178,16 +162,21 @@ describe("body memory admission (unlimited capacity, maintenance pause)", () => 
         new Request("http://helm.test/v1/responses", { method: "POST", body: "{}" }),
         admission,
       ),
-    ).rejects.toMatchObject({ status: 503, code: "server_overloaded" });
+    ).rejects.toMatchObject({ status: 503, code: "database_maintenance" });
     expect(admission.reservedBytes).toBe(0);
   });
 
-  it("exposes unlimited maxWireBytes regardless of configured historical limits", () => {
+  it("exposes and enforces the configured hard wire limit", () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 1,
       maxWireBytes: 1,
       jsonAmplification: 1,
     });
-    expect(admission.maxWireBytes).toBe(Number.MAX_SAFE_INTEGER);
+    expect(admission.maxWireBytes).toBe(1);
+    expect(admission.acquire(2)).toMatchObject({
+      ok: false,
+      reason: "too_large",
+      cause: "wire_limit",
+    });
   });
 });

@@ -245,7 +245,7 @@ function expectNativeCarrier(
 }
 
 describe("POST /v1/messages (Anthropic inbound)", () => {
-  it("admits message and count-token bodies even when historical maxWireBytes is tiny", async () => {
+  it("keeps the hard body limit for message and count-token requests", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1024,
       maxWireBytes: 1,
@@ -260,9 +260,9 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
         headers: AUTH,
         body: JSON.stringify(REQ_BODY),
       });
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(413);
     }
-    expect(harness.order).toContain("route");
+    expect(harness.order).toEqual(["auth", "auth"]);
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 

@@ -178,10 +178,15 @@ export function installRealtimeWebSocketBridge(
       else if (upstream.readyState !== WebSocket.CLOSED) upstream.terminate();
     };
     const relay = (destination: WebSocket, data: WebSocket.RawData, isBinary: boolean) => {
-      // Capacity/wire unlimited; only maintenance pause rejects new frames.
+      // Aggregate capacity is unlimited; hard wire and maintenance pause remain.
       const acquired = admission.acquire(rawBytes(data));
       if (!acquired.ok) {
-        closeBoth(1013, "realtime frame capacity exceeded");
+        closeBoth(
+          acquired.reason === "too_large" ? 1009 : 1013,
+          acquired.reason === "too_large"
+            ? "realtime frame too large"
+            : "database maintenance in progress",
+        );
         return;
       }
       if (destination.readyState !== WebSocket.OPEN) {

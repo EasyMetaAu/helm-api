@@ -178,7 +178,7 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
     "generateContent",
     "streamGenerateContent",
     "countTokens",
-  ])("admits %s bodies even when historical maxWireBytes is tiny", async (operation) => {
+  ])("keeps the hard body limit for %s", async (operation) => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1024,
       maxWireBytes: 1,
@@ -193,18 +193,9 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
       body: JSON.stringify(REQ_BODY),
     });
 
-    expect(res.status).toBe(200);
-    expect(harness.order[0]).toBe("auth:helm_live_secret");
-    if (operation === "countTokens") {
-      // countTokens path does not always route through the full pipeline.
-      expect(harness.order.length).toBeGreaterThanOrEqual(1);
-    } else {
-      expect(harness.order).toContain("route");
-    }
-    // Streaming responses may still hold a lease until the body is drained.
-    if (operation !== "streamGenerateContent") {
-      expect(memoryAdmission.reservedBytes).toBe(0);
-    }
+    expect(res.status).toBe(413);
+    expect(harness.order).toEqual(["auth:helm_live_secret"]);
+    expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
   it("does not return capacity 503 when the historical shared body budget is exhausted", async () => {

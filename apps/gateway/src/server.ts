@@ -1792,12 +1792,6 @@ export async function buildServer(
   const logger = opts.logger ?? createJsonLogger();
   const responsesWebSocketSessionProof = randomUUID();
   const memoryBudget = runtimeMemoryBudget();
-  const requestProtectedHeapBytes =
-    memoryBudget.responseWorkBytes +
-    memoryBudget.writeQueueBytes +
-    memoryBudget.sessionCacheBytes +
-    memoryBudget.responseCaptureBytes +
-    Math.floor(memoryBudget.heapLimitBytes * 0.05);
   const maintenanceActivityGate = createMaintenanceActivityGate();
   const backgroundTasks = createTrackedBackgroundTasks();
   const requestBodyMemoryAdmission = createBodyMemoryAdmission({
@@ -1805,9 +1799,6 @@ export async function buildServer(
     maxWireBytes: memoryBudget.maxWireBytes,
     jsonAmplification: memoryBudget.jsonAmplification,
     minRequestChargeBytes: memoryBudget.minRequestChargeBytes,
-    heapLimitBytes: memoryBudget.heapLimitBytes,
-    protectedHeapBytes: requestProtectedHeapBytes,
-    heapUsedBytes: () => process.memoryUsage().heapUsed,
   });
   const websocketIngressAdmission = createBodyMemoryAdmission({
     activeRequestBytes: memoryBudget.websocketIngressBytes,
@@ -1818,17 +1809,14 @@ export async function buildServer(
   logger.log("info", "runtime.memory_budget", {
     heap_limit_bytes: memoryBudget.heapLimitBytes,
     process_limit_bytes: memoryBudget.processLimitBytes,
-    active_request_bytes: memoryBudget.activeRequestBytes,
+    request_admission_mode: "wire_limit_only",
     max_wire_bytes: memoryBudget.maxWireBytes,
-    min_request_charge_bytes: memoryBudget.minRequestChargeBytes,
-    request_heap_ceiling_bytes: memoryBudget.heapLimitBytes - requestProtectedHeapBytes,
     write_queue_bytes: memoryBudget.writeQueueBytes,
     session_cache_bytes: memoryBudget.sessionCacheBytes,
     response_capture_bytes: memoryBudget.responseCaptureBytes,
     sse_tail_chars: memoryBudget.sseTailChars,
     sqlite_page_cache_bytes: memoryBudget.sqlitePageCacheBytes,
     sqlite_maintenance_cache_bytes: memoryBudget.sqliteMaintenanceCacheBytes,
-    websocket_ingress_bytes: memoryBudget.websocketIngressBytes,
     websocket_max_payload_bytes: memoryBudget.websocketMaxPayloadBytes,
   });
   const config = loadConfig({ configDir: opts.configDir ?? "./config" });

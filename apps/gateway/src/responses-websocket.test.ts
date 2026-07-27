@@ -190,32 +190,56 @@ describe("Responses websocket bridge", () => {
     expect(ingressAdmission.reservedBytes).toBe(0);
   });
 
-  it("does not close oversized websocket frames for historical machine wire limits", async () => {
+  it("keeps the shared hard wire limit before parsing a websocket message", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
       maxWireBytes: 10,
       jsonAmplification: 6,
     });
-    let fetched = false;
     const baseUrl = await startBridge(
       () => {
-        fetched = true;
-        return new Response(
-          'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n',
-          { headers: { "content-type": "text/event-stream" } },
-        );
+        throw new Error("fetch should not run");
       },
       undefined,
       { memoryAdmission },
     );
     const socket = await connect(`${baseUrl}/v1/responses`);
-    const turn = collectTurn(socket, {
-      type: "response.create",
-      input: "too large for the old 10-byte wire limit",
-      stream: true,
+    const closed = once(socket, "close");
+    socket.send(JSON.stringify({ type: "response.create", input: "too large" }));
+    const [code] = await closed;
+
+    expect(code).toBe(1009);
+    expect(memoryAdmission.reservedBytes).toBe(0);
+  });
+
+  it("reports maintenance pause honestly on an established websocket", async () => {
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 60,
+      maxWireBytes: 1_000,
+      jsonAmplification: 6,
     });
-    await turn;
-    expect(fetched).toBe(true);
+    const baseUrl = await startBridge(
+      () => {
+        throw new Error("fetch should not run while admission is paused");
+      },
+      undefined,
+      { memoryAdmission },
+    );
+    const socket = await connect(`${baseUrl}/v1/responses`);
+    memoryAdmission.pause();
+
+    await expect(
+      collectTurn(socket, { type: "response.create", input: "maintenance", stream: true }),
+    ).resolves.toMatchObject([
+      {
+        type: "error",
+        status: 503,
+        error: {
+          code: "database_maintenance",
+          message: "database maintenance in progress",
+        },
+      },
+    ]);
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 

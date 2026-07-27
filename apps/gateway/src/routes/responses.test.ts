@@ -241,7 +241,7 @@ function expectNativeCarrier(
 }
 
 describe("POST /v1/responses (OpenAI Responses inbound)", () => {
-  it("admits bodies beyond the historical machine-derived wire limit", async () => {
+  it("keeps the hard body limit before translation", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
       maxWireBytes: 10,
@@ -255,21 +255,21 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       body: JSON.stringify(REQ),
     });
 
-    expect(res.status).toBe(200);
-    expect(order).toEqual(expect.arrayContaining(["auth", "translate-out", "route"]));
+    expect(res.status).toBe(413);
+    expect((await res.json()) as unknown).toMatchObject({
+      error: { type: "invalid_request_error", code: "request_too_large" },
+    });
+    expect(order).toEqual(["auth"]);
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
-  it("admits a safe request while a parsed streaming request remains active", async () => {
-    let heapUsedBytes = 0;
+  it("does not reject aggregate capacity while a parsed streaming request remains active", async () => {
     const finish = deferred<void>();
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1_000,
       maxWireBytes: 1_000,
       jsonAmplification: 1,
       minRequestChargeBytes: 1,
-      heapLimitBytes: 220,
-      heapUsedBytes: () => heapUsedBytes,
     });
     const { deps } = makeDeps({
       memoryAdmission,
@@ -298,7 +298,6 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(memoryAdmission.reservedBytes).toBeGreaterThan(0);
     expect(memoryAdmission.pendingBytes).toBe(0);
 
-    heapUsedBytes = 140;
     const next = await app.request("/v1/responses", {
       method: "POST",
       headers: AUTH,

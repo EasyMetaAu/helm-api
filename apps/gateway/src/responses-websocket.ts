@@ -9,6 +9,7 @@ import {
   type BodyMemoryAdmission,
   createBodyMemoryAdmission,
   RequestAdmissionError,
+  requestAdmissionError,
 } from "./runtime/memory-admission.js";
 
 const RESPONSES_WEBSOCKET_PATHS = new Set(["/v1/responses", "/responses", "/openai/v1/responses"]);
@@ -451,7 +452,6 @@ export function installResponsesWebSocketBridge({
       activeRequestBytes: memoryBudget.websocketIngressBytes,
       maxWireBytes: Math.min(admission.maxWireBytes, memoryBudget.websocketMaxPayloadBytes),
       jsonAmplification: 1,
-      // Keep zero-headroom upgrades fail-closed without charging idle sockets for a full frame.
       minRequestChargeBytes: 1,
     });
   const websocketMaxPayloadBytes = Math.max(
@@ -502,29 +502,37 @@ export function installResponsesWebSocketBridge({
       const bytes = Array.isArray(data)
         ? data.reduce((total, chunk) => total + chunk.byteLength, 0)
         : data.byteLength;
-      // Capacity/wire limits are unlimited. Acquire only fails during maintenance
-      // pause so vacuum's waitForIdle can drain in-flight leases.
+      // Aggregate capacity/live-heap checks are disabled. Deterministic wire and
+      // maintenance-pause boundaries remain.
       const ingressAcquired = ingress.acquire(bytes);
       if (!ingressAcquired.ok) {
-        const error = new RequestAdmissionError(
-          503,
-          "server_overloaded",
-          "websocket ingress memory capacity is temporarily exhausted",
+        const error = requestAdmissionError(
+          ingressAcquired.cause,
+          ingress.maxWireBytes,
           ingressAcquired.admission,
+          "websocket message",
         );
-        void sendEnvelope(socket, localErrorEnvelope(error)).catch(() => {});
+        void sendEnvelope(socket, localErrorEnvelope(error))
+          .catch(() => {})
+          .finally(() => {
+            if (error.status === 413) socket.close(1009, "message too big");
+          });
         return;
       }
       const acquired = admission.acquire(bytes);
       if (!acquired.ok) {
         ingressAcquired.lease.release();
-        const error = new RequestAdmissionError(
-          503,
-          "server_overloaded",
-          "request memory capacity is temporarily exhausted",
+        const error = requestAdmissionError(
+          acquired.cause,
+          admission.maxWireBytes,
           acquired.admission,
+          "websocket message",
         );
-        void sendEnvelope(socket, localErrorEnvelope(error)).catch(() => {});
+        void sendEnvelope(socket, localErrorEnvelope(error))
+          .catch(() => {})
+          .finally(() => {
+            if (error.status === 413) socket.close(1009, "message too big");
+          });
         return;
       }
       processing = true;

@@ -170,7 +170,7 @@ describe("POST /v1/chat/completions — usage budgets + OAuth usage + eval overr
     "/chat/completions",
     "/engines/azure-deployment/chat/completions",
     "/openai/deployments/azure-deployment/chat/completions",
-  ])("admits bodies even when historical maxWireBytes would have rejected on %s", async (path) => {
+  ])("keeps the hard body limit on %s", async (path) => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1024,
       maxWireBytes: 1,
@@ -185,11 +185,8 @@ describe("POST /v1/chat/completions — usage budgets + OAuth usage + eval overr
       body: JSON.stringify(NONSTREAM_BODY),
     });
 
-    // Admission must reach the pipeline (execute), not fail closed with 413/503.
-    // This harness may still surface provider/pipeline 5xx after execute.
-    expect(res.status).not.toBe(413);
-    expect(res.status).not.toBe(503);
-    expect(harness.execute).toHaveBeenCalled();
+    expect(res.status).toBe(413);
+    expect(harness.execute).not.toHaveBeenCalled();
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 

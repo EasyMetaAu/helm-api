@@ -191,7 +191,7 @@ describe("registerImagesRoute", () => {
     expect(res.status).toBe(401);
   });
 
-  it("admits bodies even when historical maxWireBytes would have rejected", async () => {
+  it("keeps the hard body limit before JSON parsing", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
       maxWireBytes: 10,
@@ -201,8 +201,11 @@ describe("registerImagesRoute", () => {
 
     const res = await post(app, { model: "gpt-image-2", prompt: "a cat" });
 
-    expect(res.status).toBe(200);
-    expect(imageGeneration).toHaveBeenCalled();
+    expect(res.status).toBe(413);
+    expect((await res.json()) as unknown).toMatchObject({
+      error: { type: "invalid_request_error", code: "request_too_large" },
+    });
+    expect(imageGeneration).not.toHaveBeenCalled();
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 

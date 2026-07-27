@@ -7,13 +7,13 @@
 
 ---
 
-## 2026-07-27 · 关闭请求体内存准入拒绝（Gateway runtime，docs/02/05/07，用户明确要求）
+## 2026-07-27 · 拆除启发式请求内存拒绝并保留硬边界（Gateway runtime，docs/02/05/07，用户明确要求）
 
-- **决定**：按用户要求移除请求体/WebSocket 的 `active_capacity` / `live_heap` / `wire_limit` 容量拒绝。`maxWireBytes` 恒为 `Number.MAX_SAFE_INTEGER`；启动日志里的 `runtime.memory_budget` wire/heap 数字对 body 准入仅供观测，不再强制。
-- **维护 pause 保留**：`pause()` / `resume()` / `waitForIdle()` 仍有效——vacuum 依赖 `pause` + 等 in-flight lease 排空。paused 期间**新** acquire 返回 503（`admission_reason=paused`）；已持有 lease 仍可 resize/release 完成当前请求。这不是容量闸门，是维护排水。
-- **仍保留**：写队列、Session 恢复、response-work 等其他运行时预算；鉴权、并发 lease、rate limit 不变。`RequestAdmissionError` / `request.memory_rejected` 仅在 maintenance pause（及测试注入）路径出现，不再表示 active_capacity/live_heap。
-- **风险（用户已知）**：高并发/大 body 可能直接 OOM 重启，而不是可恢复的 capacity 503。
-- **测试**：unlimited capacity、maintenance pause 可 drain、各协议入口在历史小预算下仍 200 并进入 pipeline。
+- **决定**：按用户要求删除请求体/WebSocket 的 `active_capacity` 与 `live_heap` 启发式拒绝，避免健康流量因重复计账再出现 503。保留确定性的单请求/单帧 `wire_limit`（超限 413 / WebSocket 1009），防止一个合法 key 用超大正文拖垮整个容器。
+- **维护 pause 保留**：vacuum 仍通过 `pause()` + `waitForIdle()` 排空 in-flight lease；paused 期间新请求返回 `database_maintenance`，已持有 lease 可完成 resize/release。既有 WebSocket 也得到维护错误，不再误报“内存耗尽”。
+- **可观测性**：启动日志明确 `request_admission_mode=wire_limit_only`，只报告仍实际执行的 wire/WebSocket 上限；拒绝日志区分 `request.body_rejected` 与 `request.maintenance_rejected`，不再输出已删除的 active/heap 阈值。
+- **仍保留**：写队列、Session 恢复、response-work、鉴权、并发 lease 与 rate limit 不变。高并发聚合压力仍可能由 V8/cgroup 终止进程，但单请求硬边界不允许被取消。
+- **测试**：覆盖 aggregate capacity 不拒绝、HTTP/Responses WebSocket 硬上限、maintenance pause drain 与已建立 WebSocket 的维护错误，并逐协议验证 413/成功路径。
 
 ## 2026-07-25 · 图片上游参数拒绝保持客户端 400（Gateway / Provider execution，docs/05/07，原则 3/5）
 
@@ -75,7 +75,7 @@
 
 ## 历史条目摘要（最新要点）
 
-- **2026-07-27 · 请求内存准入只计算未物化 headroom**：曾修 live-heap 双重计账误拒 503；后被同日“关闭请求体内存准入拒绝”取代，完整原文通过 git history 回溯。
+- **2026-07-27 · 请求内存准入只计算未物化 headroom**：曾修 live-heap 双重计账误拒 503；后被同日“拆除启发式请求内存拒绝并保留硬边界”取代，完整原文通过 git history 回溯。
 - **2026-07-23 · Codex Responses 按运行时容量准入并让夜间 SQLite 维护收缩内存（Gateway / Session / Store，docs/02/05/07/10，原则 2/3/7/8）**：机器推导的共享请求/响应/缓存预算、活动消息准入和维护 drain 保留正文捕获与自动维护能力；后续物化重复计账、WebSocket ingress 与 terminal 生命周期修正见顶部更新条目，完整原文通过 git history 回溯。
 - **2026-07-23 · SQLite Session 与 Memory 正文使用兼容 gzip 存储（Store / Memory，docs/07/08，原则 1/3/7）**：SQLite 以 value type + gzip magic 兼容压缩 Session/Memory 正文，不回写历史数据、不在线 VACUUM，完整原文通过 git history 回溯。
 - **2026-07-22 · 全项目文案审查补齐多语言维护闭环（Admin / Portal / Setup，docs/11/12，原则 1/2）**：以 Opus 只读审查和七语言结构测试补齐 Admin、Portal、Setup 文案维护闭环，完整原文通过 git history 回溯。
