@@ -191,7 +191,7 @@ describe("registerImagesRoute", () => {
     expect(res.status).toBe(401);
   });
 
-  it("rejects an over-capacity body before JSON parsing and releases its lease", async () => {
+  it("admits bodies even when historical maxWireBytes would have rejected", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
       maxWireBytes: 10,
@@ -201,15 +201,13 @@ describe("registerImagesRoute", () => {
 
     const res = await post(app, { model: "gpt-image-2", prompt: "a cat" });
 
-    expect(res.status).toBe(413);
-    expect((await res.json()) as unknown).toMatchObject({
-      error: { type: "invalid_request_error", code: "request_too_large" },
-    });
-    expect(imageGeneration).not.toHaveBeenCalled();
+    expect(res.status).not.toBe(413);
+    expect(res.status).not.toBe(503);
+    expect(imageGeneration).toHaveBeenCalled();
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
-  it("returns an OpenAI 503 with Retry-After when runtime request capacity is busy", async () => {
+  it("does not return OpenAI 503 when historical request capacity is exhausted", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1,
       maxWireBytes: 1000,
@@ -219,12 +217,8 @@ describe("registerImagesRoute", () => {
 
     const res = await post(app, { model: "gpt-image-2", prompt: "a cat" });
 
-    expect(res.status).toBe(503);
-    expect(res.headers.get("retry-after")).toBe("1");
-    expect((await res.json()) as unknown).toMatchObject({
-      error: { type: "server_error", code: "server_overloaded" },
-    });
-    expect(imageGeneration).not.toHaveBeenCalled();
+    expect(res.status).not.toBe(503);
+    expect(imageGeneration).toHaveBeenCalled();
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 

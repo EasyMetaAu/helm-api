@@ -1,6 +1,16 @@
 import type { MiddlewareHandler } from "hono";
 import type { AppEnv } from "../app.js";
 
+/**
+ * Request-body memory admission used to reject work when active capacity or live
+ * heap was exhausted. Lukin disabled that gate: the gateway accepts every body
+ * and lets the process/cgroup decide how much work it can carry.
+ *
+ * Lease bookkeeping remains so maintenance `waitForIdle()` still drains in-flight
+ * reads, and so existing release guards keep working. Acquire/resize never fail
+ * for capacity, heap, wire size, or pause.
+ */
+
 export type RequestAdmissionCause =
   | "wire_limit"
   | "paused"
@@ -32,6 +42,8 @@ export class RequestAdmissionError extends Error {
   }
 }
 
+const UNLIMITED_WIRE_BYTES = Number.MAX_SAFE_INTEGER;
+
 export function createBodyMemoryAdmission(options: {
   activeRequestBytes: number;
   maxWireBytes: number;
@@ -43,60 +55,26 @@ export function createBodyMemoryAdmission(options: {
 }) {
   let reservedBytes = 0;
   let pendingBytes = 0;
-  let paused = false;
   const idleWaiters: Array<() => void> = [];
   const resolveIdle = () => {
     if (reservedBytes !== 0) return;
     for (const resolve of idleWaiters.splice(0)) resolve();
   };
+  // Options are retained for call-site compatibility and optional bookkeeping only.
   const minRequestChargeBytes =
     options.minRequestChargeBytes ?? Math.max(1, Math.floor(options.activeRequestBytes * 0.01));
   const charge = (wireBytes: number): number =>
     Math.max(minRequestChargeBytes, Math.ceil(Math.max(0, wireBytes) * options.jsonAmplification));
-  const heapCeilingBytes = Math.max(
-    0,
-    (options.heapLimitBytes ?? Number.POSITIVE_INFINITY) - (options.protectedHeapBytes ?? 0),
-  );
-  const readHeapUsedBytes = (): number | null => {
-    const heapUsedBytes = options.heapUsedBytes?.();
-    return heapUsedBytes !== undefined && Number.isFinite(heapUsedBytes) && heapUsedBytes >= 0
-      ? heapUsedBytes
-      : null;
-  };
-  const rejection = (
-    cause: RequestAdmissionCause,
-    wireBytes: number,
-    requestedChargeBytes: number,
-    heapUsedBytes = readHeapUsedBytes(),
-  ) => ({
-    ok: false as const,
-    reason: cause === "wire_limit" ? ("too_large" as const) : ("busy" as const),
-    cause,
-    admission: {
-      cause,
-      wireBytes,
-      requestedChargeBytes,
-      activeReservedBytes: reservedBytes,
-      activeCapacityBytes: options.activeRequestBytes,
-      pendingBytes,
-      heapUsedBytes,
-      heapCeilingBytes: Number.isFinite(heapCeilingBytes) ? heapCeilingBytes : null,
-    } satisfies RequestAdmissionSnapshot,
-  });
+  void options.maxWireBytes;
+  void options.heapLimitBytes;
+  void options.protectedHeapBytes;
+  void options.heapUsedBytes;
 
   return {
-    maxWireBytes: options.maxWireBytes,
+    /** Unlimited: WebSocket maxPayload and callers must not size-reject. */
+    maxWireBytes: UNLIMITED_WIRE_BYTES,
     acquire(wireBytes: number) {
       let held = charge(wireBytes);
-      if (paused) return rejection("paused", wireBytes, held);
-      if (wireBytes > options.maxWireBytes) return rejection("wire_limit", wireBytes, held);
-      if (reservedBytes + held > options.activeRequestBytes) {
-        return rejection("active_capacity", wireBytes, held);
-      }
-      const heapUsedBytes = readHeapUsedBytes();
-      if (heapUsedBytes !== null && heapUsedBytes + pendingBytes + held > heapCeilingBytes) {
-        return rejection("live_heap", wireBytes, held, heapUsedBytes);
-      }
       reservedBytes += held;
       pendingBytes += held;
       let released = false;
@@ -105,24 +83,12 @@ export function createBodyMemoryAdmission(options: {
         ok: true as const,
         lease: {
           resize(nextWireBytes: number) {
-            if (released) return rejection("released", nextWireBytes, charge(nextWireBytes));
-            if (isMaterialized) {
-              return rejection("materialized", nextWireBytes, charge(nextWireBytes));
+            if (released || isMaterialized) {
+              return { ok: true as const };
             }
             const next = charge(nextWireBytes);
-            if (nextWireBytes > options.maxWireBytes) {
-              return rejection("wire_limit", nextWireBytes, next);
-            }
-            if (reservedBytes - held + next > options.activeRequestBytes) {
-              return rejection("active_capacity", nextWireBytes, next);
-            }
-            const nextPendingBytes = pendingBytes - held + next;
-            const heapUsedBytes = readHeapUsedBytes();
-            if (heapUsedBytes !== null && heapUsedBytes + nextPendingBytes > heapCeilingBytes) {
-              return rejection("live_heap", nextWireBytes, next, heapUsedBytes);
-            }
             reservedBytes += next - held;
-            pendingBytes = nextPendingBytes;
+            pendingBytes += next - held;
             held = next;
             return { ok: true as const };
           },
@@ -141,12 +107,9 @@ export function createBodyMemoryAdmission(options: {
         },
       };
     },
-    pause() {
-      paused = true;
-    },
-    resume() {
-      paused = false;
-    },
+    /** No-op: admission is never paused for capacity reasons. */
+    pause() {},
+    resume() {},
     waitForIdle(): Promise<void> {
       if (reservedBytes === 0) return Promise.resolve();
       return new Promise((resolve) => idleWaiters.push(resolve));
@@ -178,26 +141,6 @@ declare module "hono" {
   }
 }
 
-function admissionError(
-  reason: "too_large" | "busy",
-  maxWireBytes: number,
-  admission?: RequestAdmissionSnapshot,
-) {
-  return reason === "too_large"
-    ? new RequestAdmissionError(
-        413,
-        "request_too_large",
-        `request body exceeds the runtime capacity limit of ${maxWireBytes} bytes`,
-        admission,
-      )
-    : new RequestAdmissionError(
-        503,
-        "server_overloaded",
-        "request memory capacity is temporarily exhausted",
-        admission,
-      );
-}
-
 export async function readAdmittedRequestBody(
   request: Request,
   admission: BodyMemoryAdmission,
@@ -207,12 +150,7 @@ export async function readAdmittedRequestBody(
     request.headers.has("transfer-encoding") || !Number.isFinite(declared) || declared < 0
       ? 0
       : declared;
-  const acquired = admission.acquire(initialBytes);
-  if (!acquired.ok) {
-    await request.body?.cancel().catch(() => {});
-    throw admissionError(acquired.reason, admission.maxWireBytes, acquired.admission);
-  }
-  const { lease } = acquired;
+  const { lease } = admission.acquire(initialBytes);
   const chunks: Uint8Array[] = [];
   let bytes = 0;
   try {
@@ -222,18 +160,11 @@ export async function readAdmittedRequestBody(
         const next = await reader.read();
         if (next.done) break;
         bytes += next.value.byteLength;
-        const resized = lease.resize(bytes);
-        if (!resized.ok) {
-          await reader.cancel().catch(() => {});
-          throw admissionError(resized.reason, admission.maxWireBytes, resized.admission);
-        }
+        lease.resize(bytes);
         chunks.push(next.value);
       }
     }
-    const resized = lease.resize(bytes);
-    if (!resized.ok) {
-      throw admissionError(resized.reason, admission.maxWireBytes, resized.admission);
-    }
+    lease.resize(bytes);
     const body = Buffer.concat(chunks, bytes);
     return {
       text: body.toString("utf8"),

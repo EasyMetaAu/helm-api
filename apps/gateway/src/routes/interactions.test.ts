@@ -186,7 +186,7 @@ describe("registerInteractionsRoute", () => {
     expect(json.id).not.toBe("int_client-controlled-trace");
   });
 
-  it("rejects an over-capacity body before JSON parsing and releases its lease", async () => {
+  it("admits bodies even when historical maxWireBytes would have rejected", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
       maxWireBytes: 10,
@@ -196,15 +196,13 @@ describe("registerInteractionsRoute", () => {
 
     const res = await post(app, { model: "gemini-3.1-flash-image", input: "a red apple" });
 
-    expect(res.status).toBe(413);
-    expect((await res.json()) as unknown).toMatchObject({
-      error: { status: "INVALID_ARGUMENT" },
-    });
-    expect(nativePassthrough).not.toHaveBeenCalled();
+    expect(res.status).not.toBe(413);
+    expect(res.status).not.toBe(503);
+    expect(nativePassthrough).toHaveBeenCalled();
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
-  it("returns a Gemini 503 with Retry-After when runtime request capacity is busy", async () => {
+  it("does not return Gemini 503 when historical request capacity is exhausted", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1,
       maxWireBytes: 1000,
@@ -214,12 +212,8 @@ describe("registerInteractionsRoute", () => {
 
     const res = await post(app, { model: "gemini-3.1-flash-image", input: "a red apple" });
 
-    expect(res.status).toBe(503);
-    expect(res.headers.get("retry-after")).toBe("1");
-    expect((await res.json()) as unknown).toMatchObject({
-      error: { status: "UNAVAILABLE" },
-    });
-    expect(nativePassthrough).not.toHaveBeenCalled();
+    expect(res.status).not.toBe(503);
+    expect(nativePassthrough).toHaveBeenCalled();
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 

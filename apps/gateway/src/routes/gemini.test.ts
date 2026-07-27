@@ -178,7 +178,7 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
     "generateContent",
     "streamGenerateContent",
     "countTokens",
-  ])("rejects oversized %s bodies before JSON.parse", async (operation) => {
+  ])("admits %s bodies even when historical maxWireBytes is tiny", async (operation) => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1024,
       maxWireBytes: 1,
@@ -193,12 +193,16 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
       body: JSON.stringify(REQ_BODY),
     });
 
-    expect(res.status).toBe(413);
-    expect(harness.order).toEqual(["auth:helm_live_secret"]);
-    expect(memoryAdmission.reservedBytes).toBe(0);
+    expect(res.status).not.toBe(413);
+    expect(res.status).not.toBe(503);
+    expect(harness.order[0]).toBe("auth:helm_live_secret");
+    // Streaming responses may still hold a lease until the body is drained.
+    if (operation !== "streamGenerateContent") {
+      expect(memoryAdmission.reservedBytes).toBe(0);
+    }
   });
 
-  it("returns 503 with Retry-After when the shared body budget is occupied", async () => {
+  it("does not return 503 when the historical shared body budget is exhausted", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1,
       maxWireBytes: 1024,
@@ -213,9 +217,9 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
       body: JSON.stringify(REQ_BODY),
     });
 
-    expect(res.status).toBe(503);
-    expect(res.headers.get("retry-after")).toBe("1");
-    expect(harness.order).toEqual(["auth:helm_live_secret"]);
+    expect(res.status).not.toBe(503);
+    expect(harness.order[0]).toBe("auth:helm_live_secret");
+    expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
   it("non-stream: auth → translate-out → route → translate-back, returns Gemini JSON", async () => {

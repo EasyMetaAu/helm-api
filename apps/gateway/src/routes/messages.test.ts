@@ -245,7 +245,7 @@ function expectNativeCarrier(
 }
 
 describe("POST /v1/messages (Anthropic inbound)", () => {
-  it("rejects oversized message and count-token bodies before JSON.parse", async () => {
+  it("admits message and count-token bodies even when historical maxWireBytes is tiny", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1024,
       maxWireBytes: 1,
@@ -260,13 +260,14 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
         headers: AUTH,
         body: JSON.stringify(REQ_BODY),
       });
-      expect(res.status).toBe(413);
+      expect(res.status).not.toBe(413);
+      expect(res.status).not.toBe(503);
     }
-    expect(harness.order).toEqual(["auth", "auth"]);
+    expect(harness.order[0]).toBe("auth");
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
-  it("returns 503 with Retry-After when the shared body budget is occupied", async () => {
+  it("does not return 503 when the historical shared body budget is exhausted", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1,
       maxWireBytes: 1024,
@@ -281,9 +282,9 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
       body: JSON.stringify(REQ_BODY),
     });
 
-    expect(res.status).toBe(503);
-    expect(res.headers.get("retry-after")).toBe("1");
-    expect(harness.order).toEqual(["auth"]);
+    expect(res.status).not.toBe(503);
+    expect(harness.order[0]).toBe("auth");
+    expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
   it("accepts the Claude Code event logging compatibility endpoint after auth", async () => {

@@ -502,49 +502,10 @@ export function installResponsesWebSocketBridge({
       const bytes = Array.isArray(data)
         ? data.reduce((total, chunk) => total + chunk.byteLength, 0)
         : data.byteLength;
+      // Memory admission is unlimited: acquire always succeeds and only tracks
+      // leases for maintenance waitForIdle / release bookkeeping.
       const ingressAcquired = ingress.acquire(bytes);
-      if (!ingressAcquired.ok) {
-        const error =
-          ingressAcquired.reason === "too_large"
-            ? new RequestAdmissionError(
-                413,
-                "request_too_large",
-                `websocket message exceeds the runtime capacity limit of ${ingress.maxWireBytes} bytes`,
-              )
-            : new RequestAdmissionError(
-                503,
-                "server_overloaded",
-                "websocket ingress memory capacity is temporarily exhausted",
-              );
-        void sendEnvelope(socket, localErrorEnvelope(error))
-          .catch(() => {})
-          .finally(() => {
-            if (error.status === 413) socket.close(1009, "message too big");
-          });
-        return;
-      }
       const acquired = admission.acquire(bytes);
-      if (!acquired.ok) {
-        ingressAcquired.lease.release();
-        const error =
-          acquired.reason === "too_large"
-            ? new RequestAdmissionError(
-                413,
-                "request_too_large",
-                `websocket message exceeds the runtime capacity limit of ${admission.maxWireBytes} bytes`,
-              )
-            : new RequestAdmissionError(
-                503,
-                "server_overloaded",
-                "request memory capacity is temporarily exhausted",
-              );
-        void sendEnvelope(socket, localErrorEnvelope(error))
-          .catch(() => {})
-          .finally(() => {
-            if (error.status === 413) socket.close(1009, "message too big");
-          });
-        return;
-      }
       processing = true;
       const turnController = new AbortController();
       activeTurnController = turnController;
@@ -585,27 +546,7 @@ export function installResponsesWebSocketBridge({
 
   const onUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer) => {
     if (!isResponsesWebSocketPath(request.url)) return;
-    const ingressLease = ingress.acquire(0);
-    if (!ingressLease.ok) {
-      const error = new RequestAdmissionError(
-        503,
-        "server_overloaded",
-        "websocket ingress memory capacity is temporarily exhausted",
-      );
-      const onRejectedSocketError = () => socket.destroy();
-      socket.once("error", onRejectedSocketError);
-      void rejectUpgrade(
-        socket,
-        new Response(JSON.stringify(localErrorEnvelope(error)), {
-          status: error.status,
-          headers: { "content-type": "application/json", "retry-after": "1" },
-        }),
-      )
-        .catch(() => socket.destroy())
-        .finally(() => socket.off("error", onRejectedSocketError));
-      return;
-    }
-    ingressLease.lease.release();
+    // Unlimited admission: no upgrade-time capacity probe / rejection.
     const onPreflightSocketError = () => {
       socket.destroy();
     };

@@ -7,12 +7,12 @@
 
 ---
 
-## 2026-07-27 · 请求内存准入只计算未物化 headroom（Gateway runtime，docs/02/05/07/10，原则 3/7/8）
+## 2026-07-27 · 关闭请求体内存准入拒绝（Gateway runtime，docs/02/05/07，用户明确要求）
 
-- **根因**：实时 V8 高水位把 `heapUsed + active reservations` 相加，但长 Responses SSE/WebSocket 请求在 `JSON.parse` 后已进入 `heapUsed`，其 reservation 仍持有到流结束，导致同一请求被重复计账并高频误拒为 503。
-- **修复**：活动请求总额度继续由 `reservedBytes` 和 `activeRequestBytes` 限制；live heap 只叠加尚未完成正文读取、schema 校验与同步协议物化的 `pendingBytes`。lease 物化后仍占活动额度，但不再占 pending；重复物化/释放幂等，物化后禁止 resize。所有 HTTP JSON/multipart 入口与 Responses WebSocket 共用该语义。
-- **安全边界**：heap ceiling 仍全额扣除 response work、write queue、Session cache、response capture 与 5% GC 余量；未新增配置、队列、依赖或阈值放宽。413/503 客户端协议形状保持不变。
-- **可观测性**：`request.memory_rejected` 增加拒绝原因、wire/charge、active/pending 与 heap/ceiling 数值；不记录正文、header 或密钥。
+- **决定**：按用户要求移除请求体/WebSocket 入口的 `active_capacity` / `live_heap` / `wire_limit` / `pause` 拒绝。`createBodyMemoryAdmission` 只保留 lease 记账（供 `waitForIdle` 与 release guard），`maxWireBytes` 恒为 `Number.MAX_SAFE_INTEGER`；HTTP 与 Responses/Realtime WebSocket 不再因该闸门返回 413/503。
+- **仍保留**：写队列、Session 恢复、response-work 等**其他**运行时预算（与本次 body 准入无关）；鉴权、并发 lease、rate limit 不变。
+- **风险（用户已知）**：小内存容器上高并发/大 body 可能直接触发 V8/cgroup OOM 重启，而不是可恢复的 `server_overloaded`。机器“有多大跑多大”，靠 OS/cgroup 自然上限，不再前置拒流。
+- **测试**：定向 Vitest 覆盖 unlimited admission 与 chat/messages/gemini/images/interactions/responses/websocket 不再因历史预算拒绝。
 
 ## 2026-07-25 · 图片上游参数拒绝保持客户端 400（Gateway / Provider execution，docs/05/07，原则 3/5）
 
@@ -74,6 +74,7 @@
 
 ## 历史条目摘要（最新要点）
 
+- **2026-07-27 · 请求内存准入只计算未物化 headroom**：曾修 live-heap 双重计账误拒 503；后被同日“关闭请求体内存准入拒绝”取代，完整原文通过 git history 回溯。
 - **2026-07-23 · Codex Responses 按运行时容量准入并让夜间 SQLite 维护收缩内存（Gateway / Session / Store，docs/02/05/07/10，原则 2/3/7/8）**：机器推导的共享请求/响应/缓存预算、活动消息准入和维护 drain 保留正文捕获与自动维护能力；后续物化重复计账、WebSocket ingress 与 terminal 生命周期修正见顶部更新条目，完整原文通过 git history 回溯。
 - **2026-07-23 · SQLite Session 与 Memory 正文使用兼容 gzip 存储（Store / Memory，docs/07/08，原则 1/3/7）**：SQLite 以 value type + gzip magic 兼容压缩 Session/Memory 正文，不回写历史数据、不在线 VACUUM，完整原文通过 git history 回溯。
 - **2026-07-22 · 全项目文案审查补齐多语言维护闭环（Admin / Portal / Setup，docs/11/12，原则 1/2）**：以 Opus 只读审查和七语言结构测试补齐 Admin、Portal、Setup 文案维护闭环，完整原文通过 git history 回溯。
