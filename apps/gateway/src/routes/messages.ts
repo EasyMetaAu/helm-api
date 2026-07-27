@@ -319,13 +319,17 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
       });
     }
     let native: unknown;
+    let requestBodyMaterialized: (() => void) | undefined;
     try {
       const admitted =
         deps.memoryAdmission === undefined
           ? null
           : await readAdmittedRequestBody(c.req.raw, deps.memoryAdmission);
       const requestJson = admitted?.text ?? (await c.req.text());
-      if (admitted !== null) c.set("requestMemoryRelease", admitted.release);
+      if (admitted !== null) {
+        c.set("requestMemoryRelease", admitted.release);
+        requestBodyMaterialized = admitted.materialized;
+      }
       native = JSON.parse(requestJson);
     } catch (error) {
       if (error instanceof RequestAdmissionError) return sendAdmissionError(c, error);
@@ -350,6 +354,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
         trace_id: traceId,
       });
     }
+    requestBodyMaterialized?.();
     if (deps.countTokens !== undefined) {
       try {
         return c.json(await deps.countTokens(obj, identity, requestSignal(c)));
@@ -451,13 +456,17 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     //    it never 5xx's as an upstream fault.
     let requestJson = "";
     let native: unknown;
+    let requestBodyMaterialized: (() => void) | undefined;
     try {
       const admitted =
         deps.memoryAdmission === undefined
           ? null
           : await readAdmittedRequestBody(c.req.raw, deps.memoryAdmission);
       requestJson = admitted?.text ?? (await c.req.text());
-      if (admitted !== null) c.set("requestMemoryRelease", admitted.release);
+      if (admitted !== null) {
+        c.set("requestMemoryRelease", admitted.release);
+        requestBodyMaterialized = admitted.materialized;
+      }
       native = JSON.parse(requestJson);
     } catch (error) {
       if (error instanceof RequestAdmissionError) return sendAdmissionError(c, error);
@@ -561,6 +570,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
       }
       ir.metadata.native_request = nativeCarrier;
     }
+    requestBodyMaterialized?.();
 
     // 3) Routing pipeline (framework-agnostic core). The per-request abort signal
     //    rides along so a client disconnect is a non-provider fault, not a breaker

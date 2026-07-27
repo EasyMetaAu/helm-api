@@ -219,6 +219,42 @@ describe("Responses websocket bridge", () => {
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
+  it("materializes the shared request lease after the internal HTTP parser returns", async () => {
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 1_000,
+      maxWireBytes: 1_000,
+      jsonAmplification: 1,
+      minRequestChargeBytes: 1,
+    });
+    let fetched!: () => void;
+    const fetchStarted = new Promise<void>((resolve) => {
+      fetched = resolve;
+    });
+    const baseUrl = await startBridge(
+      (request) => {
+        fetched();
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              request.signal.addEventListener("abort", () => controller.close(), { once: true });
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      },
+      undefined,
+      { memoryAdmission },
+    );
+    const socket = await connect(`${baseUrl}/v1/responses`);
+
+    socket.send(JSON.stringify({ type: "response.create", input: [], stream: true }));
+    await fetchStarted;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(memoryAdmission.reservedBytes).toBeGreaterThan(0);
+    expect(memoryAdmission.pendingBytes).toBe(0);
+  });
+
   it.each([
     "/v1/responses",
     "/responses",

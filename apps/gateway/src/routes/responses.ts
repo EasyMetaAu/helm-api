@@ -894,7 +894,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
   const parseJsonBodyWithRaw = async (
     c: Context<AppEnv>,
     traceId: string,
-  ): Promise<{ native: unknown; rawBody: string }> => {
+  ): Promise<{ native: unknown; rawBody: string; materialized?: () => void }> => {
     const trustedWebSocketSelfCall =
       deps.responsesWebSocketSessionProof !== undefined &&
       c.req.header(CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER) === deps.responsesWebSocketSessionProof;
@@ -905,14 +905,16 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     const rawBody = admitted?.text ?? (await c.req.text());
     if (admitted !== null) c.set("requestMemoryRelease", admitted.release);
     try {
-      return { native: JSON.parse(rawBody), rawBody };
+      const native: unknown = JSON.parse(rawBody);
+      return {
+        native,
+        rawBody,
+        ...(admitted === null ? {} : { materialized: admitted.materialized }),
+      };
     } catch {
       throw helmError("invalid_request", "malformed JSON request body", traceId);
     }
   };
-
-  const parseJsonBody = async (c: Context<AppEnv>, traceId: string): Promise<unknown> =>
-    (await parseJsonBodyWithRaw(c, traceId)).native;
 
   const handleProviderLifecycle =
     (operation: "retrieve" | "delete" | "cancel" | "inputItems") => async (c: Context<AppEnv>) => {
@@ -949,13 +951,14 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     const identity = await authenticateResponsesRequest(c);
     await enforceRateLimit(c, identity);
     await acquireConcurrency(c, identity);
-    const { native, rawBody } = await parseJsonBodyWithRaw(c, traceId);
+    const { native, rawBody, materialized } = await parseJsonBodyWithRaw(c, traceId);
     const method = deps.lifecycle?.compact;
     if (method === undefined) throw lifecycleUnsupported("compact", traceId);
     let carrier = nativeCarrierForRequest(c, deps, native, rawBody);
     if (carrier === null) {
       throw helmError("invalid_request", "invalid Responses compact request body", traceId);
     }
+    materialized?.();
     const budgetCaps = identity.caps?.budget;
     if (deps.budget !== undefined && budgetCaps !== undefined) {
       const check = await deps.budget.gate.check({
@@ -1088,7 +1091,8 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
   const handleInputTokens = async (c: Context<AppEnv>) => {
     const traceId = c.get("trace_id");
     const identity = await authenticateResponsesRequest(c);
-    const native = await parseJsonBody(c, traceId);
+    const { native, materialized } = await parseJsonBodyWithRaw(c, traceId);
+    materialized?.();
     const providerMethod = deps.lifecycle?.inputTokens;
     if (providerMethod !== undefined) {
       const body = await providerMethod(native, identity, requestSignal(c));
@@ -1119,7 +1123,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     // 2) Parse + translate inbound. A malformed JSON body OR a structurally invalid
     //    Responses request (the transformer's Zod parse throws) is a CLIENT error →
     //    400 invalid_request, before routing (docs/07, principle 2 fail-closed).
-    const { native, rawBody: requestJson } = await parseJsonBodyWithRaw(c, traceId);
+    const { native, rawBody: requestJson, materialized } = await parseJsonBodyWithRaw(c, traceId);
     let ir: ResponsesIRLike;
     try {
       ir = deps.transformer.transformRequestOut(native);
@@ -1127,6 +1131,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       const detail = err instanceof Error ? err.message : "invalid Responses request";
       throw helmError("invalid_request", detail, traceId);
     }
+    materialized?.();
     // Memory scope (docs/08 Phase 1): parse the four memory headers at this HTTP
     // boundary and stamp them onto the IR metadata bag (mirrors /v1/messages), so
     // the SHARED pipeline's observe phase can read the scope off ir.metadata

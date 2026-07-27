@@ -110,12 +110,16 @@ export function registerRealtimeRoutes(app: Hono<AppEnv>, deps: RealtimeRouteDep
     }
 
     let bytes: Uint8Array;
+    let requestBodyMaterialized: (() => void) | undefined;
     try {
       const admitted = deps.memoryAdmission
         ? await readAdmittedRequestBody(c.req.raw, deps.memoryAdmission)
         : null;
       bytes = admitted?.bytes ?? new Uint8Array(await c.req.arrayBuffer());
-      if (admitted) c.set("requestMemoryRelease", admitted.release);
+      if (admitted) {
+        c.set("requestMemoryRelease", admitted.release);
+        requestBodyMaterialized = admitted.materialized;
+      }
     } catch (cause) {
       if (cause instanceof RequestAdmissionError) {
         if (cause.status === 503) c.header("retry-after", "1");
@@ -152,6 +156,7 @@ export function registerRealtimeRoutes(app: Hono<AppEnv>, deps: RealtimeRouteDep
       }
       session = parsed.data;
       model = parsed.data.model;
+      requestBodyMaterialized?.();
     } catch {
       return error(c, 400, "realtime call contains malformed multipart fields", "invalid_request");
     }

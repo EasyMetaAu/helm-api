@@ -313,6 +313,7 @@ async function forwardResponse(
   signal: AbortSignal,
   sessionId: string,
   sessionProof: string | undefined,
+  materialized: () => void,
 ): Promise<boolean> {
   const headers = normalizedFetchHeaders(request);
   headers.set("accept", "text/event-stream");
@@ -321,14 +322,19 @@ async function forwardResponse(
   if (sessionProof !== undefined) {
     headers.set(CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER, sessionProof);
   }
-  const response = await fetch(
-    new Request(requestUrl(request), {
-      method: "POST",
-      headers,
-      body: JSON.stringify(websocketRequestBody(data)),
-      signal,
-    }),
-  );
+  let response: Response;
+  try {
+    response = await fetch(
+      new Request(requestUrl(request), {
+        method: "POST",
+        headers,
+        body: JSON.stringify(websocketRequestBody(data)),
+        signal,
+      }),
+    );
+  } finally {
+    materialized();
+  }
   if (!response.ok) {
     await sendEnvelope(socket, await responseErrorEnvelope(response));
     return true;
@@ -554,6 +560,7 @@ export function installResponsesWebSocketBridge({
             turnController.signal,
             sessionId,
             sessionProof,
+            acquired.lease.materialized,
           );
           if (invalidatesSession) {
             socket.close(1000, "upstream session reset");

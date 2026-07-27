@@ -269,6 +269,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         if (editing) editInput = { kind: "json", body: parsed.data };
         else generationBody = parsed.data;
       }
+      admitted?.materialized();
     } catch (error) {
       if (error instanceof RequestAdmissionError) {
         if (error.status === 503) c.header("retry-after", "1");
