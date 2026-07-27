@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createBodyMemoryAdmission, readAdmittedRequestBody } from "./memory-admission.js";
 
-describe("body memory admission (unlimited)", () => {
+describe("body memory admission (unlimited capacity, maintenance pause)", () => {
   it("never rejects for active capacity, even when charge exceeds the historical pool", () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 100,
@@ -23,7 +23,7 @@ describe("body memory admission (unlimited)", () => {
     expect(admission.reservedBytes).toBe(0);
   });
 
-  it("ignores pause for new acquires and still waits for active leases", async () => {
+  it("blocks new acquires while paused so waitForIdle can drain active leases", async () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
       maxWireBytes: 10,
@@ -32,24 +32,29 @@ describe("body memory admission (unlimited)", () => {
     const active = admission.acquire(5);
     expect(active.ok).toBe(true);
     admission.pause();
-    const second = admission.acquire(1);
-    expect(second.ok).toBe(true);
+    expect(admission.acquire(1)).toMatchObject({
+      ok: false,
+      reason: "busy",
+      cause: "paused",
+    });
     let idle = false;
     const waiting = admission.waitForIdle().then(() => {
       idle = true;
     });
     await Promise.resolve();
     expect(idle).toBe(false);
-    if (active.ok) active.lease.release();
-    await Promise.resolve();
-    expect(idle).toBe(false);
-    if (second.ok) second.lease.release();
+    if (active.ok) {
+      // In-flight lease may still resize while paused.
+      expect(active.lease.resize(8).ok).toBe(true);
+      active.lease.release();
+    }
     await waiting;
     expect(idle).toBe(true);
     admission.resume();
+    expect(admission.acquire(1).ok).toBe(true);
   });
 
-  it("tracks charge for bookkeeping but never returns busy", () => {
+  it("tracks charge for bookkeeping but never returns capacity-busy", () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
       maxWireBytes: 10,
@@ -58,8 +63,11 @@ describe("body memory admission (unlimited)", () => {
     const first = admission.acquire(6);
     expect(first.ok).toBe(true);
     expect(admission.reservedBytes).toBe(36);
-    expect(admission.acquire(5).ok).toBe(true);
+    const second = admission.acquire(5);
+    expect(second.ok).toBe(true);
     if (first.ok) first.lease.release();
+    if (second.ok) second.lease.release();
+    expect(admission.reservedBytes).toBe(0);
   });
 
   it("never rejects for live heap pressure", () => {
@@ -155,6 +163,22 @@ describe("body memory admission (unlimited)", () => {
     const admitted = await readAdmittedRequestBody(request, admission);
     expect(admitted.text).toBe(payload);
     admitted.release();
+    expect(admission.reservedBytes).toBe(0);
+  });
+
+  it("rejects readAdmittedRequestBody while paused for maintenance", async () => {
+    const admission = createBodyMemoryAdmission({
+      activeRequestBytes: 60,
+      maxWireBytes: 10,
+      jsonAmplification: 6,
+    });
+    admission.pause();
+    await expect(
+      readAdmittedRequestBody(
+        new Request("http://helm.test/v1/responses", { method: "POST", body: "{}" }),
+        admission,
+      ),
+    ).rejects.toMatchObject({ status: 503, code: "server_overloaded" });
     expect(admission.reservedBytes).toBe(0);
   });
 

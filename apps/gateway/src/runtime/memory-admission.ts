@@ -2,13 +2,15 @@ import type { MiddlewareHandler } from "hono";
 import type { AppEnv } from "../app.js";
 
 /**
- * Request-body memory admission used to reject work when active capacity or live
- * heap was exhausted. Lukin disabled that gate: the gateway accepts every body
- * and lets the process/cgroup decide how much work it can carry.
+ * Request-body memory admission.
  *
- * Lease bookkeeping remains so maintenance `waitForIdle()` still drains in-flight
- * reads, and so existing release guards keep working. Acquire/resize never fail
- * for capacity, heap, wire size, or pause.
+ * Capacity / live-heap / wire-size gates are intentionally disabled: the gateway
+ * accepts every body and lets the process/cgroup decide how much work it can
+ * carry. Lease bookkeeping remains so vacuum can `pause()` + `waitForIdle()`.
+ *
+ * The only remaining rejection is **maintenance pause**: while vacuum (or any
+ * caller) has paused admission, new acquires fail with `server_overloaded` so
+ * in-flight leases can drain and `waitForIdle()` can complete.
  */
 
 export type RequestAdmissionCause =
@@ -55,12 +57,14 @@ export function createBodyMemoryAdmission(options: {
 }) {
   let reservedBytes = 0;
   let pendingBytes = 0;
+  let paused = false;
   const idleWaiters: Array<() => void> = [];
   const resolveIdle = () => {
     if (reservedBytes !== 0) return;
     for (const resolve of idleWaiters.splice(0)) resolve();
   };
-  // Options are retained for call-site compatibility and optional bookkeeping only.
+  // Historical options retained for call-site compatibility / bookkeeping only.
+  // They do not enforce capacity, heap, or wire limits.
   const minRequestChargeBytes =
     options.minRequestChargeBytes ?? Math.max(1, Math.floor(options.activeRequestBytes * 0.01));
   const charge = (wireBytes: number): number =>
@@ -70,15 +74,34 @@ export function createBodyMemoryAdmission(options: {
   void options.protectedHeapBytes;
   void options.heapUsedBytes;
 
+  const pauseRejection = (wireBytes: number, requestedChargeBytes: number) =>
+    ({
+      ok: false as const,
+      reason: "busy" as const,
+      cause: "paused" as const,
+      admission: {
+        cause: "paused" as const,
+        wireBytes,
+        requestedChargeBytes,
+        activeReservedBytes: reservedBytes,
+        activeCapacityBytes: options.activeRequestBytes,
+        pendingBytes,
+        heapUsedBytes: null,
+        heapCeilingBytes: null,
+      } satisfies RequestAdmissionSnapshot,
+    }) as const;
+
   return {
     /** Unlimited: WebSocket maxPayload and callers must not size-reject. */
     maxWireBytes: UNLIMITED_WIRE_BYTES,
     acquire(wireBytes: number) {
-      let held = charge(wireBytes);
+      const held = charge(wireBytes);
+      if (paused) return pauseRejection(wireBytes, held);
       reservedBytes += held;
       pendingBytes += held;
       let released = false;
       let isMaterialized = false;
+      let current = held;
       return {
         ok: true as const,
         lease: {
@@ -86,30 +109,36 @@ export function createBodyMemoryAdmission(options: {
             if (released || isMaterialized) {
               return { ok: true as const };
             }
+            // In-flight leases may still grow while maintenance is paused so the
+            // current body/frame can finish; only *new* acquires are rejected.
             const next = charge(nextWireBytes);
-            reservedBytes += next - held;
-            pendingBytes += next - held;
-            held = next;
+            reservedBytes += next - current;
+            pendingBytes += next - current;
+            current = next;
             return { ok: true as const };
           },
           materialized() {
             if (released || isMaterialized) return;
             isMaterialized = true;
-            pendingBytes -= held;
+            pendingBytes -= current;
           },
           release() {
             if (released) return;
             released = true;
-            reservedBytes -= held;
-            if (!isMaterialized) pendingBytes -= held;
+            reservedBytes -= current;
+            if (!isMaterialized) pendingBytes -= current;
             resolveIdle();
           },
         },
       };
     },
-    /** No-op: admission is never paused for capacity reasons. */
-    pause() {},
-    resume() {},
+    /** Maintenance only: block new acquires so waitForIdle can drain. */
+    pause() {
+      paused = true;
+    },
+    resume() {
+      paused = false;
+    },
     waitForIdle(): Promise<void> {
       if (reservedBytes === 0) return Promise.resolve();
       return new Promise((resolve) => idleWaiters.push(resolve));
@@ -141,6 +170,16 @@ declare module "hono" {
   }
 }
 
+/** Thrown only when admission is paused for maintenance (not capacity). */
+function pauseError(admission?: RequestAdmissionSnapshot) {
+  return new RequestAdmissionError(
+    503,
+    "server_overloaded",
+    "request memory capacity is temporarily exhausted",
+    admission,
+  );
+}
+
 export async function readAdmittedRequestBody(
   request: Request,
   admission: BodyMemoryAdmission,
@@ -150,7 +189,12 @@ export async function readAdmittedRequestBody(
     request.headers.has("transfer-encoding") || !Number.isFinite(declared) || declared < 0
       ? 0
       : declared;
-  const { lease } = admission.acquire(initialBytes);
+  const acquired = admission.acquire(initialBytes);
+  if (!acquired.ok) {
+    await request.body?.cancel().catch(() => {});
+    throw pauseError(acquired.admission);
+  }
+  const { lease } = acquired;
   const chunks: Uint8Array[] = [];
   let bytes = 0;
   try {

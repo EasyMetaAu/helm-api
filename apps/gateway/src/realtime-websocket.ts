@@ -178,8 +178,12 @@ export function installRealtimeWebSocketBridge(
       else if (upstream.readyState !== WebSocket.CLOSED) upstream.terminate();
     };
     const relay = (destination: WebSocket, data: WebSocket.RawData, isBinary: boolean) => {
-      // Unlimited admission: track lease for bookkeeping only, never reject frames.
+      // Capacity/wire unlimited; only maintenance pause rejects new frames.
       const acquired = admission.acquire(rawBytes(data));
+      if (!acquired.ok) {
+        closeBoth(1013, "realtime frame capacity exceeded");
+        return;
+      }
       if (destination.readyState !== WebSocket.OPEN) {
         acquired.lease.release();
         closeBoth(1011, "realtime peer closed");

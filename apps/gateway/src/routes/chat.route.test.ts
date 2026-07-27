@@ -185,13 +185,15 @@ describe("POST /v1/chat/completions — usage budgets + OAuth usage + eval overr
       body: JSON.stringify(NONSTREAM_BODY),
     });
 
+    // Admission must reach the pipeline (execute), not fail closed with 413/503.
+    // This harness may still surface provider/pipeline 5xx after execute.
     expect(res.status).not.toBe(413);
     expect(res.status).not.toBe(503);
     expect(harness.execute).toHaveBeenCalled();
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
-  it("does not return 503 when the historical shared body budget is exhausted", async () => {
+  it("does not return capacity 503 when the historical shared body budget is exhausted", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1,
       maxWireBytes: 1024,
@@ -206,6 +208,7 @@ describe("POST /v1/chat/completions — usage budgets + OAuth usage + eval overr
       body: JSON.stringify(NONSTREAM_BODY),
     });
 
+    expect(res.status).not.toBe(413);
     expect(res.status).not.toBe(503);
     expect(harness.execute).toHaveBeenCalled();
     expect(memoryAdmission.reservedBytes).toBe(0);

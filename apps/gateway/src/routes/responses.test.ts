@@ -255,9 +255,8 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       body: JSON.stringify(REQ),
     });
 
-    expect(res.status).not.toBe(413);
-    expect(res.status).not.toBe(503);
-    expect(order[0]).toBe("auth");
+    expect(res.status).toBe(200);
+    expect(order).toEqual(expect.arrayContaining(["auth", "translate-out", "route"]));
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 

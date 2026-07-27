@@ -260,14 +260,13 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
         headers: AUTH,
         body: JSON.stringify(REQ_BODY),
       });
-      expect(res.status).not.toBe(413);
-      expect(res.status).not.toBe(503);
+      expect(res.status).toBe(200);
     }
-    expect(harness.order[0]).toBe("auth");
+    expect(harness.order).toContain("route");
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
-  it("does not return 503 when the historical shared body budget is exhausted", async () => {
+  it("does not return capacity 503 when the historical shared body budget is exhausted", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1,
       maxWireBytes: 1024,
@@ -282,8 +281,8 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
       body: JSON.stringify(REQ_BODY),
     });
 
-    expect(res.status).not.toBe(503);
-    expect(harness.order[0]).toBe("auth");
+    expect(res.status).toBe(200);
+    expect(harness.order).toEqual(expect.arrayContaining(["auth", "translate-out", "route"]));
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 

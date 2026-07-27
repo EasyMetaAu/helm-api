@@ -9,10 +9,11 @@
 
 ## 2026-07-27 · 关闭请求体内存准入拒绝（Gateway runtime，docs/02/05/07，用户明确要求）
 
-- **决定**：按用户要求移除请求体/WebSocket 入口的 `active_capacity` / `live_heap` / `wire_limit` / `pause` 拒绝。`createBodyMemoryAdmission` 只保留 lease 记账（供 `waitForIdle` 与 release guard），`maxWireBytes` 恒为 `Number.MAX_SAFE_INTEGER`；HTTP 与 Responses/Realtime WebSocket 不再因该闸门返回 413/503。
-- **仍保留**：写队列、Session 恢复、response-work 等**其他**运行时预算（与本次 body 准入无关）；鉴权、并发 lease、rate limit 不变。
-- **风险（用户已知）**：小内存容器上高并发/大 body 可能直接触发 V8/cgroup OOM 重启，而不是可恢复的 `server_overloaded`。机器“有多大跑多大”，靠 OS/cgroup 自然上限，不再前置拒流。
-- **测试**：定向 Vitest 覆盖 unlimited admission 与 chat/messages/gemini/images/interactions/responses/websocket 不再因历史预算拒绝。
+- **决定**：按用户要求移除请求体/WebSocket 的 `active_capacity` / `live_heap` / `wire_limit` 容量拒绝。`maxWireBytes` 恒为 `Number.MAX_SAFE_INTEGER`；启动日志里的 `runtime.memory_budget` wire/heap 数字对 body 准入仅供观测，不再强制。
+- **维护 pause 保留**：`pause()` / `resume()` / `waitForIdle()` 仍有效——vacuum 依赖 `pause` + 等 in-flight lease 排空。paused 期间**新** acquire 返回 503（`admission_reason=paused`）；已持有 lease 仍可 resize/release 完成当前请求。这不是容量闸门，是维护排水。
+- **仍保留**：写队列、Session 恢复、response-work 等其他运行时预算；鉴权、并发 lease、rate limit 不变。`RequestAdmissionError` / `request.memory_rejected` 仅在 maintenance pause（及测试注入）路径出现，不再表示 active_capacity/live_heap。
+- **风险（用户已知）**：高并发/大 body 可能直接 OOM 重启，而不是可恢复的 capacity 503。
+- **测试**：unlimited capacity、maintenance pause 可 drain、各协议入口在历史小预算下仍 200 并进入 pipeline。
 
 ## 2026-07-25 · 图片上游参数拒绝保持客户端 400（Gateway / Provider execution，docs/05/07，原则 3/5）
 

@@ -502,10 +502,31 @@ export function installResponsesWebSocketBridge({
       const bytes = Array.isArray(data)
         ? data.reduce((total, chunk) => total + chunk.byteLength, 0)
         : data.byteLength;
-      // Memory admission is unlimited: acquire always succeeds and only tracks
-      // leases for maintenance waitForIdle / release bookkeeping.
+      // Capacity/wire limits are unlimited. Acquire only fails during maintenance
+      // pause so vacuum's waitForIdle can drain in-flight leases.
       const ingressAcquired = ingress.acquire(bytes);
+      if (!ingressAcquired.ok) {
+        const error = new RequestAdmissionError(
+          503,
+          "server_overloaded",
+          "websocket ingress memory capacity is temporarily exhausted",
+          ingressAcquired.admission,
+        );
+        void sendEnvelope(socket, localErrorEnvelope(error)).catch(() => {});
+        return;
+      }
       const acquired = admission.acquire(bytes);
+      if (!acquired.ok) {
+        ingressAcquired.lease.release();
+        const error = new RequestAdmissionError(
+          503,
+          "server_overloaded",
+          "request memory capacity is temporarily exhausted",
+          acquired.admission,
+        );
+        void sendEnvelope(socket, localErrorEnvelope(error)).catch(() => {});
+        return;
+      }
       processing = true;
       const turnController = new AbortController();
       activeTurnController = turnController;

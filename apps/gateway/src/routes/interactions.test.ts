@@ -196,13 +196,12 @@ describe("registerInteractionsRoute", () => {
 
     const res = await post(app, { model: "gemini-3.1-flash-image", input: "a red apple" });
 
-    expect(res.status).not.toBe(413);
-    expect(res.status).not.toBe(503);
+    expect(res.status).toBe(200);
     expect(nativePassthrough).toHaveBeenCalled();
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
-  it("does not return Gemini 503 when historical request capacity is exhausted", async () => {
+  it("does not return Gemini capacity 503 when historical request capacity is exhausted", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1,
       maxWireBytes: 1000,
@@ -212,7 +211,7 @@ describe("registerInteractionsRoute", () => {
 
     const res = await post(app, { model: "gemini-3.1-flash-image", input: "a red apple" });
 
-    expect(res.status).not.toBe(503);
+    expect(res.status).toBe(200);
     expect(nativePassthrough).toHaveBeenCalled();
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
