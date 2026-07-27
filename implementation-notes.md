@@ -7,12 +7,13 @@
 
 ---
 
-## 2026-07-27 · 请求内存准入只计算未物化 headroom（Gateway runtime，docs/02/05/07/10，原则 3/7/8）
+## 2026-07-27 · 拆除启发式请求内存拒绝并保留硬边界（Gateway runtime，docs/02/05/07，用户明确要求）
 
-- **根因**：实时 V8 高水位把 `heapUsed + active reservations` 相加，但长 Responses SSE/WebSocket 请求在 `JSON.parse` 后已进入 `heapUsed`，其 reservation 仍持有到流结束，导致同一请求被重复计账并高频误拒为 503。
-- **修复**：活动请求总额度继续由 `reservedBytes` 和 `activeRequestBytes` 限制；live heap 只叠加尚未完成正文读取、schema 校验与同步协议物化的 `pendingBytes`。lease 物化后仍占活动额度，但不再占 pending；重复物化/释放幂等，物化后禁止 resize。所有 HTTP JSON/multipart 入口与 Responses WebSocket 共用该语义。
-- **安全边界**：heap ceiling 仍全额扣除 response work、write queue、Session cache、response capture 与 5% GC 余量；未新增配置、队列、依赖或阈值放宽。413/503 客户端协议形状保持不变。
-- **可观测性**：`request.memory_rejected` 增加拒绝原因、wire/charge、active/pending 与 heap/ceiling 数值；不记录正文、header 或密钥。
+- **决定**：按用户要求删除请求体/WebSocket 的 `active_capacity` 与 `live_heap` 启发式拒绝，避免健康流量因重复计账再出现 503。保留确定性的单请求/单帧 `wire_limit`（超限 413 / WebSocket 1009），防止一个合法 key 用超大正文拖垮整个容器。
+- **维护 pause 保留**：vacuum 仍通过 `pause()` + `waitForIdle()` 排空 in-flight lease；paused 期间新请求返回 `database_maintenance`，已持有 lease 可完成 resize/release。既有 WebSocket 也得到维护错误，不再误报“内存耗尽”。
+- **可观测性**：启动日志明确 `request_admission_mode=wire_limit_only`，只报告仍实际执行的 wire/WebSocket 上限；拒绝日志区分 `request.body_rejected` 与 `request.maintenance_rejected`，不再输出已删除的 active/heap 阈值。
+- **仍保留**：写队列、Session 恢复、response-work、鉴权、并发 lease 与 rate limit 不变。高并发聚合压力仍可能由 V8/cgroup 终止进程，但单请求硬边界不允许被取消。
+- **测试**：覆盖 aggregate capacity 不拒绝、HTTP/Responses WebSocket 硬上限、maintenance pause drain 与已建立 WebSocket 的维护错误，并逐协议验证 413/成功路径。
 
 ## 2026-07-25 · 图片上游参数拒绝保持客户端 400（Gateway / Provider execution，docs/05/07，原则 3/5）
 
@@ -74,6 +75,7 @@
 
 ## 历史条目摘要（最新要点）
 
+- **2026-07-27 · 请求内存准入只计算未物化 headroom**：曾修 live-heap 双重计账误拒 503；后被同日“拆除启发式请求内存拒绝并保留硬边界”取代，完整原文通过 git history 回溯。
 - **2026-07-23 · Codex Responses 按运行时容量准入并让夜间 SQLite 维护收缩内存（Gateway / Session / Store，docs/02/05/07/10，原则 2/3/7/8）**：机器推导的共享请求/响应/缓存预算、活动消息准入和维护 drain 保留正文捕获与自动维护能力；后续物化重复计账、WebSocket ingress 与 terminal 生命周期修正见顶部更新条目，完整原文通过 git history 回溯。
 - **2026-07-23 · SQLite Session 与 Memory 正文使用兼容 gzip 存储（Store / Memory，docs/07/08，原则 1/3/7）**：SQLite 以 value type + gzip magic 兼容压缩 Session/Memory 正文，不回写历史数据、不在线 VACUUM，完整原文通过 git history 回溯。
 - **2026-07-22 · 全项目文案审查补齐多语言维护闭环（Admin / Portal / Setup，docs/11/12，原则 1/2）**：以 Opus 只读审查和七语言结构测试补齐 Admin、Portal、Setup 文案维护闭环，完整原文通过 git history 回溯。

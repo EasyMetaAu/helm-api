@@ -170,7 +170,7 @@ describe("POST /v1/chat/completions — usage budgets + OAuth usage + eval overr
     "/chat/completions",
     "/engines/azure-deployment/chat/completions",
     "/openai/deployments/azure-deployment/chat/completions",
-  ])("rejects an oversized body before JSON.parse on %s", async (path) => {
+  ])("keeps the hard body limit on %s", async (path) => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1024,
       maxWireBytes: 1,
@@ -190,7 +190,7 @@ describe("POST /v1/chat/completions — usage budgets + OAuth usage + eval overr
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
-  it("returns 503 with Retry-After when the shared body budget is occupied", async () => {
+  it("does not return capacity 503 when the historical shared body budget is exhausted", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1,
       maxWireBytes: 1024,
@@ -205,9 +205,10 @@ describe("POST /v1/chat/completions — usage budgets + OAuth usage + eval overr
       body: JSON.stringify(NONSTREAM_BODY),
     });
 
-    expect(res.status).toBe(503);
-    expect(res.headers.get("retry-after")).toBe("1");
-    expect(harness.execute).not.toHaveBeenCalled();
+    expect(res.status).not.toBe(413);
+    expect(res.status).not.toBe(503);
+    expect(harness.execute).toHaveBeenCalled();
+    expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
   it("rejects an over-budget request with 429 before routing (behavior=reject)", async () => {

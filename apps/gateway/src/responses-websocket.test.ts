@@ -146,7 +146,7 @@ describe("Responses websocket bridge", () => {
     expect(ingressAdmission.reservedBytes).toBe(0);
   });
 
-  it("limits materialized websocket messages instead of idle connections", async () => {
+  it("admits concurrent materialized websocket messages without capacity 503", async () => {
     const ingressAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 200,
       maxWireBytes: 100,
@@ -173,19 +173,12 @@ describe("Responses websocket bridge", () => {
 
     const firstTurn = collectTurn(first, request);
     const secondTurn = collectTurn(second, request);
-    for (let attempt = 0; attempt < 20 && pendingResponses.length < 2; attempt += 1) {
+    const thirdTurn = collectTurn(third, request);
+    for (let attempt = 0; attempt < 40 && pendingResponses.length < 3; attempt += 1) {
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
-    expect(pendingResponses).toHaveLength(2);
-    expect(ingressAdmission.reservedBytes).toBe(200);
-
-    await expect(collectTurn(third, request)).resolves.toMatchObject([
-      {
-        type: "error",
-        status: 503,
-        error: { code: "server_overloaded" },
-      },
-    ]);
+    expect(pendingResponses).toHaveLength(3);
+    expect(ingressAdmission.reservedBytes).toBe(300);
 
     const completed = () =>
       new Response(
@@ -193,11 +186,11 @@ describe("Responses websocket bridge", () => {
         { headers: { "content-type": "text/event-stream" } },
       );
     for (const resolve of pendingResponses) resolve(completed());
-    await Promise.all([firstTurn, secondTurn]);
+    await Promise.all([firstTurn, secondTurn, thirdTurn]);
     expect(ingressAdmission.reservedBytes).toBe(0);
   });
 
-  it("uses the shared machine-derived limit before parsing a websocket message", async () => {
+  it("keeps the shared hard wire limit before parsing a websocket message", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
       maxWireBytes: 10,
@@ -216,6 +209,37 @@ describe("Responses websocket bridge", () => {
     const [code] = await closed;
 
     expect(code).toBe(1009);
+    expect(memoryAdmission.reservedBytes).toBe(0);
+  });
+
+  it("reports maintenance pause honestly on an established websocket", async () => {
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 60,
+      maxWireBytes: 1_000,
+      jsonAmplification: 6,
+    });
+    const baseUrl = await startBridge(
+      () => {
+        throw new Error("fetch should not run while admission is paused");
+      },
+      undefined,
+      { memoryAdmission },
+    );
+    const socket = await connect(`${baseUrl}/v1/responses`);
+    memoryAdmission.pause();
+
+    await expect(
+      collectTurn(socket, { type: "response.create", input: "maintenance", stream: true }),
+    ).resolves.toMatchObject([
+      {
+        type: "error",
+        status: 503,
+        error: {
+          code: "database_maintenance",
+          message: "database maintenance in progress",
+        },
+      },
+    ]);
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { createBodyMemoryAdmission, readAdmittedRequestBody } from "./memory-admission.js";
 
-describe("body memory admission", () => {
-  it("charges a capacity-derived floor for tiny requests", () => {
+describe("body memory admission (hard wire limit, unlimited aggregate capacity)", () => {
+  it("never rejects for active capacity, even when charge exceeds the historical pool", () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 100,
       maxWireBytes: 100,
@@ -12,20 +12,18 @@ describe("body memory admission", () => {
 
     const first = admission.acquire(1);
     const second = admission.acquire(1);
+    const third = admission.acquire(1);
     expect(first.ok).toBe(true);
     expect(second.ok).toBe(true);
-    expect(admission.reservedBytes).toBe(80);
-    expect(admission.acquire(1)).toMatchObject({
-      ok: false,
-      reason: "busy",
-      cause: "active_capacity",
-    });
+    expect(third.ok).toBe(true);
+    expect(admission.reservedBytes).toBe(120);
     if (first.ok) first.lease.release();
     if (second.ok) second.lease.release();
+    if (third.ok) third.lease.release();
     expect(admission.reservedBytes).toBe(0);
   });
 
-  it("pauses new requests and waits for active leases before maintenance", async () => {
+  it("blocks new acquires while paused so waitForIdle can drain active leases", async () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
       maxWireBytes: 10,
@@ -34,20 +32,29 @@ describe("body memory admission", () => {
     const active = admission.acquire(5);
     expect(active.ok).toBe(true);
     admission.pause();
-    expect(admission.acquire(1)).toMatchObject({ ok: false, reason: "busy", cause: "paused" });
+    expect(admission.acquire(1)).toMatchObject({
+      ok: false,
+      reason: "busy",
+      cause: "paused",
+    });
     let idle = false;
     const waiting = admission.waitForIdle().then(() => {
       idle = true;
     });
     await Promise.resolve();
     expect(idle).toBe(false);
-    if (active.ok) active.lease.release();
+    if (active.ok) {
+      // In-flight lease may still resize while paused.
+      expect(active.lease.resize(8).ok).toBe(true);
+      active.lease.release();
+    }
     await waiting;
+    expect(idle).toBe(true);
     admission.resume();
     expect(admission.acquire(1).ok).toBe(true);
   });
 
-  it("charges parsed JSON amplification and releases the shared budget", () => {
+  it("tracks charge for bookkeeping but never returns capacity-busy", () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
       maxWireBytes: 10,
@@ -56,48 +63,19 @@ describe("body memory admission", () => {
     const first = admission.acquire(6);
     expect(first.ok).toBe(true);
     expect(admission.reservedBytes).toBe(36);
-    expect(admission.acquire(5)).toMatchObject({ ok: false, reason: "busy" });
+    const second = admission.acquire(5);
+    expect(second.ok).toBe(true);
     if (first.ok) first.lease.release();
+    if (second.ok) second.lease.release();
     expect(admission.reservedBytes).toBe(0);
   });
 
-  it("rejects new bodies when live heap pressure has consumed protected headroom", () => {
-    let heapUsedBytes = 71;
+  it("stops counting pending after materialize and still allows more acquires", () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 100,
       maxWireBytes: 100,
       jsonAmplification: 2,
       minRequestChargeBytes: 10,
-      heapLimitBytes: 100,
-      protectedHeapBytes: 20,
-      heapUsedBytes: () => heapUsedBytes,
-    });
-
-    expect(admission.acquire(1)).toMatchObject({
-      ok: false,
-      reason: "busy",
-      cause: "live_heap",
-    });
-    heapUsedBytes = 60;
-    const admitted = admission.acquire(1);
-    expect(admitted.ok).toBe(true);
-    if (admitted.ok) {
-      heapUsedBytes = 71;
-      expect(admitted.lease.resize(1)).toMatchObject({ ok: false, reason: "busy" });
-      admitted.lease.release();
-    }
-  });
-
-  it("does not double count materialized requests against the live heap", () => {
-    let heapUsedBytes = 61;
-    const admission = createBodyMemoryAdmission({
-      activeRequestBytes: 100,
-      maxWireBytes: 100,
-      jsonAmplification: 2,
-      minRequestChargeBytes: 10,
-      heapLimitBytes: 100,
-      protectedHeapBytes: 20,
-      heapUsedBytes: () => heapUsedBytes,
     });
 
     const active = admission.acquire(1);
@@ -107,13 +85,7 @@ describe("body memory admission", () => {
     active.lease.materialized();
     expect(admission.reservedBytes).toBe(10);
     expect(admission.pendingBytes).toBe(0);
-    expect(active.lease.resize(2)).toMatchObject({
-      ok: false,
-      reason: "busy",
-      cause: "materialized",
-    });
 
-    heapUsedBytes = 69;
     const next = admission.acquire(1);
     expect(next.ok).toBe(true);
     if (next.ok) next.lease.release();
@@ -123,7 +95,7 @@ describe("body memory admission", () => {
     expect(admission.pendingBytes).toBe(0);
   });
 
-  it("bounds a streaming body before JSON parsing and returns its lease", async () => {
+  it("keeps a deterministic hard wire limit without restoring capacity rejection", async () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 120,
       maxWireBytes: 20,
@@ -148,9 +120,10 @@ describe("body memory admission", () => {
         admission,
       ),
     ).rejects.toMatchObject({ status: 413, code: "request_too_large" });
+    expect(admission.reservedBytes).toBe(0);
   });
 
-  it("best-effort cancels the body when Content-Length is rejected before reading", async () => {
+  it("rejects Content-Length beyond the hard wire limit before reading", async () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
       maxWireBytes: 10,
@@ -175,5 +148,35 @@ describe("body memory admission", () => {
     });
     expect(canceled).toBe(true);
     expect(admission.reservedBytes).toBe(0);
+  });
+
+  it("rejects readAdmittedRequestBody while paused for maintenance", async () => {
+    const admission = createBodyMemoryAdmission({
+      activeRequestBytes: 60,
+      maxWireBytes: 10,
+      jsonAmplification: 6,
+    });
+    admission.pause();
+    await expect(
+      readAdmittedRequestBody(
+        new Request("http://helm.test/v1/responses", { method: "POST", body: "{}" }),
+        admission,
+      ),
+    ).rejects.toMatchObject({ status: 503, code: "database_maintenance" });
+    expect(admission.reservedBytes).toBe(0);
+  });
+
+  it("exposes and enforces the configured hard wire limit", () => {
+    const admission = createBodyMemoryAdmission({
+      activeRequestBytes: 1,
+      maxWireBytes: 1,
+      jsonAmplification: 1,
+    });
+    expect(admission.maxWireBytes).toBe(1);
+    expect(admission.acquire(2)).toMatchObject({
+      ok: false,
+      reason: "too_large",
+      cause: "wire_limit",
+    });
   });
 });

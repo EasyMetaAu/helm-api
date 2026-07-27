@@ -1,29 +1,34 @@
 import type { MiddlewareHandler } from "hono";
 import type { AppEnv } from "../app.js";
 
-export type RequestAdmissionCause =
-  | "wire_limit"
-  | "paused"
-  | "active_capacity"
-  | "live_heap"
-  | "materialized"
-  | "released";
+/**
+ * Request-body memory admission.
+ *
+ * Capacity and live-heap gates are intentionally disabled: they used heuristic
+ * reservations that could reject healthy traffic. A deterministic per-request
+ * wire limit remains so one authenticated client cannot OOM the whole gateway.
+ * Lease bookkeeping remains so vacuum can `pause()` + `waitForIdle()`.
+ *
+ * The other remaining rejection is **maintenance pause**: while vacuum (or any
+ * caller) has paused admission, new acquires fail with `database_maintenance`
+ * so in-flight leases can drain and `waitForIdle()` can complete.
+ */
+
+export type RequestAdmissionCause = "wire_limit" | "paused";
 
 export interface RequestAdmissionSnapshot {
   cause: RequestAdmissionCause;
   wireBytes: number;
   requestedChargeBytes: number;
+  maxWireBytes: number;
   activeReservedBytes: number;
-  activeCapacityBytes: number;
   pendingBytes: number;
-  heapUsedBytes: number | null;
-  heapCeilingBytes: number | null;
 }
 
 export class RequestAdmissionError extends Error {
   constructor(
     readonly status: 413 | 503,
-    readonly code: "request_too_large" | "server_overloaded",
+    readonly code: "request_too_large" | "database_maintenance",
     message: string,
     readonly admission?: RequestAdmissionSnapshot,
   ) {
@@ -37,9 +42,6 @@ export function createBodyMemoryAdmission(options: {
   maxWireBytes: number;
   jsonAmplification: number;
   minRequestChargeBytes?: number;
-  heapLimitBytes?: number;
-  protectedHeapBytes?: number;
-  heapUsedBytes?: () => number;
 }) {
   let reservedBytes = 0;
   let pendingBytes = 0;
@@ -49,98 +51,76 @@ export function createBodyMemoryAdmission(options: {
     if (reservedBytes !== 0) return;
     for (const resolve of idleWaiters.splice(0)) resolve();
   };
+  // Capacity-derived charge remains bookkeeping only. It never rejects work.
   const minRequestChargeBytes =
     options.minRequestChargeBytes ?? Math.max(1, Math.floor(options.activeRequestBytes * 0.01));
   const charge = (wireBytes: number): number =>
     Math.max(minRequestChargeBytes, Math.ceil(Math.max(0, wireBytes) * options.jsonAmplification));
-  const heapCeilingBytes = Math.max(
-    0,
-    (options.heapLimitBytes ?? Number.POSITIVE_INFINITY) - (options.protectedHeapBytes ?? 0),
-  );
-  const readHeapUsedBytes = (): number | null => {
-    const heapUsedBytes = options.heapUsedBytes?.();
-    return heapUsedBytes !== undefined && Number.isFinite(heapUsedBytes) && heapUsedBytes >= 0
-      ? heapUsedBytes
-      : null;
-  };
+
   const rejection = (
     cause: RequestAdmissionCause,
     wireBytes: number,
     requestedChargeBytes: number,
-    heapUsedBytes = readHeapUsedBytes(),
-  ) => ({
-    ok: false as const,
-    reason: cause === "wire_limit" ? ("too_large" as const) : ("busy" as const),
-    cause,
-    admission: {
+  ) =>
+    ({
+      ok: false as const,
+      reason: cause === "wire_limit" ? ("too_large" as const) : ("busy" as const),
       cause,
-      wireBytes,
-      requestedChargeBytes,
-      activeReservedBytes: reservedBytes,
-      activeCapacityBytes: options.activeRequestBytes,
-      pendingBytes,
-      heapUsedBytes,
-      heapCeilingBytes: Number.isFinite(heapCeilingBytes) ? heapCeilingBytes : null,
-    } satisfies RequestAdmissionSnapshot,
-  });
+      admission: {
+        cause,
+        wireBytes,
+        requestedChargeBytes,
+        maxWireBytes: options.maxWireBytes,
+        activeReservedBytes: reservedBytes,
+        pendingBytes,
+      } satisfies RequestAdmissionSnapshot,
+    }) as const;
 
   return {
     maxWireBytes: options.maxWireBytes,
     acquire(wireBytes: number) {
-      let held = charge(wireBytes);
+      const held = charge(wireBytes);
       if (paused) return rejection("paused", wireBytes, held);
       if (wireBytes > options.maxWireBytes) return rejection("wire_limit", wireBytes, held);
-      if (reservedBytes + held > options.activeRequestBytes) {
-        return rejection("active_capacity", wireBytes, held);
-      }
-      const heapUsedBytes = readHeapUsedBytes();
-      if (heapUsedBytes !== null && heapUsedBytes + pendingBytes + held > heapCeilingBytes) {
-        return rejection("live_heap", wireBytes, held, heapUsedBytes);
-      }
       reservedBytes += held;
       pendingBytes += held;
       let released = false;
       let isMaterialized = false;
+      let current = held;
       return {
         ok: true as const,
         lease: {
           resize(nextWireBytes: number) {
-            if (released) return rejection("released", nextWireBytes, charge(nextWireBytes));
-            if (isMaterialized) {
-              return rejection("materialized", nextWireBytes, charge(nextWireBytes));
+            if (released || isMaterialized) {
+              return { ok: true as const };
             }
+            // In-flight leases may still grow while maintenance is paused so the
+            // current body/frame can finish; only *new* acquires are rejected.
             const next = charge(nextWireBytes);
             if (nextWireBytes > options.maxWireBytes) {
               return rejection("wire_limit", nextWireBytes, next);
             }
-            if (reservedBytes - held + next > options.activeRequestBytes) {
-              return rejection("active_capacity", nextWireBytes, next);
-            }
-            const nextPendingBytes = pendingBytes - held + next;
-            const heapUsedBytes = readHeapUsedBytes();
-            if (heapUsedBytes !== null && heapUsedBytes + nextPendingBytes > heapCeilingBytes) {
-              return rejection("live_heap", nextWireBytes, next, heapUsedBytes);
-            }
-            reservedBytes += next - held;
-            pendingBytes = nextPendingBytes;
-            held = next;
+            reservedBytes += next - current;
+            pendingBytes += next - current;
+            current = next;
             return { ok: true as const };
           },
           materialized() {
             if (released || isMaterialized) return;
             isMaterialized = true;
-            pendingBytes -= held;
+            pendingBytes -= current;
           },
           release() {
             if (released) return;
             released = true;
-            reservedBytes -= held;
-            if (!isMaterialized) pendingBytes -= held;
+            reservedBytes -= current;
+            if (!isMaterialized) pendingBytes -= current;
             resolveIdle();
           },
         },
       };
     },
+    /** Maintenance only: block new acquires so waitForIdle can drain. */
     pause() {
       paused = true;
     },
@@ -178,22 +158,23 @@ declare module "hono" {
   }
 }
 
-function admissionError(
-  reason: "too_large" | "busy",
+export function requestAdmissionError(
+  cause: RequestAdmissionCause,
   maxWireBytes: number,
   admission?: RequestAdmissionSnapshot,
+  subject = "request body",
 ) {
-  return reason === "too_large"
+  return cause === "wire_limit"
     ? new RequestAdmissionError(
         413,
         "request_too_large",
-        `request body exceeds the runtime capacity limit of ${maxWireBytes} bytes`,
+        `${subject} exceeds the hard limit of ${maxWireBytes} bytes`,
         admission,
       )
     : new RequestAdmissionError(
         503,
-        "server_overloaded",
-        "request memory capacity is temporarily exhausted",
+        "database_maintenance",
+        "database maintenance in progress",
         admission,
       );
 }
@@ -210,7 +191,7 @@ export async function readAdmittedRequestBody(
   const acquired = admission.acquire(initialBytes);
   if (!acquired.ok) {
     await request.body?.cancel().catch(() => {});
-    throw admissionError(acquired.reason, admission.maxWireBytes, acquired.admission);
+    throw requestAdmissionError(acquired.cause, admission.maxWireBytes, acquired.admission);
   }
   const { lease } = acquired;
   const chunks: Uint8Array[] = [];
@@ -225,14 +206,14 @@ export async function readAdmittedRequestBody(
         const resized = lease.resize(bytes);
         if (!resized.ok) {
           await reader.cancel().catch(() => {});
-          throw admissionError(resized.reason, admission.maxWireBytes, resized.admission);
+          throw requestAdmissionError(resized.cause, admission.maxWireBytes, resized.admission);
         }
         chunks.push(next.value);
       }
     }
     const resized = lease.resize(bytes);
     if (!resized.ok) {
-      throw admissionError(resized.reason, admission.maxWireBytes, resized.admission);
+      throw requestAdmissionError(resized.cause, admission.maxWireBytes, resized.admission);
     }
     const body = Buffer.concat(chunks, bytes);
     return {

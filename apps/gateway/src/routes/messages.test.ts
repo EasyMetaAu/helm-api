@@ -245,7 +245,7 @@ function expectNativeCarrier(
 }
 
 describe("POST /v1/messages (Anthropic inbound)", () => {
-  it("rejects oversized message and count-token bodies before JSON.parse", async () => {
+  it("keeps the hard body limit for message and count-token requests", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1024,
       maxWireBytes: 1,
@@ -266,7 +266,7 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
-  it("returns 503 with Retry-After when the shared body budget is occupied", async () => {
+  it("does not return capacity 503 when the historical shared body budget is exhausted", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1,
       maxWireBytes: 1024,
@@ -281,9 +281,9 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
       body: JSON.stringify(REQ_BODY),
     });
 
-    expect(res.status).toBe(503);
-    expect(res.headers.get("retry-after")).toBe("1");
-    expect(harness.order).toEqual(["auth"]);
+    expect(res.status).toBe(200);
+    expect(harness.order).toEqual(expect.arrayContaining(["auth", "translate-out", "route"]));
+    expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
   it("accepts the Claude Code event logging compatibility endpoint after auth", async () => {

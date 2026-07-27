@@ -9,6 +9,7 @@ import {
   isRealtimeWebSocketPath,
   type RealtimeWebSocketBridge,
 } from "./realtime-websocket.js";
+import { createBodyMemoryAdmission } from "./runtime/memory-admission.js";
 
 const closers: Array<() => Promise<void>> = [];
 
@@ -101,6 +102,46 @@ describe("Realtime websocket bridge", () => {
       { statusCode: number },
     ];
     expect(response.statusCode).toBe(404);
+  });
+
+  it("closes an oversized client frame with 1009 before relaying it", async () => {
+    const upstreamHttp = await listeningServer();
+    const upstream = new WebSocketServer({ server: upstreamHttp.server, perMessageDeflate: false });
+    upstream.on("connection", (socket) => socket.on("message", (data) => socket.send(data)));
+    closers.push(
+      () =>
+        new Promise<void>((resolve) => {
+          for (const socket of upstream.clients) socket.terminate();
+          upstream.close(() => resolve());
+        }),
+    );
+
+    const gateway = await listeningServer();
+    const registry = createRealtimeCallRegistry();
+    registry.put("rtc_1", "key-1", {
+      url: `ws://127.0.0.1:${upstreamHttp.port}/v1/realtime?call_id=rtc_1`,
+      headers: async () => ({}),
+    });
+    const bridge = installRealtimeWebSocketBridge({
+      server: gateway.server,
+      registry,
+      resolveKey: async () => "key-1",
+      memoryAdmission: createBodyMemoryAdmission({
+        activeRequestBytes: 100,
+        maxWireBytes: 4,
+        jsonAmplification: 1,
+      }),
+    });
+    closers.push(() => bridge.close());
+
+    const client = new WebSocket(`ws://127.0.0.1:${gateway.port}/v1/realtime?call_id=rtc_1`, {
+      headers: { Authorization: "Bearer helm-key" },
+    });
+    await once(client, "open");
+    const closed = once(client, "close");
+    client.send("12345");
+    const [code] = (await closed) as [number];
+    expect(code).toBe(1009);
   });
 
   it("refreshes OAuth once when the upstream sideband rejects with 401", async () => {
