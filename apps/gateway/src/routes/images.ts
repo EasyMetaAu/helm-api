@@ -272,14 +272,8 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
       admitted?.materialized();
     } catch (error) {
       if (error instanceof RequestAdmissionError) {
-        if (error.status === 503) c.header("retry-after", "1");
-        return errorJson(
-          c,
-          error.status,
-          error.status === 413 ? "invalid_request_error" : "server_error",
-          error.message,
-          error.code,
-        );
+        c.header("retry-after", "1");
+        return errorJson(c, error.status, "server_error", error.message, error.code);
       }
       return errorJson(c, 400, "invalid_request_error", "malformed image request body");
     }

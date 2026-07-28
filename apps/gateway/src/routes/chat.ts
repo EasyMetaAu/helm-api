@@ -465,12 +465,12 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       raw = JSON.parse(requestJson);
     } catch (error) {
       if (error instanceof RequestAdmissionError) {
-        if (error.status === 503) c.header("retry-after", "1");
+        c.header("retry-after", "1");
         return c.json(
           {
             error: {
               message: error.message,
-              type: error.status === 413 ? "invalid_request_error" : "api_error",
+              type: "api_error",
               code: error.code,
               param: null,
             },

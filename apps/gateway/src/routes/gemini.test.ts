@@ -178,10 +178,9 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
     "generateContent",
     "streamGenerateContent",
     "countTokens",
-  ])("keeps the hard body limit for %s", async (operation) => {
+  ])("does not enforce the former hard body limit for %s", async (operation) => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1024,
-      maxWireBytes: 1,
       jsonAmplification: 1,
     });
     const { deps, harness } = makeDeps({ memoryAdmission });
@@ -193,15 +192,15 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
       body: JSON.stringify(REQ_BODY),
     });
 
-    expect(res.status).toBe(413);
-    expect(harness.order).toEqual(["auth:helm_live_secret"]);
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(harness.order).toContain("auth:helm_live_secret");
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
   it("does not return capacity 503 when the historical shared body budget is exhausted", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1,
-      maxWireBytes: 1024,
       jsonAmplification: 1,
     });
     const { deps, harness } = makeDeps({ memoryAdmission });

@@ -244,11 +244,11 @@ function localErrorEnvelope(error: unknown): Record<string, unknown> {
       status: error.status,
       status_code: error.status,
       error: {
-        type: error.status === 413 ? "invalid_request_error" : "server_error",
+        type: "server_error",
         code: error.code,
         message: error.message,
       },
-      headers: error.status === 503 ? { "retry-after": "1" } : {},
+      headers: { "retry-after": "1" },
     };
   }
   if (error instanceof WebSocketRequestError) {
@@ -507,21 +507,16 @@ export function installResponsesWebSocketBridge({
     memoryAdmission ??
     createBodyMemoryAdmission({
       activeRequestBytes: memoryBudget.activeRequestBytes,
-      maxWireBytes: memoryBudget.maxWireBytes,
       jsonAmplification: memoryBudget.jsonAmplification,
     });
   const ingress =
     ingressAdmission ??
     createBodyMemoryAdmission({
       activeRequestBytes: memoryBudget.websocketIngressBytes,
-      maxWireBytes: Math.min(admission.maxWireBytes, memoryBudget.websocketMaxPayloadBytes),
       jsonAmplification: 1,
       minRequestChargeBytes: 1,
     });
-  const websocketMaxPayloadBytes = Math.max(
-    1,
-    Math.min(admission.maxWireBytes, ingress.maxWireBytes),
-  );
+  const websocketMaxPayloadBytes = 0;
   const metadataByRequest = new WeakMap<IncomingMessage, UpgradeMetadata>();
   const websocketServer = new WebSocketServer({
     noServer: true,
@@ -567,37 +562,19 @@ export function installResponsesWebSocketBridge({
       const bytes = Array.isArray(data)
         ? data.reduce((total, chunk) => total + chunk.byteLength, 0)
         : data.byteLength;
-      // Aggregate capacity/live-heap checks are disabled. Deterministic wire and
-      // maintenance-pause boundaries remain.
+      // Size/capacity checks are disabled. Admission remains only so database
+      // maintenance can pause new work and drain active leases.
       const ingressAcquired = ingress.acquire(bytes);
       if (!ingressAcquired.ok) {
-        const error = requestAdmissionError(
-          ingressAcquired.cause,
-          ingress.maxWireBytes,
-          ingressAcquired.admission,
-          "websocket message",
-        );
-        void sendEnvelope(socket, localErrorEnvelope(error))
-          .catch(() => {})
-          .finally(() => {
-            if (error.status === 413) socket.close(1009, "message too big");
-          });
+        const error = requestAdmissionError(ingressAcquired.admission);
+        void sendEnvelope(socket, localErrorEnvelope(error)).catch(() => {});
         return;
       }
       const acquired = admission.acquire(bytes);
       if (!acquired.ok) {
         ingressAcquired.lease.release();
-        const error = requestAdmissionError(
-          acquired.cause,
-          admission.maxWireBytes,
-          acquired.admission,
-          "websocket message",
-        );
-        void sendEnvelope(socket, localErrorEnvelope(error))
-          .catch(() => {})
-          .finally(() => {
-            if (error.status === 413) socket.close(1009, "message too big");
-          });
+        const error = requestAdmissionError(acquired.admission);
+        void sendEnvelope(socket, localErrorEnvelope(error)).catch(() => {});
         return;
       }
       processing = true;

@@ -156,16 +156,16 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
     return c.json(out.body as Record<string, unknown>, out.status as 400 | 401 | 404 | 429 | 502);
   };
   const sendAdmissionError = (c: Context<AppEnv>, error: RequestAdmissionError): Response => {
-    if (error.status === 503) c.header("retry-after", "1");
+    c.header("retry-after", "1");
     const out = transformer.transformErrorOut({
-      error_class: error.status === 413 ? "invalid_request" : "lane_unavailable",
+      error_class: "lane_unavailable",
       message: error.message,
       trace_id: c.get("trace_id"),
     });
     const body = out.body as { error?: Record<string, unknown> };
     return c.json(
       body.error === undefined ? body : { ...body, error: { ...body.error, code: error.status } },
-      error.status as 413 | 503,
+      error.status,
     );
   };
 

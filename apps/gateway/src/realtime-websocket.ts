@@ -104,7 +104,7 @@ async function openUpstream(
         });
         const queue = (data: WebSocket.RawData, isBinary: boolean) => {
           pendingBytes += rawBytes(data);
-          if (pendingBytes > maxPayload) {
+          if (maxPayload > 0 && pendingBytes > maxPayload) {
             socket.close(1009, "pending response too large");
             return;
           }
@@ -151,14 +151,13 @@ export function installRealtimeWebSocketBridge(
     options.memoryAdmission ??
     createBodyMemoryAdmission({
       activeRequestBytes: memoryBudget.websocketIngressBytes,
-      maxWireBytes: memoryBudget.websocketMaxPayloadBytes,
       jsonAmplification: 1,
       minRequestChargeBytes: 1,
     });
   const websocketServer = new WebSocketServer({
     noServer: true,
     perMessageDeflate: false,
-    maxPayload: admission.maxWireBytes,
+    maxPayload: 0,
   });
   const upstreams = new Set<WebSocket>();
   let closed = false;
@@ -178,15 +177,10 @@ export function installRealtimeWebSocketBridge(
       else if (upstream.readyState !== WebSocket.CLOSED) upstream.terminate();
     };
     const relay = (destination: WebSocket, data: WebSocket.RawData, isBinary: boolean) => {
-      // Aggregate capacity is unlimited; hard wire and maintenance pause remain.
+      // Size/capacity checks are disabled; maintenance pause remains.
       const acquired = admission.acquire(rawBytes(data));
       if (!acquired.ok) {
-        closeBoth(
-          acquired.reason === "too_large" ? 1009 : 1013,
-          acquired.reason === "too_large"
-            ? "realtime frame too large"
-            : "database maintenance in progress",
-        );
+        closeBoth(1013, "database maintenance in progress");
         return;
       }
       if (destination.readyState !== WebSocket.OPEN) {
@@ -227,7 +221,7 @@ export function installRealtimeWebSocketBridge(
       }
       let upstream: PendingUpstream;
       try {
-        upstream = await openUpstream(call.target, admission.maxWireBytes);
+        upstream = await openUpstream(call.target, 0);
       } catch (cause) {
         options.registry.put(callId, keyId, call.target);
         throw cause;

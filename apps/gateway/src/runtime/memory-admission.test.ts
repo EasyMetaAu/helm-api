@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { createBodyMemoryAdmission, readAdmittedRequestBody } from "./memory-admission.js";
 
-describe("body memory admission (hard wire limit, unlimited aggregate capacity)", () => {
+describe("body memory admission (unlimited body size and aggregate capacity)", () => {
   it("never rejects for active capacity, even when charge exceeds the historical pool", () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 100,
-      maxWireBytes: 100,
       jsonAmplification: 2,
       minRequestChargeBytes: 40,
     });
@@ -26,7 +25,6 @@ describe("body memory admission (hard wire limit, unlimited aggregate capacity)"
   it("blocks new acquires while paused so waitForIdle can drain active leases", async () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
-      maxWireBytes: 10,
       jsonAmplification: 6,
     });
     const active = admission.acquire(5);
@@ -57,7 +55,6 @@ describe("body memory admission (hard wire limit, unlimited aggregate capacity)"
   it("tracks charge for bookkeeping but never returns capacity-busy", () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
-      maxWireBytes: 10,
       jsonAmplification: 6,
     });
     const first = admission.acquire(6);
@@ -73,7 +70,6 @@ describe("body memory admission (hard wire limit, unlimited aggregate capacity)"
   it("stops counting pending after materialize and still allows more acquires", () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 100,
-      maxWireBytes: 100,
       jsonAmplification: 2,
       minRequestChargeBytes: 10,
     });
@@ -95,10 +91,9 @@ describe("body memory admission (hard wire limit, unlimited aggregate capacity)"
     expect(admission.pendingBytes).toBe(0);
   });
 
-  it("keeps a deterministic hard wire limit without restoring capacity rejection", async () => {
+  it("admits a body larger than the former hard wire limit", async () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 120,
-      maxWireBytes: 20,
       jsonAmplification: 6,
     });
     const admitted = await readAdmittedRequestBody(
@@ -114,46 +109,35 @@ describe("body memory admission (hard wire limit, unlimited aggregate capacity)"
     admitted.release();
     expect(admission.reservedBytes).toBe(0);
 
-    await expect(
-      readAdmittedRequestBody(
-        new Request("http://helm.test/v1/responses", { method: "POST", body: "x".repeat(21) }),
-        admission,
-      ),
-    ).rejects.toMatchObject({ status: 413, code: "request_too_large" });
+    const large = await readAdmittedRequestBody(
+      new Request("http://helm.test/v1/responses", { method: "POST", body: "x".repeat(21) }),
+      admission,
+    );
+    expect(large.text).toBe("x".repeat(21));
+    large.release();
     expect(admission.reservedBytes).toBe(0);
   });
 
-  it("rejects Content-Length beyond the hard wire limit before reading", async () => {
+  it("admits Content-Length beyond the former hard wire limit", async () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
-      maxWireBytes: 10,
       jsonAmplification: 6,
-    });
-    let canceled = false;
-    const body = new ReadableStream<Uint8Array>({
-      cancel() {
-        canceled = true;
-      },
     });
     const request = new Request("http://helm.test/v1/responses", {
       method: "POST",
       headers: { "content-length": "11" },
-      body,
-      duplex: "half",
-    } as RequestInit & { duplex: "half" });
-
-    await expect(readAdmittedRequestBody(request, admission)).rejects.toMatchObject({
-      status: 413,
-      code: "request_too_large",
+      body: "x".repeat(11),
     });
-    expect(canceled).toBe(true);
+
+    const admitted = await readAdmittedRequestBody(request, admission);
+    expect(admitted.text).toBe("x".repeat(11));
+    admitted.release();
     expect(admission.reservedBytes).toBe(0);
   });
 
   it("rejects readAdmittedRequestBody while paused for maintenance", async () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
-      maxWireBytes: 10,
       jsonAmplification: 6,
     });
     admission.pause();
@@ -166,17 +150,13 @@ describe("body memory admission (hard wire limit, unlimited aggregate capacity)"
     expect(admission.reservedBytes).toBe(0);
   });
 
-  it("exposes and enforces the configured hard wire limit", () => {
+  it("does not enforce the legacy configured hard wire limit", () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 1,
-      maxWireBytes: 1,
       jsonAmplification: 1,
     });
-    expect(admission.maxWireBytes).toBe(1);
-    expect(admission.acquire(2)).toMatchObject({
-      ok: false,
-      reason: "too_large",
-      cause: "wire_limit",
-    });
+    const acquired = admission.acquire(2);
+    expect(acquired.ok).toBe(true);
+    if (acquired.ok) acquired.lease.release();
   });
 });

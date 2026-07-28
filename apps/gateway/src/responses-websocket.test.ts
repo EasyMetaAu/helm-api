@@ -128,7 +128,6 @@ describe("Responses websocket bridge", () => {
   it("does not reserve a maximum frame for idle websocket connections", async () => {
     const ingressAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 20,
-      maxWireBytes: 10,
       jsonAmplification: 1,
       minRequestChargeBytes: 10,
     });
@@ -152,7 +151,6 @@ describe("Responses websocket bridge", () => {
   it("admits concurrent materialized websocket messages without capacity 503", async () => {
     const ingressAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 200,
-      maxWireBytes: 100,
       jsonAmplification: 1,
       minRequestChargeBytes: 100,
     });
@@ -193,32 +191,33 @@ describe("Responses websocket bridge", () => {
     expect(ingressAdmission.reservedBytes).toBe(0);
   });
 
-  it("keeps the shared hard wire limit before parsing a websocket message", async () => {
+  it("accepts a websocket message larger than the former shared hard wire limit", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
-      maxWireBytes: 10,
       jsonAmplification: 6,
     });
     const baseUrl = await startBridge(
-      () => {
-        throw new Error("fetch should not run");
-      },
+      () =>
+        new Response(
+          'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        ),
       undefined,
       { memoryAdmission },
     );
     const socket = await connect(`${baseUrl}/v1/responses`);
-    const closed = once(socket, "close");
-    socket.send(JSON.stringify({ type: "response.create", input: "too large" }));
-    const [code] = await closed;
+    const events = await collectTurn(socket, {
+      type: "response.create",
+      input: "larger than ten bytes",
+    });
 
-    expect(code).toBe(1009);
+    expect(events.at(-1)).toMatchObject({ type: "response.completed" });
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
   it("reports maintenance pause honestly on an established websocket", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
-      maxWireBytes: 1_000,
       jsonAmplification: 6,
     });
     const baseUrl = await startBridge(
@@ -249,7 +248,6 @@ describe("Responses websocket bridge", () => {
   it("materializes the shared request lease after the internal HTTP parser returns", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1_000,
-      maxWireBytes: 1_000,
       jsonAmplification: 1,
       minRequestChargeBytes: 1,
     });

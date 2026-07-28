@@ -1832,28 +1832,25 @@ export async function buildServer(
   const backgroundTasks = createTrackedBackgroundTasks();
   const requestBodyMemoryAdmission = createBodyMemoryAdmission({
     activeRequestBytes: memoryBudget.activeRequestBytes,
-    maxWireBytes: memoryBudget.maxWireBytes,
     jsonAmplification: memoryBudget.jsonAmplification,
     minRequestChargeBytes: memoryBudget.minRequestChargeBytes,
   });
   const websocketIngressAdmission = createBodyMemoryAdmission({
     activeRequestBytes: memoryBudget.websocketIngressBytes,
-    maxWireBytes: memoryBudget.websocketMaxPayloadBytes,
     jsonAmplification: 1,
     minRequestChargeBytes: 1,
   });
   logger.log("info", "runtime.memory_budget", {
     heap_limit_bytes: memoryBudget.heapLimitBytes,
     process_limit_bytes: memoryBudget.processLimitBytes,
-    request_admission_mode: "wire_limit_only",
-    max_wire_bytes: memoryBudget.maxWireBytes,
+    request_admission_mode: "unlimited",
     write_queue_bytes: memoryBudget.writeQueueBytes,
     session_cache_bytes: memoryBudget.sessionCacheBytes,
     response_capture_bytes: memoryBudget.responseCaptureBytes,
     sse_tail_chars: memoryBudget.sseTailChars,
     sqlite_page_cache_bytes: memoryBudget.sqlitePageCacheBytes,
     sqlite_maintenance_cache_bytes: memoryBudget.sqliteMaintenanceCacheBytes,
-    websocket_max_payload_bytes: memoryBudget.websocketMaxPayloadBytes,
+    websocket_max_payload_bytes: 0,
   });
   const config = loadConfig({ configDir: opts.configDir ?? "./config" });
   // Validate the optional Grok proxy protocol override before opening stores or

@@ -7,7 +7,6 @@ import {
   type ProxyConfig,
   proxyConfigToUrl,
   type ResponseWorkAdmission,
-  runtimeMemoryBudget,
   runtimeResponseWorkAdmission,
 } from "@helm/core";
 import { HttpsProxyAgent } from "https-proxy-agent";
@@ -122,7 +121,7 @@ class WsCodexConnection implements CodexResponsesWebSocketConnection {
       waiter.resolve(message);
       return;
     }
-    if (this.pendingBytes + bytes > this.maxPendingBytes) {
+    if (this.maxPendingBytes > 0 && this.pendingBytes + bytes > this.maxPendingBytes) {
       this.failCapacity(message.release);
       return;
     }
@@ -211,7 +210,7 @@ async function unexpectedResponseBody(
     for await (const chunk of response) {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       bytes += buffer.byteLength;
-      if (bytes > maxBytes) {
+      if (maxBytes > 0 && bytes > maxBytes) {
         const error = new UnexpectedResponseBodyError(
           "too_large",
           `Codex Responses websocket unexpected response body exceeded ${maxBytes} bytes`,
@@ -232,11 +231,8 @@ export function createCodexResponsesWebSocketConnector(
 ): CodexResponsesWebSocketConnector {
   const agent = codexWebSocketAgent(options.proxy);
   const connectTimeoutMs = codexWebSocketConnectTimeoutMs(options.timeoutMs);
-  const maxPayloadBytes = Math.max(
-    1,
-    Math.floor(options.maxPayloadBytes ?? runtimeMemoryBudget().maxWireBytes),
-  );
-  const maxPendingBytes = Math.max(1, Math.floor(options.maxPendingBytes ?? maxPayloadBytes));
+  const maxPayloadBytes = Math.max(0, Math.floor(options.maxPayloadBytes ?? 0));
+  const maxPendingBytes = Math.max(0, Math.floor(options.maxPendingBytes ?? 0));
   const responseWorkAdmission = options.responseWorkAdmission ?? runtimeResponseWorkAdmission();
 
   return async ({ url, headers, signal }) =>

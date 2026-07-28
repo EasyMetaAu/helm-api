@@ -47,6 +47,15 @@ describe("readResponseTextWithinBudget", () => {
     ).toBe(body);
   });
 
+  it("treats zero as unlimited", async () => {
+    await expect(
+      readResponseTextWithinBudget(
+        new Response("unread", { headers: { "content-length": "6" } }),
+        0,
+      ),
+    ).resolves.toBe("unread");
+  });
+
   it("holds the shared amplified reservation through consumption and releases it", async () => {
     const admission = createResponseWorkAdmission({
       capacityBytes: 12,

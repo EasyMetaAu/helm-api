@@ -64,31 +64,26 @@ export function handleError(err: unknown, c: Context<AppEnv>): Response {
   const logger = c.get("logger");
 
   if (err instanceof RequestAdmissionError) {
-    if (err.status === 503) c.header("retry-after", "1");
-    logger.log(
-      "warn",
-      err.admission?.cause === "paused" ? "request.maintenance_rejected" : "request.body_rejected",
-      {
-        trace_id: traceId,
-        http_status: err.status,
-        code: err.code,
-        ...(err.admission === undefined
-          ? {}
-          : {
-              admission_reason: err.admission.cause,
-              wire_bytes: err.admission.wireBytes,
-              requested_charge_bytes: err.admission.requestedChargeBytes,
-              max_wire_bytes: err.admission.maxWireBytes,
-              active_reserved_bytes: err.admission.activeReservedBytes,
-              pending_bytes: err.admission.pendingBytes,
-            }),
-      },
-    );
+    c.header("retry-after", "1");
+    logger.log("warn", "request.maintenance_rejected", {
+      trace_id: traceId,
+      http_status: err.status,
+      code: err.code,
+      ...(err.admission === undefined
+        ? {}
+        : {
+            admission_reason: err.admission.cause,
+            wire_bytes: err.admission.wireBytes,
+            requested_charge_bytes: err.admission.requestedChargeBytes,
+            active_reserved_bytes: err.admission.activeReservedBytes,
+            pending_bytes: err.admission.pendingBytes,
+          }),
+    });
     return c.json(
       {
         error: {
           message: err.message,
-          type: err.status === 413 ? "invalid_request_error" : "server_error",
+          type: "server_error",
           code: err.code,
           trace_id: traceId,
         },

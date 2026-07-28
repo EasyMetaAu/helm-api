@@ -138,28 +138,28 @@ describe("createApp: trace_id, logging, error handling", () => {
     });
   });
 
-  it("logs the hard body rejection without stale capacity fields or request payload data", async () => {
+  it("logs maintenance admission without stale capacity fields or request payload data", async () => {
     const { logger, lines } = fakeLogger();
     const c = mockCtx(logger, "trace-memory");
     const res = handleError(
-      new RequestAdmissionError(413, "request_too_large", "body too large", {
-        cause: "wire_limit",
+      new RequestAdmissionError(503, "database_maintenance", "database maintenance in progress", {
+        cause: "paused",
         wireBytes: 12,
         requestedChargeBytes: 72,
-        maxWireBytes: 10,
         activeReservedBytes: 144,
         pendingBytes: 24,
       }),
       c,
     );
 
-    expect(res.status).toBe(413);
-    expect(lines.find((line) => line.message === "request.body_rejected")?.fields).toMatchObject({
+    expect(res.status).toBe(503);
+    expect(
+      lines.find((line) => line.message === "request.maintenance_rejected")?.fields,
+    ).toMatchObject({
       trace_id: "trace-memory",
-      admission_reason: "wire_limit",
+      admission_reason: "paused",
       wire_bytes: 12,
       requested_charge_bytes: 72,
-      max_wire_bytes: 10,
       active_reserved_bytes: 144,
       pending_bytes: 24,
     });

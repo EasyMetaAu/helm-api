@@ -370,7 +370,7 @@ function hasResponsesOutput(raw: string | null | undefined): boolean {
 const defaultMemoryBudget = runtimeMemoryBudget();
 
 function captureBodyLimitBytes(deps: PayloadCaptureDeps): number {
-  return deps.captureBodyLimitBytes ?? defaultMemoryBudget.maxWireBytes;
+  return deps.captureBodyLimitBytes ?? defaultMemoryBudget.responseCaptureBytes;
 }
 
 function sessionCacheBytes(deps: PayloadCaptureDeps): number {

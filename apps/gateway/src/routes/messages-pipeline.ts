@@ -24,7 +24,6 @@ import {
   type ResponseWorkAdmission,
   type RouteOptions,
   resolveMemoryMode,
-  runtimeMemoryBudget,
   runtimeResponseWorkAdmission,
   UpstreamError,
 } from "@helm/core";
@@ -558,13 +557,13 @@ function nextSSEBoundary(buffer: string): { index: number; length: number } | nu
 }
 
 function assertNativeSSEFrameFits(frame: string, maxFrameBytes: number): void {
-  if (Buffer.byteLength(frame) <= maxFrameBytes) return;
+  if (maxFrameBytes === 0 || Buffer.byteLength(frame) <= maxFrameBytes) return;
   throw new UpstreamError("upstream_error", "upstream SSE frame exceeds the runtime memory budget");
 }
 
 export async function* splitSSEFrames(
   raw: AsyncIterable<string>,
-  maxFrameBytes = runtimeMemoryBudget().maxWireBytes,
+  maxFrameBytes = 0,
   workAdmission: ResponseWorkAdmission = runtimeResponseWorkAdmission(),
 ): AsyncIterable<RawSSEFrame> {
   const acquired = workAdmission.acquire(0);
