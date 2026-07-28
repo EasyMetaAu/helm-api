@@ -1,4 +1,8 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { listSqliteIdleFlushCandidates } from "./idle-flush-candidates.js";
 import { SqliteMemoryStore } from "./memory-store.js";
 import { createSqliteDb } from "./migrate.js";
 
@@ -76,6 +80,66 @@ describe("SqliteMemoryStore — thread model stamp", () => {
 });
 
 describe("SqliteMemoryStore — idle-flush candidates", () => {
+  it("keeps the event loop moving while a file-backed candidate scan waits on SQLite", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "helm-idle-flush-"));
+    const path = join(dir, "helm.db");
+    const db = createSqliteDb(path);
+    const store = new SqliteMemoryStore(
+      db,
+      () => "m1",
+      () => new Date(1_000_000),
+    );
+    try {
+      await store.ensureThread({ id: "t1", ownerId: "acct-a" });
+      await store.appendMessage({
+        threadId: "t1",
+        role: "user",
+        content: "hi",
+        tokenEstimate: 1,
+      });
+      db.$sqlite.pragma("journal_mode = DELETE");
+      db.$sqlite.exec("BEGIN EXCLUSIVE");
+      let lockReleased = false;
+      const release = setTimeout(() => {
+        db.$sqlite.exec("COMMIT");
+        lockReleased = true;
+      }, 50);
+
+      try {
+        await expect(
+          store.listIdleFlushCandidates({ idleBeforeMs: 2_000_000, limit: 10 }),
+        ).resolves.toEqual([{ accountId: "acct-a", threadId: "t1" }]);
+        expect(lockReleased).toBe(true);
+      } finally {
+        clearTimeout(release);
+        if (!lockReleased) db.$sqlite.exec("COMMIT");
+      }
+    } finally {
+      if (db.$sqlite.open) db.$sqlite.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("coalesces overlapping scans and terminates a stuck file worker", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "helm-idle-flush-timeout-"));
+    const path = join(dir, "helm.db");
+    const db = createSqliteDb(path);
+    try {
+      db.$sqlite.pragma("journal_mode = DELETE");
+      db.$sqlite.exec("BEGIN EXCLUSIVE");
+      const input = { idleBeforeMs: 2_000_000, limit: 10 };
+      const first = listSqliteIdleFlushCandidates(db.$sqlite, input, { workerTimeoutMs: 25 });
+      const second = listSqliteIdleFlushCandidates(db.$sqlite, input, { workerTimeoutMs: 25 });
+
+      expect(second).toBe(first);
+      await expect(first).rejects.toThrow("sqlite idle-flush worker timed out after 25ms");
+    } finally {
+      db.$sqlite.exec("COMMIT");
+      db.$sqlite.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("returns an idle thread with uncovered messages; respects the idle cutoff", async () => {
     const { store, clock } = newStore();
     await store.ensureThread({ id: "t1", ownerId: "acct-a" });
