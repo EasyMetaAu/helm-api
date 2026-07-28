@@ -915,21 +915,24 @@ export class SqliteMemoryStore implements MemoryStore {
     const intervalCutoff = input.nowMs - input.triggerIntervalS * 1000;
     const rows = this.db.$sqlite
       .prepare(
-        `SELECT mt.owner_id AS owner_id,
-                (SELECT MAX(j.created_at) FROM memory_jobs j
-                  WHERE j.type = 'decay'
-                    AND json_extract(j.scope_id, '$.accountId') = mt.owner_id) AS last_sweep,
+        `WITH decay_sweeps AS MATERIALIZED (
+           SELECT json_extract(scope_id, '$.accountId') AS owner_id,
+                  MAX(created_at) AS last_sweep
+             FROM memory_jobs
+            WHERE type = 'decay'
+            GROUP BY json_extract(scope_id, '$.accountId')
+         )
+         SELECT mt.owner_id AS owner_id,
+                ds.last_sweep AS last_sweep,
                 COUNT(o.id) AS active_total,
-                SUM(CASE WHEN o.observed_at > COALESCE(
-                  (SELECT MAX(j2.created_at) FROM memory_jobs j2
-                    WHERE j2.type = 'decay'
-                      AND json_extract(j2.scope_id, '$.accountId') = mt.owner_id), 0)
+                SUM(CASE WHEN o.observed_at > COALESCE(ds.last_sweep, 0)
                   THEN 1 ELSE 0 END) AS new_since_sweep
            FROM memory_observations o
            JOIN memory_threads mt ON mt.id = o.thread_id
+           LEFT JOIN decay_sweeps ds ON ds.owner_id = mt.owner_id
           WHERE o.status = 'active'
             AND mt.owner_id IS NOT NULL
-          GROUP BY mt.owner_id`,
+          GROUP BY mt.owner_id, ds.last_sweep`,
       )
       .all() as Array<{
       owner_id: string;
