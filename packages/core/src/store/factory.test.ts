@@ -25,6 +25,7 @@ describe("createStore factory", () => {
     expect(store.concurrencyLeases).toBeNull();
     expect(store.memory).toBeDefined();
     expect(store.config).toBeDefined();
+    expect(store.responsesRegistry).toBeDefined();
     await store.close();
   });
 

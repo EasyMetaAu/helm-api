@@ -20,7 +20,7 @@
 import { decryptSecret, encryptSecret } from "../store/crypto/token-cipher.js";
 import type { OAuthTokenStore } from "../store/ports.js";
 import { OpenAICodexIdentityMismatchError } from "./oauth/openai-codex.js";
-import { OAuthHttpError } from "./oauth/runtime.js";
+import { buildOAuthRequestSignal, OAuthHttpError } from "./oauth/runtime.js";
 import type { OAuthCredentials, OAuthProviderInterface } from "./oauth/types.js";
 
 // Cross-instance refresh serialization for PRESET credentials. The composition root
@@ -37,6 +37,11 @@ import type { OAuthCredentials, OAuthProviderInterface } from "./oauth/types.js"
 // unrelated stores in a test never collide. Inside the gate each instance RE-READS
 // the store, so a sibling's just-rotated token is adopted rather than re-refreshed.
 const presetRefreshGates = new WeakMap<OAuthTokenStore, Map<string, Promise<unknown>>>();
+let presetRefreshOutstanding = 0;
+
+export function oauthRefreshQueueDepth(): number {
+  return presetRefreshOutstanding;
+}
 
 function runExclusive<T>(store: OAuthTokenStore, key: string, fn: () => Promise<T>): Promise<T> {
   let gates = presetRefreshGates.get(store);
@@ -49,14 +54,28 @@ function runExclusive<T>(store: OAuthTokenStore, key: string, fn: () => Promise<
   // wedging the queue.
   const prev = gates.get(key) ?? Promise.resolve();
   const result = prev.then(fn);
-  gates.set(
-    key,
-    result.then(
-      () => {},
-      () => {},
-    ),
+  const tail = result.then(
+    () => {},
+    () => {},
   );
-  return result;
+  gates.set(key, tail);
+  presetRefreshOutstanding += 1;
+  return result.finally(() => {
+    presetRefreshOutstanding -= 1;
+    if (gates?.get(key) !== tail) return;
+    gates.delete(key);
+    if (gates.size === 0) presetRefreshGates.delete(store);
+  });
+}
+
+function waitForSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const aborted = () => reject(signal.reason);
+    signal.addEventListener("abort", aborted, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", aborted));
+  });
 }
 
 // CONFIDENTIAL-client OAuth (PR #43): generic token endpoint reached with a
@@ -94,6 +113,8 @@ export interface TokenManagerDeps {
   now?: () => number;
   /** Refresh `skew` ms before the reported expiry so a token never expires mid-flight. */
   expirySkewMs?: number;
+  /** Internal deadline for the shared refresh fetch. */
+  refreshTimeoutMs?: number;
   // ── preset-kind deps (REQUIRED when oauth.kind === "preset") ────────────────
   /** Persistent credential store (read on first use, rotation write-back on refresh). */
   tokenStore?: OAuthTokenStore;
@@ -105,7 +126,7 @@ export interface TokenManagerDeps {
 
 export interface TokenManager {
   /** "Bearer <access-token>"; refreshes first if the token is missing/expired. */
-  getAuthHeader(): Promise<string>;
+  getAuthHeader(signal?: AbortSignal): Promise<string>;
   /** Live access + refresh tokens, for redaction of echoed upstream bodies. */
   currentSecrets(): string[];
   /** Persisted provider metadata loaded with the current preset credential. */
@@ -133,6 +154,7 @@ export class TokenRefreshError extends Error {
 }
 
 const DEFAULT_EXPIRY_SKEW_MS = 60_000;
+const DEFAULT_REFRESH_TIMEOUT_MS = 30_000;
 // Fallback lifetime when the token endpoint omits expires_in (rare). Short so a
 // missing TTL degrades to "refresh often", never "cache a token forever".
 const DEFAULT_EXPIRES_IN_S = 3600;
@@ -147,6 +169,7 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
   const doFetch = deps.fetch ?? globalThis.fetch;
   const now = deps.now ?? (() => Date.now());
   const skew = deps.expirySkewMs ?? DEFAULT_EXPIRY_SKEW_MS;
+  const refreshTimeoutMs = Math.max(1, deps.refreshTimeoutMs ?? DEFAULT_REFRESH_TIMEOUT_MS);
   const oauth = deps.oauth;
   const isPreset = oauth.kind === "preset";
 
@@ -162,6 +185,7 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
   // through the store `meta` and re-merged into the provider refresh call.
   let presetExtra: Record<string, unknown> = {};
   let presetLoaded = false;
+  let presetLoading: Promise<void> | null = null;
   // Preset-only: invalidate() (an upstream 401) demands a NETWORK refresh even when
   // the stored token still looks unexpired — but ONLY while the store holds the SAME
   // token that was just rejected. `forcedRefresh` carries that intent across the gate
@@ -193,7 +217,7 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
     return body;
   }
 
-  async function doRefresh(): Promise<void> {
+  async function doRefresh(signal?: AbortSignal): Promise<void> {
     const o = oauth as ConfidentialOAuth;
     let res: Response;
     try {
@@ -201,6 +225,7 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: buildBody(o).toString(),
+        signal: buildOAuthRequestSignal({ signal, timeoutMs: refreshTimeoutMs }),
       });
     } catch {
       // Network / DNS / abort: never echo the cause (could carry the URL with a
@@ -260,8 +285,16 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
   // after a restart.
   async function ensurePresetLoaded(): Promise<void> {
     if (presetLoaded) return;
-    presetLoaded = true;
-    await loadFromStore();
+    if (presetLoading === null) {
+      presetLoading = loadFromStore()
+        .then(() => {
+          presetLoaded = true;
+        })
+        .finally(() => {
+          presetLoading = null;
+        });
+    }
+    await presetLoading;
   }
 
   // Preset refresh: delegate the wire shape to the subscription provider, then
@@ -288,7 +321,14 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
           expires: expiresAt,
           ...presetExtra,
         },
-        doFetch,
+        (input, init) =>
+          doFetch(input, {
+            ...init,
+            signal: buildOAuthRequestSignal({
+              signal: init?.signal ?? undefined,
+              timeoutMs: refreshTimeoutMs,
+            }),
+          }),
       );
     } catch (err) {
       // Provider refresh failed — never echo its message (could carry a token), but
@@ -335,23 +375,23 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
     return invalidatedAccess !== null && accessToken === invalidatedAccess;
   }
 
-  async function ensureFresh(): Promise<void> {
+  async function ensureFresh(signal?: AbortSignal): Promise<void> {
     if (!isPreset) {
       // Confidential grant: in-memory only, so the per-instance single-flight lock is
       // sufficient (no shared rotating credential to coordinate with siblings).
       if (!isExpired()) return;
       if (refreshing === null) {
-        refreshing = doRefresh().finally(() => {
+        refreshing = doRefresh(signal).finally(() => {
           refreshing = null;
         });
       }
-      await refreshing;
+      await waitForSignal(refreshing, signal);
       return;
     }
 
     // Preset grant: the rotating refresh token is shared across instances via the
     // store, so coordinate through the store-scoped gate (see presetRefreshGates).
-    await ensurePresetLoaded();
+    await waitForSignal(ensurePresetLoaded(), signal);
     if (!isExpired() && !forcedRefresh) return;
     // Per-instance single-flight: N concurrent callers of THIS manager coalesce into
     // ONE refresh op (cleared in finally so a later expiry refreshes again, and a
@@ -362,7 +402,7 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
         refreshing = null;
       });
     }
-    await refreshing;
+    await waitForSignal(refreshing, signal);
   }
 
   // Run ONE preset refresh under the cross-instance gate: serialize against sibling
@@ -389,8 +429,8 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
   }
 
   return {
-    async getAuthHeader(): Promise<string> {
-      await ensureFresh();
+    async getAuthHeader(signal?: AbortSignal): Promise<string> {
+      await ensureFresh(signal);
       return `Bearer ${accessToken}`;
     },
     currentSecrets(): string[] {

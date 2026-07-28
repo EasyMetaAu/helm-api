@@ -1534,7 +1534,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(routeHarness.routed?.provider_raw?.generate).toBe(false);
   });
 
-  it("commits a streamed response binding before exposing its terminal frame", async () => {
+  it("persists a streamed response binding before exposing its terminal frame", async () => {
     const saved = deferred<void>();
     const put = vi.fn(() => saved.promise);
     const decision = {
@@ -1581,7 +1581,6 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       firstRead.then(() => "frame" as const),
       shortTimeout(),
     ]);
-    saved.resolve(undefined);
 
     expect(firstResult).toBe("timeout");
     expect(put).toHaveBeenCalledWith(
@@ -1591,7 +1590,10 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
         selectedLane: "coding",
       }),
     );
+    saved.resolve(undefined);
     expect(new TextDecoder().decode((await firstRead).value)).toContain("response.completed");
+    const streamClosed = reader.read().then(() => "closed" as const);
+    expect(await streamClosed).toBe("closed");
   });
 
   it("rejects an unknown previous_response_id instead of routing it without history", async () => {
@@ -2816,6 +2818,45 @@ describe("streamStatusFromEventName — incomplete / failed / cancelled cases (l
     );
   });
 
+  it("waits for registry persistence before writing the terminal SSE frame", async () => {
+    let release!: () => void;
+    const persisted = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const completedData = JSON.stringify({
+      type: "response.completed",
+      response: { id: "resp_fast_terminal", status: "completed" },
+    });
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield { event: "response.completed", data: completedData };
+    }
+    const { deps } = makeDeps({
+      nativePassthrough: true,
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      streamIR: events,
+      registry: { put: () => persisted, get: vi.fn() },
+    });
+    const app = buildApp(deps);
+    const response = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("stream body missing");
+
+    const firstRead = reader.read();
+    const first = await Promise.race([
+      firstRead,
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 50)),
+    ]);
+    expect(first).toBe("timeout");
+    release();
+    const terminal = await firstRead;
+    expect(new TextDecoder().decode(terminal.value)).toContain("response.completed");
+    await reader.cancel();
+  });
+
   it("records status='failed' when the stream emits a response.failed event", async () => {
     const put = vi.fn();
     const failedData = JSON.stringify({
@@ -2844,7 +2885,11 @@ describe("streamStatusFromEventName — incomplete / failed / cancelled cases (l
   });
 
   it("normalizes response.cancelled to the failed stream outcome", async () => {
-    const put = vi.fn();
+    let release!: () => void;
+    const persisted = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const put = vi.fn(() => persisted);
     const cancelledData = JSON.stringify({
       type: "response.cancelled",
       response: { id: "resp_cancel_1", status: "cancelled" },
@@ -2864,7 +2909,18 @@ describe("streamStatusFromEventName — incomplete / failed / cancelled cases (l
       headers: AUTH,
       body: JSON.stringify({ ...REQ, stream: true }),
     });
-    await res.text();
+    const reader = res.body?.getReader();
+    if (!reader) throw new Error("stream body missing");
+    const firstRead = reader.read();
+    const first = await Promise.race([
+      firstRead,
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 50)),
+    ]);
+    release();
+    expect(first).toBe("timeout");
+    const terminal = await firstRead;
+    expect(new TextDecoder().decode(terminal.value)).toContain("response.cancelled");
+    await reader.cancel();
     expect(put).toHaveBeenCalledWith(
       expect.objectContaining({ responseId: "resp_cancel_1", status: "failed" }),
     );

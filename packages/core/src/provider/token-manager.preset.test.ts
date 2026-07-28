@@ -1,10 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { encryptSecret } from "../store/crypto/token-cipher.js";
 import type { OAuthTokenRecord, OAuthTokenStore } from "../store/ports.js";
 import { OpenAICodexIdentityMismatchError } from "./oauth/openai-codex.js";
 import { OAuthHttpError } from "./oauth/runtime.js";
 import type { OAuthCredentials, OAuthProviderInterface } from "./oauth/types.js";
-import { createTokenManager, type PresetOAuth, TokenRefreshError } from "./token-manager.js";
+import {
+  createTokenManager,
+  oauthRefreshQueueDepth,
+  type PresetOAuth,
+  TokenRefreshError,
+} from "./token-manager.js";
 
 const KEY = Buffer.alloc(32, 1);
 const PRESET: PresetOAuth = { kind: "preset", providerId: "anthropic", account: "default" };
@@ -217,6 +222,112 @@ describe("createTokenManager (preset kind)", () => {
     expect(provider.calls).toBe(1);
   });
 
+  it("lets one caller stop waiting without cancelling the shared refresh", async () => {
+    let release!: () => void;
+    let started!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const refreshStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const provider = rotatingProvider();
+    const refreshToken = provider.refreshToken.bind(provider);
+    provider.refreshToken = async (credentials) => {
+      started();
+      await waiting;
+      return refreshToken(credentials);
+    };
+    const tm = createTokenManager({
+      oauth: PRESET,
+      tokenStore: memStore(rotatingSeed(100)),
+      encKey: KEY,
+      oauthProvider: provider,
+      now: () => 1_000_000,
+    });
+    const first = tm.getAuthHeader();
+    await refreshStarted;
+    const caller = new AbortController();
+    const second = tm.getAuthHeader(caller.signal);
+
+    caller.abort(new Error("caller disconnected"));
+    await expect(second).rejects.toThrow("caller disconnected");
+    release();
+    await expect(first).resolves.toBe("Bearer at-1");
+    await expect(tm.getAuthHeader()).resolves.toBe("Bearer at-1");
+    expect(provider.calls).toBe(1);
+  });
+
+  it("bounds the shared preset refresh fetch after every caller disconnects", async () => {
+    let refreshSignal: AbortSignal | undefined;
+    let fetchStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      fetchStarted = resolve;
+    });
+    const provider = rotatingProvider();
+    provider.refreshToken = async (_credentials, fetchImpl) => {
+      await fetchImpl?.("https://oauth.example/token");
+      throw new Error("unreachable");
+    };
+    const tm = createTokenManager({
+      oauth: PRESET,
+      tokenStore: memStore(rotatingSeed(100)),
+      encKey: KEY,
+      oauthProvider: provider,
+      refreshTimeoutMs: 5,
+      fetch: (_input, init) => {
+        const signal = init?.signal ?? undefined;
+        refreshSignal = signal;
+        fetchStarted();
+        return new Promise<Response>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      },
+      now: () => 1_000_000,
+    });
+    const caller = new AbortController();
+    const waiting = tm.getAuthHeader(caller.signal);
+    await started;
+    caller.abort(new Error("caller disconnected"));
+
+    await expect(waiting).rejects.toThrow("caller disconnected");
+    await vi.waitFor(() => expect(refreshSignal?.aborted).toBe(true));
+    await vi.waitFor(() => expect(oauthRefreshQueueDepth()).toBe(0));
+  });
+
+  it("coalesces concurrent first-use reads before deciding whether to refresh", async () => {
+    let reads = 0;
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const seed = rotatingSeed(9_999_999_999_999);
+    const store = memStore(seed);
+    const originalGet = store.get.bind(store);
+    store.get = async (providerId, account) => {
+      reads += 1;
+      await ready;
+      return originalGet(providerId, account);
+    };
+    const provider = rotatingProvider();
+    const tm = createTokenManager({
+      oauth: PRESET,
+      tokenStore: store,
+      encKey: KEY,
+      oauthProvider: provider,
+      now: () => 1_000_000,
+    });
+
+    const first = tm.getAuthHeader();
+    const second = tm.getAuthHeader();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    release();
+
+    await expect(Promise.all([first, second])).resolves.toEqual(["Bearer at-0", "Bearer at-0"]);
+    expect(reads).toBe(1);
+    expect(provider.calls).toBe(0);
+  });
+
   // ── cross-instance coordination (the rotating-refresh-token race fix) ──────────
   // The composition root builds MANY managers for one (provider, account): executor,
   // model discovery, providers-page status refresh, quota scrape, connectivity test.
@@ -242,6 +353,42 @@ describe("createTokenManager (preset kind)", () => {
     expect(provider.calls).toBe(1);
     expect(ha).toBe("Bearer at-1");
     expect(hb).toBe("Bearer at-1");
+  });
+
+  it("reports running and waiting preset refreshes until the shared gate settles", async () => {
+    let release!: () => void;
+    let started!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const refreshStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const provider = rotatingProvider();
+    const refreshToken = provider.refreshToken.bind(provider);
+    provider.refreshToken = async (credentials) => {
+      started();
+      await waiting;
+      return refreshToken(credentials);
+    };
+    const store = memStore(rotatingSeed(100));
+    const manager = () =>
+      createTokenManager({
+        oauth: PRESET,
+        tokenStore: store,
+        encKey: KEY,
+        oauthProvider: provider,
+        now: () => 1_000_000,
+      });
+
+    const first = manager().getAuthHeader();
+    const second = manager().getAuthHeader();
+    await refreshStarted;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(oauthRefreshQueueDepth()).toBe(2);
+    release();
+    await Promise.all([first, second]);
+    expect(oauthRefreshQueueDepth()).toBe(0);
   });
 
   it("re-reads the store before replaying a stale in-memory rotating token", async () => {
@@ -374,7 +521,7 @@ describe("createTokenManager (preset kind)", () => {
     // A sentinel fetch standing in for the per-account egress-proxy fetch. The
     // preset refresh MUST hand THIS to the provider so the refresh leaves through
     // the same hop as execution — never the real-IP global fetch.
-    const proxyFetch = (() => {}) as unknown as typeof globalThis.fetch;
+    const proxyFetch = vi.fn(async () => new Response("{}"));
     let receivedFetch: unknown;
     const provider: OAuthProviderInterface = {
       id: "anthropic",
@@ -384,6 +531,7 @@ describe("createTokenManager (preset kind)", () => {
       },
       async refreshToken(creds, fetchImpl) {
         receivedFetch = fetchImpl;
+        await fetchImpl?.("https://oauth.example/token");
         return { access: "at-x", refresh: creds.refresh, expires: 9_999_999 };
       },
       getApiKey: (c) => c.access,
@@ -397,7 +545,8 @@ describe("createTokenManager (preset kind)", () => {
       now: () => 1_000_000,
     });
     await tm.getAuthHeader();
-    expect(receivedFetch).toBe(proxyFetch);
+    expect(receivedFetch).toBeTypeOf("function");
+    expect(proxyFetch).toHaveBeenCalledOnce();
   });
 
   it("round-trips provider-specific meta (e.g. copilot enterpriseUrl) on refresh", async () => {

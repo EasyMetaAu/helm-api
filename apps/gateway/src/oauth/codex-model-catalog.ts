@@ -10,8 +10,10 @@ import { normalizeOpenAICodexClientVersion } from "./codex-client-version.js";
 import type {
   CodexModelCache,
   CodexModelCacheEntry,
+  CodexModelCacheHit,
   CodexModelCacheKey,
 } from "./codex-model-cache.js";
+import { DEFAULT_CODEX_MODEL_CACHE_TTL_MS } from "./codex-model-cache.js";
 
 export const DEFAULT_CODEX_MODEL_CATALOG_MAX_ENTRIES = 64;
 
@@ -30,8 +32,8 @@ export interface CodexModelCatalogSnapshot {
 export interface CodexModelCatalog {
   load(
     key: CodexModelCacheKey,
-    fetchModels: () => Promise<OpenAICodexModelsResult>,
-    options?: { force?: boolean },
+    fetchModels: (signal?: AbortSignal) => Promise<OpenAICodexModelsResult>,
+    options?: { force?: boolean; signal?: AbortSignal },
   ): Promise<CodexModelCatalogSnapshot | null>;
   snapshot(key: CodexModelCacheKey): CodexModelCatalogSnapshot | undefined;
   resolve(key: CodexModelCacheKey, model: string): CodexModelInfo | undefined;
@@ -42,7 +44,7 @@ export interface CodexModelCatalog {
   observeEtag(
     key: CodexModelCacheKey,
     etag: string,
-    fetchModels: () => Promise<OpenAICodexModelsResult>,
+    fetchModels: (signal?: AbortSignal) => Promise<OpenAICodexModelsResult>,
     onChanged?: () => void,
   ): Promise<void>;
 }
@@ -53,6 +55,7 @@ export interface CodexModelCatalogOptions {
   maxEntries?: number;
   now?: () => number;
   onRefresh?: () => void;
+  etagRenewIntervalMs?: number;
 }
 
 function normalizedKey(key: CodexModelCacheKey): CodexModelCacheKey | null {
@@ -146,6 +149,11 @@ export function createCodexModelCatalog(options: CodexModelCatalogOptions): Code
   const current = new Map<string, CodexModelCatalogSnapshot>();
   const refreshes = new Map<string, Promise<CodexModelCatalogSnapshot | null>>();
   const observations = new Map<string, Promise<void>>();
+  const etagRenewedAt = new Map<string, number>();
+  const etagRenewIntervalMs = Math.max(
+    0,
+    options.etagRenewIntervalMs ?? DEFAULT_CODEX_MODEL_CACHE_TTL_MS,
+  );
 
   function currentSnapshot(key: CodexModelCacheKey): CodexModelCatalogSnapshot | undefined {
     const id = cacheKey(key);
@@ -196,14 +204,15 @@ export function createCodexModelCatalog(options: CodexModelCatalogOptions): Code
 
   async function refresh(
     key: CodexModelCacheKey,
-    fetchModels: () => Promise<OpenAICodexModelsResult>,
+    fetchModels: (signal?: AbortSignal) => Promise<OpenAICodexModelsResult>,
+    signal?: AbortSignal,
   ): Promise<CodexModelCatalogSnapshot | null> {
     const id = cacheKey(key);
     const active = refreshes.get(id);
-    if (active) return active;
+    if (active) return waitForSignal(active, signal);
     if (refreshes.size >= maxEntries) return null;
     const run = (async () => {
-      const result = await fetchModels();
+      const result = await fetchModels(signal);
       const models = parseModels(result.models);
       if (!models) return null;
       const entry: CodexModelCacheEntry = {
@@ -231,14 +240,34 @@ export function createCodexModelCatalog(options: CodexModelCatalogOptions): Code
       refreshes.delete(id);
     });
     refreshes.set(id, run);
-    return run;
+    return waitForSignal(run, signal);
+  }
+
+  function waitForSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (!signal) return promise;
+    if (signal.aborted) return Promise.reject(signal.reason);
+    return new Promise<T>((resolve, reject) => {
+      const aborted = () => reject(signal.reason);
+      signal.addEventListener("abort", aborted, { once: true });
+      promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", aborted));
+    });
   }
 
   return {
     async load(key, fetchModels, loadOptions = {}) {
       const normalized = normalizedKey(key);
       if (normalized === null) return null;
-      const hit = await options.cache.get(normalized);
+      let hit: CodexModelCacheHit | null = null;
+      try {
+        hit = loadOptions.signal
+          ? await options.cache.get(normalized, loadOptions.signal)
+          : await options.cache.get(normalized);
+      } catch {
+        const snapshot = currentSnapshot(normalized);
+        if (snapshot) return snapshot;
+        const fallback = bundledModelsFor(normalized.clientVersion);
+        return fallback.length > 0 ? apply(normalized, fallback, null, false, "bundled") : null;
+      }
       const cachedModels = hit ? parseModels(hit.entry.models) : null;
       if (loadOptions.force !== true && hit?.fresh && cachedModels) {
         const models = applyRemoteModels(normalized, cachedModels);
@@ -253,7 +282,7 @@ export function createCodexModelCatalog(options: CodexModelCatalogOptions): Code
         }
       }
       try {
-        const online = await refresh(normalized, fetchModels);
+        const online = await refresh(normalized, fetchModels, loadOptions.signal);
         if (online) return online;
       } catch {
         // Last-known-good below.
@@ -357,6 +386,15 @@ export function createCodexModelCatalog(options: CodexModelCatalogOptions): Code
           }
         }
         if (snapshot?.etag === etag) {
+          const renewedAt = etagRenewedAt.get(id);
+          if (renewedAt !== undefined && now() - renewedAt < etagRenewIntervalMs) return;
+          etagRenewedAt.delete(id);
+          etagRenewedAt.set(id, now());
+          while (etagRenewedAt.size > maxEntries) {
+            const oldest = etagRenewedAt.keys().next().value;
+            if (oldest === undefined) break;
+            etagRenewedAt.delete(oldest);
+          }
           await options.cache.renew(normalized, etag);
           return;
         }

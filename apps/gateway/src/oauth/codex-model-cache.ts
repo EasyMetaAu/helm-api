@@ -27,7 +27,7 @@ export interface CodexModelCacheHit {
 }
 
 export interface CodexModelCache {
-  get(key: CodexModelCacheKey): Promise<CodexModelCacheHit | null>;
+  get(key: CodexModelCacheKey, signal?: AbortSignal): Promise<CodexModelCacheHit | null>;
   upsert(entry: CodexModelCacheEntry): Promise<CodexModelCacheEntry | null>;
   renew(key: CodexModelCacheKey, etag: string | null): Promise<CodexModelCacheEntry | null>;
 }
@@ -164,9 +164,32 @@ async function saveEntries(
   }
 }
 
-function serializeMutation<T>(config: ConfigStore, work: () => Promise<T>): Promise<T> {
+function waitForSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const aborted = () => reject(signal.reason);
+    signal.addEventListener("abort", aborted, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", aborted));
+  });
+}
+
+function serializeMutation<T>(
+  config: ConfigStore,
+  work: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
   const previous = mutationQueues.get(config) ?? Promise.resolve();
-  const run = previous.then(work, work);
+  const run = previous.then(
+    () => {
+      signal?.throwIfAborted();
+      return work();
+    },
+    () => {
+      signal?.throwIfAborted();
+      return work();
+    },
+  );
   mutationQueues.set(
     config,
     run.then(
@@ -174,7 +197,7 @@ function serializeMutation<T>(config: ConfigStore, work: () => Promise<T>): Prom
       () => undefined,
     ),
   );
-  return run;
+  return waitForSignal(run, signal);
 }
 
 export function createCodexModelCache(
@@ -188,21 +211,35 @@ export function createCodexModelCache(
     options.maxEntries === undefined || !Number.isFinite(options.maxEntries)
       ? DEFAULT_CODEX_MODEL_CACHE_MAX_ENTRIES
       : Math.max(1, Math.floor(options.maxEntries));
+  let hotEntries: CodexModelCacheEntry[] | null = null;
+  let hydration: Promise<CodexModelCacheEntry[]> | null = null;
 
-  return {
-    async get(key) {
-      const normalizedKey = normalizeKey(key);
-      if (normalizedKey === null) return null;
-      return serializeMutation(config, async () => {
+  const hydrate = (signal?: AbortSignal): Promise<CodexModelCacheEntry[]> => {
+    if (hotEntries !== null) return Promise.resolve(hotEntries);
+    if (hydration === null) {
+      hydration = serializeMutation(config, async () => {
         const loaded = await loadEntries(config, encKey, maxEntries);
         if (loaded.needsCleanup) await saveEntries(config, encKey, loaded.entries);
-        const entry = loaded.entries.find((candidate) => sameKey(candidate, normalizedKey));
-        if (!entry) return null;
-        return {
-          entry: cloneEntry(entry),
-          fresh: now() - entry.fetchedAtMs < ttlMs,
-        };
+        hotEntries = loaded.entries;
+        return loaded.entries;
+      }).finally(() => {
+        hydration = null;
       });
+    }
+    return waitForSignal(hydration, signal);
+  };
+
+  return {
+    async get(key, signal) {
+      const normalizedKey = normalizeKey(key);
+      if (normalizedKey === null) return null;
+      const entries = await hydrate(signal);
+      const entry = entries.find((candidate) => sameKey(candidate, normalizedKey));
+      if (!entry) return null;
+      return {
+        entry: cloneEntry(entry),
+        fresh: now() - entry.fetchedAtMs < ttlMs,
+      };
     },
 
     async upsert(entry) {
@@ -214,7 +251,9 @@ export function createCodexModelCache(
         const index = entries.findIndex((candidate) => sameKey(candidate, next));
         if (index === -1) entries.push(next);
         else entries[index] = next;
-        await saveEntries(config, encKey, boundEntries(entries, maxEntries));
+        const bounded = boundEntries(entries, maxEntries);
+        await saveEntries(config, encKey, bounded);
+        hotEntries = bounded;
         return cloneEntry(next);
       });
     },
@@ -231,7 +270,9 @@ export function createCodexModelCache(
           fetchedAtMs: now(),
         });
         entries[index] = renewed;
-        await saveEntries(config, encKey, boundEntries(entries, maxEntries));
+        const bounded = boundEntries(entries, maxEntries);
+        await saveEntries(config, encKey, bounded);
+        hotEntries = bounded;
         return cloneEntry(renewed);
       });
     },

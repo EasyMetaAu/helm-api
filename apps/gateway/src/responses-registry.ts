@@ -1,9 +1,11 @@
-import type { ConfigStore } from "@helm/core";
+import type { ConfigStore, ResponsesRegistryStore } from "@helm/core";
 import type { MessagesIdentity } from "./routes/messages.js";
 import type { ResponsesRegistryPort, ResponsesRegistryRecord } from "./routes/responses.js";
 
 const RESPONSES_REGISTRY_KEY = "responses_registry_v1";
 const REGISTRY_MAX_ENTRIES = 10_000;
+const REGISTRY_PRUNE_INTERVAL_MS = 5 * 60_000;
+const REGISTRY_PRUNE_BATCH_SIZE = 1_000;
 
 interface RegistryBlob {
   records: ResponsesRegistryRecord[];
@@ -69,74 +71,72 @@ function parseBlob(raw: string | null): Map<string, ResponsesRegistryRecord> {
   }
 }
 
-function serialize(map: Map<string, ResponsesRegistryRecord>, now: number): string {
-  const records = [...map.values()]
-    .filter((record) => record.expiresAt > now && record.status !== "deleted")
-    .sort((a, b) => a.createdAt - b.createdAt);
-  const trimmed =
-    records.length > REGISTRY_MAX_ENTRIES
-      ? records.slice(records.length - REGISTRY_MAX_ENTRIES)
-      : records;
-  return JSON.stringify({ records: trimmed } satisfies RegistryBlob);
-}
-
 export function createResponsesRegistry(
-  config: ConfigStore,
+  store: ResponsesRegistryStore,
+  legacyConfig?: ConfigStore,
   opts: { now?: () => number } = {},
 ): ResponsesRegistryPort {
   const now = opts.now ?? (() => Date.now());
-  let mutation = Promise.resolve();
-
-  const load = async (): Promise<Map<string, ResponsesRegistryRecord>> => {
-    try {
-      return parseBlob(await config.get(RESPONSES_REGISTRY_KEY));
-    } catch {
-      return new Map();
+  const pending = new Map<string, ResponsesRegistryRecord>();
+  let lastPrunedAt = now();
+  let legacy: Promise<Map<string, ResponsesRegistryRecord>> | null = null;
+  const loadLegacy = () => {
+    if (legacy === null) {
+      legacy = legacyConfig
+        ? legacyConfig
+            .get(RESPONSES_REGISTRY_KEY)
+            .then(parseBlob)
+            .catch(() => new Map())
+        : Promise.resolve(new Map());
     }
+    return legacy;
   };
-
-  const save = async (map: Map<string, ResponsesRegistryRecord>): Promise<void> => {
-    try {
-      await config.set(RESPONSES_REGISTRY_KEY, serialize(map, now()));
-    } catch {
-      // Lifecycle registry persistence is best-effort; a storage outage must not
-      // turn a successfully served model response into a failed client request.
-    }
-  };
-
-  const mutate = async <T>(
-    fn: (map: Map<string, ResponsesRegistryRecord>) => Promise<T>,
-  ): Promise<T> => {
-    const run = mutation.then(async () => {
-      const map = await load();
-      return fn(map);
+  const persist = async (record: ResponsesRegistryRecord) => {
+    await store.upsert(record);
+    const nowMs = now();
+    if (nowMs - lastPrunedAt < REGISTRY_PRUNE_INTERVAL_MS) return;
+    lastPrunedAt = nowMs;
+    await store.prune({
+      nowMs,
+      maxEntries: REGISTRY_MAX_ENTRIES,
+      limit: REGISTRY_PRUNE_BATCH_SIZE,
     });
-    mutation = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
   };
 
   return {
-    put(record) {
-      return mutate(async (map) => {
-        map.set(record.responseId, record);
-        await save(map);
-      });
+    async put(record) {
+      pending.set(record.responseId, record);
+      try {
+        await persist(record);
+      } finally {
+        if (pending.get(record.responseId) === record) pending.delete(record.responseId);
+      }
     },
     async get(responseId: string, identity: MessagesIdentity) {
-      const map = await load();
-      const record = map.get(responseId);
-      if (record === undefined) return null;
-      if (record.accountId !== identity.accountId || record.keyId !== identity.keyId) return null;
-      if (record.expiresAt <= now() || record.status === "deleted") {
-        await mutate(async (fresh) => {
-          fresh.delete(responseId);
-          await save(fresh);
-        });
-        return null;
+      const pendingRecord = pending.get(responseId);
+      if (pendingRecord) {
+        if (
+          pendingRecord.accountId !== identity.accountId ||
+          pendingRecord.keyId !== identity.keyId ||
+          pendingRecord.expiresAt <= now() ||
+          pendingRecord.status === "deleted"
+        ) {
+          return null;
+        }
+        return pendingRecord;
       }
+      const live = await store.getOwnedLive({
+        responseId,
+        accountId: identity.accountId,
+        keyId: identity.keyId,
+        nowMs: now(),
+      });
+      if (live) return live;
+      const record = (await loadLegacy()).get(responseId);
+      if (!record) return null;
+      if (record.accountId !== identity.accountId || record.keyId !== identity.keyId) return null;
+      if (record.expiresAt <= now() || record.status === "deleted") return null;
+      await persist(record);
       return record;
     },
   };

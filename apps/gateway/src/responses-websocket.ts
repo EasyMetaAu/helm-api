@@ -13,6 +13,7 @@ import {
 } from "./runtime/memory-admission.js";
 
 const RESPONSES_WEBSOCKET_PATHS = new Set(["/v1/responses", "/responses", "/openai/v1/responses"]);
+const DEFAULT_PREFLIGHT_TIMEOUT_MS = 6_000;
 
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -44,6 +45,12 @@ export interface ResponsesWebSocketBridge {
   close(): Promise<void>;
 }
 
+let responsesPreflightPending = 0;
+
+export function responsesWebSocketPreflightPending(): number {
+  return responsesPreflightPending;
+}
+
 export interface ResponsesWebSocketBridgeOptions {
   server: ResponsesWebSocketUpgradeServer;
   fetch: AppFetch;
@@ -52,6 +59,7 @@ export interface ResponsesWebSocketBridgeOptions {
   memoryAdmission?: BodyMemoryAdmission;
   /** Optional test/embedding override for bytes retained by `ws` before `message`. */
   ingressAdmission?: BodyMemoryAdmission;
+  preflightTimeoutMs?: number;
 }
 
 export interface ResponsesWebSocketUpgradeServer {
@@ -383,27 +391,82 @@ function signalsReasoningIncluded(value: string | null): boolean {
   return !["false", "0", "no", "off"].includes(value.trim().toLowerCase());
 }
 
+function fetchResponseUntilAbort(fetch: AppFetch, request: Request): Promise<Response> {
+  const pending = Promise.resolve().then(() => {
+    request.signal.throwIfAborted();
+    return fetch(request);
+  });
+  const cancelBody = (response: Response) => {
+    if (response.body !== null) void response.body.cancel().catch(() => {});
+  };
+  if (request.signal.aborted) {
+    void pending.then(cancelBody, () => {});
+    return Promise.reject(request.signal.reason);
+  }
+  return new Promise<Response>((resolve, reject) => {
+    let aborted = false;
+    const onAbort = () => {
+      aborted = true;
+      reject(request.signal.reason);
+    };
+    request.signal.addEventListener("abort", onAbort, { once: true });
+    pending.then(
+      (response) => {
+        request.signal.removeEventListener("abort", onAbort);
+        if (aborted) cancelBody(response);
+        else resolve(response);
+      },
+      (error: unknown) => {
+        request.signal.removeEventListener("abort", onAbort);
+        if (!aborted) reject(error);
+      },
+    );
+  });
+}
+
 async function preflightUpgrade(
   request: IncomingMessage,
   fetch: AppFetch,
+  signal: AbortSignal,
+  timeoutMs: number,
 ): Promise<{ response: Response; metadata: UpgradeMetadata | null }> {
   const modelsUrl = requestUrl(request, "/v1/models");
   const clientVersion = codexClientVersion(request);
   if (clientVersion !== null) modelsUrl.searchParams.set("client_version", clientVersion);
-  const response = await fetch(
-    new Request(modelsUrl, {
-      method: "GET",
-      headers: normalizedFetchHeaders(request),
-    }),
-  );
+  const requestModels = (url: URL, requestSignal: AbortSignal) =>
+    fetchResponseUntilAbort(
+      fetch,
+      new Request(url, {
+        method: "GET",
+        headers: normalizedFetchHeaders(request),
+        signal: requestSignal,
+      }),
+    );
+  const deadline = AbortSignal.timeout(timeoutMs);
+  const versionedSignal = AbortSignal.any([signal, deadline]);
+  const requestFallback = () =>
+    requestModels(
+      requestUrl(request, "/v1/models"),
+      AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
+    );
+  let response: Response;
+  try {
+    response = await requestModels(modelsUrl, versionedSignal);
+  } catch (error) {
+    if (signal.aborted || !deadline.aborted || clientVersion === null) throw error;
+    response = await requestFallback();
+  }
+  if (response.status === 504 && clientVersion !== null && !signal.aborted) {
+    if (response.body !== null) await response.body.cancel().catch(() => {});
+    response = await requestFallback();
+  }
   if (!response.ok) return { response, metadata: null };
-  return {
-    response,
-    metadata: {
-      modelsEtag: response.headers.get("etag"),
-      reasoningIncluded: signalsReasoningIncluded(response.headers.get("x-reasoning-included")),
-    },
+  const metadata = {
+    modelsEtag: response.headers.get("etag"),
+    reasoningIncluded: signalsReasoningIncluded(response.headers.get("x-reasoning-included")),
   };
+  if (response.body !== null) await response.body.cancel().catch(() => {});
+  return { response, metadata };
 }
 
 async function rejectUpgrade(socket: Duplex, response: Response): Promise<void> {
@@ -437,6 +500,7 @@ export function installResponsesWebSocketBridge({
   sessionProof,
   memoryAdmission,
   ingressAdmission,
+  preflightTimeoutMs,
 }: ResponsesWebSocketBridgeOptions): ResponsesWebSocketBridge {
   const memoryBudget = runtimeMemoryBudget();
   const admission =
@@ -465,6 +529,7 @@ export function installResponsesWebSocketBridge({
     maxPayload: websocketMaxPayloadBytes,
   });
   let closed = false;
+  const preflightControllers = new Set<AbortController>();
 
   websocketServer.on("headers", (headers, request) => {
     const metadata = metadataByRequest.get(request);
@@ -576,11 +641,22 @@ export function installResponsesWebSocketBridge({
   const onUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer) => {
     if (!isResponsesWebSocketPath(request.url)) return;
     // Unlimited admission: no upgrade-time capacity probe / rejection.
+    const preflightController = new AbortController();
+    preflightControllers.add(preflightController);
+    responsesPreflightPending += 1;
     const onPreflightSocketError = () => {
+      preflightController.abort();
       socket.destroy();
     };
+    const onPreflightSocketClose = () => preflightController.abort();
     socket.on("error", onPreflightSocketError);
-    void preflightUpgrade(request, fetch)
+    socket.on("close", onPreflightSocketClose);
+    void preflightUpgrade(
+      request,
+      fetch,
+      preflightController.signal,
+      Math.max(1, preflightTimeoutMs ?? DEFAULT_PREFLIGHT_TIMEOUT_MS),
+    )
       .then(async ({ response, metadata }) => {
         if (closed || socket.destroyed) {
           socket.destroy();
@@ -611,7 +687,10 @@ export function installResponsesWebSocketBridge({
         );
       })
       .finally(() => {
+        preflightControllers.delete(preflightController);
+        responsesPreflightPending -= 1;
         socket.off("error", onPreflightSocketError);
+        socket.off("close", onPreflightSocketClose);
       });
   };
   server.on("upgrade", onUpgrade);
@@ -621,6 +700,7 @@ export function installResponsesWebSocketBridge({
       if (closed) return;
       closed = true;
       server.off("upgrade", onUpgrade);
+      for (const controller of preflightControllers) controller.abort();
       for (const client of websocketServer.clients) client.terminate();
       await new Promise<void>((resolve) => {
         websocketServer.close(() => resolve());

@@ -1202,6 +1202,32 @@ export class MemoryFactContentHashConflictError extends Error {
   }
 }
 
+export interface ResponsesRegistryRecord {
+  responseId: string;
+  accountId: string;
+  keyId: string;
+  providerAlias: string | null;
+  providerName: string | null;
+  providerModel: string | null;
+  providerProtocol: "openai_chat" | "anthropic_messages" | "openai_responses" | "gemini" | null;
+  providerAccount?: string | null;
+  selectedLane?: string | null;
+  createdAt: number;
+  expiresAt: number;
+  status: string;
+}
+
+export interface ResponsesRegistryStore {
+  upsert(record: ResponsesRegistryRecord): Promise<void>;
+  prune(input: { nowMs: number; maxEntries: number; limit: number }): Promise<void>;
+  getOwnedLive(input: {
+    responseId: string;
+    accountId: string;
+    keyId: string;
+    nowMs: number;
+  }): Promise<ResponsesRegistryRecord | null>;
+}
+
 // Optional config persistence (MVP is yaml-first; reserved for admin write-back).
 export interface ConfigStore {
   get(key: string): Promise<string | null>;

@@ -320,6 +320,28 @@ export const configKv = pgTable("config_kv", {
   value: text("value").notNull(),
 });
 
+export const responsesRegistry = pgTable(
+  "responses_registry",
+  {
+    responseId: text("response_id").primaryKey(),
+    accountId: text("account_id").notNull(),
+    keyId: text("key_id").notNull(),
+    providerAlias: text("provider_alias"),
+    providerName: text("provider_name"),
+    providerModel: text("provider_model"),
+    providerProtocol: text("provider_protocol"),
+    providerAccount: text("provider_account"),
+    selectedLane: text("selected_lane"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
+    status: text("status").notNull(),
+  },
+  (table) => [
+    index("idx_responses_registry_expires_at").on(table.expiresAt),
+    index("idx_responses_registry_created_id").on(table.createdAt, table.responseId),
+  ],
+);
+
 // Full request/response body capture (admin "System Settings" → capture_payloads).
 // SEPARATE from telemetry so it prunes independently (payload_retention_days) and
 // never bloats the decision JSON. NOT redacted — verbatim client request +
@@ -428,6 +450,7 @@ export type MemoryReflectionsTable = typeof memoryReflections;
 export type MemoryFactsTable = typeof memoryFacts;
 export type MemoryJobsTable = typeof memoryJobs;
 export type ConfigKvTable = typeof configKv;
+export type ResponsesRegistryTable = typeof responsesRegistry;
 export type RequestPayloadsTable = typeof requestPayloads;
 export type PayloadBlobsTable = typeof payloadBlobs;
 export type OAuthTokensTable = typeof oauthTokens;

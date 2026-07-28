@@ -126,6 +126,50 @@ describe("createCodexModelCache", () => {
     });
   });
 
+  it("hydrates the encrypted blob once and serves repeated hot gets from memory", async () => {
+    let reads = 0;
+    const persisted = encryptSecret(JSON.stringify({ version: 1, entries: [entry()] }), ENC_KEY);
+    const base = fakeConfigStore({ [CODEX_MODEL_CACHE_CONFIG_KEY]: persisted });
+    const store: ConfigStore = {
+      get: async (key) => {
+        reads += 1;
+        return base.get(key);
+      },
+      set: (key, value) => base.set(key, value),
+    };
+    const cache = createCodexModelCache(store, ENC_KEY, { now: () => 1_100 });
+
+    await expect(cache.get(BASE_KEY)).resolves.toMatchObject({ fresh: true });
+    await expect(cache.get(BASE_KEY)).resolves.toMatchObject({ fresh: true });
+    expect(reads).toBe(1);
+  });
+
+  it("keeps one underlying hydration when the first caller disconnects", async () => {
+    let reads = 0;
+    const loading = deferred();
+    const persisted = encryptSecret(JSON.stringify({ version: 1, entries: [entry()] }), ENC_KEY);
+    const store: ConfigStore = {
+      get: async () => {
+        reads += 1;
+        await loading.promise;
+        return persisted;
+      },
+      set: async () => {},
+    };
+    const cache = createCodexModelCache(store, ENC_KEY, { now: () => 1_100 });
+    const caller = new AbortController();
+    const first = cache.get(BASE_KEY, caller.signal);
+    caller.abort(new Error("caller disconnected"));
+
+    await expect(first).rejects.toThrow("caller disconnected");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const second = cache.get(BASE_KEY);
+    loading.resolve();
+
+    await expect(second).resolves.toMatchObject({ fresh: true });
+    expect(reads).toBe(1);
+  });
+
   it("requires provider, account, identity, and client version to all match", async () => {
     const store = fakeConfigStore();
     const cache = createCodexModelCache(store, ENC_KEY, { now: () => 1_100 });

@@ -83,6 +83,7 @@ import {
   type OpenAICodexIdentity,
   OpenAICodexModelsError,
   type OpenAICodexModelsResult,
+  oauthRefreshQueueDepth,
   openAICodexIdentityFingerprint,
   type PoliciesConfig,
   type ProviderClient,
@@ -192,6 +193,7 @@ import {
 import { createResetCreditGuard, resetCreditGuardHash } from "./oauth/reset-credit-guard.js";
 import { createRealtimeCallRegistry, type RealtimeCallRegistry } from "./realtime-call-registry.js";
 import { createResponsesRegistry } from "./responses-registry.js";
+import { responsesWebSocketPreflightPending } from "./responses-websocket.js";
 import { createArchiveFsAccess } from "./routes/admin/cleanup-fs.js";
 import { registerAdminApi } from "./routes/admin/index.js";
 import { createOAuthAccountTester, type OAuthTester } from "./routes/admin/oauth-test.js";
@@ -232,6 +234,7 @@ import {
   withPausedActivities,
 } from "./runtime/maintenance-gate.js";
 import { type BodyMemoryAdmission, createBodyMemoryAdmission } from "./runtime/memory-admission.js";
+import { startRuntimeStatsLogger } from "./runtime/runtime-stats.js";
 import {
   markServingAccount,
   type ServingAccount,
@@ -457,11 +460,15 @@ async function loadCodexAccountCatalog(input: {
   catalog: CodexModelCatalog;
   onCatalogChanged?: () => void;
   runInBackground: CodexOAuthRuntime["runInBackground"];
+  signal?: AbortSignal;
 }): Promise<LoadedCodexAccountCatalog | null> {
   const clientVersion = normalizeOpenAICodexClientVersion(input.clientVersion);
   if (clientVersion === null) return null;
   const userAgent = buildOpenAICodexUserAgent(clientVersion);
-  const accessToken = (await input.tokenManager.getAuthHeader()).replace(/^Bearer /, "");
+  const accessToken = (await input.tokenManager.getAuthHeader(input.signal)).replace(
+    /^Bearer /,
+    "",
+  );
   const accountIdentity = mergeCodexIdentity(accessToken, input.tokenManager.currentMetadata());
   const key: CodexModelCacheKey = {
     providerId: "openai-codex",
@@ -469,8 +476,8 @@ async function loadCodexAccountCatalog(input: {
     accountIdentity: codexCacheIdentity(accountIdentity),
     clientVersion,
   };
-  const fetchModelsOnce = async (): Promise<OpenAICodexModelsResult> => {
-    const currentAccess = (await input.tokenManager.getAuthHeader()).replace(/^Bearer /, "");
+  const fetchModelsOnce = async (signal?: AbortSignal): Promise<OpenAICodexModelsResult> => {
+    const currentAccess = (await input.tokenManager.getAuthHeader(signal)).replace(/^Bearer /, "");
     const currentIdentity = mergeCodexIdentity(currentAccess, input.tokenManager.currentMetadata());
     return listOpenAICodexModels(currentAccess, {
       accountId: currentIdentity.accountId,
@@ -478,20 +485,21 @@ async function loadCodexAccountCatalog(input: {
       clientVersion,
       userAgent,
       fetchImpl: input.proxyFetch,
+      signal,
     });
   };
-  const fetchModels = async (): Promise<OpenAICodexModelsResult> => {
+  const fetchModels = async (signal?: AbortSignal): Promise<OpenAICodexModelsResult> => {
     try {
-      return await fetchModelsOnce();
+      return await fetchModelsOnce(signal);
     } catch (error) {
       if (!(error instanceof OpenAICodexModelsError) || error.httpStatus !== 401) {
         throw error;
       }
       input.tokenManager.invalidate();
-      return fetchModelsOnce();
+      return fetchModelsOnce(signal);
     }
   };
-  const snapshot = await input.catalog.load(key, fetchModels);
+  const snapshot = await input.catalog.load(key, fetchModels, { signal: input.signal });
   if (snapshot === null) return null;
   return {
     key,
@@ -520,6 +528,8 @@ export async function loadCodexCatalogForClientVersion(input: {
   config: ConfigStore;
   catalog: CodexModelCatalog;
   clientVersion: string;
+  signal?: AbortSignal;
+  tokenManagers?: Map<string, ReturnType<typeof createTokenManager>>;
 }): Promise<CodexClientVersionCatalog> {
   const clientVersion = normalizeOpenAICodexClientVersion(input.clientVersion);
   if (clientVersion === null) return { keys: [], models: [] };
@@ -530,13 +540,19 @@ export async function loadCodexCatalogForClientVersion(input: {
   );
   if (declared.has("openai-codex")) return { keys: [], models: [] };
 
-  const accountSettings = await loadAccountSettings(input.config, input.oauthCtx.encKey);
+  input.signal?.throwIfAborted();
+  const accountSettings = await waitForAbort(
+    loadAccountSettings(input.config, input.oauthCtx.encKey),
+    input.signal,
+  );
   const keys: CodexModelCacheKey[] = [];
   const models = new Set<string>();
   const provider = getOAuthProvider("openai-codex");
   if (!provider) return { keys, models: [] };
 
-  for (const binding of await input.oauthCtx.store.list()) {
+  const bindings = await waitForAbort(input.oauthCtx.store.list(), input.signal);
+  for (const binding of bindings) {
+    input.signal?.throwIfAborted();
     if (binding.providerId !== "openai-codex") continue;
     const settings = getAccountSettings(accountSettings, binding.providerId, binding.account);
     if (typeof settings.credentialFailedAt === "number" || settings.schedulable === false) continue;
@@ -545,18 +561,23 @@ export async function loadCodexCatalogForClientVersion(input: {
     } as unknown as ProviderConfigShared;
     const proxy = resolveProviderProxy(accountConfig, accountSettings);
     const proxyFetch = proxy ? makeProxyFetch(proxy) : undefined;
-    const tokenManager = createTokenManager({
-      oauth: {
-        kind: "preset",
-        providerId: binding.providerId,
-        account: binding.account,
-      },
-      tokenStore: input.oauthCtx.store,
-      encKey: input.oauthCtx.encKey,
-      oauthProvider: provider,
-      fetch: proxyFetch,
-      now: () => Date.now(),
-    });
+    const tokenManagerKey = JSON.stringify([binding.providerId, binding.account]);
+    let tokenManager = input.tokenManagers?.get(tokenManagerKey);
+    if (!tokenManager) {
+      tokenManager = createTokenManager({
+        oauth: {
+          kind: "preset",
+          providerId: binding.providerId,
+          account: binding.account,
+        },
+        tokenStore: input.oauthCtx.store,
+        encKey: input.oauthCtx.encKey,
+        oauthProvider: provider,
+        fetch: proxyFetch,
+        now: () => Date.now(),
+      });
+      input.tokenManagers?.set(tokenManagerKey, tokenManager);
+    }
     let loaded: LoadedCodexAccountCatalog | null;
     try {
       loaded = await loadCodexAccountCatalog({
@@ -566,6 +587,7 @@ export async function loadCodexCatalogForClientVersion(input: {
         clientVersion,
         catalog: input.catalog,
         runInBackground: () => false,
+        signal: input.signal,
       });
     } catch {
       continue;
@@ -585,6 +607,16 @@ export async function loadCodexCatalogForClientVersion(input: {
   }
 
   return { keys, models: [...models] };
+}
+
+function waitForAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const aborted = () => reject(signal.reason);
+    signal.addEventListener("abort", aborted, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", aborted));
+  });
 }
 
 function nativeHeaderValue(
@@ -1781,6 +1813,10 @@ export function createUnavailableProviderClient(name: string): ProviderClient {
   };
 }
 
+export function supportsAutomaticVacuum(driver: "sqlite" | "supabase"): boolean {
+  return driver === "sqlite";
+}
+
 // Full wiring: config -> store -> bootstrap key -> provider -> routing pipeline.
 // Fail-closed: an invalid config throws (caller exits non-zero). The HTTP listen
 // is performed by the caller (index.ts) so this stays testable. Async because the
@@ -1896,6 +1932,7 @@ export async function buildServer(
   let rebuildOAuthPool: (() => Promise<{ applied: boolean }>) | undefined;
   const codexModelsEtagTracker = createCodexModelsEtagTracker();
   const oauthModelDiscoveryCache = createOAuthModelDiscoveryCache();
+  const codexModelTokenManagers = new Map<string, ReturnType<typeof createTokenManager>>();
   const codexModelCatalog = oauthCtx
     ? createCodexModelCatalog({
         cache: createCodexModelCache(store.config, oauthCtx.encKey),
@@ -2031,9 +2068,9 @@ export async function buildServer(
   };
   const runCleanupPassNow = (trigger: "scheduled" | "manual") =>
     maintenanceQueue.run(() => executeCleanupPass(trigger));
-  const executeVacuum = async () => {
+  const executeVacuum = async (options: { httpAlreadyPaused?: boolean } = {}) => {
     const activities: PausableActivity[] = [
-      maintenanceActivityGate,
+      ...(options.httpAlreadyPaused ? [] : [maintenanceActivityGate]),
       {
         pauseAndWait: async () => {
           requestBodyMemoryAdmission.pause();
@@ -2753,6 +2790,7 @@ export async function buildServer(
           ...configuredClients,
           ...oauthPoolClients,
         ]);
+        codexModelTokenManagers.clear();
         codexModelsEtagTracker.invalidate();
         logger.log("info", "oauth.pool.rebuilt", {
           providers: [...oauthPoolClients.keys()],
@@ -3080,7 +3118,13 @@ export async function buildServer(
     // routes by (rebound on OAuth curation/connect/disconnect), so discovery and
     // routability never disagree.
     oauthAliases: () => oauthAliasSet,
-    codexModels: async ({ clientVersion, allowCustomModel, allowedLanes, blockedModels }) => {
+    codexModels: async ({
+      clientVersion,
+      allowCustomModel,
+      allowedLanes,
+      blockedModels,
+      signal,
+    }) => {
       if (!oauthCtx || !codexModelCatalog) return null;
       const versionCatalog = await loadCodexCatalogForClientVersion({
         configured: config.providers,
@@ -3088,6 +3132,8 @@ export async function buildServer(
         config: store.config,
         catalog: codexModelCatalog,
         clientVersion,
+        signal,
+        tokenManagers: codexModelTokenManagers,
       });
       const versionOAuthAliases = new Set(
         versionCatalog.models.map((model) => `openai-codex/${model}`),
@@ -3752,7 +3798,10 @@ export async function buildServer(
     }
     return null;
   };
-  const responsesRegistry: ResponsesRouteDeps["registry"] = createResponsesRegistry(store.config);
+  const responsesRegistry: ResponsesRouteDeps["registry"] = createResponsesRegistry(
+    store.responsesRegistry,
+    store.config,
+  );
   const responsesLifecycleUnsupported = (operation: string): HelmHttpError =>
     new HelmHttpError(
       makeHelmError({
@@ -4334,34 +4383,52 @@ export async function buildServer(
     // at the operator's chosen low-traffic local hour, and only when vacuum_enabled
     // is on (default off — VACUUM holds an exclusive lock for the whole rewrite). The
     // live `settings` closure means a toggle/hour change takes effect without a
-    // restart. store.vacuum() is a no-op on postgres (autovacuum), so this is inert
-    // there. The last successful day is in-memory: failures remain retryable if a
+    // restart. PostgreSQL uses its native autovacuum, so this scheduler is installed
+    // only for SQLite. The last successful day is in-memory: failures remain retryable if a
     // later tick is still eligible, while a restart may harmlessly run it once more.
-    const autoVacuum = createAutoVacuumRunner();
-    vacuumScheduler = startCleanupScheduler({
-      intervalMs: AUTO_VACUUM_CHECK_INTERVAL_MS,
-      runTick: async () => {
-        const now = new Date();
-        const todayKey = now.toDateString();
-        await autoVacuum.run(
-          {
-            enabled: settings.vacuum_enabled,
-            vacuumHour: settings.vacuum_hour,
-            currentHour: now.getHours(),
-            todayKey,
-          },
-          () =>
-            maintenanceQueue.run(async () => {
-              logger.log("info", "vacuum.auto_start", { hour: settings.vacuum_hour });
-              if (settings.cleanup_enabled) await executeCleanupPass("scheduled");
-              await executeVacuum();
-              logger.log("info", "vacuum.auto_done", {});
-            }),
-        );
-      },
-      log: (level, msg, fields) => logger.log(level, msg, fields),
-    });
+    if (supportsAutomaticVacuum(storeCfg.driver)) {
+      const autoVacuum = createAutoVacuumRunner();
+      vacuumScheduler = startCleanupScheduler({
+        intervalMs: AUTO_VACUUM_CHECK_INTERVAL_MS,
+        runTick: async () => {
+          await maintenanceQueue.run(() =>
+            autoVacuum.run(
+              () => {
+                const now = new Date();
+                return {
+                  enabled: settings.vacuum_enabled,
+                  vacuumHour: settings.vacuum_hour,
+                  currentHour: now.getHours(),
+                  todayKey: now.toDateString(),
+                };
+              },
+              async () => {
+                if (!maintenanceActivityGate.tryPauseIfIdle()) {
+                  logger.log("info", "vacuum.auto_skip_busy", { hour: settings.vacuum_hour });
+                  return false;
+                }
+                try {
+                  logger.log("info", "vacuum.auto_start", { hour: settings.vacuum_hour });
+                  await executeVacuum({ httpAlreadyPaused: true });
+                  logger.log("info", "vacuum.auto_done", {});
+                  return true;
+                } finally {
+                  maintenanceActivityGate.resume();
+                }
+              },
+            ),
+          );
+        },
+        log: (level, msg, fields) => logger.log(level, msg, fields),
+      });
+    }
   }
+
+  const runtimeStats = startRuntimeStatsLogger({
+    logger,
+    responsesPreflightPending: responsesWebSocketPreflightPending,
+    oauthRefreshQueueDepth,
+  });
 
   return {
     app,
@@ -4380,6 +4447,7 @@ export async function buildServer(
       );
     },
     dispose: async () => {
+      runtimeStats.stop();
       const signalStopped = signalScheduler?.stop();
       const memoryStopped = memoryWorker?.stop();
       const backgroundStopped = backgroundTasks.closeAndWait();

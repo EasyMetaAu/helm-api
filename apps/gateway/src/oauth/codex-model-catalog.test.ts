@@ -303,6 +303,36 @@ describe("createCodexModelCatalog", () => {
     expect(fetchModels).not.toHaveBeenCalled();
   });
 
+  it("renews the same response ETag at most once per cache TTL window", async () => {
+    let now = 1_000;
+    const cache = fakeCache({ entry: entry([model("gpt-5.6-sol")]), fresh: true });
+    const fetchModels = remote([model("gpt-5.6-terra")]);
+    const catalog = createCodexModelCatalog({ cache, now: () => now });
+    await catalog.load(KEY, fetchModels);
+
+    for (let index = 0; index < 100; index += 1) {
+      await catalog.observeEtag(KEY, '"v1"', fetchModels);
+    }
+    expect(cache.renew).toHaveBeenCalledTimes(1);
+
+    now += 300_000;
+    await catalog.observeEtag(KEY, '"v1"', fetchModels);
+    expect(cache.renew).toHaveBeenCalledTimes(2);
+  });
+
+  it("throttles repeated ETag renew attempts when persistence is unavailable", async () => {
+    const cache = fakeCache({ entry: entry([model("gpt-5.6-sol")]), fresh: true });
+    vi.mocked(cache.renew).mockResolvedValue(null);
+    const fetchModels = remote([model("gpt-5.6-terra")]);
+    const catalog = createCodexModelCatalog({ cache, now: () => 1_000 });
+    await catalog.load(KEY, fetchModels);
+
+    await catalog.observeEtag(KEY, '"v1"', fetchModels);
+    await catalog.observeEtag(KEY, '"v1"', fetchModels);
+
+    expect(cache.renew).toHaveBeenCalledTimes(1);
+  });
+
   it("deduplicates concurrent refreshes for a changed response ETag", async () => {
     const cache = fakeCache({ entry: entry([model("gpt-5.5")]), fresh: true });
     const catalog = createCodexModelCatalog({ cache });

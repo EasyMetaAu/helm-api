@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-07-28 · 消除 preflight/registry 内存放大并让自动 VACUUM 只在空闲启动（Gateway / OAuth / Store，docs/02/05/07/10，原则 1/3/7/8）
+
+- **连接超时根因**：Responses WebSocket 的内部 models preflight 原先没有独立 deadline，也没有把 socket/request abort 贯穿 models、OAuth token、catalog/cache 与上游 fetch；现在 versioned 与 auth-only fallback 各有 6 秒边界，bridge 对内部 fetch Promise 做硬 race，即使 Store/鉴权忽略 signal 也会终止握手并取消晚到 body；断连同样立即取消，避免辅助目录阻断 101 或永久占住维护 activity。相同账号的 TokenManager 在 models 请求间复用，首次 Store 读取 singleflight，等待者可取消；共享 preset refresh 不接受单个等待者取消，但底层 fetch 固定在 30 秒内终止且 settled gate 会清理。
+- **内存与 I/O 放大**：Codex catalog 增加进程内热快照，相同 ETag 每 300 秒最多续期一次；首次 hydration 不归单个 caller 所有，断连只停止等待，不会再触发第二次大 blob 读取。Responses registry 改为 SQLite/Postgres keyed row 单行 upsert/tenant lookup，并保留一版 legacy blob read-through；全局裁剪从写入热路径拆出，每进程五分钟最多一次、每类最多 1,000 行并使用真实当前时间。流式 registry 必须先持久化再暴露 terminal frame，跨 replica 的立即 continuation 不依赖进程内 pending map。
+- **自动维护保持开启**：未关闭 `vacuum_enabled`，也未改低峰小时。自动 VACUUM 的开关、小时与日期在进入串行维护队列后重新读取；busy 时只记录 `vacuum.auto_skip_busy`、不暂停入口、不记当天成功，并在下一次 10 分钟 tick 重试。空闲路径由外层唯一持有 HTTP gate，其他 worker/write activity 排空和 `store.vacuum()` 完成后才统一恢复入口；Postgres/Supabase 使用原生 autovacuum，不安装这个 SQLite scheduler。数据清理继续由原有容器内 scheduler 直接调用 Store，VACUUM 不再重复先跑清理，以缩短独占维护窗口。
+- **只观测不拒绝**：每 60 秒记录 process memory、event-loop delay、pending preflight 与 OAuth refresh queue depth；这些指标不进入 `/healthz`、readiness、admission、限流或 503 判定。Docker cgroup 上限保持部署现状。
+
 ## 2026-07-27 · 拆除启发式请求内存拒绝并保留硬边界（Gateway runtime，docs/02/05/07，用户明确要求）
 
 - **决定**：按用户要求删除请求体/WebSocket 的 `active_capacity` 与 `live_heap` 启发式拒绝，避免健康流量因重复计账再出现 503。保留确定性的单请求/单帧 `wire_limit`（超限 413 / WebSocket 1009），防止一个合法 key 用超大正文拖垮整个容器。
@@ -69,12 +76,9 @@
 - **本地调度边界**：每 replica/key 只让本地队首轮询 DB；默认 TTL 30s、heartbeat 10s，失败轮询使用可注入的 100–250ms jitter。manager 同时以 DB 返回 `expiresAtMs` 和本地 RPC 开始时间 + TTL 的较早值作为 ownership deadline，防止 acquire/renew 响应延迟或挂起越过已知租期。renew 失败使持有者 signal 以 `concurrency_lease_lost` abort，release 为 async/idempotent best-effort，gateway 将它与 client abort/request timeout 合并；流 lease 到 body final close/cancel 才释放。shutdown 会等待正在进行的 acquire，并在返回前清理 late-success orphan。
 - **真实 PG 验收**：`apps/gateway/e2e/concurrency-postgres.spec.ts` 用两个独立 postgres-js pool、两个 distributed manager 和两个请求级 Hono app 验证 100 并发全局上限、key 隔离、TTL crash recovery、heartbeat、lease-loss no-cooldown、stream final/cancel 与 DB-unavailable 503。`pnpm test:e2e` 的 launcher 按 `PG_TEST_URL` > `HELM_TEST_POSTGRES_URL` 取外部测试库；无 URL 时自动启动 digest-pinned PostgreSQL 17 + pgvector 并 finally 清理，Docker 不可用则明确失败。PGlite 仍只算 SQL/contract coverage，不计真实多 pool AC。
 
-## 2026-07-23 · Session 恢复与在线响应共享内存池（Admin requests，docs/07/11，原则 3/7）
-
-- **恢复窗口**：Admin Session 恢复单次最多预占 response-work 池的一半，允许两次有界恢复并行，也为在线 API 响应保留容量；第三次并发恢复或超过半窗口的会话继续返回 `session_recovery_limited`。保留先准入、后物化正文的顺序，不新增队列、配置或独立内存池。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-23 · Session 恢复与在线响应共享内存池**：Admin Session 恢复单次最多占 response-work 池一半，保留在线响应容量并坚持先准入后物化；完整原文通过 git history 回溯。
 - **2026-07-27 · 请求内存准入只计算未物化 headroom**：曾修 live-heap 双重计账误拒 503；后被同日“拆除启发式请求内存拒绝并保留硬边界”取代，完整原文通过 git history 回溯。
 - **2026-07-23 · Codex Responses 按运行时容量准入并让夜间 SQLite 维护收缩内存（Gateway / Session / Store，docs/02/05/07/10，原则 2/3/7/8）**：机器推导的共享请求/响应/缓存预算、活动消息准入和维护 drain 保留正文捕获与自动维护能力；后续物化重复计账、WebSocket ingress 与 terminal 生命周期修正见顶部更新条目，完整原文通过 git history 回溯。
 - **2026-07-23 · SQLite Session 与 Memory 正文使用兼容 gzip 存储（Store / Memory，docs/07/08，原则 1/3/7）**：SQLite 以 value type + gzip magic 兼容压缩 Session/Memory 正文，不回写历史数据、不在线 VACUUM，完整原文通过 git history 回溯。
