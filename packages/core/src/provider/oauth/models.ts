@@ -12,6 +12,7 @@ import { arch, platform, release } from "node:os";
 import { type CodexModelInfo, CodexModelsResponseSchema } from "./codex-model-info.js";
 import { listGitHubCopilotModels } from "./github-copilot.js";
 import { parseOpenAICodexIdentity } from "./openai-codex.js";
+import { buildOAuthRequestSignal } from "./runtime.js";
 import { XAI_GROK_OAUTH_BASE_URL, xaiGrokCatalogHeaders } from "./xai.js";
 
 // Curated FALLBACK model ids — used when live discovery is unavailable or fails.
@@ -90,6 +91,7 @@ export interface OpenAICodexModelsOptions {
   userAgent?: string;
   fetchImpl?: typeof globalThis.fetch;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 export interface OpenAICodexModelsResult {
@@ -196,7 +198,7 @@ export async function listOpenAICodexModels(
       : OAUTH_MODEL_DISCOVERY_TIMEOUT_MS;
   const response = await (options.fetchImpl ?? fetch)(url.toString(), {
     headers,
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: buildOAuthRequestSignal({ signal: options.signal, timeoutMs }),
   });
   if (!response.ok) {
     await response.text().catch(() => "");

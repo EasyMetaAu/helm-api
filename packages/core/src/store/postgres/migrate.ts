@@ -1169,6 +1169,29 @@ const MIGRATIONS: readonly Migration[] = [
         ON api_key_concurrency_leases (key_id, expires_at);
     `,
   },
+  {
+    version: 42,
+    sql: `
+      CREATE TABLE IF NOT EXISTS responses_registry (
+        response_id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        key_id TEXT NOT NULL,
+        provider_alias TEXT,
+        provider_name TEXT,
+        provider_model TEXT,
+        provider_protocol TEXT,
+        provider_account TEXT,
+        selected_lane TEXT,
+        created_at BIGINT NOT NULL,
+        expires_at BIGINT NOT NULL,
+        status TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_responses_registry_expires_at
+        ON responses_registry (expires_at);
+      CREATE INDEX IF NOT EXISTS idx_responses_registry_created_id
+        ON responses_registry (created_at, response_id);
+    `,
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {

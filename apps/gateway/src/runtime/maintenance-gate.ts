@@ -65,6 +65,11 @@ export function createMaintenanceActivityGate() {
     },
     release,
     releaseCurrent,
+    tryPauseIfIdle(): boolean {
+      if (paused || active.size !== 0) return false;
+      paused = true;
+      return true;
+    },
     async pauseAndWait(): Promise<void> {
       paused = true;
       releaseCurrent();

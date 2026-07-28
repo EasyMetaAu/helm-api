@@ -199,6 +199,28 @@ export const configKv = sqliteTable("config_kv", {
   value: text("value").notNull(),
 });
 
+export const responsesRegistry = sqliteTable(
+  "responses_registry",
+  {
+    responseId: text("response_id").primaryKey(),
+    accountId: text("account_id").notNull(),
+    keyId: text("key_id").notNull(),
+    providerAlias: text("provider_alias"),
+    providerName: text("provider_name"),
+    providerModel: text("provider_model"),
+    providerProtocol: text("provider_protocol"),
+    providerAccount: text("provider_account"),
+    selectedLane: text("selected_lane"),
+    createdAt: integer("created_at").notNull(),
+    expiresAt: integer("expires_at").notNull(),
+    status: text("status").notNull(),
+  },
+  (table) => [
+    index("idx_responses_registry_expires_at").on(table.expiresAt),
+    index("idx_responses_registry_created_id").on(table.createdAt, table.responseId),
+  ],
+);
+
 // Full request/response body capture (admin "System Settings" → capture_payloads,
 // default ON). Stored SEPARATELY from telemetry so it can be pruned independently
 // (payload_retention_days) and never bloats the decision JSON. Unlike telemetry
@@ -302,5 +324,6 @@ export type RateLimitBucketsTable = typeof rateLimitBuckets;
 export type UsageBudgetBucketsTable = typeof usageBudgetBuckets;
 export type RoutingSignalsTable = typeof routingSignals;
 export type ConfigKvTable = typeof configKv;
+export type ResponsesRegistryTable = typeof responsesRegistry;
 export type RequestPayloadsTable = typeof requestPayloads;
 export type OAuthTokensTable = typeof oauthTokens;

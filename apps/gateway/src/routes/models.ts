@@ -4,6 +4,7 @@ import { type CatalogEntry, makeHelmError } from "@helm/shared";
 import type { Context, Hono } from "hono";
 import type { AppEnv } from "../app.js";
 import { HelmHttpError } from "../middleware/error-handler.js";
+import { requestSignal } from "../middleware/limits.js";
 import { normalizeOpenAICodexClientVersion } from "../oauth/codex-client-version.js";
 
 // GET /v1/models — OpenAI-compatible model discovery. Behind API-key auth (mounted
@@ -34,7 +35,9 @@ export interface ModelsRouteDeps {
     allowCustomModel: boolean;
     allowedLanes: readonly string[] | null;
     blockedModels: readonly string[] | null;
+    signal: AbortSignal;
   }) => OpenAICodexModelsResult | null | Promise<OpenAICodexModelsResult | null>;
+  codexModelsTimeoutMs?: number;
   // Records the exact key-filtered ETag returned to Codex CLI. Responses can then
   // replace the upstream account-wide ETag with this same key-scoped value.
   onCodexModelsListed?: (keyId: string, clientVersion: string, etag: string) => void;
@@ -92,11 +95,13 @@ export function registerModelsRoute(app: Hono<AppEnv>, deps: ModelsRouteDeps): v
         );
       }
       const caps = c.get("identity").caps;
+      const timeoutMs = Math.max(1, deps.codexModelsTimeoutMs ?? 5_000);
       const result = await deps.codexModels({
         clientVersion,
         allowCustomModel: caps.allowCustomModel,
         allowedLanes: caps.allowedLanes,
         blockedModels: caps.blockedModels,
+        signal: AbortSignal.any([requestSignal(c), AbortSignal.timeout(timeoutMs)]),
       });
       if (result?.etag !== undefined) {
         c.header("ETag", result.etag);

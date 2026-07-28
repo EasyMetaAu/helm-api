@@ -11,6 +11,7 @@ import {
   buildRegistry,
   createUnavailableProviderClient,
   estimateRequestTokens,
+  supportsAutomaticVacuum,
   testStaticProviderKey,
 } from "./server.js";
 
@@ -75,6 +76,13 @@ describe("tool_call_xml_recovery runtime flag", () => {
   it("defaults ON so malformed upstream tool XML is recovered defensively", () => {
     const parsed = RuntimeSettingsSchema.parse({});
     expect(parsed.tool_call_xml_recovery).toBe(true);
+  });
+});
+
+describe("automatic VACUUM", () => {
+  it("runs only for SQLite stores", () => {
+    expect(supportsAutomaticVacuum("sqlite")).toBe(true);
+    expect(supportsAutomaticVacuum("supabase")).toBe(false);
   });
 });
 

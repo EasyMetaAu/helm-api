@@ -9,7 +9,7 @@ import type { CatalogEntry, ModelsList } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
 import { authMiddleware } from "../middleware/auth.js";
-import { registerModelsRoute } from "./models.js";
+import { type ModelsRouteDeps, registerModelsRoute } from "./models.js";
 
 const lanes = parseLanesConfig({
   economy: { primary: "deepseek/flash", fallback: ["balanced"] },
@@ -75,7 +75,7 @@ function buildApp(
   rec: ApiKeyRecord | null,
   oauthAliases?: () => Iterable<string>,
   lanesThunk: () => typeof lanes = () => lanes,
-  codexModels?: () => OpenAICodexModelsResult | null | Promise<OpenAICodexModelsResult | null>,
+  codexModels?: ModelsRouteDeps["codexModels"],
   onCodexModelsListed?: (keyId: string, clientVersion: string, etag: string) => void,
 ) {
   const getByHash = vi.fn().mockResolvedValue(rec);
@@ -232,6 +232,7 @@ describe("GET /v1/models", () => {
       allowCustomModel: true,
       allowedLanes: null,
       blockedModels: null,
+      signal: expect.any(AbortSignal),
     });
     expect(onCodexModelsListed).toHaveBeenCalledWith("k1", "0.145.0", '"helm-codex-test"');
   });
@@ -319,7 +320,32 @@ describe("GET /v1/models", () => {
       allowCustomModel: true,
       allowedLanes: ["economy"],
       blockedModels: ["openai-codex/gpt-5.6-sol"],
+      signal: expect.any(AbortSignal),
     });
+  });
+
+  it("propagates caller cancellation into native Codex discovery", async () => {
+    const caller = new AbortController();
+    let received: AbortSignal | undefined;
+    const app = buildApp(
+      record({ allow_custom_model: true }),
+      undefined,
+      () => lanes,
+      (input) => {
+        received = (input as { signal?: AbortSignal }).signal;
+        return { models: [] };
+      },
+    );
+
+    const response = await app.request("/v1/models?client_version=0.145.0", {
+      headers: AUTH,
+      signal: caller.signal,
+    });
+    caller.abort();
+
+    expect(response.status).toBe(200);
+    expect(received).toBeInstanceOf(AbortSignal);
+    expect(received?.aborted).toBe(true);
   });
 
   it("keeps the native Codex envelope when no model is available to the key", async () => {

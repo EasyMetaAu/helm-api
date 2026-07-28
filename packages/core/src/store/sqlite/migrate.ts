@@ -1216,6 +1216,29 @@ const MIGRATIONS: readonly Migration[] = [
         ADD COLUMN body_bytes INTEGER;
     `,
   },
+  {
+    version: 43,
+    sql: `
+      CREATE TABLE IF NOT EXISTS responses_registry (
+        response_id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        key_id TEXT NOT NULL,
+        provider_alias TEXT,
+        provider_name TEXT,
+        provider_model TEXT,
+        provider_protocol TEXT,
+        provider_account TEXT,
+        selected_lane TEXT,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        status TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_responses_registry_expires_at
+        ON responses_registry (expires_at);
+      CREATE INDEX IF NOT EXISTS idx_responses_registry_created_id
+        ON responses_registry (created_at, response_id);
+    `,
+  },
 ];
 
 function sqliteTableHasColumns(

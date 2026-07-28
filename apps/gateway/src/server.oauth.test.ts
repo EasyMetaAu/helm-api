@@ -1416,6 +1416,8 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     const catalog = createCodexModelCatalog({
       cache: createCodexModelCache(config, ENC_KEY),
     });
+    const tokenManagers = new Map();
+    const tokenReads = vi.spyOn(ctx.store, "get");
     const requests: Array<{ url: URL; headers: Headers }> = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = new URL(typeof input === "string" ? input : input.toString());
@@ -1442,6 +1444,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       config,
       catalog,
       clientVersion: "0.139.0",
+      tokenManagers,
     });
     const current = await loadCodexCatalogForClientVersion({
       configured: [],
@@ -1449,6 +1452,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       config,
       catalog,
       clientVersion: "0.145.0-alpha.4",
+      tokenManagers,
     });
     const currentAgain = await loadCodexCatalogForClientVersion({
       configured: [],
@@ -1456,6 +1460,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       config,
       catalog,
       clientVersion: "0.145.0",
+      tokenManagers,
     });
 
     expect(older.models).toEqual(["gpt-5.5"]);
@@ -1464,6 +1469,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     expect(current.keys.map((key) => key.clientVersion)).toEqual(["0.145.0"]);
     expect(currentAgain).toEqual(current);
     expect(requests).toHaveLength(2);
+    expect(tokenReads).toHaveBeenCalledTimes(1);
     expect(requests.map(({ url }) => url.searchParams.get("client_version"))).toEqual([
       "0.139.0",
       "0.145.0",

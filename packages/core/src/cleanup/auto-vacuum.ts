@@ -29,11 +29,12 @@ export function createAutoVacuumRunner() {
 
   return {
     async run(
-      args: Omit<Parameters<typeof shouldAutoVacuum>[0], "lastRunDayKey">,
-      maintenance: () => Promise<void>,
+      current: () => Omit<Parameters<typeof shouldAutoVacuum>[0], "lastRunDayKey">,
+      maintenance: () => Promise<boolean>,
     ): Promise<boolean> {
+      const args = current();
       if (!shouldAutoVacuum({ ...args, lastRunDayKey: lastSuccessfulDayKey })) return false;
-      await maintenance();
+      if ((await maintenance()) === false) return false;
       lastSuccessfulDayKey = args.todayKey;
       return true;
     },

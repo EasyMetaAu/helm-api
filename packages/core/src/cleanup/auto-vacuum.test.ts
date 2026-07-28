@@ -51,17 +51,38 @@ describe("createAutoVacuumRunner", () => {
     todayKey: "Mon Jun 22 2026",
   };
 
+  it("reads live eligibility at execution time", async () => {
+    const runner = createAutoVacuumRunner();
+    let reads = 0;
+    const run = runner.run as unknown as (
+      current: () => typeof tick,
+      maintenance: () => Promise<boolean>,
+    ) => Promise<boolean>;
+
+    await expect(
+      run(
+        () => {
+          reads += 1;
+          return tick;
+        },
+        async () => true,
+      ),
+    ).resolves.toBe(true);
+    expect(reads).toBe(1);
+  });
+
   it("marks the day only after maintenance succeeds", async () => {
     const runner = createAutoVacuumRunner();
     let attempts = 0;
     const run = async () => {
       attempts += 1;
       if (attempts === 1) throw new Error("disk preflight failed");
+      return true;
     };
 
-    await expect(runner.run(tick, run)).rejects.toThrow("disk preflight failed");
-    await expect(runner.run(tick, run)).resolves.toBe(true);
-    await expect(runner.run(tick, run)).resolves.toBe(false);
+    await expect(runner.run(() => tick, run)).rejects.toThrow("disk preflight failed");
+    await expect(runner.run(() => tick, run)).resolves.toBe(true);
+    await expect(runner.run(() => tick, run)).resolves.toBe(false);
     expect(attempts).toBe(2);
   });
 
@@ -70,10 +91,28 @@ describe("createAutoVacuumRunner", () => {
     let called = false;
 
     await expect(
-      runner.run({ ...tick, enabled: false }, async () => {
-        called = true;
-      }),
+      runner.run(
+        () => ({ ...tick, enabled: false }),
+        async () => {
+          called = true;
+          return true;
+        },
+      ),
     ).resolves.toBe(false);
     expect(called).toBe(false);
+  });
+
+  it("retries later when eligible maintenance reports that the gateway is busy", async () => {
+    const runner = createAutoVacuumRunner();
+    let attempts = 0;
+    const run = async () => {
+      attempts += 1;
+      return attempts > 1;
+    };
+
+    await expect(runner.run(() => tick, run)).resolves.toBe(false);
+    await expect(runner.run(() => tick, run)).resolves.toBe(true);
+    await expect(runner.run(() => tick, run)).resolves.toBe(false);
+    expect(attempts).toBe(2);
   });
 });

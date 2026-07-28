@@ -12,6 +12,7 @@ import type {
   OAuthTokenStore,
   OAuthUsageStore,
   RateLimitStore,
+  ResponsesRegistryStore,
   SignalStore,
   TelemetryStore,
 } from "./ports.js";
@@ -25,6 +26,7 @@ import { PgOAuthQuotaStore } from "./postgres/oauth-quota.js";
 import { PgOAuthTokenStore } from "./postgres/oauth-tokens.js";
 import { PgOAuthUsageStore } from "./postgres/oauth-usage.js";
 import { PgRateLimitStore } from "./postgres/rate-limit.js";
+import { PgResponsesRegistryStore } from "./postgres/responses-registry.js";
 import { PgSignalStore } from "./postgres/signals.js";
 import { PgTelemetryStore } from "./postgres/telemetry.js";
 import { SqliteBudgetStore } from "./sqlite/budget.js";
@@ -36,6 +38,7 @@ import { SqliteOAuthQuotaStore } from "./sqlite/oauth-quota.js";
 import { SqliteOAuthTokenStore } from "./sqlite/oauth-tokens.js";
 import { SqliteOAuthUsageStore } from "./sqlite/oauth-usage.js";
 import { SqliteRateLimitStore } from "./sqlite/rate-limit.js";
+import { SqliteResponsesRegistryStore } from "./sqlite/responses-registry.js";
 import { SqliteSignalStore } from "./sqlite/signals.js";
 import { SqliteTelemetryStore } from "./sqlite/telemetry.js";
 import { vacuumSqlite } from "./sqlite/vacuum.js";
@@ -54,6 +57,7 @@ export interface StoreSet {
   readonly budget: BudgetStore;
   readonly memory: MemoryStore;
   readonly config: ConfigStore;
+  readonly responsesRegistry: ResponsesRegistryStore;
   // Null for SQLite: only PostgreSQL coordinates leases across replicas.
   readonly concurrencyLeases: ConcurrencyLeaseStore | null;
   readonly oauthTokens: OAuthTokenStore;
@@ -99,6 +103,7 @@ export async function createStore(opts: CreateStoreOptions): Promise<StoreSet> {
         budget: new SqliteBudgetStore(db),
         memory: new SqliteMemoryStore(db),
         config: new SqliteConfigStore(db),
+        responsesRegistry: new SqliteResponsesRegistryStore(db),
         concurrencyLeases: null,
         oauthTokens: new SqliteOAuthTokenStore(db),
         oauthUsage: new SqliteOAuthUsageStore(db),
@@ -130,6 +135,7 @@ export async function createStore(opts: CreateStoreOptions): Promise<StoreSet> {
         budget: new PgBudgetStore(db),
         memory: new PgMemoryStore(db),
         config: new PgConfigStore(db),
+        responsesRegistry: new PgResponsesRegistryStore(db),
         concurrencyLeases: new PgConcurrencyLeaseStore(db),
         oauthTokens: new PgOAuthTokenStore(db),
         oauthUsage: new PgOAuthUsageStore(db),

@@ -1,12 +1,13 @@
 import { once } from "node:events";
 import { createServer, IncomingMessage } from "node:http";
 import { Socket } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import {
   installResponsesWebSocketBridge,
   isResponsesWebSocketPath,
   type ResponsesWebSocketUpgradeServer,
+  responsesWebSocketPreflightPending,
 } from "./responses-websocket.js";
 import { createBodyMemoryAdmission } from "./runtime/memory-admission.js";
 
@@ -80,6 +81,7 @@ async function startBridge(
     closeSession?: (sessionId: string) => void | Promise<void>;
     memoryAdmission?: ReturnType<typeof createBodyMemoryAdmission>;
     ingressAdmission?: ReturnType<typeof createBodyMemoryAdmission>;
+    preflightTimeoutMs?: number;
   } = {},
 ) {
   const server = createServer((_req, res) => {
@@ -98,6 +100,7 @@ async function startBridge(
     closeSession: options.closeSession,
     memoryAdmission: options.memoryAdmission,
     ingressAdmission: options.ingressAdmission,
+    preflightTimeoutMs: options.preflightTimeoutMs,
   });
   openBridges.push(bridge);
   server.listen(0, "127.0.0.1");
@@ -309,13 +312,15 @@ describe("Responses websocket bridge", () => {
     };
     let resolvePreflight!: (response: Response) => void;
     let preflightStarted = false;
+    let preflightSignal: AbortSignal | undefined;
     const preflight = new Promise<Response>((resolve) => {
       resolvePreflight = resolve;
     });
     const bridge = installResponsesWebSocketBridge({
       server,
-      fetch: () => {
+      fetch: (request) => {
         preflightStarted = true;
+        preflightSignal = request.signal;
         return preflight;
       },
     });
@@ -326,7 +331,9 @@ describe("Responses websocket bridge", () => {
     request.method = "GET";
     request.url = "/v1/responses";
     upgradeListener?.(request, socket, Buffer.alloc(0));
+    await new Promise<void>((resolve) => setImmediate(resolve));
     expect(preflightStarted).toBe(true);
+    expect(responsesWebSocketPreflightPending()).toBe(1);
 
     let unhandledError: unknown;
     try {
@@ -349,6 +356,8 @@ describe("Responses websocket bridge", () => {
     }
 
     expect(unhandledError).toBeUndefined();
+    expect(preflightSignal?.aborted).toBe(true);
+    expect(responsesWebSocketPreflightPending()).toBe(0);
   });
 
   it("supports prewarm and a second response.create on the same connection", async () => {
@@ -470,6 +479,119 @@ describe("Responses websocket bridge", () => {
     expect(response.headers["x-models-etag"]).toBe('"models-1"');
     expect(response.headers["x-reasoning-included"]).toBeUndefined();
     expect(response.headers["sec-websocket-extensions"]).toBeUndefined();
+  });
+
+  it("falls back to an auth-only models check when versioned preflight times out", async () => {
+    let versionedAborted = false;
+    let fallbackCalls = 0;
+    const baseUrl = await startBridge(
+      () => {
+        throw new Error("response fetch should not run");
+      },
+      (request) => {
+        const version = new URL(request.url).searchParams.get("client_version");
+        if (version !== null) {
+          return new Promise<Response>((resolve, reject) => {
+            const timer = setTimeout(
+              () => resolve(new Response("catalog stuck", { status: 504 })),
+              50,
+            );
+            request.signal.addEventListener(
+              "abort",
+              () => {
+                versionedAborted = true;
+                clearTimeout(timer);
+                reject(request.signal.reason);
+              },
+              { once: true },
+            );
+          });
+        }
+        fallbackCalls += 1;
+        return new Response(JSON.stringify({ data: [] }), {
+          headers: { "content-type": "application/json" },
+        });
+      },
+      { preflightTimeoutMs: 10 },
+    );
+
+    const socket = await connect(`${baseUrl}/v1/responses`);
+
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+    expect(versionedAborted).toBe(true);
+    expect(fallbackCalls).toBe(1);
+  });
+
+  it("bounds a stalled auth-only fallback and releases the preflight", async () => {
+    let upgradeListener: Parameters<ResponsesWebSocketUpgradeServer["on"]>[1] | undefined;
+    const server: ResponsesWebSocketUpgradeServer = {
+      on(_event, listener) {
+        upgradeListener = listener;
+      },
+      off(_event, listener) {
+        if (upgradeListener === listener) upgradeListener = undefined;
+      },
+    };
+    let fallbackSignal: AbortSignal | undefined;
+    let resolveFallback!: (response: Response) => void;
+    const fallback = new Promise<Response>((resolve) => {
+      resolveFallback = resolve;
+    });
+    const bridge = installResponsesWebSocketBridge({
+      server,
+      preflightTimeoutMs: 5,
+      fetch: (request) => {
+        if (new URL(request.url).searchParams.has("client_version")) {
+          return Promise.resolve(new Response("catalog timeout", { status: 504 }));
+        }
+        fallbackSignal = request.signal;
+        return fallback;
+      },
+    });
+    openBridges.push(bridge);
+    const socket = new Socket();
+    socket.on("error", () => {});
+    const request = new IncomingMessage(socket);
+    request.method = "GET";
+    request.url = "/v1/responses";
+    request.headers = {
+      authorization: "Bearer helm-test-key",
+      "user-agent": "codex_cli_rs/0.144.1 (test)",
+    };
+
+    upgradeListener?.(request, socket, Buffer.alloc(0));
+
+    try {
+      await vi.waitFor(() => expect(fallbackSignal?.aborted).toBe(true));
+      await vi.waitFor(() => expect(responsesWebSocketPreflightPending()).toBe(0));
+      expect(socket.destroyed).toBe(true);
+    } finally {
+      socket.destroy();
+      resolveFallback(new Response("late response"));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  });
+
+  it("cancels an unused successful models preflight body", async () => {
+    let cancelled = false;
+    const baseUrl = await startBridge(
+      () => {
+        throw new Error("response fetch should not run");
+      },
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            cancel() {
+              cancelled = true;
+            },
+          }),
+          { headers: { etag: '"models-1"' } },
+        ),
+    );
+
+    await connect(`${baseUrl}/v1/responses`);
+
+    expect(cancelled).toBe(true);
   });
 
   it("prefers the standard version header for the models preflight cache key", async () => {

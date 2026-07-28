@@ -237,6 +237,34 @@ describe("listOpenAICodexModels", () => {
     await listOpenAICodexModels("token", { fetchImpl });
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
+
+  it("combines the caller abort signal with the Codex models timeout", async () => {
+    const caller = new AbortController();
+    let received: AbortSignal | undefined;
+    const fetchImpl = async (_input: string | URL | Request, init?: RequestInit) => {
+      received = init?.signal instanceof AbortSignal ? init.signal : undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = received;
+        if (signal?.aborted) {
+          reject(signal.reason);
+          return;
+        }
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    };
+    const pending = listOpenAICodexModels("token", {
+      fetchImpl: fetchImpl as typeof globalThis.fetch,
+      signal: caller.signal,
+      timeoutMs: 20,
+    });
+    const settled = pending.catch((error: unknown) => error);
+
+    caller.abort(new Error("caller disconnected"));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const abortedByCaller = received?.aborted;
+    await settled;
+    expect(abortedByCaller).toBe(true);
+  });
   it("uses the current Codex whole client version and permits an environment override", () => {
     expect(DEFAULT_OPENAI_CODEX_CLIENT_VERSION).toBe("0.145.0");
     expect(resolveOpenAICodexClientVersion({})).toBe("0.145.0");

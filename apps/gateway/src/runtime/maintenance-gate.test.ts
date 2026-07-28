@@ -59,6 +59,40 @@ describe("serialized maintenance queue", () => {
 });
 
 describe("maintenance activity gate", () => {
+  it("atomically pauses only when no request is active", () => {
+    const gate = createMaintenanceActivityGate();
+    const active = gate.enter();
+    if (!active.ok) throw new Error("expected active request");
+
+    expect(gate.tryPauseIfIdle()).toBe(false);
+    gate.release(active.activity);
+    expect(gate.tryPauseIfIdle()).toBe(true);
+    expect(gate.enter()).toEqual({ ok: false });
+    gate.resume();
+    expect(gate.enter().ok).toBe(true);
+  });
+
+  it("keeps an outer HTTP idle claim through the complete vacuum", async () => {
+    const gate = createMaintenanceActivityGate();
+    const background = createTrackedBackgroundTasks();
+    let finish!: () => void;
+    const vacuuming = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    expect(gate.tryPauseIfIdle()).toBe(true);
+
+    const vacuum = withPausedActivities([background], async () => vacuuming);
+    expect(gate.enter()).toEqual({ ok: false });
+    finish();
+    await vacuum;
+    expect(gate.enter()).toEqual({ ok: false });
+
+    gate.resume();
+    const entered = gate.enter();
+    expect(entered.ok).toBe(true);
+    if (entered.ok) gate.release(entered.activity);
+  });
+
   it.each([
     [
       "OpenAI Responses",

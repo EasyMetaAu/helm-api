@@ -19,6 +19,8 @@ export type {
   RateLimitConsumeResult,
   RateLimitStore,
   RequestPayload,
+  ResponsesRegistryRecord,
+  ResponsesRegistryStore,
   SessionRecord,
   SessionRevisionPage,
   SessionRevisionPageOptions,
@@ -51,6 +53,7 @@ export { PgOAuthQuotaStore } from "./postgres/oauth-quota.js";
 export { PgOAuthTokenStore } from "./postgres/oauth-tokens.js";
 export { PgOAuthUsageStore } from "./postgres/oauth-usage.js";
 export { PgRateLimitStore } from "./postgres/rate-limit.js";
+export { PgResponsesRegistryStore } from "./postgres/responses-registry.js";
 export { PgSignalStore } from "./postgres/signals.js";
 export { PgTelemetryStore } from "./postgres/telemetry.js";
 export {
@@ -67,6 +70,7 @@ export { SqliteOAuthTokenStore } from "./sqlite/oauth-tokens.js";
 export { SqliteOAuthUsageStore } from "./sqlite/oauth-usage.js";
 export { SqliteRateLimitStore } from "./sqlite/rate-limit.js";
 export { InMemoryRateLimitStore } from "./sqlite/rate-limit-memory.js";
+export { SqliteResponsesRegistryStore } from "./sqlite/responses-registry.js";
 export { SqliteSignalStore } from "./sqlite/signals.js";
 export { InMemorySignalStore } from "./sqlite/signals-memory.js";
 export { SqliteTelemetryStore } from "./sqlite/telemetry.js";

@@ -153,20 +153,9 @@ export interface ResponsesBudgetPort {
   now(): number;
 }
 
-export interface ResponsesRegistryRecord {
-  responseId: string;
-  accountId: string;
-  keyId: string;
-  providerAlias: string | null;
-  providerName: string | null;
-  providerModel: string | null;
-  providerProtocol: "openai_chat" | "anthropic_messages" | "openai_responses" | "gemini" | null;
-  providerAccount?: string | null;
-  selectedLane?: string | null;
-  createdAt: number;
-  expiresAt: number;
-  status: string;
-}
+export type { ResponsesRegistryRecord } from "@helm/core";
+
+import type { ResponsesRegistryRecord } from "@helm/core";
 
 export interface ResponsesRegistryPort {
   put(record: ResponsesRegistryRecord): void | Promise<void>;
@@ -447,7 +436,8 @@ function isResponsesTerminalEvent(eventName: string): boolean {
   return (
     eventName === "response.completed" ||
     eventName === "response.incomplete" ||
-    eventName === "response.failed"
+    eventName === "response.failed" ||
+    eventName === "response.cancelled"
   );
 }
 
@@ -1268,31 +1258,28 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         let streamStatus: string | null = null;
         let cancellationReason: RequestCancellationReason | null = null;
         let caughtErrorReason: string | null = null;
-        let registryCommitted = false;
+        let registryCommit: Promise<void> | null = null;
         const commitRegistry = async (status: string): Promise<void> => {
-          if (
-            registryCommitted ||
-            deps.registry === undefined ||
-            result === null ||
-            streamResponseId === null
-          ) {
+          if (deps.registry === undefined || result === null || streamResponseId === null) {
             return;
           }
-          registryCommitted = true;
-          try {
-            await deps.registry.put(
-              responsesRegistryRecord({
-                responseId: streamResponseId,
-                identity,
-                result,
-                status,
-              }),
-            );
-          } catch {
-            c.get("logger").log("warn", "responses.registry_put_failed", {
-              trace_id: traceId,
-            });
-          }
+          registryCommit ??= (async () => {
+            try {
+              await deps.registry?.put(
+                responsesRegistryRecord({
+                  responseId: streamResponseId,
+                  identity,
+                  result,
+                  status,
+                }),
+              );
+            } catch {
+              c.get("logger").log("warn", "responses.registry_put_failed", {
+                trace_id: traceId,
+              });
+            }
+          })();
+          await registryCommit;
         };
         try {
           if (initialError !== null) throw initialError;
@@ -1332,7 +1319,12 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                 if (terminal.responseJson !== null) sessionResponseJson = terminal.responseJson;
               }
             }
-            if (terminalEvent) await commitRegistry(streamStatus ?? "truncated");
+            const terminalCommit = terminalEvent
+              ? commitRegistry(
+                  streamStatus === "cancelled" ? "failed" : (streamStatus ?? "truncated"),
+                )
+              : null;
+            await terminalCommit;
             if (raw !== undefined) {
               await sse.write(raw);
               lastWrite = raw;
