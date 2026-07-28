@@ -18,7 +18,6 @@ describe("deriveRuntimeMemoryBudget", () => {
 
     expect(large.activeRequestBytes).toBe(small.activeRequestBytes * 2);
     expect(large.responseWorkBytes).toBe(small.responseWorkBytes * 2);
-    expect(large.maxWireBytes).toBe(small.maxWireBytes * 2);
     expect(
       Math.abs(large.minRequestChargeBytes - small.minRequestChargeBytes * 2),
     ).toBeLessThanOrEqual(1);
@@ -37,9 +36,6 @@ describe("deriveRuntimeMemoryBudget", () => {
     expect(
       Math.abs(large.websocketIngressBytes - small.websocketIngressBytes * 2),
     ).toBeLessThanOrEqual(1);
-    expect(
-      Math.abs(large.websocketMaxPayloadBytes - small.websocketMaxPayloadBytes * 2),
-    ).toBeLessThanOrEqual(1);
   });
 
   it("uses rss plus available memory as the process limit without cgroup constraints", () => {
@@ -53,7 +49,6 @@ describe("deriveRuntimeMemoryBudget", () => {
 
     expect(budget.processLimitBytes).toBe(2_000);
     expect(budget.websocketIngressBytes).toBeGreaterThan(0);
-    expect(budget.websocketMaxPayloadBytes).toBeGreaterThan(0);
   });
 
   it("ignores the no-limit sentinel returned by process.constrainedMemory", () => {
@@ -85,7 +80,7 @@ describe("deriveRuntimeMemoryBudget", () => {
     expect(busy.websocketIngressBytes).toBeLessThan(quiet.websocketIngressBytes);
   });
 
-  it("shrinks websocket max payload to native headroom and fails closed only at zero", () => {
+  it("does not derive a websocket payload limit from native headroom", () => {
     const narrow = deriveRuntimeMemoryBudget({
       heapLimitBytes: 1_000,
       constrainedMemoryBytes: 1_050,
@@ -100,10 +95,7 @@ describe("deriveRuntimeMemoryBudget", () => {
     });
 
     expect(narrow.websocketIngressBytes).toBeGreaterThan(0);
-    expect(narrow.websocketMaxPayloadBytes).toBe(narrow.websocketIngressBytes);
-    expect(narrow.websocketMaxPayloadBytes).toBeLessThan(narrow.maxWireBytes);
     expect(none.websocketIngressBytes).toBe(0);
-    expect(none.websocketMaxPayloadBytes).toBe(0);
   });
 
   it("uses the tighter process capacity for every runtime allocation", () => {
@@ -123,16 +115,12 @@ describe("deriveRuntimeMemoryBudget", () => {
     expect(budget.sqlitePageCacheBytes).toBe(Math.floor(budget.processLimitBytes * 0.03));
   });
 
-  it("admits the production-proven request at the observed constrained heap capacity", () => {
+  it("keeps managed allocations within the observed process capacity", () => {
     const budget = deriveRuntimeMemoryBudget({
       heapLimitBytes: 706_740_224,
       constrainedMemoryBytes: 706_740_224,
     });
 
-    expect(budget.maxWireBytes).toBeGreaterThanOrEqual(22_020_096);
-    expect(budget.responseWorkBytes).toBeGreaterThanOrEqual(
-      budget.maxWireBytes * budget.jsonAmplification,
-    );
     expect(
       budget.activeRequestBytes +
         budget.responseWorkBytes +

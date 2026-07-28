@@ -275,9 +275,9 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     return c.json(out.body as Record<string, unknown>, out.status as ContentfulStatusCode);
   };
   const sendAdmissionError = (c: Context<AppEnv>, error: RequestAdmissionError): Response => {
-    if (error.status === 503) c.header("retry-after", "1");
+    c.header("retry-after", "1");
     const out = anthropic.transformErrorOut({
-      error_class: error.status === 413 ? "invalid_request" : "lane_unavailable",
+      error_class: "lane_unavailable",
       message: error.message,
       trace_id: c.get("trace_id"),
     });

@@ -27,7 +27,6 @@ import {
   consumeResponseTextWithinBudget,
   ResponseBodyTooLargeError,
 } from "../runtime/bounded-response.js";
-import { runtimeMemoryBudget } from "../runtime/memory-budget.js";
 import { ResponseWorkCapacityError } from "../runtime/response-work-admission.js";
 import {
   type PreparedNativePassthroughRequest,
@@ -1417,11 +1416,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     consume: (text: string) => T | Promise<T>,
   ): Promise<T> {
     try {
-      return await consumeResponseTextWithinBudget(
-        result.response,
-        runtimeMemoryBudget().maxWireBytes,
-        consume,
-      );
+      return await consumeResponseTextWithinBudget(result.response, 0, consume);
     } catch (err) {
       if (result.bodyTimeout?.isTimeout() && !result.bodyTimeout.isExternalAbort()) {
         throw new UpstreamError("timeout", "upstream request timed out");
@@ -2333,17 +2328,13 @@ export function createGenericOpenAIResponsesClient(
   }
 
   async function errorFromResponse(res: Response): Promise<UpstreamError> {
-    const providerRaw = await consumeResponseTextWithinBudget(
-      res,
-      runtimeMemoryBudget().maxWireBytes,
-      (text) => {
-        try {
-          return scrub(JSON.parse(text));
-        } catch {
-          return scrub(text);
-        }
-      },
-    ).catch(() => null);
+    const providerRaw = await consumeResponseTextWithinBudget(res, 0, (text) => {
+      try {
+        return scrub(JSON.parse(text));
+      } catch {
+        return scrub(text);
+      }
+    }).catch(() => null);
     return new UpstreamError(
       "upstream_error",
       `upstream returned ${res.status}`,
@@ -2356,7 +2347,7 @@ export function createGenericOpenAIResponsesClient(
     try {
       return await consumeResponseTextWithinBudget(
         res,
-        runtimeMemoryBudget().maxWireBytes,
+        0,
         (text) => JSON.parse(text) as Record<string, unknown>,
       );
     } catch (error) {

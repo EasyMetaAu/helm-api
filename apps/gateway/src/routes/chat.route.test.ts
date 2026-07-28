@@ -170,10 +170,9 @@ describe("POST /v1/chat/completions — usage budgets + OAuth usage + eval overr
     "/chat/completions",
     "/engines/azure-deployment/chat/completions",
     "/openai/deployments/azure-deployment/chat/completions",
-  ])("keeps the hard body limit on %s", async (path) => {
+  ])("does not enforce the former hard body limit on %s", async (path) => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1024,
-      maxWireBytes: 1,
       jsonAmplification: 1,
     });
     const { deps: d, harness } = deps({ memoryAdmission });
@@ -185,15 +184,14 @@ describe("POST /v1/chat/completions — usage budgets + OAuth usage + eval overr
       body: JSON.stringify(NONSTREAM_BODY),
     });
 
-    expect(res.status).toBe(413);
-    expect(harness.execute).not.toHaveBeenCalled();
+    expect(res.status).not.toBe(413);
+    expect(harness.execute).toHaveBeenCalledOnce();
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
   it("does not return capacity 503 when the historical shared body budget is exhausted", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1,
-      maxWireBytes: 1024,
       jsonAmplification: 1,
     });
     const { deps: d, harness } = deps({ memoryAdmission });

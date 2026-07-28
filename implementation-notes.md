@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-07-28 · 删除 HTTP 与 WebSocket 请求大小上限（Gateway runtime / Deployment，docs/02/05/07/10，用户明确要求）
+
+- **决定**：删除由 `activeRequestBytes / JSON_AMPLIFICATION` 推导的共享 wire 上限；HTTP 请求体不再执行 `wire_limit` 拒绝，Responses/Realtime 和上游 Codex WebSocket 的 `ws.maxPayload` 使用 `0`（无限制），HTTP/SSE 响应读取也不再复用该请求上限。原先约 25.8 MiB 的隐藏上限会把约 31 MiB 的 Codex 上下文压缩请求表现成 HTTP 413 或 `websocket closed by server before response.completed`。
+- **部署边界**：Remote Nginx 必须同步使用 `client_max_body_size 0`，不能以 100 MiB 替代已删除的应用限制。鉴权、schema 校验、maintenance drain、provider timeout、正文留存边界和缓存/写队列预算不变。
+
 ## 2026-07-28 · 消除 preflight/registry 内存放大并让自动 VACUUM 只在空闲启动（Gateway / OAuth / Store，docs/02/05/07/10，原则 1/3/7/8）
 
 - **连接超时根因**：Responses WebSocket 的内部 models preflight 原先没有独立 deadline，也没有把 socket/request abort 贯穿 models、OAuth token、catalog/cache 与上游 fetch；现在 versioned 与 auth-only fallback 各有 6 秒边界，bridge 对内部 fetch Promise 做硬 race，即使 Store/鉴权忽略 signal 也会终止握手并取消晚到 body；断连同样立即取消，避免辅助目录阻断 101 或永久占住维护 activity。相同账号的 TokenManager 在 models 请求间复用，首次 Store 读取 singleflight，等待者可取消；共享 preset refresh 不接受单个等待者取消，但底层 fetch 固定在 30 秒内终止且 settled gate 会清理。
@@ -70,14 +75,9 @@
 - **握手错误正文**：一旦上游已经返回非 101 HTTP response，关闭 `ws` 的 opening-handshake socket timeout，改由既有的有界 response-body timeout 接管；避免两个同期限时器竞争，把确定性 timeout 偶发误报为 generic body failure。正文大小上限、socket 销毁与客户端错误形状保持不变。
 - **安全边界**：`ws.maxPayload` 继续按运行时机器容量动态限制单帧，超限仍以 1009/413 失败；活动消息超过 native ingress 池仍返回结构化 503，超过共享请求池也继续拒绝。没有新增固定连接数、队列、配置或依赖；定向测试同时覆盖“第三条空闲连接可建立”和“第三条并发活动消息被预算拒绝”。
 
-## 2026-07-23 · PostgreSQL API-key 分布式并发 lease（Phase 1，docs/06/10，原则 1/3/7）
-
-- **一致性边界**：仅 `supabase`/PostgreSQL 使用 state-row `FOR UPDATE` + DB `clock_timestamp()` 的 lease 表实现跨 replica 上限；SQLite 保持既有 process-local FIFO。statement-time clock 避免等待 row lock 后仍使用事务开始时间；lease 过期回收不依赖 Node clock，也不维护独立 active counter。
-- **本地调度边界**：每 replica/key 只让本地队首轮询 DB；默认 TTL 30s、heartbeat 10s，失败轮询使用可注入的 100–250ms jitter。manager 同时以 DB 返回 `expiresAtMs` 和本地 RPC 开始时间 + TTL 的较早值作为 ownership deadline，防止 acquire/renew 响应延迟或挂起越过已知租期。renew 失败使持有者 signal 以 `concurrency_lease_lost` abort，release 为 async/idempotent best-effort，gateway 将它与 client abort/request timeout 合并；流 lease 到 body final close/cancel 才释放。shutdown 会等待正在进行的 acquire，并在返回前清理 late-success orphan。
-- **真实 PG 验收**：`apps/gateway/e2e/concurrency-postgres.spec.ts` 用两个独立 postgres-js pool、两个 distributed manager 和两个请求级 Hono app 验证 100 并发全局上限、key 隔离、TTL crash recovery、heartbeat、lease-loss no-cooldown、stream final/cancel 与 DB-unavailable 503。`pnpm test:e2e` 的 launcher 按 `PG_TEST_URL` > `HELM_TEST_POSTGRES_URL` 取外部测试库；无 URL 时自动启动 digest-pinned PostgreSQL 17 + pgvector 并 finally 清理，Docker 不可用则明确失败。PGlite 仍只算 SQL/contract coverage，不计真实多 pool AC。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-23 · PostgreSQL API-key 分布式并发 lease**：PostgreSQL 用 DB 时钟和 state-row lease 实现跨 replica 并发上限、心跳与 crash recovery，真实多 pool e2e 作为验收边界；完整原文通过 git history 回溯。
 - **2026-07-23 · Session 恢复与在线响应共享内存池**：Admin Session 恢复单次最多占 response-work 池一半，保留在线响应容量并坚持先准入后物化；完整原文通过 git history 回溯。
 - **2026-07-27 · 请求内存准入只计算未物化 headroom**：曾修 live-heap 双重计账误拒 503；后被同日“拆除启发式请求内存拒绝并保留硬边界”取代，完整原文通过 git history 回溯。
 - **2026-07-23 · Codex Responses 按运行时容量准入并让夜间 SQLite 维护收缩内存（Gateway / Session / Store，docs/02/05/07/10，原则 2/3/7/8）**：机器推导的共享请求/响应/缓存预算、活动消息准入和维护 drain 保留正文捕获与自动维护能力；后续物化重复计账、WebSocket ingress 与 terminal 生命周期修正见顶部更新条目，完整原文通过 git history 回溯。

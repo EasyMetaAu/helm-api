@@ -104,7 +104,7 @@ describe("Realtime websocket bridge", () => {
     expect(response.statusCode).toBe(404);
   });
 
-  it("closes an oversized client frame with 1009 before relaying it", async () => {
+  it("relays a client frame larger than the former admission limit", async () => {
     const upstreamHttp = await listeningServer();
     const upstream = new WebSocketServer({ server: upstreamHttp.server, perMessageDeflate: false });
     upstream.on("connection", (socket) => socket.on("message", (data) => socket.send(data)));
@@ -128,7 +128,6 @@ describe("Realtime websocket bridge", () => {
       resolveKey: async () => "key-1",
       memoryAdmission: createBodyMemoryAdmission({
         activeRequestBytes: 100,
-        maxWireBytes: 4,
         jsonAmplification: 1,
       }),
     });
@@ -138,10 +137,10 @@ describe("Realtime websocket bridge", () => {
       headers: { Authorization: "Bearer helm-key" },
     });
     await once(client, "open");
-    const closed = once(client, "close");
+    const echoed = once(client, "message");
     client.send("12345");
-    const [code] = (await closed) as [number];
-    expect(code).toBe(1009);
+    const [data] = (await echoed) as [WebSocket.RawData, boolean];
+    expect(data.toString()).toBe("12345");
   });
 
   it("refreshes OAuth once when the upstream sideband rejects with 401", async () => {

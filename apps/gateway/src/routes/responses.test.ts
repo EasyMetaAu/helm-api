@@ -241,10 +241,9 @@ function expectNativeCarrier(
 }
 
 describe("POST /v1/responses (OpenAI Responses inbound)", () => {
-  it("keeps the hard body limit before translation", async () => {
+  it("accepts a body larger than the former hard body limit", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
-      maxWireBytes: 10,
       jsonAmplification: 6,
     });
     const { deps, order } = makeDeps({ memoryAdmission });
@@ -255,11 +254,9 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       body: JSON.stringify(REQ),
     });
 
-    expect(res.status).toBe(413);
-    expect((await res.json()) as unknown).toMatchObject({
-      error: { type: "invalid_request_error", code: "request_too_large" },
-    });
-    expect(order).toEqual(["auth"]);
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(order).toContain("auth");
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
@@ -267,7 +264,6 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     const finish = deferred<void>();
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1_000,
-      maxWireBytes: 1_000,
       jsonAmplification: 1,
       minRequestChargeBytes: 1,
     });

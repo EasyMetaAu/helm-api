@@ -8,7 +8,6 @@ export interface RuntimeMemoryBudget {
   jsonAmplification: number;
   activeRequestBytes: number;
   responseWorkBytes: number;
-  maxWireBytes: number;
   minRequestChargeBytes: number;
   writeQueueBytes: number;
   sessionCacheBytes: number;
@@ -17,7 +16,6 @@ export interface RuntimeMemoryBudget {
   sqlitePageCacheBytes: number;
   sqliteMaintenanceCacheBytes: number;
   websocketIngressBytes: number;
-  websocketMaxPayloadBytes: number;
 }
 
 export function deriveRuntimeMemoryBudget(input: {
@@ -51,7 +49,6 @@ export function deriveRuntimeMemoryBudget(input: {
   const responseCaptureBytes = Math.floor(allocationLimitBytes * 0.06);
   const sqlitePageCacheBytes = Math.floor(processLimitBytes * 0.03);
   const sqliteMaintenanceCacheBytes = Math.floor(sqlitePageCacheBytes / 4);
-  const maxWireBytes = Math.floor(activeRequestBytes / JSON_AMPLIFICATION);
   const hasNativeMeasurement = hasConstrainedLimit || hasAvailableMemory;
   const heapTotalBytes = Math.min(
     rssBytes,
@@ -95,7 +92,6 @@ export function deriveRuntimeMemoryBudget(input: {
     jsonAmplification: JSON_AMPLIFICATION,
     activeRequestBytes,
     responseWorkBytes,
-    maxWireBytes,
     minRequestChargeBytes: Math.max(1, Math.floor(activeRequestBytes * 0.01)),
     writeQueueBytes,
     sessionCacheBytes,
@@ -104,7 +100,6 @@ export function deriveRuntimeMemoryBudget(input: {
     sqlitePageCacheBytes,
     sqliteMaintenanceCacheBytes,
     websocketIngressBytes,
-    websocketMaxPayloadBytes: Math.min(maxWireBytes, websocketIngressBytes),
   };
 }
 

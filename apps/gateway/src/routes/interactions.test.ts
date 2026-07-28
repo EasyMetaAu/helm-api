@@ -186,28 +186,23 @@ describe("registerInteractionsRoute", () => {
     expect(json.id).not.toBe("int_client-controlled-trace");
   });
 
-  it("keeps the hard body limit before JSON parsing", async () => {
+  it("does not enforce the former hard body limit before JSON parsing", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
-      maxWireBytes: 10,
       jsonAmplification: 6,
     });
     const { app, nativePassthrough } = setup({ memoryAdmission });
 
     const res = await post(app, { model: "gemini-3.1-flash-image", input: "a red apple" });
 
-    expect(res.status).toBe(413);
-    expect((await res.json()) as unknown).toMatchObject({
-      error: { status: "INVALID_ARGUMENT" },
-    });
-    expect(nativePassthrough).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(nativePassthrough).toHaveBeenCalledOnce();
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
   it("does not return Gemini capacity 503 when historical request capacity is exhausted", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1,
-      maxWireBytes: 1000,
       jsonAmplification: 1,
     });
     const { app, nativePassthrough } = setup({ memoryAdmission });
@@ -222,7 +217,6 @@ describe("registerInteractionsRoute", () => {
   it("releases its memory lease after a successful interactions request", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1000,
-      maxWireBytes: 1000,
       jsonAmplification: 1,
     });
     const { app } = setup({ memoryAdmission });
@@ -236,7 +230,6 @@ describe("registerInteractionsRoute", () => {
   it("releases its memory lease when interactions JSON is malformed", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1000,
-      maxWireBytes: 1000,
       jsonAmplification: 1,
     });
     const { app } = setup({ memoryAdmission });

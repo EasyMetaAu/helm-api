@@ -277,13 +277,17 @@ async function getSessionRequest(
   if (!sessionRef) return { status: "unavailable", reason: "no_session" };
   if (!listPage) return { status: "unavailable", reason: "session_unavailable" };
   const budget = runtimeMemoryBudget();
+  const responseAdmission = runtimeResponseWorkAdmission();
   // ponytail: half a response-work window lets inspection coexist with live API
   // traffic; add metadata-first admission if larger concurrent restores are needed.
-  const recoveryMaxWireBytes = Math.max(1, Math.floor(budget.maxWireBytes / 2));
+  const recoveryMaxWireBytes = Math.max(
+    1,
+    Math.floor(responseAdmission.capacityBytes / budget.jsonAmplification / 2),
+  );
   // Reserve one whole safe recovery window before the adapter materializes even
   // the first page. Reserving after listPage() would let concurrent readers each
   // allocate a large page before either one became visible to the shared budget.
-  const acquired = runtimeResponseWorkAdmission().acquire(recoveryMaxWireBytes);
+  const acquired = responseAdmission.acquire(recoveryMaxWireBytes);
   if (!acquired.ok) return { status: "unavailable", reason: "session_recovery_limited" };
   const revisions: SessionRevisionRecord[] = [];
   let afterSequence: number | undefined;

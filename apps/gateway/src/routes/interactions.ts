@@ -270,13 +270,8 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
       raw = JSON.parse(requestJson);
     } catch (error) {
       if (error instanceof RequestAdmissionError) {
-        if (error.status === 503) c.header("retry-after", "1");
-        return errorJson(
-          c,
-          error.status,
-          error.message,
-          error.status === 413 ? "INVALID_ARGUMENT" : "UNAVAILABLE",
-        );
+        c.header("retry-after", "1");
+        return errorJson(c, error.status, error.message, "UNAVAILABLE");
       }
       return errorJson(c, 400, "malformed JSON request body", "INVALID_ARGUMENT");
     }

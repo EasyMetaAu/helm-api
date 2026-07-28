@@ -1,6 +1,5 @@
 import { Buffer } from "node:buffer";
 import { UpstreamError } from "../provider/openai.js";
-import { runtimeMemoryBudget } from "../runtime/memory-budget.js";
 import {
   type ResponseWorkAdmission,
   runtimeResponseWorkAdmission,
@@ -39,7 +38,7 @@ export interface SSEFrame {
 }
 
 function assertSSEFrameFits(frame: string, maxFrameBytes: number): void {
-  if (Buffer.byteLength(frame) <= maxFrameBytes) return;
+  if (maxFrameBytes === 0 || Buffer.byteLength(frame) <= maxFrameBytes) return;
   throw new UpstreamError("upstream_error", "upstream SSE frame exceeds the runtime memory budget");
 }
 
@@ -78,7 +77,7 @@ function parseFrame(block: string): SSEFrame | null {
  */
 export async function* readSSE(
   stream: ReadableStream<Uint8Array>,
-  maxFrameBytes = runtimeMemoryBudget().maxWireBytes,
+  maxFrameBytes = 0,
   workAdmission: ResponseWorkAdmission = runtimeResponseWorkAdmission(),
 ): AsyncIterable<SSEFrame> {
   const reader = stream.getReader();

@@ -245,10 +245,9 @@ function expectNativeCarrier(
 }
 
 describe("POST /v1/messages (Anthropic inbound)", () => {
-  it("keeps the hard body limit for message and count-token requests", async () => {
+  it("does not enforce the former hard body limit for message and count-token requests", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1024,
-      maxWireBytes: 1,
       jsonAmplification: 1,
     });
     const { deps, harness } = makeDeps({ memoryAdmission });
@@ -260,16 +259,15 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
         headers: AUTH,
         body: JSON.stringify(REQ_BODY),
       });
-      expect(res.status).toBe(413);
+      expect(res.status).toBe(200);
     }
-    expect(harness.order).toEqual(["auth", "auth"]);
+    expect(harness.order.filter((entry) => entry === "auth")).toHaveLength(2);
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
   it("does not return capacity 503 when the historical shared body budget is exhausted", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1,
-      maxWireBytes: 1024,
       jsonAmplification: 1,
     });
     const { deps, harness } = makeDeps({ memoryAdmission });

@@ -191,28 +191,23 @@ describe("registerImagesRoute", () => {
     expect(res.status).toBe(401);
   });
 
-  it("keeps the hard body limit before JSON parsing", async () => {
+  it("does not enforce the former hard body limit before JSON parsing", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
-      maxWireBytes: 10,
       jsonAmplification: 6,
     });
     const { app, imageGeneration } = setup({ memoryAdmission });
 
     const res = await post(app, { model: "gpt-image-2", prompt: "a cat" });
 
-    expect(res.status).toBe(413);
-    expect((await res.json()) as unknown).toMatchObject({
-      error: { type: "invalid_request_error", code: "request_too_large" },
-    });
-    expect(imageGeneration).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(imageGeneration).toHaveBeenCalledOnce();
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
   it("does not return OpenAI capacity 503 when historical request capacity is exhausted", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1,
-      maxWireBytes: 1000,
       jsonAmplification: 1,
     });
     const { app, imageGeneration } = setup({ memoryAdmission });
@@ -227,7 +222,6 @@ describe("registerImagesRoute", () => {
   it("releases its memory lease after a successful image request", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1000,
-      maxWireBytes: 1000,
       jsonAmplification: 1,
     });
     const { app } = setup({ memoryAdmission });
@@ -239,7 +233,6 @@ describe("registerImagesRoute", () => {
   it("releases its memory lease when image JSON is malformed", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 1000,
-      maxWireBytes: 1000,
       jsonAmplification: 1,
     });
     const { app } = setup({ memoryAdmission });

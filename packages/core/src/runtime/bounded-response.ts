@@ -18,6 +18,7 @@ export class ResponseBodyTooLargeError extends Error {
 }
 
 function exceedsBudget(contentLength: string | null, maxBytes: number): boolean {
+  if (maxBytes === 0) return false;
   if (contentLength === null || !/^\d+$/.test(contentLength)) return false;
   const bytes = Number(contentLength);
   return !Number.isSafeInteger(bytes) || bytes > maxBytes;
@@ -72,7 +73,7 @@ export async function consumeResponseTextWithinBudget<T>(
         if (done) break;
         if (!value) continue;
         totalBytes += value.byteLength;
-        if (totalBytes > maxBytes) {
+        if (maxBytes > 0 && totalBytes > maxBytes) {
           await reader.cancel().catch(() => {});
           throw new ResponseBodyTooLargeError(maxBytes);
         }
