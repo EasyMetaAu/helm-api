@@ -320,6 +320,37 @@ describe("SqliteMemoryStore.listDecayCandidateAccounts (P5 buffer-flush gate)", 
     expect(due).toEqual(["acct-a"]);
   });
 
+  it("extracts each decay job scope once instead of once per observation", async () => {
+    const t0 = new Date("2026-06-05T00:00:00.000Z");
+    const { store, db, set } = clockStore(t0);
+    await store.ensureThread({ id: "t-a", ownerId: "acct-a" });
+    await store.enqueueJob({ type: "decay", scope: { accountId: "acct-a" } });
+    set(new Date(t0.getTime() + 1000));
+    for (let i = 0; i < 20; i += 1) {
+      await store.appendObservation({
+        threadId: "t-a",
+        sourceMessageRange: [`m${i}`, `m${i}`],
+        observationText: `observation ${i}`,
+        observedAt: new Date(t0.getTime() + 1000),
+      });
+    }
+
+    let jsonExtractCalls = 0;
+    db.$sqlite.function("json_extract", { deterministic: true }, (raw: unknown, path: unknown) => {
+      jsonExtractCalls += 1;
+      if (typeof raw !== "string" || path !== "$.accountId") return null;
+      const parsed = JSON.parse(raw) as { accountId?: unknown };
+      return typeof parsed.accountId === "string" ? parsed.accountId : null;
+    });
+
+    await store.listDecayCandidateAccounts({
+      triggerObservations: 50,
+      triggerIntervalS: 3600,
+      nowMs: t0.getTime() + 60_000,
+    });
+    expect(jsonExtractCalls).toBeLessThan(10);
+  });
+
   it("ignores accounts whose only observations are already archived", async () => {
     const t0 = new Date("2026-06-05T00:00:00.000Z");
     const { store } = clockStore(t0);
