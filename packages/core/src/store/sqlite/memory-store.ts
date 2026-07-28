@@ -47,6 +47,7 @@ import {
   type MemoryMessageArchiveRow,
   type MemoryStore,
 } from "../ports.js";
+import { listSqliteIdleFlushCandidates } from "./idle-flush-candidates.js";
 import {
   memoryFacts,
   memoryJobs,
@@ -2062,7 +2063,9 @@ export class SqliteMemoryStore implements MemoryStore {
   // false candidates. project_id/resource_id ride along so the observer can
   // promote the resulting observation to the project/resource reflection.
   // Candidates are interleaved by owner+project+resource, so one stale project
-  // backlog cannot monopolize the worker's small per-tick page.
+  // backlog cannot monopolize the worker's small per-tick page. File-backed
+  // databases run this global scan in a Worker so better-sqlite3 cannot block the
+  // gateway event loop; in-memory test stores keep the same SQL inline.
   async listIdleFlushCandidates(input: {
     idleBeforeMs: number;
     idleAfterMs?: number;
@@ -2070,109 +2073,6 @@ export class SqliteMemoryStore implements MemoryStore {
   }): Promise<
     Array<{ accountId: string; threadId: string; projectId?: string; resourceId?: string }>
   > {
-    const rows = this.db.$sqlite
-      .prepare(
-        `WITH candidates AS (
-           SELECT t.owner_id AS owner_id, t.id AS thread_id,
-                  t.project_id AS project_id, t.resource_id AS resource_id,
-                  (SELECT MAX(m.created_at) FROM memory_messages m WHERE m.thread_id = t.id)
-                    AS last_activity
-             FROM memory_threads t
-            WHERE t.owner_id IS NOT NULL
-              AND last_activity IS NOT NULL
-              AND last_activity <= ?
-              AND (? IS NULL OR last_activity >= ?)
-              AND EXISTS (
-                -- A message NOT covered by ANY observation's [first,last] range,
-                -- using the SAME order as listMessages/Observer. Interval
-                -- containment catches sparse gaps before later observations, and
-                -- the full tuple handles same-message-index / same-ms ties.
-                SELECT 1 FROM memory_messages m
-                 WHERE m.thread_id = t.id
-                   AND NOT EXISTS (
-                     SELECT 1 FROM memory_observations o
-                     JOIN memory_messages mf
-                       ON mf.id = json_extract(o.source_message_range, '$[0]')
-                     JOIN memory_messages ml
-                       ON ml.id = json_extract(o.source_message_range, '$[1]')
-                      WHERE o.thread_id = t.id
-                        AND (
-                          (
-                            (CASE WHEN mf.message_index IS NULL THEN 1 ELSE 0 END,
-                             COALESCE(mf.message_index, 9223372036854775807),
-                             mf.created_at,
-                             mf.id)
-                            <=
-                            (CASE WHEN m.message_index IS NULL THEN 1 ELSE 0 END,
-                             COALESCE(m.message_index, 9223372036854775807),
-                             m.created_at,
-                             m.id)
-                            AND
-                            (CASE WHEN m.message_index IS NULL THEN 1 ELSE 0 END,
-                             COALESCE(m.message_index, 9223372036854775807),
-                             m.created_at,
-                             m.id)
-                            <=
-                            (CASE WHEN ml.message_index IS NULL THEN 1 ELSE 0 END,
-                             COALESCE(ml.message_index, 9223372036854775807),
-                             ml.created_at,
-                             ml.id)
-                          )
-                          OR
-                          (
-                            (CASE WHEN ml.message_index IS NULL THEN 1 ELSE 0 END,
-                             COALESCE(ml.message_index, 9223372036854775807),
-                             ml.created_at,
-                             ml.id)
-                            <=
-                            (CASE WHEN m.message_index IS NULL THEN 1 ELSE 0 END,
-                             COALESCE(m.message_index, 9223372036854775807),
-                             m.created_at,
-                             m.id)
-                            AND
-                            (CASE WHEN m.message_index IS NULL THEN 1 ELSE 0 END,
-                             COALESCE(m.message_index, 9223372036854775807),
-                             m.created_at,
-                             m.id)
-                            <=
-                            (CASE WHEN mf.message_index IS NULL THEN 1 ELSE 0 END,
-                             COALESCE(mf.message_index, 9223372036854775807),
-                             mf.created_at,
-                             mf.id)
-                          )
-                        )
-                   )
-              )
-          ),
-          ranked AS (
-            SELECT *,
-                   ROW_NUMBER() OVER (
-                     PARTITION BY owner_id, COALESCE(project_id, ''), COALESCE(resource_id, '')
-                     ORDER BY last_activity ASC, thread_id ASC
-                   ) AS scope_rank
-              FROM candidates
-          )
-          SELECT owner_id, thread_id, project_id, resource_id
-            FROM ranked
-           ORDER BY scope_rank ASC, last_activity ASC, thread_id ASC
-           LIMIT ?`,
-      )
-      .all(
-        input.idleBeforeMs,
-        input.idleAfterMs ?? null,
-        input.idleAfterMs ?? null,
-        input.limit,
-      ) as Array<{
-      owner_id: string;
-      thread_id: string;
-      project_id: string | null;
-      resource_id: string | null;
-    }>;
-    return rows.map((row) => ({
-      accountId: row.owner_id,
-      threadId: row.thread_id,
-      ...(row.project_id !== null ? { projectId: row.project_id } : {}),
-      ...(row.resource_id !== null ? { resourceId: row.resource_id } : {}),
-    }));
+    return listSqliteIdleFlushCandidates(this.db.$sqlite, input);
   }
 }
