@@ -32,6 +32,17 @@ describe("Dockerfile contract", () => {
     expect(dockerfile).toContain("--frozen-lockfile");
   });
 
+  it("caches dependency downloads independently of package metadata", () => {
+    const fetch = dockerfile.indexOf("pnpm fetch --frozen-lockfile");
+    const manifests = dockerfile.indexOf("COPY package.json ./");
+    const install = dockerfile.indexOf("RUN pnpm install --offline --frozen-lockfile");
+
+    expect(fetch).toBeGreaterThanOrEqual(0);
+    expect(fetch).toBeLessThan(manifests);
+    expect(install).toBeGreaterThan(manifests);
+    expect(dockerfile).toMatch(/pnpm deploy .*--prefer-offline/);
+  });
+
   it("creates the config and data mount points owned by the runtime user", () => {
     expect(dockerfile).toMatch(/mkdir -p \/app\/config \/app\/data/);
     expect(dockerfile).toMatch(/chown -R helm:helm \/app/);
