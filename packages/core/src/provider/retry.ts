@@ -79,7 +79,9 @@ export function isFetchTransportError(err: unknown): boolean {
   if (isTransientConnectionError(err)) return true;
   if (typeof err !== "object" || err === null) return false;
   const e = err as { name?: unknown; message?: unknown };
-  return e.name === "TypeError" && e.message === "fetch failed";
+  return (
+    e.name === "TypeError" && typeof e.message === "string" && e.message.startsWith("fetch failed")
+  );
 }
 
 // ── Upstream overload (529 / 503) ────────────────────────────────────────────

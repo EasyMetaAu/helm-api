@@ -59,6 +59,9 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
           upstream_status: 429,
           message: 'upstream returned 429',
           provider_raw: { error: { message: 'rate limit exceeded', type: 'rate_limit_error' } },
+          provider_headers: { 'x-request-id': 'req_upstream_1' },
+          cause: { code: 'ECONNRESET', message: 'socket closed' },
+          stack: 'UpstreamError: upstream returned 429',
         },
       },
       {
@@ -303,7 +306,7 @@ describe('DecisionChain', () => {
     expect(within(rows[2]).getByTitle('capability_unsatisfiable')).toBeInTheDocument();
   });
 
-  it('exposes a failed attempt error_detail (upstream status + message + raw body) as an expandable panel', () => {
+  it('exposes complete provider diagnostics as an expandable panel', () => {
     render(DecisionChain, { detail: detail() });
     const attempts = screen.getByTestId('chain-attempts');
     const rows = within(attempts).getAllByTestId('attempt-row');
@@ -312,8 +315,11 @@ describe('DecisionChain', () => {
     expect(detailEl).toBeInTheDocument();
     expect(detailEl).toHaveTextContent('429');
     expect(detailEl).toHaveTextContent('upstream returned 429');
-    // The redacted raw upstream body is shown (already key-scrubbed by backend).
+    // The credential-safe raw upstream body is shown.
     expect(detailEl).toHaveTextContent('rate limit exceeded');
+    expect(detailEl).toHaveTextContent('req_upstream_1');
+    expect(detailEl).toHaveTextContent('ECONNRESET');
+    expect(detailEl).toHaveTextContent('UpstreamError');
     // A successful attempt has no detail panel.
     expect(within(rows[1]).queryByTestId('attempt-error-detail')).toBeNull();
   });

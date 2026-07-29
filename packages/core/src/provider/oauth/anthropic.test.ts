@@ -33,6 +33,19 @@ function captureAuth(): {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("refreshAnthropicToken — invalid JSON token body", () => {
+  it("stores the provider's real expiry without a provider-local skew", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ access_token: "a", refresh_token: "r", expires_in: 3600 })),
+    );
+
+    const creds = await refreshAnthropicToken("rtok");
+    expect(creds.expires).toBe(4_600_000);
+    vi.useRealTimers();
+  });
+
   it("throws a JSON-parse error when the token endpoint returns non-JSON", async () => {
     vi.stubGlobal(
       "fetch",

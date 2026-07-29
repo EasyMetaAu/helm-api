@@ -206,75 +206,118 @@ describe("createWriteQueue", () => {
     expect(sink.manyCalls).toBe(0); // no batch method available
   });
 
-  it("bounds depth: drops + logs under overflow, never throws", async () => {
+  it("backpressures telemetry at maxDepth and preserves every row", async () => {
     const sink = fakeSink();
     const logs: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    (sink.insertMany as ReturnType<typeof vi.fn>).mockImplementation(
+      async (inputs: InsertTelemetryInput[]) => {
+        await gate;
+        sink.inserts.push(...inputs);
+      },
+    );
     const q = createWriteQueue({
       telemetry: sink,
       log: (m) => logs.push(m),
       flushIntervalMs: 10_000,
       maxDepth: 2,
     });
-    expect(() => {
-      q.enqueueTelemetry(tele("a"));
-      q.enqueueTelemetry(tele("b"));
-      q.enqueueTelemetry(tele("c")); // over depth → drop, log
-      q.enqueueTelemetry(tele("d"));
-    }).not.toThrow();
+    await q.enqueueTelemetry(tele("a"));
+    await q.enqueueTelemetry(tele("b"));
+    let admitted = false;
+    const third = q.enqueueTelemetry(tele("c")).then(() => {
+      admitted = true;
+    });
+    await Promise.resolve();
+    expect(admitted).toBe(false);
+    expect(q.depth).toBe(2);
+
+    release();
+    await third;
     await q.flush();
-    expect(sink.inserts.length).toBeLessThanOrEqual(2);
-    expect(logs.some((l) => l.includes("overflow"))).toBe(true);
+    expect(sink.inserts.map((i) => (i.decision as { request_id: string }).request_id)).toEqual([
+      "a",
+      "b",
+      "c",
+    ]);
+    expect(logs.some((line) => line.includes("overflow"))).toBe(false);
   });
 
-  it("drops new buffered writes when pending tasks already fill maxDepth", async () => {
+  it("serializes concurrent admissions so waking producers cannot stampede past maxDepth", async () => {
     const sink = fakeSink();
-    const logs: string[] = [];
     let release!: () => void;
-    const blocker = new Promise<void>((resolve) => {
+    const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
+    (sink.insertMany as ReturnType<typeof vi.fn>).mockImplementation(
+      async (inputs: InsertTelemetryInput[]) => {
+        await gate;
+        sink.inserts.push(...inputs);
+      },
+    );
     const q = createWriteQueue({
       telemetry: sink,
-      log: (m) => logs.push(m),
+      log: () => {},
       flushIntervalMs: 10_000,
       maxDepth: 1,
     });
 
-    q.enqueueTask(async () => {
-      await blocker;
-    });
-    q.enqueueTelemetry(tele("dropped-telemetry"));
-    q.enqueuePayload(payload("dropped-payload"));
+    await q.enqueueTelemetry(tele("a"));
+    const waiting = ["b", "c", "d"].map((id) => q.enqueueTelemetry(tele(id)));
+    await Promise.resolve();
+    expect(q.depth).toBe(1);
 
     release();
+    await Promise.all(waiting);
+    expect(q.depth).toBe(1);
     await q.flush();
-
-    expect(sink.inserts).toHaveLength(0);
-    expect(sink.payloadCalls).toHaveLength(0);
-    expect(logs.filter((l) => l.includes("overflow"))).toHaveLength(2);
+    expect(sink.inserts.map((i) => (i.decision as { request_id: string }).request_id)).toEqual([
+      "a",
+      "b",
+      "c",
+      "d",
+    ]);
   });
 
-  it("sheds on the BYTE budget even when row depth is nowhere near maxDepth", async () => {
-    // Production payloads are 6-7MB each. A handful of them blows the heap long
-    // before the 10k-row maxDepth. The byte budget must trip on size, not count.
+  it("backpressures payloads on the byte budget and preserves every body", async () => {
     const sink = fakeSink();
     const logs: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    (sink.insertPayloads as ReturnType<typeof vi.fn>).mockImplementation(
+      async (inputs: InsertPayloadInput[]) => {
+        await gate;
+        sink.payloadCalls.push(...inputs);
+      },
+    );
     const q = createWriteQueue({
       telemetry: sink,
       log: (m) => logs.push(m),
       flushIntervalMs: 10_000,
-      maxDepth: 10_000, // far out of reach
-      maxBytes: 1_500, // one retained 600-char payload fits; two do not
-      flushBytes: 10_000_000, // park eager byte-flush so we observe shedding, not flushing
+      maxDepth: 10_000,
+      maxBytes: 1_500,
+      flushBytes: 10_000_000,
     });
 
-    q.enqueuePayload(bigPayload("p1", 600));
-    q.enqueuePayload(bigPayload("p2", 600)); // total would be 1200B > 1000 → shed oldest
+    await q.enqueuePayload(bigPayload("p1", 600));
+    let admitted = false;
+    const second = q.enqueuePayload(bigPayload("p2", 600)).then(() => {
+      admitted = true;
+    });
+    await Promise.resolve();
+    expect(admitted).toBe(false);
+    expect(q.depth).toBe(1);
 
+    release();
+    await second;
     await q.flush();
-    // Only the newest fits under budget; the older one was shed (not a row-count drop).
-    expect(sink.payloadCalls.map((p) => p.requestId)).toEqual(["p2"]);
-    expect(logs.some((l) => l.includes("overflow"))).toBe(true);
+    expect(sink.payloadCalls.map((p) => p.requestId)).toEqual(["p1", "p2"]);
+    expect(logs.some((line) => line.includes("overflow"))).toBe(false);
   });
 
   it("charges retained strings by worst-case V8 bytes instead of UTF-16 code units", async () => {
@@ -288,7 +331,7 @@ describe("createWriteQueue", () => {
       flushBytes: 10_000,
     });
 
-    q.enqueuePayload({
+    await q.enqueuePayload({
       requestId: "unicode",
       requestJson: "😀😀😀",
       responseJson: null,
@@ -297,51 +340,8 @@ describe("createWriteQueue", () => {
     });
     await q.flush();
 
-    expect(sink.payloadCalls).toHaveLength(0);
-    expect(logs).toContain("writequeue.overflow");
-  });
-
-  it("on byte overflow, sheds PAYLOAD (debug) first and keeps TELEMETRY (audit)", async () => {
-    const sink = fakeSink();
-    const q = createWriteQueue({
-      telemetry: sink,
-      log: () => {},
-      flushIntervalMs: 10_000,
-      maxDepth: 10_000,
-      maxBytes: 1_500,
-      flushBytes: 10_000_000,
-    });
-
-    q.enqueueTelemetry(tele("audit")); // cheap, must survive
-    q.enqueuePayload(bigPayload("debug-1", 600));
-    q.enqueuePayload(bigPayload("debug-2", 600)); // overflow → drop a payload, not the telemetry
-
-    await q.flush();
-    // Telemetry (audit) is preserved; a payload (debug料) was the one shed.
-    expect(sink.inserts.map((i) => (i.decision as { request_id: string }).request_id)).toEqual([
-      "audit",
-    ]);
-    expect(sink.payloadCalls.map((p) => p.requestId)).toEqual(["debug-2"]);
-  });
-
-  it("keeps the byte count accurate across push/shed: a stream of big payloads stays bounded", async () => {
-    // If the byte accounting under-counted on shed, the buffer would creep up and
-    // eventually exceed the budget without ever flushing — the OOM we're fixing.
-    const sink = fakeSink();
-    const q = createWriteQueue({
-      telemetry: sink,
-      log: () => {},
-      flushIntervalMs: 10_000,
-      maxDepth: 10_000,
-      maxBytes: 1_500,
-      flushBytes: 10_000_000, // never byte-flush; force the budget to hold via shedding alone
-    });
-
-    // 50 payloads of ~600B each: only ~one fits at a time under a 1KB budget.
-    for (let i = 0; i < 50; i++) q.enqueuePayload(bigPayload(`p${i}`, 600));
-
-    // depth never ran away (a single 600B row + headroom; certainly not 50).
-    expect(q.depth).toBeLessThanOrEqual(2);
+    expect(sink.payloadCalls.map((input) => input.requestId)).toEqual(["unicode"]);
+    expect(logs.some((line) => line.includes("overflow"))).toBe(false);
   });
 
   it("byte threshold (flushBytes) flushes early before a few rows balloon into a huge txn", async () => {
@@ -357,55 +357,11 @@ describe("createWriteQueue", () => {
       flushBytes: 1_000, // ~1KB → flush after the first big payload
     });
 
-    q.enqueuePayload(bigPayload("p1", 1_500)); // exceeds flushBytes alone → eager flush
+    await q.enqueuePayload(bigPayload("p1", 1_500)); // exceeds flushBytes alone → eager flush
     // Drain the in-flight threshold flush.
     await q.flush();
     expect(sink.payloadsManyCalls).toBeGreaterThanOrEqual(1);
     expect(sink.payloadCalls.map((p) => p.requestId)).toContain("p1");
-  });
-
-  it("counts IN-FLIGHT batches toward the byte budget so a stalled writer can't pile up unbounded memory", async () => {
-    // The OOM scenario this whole change exists to fix: the DB writer is blocked (4am
-    // VACUUM holds the write lock). doFlush hands batches to the write chain, but they
-    // still occupy the heap until the commit lands. Counting only the live buffer would
-    // let repeated flushBytes triggers queue unbounded 6-7MB batches behind the first
-    // blocked write. In-flight bytes must count toward maxBytes so admit() rejects once
-    // the cap is reached — otherwise the byte budget doesn't actually bound the heap.
-    let release!: () => void;
-    const gate = new Promise<void>((r) => {
-      release = r;
-    });
-    const received: string[] = [];
-    const stalled: WriteQueueTelemetry = {
-      insert: async () => ({ id: "x" }),
-      insertMany: async () => {},
-      insertPayload: async (i) => {
-        received.push(i.requestId);
-      },
-      insertPayloads: async (xs) => {
-        received.push(...xs.map((x) => x.requestId));
-        await gate; // writer is stalled until released
-      },
-    };
-    const logs: string[] = [];
-    const q = createWriteQueue({
-      telemetry: stalled,
-      log: (m) => logs.push(m),
-      flushIntervalMs: 10_000,
-      maxDepth: 10_000, // row backstop far out of reach — only bytes can gate
-      maxBytes: 2_000,
-      flushBytes: 500, // eager-flush each big payload into the (stalled) chain
-    });
-
-    // 100 × 600B payloads at a stalled writer. With in-flight accounting the budget
-    // trips and most are rejected; without it every one would flush and the heap balloon.
-    for (let i = 0; i < 100; i++) q.enqueuePayload(bigPayload(`p${i}`, 600));
-    expect(logs.filter((l) => l.includes("overflow")).length).toBeGreaterThan(0);
-
-    release();
-    await q.flush();
-    // Only a bounded prefix (~maxBytes worth) ever reached the writer — not all 100.
-    expect(received.length).toBeLessThanOrEqual(5);
   });
 
   it("runs admitted session writes fail-open on the deferred task chain", async () => {
@@ -417,7 +373,7 @@ describe("createWriteQueue", () => {
       flushIntervalMs: 10_000,
       maxBytes: 1_500,
     });
-    q.enqueueSession(async () => {
+    await q.enqueueSession(async () => {
       ran.push("session");
     }, 100);
     expect(q.depth).toBe(1);
@@ -426,7 +382,7 @@ describe("createWriteQueue", () => {
     expect(q.depth).toBe(0);
   });
 
-  it("charges retained task closures until they settle, then releases their dynamic budget", async () => {
+  it("backpressures retained tasks until capacity is free without dropping them", async () => {
     const sink = fakeSink();
     const logs: string[] = [];
     let release!: () => void;
@@ -443,7 +399,7 @@ describe("createWriteQueue", () => {
     });
     const ran: string[] = [];
 
-    q.enqueueTask(
+    await q.enqueueTask(
       async () => {
         await blocker;
         ran.push("first");
@@ -451,27 +407,29 @@ describe("createWriteQueue", () => {
       { retainedBytes: 100 },
     );
     await Promise.resolve(); // let the first task become active
-    q.enqueueTask(
-      async () => {
-        ran.push("rejected");
-      },
-      { retainedBytes: 100 },
-    );
-    expect(logs).toContain("writequeue.task_overflow");
+    let admitted = false;
+    const second = Promise.resolve(
+      q.enqueueTask(
+        async () => {
+          ran.push("second");
+        },
+        { retainedBytes: 100 },
+      ),
+    ).then(() => {
+      admitted = true;
+    });
+    await Promise.resolve();
+    expect(admitted).toBe(false);
+    expect(q.depth).toBe(1);
 
     release();
+    await second;
     await q.flush();
-    q.enqueueTask(
-      async () => {
-        ran.push("after-release");
-      },
-      { retainedBytes: 100 },
-    );
-    await q.flush();
-    expect(ran).toEqual(["first", "after-release"]);
+    expect(ran).toEqual(["first", "second"]);
+    expect(logs.some((line) => line.includes("overflow"))).toBe(false);
   });
 
-  it("sheds payload capture before admitting a retained side-effect task", async () => {
+  it("drains payload capture before admitting a retained side-effect task", async () => {
     const sink = fakeSink();
     const q = createWriteQueue({
       telemetry: sink,
@@ -481,8 +439,8 @@ describe("createWriteQueue", () => {
       flushBytes: 10_000,
     });
     const ran: string[] = [];
-    q.enqueuePayload(bigPayload("payload", 700));
-    q.enqueueTask(
+    await q.enqueuePayload(bigPayload("payload", 700));
+    await q.enqueueTask(
       async () => {
         ran.push("observe");
       },
@@ -490,10 +448,10 @@ describe("createWriteQueue", () => {
     );
     await q.flush();
     expect(ran).toEqual(["observe"]);
-    expect(sink.payloadCalls).toHaveLength(0);
+    expect(sink.payloadCalls.map((input) => input.requestId)).toEqual(["payload"]);
   });
 
-  it("rejects an oversized session without dropping audit telemetry", async () => {
+  it("admits one oversized session after draining prior audit telemetry", async () => {
     const sink = fakeSink();
     const logs: string[] = [];
     const ran: string[] = [];
@@ -503,31 +461,14 @@ describe("createWriteQueue", () => {
       flushIntervalMs: 10_000,
       maxBytes: 500,
     });
-    q.enqueueTelemetry(tele("audit"));
-    q.enqueueSession(async () => {
+    await q.enqueueTelemetry(tele("audit"));
+    await q.enqueueSession(async () => {
       ran.push("session");
     }, 1_000);
     await q.flush();
-    expect(ran).toEqual([]);
+    expect(ran).toEqual(["session"]);
     expect(sink.inserts).toHaveLength(1);
-    expect(logs).toContain("writequeue.session_overflow");
-  });
-
-  it("sheds full payload before admitting a semantic session transcript", async () => {
-    const sink = fakeSink();
-    const q = createWriteQueue({
-      telemetry: sink,
-      log: () => {},
-      flushIntervalMs: 10_000,
-      maxBytes: 1_500,
-      flushBytes: 10_000,
-    });
-    q.enqueueTelemetry(tele("audit"));
-    q.enqueuePayload(bigPayload("payload", 700));
-    q.enqueueSession(async () => {}, 400);
-    await q.flush();
-    expect(sink.inserts).toHaveLength(1);
-    expect(sink.payloadCalls).toHaveLength(0);
+    expect(logs.some((line) => line.includes("overflow"))).toBe(false);
   });
 
   it("stop() flushes pending writes and stops the timer", async () => {
@@ -559,6 +500,103 @@ describe("createWriteQueue", () => {
       sink.inserts.map((input) => (input.decision as { request_id: string }).request_id),
     ).toEqual(["before", "after"]);
     expect(logs).toContain("writequeue.paused");
+  });
+
+  it("persists admissions that started before the maintenance pause barrier", async () => {
+    const sink = fakeSink();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    (sink.insertMany as ReturnType<typeof vi.fn>).mockImplementation(
+      async (inputs: InsertTelemetryInput[]) => {
+        await gate;
+        sink.inserts.push(...inputs);
+      },
+    );
+    const q = createWriteQueue({
+      telemetry: sink,
+      log: () => {},
+      flushIntervalMs: 10_000,
+      maxDepth: 1,
+    });
+    await q.enqueueTelemetry(tele("before"));
+    const waiting = [q.enqueueTelemetry(tele("queued-1")), q.enqueueTelemetry(tele("queued-2"))];
+    await Promise.resolve();
+
+    const paused = q.pauseAndFlush();
+    release();
+    await Promise.all([...waiting, paused]);
+    q.resume();
+    await q.enqueueTelemetry(tele("after"));
+    await q.flush();
+
+    expect(
+      sink.inserts.map((input) => (input.decision as { request_id: string }).request_id),
+    ).toEqual(["before", "queued-1", "queued-2", "after"]);
+  });
+
+  it("persists admissions that started before stop", async () => {
+    const sink = fakeSink();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    (sink.insertMany as ReturnType<typeof vi.fn>).mockImplementation(
+      async (inputs: InsertTelemetryInput[]) => {
+        await gate;
+        sink.inserts.push(...inputs);
+      },
+    );
+    const q = createWriteQueue({
+      telemetry: sink,
+      log: () => {},
+      flushIntervalMs: 10_000,
+      maxDepth: 1,
+    });
+    await q.enqueueTelemetry(tele("before"));
+    const waiting = [q.enqueueTelemetry(tele("queued-1")), q.enqueueTelemetry(tele("queued-2"))];
+    await Promise.resolve();
+
+    const stopped = q.stop();
+    release();
+    await Promise.all([...waiting, stopped]);
+
+    expect(
+      sink.inserts.map((input) => (input.decision as { request_id: string }).request_id),
+    ).toEqual(["before", "queued-1", "queued-2"]);
+    expect(q.depth).toBe(0);
+  });
+
+  it("flush waits for queued admissions and persists them before returning", async () => {
+    const sink = fakeSink();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    (sink.insertMany as ReturnType<typeof vi.fn>).mockImplementation(
+      async (inputs: InsertTelemetryInput[]) => {
+        await gate;
+        sink.inserts.push(...inputs);
+      },
+    );
+    const q = createWriteQueue({
+      telemetry: sink,
+      log: () => {},
+      flushIntervalMs: 10_000,
+      maxDepth: 1,
+    });
+    await q.enqueueTelemetry(tele("a"));
+    const waiting = [q.enqueueTelemetry(tele("b")), q.enqueueTelemetry(tele("c"))];
+    const flushed = q.flush();
+    release();
+
+    await Promise.all([...waiting, flushed]);
+
+    expect(
+      sink.inserts.map((input) => (input.decision as { request_id: string }).request_id),
+    ).toEqual(["a", "b", "c"]);
+    expect(q.depth).toBe(0);
   });
 
   it("fires onTaskDrain ONLY for tasks flagged wakeOnSettle (inbound observe must not wake)", async () => {

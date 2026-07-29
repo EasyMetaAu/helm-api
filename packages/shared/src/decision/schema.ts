@@ -73,16 +73,19 @@ export const LaneDecisionSchema = z.object({
 // for attempts that actually failed at the upstream — it carries WHY a single
 // candidate failed even when a LATER candidate served the request (so the
 // failure is no longer visible in the terminal `final` error). Mirrors
-// HelmError's redacted shape; principle 7: `message`/`provider_raw` are already
-// key-scrubbed by the producer and pass through the telemetry `redact` gate.
+// HelmError's diagnostic shape; `message`/`provider_raw` retain upstream detail after
+// the producer removes actual credentials and the telemetry gate protects payloads.
 //   • upstream_status — the REAL upstream HTTP status (e.g. 429/500); null for a
 //     timeout / network error with no response.
-//   • message         — short, redacted, human-readable (e.g. "upstream returned 429").
-//   • provider_raw    — the upstream error body (key-scrubbed), or null when absent.
+//   • message         — bounded, human-readable (e.g. "upstream returned 429").
+//   • provider_raw    — the bounded upstream error body, or null when absent.
 export const AttemptErrorDetailSchema = z.object({
   upstream_status: z.number().int().nullable(),
   message: z.string(),
   provider_raw: z.record(z.string(), z.unknown()).nullable(),
+  provider_headers: z.record(z.string(), z.string()).nullable().optional(),
+  cause: z.unknown().nullable().optional(),
+  stack: z.string().nullable().optional(),
 });
 
 export const ProviderAttemptSchema = z.object({

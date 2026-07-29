@@ -4,6 +4,11 @@
 // injected config (env-sourced) and are never logged or echoed. See docs/02.
 
 import type { NativePassthroughInput } from "@helm/shared";
+import {
+  consumeResponseTextWithinBudget,
+  ResponseBodyTooLargeError,
+} from "../runtime/bounded-response.js";
+import { ResponseWorkCapacityError } from "../runtime/response-work-admission.js";
 import type { ProxyConfig } from "./proxy.js";
 // Provider credential: EXACTLY ONE of a static `apiKey` or a dynamic
 // `getAuthHeader` (issue #38 OAuth). The dynamic path also accepts:
@@ -14,7 +19,7 @@ import type { ProxyConfig } from "./proxy.js";
 //   - `currentSecrets`: live access + refresh tokens, used by `scrub()` to strip
 //     any echoed credential from an upstream error body (principle 7).
 // Credentials are runtime-only: from env, never persisted/logged.
-import { withConnectionRetry, withOverloadRetry } from "./retry.js";
+import { isFetchTransportError, withConnectionRetry, withOverloadRetry } from "./retry.js";
 import { readChunkWithIdle, StreamStalledError } from "./stream-idle.js";
 
 export interface ProviderConfig {
@@ -223,18 +228,130 @@ export class UpstreamError extends Error {
   // reads this for the `:free` 429-skip rule (docs/04, principle 5).
   readonly upstreamStatus: number | null;
   readonly providerRaw: unknown | null;
+  readonly upstreamHeaders: Record<string, string> | null;
   constructor(
     errorClass: "upstream_error" | "timeout",
     message: string,
     providerRaw: unknown | null = null,
     upstreamStatus: number | null = null,
+    upstreamHeaders: Record<string, string> | null = null,
+    cause?: unknown,
   ) {
     super(message);
+    if (cause !== undefined) Object.defineProperty(this, "cause", { value: cause });
     this.name = "UpstreamError";
     this.errorClass = errorClass;
     this.httpStatus = errorClass === "timeout" ? 504 : 502;
     this.upstreamStatus = upstreamStatus;
     this.providerRaw = providerRaw;
+    this.upstreamHeaders = upstreamHeaders;
+  }
+}
+
+function transportErrorNode(
+  error: unknown,
+  depth = 0,
+  seen = new WeakSet<object>(),
+): Record<string, unknown> {
+  if (typeof error !== "object" || error === null) return { message: String(error) };
+  if (seen.has(error)) return { message: "[circular cause]" };
+  seen.add(error);
+  const source = error as {
+    name?: unknown;
+    message?: unknown;
+    code?: unknown;
+    stack?: unknown;
+    cause?: unknown;
+  };
+  const detail: Record<string, unknown> = {};
+  if (typeof source.name === "string" && source.name.length > 0) detail.name = source.name;
+  if (typeof source.message === "string" && source.message.length > 0) {
+    detail.message = source.message.slice(0, 16_384);
+  }
+  if (typeof source.code === "string" || typeof source.code === "number") detail.code = source.code;
+  if (typeof source.stack === "string" && source.stack.length > 0) {
+    detail.stack = source.stack.slice(0, 16_384);
+  }
+  if (source.cause !== undefined && depth < 4) {
+    detail.cause = transportErrorNode(source.cause, depth + 1, seen);
+  }
+  return detail;
+}
+
+export function upstreamTransportError(
+  error: unknown,
+  scrub: (raw: unknown) => unknown,
+): UpstreamError {
+  const detail = scrub(transportErrorNode(error));
+  const rawMessage = error instanceof Error ? error.message : "upstream fetch failed";
+  const message = scrub(rawMessage);
+  return new UpstreamError(
+    "upstream_error",
+    typeof message === "string" ? message : "upstream fetch failed",
+    { error: detail },
+    null,
+    null,
+    detail,
+  );
+}
+
+export const UPSTREAM_ERROR_BODY_MAX_BYTES = 64 * 1024;
+const UPSTREAM_ERROR_HEADER_MAX_BYTES = 16 * 1024;
+const UPSTREAM_ERROR_HEADER_VALUE_MAX_BYTES = 4 * 1024;
+const CREDENTIAL_HEADERS = new Set([
+  "authorization",
+  "proxy-authorization",
+  "x-proxy-authorization",
+  "cookie",
+  "set-cookie",
+  "api-key",
+  "x-api-key",
+  "x-goog-api-key",
+  "x-google-api-key",
+  "x-auth-token",
+  "x-access-token",
+]);
+
+export function safeUpstreamHeaders(headers: Headers): Record<string, string> {
+  const safe: Record<string, string> = {};
+  let bytes = 0;
+  for (const [name, rawValue] of headers) {
+    if (CREDENTIAL_HEADERS.has(name.toLowerCase())) continue;
+    const value = rawValue.slice(0, UPSTREAM_ERROR_HEADER_VALUE_MAX_BYTES);
+    const nextBytes = Buffer.byteLength(name) + Buffer.byteLength(value);
+    if (bytes + nextBytes > UPSTREAM_ERROR_HEADER_MAX_BYTES) break;
+    safe[name] = value;
+    bytes += nextBytes;
+  }
+  return safe;
+}
+
+export async function readUpstreamErrorBody(
+  response: Response,
+  scrub: (raw: unknown) => unknown,
+): Promise<unknown> {
+  try {
+    return await consumeResponseTextWithinBudget(
+      response,
+      UPSTREAM_ERROR_BODY_MAX_BYTES,
+      (text) => {
+        try {
+          return scrub(JSON.parse(text));
+        } catch {
+          return scrub(text);
+        }
+      },
+    );
+  } catch (error) {
+    if (error instanceof ResponseBodyTooLargeError) {
+      return { error: { code: "error_body_too_large", limit_bytes: error.limitBytes } };
+    }
+    if (error instanceof ResponseWorkCapacityError) {
+      return {
+        error: { code: "error_body_capacity_exhausted", limit_bytes: error.capacityBytes },
+      };
+    }
+    return scrub({ error: { code: "error_body_read_failed", message: String(error) } });
   }
 }
 
@@ -434,32 +551,37 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
     // withOverloadRetry wraps it: an overloaded 529/503 is a normal Response (never a
     // throw), so it re-issues the whole attempt after a pause instead of burning a
     // candidate on transient upstream capacity pressure.
-    return withOverloadRetry(
-      () =>
-        withConnectionRetry(
-          async () => {
-            const t = withTimeout(timeoutMs, external);
-            try {
-              return await doFetch(await urlFn(), {
-                method: "POST",
-                headers: await headers(),
-                body: bodyText,
-                signal: t.signal,
-              });
-            } catch (err) {
-              if (t.isTimeout() && !t.isExternalAbort()) {
-                throw new UpstreamError("timeout", "upstream request timed out");
+    try {
+      return await withOverloadRetry(
+        () =>
+          withConnectionRetry(
+            async () => {
+              const t = withTimeout(timeoutMs, external);
+              try {
+                return await doFetch(await urlFn(), {
+                  method: "POST",
+                  headers: await headers(),
+                  body: bodyText,
+                  signal: t.signal,
+                });
+              } catch (err) {
+                if (t.isTimeout() && !t.isExternalAbort()) {
+                  throw new UpstreamError("timeout", "upstream request timed out");
+                }
+                // Client abort is NOT a provider fault — rethrow as-is for the caller.
+                throw err;
+              } finally {
+                t.cleanup();
               }
-              // Client abort is NOT a provider fault — rethrow as-is for the caller.
-              throw err;
-            } finally {
-              t.cleanup();
-            }
-          },
-          { retries: cfg.connectRetries, backoffMs: cfg.connectRetryBackoffMs, signal: external },
-        ),
-      { signal: external },
-    );
+            },
+            { retries: cfg.connectRetries, backoffMs: cfg.connectRetryBackoffMs, signal: external },
+          ),
+        { signal: external },
+      );
+    } catch (error) {
+      if (external?.aborted || !isFetchTransportError(error)) throw error;
+      throw upstreamTransportError(error, scrub);
+    }
   }
 
   // Issue the request, applying the OAuth 401 single-retry (D2): on a 401 with an
@@ -489,32 +611,38 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
     headers: () => Promise<Record<string, string>>;
     signal?: AbortSignal;
   }): Promise<Response> {
-    const attempt = async (): Promise<Response> =>
-      withConnectionRetry(
-        async () => {
-          const t = withTimeout(timeoutMs, options.signal);
-          try {
-            return await doFetch(await options.url(), {
-              method: "POST",
-              headers: await options.headers(),
-              body: options.body(),
-              signal: t.signal,
-            });
-          } catch (error) {
-            if (t.isTimeout() && !t.isExternalAbort()) {
-              throw new UpstreamError("timeout", "upstream request timed out");
+    const attempt = async (): Promise<Response> => {
+      try {
+        return await withConnectionRetry(
+          async () => {
+            const t = withTimeout(timeoutMs, options.signal);
+            try {
+              return await doFetch(await options.url(), {
+                method: "POST",
+                headers: await options.headers(),
+                body: options.body(),
+                signal: t.signal,
+              });
+            } catch (error) {
+              if (t.isTimeout() && !t.isExternalAbort()) {
+                throw new UpstreamError("timeout", "upstream request timed out");
+              }
+              throw error;
+            } finally {
+              t.cleanup();
             }
-            throw error;
-          } finally {
-            t.cleanup();
-          }
-        },
-        {
-          retries: cfg.connectRetries,
-          backoffMs: cfg.connectRetryBackoffMs,
-          signal: options.signal,
-        },
-      );
+          },
+          {
+            retries: cfg.connectRetries,
+            backoffMs: cfg.connectRetryBackoffMs,
+            signal: options.signal,
+          },
+        );
+      } catch (error) {
+        if (options.signal?.aborted || !isFetchTransportError(error)) throw error;
+        throw upstreamTransportError(error, scrub);
+      }
+    };
     const response = await attempt();
     if (response.status !== 401 || cfg.onUnauthorized === undefined) return response;
     await response.body?.cancel().catch(() => {});
@@ -523,23 +651,18 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
   }
 
   async function errorFromResponse(res: Response): Promise<UpstreamError> {
-    const providerRaw = await res
-      .json()
-      .catch(() => null)
-      .then(scrub);
+    const providerRaw = await readUpstreamErrorBody(res, scrub);
     return new UpstreamError(
       "upstream_error",
       `upstream returned ${res.status}`,
       providerRaw,
       res.status,
+      scrub(safeUpstreamHeaders(res.headers)) as Record<string, string>,
     );
   }
 
   async function realtimeErrorFromResponse(res: Response): Promise<UpstreamError> {
-    const providerRaw = await res
-      .json()
-      .catch(() => null)
-      .then(scrub);
+    const providerRaw = await readUpstreamErrorBody(res, scrub);
     const outer =
       providerRaw !== null && typeof providerRaw === "object" && !Array.isArray(providerRaw)
         ? (providerRaw as Record<string, unknown>)
@@ -552,7 +675,13 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
       typeof nested?.message === "string" && nested.message.length > 0
         ? nested.message
         : `upstream returned ${res.status}`;
-    return new UpstreamError("upstream_error", message, providerRaw, res.status);
+    return new UpstreamError(
+      "upstream_error",
+      message,
+      providerRaw,
+      res.status,
+      scrub(safeUpstreamHeaders(res.headers)) as Record<string, string>,
+    );
   }
 
   function realtimeCallId(location: string): string | null {

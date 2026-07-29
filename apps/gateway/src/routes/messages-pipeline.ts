@@ -786,7 +786,7 @@ export function createMessagesPipeline(
       // amplification; inline mode remains unchanged.
       const runObserve = async (task: () => Promise<unknown>, wake = true): Promise<void> => {
         if (writes !== undefined) {
-          writes.enqueueTask(
+          await writes.enqueueTask(
             async () => {
               await task();
             },

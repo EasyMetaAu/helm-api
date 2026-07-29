@@ -1833,6 +1833,12 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
   const BAD = new UpstreamError("upstream_error", "bad request", null, 400);
   const REFRESH_401 = new TokenRefreshError("oauth refresh failed (openai-codex, status 401)", 401);
   const REFRESH_429 = new TokenRefreshError("oauth refresh rate-limited (status 429)", 429);
+  const SHORT_LEASE = new TokenRefreshError(
+    "oauth access token is shorter than required request lease",
+    null,
+    false,
+    true,
+  );
   const QUEUE_TIMEOUT = Object.assign(new Error("user message queue wait timed out"), {
     queueTimeout: true,
   });
@@ -2091,6 +2097,52 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "good" });
     expect(served).toEqual(["good", "good"]);
     expect(selected).toEqual(["bad", "good", "good"]); // bad stays cooled on the 2nd request
+  });
+
+  it("retries a sibling for a short token lease without permanently parking the account", async () => {
+    const served: string[] = [];
+    const selected: string[] = [];
+    const credentialFailures: string[] = [];
+    let now = 1_000;
+    const pool = createOAuthPoolClient({
+      members: [
+        faultMember("short", 10, served, SHORT_LEASE),
+        faultMember("good", 50, served, null),
+      ],
+      now: () => now,
+      onSelect: (account) => selected.push(account),
+      onAccountCredentialFailure: (account) => credentialFailures.push(account),
+    });
+
+    await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "good" });
+    await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "good" });
+    now += 60_000;
+    await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "good" });
+    expect(selected).toEqual(["short", "good", "good", "short", "good"]);
+    expect(credentialFailures).toEqual([]);
+  });
+
+  it("cools a refresh-failed account for streaming requests too", async () => {
+    const served: string[] = [];
+    const selected: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        faultMember("refreshing", 10, served, SHORT_LEASE),
+        faultMember("good", 50, served, null),
+      ],
+      now: () => 1_000,
+      onSelect: (account) => selected.push(account),
+    });
+
+    for await (const _chunk of pool.chatCompletionStream(REQ)) {
+      // drain
+    }
+    for await (const _chunk of pool.chatCompletionStream(REQ)) {
+      // drain
+    }
+
+    expect(selected).toEqual(["refreshing", "good", "good"]);
+    expect(served).toEqual(["good", "good"]);
   });
 
   it("a rate-limit park never SHORTENS a precise quota cooldown already set (extend-only)", async () => {

@@ -315,6 +315,25 @@ describe("credential validation + identity extraction", () => {
 });
 
 describe("refreshOpenAICodexToken", () => {
+  it("stores the provider's real expiry without a provider-local skew", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          access_token: codexJwt({}),
+          refresh_token: "new-rt",
+          expires_in: 3600,
+        }),
+      ),
+    );
+
+    const creds = await refreshOpenAICodexToken("old-rt");
+    expect(creds.expires).toBe(4_600_000);
+    vi.useRealTimers();
+  });
+
   it("sends a JSON refresh_token grant with NO client_secret and parses creds", async () => {
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       expect(new Headers(init?.headers).get("Content-Type")).toBe("application/json");

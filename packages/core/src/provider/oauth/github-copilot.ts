@@ -32,8 +32,6 @@ export const COPILOT_HEADERS = {
 } as const;
 
 const REQUEST_TIMEOUT_MS = 30_000;
-const EPOCH_SKEW_MS = 5 * 60 * 1000;
-
 export function normalizeDomain(input: string): string | null {
   const trimmed = input.trim();
   if (!trimmed) return null;
@@ -290,7 +288,7 @@ export async function refreshGitHubCopilotToken(
     fetchImpl,
   )) as Record<string, unknown>;
   const token = raw.token;
-  const expires = resolveExpiresAtMsFromEpochSeconds(raw.expires_at, { bufferMs: EPOCH_SKEW_MS });
+  const expires = resolveExpiresAtMsFromEpochSeconds(raw.expires_at);
   if (typeof token !== "string" || expires === undefined) {
     throw new Error("Invalid Copilot token response");
   }

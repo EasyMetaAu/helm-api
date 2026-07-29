@@ -118,9 +118,9 @@ function providerAttemptRecord(a: AttemptRecord): DecisionRecord["provider_attem
     error_class: a.error_class,
     latency_ms: a.latency_ms,
     cost_usd: a.cost_usd,
-    // Per-attempt upstream failure detail (admin-debug-error-detail). The whole
-    // record is run through `redact` below, so any key echoed in provider_raw
-    // is irreversibly fingerprinted before persistence (principle 7).
+    // Per-attempt upstream failure detail (admin-debug-error-detail). Provider clients
+    // keep the bounded raw diagnostics while removing actual credentials; the final
+    // telemetry gate remains defense in depth for credential fields and payloads.
     error_detail: a.error_detail,
     ...(a.passthrough_considered !== undefined
       ? { passthrough_considered: a.passthrough_considered }

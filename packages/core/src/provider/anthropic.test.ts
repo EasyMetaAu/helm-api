@@ -2217,12 +2217,12 @@ describe("createAnthropicClient", () => {
     }
   });
 
-  it("retries a transient network error then re-throws it unchanged", async () => {
+  it("retries a transient network error then preserves its credential-safe cause", async () => {
     // The non-timeout catch arm: fetch rejects for a reason OTHER than the internal
     // abort. ECONNREFUSED is a transient connection error, so it is retried at the
     // fetch boundary ([0,0] backoff keeps the test instant); once the budget is
     // exhausted the ORIGINAL error propagates (executor treats it as a provider failure).
-    const boom = new Error("ECONNREFUSED");
+    const boom = Object.assign(new Error("ECONNREFUSED sk-static"), { code: "ECONNREFUSED" });
     const fetch = vi.fn(async () => {
       throw boom;
     });
@@ -2234,9 +2234,15 @@ describe("createAnthropicClient", () => {
       },
       fetch: fetch as unknown as typeof globalThis.fetch,
     });
-    await expect(
-      client.chatCompletion({ model: "m", messages: [{ role: "user", content: "x" }] }),
-    ).rejects.toBe(boom);
+    let caught: unknown;
+    try {
+      await client.chatCompletion({ model: "m", messages: [{ role: "user", content: "x" }] });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(UpstreamError);
+    expect(JSON.stringify(caught)).not.toContain("sk-static");
+    expect(JSON.stringify(caught)).toContain("ECONNREFUSED");
     expect(fetch).toHaveBeenCalledTimes(3); // 1 initial + 2 retries
   });
 

@@ -3,8 +3,8 @@ import { z } from "zod";
 // Structured error model. core produces a unified internal error; the Protocol
 // Adapter's responseOut translates it into each client protocol's error shape
 // (docs/05, 07). The error_class -> HTTP status table is the single source of
-// truth (no magic numbers scattered in the gateway). Per CLAUDE.md principle 7,
-// message/provider_raw must already be redacted by the producer.
+// truth (no magic numbers scattered in the gateway). message/provider_raw keep
+// diagnostic detail but must not contain API keys, OAuth tokens, or auth cookies.
 
 // The error classes from docs/07, in document order.
 export const ErrorClassSchema = z.enum([
@@ -27,9 +27,9 @@ export type ErrorClass = z.infer<typeof ErrorClassSchema>;
 export const HelmErrorSchema = z.object({
   error_class: ErrorClassSchema,
   http_status: z.number().int(), // must equal the mapped value (see factory + tests)
-  message: z.string(), // redacted, human-readable
+  message: z.string(), // credential-safe, human-readable
   trace_id: z.string().min(1), // links the decision record; restorable in the Debug UI
-  provider_raw: z.record(z.string(), z.unknown()).nullable(), // upstream raw error (redacted)
+  provider_raw: z.record(z.string(), z.unknown()).nullable(), // upstream raw error body
 });
 
 export type HelmError = z.infer<typeof HelmErrorSchema>;

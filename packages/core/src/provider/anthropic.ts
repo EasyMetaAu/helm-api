@@ -43,9 +43,12 @@ import {
   type ChatCompletionRequest,
   type ChatCompletionResponse,
   type ProviderClient,
+  readUpstreamErrorBody,
+  safeUpstreamHeaders,
   UpstreamError,
+  upstreamTransportError,
 } from "./openai.js";
-import { withConnectionRetry, withOverloadRetry } from "./retry.js";
+import { isFetchTransportError, withConnectionRetry, withOverloadRetry } from "./retry.js";
 import { readChunkWithIdle, StreamStalledError } from "./stream-idle.js";
 
 export interface AnthropicClientConfig {
@@ -1628,31 +1631,37 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     // The overload wrapper sits OUTSIDE: a 529 answer is a valid Response (no throw), so
     // it re-issues the whole connection-retried attempt after a pause. Anthropic's 529 is
     // the single loudest source of this — a raw one here 502s the client for a blip.
-    const res = await withOverloadRetry(
-      () =>
-        withConnectionRetry(
-          async () => {
-            const t = withTimeout(timeoutMs, external);
-            try {
-              return await doFetch(endpointUrl, {
-                method: "POST",
-                headers: wireHeaders,
-                body: wireBody,
-                signal: t.signal,
-              });
-            } catch (err) {
-              if (t.isTimeout() && !t.isExternalAbort()) {
-                throw new UpstreamError("timeout", "upstream request timed out");
+    let res: Response;
+    try {
+      res = await withOverloadRetry(
+        () =>
+          withConnectionRetry(
+            async () => {
+              const t = withTimeout(timeoutMs, external);
+              try {
+                return await doFetch(endpointUrl, {
+                  method: "POST",
+                  headers: wireHeaders,
+                  body: wireBody,
+                  signal: t.signal,
+                });
+              } catch (err) {
+                if (t.isTimeout() && !t.isExternalAbort()) {
+                  throw new UpstreamError("timeout", "upstream request timed out");
+                }
+                throw err;
+              } finally {
+                t.cleanup();
               }
-              throw err;
-            } finally {
-              t.cleanup();
-            }
-          },
-          { retries: cfg.connectRetries, backoffMs: cfg.connectRetryBackoffMs, signal: external },
-        ),
-      { signal: external },
-    );
+            },
+            { retries: cfg.connectRetries, backoffMs: cfg.connectRetryBackoffMs, signal: external },
+          ),
+        { signal: external },
+      );
+    } catch (error) {
+      if (external?.aborted || !isFetchTransportError(error)) throw error;
+      throw upstreamTransportError(error, scrub);
+    }
     return toolNameMap ? { res, toolNameMap } : { res };
   }
 
@@ -1691,15 +1700,13 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
   }
 
   async function errorFromResponse(res: Response): Promise<UpstreamError> {
-    const providerRaw = await res
-      .json()
-      .catch(() => null)
-      .then(scrub);
+    const providerRaw = await readUpstreamErrorBody(res, scrub);
     return new UpstreamError(
       "upstream_error",
       `upstream returned ${res.status}`,
       providerRaw,
       res.status,
+      scrub(safeUpstreamHeaders(res.headers)) as Record<string, string>,
     );
   }
 

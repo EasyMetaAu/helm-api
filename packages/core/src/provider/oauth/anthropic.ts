@@ -42,8 +42,6 @@ const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}${CALLBACK_PATH}`;
 const CONSOLE_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
 const SCOPES =
   "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
-const REFRESH_SKEW_MS = 5 * 60 * 1000;
-
 interface CallbackServer {
   server: Server;
   cancelWait: () => void;
@@ -58,7 +56,7 @@ function parseTokenCredentials(responseBody: string): OAuthCredentials {
     throw new Error("Anthropic token response was not valid JSON");
   }
   const rec = (data ?? {}) as Record<string, unknown>;
-  const expires = resolveOAuthTokenExpiresAt(rec.expires_in, { refreshSkewMs: REFRESH_SKEW_MS });
+  const expires = resolveOAuthTokenExpiresAt(rec.expires_in);
   if (
     typeof rec.access_token !== "string" ||
     !rec.access_token ||

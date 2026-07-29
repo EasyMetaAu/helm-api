@@ -43,6 +43,7 @@ import {
   discoverOAuthModels,
   type EmbeddingJob,
   encryptSecret,
+  executionTokenExpirySkewMs,
   expandLaneChain,
   expandOpenAICodexModelAliases,
   filterRetiredOpenAICodexLimits,
@@ -870,7 +871,7 @@ function buildOAuthAccountClient(
     targetProviderProtocol: spec.targetProviderProtocol,
     providerRequiresCompatibilityRewrite: spec.providerRequiresCompatibilityRewrite,
   } as unknown as ProviderConfigShared;
-  const cred = buildCredential(accountConfig, oauthCtx, proxy);
+  const cred = buildCredential(accountConfig, oauthCtx, proxy, base.timeoutMs);
   if (!cred) return null;
   // Stable per-account anti-ban identity (never rotates): Anthropic gets a
   // metadata.user_id; Codex a stable session_id. Both deterministic from
@@ -1014,6 +1015,7 @@ export async function synthesizeOAuthProviders(
         oauthProvider: provider,
         fetch: proxyFetch,
         now: () => Date.now(),
+        expirySkewMs: executionTokenExpirySkewMs(timeoutMs),
       });
       let accessToken: string;
       try {
@@ -1401,7 +1403,12 @@ export function buildCredential(
   // manager so a proxied account's token REFRESH leaves through the same hop as its
   // execution traffic — never the real IP (issue #38). undefined ⇒ direct.
   proxy?: ProxyConfig,
+  requestTimeoutMs?: number,
 ): ProviderCredential | null {
+  const executionSkew =
+    requestTimeoutMs === undefined
+      ? {}
+      : { expirySkewMs: executionTokenExpirySkewMs(requestTimeoutMs) };
   if (p.oauth) {
     const o = p.oauth;
     // ── PRESET subscription OAuth: credentials live in the OAuthTokenStore,
@@ -1418,6 +1425,7 @@ export function buildCredential(
         oauthProvider: provider,
         fetch: proxy ? makeProxyFetch(proxy) : undefined,
         now: () => Date.now(),
+        ...executionSkew,
       });
       return {
         getAuthHeader: () => tm.getAuthHeader(),
@@ -1444,6 +1452,7 @@ export function buildCredential(
         audience: o.audience,
       },
       now: () => Date.now(),
+      ...executionSkew,
     });
     return {
       getAuthHeader: () => tm.getAuthHeader(),
@@ -1480,7 +1489,7 @@ export function buildProviderClients(
   for (const p of providers) {
     const proxy = resolveProviderProxy(p, accountSettings);
     const fastMode = resolveProviderFastMode(p, accountSettings);
-    const cred = buildCredential(p, oauthCtx, proxy);
+    const cred = buildCredential(p, oauthCtx, proxy, timeoutMs);
     if (!cred) continue; // no credential → cannot build a client; skip.
     const baseUrl = p.base_url ?? fallbackBaseUrl;
     clients.set(
@@ -2256,13 +2265,13 @@ export async function buildServer(
   // a preset-OAuth primary must not leak the real IP on the eval/default/401 path
   // (issue #38). Reused at the createProviderClient call below.
   const primaryProxy = resolveProviderProxy(first, accountSettings);
-  const primaryCred = buildCredential(first, oauthCtx, primaryProxy);
+  const timeoutMs = config.runtime.request_timeout_ms;
+  const primaryCred = buildCredential(first, oauthCtx, primaryProxy, timeoutMs);
   // HELM_PROVIDER_BASE_URL (test/e2e) overrides EVERY provider's base_url so the
   // mock upstream serves all of them; otherwise each provider uses its own.
   const baseUrlOverride = process.env.HELM_PROVIDER_BASE_URL;
   const fallbackBaseUrl = baseUrlOverride ?? "https://api.openai.com/v1";
   const baseUrl = baseUrlOverride ?? first.base_url ?? fallbackBaseUrl;
-  const timeoutMs = config.runtime.request_timeout_ms;
 
   // Bound subscriptions become routable providers (issue #38, Stage 3). For each
   // routable subscription NOT declared in providers.yaml, synthesize a provider

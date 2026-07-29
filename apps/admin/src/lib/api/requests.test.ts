@@ -357,7 +357,7 @@ describe('toDetail', () => {
     expect(d.cost_breakdown.total_usd).toBeCloseTo(0.01);
   });
 
-  it('surfaces a failed attempt error_detail (status + message + raw body); null elsewhere', () => {
+  it('surfaces complete provider diagnostics; null elsewhere', () => {
     const raw = rawRecord();
     // The first attempt failed at the upstream but the second served — so this
     // detail is the only record of WHY the first failed.
@@ -365,12 +365,18 @@ describe('toDetail', () => {
       upstream_status: 429,
       message: 'upstream returned 429',
       provider_raw: { error: { message: 'rate limit exceeded' } },
+      provider_headers: { 'x-request-id': 'req_upstream_1' },
+      cause: { code: 'ECONNRESET', message: 'socket closed' },
+      stack: 'UpstreamError: upstream returned 429',
     };
     const d = toDetail(raw);
     expect(d.provider_attempts[0]?.error_detail).toEqual({
       upstream_status: 429,
       message: 'upstream returned 429',
       provider_raw: { error: { message: 'rate limit exceeded' } },
+      provider_headers: { 'x-request-id': 'req_upstream_1' },
+      cause: { code: 'ECONNRESET', message: 'socket closed' },
+      stack: 'UpstreamError: upstream returned 429',
     });
     // The ok attempt carries no detail.
     expect(d.provider_attempts[1]?.error_detail ?? null).toBeNull();

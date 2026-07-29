@@ -2,7 +2,7 @@ import type { CircuitBreaker, ExecutionPlan, ProviderClient, ProviderRegistry } 
 import { createCircuitBreaker, UpstreamError } from "@helm/core";
 import type { CatalogEntry, InternalRequest } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
-import { createExecute } from "./execute.js";
+import { createExecute, errorDetailOf } from "./execute.js";
 
 // Supplemental error/edge coverage for the gateway execution adapter. Pins the
 // branches execute.test.ts leaves open: the per-account user-message queue-timeout
@@ -351,5 +351,69 @@ describe("createExecute — error_detail provider_raw wrapping", () => {
     const out = await execute(plan(["a"]), req());
     const detail = out.attempts[0]?.error_detail;
     expect(detail?.provider_raw).toEqual({ code: "x", detail: "y" });
+  });
+
+  it("preserves bounded stack and nested transport causes without credentials", async () => {
+    const cause = Object.assign(new Error("getaddrinfo EAI_AGAIN api.example.test"), {
+      code: "EAI_AGAIN",
+      authorization: "Bearer must-not-survive",
+      x_proxy_authorization: "Basic proxy-must-not-survive",
+      x_google_api_key: "google-must-not-survive",
+      x_access_token: "oauth-must-not-survive",
+      token_count: 123,
+    });
+    cause.message =
+      "Authorization: Basic YmFzaWMtc2VjcmV0; Cookie: session=cookie-secret\ngetaddrinfo EAI_AGAIN api.example.test";
+    const error = new TypeError("fetch failed", { cause });
+    error.stack = `TypeError: fetch failed\n${"at retry (execute.ts:1:1)\n".repeat(800)}`;
+    const provider = {
+      chatCompletion: vi.fn().mockRejectedValue(error),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ a: "m-a" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["a"]), req());
+    const detail = out.attempts[0]?.error_detail;
+    expect(detail?.message).toBe("fetch failed");
+    expect(detail?.cause).toMatchObject({
+      name: "Error",
+      code: "EAI_AGAIN",
+      message: expect.stringContaining("getaddrinfo EAI_AGAIN api.example.test"),
+      authorization: "[redacted]",
+      x_proxy_authorization: "[redacted]",
+      x_google_api_key: "[redacted]",
+      x_access_token: "[redacted]",
+      token_count: 123,
+    });
+    expect(detail?.stack).toContain("TypeError: fetch failed");
+    expect(detail?.stack?.length).toBeLessThanOrEqual(16_384);
+    expect(JSON.stringify(detail)).not.toContain("must-not-survive");
+    expect(JSON.stringify(detail)).not.toContain("YmFzaWMtc2VjcmV0");
+    expect(JSON.stringify(detail)).not.toContain("cookie-secret");
+  });
+
+  it("bounds the complete nested diagnostic, not only each individual string", () => {
+    const providerRaw = Array.from({ length: 64 }, (_, row) =>
+      Object.fromEntries(
+        Array.from({ length: 64 }, (_, column) => [
+          `field_${row}_${column}`,
+          "diagnostic".repeat(64),
+        ]),
+      ),
+    );
+
+    const detail = errorDetailOf(
+      new UpstreamError("upstream_error", "large diagnostic", providerRaw, 502),
+    );
+
+    expect(Buffer.byteLength(JSON.stringify(detail))).toBeLessThanOrEqual(160 * 1024);
   });
 });

@@ -37,6 +37,8 @@ import { CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER } from "../openai-responses.js
 import { TokenRefreshError } from "../token-manager.js";
 import { DEFAULT_429_COOLDOWN_MS } from "./usage-limit.js";
 
+const RETRYABLE_ACCOUNT_FAILURE_COOLDOWN_MS = 30_000;
+
 // Which PRE-FIRST-CHUNK failure justifies trying a SIBLING account in the same pool
 // before the executor advances to the next alias. A Codex (openai_responses + native
 // tools) request has NO valid cross-protocol fallback — every non-Responses alias is
@@ -84,6 +86,10 @@ function isCredentialAccountFailure(
 function isRateLimitAccountFailure(err: unknown): boolean {
   if (err instanceof TokenRefreshError) return err.httpStatus === 429;
   return err instanceof UpstreamError && err.upstreamStatus === 429;
+}
+
+function isRetryableAccountFailure(err: unknown): boolean {
+  return err instanceof TokenRefreshError && err.retryableAccountFailure;
 }
 
 // The per-account user-message queue reports backpressure with this structural flag.
@@ -241,6 +247,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     string,
     { account: string; model: string; limitId: string | null; untilMs: number }
   >();
+  const retryableAccountFailures = new Map<string, number>();
   const credentialFailureReported = new Set<string>();
   let selectionCounter = 0;
 
@@ -250,6 +257,14 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   function usageLimited(member: OAuthPoolMember, nowMs: number): boolean {
     const until = member.usageLimitedUntilMs;
     return until != null && nowMs < until;
+  }
+
+  function retryableAccountLimited(account: string, nowMs: number): boolean {
+    const until = retryableAccountFailures.get(account);
+    if (until === undefined) return false;
+    if (until > nowMs) return true;
+    retryableAccountFailures.delete(account);
+    return false;
   }
 
   function supportsModel(member: OAuthPoolMember, model: string | null): boolean {
@@ -423,6 +438,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         e.member.schedulable &&
         supportsModel(e.member, model) &&
         !usageLimited(e.member, nowMs) &&
+        !retryableAccountLimited(e.member.account, nowMs) &&
         !modelLimited(e.member.account, model, nowMs) &&
         !exclude?.has(e.member.account),
     );
@@ -876,6 +892,14 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     }
   }
 
+  function coolRetryableAccount(entry: PoolEntry): void {
+    retryableAccountFailures.set(
+      entry.member.account,
+      now() + RETRYABLE_ACCOUNT_FAILURE_COOLDOWN_MS,
+    );
+    forgetStickyAccount(entry.member.account, true);
+  }
+
   function rateLimitScope(
     entry: PoolEntry,
     err: unknown,
@@ -954,6 +978,12 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         rememberResponseAffinity(result, entry);
         return result;
       } catch (err) {
+        if (isRetryableAccountFailure(err)) {
+          coolRetryableAccount(entry);
+          if (statefulContinuation) throw err;
+          lastErr = err;
+          continue;
+        }
         if (isCredentialAccountFailure(err, credentialFailureStatuses)) {
           parkCredentialFailedAccount(entry, err);
           if (statefulContinuation) throw err;
@@ -1018,7 +1048,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         first = await iterator.next(); // pre-first-(real-)chunk fault surfaces HERE
       } catch (err) {
         if (iterator) await iterator.return?.().catch(() => {});
-        if (isCredentialAccountFailure(err, upstreamCredentialFailureStatuses)) {
+        if (isRetryableAccountFailure(err)) {
+          coolRetryableAccount(entry);
+          lastErr = err;
+        } else if (isCredentialAccountFailure(err, upstreamCredentialFailureStatuses)) {
           parkCredentialFailedAccount(entry, err);
           lastErr = err;
         } else if (isRateLimitAccountFailure(err)) {

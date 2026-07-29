@@ -3516,6 +3516,23 @@ describe("createCodexResponsesClient — nativePassthrough", () => {
     });
   });
 
+  it("preserves the bounded-body marker for an oversized Codex HTTP error", async () => {
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        connectRetries: 0,
+      },
+      fetch: vi.fn().mockResolvedValue(new Response("x".repeat(70_000), { status: 502 })),
+    });
+
+    await expect(client.nativePassthrough?.(nativeBody())).rejects.toMatchObject({
+      providerRaw: {
+        error: { code: "response_body_too_large", limit_bytes: 65_536 },
+      },
+    });
+  });
+
   it("preserves a client abort instead of wrapping it as an upstream transport failure", async () => {
     const client = createCodexResponsesClient({
       config: {
@@ -4336,6 +4353,62 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
       expect(raw).not.toContain("sk-secret-1234");
       expect(raw).toContain("[redacted]");
     }
+  });
+
+  it("keeps safe upstream headers and bounded error bodies for generic Responses", async () => {
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://api.openai.test/v1", apiKey: "sk-secret-1234" },
+      fetch: vi.fn(
+        async () =>
+          new Response("upstream exploded", {
+            status: 502,
+            headers: {
+              authorization: "Bearer must-not-survive",
+              "x-request-id": "req-upstream-1",
+              "x-ratelimit-remaining-tokens": "123",
+            },
+          }),
+      ),
+    });
+    let caught: unknown;
+    try {
+      await client.nativePassthrough?.({ model: "gpt-5.5", input: "hi" });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(UpstreamError);
+    expect((caught as UpstreamError).providerRaw).toBe("upstream exploded");
+    expect((caught as UpstreamError).upstreamHeaders).toMatchObject({
+      "x-ratelimit-remaining-tokens": "123",
+      "x-request-id": "req-upstream-1",
+    });
+    expect((caught as UpstreamError).upstreamHeaders).not.toHaveProperty("authorization");
+  });
+
+  it("keeps generic Responses transport cause details without known credentials", async () => {
+    const token = "sk-secret-transport";
+    const cause = Object.assign(new Error(`getaddrinfo EAI_AGAIN ${token}`), {
+      code: "EAI_AGAIN",
+    });
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://api.openai.test/v1", apiKey: token },
+      fetch: vi.fn(async () => {
+        throw new TypeError(`fetch failed ${token}`, { cause });
+      }),
+    });
+    let caught: unknown;
+    try {
+      await client.nativePassthrough?.({ model: "gpt-5.5", input: "hi" });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(UpstreamError);
+    const raw = JSON.stringify(caught);
+    expect(raw).not.toContain(token);
+    expect(raw).toContain("EAI_AGAIN");
+    expect(raw).toContain("[redacted]");
   });
 
   it("rebuilds the Authorization header after a 401 so the OAuth retry uses the refreshed token", async () => {

@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-07-29 · 生产韧性改为持续小批、无丢弃背压、执行 Token 租约与完整错误诊断（Store / Gateway / OAuth / Telemetry，docs/02/04/07/10/11，原则 1/3/5/7/8）
+
+- **SQLite 持续清理**：七类 SQLite retention mutation 统一为每批最多 10 行，满批后 `setImmediate` 让出事件循环，不再执行无界 DELETE。Session cleanup 先用既有 `head_request_id` 写入持久 prune claim，再按每批最多 10 个 revision 推进；进程中断后可继续完成，批间到达的同 Session 写入会等待过期链删完并以新 root 恢复。写入在真正落库的同步事务内再次检查 claim，关闭“先检查、await 让出、随后写进删除链”的竞态。该机制只减少未来增长和清理停顿，不替代整库重写；大库 `VACUUM` 仍必须由既有维护 drain 和低峰调度单独执行。
+- **写队列不再丢数据**：删除 `overflow`、`task_overflow`、`session_overflow` 的 OOM shedding；Telemetry、Payload、Session 与 Memory task 使用同一串行 admission 背压，已接受数据按 FIFO 落库。`flush`、maintenance pause 与 stop 都等待 admission tail 后再完成最终 drain，barrier 之前已开始等待的 admission 也会持久化；deferred task 下一事件循环才执行，避免 awaited admission 把同步 SQLite 写重新拉回请求关键路径。没有新增依赖或配置。
+- **执行 Token 租约**：OAuth Provider 统一保存上游真实 `expires`，不再在各 Provider 解析时篡改到期时间；执行 client 在 `request_timeout_ms` 之外保留 5 分钟提前刷新余量（默认共 6 分钟），Admin discovery/quota 保持既有 60 秒余量。网络、408/425/5xx 刷新失败会按账号稳定抖动等待 1–3 秒并重读共享 Store：只采用其他实例已经轮换出的有效 credential，绝不重放结果不确定的旧 rotating refresh token；Store 未变化时当前请求转健康兄弟账号，失败账号在本进程短冷却 30 秒后自动恢复。确定性凭证错误与 429 继续进入既有重连/限流分流。刷新后 Token 若覆盖不了整段租约就不用于请求，但先加密持久化旋转后的 refresh token；短租约账号不会被永久标记为凭证失效。
+- **完整但有界的错误诊断**：Provider HTTP/transport 错误保存 64 KiB body、16 KiB 非凭证 headers、嵌套 cause、16 KiB stack，并用 128 KiB/256 节点总预算防止诊断本身放大内存。Telemetry 不再因字段名含 `token` 就误隐藏 `token_count` 或 rate-limit token 指标；只过滤 API key、OAuth access/refresh/id token、Authorization、Cookie、密码和代理凭证。请求/响应正文仍遵守 `capture_payloads` / Session 留存边界，不塞进 DecisionRecord。
+
 ## 2026-07-28 · 删除 HTTP 与 WebSocket 请求大小上限（Gateway runtime / Deployment，docs/02/05/07/10，用户明确要求）
 
 - **决定**：删除由 `activeRequestBytes / JSON_AMPLIFICATION` 推导的共享 wire 上限；HTTP 请求体不再执行 `wire_limit` 拒绝，Responses/Realtime 和上游 Codex WebSocket 的 `ws.maxPayload` 使用 `0`（无限制），HTTP/SSE 响应读取也不再复用该请求上限。原先约 25.8 MiB 的隐藏上限会把约 31 MiB 的 Codex 上下文压缩请求表现成 HTTP 413 或 `websocket closed by server before response.completed`。
@@ -69,14 +76,9 @@
 
 - **根因与修复**：Admin 登录/登出的 CSRF 校验原本只比较 `Origin` 与请求 `Host` / `X-Forwarded-Host`；部分反向代理或 NAT 会把 `Host` 改成内部地址且不补 `X-Forwarded-Host`，导致浏览器从同一外部 origin 提交表单也稳定返回 403。校验现在优先接受浏览器提供的 `Sec-Fetch-Site: same-origin`，再保留原有 Host 比较与 opaque-origin 边界；`cross-site` 仍拒绝。该 header 不能由网页脚本伪造，而无 `Origin` 的非浏览器客户端原本就允许，因此不新增配置、代理白名单或信任任意 forwarded header。
 
-## 2026-07-24 · Responses WebSocket ingress 改为按活动消息计费（Gateway / Protocol，docs/02/05/07，原则 3/8）
-
-- **根因与修复**：机器推导的 native ingress 池原本在 Upgrade 时为每条连接预留一个完整最大帧，导致空闲/预热连接达到 `floor(ingressBytes / maxPayload)` 后稳定返回 503。Upgrade 现在只瞬时探测零容量或暂停状态，空闲连接不保留 ingress lease；收到 `response.create` 后按消息真实 wire bytes 申请 ingress 与既有 JSON amplification 两级预算，并在请求结束时一起释放。
-- **握手错误正文**：一旦上游已经返回非 101 HTTP response，关闭 `ws` 的 opening-handshake socket timeout，改由既有的有界 response-body timeout 接管；避免两个同期限时器竞争，把确定性 timeout 偶发误报为 generic body failure。正文大小上限、socket 销毁与客户端错误形状保持不变。
-- **安全边界**：`ws.maxPayload` 继续按运行时机器容量动态限制单帧，超限仍以 1009/413 失败；活动消息超过 native ingress 池仍返回结构化 503，超过共享请求池也继续拒绝。没有新增固定连接数、队列、配置或依赖；定向测试同时覆盖“第三条空闲连接可建立”和“第三条并发活动消息被预算拒绝”。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-24 · Responses WebSocket ingress 改为按活动消息计费**：空闲连接不再预留完整帧容量，活动 `response.create` 才按真实 wire/JSON bytes 申请并释放 ingress lease；上游非 101 body 统一由有界响应超时接管，完整原文通过 git history 回溯。
 - **2026-07-23 · PostgreSQL API-key 分布式并发 lease**：PostgreSQL 用 DB 时钟和 state-row lease 实现跨 replica 并发上限、心跳与 crash recovery，真实多 pool e2e 作为验收边界；完整原文通过 git history 回溯。
 - **2026-07-23 · Session 恢复与在线响应共享内存池**：Admin Session 恢复单次最多占 response-work 池一半，保留在线响应容量并坚持先准入后物化；完整原文通过 git history 回溯。
 - **2026-07-27 · 请求内存准入只计算未物化 headroom**：曾修 live-heap 双重计账误拒 503；后被同日“拆除启发式请求内存拒绝并保留硬边界”取代，完整原文通过 git history 回溯。

@@ -1,6 +1,7 @@
 import { type OAuthUsageRow, OAuthUsageRowSchema } from "@helm/shared";
 import { and, count, gte, lt, sql } from "drizzle-orm";
 import type { OAuthUsageStore } from "../ports.js";
+import { runBatchedPrune } from "./batched-prune.js";
 import type { SqliteDb } from "./migrate.js";
 import { oauthUsage } from "./schema.js";
 
@@ -84,8 +85,10 @@ export class SqliteOAuthUsageStore implements OAuthUsageStore {
   }
 
   async pruneUsageOlderThan(olderThanMs: number): Promise<number> {
-    const res = this.db.delete(oauthUsage).where(lt(oauthUsage.bucketMs, olderThanMs)).run();
-    return res.changes;
+    const batch = this.db.$sqlite.prepare(`DELETE FROM oauth_usage WHERE rowid IN (
+      SELECT rowid FROM oauth_usage WHERE bucket_ms < ? ORDER BY bucket_ms, rowid LIMIT ?
+    )`);
+    return runBatchedPrune((limit) => batch.run(olderThanMs, limit).changes);
   }
 
   // Aggregated row -> OAuthUsageRow. Re-validates through the shared schema so a

@@ -57,6 +57,20 @@ describe("fetchJson error path (non-ok)", () => {
 });
 
 describe("refreshGitHubCopilotToken validation", () => {
+  it("stores the provider's real expiry without a provider-local skew", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ token: "tid=x;proxy-ep=proxy.example.test;", expires_at: 4600 }),
+      ),
+    );
+
+    const creds = await refreshGitHubCopilotToken("gh");
+    expect(creds.expires).toBe(4_600_000);
+  });
+
   it("rejects a Copilot token response missing token/expires_at", async () => {
     vi.stubGlobal(
       "fetch",
