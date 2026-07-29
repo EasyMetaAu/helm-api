@@ -842,6 +842,29 @@ describe("createGeminiClient — scrub / currentSecrets", () => {
     );
     expect(JSON.stringify((caught as UpstreamError).providerRaw)).toContain("[redacted]");
   });
+
+  it("preserves transport causes without leaking the configured key", async () => {
+    const apiKey = "AIzaSy-transport-secret";
+    const client = createGeminiClient({
+      config: {
+        baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+        apiKey,
+      },
+      fetch: vi.fn(async () => {
+        throw Object.assign(new TypeError(`fetch failed ${apiKey}`), { code: "EAI_AGAIN" });
+      }),
+    });
+    let caught: unknown;
+    try {
+      await client.nativePassthrough?.({ model: "gemini-2.0-flash", contents: [] });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(UpstreamError);
+    expect(JSON.stringify(caught)).not.toContain(apiKey);
+    expect(JSON.stringify(caught)).toContain("EAI_AGAIN");
+  });
 });
 
 describe("createGeminiClient — 401 auth retry", () => {

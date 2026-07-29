@@ -196,6 +196,73 @@ describe("createOpenAIClient (Phase 0 passthrough)", () => {
     });
   });
 
+  it("retains bounded safe upstream headers and rejects credential headers", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: { message: "boom" } }), {
+        status: 502,
+        headers: {
+          "content-type": "application/json",
+          "x-request-id": "req_upstream_1",
+          "x-ratelimit-remaining-tokens": "42",
+          authorization: "Bearer response-secret",
+          "x-proxy-authorization": "Basic proxy-response-secret",
+          "set-cookie": "session=response-secret",
+          "x-goog-api-key": "google-response-secret",
+          "x-access-token": "oauth-response-secret",
+        },
+      }),
+    );
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+
+    await expect(client.chatCompletion({ model: "m" })).rejects.toMatchObject({
+      upstreamStatus: 502,
+      upstreamHeaders: {
+        "content-type": "application/json",
+        "x-request-id": "req_upstream_1",
+        "x-ratelimit-remaining-tokens": "42",
+      },
+    });
+    try {
+      await client.chatCompletion({ model: "m" });
+    } catch (error) {
+      expect(JSON.stringify((error as UpstreamError).upstreamHeaders)).not.toContain(
+        "response-secret",
+      );
+      expect((error as UpstreamError).upstreamHeaders).not.toHaveProperty("x-goog-api-key");
+      expect((error as UpstreamError).upstreamHeaders).not.toHaveProperty("x-access-token");
+      expect((error as UpstreamError).upstreamHeaders).not.toHaveProperty("x-proxy-authorization");
+    }
+  });
+
+  it("bounds an oversized upstream error body instead of buffering it into telemetry", async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response("x".repeat(70_000), { status: 502 }));
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+
+    await expect(client.chatCompletion({ model: "m" })).rejects.toMatchObject({
+      providerRaw: {
+        error: { code: "error_body_too_large", limit_bytes: 65_536 },
+      },
+    });
+  });
+
+  it("scrubs credentials from an upstream error-body read failure", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(new Error("Authorization: Bearer sk-secret-key"));
+      },
+    });
+    const client = createOpenAIClient({
+      config: CONFIG,
+      fetch: vi.fn().mockResolvedValue(new Response(body, { status: 502 })),
+    });
+
+    try {
+      await client.chatCompletion({ model: "m" });
+    } catch (error) {
+      expect(JSON.stringify((error as UpstreamError).providerRaw)).not.toContain("sk-secret-key");
+    }
+  });
+
   it("maps a timeout to UpstreamError(timeout, 504)", async () => {
     // fetch that rejects with an AbortError when its signal aborts
     const fetch = vi.fn().mockImplementation(
@@ -566,5 +633,29 @@ describe("createOpenAIClient (transient-connection retry)", () => {
     });
     await expect(client.chatCompletion({ model: "m" }, { signal: ac.signal })).rejects.toThrow();
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves exhausted transport causes without leaking the configured key", async () => {
+    const cause = Object.assign(new Error(`getaddrinfo EAI_AGAIN ${CONFIG.apiKey}`), {
+      code: "EAI_AGAIN",
+    });
+    const fetch = vi.fn(async () => {
+      throw new TypeError(`fetch failed ${CONFIG.apiKey}`, { cause });
+    });
+    const client = createOpenAIClient({
+      config: { ...RETRY_CONFIG, connectRetries: 0 },
+      fetch: fetch as unknown as typeof globalThis.fetch,
+    });
+    let caught: unknown;
+    try {
+      await client.chatCompletion({ model: "m" });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(UpstreamError);
+    const raw = JSON.stringify(caught);
+    expect(raw).not.toContain(CONFIG.apiKey);
+    expect(raw).toContain("EAI_AGAIN");
   });
 });

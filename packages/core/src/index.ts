@@ -683,6 +683,7 @@ export {
 export {
   type ConfidentialOAuth,
   createTokenManager,
+  executionTokenExpirySkewMs,
   oauthRefreshQueueDepth,
   type PresetOAuth,
   type ResolvedOAuth,

@@ -115,13 +115,14 @@ export interface SessionView {
   source: string;
 }
 
-// Redacted per-attempt upstream failure detail (admin-debug-error-detail).
-// Present only for an attempt that failed at the upstream; the backend has
-// already key-scrubbed `provider_raw` (Principle 7), so this is safe to display.
+// Complete credential-safe per-attempt upstream failure detail.
 export interface AttemptErrorDetail {
   upstream_status: number | null; // real upstream HTTP status (e.g. 429); null for timeout/network
-  message: string; // redacted, human-readable
-  provider_raw: unknown; // upstream error body (redacted), or null
+  message: string;
+  provider_raw: unknown;
+  provider_headers: Record<string, string> | null;
+  cause: unknown;
+  stack: string | null;
 }
 
 export interface ProviderAttempt {
@@ -233,6 +234,9 @@ interface RawAttempt {
     upstream_status?: number | null;
     message?: string;
     provider_raw?: unknown;
+    provider_headers?: Record<string, string> | null;
+    cause?: unknown;
+    stack?: string | null;
   } | null;
 }
 
@@ -370,6 +374,9 @@ function attemptErrorDetail(a: RawAttempt): AttemptErrorDetail | null {
     upstream_status: typeof d.upstream_status === 'number' ? d.upstream_status : null,
     message: typeof d.message === 'string' ? d.message : '',
     provider_raw: d.provider_raw ?? null,
+    provider_headers: d.provider_headers ?? null,
+    cause: d.cause ?? null,
+    stack: typeof d.stack === 'string' ? d.stack : null,
   };
 }
 

@@ -17,11 +17,13 @@
 // grants (issue #38) are persisted to the OAuthTokenStore — encrypted — so a
 // rotated refresh token survives restarts.
 
+import { createHash } from "node:crypto";
 import { decryptSecret, encryptSecret } from "../store/crypto/token-cipher.js";
 import type { OAuthTokenStore } from "../store/ports.js";
 import { OpenAICodexIdentityMismatchError } from "./oauth/openai-codex.js";
 import { buildOAuthRequestSignal, OAuthHttpError } from "./oauth/runtime.js";
 import type { OAuthCredentials, OAuthProviderInterface } from "./oauth/types.js";
+import { isFetchTransportError } from "./retry.js";
 
 // Cross-instance refresh serialization for PRESET credentials. The composition root
 // builds MANY TokenManager instances for the SAME (providerId, account) — the
@@ -141,20 +143,26 @@ export interface TokenManager {
 export class TokenRefreshError extends Error {
   readonly httpStatus: number | null;
   readonly permanentCredentialFailure: boolean;
+  readonly retryableAccountFailure: boolean;
   constructor(
     message: string,
     httpStatus: number | null = null,
     permanentCredentialFailure = false,
+    retryableAccountFailure = false,
   ) {
     super(message);
     this.name = "TokenRefreshError";
     this.httpStatus = httpStatus;
     this.permanentCredentialFailure = permanentCredentialFailure;
+    this.retryableAccountFailure = retryableAccountFailure;
   }
 }
 
 const DEFAULT_EXPIRY_SKEW_MS = 60_000;
+const TOKEN_REFRESH_HEADROOM_MS = 5 * 60_000;
 const DEFAULT_REFRESH_TIMEOUT_MS = 30_000;
+const REFRESH_FAILURE_WAIT_MS = 1_000;
+const REFRESH_FAILURE_JITTER_MS = 2_000;
 // Fallback lifetime when the token endpoint omits expires_in (rare). Short so a
 // missing TTL degrades to "refresh often", never "cache a token forever".
 const DEFAULT_EXPIRES_IN_S = 3600;
@@ -165,10 +173,32 @@ interface TokenEndpointResponse {
   refresh_token?: unknown;
 }
 
+export function executionTokenExpirySkewMs(requestTimeoutMs: number): number {
+  const timeout =
+    Number.isFinite(requestTimeoutMs) && requestTimeoutMs > 0 ? Math.ceil(requestTimeoutMs) : 0;
+  return timeout + TOKEN_REFRESH_HEADROOM_MS;
+}
+
+function presetRefreshFailureWaitMs(providerId: string, account: string): number {
+  return (
+    REFRESH_FAILURE_WAIT_MS +
+    (createHash("sha256").update(`${providerId}\0${account}`).digest().readUInt16BE(0) %
+      REFRESH_FAILURE_JITTER_MS)
+  );
+}
+
+function isRetryableRefreshError(err: unknown): boolean {
+  if (err instanceof OAuthHttpError) {
+    return err.httpStatus === 408 || err.httpStatus === 425 || err.httpStatus >= 500;
+  }
+  return isFetchTransportError(err);
+}
+
 export function createTokenManager(deps: TokenManagerDeps): TokenManager {
   const doFetch = deps.fetch ?? globalThis.fetch;
   const now = deps.now ?? (() => Date.now());
   const skew = deps.expirySkewMs ?? DEFAULT_EXPIRY_SKEW_MS;
+  const enforceRequestLease = deps.expirySkewMs !== undefined;
   const refreshTimeoutMs = Math.max(1, deps.refreshTimeoutMs ?? DEFAULT_REFRESH_TIMEOUT_MS);
   const oauth = deps.oauth;
   const isPreset = oauth.kind === "preset";
@@ -246,15 +276,24 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
     if (typeof parsed.access_token !== "string" || parsed.access_token.length === 0) {
       throw new TokenRefreshError("oauth token response missing access_token", res.status);
     }
-    accessToken = parsed.access_token;
     const expiresInS =
       typeof parsed.expires_in === "number" && parsed.expires_in > 0
         ? parsed.expires_in
         : DEFAULT_EXPIRES_IN_S;
-    expiresAt = now() + expiresInS * 1000;
+    const nextExpiresAt = now() + expiresInS * 1000;
+    accessToken = parsed.access_token;
+    expiresAt = nextExpiresAt;
     // Rotated refresh token: adopt the new value for subsequent refreshes.
     if (typeof parsed.refresh_token === "string" && parsed.refresh_token.length > 0) {
       refreshToken = parsed.refresh_token;
+    }
+    if (enforceRequestLease && expiresAt <= now() + skew) {
+      throw new TokenRefreshError(
+        "oauth access token is shorter than required request lease",
+        null,
+        false,
+        true,
+      );
     }
   }
 
@@ -305,7 +344,9 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
     const p = oauth as PresetOAuth;
     const provider = deps.oauthProvider as OAuthProviderInterface;
     const encKey = deps.encKey as Buffer;
-    if (refreshToken === undefined) {
+    const currentRefreshToken = refreshToken;
+    const currentAccessToken = accessToken;
+    if (currentRefreshToken === undefined) {
       throw new TokenRefreshError(
         `no stored OAuth credential for ${p.providerId} (run \`helm oauth login ${p.providerId}\`)`,
       );
@@ -317,7 +358,7 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
       creds = await provider.refreshToken(
         {
           access: accessToken ?? "",
-          refresh: refreshToken,
+          refresh: currentRefreshToken,
           expires: expiresAt,
           ...presetExtra,
         },
@@ -337,6 +378,19 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
       // 429 ⇒ rate limited; 5xx ⇒ upstream down).
       const status = err instanceof OAuthHttpError ? err.httpStatus : null;
       const identityMismatch = err instanceof OpenAICodexIdentityMismatchError;
+      const retryableAccountFailure = isRetryableRefreshError(err);
+      if (retryableAccountFailure) {
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, presetRefreshFailureWaitMs(p.providerId, p.account)),
+        );
+        await loadFromStore();
+        if (
+          !isExpired() &&
+          (accessToken !== currentAccessToken || refreshToken !== currentRefreshToken)
+        ) {
+          return;
+        }
+      }
       throw new TokenRefreshError(
         identityMismatch
           ? `oauth refresh identity changed (${p.providerId}); reconnect the account`
@@ -345,6 +399,7 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
             : `oauth refresh failed (${p.providerId}, status ${status})`,
         status,
         identityMismatch,
+        retryableAccountFailure,
       );
     }
     accessToken = provider.getApiKey(creds);
@@ -363,6 +418,16 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
       meta: metaFrom(creds),
       updatedAt: now(),
     });
+    if (enforceRequestLease && expiresAt <= now() + skew) {
+      // Persist a rotated refresh token even when the accompanying access token is
+      // too short for this request. Otherwise a single-use rotation would be lost.
+      throw new TokenRefreshError(
+        "oauth access token is shorter than required request lease",
+        null,
+        false,
+        true,
+      );
+    }
   }
 
   function isExpired(): boolean {

@@ -610,7 +610,7 @@ export async function queueOrPersistSessionRequest(
   if (args.responseJson !== null && responseJson === null) log("session.response_limited");
   const boundedArgs = responseJson === args.responseJson ? args : { ...args, responseJson };
   if (deps.writes && sessionCaptureEnabled(deps) && args.decision.session?.label) {
-    deps.writes.enqueueSession(
+    await deps.writes.enqueueSession(
       () => persistSessionRequest(deps, boundedArgs, log),
       Buffer.byteLength(args.requestJson, "utf8") +
         (responseJson === null ? 0 : Buffer.byteLength(responseJson, "utf8")),
@@ -839,14 +839,14 @@ export async function recordServed(
   // independent of anything that touches the decision later.
   const w = deps.writes;
   if (w !== undefined) {
-    w.enqueueTelemetry({
+    await w.enqueueTelemetry({
       decision: redactDecisionForTelemetry(deps.redact, decision),
       apiKeyId: args.apiKeyId,
       createdAt: new Date(deps.now()),
     });
     await queueOrPersistSessionRequest(deps, sessionArgs, log);
     if (captureEnabled(deps)) {
-      w.enqueuePayload({
+      await w.enqueuePayload({
         requestId: args.requestId,
         requestJson: args.requestJson,
         responseJson,

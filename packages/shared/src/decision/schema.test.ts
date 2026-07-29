@@ -294,7 +294,7 @@ describe("DecisionRecordSchema", () => {
     expect(DecisionRecordSchema.safeParse(r).success).toBe(false);
   });
 
-  it("accepts a per-attempt error_detail (upstream status + message + raw body)", () => {
+  it("accepts a per-attempt error_detail with transport and upstream diagnostics", () => {
     const r = fullRecord();
     r.provider_attempts[0] = {
       alias: "coding_model",
@@ -308,6 +308,9 @@ describe("DecisionRecordSchema", () => {
         upstream_status: 429,
         message: "upstream returned 429",
         provider_raw: { error: { message: "rate limit exceeded", type: "rate_limit_error" } },
+        provider_headers: { "x-request-id": "req_upstream_1" },
+        cause: { name: "Error", code: "ECONNRESET", message: "socket closed" },
+        stack: "UpstreamError: upstream returned 429\n    at request",
       },
     };
     const parsed = DecisionRecordSchema.parse(r);
@@ -316,6 +319,11 @@ describe("DecisionRecordSchema", () => {
     expect(parsed.provider_attempts[0]?.error_detail?.provider_raw).toEqual({
       error: { message: "rate limit exceeded", type: "rate_limit_error" },
     });
+    expect(parsed.provider_attempts[0]?.error_detail?.provider_headers).toEqual({
+      "x-request-id": "req_upstream_1",
+    });
+    expect(parsed.provider_attempts[0]?.error_detail?.cause).toMatchObject({ code: "ECONNRESET" });
+    expect(parsed.provider_attempts[0]?.error_detail?.stack).toContain("UpstreamError");
   });
 
   it("defaults error_detail to null when omitted (legacy records round-trip)", () => {

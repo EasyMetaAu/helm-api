@@ -28,11 +28,13 @@ import type {
 import { PERSISTED_SESSION_MAX_REVISIONS, PERSISTED_SESSION_MAX_STORED_BYTES } from "../ports.js";
 import { likeContains } from "../sql-like.js";
 import { denormalizedDecisionCost } from "../telemetry-cost.js";
+import { runBatchedPrune, yieldToEventLoop } from "./batched-prune.js";
 import type { SqliteDb } from "./migrate.js";
-import { payloadBlobs, requestPayloads, sessionRevisions, sessions, telemetry } from "./schema.js";
+import { requestPayloads, sessionRevisions, sessions, telemetry } from "./schema.js";
 
 type TelemetryRow = typeof telemetry.$inferSelect;
 type SessionRevisionRow = typeof sessionRevisions.$inferSelect;
+const SESSION_PRUNE_MARKER = "__helm_pruning__";
 
 function decodeSessionRevisionRow(row: SessionRevisionRow): SessionRevisionRecord {
   const { bodyBytes: _, ...revision } = row;
@@ -71,6 +73,46 @@ export class SqliteTelemetryStore implements TelemetryStore {
   private sessionPreparedStmts:
     | ReturnType<SqliteTelemetryStore["buildSessionWriteStmts"]>
     | undefined;
+  private readonly sessionPrunes = new Map<string, Promise<number>>();
+
+  private async finishClaimedSessionPrune(sessionRef: string): Promise<number> {
+    const active = this.sessionPrunes.get(sessionRef);
+    if (active) return active;
+    const db = this.db.$sqlite;
+    const work = (async () => {
+      const revisions = db.prepare(`DELETE FROM session_revisions WHERE request_id IN (
+        SELECT request_id FROM session_revisions WHERE session_ref = ?
+        ORDER BY sequence, request_id LIMIT ?
+      )`);
+      await runBatchedPrune((limit) => revisions.run(sessionRef, limit).changes);
+      return db
+        .prepare(
+          "DELETE FROM sessions WHERE session_ref = ? AND head_request_id = ? AND NOT EXISTS (SELECT 1 FROM session_revisions WHERE session_ref = ?)",
+        )
+        .run(sessionRef, SESSION_PRUNE_MARKER, sessionRef).changes;
+    })();
+    this.sessionPrunes.set(sessionRef, work);
+    try {
+      return await work;
+    } finally {
+      if (this.sessionPrunes.get(sessionRef) === work) this.sessionPrunes.delete(sessionRef);
+    }
+  }
+
+  private async waitForClaimedSessionPrune(sessionRef: string): Promise<boolean> {
+    const active = this.sessionPrunes.get(sessionRef);
+    if (active) {
+      await active;
+      return true;
+    }
+    const claimed = this.db.$sqlite
+      .prepare("SELECT 1 FROM sessions WHERE session_ref = ? AND head_request_id = ?")
+      .get(sessionRef, SESSION_PRUNE_MARKER);
+    if (!claimed) return false;
+    await this.finishClaimedSessionPrune(sessionRef);
+    return true;
+  }
+
   private buildSessionWriteStmts() {
     const db = this.db.$sqlite;
     return {
@@ -149,118 +191,140 @@ export class SqliteTelemetryStore implements TelemetryStore {
   }
 
   async upsertSessionRevision(input: UpsertSessionRevisionInput): Promise<void> {
+    // A persisted marker makes a multi-batch prune crash-safe. Reactivation waits for
+    // the expired capture to finish, then starts a fresh root instead of reviving a
+    // partially deleted revision chain.
+    let resumedAfterPrune = false;
     const at = input.createdAt;
     const atMs = at.getTime();
     const storedBytes = Buffer.byteLength(
       input.requestDeltaJson + input.requestEnvelopeJson + (input.responseJson ?? ""),
       "utf8",
     );
-    this.db.$sqlite.transaction(() => {
-      this.db
-        .insert(sessions)
-        .values({
-          sessionRef: input.sessionRef,
-          accountId: input.accountId,
-          apiKeyId: input.apiKeyId,
-          source: input.source,
-          externalSessionId: input.externalSessionId,
-          createdAt: at,
-          lastSeenAt: at,
-        })
-        .onConflictDoNothing()
-        .run();
+    for (;;) {
+      resumedAfterPrune =
+        (await this.waitForClaimedSessionPrune(input.sessionRef)) || resumedAfterPrune;
+      const admitted = this.db.$sqlite.transaction(() => {
+        // The await above can yield after observing no claim. Recheck inside the
+        // synchronous write transaction so a prune that claimed in that gap wins.
+        const pruning = this.db.$sqlite
+          .prepare("SELECT 1 FROM sessions WHERE session_ref = ? AND head_request_id = ?")
+          .get(input.sessionRef, SESSION_PRUNE_MARKER);
+        if (pruning) return false;
+        this.db
+          .insert(sessions)
+          .values({
+            sessionRef: input.sessionRef,
+            accountId: input.accountId,
+            apiKeyId: input.apiKeyId,
+            source: input.source,
+            externalSessionId: input.externalSessionId,
+            createdAt: at,
+            lastSeenAt: at,
+          })
+          .onConflictDoNothing()
+          .run();
 
-      const existing = this.db
-        .select({
-          requestId: sessionRevisions.requestId,
-          sessionRef: sessionRevisions.sessionRef,
-          responseJson: sessionRevisions.responseJson,
-        })
-        .from(sessionRevisions)
-        .where(eq(sessionRevisions.requestId, input.requestId))
-        .get();
-      if (existing) {
-        if (existing.sessionRef !== input.sessionRef) throw new Error("request session mismatch");
-        const responseJson = input.responseJson;
-        const responseBytes =
-          responseJson !== null && existing.responseJson === null
-            ? Buffer.byteLength(responseJson, "utf8")
-            : 0;
-        if (responseBytes === 0 || responseJson === null) return;
+        const existing = this.db
+          .select({
+            requestId: sessionRevisions.requestId,
+            sessionRef: sessionRevisions.sessionRef,
+            responseJson: sessionRevisions.responseJson,
+          })
+          .from(sessionRevisions)
+          .where(eq(sessionRevisions.requestId, input.requestId))
+          .get();
+        if (existing) {
+          if (existing.sessionRef !== input.sessionRef) throw new Error("request session mismatch");
+          const responseJson = input.responseJson;
+          const responseBytes =
+            responseJson !== null && existing.responseJson === null
+              ? Buffer.byteLength(responseJson, "utf8")
+              : 0;
+          if (responseBytes === 0 || responseJson === null) return true;
+          const session = this.db
+            .select({ storedBytes: sessions.storedBytes })
+            .from(sessions)
+            .where(eq(sessions.sessionRef, input.sessionRef))
+            .get();
+          if (!session) throw new Error("session row missing after insert");
+          if (session.storedBytes + responseBytes > PERSISTED_SESSION_MAX_STORED_BYTES)
+            throw new Error("session capture limit exceeded");
+          this.db
+            .update(sessions)
+            .set({
+              storedBytes: sql`${sessions.storedBytes} + ${responseBytes}`,
+              lastSeenAt: sql`max(${sessions.lastSeenAt}, ${atMs})`,
+            })
+            .where(eq(sessions.sessionRef, input.sessionRef))
+            .run();
+          this.sessionWriteStmts().updateResponse.run({
+            requestId: input.requestId,
+            responseId: input.responseId ?? null,
+            responseJson: encodePayloadText(responseJson),
+            responseBytes,
+            fidelity: input.fidelity,
+          });
+          return true;
+        }
+
+        let parentRequestId = input.parentRequestId;
+        if (parentRequestId !== null) {
+          const parent = this.db
+            .select({ sessionRef: sessionRevisions.sessionRef })
+            .from(sessionRevisions)
+            .where(eq(sessionRevisions.requestId, parentRequestId))
+            .get();
+          if ((!parent || parent.sessionRef !== input.sessionRef) && resumedAfterPrune) {
+            parentRequestId = null;
+          } else if (!parent || parent.sessionRef !== input.sessionRef) {
+            throw new Error("session parent mismatch");
+          }
+        }
+
         const session = this.db
-          .select({ storedBytes: sessions.storedBytes })
+          .select({ revisionCount: sessions.revisionCount, storedBytes: sessions.storedBytes })
           .from(sessions)
           .where(eq(sessions.sessionRef, input.sessionRef))
           .get();
         if (!session) throw new Error("session row missing after insert");
-        if (session.storedBytes + responseBytes > PERSISTED_SESSION_MAX_STORED_BYTES)
+        if (
+          session.revisionCount >= PERSISTED_SESSION_MAX_REVISIONS ||
+          session.storedBytes + storedBytes > PERSISTED_SESSION_MAX_STORED_BYTES
+        ) {
           throw new Error("session capture limit exceeded");
+        }
+        const sequence = session.revisionCount + 1;
+        this.sessionWriteStmts().insert.run({
+          requestId: input.requestId,
+          sessionRef: input.sessionRef,
+          sequence,
+          parentRequestId,
+          retainCount: input.retainCount,
+          requestDeltaJson: encodePayloadText(input.requestDeltaJson),
+          requestEnvelopeJson: encodePayloadText(input.requestEnvelopeJson),
+          bodyBytes: storedBytes,
+          responseId: input.responseId ?? null,
+          responseJson: input.responseJson === null ? null : encodePayloadText(input.responseJson),
+          fidelity: input.fidelity,
+          createdAt: atMs,
+        });
         this.db
           .update(sessions)
           .set({
-            storedBytes: sql`${sessions.storedBytes} + ${responseBytes}`,
+            headRequestId: input.requestId,
+            revisionCount: sequence,
+            storedBytes: sql`${sessions.storedBytes} + ${storedBytes}`,
             lastSeenAt: sql`max(${sessions.lastSeenAt}, ${atMs})`,
           })
           .where(eq(sessions.sessionRef, input.sessionRef))
           .run();
-        this.sessionWriteStmts().updateResponse.run({
-          requestId: input.requestId,
-          responseId: input.responseId ?? null,
-          responseJson: encodePayloadText(responseJson),
-          responseBytes,
-          fidelity: input.fidelity,
-        });
-        return;
-      }
-
-      if (input.parentRequestId !== null) {
-        const parent = this.db
-          .select({ sessionRef: sessionRevisions.sessionRef })
-          .from(sessionRevisions)
-          .where(eq(sessionRevisions.requestId, input.parentRequestId))
-          .get();
-        if (!parent || parent.sessionRef !== input.sessionRef)
-          throw new Error("session parent mismatch");
-      }
-
-      const session = this.db
-        .select({ revisionCount: sessions.revisionCount, storedBytes: sessions.storedBytes })
-        .from(sessions)
-        .where(eq(sessions.sessionRef, input.sessionRef))
-        .get();
-      if (!session) throw new Error("session row missing after insert");
-      if (
-        session.revisionCount >= PERSISTED_SESSION_MAX_REVISIONS ||
-        session.storedBytes + storedBytes > PERSISTED_SESSION_MAX_STORED_BYTES
-      ) {
-        throw new Error("session capture limit exceeded");
-      }
-      const sequence = session.revisionCount + 1;
-      this.sessionWriteStmts().insert.run({
-        requestId: input.requestId,
-        sessionRef: input.sessionRef,
-        sequence,
-        parentRequestId: input.parentRequestId,
-        retainCount: input.retainCount,
-        requestDeltaJson: encodePayloadText(input.requestDeltaJson),
-        requestEnvelopeJson: encodePayloadText(input.requestEnvelopeJson),
-        bodyBytes: storedBytes,
-        responseId: input.responseId ?? null,
-        responseJson: input.responseJson === null ? null : encodePayloadText(input.responseJson),
-        fidelity: input.fidelity,
-        createdAt: atMs,
-      });
-      this.db
-        .update(sessions)
-        .set({
-          headRequestId: input.requestId,
-          revisionCount: sequence,
-          storedBytes: sql`${sessions.storedBytes} + ${storedBytes}`,
-          lastSeenAt: sql`max(${sessions.lastSeenAt}, ${atMs})`,
-        })
-        .where(eq(sessions.sessionRef, input.sessionRef))
-        .run();
-    })();
+        return true;
+      })();
+      if (admitted) return;
+      resumedAfterPrune = true;
+      await this.finishClaimedSessionPrune(input.sessionRef);
+    }
   }
 
   async getSessionByRef(sessionRef: string): Promise<SessionRecord | null> {
@@ -381,12 +445,23 @@ export class SqliteTelemetryStore implements TelemetryStore {
 
   async pruneInactiveSessions(olderThanMs: number): Promise<number> {
     const db = this.db.$sqlite;
-    return db.transaction(() => {
-      db.prepare(
-        "DELETE FROM session_revisions WHERE session_ref IN (SELECT session_ref FROM sessions WHERE last_seen_at < ?)",
-      ).run(olderThanMs);
-      return db.prepare("DELETE FROM sessions WHERE last_seen_at < ?").run(olderThanMs).changes;
-    })();
+    let deletedSessions = 0;
+    for (;;) {
+      const candidate = db
+        .prepare(`SELECT session_ref AS sessionRef FROM sessions
+          WHERE last_seen_at < ? ORDER BY last_seen_at, session_ref LIMIT 1`)
+        .get(olderThanMs) as { sessionRef: string } | undefined;
+      if (!candidate) break;
+      const claimed = db
+        .prepare(
+          "UPDATE sessions SET head_request_id = ? WHERE session_ref = ? AND last_seen_at < ?",
+        )
+        .run(SESSION_PRUNE_MARKER, candidate.sessionRef, olderThanMs);
+      if (claimed.changes === 0) continue;
+      deletedSessions += await this.finishClaimedSessionPrune(candidate.sessionRef);
+      await yieldToEventLoop();
+    }
+    return deletedSessions;
   }
 
   async queryRecent(limit: number): Promise<RecentDecisionRecord[]> {
@@ -766,27 +841,29 @@ export class SqliteTelemetryStore implements TelemetryStore {
   // Retention auto-prune: drop rows strictly older than the cutoff. The
   // created_at index keeps this cheap enough to call opportunistically.
   async prunePayloads(olderThanMs: number): Promise<void> {
-    this.db
-      .delete(requestPayloads)
-      .where(lt(requestPayloads.createdAt, new Date(olderThanMs)))
-      .run();
+    const db = this.db.$sqlite;
+    const payloadBatch = db.prepare(`DELETE FROM request_payloads WHERE request_id IN (
+      SELECT request_id FROM request_payloads WHERE created_at < ?
+      ORDER BY created_at, request_id LIMIT ?
+    )`);
+    await runBatchedPrune((limit) => payloadBatch.run(olderThanMs, limit).changes);
     // Same-cutoff blob prune. Safe because an in-use image's created_at is touched
     // on every referencing write, so blob.created_at >= every surviving payload's
     // created_at → a kept payload never references a pruned blob.
-    this.db
-      .delete(payloadBlobs)
-      .where(lt(payloadBlobs.createdAt, new Date(olderThanMs)))
-      .run();
+    const blobBatch = db.prepare(`DELETE FROM payload_blobs WHERE sha256 IN (
+      SELECT sha256 FROM payload_blobs WHERE created_at < ?
+      ORDER BY created_at, sha256 LIMIT ?
+    )`);
+    await runBatchedPrune((limit) => blobBatch.run(olderThanMs, limit).changes);
   }
 
   // Telemetry retention prune — the decision table's equivalent of prunePayloads
   // (it had none before, hence unbounded growth). Strict lower bound on created_at.
   async pruneTelemetry(olderThanMs: number): Promise<number> {
-    const res = this.db
-      .delete(telemetry)
-      .where(lt(telemetry.createdAt, new Date(olderThanMs)))
-      .run();
-    return res.changes;
+    const batch = this.db.$sqlite.prepare(`DELETE FROM telemetry WHERE id IN (
+      SELECT id FROM telemetry WHERE created_at < ? ORDER BY created_at, id LIMIT ?
+    )`);
+    return runBatchedPrune((limit) => batch.run(olderThanMs, limit).changes);
   }
 
   async countTelemetryOlderThan(olderThanMs: number): Promise<number> {

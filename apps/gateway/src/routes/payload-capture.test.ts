@@ -1704,7 +1704,7 @@ describe("recordServed — deferred write queue (the three pipeline faces)", () 
     });
   });
 
-  it("charges retained Responses output to the persisted Session byte quota", async () => {
+  it("backpressures an oversized retained Responses output instead of dropping the Session", async () => {
     const upsertSessionRevision = vi.fn(async (_input: UpsertSessionRevisionInput) => {});
     const insert = vi.fn(async () => ({ id: "1" }));
     const telemetry = {
@@ -1747,6 +1747,6 @@ describe("recordServed — deferred write queue (the three pipeline faces)", () 
     );
     await writes.flush();
     expect(insert).toHaveBeenCalledOnce();
-    expect(upsertSessionRevision).not.toHaveBeenCalled();
+    expect(upsertSessionRevision).toHaveBeenCalledOnce();
   });
 });

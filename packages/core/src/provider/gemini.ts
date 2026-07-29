@@ -9,9 +9,12 @@ import {
   type ChatCompletionRequest,
   type ChatCompletionResponse,
   type ProviderClient,
+  readUpstreamErrorBody,
+  safeUpstreamHeaders,
   UpstreamError,
+  upstreamTransportError,
 } from "./openai.js";
-import { withOverloadRetry } from "./retry.js";
+import { isFetchTransportError, withOverloadRetry } from "./retry.js";
 import { readChunkWithIdle, StreamStalledError } from "./stream-idle.js";
 
 // Resolve a hostname to its candidate addresses. Injectable so the SSRF guard can be
@@ -588,9 +591,14 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
     external?: AbortSignal,
     capture?: (wireBody: string) => void,
   ): Promise<Response> {
-    return withOverloadRetry(() => requestOnce(operation, input, external, capture), {
-      signal: external,
-    });
+    try {
+      return await withOverloadRetry(() => requestOnce(operation, input, external, capture), {
+        signal: external,
+      });
+    } catch (error) {
+      if (external?.aborted || !isFetchTransportError(error)) throw error;
+      throw upstreamTransportError(error, scrub);
+    }
   }
 
   async function requestWithAuthRetry(
@@ -609,22 +617,13 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
   }
 
   async function errorFromResponse(res: Response): Promise<UpstreamError> {
-    const providerRaw = await res
-      .text()
-      .then((text) => {
-        try {
-          return JSON.parse(text) as unknown;
-        } catch {
-          return text;
-        }
-      })
-      .catch(() => null)
-      .then(scrub);
+    const providerRaw = await readUpstreamErrorBody(res, scrub);
     return new UpstreamError(
       "upstream_error",
       `upstream returned ${res.status}`,
       providerRaw,
       res.status,
+      scrub(safeUpstreamHeaders(res.headers)) as Record<string, string>,
     );
   }
 

@@ -188,7 +188,7 @@ function postTokenJson(
 }
 
 function toCredentials(json: TokenResponseJson, previous?: OAuthCredentials): OAuthCredentials {
-  const expires = resolveOAuthTokenExpiresAt(json.expires_in, { refreshSkewMs: 5 * 60 * 1000 });
+  const expires = resolveOAuthTokenExpiresAt(json.expires_in);
   const access = nonEmptyString(json.access_token);
   const refresh = nonEmptyString(json.refresh_token) ?? previous?.refresh;
   if (!access || !refresh || expires === undefined) {

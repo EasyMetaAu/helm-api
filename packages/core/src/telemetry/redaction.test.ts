@@ -94,6 +94,34 @@ describe("redact", () => {
     expect(redact(input)).toEqual(input);
   });
 
+  it("preserves string token metrics and rate-limit headers while filtering real token fields", () => {
+    const out = redact({
+      provider_headers: {
+        "x-ratelimit-remaining-tokens": "123",
+        "x-request-id": "req-1",
+      },
+      token_count: "456",
+      access_token: "oauth-secret-value",
+      x_google_api_key: "google-secret-value",
+      x_access_token: "oauth-header-secret-value",
+      x_proxy_authorization: "proxy-header-secret-value",
+    });
+
+    expect(out.provider_headers).toEqual({
+      "x-ratelimit-remaining-tokens": "123",
+      "x-request-id": "req-1",
+    });
+    expect(out.token_count).toBe("456");
+    expect(out.access_token).toMatch(/^sha256:/);
+    expect(out.x_google_api_key).toMatch(/^sha256:/);
+    expect(out.x_access_token).toMatch(/^sha256:/);
+    expect(out.x_proxy_authorization).toMatch(/^sha256:/);
+    expect(JSON.stringify(out)).not.toContain("oauth-secret-value");
+    expect(JSON.stringify(out)).not.toContain("google-secret-value");
+    expect(JSON.stringify(out)).not.toContain("oauth-header-secret-value");
+    expect(JSON.stringify(out)).not.toContain("proxy-header-secret-value");
+  });
+
   it("boolean/null under a secret-matching key pass through; strings/objects stay redacted", () => {
     const out = redact({
       token_present: true, // boolean — not a credential

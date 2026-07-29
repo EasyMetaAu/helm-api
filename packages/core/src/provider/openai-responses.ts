@@ -39,7 +39,11 @@ import {
   type ChatCompletionResponse,
   type ProviderClient,
   type ProviderConfig,
+  readUpstreamErrorBody,
+  safeUpstreamHeaders,
+  UPSTREAM_ERROR_BODY_MAX_BYTES,
   UpstreamError,
+  upstreamTransportError,
 } from "./openai.js";
 import {
   isFetchTransportError,
@@ -1244,45 +1248,6 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     return changed ? JSON.parse(value) : raw;
   }
 
-  function transportErrorNode(
-    error: unknown,
-    depth = 0,
-    seen = new WeakSet<object>(),
-  ): Record<string, unknown> {
-    if (typeof error !== "object" || error === null) return { message: String(error) };
-    if (seen.has(error)) return { message: "[circular cause]" };
-    seen.add(error);
-    const source = error as {
-      name?: unknown;
-      message?: unknown;
-      code?: unknown;
-      cause?: unknown;
-    };
-    const detail: Record<string, unknown> = {};
-    if (typeof source.name === "string" && source.name.length > 0) detail.name = source.name;
-    if (typeof source.code === "string" || typeof source.code === "number") {
-      detail.code = source.code;
-    }
-    if (typeof source.message === "string" && source.message.length > 0) {
-      detail.message = source.message;
-    }
-    if (source.cause !== undefined && depth < 4) {
-      detail.cause = transportErrorNode(source.cause, depth + 1, seen);
-    }
-    return detail;
-  }
-
-  function transportUpstreamError(error: unknown): UpstreamError {
-    const rawMessage = error instanceof Error ? error.message : "upstream fetch failed";
-    const scrubbedMessage = scrub(rawMessage);
-    return new UpstreamError(
-      "upstream_error",
-      typeof scrubbedMessage === "string" ? scrubbedMessage : "upstream fetch failed",
-      scrub({ error: transportErrorNode(error) }),
-      null,
-    );
-  }
-
   type RequestTimeout = ReturnType<typeof withTimeout>;
   interface CodexHttpResponse {
     response: Response;
@@ -1407,16 +1372,17 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       // transport-shaped TypeError. Explicit provider timeouts are already
       // UpstreamError("timeout") and therefore fail this raw-transport guard.
       if (init.signal?.aborted || !isFetchTransportError(error)) throw error;
-      throw transportUpstreamError(error);
+      throw upstreamTransportError(error, scrub);
     }
   }
 
   async function consumeUnaryBody<T>(
     result: CodexHttpResponse,
     consume: (text: string) => T | Promise<T>,
+    maxBytes = 0,
   ): Promise<T> {
     try {
-      return await consumeResponseTextWithinBudget(result.response, 0, consume);
+      return await consumeResponseTextWithinBudget(result.response, maxBytes, consume);
     } catch (err) {
       if (result.bodyTimeout?.isTimeout() && !result.bodyTimeout.isExternalAbort()) {
         throw new UpstreamError("timeout", "upstream request timed out");
@@ -1534,17 +1500,22 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
   async function errorFromResponse(result: CodexHttpResponse): Promise<UpstreamError> {
     let providerRaw: unknown = null;
     try {
-      providerRaw = await consumeUnaryBody(result, (text) => {
-        let raw: unknown;
-        try {
-          raw = JSON.parse(text);
-        } catch {
-          raw = text;
-        }
-        return scrub(raw);
-      });
+      providerRaw = await consumeUnaryBody(
+        result,
+        (text) => {
+          let raw: unknown;
+          try {
+            raw = JSON.parse(text);
+          } catch {
+            raw = text;
+          }
+          return scrub(raw);
+        },
+        UPSTREAM_ERROR_BODY_MAX_BYTES,
+      );
     } catch (err) {
       if (err instanceof UpstreamError && err.errorClass === "timeout") throw err;
+      if (err instanceof UpstreamError) providerRaw = err.providerRaw;
     }
     const scrubbedBody = providerRaw;
     const selectedHeaders =
@@ -1558,6 +1529,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       `upstream returned ${result.response.status}`,
       structuredRaw,
       result.response.status,
+      scrub(safeUpstreamHeaders(result.response.headers)) as Record<string, string>,
     );
   }
 
@@ -1596,6 +1568,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         error.status === null ? error.message : `upstream websocket returned ${error.status}`,
         websocketErrorRaw(error),
         error.status,
+        scrub(safeUpstreamHeaders(error.headers)) as Record<string, string>,
       );
     }
     return new UpstreamError(
@@ -2309,37 +2282,37 @@ export function createGenericOpenAIResponsesClient(
     // A 529/503 is transient upstream capacity pressure, not a request fault — pause
     // and re-issue the SAME body (pre-first-byte → idempotent) before the executor
     // burns another candidate on it.
-    return withOverloadRetry(
-      async () => {
-        const t = withTimeout(timeoutMs, external);
-        try {
-          return await doFetch(url, { ...init, signal: t.signal });
-        } catch (err) {
-          if (t.isTimeout() && !t.isExternalAbort()) {
-            throw new UpstreamError("timeout", "upstream request timed out");
+    try {
+      return await withOverloadRetry(
+        async () => {
+          const t = withTimeout(timeoutMs, external);
+          try {
+            return await doFetch(url, { ...init, signal: t.signal });
+          } catch (err) {
+            if (t.isTimeout() && !t.isExternalAbort()) {
+              throw new UpstreamError("timeout", "upstream request timed out");
+            }
+            throw err;
+          } finally {
+            t.cleanup();
           }
-          throw err;
-        } finally {
-          t.cleanup();
-        }
-      },
-      { signal: external },
-    );
+        },
+        { signal: external },
+      );
+    } catch (error) {
+      if (external?.aborted || !isFetchTransportError(error)) throw error;
+      throw upstreamTransportError(error, scrub);
+    }
   }
 
   async function errorFromResponse(res: Response): Promise<UpstreamError> {
-    const providerRaw = await consumeResponseTextWithinBudget(res, 0, (text) => {
-      try {
-        return scrub(JSON.parse(text));
-      } catch {
-        return scrub(text);
-      }
-    }).catch(() => null);
+    const providerRaw = await readUpstreamErrorBody(res, scrub);
     return new UpstreamError(
       "upstream_error",
       `upstream returned ${res.status}`,
       providerRaw,
       res.status,
+      scrub(safeUpstreamHeaders(res.headers)) as Record<string, string>,
     );
   }
 

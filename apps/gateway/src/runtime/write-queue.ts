@@ -21,15 +21,13 @@ export interface WriteQueueDeps {
   // Flush a buffer eagerly once it reaches this many rows. Default 256.
   maxBatch?: number;
   // Hard cap on in-memory backlog (telemetry + payloads + queued tasks). Past it,
-  // the oldest buffered write is dropped (logged) so a write stall can never grow
-  // the heap without bound. Default 10_000.
+  // producers wait for the current bounded backlog to drain. Default 10_000.
   maxDepth?: number;
   // Hard cap on the in-memory BYTE footprint of the buffered inserts. The real OOM
   // risk isn't row count — a single payload is 6-7MB, so 10_000 rows × 7MB ≈ 70GB.
-  // Past this budget the queue sheds buffered writes (payload first — see
-  // shedBufferedWrite) so a downstream stall (e.g. the 4am VACUUM holding the write
-  // lock) can never balloon the heap. maxDepth stays as a row-count backstop; EITHER
-  // limit tripping triggers a shed/reject. Default scales from the V8 heap limit.
+  // Past this budget producers wait for the current backlog to drain, so a downstream
+  // stall (e.g. the 4am VACUUM holding the write lock) cannot balloon the heap or lose
+  // accepted work. maxDepth stays as a row-count backstop. Default scales from V8.
   maxBytes?: number;
   // Flush a buffer eagerly once its accumulated bytes reach this, so a few giant
   // payloads can't coalesce into a multi-hundred-MB single transaction (maxBatch=256
@@ -46,13 +44,13 @@ export interface WriteQueueDeps {
 
 export interface WriteQueue {
   // Defer a telemetry decision insert (batched, fail-open, runs after the response).
-  enqueueTelemetry(input: InsertTelemetryInput): void;
+  enqueueTelemetry(input: InsertTelemetryInput): Promise<void>;
   // Defer a payload upsert (batched, fail-open).
-  enqueuePayload(input: InsertPayloadInput): void;
+  enqueuePayload(input: InsertPayloadInput): Promise<void>;
   // Defer a session transcript write while charging the retained request body
-  // against the same byte/depth budget. Payload rows are shed first; if that is
-  // insufficient, the session write itself is rejected before audit telemetry.
-  enqueueSession(task: () => Promise<void>, bytes: number): void;
+  // against the same byte/depth budget. When full, admission waits for the bounded
+  // backlog instead of retaining another closure or dropping the transcript.
+  enqueueSession(task: () => Promise<void>, bytes: number): Promise<void>;
   // Defer a fail-open side-effect (memory observe, retention prune, …). Tasks run
   // sequentially in FIFO order, so callers can rely on inbound-before-outbound.
   // `wakeOnSettle` fires onTaskDrain after THIS task settles — set it only on the
@@ -61,10 +59,11 @@ export interface WriteQueue {
   enqueueTask(
     task: () => Promise<void>,
     opts?: { wakeOnSettle?: boolean; retainedBytes?: number },
-  ): void;
+  ): Promise<void>;
   // Drain everything currently buffered/queued and resolve when the DB has it.
   flush(): Promise<void>;
-  // Maintenance barrier: reject new deferred writes, then drain everything admitted.
+  // Maintenance barrier: reject new deferred writes, then drain everything whose
+  // admission started before the barrier.
   pauseAndFlush(): Promise<void>;
   resume(): void;
   // Stop the idle timer and flush once. Idempotent. For graceful shutdown.
@@ -93,14 +92,9 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
 
   let telemetryBuf: InsertTelemetryInput[] = [];
   let payloadBuf: InsertPayloadInput[] = [];
-  // Parallel byte-cost arrays kept in lock-step with the buffers above (same index =
-  // same row). We never re-stringify a buffered entry to weigh it: the cost is
-  // computed ONCE at enqueue (a cheap .length sum of the already-serialized JSON
-  // fields) and the running total is adjusted by +cost on push / -cost on
-  // shed|flush. That keeps backpressure O(1) amortized instead of turning the admit
-  // check into an O(buffer) CPU hotspot.
-  let telemetryBytes: number[] = [];
-  let payloadBytes: number[] = [];
+  // Costs are computed once at admission and accumulated until the whole buffer moves
+  // to the in-flight batch. No per-row cost arrays are needed because rows are never
+  // shed after admission.
   let bufferedBytes = 0;
   // Bytes that have been flushed into the write chain but whose commit hasn't landed
   // yet — they still occupy the heap (the batch closures retain them). Counted toward
@@ -108,6 +102,7 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
   // let repeated flushes pile up unbounded batches behind the first blocked write.
   // Incremented at flush, released when each commit settles.
   let inFlightBytes = 0;
+  let inFlightDepth = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
   let paused = false;
@@ -119,8 +114,14 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
   let pendingTasks = 0;
   let pendingSessionBytes = 0;
   let pendingTaskBytes = 0;
+  // Serialize only the capacity check + append. Waiting work remains on the producing
+  // request's async frame; it is not appended to the bounded write/task chains until
+  // capacity is available.
+  let admissionTail: Promise<void> = Promise.resolve();
+  let pendingAdmissions = 0;
 
-  const depth = (): number => telemetryBuf.length + payloadBuf.length + pendingTasks;
+  const depth = (): number =>
+    telemetryBuf.length + payloadBuf.length + inFlightDepth + pendingTasks;
 
   // Cheap, allocation-free worst-case V8 estimate: retained JS strings may occupy
   // two bytes per UTF-16 code unit. Object/array overhead is small beside the bodies.
@@ -145,6 +146,10 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
   // strings. Charge their wire-size estimate using the process-derived multiplier.
   const retainedTaskCost = (bytes: number): number =>
     Number.isFinite(bytes) && bytes > 0 ? Math.ceil(bytes * jsonAmplification) : 0;
+
+  // Awaited admission must not pull deferred better-sqlite3 work back onto the
+  // response path. Start side-effect tasks on the next event-loop turn.
+  const deferTask = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
   const clearTimer = (): void => {
     if (timer !== null) {
@@ -218,15 +223,15 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
     const pBatch = payloadBuf;
     telemetryBuf = [];
     payloadBuf = [];
-    telemetryBytes = [];
-    payloadBytes = [];
     // The bytes don't leave memory at flush — they move into the batch closures the
     // write chain retains until the commit lands. Move them from buffered → in-flight
     // (NOT zeroed) so admit() keeps counting them against maxBytes while the writer is
     // stalled; released when this batch's commit settles (success or failure).
     const flushedBytes = bufferedBytes;
+    const flushedDepth = tBatch.length + pBatch.length;
     bufferedBytes = 0;
     inFlightBytes += flushedBytes;
+    inFlightDepth += flushedDepth;
     writeChain = writeChain
       .then(async () => {
         await writeTelemetry(tBatch);
@@ -234,168 +239,155 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
       })
       .finally(() => {
         inFlightBytes -= flushedBytes;
+        inFlightDepth -= flushedDepth;
       });
     return writeChain;
   };
 
-  // Would admitting a row costing `incomingBytes` breach either limit? The row budget
-  // is checked LAGGING (depth already at the cap) to preserve the original row-shed
-  // behaviour; the byte budget is checked LOOKING-AHEAD over buffered + IN-FLIGHT +
-  // incoming, so a single oversized payload is shed against BEFORE it lands AND a
-  // stalled writer's queued-but-uncommitted batches still count — one 7MB row must not
-  // overshoot the budget, and a write stall must not pile up batches past the cap.
+  // Would admitting a row costing `incomingBytes` breach either limit? Both buffered
+  // and IN-FLIGHT batches count: flushing into a stalled write chain must not create an
+  // unbounded hidden queue of closures.
   const overBudget = (incomingBytes: number): boolean =>
     depth() >= maxDepth ||
     bufferedBytes + inFlightBytes + pendingSessionBytes + pendingTaskBytes + incomingBytes >
       maxBytes;
 
-  const shedPayload = (): boolean => {
-    if (payloadBuf.length === 0) return false;
-    payloadBuf.shift();
-    bufferedBytes -= payloadBytes.shift() ?? 0;
-    log("writequeue.overflow");
-    return true;
+  const waitForCapacity = async (incomingBytes: number): Promise<void> => {
+    while (overBudget(incomingBytes) && depth() > 0) {
+      // Backpressure stays on the producing request. Only already-admitted work lives
+      // in the queue; waiting producers do not append closures behind a stalled writer.
+      const currentTaskTail = taskChain;
+      await Promise.all([doFlush(), currentTaskTail]);
+    }
+    // One item may exceed the derived byte budget, but it is the only admitted item.
+    // Its body already exists on the request path; admitting exactly one avoids a
+    // deadlock while keeping the queue bounded by one item rather than an unbounded
+    // chain of oversized closures.
   };
 
-  // Drop the oldest buffered insert to relieve a depth/byte overflow. Tasks are never
-  // dropped mid-chain (they're already scheduled); only buffered inserts are shed.
-  // Priority: shed PAYLOAD (debug capture) before TELEMETRY (audit-critical). When a
-  // stall forces a choice we keep the decision record and sacrifice the verbatim body
-  // — and payloads are also where the bytes are (6-7MB each), so dropping them first
-  // reclaims the most heap per shed. Byte counts are decremented in lock-step so the
-  // running total never drifts.
-  const shedBufferedWrite = (): boolean => {
-    if (shedPayload()) return true;
-    if (telemetryBuf.length > 0) {
-      telemetryBuf.shift();
-      bufferedBytes -= telemetryBytes.shift() ?? 0;
-    } else {
-      return false;
+  const admit = async (incomingBytes: number, append: () => void): Promise<void> => {
+    // The uncontended hot path is synchronous: the check and append are one JS turn.
+    if (pendingAdmissions === 0 && !overBudget(incomingBytes)) {
+      append();
+      return;
     }
-    log("writequeue.overflow");
-    return true;
-  };
 
-  const admitBufferedWrite = (incomingBytes: number): boolean => {
-    if (!overBudget(incomingBytes)) return true;
-    // Keep shedding until BOTH limits clear (a single 7MB payload can blow the byte
-    // budget while many tiny rows blow the row budget). Stop if nothing is left to drop
-    // (the incoming write alone is larger than the whole budget).
-    while (overBudget(incomingBytes) && shedBufferedWrite()) {
-      /* shed until under budget or empty */
+    let release!: () => void;
+    const previous = admissionTail;
+    admissionTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    pendingAdmissions++;
+    await previous;
+    try {
+      if (overBudget(incomingBytes)) await waitForCapacity(incomingBytes);
+      append();
+    } finally {
+      pendingAdmissions--;
+      release();
     }
-    if (!overBudget(incomingBytes)) return true;
-    log("writequeue.overflow");
-    return false;
   };
 
   return {
-    enqueueTelemetry(input: InsertTelemetryInput): void {
+    async enqueueTelemetry(input: InsertTelemetryInput): Promise<void> {
       if (stopped) return;
       if (paused) {
         log("writequeue.paused");
         return;
       }
       const cost = telemetryCost(input);
-      if (!admitBufferedWrite(cost)) return;
-      telemetryBuf.push(input);
-      telemetryBytes.push(cost);
-      bufferedBytes += cost;
-      // Eager flush on EITHER the row threshold or the byte threshold, so neither a
-      // burst of rows nor a few giant rows can grow an oversized single transaction.
-      if (telemetryBuf.length >= maxBatch || bufferedBytes >= flushBytes) void doFlush();
-      else scheduleTimer();
+      await admit(cost, () => {
+        telemetryBuf.push(input);
+        bufferedBytes += cost;
+        // Eager flush on EITHER the row threshold or the byte threshold, so neither a
+        // burst of rows nor a few giant rows can grow an oversized single transaction.
+        if (telemetryBuf.length >= maxBatch || bufferedBytes >= flushBytes) void doFlush();
+        else scheduleTimer();
+      });
     },
 
-    enqueuePayload(input: InsertPayloadInput): void {
+    async enqueuePayload(input: InsertPayloadInput): Promise<void> {
       if (stopped) return;
       if (paused) {
         log("writequeue.paused");
         return;
       }
       const cost = payloadCost(input);
-      if (!admitBufferedWrite(cost)) return;
-      payloadBuf.push(input);
-      payloadBytes.push(cost);
-      bufferedBytes += cost;
-      if (payloadBuf.length >= maxBatch || bufferedBytes >= flushBytes) void doFlush();
-      else scheduleTimer();
+      await admit(cost, () => {
+        payloadBuf.push(input);
+        bufferedBytes += cost;
+        if (payloadBuf.length >= maxBatch || bufferedBytes >= flushBytes) void doFlush();
+        else scheduleTimer();
+      });
     },
 
-    enqueueSession(task: () => Promise<void>, bytes: number): void {
+    async enqueueSession(task: () => Promise<void>, bytes: number): Promise<void> {
       if (stopped) return;
       if (paused) {
         log("writequeue.paused");
         return;
       }
       const cost = retainedTaskCost(bytes);
-      while (overBudget(cost) && shedPayload()) {
-        /* payload is less valuable than a semantic session transcript */
-      }
-      if (overBudget(cost)) {
-        log("writequeue.session_overflow");
-        return;
-      }
-      pendingTasks++;
-      pendingSessionBytes += cost;
-      taskChain = taskChain.then(async () => {
-        try {
-          await task();
-        } catch {
-          log("writequeue.session_failed");
-        } finally {
-          pendingTasks--;
-          pendingSessionBytes -= cost;
-        }
+      await admit(cost, () => {
+        pendingTasks++;
+        pendingSessionBytes += cost;
+        taskChain = taskChain.then(async () => {
+          try {
+            await deferTask();
+            await task();
+          } catch {
+            log("writequeue.session_failed");
+          } finally {
+            pendingTasks--;
+            pendingSessionBytes -= cost;
+          }
+        });
       });
     },
 
-    enqueueTask(
+    async enqueueTask(
       task: () => Promise<void>,
       opts?: { wakeOnSettle?: boolean; retainedBytes?: number },
-    ): void {
+    ): Promise<void> {
       if (stopped) return;
       if (paused) {
         log("writequeue.paused");
         return;
       }
       const cost = retainedTaskCost(opts?.retainedBytes ?? 0);
-      while (overBudget(cost) && shedPayload()) {
-        /* payload capture is less valuable than a deferred semantic write */
-      }
-      if (overBudget(cost)) {
-        log("writequeue.task_overflow");
-        return;
-      }
       const wakeOnSettle = opts?.wakeOnSettle === true;
-      pendingTasks++;
-      pendingTaskBytes += cost;
-      taskChain = taskChain.then(async () => {
-        try {
-          await task();
-        } catch {
-          log("writequeue.task_failed");
-        } finally {
-          pendingTasks--;
-          pendingTaskBytes -= cost;
-          // Fire the post-task hook (memory-worker wake) ONLY for tasks that opted in
-          // — the turn's final/outbound observe. Waking after the inbound-only write
-          // could drain the observer job before the assistant turn is persisted.
-          // Fail-open: a throwing hook must never poison the FIFO chain.
-          if (wakeOnSettle && deps.onTaskDrain !== undefined) {
-            try {
-              deps.onTaskDrain();
-            } catch {
-              log("writequeue.on_task_drain_failed");
+      await admit(cost, () => {
+        pendingTasks++;
+        pendingTaskBytes += cost;
+        taskChain = taskChain.then(async () => {
+          try {
+            await deferTask();
+            await task();
+          } catch {
+            log("writequeue.task_failed");
+          } finally {
+            pendingTasks--;
+            pendingTaskBytes -= cost;
+            // Fire the post-task hook (memory-worker wake) ONLY for tasks that opted in
+            // — the turn's final/outbound observe. Waking after the inbound-only write
+            // could drain the observer job before the assistant turn is persisted.
+            // Fail-open: a throwing hook must never poison the FIFO chain.
+            if (wakeOnSettle && deps.onTaskDrain !== undefined) {
+              try {
+                deps.onTaskDrain();
+              } catch {
+                log("writequeue.on_task_drain_failed");
+              }
             }
           }
-        }
+        });
       });
     },
 
     async flush(): Promise<void> {
-      // Flush buffers into the write chain, then await both chains. Tasks never
-      // enqueue inserts, so a single drain pass settles everything.
+      // Let every producer already waiting on capacity finish admission first, then
+      // flush what they appended. Tasks never enqueue inserts, so one drain settles all.
+      await admissionTail;
       await doFlush();
       await writeChain;
       await taskChain;
@@ -404,6 +396,7 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
     async pauseAndFlush(): Promise<void> {
       paused = true;
       clearTimer();
+      await admissionTail;
       await doFlush();
       await writeChain;
       await taskChain;
@@ -416,6 +409,7 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
     async stop(): Promise<void> {
       stopped = true;
       clearTimer();
+      await admissionTail;
       await doFlush();
       await writeChain;
       await taskChain;

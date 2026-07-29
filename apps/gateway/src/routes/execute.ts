@@ -1264,29 +1264,122 @@ function isReasoningHistoryRejection(err: unknown): boolean {
 // Coerce an already-scrubbed upstream error body into the schema's record|null
 // shape. A plain object passes through; a primitive/array (e.g. an HTML or text
 // error page) is wrapped so the detail is preserved, not silently dropped.
-function toRawRecord(raw: unknown): Record<string, unknown> | null {
+function toRawRecord(raw: unknown, budget: DiagnosticBudget): Record<string, unknown> | null {
   if (raw === null || raw === undefined) return null;
-  if (typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, unknown>;
-  return { raw };
+  const bounded = diagnosticValue(raw, budget);
+  if (typeof bounded === "object" && bounded !== null && !Array.isArray(bounded)) {
+    return bounded as Record<string, unknown>;
+  }
+  return { raw: bounded };
 }
 
-// Build the redacted per-attempt error_detail (admin-debug-error-detail) from a
-// genuine upstream failure. An UpstreamError carries the real upstream status,
-// a message, and the key-scrubbed body; any other error degrades to its message
-// with no status/body. The telemetry redact gate scrubs this again before it is
-// persisted (principle 7), so a key echoed in the body never survives.
+const DIAGNOSTIC_STRING_MAX = 16_384;
+const DIAGNOSTIC_COLLECTION_MAX = 64;
+const DIAGNOSTIC_TOTAL_STRING_MAX = 128 * 1024;
+const DIAGNOSTIC_NODE_MAX = 256;
+const CREDENTIAL_FIELD =
+  /^(authorization|(?:x[_-]?)?proxy[_-]?authorization|cookie|set[_-]?cookie|api[_-]?key|x[_-]?(?:goog(?:le)?[_-]?)?api[_-]?key|token|(?:x[_-]?)?access[_-]?token|refresh[_-]?token|id[_-]?token|password|client[_-]?secret|secret|credential)$/i;
+
+interface DiagnosticBudget {
+  remainingChars: number;
+  remainingNodes: number;
+}
+
+function diagnosticString(value: string, budget: DiagnosticBudget): string {
+  if (budget.remainingChars <= 0) return "[diagnostic truncated]";
+  const safe = value
+    .replace(
+      /\b(authorization|(?:x[_-]?)?proxy[_-]?authorization)\s*[:=]\s*(?:(?:Bearer|Basic)\s+)?(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;\r\n]+)/gi,
+      "$1=[redacted]",
+    )
+    .replace(/\b(cookie|set[_-]?cookie)\s*[:=]\s*[^\r\n]*/gi, "$1=[redacted]")
+    .replace(
+      /(api[_-]?key|x[_-]?(?:goog(?:le)?[_-]?)?api[_-]?key|token|(?:x[_-]?)?access[_-]?token|refresh[_-]?token|password|secret|credential)\s*[:=]\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;\r\n]+)/gi,
+      "$1=[redacted]",
+    );
+  const bounded = safe.slice(0, Math.min(DIAGNOSTIC_STRING_MAX, budget.remainingChars));
+  budget.remainingChars -= bounded.length;
+  return bounded;
+}
+
+function diagnosticValue(
+  value: unknown,
+  budget: DiagnosticBudget,
+  depth = 0,
+  seen = new WeakSet<object>(),
+): unknown {
+  if (budget.remainingNodes <= 0) return "[node limit]";
+  budget.remainingNodes--;
+  if (typeof value === "string") return diagnosticString(value, budget);
+  if (value === null || typeof value !== "object") return value;
+  if (depth >= 6) return "[depth limit]";
+  if (seen.has(value)) return "[circular]";
+  seen.add(value);
+
+  if (value instanceof Error) {
+    const out: Record<string, unknown> = {
+      name: value.name,
+      message: diagnosticString(value.message, budget),
+    };
+    const code = (value as Error & { code?: unknown }).code;
+    if (typeof code === "string" || typeof code === "number") out.code = code;
+    if (value.stack) out.stack = diagnosticString(value.stack, budget);
+    if (value.cause !== undefined)
+      out.cause = diagnosticValue(value.cause, budget, depth + 1, seen);
+    for (const [key, child] of Object.entries(value).slice(0, DIAGNOSTIC_COLLECTION_MAX)) {
+      out[key] = CREDENTIAL_FIELD.test(key)
+        ? "[redacted]"
+        : diagnosticValue(child, budget, depth + 1, seen);
+    }
+    return out;
+  }
+
+  if (Array.isArray(value)) {
+    const out: unknown[] = [];
+    for (const item of value.slice(0, DIAGNOSTIC_COLLECTION_MAX)) {
+      if (budget.remainingNodes <= 0 || budget.remainingChars <= 0) break;
+      out.push(diagnosticValue(item, budget, depth + 1, seen));
+    }
+    return out;
+  }
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value).slice(0, DIAGNOSTIC_COLLECTION_MAX)) {
+    if (budget.remainingNodes <= 0 || budget.remainingChars <= 0) break;
+    out[key] = CREDENTIAL_FIELD.test(key)
+      ? "[redacted]"
+      : diagnosticValue(child, budget, depth + 1, seen);
+  }
+  return out;
+}
+
+// Build the credential-safe per-attempt error_detail. Keep status/body/headers and
+// transport cause/stack; remove only actual credentials before persistence.
 export function errorDetailOf(err: unknown): AttemptErrorDetail {
+  const budget: DiagnosticBudget = {
+    remainingChars: DIAGNOSTIC_TOTAL_STRING_MAX,
+    remainingNodes: DIAGNOSTIC_NODE_MAX,
+  };
+  const message = diagnosticString(err instanceof Error ? err.message : String(err), budget);
+  const stack = err instanceof Error && err.stack ? diagnosticString(err.stack, budget) : null;
+  const cause =
+    err instanceof Error && err.cause !== undefined ? diagnosticValue(err.cause, budget) : null;
   if (err instanceof UpstreamError) {
     return {
       upstream_status: err.upstreamStatus,
-      message: err.message,
-      provider_raw: toRawRecord(err.providerRaw),
+      message,
+      provider_raw: toRawRecord(err.providerRaw, budget),
+      provider_headers: toRawRecord(err.upstreamHeaders, budget) as Record<string, string> | null,
+      cause,
+      stack,
     };
   }
   return {
     upstream_status: null,
-    message: err instanceof Error ? err.message : String(err),
+    message,
     provider_raw: null,
+    provider_headers: null,
+    cause,
+    stack,
   };
 }
 

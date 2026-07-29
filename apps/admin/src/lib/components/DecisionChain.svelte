@@ -275,8 +275,8 @@
               >{/if}
           </div>
           <!-- Expandable upstream failure detail for THIS attempt — the only
-               record of WHY a candidate failed when a later one served. Already
-               redacted by the backend (Principle 7). -->
+               record of WHY a candidate failed when a later one served. The backend
+               removes credentials but keeps diagnostic body/headers/cause/stack. -->
           {#if a.error_detail}
             {@const ed = a.error_detail}
             <details
@@ -288,10 +288,15 @@
                   ? ` · HTTP ${ed.upstream_status}`
                   : ''}{ed.message ? ` — ${ed.message}` : ''}
               </summary>
-              {#if ed.provider_raw !== null && ed.provider_raw !== undefined}
+              {#if ed.provider_raw !== null || ed.provider_headers !== null || ed.cause !== null || ed.stack !== null}
                 <pre
                   class="mt-1 max-h-64 overflow-auto whitespace-pre-wrap break-all text-red-900">{showRaw(
-                    ed.provider_raw,
+                    {
+                      body: ed.provider_raw,
+                      headers: ed.provider_headers,
+                      cause: ed.cause,
+                      stack: ed.stack,
+                    },
                   )}</pre>
               {:else}
                 <p class="mt-1 italic text-ink-muted">{$t('No raw upstream body recorded.')}</p>

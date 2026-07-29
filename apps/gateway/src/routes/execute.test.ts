@@ -1313,7 +1313,7 @@ describe("createExecute — gateway execution adapter", () => {
     expect(out.attempts[1]?.status).toBe("ok");
   });
 
-  it("captures per-attempt error_detail (upstream status + message + raw body) on a failed attempt", async () => {
+  it("captures complete per-attempt error_detail on a failed attempt", async () => {
     const rawBody = { error: { message: "rate limit exceeded", type: "rate_limit_error" } };
     const provider = {
       chatCompletion: vi
@@ -1342,6 +1342,9 @@ describe("createExecute — gateway execution adapter", () => {
       upstream_status: 429,
       message: "upstream returned 429",
       provider_raw: rawBody,
+      provider_headers: null,
+      cause: null,
+      stack: expect.stringContaining("UpstreamError: upstream returned 429"),
     });
     // ok / skipped rows must NOT carry a detail.
     expect(out.attempts[1]?.error_detail ?? null).toBeNull();

@@ -47,6 +47,7 @@ import {
   type MemoryMessageArchiveRow,
   type MemoryStore,
 } from "../ports.js";
+import { runBatchedPrune } from "./batched-prune.js";
 import { listSqliteIdleFlushCandidates } from "./idle-flush-candidates.js";
 import {
   memoryFacts,
@@ -1916,25 +1917,28 @@ export class SqliteMemoryStore implements MemoryStore {
     // DELETE would orphan that coverage and resurrect the raw into the prefix /
     // re-compression. So we free the bulky text + tags but KEEP the row with
     // status='pruned' (invisible to content reads, still seen by coverage reads).
-    const obs = this.db.$sqlite
-      .prepare(
-        `UPDATE memory_observations
-            SET status = 'pruned', observation_text = '[pruned]', tags = NULL
-          WHERE status = 'archived'
-            AND archived_at IS NOT NULL
-            AND archived_at < ?`,
-      )
-      .run(input.archivedObservationsBeforeMs);
+    const db = this.db.$sqlite;
+    const observationsBatch = db.prepare(`UPDATE memory_observations
+      SET status = 'pruned', observation_text = '[pruned]', tags = NULL
+      WHERE id IN (
+        SELECT id FROM memory_observations
+        WHERE status = 'archived' AND archived_at IS NOT NULL AND archived_at < ?
+        ORDER BY archived_at, id LIMIT ?
+      )`);
+    const observationsDeleted = await runBatchedPrune(
+      (limit) => observationsBatch.run(input.archivedObservationsBeforeMs, limit).changes,
+    );
     // Facts carry NO coverage role → a true hard DELETE is correct (the only
     // DELETE in the forgetting system). expired_at IS NOT NULL keeps live facts.
-    const facts = this.db.$sqlite
-      .prepare(
-        `DELETE FROM memory_facts
-          WHERE expired_at IS NOT NULL
-            AND expired_at < ?`,
-      )
-      .run(input.expiredFactsBeforeMs);
-    return { observationsDeleted: obs.changes, factsDeleted: facts.changes };
+    const factsBatch = db.prepare(`DELETE FROM memory_facts WHERE id IN (
+      SELECT id FROM memory_facts
+      WHERE expired_at IS NOT NULL AND expired_at < ?
+      ORDER BY expired_at, id LIMIT ?
+    )`);
+    const factsDeleted = await runBatchedPrune(
+      (limit) => factsBatch.run(input.expiredFactsBeforeMs, limit).changes,
+    );
+    return { observationsDeleted, factsDeleted };
   }
 
   // ——— Cleanup/archival (raw transcript + job log) ———
@@ -1977,24 +1981,28 @@ export class SqliteMemoryStore implements MemoryStore {
     // Keep the summary exact in the SAME transaction. A TEMP key table avoids
     // returning every deleted body row to JS and lets one set-based UPDATE repair
     // only affected threads after the delete (including the new MAX timestamp).
-    return this.db.$sqlite.transaction(() => {
-      this.db.$sqlite.exec(`
-        CREATE TEMP TABLE IF NOT EXISTS _helm_pruned_message_threads (
-          thread_id TEXT PRIMARY KEY
-        ) WITHOUT ROWID;
-        DELETE FROM _helm_pruned_message_threads;
-      `);
-      this.db.$sqlite
+    const db = this.db.$sqlite;
+    db.exec(`CREATE TEMP TABLE IF NOT EXISTS _helm_pruned_message_threads (
+      thread_id TEXT PRIMARY KEY
+    ) WITHOUT ROWID;`);
+    const pruneBatch = db.transaction((limit: number) => {
+      db.exec("DELETE FROM _helm_pruned_message_threads");
+      db.prepare(
+        `INSERT OR IGNORE INTO _helm_pruned_message_threads (thread_id)
+         SELECT DISTINCT thread_id FROM memory_messages WHERE id IN (
+           SELECT id FROM memory_messages WHERE created_at < ?
+           ORDER BY created_at, id LIMIT ?
+         )`,
+      ).run(olderThanMs, limit);
+      const res = db
         .prepare(
-          `INSERT OR IGNORE INTO _helm_pruned_message_threads (thread_id)
-           SELECT thread_id FROM memory_messages WHERE created_at < ?`,
+          `DELETE FROM memory_messages WHERE id IN (
+             SELECT id FROM memory_messages WHERE created_at < ?
+             ORDER BY created_at, id LIMIT ?
+           )`,
         )
-        .run(olderThanMs);
-      const res = this.db
-        .delete(memoryMessages)
-        .where(lt(memoryMessages.createdAt, new Date(olderThanMs)))
-        .run();
-      this.db.$sqlite.exec(`
+        .run(olderThanMs, limit);
+      db.exec(`
         UPDATE memory_threads AS t
            SET message_count = (
                  SELECT COUNT(*) FROM memory_messages m WHERE m.thread_id = t.id
@@ -2006,18 +2014,17 @@ export class SqliteMemoryStore implements MemoryStore {
         DELETE FROM _helm_pruned_message_threads;
       `);
       return res.changes;
-    })();
+    });
+    return runBatchedPrune(pruneBatch);
   }
 
   async pruneFinishedJobsOlderThan(olderThanMs: number): Promise<number> {
-    const res = this.db.$sqlite
-      .prepare(
-        `DELETE FROM memory_jobs
-          WHERE status IN ('done', 'failed')
-            AND updated_at < ?`,
-      )
-      .run(olderThanMs);
-    return res.changes;
+    const batch = this.db.$sqlite.prepare(`DELETE FROM memory_jobs WHERE id IN (
+      SELECT id FROM memory_jobs
+      WHERE status IN ('done', 'failed') AND updated_at < ?
+      ORDER BY updated_at, id LIMIT ?
+    )`);
+    return runBatchedPrune((limit) => batch.run(olderThanMs, limit).changes);
   }
 
   // Auto-compaction model→price resolution, write half: stamp the served model

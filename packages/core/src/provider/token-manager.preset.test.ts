@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { encryptSecret } from "../store/crypto/token-cipher.js";
+import { decryptSecret, encryptSecret } from "../store/crypto/token-cipher.js";
 import type { OAuthTokenRecord, OAuthTokenStore } from "../store/ports.js";
 import { OpenAICodexIdentityMismatchError } from "./oauth/openai-codex.js";
 import { OAuthHttpError } from "./oauth/runtime.js";
 import type { OAuthCredentials, OAuthProviderInterface } from "./oauth/types.js";
 import {
   createTokenManager,
+  executionTokenExpirySkewMs,
   oauthRefreshQueueDepth,
   type PresetOAuth,
   TokenRefreshError,
@@ -113,6 +114,140 @@ function rotatingSeed(expiresAt: number): OAuthTokenRecord {
 describe("createTokenManager (preset kind)", () => {
   it("throws at construction when preset deps are missing", () => {
     expect(() => createTokenManager({ oauth: PRESET })).toThrow(/requires tokenStore/);
+  });
+
+  it("uses one request lease and refreshes at its exact expiry boundary", async () => {
+    const provider = rotatingProvider();
+    const skew = executionTokenExpirySkewMs(60_000);
+    expect(skew).toBe(6 * 60_000);
+    const usable = createTokenManager({
+      oauth: PRESET,
+      tokenStore: memStore(rotatingSeed(skew + 1)),
+      encKey: KEY,
+      oauthProvider: provider,
+      expirySkewMs: skew,
+      now: () => 0,
+    });
+    expect(await usable.getAuthHeader()).toBe("Bearer at-0");
+    expect(provider.calls).toBe(0);
+
+    const boundaryProvider = rotatingProvider();
+    const boundary = createTokenManager({
+      oauth: PRESET,
+      tokenStore: memStore(rotatingSeed(skew)),
+      encKey: KEY,
+      oauthProvider: boundaryProvider,
+      expirySkewMs: skew,
+      now: () => 0,
+    });
+    expect(await boundary.getAuthHeader()).toBe("Bearer at-1");
+    expect(boundaryProvider.calls).toBe(1);
+  });
+
+  it("waits before failover without replaying an ambiguously consumed refresh token", async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const provider: OAuthProviderInterface = {
+        id: "anthropic",
+        name: "transient",
+        async login() {
+          throw new Error("not used");
+        },
+        async refreshToken() {
+          calls += 1;
+          throw new OAuthHttpError("Anthropic", 503);
+        },
+        getApiKey: (c) => c.access,
+      };
+      const store = memStore(seedRecord({ expiresAt: 0 }));
+      const tm = createTokenManager({
+        oauth: PRESET,
+        tokenStore: store,
+        encKey: KEY,
+        oauthProvider: provider,
+        now: () => 0,
+      });
+
+      let settled = false;
+      const header = tm.getAuthHeader().finally(() => {
+        settled = true;
+      });
+      const failure = expect(header).rejects.toMatchObject({
+        httpStatus: 503,
+        retryableAccountFailure: true,
+      });
+      await vi.advanceTimersByTimeAsync(999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      await failure;
+      expect(calls).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("adopts a credential another instance rotated while waiting after a transient failure", async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const provider: OAuthProviderInterface = {
+        id: "anthropic",
+        name: "unavailable",
+        async login() {
+          throw new Error("not used");
+        },
+        async refreshToken() {
+          calls += 1;
+          throw new OAuthHttpError("Anthropic", 503);
+        },
+        getApiKey: (c) => c.access,
+      };
+      const store = memStore(seedRecord({ expiresAt: 0 }));
+      const tm = createTokenManager({
+        oauth: PRESET,
+        tokenStore: store,
+        encKey: KEY,
+        oauthProvider: provider,
+        now: () => 0,
+      });
+
+      const header = tm.getAuthHeader();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(calls).toBe(1);
+      await store.upsert({
+        ...seedRecord(),
+        accessEnc: encryptSecret("at-sibling", KEY),
+        refreshEnc: encryptSecret("rt-sibling", KEY),
+        expiresAt: 9_999_999,
+        updatedAt: 1,
+      });
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      await expect(header).resolves.toBe("Bearer at-sibling");
+      expect(calls).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects a newly refreshed token shorter than the required request lease", async () => {
+    const skew = executionTokenExpirySkewMs(60_000);
+    const provider = stubProvider(); // returns expires=10_000, shorter than the 120s lease
+    const store = memStore(seedRecord({ expiresAt: 0 }));
+    const tm = createTokenManager({
+      oauth: PRESET,
+      tokenStore: store,
+      encKey: KEY,
+      oauthProvider: provider,
+      expirySkewMs: skew,
+      now: () => 0,
+    });
+
+    await expect(tm.getAuthHeader()).rejects.toThrow(/shorter than required request lease/);
+    const rotated = await store.get("anthropic", "default");
+    expect(rotated?.refreshEnc && decryptSecret(rotated.refreshEnc, KEY)).toBe("rt-1");
   });
 
   it("reuses a still-valid stored access token WITHOUT calling the provider", async () => {

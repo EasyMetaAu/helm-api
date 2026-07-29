@@ -8,7 +8,8 @@ import { createHash } from "node:crypto";
 
 const DEFAULT_KEY_PREFIX_LEN = 12;
 const DEFAULT_PAYLOAD_KEYS = ["messages", "attachments", "prompt", "content", "input"];
-const DEFAULT_SECRET_PATTERN = /(api[_-]?key|authorization|password|secret|token|credential)/i;
+const DEFAULT_SECRET_PATTERN =
+  /^(?:api[_-]?key|x[_-]?(?:goog(?:le)?[_-]?)?api[_-]?key|authorization|(?:x[_-]?)?proxy[_-]?authorization|cookie|set[_-]?cookie|password|client[_-]?secret|secret(?:[_-]?(?:key|enc))?|credential(?:s)?|token|token[_-]?bundle|(?:x[_-]?)?access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|oauth[_-]?token|x[_-]?auth[_-]?token)$/i;
 
 export interface RedactOptions {
   keyPrefixLen?: number;

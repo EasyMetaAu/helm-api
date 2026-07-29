@@ -457,13 +457,17 @@ async function seedAnthropic(ctx: OAuthRuntimeCtx, account: string): Promise<voi
   });
 }
 
-async function seedXai(ctx: OAuthRuntimeCtx, account: string): Promise<void> {
+async function seedXai(
+  ctx: OAuthRuntimeCtx,
+  account: string,
+  expiresAt = FAR_FUTURE,
+): Promise<void> {
   await ctx.store.upsert({
     providerId: "xai",
     account,
     accessEnc: encryptSecret(`xai-access-${account}`, ENC_KEY),
     refreshEnc: encryptSecret(`xai-refresh-${account}`, ENC_KEY),
-    expiresAt: FAR_FUTURE,
+    expiresAt,
     meta: JSON.stringify({
       tokenEndpoint: "https://auth.x.ai/oauth2/token",
       accountId: `xai-user-${account}`,
@@ -528,6 +532,32 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     void task();
     return true;
   };
+
+  it("refreshes a subscription token before the request-timeout lease begins", async () => {
+    const { ctx, config } = oauthStores();
+    await seedXai(ctx, "lease", Date.now() + 90_000);
+    const refreshedAccess = codexJwt({ sub: "xai-user-lease", email: "lease@example.test" });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const target = String(url);
+      if (target === "https://auth.x.ai/oauth2/token") {
+        return Response.json({
+          access_token: refreshedAccess,
+          refresh_token: "xai-refresh-rotated",
+          expires_in: 3_600,
+        });
+      }
+      if (target.endsWith("/models")) {
+        expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${refreshedAccess}`);
+        return Response.json({
+          data: [{ id: "grok-4.5", apiBackend: "responses", streamToolCalls: true }],
+        });
+      }
+      throw new Error(`unexpected URL ${target}`);
+    });
+
+    await synthesizeOAuthProviders([], ctx, config, "https://fallback/v1", 60_000, noop);
+    expect(fetchMock).toHaveBeenCalledWith("https://auth.x.ai/oauth2/token", expect.any(Object));
+  });
 
   it("routes xAI subscription OAuth through the generic Responses proxy by default", async () => {
     const { ctx, config } = oauthStores();

@@ -552,7 +552,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
         createdAt: new Date(),
       };
       if (deps.writes !== undefined) {
-        deps.writes.enqueueTelemetry(input);
+        await deps.writes.enqueueTelemetry(input);
         await queueOrPersistSessionRequest(
           deps,
           {
@@ -602,7 +602,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       const capturedResponseJson = requestTimedOut(c) ? null : responseJson;
       if (deps.writes !== undefined) {
         if (!captureEnabled(deps)) return;
-        deps.writes.enqueuePayload({
+        await deps.writes.enqueuePayload({
           requestId,
           requestJson,
           responseJson: capturedResponseJson,
@@ -639,7 +639,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     const observeRetainedBytes = Buffer.byteLength(requestJson, "utf8");
     const runObserve = async (task: () => Promise<unknown>, wake = true) => {
       if (deps.writes !== undefined) {
-        deps.writes.enqueueTask(
+        await deps.writes.enqueueTask(
           async () => {
             await task();
           },
