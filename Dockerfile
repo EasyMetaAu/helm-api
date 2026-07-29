@@ -7,19 +7,27 @@ RUN corepack enable && apt-get update && apt-get install -y --no-install-recomme
     python3 make g++ \
  && rm -rf /var/lib/apt/lists/*
 
-# Copy lockfile + workspace manifests first for maximal layer caching.
-COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
+# Download dependencies in a lockfile-only layer so release version bumps do not
+# invalidate the network cache. Extra retries tolerate transient registry resets.
+COPY pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN corepack prepare pnpm@10.25.0 --activate \
+ && pnpm config set fetch-retries 5 \
+ && pnpm config set fetch-timeout 120000 \
+ && pnpm fetch --frozen-lockfile
+
+# Link the fetched packages only after copying workspace manifests.
+COPY package.json ./
 COPY apps/gateway/package.json apps/gateway/
 COPY apps/admin/package.json apps/admin/
 COPY apps/portal/package.json apps/portal/
 COPY packages/core/package.json packages/core/
 COPY packages/shared/package.json packages/shared/
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --offline --frozen-lockfile
 
 COPY . .
 RUN pnpm build
 # Flatten the gateway + its prod dependencies into /app/out.
-RUN pnpm deploy --filter=@helm/gateway --prod --legacy /app/out
+RUN pnpm deploy --filter=@helm/gateway --prod --legacy --prefer-offline /app/out
 
 # ---- runtime ----
 FROM node:22-slim AS runtime
