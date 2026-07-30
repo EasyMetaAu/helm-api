@@ -1678,31 +1678,41 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     sessionId: string,
     prepared: PreparedNativePassthroughRequest,
     signal: AbortSignal | undefined,
-  ): Promise<{
-    connection: CodexResponsesWebSocketConnection;
-    release: () => void;
-  }> {
-    let state = websocketSessions.get(sessionId);
-    if (!state) {
-      const connection = connectWebSocket(prepared, signal);
-      state = { connection, tail: Promise.resolve() };
-      websocketSessions.set(sessionId, state);
-      connection.catch(() => {
-        if (websocketSessions.get(sessionId) === state) websocketSessions.delete(sessionId);
+  ): Promise<
+    | {
+        connection: CodexResponsesWebSocketConnection;
+        release: () => void;
+      }
+    | undefined
+  > {
+    while (!websocketHttpFallbackSessions.has(sessionId)) {
+      let state = websocketSessions.get(sessionId);
+      if (!state) {
+        const connection = connectWebSocket(prepared, signal);
+        state = { connection, tail: Promise.resolve() };
+        websocketSessions.set(sessionId, state);
+        connection.catch(() => {
+          if (websocketSessions.get(sessionId) === state) websocketSessions.delete(sessionId);
+        });
+      }
+      let release = () => {};
+      const previous = state.tail;
+      state.tail = new Promise<void>((resolve) => {
+        release = resolve;
       });
+      await previous;
+      if (websocketSessions.get(sessionId) !== state) {
+        release();
+        continue;
+      }
+      try {
+        return { connection: await state.connection, release };
+      } catch (error) {
+        release();
+        throw error;
+      }
     }
-    let release = () => {};
-    const previous = state.tail;
-    state.tail = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await previous;
-    try {
-      return { connection: await state.connection, release };
-    } catch (error) {
-      release();
-      throw error;
-    }
+    return undefined;
   }
 
   async function closeWebSocketSession(sessionId: string): Promise<void> {
@@ -2018,6 +2028,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
             | undefined;
           try {
             lease = await acquireWebSocketSession(sessionId, prepared, opts?.signal);
+            if (!lease) break;
           } catch (error) {
             if (
               error instanceof UpstreamError &&

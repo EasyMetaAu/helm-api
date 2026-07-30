@@ -2763,6 +2763,119 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect(chunks.join("")).toContain("response.completed");
   });
 
+  it("requeues a same-session request after an ECANCELED connection is replaced", async () => {
+    let releaseFirstSend = () => {};
+    let markFirstSendStarted = () => {};
+    const firstSendStarted = new Promise<void>((resolve) => {
+      markFirstSendStarted = resolve;
+    });
+    const firstSendRelease = new Promise<void>((resolve) => {
+      releaseFirstSend = resolve;
+    });
+    let firstSendCalls = 0;
+    const first: CodexResponsesWebSocketConnection = {
+      responseHeaders: new Headers(),
+      async send() {
+        firstSendCalls += 1;
+        if (firstSendCalls > 1) throw new Error("stale websocket reused");
+        markFirstSendStarted();
+        await firstSendRelease;
+        throw Object.assign(new Error("write ECANCELED"), { code: "ECANCELED" });
+      },
+      async receive() {
+        return null;
+      },
+      async close() {},
+    };
+    const second = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-a" } },
+        { type: "response.completed", response: { id: "resp-a", status: "completed" } },
+      ],
+      [
+        { type: "response.created", response: { id: "resp-b" } },
+        { type: "response.completed", response: { id: "resp-b", status: "completed" } },
+      ],
+    ]);
+    const connect = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_ecanceled_concurrent")}`,
+        responsesWebSocketConnector: connect,
+        connectRetries: 1,
+        connectRetryBackoffMs: [0],
+      },
+    });
+    const request = carrier("ingress-ecanceled-concurrent", {
+      model: "gpt-5.6-sol",
+      input: [],
+      stream: true,
+      store: false,
+    });
+    const drain = async () => {
+      const chunks: string[] = [];
+      for await (const chunk of client.nativePassthroughStream?.(request) ?? []) chunks.push(chunk);
+      return chunks.join("");
+    };
+
+    const firstTurn = drain();
+    await firstSendStarted;
+    const secondTurn = drain();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    releaseFirstSend();
+
+    const output = await Promise.all([firstTurn, secondTurn]);
+    expect(firstSendCalls).toBe(1);
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(second.sent).toHaveLength(2);
+    expect(output.every((text) => text.includes("response.completed"))).toBe(true);
+  });
+
+  it("does not retry ECANCELED after websocket output starts", async () => {
+    const boom = Object.assign(new Error("read ECANCELED"), { code: "ECANCELED" });
+    let receiveCalls = 0;
+    const connection: CodexResponsesWebSocketConnection = {
+      responseHeaders: new Headers(),
+      async send() {},
+      async receive() {
+        receiveCalls += 1;
+        if (receiveCalls === 1) {
+          return JSON.stringify({ type: "response.created", response: { id: "resp-started" } });
+        }
+        throw boom;
+      },
+      async close() {},
+    };
+    const connect = vi.fn(async () => connection);
+    const fetchMock = vi.fn();
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_ecanceled_receive")}`,
+        responsesWebSocketConnector: connect,
+        connectRetries: 1,
+        connectRetryBackoffMs: [0],
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier("ingress-ecanceled-receive", {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+        }),
+      )
+      [Symbol.asyncIterator]();
+
+    expect((await iterator?.next())?.value).toContain("response.created");
+    await expect(iterator?.next()).rejects.toBe(boom);
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("does not reconnect a websocket write ECANCELED after the caller aborts", async () => {
     const controller = new AbortController();
     const abortReason = new Error("client aborted during send");
