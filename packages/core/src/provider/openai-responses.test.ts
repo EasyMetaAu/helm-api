@@ -1663,10 +1663,10 @@ describe("createCodexResponsesClient", () => {
     expect(caught).not.toBeInstanceOf(UpstreamError);
   });
 
-  it("retries a transient network error then wraps it for account-pool failover", async () => {
-    // ECONNREFUSED is transient → retried at the fetch boundary ([0,0] backoff keeps
-    // the test instant); exhaustion is then classified for account-pool failover.
-    const boom = new Error("ECONNREFUSED");
+  it("retries write ECANCELED then wraps it for account-pool failover", async () => {
+    // A pre-response Node socket cancellation is transient → retried at the fetch
+    // boundary; exhaustion is then classified for account-pool failover.
+    const boom = Object.assign(new Error("write ECANCELED"), { code: "ECANCELED" });
     const fetch = vi.fn(async () => {
       throw boom;
     });
@@ -1683,7 +1683,7 @@ describe("createCodexResponsesClient", () => {
     ).rejects.toMatchObject({
       errorClass: "upstream_error",
       upstreamStatus: null,
-      providerRaw: { error: { name: "Error", message: "ECONNREFUSED" } },
+      providerRaw: { error: { name: "Error", message: "write ECANCELED", code: "ECANCELED" } },
     });
     expect(fetch).toHaveBeenCalledTimes(3); // 1 initial + 2 retries
   });
