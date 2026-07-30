@@ -2832,6 +2832,67 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect(output.every((text) => text.includes("response.completed"))).toBe(true);
   });
 
+  it("does not send a same-session request aborted while waiting for its lease", async () => {
+    let releaseFirstSend = () => {};
+    let markFirstSendStarted = () => {};
+    const firstSendStarted = new Promise<void>((resolve) => {
+      markFirstSendStarted = resolve;
+    });
+    const firstSendRelease = new Promise<void>((resolve) => {
+      releaseFirstSend = resolve;
+    });
+    const connection = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-first" } },
+        {
+          type: "response.completed",
+          response: { id: "resp-first", status: "completed" },
+        },
+      ],
+    ]);
+    const send = connection.send.bind(connection);
+    let sendCalls = 0;
+    connection.send = async (text) => {
+      sendCalls += 1;
+      if (sendCalls === 1) {
+        markFirstSendStarted();
+        await firstSendRelease;
+      }
+      await send(text);
+    };
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_aborted_lease")}`,
+        responsesWebSocketConnector: vi.fn(async () => connection),
+      },
+    });
+    const request = carrier("ingress-aborted-lease", {
+      model: "gpt-5.6-sol",
+      input: [],
+      stream: true,
+      store: false,
+    });
+    const drain = async (signal?: AbortSignal) => {
+      for await (const _chunk of client.nativePassthroughStream?.(request, { signal }) ?? []) {
+        // drain
+      }
+    };
+
+    const firstTurn = drain();
+    await firstSendStarted;
+    const controller = new AbortController();
+    const abortReason = new Error("queued request aborted");
+    const secondTurn = drain(controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort(abortReason);
+    const secondExpectation = expect(secondTurn).rejects.toBe(abortReason);
+    releaseFirstSend();
+
+    await Promise.all([firstTurn, secondExpectation]);
+    expect(connection.sent).toHaveLength(1);
+  });
+
   it("does not retry ECANCELED after websocket output starts", async () => {
     const boom = Object.assign(new Error("read ECANCELED"), { code: "ECANCELED" });
     let receiveCalls = 0;

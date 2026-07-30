@@ -1686,6 +1686,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     | undefined
   > {
     while (!websocketHttpFallbackSessions.has(sessionId)) {
+      if (signal?.aborted) throw signal.reason ?? new Error("client aborted");
       let state = websocketSessions.get(sessionId);
       if (!state) {
         const connection = connectWebSocket(prepared, signal);
@@ -1701,6 +1702,10 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         release = resolve;
       });
       await previous;
+      if (signal?.aborted) {
+        release();
+        throw signal.reason ?? new Error("client aborted");
+      }
       if (websocketSessions.get(sessionId) !== state) {
         release();
         continue;
