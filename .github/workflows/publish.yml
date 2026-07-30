@@ -169,16 +169,29 @@ jobs:
           IMMUTABLE_TAG: ${{ steps.meta.outputs.immutable_tag }}
         run: |
           CHECK_LOG="${RUNNER_TEMP}/helm-immutable-manifest.log"
-          if docker manifest inspect "${IMMUTABLE_TAG}" >"${CHECK_LOG}" 2>&1; then
+          IMAGE_STATE=""
+          for attempt in 1 2 3; do
+            if docker manifest inspect "${IMMUTABLE_TAG}" >"${CHECK_LOG}" 2>&1; then
+              IMAGE_STATE=exists
+              break
+            elif grep -Eiq 'manifest unknown|no such manifest' "${CHECK_LOG}"; then
+              IMAGE_STATE=missing
+              break
+            elif [ "${attempt}" -lt 3 ]; then
+              echo "::warning::GHCR manifest lookup failed; retrying (${attempt}/3)"
+              sleep 2
+            else
+              echo "::error::cannot determine whether ${IMMUTABLE_TAG} exists"
+              cat "${CHECK_LOG}"
+              exit 1
+            fi
+          done
+          if [ "${IMAGE_STATE}" = "exists" ]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "Reusing existing immutable image ${IMMUTABLE_TAG}; metadata validation follows."
-          elif grep -Eiq 'manifest unknown|no such manifest' "${CHECK_LOG}"; then
+          else
             echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "Immutable image ${IMMUTABLE_TAG} does not exist; it will be built once."
-          else
-            echo "::error::cannot determine whether ${IMMUTABLE_TAG} exists"
-            cat "${CHECK_LOG}"
-            exit 1
           fi
 
       - name: Build immutable image
@@ -205,14 +218,27 @@ jobs:
           # through `docker push`, so the remaining inspect/push race is reported
           # as a known registry limitation rather than pretending it is atomic.
           CHECK_LOG="${RUNNER_TEMP}/helm-immutable-pre-push.log"
-          if docker manifest inspect "${IMMUTABLE_TAG}" >"${CHECK_LOG}" 2>&1; then
+          IMAGE_STATE=""
+          for attempt in 1 2 3; do
+            if docker manifest inspect "${IMMUTABLE_TAG}" >"${CHECK_LOG}" 2>&1; then
+              IMAGE_STATE=exists
+              break
+            elif grep -Eiq 'manifest unknown|no such manifest' "${CHECK_LOG}"; then
+              IMAGE_STATE=missing
+              break
+            elif [ "${attempt}" -lt 3 ]; then
+              echo "::warning::GHCR manifest lookup failed; retrying (${attempt}/3)"
+              sleep 2
+            else
+              echo "::error::cannot safely publish ${IMMUTABLE_TAG}"
+              cat "${CHECK_LOG}"
+              exit 1
+            fi
+          done
+          if [ "${IMAGE_STATE}" = "exists" ]; then
             echo "${IMMUTABLE_TAG} appeared while building; do not overwrite it."
-          elif grep -Eiq 'manifest unknown|no such manifest' "${CHECK_LOG}"; then
-            docker push "${IMMUTABLE_TAG}"
           else
-            echo "::error::cannot safely publish ${IMMUTABLE_TAG}"
-            cat "${CHECK_LOG}"
-            exit 1
+            docker push "${IMMUTABLE_TAG}"
           fi
 
       - name: Verify immutable image
@@ -358,15 +384,23 @@ jobs:
           # release. An existing one is an interrupted prior publish and may be
           # reconciled only from strict, independently verifiable metadata.
           CHECK_LOG="${RUNNER_TEMP}/helm-orphan-version-manifest.log"
-          if docker manifest inspect "${TARGET_TAG}" >"${CHECK_LOG}" 2>&1; then
-            VERSION_EXISTS=true
-          elif grep -Eiq 'manifest unknown|no such manifest' "${CHECK_LOG}"; then
-            VERSION_EXISTS=false
-          else
-            echo "::error::cannot inspect possible interrupted release ${TARGET_TAG}"
-            cat "${CHECK_LOG}"
-            exit 1
-          fi
+          VERSION_EXISTS=""
+          for attempt in 1 2 3; do
+            if docker manifest inspect "${TARGET_TAG}" >"${CHECK_LOG}" 2>&1; then
+              VERSION_EXISTS=true
+              break
+            elif grep -Eiq 'manifest unknown|no such manifest' "${CHECK_LOG}"; then
+              VERSION_EXISTS=false
+              break
+            elif [ "${attempt}" -lt 3 ]; then
+              echo "::warning::GHCR manifest lookup failed; retrying (${attempt}/3)"
+              sleep 2
+            else
+              echo "::error::cannot inspect possible interrupted release ${TARGET_TAG}"
+              cat "${CHECK_LOG}"
+              exit 1
+            fi
+          done
 
           if [ "${VERSION_EXISTS}" = "false" ]; then
             emit_state true "${CURRENT_SHA}" "${CURRENT_DIGEST}" "${CURRENT_REF}" false false
@@ -435,15 +469,23 @@ jobs:
           manifest_exists() {
             local ref="$1"
             local log="${RUNNER_TEMP}/helm-version-manifest.log"
-            if docker manifest inspect "${ref}" >"${log}" 2>&1; then
-              return 0
-            fi
-            if grep -Eiq 'manifest unknown|no such manifest' "${log}"; then
-              return 1
-            fi
-            echo "::error::cannot inspect ${ref}"
-            cat "${log}"
-            return 2
+            local attempt
+            for attempt in 1 2 3; do
+              if docker manifest inspect "${ref}" >"${log}" 2>&1; then
+                return 0
+              fi
+              if grep -Eiq 'manifest unknown|no such manifest' "${log}"; then
+                return 1
+              fi
+              if [ "${attempt}" -lt 3 ]; then
+                echo "::warning::GHCR manifest lookup failed; retrying (${attempt}/3)"
+                sleep 2
+              else
+                echo "::error::cannot inspect ${ref}"
+                cat "${log}"
+                return 2
+              fi
+            done
           }
 
           pull_digest() {
@@ -554,15 +596,23 @@ jobs:
           manifest_exists() {
             local ref="$1"
             local log="${RUNNER_TEMP}/helm-latest-manifest.log"
-            if docker manifest inspect "${ref}" >"${log}" 2>&1; then
-              return 0
-            fi
-            if grep -Eiq 'manifest unknown|no such manifest' "${log}"; then
-              return 1
-            fi
-            echo "::error::cannot inspect ${ref}"
-            cat "${log}"
-            return 2
+            local attempt
+            for attempt in 1 2 3; do
+              if docker manifest inspect "${ref}" >"${log}" 2>&1; then
+                return 0
+              fi
+              if grep -Eiq 'manifest unknown|no such manifest' "${log}"; then
+                return 1
+              fi
+              if [ "${attempt}" -lt 3 ]; then
+                echo "::warning::GHCR manifest lookup failed; retrying (${attempt}/3)"
+                sleep 2
+              else
+                echo "::error::cannot inspect ${ref}"
+                cat "${log}"
+                return 2
+              fi
+            done
           }
 
           pull_digest() {

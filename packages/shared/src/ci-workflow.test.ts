@@ -262,6 +262,39 @@ describe("release workflow policy", () => {
     expect(verifyStep).toContain('echo "digest_ref=${IMAGE}@${DIGEST}"');
   });
 
+  it("retries transient manifest lookups without treating missing tags as errors", () => {
+    expect(publishRaw.match(/docker manifest inspect/g)).toHaveLength(5);
+
+    for (const name of [
+      "Check immutable image",
+      "Push immutable image",
+      "Resolve effective release image",
+      "Promote release tag",
+      "Promote latest tag",
+    ]) {
+      const step = stepBlock(publishRaw, name);
+      expect(step, `${name} step must exist`).not.toBe("");
+      expect(step).toContain("for attempt in 1 2 3");
+      expect(step).toContain("sleep 2");
+      expect(step.indexOf("manifest unknown|no such manifest")).toBeLessThan(
+        step.indexOf("sleep 2"),
+      );
+      expect(step).toMatch(/(?:exit 1|return 2)/);
+    }
+
+    for (const name of ["Check immutable image", "Push immutable image"]) {
+      expect(stepBlock(publishRaw, name)).toMatch(/IMAGE_STATE=missing\s+break/);
+    }
+    expect(stepBlock(publishRaw, "Resolve effective release image")).toMatch(
+      /VERSION_EXISTS=false\s+break/,
+    );
+    for (const name of ["Promote release tag", "Promote latest tag"]) {
+      expect(stepBlock(publishRaw, name)).toMatch(
+        /manifest unknown\|no such manifest[\s\S]+return 1/,
+      );
+    }
+  });
+
   it("fails closed when the git tag and GitHub Release disagree", () => {
     const metaStep = stepBlock(publishRaw, "Resolve release state + deterministic build info");
     expect(metaStep).toContain("/releases/tags/v${VERSION}");
