@@ -36,7 +36,7 @@ jobs:
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main'
-    runs-on: [self-hosted, Linux, X64, docker]
+    runs-on: ubuntu-24.04
     permissions:
       contents: write   # create the tag + GitHub Release on a version bump
       packages: write
