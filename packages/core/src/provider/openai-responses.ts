@@ -1678,31 +1678,46 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     sessionId: string,
     prepared: PreparedNativePassthroughRequest,
     signal: AbortSignal | undefined,
-  ): Promise<{
-    connection: CodexResponsesWebSocketConnection;
-    release: () => void;
-  }> {
-    let state = websocketSessions.get(sessionId);
-    if (!state) {
-      const connection = connectWebSocket(prepared, signal);
-      state = { connection, tail: Promise.resolve() };
-      websocketSessions.set(sessionId, state);
-      connection.catch(() => {
-        if (websocketSessions.get(sessionId) === state) websocketSessions.delete(sessionId);
+  ): Promise<
+    | {
+        connection: CodexResponsesWebSocketConnection;
+        release: () => void;
+      }
+    | undefined
+  > {
+    while (!websocketHttpFallbackSessions.has(sessionId)) {
+      if (signal?.aborted) throw signal.reason ?? new Error("client aborted");
+      let state = websocketSessions.get(sessionId);
+      if (!state) {
+        const connection = connectWebSocket(prepared, signal);
+        state = { connection, tail: Promise.resolve() };
+        websocketSessions.set(sessionId, state);
+        connection.catch(() => {
+          if (websocketSessions.get(sessionId) === state) websocketSessions.delete(sessionId);
+        });
+      }
+      let release = () => {};
+      const previous = state.tail;
+      state.tail = new Promise<void>((resolve) => {
+        release = resolve;
       });
+      await previous;
+      if (signal?.aborted) {
+        release();
+        throw signal.reason ?? new Error("client aborted");
+      }
+      if (websocketSessions.get(sessionId) !== state) {
+        release();
+        continue;
+      }
+      try {
+        return { connection: await state.connection, release };
+      } catch (error) {
+        release();
+        throw error;
+      }
     }
-    let release = () => {};
-    const previous = state.tail;
-    state.tail = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await previous;
-    try {
-      return { connection: await state.connection, release };
-    } catch (error) {
-      release();
-      throw error;
-    }
+    return undefined;
   }
 
   async function closeWebSocketSession(sessionId: string): Promise<void> {
@@ -2018,6 +2033,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
             | undefined;
           try {
             lease = await acquireWebSocketSession(sessionId, prepared, opts?.signal);
+            if (!lease) break;
           } catch (error) {
             if (
               error instanceof UpstreamError &&
@@ -2032,6 +2048,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
 
           let retryConnection = false;
           let fallbackToHttp = false;
+          let sendingRequest = false;
           try {
             if (!websocketMetadataFired.has(lease.connection)) {
               websocketMetadataFired.add(lease.connection);
@@ -2042,7 +2059,9 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
             rememberTurnState(turnKey, turnState);
             const requestText = JSON.stringify({ type: "response.create", ...prepared.body });
             opts?.captureUpstream?.(requestText);
+            sendingRequest = true;
             await lease.connection.send(requestText);
+            sendingRequest = false;
             while (true) {
               const received = await receiveWebSocketMessage(lease.connection, opts?.signal);
               if (received === null) {
@@ -2086,7 +2105,17 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
             }
           } catch (error) {
             await closeWebSocketSession(sessionId);
-            throw error;
+            if (opts?.signal?.aborted) throw opts.signal.reason ?? error;
+            if (sendingRequest && isTransientConnectionError(error)) {
+              if (retries < maxRetries) {
+                retryConnection = true;
+              } else {
+                websocketHttpFallbackSessions.add(sessionId);
+                fallbackToHttp = true;
+              }
+            } else {
+              throw error;
+            }
           } finally {
             lease.release();
           }

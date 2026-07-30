@@ -19,6 +19,7 @@ describe("isTransientConnectionError", () => {
       Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
     ],
     ["EPIPE code", Object.assign(new Error("write EPIPE"), { code: "EPIPE" })],
+    ["ECANCELED code", Object.assign(new Error("write ECANCELED"), { code: "ECANCELED" })],
     ["ETIMEDOUT code", Object.assign(new Error("connect ETIMEDOUT"), { code: "ETIMEDOUT" })],
     [
       "UND_ERR_SOCKET code",
