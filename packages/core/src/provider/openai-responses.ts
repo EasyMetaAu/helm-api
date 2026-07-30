@@ -2032,6 +2032,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
 
           let retryConnection = false;
           let fallbackToHttp = false;
+          let sendingRequest = false;
           try {
             if (!websocketMetadataFired.has(lease.connection)) {
               websocketMetadataFired.add(lease.connection);
@@ -2042,7 +2043,9 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
             rememberTurnState(turnKey, turnState);
             const requestText = JSON.stringify({ type: "response.create", ...prepared.body });
             opts?.captureUpstream?.(requestText);
+            sendingRequest = true;
             await lease.connection.send(requestText);
+            sendingRequest = false;
             while (true) {
               const received = await receiveWebSocketMessage(lease.connection, opts?.signal);
               if (received === null) {
@@ -2086,7 +2089,17 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
             }
           } catch (error) {
             await closeWebSocketSession(sessionId);
-            throw error;
+            if (opts?.signal?.aborted) throw opts.signal.reason ?? error;
+            if (sendingRequest && isTransientConnectionError(error)) {
+              if (retries < maxRetries) {
+                retryConnection = true;
+              } else {
+                websocketHttpFallbackSessions.add(sessionId);
+                fallbackToHttp = true;
+              }
+            } else {
+              throw error;
+            }
           } finally {
             lease.release();
           }

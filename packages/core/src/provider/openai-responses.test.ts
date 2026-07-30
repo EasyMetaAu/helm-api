@@ -2662,13 +2662,116 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect(releaseCalls).toBe(1);
   });
 
-  it("rejects an abort that happens during websocket send before receive starts", async () => {
+  it("reconnects after a pre-output websocket write ECANCELED", async () => {
+    let firstCloseCalls = 0;
+    const first: CodexResponsesWebSocketConnection = {
+      responseHeaders: new Headers(),
+      async send() {
+        throw Object.assign(new Error("write ECANCELED"), { code: "ECANCELED" });
+      },
+      async receive() {
+        return null;
+      },
+      async close() {
+        firstCloseCalls += 1;
+      },
+    };
+    const second = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-retried" } },
+        {
+          type: "response.completed",
+          response: { id: "resp-retried", status: "completed", usage: {} },
+        },
+      ],
+    ]);
+    const connect = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_ecanceled")}`,
+        responsesWebSocketConnector: connect,
+        connectRetries: 1,
+        connectRetryBackoffMs: [0],
+      },
+    });
+    const chunks: string[] = [];
+
+    for await (const chunk of client.nativePassthroughStream?.(
+      carrier("ingress-ecanceled", {
+        model: "gpt-5.6-sol",
+        input: [],
+        stream: true,
+        store: false,
+      }),
+    ) ?? []) {
+      chunks.push(chunk);
+    }
+
+    expect(firstCloseCalls).toBe(1);
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(chunks.join("")).toContain("response.completed");
+  });
+
+  it("falls back to HTTP after websocket write ECANCELED exhausts the retry budget", async () => {
+    let closeCalls = 0;
+    const connect = vi.fn(
+      async (): Promise<CodexResponsesWebSocketConnection> => ({
+        responseHeaders: new Headers(),
+        async send() {
+          throw Object.assign(new Error("write ECANCELED"), { code: "ECANCELED" });
+        },
+        async receive() {
+          return null;
+        },
+        async close() {
+          closeCalls += 1;
+        },
+      }),
+    );
+    const fetchMock = vi.fn(async () =>
+      rawSSEResponse(
+        'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+      ),
+    );
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_ecanceled_fallback")}`,
+        responsesWebSocketConnector: connect,
+        connectRetries: 1,
+        connectRetryBackoffMs: [0],
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const chunks: string[] = [];
+
+    for await (const chunk of client.nativePassthroughStream?.(
+      carrier("ingress-ecanceled-fallback", {
+        model: "gpt-5.6-sol",
+        input: [],
+        stream: true,
+        store: false,
+      }),
+    ) ?? []) {
+      chunks.push(chunk);
+    }
+
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(closeCalls).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(chunks.join("")).toContain("response.completed");
+  });
+
+  it("does not reconnect a websocket write ECANCELED after the caller aborts", async () => {
     const controller = new AbortController();
+    const abortReason = new Error("client aborted during send");
     let closeCalls = 0;
     const connection: CodexResponsesWebSocketConnection = {
       responseHeaders: new Headers(),
       async send() {
-        controller.abort(new Error("client aborted during send"));
+        controller.abort(abortReason);
+        throw Object.assign(new Error("write ECANCELED"), { code: "ECANCELED" });
       },
       async receive() {
         return await new Promise<string | null>(() => {});
@@ -2677,11 +2780,12 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
         closeCalls += 1;
       },
     };
+    const connect = vi.fn(async () => connection);
     const client = createCodexResponsesClient({
       config: {
         baseUrl: "https://chatgpt.com/backend-api/codex",
         getAuthHeader: async () => `Bearer ${jwt("acct_abort_send")}`,
-        responsesWebSocketConnector: vi.fn(async () => connection),
+        responsesWebSocketConnector: connect,
         timeoutMs: 10,
       },
     });
@@ -2697,8 +2801,9 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       )
       [Symbol.asyncIterator]();
 
-    await expect(iterator?.next()).rejects.toThrow("client aborted during send");
+    await expect(iterator?.next()).rejects.toBe(abortReason);
     expect(closeCalls).toBe(1);
+    expect(connect).toHaveBeenCalledTimes(1);
   });
 
   it("reuses one upstream websocket for prewarm and previous_response_id continuation", async () => {
