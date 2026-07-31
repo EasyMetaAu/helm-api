@@ -275,9 +275,7 @@ test.describe("per-key request-content storage", () => {
           return requestIds.length;
         })
         .toBeGreaterThanOrEqual(1);
-      const captured = await admin.get(
-        `/admin/api/requests/${requestIds[0]}/payload?part=meta`,
-      );
+      const captured = await admin.get(`/admin/api/requests/${requestIds[0]}/payload?part=meta`);
       expect(await captured.json()).toMatchObject({ captured: true, source: "payload" });
 
       const cleared = await admin.patch(`/admin/api/keys/${keyId}`, {
@@ -302,9 +300,7 @@ test.describe("per-key request-content storage", () => {
           return requestIds.length;
         })
         .toBeGreaterThanOrEqual(2);
-      const inherited = await admin.get(
-        `/admin/api/requests/${requestIds[0]}/payload?part=meta`,
-      );
+      const inherited = await admin.get(`/admin/api/requests/${requestIds[0]}/payload?part=meta`);
       expect(await inherited.json()).toMatchObject({ captured: false });
     } finally {
       await api?.dispose();
