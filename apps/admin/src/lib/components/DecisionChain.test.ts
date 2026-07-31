@@ -28,6 +28,7 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
     status: 'ok',
     stream_outcome: 'completed',
     latency_ms: 460,
+    request_body_bytes: null,
     request_meta: {},
     payload_summary: 'payload withheld (redacted)',
     classifier_output: {

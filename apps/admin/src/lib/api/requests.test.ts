@@ -72,6 +72,13 @@ function rawRecord(overrides: Record<string, unknown> = {}): Record<string, unkn
 }
 
 describe('toDetail', () => {
+  it('maps the recorded request body byte count without inventing legacy values', () => {
+    const measured = toDetail(rawRecord({ request_body_bytes: 1_572_864 }));
+    const legacy = toDetail(rawRecord());
+    expect(measured.request_body_bytes).toBe(1_572_864);
+    expect(legacy.request_body_bytes).toBeNull();
+  });
+
   it('surfaces body-free reasoning effort in redacted request metadata', () => {
     const detail = toDetail(rawRecord());
     expect(detail.reasoning_effort).toBe('high');

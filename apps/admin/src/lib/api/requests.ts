@@ -161,6 +161,8 @@ export interface RequestDetail {
   stream_outcome: StreamOutcome;
   // Total wall-clock latency (Σ attempt latency, ms); null on a legacy record.
   latency_ms: number | null;
+  // Exact client request body size; null on a legacy record.
+  request_body_bytes: number | null;
   request_meta: Record<string, unknown>;
   payload_summary: string; // redacted summary — NOT the full payload
   classifier_output: {
@@ -446,6 +448,12 @@ function servedProvider(raw: RawDecisionRecord, attempts: RawAttempt[]): string 
 function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
+
+function requestBodyBytes(raw: RawDecisionRecord): number | null {
+  const bytes = num(raw.request_body_bytes);
+  return bytes !== null && bytes >= 0 ? bytes : null;
+}
+
 export function toUsage(raw: RawDecisionRecord): TokenUsageView {
   const u = raw.usage ?? undefined;
   const input = num(u?.prompt_tokens);
@@ -558,12 +566,7 @@ export function toListItem(raw: RawDecisionRecord): RequestListItem {
     latency_ms:
       typeof raw.latency_total_ms === 'number' ? raw.latency_total_ms : sumLatency(attempts),
     cost_usd: listCost(raw, attempts),
-    request_body_bytes:
-      typeof raw.request_body_bytes === 'number' &&
-      Number.isFinite(raw.request_body_bytes) &&
-      raw.request_body_bytes >= 0
-        ? raw.request_body_bytes
-        : null,
+    request_body_bytes: requestBodyBytes(raw),
     usage: toUsage(raw),
     // True throughput (output ÷ generation time); null → '—' for non-streaming/legacy.
     tps: computeTps(raw),
@@ -663,6 +666,7 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
     status,
     stream_outcome: normalizeStreamOutcome(raw.stream_outcome),
     latency_ms: typeof raw.latency_total_ms === 'number' ? raw.latency_total_ms : null,
+    request_body_bytes: requestBodyBytes(raw),
     request_meta: buildRequestMeta(raw),
     // The backend does not persist a payload; we render a redaction placeholder so
     // the operator knows it was intentionally withheld (Principle 7).

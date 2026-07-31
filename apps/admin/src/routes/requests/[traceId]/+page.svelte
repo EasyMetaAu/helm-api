@@ -9,7 +9,7 @@
   } from '$lib/api/requests.js';
   import { deepEqual } from '$lib/deep-equal.js';
   import { attemptCodeLabel } from '$lib/format/attempt-codes.js';
-  import { formatDurationMs, formatTimestamp, formatTps } from '$lib/format.js';
+  import { formatBytes, formatDurationMs, formatTimestamp, formatTps } from '$lib/format.js';
   import { t } from '$lib/i18n';
   import Conversation from '$lib/components/Conversation.svelte';
   import CostBreakdown from '$lib/components/CostBreakdown.svelte';
@@ -342,6 +342,12 @@
           <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Latency')}</dt>
           <dd class="mt-0.5 font-mono text-ink-body">
             {d.latency_ms === null ? '—' : formatDurationMs(d.latency_ms)}
+          </dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase tracking-wide text-slate-400">{$t('Request body')}</dt>
+          <dd data-testid="request-body-size" class="mt-0.5 font-mono text-ink-body">
+            {formatBytes(d.request_body_bytes)}
           </dd>
         </div>
       </dl>
