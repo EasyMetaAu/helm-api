@@ -222,6 +222,98 @@ test.describe("admin system settings", () => {
   });
 });
 
+test.describe("per-key request-content storage", () => {
+  test("a key override wins over the system mode and clearing it restores inheritance", async () => {
+    const admin = await playwrightRequest.newContext({
+      baseURL: BASE,
+      extraHTTPHeaders: { Authorization: basicHeader(ADMIN_USER, ADMIN_PASSWORD) },
+    });
+    const current = await admin.get("/admin/api/settings");
+    expect(current.ok()).toBeTruthy();
+    const originalSettings = await current.json();
+    let keyId: string | undefined;
+    let api: Awaited<ReturnType<typeof playwrightRequest.newContext>> | undefined;
+
+    try {
+      const metadataOnly = await admin.put("/admin/api/settings", {
+        data: { ...originalSettings, capture_payloads: false, capture_sessions: false },
+      });
+      expect(metadataOnly.ok()).toBeTruthy();
+
+      const created = await admin.post("/admin/api/keys", {
+        data: {
+          role: "user",
+          name: "e2e per-key content override",
+          request_content_mode: "payload",
+        },
+      });
+      expect(created.status()).toBe(201);
+      const minted = (await created.json()) as { key_id: string; plaintext: string };
+      keyId = minted.key_id;
+      api = await playwrightRequest.newContext({
+        baseURL: BASE,
+        extraHTTPHeaders: {
+          Authorization: `Bearer ${minted.plaintext}`,
+          "Content-Type": "application/json",
+        },
+      });
+
+      const first = await api.post("/v1/chat/completions", {
+        data: {
+          model: "auto",
+          messages: [{ role: "user", content: "hi from per-key payload e2e" }],
+        },
+      });
+      expect(first.ok()).toBeTruthy();
+
+      let requestIds: string[] = [];
+      await expect
+        .poll(async () => {
+          const requests = await admin.get(`/admin/api/requests?key_id=${keyId}&pageSize=10`);
+          const body = (await requests.json()) as { items: Array<{ request_id: string }> };
+          requestIds = body.items.map((item) => item.request_id);
+          return requestIds.length;
+        })
+        .toBeGreaterThanOrEqual(1);
+      const captured = await admin.get(`/admin/api/requests/${requestIds[0]}/payload?part=meta`);
+      expect(await captured.json()).toMatchObject({ captured: true, source: "payload" });
+
+      const cleared = await admin.patch(`/admin/api/keys/${keyId}`, {
+        data: { request_content_mode: null },
+      });
+      expect(cleared.ok()).toBeTruthy();
+      const key = await admin.get(`/admin/api/keys/${keyId}`);
+      expect(await key.json()).toMatchObject({ request_content_mode: null });
+
+      const second = await api.post("/v1/chat/completions", {
+        data: {
+          model: "auto",
+          messages: [{ role: "user", content: "hi after clearing per-key payload e2e" }],
+        },
+      });
+      expect(second.ok()).toBeTruthy();
+      await expect
+        .poll(async () => {
+          const requests = await admin.get(`/admin/api/requests?key_id=${keyId}&pageSize=10`);
+          const body = (await requests.json()) as { items: Array<{ request_id: string }> };
+          requestIds = body.items.map((item) => item.request_id);
+          return requestIds.length;
+        })
+        .toBeGreaterThanOrEqual(2);
+      const inherited = await admin.get(`/admin/api/requests/${requestIds[0]}/payload?part=meta`);
+      expect(await inherited.json()).toMatchObject({ captured: false });
+    } finally {
+      await api?.dispose();
+      if (keyId !== undefined) {
+        await admin.delete(`/admin/api/keys/${keyId}`);
+        await admin.delete(`/admin/api/keys/${keyId}?purge=true`);
+      }
+      await admin.put("/admin/api/settings", { data: originalSettings });
+      await admin.dispose();
+    }
+  });
+});
+
 // ── 6. Payload view: the seeded request was stored WITHOUT a captured body ────
 test.describe("admin request payload view", () => {
   test("shows a no-session notice when no payload or Session ID was captured", async ({ page }) => {

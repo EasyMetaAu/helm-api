@@ -39,6 +39,7 @@ export interface ApiKeyView {
   memory_mode: 'off' | 'observe' | 'inject';
   memory_project_id: string | null;
   memory_thread_source: 'header' | 'auto';
+  request_content_mode: 'none' | 'payload' | 'session' | null;
 }
 
 // Operator-specified caps for a new key. The plaintext is minted server-side; the
@@ -71,6 +72,7 @@ export interface CreateKeyInput {
   memory_mode?: 'off' | 'observe' | 'inject';
   memory_project_id?: string;
   memory_thread_source?: 'header' | 'auto';
+  request_content_mode?: 'none' | 'payload' | 'session';
 }
 
 // Editable caps for an existing key (PATCH). Mirrors the server
@@ -99,6 +101,7 @@ export interface UpdateKeyInput {
   memory_mode?: 'off' | 'observe' | 'inject';
   memory_project_id?: string | null;
   memory_thread_source?: 'header' | 'auto';
+  request_content_mode?: 'none' | 'payload' | 'session' | null;
 }
 
 // Create/rotate responses intentionally carry plaintext so the operator can copy
@@ -209,6 +212,12 @@ function normalizeView(raw: Record<string, unknown>): ApiKeyView {
       raw.memory_mode === 'inject' ? 'inject' : raw.memory_mode === 'observe' ? 'observe' : 'off',
     memory_project_id: typeof raw.memory_project_id === 'string' ? raw.memory_project_id : null,
     memory_thread_source: raw.memory_thread_source === 'auto' ? 'auto' : 'header',
+    request_content_mode:
+      raw.request_content_mode === 'none' ||
+      raw.request_content_mode === 'payload' ||
+      raw.request_content_mode === 'session'
+        ? raw.request_content_mode
+        : null,
   };
 }
 
@@ -255,6 +264,9 @@ function toServerBody(input: CreateKeyInput): Record<string, unknown> {
   }
   if (input.memory_thread_source !== undefined) {
     out.memory_thread_source = input.memory_thread_source;
+  }
+  if (input.request_content_mode !== undefined) {
+    out.request_content_mode = input.request_content_mode;
   }
   return out;
 }

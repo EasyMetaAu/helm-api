@@ -414,6 +414,7 @@
   "Inject (record + hydrate)": "注入（記錄 + 召回注入）",
   "input {input} · output {output} · cached {cached} · non-cached {nonCached}": "輸入 {input} · 輸出 {output} · 快取 {cached} · 非快取 {nonCached}",
   "Input tokens": "輸入權杖",
+  "Inherit system setting": "繼承系統設定",
   "Interval changes take effect on the next restart.": "間隔變更將在下次重新啟動時生效。",
   "Invalid JSON in request body": "請求內容 JSON 格式有誤",
   "Invalid request": "請求無效",

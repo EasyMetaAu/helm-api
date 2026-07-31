@@ -45,6 +45,7 @@ function key(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView {
     memory_mode: 'off' as const,
     memory_project_id: null,
     memory_thread_source: 'header' as const,
+    request_content_mode: null,
     ...overrides,
   };
 }
@@ -413,6 +414,7 @@ describe('keys page', () => {
         budget_window_seconds: null,
         over_budget_behavior: 'degrade',
         degrade_lane: null,
+        request_content_mode: null,
         // Concurrency untouched → still unlimited (null).
         concurrency_limit: null,
         // Memory defaults untouched → off / none / header (issue #97).
@@ -441,6 +443,25 @@ describe('keys page', () => {
       expect(updateKey).toHaveBeenCalledWith(
         'k1',
         expect.objectContaining({ rate_limit_rpm: null }),
+      ),
+    );
+  });
+
+  it('clears a request-content override back to the system setting', async () => {
+    renderPage([key('k1', { request_content_mode: 'payload' })]);
+    await fireEvent.click(
+      within(screen.getByTestId('key-row')).getByRole('button', { name: /^edit$/i }),
+    );
+    const dialog = screen.getByRole('dialog', { name: /edit key/i });
+    await fireEvent.change(within(dialog).getByLabelText('Request content storage'), {
+      target: { value: 'inherit' },
+    });
+    await fireEvent.click(within(dialog).getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() =>
+      expect(updateKey).toHaveBeenCalledWith(
+        'k1',
+        expect.objectContaining({ request_content_mode: null }),
       ),
     );
   });

@@ -624,6 +624,22 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
     expect(insertPayload).not.toHaveBeenCalled();
   });
 
+  it("per-key payload mode overrides the disabled system setting", async () => {
+    const { record, insertPayload } = makeRecord({ capturePayloads: false });
+    const { deps } = makeDeps({
+      record,
+      identity: { ...IDENTITY, caps: { requestContentMode: "payload" } },
+    });
+    const res = await buildApp(deps).request("/v1beta/models/gemini-2.0-flash:generateContent", {
+      method: "POST",
+      headers: GEMINI_AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    expect(insertPayload).toHaveBeenCalledOnce();
+  });
+
   // ── Terminal stream error frame must be appended to the captured body (review
   //    P2). A mid-stream error writes a nameless `data:` error frame to the
   //    client; that frame has to land in the persisted responseJson too.

@@ -33,6 +33,7 @@ function fakeKey(overrides: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
     memory_mode: "off",
     memory_project_id: null,
     memory_thread_source: "header",
+    request_content_mode: null,
     ...overrides,
   };
 }
@@ -441,6 +442,27 @@ describe("runReplay", () => {
     );
     expect(rec.payloads).toHaveLength(0);
     expect(rec.inserts).toHaveLength(1);
+  });
+
+  it("per-key payload mode overrides disabled system capture for replay", async () => {
+    const rec = emptyRec();
+    const route: ReplayWiring["route"] = async (req) => ({
+      decision: decision(req.request_id),
+      final: { status: "ok", alias: "openai/gpt-4" },
+      body: { ok: true },
+      stream: null,
+      error: null,
+    });
+    await runReplay(
+      {
+        replay: wiring(route, rec, { capturePayloads: () => false }),
+        telemetry: fakeTelemetry("key_1", rec),
+        keyStore: fakeKeyStore([fakeKey({ request_content_mode: "payload" })]),
+      },
+      { originalTraceId: "orig", body: okBody, signal: new AbortController().signal, log: noop },
+    );
+
+    expect(rec.payloads).toHaveLength(1);
   });
 
   it("persists the partial stream + telemetry when the stream throws mid-drain", async () => {

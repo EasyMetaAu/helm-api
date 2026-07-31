@@ -43,6 +43,7 @@ export interface AuthIdentity {
       projectName?: string | null;
       threadSource: "header" | "auto";
     };
+    requestContentMode: ApiKeyRecord["request_content_mode"];
   };
 }
 
@@ -139,6 +140,7 @@ export function authMiddleware(deps: AuthDeps): MiddlewareHandler<AppEnv> {
           projectName: record.memory_project_id,
           threadSource: record.memory_thread_source,
         },
+        requestContentMode: record.request_content_mode,
       },
     };
     c.set("identity", identity);

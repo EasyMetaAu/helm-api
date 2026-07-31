@@ -900,6 +900,25 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     });
   });
 
+  it("/compact honors a per-key payload override when system capture is off", async () => {
+    const { record, insertPayload } = makeRecord({ capturePayloads: false });
+    const compact = vi.fn().mockResolvedValue({ id: "resp_compact", output: [] });
+    const { deps } = makeDeps({
+      lifecycle: { compact },
+      record,
+      identity: { keyId: "k1", accountId: "acct", caps: { requestContentMode: "payload" } },
+    });
+
+    const res = await buildApp(deps).request("/v1/responses/compact", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+
+    expect(res.status).toBe(200);
+    expect(insertPayload).toHaveBeenCalledOnce();
+  });
+
   it("/compact rejects an exhausted per-key usage budget before subscription dispatch", async () => {
     const compact = vi.fn().mockResolvedValue({ output: [] });
     const check = vi.fn().mockResolvedValue({

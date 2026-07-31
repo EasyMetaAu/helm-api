@@ -65,6 +65,7 @@ import {
   tokensFromUsage,
   usageFromBody,
   usageFromSSE,
+  withRequestContentMode,
   withSseCaptureRelease,
 } from "./payload-capture.js";
 import { resolveSessionCapture, stampSessionCapture } from "./session-capture.js";
@@ -249,6 +250,7 @@ interface ChatIdentity {
     budget?: BudgetCaps;
     /** Per-key memory defaults (issue #97); absent = memory off unless headers say otherwise. */
     memory?: MemoryKeyDefaults;
+    requestContentMode?: "none" | "payload" | "session" | null;
   };
 }
 
@@ -444,6 +446,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     const traceId = c.get("trace_id");
     const requestId = c.get("request_id");
     const identity = c.get("identity") as unknown as ChatIdentity;
+    const captureDeps = withRequestContentMode(deps, identity.caps.requestContentMode);
 
     // Boundary validation (docs/07, principle 2 fail-closed): a malformed JSON
     // body or an invalid request (e.g. empty `messages`) is a CLIENT error → 400
@@ -563,7 +566,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       if (deps.writes !== undefined) {
         await deps.writes.enqueueTelemetry(input);
         await queueOrPersistSessionRequest(
-          deps,
+          captureDeps,
           {
             requestId,
             accountId: identity.accountId,
@@ -579,7 +582,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
         return;
       }
       await queueOrPersistSessionRequest(
-        deps,
+        captureDeps,
         {
           requestId,
           accountId: identity.accountId,
@@ -610,7 +613,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     ) => {
       const capturedResponseJson = requestTimedOut(c) ? null : responseJson;
       if (deps.writes !== undefined) {
-        if (!captureEnabled(deps)) return;
+        if (!captureEnabled(captureDeps)) return;
         await deps.writes.enqueuePayload({
           requestId,
           requestJson,
@@ -621,7 +624,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
         return;
       }
       await persistPayload(
-        deps,
+        captureDeps,
         {
           requestId,
           requestJson,
@@ -890,7 +893,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       // whether the buffered body is PERSISTED, not whether it is collected — so
       // when capture is OFF we retain only a bounded TAIL (enough for usageFromSSE),
       // not the whole response, capping per-stream memory under high concurrency.
-      const captureOn = captureEnabled(deps);
+      const captureOn = captureEnabled(captureDeps);
       const captured = createSseCapture(captureOn);
       const streamModelRestamper =
         (deps.responseModelPolicy ?? "provider") === "requested_alias"

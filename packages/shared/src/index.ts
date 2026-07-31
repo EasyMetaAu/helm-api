@@ -200,6 +200,8 @@ export {
   OverBudgetBehaviorSchema,
   type PortalMemorySettingsRequest,
   PortalMemorySettingsRequestSchema,
+  type RequestContentMode,
+  RequestContentModeSchema,
   type UpdateKeyRequest,
   UpdateKeyRequestSchema,
 } from "./key/schema.js";

@@ -28,7 +28,12 @@ import {
 import { buildImageDecision, numField } from "./image-telemetry.js";
 import { geminiImageUsageBody } from "./image-usage.js";
 import type { MessagesIdentity } from "./messages.js";
-import { captureEnabled, type RecordServedDeps, recordServed } from "./payload-capture.js";
+import {
+  captureEnabled,
+  type RecordServedDeps,
+  recordServed,
+  withRequestContentMode,
+} from "./payload-capture.js";
 
 // POST /v1beta/interactions — Google Gemini Interactions API (the modern image-gen
 // surface for the gemini-*-image "Nano Banana" models; the SDK's
@@ -202,6 +207,10 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
     if (identity === null) {
       return errorJson(c, 401, "missing or invalid API key", "UNAUTHENTICATED");
     }
+    const captureRecord =
+      deps.record === undefined
+        ? undefined
+        : withRequestContentMode(deps.record, identity.caps?.requestContentMode);
     const keyPrefix = typeof identity.keyPrefix === "string" ? identity.keyPrefix : null;
 
     // 2) Rate limit AFTER auth.
@@ -385,7 +394,7 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
     // 6b) Terminal failure. A client abort is a NON-provider fault → no record.
     if (!outcome.ok) {
       if (outcome.aborted) return errorJson(c, 400, "client disconnected", "CANCELLED");
-      if (deps.record !== undefined) {
+      if (captureRecord !== undefined) {
         const decision = buildImageDecision({
           requestId,
           traceId,
@@ -399,7 +408,7 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
           usage: null,
         });
         await recordServed(
-          deps.record,
+          captureRecord,
           {
             requestId,
             apiKeyId: identity.keyId,
@@ -422,7 +431,7 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
 
     // 7) Cost + telemetry. Capture a copy with the base64 image stripped.
     const { served, result } = outcome;
-    if (deps.record !== undefined) {
+    if (captureRecord !== undefined) {
       const decision = buildImageDecision({
         requestId,
         traceId,
@@ -438,9 +447,9 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
       // Capture the FULL body — the store's externalizeImages content-addresses the
       // base64 image into payload_blobs (deduped + retention-pruned) and rehydrates it
       // for the admin detail view; request_payloads keeps only a sentinel.
-      const responseJson = captureEnabled(deps.record) ? JSON.stringify(result.clientBody) : null;
+      const responseJson = captureEnabled(captureRecord) ? JSON.stringify(result.clientBody) : null;
       await recordServed(
-        deps.record,
+        captureRecord,
         {
           requestId,
           apiKeyId: identity.keyId,

@@ -3724,6 +3724,7 @@ export async function buildServer(
               projectId: effectiveMemoryProjectId(record),
               threadSource: record.memory_thread_source,
             },
+            requestContentMode: record.request_content_mode,
           },
         };
       },
@@ -3942,6 +3943,7 @@ export async function buildServer(
               projectId: effectiveMemoryProjectId(record),
               threadSource: record.memory_thread_source,
             },
+            requestContentMode: record.request_content_mode,
           },
         };
       },
@@ -4041,6 +4043,7 @@ export async function buildServer(
           projectId: effectiveMemoryProjectId(record),
           threadSource: record.memory_thread_source,
         },
+        requestContentMode: record.request_content_mode,
       },
     };
   };

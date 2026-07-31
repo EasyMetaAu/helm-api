@@ -414,6 +414,7 @@
   "Inject (record + hydrate)": "Inyectar (registrar + hidratar)",
   "input {input} · output {output} · cached {cached} · non-cached {nonCached}": "entrada {input} · salida {output} · en caché {cached} · sin caché {nonCached}",
   "Input tokens": "Tokens de entrada",
+  "Inherit system setting": "Heredar la configuración del sistema",
   "Interval changes take effect on the next restart.": "Los cambios de intervalo se aplican en el próximo reinicio.",
   "Invalid JSON in request body": "JSON no válido en el cuerpo de la solicitud",
   "Invalid request": "Solicitud no válida",

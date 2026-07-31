@@ -53,6 +53,7 @@ export const apiKeys = sqliteTable("api_keys", {
   memoryMode: text("memory_mode").notNull().default("off"),
   memoryProjectId: text("memory_project_id"),
   memoryThreadSource: text("memory_thread_source").notNull().default("header"),
+  requestContentMode: text("request_content_mode"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });
 

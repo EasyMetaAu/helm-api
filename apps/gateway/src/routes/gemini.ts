@@ -32,6 +32,7 @@ import {
   type RecordServedDeps,
   recordServed,
   sessionCaptureEnabled,
+  withRequestContentMode,
   withSseCaptureRelease,
 } from "./payload-capture.js";
 import { resolveSessionCapture, stampSessionCapture } from "./session-capture.js";
@@ -220,6 +221,10 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
         trace_id: traceId,
       });
     }
+    const captureRecord =
+      deps.record === undefined
+        ? undefined
+        : withRequestContentMode(deps.record, identity.caps?.requestContentMode);
 
     // 1b) Rate limit AFTER auth (needs the resolved key_id), BEFORE translate/route.
     if (deps.rateLimiter !== undefined) {
@@ -429,8 +434,9 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
     // (the telemetry row is always written regardless). Gating the buffering here
     // stops long/concurrent streams from accumulating the full body when capture is
     // off (review P2).
-    const captureBodies = deps.record !== undefined && captureEnabled(deps.record);
-    const captureSessionResponse = deps.record !== undefined && sessionCaptureEnabled(deps.record);
+    const captureBodies = captureRecord !== undefined && captureEnabled(captureRecord);
+    const captureSessionResponse =
+      captureRecord !== undefined && sessionCaptureEnabled(captureRecord);
 
     // 4) Protocol Adapter (outbound). Gemini streaming events are incremental deltas,
     //    written as nameless `data:` frames — NO `event:` name, NO `[DONE]`.
@@ -508,13 +514,13 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
               // for-await loop ended so the pipeline's own streamIR finally (cost
               // backfill) already mutated result.decision. result.decision exists even
               // on a pre-stream failure, so a failed stream still records. Fail-open.
-              if (deps.record) {
+              if (captureRecord) {
                 stampServingAccount(result.decision, result.servingAccount ?? null);
                 if (captured?.limited()) {
                   c.get("logger").log("warn", "payload.capture_limited", { trace_id: traceId });
                 }
                 await recordServed(
-                  deps.record,
+                  captureRecord,
                   {
                     requestId,
                     accountId: identity.accountId,
@@ -548,10 +554,10 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
       // chat.ts) so an all-providers-failed request still appears in
       // /admin/requests. responseJson null = no body. result.decision exists even
       // on failure. Fail-open inside recordServed.
-      if (deps.record) {
+      if (captureRecord) {
         stampServingAccount(result.decision, result.servingAccount ?? null);
         await recordServed(
-          deps.record,
+          captureRecord,
           {
             requestId,
             accountId: identity.accountId,
@@ -576,10 +582,10 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
     }
     // Record the served (non-stream) request: telemetry row (→ /admin/requests) +
     // verbatim request/response body. Mirrors chat.ts. Fail-open inside recordServed.
-    if (deps.record) {
+    if (captureRecord) {
       stampServingAccount(result.decision, result.servingAccount ?? null);
       await recordServed(
-        deps.record,
+        captureRecord,
         {
           requestId,
           accountId: identity.accountId,

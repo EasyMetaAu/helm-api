@@ -56,6 +56,7 @@ import {
   tokenBreakdownFromUsage,
   tokensFromUsage,
   usageFromResponsesResponse,
+  withRequestContentMode,
 } from "./payload-capture.js";
 import { resolveSessionCapture, stampSessionCapture } from "./session-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
@@ -939,6 +940,10 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     const traceId = c.get("trace_id");
     const requestId = c.get("request_id");
     const identity = await authenticateResponsesRequest(c);
+    const captureRecord =
+      deps.record === undefined
+        ? undefined
+        : withRequestContentMode(deps.record, identity.caps?.requestContentMode);
     await enforceRateLimit(c, identity);
     await acquireConcurrency(c, identity);
     const { native, rawBody, materialized } = await parseJsonBodyWithRaw(c, traceId);
@@ -995,7 +1000,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       const costUsd =
         usage === null
           ? null
-          : (deps.budget?.costOf?.(alias, usage) ?? deps.record?.costOf?.(alias, usage) ?? null);
+          : (deps.budget?.costOf?.(alias, usage) ?? captureRecord?.costOf?.(alias, usage) ?? null);
       const tokens = tokensFromUsage(usage);
       if (deps.budget !== undefined && budgetCaps !== undefined) {
         try {
@@ -1010,9 +1015,9 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         }
       }
       deps.recordOAuthUsage?.(execution?.servingAccount ?? null, alias, { tokens, costUsd });
-      if (deps.record !== undefined) {
+      if (captureRecord !== undefined) {
         await recordServed(
-          deps.record,
+          captureRecord,
           {
             requestId,
             apiKeyId: identity.keyId,
@@ -1032,7 +1037,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
               costUsd,
             }),
             requestJson: rawBody,
-            responseJson: captureEnabled(deps.record) ? JSON.stringify(body) : null,
+            responseJson: captureEnabled(captureRecord) ? JSON.stringify(body) : null,
             timedOut: requestTimedOut(c),
             upstreamRequestJson: execution?.upstreamRequest ?? null,
           },
@@ -1042,12 +1047,12 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       applyResponseMetadata(c, responseMetadata, modelsEtagForRequest(c, deps, identity.keyId));
       return c.json(body);
     } catch (err) {
-      if (deps.record !== undefined) {
+      if (captureRecord !== undefined) {
         const requestedModel = compactModelFromBody(carrier.body);
         const execution = executionState.value;
         const providerModel = execution?.providerModel ?? requestedModel;
         await recordServed(
-          deps.record,
+          captureRecord,
           {
             requestId,
             apiKeyId: identity.keyId,
@@ -1097,6 +1102,10 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
 
     // 1) Auth FIRST (docs/02 pipeline order).
     const identity = await authenticateResponsesRequest(c);
+    const captureRecord =
+      deps.record === undefined
+        ? undefined
+        : withRequestContentMode(deps.record, identity.caps?.requestContentMode);
 
     // 1b) Rate limit AFTER auth (needs the resolved key_id) and BEFORE translate/
     //     route. OpenAI surface → the structured rate_limited envelope via onError
@@ -1205,8 +1214,9 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     // (the telemetry row is always written regardless). Gating the buffering here
     // stops long/concurrent streams from accumulating the full body when capture is
     // off (review P2).
-    const captureBodies = deps.record !== undefined && captureEnabled(deps.record);
-    const captureSessionResponse = deps.record !== undefined && sessionCaptureEnabled(deps.record);
+    const captureBodies = captureRecord !== undefined && captureEnabled(captureRecord);
+    const captureSessionResponse =
+      captureRecord !== undefined && sessionCaptureEnabled(captureRecord);
 
     // 4) Outbound: stream vs non-stream, isomorphic shape.
     if (ir.stream === true) {
@@ -1391,13 +1401,13 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           // result.decision exists even on a pre-stream failure, so a failed stream
           // still records. Fail-open inside recordServed.
           try {
-            if (deps.record && result !== null) {
+            if (captureRecord && result !== null) {
               stampServingAccount(result.decision, result.servingAccount ?? null);
               if (captured?.limited()) {
                 c.get("logger").log("warn", "payload.capture_limited", { trace_id: traceId });
               }
               await recordServed(
-                deps.record,
+                captureRecord,
                 {
                   requestId,
                   accountId: identity.accountId,
@@ -1462,10 +1472,10 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       // chat.ts, which records failures too) so an all-providers-failed request
       // still appears in /admin/requests. responseJson null = no body produced.
       // result.decision exists even on failure. Fail-open inside recordServed.
-      if (deps.record) {
+      if (captureRecord) {
         stampServingAccount(result.decision, result.servingAccount ?? null);
         await recordServed(
-          deps.record,
+          captureRecord,
           {
             requestId,
             accountId: identity.accountId,
@@ -1498,10 +1508,10 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     }
     // Record the served (non-stream) request: telemetry row (→ /admin/requests) +
     // verbatim request/response body. Mirrors chat.ts. Fail-open inside recordServed.
-    if (deps.record) {
+    if (captureRecord) {
       stampServingAccount(result.decision, result.servingAccount ?? null);
       await recordServed(
-        deps.record,
+        captureRecord,
         {
           requestId,
           accountId: identity.accountId,

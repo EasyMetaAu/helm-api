@@ -9,6 +9,7 @@ import zhHant from '../../locales/zh-hant.json';
 const settingsKeys = [
   'Compact database automatically',
   'Full payload for every request',
+  'Inherit system setting',
   'Incremental transcript per session',
   'Metadata only',
   'Privacy note: full payload and session modes store request and response content, which may include tool arguments, reasoning, and media. Choose metadata only to store no bodies.',

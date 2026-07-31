@@ -303,6 +303,20 @@
           >
         </dd>
       </div>
+      <div>
+        <dt class="text-xs uppercase tracking-wide text-slate-400">
+          {$t('Request content storage')}
+        </dt>
+        <dd class="mt-0.5 text-ink-body">
+          {key.request_content_mode === 'none'
+            ? $t('Metadata only')
+            : key.request_content_mode === 'payload'
+              ? $t('Full payload for every request')
+              : key.request_content_mode === 'session'
+                ? $t('Incremental transcript per session')
+                : $t('Inherit system setting')}
+        </dd>
+      </div>
     </dl>
   </section>
 

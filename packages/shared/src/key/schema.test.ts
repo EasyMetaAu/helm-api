@@ -5,6 +5,7 @@ import {
   effectiveMemoryProjectId,
   KeyRoleSchema,
   PortalMemorySettingsRequestSchema,
+  RequestContentModeSchema,
   UpdateKeyRequestSchema,
 } from "./schema.js";
 
@@ -24,6 +25,20 @@ function fullKey() {
 }
 
 describe("ApiKeyRecordSchema", () => {
+  it("supports a nullable per-key request-content override", () => {
+    expect(RequestContentModeSchema.options).toEqual(["none", "payload", "session"]);
+    expect(ApiKeyRecordSchema.parse(fullKey()).request_content_mode).toBeNull();
+    expect(
+      CreateKeyRequestSchema.parse({ request_content_mode: "payload" }).request_content_mode,
+    ).toBe("payload");
+    expect(
+      UpdateKeyRequestSchema.parse({ request_content_mode: null }).request_content_mode,
+    ).toBeNull();
+    expect(UpdateKeyRequestSchema.safeParse({ request_content_mode: "invalid" }).success).toBe(
+      false,
+    );
+  });
+
   it("accepts a full key record (docs/06 fields)", () => {
     expect(ApiKeyRecordSchema.safeParse(fullKey()).success).toBe(true);
   });

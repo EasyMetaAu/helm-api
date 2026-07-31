@@ -320,6 +320,29 @@ describe("runPgMigrations — per-migration atomicity", () => {
     await db.$close();
   });
 
+  it("v43 adds a nullable per-key request-content override", async () => {
+    const client = new PGlite();
+    const db = Object.assign(drizzlePglite(client), { $close: () => client.close() });
+    await db.execute(
+      sql.raw("CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at BIGINT NOT NULL)"),
+    );
+    await db.execute(sql.raw("CREATE TABLE api_keys (key_id TEXT PRIMARY KEY)"));
+    await db.execute(sql.raw("INSERT INTO api_keys (key_id) VALUES ('legacy')"));
+    for (let version = 1; version <= 42; version++) {
+      await db.execute(
+        sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),
+      );
+    }
+
+    await expect(runPgMigrations(db)).resolves.toBeUndefined();
+
+    const row = (await db.execute(
+      sql.raw("SELECT request_content_mode FROM api_keys WHERE key_id = 'legacy'"),
+    )) as { rows: Array<{ request_content_mode: string | null }> };
+    expect(row.rows[0]?.request_content_mode).toBeNull();
+    await db.$close();
+  });
+
   it("v38 adds and backfills per-thread admin activity summaries", async () => {
     const client = new PGlite();
     const db = Object.assign(drizzlePglite(client), { $close: () => client.close() });

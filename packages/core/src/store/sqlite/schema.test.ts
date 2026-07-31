@@ -156,6 +156,7 @@ describe("sqlite schema + migrations", () => {
       "allow_custom_model",
       "blocked_models",
       "allow_fast_mode",
+      "request_content_mode",
       "disabled",
       "created_at",
     ]) {
@@ -262,6 +263,33 @@ describe("sqlite schema + migrations", () => {
       ).sql;
       expect(schemaSql).toContain("body_bytes INTEGER");
       expect(schemaSql).not.toContain("body_bytes INTEGER CHECK");
+      after.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("v44 adds a nullable per-key request-content override", () => {
+    const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v44-key-content-mode-"));
+    const path = join(dir, "helm.db");
+    try {
+      const seed = new Database(path);
+      seed.exec(`
+        CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
+        CREATE TABLE api_keys (key_id TEXT PRIMARY KEY);
+        INSERT INTO api_keys (key_id) VALUES ('legacy');
+      `);
+      const record = seed.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)");
+      for (let version = 1; version <= 43; version++) record.run(version, 1);
+      seed.close();
+
+      runMigrations(path);
+
+      const after = new Database(path);
+      const row = after
+        .prepare("SELECT request_content_mode FROM api_keys WHERE key_id = 'legacy'")
+        .get() as { request_content_mode: string | null };
+      expect(row.request_content_mode).toBeNull();
       after.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });

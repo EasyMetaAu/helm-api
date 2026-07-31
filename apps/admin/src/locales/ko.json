@@ -414,6 +414,7 @@
   "Inject (record + hydrate)": "주입(기록 + 하이드레이트)",
   "input {input} · output {output} · cached {cached} · non-cached {nonCached}": "입력 {input} · 출력 {output} · 캐시 {cached} · 비캐시 {nonCached}",
   "Input tokens": "입력 토큰",
+  "Inherit system setting": "시스템 설정 상속",
   "Interval changes take effect on the next restart.": "간격 변경 사항은 다음 재시작 시 적용됩니다.",
   "Invalid JSON in request body": "요청 본문의 JSON 형식이 올바르지 않습니다",
   "Invalid request": "잘못된 요청",

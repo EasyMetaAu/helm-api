@@ -35,6 +35,7 @@ import {
   type RecordServedDeps,
   recordServed,
   sessionCaptureEnabled,
+  withRequestContentMode,
   withSseCaptureRelease,
 } from "./payload-capture.js";
 import { resolveSessionCapture, stampSessionCapture } from "./session-capture.js";
@@ -81,6 +82,8 @@ export interface MessagesIdentity {
     /** Per-key memory defaults (issue #97), read by the route's memory scope
      *  resolver; absent = memory off unless headers say otherwise. */
     memory?: MemoryKeyDefaults;
+    /** Per-key request-content override; null/absent inherits the system mode. */
+    requestContentMode?: "none" | "payload" | "session" | null;
     [k: string]: unknown;
   };
   [k: string]: unknown;
@@ -380,6 +383,10 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
         trace_id: traceId,
       });
     }
+    const captureRecord =
+      deps.record === undefined
+        ? undefined
+        : withRequestContentMode(deps.record, identity.caps?.requestContentMode);
 
     // 1b) Rate limit AFTER auth (needs the resolved key_id) and BEFORE translate/
     //     route (cut off cost before classification/eval). Mirrors the OpenAI chat
@@ -602,8 +609,9 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     // (the telemetry row is always written regardless). Gating the buffering here
     // stops long/concurrent streams from accumulating the full body when capture is
     // off (review P2).
-    const captureBodies = deps.record !== undefined && captureEnabled(deps.record);
-    const captureSessionResponse = deps.record !== undefined && sessionCaptureEnabled(deps.record);
+    const captureBodies = captureRecord !== undefined && captureEnabled(captureRecord);
+    const captureSessionResponse =
+      captureRecord !== undefined && sessionCaptureEnabled(captureRecord);
 
     // 4) Protocol Adapter (outbound): stream vs non-stream, isomorphic shape.
     if (ir.stream === true) {
@@ -694,13 +702,13 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
               // for-await loop ended so the pipeline's own streamIR finally (cost
               // backfill) already mutated result.decision. result.decision exists even
               // on a pre-stream failure, so a failed stream still records. Fail-open.
-              if (deps.record) {
+              if (captureRecord) {
                 stampServingAccount(result.decision, result.servingAccount ?? null);
                 if (captured?.limited()) {
                   c.get("logger").log("warn", "payload.capture_limited", { trace_id: traceId });
                 }
                 await recordServed(
-                  deps.record,
+                  captureRecord,
                   {
                     requestId,
                     accountId: identity.accountId,
@@ -744,10 +752,10 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
       // chat.ts) so an all-providers-failed request still appears in
       // /admin/requests. responseJson null = no body. result.decision exists even
       // on failure. Fail-open inside recordServed.
-      if (deps.record) {
+      if (captureRecord) {
         stampServingAccount(result.decision, result.servingAccount ?? null);
         await recordServed(
-          deps.record,
+          captureRecord,
           {
             requestId,
             accountId: identity.accountId,
@@ -772,10 +780,10 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     }
     // Record the served (non-stream) request: telemetry row (→ /admin/requests) +
     // verbatim request/response body. Mirrors chat.ts. Fail-open inside recordServed.
-    if (deps.record) {
+    if (captureRecord) {
       stampServingAccount(result.decision, result.servingAccount ?? null);
       await recordServed(
-        deps.record,
+        captureRecord,
         {
           requestId,
           accountId: identity.accountId,

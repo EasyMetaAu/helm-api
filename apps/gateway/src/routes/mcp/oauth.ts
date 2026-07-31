@@ -212,6 +212,7 @@ function identityFromClaims(claims: Record<string, unknown>): AuthIdentity {
         projectId: typeof claims.pid === "string" ? claims.pid : null,
         threadSource: "header",
       },
+      requestContentMode: null,
     },
   };
 }

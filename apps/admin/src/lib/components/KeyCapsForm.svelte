@@ -22,6 +22,7 @@
     budgetWindow: number | null;
     overBudgetBehavior: 'degrade' | 'reject';
     degradeLane: string;
+    requestContentMode: 'inherit' | 'none' | 'payload' | 'session';
     memoryMode: 'off' | 'observe' | 'inject';
     memoryProject: string;
     memoryThreadSource: 'header' | 'auto';
@@ -44,6 +45,7 @@
       budgetWindow: null,
       overBudgetBehavior: 'degrade',
       degradeLane: '',
+      requestContentMode: 'inherit',
       memoryMode: 'off',
       memoryProject: '',
       // Mirrors the keystore mint-default: a new key derives its thread automatically
@@ -69,6 +71,7 @@
       budgetWindow: key.budget_window_seconds,
       overBudgetBehavior: key.over_budget_behavior,
       degradeLane: key.degrade_lane ?? '',
+      requestContentMode: key.request_content_mode ?? 'inherit',
       memoryMode: key.memory_mode,
       memoryProject: key.memory_project_id ?? '',
       memoryThreadSource: key.memory_thread_source,
@@ -127,6 +130,9 @@
           form.budgetWindow != null),
     ),
   );
+  let openRequestContent = $state(
+    untrack(() => expandConfigured && form.requestContentMode !== 'inherit'),
+  );
   let openMemory = $state(untrack(() => expandConfigured && form.memoryMode !== 'off'));
 
   function toggleLane(lane: string, checked: boolean): void {
@@ -158,6 +164,15 @@
     parts.push(form.overBudgetBehavior === 'degrade' ? $t('degrade') : $t('reject'));
     return parts.join(' · ');
   });
+  const requestContentSummary = $derived(
+    form.requestContentMode === 'none'
+      ? $t('Metadata only')
+      : form.requestContentMode === 'payload'
+        ? $t('Full payload for every request')
+        : form.requestContentMode === 'session'
+          ? $t('Incremental transcript per session')
+          : $t('Inherit system setting'),
+  );
   const memorySummary = $derived.by(() => {
     if (form.memoryMode === 'off') return $t('Off');
     const parts = [form.memoryMode === 'observe' ? $t('Observe') : $t('Inject')];
@@ -398,6 +413,36 @@
     <span class="field-help"
       >{$t(
         'Cap usage over a rolling window. Over budget, the key is degraded to a cheaper lane (cost-controlled, service continues) or rejected. Leave caps blank for no budget.',
+      )}</span
+    >
+  </div>
+</details>
+
+<details class="form-section" bind:open={openRequestContent}>
+  <summary class="form-section-summary">
+    {@render sectionHead(
+      $t('Request content storage'),
+      openRequestContent,
+      requestContentSummary,
+    )}
+  </summary>
+  <div class="form-section-body">
+    <label class="flex flex-col gap-1 text-sm">
+      <span class="field-label">{$t('Request content storage')}</span>
+      <select
+        class="select"
+        aria-label={$t('Request content storage')}
+        bind:value={form.requestContentMode}
+      >
+        <option value="inherit">{$t('Inherit system setting')}</option>
+        <option value="none">{$t('Metadata only')}</option>
+        <option value="payload">{$t('Full payload for every request')}</option>
+        <option value="session">{$t('Incremental transcript per session')}</option>
+      </select>
+    </label>
+    <span class="field-help"
+      >{$t(
+        'Privacy note: full payload and session modes store request and response content, which may include tool arguments, reasoning, and media. Choose metadata only to store no bodies.',
       )}</span
     >
   </div>

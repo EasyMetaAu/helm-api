@@ -209,6 +209,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         allowedLanes: ["economy", "balanced"],
         allowCustomModel: true,
         allowFastMode: true,
+        requestContentMode: "payload",
       });
       const got = await ctx.stores.keys.getByHash("sha256_h1");
       expect(got).toMatchObject<Partial<ApiKeyRecord>>({
@@ -220,6 +221,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         allowed_lanes: ["economy", "balanced"],
         allow_custom_model: true,
         allow_fast_mode: true,
+        request_content_mode: "payload",
         disabled: false,
       });
     });
@@ -411,6 +413,24 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       got = await ctx.stores.keys.getByHash("h1");
       expect(got?.concurrency_limit).toBeNull();
       expect(got?.rate_limit_rpm).toBe(9);
+    });
+
+    it("request-content mode: omitted inherits, updateKey overrides and clears", async () => {
+      ctx = await make();
+      await ctx.stores.keys.createKey({
+        keyId: "k1",
+        hash: "h1",
+        prefix: "p1",
+        accountId: "a",
+        role: "user",
+      });
+      expect((await ctx.stores.keys.getByHash("h1"))?.request_content_mode).toBeNull();
+
+      await ctx.stores.keys.updateKey("k1", { requestContentMode: "session" });
+      expect((await ctx.stores.keys.getByHash("h1"))?.request_content_mode).toBe("session");
+
+      await ctx.stores.keys.updateKey("k1", { requestContentMode: null });
+      expect((await ctx.stores.keys.getByHash("h1"))?.request_content_mode).toBeNull();
     });
 
     it("memory defaults: omitted -> off/null/auto, set at create round-trips, updateKey edits + clears", async () => {

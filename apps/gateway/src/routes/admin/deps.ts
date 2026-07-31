@@ -592,6 +592,8 @@ export interface KeySummary {
   memory_mode: "off" | "observe" | "inject";
   memory_project_id: string | null;
   memory_thread_source: "header" | "auto";
+  // null inherits the live System Settings request-content mode.
+  request_content_mode: "none" | "payload" | "session" | null;
 }
 
 // New-key/rotated-key response: carries plaintext intentionally so the operator

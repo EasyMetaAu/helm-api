@@ -106,6 +106,7 @@ function key(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView {
     memory_mode: 'inject' as const,
     memory_project_id: 'proj-a',
     memory_thread_source: 'auto' as const,
+    request_content_mode: null,
     ...overrides,
   };
 }

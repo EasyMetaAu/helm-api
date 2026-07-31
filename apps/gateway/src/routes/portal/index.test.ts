@@ -42,6 +42,7 @@ function record(overrides: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
     memory_mode: "inject",
     memory_project_id: null,
     memory_thread_source: "header",
+    request_content_mode: null,
     ...overrides,
   };
 }

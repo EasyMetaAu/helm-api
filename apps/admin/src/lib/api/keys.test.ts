@@ -318,6 +318,22 @@ describe('keys api client', () => {
     expect(body.blocked_models).toBeNull();
   });
 
+  it('normalizes and updates the per-key request-content override', async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      new Response(JSON.stringify([summaryRow('k1', { request_content_mode: 'session' })]), {
+        status: 200,
+      }),
+    );
+    expect((await listKeys())[0]?.request_content_mode).toBe('session');
+
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      new Response(JSON.stringify({ key_id: 'k1' }), { status: 200 }),
+    );
+    await updateKey('k1', { request_content_mode: null });
+    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[1];
+    expect(JSON.parse(init.body as string).request_content_mode).toBeNull();
+  });
+
   it('updateKey rejects on a non-2xx response (404)', async () => {
     (fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({ error: 'key not found' }), { status: 404 }),

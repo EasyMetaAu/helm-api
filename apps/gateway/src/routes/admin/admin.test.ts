@@ -114,6 +114,7 @@ function makeKeyStore(): KeyStore & { rows: TestKeyRecord[] } {
         memory_mode: input.memoryMode ?? "off",
         memory_project_id: input.memoryProjectId ?? null,
         memory_thread_source: input.memoryThreadSource ?? "auto",
+        request_content_mode: input.requestContentMode ?? null,
       };
       rows.push(rec);
       return rec;
@@ -160,6 +161,8 @@ function makeKeyStore(): KeyStore & { rows: TestKeyRecord[] } {
       if (patch.memoryProjectId !== undefined) row.memory_project_id = patch.memoryProjectId;
       if (patch.memoryThreadSource !== undefined)
         row.memory_thread_source = patch.memoryThreadSource;
+      if (patch.requestContentMode !== undefined)
+        row.request_content_mode = patch.requestContentMode;
     },
     async rotateKey(keyId, input) {
       const row = rows.find((r) => r.key_id === keyId);
@@ -888,6 +891,31 @@ describe("admin.api keys", () => {
       Record<string, unknown>
     >;
     expect(list[0]?.allow_fast_mode).toBe(true);
+  });
+
+  it("creates, lists, updates, and clears a per-key request-content override", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    const created = await app.request("/admin/api/keys", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ role: "user", request_content_mode: "payload" }),
+    });
+    expect(created.status).toBe(201);
+    expect(keyStore.rows[0]?.request_content_mode).toBe("payload");
+
+    const list = (await (await app.request("/admin/api/keys")).json()) as Array<
+      Record<string, unknown>
+    >;
+    expect(list[0]?.request_content_mode).toBe("payload");
+
+    const cleared = await app.request("/admin/api/keys/key_1", {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ request_content_mode: null }),
+    });
+    expect(cleared.status).toBe(200);
+    expect(keyStore.rows[0]?.request_content_mode).toBeNull();
   });
 
   it("PATCH edits a key's rate limits (number sets, null clears) without touching caps", async () => {
