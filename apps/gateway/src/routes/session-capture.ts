@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import type { DecisionRecord } from "@helm/shared";
 
+const REQUEST_ID_SESSION_PREFIX = "helm-request:";
+
 export type SessionCaptureSource =
   | "x-thread-id"
   | "metadata.thread_id"
@@ -83,6 +85,7 @@ export function resolveSessionCapture(
   if (!candidate || !validId(candidate[1])) return null;
 
   const [source, rawId] = candidate;
+  if (source === "session-id" && rawId.startsWith(REQUEST_ID_SESSION_PREFIX)) return null;
   return {
     rawId,
     source,
@@ -94,8 +97,19 @@ export function resolveSessionCapture(
 export function stampSessionCapture(
   decision: DecisionRecord,
   session: SessionCapture | null,
+  scope: SessionCaptureScope,
 ): void {
-  decision.session = session
-    ? { ref: session.sessionRef, label: session.rawId, source: session.source }
+  if (session) {
+    decision.session = { ref: session.sessionRef, label: session.rawId, source: session.source };
+    return;
+  }
+  decision.session = validId(decision.request_id)
+    ? {
+        ref: hash(
+          JSON.stringify([scope.accountId, scope.apiKeyId, "request_id", decision.request_id]),
+        ),
+        label: `${REQUEST_ID_SESSION_PREFIX}${hash(decision.request_id)}`,
+        source: "session-id",
+      }
     : null;
 }

@@ -7,7 +7,13 @@ import type {
   TelemetryStore,
   UpsertSessionRevisionInput,
 } from "@helm/core";
-import { hashKey, routeRequest, UpstreamError } from "@helm/core";
+import {
+  createSqliteDb,
+  hashKey,
+  routeRequest,
+  SqliteTelemetryStore,
+  UpstreamError,
+} from "@helm/core";
 import { type InternalRequest, makeHelmError } from "@helm/shared";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
@@ -820,6 +826,134 @@ describe("POST /v1/chat/completions (routing pipeline)", () => {
       }),
     );
     expect(stored.decision.session).not.toHaveProperty("label");
+  });
+
+  it("keeps recording the Session through the route and write queue after 64 MiB", async () => {
+    const db = createSqliteDb(":memory:");
+    const telemetry = new SqliteTelemetryStore(db);
+    const writes = createWriteQueue({
+      telemetry,
+      log: () => {},
+      flushIntervalMs: 10_000,
+    });
+    const { deps: d, harness } = deps({
+      telemetry,
+      writes,
+      captureSessions: () => true,
+    });
+    harness.execute.mockResolvedValue(nonStreamOutcome({ ok: true }));
+    const app = buildApp(d);
+    const request = () =>
+      app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: { ...AUTH, "x-thread-id": "thread-unbounded" },
+        body: JSON.stringify(NONSTREAM_BODY),
+      });
+
+    try {
+      expect((await request()).status).toBe(200);
+      await writes.flush();
+      db.$sqlite
+        .prepare("UPDATE sessions SET stored_bytes = ? WHERE external_session_id = ?")
+        .run(64 * 1024 * 1024, "thread-unbounded");
+
+      expect((await request()).status).toBe(200);
+      await writes.flush();
+
+      const stored = db.$sqlite
+        .prepare(
+          "SELECT revision_count AS revisionCount, stored_bytes AS storedBytes FROM sessions WHERE external_session_id = ?",
+        )
+        .get("thread-unbounded") as { revisionCount: number; storedBytes: number };
+      expect(stored.revisionCount).toBe(2);
+      expect(stored.storedBytes).toBeGreaterThan(64 * 1024 * 1024);
+    } finally {
+      await writes.stop();
+      db.$sqlite.close();
+    }
+  });
+
+  it("records a request-scoped Session when the client supplies no Session signal", async () => {
+    const db = createSqliteDb(":memory:");
+    const telemetry = new SqliteTelemetryStore(db);
+    const writes = createWriteQueue({
+      telemetry,
+      log: () => {},
+      flushIntervalMs: 10_000,
+    });
+    const { deps: d, harness } = deps({
+      telemetry,
+      writes,
+      captureSessions: () => true,
+    });
+    harness.execute.mockResolvedValue(nonStreamOutcome({ ok: true }));
+    const app = buildApp(d);
+
+    try {
+      const response = await app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: AUTH,
+        body: JSON.stringify(NONSTREAM_BODY),
+      });
+      expect(response.status).toBe(200);
+      await writes.flush();
+
+      const stored = db.$sqlite
+        .prepare(
+          "SELECT source, external_session_id AS externalSessionId, revision_count AS revisionCount FROM sessions",
+        )
+        .get() as { source: string; externalSessionId: string; revisionCount: number };
+      expect(stored).toEqual({
+        source: "session-id",
+        externalSessionId: expect.any(String),
+        revisionCount: 1,
+      });
+    } finally {
+      await writes.stop();
+      db.$sqlite.close();
+    }
+  });
+
+  it("does not merge requests that only share a prompt_cache_key", async () => {
+    const db = createSqliteDb(":memory:");
+    const telemetry = new SqliteTelemetryStore(db);
+    const writes = createWriteQueue({
+      telemetry,
+      log: () => {},
+      flushIntervalMs: 10_000,
+    });
+    const { deps: d, harness } = deps({
+      telemetry,
+      writes,
+      captureSessions: () => true,
+    });
+    harness.execute.mockResolvedValue(nonStreamOutcome({ ok: true }));
+    const app = buildApp(d);
+    const request = () =>
+      app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: AUTH,
+        body: JSON.stringify({ ...NONSTREAM_BODY, prompt_cache_key: "shared-cache-key" }),
+      });
+
+    try {
+      expect((await request()).status).toBe(200);
+      expect((await request()).status).toBe(200);
+      await writes.flush();
+
+      const stored = db.$sqlite
+        .prepare(
+          "SELECT source, revision_count AS revisionCount FROM sessions ORDER BY external_session_id",
+        )
+        .all() as Array<{ source: string; revisionCount: number }>;
+      expect(stored).toEqual([
+        { source: "session-id", revisionCount: 1 },
+        { source: "session-id", revisionCount: 1 },
+      ]);
+    } finally {
+      await writes.stop();
+      db.$sqlite.close();
+    }
   });
 
   it("rejects unauthenticated requests without routing", async () => {

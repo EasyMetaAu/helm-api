@@ -364,10 +364,15 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
       const detail = err instanceof Error ? err.message : "invalid Gemini request";
       return sendError(c, { error_class: "invalid_request", message: detail, trace_id: traceId });
     }
-    const sessionCapture = resolveSessionCapture((name) => c.req.header(name), native, {
+    const sessionCaptureScope = {
       accountId: identity.accountId,
       apiKeyId: identity.keyId,
-    });
+    };
+    const sessionCapture = resolveSessionCapture(
+      (name) => c.req.header(name),
+      native,
+      sessionCaptureScope,
+    );
 
     // 2b) Backfill the PATH model + the parsed stream flag onto the IR. The
     //     transformer defaults model:"gemini" (the path-derived model is supplied
@@ -408,7 +413,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
     let result: PipelineRunResult;
     try {
       result = await deps.pipeline.run(ir, identity, requestSignal(c));
-      stampSessionCapture(result.decision, sessionCapture);
+      stampSessionCapture(result.decision, sessionCapture, sessionCaptureScope);
     } catch (err) {
       if (err instanceof PipelineError) {
         return sendError(c, {

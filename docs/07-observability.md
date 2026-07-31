@@ -173,6 +173,13 @@ and never bloat the decision JSON.
   reconstructable; Chat, Anthropic, and Gemini streams remain response-unavailable
   rather than buffering an unbounded SSE body. Session recovery is semantic and is
   always reported as `exact=false`, so it cannot be used for Retry.
+- Session identity prefers explicit conversation signals, including
+  `x-thread-id`, metadata conversation IDs, `x-session-key`, and native
+  Codex/Claude session identifiers. If none is usable, Helm derives a tenant-scoped,
+  request-only Session from its server-generated `request_id`; this preserves the
+  transcript without incorrectly merging unrelated requests. `prompt_cache_key`
+  alone is not treated as Session identity because clients may reuse a cache key
+  across conversations.
 - `capture_payloads` defaults to **OFF** and stores complete per-request bodies when
   exact inspection or Retry is required. The two modes are mutually exclusive;
   operators can also select metadata-only.
@@ -183,9 +190,10 @@ and never bloat the decision JSON.
 - `payload_retention_days` (default 30) bounds the storage footprint and the
   exposure window. The scheduled cleanup runner owns pruning independently of
   whether capture is currently enabled or new traffic is arriving.
-- One Session response snapshot is limited to 16 MiB. An oversized snapshot is
-  omitted while the request revision is still retained; the whole Session remains
-  bounded by the Store's 64 MiB / 10,000 revision limits.
+- Session aggregate bytes are not capped; `stored_bytes` remains an observability
+  counter, not an admission gate. A single in-flight request or response is still
+  subject to the runtime capture-body memory budget, and Session history remains
+  bounded by the Store's 10,000 revision limit.
 - Captured content is **not** redacted. Full-payload mode stores the verbatim client
   request body plus the assembled provider response, with the exact
   post-injection/translation upstream request as a separate part when available;

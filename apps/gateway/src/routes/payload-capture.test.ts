@@ -131,6 +131,38 @@ describe("Session queue admission", () => {
     expect(enqueueSession).toHaveBeenCalledTimes(1);
     expect(enqueueSession).toHaveBeenCalledWith(expect.any(Function), expect.any(Number));
   });
+
+  it("keeps appending after a Session exceeds the former 64 MiB aggregate cap", async () => {
+    const upsertSessionRevision = vi.fn();
+    const telemetry = {
+      getSessionByRef: vi.fn(async () => ({
+        revisionCount: 10,
+        storedBytes: 64 * 1024 * 1024,
+      })),
+      upsertSessionRevision,
+    } as unknown as PayloadCaptureDeps["telemetry"];
+    const log = vi.fn();
+
+    await persistSessionRequest(
+      { telemetry, captureSessions: () => true },
+      {
+        requestId: "request-over-former-cap",
+        accountId: "account-1",
+        apiKeyId: "key-1",
+        decision: {
+          session: { ref: "session-over-former-cap", label: "thread-1", source: "x-session-key" },
+        } as unknown as DecisionRecord,
+        requestJson: '{"input":"hello"}',
+        responseId: null,
+        responseJson: null,
+        now: 1,
+      },
+      log,
+    );
+
+    expect(upsertSessionRevision).toHaveBeenCalledOnce();
+    expect(log).not.toHaveBeenCalledWith("session.capture_limited");
+  });
 });
 
 describe("Responses session response capture", () => {

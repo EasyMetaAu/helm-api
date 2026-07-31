@@ -243,7 +243,7 @@ export const DecisionRecordSchema = z.object({
   // (principle 7). Null when the key/prefix is unknown. `.default(null)` keeps
   // pre-existing (pre-enrichment) records valid.
   key_prefix: z.string().nullable().default(null),
-  // High-confidence client session linkage. `ref` is the tenant-scoped opaque
+  // Session linkage. `ref` is the tenant-scoped opaque
   // identifier persisted in body-free telemetry. `label` is present only on the
   // in-memory capture decision and is removed before telemetry persistence; the
   // Admin API resolves it from the body-retention-governed Session table.

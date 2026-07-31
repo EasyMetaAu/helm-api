@@ -31,9 +31,7 @@ export type {
 } from "./ports.js";
 export {
   PERSISTED_SESSION_MAX_REVISIONS,
-  PERSISTED_SESSION_MAX_STORED_BYTES,
   SESSION_MAX_REVISIONS,
-  SESSION_MAX_STORED_BYTES,
 } from "./ports.js";
 // Postgres (supabase) adapters + migration helpers. supabase == hosted Postgres,
 // reached via postgres-js; the same adapters run against in-process PGlite in

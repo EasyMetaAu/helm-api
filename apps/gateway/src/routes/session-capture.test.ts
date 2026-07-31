@@ -131,11 +131,32 @@ describe("resolveSessionCapture", () => {
     stampSessionCapture(
       decision,
       resolveSessionCapture(headers({ "x-thread-id": "thread-1" }), {}, scope),
+      scope,
     );
     expect((decision as { session: unknown }).session).toEqual({
       ref: sha256(JSON.stringify(["account-a", "key-a", "x-thread-id", "thread-1"])),
       label: "thread-1",
       source: "x-thread-id",
     });
+  });
+
+  it("derives a one-request Session when the client supplies no usable identifier", () => {
+    const decision = { request_id: "request-fallback", session: null } as never;
+    const fallbackLabel = `helm-request:${sha256("request-fallback")}`;
+
+    stampSessionCapture(decision, null, scope);
+
+    expect((decision as { session: unknown }).session).toEqual({
+      ref: sha256(JSON.stringify(["account-a", "key-a", "request_id", "request-fallback"])),
+      label: fallbackLabel,
+      source: "session-id",
+    });
+    expect(resolveSessionCapture(headers({ "session-id": fallbackLabel }), {}, scope)).toBeNull();
+    const otherKey = { ...scope, apiKeyId: "key-b" };
+    const otherDecision = { request_id: "request-fallback", session: null } as never;
+    stampSessionCapture(otherDecision, null, otherKey);
+    expect((otherDecision as { session: { ref: string } }).session.ref).not.toBe(
+      (decision as { session: { ref: string } }).session.ref,
+    );
   });
 });

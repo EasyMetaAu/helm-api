@@ -24,7 +24,7 @@ import type {
   TelemetryStore,
   UpsertSessionRevisionInput,
 } from "../ports.js";
-import { PERSISTED_SESSION_MAX_REVISIONS, PERSISTED_SESSION_MAX_STORED_BYTES } from "../ports.js";
+import { PERSISTED_SESSION_MAX_REVISIONS } from "../ports.js";
 import { likeContains } from "../sql-like.js";
 import { denormalizedDecisionCost } from "../telemetry-cost.js";
 import type { PgDb } from "./migrate.js";
@@ -128,10 +128,7 @@ export class PgTelemetryStore implements TelemetryStore {
         .onConflictDoNothing();
 
       const lockedSessions = await tx
-        .select({
-          revisionCount: sessions.revisionCount,
-          storedBytes: sessions.storedBytes,
-        })
+        .select({ revisionCount: sessions.revisionCount })
         .from(sessions)
         .where(eq(sessions.sessionRef, input.sessionRef))
         .limit(1)
@@ -156,8 +153,6 @@ export class PgTelemetryStore implements TelemetryStore {
             ? Buffer.byteLength(input.responseJson, "utf8")
             : 0;
         if (responseBytes === 0) return;
-        if (lockedSession.storedBytes + responseBytes > PERSISTED_SESSION_MAX_STORED_BYTES)
-          throw new Error("session capture limit exceeded");
         await tx
           .update(sessions)
           .set({
@@ -198,7 +193,6 @@ export class PgTelemetryStore implements TelemetryStore {
           and(
             eq(sessions.sessionRef, input.sessionRef),
             lt(sessions.revisionCount, PERSISTED_SESSION_MAX_REVISIONS),
-            sql`${sessions.storedBytes} + ${storedBytes} <= ${PERSISTED_SESSION_MAX_STORED_BYTES}`,
           ),
         )
         .returning();

@@ -2,7 +2,6 @@ import type { DecisionRecord, TelemetryStore } from "@helm/core";
 import {
   billedCostFromBody,
   PERSISTED_SESSION_MAX_REVISIONS,
-  PERSISTED_SESSION_MAX_STORED_BYTES,
   usageFromBody as parseUsage,
   runtimeMemoryBudget,
   splitSessionRequestJson,
@@ -501,11 +500,7 @@ export async function persistSessionRequest(
       return;
     }
     const head = await get.call(deps.telemetry, session.ref);
-    if (
-      head &&
-      (head.revisionCount >= PERSISTED_SESSION_MAX_REVISIONS ||
-        head.storedBytes >= PERSISTED_SESSION_MAX_STORED_BYTES)
-    ) {
+    if (head && head.revisionCount >= PERSISTED_SESSION_MAX_REVISIONS) {
       markSaturatedSession(deps.telemetry, session.ref, sessionCacheBytes(deps));
       log("session.capture_limited");
       return;
@@ -538,19 +533,6 @@ export async function persistSessionRequest(
       previousEvents === undefined
         ? currentBase
         : splitSessionRequestJson(args.requestJson, previousEvents);
-    const deltaBytes = Buffer.byteLength(delta.eventsJson + delta.envelopeJson, "utf8");
-    if ((head?.storedBytes ?? 0) + deltaBytes > PERSISTED_SESSION_MAX_STORED_BYTES) {
-      markSaturatedSession(deps.telemetry, session.ref, sessionCacheBytes(deps));
-      log("session.capture_limited");
-      return;
-    }
-    const responseBytes =
-      args.responseJson === null ? 0 : Buffer.byteLength(args.responseJson, "utf8");
-    const responseJson =
-      (head?.storedBytes ?? 0) + deltaBytes + responseBytes <= PERSISTED_SESSION_MAX_STORED_BYTES
-        ? args.responseJson
-        : null;
-    if (args.responseJson !== null && responseJson === null) log("session.response_limited");
     await upsert.call(deps.telemetry, {
       sessionRef: session.ref,
       accountId: args.accountId,
@@ -563,15 +545,11 @@ export async function persistSessionRequest(
       requestDeltaJson: delta.eventsJson,
       requestEnvelopeJson: delta.envelopeJson,
       responseId: args.responseId,
-      responseJson,
+      responseJson: args.responseJson,
       fidelity: fidelity === "partial" ? fidelity : delta.fidelity,
       createdAt: new Date(args.now),
     });
-    if (
-      (head?.revisionCount ?? 0) + 1 >= PERSISTED_SESSION_MAX_REVISIONS ||
-      (head?.storedBytes ?? 0) + deltaBytes + (responseJson === null ? 0 : responseBytes) >=
-        PERSISTED_SESSION_MAX_STORED_BYTES
-    ) {
+    if ((head?.revisionCount ?? 0) + 1 >= PERSISTED_SESSION_MAX_REVISIONS) {
       markSaturatedSession(deps.telemetry, session.ref, sessionCacheBytes(deps));
     }
     cacheSessionHead(

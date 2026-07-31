@@ -25,7 +25,7 @@ import type {
   TelemetryStore,
   UpsertSessionRevisionInput,
 } from "../ports.js";
-import { PERSISTED_SESSION_MAX_REVISIONS, PERSISTED_SESSION_MAX_STORED_BYTES } from "../ports.js";
+import { PERSISTED_SESSION_MAX_REVISIONS } from "../ports.js";
 import { likeContains } from "../sql-like.js";
 import { denormalizedDecisionCost } from "../telemetry-cost.js";
 import { runBatchedPrune, yieldToEventLoop } from "./batched-prune.js";
@@ -242,14 +242,6 @@ export class SqliteTelemetryStore implements TelemetryStore {
               ? Buffer.byteLength(responseJson, "utf8")
               : 0;
           if (responseBytes === 0 || responseJson === null) return true;
-          const session = this.db
-            .select({ storedBytes: sessions.storedBytes })
-            .from(sessions)
-            .where(eq(sessions.sessionRef, input.sessionRef))
-            .get();
-          if (!session) throw new Error("session row missing after insert");
-          if (session.storedBytes + responseBytes > PERSISTED_SESSION_MAX_STORED_BYTES)
-            throw new Error("session capture limit exceeded");
           this.db
             .update(sessions)
             .set({
@@ -283,15 +275,12 @@ export class SqliteTelemetryStore implements TelemetryStore {
         }
 
         const session = this.db
-          .select({ revisionCount: sessions.revisionCount, storedBytes: sessions.storedBytes })
+          .select({ revisionCount: sessions.revisionCount })
           .from(sessions)
           .where(eq(sessions.sessionRef, input.sessionRef))
           .get();
         if (!session) throw new Error("session row missing after insert");
-        if (
-          session.revisionCount >= PERSISTED_SESSION_MAX_REVISIONS ||
-          session.storedBytes + storedBytes > PERSISTED_SESSION_MAX_STORED_BYTES
-        ) {
+        if (session.revisionCount >= PERSISTED_SESSION_MAX_REVISIONS) {
           throw new Error("session capture limit exceeded");
         }
         const sequence = session.revisionCount + 1;
