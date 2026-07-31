@@ -71,6 +71,9 @@
     if (form.budgetWindow != null) input.budget_window_seconds = form.budgetWindow;
     input.over_budget_behavior = form.overBudgetBehavior;
     if (form.degradeLane.length > 0) input.degrade_lane = form.degradeLane;
+    if (form.requestContentMode !== 'inherit') {
+      input.request_content_mode = form.requestContentMode;
+    }
     // Concurrency limit: send only when set (blank => unlimited).
     if (form.concurrencyLimit != null) input.concurrency_limit = form.concurrencyLimit;
     if (form.memoryMode !== 'off') input.memory_mode = form.memoryMode;
@@ -125,6 +128,8 @@
         budget_window_seconds: form.budgetWindow ?? null,
         over_budget_behavior: form.overBudgetBehavior,
         degrade_lane: form.degradeLane.length > 0 ? form.degradeLane : null,
+        request_content_mode:
+          form.requestContentMode === 'inherit' ? null : form.requestContentMode,
         concurrency_limit: form.concurrencyLimit ?? null,
         memory_mode: form.memoryMode,
         memory_project_id: form.memoryProject.length > 0 ? form.memoryProject : null,

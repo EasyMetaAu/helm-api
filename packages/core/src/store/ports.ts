@@ -205,6 +205,8 @@ export interface CreateKeyInput {
   memoryMode?: "off" | "observe" | "inject";
   memoryProjectId?: string;
   memoryThreadSource?: "header" | "auto";
+  // Per-key request-content retention override. Omitted => inherit system mode.
+  requestContentMode?: "none" | "payload" | "session";
 }
 
 export interface KeyStore {
@@ -273,6 +275,8 @@ export interface KeyPatch {
   memoryMode?: "off" | "observe" | "inject";
   memoryProjectId?: string | null;
   memoryThreadSource?: "header" | "auto";
+  // null clears the override back to the live system mode.
+  requestContentMode?: "none" | "payload" | "session" | null;
 }
 
 export interface RotateKeyInput {

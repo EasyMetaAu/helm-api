@@ -414,6 +414,7 @@
   "Inject (record + hydrate)": "注入（記録 + ハイドレート）",
   "input {input} · output {output} · cached {cached} · non-cached {nonCached}": "入力 {input} · 出力 {output} · キャッシュ {cached} · 非キャッシュ {nonCached}",
   "Input tokens": "入力トークン数",
+  "Inherit system setting": "システム設定を継承",
   "Interval changes take effect on the next restart.": "間隔の変更は次回の再起動時に反映されます。",
   "Invalid JSON in request body": "リクエスト本文の JSON が不正です",
   "Invalid request": "無効なリクエスト",

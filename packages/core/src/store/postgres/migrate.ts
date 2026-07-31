@@ -1192,6 +1192,17 @@ const MIGRATIONS: readonly Migration[] = [
         ON responses_registry (created_at, response_id);
     `,
   },
+  {
+    // Per-key request-content retention override. NULL inherits the system mode.
+    version: 43,
+    run: async (db) => {
+      if (await pgTableHasColumns(db, "api_keys", ["key_id"])) {
+        await db.execute(
+          sql.raw("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS request_content_mode TEXT"),
+        );
+      }
+    },
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {

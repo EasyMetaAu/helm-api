@@ -49,6 +49,7 @@ function keyRecord(over: Partial<ApiKeyRecord> = {}): ApiKeyRecord {
     memory_mode: "off" as const,
     memory_project_id: null,
     memory_thread_source: "header" as const,
+    request_content_mode: null,
     ...over,
   };
 }
@@ -1287,6 +1288,44 @@ describe("POST /v1/chat/completions — payload capture + streamed cost", () => 
     expect(cap.payloads).toHaveLength(1);
     expect(cap.payloads[0]?.requestJson).toBe(rawRequest);
     expect(cap.payloads[0]?.responseJson).toBe(JSON.stringify(upstream));
+  });
+
+  it("lets a key enable full payload capture over a global metadata-only mode", async () => {
+    const cap = captureTelemetry();
+    const { deps: d, harness } = deps({
+      telemetry: cap.telemetry,
+      capturePayloads: () => false,
+      captureSessions: () => false,
+    });
+    harness.execute.mockResolvedValue(
+      nonStreamOutcome({ id: "override-on", choices: [{ message: { content: "ok" } }] }),
+    );
+    const app = buildApp(d, { record: { request_content_mode: "payload" } });
+    await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(NONSTREAM_BODY),
+    });
+    expect(cap.payloads).toHaveLength(1);
+  });
+
+  it("lets a key disable full payload capture over a global payload mode", async () => {
+    const cap = captureTelemetry();
+    const { deps: d, harness } = deps({
+      telemetry: cap.telemetry,
+      capturePayloads: () => true,
+      captureSessions: () => false,
+    });
+    harness.execute.mockResolvedValue(
+      nonStreamOutcome({ id: "override-off", choices: [{ message: { content: "ok" } }] }),
+    );
+    const app = buildApp(d, { record: { request_content_mode: "none" } });
+    await app.request("/v1/chat/completions", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(NONSTREAM_BODY),
+    });
+    expect(cap.payloads).toHaveLength(0);
   });
 });
 

@@ -1239,6 +1239,18 @@ const MIGRATIONS: readonly Migration[] = [
         ON responses_registry (created_at, response_id);
     `,
   },
+  {
+    // Per-key request-content retention override. NULL inherits the system mode.
+    version: 44,
+    run: (db) => {
+      if (
+        sqliteTableHasColumns(db, "api_keys", ["key_id"]) &&
+        !sqliteTableHasColumns(db, "api_keys", ["request_content_mode"])
+      ) {
+        db.exec("ALTER TABLE api_keys ADD COLUMN request_content_mode TEXT;");
+      }
+    },
+  },
 ];
 
 function sqliteTableHasColumns(

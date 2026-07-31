@@ -77,6 +77,16 @@ describe('CreateKeyDialog', () => {
     expect(input.rate_limit_tpm).toBeUndefined();
   });
 
+  it('submits a request-content override when selected', async () => {
+    setup();
+    await fireEvent.change(screen.getByLabelText('Request content storage'), {
+      target: { value: 'payload' },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /create key/i }));
+    await waitFor(() => expect(createKey).toHaveBeenCalledTimes(1));
+    expect(createKey.mock.calls[0][0].request_content_mode).toBe('payload');
+  });
+
   it('collapses the optional cap sections by default, basics stay visible', async () => {
     setup();
     // Basics (lanes + blacklist + passthrough) are immediately visible — not inside a section.
@@ -86,7 +96,7 @@ describe('CreateKeyDialog', () => {
     expect(screen.getByLabelText('allow client-requested Fast mode')).toBeInTheDocument();
     // The three optional groups render as <details> sections, all closed.
     const sections = document.querySelectorAll('details');
-    expect(sections).toHaveLength(3);
+    expect(sections).toHaveLength(4);
     for (const section of sections) expect(section.open).toBe(false);
     // Each closed section carries a one-line state summary so the operator can
     // see "nothing configured" without expanding.

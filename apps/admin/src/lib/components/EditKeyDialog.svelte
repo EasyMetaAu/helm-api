@@ -57,6 +57,8 @@
       budget_window_seconds: form.budgetWindow ?? null,
       over_budget_behavior: form.overBudgetBehavior,
       degrade_lane: form.degradeLane.length > 0 ? form.degradeLane : null,
+      request_content_mode:
+        form.requestContentMode === 'inherit' ? null : form.requestContentMode,
       concurrency_limit: form.concurrencyLimit ?? null,
       memory_mode: form.memoryMode,
       memory_project_id: form.memoryProject.length > 0 ? form.memoryProject : null,
@@ -83,6 +85,7 @@
         budget_window_seconds: patch.budget_window_seconds ?? null,
         over_budget_behavior: form.overBudgetBehavior,
         degrade_lane: patch.degrade_lane ?? null,
+        request_content_mode: patch.request_content_mode ?? null,
         concurrency_limit: patch.concurrency_limit ?? null,
         memory_mode: form.memoryMode,
         memory_project_id: patch.memory_project_id ?? null,

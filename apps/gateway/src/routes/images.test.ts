@@ -36,7 +36,10 @@ const BUDGET_CAPS = {
   degradeLane: null,
 };
 
-function setup(over: Partial<ImagesRouteDeps> = {}) {
+function setup(
+  over: Partial<ImagesRouteDeps> = {},
+  requestContentMode?: "none" | "payload" | "session",
+) {
   const imageGeneration = vi.fn().mockResolvedValue(UPSTREAM);
   const imageEdit = vi.fn().mockResolvedValue(UPSTREAM);
   const client = { imageGeneration, imageEdit } as unknown as ProviderClient;
@@ -58,7 +61,7 @@ function setup(over: Partial<ImagesRouteDeps> = {}) {
               keyId: "key1",
               accountId: "acct",
               keyPrefix: "helm_live_xy",
-              caps: { budget: BUDGET_CAPS },
+              caps: { budget: BUDGET_CAPS, requestContentMode },
             } as MessagesIdentity)
           : null,
     },
@@ -186,6 +189,14 @@ describe("registerImagesRoute", () => {
     const stored = JSON.parse(payload.responseJson) as typeof UPSTREAM;
     expect(stored.data[0]?.b64_json).toBe("REALIMAGEBYTES"); // full image handed to capture
     expect(stored.usage.output_tokens).toBe(196); // metadata/usage preserved
+  });
+
+  it("per-key metadata-only mode overrides enabled system payload capture", async () => {
+    const { app, enqueuePayload } = setup({}, "none");
+    const res = await post(app, { model: "gpt-image-2", prompt: "a cat" });
+
+    expect(res.status).toBe(200);
+    expect(enqueuePayload).not.toHaveBeenCalled();
   });
 
   it("returns 401 without a valid key", async () => {

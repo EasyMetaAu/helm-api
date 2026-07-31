@@ -45,6 +45,7 @@ const BUDGET_CAPS = {
 function setup(
   over: Partial<InteractionsRouteDeps> = {},
   contextIds?: { requestId: string; traceId: string },
+  requestContentMode?: "none" | "payload" | "session",
 ) {
   const nativePassthrough = vi.fn().mockResolvedValue(NATIVE);
   const client = { nativePassthrough } as unknown as ProviderClient;
@@ -66,7 +67,7 @@ function setup(
               keyId: "key1",
               accountId: "acct",
               keyPrefix: "helm_live_xy",
-              caps: { budget: BUDGET_CAPS },
+              caps: { budget: BUDGET_CAPS, requestContentMode },
             } as MessagesIdentity)
           : null,
     },
@@ -297,6 +298,14 @@ describe("registerInteractionsRoute", () => {
     };
     const img = stored.steps[0]?.content.find((b) => b.type === "image");
     expect(img?.data).toBe("GEMIMG"); // full image handed to capture
+  });
+
+  it("per-key metadata-only mode overrides enabled system payload capture", async () => {
+    const { app, enqueuePayload } = setup({}, undefined, "none");
+    const res = await post(app, { model: "gemini-3.1-flash-image", input: "a cat" });
+
+    expect(res.status).toBe(200);
+    expect(enqueuePayload).not.toHaveBeenCalled();
   });
 
   it("returns 401 without a valid key", async () => {

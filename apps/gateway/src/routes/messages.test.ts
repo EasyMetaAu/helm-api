@@ -866,6 +866,22 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     expect(insertPayload).not.toHaveBeenCalled();
   });
 
+  it("per-key payload mode overrides the disabled system setting", async () => {
+    const { record, insertPayload } = makeRecord({ capturePayloads: false });
+    const { deps } = makeDeps({
+      record,
+      identity: { ...IDENTITY, caps: { requestContentMode: "payload" } },
+    });
+    const res = await buildApp(deps).request("/v1/messages", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ_BODY),
+    });
+
+    expect(res.status).toBe(200);
+    expect(insertPayload).toHaveBeenCalledOnce();
+  });
+
   // ── Native protocol passthrough (#217 C3). When the pipeline reports
   //    nativePassthrough the route MUST return collect()'s body UNTOUCHED (skip
   //    transformResponseOut), so the verbatim Anthropic upstream body reaches the

@@ -70,6 +70,7 @@ function keyView(overrides: Partial<ApiKeyView> = {}): ApiKeyView {
     memory_mode: 'off',
     memory_project_id: null,
     memory_thread_source: 'header',
+    request_content_mode: null,
     ...overrides,
   };
 }
@@ -280,6 +281,17 @@ describe('key detail page', () => {
     expect(screen.getByRole('link', { name: /manage memory/i }).getAttribute('href')).toBe(
       '/memory?key=k1',
     );
+  });
+
+  it('shows whether request-content storage inherits or overrides the system setting', () => {
+    const { unmount } = render(KeyDetailPage, {
+      data: pageData({ key: keyView({ request_content_mode: 'payload' }) }),
+    });
+    expect(screen.getByText('Full payload for every request')).toBeInTheDocument();
+    unmount();
+
+    render(KeyDetailPage, { data: pageData({ key: keyView({ request_content_mode: null }) }) });
+    expect(screen.getByText('Inherit system setting')).toBeInTheDocument();
   });
 
   it('shows a "view all" link to the global requests list filtered by key and active window', () => {

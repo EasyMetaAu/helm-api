@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-31 · API key 单独覆盖请求内容存储模式（Key Store / Telemetry / Admin，docs/06/07/11，原则 2/7）
+
+- **继承与优先级**：`api_keys.request_content_mode` 是 SQLite/PostgreSQL 的 nullable 枚举列；`NULL` 表示继承实时全局模式，`none` / `payload` / `session` 显式覆盖。历史 key 迁移后保持 `NULL`，不会因升级改变正文留存行为。
+- **覆盖面**：鉴权身份把覆盖值传到 Chat、Messages、Responses（含 compact）、Gemini、Images、Interactions 与 Admin Replay，并复用同一个 capture helper；只替换本次请求的 capture getter，不冻结或修改全局设置。
+- **保留边界**：`payload_retention_days` 仍是全局值，未增加 per-key retention。Admin Create/Edit/详情支持设置和清除覆盖；隐私提示与系统设置共用现有文案。
+
 ## 2026-07-31 · 保证 Session 捕获且删除累计字节上限（Telemetry / Session Store，docs/07/11，用户明确要求）
 
 - **决定**：按用户要求删除单 Session 64 MiB 累计存储上限，不用更大的常量替代。共享 Session 捕获、SQLite 与 PostgreSQL adapter 都不再因 `stored_bytes` 拒绝新 revision 或响应回填；`stored_bytes` 只继续用于观测。现有 SQLite `INTEGER` 与 PostgreSQL `BIGINT` 均无需迁移。
@@ -70,17 +76,9 @@
 - **Codex 增量续接**：真实客户端既会发送带完整 input 的 `generate:false` 预热帧，也会在启动预连接时发送严格的 `input:[] + generate:false` 预热帧；后一形状只有 normalized/native 两层都明确 `generate:false` 时才允许空 IR messages。下一帧可只带 `previous_response_id` 与空 `input`，此时仅当 Responses registry 已验证该 id 并固定原 provider 时放行；registry 在对客户端发送 terminal frame 前先持久化实际 provider alias、与成功 alias 相符的 OAuth account 及 selected lane，重启后仍恢复同一账号，fallback 前选中过但未实际服务的账号不会被写入。该持久化不伪造上游 connection-local state：Codex 在 WebSocket 重连时会清除旧增量状态并重发完整 input。续接在分类前固定为单 provider，真实 lane 继续受 `allowed_lanes` 约束，显式 custom-model 延续首轮既有语义；旧 registry 行缺少 lane provenance 时保持 fail-closed，`blocked_models` 与预算 degrade 同样不可绕过。普通空请求、未知 id、无 provider pin 与跨协议请求仍拒绝。`generate:false` 无 native Responses passthrough 时直接拒绝，不允许翻译路径意外产生计费输出。首 chunk 后的 `AbortError` 只记录为 `client_abort`，不误报上游截断，也不触发 breaker failure。
 - **连接超时边界**：Codex 上游 WebSocket handshake 与非 101 error body 的等待上限为 `min(request_timeout_ms, 60s)`；正常流式请求仍使用既有 request/idle timeout，不因连接建立保护而缩短。没有新增配置、依赖、后台 drain 或 graceful-shutdown 重构。
 
-## 2026-07-24 · Codex Voice、Responses 音频与图片编辑补齐代理面（Gateway / Protocol / Provider，docs/01/05/06，原则 1/2/3/7/8）
-
-- **Realtime V1/V2/V3**：新增 `/v1/realtime/calls`、`/v1/live` 与对应 WebSocket sideband。Call-create 复用现有 static/OpenAI-Codex provider client、OAuth pool、账号 token 与 egress proxy；ChatGPT backend 继续使用 JSON call shape，官方 OpenAI 使用 multipart。`call_id` 以进程内短 TTL 绑定创建它的 Helm key 与实际 provider/account sideband，WebSocket 必须使用同一 key，且不会重新选账号；OAuth HTTP/WS 401 各只刷新重试一次。Call-create 接入现有进程内或 PostgreSQL 分布式并发 lease，DB 不可用时 fail-closed 为 503，持有期间 lease 丢失会中止上游请求。双向文本/二进制帧按实际字节占用动态内存预算，关闭压缩并保留 close code。当前部署为单 gateway replica；水平扩容前必须把 registry 换成支持原子 claim 的共享存储。
-- **Codex upstream 线缆**：Codex 实际 WebRTC 请求使用 `x-session-id`，因此仅保留旧 `session-id` 会丢失会话身份；Realtime 只额外转发 `x-session-id` 与 `x-oai-attestation` 两个明确安全 header。ChatGPT backend 的 V3 `/v1/live` 不携带 query，但上游仍要求 `intent=quicksilver&architecture=avas`，只在 backend shape 且 query 为空时补该固定值；V1 sideband 使用 `/v1/realtime?intent=quicksilver&call_id=...`，V3 使用 `/v1/live/{call_id}`，custom/public base URL 保留已有路径前缀。同时复用目录运行时已生成的 Codex User-Agent，不信任或透传调用方任意 User-Agent。
-- **Voice 授权边界**：ChatGPT Desktop 宿主会为 Realtime call-create 即时生成 `x-oai-attestation`，Helm 仅将该明确 header 转发到创建调用的 ChatGPT backend 与同一 `call_id` sideband，不接受或透传任意扩展 header。OpenAI OAuth 对 Voice 返回的推理 403 属于产品访问拒绝：账号池会尝试尚未试过的兄弟账号，全部拒绝后保留真实 403，但不会持久禁用仍可服务文本 Responses 的账号；真正的 401 与永久 token-refresh 失败仍按原策略隔离账号。
-- **Responses 与模型目录**：Responses `input_audio.audio_url` data URL 进入统一 audio IR；provider 明确声明 `responses_audio_url` 时恢复同一 carrier，旧 `input_audio:{data,format}` 保持兼容。Codex 模型目录的 `input_modalities` 接受 `audio`，不再因新目录字段丢弃模型。
-- **Images edits**：`/v1/images/edits` 复用现有 Images 的鉴权、限流、并发、预算、blocked-model、breaker/fallback、成本与 payload/telemetry 链；支持 Codex JSON `images[].image_url|file_id` 和 OpenAI multipart `image`/`image[]`、`mask`，binary bytes 在 fallback 间可重放。线上验证发现 ZenMux 虽在 `/models` 发布 `openai/gpt-image-2`，但 `/images/edits` 对它返回 `404 invalid_model`，而 OpenAI 官方对同一 JSON/multipart 请求均成功；因此客户端 `gpt-image-2` 改为 ZenMux 优先、OpenAI 官方操作回退。Gemini edit 未发现兼容契约，确定性返回 unsupported，不做有损转换。
-- **暂缓边界**：按用户确认不代理 `alpha/search` 与 `memories/trace_summarize`；未引入新依赖、媒体存储、共享 registry 或第二套路由器。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-24 · Codex Voice、Responses 音频与图片编辑补齐代理面**：Realtime V1/V2/V3、Responses 音频与 Images edits 复用既有鉴权、路由、账号和遥测链；Voice attestation 与单实例 call registry 保持收窄边界，完整原文通过 git history 回溯。
 - **2026-07-24 · 请求准入增加实时 V8 堆高水位**：曾以 live heap + 分池余量拒绝高风险请求；后被 2026-07-27 的启发式拒绝拆除与 2026-07-28 的请求大小上限删除取代，完整原文通过 git history 回溯。
 - **2026-07-24 · Admin 登录同源证明兼容代理 Host 改写**：登录/登出优先接受浏览器不可伪造的 `Sec-Fetch-Site: same-origin`，同时保留 Origin/Host 与 cross-site 拒绝边界；完整原文通过 git history 回溯。
 - **2026-07-24 · Responses WebSocket ingress 改为按活动消息计费**：空闲连接不再预留完整帧容量，活动 `response.create` 才按真实 wire/JSON bytes 申请并释放 ingress lease；上游非 101 body 统一由有界响应超时接管，完整原文通过 git history 回溯。

@@ -6,7 +6,7 @@ import {
   runtimeMemoryBudget,
   splitSessionRequestJson,
 } from "@helm/core";
-import type { TokenUsageBreakdown } from "@helm/shared";
+import type { RequestContentMode, TokenUsageBreakdown } from "@helm/shared";
 import { countTokens as countO200kHarmonyTokens } from "gpt-tokenizer/encoding/o200k_harmony";
 import { CONCURRENCY_LEASE_LOST_REASON } from "../request-cancellation.js";
 import type { WriteQueue } from "../runtime/write-queue.js";
@@ -37,6 +37,19 @@ export interface PayloadCaptureDeps {
    *  catalog estimate, else tokens × `alias`'s pricing; null when neither is
    *  available. Closed over the catalog + resolveCostUsd in the composition root. */
   costOf?: (alias: string, usage: StreamUsage) => number | null;
+}
+
+/** Apply one authenticated key's override without mutating the shared live deps. */
+export function withRequestContentMode<T extends PayloadCaptureDeps>(
+  deps: T,
+  mode: RequestContentMode | null | undefined,
+): T {
+  if (mode == null) return deps;
+  return {
+    ...deps,
+    capturePayloads: () => mode === "payload",
+    captureSessions: () => mode === "session",
+  };
 }
 
 export interface StreamUsage {

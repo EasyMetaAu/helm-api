@@ -26,6 +26,7 @@ import {
   persistPayload,
   stampRequestBodyBytes,
   usageFromSSE,
+  withRequestContentMode,
 } from "../payload-capture.js";
 import type { AdminApiDeps, ReplayWiring } from "./deps.js";
 
@@ -134,11 +135,14 @@ export async function runReplay(
   //    a decision (the error trail) so even a failed retry is viewable. Payload
   //    capture stays fail-open (like the live routes); the telemetry insert is
   //    fail-CLOSED — see below.
-  const captureDeps: PayloadCaptureDeps = {
-    telemetry: deps.telemetry,
-    capturePayloads: deps.replay.capturePayloads,
-    costOf: deps.replay.costOf,
-  };
+  const captureDeps = withRequestContentMode<PayloadCaptureDeps>(
+    {
+      telemetry: deps.telemetry,
+      capturePayloads: deps.replay.capturePayloads,
+      costOf: deps.replay.costOf,
+    },
+    key.request_content_mode,
+  );
   await persistPayload(
     captureDeps,
     {

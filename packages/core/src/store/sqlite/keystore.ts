@@ -51,6 +51,7 @@ export class SqliteKeyStore implements KeyStore {
       // undefined => "auto": a memory-on key derives its thread from client signals
       // out of the box (issue #97). Pass "header" explicitly to opt out.
       memoryThreadSource: input.memoryThreadSource ?? "auto",
+      requestContentMode: input.requestContentMode ?? null,
       createdAt: this.now(),
     };
     this.db.insert(apiKeys).values(row).run();
@@ -119,6 +120,7 @@ export class SqliteKeyStore implements KeyStore {
         | "memoryMode"
         | "memoryProjectId"
         | "memoryThreadSource"
+        | "requestContentMode"
       >
     > = {};
     // Rename (null clears back to unnamed). Cosmetic only.
@@ -145,6 +147,7 @@ export class SqliteKeyStore implements KeyStore {
     if (patch.memoryMode !== undefined) set.memoryMode = patch.memoryMode;
     if (patch.memoryProjectId !== undefined) set.memoryProjectId = patch.memoryProjectId;
     if (patch.memoryThreadSource !== undefined) set.memoryThreadSource = patch.memoryThreadSource;
+    if (patch.requestContentMode !== undefined) set.requestContentMode = patch.requestContentMode;
     if (Object.keys(set).length === 0) {
       // No-op patch: still verify the key exists (fail-loud on unknown id).
       const row = this.db.select().from(apiKeys).where(eq(apiKeys.keyId, keyId)).get();
@@ -212,6 +215,12 @@ export class SqliteKeyStore implements KeyStore {
         row.memoryMode === "inject" ? "inject" : row.memoryMode === "observe" ? "observe" : "off",
       memory_project_id: row.memoryProjectId ?? null,
       memory_thread_source: row.memoryThreadSource === "auto" ? "auto" : "header",
+      request_content_mode:
+        row.requestContentMode === "none" ||
+        row.requestContentMode === "payload" ||
+        row.requestContentMode === "session"
+          ? row.requestContentMode
+          : null,
     };
   }
 }

@@ -20,6 +20,7 @@ describe("SqliteKeyStore", () => {
       allowCustomModel: true,
       blockedModels: ["gpt-4o"],
       allowFastMode: true,
+      requestContentMode: "payload",
     });
     const got = await store.getByHash("sha256_h1");
     expect(got).not.toBeNull();
@@ -33,6 +34,7 @@ describe("SqliteKeyStore", () => {
       allow_custom_model: true,
       blocked_models: ["gpt-4o"],
       allow_fast_mode: true,
+      request_content_mode: "payload",
       disabled: false,
     });
   });
@@ -170,6 +172,16 @@ describe("SqliteKeyStore", () => {
     const got = await store.getByHash("h1");
     expect(got?.rate_limit_rpm).toBeNull();
     expect(got?.rate_limit_tpm).toBeNull();
+  });
+
+  it("updates and clears the per-key request-content override", async () => {
+    const store = freshStore();
+    await store.createKey({ keyId: "k1", hash: "h1", prefix: "p1", accountId: "a", role: "user" });
+    expect((await store.getByHash("h1"))?.request_content_mode).toBeNull();
+    await store.updateKey("k1", { requestContentMode: "session" });
+    expect((await store.getByHash("h1"))?.request_content_mode).toBe("session");
+    await store.updateKey("k1", { requestContentMode: null });
+    expect((await store.getByHash("h1"))?.request_content_mode).toBeNull();
   });
 
   it("round-trips per-key rate limits set at creation (0 = explicit unlimited)", async () => {

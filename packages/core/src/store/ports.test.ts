@@ -48,6 +48,7 @@ class InMemoryKeyStore implements KeyStore {
       memory_mode: input.memoryMode ?? "off",
       memory_project_id: input.memoryProjectId ?? null,
       memory_thread_source: input.memoryThreadSource ?? "header",
+      request_content_mode: input.requestContentMode ?? null,
     };
     this.byId.set(record.key_id, record);
     return record;
@@ -86,6 +87,8 @@ class InMemoryKeyStore implements KeyStore {
     if (patch.overBudgetBehavior !== undefined)
       next.over_budget_behavior = patch.overBudgetBehavior;
     if (patch.degradeLane !== undefined) next.degrade_lane = patch.degradeLane;
+    if (patch.requestContentMode !== undefined)
+      next.request_content_mode = patch.requestContentMode;
     this.byId.set(keyId, next);
   }
   async rotateKey(keyId: string, input: RotateKeyInput): Promise<void> {
@@ -406,6 +409,7 @@ describe("port type contracts", () => {
       | "memoryMode"
       | "memoryProjectId"
       | "memoryThreadSource"
+      | "requestContentMode"
     >();
   });
 

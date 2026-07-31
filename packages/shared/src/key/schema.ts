@@ -21,6 +21,11 @@ export const OverBudgetBehaviorSchema = z.enum(["degrade", "reject"]);
 // keys are minted with `auto` in the keystores; moot while memory is off.
 export const MemoryThreadSourceSchema = z.enum(["header", "auto"]);
 
+// Per-key request/response body retention override. null on the key record means
+// inherit the live system setting; an explicit value selects one of the same
+// three modes exposed by Admin System Settings.
+export const RequestContentModeSchema = z.enum(["none", "payload", "session"]);
+
 // Human-readable key label (docs/06) — cosmetic only, never an auth/routing input.
 // `.trim()` runs BEFORE the length checks, so a whitespace-only label collapses to
 // "" and fails min(1) (fail-closed, Principle 2) instead of masquerading as a real
@@ -95,11 +100,13 @@ export const ApiKeyRecordSchema = z.object({
   // are minted with `auto` in the keystores, so a memory-on key derives its thread
   // out of the box; existing keys keep their stored value.
   memory_thread_source: MemoryThreadSourceSchema.default("header"),
+  request_content_mode: RequestContentModeSchema.nullable().default(null),
 });
 
 export type KeyRole = z.infer<typeof KeyRoleSchema>;
 export type OverBudgetBehavior = z.infer<typeof OverBudgetBehaviorSchema>;
 export type MemoryThreadSource = z.infer<typeof MemoryThreadSourceSchema>;
+export type RequestContentMode = z.infer<typeof RequestContentModeSchema>;
 export type ApiKeyRecord = z.infer<typeof ApiKeyRecordSchema>;
 
 // A key's EFFECTIVE memory project scope. `memory_project_id` is the explicit
@@ -150,6 +157,7 @@ export const CreateKeyRequestSchema = z
     memory_mode: MemoryModeSchema.optional(),
     memory_project_id: z.string().min(1).optional(),
     memory_thread_source: MemoryThreadSourceSchema.optional(),
+    request_content_mode: RequestContentModeSchema.optional(),
   })
   .strict();
 
@@ -193,6 +201,8 @@ export const UpdateKeyRequestSchema = z
     memory_mode: MemoryModeSchema.optional(),
     memory_project_id: z.string().min(1).nullable().optional(),
     memory_thread_source: MemoryThreadSourceSchema.optional(),
+    // null clears the override and resumes inheriting the live system setting.
+    request_content_mode: RequestContentModeSchema.nullable().optional(),
   })
   .strict();
 

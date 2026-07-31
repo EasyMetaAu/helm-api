@@ -25,8 +25,28 @@ import {
   usageFromResponsesResponse,
   usageFromResponsesSSE,
   usageFromSSE,
+  withRequestContentMode,
   withSseCaptureRelease,
 } from "./payload-capture.js";
+
+describe("per-key request content mode", () => {
+  const global = {
+    telemetry: {} as PayloadCaptureDeps["telemetry"],
+    capturePayloads: () => false,
+    captureSessions: () => true,
+  } satisfies PayloadCaptureDeps;
+
+  it.each([
+    [null, false, true],
+    ["none", false, false],
+    ["payload", true, false],
+    ["session", false, true],
+  ] as const)("resolves %s over the global mode", (mode, payloads, sessions) => {
+    const scoped = withRequestContentMode(global, mode);
+    expect(scoped.capturePayloads?.()).toBe(payloads);
+    expect(scoped.captureSessions?.()).toBe(sessions);
+  });
+});
 
 describe("session head cache", () => {
   it("evicts by retained UTF-8 bytes, not only by Session count", () => {
