@@ -64,6 +64,52 @@ function freshStore() {
 }
 
 describe("SqliteTelemetryStore", () => {
+  it("updates and appends Session revisions after the former 64 MiB aggregate cap", async () => {
+    const db = createSqliteDb(":memory:");
+    const store = new SqliteTelemetryStore(db);
+    const first = {
+      sessionRef: "s-unbounded",
+      accountId: "a1",
+      apiKeyId: "k1",
+      source: "header",
+      externalSessionId: "external-unbounded",
+      requestId: "r1",
+      parentRequestId: null,
+      retainCount: 0,
+      requestDeltaJson: '["first"]',
+      requestEnvelopeJson: "{}",
+      responseId: null,
+      responseJson: null,
+      fidelity: "semantic",
+      createdAt: new Date(1_000),
+    } as const;
+    await store.upsertSessionRevision(first);
+    db.$sqlite
+      .prepare("UPDATE sessions SET stored_bytes = ? WHERE session_ref = ?")
+      .run(64 * 1024 * 1024, first.sessionRef);
+
+    await store.upsertSessionRevision({
+      ...first,
+      responseId: "resp_1",
+      responseJson: '{"output":"first"}',
+    });
+    await store.upsertSessionRevision({
+      ...first,
+      requestId: "r2",
+      parentRequestId: "r1",
+      requestDeltaJson: '["second"]',
+      responseId: null,
+      responseJson: null,
+      createdAt: new Date(2_000),
+    });
+
+    expect(await store.listSessionRevisions(first.sessionRef)).toHaveLength(2);
+    expect((await store.getSessionByRef(first.sessionRef))?.storedBytes).toBeGreaterThan(
+      64 * 1024 * 1024,
+    );
+    db.$sqlite.close();
+  });
+
   it("stores session bodies as gzip BLOBs and still reads legacy TEXT", async () => {
     const db = createSqliteDb(":memory:");
     const store = new SqliteTelemetryStore(db);

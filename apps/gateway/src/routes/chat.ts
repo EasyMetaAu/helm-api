@@ -491,10 +491,15 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       throw invalidRequest(`${where}${issue?.message ?? "invalid request"}`, traceId);
     }
     const body = parsed.data as ChatCompletionRequest;
-    const sessionCapture = resolveSessionCapture((name) => c.req.header(name), body, {
+    const sessionCaptureScope = {
       accountId: identity.accountId,
       apiKeyId: identity.keyId,
-    });
+    };
+    const sessionCapture = resolveSessionCapture(
+      (name) => c.req.header(name),
+      body,
+      sessionCaptureScope,
+    );
 
     // `x-session-key` is the conversation-dimension key clients send to opt into
     // session momentum; it maps into metadata.conversation_id (never logged — it
@@ -826,7 +831,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       requestSignal(c),
       classifyOverrides,
     );
-    stampSessionCapture(result.decision, sessionCapture);
+    stampSessionCapture(result.decision, sessionCapture, sessionCaptureScope);
     // The subscription the pool selected (null for a configured/non-OAuth provider),
     // threaded out on the result so the settle path can attribute usage (Tier 2).
     servingAccount = result.servingAccount ?? null;

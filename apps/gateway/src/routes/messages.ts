@@ -478,10 +478,15 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
     }
     const normalizedNative = normalizeClaudeCodeDateFingerprintInAnthropicRequest(native);
     const nativeForPipeline = normalizedNative.body;
-    const sessionCapture = resolveSessionCapture((name) => c.req.header(name), nativeForPipeline, {
+    const sessionCaptureScope = {
       accountId: identity.accountId,
       apiKeyId: identity.keyId,
-    });
+    };
+    const sessionCapture = resolveSessionCapture(
+      (name) => c.req.header(name),
+      nativeForPipeline,
+      sessionCaptureScope,
+    );
     const nativeCarrierRawBody = normalizedNative.normalized
       ? (JSON.stringify(nativeForPipeline) ?? requestJson)
       : requestJson;
@@ -591,7 +596,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
       }
       throw err;
     }
-    stampSessionCapture(result.decision, sessionCapture);
+    stampSessionCapture(result.decision, sessionCapture, sessionCaptureScope);
 
     // Capture the verbatim request/response bodies only when capture_payloads is ON
     // (the telemetry row is always written regardless). Gating the buffering here

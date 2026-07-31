@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-07-31 · 保证 Session 捕获且删除累计字节上限（Telemetry / Session Store，docs/07/11，用户明确要求）
+
+- **决定**：按用户要求删除单 Session 64 MiB 累计存储上限，不用更大的常量替代。共享 Session 捕获、SQLite 与 PostgreSQL adapter 都不再因 `stored_bytes` 拒绝新 revision 或响应回填；`stored_bytes` 只继续用于观测。现有 SQLite `INTEGER` 与 PostgreSQL `BIGINT` 均无需迁移。
+- **Session ID**：当所有可信客户端标识都缺失或不可用时，以 `account_id + api_key_id + request_id` 派生一个只覆盖当前请求的 Session；这样保证正文落库，同时避免用内容或缓存亲和键把无关会话错误合并。`prompt_cache_key` 可能跨会话复用，因此不作为默认 Session 身份。
+- **回滚兼容**：fallback 沿用旧版已接受的通用 `session-id` 持久化来源，不新增 DecisionRecord 枚举值；内部 ref 使用独立 `request_id` 哈希域，外部 ID 使用客户端不可占用的 `helm-request:` 保留前缀加请求哈希，避免与真实 `session-id` 的 ref 或数据库唯一键碰撞。v0.28.26 回滚后仍能读取新版写入的遥测记录。
+- **边界**：单次请求/响应仍受进程动态 capture-body 内存预算保护，避免一个在途正文直接造成 OOM；10,000 revision 计数上限与既有 retention cleanup 保持不变。本次不补写已经漏掉的历史 revision，因为正文未保存时无法可靠恢复。生产必须切换到 `capture_sessions=true`、`capture_payloads=false` 才会使用该增量模式。
+
 ## 2026-07-31 · 请求列表记录并显示客户端正文大小（Telemetry / Admin requests，docs/07/11，原则 1/7）
 
 - **计量口径**：新增可选 `request_body_bytes`，记录网关实际收到的客户端请求正文 UTF-8 字节数；不信任可能缺失或经过 transfer encoding 的 `Content-Length`，也不以字符数、Token 数、压缩后存储量或转换后的上游正文替代。该数字随脱敏 `DecisionRecord` 保存，不受正文捕获开关影响，不保存正文，因此无需 SQLite/Postgres 迁移。
@@ -72,14 +79,9 @@
 - **Images edits**：`/v1/images/edits` 复用现有 Images 的鉴权、限流、并发、预算、blocked-model、breaker/fallback、成本与 payload/telemetry 链；支持 Codex JSON `images[].image_url|file_id` 和 OpenAI multipart `image`/`image[]`、`mask`，binary bytes 在 fallback 间可重放。线上验证发现 ZenMux 虽在 `/models` 发布 `openai/gpt-image-2`，但 `/images/edits` 对它返回 `404 invalid_model`，而 OpenAI 官方对同一 JSON/multipart 请求均成功；因此客户端 `gpt-image-2` 改为 ZenMux 优先、OpenAI 官方操作回退。Gemini edit 未发现兼容契约，确定性返回 unsupported，不做有损转换。
 - **暂缓边界**：按用户确认不代理 `alpha/search` 与 `memories/trace_summarize`；未引入新依赖、媒体存储、共享 registry 或第二套路由器。
 
-## 2026-07-24 · 请求准入增加实时 V8 堆高水位（Gateway runtime，docs/02/07/10，原则 3/7）
-
-- **线上根因**：`v0.28.7` 已限制请求、响应、写队列、Session cache 与 SSE capture 各自的静态容量，但生产容器仍在 12 小时内因 V8 heap OOM 重启 8 次；崩溃前 Mark-Compact 后仍有约 647 MiB live heap，而 heap limit 约 674 MiB。分池上限没有把当前 live heap 与其他分池尚可增长的容量合并判断，因此下一次 UTF-8 请求正文转换仍可触发进程级 OOM。
-- **统一边界**：复用所有 HTTP JSON 与 Responses WebSocket 内部请求已经经过的 `BodyMemoryAdmission`，在读取、扩容和 `JSON.parse` 前同时检查 `heapUsed + active reservations`。高水位为 heap limit 扣除 response work、write queue、Session cache、response capture 与 5% GC 余量；超过时沿用现有协议形状返回 503，单请求 wire 上限仍返回 413。未新增配置、依赖、队列或并发限制。
-- **运维边界**：该保护把聚合内存压力转成可恢复的拒绝，不负责物理缩小生产 20 GiB SQLite；历史正文清理与 VACUUM 仍必须通过既有维护 drain、磁盘与内存门禁执行，不能在线手工 VACUUM。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-24 · 请求准入增加实时 V8 堆高水位**：曾以 live heap + 分池余量拒绝高风险请求；后被 2026-07-27 的启发式拒绝拆除与 2026-07-28 的请求大小上限删除取代，完整原文通过 git history 回溯。
 - **2026-07-24 · Admin 登录同源证明兼容代理 Host 改写**：登录/登出优先接受浏览器不可伪造的 `Sec-Fetch-Site: same-origin`，同时保留 Origin/Host 与 cross-site 拒绝边界；完整原文通过 git history 回溯。
 - **2026-07-24 · Responses WebSocket ingress 改为按活动消息计费**：空闲连接不再预留完整帧容量，活动 `response.create` 才按真实 wire/JSON bytes 申请并释放 ingress lease；上游非 101 body 统一由有界响应超时接管，完整原文通过 git history 回溯。
 - **2026-07-23 · PostgreSQL API-key 分布式并发 lease**：PostgreSQL 用 DB 时钟和 state-row lease 实现跨 replica 并发上限、心跳与 crash recovery，真实多 pool e2e 作为验收边界；完整原文通过 git history 回溯。
@@ -88,7 +90,7 @@
 - **2026-07-23 · Codex Responses 按运行时容量准入并让夜间 SQLite 维护收缩内存（Gateway / Session / Store，docs/02/05/07/10，原则 2/3/7/8）**：机器推导的共享请求/响应/缓存预算、活动消息准入和维护 drain 保留正文捕获与自动维护能力；后续物化重复计账、WebSocket ingress 与 terminal 生命周期修正见顶部更新条目，完整原文通过 git history 回溯。
 - **2026-07-23 · SQLite Session 与 Memory 正文使用兼容 gzip 存储（Store / Memory，docs/07/08，原则 1/3/7）**：SQLite 以 value type + gzip magic 兼容压缩 Session/Memory 正文，不回写历史数据、不在线 VACUUM，完整原文通过 git history 回溯。
 - **2026-07-22 · 全项目文案审查补齐多语言维护闭环（Admin / Portal / Setup，docs/11/12，原则 1/2）**：以 Opus 只读审查和七语言结构测试补齐 Admin、Portal、Setup 文案维护闭环，完整原文通过 git history 回溯。
-- **2026-07-22 · Session 恢复补齐响应快照并限制默认留存范围（Telemetry / Admin requests，docs/07/11，原则 1/3/7/8）**：复用 `session_revisions.response_json` 不新增迁移，四种协议的成功非流式请求保存客户端形态响应快照，流式不新增 SSE 缓冲；单快照 16 MiB、Session 64 MiB 上限，来源恒为 `exact=false` 故 Retry 禁用，完整原文通过 git history 回溯。
+- **2026-07-22 · Session 恢复补齐响应快照并限制默认留存范围（Telemetry / Admin requests，docs/07/11，原则 1/3/7/8）**：复用 `session_revisions.response_json` 保存四种协议的成功非流式响应快照，流式不新增 SSE 缓冲；当时的 Session 64 MiB 累计上限已于 2026-07-31 按用户要求删除，来源仍恒为 `exact=false` 且 Retry 禁用，完整原文通过 git history 回溯。
 - **2026-07-22 · 按会话增量保存请求正文并诚实区分恢复保真度（Telemetry / Admin requests / Store，docs/07/11，原则 1/3/7/8）**：新增 `capture_sessions` 与 `capture_payloads` 构成三种互斥留存模式（同时为 true 则 fail-closed），只解析高置信客户端会话信号并以不可猜测 `session_ref` 存储；Session head + 单调 sequence + 不可变 revision 按最长公共前缀存增量，Responses 续接建真实 `response_id → request_id` 父边、找不到父 response 时恢复 fail-closed 为 `session_incomplete`，完整原文通过 git history 回溯。
 - **2026-07-22 · Lanes 批量保存、拖拽回退与可配置默认通道删除边界（Routing / Admin lanes，docs/03/04/11，原则 2/3/5/6）**：Lanes 整组原子保存、拖拽排序并只保护当前默认通道，非法默认配置 fail-closed，完整原文通过 git history 回溯。
 - **2026-07-22 · Responses 状态续接严格绑定原 provider 与账号（Protocol translation / provider execution，docs/04/05/07，原则 2/3/5/8）**：`previous_response_id` 只允许同 account/key、原 provider 与原账号继续执行；未知、跨协议或不可用状态 fail-closed，完整原文通过 git history 回溯。

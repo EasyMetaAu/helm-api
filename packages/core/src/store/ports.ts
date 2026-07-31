@@ -372,15 +372,12 @@ export interface SessionRecord {
   storedBytes: number;
 }
 
-// Persistent per-Session database quotas. These bound retained revision history;
-// they are not runtime heap, request-admission, or cache-memory limits.
+// Persistent per-Session revision quota. This bounds retained revision count;
+// Session bytes are intentionally unbounded and still tracked for observability.
 export const PERSISTED_SESSION_MAX_REVISIONS = 10_000;
-export const PERSISTED_SESSION_MAX_STORED_BYTES = 64 * 1024 * 1024;
 
 /** @deprecated Use PERSISTED_SESSION_MAX_REVISIONS. */
 export const SESSION_MAX_REVISIONS = PERSISTED_SESSION_MAX_REVISIONS;
-/** @deprecated Use PERSISTED_SESSION_MAX_STORED_BYTES. */
-export const SESSION_MAX_STORED_BYTES = PERSISTED_SESSION_MAX_STORED_BYTES;
 
 export interface SessionRevisionRecord {
   sessionRef: string;

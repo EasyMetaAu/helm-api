@@ -1129,10 +1129,15 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     // with observe deps but never received a scope → memory was dead on this
     // surface. Absent/illegal headers → off + null (default-safe).
     const nativeRec = (native ?? {}) as Record<string, unknown>;
-    const sessionCapture = resolveSessionCapture((name) => c.req.header(name), native, {
+    const sessionCaptureScope = {
       accountId: identity.accountId,
       apiKeyId: identity.keyId,
-    });
+    };
+    const sessionCapture = resolveSessionCapture(
+      (name) => c.req.header(name),
+      native,
+      sessionCaptureScope,
+    );
     const nativeMetaBag =
       nativeRec.metadata && typeof nativeRec.metadata === "object"
         ? (nativeRec.metadata as Record<string, unknown>)
@@ -1217,7 +1222,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       let initialError: unknown = null;
       try {
         initialResult = await deps.pipeline.run(ir, identity, requestSignal(c));
-        stampSessionCapture(initialResult.decision, sessionCapture);
+        stampSessionCapture(initialResult.decision, sessionCapture, sessionCaptureScope);
         applyResponseMetadata(
           c,
           initialResult.responseMetadata,
@@ -1429,7 +1434,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     let result: PipelineRunResult;
     try {
       result = await deps.pipeline.run(ir, identity, requestSignal(c));
-      stampSessionCapture(result.decision, sessionCapture);
+      stampSessionCapture(result.decision, sessionCapture, sessionCaptureScope);
     } catch (err) {
       if (err instanceof PipelineError) throw pipelineToHelm(err, traceId);
       throw err;
