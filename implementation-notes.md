@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-31 · 请求列表记录并显示客户端正文大小（Telemetry / Admin requests，docs/07/11，原则 1/7）
+
+- **计量口径**：新增可选 `request_body_bytes`，记录网关实际收到的客户端请求正文 UTF-8 字节数；不信任可能缺失或经过 transfer encoding 的 `Content-Length`，也不以字符数、Token 数、压缩后存储量或转换后的上游正文替代。该数字随脱敏 `DecisionRecord` 保存，不受正文捕获开关影响，不保存正文，因此无需 SQLite/Postgres 迁移。
+- **协议边界**：共享记录路径覆盖 Responses、Messages、Gemini、Interactions 与 Images，OpenAI Chat 和 Admin Replay 的独立写入路径显式补齐；multipart 图片使用原始 wire bytes 覆盖其后生成的元数据 JSON 大小。尚不产生 `DecisionRecord` 的预路由拒绝、count-tokens 与 Realtime 请求不伪造该指标。
+- **兼容与展示**：Admin 共享请求表按二进制阈值显示 `B / KB / MB`；旧记录不回填并显示 `—`，避免读取或扫描历史私密正文。
+
 ## 2026-07-29 · 生产韧性改为持续小批、无丢弃背压、执行 Token 租约与完整错误诊断（Store / Gateway / OAuth / Telemetry，docs/02/04/07/10/11，原则 1/3/5/7/8）
 
 - **SQLite 持续清理**：七类 SQLite retention mutation 统一为每批最多 10 行，满批后 `setImmediate` 让出事件循环，不再执行无界 DELETE。Session cleanup 先用既有 `head_request_id` 写入持久 prune claim，再按每批最多 10 个 revision 推进；进程中断后可继续完成，批间到达的同 Session 写入会等待过期链删完并以新 root 恢复。写入在真正落库的同步事务内再次检查 claim，关闭“先检查、await 让出、随后写进删除链”的竞态。该机制只减少未来增长和清理停顿，不替代整库重写；大库 `VACUUM` 仍必须由既有维护 drain 和低峰调度单独执行。
@@ -72,12 +78,9 @@
 - **统一边界**：复用所有 HTTP JSON 与 Responses WebSocket 内部请求已经经过的 `BodyMemoryAdmission`，在读取、扩容和 `JSON.parse` 前同时检查 `heapUsed + active reservations`。高水位为 heap limit 扣除 response work、write queue、Session cache、response capture 与 5% GC 余量；超过时沿用现有协议形状返回 503，单请求 wire 上限仍返回 413。未新增配置、依赖、队列或并发限制。
 - **运维边界**：该保护把聚合内存压力转成可恢复的拒绝，不负责物理缩小生产 20 GiB SQLite；历史正文清理与 VACUUM 仍必须通过既有维护 drain、磁盘与内存门禁执行，不能在线手工 VACUUM。
 
-## 2026-07-24 · Admin 登录在 Host 被代理改写时复用浏览器同源证明（Admin auth，docs/10/11，原则 3/7）
-
-- **根因与修复**：Admin 登录/登出的 CSRF 校验原本只比较 `Origin` 与请求 `Host` / `X-Forwarded-Host`；部分反向代理或 NAT 会把 `Host` 改成内部地址且不补 `X-Forwarded-Host`，导致浏览器从同一外部 origin 提交表单也稳定返回 403。校验现在优先接受浏览器提供的 `Sec-Fetch-Site: same-origin`，再保留原有 Host 比较与 opaque-origin 边界；`cross-site` 仍拒绝。该 header 不能由网页脚本伪造，而无 `Origin` 的非浏览器客户端原本就允许，因此不新增配置、代理白名单或信任任意 forwarded header。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-24 · Admin 登录同源证明兼容代理 Host 改写**：登录/登出优先接受浏览器不可伪造的 `Sec-Fetch-Site: same-origin`，同时保留 Origin/Host 与 cross-site 拒绝边界；完整原文通过 git history 回溯。
 - **2026-07-24 · Responses WebSocket ingress 改为按活动消息计费**：空闲连接不再预留完整帧容量，活动 `response.create` 才按真实 wire/JSON bytes 申请并释放 ingress lease；上游非 101 body 统一由有界响应超时接管，完整原文通过 git history 回溯。
 - **2026-07-23 · PostgreSQL API-key 分布式并发 lease**：PostgreSQL 用 DB 时钟和 state-row lease 实现跨 replica 并发上限、心跳与 crash recovery，真实多 pool e2e 作为验收边界；完整原文通过 git history 回溯。
 - **2026-07-23 · Session 恢复与在线响应共享内存池**：Admin Session 恢复单次最多占 response-work 池一半，保留在线响应容量并坚持先准入后物化；完整原文通过 git history 回溯。

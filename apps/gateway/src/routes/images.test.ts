@@ -144,17 +144,19 @@ describe("registerImagesRoute", () => {
   });
 
   it("forwards multipart image edits without losing binary bytes", async () => {
-    const { app, imageEdit } = setup();
+    const { app, imageEdit, enqueueTelemetry } = setup();
     const body = new FormData();
     body.set("model", "gpt-image-2");
     body.set("prompt", "add snow");
     body.append("image[]", new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" }), "a.png");
 
-    const res = await app.request("/v1/images/edits", {
+    const request = new Request("http://helm.test/v1/images/edits", {
       method: "POST",
       headers: { Authorization: "Bearer k" },
       body,
     });
+    const wireBytes = (await request.clone().arrayBuffer()).byteLength;
+    const res = await app.request(request);
 
     expect(res.status).toBe(200);
     const edit = imageEdit.mock.calls[0]?.[0] as {
@@ -170,6 +172,7 @@ describe("registerImagesRoute", () => {
     );
     const image = edit.fields.find((field) => field.name === "image[]");
     expect([...((image?.value as Uint8Array) ?? [])]).toEqual([1, 2, 3]);
+    expect(enqueueTelemetry.mock.calls[0]?.[0].decision.request_body_bytes).toBe(wireBytes);
   });
 
   it("captures the FULL image verbatim (the store externalizes it to payload_blobs)", async () => {

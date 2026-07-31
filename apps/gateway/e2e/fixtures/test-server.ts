@@ -92,6 +92,7 @@ await telemetry.insert({
   decision: {
     request_id: SEED_TRACE_ID,
     trace_id: SEED_TRACE_ID,
+    request_body_bytes: 1_572_864,
     requested_model: "gpt-4o-mini",
     classifier: {
       task_type: "coding",

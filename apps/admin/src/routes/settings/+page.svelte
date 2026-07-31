@@ -16,7 +16,7 @@
     saveSettings,
   } from '$lib/api/settings.js';
   import Modal from '$lib/components/Modal.svelte';
-  import { formatTimestamp } from '$lib/format.js';
+  import { formatBytes, formatTimestamp } from '$lib/format.js';
   import { t } from '$lib/i18n';
 
   // System Settings — runtime-mutable config that applies WITHOUT a restart
@@ -156,11 +156,6 @@
     }
   }
 
-  function formatBytes(n: number): string {
-    if (n < 1024) return `${n} B`;
-    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-  }
 </script>
 
 <section class="flex w-full flex-col gap-6 px-4 py-6 md:px-8">

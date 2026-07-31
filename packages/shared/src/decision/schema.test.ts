@@ -92,6 +92,16 @@ function passthroughRecord(model = "gpt-4o-mini") {
 }
 
 describe("DecisionRecordSchema", () => {
+  it("records the UTF-8 request body byte count while keeping legacy rows valid", () => {
+    expect(DecisionRecordSchema.parse(fullRecord()).request_body_bytes).toBeUndefined();
+    expect(
+      DecisionRecordSchema.parse({ ...fullRecord(), request_body_bytes: 17 }).request_body_bytes,
+    ).toBe(17);
+    expect(
+      DecisionRecordSchema.safeParse({ ...fullRecord(), request_body_bytes: -1 }).success,
+    ).toBe(false);
+  });
+
   it("preserves body-free reasoning effort metadata", () => {
     const parsed = DecisionRecordSchema.parse({
       ...fullRecord(),

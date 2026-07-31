@@ -761,16 +761,21 @@ describe("POST /v1/chat/completions (routing pipeline)", () => {
     harness.execute.mockResolvedValue(nonStreamOutcome({ ok: true }));
     const app = buildApp(d);
 
+    const requestJson = JSON.stringify({
+      ...NONSTREAM_BODY,
+      messages: [{ role: "user", content: "你好" }],
+    });
     await app.request("/v1/chat/completions", {
       method: "POST",
       headers: AUTH,
-      body: JSON.stringify(NONSTREAM_BODY),
+      body: requestJson,
     });
 
     expect(redact).toHaveBeenCalled();
     expect(d.telemetry.insert).toHaveBeenCalledOnce();
     const arg = (d.telemetry.insert as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
     expect(arg.apiKeyId).toBe("k1");
+    expect(arg.decision.request_body_bytes).toBe(Buffer.byteLength(requestJson, "utf8"));
     expect(JSON.stringify(arg)).not.toContain("helm_live_secret");
   });
 

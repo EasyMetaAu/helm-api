@@ -787,6 +787,14 @@ export function redactDecisionForTelemetry(
   return redact(bodyFreeDecision) as DecisionRecord;
 }
 
+export function stampRequestBodyBytes(
+  decision: DecisionRecord,
+  requestJson: string,
+  requestBodyBytes = Buffer.byteLength(requestJson, "utf8"),
+): DecisionRecord {
+  return { ...decision, request_body_bytes: requestBodyBytes };
+}
+
 // Record ONE served request: the telemetry row (always — this is what makes the
 // request appear in /admin/requests) plus the verbatim request/response payload
 // (gated by capture_payloads). Shared by the three pipeline faces (/v1/responses,
@@ -801,6 +809,7 @@ export async function recordServed(
     apiKeyId: string;
     decision: DecisionRecord;
     requestJson: string;
+    requestBodyBytes?: number;
     responseJson: string | null;
     timedOut?: boolean;
     // The exact body forwarded upstream (post inject + translation); null when no
@@ -814,7 +823,7 @@ export async function recordServed(
   // but telemetry.request_id and request_payloads.request_id must always use the
   // server-generated context request_id passed in args.
   const storageDecision: DecisionRecord = {
-    ...args.decision,
+    ...stampRequestBodyBytes(args.decision, args.requestJson, args.requestBodyBytes),
     request_id: args.requestId,
   };
   const decision =

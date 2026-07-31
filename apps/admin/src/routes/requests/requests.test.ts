@@ -56,6 +56,7 @@ function item(traceId: string, overrides: Partial<RequestListItem> = {}): Reques
     stream_outcome: 'completed',
     latency_ms: 460,
     cost_usd: 0.0123,
+    request_body_bytes: null,
     usage: {
       measurement: 'reported',
       input: 1200,
