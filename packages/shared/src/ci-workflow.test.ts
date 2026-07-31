@@ -159,7 +159,13 @@ describe("release workflow policy", () => {
     expect(publishRaw).not.toContain("allow-unsafe-pr-checkout");
   });
 
-  it("keeps the package-write Docker credential run-scoped on the persistent runner", () => {
+  it("keeps GHCR publishing off the self-hosted runner egress", () => {
+    const publishJob = jobBlock(publishRaw, "publish");
+    expect(publishJob).toContain("runs-on: ubuntu-24.04");
+    expect(publishJob).not.toContain("runs-on: [self-hosted, Linux, X64, docker]");
+  });
+
+  it("keeps the package-write Docker credential run-scoped", () => {
     const publishJob = jobBlock(publishRaw, "publish");
     const jobHeader = publishJob.slice(0, publishJob.indexOf("\n    steps:"));
     expect(jobHeader).not.toMatch(/\$\{\{\s*runner\./);
