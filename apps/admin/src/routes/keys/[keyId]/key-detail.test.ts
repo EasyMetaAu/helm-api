@@ -194,6 +194,7 @@ function requestItem(traceId: string): RequestListItem {
     stream_outcome: 'completed',
     latency_ms: 1200,
     cost_usd: 0.004,
+    request_body_bytes: null,
     usage: {
       measurement: 'reported',
       input: 100,

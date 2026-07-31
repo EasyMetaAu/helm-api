@@ -114,6 +114,7 @@ test.describe("admin request debugging", () => {
     await expect(row).toBeVisible();
     // Classification-stage decision layer is shown (decided_by column, Principle 5).
     await expect(row.getByTestId("decided-by")).toHaveText("rules");
+    await expect(row.getByTestId("cell-request-body")).toHaveText("1.5 MB");
 
     // Drill into the detail by deep-linking the trace id (SPA fallback route).
     await page.goto(`${BASE}/admin/requests/${SEED_TRACE_ID}`);

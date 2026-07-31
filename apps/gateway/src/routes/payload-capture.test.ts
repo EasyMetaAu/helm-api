@@ -1393,8 +1393,13 @@ describe("recordServed — deferred write queue (the three pipeline faces)", () 
       now: () => 5000,
       capturePayloads: () => true,
     };
-    await recordServed(d, { ...args, requestId: "req_2" }, () => {});
+    await recordServed(
+      d,
+      { ...args, requestId: "req_2", requestJson: '{"text":"你好"}' },
+      () => {},
+    );
     expect(s.inserted).toHaveLength(1);
+    expect(s.inserted[0]?.request_body_bytes).toBe(17);
     expect(s.payloads).toHaveLength(1);
   });
 

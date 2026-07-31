@@ -189,6 +189,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
     // 4) Parse + validate. Edits support both the Codex JSON carrier and the public
     // multipart carrier. The admitted bytes make multipart fallback attempts replayable.
     let requestJson = "";
+    let requestBodyBytes = 0;
     let model = "";
     let prompt = "";
     let generationBody: Record<string, unknown> | null = null;
@@ -199,6 +200,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
           ? null
           : await readAdmittedRequestBody(c.req.raw, deps.memoryAdmission);
       const bytes = admitted?.bytes ?? new Uint8Array(await c.req.arrayBuffer());
+      requestBodyBytes = bytes.byteLength;
       requestJson = admitted?.text ?? Buffer.from(bytes).toString("utf8");
       if (admitted !== null) c.set("requestMemoryRelease", admitted.release);
       const contentType = c.req.header("Content-Type")?.toLowerCase() ?? "";
@@ -435,6 +437,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
             apiKeyId: identity.keyId,
             decision,
             requestJson,
+            requestBodyBytes,
             responseJson: null,
             timedOut: requestTimedOut(c),
             upstreamRequestJson: null,
@@ -478,6 +481,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
           apiKeyId: identity.keyId,
           decision,
           requestJson,
+          requestBodyBytes,
           responseJson,
           timedOut: requestTimedOut(c),
           upstreamRequestJson: result.upstreamRequestJson,

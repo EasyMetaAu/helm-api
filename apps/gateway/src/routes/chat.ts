@@ -61,6 +61,7 @@ import {
   persistPayload,
   queueOrPersistSessionRequest,
   redactDecisionForTelemetry,
+  stampRequestBodyBytes,
   tokensFromUsage,
   usageFromBody,
   usageFromSSE,
@@ -544,7 +545,10 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
     // With a write queue wired, the insert is deferred + batched off the hot path.
     const persist = async (decision: DecisionRecord, responseJson: string | null = null) => {
       const timedOut = requestTimedOut(c);
-      const decisionSnapshot = timedOut ? decisionForTimedOutRequest(decision) : decision;
+      const decisionSnapshot = stampRequestBodyBytes(
+        timedOut ? decisionForTimedOutRequest(decision) : decision,
+        requestJson,
+      );
       const sessionResponseJson = timedOut ? null : responseJson;
       const input: InsertTelemetryInput = {
         decision: redactDecisionForTelemetry(deps.redact, decisionSnapshot),

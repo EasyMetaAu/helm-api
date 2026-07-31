@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   durationParts,
+  formatBytes,
   formatCount,
   formatDurationMs,
   formatTimestamp,
@@ -8,6 +9,15 @@ import {
   formatTps,
   formatUsd,
 } from './format.js';
+
+describe('formatBytes — request body size', () => {
+  it('uses binary B, KB, and MB thresholds and preserves unknown values', () => {
+    expect(formatBytes(null)).toBe('—');
+    expect(formatBytes(0)).toBe('0 B');
+    expect(formatBytes(1024)).toBe('1.0 KB');
+    expect(formatBytes(1_572_864)).toBe('1.5 MB');
+  });
+});
 
 describe('formatDurationMs — compact duration', () => {
   it('keeps sub-second durations in milliseconds', () => {

@@ -84,6 +84,15 @@ describe('toDetail', () => {
 });
 
 describe('toListItem', () => {
+  it('maps the recorded request body byte count without inventing legacy values', () => {
+    const measured = toListItem(rawRecord({ request_body_bytes: 1_572_864 })) as unknown as {
+      request_body_bytes: number | null;
+    };
+    const legacy = toListItem(rawRecord()) as unknown as { request_body_bytes: number | null };
+    expect(measured.request_body_bytes).toBe(1_572_864);
+    expect(legacy.request_body_bytes).toBeNull();
+  });
+
   it('keeps the unique storage request id separate from reusable client correlation', () => {
     const raw = rawRecord({ request_id: 'req_internal_1', trace_id: 'client_shared_trace' });
     const row = toListItem(raw);

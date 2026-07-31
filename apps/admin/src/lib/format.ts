@@ -1,6 +1,13 @@
 // Shared display formatters for the admin UI. Read-only presentation — never
 // re-computes backend figures, only renders them.
 
+export function formatBytes(n: number | null | undefined): string {
+  if (n === null || n === undefined || Number.isNaN(n)) return '—';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 // Format a USD cost for the requests table / cost breakdown.
 //
 // WHY adaptive precision: relay models can be extraordinarily cheap (a DeepSeek

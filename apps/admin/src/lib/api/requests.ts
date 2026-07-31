@@ -68,6 +68,8 @@ export interface RequestListItem {
   // rendered as '—'. A number is a real cost. Crucially distinct from 0 so an
   // unmeasured request never looks like a free one (#6).
   cost_usd: number | null;
+  // Exact UTF-8 byte length of the client request body. null for legacy rows.
+  request_body_bytes: number | null;
   // Served-completion token counts (see TokenUsageView). Every leaf is null on a
   // legacy/un-stamped record → the cell renders '—'.
   usage: TokenUsageView;
@@ -249,6 +251,7 @@ interface RawDecisionRecord {
   requested_model?: string;
   requested_reasoning_effort?: string | null;
   reasoning_effort?: string | null;
+  request_body_bytes?: number | null;
   // Display prefix only (helm_live_ab12) — the record NEVER carries the plaintext
   // key (Principle 7). Null/absent on legacy (pre-enrichment) records.
   key_prefix?: string | null;
@@ -555,6 +558,12 @@ export function toListItem(raw: RawDecisionRecord): RequestListItem {
     latency_ms:
       typeof raw.latency_total_ms === 'number' ? raw.latency_total_ms : sumLatency(attempts),
     cost_usd: listCost(raw, attempts),
+    request_body_bytes:
+      typeof raw.request_body_bytes === 'number' &&
+      Number.isFinite(raw.request_body_bytes) &&
+      raw.request_body_bytes >= 0
+        ? raw.request_body_bytes
+        : null,
     usage: toUsage(raw),
     // True throughput (output ÷ generation time); null → '—' for non-streaming/legacy.
     tps: computeTps(raw),

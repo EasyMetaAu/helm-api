@@ -730,6 +730,7 @@ describe("registerReplayRoutes", () => {
 
   it("POST returns { trace_id } for a captured request", async () => {
     const rec = emptyRec();
+    const requestBody = JSON.stringify({ request: okBody }, null, 2);
     const route: ReplayWiring["route"] = async (req) => ({
       decision: decision(req.request_id),
       final: { status: "ok", alias: "openai/gpt-4" },
@@ -740,10 +741,13 @@ describe("registerReplayRoutes", () => {
     const res = await appWith(wiring(route, rec), rec).request("/admin/api/requests/orig/replay", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ request: okBody }),
+      body: requestBody,
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ trace_id: "new_trace" });
+    expect(rec.inserts[0]?.decision.request_body_bytes).toBe(
+      Buffer.byteLength(requestBody, "utf8"),
+    );
   });
 
   it("503s when replay is not wired", async () => {

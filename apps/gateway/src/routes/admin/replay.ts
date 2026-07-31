@@ -24,6 +24,7 @@ import {
   backfillCompletionCost,
   type PayloadCaptureDeps,
   persistPayload,
+  stampRequestBodyBytes,
   usageFromSSE,
 } from "../payload-capture.js";
 import type { AdminApiDeps, ReplayWiring } from "./deps.js";
@@ -69,6 +70,7 @@ export async function runReplay(
   args: {
     originalTraceId: string;
     body: unknown;
+    requestBodyBytes?: number;
     signal: AbortSignal;
     log: (msg: string) => void;
   },
@@ -154,7 +156,9 @@ export async function runReplay(
   // contract: fail the endpoint instead.
   try {
     await deps.telemetry.insert({
-      decision: deps.replay.redact(prepared.decision) as DecisionRecord,
+      decision: deps.replay.redact(
+        stampRequestBodyBytes(prepared.decision, prepared.requestJson, args.requestBodyBytes),
+      ) as DecisionRecord,
       // Attribute the NEW trace to the key ACTUALLY used — on a root-key
       // fallback that is the root key, not the dead original (honest audit
       // trail, no dangling key_id reference).
@@ -453,7 +457,14 @@ export function registerReplayRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
   app.post("/admin/api/requests/:traceId/replay", async (c) => {
     if (deps.replay === undefined) return c.json({ error: "replay not available" }, 503);
     const originalTraceId = c.req.param("traceId");
-    const raw = (await c.req.json().catch(() => null)) as { request?: unknown } | null;
+    let requestBytes = new Uint8Array();
+    let raw: { request?: unknown } | null = null;
+    try {
+      requestBytes = new Uint8Array(await c.req.arrayBuffer());
+      raw = JSON.parse(Buffer.from(requestBytes).toString("utf8")) as { request?: unknown };
+    } catch {
+      // Invalid JSON is handled by the existing missing-body response below.
+    }
     if (raw === null || typeof raw !== "object" || !("request" in raw)) {
       return c.json({ error: "missing request body" }, 400);
     }
@@ -466,7 +477,13 @@ export function registerReplayRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
     };
     const outcome = await runReplay(
       { replay: deps.replay, telemetry: deps.telemetry, keyStore: deps.keyStore },
-      { originalTraceId, body: raw.request, signal: c.req.raw.signal, log },
+      {
+        originalTraceId,
+        body: raw.request,
+        requestBodyBytes: requestBytes.byteLength,
+        signal: c.req.raw.signal,
+        log,
+      },
     );
     if (!outcome.ok) return c.json({ error: outcome.error }, outcome.status);
     return c.json({ trace_id: outcome.traceId });

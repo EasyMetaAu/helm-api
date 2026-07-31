@@ -272,6 +272,10 @@ export const DecisionRecordSchema = z.object({
   // non-subscription providers, legacy rows, failed requests, or stale selections
   // that later fell back to a different provider. Body-free routing metadata only.
   serving_account: ServingAccountDecisionSchema.nullable().default(null),
+  // Exact UTF-8 byte length of the client request body as received by the gateway.
+  // Body-free telemetry only: the bytes themselves remain governed by capture mode.
+  // null/absent for legacy rows that predate measurement.
+  request_body_bytes: z.number().int().nonnegative().nullable().optional(),
   // Total served latency = Σ provider_attempts.latency_ms (docs/07 latency).
   // `.default(0)` so legacy records validate; the builder computes the real sum.
   latency_total_ms: z.number().nonnegative().default(0),

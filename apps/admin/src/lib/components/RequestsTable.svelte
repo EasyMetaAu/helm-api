@@ -2,7 +2,13 @@
   import { goto } from '$app/navigation';
   import type { RequestListItem } from '$lib/api/requests.js';
   import { attemptCodeLabel } from '$lib/format/attempt-codes.js';
-  import { formatDurationMs, formatTimestamp, formatTps, formatUsd } from '$lib/format.js';
+  import {
+    formatBytes,
+    formatDurationMs,
+    formatTimestamp,
+    formatTps,
+    formatUsd,
+  } from '$lib/format.js';
   import { t } from '$lib/i18n';
   import TokensCell from './TokensCell.svelte';
 
@@ -322,6 +328,7 @@
         <th class="px-3 py-2" title={$t('Token usage: input / output, with cached input tokens.')}
           >{$t('Tokens')}</th
         >
+        <th class="px-3 py-2" title={$t('Request body')}>{$t('Request body')}</th>
         <th class="px-3 py-2" title={$t('End-to-end latency and streamed generation throughput.')}
           >{$t('Performance')}</th
         >
@@ -404,6 +411,11 @@
             {/if}
           </td>
           <td data-label={$t('Tokens')} class="px-3 py-2"><TokensCell usage={r.usage} /></td>
+          <td
+            data-testid="cell-request-body"
+            data-label={$t('Request body')}
+            class="px-3 py-2 font-mono text-ink-body"
+          >{formatBytes(r.request_body_bytes)}</td>
           <td data-label={$t('Performance')} class="px-3 py-2">
             {@render performanceCell(r)}
           </td>

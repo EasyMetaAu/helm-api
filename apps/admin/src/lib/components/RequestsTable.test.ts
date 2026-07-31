@@ -31,6 +31,7 @@ function item(overrides: Partial<RequestListItem> = {}): RequestListItem {
     stream_outcome: 'completed',
     latency_ms: 460,
     cost_usd: 0.0123,
+    request_body_bytes: null,
     usage: {
       measurement: 'reported',
       input: 1200,
@@ -81,6 +82,21 @@ describe('RequestsTable key cell', () => {
 });
 
 describe('RequestsTable variants', () => {
+  it('shows the recorded request body size and keeps legacy rows unknown', () => {
+    const { unmount } = render(RequestsTable, {
+      items: [
+        item({ request_body_bytes: 1_572_864 }),
+      ],
+      detailHref,
+    });
+    expect(screen.getByText('Request body')).toBeInTheDocument();
+    expect(screen.getByTestId('cell-request-body')).toHaveTextContent('1.5 MB');
+    unmount();
+
+    render(RequestsTable, { items: [item()], detailHref });
+    expect(screen.getByTestId('cell-request-body')).toHaveTextContent('—');
+  });
+
   it('makes Session a filter button or canonical link when the caller provides one', async () => {
     const session = { ref: 'session_abc', label: 'Support case 42', source: 'header' };
     const onSessionFilter = vi.fn();
