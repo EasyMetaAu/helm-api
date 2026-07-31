@@ -118,6 +118,7 @@ test.describe("admin request debugging", () => {
 
     // Drill into the detail by deep-linking the trace id (SPA fallback route).
     await page.goto(`${BASE}/admin/requests/${SEED_TRACE_ID}`);
+    await expect(page.getByTestId("request-body-size")).toHaveText("1.5 MB");
 
     // Decision chain blocks must be visible (docs/07): classifier output, lane
     // candidate chain, provider attempts, cost breakdown, trace_id.

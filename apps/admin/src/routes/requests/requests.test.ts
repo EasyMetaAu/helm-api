@@ -136,6 +136,7 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
     status: 'ok',
     stream_outcome: 'completed',
     latency_ms: 460,
+    request_body_bytes: null,
     request_meta: { requested_model: 'gpt-4o' },
     payload_summary: 'payload withheld (redacted — only routing metadata is stored)',
     classifier_output: {
@@ -562,10 +563,10 @@ describe('requests detail page', () => {
     expect(screen.getByTestId('payload-summary')).toHaveTextContent(/not recorded/i);
   });
 
-  it('renders a Request summary card with key, provider/account, requested+served model, lane, status, latency', () => {
+  it('renders a Request summary card with identity, routing, latency, and request body size', () => {
     render(DetailPage, {
       data: {
-        detail: detail({ latency_ms: 6911 }),
+        detail: detail({ latency_ms: 6911, request_body_bytes: 1_572_864 }),
         payload: { captured: false },
         requestId: 'tr_1',
       },
@@ -579,6 +580,8 @@ describe('requests detail page', () => {
     expect(summary).toHaveTextContent('claude-x'); // served model
     expect(summary).toHaveTextContent('premium'); // lane
     expect(summary).toHaveTextContent('6.9s'); // total latency
+    expect(within(summary).getByText('Request body')).toBeInTheDocument();
+    expect(within(summary).getByTestId('request-body-size')).toHaveTextContent('1.5 MB');
   });
 
   it('shows a partial stream status and approximate cost/usage provenance on detail', () => {
@@ -612,6 +615,7 @@ describe('requests detail page', () => {
     // and never a fabricated value (Principle 7).
     expect(summary).toHaveTextContent('—');
     expect(summary).not.toHaveTextContent('Production backend');
+    expect(within(summary).getByTestId('request-body-size')).toHaveTextContent('—');
   });
 
   it('renders the throughput card: true TPS, time-to-first-token, and the generation window', () => {
