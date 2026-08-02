@@ -145,6 +145,9 @@ export interface GenericOpenAIResponsesRequestContract {
   // continuation. Reject deterministically before network I/O instead of surfacing
   // the proxy's eventual 404 as an all-providers-failed 502.
   rejectPreviousResponseId?: boolean;
+  // Some providers accept only the Responses item sequence form; reject the
+  // proven object form locally instead of sending a deterministic upstream 422.
+  rejectObjectInput?: boolean;
   // Account-scoped model metadata discovered from the upstream catalog. The
   // resolver receives the final wire model; no provider-wide defaults are guessed.
   resolveModelRequestDefaults?: (
@@ -2230,6 +2233,7 @@ export function createGenericOpenAIResponsesClient(
       contract?.ensureReasoningEncryptedContent !== true &&
       contract?.ensureInstructions !== true &&
       contract?.rejectPreviousResponseId !== true &&
+      contract?.rejectObjectInput !== true &&
       contract?.resolveModelRequestDefaults === undefined
     ) {
       return body;
@@ -2278,6 +2282,20 @@ export function createGenericOpenAIResponsesClient(
         "upstream_error",
         message,
         { type: "invalid_request_error", code: "previous_response_id_unsupported", message },
+        400,
+      );
+    }
+    if (
+      contract.rejectObjectInput === true &&
+      next.input !== null &&
+      typeof next.input === "object" &&
+      !Array.isArray(next.input)
+    ) {
+      const message = "input must be an array of Responses items for this subscription provider";
+      throw new UpstreamError(
+        "upstream_error",
+        message,
+        { type: "invalid_request_error", code: "responses_input_sequence_required", message },
         400,
       );
     }

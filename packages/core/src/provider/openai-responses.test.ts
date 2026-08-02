@@ -4364,6 +4364,32 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("rejects an object native input when the provider contract requires a sequence", async () => {
+    const fetchMock = vi.fn();
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://stream-only.test/v1", apiKey: "sk-test" },
+      requestContract: {
+        forceSse: true,
+        rejectObjectInput: true,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await expect(
+      client.nativePassthrough?.({
+        model: "grok-4.5",
+        input: { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+      }),
+    ).rejects.toMatchObject({
+      upstreamStatus: 400,
+      providerRaw: expect.objectContaining({
+        type: "invalid_request_error",
+        code: "responses_input_sequence_required",
+      }),
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("adapts a unary chat call to a stream-only upstream and aggregates its SSE", async () => {
     let seenHeaders = new Headers();
     let seenBody: Record<string, unknown> = {};
