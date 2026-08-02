@@ -333,14 +333,15 @@ async function forwardResponse(
   }
   let response: Response;
   try {
-    response = await fetch(
-      new Request(requestUrl(request), {
-        method: "POST",
-        headers,
-        body: JSON.stringify(websocketRequestBody(data)),
-        signal,
-      }),
-    );
+    const body = websocketRequestBody(data);
+    const internalRequest = new Request(requestUrl(request), {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal,
+    });
+    materialized();
+    response = await fetch(internalRequest);
   } finally {
     materialized();
   }
@@ -368,6 +369,7 @@ async function forwardResponse(
     }
     if (
       type === "response.completed" ||
+      type === "response.cancelled" ||
       type === "response.failed" ||
       type === "response.incomplete" ||
       type === "error"
