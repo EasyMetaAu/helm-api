@@ -1,4 +1,4 @@
-import type { TelemetryStore, UpsertSessionRevisionInput } from "@helm/core";
+import type { DecisionRecord, TelemetryStore, UpsertSessionRevisionInput } from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
 import { createBodyMemoryAdmission } from "../runtime/memory-admission.js";
@@ -50,6 +50,7 @@ function makeDeps(
     countTokens?: GeminiRouteDeps["countTokens"];
     record?: RecordServedDeps;
     memoryAdmission?: GeminiRouteDeps["memoryAdmission"];
+    decision?: DecisionRecord;
   } = {},
 ): { deps: GeminiRouteDeps; harness: Harness } {
   const harness: Harness = { order: [], pipelineSawIR: null, pipelineSawAbort: false };
@@ -110,7 +111,7 @@ function makeDeps(
           });
         }
         return {
-          decision: FAKE_DECISION,
+          decision: over.decision ?? FAKE_DECISION,
           collect: over.collect ?? (async () => ({ id: "ir-resp" })),
           streamIR:
             over.streamEvents ??
@@ -648,8 +649,11 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
       yield { candidates: [{ content: { role: "model", parts: [{ text: "Hi" }] } }] };
       throw new PipelineError("all_providers_failed", "all providers failed", "trace-1");
     }
-    const { record, insertPayload } = makeRecord({ capturePayloads: true });
-    const { deps } = makeDeps({ record, streamEvents: events });
+    const { record, insert, insertPayload } = makeRecord({ capturePayloads: true });
+    const decision = {
+      final: { status: "ok", model_alias: "gemini-2.0-flash", error_reason: null },
+    } as never;
+    const { deps } = makeDeps({ record, streamEvents: events, decision });
     const app = buildApp(deps);
 
     const res = await app.request("/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse", {
@@ -663,6 +667,17 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
     const arg = insertPayload.mock.calls[0]?.[0] as { responseJson: string };
     expect(arg.responseJson).toContain("UNAVAILABLE");
     expect(arg.responseJson).toContain("all providers failed");
+    const recorded = insert.mock.calls[0]?.[0] as {
+      decision: {
+        final: { status: string; error_reason: string | null };
+        stream_outcome: string | null;
+      };
+    };
+    expect(recorded.decision.final).toMatchObject({
+      status: "error",
+      error_reason: "all_providers_failed",
+    });
+    expect(recorded.decision.stream_outcome).toBe("failed");
   });
 });
 

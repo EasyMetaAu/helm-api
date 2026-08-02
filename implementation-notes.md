@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-08-02 · 流式错误的 telemetry 终态与 metadata-only 捕获短路（Gateway / Telemetry，docs/05/07，原则 3/7/8）
+
+- **流式终态**：Chat、Messages 与 Gemini 在已经开始写 SSE 后遇到非取消错误时，共用取消边界旁的 helper，把同一份 `DecisionRecord` 标为 `final.status=error`、保留协议映射使用的 `error_reason`，并写入 `stream_outcome=failed`；客户端主动断连仍只走原有 `client_aborted` 语义。
+- **metadata-only**：Session capture 关闭时，队列入口在计算 request/response 字节、查询饱和 cache 或创建 deferred DB write 前直接返回；不会产生 `session.capture_limited` 或 Session 存储工作，脱敏 telemetry 的正常记录不受影响。
+
 ## 2026-08-02 · Session 正文改为原子分块存储并以机器压力协调后台工作（Telemetry / Gateway runtime，docs/02/07/11，原则 3/7）
 
 - **存储格式**：新 Session 正文按 UTF-8 安全的 256 KiB 原始块逐块 gzip/raw 写入，最多 4 块一批；revision 用请求/响应两个 generation 指针原子发布，响应回填不重写大请求正文，并发重试不会把一份元数据配到另一份正文。历史正文不扫描、不回填；legacy 行继续读取，首次响应回填记录准确的逻辑 `body_bytes`。Admin 恢复先按机器动态 response-work 预算分页，只读取已发布 generation；旧二进制正文在缺少可靠原始字节数时 fail-closed。
@@ -66,17 +71,9 @@
 - **修复**：共享 `isUpstreamRequestRejection` 在原有 `400/413/422` 状态白名单内识别 `invalid_params`；图片链复用现有上游消息提取，Images 路由返回 OpenAI 形状的 `invalid_request_error / invalid_request / 400`。不按错误字符串或具体参数名特判，也不删除客户端字段。
 - **边界不变**：`401/403/404/429`、provider `5xx`、网络/超时、熔断与真实链耗尽仍走原有认证、重试、breaker、fallback 和 `5xx` 语义；回归测试覆盖 ZenMux 形状、provider `500`、网络失败与链耗尽。
 
-## 2026-07-25 · 上游过载（529/503）在 fetch 边界退避重试（Provider，docs/02/04，原则 3/5/8）
-
-- **根因**：`provider/retry.ts` 的重试分类是严格白名单，只覆盖裸 socket/连接失败；HTTP 529（Anthropic Overloaded）/503 直接变成 `UpstreamError` 抛出，**零延迟零重试**。OAuth 账号池确实把 `status >= 500` 当作可换兄弟账号的瞬时故障，但那也是立即换、无退避；单账号或普通 API key 的 provider 根本没有这条通路，一次 529 就烧掉一个候选，单候选链直接 502 给客户端——而同样的请求体隔一秒重发通常就成功。
-- **修复**：新增 `overloadRetryDelayMs` + `withOverloadRetry`，包在四个 provider client 的 fetch 边界外层（anthropic、openai、codex-responses、generic-responses、gemini）。过载答复是**正常 Response 而非 throw**，所以过载重试必须套在 `withConnectionRetry` 外面，而不是塞进它的 `shouldRetry`。首字节前才重试、body 从未消费，因此幂等（原则 8）；被丢弃的 response 会 `body.cancel()` 释放 socket，codex 那条延迟到 body 的 timeout 定时器通过 `release` 钩子显式清理。
-- **刻意收窄**：只认 **529 + 503**。500/502 是不明服务端故障，重试只是拖延真正的失败；429 是真限流，账号池 park 账号后走链才对。退避 **1s → 3s**（共 2 次重试）；上游给出数字 `Retry-After` 则优先，但**钳制在 10s**——一个上游不该占住客户端 socket 十分钟，那时换候选才是更快的答案路径。HTTP-date 形式的 `Retry-After` 不解析，退回默认表。
-- **下游不变**：重试耗尽后仍抛原来的 `UpstreamError(upstreamStatus: 529)`，账号池换号、熔断计数、fallback 链、遥测字段**逻辑一行未改**——只是现在它们只在真的持续过载时才启动。客户端断连时立刻停止，不再多烧一次上游（此时返回的 response body 已被 drain，error detail 退化为 null；无人在听，可接受）。
-- **测试影响**：三个老测试用 503 当"随便一个 5xx"占位（openai 401 分支、gemini/codex 非 JSON body 保留、generic 首 chunk 前抛错），503 现在会触发重试，已改成 500 并注明原因；意图不变，provider 套件同时从 9s 回到 2.5s。
-- **TODO / 边界**：退避参数目前是代码常量，未做成配置（与原则 2 的"会撒谎的旋钮比没有旋钮更糟"一致，先观察线上真实 529 分布再决定）；OAuth 池**换账号之间**仍无延迟，本次未动——换号本身就是在换容量，加睡眠反而拖慢。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-25 · 上游过载（529/503）在 fetch 边界退避重试**：只在首字节前对 529/503 做两次有界退避，保留账号池、熔断、fallback 与终态 telemetry 语义；客户端断连立即停止，完整原文通过 git history 回溯。
 - **2026-07-25 · Responses WebSocket terminal 立即释放并关闭失效连接**：成功终态立即释放请求与 ingress lease，失败终态关闭失效连接；Codex 增量续接保持 registry/provider/account/lane provenance 与 abort 边界，完整原文通过 git history 回溯。
 - **2026-07-24 · Codex Voice、Responses 音频与图片编辑补齐代理面**：Realtime V1/V2/V3、Responses 音频与 Images edits 复用既有鉴权、路由、账号和遥测链；Voice attestation 与单实例 call registry 保持收窄边界，完整原文通过 git history 回溯。
 - **2026-07-24 · 请求准入增加实时 V8 堆高水位**：曾以 live heap + 分池余量拒绝高风险请求；后被 2026-07-27 的启发式拒绝拆除与 2026-07-28 的请求大小上限删除取代，完整原文通过 git history 回溯。

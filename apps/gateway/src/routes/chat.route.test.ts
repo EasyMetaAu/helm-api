@@ -583,7 +583,8 @@ describe("POST /v1/chat/completions (routing pipeline)", () => {
       yield first;
       throw new UpstreamError("timeout", "upstream stream produced no data for 1500ms");
     }
-    const { deps: d, harness } = deps();
+    const insert = vi.fn(async (_input: { decision: unknown }) => ({ id: "1" }));
+    const { deps: d, harness } = deps({ telemetry: { insert } as unknown as TelemetryStore });
     harness.execute.mockResolvedValue({
       ...nonStreamOutcome(null),
       body: null,
@@ -606,6 +607,14 @@ describe("POST /v1/chat/completions (routing pipeline)", () => {
       error: { error_class: string };
     };
     expect(parsed.error.error_class).toBe("timeout");
+    const recorded = insert.mock.calls[0]?.[0] as {
+      decision: {
+        final: { status: string; error_reason: string | null };
+        stream_outcome: string | null;
+      };
+    };
+    expect(recorded.decision.final).toMatchObject({ status: "error", error_reason: "timeout" });
+    expect(recorded.decision.stream_outcome).toBe("failed");
   });
 
   it("does NOT bypass the pipeline (Phase 0 passthrough is gone)", async () => {

@@ -1163,9 +1163,13 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
 
     expect(insert).toHaveBeenCalledOnce();
     const arg = insert.mock.calls[0]?.[0] as {
-      decision: { final: { status: string; error_reason: string | null } };
+      decision: {
+        final: { status: string; error_reason: string | null };
+        stream_outcome: string | null;
+      };
     };
     expect(arg.decision.final.status).toBe("error");
     expect(arg.decision.final.error_reason).toBe("upstream_error");
+    expect(arg.decision.stream_outcome).toBe("failed");
   });
 });
