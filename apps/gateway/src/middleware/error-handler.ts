@@ -65,20 +65,26 @@ export function handleError(err: unknown, c: Context<AppEnv>): Response {
 
   if (err instanceof RequestAdmissionError) {
     c.header("retry-after", "1");
-    logger.log("warn", "request.maintenance_rejected", {
-      trace_id: traceId,
-      http_status: err.status,
-      code: err.code,
-      ...(err.admission === undefined
-        ? {}
-        : {
-            admission_reason: err.admission.cause,
-            wire_bytes: err.admission.wireBytes,
-            requested_charge_bytes: err.admission.requestedChargeBytes,
-            active_reserved_bytes: err.admission.activeReservedBytes,
-            pending_bytes: err.admission.pendingBytes,
-          }),
-    });
+    logger.log(
+      "warn",
+      err.admission?.cause === "capacity"
+        ? "request.capacity_rejected"
+        : "request.maintenance_rejected",
+      {
+        trace_id: traceId,
+        http_status: err.status,
+        code: err.code,
+        ...(err.admission === undefined
+          ? {}
+          : {
+              admission_reason: err.admission.cause,
+              wire_bytes: err.admission.wireBytes,
+              requested_charge_bytes: err.admission.requestedChargeBytes,
+              active_reserved_bytes: err.admission.activeReservedBytes,
+              pending_bytes: err.admission.pendingBytes,
+            }),
+      },
+    );
     return c.json(
       {
         error: {

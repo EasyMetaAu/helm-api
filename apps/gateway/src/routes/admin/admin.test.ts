@@ -6,7 +6,7 @@ import type {
   SessionRevisionRecord,
   TelemetryStore,
 } from "@helm/core";
-import { DEFAULT_LANES, parseLanesConfig } from "@helm/core";
+import { createResponseWorkAdmission, DEFAULT_LANES, parseLanesConfig } from "@helm/core";
 import type { ApiKeyRecord, ClassifierConfig, DecisionRecord, RuntimeSettings } from "@helm/shared";
 import { ClassifierConfigSchema, RuntimeSettingsSchema } from "@helm/shared";
 import { Hono } from "hono";
@@ -328,6 +328,11 @@ function buildDeps(over: Partial<AdminApiDeps> = {}): AdminApiDeps {
     rules,
     keyStore,
     telemetry: makeTelemetry(),
+    responseWorkAdmission: createResponseWorkAdmission({
+      capacityBytes: 1_200_000,
+      jsonAmplification: 6,
+      minChargeBytes: 1,
+    }),
     genKey: () => ({
       plaintext: "helm_live_PLAINTEXT_SECRET",
       hash: "hash_of_plaintext_full",
@@ -1722,6 +1727,13 @@ describe("admin.api request payload", () => {
     const telemetry = {
       ...makeTelemetry([rec]),
       getPayload: async () => null,
+      getSessionRevisionMeta: async () => ({
+        requestId: "req_session",
+        sessionRef: "session-ref",
+        responseBodyStored: true,
+        fidelity: "semantic",
+        createdAt: new Date(1234),
+      }),
       listSessionRevisionsPage: async () => ({
         revisions: [
           {
@@ -1780,6 +1792,40 @@ describe("admin.api request payload", () => {
       captured: false,
       source: "unavailable",
       reason: "response_unavailable",
+    });
+  });
+
+  it("returns Session metadata without reading or decoding any Session body", async () => {
+    const rec = {
+      ...decision("req_session_meta", "balanced"),
+      session: { ref: "session-ref", label: "thread-1", source: "x-thread-id" as const },
+    };
+    const telemetry = {
+      ...makeTelemetry([rec]),
+      getPayloadMeta: async () => null,
+      getSessionRevisionMeta: async () => ({
+        requestId: "req_session_meta",
+        sessionRef: "session-ref",
+        responseBodyStored: true,
+        fidelity: "semantic",
+        createdAt: new Date(1234),
+      }),
+      listSessionRevisionsPage: async () => {
+        throw new Error("Session body must not be read for part=meta");
+      },
+    } as unknown as TelemetryStore;
+
+    const response = await buildApp(buildDeps({ telemetry })).request(
+      "/admin/api/requests/req_session_meta/payload?part=meta",
+    );
+
+    expect(await response.json()).toEqual({
+      captured: true,
+      source: "session",
+      exact: false,
+      fidelity: "semantic",
+      created_at: 1234,
+      parts: { request: true, response: true, upstream_request: false },
     });
   });
 

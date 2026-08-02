@@ -1203,6 +1203,40 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // Additive Session chunk storage. Legacy bodies stay where they are and are
+    // never scanned or backfilled during deployment.
+    version: 44,
+    run: async (db) => {
+      if (!(await pgTableHasColumns(db, "session_revisions", ["request_id"]))) return;
+      const ddl = `
+        ALTER TABLE session_revisions ADD COLUMN IF NOT EXISTS body_bytes BIGINT;
+        ALTER TABLE session_revisions ADD COLUMN IF NOT EXISTS request_body_generation TEXT;
+        ALTER TABLE session_revisions ADD COLUMN IF NOT EXISTS response_body_generation TEXT;
+        CREATE TABLE IF NOT EXISTS session_head_event_hashes (
+          session_ref TEXT PRIMARY KEY REFERENCES sessions(session_ref) ON DELETE CASCADE,
+          request_id TEXT NOT NULL,
+          event_key TEXT NOT NULL CHECK (event_key IN ('messages', 'contents', 'input')),
+          event_count INTEGER NOT NULL CHECK (event_count >= 0),
+          event_hash TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS session_revision_body_chunks (
+          request_id TEXT NOT NULL,
+          generation TEXT NOT NULL,
+          part TEXT NOT NULL CHECK (part IN ('request_delta', 'request_envelope', 'response')),
+          chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
+          codec TEXT NOT NULL CHECK (codec IN ('gzip', 'raw')),
+          raw_bytes INTEGER NOT NULL CHECK (raw_bytes >= 0 AND raw_bytes <= 262144),
+          bytes BYTEA NOT NULL,
+          created_at BIGINT NOT NULL,
+          PRIMARY KEY (request_id, generation, part, chunk_index)
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_revision_body_chunks_created
+          ON session_revision_body_chunks (created_at);
+      `;
+      for (const statement of splitStatements(ddl)) await db.execute(sql.raw(statement));
+    },
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {
@@ -1222,6 +1256,7 @@ async function pgTableHasColumns(
     | "memory_facts"
     | "memory_jobs"
     | "oauth_quota"
+    | "session_revisions"
     | "telemetry",
   requiredColumns: readonly string[],
 ): Promise<boolean> {

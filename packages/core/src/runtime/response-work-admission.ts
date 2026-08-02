@@ -1,4 +1,9 @@
-import { runtimeMemoryBudget } from "./memory-budget.js";
+import {
+  type RuntimeMemoryCoordinator,
+  type RuntimeMemoryLease,
+  runtimeMemoryBudget,
+  runtimeMemoryCoordinator,
+} from "./memory-budget.js";
 
 export class ResponseWorkCapacityError extends Error {
   constructor(readonly capacityBytes: number) {
@@ -22,10 +27,14 @@ export interface ResponseWorkAdmission {
 
 export function createResponseWorkAdmission(options: {
   capacityBytes: number;
+  dynamicCapacityBytes?: () => number;
   jsonAmplification: number;
   minChargeBytes: number;
+  coordinator?: RuntimeMemoryCoordinator;
 }): ResponseWorkAdmission {
-  const capacityBytes = Math.max(1, Math.floor(options.capacityBytes));
+  const configuredCapacityBytes = Math.max(1, Math.floor(options.capacityBytes));
+  const capacityBytes = (): number =>
+    Math.max(0, Math.floor(options.dynamicCapacityBytes?.() ?? configuredCapacityBytes));
   const minChargeBytes = Math.max(1, Math.floor(options.minChargeBytes));
   let reservedBytes = 0;
   const charge = (wireBytes: number): number =>
@@ -34,9 +43,15 @@ export function createResponseWorkAdmission(options: {
   return {
     acquire(wireBytes) {
       let held = charge(wireBytes);
-      if (reservedBytes + held > capacityBytes) {
+      const shared = options.coordinator?.acquire(held);
+      if (shared !== undefined && !shared.ok) {
         return { ok: false as const, reason: "busy" as const };
       }
+      if (shared === undefined && reservedBytes + held > capacityBytes()) {
+        return { ok: false as const, reason: "busy" as const };
+      }
+      let sharedLease: RuntimeMemoryLease | undefined =
+        shared?.ok === true ? shared.lease : undefined;
       reservedBytes += held;
       let released = false;
       return {
@@ -45,7 +60,11 @@ export function createResponseWorkAdmission(options: {
           resize(nextWireBytes) {
             if (released) return { ok: false as const, reason: "busy" as const };
             const next = charge(nextWireBytes);
-            if (reservedBytes - held + next > capacityBytes) {
+            if (sharedLease !== undefined) {
+              if (!sharedLease.resize(next).ok) {
+                return { ok: false as const, reason: "busy" as const };
+              }
+            } else if (next > held && reservedBytes - held + next > capacityBytes()) {
               return { ok: false as const, reason: "busy" as const };
             }
             reservedBytes += next - held;
@@ -55,13 +74,15 @@ export function createResponseWorkAdmission(options: {
           release() {
             if (released) return;
             released = true;
+            sharedLease?.release();
+            sharedLease = undefined;
             reservedBytes -= held;
           },
         },
       };
     },
     get capacityBytes() {
-      return capacityBytes;
+      return capacityBytes();
     },
     get reservedBytes() {
       return reservedBytes;
@@ -78,6 +99,7 @@ export function runtimeResponseWorkAdmission(): ResponseWorkAdmission {
     capacityBytes: budget.responseWorkBytes,
     jsonAmplification: budget.jsonAmplification,
     minChargeBytes: budget.minRequestChargeBytes,
+    coordinator: runtimeMemoryCoordinator(),
   });
   return detected;
 }

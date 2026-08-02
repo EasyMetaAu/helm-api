@@ -66,6 +66,9 @@ export interface MemoryWorkerDeps {
   // request). Itself fail-open + guarded by the tick wrapper; with forgetting off it is
   // either unset or a no-op, so the tick is byte-identical to today.
   onTick?: () => Promise<void>;
+  // Resource-pressure gate for optional background work. It is checked before a
+  // trigger and between catch-up batches; already claimed jobs always finish.
+  shouldRun?: () => boolean | Promise<boolean>;
 }
 
 export interface MemoryWorkerHandle {
@@ -212,6 +215,18 @@ export function startMemoryWorker(deps: MemoryWorkerDeps): MemoryWorkerHandle {
   // (that is the interval's job). Shared by the interval tick and the wake drain.
   const workerConcurrency = Math.max(1, Math.floor(deps.concurrency ?? 1));
 
+  const shouldRun = async (): Promise<boolean> => {
+    if (deps.shouldRun === undefined) return true;
+    try {
+      return (await deps.shouldRun()) !== false;
+    } catch (err) {
+      deps.log("memory.worker.resource_gate_failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  };
+
   const runOneJob = async (job: MemoryJobRow): Promise<void> => {
     // Per-job guard: a single failing job must not abort the rest of the batch
     // nor stop the timer (principle 3). The runners record their own outcome on
@@ -284,6 +299,7 @@ export function startMemoryWorker(deps: MemoryWorkerDeps): MemoryWorkerHandle {
         let batches = 0;
         let lastClaimed = 0;
         do {
+          if (!(await shouldRun())) break;
           lastClaimed = await drainJobs();
           batches += 1;
           if (lastClaimed < deps.batchSize) break;
@@ -325,6 +341,8 @@ export function startMemoryWorker(deps: MemoryWorkerDeps): MemoryWorkerHandle {
   let activeRuns = 0;
   const idleWaiters: Array<() => void> = [];
   const runWhileActive = async (run: () => Promise<void>): Promise<void> => {
+    if (paused || stopped) return;
+    if (!(await shouldRun())) return;
     if (paused || stopped) return;
     activeRuns += 1;
     try {

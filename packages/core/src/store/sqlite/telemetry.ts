@@ -3,7 +3,12 @@ import { type DecisionRecord, DecisionRecordSchema } from "@helm/shared";
 import { and, asc, count, desc, eq, gt, gte, inArray, lt, type SQL, sql } from "drizzle-orm";
 import { shapeTelemetryAggregate, shapeTelemetryKeyUsage } from "../aggregate-shape.js";
 import { externalizeImages, type PayloadBlob, rehydrateImages } from "../payload-blobs.js";
-import { decodePayloadValue, encodePayloadText } from "../payload-codec.js";
+import {
+  decodePayloadTextChunks,
+  decodePayloadValue,
+  encodePayloadText,
+  iteratePayloadTextChunks,
+} from "../payload-codec.js";
 import type {
   InsertPayloadInput,
   InsertTelemetryInput,
@@ -13,7 +18,10 @@ import type {
   RequestPayloadMeta,
   RequestPayloadPart,
   RequestPayloadPartRecord,
+  SessionContinuationRecord,
+  SessionEventHead,
   SessionRecord,
+  SessionRevisionMetaRecord,
   SessionRevisionPage,
   SessionRevisionPageOptions,
   SessionRevisionRecord,
@@ -30,20 +38,83 @@ import { likeContains } from "../sql-like.js";
 import { denormalizedDecisionCost } from "../telemetry-cost.js";
 import { runBatchedPrune, yieldToEventLoop } from "./batched-prune.js";
 import type { SqliteDb } from "./migrate.js";
-import { requestPayloads, sessionRevisions, sessions, telemetry } from "./schema.js";
+import {
+  requestPayloads,
+  sessionHeadEventHashes,
+  sessionRevisionBodyChunks,
+  sessionRevisions,
+  sessions,
+  telemetry,
+} from "./schema.js";
 
 type TelemetryRow = typeof telemetry.$inferSelect;
 type SessionRevisionRow = typeof sessionRevisions.$inferSelect;
+type SessionBodyChunkRow = typeof sessionRevisionBodyChunks.$inferSelect;
+type SessionBodyChunkInsert = typeof sessionRevisionBodyChunks.$inferInsert;
+type SessionBodyPart = "request_delta" | "request_envelope" | "response";
 const SESSION_PRUNE_MARKER = "__helm_pruning__";
+const SESSION_CHUNKS_PER_WRITE = 4;
 
-function decodeSessionRevisionRow(row: SessionRevisionRow): SessionRevisionRecord {
-  const { bodyBytes: _, ...revision } = row;
+function decodeSessionRevisionRow(
+  row: SessionRevisionRow,
+  chunks: readonly SessionBodyChunkRow[] = [],
+): SessionRevisionRecord {
+  const { bodyBytes: _, requestBodyGeneration: __, responseBodyGeneration: ___, ...revision } = row;
+  const body = (part: SessionBodyPart): string | null => {
+    const selected = chunks
+      .filter(
+        (chunk) =>
+          chunk.part === part &&
+          chunk.generation ===
+            (part === "response" ? row.responseBodyGeneration : row.requestBodyGeneration),
+      )
+      .sort((left, right) => left.chunkIndex - right.chunkIndex);
+    return selected.length === 0 ? null : decodePayloadTextChunks(selected);
+  };
+  const chunkedDelta = body("request_delta");
+  const chunkedEnvelope = body("request_envelope");
+  const chunkedResponse = body("response");
   return {
     ...revision,
-    requestDeltaJson: decodePayloadValue(row.requestDeltaJson) ?? "",
-    requestEnvelopeJson: decodePayloadValue(row.requestEnvelopeJson) ?? "",
-    responseJson: decodePayloadValue(row.responseJson),
+    requestDeltaJson:
+      row.requestBodyGeneration === null
+        ? (decodePayloadValue(row.requestDeltaJson) ?? "")
+        : (chunkedDelta ?? ""),
+    requestEnvelopeJson:
+      row.requestBodyGeneration === null
+        ? (decodePayloadValue(row.requestEnvelopeJson) ?? "")
+        : (chunkedEnvelope ?? ""),
+    responseJson:
+      row.responseBodyGeneration === null ? decodePayloadValue(row.responseJson) : chunkedResponse,
   };
+}
+
+function* sessionBodyRows(
+  input: UpsertSessionRevisionInput,
+  parts: readonly SessionBodyPart[],
+  generation: string,
+): Generator<SessionBodyChunkInsert> {
+  const text = {
+    request_delta: input.requestDeltaJson,
+    request_envelope: input.requestEnvelopeJson,
+    response: input.responseJson,
+  } as const;
+  for (const part of parts) {
+    const value = text[part];
+    if (value === null) continue;
+    for (const chunk of iteratePayloadTextChunks(value)) {
+      yield {
+        requestId: input.requestId,
+        generation,
+        part,
+        chunkIndex: chunk.chunkIndex,
+        codec: chunk.codec,
+        rawBytes: chunk.rawBytes,
+        bytes: chunk.bytes,
+        createdAt: input.createdAt.getTime(),
+      };
+    }
+  }
 }
 
 function boundedSessionPageLimit(options: SessionRevisionPageOptions): number {
@@ -75,16 +146,82 @@ export class SqliteTelemetryStore implements TelemetryStore {
     | undefined;
   private readonly sessionPrunes = new Map<string, Promise<number>>();
 
+  private async stageSessionBodyChunks(
+    input: UpsertSessionRevisionInput,
+    parts: readonly SessionBodyPart[],
+  ): Promise<string> {
+    const db = this.db.$sqlite;
+    const generation = this.genId();
+    const insert = db.prepare(`INSERT INTO session_revision_body_chunks
+      (request_id, generation, part, chunk_index, codec, raw_bytes, bytes, created_at)
+      VALUES (@requestId, @generation, @part, @chunkIndex, @codec, @rawBytes, @bytes, @createdAt)`);
+    const writeBatch = db.transaction((rows: readonly SessionBodyChunkInsert[]) => {
+      for (const row of rows) insert.run(row);
+    });
+    const batch: SessionBodyChunkInsert[] = [];
+    for (const row of sessionBodyRows(input, parts, generation)) {
+      batch.push(row);
+      if (batch.length < SESSION_CHUNKS_PER_WRITE) continue;
+      writeBatch(batch);
+      batch.length = 0;
+      await yieldToEventLoop();
+    }
+    if (batch.length > 0) writeBatch(batch);
+    return generation;
+  }
+
+  private chunksByRevisions(
+    rows: readonly SessionRevisionRow[],
+  ): Map<string, SessionBodyChunkRow[]> {
+    const grouped = new Map<string, SessionBodyChunkRow[]>();
+    const requestIds = rows.map((row) => row.requestId);
+    const generations = rows.flatMap((row) =>
+      [row.requestBodyGeneration, row.responseBodyGeneration].filter(
+        (generation): generation is string => generation !== null,
+      ),
+    );
+    if (requestIds.length === 0 || generations.length === 0) return grouped;
+    const chunks = this.db
+      .select()
+      .from(sessionRevisionBodyChunks)
+      .where(
+        and(
+          inArray(sessionRevisionBodyChunks.requestId, requestIds),
+          inArray(sessionRevisionBodyChunks.generation, generations),
+        ),
+      )
+      .orderBy(
+        asc(sessionRevisionBodyChunks.requestId),
+        asc(sessionRevisionBodyChunks.part),
+        asc(sessionRevisionBodyChunks.chunkIndex),
+      )
+      .all();
+    for (const row of chunks) {
+      const existing = grouped.get(row.requestId) ?? [];
+      existing.push(row);
+      grouped.set(row.requestId, existing);
+    }
+    return grouped;
+  }
+
   private async finishClaimedSessionPrune(sessionRef: string): Promise<number> {
     const active = this.sessionPrunes.get(sessionRef);
     if (active) return active;
     const db = this.db.$sqlite;
     const work = (async () => {
+      const chunks = db.prepare(`DELETE FROM session_revision_body_chunks WHERE request_id IN (
+          SELECT request_id FROM session_revisions WHERE session_ref = ?
+          ORDER BY sequence, request_id LIMIT ?
+        )`);
       const revisions = db.prepare(`DELETE FROM session_revisions WHERE request_id IN (
-        SELECT request_id FROM session_revisions WHERE session_ref = ?
-        ORDER BY sequence, request_id LIMIT ?
-      )`);
-      await runBatchedPrune((limit) => revisions.run(sessionRef, limit).changes);
+          SELECT request_id FROM session_revisions WHERE session_ref = ?
+          ORDER BY sequence, request_id LIMIT ?
+        )`);
+      const pruneBatch = db.transaction((limit: number) => {
+        chunks.run(sessionRef, limit);
+        return revisions.run(sessionRef, limit).changes;
+      });
+      await runBatchedPrune(pruneBatch);
       return db
         .prepare(
           "DELETE FROM sessions WHERE session_ref = ? AND head_request_id = ? AND NOT EXISTS (SELECT 1 FROM session_revisions WHERE session_ref = ?)",
@@ -119,22 +256,21 @@ export class SqliteTelemetryStore implements TelemetryStore {
       insert: db.prepare(
         `INSERT INTO session_revisions
            (request_id, session_ref, sequence, parent_request_id, retain_count,
-            request_delta_json, request_envelope_json, body_bytes, response_id, response_json,
-            fidelity, created_at)
+            request_delta_json, request_envelope_json, body_bytes,
+            request_body_generation, response_body_generation,
+            response_id, response_json, fidelity, created_at)
          VALUES
            (@requestId, @sessionRef, @sequence, @parentRequestId, @retainCount,
-            @requestDeltaJson, @requestEnvelopeJson, @bodyBytes, @responseId, @responseJson,
-            @fidelity, @createdAt)`,
+            @requestDeltaJson, @requestEnvelopeJson, @bodyBytes,
+            @requestBodyGeneration, @responseBodyGeneration,
+            @responseId, @responseJson, @fidelity, @createdAt)`,
       ),
       updateResponse: db.prepare(
         `UPDATE session_revisions
             SET response_id = @responseId,
-                response_json = @responseJson,
-                body_bytes = coalesce(
-                  body_bytes,
-                  length(CAST(request_delta_json AS BLOB)) +
-                  length(CAST(request_envelope_json AS BLOB))
-                ) + @responseBytes,
+                response_json = '',
+                body_bytes = @bodyBytes,
+                response_body_generation = @responseBodyGeneration,
                 fidelity = @fidelity
           WHERE request_id = @requestId`,
       ),
@@ -204,6 +340,25 @@ export class SqliteTelemetryStore implements TelemetryStore {
     for (;;) {
       resumedAfterPrune =
         (await this.waitForClaimedSessionPrune(input.sessionRef)) || resumedAfterPrune;
+      const before = this.db
+        .select({
+          sessionRef: sessionRevisions.sessionRef,
+          responseBodyStored: sql<number>`${sessionRevisions.responseJson} IS NOT NULL`,
+        })
+        .from(sessionRevisions)
+        .where(eq(sessionRevisions.requestId, input.requestId))
+        .get();
+      if (before?.sessionRef !== undefined && before.sessionRef !== input.sessionRef)
+        throw new Error("request session mismatch");
+      if (before?.responseBodyStored || (before && input.responseJson === null)) return;
+      const generation = await this.stageSessionBodyChunks(
+        input,
+        before
+          ? ["response"]
+          : input.responseJson === null
+            ? ["request_delta", "request_envelope"]
+            : ["request_delta", "request_envelope", "response"],
+      );
       const admitted = this.db.$sqlite.transaction(() => {
         // The await above can yield after observing no claim. Recheck inside the
         // synchronous write transaction so a prune that claimed in that gap wins.
@@ -229,7 +384,7 @@ export class SqliteTelemetryStore implements TelemetryStore {
           .select({
             requestId: sessionRevisions.requestId,
             sessionRef: sessionRevisions.sessionRef,
-            responseJson: sessionRevisions.responseJson,
+            responseBodyStored: sql<number>`${sessionRevisions.responseJson} IS NOT NULL`,
           })
           .from(sessionRevisions)
           .where(eq(sessionRevisions.requestId, input.requestId))
@@ -238,7 +393,7 @@ export class SqliteTelemetryStore implements TelemetryStore {
           if (existing.sessionRef !== input.sessionRef) throw new Error("request session mismatch");
           const responseJson = input.responseJson;
           const responseBytes =
-            responseJson !== null && existing.responseJson === null
+            responseJson !== null && !existing.responseBodyStored
               ? Buffer.byteLength(responseJson, "utf8")
               : 0;
           if (responseBytes === 0 || responseJson === null) return true;
@@ -253,8 +408,8 @@ export class SqliteTelemetryStore implements TelemetryStore {
           this.sessionWriteStmts().updateResponse.run({
             requestId: input.requestId,
             responseId: input.responseId ?? null,
-            responseJson: encodePayloadText(responseJson),
-            responseBytes,
+            bodyBytes: storedBytes,
+            responseBodyGeneration: generation,
             fidelity: input.fidelity,
           });
           return true;
@@ -290,11 +445,13 @@ export class SqliteTelemetryStore implements TelemetryStore {
           sequence,
           parentRequestId,
           retainCount: input.retainCount,
-          requestDeltaJson: encodePayloadText(input.requestDeltaJson),
-          requestEnvelopeJson: encodePayloadText(input.requestEnvelopeJson),
+          requestDeltaJson: "",
+          requestEnvelopeJson: "",
           bodyBytes: storedBytes,
+          requestBodyGeneration: generation,
+          responseBodyGeneration: input.responseJson === null ? null : generation,
           responseId: input.responseId ?? null,
-          responseJson: input.responseJson === null ? null : encodePayloadText(input.responseJson),
+          responseJson: input.responseJson === null ? null : "",
           fidelity: input.fidelity,
           createdAt: atMs,
         });
@@ -308,6 +465,25 @@ export class SqliteTelemetryStore implements TelemetryStore {
           })
           .where(eq(sessions.sessionRef, input.sessionRef))
           .run();
+        if (input.eventHead) {
+          this.db
+            .insert(sessionHeadEventHashes)
+            .values({
+              sessionRef: input.sessionRef,
+              requestId: input.requestId,
+              ...input.eventHead,
+            })
+            .onConflictDoUpdate({
+              target: sessionHeadEventHashes.sessionRef,
+              set: { requestId: input.requestId, ...input.eventHead },
+            })
+            .run();
+        } else {
+          this.db
+            .delete(sessionHeadEventHashes)
+            .where(eq(sessionHeadEventHashes.sessionRef, input.sessionRef))
+            .run();
+        }
         return true;
       })();
       if (admitted) return;
@@ -318,6 +494,13 @@ export class SqliteTelemetryStore implements TelemetryStore {
 
   async getSessionByRef(sessionRef: string): Promise<SessionRecord | null> {
     const row = this.db.select().from(sessions).where(eq(sessions.sessionRef, sessionRef)).get();
+    const head = row
+      ? this.db
+          .select()
+          .from(sessionHeadEventHashes)
+          .where(eq(sessionHeadEventHashes.sessionRef, sessionRef))
+          .get()
+      : undefined;
     return row
       ? {
           sessionRef: row.sessionRef,
@@ -330,6 +513,15 @@ export class SqliteTelemetryStore implements TelemetryStore {
           headRequestId: row.headRequestId,
           revisionCount: row.revisionCount,
           storedBytes: row.storedBytes,
+          eventHead:
+            head && head.requestId === row.headRequestId
+              ? {
+                  requestId: head.requestId,
+                  eventKey: head.eventKey as SessionEventHead["eventKey"],
+                  eventCount: head.eventCount,
+                  eventHash: head.eventHash,
+                }
+              : null,
         }
       : null;
   }
@@ -341,17 +533,18 @@ export class SqliteTelemetryStore implements TelemetryStore {
       .from(sessions)
       .where(inArray(sessions.sessionRef, [...sessionRefs]))
       .all()
-      .map((row) => ({ ...row }));
+      .map((row) => ({ ...row, eventHead: null }));
   }
 
   async listSessionRevisions(sessionRef: string): Promise<SessionRevisionRecord[]> {
-    return this.db
+    const rows = this.db
       .select()
       .from(sessionRevisions)
       .where(eq(sessionRevisions.sessionRef, sessionRef))
       .orderBy(asc(sessionRevisions.sequence))
-      .all()
-      .map(decodeSessionRevisionRow);
+      .all();
+    const chunks = this.chunksByRevisions(rows);
+    return rows.map((row) => decodeSessionRevisionRow(row, chunks.get(row.requestId)));
   }
 
   async listSessionRevisionsPage(
@@ -374,7 +567,15 @@ export class SqliteTelemetryStore implements TelemetryStore {
       length(CAST(${sessionRevisions.fidelity} AS BLOB)) + 64
     `;
     const metadata = this.db
-      .select({ sequence: sessionRevisions.sequence, bytes: rowBytes })
+      .select({
+        sequence: sessionRevisions.sequence,
+        bytes: rowBytes,
+        legacyBinary: sql<number>`${sessionRevisions.bodyBytes} IS NULL AND (
+          typeof(${sessionRevisions.requestDeltaJson}) = 'blob' OR
+          typeof(${sessionRevisions.requestEnvelopeJson}) = 'blob' OR
+          typeof(${sessionRevisions.responseJson}) = 'blob'
+        )`,
+      })
       .from(sessionRevisions)
       .where(
         and(
@@ -389,7 +590,12 @@ export class SqliteTelemetryStore implements TelemetryStore {
     let usedBytes = 0;
     for (const row of metadata.slice(0, limit)) {
       const bytes = Number(row.bytes);
-      if (!Number.isSafeInteger(bytes) || bytes < 0 || usedBytes + bytes > options.maxBytes) {
+      if (
+        row.legacyBinary ||
+        !Number.isSafeInteger(bytes) ||
+        bytes < 0 ||
+        usedBytes + bytes > options.maxBytes
+      ) {
         return { revisions: [], nextSequence: null, limited: true };
       }
       selected.push(row.sequence);
@@ -406,21 +612,24 @@ export class SqliteTelemetryStore implements TelemetryStore {
         ),
       )
       .orderBy(asc(sessionRevisions.sequence))
-      .all()
-      .map(decodeSessionRevisionRow);
+      .all();
+    const chunks = this.chunksByRevisions(revisions);
     return {
-      revisions,
+      revisions: revisions.map((row) => decodeSessionRevisionRow(row, chunks.get(row.requestId))),
       nextSequence: metadata.length > selected.length ? (selected.at(-1) ?? null) : null,
       limited: false,
     };
   }
 
-  async getSessionRevisionByResponseId(
+  async findSessionRequestIdByResponseId(
     sessionRef: string,
     responseId: string,
-  ): Promise<SessionRevisionRecord | null> {
+  ): Promise<SessionContinuationRecord | null> {
     const row = this.db
-      .select()
+      .select({
+        requestId: sessionRevisions.requestId,
+        responseBodyStored: sql<number>`${sessionRevisions.responseJson} IS NOT NULL`,
+      })
       .from(sessionRevisions)
       .where(
         and(
@@ -429,7 +638,32 @@ export class SqliteTelemetryStore implements TelemetryStore {
         ),
       )
       .get();
-    return row ? decodeSessionRevisionRow(row) : null;
+    return row
+      ? { requestId: row.requestId, responseBodyStored: Boolean(row.responseBodyStored) }
+      : null;
+  }
+
+  async getSessionRevisionMeta(requestId: string): Promise<SessionRevisionMetaRecord | null> {
+    const row = this.db
+      .select({
+        requestId: sessionRevisions.requestId,
+        sessionRef: sessionRevisions.sessionRef,
+        responseBodyStored: sql<number>`${sessionRevisions.responseJson} IS NOT NULL`,
+        fidelity: sessionRevisions.fidelity,
+        createdAt: sessionRevisions.createdAt,
+      })
+      .from(sessionRevisions)
+      .where(eq(sessionRevisions.requestId, requestId))
+      .get();
+    return row
+      ? {
+          requestId: row.requestId,
+          sessionRef: row.sessionRef,
+          responseBodyStored: Boolean(row.responseBodyStored),
+          fidelity: row.fidelity,
+          createdAt: row.createdAt,
+        }
+      : null;
   }
 
   async pruneInactiveSessions(olderThanMs: number): Promise<number> {
@@ -450,6 +684,21 @@ export class SqliteTelemetryStore implements TelemetryStore {
       deletedSessions += await this.finishClaimedSessionPrune(candidate.sessionRef);
       await yieldToEventLoop();
     }
+    const orphanChunks = db.prepare(`DELETE FROM session_revision_body_chunks WHERE rowid IN (
+      SELECT chunks.rowid FROM session_revision_body_chunks AS chunks
+      WHERE chunks.created_at < ? AND NOT EXISTS (
+        SELECT 1 FROM session_revisions AS revisions
+        WHERE revisions.request_id = chunks.request_id
+          AND (
+            (chunks.part = 'response' AND revisions.response_body_generation = chunks.generation)
+            OR
+            (chunks.part <> 'response' AND revisions.request_body_generation = chunks.generation)
+          )
+      )
+      ORDER BY chunks.created_at, chunks.request_id, chunks.generation,
+               chunks.part, chunks.chunk_index LIMIT ?
+    )`);
+    await runBatchedPrune((limit) => orphanChunks.run(Date.now() - 86_400_000, limit).changes);
     return deletedSessions;
   }
 

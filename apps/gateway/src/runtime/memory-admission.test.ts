@@ -1,7 +1,99 @@
+import { createResponseWorkAdmission, createRuntimeMemoryCoordinator } from "@helm/core";
 import { describe, expect, it } from "vitest";
 import { createBodyMemoryAdmission, readAdmittedRequestBody } from "./memory-admission.js";
 
 describe("body memory admission (unlimited body size and aggregate capacity)", () => {
+  it("shares one live capacity across HTTP, websocket ingress, and response work", () => {
+    const coordinator = createRuntimeMemoryCoordinator({ capacityBytes: () => 100 });
+    const http = createBodyMemoryAdmission({
+      activeRequestBytes: 100,
+      jsonAmplification: 1,
+      minRequestChargeBytes: 1,
+      coordinator,
+    });
+    const websocket = createBodyMemoryAdmission({
+      activeRequestBytes: 100,
+      jsonAmplification: 1,
+      minRequestChargeBytes: 1,
+      coordinator,
+    });
+    const response = createResponseWorkAdmission({
+      capacityBytes: 100,
+      jsonAmplification: 1,
+      minChargeBytes: 1,
+      coordinator,
+    });
+
+    const httpLease = http.acquire(60);
+    const websocketLease = websocket.acquire(30);
+    expect(httpLease.ok).toBe(true);
+    expect(websocketLease.ok).toBe(true);
+    expect(response.acquire(20)).toMatchObject({ ok: false, reason: "busy" });
+    if (httpLease.ok) httpLease.lease.release();
+    const responseLease = response.acquire(20);
+    expect(responseLease.ok).toBe(true);
+    if (responseLease.ok) responseLease.lease.release();
+    if (websocketLease.ok) websocketLease.lease.release();
+  });
+
+  it("always permits a lease to shrink when live capacity falls", () => {
+    let capacity = 100;
+    const admission = createBodyMemoryAdmission({
+      activeRequestBytes: 100,
+      jsonAmplification: 2,
+      minRequestChargeBytes: 1,
+      capacityBytes: () => capacity,
+    });
+    const acquired = admission.acquire(40);
+    expect(acquired.ok).toBe(true);
+    if (!acquired.ok) return;
+
+    capacity = 30;
+    expect(acquired.lease.resize(20)).toEqual({ ok: true });
+    expect(admission.reservedBytes).toBe(40);
+    acquired.lease.release();
+  });
+
+  it("reports the amplified requested charge when a streamed resize is rejected", async () => {
+    let capacityChecks = 0;
+    const admission = createBodyMemoryAdmission({
+      activeRequestBytes: 100,
+      jsonAmplification: 2,
+      minRequestChargeBytes: 1,
+      capacityBytes: () => (++capacityChecks === 1 ? 100 : 5),
+    });
+
+    await expect(
+      readAdmittedRequestBody(
+        new Request("http://helm.test/v1/responses", { method: "POST", body: "abc" }),
+        admission,
+      ),
+    ).rejects.toMatchObject({
+      code: "server_overloaded",
+      admission: { wireBytes: 3, requestedChargeBytes: 6 },
+    });
+    expect(admission.reservedBytes).toBe(0);
+    expect(admission.pendingBytes).toBe(0);
+  });
+
+  it("shrinks and recovers admission from live safe capacity without a fixed wire limit", () => {
+    let capacity = 100;
+    const admission = createBodyMemoryAdmission({
+      activeRequestBytes: 100,
+      jsonAmplification: 2,
+      minRequestChargeBytes: 10,
+      capacityBytes: () => capacity,
+    } as never);
+
+    const first = admission.acquire(20);
+    expect(first.ok).toBe(true);
+    capacity = 30;
+    expect(admission.acquire(1)).toMatchObject({ ok: false, cause: "capacity" });
+    if (first.ok) first.lease.release();
+    capacity = 200;
+    expect(admission.acquire(80).ok).toBe(true);
+  });
+
   it("never rejects for active capacity, even when charge exceeds the historical pool", () => {
     const admission = createBodyMemoryAdmission({
       activeRequestBytes: 100,

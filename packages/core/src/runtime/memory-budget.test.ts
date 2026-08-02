@@ -1,7 +1,44 @@
 import { describe, expect, it } from "vitest";
-import { deriveRuntimeMemoryBudget } from "./memory-budget.js";
+import { deriveRuntimeMemoryBudget, deriveSafeWorkingMemoryCapacity } from "./memory-budget.js";
 
 describe("deriveRuntimeMemoryBudget", () => {
+  it("reserves bounded host and V8 emergency memory while scaling with live headroom", () => {
+    expect(
+      deriveSafeWorkingMemoryCapacity({
+        heapLimitBytes: 1_000,
+        heapUsedBytes: 200,
+        availableMemoryBytes: 900,
+        hostTotalMemoryBytes: 2_000,
+        hostReserveMinBytes: 100,
+        emergencyReserveBytes: 100,
+        utilization: 0.7,
+      }),
+    ).toBe(489);
+    expect(
+      deriveSafeWorkingMemoryCapacity({
+        heapLimitBytes: 1_000,
+        heapUsedBytes: 200,
+        availableMemoryBytes: 50,
+        hostTotalMemoryBytes: 2_000,
+        hostReserveMinBytes: 100,
+        emergencyReserveBytes: 100,
+        utilization: 0.7,
+      }),
+    ).toBe(0);
+  });
+
+  it("bases the proportional reserve on the cgroup total instead of the host total", () => {
+    expect(
+      deriveSafeWorkingMemoryCapacity({
+        heapLimitBytes: 512 * 1024 * 1024,
+        heapUsedBytes: 64 * 1024 * 1024,
+        availableMemoryBytes: 400 * 1024 * 1024,
+        hostTotalMemoryBytes: 64 * 1024 * 1024 * 1024,
+        constrainedMemoryBytes: 512 * 1024 * 1024,
+      }),
+    ).toBeGreaterThan(0);
+  });
+
   it("scales every in-memory budget from the detected runtime capacity", () => {
     const small = deriveRuntimeMemoryBudget({
       heapLimitBytes: 1_000,

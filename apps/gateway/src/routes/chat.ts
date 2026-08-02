@@ -121,6 +121,7 @@ export interface ChatRouteDeps {
    *  and streamed completion-cost backfill (#6). */
   capturePayloads?: PayloadCaptureDeps["capturePayloads"];
   captureSessions?: PayloadCaptureDeps["captureSessions"];
+  captureGeneration?: PayloadCaptureDeps["captureGeneration"];
   costOf?: PayloadCaptureDeps["costOf"];
   /** When true, honor the e2e-only `x-helm-eval` / `x-helm-rules-threshold`
    *  headers to toggle Layer-2 eval and raise the Layer-1 gate per request.

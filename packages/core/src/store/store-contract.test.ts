@@ -524,7 +524,8 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         !t.getSessionByRef ||
         !t.listSessionRevisions ||
         !("listSessionRevisionsPage" in t) ||
-        !t.getSessionRevisionByResponseId
+        !t.findSessionRequestIdByResponseId ||
+        !t.getSessionRevisionMeta
       )
         throw new Error("session revision methods required");
       const base = {
@@ -543,6 +544,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         requestEnvelopeJson: '{"model":"x"}',
         responseId: "resp_1",
         responseJson: '{"output":["one"]}',
+        eventHead: { eventKey: "messages", eventCount: 1, eventHash: "hash-one" },
         fidelity: "verbatim",
         createdAt: new Date(1000),
       });
@@ -555,6 +557,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         requestEnvelopeJson: '{"model":"x"}',
         responseId: "resp_2",
         responseJson: '{"output":["two"]}',
+        eventHead: { eventKey: "messages", eventCount: 2, eventHash: "hash-two" },
         fidelity: "verbatim",
         createdAt: new Date(2000),
       });
@@ -566,6 +569,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         requestDeltaJson: '["branch"]',
         requestEnvelopeJson: '{"model":"x"}',
         responseJson: null,
+        eventHead: { eventKey: "messages", eventCount: 2, eventHash: "hash-branch" },
         fidelity: "partial",
         createdAt: new Date(3000),
       });
@@ -621,12 +625,25 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         lastSeenAt: new Date(4000),
         revisionCount: 3,
         storedBytes: afterBackfill?.storedBytes,
+        eventHead: {
+          requestId: "r3",
+          eventKey: "messages",
+          eventCount: 2,
+          eventHash: "hash-branch",
+        },
       });
-      expect(await t.getSessionRevisionByResponseId("s_1", "resp_1")).toMatchObject({
+      expect(await t.findSessionRequestIdByResponseId("s_1", "resp_1")).toEqual({
         requestId: "r1",
-        responseId: "resp_1",
+        responseBodyStored: true,
       });
-      expect(await t.getSessionRevisionByResponseId("s_1", "resp_malicious")).toBeNull();
+      expect(await t.findSessionRequestIdByResponseId("s_1", "resp_malicious")).toBeNull();
+      expect(await t.getSessionRevisionMeta("r1")).toEqual({
+        requestId: "r1",
+        sessionRef: "s_1",
+        responseBodyStored: true,
+        fidelity: "verbatim",
+        createdAt: new Date(1000),
+      });
       expect(await t.listSessionRevisions("s_1")).toEqual([
         expect.objectContaining({
           requestId: "r1",
@@ -703,6 +720,45 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         }
       ).listSessionRevisionsPage("s_1", { limit: 10, maxBytes: 1 });
       expect(limited).toEqual({ revisions: [], nextSequence: null, limited: true });
+    });
+
+    it("atomically publishes one matching body generation for concurrent duplicate writes", async () => {
+      ctx = await make();
+      const t = ctx.stores.telemetry;
+      if (!t.upsertSessionRevision || !t.listSessionRevisions)
+        throw new Error("session revision methods required");
+      const write = (marker: string) =>
+        t.upsertSessionRevision?.({
+          sessionRef: "s_concurrent",
+          accountId: "acct_1",
+          apiKeyId: "key_1",
+          source: "codex",
+          externalSessionId: "external-concurrent",
+          requestId: "r_concurrent",
+          parentRequestId: null,
+          retainCount: 0,
+          requestDeltaJson: JSON.stringify([{ marker, text: "x".repeat(1_100_000) }]),
+          requestEnvelopeJson: JSON.stringify({ marker }),
+          responseId: marker,
+          responseJson: JSON.stringify({ marker }),
+          fidelity: "verbatim",
+          createdAt: new Date(1000),
+        });
+
+      await Promise.all([write("A"), write("B")]);
+      const revisions = await t.listSessionRevisions("s_concurrent");
+      expect(revisions).toHaveLength(1);
+      const revision = revisions[0];
+      const requestMarker = (
+        JSON.parse(revision?.requestDeltaJson ?? "[]") as Array<{ marker: string }>
+      )[0]?.marker;
+      const responseMarker = (JSON.parse(revision?.responseJson ?? "{}") as { marker: string })
+        .marker;
+      expect([requestMarker, responseMarker, revision?.responseId]).toEqual([
+        revision?.responseId,
+        revision?.responseId,
+        revision?.responseId,
+      ]);
     });
 
     it("prunes an entire inactive session without touching a recent one", async () => {

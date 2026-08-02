@@ -1,19 +1,20 @@
+import type { RuntimeMemoryCoordinator, RuntimeMemoryLease } from "@helm/core";
 import type { MiddlewareHandler } from "hono";
 import type { AppEnv } from "../app.js";
 
 /**
  * Request-body memory admission.
  *
- * Capacity, live-heap and per-request wire gates are intentionally disabled:
- * they used heuristic reservations that rejected healthy traffic. Lease
- * bookkeeping remains so vacuum can `pause()` + `waitForIdle()`.
+ * There is no fixed per-request wire limit. A shared, live-headroom coordinator
+ * bounds aggregate pending memory across HTTP, websocket ingress, and response
+ * work, while lease bookkeeping also lets vacuum `pause()` + `waitForIdle()`.
  *
  * The other remaining rejection is **maintenance pause**: while vacuum (or any
  * caller) has paused admission, new acquires fail with `database_maintenance`
  * so in-flight leases can drain and `waitForIdle()` can complete.
  */
 
-export type RequestAdmissionCause = "paused";
+export type RequestAdmissionCause = "paused" | "capacity";
 
 export interface RequestAdmissionSnapshot {
   cause: RequestAdmissionCause;
@@ -26,7 +27,7 @@ export interface RequestAdmissionSnapshot {
 export class RequestAdmissionError extends Error {
   constructor(
     readonly status: 503,
-    readonly code: "database_maintenance",
+    readonly code: "database_maintenance" | "server_overloaded",
     message: string,
     readonly admission?: RequestAdmissionSnapshot,
   ) {
@@ -37,8 +38,10 @@ export class RequestAdmissionError extends Error {
 
 export function createBodyMemoryAdmission(options: {
   activeRequestBytes: number;
+  capacityBytes?: () => number;
   jsonAmplification: number;
   minRequestChargeBytes?: number;
+  coordinator?: RuntimeMemoryCoordinator;
 }) {
   let reservedBytes = 0;
   let pendingBytes = 0;
@@ -48,11 +51,13 @@ export function createBodyMemoryAdmission(options: {
     if (reservedBytes !== 0) return;
     for (const resolve of idleWaiters.splice(0)) resolve();
   };
-  // Capacity-derived charge remains bookkeeping only. It never rejects work.
+  // Estimate retained memory rather than treating wire bytes as heap bytes.
   const minRequestChargeBytes =
     options.minRequestChargeBytes ?? Math.max(1, Math.floor(options.activeRequestBytes * 0.01));
   const charge = (wireBytes: number): number =>
     Math.max(minRequestChargeBytes, Math.ceil(Math.max(0, wireBytes) * options.jsonAmplification));
+  const capacityBytes = (): number =>
+    Math.max(0, Math.floor(options.capacityBytes?.() ?? Number.MAX_SAFE_INTEGER));
 
   const rejection = (
     cause: RequestAdmissionCause,
@@ -76,11 +81,18 @@ export function createBodyMemoryAdmission(options: {
     acquire(wireBytes: number) {
       const held = charge(wireBytes);
       if (paused) return rejection("paused", wireBytes, held);
+      const shared = options.coordinator?.acquire(held);
+      if (shared !== undefined && !shared.ok) return rejection("capacity", wireBytes, held);
+      if (shared === undefined && pendingBytes + held > capacityBytes()) {
+        return rejection("capacity", wireBytes, held);
+      }
       reservedBytes += held;
       pendingBytes += held;
       let released = false;
       let isMaterialized = false;
       let current = held;
+      let sharedLease: RuntimeMemoryLease | undefined =
+        shared?.ok === true ? shared.lease : undefined;
       return {
         ok: true as const,
         lease: {
@@ -91,6 +103,19 @@ export function createBodyMemoryAdmission(options: {
             // In-flight leases may still grow while maintenance is paused so the
             // current body/frame can finish; only *new* acquires are rejected.
             const next = charge(nextWireBytes);
+            if (sharedLease !== undefined) {
+              if (!sharedLease.resize(next).ok) {
+                return {
+                  ok: false as const,
+                  admission: rejection("capacity", nextWireBytes, next).admission,
+                };
+              }
+            } else if (next > current && pendingBytes - current + next > capacityBytes()) {
+              return {
+                ok: false as const,
+                admission: rejection("capacity", nextWireBytes, next).admission,
+              };
+            }
             reservedBytes += next - current;
             pendingBytes += next - current;
             current = next;
@@ -100,10 +125,14 @@ export function createBodyMemoryAdmission(options: {
             if (released || isMaterialized) return;
             isMaterialized = true;
             pendingBytes -= current;
+            sharedLease?.release();
+            sharedLease = undefined;
           },
           release() {
             if (released) return;
             released = true;
+            sharedLease?.release();
+            sharedLease = undefined;
             reservedBytes -= current;
             if (!isMaterialized) pendingBytes -= current;
             resolveIdle();
@@ -150,6 +179,14 @@ declare module "hono" {
 }
 
 export function requestAdmissionError(admission?: RequestAdmissionSnapshot) {
+  if (admission?.cause === "capacity") {
+    return new RequestAdmissionError(
+      503,
+      "server_overloaded",
+      "request memory capacity is temporarily exhausted",
+      admission,
+    );
+  }
   return new RequestAdmissionError(
     503,
     "database_maintenance",
@@ -182,11 +219,18 @@ export async function readAdmittedRequestBody(
         const next = await reader.read();
         if (next.done) break;
         bytes += next.value.byteLength;
-        lease.resize(bytes);
+        const resized = lease.resize(bytes);
+        if (!resized.ok) {
+          await reader.cancel().catch(() => {});
+          throw requestAdmissionError(resized.admission);
+        }
         chunks.push(next.value);
       }
     }
-    lease.resize(bytes);
+    const resized = lease.resize(bytes);
+    if (!resized.ok) {
+      throw requestAdmissionError(resized.admission);
+    }
     const body = Buffer.concat(chunks, bytes);
     return {
       text: body.toString("utf8"),

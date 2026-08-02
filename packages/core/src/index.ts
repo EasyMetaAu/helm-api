@@ -783,9 +783,15 @@ export {
   routeRequest,
 } from "./routing/route-request.js";
 export {
+  createRuntimeMemoryCoordinator,
   deriveRuntimeMemoryBudget,
+  deriveSafeWorkingMemoryCapacity,
   type RuntimeMemoryBudget,
+  type RuntimeMemoryCoordinator,
+  type RuntimeMemoryLease,
   runtimeMemoryBudget,
+  runtimeMemoryCoordinator,
+  runtimeSafeWorkingMemoryCapacity,
 } from "./runtime/memory-budget.js";
 export {
   acquireResponseWork,

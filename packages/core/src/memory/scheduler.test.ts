@@ -72,6 +72,77 @@ describe("startMemoryWorker", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
+  it("does not run interval or wake work while the resource gate is closed", async () => {
+    const { store, claim } = makeStore([]);
+    let allowed = false;
+    const onTick = vi.fn(async () => {});
+    const handle = startMemoryWorker(
+      makeDeps(store, { shouldRun: async () => allowed, coalesceMs: 1, onTick }),
+    );
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    handle.wake();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onTick).not.toHaveBeenCalled();
+    expect(claim).not.toHaveBeenCalled();
+
+    allowed = true;
+    handle.wake();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(claim).toHaveBeenCalledTimes(1);
+    await handle.stop();
+  });
+
+  it("does not cross a pause fence while an asynchronous resource check is pending", async () => {
+    const { store, claim } = makeStore([]);
+    const onTick = vi.fn(async () => {});
+    let resolveGate = (_allowed: boolean) => {};
+    const shouldRun = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveGate = resolve;
+        }),
+    );
+    const handle = startMemoryWorker(makeDeps(store, { shouldRun, onTick }));
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(shouldRun).toHaveBeenCalledTimes(1);
+    await handle.pauseAndWait();
+    resolveGate(true);
+    await vi.waitFor(() => expect(onTick).not.toHaveBeenCalled());
+    expect(claim).not.toHaveBeenCalled();
+    await handle.stop();
+  });
+
+  it("finishes a claimed batch but checks pressure again before the next claim", async () => {
+    const { store } = makeStore([]);
+    const claim = store.claimPendingJobs as ReturnType<typeof vi.fn>;
+    claim
+      .mockResolvedValueOnce([
+        { jobId: "j1", type: "observer", scope: { accountId: "acct-a", threadId: "t1" } },
+      ])
+      .mockResolvedValueOnce([]);
+    const shouldRun = vi
+      .fn<() => Promise<boolean>>()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValue(false);
+    const runObserver = vi.fn(async (): Promise<ObserverResult> => OBS_NOOP);
+    const handle = startMemoryWorker(
+      makeDeps(store, {
+        batchSize: 1,
+        maxBatchesPerDrain: 10,
+        shouldRun,
+        runObserver,
+      }),
+    );
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(runObserver).toHaveBeenCalledTimes(1);
+    expect(claim).toHaveBeenCalledTimes(1);
+    await handle.stop();
+  });
+
   it("claims a batch each tick and dispatches an observer row to runObserver", async () => {
     const { store } = makeStore([
       { jobId: "j1", type: "observer", scope: { accountId: "acct-a", threadId: "t1" } },

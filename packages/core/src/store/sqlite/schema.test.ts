@@ -144,6 +144,10 @@ describe("sqlite schema + migrations", () => {
       .prepare("PRAGMA table_info(session_revisions)")
       .all()
       .map((c) => (c as { name: string }).name);
+    const tables = raw
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+      .all()
+      .map((row) => (row as { name: string }).name);
 
     for (const c of [
       "key_id",
@@ -192,12 +196,16 @@ describe("sqlite schema + migrations", () => {
       "request_delta_json",
       "request_envelope_json",
       "body_bytes",
+      "request_body_generation",
+      "response_body_generation",
       "response_id",
       "response_json",
       "fidelity",
     ]) {
       expect(sessionRevisionCols).toContain(c);
     }
+    expect(tables).toContain("session_head_event_hashes");
+    expect(tables).toContain("session_revision_body_chunks");
     const telemetryIndexes = raw
       .prepare("PRAGMA index_list(telemetry)")
       .all()
@@ -218,10 +226,26 @@ describe("sqlite schema + migrations", () => {
     expect(() => insertRevision.run("r-valid", 1, 0)).not.toThrow();
     expect(() => insertRevision.run("r-negative", 2, -1)).toThrow();
     expect(() => insertRevision.run("r-fractional", 2, 1.5)).toThrow();
+    raw
+      .prepare(
+        "INSERT INTO session_revision_body_chunks (request_id, generation, part, chunk_index, codec, raw_bytes, bytes, created_at) VALUES ('r-valid', 'g1', 'request_delta', 0, 'raw', 2, x'7b7d', 1)",
+      )
+      .run();
+    expect(() =>
+      raw
+        .prepare(
+          "INSERT INTO session_revision_body_chunks (request_id, generation, part, chunk_index, codec, raw_bytes, bytes, created_at) VALUES ('r-valid', 'g1', 'invalid', 1, 'raw', 2, x'7b7d', 1)",
+        )
+        .run(),
+    ).toThrow();
+    raw.prepare("DELETE FROM session_revisions WHERE request_id = 'r-valid'").run();
+    expect(raw.prepare("SELECT COUNT(*) AS count FROM session_revision_body_chunks").get()).toEqual(
+      { count: 1 },
+    );
     raw.close();
   });
 
-  it("v42 adds Session body-byte metadata without scanning old bodies", () => {
+  it("v45 adds empty Session chunk storage without scanning old bodies", () => {
     const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v42-session-bytes-"));
     const path = join(dir, "helm.db");
     try {
@@ -290,6 +314,80 @@ describe("sqlite schema + migrations", () => {
         .prepare("SELECT request_content_mode FROM api_keys WHERE key_id = 'legacy'")
         .get() as { request_content_mode: string | null };
       expect(row.request_content_mode).toBeNull();
+      after.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("v45 adds empty chunk tables without touching legacy Session bodies", () => {
+    const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v45-session-chunks-"));
+    const path = join(dir, "helm.db");
+    try {
+      const seed = new Database(path);
+      seed.exec(`
+        PRAGMA foreign_keys = ON;
+        CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
+        CREATE TABLE sessions (
+          session_ref TEXT PRIMARY KEY,
+          account_id TEXT NOT NULL,
+          api_key_id TEXT NOT NULL,
+          source TEXT NOT NULL,
+          external_session_id TEXT NOT NULL,
+          head_request_id TEXT,
+          revision_count INTEGER NOT NULL DEFAULT 0,
+          stored_bytes INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          last_seen_at INTEGER NOT NULL
+        );
+        CREATE TABLE session_revisions (
+          request_id TEXT PRIMARY KEY,
+          session_ref TEXT NOT NULL REFERENCES sessions(session_ref) ON DELETE CASCADE,
+          sequence INTEGER NOT NULL,
+          parent_request_id TEXT,
+          retain_count INTEGER NOT NULL,
+          request_delta_json TEXT NOT NULL,
+          request_envelope_json TEXT NOT NULL,
+          body_bytes INTEGER,
+          response_id TEXT,
+          response_json TEXT,
+          fidelity TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+        INSERT INTO sessions
+          (session_ref, account_id, api_key_id, source, external_session_id, created_at, last_seen_at)
+        VALUES ('s1', 'a1', 'k1', 'test', 'external', 1, 1);
+        INSERT INTO session_revisions
+          (request_id, session_ref, sequence, retain_count, request_delta_json,
+           request_envelope_json, response_json, fidelity, created_at)
+        VALUES ('r1', 's1', 1, 0, '["legacy"]', '{"model":"x"}', '{"ok":true}', 'semantic', 1);
+        CREATE TRIGGER forbid_legacy_session_update
+          BEFORE UPDATE ON session_revisions BEGIN SELECT RAISE(ABORT, 'legacy row touched'); END;
+        CREATE TRIGGER forbid_legacy_session_delete
+          BEFORE DELETE ON session_revisions BEGIN SELECT RAISE(ABORT, 'legacy row touched'); END;
+      `);
+      const record = seed.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)");
+      for (let version = 1; version <= 44; version++) record.run(version, 1);
+      seed.close();
+
+      expect(() => runMigrations(path)).not.toThrow();
+
+      const after = new Database(path);
+      expect(
+        after
+          .prepare(
+            "SELECT request_delta_json, request_envelope_json, response_json, body_bytes FROM session_revisions WHERE request_id = 'r1'",
+          )
+          .get(),
+      ).toEqual({
+        request_delta_json: '["legacy"]',
+        request_envelope_json: '{"model":"x"}',
+        response_json: '{"ok":true}',
+        body_bytes: null,
+      });
+      expect(
+        after.prepare("SELECT COUNT(*) AS count FROM session_revision_body_chunks").get(),
+      ).toEqual({ count: 0 });
       after.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
