@@ -9,7 +9,7 @@
 
 ## 2026-08-02 · Responses WebSocket 首输出前恢复并提前释放物化准入（Protocol / Gateway runtime，docs/05/07/10，原则 3/5/8）
 
-- **恢复边界**：上游 WebSocket 只产生 `response.created` / `response.in_progress` 后关闭时，丢弃未提交的 preamble，按既有连接重试预算重连，耗尽后回退 HTTP/SSE；真实输出一旦开始则绝不重放。`response.cancelled` 在 provider parser 与 ingress bridge 都是失败终态，不再追加伪 bridge error。
+- **恢复边界**：上游 WebSocket 只产生 `response.created` / `response.in_progress` 后关闭时，丢弃未提交的 preamble，按既有连接重试预算重连，耗尽后回退 HTTP/SSE；最多缓冲协议正常需要的两个 preamble，第三个重复 preamble 立即提交为已开始输出，避免异常上游造成无界缓存。真实输出一旦开始则绝不重放。`response.cancelled` 在 provider parser 与 ingress bridge 都是失败终态，不再追加伪 bridge error。
 - **准入生命周期**：Responses WebSocket bridge 用进程内 `WeakMap<Request, callback>` 把 request-body lease 交给可信内部路由；只有随机 proof 匹配的内部请求会在第二次 JSON parse 成功或失败后立即标为已物化，provider 等待不再长期持有 6 倍预留，而 parser 完成前的并发大请求仍受动态 headroom 保护。没有恢复固定请求、WebSocket 或 Session 大小上限。
 - **保留边界**：bridge 到内部 Responses 路由仍有一次 `JSON.stringify` 与再次 parse；本次先修已证实的 503 放大根因，不抽取会绕过鉴权、schema、rate limit、并发与 telemetry 的第二条执行通道。
 

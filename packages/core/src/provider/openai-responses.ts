@@ -2111,7 +2111,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
                   await closeWebSocketSession(sessionId);
                   throw event.error;
                 }
-                if (!outputStarted && event.preamble) {
+                if (!outputStarted && event.preamble && preambleFrames.length < 2) {
                   preambleFrames.push(event.frame);
                   continue;
                 }

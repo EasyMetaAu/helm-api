@@ -2539,7 +2539,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       },
       async receiveWithWork() {
         return {
-          text: JSON.stringify({ type: "response.created", response: { id: "resp-held" } }),
+          text: JSON.stringify({ type: "response.output_text.delta", delta: "held" }),
           release() {
             releaseCalls += 1;
           },
@@ -2567,7 +2567,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
 
     const yielded = await iterator?.next();
 
-    expect(yielded?.value).toContain("response.created");
+    expect(yielded?.value).toContain("response.output_text.delta");
     expect(releaseCalls).toBe(0);
     await iterator?.return?.();
     expect(releaseCalls).toBe(1);
@@ -2817,6 +2817,49 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect(connect).toHaveBeenCalledTimes(2);
     expect(output.match(/event: response\.created/g)).toHaveLength(1);
     expect(output).toContain("response.completed");
+  });
+
+  it("commits repeated websocket preambles instead of buffering them without bound", async () => {
+    let receiveCalls = 0;
+    const connection: CodexResponsesWebSocketConnection = {
+      responseHeaders: new Headers(),
+      async send() {},
+      async receive() {
+        receiveCalls += 1;
+        return receiveCalls <= 3
+          ? JSON.stringify({ type: "response.created", response: { id: `resp-${receiveCalls}` } })
+          : null;
+      },
+      async close() {},
+    };
+    const fetchMock = vi.fn(async () =>
+      rawSSEResponse(
+        'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+      ),
+    );
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_repeated_preamble")}`,
+        responsesWebSocketConnector: vi.fn(async () => connection),
+        connectRetries: 0,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier("ingress-repeated-preamble", {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+        }),
+      )
+      [Symbol.asyncIterator]();
+
+    expect((await iterator?.next())?.value).toContain("response.created");
+    expect(fetchMock).not.toHaveBeenCalled();
+    await iterator?.return?.();
   });
 
   it("falls back to HTTP after preamble-only websocket closes exhaust retries", async () => {
