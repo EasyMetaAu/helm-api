@@ -2539,7 +2539,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       },
       async receiveWithWork() {
         return {
-          text: JSON.stringify({ type: "response.created", response: { id: "resp-held" } }),
+          text: JSON.stringify({ type: "response.output_text.delta", delta: "held" }),
           release() {
             releaseCalls += 1;
           },
@@ -2567,7 +2567,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
 
     const yielded = await iterator?.next();
 
-    expect(yielded?.value).toContain("response.created");
+    expect(yielded?.value).toContain("response.output_text.delta");
     expect(releaseCalls).toBe(0);
     await iterator?.return?.();
     expect(releaseCalls).toBe(1);
@@ -2763,6 +2763,156 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect(chunks.join("")).toContain("response.completed");
   });
 
+  it("reconnects after a preamble-only websocket close without replaying its preamble", async () => {
+    let firstCloseCalls = 0;
+    let firstReceiveCalls = 0;
+    const first: CodexResponsesWebSocketConnection = {
+      responseHeaders: new Headers(),
+      async send() {},
+      async receive() {
+        firstReceiveCalls += 1;
+        return firstReceiveCalls === 1
+          ? JSON.stringify({ type: "response.created", response: { id: "resp-closed" } })
+          : null;
+      },
+      async close() {
+        firstCloseCalls += 1;
+      },
+    };
+    const second = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-recovered" } },
+        { type: "response.output_text.delta", delta: "recovered" },
+        {
+          type: "response.completed",
+          response: { id: "resp-recovered", status: "completed", usage: {} },
+        },
+      ],
+    ]);
+    const connect = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_preamble_reconnect")}`,
+        responsesWebSocketConnector: connect,
+        connectRetries: 1,
+        connectRetryBackoffMs: [0],
+      },
+    });
+    const chunks: string[] = [];
+
+    for await (const chunk of client.nativePassthroughStream?.(
+      carrier("ingress-preamble-reconnect", {
+        model: "gpt-5.6-sol",
+        input: [],
+        stream: true,
+        store: false,
+      }),
+    ) ?? []) {
+      chunks.push(chunk);
+    }
+
+    const output = chunks.join("");
+    expect(firstCloseCalls).toBe(1);
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(output.match(/event: response\.created/g)).toHaveLength(1);
+    expect(output).toContain("response.completed");
+  });
+
+  it("commits repeated websocket preambles instead of buffering them without bound", async () => {
+    let receiveCalls = 0;
+    const connection: CodexResponsesWebSocketConnection = {
+      responseHeaders: new Headers(),
+      async send() {},
+      async receive() {
+        receiveCalls += 1;
+        return receiveCalls <= 3
+          ? JSON.stringify({ type: "response.created", response: { id: `resp-${receiveCalls}` } })
+          : null;
+      },
+      async close() {},
+    };
+    const fetchMock = vi.fn(async () =>
+      rawSSEResponse(
+        'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+      ),
+    );
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_repeated_preamble")}`,
+        responsesWebSocketConnector: vi.fn(async () => connection),
+        connectRetries: 0,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier("ingress-repeated-preamble", {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+        }),
+      )
+      [Symbol.asyncIterator]();
+
+    expect((await iterator?.next())?.value).toContain("response.created");
+    expect(fetchMock).not.toHaveBeenCalled();
+    await iterator?.return?.();
+  });
+
+  it("falls back to HTTP after preamble-only websocket closes exhaust retries", async () => {
+    let closeCalls = 0;
+    const connect = vi.fn(async (): Promise<CodexResponsesWebSocketConnection> => {
+      let receiveCalls = 0;
+      return {
+        responseHeaders: new Headers(),
+        async send() {},
+        async receive() {
+          receiveCalls += 1;
+          return receiveCalls === 1 ? JSON.stringify({ type: "response.created" }) : null;
+        },
+        async close() {
+          closeCalls += 1;
+        },
+      };
+    });
+    const fetchMock = vi.fn(async () =>
+      rawSSEResponse(
+        'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+      ),
+    );
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_preamble_fallback")}`,
+        responsesWebSocketConnector: connect,
+        connectRetries: 1,
+        connectRetryBackoffMs: [0],
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const chunks: string[] = [];
+
+    for await (const chunk of client.nativePassthroughStream?.(
+      carrier("ingress-preamble-fallback", {
+        model: "gpt-5.6-sol",
+        input: [],
+        stream: true,
+        store: false,
+      }),
+    ) ?? []) {
+      chunks.push(chunk);
+    }
+
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(closeCalls).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(chunks.join("")).not.toContain("response.created");
+    expect(chunks.join("")).toContain("response.completed");
+  });
+
   it("requeues a same-session request after an ECANCELED connection is replaced", async () => {
     let releaseFirstSend = () => {};
     let markFirstSendStarted = () => {};
@@ -2902,7 +3052,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       async receive() {
         receiveCalls += 1;
         if (receiveCalls === 1) {
-          return JSON.stringify({ type: "response.created", response: { id: "resp-started" } });
+          return JSON.stringify({ type: "response.output_text.delta", delta: "started" });
         }
         throw boom;
       },
@@ -2931,7 +3081,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       )
       [Symbol.asyncIterator]();
 
-    expect((await iterator?.next())?.value).toContain("response.created");
+    expect((await iterator?.next())?.value).toContain("response.output_text.delta");
     await expect(iterator?.next()).rejects.toBe(boom);
     expect(connect).toHaveBeenCalledTimes(1);
     expect(fetchMock).not.toHaveBeenCalled();
@@ -3143,6 +3293,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
   it.each([
     "response.failed",
     "response.incomplete",
+    "response.cancelled",
     "error",
   ] as const)("closes the upstream websocket before yielding %s and reconnects after iterator.return", async (terminalType) => {
     const first = fakeConnection([
@@ -3153,7 +3304,12 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
             ? { code: "synthetic_error", message: "synthetic websocket error" }
             : {
                 response: {
-                  status: terminalType === "response.failed" ? "failed" : "incomplete",
+                  status:
+                    terminalType === "response.failed"
+                      ? "failed"
+                      : terminalType === "response.cancelled"
+                        ? "cancelled"
+                        : "incomplete",
                 },
               }),
         },
@@ -4246,6 +4402,32 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
       providerRaw: expect.objectContaining({
         type: "invalid_request_error",
         code: "previous_response_id_unsupported",
+      }),
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects an object native input when the provider contract requires a sequence", async () => {
+    const fetchMock = vi.fn();
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://stream-only.test/v1", apiKey: "sk-test" },
+      requestContract: {
+        forceSse: true,
+        rejectObjectInput: true,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await expect(
+      client.nativePassthrough?.({
+        model: "grok-4.5",
+        input: { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+      }),
+    ).rejects.toMatchObject({
+      upstreamStatus: 400,
+      providerRaw: expect.objectContaining({
+        type: "invalid_request_error",
+        code: "responses_input_sequence_required",
       }),
     });
     expect(fetchMock).not.toHaveBeenCalled();

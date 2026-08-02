@@ -9,6 +9,7 @@ import {
   type ResponsesWebSocketUpgradeServer,
   responsesWebSocketPreflightPending,
 } from "./responses-websocket.js";
+import { markResponsesWebSocketRequestParsed } from "./responses-websocket-internal.js";
 import { createBodyMemoryAdmission } from "./runtime/memory-admission.js";
 
 interface CapturedRequest {
@@ -258,13 +259,11 @@ describe("Responses websocket bridge", () => {
     const baseUrl = await startBridge(
       (request) => {
         fetched();
-        return new Response(
-          new ReadableStream<Uint8Array>({
-            start(controller) {
-              request.signal.addEventListener("abort", () => controller.close(), { once: true });
-            },
+        markResponsesWebSocketRequestParsed(request);
+        return new Promise<Response>((_resolve, reject) =>
+          request.signal.addEventListener("abort", () => reject(request.signal.reason), {
+            once: true,
           }),
-          { headers: { "content-type": "text/event-stream" } },
         );
       },
       undefined,
@@ -278,6 +277,70 @@ describe("Responses websocket bridge", () => {
 
     expect(memoryAdmission.reservedBytes).toBeGreaterThan(0);
     expect(memoryAdmission.pendingBytes).toBe(0);
+  });
+
+  it("keeps request admission until the internal parser finishes", async () => {
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 100,
+      capacityBytes: () => 100,
+      jsonAmplification: 1,
+      minRequestChargeBytes: 100,
+    });
+    const pendingResponses: Array<(response: Response) => void> = [];
+    const parsedRequests: Request[] = [];
+    const baseUrl = await startBridge(
+      (request) => {
+        parsedRequests.push(request);
+        return new Promise<Response>((resolve) => pendingResponses.push(resolve));
+      },
+      undefined,
+      { memoryAdmission },
+    );
+    const [first, second, third] = await Promise.all([
+      connect(`${baseUrl}/v1/responses`),
+      connect(`${baseUrl}/v1/responses`),
+      connect(`${baseUrl}/v1/responses`),
+    ]);
+    const firstTurn = collectTurn(first, {
+      type: "response.create",
+      input: [],
+      stream: true,
+    });
+
+    for (let attempt = 0; attempt < 40 && parsedRequests.length < 1; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(parsedRequests).toHaveLength(1);
+    expect(memoryAdmission.pendingBytes).toBe(100);
+
+    await expect(
+      collectTurn(second, { type: "response.create", input: [], stream: true }),
+    ).resolves.toMatchObject([{ type: "error", status: 503 }]);
+    expect(parsedRequests).toHaveLength(1);
+
+    const firstRequest = parsedRequests[0];
+    if (firstRequest === undefined) throw new Error("internal request did not reach the parser");
+    markResponsesWebSocketRequestParsed(firstRequest);
+    expect(memoryAdmission.pendingBytes).toBe(0);
+
+    const thirdTurn = collectTurn(third, {
+      type: "response.create",
+      input: [],
+      stream: true,
+    });
+    for (let attempt = 0; attempt < 40 && parsedRequests.length < 2; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    expect(parsedRequests).toHaveLength(2);
+
+    const completed = () =>
+      new Response(
+        'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    for (const resolve of pendingResponses) resolve(completed());
+    await Promise.all([firstTurn, thirdTurn]);
   });
 
   it.each([
@@ -1008,6 +1071,27 @@ describe("Responses websocket bridge", () => {
         response: { id: "resp-terminal", status: "completed" },
       },
     ]);
+  });
+
+  it("treats response.cancelled as terminal without adding a bridge error", async () => {
+    const baseUrl = await startBridge(
+      () =>
+        new Response(
+          'event: response.cancelled\ndata: {"type":"response.cancelled","response":{"status":"cancelled"}}\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const socket = await connect(`${baseUrl}/v1/responses`);
+    const events: Record<string, unknown>[] = [];
+    socket.on("message", (data) =>
+      events.push(JSON.parse(data.toString()) as Record<string, unknown>),
+    );
+    const closed = once(socket, "close");
+
+    socket.send(JSON.stringify({ type: "response.create", input: [], stream: true }));
+    await closed;
+
+    expect(events).toEqual([{ type: "response.cancelled", response: { status: "cancelled" } }]);
   });
 
   it("does not wait for internal stream cancellation before handling the next turn", async () => {

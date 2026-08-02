@@ -40,3 +40,12 @@ export function markStartedStreamCancellation(
     error_reason: reason === REQUEST_TIMEOUT_REASON ? "timeout" : reason,
   };
 }
+
+export function markStartedStreamError(decision: DecisionRecord, errorReason: string): void {
+  decision.stream_outcome = "failed";
+  decision.final = {
+    ...decision.final,
+    status: "error",
+    error_reason: errorReason,
+  };
+}

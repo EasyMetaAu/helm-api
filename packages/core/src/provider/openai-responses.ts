@@ -145,6 +145,9 @@ export interface GenericOpenAIResponsesRequestContract {
   // continuation. Reject deterministically before network I/O instead of surfacing
   // the proxy's eventual 404 as an all-providers-failed 502.
   rejectPreviousResponseId?: boolean;
+  // Some providers accept only the Responses item sequence form; reject the
+  // proven object form locally instead of sending a deterministic upstream 422.
+  rejectObjectInput?: boolean;
   // Account-scoped model metadata discovered from the upstream catalog. The
   // resolver receives the final wire model; no provider-wide defaults are guessed.
   resolveModelRequestDefaults?: (
@@ -1736,6 +1739,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     | {
         kind: "frame";
         frame: string;
+        preamble: boolean;
         terminal: boolean;
         reusable: boolean;
       }
@@ -1894,10 +1898,12 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     return {
       kind: "frame",
       frame: `event: ${type}\ndata: ${text}\n\n`,
+      preamble: type === "response.created" || type === "response.in_progress",
       terminal:
         type === "response.completed" ||
         type === "response.failed" ||
         type === "response.incomplete" ||
+        type === "response.cancelled" ||
         type === "error",
       reusable: type === "response.completed",
     };
@@ -2049,6 +2055,8 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
           let retryConnection = false;
           let fallbackToHttp = false;
           let sendingRequest = false;
+          let outputStarted = false;
+          const preambleFrames: string[] = [];
           try {
             if (!websocketMetadataFired.has(lease.connection)) {
               websocketMetadataFired.add(lease.connection);
@@ -2066,10 +2074,19 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
               const received = await receiveWebSocketMessage(lease.connection, opts?.signal);
               if (received === null) {
                 await closeWebSocketSession(sessionId);
-                throw new UpstreamError(
-                  "upstream_error",
-                  "upstream websocket closed before a terminal response event",
-                );
+                if (outputStarted) {
+                  throw new UpstreamError(
+                    "upstream_error",
+                    "upstream websocket closed before a terminal response event",
+                  );
+                }
+                if (retries < maxRetries) {
+                  retryConnection = true;
+                } else {
+                  websocketHttpFallbackSessions.add(sessionId);
+                  fallbackToHttp = true;
+                }
+                break;
               }
               try {
                 const event = websocketSseFrame(received.text);
@@ -2081,16 +2098,26 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
                   fireResponseMetaHeaders(event.headers, opts?.onResponseMeta);
                   if (isWebsocketConnectionLimitError(event.error)) {
                     await closeWebSocketSession(sessionId);
-                    if (retries < maxRetries) {
+                    if (!outputStarted && retries < maxRetries) {
                       retryConnection = true;
-                    } else {
+                    } else if (!outputStarted) {
                       websocketHttpFallbackSessions.add(sessionId);
                       fallbackToHttp = true;
+                    } else {
+                      throw event.error;
                     }
                     break;
                   }
                   await closeWebSocketSession(sessionId);
                   throw event.error;
+                }
+                if (!outputStarted && event.preamble && preambleFrames.length < 2) {
+                  preambleFrames.push(event.frame);
+                  continue;
+                }
+                if (!outputStarted) {
+                  outputStarted = true;
+                  yield* preambleFrames;
                 }
                 if (event.terminal && !event.reusable) {
                   await closeWebSocketSession(sessionId);
@@ -2206,6 +2233,7 @@ export function createGenericOpenAIResponsesClient(
       contract?.ensureReasoningEncryptedContent !== true &&
       contract?.ensureInstructions !== true &&
       contract?.rejectPreviousResponseId !== true &&
+      contract?.rejectObjectInput !== true &&
       contract?.resolveModelRequestDefaults === undefined
     ) {
       return body;
@@ -2254,6 +2282,20 @@ export function createGenericOpenAIResponsesClient(
         "upstream_error",
         message,
         { type: "invalid_request_error", code: "previous_response_id_unsupported", message },
+        400,
+      );
+    }
+    if (
+      contract.rejectObjectInput === true &&
+      next.input !== null &&
+      typeof next.input === "object" &&
+      !Array.isArray(next.input)
+    ) {
+      const message = "input must be an array of Responses items for this subscription provider";
+      throw new UpstreamError(
+        "upstream_error",
+        message,
+        { type: "invalid_request_error", code: "responses_input_sequence_required", message },
         400,
       );
     }

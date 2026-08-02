@@ -1688,6 +1688,7 @@ function createProviderClient(
               ensureReasoningEncryptedContent: true,
               ensureInstructions: true,
               rejectPreviousResponseId: true,
+              rejectObjectInput: true,
               resolveModelRequestDefaults: (model: string) => {
                 const metadata = xaiRuntime?.modelsByWireModel.get(model);
                 return metadata

@@ -490,6 +490,7 @@ export async function queueOrPersistSessionRequest(
   args: Parameters<typeof persistSessionRequest>[1],
   log: (msg: string) => void,
 ): Promise<void> {
+  if (!sessionCaptureEnabled(deps)) return;
   if (Buffer.byteLength(args.requestJson, "utf8") > captureBodyLimitBytes(deps)) {
     log("session.capture_limited");
     return;

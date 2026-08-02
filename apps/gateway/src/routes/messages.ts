@@ -16,6 +16,7 @@ import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
 import {
   markStartedStreamCancellation,
+  markStartedStreamError,
   requestCancellationReason,
 } from "../request-cancellation.js";
 import {
@@ -259,14 +260,6 @@ function estimateAnthropicInputTokens(value: unknown): number {
     .filter((s) => s.length > 0)
     .join("\n");
   return Math.max(1, Math.ceil(Buffer.byteLength(text, "utf8") / 4));
-}
-
-function markStreamDecisionError(decision: DecisionRecord, errorClass: string): void {
-  decision.final = {
-    ...decision.final,
-    status: "error",
-    error_reason: errorClass,
-  };
 }
 
 export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps): void {
@@ -688,7 +681,7 @@ export function registerMessagesRoute(app: Hono<AppEnv>, deps: MessagesRouteDeps
                     message: isUpstreamTimeout(err) ? "upstream timed out" : "upstream error",
                     trace_id: traceId,
                   };
-            markStreamDecisionError(result.decision, errorClass);
+            markStartedStreamError(result.decision, errorClass);
             const out = anthropic.transformErrorOut(re);
             const data = JSON.stringify(out.body);
             captured?.push(`event: error\ndata: ${data}\n\n`);

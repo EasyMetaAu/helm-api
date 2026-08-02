@@ -12,6 +12,7 @@ import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
 import {
   markStartedStreamCancellation,
+  markStartedStreamError,
   requestCancellationReason,
 } from "../request-cancellation.js";
 import {
@@ -501,6 +502,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
                     message: isUpstreamTimeout(err) ? "upstream timed out" : "upstream error",
                     trace_id: traceId,
                   };
+            markStartedStreamError(result.decision, re.error_class);
             const out = transformer.transformErrorOut(re);
             const data = JSON.stringify(out.body);
             captured?.push(`data: ${data}\n\n`);

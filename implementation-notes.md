@@ -7,6 +7,22 @@
 
 ---
 
+## 2026-08-02 · Responses WebSocket 首输出前恢复并提前释放物化准入（Protocol / Gateway runtime，docs/05/07/10，原则 3/5/8）
+
+- **恢复边界**：上游 WebSocket 只产生 `response.created` / `response.in_progress` 后关闭时，丢弃未提交的 preamble，按既有连接重试预算重连，耗尽后回退 HTTP/SSE；最多缓冲协议正常需要的两个 preamble，第三个重复 preamble 立即提交为已开始输出，避免异常上游造成无界缓存。真实输出一旦开始则绝不重放。`response.cancelled` 在 provider parser 与 ingress bridge 都是失败终态，不再追加伪 bridge error。
+- **准入生命周期**：Responses WebSocket bridge 用进程内 `WeakMap<Request, callback>` 把 request-body lease 交给可信内部路由；只有随机 proof 匹配的内部请求会在第二次 JSON parse 成功或失败后立即标为已物化，provider 等待不再长期持有 6 倍预留，而 parser 完成前的并发大请求仍受动态 headroom 保护。没有恢复固定请求、WebSocket 或 Session 大小上限。
+- **保留边界**：bridge 到内部 Responses 路由仍有一次 `JSON.stringify` 与再次 parse；本次先修已证实的 503 放大根因，不抽取会绕过鉴权、schema、rate limit、并发与 telemetry 的第二条执行通道。
+
+## 2026-08-02 · 流式错误的 telemetry 终态与 metadata-only 捕获短路（Gateway / Telemetry，docs/05/07，原则 3/7/8）
+
+- **流式终态**：Chat、Messages 与 Gemini 在已经开始写 SSE 后遇到非取消错误时，共用取消边界旁的 helper，把同一份 `DecisionRecord` 标为 `final.status=error`、保留协议映射使用的 `error_reason`，并写入 `stream_outcome=failed`；客户端主动断连仍只走原有 `client_aborted` 语义。
+- **metadata-only**：Session capture 关闭时，队列入口在计算 request/response 字节、查询饱和 cache 或创建 deferred DB write 前直接返回；不会产生 `session.capture_limited` 或 Session 存储工作，脱敏 telemetry 的正常记录不受影响。
+
+## 2026-08-02 · xAI Responses 对象 input 在本地拒绝（Protocol / provider execution，docs/04/05/07，原则 3/5/8）
+
+- **确定性边界**：xAI `grok-4.5` 对 `input` 对象返回 `invalid type: map, expected a sequence`；只为 xAI 的 generic Responses contract 增加对象形态预检，返回结构化 `invalid_request / 400` 且不发起上游请求。数组保持可用；未证实 string 形态，不猜测也不改写。
+- **资源边界**：未修改 response-work admission、错误正文预算或 Session 容量。xAI 的 `error_body_capacity_exhausted` 是独立的上游正文边界，本次没有足够的稳定请求契约可做本地预判，仍保留其真实 provider 诊断而不虚构 Helm 固定上限。
+
 ## 2026-08-02 · Session 正文改为原子分块存储并以机器压力协调后台工作（Telemetry / Gateway runtime，docs/02/07/11，原则 3/7）
 
 - **存储格式**：新 Session 正文按 UTF-8 安全的 256 KiB 原始块逐块 gzip/raw 写入，最多 4 块一批；revision 用请求/响应两个 generation 指针原子发布，响应回填不重写大请求正文，并发重试不会把一份元数据配到另一份正文。历史正文不扫描、不回填；legacy 行继续读取，首次响应回填记录准确的逻辑 `body_bytes`。Admin 恢复先按机器动态 response-work 预算分页，只读取已发布 generation；旧二进制正文在缺少可靠原始字节数时 fail-closed。
@@ -52,32 +68,11 @@
 - **自动维护保持开启**：未关闭 `vacuum_enabled`，也未改低峰小时。自动 VACUUM 的开关、小时与日期在进入串行维护队列后重新读取；busy 时只记录 `vacuum.auto_skip_busy`、不暂停入口、不记当天成功，并在下一次 10 分钟 tick 重试。空闲路径由外层唯一持有 HTTP gate，其他 worker/write activity 排空和 `store.vacuum()` 完成后才统一恢复入口；Postgres/Supabase 使用原生 autovacuum，不安装这个 SQLite scheduler。数据清理继续由原有容器内 scheduler 直接调用 Store，VACUUM 不再重复先跑清理，以缩短独占维护窗口。
 - **只观测不拒绝**：每 60 秒记录 process memory、event-loop delay、pending preflight 与 OAuth refresh queue depth；这些指标不进入 `/healthz`、readiness、admission、限流或 503 判定。Docker cgroup 上限保持部署现状。
 
-## 2026-07-27 · 拆除启发式请求内存拒绝并保留硬边界（Gateway runtime，docs/02/05/07，用户明确要求）
-
-- **决定**：按用户要求删除请求体/WebSocket 的 `active_capacity` 与 `live_heap` 启发式拒绝，避免健康流量因重复计账再出现 503。保留确定性的单请求/单帧 `wire_limit`（超限 413 / WebSocket 1009），防止一个合法 key 用超大正文拖垮整个容器。
-- **维护 pause 保留**：vacuum 仍通过 `pause()` + `waitForIdle()` 排空 in-flight lease；paused 期间新请求返回 `database_maintenance`，已持有 lease 可完成 resize/release。既有 WebSocket 也得到维护错误，不再误报“内存耗尽”。
-- **可观测性**：启动日志明确 `request_admission_mode=wire_limit_only`，只报告仍实际执行的 wire/WebSocket 上限；拒绝日志区分 `request.body_rejected` 与 `request.maintenance_rejected`，不再输出已删除的 active/heap 阈值。
-- **仍保留**：写队列、Session 恢复、response-work、鉴权、并发 lease 与 rate limit 不变。高并发聚合压力仍可能由 V8/cgroup 终止进程，但单请求硬边界不允许被取消。
-- **测试**：覆盖 aggregate capacity 不拒绝、HTTP/Responses WebSocket 硬上限、maintenance pause drain 与已建立 WebSocket 的维护错误，并逐协议验证 413/成功路径。
-
-## 2026-07-25 · 图片上游参数拒绝保持客户端 400（Gateway / Provider execution，docs/05/07，原则 3/5）
-
-- **根因**：OpenAI provider 已把 ZenMux 的真实 HTTP `400` 保存到 `UpstreamError.upstreamStatus`，但共享请求拒绝分类只识别 `invalid_request_error`、`413` 与超大图片提示，遗漏 ZenMux 的结构化 `invalid_params`，导致图片链继续按 provider 故障耗尽并返回 `all_providers_failed / 502`。
-- **修复**：共享 `isUpstreamRequestRejection` 在原有 `400/413/422` 状态白名单内识别 `invalid_params`；图片链复用现有上游消息提取，Images 路由返回 OpenAI 形状的 `invalid_request_error / invalid_request / 400`。不按错误字符串或具体参数名特判，也不删除客户端字段。
-- **边界不变**：`401/403/404/429`、provider `5xx`、网络/超时、熔断与真实链耗尽仍走原有认证、重试、breaker、fallback 和 `5xx` 语义；回归测试覆盖 ZenMux 形状、provider `500`、网络失败与链耗尽。
-
-## 2026-07-25 · 上游过载（529/503）在 fetch 边界退避重试（Provider，docs/02/04，原则 3/5/8）
-
-- **根因**：`provider/retry.ts` 的重试分类是严格白名单，只覆盖裸 socket/连接失败；HTTP 529（Anthropic Overloaded）/503 直接变成 `UpstreamError` 抛出，**零延迟零重试**。OAuth 账号池确实把 `status >= 500` 当作可换兄弟账号的瞬时故障，但那也是立即换、无退避；单账号或普通 API key 的 provider 根本没有这条通路，一次 529 就烧掉一个候选，单候选链直接 502 给客户端——而同样的请求体隔一秒重发通常就成功。
-- **修复**：新增 `overloadRetryDelayMs` + `withOverloadRetry`，包在四个 provider client 的 fetch 边界外层（anthropic、openai、codex-responses、generic-responses、gemini）。过载答复是**正常 Response 而非 throw**，所以过载重试必须套在 `withConnectionRetry` 外面，而不是塞进它的 `shouldRetry`。首字节前才重试、body 从未消费，因此幂等（原则 8）；被丢弃的 response 会 `body.cancel()` 释放 socket，codex 那条延迟到 body 的 timeout 定时器通过 `release` 钩子显式清理。
-- **刻意收窄**：只认 **529 + 503**。500/502 是不明服务端故障，重试只是拖延真正的失败；429 是真限流，账号池 park 账号后走链才对。退避 **1s → 3s**（共 2 次重试）；上游给出数字 `Retry-After` 则优先，但**钳制在 10s**——一个上游不该占住客户端 socket 十分钟，那时换候选才是更快的答案路径。HTTP-date 形式的 `Retry-After` 不解析，退回默认表。
-- **下游不变**：重试耗尽后仍抛原来的 `UpstreamError(upstreamStatus: 529)`，账号池换号、熔断计数、fallback 链、遥测字段**逻辑一行未改**——只是现在它们只在真的持续过载时才启动。客户端断连时立刻停止，不再多烧一次上游（此时返回的 response body 已被 drain，error detail 退化为 null；无人在听，可接受）。
-- **测试影响**：三个老测试用 503 当"随便一个 5xx"占位（openai 401 分支、gemini/codex 非 JSON body 保留、generic 首 chunk 前抛错），503 现在会触发重试，已改成 500 并注明原因；意图不变，provider 套件同时从 9s 回到 2.5s。
-- **TODO / 边界**：退避参数目前是代码常量，未做成配置（与原则 2 的"会撒谎的旋钮比没有旋钮更糟"一致，先观察线上真实 529 分布再决定）；OAuth 池**换账号之间**仍无延迟，本次未动——换号本身就是在换容量，加睡眠反而拖慢。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-25 · 上游过载（529/503）在 fetch 边界退避重试**：只在首字节前对 529/503 做两次有界退避，保留账号池、熔断、fallback 与终态 telemetry 语义；客户端断连立即停止，完整原文通过 git history 回溯。
 - **2026-07-25 · Responses WebSocket terminal 立即释放并关闭失效连接**：成功终态立即释放请求与 ingress lease，失败终态关闭失效连接；Codex 增量续接保持 registry/provider/account/lane provenance 与 abort 边界，完整原文通过 git history 回溯。
+- **2026-07-25 · 图片上游参数拒绝保持客户端 400**：ZenMux 的结构化 `invalid_params` 在共享边界转为 `invalid_request / 400`，provider 5xx、网络、限流与真实链耗尽语义不变，完整原文通过 git history回溯。
 - **2026-07-24 · Codex Voice、Responses 音频与图片编辑补齐代理面**：Realtime V1/V2/V3、Responses 音频与 Images edits 复用既有鉴权、路由、账号和遥测链；Voice attestation 与单实例 call registry 保持收窄边界，完整原文通过 git history 回溯。
 - **2026-07-24 · 请求准入增加实时 V8 堆高水位**：曾以 live heap + 分池余量拒绝高风险请求；后被 2026-07-27 的启发式拒绝拆除与 2026-07-28 的请求大小上限删除取代，完整原文通过 git history 回溯。
 - **2026-07-24 · Admin 登录同源证明兼容代理 Host 改写**：登录/登出优先接受浏览器不可伪造的 `Sec-Fetch-Site: same-origin`，同时保留 Origin/Host 与 cross-site 拒绝边界；完整原文通过 git history 回溯。

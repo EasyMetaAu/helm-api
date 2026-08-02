@@ -37,6 +37,7 @@ import { HelmHttpError } from "../middleware/error-handler.js";
 import { requestSignal, requestTimedOut } from "../middleware/limits.js";
 import {
   markStartedStreamCancellation,
+  markStartedStreamError,
   requestCancellationReason,
 } from "../request-cancellation.js";
 import {
@@ -950,8 +951,10 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
             // Preserve a mid-stream idle timeout (UpstreamError("timeout")) instead
             // of flattening it to a generic upstream_error frame.
             const timedOut = isUpstreamTimeout(err);
+            const errorClass = timedOut ? "timeout" : "upstream_error";
+            markStartedStreamError(result.decision, errorClass);
             const errBody = makeHelmError({
-              error_class: timedOut ? "timeout" : "upstream_error",
+              error_class: errorClass,
               message: timedOut ? "upstream timed out" : "upstream error",
               trace_id: traceId,
             });

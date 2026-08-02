@@ -70,6 +70,43 @@ describe("per-key request content mode", () => {
 });
 
 describe("Session queue admission", () => {
+  it("does nothing when Session capture is disabled", async () => {
+    const enqueueSession = vi.fn();
+    const getSessionByRef = vi.fn();
+    const upsertSessionRevision = vi.fn();
+    const log = vi.fn();
+
+    await queueOrPersistSessionRequest(
+      {
+        telemetry: {
+          getSessionByRef,
+          upsertSessionRevision,
+        } as unknown as PayloadCaptureDeps["telemetry"],
+        writes: { enqueueSession } as unknown as WriteQueue,
+        captureSessions: () => false,
+        captureBodyLimitBytes: 10,
+      },
+      {
+        requestId: "request-disabled",
+        accountId: "account-1",
+        apiKeyId: "key-1",
+        decision: {
+          session: { ref: "session-disabled", label: "thread-disabled", source: "x-session-key" },
+        } as unknown as DecisionRecord,
+        requestJson: "x".repeat(11),
+        responseId: null,
+        responseJson: "x".repeat(11),
+        now: 1,
+      },
+      log,
+    );
+
+    expect(log).not.toHaveBeenCalled();
+    expect(enqueueSession).not.toHaveBeenCalled();
+    expect(getSessionByRef).not.toHaveBeenCalled();
+    expect(upsertSessionRevision).not.toHaveBeenCalled();
+  });
+
   it("rejects an oversized retained body before creating the deferred closure", async () => {
     const enqueueSession = vi.fn();
     const writes = { enqueueSession } as unknown as WriteQueue;
