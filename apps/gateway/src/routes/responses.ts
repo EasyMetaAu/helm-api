@@ -32,7 +32,10 @@ import {
   type RequestCancellationReason,
   requestCancellationReason,
 } from "../request-cancellation.js";
-import { CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER } from "../responses-websocket-internal.js";
+import {
+  CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER,
+  markResponsesWebSocketRequestParsed,
+} from "../responses-websocket-internal.js";
 import {
   type BodyMemoryAdmission,
   memoryAdmissionReleaseGuard,
@@ -893,17 +896,21 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       deps.memoryAdmission === undefined || trustedWebSocketSelfCall
         ? null
         : await readAdmittedRequestBody(c.req.raw, deps.memoryAdmission);
-    const rawBody = admitted?.text ?? (await c.req.text());
-    if (admitted !== null) c.set("requestMemoryRelease", admitted.release);
     try {
-      const native: unknown = JSON.parse(rawBody);
-      return {
-        native,
-        rawBody,
-        ...(admitted === null ? {} : { materialized: admitted.materialized }),
-      };
-    } catch {
-      throw helmError("invalid_request", "malformed JSON request body", traceId);
+      const rawBody = admitted?.text ?? (await c.req.text());
+      if (admitted !== null) c.set("requestMemoryRelease", admitted.release);
+      try {
+        const native: unknown = JSON.parse(rawBody);
+        return {
+          native,
+          rawBody,
+          ...(admitted === null ? {} : { materialized: admitted.materialized }),
+        };
+      } catch {
+        throw helmError("invalid_request", "malformed JSON request body", traceId);
+      }
+    } finally {
+      if (trustedWebSocketSelfCall) markResponsesWebSocketRequestParsed(c.req.raw);
     }
   };
 

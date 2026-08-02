@@ -9,7 +9,10 @@ import {
 } from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
-import { CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER } from "../responses-websocket-internal.js";
+import {
+  CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER,
+  trackResponsesWebSocketRequest,
+} from "../responses-websocket-internal.js";
 import { createBodyMemoryAdmission } from "../runtime/memory-admission.js";
 import type { MessagesIdentity } from "./messages.js";
 import { createMessagesPipeline, PipelineError, type RouteFn } from "./messages-pipeline.js";
@@ -2543,6 +2546,71 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       ?.metadata?.native_request as { headers?: Record<string, string> } | undefined;
     expect(native?.headers?.[CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER]).toBe("session-ok");
     expect(native?.headers?.[CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER]).toBeUndefined();
+  });
+
+  it("materializes a trusted internal websocket request after JSON parsing", async () => {
+    const materialized = vi.fn();
+    const { deps } = makeDeps({
+      transformRequestOut: () => {
+        expect(materialized).toHaveBeenCalledOnce();
+        return { stream: false };
+      },
+    });
+    deps.responsesWebSocketSessionProof = "proof-ok";
+    const app = buildApp(deps);
+    const request = new Request("http://helm.internal/v1/responses", {
+      method: "POST",
+      headers: {
+        ...AUTH,
+        [CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER]: "proof-ok",
+      },
+      body: JSON.stringify(REQ),
+    });
+    trackResponsesWebSocketRequest(request, materialized);
+
+    const res = await app.fetch(request);
+
+    expect(res.status).toBe(200);
+    expect(materialized).toHaveBeenCalledOnce();
+  });
+
+  it("materializes a trusted internal websocket request when JSON parsing fails", async () => {
+    const materialized = vi.fn();
+    const { deps } = makeDeps();
+    deps.responsesWebSocketSessionProof = "proof-ok";
+    const app = buildApp(deps);
+    const request = new Request("http://helm.internal/v1/responses", {
+      method: "POST",
+      headers: {
+        ...AUTH,
+        [CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER]: "proof-ok",
+      },
+      body: "{",
+    });
+    trackResponsesWebSocketRequest(request, materialized);
+
+    const res = await app.fetch(request);
+
+    expect(res.status).toBe(400);
+    expect(materialized).toHaveBeenCalledOnce();
+  });
+
+  it("does not materialize a tracked request without the internal proof", async () => {
+    const materialized = vi.fn();
+    const { deps } = makeDeps();
+    deps.responsesWebSocketSessionProof = "proof-ok";
+    const app = buildApp(deps);
+    const request = new Request("http://helm.internal/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(REQ),
+    });
+    trackResponsesWebSocketRequest(request, materialized);
+
+    const res = await app.fetch(request);
+
+    expect(res.status).toBe(200);
+    expect(materialized).not.toHaveBeenCalled();
   });
 
   it("strips spoofed websocket session headers from ordinary HTTP requests", async () => {

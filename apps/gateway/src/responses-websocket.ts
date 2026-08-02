@@ -4,7 +4,11 @@ import type { Duplex } from "node:stream";
 import { CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER, readSSE, runtimeMemoryBudget } from "@helm/core";
 import WebSocket, { WebSocketServer } from "ws";
 import { normalizeOpenAICodexClientVersion } from "./oauth/codex-client-version.js";
-import { CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER } from "./responses-websocket-internal.js";
+import {
+  CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER,
+  markResponsesWebSocketRequestParsed,
+  trackResponsesWebSocketRequest,
+} from "./responses-websocket-internal.js";
 import {
   type BodyMemoryAdmission,
   createBodyMemoryAdmission,
@@ -331,19 +335,19 @@ async function forwardResponse(
   if (sessionProof !== undefined) {
     headers.set(CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER, sessionProof);
   }
+  const requestBody = websocketRequestBody(data);
+  const internalRequest = new Request(requestUrl(request), {
+    method: "POST",
+    headers,
+    body: JSON.stringify(requestBody),
+    signal,
+  });
+  trackResponsesWebSocketRequest(internalRequest, materialized);
   let response: Response;
   try {
-    const body = websocketRequestBody(data);
-    const internalRequest = new Request(requestUrl(request), {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      signal,
-    });
-    materialized();
     response = await fetch(internalRequest);
   } finally {
-    materialized();
+    markResponsesWebSocketRequestParsed(internalRequest);
   }
   if (!response.ok) {
     await sendEnvelope(socket, await responseErrorEnvelope(response));
