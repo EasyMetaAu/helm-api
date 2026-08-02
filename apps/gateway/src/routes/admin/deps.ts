@@ -8,6 +8,7 @@ import type {
   OAuthSelectionStrategy,
   OAuthUsageStore,
   PoliciesConfig,
+  ResponseWorkAdmission,
   RouteOptions,
   StoredCleanupReport,
   TelemetryStore,
@@ -438,6 +439,7 @@ export interface AdminApiDeps {
   rules: RuleStore;
   keyStore: KeyStore;
   telemetry: TelemetryStore;
+  responseWorkAdmission?: ResponseWorkAdmission;
   runInBackground?: (task: () => Promise<unknown>, onError?: (error: unknown) => void) => boolean;
   // Automatic data cleanup / retention / archival (admin "Data cleanup"). Optional —
   // absent in unit tests; the cleanup routes 503 when not wired.

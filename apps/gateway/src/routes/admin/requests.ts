@@ -140,6 +140,21 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
     if (part === "meta") {
       const meta = await getPayloadMeta(deps, traceId);
       if (!meta) {
+        const sessionMeta = await deps.telemetry.getSessionRevisionMeta?.(traceId);
+        if (sessionMeta) {
+          return c.json({
+            captured: true,
+            source: "session",
+            exact: false,
+            fidelity: sessionMeta.fidelity,
+            created_at: sessionMeta.createdAt.getTime(),
+            parts: {
+              request: true,
+              response: sessionMeta.responseBodyStored,
+              upstream_request: false,
+            },
+          });
+        }
         const recovered = await getSessionRequest(deps, traceId);
         if (recovered.status === "unavailable")
           return c.json({ captured: false, source: "unavailable", reason: recovered.reason });
@@ -277,7 +292,7 @@ async function getSessionRequest(
   if (!sessionRef) return { status: "unavailable", reason: "no_session" };
   if (!listPage) return { status: "unavailable", reason: "session_unavailable" };
   const budget = runtimeMemoryBudget();
-  const responseAdmission = runtimeResponseWorkAdmission();
+  const responseAdmission = deps.responseWorkAdmission ?? runtimeResponseWorkAdmission();
   // ponytail: half a response-work window lets inspection coexist with live API
   // traffic; add metadata-first admission if larger concurrent restores are needed.
   const recoveryMaxWireBytes = Math.max(

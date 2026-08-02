@@ -12,7 +12,11 @@ describe("session request delta", () => {
     );
     const second = splitSessionRequestJson(
       '{"model":"x","messages":[{"role":"user","content":"one"},{"role":"assistant","content":"two"}]}',
-      first.eventsJson,
+      {
+        eventKey: first.eventKey,
+        eventCount: first.eventCount,
+        eventHash: first.eventHash,
+      },
     );
     expect(second).toMatchObject({ eventKey: "messages", retainCount: 1 });
     expect(second.eventsJson).toBe('[{"role":"assistant","content":"two"}]');
@@ -26,10 +30,29 @@ describe("session request delta", () => {
     );
   });
 
+  it("falls back to a full delta when the persisted head hash is not a prefix", () => {
+    const first = splitSessionRequestJson('{"messages":["one","two"]}');
+    const changed = splitSessionRequestJson('{"messages":["changed","two","three"]}', {
+      eventKey: first.eventKey,
+      eventCount: first.eventCount,
+      eventHash: first.eventHash,
+    });
+    expect(changed).toMatchObject({
+      retainCount: 0,
+      eventCount: 3,
+      eventsJson: '["changed","two","three"]',
+    });
+  });
+
   it("restores a branch from its explicit parent rather than its newest sibling", () => {
     const root = splitSessionRequestJson('{"messages":["one"]}');
-    const left = splitSessionRequestJson('{"messages":["one","left"]}', root.eventsJson);
-    const right = splitSessionRequestJson('{"messages":["one","right"]}', root.eventsJson);
+    const head = {
+      eventKey: root.eventKey,
+      eventCount: root.eventCount,
+      eventHash: root.eventHash,
+    };
+    const left = splitSessionRequestJson('{"messages":["one","left"]}', head);
+    const right = splitSessionRequestJson('{"messages":["one","right"]}', head);
     expect(
       restoreSessionRevisionJson(
         [
@@ -63,7 +86,7 @@ describe("session request delta", () => {
   it("does not inherit input before a previous_response_id baseline", () => {
     const delta = splitSessionRequestJson(
       '{"previous_response_id":"resp_1","input":[{"role":"user","content":"next"}]}',
-      '[{"role":"user","content":"old"}]',
+      { eventKey: "input", eventCount: 1, eventHash: "ignored-for-continuation" },
     );
     expect(delta).toMatchObject({
       eventKey: "input",
@@ -78,7 +101,7 @@ describe("session request delta", () => {
     );
     const child = splitSessionRequestJson(
       '{"model":"gpt-5","previous_response_id":"resp_1","input":[{"role":"user","content":"two"}]}',
-      root.eventsJson,
+      { eventKey: root.eventKey, eventCount: root.eventCount, eventHash: root.eventHash },
     );
     expect(
       restoreSessionRevisionJson(

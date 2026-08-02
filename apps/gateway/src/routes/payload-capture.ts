@@ -28,10 +28,11 @@ export interface PayloadCaptureDeps {
   capturePayloads?: () => boolean;
   /** Live getter for the incremental per-session request transcript setting. */
   captureSessions?: () => boolean;
+  /** Monotonic generation for live capture-mode changes. Deferred body writes
+   * from an older generation are discarded while telemetry still lands. */
+  captureGeneration?: () => number;
   /** Optional test/embedding override. Production derives this from the V8 heap. */
   captureBodyLimitBytes?: number;
-  /** Optional test/embedding override. Production derives this from the V8 heap. */
-  sessionCacheBytes?: number;
   /** Resolve the served attempt's USD cost from the trailing usage chunk: an
    *  upstream-BILLED cost in it (`cost_usd` / OpenRouter `cost`) OVERRIDES the
    *  catalog estimate, else tokens × `alias`'s pricing; null when neither is
@@ -45,10 +46,12 @@ export function withRequestContentMode<T extends PayloadCaptureDeps>(
   mode: RequestContentMode | null | undefined,
 ): T {
   if (mode == null) return deps;
+  const globallyEnabled = () =>
+    deps.capturePayloads?.() === true || deps.captureSessions?.() === true;
   return {
     ...deps,
-    capturePayloads: () => mode === "payload",
-    captureSessions: () => mode === "session",
+    capturePayloads: () => globallyEnabled() && mode === "payload",
+    captureSessions: () => globallyEnabled() && mode === "session",
   };
 }
 
@@ -364,82 +367,12 @@ export function capturedResponsesResponse(
   return { responseId: null, responseJson: null };
 }
 
-function hasResponsesOutput(raw: string | null | undefined): boolean {
-  if (!raw) return false;
-  try {
-    const value = JSON.parse(raw) as unknown;
-    return (
-      value !== null &&
-      typeof value === "object" &&
-      !Array.isArray(value) &&
-      Array.isArray((value as Record<string, unknown>).output)
-    );
-  } catch {
-    return false;
-  }
-}
-
 const defaultMemoryBudget = runtimeMemoryBudget();
 
 function captureBodyLimitBytes(deps: PayloadCaptureDeps): number {
   return deps.captureBodyLimitBytes ?? defaultMemoryBudget.responseCaptureBytes;
 }
 
-function sessionCacheBytes(deps: PayloadCaptureDeps): number {
-  return deps.sessionCacheBytes ?? defaultMemoryBudget.sessionCacheBytes;
-}
-
-export interface SessionHeadCache {
-  get(sessionRef: string): { requestId: string; requestJson: string } | undefined;
-  set(sessionRef: string, head: { requestId: string; requestJson: string }): void;
-  clear(): void;
-  readonly retainedBytes: number;
-}
-
-export function createSessionHeadCache(
-  maxEntries = Math.max(1, Math.floor(defaultMemoryBudget.sessionCacheBytes / 1024)),
-  maxBytes = defaultMemoryBudget.sessionCacheBytes,
-): SessionHeadCache {
-  const entries = new Map<
-    string,
-    { requestId: string; requestJson: string; retainedBytes: number }
-  >();
-  let retainedBytes = 0;
-  return {
-    get(sessionRef) {
-      const value = entries.get(sessionRef);
-      if (!value) return undefined;
-      entries.delete(sessionRef);
-      entries.set(sessionRef, value);
-      return { requestId: value.requestId, requestJson: value.requestJson };
-    },
-    set(sessionRef, head) {
-      const previous = entries.get(sessionRef);
-      if (previous) retainedBytes -= previous.retainedBytes;
-      entries.delete(sessionRef);
-      const bytes = Buffer.byteLength(head.requestJson, "utf8");
-      entries.set(sessionRef, { ...head, retainedBytes: bytes });
-      retainedBytes += bytes;
-      while (entries.size > maxEntries || retainedBytes > maxBytes) {
-        const oldest = entries.entries().next().value as
-          | [string, { retainedBytes: number }]
-          | undefined;
-        if (!oldest) break;
-        entries.delete(oldest[0]);
-        retainedBytes -= oldest[1].retainedBytes;
-      }
-    },
-    clear() {
-      entries.clear();
-      retainedBytes = 0;
-    },
-    get retainedBytes() {
-      return retainedBytes;
-    },
-  };
-}
-
-const sessionHeadCaches = new WeakMap<TelemetryStore, SessionHeadCache>();
 const saturatedSessionRefs = new WeakMap<TelemetryStore, Set<string>>();
 
 function saturatedSessions(store: TelemetryStore): Set<string> {
@@ -462,25 +395,7 @@ function markSaturatedSession(store: TelemetryStore, sessionRef: string, maxByte
   }
 }
 
-function sessionHeadCache(store: TelemetryStore, maxBytes: number): SessionHeadCache {
-  const existing = sessionHeadCaches.get(store);
-  if (existing) return existing;
-  const created = createSessionHeadCache(Math.max(1, Math.floor(maxBytes / 1024)), maxBytes);
-  sessionHeadCaches.set(store, created);
-  return created;
-}
-
-function cacheSessionHead(
-  store: TelemetryStore,
-  sessionRef: string,
-  head: { requestId: string; requestJson: string },
-  maxBytes: number,
-): void {
-  sessionHeadCache(store, maxBytes).set(sessionRef, head);
-}
-
 export function clearSessionCaptureCache(store: TelemetryStore): void {
-  sessionHeadCaches.delete(store);
   saturatedSessionRefs.delete(store);
 }
 
@@ -500,7 +415,7 @@ export async function persistSessionRequest(
 ): Promise<void> {
   const session = args.decision.session;
   const get = deps.telemetry.getSessionByRef;
-  const getByResponseId = deps.telemetry.getSessionRevisionByResponseId;
+  const getByResponseId = deps.telemetry.findSessionRequestIdByResponseId;
   const upsert = deps.telemetry.upsertSessionRevision;
   if (!sessionCaptureEnabled(deps)) {
     clearSessionCaptureCache(deps.telemetry);
@@ -514,38 +429,33 @@ export async function persistSessionRequest(
     }
     const head = await get.call(deps.telemetry, session.ref);
     if (head && head.revisionCount >= PERSISTED_SESSION_MAX_REVISIONS) {
-      markSaturatedSession(deps.telemetry, session.ref, sessionCacheBytes(deps));
+      markSaturatedSession(deps.telemetry, session.ref, defaultMemoryBudget.sessionCacheBytes);
       log("session.capture_limited");
       return;
     }
-    const currentBase = splitSessionRequestJson(args.requestJson);
+    const currentBase = splitSessionRequestJson(
+      args.requestJson,
+      head?.eventHead && head.eventHead.requestId === head.headRequestId
+        ? {
+            eventKey: head.eventHead.eventKey,
+            eventCount: head.eventHead.eventCount,
+            eventHash: head.eventHead.eventHash,
+          }
+        : undefined,
+    );
     const previousResponseId = currentBase.previousResponseId;
     let parentRequestId: string | null = null;
-    let previousEvents: string | undefined;
     let fidelity: "semantic" | "partial" = "semantic";
     if (previousResponseId !== null) {
       const parent = getByResponseId
         ? await getByResponseId.call(deps.telemetry, session.ref, previousResponseId)
         : null;
       parentRequestId = parent?.requestId ?? null;
-      if (!hasResponsesOutput(parent?.responseJson)) fidelity = "partial";
+      if (parent?.responseBodyStored !== true) fidelity = "partial";
     } else {
       parentRequestId = head?.headRequestId ?? null;
-      const cached = sessionHeadCache(deps.telemetry, sessionCacheBytes(deps)).get(session.ref);
-      const parentRequest =
-        parentRequestId === null
-          ? null
-          : cached?.requestId === parentRequestId
-            ? cached.requestJson
-            : null;
-      const parentDelta = parentRequest ? splitSessionRequestJson(parentRequest) : null;
-      previousEvents =
-        parentDelta?.eventKey === currentBase.eventKey ? parentDelta.eventsJson : undefined;
     }
-    const delta =
-      previousEvents === undefined
-        ? currentBase
-        : splitSessionRequestJson(args.requestJson, previousEvents);
+    const delta = currentBase;
     await upsert.call(deps.telemetry, {
       sessionRef: session.ref,
       accountId: args.accountId,
@@ -561,19 +471,15 @@ export async function persistSessionRequest(
       responseJson: args.responseJson,
       fidelity: fidelity === "partial" ? fidelity : delta.fidelity,
       createdAt: new Date(args.now),
+      eventHead: {
+        eventKey: delta.eventKey,
+        eventCount: delta.eventCount,
+        eventHash: delta.eventHash,
+      },
     });
     if ((head?.revisionCount ?? 0) + 1 >= PERSISTED_SESSION_MAX_REVISIONS) {
-      markSaturatedSession(deps.telemetry, session.ref, sessionCacheBytes(deps));
+      markSaturatedSession(deps.telemetry, session.ref, defaultMemoryBudget.sessionCacheBytes);
     }
-    cacheSessionHead(
-      deps.telemetry,
-      session.ref,
-      {
-        requestId: args.requestId,
-        requestJson: args.requestJson,
-      },
-      sessionCacheBytes(deps),
-    );
   } catch {
     log("session.capture_failed");
   }
@@ -601,8 +507,16 @@ export async function queueOrPersistSessionRequest(
   if (args.responseJson !== null && responseJson === null) log("session.response_limited");
   const boundedArgs = responseJson === args.responseJson ? args : { ...args, responseJson };
   if (deps.writes && sessionCaptureEnabled(deps) && args.decision.session?.label) {
+    const generation = deps.captureGeneration?.();
     await deps.writes.enqueueSession(
-      () => persistSessionRequest(deps, boundedArgs, log),
+      () => {
+        if (
+          generation !== undefined &&
+          (deps.captureGeneration?.() !== generation || !sessionCaptureEnabled(deps))
+        )
+          return Promise.resolve();
+        return persistSessionRequest(deps, boundedArgs, log);
+      },
       Buffer.byteLength(args.requestJson, "utf8") +
         (responseJson === null ? 0 : Buffer.byteLength(responseJson, "utf8")),
     );
@@ -846,13 +760,19 @@ export async function recordServed(
     });
     await queueOrPersistSessionRequest(deps, sessionArgs, log);
     if (captureEnabled(deps)) {
-      await w.enqueuePayload({
-        requestId: args.requestId,
-        requestJson: args.requestJson,
-        responseJson,
-        upstreamRequestJson: args.upstreamRequestJson ?? null,
-        createdAt: new Date(deps.now()),
-      });
+      const generation = deps.captureGeneration?.();
+      await w.enqueuePayload(
+        {
+          requestId: args.requestId,
+          requestJson: args.requestJson,
+          responseJson,
+          upstreamRequestJson: args.upstreamRequestJson ?? null,
+          createdAt: new Date(deps.now()),
+        },
+        generation === undefined
+          ? undefined
+          : () => deps.captureGeneration?.() === generation && captureEnabled(deps),
+      );
       // Retention is NOT pruned on the request path — the scheduled cleanup runner
       // owns payload retention (archive-first), governed by the cleanup settings.
     }

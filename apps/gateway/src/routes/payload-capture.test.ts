@@ -1,4 +1,9 @@
-import type { DecisionRecord, InsertPayloadInput, UpsertSessionRevisionInput } from "@helm/core";
+import {
+  type DecisionRecord,
+  type InsertPayloadInput,
+  splitSessionRequestJson,
+  type UpsertSessionRevisionInput,
+} from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
 import type { WriteQueue } from "../runtime/write-queue.js";
 import { createWriteQueue } from "../runtime/write-queue.js";
@@ -6,7 +11,6 @@ import {
   backfillCompletionCost,
   capturedResponsesResponse,
   createResponsesDeltaAccumulator,
-  createSessionHeadCache,
   createSseCapture,
   createStreamGenerationTimer,
   decisionForTimedOutRequest,
@@ -46,33 +50,22 @@ describe("per-key request content mode", () => {
     expect(scoped.capturePayloads?.()).toBe(payloads);
     expect(scoped.captureSessions?.()).toBe(sessions);
   });
-});
 
-describe("session head cache", () => {
-  it("evicts by retained UTF-8 bytes, not only by Session count", () => {
-    const cache = createSessionHeadCache(1_000, 20);
-    cache.set("one", { requestId: "r1", requestJson: "123456789012345" });
-    cache.set("two", { requestId: "r2", requestJson: "abcdefghijklmno" });
-    expect(cache.get("one")).toBeUndefined();
-    expect(cache.get("two")?.requestId).toBe("r2");
-    expect(cache.retainedBytes).toBeLessThanOrEqual(20);
-  });
+  it("keeps global metadata-only as a live hard-off over every key override", () => {
+    let globallyEnabled = true;
+    const scoped = withRequestContentMode(
+      {
+        telemetry: {} as PayloadCaptureDeps["telemetry"],
+        capturePayloads: () => false,
+        captureSessions: () => globallyEnabled,
+      },
+      "payload",
+    );
 
-  it("tracks replacement bytes, touches LRU order, and resets on clear", () => {
-    const cache = createSessionHeadCache(10, 20);
-    cache.set("one", { requestId: "r1", requestJson: "11111111" });
-    cache.set("two", { requestId: "r2", requestJson: "22222222" });
-    expect(cache.retainedBytes).toBe(16);
-    expect(cache.get("one")?.requestId).toBe("r1");
-    cache.set("three", { requestId: "r3", requestJson: "33333333" });
-    expect(cache.get("two")).toBeUndefined();
-    cache.set("one", { requestId: "r1-new", requestJson: "1" });
-    expect(cache.retainedBytes).toBe(9);
-    expect(cache.get("one")?.requestId).toBe("r1-new");
-    cache.clear();
-    expect(cache.retainedBytes).toBe(0);
-    expect(cache.get("one")).toBeUndefined();
-    expect(cache.get("three")).toBeUndefined();
+    expect(scoped.capturePayloads?.()).toBe(true);
+    globallyEnabled = false;
+    expect(scoped.capturePayloads?.()).toBe(false);
+    expect(scoped.captureSessions?.()).toBe(false);
   });
 });
 
@@ -109,47 +102,83 @@ describe("Session queue admission", () => {
     expect(log).toHaveBeenCalledWith("session.capture_limited");
   });
 
-  it("bounds saturated Session metadata by the dynamic cache capacity", async () => {
+  it("drops a queued Session body after metadata-only is enabled", async () => {
+    let task: (() => Promise<void>) | undefined;
+    const writes = {
+      enqueueSession: vi.fn(async (queued: () => Promise<void>) => {
+        task = queued;
+      }),
+    } as unknown as WriteQueue;
+    const upsertSessionRevision = vi.fn();
+    let capture = true;
+    let generation = 0;
+
+    await queueOrPersistSessionRequest(
+      {
+        telemetry: { upsertSessionRevision } as unknown as PayloadCaptureDeps["telemetry"],
+        writes,
+        captureSessions: () => capture,
+        captureGeneration: () => generation,
+      },
+      {
+        requestId: "request-disabled-before-flush",
+        accountId: "account-1",
+        apiKeyId: "key-1",
+        decision: {
+          session: { ref: "session-1", label: "thread-1", source: "x-session-key" },
+        } as unknown as DecisionRecord,
+        requestJson: '{"input":"hello"}',
+        responseId: null,
+        responseJson: null,
+        now: 1,
+      },
+      vi.fn(),
+    );
+
+    capture = false;
+    generation++;
+    await task?.();
+    expect(upsertSessionRevision).not.toHaveBeenCalled();
+  });
+
+  it("uses the persisted head hash instead of retaining the previous request JSON", async () => {
+    const first = splitSessionRequestJson('{"messages":["one"]}');
+    const upsertSessionRevision = vi.fn();
     const telemetry = {
       getSessionByRef: vi.fn(async () => ({
-        revisionCount: Number.MAX_SAFE_INTEGER,
-        storedBytes: 0,
+        headRequestId: "r1",
+        revisionCount: 1,
+        storedBytes: 10,
+        eventHead: {
+          requestId: "r1",
+          eventKey: first.eventKey,
+          eventCount: first.eventCount,
+          eventHash: first.eventHash,
+        },
       })),
-      upsertSessionRevision: vi.fn(),
+      upsertSessionRevision,
     } as unknown as PayloadCaptureDeps["telemetry"];
-    const deps = {
-      telemetry,
-      captureSessions: () => true,
-      captureBodyLimitBytes: 1_024,
-      sessionCacheBytes: 2_048,
-    } satisfies PayloadCaptureDeps;
-    const args = (sessionRef: string) => ({
-      requestId: `request-${sessionRef}`,
-      accountId: "account-1",
-      apiKeyId: "key-1",
-      decision: {
-        session: { ref: sessionRef, label: sessionRef, source: "x-session-key" },
-      } as unknown as DecisionRecord,
-      requestJson: '{"input":"hello"}',
-      responseId: null,
-      responseJson: null,
-      now: 1,
-    });
 
-    for (const sessionRef of ["session-one", "session-two", "session-three"]) {
-      await persistSessionRequest(deps, args(sessionRef), vi.fn());
-    }
+    await persistSessionRequest(
+      { telemetry, captureSessions: () => true },
+      {
+        requestId: "r2",
+        accountId: "account-1",
+        apiKeyId: "key-1",
+        decision: {
+          session: { ref: "session-1", label: "thread-1", source: "x-session-key" },
+        } as unknown as DecisionRecord,
+        requestJson: '{"messages":["one","two"]}',
+        responseId: null,
+        responseJson: null,
+        now: 2,
+      },
+      vi.fn(),
+    );
 
-    const enqueueSession = vi.fn();
-    const queuedDeps = {
-      ...deps,
-      writes: { enqueueSession } as unknown as WriteQueue,
-    };
-    await queueOrPersistSessionRequest(queuedDeps, args("session-one"), vi.fn());
-    await queueOrPersistSessionRequest(queuedDeps, args("session-three"), vi.fn());
-
-    expect(enqueueSession).toHaveBeenCalledTimes(1);
-    expect(enqueueSession).toHaveBeenCalledWith(expect.any(Function), expect.any(Number));
+    expect(upsertSessionRevision).toHaveBeenCalledWith(
+      expect.objectContaining({ retainCount: 1, requestDeltaJson: '["two"]' }),
+    );
   });
 
   it("keeps appending after a Session exceeds the former 64 MiB aggregate cap", async () => {
@@ -1437,6 +1466,30 @@ describe("recordServed — deferred write queue (the three pipeline faces)", () 
     expect(s.payloads[0]?.requestId).toBe("req_1");
   });
 
+  it("drops queued body capture after a live hard-off while retaining telemetry", async () => {
+    const s = sink();
+    const q = createWriteQueue({ telemetry: s.telemetry, log: () => {}, flushIntervalMs: 10_000 });
+    let capture = true;
+    let generation = 0;
+    const d = {
+      telemetry: s.telemetry,
+      writes: q,
+      redact: (x: unknown) => x,
+      now: () => 5000,
+      capturePayloads: () => capture,
+      captureSessions: () => false,
+      captureGeneration: () => generation,
+    } as RecordServedDeps & { captureGeneration: () => number };
+
+    await recordServed(d, args, () => {});
+    capture = false;
+    generation++;
+    await q.flush();
+
+    expect(s.inserted).toHaveLength(1);
+    expect(s.payloads).toHaveLength(0);
+  });
+
   it("writes inline (today's behavior) when no queue is wired", async () => {
     const s = sink();
     const d: RecordServedDeps = {
@@ -1625,13 +1678,12 @@ describe("recordServed — deferred write queue (the three pipeline faces)", () 
           sequence: sequence + 1,
         })),
       ),
-      getSessionRevisionByResponseId: vi.fn(async (_sessionRef: string, responseId: string) => {
+      findSessionRequestIdByResponseId: vi.fn(async (_sessionRef: string, responseId: string) => {
         const revision = revisions.find((item) => item.responseId === responseId);
         if (!revision) return null;
         return {
-          ...revision,
-          responseId: revision.responseId ?? null,
-          sequence: revisions.indexOf(revision) + 1,
+          requestId: revision.requestId,
+          responseBodyStored: revision.responseJson !== null,
         };
       }),
       upsertSessionRevision: vi.fn(async (input: UpsertSessionRevisionInput) => {
@@ -1723,7 +1775,7 @@ describe("recordServed — deferred write queue (the three pipeline faces)", () 
         storedBytes: 1,
       })),
       listSessionRevisions: vi.fn(async () => []),
-      getSessionRevisionByResponseId: vi.fn(async () => null),
+      findSessionRequestIdByResponseId: vi.fn(async () => null),
       upsertSessionRevision: vi.fn(async (input: UpsertSessionRevisionInput) => {
         revisions.push(input);
       }),
@@ -1768,7 +1820,7 @@ describe("recordServed — deferred write queue (the three pipeline faces)", () 
       insert,
       getSessionByRef: vi.fn(async () => null),
       listSessionRevisions: vi.fn(async () => []),
-      getSessionRevisionByResponseId: vi.fn(async () => null),
+      findSessionRequestIdByResponseId: vi.fn(async () => null),
       upsertSessionRevision,
     } as unknown as RecordServedDeps["telemetry"];
     const writes = createWriteQueue({

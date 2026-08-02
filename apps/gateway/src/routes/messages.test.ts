@@ -866,7 +866,7 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     expect(insertPayload).not.toHaveBeenCalled();
   });
 
-  it("per-key payload mode overrides the disabled system setting", async () => {
+  it("global metadata-only mode remains off despite a per-key payload override", async () => {
     const { record, insertPayload } = makeRecord({ capturePayloads: false });
     const { deps } = makeDeps({
       record,
@@ -879,7 +879,7 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(insertPayload).toHaveBeenCalledOnce();
+    expect(insertPayload).not.toHaveBeenCalled();
   });
 
   // ── Native protocol passthrough (#217 C3). When the pipeline reports

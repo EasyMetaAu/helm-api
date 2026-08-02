@@ -3,6 +3,7 @@ import { type DecisionRecord, DecisionRecordSchema } from "@helm/shared";
 import { and, asc, count, desc, eq, gt, gte, inArray, lt, type SQL, sql } from "drizzle-orm";
 import { shapeTelemetryAggregate, shapeTelemetryKeyUsage } from "../aggregate-shape.js";
 import { externalizeImages, type PayloadBlob, rehydrateImages } from "../payload-blobs.js";
+import { decodePayloadTextChunks, iteratePayloadTextChunks } from "../payload-codec.js";
 import type {
   InsertPayloadInput,
   InsertTelemetryInput,
@@ -12,7 +13,10 @@ import type {
   RequestPayloadMeta,
   RequestPayloadPart,
   RequestPayloadPartRecord,
+  SessionContinuationRecord,
+  SessionEventHead,
   SessionRecord,
+  SessionRevisionMetaRecord,
   SessionRevisionPage,
   SessionRevisionPageOptions,
   SessionRevisionRecord,
@@ -28,7 +32,15 @@ import { PERSISTED_SESSION_MAX_REVISIONS } from "../ports.js";
 import { likeContains } from "../sql-like.js";
 import { denormalizedDecisionCost } from "../telemetry-cost.js";
 import type { PgDb } from "./migrate.js";
-import { payloadBlobs, requestPayloads, sessionRevisions, sessions, telemetry } from "./schema.js";
+import {
+  payloadBlobs,
+  requestPayloads,
+  sessionHeadEventHashes,
+  sessionRevisionBodyChunks,
+  sessionRevisions,
+  sessions,
+  telemetry,
+} from "./schema.js";
 
 // Sentinel left in the slimmed text by externalizeImages; we scan for these to
 // know which blobs a stored payload references, so we can pre-fetch them before
@@ -42,6 +54,82 @@ const BLOB_SHA_RE = /helm-blob:sha256:([0-9a-f]{64})/g;
 type PgWriter = Pick<PgDb, "insert">;
 
 type TelemetryRow = typeof telemetry.$inferSelect;
+type SessionRevisionRow = typeof sessionRevisions.$inferSelect;
+type SessionBodyChunkRow = typeof sessionRevisionBodyChunks.$inferSelect;
+type SessionBodyChunkInsert = typeof sessionRevisionBodyChunks.$inferInsert;
+type SessionBodyPart = "request_delta" | "request_envelope" | "response";
+const SESSION_CHUNKS_PER_WRITE = 4;
+const SESSION_PRUNE_MARKER = "__helm_pruning__";
+const PG_PRUNE_BATCH_ROWS = 16;
+const PG_PRUNE_TICK_ROWS = 128;
+const ORPHAN_CHUNK_TTL_MS = 86_400_000;
+
+function resultRows<T>(result: unknown): T[] {
+  if (Array.isArray(result)) return result as T[];
+  if (result && typeof result === "object" && "rows" in result) {
+    const rows = (result as { rows?: unknown }).rows;
+    if (Array.isArray(rows)) return rows as T[];
+  }
+  return [];
+}
+
+function* sessionBodyRows(
+  input: UpsertSessionRevisionInput,
+  parts: readonly SessionBodyPart[],
+  generation: string,
+): Generator<SessionBodyChunkInsert> {
+  const text = {
+    request_delta: input.requestDeltaJson,
+    request_envelope: input.requestEnvelopeJson,
+    response: input.responseJson,
+  } as const;
+  for (const part of parts) {
+    const value = text[part];
+    if (value === null) continue;
+    for (const chunk of iteratePayloadTextChunks(value)) {
+      yield {
+        requestId: input.requestId,
+        generation,
+        part,
+        chunkIndex: chunk.chunkIndex,
+        codec: chunk.codec,
+        rawBytes: chunk.rawBytes,
+        bytes: chunk.bytes,
+        createdAt: input.createdAt.getTime(),
+      };
+    }
+  }
+}
+
+function decodeSessionRevisionRow(
+  row: SessionRevisionRow,
+  chunks: readonly SessionBodyChunkRow[] = [],
+): SessionRevisionRecord {
+  const { bodyBytes: _, requestBodyGeneration: __, responseBodyGeneration: ___, ...revision } = row;
+  const body = (part: SessionBodyPart): string | null => {
+    const selected = chunks
+      .filter(
+        (chunk) =>
+          chunk.part === part &&
+          chunk.generation ===
+            (part === "response" ? row.responseBodyGeneration : row.requestBodyGeneration),
+      )
+      .sort((left, right) => left.chunkIndex - right.chunkIndex);
+    return selected.length === 0 ? null : decodePayloadTextChunks(selected);
+  };
+  const chunkedDelta = body("request_delta");
+  const chunkedEnvelope = body("request_envelope");
+  const chunkedResponse = body("response");
+  return {
+    ...revision,
+    requestDeltaJson:
+      row.requestBodyGeneration === null ? row.requestDeltaJson : (chunkedDelta ?? ""),
+    requestEnvelopeJson:
+      row.requestBodyGeneration === null ? row.requestEnvelopeJson : (chunkedEnvelope ?? ""),
+    responseJson: row.responseBodyGeneration === null ? row.responseJson : chunkedResponse,
+    createdAt: new Date(row.createdAt),
+  };
+}
 
 function boundedSessionPageLimit(options: SessionRevisionPageOptions): number {
   if (!Number.isSafeInteger(options.limit) || options.limit <= 0)
@@ -66,6 +154,56 @@ export class PgTelemetryStore implements TelemetryStore {
     private readonly db: PgDb,
     private readonly genId: () => string = randomUUID,
   ) {}
+
+  private async stageSessionBodyChunks(
+    input: UpsertSessionRevisionInput,
+    parts: readonly SessionBodyPart[],
+  ): Promise<string> {
+    const generation = this.genId();
+    const batch: SessionBodyChunkInsert[] = [];
+    for (const row of sessionBodyRows(input, parts, generation)) {
+      batch.push(row);
+      if (batch.length < SESSION_CHUNKS_PER_WRITE) continue;
+      await this.db.insert(sessionRevisionBodyChunks).values(batch).onConflictDoNothing();
+      batch.length = 0;
+    }
+    if (batch.length > 0)
+      await this.db.insert(sessionRevisionBodyChunks).values(batch).onConflictDoNothing();
+    return generation;
+  }
+
+  private async chunksByRevisions(
+    rows: readonly SessionRevisionRow[],
+  ): Promise<Map<string, SessionBodyChunkRow[]>> {
+    const grouped = new Map<string, SessionBodyChunkRow[]>();
+    const requestIds = rows.map((row) => row.requestId);
+    const generations = rows.flatMap((row) =>
+      [row.requestBodyGeneration, row.responseBodyGeneration].filter(
+        (generation): generation is string => generation !== null,
+      ),
+    );
+    if (requestIds.length === 0 || generations.length === 0) return grouped;
+    const chunks = await this.db
+      .select()
+      .from(sessionRevisionBodyChunks)
+      .where(
+        and(
+          inArray(sessionRevisionBodyChunks.requestId, requestIds),
+          inArray(sessionRevisionBodyChunks.generation, generations),
+        ),
+      )
+      .orderBy(
+        asc(sessionRevisionBodyChunks.requestId),
+        asc(sessionRevisionBodyChunks.part),
+        asc(sessionRevisionBodyChunks.chunkIndex),
+      );
+    for (const row of chunks) {
+      const existing = grouped.get(row.requestId) ?? [];
+      existing.push(row);
+      grouped.set(row.requestId, existing);
+    }
+    return grouped;
+  }
 
   // Build one telemetry row (fresh id + denormalized status/cost). Shared by the
   // single and batch inserts so they can never drift. jsonb stored natively.
@@ -113,105 +251,167 @@ export class PgTelemetryStore implements TelemetryStore {
       input.requestDeltaJson + input.requestEnvelopeJson + (input.responseJson ?? ""),
       "utf8",
     );
-    await this.db.transaction(async (tx) => {
-      await tx
-        .insert(sessions)
-        .values({
-          sessionRef: input.sessionRef,
-          accountId: input.accountId,
-          apiKeyId: input.apiKeyId,
-          source: input.source,
-          externalSessionId: input.externalSessionId,
-          createdAt: at,
-          lastSeenAt: at,
-        })
-        .onConflictDoNothing();
-
-      const lockedSessions = await tx
-        .select({ revisionCount: sessions.revisionCount })
+    let resumedAfterPrune = false;
+    for (;;) {
+      const existingSession = await this.db
+        .select({ headRequestId: sessions.headRequestId })
         .from(sessions)
         .where(eq(sessions.sessionRef, input.sessionRef))
-        .limit(1)
-        .for("update");
-      const lockedSession = lockedSessions[0];
-      if (!lockedSession) throw new Error("session row missing after insert");
-
-      const existing = await tx
+        .limit(1);
+      if (existingSession[0]?.headRequestId === SESSION_PRUNE_MARKER) {
+        await this.finishClaimedSessionPrune(input.sessionRef, Number.MAX_SAFE_INTEGER);
+        resumedAfterPrune = true;
+        continue;
+      }
+      const before = await this.db
         .select({
-          requestId: sessionRevisions.requestId,
           sessionRef: sessionRevisions.sessionRef,
-          responseJson: sessionRevisions.responseJson,
+          responseBodyStored: sql<boolean>`${sessionRevisions.responseJson} IS NOT NULL`,
         })
         .from(sessionRevisions)
         .where(eq(sessionRevisions.requestId, input.requestId))
         .limit(1);
-      if (existing.length > 0) {
-        if (existing[0]?.sessionRef !== input.sessionRef)
-          throw new Error("request session mismatch");
-        const responseBytes =
-          input.responseJson !== null && existing[0]?.responseJson === null
-            ? Buffer.byteLength(input.responseJson, "utf8")
-            : 0;
-        if (responseBytes === 0) return;
+      if (before[0]?.sessionRef !== undefined && before[0].sessionRef !== input.sessionRef)
+        throw new Error("request session mismatch");
+      if (before[0]?.responseBodyStored || (before[0] && input.responseJson === null)) return;
+      const generation = await this.stageSessionBodyChunks(
+        input,
+        before[0]
+          ? ["response"]
+          : input.responseJson === null
+            ? ["request_delta", "request_envelope"]
+            : ["request_delta", "request_envelope", "response"],
+      );
+      const admitted = await this.db.transaction(async (tx) => {
         await tx
+          .insert(sessions)
+          .values({
+            sessionRef: input.sessionRef,
+            accountId: input.accountId,
+            apiKeyId: input.apiKeyId,
+            source: input.source,
+            externalSessionId: input.externalSessionId,
+            createdAt: at,
+            lastSeenAt: at,
+          })
+          .onConflictDoNothing();
+        const lockedSession = (
+          await tx
+            .select({
+              revisionCount: sessions.revisionCount,
+              headRequestId: sessions.headRequestId,
+            })
+            .from(sessions)
+            .where(eq(sessions.sessionRef, input.sessionRef))
+            .limit(1)
+            .for("update")
+        )[0];
+        if (!lockedSession) throw new Error("session row missing after insert");
+        if (lockedSession.headRequestId === SESSION_PRUNE_MARKER) return false;
+
+        const existing = await tx
+          .select({
+            requestId: sessionRevisions.requestId,
+            sessionRef: sessionRevisions.sessionRef,
+            responseBodyStored: sql<boolean>`${sessionRevisions.responseJson} IS NOT NULL`,
+          })
+          .from(sessionRevisions)
+          .where(eq(sessionRevisions.requestId, input.requestId))
+          .limit(1);
+        if (existing.length > 0) {
+          if (existing[0]?.sessionRef !== input.sessionRef)
+            throw new Error("request session mismatch");
+          const responseBytes =
+            input.responseJson !== null && !existing[0]?.responseBodyStored
+              ? Buffer.byteLength(input.responseJson, "utf8")
+              : 0;
+          if (responseBytes === 0) return true;
+          await tx
+            .update(sessions)
+            .set({
+              storedBytes: sql`${sessions.storedBytes} + ${responseBytes}`,
+              lastSeenAt: sql`GREATEST(${sessions.lastSeenAt}, ${at})`,
+            })
+            .where(eq(sessions.sessionRef, input.sessionRef));
+          await tx
+            .update(sessionRevisions)
+            .set({
+              responseId: input.responseId ?? null,
+              responseJson: "",
+              bodyBytes: storedBytes,
+              responseBodyGeneration: generation,
+              fidelity: input.fidelity,
+            })
+            .where(eq(sessionRevisions.requestId, input.requestId));
+          return true;
+        }
+
+        const parentRequestId = resumedAfterPrune ? null : input.parentRequestId;
+        if (parentRequestId !== null) {
+          const parent = await tx
+            .select({ sessionRef: sessionRevisions.sessionRef })
+            .from(sessionRevisions)
+            .where(eq(sessionRevisions.requestId, parentRequestId))
+            .limit(1);
+          if (!parent[0] || parent[0].sessionRef !== input.sessionRef)
+            throw new Error("session parent mismatch");
+        }
+        const updated = await tx
           .update(sessions)
           .set({
-            storedBytes: sql`${sessions.storedBytes} + ${responseBytes}`,
+            headRequestId: input.requestId,
+            revisionCount: sql`${sessions.revisionCount} + 1`,
+            storedBytes: sql`${sessions.storedBytes} + ${storedBytes}`,
             lastSeenAt: sql`GREATEST(${sessions.lastSeenAt}, ${at})`,
           })
-          .where(eq(sessions.sessionRef, input.sessionRef));
-        await tx
-          .update(sessionRevisions)
-          .set({
-            responseId: input.responseId ?? null,
-            responseJson: input.responseJson,
-            fidelity: input.fidelity,
-          })
-          .where(eq(sessionRevisions.requestId, input.requestId));
-        return;
-      }
-
-      if (input.parentRequestId !== null) {
-        const parent = await tx
-          .select({ sessionRef: sessionRevisions.sessionRef })
-          .from(sessionRevisions)
-          .where(eq(sessionRevisions.requestId, input.parentRequestId))
-          .limit(1);
-        if (!parent[0] || parent[0].sessionRef !== input.sessionRef)
-          throw new Error("session parent mismatch");
-      }
-
-      const updated = await tx
-        .update(sessions)
-        .set({
-          headRequestId: input.requestId,
-          revisionCount: sql`${sessions.revisionCount} + 1`,
-          storedBytes: sql`${sessions.storedBytes} + ${storedBytes}`,
-          lastSeenAt: sql`GREATEST(${sessions.lastSeenAt}, ${at})`,
-        })
-        .where(
-          and(
-            eq(sessions.sessionRef, input.sessionRef),
-            lt(sessions.revisionCount, PERSISTED_SESSION_MAX_REVISIONS),
-          ),
-        )
-        .returning();
-      const sequence = updated[0]?.revisionCount;
-      if (sequence === undefined) throw new Error("session row missing after insert");
-      await tx.insert(sessionRevisions).values({
-        requestId: input.requestId,
-        sessionRef: input.sessionRef,
-        sequence,
-        parentRequestId: input.parentRequestId,
-        retainCount: input.retainCount,
-        requestDeltaJson: input.requestDeltaJson,
-        requestEnvelopeJson: input.requestEnvelopeJson,
-        responseId: input.responseId ?? null,
-        responseJson: input.responseJson,
-        fidelity: input.fidelity,
-        createdAt: at,
+          .where(
+            and(
+              eq(sessions.sessionRef, input.sessionRef),
+              lt(sessions.revisionCount, PERSISTED_SESSION_MAX_REVISIONS),
+            ),
+          )
+          .returning();
+        const sequence = updated[0]?.revisionCount;
+        if (sequence === undefined) throw new Error("session row missing after insert");
+        await tx.insert(sessionRevisions).values({
+          requestId: input.requestId,
+          sessionRef: input.sessionRef,
+          sequence,
+          parentRequestId,
+          retainCount: input.retainCount,
+          requestDeltaJson: "",
+          requestEnvelopeJson: "",
+          bodyBytes: storedBytes,
+          requestBodyGeneration: generation,
+          responseBodyGeneration: input.responseJson === null ? null : generation,
+          responseId: input.responseId ?? null,
+          responseJson: input.responseJson === null ? null : "",
+          fidelity: input.fidelity,
+          createdAt: at,
+        });
+        if (input.eventHead) {
+          await tx
+            .insert(sessionHeadEventHashes)
+            .values({
+              sessionRef: input.sessionRef,
+              requestId: input.requestId,
+              ...input.eventHead,
+            })
+            .onConflictDoUpdate({
+              target: sessionHeadEventHashes.sessionRef,
+              set: { requestId: input.requestId, ...input.eventHead },
+            });
+        } else {
+          await tx
+            .delete(sessionHeadEventHashes)
+            .where(eq(sessionHeadEventHashes.sessionRef, input.sessionRef));
+        }
+        return true;
       });
-    });
+      if (admitted) return;
+      await this.finishClaimedSessionPrune(input.sessionRef, Number.MAX_SAFE_INTEGER);
+      resumedAfterPrune = true;
+    }
   }
 
   async getSessionByRef(sessionRef: string): Promise<SessionRecord | null> {
@@ -221,6 +421,14 @@ export class PgTelemetryStore implements TelemetryStore {
       .where(eq(sessions.sessionRef, sessionRef))
       .limit(1);
     const row = rows[0];
+    const heads = row
+      ? await this.db
+          .select()
+          .from(sessionHeadEventHashes)
+          .where(eq(sessionHeadEventHashes.sessionRef, sessionRef))
+          .limit(1)
+      : [];
+    const head = heads[0];
     return row
       ? {
           sessionRef: row.sessionRef,
@@ -233,6 +441,15 @@ export class PgTelemetryStore implements TelemetryStore {
           headRequestId: row.headRequestId,
           revisionCount: row.revisionCount,
           storedBytes: row.storedBytes,
+          eventHead:
+            head && head.requestId === row.headRequestId
+              ? {
+                  requestId: head.requestId,
+                  eventKey: head.eventKey as SessionEventHead["eventKey"],
+                  eventCount: head.eventCount,
+                  eventHash: head.eventHash,
+                }
+              : null,
         }
       : null;
   }
@@ -254,6 +471,7 @@ export class PgTelemetryStore implements TelemetryStore {
       headRequestId: row.headRequestId,
       revisionCount: row.revisionCount,
       storedBytes: row.storedBytes,
+      eventHead: null,
     }));
   }
 
@@ -263,10 +481,8 @@ export class PgTelemetryStore implements TelemetryStore {
       .from(sessionRevisions)
       .where(eq(sessionRevisions.sessionRef, sessionRef))
       .orderBy(asc(sessionRevisions.sequence));
-    return rows.map((row) => ({
-      ...row,
-      createdAt: new Date(row.createdAt),
-    }));
+    const chunks = await this.chunksByRevisions(rows);
+    return rows.map((row) => decodeSessionRevisionRow(row, chunks.get(row.requestId)));
   }
 
   async listSessionRevisionsPage(
@@ -279,10 +495,13 @@ export class PgTelemetryStore implements TelemetryStore {
       octet_length(${sessionRevisions.sessionRef}) +
       octet_length(${sessionRevisions.requestId}) +
       octet_length(coalesce(${sessionRevisions.parentRequestId}, '')) +
-      octet_length(${sessionRevisions.requestDeltaJson}) +
-      octet_length(${sessionRevisions.requestEnvelopeJson}) +
+      coalesce(
+        ${sessionRevisions.bodyBytes},
+        octet_length(${sessionRevisions.requestDeltaJson}) +
+        octet_length(${sessionRevisions.requestEnvelopeJson}) +
+        octet_length(coalesce(${sessionRevisions.responseJson}, ''))
+      ) +
       octet_length(coalesce(${sessionRevisions.responseId}, '')) +
-      octet_length(coalesce(${sessionRevisions.responseJson}, '')) +
       octet_length(${sessionRevisions.fidelity}) + 64
     `;
     const metadata = await this.db
@@ -317,19 +536,23 @@ export class PgTelemetryStore implements TelemetryStore {
         ),
       )
       .orderBy(asc(sessionRevisions.sequence));
+    const chunks = await this.chunksByRevisions(rows);
     return {
-      revisions: rows.map((row) => ({ ...row, createdAt: new Date(row.createdAt) })),
+      revisions: rows.map((row) => decodeSessionRevisionRow(row, chunks.get(row.requestId))),
       nextSequence: metadata.length > selected.length ? (selected.at(-1) ?? null) : null,
       limited: false,
     };
   }
 
-  async getSessionRevisionByResponseId(
+  async findSessionRequestIdByResponseId(
     sessionRef: string,
     responseId: string,
-  ): Promise<SessionRevisionRecord | null> {
+  ): Promise<SessionContinuationRecord | null> {
     const rows = await this.db
-      .select()
+      .select({
+        requestId: sessionRevisions.requestId,
+        responseBodyStored: sql<boolean>`${sessionRevisions.responseJson} IS NOT NULL`,
+      })
       .from(sessionRevisions)
       .where(
         and(
@@ -339,15 +562,144 @@ export class PgTelemetryStore implements TelemetryStore {
       )
       .limit(1);
     const row = rows[0];
+    return row ?? null;
+  }
+
+  async getSessionRevisionMeta(requestId: string): Promise<SessionRevisionMetaRecord | null> {
+    const rows = await this.db
+      .select({
+        requestId: sessionRevisions.requestId,
+        sessionRef: sessionRevisions.sessionRef,
+        responseBodyStored: sql<boolean>`${sessionRevisions.responseJson} IS NOT NULL`,
+        fidelity: sessionRevisions.fidelity,
+        createdAt: sessionRevisions.createdAt,
+      })
+      .from(sessionRevisions)
+      .where(eq(sessionRevisions.requestId, requestId))
+      .limit(1);
+    const row = rows[0];
     return row ? { ...row, createdAt: new Date(row.createdAt) } : null;
   }
 
+  private async finishClaimedSessionPrune(
+    sessionRef: string,
+    maxRows: number,
+  ): Promise<{ workRows: number; deletedSession: number }> {
+    let workRows = 0;
+    while (workRows < maxRows) {
+      const limit = Math.min(PG_PRUNE_BATCH_ROWS, maxRows - workRows);
+      const deletedChunks = resultRows(
+        await this.db.execute(sql`
+          WITH doomed AS (
+            SELECT chunks.ctid
+            FROM session_revision_body_chunks AS chunks
+            JOIN session_revisions AS revisions ON revisions.request_id = chunks.request_id
+            WHERE revisions.session_ref = ${sessionRef}
+            ORDER BY revisions.sequence, chunks.part, chunks.chunk_index
+            LIMIT ${limit}
+            FOR UPDATE OF chunks SKIP LOCKED
+          )
+          DELETE FROM session_revision_body_chunks AS chunks
+          USING doomed WHERE chunks.ctid = doomed.ctid
+          RETURNING 1
+        `),
+      ).length;
+      workRows += deletedChunks;
+      if (deletedChunks === limit) continue;
+      const remaining = Math.min(PG_PRUNE_BATCH_ROWS, maxRows - workRows);
+      if (remaining <= 0) break;
+      const deletedRevisions = resultRows(
+        await this.db.execute(sql`
+          WITH doomed AS (
+            SELECT revisions.request_id
+            FROM session_revisions AS revisions
+            WHERE revisions.session_ref = ${sessionRef}
+              AND NOT EXISTS (
+                SELECT 1 FROM session_revision_body_chunks AS chunks
+                WHERE chunks.request_id = revisions.request_id
+              )
+            ORDER BY revisions.sequence, revisions.request_id
+            LIMIT ${remaining}
+            FOR UPDATE OF revisions SKIP LOCKED
+          )
+          DELETE FROM session_revisions AS revisions
+          USING doomed WHERE revisions.request_id = doomed.request_id
+          RETURNING 1
+        `),
+      ).length;
+      workRows += deletedRevisions;
+      if (deletedChunks === 0 && deletedRevisions === 0) break;
+    }
+    if (workRows >= maxRows) return { workRows, deletedSession: 0 };
+    const deletedSession = resultRows(
+      await this.db.execute(sql`
+        DELETE FROM sessions
+        WHERE session_ref = ${sessionRef}
+          AND head_request_id = ${SESSION_PRUNE_MARKER}
+          AND NOT EXISTS (
+            SELECT 1 FROM session_revisions
+            WHERE session_revisions.session_ref = sessions.session_ref
+          )
+        RETURNING 1
+      `),
+    ).length;
+    return { workRows, deletedSession };
+  }
+
   async pruneInactiveSessions(olderThanMs: number): Promise<number> {
-    const rows = await this.db
-      .delete(sessions)
-      .where(lt(sessions.lastSeenAt, olderThanMs))
-      .returning();
-    return rows.length;
+    let budget = PG_PRUNE_TICK_ROWS;
+    let deletedSessions = 0;
+    while (budget > 0) {
+      const sessionRef = await this.db.transaction(async (tx) => {
+        const candidates = await tx.execute(sql`
+          SELECT session_ref
+          FROM sessions
+          WHERE last_seen_at < ${olderThanMs}
+          ORDER BY CASE WHEN head_request_id = ${SESSION_PRUNE_MARKER} THEN 0 ELSE 1 END,
+                   last_seen_at, session_ref
+          LIMIT 1
+          FOR UPDATE SKIP LOCKED
+        `);
+        const candidate = resultRows<{ session_ref: string }>(candidates)[0]?.session_ref;
+        if (!candidate) return null;
+        await tx.execute(sql`
+          UPDATE sessions SET head_request_id = ${SESSION_PRUNE_MARKER}
+          WHERE session_ref = ${candidate} AND last_seen_at < ${olderThanMs}
+        `);
+        return candidate;
+      });
+      if (!sessionRef) break;
+      const result = await this.finishClaimedSessionPrune(sessionRef, budget);
+      budget -= result.workRows;
+      deletedSessions += result.deletedSession;
+      if (result.workRows === 0 && result.deletedSession === 0) break;
+    }
+    if (budget > 0) {
+      const limit = Math.min(PG_PRUNE_BATCH_ROWS, budget);
+      await this.db.execute(sql`
+        WITH doomed AS (
+          SELECT chunks.ctid
+          FROM session_revision_body_chunks AS chunks
+          WHERE chunks.created_at < ${Date.now() - ORPHAN_CHUNK_TTL_MS}
+            AND NOT EXISTS (
+              SELECT 1 FROM session_revisions AS revisions
+              WHERE revisions.request_id = chunks.request_id
+                AND (
+                  (chunks.part = 'response' AND revisions.response_body_generation = chunks.generation)
+                  OR
+                  (chunks.part <> 'response' AND revisions.request_body_generation = chunks.generation)
+                )
+            )
+          ORDER BY chunks.created_at, chunks.request_id, chunks.generation,
+                   chunks.part, chunks.chunk_index
+          LIMIT ${limit}
+          FOR UPDATE OF chunks SKIP LOCKED
+        )
+        DELETE FROM session_revision_body_chunks AS chunks
+        USING doomed WHERE chunks.ctid = doomed.ctid
+      `);
+    }
+    return deletedSessions;
   }
 
   async queryRecent(limit: number): Promise<RecentDecisionRecord[]> {

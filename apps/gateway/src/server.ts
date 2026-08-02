@@ -112,6 +112,8 @@ import {
   runObserverJob,
   runReflectorJob,
   runtimeMemoryBudget,
+  runtimeMemoryCoordinator,
+  runtimeResponseWorkAdmission,
   type StoreSet,
   saveRuntimeSettings,
   settleBudget,
@@ -235,6 +237,7 @@ import {
   withPausedActivities,
 } from "./runtime/maintenance-gate.js";
 import { type BodyMemoryAdmission, createBodyMemoryAdmission } from "./runtime/memory-admission.js";
+import { createRuntimeResourcePressureGate } from "./runtime/resource-pressure.js";
 import { startRuntimeStatsLogger } from "./runtime/runtime-stats.js";
 import {
   markServingAccount,
@@ -1839,20 +1842,23 @@ export async function buildServer(
   const memoryBudget = runtimeMemoryBudget();
   const maintenanceActivityGate = createMaintenanceActivityGate();
   const backgroundTasks = createTrackedBackgroundTasks();
+  const memoryCoordinator = runtimeMemoryCoordinator();
   const requestBodyMemoryAdmission = createBodyMemoryAdmission({
     activeRequestBytes: memoryBudget.activeRequestBytes,
     jsonAmplification: memoryBudget.jsonAmplification,
     minRequestChargeBytes: memoryBudget.minRequestChargeBytes,
+    coordinator: memoryCoordinator,
   });
   const websocketIngressAdmission = createBodyMemoryAdmission({
     activeRequestBytes: memoryBudget.websocketIngressBytes,
     jsonAmplification: 1,
     minRequestChargeBytes: 1,
+    coordinator: memoryCoordinator,
   });
   logger.log("info", "runtime.memory_budget", {
     heap_limit_bytes: memoryBudget.heapLimitBytes,
     process_limit_bytes: memoryBudget.processLimitBytes,
-    request_admission_mode: "unlimited",
+    request_admission_mode: "dynamic_safe_headroom",
     write_queue_bytes: memoryBudget.writeQueueBytes,
     session_cache_bytes: memoryBudget.sessionCacheBytes,
     response_capture_bytes: memoryBudget.responseCaptureBytes,
@@ -2015,6 +2021,7 @@ export async function buildServer(
   let settings = await loadRuntimeSettings(store.config, config, (lvl, msg, fields) =>
     logger.log(lvl, msg, fields),
   );
+  let captureGeneration = 0;
   logger.setLevel?.(settings.log_level);
   // A MUTABLE copy of the rate-limit config: the limiter reads `.enabled` and
   // `.default` fresh on every check(), so flipping the master switch OR retuning
@@ -2033,11 +2040,20 @@ export async function buildServer(
   let vacuumScheduler: ReturnType<typeof startCleanupScheduler> | null = null;
   let signalScheduler: ReturnType<typeof startSignalScheduler> | null = null;
   let memoryWorker: ReturnType<typeof startMemoryWorker> | null = null;
+  const resourcePressure = createRuntimeResourcePressureGate((message, fields) =>
+    logger.log("info", message, fields),
+  );
   // Apply a new settings object live: re-bind `settings`, push the log level into
   // the logger, flip the rate-limit master switch, and retune the system-default
   // quota. Cleanup cadence is also rescheduled live so the admin setting is not
   // restart-only. Called by the admin settings route after it validates + persists.
   const applySettings = (next: RuntimeSettings): void => {
+    if (
+      settings.capture_payloads !== next.capture_payloads ||
+      settings.capture_sessions !== next.capture_sessions
+    ) {
+      captureGeneration++;
+    }
     settings = next;
     logger.setLevel?.(next.log_level);
     rateLimitConfig.enabled = next.rate_limit_enabled;
@@ -2074,7 +2090,9 @@ export async function buildServer(
   };
   const runCleanupPassNow = (trigger: "scheduled" | "manual") =>
     maintenanceQueue.run(() => executeCleanupPass(trigger));
-  const executeVacuum = async (options: { httpAlreadyPaused?: boolean } = {}) => {
+  const executeVacuum = async (
+    options: { httpAlreadyPaused?: boolean; shouldProceed?: () => Promise<boolean> } = {},
+  ) => {
     const activities: PausableActivity[] = [
       ...(options.httpAlreadyPaused ? [] : [maintenanceActivityGate]),
       {
@@ -2095,18 +2113,20 @@ export async function buildServer(
       backgroundTasks,
       { pauseAndWait: writeQueue.pauseAndFlush, resume: writeQueue.resume },
     ];
-    await withPausedActivities(
+    return withPausedActivities(
       activities,
       async () => {
         clearSessionCaptureCache(telemetry);
+        if (options.shouldProceed && !(await options.shouldProceed())) return false;
         await store.vacuum();
+        return true;
       },
       { pauseTimeoutMs: maintenanceDrainTimeoutMs(config.runtime.request_timeout_ms) },
     );
   };
-  const runVacuumNow = () => {
+  const runVacuumNow = async (): Promise<void> => {
     maintenanceActivityGate.releaseCurrent();
-    return maintenanceQueue.run(executeVacuum);
+    await maintenanceQueue.run(executeVacuum);
   };
   // Agentic Signals (docs/02). The collector consumes ALREADY-persisted telemetry
   // and writes aggregated, REDACTED signals in the background. The optional
@@ -3408,6 +3428,7 @@ export async function buildServer(
     // retention is owned by the scheduled cleanup runner, not the capture path.
     capturePayloads: () => settings.capture_payloads,
     captureSessions: () => settings.capture_sessions,
+    captureGeneration: () => captureGeneration,
     costOf,
     // Per-key usage budgets (docs/06): the pre-route gate (degrade/reject) + the
     // post-served settle, threaded from the composition root.
@@ -3524,6 +3545,7 @@ export async function buildServer(
       rules: ruleStore,
       keyStore,
       telemetry,
+      responseWorkAdmission: runtimeResponseWorkAdmission(),
       runInBackground: backgroundTasks.run,
       // Data cleanup / retention / archival surface (admin "Data cleanup").
       cleanup: {
@@ -3771,6 +3793,7 @@ export async function buildServer(
       now: () => Date.now(),
       capturePayloads: () => settings.capture_payloads,
       captureSessions: () => settings.capture_sessions,
+      captureGeneration: () => captureGeneration,
     },
   } as Parameters<typeof registerMessagesRoute>[1] & { rateLimiter: RateLimiterPort });
 
@@ -3978,6 +4001,7 @@ export async function buildServer(
       now: () => Date.now(),
       capturePayloads: () => settings.capture_payloads,
       captureSessions: () => settings.capture_sessions,
+      captureGeneration: () => captureGeneration,
       costOf,
     },
   } as Parameters<typeof registerResponsesRoute>[1] & { rateLimiter: RateLimiterPort });
@@ -4141,6 +4165,7 @@ export async function buildServer(
       now: () => Date.now(),
       capturePayloads: () => settings.capture_payloads,
       captureSessions: () => settings.capture_sessions,
+      captureGeneration: () => captureGeneration,
     },
   } as Parameters<typeof registerGeminiRoute>[1] & { rateLimiter: RateLimiterPort });
 
@@ -4223,6 +4248,7 @@ export async function buildServer(
       now: () => Date.now(),
       capturePayloads: () => settings.capture_payloads,
       captureSessions: () => settings.capture_sessions,
+      captureGeneration: () => captureGeneration,
     },
   });
 
@@ -4246,6 +4272,7 @@ export async function buildServer(
       now: () => Date.now(),
       capturePayloads: () => settings.capture_payloads,
       captureSessions: () => settings.capture_sessions,
+      captureGeneration: () => captureGeneration,
     },
   });
 
@@ -4261,6 +4288,7 @@ export async function buildServer(
       collector: signalCollector,
       intervalMs: Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : 60_000,
       now: () => Date.now(),
+      shouldRun: resourcePressure.shouldRun,
       log: (level, msg, fields) => logger.log(level, msg, fields),
     });
   }
@@ -4308,6 +4336,7 @@ export async function buildServer(
       maxDrainMs: memoryWorkerMaxDrainMs,
       yieldBetweenBatches: () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
       now: () => Date.now(),
+      shouldRun: resourcePressure.shouldRun,
       log: memoryLog,
       runObserver: (job) => runObserverJob(job, observerDeps),
       runReflector: (job) => runReflectorJob(job, reflectorDeps),
@@ -4381,7 +4410,10 @@ export async function buildServer(
       intervalMs: hours * 3_600_000,
       runTick: async () => {
         if (!settings.cleanup_enabled) return; // live master switch
-        await runCleanupPassNow("scheduled");
+        await maintenanceQueue.run(async () => {
+          if (!(await resourcePressure.shouldRunHeavy())) return;
+          await executeCleanupPass("scheduled");
+        });
       },
       log: (level, msg, fields) => logger.log(level, msg, fields),
     });
@@ -4400,8 +4432,9 @@ export async function buildServer(
       vacuumScheduler = startCleanupScheduler({
         intervalMs: AUTO_VACUUM_CHECK_INTERVAL_MS,
         runTick: async () => {
-          await maintenanceQueue.run(() =>
-            autoVacuum.run(
+          await maintenanceQueue.run(async () => {
+            if (!(await resourcePressure.shouldRunHeavy())) return;
+            await autoVacuum.run(
               () => {
                 const now = new Date();
                 return {
@@ -4418,15 +4451,19 @@ export async function buildServer(
                 }
                 try {
                   logger.log("info", "vacuum.auto_start", { hour: settings.vacuum_hour });
-                  await executeVacuum({ httpAlreadyPaused: true });
+                  const completed = await executeVacuum({
+                    httpAlreadyPaused: true,
+                    shouldProceed: resourcePressure.shouldRunHeavy,
+                  });
+                  if (!completed) return false;
                   logger.log("info", "vacuum.auto_done", {});
                   return true;
                 } finally {
                   maintenanceActivityGate.resume();
                 }
               },
-            ),
-          );
+            );
+          });
         },
         log: (level, msg, fields) => logger.log(level, msg, fields),
       });

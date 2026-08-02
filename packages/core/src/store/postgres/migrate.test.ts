@@ -135,11 +135,29 @@ describe("runPgMigrations — per-migration atomicity", () => {
         "retain_count",
         "request_delta_json",
         "request_envelope_json",
+        "body_bytes",
+        "request_body_generation",
+        "response_body_generation",
         "response_id",
         "response_json",
         "fidelity",
       ]),
     );
+    const sessionStorageTables = (await db.execute(
+      sql.raw(`
+        SELECT table_name
+          FROM information_schema.tables
+         WHERE table_name IN (
+           'session_head_event_hashes',
+           'session_revision_body_chunks'
+         )
+         ORDER BY table_name
+      `),
+    )) as { rows: Array<{ table_name: string }> };
+    expect(sessionStorageTables.rows.map((row) => row.table_name)).toEqual([
+      "session_head_event_hashes",
+      "session_revision_body_chunks",
+    ]);
     await db.execute(
       sql.raw(`
         INSERT INTO sessions
@@ -157,6 +175,35 @@ describe("runPgMigrations — per-migration atomicity", () => {
         `),
       ),
     ).rejects.toThrow();
+    await db.execute(
+      sql.raw(`
+        INSERT INTO session_revisions
+          (request_id, session_ref, sequence, retain_count, request_delta_json,
+           request_envelope_json, fidelity, created_at)
+        VALUES ('r-valid', 's-check', 1, 0, '[]', '{}', 'semantic', 1)
+      `),
+    );
+    await db.execute(
+      sql.raw(`
+        INSERT INTO session_revision_body_chunks
+          (request_id, generation, part, chunk_index, codec, raw_bytes, bytes, created_at)
+        VALUES ('r-valid', 'g1', 'request_delta', 0, 'raw', 2, decode('7b7d', 'hex'), 1)
+      `),
+    );
+    await expect(
+      db.execute(
+        sql.raw(`
+          INSERT INTO session_revision_body_chunks
+            (request_id, generation, part, chunk_index, codec, raw_bytes, bytes, created_at)
+          VALUES ('r-valid', 'g1', 'invalid', 1, 'raw', 2, decode('7b7d', 'hex'), 1)
+        `),
+      ),
+    ).rejects.toThrow();
+    await db.execute(sql.raw("DELETE FROM session_revisions WHERE request_id = 'r-valid'"));
+    const chunkCount = (await db.execute(
+      sql.raw("SELECT COUNT(*)::int AS count FROM session_revision_body_chunks"),
+    )) as { rows: Array<{ count: number }> };
+    expect(chunkCount.rows[0]?.count).toBe(1);
     await db.$close();
   });
 
@@ -340,6 +387,97 @@ describe("runPgMigrations — per-migration atomicity", () => {
       sql.raw("SELECT request_content_mode FROM api_keys WHERE key_id = 'legacy'"),
     )) as { rows: Array<{ request_content_mode: string | null }> };
     expect(row.rows[0]?.request_content_mode).toBeNull();
+    await db.$close();
+  });
+
+  it("v44 adds empty chunk tables without scanning legacy Session bodies", async () => {
+    const client = new PGlite();
+    const db = Object.assign(drizzlePglite(client), { $close: () => client.close() });
+    await db.execute(
+      sql.raw("CREATE TABLE _migrations (version INTEGER PRIMARY KEY, applied_at BIGINT NOT NULL)"),
+    );
+    await db.execute(
+      sql.raw(`
+        CREATE TABLE sessions (
+          session_ref TEXT PRIMARY KEY,
+          account_id TEXT NOT NULL,
+          api_key_id TEXT NOT NULL,
+          source TEXT NOT NULL,
+          external_session_id TEXT NOT NULL,
+          head_request_id TEXT,
+          revision_count INTEGER NOT NULL DEFAULT 0,
+          stored_bytes BIGINT NOT NULL DEFAULT 0,
+          created_at BIGINT NOT NULL,
+          last_seen_at BIGINT NOT NULL
+        )
+      `),
+    );
+    await db.execute(
+      sql.raw(`
+        CREATE TABLE session_revisions (
+          request_id TEXT PRIMARY KEY,
+          session_ref TEXT NOT NULL REFERENCES sessions(session_ref) ON DELETE CASCADE,
+          sequence INTEGER NOT NULL,
+          parent_request_id TEXT,
+          retain_count INTEGER NOT NULL,
+          request_delta_json TEXT NOT NULL,
+          request_envelope_json TEXT NOT NULL,
+          response_id TEXT,
+          response_json TEXT,
+          fidelity TEXT NOT NULL,
+          created_at BIGINT NOT NULL
+        )
+      `),
+    );
+    await db.execute(
+      sql.raw(`
+        INSERT INTO sessions
+          (session_ref, account_id, api_key_id, source, external_session_id, created_at, last_seen_at)
+        VALUES ('s1', 'a1', 'k1', 'test', 'external', 1, 1)
+      `),
+    );
+    await db.execute(
+      sql.raw(`
+        INSERT INTO session_revisions
+          (request_id, session_ref, sequence, retain_count, request_delta_json,
+           request_envelope_json, response_json, fidelity, created_at)
+        VALUES ('r1', 's1', 1, 0, '["legacy"]', '{"model":"x"}', '{"ok":true}', 'semantic', 1)
+      `),
+    );
+    for (let version = 1; version <= 43; version++) {
+      await db.execute(
+        sql.raw(`INSERT INTO _migrations (version, applied_at) VALUES (${version}, 1000)`),
+      );
+    }
+
+    await expect(runPgMigrations(db)).resolves.toBeUndefined();
+
+    const legacy = (await db.execute(
+      sql.raw(`
+        SELECT request_delta_json, request_envelope_json, response_json, body_bytes
+        FROM session_revisions WHERE request_id = 'r1'
+      `),
+    )) as {
+      rows: Array<{
+        request_delta_json: string;
+        request_envelope_json: string;
+        response_json: string;
+        body_bytes: number | null;
+      }>;
+    };
+    expect(legacy.rows[0]).toEqual({
+      request_delta_json: '["legacy"]',
+      request_envelope_json: '{"model":"x"}',
+      response_json: '{"ok":true}',
+      body_bytes: null,
+    });
+    const counts = (await db.execute(
+      sql.raw(`
+        SELECT
+          (SELECT COUNT(*)::int FROM session_revision_body_chunks) AS chunks
+      `),
+    )) as { rows: Array<{ chunks: number }> };
+    expect(counts.rows[0]).toEqual({ chunks: 0 });
     await db.$close();
   });
 

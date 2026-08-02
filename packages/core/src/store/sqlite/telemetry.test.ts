@@ -110,7 +110,7 @@ describe("SqliteTelemetryStore", () => {
     db.$sqlite.close();
   });
 
-  it("stores session bodies as gzip BLOBs and still reads legacy TEXT", async () => {
+  it("stores new session bodies in bounded chunks and still reads legacy TEXT", async () => {
     const db = createSqliteDb(":memory:");
     const store = new SqliteTelemetryStore(db);
     const requestDeltaJson = JSON.stringify(["event ".repeat(2_000)]);
@@ -145,13 +145,24 @@ describe("SqliteTelemetryStore", () => {
              FROM session_revisions WHERE request_id = 'r1'`,
         )
         .get(),
-    ).toEqual({ delta: "blob", envelope: "blob", response: "blob" });
+    ).toEqual({ delta: "text", envelope: "text", response: "text" });
+    const chunks = db.$sqlite
+      .prepare(
+        "SELECT part, chunk_index AS chunkIndex, codec, raw_bytes AS rawBytes, length(bytes) AS storedBytes FROM session_revision_body_chunks WHERE request_id = 'r1' ORDER BY part, chunk_index",
+      )
+      .all() as Array<{
+      part: string;
+      chunkIndex: number;
+      codec: string;
+      rawBytes: number;
+      storedBytes: number;
+    }>;
+    expect(chunks.length).toBeGreaterThanOrEqual(3);
+    expect(chunks.every((chunk) => chunk.rawBytes <= 256 * 1024)).toBe(true);
+    expect(chunks.every((chunk) => chunk.storedBytes <= chunk.rawBytes)).toBe(true);
     expect(await store.listSessionRevisions("s1")).toEqual([
       expect.objectContaining({ requestDeltaJson, requestEnvelopeJson, responseJson }),
     ]);
-    expect(await store.getSessionRevisionByResponseId("s1", "resp_1")).toEqual(
-      expect.objectContaining({ requestDeltaJson, requestEnvelopeJson, responseJson }),
-    );
     expect((await store.getSessionByRef("s1"))?.storedBytes).toBe(
       Buffer.byteLength(requestDeltaJson + requestEnvelopeJson + responseJson, "utf8"),
     );
@@ -166,9 +177,30 @@ describe("SqliteTelemetryStore", () => {
       limited: false,
     });
 
+    db.$sqlite
+      .prepare(
+        `UPDATE session_revisions
+            SET request_delta_json = x'1f8b00',
+                request_envelope_json = x'1f8b00',
+                response_json = x'1f8b00'
+          WHERE request_id = 'r1'`,
+      )
+      .run();
+    await expect(store.findSessionRequestIdByResponseId("s1", "resp_1")).resolves.toEqual({
+      requestId: "r1",
+      responseBodyStored: true,
+    });
+
     const legacy = '["legacy text"]';
     db.$sqlite
-      .prepare("UPDATE session_revisions SET request_delta_json = ? WHERE request_id = 'r1'")
+      .prepare(
+        "DELETE FROM session_revision_body_chunks WHERE request_id = 'r1' AND part = 'request_delta'",
+      )
+      .run();
+    db.$sqlite
+      .prepare(
+        "UPDATE session_revisions SET request_delta_json = ?, request_body_generation = NULL WHERE request_id = 'r1'",
+      )
       .run(legacy);
     expect((await store.listSessionRevisions("s1"))[0]?.requestDeltaJson).toBe(legacy);
     db.$sqlite.close();
@@ -243,6 +275,62 @@ describe("SqliteTelemetryStore", () => {
       nextSequence: null,
       limited: false,
     });
+    db.$sqlite.close();
+  });
+
+  it("accounts the full logical size when a legacy Session response is backfilled", async () => {
+    const db = createSqliteDb(":memory:");
+    const store = new SqliteTelemetryStore(db);
+    const requestDeltaJson = '["legacy"]';
+    const requestEnvelopeJson = '{"model":"x"}';
+    const responseJson = JSON.stringify({ output: "x".repeat(300_000) });
+    db.$sqlite
+      .prepare(
+        "INSERT INTO sessions (session_ref, account_id, api_key_id, source, external_session_id, head_request_id, revision_count, stored_bytes, created_at, last_seen_at) VALUES ('legacy', 'a1', 'k1', 'header', 'external', 'r1', 1, ?, 1, 1)",
+      )
+      .run(Buffer.byteLength(requestDeltaJson + requestEnvelopeJson, "utf8"));
+    db.$sqlite
+      .prepare(
+        "INSERT INTO session_revisions (request_id, session_ref, sequence, retain_count, request_delta_json, request_envelope_json, response_json, fidelity, created_at) VALUES ('r1', 'legacy', 1, 0, ?, ?, NULL, 'semantic', 1)",
+      )
+      .run(requestDeltaJson, requestEnvelopeJson);
+
+    await store.upsertSessionRevision({
+      sessionRef: "legacy",
+      accountId: "a1",
+      apiKeyId: "k1",
+      source: "header",
+      externalSessionId: "external",
+      requestId: "r1",
+      parentRequestId: null,
+      retainCount: 0,
+      requestDeltaJson,
+      requestEnvelopeJson,
+      responseId: "resp_1",
+      responseJson,
+      fidelity: "semantic",
+      createdAt: new Date(2),
+    });
+
+    const expectedBytes = Buffer.byteLength(
+      requestDeltaJson + requestEnvelopeJson + responseJson,
+      "utf8",
+    );
+    expect(
+      db.$sqlite
+        .prepare(
+          "SELECT body_bytes AS bodyBytes, request_body_generation AS requestGeneration, response_body_generation AS responseGeneration FROM session_revisions WHERE request_id = 'r1'",
+        )
+        .get(),
+    ).toEqual({
+      bodyBytes: expectedBytes,
+      requestGeneration: null,
+      responseGeneration: expect.any(String),
+    });
+    await expect(
+      store.listSessionRevisionsPage("legacy", { limit: 1, maxBytes: expectedBytes - 1 }),
+    ).resolves.toEqual({ revisions: [], nextSequence: null, limited: true });
+    expect((await store.listSessionRevisions("legacy"))[0]?.responseJson).toBe(responseJson);
     db.$sqlite.close();
   });
 

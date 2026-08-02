@@ -168,6 +168,25 @@ describe("createApp: trace_id, logging, error handling", () => {
     expect(JSON.stringify(lines)).not.toContain("payload");
   });
 
+  it("logs capacity rejection separately from database maintenance", async () => {
+    const { logger, lines } = fakeLogger();
+    const c = mockCtx(logger, "trace-capacity");
+    const res = handleError(
+      new RequestAdmissionError(503, "server_overloaded", "capacity exhausted", {
+        cause: "capacity",
+        wireBytes: 12,
+        requestedChargeBytes: 72,
+        activeReservedBytes: 144,
+        pendingBytes: 24,
+      }),
+      c,
+    );
+
+    expect(res.status).toBe(503);
+    expect(lines.find((line) => line.message === "request.capacity_rejected")).toBeDefined();
+    expect(lines.find((line) => line.message === "request.maintenance_rejected")).toBeUndefined();
+  });
+
   it("marks the request context as timed out while late route work continues", async () => {
     const { logger } = fakeLogger();
     const app = createApp({

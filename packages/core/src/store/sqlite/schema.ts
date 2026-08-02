@@ -119,6 +119,8 @@ export const sessionRevisions = sqliteTable(
     requestDeltaJson: text("request_delta_json").notNull(),
     requestEnvelopeJson: text("request_envelope_json").notNull(),
     bodyBytes: integer("body_bytes"),
+    requestBodyGeneration: text("request_body_generation"),
+    responseBodyGeneration: text("response_body_generation"),
     responseId: text("response_id"),
     responseJson: text("response_json"),
     fidelity: text("fidelity").notNull(),
@@ -128,6 +130,34 @@ export const sessionRevisions = sqliteTable(
     uniqueIndex("uniq_session_revisions_sequence").on(t.sessionRef, t.sequence),
     uniqueIndex("uniq_session_revisions_response").on(t.sessionRef, t.responseId),
     index("idx_session_revisions_session_created").on(t.sessionRef, t.createdAt),
+  ],
+);
+
+export const sessionHeadEventHashes = sqliteTable("session_head_event_hashes", {
+  sessionRef: text("session_ref")
+    .primaryKey()
+    .references(() => sessions.sessionRef, { onDelete: "cascade" }),
+  requestId: text("request_id").notNull(),
+  eventKey: text("event_key").notNull(),
+  eventCount: integer("event_count").notNull(),
+  eventHash: text("event_hash").notNull(),
+});
+
+export const sessionRevisionBodyChunks = sqliteTable(
+  "session_revision_body_chunks",
+  {
+    requestId: text("request_id").notNull(),
+    generation: text("generation").notNull(),
+    part: text("part").$type<"request_delta" | "request_envelope" | "response">().notNull(),
+    chunkIndex: integer("chunk_index").notNull(),
+    codec: text("codec").$type<"gzip" | "raw">().notNull(),
+    rawBytes: integer("raw_bytes").notNull(),
+    bytes: blob("bytes").$type<Buffer>().notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.requestId, t.generation, t.part, t.chunkIndex] }),
+    index("idx_session_revision_body_chunks_created").on(t.createdAt),
   ],
 );
 

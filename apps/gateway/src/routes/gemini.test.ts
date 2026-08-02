@@ -624,7 +624,7 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
     expect(insertPayload).not.toHaveBeenCalled();
   });
 
-  it("per-key payload mode overrides the disabled system setting", async () => {
+  it("global metadata-only mode remains off despite a per-key payload override", async () => {
     const { record, insertPayload } = makeRecord({ capturePayloads: false });
     const { deps } = makeDeps({
       record,
@@ -637,7 +637,7 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(insertPayload).toHaveBeenCalledOnce();
+    expect(insertPayload).not.toHaveBeenCalled();
   });
 
   // ── Terminal stream error frame must be appended to the captured body (review

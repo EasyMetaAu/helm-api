@@ -444,7 +444,7 @@ describe("runReplay", () => {
     expect(rec.inserts).toHaveLength(1);
   });
 
-  it("per-key payload mode overrides disabled system capture for replay", async () => {
+  it("global metadata-only mode remains off for replay despite a per-key override", async () => {
     const rec = emptyRec();
     const route: ReplayWiring["route"] = async (req) => ({
       decision: decision(req.request_id),
@@ -462,7 +462,7 @@ describe("runReplay", () => {
       { originalTraceId: "orig", body: okBody, signal: new AbortController().signal, log: noop },
     );
 
-    expect(rec.payloads).toHaveLength(1);
+    expect(rec.payloads).toHaveLength(0);
   });
 
   it("persists the partial stream + telemetry when the stream throws mid-drain", async () => {

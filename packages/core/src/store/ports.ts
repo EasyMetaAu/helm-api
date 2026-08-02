@@ -361,6 +361,16 @@ export interface UpsertSessionRevisionInput {
   responseJson: string | null;
   fidelity: string;
   createdAt: Date;
+  eventHead?: Omit<SessionEventHead, "requestId">;
+}
+
+export type SessionEventKey = "messages" | "contents" | "input";
+
+export interface SessionEventHead {
+  requestId: string;
+  eventKey: SessionEventKey;
+  eventCount: number;
+  eventHash: string;
 }
 
 export interface SessionRecord {
@@ -374,6 +384,7 @@ export interface SessionRecord {
   headRequestId: string | null;
   revisionCount: number;
   storedBytes: number;
+  eventHead: SessionEventHead | null;
 }
 
 // Persistent per-Session revision quota. This bounds retained revision count;
@@ -393,6 +404,17 @@ export interface SessionRevisionRecord {
   requestEnvelopeJson: string;
   responseId: string | null;
   responseJson: string | null;
+  fidelity: string;
+  createdAt: Date;
+}
+
+export interface SessionContinuationRecord {
+  requestId: string;
+  responseBodyStored: boolean;
+}
+
+export interface SessionRevisionMetaRecord extends SessionContinuationRecord {
+  sessionRef: string;
   fidelity: string;
   createdAt: Date;
 }
@@ -581,10 +603,11 @@ export interface TelemetryStore {
     sessionRef: string,
     options: SessionRevisionPageOptions,
   ): Promise<SessionRevisionPage>;
-  getSessionRevisionByResponseId?(
+  findSessionRequestIdByResponseId?(
     sessionRef: string,
     responseId: string,
-  ): Promise<SessionRevisionRecord | null>;
+  ): Promise<SessionContinuationRecord | null>;
+  getSessionRevisionMeta?(requestId: string): Promise<SessionRevisionMetaRecord | null>;
   // Deletes whole sessions whose last activity is strictly older than the cutoff;
   // revisions follow through their FK, so no orphan transcript rows survive.
   pruneInactiveSessions?(olderThanMs: number): Promise<number>;

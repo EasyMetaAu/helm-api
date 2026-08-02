@@ -16,7 +16,9 @@ import type { SignalCollector } from "./collector.js";
 export interface SignalSchedulerDeps {
   collector: SignalCollector;
   intervalMs: number;
+  maxCatchupWindowMs?: number;
   now: () => number; // epoch ms; injectable for tests
+  shouldRun?: () => boolean | Promise<boolean>;
   log?: (level: "warn" | "info", msg: string, fields?: Record<string, unknown>) => void;
 }
 
@@ -28,6 +30,10 @@ export interface SignalSchedulerHandle {
 
 export function startSignalScheduler(deps: SignalSchedulerDeps): SignalSchedulerHandle {
   const log = deps.log ?? (() => {});
+  const maxCatchupWindowMs = Math.max(
+    deps.intervalMs,
+    deps.maxCatchupWindowMs ?? deps.intervalMs * 5,
+  );
   let prevTick = deps.now();
   let retryWindow: [number, number] | null = null;
   let inFlight = false;
@@ -36,14 +42,20 @@ export function startSignalScheduler(deps: SignalSchedulerDeps): SignalScheduler
 
   const timer = setInterval(() => {
     if (paused || inFlight) return;
-    const [windowStart, windowEnd] = retryWindow ?? [prevTick, deps.now()];
     inFlight = true;
-    // Fire-and-forget; collect() is fail-open in normal operation, but the scheduler
-    // still treats ok:false or a rejection as a non-advanced window so telemetry is
-    // retried instead of skipped permanently.
-    void deps.collector
-      .collect(windowStart, windowEnd)
+    let windowStart = prevTick;
+    let windowEnd = prevTick;
+    void Promise.resolve()
+      .then(async () => {
+        if (deps.shouldRun !== undefined && (await deps.shouldRun()) === false) return null;
+        [windowStart, windowEnd] = retryWindow ?? [
+          prevTick,
+          Math.min(deps.now(), prevTick + maxCatchupWindowMs),
+        ];
+        return deps.collector.collect(windowStart, windowEnd);
+      })
       .then((res) => {
+        if (res === null) return;
         if (res.ok) {
           retryWindow = null;
           prevTick = windowEnd;
@@ -53,7 +65,7 @@ export function startSignalScheduler(deps: SignalSchedulerDeps): SignalScheduler
         log("warn", "signals.scheduler_tick_failed", { windowStart, windowEnd });
       })
       .catch((err: unknown) => {
-        retryWindow = [windowStart, windowEnd];
+        if (windowEnd !== prevTick) retryWindow = [windowStart, windowEnd];
         log("warn", "signals.scheduler_tick_failed", {
           windowStart,
           windowEnd,

@@ -223,7 +223,7 @@ test.describe("admin system settings", () => {
 });
 
 test.describe("per-key request-content storage", () => {
-  test("a key override wins over the system mode and clearing it restores inheritance", async () => {
+  test("global metadata-only remains a hard-off over key overrides", async () => {
     const admin = await playwrightRequest.newContext({
       baseURL: BASE,
       extraHTTPHeaders: { Authorization: basicHeader(ADMIN_USER, ADMIN_PASSWORD) },
@@ -276,7 +276,7 @@ test.describe("per-key request-content storage", () => {
         })
         .toBeGreaterThanOrEqual(1);
       const captured = await admin.get(`/admin/api/requests/${requestIds[0]}/payload?part=meta`);
-      expect(await captured.json()).toMatchObject({ captured: true, source: "payload" });
+      expect(await captured.json()).toMatchObject({ captured: false });
 
       const cleared = await admin.patch(`/admin/api/keys/${keyId}`, {
         data: { request_content_mode: null },

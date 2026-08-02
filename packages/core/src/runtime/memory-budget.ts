@@ -1,4 +1,7 @@
+import { totalmem } from "node:os";
 import { getHeapStatistics } from "node:v8";
+
+const MIB = 1024 * 1024;
 
 const JSON_AMPLIFICATION = 6;
 
@@ -16,6 +19,105 @@ export interface RuntimeMemoryBudget {
   sqlitePageCacheBytes: number;
   sqliteMaintenanceCacheBytes: number;
   websocketIngressBytes: number;
+}
+
+export interface RuntimeMemoryLease {
+  resize(bytes: number): { ok: true } | { ok: false; capacityBytes: number };
+  release(): void;
+}
+
+export interface RuntimeMemoryCoordinator {
+  acquire(
+    bytes: number,
+  ): { ok: true; lease: RuntimeMemoryLease } | { ok: false; capacityBytes: number };
+  readonly capacityBytes: number;
+  readonly reservedBytes: number;
+}
+
+function normalizedBytes(bytes: number): number {
+  return Number.isSafeInteger(bytes) && bytes >= 0 ? bytes : Number.MAX_SAFE_INTEGER;
+}
+
+export function createRuntimeMemoryCoordinator(options: {
+  capacityBytes: () => number;
+}): RuntimeMemoryCoordinator {
+  let reservedBytes = 0;
+  const capacityBytes = (): number => {
+    const capacity = options.capacityBytes();
+    return Number.isSafeInteger(capacity) && capacity >= 0 ? capacity : 0;
+  };
+
+  return {
+    acquire(bytes) {
+      let held = normalizedBytes(bytes);
+      const capacity = capacityBytes();
+      if (reservedBytes + held > capacity) {
+        return { ok: false as const, capacityBytes: capacity };
+      }
+      reservedBytes += held;
+      let released = false;
+      return {
+        ok: true as const,
+        lease: {
+          resize(nextBytes) {
+            if (released) return { ok: false as const, capacityBytes: capacityBytes() };
+            const next = normalizedBytes(nextBytes);
+            if (next > held) {
+              const capacity = capacityBytes();
+              if (reservedBytes - held + next > capacity) {
+                return { ok: false as const, capacityBytes: capacity };
+              }
+            }
+            reservedBytes += next - held;
+            held = next;
+            return { ok: true as const };
+          },
+          release() {
+            if (released) return;
+            released = true;
+            reservedBytes -= held;
+          },
+        },
+      };
+    },
+    get capacityBytes() {
+      return capacityBytes();
+    },
+    get reservedBytes() {
+      return reservedBytes;
+    },
+  };
+}
+
+export function deriveSafeWorkingMemoryCapacity(input: {
+  heapLimitBytes: number;
+  heapUsedBytes: number;
+  availableMemoryBytes: number;
+  hostTotalMemoryBytes: number;
+  constrainedMemoryBytes?: number;
+  hostReserveMinBytes?: number;
+  emergencyReserveBytes?: number;
+  utilization?: number;
+}): number {
+  const hostReserveMinBytes = input.hostReserveMinBytes ?? 384 * MIB;
+  const emergencyReserveBytes = input.emergencyReserveBytes ?? 128 * MIB;
+  const utilization = input.utilization ?? 0.7;
+  const constrainedMemoryBytes = input.constrainedMemoryBytes ?? 0;
+  const hasConstrainedLimit =
+    Number.isSafeInteger(constrainedMemoryBytes) && constrainedMemoryBytes > 0;
+  const effectiveTotalMemoryBytes = hasConstrainedLimit
+    ? Math.min(input.hostTotalMemoryBytes, constrainedMemoryBytes)
+    : input.hostTotalMemoryBytes;
+  const hostReserve = Math.max(
+    hostReserveMinBytes,
+    Math.min(1024 * MIB, Math.floor(effectiveTotalMemoryBytes * 0.05)),
+  );
+  const heapHeadroom = Math.max(
+    0,
+    input.heapLimitBytes - input.heapUsedBytes - emergencyReserveBytes,
+  );
+  const nativeHeadroom = Math.max(0, input.availableMemoryBytes - hostReserve);
+  return Math.max(0, Math.floor(Math.min(heapHeadroom, nativeHeadroom) * utilization));
 }
 
 export function deriveRuntimeMemoryBudget(input: {
@@ -115,4 +217,27 @@ export function runtimeMemoryBudget(): RuntimeMemoryBudget {
     availableMemoryBytes: process.availableMemory(),
   });
   return detected;
+}
+
+/** Live process/cgroup-aware capacity. It scales with the machine and current
+ * pressure; it is an operation budget, never a cumulative Session byte limit. */
+export function runtimeSafeWorkingMemoryCapacity(): number {
+  const heap = getHeapStatistics();
+  const memory = process.memoryUsage();
+  return deriveSafeWorkingMemoryCapacity({
+    heapLimitBytes: heap.heap_size_limit,
+    heapUsedBytes: memory.heapUsed,
+    availableMemoryBytes: process.availableMemory(),
+    hostTotalMemoryBytes: totalmem(),
+    constrainedMemoryBytes: process.constrainedMemory(),
+  });
+}
+
+let runtimeCoordinator: RuntimeMemoryCoordinator | undefined;
+
+export function runtimeMemoryCoordinator(): RuntimeMemoryCoordinator {
+  runtimeCoordinator ??= createRuntimeMemoryCoordinator({
+    capacityBytes: runtimeSafeWorkingMemoryCapacity,
+  });
+  return runtimeCoordinator;
 }

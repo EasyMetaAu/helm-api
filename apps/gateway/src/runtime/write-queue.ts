@@ -46,7 +46,7 @@ export interface WriteQueue {
   // Defer a telemetry decision insert (batched, fail-open, runs after the response).
   enqueueTelemetry(input: InsertTelemetryInput): Promise<void>;
   // Defer a payload upsert (batched, fail-open).
-  enqueuePayload(input: InsertPayloadInput): Promise<void>;
+  enqueuePayload(input: InsertPayloadInput, isCurrent?: () => boolean): Promise<void>;
   // Defer a session transcript write while charging the retained request body
   // against the same byte/depth budget. When full, admission waits for the bounded
   // backlog instead of retaining another closure or dropping the transcript.
@@ -91,7 +91,7 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
   const jsonAmplification = runtimeMemoryBudget().jsonAmplification;
 
   let telemetryBuf: InsertTelemetryInput[] = [];
-  let payloadBuf: InsertPayloadInput[] = [];
+  let payloadBuf: Array<{ input: InsertPayloadInput; isCurrent?: () => boolean }> = [];
   // Costs are computed once at admission and accumulated until the whole buffer moves
   // to the in-flight batch. No per-row cost arrays are needed because rows are never
   // shed after admission.
@@ -195,17 +195,22 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
 
   // Same batch-then-per-row resilience for payloads (their upsert tolerates a
   // duplicate request_id, but any other batch error must not drop the window).
-  const writePayloads = async (batch: InsertPayloadInput[]): Promise<void> => {
-    if (batch.length === 0) return;
+  const writePayloads = async (
+    batch: Array<{ input: InsertPayloadInput; isCurrent?: () => boolean }>,
+  ): Promise<void> => {
+    const current = batch
+      .filter((queued) => queued.isCurrent?.() !== false)
+      .map((queued) => queued.input);
+    if (current.length === 0) return;
     if (telemetry.insertPayloads) {
       try {
-        await telemetry.insertPayloads(batch);
+        await telemetry.insertPayloads(current);
         return;
       } catch {
         log("writequeue.payload_batch_fallback");
       }
     }
-    for (const input of batch) {
+    for (const input of current) {
       try {
         await telemetry.insertPayload(input);
       } catch {
@@ -306,7 +311,7 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
       });
     },
 
-    async enqueuePayload(input: InsertPayloadInput): Promise<void> {
+    async enqueuePayload(input: InsertPayloadInput, isCurrent?: () => boolean): Promise<void> {
       if (stopped) return;
       if (paused) {
         log("writequeue.paused");
@@ -314,7 +319,7 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
       }
       const cost = payloadCost(input);
       await admit(cost, () => {
-        payloadBuf.push(input);
+        payloadBuf.push({ input, isCurrent });
         bufferedBytes += cost;
         if (payloadBuf.length >= maxBatch || bufferedBytes >= flushBytes) void doFlush();
         else scheduleTimer();

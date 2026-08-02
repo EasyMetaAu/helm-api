@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-08-02 · Session 正文改为原子分块存储并以机器压力协调后台工作（Telemetry / Gateway runtime，docs/02/07/11，原则 3/7）
+
+- **存储格式**：新 Session 正文按 UTF-8 安全的 256 KiB 原始块逐块 gzip/raw 写入，最多 4 块一批；revision 用请求/响应两个 generation 指针原子发布，响应回填不重写大请求正文，并发重试不会把一份元数据配到另一份正文。历史正文不扫描、不回填；legacy 行继续读取，首次响应回填记录准确的逻辑 `body_bytes`。Admin 恢复先按机器动态 response-work 预算分页，只读取已发布 generation；旧二进制正文在缺少可靠原始字节数时 fail-closed。
+- **无 Session 容量上限**：不恢复 64 MiB 或其他累计上限；单次正文、写队列、HTTP/WebSocket 与响应解析共享基于 V8/cgroup/可用内存的动态协调器，允许更大机器自动使用更多内存，但在 PSI/内存压力下暂停 Memory、Signals 与 scheduled cleanup。健康连续 60 秒后才恢复，避免抖动。
+- **维护边界**：SQLite Session prune 继续小批续跑；PostgreSQL 每次 cleanup tick 最多处理 128 个物理行、每批 16 行，并用持久 marker 续跑。scheduled cleanup 与 auto-VACUUM 在开始前检查压力，VACUUM 排空活动后、真正重写数据库前再次检查；压力恶化时不执行也不误记当天成功。手动维护语义保持不变。
+- **模式切换**：全局 metadata-only 是 hard-off，任何 key override 都不能绕过；切换 generation 后，已排队的 payload/Session 正文写入会被丢弃，脱敏 telemetry 仍保存。`part=meta` 不读取正文。
+
 ## 2026-07-31 · API key 单独覆盖请求内容存储模式（Key Store / Telemetry / Admin，docs/06/07/11，原则 2/7）
 
 - **继承与优先级**：`api_keys.request_content_mode` 是 SQLite/PostgreSQL 的 nullable 枚举列；`NULL` 表示继承实时全局模式，`none` / `payload` / `session` 显式覆盖。历史 key 迁移后保持 `NULL`，不会因升级改变正文留存行为。
@@ -68,16 +75,9 @@
 - **测试影响**：三个老测试用 503 当"随便一个 5xx"占位（openai 401 分支、gemini/codex 非 JSON body 保留、generic 首 chunk 前抛错），503 现在会触发重试，已改成 500 并注明原因；意图不变，provider 套件同时从 9s 回到 2.5s。
 - **TODO / 边界**：退避参数目前是代码常量，未做成配置（与原则 2 的"会撒谎的旋钮比没有旋钮更糟"一致，先观察线上真实 529 分布再决定）；OAuth 池**换账号之间**仍无延迟，本次未动——换号本身就是在换容量，加睡眠反而拖慢。
 
-## 2026-07-25 · Responses WebSocket terminal 立即释放并关闭失效连接（Gateway / Protocol，docs/02/05/07，原则 3/8）
-
-- **成功终态**：内部 SSE 一旦转发 `response.completed` 就停止读取并异步取消正文，不再等待 provider body EOF；请求与 ingress lease 随即释放，同一 downstream WebSocket 可以立即处理下一 turn，避免长期 `processing=true` 导致 1008、中断或卡住。
-- **每轮取消边界**：downstream 连接只保留 connection controller，每个 `response.create` 另建 turn controller；终态后主动 abort 当前内部 fetch，但不 abort 可复用连接。客户端断连、bridge error 或并发发送第二个 active turn 时同时 abort 当前 turn 与 session，释放内存/并发 lease，不等待可能挂起的 body cancel。已观察到的 `completed` / `incomplete` / `failed` 优先于随后发生的 teardown `client_abort`，避免把真实结果误记为客户端中断。
-- **失败终态**：`response.failed`、`response.incomplete`、`error`、非 2xx 与本地桥接错误均先发送协议终态，再幂等销毁 connection-local 上游 Session，并以 1000 正常关闭 downstream socket；终态本身已携带失败事实，不再用 1011 诱发客户端错误退避。Codex 下一次请求会新建连接并清除旧 `previous_response_id`，不会在已失效 Session 上续接。
-- **Codex 增量续接**：真实客户端既会发送带完整 input 的 `generate:false` 预热帧，也会在启动预连接时发送严格的 `input:[] + generate:false` 预热帧；后一形状只有 normalized/native 两层都明确 `generate:false` 时才允许空 IR messages。下一帧可只带 `previous_response_id` 与空 `input`，此时仅当 Responses registry 已验证该 id 并固定原 provider 时放行；registry 在对客户端发送 terminal frame 前先持久化实际 provider alias、与成功 alias 相符的 OAuth account 及 selected lane，重启后仍恢复同一账号，fallback 前选中过但未实际服务的账号不会被写入。该持久化不伪造上游 connection-local state：Codex 在 WebSocket 重连时会清除旧增量状态并重发完整 input。续接在分类前固定为单 provider，真实 lane 继续受 `allowed_lanes` 约束，显式 custom-model 延续首轮既有语义；旧 registry 行缺少 lane provenance 时保持 fail-closed，`blocked_models` 与预算 degrade 同样不可绕过。普通空请求、未知 id、无 provider pin 与跨协议请求仍拒绝。`generate:false` 无 native Responses passthrough 时直接拒绝，不允许翻译路径意外产生计费输出。首 chunk 后的 `AbortError` 只记录为 `client_abort`，不误报上游截断，也不触发 breaker failure。
-- **连接超时边界**：Codex 上游 WebSocket handshake 与非 101 error body 的等待上限为 `min(request_timeout_ms, 60s)`；正常流式请求仍使用既有 request/idle timeout，不因连接建立保护而缩短。没有新增配置、依赖、后台 drain 或 graceful-shutdown 重构。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-25 · Responses WebSocket terminal 立即释放并关闭失效连接**：成功终态立即释放请求与 ingress lease，失败终态关闭失效连接；Codex 增量续接保持 registry/provider/account/lane provenance 与 abort 边界，完整原文通过 git history 回溯。
 - **2026-07-24 · Codex Voice、Responses 音频与图片编辑补齐代理面**：Realtime V1/V2/V3、Responses 音频与 Images edits 复用既有鉴权、路由、账号和遥测链；Voice attestation 与单实例 call registry 保持收窄边界，完整原文通过 git history 回溯。
 - **2026-07-24 · 请求准入增加实时 V8 堆高水位**：曾以 live heap + 分池余量拒绝高风险请求；后被 2026-07-27 的启发式拒绝拆除与 2026-07-28 的请求大小上限删除取代，完整原文通过 git history 回溯。
 - **2026-07-24 · Admin 登录同源证明兼容代理 Host 改写**：登录/登出优先接受浏览器不可伪造的 `Sec-Fetch-Site: same-origin`，同时保留 Origin/Host 与 cross-site 拒绝边界；完整原文通过 git history 回溯。

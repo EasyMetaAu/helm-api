@@ -14,6 +14,57 @@ function fakeCollector(): SignalCollector & { calls: Array<[number, number]> } {
 }
 
 describe("startSignalScheduler", () => {
+  it("keeps the elapsed window pending while the resource gate is closed", async () => {
+    vi.useFakeTimers();
+    try {
+      const collector = fakeCollector();
+      let allowed = false;
+      let t = 100_000;
+      const handle = startSignalScheduler({
+        collector,
+        intervalMs: 1_000,
+        now: () => t,
+        shouldRun: async () => allowed,
+      });
+
+      t = 101_000;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(collector.calls).toEqual([]);
+      allowed = true;
+      t = 102_000;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(collector.calls).toEqual([[100_000, 102_000]]);
+      await handle.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds a recovered catch-up window", async () => {
+    vi.useFakeTimers();
+    try {
+      const collector = fakeCollector();
+      let allowed = false;
+      let t = 100_000;
+      const handle = startSignalScheduler({
+        collector,
+        intervalMs: 1_000,
+        maxCatchupWindowMs: 5_000,
+        now: () => t,
+        shouldRun: async () => allowed,
+      });
+
+      t = 200_000;
+      await vi.advanceTimersByTimeAsync(1_000);
+      allowed = true;
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(collector.calls).toEqual([[100_000, 105_000]]);
+      await handle.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("stop waits for an active collection before resolving", async () => {
     vi.useFakeTimers();
     try {

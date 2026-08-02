@@ -1290,7 +1290,7 @@ describe("POST /v1/chat/completions — payload capture + streamed cost", () => 
     expect(cap.payloads[0]?.responseJson).toBe(JSON.stringify(upstream));
   });
 
-  it("lets a key enable full payload capture over a global metadata-only mode", async () => {
+  it("keeps global metadata-only mode off despite a per-key payload override", async () => {
     const cap = captureTelemetry();
     const { deps: d, harness } = deps({
       telemetry: cap.telemetry,
@@ -1306,7 +1306,7 @@ describe("POST /v1/chat/completions — payload capture + streamed cost", () => 
       headers: AUTH,
       body: JSON.stringify(NONSTREAM_BODY),
     });
-    expect(cap.payloads).toHaveLength(1);
+    expect(cap.payloads).toHaveLength(0);
   });
 
   it("lets a key disable full payload capture over a global payload mode", async () => {
