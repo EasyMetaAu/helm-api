@@ -39,6 +39,20 @@ describe("deriveRuntimeMemoryBudget", () => {
     ).toBeGreaterThan(0);
   });
 
+  it("does not apply the host reserve floor inside a constrained container", () => {
+    const capacity = deriveSafeWorkingMemoryCapacity({
+      heapLimitBytes: 4 * 1024 * 1024 * 1024,
+      heapUsedBytes: 512 * 1024 * 1024,
+      availableMemoryBytes: 480_205_864,
+      hostTotalMemoryBytes: 64 * 1024 * 1024 * 1024,
+      constrainedMemoryBytes: 1_536 * 1024 * 1024,
+    });
+
+    expect(capacity).toBe(279_772_659);
+    expect(capacity).toBeGreaterThanOrEqual(26_888_188 * 6);
+    expect(capacity).toBeLessThan(26_888_188 * 12);
+  });
+
   it("scales every in-memory budget from the detected runtime capacity", () => {
     const small = deriveRuntimeMemoryBudget({
       heapLimitBytes: 1_000,

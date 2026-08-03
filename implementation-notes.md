@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-08-03 · 受限容器不再重复套用宿主机固定内存预留（Gateway runtime，docs/02/05/10，原则 3/7/8）
+
+- **现场根因**：1.5 GiB cgroup 当时仍有约 457.96 MiB 可用内存，但动态准入先扣除面向非受限宿主机的 384 MiB 固定预留，再只使用剩余量的 70%，把安全工作容量压到约 51.78 MiB；一个 25.64 MiB Responses 请求按 6 倍 JSON 放大计为约 153.86 MiB，即使共享协调器没有任何活动 lease 也会稳定返回 503。
+- **最小修复**：受 cgroup 约束时只按容器总量的 5%（最多 1 GiB）保留 native headroom；未受约束进程继续使用原有 384 MiB 下限。V8 128 MiB emergency reserve、70% utilization、HTTP/WebSocket/response-work 共享协调器和 maintenance drain 均保持不变。事故快照下容量变为约 266.81 MiB，单请求可通过，而两个同体积并发请求仍超过共享容量。
+- **边界**：不恢复固定 HTTP/WebSocket/Session 大小上限，不为空闲协调器增加超额旁路，也不以扩大容器替代算法修复。有限进程仍可能对真正超过实时安全 headroom 的请求返回结构化过载错误。
+
 ## 2026-08-03 · 多候选上下文溢出优先恢复客户端压缩信号（Provider execution / protocol errors，docs/04/05/07，原则 3/5/8）
 
 - **终态优先级**：单个候选的上下文溢出若混有真实 provider failure，仍返回 `all_providers_failed / 502`；同一链中至少两个不同 provider/model 通过精确 `count_tokens` 或结构化 `context_length_exceeded` 分别确认溢出时，即使夹有其他候选故障，也返回 `invalid_request / 400` 并保留上游消息，让 Claude/Codex 客户端进入既有自动压缩路径。
@@ -62,13 +68,9 @@
 - **执行 Token 租约**：OAuth Provider 统一保存上游真实 `expires`，不再在各 Provider 解析时篡改到期时间；执行 client 在 `request_timeout_ms` 之外保留 5 分钟提前刷新余量（默认共 6 分钟），Admin discovery/quota 保持既有 60 秒余量。网络、408/425/5xx 刷新失败会按账号稳定抖动等待 1–3 秒并重读共享 Store：只采用其他实例已经轮换出的有效 credential，绝不重放结果不确定的旧 rotating refresh token；Store 未变化时当前请求转健康兄弟账号，失败账号在本进程短冷却 30 秒后自动恢复。确定性凭证错误与 429 继续进入既有重连/限流分流。刷新后 Token 若覆盖不了整段租约就不用于请求，但先加密持久化旋转后的 refresh token；短租约账号不会被永久标记为凭证失效。
 - **完整但有界的错误诊断**：Provider HTTP/transport 错误保存 64 KiB body、16 KiB 非凭证 headers、嵌套 cause、16 KiB stack，并用 128 KiB/256 节点总预算防止诊断本身放大内存。Telemetry 不再因字段名含 `token` 就误隐藏 `token_count` 或 rate-limit token 指标；只过滤 API key、OAuth access/refresh/id token、Authorization、Cookie、密码和代理凭证。请求/响应正文仍遵守 `capture_payloads` / Session 留存边界，不塞进 DecisionRecord。
 
-## 2026-07-28 · 删除 HTTP 与 WebSocket 请求大小上限（Gateway runtime / Deployment，docs/02/05/07/10，用户明确要求）
-
-- **决定**：删除由 `activeRequestBytes / JSON_AMPLIFICATION` 推导的共享 wire 上限；HTTP 请求体不再执行 `wire_limit` 拒绝，Responses/Realtime 和上游 Codex WebSocket 的 `ws.maxPayload` 使用 `0`（无限制），HTTP/SSE 响应读取也不再复用该请求上限。原先约 25.8 MiB 的隐藏上限会把约 31 MiB 的 Codex 上下文压缩请求表现成 HTTP 413 或 `websocket closed by server before response.completed`。
-- **部署边界**：Remote Nginx 必须同步使用 `client_max_body_size 0`，不能以 100 MiB 替代已删除的应用限制。鉴权、schema 校验、maintenance drain、provider timeout、正文留存边界和缓存/写队列预算不变。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-28 · 删除 HTTP 与 WebSocket 请求大小上限**：删除应用与 Remote Nginx 固定正文上限，继续由动态内存准入、鉴权、schema、maintenance drain 和 provider timeout 保护运行时；完整原文通过 git history回溯。
 - **2026-07-28 · preflight/registry 内存放大与自动 VACUUM 空闲门禁**：Responses preflight 增加 deadline/abort，catalog 与 registry 改为有界热路径；自动 VACUUM 仅在空闲 drain 后执行，完整原文通过 git history 回溯。
 - **2026-07-25 · 上游过载（529/503）在 fetch 边界退避重试**：只在首字节前对 529/503 做两次有界退避，保留账号池、熔断、fallback 与终态 telemetry 语义；客户端断连立即停止，完整原文通过 git history 回溯。
 - **2026-07-25 · Responses WebSocket terminal 立即释放并关闭失效连接**：成功终态立即释放请求与 ingress lease，失败终态关闭失效连接；Codex 增量续接保持 registry/provider/account/lane provenance 与 abort 边界，完整原文通过 git history 回溯。

@@ -108,10 +108,10 @@ export function deriveSafeWorkingMemoryCapacity(input: {
   const effectiveTotalMemoryBytes = hasConstrainedLimit
     ? Math.min(input.hostTotalMemoryBytes, constrainedMemoryBytes)
     : input.hostTotalMemoryBytes;
-  const hostReserve = Math.max(
-    hostReserveMinBytes,
-    Math.min(1024 * MIB, Math.floor(effectiveTotalMemoryBytes * 0.05)),
-  );
+  const proportionalReserve = Math.min(1024 * MIB, Math.floor(effectiveTotalMemoryBytes * 0.05));
+  const hostReserve = hasConstrainedLimit
+    ? proportionalReserve
+    : Math.max(hostReserveMinBytes, proportionalReserve);
   const heapHeadroom = Math.max(
     0,
     input.heapLimitBytes - input.heapUsedBytes - emergencyReserveBytes,
