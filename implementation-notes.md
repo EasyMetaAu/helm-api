@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-08-03 · 多候选上下文溢出优先恢复客户端压缩信号（Provider execution / protocol errors，docs/04/05/07，原则 3/5/8）
+
+- **终态优先级**：单个候选的上下文溢出若混有真实 provider failure，仍返回 `all_providers_failed / 502`；同一链中至少两个不同 provider/model 通过精确 `count_tokens` 或结构化 `context_length_exceeded` 分别确认溢出时，即使夹有其他候选故障，也返回 `invalid_request / 400` 并保留上游消息，让 Claude/Codex 客户端进入既有自动压缩路径。
+- **流式诊断保真**：首输出前的原生 Responses SSE 错误现在只把 `type/code/message/param` 与嵌套 error envelope 放入 `UpstreamError.providerRaw`，并读取 top-level `message`；既保留 fallback 分类依据，又不让 `response.failed.response` 中的 instructions、tools、metadata 或 output 进入常规 telemetry。
+- **保守边界**：近似字符/token 估算和自由文本错误仍可用于“整链只有上下文/能力 skip”的既有 400，但不能压过真实 5xx/422；没有增加请求、Session 或上下文固定上限。top-level `error` 的 exact-once 终态统一和 CRLF SSE framing 属于独立协议问题，本次不扩大修改面。
+
 ## 2026-08-02 · Responses WebSocket 首输出前恢复并提前释放物化准入（Protocol / Gateway runtime，docs/05/07/10，原则 3/5/8）
 
 - **恢复边界**：上游 WebSocket 只产生 `response.created` / `response.in_progress` 后关闭时，丢弃未提交的 preamble，按既有连接重试预算重连，耗尽后回退 HTTP/SSE；最多缓冲协议正常需要的两个 preamble，第三个重复 preamble 立即提交为已开始输出，避免异常上游造成无界缓存。真实输出一旦开始则绝不重放。`response.cancelled` 在 provider parser 与 ingress bridge 都是失败终态，不再追加伪 bridge error。
@@ -61,15 +67,9 @@
 - **决定**：删除由 `activeRequestBytes / JSON_AMPLIFICATION` 推导的共享 wire 上限；HTTP 请求体不再执行 `wire_limit` 拒绝，Responses/Realtime 和上游 Codex WebSocket 的 `ws.maxPayload` 使用 `0`（无限制），HTTP/SSE 响应读取也不再复用该请求上限。原先约 25.8 MiB 的隐藏上限会把约 31 MiB 的 Codex 上下文压缩请求表现成 HTTP 413 或 `websocket closed by server before response.completed`。
 - **部署边界**：Remote Nginx 必须同步使用 `client_max_body_size 0`，不能以 100 MiB 替代已删除的应用限制。鉴权、schema 校验、maintenance drain、provider timeout、正文留存边界和缓存/写队列预算不变。
 
-## 2026-07-28 · 消除 preflight/registry 内存放大并让自动 VACUUM 只在空闲启动（Gateway / OAuth / Store，docs/02/05/07/10，原则 1/3/7/8）
-
-- **连接超时根因**：Responses WebSocket 的内部 models preflight 原先没有独立 deadline，也没有把 socket/request abort 贯穿 models、OAuth token、catalog/cache 与上游 fetch；现在 versioned 与 auth-only fallback 各有 6 秒边界，bridge 对内部 fetch Promise 做硬 race，即使 Store/鉴权忽略 signal 也会终止握手并取消晚到 body；断连同样立即取消，避免辅助目录阻断 101 或永久占住维护 activity。相同账号的 TokenManager 在 models 请求间复用，首次 Store 读取 singleflight，等待者可取消；共享 preset refresh 不接受单个等待者取消，但底层 fetch 固定在 30 秒内终止且 settled gate 会清理。
-- **内存与 I/O 放大**：Codex catalog 增加进程内热快照，相同 ETag 每 300 秒最多续期一次；首次 hydration 不归单个 caller 所有，断连只停止等待，不会再触发第二次大 blob 读取。Responses registry 改为 SQLite/Postgres keyed row 单行 upsert/tenant lookup，并保留一版 legacy blob read-through；全局裁剪从写入热路径拆出，每进程五分钟最多一次、每类最多 1,000 行并使用真实当前时间。流式 registry 必须先持久化再暴露 terminal frame，跨 replica 的立即 continuation 不依赖进程内 pending map。
-- **自动维护保持开启**：未关闭 `vacuum_enabled`，也未改低峰小时。自动 VACUUM 的开关、小时与日期在进入串行维护队列后重新读取；busy 时只记录 `vacuum.auto_skip_busy`、不暂停入口、不记当天成功，并在下一次 10 分钟 tick 重试。空闲路径由外层唯一持有 HTTP gate，其他 worker/write activity 排空和 `store.vacuum()` 完成后才统一恢复入口；Postgres/Supabase 使用原生 autovacuum，不安装这个 SQLite scheduler。数据清理继续由原有容器内 scheduler 直接调用 Store，VACUUM 不再重复先跑清理，以缩短独占维护窗口。
-- **只观测不拒绝**：每 60 秒记录 process memory、event-loop delay、pending preflight 与 OAuth refresh queue depth；这些指标不进入 `/healthz`、readiness、admission、限流或 503 判定。Docker cgroup 上限保持部署现状。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-28 · preflight/registry 内存放大与自动 VACUUM 空闲门禁**：Responses preflight 增加 deadline/abort，catalog 与 registry 改为有界热路径；自动 VACUUM 仅在空闲 drain 后执行，完整原文通过 git history 回溯。
 - **2026-07-25 · 上游过载（529/503）在 fetch 边界退避重试**：只在首字节前对 529/503 做两次有界退避，保留账号池、熔断、fallback 与终态 telemetry 语义；客户端断连立即停止，完整原文通过 git history 回溯。
 - **2026-07-25 · Responses WebSocket terminal 立即释放并关闭失效连接**：成功终态立即释放请求与 ingress lease，失败终态关闭失效连接；Codex 增量续接保持 registry/provider/account/lane provenance 与 abort 边界，完整原文通过 git history 回溯。
 - **2026-07-25 · 图片上游参数拒绝保持客户端 400**：ZenMux 的结构化 `invalid_params` 在共享边界转为 `invalid_request / 400`，provider 5xx、网络、限流与真实链耗尽语义不变，完整原文通过 git history回溯。

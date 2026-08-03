@@ -1196,6 +1196,14 @@ function upstreamErrorCode(raw: unknown): string | null {
     const code = (inner as { code?: unknown }).code;
     if (typeof code === "string") return code;
   }
+  const response = (raw as { response?: unknown }).response;
+  if (response !== null && typeof response === "object") {
+    const responseError = (response as { error?: unknown }).error;
+    if (responseError !== null && typeof responseError === "object") {
+      const code = (responseError as { code?: unknown }).code;
+      if (typeof code === "string") return code;
+    }
+  }
   const top = (raw as { code?: unknown }).code;
   return typeof top === "string" ? top : null;
 }
@@ -1532,11 +1540,12 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     let capabilityPruned = false;
     let attemptedAny = false;
     let circuitSkipped = false;
-    // A terminal context error is actionable only when every other candidate was
-    // rejected for context/capability reasons. Availability and provider failures
-    // keep the existing retryable aggregate instead of falsely telling the client
-    // that compaction is guaranteed to fix the request.
+    // A terminal context error is actionable when every other candidate was rejected
+    // for context/capability reasons, or when two candidates independently confirm
+    // the same overflow. One context rejection mixed with a provider failure keeps
+    // the retryable aggregate instead of claiming compaction is guaranteed to help.
     let onlyContextOrCapabilitySkips = true;
+    const contextConfirmations = new Set<string>();
     let contextOverflow:
       | {
           message: string;
@@ -1546,7 +1555,9 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     const rememberContextOverflow = (
       message: string,
       providerRaw: Record<string, unknown> | null,
+      confirmationKey?: string,
     ): void => {
+      if (confirmationKey !== undefined) contextConfirmations.add(confirmationKey);
       if (contextOverflow === undefined) {
         contextOverflow = { message, providerRaw };
         return;
@@ -1596,6 +1607,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         oauthProviderProtocols,
       });
       const { provider, providerModel } = target;
+      const contextConfirmationKey = `${target.providerName ?? "<default>"}\0${providerModel}`;
       if (!provider) {
         onlyContextOrCapabilitySkips = false;
         attempts.push(skipRow(alias, "provider_unavailable", elapsed()));
@@ -1769,6 +1781,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 exactContextLimit,
               )} maximum`,
               null,
+              contextConfirmationKey,
             );
             attempts.push(skipRow(alias, "context_too_small", elapsed()));
             continue;
@@ -2181,6 +2194,9 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           rememberContextOverflow(
             upstreamErrorMessage(detail.provider_raw) ?? detail.message,
             detail.provider_raw,
+            upstreamErrorCode(detail.provider_raw)?.toLowerCase() === "context_length_exceeded"
+              ? contextConfirmationKey
+              : undefined,
           );
           attempts.push({
             alias,
@@ -2306,7 +2322,10 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       errorClass = "lane_unavailable";
       message =
         "no provider is configured; add an API key or connect a subscription in Admin → Providers";
-    } else if (contextOverflow !== undefined && onlyContextOrCapabilitySkips) {
+    } else if (
+      contextOverflow !== undefined &&
+      (onlyContextOrCapabilitySkips || contextConfirmations.size >= 2)
+    ) {
       errorClass = "invalid_request";
       message = contextOverflow.message;
       providerRaw = contextOverflow.providerRaw;
