@@ -1576,6 +1576,39 @@ describe("createExecute — gateway execution adapter", () => {
     });
   });
 
+  it("does not let approximate context estimates override a real provider failure", async () => {
+    const provider = {
+      chatCompletion: vi
+        .fn()
+        .mockRejectedValue(new UpstreamError("upstream_error", "upstream returned 500", {}, 500)),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ first: "small-a", second: "small-b", tail: "tail-model" }),
+      breaker: breaker(),
+      catalog: new Map([
+        ["first", entry("first", { maxContextTokens: 20 })],
+        ["second", entry("second", { maxContextTokens: 20 })],
+      ]),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["first", "second", "tail"]),
+      req({ messages: [{ role: "user", content: "x".repeat(100) }] }),
+    );
+
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected a terminal error");
+    expect(out.final.error).toMatchObject({
+      error_class: "all_providers_failed",
+      http_status: 502,
+    });
+  });
+
   it("skips a candidate on context_length_exceeded without tripping the breaker", async () => {
     // Some upstreams report model-window overflow as an in-band stream error without an
     // HTTP 400 status. That is a candidate capability miss, not provider health.
@@ -1801,6 +1834,104 @@ describe("createExecute — gateway execution adapter", () => {
       error_class: "all_providers_failed",
       http_status: 502,
       provider_raw: null,
+    });
+  });
+
+  it("returns a compaction 400 when multiple candidates confirm context overflow", async () => {
+    const raw = {
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        code: "context_length_exceeded",
+        message:
+          "Your input exceeds the context window of this model. Please adjust your input and try again.",
+        param: "input",
+      },
+      sequence_number: 2,
+    };
+    const provider = {
+      chatCompletion: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new UpstreamError("upstream_error", "codex responses stream error", raw, null),
+        )
+        .mockRejectedValueOnce(
+          new UpstreamError(
+            "upstream_error",
+            "upstream returned 422",
+            {
+              error:
+                "Failed to deserialize the JSON body into the target type: invalid type: map, expected a sequence",
+            },
+            422,
+          ),
+        )
+        .mockRejectedValueOnce(
+          new UpstreamError("upstream_error", "codex responses stream error", raw, null),
+        ),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ sol: "gpt-5.6-sol", xai: "grok-4.5", terra: "gpt-5.6-terra" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["sol", "xai", "terra"]), req());
+
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected a terminal error");
+    expect(out.final.error).toMatchObject({
+      error_class: "invalid_request",
+      http_status: 400,
+      message: raw.error.message,
+      provider_raw: raw,
+    });
+    expect(out.attempts.map((attempt) => attempt.skip_reason)).toEqual([
+      "context_too_small",
+      null,
+      "context_too_small",
+    ]);
+  });
+
+  it("does not count duplicate provider/model context errors as independent confirmations", async () => {
+    const raw = {
+      error: {
+        code: "context_length_exceeded",
+        message: "Your input exceeds the context window of this model.",
+      },
+    };
+    const provider = {
+      chatCompletion: vi
+        .fn()
+        .mockRejectedValueOnce(new UpstreamError("upstream_error", "overflow", raw, 400))
+        .mockRejectedValueOnce(new UpstreamError("upstream_error", "overflow", raw, 400))
+        .mockRejectedValueOnce(
+          new UpstreamError("upstream_error", "upstream returned 500", {}, 500),
+        ),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ first: "same-model", duplicate: "same-model", tail: "tail-model" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["first", "duplicate", "tail"]), req());
+
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected a terminal error");
+    expect(out.final.error).toMatchObject({
+      error_class: "all_providers_failed",
+      http_status: 502,
     });
   });
 
@@ -5631,6 +5762,112 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
     expect(out.final.status).toBe("ok");
     expect(out.stream).not.toBeNull();
     expect(out.nativePassthrough).toBe(true);
+  });
+
+  it("maps two native Responses context errors around another failure to compaction 400", async () => {
+    const contextStream = (model: string) =>
+      gen([
+        'event: response.created\ndata: {"type":"response.created"}\n\n',
+        `event: response.failed\ndata: ${JSON.stringify({
+          type: "response.failed",
+          response: {
+            instructions: "private request content",
+            error: {
+              type: "invalid_request_error",
+              code: "context_length_exceeded",
+              message: `Your input exceeds the context window of ${model}.`,
+            },
+          },
+        })}\n\n`,
+      ]);
+    // biome-ignore lint/correctness/useYield: pre-output provider rejection
+    async function* xaiFailure(): AsyncGenerator<string> {
+      throw new UpstreamError(
+        "upstream_error",
+        "upstream returned 422",
+        { error: "invalid type: map, expected a sequence" },
+        422,
+      );
+    }
+    const sol = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: vi.fn().mockReturnValue(contextStream("sol")),
+    } as unknown as ProviderClient;
+    const xai = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: vi.fn().mockReturnValue(xaiFailure()),
+    } as unknown as ProviderClient;
+    const terra = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: vi.fn().mockReturnValue(contextStream("terra")),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: sol,
+      providers: new Map([
+        ["codex", sol],
+        ["xai", xai],
+        ["codex-terra", terra],
+      ]),
+      registry: protocolRegistry({
+        sol: {
+          providerName: "codex",
+          providerModel: "gpt-5.6-sol",
+          targetProviderProtocol: "openai_responses",
+        },
+        xai: {
+          providerName: "xai",
+          providerModel: "grok-4.5",
+          targetProviderProtocol: "openai_responses",
+        },
+        terra: {
+          providerName: "codex-terra",
+          providerModel: "gpt-5.6-terra",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(
+      plan(["sol", "xai", "terra"]),
+      req({
+        protocol: "openai_responses",
+        stream: true,
+        native_request: createNativePassthroughCarrier({
+          protocol: "openai_responses",
+          body: { model: "auto", input: "large request", stream: true },
+          headers: {},
+        }),
+      }),
+    );
+
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected a terminal error");
+    expect(out.final.error).toMatchObject({
+      error_class: "invalid_request",
+      http_status: 400,
+      provider_raw: {
+        type: "response.failed",
+        response: { error: { code: "context_length_exceeded" } },
+      },
+    });
+    expect(out.attempts.map((attempt) => attempt.skip_reason)).toEqual([
+      "context_too_small",
+      null,
+      "context_too_small",
+    ]);
+    expect(out.attempts[0]?.error_detail?.provider_raw).not.toHaveProperty("response.instructions");
+    expect(recordFailure).toHaveBeenCalledTimes(1);
+    expect(recordFailure).toHaveBeenCalledWith("xai");
   });
 
   it("an Anthropic passthrough stream that ends with no real output records a failure and advances the chain", async () => {

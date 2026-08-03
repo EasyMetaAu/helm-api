@@ -65,6 +65,29 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
 }
 
+function errorFields(value: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of ["type", "code", "message", "param"] as const) {
+    const field = value[key];
+    if (typeof field === "string" || typeof field === "number" || field === null) {
+      out[key] = field;
+    }
+  }
+  return out;
+}
+
+function errorProviderRaw(data: string): Record<string, unknown> | null {
+  const obj = tryParse(data);
+  if (!obj) return null;
+  const out = errorFields(obj);
+  const error = asRecord(obj.error);
+  if (error) out.error = errorFields(error);
+  else if (typeof obj.error === "string") out.error = obj.error;
+  const responseError = asRecord(asRecord(obj.response)?.error);
+  if (responseError) out.response = { error: errorFields(responseError) };
+  return out;
+}
+
 function nonEmptyString(value: unknown): boolean {
   return typeof value === "string" && value.length > 0;
 }
@@ -85,7 +108,7 @@ const responsesClassifier: PreOutputClassifier = {
   },
   errorMessage(data) {
     const obj = tryParse(data) ?? {};
-    const top = (obj.error ?? {}) as { message?: string };
+    const top = (obj.error ?? obj) as { message?: string };
     const nested = (((obj.response ?? {}) as Record<string, unknown>).error ?? {}) as {
       message?: string;
     };
@@ -238,7 +261,11 @@ export async function* guardPreOutputFailure(
       if (data !== null) {
         const cls = classifier.classify(data);
         if (cls === "error") {
-          throw new UpstreamError("upstream_error", classifier.errorMessage(data));
+          throw new UpstreamError(
+            "upstream_error",
+            classifier.errorMessage(data),
+            errorProviderRaw(data),
+          );
         }
         if (cls === "output") {
           committed = true;

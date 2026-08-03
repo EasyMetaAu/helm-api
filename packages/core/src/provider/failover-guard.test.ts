@@ -45,6 +45,32 @@ describe("guardPreOutputFailure — openai_responses", () => {
     await expect(collect(guardPreOutputFailure(src, responses))).rejects.toThrow(UpstreamError);
   });
 
+  it("preserves the structured terminal error for fallback classification", async () => {
+    const raw = {
+      type: "error",
+      code: "context_length_exceeded",
+      message: "Please reduce the input",
+      response: { instructions: "private request content" },
+    };
+    const src = fromChunks([
+      'event: response.created\ndata: {"type":"response.created"}\n\n',
+      `event: error\ndata: ${JSON.stringify(raw)}\n\n`,
+    ]);
+
+    try {
+      await collect(guardPreOutputFailure(src, responses));
+      throw new Error("expected a terminal error");
+    } catch (error) {
+      expect(error).toBeInstanceOf(UpstreamError);
+      expect(error).toMatchObject({ message: raw.message });
+      expect((error as UpstreamError).providerRaw).toEqual({
+        type: raw.type,
+        code: raw.code,
+        message: raw.message,
+      });
+    }
+  });
+
   it("preamble then real output → commits, replays every byte in order (preamble kept)", async () => {
     const chunks = [
       'event: response.created\ndata: {"type":"response.created"}\n\n',
