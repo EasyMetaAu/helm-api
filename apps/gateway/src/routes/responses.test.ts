@@ -1,6 +1,8 @@
 import {
   CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
+  createRuntimeMemoryCoordinator,
   type DecisionRecord,
+  deriveSafeWorkingMemoryCapacity,
   type ExecutionResult,
   responsesTransformer,
   type TelemetryStore,
@@ -244,6 +246,42 @@ function expectNativeCarrier(
 }
 
 describe("POST /v1/responses (OpenAI Responses inbound)", () => {
+  it("admits the production 25.64 MiB request under healthy cgroup headroom", async () => {
+    const capacityBytes = () =>
+      deriveSafeWorkingMemoryCapacity({
+        heapLimitBytes: 4 * 1024 * 1024 * 1024,
+        heapUsedBytes: 512 * 1024 * 1024,
+        availableMemoryBytes: 480_205_864,
+        hostTotalMemoryBytes: 64 * 1024 * 1024 * 1024,
+        constrainedMemoryBytes: 1_536 * 1024 * 1024,
+      });
+    const coordinator = createRuntimeMemoryCoordinator({ capacityBytes });
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 1,
+      jsonAmplification: 6,
+      minRequestChargeBytes: 1,
+      coordinator,
+    });
+    const { deps } = makeDeps({ memoryAdmission });
+    const app = buildApp(deps);
+    const wireBytes = 26_888_188;
+    const emptyBody = JSON.stringify({ ...REQ, input: "" });
+    const body = JSON.stringify({ ...REQ, input: "x".repeat(wireBytes - emptyBody.length) });
+    expect(Buffer.byteLength(body)).toBe(wireBytes);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body,
+    });
+
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(coordinator.reservedBytes).toBe(0);
+    expect(memoryAdmission.reservedBytes).toBe(0);
+    expect(memoryAdmission.pendingBytes).toBe(0);
+  });
+
   it("accepts a body larger than the former hard body limit", async () => {
     const memoryAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 60,
