@@ -1836,7 +1836,14 @@ export function supportsAutomaticVacuum(driver: "sqlite" | "supabase"): boolean 
 // Store factory may open a remote Postgres (supabase driver); the sqlite default
 // resolves synchronously under the await.
 export async function buildServer(
-  opts: { logger?: Logger; configDir?: string } = {},
+  opts: {
+    logger?: Logger;
+    configDir?: string;
+    resourcePressure?: Pick<
+      ReturnType<typeof createRuntimeResourcePressureGate>,
+      "shouldRun" | "shouldRunHeavy"
+    >;
+  } = {},
 ): Promise<ServerHandle> {
   const logger = opts.logger ?? createJsonLogger();
   const responsesWebSocketSessionProof = randomUUID();
@@ -2041,9 +2048,9 @@ export async function buildServer(
   let vacuumScheduler: ReturnType<typeof startCleanupScheduler> | null = null;
   let signalScheduler: ReturnType<typeof startSignalScheduler> | null = null;
   let memoryWorker: ReturnType<typeof startMemoryWorker> | null = null;
-  const resourcePressure = createRuntimeResourcePressureGate((message, fields) =>
-    logger.log("info", message, fields),
-  );
+  const resourcePressure =
+    opts.resourcePressure ??
+    createRuntimeResourcePressureGate((message, fields) => logger.log("info", message, fields));
   // Apply a new settings object live: re-bind `settings`, push the log level into
   // the logger, flip the rate-limit master switch, and retune the system-default
   // quota. Cleanup cadence is also rescheduled live so the admin setting is not

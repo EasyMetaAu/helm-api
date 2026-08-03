@@ -145,7 +145,13 @@ const { buildServer } = process.env.NODE_V8_COVERAGE
 const repoConfigDir = new URL("../../../../config", import.meta.url).pathname;
 const configDir = `${DATA_DIR}/config`;
 cpSync(repoConfigDir, configDir, { recursive: true });
-const { app, port, host } = await buildServer({ configDir });
+const { app, port, host } = await buildServer({
+  configDir,
+  resourcePressure: {
+    shouldRun: async () => true,
+    shouldRunHeavy: async () => false,
+  },
+});
 serve({ fetch: app.fetch, port, hostname: host });
 process.stdout.write(`e2e gateway listening on ${host}:${port}\n`);
 

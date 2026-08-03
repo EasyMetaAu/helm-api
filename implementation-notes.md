@@ -11,6 +11,7 @@
 
 - **现场根因**：1.5 GiB cgroup 当时仍有约 457.96 MiB 可用内存，但动态准入先扣除面向非受限宿主机的 384 MiB 固定预留，再只使用剩余量的 70%，把安全工作容量压到约 51.78 MiB；一个 25.64 MiB Responses 请求按 6 倍 JSON 放大计为约 153.86 MiB，即使共享协调器没有任何活动 lease 也会稳定返回 503。
 - **最小修复**：受 cgroup 约束时只按容器总量的 5%（最多 1 GiB）保留 native headroom；未受约束进程继续使用原有 384 MiB 下限。V8 128 MiB emergency reserve、70% utilization、HTTP/WebSocket/response-work 共享协调器和 maintenance drain 均保持不变。事故快照下容量变为约 266.81 MiB，单请求可通过，而两个同体积并发请求仍超过共享容量。
+- **e2e 边界**：Playwright gateway 注入确定性压力门，普通后台观察始终允许，重型维护始终禁止，避免 hosted runner 的瞬时 PSI 暂停 60 秒 Memory worker。生产入口不注入，继续读取真实 cgroup、可用内存与 PSI；request、WebSocket 与 response work 仍共享同一个全局 coordinator。
 - **边界**：不恢复固定 HTTP/WebSocket/Session 大小上限，不为空闲协调器增加超额旁路，也不以扩大容器替代算法修复。有限进程仍可能对真正超过实时安全 headroom 的请求返回结构化过载错误。
 
 ## 2026-08-03 · 多候选上下文溢出优先恢复客户端压缩信号（Provider execution / protocol errors，docs/04/05/07，原则 3/5/8）
