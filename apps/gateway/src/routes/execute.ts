@@ -23,6 +23,7 @@ import {
   optimizeVisualContext,
   preOutputClassifierFor,
   resolveCostUsd,
+  responsesInputItemsAreCrossProtocolLossy,
   sanitizeCodexResponsesNativeBody,
   TokenRefreshError,
   UpstreamError,
@@ -453,6 +454,16 @@ function decideNativePassthroughForAttempt(input: {
     providerSupportsPassthrough: req.stream
       ? typeof target.provider?.nativePassthroughStream === "function"
       : typeof target.provider?.nativePassthrough === "function",
+    // A Codex-origin body (custom_tool_call / caller-linked PTC / unknown items) forwarded
+    // verbatim to a GENERIC Responses provider (xAI/Grok) 422s. Disable passthrough so the
+    // executor translates it to a clean standard Responses body. The profile is read from
+    // the resolved provider client (OAuth pools forward the member profile — see
+    // serialize-client), so a multi-account pool no longer masks it as undefined.
+    sourceCarriesResponsesNativeItems:
+      Array.isArray(req.provider_raw?.responses_input_items) ||
+      Array.isArray(req.provider_raw?.unknown_items),
+    targetIsGenericResponsesProfile:
+      target.provider?.nativeProtocolProfile === "generic_openai_responses",
   });
 
   return {
@@ -779,12 +790,18 @@ function candidateGuardSkipReason(
   ) {
     return "responses_previous_response_id_provider_mismatch";
   }
+  // A generic Responses provider (xAI/Grok) can't parse Codex-private items. NARROWED to
+  // the genuinely non-translatable cases (unknown item types / caller-linked PTC chains):
+  // those stay a hard skip. Foldable items (plain custom_tool_call / caller-free
+  // function_call) fall through — canUseNativePassthrough then disables verbatim forward
+  // (`responses_native_body_provider_incompatible`) and the executor translates to a clean
+  // standard Responses body, so Grok can actually serve as a Codex fallback.
   if (
     req.protocol === "openai_responses" &&
     target.targetProviderProtocol === "openai_responses" &&
     target.provider?.nativeProtocolProfile === "generic_openai_responses" &&
-    (Array.isArray(req.provider_raw?.responses_input_items) ||
-      Array.isArray(req.provider_raw?.unknown_items))
+    (Array.isArray(req.provider_raw?.unknown_items) ||
+      responsesInputItemsAreCrossProtocolLossy(req.provider_raw?.responses_input_items))
   ) {
     return "responses_native_items_provider_incompatible";
   }
@@ -811,9 +828,14 @@ function protocolGuardSkipReason(
   if (Array.isArray(req.provider_raw?.responses_native_tools)) {
     return "responses_native_tools_cross_protocol_blocked";
   }
+  // NARROWED (issue: Codex cross-protocol fallback): only block when the native items
+  // are genuinely non-reconstructible cross-protocol — an unknown item type (dropped
+  // from messages[]) or a caller-linked PTC parallel chain. Plain custom_tool_call /
+  // caller-free function_call fold losslessly into assistant.tool_calls, so they run the
+  // normal responses->IR->target translation instead of skipping the whole candidate.
   if (
-    Array.isArray(req.provider_raw?.responses_input_items) ||
-    Array.isArray(req.provider_raw?.unknown_items)
+    Array.isArray(req.provider_raw?.unknown_items) ||
+    responsesInputItemsAreCrossProtocolLossy(req.provider_raw?.responses_input_items)
   ) {
     return "responses_native_items_cross_protocol_blocked";
   }

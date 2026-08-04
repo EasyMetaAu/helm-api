@@ -287,6 +287,36 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// Responses input[] item types the IR folder CAN rebuild losslessly (message ->
+// messages[], function/custom calls -> assistant.tool_calls, their outputs ->
+// role:"tool", reasoning -> thinking ext). Anything outside this set has no IR home.
+const CROSS_PROTOCOL_FOLDABLE_ITEM_TYPES = new Set([
+  "message",
+  "function_call",
+  "function_call_output",
+  "custom_tool_call",
+  "custom_tool_call_output",
+  "reasoning",
+]);
+
+// Does a Responses `input[]` carry structure the Responses->IR->(non-Responses) fold
+// CANNOT rebuild? True only when an item type is unknown (it would be dropped from
+// messages[]), or a function/custom call is caller-linked — a PTC parallel chain whose
+// exact top-level order + caller linkage is load-bearing and has no IR field. Plain
+// `custom_tool_call` / caller-free `function_call` fold losslessly, so they are NOT a
+// cross-protocol blocker. This is the READ-side judgment for the executor's guard; the
+// folder's stash condition (below) stays deliberately broader because it also protects
+// the SAME-protocol native-passthrough snapshot. Pure + single-unit-testable.
+export function responsesInputItemsAreCrossProtocolLossy(items: unknown): boolean {
+  if (!Array.isArray(items)) return false;
+  return items.some((item) => {
+    if (!isRecord(item)) return true;
+    const type = item.type;
+    if (typeof type !== "string" || !CROSS_PROTOCOL_FOLDABLE_ITEM_TYPES.has(type)) return true;
+    return (type === "function_call" || type === "function_call_output") && isRecord(item.caller);
+  });
+}
+
 // Responses function tools are flat (`{type:"function", name, parameters}`), while
 // Chat Completions upstreams require `{type:"function", function:{...}}`.
 function responsesToolToChatTool(tool: unknown): unknown {

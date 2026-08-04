@@ -178,5 +178,14 @@ export function createSerializingClient(deps: SerializeClientDeps): ProviderClie
       deps.inner.closeResponsesWebSocketSession?.(sessionId) ?? Promise.resolve();
   }
 
+  // Forward the inner member's wire-protocol profile verbatim. This is a DATA field,
+  // not a method, so the method-by-method decoration above would otherwise drop it —
+  // and a dropped profile made a multi-account pool report `undefined` (pool.ts only
+  // exposes a pool profile when every member agrees), silently disabling the
+  // executor's generic-Responses cross-protocol guard (`candidateGuardSkipReason`).
+  if (deps.inner.nativeProtocolProfile !== undefined) {
+    client.nativeProtocolProfile = deps.inner.nativeProtocolProfile;
+  }
+
   return client;
 }

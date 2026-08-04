@@ -23,6 +23,7 @@ export type NativePassthroughDisableReason =
   | "missing_native_request"
   | "source_protocol_is_lingua_franca"
   | "protocol_mismatch"
+  | "responses_native_body_provider_incompatible"
   | "provider_requires_compatibility_rewrite"
   | "provider_lacks_passthrough";
 
@@ -44,6 +45,12 @@ export interface NativePassthroughDecisionInput {
   providerRequiresCompatibilityRewrite: boolean;
   /** The resolved provider client actually implements `nativePassthrough`. */
   providerSupportsPassthrough: boolean;
+  /** The inbound body carries Responses native items (`responses_input_items` /
+   *  `unknown_items`) — Codex-private structure a non-Codex upstream can't parse. */
+  sourceCarriesResponsesNativeItems: boolean;
+  /** The resolved provider speaks the GENERIC OpenAI-Responses wire profile (e.g. xAI),
+   *  i.e. NOT the Codex official endpoint that emits these native items. */
+  targetIsGenericResponsesProfile: boolean;
 }
 
 // Pure decision. Governance (auth/routing/budget/telemetry/memory/fallback/
@@ -68,6 +75,19 @@ export function canUseNativePassthrough(
   // response == request shape (the client gets a native response it understands).
   if (input.request.protocol !== input.targetProviderProtocol) {
     return { ok: false, reason: "protocol_mismatch" };
+  }
+  // Same wire protocol, but a CROSS-ORIGIN Responses body: the inbound carries Codex
+  // ChatGPT-private items (custom_tool_call / additional_tools / encrypted reasoning)
+  // and the target is a GENERIC Responses provider (e.g. xAI/Grok) that cannot parse
+  // them — forwarding verbatim 422s. Disable passthrough so the executor translates the
+  // body into a clean standard Responses request. Codex->Codex (non-generic profile)
+  // and native-item-free bodies keep byte-faithful passthrough.
+  if (
+    input.request.protocol === "openai_responses" &&
+    input.targetIsGenericResponsesProfile &&
+    input.sourceCarriesResponsesNativeItems
+  ) {
+    return { ok: false, reason: "responses_native_body_provider_incompatible" };
   }
   // Phase 2: streaming passthrough is supported. The guard stays protocol-neutral —
   // whether the provider can stream the verbatim native body is conveyed by

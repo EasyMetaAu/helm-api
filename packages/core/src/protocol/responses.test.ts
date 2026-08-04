@@ -3,7 +3,49 @@ import { anthropicTransformer } from "./anthropic/index.js";
 import { geminiTransformer } from "./gemini/gemini-transformer.js";
 import type { IRRequest, IRResponse } from "./ir.js";
 import { TransformerRegistry } from "./registry.js";
-import { responsesTransformer } from "./responses.js";
+import { responsesInputItemsAreCrossProtocolLossy, responsesTransformer } from "./responses.js";
+
+describe("responsesInputItemsAreCrossProtocolLossy — cross-protocol fold gate", () => {
+  it("returns false for a plain custom_tool_call (folds into assistant.tool_calls)", () => {
+    expect(
+      responsesInputItemsAreCrossProtocolLossy([
+        { type: "custom_tool_call", call_id: "c1", name: "apply_patch", input: "{}" },
+      ]),
+    ).toBe(false);
+  });
+
+  it("returns false for a caller-free function_call / function_call_output", () => {
+    expect(
+      responsesInputItemsAreCrossProtocolLossy([
+        { type: "function_call", call_id: "c1", name: "get_weather", arguments: "{}" },
+        { type: "function_call_output", call_id: "c1", output: "sunny" },
+      ]),
+    ).toBe(false);
+  });
+
+  it("returns true for a caller-linked function_call (PTC parallel chain has no IR home)", () => {
+    expect(
+      responsesInputItemsAreCrossProtocolLossy([
+        { type: "function_call", call_id: "c1", name: "f", arguments: "{}", caller: { id: "p1" } },
+      ]),
+    ).toBe(true);
+  });
+
+  it("returns true for an unknown item type (dropped from messages[])", () => {
+    expect(responsesInputItemsAreCrossProtocolLossy([{ type: "web_search_call", id: "w1" }])).toBe(
+      true,
+    );
+  });
+
+  it("returns true for a non-record item", () => {
+    expect(responsesInputItemsAreCrossProtocolLossy(["oops"])).toBe(true);
+  });
+
+  it("returns false for a non-array / empty input (nothing to lose)", () => {
+    expect(responsesInputItemsAreCrossProtocolLossy(undefined)).toBe(false);
+    expect(responsesInputItemsAreCrossProtocolLossy([])).toBe(false);
+  });
+});
 
 describe("responsesTransformer — text.format structured output canonicalization (order 1)", () => {
   // A Responses client sends structured output as text.format.{type,name,schema};

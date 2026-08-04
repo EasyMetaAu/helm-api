@@ -53,6 +53,7 @@ function makeNativeInner(chunks: string[] = ["c1", "c2", "c3"]): ProviderClient 
     nativeCalls: 0,
     nativeStreamCalls: 0,
     compactCalls: 0,
+    nativeProtocolProfile: "generic_openai_responses" as const,
     async chatCompletion() {
       return RESPONSE;
     },
@@ -407,5 +408,23 @@ describe("createSerializingClient", () => {
     expect(client.nativePassthrough).toBeUndefined();
     expect(client.nativePassthroughStream).toBeUndefined();
     expect(client.responsesCompact).toBeUndefined();
+  });
+
+  // A member's nativeProtocolProfile is a DATA field the OAuth pool reads to decide
+  // whether every member speaks the same wire protocol (pool.ts collapses the pool
+  // profile to undefined unless all members agree). The serializing decorator must
+  // forward it verbatim — dropping it made a multi-account xAI pool report an
+  // undefined profile, which silently disabled the executor's generic-Responses
+  // cross-protocol guard and let Codex-native bodies pass through to Grok (422).
+  it("forwards the inner member's nativeProtocolProfile (pool profile agreement)", () => {
+    const inner = makeNativeInner();
+    const client = makeClient(inner, { enabled: true, delayMs: 0, timeoutMs: 5_000 });
+    expect(client.nativeProtocolProfile).toBe("generic_openai_responses");
+  });
+
+  it("leaves nativeProtocolProfile undefined when the inner member has none", () => {
+    const inner = makeInner(); // no profile
+    const client = makeClient(inner, { enabled: true, delayMs: 0, timeoutMs: 5_000 });
+    expect(client.nativeProtocolProfile).toBeUndefined();
   });
 });
