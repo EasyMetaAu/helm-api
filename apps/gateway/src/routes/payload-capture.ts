@@ -40,18 +40,21 @@ export interface PayloadCaptureDeps {
   costOf?: (alias: string, usage: StreamUsage) => number | null;
 }
 
-/** Apply one authenticated key's override without mutating the shared live deps. */
+/** Apply one authenticated key's override without mutating the shared live deps.
+ *  Priority (docs/06/07): an explicit per-key mode is the HIGHEST authority —
+ *  `none`/`payload`/`session` unconditionally override the live global toggle;
+ *  only `null`/`undefined` inherits it. (A prior resource-protection change made
+ *  global-off a hard-off that silently overrode every key; that inverted the
+ *  contract and is the regression this restores.) */
 export function withRequestContentMode<T extends PayloadCaptureDeps>(
   deps: T,
   mode: RequestContentMode | null | undefined,
 ): T {
   if (mode == null) return deps;
-  const globallyEnabled = () =>
-    deps.capturePayloads?.() === true || deps.captureSessions?.() === true;
   return {
     ...deps,
-    capturePayloads: () => globallyEnabled() && mode === "payload",
-    captureSessions: () => globallyEnabled() && mode === "session",
+    capturePayloads: () => mode === "payload",
+    captureSessions: () => mode === "session",
   };
 }
 

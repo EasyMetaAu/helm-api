@@ -223,7 +223,7 @@ test.describe("admin system settings", () => {
 });
 
 test.describe("per-key request-content storage", () => {
-  test("global metadata-only remains a hard-off over key overrides", async () => {
+  test("an explicit key mode overrides global metadata-only; null inherits it", async () => {
     const admin = await playwrightRequest.newContext({
       baseURL: BASE,
       extraHTTPHeaders: { Authorization: basicHeader(ADMIN_USER, ADMIN_PASSWORD) },
@@ -275,8 +275,10 @@ test.describe("per-key request-content storage", () => {
           return requestIds.length;
         })
         .toBeGreaterThanOrEqual(1);
+      // Global is metadata-only, but the key's explicit `payload` mode is the
+      // highest authority, so this request IS captured.
       const captured = await admin.get(`/admin/api/requests/${requestIds[0]}/payload?part=meta`);
-      expect(await captured.json()).toMatchObject({ captured: false });
+      expect(await captured.json()).toMatchObject({ captured: true });
 
       const cleared = await admin.patch(`/admin/api/keys/${keyId}`, {
         data: { request_content_mode: null },
@@ -300,6 +302,7 @@ test.describe("per-key request-content storage", () => {
           return requestIds.length;
         })
         .toBeGreaterThanOrEqual(2);
+      // Cleared to null → inherits the live global (metadata-only) → not captured.
       const inherited = await admin.get(`/admin/api/requests/${requestIds[0]}/payload?part=meta`);
       expect(await inherited.json()).toMatchObject({ captured: false });
     } finally {
