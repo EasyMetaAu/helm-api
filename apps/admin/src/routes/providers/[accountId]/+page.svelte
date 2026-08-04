@@ -64,10 +64,17 @@
     return keys;
   });
 
+  // Default the active tab to the WEEKLY window (7d / primary / weekly) — that's the
+  // allowance operators watch for shrinkage; fall back to the first window otherwise.
+  function isWeeklyKey(key: string): boolean {
+    return key === '7d' || key.startsWith('7d-') || key === 'primary' || key === 'weekly';
+  }
+
   let activeKey = $state<string | null>(null);
-  // Default the active tab to the first available window once data resolves.
   $effect(() => {
-    if (activeKey === null && windowKeys.length > 0) activeKey = windowKeys[0] ?? null;
+    if (activeKey === null && windowKeys.length > 0) {
+      activeKey = windowKeys.find(isWeeklyKey) ?? windowKeys[0] ?? null;
+    }
   });
 
   const quotaWindow = $derived.by((): OAuthQuotaWindow | null => {
@@ -252,9 +259,12 @@
     <section class="card mb-6">
       <h2 class="section-header mb-3">{$t('Tokens per period')}</h2>
       {#if trend.length > 0}
+        <!-- Each column is a full-height flex item so the bar inside can size to a
+             percentage of the h-40 track (a % height needs a parent with a resolved
+             height — the column itself must be h-full, not shrink-to-content). -->
         <div class="flex h-40 items-end gap-1">
           {#each trend as bar, i (i)}
-            <div class="flex flex-1 flex-col items-center gap-1">
+            <div class="flex h-full flex-1 items-end">
               <!-- Partial periods undercount (data cut off by retention) — hatch them
                    so a short bar isn't misread as a real drop in allowance. -->
               <div
