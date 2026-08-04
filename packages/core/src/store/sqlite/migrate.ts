@@ -1283,6 +1283,28 @@ const MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    // Real reset-period boundaries — the append-only history oauth_quota (latest-wins
+    // snapshot) lacks. Populated going forward when a quota refresh sees resetsAtMs
+    // advance; the usage-period read then slices history on true boundaries. No
+    // backfill — history stays approximate until real boundaries accrue.
+    version: 46,
+    run: (db) => {
+      db.exec(`
+      CREATE TABLE IF NOT EXISTS oauth_reset_period (
+        provider_id TEXT NOT NULL,
+        account TEXT NOT NULL,
+        window_key TEXT NOT NULL,
+        period_start_ms INTEGER NOT NULL,
+        period_end_ms INTEGER NOT NULL,
+        detected_at_ms INTEGER NOT NULL,
+        PRIMARY KEY (provider_id, account, window_key, period_start_ms)
+      );
+      CREATE INDEX IF NOT EXISTS idx_oauth_reset_period_lookup
+        ON oauth_reset_period (provider_id, account, window_key, period_end_ms);
+      `);
+    },
+  },
 ];
 
 function sqliteTableHasColumns(

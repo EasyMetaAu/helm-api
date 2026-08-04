@@ -1,10 +1,11 @@
 import {
   computeUsagePeriods,
   filterRetiredOpenAICodexLimits,
+  windowMinutesForKey,
   windowsToActiveUsageRecovery,
   windowsToUsageLimit,
 } from "@helm/core";
-import { isCodexQuotaWindowPlaceholder } from "@helm/shared";
+import { isCodexQuotaWindowPlaceholder, type OAuthQuotaWindow } from "@helm/shared";
 import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../../app.js";
@@ -263,12 +264,34 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       // queryBuckets returns ascending by bucketMs, so buckets[0] is the earliest.
       const earliestBucketMs = buckets[0]?.bucketMs ?? now;
       const dataStartMs = Math.max(retentionFloorMs, earliestBucketMs);
+      // Phase 2: real reset boundaries recorded since deploy. Where present, history
+      // slices on them (exact) instead of the fixed-window approximation. Per window
+      // key; fail-open (no store / error → all-approximate).
+      const recordedBoundaries: Record<string, Array<{ startMs: number; endMs: number }>> = {};
+      const periodStore = deps.oauthResetPeriod;
+      if (periodStore) {
+        for (const w of snapshot.windows) {
+          // Fetch limit + 1: the newest recorded row is the OPEN (in-progress) period,
+          // which computeUsagePeriods uses to anchor the current period rather than as a
+          // history row — without the +1 it would burn a history slot (grok review P2R2-2).
+          const recorded = await periodStore
+            .queryPeriods(providerId, account, w.key, limit + 1)
+            .catch(() => []);
+          if (recorded.length > 0) {
+            recordedBoundaries[w.key] = recorded.map((r) => ({
+              startMs: r.periodStartMs,
+              endMs: r.periodEndMs,
+            }));
+          }
+        }
+      }
       return computeUsagePeriods({
         windows: snapshot.windows,
         buckets,
         nowMs: now,
         dataStartMs,
         limit,
+        recordedBoundaries,
       });
     } catch {
       return { current: [], periods: [] };
@@ -312,6 +335,56 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       if (currentUntil === quotaUntil) return;
       await deps.applyUsageLimit(providerId, account, quotaUntil, "replace").catch(() => {});
     };
+    // Detect real reset boundaries by diffing the OLD snapshot against the NEW windows,
+    // per window key: when resetsAtMs advances (old and new both present, new > old), the
+    // window that ended at the old reset just closed — record [oldReset, newReset). Must
+    // run BEFORE store.upsert overwrites the snapshot. FAIL-OPEN: a missed record only
+    // leaves that span on the approximate path (never breaks the refresh).
+    //
+    // Only record a SINGLE-window advance. If the refresh lagged by 2+ windows (the
+    // reset jumped by a multiple of the window length), [oldReset, newReset) would span
+    // several real periods; recording that as one exact period would sum tokens across
+    // them and fake a huge/empty allowance — a false shrink signal. Oversized jumps are
+    // skipped and stay on the approximate path (grok review P2R-1).
+    const recordResetBoundaries = async (
+      providerId: string,
+      account: string,
+      newWindows: OAuthQuotaWindow[],
+    ): Promise<void> => {
+      const sink = deps.oauthResetPeriod;
+      if (!sink) return;
+      const prior = await store.get(providerId, account).catch(() => null);
+      if (!prior) return;
+      const nowMs = Date.now();
+      const oldByKey = new Map(
+        prior.windows.map(
+          (w) => [w.key, { resetsAtMs: w.resetsAtMs, windowMinutes: w.windowMinutes }] as const,
+        ),
+      );
+      for (const w of newWindows) {
+        const old = oldByKey.get(w.key);
+        const oldReset = old?.resetsAtMs;
+        if (oldReset == null || w.resetsAtMs == null || w.resetsAtMs <= oldReset) continue;
+        // Require the advance to be one window long (within half a window's tolerance).
+        const winMinutes = windowMinutesForKey(
+          w.key,
+          w.windowMinutes ?? old?.windowMinutes ?? null,
+        );
+        if (winMinutes === null) continue; // unknown length → can't validate a single step
+        const winMs = winMinutes * 60_000;
+        if (Math.abs(w.resetsAtMs - oldReset - winMs) > winMs / 2) continue; // multi-window jump → skip
+        await sink
+          .record({
+            providerId,
+            account,
+            windowKey: w.key,
+            periodStartMs: oldReset,
+            periodEndMs: w.resetsAtMs,
+            detectedAtMs: nowMs,
+          })
+          .catch(() => {});
+      }
+    };
     if (s) {
       try {
         const status = await s.listStatus({ forceRefresh: true, serial: true });
@@ -343,6 +416,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                   throw new Error("quota refresh returned no windows");
                 }
                 const capturedAt = Date.now();
+                await recordResetBoundaries("anthropic", a.account, windows);
                 await store.upsert({
                   providerId: "anthropic",
                   account: a.account,
@@ -371,6 +445,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                   throw new Error("quota refresh returned no windows");
                 }
                 const capturedAt = Date.now();
+                await recordResetBoundaries("xai", a.account, windows);
                 await store.upsert({
                   providerId: "xai",
                   account: a.account,
@@ -398,6 +473,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                     additionalLimits: filterRetiredOpenAICodexLimits(fresh.additionalLimits),
                   };
                   const capturedAt = Date.now();
+                  await recordResetBoundaries("openai-codex", a.account, activeResult.windows);
                   await store.upsert({
                     providerId: "openai-codex",
                     account: a.account,

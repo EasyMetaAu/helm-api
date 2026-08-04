@@ -3615,6 +3615,9 @@ export async function buildServer(
       // /oauth/usage + /oauth/quota admin routes (fail-open to empty when absent).
       oauthUsage: store.oauthUsage,
       oauthQuota: store.oauthQuota,
+      // Append-only reset-period boundaries; refreshQuota records them, and the
+      // /oauth/usage/periods read slices history on the real ones where present.
+      oauthResetPeriod: store.oauthResetPeriod,
       resetCreditGuard,
       // Per-account connectivity tester (providers page "Test" button); see above.
       oauthTester,

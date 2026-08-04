@@ -407,6 +407,126 @@ describe("admin OAuth routes — read endpoints", () => {
     });
   });
 
+  it("POST /oauth/refresh records a reset-period boundary when resetsAtMs advances", async () => {
+    const now = Date.now();
+    const oldReset = now - 86_400_000; // yesterday
+    const newReset = now + 6 * 86_400_000; // next week
+    const newWindows: OAuthQuotaWindow[] = [
+      { key: "7d", usedPercent: 4, resetsAtMs: newReset, windowMinutes: 10_080 },
+    ];
+    // Prior snapshot carries the OLD resetsAtMs for the same key → advance detected.
+    const oauthQuota = {
+      get: vi.fn(async () => ({
+        providerId: "xai",
+        account: "subscription",
+        windows: [{ key: "7d", usedPercent: 96, resetsAtMs: oldReset, windowMinutes: 10_080 }],
+        capturedAt: oldReset,
+        source: "xai",
+        usageLimitedUntilMs: null,
+        resetCredits: null,
+      })),
+      getAll: vi.fn(async () => []),
+      upsert: vi.fn(async () => {}),
+      delete: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const oauthResetPeriod = {
+      record: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthResetPeriod"];
+    const seam = fullSeam({
+      listStatus: vi.fn(async () => ({
+        selectionStrategy: "balanced",
+        providers: [{ id: "xai", name: "Grok", accounts: [{ account: "subscription" }] }],
+      })) as never,
+      fetchXaiQuota: vi.fn(async () => newWindows),
+    });
+    const api = app({ oauth: seam, oauthQuota, oauthResetPeriod, applyQuotaSnapshot: vi.fn() });
+    await enqueueRefresh(api);
+
+    expect(oauthResetPeriod?.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerId: "xai",
+        account: "subscription",
+        windowKey: "7d",
+        periodStartMs: oldReset,
+        periodEndMs: newReset,
+      }),
+    );
+  });
+
+  it("POST /oauth/refresh does NOT record a boundary when resetsAtMs is unchanged", async () => {
+    const reset = Date.now() + 6 * 86_400_000;
+    const windows: OAuthQuotaWindow[] = [
+      { key: "7d", usedPercent: 5, resetsAtMs: reset, windowMinutes: 10_080 },
+    ];
+    const oauthQuota = {
+      // Prior snapshot has the SAME resetsAtMs → no advance, no record.
+      get: vi.fn(async () => ({
+        providerId: "xai",
+        account: "subscription",
+        windows,
+        capturedAt: reset - 1000,
+        source: "xai",
+        usageLimitedUntilMs: null,
+        resetCredits: null,
+      })),
+      getAll: vi.fn(async () => []),
+      upsert: vi.fn(async () => {}),
+      delete: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const oauthResetPeriod = {
+      record: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthResetPeriod"];
+    const seam = fullSeam({
+      listStatus: vi.fn(async () => ({
+        selectionStrategy: "balanced",
+        providers: [{ id: "xai", name: "Grok", accounts: [{ account: "subscription" }] }],
+      })) as never,
+      fetchXaiQuota: vi.fn(async () => windows),
+    });
+    const api = app({ oauth: seam, oauthQuota, oauthResetPeriod, applyQuotaSnapshot: vi.fn() });
+    await enqueueRefresh(api);
+
+    expect(oauthResetPeriod?.record).not.toHaveBeenCalled();
+  });
+
+  it("POST /oauth/refresh does NOT record a MULTI-window jump (refresh lagged 2+ windows)", async () => {
+    const now = Date.now();
+    const oldReset = now - 10 * 86_400_000; // 10 days ago
+    const newReset = now + 4 * 86_400_000; // → jump is 14 days = TWO 7d windows
+    const windows: OAuthQuotaWindow[] = [
+      { key: "7d", usedPercent: 3, resetsAtMs: newReset, windowMinutes: 10_080 },
+    ];
+    const oauthQuota = {
+      get: vi.fn(async () => ({
+        providerId: "xai",
+        account: "subscription",
+        windows: [{ key: "7d", usedPercent: 99, resetsAtMs: oldReset, windowMinutes: 10_080 }],
+        capturedAt: oldReset,
+        source: "xai",
+        usageLimitedUntilMs: null,
+        resetCredits: null,
+      })),
+      getAll: vi.fn(async () => []),
+      upsert: vi.fn(async () => {}),
+      delete: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const oauthResetPeriod = {
+      record: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthResetPeriod"];
+    const seam = fullSeam({
+      listStatus: vi.fn(async () => ({
+        selectionStrategy: "balanced",
+        providers: [{ id: "xai", name: "Grok", accounts: [{ account: "subscription" }] }],
+      })) as never,
+      fetchXaiQuota: vi.fn(async () => windows),
+    });
+    const api = app({ oauth: seam, oauthQuota, oauthResetPeriod, applyQuotaSnapshot: vi.fn() });
+    await enqueueRefresh(api);
+    // A 14-day jump spans two real 7d periods → recording it as one exact period would
+    // fake a huge allowance; it is skipped and stays on the approximate path.
+    expect(oauthResetPeriod?.record).not.toHaveBeenCalled();
+  });
+
   it("POST /oauth/refresh reports xAI failure and still refreshes peers and prunes orphans", async () => {
     const anthropicWindows: OAuthQuotaWindow[] = [
       { key: "5h", usedPercent: 10, resetsAtMs: null, windowMinutes: 300 },

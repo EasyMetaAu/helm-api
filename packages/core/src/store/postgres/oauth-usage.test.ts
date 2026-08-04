@@ -2,6 +2,7 @@ import type { OAuthQuotaSnapshot } from "@helm/shared";
 import { describe, expect, it } from "vitest";
 import { createPgliteDb, type PgDb } from "./migrate.js";
 import { PgOAuthQuotaStore } from "./oauth-quota.js";
+import { PgOAuthResetPeriodStore } from "./oauth-reset-period.js";
 import { PgOAuthUsageStore } from "./oauth-usage.js";
 
 // supabase == hosted Postgres; pglite runs the SAME pg-dialect adapters in-process
@@ -218,6 +219,30 @@ describe("PgOAuthQuotaStore (pglite)", () => {
       usageLimitedUntilMs: 9_000,
       windows: [],
     });
+    await db.$close();
+  });
+});
+
+describe("PgOAuthResetPeriodStore (pglite)", () => {
+  it("record is idempotent; queryPeriods filters + orders most-recent first (coerces pg bigints)", async () => {
+    const db: PgDb = await createPgliteDb();
+    const store = new PgOAuthResetPeriodStore(db);
+    const base = {
+      providerId: "anthropic",
+      account: "a@x.com",
+      windowKey: "5h",
+      detectedAtMs: 19500,
+    };
+    await store.record({ ...base, periodStartMs: 1000, periodEndMs: 19000 });
+    await store.record({ ...base, periodStartMs: 1000, periodEndMs: 19000, detectedAtMs: 99999 }); // dup PK → no-op
+    await store.record({ ...base, periodStartMs: 19000, periodEndMs: 37000 });
+    await store.record({ ...base, windowKey: "7d", periodStartMs: 1000, periodEndMs: 605000 }); // other window
+    const rows = await store.queryPeriods("anthropic", "a@x.com", "5h", 10);
+    expect(rows).toHaveLength(2);
+    // numbers, not pg bigint strings; descending by periodEndMs
+    expect(rows.map((r) => r.periodEndMs)).toEqual([37000, 19000]);
+    expect(rows[1]?.detectedAtMs).toBe(19500); // first write wins
+    expect(await store.queryPeriods("anthropic", "nobody", "5h", 10)).toHaveLength(0);
     await db.$close();
   });
 });

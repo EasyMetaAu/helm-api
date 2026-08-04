@@ -468,10 +468,26 @@ export const oauthQuota = pgTable(
   (t) => [primaryKey({ columns: [t.providerId, t.account] })],
 );
 
+// Per-account RESET-PERIOD boundaries — pg mirror of the sqlite oauth_reset_period
+// table. Append-only history of real reset events; PK makes re-detection idempotent.
+export const oauthResetPeriod = pgTable(
+  "oauth_reset_period",
+  {
+    providerId: text("provider_id").notNull(),
+    account: text("account").notNull(),
+    windowKey: text("window_key").notNull(),
+    periodStartMs: bigint("period_start_ms", { mode: "number" }).notNull(), // prior resetsAtMs
+    periodEndMs: bigint("period_end_ms", { mode: "number" }).notNull(), // new resetsAtMs
+    detectedAtMs: bigint("detected_at_ms", { mode: "number" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.providerId, t.account, t.windowKey, t.periodStartMs] })],
+);
+
 export type ApiKeysTable = typeof apiKeys;
 export type TelemetryTable = typeof telemetry;
 export type OAuthUsageTable = typeof oauthUsage;
 export type OAuthQuotaTable = typeof oauthQuota;
+export type OAuthResetPeriodTable = typeof oauthResetPeriod;
 export type RateLimitBucketsTable = typeof rateLimitBuckets;
 export type UsageBudgetBucketsTable = typeof usageBudgetBuckets;
 export type RoutingSignalsTable = typeof routingSignals;

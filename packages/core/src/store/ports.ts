@@ -12,6 +12,7 @@ import type {
   MemoryScopeSummary,
   MemoryThreadInput,
   OAuthQuotaSnapshot,
+  OAuthResetPeriod,
   OAuthUsageBucket,
   OAuthUsageRow,
   Observation,
@@ -1345,6 +1346,24 @@ export interface OAuthQuotaStore {
   // 429 can park an account before any quota PULL has captured its windows. Passing
   // null is the manual "Reset usage" path.
   setUsageLimit(providerId: string, account: string, untilMs: number | null): Promise<void>;
+}
+
+// Append-only RESET-PERIOD boundary history — the record oauth_quota (latest-wins)
+// lacks. `record` is idempotent (PK on provider/account/window/start: re-detecting the
+// same reset folds to one row). OBSERVABILITY only — writes are FAIL-OPEN at the call
+// site (a missed reset just leaves that span on the approximate path). No secret column.
+export interface OAuthResetPeriodStore {
+  // Persist one detected reset boundary; a repeat of the same (provider, account,
+  // window, start) is a no-op.
+  record(row: OAuthResetPeriod): Promise<void>;
+  // Recorded boundaries for one account/window, most recent first, capped by `limit`.
+  // Feeds the usage-period read so history slices on true boundaries where available.
+  queryPeriods(
+    providerId: string,
+    account: string,
+    windowKey: string,
+    limit: number,
+  ): Promise<OAuthResetPeriod[]>;
 }
 
 export interface OAuthTokenStore {

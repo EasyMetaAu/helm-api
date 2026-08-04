@@ -1237,6 +1237,27 @@ const MIGRATIONS: readonly Migration[] = [
       for (const statement of splitStatements(ddl)) await db.execute(sql.raw(statement));
     },
   },
+  {
+    // Real reset-period boundaries — pg mirror of sqlite v46. Append-only history for
+    // the usage-period read; populated going forward from quota-refresh detection.
+    version: 45,
+    run: async (db) => {
+      const ddl = `
+        CREATE TABLE IF NOT EXISTS oauth_reset_period (
+          provider_id TEXT NOT NULL,
+          account TEXT NOT NULL,
+          window_key TEXT NOT NULL,
+          period_start_ms BIGINT NOT NULL,
+          period_end_ms BIGINT NOT NULL,
+          detected_at_ms BIGINT NOT NULL,
+          PRIMARY KEY (provider_id, account, window_key, period_start_ms)
+        );
+        CREATE INDEX IF NOT EXISTS idx_oauth_reset_period_lookup
+          ON oauth_reset_period (provider_id, account, window_key, period_end_ms);
+      `;
+      for (const statement of splitStatements(ddl)) await db.execute(sql.raw(statement));
+    },
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {
