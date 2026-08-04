@@ -232,4 +232,210 @@ describe("computeUsagePeriods", () => {
     expect(historyKeys.has("5h")).toBe(true);
     expect(historyKeys.has("7d")).toBe(true);
   });
+
+  it("uses recorded boundaries (exact) for history then falls back to approximate for the older gap", () => {
+    const now = 107 * HOUR;
+    const reset = 110 * HOUR; // current [105h,110h) capped to now → [105h,107h)
+    const bs = buckets(80 * HOUR, 27, 1000); // [80h,107h)
+    // Two REAL recorded boundaries just before the current period start (105h).
+    const out = computeUsagePeriods({
+      windows: [win("5h", reset, null)],
+      buckets: bs,
+      nowMs: now,
+      dataStartMs: 0,
+      limit: 5,
+      recordedBoundaries: {
+        "5h": [
+          { startMs: 100 * HOUR, endMs: 105 * HOUR },
+          { startMs: 95 * HOUR, endMs: 100 * HOUR },
+        ],
+      },
+    });
+    // First two history periods are the recorded ones → exact (approximate:false).
+    expect(out.periods[0]).toMatchObject({
+      periodStartMs: 100 * HOUR,
+      periodEndMs: 105 * HOUR,
+      approximate: false,
+    });
+    expect(out.periods[1]).toMatchObject({
+      periodStartMs: 95 * HOUR,
+      periodEndMs: 100 * HOUR,
+      approximate: false,
+    });
+    // Older periods roll back from the oldest recorded start (95h) → approximate.
+    expect(out.periods[2]).toMatchObject({ periodEndMs: 95 * HOUR, approximate: true });
+    expect(out.periods[2]?.periodStartMs).toBe(90 * HOUR);
+  });
+
+  it("ignores recorded boundaries that overlap or postdate the current period", () => {
+    const now = 107 * HOUR;
+    const reset = 110 * HOUR; // current starts at 105h
+    const bs = buckets(90 * HOUR, 17, 100);
+    const out = computeUsagePeriods({
+      windows: [win("5h", reset, null)],
+      buckets: bs,
+      nowMs: now,
+      dataStartMs: 0,
+      limit: 3,
+      // endMs 106h > curStart 105h → must be ignored (would overlap current).
+      recordedBoundaries: { "5h": [{ startMs: 101 * HOUR, endMs: 106 * HOUR }] },
+    });
+    // No exact history period from the overlapping boundary; all history is approximate.
+    expect(out.periods.every((p) => p.approximate)).toBe(true);
+  });
+
+  it("fills a hole between non-contiguous recorded boundaries with an approximate step (no dropped period)", () => {
+    const now = 107 * HOUR;
+    const reset = 110 * HOUR; // current starts at 105h
+    const bs = buckets(80 * HOUR, 27, 1000);
+    // Recorded: [100h,105h) abuts current, and [90h,95h) — but [95h,100h) is MISSING
+    // (a fail-open miss). The gap must be filled by an approximate rollback, not skipped.
+    const out = computeUsagePeriods({
+      windows: [win("5h", reset, null)],
+      buckets: bs,
+      nowMs: now,
+      dataStartMs: 0,
+      limit: 4,
+      recordedBoundaries: {
+        "5h": [
+          { startMs: 100 * HOUR, endMs: 105 * HOUR },
+          { startMs: 90 * HOUR, endMs: 95 * HOUR },
+        ],
+      },
+    });
+    // [100h,105h) recorded exact
+    expect(out.periods[0]).toMatchObject({ periodEndMs: 105 * HOUR, approximate: false });
+    // [95h,100h) hole → approximate, NOT dropped
+    expect(out.periods[1]).toMatchObject({
+      periodStartMs: 95 * HOUR,
+      periodEndMs: 100 * HOUR,
+      approximate: true,
+    });
+    // [90h,95h) recorded exact again
+    expect(out.periods[2]).toMatchObject({
+      periodStartMs: 90 * HOUR,
+      periodEndMs: 95 * HOUR,
+      approximate: false,
+    });
+    // periods stay contiguous (each start == the previous end)
+    for (let i = 1; i < out.periods.length; i++) {
+      expect(out.periods[i]?.periodEndMs).toBe(out.periods[i - 1]?.periodStartMs);
+    }
+  });
+
+  it("marks a NON-hour-aligned recorded boundary as approximate (hour-bucket quantization)", () => {
+    const now = 107 * HOUR;
+    const reset = 110 * HOUR; // current starts at 105h
+    const bs = buckets(90 * HOUR, 17, 100);
+    // Recorded boundary abuts curStart (end 105h aligned) but its start is mid-hour.
+    const out = computeUsagePeriods({
+      windows: [win("5h", reset, null)],
+      buckets: bs,
+      nowMs: now,
+      dataStartMs: 0,
+      limit: 2,
+      recordedBoundaries: { "5h": [{ startMs: 100 * HOUR + 1_800_000, endMs: 105 * HOUR }] },
+    });
+    // start not hour-aligned → approximate despite being a real recorded boundary
+    expect(out.periods[0]).toMatchObject({ periodEndMs: 105 * HOUR, approximate: true });
+  });
+
+  it("anchors the current period on a recorded boundary whose length differs from winMs", () => {
+    // Real 5h periods drift slightly (recorder tolerates ±winMs/2). A recorded OPEN
+    // period ending at `reset` with a length ≠ winMs must anchor the current period on
+    // its real start, and its predecessors must still be used (not fall through to all
+    // approximate — grok review P2R2-1).
+    const HALF = 1_800_000; // 30 min
+    const reset = 110 * HOUR + HALF; // in the future, mid-hour
+    const now = 108 * HOUR;
+    const bs = buckets(90 * HOUR, 20, 500);
+    // Open period [105h+HALF, reset) has length exactly 5h (winMs). Prior real period
+    // [100h, 105h+HALF) is 5h30m — longer than winMs but within tolerance.
+    const out = computeUsagePeriods({
+      windows: [win("5h", reset, null)],
+      buckets: bs,
+      nowMs: now,
+      dataStartMs: 0,
+      limit: 3,
+      recordedBoundaries: {
+        "5h": [
+          { startMs: 105 * HOUR + HALF, endMs: reset }, // open/current
+          { startMs: 100 * HOUR, endMs: 105 * HOUR + HALF }, // prior, real length ≠ winMs
+        ],
+      },
+    });
+    // current anchored on the recorded open-period start, not reset − winMs
+    expect(currentFor(out, "5h")?.periodStartMs).toBe(105 * HOUR + HALF);
+    // the prior recorded period IS used as history (proves it wasn't skipped)
+    expect(out.periods[0]).toMatchObject({
+      periodStartMs: 100 * HOUR,
+      periodEndMs: 105 * HOUR + HALF,
+    });
+  });
+
+  it("with recorded boundaries and limit=1, still returns one exact history period (open row doesn't burn the slot)", () => {
+    // The gateway fetches limit+1 rows; here we pass the open row + one completed row and
+    // ask for limit 1. The open row anchors current; the completed row is the 1 history.
+    const reset = 110 * HOUR;
+    const now = 107 * HOUR;
+    const bs = buckets(95 * HOUR, 15, 200);
+    const out = computeUsagePeriods({
+      windows: [win("5h", reset, null)],
+      buckets: bs,
+      nowMs: now,
+      dataStartMs: 0,
+      limit: 1,
+      recordedBoundaries: {
+        "5h": [
+          { startMs: 105 * HOUR, endMs: 110 * HOUR }, // open (endMs == reset)
+          { startMs: 100 * HOUR, endMs: 105 * HOUR }, // completed
+        ],
+      },
+    });
+    expect(out.periods).toHaveLength(1);
+    expect(out.periods[0]).toMatchObject({
+      periodStartMs: 100 * HOUR,
+      periodEndMs: 105 * HOUR,
+      approximate: false,
+    });
+  });
+
+  it("current period is EXACT when reset+curStart are hour-aligned even though now is mid-hour", () => {
+    // curEnd = now is a live cap, not a grid cut — a mid-hour `now` must not force the
+    // in-progress period approximate (grok review P2R3-1).
+    const now = 106 * HOUR + 1_234_567; // deliberately NOT hour-aligned
+    const reset = 110 * HOUR; // hour-aligned, future → curStart 105h aligned
+    const bs = buckets(100 * HOUR, 7, 100);
+    const out = computeUsagePeriods({
+      windows: [win("5h", reset, null)],
+      buckets: bs,
+      nowMs: now,
+      dataStartMs: 0,
+      limit: 2,
+    });
+    expect(currentFor(out, "5h")?.approximate).toBe(false);
+  });
+
+  it("history stays contiguous with no double-count when a recording's end sits within tolerance of a rolled-back cursor", () => {
+    const now = 107 * HOUR;
+    const reset = 110 * HOUR; // curStart 105h
+    const bs = buckets(80 * HOUR, 27, 100);
+    // A recording ends at 103h — which is BELOW curStart (105h) by 2h (< tol 2.5h). It
+    // must not overlap the first period [ ?,105h): every period ends exactly at its
+    // cursor, so no two periods share span.
+    const out = computeUsagePeriods({
+      windows: [win("5h", reset, null)],
+      buckets: bs,
+      nowMs: now,
+      dataStartMs: 0,
+      limit: 4,
+      recordedBoundaries: { "5h": [{ startMs: 98 * HOUR, endMs: 103 * HOUR }] },
+    });
+    // No period's end exceeds the previous period's start → strictly contiguous.
+    for (let i = 1; i < out.periods.length; i++) {
+      expect(out.periods[i]?.periodEndMs).toBe(out.periods[i - 1]?.periodStartMs);
+    }
+    // And no period ends above the current period's start (105h).
+    expect(out.periods.every((p) => p.periodEndMs <= 105 * HOUR)).toBe(true);
+  });
 });

@@ -5,6 +5,7 @@ import type {
   Lane,
   MemoryStore,
   OAuthQuotaStore,
+  OAuthResetPeriodStore,
   OAuthSelectionStrategy,
   OAuthUsageStore,
   PoliciesConfig,
@@ -460,6 +461,10 @@ export interface AdminApiDeps {
   // list when absent (fail-open; never 503 the whole page over observability).
   oauthUsage?: OAuthUsageStore;
   oauthQuota?: OAuthQuotaStore;
+  // Append-only reset-period boundary history. Optional — refreshQuota records into it
+  // (fail-open) and /usage/periods reads real boundaries from it where present, else
+  // falls back to the approximate reconstruction.
+  oauthResetPeriod?: OAuthResetPeriodStore;
   // Hard safety gate before any Codex reset-credit consume (manual button or
   // auto-reset). Optional only for tests/disabled deployments; reset-credit routes
   // fail closed when it is absent.

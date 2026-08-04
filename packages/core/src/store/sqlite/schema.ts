@@ -347,10 +347,32 @@ export const oauthQuota = sqliteTable(
   (t) => [primaryKey({ columns: [t.providerId, t.account] })],
 );
 
+// Per-account RESET-PERIOD boundaries — the append-only history the latest-wins
+// oauth_quota snapshot lacks. One row per real reset event detected during a quota
+// refresh: [period_start_ms, period_end_ms) is the window that just ended (its start
+// = the prior resetsAtMs, its end = the new resetsAtMs). Lets the usage-period read
+// slice history on TRUE boundaries going forward instead of rolling back a fixed
+// window length. Pure observability, no secret column (principle 7).
+export const oauthResetPeriod = sqliteTable(
+  "oauth_reset_period",
+  {
+    providerId: text("provider_id").notNull(),
+    account: text("account").notNull(),
+    windowKey: text("window_key").notNull(), // '5h' | '7d' | 'primary' | ...
+    periodStartMs: integer("period_start_ms").notNull(), // prior resetsAtMs
+    periodEndMs: integer("period_end_ms").notNull(), // new resetsAtMs
+    detectedAtMs: integer("detected_at_ms").notNull(), // when the refresh saw it
+  },
+  // PK on (provider, account, window, start) makes re-detection idempotent — the same
+  // reset seen by repeated refreshes folds to one row.
+  (t) => [primaryKey({ columns: [t.providerId, t.account, t.windowKey, t.periodStartMs] })],
+);
+
 export type ApiKeysTable = typeof apiKeys;
 export type TelemetryTable = typeof telemetry;
 export type OAuthUsageTable = typeof oauthUsage;
 export type OAuthQuotaTable = typeof oauthQuota;
+export type OAuthResetPeriodTable = typeof oauthResetPeriod;
 export type RateLimitBucketsTable = typeof rateLimitBuckets;
 export type UsageBudgetBucketsTable = typeof usageBudgetBuckets;
 export type RoutingSignalsTable = typeof routingSignals;

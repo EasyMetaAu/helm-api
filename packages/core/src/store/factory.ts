@@ -9,6 +9,7 @@ import type {
   KeyStore,
   MemoryStore,
   OAuthQuotaStore,
+  OAuthResetPeriodStore,
   OAuthTokenStore,
   OAuthUsageStore,
   RateLimitStore,
@@ -23,6 +24,7 @@ import { PgKeyStore } from "./postgres/keystore.js";
 import { PgMemoryStore } from "./postgres/memory-store.js";
 import { createPgDb } from "./postgres/migrate.js";
 import { PgOAuthQuotaStore } from "./postgres/oauth-quota.js";
+import { PgOAuthResetPeriodStore } from "./postgres/oauth-reset-period.js";
 import { PgOAuthTokenStore } from "./postgres/oauth-tokens.js";
 import { PgOAuthUsageStore } from "./postgres/oauth-usage.js";
 import { PgRateLimitStore } from "./postgres/rate-limit.js";
@@ -35,6 +37,7 @@ import { SqliteKeyStore } from "./sqlite/keystore.js";
 import { SqliteMemoryStore } from "./sqlite/memory-store.js";
 import { createSqliteDb } from "./sqlite/migrate.js";
 import { SqliteOAuthQuotaStore } from "./sqlite/oauth-quota.js";
+import { SqliteOAuthResetPeriodStore } from "./sqlite/oauth-reset-period.js";
 import { SqliteOAuthTokenStore } from "./sqlite/oauth-tokens.js";
 import { SqliteOAuthUsageStore } from "./sqlite/oauth-usage.js";
 import { SqliteRateLimitStore } from "./sqlite/rate-limit.js";
@@ -65,6 +68,7 @@ export interface StoreSet {
   // served traffic; quota = latest rate-limit window snapshot. Both fail-open.
   readonly oauthUsage: OAuthUsageStore;
   readonly oauthQuota: OAuthQuotaStore;
+  readonly oauthResetPeriod: OAuthResetPeriodStore;
   // Reclaim on-disk space after a cleanup sweep. sqlite runs VACUUM (rewrites the
   // file under an EXCLUSIVE lock in the gateway's serialized off-hours maintenance
   // window); postgres is a no-op because it autovacuums.
@@ -108,6 +112,7 @@ export async function createStore(opts: CreateStoreOptions): Promise<StoreSet> {
         oauthTokens: new SqliteOAuthTokenStore(db),
         oauthUsage: new SqliteOAuthUsageStore(db),
         oauthQuota: new SqliteOAuthQuotaStore(db),
+        oauthResetPeriod: new SqliteOAuthResetPeriodStore(db),
         // VACUUM cannot run inside a transaction. The helper checkpoints WAL, sheds
         // SQLite cache memory, uses file-backed temp storage, then restores pragmas.
         vacuum: () =>
@@ -140,6 +145,7 @@ export async function createStore(opts: CreateStoreOptions): Promise<StoreSet> {
         oauthTokens: new PgOAuthTokenStore(db),
         oauthUsage: new PgOAuthUsageStore(db),
         oauthQuota: new PgOAuthQuotaStore(db),
+        oauthResetPeriod: new PgOAuthResetPeriodStore(db),
         // Postgres autovacuums; an explicit VACUUM needs a non-pooled conn and is
         // unnecessary for managed supabase — no-op keeps the StoreSet contract uniform.
         vacuum: async () => {},

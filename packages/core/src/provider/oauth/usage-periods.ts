@@ -16,6 +16,11 @@ export interface ComputeUsagePeriodsInput {
   dataStartMs: number;
   // Max historical periods to roll back per window.
   limit: number;
+  // Optional REAL reset boundaries per window key (from oauth_reset_period), each a
+  // half-open [startMs, endMs). When present, history uses these exact boundaries
+  // (approximate:false) and only rolls back the fixed-window approximation for the
+  // GAP older than the earliest recorded boundary. Absent/empty → all-approximate.
+  recordedBoundaries?: Record<string, Array<{ startMs: number; endMs: number }>>;
 }
 
 // A period's boundary is "exact" only when it comes from a real upstream resetsAtMs
@@ -60,7 +65,7 @@ function sumWindow(
 // length from the current resetsAtMs — the quota snapshot keeps no boundary history).
 // The current in-progress period uses the real upstream resetsAtMs (approximate:false).
 export function computeUsagePeriods(input: ComputeUsagePeriodsInput): UsagePeriodsResult {
-  const { windows, buckets, nowMs, dataStartMs, limit } = input;
+  const { windows, buckets, nowMs, dataStartMs, limit, recordedBoundaries } = input;
   const current: OAuthUsagePeriod[] = [];
   const periods: OAuthUsagePeriod[] = [];
 
@@ -87,13 +92,42 @@ export function computeUsagePeriods(input: ComputeUsagePeriodsInput): UsagePerio
       boundaryAdvanced = true;
     }
 
-    // Current: [reset - winMs, reset). Cap the end at now so an in-progress period
-    // never claims future buckets (there are none, but keep the span honest).
-    const curStart = reset - winMs;
+    // Recorded real boundaries for this window (phase 2), newest first. Real periods may
+    // be slightly off a fixed winMs (the recorder tolerates ±winMs/2), so abutment is
+    // matched with the same tolerance rather than strict equality — otherwise a real
+    // period whose length ≠ winMs would never line up and the recordings would go unused
+    // (grok review P2R2-1). A boundary is only usable if its span is sane.
+    const recorded = (recordedBoundaries?.[w.key] ?? [])
+      .filter((b) => b.startMs < b.endMs)
+      .sort((a, b) => b.endMs - a.endMs);
+    const tol = winMs / 2;
+    const abuts = (endMs: number, cursor: number): boolean => Math.abs(endMs - cursor) <= tol;
+
+    // The current (open) period's start comes from the recorded chain when a recording
+    // ends at `reset` (the in-progress window), giving its TRUE length; else fall back
+    // to the fixed reset − winMs. Consuming that open row here also stops it from
+    // burning a history slot later (grok review P2R2-2).
+    let curStart = reset - winMs;
+    let recIdx = 0;
+    // Skip recordings that end AFTER reset (future / already-superseded).
+    while (recIdx < recorded.length && (recorded[recIdx]?.endMs ?? 0) > reset + tol) recIdx++;
+    let curBoundaryReal = false;
+    const openRow = recorded[recIdx];
+    if (openRow && abuts(openRow.endMs, reset)) {
+      curStart = openRow.startMs;
+      curBoundaryReal = true; // start came from a real recorded boundary
+      recIdx++;
+    }
+
+    // Current: [curStart, min(reset, now)). Exact only when the START boundary is a
+    // confirmed reset (not advanced) AND hour-aligned — hour-bucket quantization makes a
+    // mid-hour START approximate. curEnd is `now`, a LIVE cap on an in-progress period,
+    // not a period-grid cut, so its (almost never hour-aligned) value must NOT force the
+    // period approximate — else current would be ≈ forever and defeat phase 2 (grok
+    // review P2R3-1). A real recorded curStart still needs hour-alignment.
     const curEnd = Math.min(reset, nowMs);
-    // Exact only if the boundary is a confirmed upstream reset AND hour-aligned (else
-    // hour-bucket quantization makes the totals approximate — see isHourAligned).
-    const curExact = !boundaryAdvanced && isHourAligned(reset) && isHourAligned(curStart);
+    const curExact =
+      !boundaryAdvanced && (curBoundaryReal || isHourAligned(reset)) && isHourAligned(curStart);
     if (curEnd > curStart) {
       const sums = sumWindow(buckets, curStart, curEnd);
       current.push({
@@ -106,23 +140,47 @@ export function computeUsagePeriods(input: ComputeUsagePeriodsInput): UsagePerio
       });
     }
 
-    // History: roll back whole windows from `curStart` (the current period's start),
-    // so the newest historical period sits immediately before the current one and
-    // never overlaps it. Each period is [end - winMs, end). Always approximate — the
-    // boundary is rolled back, not a confirmed reset event.
-    for (let k = 1; k <= limit; k++) {
-      const end = curStart - (k - 1) * winMs; // k==1 → ends where current begins
-      const start = end - winMs;
-      if (end <= dataStartMs) break; // fully older than retained data — stop
+    // Drop any recordings that reach INTO the current period (endMs > curStart): they
+    // overlap it and must never become a history row (grok review — overlapping boundary).
+    while (recIdx < recorded.length && (recorded[recIdx]?.endMs ?? 0) > curStart) recIdx++;
+
+    // History: walk backward from curStart. Every period ENDS exactly at the cursor —
+    // never above it — so the walk stays strictly contiguous and can never double-count
+    // (grok review P2R3-2). A recorded boundary is used when it abuts the cursor from
+    // BELOW within tolerance (its end at/just under the cursor); then the period is
+    // [rec.startMs, cursor) (its real length, exact when both ends hour-aligned). No
+    // abutting recording → roll back one fixed window [cursor - winMs, cursor)
+    // (approximate). Both consume the cursor, so a missing recording is an approximate
+    // step, never a dropped period.
+    let cursor = curStart;
+    for (let emitted = 0; emitted < limit; emitted++) {
+      if (cursor <= dataStartMs) break; // nothing retained older than the cursor
+      // Skip recordings whose end is above the cursor (already covered / overlapping).
+      while (recIdx < recorded.length && (recorded[recIdx]?.endMs ?? 0) > cursor) recIdx++;
+      const rec = recorded[recIdx];
+      const end = cursor; // ALWAYS the cursor — guarantees contiguity, no overlap
+      let start: number;
+      let approximate: boolean;
+      // Usable when the recording's end sits at/just under the cursor (gap ≤ tol) and its
+      // start is strictly older — its real start becomes the next cursor.
+      if (rec && cursor - rec.endMs <= tol && rec.startMs < cursor) {
+        start = rec.startMs;
+        approximate = !(isHourAligned(rec.startMs) && isHourAligned(rec.endMs));
+        recIdx++;
+      } else {
+        start = cursor - winMs;
+        approximate = true;
+      }
       const sums = sumWindow(buckets, start, end);
       periods.push({
         windowKey: w.key,
         periodStartMs: start,
         periodEndMs: end,
         ...sums,
-        approximate: true, // boundary rolled back, not a real reset event
+        approximate,
         partial: start < dataStartMs,
       });
+      cursor = start;
     }
   }
 

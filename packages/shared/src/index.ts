@@ -290,6 +290,8 @@ export {
   OAuthQuotaSnapshotSchema,
   type OAuthQuotaWindow,
   OAuthQuotaWindowSchema,
+  type OAuthResetPeriod,
+  OAuthResetPeriodSchema,
   type OAuthUsageBucket,
   OAuthUsageBucketSchema,
   type OAuthUsagePeriod,

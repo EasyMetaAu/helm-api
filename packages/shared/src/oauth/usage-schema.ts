@@ -472,3 +472,20 @@ export const OAuthUsagePeriodsSchema = z
   .strict();
 
 export type OAuthUsagePeriods = z.infer<typeof OAuthUsagePeriodsSchema>;
+
+// One RECORDED reset boundary — an append-only fact captured when a quota refresh saw
+// resetsAtMs advance. [periodStartMs, periodEndMs) is the window that just ended
+// (start = prior resetsAtMs, end = new resetsAtMs). Lets the usage-period read slice
+// history on TRUE boundaries instead of rolling back a fixed window length.
+export const OAuthResetPeriodSchema = z
+  .object({
+    providerId: z.string(),
+    account: z.string(),
+    windowKey: z.string(),
+    periodStartMs: z.number().int(),
+    periodEndMs: z.number().int(),
+    detectedAtMs: z.number().int(),
+  })
+  .strict();
+
+export type OAuthResetPeriod = z.infer<typeof OAuthResetPeriodSchema>;

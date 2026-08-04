@@ -13,6 +13,7 @@ export type {
   MemoryJobStatus,
   MemoryStore,
   OAuthQuotaStore,
+  OAuthResetPeriodStore,
   OAuthTokenRecord,
   OAuthTokenStore,
   OAuthUsageStore,
@@ -48,6 +49,7 @@ export {
   runPgMigrations,
 } from "./postgres/migrate.js";
 export { PgOAuthQuotaStore } from "./postgres/oauth-quota.js";
+export { PgOAuthResetPeriodStore } from "./postgres/oauth-reset-period.js";
 export { PgOAuthTokenStore } from "./postgres/oauth-tokens.js";
 export { PgOAuthUsageStore } from "./postgres/oauth-usage.js";
 export { PgRateLimitStore } from "./postgres/rate-limit.js";
@@ -64,6 +66,7 @@ export { SqliteKeyStore } from "./sqlite/keystore.js";
 export { SqliteMemoryStore } from "./sqlite/memory-store.js";
 export { createSqliteDb, runMigrations, type SqliteDb } from "./sqlite/migrate.js";
 export { SqliteOAuthQuotaStore } from "./sqlite/oauth-quota.js";
+export { SqliteOAuthResetPeriodStore } from "./sqlite/oauth-reset-period.js";
 export { SqliteOAuthTokenStore } from "./sqlite/oauth-tokens.js";
 export { SqliteOAuthUsageStore } from "./sqlite/oauth-usage.js";
 export { SqliteRateLimitStore } from "./sqlite/rate-limit.js";
