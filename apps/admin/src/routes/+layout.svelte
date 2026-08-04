@@ -46,7 +46,12 @@
 
   function skeletonVariant(routeId: string | null): 'list' | 'detail' | 'dashboard' {
     if (routeId === '/') return 'dashboard';
-    if (routeId === '/requests/[traceId]' || routeId === '/keys/[keyId]') return 'detail';
+    if (
+      routeId === '/requests/[traceId]' ||
+      routeId === '/keys/[keyId]' ||
+      routeId === '/providers/[accountId]'
+    )
+      return 'detail';
     return 'list';
   }
 

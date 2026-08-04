@@ -181,6 +181,84 @@ describe("admin OAuth routes — read endpoints", () => {
     expect((start ?? 0) % 86_400_000).toBe(0); // offset 0 → UTC midnight
   });
 
+  it("GET /oauth/usage/periods requires provider+account, else 400", async () => {
+    const res = await app({ oauth: fullSeam() }).request("/admin/api/oauth/usage/periods");
+    expect(res.status).toBe(400);
+    const res2 = await app({ oauth: fullSeam() }).request(
+      "/admin/api/oauth/usage/periods?provider=anthropic",
+    );
+    expect(res2.status).toBe(400);
+  });
+
+  it("GET /oauth/usage/periods reconstructs per-reset-period totals from buckets + quota", async () => {
+    const HOUR = 3_600_000;
+    // A 5h Anthropic window (windowMinutes null → inferred 300). resetsAtMs is a real
+    // upstream value slightly in the FUTURE, so the current period [reset-5h, reset)
+    // straddles now; buckets fill the current + one prior 5h period (all in the past).
+    const reset = Date.now() + HOUR; // resets ~1h from now
+    const buckets = Array.from({ length: 10 }, (_, i) => ({
+      bucketMs: reset - (10 - i) * HOUR, // [reset-10h, reset)
+      requests: 1,
+      tokens: 100,
+      costUsd: null,
+    }));
+    const oauthUsage = {
+      queryBuckets: vi.fn(async () => buckets),
+    } as unknown as AdminApiDeps["oauthUsage"];
+    const oauthQuota = {
+      get: vi.fn(async () => ({
+        providerId: "anthropic",
+        account: "a@x.com",
+        windows: [{ key: "5h", usedPercent: 50, resetsAtMs: reset, windowMinutes: null }],
+        capturedAt: 0,
+        source: "anthropic",
+        usageLimitedUntilMs: null,
+        resetCredits: null,
+      })),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const settings = {
+      get: () => ({ oauth_usage_retention_days: 180 }),
+    } as unknown as AdminApiDeps["settings"];
+    const res = await app({ oauth: fullSeam(), oauthUsage, oauthQuota, settings }).request(
+      "/admin/api/oauth/usage/periods?provider=anthropic&account=a%40x.com&limit=3",
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      current: Array<{ windowKey: string; tokens: number; approximate: boolean }>;
+      periods: Array<{ tokens: number; approximate: boolean }>;
+    };
+    // current period exists for the 5h window (a real, non-hour-aligned resetsAtMs →
+    // hour-bucket quantization makes it approximate; token total is still present).
+    expect(body.current).toHaveLength(1);
+    expect(body.current[0]?.windowKey).toBe("5h");
+    expect(body.current[0]?.tokens ?? 0).toBeGreaterThan(0);
+    // history periods are approximate (rolled-back boundaries) and carry token totals.
+    expect(body.periods.length).toBeGreaterThanOrEqual(1);
+    const firstHistory = body.periods[0];
+    expect(firstHistory).toMatchObject({ approximate: true });
+    expect(firstHistory?.tokens ?? 0).toBeGreaterThan(0);
+    // token conservation: current + history covers the 10 seeded buckets (1000 tokens),
+    // minus at most the boundary bucket that falls outside the rolled-back span.
+    const total = (body.current[0]?.tokens ?? 0) + body.periods.reduce((s, p) => s + p.tokens, 0);
+    expect(total).toBeGreaterThanOrEqual(900);
+    expect(total).toBeLessThanOrEqual(1000);
+  });
+
+  it("GET /oauth/usage/periods fails open to empty when the quota snapshot is missing", async () => {
+    const oauthUsage = {
+      queryBuckets: vi.fn(async () => []),
+    } as unknown as AdminApiDeps["oauthUsage"];
+    const oauthQuota = { get: vi.fn(async () => null) } as unknown as AdminApiDeps["oauthQuota"];
+    const settings = {
+      get: () => ({ oauth_usage_retention_days: 180 }),
+    } as unknown as AdminApiDeps["settings"];
+    const res = await app({ oauth: fullSeam(), oauthUsage, oauthQuota, settings }).request(
+      "/admin/api/oauth/usage/periods?provider=xai&account=nobody",
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ current: [], periods: [] });
+  });
+
   it("GET /oauth/quota returns cached rows without pulling upstream", async () => {
     expect(
       (

@@ -119,6 +119,53 @@ describe("SqliteOAuthUsageStore", () => {
     close();
   });
 
+  it("queryBuckets returns raw un-grouped buckets for one account, ascending, half-open", async () => {
+    const { store, close } = freshStore();
+    // Two buckets for account a, one for b, plus one for a OUTSIDE the window.
+    await store.record({
+      providerId: "anthropic",
+      account: "a",
+      bucketMs: H0,
+      tokens: 100,
+      costUsd: 0.01,
+      nowMs: T0,
+    });
+    await store.record({
+      providerId: "anthropic",
+      account: "a",
+      bucketMs: H1,
+      tokens: 30,
+      costUsd: null,
+      nowMs: H1 + 1000,
+    });
+    await store.record({
+      providerId: "anthropic",
+      account: "b",
+      bucketMs: H0,
+      tokens: 7,
+      costUsd: null,
+      nowMs: T0,
+    });
+    await store.record({
+      providerId: "anthropic",
+      account: "a",
+      bucketMs: H0 + 2 * HOUR,
+      tokens: 999,
+      costUsd: 9,
+      nowMs: T0,
+    });
+    // window [H0, H0+2h): includes H0 and H1, excludes H0+2h (end exclusive).
+    const rows = await store.queryBuckets(H0, H0 + 2 * HOUR, "anthropic", "a");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toEqual({ bucketMs: H0, requests: 1, tokens: 100, costUsd: 0.01 });
+    expect(rows[1]).toEqual({ bucketMs: H1, requests: 1, tokens: 30, costUsd: null });
+    // ascending by bucketMs
+    expect((rows[0]?.bucketMs ?? 0) < (rows[1]?.bucketMs ?? 0)).toBe(true);
+    // start inclusive: a bucket exactly at H0 is present; empty result for an account with none
+    expect(await store.queryBuckets(H0, H0 + HOUR, "anthropic", "zzz")).toHaveLength(0);
+    close();
+  });
+
   it("isolates rows by (provider, account, bucket) and rolls each account separately", async () => {
     const { store, close } = freshStore();
     await store.record({

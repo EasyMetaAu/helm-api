@@ -128,6 +128,12 @@ export {
   windowsToUsageLimit,
 } from "./usage-limit.js";
 export {
+  type ComputeUsagePeriodsInput,
+  computeUsagePeriods,
+  type UsagePeriodsResult,
+} from "./usage-periods.js";
+export { ANTHROPIC_WINDOW_MINUTES, windowMinutesForKey } from "./window-minutes.js";
+export {
   beginXaiDeviceLogin,
   isTrustedXaiOAuthEndpoint,
   loginXai,

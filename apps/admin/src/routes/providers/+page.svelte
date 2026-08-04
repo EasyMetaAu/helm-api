@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
   import { invalidateAll } from '$app/navigation';
+  import { base } from '$app/paths';
+  import { accountDetailHref } from '$lib/oauth-account-id.js';
   import {
     isCodexQuotaWindowPlaceholder,
     selectCodexAccountWeeklyQuotaWindows,
@@ -1202,6 +1204,11 @@
                         providerName: row.provider.name,
                         account: row.account.account,
                       })}>{$t('Manage')}</button
+                  >
+                  <a
+                    class="btn-secondary text-center"
+                    href={accountDetailHref(base, row.provider.id, row.account.account)}
+                    title={$t('View token usage per reset period')}>{$t('Usage')}</a
                   >
                   {#if usageLimit?.retryable && isCodex}
                     <button
