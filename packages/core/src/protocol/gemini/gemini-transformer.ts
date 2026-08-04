@@ -150,7 +150,7 @@ const GEMINI_TO_IR_MODALITY: Record<string, "text" | "image" | "audio" | "video"
 // Keyed over the FULL IR effort union (exhaustive) so it never indexes to an
 // undefined budget when a newer tier (xhigh/max) or `none` reaches Gemini. Budgets
 // are representative + monotonically increasing; xhigh/max sit at Gemini's ceiling.
-const REASONING_EFFORT_BUDGET: Record<IRReasoningEffort, number> = {
+export const REASONING_EFFORT_BUDGET: Record<IRReasoningEffort, number> = {
   none: 0,
   minimal: 128,
   low: 1024,

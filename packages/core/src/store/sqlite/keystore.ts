@@ -1,4 +1,4 @@
-import type { ApiKeyRecord } from "@helm/shared";
+import { type ApiKeyRecord, ReasoningEffortSchema } from "@helm/shared";
 import { asc, eq } from "drizzle-orm";
 import type { CreateKeyInput, KeyPatch, KeyStore, RotateKeyInput } from "../ports.js";
 import type { SqliteDb } from "./migrate.js";
@@ -52,6 +52,7 @@ export class SqliteKeyStore implements KeyStore {
       // out of the box (issue #97). Pass "header" explicitly to opt out.
       memoryThreadSource: input.memoryThreadSource ?? "auto",
       requestContentMode: input.requestContentMode ?? null,
+      maxReasoningEffort: input.maxReasoningEffort ?? null,
       createdAt: this.now(),
     };
     this.db.insert(apiKeys).values(row).run();
@@ -121,6 +122,7 @@ export class SqliteKeyStore implements KeyStore {
         | "memoryProjectId"
         | "memoryThreadSource"
         | "requestContentMode"
+        | "maxReasoningEffort"
       >
     > = {};
     // Rename (null clears back to unnamed). Cosmetic only.
@@ -148,6 +150,7 @@ export class SqliteKeyStore implements KeyStore {
     if (patch.memoryProjectId !== undefined) set.memoryProjectId = patch.memoryProjectId;
     if (patch.memoryThreadSource !== undefined) set.memoryThreadSource = patch.memoryThreadSource;
     if (patch.requestContentMode !== undefined) set.requestContentMode = patch.requestContentMode;
+    if (patch.maxReasoningEffort !== undefined) set.maxReasoningEffort = patch.maxReasoningEffort;
     if (Object.keys(set).length === 0) {
       // No-op patch: still verify the key exists (fail-loud on unknown id).
       const row = this.db.select().from(apiKeys).where(eq(apiKeys.keyId, keyId)).get();
@@ -221,6 +224,9 @@ export class SqliteKeyStore implements KeyStore {
         row.requestContentMode === "session"
           ? row.requestContentMode
           : null,
+      // Defensive narrow of the free-text column to the effort enum; anything
+      // unrecognized (or NULL) => no cap.
+      max_reasoning_effort: ReasoningEffortSchema.safeParse(row.maxReasoningEffort).data ?? null,
     };
   }
 }

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ReasoningEffortSchema } from "../config/lanes-schema.js";
 import { MemoryModeSchema } from "../request/schema.js";
 
 // API key record (storage layer shape) per docs/06. Per CLAUDE.md principle 7,
@@ -101,6 +102,13 @@ export const ApiKeyRecordSchema = z.object({
   // out of the box; existing keys keep their stored value.
   memory_thread_source: MemoryThreadSourceSchema.default("header"),
   request_content_mode: RequestContentModeSchema.nullable().default(null),
+  // Per-key CEILING on client-requested reasoning effort (cost control). null =
+  // no cap (client's effort passes through untouched). A value clamps any HIGHER
+  // client-requested tier DOWN to it before the request leaves the gateway
+  // (none < minimal < low < medium < high < xhigh < max). Distinct from a lane's
+  // FORCED effort (config-as-code) — this only lowers, never raises, and only a
+  // CLIENT request. `.default(null)` so legacy rows predating the column parse.
+  max_reasoning_effort: ReasoningEffortSchema.nullable().default(null),
 });
 
 export type KeyRole = z.infer<typeof KeyRoleSchema>;
@@ -158,6 +166,8 @@ export const CreateKeyRequestSchema = z
     memory_project_id: z.string().min(1).optional(),
     memory_thread_source: MemoryThreadSourceSchema.optional(),
     request_content_mode: RequestContentModeSchema.optional(),
+    // Optional reasoning-effort ceiling at mint time. Omitted => no cap.
+    max_reasoning_effort: ReasoningEffortSchema.optional(),
   })
   .strict();
 
@@ -203,6 +213,8 @@ export const UpdateKeyRequestSchema = z
     memory_thread_source: MemoryThreadSourceSchema.optional(),
     // null clears the override and resumes inheriting the live system setting.
     request_content_mode: RequestContentModeSchema.nullable().optional(),
+    // Omit = leave unchanged; null = clear the cap (no ceiling); a value sets it.
+    max_reasoning_effort: ReasoningEffortSchema.nullable().optional(),
   })
   .strict();
 

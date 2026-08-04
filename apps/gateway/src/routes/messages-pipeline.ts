@@ -64,6 +64,7 @@ import {
   usageFromResponsesResponse,
   usageFromResponsesSSE,
 } from "./payload-capture.js";
+import { clampClientReasoningEffortToKeyMax } from "./reasoning-cap.js";
 
 // Per-key usage-budget wiring shared by ALL pipeline faces (anthropic /v1/messages,
 // openai /v1/responses, gemini :generateContent). The pipeline is the single place
@@ -775,9 +776,12 @@ export function createMessagesPipeline(
       ) {
         throw new PipelineError("invalid_request", "messages must be a non-empty array", traceId);
       }
-      const internal = downgradeClientFastModeIfDisallowed(
-        toInternalRequest(ir, identity, requestId, traceId, protocol),
-        identity.caps?.allowFastMode === true,
+      const internal = clampClientReasoningEffortToKeyMax(
+        downgradeClientFastModeIfDisallowed(
+          toInternalRequest(ir, identity, requestId, traceId, protocol),
+          identity.caps?.allowFastMode === true,
+        ),
+        identity.caps?.maxReasoningEffort,
       );
       const originalMessagesForMemory = [...(internal.messages as IRMessage[])];
       const observeRetainedBytes = retainedRequestBytes(internal);

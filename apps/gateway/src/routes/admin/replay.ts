@@ -28,6 +28,7 @@ import {
   usageFromSSE,
   withRequestContentMode,
 } from "../payload-capture.js";
+import { clampClientReasoningEffortToKeyMax } from "../reasoning-cap.js";
 import type { AdminApiDeps, ReplayWiring } from "./deps.js";
 
 // /admin/api/requests/:traceId/replay — the admin "Retry" surface (behind the
@@ -215,9 +216,12 @@ async function replayOpenAIChat(
     const where = issue?.path.length ? `${issue.path.join(".")}: ` : "";
     return { ok: false, status: 400, error: `${where}${issue?.message ?? "invalid request body"}` };
   }
-  const internal = downgradeClientFastModeIfDisallowed(
-    buildInternal(parsed.data, requestId, key),
-    key.allow_fast_mode,
+  const internal = clampClientReasoningEffortToKeyMax(
+    downgradeClientFastModeIfDisallowed(
+      buildInternal(parsed.data, requestId, key),
+      key.allow_fast_mode,
+    ),
+    key.max_reasoning_effort,
   );
   const result = await deps.replay.route(
     internal,

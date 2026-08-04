@@ -74,6 +74,10 @@
     if (form.requestContentMode !== 'inherit') {
       input.request_content_mode = form.requestContentMode;
     }
+    // Reasoning-effort ceiling: send only when the operator set one ('inherit' => no cap).
+    if (form.maxReasoningEffort !== 'inherit') {
+      input.max_reasoning_effort = form.maxReasoningEffort;
+    }
     // Concurrency limit: send only when set (blank => unlimited).
     if (form.concurrencyLimit != null) input.concurrency_limit = form.concurrencyLimit;
     if (form.memoryMode !== 'off') input.memory_mode = form.memoryMode;
@@ -130,6 +134,8 @@
         degrade_lane: form.degradeLane.length > 0 ? form.degradeLane : null,
         request_content_mode:
           form.requestContentMode === 'inherit' ? null : form.requestContentMode,
+        max_reasoning_effort:
+          form.maxReasoningEffort === 'inherit' ? null : form.maxReasoningEffort,
         concurrency_limit: form.concurrencyLimit ?? null,
         memory_mode: form.memoryMode,
         memory_project_id: form.memoryProject.length > 0 ? form.memoryProject : null,

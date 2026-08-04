@@ -15,7 +15,7 @@ import type { IRReasoningEffort } from "./ir.js";
 // Anthropic extended-thinking budget per effort tier. Anthropic requires
 // `budget_tokens >= 1024`; `none` (and anything unrecognized) disables thinking.
 // Monotonically increasing; the top tiers sit at a safe ceiling across models.
-const ANTHROPIC_THINKING_BUDGET: Record<string, number> = {
+export const ANTHROPIC_THINKING_BUDGET: Record<string, number> = {
   minimal: 1024,
   low: 2048,
   medium: 8192,

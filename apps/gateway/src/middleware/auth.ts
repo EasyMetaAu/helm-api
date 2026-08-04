@@ -44,6 +44,10 @@ export interface AuthIdentity {
       threadSource: "header" | "auto";
     };
     requestContentMode: ApiKeyRecord["request_content_mode"];
+    /** Per-key ceiling on client-requested reasoning effort (cost control). null
+     *  = no cap. Read by the request pipeline to clamp a higher client effort
+     *  DOWN to this tier before the request leaves the gateway. */
+    maxReasoningEffort: ApiKeyRecord["max_reasoning_effort"];
   };
 }
 
@@ -141,6 +145,7 @@ export function authMiddleware(deps: AuthDeps): MiddlewareHandler<AppEnv> {
           threadSource: record.memory_thread_source,
         },
         requestContentMode: record.request_content_mode,
+        maxReasoningEffort: record.max_reasoning_effort,
       },
     };
     c.set("identity", identity);

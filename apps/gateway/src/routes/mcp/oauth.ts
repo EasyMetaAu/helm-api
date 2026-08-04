@@ -213,6 +213,7 @@ function identityFromClaims(claims: Record<string, unknown>): AuthIdentity {
         threadSource: "header",
       },
       requestContentMode: null,
+      maxReasoningEffort: null,
     },
   };
 }

@@ -16,6 +16,8 @@
     rpm: number | null;
     tpm: number | null;
     concurrencyLimit: number | null;
+    // 'inherit' = no cap; a tier caps client-requested reasoning effort down to it.
+    maxReasoningEffort: 'inherit' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
     budgetRequests: number | null;
     budgetTokens: number | null;
     budgetSpend: number | null;
@@ -39,6 +41,7 @@
       rpm: null,
       tpm: null,
       concurrencyLimit: null,
+      maxReasoningEffort: 'inherit',
       budgetRequests: null,
       budgetTokens: null,
       budgetSpend: null,
@@ -65,6 +68,7 @@
       rpm: key.rate_limit_rpm,
       tpm: key.rate_limit_tpm,
       concurrencyLimit: key.concurrency_limit,
+      maxReasoningEffort: key.max_reasoning_effort ?? 'inherit',
       budgetRequests: key.budget_requests,
       budgetTokens: key.budget_tokens,
       budgetSpend: key.budget_spend_usd,
@@ -117,7 +121,11 @@
   let openRates = $state(
     untrack(
       () =>
-        expandConfigured && (form.rpm != null || form.tpm != null || form.concurrencyLimit != null),
+        expandConfigured &&
+        (form.rpm != null ||
+          form.tpm != null ||
+          form.concurrencyLimit != null ||
+          form.maxReasoningEffort !== 'inherit'),
     ),
   );
   let openBudget = $state(
@@ -153,6 +161,8 @@
     if (form.tpm != null) parts.push(`TPM ${form.tpm}`);
     if (form.concurrencyLimit != null)
       parts.push($t('Concurrency {n}', { n: form.concurrencyLimit }));
+    if (form.maxReasoningEffort !== 'inherit')
+      parts.push($t('Effort ≤ {tier}', { tier: form.maxReasoningEffort }));
     return parts.length > 0 ? parts.join(' · ') : $t('Using system defaults');
   });
   const budgetSummary = $derived.by(() => {
@@ -327,6 +337,28 @@
       <span class="field-help"
         >{$t(
           'Cap how many requests this key may run at once. Extra requests queue when request queueing is enabled in System Settings. Leave blank for unlimited.',
+        )}</span
+      >
+    </label>
+    <label class="flex flex-col gap-1 text-sm">
+      <span class="field-label">{$t('Max reasoning effort')}</span>
+      <select
+        class="select"
+        aria-label={$t('Max reasoning effort')}
+        bind:value={form.maxReasoningEffort}
+      >
+        <option value="inherit">{$t('No cap')}</option>
+        <option value="none">none</option>
+        <option value="minimal">minimal</option>
+        <option value="low">low</option>
+        <option value="medium">medium</option>
+        <option value="high">high</option>
+        <option value="xhigh">xhigh</option>
+        <option value="max">max</option>
+      </select>
+      <span class="field-help"
+        >{$t(
+          'Ceiling on client-requested reasoning effort (cost control). A client asking for a higher tier is clamped down to this one. Leave at no cap to pass the client value through.',
         )}</span
       >
     </label>

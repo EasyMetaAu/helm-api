@@ -376,6 +376,7 @@ export {
   type GeminiRoute,
   geminiTransformer,
   parseGeminiPath,
+  REASONING_EFFORT_BUDGET as GEMINI_REASONING_EFFORT_BUDGET,
 } from "./protocol/gemini/gemini-transformer.js";
 // Gemini wire types (docs/05). GenerateContentRequest/Response + the snapshot SSE
 // event + the OpenAI-shaped IRChunk the snapshot state machine consumes.
@@ -391,6 +392,7 @@ export {
 // Protocol IR — the single central representation (docs/05). All translation
 // goes nativeIn -> IR -> nativeOut. Types are z.infer of these schemas.
 export {
+  IR_REASONING_EFFORTS,
   type IRChoice,
   IRChoiceSchema,
   type IRContentPart,
@@ -400,6 +402,7 @@ export {
   IRMessageSchema,
   type IRRequest,
   IRRequestSchema,
+  type IRReasoningEffort,
   type IRResponse,
   IRResponseSchema,
   IRTextPartSchema,
@@ -427,6 +430,7 @@ export {
 // Lane-forced reasoning-effort → wire mapping (native-passthrough body rewrite +
 // the Anthropic thinking bridge). Used by the gateway executor + anthropic provider.
 export {
+  ANTHROPIC_THINKING_BUDGET,
   type AnthropicThinking,
   applyForcedAnthropicThinking,
   applyForcedReasoningToNativeBody,

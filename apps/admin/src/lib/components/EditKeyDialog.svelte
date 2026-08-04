@@ -59,6 +59,8 @@
       degrade_lane: form.degradeLane.length > 0 ? form.degradeLane : null,
       request_content_mode:
         form.requestContentMode === 'inherit' ? null : form.requestContentMode,
+      max_reasoning_effort:
+        form.maxReasoningEffort === 'inherit' ? null : form.maxReasoningEffort,
       concurrency_limit: form.concurrencyLimit ?? null,
       memory_mode: form.memoryMode,
       memory_project_id: form.memoryProject.length > 0 ? form.memoryProject : null,
@@ -86,6 +88,7 @@
         over_budget_behavior: form.overBudgetBehavior,
         degrade_lane: patch.degrade_lane ?? null,
         request_content_mode: patch.request_content_mode ?? null,
+        max_reasoning_effort: patch.max_reasoning_effort ?? null,
         concurrency_limit: patch.concurrency_limit ?? null,
         memory_mode: form.memoryMode,
         memory_project_id: patch.memory_project_id ?? null,
