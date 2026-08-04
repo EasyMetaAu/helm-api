@@ -909,10 +909,21 @@
                 row.account.isFedramp,
               )}
             <tr class="align-top" data-testid="provider-account-row">
-              <!-- Provider / account + type badge -->
+              <!-- Provider / account + type badge. The name+account is a link into the
+                   account usage-detail page (per-reset-period token usage). -->
               <td data-label={$t('Provider')} class="px-3 py-3">
-                <div class="font-medium text-ink-body">{row.provider.name}</div>
-                <code class="font-mono text-xs text-ink-strong">{row.account.account}</code>
+                <a
+                  class="group block"
+                  href={accountDetailHref(base, row.provider.id, row.account.account)}
+                  title={$t('View token usage per reset period')}
+                >
+                  <div class="font-medium text-ink-body group-hover:text-indigo-600 group-hover:underline">
+                    {row.provider.name}
+                  </div>
+                  <code class="font-mono text-xs text-ink-strong group-hover:text-indigo-600">
+                    {row.account.account}
+                  </code>
+                </a>
                 {#if hasCodexIdentity}
                   <div
                     class="mt-1 flex max-w-64 flex-col items-start gap-1 text-xs"
@@ -1204,11 +1215,6 @@
                         providerName: row.provider.name,
                         account: row.account.account,
                       })}>{$t('Manage')}</button
-                  >
-                  <a
-                    class="btn-secondary text-center"
-                    href={accountDetailHref(base, row.provider.id, row.account.account)}
-                    title={$t('View token usage per reset period')}>{$t('Usage')}</a
                   >
                   {#if usageLimit?.retryable && isCodex}
                     <button
