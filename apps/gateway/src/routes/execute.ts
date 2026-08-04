@@ -2378,7 +2378,19 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       message = "no candidate satisfies the request's capability constraints";
     } else {
       errorClass = "all_providers_failed";
-      message = "all providers in the candidate chain failed";
+      // Name the structural blocker when every cross-protocol / generic-Responses candidate
+      // was skipped for carrying Responses native items that can't be translated (Codex
+      // sub-agent orchestration: encrypted `agent_message`, `additional_tools`, unknown item
+      // types). Those requests are bound to the Codex-native endpoint by construction — no
+      // fail-over exists — so a bare "all providers failed" hides the real reason.
+      const nativeItemsSkipped = attempts.some(
+        (a) =>
+          a.skip_reason === "responses_native_items_cross_protocol_blocked" ||
+          a.skip_reason === "responses_native_items_provider_incompatible",
+      );
+      message = nativeItemsSkipped
+        ? "request carries Responses native items (e.g. Codex sub-agent / encrypted agent_message) that cannot be translated to another provider; the only compatible providers were unavailable, and no cross-provider fallback is possible for this request"
+        : "all providers in the candidate chain failed";
     }
     return {
       attempts,

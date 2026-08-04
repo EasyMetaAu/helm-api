@@ -1653,6 +1653,85 @@ describe("createExecute — gateway execution adapter", () => {
     expect(provider.chatCompletion).not.toHaveBeenCalled();
   });
 
+  it("explains cross-protocol native-items exhaustion instead of a bare all_providers_failed", async () => {
+    // Real case (Codex sub-agent / encrypted agent_message): the same-protocol Codex head
+    // errors (pool exhausted) while every cross-protocol candidate is skipped because the
+    // body carries Responses native items that cannot be translated. The terminal error must
+    // NAME that structural reason so the client knows it can't fail over, not a bare
+    // "all providers failed".
+    const poolExhausted = () =>
+      Promise.reject(new UpstreamError("upstream_error", "pool exhausted", {}, 503));
+    const codex = {
+      chatCompletion: vi.fn(poolExhausted),
+      chatCompletionStream: vi.fn(poolExhausted),
+      nativeProtocolProfile: "openai_responses",
+      nativePassthrough: vi.fn(poolExhausted),
+      nativePassthroughStream: vi.fn(poolExhausted),
+    } as unknown as ProviderClient;
+    const anthropic = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: codex,
+      providers: new Map([
+        ["codex", codex],
+        ["anthropic", anthropic],
+      ]),
+      registry: {
+        resolve(alias: string) {
+          if (alias === "codex/gpt") {
+            return {
+              ok: true as const,
+              value: {
+                alias,
+                providerName: "codex",
+                providerModel: "gpt",
+                baseUrl: "http://x",
+                apiKeyEnv: "X",
+                targetProviderProtocol: "openai_responses" as const,
+                providerRequiresCompatibilityRewrite: false,
+              },
+            };
+          }
+          if (alias === "anthropic/claude") {
+            return {
+              ok: true as const,
+              value: {
+                alias,
+                providerName: "anthropic",
+                providerModel: "claude",
+                baseUrl: "http://y",
+                apiKeyEnv: "Y",
+                targetProviderProtocol: "anthropic_messages" as const,
+                providerRequiresCompatibilityRewrite: false,
+              },
+            };
+          }
+          return { ok: false as const, error: { kind: "unknown_alias" as const, alias } };
+        },
+        list: () => ["codex/gpt", "anthropic/claude"],
+      },
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["codex/gpt", "anthropic/claude"]),
+      req({
+        protocol: "openai_responses",
+        provider_raw: { unknown_items: [{ type: "agent_message", content: [] }] },
+      }),
+    );
+
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected a terminal error");
+    // Message names the structural blocker (native items / cross-provider), not a bare fail.
+    expect(out.final.error.message.toLowerCase()).toMatch(/native|cross-provider|responses/);
+  });
+
   it("does not claim compaction will fix a chain that also has an unavailable provider", async () => {
     const provider = {
       chatCompletion: vi.fn(),
