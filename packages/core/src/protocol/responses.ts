@@ -287,6 +287,40 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// Responses input[] item types the IR folder CAN rebuild losslessly (message ->
+// messages[], function/custom calls -> assistant.tool_calls, their outputs ->
+// role:"tool", reasoning -> thinking ext). Anything outside this set has no IR home.
+const CROSS_PROTOCOL_FOLDABLE_ITEM_TYPES = new Set([
+  "message",
+  "function_call",
+  "function_call_output",
+  "custom_tool_call",
+  "custom_tool_call_output",
+  "reasoning",
+]);
+
+// Does a Responses `input[]` carry structure the Responses->IR->(non-Responses) fold
+// CANNOT rebuild? True only when an item type is unknown (it would be dropped from
+// messages[]), or a `function_call`/`function_call_output` is caller-linked — a PTC
+// parallel chain whose exact top-level order + caller linkage is load-bearing and has no
+// IR field. (custom_tool_call carries no `caller` shape, so it is always foldable here.)
+// Plain `custom_tool_call` / caller-free `function_call` fold into assistant.tool_calls,
+// so they are NOT a cross-protocol blocker. NOTE: `reasoning` items fold to thinking-
+// summary text only — the OpenAI-private `encrypted_content` is intentionally dropped on
+// any cross-provider hop (no non-OpenAI provider can consume it); this is a benign
+// reasoning-cache loss, not conversation-content loss. This is the READ-side judgment for
+// the executor's guard; the folder's stash condition (below) stays deliberately broader
+// because it also protects the SAME-protocol native-passthrough snapshot. Pure + testable.
+export function responsesInputItemsAreCrossProtocolLossy(items: unknown): boolean {
+  if (!Array.isArray(items)) return false;
+  return items.some((item) => {
+    if (!isRecord(item)) return true;
+    const type = item.type;
+    if (typeof type !== "string" || !CROSS_PROTOCOL_FOLDABLE_ITEM_TYPES.has(type)) return true;
+    return (type === "function_call" || type === "function_call_output") && isRecord(item.caller);
+  });
+}
+
 // Responses function tools are flat (`{type:"function", name, parameters}`), while
 // Chat Completions upstreams require `{type:"function", function:{...}}`.
 function responsesToolToChatTool(tool: unknown): unknown {
@@ -328,6 +362,20 @@ function chatToolChoiceToResponses(toolChoice: unknown): unknown {
   return { type: "function", name: toolChoice.function.name };
 }
 
+// A `type:"custom"` tool is client-declared free-form (name + optional description, and a
+// grammar `format` we can't express in JSON-Schema). Degrade it to a standard Chat function
+// tool with a permissive object schema so a CROSS-PROTOCOL target (Anthropic/OpenAI-chat)
+// still sees the tool by name — otherwise the fold parks it in responses_native_tools, which
+// no non-Responses wire forwards, and the model loses the tool. The verbatim original is
+// kept in `responses_tools` (rawTools) for the same-protocol Codex re-render.
+function responsesCustomToolToChatTool(tool: Record<string, unknown>): unknown {
+  if (typeof tool.name !== "string") return tool;
+  const fn: Record<string, unknown> = { name: tool.name };
+  if (typeof tool.description === "string") fn.description = tool.description;
+  fn.parameters = { type: "object", properties: {}, additionalProperties: true };
+  return { type: "function", function: fn };
+}
+
 function normalizeResponsesTools(tools: unknown[] | undefined): {
   tools?: unknown[];
   rawTools?: unknown[];
@@ -338,6 +386,11 @@ function normalizeResponsesTools(tools: unknown[] | undefined): {
   const nativeTools: unknown[] = [];
   let changed = false;
   for (const tool of tools) {
+    if (isRecord(tool) && tool.type === "custom") {
+      normalized.push(responsesCustomToolToChatTool(tool));
+      changed = true;
+      continue;
+    }
     if (isRecord(tool) && tool.type !== "function") {
       nativeTools.push(tool);
       changed = true;

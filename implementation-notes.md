@@ -7,6 +7,18 @@
 
 ---
 
+## 2026-08-04 · Codex 请求跨协议 fallback 全军覆没（Provider execution / Protocol，docs/03/04/05，原则 3/5/8）
+
+- **现场根因（三个叠加的独立 bug）**：一个带 Codex 原生 items（`custom_tool_call` / caller-linked PTC）的 Responses 请求，在 GPT 订阅池耗尽后返回 `all_providers_failed`——Grok 422、Claude/DeepSeek/zenmux/openrouter 全被 skip。用户切 Grok / Claude 都用不了。
+  - **Bug A**：`protocolGuardSkipReason`（execute.ts）对“源 Responses + 目标非 Responses + 带 native items”一律整体跳过候选，连协议翻译都不做——过度保守。实测 IR 折叠器 `toIRRequest` 已能把 `custom_tool_call` / 无 caller 的 `function_call` 无损折进 `assistant.tool_calls`；真正跨协议装不下的只有 unknown item 类型与 caller-linked PTC 并行链。
+  - **Bug B**：`canUseNativePassthrough` 只比协议，把 Codex(responses)→Grok(generic responses) 判为“同协议→透传”，逐字（只换 model 名）把 Codex 私有 body 发给 Grok → 422。
+  - **Bug C（矛盾根因）**：`candidateGuardSkipReason` 的 profile 检查读 `target.provider?.nativeProtocolProfile`，但 `createSerializingClient` 逐方法转发时**漏了 `nativeProtocolProfile` 这个数据字段**。多账号 OAuth 池（box xai 有 2 个账号）因 pool 要求“所有成员 profile 一致才暴露”而塌成 `undefined`，profile 检查失效 → Grok 漏过 skip 发出 422。这解释了诊断时“Grok 未 skip 却 422、Claude 被 skip”的字面矛盾（两 guard 条件不对称，非数据被 mutate）。
+- **修复**：(A) 新增纯函数 `responsesInputItemsAreCrossProtocolLossy`（core，导出），把两个 guard 收窄为“仅 unknown_items 或 caller-linked/unknown item 才 skip”，可折叠 items 放行走翻译。(B) `canUseNativePassthrough` 新增 `sourceCarriesResponsesNativeItems` + `targetIsGenericResponsesProfile` 两个输入与新 disable reason `responses_native_body_provider_incompatible`：Codex-origin body → generic responses provider 不透传，fall through 到 `chatCompletion(Stream)` 翻译，`openaiToGenericResponsesRequest` 天生产出干净 body。(C) `createSerializingClient` 补透传 `nativeProtocolProfile`，让多成员池正确暴露 profile。
+- **权衡与边界**：profile 判据选择读 pool client 运行时字段（Bug C 修好后可靠）而非 `resolveAttemptTarget` 静态标志——更贴近“这个成员实际讲什么协议”。有损降级会丢 `reasoning.encrypted_content`（Grok 本就不认）；caller-linked PTC / unknown items **仍保持 hard skip**，不做有损翻译。判据读 `provider_raw.responses_input_items`/`unknown_items`（copy-on-write 恒定、是“带不可翻译结构”的精确信号），**不改读** `native_request.body.input`（任何 responses 请求都有 input，会误判）。TDD 全绿：新增 predicate 单测、pool profile 透传测、两个 guard 收窄测、Grok 走翻译集成测（411 tests）。
+- **Grok 双轮 review 追加修复**：(High) 放行 `type:"custom"` 工具后必须真正降级——`normalizeResponsesTools` 把 custom 工具声明转成标准 function tool 进 `IR.tools`（不再进 `responses_native_tools`），否则跨协议到 Claude 时工具声明整个丢失、agent 工具环断（`responses_native_tools` 不在 anthropic forward 白名单）。custom 降级后 `responses_native_tools` 只剩服务端工具，guard 恢复无条件 hard-skip（删掉了中途加的 allowlist 判据，净简化）。原始 custom 形状仍由 `responses_tools`（rawTools 快照）保护 Codex→Codex 同协议回渲染。(Medium) generic responses target 不再 forward `responses_input_items`（`renderProviderRawForTarget` 加 `targetIsGenericResponsesProfile` 参数删该 key），正确性不再依赖 Grok 客户端碰巧 ignore 它。(Medium) serialize-client 补透传 `streamReframed`（连同 profile）。
+- **已知限制（Grok 次要发现，本 PR 不修）**：`custom_tool_call.input` 是 free-form 文本（apply_patch 的 patch / shell 命令），fold 进 IR `function.arguments` 后，Anthropic 侧 `JSON.parse` 失败会回退成 `{}`——历史轮 tool call 的**参数**在跨协议翻译时降级为空对象。这是既有 fold 语义（本 PR 只是让该路径可达），影响历史工具调用的参数保真度，不影响 Claude 理解“上一轮做过什么”（结果在 tool_output 里）与调用新工具。修它需改 IR tool-call arguments 的 non-JSON 承载语义、波及所有 provider，超出本 PR 范围，留作 follow-up。
+- **数据完整性论证（回应“服务端数据取不回”质疑）**：原跳过的理由是“Responses body 不完整、部分数据只在服务端”。代码+OpenAI 文档双证：真正“历史在服务端”的机制只有 `previous_response_id`，该 guard **原封不动保留**（`protocolGuardSkipReason` 在收窄的 items 检查之前先 return，换 provider 续接另有 `_provider_mismatch`）。Codex 恒发 `store:false`，语义是服务端无状态、客户端每轮重发完整历史——`sanitizeStoreFalseInputItems` 主动删每个 item 的 `id` 死引用，正证明 `input[]` 自包含、正文全在 body（`custom_tool_call.input` / `function_call.arguments` 皆 inline `z.string()`）。翻译丢弃的 `reasoning.encrypted_content` 是 OpenAI 私有的**加密推理 token 缓存（跨轮 reasoning 连续性优化），不是对话内容**——对话由 message/tool item 承载并完整保留，且任何非-OpenAI provider 本就无法消费该加密串。故“可折叠 ⇒ 自包含 ⇒ 可翻译”成立，放行范围无需再收窄。
+
 ## 2026-08-03 · 受限容器不再重复套用宿主机固定内存预留（Gateway runtime，docs/02/05/10，原则 3/7/8）
 
 - **现场根因**：1.5 GiB cgroup 当时仍有约 457.96 MiB 可用内存，但动态准入先扣除面向非受限宿主机的 384 MiB 固定预留，再只使用剩余量的 70%，把安全工作容量压到约 51.78 MiB；一个 25.64 MiB Responses 请求按 6 倍 JSON 放大计为约 153.86 MiB，即使共享协调器没有任何活动 lease 也会稳定返回 503。
@@ -62,15 +74,9 @@
 - **协议边界**：共享记录路径覆盖 Responses、Messages、Gemini、Interactions 与 Images，OpenAI Chat 和 Admin Replay 的独立写入路径显式补齐；multipart 图片使用原始 wire bytes 覆盖其后生成的元数据 JSON 大小。尚不产生 `DecisionRecord` 的预路由拒绝、count-tokens 与 Realtime 请求不伪造该指标。
 - **兼容与展示**：Admin 共享请求表按二进制阈值显示 `B / KB / MB`；旧记录不回填并显示 `—`，避免读取或扫描历史私密正文。
 
-## 2026-07-29 · 生产韧性改为持续小批、无丢弃背压、执行 Token 租约与完整错误诊断（Store / Gateway / OAuth / Telemetry，docs/02/04/07/10/11，原则 1/3/5/7/8）
-
-- **SQLite 持续清理**：七类 SQLite retention mutation 统一为每批最多 10 行，满批后 `setImmediate` 让出事件循环，不再执行无界 DELETE。Session cleanup 先用既有 `head_request_id` 写入持久 prune claim，再按每批最多 10 个 revision 推进；进程中断后可继续完成，批间到达的同 Session 写入会等待过期链删完并以新 root 恢复。写入在真正落库的同步事务内再次检查 claim，关闭“先检查、await 让出、随后写进删除链”的竞态。该机制只减少未来增长和清理停顿，不替代整库重写；大库 `VACUUM` 仍必须由既有维护 drain 和低峰调度单独执行。
-- **写队列不再丢数据**：删除 `overflow`、`task_overflow`、`session_overflow` 的 OOM shedding；Telemetry、Payload、Session 与 Memory task 使用同一串行 admission 背压，已接受数据按 FIFO 落库。`flush`、maintenance pause 与 stop 都等待 admission tail 后再完成最终 drain，barrier 之前已开始等待的 admission 也会持久化；deferred task 下一事件循环才执行，避免 awaited admission 把同步 SQLite 写重新拉回请求关键路径。没有新增依赖或配置。
-- **执行 Token 租约**：OAuth Provider 统一保存上游真实 `expires`，不再在各 Provider 解析时篡改到期时间；执行 client 在 `request_timeout_ms` 之外保留 5 分钟提前刷新余量（默认共 6 分钟），Admin discovery/quota 保持既有 60 秒余量。网络、408/425/5xx 刷新失败会按账号稳定抖动等待 1–3 秒并重读共享 Store：只采用其他实例已经轮换出的有效 credential，绝不重放结果不确定的旧 rotating refresh token；Store 未变化时当前请求转健康兄弟账号，失败账号在本进程短冷却 30 秒后自动恢复。确定性凭证错误与 429 继续进入既有重连/限流分流。刷新后 Token 若覆盖不了整段租约就不用于请求，但先加密持久化旋转后的 refresh token；短租约账号不会被永久标记为凭证失效。
-- **完整但有界的错误诊断**：Provider HTTP/transport 错误保存 64 KiB body、16 KiB 非凭证 headers、嵌套 cause、16 KiB stack，并用 128 KiB/256 节点总预算防止诊断本身放大内存。Telemetry 不再因字段名含 `token` 就误隐藏 `token_count` 或 rate-limit token 指标；只过滤 API key、OAuth access/refresh/id token、Authorization、Cookie、密码和代理凭证。请求/响应正文仍遵守 `capture_payloads` / Session 留存边界，不塞进 DecisionRecord。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-29 · 生产韧性：持续小批清理 + 无丢弃背压 + 执行 Token 租约 + 完整错误诊断**：SQLite retention 每批≤10 行让出事件循环、Session prune claim 可续；写队列删除 OOM shedding 改统一串行 admission 背压 FIFO；OAuth 保存真实 `expires`、执行 client 6 分钟提前刷新、刷新失败重读共享 Store 只用他实例轮换出的有效 credential；Provider 错误有界诊断（64 KiB body / 128 KiB 总预算），完整原文通过 git history 回溯。
 - **2026-07-28 · 删除 HTTP 与 WebSocket 请求大小上限**：删除应用与 Remote Nginx 固定正文上限，继续由动态内存准入、鉴权、schema、maintenance drain 和 provider timeout 保护运行时；完整原文通过 git history回溯。
 - **2026-07-28 · preflight/registry 内存放大与自动 VACUUM 空闲门禁**：Responses preflight 增加 deadline/abort，catalog 与 registry 改为有界热路径；自动 VACUUM 仅在空闲 drain 后执行，完整原文通过 git history 回溯。
 - **2026-07-25 · 上游过载（529/503）在 fetch 边界退避重试**：只在首字节前对 529/503 做两次有界退避，保留账号池、熔断、fallback 与终态 telemetry 语义；客户端断连立即停止，完整原文通过 git history 回溯。

@@ -1040,6 +1040,41 @@ describe("createExecute — gateway execution adapter", () => {
     expect(out.attempts[0]?.skip_reason).toBe("responses_native_items_cross_protocol_blocked");
   });
 
+  it("translates (does NOT skip) foldable Responses items to a non-Responses target", async () => {
+    // A plain custom_tool_call / caller-free function_call folds losslessly into
+    // assistant.tool_calls — the cross-protocol guard must let the candidate run the
+    // normal responses->IR->target translation instead of skipping the whole candidate.
+    // Regression for Codex fallback: GPT quota exhausted must still reach Claude.
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "translated-ok", usage: {} }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ default_good_model: "gpt-x" }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["default_good_model"]),
+      req({
+        protocol: "openai_responses",
+        provider_raw: {
+          responses_input_items: [
+            { type: "custom_tool_call", call_id: "c1", name: "apply_patch", input: "{}" },
+          ],
+        },
+      }),
+    );
+
+    expect(provider.chatCompletion).toHaveBeenCalled();
+    expect(out.attempts[0]?.skip_reason).not.toBe("responses_native_items_cross_protocol_blocked");
+  });
+
   it("blocks Codex-native Responses items on xAI Responses targets", async () => {
     const memberClient = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "should-not-call" }),
@@ -1098,6 +1133,79 @@ describe("createExecute — gateway execution adapter", () => {
     expect(memberClient.chatCompletion).not.toHaveBeenCalled();
     expect(out.final.status).toBe("error");
     expect(out.attempts[0]?.skip_reason).toBe("responses_native_items_provider_incompatible");
+  });
+
+  it("translates (not verbatim-forwards) a FOLDABLE Codex body to an xAI Responses pool", async () => {
+    // Regression: GPT quota exhausted -> Grok fallback. A plain custom_tool_call folds
+    // losslessly, so instead of a 422 verbatim passthrough (or a hard skip), the xAI
+    // member's chatCompletion translation path runs and produces a clean Responses body.
+    const memberClient = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "grok-translated", usage: {} }),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockResolvedValue({ id: "should-not-passthrough" }),
+      nativeProtocolProfile: "generic_openai_responses",
+    } as unknown as ProviderClient;
+    const provider = createOAuthPoolClient({
+      members: [
+        { account: "xai-a", priority: 10, schedulable: true, client: memberClient },
+        { account: "xai-b", priority: 20, schedulable: true, client: memberClient },
+      ],
+    });
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["xai", provider]]),
+      registry: {
+        resolve(alias: string) {
+          if (alias !== "xai/grok-4.5") {
+            return { ok: false as const, error: { kind: "unknown_alias" as const, alias } };
+          }
+          return {
+            ok: true as const,
+            value: {
+              alias,
+              providerName: "xai",
+              providerModel: "grok-4.5",
+              baseUrl: "https://example.test",
+              apiKeyEnv: "XAI_API_KEY",
+              targetProviderProtocol: "openai_responses" as const,
+              providerRequiresCompatibilityRewrite: false,
+            },
+          };
+        },
+        list: () => ["xai/grok-4.5"],
+      },
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const responsesInput = [
+      { type: "custom_tool_call", call_id: "c1", name: "apply_patch", input: "{}" },
+    ];
+    const out = await execute(
+      plan(["xai/grok-4.5"]),
+      req({
+        protocol: "openai_responses",
+        provider_raw: { responses_input_items: responsesInput },
+        native_request: {
+          protocol: "openai_responses",
+          body: { model: "gpt-5.6-sol", input: responsesInput, stream: true },
+          headers: {},
+          mutations: {},
+        },
+      }),
+    );
+
+    // Translation ran, verbatim passthrough did NOT, and it was not skipped.
+    expect(memberClient.chatCompletion).toHaveBeenCalled();
+    expect(memberClient.nativePassthrough).not.toHaveBeenCalled();
+    expect(out.attempts[0]?.skipped).not.toBe(true);
+    expect(out.attempts[0]?.passthrough_used).toBe(false);
+    expect(out.attempts[0]?.passthrough_disable_reason).toBe(
+      "responses_native_body_provider_incompatible",
+    );
   });
 
   it("does not forward top-level cache_control to non-Anthropic target protocols", async () => {

@@ -178,5 +178,19 @@ export function createSerializingClient(deps: SerializeClientDeps): ProviderClie
       deps.inner.closeResponsesWebSocketSession?.(sessionId) ?? Promise.resolve();
   }
 
+  // Forward the inner member's non-method DATA fields verbatim. The method-by-method
+  // decoration above only copies functions, so any plain data property is silently
+  // dropped unless listed here. A dropped `nativeProtocolProfile` made a multi-account
+  // pool report `undefined` (pool.ts only exposes a pool profile when every member
+  // agrees), disabling the generic-Responses cross-protocol guard; `streamReframed`
+  // drives the `stream_reframed` telemetry mutation. Keep this list in sync with the
+  // non-method fields on ProviderClient so a future field isn't lost the same way.
+  if (deps.inner.nativeProtocolProfile !== undefined) {
+    client.nativeProtocolProfile = deps.inner.nativeProtocolProfile;
+  }
+  if (deps.inner.streamReframed !== undefined) {
+    client.streamReframed = deps.inner.streamReframed;
+  }
+
   return client;
 }

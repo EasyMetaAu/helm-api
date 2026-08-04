@@ -3,7 +3,49 @@ import { anthropicTransformer } from "./anthropic/index.js";
 import { geminiTransformer } from "./gemini/gemini-transformer.js";
 import type { IRRequest, IRResponse } from "./ir.js";
 import { TransformerRegistry } from "./registry.js";
-import { responsesTransformer } from "./responses.js";
+import { responsesInputItemsAreCrossProtocolLossy, responsesTransformer } from "./responses.js";
+
+describe("responsesInputItemsAreCrossProtocolLossy — cross-protocol fold gate", () => {
+  it("returns false for a plain custom_tool_call (folds into assistant.tool_calls)", () => {
+    expect(
+      responsesInputItemsAreCrossProtocolLossy([
+        { type: "custom_tool_call", call_id: "c1", name: "apply_patch", input: "{}" },
+      ]),
+    ).toBe(false);
+  });
+
+  it("returns false for a caller-free function_call / function_call_output", () => {
+    expect(
+      responsesInputItemsAreCrossProtocolLossy([
+        { type: "function_call", call_id: "c1", name: "get_weather", arguments: "{}" },
+        { type: "function_call_output", call_id: "c1", output: "sunny" },
+      ]),
+    ).toBe(false);
+  });
+
+  it("returns true for a caller-linked function_call (PTC parallel chain has no IR home)", () => {
+    expect(
+      responsesInputItemsAreCrossProtocolLossy([
+        { type: "function_call", call_id: "c1", name: "f", arguments: "{}", caller: { id: "p1" } },
+      ]),
+    ).toBe(true);
+  });
+
+  it("returns true for an unknown item type (dropped from messages[])", () => {
+    expect(responsesInputItemsAreCrossProtocolLossy([{ type: "web_search_call", id: "w1" }])).toBe(
+      true,
+    );
+  });
+
+  it("returns true for a non-record item", () => {
+    expect(responsesInputItemsAreCrossProtocolLossy(["oops"])).toBe(true);
+  });
+
+  it("returns false for a non-array / empty input (nothing to lose)", () => {
+    expect(responsesInputItemsAreCrossProtocolLossy(undefined)).toBe(false);
+    expect(responsesInputItemsAreCrossProtocolLossy([])).toBe(false);
+  });
+});
 
 describe("responsesTransformer — text.format structured output canonicalization (order 1)", () => {
   // A Responses client sends structured output as text.format.{type,name,schema};
@@ -1254,7 +1296,7 @@ describe("responsesTransformer — request sampling/control params (litellm pari
     expect(ir.messages).toEqual([{ role: "tool", content: "done", tool_call_id: "call_1" }]);
   });
 
-  it("keeps native-only Responses tools out of IR tools and preserves them in provider_raw", async () => {
+  it("keeps SERVER-hosted Responses tools out of IR tools and preserves them in provider_raw", async () => {
     const ir = await responsesTransformer.transformRequestOut({
       model: "gpt-4o",
       input: "hi",
@@ -1270,6 +1312,34 @@ describe("responsesTransformer — request sampling/control params (litellm pari
     expect(ir.provider_raw?.responses_native_tools).toEqual([
       { type: "mcp", server_label: "local" },
       { type: "file_search", vector_store_ids: ["vs_1"] },
+    ]);
+  });
+
+  it("degrades a client custom tool DECLARATION into an IR function tool (survives cross-protocol)", async () => {
+    // A `type:"custom"` tool (Codex apply_patch) is client-declared free-form. It must land
+    // in IR.tools as a standard function tool so a cross-protocol target (Claude) still sees
+    // the tool. It must NOT stay in responses_native_tools (that would drop it on the
+    // Anthropic wire). The verbatim original is still preserved in responses_tools for the
+    // same-protocol Codex path.
+    const ir = await responsesTransformer.transformRequestOut({
+      model: "gpt-5.6-sol",
+      input: "hi",
+      tools: [
+        { type: "custom", name: "apply_patch", description: "apply a patch" },
+        { type: "mcp", server_label: "local" },
+      ],
+    });
+    expect(ir.tools).toContainEqual({
+      type: "function",
+      function: {
+        name: "apply_patch",
+        description: "apply a patch",
+        parameters: { type: "object", properties: {}, additionalProperties: true },
+      },
+    });
+    // Server-hosted mcp still parked as native, custom no longer among native tools.
+    expect(ir.provider_raw?.responses_native_tools).toEqual([
+      { type: "mcp", server_label: "local" },
     ]);
   });
 });

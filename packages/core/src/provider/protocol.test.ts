@@ -51,6 +51,8 @@ function input(
     targetProviderProtocol: "anthropic_messages",
     providerRequiresCompatibilityRewrite: false,
     providerSupportsPassthrough: true,
+    sourceCarriesResponsesNativeItems: false,
+    targetIsGenericResponsesProfile: false,
     ...overrides,
   };
 }
@@ -124,6 +126,49 @@ describe("canUseNativePassthrough", () => {
     expect(canUseNativePassthrough(input())).toEqual({ ok: true });
   });
 
+  it("6a) disables a Codex-origin body to a generic Responses provider (fall through to translate)", () => {
+    // Codex(responses) -> Grok(generic responses) is same-protocol, so protocol_mismatch
+    // passes. But a Codex-private body (custom_tool_call / additional_tools / encrypted
+    // reasoning) forwarded verbatim makes Grok 422. Disable passthrough so the executor
+    // translates it into a clean standard Responses body instead.
+    expect(
+      canUseNativePassthrough(
+        input({
+          request: request({ protocol: "openai_responses" }),
+          targetProviderProtocol: "openai_responses",
+          sourceCarriesResponsesNativeItems: true,
+          targetIsGenericResponsesProfile: true,
+        }),
+      ),
+    ).toEqual({ ok: false, reason: "responses_native_body_provider_incompatible" });
+  });
+
+  it("6b) keeps Codex->Codex native passthrough (target is NOT a generic Responses profile)", () => {
+    expect(
+      canUseNativePassthrough(
+        input({
+          request: request({ protocol: "openai_responses" }),
+          targetProviderProtocol: "openai_responses",
+          sourceCarriesResponsesNativeItems: true,
+          targetIsGenericResponsesProfile: false,
+        }),
+      ),
+    ).toEqual({ ok: true });
+  });
+
+  it("6c) keeps passthrough to a generic Responses provider when the body has no native items", () => {
+    expect(
+      canUseNativePassthrough(
+        input({
+          request: request({ protocol: "openai_responses" }),
+          targetProviderProtocol: "openai_responses",
+          sourceCarriesResponsesNativeItems: false,
+          targetIsGenericResponsesProfile: true,
+        }),
+      ),
+    ).toEqual({ ok: true });
+  });
+
   it("7) disables when the provider requires a compatibility rewrite (developer-role / schema remap)", () => {
     expect(canUseNativePassthrough(input({ providerRequiresCompatibilityRewrite: true }))).toEqual({
       ok: false,
@@ -166,6 +211,8 @@ describe("canUseNativePassthrough", () => {
       "providerRequiresCompatibilityRewrite",
       "providerSupportsPassthrough",
       "request",
+      "sourceCarriesResponsesNativeItems",
+      "targetIsGenericResponsesProfile",
       "targetProviderProtocol",
     ]);
   });

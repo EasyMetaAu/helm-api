@@ -56,7 +56,7 @@ reasoning policy, materialize media, or reframe a stream.
 | Feature | OpenAI Chat | Anthropic Messages | OpenAI Responses | Gemini |
 |---|---|---|---|---|
 | Text/system roles | `messages[]` with system/developer roles | top-level `system` plus messages | `instructions` plus input items | `systemInstruction` plus contents |
-| Function tools | Native Chat tool shape; multiple tool calls | Native tools/tool-use/tool-result; translated names normalized to 64 chars with stable collision suffixes | Function/custom call items; non-function native tools guarded cross-protocol | Function declarations/calls/responses; Helm synthesizes IR call IDs |
+| Function tools | Native Chat tool shape; multiple tool calls | Native tools/tool-use/tool-result; translated names normalized to 64 chars with stable collision suffixes | Function/custom call items fold to tool_calls; server-hosted native tools (mcp/file_search/…) guarded cross-protocol, client `custom` tools translate | Function declarations/calls/responses; Helm synthesizes IR call IDs |
 | Structured output | `response_format` | native output config/schema mapping where supported | `text.format` canonicalized to/from shared `response_format` | response MIME/schema generation config |
 | Input media | Modeled image, audio, and file/document parts; IR-shaped video is not a general OpenAI wire guarantee | Image and document blocks; no general audio/video request surface | `input_image`, `input_audio`, and `input_file`; translated renderer currently omits video | `inlineData`, `fileData`, and video metadata; provider capability and optional remote fetch still apply |
 | Generated media | Message audio/images where modeled | Native image blocks map to IR images | The translated response renderer emits text/reasoning/functions but currently does not emit IR image parts; native passthrough is safest | `inlineData` image/audio maps to IR output carriers |
@@ -76,8 +76,8 @@ protocol boundary. The attempt is recorded as skipped and fallback can continue:
 |---|---|
 | `responses_previous_response_id_cross_protocol_blocked` | A Responses request uses `previous_response_id`, whose hidden history cannot be reconstructed by a non-Responses target. |
 | `responses_previous_response_id_provider_mismatch` | A continuation candidate is not the provider alias recorded for the referenced response. |
-| `responses_native_tools_cross_protocol_blocked` | The Responses request contains non-function/native tools. |
-| `responses_native_items_cross_protocol_blocked` | The request contains native/custom/caller-linked or unknown Responses input items whose sequence cannot be represented safely. |
+| `responses_native_tools_cross_protocol_blocked` | The Responses request declares a **server-hosted** native tool (mcp / file_search / web_search / …) with no cross-protocol home. Client `type:"custom"` tools (e.g. Codex `apply_patch`) are NOT server-hosted — the fold degrades them to standard function tools in `IR.tools`, so they never reach this guard and translate normally. |
+| `responses_native_items_cross_protocol_blocked` | The request contains **unknown** Responses input item types or **caller-linked** function calls (a PTC parallel chain whose top-level order/linkage is load-bearing). Plain `custom_tool_call` / caller-free `function_call` fold losslessly and are NOT blocked. |
 | `responses_background_cross_protocol_blocked` | A Responses request sets `background: true` and the target is not Responses. |
 | `reasoning_history_incompatible` | A Responses reasoning-history request targets direct DeepSeek over OpenAI Chat, whose wire cannot safely represent that history. |
 

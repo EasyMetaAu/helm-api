@@ -23,6 +23,7 @@ import {
   optimizeVisualContext,
   preOutputClassifierFor,
   resolveCostUsd,
+  responsesInputItemsAreCrossProtocolLossy,
   sanitizeCodexResponsesNativeBody,
   TokenRefreshError,
   UpstreamError,
@@ -453,6 +454,16 @@ function decideNativePassthroughForAttempt(input: {
     providerSupportsPassthrough: req.stream
       ? typeof target.provider?.nativePassthroughStream === "function"
       : typeof target.provider?.nativePassthrough === "function",
+    // A Codex-origin body (custom_tool_call / caller-linked PTC / unknown items) forwarded
+    // verbatim to a GENERIC Responses provider (xAI/Grok) 422s. Disable passthrough so the
+    // executor translates it to a clean standard Responses body. The profile is read from
+    // the resolved provider client (OAuth pools forward the member profile — see
+    // serialize-client), so a multi-account pool no longer masks it as undefined.
+    sourceCarriesResponsesNativeItems:
+      Array.isArray(req.provider_raw?.responses_input_items) ||
+      Array.isArray(req.provider_raw?.unknown_items),
+    targetIsGenericResponsesProfile:
+      target.provider?.nativeProtocolProfile === "generic_openai_responses",
   });
 
   return {
@@ -779,12 +790,18 @@ function candidateGuardSkipReason(
   ) {
     return "responses_previous_response_id_provider_mismatch";
   }
+  // A generic Responses provider (xAI/Grok) can't parse Codex-private items. NARROWED to
+  // the genuinely non-translatable cases (unknown item types / caller-linked PTC chains):
+  // those stay a hard skip. Foldable items (plain custom_tool_call / caller-free
+  // function_call) fall through — canUseNativePassthrough then disables verbatim forward
+  // (`responses_native_body_provider_incompatible`) and the executor translates to a clean
+  // standard Responses body, so Grok can actually serve as a Codex fallback.
   if (
     req.protocol === "openai_responses" &&
     target.targetProviderProtocol === "openai_responses" &&
     target.provider?.nativeProtocolProfile === "generic_openai_responses" &&
-    (Array.isArray(req.provider_raw?.responses_input_items) ||
-      Array.isArray(req.provider_raw?.unknown_items))
+    (Array.isArray(req.provider_raw?.unknown_items) ||
+      responsesInputItemsAreCrossProtocolLossy(req.provider_raw?.responses_input_items))
   ) {
     return "responses_native_items_provider_incompatible";
   }
@@ -808,12 +825,22 @@ function protocolGuardSkipReason(
   if (hasResponsesContinuation(req)) {
     return "responses_previous_response_id_cross_protocol_blocked";
   }
+  // `responses_native_tools` now holds ONLY server-hosted tools (mcp / file_search /
+  // web_search …) — a client `type:"custom"` tool is degraded to a standard function tool
+  // in IR.tools by the fold (normalizeResponsesTools), so it never lands here. Server tools
+  // have no IR/Anthropic home, so their presence still hard-skips the cross-protocol
+  // candidate.
   if (Array.isArray(req.provider_raw?.responses_native_tools)) {
     return "responses_native_tools_cross_protocol_blocked";
   }
+  // NARROWED (issue: Codex cross-protocol fallback): only block when the native items
+  // are genuinely non-reconstructible cross-protocol — an unknown item type (dropped
+  // from messages[]) or a caller-linked PTC parallel chain. Plain custom_tool_call /
+  // caller-free function_call fold losslessly into assistant.tool_calls, so they run the
+  // normal responses->IR->target translation instead of skipping the whole candidate.
   if (
-    Array.isArray(req.provider_raw?.responses_input_items) ||
-    Array.isArray(req.provider_raw?.unknown_items)
+    Array.isArray(req.provider_raw?.unknown_items) ||
+    responsesInputItemsAreCrossProtocolLossy(req.provider_raw?.responses_input_items)
   ) {
     return "responses_native_items_cross_protocol_blocked";
   }
@@ -1910,7 +1937,13 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           // Translate stream path (passthrough disabled): the existing byte-for-byte
           // forward. peekStream opens chatCompletionStream(stripInternal); the row
           // carries the (used:false) passthrough telemetry. No nativePassthrough marker.
-          const rendered = stripInternal(req, providerModel, target.targetProviderProtocol, caps);
+          const rendered = stripInternal(
+            req,
+            providerModel,
+            target.targetProviderProtocol,
+            caps,
+            target.provider?.nativeProtocolProfile === "generic_openai_responses",
+          );
           // Pre-output failover guard (principle 5 + 8): the translate generators
           // ALREADY throw on a terminal error frame, but they yield an empty role
           // preamble chunk first, so peekStream would commit success before the throw.
@@ -2036,7 +2069,13 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             responseMetadata: capturedResponseMetadata,
           };
         }
-        const bodyReq = stripInternal(req, providerModel, target.targetProviderProtocol, caps);
+        const bodyReq = stripInternal(
+          req,
+          providerModel,
+          target.targetProviderProtocol,
+          caps,
+          target.provider?.nativeProtocolProfile === "generic_openai_responses",
+        );
         const body = await withAttemptDeadline(req.attempt_timeout_ms, signal, (attemptSignal) =>
           provider.chatCompletion(bodyReq.body, {
             signal: attemptSignal,
@@ -2486,11 +2525,18 @@ const PROVIDER_RAW_FORWARD_KEYS_BY_PROTOCOL = {
 function renderProviderRawForTarget(
   providerRaw: Record<string, unknown> | undefined,
   targetProviderProtocol: TargetProviderProtocol,
+  targetIsGenericResponsesProfile: boolean,
 ): { body: Record<string, unknown>; strippedKeys: string[] } {
   if (providerRaw === undefined) return { body: {}, strippedKeys: [] };
   const out: Record<string, unknown> = {};
   const allowed = new Set<string>(PROVIDER_RAW_FORWARD_KEYS_BY_PROTOCOL[targetProviderProtocol]);
-  for (const key of PROVIDER_RAW_FORWARD_KEYS_BY_PROTOCOL[targetProviderProtocol]) {
+  // `responses_input_items` is the Codex-private input snapshot — it is only meaningful to
+  // the Codex OFFICIAL endpoint that emitted it. A GENERIC Responses provider (xAI/Grok)
+  // rebuilds `input` from the folded messages (openaiToGenericResponsesRequest), so never
+  // forward the Codex snapshot to it: correctness must not depend on the generic client
+  // happening to ignore the field. (Codex->Codex keeps it via the passthrough path.)
+  if (targetIsGenericResponsesProfile) allowed.delete("responses_input_items");
+  for (const key of allowed) {
     const value = providerRaw[key];
     if (value !== undefined && value !== null) out[key] = value;
   }
@@ -2552,6 +2598,7 @@ function stripInternal(
   providerModel: string,
   targetProviderProtocol: TargetProviderProtocol,
   caps: Capabilities | undefined,
+  targetIsGenericResponsesProfile = false,
 ): { body: Record<string, unknown>; request_mutations?: NativePassthroughCarrier["mutations"] } {
   const requestMutations: NativePassthroughCarrier["mutations"] = {};
   const openAICompatibleWire =
@@ -2611,7 +2658,11 @@ function stripInternal(
   if (targetProviderProtocol === "anthropic_messages" && req.cache_control !== undefined) {
     body.cache_control = req.cache_control;
   }
-  const renderedRaw = renderProviderRawForTarget(req.provider_raw, targetProviderProtocol);
+  const renderedRaw = renderProviderRawForTarget(
+    req.provider_raw,
+    targetProviderProtocol,
+    targetIsGenericResponsesProfile,
+  );
   if (targetProviderProtocol === "openai_chat" && renderedRaw.strippedKeys.length > 0) {
     requestMutations.provider_raw_stripped_for_openai = renderedRaw.strippedKeys;
   } else if (renderedRaw.strippedKeys.length > 0) {
