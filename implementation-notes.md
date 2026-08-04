@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-08-04 · 修复 per-key 请求内容存储覆盖的优先级回归（Gateway / Telemetry，docs/06/07/11，原则 2/7）
+
+- **回归根因**：`withRequestContentMode`（payload-capture.ts）自 PR #677（`52bb5f9b`，v0.28.29）起把 key 覆盖包在 `globallyEnabled() && …` 内——全局关闭即成 hard-off，强制所有 key 关闭，与 #675 承诺的“key 显式值 > 全局值”完全相反。测试也被同步改成断言这个错误语义，故 CI 一直绿。生产实测：WW 落库 `request_content_mode='payload'` 但全局关闭后 38 个请求全部无 payload。
+- **修复**：恢复 #675 原始语义——`none`/`payload`/`session` 无条件覆盖实时全局开关，仅 `null`/`undefined` 继承全局。仅改共享 helper 一处，Chat/Messages/Responses/Gemini/Images/Interactions/Admin Replay 复用同一 getter，自动同修。
+- **契约澄清**：更正 2026-08-02 Session-storage 条目中“全局 metadata-only 是 hard-off、key 不能绕过”的错误措辞。资源保护的 generation-drop（切换后丢弃已排队正文写入）保持不变——那是全局开关翻转时的机制，与 per-key 优先级正交。
+
 ## 2026-08-04 · Codex 请求跨协议 fallback 全军覆没（Provider execution / Protocol，docs/03/04/05，原则 3/5/8）
 
 - **现场根因（三个叠加的独立 bug）**：一个带 Codex 原生 items（`custom_tool_call` / caller-linked PTC）的 Responses 请求，在 GPT 订阅池耗尽后返回 `all_providers_failed`——Grok 422、Claude/DeepSeek/zenmux/openrouter 全被 skip。用户切 Grok / Claude 都用不了。
@@ -53,7 +59,7 @@
 - **存储格式**：新 Session 正文按 UTF-8 安全的 256 KiB 原始块逐块 gzip/raw 写入，最多 4 块一批；revision 用请求/响应两个 generation 指针原子发布，响应回填不重写大请求正文，并发重试不会把一份元数据配到另一份正文。历史正文不扫描、不回填；legacy 行继续读取，首次响应回填记录准确的逻辑 `body_bytes`。Admin 恢复先按机器动态 response-work 预算分页，只读取已发布 generation；旧二进制正文在缺少可靠原始字节数时 fail-closed。
 - **无 Session 容量上限**：不恢复 64 MiB 或其他累计上限；单次正文、写队列、HTTP/WebSocket 与响应解析共享基于 V8/cgroup/可用内存的动态协调器，允许更大机器自动使用更多内存，但在 PSI/内存压力下暂停 Memory、Signals 与 scheduled cleanup。健康连续 60 秒后才恢复，避免抖动。
 - **维护边界**：SQLite Session prune 继续小批续跑；PostgreSQL 每次 cleanup tick 最多处理 128 个物理行、每批 16 行，并用持久 marker 续跑。scheduled cleanup 与 auto-VACUUM 在开始前检查压力，VACUUM 排空活动后、真正重写数据库前再次检查；压力恶化时不执行也不误记当天成功。手动维护语义保持不变。
-- **模式切换**：全局 metadata-only 是 hard-off，任何 key override 都不能绕过；切换 generation 后，已排队的 payload/Session 正文写入会被丢弃，脱敏 telemetry 仍保存。`part=meta` 不读取正文。
+- **模式切换**：切换全局 capture generation 后，已排队但尚未 flush 的 payload/Session 正文写入会被丢弃，脱敏 telemetry 仍保存。`part=meta` 不读取正文。（原先此处误把“全局 metadata-only 视为 hard-off、任何 key override 都不能绕过”写成契约——与 #675 的 per-key 覆盖优先级冲突，已于 2026-08-04 更正，见顶部条目。）
 
 ## 2026-07-31 · API key 单独覆盖请求内容存储模式（Key Store / Telemetry / Admin，docs/06/07/11，原则 2/7）
 

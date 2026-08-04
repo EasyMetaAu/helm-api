@@ -51,21 +51,47 @@ describe("per-key request content mode", () => {
     expect(scoped.captureSessions?.()).toBe(sessions);
   });
 
-  it("keeps global metadata-only as a live hard-off over every key override", () => {
-    let globallyEnabled = true;
-    const scoped = withRequestContentMode(
+  it("lets an explicit key mode override the global toggle in both directions", () => {
+    // Global fully off (metadata-only). An explicit key mode must still capture:
+    // per-key `none/payload/session` is the highest priority, `null` inherits.
+    const globalOff = {
+      telemetry: {} as PayloadCaptureDeps["telemetry"],
+      capturePayloads: () => false,
+      captureSessions: () => false,
+    } satisfies PayloadCaptureDeps;
+
+    const forcedPayload = withRequestContentMode(globalOff, "payload");
+    expect(forcedPayload.capturePayloads?.()).toBe(true);
+    expect(forcedPayload.captureSessions?.()).toBe(false);
+
+    const forcedSession = withRequestContentMode(globalOff, "session");
+    expect(forcedSession.capturePayloads?.()).toBe(false);
+    expect(forcedSession.captureSessions?.()).toBe(true);
+
+    // Global on, key opts out: `none` forces capture off for this request only.
+    const globalOn = {
+      telemetry: {} as PayloadCaptureDeps["telemetry"],
+      capturePayloads: () => true,
+      captureSessions: () => true,
+    } satisfies PayloadCaptureDeps;
+
+    const forcedOff = withRequestContentMode(globalOn, "none");
+    expect(forcedOff.capturePayloads?.()).toBe(false);
+    expect(forcedOff.captureSessions?.()).toBe(false);
+
+    // `null` inherits the live global — tracked even as it flips.
+    let live = true;
+    const inherit = withRequestContentMode(
       {
         telemetry: {} as PayloadCaptureDeps["telemetry"],
-        capturePayloads: () => false,
-        captureSessions: () => globallyEnabled,
+        capturePayloads: () => live,
+        captureSessions: () => false,
       },
-      "payload",
+      null,
     );
-
-    expect(scoped.capturePayloads?.()).toBe(true);
-    globallyEnabled = false;
-    expect(scoped.capturePayloads?.()).toBe(false);
-    expect(scoped.captureSessions?.()).toBe(false);
+    expect(inherit.capturePayloads?.()).toBe(true);
+    live = false;
+    expect(inherit.capturePayloads?.()).toBe(false);
   });
 });
 
