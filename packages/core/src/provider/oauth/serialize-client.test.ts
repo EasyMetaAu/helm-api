@@ -427,4 +427,10 @@ describe("createSerializingClient", () => {
     const client = makeClient(inner, { enabled: true, delayMs: 0, timeoutMs: 5_000 });
     expect(client.nativeProtocolProfile).toBeUndefined();
   });
+
+  it("forwards the inner member's streamReframed flag (stream_reframed telemetry)", () => {
+    const inner = { ...makeInner(), streamReframed: true };
+    const client = makeClient(inner, { enabled: true, delayMs: 0, timeoutMs: 5_000 });
+    expect(client.streamReframed).toBe(true);
+  });
 });

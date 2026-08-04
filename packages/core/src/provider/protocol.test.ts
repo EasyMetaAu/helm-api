@@ -126,7 +126,7 @@ describe("canUseNativePassthrough", () => {
     expect(canUseNativePassthrough(input())).toEqual({ ok: true });
   });
 
-  it("6) disables a Codex-origin body to a generic Responses provider (fall through to translate)", () => {
+  it("6a) disables a Codex-origin body to a generic Responses provider (fall through to translate)", () => {
     // Codex(responses) -> Grok(generic responses) is same-protocol, so protocol_mismatch
     // passes. But a Codex-private body (custom_tool_call / additional_tools / encrypted
     // reasoning) forwarded verbatim makes Grok 422. Disable passthrough so the executor
@@ -143,7 +143,7 @@ describe("canUseNativePassthrough", () => {
     ).toEqual({ ok: false, reason: "responses_native_body_provider_incompatible" });
   });
 
-  it("6) keeps Codex->Codex native passthrough (target is NOT a generic Responses profile)", () => {
+  it("6b) keeps Codex->Codex native passthrough (target is NOT a generic Responses profile)", () => {
     expect(
       canUseNativePassthrough(
         input({
@@ -156,7 +156,7 @@ describe("canUseNativePassthrough", () => {
     ).toEqual({ ok: true });
   });
 
-  it("6) keeps passthrough to a generic Responses provider when the body has no native items", () => {
+  it("6c) keeps passthrough to a generic Responses provider when the body has no native items", () => {
     expect(
       canUseNativePassthrough(
         input({
