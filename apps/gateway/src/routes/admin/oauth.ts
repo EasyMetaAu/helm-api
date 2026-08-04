@@ -1,4 +1,5 @@
 import {
+  aggregateByCalendar,
   computeUsagePeriods,
   filterRetiredOpenAICodexLimits,
   windowMinutesForKey,
@@ -238,63 +239,52 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
   // silently shrinking an allowance (per-period token totals trending down). Token
   // totals are exact; historical boundaries are approximate (rolled back a fixed
   // window length — flagged per period). Cache-only + FAIL-OPEN: any gap → empty.
+  const EMPTY_PERIODS = { current: [], daily: [], weekly: [] };
   const readPeriods = async (
     providerId: string,
     account: string,
-    rawLimit: unknown,
-  ): Promise<{ current: unknown[]; periods: unknown[] }> => {
+    rawTz: unknown,
+  ): Promise<{ current: unknown[]; daily: unknown[]; weekly: unknown[] }> => {
     const usage = deps.oauthUsage;
     const quotaStore = deps.oauthQuota;
-    if (!usage || !quotaStore) return { current: [], periods: [] };
-    // Roll back at most `limit` historical periods per window (clamped 1..52).
-    const parsed = Number(rawLimit);
-    const limit = Number.isInteger(parsed) && parsed >= 1 && parsed <= 52 ? parsed : 12;
+    if (!usage || !quotaStore) return EMPTY_PERIODS;
+    const parsedTz = Number(rawTz);
+    const tzOffsetMinutes =
+      Number.isInteger(parsedTz) && parsedTz >= -720 && parsedTz <= 840 ? parsedTz : 0;
     try {
       const snapshot = await quotaStore.get(providerId, account);
-      if (!snapshot) return { current: [], periods: [] };
+      if (!snapshot) return EMPTY_PERIODS;
       const now = Date.now();
-      // History reaches back only as far as buckets are retained (oauth_usage
-      // retention). Fetch from the retention floor, then anchor dataStartMs at the
-      // EARLIEST bucket seen — otherwise periods before the account had any traffic
-      // render as tokens:0 / partial:false, reading as a real empty period (a false
-      // "allowance shrank to zero") rather than "no data yet" (grok review R1-3).
+      // Fetch every retained hour bucket (oauth_usage retention floor → now).
       const retentionDays = deps.settings.get().oauth_usage_retention_days;
       const retentionFloorMs = now - retentionDays * 86_400_000;
       const buckets = await usage.queryBuckets(retentionFloorMs, now, providerId, account);
-      // queryBuckets returns ascending by bucketMs, so buckets[0] is the earliest.
-      const earliestBucketMs = buckets[0]?.bucketMs ?? now;
+      // `current`: the in-progress RESET period per window — exact (real resetsAtMs), the
+      // "this window has burned X so far" summary. limit 1: we only want the current one.
+      const earliestBucketMs = buckets[0]?.bucketMs ?? now; // ascending → [0] is earliest
       const dataStartMs = Math.max(retentionFloorMs, earliestBucketMs);
-      // Phase 2: real reset boundaries recorded since deploy. Where present, history
-      // slices on them (exact) instead of the fixed-window approximation. Per window
-      // key; fail-open (no store / error → all-approximate).
-      const recordedBoundaries: Record<string, Array<{ startMs: number; endMs: number }>> = {};
-      const periodStore = deps.oauthResetPeriod;
-      if (periodStore) {
-        for (const w of snapshot.windows) {
-          // Fetch limit + 1: the newest recorded row is the OPEN (in-progress) period,
-          // which computeUsagePeriods uses to anchor the current period rather than as a
-          // history row — without the +1 it would burn a history slot (grok review P2R2-2).
-          const recorded = await periodStore
-            .queryPeriods(providerId, account, w.key, limit + 1)
-            .catch(() => []);
-          if (recorded.length > 0) {
-            recordedBoundaries[w.key] = recorded.map((r) => ({
-              startMs: r.periodStartMs,
-              endMs: r.periodEndMs,
-            }));
-          }
-        }
-      }
-      return computeUsagePeriods({
+      const { current } = computeUsagePeriods({
         windows: snapshot.windows,
         buckets,
         nowMs: now,
         dataStartMs,
-        limit,
-        recordedBoundaries,
+        limit: 1,
       });
+      // History: NATURAL calendar day/week in the admin's local tz — exact, honest, and
+      // free of the reset-period drift/reset-credit distortion. A period is `partial`
+      // (undercounts) on EITHER edge: it starts before retained data (left), or it ends
+      // in the future — the in-progress day/week (right). Marking the open period partial
+      // is essential: a mid-week bar is only ~3/7 of a full week and would otherwise read
+      // as a false allowance drop (grok review CR1).
+      const daily = aggregateByCalendar(buckets, tzOffsetMinutes, "day");
+      const weekly = aggregateByCalendar(buckets, tzOffsetMinutes, "week");
+      const markPartial = (rows: typeof daily) =>
+        rows.map((r) =>
+          r.periodStartMs < dataStartMs || r.periodEndMs > now ? { ...r, partial: true } : r,
+        );
+      return { current, daily: markPartial(daily), weekly: markPartial(weekly) };
     } catch {
-      return { current: [], periods: [] };
+      return EMPTY_PERIODS;
     }
   };
 
@@ -628,15 +618,16 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     return c.json({ usage: await readUsage(c.req.query("tzOffsetMinutes"), status ?? null) });
   });
 
-  // GET /oauth/usage/periods?provider=&account=&limit= -> per-reset-period token/cost
-  // for one account (the account-detail page). provider+account are required.
+  // GET /oauth/usage/periods?provider=&account=&tzOffsetMinutes= -> the account-detail
+  // page: current reset-period summary + natural day/week history. provider+account
+  // required; tzOffsetMinutes (the viewer's local offset) shapes the calendar buckets.
   app.get("/admin/api/oauth/usage/periods", async (c) => {
     const provider = c.req.query("provider");
     const account = c.req.query("account");
     if (!provider || !account) {
       return c.json({ error: "provider and account are required" }, 400);
     }
-    return c.json(await readPeriods(provider, account, c.req.query("limit")));
+    return c.json(await readPeriods(provider, account, c.req.query("tzOffsetMinutes")));
   });
 
   app.get("/admin/api/oauth/quota", async (c) => {

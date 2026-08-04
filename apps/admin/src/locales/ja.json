@@ -1046,5 +1046,11 @@
   "snapshot may be stale": "snapshot may be stale",
   "Approximate — the quota snapshot may be stale, so this period is reconstructed": "Approximate — the quota snapshot may be stale, so this period is reconstructed",
   "Token usage per quota reset period. Periods marked ≈ have approximate boundaries.": "Token usage per quota reset period. Periods marked ≈ have approximate boundaries.",
-  "Approximate — the period boundary is not hour-aligned, so hour-bucket totals are within about one hour": "Approximate — the period boundary is not hour-aligned, so hour-bucket totals are within about one hour"
+  "Approximate — the period boundary is not hour-aligned, so hour-bucket totals are within about one hour": "Approximate — the period boundary is not hour-aligned, so hour-bucket totals are within about one hour",
+  "Current quota window usage, plus token history by calendar day or week.": "Current quota window usage, plus token history by calendar day or week.",
+  "Usage history": "Usage history",
+  "Daily": "Daily",
+  "Day": "Day",
+  "Week": "Week",
+  "This window caps one model, but the history below is account-wide (usage is not tracked per model). Use “Used %” for this window’s own consumption.": "This window caps one model, but the history below is account-wide (usage is not tracked per model). Use “Used %” for this window’s own consumption."
 }

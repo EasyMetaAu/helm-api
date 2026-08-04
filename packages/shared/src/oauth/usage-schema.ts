@@ -458,16 +458,22 @@ export const OAuthUsagePeriodSchema = z
 
 export type OAuthUsagePeriod = z.infer<typeof OAuthUsagePeriodSchema>;
 
-// The /usage/periods response for one account, across its (possibly several) reset
-// windows — Anthropic has 5h + 7d(+scoped), Codex/xai have one. `current` holds the
-// in-progress period per window (exact boundary; a window with no anchorable
-// resetsAtMs is omitted). `periods` holds the finished historical periods across all
-// windows, each tagged with its windowKey (most recent first within a window). The
-// UI groups both by windowKey into per-window tabs.
+// The /usage/periods response for one account. `current` holds the in-progress period
+// per reset window (exact upstream boundary — the "this window has burned X so far"
+// summary; a window with no anchorable resetsAtMs is omitted), grouped by windowKey.
+//
+// History is NOT sliced by reset period: real reset boundaries drift and are cut short
+// by reset-credit consumption (an account can burn a weekly allowance in a day), and
+// the true boundaries were never recorded — so rolling back a fixed window length is
+// misleading. Instead history is aggregated by NATURAL CALENDAR day and week in the
+// admin's local timezone (`daily` / `weekly`), which are exact and honest. Both are
+// most-recent first; the caller marks the oldest as `partial` if it precedes retained
+// data. `windowKey` on these carries the granularity ("day" / "week"), not a window.
 export const OAuthUsagePeriodsSchema = z
   .object({
     current: z.array(OAuthUsagePeriodSchema),
-    periods: z.array(OAuthUsagePeriodSchema),
+    daily: z.array(OAuthUsagePeriodSchema),
+    weekly: z.array(OAuthUsagePeriodSchema),
   })
   .strict();
 
