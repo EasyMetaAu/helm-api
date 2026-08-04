@@ -1659,16 +1659,14 @@ describe("createExecute — gateway execution adapter", () => {
     // body carries Responses native items that cannot be translated. The terminal error must
     // NAME that structural reason so the client knows it can't fail over, not a bare
     // "all providers failed".
+    const poolExhausted = () =>
+      Promise.reject(new UpstreamError("upstream_error", "pool exhausted", {}, 503));
     const codex = {
-      chatCompletion: vi
-        .fn()
-        .mockRejectedValue(new UpstreamError("upstream_error", "pool exhausted", {}, 503)),
-      chatCompletionStream: vi.fn().mockImplementation(async function* () {
-        throw new UpstreamError("upstream_error", "pool exhausted", {}, 503);
-      }),
+      chatCompletion: vi.fn(poolExhausted),
+      chatCompletionStream: vi.fn(poolExhausted),
       nativeProtocolProfile: "openai_responses",
-      nativePassthrough: vi.fn(),
-      nativePassthroughStream: vi.fn(),
+      nativePassthrough: vi.fn(poolExhausted),
+      nativePassthroughStream: vi.fn(poolExhausted),
     } as unknown as ProviderClient;
     const anthropic = {
       chatCompletion: vi.fn(),
