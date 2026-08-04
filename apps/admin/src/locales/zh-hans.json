@@ -1046,5 +1046,11 @@
   "snapshot may be stale": "快照可能已过期",
   "Approximate — the quota snapshot may be stale, so this period is reconstructed": "近似值——配额快照可能已过期，此周期为重建结果",
   "Token usage per quota reset period. Periods marked ≈ have approximate boundaries.": "按配额重置周期统计的 Token 用量；标 ≈ 的周期边界为近似值。",
-  "Approximate — the period boundary is not hour-aligned, so hour-bucket totals are within about one hour": "近似值——周期边界未对齐到整点，小时桶合计存在约一小时以内的误差"
+  "Approximate — the period boundary is not hour-aligned, so hour-bucket totals are within about one hour": "近似值——周期边界未对齐到整点，小时桶合计存在约一小时以内的误差",
+  "Current quota window usage, plus token history by calendar day or week.": "当前配额窗口用量，以及按自然日或周统计的 Token 历史。",
+  "Usage history": "用量历史",
+  "Daily": "按日",
+  "Day": "日期",
+  "Week": "周",
+  "This window caps one model, but the history below is account-wide (usage is not tracked per model). Use “Used %” for this window’s own consumption.": "该窗口只限制单个模型，但下方历史是账号级的（用量未按模型统计）。该窗口自身的消耗请看「已用 %」。"
 }

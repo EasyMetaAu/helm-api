@@ -246,19 +246,21 @@ export async function getOAuthQuota(): Promise<OAuthQuotaSnapshot[]> {
 export type OAuthUsagePeriod = SharedOAuthUsagePeriod;
 export type OAuthUsagePeriods = SharedOAuthUsagePeriods;
 
-const EMPTY_PERIODS: OAuthUsagePeriods = { current: [], periods: [] };
+const EMPTY_PERIODS: OAuthUsagePeriods = { current: [], daily: [], weekly: [] };
 
-// GET /oauth/usage/periods -> per-reset-period token/cost for ONE account (the
-// account-detail page). FAIL-OPEN: any failure yields { current:[], periods:[] } so
-// the page renders an empty state instead of breaking.
+// GET /oauth/usage/periods -> the account-detail page: current reset-period summary +
+// natural day/week history (bucketed in the viewer's local tz). FAIL-OPEN: any failure
+// yields empty arrays so the page renders an empty state instead of breaking.
 export async function getOAuthUsagePeriods(
   provider: string,
   account: string,
-  limit?: number,
 ): Promise<OAuthUsagePeriods> {
   try {
-    const qs = new URLSearchParams({ provider, account });
-    if (limit !== undefined) qs.set('limit', String(limit));
+    const qs = new URLSearchParams({
+      provider,
+      account,
+      tzOffsetMinutes: String(clientTzOffsetMinutes()),
+    });
     const res = await fetch(`${BASE}/usage/periods?${qs.toString()}`, {
       headers: { accept: 'application/json' },
       signal: AbortSignal.timeout(OBSERVABILITY_TIMEOUT_MS),

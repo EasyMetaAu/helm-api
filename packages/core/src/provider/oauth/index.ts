@@ -119,6 +119,7 @@ export type {
   OAuthProviderInterface,
   OpenAICodexIdentity,
 } from "./types.js";
+export { aggregateByCalendar, type CalendarGranularity } from "./usage-calendar.js";
 export {
   ACTIVE_LIMIT_RECOVERY_THRESHOLD,
   DEFAULT_429_COOLDOWN_MS,

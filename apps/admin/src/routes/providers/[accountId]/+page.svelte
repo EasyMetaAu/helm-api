@@ -32,11 +32,6 @@
     return 'bg-indigo-500';
   }
 
-  // epoch ms → local date-time string (formatTimestamp takes an ISO string).
-  function fmtTime(ms: number): string {
-    return new Date(ms).toLocaleString();
-  }
-
   // "resets in 3h 12m" / "" when unknown or elapsed.
   function resetIn(ms: number | null): string {
     if (ms == null) return '';
@@ -50,12 +45,13 @@
     return parts.join(' ');
   }
 
-  // Distinct window keys present in the response, preserving the order the current
-  // periods appear (Anthropic: 5h then 7d…). Each becomes a tab.
+  // Reset-window keys present in the CURRENT summary (Anthropic: 5h then 7d…). Each is
+  // a tab for the current-period summary card. History does NOT use these — it's by
+  // natural calendar day/week (see below).
   const windowKeys = $derived.by(() => {
     const seen = new Set<string>();
     const keys: string[] = [];
-    for (const p of [...data.periods.current, ...data.periods.periods]) {
+    for (const p of data.periods.current) {
       if (!seen.has(p.windowKey)) {
         seen.add(p.windowKey);
         keys.push(p.windowKey);
@@ -64,10 +60,17 @@
     return keys;
   });
 
+  // Default the active tab to the WEEKLY window (7d / primary / weekly) — the allowance
+  // operators watch for shrinkage; fall back to the first window otherwise.
+  function isWeeklyKey(key: string): boolean {
+    return key === '7d' || key.startsWith('7d-') || key === 'primary' || key === 'weekly';
+  }
+
   let activeKey = $state<string | null>(null);
-  // Default the active tab to the first available window once data resolves.
   $effect(() => {
-    if (activeKey === null && windowKeys.length > 0) activeKey = windowKeys[0] ?? null;
+    if (activeKey === null && windowKeys.length > 0) {
+      activeKey = windowKeys.find(isWeeklyKey) ?? windowKeys[0] ?? null;
+    }
   });
 
   const quotaWindow = $derived.by((): OAuthQuotaWindow | null => {
@@ -80,25 +83,20 @@
     return data.periods.current.find((p) => p.windowKey === activeKey) ?? null;
   });
 
-  // History for the active window, most recent first.
-  const historyPeriods = $derived.by((): OAuthUsagePeriod[] =>
-    activeKey === null ? [] : data.periods.periods.filter((p) => p.windowKey === activeKey),
-  );
+  // History granularity toggle: natural DAYS or WEEKS (local tz), account-wide. Default
+  // to daily — the accounts here can burn billions of tokens in a day, so per-day best
+  // surfaces a spike or a provider quietly cutting the allowance.
+  let granularity = $state<'day' | 'week'>('day');
+  const history = $derived(granularity === 'day' ? data.periods.daily : data.periods.weekly);
 
-  // Bar-chart data (oldest → newest so the trend reads left-to-right). Current period
-  // last, marked so it can be tinted differently.
-  const trend = $derived.by(() => {
-    const hist = [...historyPeriods].reverse().map((p) => ({ period: p, current: false }));
-    const cur = currentPeriod ? [{ period: currentPeriod, current: true }] : [];
-    return [...hist, ...cur];
-  });
-  const trendMax = $derived(Math.max(1, ...trend.map((b) => b.period.tokens)));
+  // Bar-chart data (oldest → newest so the trend reads left-to-right).
+  const trend = $derived([...history].reverse());
+  const trendMax = $derived(Math.max(1, ...trend.map((p) => p.tokens)));
 
   // A scoped window caps ONE model family (Anthropic `7d-opus`/`7d-fable`, or a Codex
-  // additional-limit window carrying a non-default `limitId`), but oauth_usage has no
-  // model dimension — so the token totals shown here are account-wide, not just this
-  // window's model. Flag it so the number isn't misread as this window's own
-  // consumption (grok review R1-4 / R2-3).
+  // additional-limit window carrying a non-default `limitId`); Used% is model-scoped
+  // but the calendar history below is account-wide (usage has no model dimension). Flag
+  // it so the two aren't conflated.
   const isScopedWindow = $derived.by((): boolean => {
     if (activeKey === null) return false;
     if (activeKey.startsWith('7d-')) return true;
@@ -106,24 +104,24 @@
     return limitId !== undefined && limitId !== 'codex';
   });
 
-  // Distinguish two empty states (grok review R1-5): the account has quota windows
-  // but NONE can be sliced (no resetsAtMs anchor / unknown window length) vs the
-  // account genuinely has no recorded traffic. The first needs a fresh quota refresh,
-  // not "no usage".
-  const hasUnanchorableWindows = $derived(
-    windowKeys.length === 0 && (data.quota?.windows.length ?? 0) > 0,
-  );
-
-  // Is the live quota snapshot for the ACTIVE window stale? Only true when its
-  // resetsAtMs is missing or already in the past — that's the case where Used% and the
-  // countdown belong to a FINISHED window and must not be shown next to the
-  // reconstructed current-period tokens (grok review R3-1). A merely non-hour-aligned
-  // boundary (the common case — real resetsAtMs rarely lands on the hour) still makes
-  // token totals `approximate` (the ≈ marker) but leaves the snapshot's Used% VALID.
+  // Is the live quota snapshot for the ACTIVE window stale? True when its resetsAtMs is
+  // missing or already past — then Used% / countdown belong to a finished window and
+  // must not be shown as the current period's.
   const snapshotStale = $derived.by((): boolean => {
     const r = quotaWindow?.resetsAtMs;
     return r == null || r <= Date.now();
   });
+
+  // Label a calendar period: a day shows its date; a week shows "start – end". For an
+  // in-progress week (partial, ends in the future) clip the end to today so the label
+  // doesn't imply a full Mon–Sun span that hasn't happened yet.
+  function periodLabel(p: OAuthUsagePeriod): string {
+    const start = new Date(p.periodStartMs);
+    if (granularity === 'day') return start.toLocaleDateString();
+    const endMs = Math.min(p.periodEndMs, Date.now());
+    const end = new Date(endMs - 1); // inclusive last day
+    return `${start.toLocaleDateString()} – ${end.toLocaleDateString()}`;
+  }
 </script>
 
 <div class="w-full px-4 py-6 md:px-8 md:py-8">
@@ -134,19 +132,14 @@
       <code class="font-mono text-sm text-ink-muted">{data.providerId}</code>
     </div>
     <p class="mt-1 text-sm text-ink-muted">
-      {$t('Token usage per quota reset period. Periods marked ≈ have approximate boundaries.')}
+      {$t('Current quota window usage, plus token history by calendar day or week.')}
     </p>
   </header>
 
-  {#if windowKeys.length === 0}
-    {#if hasUnanchorableWindows}
-      <div class="empty-state">
-        {$t('This account has no reset time yet, so usage cannot be split into periods. Refresh the provider to fetch a fresh quota snapshot.')}
-      </div>
-    {:else}
-      <div class="empty-state">{$t('No usage recorded for this account yet.')}</div>
-    {/if}
+  {#if windowKeys.length === 0 && history.length === 0}
+    <div class="empty-state">{$t('No usage recorded for this account yet.')}</div>
   {:else}
+    {#if windowKeys.length > 0}
     <!-- Window tabs: one per reset cadence (an account can have several). -->
     <div class="mb-5 flex flex-wrap gap-2" role="tablist">
       {#each windowKeys as key (key)}
@@ -164,28 +157,14 @@
 
     {#if isScopedWindow}
       <p class="mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
-        {$t('This window caps one model, but token totals below are account-wide (usage is not tracked per model). Use “Used %” for this window’s own consumption.')}
+        {$t('This window caps one model, but the history below is account-wide (usage is not tracked per model). Use “Used %” for this window’s own consumption.')}
       </p>
     {/if}
 
-    <!-- (a) Current period summary -->
+    <!-- (a) Current reset-window summary — the real resetsAtMs boundary, exact. -->
     <section class="mb-6">
       <div class="mb-2 flex items-baseline justify-between">
-        <h2 class="section-header">
-          {$t('Current period')}
-          {#if currentPeriod?.approximate}
-            <span
-              class="ml-1 text-xs font-normal text-ink-muted"
-              title={$t('Approximate — the period boundary is not hour-aligned, so hour-bucket totals are within about one hour')}
-              >≈</span
-            >
-          {/if}
-          {#if currentPeriod?.partial}
-            <span class="ml-1 text-xs font-normal text-amber-600">{$t('(partial)')}</span>
-          {/if}
-        </h2>
-        <!-- Show the reset countdown while the snapshot boundary is still in the future
-             (not stale). A non-hour-aligned but future resetsAtMs is fine here. -->
+        <h2 class="section-header">{$t('Current period')}</h2>
         {#if quotaWindow && !snapshotStale && resetIn(quotaWindow.resetsAtMs)}
           <span class="text-sm text-ink-muted"
             >{$t('resets in {t}', { t: resetIn(quotaWindow.resetsAtMs) })}</span
@@ -246,86 +225,65 @@
         </div>
       </div>
     </section>
+    {/if}
 
-    <!-- Trend: one bar per period (oldest → newest). Spotting a downward trend is the
-         whole point — a provider quietly shrinking the allowance shows here. -->
+    <!-- History: token usage by NATURAL calendar day/week (exact, account-wide). This
+         replaces reset-period slicing — real reset windows drift and get cut short by
+         reset-credit, so calendar buckets are the honest way to spot a spike or a
+         shrinking allowance. -->
+    <div class="mb-3 flex items-center justify-between">
+      <h2 class="section-header">{$t('Usage history')}</h2>
+      <div class="flex gap-1" role="tablist">
+        <button
+          type="button"
+          class={granularity === 'day' ? 'btn-primary' : 'btn-secondary'}
+          onclick={() => (granularity = 'day')}>{$t('Daily')}</button
+        >
+        <button
+          type="button"
+          class={granularity === 'week' ? 'btn-primary' : 'btn-secondary'}
+          onclick={() => (granularity = 'week')}>{$t('Weekly')}</button
+        >
+      </div>
+    </div>
+
     <section class="card mb-6">
-      <h2 class="section-header mb-3">{$t('Tokens per period')}</h2>
       {#if trend.length > 0}
+        <!-- Each column is a full-height flex item so the bar inside can size to a
+             percentage of the h-40 track (a % height needs a parent with a resolved
+             height — the column itself must be h-full, not shrink-to-content). -->
         <div class="flex h-40 items-end gap-1">
-          {#each trend as bar, i (i)}
-            <div class="flex flex-1 flex-col items-center gap-1">
-              <!-- Partial periods undercount (data cut off by retention) — hatch them
-                   so a short bar isn't misread as a real drop in allowance. -->
+          {#each trend as p, i (i)}
+            <div class="flex h-full flex-1 items-end">
               <div
-                class={`w-full rounded-t ${
-                  bar.period.partial
-                    ? 'bg-slate-300'
-                    : bar.current
-                      ? 'bg-indigo-500'
-                      : 'bg-indigo-300'
-                }`}
-                style={`height: ${Math.max(2, (bar.period.tokens / trendMax) * 100)}%`}
-                title={`${fmtTime(bar.period.periodStartMs)} — ${formatTokens(bar.period.tokens)} tokens${bar.period.partial ? ' (partial)' : ''}`}
+                class={`w-full rounded-t ${p.partial ? 'bg-slate-300' : 'bg-indigo-400'}`}
+                style={`height: ${Math.max(2, (p.tokens / trendMax) * 100)}%`}
+                title={`${periodLabel(p)} — ${formatTokens(p.tokens)} tokens${p.partial ? ' (partial)' : ''}`}
               ></div>
             </div>
           {/each}
         </div>
       {:else}
-        <div class="empty-state">{$t('No usage recorded for this window yet.')}</div>
+        <div class="empty-state">{$t('No usage recorded for this account yet.')}</div>
       {/if}
     </section>
 
-    <!-- (b) Historical periods -->
+    <!-- History table -->
     <section class="cards-table-frame">
       <table class="cards-table">
         <thead class="table-head">
           <tr>
-            <th class="px-3 py-2 text-left">{$t('Period')}</th>
+            <th class="px-3 py-2 text-left">{granularity === 'day' ? $t('Day') : $t('Week')}</th>
             <th class="px-3 py-2 text-right">{$t('Requests')}</th>
             <th class="px-3 py-2 text-right">{$t('Tokens')}</th>
             <th class="px-3 py-2 text-right">{$t('Cost')}</th>
           </tr>
         </thead>
         <tbody>
-          {#if currentPeriod}
-            <tr class="bg-indigo-50/40">
-              <td data-label={$t('Period')} class="px-3 py-2">
-                {fmtTime(currentPeriod.periodStartMs)} →
-                <span class="text-ink-muted">{$t('now')}</span>
-                {#if currentPeriod.approximate}
-                  <span
-                    class="ml-1 text-xs text-ink-muted"
-                    title={$t('Approximate boundary — reconstructed by rolling back a fixed window length')}
-                    >≈</span
-                  >
-                {/if}
-                {#if currentPeriod.partial}
-                  <span class="ml-1 text-xs text-amber-600">{$t('(partial)')}</span>
-                {/if}
-              </td>
-              <td data-label={$t('Requests')} class="px-3 py-2 text-right font-mono"
-                >{formatCount(currentPeriod.requests)}</td
-              >
-              <td data-label={$t('Tokens')} class="px-3 py-2 text-right font-mono"
-                >{formatTokens(currentPeriod.tokens)}</td
-              >
-              <td data-label={$t('Cost')} class="px-3 py-2 text-right font-mono"
-                >{formatUsd(currentPeriod.costUsd)}</td
-              >
-            </tr>
-          {/if}
-          {#each historyPeriods as p (p.periodStartMs)}
+          {#each history as p (p.periodStartMs)}
             <tr>
-              <td data-label={$t('Period')} class="px-3 py-2">
-                {fmtTime(p.periodStartMs)} → {fmtTime(p.periodEndMs)}
-                {#if p.approximate}
-                  <span
-                    class="ml-1 text-xs text-ink-muted"
-                    title={$t('Approximate boundary — reconstructed by rolling back a fixed window length')}
-                    >≈</span
-                  >
-                {/if}
+              <td data-label={granularity === 'day' ? $t('Day') : $t('Week')} class="px-3 py-2">
+                {periodLabel(p)}
                 {#if p.partial}
                   <span class="ml-1 text-xs text-amber-600">{$t('(partial)')}</span>
                 {/if}

@@ -190,14 +190,14 @@ describe("admin OAuth routes — read endpoints", () => {
     expect(res2.status).toBe(400);
   });
 
-  it("GET /oauth/usage/periods reconstructs per-reset-period totals from buckets + quota", async () => {
+  it("GET /oauth/usage/periods returns current reset summary + natural day/week history", async () => {
     const HOUR = 3_600_000;
-    // A 5h Anthropic window (windowMinutes null → inferred 300). resetsAtMs is a real
-    // upstream value slightly in the FUTURE, so the current period [reset-5h, reset)
-    // straddles now; buckets fill the current + one prior 5h period (all in the past).
-    const reset = Date.now() + HOUR; // resets ~1h from now
-    const buckets = Array.from({ length: 10 }, (_, i) => ({
-      bucketMs: reset - (10 - i) * HOUR, // [reset-10h, reset)
+    const DAY = 86_400_000;
+    // Current 5h reset window (real resetsAtMs in the future). Buckets span ~3 days so
+    // the calendar aggregation produces multiple day rows and at least one week row.
+    const reset = Date.now() + HOUR;
+    const buckets = Array.from({ length: 60 }, (_, i) => ({
+      bucketMs: reset - (60 - i) * HOUR, // last ~2.5 days of hourly buckets
       requests: 1,
       tokens: 100,
       costUsd: null,
@@ -220,28 +220,39 @@ describe("admin OAuth routes — read endpoints", () => {
       get: () => ({ oauth_usage_retention_days: 180 }),
     } as unknown as AdminApiDeps["settings"];
     const res = await app({ oauth: fullSeam(), oauthUsage, oauthQuota, settings }).request(
-      "/admin/api/oauth/usage/periods?provider=anthropic&account=a%40x.com&limit=3",
+      "/admin/api/oauth/usage/periods?provider=anthropic&account=a%40x.com&tzOffsetMinutes=0",
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      current: Array<{ windowKey: string; tokens: number; approximate: boolean }>;
-      periods: Array<{ tokens: number; approximate: boolean }>;
+      current: Array<{ windowKey: string; tokens: number }>;
+      daily: Array<{
+        windowKey: string;
+        tokens: number;
+        periodStartMs: number;
+        periodEndMs: number;
+        partial: boolean;
+      }>;
+      weekly: Array<{ windowKey: string; tokens: number; partial: boolean; periodEndMs: number }>;
     };
-    // current period exists for the 5h window (a real, non-hour-aligned resetsAtMs →
-    // hour-bucket quantization makes it approximate; token total is still present).
+    // current: the in-progress 5h reset window summary (exact resetsAtMs boundary).
     expect(body.current).toHaveLength(1);
     expect(body.current[0]?.windowKey).toBe("5h");
     expect(body.current[0]?.tokens ?? 0).toBeGreaterThan(0);
-    // history periods are approximate (rolled-back boundaries) and carry token totals.
-    expect(body.periods.length).toBeGreaterThanOrEqual(1);
-    const firstHistory = body.periods[0];
-    expect(firstHistory).toMatchObject({ approximate: true });
-    expect(firstHistory?.tokens ?? 0).toBeGreaterThan(0);
-    // token conservation: current + history covers the 10 seeded buckets (1000 tokens),
-    // minus at most the boundary bucket that falls outside the rolled-back span.
-    const total = (body.current[0]?.tokens ?? 0) + body.periods.reduce((s, p) => s + p.tokens, 0);
-    expect(total).toBeGreaterThanOrEqual(900);
-    expect(total).toBeLessThanOrEqual(1000);
+    // daily: natural-day buckets, most recent first, each a 24h span, windowKey "day".
+    expect(body.daily.length).toBeGreaterThanOrEqual(2);
+    expect(body.daily[0]?.windowKey).toBe("day");
+    expect((body.daily[0]?.periodEndMs ?? 0) - (body.daily[0]?.periodStartMs ?? 0)).toBe(DAY);
+    // The newest day/week is IN PROGRESS (ends in the future) → marked partial so a
+    // half-elapsed bar isn't misread as an allowance drop (grok review CR1).
+    expect(body.daily[0]?.periodEndMs).toBeGreaterThan(Date.now());
+    expect(body.daily[0]?.partial).toBe(true);
+    expect(body.weekly[0]?.partial).toBe(true);
+    // weekly: at least one 7-day bucket, windowKey "week".
+    expect(body.weekly.length).toBeGreaterThanOrEqual(1);
+    expect(body.weekly[0]?.windowKey).toBe("week");
+    // token conservation: the day buckets cover ALL 60 hourly buckets (6000 tokens).
+    const dayTotal = body.daily.reduce((s, p) => s + p.tokens, 0);
+    expect(dayTotal).toBe(6000);
   });
 
   it("GET /oauth/usage/periods fails open to empty when the quota snapshot is missing", async () => {
@@ -256,7 +267,7 @@ describe("admin OAuth routes — read endpoints", () => {
       "/admin/api/oauth/usage/periods?provider=xai&account=nobody",
     );
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ current: [], periods: [] });
+    expect(await res.json()).toEqual({ current: [], daily: [], weekly: [] });
   });
 
   it("GET /oauth/quota returns cached rows without pulling upstream", async () => {
