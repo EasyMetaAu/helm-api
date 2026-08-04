@@ -444,7 +444,7 @@ describe("runReplay", () => {
     expect(rec.inserts).toHaveLength(1);
   });
 
-  it("global metadata-only mode remains off for replay despite a per-key override", async () => {
+  it("a per-key payload override captures on replay even when global mode is metadata-only", async () => {
     const rec = emptyRec();
     const route: ReplayWiring["route"] = async (req) => ({
       decision: decision(req.request_id),
@@ -462,7 +462,8 @@ describe("runReplay", () => {
       { originalTraceId: "orig", body: okBody, signal: new AbortController().signal, log: noop },
     );
 
-    expect(rec.payloads).toHaveLength(0);
+    // The replayed key's explicit `payload` mode overrides global metadata-only.
+    expect(rec.payloads).toHaveLength(1);
   });
 
   it("persists the partial stream + telemetry when the stream throws mid-drain", async () => {

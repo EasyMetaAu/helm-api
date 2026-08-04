@@ -625,7 +625,7 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
     expect(insertPayload).not.toHaveBeenCalled();
   });
 
-  it("global metadata-only mode remains off despite a per-key payload override", async () => {
+  it("a per-key payload override captures even when global mode is metadata-only", async () => {
     const { record, insertPayload } = makeRecord({ capturePayloads: false });
     const { deps } = makeDeps({
       record,
@@ -638,7 +638,8 @@ describe("POST /v1beta/models/{model}:generateContent (Gemini inbound)", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(insertPayload).not.toHaveBeenCalled();
+    // The key's explicit `payload` mode overrides the global metadata-only toggle.
+    expect(insertPayload).toHaveBeenCalledOnce();
   });
 
   // ── Terminal stream error frame must be appended to the captured body (review

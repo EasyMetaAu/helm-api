@@ -941,7 +941,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     });
   });
 
-  it("/compact keeps global metadata-only mode off despite a per-key payload override", async () => {
+  it("/compact captures under a per-key payload override even when global mode is metadata-only", async () => {
     const { record, insertPayload } = makeRecord({ capturePayloads: false });
     const compact = vi.fn().mockResolvedValue({ id: "resp_compact", output: [] });
     const { deps } = makeDeps({
@@ -957,7 +957,8 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(insertPayload).not.toHaveBeenCalled();
+    // The key's explicit `payload` mode overrides the global metadata-only toggle.
+    expect(insertPayload).toHaveBeenCalledOnce();
   });
 
   it("/compact rejects an exhausted per-key usage budget before subscription dispatch", async () => {

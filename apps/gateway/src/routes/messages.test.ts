@@ -866,7 +866,7 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     expect(insertPayload).not.toHaveBeenCalled();
   });
 
-  it("global metadata-only mode remains off despite a per-key payload override", async () => {
+  it("a per-key payload override captures even when global mode is metadata-only", async () => {
     const { record, insertPayload } = makeRecord({ capturePayloads: false });
     const { deps } = makeDeps({
       record,
@@ -879,7 +879,9 @@ describe("POST /v1/messages (Anthropic inbound)", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(insertPayload).not.toHaveBeenCalled();
+    // The key's explicit `payload` mode is the highest authority: it overrides
+    // the global metadata-only toggle, so the body IS captured for this request.
+    expect(insertPayload).toHaveBeenCalledOnce();
   });
 
   // ── Native protocol passthrough (#217 C3). When the pipeline reports
