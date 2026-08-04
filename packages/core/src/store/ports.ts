@@ -12,6 +12,7 @@ import type {
   MemoryScopeSummary,
   MemoryThreadInput,
   OAuthQuotaSnapshot,
+  OAuthUsageBucket,
   OAuthUsageRow,
   Observation,
   RawMessage,
@@ -1304,6 +1305,15 @@ export interface OAuthUsageStore {
   // All accounts' usage ROLLED UP over [startMs, endMs) — the providers page passes
   // the admin's local-day window. Sums the per-hour buckets per (provider, account).
   queryRange(startMs: number, endMs: number): Promise<OAuthUsageRow[]>;
+  // Raw (UN-grouped) hour buckets for ONE account over [startMs, endMs), ascending by
+  // bucketMs. Feeds reset-period reconstruction, which must bin buckets by period
+  // boundary in memory (queryRange's per-account SUM can't). Empty if none.
+  queryBuckets(
+    startMs: number,
+    endMs: number,
+    providerId: string,
+    account: string,
+  ): Promise<OAuthUsageBucket[]>;
   // Cleanup (OPTIONAL): delete hour-bucket rows whose bucket_ms is strictly older
   // than the cutoff. Delete-only — these are aggregate observability counters, not
   // training data. Returns the deleted count. The runner null-checks before use.

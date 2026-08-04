@@ -1,5 +1,10 @@
-import { type OAuthUsageRow, OAuthUsageRowSchema } from "@helm/shared";
-import { and, count, gte, lt, sql } from "drizzle-orm";
+import {
+  type OAuthUsageBucket,
+  OAuthUsageBucketSchema,
+  type OAuthUsageRow,
+  OAuthUsageRowSchema,
+} from "@helm/shared";
+import { and, count, eq, gte, lt, sql } from "drizzle-orm";
 import type { OAuthUsageStore } from "../ports.js";
 import type { PgDb } from "./migrate.js";
 import { oauthUsage } from "./schema.js";
@@ -64,6 +69,41 @@ export class PgOAuthUsageStore implements OAuthUsageStore {
       .where(and(gte(oauthUsage.bucketMs, startMs), lt(oauthUsage.bucketMs, endMs)))
       .groupBy(oauthUsage.providerId, oauthUsage.account);
     return rows.map((r) => this.toRow(r));
+  }
+
+  // Raw hour buckets for ONE account over [startMs, endMs), ascending. pg marshals
+  // bigint counters as strings, so Number()-normalize before the shared schema parse.
+  async queryBuckets(
+    startMs: number,
+    endMs: number,
+    providerId: string,
+    account: string,
+  ): Promise<OAuthUsageBucket[]> {
+    const rows = await this.db
+      .select({
+        bucketMs: oauthUsage.bucketMs,
+        requests: oauthUsage.requests,
+        tokens: oauthUsage.tokens,
+        costUsd: oauthUsage.costUsd,
+      })
+      .from(oauthUsage)
+      .where(
+        and(
+          eq(oauthUsage.providerId, providerId),
+          eq(oauthUsage.account, account),
+          gte(oauthUsage.bucketMs, startMs),
+          lt(oauthUsage.bucketMs, endMs),
+        ),
+      )
+      .orderBy(oauthUsage.bucketMs);
+    return rows.map((r) =>
+      OAuthUsageBucketSchema.parse({
+        bucketMs: Number(r.bucketMs),
+        requests: Number(r.requests),
+        tokens: Number(r.tokens),
+        costUsd: r.costUsd == null ? null : Number(r.costUsd),
+      }),
+    );
   }
 
   // Cleanup: count / delete hour buckets strictly older than the cutoff (bucket_ms).

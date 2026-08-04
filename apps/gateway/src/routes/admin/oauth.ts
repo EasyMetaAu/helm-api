@@ -1,4 +1,5 @@
 import {
+  computeUsagePeriods,
   filterRetiredOpenAICodexLimits,
   windowsToActiveUsageRecovery,
   windowsToUsageLimit,
@@ -227,6 +228,50 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         });
     } catch {
       return [];
+    }
+  };
+
+  // Per-reset-period usage for ONE account (the account-detail page). Reconstructs
+  // token/cost totals sliced by quota reset window from the raw hour buckets +
+  // current quota snapshot — see computeUsagePeriods. Purpose: spot a provider
+  // silently shrinking an allowance (per-period token totals trending down). Token
+  // totals are exact; historical boundaries are approximate (rolled back a fixed
+  // window length — flagged per period). Cache-only + FAIL-OPEN: any gap → empty.
+  const readPeriods = async (
+    providerId: string,
+    account: string,
+    rawLimit: unknown,
+  ): Promise<{ current: unknown[]; periods: unknown[] }> => {
+    const usage = deps.oauthUsage;
+    const quotaStore = deps.oauthQuota;
+    if (!usage || !quotaStore) return { current: [], periods: [] };
+    // Roll back at most `limit` historical periods per window (clamped 1..52).
+    const parsed = Number(rawLimit);
+    const limit = Number.isInteger(parsed) && parsed >= 1 && parsed <= 52 ? parsed : 12;
+    try {
+      const snapshot = await quotaStore.get(providerId, account);
+      if (!snapshot) return { current: [], periods: [] };
+      const now = Date.now();
+      // History reaches back only as far as buckets are retained (oauth_usage
+      // retention). Fetch from the retention floor, then anchor dataStartMs at the
+      // EARLIEST bucket seen — otherwise periods before the account had any traffic
+      // render as tokens:0 / partial:false, reading as a real empty period (a false
+      // "allowance shrank to zero") rather than "no data yet" (grok review R1-3).
+      const retentionDays = deps.settings.get().oauth_usage_retention_days;
+      const retentionFloorMs = now - retentionDays * 86_400_000;
+      const buckets = await usage.queryBuckets(retentionFloorMs, now, providerId, account);
+      // queryBuckets returns ascending by bucketMs, so buckets[0] is the earliest.
+      const earliestBucketMs = buckets[0]?.bucketMs ?? now;
+      const dataStartMs = Math.max(retentionFloorMs, earliestBucketMs);
+      return computeUsagePeriods({
+        windows: snapshot.windows,
+        buckets,
+        nowMs: now,
+        dataStartMs,
+        limit,
+      });
+    } catch {
+      return { current: [], periods: [] };
     }
   };
 
@@ -505,6 +550,17 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       ?.listCachedStatus()
       .catch(() => null);
     return c.json({ usage: await readUsage(c.req.query("tzOffsetMinutes"), status ?? null) });
+  });
+
+  // GET /oauth/usage/periods?provider=&account=&limit= -> per-reset-period token/cost
+  // for one account (the account-detail page). provider+account are required.
+  app.get("/admin/api/oauth/usage/periods", async (c) => {
+    const provider = c.req.query("provider");
+    const account = c.req.query("account");
+    if (!provider || !account) {
+      return c.json({ error: "provider and account are required" }, 400);
+    }
+    return c.json(await readPeriods(provider, account, c.req.query("limit")));
   });
 
   app.get("/admin/api/oauth/quota", async (c) => {

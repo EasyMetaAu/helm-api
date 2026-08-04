@@ -8,6 +8,9 @@ import {
   CodexResetResultSchema,
   type OAuthQuotaSnapshot as SharedOAuthQuotaSnapshot,
   OAuthQuotaSnapshotSchema,
+  type OAuthUsagePeriod as SharedOAuthUsagePeriod,
+  type OAuthUsagePeriods as SharedOAuthUsagePeriods,
+  OAuthUsagePeriodsSchema,
 } from '@helm/shared';
 import { clientTzOffsetMinutes } from '$lib/requests-filters.js';
 
@@ -235,6 +238,36 @@ export async function getOAuthQuota(): Promise<OAuthQuotaSnapshot[]> {
     });
   } catch {
     return [];
+  }
+}
+
+// Re-export the shared period types so the account-detail page imports them from
+// the API client (stable boundary) rather than reaching into @helm/shared directly.
+export type OAuthUsagePeriod = SharedOAuthUsagePeriod;
+export type OAuthUsagePeriods = SharedOAuthUsagePeriods;
+
+const EMPTY_PERIODS: OAuthUsagePeriods = { current: [], periods: [] };
+
+// GET /oauth/usage/periods -> per-reset-period token/cost for ONE account (the
+// account-detail page). FAIL-OPEN: any failure yields { current:[], periods:[] } so
+// the page renders an empty state instead of breaking.
+export async function getOAuthUsagePeriods(
+  provider: string,
+  account: string,
+  limit?: number,
+): Promise<OAuthUsagePeriods> {
+  try {
+    const qs = new URLSearchParams({ provider, account });
+    if (limit !== undefined) qs.set('limit', String(limit));
+    const res = await fetch(`${BASE}/usage/periods?${qs.toString()}`, {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(OBSERVABILITY_TIMEOUT_MS),
+    });
+    if (!res.ok) return EMPTY_PERIODS;
+    const parsed = OAuthUsagePeriodsSchema.safeParse(await res.json());
+    return parsed.success ? parsed.data : EMPTY_PERIODS;
+  } catch {
+    return EMPTY_PERIODS;
   }
 }
 

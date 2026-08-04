@@ -414,3 +414,61 @@ export const CodexResetResultSchema = z
   .loose();
 
 export type CodexResetResult = z.infer<typeof CodexResetResultSchema>;
+
+// ── Usage periods (reset-window rollup) ──────────────────────────────────────
+// Per-account token/cost usage sliced by QUOTA RESET PERIOD (not the admin's local
+// day). Anchored on the quota snapshot's resetsAtMs, rolling back one window length
+// per period; each period sums the underlying hour buckets. Purpose: spot a provider
+// silently shrinking a subscription's allowance (per-period token totals trending
+// down). Token counts are exact; only the PERIOD BOUNDARIES are approximate for
+// history (rebuilt by rolling back a fixed window length — see `approximate`).
+
+// One raw hour bucket for a single (provider, account) — the un-grouped form of an
+// oauth_usage row, so period reconstruction can bin buckets in memory. bucketMs is
+// the UTC-hour floor. costUsd nullable: flat-rate plans report no per-token price.
+export const OAuthUsageBucketSchema = z
+  .object({
+    bucketMs: z.number().int(),
+    requests: z.number().int().nonnegative(),
+    tokens: z.number().int().nonnegative(),
+    costUsd: z.number().nullable(),
+  })
+  .strict();
+
+export type OAuthUsageBucket = z.infer<typeof OAuthUsageBucketSchema>;
+
+// One reset period's usage. windowKey names the window (5h / 7d / primary / ...).
+// [periodStartMs, periodEndMs) is the half-open span. `approximate` is false when
+// the boundary is an upstream-reported resetsAtMs (the CURRENT period, or a recorded
+// real boundary), true when rolled back by a fixed window length. `partial` marks a
+// period whose start predates available data (retention / data start) — its totals
+// undercount, so don't read a low number as a real allowance cut.
+export const OAuthUsagePeriodSchema = z
+  .object({
+    windowKey: z.string(),
+    periodStartMs: z.number().int(),
+    periodEndMs: z.number().int(),
+    requests: z.number().int().nonnegative(),
+    tokens: z.number().int().nonnegative(),
+    costUsd: z.number().nullable(),
+    approximate: z.boolean(),
+    partial: z.boolean(),
+  })
+  .strict();
+
+export type OAuthUsagePeriod = z.infer<typeof OAuthUsagePeriodSchema>;
+
+// The /usage/periods response for one account, across its (possibly several) reset
+// windows — Anthropic has 5h + 7d(+scoped), Codex/xai have one. `current` holds the
+// in-progress period per window (exact boundary; a window with no anchorable
+// resetsAtMs is omitted). `periods` holds the finished historical periods across all
+// windows, each tagged with its windowKey (most recent first within a window). The
+// UI groups both by windowKey into per-window tabs.
+export const OAuthUsagePeriodsSchema = z
+  .object({
+    current: z.array(OAuthUsagePeriodSchema),
+    periods: z.array(OAuthUsagePeriodSchema),
+  })
+  .strict();
+
+export type OAuthUsagePeriods = z.infer<typeof OAuthUsagePeriodsSchema>;

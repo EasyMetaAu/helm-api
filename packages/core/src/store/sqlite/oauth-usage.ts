@@ -1,5 +1,10 @@
-import { type OAuthUsageRow, OAuthUsageRowSchema } from "@helm/shared";
-import { and, count, gte, lt, sql } from "drizzle-orm";
+import {
+  type OAuthUsageBucket,
+  OAuthUsageBucketSchema,
+  type OAuthUsageRow,
+  OAuthUsageRowSchema,
+} from "@helm/shared";
+import { and, count, eq, gte, lt, sql } from "drizzle-orm";
 import type { OAuthUsageStore } from "../ports.js";
 import { runBatchedPrune } from "./batched-prune.js";
 import type { SqliteDb } from "./migrate.js";
@@ -72,6 +77,35 @@ export class SqliteOAuthUsageStore implements OAuthUsageStore {
       .groupBy(oauthUsage.providerId, oauthUsage.account)
       .all();
     return rows.map((r) => this.toRow(r));
+  }
+
+  // Raw hour buckets for ONE account over [startMs, endMs), ascending. No GROUP BY —
+  // reset-period reconstruction bins these by period boundary in memory.
+  async queryBuckets(
+    startMs: number,
+    endMs: number,
+    providerId: string,
+    account: string,
+  ): Promise<OAuthUsageBucket[]> {
+    const rows = this.db
+      .select({
+        bucketMs: oauthUsage.bucketMs,
+        requests: oauthUsage.requests,
+        tokens: oauthUsage.tokens,
+        costUsd: oauthUsage.costUsd,
+      })
+      .from(oauthUsage)
+      .where(
+        and(
+          eq(oauthUsage.providerId, providerId),
+          eq(oauthUsage.account, account),
+          gte(oauthUsage.bucketMs, startMs),
+          lt(oauthUsage.bucketMs, endMs),
+        ),
+      )
+      .orderBy(oauthUsage.bucketMs)
+      .all();
+    return rows.map((r) => OAuthUsageBucketSchema.parse(r));
   }
 
   // Cleanup: count / delete hour buckets strictly older than the cutoff (bucket_ms).
