@@ -1,3 +1,6 @@
+// biome-ignore-all lint/suspicious/noTemplateCurlyInString: these assertions match
+// literal shell/GitHub-Actions `${VAR}` interpolation inside the workflow YAML, not
+// JS template literals (same rationale as compose.test.ts).
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -398,9 +401,9 @@ describe("release workflow policy", () => {
     const releaseStep = stepBlock(publishRaw, "Cut GitHub Release");
     expect(releaseStep).toContain("steps.version.outputs.current == 'true'");
     expect(releaseStep).toContain(
-      `target_commitish\\\":\\\"${dollar}{{ steps.release_state.outputs.release_sha }}`,
+      `target_commitish\\":\\"${dollar}{{ steps.release_state.outputs.release_sha }}`,
     );
-    expect(releaseStep).not.toContain(`target_commitish\\\":\\\"${dollar}{GITHUB_SHA}`);
+    expect(releaseStep).not.toContain(`target_commitish\\":\\"${dollar}{GITHUB_SHA}`);
     expect(releaseStep).not.toContain("refs/heads/main");
 
     expect(publishRaw.indexOf("- name: Promote release tag")).toBeLessThan(
