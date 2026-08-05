@@ -49,6 +49,7 @@ function toSummary(rec: {
   memory_project_id: string | null;
   memory_thread_source: "header" | "auto";
   request_content_mode: "none" | "payload" | "session" | null;
+  max_reasoning_effort: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
 }): KeySummary {
   return {
     key_id: rec.key_id,
@@ -73,6 +74,7 @@ function toSummary(rec: {
     memory_project_id: rec.memory_project_id,
     memory_thread_source: rec.memory_thread_source,
     request_content_mode: rec.request_content_mode,
+    max_reasoning_effort: rec.max_reasoning_effort,
   };
 }
 
@@ -229,6 +231,7 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       memoryProjectId: parsed.data.memory_project_id,
       memoryThreadSource: parsed.data.memory_thread_source,
       requestContentMode: parsed.data.request_content_mode,
+      maxReasoningEffort: parsed.data.max_reasoning_effort,
     });
     // The ONLY place plaintext is ever returned. `prefix` is the server-minted
     // non-sensitive display prefix (already persisted) — returned so the SPA need
@@ -282,6 +285,7 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
       memoryProjectId?: string | null;
       memoryThreadSource?: "header" | "auto";
       requestContentMode?: "none" | "payload" | "session" | null;
+      maxReasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
     } = {};
     if (d.name !== undefined) patch.name = d.name;
     if (d.allowed_lanes !== undefined) patch.allowedLanes = d.allowed_lanes;
@@ -301,6 +305,7 @@ export function registerKeysRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void 
     if (d.memory_project_id !== undefined) patch.memoryProjectId = d.memory_project_id;
     if (d.memory_thread_source !== undefined) patch.memoryThreadSource = d.memory_thread_source;
     if (d.request_content_mode !== undefined) patch.requestContentMode = d.request_content_mode;
+    if (d.max_reasoning_effort !== undefined) patch.maxReasoningEffort = d.max_reasoning_effort;
     try {
       await deps.keyStore.updateKey(id, patch);
     } catch {

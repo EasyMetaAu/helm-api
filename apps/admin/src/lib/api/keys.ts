@@ -40,7 +40,13 @@ export interface ApiKeyView {
   memory_project_id: string | null;
   memory_thread_source: 'header' | 'auto';
   request_content_mode: 'none' | 'payload' | 'session' | null;
+  // Per-key reasoning-effort ceiling (cost control). null = no cap.
+  max_reasoning_effort: ReasoningEffort | null;
 }
+
+// Reasoning-effort tiers (ordered low→high). Mirrors the server enum; used for
+// the per-key max_reasoning_effort ceiling.
+export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 // Operator-specified caps for a new key. The plaintext is minted server-side; the
 // operator only chooses role + per-key caps. role defaults to "user" — root keys
@@ -73,6 +79,8 @@ export interface CreateKeyInput {
   memory_project_id?: string;
   memory_thread_source?: 'header' | 'auto';
   request_content_mode?: 'none' | 'payload' | 'session';
+  // Optional reasoning-effort ceiling at mint time. Omitted => no cap.
+  max_reasoning_effort?: ReasoningEffort;
 }
 
 // Editable caps for an existing key (PATCH). Mirrors the server
@@ -102,6 +110,8 @@ export interface UpdateKeyInput {
   memory_project_id?: string | null;
   memory_thread_source?: 'header' | 'auto';
   request_content_mode?: 'none' | 'payload' | 'session' | null;
+  // Omit = leave unchanged; null = clear the cap (no ceiling).
+  max_reasoning_effort?: ReasoningEffort | null;
 }
 
 // Create/rotate responses intentionally carry plaintext so the operator can copy
@@ -218,8 +228,21 @@ function normalizeView(raw: Record<string, unknown>): ApiKeyView {
       raw.request_content_mode === 'session'
         ? raw.request_content_mode
         : null,
+    max_reasoning_effort: REASONING_EFFORTS.includes(raw.max_reasoning_effort as ReasoningEffort)
+      ? (raw.max_reasoning_effort as ReasoningEffort)
+      : null,
   };
 }
+
+const REASONING_EFFORTS: readonly ReasoningEffort[] = [
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+];
 
 // Send only the caps the operator set. The server CreateKeyRequestSchema is
 // `.strict()`, so empty/undefined optional fields must be omitted (Principle 2 fail-closed).
@@ -267,6 +290,10 @@ function toServerBody(input: CreateKeyInput): Record<string, unknown> {
   }
   if (input.request_content_mode !== undefined) {
     out.request_content_mode = input.request_content_mode;
+  }
+  // Send only when a cap is set (omitted = no cap; server schema is .strict()).
+  if (input.max_reasoning_effort !== undefined) {
+    out.max_reasoning_effort = input.max_reasoning_effort;
   }
   return out;
 }

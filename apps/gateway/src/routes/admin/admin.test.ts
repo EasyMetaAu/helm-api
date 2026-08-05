@@ -115,6 +115,7 @@ function makeKeyStore(): KeyStore & { rows: TestKeyRecord[] } {
         memory_project_id: input.memoryProjectId ?? null,
         memory_thread_source: input.memoryThreadSource ?? "auto",
         request_content_mode: input.requestContentMode ?? null,
+        max_reasoning_effort: input.maxReasoningEffort ?? null,
       };
       rows.push(rec);
       return rec;
@@ -163,6 +164,8 @@ function makeKeyStore(): KeyStore & { rows: TestKeyRecord[] } {
         row.memory_thread_source = patch.memoryThreadSource;
       if (patch.requestContentMode !== undefined)
         row.request_content_mode = patch.requestContentMode;
+      if (patch.maxReasoningEffort !== undefined)
+        row.max_reasoning_effort = patch.maxReasoningEffort;
     },
     async rotateKey(keyId, input) {
       const row = rows.find((r) => r.key_id === keyId);
@@ -921,6 +924,43 @@ describe("admin.api keys", () => {
     });
     expect(cleared.status).toBe(200);
     expect(keyStore.rows[0]?.request_content_mode).toBeNull();
+  });
+
+  it("creates a reasoning-effort cap, surfaces it in the list, and does NOT wipe it on an unrelated edit", async () => {
+    const deps = buildDeps();
+    const app = buildApp(deps);
+    const created = await app.request("/admin/api/keys", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ role: "user", max_reasoning_effort: "medium" }),
+    });
+    expect(created.status).toBe(201);
+    expect(keyStore.rows[0]?.max_reasoning_effort).toBe("medium");
+
+    // CRITICAL round-trip: the list/summary view MUST carry the cap so the admin edit
+    // dialog re-reads it (not null) and cannot silently wipe it on the next save.
+    const list = (await (await app.request("/admin/api/keys")).json()) as Array<
+      Record<string, unknown>
+    >;
+    expect(list[0]?.max_reasoning_effort).toBe("medium");
+
+    // Edit an UNRELATED field: the cap column must be left untouched (partial PATCH).
+    const edited = await app.request("/admin/api/keys/key_1", {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ rate_limit_rpm: 60 }),
+    });
+    expect(edited.status).toBe(200);
+    expect(keyStore.rows[0]?.max_reasoning_effort).toBe("medium");
+
+    // Explicit null clears the cap.
+    const cleared = await app.request("/admin/api/keys/key_1", {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ max_reasoning_effort: null }),
+    });
+    expect(cleared.status).toBe(200);
+    expect(keyStore.rows[0]?.max_reasoning_effort).toBeNull();
   });
 
   it("PATCH edits a key's rate limits (number sets, null clears) without touching caps", async () => {

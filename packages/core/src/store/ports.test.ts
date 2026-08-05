@@ -49,6 +49,7 @@ class InMemoryKeyStore implements KeyStore {
       memory_project_id: input.memoryProjectId ?? null,
       memory_thread_source: input.memoryThreadSource ?? "header",
       request_content_mode: input.requestContentMode ?? null,
+      max_reasoning_effort: input.maxReasoningEffort ?? null,
     };
     this.byId.set(record.key_id, record);
     return record;
@@ -410,6 +411,7 @@ describe("port type contracts", () => {
       | "memoryProjectId"
       | "memoryThreadSource"
       | "requestContentMode"
+      | "maxReasoningEffort"
     >();
   });
 

@@ -85,6 +85,8 @@ export interface MessagesIdentity {
     memory?: MemoryKeyDefaults;
     /** Per-key request-content override; null/absent inherits the system mode. */
     requestContentMode?: "none" | "payload" | "session" | null;
+    /** Per-key reasoning-effort ceiling (cost control); null/absent = no cap. */
+    maxReasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
     [k: string]: unknown;
   };
   [k: string]: unknown;

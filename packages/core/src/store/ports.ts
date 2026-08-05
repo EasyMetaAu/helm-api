@@ -209,6 +209,8 @@ export interface CreateKeyInput {
   memoryThreadSource?: "header" | "auto";
   // Per-key request-content retention override. Omitted => inherit system mode.
   requestContentMode?: "none" | "payload" | "session";
+  // Per-key ceiling on client-requested reasoning effort. Omitted => no cap.
+  maxReasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 }
 
 export interface KeyStore {
@@ -279,6 +281,9 @@ export interface KeyPatch {
   memoryThreadSource?: "header" | "auto";
   // null clears the override back to the live system mode.
   requestContentMode?: "none" | "payload" | "session" | null;
+  // Reasoning-effort ceiling edit: present (even null) => written; null clears
+  // the cap (no ceiling); a value sets it.
+  maxReasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
 }
 
 export interface RotateKeyInput {

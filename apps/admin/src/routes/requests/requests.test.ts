@@ -117,6 +117,7 @@ function apiKey(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView 
     memory_project_id: null,
     memory_thread_source: 'header',
     request_content_mode: null,
+    max_reasoning_effort: null,
     ...overrides,
   };
 }

@@ -46,6 +46,7 @@ function key(keyId: string, overrides: Partial<ApiKeyView> = {}): ApiKeyView {
     memory_project_id: null,
     memory_thread_source: 'header' as const,
     request_content_mode: null,
+    max_reasoning_effort: null,
     ...overrides,
   };
 }
@@ -415,6 +416,8 @@ describe('keys page', () => {
         over_budget_behavior: 'degrade',
         degrade_lane: null,
         request_content_mode: null,
+        // Reasoning cap untouched → still no cap (null), never undefined.
+        max_reasoning_effort: null,
         // Concurrency untouched → still unlimited (null).
         concurrency_limit: null,
         // Memory defaults untouched → off / none / header (issue #97).

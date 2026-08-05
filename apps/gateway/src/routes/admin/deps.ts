@@ -601,6 +601,11 @@ export interface KeySummary {
   memory_thread_source: "header" | "auto";
   // null inherits the live System Settings request-content mode.
   request_content_mode: "none" | "payload" | "session" | null;
+  // Per-key reasoning-effort ceiling (cost control). null = no cap. Surfaced so the
+  // admin UI can display + ROUND-TRIP it — omitting it from the list view makes the
+  // edit dialog re-read null and silently WIPE a configured cap on the next save
+  // (same hazard documented for the memory defaults above). No key material.
+  max_reasoning_effort: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
 }
 
 // New-key/rotated-key response: carries plaintext intentionally so the operator

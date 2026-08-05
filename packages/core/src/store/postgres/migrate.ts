@@ -1258,6 +1258,18 @@ const MIGRATIONS: readonly Migration[] = [
       for (const statement of splitStatements(ddl)) await db.execute(sql.raw(statement));
     },
   },
+  {
+    // Per-key reasoning-effort ceiling (cost control). NULL = no cap. pg mirror of
+    // sqlite v47.
+    version: 46,
+    run: async (db) => {
+      if (await pgTableHasColumns(db, "api_keys", ["key_id"])) {
+        await db.execute(
+          sql.raw("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS max_reasoning_effort TEXT"),
+        );
+      }
+    },
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {

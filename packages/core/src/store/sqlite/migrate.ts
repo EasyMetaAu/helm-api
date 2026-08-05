@@ -1305,6 +1305,18 @@ const MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    // Per-key reasoning-effort ceiling (cost control). NULL = no cap.
+    version: 47,
+    run: (db) => {
+      if (
+        sqliteTableHasColumns(db, "api_keys", ["key_id"]) &&
+        !sqliteTableHasColumns(db, "api_keys", ["max_reasoning_effort"])
+      ) {
+        db.exec("ALTER TABLE api_keys ADD COLUMN max_reasoning_effort TEXT;");
+      }
+    },
+  },
 ];
 
 function sqliteTableHasColumns(

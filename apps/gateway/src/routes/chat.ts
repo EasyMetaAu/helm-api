@@ -69,6 +69,7 @@ import {
   withRequestContentMode,
   withSseCaptureRelease,
 } from "./payload-capture.js";
+import { clampClientReasoningEffortToKeyMax } from "./reasoning-cap.js";
 import { resolveSessionCapture, stampSessionCapture } from "./session-capture.js";
 import { isUpstreamTimeout } from "./stream-error.js";
 
@@ -253,6 +254,8 @@ interface ChatIdentity {
     /** Per-key memory defaults (issue #97); absent = memory off unless headers say otherwise. */
     memory?: MemoryKeyDefaults;
     requestContentMode?: "none" | "payload" | "session" | null;
+    /** Per-key reasoning-effort ceiling (cost control); absent/null = no cap. */
+    maxReasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null;
   };
 }
 
@@ -535,6 +538,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
 
     let internal = toInternalRequest(body, requestId, traceId, identity, sessionKey, memoryScope);
     internal = downgradeClientFastModeIfDisallowed(internal, identity.caps.allowFastMode);
+    internal = clampClientReasoningEffortToKeyMax(internal, identity.caps.maxReasoningEffort);
     // Per-candidate attempt timeout: a slow head model times out and the executor falls
     // back to the next candidate (instead of waiting out the global 90s connect timeout).
     // Honored ONLY from the trusted INTERNAL key — the classifier eval / memory self-HTTP
