@@ -18,6 +18,8 @@ jobs:
   # checkout v7's fork-PR opt-in is scoped to pull_request_target jobs below;
   # those jobs run only on disposable hosted runners with a read-only token.
   verify:
+    # Bound a genuinely stuck verify run; GitHub's default is six hours.
+    timeout-minutes: 10
     # Untrusted pull-request code must never reach the persistent runner pool.
     # Trusted main pushes retain the labelled self-hosted pool for throughput.
     runs-on: ${{ fromJSON(github.event_name == 'pull_request_target' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","docker"]') }}
@@ -56,7 +58,46 @@ jobs:
       # build BEFORE test: admin-static.test.ts serves apps/admin/build, which is
       # gitignored and therefore absent on a fresh CI checkout (would 404 → test fail).
       - run: pnpm build
-      - run: pnpm test
+      # Keep PGlite-backed Store tests on two workers without slowing every
+      # unrelated unit test to the same concurrency.
+      - run: pnpm test:ci:fast
+        timeout-minutes: 5
+
+  # PGlite starts an in-process WASM Postgres and runs migrations for each fresh
+  # database. Isolate every Store test in its own bounded job so it cannot delay
+  # unrelated unit checks or inherit their workers.
+  store:
+    timeout-minutes: 8
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request_target' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","docker"]') }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          allow-unsafe-pr-checkout: ${{ github.event_name == 'pull_request_target' }}
+          ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify PR merge ref matches event head
+        if: github.event_name == 'pull_request_target'
+        env:
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          read -r base_sha actual_head_sha extra_parent <<<"$(git show -s --format='%P' HEAD)"
+          if [[ -z "${base_sha}" || -z "${actual_head_sha}" || -n "${extra_parent}" || "${actual_head_sha}" != "${EXPECTED_HEAD_SHA}" ]]; then
+            echo "::error::PR merge ref does not match the event head SHA"
+            exit 1
+          fi
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Use persistent pnpm store on runner
+        if: github.event_name == 'push'
+        run: pnpm config set store-dir /home/runner/_work/.pnpm-store
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:ci:store
+        timeout-minutes: 6
 
   # End-to-end (Playwright) gate. Independent of `verify`/`docker` (no `needs`) so
   # the jobs run in parallel and don't block one another. The e2e webServers run
@@ -174,12 +215,12 @@ jobs:
         continue-on-error: true
         run: docker stop helm-ci && docker rm helm-ci
 
-  # The three jobs above execute untrusted PR code with a read-only token. This
+  # The four jobs above execute untrusted PR code with a read-only token. This
   # separate default-branch-controlled job never checks out or executes PR code;
   # it is the only job allowed to publish stable required checks on the PR head.
   report_pr_checks:
     if: always() && github.event_name == 'pull_request_target'
-    needs: [verify, e2e, docker]
+    needs: [verify, store, e2e, docker]
     runs-on: ubuntu-24.04
     permissions:
       checks: write
@@ -189,6 +230,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           VERIFY_RESULT: ${{ needs.verify.result }}
+          STORE_RESULT: ${{ needs.store.result }}
           E2E_RESULT: ${{ needs.e2e.result }}
           DOCKER_RESULT: ${{ needs.docker.result }}
         run: |
@@ -223,5 +265,6 @@ jobs:
           }
 
           publish_check "PR / verify" "${VERIFY_RESULT}"
+          publish_check "PR / store" "${STORE_RESULT}"
           publish_check "PR / e2e" "${E2E_RESULT}"
           publish_check "PR / docker" "${DOCKER_RESULT}"
