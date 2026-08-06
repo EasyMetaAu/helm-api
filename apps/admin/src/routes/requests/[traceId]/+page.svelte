@@ -494,6 +494,8 @@
             {$t('The session transcript is unavailable or has been cleaned up.')}
           {:else if data.payload?.reason === 'session_incomplete'}
             {$t('The session transcript is incomplete and this request cannot be recovered.')}
+          {:else if data.payload?.reason === 'session_recovery_limited'}
+            {$t('The session transcript is too large to recover safely.')}
           {:else if data.payload?.reason === 'no_session'}
             {$t('This request has no captured Session ID, so no session transcript is available.')}
           {:else}

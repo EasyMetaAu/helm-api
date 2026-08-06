@@ -1771,6 +1771,7 @@ describe("admin.api request payload", () => {
         requestId: "req_session",
         sessionRef: "session-ref",
         responseBodyStored: true,
+        recoveryWireBytes: 100,
         fidelity: "semantic",
         createdAt: new Date(1234),
       }),
@@ -1847,6 +1848,7 @@ describe("admin.api request payload", () => {
         requestId: "req_session_meta",
         sessionRef: "session-ref",
         responseBodyStored: true,
+        recoveryWireBytes: 100,
         fidelity: "semantic",
         createdAt: new Date(1234),
       }),
@@ -1866,6 +1868,74 @@ describe("admin.api request payload", () => {
       fidelity: "semantic",
       created_at: 1234,
       parts: { request: true, response: true, upstream_request: false },
+    });
+  });
+
+  it.each([
+    null,
+    1_000_000,
+  ] as const)("does not advertise a Session payload with unsafe recovery bytes (%s)", async (recoveryWireBytes) => {
+    const rec = {
+      ...decision("req_session_limited", "balanced"),
+      session: { ref: "session-ref", label: "thread-1", source: "x-thread-id" as const },
+    };
+    const telemetry = {
+      ...makeTelemetry([rec]),
+      getPayloadMeta: async () => null,
+      getSessionRevisionMeta: async () => ({
+        requestId: "req_session_limited",
+        sessionRef: "session-ref",
+        responseBodyStored: true,
+        recoveryWireBytes,
+        fidelity: "semantic",
+        createdAt: new Date(1234),
+      }),
+      listSessionRevisionsPage: async () => {
+        throw new Error("Session body must not be read for part=meta");
+      },
+    } as unknown as TelemetryStore;
+
+    const response = await buildApp(buildDeps({ telemetry })).request(
+      "/admin/api/requests/req_session_limited/payload?part=meta",
+    );
+
+    expect(await response.json()).toEqual({
+      captured: false,
+      source: "unavailable",
+      reason: "session_recovery_limited",
+    });
+  });
+
+  it("does not advertise a Session response for a failed request", async () => {
+    const rec = {
+      ...decision("req_session_failed", "balanced"),
+      session: { ref: "session-ref", label: "thread-1", source: "x-thread-id" as const },
+      final: {
+        ...decision("req_session_failed", "balanced").final,
+        status: "error" as const,
+        error_reason: "provider_error",
+      },
+    };
+    const telemetry = {
+      ...makeTelemetry([rec]),
+      getPayloadMeta: async () => null,
+      getSessionRevisionMeta: async () => ({
+        requestId: "req_session_failed",
+        sessionRef: "session-ref",
+        responseBodyStored: true,
+        recoveryWireBytes: 100,
+        fidelity: "semantic",
+        createdAt: new Date(1234),
+      }),
+    } as unknown as TelemetryStore;
+
+    const response = await buildApp(buildDeps({ telemetry })).request(
+      "/admin/api/requests/req_session_failed/payload?part=meta",
+    );
+
+    expect(await response.json()).toMatchObject({
+      captured: true,
+      parts: { request: true, response: false, upstream_request: false },
     });
   });
 

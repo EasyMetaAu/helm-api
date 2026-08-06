@@ -3,6 +3,7 @@ import type {
   RequestPayloadMeta,
   RequestPayloadPart,
   RequestPayloadPartRecord,
+  ResponseWorkAdmission,
   SessionRevisionRecord,
 } from "@helm/core";
 import {
@@ -142,6 +143,18 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
       if (!meta) {
         const sessionMeta = await deps.telemetry.getSessionRevisionMeta?.(traceId);
         if (sessionMeta) {
+          const responseAdmission = deps.responseWorkAdmission ?? runtimeResponseWorkAdmission();
+          if (
+            sessionMeta.recoveryWireBytes === null ||
+            sessionMeta.recoveryWireBytes > sessionRecoveryMaxWireBytes(responseAdmission)
+          ) {
+            return c.json({
+              captured: false,
+              source: "unavailable",
+              reason: "session_recovery_limited",
+            });
+          }
+          const decision = await deps.telemetry.getByRequestId(traceId);
           return c.json({
             captured: true,
             source: "session",
@@ -150,7 +163,7 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
             created_at: sessionMeta.createdAt.getTime(),
             parts: {
               request: true,
-              response: sessionMeta.responseBodyStored,
+              response: decision?.final.status === "ok" && sessionMeta.responseBodyStored,
               upstream_request: false,
             },
           });
@@ -295,9 +308,9 @@ async function getSessionRequest(
   const responseAdmission = deps.responseWorkAdmission ?? runtimeResponseWorkAdmission();
   // ponytail: half a response-work window lets inspection coexist with live API
   // traffic; add metadata-first admission if larger concurrent restores are needed.
-  const recoveryMaxWireBytes = Math.max(
-    1,
-    Math.floor(responseAdmission.capacityBytes / budget.jsonAmplification / 2),
+  const recoveryMaxWireBytes = sessionRecoveryMaxWireBytes(
+    responseAdmission,
+    budget.jsonAmplification,
   );
   // Reserve one whole safe recovery window before the adapter materializes even
   // the first page. Reserving after listPage() would let concurrent readers each
@@ -348,6 +361,13 @@ async function getSessionRequest(
   } finally {
     if (!releaseTransferred) acquired.lease.release();
   }
+}
+
+function sessionRecoveryMaxWireBytes(
+  responseAdmission: ResponseWorkAdmission,
+  jsonAmplification = runtimeMemoryBudget().jsonAmplification,
+): number {
+  return Math.max(1, Math.floor(responseAdmission.capacityBytes / jsonAmplification / 2));
 }
 
 function sessionRevisionWireBytes(revision: SessionRevisionRecord): number {

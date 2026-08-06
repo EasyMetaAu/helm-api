@@ -915,6 +915,7 @@
   "The request body as received from the client — before memory injection and translation.": "从客户端收到的请求正文——在记忆注入和转换之前。",
   "The server uses the MCP Streamable HTTP transport at the bare origin + /mcp and authenticates with your API key as a bearer token. Enable it on the gateway with memory.mcp.enabled — until then /mcp returns 404.": "服务器在裸源地址 + /mcp 上使用 MCP Streamable HTTP 传输，并以 Bearer 令牌形式用你的 API 密钥进行认证。需在网关上通过 memory.mcp.enabled 启用——在此之前 /mcp 返回 404。",
   "The session transcript is incomplete and this request cannot be recovered.": "会话转录不完整，无法恢复此请求。",
+  "The session transcript is too large to recover safely.": "会话转录过大，无法安全恢复。",
   "The session transcript is unavailable or has been cleaned up.": "会话转录不可用或已被清理。",
   "The subject is fixed — it identifies which fact a newer one supersedes.": "主题是固定的——它标识较新的事实取代了哪个事实。",
   "The subscription account that served this request, when applicable.": "实际处理此请求的订阅账号（如适用）。",

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { type DecisionRecord, DecisionRecordSchema } from "@helm/shared";
-import { and, asc, count, desc, eq, gt, gte, inArray, lt, type SQL, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, inArray, lt, lte, type SQL, sql } from "drizzle-orm";
 import { shapeTelemetryAggregate, shapeTelemetryKeyUsage } from "../aggregate-shape.js";
 import { externalizeImages, type PayloadBlob, rehydrateImages } from "../payload-blobs.js";
 import {
@@ -54,6 +54,19 @@ type SessionBodyChunkInsert = typeof sessionRevisionBodyChunks.$inferInsert;
 type SessionBodyPart = "request_delta" | "request_envelope" | "response";
 const SESSION_PRUNE_MARKER = "__helm_pruning__";
 const SESSION_CHUNKS_PER_WRITE = 4;
+const sessionRevisionWireBytes = sql<number>`
+  length(CAST(${sessionRevisions.sessionRef} AS BLOB)) +
+  length(CAST(${sessionRevisions.requestId} AS BLOB)) +
+  coalesce(length(CAST(${sessionRevisions.parentRequestId} AS BLOB)), 0) +
+  coalesce(
+    ${sessionRevisions.bodyBytes},
+    length(CAST(${sessionRevisions.requestDeltaJson} AS BLOB)) +
+    length(CAST(${sessionRevisions.requestEnvelopeJson} AS BLOB)) +
+    coalesce(length(CAST(${sessionRevisions.responseJson} AS BLOB)), 0)
+  ) +
+  coalesce(length(CAST(${sessionRevisions.responseId} AS BLOB)), 0) +
+  length(CAST(${sessionRevisions.fidelity} AS BLOB)) + 64
+`;
 
 function decodeSessionRevisionRow(
   row: SessionRevisionRow,
@@ -553,23 +566,10 @@ export class SqliteTelemetryStore implements TelemetryStore {
   ): Promise<SessionRevisionPage> {
     const limit = boundedSessionPageLimit(options);
     const afterSequence = options.afterSequence ?? 0;
-    const rowBytes = sql<number>`
-      length(CAST(${sessionRevisions.sessionRef} AS BLOB)) +
-      length(CAST(${sessionRevisions.requestId} AS BLOB)) +
-      coalesce(length(CAST(${sessionRevisions.parentRequestId} AS BLOB)), 0) +
-      coalesce(
-        ${sessionRevisions.bodyBytes},
-        length(CAST(${sessionRevisions.requestDeltaJson} AS BLOB)) +
-        length(CAST(${sessionRevisions.requestEnvelopeJson} AS BLOB)) +
-        coalesce(length(CAST(${sessionRevisions.responseJson} AS BLOB)), 0)
-      ) +
-      coalesce(length(CAST(${sessionRevisions.responseId} AS BLOB)), 0) +
-      length(CAST(${sessionRevisions.fidelity} AS BLOB)) + 64
-    `;
     const metadata = this.db
       .select({
         sequence: sessionRevisions.sequence,
-        bytes: rowBytes,
+        bytes: sessionRevisionWireBytes,
         legacyBinary: sql<number>`${sessionRevisions.bodyBytes} IS NULL AND (
           typeof(${sessionRevisions.requestDeltaJson}) = 'blob' OR
           typeof(${sessionRevisions.requestEnvelopeJson}) = 'blob' OR
@@ -649,21 +649,47 @@ export class SqliteTelemetryStore implements TelemetryStore {
         requestId: sessionRevisions.requestId,
         sessionRef: sessionRevisions.sessionRef,
         responseBodyStored: sql<number>`${sessionRevisions.responseJson} IS NOT NULL`,
+        sequence: sessionRevisions.sequence,
         fidelity: sessionRevisions.fidelity,
         createdAt: sessionRevisions.createdAt,
       })
       .from(sessionRevisions)
       .where(eq(sessionRevisions.requestId, requestId))
       .get();
-    return row
-      ? {
-          requestId: row.requestId,
-          sessionRef: row.sessionRef,
-          responseBodyStored: Boolean(row.responseBodyStored),
-          fidelity: row.fidelity,
-          createdAt: row.createdAt,
-        }
-      : null;
+    if (!row) return null;
+    const recovery = this.db
+      .select({
+        bytes: sql<number | null>`CASE
+          WHEN sum(CASE WHEN ${sessionRevisions.bodyBytes} IS NULL AND (
+            typeof(${sessionRevisions.requestDeltaJson}) = 'blob' OR
+            typeof(${sessionRevisions.requestEnvelopeJson}) = 'blob' OR
+            typeof(${sessionRevisions.responseJson}) = 'blob'
+          ) THEN 1 ELSE 0 END) > 0 THEN NULL
+          ELSE sum(${sessionRevisionWireBytes})
+        END`,
+      })
+      .from(sessionRevisions)
+      .where(
+        and(
+          eq(sessionRevisions.sessionRef, row.sessionRef),
+          lte(sessionRevisions.sequence, row.sequence),
+        ),
+      )
+      .get();
+    const recoveryWireBytes = Number(recovery?.bytes);
+    return {
+      requestId: row.requestId,
+      sessionRef: row.sessionRef,
+      responseBodyStored: Boolean(row.responseBodyStored),
+      recoveryWireBytes:
+        recovery?.bytes !== null &&
+        Number.isSafeInteger(recoveryWireBytes) &&
+        recoveryWireBytes >= 0
+          ? recoveryWireBytes
+          : null,
+      fidelity: row.fidelity,
+      createdAt: row.createdAt,
+    };
   }
 
   async pruneInactiveSessions(olderThanMs: number): Promise<number> {

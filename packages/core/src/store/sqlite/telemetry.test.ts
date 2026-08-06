@@ -206,6 +206,45 @@ describe("SqliteTelemetryStore", () => {
     db.$sqlite.close();
   });
 
+  it("fails closed when Session recovery includes a legacy binary revision", async () => {
+    const db = createSqliteDb(":memory:");
+    const store = new SqliteTelemetryStore(db);
+    const first = {
+      sessionRef: "s-legacy-binary",
+      accountId: "a1",
+      apiKeyId: "k1",
+      source: "header",
+      externalSessionId: "external-legacy-binary",
+      requestId: "r1",
+      parentRequestId: null,
+      retainCount: 0,
+      requestDeltaJson: '["first"]',
+      requestEnvelopeJson: "{}",
+      responseId: null,
+      responseJson: null,
+      fidelity: "semantic",
+      createdAt: new Date(1_000),
+    } as const;
+    await store.upsertSessionRevision(first);
+    await store.upsertSessionRevision({
+      ...first,
+      requestId: "r2",
+      parentRequestId: "r1",
+      requestDeltaJson: '["second"]',
+      createdAt: new Date(2_000),
+    });
+    db.$sqlite
+      .prepare(
+        "UPDATE session_revisions SET request_delta_json = x'1f8b00', body_bytes = NULL WHERE request_id = 'r1'",
+      )
+      .run();
+
+    await expect(store.getSessionRevisionMeta("r2")).resolves.toMatchObject({
+      recoveryWireBytes: null,
+    });
+    db.$sqlite.close();
+  });
+
   it("pages mixed Session rows by uncompressed bytes and returns decoded text", async () => {
     const db = createSqliteDb(":memory:");
     const store = new SqliteTelemetryStore(db);

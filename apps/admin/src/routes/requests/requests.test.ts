@@ -831,6 +831,26 @@ describe('requests detail page', () => {
     expect(screen.getByTestId('retry-request')).toBeDisabled();
   });
 
+  it('does not offer payload loading when Session recovery exceeds the safe limit', () => {
+    render(DetailPage, {
+      data: {
+        detail: detail(),
+        payload: {
+          captured: false,
+          source: 'unavailable',
+          reason: 'session_recovery_limited',
+        },
+        requestId: 'tr_session_limited',
+      },
+    });
+
+    expect(screen.getByTestId('payload-summary')).toHaveTextContent(
+      'The session transcript is too large to recover safely.',
+    );
+    expect(screen.queryByTestId('load-conversation')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('load-request-body')).not.toBeInTheDocument();
+  });
+
   it('surfaces a structured error with class, status, redacted message and redacted provider_raw', () => {
     render(DetailPage, {
       data: {

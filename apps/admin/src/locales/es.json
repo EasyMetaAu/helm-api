@@ -915,6 +915,7 @@
   "The request body as received from the client — before memory injection and translation.": "El cuerpo de la solicitud tal como se recibió del cliente: antes de la inyección de memoria y la traducción.",
   "The server uses the MCP Streamable HTTP transport at the bare origin + /mcp and authenticates with your API key as a bearer token. Enable it on the gateway with memory.mcp.enabled — until then /mcp returns 404.": "El servidor usa el transporte MCP Streamable HTTP en el origen sin ruta + /mcp y se autentica con tu API key como bearer token. Actívalo en el gateway con memory.mcp.enabled; hasta entonces /mcp devuelve 404.",
   "The session transcript is incomplete and this request cannot be recovered.": "La transcripción de la sesión está incompleta y esta solicitud no se puede recuperar.",
+  "The session transcript is too large to recover safely.": "La transcripción de la sesión es demasiado grande para recuperarla de forma segura.",
   "The session transcript is unavailable or has been cleaned up.": "La transcripción de la sesión no está disponible o se ha eliminado.",
   "The subject is fixed — it identifies which fact a newer one supersedes.": "El asunto es fijo: identifica qué hecho sustituye uno más nuevo.",
   "The subscription account that served this request, when applicable.": "La cuenta de suscripción que sirvió esta solicitud, cuando corresponda.",
