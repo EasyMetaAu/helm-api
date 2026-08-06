@@ -10,6 +10,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "../../..");
 const ciPath = resolve(repoRoot, ".github/workflows/ci.yml");
 const publishPath = resolve(repoRoot, ".github/workflows/publish.yml");
+const vitestConfigRaw = readFileSync(resolve(repoRoot, "vitest.config.ts"), "utf8");
+const packageJson = JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "utf8")) as {
+  scripts: Record<string, string>;
+};
 
 function jobBlock(raw: string, name: string): string {
   const start = raw.indexOf(`\n  ${name}:`);
@@ -34,6 +38,13 @@ describe("CI workflow", () => {
     for (const gate of ["pnpm typecheck", "pnpm lint", "pnpm test", "pnpm build"]) {
       expect(raw).toContain(gate);
     }
+  });
+
+  it("keeps Store tests out of the fast suite and in their isolated suite", () => {
+    expect(packageJson.scripts["test:ci:fast"]).toContain("HELM_CI_FAST=1");
+    expect(packageJson.scripts["test:ci:store"]).toContain("vitest run packages/core/src/store");
+    expect(vitestConfigRaw).toContain('process.env.HELM_CI_FAST === "1"');
+    expect(vitestConfigRaw).toContain('"**/src/store/**"');
   });
 
   it("uses the default-branch workflow for pull requests and still runs on main pushes", () => {
@@ -97,8 +108,13 @@ describe("CI workflow", () => {
       const job = jobBlock(raw, name);
       expect(job, `${name} job must exist`).not.toBe("");
       expect(job).toContain("github.event_name == 'pull_request_target'");
-      expect(job).toContain('["ubuntu-24.04"]');
-      expect(job).toContain('["self-hosted","Linux","X64","docker"]');
+      if (name === "store") {
+        expect(job).toContain("runs-on: ubuntu-24.04");
+        expect(job).not.toContain('["self-hosted","Linux","X64","docker"]');
+      } else {
+        expect(job).toContain('["ubuntu-24.04"]');
+        expect(job).toContain('["self-hosted","Linux","X64","docker"]');
+      }
       expect(job).toContain("refs/pull/{0}/merge");
       expect(job).toContain("fetch-depth: 2");
       expect(job).toContain(

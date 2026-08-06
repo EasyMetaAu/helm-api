@@ -1,5 +1,7 @@
 import { defineConfig } from "vitest/config";
 
+const excludeStoreTests = process.env.HELM_CI_FAST === "1";
+
 export default defineConfig({
   test: {
     // Sixteen self-hosted runners share the 32-core host. Limit the top-level
@@ -26,6 +28,7 @@ export default defineConfig({
           exclude: [
             "**/node_modules/**",
             "**/dist/**",
+            ...(excludeStoreTests ? ["**/src/store/**"] : []),
             "packages/core/src/store/postgres/concurrency-leases.real-postgres.test.ts",
           ],
           // PGlite starts a WASM Postgres and runs every migration for each fresh
