@@ -6897,7 +6897,9 @@ describe("createExecute — HALF_OPEN probe lock release", () => {
     const { cb, now } = openThenCooldownElapsed(alias);
     const recordAbort = vi.spyOn(cb, "recordAbort");
     const recordFailure = vi.spyOn(cb, "recordFailure");
-    const oauth429 = rejects(new UpstreamError("upstream_error", "upstream returned 429", null, 429));
+    const oauth429 = rejects(
+      new UpstreamError("upstream_error", "upstream returned 429", null, 429),
+    );
     const ok = resolves({ id: "fallback-ok" });
     const mk = () =>
       createExecute({
@@ -6934,8 +6936,8 @@ describe("createExecute — HALF_OPEN probe lock release", () => {
     expect(next.attempts[0]?.alias).toBe(alias);
     expect(next.attempts[0]?.skip_reason).not.toBe("circuit_open");
     expect(
-      (oauth429 as unknown as { chatCompletion: ReturnType<typeof vi.fn> }).chatCompletion.mock.calls
-        .length,
+      (oauth429 as unknown as { chatCompletion: ReturnType<typeof vi.fn> }).chatCompletion.mock
+        .calls.length,
     ).toBeGreaterThanOrEqual(2);
   });
 
