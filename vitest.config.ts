@@ -2,6 +2,10 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    // Sixteen self-hosted runners share the 32-core host. Limit the top-level
+    // project scheduler to this job's two-core fair share; a nested project
+    // maxWorkers value does not constrain concurrent project test files.
+    maxWorkers: 2,
     // Multi-project run: the node-only packages/gateway suite plus the admin
     // SvelteKit suite (its own config adds the Svelte compiler + jsdom). One
     // `vitest run` (= `pnpm test`) executes both. `apps/admin` is intentionally
@@ -24,18 +28,13 @@ export default defineConfig({
             "**/dist/**",
             "packages/core/src/store/postgres/concurrency-leases.real-postgres.test.ts",
           ],
-          // The postgres store suite opens an in-process PGlite (WASM Postgres)
-          // per test. Under a full parallel run, many WASM cold-starts contend for
-          // CPU and the default 5s ceiling is occasionally exceeded — a load flake,
-          // not a real hang (the same files pass in isolation). Lift the ceiling so
-          // these legitimately-slow inits have headroom; fast tests (the vast
-          // majority, sub-ms) are unaffected. hookTimeout covers DB setup in hooks.
-          testTimeout: 15_000,
-          hookTimeout: 15_000,
-          // Self-hosted runners expose 32 host CPUs. Letting Vitest match that
-          // count cold-starts too many PGlite instances at once and makes valid
-          // queries miss the timeout under shared-host load.
-          maxWorkers: 4,
+          // PGlite starts a WASM Postgres and runs every migration for each fresh
+          // test database. The self-hosted runner pool shares one machine, so 15s
+          // misclassified slow cold-starts as hangs and left their uncancelled work
+          // competing with later tests. Keep a bounded but realistic cold-start
+          // ceiling; fast tests still finish immediately.
+          testTimeout: 60_000,
+          hookTimeout: 60_000,
           environment: "node",
           // Native addons (better-sqlite3) must be loaded by Node's require, not
           // transformed by Vite — otherwise the .node bindings cannot be located.
