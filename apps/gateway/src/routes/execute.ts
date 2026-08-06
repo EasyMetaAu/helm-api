@@ -1647,6 +1647,14 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       // must still back the alias off + half-open-probe. Per-account faults never reach
       // here — the pool absorbs them, and the recordFailure skip below keeps the rare
       // surfaced one off the breaker.
+      //
+      // canAttempt may grab the HALF_OPEN probe lock. Every exit from this candidate
+      // after allow:true MUST settle the breaker (success / failure / abort). Paths that
+      // intentionally skip recordFailure (OAuth account-scoped 429, capability skip after
+      // the gate, free_429, context overflow, …) still release the probe via recordAbort;
+      // otherwise inFlightProbe stays true and the alias returns circuit_open forever
+      // (prod 2026-08-06: anthropic/claude-opus-4-8 stuck for hours while other Anthropic
+      // models kept serving).
       const gate = breaker.canAttempt(alias);
       if (!gate.allow) {
         circuitSkipped = true;
@@ -1654,7 +1662,15 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         attempts.push(skipRow(alias, gate.reason ?? "circuit_open", elapsed()));
         continue;
       }
+      let breakerSettled = false;
+      const settleBreaker = (kind: "success" | "failure" | "abort"): void => {
+        if (kind === "success") breaker.recordSuccess(alias);
+        else if (kind === "failure") breaker.recordFailure(alias);
+        else breaker.recordAbort(alias);
+        breakerSettled = true;
+      };
 
+      try {
       // 2) Capability filter. Missing catalog data remains fail-open for generic
       // requests, but not for cached_content: that field is a required Gemini/LiteLLM
       // cached context handle, not an optional affinity hint.
@@ -1920,7 +1936,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 log,
               ),
           );
-          breaker.recordSuccess(alias);
+          settleBreaker("success");
           // Streamed usage is not known at peek time → cost null, backfilled later.
           attempts.push(okRow(alias, elapsed(), null, attemptTelemetry));
           return {
@@ -1976,7 +1992,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 log,
               ),
           );
-          breaker.recordSuccess(alias);
+          settleBreaker("success");
           attemptTelemetry = withRequestMutations(
             passthrough,
             mergeRequestMutations(
@@ -2048,7 +2064,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 (toolCallXmlRecoveryEnabled?.() ?? true),
             }),
           );
-          breaker.recordSuccess(alias);
+          settleBreaker("success");
           const usage =
             req.protocol === "openai_responses"
               ? usageFromResponsesResponse(body)
@@ -2094,7 +2110,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             visualCompressionMutationLedger(visualCompressionMutation),
           ),
         );
-        breaker.recordSuccess(alias);
+        settleBreaker("success");
         attempts.push(
           okRow(alias, elapsed(), costOf(alias, providerModel, body), attemptTelemetry),
         );
@@ -2111,7 +2127,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         if (cancellation === CONCURRENCY_LEASE_LOST_REASON || cancellation === "request_timeout") {
           const leaseLost = cancellation === CONCURRENCY_LEASE_LOST_REASON;
           const errorClass = leaseLost ? "lane_unavailable" : "timeout";
-          breaker.recordAbort(alias);
+          settleBreaker("abort");
           attempts.push({
             alias,
             skipped: false,
@@ -2140,7 +2156,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         // Client abort: non-provider fault. Terminate the chain WITHOUT marking a
         // breaker failure or counting it as all_providers_failed.
         if (isAbort(err, signal)) {
-          breaker.recordAbort(alias);
+          settleBreaker("abort");
           attempts.push({
             alias,
             skipped: false,
@@ -2177,7 +2193,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         // defeat the throttle the operator deliberately turned on. 503 via
         // lane_unavailable (retryable in the client's eyes).
         if (isQueueTimeout(err)) {
-          breaker.recordAbort(alias);
+          settleBreaker("abort");
           attempts.push({
             alias,
             skipped: false,
@@ -2311,8 +2327,10 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         // timeout) that survived the pool's sibling retry means the WHOLE pool is down →
         // record it so the breaker backs the alias off, just like a configured provider.
         if (!(isOAuthSubscriptionAlias(alias) && isAccountScopedFault(err))) {
-          breaker.recordFailure(alias);
+          settleBreaker("failure");
         }
+        // Account-scoped OAuth faults leave breakerSettled=false so the finally
+        // block releases any HALF_OPEN probe lock without counting a failure.
         onlyContextOrCapabilitySkips = false;
         // Auto-park a subscription account that hit its rate/usage limit. A genuine
         // (non-`:free`, handled above) 429 on an OAuth alias means the served account
@@ -2332,6 +2350,14 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           error_detail: errorDetailOf(err),
           ...attemptTelemetry,
         });
+      }
+      } finally {
+        // Release a HALF_OPEN probe lock on any path that allowed the attempt but
+        // never settled success/failure/abort (capability skip after canAttempt,
+        // free_429, context/reasoning skip, OAuth account-scoped 429/401/403).
+        // recordAbort is a no-op when the alias was never HALF_OPEN or the lock was
+        // already cleared by success/failure/abort above.
+        if (!breakerSettled) settleBreaker("abort");
       }
     }
 
