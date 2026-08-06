@@ -405,7 +405,7 @@ function trackedBreaker(): {
         inner.recordFailure(model);
       },
       recordSuccess: (model) => inner.recordSuccess(model),
-      recordAbort: (model) => inner.recordAbort(model),
+      recordAbort: (model, probeToken) => inner.recordAbort(model, probeToken),
       getState: (model) => inner.getState(model),
     },
   };

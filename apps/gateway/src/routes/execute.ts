@@ -1648,13 +1648,13 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       // here — the pool absorbs them, and the recordFailure skip below keeps the rare
       // surfaced one off the breaker.
       //
-      // canAttempt may grab the HALF_OPEN probe lock. Every exit from this candidate
-      // after allow:true MUST settle the breaker (success / failure / abort). Paths that
-      // intentionally skip recordFailure (OAuth account-scoped 429, capability skip after
-      // the gate, free_429, context overflow, …) still release the probe via recordAbort;
-      // otherwise inFlightProbe stays true and the alias returns circuit_open forever
-      // (prod 2026-08-06: anthropic/claude-opus-4-8 stuck for hours while other Anthropic
-      // models kept serving).
+      // canAttempt may grab the HALF_OPEN probe lock (+ opaque probeToken). Every exit
+      // from this candidate after allow:true MUST settle the breaker (success / failure /
+      // abort). Paths that intentionally skip recordFailure (OAuth account-scoped 429,
+      // capability skip after the gate, free_429, context overflow, …) still release the
+      // probe via recordAbort with the matching token; otherwise the lock stays held and
+      // the alias returns circuit_open forever (prod 2026-08-06). Abort must pass the
+      // token so a stale CLOSED request cannot release a later probe it never owned.
       const gate = breaker.canAttempt(alias);
       if (!gate.allow) {
         circuitSkipped = true;
@@ -1666,6 +1666,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       const settleBreaker = (kind: "success" | "failure" | "abort"): void => {
         if (kind === "success") breaker.recordSuccess(alias);
         else if (kind === "failure") breaker.recordFailure(alias);
+        else if (gate.probeToken !== undefined) breaker.recordAbort(alias, gate.probeToken);
         else breaker.recordAbort(alias);
         breakerSettled = true;
       };
@@ -2363,8 +2364,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         // Release a HALF_OPEN probe lock on any path that allowed the attempt but
         // never settled success/failure/abort (capability skip after canAttempt,
         // free_429, context/reasoning skip, OAuth account-scoped 429/401/403).
-        // recordAbort is a no-op when the alias was never HALF_OPEN or the lock was
-        // already cleared by success/failure/abort above.
+        // Token-scoped abort is a no-op when the alias was never HALF_OPEN, the lock
+        // was already cleared, or this attempt does not own the in-flight probe.
         if (!breakerSettled) settleBreaker("abort");
       }
     }

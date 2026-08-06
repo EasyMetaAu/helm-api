@@ -109,6 +109,16 @@ export async function runImageChain(
       attempts.push(skipRow(target.alias, gate.reason ?? "circuit_open"));
       continue;
     }
+    // Mirror execute.ts: canAttempt may hold a HALF_OPEN probe lock. Paths that
+    // exit without recordSuccess/recordFailure must release its matching token or the
+    // alias stays permanently circuit_open until process restart.
+    const releaseProbeLock = (): void => {
+      if (gate.probeToken !== undefined) {
+        breaker.recordAbort(target.alias, gate.probeToken);
+      } else {
+        breaker.recordAbort(target.alias);
+      }
+    };
 
     const started = Date.now();
     try {
@@ -130,7 +140,7 @@ export async function runImageChain(
       if (cancellation === CONCURRENCY_LEASE_LOST_REASON || cancellation === "request_timeout") {
         const leaseLost = cancellation === CONCURRENCY_LEASE_LOST_REASON;
         const errorClass = leaseLost ? "lane_unavailable" : "timeout";
-        breaker.recordAbort(target.alias);
+        releaseProbeLock();
         attempts.push({
           alias: target.alias,
           skipped: false,
@@ -154,7 +164,7 @@ export async function runImageChain(
       // Client abort: NON-provider fault — terminate WITHOUT a breaker failure and
       // WITHOUT recording it as a provider error (mirrors execute.ts's recordAbort).
       if (isAbort(err, signal)) {
-        breaker.recordAbort(target.alias);
+        releaseProbeLock();
         return {
           ok: false,
           errorClass: "client_abort",
@@ -171,6 +181,7 @@ export async function runImageChain(
       // the upstream's structured error verbatim as a 400 invalid_request.
       if (isUpstreamRequestRejection(err)) {
         const detail = errorDetailOf(err);
+        releaseProbeLock();
         attempts.push({
           alias: target.alias,
           skipped: false,

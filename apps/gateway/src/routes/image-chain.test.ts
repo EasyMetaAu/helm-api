@@ -1,5 +1,5 @@
 import type { CircuitBreaker, ProviderClient } from "@helm/core";
-import { UpstreamError } from "@helm/core";
+import { createCircuitBreaker, UpstreamError } from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
 import { type ImageAttempt, type ImageChainTarget, runImageChain } from "./image-chain.js";
 
@@ -30,6 +30,16 @@ function okResult(cost: number | null = 0.01) {
     cost,
     upstreamRequestJson: "{}",
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 describe("runImageChain", () => {
@@ -105,6 +115,81 @@ describe("runImageChain", () => {
     expect(res.providerRaw).toEqual(raw); // surfaced verbatim
     expect(attempt).toHaveBeenCalledTimes(1); // did NOT advance to the fallback
     expect(breaker.recordFailure).not.toHaveBeenCalled(); // request is wrong, upstream is healthy
+  });
+
+  it("does not let a stale invalid_request release another request's HALF_OPEN probe", async () => {
+    let now = 0;
+    const breaker = createCircuitBreaker({
+      config: { failureThreshold: 5, cooldownMs: 1000 },
+      now: () => now,
+    });
+    const stale = deferred<Awaited<ReturnType<ImageAttempt>>>();
+    const probe = deferred<Awaited<ReturnType<ImageAttempt>>>();
+
+    const staleRun = runImageChain([target("a")], breaker, () => stale.promise, signal);
+    for (let i = 0; i < 5; i += 1) breaker.recordFailure("a");
+    expect(breaker.getState("a")).toBe("OPEN");
+
+    now = 1000;
+    const probeAttempt: ImageAttempt = vi.fn().mockReturnValue(probe.promise);
+    const probeRun = runImageChain([target("a")], breaker, probeAttempt, signal);
+    expect(probeAttempt).toHaveBeenCalledTimes(1);
+    expect(breaker.getState("a")).toBe("HALF_OPEN");
+
+    stale.reject(
+      new UpstreamError(
+        "upstream_error",
+        "bad request",
+        { error: { type: "invalid_request_error", message: "image too large" } },
+        400,
+      ),
+    );
+    const staleResult = await staleRun;
+    expect(staleResult.ok).toBe(false);
+    if (!staleResult.ok) expect(staleResult.errorClass).toBe("invalid_request");
+    expect(breaker.canAttempt("a")).toEqual({
+      allow: false,
+      probe: false,
+      reason: "circuit_open",
+    });
+
+    probe.resolve(okResult());
+    expect((await probeRun).ok).toBe(true);
+    expect(breaker.getState("a")).toBe("CLOSED");
+  });
+
+  it("releases its own HALF_OPEN probe on invalid_request", async () => {
+    let now = 0;
+    const breaker = createCircuitBreaker({
+      config: { failureThreshold: 5, cooldownMs: 1000 },
+      now: () => now,
+    });
+    for (let i = 0; i < 5; i += 1) breaker.recordFailure("a");
+    now = 1000;
+
+    const attempt: ImageAttempt = vi
+      .fn()
+      .mockRejectedValue(
+        new UpstreamError(
+          "upstream_error",
+          "bad request",
+          { error: { type: "invalid_request_error", message: "image too large" } },
+          400,
+        ),
+      );
+    const first = await runImageChain([target("a")], breaker, attempt, signal);
+    expect(first.ok).toBe(false);
+    if (!first.ok) expect(first.errorClass).toBe("invalid_request");
+    expect(breaker.getState("a")).toBe("HALF_OPEN");
+
+    const second = await runImageChain(
+      [target("a")],
+      breaker,
+      vi.fn().mockResolvedValue(okResult()),
+      signal,
+    );
+    expect(second.ok).toBe(true);
+    expect(breaker.getState("a")).toBe("CLOSED");
   });
 
   it("a ZenMux invalid_params 400 is terminal with the upstream message", async () => {
