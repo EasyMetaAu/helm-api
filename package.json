@@ -14,7 +14,7 @@
     "typecheck": "pnpm -r typecheck && pnpm typecheck:ops",
     "typecheck:ops": "tsc --noEmit -p scripts/ops/tsconfig.json",
     "test": "vitest run",
-    "test:ci:fast": "vitest run --exclude='packages/core/src/store/**' --maxWorkers=1 --bail=1",
+    "test:ci:fast": "HELM_CI_FAST=1 vitest run --maxWorkers=2 --bail=1",
     "test:ci:store": "vitest run packages/core/src/store --maxWorkers=2 --bail=1",
     "test:watch": "vitest",
     "test:e2e": "pnpm --filter @helm/gateway test:e2e",

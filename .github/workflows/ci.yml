@@ -61,14 +61,14 @@ jobs:
       # Keep PGlite-backed Store tests on two workers without slowing every
       # unrelated unit test to the same concurrency.
       - run: pnpm test:ci:fast
-        timeout-minutes: 5
+        timeout-minutes: 7
 
   # PGlite starts an in-process WASM Postgres and runs migrations for each fresh
-  # database. Isolate every Store test in its own bounded job so it cannot delay
-  # unrelated unit checks or inherit their workers.
+  # database. Isolate every Store test on a fresh hosted runner so it cannot
+  # contend with unrelated jobs on the persistent runner pool.
   store:
     timeout-minutes: 8
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request_target' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","docker"]') }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
