@@ -6,8 +6,8 @@
 //     / early upstream errors); successes only AFTER the first valid chunk —
 //     mid-stream breakage cannot count as success;
 //   - client abort is a NON-provider fault: records neither failure nor success
-//     (does not pollute health, does not trip the breaker), but releases any
-//     held probe lock so HALF_OPEN never deadlocks;
+//     (does not pollute health, does not trip the breaker), but releases its
+//     own probe lock so HALF_OPEN never deadlocks;
 //   - HALF_OPEN uses a per-model probe lock so only one probe request is in
 //     flight; all other concurrent requests are treated as OPEN (skipped).
 //
@@ -39,6 +39,8 @@ export interface BreakerDeps {
 export interface AttemptDecision {
   allow: boolean;
   probe: boolean;
+  /** Opaque owner token for a HALF_OPEN probe; absent for ordinary attempts. */
+  probeToken?: symbol;
   reason?: string;
 }
 
@@ -47,7 +49,7 @@ export interface CircuitBreaker {
    * Asked before each attempt: may this model be called right now?
    *   CLOSED                          -> { allow:true,  probe:false }
    *   OPEN & within cooldown          -> { allow:false, probe:false, reason:"circuit_open" }
-   *   OPEN & cooldown elapsed         -> grab probe lock: won  -> HALF_OPEN, { allow:true, probe:true }
+   *   OPEN & cooldown elapsed         -> grab probe lock: won  -> HALF_OPEN, { allow:true, probe:true, probeToken }
    *                                                       lost -> { allow:false, probe:false, reason:"circuit_open" }
    *   HALF_OPEN (probe already in flight) -> { allow:false, probe:false, reason:"circuit_open" }
    */
@@ -59,8 +61,8 @@ export interface CircuitBreaker {
   /** Call ONLY after a first valid chunk / valid response is received. */
   recordSuccess(model: string): void;
 
-  /** Client abort: record nothing (non-provider fault), but release any probe lock. */
-  recordAbort(model: string): void;
+  /** Client abort: record nothing; release only the caller's HALF_OPEN probe lock. */
+  recordAbort(model: string, probeToken?: symbol): void;
 
   getState(model: string): CircuitState;
 }
@@ -69,8 +71,8 @@ interface ModelEntry {
   state: CircuitState;
   failures: number;
   openedAt: number;
-  /** HALF_OPEN single-probe lock: only the holder gets allow:true, probe:true. */
-  inFlightProbe: boolean;
+  /** HALF_OPEN single-probe ownership; only the holder may release it. */
+  probeToken: symbol | null;
 }
 
 const CIRCUIT_OPEN = "circuit_open";
@@ -79,7 +81,7 @@ const ALLOW: AttemptDecision = { allow: true, probe: false };
 const PROBE: AttemptDecision = { allow: true, probe: true };
 
 function freshEntry(): ModelEntry {
-  return { state: "CLOSED", failures: 0, openedAt: 0, inFlightProbe: false };
+  return { state: "CLOSED", failures: 0, openedAt: 0, probeToken: null };
 }
 
 export function createCircuitBreaker(deps: BreakerDeps): CircuitBreaker {
@@ -98,13 +100,13 @@ export function createCircuitBreaker(deps: BreakerDeps): CircuitBreaker {
   function reset(e: ModelEntry): void {
     e.state = "CLOSED";
     e.failures = 0;
-    e.inFlightProbe = false;
+    e.probeToken = null;
   }
 
   function trip(e: ModelEntry): void {
     e.state = "OPEN";
     e.openedAt = now();
-    e.inFlightProbe = false;
+    e.probeToken = null;
   }
 
   return {
@@ -118,16 +120,16 @@ export function createCircuitBreaker(deps: BreakerDeps): CircuitBreaker {
             // A probe is already in flight — everyone else is skipped. If the
             // lock was released without resolution (e.g. after an abort), the
             // next caller may acquire it for a fresh probe.
-            if (e.inFlightProbe) return SKIP;
-            e.inFlightProbe = true;
-            return PROBE;
+            if (e.probeToken !== null) return SKIP;
+            e.probeToken = Symbol(model);
+            return { ...PROBE, probeToken: e.probeToken };
           case "OPEN": {
             if (now() - e.openedAt < config.cooldownMs) return SKIP;
             // Cooldown elapsed — grab the probe lock and transition to HALF_OPEN.
             // (Single-threaded JS: the first synchronous caller wins the lock.)
             e.state = "HALF_OPEN";
-            e.inFlightProbe = true;
-            return PROBE;
+            e.probeToken = Symbol(model);
+            return { ...PROBE, probeToken: e.probeToken };
           }
           default:
             return ALLOW;
@@ -170,15 +172,16 @@ export function createCircuitBreaker(deps: BreakerDeps): CircuitBreaker {
       }
     },
 
-    recordAbort(model) {
+    recordAbort(model, probeToken) {
       try {
         // Non-provider fault: record neither failure nor success. Release the probe
-        // lock so HALF_OPEN never deadlocks into a phantom OPEN — but ONLY when actually
-        // HALF_OPEN (the only state that holds a lock). Clearing it in CLOSED/OPEN is a
-        // no-op today (trip/reset already cleared it); gating keeps a stray abort from
-        // ever releasing a lock it doesn't own if the state model grows (review M4).
+        // lock so HALF_OPEN never deadlocks into a phantom OPEN — but only for the
+        // probe owner. A stale CLOSED request may finish after a newer probe starts;
+        // accepting an unowned abort would release that newer request's lock.
         const e = get(model);
-        if (e.state === "HALF_OPEN") e.inFlightProbe = false;
+        if (e.state === "HALF_OPEN" && probeToken !== undefined && e.probeToken === probeToken) {
+          e.probeToken = null;
+        }
       } catch {
         // fail-open.
       }

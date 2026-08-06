@@ -6925,7 +6925,7 @@ describe("createExecute — HALF_OPEN probe lock release", () => {
     const probeOut = await mk()(plan([alias, fallback]), req());
     expect(probeOut.final.status).toBe("ok");
     expect(recordFailure).not.toHaveBeenCalledWith(alias);
-    expect(recordAbort).toHaveBeenCalledWith(alias);
+    expect(recordAbort).toHaveBeenCalledWith(alias, expect.any(Symbol));
     // Design lock: abort releases the probe lock WITHOUT re-OPENing. Re-trip would
     // punish a healthy alias for a per-account throttle (the reason recordFailure is
     // skipped). Staying HALF_OPEN lets the next request re-probe immediately.
@@ -6988,7 +6988,7 @@ describe("createExecute — HALF_OPEN probe lock release", () => {
     const toolReq = req({ tools: [{ type: "function" }] });
     const probeOut = await mk()(plan([alias, fallback]), toolReq);
     expect(probeOut.attempts[0]?.skip_reason).toBe("no_tool_support");
-    expect(recordAbort).toHaveBeenCalledWith(alias);
+    expect(recordAbort).toHaveBeenCalledWith(alias, expect.any(Symbol));
 
     // Without tools, the same alias must not still be circuit_open from a leaked probe.
     const plain = await mk()(plan([alias, fallback]), req());
@@ -7024,7 +7024,7 @@ describe("createExecute — HALF_OPEN probe lock release", () => {
     const out = await mk()(plan([alias, fallback]), req());
     expect(out.attempts[0]?.skip_reason).toBe("free_429");
     expect(recordFailure).not.toHaveBeenCalledWith(alias);
-    expect(recordAbort).toHaveBeenCalledWith(alias);
+    expect(recordAbort).toHaveBeenCalledWith(alias, expect.any(Symbol));
 
     const next = await mk()(plan([alias, fallback]), req());
     expect(next.attempts[0]?.skip_reason).not.toBe("circuit_open");

@@ -7,12 +7,13 @@
 
 ---
 
-## 2026-08-06 · HALF_OPEN 探测锁泄漏导致 alias 永久 circuit_open（Provider execution / circuit breaker，docs/02/04，原则 3/5）
+## 2026-08-06 · HALF_OPEN 探测锁：释放路径 + 探针所有权令牌（Provider execution / circuit breaker，docs/02/04，原则 3/5）
 
 - **现场**：`anthropic/claude-opus-4-8` 连续数小时 `skip_reason=circuit_open`（0ms），同 Anthropic OAuth 池的 haiku/sonnet 仍正常；账号配额未 limited。请求 `5c27cf5d…` 正确 fallback 到 `openai-codex/gpt-5.6-sol`。
-- **根因**：`canAttempt` 在 cooldown 结束后把 alias 置 `HALF_OPEN` 并持有 `inFlightProbe`。随后路径若**故意不** `recordFailure`（OAuth 账号级 429/401/403、capability/protocol skip、`free_429`、context overflow 等）也**不** `recordAbort`，锁永不释放 → 后续全部 `circuit_open`。生产序列：`no schedulable account`×5 打开 OPEN → HALF_OPEN probe 撞 429（account-scoped，跳过 failure）→ 锁卡死。
-- **修复**：`execute.ts` 在 `canAttempt` allow 后用 `settleBreaker` + `try/finally`：任何未 success/failure/abort 的退出都 `recordAbort` 释放探测锁；OAuth 账号级故障仍不计 alias failure。ops 侧已 `docker restart helm` 清内存状态。
-- **测试**：新增 3 个 HALF_OPEN 用例（OAuth 429 / capability skip / free_429）。不改 breaker 默认阈值（5 / 30s）。
+- **根因 1（#698）**：`canAttempt` 在 cooldown 后置 `HALF_OPEN` 并持锁；随后路径故意不 `recordFailure`（OAuth 账号级 429/401/403、capability skip、`free_429` 等）也未 `recordAbort` → 锁永不释放。
+- **根因 2（#700 加固）**：无主的 `recordAbort(model)` 会释放**任意** in-flight probe。若 CLOSED 请求晚结束，而新 probe 已启动，旧 abort 会误清新 probe 的锁，或相反地形成竞态。
+- **修复**：`execute.ts` / `image-chain.ts` 在 allow 后 `settleBreaker` + `try/finally`（或等价显式 release）；`recordAbort(model, probeToken?)` 仅当 `probeToken` 与 entry 匹配时清锁；`canAttempt` 对 probe 返回 opaque `probeToken`。
+- **测试**：HALF_OPEN OAuth 429 / capability / free_429；breaker 单测「stale CLOSED abort 不释放新 probe」；image-chain invalid-request / capability 恢复。阈值仍 5 / 30s。
 
 ## 2026-08-04 · 修复 per-key 请求内容存储覆盖的优先级回归（Gateway / Telemetry，docs/06/07/11，原则 2/7）
 

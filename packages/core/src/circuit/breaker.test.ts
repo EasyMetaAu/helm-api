@@ -76,7 +76,9 @@ describe("createCircuitBreaker", () => {
     const { breaker, clock } = makeBreaker();
     fail(breaker, "m", config.failureThreshold);
     clock.advance(config.cooldownMs);
-    expect(breaker.canAttempt("m")).toEqual({ allow: true, probe: true });
+    const probe = breaker.canAttempt("m");
+    expect(probe).toMatchObject({ allow: true, probe: true });
+    expect(probe.probeToken).toBeTypeOf("symbol");
     expect(breaker.getState("m")).toBe("HALF_OPEN");
   });
 
@@ -85,7 +87,8 @@ describe("createCircuitBreaker", () => {
     fail(breaker, "m", config.failureThreshold);
     clock.advance(config.cooldownMs);
     const first = breaker.canAttempt("m");
-    expect(first).toEqual({ allow: true, probe: true });
+    expect(first).toMatchObject({ allow: true, probe: true });
+    expect(first.probeToken).toBeTypeOf("symbol");
     // Second concurrent attempt while probe in flight is treated as OPEN.
     expect(breaker.canAttempt("m")).toEqual({
       allow: false,
@@ -99,7 +102,8 @@ describe("createCircuitBreaker", () => {
     const { breaker, clock } = makeBreaker();
     fail(breaker, "m", config.failureThreshold);
     clock.advance(config.cooldownMs);
-    breaker.canAttempt("m"); // acquire probe
+    const probe = breaker.canAttempt("m"); // acquire probe
+    expect(probe.probeToken).toBeTypeOf("symbol");
     breaker.recordSuccess("m");
     expect(breaker.getState("m")).toBe("CLOSED");
     // Lock released, counter cleared -> allows again.
@@ -113,7 +117,8 @@ describe("createCircuitBreaker", () => {
     const { breaker, clock } = makeBreaker();
     fail(breaker, "m", config.failureThreshold);
     clock.advance(config.cooldownMs);
-    breaker.canAttempt("m"); // HALF_OPEN, acquire probe
+    const probe = breaker.canAttempt("m"); // HALF_OPEN, acquire probe
+    expect(probe.probeToken).toBeTypeOf("symbol");
     breaker.recordFailure("m"); // probe fails
     expect(breaker.getState("m")).toBe("OPEN");
     // Cooldown origin refreshed at the time of probe failure: still OPEN now.
@@ -124,7 +129,7 @@ describe("createCircuitBreaker", () => {
     });
     // After a fresh full cooldown a new probe is permitted (lock was released).
     clock.advance(config.cooldownMs);
-    expect(breaker.canAttempt("m")).toEqual({ allow: true, probe: true });
+    expect(breaker.canAttempt("m")).toMatchObject({ allow: true, probe: true });
   });
 
   it("8. failure-before-first-chunk / success-after contract", () => {
@@ -154,12 +159,39 @@ describe("createCircuitBreaker", () => {
 
     // abort while HALF_OPEN holding the probe lock must release it (no deadlock).
     clock.advance(config.cooldownMs);
-    expect(breaker.canAttempt("m")).toEqual({ allow: true, probe: true });
+    const probe = breaker.canAttempt("m");
+    expect(probe).toMatchObject({ allow: true, probe: true });
+    expect(probe.probeToken).toBeTypeOf("symbol");
     expect(breaker.getState("m")).toBe("HALF_OPEN");
-    breaker.recordAbort("m");
+    breaker.recordAbort("m", probe.probeToken);
     // Lock released -> another probe can be acquired (still HALF_OPEN, not reset
     // to OPEN since abort is not a fault).
-    expect(breaker.canAttempt("m")).toEqual({ allow: true, probe: true });
+    expect(breaker.canAttempt("m")).toMatchObject({ allow: true, probe: true });
+  });
+
+  it("does not let a stale CLOSED attempt release a later HALF_OPEN probe", () => {
+    const { breaker, clock } = makeBreaker();
+    const ordinaryAttempt = breaker.canAttempt("m");
+    expect(ordinaryAttempt).toEqual({ allow: true, probe: false });
+
+    fail(breaker, "m", config.failureThreshold);
+    clock.advance(config.cooldownMs);
+    const probe = breaker.canAttempt("m");
+    expect(probe).toMatchObject({ allow: true, probe: true });
+    expect(probe.probeToken).toBeTypeOf("symbol");
+
+    // The old CLOSED request finishes after a newer request acquired the probe.
+    // Its missing token must not release a lock that it never owned.
+    breaker.recordAbort("m", ordinaryAttempt.probeToken);
+    expect(breaker.canAttempt("m")).toEqual({
+      allow: false,
+      probe: false,
+      reason: "circuit_open",
+    });
+
+    // The actual probe owner can release its lock and let the next probe in.
+    breaker.recordAbort("m", probe.probeToken);
+    expect(breaker.canAttempt("m")).toMatchObject({ allow: true, probe: true });
   });
 
   it("10. per-model isolation — model A OPEN does not affect model B", () => {
@@ -181,7 +213,7 @@ describe("createCircuitBreaker", () => {
     // 1ms later the ORIGINAL cooldown elapses → a probe is allowed. If the stray failure
     // had reset openedAt, this would still be SKIP and the breaker would never recover.
     clock.advance(1);
-    expect(breaker.canAttempt("m")).toEqual({ allow: true, probe: true });
+    expect(breaker.canAttempt("m")).toMatchObject({ allow: true, probe: true });
   });
 
   it("fail-open: an internal fault degrades to allow:true (treated as CLOSED)", () => {

@@ -296,6 +296,58 @@ describe("createExecute — circuit-open skip is transient (not capability_unsat
     }
     expect(provider.chatCompletion).not.toHaveBeenCalled();
   });
+
+  it("releases a HALF_OPEN probe lock when the probe request is capability-skipped (no permanent circuit_open)", async () => {
+    // Production bug: canAttempt() acquires the single-probe lock (OPEN → HALF_OPEN),
+    // then a later capability gate continues without recordAbort/Success/Failure.
+    // The lock stays held forever → every subsequent request sees circuit_open until
+    // process restart. A real breaker + capability prune must release the probe.
+    let t = 0;
+    const cb = createCircuitBreaker({
+      config: { failureThreshold: 5, cooldownMs: 1000 },
+      now: () => t,
+    });
+    for (let i = 0; i < 5; i++) cb.recordFailure("a");
+    expect(cb.getState("a")).toBe("OPEN");
+    t = 1000; // cooldown elapsed → next canAttempt becomes the probe
+
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "from-b" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ a: "m-a", b: "m-b" }),
+      breaker: cb,
+      catalog: new Map([
+        [
+          "a",
+          noToolsEntry("a"), // tools request → capability skip on the probe candidate
+        ],
+      ]),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const toolsReq = req({
+      tools: [{ type: "function", function: { name: "f", parameters: {} } }],
+    });
+    const first = await execute(plan(["a", "b"]), toolsReq);
+    expect(first.attempts[0]?.skip_reason).toBe("no_tool_support");
+    expect(first.final.status).toBe("ok");
+    // Probe must NOT stay locked forever. Capability skip releases the lock while
+    // leaving HALF_OPEN so the next real request can re-acquire the probe.
+    // Do NOT call canAttempt() here — that would steal the probe from the next execute.
+    expect(cb.getState("a")).toBe("HALF_OPEN");
+
+    const second = await execute(plan(["a"]), req()); // no tools → capability ok
+    expect(second.attempts[0]?.skip_reason).not.toBe("circuit_open");
+    expect(second.final.status).toBe("ok");
+    if (second.final.status === "ok") expect(second.final.alias).toBe("a");
+    expect(cb.getState("a")).toBe("CLOSED");
+    expect(provider.chatCompletion).toHaveBeenCalled();
+  });
 });
 
 describe("createExecute — error_detail provider_raw wrapping", () => {
