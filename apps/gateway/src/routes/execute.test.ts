@@ -6856,6 +6856,181 @@ describe("createExecute — onOAuthSubscription429 (auto-park)", () => {
   });
 });
 
+// HALF_OPEN probe lock must be released on every non-success exit after canAttempt
+// allowed the alias. Production incident 2026-08-06: OAuth 429 skipped recordFailure
+// (correct — account-scoped) but never recordAbort, so inFlightProbe stayed true and
+// anthropic/claude-opus-4-8 returned circuit_open for hours while other Anthropic
+// models served fine. Same leak exists for post-canAttempt capability/protocol skips
+// and other "do not trip breaker" continues.
+describe("createExecute — HALF_OPEN probe lock release", () => {
+  const rejects = (err: unknown) =>
+    ({
+      chatCompletion: vi.fn().mockRejectedValue(err),
+      chatCompletionStream: vi.fn(),
+    }) as unknown as ProviderClient;
+  const resolves = (body: unknown = { id: "ok" }) =>
+    ({
+      chatCompletion: vi.fn().mockResolvedValue(body),
+      chatCompletionStream: vi.fn(),
+    }) as unknown as ProviderClient;
+
+  function openThenCooldownElapsed(alias: string): {
+    cb: CircuitBreaker;
+    now: () => number;
+  } {
+    let t = 0;
+    const now = () => t;
+    // cooldownMs=1000 matches breaker(); advance past cooldown after tripping.
+    const cb = createCircuitBreaker({
+      config: { failureThreshold: 5, cooldownMs: 1000 },
+      now,
+    });
+    for (let i = 0; i < 5; i += 1) cb.recordFailure(alias);
+    expect(cb.getState(alias)).toBe("OPEN");
+    t = 1000; // cooldown elapsed → next canAttempt becomes HALF_OPEN probe
+    return { cb, now };
+  }
+
+  it("releases the probe lock when a HALF_OPEN OAuth probe hits account-scoped 429 (no recordFailure)", async () => {
+    const alias = "anthropic/claude-opus-4-8";
+    const fallback = "openai-codex/gpt-5.6-sol";
+    const { cb, now } = openThenCooldownElapsed(alias);
+    const recordAbort = vi.spyOn(cb, "recordAbort");
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const oauth429 = rejects(
+      new UpstreamError("upstream_error", "upstream returned 429", null, 429),
+    );
+    const ok = resolves({ id: "fallback-ok" });
+    const mk = () =>
+      createExecute({
+        defaultProvider: ok,
+        providers: new Map([
+          ["anthropic", oauth429],
+          ["openai-codex", ok],
+        ]),
+        knownOAuthPrefixes: new Set(["anthropic", "openai-codex"]),
+        oauthAliases: () => new Set([alias, fallback]),
+        registry: registryWithProviders({
+          [alias]: { providerName: "anthropic", providerModel: "claude-opus-4-8" },
+          [fallback]: { providerName: "openai-codex", providerModel: "gpt-5.6-sol" },
+        }),
+        breaker: cb,
+        catalog: new Map(),
+        now,
+        signal: new AbortController().signal,
+      });
+
+    // Probe request: 429 is account-scoped → must NOT recordFailure, MUST recordAbort
+    // so the alias does not stay stuck HALF_OPEN forever.
+    const probeOut = await mk()(plan([alias, fallback]), req());
+    expect(probeOut.final.status).toBe("ok");
+    expect(recordFailure).not.toHaveBeenCalledWith(alias);
+    expect(recordAbort).toHaveBeenCalledWith(alias);
+    // Design lock: abort releases the probe lock WITHOUT re-OPENing. Re-trip would
+    // punish a healthy alias for a per-account throttle (the reason recordFailure is
+    // skipped). Staying HALF_OPEN lets the next request re-probe immediately.
+    expect(cb.getState(alias)).toBe("HALF_OPEN");
+
+    // Next request must be allowed to attempt Anthropic again (not permanent circuit_open).
+    const next = await mk()(plan([alias, fallback]), req());
+    expect(next.attempts[0]?.alias).toBe(alias);
+    expect(next.attempts[0]?.skip_reason).not.toBe("circuit_open");
+    expect(
+      (oauth429 as unknown as { chatCompletion: ReturnType<typeof vi.fn> }).chatCompletion.mock
+        .calls.length,
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("releases the probe lock when a HALF_OPEN candidate is skipped by capability after canAttempt", async () => {
+    const alias = "anthropic/claude-opus-4-8";
+    const fallback = "mock/ok";
+    const { cb, now } = openThenCooldownElapsed(alias);
+    const recordAbort = vi.spyOn(cb, "recordAbort");
+    const ok = resolves({ id: "fallback-ok" });
+    // Force tools capability miss so checkCapability skips after canAttempt allowed the probe.
+    const noTools: CatalogEntry = {
+      modelKey: alias,
+      capabilities: {
+        supportsTools: false,
+        jsonOutput: "schema",
+        supportsVision: true,
+        supportsStreaming: true,
+        maxContextTokens: 100000,
+        maxOutputTokens: 4096,
+      },
+      pricing: {
+        inputPerMTokUsd: null,
+        outputPerMTokUsd: null,
+        cacheReadPerMTokUsd: null,
+        cacheWritePerMTokUsd: null,
+      },
+      source: "generated",
+    };
+    const mk = () =>
+      createExecute({
+        defaultProvider: ok,
+        providers: new Map([
+          ["anthropic", ok],
+          ["mock", ok],
+        ]),
+        knownOAuthPrefixes: new Set(["anthropic"]),
+        oauthAliases: () => new Set([alias]),
+        registry: registryWithProviders({
+          [alias]: { providerName: "anthropic", providerModel: "claude-opus-4-8" },
+          [fallback]: { providerName: "mock", providerModel: "ok" },
+        }),
+        breaker: cb,
+        catalog: new Map([[alias, noTools]]),
+        now,
+        signal: new AbortController().signal,
+      });
+
+    const toolReq = req({ tools: [{ type: "function" }] });
+    const probeOut = await mk()(plan([alias, fallback]), toolReq);
+    expect(probeOut.attempts[0]?.skip_reason).toBe("no_tool_support");
+    expect(recordAbort).toHaveBeenCalledWith(alias);
+
+    // Without tools, the same alias must not still be circuit_open from a leaked probe.
+    const plain = await mk()(plan([alias, fallback]), req());
+    expect(plain.attempts[0]?.skip_reason).not.toBe("circuit_open");
+    expect(plain.final.status).toBe("ok");
+  });
+
+  it("releases the probe lock on free-tier 429 continue (no recordFailure)", async () => {
+    const alias = "openrouter/free-model:free";
+    const fallback = "mock/ok";
+    const { cb, now } = openThenCooldownElapsed(alias);
+    const recordAbort = vi.spyOn(cb, "recordAbort");
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const free429 = rejects(new UpstreamError("upstream_error", "rate limited", null, 429));
+    const ok = resolves({ id: "ok" });
+    const mk = () =>
+      createExecute({
+        defaultProvider: ok,
+        providers: new Map([
+          ["mock", free429],
+          ["mock-ok", ok],
+        ]),
+        registry: registryWithProviders({
+          [alias]: { providerName: "mock", providerModel: "free-model" },
+          [fallback]: { providerName: "mock-ok", providerModel: "ok" },
+        }),
+        breaker: cb,
+        catalog: new Map(),
+        now,
+        signal: new AbortController().signal,
+      });
+
+    const out = await mk()(plan([alias, fallback]), req());
+    expect(out.attempts[0]?.skip_reason).toBe("free_429");
+    expect(recordFailure).not.toHaveBeenCalledWith(alias);
+    expect(recordAbort).toHaveBeenCalledWith(alias);
+
+    const next = await mk()(plan([alias, fallback]), req());
+    expect(next.attempts[0]?.skip_reason).not.toBe("circuit_open");
+  });
+});
+
 // ── Additional branch-coverage tests ────────────────────────────────────────
 
 describe("createExecute — empty candidate chain", () => {

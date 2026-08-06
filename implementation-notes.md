@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-08-06 · HALF_OPEN 探测锁泄漏导致 alias 永久 circuit_open（Provider execution / circuit breaker，docs/02/04，原则 3/5）
+
+- **现场**：`anthropic/claude-opus-4-8` 连续数小时 `skip_reason=circuit_open`（0ms），同 Anthropic OAuth 池的 haiku/sonnet 仍正常；账号配额未 limited。请求 `5c27cf5d…` 正确 fallback 到 `openai-codex/gpt-5.6-sol`。
+- **根因**：`canAttempt` 在 cooldown 结束后把 alias 置 `HALF_OPEN` 并持有 `inFlightProbe`。随后路径若**故意不** `recordFailure`（OAuth 账号级 429/401/403、capability/protocol skip、`free_429`、context overflow 等）也**不** `recordAbort`，锁永不释放 → 后续全部 `circuit_open`。生产序列：`no schedulable account`×5 打开 OPEN → HALF_OPEN probe 撞 429（account-scoped，跳过 failure）→ 锁卡死。
+- **修复**：`execute.ts` 在 `canAttempt` allow 后用 `settleBreaker` + `try/finally`：任何未 success/failure/abort 的退出都 `recordAbort` 释放探测锁；OAuth 账号级故障仍不计 alias failure。ops 侧已 `docker restart helm` 清内存状态。
+- **测试**：新增 3 个 HALF_OPEN 用例（OAuth 429 / capability skip / free_429）。不改 breaker 默认阈值（5 / 30s）。
+
 ## 2026-08-04 · 修复 per-key 请求内容存储覆盖的优先级回归（Gateway / Telemetry，docs/06/07/11，原则 2/7）
 
 - **回归根因**：`withRequestContentMode`（payload-capture.ts）自 PR #677（`52bb5f9b`，v0.28.29）起把 key 覆盖包在 `globallyEnabled() && …` 内——全局关闭即成 hard-off，强制所有 key 关闭，与 #675 承诺的“key 显式值 > 全局值”完全相反。测试也被同步改成断言这个错误语义，故 CI 一直绿。生产实测：WW 落库 `request_content_mode='payload'` 但全局关闭后 38 个请求全部无 payload。
@@ -75,14 +82,9 @@
 - **回滚兼容**：fallback 沿用旧版已接受的通用 `session-id` 持久化来源，不新增 DecisionRecord 枚举值；内部 ref 使用独立 `request_id` 哈希域，外部 ID 使用客户端不可占用的 `helm-request:` 保留前缀加请求哈希，避免与真实 `session-id` 的 ref 或数据库唯一键碰撞。v0.28.26 回滚后仍能读取新版写入的遥测记录。
 - **边界**：单次请求/响应仍受进程动态 capture-body 内存预算保护，避免一个在途正文直接造成 OOM；10,000 revision 计数上限与既有 retention cleanup 保持不变。本次不补写已经漏掉的历史 revision，因为正文未保存时无法可靠恢复。生产必须切换到 `capture_sessions=true`、`capture_payloads=false` 才会使用该增量模式。
 
-## 2026-07-31 · 请求列表记录并显示客户端正文大小（Telemetry / Admin requests，docs/07/11，原则 1/7）
-
-- **计量口径**：新增可选 `request_body_bytes`，记录网关实际收到的客户端请求正文 UTF-8 字节数；不信任可能缺失或经过 transfer encoding 的 `Content-Length`，也不以字符数、Token 数、压缩后存储量或转换后的上游正文替代。该数字随脱敏 `DecisionRecord` 保存，不受正文捕获开关影响，不保存正文，因此无需 SQLite/Postgres 迁移。
-- **协议边界**：共享记录路径覆盖 Responses、Messages、Gemini、Interactions 与 Images，OpenAI Chat 和 Admin Replay 的独立写入路径显式补齐；multipart 图片使用原始 wire bytes 覆盖其后生成的元数据 JSON 大小。尚不产生 `DecisionRecord` 的预路由拒绝、count-tokens 与 Realtime 请求不伪造该指标。
-- **兼容与展示**：Admin 共享请求表按二进制阈值显示 `B / KB / MB`；旧记录不回填并显示 `—`，避免读取或扫描历史私密正文。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-31 · 请求列表记录并显示客户端正文大小**：新增可选 `request_body_bytes`（客户端 wire UTF-8 字节，非 Content-Length/token/压缩量），随脱敏 DecisionRecord 保存；Admin 表按 B/KB/MB 展示，旧记录显示 `—`；完整原文通过 git history 回溯。
 - **2026-07-29 · 生产韧性：持续小批清理 + 无丢弃背压 + 执行 Token 租约 + 完整错误诊断**：SQLite retention 每批≤10 行让出事件循环、Session prune claim 可续；写队列删除 OOM shedding 改统一串行 admission 背压 FIFO；OAuth 保存真实 `expires`、执行 client 6 分钟提前刷新、刷新失败重读共享 Store 只用他实例轮换出的有效 credential；Provider 错误有界诊断（64 KiB body / 128 KiB 总预算），完整原文通过 git history 回溯。
 - **2026-07-28 · 删除 HTTP 与 WebSocket 请求大小上限**：删除应用与 Remote Nginx 固定正文上限，继续由动态内存准入、鉴权、schema、maintenance drain 和 provider timeout 保护运行时；完整原文通过 git history回溯。
 - **2026-07-28 · preflight/registry 内存放大与自动 VACUUM 空闲门禁**：Responses preflight 增加 deadline/abort，catalog 与 registry 改为有界热路径；自动 VACUUM 仅在空闲 drain 后执行，完整原文通过 git history 回溯。

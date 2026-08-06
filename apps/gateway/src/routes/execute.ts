@@ -1647,6 +1647,14 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       // must still back the alias off + half-open-probe. Per-account faults never reach
       // here — the pool absorbs them, and the recordFailure skip below keeps the rare
       // surfaced one off the breaker.
+      //
+      // canAttempt may grab the HALF_OPEN probe lock. Every exit from this candidate
+      // after allow:true MUST settle the breaker (success / failure / abort). Paths that
+      // intentionally skip recordFailure (OAuth account-scoped 429, capability skip after
+      // the gate, free_429, context overflow, …) still release the probe via recordAbort;
+      // otherwise inFlightProbe stays true and the alias returns circuit_open forever
+      // (prod 2026-08-06: anthropic/claude-opus-4-8 stuck for hours while other Anthropic
+      // models kept serving).
       const gate = breaker.canAttempt(alias);
       if (!gate.allow) {
         circuitSkipped = true;
@@ -1654,369 +1662,148 @@ export function createExecute(deps: ExecuteAdapterDeps) {
         attempts.push(skipRow(alias, gate.reason ?? "circuit_open", elapsed()));
         continue;
       }
+      let breakerSettled = false;
+      const settleBreaker = (kind: "success" | "failure" | "abort"): void => {
+        if (kind === "success") breaker.recordSuccess(alias);
+        else if (kind === "failure") breaker.recordFailure(alias);
+        else breaker.recordAbort(alias);
+        breakerSettled = true;
+      };
 
-      // 2) Capability filter. Missing catalog data remains fail-open for generic
-      // requests, but not for cached_content: that field is a required Gemini/LiteLLM
-      // cached context handle, not an optional affinity hint.
-      const catalogEntry = xaiCatalogEntry(alias, providerModel);
-      const caps = catalogEntry?.capabilities;
-      const exactContextLimit = effectiveContextLimit(catalogEntry, providerModel);
-      const canUseExactContextPreflight =
-        target.targetProviderProtocol === "anthropic_messages" &&
-        req.native_request !== undefined &&
-        provider.countTokens !== undefined &&
-        exactContextLimit !== null;
-      if (!caps && isOAuthSubscriptionAlias(alias) && alias.startsWith("xai/")) {
-        capabilityPruned = true;
-        attempts.push(skipRow(alias, "capability_metadata_missing", elapsed()));
-        continue;
-      }
-      if (!caps && needsCachedContent) {
-        capabilityPruned = true;
-        attempts.push(skipRow(alias, "no_cached_content_support", elapsed()));
-        continue;
-      }
-      if (caps) {
-        const estimatedPromptTokens = approxPromptTokens(req);
-        const verdict = checkCapability(caps, {
-          needsTools: Array.isArray(req.tools) && req.tools.length > 0,
-          needsJson: isJson(req.response_format),
-          needsResponseSchema: isJsonSchema(req.response_format),
-          needsVision:
-            (Array.isArray(req.attachments) && req.attachments.length > 0) || reqModalities.image,
-          needsStreaming: req.stream,
-          needsCachedContent,
-          // Prefer Anthropic's exact native count when available. Passing zero only
-          // defers the approximate input gate; max_tokens and every other capability
-          // check still run here.
-          estimatedPromptTokens: canUseExactContextPreflight ? 0 : estimatedPromptTokens,
-          maxTokens: req.max_tokens,
-          needsAudio: reqModalities.audio,
-          needsVideo: reqModalities.video,
-          needsDocument: reqModalities.document,
-        });
-        if (!verdict.ok) {
+      try {
+        // 2) Capability filter. Missing catalog data remains fail-open for generic
+        // requests, but not for cached_content: that field is a required Gemini/LiteLLM
+        // cached context handle, not an optional affinity hint.
+        const catalogEntry = xaiCatalogEntry(alias, providerModel);
+        const caps = catalogEntry?.capabilities;
+        const exactContextLimit = effectiveContextLimit(catalogEntry, providerModel);
+        const canUseExactContextPreflight =
+          target.targetProviderProtocol === "anthropic_messages" &&
+          req.native_request !== undefined &&
+          provider.countTokens !== undefined &&
+          exactContextLimit !== null;
+        if (!caps && isOAuthSubscriptionAlias(alias) && alias.startsWith("xai/")) {
           capabilityPruned = true;
-          if (verdict.skipReason === "context_too_small") {
-            const limit = exactContextLimit ?? caps.maxContextTokens;
-            const estimatedTotal = estimatedPromptTokens + (req.max_tokens ?? 0);
-            rememberContextOverflow(
-              `prompt is too long: ${Math.trunc(estimatedTotal)} tokens > ${Math.trunc(
-                limit,
-              )} maximum`,
-              null,
-            );
-          }
-          attempts.push(skipRow(alias, verdict.skipReason ?? "capability", elapsed()));
+          attempts.push(skipRow(alias, "capability_metadata_missing", elapsed()));
           continue;
         }
-      }
-
-      const protocolSkip = protocolGuardSkipReason(req, target.targetProviderProtocol);
-      if (protocolSkip !== null) {
-        capabilityPruned = true;
-        attempts.push(skipRow(alias, protocolSkip, elapsed()));
-        continue;
-      }
-
-      const candidateSkip = candidateGuardSkipReason(req, target, alias);
-      if (candidateSkip !== null) {
-        capabilityPruned = true;
-        attempts.push(skipRow(alias, candidateSkip, elapsed()));
-        continue;
-      }
-
-      // Native protocol passthrough decision for THIS attempt (issue #217), computed
-      // before the Anthropic count_tokens preflight so visual compression can reduce
-      // an over-window native request before we decide to skip the candidate.
-      const passthrough = decideNativePassthroughForAttempt({
-        req,
-        target,
-        enabled: nativeProtocolPassthroughEnabled?.() === true,
-      });
-      if (req.provider_raw?.generate === false && !passthrough.passthrough_used) {
-        capabilityPruned = true;
-        attempts.push(
-          skipRow(alias, "responses_generate_false_requires_native_passthrough", elapsed()),
-        );
-        continue;
-      }
-      let visualCompressionMutation: VisualContextCompressionMutation | undefined;
-      let optimizedNativeBody: Record<string, unknown> | null = null;
-      const optimizeAnthropicBodyForAttempt = async (
-        body: Record<string, unknown>,
-      ): Promise<Record<string, unknown>> => {
-        if (target.targetProviderProtocol !== "anthropic_messages") return body;
-        try {
-          const optimized = await visualContextCompressor({
-            mode: visualContextCompressionMode?.() ?? "off",
-            targetProviderProtocol: target.targetProviderProtocol,
-            model: providerModel,
-            body,
-            capabilities: caps,
-            requestId: req.request_id,
-          });
-          visualCompressionMutation = optimized.mutation;
-          return optimized.body;
-        } catch (err) {
-          log?.("warn", "visual_context_compression.failed_open", {
-            alias,
-            error_class: errorClassOf(err),
-          });
-          return body;
+        if (!caps && needsCachedContent) {
+          capabilityPruned = true;
+          attempts.push(skipRow(alias, "no_cached_content_support", elapsed()));
+          continue;
         }
-      };
-      const optimizeNativeBodyForAttempt = async (
-        input: NativePassthroughCarrier | Record<string, unknown>,
-      ): Promise<NativePassthroughCarrier | Record<string, unknown>> => {
-        if (!passthrough.passthrough_used) return input;
-        const body = nativePassthroughBody(input);
-        if (optimizedNativeBody === null) {
-          optimizedNativeBody = await optimizeAnthropicBodyForAttempt(body);
-        }
-        return isNativePassthroughCarrier(input)
-          ? cloneCarrierWithBody(input, optimizedNativeBody)
-          : optimizedNativeBody;
-      };
-
-      if (
-        target.targetProviderProtocol === "anthropic_messages" &&
-        req.native_request !== undefined &&
-        provider.countTokens !== undefined &&
-        exactContextLimit !== null
-      ) {
-        try {
-          const countInput = prepareNativeRequestForUpstream(
-            { ...nativePassthroughBody(req.native_request) },
-            providerModel,
-            req.protocol,
-            false,
-            provider.nativeProtocolProfile,
-            req.reasoning_effort_forced === true ? req.reasoning_effort : undefined,
-            caps,
-            req.reasoning_effort,
-          );
-          const optimizedCountInput = await optimizeNativeBodyForAttempt(countInput);
-          const countBody = { ...nativePassthroughBody(optimizedCountInput) };
-          delete countBody.stream;
-          const tokenCount = await provider.countTokens(countBody, { signal });
-          const inputTokens = countTokensInputTokens(tokenCount);
-          if (inputTokens !== null && inputTokens > exactContextLimit) {
+        if (caps) {
+          const estimatedPromptTokens = approxPromptTokens(req);
+          const verdict = checkCapability(caps, {
+            needsTools: Array.isArray(req.tools) && req.tools.length > 0,
+            needsJson: isJson(req.response_format),
+            needsResponseSchema: isJsonSchema(req.response_format),
+            needsVision:
+              (Array.isArray(req.attachments) && req.attachments.length > 0) || reqModalities.image,
+            needsStreaming: req.stream,
+            needsCachedContent,
+            // Prefer Anthropic's exact native count when available. Passing zero only
+            // defers the approximate input gate; max_tokens and every other capability
+            // check still run here.
+            estimatedPromptTokens: canUseExactContextPreflight ? 0 : estimatedPromptTokens,
+            maxTokens: req.max_tokens,
+            needsAudio: reqModalities.audio,
+            needsVideo: reqModalities.video,
+            needsDocument: reqModalities.document,
+          });
+          if (!verdict.ok) {
             capabilityPruned = true;
-            rememberContextOverflow(
-              `prompt is too long: ${Math.trunc(inputTokens)} tokens > ${Math.trunc(
-                exactContextLimit,
-              )} maximum`,
-              null,
-              contextConfirmationKey,
-            );
-            attempts.push(skipRow(alias, "context_too_small", elapsed()));
+            if (verdict.skipReason === "context_too_small") {
+              const limit = exactContextLimit ?? caps.maxContextTokens;
+              const estimatedTotal = estimatedPromptTokens + (req.max_tokens ?? 0);
+              rememberContextOverflow(
+                `prompt is too long: ${Math.trunc(estimatedTotal)} tokens > ${Math.trunc(
+                  limit,
+                )} maximum`,
+                null,
+              );
+            }
+            attempts.push(skipRow(alias, verdict.skipReason ?? "capability", elapsed()));
             continue;
           }
-        } catch (err) {
-          log?.("warn", "anthropic.count_tokens_preflight_failed", {
-            alias,
-            error_class: errorClassOf(err),
-            upstream_status: upstreamStatusOf(err),
-          });
         }
-      }
-      // Past the gates → this candidate is attempted against the upstream. A
-      // failure from here on is a PROVIDER fault, not a capability gap.
-      attemptedAny = true;
 
-      let attemptTelemetry: PassthroughTelemetry = passthrough;
+        const protocolSkip = protocolGuardSkipReason(req, target.targetProviderProtocol);
+        if (protocolSkip !== null) {
+          capabilityPruned = true;
+          attempts.push(skipRow(alias, protocolSkip, elapsed()));
+          continue;
+        }
 
-      // 3) Invoke the provider (stream or non-stream). We send the RESOLVED
-      //    provider model (not the originally-requested alias) — the gateway
-      //    picked this model, so the upstream must be told which one to run.
-      try {
-        // Capture sink for the EXACT bytes forwarded upstream (AFTER memory injection +
-        // protocol translation). Each provider fires this just before its HTTP POST with
-        // the serialized provider-native body; the value the SERVED attempt captured
-        // becomes ExecuteOutcome.upstreamRequest. Scoped per candidate (reset each loop).
-        let capturedUpstream: string | null = null;
-        const captureUpstream = (wireBody: string): void => {
-          capturedUpstream = wireBody;
-        };
-        let capturedResponseMetadata: Record<string, string> | undefined;
-        const onResponseMeta = (headers: Headers): void => {
-          capturedResponseMetadata = safeResponseMetadata(headers);
-        };
-        if (req.stream && passthrough.passthrough_used) {
-          // Native STREAMING passthrough (issue #217, Phase 2): forward the client's
-          // VERBATIM native body (which ALREADY carries stream:true) to the upstream and
-          // BYTE-RELAY the upstream SSE back — NO translation. peekStream peeks the first
-          // chunk for the breaker contract (pre-first-chunk failure → recordFailure +
-          // chain advance below; healthy → recordSuccess), only the SOURCE iterable
-          // differs (nativePassthroughStream vs chatCompletionStream). The method +
-          // native body are guaranteed present (the guard's providerSupportsPassthrough
-          // feature-detected nativePassthroughStream, hasNativeRequest proved the body);
-          // narrow defensively for type-safety (unreachable after the guard).
-          const passthroughStream = provider.nativePassthroughStream;
-          const nativeBody = req.native_request;
-          if (!passthroughStream || !nativeBody) {
-            throw new Error(
-              "native streaming passthrough invoked without a native request or client method",
-            );
-          }
-          // Patch ONLY `model` to the RESOLVED upstream id (issue #217): the gateway
-          // chose this provider/model, so the upstream must be told which one to run —
-          // the client's `model` is the routing alias (e.g. `anthropic/claude-…`), not
-          // a real upstream model id. Everything else is forwarded verbatim. Mirrors
-          // stripInternal's `model: providerModel`; without it the upstream 404s.
-          const passthroughBody = await optimizeNativeBodyForAttempt(
-            prepareNativeRequestForUpstream(
-              nativeBody,
-              providerModel,
-              req.protocol,
-              true,
-              provider.nativeProtocolProfile,
-              req.reasoning_effort_forced === true ? req.reasoning_effort : undefined,
-              caps,
-              req.reasoning_effort,
-            ),
-          );
-          if (hasResponsesContinuation(req)) {
-            const mutations = nativePassthroughMutations(passthroughBody);
-            if (mutations) mutations.responses_previous_response_id_native_passthrough = true;
-          }
-          passthrough.passthrough_mutations = nativePassthroughMutations(passthroughBody);
-          attemptTelemetry = withRequestMutations(
-            passthrough,
-            visualCompressionMutationLedger(visualCompressionMutation),
-          );
-          // Pre-output failover guard (principle 5 + 8): a same-protocol byte-relay
-          // that 200s then fails IN-BAND before any output (e.g. Responses
-          // `response.failed`/server_is_overloaded after only the `response.created`
-          // preamble) must fall back, not stream the error as success. The guard
-          // buffers preamble and turns a pre-output error frame into a pre-first-chunk
-          // throw → peekStream records a breaker failure and advances the chain. null
-          // classifier (gemini) → unchanged commit-on-first behavior.
-          const passthroughClassifier = preOutputClassifierFor(req.protocol);
-          const stream = await withAttemptDeadline(
-            req.attempt_timeout_ms,
-            signal,
-            (attemptSignal) =>
-              peekStream(
-                () => {
-                  const raw = passthroughStream(passthroughBody, {
-                    signal: attemptSignal,
-                    ...(req.metadata.stateful_provider_account
-                      ? { statefulAccount: req.metadata.stateful_provider_account }
-                      : {}),
-                    captureUpstream,
-                    onResponseMeta,
-                    toolCallXmlRecovery:
-                      target.targetProviderProtocol === "anthropic_messages" &&
-                      (toolCallXmlRecoveryEnabled?.() ?? true),
-                  });
-                  return passthroughClassifier
-                    ? guardPreOutputFailure(raw, passthroughClassifier)
-                    : raw;
-                },
-                attemptSignal,
-                alias,
-                log,
-              ),
-          );
-          breaker.recordSuccess(alias);
-          // Streamed usage is not known at peek time → cost null, backfilled later.
-          attempts.push(okRow(alias, elapsed(), null, attemptTelemetry));
-          return {
-            attempts,
-            final: { status: "ok", alias, providerModel },
-            body: null,
-            stream,
-            nativePassthrough: true,
-            upstreamRequest: capturedUpstream,
-            responseMetadata: capturedResponseMetadata,
-          };
+        const candidateSkip = candidateGuardSkipReason(req, target, alias);
+        if (candidateSkip !== null) {
+          capabilityPruned = true;
+          attempts.push(skipRow(alias, candidateSkip, elapsed()));
+          continue;
         }
-        if (req.stream) {
-          // Translate stream path (passthrough disabled): the existing byte-for-byte
-          // forward. peekStream opens chatCompletionStream(stripInternal); the row
-          // carries the (used:false) passthrough telemetry. No nativePassthrough marker.
-          const rendered = stripInternal(
-            req,
-            providerModel,
-            target.targetProviderProtocol,
-            caps,
-            target.provider?.nativeProtocolProfile === "generic_openai_responses",
+
+        // Native protocol passthrough decision for THIS attempt (issue #217), computed
+        // before the Anthropic count_tokens preflight so visual compression can reduce
+        // an over-window native request before we decide to skip the candidate.
+        const passthrough = decideNativePassthroughForAttempt({
+          req,
+          target,
+          enabled: nativeProtocolPassthroughEnabled?.() === true,
+        });
+        if (req.provider_raw?.generate === false && !passthrough.passthrough_used) {
+          capabilityPruned = true;
+          attempts.push(
+            skipRow(alias, "responses_generate_false_requires_native_passthrough", elapsed()),
           );
-          // Pre-output failover guard (principle 5 + 8): the translate generators
-          // ALREADY throw on a terminal error frame, but they yield an empty role
-          // preamble chunk first, so peekStream would commit success before the throw.
-          // The guard buffers that preamble so the commit lands on the first REAL
-          // output; a pre-output error (thrown by the generator, or an in-band error
-          // frame) stays a pre-first-chunk failure → fallback. Translate output is
-          // always OpenAI-Chat framed, so the chat classifier is always correct.
-          const translateClassifier = preOutputClassifierFor("openai_chat");
-          const stream = await withAttemptDeadline(
-            req.attempt_timeout_ms,
-            signal,
-            (attemptSignal) =>
-              peekStream(
-                () => {
-                  const raw = provider.chatCompletionStream(rendered.body, {
-                    signal: attemptSignal,
-                    ...(req.metadata.stateful_provider_account
-                      ? { statefulAccount: req.metadata.stateful_provider_account }
-                      : {}),
-                    captureUpstream,
-                    onResponseMeta,
-                    optimizeAnthropicBody: optimizeAnthropicBodyForAttempt,
-                  });
-                  return translateClassifier
-                    ? guardPreOutputFailure(raw, translateClassifier)
-                    : raw;
-                },
-                attemptSignal,
-                alias,
-                log,
-              ),
-          );
-          breaker.recordSuccess(alias);
-          attemptTelemetry = withRequestMutations(
-            passthrough,
-            mergeRequestMutations(
-              rendered.request_mutations,
-              provider.streamReframed === true ? { stream_reframed: true } : undefined,
-              visualCompressionMutationLedger(visualCompressionMutation),
-            ),
-          );
-          // Streamed usage is not known at peek time → cost null (not measured).
-          attempts.push(okRow(alias, elapsed(), null, attemptTelemetry));
-          return {
-            attempts,
-            final: { status: "ok", alias, providerModel },
-            body: null,
-            stream,
-            upstreamRequest: capturedUpstream,
-            responseMetadata: capturedResponseMetadata,
-          };
+          continue;
         }
-        if (passthrough.passthrough_used) {
-          // Native passthrough: forward the client's VERBATIM native body to the
-          // upstream (NO OpenAI-Chat translation) and return the native response
-          // untouched. provider.nativePassthrough is guaranteed present here — the
-          // guard's providerSupportsPassthrough feature-detected it. Cost is priced
-          // off the native usage, normalized to OpenAI shape (usageFromAnthropicResponse)
-          // so resolveCostUsd applies the same token math as a translated attempt.
-          const passthroughInvoke = provider.nativePassthrough;
-          const nativeBody = req.native_request;
-          if (!passthroughInvoke || !nativeBody) {
-            // Unreachable: the guard's providerSupportsPassthrough + hasNativeRequest
-            // checks already proved both present. Narrow defensively for type-safety.
-            throw new Error("native passthrough invoked without a native request or client method");
+        let visualCompressionMutation: VisualContextCompressionMutation | undefined;
+        let optimizedNativeBody: Record<string, unknown> | null = null;
+        const optimizeAnthropicBodyForAttempt = async (
+          body: Record<string, unknown>,
+        ): Promise<Record<string, unknown>> => {
+          if (target.targetProviderProtocol !== "anthropic_messages") return body;
+          try {
+            const optimized = await visualContextCompressor({
+              mode: visualContextCompressionMode?.() ?? "off",
+              targetProviderProtocol: target.targetProviderProtocol,
+              model: providerModel,
+              body,
+              capabilities: caps,
+              requestId: req.request_id,
+            });
+            visualCompressionMutation = optimized.mutation;
+            return optimized.body;
+          } catch (err) {
+            log?.("warn", "visual_context_compression.failed_open", {
+              alias,
+              error_class: errorClassOf(err),
+            });
+            return body;
           }
-          // Patch ONLY `model` to the RESOLVED upstream id (issue #217): the client's
-          // `model` is the routing alias (e.g. `anthropic/claude-…`), but the gateway
-          // picked this upstream model — forward it so the upstream doesn't 404 on the
-          // alias. Everything else verbatim. Mirrors stripInternal's `model: providerModel`.
-          const passthroughBody = await optimizeNativeBodyForAttempt(
-            prepareNativeRequestForUpstream(
-              nativeBody,
+        };
+        const optimizeNativeBodyForAttempt = async (
+          input: NativePassthroughCarrier | Record<string, unknown>,
+        ): Promise<NativePassthroughCarrier | Record<string, unknown>> => {
+          if (!passthrough.passthrough_used) return input;
+          const body = nativePassthroughBody(input);
+          if (optimizedNativeBody === null) {
+            optimizedNativeBody = await optimizeAnthropicBodyForAttempt(body);
+          }
+          return isNativePassthroughCarrier(input)
+            ? cloneCarrierWithBody(input, optimizedNativeBody)
+            : optimizedNativeBody;
+        };
+
+        if (
+          target.targetProviderProtocol === "anthropic_messages" &&
+          req.native_request !== undefined &&
+          provider.countTokens !== undefined &&
+          exactContextLimit !== null
+        ) {
+          try {
+            const countInput = prepareNativeRequestForUpstream(
+              { ...nativePassthroughBody(req.native_request) },
               providerModel,
               req.protocol,
               false,
@@ -2024,314 +1811,561 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               req.reasoning_effort_forced === true ? req.reasoning_effort : undefined,
               caps,
               req.reasoning_effort,
-            ),
-          );
-          if (hasResponsesContinuation(req)) {
-            const mutations = nativePassthroughMutations(passthroughBody);
-            if (mutations) mutations.responses_previous_response_id_native_passthrough = true;
+            );
+            const optimizedCountInput = await optimizeNativeBodyForAttempt(countInput);
+            const countBody = { ...nativePassthroughBody(optimizedCountInput) };
+            delete countBody.stream;
+            const tokenCount = await provider.countTokens(countBody, { signal });
+            const inputTokens = countTokensInputTokens(tokenCount);
+            if (inputTokens !== null && inputTokens > exactContextLimit) {
+              capabilityPruned = true;
+              rememberContextOverflow(
+                `prompt is too long: ${Math.trunc(inputTokens)} tokens > ${Math.trunc(
+                  exactContextLimit,
+                )} maximum`,
+                null,
+                contextConfirmationKey,
+              );
+              attempts.push(skipRow(alias, "context_too_small", elapsed()));
+              continue;
+            }
+          } catch (err) {
+            log?.("warn", "anthropic.count_tokens_preflight_failed", {
+              alias,
+              error_class: errorClassOf(err),
+              upstream_status: upstreamStatusOf(err),
+            });
           }
-          passthrough.passthrough_mutations = nativePassthroughMutations(passthroughBody);
-          attemptTelemetry = withRequestMutations(
-            passthrough,
-            visualCompressionMutationLedger(visualCompressionMutation),
+        }
+        // Past the gates → this candidate is attempted against the upstream. A
+        // failure from here on is a PROVIDER fault, not a capability gap.
+        attemptedAny = true;
+
+        let attemptTelemetry: PassthroughTelemetry = passthrough;
+
+        // 3) Invoke the provider (stream or non-stream). We send the RESOLVED
+        //    provider model (not the originally-requested alias) — the gateway
+        //    picked this model, so the upstream must be told which one to run.
+        try {
+          // Capture sink for the EXACT bytes forwarded upstream (AFTER memory injection +
+          // protocol translation). Each provider fires this just before its HTTP POST with
+          // the serialized provider-native body; the value the SERVED attempt captured
+          // becomes ExecuteOutcome.upstreamRequest. Scoped per candidate (reset each loop).
+          let capturedUpstream: string | null = null;
+          const captureUpstream = (wireBody: string): void => {
+            capturedUpstream = wireBody;
+          };
+          let capturedResponseMetadata: Record<string, string> | undefined;
+          const onResponseMeta = (headers: Headers): void => {
+            capturedResponseMetadata = safeResponseMetadata(headers);
+          };
+          if (req.stream && passthrough.passthrough_used) {
+            // Native STREAMING passthrough (issue #217, Phase 2): forward the client's
+            // VERBATIM native body (which ALREADY carries stream:true) to the upstream and
+            // BYTE-RELAY the upstream SSE back — NO translation. peekStream peeks the first
+            // chunk for the breaker contract (pre-first-chunk failure → recordFailure +
+            // chain advance below; healthy → recordSuccess), only the SOURCE iterable
+            // differs (nativePassthroughStream vs chatCompletionStream). The method +
+            // native body are guaranteed present (the guard's providerSupportsPassthrough
+            // feature-detected nativePassthroughStream, hasNativeRequest proved the body);
+            // narrow defensively for type-safety (unreachable after the guard).
+            const passthroughStream = provider.nativePassthroughStream;
+            const nativeBody = req.native_request;
+            if (!passthroughStream || !nativeBody) {
+              throw new Error(
+                "native streaming passthrough invoked without a native request or client method",
+              );
+            }
+            // Patch ONLY `model` to the RESOLVED upstream id (issue #217): the gateway
+            // chose this provider/model, so the upstream must be told which one to run —
+            // the client's `model` is the routing alias (e.g. `anthropic/claude-…`), not
+            // a real upstream model id. Everything else is forwarded verbatim. Mirrors
+            // stripInternal's `model: providerModel`; without it the upstream 404s.
+            const passthroughBody = await optimizeNativeBodyForAttempt(
+              prepareNativeRequestForUpstream(
+                nativeBody,
+                providerModel,
+                req.protocol,
+                true,
+                provider.nativeProtocolProfile,
+                req.reasoning_effort_forced === true ? req.reasoning_effort : undefined,
+                caps,
+                req.reasoning_effort,
+              ),
+            );
+            if (hasResponsesContinuation(req)) {
+              const mutations = nativePassthroughMutations(passthroughBody);
+              if (mutations) mutations.responses_previous_response_id_native_passthrough = true;
+            }
+            passthrough.passthrough_mutations = nativePassthroughMutations(passthroughBody);
+            attemptTelemetry = withRequestMutations(
+              passthrough,
+              visualCompressionMutationLedger(visualCompressionMutation),
+            );
+            // Pre-output failover guard (principle 5 + 8): a same-protocol byte-relay
+            // that 200s then fails IN-BAND before any output (e.g. Responses
+            // `response.failed`/server_is_overloaded after only the `response.created`
+            // preamble) must fall back, not stream the error as success. The guard
+            // buffers preamble and turns a pre-output error frame into a pre-first-chunk
+            // throw → peekStream records a breaker failure and advances the chain. null
+            // classifier (gemini) → unchanged commit-on-first behavior.
+            const passthroughClassifier = preOutputClassifierFor(req.protocol);
+            const stream = await withAttemptDeadline(
+              req.attempt_timeout_ms,
+              signal,
+              (attemptSignal) =>
+                peekStream(
+                  () => {
+                    const raw = passthroughStream(passthroughBody, {
+                      signal: attemptSignal,
+                      ...(req.metadata.stateful_provider_account
+                        ? { statefulAccount: req.metadata.stateful_provider_account }
+                        : {}),
+                      captureUpstream,
+                      onResponseMeta,
+                      toolCallXmlRecovery:
+                        target.targetProviderProtocol === "anthropic_messages" &&
+                        (toolCallXmlRecoveryEnabled?.() ?? true),
+                    });
+                    return passthroughClassifier
+                      ? guardPreOutputFailure(raw, passthroughClassifier)
+                      : raw;
+                  },
+                  attemptSignal,
+                  alias,
+                  log,
+                ),
+            );
+            settleBreaker("success");
+            // Streamed usage is not known at peek time → cost null, backfilled later.
+            attempts.push(okRow(alias, elapsed(), null, attemptTelemetry));
+            return {
+              attempts,
+              final: { status: "ok", alias, providerModel },
+              body: null,
+              stream,
+              nativePassthrough: true,
+              upstreamRequest: capturedUpstream,
+              responseMetadata: capturedResponseMetadata,
+            };
+          }
+          if (req.stream) {
+            // Translate stream path (passthrough disabled): the existing byte-for-byte
+            // forward. peekStream opens chatCompletionStream(stripInternal); the row
+            // carries the (used:false) passthrough telemetry. No nativePassthrough marker.
+            const rendered = stripInternal(
+              req,
+              providerModel,
+              target.targetProviderProtocol,
+              caps,
+              target.provider?.nativeProtocolProfile === "generic_openai_responses",
+            );
+            // Pre-output failover guard (principle 5 + 8): the translate generators
+            // ALREADY throw on a terminal error frame, but they yield an empty role
+            // preamble chunk first, so peekStream would commit success before the throw.
+            // The guard buffers that preamble so the commit lands on the first REAL
+            // output; a pre-output error (thrown by the generator, or an in-band error
+            // frame) stays a pre-first-chunk failure → fallback. Translate output is
+            // always OpenAI-Chat framed, so the chat classifier is always correct.
+            const translateClassifier = preOutputClassifierFor("openai_chat");
+            const stream = await withAttemptDeadline(
+              req.attempt_timeout_ms,
+              signal,
+              (attemptSignal) =>
+                peekStream(
+                  () => {
+                    const raw = provider.chatCompletionStream(rendered.body, {
+                      signal: attemptSignal,
+                      ...(req.metadata.stateful_provider_account
+                        ? { statefulAccount: req.metadata.stateful_provider_account }
+                        : {}),
+                      captureUpstream,
+                      onResponseMeta,
+                      optimizeAnthropicBody: optimizeAnthropicBodyForAttempt,
+                    });
+                    return translateClassifier
+                      ? guardPreOutputFailure(raw, translateClassifier)
+                      : raw;
+                  },
+                  attemptSignal,
+                  alias,
+                  log,
+                ),
+            );
+            settleBreaker("success");
+            attemptTelemetry = withRequestMutations(
+              passthrough,
+              mergeRequestMutations(
+                rendered.request_mutations,
+                provider.streamReframed === true ? { stream_reframed: true } : undefined,
+                visualCompressionMutationLedger(visualCompressionMutation),
+              ),
+            );
+            // Streamed usage is not known at peek time → cost null (not measured).
+            attempts.push(okRow(alias, elapsed(), null, attemptTelemetry));
+            return {
+              attempts,
+              final: { status: "ok", alias, providerModel },
+              body: null,
+              stream,
+              upstreamRequest: capturedUpstream,
+              responseMetadata: capturedResponseMetadata,
+            };
+          }
+          if (passthrough.passthrough_used) {
+            // Native passthrough: forward the client's VERBATIM native body to the
+            // upstream (NO OpenAI-Chat translation) and return the native response
+            // untouched. provider.nativePassthrough is guaranteed present here — the
+            // guard's providerSupportsPassthrough feature-detected it. Cost is priced
+            // off the native usage, normalized to OpenAI shape (usageFromAnthropicResponse)
+            // so resolveCostUsd applies the same token math as a translated attempt.
+            const passthroughInvoke = provider.nativePassthrough;
+            const nativeBody = req.native_request;
+            if (!passthroughInvoke || !nativeBody) {
+              // Unreachable: the guard's providerSupportsPassthrough + hasNativeRequest
+              // checks already proved both present. Narrow defensively for type-safety.
+              throw new Error(
+                "native passthrough invoked without a native request or client method",
+              );
+            }
+            // Patch ONLY `model` to the RESOLVED upstream id (issue #217): the client's
+            // `model` is the routing alias (e.g. `anthropic/claude-…`), but the gateway
+            // picked this upstream model — forward it so the upstream doesn't 404 on the
+            // alias. Everything else verbatim. Mirrors stripInternal's `model: providerModel`.
+            const passthroughBody = await optimizeNativeBodyForAttempt(
+              prepareNativeRequestForUpstream(
+                nativeBody,
+                providerModel,
+                req.protocol,
+                false,
+                provider.nativeProtocolProfile,
+                req.reasoning_effort_forced === true ? req.reasoning_effort : undefined,
+                caps,
+                req.reasoning_effort,
+              ),
+            );
+            if (hasResponsesContinuation(req)) {
+              const mutations = nativePassthroughMutations(passthroughBody);
+              if (mutations) mutations.responses_previous_response_id_native_passthrough = true;
+            }
+            passthrough.passthrough_mutations = nativePassthroughMutations(passthroughBody);
+            attemptTelemetry = withRequestMutations(
+              passthrough,
+              visualCompressionMutationLedger(visualCompressionMutation),
+            );
+            const body = await withAttemptDeadline(
+              req.attempt_timeout_ms,
+              signal,
+              (attemptSignal) =>
+                passthroughInvoke(passthroughBody, {
+                  signal: attemptSignal,
+                  ...(req.metadata.stateful_provider_account
+                    ? { statefulAccount: req.metadata.stateful_provider_account }
+                    : {}),
+                  captureUpstream,
+                  onResponseMeta,
+                  toolCallXmlRecovery:
+                    target.targetProviderProtocol === "anthropic_messages" &&
+                    (toolCallXmlRecoveryEnabled?.() ?? true),
+                }),
+            );
+            settleBreaker("success");
+            const usage =
+              req.protocol === "openai_responses"
+                ? usageFromResponsesResponse(body)
+                : req.protocol === "gemini"
+                  ? usageFromGeminiResponse(body)
+                  : usageFromAnthropicResponse(body);
+            const pricedBody = usage ? { ...body, usage } : body;
+            attempts.push(
+              okRow(alias, elapsed(), costOf(alias, providerModel, pricedBody), attemptTelemetry),
+            );
+            return {
+              attempts,
+              final: { status: "ok", alias, providerModel },
+              body,
+              stream: null,
+              nativePassthrough: true,
+              upstreamRequest: capturedUpstream,
+              responseMetadata: capturedResponseMetadata,
+            };
+          }
+          const bodyReq = stripInternal(
+            req,
+            providerModel,
+            target.targetProviderProtocol,
+            caps,
+            target.provider?.nativeProtocolProfile === "generic_openai_responses",
           );
           const body = await withAttemptDeadline(req.attempt_timeout_ms, signal, (attemptSignal) =>
-            passthroughInvoke(passthroughBody, {
+            provider.chatCompletion(bodyReq.body, {
               signal: attemptSignal,
               ...(req.metadata.stateful_provider_account
                 ? { statefulAccount: req.metadata.stateful_provider_account }
                 : {}),
               captureUpstream,
               onResponseMeta,
-              toolCallXmlRecovery:
-                target.targetProviderProtocol === "anthropic_messages" &&
-                (toolCallXmlRecoveryEnabled?.() ?? true),
+              optimizeAnthropicBody: optimizeAnthropicBodyForAttempt,
             }),
           );
-          breaker.recordSuccess(alias);
-          const usage =
-            req.protocol === "openai_responses"
-              ? usageFromResponsesResponse(body)
-              : req.protocol === "gemini"
-                ? usageFromGeminiResponse(body)
-                : usageFromAnthropicResponse(body);
-          const pricedBody = usage ? { ...body, usage } : body;
+          attemptTelemetry = withRequestMutations(
+            passthrough,
+            mergeRequestMutations(
+              bodyReq.request_mutations,
+              visualCompressionMutationLedger(visualCompressionMutation),
+            ),
+          );
+          settleBreaker("success");
           attempts.push(
-            okRow(alias, elapsed(), costOf(alias, providerModel, pricedBody), attemptTelemetry),
+            okRow(alias, elapsed(), costOf(alias, providerModel, body), attemptTelemetry),
           );
           return {
             attempts,
             final: { status: "ok", alias, providerModel },
             body,
             stream: null,
-            nativePassthrough: true,
             upstreamRequest: capturedUpstream,
             responseMetadata: capturedResponseMetadata,
           };
-        }
-        const bodyReq = stripInternal(
-          req,
-          providerModel,
-          target.targetProviderProtocol,
-          caps,
-          target.provider?.nativeProtocolProfile === "generic_openai_responses",
-        );
-        const body = await withAttemptDeadline(req.attempt_timeout_ms, signal, (attemptSignal) =>
-          provider.chatCompletion(bodyReq.body, {
-            signal: attemptSignal,
-            ...(req.metadata.stateful_provider_account
-              ? { statefulAccount: req.metadata.stateful_provider_account }
-              : {}),
-            captureUpstream,
-            onResponseMeta,
-            optimizeAnthropicBody: optimizeAnthropicBodyForAttempt,
-          }),
-        );
-        attemptTelemetry = withRequestMutations(
-          passthrough,
-          mergeRequestMutations(
-            bodyReq.request_mutations,
-            visualCompressionMutationLedger(visualCompressionMutation),
-          ),
-        );
-        breaker.recordSuccess(alias);
-        attempts.push(
-          okRow(alias, elapsed(), costOf(alias, providerModel, body), attemptTelemetry),
-        );
-        return {
-          attempts,
-          final: { status: "ok", alias, providerModel },
-          body,
-          stream: null,
-          upstreamRequest: capturedUpstream,
-          responseMetadata: capturedResponseMetadata,
-        };
-      } catch (err) {
-        const cancellation = requestCancellationReason(signal);
-        if (cancellation === CONCURRENCY_LEASE_LOST_REASON || cancellation === "request_timeout") {
-          const leaseLost = cancellation === CONCURRENCY_LEASE_LOST_REASON;
-          const errorClass = leaseLost ? "lane_unavailable" : "timeout";
-          breaker.recordAbort(alias);
-          attempts.push({
-            alias,
-            skipped: false,
-            skip_reason: cancellation,
-            status: "error",
-            error_class: errorClass,
-            latency_ms: elapsed(),
-            cost_usd: null,
-            error_detail: null,
-            ...defaultPassthroughTelemetry(),
-          });
-          return {
-            attempts,
-            final: {
+        } catch (err) {
+          const cancellation = requestCancellationReason(signal);
+          if (
+            cancellation === CONCURRENCY_LEASE_LOST_REASON ||
+            cancellation === "request_timeout"
+          ) {
+            const leaseLost = cancellation === CONCURRENCY_LEASE_LOST_REASON;
+            const errorClass = leaseLost ? "lane_unavailable" : "timeout";
+            settleBreaker("abort");
+            attempts.push({
+              alias,
+              skipped: false,
+              skip_reason: cancellation,
               status: "error",
-              error: makeHelmError({
-                error_class: errorClass,
-                message: leaseLost ? "concurrency lease lost" : "request timed out",
-                trace_id: correlationTraceId(req),
-              }),
-            },
-            body: null,
-            stream: null,
-          };
-        }
-        // Client abort: non-provider fault. Terminate the chain WITHOUT marking a
-        // breaker failure or counting it as all_providers_failed.
-        if (isAbort(err, signal)) {
-          breaker.recordAbort(alias);
-          attempts.push({
-            alias,
-            skipped: false,
-            skip_reason: "aborted",
-            status: "error",
-            error_class: "client_abort",
-            latency_ms: elapsed(),
-            cost_usd: null,
-            error_detail: null,
-            ...defaultPassthroughTelemetry(),
-          });
-          return {
-            attempts,
-            final: {
+              error_class: errorClass,
+              latency_ms: elapsed(),
+              cost_usd: null,
+              error_detail: null,
+              ...defaultPassthroughTelemetry(),
+            });
+            return {
+              attempts,
+              final: {
+                status: "error",
+                error: makeHelmError({
+                  error_class: errorClass,
+                  message: leaseLost ? "concurrency lease lost" : "request timed out",
+                  trace_id: correlationTraceId(req),
+                }),
+              },
+              body: null,
+              stream: null,
+            };
+          }
+          // Client abort: non-provider fault. Terminate the chain WITHOUT marking a
+          // breaker failure or counting it as all_providers_failed.
+          if (isAbort(err, signal)) {
+            settleBreaker("abort");
+            attempts.push({
+              alias,
+              skipped: false,
+              skip_reason: "aborted",
               status: "error",
-              error: makeHelmError({
-                // C2: client disconnect is a NON-provider fault — surface the
-                // dedicated client_abort class (499), never upstream_error (502),
-                // so telemetry/dashboards don't count a disconnect as a provider
-                // failure. Matches the per-attempt row above (docs/02, docs/07).
-                error_class: "client_abort",
-                message: "client aborted request",
-                trace_id: correlationTraceId(req),
-              }),
-            },
-            body: null,
-            stream: null,
-          };
-        }
-        // Per-account user-message queue timeout (issue #93, feature B):
-        // BACKPRESSURE, not provider health — release any probe lock WITHOUT a
-        // breaker failure. Terminal (no chain advance): the queue protects THIS
-        // subscription's rate limits; spilling onto the next candidate would
-        // defeat the throttle the operator deliberately turned on. 503 via
-        // lane_unavailable (retryable in the client's eyes).
-        if (isQueueTimeout(err)) {
-          breaker.recordAbort(alias);
-          attempts.push({
-            alias,
-            skipped: false,
-            skip_reason: "user_message_queue_timeout",
-            status: "error",
-            error_class: "lane_unavailable",
-            latency_ms: elapsed(),
-            cost_usd: null,
-            error_detail: null,
-            ...defaultPassthroughTelemetry(),
-          });
-          return {
-            attempts,
-            final: {
+              error_class: "client_abort",
+              latency_ms: elapsed(),
+              cost_usd: null,
+              error_detail: null,
+              ...defaultPassthroughTelemetry(),
+            });
+            return {
+              attempts,
+              final: {
+                status: "error",
+                error: makeHelmError({
+                  // C2: client disconnect is a NON-provider fault — surface the
+                  // dedicated client_abort class (499), never upstream_error (502),
+                  // so telemetry/dashboards don't count a disconnect as a provider
+                  // failure. Matches the per-attempt row above (docs/02, docs/07).
+                  error_class: "client_abort",
+                  message: "client aborted request",
+                  trace_id: correlationTraceId(req),
+                }),
+              },
+              body: null,
+              stream: null,
+            };
+          }
+          // Per-account user-message queue timeout (issue #93, feature B):
+          // BACKPRESSURE, not provider health — release any probe lock WITHOUT a
+          // breaker failure. Terminal (no chain advance): the queue protects THIS
+          // subscription's rate limits; spilling onto the next candidate would
+          // defeat the throttle the operator deliberately turned on. 503 via
+          // lane_unavailable (retryable in the client's eyes).
+          if (isQueueTimeout(err)) {
+            settleBreaker("abort");
+            attempts.push({
+              alias,
+              skipped: false,
+              skip_reason: "user_message_queue_timeout",
               status: "error",
-              error: makeHelmError({
-                error_class: "lane_unavailable",
-                message: "user message queue wait timed out; retry shortly",
-                trace_id: correlationTraceId(req),
-              }),
-            },
-            body: null,
-            stream: null,
-          };
-        }
-        // `:free` candidate 429 — ported llm-router semantics (principle 5):
-        // skip to the next candidate, do NOT record a breaker failure (free-tier
-        // throttling is not a provider-health signal). Distinct log field from
-        // execution-fallback: skip_reason 'free_429', error_class 'rate_limited'.
-        if (isFreeAlias(alias) && upstreamStatusOf(err) === 429) {
+              error_class: "lane_unavailable",
+              latency_ms: elapsed(),
+              cost_usd: null,
+              error_detail: null,
+              ...defaultPassthroughTelemetry(),
+            });
+            return {
+              attempts,
+              final: {
+                status: "error",
+                error: makeHelmError({
+                  error_class: "lane_unavailable",
+                  message: "user message queue wait timed out; retry shortly",
+                  trace_id: correlationTraceId(req),
+                }),
+              },
+              body: null,
+              stream: null,
+            };
+          }
+          // `:free` candidate 429 — ported llm-router semantics (principle 5):
+          // skip to the next candidate, do NOT record a breaker failure (free-tier
+          // throttling is not a provider-health signal). Distinct log field from
+          // execution-fallback: skip_reason 'free_429', error_class 'rate_limited'.
+          if (isFreeAlias(alias) && upstreamStatusOf(err) === 429) {
+            onlyContextOrCapabilitySkips = false;
+            attempts.push({
+              alias,
+              skipped: true,
+              skip_reason: "free_429",
+              status: "error",
+              error_class: "rate_limited",
+              latency_ms: elapsed(),
+              cost_usd: null,
+              error_detail: errorDetailOf(err),
+              ...defaultPassthroughTelemetry(),
+            });
+            continue;
+          }
+
+          // Model context window overflow: THIS candidate cannot serve the request,
+          // but a later fallback with a larger window can. Treat it like a late-discovered
+          // capability skip, not provider health: no breaker failure, no red provider
+          // error row, and no execution-fallback count.
+          if (isContextWindowRejection(err)) {
+            capabilityPruned = true;
+            const detail = errorDetailOf(err);
+            rememberContextOverflow(
+              upstreamErrorMessage(detail.provider_raw) ?? detail.message,
+              detail.provider_raw,
+              upstreamErrorCode(detail.provider_raw)?.toLowerCase() === "context_length_exceeded"
+                ? contextConfirmationKey
+                : undefined,
+            );
+            attempts.push({
+              alias,
+              skipped: true,
+              skip_reason: "context_too_small",
+              status: "error",
+              error_class: null,
+              latency_ms: elapsed(),
+              cost_usd: null,
+              error_detail: detail,
+              ...attemptTelemetry,
+            });
+            continue;
+          }
+
+          // DeepSeek-style thinking mode is candidate-specific: when a fallback target
+          // requires OpenAI `reasoning_content` history that the source protocol cannot
+          // supply, another candidate may still serve the request. Do not surface this
+          // as a terminal client 400 and do not fault provider health.
+          if (isReasoningHistoryRejection(err)) {
+            capabilityPruned = true;
+            attempts.push({
+              alias,
+              skipped: true,
+              skip_reason: "reasoning_history_incompatible",
+              status: "error",
+              error_class: null,
+              latency_ms: elapsed(),
+              cost_usd: null,
+              error_detail: errorDetailOf(err),
+              ...attemptTelemetry,
+            });
+            continue;
+          }
+
+          // Deterministic request-shape rejection (oversized image, bad param): the
+          // body is invalid for EVERY candidate, so do NOT advance the chain and do NOT
+          // fault the breaker (the upstream is healthy — the request is what's wrong).
+          // Surface the upstream's structured error VERBATIM as a 400 invalid_request.
+          if (isUpstreamRequestRejection(err)) {
+            const detail = errorDetailOf(err);
+            attempts.push({
+              alias,
+              skipped: false,
+              skip_reason: null,
+              status: "error",
+              error_class: "invalid_request",
+              latency_ms: elapsed(),
+              cost_usd: null,
+              error_detail: detail,
+              ...attemptTelemetry,
+            });
+            return {
+              attempts,
+              final: {
+                status: "error",
+                error: makeHelmError({
+                  error_class: "invalid_request",
+                  message: upstreamErrorMessage(detail.provider_raw) ?? detail.message,
+                  trace_id: correlationTraceId(req),
+                  provider_raw: detail.provider_raw,
+                }),
+              },
+              body: null,
+              stream: null,
+            };
+          }
+
+          // Genuine pre-first-chunk failure: record on the alias breaker — EXCEPT an OAuth
+          // subscription fault the pool already isolates per-account (credential 401/403 or
+          // a 429). Those are pooled-account state, never an alias-wide signal, so one bad
+          // account must not open the model alias. A server/transport fault (5xx / overload /
+          // timeout) that survived the pool's sibling retry means the WHOLE pool is down →
+          // record it so the breaker backs the alias off, just like a configured provider.
+          if (!(isOAuthSubscriptionAlias(alias) && isAccountScopedFault(err))) {
+            settleBreaker("failure");
+          }
+          // Account-scoped OAuth faults leave breakerSettled=false so the finally
+          // block releases any HALF_OPEN probe lock without counting a failure.
           onlyContextOrCapabilitySkips = false;
-          attempts.push({
-            alias,
-            skipped: true,
-            skip_reason: "free_429",
-            status: "error",
-            error_class: "rate_limited",
-            latency_ms: elapsed(),
-            cost_usd: null,
-            error_detail: errorDetailOf(err),
-            ...defaultPassthroughTelemetry(),
-          });
-          continue;
-        }
-
-        // Model context window overflow: THIS candidate cannot serve the request,
-        // but a later fallback with a larger window can. Treat it like a late-discovered
-        // capability skip, not provider health: no breaker failure, no red provider
-        // error row, and no execution-fallback count.
-        if (isContextWindowRejection(err)) {
-          capabilityPruned = true;
-          const detail = errorDetailOf(err);
-          rememberContextOverflow(
-            upstreamErrorMessage(detail.provider_raw) ?? detail.message,
-            detail.provider_raw,
-            upstreamErrorCode(detail.provider_raw)?.toLowerCase() === "context_length_exceeded"
-              ? contextConfirmationKey
-              : undefined,
-          );
-          attempts.push({
-            alias,
-            skipped: true,
-            skip_reason: "context_too_small",
-            status: "error",
-            error_class: null,
-            latency_ms: elapsed(),
-            cost_usd: null,
-            error_detail: detail,
-            ...attemptTelemetry,
-          });
-          continue;
-        }
-
-        // DeepSeek-style thinking mode is candidate-specific: when a fallback target
-        // requires OpenAI `reasoning_content` history that the source protocol cannot
-        // supply, another candidate may still serve the request. Do not surface this
-        // as a terminal client 400 and do not fault provider health.
-        if (isReasoningHistoryRejection(err)) {
-          capabilityPruned = true;
-          attempts.push({
-            alias,
-            skipped: true,
-            skip_reason: "reasoning_history_incompatible",
-            status: "error",
-            error_class: null,
-            latency_ms: elapsed(),
-            cost_usd: null,
-            error_detail: errorDetailOf(err),
-            ...attemptTelemetry,
-          });
-          continue;
-        }
-
-        // Deterministic request-shape rejection (oversized image, bad param): the
-        // body is invalid for EVERY candidate, so do NOT advance the chain and do NOT
-        // fault the breaker (the upstream is healthy — the request is what's wrong).
-        // Surface the upstream's structured error VERBATIM as a 400 invalid_request.
-        if (isUpstreamRequestRejection(err)) {
-          const detail = errorDetailOf(err);
+          // Auto-park a subscription account that hit its rate/usage limit. A genuine
+          // (non-`:free`, handled above) 429 on an OAuth alias means the served account
+          // is throttled — signal the gateway to park it so the pool routes around it.
+          // Pure side-channel: chain advancement below is unchanged.
+          if (upstreamStatusOf(err) === 429 && isOAuthSubscriptionAlias(alias)) {
+            onOAuthSubscription429?.(alias, err);
+          }
           attempts.push({
             alias,
             skipped: false,
             skip_reason: null,
             status: "error",
-            error_class: "invalid_request",
+            error_class: errorClassOf(err),
             latency_ms: elapsed(),
             cost_usd: null,
-            error_detail: detail,
+            error_detail: errorDetailOf(err),
             ...attemptTelemetry,
           });
-          return {
-            attempts,
-            final: {
-              status: "error",
-              error: makeHelmError({
-                error_class: "invalid_request",
-                message: upstreamErrorMessage(detail.provider_raw) ?? detail.message,
-                trace_id: correlationTraceId(req),
-                provider_raw: detail.provider_raw,
-              }),
-            },
-            body: null,
-            stream: null,
-          };
         }
-
-        // Genuine pre-first-chunk failure: record on the alias breaker — EXCEPT an OAuth
-        // subscription fault the pool already isolates per-account (credential 401/403 or
-        // a 429). Those are pooled-account state, never an alias-wide signal, so one bad
-        // account must not open the model alias. A server/transport fault (5xx / overload /
-        // timeout) that survived the pool's sibling retry means the WHOLE pool is down →
-        // record it so the breaker backs the alias off, just like a configured provider.
-        if (!(isOAuthSubscriptionAlias(alias) && isAccountScopedFault(err))) {
-          breaker.recordFailure(alias);
-        }
-        onlyContextOrCapabilitySkips = false;
-        // Auto-park a subscription account that hit its rate/usage limit. A genuine
-        // (non-`:free`, handled above) 429 on an OAuth alias means the served account
-        // is throttled — signal the gateway to park it so the pool routes around it.
-        // Pure side-channel: chain advancement below is unchanged.
-        if (upstreamStatusOf(err) === 429 && isOAuthSubscriptionAlias(alias)) {
-          onOAuthSubscription429?.(alias, err);
-        }
-        attempts.push({
-          alias,
-          skipped: false,
-          skip_reason: null,
-          status: "error",
-          error_class: errorClassOf(err),
-          latency_ms: elapsed(),
-          cost_usd: null,
-          error_detail: errorDetailOf(err),
-          ...attemptTelemetry,
-        });
+      } finally {
+        // Release a HALF_OPEN probe lock on any path that allowed the attempt but
+        // never settled success/failure/abort (capability skip after canAttempt,
+        // free_429, context/reasoning skip, OAuth account-scoped 429/401/403).
+        // recordAbort is a no-op when the alias was never HALF_OPEN or the lock was
+        // already cleared by success/failure/abort above.
+        if (!breakerSettled) settleBreaker("abort");
       }
     }
 
