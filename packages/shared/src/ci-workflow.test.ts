@@ -47,14 +47,14 @@ describe("CI workflow", () => {
     expect(permissions).toContain("contents: read");
     expect(permissions).not.toContain("write");
     expect(raw.match(/^\s+checks:\s*write$/gm)).toHaveLength(1);
-    for (const name of ["verify", "e2e", "docker"]) {
+    for (const name of ["verify", "store", "e2e", "docker"]) {
       expect(jobBlock(raw, name)).not.toMatch(/^\s+[a-z-]+:\s*write$/m);
     }
   });
 
   it("does not persist checkout credentials in any CI job", () => {
-    expect(raw.match(/uses:\s*actions\/checkout@/g)).toHaveLength(3);
-    expect(raw.match(/persist-credentials:\s*false/g)).toHaveLength(3);
+    expect(raw.match(/uses:\s*actions\/checkout@/g)).toHaveLength(4);
+    expect(raw.match(/persist-credentials:\s*false/g)).toHaveLength(4);
   });
 
   it("installs with a frozen lockfile and does not swallow failures in the unit gate", () => {
@@ -89,11 +89,11 @@ describe("CI workflow", () => {
   });
 
   it("fetches both parents before validating a pull-request merge ref", () => {
-    expect(raw.match(/fetch-depth:\s*2/g)).toHaveLength(3);
+    expect(raw.match(/fetch-depth:\s*2/g)).toHaveLength(4);
   });
 
   it("keeps pull requests on the trusted default-branch workflow and off the persistent pool", () => {
-    for (const name of ["verify", "e2e", "docker"]) {
+    for (const name of ["verify", "store", "e2e", "docker"]) {
       const job = jobBlock(raw, name);
       expect(job, `${name} job must exist`).not.toBe("");
       expect(job).toContain("github.event_name == 'pull_request_target'");
@@ -112,18 +112,18 @@ describe("CI workflow", () => {
   it("reports immutable PR-head checks from a separate trusted job", () => {
     const report = jobBlock(raw, "report_pr_checks");
     expect(report).toContain("if: always() && github.event_name == 'pull_request_target'");
-    expect(report).toContain("needs: [verify, e2e, docker]");
+    expect(report).toContain("needs: [verify, store, e2e, docker]");
     expect(report).toContain("runs-on: ubuntu-24.04");
     expect(report).toContain("checks: write");
     expect(report).toContain("github.event.pull_request.head.sha");
-    for (const context of ["PR / verify", "PR / e2e", "PR / docker"]) {
+    for (const context of ["PR / verify", "PR / store", "PR / e2e", "PR / docker"]) {
       expect(report).toContain(context);
     }
     expect(report).not.toContain("actions/checkout@");
   });
 
   it("disables package-manager caching explicitly without enabling pnpm cache", () => {
-    expect(raw.match(/package-manager-cache:\s*false/g)).toHaveLength(2);
+    expect(raw.match(/package-manager-cache:\s*false/g)).toHaveLength(3);
     expect(raw).not.toMatch(/^\s+cache:\s*(?:pnpm|true)\s*$/m);
   });
 });
