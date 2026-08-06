@@ -20,9 +20,9 @@ jobs:
   verify:
     # Bound a genuinely stuck verify run; GitHub's default is six hours.
     timeout-minutes: 10
-    # Untrusted pull-request code must never reach the persistent runner pool.
-    # Trusted main pushes retain the labelled self-hosted pool for throughput.
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request_target' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","docker"]') }}
+    # Keep the broad unit suite off the shared self-hosted machine: concurrent
+    # runner processes there can consume this job's entire bounded runtime.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
