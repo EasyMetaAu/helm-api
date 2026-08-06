@@ -32,6 +32,10 @@ export default defineConfig({
           // majority, sub-ms) are unaffected. hookTimeout covers DB setup in hooks.
           testTimeout: 15_000,
           hookTimeout: 15_000,
+          // Self-hosted runners expose 32 host CPUs. Letting Vitest match that
+          // count cold-starts too many PGlite instances at once and makes valid
+          // queries miss the timeout under shared-host load.
+          maxWorkers: 4,
           environment: "node",
           // Native addons (better-sqlite3) must be loaded by Node's require, not
           // transformed by Vite — otherwise the .node bindings cannot be located.
