@@ -915,6 +915,7 @@
   "The request body as received from the client — before memory injection and translation.": "클라이언트에서 수신된 요청 본문 — 메모리 주입 및 번역 이전.",
   "The server uses the MCP Streamable HTTP transport at the bare origin + /mcp and authenticates with your API key as a bearer token. Enable it on the gateway with memory.mcp.enabled — until then /mcp returns 404.": "서버는 베이스 오리진 + /mcp에서 MCP Streamable HTTP 전송을 사용하며, API 키를 Bearer 토큰으로 인증합니다. 게이트웨이에서 memory.mcp.enabled로 활성화하세요. 그 전까지 /mcp는 404를 반환합니다.",
   "The session transcript is incomplete and this request cannot be recovered.": "세션 기록이 불완전하여 이 요청을 복원할 수 없습니다.",
+  "The session transcript is too large to recover safely.": "세션 기록이 너무 커서 안전하게 복원할 수 없습니다.",
   "The session transcript is unavailable or has been cleaned up.": "세션 기록을 사용할 수 없거나 이미 정리되었습니다.",
   "The subject is fixed — it identifies which fact a newer one supersedes.": "주제는 고정되어 있습니다 — 어떤 사실이 더 새로운 사실로 대체되는지 식별합니다.",
   "The subscription account that served this request, when applicable.": "해당하는 경우 이 요청을 처리한 구독 계정입니다.",

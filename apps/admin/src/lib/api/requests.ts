@@ -832,7 +832,12 @@ export async function getRequest(requestId: string): Promise<RequestDetail> {
 export interface RequestPayloadView {
   captured: boolean;
   source?: 'payload' | 'session' | 'unavailable';
-  reason?: 'no_session' | 'session_unavailable' | 'session_incomplete' | 'response_unavailable';
+  reason?:
+    | 'no_session'
+    | 'session_unavailable'
+    | 'session_incomplete'
+    | 'session_recovery_limited'
+    | 'response_unavailable';
   exact?: boolean;
   fidelity?: 'exact' | 'semantic' | 'partial' | string;
   request?: unknown;
@@ -854,7 +859,12 @@ export type RequestPayloadPartName = 'request' | 'response' | 'upstream_request'
 export interface RequestPayloadPartView {
   captured: boolean;
   source?: 'payload' | 'session' | 'unavailable';
-  reason?: 'no_session' | 'session_unavailable' | 'session_incomplete' | 'response_unavailable';
+  reason?:
+    | 'no_session'
+    | 'session_unavailable'
+    | 'session_incomplete'
+    | 'session_recovery_limited'
+    | 'response_unavailable';
   exact?: boolean;
   fidelity?: 'exact' | 'semantic' | 'partial' | string;
   part?: RequestPayloadPartName;

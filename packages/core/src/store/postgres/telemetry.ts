@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { type DecisionRecord, DecisionRecordSchema } from "@helm/shared";
-import { and, asc, count, desc, eq, gt, gte, inArray, lt, type SQL, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, inArray, lt, lte, type SQL, sql } from "drizzle-orm";
 import { shapeTelemetryAggregate, shapeTelemetryKeyUsage } from "../aggregate-shape.js";
 import { externalizeImages, type PayloadBlob, rehydrateImages } from "../payload-blobs.js";
 import { decodePayloadTextChunks, iteratePayloadTextChunks } from "../payload-codec.js";
@@ -63,6 +63,19 @@ const SESSION_PRUNE_MARKER = "__helm_pruning__";
 const PG_PRUNE_BATCH_ROWS = 16;
 const PG_PRUNE_TICK_ROWS = 128;
 const ORPHAN_CHUNK_TTL_MS = 86_400_000;
+const sessionRevisionWireBytes = sql<number>`
+  octet_length(${sessionRevisions.sessionRef}) +
+  octet_length(${sessionRevisions.requestId}) +
+  octet_length(coalesce(${sessionRevisions.parentRequestId}, '')) +
+  coalesce(
+    ${sessionRevisions.bodyBytes},
+    octet_length(${sessionRevisions.requestDeltaJson}) +
+    octet_length(${sessionRevisions.requestEnvelopeJson}) +
+    octet_length(coalesce(${sessionRevisions.responseJson}, ''))
+  ) +
+  octet_length(coalesce(${sessionRevisions.responseId}, '')) +
+  octet_length(${sessionRevisions.fidelity}) + 64
+`;
 
 function resultRows<T>(result: unknown): T[] {
   if (Array.isArray(result)) return result as T[];
@@ -491,21 +504,8 @@ export class PgTelemetryStore implements TelemetryStore {
   ): Promise<SessionRevisionPage> {
     const limit = boundedSessionPageLimit(options);
     const afterSequence = options.afterSequence ?? 0;
-    const rowBytes = sql<number>`
-      octet_length(${sessionRevisions.sessionRef}) +
-      octet_length(${sessionRevisions.requestId}) +
-      octet_length(coalesce(${sessionRevisions.parentRequestId}, '')) +
-      coalesce(
-        ${sessionRevisions.bodyBytes},
-        octet_length(${sessionRevisions.requestDeltaJson}) +
-        octet_length(${sessionRevisions.requestEnvelopeJson}) +
-        octet_length(coalesce(${sessionRevisions.responseJson}, ''))
-      ) +
-      octet_length(coalesce(${sessionRevisions.responseId}, '')) +
-      octet_length(${sessionRevisions.fidelity}) + 64
-    `;
     const metadata = await this.db
-      .select({ sequence: sessionRevisions.sequence, bytes: rowBytes })
+      .select({ sequence: sessionRevisions.sequence, bytes: sessionRevisionWireBytes })
       .from(sessionRevisions)
       .where(
         and(
@@ -571,6 +571,7 @@ export class PgTelemetryStore implements TelemetryStore {
         requestId: sessionRevisions.requestId,
         sessionRef: sessionRevisions.sessionRef,
         responseBodyStored: sql<boolean>`${sessionRevisions.responseJson} IS NOT NULL`,
+        sequence: sessionRevisions.sequence,
         fidelity: sessionRevisions.fidelity,
         createdAt: sessionRevisions.createdAt,
       })
@@ -578,7 +579,28 @@ export class PgTelemetryStore implements TelemetryStore {
       .where(eq(sessionRevisions.requestId, requestId))
       .limit(1);
     const row = rows[0];
-    return row ? { ...row, createdAt: new Date(row.createdAt) } : null;
+    if (!row) return null;
+    const recoveryRows = await this.db
+      .select({ bytes: sql<number>`sum(${sessionRevisionWireBytes})` })
+      .from(sessionRevisions)
+      .where(
+        and(
+          eq(sessionRevisions.sessionRef, row.sessionRef),
+          lte(sessionRevisions.sequence, row.sequence),
+        ),
+      );
+    const recoveryWireBytes = Number(recoveryRows[0]?.bytes);
+    return {
+      requestId: row.requestId,
+      sessionRef: row.sessionRef,
+      responseBodyStored: row.responseBodyStored,
+      recoveryWireBytes:
+        Number.isSafeInteger(recoveryWireBytes) && recoveryWireBytes >= 0
+          ? recoveryWireBytes
+          : null,
+      fidelity: row.fidelity,
+      createdAt: new Date(row.createdAt),
+    };
   }
 
   private async finishClaimedSessionPrune(

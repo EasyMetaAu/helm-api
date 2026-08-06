@@ -637,12 +637,27 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         responseBodyStored: true,
       });
       expect(await t.findSessionRequestIdByResponseId("s_1", "resp_malicious")).toBeNull();
+      const expectedR1RecoveryBytes =
+        Buffer.byteLength("s_1r1", "utf8") +
+        Buffer.byteLength('["one"]{"model":"x"}{"output":["one"]}', "utf8") +
+        Buffer.byteLength("resp_1verbatim", "utf8") +
+        64;
       expect(await t.getSessionRevisionMeta("r1")).toEqual({
         requestId: "r1",
         sessionRef: "s_1",
         responseBodyStored: true,
+        recoveryWireBytes: expectedR1RecoveryBytes,
         fidelity: "verbatim",
         createdAt: new Date(1000),
+      });
+      const expectedR2RecoveryBytes =
+        expectedR1RecoveryBytes +
+        Buffer.byteLength("s_1r2r1", "utf8") +
+        Buffer.byteLength('["two"]{"model":"x"}{"output":["two"]}', "utf8") +
+        Buffer.byteLength("resp_2verbatim", "utf8") +
+        64;
+      expect(await t.getSessionRevisionMeta("r2")).toMatchObject({
+        recoveryWireBytes: expectedR2RecoveryBytes,
       });
       expect(await t.listSessionRevisions("s_1")).toEqual([
         expect.objectContaining({

@@ -325,4 +325,22 @@ test.describe("admin request payload view", () => {
     await page.goto(`${BASE}/admin/requests/${SEED_TRACE_ID}`);
     await expect(page.getByTestId("payload-summary")).toContainText(/no captured Session ID/i);
   });
+
+  test("does not offer loading when Session recovery exceeds the safe limit", async ({ page }) => {
+    await page.route(`**/admin/api/requests/${SEED_TRACE_ID}/payload?part=meta`, async (route) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          captured: false,
+          source: "unavailable",
+          reason: "session_recovery_limited",
+        }),
+      }),
+    );
+
+    await page.goto(`${BASE}/admin/requests/${SEED_TRACE_ID}`);
+    await expect(page.getByTestId("payload-summary")).toContainText(/too large to recover safely/i);
+    await expect(page.getByTestId("load-conversation")).toHaveCount(0);
+    await expect(page.getByTestId("load-request-body")).toHaveCount(0);
+  });
 });

@@ -422,6 +422,9 @@ export interface SessionContinuationRecord {
 
 export interface SessionRevisionMetaRecord extends SessionContinuationRecord {
   sessionRef: string;
+  // UTF-8 bytes the current recovery path must materialize through this revision.
+  // null means legacy storage cannot be measured safely, so callers fail closed.
+  recoveryWireBytes: number | null;
   fidelity: string;
   createdAt: Date;
 }
