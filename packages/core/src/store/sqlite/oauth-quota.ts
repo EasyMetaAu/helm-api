@@ -1,4 +1,9 @@
-import { type OAuthQuotaSnapshot, OAuthQuotaSnapshotSchema } from "@helm/shared";
+import {
+  type OAuthQuotaSnapshot,
+  OAuthQuotaSnapshotSchema,
+  packCodexQuotaMetadata,
+  unpackCodexQuotaMetadata,
+} from "@helm/shared";
 import { and, eq } from "drizzle-orm";
 import type { OAuthQuotaStore } from "../ports.js";
 import type { SqliteDb } from "./migrate.js";
@@ -15,6 +20,10 @@ export class SqliteOAuthQuotaStore implements OAuthQuotaStore {
   constructor(private readonly db: SqliteDb) {}
 
   async upsert(snapshot: Omit<OAuthQuotaSnapshot, "usageLimitedUntilMs">): Promise<void> {
+    // JSON blob of the Codex live metadata, or undefined when the snapshot carries
+    // none (a header PUSH) — in which case it is omitted from the SET so the last
+    // fresh PULL's metadata is preserved, exactly like resetCredits.
+    const metadata = packCodexQuotaMetadata(snapshot);
     const row = {
       providerId: snapshot.providerId,
       account: snapshot.account,
@@ -22,17 +31,19 @@ export class SqliteOAuthQuotaStore implements OAuthQuotaStore {
       capturedAt: snapshot.capturedAt,
       source: snapshot.source,
       ...(snapshot.resetCredits !== undefined ? { resetCredits: snapshot.resetCredits } : {}),
+      ...(metadata !== undefined ? { metadata } : {}),
     };
     const set = {
       windows: row.windows,
       capturedAt: row.capturedAt,
       source: row.source,
       ...(snapshot.resetCredits !== undefined ? { resetCredits: snapshot.resetCredits } : {}),
+      ...(metadata !== undefined ? { metadata } : {}),
     };
     // Note: usage_limited_until_ms is intentionally absent from BOTH the insert values
     // (defaults to NULL on a brand-new row) and the conflict SET — an observability
-    // refresh must never overwrite an active cooldown. reset_credits is updated only
-    // when the caller has a fresh Codex PULL count; Codex header PUSHes preserve it.
+    // refresh must never overwrite an active cooldown. reset_credits and metadata are
+    // updated only when the caller has a fresh Codex PULL; Codex header PUSHes preserve them.
     this.db
       .insert(oauthQuota)
       .values(row)
@@ -101,6 +112,7 @@ export class SqliteOAuthQuotaStore implements OAuthQuotaStore {
       source: row.source,
       usageLimitedUntilMs: row.usageLimitedUntilMs ?? null,
       resetCredits: row.resetCredits ?? null,
+      ...unpackCodexQuotaMetadata(row.metadata),
     });
   }
 }

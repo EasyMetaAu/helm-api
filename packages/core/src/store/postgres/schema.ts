@@ -466,6 +466,11 @@ export const oauthQuota = pgTable(
     usageLimitedUntilMs: bigint("usage_limited_until_ms", { mode: "number" }), // nullable
     // Codex only: available rate-limit reset credits captured from the usage PULL.
     resetCredits: integer("reset_credits"), // nullable
+    // Codex only: JSON blob of the live metadata folded onto the Admin quota
+    // response (planType, credits, resetCreditDetails, individualLimit,
+    // additionalLimits, rateLimitReachedType). Persisted so the providers page
+    // renders the full card after a restart instead of waiting for a refresh.
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(), // nullable
   },
   (t) => [primaryKey({ columns: [t.providerId, t.account] })],
 );

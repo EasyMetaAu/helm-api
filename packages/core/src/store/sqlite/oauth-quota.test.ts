@@ -72,6 +72,35 @@ describe("SqliteOAuthQuotaStore", () => {
     close();
   });
 
+  it("round-trips Codex live metadata (planType/credits/individualLimit) and preserves it when a header snapshot omits it", async () => {
+    const { store, close } = freshStore();
+    await store.upsert(
+      snap({
+        providerId: "openai-codex",
+        source: "codex",
+        planType: "pro",
+        credits: { hasCredits: false, unlimited: false, balance: "0" },
+        individualLimit: { limit: "100", used: "40", remainingPercent: 60, resetsAtMs: 9_000 },
+        additionalLimits: [{ limitId: "web_search", limitName: "Web search" }],
+        rateLimitReachedType: "rate_limit_reached",
+      }),
+    );
+    const got = await store.get("openai-codex", "a");
+    expect(got?.planType).toBe("pro");
+    expect(got?.credits).toMatchObject({ balance: "0", unlimited: false });
+    expect(got?.individualLimit).toMatchObject({ remainingPercent: 60 });
+    expect(got?.additionalLimits).toHaveLength(1);
+    expect(got?.rateLimitReachedType).toBe("rate_limit_reached");
+
+    // A Codex header PUSH carries no live metadata (undefined) → must NOT wipe it,
+    // same preserve-on-omit contract as resetCredits.
+    await store.upsert(
+      snap({ providerId: "openai-codex", source: "codex-headers", capturedAt: 999 }),
+    );
+    expect((await store.get("openai-codex", "a"))?.planType).toBe("pro");
+    close();
+  });
+
   it("getAll returns every account's latest snapshot; get is null when absent", async () => {
     const { store, close } = freshStore();
     expect(await store.get("anthropic", "missing")).toBeNull();
