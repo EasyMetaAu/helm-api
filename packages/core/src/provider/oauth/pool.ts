@@ -270,6 +270,26 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     return until != null && nowMs < until;
   }
 
+  // A "spend remaining credits" account that IS currently past its usage-limit park.
+  // usageLimited() waves it through the eligibility gate (returns false above), but it
+  // is serving off paid credits / a saturated plan — real money. It must sink below any
+  // healthy account so credits are the LAST resort, not a co-equal round-robin peer.
+  // This is the runtime twin of the amber "still spending credits" providers badge.
+  function spendingWhileLimited(member: OAuthPoolMember, nowMs: number): boolean {
+    if (member.allowSpendRemainingCredits !== true) return false;
+    const until = member.usageLimitedUntilMs;
+    return until != null && nowMs < until;
+  }
+
+  // Prefer healthy accounts; only expose the credit-spending sink tier when NO healthy
+  // account is eligible. Applied to the general candidate flow — a stateful sticky
+  // continuation (isStrictAccountSticky) deliberately bypasses this on the full
+  // `eligible` set so a pinned conversation is never diverted mid-flight.
+  function preferHealthyTier(eligible: PoolEntry[], nowMs: number): PoolEntry[] {
+    const healthy = eligible.filter((e) => !spendingWhileLimited(e.member, nowMs));
+    return healthy.length > 0 ? healthy : eligible;
+  }
+
   function retryableAccountLimited(account: string, nowMs: number): boolean {
     const until = retryableAccountFailures.get(account);
     if (until === undefined) return false;
@@ -823,7 +843,11 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     const nowMs = now();
     const model = opts.model ?? null;
     const eligible = eligibleEntries(nowMs, exclude, model);
-    const capacityTier = preferredCapacityTier(eligible, opts.avoidBusy === true);
+    // General selection prefers healthy accounts; the credit-spending sink tier only
+    // surfaces when no healthy account is left. A strict-sticky continuation (below)
+    // still uses the full `eligible` set so a pinned conversation is never diverted.
+    const preferred = preferHealthyTier(eligible, nowMs);
+    const capacityTier = preferredCapacityTier(preferred, opts.avoidBusy === true);
     const selectionBase = {
       affinityKeySource: affinityKeySource(stickyKey ?? null),
       capacityAvoided: capacityTier.capacityAvoided,

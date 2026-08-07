@@ -1003,6 +1003,82 @@ describe("createOAuthPoolClient — account selection", () => {
     expect(calls).toEqual(["a"]);
   });
 
+  it("sinks a limited-but-spending account below a healthy sibling (all strategies)", async () => {
+    // "a": rate-limited but opted in to spend remaining credits (real money).
+    // "b": healthy subscription account. Even though "a" has BETTER priority and is
+    // less-recently-used, the pool must prefer "b" — burning credits is the last
+    // resort. Assert across every strategy so it never depends on use_expiring luck.
+    for (const strategy of ["balanced", "manual_priority", "low_risk", "use_expiring"] as const) {
+      const calls: string[] = [];
+      const pool = createOAuthPoolClient({
+        members: [
+          {
+            ...member("a", 1, true, calls), // better priority
+            usageLimitedUntilMs: 9_000,
+            allowSpendRemainingCredits: true,
+          },
+          { ...member("b", 2, true, calls) }, // healthy, worse priority
+        ],
+        selectionStrategy: strategy,
+        now: () => 1_000,
+      });
+      await pool.chatCompletion(REQ);
+      expect(calls, `strategy=${strategy}`).toEqual(["b"]);
+    }
+  });
+
+  it("falls back to the limited-but-spending account when no healthy account is left", async () => {
+    // Only the spending account is eligible (sibling is hard-limited, no opt-in) →
+    // the sink tier must still yield it rather than fail closed.
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        {
+          ...member("a", 1, true, calls),
+          usageLimitedUntilMs: 9_000,
+          allowSpendRemainingCredits: true,
+        },
+        { ...member("b", 2, true, calls), usageLimitedUntilMs: 9_000 },
+      ],
+      now: () => 1_000,
+    });
+    await pool.chatCompletion(REQ);
+    expect(calls).toEqual(["a"]);
+  });
+
+  it("a stateful previous_response_id continuation still pins to its limited-but-spending account", async () => {
+    // Correctness > waste-avoidance: a previous_response_id pinned to the spending
+    // account must NOT be diverted to a healthy sibling mid-conversation.
+    const calls: string[] = [];
+    let clock = 1_000;
+    const responseMember = (account: string, spend = false): OAuthPoolMember => ({
+      account,
+      priority: 50,
+      schedulable: true,
+      ...(spend ? { allowSpendRemainingCredits: true } : {}),
+      client: {
+        async chatCompletion(_req: ChatCompletionRequest) {
+          calls.push(account);
+          return { id: `resp-${account}`, served_by: account };
+        },
+        async *chatCompletionStream(_req: ChatCompletionRequest) {
+          calls.push(account);
+          yield `data: ${account}\n\n`;
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      // "a" opted in to spend remaining credits; "b" is a healthy sibling.
+      members: [responseMember("a", true), responseMember("b")],
+      now: () => clock,
+    });
+    await pool.chatCompletion(REQ); // → a; seeds resp-a → a affinity
+    pool.setUsageLimit("a", 50_000); // a hits its limit but keeps spending → would be sunk
+    clock = 2_000;
+    await pool.chatCompletion({ ...USER_REQ, previous_response_id: "resp-a" });
+    expect(calls).toEqual(["a", "a"]); // pinned to a, NOT diverted to healthy b
+  });
+
   it("setUsageLimit parks a live member; null un-parks it (the reset path)", async () => {
     const calls: string[] = [];
     let clock = 1_000;
