@@ -978,7 +978,14 @@
                 {/if}
                 {#if usageLimit}
                   <div class="mt-1">
-                    <span class="badge-error">{$t('Rate limited')}</span>
+                    {#if row.account.allowSpendRemainingCredits}
+                      <!-- Toggle on: the account still serves off its remaining credits
+                           despite the limit, so the pill reflects that instead of a plain
+                           "parked" rate-limited state. -->
+                      <span class="badge-warning">{$t('Rate limited · still spending credits')}</span>
+                    {:else}
+                      <span class="badge-error">{$t('Rate limited')}</span>
+                    {/if}
                     {#if usageLimitRecovery}
                       <div class="text-[10px] text-ink-muted">
                         {usageLimit.label

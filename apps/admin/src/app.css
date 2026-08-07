@@ -188,6 +188,9 @@
   .badge-error {
     @apply inline-flex items-center rounded bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700;
   }
+  .badge-warning {
+    @apply inline-flex items-center rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700;
+  }
   .badge-neutral {
     @apply inline-flex items-center rounded bg-slate-200 px-2 py-0.5 text-xs font-medium text-slate-600;
   }
