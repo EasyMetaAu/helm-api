@@ -69,6 +69,10 @@ export interface AccountSettings {
   // Codex only: when true, auto-consume one rate-limit reset credit the moment the
   // weekly window saturates (≥100%). Unset/false = never auto-reset (manual only).
   autoReset?: boolean;
+  // When true, keep routing to this account even while it is usage-limited (rate-limited
+  // / weekly window saturated), so its remaining credits are spent instead of the account
+  // being parked until reset. Unset/false = park normally on the usage limit.
+  allowSpendRemainingCredits?: boolean;
   // Per-account Fast mode. Anthropic accounts force `speed:"fast"`; Codex accounts
   // force Responses `service_tier:"priority"` on every request served by this account.
   fastMode?: boolean;

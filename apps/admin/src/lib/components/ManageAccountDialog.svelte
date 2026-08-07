@@ -226,6 +226,7 @@
   const isCodex = $derived(providerId === 'openai-codex');
   const supportsFast = $derived(providerId === 'anthropic' || providerId === 'openai-codex');
   let autoReset = $state<boolean>(false);
+  let allowSpendRemainingCredits = $state<boolean>(false);
   let fastMode = $state<boolean>(false);
 
   async function loadSchedule(): Promise<void> {
@@ -235,12 +236,14 @@
     priority = '50';
     schedulable = true;
     autoReset = false;
+    allowSpendRemainingCredits = false;
     fastMode = false;
     try {
       const s = await getAccountSchedule(providerId, account);
       priority = String(s.priority);
       schedulable = s.schedulable;
       autoReset = s.autoReset;
+      allowSpendRemainingCredits = s.allowSpendRemainingCredits;
       fastMode = s.fastMode;
     } catch (e) {
       scheduleError = e instanceof Error ? e.message : $t('Failed to load schedule');
@@ -263,6 +266,7 @@
         priority: p,
         schedulable,
         autoReset,
+        allowSpendRemainingCredits,
         fastMode,
       });
       dirty = true;
@@ -604,6 +608,17 @@
               )}
             </p>
           {/if}
+          <label class="checkbox-field" data-testid="allow-spend-remaining-credits-toggle">
+            <input type="checkbox" class="checkbox" bind:checked={allowSpendRemainingCredits} />
+            <span class="text-sm text-ink-body"
+              >{$t('Keep spending remaining credits when rate-limited')}</span
+            >
+          </label>
+          <p class="field-help">
+            {$t(
+              'When enabled, Helm keeps routing to this account even after it is rate-limited, so its remaining credits are used instead of the account sitting idle until reset. If the account is truly out of budget the provider still refuses and Helm fails over to another account.',
+            )}
+          </p>
           <div class="card-actions">
             {#if scheduleSaved}
               <span class="badge-ok" role="status">{$t('Saved')}</span>

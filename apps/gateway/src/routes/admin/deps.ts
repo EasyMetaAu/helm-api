@@ -121,6 +121,9 @@ export interface OAuthAdminStatus {
     // Codex only: auto-consume a reset credit when the weekly window saturates
     // (default false). Folded in so the providers page can pre-fill the reset dialog.
     autoReset: boolean;
+    // When true, keep spending this account's remaining credits even while it is
+    // usage-limited (never park it on the rate limit). Folded in for inline edit.
+    allowSpendRemainingCredits: boolean;
     // Per-account Fast mode, folded in so the providers page can inline-edit it.
     fastMode: boolean;
     // The account's egress proxy, REDACTED (principle 7: never the password, only
@@ -239,6 +242,7 @@ export interface OAuthAdminAccess {
     priority?: number;
     schedulable?: boolean;
     autoReset?: boolean;
+    allowSpendRemainingCredits?: boolean;
     fastMode?: boolean;
   }): Promise<void>;
   // Global account-pool selection strategy. Defaults to balanced when no operator
@@ -348,6 +352,8 @@ export interface AccountScheduleView {
   schedulable: boolean;
   // Codex only: auto-consume a reset credit when the weekly window saturates.
   autoReset: boolean;
+  // When true, keep spending this account's remaining credits even while usage-limited.
+  allowSpendRemainingCredits: boolean;
   // Per-account Fast mode.
   fastMode: boolean;
 }

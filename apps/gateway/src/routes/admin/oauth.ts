@@ -1003,7 +1003,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     }
   });
 
-  // PUT /oauth/:provider/account { account?, priority?, schedulable?, autoReset?, fastMode? } -> 204
+  // PUT /oauth/:provider/account { account?, priority?, schedulable?, autoReset?, allowSpendRemainingCredits?, fastMode? } -> 204
   // Persist the account's pool scheduling. priority must be a finite integer; either
   // field may be omitted to leave it unchanged (fail-closed on a malformed value).
   app.put("/admin/api/oauth/:provider/account", async (c) => {
@@ -1014,6 +1014,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       priority?: unknown;
       schedulable?: unknown;
       autoReset?: unknown;
+      allowSpendRemainingCredits?: unknown;
       fastMode?: unknown;
     };
     const account =
@@ -1046,6 +1047,13 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       }
       autoReset = body.autoReset;
     }
+    let allowSpendRemainingCredits: boolean | undefined;
+    if (body.allowSpendRemainingCredits !== undefined) {
+      if (typeof body.allowSpendRemainingCredits !== "boolean") {
+        return c.json({ error: "allowSpendRemainingCredits must be a boolean" }, 400);
+      }
+      allowSpendRemainingCredits = body.allowSpendRemainingCredits;
+    }
     let fastMode: boolean | undefined;
     if (body.fastMode !== undefined) {
       if (typeof body.fastMode !== "boolean") {
@@ -1060,6 +1068,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         priority,
         schedulable,
         autoReset,
+        allowSpendRemainingCredits,
         fastMode,
       });
       // Rebuild so the new priority / schedulable reorders (or parks) this account now.

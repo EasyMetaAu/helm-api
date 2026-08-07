@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-08-07 · OAuth 账号「限流后继续用剩余点数」每账号开关（OAuth pool / account settings，docs/06，原则 3/6）
+
+- **需求**：账号周限 100%（`已限流`）但仍想榨干剩余点数——加一个每账号开关，开了就别把它从池里 park 掉。
+- **实现**：`AccountSettings.allowSpendRemainingCredits`（可选布尔）→ 合成时喂进 `OAuthPoolMember.allowSpendRemainingCredits` → pool 的 `usageLimited()` 首行：`if (member.allowSpendRemainingCredits) return false`。整条读侧只有这一处 gate（`eligibleEntries` 的 `!usageLimited`），所以一处 bypass 即全覆盖（chat/stream/native/responses/realtime 都走 `select()`）。
+- **刻意的边界**：只绕过**账号级 usage-limit park**（`usageLimitedUntilMs`）。model-scoped（`scopedRateLimits`）与 transient retryable（`retryableAccountFailures`）冷却**不动**——它们是不同轴，绕过会误伤。写侧（park 的记录）也不碰：账号真没预算时上游照样 429，pool 正常 in-pool failover 到兄弟账号，不会死循环打爆上游。
+- **拍板（AskUserQuestion）**：① 忽略**全部** usage-limit park（不只周限）；② **每账号**开关，跟 `autoReset`/`fastMode` 并列。开关对所有 OAuth provider 生效（非 Codex 专属），所以 ManageAccountDialog 里是无条件 toggle。
+- **布线**镜像 `autoReset`：account-settings → server 合成 → admin-oauth 的 `getAccountSchedule`/`setAccountSchedule` seam → deps.ts 三处类型（list-item / setAccountSchedule 入参 / `AccountScheduleView`）→ PUT 路由校验（非布尔 400）→ admin client `oauth.ts`（list-item 可选、schedule 必填，跟 `autoReset?`/`autoReset` 的可选/必填分裂一致）→ Svelte toggle + 3 条 i18n 串（7 语已对齐；`i18n:translate` 离线失败无碍，key 已由 `i18n:update` 填英文占位）。
+- **TDD**：pool.test 先加失败用例（parked 成员带 flag 仍应被选中→原本落到兄弟）→ Red→加 flag+bypass→Green（99/99）。admin-oauth/oauth 路由测试补 round-trip 与 400 校验。
+- **坑**：worktree 内编辑必须用 worktree 绝对路径——首次 Edit 误落主库（共享 checkout），已 `git checkout --` 干净回退后在 worktree 重做。
+
 ## 2026-08-07 · 真实上游超长溢出在链耗尽时胜出终态，修复客户端无法压缩（Provider execution / protocol errors，docs/04/05/07，原则 3/5/8）
 
 - **现场（box `c211e4a1`，v0.28.42）**：Claude Code 发 ~102 万 token，Anthropic（链首、最大窗口）返回真实 400 `prompt is too long: 1022145 tokens > 1000000 maximum`（**无** `context_length_exceeded` code）。helm 把它当可重试 `context_too_small` 继续 fallback；`xai/grok-4.5` 因独立翻译 bug 返回 422，把 `onlyContextOrCapabilitySkips` 打成 false，终态选择器降级为合成 `all_providers_failed / 502`。客户端拿不到真实 400 → 认不出该压缩 → 卡死。

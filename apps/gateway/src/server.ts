@@ -1232,6 +1232,7 @@ export async function synthesizeOAuthProviders(
         // rebuild). A past timestamp is harmless — select() treats now>=until as
         // eligible — so stale seeds self-clear.
         usageLimitedUntilMs: quotaSeed?.usageLimitedUntilMs ?? null,
+        allowSpendRemainingCredits: s.allowSpendRemainingCredits === true,
         quotaWindows: quotaSeed?.windows,
         quotaCapturedAtMs: quotaSeed?.capturedAt,
         quotaResetCredits: quotaSeed?.resetCredits ?? null,

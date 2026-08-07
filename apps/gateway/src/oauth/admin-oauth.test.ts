@@ -1384,12 +1384,13 @@ describe("createOAuthAdmin", () => {
         priority: 50,
         schedulable: true,
         autoReset: false,
+        allowSpendRemainingCredits: false,
         fastMode: false,
       },
     );
   });
 
-  it("setAccountSchedule persists priority + schedulable + autoReset + fastMode; round-trips", async () => {
+  it("setAccountSchedule persists priority + schedulable + autoReset + allowSpendRemainingCredits + fastMode; round-trips", async () => {
     const { tokens, config } = makeStores();
     const admin = createOAuthAdmin({ store: tokens, encKey: KEY, config });
     await admin.setAccountSchedule({
@@ -1398,12 +1399,14 @@ describe("createOAuthAdmin", () => {
       priority: 10,
       schedulable: false,
       autoReset: true,
+      allowSpendRemainingCredits: true,
       fastMode: true,
     });
     expect(await admin.getAccountSchedule({ providerId: "anthropic", account: "a1" })).toEqual({
       priority: 10,
       schedulable: false,
       autoReset: true,
+      allowSpendRemainingCredits: true,
       fastMode: true,
     });
   });
@@ -1431,6 +1434,7 @@ describe("createOAuthAdmin", () => {
         priority: 50,
         schedulable: false,
         autoReset: false,
+        allowSpendRemainingCredits: false,
         fastMode: false,
       },
     );
@@ -1458,6 +1462,7 @@ describe("createOAuthAdmin", () => {
         priority: 5,
         schedulable: true,
         autoReset: false,
+        allowSpendRemainingCredits: false,
         fastMode: false,
       },
     );
@@ -1471,6 +1476,7 @@ describe("createOAuthAdmin", () => {
         priority: 5,
         schedulable: false,
         autoReset: false,
+        allowSpendRemainingCredits: false,
         fastMode: false,
       },
     );

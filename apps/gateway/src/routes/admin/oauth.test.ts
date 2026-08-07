@@ -44,6 +44,7 @@ function fullSeam(over: Partial<OAuthAdminAccess> = {}): OAuthAdminAccess {
       priority: 50,
       schedulable: true,
       autoReset: false,
+      allowSpendRemainingCredits: false,
       fastMode: false,
     })),
     setAccountSchedule: vi.fn(async () => {}),
@@ -2045,11 +2046,26 @@ describe("admin OAuth routes — mutations + validation", () => {
       },
     );
     expect(badFastMode.status).toBe(400);
+    const badSpend = await app({ oauth: fullSeam() }).request(
+      "/admin/api/oauth/anthropic/account",
+      {
+        method: "PUT",
+        headers: JSONH,
+        body: JSON.stringify({ allowSpendRemainingCredits: "yes" }),
+      },
+    );
+    expect(badSpend.status).toBe(400);
     const seam = fullSeam();
     const ok = await app({ oauth: seam }).request("/admin/api/oauth/openai-codex/account", {
       method: "PUT",
       headers: JSONH,
-      body: JSON.stringify({ priority: 10, schedulable: false, autoReset: true, fastMode: true }),
+      body: JSON.stringify({
+        priority: 10,
+        schedulable: false,
+        autoReset: true,
+        allowSpendRemainingCredits: true,
+        fastMode: true,
+      }),
     });
     expect(ok.status).toBe(204);
     expect(seam.setAccountSchedule).toHaveBeenCalledWith({
@@ -2058,6 +2074,7 @@ describe("admin OAuth routes — mutations + validation", () => {
       priority: 10,
       schedulable: false,
       autoReset: true,
+      allowSpendRemainingCredits: true,
       fastMode: true,
     });
   });
