@@ -1269,12 +1269,18 @@ export function upstreamErrorMessage(raw: unknown): string | null {
   return null;
 }
 
-// A model-specific context-window rejection means THIS candidate cannot serve the
-// request, but a later fallback with a larger window may still succeed. Some streaming
-// providers emit this as an in-band SSE error with no HTTP status, so classify from the
-// provider error body/message rather than relying on status alone.
+// A REAL upstream rejection that the request is over the model's context window. This
+// SHORT-CIRCUITS to a client 400 (the request as sent is over a hard ceiling), so it must
+// never fire on a transient/retryable fault: 429 (rate limit), 408 (request timeout), 5xx
+// (server error) are all retryable on a healthy sibling and must fault the breaker — even if
+// the body coincidentally carries an overflow marker (an upstream wrapping a context-related
+// overload as a 500). So ALLOWLIST the deterministic request-shape statuses (400/413/422),
+// exactly like `isUpstreamRequestRejection`, plus `null` for in-band SSE overflow errors that
+// carry no HTTP status. Every other numeric status falls through to normal fallback.
 export function isContextWindowRejection(err: unknown): boolean {
   if (!(err instanceof UpstreamError)) return false;
+  const status = err.upstreamStatus;
+  if (status !== null && status !== 400 && status !== 413 && status !== 422) return false;
   if (upstreamErrorCode(err.providerRaw) === "context_length_exceeded") return true;
   // Strong, unambiguous markers may be matched anywhere in the body — they don't occur as
   // innocent echoed request content (some in-band SSE errors only surface them in the raw
@@ -1315,16 +1321,6 @@ export function isUpstreamRequestRejection(err: unknown): boolean {
   const text = `${err.message} ${rawErrorText(err.providerRaw)}`.toLowerCase();
   return text.includes("max allowed size");
 }
-
-// Anthropic's authoritative hard-maximum phrasing: "prompt is too long: N tokens > M
-// maximum" (comma grouping in the counts tolerated). This is an actionable compaction
-// signal — the request as sent is over a real ceiling — so once the candidate chain is
-// exhausted the terminal selector returns it as a client-visible `invalid_request` (400)
-// even if an UNRELATED sibling also failed, instead of burying it as all_providers_failed
-// (box c211e4a1). It does NOT short-circuit the chain: a larger-window sibling may still
-// serve the request (the same shape is emitted by 200k models, not only the 1M ceiling),
-// so fallback continues; this only governs which structured error wins at exhaustion.
-const ABSOLUTE_CONTEXT_MAX_PATTERN = /prompt is too long[^0-9]*[\d,]+\s*tokens?\s*>\s*[\d,]+/i;
 
 function isReasoningHistoryRejection(err: unknown): boolean {
   if (!(err instanceof UpstreamError)) return false;
@@ -1612,45 +1608,27 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     // the retryable aggregate instead of claiming compaction is guaranteed to help.
     let onlyContextOrCapabilitySkips = true;
     const contextConfirmations = new Set<string>();
+    // A per-model context overflow discovered by a PRE-FLIGHT estimate (approximate token
+    // count or exact count_tokens). A real upstream overflow no longer flows here — it
+    // short-circuits with a verbatim 400 at the attempt site. So `contextOverflow` only
+    // records conservative estimates: the terminal below turns them into a compaction 400
+    // ONLY when every rejection was a context/capability skip, or when ≥2 candidates
+    // independently confirm the same overflow.
     let contextOverflow:
       | {
           message: string;
           providerRaw: Record<string, unknown> | null;
         }
       | undefined;
-    // The shaped "prompt is too long: N > M" message + raw from a REAL upstream response,
-    // if one was seen. Tracked SEPARATELY from `contextOverflow` (which also collects
-    // pre-flight approximate estimates that synthesize the same phrasing) so the terminal
-    // bypass — "return a compaction 400 even when mixed with an unrelated provider failure"
-    // (box c211e4a1) — can never be satisfied by an approximate estimate. Both the shape AND
-    // the authoritative provenance must belong to the SAME record, which is exactly what this
-    // captures. A real 5xx alongside a mere estimate therefore still yields all_providers_failed.
-    let authoritativeShapedOverflow:
-      | { message: string; providerRaw: Record<string, unknown> | null }
-      | undefined;
     const rememberContextOverflow = (
       message: string,
       providerRaw: Record<string, unknown> | null,
       confirmationKey: string | undefined,
-      authoritative: boolean,
     ): void => {
       if (confirmationKey !== undefined) contextConfirmations.add(confirmationKey);
-      if (
-        authoritative &&
-        authoritativeShapedOverflow === undefined &&
-        ABSOLUTE_CONTEXT_MAX_PATTERN.test(message)
-      ) {
-        authoritativeShapedOverflow = { message, providerRaw };
-      }
       if (contextOverflow === undefined) {
         contextOverflow = { message, providerRaw };
         return;
-      }
-      if (
-        !ABSOLUTE_CONTEXT_MAX_PATTERN.test(contextOverflow.message) &&
-        ABSOLUTE_CONTEXT_MAX_PATTERN.test(message)
-      ) {
-        contextOverflow.message = message;
       }
       if (contextOverflow.providerRaw === null && providerRaw !== null) {
         contextOverflow.providerRaw = providerRaw;
@@ -1782,7 +1760,6 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 )} maximum`,
                 null,
                 undefined,
-                false, // approximate estimate, not an authoritative upstream verdict
               );
             }
             attempts.push(skipRow(alias, verdict.skipReason ?? "capability", elapsed()));
@@ -1881,13 +1858,15 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             const inputTokens = countTokensInputTokens(tokenCount);
             if (inputTokens !== null && inputTokens > exactContextLimit) {
               capabilityPruned = true;
+              // per-model count_tokens preflight; a larger sibling may still fit, so this
+              // is a fall-back skip (NOT a short-circuit). ≥2 such confirmations at the
+              // terminal still yield a compaction 400.
               rememberContextOverflow(
                 `prompt is too long: ${Math.trunc(inputTokens)} tokens > ${Math.trunc(
                   exactContextLimit,
                 )} maximum`,
                 null,
                 contextConfirmationKey,
-                false, // per-model count_tokens preflight; a larger sibling may still fit
               );
               attempts.push(skipRow(alias, "context_too_small", elapsed()));
               continue;
@@ -2310,36 +2289,44 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             continue;
           }
 
-          // Model context window overflow: THIS candidate cannot serve the request,
-          // but a later fallback with a LARGER window can (the same "prompt is too long:
-          // N > M" shape is emitted by 200k models too, not only the 1M ceiling — so this
-          // is NOT proof the whole chain overflows). Treat it like a late-discovered
-          // capability skip, not provider health: no breaker failure, no red provider
-          // error row, and no execution-fallback count. The chain-exhausted terminal below
-          // returns the compaction-compatible 400 once no larger sibling can serve it.
+          // A REAL upstream confirmed the request is over a hard context ceiling
+          // ("prompt is too long: N > M"). Do NOT fall back: a later, larger-window
+          // candidate would just "catch" the oversized request and return 200, so the
+          // client never sees a 4xx and never triggers its own context compaction (fatal
+          // under native passthrough — Claude Code / Codex rely on the 400 to compact).
+          // Short-circuit with the upstream's structured error VERBATIM as 400
+          // invalid_request. No breaker fault (the upstream is healthy — the request is
+          // what's wrong), no execution-fallback count. This mirrors the
+          // isUpstreamRequestRejection short-circuit directly below; a per-model
+          // count_tokens/approximate preflight (which may be conservative) is handled
+          // separately and still falls back.
           if (isContextWindowRejection(err)) {
-            capabilityPruned = true;
             const detail = errorDetailOf(err);
-            rememberContextOverflow(
-              upstreamErrorMessage(detail.provider_raw) ?? detail.message,
-              detail.provider_raw,
-              upstreamErrorCode(detail.provider_raw)?.toLowerCase() === "context_length_exceeded"
-                ? contextConfirmationKey
-                : undefined,
-              true, // authoritative: a real upstream response reported the overflow
-            );
             attempts.push({
               alias,
-              skipped: true,
-              skip_reason: "context_too_small",
+              skipped: false,
+              skip_reason: null,
               status: "error",
-              error_class: null,
+              error_class: "invalid_request",
               latency_ms: elapsed(),
               cost_usd: null,
               error_detail: detail,
               ...attemptTelemetry,
             });
-            continue;
+            return {
+              attempts,
+              final: {
+                status: "error",
+                error: makeHelmError({
+                  error_class: "invalid_request",
+                  message: upstreamErrorMessage(detail.provider_raw) ?? detail.message,
+                  trace_id: correlationTraceId(req),
+                  provider_raw: detail.provider_raw,
+                }),
+              },
+              body: null,
+              stream: null,
+            };
           }
 
           // DeepSeek-style thinking mode is candidate-specific: when a fallback target
@@ -2466,22 +2453,12 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       contextOverflow !== undefined &&
       (onlyContextOrCapabilitySkips || contextConfirmations.size >= 2)
     ) {
+      // Only PRE-FLIGHT estimates reach here (a real upstream overflow already short-circuited
+      // with a verbatim 400 at the attempt site). A conservative estimate becomes a compaction
+      // 400 only when every rejection was a context/capability skip, or ≥2 candidates confirm.
       errorClass = "invalid_request";
       message = contextOverflow.message;
       providerRaw = contextOverflow.providerRaw;
-    } else if (authoritativeShapedOverflow !== undefined) {
-      // A REAL upstream response carried the exact hard-maximum shape "prompt is too long:
-      // N > M". Emit the compaction-compatible 400 VERBATIM even when the chain also had an
-      // UNRELATED provider failure (box c211e4a1: a grok 422 must NOT bury it as
-      // all_providers_failed and leave Claude Code / Codex unable to compact). The
-      // shape AND the authoritative provenance belong to the same record, so a pre-flight
-      // APPROXIMATE estimate (which synthesizes the same phrasing) can never reach here and
-      // override a genuine provider 5xx. Larger-window fallback already ran first (a shaped
-      // overflow is a context skip, not a short-circuit); this only picks the terminal once
-      // the chain is truly exhausted.
-      errorClass = "invalid_request";
-      message = authoritativeShapedOverflow.message;
-      providerRaw = authoritativeShapedOverflow.providerRaw;
     } else if (
       !attemptedAny &&
       capabilityPruned &&
