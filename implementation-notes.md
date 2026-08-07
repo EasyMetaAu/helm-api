@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-08-07 · context_management 转发给 generic responses 导致 grok 422（Protocol / provider execution，docs/04/05，原则 3/5/8）
+
+- **现场**：anthropic_messages 请求 fallback 到 xAI grok-4.5（generic openai_responses profile）时，`context_management` 以 Anthropic 对象形状 `{ edits: [...] }` 发出，xAI Responses 反序列化要 array → 422 `invalid type: map, expected a sequence`（正是上一条 prompt-too-long 现场里 grok 那个无关 422）。
+- **根因**：`context_management` 是 Anthropic 原生上下文编辑控制，因 Codex GPT-5.6 订阅工作（`680e570a`）被加进 `openai_responses` 转发 allowlist——供 **Codex 官方**端点消费；但 **generic** profile（grok）继承同一 allowlist，不认这个字段且形状不符。
+- **修复（两条路径都堵）**：(1) **翻译路径** `renderProviderRawForTarget`：对 `targetIsGenericResponsesProfile` 从 allowed 删除 `context_management`，与其上方既有 `responses_input_items` 删除同理同位。(2) **同协议 passthrough 路径**（Codex review 补漏）：`openai_responses → generic grok` 同协议可 verbatim passthrough 绕过 allowlist；在 `prepareNativeRequestForUpstream`（native body 唯一 chokepoint，已有 Codex/Anthropic sanitizer）新增：generic profile 时删除 body 里的 `context_management`（任何形状；对 generic 都是不可执行的 Anthropic 控制），mutation 记 `context_management_stripped_for_generic`。Codex 官方（非 generic）两路都保留。
+- **测试**：三向锁定——翻译 strip 到 generic xai（mutation `provider_raw_stripped_for_target`）+ 非 generic Codex-official 保留 + 同协议 passthrough strip（mutation `context_management_stripped_for_generic`）。execute.test.ts 169 全绿；execute/pipeline/responses/core-responses 合计 539 全绿。
+- **遗留**：allowlist 里 `text`/`reasoning_config`/`truncation`/`logit_bias`/`include`/`responses_tools`/`container` 等对 generic provider 是否有同类 array/object 形状风险，Codex 抽查未确认第二例，未逐一核；本次只修实测触发的 `context_management`。
+
 ## 2026-08-07 · OAuth 账号「限流后继续用剩余点数」每账号开关（OAuth pool / account settings，docs/06，原则 3/6）
 
 - **需求**：账号周限 100%（`已限流`）但仍想榨干剩余点数——加一个每账号开关，开了就别把它从池里 park 掉。
@@ -91,15 +99,9 @@
 - **维护边界**：SQLite Session prune 继续小批续跑；PostgreSQL 每次 cleanup tick 最多处理 128 个物理行、每批 16 行，并用持久 marker 续跑。scheduled cleanup 与 auto-VACUUM 在开始前检查压力，VACUUM 排空活动后、真正重写数据库前再次检查；压力恶化时不执行也不误记当天成功。手动维护语义保持不变。
 - **模式切换**：切换全局 capture generation 后，已排队但尚未 flush 的 payload/Session 正文写入会被丢弃，脱敏 telemetry 仍保存。`part=meta` 不读取正文。（原先此处误把“全局 metadata-only 视为 hard-off、任何 key override 都不能绕过”写成契约——与 #675 的 per-key 覆盖优先级冲突，已于 2026-08-04 更正，见顶部条目。）
 
-## 2026-07-31 · 保证 Session 捕获且删除累计字节上限（Telemetry / Session Store，docs/07/11，用户明确要求）
-
-- **决定**：按用户要求删除单 Session 64 MiB 累计存储上限，不用更大的常量替代。共享 Session 捕获、SQLite 与 PostgreSQL adapter 都不再因 `stored_bytes` 拒绝新 revision 或响应回填；`stored_bytes` 只继续用于观测。现有 SQLite `INTEGER` 与 PostgreSQL `BIGINT` 均无需迁移。
-- **Session ID**：当所有可信客户端标识都缺失或不可用时，以 `account_id + api_key_id + request_id` 派生一个只覆盖当前请求的 Session；这样保证正文落库，同时避免用内容或缓存亲和键把无关会话错误合并。`prompt_cache_key` 可能跨会话复用，因此不作为默认 Session 身份。
-- **回滚兼容**：fallback 沿用旧版已接受的通用 `session-id` 持久化来源，不新增 DecisionRecord 枚举值；内部 ref 使用独立 `request_id` 哈希域，外部 ID 使用客户端不可占用的 `helm-request:` 保留前缀加请求哈希，避免与真实 `session-id` 的 ref 或数据库唯一键碰撞。v0.28.26 回滚后仍能读取新版写入的遥测记录。
-- **边界**：单次请求/响应仍受进程动态 capture-body 内存预算保护，避免一个在途正文直接造成 OOM；10,000 revision 计数上限与既有 retention cleanup 保持不变。本次不补写已经漏掉的历史 revision，因为正文未保存时无法可靠恢复。生产必须切换到 `capture_sessions=true`、`capture_payloads=false` 才会使用该增量模式。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-07-31 · 保证 Session 捕获且删除累计字节上限**：按用户要求删除单 Session 64 MiB 累计上限（不换更大常量），SQLite/PG adapter 不再因 `stored_bytes` 拒 revision，`stored_bytes` 仅观测，无迁移；缺可信标识时以 `account_id+api_key_id+request_id` 派生仅本请求的 Session（`prompt_cache_key` 可跨会话复用故不作身份），外部 ID 用 `helm-request:` 保留前缀防碰撞，v0.28.26 回滚仍可读；单请求仍受动态 capture-body 内存预算保护，10k revision 上限不变，生产需 `capture_sessions=true`+`capture_payloads=false` 才走增量。完整原文经 git history 回溯。
 - **2026-07-31 · API key 单独覆盖请求内容存储模式**：`api_keys.request_content_mode` nullable 枚举列，`NULL` 继承实时全局、`none`/`payload`/`session` 显式覆盖；鉴权身份把覆盖值传到 Chat/Messages/Responses(含 compact)/Gemini/Images/Interactions/Admin Replay 复用同一 capture helper，只换本次请求 getter；`payload_retention_days` 仍全局，无 per-key retention（2026-08-04 修正其优先级回归，见顶部）。完整原文经 git history 回溯。
 - **2026-07-31 · 请求列表记录并显示客户端正文大小**：新增可选 `request_body_bytes`（客户端 wire UTF-8 字节，非 Content-Length/token/压缩量），随脱敏 DecisionRecord 保存；Admin 表按 B/KB/MB 展示，旧记录显示 `—`；完整原文通过 git history 回溯。
 - **2026-07-29 · 生产韧性：持续小批清理 + 无丢弃背压 + 执行 Token 租约 + 完整错误诊断**：SQLite retention 每批≤10 行让出事件循环、Session prune claim 可续；写队列删除 OOM shedding 改统一串行 admission 背压 FIFO；OAuth 保存真实 `expires`、执行 client 6 分钟提前刷新、刷新失败重读共享 Store 只用他实例轮换出的有效 credential；Provider 错误有界诊断（64 KiB body / 128 KiB 总预算），完整原文通过 git history 回溯。

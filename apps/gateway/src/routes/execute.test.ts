@@ -1208,6 +1208,190 @@ describe("createExecute — gateway execution adapter", () => {
     );
   });
 
+  it("strips Anthropic context_management before a GENERIC Responses (xAI) upstream (box grok 422)", async () => {
+    // context_management is an Anthropic-native context-editing control. It is forwarded to
+    // openai_responses targets for the Codex-OFFICIAL endpoint (which understands it), but a
+    // GENERIC Responses provider (xAI grok) does not — and helm carries it as the Anthropic
+    // object shape `{ edits: [...] }`, which xAI rejects with HTTP 422 "invalid type: map,
+    // expected a sequence". Like `responses_input_items`, it must be dropped for the generic
+    // profile so correctness never depends on the upstream happening to ignore it.
+    const memberClient = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "grok-ok", usage: {} }),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn(),
+      nativeProtocolProfile: "generic_openai_responses",
+    } as unknown as ProviderClient;
+    const provider = createOAuthPoolClient({
+      members: [{ account: "xai-a", priority: 10, schedulable: true, client: memberClient }],
+    });
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["xai", provider]]),
+      registry: {
+        resolve(alias: string) {
+          if (alias !== "xai/grok-4.5") {
+            return { ok: false as const, error: { kind: "unknown_alias" as const, alias } };
+          }
+          return {
+            ok: true as const,
+            value: {
+              alias,
+              providerName: "xai",
+              providerModel: "grok-4.5",
+              baseUrl: "https://example.test",
+              apiKeyEnv: "XAI_API_KEY",
+              targetProviderProtocol: "openai_responses" as const,
+              providerRequiresCompatibilityRewrite: false,
+            },
+          };
+        },
+        list: () => ["xai/grok-4.5"],
+      },
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan(["xai/grok-4.5"]),
+      req({
+        protocol: "anthropic_messages",
+        // As Claude Code sends it: context_management folded into provider_raw as the
+        // Anthropic object shape after normalizeAnthropicContextManagement wraps the bare array.
+        provider_raw: {
+          context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
+        },
+      }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    const body = (memberClient.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as
+      | Record<string, unknown>
+      | undefined;
+    // The Anthropic-only control must NOT reach the generic xAI Responses body.
+    expect(body?.context_management).toBeUndefined();
+    expect(out.attempts[0]?.request_mutations).toMatchObject({
+      provider_raw_stripped_for_target: ["context_management"],
+    });
+  });
+
+  it("keeps context_management for a NON-generic (Codex-official) Responses profile", async () => {
+    // The strip is scoped to the generic profile: the Codex OFFICIAL endpoint understands
+    // context_management, so a non-generic openai_responses target must still receive it.
+    const memberClient = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "codex-ok", usage: {} }),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn(),
+      nativeProtocolProfile: "openai_responses",
+    } as unknown as ProviderClient;
+    const provider = createOAuthPoolClient({
+      members: [{ account: "codex-a", priority: 10, schedulable: true, client: memberClient }],
+    });
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["codex", provider]]),
+      registry: {
+        resolve(alias: string) {
+          if (alias !== "codex/gpt-5.6") {
+            return { ok: false as const, error: { kind: "unknown_alias" as const, alias } };
+          }
+          return {
+            ok: true as const,
+            value: {
+              alias,
+              providerName: "codex",
+              providerModel: "gpt-5.6",
+              baseUrl: "https://example.test",
+              apiKeyEnv: "OPENAI_API_KEY",
+              targetProviderProtocol: "openai_responses" as const,
+              providerRequiresCompatibilityRewrite: false,
+            },
+          };
+        },
+        list: () => ["codex/gpt-5.6"],
+      },
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const cm = { edits: [{ type: "clear_tool_uses_20250919" }] };
+    const out = await execute(
+      plan(["codex/gpt-5.6"]),
+      req({ protocol: "anthropic_messages", provider_raw: { context_management: cm } }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    const body = (memberClient.chatCompletion as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as
+      | Record<string, unknown>
+      | undefined;
+    expect(body?.context_management).toEqual(cm);
+  });
+
+  it("strips object-shaped context_management from a generic-Responses native passthrough body", async () => {
+    // Same-protocol openai_responses -> generic xAI can PASSTHROUGH verbatim (no translation),
+    // bypassing the forward allowlist. If the native body carries Anthropic's object-shaped
+    // context_management, xAI still 422s. The passthrough sanitizer must drop it for the
+    // generic profile (mirrors the Codex-official native sanitizer at the same chokepoint).
+    const responsesBody = {
+      id: "resp_generic",
+      object: "response",
+      status: "completed",
+      output: [],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const provider = {
+      nativeProtocolProfile: "generic_openai_responses",
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockResolvedValue(responsesBody),
+    } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["xai", provider]]),
+      registry: protocolRegistry({
+        r: {
+          providerName: "xai",
+          providerModel: "grok-4.5",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(
+      plan(["r"]),
+      req({
+        protocol: "openai_responses",
+        native_request: {
+          protocol: "openai_responses" as const,
+          body: {
+            model: "grok-4.5",
+            input: "hi",
+            context_management: { edits: [{ type: "clear_tool_uses_20250919" }] },
+          },
+          headers: {},
+          mutations: {},
+        },
+      }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    const forwarded = provider.nativePassthrough.mock.calls[0]?.[0] as {
+      body?: Record<string, unknown>;
+    } & Record<string, unknown>;
+    const forwardedBody = (forwarded?.body ?? forwarded) as Record<string, unknown>;
+    expect(forwardedBody.context_management).toBeUndefined();
+    // The rest of the native body is untouched.
+    expect(forwardedBody.input).toBe("hi");
+  });
+
   it("does not forward top-level cache_control to non-Anthropic target protocols", async () => {
     const provider = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "ok", usage: {} }),
