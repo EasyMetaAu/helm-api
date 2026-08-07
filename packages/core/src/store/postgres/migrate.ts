@@ -1270,6 +1270,19 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // Persist Codex live quota metadata (planType/credits/individualLimit/…) as a
+    // JSONB blob so the providers page renders the full card after a restart instead
+    // of losing everything but windows until the next refresh. Pg mirror of sqlite v48.
+    version: 47,
+    run: async (db) => {
+      if (await pgTableHasColumns(db, "oauth_quota", ["provider_id"])) {
+        await db.execute(
+          sql.raw("ALTER TABLE oauth_quota ADD COLUMN IF NOT EXISTS metadata JSONB"),
+        );
+      }
+    },
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {

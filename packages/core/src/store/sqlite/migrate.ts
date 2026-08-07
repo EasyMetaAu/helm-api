@@ -1317,6 +1317,20 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // Persist Codex live quota metadata (planType/credits/individualLimit/…) as a
+    // JSON blob so the providers page renders the full card after a restart instead
+    // of losing everything but windows until the next refresh.
+    version: 48,
+    run: (db) => {
+      if (
+        sqliteTableHasColumns(db, "oauth_quota", ["provider_id"]) &&
+        !sqliteTableHasColumns(db, "oauth_quota", ["metadata"])
+      ) {
+        db.exec("ALTER TABLE oauth_quota ADD COLUMN metadata TEXT;");
+      }
+    },
+  },
 ];
 
 function sqliteTableHasColumns(

@@ -223,6 +223,75 @@ export const OAuthQuotaSnapshotSchema = z
 
 export type OAuthQuotaSnapshot = z.infer<typeof OAuthQuotaSnapshotSchema>;
 
+// ── Persisted Codex live-metadata blob (oauth_quota.metadata JSON column) ─────
+// The quota stores keep windows + cooldown + resetCredits as first-class columns.
+// Everything else the Admin providers card shows for Codex (plan, credits, monthly
+// spend-control limit, reset-credit details, additional limits, the rate-limit
+// reason) is folded into ONE nullable JSON column so a restart doesn't blank the
+// card until the next refresh. planType/credits are OPTIONAL fields (nullable),
+// so `.default(null)` keeps them explicit on the wire.
+export const CodexQuotaMetadataSchema = z
+  .object({
+    planType: z.string().nullable().default(null),
+    credits: CodexQuotaCreditsSchema.nullable().default(null),
+    resetCreditDetails: z.array(CodexResetCreditDetailSchema).nullable().default(null),
+    individualLimit: CodexIndividualLimitSchema.nullable().default(null),
+    additionalLimits: z.array(CodexAdditionalLimitSchema).default([]),
+    rateLimitReachedType: CodexRateLimitReachedTypeSchema.nullable().default(null),
+  })
+  .strict();
+
+export type CodexQuotaMetadata = z.infer<typeof CodexQuotaMetadataSchema>;
+
+// Serialize the Codex live metadata off a snapshot into the JSON blob stored in
+// oauth_quota.metadata. Returns `undefined` when the snapshot carries NO live
+// metadata (e.g. a Codex header PUSH or a non-Codex provider) so the caller can
+// omit the column from the SET and preserve the last fresh PULL — same
+// preserve-on-omit contract as resetCredits.
+export function packCodexQuotaMetadata(
+  snapshot: Pick<
+    OAuthQuotaSnapshot,
+    | "planType"
+    | "credits"
+    | "resetCreditDetails"
+    | "individualLimit"
+    | "additionalLimits"
+    | "rateLimitReachedType"
+  >,
+): string | undefined {
+  const carries =
+    snapshot.planType !== undefined ||
+    snapshot.credits !== undefined ||
+    snapshot.resetCreditDetails !== undefined ||
+    snapshot.individualLimit !== undefined ||
+    snapshot.additionalLimits !== undefined ||
+    snapshot.rateLimitReachedType !== undefined;
+  if (!carries) return undefined;
+  return JSON.stringify({
+    planType: snapshot.planType ?? null,
+    credits: snapshot.credits ?? null,
+    resetCreditDetails: snapshot.resetCreditDetails ?? null,
+    individualLimit: snapshot.individualLimit ?? null,
+    additionalLimits: snapshot.additionalLimits ?? [],
+    rateLimitReachedType: snapshot.rateLimitReachedType ?? null,
+  } satisfies CodexQuotaMetadata);
+}
+
+// Parse the stored blob back into the snapshot fields. Fail-open: a null/absent or
+// corrupt blob yields `{}` (no metadata) so a bad row renders "—" rather than
+// throwing. The returned object is spread onto the snapshot before schema.parse.
+export function unpackCodexQuotaMetadata(
+  raw: string | null | undefined,
+): Partial<CodexQuotaMetadata> {
+  if (raw === null || raw === undefined || raw === "") return {};
+  try {
+    const parsed = CodexQuotaMetadataSchema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : {};
+  } catch {
+    return {};
+  }
+}
+
 // ── Anthropic usage-endpoint response (GET /api/oauth/usage) ─────────────────
 
 // The (untrusted) shape Anthropic's OAuth usage endpoint returns. Parsed

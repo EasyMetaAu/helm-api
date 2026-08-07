@@ -67,11 +67,15 @@ describe("oauth_quota usage_limited_until_ms migration (v26)", () => {
         .all()
         .map((c) => (c as { name: string }).name);
       expect(cols).toContain("usage_limited_until_ms");
+      // v48 also adds the Codex metadata column on the same legacy table.
+      expect(cols).toContain("metadata");
 
-      // The legacy row survives and reads a null cooldown through the store.
+      // The legacy row survives and reads a null cooldown + null metadata through the store.
       const store = new SqliteOAuthQuotaStore(db);
       const got = await store.get("openai-codex", "default");
       expect(got?.usageLimitedUntilMs).toBeNull();
+      expect(got?.planType ?? null).toBeNull();
+      expect(got?.credits ?? null).toBeNull();
       // And the new write path works against the upgraded table.
       await store.setUsageLimit("openai-codex", "default", 12_345);
       expect((await store.get("openai-codex", "default"))?.usageLimitedUntilMs).toBe(12_345);

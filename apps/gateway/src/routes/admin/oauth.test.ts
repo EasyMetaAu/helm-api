@@ -349,6 +349,52 @@ describe("admin OAuth routes — read endpoints", () => {
     ]);
   });
 
+  it("GET /oauth/quota falls back to PERSISTED Codex metadata when the in-process cache is cold (post-restart)", async () => {
+    const capturedAt = 2_000_000;
+    // The row carries metadata persisted by a prior refresh; fullSeam has NO
+    // getCachedCodexQuota (cold cache, as right after a container restart).
+    const oauthQuota = {
+      getAll: vi.fn(async () => [
+        {
+          providerId: "openai-codex",
+          account: "default",
+          windows: [
+            {
+              key: "primary",
+              usedPercent: 100,
+              resetsAtMs: capturedAt + 500_000,
+              windowMinutes: 10_080,
+            },
+          ],
+          capturedAt,
+          source: "codex",
+          usageLimitedUntilMs: null,
+          resetCredits: 2,
+          planType: "pro",
+          credits: { hasCredits: false, unlimited: false, balance: "0" },
+          individualLimit: null,
+          additionalLimits: [],
+          resetCreditDetails: null,
+          rateLimitReachedType: null,
+        },
+      ]),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const seam = fullSeam({
+      listCachedStatus: vi.fn(async () => ({
+        selectionStrategy: "balanced",
+        providers: [{ id: "openai-codex", name: "Codex", accounts: [{ account: "default" }] }],
+      })) as never,
+    });
+
+    const res = await app({ oauth: seam, oauthQuota }).request("/admin/api/oauth/quota");
+    const body = (await res.json()) as {
+      quota: Array<{ planType?: string; credits?: { balance: string }; resetCredits?: number }>;
+    };
+    expect(body.quota[0]?.planType).toBe("pro");
+    expect(body.quota[0]?.credits?.balance).toBe("0");
+    expect(body.quota[0]?.resetCredits).toBe(2);
+  });
+
   it("POST /oauth/refresh refreshes xAI, updates the pool snapshot, and syncs cooldown", async () => {
     const now = Date.now();
     const resetAt = now + 3 * 86_400_000;

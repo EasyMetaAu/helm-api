@@ -471,6 +471,15 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                     capturedAt,
                     source: "codex",
                     resetCredits: activeResult.resetCredits,
+                    // Persist the live metadata so the providers card survives a
+                    // restart (the in-process cache alone is lost). readCachedQuota
+                    // falls back to these when getCachedCodexQuota is cold.
+                    planType: activeResult.planType,
+                    credits: activeResult.credits,
+                    resetCreditDetails: activeResult.resetCreditDetails,
+                    individualLimit: activeResult.individualLimit,
+                    additionalLimits: activeResult.additionalLimits,
+                    rateLimitReachedType: activeResult.rateLimitReachedType,
                   });
                   deps.applyQuotaSnapshot?.(
                     "openai-codex",
@@ -570,10 +579,27 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       for (const row of await store.getAll()) {
         const key = acctKey(row.providerId, row.account);
         if (bound && !bound.has(key)) continue;
-        const metadata =
+        // In-process cache (fresh, richest) wins; when it is cold — e.g. right after
+        // a restart — fall back to the metadata PERSISTED on the row so the card
+        // renders plan/credits/reset-details instead of blanking until a refresh.
+        const liveMetadata =
           row.providerId === "openai-codex"
             ? await seam()?.getCachedCodexQuota?.({ account: row.account })
             : null;
+        const metadata =
+          liveMetadata !== null && liveMetadata !== undefined
+            ? liveMetadata
+            : row.providerId === "openai-codex"
+              ? {
+                  resetCredits: row.resetCredits ?? null,
+                  resetCreditDetails: row.resetCreditDetails ?? null,
+                  credits: row.credits ?? null,
+                  individualLimit: row.individualLimit ?? null,
+                  additionalLimits: row.additionalLimits ?? [],
+                  planType: row.planType ?? null,
+                  rateLimitReachedType: row.rateLimitReachedType ?? null,
+                }
+              : null;
         const identity = identities.get(key);
         result.push({
           ...row,
