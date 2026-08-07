@@ -838,6 +838,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         priority: sch.priority ?? 50,
         schedulable: credentialFailed ? false : (sch.schedulable ?? true),
         autoReset: sch.autoReset ?? false,
+        allowSpendRemainingCredits: sch.allowSpendRemainingCredits ?? false,
         fastMode: sch.fastMode ?? false,
         proxy: redactProxy(sch.proxy),
         models,
@@ -1113,6 +1114,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         priority: s.priority ?? 50,
         schedulable: typeof s.credentialFailedAt === "number" ? false : (s.schedulable ?? true),
         autoReset: s.autoReset ?? false,
+        allowSpendRemainingCredits: s.allowSpendRemainingCredits ?? false,
         fastMode: s.fastMode ?? false,
       };
     },
@@ -1123,6 +1125,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       priority,
       schedulable,
       autoReset,
+      allowSpendRemainingCredits,
       fastMode,
     }): Promise<void> {
       if (schedulable === true) {
@@ -1141,6 +1144,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         priority?: number;
         schedulable?: boolean;
         autoReset?: boolean;
+        allowSpendRemainingCredits?: boolean;
         fastMode?: boolean;
         autoDisabledForCredentialFailure?: boolean;
       } = {};
@@ -1148,6 +1152,9 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       if (schedulable !== undefined) patch.schedulable = schedulable;
       if (schedulable !== undefined) patch.autoDisabledForCredentialFailure = false;
       if (autoReset !== undefined) patch.autoReset = autoReset;
+      if (allowSpendRemainingCredits !== undefined) {
+        patch.allowSpendRemainingCredits = allowSpendRemainingCredits;
+      }
       if (fastMode !== undefined) patch.fastMode = fastMode;
       await setAccountSettings(deps.config, deps.encKey, providerId, account, patch);
     },

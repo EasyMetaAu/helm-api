@@ -984,6 +984,25 @@ describe("createOAuthPoolClient — account selection", () => {
     await expect(pool.chatCompletion(REQ)).rejects.toThrow(/no schedulable account/);
   });
 
+  it("allowSpendRemainingCredits keeps a usage-limited member eligible (operator opt-in)", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      // "a" is parked far in the future but opted in to spend its remaining credits;
+      // it must stay selectable instead of falling through to the un-parked sibling.
+      members: [
+        {
+          ...member("a", 1, true, calls),
+          usageLimitedUntilMs: 9_000,
+          allowSpendRemainingCredits: true,
+        },
+        { ...member("b", 2, true, calls), usageLimitedUntilMs: 9_000 },
+      ],
+      now: () => 1_000,
+    });
+    await pool.chatCompletion(REQ);
+    expect(calls).toEqual(["a"]);
+  });
+
   it("setUsageLimit parks a live member; null un-parks it (the reset path)", async () => {
     const calls: string[] = [];
     let clock = 1_000;

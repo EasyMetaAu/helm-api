@@ -2181,6 +2181,7 @@ describe("admin.api oauth cached overview and refresh queue", () => {
     priority: 50,
     schedulable: true,
     autoReset: false,
+    allowSpendRemainingCredits: false,
     fastMode: false,
     proxy: null,
     models: [],

@@ -123,6 +123,13 @@ export interface OAuthPoolMember {
   // against `now` on every select(), so recovery is AUTOMATIC once the timestamp passes
   // — no timer, no sweep.
   usageLimitedUntilMs?: number | null;
+  // Operator opt-in (per account): keep serving from this account even while its
+  // usage-limit park (`usageLimitedUntilMs`) is active, so its remaining credits are
+  // spent instead of the account sitting idle until reset. Upstream still 429s if the
+  // account is genuinely out of budget, so the pool fails over normally in that case.
+  // Does NOT affect model-scoped or transient retryable cooldowns — only the account
+  // usage-limit gate.
+  allowSpendRemainingCredits?: boolean;
   // Latest quota windows for strategy-only scoring. These are soft observability
   // signals: stale/missing windows must never make the pool fail closed.
   quotaWindows?: OAuthQuotaWindow[];
@@ -255,6 +262,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   // AND its auto-park cooldown has elapsed. Re-evaluated on every select() against the
   // live clock, so a cooldown un-parks itself the instant `now` passes it.
   function usageLimited(member: OAuthPoolMember, nowMs: number): boolean {
+    // Operator opted this account in to spend its remaining credits: never park it on
+    // the usage-limit gate. If it is truly exhausted upstream will 429 and the normal
+    // in-pool failover takes over.
+    if (member.allowSpendRemainingCredits) return false;
     const until = member.usageLimitedUntilMs;
     return until != null && nowMs < until;
   }

@@ -154,6 +154,7 @@ describe('providers page', () => {
       priority: 50,
       schedulable: true,
       autoReset: false,
+      allowSpendRemainingCredits: false,
       fastMode: false,
     });
     setAccountModels.mockResolvedValue(undefined);
