@@ -1254,15 +1254,22 @@ export function upstreamErrorMessage(raw: unknown): string | null {
 export function isContextWindowRejection(err: unknown): boolean {
   if (!(err instanceof UpstreamError)) return false;
   if (upstreamErrorCode(err.providerRaw) === "context_length_exceeded") return true;
-  const text = `${err.message} ${upstreamErrorMessage(err.providerRaw) ?? ""} ${rawErrorText(
-    err.providerRaw,
-  )}`.toLowerCase();
+  // Strong, unambiguous markers may be matched anywhere in the body — they don't occur as
+  // innocent echoed request content (some in-band SSE errors only surface them in the raw
+  // envelope, not a structured `error.message`).
+  const rawText = rawErrorText(err.providerRaw).toLowerCase();
+  if (rawText.includes("context_length_exceeded") || rawText.includes("maximum context")) {
+    return true;
+  }
+  // Weaker phrases ("prompt is too long", "context window/length") are matched ONLY in the
+  // structured error string, never the stringified raw body: a provider-failure body that
+  // echoes the user's prompt could otherwise be misclassified as an overflow (and, worse,
+  // fabricate a client-visible compaction 400 at the terminal).
+  const structured = `${err.message} ${upstreamErrorMessage(err.providerRaw) ?? ""}`.toLowerCase();
   return (
-    text.includes("context_length_exceeded") ||
-    text.includes("context window") ||
-    text.includes("context length") ||
-    text.includes("maximum context") ||
-    text.includes("prompt is too long")
+    structured.includes("context window") ||
+    structured.includes("context length") ||
+    structured.includes("prompt is too long")
   );
 }
 
@@ -1286,6 +1293,16 @@ export function isUpstreamRequestRejection(err: unknown): boolean {
   const text = `${err.message} ${rawErrorText(err.providerRaw)}`.toLowerCase();
   return text.includes("max allowed size");
 }
+
+// Anthropic's authoritative hard-maximum phrasing: "prompt is too long: N tokens > M
+// maximum" (comma grouping in the counts tolerated). This is an actionable compaction
+// signal — the request as sent is over a real ceiling — so once the candidate chain is
+// exhausted the terminal selector returns it as a client-visible `invalid_request` (400)
+// even if an UNRELATED sibling also failed, instead of burying it as all_providers_failed
+// (box c211e4a1). It does NOT short-circuit the chain: a larger-window sibling may still
+// serve the request (the same shape is emitted by 200k models, not only the 1M ceiling),
+// so fallback continues; this only governs which structured error wins at exhaustion.
+const ABSOLUTE_CONTEXT_MAX_PATTERN = /prompt is too long[^0-9]*[\d,]+\s*tokens?\s*>\s*[\d,]+/i;
 
 function isReasoningHistoryRejection(err: unknown): boolean {
   if (!(err instanceof UpstreamError)) return false;
@@ -1579,18 +1596,38 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           providerRaw: Record<string, unknown> | null;
         }
       | undefined;
+    // The shaped "prompt is too long: N > M" message + raw from a REAL upstream response,
+    // if one was seen. Tracked SEPARATELY from `contextOverflow` (which also collects
+    // pre-flight approximate estimates that synthesize the same phrasing) so the terminal
+    // bypass — "return a compaction 400 even when mixed with an unrelated provider failure"
+    // (box c211e4a1) — can never be satisfied by an approximate estimate. Both the shape AND
+    // the authoritative provenance must belong to the SAME record, which is exactly what this
+    // captures. A real 5xx alongside a mere estimate therefore still yields all_providers_failed.
+    let authoritativeShapedOverflow:
+      | { message: string; providerRaw: Record<string, unknown> | null }
+      | undefined;
     const rememberContextOverflow = (
       message: string,
       providerRaw: Record<string, unknown> | null,
-      confirmationKey?: string,
+      confirmationKey: string | undefined,
+      authoritative: boolean,
     ): void => {
       if (confirmationKey !== undefined) contextConfirmations.add(confirmationKey);
+      if (
+        authoritative &&
+        authoritativeShapedOverflow === undefined &&
+        ABSOLUTE_CONTEXT_MAX_PATTERN.test(message)
+      ) {
+        authoritativeShapedOverflow = { message, providerRaw };
+      }
       if (contextOverflow === undefined) {
         contextOverflow = { message, providerRaw };
         return;
       }
-      const compactionPattern = /prompt is too long[^0-9]*\d+\s*tokens?\s*>\s*\d+/i;
-      if (!compactionPattern.test(contextOverflow.message) && compactionPattern.test(message)) {
+      if (
+        !ABSOLUTE_CONTEXT_MAX_PATTERN.test(contextOverflow.message) &&
+        ABSOLUTE_CONTEXT_MAX_PATTERN.test(message)
+      ) {
         contextOverflow.message = message;
       }
       if (contextOverflow.providerRaw === null && providerRaw !== null) {
@@ -1722,6 +1759,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                   limit,
                 )} maximum`,
                 null,
+                undefined,
+                false, // approximate estimate, not an authoritative upstream verdict
               );
             }
             attempts.push(skipRow(alias, verdict.skipReason ?? "capability", elapsed()));
@@ -1826,6 +1865,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                 )} maximum`,
                 null,
                 contextConfirmationKey,
+                false, // per-model count_tokens preflight; a larger sibling may still fit
               );
               attempts.push(skipRow(alias, "context_too_small", elapsed()));
               continue;
@@ -2249,9 +2289,12 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           }
 
           // Model context window overflow: THIS candidate cannot serve the request,
-          // but a later fallback with a larger window can. Treat it like a late-discovered
+          // but a later fallback with a LARGER window can (the same "prompt is too long:
+          // N > M" shape is emitted by 200k models too, not only the 1M ceiling — so this
+          // is NOT proof the whole chain overflows). Treat it like a late-discovered
           // capability skip, not provider health: no breaker failure, no red provider
-          // error row, and no execution-fallback count.
+          // error row, and no execution-fallback count. The chain-exhausted terminal below
+          // returns the compaction-compatible 400 once no larger sibling can serve it.
           if (isContextWindowRejection(err)) {
             capabilityPruned = true;
             const detail = errorDetailOf(err);
@@ -2261,6 +2304,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               upstreamErrorCode(detail.provider_raw)?.toLowerCase() === "context_length_exceeded"
                 ? contextConfirmationKey
                 : undefined,
+              true, // authoritative: a real upstream response reported the overflow
             );
             attempts.push({
               alias,
@@ -2403,6 +2447,19 @@ export function createExecute(deps: ExecuteAdapterDeps) {
       errorClass = "invalid_request";
       message = contextOverflow.message;
       providerRaw = contextOverflow.providerRaw;
+    } else if (authoritativeShapedOverflow !== undefined) {
+      // A REAL upstream response carried the exact hard-maximum shape "prompt is too long:
+      // N > M". Emit the compaction-compatible 400 VERBATIM even when the chain also had an
+      // UNRELATED provider failure (box c211e4a1: a grok 422 must NOT bury it as
+      // all_providers_failed and leave Claude Code / Codex unable to compact). The
+      // shape AND the authoritative provenance belong to the same record, so a pre-flight
+      // APPROXIMATE estimate (which synthesizes the same phrasing) can never reach here and
+      // override a genuine provider 5xx. Larger-window fallback already ran first (a shaped
+      // overflow is a context skip, not a short-circuit); this only picks the terminal once
+      // the chain is truly exhausted.
+      errorClass = "invalid_request";
+      message = authoritativeShapedOverflow.message;
+      providerRaw = authoritativeShapedOverflow.providerRaw;
     } else if (
       !attemptedAny &&
       capabilityPruned &&

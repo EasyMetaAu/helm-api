@@ -7,6 +7,17 @@
 
 ---
 
+## 2026-08-07 · 真实上游超长溢出在链耗尽时胜出终态，修复客户端无法压缩（Provider execution / protocol errors，docs/04/05/07，原则 3/5/8）
+
+- **现场（box `c211e4a1`，v0.28.42）**：Claude Code 发 ~102 万 token，Anthropic（链首、最大窗口）返回真实 400 `prompt is too long: 1022145 tokens > 1000000 maximum`（**无** `context_length_exceeded` code）。helm 把它当可重试 `context_too_small` 继续 fallback；`xai/grok-4.5` 因独立翻译 bug 返回 422，把 `onlyContextOrCapabilitySkips` 打成 false，终态选择器降级为合成 `all_providers_failed / 502`。客户端拿不到真实 400 → 认不出该压缩 → 卡死。
+- **根因**：2026-08-03 的终态优先级（下方同标题条目）只在“整链仅上下文/能力 skip”或“≥2 个 `context_length_exceeded` code 确认”时才回 `invalid_request / 400`。Anthropic 绝对上限用 `prompt is too long: N > M` 措辞、不带该 code，一个无关兄弟失败就翻掉守卫。
+- **关键教训（Codex review 纠偏，避免过修）**：初版曾想“命中即短路、不再 fallback”，**错**——`N > M` 只证明**该候选**的窗口，200k 模型也用同一措辞；若链后面有更大窗口候选，短路会误杀可成功的 fallback。正解是**继续 fallback 试更大窗口**，仅在**链耗尽**时让这个溢出胜出终态。
+- **修复（拍板：所有协议一致；不短路，改终态守卫）**：单独追踪 `authoritativeShapedOverflow`——**只有真实上游响应**报的、且消息形如 `prompt is too long: N > M`（逗号分组容错）的溢出才记入；预检估算（char / `count_tokens`）绝不进。终态在原两条件（`onlyContextOrCapabilitySkips` / `≥2` 确认）后新增：`authoritativeShapedOverflow !== undefined` → 即使夹有无关 provider failure 也回 `invalid_request / 400` 保留其 `provider_raw`。把「形状」与「真实来源」绑在同一条记录，杜绝近似估算冒充硬上限压过真实 5xx（守住既有 “approximate estimate override provider failure” 用例）。
+- **Codex 对抗式 review 的价值**：Codex 曾提「短路会误杀更大窗口兄弟」（真，已改为不短路）、「近似估算的 shape 经 boolean 合并冒充 authoritative」（合理担忧，实测该路径下 `onlyContextOrCapabilitySkips` 仍为 true、第一条守卫本就触发，不会错翻 error class——属 plausible-but-not-reachable，但仍按其建议重构成 provenance 绑定，更干净且消息来源正确）、「回显内容误判」（真，已收窄 `isContextWindowRejection` 弱措辞只匹配结构化 message）。遗留：强标记 `context_length_exceeded`/“maximum context” 仍全 body 匹配（API 专有 token，正文混入概率极低，ponytail 上限）；真实溢出行仍记 `skipped:true`（既有全体 context-overflow 约定，`fallback_count` 少计一次，非本次回归，另议）。
+- **顺带加固 `isContextWindowRejection`（Codex #2 回显内容误判）**：强信号（`context_length_exceeded` code / “maximum context”）仍全 body 匹配；弱措辞（“prompt is too long”/“context window/length”）只在**结构化 error message** 匹配，不扫 `rawErrorText`——否则 provider-failure body 里回显的用户 prompt 会被误判为溢出，甚至在终态**伪造**一个客户端 400。
+- **测试**：box 回归（`N>M` 首 + 兄弟 422 → 两候选都试、终态 400）；`context_length_exceeded` 变体同理；“更大窗口兄弟胜过 shaped 溢出”（不短路、fallback 成功）；“回显内容不伪造 400”（全链失败 → `all_providers_failed`）；per-model / 流式 / 多候选确认 / 近似估算不压真实故障用例全绿。execute.test.ts 164 全绿；messages/chat/gemini/responses/image-chain/pipeline 相关 239 全绿。
+- **遗留（本次不修）**：`xai/grok-4.5` 的 422 `invalid type: map, expected a sequence` 是独立的 anthropic→openai_responses 翻译缺陷；另开 change。
+
 ## 2026-08-06 · HALF_OPEN 探测锁：释放路径 + 探针所有权令牌（Provider execution / circuit breaker，docs/02/04，原则 3/5）
 
 - **现场**：`anthropic/claude-opus-4-8` 连续数小时 `skip_reason=circuit_open`（0ms），同 Anthropic OAuth 池的 haiku/sonnet 仍正常；账号配额未 limited。请求 `5c27cf5d…` 正确 fallback 到 `openai-codex/gpt-5.6-sol`。
@@ -70,12 +81,6 @@
 - **维护边界**：SQLite Session prune 继续小批续跑；PostgreSQL 每次 cleanup tick 最多处理 128 个物理行、每批 16 行，并用持久 marker 续跑。scheduled cleanup 与 auto-VACUUM 在开始前检查压力，VACUUM 排空活动后、真正重写数据库前再次检查；压力恶化时不执行也不误记当天成功。手动维护语义保持不变。
 - **模式切换**：切换全局 capture generation 后，已排队但尚未 flush 的 payload/Session 正文写入会被丢弃，脱敏 telemetry 仍保存。`part=meta` 不读取正文。（原先此处误把“全局 metadata-only 视为 hard-off、任何 key override 都不能绕过”写成契约——与 #675 的 per-key 覆盖优先级冲突，已于 2026-08-04 更正，见顶部条目。）
 
-## 2026-07-31 · API key 单独覆盖请求内容存储模式（Key Store / Telemetry / Admin，docs/06/07/11，原则 2/7）
-
-- **继承与优先级**：`api_keys.request_content_mode` 是 SQLite/PostgreSQL 的 nullable 枚举列；`NULL` 表示继承实时全局模式，`none` / `payload` / `session` 显式覆盖。历史 key 迁移后保持 `NULL`，不会因升级改变正文留存行为。
-- **覆盖面**：鉴权身份把覆盖值传到 Chat、Messages、Responses（含 compact）、Gemini、Images、Interactions 与 Admin Replay，并复用同一个 capture helper；只替换本次请求的 capture getter，不冻结或修改全局设置。
-- **保留边界**：`payload_retention_days` 仍是全局值，未增加 per-key retention。Admin Create/Edit/详情支持设置和清除覆盖；隐私提示与系统设置共用现有文案。
-
 ## 2026-07-31 · 保证 Session 捕获且删除累计字节上限（Telemetry / Session Store，docs/07/11，用户明确要求）
 
 - **决定**：按用户要求删除单 Session 64 MiB 累计存储上限，不用更大的常量替代。共享 Session 捕获、SQLite 与 PostgreSQL adapter 都不再因 `stored_bytes` 拒绝新 revision 或响应回填；`stored_bytes` 只继续用于观测。现有 SQLite `INTEGER` 与 PostgreSQL `BIGINT` 均无需迁移。
@@ -85,6 +90,7 @@
 
 ## 历史条目摘要（最新要点）
 
+- **2026-07-31 · API key 单独覆盖请求内容存储模式**：`api_keys.request_content_mode` nullable 枚举列，`NULL` 继承实时全局、`none`/`payload`/`session` 显式覆盖；鉴权身份把覆盖值传到 Chat/Messages/Responses(含 compact)/Gemini/Images/Interactions/Admin Replay 复用同一 capture helper，只换本次请求 getter；`payload_retention_days` 仍全局，无 per-key retention（2026-08-04 修正其优先级回归，见顶部）。完整原文经 git history 回溯。
 - **2026-07-31 · 请求列表记录并显示客户端正文大小**：新增可选 `request_body_bytes`（客户端 wire UTF-8 字节，非 Content-Length/token/压缩量），随脱敏 DecisionRecord 保存；Admin 表按 B/KB/MB 展示，旧记录显示 `—`；完整原文通过 git history 回溯。
 - **2026-07-29 · 生产韧性：持续小批清理 + 无丢弃背压 + 执行 Token 租约 + 完整错误诊断**：SQLite retention 每批≤10 行让出事件循环、Session prune claim 可续；写队列删除 OOM shedding 改统一串行 admission 背压 FIFO；OAuth 保存真实 `expires`、执行 client 6 分钟提前刷新、刷新失败重读共享 Store 只用他实例轮换出的有效 credential；Provider 错误有界诊断（64 KiB body / 128 KiB 总预算），完整原文通过 git history 回溯。
 - **2026-07-28 · 删除 HTTP 与 WebSocket 请求大小上限**：删除应用与 Remote Nginx 固定正文上限，继续由动态内存准入、鉴权、schema、maintenance drain 和 provider timeout 保护运行时；完整原文通过 git history回溯。
