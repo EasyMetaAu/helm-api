@@ -1980,10 +1980,12 @@ describe("createExecute — gateway execution adapter", () => {
     });
   });
 
-  it("skips a candidate on context_length_exceeded without tripping the breaker", async () => {
+  it("short-circuits an in-band stream context_length_exceeded without tripping the breaker", async () => {
     // Some upstreams report model-window overflow as an in-band stream error without an
-    // HTTP 400 status. That is a candidate capability miss, not provider health.
-    // Helm should try the next model and render the failed candidate as skipped.
+    // HTTP 400 status. That is still a REAL upstream confirming the request is over the
+    // ceiling, so short-circuit with the 400 VERBATIM — do NOT fall back to a larger model
+    // that would "catch" the oversized request and hide the compaction signal. No breaker
+    // fault (the upstream is healthy — the request is what's wrong).
     // biome-ignore lint/correctness/useYield: pre-first-chunk failure throws before any yield
     async function* contextWindowError(): AsyncGenerator<string> {
       throw new UpstreamError(
@@ -2003,12 +2005,13 @@ describe("createExecute — gateway execution adapter", () => {
         null,
       );
     }
+    const opusStream = vi.fn();
     const provider = {
       chatCompletion: vi.fn(),
       chatCompletionStream: vi
         .fn()
         .mockReturnValueOnce(contextWindowError())
-        .mockReturnValueOnce(gen(['data: {"ok":1}\n\n', "data: [DONE]\n\n"])),
+        .mockImplementation(opusStream),
     } as unknown as ProviderClient;
     const cb = breaker();
     const recordFailure = vi.spyOn(cb, "recordFailure");
@@ -2035,13 +2038,17 @@ describe("createExecute — gateway execution adapter", () => {
 
     const out = await execute(plan(["codex", "opus"]), req({ stream: true }));
 
-    expect(out.final).toEqual({ status: "ok", alias: "opus", providerModel: "claude-opus-4-8" });
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected a terminal error");
+    expect(out.final.error).toMatchObject({
+      error_class: "invalid_request",
+      http_status: 400,
+    });
+    expect(out.attempts).toHaveLength(1);
     expect(out.attempts[0]).toMatchObject({
       alias: "codex",
-      skipped: true,
-      skip_reason: "context_too_small",
-      status: "error",
-      error_class: null,
+      skipped: false,
+      error_class: "invalid_request",
     });
     expect(out.attempts[0]?.error_detail).toMatchObject({
       provider_raw: {
@@ -2050,11 +2057,71 @@ describe("createExecute — gateway execution adapter", () => {
         },
       },
     });
-    expect(out.attempts[1]?.status).toBe("ok");
+    // The larger-window sibling is never even opened — the chain short-circuited.
+    expect(opusStream).not.toHaveBeenCalled();
     expect(recordFailure).not.toHaveBeenCalled();
   });
 
-  it("preserves an upstream context error when every candidate is exhausted", async () => {
+  it("short-circuits a REAL upstream context overflow instead of falling back (box 12a22879)", async () => {
+    // Reproduces the production incident: the head candidate returns a REAL upstream 400
+    // "prompt is too long: N > M". Older behavior skipped it and fell back all the way to a
+    // larger-window model (deepseek), which returned 200 — so the client never saw a 4xx and
+    // never triggered its own context compaction. A real upstream overflow means the request
+    // as sent is over a hard ceiling: surface the 400 VERBATIM immediately and DO NOT try any
+    // later candidate (no larger-window "catch" that hides the compaction signal).
+    const raw = {
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "prompt is too long: 1033542 tokens > 1000000 maximum",
+      },
+      request_id: "req_011CdoYiHHe3pg8rYTPqHABp",
+    };
+    const provider = {
+      chatCompletion: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new UpstreamError("upstream_error", "upstream returned 400", raw, 400),
+        )
+        // Later candidates must NEVER be invoked once a real overflow short-circuits.
+        .mockResolvedValueOnce({ id: "should-not-be-reached" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ opus: "claude-opus-4-8", deepseek: "deepseek-v4-pro" }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["opus", "deepseek"]), req());
+
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected a terminal error");
+    expect(out.final.error).toMatchObject({
+      error_class: "invalid_request",
+      http_status: 400,
+      message: "prompt is too long: 1033542 tokens > 1000000 maximum",
+      provider_raw: raw,
+    });
+    // Only the first candidate was attempted; the chain short-circuited (no fall-back).
+    expect(provider.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(out.attempts).toHaveLength(1);
+    expect(out.attempts[0]).toMatchObject({
+      alias: "opus",
+      skipped: false,
+      error_class: "invalid_request",
+    });
+    // Upstream is healthy — the request is what's wrong. No breaker fault.
+    expect(recordFailure).not.toHaveBeenCalled();
+  });
+
+  it("surfaces an upstream context error VERBATIM as a 400", async () => {
     const raw = {
       type: "error",
       error: {
@@ -2092,8 +2159,8 @@ describe("createExecute — gateway execution adapter", () => {
       provider_raw: raw,
     });
     expect(out.attempts[0]).toMatchObject({
-      skipped: true,
-      skip_reason: "context_too_small",
+      skipped: false,
+      error_class: "invalid_request",
       error_detail: {
         upstream_status: 400,
         provider_raw: raw,
@@ -2102,74 +2169,42 @@ describe("createExecute — gateway execution adapter", () => {
     expect(recordFailure).not.toHaveBeenCalled();
   });
 
-  it("prefers an exact compaction message while retaining the first upstream context detail", async () => {
-    const raw = {
-      error: {
-        type: "invalid_request_error",
-        code: "context_length_exceeded",
-        message: "This model's context window is too small.",
-      },
-    };
+  it("does NOT short-circuit an approximate context estimate — a larger sibling still serves", async () => {
+    // The head candidate is skipped by the APPROXIMATE capability-filter estimate (its tiny
+    // window can't hold the prompt). That is a per-model estimate, NOT a real upstream verdict,
+    // so it must FALL BACK (not short-circuit) — a larger-window sibling can still serve the
+    // request and succeed. Contrast with a REAL upstream overflow, which short-circuits.
     const provider = {
-      countTokens: vi.fn().mockResolvedValue({ input_tokens: 1_001_854 }),
-      chatCompletion: vi
-        .fn()
-        .mockRejectedValueOnce(
-          new UpstreamError("upstream_error", "upstream returned 400", raw, 400),
-        ),
+      chatCompletion: vi.fn().mockResolvedValue({ id: "big-window-ok" }),
       chatCompletionStream: vi.fn(),
     } as unknown as ProviderClient;
     const execute = createExecute({
       defaultProvider: provider,
       providers: new Map([["mock", provider]]),
-      registry: protocolRegistry({
-        codex: {
-          providerName: "mock",
-          providerModel: "gpt-5.6-sol",
-          targetProviderProtocol: "openai_responses",
-        },
-        opus: {
-          providerName: "mock",
-          providerModel: "claude-opus-4-8",
-          targetProviderProtocol: "anthropic_messages",
-        },
-      }),
+      registry: registry({ small: "small-model", big: "big-model" }),
       breaker: breaker(),
-      catalog: new Map(),
+      // `small` has a tiny window → the long prompt trips the approximate pre-flight gate.
+      // `big` has no catalog entry → fail-open, attempted, and succeeds.
+      catalog: new Map([["small", entry("small", { maxContextTokens: 20 })]]),
       now: clock(),
       signal: new AbortController().signal,
     });
 
     const out = await execute(
-      plan(["codex", "opus"]),
-      req({
-        protocol: "anthropic_messages",
-        native_request: createNativePassthroughCarrier({
-          protocol: "anthropic_messages",
-          body: {
-            model: "claude-opus-4-8",
-            messages: [{ role: "user", content: "huge" }],
-            max_tokens: 64,
-          },
-          headers: {},
-        }),
-      }),
+      plan(["small", "big"]),
+      req({ messages: [{ role: "user", content: "x".repeat(100) }] }),
     );
 
-    expect(out.final.status).toBe("error");
-    if (out.final.status !== "error") throw new Error("expected a terminal error");
-    expect(out.final.error).toMatchObject({
-      error_class: "invalid_request",
-      message: "prompt is too long: 1001854 tokens > 1000000 maximum",
-      provider_raw: raw,
-    });
+    // The approximate estimate skip fell back to the larger sibling, which succeeded.
+    expect(out.final.status).toBe("ok");
+    expect(out.attempts[0]).toMatchObject({ skipped: true, skip_reason: "context_too_small" });
+    expect(out.attempts[1]?.status).toBe("ok");
   });
 
-  it("returns the shaped overflow 400 at exhaustion even when a later candidate has a provider failure", async () => {
-    // The head candidate reports a shaped overflow ("prompt is too long: N > M maximum",
-    // here with a `context_length_exceeded` code). A sibling is still tried, but fails with
-    // an unrelated 500. At exhaustion the terminal must surface the compaction-compatible
-    // 400 VERBATIM, not demote it to all_providers_failed because of the 500 (box c211e4a1).
+  it("short-circuits on the FIRST real upstream overflow, before a later sibling is tried", async () => {
+    // The head candidate reports a shaped overflow ("prompt is too long: N > M maximum").
+    // The chain short-circuits immediately: the tail candidate is NEVER invoked, and the
+    // 400 is surfaced VERBATIM so the client can compact.
     const raw = {
       error: {
         code: "context_length_exceeded",
@@ -2207,11 +2242,15 @@ describe("createExecute — gateway execution adapter", () => {
       message: "prompt is too long: 1200000 tokens > 1000000 maximum",
       provider_raw: raw,
     });
-    // Both candidates attempted — the shaped overflow wins the terminal at exhaustion.
-    expect(provider.chatCompletion).toHaveBeenCalledTimes(2);
+    // Only the head candidate ran — the overflow short-circuited before the tail.
+    expect(provider.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(out.attempts).toHaveLength(1);
   });
 
-  it("returns a compaction 400 when multiple candidates confirm context overflow", async () => {
+  it("short-circuits on the first overflow even when later candidates would also overflow", async () => {
+    // Mirrors the production incident (box 12a22879): chain = [overflow, unrelated-fail,
+    // overflow]. The FIRST real overflow returns the 400 immediately — the unrelated sibling
+    // and the second overflow candidate are never reached.
     const raw = {
       type: "error",
       error: {
@@ -2265,48 +2304,10 @@ describe("createExecute — gateway execution adapter", () => {
       message: raw.error.message,
       provider_raw: raw,
     });
-    expect(out.attempts.map((attempt) => attempt.skip_reason)).toEqual([
-      "context_too_small",
-      null,
-      "context_too_small",
-    ]);
-  });
-
-  it("does not count duplicate provider/model context errors as independent confirmations", async () => {
-    const raw = {
-      error: {
-        code: "context_length_exceeded",
-        message: "Your input exceeds the context window of this model.",
-      },
-    };
-    const provider = {
-      chatCompletion: vi
-        .fn()
-        .mockRejectedValueOnce(new UpstreamError("upstream_error", "overflow", raw, 400))
-        .mockRejectedValueOnce(new UpstreamError("upstream_error", "overflow", raw, 400))
-        .mockRejectedValueOnce(
-          new UpstreamError("upstream_error", "upstream returned 500", {}, 500),
-        ),
-      chatCompletionStream: vi.fn(),
-    } as unknown as ProviderClient;
-    const execute = createExecute({
-      defaultProvider: provider,
-      providers: new Map([["mock", provider]]),
-      registry: registry({ first: "same-model", duplicate: "same-model", tail: "tail-model" }),
-      breaker: breaker(),
-      catalog: new Map(),
-      now: clock(),
-      signal: new AbortController().signal,
-    });
-
-    const out = await execute(plan(["first", "duplicate", "tail"]), req());
-
-    expect(out.final.status).toBe("error");
-    if (out.final.status !== "error") throw new Error("expected a terminal error");
-    expect(out.final.error).toMatchObject({
-      error_class: "all_providers_failed",
-      http_status: 502,
-    });
+    // Short-circuited on the first candidate; xai + terra never invoked.
+    expect(provider.chatCompletion).toHaveBeenCalledTimes(1);
+    expect(out.attempts).toHaveLength(1);
+    expect(out.attempts[0]).toMatchObject({ alias: "sol", error_class: "invalid_request" });
   });
 
   it("maps Anthropic output_config.effort through the target model policy instead of skipping", async () => {
@@ -2497,13 +2498,11 @@ describe("createExecute — gateway execution adapter", () => {
     expect(recordFailure).not.toHaveBeenCalled();
   });
 
-  it("returns the compaction 400 at exhaustion even when an unrelated sibling fails (box c211e4a1)", async () => {
-    // Anthropic (the LARGEST-window candidate, head of chain) returns a REAL 400
-    // "prompt is too long: N > M maximum". A smaller sibling is still tried (a larger
-    // window could in principle serve it), but here it fails with an UNRELATED 422. The
-    // chain-exhausted terminal must surface the shaped overflow VERBATIM as invalid_request
-    // (400) — NOT bury it as all_providers_failed just because grok also failed — so Claude
-    // Code / Codex receive the 4xx and trigger their own context compaction.
+  it("short-circuits the real overflow 400 before an unrelated sibling is tried (box c211e4a1)", async () => {
+    // Anthropic (head of chain) returns a REAL 400 "prompt is too long: N > M maximum".
+    // The chain short-circuits: the grok sibling is NEVER tried, and the 400 is surfaced
+    // VERBATIM so Claude Code / Codex receive the 4xx and trigger their own compaction —
+    // instead of falling back to a model that would "catch" the oversized request.
     const raw = {
       type: "error",
       error: {
@@ -2551,29 +2550,29 @@ describe("createExecute — gateway execution adapter", () => {
       message: "prompt is too long: 1022145 tokens > 1000000 maximum",
       provider_raw: raw,
     });
-    // Both candidates were attempted (the overflow does NOT short-circuit — a bigger
-    // sibling could serve it); the terminal still prefers the compaction 400.
-    expect(provider.chatCompletion).toHaveBeenCalledTimes(2);
+    // Only the head candidate ran — the overflow short-circuited before grok.
+    expect(provider.chatCompletion).toHaveBeenCalledTimes(1);
   });
 
-  it("prefers a larger-window sibling over a shaped context overflow instead of short-circuiting", async () => {
-    // The head candidate reports "prompt is too long: N > M" (its OWN window; 200k models
-    // emit the same shape). A later, larger-window sibling can still serve the request, so
-    // the gateway must fall back and succeed — the shaped overflow must NOT be treated as a
-    // whole-chain ceiling that terminates early.
+  it("short-circuits a real overflow rather than letting a larger-window sibling catch it", async () => {
+    // The head candidate reports a REAL "prompt is too long: N > M". A later, larger-window
+    // sibling COULD serve the oversized request — but that would hide the compaction signal
+    // (the client gets 200 and never compacts). So the gateway short-circuits with the 400
+    // and does NOT fall back.
     const raw = {
       error: {
         code: "context_length_exceeded",
         message: "prompt is too long: 210000 tokens > 200000 maximum",
       },
     };
+    const bigCompletion = vi.fn().mockResolvedValue({ id: "big-window" });
     const provider = {
       chatCompletion: vi
         .fn()
         .mockRejectedValueOnce(
           new UpstreamError("upstream_error", "upstream returned 400", raw, 400),
         )
-        .mockResolvedValueOnce({ id: "big-window" }),
+        .mockImplementation(bigCompletion),
       chatCompletionStream: vi.fn(),
     } as unknown as ProviderClient;
     const execute = createExecute({
@@ -2588,10 +2587,18 @@ describe("createExecute — gateway execution adapter", () => {
 
     const out = await execute(plan(["small", "big"]), req());
 
-    expect(out.final).toEqual({ status: "ok", alias: "big", providerModel: "claude-opus-4-8" });
-    expect(provider.chatCompletion).toHaveBeenCalledTimes(2);
-    expect(out.attempts[0]).toMatchObject({ skipped: true, skip_reason: "context_too_small" });
-    expect(out.attempts[1]?.status).toBe("ok");
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected a terminal error");
+    expect(out.final.error).toMatchObject({
+      error_class: "invalid_request",
+      http_status: 400,
+      message: "prompt is too long: 210000 tokens > 200000 maximum",
+      provider_raw: raw,
+    });
+    // The bigger-window sibling is never invoked.
+    expect(bigCompletion).not.toHaveBeenCalled();
+    expect(out.attempts).toHaveLength(1);
+    expect(out.attempts[0]).toMatchObject({ skipped: false, error_class: "invalid_request" });
   });
 
   it("does not let a pre-flight approximate shaped estimate override a real provider failure via the bypass", async () => {
@@ -2632,9 +2639,9 @@ describe("createExecute — gateway execution adapter", () => {
     expect(out.final.error.http_status).toBe(502);
   });
 
-  it("returns the compaction 400 for an authoritative shaped overflow with comma-grouped counts", async () => {
-    // Real upstreams format the counts with commas ("1,022,145"). The shape matcher must
-    // tolerate grouping so a genuine overflow still surfaces the compaction 400 at exhaustion.
+  it("surfaces a comma-grouped overflow message VERBATIM on short-circuit", async () => {
+    // Real upstreams format the counts with commas ("1,022,145"). The message is passed
+    // through unchanged when the real overflow short-circuits.
     const raw = {
       type: "error",
       error: {
@@ -2673,6 +2680,8 @@ describe("createExecute — gateway execution adapter", () => {
       message: "prompt is too long: 1,022,145 tokens > 1,000,000 maximum",
       provider_raw: raw,
     });
+    // Short-circuited before the tail candidate.
+    expect(provider.chatCompletion).toHaveBeenCalledTimes(1);
   });
 
   it("does not synthesize a compaction 400 from the phrase echoed in a provider-failure body", async () => {
@@ -2711,6 +2720,85 @@ describe("createExecute — gateway execution adapter", () => {
     // The echoed phrase must not fabricate a client-visible 400.
     expect(out.final.error.error_class).toBe("all_providers_failed");
     expect(out.final.error.http_status).toBe(502);
+  });
+
+  it("does NOT short-circuit a retryable 5xx whose body happens to carry a context_length_exceeded marker", async () => {
+    // A REAL HTTP 5xx (or 429) is a transient/retryable provider fault, NOT a client context
+    // overflow — even if the error body coincidentally carries `context_length_exceeded` (e.g.
+    // an upstream wrapping a context-related overload as a 500). Short-circuiting it to a 400
+    // would strand the request: no fall-back to a healthy sibling, no breaker fault. The
+    // overflow short-circuit ALLOWLISTS only deterministic 400/413/422 (+ null in-band).
+    const provider = {
+      chatCompletion: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new UpstreamError(
+            "upstream_error",
+            "upstream returned 500",
+            { error: { code: "context_length_exceeded", message: "overloaded" } },
+            500,
+          ),
+        )
+        .mockResolvedValueOnce({ id: "healthy-sibling" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ opus: "claude-opus-4-8", tail: "tail-model" }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["opus", "tail"]), req());
+
+    // The 5xx faults the breaker and the chain falls back to the healthy sibling.
+    expect(out.final).toEqual({ status: "ok", alias: "tail", providerModel: "tail-model" });
+    expect(provider.chatCompletion).toHaveBeenCalledTimes(2);
+    expect(out.attempts[0]).toMatchObject({ alias: "opus", skipped: false, status: "error" });
+    expect(recordFailure).toHaveBeenCalledWith("opus");
+  });
+
+  it("does NOT short-circuit a retryable 408 that coincidentally carries a context marker", async () => {
+    // 408 Request Timeout is retryable, not a deterministic client overflow. The overflow
+    // short-circuit ALLOWLISTS only deterministic request-shape statuses (400/413/422) + null
+    // (in-band, no HTTP status); every other numeric status — 408 included — must fall back and
+    // fault the breaker, even if the body coincidentally carries an overflow marker.
+    const provider = {
+      chatCompletion: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new UpstreamError(
+            "upstream_error",
+            "upstream returned 408",
+            { error: { code: "context_length_exceeded", message: "request timeout" } },
+            408,
+          ),
+        )
+        .mockResolvedValueOnce({ id: "healthy-sibling" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ opus: "claude-opus-4-8", tail: "tail-model" }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["opus", "tail"]), req());
+
+    expect(out.final).toEqual({ status: "ok", alias: "tail", providerModel: "tail-model" });
+    expect(provider.chatCompletion).toHaveBeenCalledTimes(2);
+    expect(recordFailure).toHaveBeenCalledWith("opus");
   });
 
   it("falls back when an OpenAI-compatible thinking target requires missing reasoning_content history", async () => {
@@ -6354,7 +6442,10 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
     expect(out.nativePassthrough).toBe(true);
   });
 
-  it("maps two native Responses context errors around another failure to compaction 400", async () => {
+  it("short-circuits a native Responses in-band context error to a scrubbed 400", async () => {
+    // The head passthrough stream reports an in-band context overflow (response.failed with
+    // context_length_exceeded). It short-circuits to a 400 with the provider_raw SCRUBBED of
+    // private request content — the later candidates are never opened.
     const contextStream = (model: string) =>
       gen([
         'event: response.created\ndata: {"type":"response.created"}\n\n',
@@ -6370,15 +6461,6 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
           },
         })}\n\n`,
       ]);
-    // biome-ignore lint/correctness/useYield: pre-output provider rejection
-    async function* xaiFailure(): AsyncGenerator<string> {
-      throw new UpstreamError(
-        "upstream_error",
-        "upstream returned 422",
-        { error: "invalid type: map, expected a sequence" },
-        422,
-      );
-    }
     const sol = {
       chatCompletion: vi.fn(),
       chatCompletionStream: vi.fn(),
@@ -6387,12 +6469,12 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
     const xai = {
       chatCompletion: vi.fn(),
       chatCompletionStream: vi.fn(),
-      nativePassthroughStream: vi.fn().mockReturnValue(xaiFailure()),
+      nativePassthroughStream: vi.fn(),
     } as unknown as ProviderClient;
     const terra = {
       chatCompletion: vi.fn(),
       chatCompletionStream: vi.fn(),
-      nativePassthroughStream: vi.fn().mockReturnValue(contextStream("terra")),
+      nativePassthroughStream: vi.fn(),
     } as unknown as ProviderClient;
     const cb = breaker();
     const recordFailure = vi.spyOn(cb, "recordFailure");
@@ -6450,14 +6532,13 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
         response: { error: { code: "context_length_exceeded" } },
       },
     });
-    expect(out.attempts.map((attempt) => attempt.skip_reason)).toEqual([
-      "context_too_small",
-      null,
-      "context_too_small",
-    ]);
+    // Short-circuited on the head candidate; xai + terra never opened.
+    expect(out.attempts).toHaveLength(1);
+    expect(out.attempts[0]).toMatchObject({ alias: "sol", error_class: "invalid_request" });
     expect(out.attempts[0]?.error_detail?.provider_raw).not.toHaveProperty("response.instructions");
-    expect(recordFailure).toHaveBeenCalledTimes(1);
-    expect(recordFailure).toHaveBeenCalledWith("xai");
+    expect(xai.nativePassthroughStream).not.toHaveBeenCalled();
+    expect(terra.nativePassthroughStream).not.toHaveBeenCalled();
+    expect(recordFailure).not.toHaveBeenCalled();
   });
 
   it("an Anthropic passthrough stream that ends with no real output records a failure and advances the chain", async () => {

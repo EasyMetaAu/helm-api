@@ -7,6 +7,17 @@
 
 ---
 
+## 2026-08-07 · 真上游上下文溢出短路直返 400，不再 fall back（Gateway / execution chain，docs/03/04/07，原则 3/5）
+
+- **现场（box 12a22879）**：客户端请求 `claude-opus-5`（anthropic passthrough），链上 anthropic/opus-4-8 与 sonnet-5 都真上游 400 `prompt is too long: N > 1000000`，被当作 `context_too_small` skip，一路 fall back 到 `openrouter/deepseek-v4-pro`（更大窗口）**成功返回 200**。客户端拿到成功响应→永不触发 context compaction→下一轮请求只会更长。透传场景尤其致命：Claude Code / Codex 靠收到 4xx 才压缩。
+- **根因**：`#702`（v0.28.43）的设计是「真上游溢出当 skip 继续 fall back，只在**链条耗尽**时由 `authoritativeShapedOverflow` 返回 400」。但只要链上有一个更大窗口模型兜住（deepseek 返回 200），链条就没耗尽，那段终态逻辑永远走不到。「让更大 sibling 试」的假设直接破坏了压缩语义。
+- **修复（Lukin 拍板"遇到一个上下文太大就直接返回，不要往后走"）**：`isContextWindowRejection(err)` 命中的分支从 `skip + continue` 改为**短路返回 400**（`error_class:invalid_request`，原样透传上游 `provider_raw`），形态对齐紧邻的 `isUpstreamRequestRejection` 短路模板。不记熔断（上游健康、错的是请求），不算 execution-fallback。
+- **刻意的边界（AskUserQuestion 敲定）**：**仅真上游 400 短路**。预检估算两条路径——能力过滤近似估算（`execute.ts` ~1776）与 `count_tokens` 精确预检（~1863）——**仍 skip 继续 fall back**，因为估算可能偏保守，更大真实窗口的模型也许真能服务。这两条继续走 `contextOverflow` + `contextConfirmations`（≥2 确认）的链条耗尽终态。
+- **清理死代码**：真上游溢出短路后不再进终态判定，删除只服务旧机制的 `authoritativeShapedOverflow` 变量、`rememberContextOverflow` 的 `authoritative` 形参、`ABSOLUTE_CONTEXT_MAX_PATTERN`、终态 `else if (authoritativeShapedOverflow)` 分支。`contextOverflow` 择优逻辑同步简化（两个预检调用点 message 都是 shaped，择优永不触发）。
+- **可观测影响**：这类请求 `provider_attempts` 从多条变 1 条、`fallback_count` 从 1 变 0、admin「提供商尝试」面板只显示第一个候选返回 400。这是短路的直接结果，预期内。
+- **Codex review 补的 gate（round 1-2 HIGH）**：短路把一个潜伏 bug 放大了——`isContextWindowRejection` 原本纯靠 error body/message 标记判定，**不看 `err.upstreamStatus`**。一个可重试的 429/5xx/408 若 body 恰好含 `context_length_exceeded` 标记（如上游把上下文相关的过载包成 500），会被短路成客户端 400 → 不再 fall back 到健康兄弟、不记熔断。round-1 用黑名单（`status === 429 || status >= 500`）；round-2 Codex 指出漏了 408 → 改成**白名单** `if (status !== null && status !== 400 && status !== 413 && status !== 422) return false;`。只有确定性请求-shape 4xx（400/413/422）+ `null`（in-band 流式，无 HTTP 状态）短路；其余所有 numeric status（408/409/425/429/5xx…）走正常 fall back + 记熔断。与 `isUpstreamRequestRejection` 的 4xx 白名单一致，未来新增可重试 status 天然被排除，不用补黑名单。旧的 skip-and-continue 设计下这个误判无害（只少试一个候选），是短路抬高了代价。
+- **测试**：9 个围绕旧「skip+耗尽才返回/多候选确认/让位给更大 sibling」的 case 全部重写为「第一个真上游溢出即短路、后续候选从不被调用」（含 in-band 流式溢出、native Responses 脱敏、逗号分组、box c211e4a1）；新增复现线上 case 的短路测试 + 预检估算不短路的正向证明 + 5xx-gate 测试（500 带溢出标记必须 fall back 而非短路）。execute.test.ts 170 全绿；route-request 92 全绿；typecheck + lint 全绿。
+
 ## 2026-08-07 · Codex 配额富元数据持久化（providers page Tier 3，docs/11，原则 7）
 
 - **现场**：providers 页某 Codex 账号卡片"显示不全"——只有"周限 100%"进度条 + resetCredits 0，缺 Plan 类型、Credits 点数、Reset limit 按钮点数、individualLimit。box 刚重启到 0.28.46 后**所有** Codex 账号都这样；手动 refresh 后未限流账号立即恢复出 planType/credits，已限流账号（其 `/wham/usage` PULL 拿不到富数据）仍缺。
