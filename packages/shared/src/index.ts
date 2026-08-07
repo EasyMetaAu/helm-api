@@ -282,6 +282,8 @@ export {
   AnthropicOAuthUsageSchema,
   type CodexOAuthUsage,
   CodexOAuthUsageSchema,
+  type CodexQuotaMetadata,
+  CodexQuotaMetadataSchema,
   type CodexResetResult,
   CodexResetResultSchema,
   isCodexAccountWeeklyQuotaWindow,
@@ -300,7 +302,9 @@ export {
   OAuthUsagePeriodsSchema,
   type OAuthUsageRow,
   OAuthUsageRowSchema,
+  packCodexQuotaMetadata,
   selectCodexAccountWeeklyQuotaWindows,
+  unpackCodexQuotaMetadata,
 } from "./oauth/usage-schema.js";
 export {
   type ImageEditRequest,

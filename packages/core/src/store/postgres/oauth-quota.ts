@@ -1,4 +1,9 @@
-import { type OAuthQuotaSnapshot, OAuthQuotaSnapshotSchema } from "@helm/shared";
+import {
+  type OAuthQuotaSnapshot,
+  OAuthQuotaSnapshotSchema,
+  packCodexQuotaMetadata,
+  unpackCodexQuotaMetadata,
+} from "@helm/shared";
 import { and, eq } from "drizzle-orm";
 import type { OAuthQuotaStore } from "../ports.js";
 import type { PgDb } from "./migrate.js";
@@ -13,6 +18,11 @@ export class PgOAuthQuotaStore implements OAuthQuotaStore {
   constructor(private readonly db: PgDb) {}
 
   async upsert(snapshot: Omit<OAuthQuotaSnapshot, "usageLimitedUntilMs">): Promise<void> {
+    // jsonb stores the object; pack→undefined on a header PUSH so it is omitted and
+    // the last fresh PULL's metadata is preserved (same contract as resetCredits).
+    const packed = packCodexQuotaMetadata(snapshot);
+    const metadata =
+      packed === undefined ? undefined : (JSON.parse(packed) as Record<string, unknown>);
     const values = {
       providerId: snapshot.providerId,
       account: snapshot.account,
@@ -20,17 +30,19 @@ export class PgOAuthQuotaStore implements OAuthQuotaStore {
       capturedAt: snapshot.capturedAt,
       source: snapshot.source,
       ...(snapshot.resetCredits !== undefined ? { resetCredits: snapshot.resetCredits } : {}),
+      ...(metadata !== undefined ? { metadata } : {}),
     };
     const set = {
       windows: snapshot.windows,
       capturedAt: snapshot.capturedAt,
       source: snapshot.source,
       ...(snapshot.resetCredits !== undefined ? { resetCredits: snapshot.resetCredits } : {}),
+      ...(metadata !== undefined ? { metadata } : {}),
     };
     // usage_limited_until_ms is intentionally absent from BOTH insert values (NULL on
     // a new row) and the conflict SET — a window refresh must not clobber a cooldown.
-    // reset_credits is updated only when the caller has a fresh Codex PULL count;
-    // Codex header PUSHes preserve it.
+    // reset_credits and metadata are updated only when the caller has a fresh Codex
+    // PULL; Codex header PUSHes preserve them.
     await this.db
       .insert(oauthQuota)
       .values(values)
@@ -91,6 +103,7 @@ export class PgOAuthQuotaStore implements OAuthQuotaStore {
       source: row.source,
       usageLimitedUntilMs: row.usageLimitedUntilMs ?? null,
       resetCredits: row.resetCredits ?? null,
+      ...unpackCodexQuotaMetadata(row.metadata == null ? null : JSON.stringify(row.metadata)),
     });
   }
 }

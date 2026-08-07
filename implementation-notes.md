@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-08-07 · Codex 配额富元数据持久化（providers page Tier 3，docs/11，原则 7）
+
+- **现场**：providers 页某 Codex 账号卡片"显示不全"——只有"周限 100%"进度条 + resetCredits 0，缺 Plan 类型、Credits 点数、Reset limit 按钮点数、individualLimit。box 刚重启到 0.28.46 后**所有** Codex 账号都这样；手动 refresh 后未限流账号立即恢复出 planType/credits，已限流账号（其 `/wham/usage` PULL 拿不到富数据）仍缺。
+- **根因**：Codex 富元数据（planType/credits/resetCreditDetails/individualLimit/additionalLimits/rateLimitReachedType）此前**只存在 `admin-oauth.ts` 的进程内 `quotaCache` Map**，从不落库——`oauth_quota` 的 `store.upsert` 只写 windows + resetCredits（`oauth.ts:467`）。重启即清空进程缓存；持久化 store 只剩 windows（→ 周限进度条能显示），`getCachedCodexQuota` 返回 null → 富字段全丢，直到下次 refresh 重填进程缓存。
+- **修复（Lukin 拍板"扩 store schema"）**：给 `oauth_quota` 加一列 `metadata`（sqlite TEXT / pg JSONB，nullable）。① shared 新增 `CodexQuotaMetadataSchema` + `packCodexQuotaMetadata`（header PUSH 无富数据时返回 `undefined` → upsert 里省略该列，保留上次 PULL，与 resetCredits 同 preserve-on-omit 契约）+ `unpackCodexQuotaMetadata`（null/损坏 → `{}` fail-open）。② 两个适配器 upsert 写 metadata、toSnapshot 读回。③ sqlite migration v48 / pg migration v47（都 `ADD COLUMN IF NOT EXISTS`）。④ 刷新路径 `oauth.ts` 把 activeResult 的富字段一并 upsert。⑤ 读取路径 `readCachedQuota`：进程缓存（最新最全）优先，**冷缓存时 fallback 到行上持久化的 metadata**——重启后卡片即完整，无需等 refresh。
+- **未修的次要项**：已限流账号（weekly 100%）的 `/wham/usage` PULL 本身拿不到富数据，是 OpenAI 上游对限流账号的行为，非 helm bug；weekly 重置后自愈。
+- **测试**：sqlite round-trip + header-PUSH 保留；pg（pglite）round-trip + 保留 + fail-open；admin route 冷缓存 fallback（fullSeam 无 getCachedCodexQuota → 用行持久化 metadata）。core store 807 全绿；admin oauth route 86 全绿；typecheck + lint 全绿。
+
 ## 2026-08-07 · context_management 转发给 generic responses 导致 grok 422（Protocol / provider execution，docs/04/05，原则 3/5/8）
 
 - **现场**：anthropic_messages 请求 fallback 到 xAI grok-4.5（generic openai_responses profile）时，`context_management` 以 Anthropic 对象形状 `{ edits: [...] }` 发出，xAI Responses 反序列化要 array → 422 `invalid type: map, expected a sequence`（正是上一条 prompt-too-long 现场里 grok 那个无关 422）。
@@ -84,13 +92,9 @@
 - **流式诊断保真**：首输出前的原生 Responses SSE 错误现在只把 `type/code/message/param` 与嵌套 error envelope 放入 `UpstreamError.providerRaw`，并读取 top-level `message`；既保留 fallback 分类依据，又不让 `response.failed.response` 中的 instructions、tools、metadata 或 output 进入常规 telemetry。
 - **保守边界**：近似字符/token 估算和自由文本错误仍可用于“整链只有上下文/能力 skip”的既有 400，但不能压过真实 5xx/422；没有增加请求、Session 或上下文固定上限。top-level `error` 的 exact-once 终态统一和 CRLF SSE framing 属于独立协议问题，本次不扩大修改面。
 
-## 2026-08-02 · Responses WebSocket 首输出前恢复并提前释放物化准入（Protocol / Gateway runtime，docs/05/07/10，原则 3/5/8）
-
-- **恢复边界**：上游 WebSocket 只产生 `response.created` / `response.in_progress` 后关闭时，丢弃未提交的 preamble，按既有连接重试预算重连，耗尽后回退 HTTP/SSE；最多缓冲协议正常需要的两个 preamble，第三个重复 preamble 立即提交为已开始输出，避免异常上游造成无界缓存。真实输出一旦开始则绝不重放。`response.cancelled` 在 provider parser 与 ingress bridge 都是失败终态，不再追加伪 bridge error。
-- **准入生命周期**：Responses WebSocket bridge 用进程内 `WeakMap<Request, callback>` 把 request-body lease 交给可信内部路由；只有随机 proof 匹配的内部请求会在第二次 JSON parse 成功或失败后立即标为已物化，provider 等待不再长期持有 6 倍预留，而 parser 完成前的并发大请求仍受动态 headroom 保护。没有恢复固定请求、WebSocket 或 Session 大小上限。
-- **保留边界**：bridge 到内部 Responses 路由仍有一次 `JSON.stringify` 与再次 parse；本次先修已证实的 503 放大根因，不抽取会绕过鉴权、schema、rate limit、并发与 telemetry 的第二条执行通道。
-
 ## 历史条目摘要（最新要点）
+
+- **2026-08-02 · Responses WebSocket 首输出前恢复并提前释放物化准入**：上游 WebSocket 只产生 created/in_progress 后关闭时丢弃未提交 preamble 并按连接重试预算重连、耗尽回退 HTTP/SSE，最多缓冲两个 preamble、第三个重复立即提交为已开始输出，真实输出绝不重放，`response.cancelled` 两处均为失败终态；bridge 用进程内 `WeakMap<Request,callback>` 把 request-body lease 交给可信内部路由、随机 proof 匹配后第二次 parse 完即标物化，避免长期持有 6 倍预留，并发大请求仍受动态 headroom 保护，未恢复任何固定大小上限，完整原文经 git history 回溯。
 
 - **2026-08-02 · 流式错误的 telemetry 终态与 metadata-only 捕获短路**：Chat/Messages/Gemini 已开始写 SSE 后遇非取消错误，共用取消边界旁 helper 把同一 `DecisionRecord` 标 `final.status=error`、保留 `error_reason`、写 `stream_outcome=failed`，客户端断连仍走 `client_aborted`；Session capture 关闭时队列入口在算字节/查 cache/建 deferred write 前直接返回，不产生 `session.capture_limited` 或存储工作，脱敏 telemetry 不受影响，完整原文经 git history 回溯。
 - **2026-08-02 · xAI Responses 对象 input 在本地拒绝**：xAI `grok-4.5` 对 `input` 对象返回 `invalid type: map, expected a sequence`；只为 xAI generic Responses contract 加对象形态预检 → 结构化 `invalid_request / 400` 不发上游，数组保持可用、string 形态未证实不猜测；未动 admission/错误正文预算/Session 容量，`error_body_capacity_exhausted` 是独立上游边界保留真实诊断，完整原文经 git history 回溯。
