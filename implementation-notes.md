@@ -25,6 +25,14 @@
 - **TDD**：pool.test 先加失败用例（parked 成员带 flag 仍应被选中→原本落到兄弟）→ Red→加 flag+bypass→Green（99/99）。admin-oauth/oauth 路由测试补 round-trip 与 400 校验。
 - **坑**：worktree 内编辑必须用 worktree 绝对路径——首次 Edit 误落主库（共享 checkout），已 `git checkout --` 干净回退后在 worktree 重做。
 
+## 2026-08-07 · per-key `max_reasoning_effort` 上限在三处身份解析器漏挂，全协议静默失效（Gateway / Key governance，docs/06/11，原则 2/7）
+
+- **现场（box v0.28.43）**：luke 的 key 设了 `max_reasoning_effort=medium`，但 `decision_json` 显示 Anthropic 请求 `xhigh→xhigh`、Responses 请求 `high→high`，**两协议都没被 clamp**。DB 列值正确、v0.28.39 的 `clampClientReasoningEffortToKeyMax` 也被各路由正确调用。
+- **根因**：composition root（`server.ts`）里 `/v1/chat`、`/v1/messages`、`/v1/responses` 各自**内联**一份 `record → caps` 映射（三份几乎相同的 25 行块）。v0.28.39 加 `max_reasoning_effort` 时改了 DB、clamp 调用点、以及 `middleware/auth.ts` 的构造器——但**漏了这三份内联副本**。于是 `identity.caps.maxReasoningEffort` 运行时恒为 `undefined`，clamp 第一行 `if (maxEffort == null) return req` 直接 no-op。`middleware/auth.ts` 版本有该字段，但那个 middleware 并不服务这三条路由（它们走 `resolveIdentity`/内联 resolver）。经典“同一映射多副本漂移”bug（与 memory 里 KeySummary/toSummary 同类）。
+- **修复（消除漂移，不加兼容层）**：把三份内联块抽成单一 `capsFromRecord(record)`（`routes/messages.ts` 导出），三处 resolver 全部改调它。新增 cap 只改一处，物理上杜绝再漂移。删除 server.ts ~90 行重复。
+- **测试**：`messages.caps.test.ts` 直接 pin 映射（`max_reasoning_effort=medium → caps.maxReasoningEffort=medium`，null 透传，其余 caps 齐全）；`responses.test.ts` 新增用例走**真实 `capsFromRecord`** 构造 identity + 真实 pipeline + stateful passthrough continuation，断言到达 `route()` 的 carrier body 与 `reasoning_effort` 均被压到 medium。临时注释掉修复 → 两测试红，且 responses 用例复现 box 症状 `expected 'high' to be 'medium'`；恢复后全绿（reasoning-cap 29 / auth 10 / responses 99 / messages+chat+pipeline 191 全绿）。
+- **坑/边界**：clamp 本身对 `openai_responses` 原生 passthrough carrier 处理完整（早已覆盖），本次纯粹是 cap 值没送达。三处 resolver 之外，`realtime` 的 auth 子集不含 reasoning cap（realtime 无 reasoning，无需）。box 需部署新版本后该 key 才会真正生效（旧进程仍 undefined）。
+
 ## 2026-08-07 · 真实上游超长溢出在链耗尽时胜出终态，修复客户端无法压缩（Provider execution / protocol errors，docs/04/05/07，原则 3/5/8）
 
 - **现场（box `c211e4a1`，v0.28.42）**：Claude Code 发 ~102 万 token，Anthropic（链首、最大窗口）返回真实 400 `prompt is too long: 1022145 tokens > 1000000 maximum`（**无** `context_length_exceeded` code）。helm 把它当可重试 `context_too_small` 继续 fallback；`xai/grok-4.5` 因独立翻译 bug 返回 422，把 `onlyContextOrCapabilitySkips` 打成 false，终态选择器降级为合成 `all_providers_failed / 502`。客户端拿不到真实 400 → 认不出该压缩 → 卡死。
@@ -82,26 +90,12 @@
 - **准入生命周期**：Responses WebSocket bridge 用进程内 `WeakMap<Request, callback>` 把 request-body lease 交给可信内部路由；只有随机 proof 匹配的内部请求会在第二次 JSON parse 成功或失败后立即标为已物化，provider 等待不再长期持有 6 倍预留，而 parser 完成前的并发大请求仍受动态 headroom 保护。没有恢复固定请求、WebSocket 或 Session 大小上限。
 - **保留边界**：bridge 到内部 Responses 路由仍有一次 `JSON.stringify` 与再次 parse；本次先修已证实的 503 放大根因，不抽取会绕过鉴权、schema、rate limit、并发与 telemetry 的第二条执行通道。
 
-## 2026-08-02 · 流式错误的 telemetry 终态与 metadata-only 捕获短路（Gateway / Telemetry，docs/05/07，原则 3/7/8）
-
-- **流式终态**：Chat、Messages 与 Gemini 在已经开始写 SSE 后遇到非取消错误时，共用取消边界旁的 helper，把同一份 `DecisionRecord` 标为 `final.status=error`、保留协议映射使用的 `error_reason`，并写入 `stream_outcome=failed`；客户端主动断连仍只走原有 `client_aborted` 语义。
-- **metadata-only**：Session capture 关闭时，队列入口在计算 request/response 字节、查询饱和 cache 或创建 deferred DB write 前直接返回；不会产生 `session.capture_limited` 或 Session 存储工作，脱敏 telemetry 的正常记录不受影响。
-
-## 2026-08-02 · xAI Responses 对象 input 在本地拒绝（Protocol / provider execution，docs/04/05/07，原则 3/5/8）
-
-- **确定性边界**：xAI `grok-4.5` 对 `input` 对象返回 `invalid type: map, expected a sequence`；只为 xAI 的 generic Responses contract 增加对象形态预检，返回结构化 `invalid_request / 400` 且不发起上游请求。数组保持可用；未证实 string 形态，不猜测也不改写。
-- **资源边界**：未修改 response-work admission、错误正文预算或 Session 容量。xAI 的 `error_body_capacity_exhausted` 是独立的上游正文边界，本次没有足够的稳定请求契约可做本地预判，仍保留其真实 provider 诊断而不虚构 Helm 固定上限。
-
-## 2026-08-02 · Session 正文改为原子分块存储并以机器压力协调后台工作（Telemetry / Gateway runtime，docs/02/07/11，原则 3/7）
-
-- **存储格式**：新 Session 正文按 UTF-8 安全的 256 KiB 原始块逐块 gzip/raw 写入，最多 4 块一批；revision 用请求/响应两个 generation 指针原子发布，响应回填不重写大请求正文，并发重试不会把一份元数据配到另一份正文。历史正文不扫描、不回填；legacy 行继续读取，首次响应回填记录准确的逻辑 `body_bytes`。Admin 恢复先按机器动态 response-work 预算分页，只读取已发布 generation；旧二进制正文在缺少可靠原始字节数时 fail-closed。
-- **无 Session 容量上限**：不恢复 64 MiB 或其他累计上限；单次正文、写队列、HTTP/WebSocket 与响应解析共享基于 V8/cgroup/可用内存的动态协调器，允许更大机器自动使用更多内存，但在 PSI/内存压力下暂停 Memory、Signals 与 scheduled cleanup。健康连续 60 秒后才恢复，避免抖动。
-- **维护边界**：SQLite Session prune 继续小批续跑；PostgreSQL 每次 cleanup tick 最多处理 128 个物理行、每批 16 行，并用持久 marker 续跑。scheduled cleanup 与 auto-VACUUM 在开始前检查压力，VACUUM 排空活动后、真正重写数据库前再次检查；压力恶化时不执行也不误记当天成功。手动维护语义保持不变。
-- **模式切换**：切换全局 capture generation 后，已排队但尚未 flush 的 payload/Session 正文写入会被丢弃，脱敏 telemetry 仍保存。`part=meta` 不读取正文。（原先此处误把“全局 metadata-only 视为 hard-off、任何 key override 都不能绕过”写成契约——与 #675 的 per-key 覆盖优先级冲突，已于 2026-08-04 更正，见顶部条目。）
-
 ## 历史条目摘要（最新要点）
 
-- **2026-07-31 · 保证 Session 捕获且删除累计字节上限**：按用户要求删除单 Session 64 MiB 累计上限（不换更大常量），SQLite/PG adapter 不再因 `stored_bytes` 拒 revision，`stored_bytes` 仅观测，无迁移；缺可信标识时以 `account_id+api_key_id+request_id` 派生仅本请求的 Session（`prompt_cache_key` 可跨会话复用故不作身份），外部 ID 用 `helm-request:` 保留前缀防碰撞，v0.28.26 回滚仍可读；单请求仍受动态 capture-body 内存预算保护，10k revision 上限不变，生产需 `capture_sessions=true`+`capture_payloads=false` 才走增量。完整原文经 git history 回溯。
+- **2026-08-02 · 流式错误的 telemetry 终态与 metadata-only 捕获短路**：Chat/Messages/Gemini 已开始写 SSE 后遇非取消错误，共用取消边界旁 helper 把同一 `DecisionRecord` 标 `final.status=error`、保留 `error_reason`、写 `stream_outcome=failed`，客户端断连仍走 `client_aborted`；Session capture 关闭时队列入口在算字节/查 cache/建 deferred write 前直接返回，不产生 `session.capture_limited` 或存储工作，脱敏 telemetry 不受影响，完整原文经 git history 回溯。
+- **2026-08-02 · xAI Responses 对象 input 在本地拒绝**：xAI `grok-4.5` 对 `input` 对象返回 `invalid type: map, expected a sequence`；只为 xAI generic Responses contract 加对象形态预检 → 结构化 `invalid_request / 400` 不发上游，数组保持可用、string 形态未证实不猜测；未动 admission/错误正文预算/Session 容量，`error_body_capacity_exhausted` 是独立上游边界保留真实诊断，完整原文经 git history 回溯。
+- **2026-08-02 · Session 正文原子分块存储 + 机器压力协调后台工作**：Session 正文按 256 KiB UTF-8 安全块 gzip/raw 写入（≤4 块/批），revision 用请求/响应双 generation 指针原子发布、响应回填不重写大请求正文；不恢复 64 MiB 上限，改由 V8/cgroup 动态协调器统管并在 PSI 压力下暂停 Memory/Signals/cleanup；SQLite 小批 prune、PostgreSQL 每 tick≤128 行续跑，VACUUM 前后双检压力；切 capture generation 丢弃未 flush 正文，`part=meta` 不读正文（原“全局 metadata-only 硬 off 不可 override”契约已于 2026-08-04 更正），完整原文经 git history 回溯。
+- **2026-07-31 · 保证 Session 捕获且删除累计字节上限**：按用户要求删单 Session 64 MiB 累计上限（不换更大常量），`stored_bytes` 仅作观测、SQLite INTEGER/Postgres BIGINT 无需迁移；可信客户端标识全缺时以 `account_id+api_key_id+request_id` 派生仅覆盖本请求的 Session（不拿 `prompt_cache_key` 当身份以免错并会话），外部 ID 用 `helm-request:` 保留前缀避免碰撞、v0.28.26 回滚仍可读；单请求仍受动态 capture-body 内存预算与 10,000 revision 上限保护，历史缺失 revision 不补写，生产需 `capture_sessions=true`+`capture_payloads=false` 才用增量模式，完整原文经 git history 回溯。
 - **2026-07-31 · API key 单独覆盖请求内容存储模式**：`api_keys.request_content_mode` nullable 枚举列，`NULL` 继承实时全局、`none`/`payload`/`session` 显式覆盖；鉴权身份把覆盖值传到 Chat/Messages/Responses(含 compact)/Gemini/Images/Interactions/Admin Replay 复用同一 capture helper，只换本次请求 getter；`payload_retention_days` 仍全局，无 per-key retention（2026-08-04 修正其优先级回归，见顶部）。完整原文经 git history 回溯。
 - **2026-07-31 · 请求列表记录并显示客户端正文大小**：新增可选 `request_body_bytes`（客户端 wire UTF-8 字节，非 Content-Length/token/压缩量），随脱敏 DecisionRecord 保存；Admin 表按 B/KB/MB 展示，旧记录显示 `—`；完整原文通过 git history 回溯。
 - **2026-07-29 · 生产韧性：持续小批清理 + 无丢弃背压 + 执行 Token 租约 + 完整错误诊断**：SQLite retention 每批≤10 行让出事件循环、Session prune claim 可续；写队列删除 OOM shedding 改统一串行 admission 背压 FIFO；OAuth 保存真实 `expires`、执行 client 6 分钟提前刷新、刷新失败重读共享 Store 只用他实例轮换出的有效 credential；Provider 错误有界诊断（64 KiB body / 128 KiB 总预算），完整原文通过 git history 回溯。

@@ -1,4 +1,5 @@
 import {
+  type ApiKeyRecord,
   type BudgetCaps,
   type DecisionRecord,
   extractBillingHeaderIdentity,
@@ -6,7 +7,7 @@ import {
   type RateLimitProbe,
   type RateLimitResult,
 } from "@helm/core";
-import { appendMutationList } from "@helm/shared";
+import { appendMutationList, effectiveMemoryProjectId } from "@helm/shared";
 import type { Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -90,6 +91,39 @@ export interface MessagesIdentity {
     [k: string]: unknown;
   };
   [k: string]: unknown;
+}
+
+/** Map a stored ApiKeyRecord to the per-key caps the self-auth faces attach to a
+ *  MessagesIdentity. SINGLE source of truth for /v1/chat, /v1/messages and
+ *  /v1/responses — previously three inline copies in server.ts, which drifted:
+ *  `maxReasoningEffort` was added to the DB + clamp but never to the copies, so the
+ *  per-key ceiling silently no-op'd on every route. Any new cap goes here once. */
+export function capsFromRecord(record: ApiKeyRecord): NonNullable<MessagesIdentity["caps"]> {
+  return {
+    allowedLanes: record.allowed_lanes,
+    allowCustomModel: record.allow_custom_model,
+    blockedModels: record.blocked_models,
+    allowFastMode: record.allow_fast_mode,
+    rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
+    concurrencyLimit: record.concurrency_limit,
+    budget: {
+      requests: record.budget_requests,
+      tokens: record.budget_tokens,
+      spendUsd: record.budget_spend_usd,
+      windowSeconds: record.budget_window_seconds,
+      behavior: record.over_budget_behavior,
+      degradeLane: record.degrade_lane,
+    },
+    // null project => isolate by the key's own id; explicit value SHARES a pool
+    // across keys (effectiveMemoryProjectId). Mirrors middleware/auth.ts.
+    memory: {
+      mode: record.memory_mode,
+      projectId: effectiveMemoryProjectId(record),
+      threadSource: record.memory_thread_source,
+    },
+    requestContentMode: record.request_content_mode,
+    maxReasoningEffort: record.max_reasoning_effort,
+  };
 }
 
 /** One Anthropic SSE event already serialized to the wire's event/data pair. */

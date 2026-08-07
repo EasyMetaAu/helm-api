@@ -144,7 +144,6 @@ import {
   appendMutationList,
   cloneCarrierWithBody,
   ErrorClassSchema,
-  effectiveMemoryProjectId,
   isNativePassthroughCarrier,
   isOAuthPreset,
   makeHelmError,
@@ -215,7 +214,7 @@ import { registerMcpServer } from "./routes/mcp/index.js";
 import { deriveMcpSigningKey, mcpAuth, registerMcpOAuth } from "./routes/mcp/oauth.js";
 import { supportsMemoryAdmin } from "./routes/mcp/tools.js";
 import type { MessagesIdentity, RouteError } from "./routes/messages.js";
-import { registerMessagesRoute } from "./routes/messages.js";
+import { capsFromRecord, registerMessagesRoute } from "./routes/messages.js";
 import { createMessagesPipeline } from "./routes/messages-pipeline.js";
 import { registerModelsRoute } from "./routes/models.js";
 import { clearSessionCaptureCache } from "./routes/payload-capture.js";
@@ -3728,38 +3727,7 @@ export async function buildServer(
           orgId: null,
           userId: null,
           role: record.role,
-          caps: {
-            allowedLanes: record.allowed_lanes,
-            allowCustomModel: record.allow_custom_model,
-            blockedModels: record.blocked_models,
-            allowFastMode: record.allow_fast_mode,
-            // Per-key rate-limit override (docs/06): carried so the self-auth
-            // /v1/messages + /v1/responses paths enforce per-key limits too, not
-            // just the OpenAI chat middleware.
-            rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
-            // Per-key max in-flight (issue #93): read by the concurrency gate.
-            concurrencyLimit: record.concurrency_limit,
-            // Per-key usage budgets (docs/06): carried so the pipeline's budget
-            // gate/settle enforce on these self-auth faces too.
-            budget: {
-              requests: record.budget_requests,
-              tokens: record.budget_tokens,
-              spendUsd: record.budget_spend_usd,
-              windowSeconds: record.budget_window_seconds,
-              behavior: record.over_budget_behavior,
-              degradeLane: record.degrade_lane,
-            },
-            // Per-key memory defaults (issue #97): read by the route's memory
-            // scope resolver; explicit x-memory-* headers always override.
-            memory: {
-              mode: record.memory_mode,
-              // null project => isolate by the key's own id; explicit value SHARES
-              // a pool across keys (effectiveMemoryProjectId). Mirrors auth.ts.
-              projectId: effectiveMemoryProjectId(record),
-              threadSource: record.memory_thread_source,
-            },
-            requestContentMode: record.request_content_mode,
-          },
+          caps: capsFromRecord(record),
         };
       },
     },
@@ -3948,38 +3916,7 @@ export async function buildServer(
           orgId: null,
           userId: null,
           role: record.role,
-          caps: {
-            allowedLanes: record.allowed_lanes,
-            allowCustomModel: record.allow_custom_model,
-            blockedModels: record.blocked_models,
-            allowFastMode: record.allow_fast_mode,
-            // Per-key rate-limit override (docs/06): carried so the self-auth
-            // /v1/messages + /v1/responses paths enforce per-key limits too, not
-            // just the OpenAI chat middleware.
-            rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
-            // Per-key max in-flight (issue #93): read by the concurrency gate.
-            concurrencyLimit: record.concurrency_limit,
-            // Per-key usage budgets (docs/06): carried so the pipeline's budget
-            // gate/settle enforce on these self-auth faces too.
-            budget: {
-              requests: record.budget_requests,
-              tokens: record.budget_tokens,
-              spendUsd: record.budget_spend_usd,
-              windowSeconds: record.budget_window_seconds,
-              behavior: record.over_budget_behavior,
-              degradeLane: record.degrade_lane,
-            },
-            // Per-key memory defaults (issue #97): read by the route's memory
-            // scope resolver; explicit x-memory-* headers always override.
-            memory: {
-              mode: record.memory_mode,
-              // null project => isolate by the key's own id; explicit value SHARES
-              // a pool across keys (effectiveMemoryProjectId). Mirrors auth.ts.
-              projectId: effectiveMemoryProjectId(record),
-              threadSource: record.memory_thread_source,
-            },
-            requestContentMode: record.request_content_mode,
-          },
+          caps: capsFromRecord(record),
         };
       },
     },
@@ -4054,33 +3991,7 @@ export async function buildServer(
       orgId: null,
       userId: null,
       role: record.role,
-      caps: {
-        allowedLanes: record.allowed_lanes,
-        allowCustomModel: record.allow_custom_model,
-        blockedModels: record.blocked_models,
-        allowFastMode: record.allow_fast_mode,
-        rateLimit: { rpm: record.rate_limit_rpm, tpm: record.rate_limit_tpm },
-        // Per-key max in-flight (issue #93): read by the concurrency gate.
-        concurrencyLimit: record.concurrency_limit,
-        budget: {
-          requests: record.budget_requests,
-          tokens: record.budget_tokens,
-          spendUsd: record.budget_spend_usd,
-          windowSeconds: record.budget_window_seconds,
-          behavior: record.over_budget_behavior,
-          degradeLane: record.degrade_lane,
-        },
-        // Per-key memory defaults (issue #97): read by the route's memory
-        // scope resolver; explicit x-memory-* headers always override.
-        memory: {
-          mode: record.memory_mode,
-          // null project => isolate by the key's own id; explicit value SHARES
-          // a pool across keys (effectiveMemoryProjectId). Mirrors auth.ts.
-          projectId: effectiveMemoryProjectId(record),
-          threadSource: record.memory_thread_source,
-        },
-        requestContentMode: record.request_content_mode,
-      },
+      caps: capsFromRecord(record),
     };
   };
 

@@ -4,6 +4,7 @@ import {
   type DecisionRecord,
   deriveSafeWorkingMemoryCapacity,
   type ExecutionResult,
+  hashKey,
   responsesTransformer,
   type TelemetryStore,
   type UpsertSessionRevisionInput,
@@ -16,7 +17,7 @@ import {
   trackResponsesWebSocketRequest,
 } from "../responses-websocket-internal.js";
 import { createBodyMemoryAdmission } from "../runtime/memory-admission.js";
-import type { MessagesIdentity } from "./messages.js";
+import { capsFromRecord, type MessagesIdentity } from "./messages.js";
 import { createMessagesPipeline, PipelineError, type RouteFn } from "./messages-pipeline.js";
 import type { RecordServedDeps, SseCapture } from "./payload-capture.js";
 import {
@@ -1543,6 +1544,106 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect((routeHarness.routed?.native_request as { body?: unknown } | undefined)?.body).toEqual(
       body,
     );
+  });
+
+  it("clamps a native-passthrough Responses reasoning.effort down to the key's ceiling", async () => {
+    // Regression: luke's key caps max_reasoning_effort at "medium", but a Codex
+    // Responses request asking for "high" reached the upstream verbatim because the
+    // per-key ceiling was never enforced on the /v1/responses surface (the clamp had
+    // only been wired into /v1/chat and /v1/messages). Assert the carrier body that
+    // reaches route() has been clamped to the cap.
+    const routeHarness: { routed: Parameters<RouteFn>[0] | null } = { routed: null };
+    const route: RouteFn = async (request) => {
+      routeHarness.routed = request;
+      return {
+        decision: FAKE_DECISION,
+        final: { status: "ok", alias: "openai-codex/gpt-5.6-sol" },
+        body: null,
+        stream: (async function* () {
+          yield 'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-x","status":"completed"}}\n\n';
+        })(),
+        error: null,
+        nativePassthrough: true,
+      } as ExecutionResult;
+    };
+    const pipeline = createMessagesPipeline(route, "openai_responses");
+    const registryRecord = {
+      responseId: "resp_previous",
+      accountId: "acct",
+      keyId: "k1",
+      providerAlias: "openai-codex/gpt-5.6-sol",
+      providerName: "openai-codex",
+      providerModel: "gpt-5.6-sol",
+      providerProtocol: "openai_responses" as const,
+      createdAt: 1,
+      expiresAt: Date.now() + 60_000,
+      status: "completed",
+    };
+    const { deps } = makeDeps({
+      transformRequestOut: (native) =>
+        responsesTransformer.transformRequestOut(native) as {
+          stream?: boolean;
+          metadata?: Record<string, unknown>;
+        },
+      run: pipeline.run,
+      // Build caps through the SAME production mapping the composition root uses, so
+      // this exercises the resolver bug (dropped maxReasoningEffort) end-to-end — not
+      // a hand-written caps object that would mask it.
+      identity: {
+        keyId: "k1",
+        accountId: "acct",
+        caps: capsFromRecord({
+          key_id: "k1",
+          hash: hashKey("helm_live_secret"),
+          prefix: "helm_live_ab",
+          account_id: "acct",
+          role: "user",
+          name: null,
+          allowed_lanes: null,
+          allow_custom_model: true,
+          blocked_models: null,
+          allow_fast_mode: false,
+          disabled: false,
+          rate_limit_rpm: null,
+          rate_limit_tpm: null,
+          budget_requests: null,
+          budget_tokens: null,
+          budget_spend_usd: null,
+          budget_window_seconds: null,
+          over_budget_behavior: "degrade",
+          degrade_lane: null,
+          concurrency_limit: null,
+          memory_mode: "off",
+          memory_project_id: null,
+          memory_thread_source: "header",
+          request_content_mode: null,
+          max_reasoning_effort: "medium",
+        }),
+      },
+      registry: { put: vi.fn(), get: vi.fn().mockResolvedValue(registryRecord) },
+    });
+    const app = buildApp(deps);
+    const body = {
+      model: "gpt-5.6-sol",
+      input: "Say hello",
+      reasoning: { effort: "high" },
+      previous_response_id: "resp_previous",
+      stream: true,
+      store: false,
+    };
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify(body),
+    });
+
+    expect(res.status).toBe(200);
+    const carrier = routeHarness.routed?.native_request as
+      | { body?: { reasoning?: { effort?: unknown } }; mutations?: Record<string, unknown> }
+      | undefined;
+    expect(carrier?.body?.reasoning?.effort).toBe("medium");
+    expect(routeHarness.routed?.reasoning_effort).toBe("medium");
   });
 
   it("serves a native WebSocket prewarm with empty input and generate:false", async () => {
