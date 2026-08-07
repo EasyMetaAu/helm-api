@@ -701,6 +701,28 @@ function prepareNativeRequestForUpstream(
     }
   }
 
+  // A GENERIC Responses provider (xAI/Grok) passing a body through verbatim cannot parse
+  // Anthropic's `context_management` (an Anthropic-native context-editing control), which
+  // helm carries in the object shape `{ edits: [...] }`. xAI rejects it with HTTP 422
+  // "invalid type: map, expected a sequence". The translation path already drops it via the
+  // forward allowlist; strip it here too so the SAME-protocol passthrough path (openai_responses
+  // -> generic Grok, which bypasses the allowlist) can't leak it. Codex-official keeps it.
+  if (
+    protocol === "openai_responses" &&
+    nativeProtocolProfile === "generic_openai_responses" &&
+    body.context_management !== undefined
+  ) {
+    const rest = { ...body };
+    delete rest.context_management;
+    body = rest;
+    bodyChanged = true;
+    if (mutations) {
+      appendMutationList(mutations, "body_shims_applied", [
+        "context_management_stripped_for_generic",
+      ]);
+    }
+  }
+
   if (protocol === "anthropic_messages") {
     const sanitized = sanitizeAnthropicNativeBody(body);
     if (sanitized.strippedEmptyTextBlocks > 0) {
@@ -2639,7 +2661,16 @@ function renderProviderRawForTarget(
   // rebuilds `input` from the folded messages (openaiToGenericResponsesRequest), so never
   // forward the Codex snapshot to it: correctness must not depend on the generic client
   // happening to ignore the field. (Codex->Codex keeps it via the passthrough path.)
-  if (targetIsGenericResponsesProfile) allowed.delete("responses_input_items");
+  //
+  // `context_management` is an Anthropic-native context-editing control forwarded to the
+  // Codex OFFICIAL endpoint (which understands it), but a GENERIC Responses provider does
+  // not — and helm carries it in Anthropic's object shape `{ edits: [...] }`, which xAI
+  // rejects with HTTP 422 "invalid type: map, expected a sequence" (box c211e4a1's grok
+  // fallback). Drop it for the generic profile for the same reason as above.
+  if (targetIsGenericResponsesProfile) {
+    allowed.delete("responses_input_items");
+    allowed.delete("context_management");
+  }
   for (const key of allowed) {
     const value = providerRaw[key];
     if (value !== undefined && value !== null) out[key] = value;
