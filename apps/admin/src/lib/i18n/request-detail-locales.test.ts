@@ -23,6 +23,7 @@ const requestDetailPayloadKeys = [
   'The forwarded upstream body matched the client request body.',
   'Load transcript',
   'Rebuild the transcript in your browser instead of on the server.',
+  'Rebuilt from the session transcript in your browser — semantically equal to the original request, not the exact HTTP body.',
   'The session transcript is too large to rebuild on the server.',
   'The session transcript could not be rebuilt.',
 ] as const;
