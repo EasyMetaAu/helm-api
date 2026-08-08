@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-08-08 · 会话转录客户端重建，绕开服务端内存阀（Admin / requests debug，docs/07，原则 1）
+
+- **现场**：未捕获正文的长 Codex/Responses 会话，请求详情页显示「会话转录过大，无法安全恢复」。数据都在（`session_revisions` 纯 TEXT 增量），但服务端重建 `getSessionRequest`（`apps/gateway/src/routes/admin/requests.ts`）在拉第一页前就 `responseAdmission.acquire(recoveryMaxWireBytes=响应窗口/放大/2)` 预留整窗内存；长链超阀 → `session_recovery_limited`。这是**故意保守**：admin 看后台不该和线上流量抢内存。
+- **方案（Lukin 拍板"吐给客户端自己重建"）**：新增 `GET /admin/api/requests/:id/session-revisions?after=<seq>`，只分页流式吐 raw revision 行（固定 `maxBytes=4MB`/页 + `limit=100`，`nextSequence` 游标），**不做服务端重建、不预留整窗**。前端 `session_recovery_limited` 分支换成「点击加载」懒加载按钮 → 循环拉页攒链 → 浏览器本地重建 → `JsonViewer` 渲染。服务端常驻内存降到「一页」。旧服务端重建路径保留（小转录仍走它，快）。
+- **架构取舍（AskUserQuestion 敲定）**：重建纯函数 `restoreSessionRevisionJson` 从 `packages/core/src/store/session-delta.ts` 抽到 **`@helm/shared`**（零 node 依赖、浏览器安全），core 反向 re-export（barrel 与调用方无感）；写入侧 `splitSessionRequestJson`/`hashEvents`（依赖 `node:crypto`）留在 core。admin `lib/api/requests.ts` **破例 import** shared 的这一个纯函数——打破该文件「零 core/gateway 业务逻辑」红线，理由：复制重建逻辑违反 DRY 更糟。破例已在两处注释标明。
+- **坑**：① 不能让 admin `import "@helm/core"`——core barrel 拽入 better-sqlite3/postgres/undici，浏览器 bundle 炸。② `session-revisions` 端点检查顺序：先取 sessionRef（`no_session` 更根本）再 null-check `listSessionRevisionsPage`（`session_unavailable`）。③ e2e/单测跑前须 `pnpm --filter @helm/{shared,core} build`——gateway e2e test-server 从 dist 解析 `@helm/core`，改 shared 后 core dist 会过期报 `runtimeResponseWorkAdmission` 缺失（红鲱鱼，非本改动）。④ 新增 5 个 UI 字符串须同步 7 locale + 加进 `request-detail-locales.test.ts` 的 `requestDetailPayloadKeys`（CI 门槛，要求 zh/ja/ko 真译文 ≠ 英文）；旧 key `...recover safely.` 变成孤儿但对齐无害（未跑 i18n:extract 清理）。
+
 ## 2026-08-07 · 真上游上下文溢出短路直返 400，不再 fall back（Gateway / execution chain，docs/03/04/07，原则 3/5）
 
 - **现场（box 12a22879）**：客户端请求 `claude-opus-5`（anthropic passthrough），链上 anthropic/opus-4-8 与 sonnet-5 都真上游 400 `prompt is too long: N > 1000000`，被当作 `context_too_small` skip，一路 fall back 到 `openrouter/deepseek-v4-pro`（更大窗口）**成功返回 200**。客户端拿到成功响应→永不触发 context compaction→下一轮请求只会更长。透传场景尤其致命：Claude Code / Codex 靠收到 4xx 才压缩。

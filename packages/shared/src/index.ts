@@ -351,6 +351,12 @@ export {
   type TargetProviderProtocol,
   TargetProviderProtocolSchema,
 } from "./request/schema.js";
+// Read-side session transcript reconstruction (shared by gateway + admin browser).
+export {
+  restoreSessionRequestJson,
+  restoreSessionRevisionJson,
+  type SessionRevisionForRestore,
+} from "./session-delta.js";
 // Routing signal (POST-MVP Agentic Signals feedback layer; docs/02 telemetry).
 export { type RoutingSignal, RoutingSignalSchema } from "./signals/schema.js";
 export { version } from "./version.js";

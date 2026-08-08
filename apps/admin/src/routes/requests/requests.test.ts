@@ -18,6 +18,7 @@ const getRequest = vi.fn();
 const getRequestPayload = vi.fn();
 const getRequestPayloadMeta = vi.fn();
 const getRequestPayloadPart = vi.fn();
+const rebuildSessionTranscript = vi.fn();
 const replayRequest = vi.fn();
 const listRequests = vi.fn();
 const listKeys = vi.fn();
@@ -27,6 +28,7 @@ vi.mock('$lib/api/requests.js', () => ({
   getRequestPayload: (...args: unknown[]) => getRequestPayload(...args),
   getRequestPayloadMeta: (...args: unknown[]) => getRequestPayloadMeta(...args),
   getRequestPayloadPart: (...args: unknown[]) => getRequestPayloadPart(...args),
+  rebuildSessionTranscript: (...args: unknown[]) => rebuildSessionTranscript(...args),
   replayRequest: (...args: unknown[]) => replayRequest(...args),
 }));
 vi.mock('$lib/api/keys.js', () => ({
@@ -691,6 +693,25 @@ describe('requests detail page', () => {
     expect(getRequestPayloadPart).toHaveBeenCalledWith('tr_lazy', 'request');
   });
 
+  it('rebuilds a too-large transcript client-side only on click', async () => {
+    rebuildSessionTranscript.mockResolvedValueOnce({ model: 'auto', messages: [] });
+    render(DetailPage, {
+      data: {
+        detail: detail(),
+        payload: { captured: false, reason: 'session_recovery_limited' },
+        requestId: 'tr_big',
+      },
+    });
+
+    // Not loaded up front — the button is present, no transcript body yet.
+    expect(rebuildSessionTranscript).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('transcript-body')).not.toBeInTheDocument();
+    await fireEvent.click(screen.getByTestId('load-transcript'));
+
+    expect(await screen.findByTestId('transcript-body')).toHaveTextContent(/"model": "auto"/);
+    expect(rebuildSessionTranscript).toHaveBeenCalledWith('tr_big');
+  });
+
   // A 1×1 PNG (bare base64) — the form a generated/input image takes inside a body.
   const PNG_B64 =
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
@@ -831,7 +852,7 @@ describe('requests detail page', () => {
     expect(screen.getByTestId('retry-request')).toBeDisabled();
   });
 
-  it('does not offer payload loading when Session recovery exceeds the safe limit', () => {
+  it('offers a client-side transcript rebuild when Session recovery exceeds the server limit', () => {
     render(DetailPage, {
       data: {
         detail: detail(),
@@ -845,10 +866,13 @@ describe('requests detail page', () => {
     });
 
     expect(screen.getByTestId('payload-summary')).toHaveTextContent(
-      'The session transcript is too large to recover safely.',
+      'The session transcript is too large to rebuild on the server.',
     );
+    // The server-side payload-part buttons stay absent (nothing captured); the
+    // client-side transcript rebuild button is offered instead.
     expect(screen.queryByTestId('load-conversation')).not.toBeInTheDocument();
     expect(screen.queryByTestId('load-request-body')).not.toBeInTheDocument();
+    expect(screen.getByTestId('load-transcript')).toBeInTheDocument();
   });
 
   it('surfaces a structured error with class, status, redacted message and redacted provider_raw', () => {

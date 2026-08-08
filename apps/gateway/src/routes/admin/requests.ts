@@ -276,7 +276,58 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
       created_at: p.createdAt.getTime(),
     });
   });
+
+  // GET /requests/:traceId/session-revisions?after=<seq> — one keyset page of RAW,
+  // unreconstructed revision rows. The browser walks the cursor (nextSequence) and
+  // rebuilds the transcript client-side via @helm/shared's restoreSessionRevisionJson.
+  // Unlike the server-side /payload recovery path (getSessionRequest), this does NOT
+  // reserve a whole response-work window: reconstruction never happens server-side, so
+  // only ONE byte-bounded page is materialized per request. That is what lets a large
+  // transcript that the server refuses to rebuild (session_recovery_limited) still be
+  // inspected. `maxBytes` caps a single page; a `limited` page still returns its rows
+  // and cursor so the client keeps paging rather than failing.
+  app.get("/admin/api/requests/:traceId/session-revisions", async (c) => {
+    const traceId = c.req.param("traceId");
+    // no_session (not a session request at all) is more fundamental than the store's
+    // paging capability, so resolve the session ref FIRST.
+    const decision = await deps.telemetry.getByRequestId(traceId);
+    const sessionRef = decision?.session?.ref;
+    if (!sessionRef) return c.json({ captured: false, reason: "no_session" });
+    const listPage = deps.telemetry.listSessionRevisionsPage;
+    if (!listPage) return c.json({ captured: false, reason: "session_unavailable" });
+    const afterRaw = c.req.query("after");
+    const afterSequence =
+      afterRaw !== undefined && /^\d+$/.test(afterRaw) ? Number(afterRaw) : undefined;
+    const page = await listPage.call(deps.telemetry, sessionRef, {
+      afterSequence,
+      limit: SESSION_REVISION_PAGE_LIMIT,
+      maxBytes: SESSION_REVISION_PAGE_MAX_BYTES,
+    });
+    return c.json({
+      captured: true,
+      sessionRef,
+      targetRequestId: traceId,
+      nextSequence: page.nextSequence,
+      // Only the fields restoreSessionRevisionJson consumes — createdAt/sequence/
+      // sessionRef/fidelity are recovery-irrelevant and stay off the wire.
+      revisions: page.revisions.map((r) => ({
+        requestId: r.requestId,
+        parentRequestId: r.parentRequestId,
+        retainCount: r.retainCount,
+        requestDeltaJson: r.requestDeltaJson,
+        requestEnvelopeJson: r.requestEnvelopeJson,
+        responseId: r.responseId,
+        responseJson: r.responseJson,
+      })),
+    });
+  });
 }
+
+// One raw-revision page: bounded so a single request never materializes an unbounded
+// chain, but large enough that most transcripts page in a few round-trips. The client
+// drives the cursor, so this is a per-page cap, not a whole-transcript budget.
+const SESSION_REVISION_PAGE_LIMIT = 100;
+const SESSION_REVISION_PAGE_MAX_BYTES = 4 * 1024 * 1024;
 
 async function getSessionRequest(
   deps: AdminApiDeps,
