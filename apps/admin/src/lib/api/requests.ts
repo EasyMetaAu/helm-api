@@ -22,6 +22,14 @@
 // prefix, e.g. helm_live_ab12, NEVER the plaintext key; '—' when absent);
 // `payload_summary` is a summary placeholder, never the full private payload;
 // `provider_raw` is redacted.
+//
+// EXCEPTION to the "imports NO core/gateway business logic" rule: the pure
+// transcript-reconstruction function lives in @helm/shared (zero node deps). For very
+// large Codex/Responses sessions the gateway refuses to rebuild the transcript
+// server-side (reserving a whole response-work memory window -> session_recovery_limited);
+// instead we stream the RAW revision rows and rebuild in the browser. Duplicating the
+// reconstruction logic in admin would be worse than this single shared import.
+import { restoreSessionRevisionJson, type SessionRevisionForRestore } from '@helm/shared';
 
 // ── UI-facing contract (docs/07) ─────────────────────────────────────────────
 
@@ -915,6 +923,58 @@ export async function getRequestPayloadPart(
   } catch {
     return { captured: false };
   }
+}
+
+// ── Client-side transcript rebuild ───────────────────────────────────────────
+// See the top-of-file @helm/shared import for why this one exception to the
+// "admin imports NO core/gateway business logic" rule exists.
+
+export interface SessionRevisionsPageView {
+  captured: boolean;
+  reason?: 'no_session' | 'session_unavailable';
+  sessionRef?: string;
+  targetRequestId?: string;
+  nextSequence?: number | null;
+  revisions?: SessionRevisionForRestore[];
+}
+
+// GET /admin/api/requests/:id/session-revisions?after=<seq> -> one raw revision page.
+export async function getSessionRevisionsPage(
+  requestId: string,
+  afterSequence?: number,
+): Promise<SessionRevisionsPageView> {
+  const suffix = afterSequence === undefined ? '' : `?after=${encodeURIComponent(afterSequence)}`;
+  try {
+    const res = await fetch(
+      `${BASE}/${encodeURIComponent(requestId)}/session-revisions${suffix}`,
+      { headers: { accept: 'application/json' } },
+    );
+    if (!res.ok) return { captured: false };
+    return (await res.json()) as SessionRevisionsPageView;
+  } catch {
+    return { captured: false };
+  }
+}
+
+// Walk the keyset cursor to collect the whole revision chain, then rebuild the target
+// request client-side. Returns the parsed request body (what JsonViewer renders).
+// Throws on an unavailable session so the caller can surface an error state.
+export async function rebuildSessionTranscript(requestId: string): Promise<unknown> {
+  const revisions: SessionRevisionForRestore[] = [];
+  let after: number | undefined;
+  let targetRequestId: string | undefined;
+  for (;;) {
+    const page = await getSessionRevisionsPage(requestId, after);
+    if (!page.captured) throw new Error(page.reason ?? 'session unavailable');
+    targetRequestId = page.targetRequestId ?? requestId;
+    if (page.revisions) revisions.push(...page.revisions);
+    const next = page.nextSequence;
+    // Stop at the final page, or if the cursor fails to advance (defensive: a stuck
+    // cursor would otherwise loop forever).
+    if (next === null || next === undefined || next === after) break;
+    after = next;
+  }
+  return JSON.parse(restoreSessionRevisionJson(revisions, targetRequestId));
 }
 
 // POST /admin/api/requests/:requestId/replay -> { trace_id } | throws. Re-issues the

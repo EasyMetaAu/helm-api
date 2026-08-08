@@ -1061,5 +1061,10 @@
   "Yesterday: {value}": "前日：{value}",
   "Your new API key": "新しい API キー",
   "Zoom in": "拡大",
-  "Zoom out": "縮小"
+  "Zoom out": "縮小",
+  "Load transcript": "トランスクリプトを読み込む",
+  "Rebuild the transcript in your browser instead of on the server.": "サーバーではなくブラウザーでトランスクリプトを再構築します。",
+  "Rebuilt from the session transcript in your browser — semantically equal to the original request, not the exact HTTP body.": "ブラウザーでセッショントランスクリプトから再構築しました。元のリクエストと意味的に同等ですが、正確な HTTP ボディではありません。",
+  "The session transcript is too large to rebuild on the server.": "セッショントランスクリプトが大きすぎて、サーバーで再構築できません。",
+  "The session transcript could not be rebuilt.": "セッショントランスクリプトを再構築できませんでした。"
 }
