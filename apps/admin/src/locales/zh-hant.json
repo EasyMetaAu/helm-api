@@ -1061,5 +1061,10 @@
   "Yesterday: {value}": "昨日：{value}",
   "Your new API key": "你的新 API 金鑰",
   "Zoom in": "放大",
-  "Zoom out": "縮小"
+  "Zoom out": "縮小",
+  "Load transcript": "載入轉錄",
+  "Rebuild the transcript in your browser instead of on the server.": "在瀏覽器中重建轉錄，而不是在伺服器上重建。",
+  "Rebuilt from the session transcript in your browser — semantically equal to the original request, not the exact HTTP body.": "已在瀏覽器中從工作階段轉錄重建——與原始請求語意等價，但不是精確的 HTTP 內文。",
+  "The session transcript is too large to rebuild on the server.": "工作階段轉錄過大，無法在伺服器上重建。",
+  "The session transcript could not be rebuilt.": "無法重建工作階段轉錄。"
 }

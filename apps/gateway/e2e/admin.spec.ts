@@ -326,7 +326,7 @@ test.describe("admin request payload view", () => {
     await expect(page.getByTestId("payload-summary")).toContainText(/no captured Session ID/i);
   });
 
-  test("does not offer loading when Session recovery exceeds the safe limit", async ({ page }) => {
+  test("rebuilds a too-large transcript client-side on demand", async ({ page }) => {
     await page.route(`**/admin/api/requests/${SEED_TRACE_ID}/payload?part=meta`, async (route) =>
       route.fulfill({
         contentType: "application/json",
@@ -337,10 +337,41 @@ test.describe("admin request payload view", () => {
         }),
       }),
     );
+    // The raw-revision stream the browser walks to rebuild the transcript locally.
+    // One root revision -> a single-message request body, no further pages.
+    await page.route(`**/admin/api/requests/${SEED_TRACE_ID}/session-revisions*`, async (route) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          captured: true,
+          sessionRef: "session-e2e",
+          targetRequestId: SEED_TRACE_ID,
+          nextSequence: null,
+          revisions: [
+            {
+              requestId: SEED_TRACE_ID,
+              parentRequestId: null,
+              retainCount: 0,
+              requestDeltaJson: '[{"role":"user","content":"rebuilt-in-browser"}]',
+              requestEnvelopeJson: '{"model":"auto","messages":[]}',
+              responseId: null,
+              responseJson: null,
+            },
+          ],
+        }),
+      }),
+    );
 
     await page.goto(`${BASE}/admin/requests/${SEED_TRACE_ID}`);
-    await expect(page.getByTestId("payload-summary")).toContainText(/too large to recover safely/i);
+    await expect(page.getByTestId("payload-summary")).toContainText(
+      /too large to rebuild on the server/i,
+    );
+    // The server-side payload-part buttons stay absent; the client rebuild is offered.
     await expect(page.getByTestId("load-conversation")).toHaveCount(0);
     await expect(page.getByTestId("load-request-body")).toHaveCount(0);
+    await expect(page.getByTestId("transcript-body")).toHaveCount(0);
+
+    await page.getByTestId("load-transcript").click();
+    await expect(page.getByTestId("transcript-body")).toContainText("rebuilt-in-browser");
   });
 });

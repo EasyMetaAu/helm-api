@@ -1061,5 +1061,10 @@
   "Yesterday: {value}": "Ontem: {value}",
   "Your new API key": "Sua nova API key",
   "Zoom in": "Aproximar zoom",
-  "Zoom out": "Afastar zoom"
+  "Zoom out": "Afastar zoom",
+  "Load transcript": "Carregar transcrição",
+  "Rebuild the transcript in your browser instead of on the server.": "Reconstrua a transcrição no seu navegador em vez de no servidor.",
+  "Rebuilt from the session transcript in your browser — semantically equal to the original request, not the exact HTTP body.": "Reconstruído a partir da transcrição da sessão no seu navegador — semanticamente igual à solicitação original, não o corpo HTTP exato.",
+  "The session transcript is too large to rebuild on the server.": "A transcrição da sessão é grande demais para reconstruir no servidor.",
+  "The session transcript could not be rebuilt.": "Não foi possível reconstruir a transcrição da sessão."
 }

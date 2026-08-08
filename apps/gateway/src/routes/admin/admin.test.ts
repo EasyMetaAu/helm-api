@@ -2170,6 +2170,127 @@ describe("admin.api request payload", () => {
       reason: "session_incomplete",
     });
   });
+
+  // Raw revision stream: hands unreconstructed rows to the browser so it can rebuild
+  // large transcripts client-side, skipping the server-side whole-window acquire.
+  it("streams one raw revision page with a cursor and no big up-front acquire", async () => {
+    const rec = {
+      ...decision("req_child", "balanced"),
+      session: { ref: "session-ref", source: "x-thread-id" as const },
+    };
+    const root: SessionRevisionRecord = {
+      sessionRef: "session-ref",
+      requestId: "req_root",
+      sequence: 1,
+      parentRequestId: null,
+      retainCount: 0,
+      requestDeltaJson: '[{"role":"user","content":"root"}]',
+      requestEnvelopeJson: '{"model":"auto","messages":[]}',
+      responseId: null,
+      responseJson: null,
+      fidelity: "semantic",
+      createdAt: new Date(1000),
+    };
+    const pages: Array<{ afterSequence?: number; maxBytes: number }> = [];
+    const telemetry = {
+      ...makeTelemetry([rec]),
+      getPayload: async () => null,
+      listSessionRevisions: async () => {
+        throw new Error("unbounded Session read must not be used");
+      },
+      listSessionRevisionsPage: async (
+        _sessionRef: string,
+        options: { afterSequence?: number; limit: number; maxBytes: number },
+      ) => {
+        pages.push(options);
+        return { revisions: [root], nextSequence: 1, limited: false };
+      },
+    } as unknown as TelemetryStore;
+
+    const response = await buildApp(buildDeps({ telemetry })).request(
+      "/admin/api/requests/req_child/session-revisions",
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      captured: true,
+      sessionRef: "session-ref",
+      targetRequestId: "req_child",
+      nextSequence: 1,
+      revisions: [
+        {
+          requestId: "req_root",
+          parentRequestId: null,
+          retainCount: 0,
+          requestDeltaJson: '[{"role":"user","content":"root"}]',
+          requestEnvelopeJson: '{"model":"auto","messages":[]}',
+          responseId: null,
+          responseJson: null,
+        },
+      ],
+    });
+    // Exactly one store page per request (the browser drives the cursor), and the
+    // page is byte-bounded but does NOT reserve a whole response window up front.
+    expect(pages).toHaveLength(1);
+    expect(pages[0]?.afterSequence).toBeUndefined();
+    expect(pages[0]?.maxBytes).toBeGreaterThan(0);
+  });
+
+  it("advances the cursor from the ?after= query", async () => {
+    const rec = {
+      ...decision("req_child", "balanced"),
+      session: { ref: "session-ref", source: "x-thread-id" as const },
+    };
+    let seenAfter: number | undefined = -1;
+    const telemetry = {
+      ...makeTelemetry([rec]),
+      getPayload: async () => null,
+      listSessionRevisionsPage: async (
+        _sessionRef: string,
+        options: { afterSequence?: number; limit: number; maxBytes: number },
+      ) => {
+        seenAfter = options.afterSequence;
+        return { revisions: [], nextSequence: null, limited: false };
+      },
+    } as unknown as TelemetryStore;
+
+    const response = await buildApp(buildDeps({ telemetry })).request(
+      "/admin/api/requests/req_child/session-revisions?after=7",
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ nextSequence: null, revisions: [] });
+    expect(seenAfter).toBe(7);
+  });
+
+  it("reports no_session when the request has no captured session ref", async () => {
+    const rec = decision("req_plain", "balanced"); // no .session
+    const telemetry = {
+      ...makeTelemetry([rec]),
+      getPayload: async () => null,
+    } as unknown as TelemetryStore;
+    const response = await buildApp(buildDeps({ telemetry })).request(
+      "/admin/api/requests/req_plain/session-revisions",
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ captured: false, reason: "no_session" });
+  });
+
+  it("reports session_unavailable when the store cannot page revisions", async () => {
+    const rec = {
+      ...decision("req_child", "balanced"),
+      session: { ref: "session-ref", source: "x-thread-id" as const },
+    };
+    const telemetry = {
+      ...makeTelemetry([rec]),
+      getPayload: async () => null,
+      listSessionRevisionsPage: undefined,
+    } as unknown as TelemetryStore;
+    const response = await buildApp(buildDeps({ telemetry })).request(
+      "/admin/api/requests/req_child/session-revisions",
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ captured: false, reason: "session_unavailable" });
+  });
 });
 
 describe("admin.api oauth cached overview and refresh queue", () => {

@@ -3,6 +3,7 @@
   import { invalidateAll } from '$app/navigation';
   import {
     getRequestPayloadPart,
+    rebuildSessionTranscript,
     type RequestDetail,
     type RequestPayloadPartName,
     type RequestPayloadView,
@@ -84,6 +85,26 @@
   let payloadValues = $state<PayloadValues>(initialPayloadValues(pagePayload()));
   let payloadStatus = $state<PayloadStatuses>(initialPayloadStatuses(pagePayload()));
   let payloadErrors = $state<Partial<Record<RequestPayloadPartName, string>>>({});
+
+  // Client-side transcript rebuild for sessions the server refuses to reconstruct
+  // (session_recovery_limited). Loaded only on click — a large transcript can be many
+  // MB, so we stream the raw revisions and rebuild in the browser.
+  let transcriptStatus = $state<'idle' | 'loading' | 'loaded' | 'error'>('idle');
+  let transcriptValue = $state<unknown>(null);
+  let transcriptError = $state<string | undefined>(undefined);
+
+  async function loadTranscript(): Promise<void> {
+    if (transcriptStatus === 'loading' || transcriptStatus === 'loaded') return;
+    transcriptStatus = 'loading';
+    transcriptError = undefined;
+    try {
+      transcriptValue = await rebuildSessionTranscript(data.requestId);
+      transcriptStatus = 'loaded';
+    } catch {
+      transcriptStatus = 'error';
+      transcriptError = $t('The session transcript could not be rebuilt.');
+    }
+  }
 
   function hasPayloadPart(part: RequestPayloadPartName): boolean {
     if (data.payload?.captured !== true) return false;
@@ -495,13 +516,42 @@
           {:else if data.payload?.reason === 'session_incomplete'}
             {$t('The session transcript is incomplete and this request cannot be recovered.')}
           {:else if data.payload?.reason === 'session_recovery_limited'}
-            {$t('The session transcript is too large to recover safely.')}
+            {$t('The session transcript is too large to rebuild on the server.')}
           {:else if data.payload?.reason === 'no_session'}
             {$t('This request has no captured Session ID, so no session transcript is available.')}
           {:else}
             {$t('Full request/response not recorded (payload capture was off for this request).')}
           {/if}
         </p>
+        {#if data.payload?.reason === 'session_recovery_limited'}
+          {#if transcriptStatus === 'loaded'}
+            <p class="field-help mb-2 mt-3">
+              {$t(
+                'Rebuilt from the session transcript in your browser — semantically equal to the original request, not the exact HTTP body.',
+              )}
+            </p>
+            <JsonViewer value={transcriptValue} testid="transcript-body" />
+          {:else}
+            <div class="mt-3 rounded border border-dashed border-border bg-canvas p-3">
+              <p class="field-help mb-2">
+                {$t('Rebuild the transcript in your browser instead of on the server.')}
+              </p>
+              <button
+                type="button"
+                data-testid="load-transcript"
+                class="btn-secondary"
+                disabled={transcriptStatus === 'loading'}
+                onclick={loadTranscript}
+                >{transcriptStatus === 'loading'
+                  ? $t('Loading')
+                  : $t('Load transcript')}</button
+              >
+              {#if transcriptError}
+                <p class="mt-2 text-sm text-red-600">{transcriptError}</p>
+              {/if}
+            </div>
+          {/if}
+        {/if}
       {/if}
     </section>
 

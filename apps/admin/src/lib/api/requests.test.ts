@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { computeTps, computeTtfbMs, listRequests, toDetail, toListItem } from './requests.js';
+import {
+  computeTps,
+  computeTtfbMs,
+  getSessionRevisionsPage,
+  listRequests,
+  rebuildSessionTranscript,
+  toDetail,
+  toListItem,
+} from './requests.js';
 
 // The API client maps the backend DecisionRecord -> the docs/07 UI contract. Since
 // admin.requests-richfields the record carries the real telemetry fields
@@ -517,5 +525,104 @@ describe('listRequests', () => {
     expect(res.pageSize).toBe(2);
     expect(res.items).toHaveLength(1);
     expect(res.items[0]?.trace_id).toBe('tr_1');
+  });
+});
+
+describe('session-revisions client-side transcript rebuild', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function stubFetchByUrl(byUrl: Record<string, unknown>): { calls: () => string[] } {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) => {
+        calls.push(input);
+        const body = byUrl[input];
+        if (body === undefined) return { ok: false, json: async () => ({}) } as Response;
+        return { ok: true, json: async () => body } as Response;
+      }),
+    );
+    return { calls: () => calls };
+  }
+
+  it('getSessionRevisionsPage hits the endpoint and passes the cursor', async () => {
+    const f = stubFetchByUrl({
+      '/admin/api/requests/tr_x/session-revisions?after=5': {
+        captured: true,
+        sessionRef: 's1',
+        targetRequestId: 'tr_x',
+        nextSequence: null,
+        revisions: [],
+      },
+    });
+    const page = await getSessionRevisionsPage('tr_x', 5);
+    expect(page.captured).toBe(true);
+    expect(page.nextSequence).toBeNull();
+    expect(f.calls()[0]).toBe('/admin/api/requests/tr_x/session-revisions?after=5');
+  });
+
+  it('rebuildSessionTranscript walks the cursor across pages and reconstructs the target', async () => {
+    // Two-page linear chain: root (seq 1) then child (seq 2, the target).
+    const f = stubFetchByUrl({
+      '/admin/api/requests/tr_child/session-revisions': {
+        captured: true,
+        sessionRef: 's1',
+        targetRequestId: 'tr_child',
+        nextSequence: 1,
+        revisions: [
+          {
+            requestId: 'r_root',
+            parentRequestId: null,
+            retainCount: 0,
+            requestDeltaJson: '[{"role":"user","content":"one"}]',
+            requestEnvelopeJson: '{"model":"x","messages":[]}',
+            responseId: null,
+            responseJson: null,
+          },
+        ],
+      },
+      '/admin/api/requests/tr_child/session-revisions?after=1': {
+        captured: true,
+        sessionRef: 's1',
+        targetRequestId: 'tr_child',
+        nextSequence: null,
+        revisions: [
+          {
+            requestId: 'tr_child',
+            parentRequestId: 'r_root',
+            retainCount: 1,
+            requestDeltaJson: '[{"role":"assistant","content":"two"}]',
+            requestEnvelopeJson: '{"model":"x","messages":[]}',
+            responseId: null,
+            responseJson: null,
+          },
+        ],
+      },
+    });
+    const result = await rebuildSessionTranscript('tr_child');
+    expect(result).toEqual({
+      model: 'x',
+      messages: [
+        { role: 'user', content: 'one' },
+        { role: 'assistant', content: 'two' },
+      ],
+    });
+    // Two round-trips: bare page then cursor page.
+    expect(f.calls()).toEqual([
+      '/admin/api/requests/tr_child/session-revisions',
+      '/admin/api/requests/tr_child/session-revisions?after=1',
+    ]);
+  });
+
+  it('rebuildSessionTranscript throws when the session is unavailable', async () => {
+    stubFetchByUrl({
+      '/admin/api/requests/tr_gone/session-revisions': {
+        captured: false,
+        reason: 'no_session',
+      },
+    });
+    await expect(rebuildSessionTranscript('tr_gone')).rejects.toThrow();
   });
 });
