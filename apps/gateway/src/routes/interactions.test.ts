@@ -421,13 +421,23 @@ describe("registerInteractionsRoute", () => {
     expect(res.status).toBe(400);
   });
 
-  it("maps an UpstreamError to its status and records an error decision", async () => {
+  it("maps an ambiguous UpstreamError to outcome_unknown without replaying the paid write", async () => {
     const { app, nativePassthrough, enqueueTelemetry } = setup();
     nativePassthrough.mockRejectedValueOnce(new UpstreamError("upstream_error", "boom", null, 502));
     const res = await post(app, { model: "gemini-3.1-flash-image", input: "x" });
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      error: {
+        code: 503,
+        message: "image create outcome is unknown",
+        status: "INTERNAL",
+      },
+    });
+    expect(nativePassthrough).toHaveBeenCalledOnce();
     const decision = enqueueTelemetry.mock.calls[0]?.[0].decision;
     expect(decision.final.status).toBe("error");
+    expect(decision.final.error_reason).toBe("outcome_unknown");
+    expect(decision.provider_attempts[0].error_class).toBe("upstream_error");
     expect(decision.provider_attempts[0].cost_usd).toBeNull();
   });
 

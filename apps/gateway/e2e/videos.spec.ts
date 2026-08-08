@@ -175,7 +175,7 @@ test.afterAll(() => {
   if (configDir) rmSync(configDir, { recursive: true, force: true });
 });
 
-test("rejects a static outputVideo provider because Imagine is SuperGrok OAuth-only", async () => {
+test("rejects a configured static outputVideo alias at the closed Imagine request boundary", async () => {
   const response = await gateway().fetch(
     new Request("http://gateway.test/v1/videos/generations", {
       method: "POST",
@@ -190,7 +190,8 @@ test("rejects a static outputVideo provider because Imagine is SuperGrok OAuth-o
     }),
   );
 
-  expect(response.status).toBe(503);
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({ error: { code: "invalid_request" } });
   expect((await videoCapture()).starts).toHaveLength(0);
 });
 
