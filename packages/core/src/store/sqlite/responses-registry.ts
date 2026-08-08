@@ -17,6 +17,15 @@ export class SqliteResponsesRegistryStore implements ResponsesRegistryStore {
       .run();
   }
 
+  async insertIfAbsent(record: ResponsesRegistryRecord): Promise<boolean> {
+    const result = this.db
+      .insert(responsesRegistry)
+      .values(this.row(record))
+      .onConflictDoNothing({ target: responsesRegistry.responseId })
+      .run();
+    return result.changes > 0;
+  }
+
   async prune(input: { nowMs: number; maxEntries: number; limit: number }): Promise<void> {
     const maxEntries = Math.max(1, Math.floor(input.maxEntries));
     const limit = Math.max(1, Math.floor(input.limit));

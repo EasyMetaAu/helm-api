@@ -1,4 +1,4 @@
-import { TokenRefreshError } from "@helm/core";
+import { GROK_OAUTH_MEDIA_MODELS, TokenRefreshError } from "@helm/core";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../../app.js";
@@ -58,6 +58,22 @@ describe("POST /admin/api/oauth/:provider/test", () => {
       body: JSON.stringify({ account: "default" }),
     });
     expect(noModel.status).toBe(400);
+  });
+
+  it("rejects Grok media aliases before the chat connectivity tester runs", async () => {
+    const tester = testerOf([]);
+    for (const model of GROK_OAUTH_MEDIA_MODELS) {
+      const res = await app({ oauthTester: tester }).request("/admin/api/oauth/xai/test", {
+        method: "POST",
+        headers: JSONH,
+        body: JSON.stringify({ account: "heavy", model }),
+      });
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toEqual({
+        error: "media models are not supported by the chat connectivity test",
+      });
+    }
+    expect(tester.test).not.toHaveBeenCalled();
   });
 
   it("streams start -> content -> finish -> done as SSE and forwards the params", async () => {

@@ -229,6 +229,7 @@ curl http://localhost:8080/v1/chat/completions \
 | `POST /v1beta/models/{model}:generateContent` | Google Gemini | ✅（走 `:streamGenerateContent`；用 `x-goog-api-key` 鉴权） |
 | `POST /v1/images/generations` | OpenAI Images API（[图片生成](#图片生成)） | —（图片模型/lane，任意 key 可用） |
 | `POST /v1/images/edits` | OpenAI Images API（JSON 或 multipart 编辑） | —（图片模型/lane，任意 key 可用） |
+| `POST /v1/videos/generations` · `GET /v1/videos/{request_id}` | Grok Imagine 视频 start / poll（[SuperGrok OAuth](#实验性-supergrok--x-premium-oauth)） | —（异步任务，任意 key 可用） |
 | `POST /v1beta/interactions` | Gemini Interactions API（[图片生成](#图片生成)） | —（图片模型/lane，任意 key 可用） |
 
 **如何填写 `model`：**
@@ -273,6 +274,8 @@ curl http://localhost:8080/v1beta/interactions \
 ```
 
 > OpenAI Images 端点可调用 OpenAI 和 Gemini 图片模型，Helm 会在内部与 Gemini `generateContent` 做双向转换；两个 Gemini 原生入口则只接受 Gemini 图片模型。在 `/v1beta/interactions` 请求 `gpt-image-2` 会返回 400，请改用 `/v1/images/generations`。
+
+连接 SuperGrok 账号后，同一个 Images 端点还可使用 `grok-imagine-image-quality`。Grok 视频分成两种严格请求：`grok-imagine-video-1.5-preview` 搭配单个 `image`，`grok-imagine-video` 搭配 2–7 个 `reference_images`；先调用 `POST /v1/videos/generations`，再用返回的 `request_id` 轮询 `GET /v1/videos/{request_id}`。媒体创建属于付费单写：结果不明时 Helm 不会重试 POST 或切换 OAuth 账号；视频任务始终绑定原 Helm account、API key、provider 和 SuperGrok 账号。
 
 #### 图片 Provider Lane
 
@@ -371,9 +374,9 @@ gemini-image:                       # 请求填 `model: "gemini-image"`
 
 #### 实验性 SuperGrok / X Premium OAuth
 
-Helm 默认提供 xAI 自家 Grok CLI 使用的设备码登录。设置 `HELM_OAUTH_ENC_KEY` 后，在 **提供商 → 连接** 中选择 **xAI (SuperGrok/X Premium) · Experimental** 即可。Helm 会从 `https://auth.x.ai` 发现 OAuth 端点，加密保存持续轮换的 token，再从 `https://cli-chat-proxy.grok.com/v1/models` 获取当前账号有权使用的模型，并通过该订阅 proxy 的通用 Responses transport 执行请求。无需在 `providers.yaml` 中添加静态配置，也无需开启 feature flag。
+Helm 默认提供 xAI 自家 Grok CLI 使用的设备码登录。设置 `HELM_OAUTH_ENC_KEY` 后，在 **提供商 → 连接** 中选择 **xAI (SuperGrok/X Premium) · Experimental** 即可。Helm 会从 `https://auth.x.ai` 发现 OAuth 端点，加密保存持续轮换的 token，再从 `https://cli-chat-proxy.grok.com/v1/models` 获取当前账号有权使用的文本模型，并通过该订阅 proxy 的通用 Responses transport 执行文本请求。三个已验证的 Imagine alias 会单独投影；图片和视频请求固定发送到 `https://api.x.ai/v1`，使用所选账号的 OAuth bearer。无需在 `providers.yaml` 中添加静态配置，也无需开启 feature flag。
 
-xAI 只公开说明了 Grok CLI 自己的 OAuth/设备码登录方式，并未为第三方发布 OAuth client 注册机制，也没有承诺 CLI client ID 与订阅 proxy 是稳定的第三方接口。SuperGrok 订阅与预付费 xAI API credits 也不是同一种产品。因此，该 provider 虽然默认可用，但会始终明确标记为 **Experimental**。它只适合使用本人账号做个人、自托管评估；不要共享、转售或开放给无关租户。正式生产环境应使用 `XAI_API_KEY` 接入 `https://api.x.ai/v1`，或先取得 xAI 的书面许可和 Helm 专用 OAuth client。
+xAI 只公开说明了 Grok CLI 自己的 OAuth/设备码登录方式，并未为第三方发布 OAuth client 注册机制，也没有承诺 CLI client ID 与订阅 proxy 是稳定的第三方接口。SuperGrok 订阅与预付费 xAI API credits 也不是同一种产品。因此，该 provider 虽然默认可用，但会始终明确标记为 **Experimental**。它只适合使用本人账号做个人、自托管评估；不要共享、转售或开放给无关租户。当前实现刻意不保留官方 `XAI_API_KEY` 媒体分支，所有 Grok Imagine 请求都必须绑定已连接的 SuperGrok OAuth 账号；扩大到正式生产用途前，应先取得 xAI 的书面许可和 Helm 专用 OAuth client。
 
 SuperGrok 没有公开的额度 API 合约。Helm 现在严格跟随官方 [`xai-org/grok-build`](https://github.com/xai-org/grok-build) 的实现，使用当前账号的 xAI OAuth bearer、账号身份、Grok 客户端请求头和出口代理，读取 `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits`。只有处于有效期内的周度 `config.currentPeriod` 及其 `creditUsagePercent` 会转换为管理面板中的额度窗口；预付余额、按需计费、月度周期和历史记录都会被明确忽略。对于格式错误、过期、体积异常、发生重定向或读取失败的响应，Helm 只会短暂缓存，并按 fail-open 原则回退到最后一次有效快照或 `—`。公开 `api.x.ai` 的 credits 不会被拿来冒充消费订阅的周额度。该端点仍属于第一方客户端协议，并非 xAI 承诺支持的第三方接口，因此每次改动协议后都必须使用真实账号做额度 smoke 验证。
 

@@ -56,9 +56,46 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
+function externalizeDataUrl(url: string, blobs: Map<string, PayloadBlob>): string | null {
+  const marker = ";base64,";
+  const idx = url.indexOf(marker);
+  if (!url.startsWith("data:image/") || idx < 0) return null;
+  const head = url.slice(0, idx + marker.length);
+  const data = url.slice(idx + marker.length);
+  const mime = url.slice("data:".length, idx) || null;
+  const ref = stash(data, mime, blobs);
+  return ref ? head + ref : null;
+}
+
+function stripCapturedUrlSecrets(value: string): string {
+  try {
+    const url = new URL(value);
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || (!url.search && !url.hash)) {
+      return value;
+    }
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return value;
+  }
+}
+
 function walkExternalize(node: unknown, blobs: Map<string, PayloadBlob>): unknown {
   if (Array.isArray(node)) return node.map((n) => walkExternalize(n, blobs));
   if (!isRecord(node)) return node;
+
+  // Grok Imagine JSON carriers use `{image:{url:"data:image/..."}}` and
+  // `reference_images:[{url:"data:image/..."}]`. The same URL slots may hold
+  // temporary signed HTTPS references. Externalize inline image bytes and keep
+  // query/fragment credentials out of captured request/response/error bodies.
+  for (const key of ["url", "upload_url"] as const) {
+    const value = node[key];
+    if (typeof value !== "string") continue;
+    const externalized = externalizeDataUrl(value, blobs);
+    const safe = externalized ?? stripCapturedUrlSecrets(value);
+    if (safe !== value) return { ...node, [key]: safe };
+  }
 
   // Anthropic: { type:"image", source:{ type:"base64", media_type, data } }
   if (node.type === "image" && isRecord(node.source) && node.source.type === "base64") {
@@ -78,20 +115,12 @@ function walkExternalize(node: unknown, blobs: Map<string, PayloadBlob>): unknow
     const url =
       typeof iu === "string" ? iu : isRecord(iu) && typeof iu.url === "string" ? iu.url : null;
     if (url !== null) {
-      const marker = ";base64,";
-      const idx = url.indexOf(marker);
-      if (idx >= 0) {
-        const head = url.slice(0, idx + marker.length); // "data:<mime>;base64,"
-        const data = url.slice(idx + marker.length);
-        const mime = url.slice("data:".length, idx) || null;
-        const ref = stash(data, mime, blobs);
-        if (ref) {
-          const newUrl = head + ref;
-          // In the non-string branch `iu` is a record (url came from iu.url via isRecord).
-          return typeof iu === "string"
-            ? { ...node, image_url: newUrl }
-            : { ...node, image_url: { ...(iu as Record<string, unknown>), url: newUrl } };
-        }
+      const newUrl = externalizeDataUrl(url, blobs);
+      if (newUrl !== null) {
+        // In the non-string branch `iu` is a record (url came from iu.url via isRecord).
+        return typeof iu === "string"
+          ? { ...node, image_url: newUrl }
+          : { ...node, image_url: { ...(iu as Record<string, unknown>), url: newUrl } };
       }
     }
   }
@@ -135,10 +164,11 @@ export function externalizeImages(json: string): ExternalizeResult {
   }
   const blobs = new Map<string, PayloadBlob>();
   const walked = walkExternalize(parsed, blobs);
-  // Nothing externalized → return the ORIGINAL bytes verbatim (preserve fidelity
-  // for bodies we didn't touch; avoids a needless re-serialization).
-  if (blobs.size === 0) return { json, blobs: [] };
-  return { json: JSON.stringify(walked), blobs: [...blobs.values()] };
+  const serialized = JSON.stringify(walked);
+  // Nothing externalized or sanitized → return the ORIGINAL bytes verbatim
+  // (preserve fidelity for bodies we didn't touch; avoids re-serialization).
+  if (blobs.size === 0 && serialized === JSON.stringify(parsed)) return { json, blobs: [] };
+  return { json: serialized, blobs: [...blobs.values()] };
 }
 
 function restoreString(s: string, fetchBlob: (sha: string) => Uint8Array | null): string {

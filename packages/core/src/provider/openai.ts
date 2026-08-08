@@ -8,7 +8,11 @@ import {
   consumeResponseTextWithinBudget,
   ResponseBodyTooLargeError,
 } from "../runtime/bounded-response.js";
-import { ResponseWorkCapacityError } from "../runtime/response-work-admission.js";
+import {
+  type ResponseWorkAdmission,
+  ResponseWorkCapacityError,
+  runtimeResponseWorkAdmission,
+} from "../runtime/response-work-admission.js";
 import type { ProxyConfig } from "./proxy.js";
 // Provider credential: EXACTLY ONE of a static `apiKey` or a dynamic
 // `getAuthHeader` (issue #38 OAuth). The dynamic path also accepts:
@@ -58,6 +62,7 @@ export interface ProviderConfig {
 export interface OpenAIClientDeps {
   config: ProviderConfig;
   fetch?: typeof globalThis.fetch;
+  responseWorkAdmission?: ResponseWorkAdmission;
 }
 
 export type ChatCompletionRequest = Record<string, unknown>;
@@ -116,6 +121,11 @@ export type NativeProtocolProfile =
 // across connection / 401 retries — same body). MUST NOT throw (capture is fail-open).
 export interface ProviderCallOptions {
   signal?: AbortSignal;
+  /** Media pools invoke this after selecting an account and before the paid write. */
+  onAccountSelected?: (account: string) => void | Promise<void>;
+  /** Trusted pool-selected account for an account-affine media poll. Provider
+   * clients do not interpret it; the OAuth pool consumes it before delegating. */
+  providerAccount?: string;
   /** Trusted persisted account pin for opaque stateful Responses continuations. */
   statefulAccount?: string;
   captureUpstream?: (wireBody: string) => void;
@@ -187,6 +197,13 @@ export interface ProviderClient {
     opts?: ProviderCallOptions,
   ): Promise<Record<string, unknown>>;
   imageEdit?(req: ImageEditInput, opts?: ProviderCallOptions): Promise<Record<string, unknown>>;
+  // Grok/xAI asynchronous Videos API. Start is a paid single-write operation;
+  // retrieve is a safe GET that may refresh an expired OAuth bearer once.
+  videoGeneration?(
+    req: Record<string, unknown>,
+    opts?: ProviderCallOptions,
+  ): Promise<Record<string, unknown>>;
+  videoRetrieve?(requestId: string, opts?: ProviderCallOptions): Promise<Record<string, unknown>>;
   realtimeCall?(req: RealtimeCallRequest, opts?: ProviderCallOptions): Promise<RealtimeCallResult>;
   responsesInputTokens?(
     req: ChatCompletionRequest,
@@ -329,6 +346,7 @@ export function safeUpstreamHeaders(headers: Headers): Record<string, string> {
 export async function readUpstreamErrorBody(
   response: Response,
   scrub: (raw: unknown) => unknown,
+  admission: ResponseWorkAdmission = runtimeResponseWorkAdmission(),
 ): Promise<unknown> {
   try {
     return await consumeResponseTextWithinBudget(
@@ -341,6 +359,7 @@ export async function readUpstreamErrorBody(
           return scrub(text);
         }
       },
+      admission,
     );
   } catch (error) {
     if (error instanceof ResponseBodyTooLargeError) {
@@ -452,6 +471,16 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
   async function imageEditsUrl(): Promise<string> {
     const base = cfg.resolveBaseUrl ? await cfg.resolveBaseUrl() : cfg.baseUrl;
     return `${base}/images/edits`;
+  }
+
+  async function videosUrl(): Promise<string> {
+    const base = cfg.resolveBaseUrl ? await cfg.resolveBaseUrl() : cfg.baseUrl;
+    return `${base}/videos/generations`;
+  }
+
+  async function videoRetrieveUrl(requestId: string): Promise<string> {
+    const base = cfg.resolveBaseUrl ? await cfg.resolveBaseUrl() : cfg.baseUrl;
+    return `${base}/videos/${encodeURIComponent(requestId)}`;
   }
 
   // Fail-closed credential guard (principle 2): EXACTLY ONE of static apiKey or
@@ -650,8 +679,77 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
     return await attempt();
   }
 
+  // Image/video creation is an externally billable write. Unlike chat, it must
+  // never replay after an ambiguous transport, timeout, or overload result: a
+  // second POST could create and bill a second asset. OAuth refresh is likewise
+  // intentionally reserved for the read-only poll path below.
+  async function mediaWriteRequest(options: {
+    url: () => Promise<string>;
+    body: () => NonNullable<RequestInit["body"]>;
+    headers: () => Promise<Record<string, string>>;
+    signal?: AbortSignal;
+  }): Promise<Response> {
+    try {
+      const t = withTimeout(timeoutMs, options.signal);
+      try {
+        return await doFetch(await options.url(), {
+          method: "POST",
+          headers: await options.headers(),
+          body: options.body(),
+          signal: t.signal,
+        });
+      } catch (error) {
+        if (t.isTimeout() && !t.isExternalAbort()) {
+          throw new UpstreamError("timeout", "upstream request timed out");
+        }
+        throw error;
+      } finally {
+        t.cleanup();
+      }
+    } catch (error) {
+      if (options.signal?.aborted || !isFetchTransportError(error)) throw error;
+      throw upstreamTransportError(error, scrub);
+    }
+  }
+
+  // Polling is read-only, so a 401 is safe to replay once after the token manager
+  // invalidates its bearer. It otherwise keeps the same no-transport-retry policy
+  // as media writes; Grok CLI owns polling cadence and backoff.
+  async function mediaRetrieveRequest(
+    url: () => Promise<string>,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    const attempt = async (): Promise<Response> => {
+      try {
+        const t = withTimeout(timeoutMs, signal);
+        try {
+          return await doFetch(await url(), {
+            method: "GET",
+            headers: await headers(),
+            signal: t.signal,
+          });
+        } catch (error) {
+          if (t.isTimeout() && !t.isExternalAbort()) {
+            throw new UpstreamError("timeout", "upstream request timed out");
+          }
+          throw error;
+        } finally {
+          t.cleanup();
+        }
+      } catch (error) {
+        if (signal?.aborted || !isFetchTransportError(error)) throw error;
+        throw upstreamTransportError(error, scrub);
+      }
+    };
+    const response = await attempt();
+    if (response.status !== 401 || cfg.onUnauthorized === undefined) return response;
+    await response.body?.cancel().catch(() => {});
+    cfg.onUnauthorized();
+    return await attempt();
+  }
+
   async function errorFromResponse(res: Response): Promise<UpstreamError> {
-    const providerRaw = await readUpstreamErrorBody(res, scrub);
+    const providerRaw = await readUpstreamErrorBody(res, scrub, deps.responseWorkAdmission);
     return new UpstreamError(
       "upstream_error",
       `upstream returned ${res.status}`,
@@ -661,8 +759,42 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
     );
   }
 
+  function invalidMediaResponse(res: Response, body: unknown, message: string): UpstreamError {
+    return new UpstreamError(
+      "upstream_error",
+      message,
+      scrub(body),
+      res.status,
+      scrub(safeUpstreamHeaders(res.headers)) as Record<string, string>,
+    );
+  }
+
+  async function mediaJsonResponse(res: Response, requiredField: "request_id" | "status") {
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      throw invalidMediaResponse(res, null, "upstream returned invalid media JSON");
+    }
+    if (
+      body === null ||
+      typeof body !== "object" ||
+      Array.isArray(body) ||
+      typeof (body as Record<string, unknown>)[requiredField] !== "string" ||
+      (requiredField === "request_id" &&
+        ((body as Record<string, unknown>).request_id as string).trim().length === 0)
+    ) {
+      throw invalidMediaResponse(
+        res,
+        body,
+        `upstream media response omitted valid ${requiredField}`,
+      );
+    }
+    return body as Record<string, unknown>;
+  }
+
   async function realtimeErrorFromResponse(res: Response): Promise<UpstreamError> {
-    const providerRaw = await readUpstreamErrorBody(res, scrub);
+    const providerRaw = await readUpstreamErrorBody(res, scrub, deps.responseWorkAdmission);
     const outer =
       providerRaw !== null && typeof providerRaw === "object" && !Array.isArray(providerRaw)
         ? (providerRaw as Record<string, unknown>)
@@ -710,15 +842,14 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
     },
 
     async imageGeneration(req, opts) {
-      // The images body carries no `messages`, so prepareRequest is a no-op; reuse
-      // the full chat request machinery (auth / timeout / connection-retry / 401-retry
-      // / scrub) but POST to /images/generations instead of /chat/completions.
-      const res = await requestWithAuthRetry(
-        req as unknown as ChatCompletionRequest,
-        opts?.signal,
-        opts?.captureUpstream,
-        imagesUrl,
-      );
+      const bodyText = JSON.stringify(req);
+      opts?.captureUpstream?.(bodyText);
+      const res = await mediaWriteRequest({
+        url: imagesUrl,
+        body: () => bodyText,
+        headers,
+        signal: opts?.signal,
+      });
       if (!res.ok) throw await errorFromResponse(res);
       return (await res.json()) as Record<string, unknown>;
     },
@@ -747,7 +878,7 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
         }
         return form;
       };
-      const res = await rawRequestWithAuthRetry({
+      const res = await mediaWriteRequest({
         url: imageEditsUrl,
         body,
         headers: req.kind === "json" ? headers : headersWithoutContentType,
@@ -755,6 +886,25 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
       });
       if (!res.ok) throw await errorFromResponse(res);
       return (await res.json()) as Record<string, unknown>;
+    },
+
+    async videoGeneration(req, opts) {
+      const bodyText = JSON.stringify(req);
+      opts?.captureUpstream?.(bodyText);
+      const res = await mediaWriteRequest({
+        url: videosUrl,
+        body: () => bodyText,
+        headers,
+        signal: opts?.signal,
+      });
+      if (!res.ok) throw await errorFromResponse(res);
+      return await mediaJsonResponse(res, "request_id");
+    },
+
+    async videoRetrieve(requestId, opts) {
+      const res = await mediaRetrieveRequest(() => videoRetrieveUrl(requestId), opts?.signal);
+      if (!res.ok) throw await errorFromResponse(res);
+      return await mediaJsonResponse(res, "status");
     },
 
     async realtimeCall(req, opts) {

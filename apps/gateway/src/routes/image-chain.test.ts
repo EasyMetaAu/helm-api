@@ -63,7 +63,7 @@ describe("runImageChain", () => {
     expect(res.attempts[0]?.cost_usd).toBe(0.05);
   });
 
-  it("falls back to the next provider when the primary fails (breaker fault on primary)", async () => {
+  it("returns outcome_unknown without replaying a paid image write on another provider", async () => {
     const breaker = fakeBreaker();
     const attempt: ImageAttempt = vi
       .fn()
@@ -71,13 +71,14 @@ describe("runImageChain", () => {
       .mockResolvedValueOnce(okResult(0.02));
     const res = await runImageChain([target("a"), target("b")], breaker, attempt, signal);
 
-    expect(res.ok).toBe(true);
-    if (!res.ok) throw new Error("expected ok");
-    expect(res.served.alias).toBe("b"); // fell over to the fallback
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("expected terminal");
+    expect(res.errorClass).toBe("outcome_unknown");
+    expect(res.httpStatus).toBe(503);
     expect(breaker.recordFailure).toHaveBeenCalledWith("a");
-    expect(breaker.recordSuccess).toHaveBeenCalledWith("b");
-    // failed row then served row
-    expect(res.attempts.map((a) => a.status)).toEqual(["error", "ok"]);
+    expect(breaker.recordSuccess).not.toHaveBeenCalled();
+    expect(attempt).toHaveBeenCalledTimes(1);
+    expect(res.attempts.map((a) => a.status)).toEqual(["error"]);
     expect(res.attempts[0]?.skipped).toBe(false);
     expect(res.attempts[0]?.cost_usd).toBeNull();
   });
@@ -218,7 +219,7 @@ describe("runImageChain", () => {
     expect(breaker.recordFailure).not.toHaveBeenCalled();
   });
 
-  it("a client abort is terminal: recordAbort, no fault, aborted flag set", async () => {
+  it("a client abort after media execution starts is outcome_unknown and remains observable", async () => {
     const ac = new AbortController();
     ac.abort();
     const breaker = fakeBreaker();
@@ -229,8 +230,9 @@ describe("runImageChain", () => {
 
     expect(res.ok).toBe(false);
     if (res.ok) throw new Error("expected terminal");
-    expect(res.aborted).toBe(true);
-    expect(res.errorClass).toBe("client_abort");
+    expect(res.aborted).toBe(false);
+    expect(res.errorClass).toBe("outcome_unknown");
+    expect(res.httpStatus).toBe(503);
     expect(breaker.recordAbort).toHaveBeenCalledWith("a");
     expect(breaker.recordFailure).not.toHaveBeenCalled();
     expect(attempt).toHaveBeenCalledTimes(1);
@@ -239,7 +241,7 @@ describe("runImageChain", () => {
   it.each([
     "openai",
     "gemini",
-  ] as const)("lease loss is terminal 503 for the production %s image chain without fallback or breaker fault", async (kind) => {
+  ] as const)("lease loss after media execution starts is outcome_unknown for the %s image chain", async (kind) => {
     const ac = new AbortController();
     ac.abort("concurrency_lease_lost");
     const breaker = fakeBreaker();
@@ -257,16 +259,37 @@ describe("runImageChain", () => {
     expect(res.ok).toBe(false);
     if (res.ok) throw new Error("expected terminal");
     expect(res.aborted).toBe(false);
-    expect(res.errorClass).toBe("lane_unavailable");
+    expect(res.errorClass).toBe("outcome_unknown");
     expect(res.httpStatus).toBe(503);
     expect(res.attempts[0]).toMatchObject({
       alias: "primary",
       skip_reason: "concurrency_lease_lost",
-      error_class: "lane_unavailable",
+      error_class: "outcome_unknown",
     });
     expect(breaker.recordAbort).toHaveBeenCalledWith("primary");
     expect(breaker.recordFailure).not.toHaveBeenCalled();
     expect(attempt).toHaveBeenCalledTimes(1);
+  });
+
+  it("a request timeout after media execution starts is outcome_unknown", async () => {
+    const ac = new AbortController();
+    ac.abort("request_timeout");
+    const breaker = fakeBreaker();
+    const attempt: ImageAttempt = vi
+      .fn()
+      .mockRejectedValue(Object.assign(new Error("timed out"), { name: "AbortError" }));
+
+    const res = await runImageChain([target("a"), target("b")], breaker, attempt, ac.signal);
+
+    expect(res).toMatchObject({
+      ok: false,
+      aborted: false,
+      errorClass: "outcome_unknown",
+      httpStatus: 503,
+    });
+    expect(attempt).toHaveBeenCalledTimes(1);
+    expect(breaker.recordAbort).toHaveBeenCalledWith("a");
+    expect(breaker.recordFailure).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -284,17 +307,18 @@ describe("runImageChain", () => {
     ["provider 429", new UpstreamError("upstream_error", "rate limited", null, 429)],
     ["provider 500", new UpstreamError("upstream_error", "boom", null, 500)],
     ["network error", new TypeError("fetch failed")],
-  ])("%s exhausts the chain as all_providers_failed (502)", async (_name, error) => {
+  ])("%s becomes outcome_unknown without replaying the POST", async (_name, error) => {
     const breaker = fakeBreaker();
     const attempt: ImageAttempt = vi.fn().mockRejectedValue(error);
     const res = await runImageChain([target("a"), target("b")], breaker, attempt, signal);
 
     expect(res.ok).toBe(false);
     if (res.ok) throw new Error("expected terminal");
-    expect(res.errorClass).toBe("all_providers_failed");
-    expect(res.httpStatus).toBe(502);
-    expect(breaker.recordFailure).toHaveBeenCalledTimes(2);
-    expect(res.attempts.map((a) => a.status)).toEqual(["error", "error"]);
+    expect(res.errorClass).toBe("outcome_unknown");
+    expect(res.httpStatus).toBe(503);
+    expect(breaker.recordFailure).toHaveBeenCalledTimes(1);
+    expect(attempt).toHaveBeenCalledTimes(1);
+    expect(res.attempts.map((a) => a.status)).toEqual(["error"]);
   });
 
   it("an empty target list → lane_unavailable (503)", async () => {

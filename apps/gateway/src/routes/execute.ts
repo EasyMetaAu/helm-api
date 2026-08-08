@@ -1730,6 +1730,17 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           attempts.push(skipRow(alias, "no_cached_content_support", elapsed()));
           continue;
         }
+        // xAI Imagine images and every video model require Helm's dedicated media
+        // routes. Other providers may intentionally return images through their
+        // native conversational protocol (for example Gemini inlineData).
+        if (
+          caps?.outputVideo === true ||
+          (alias.startsWith("xai/") && caps?.outputImage === true)
+        ) {
+          capabilityPruned = true;
+          attempts.push(skipRow(alias, "media_endpoint_required", elapsed()));
+          continue;
+        }
         if (caps) {
           const estimatedPromptTokens = approxPromptTokens(req);
           const verdict = checkCapability(caps, {

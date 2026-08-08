@@ -163,6 +163,47 @@ describe("createSerializingClient", () => {
     );
   });
 
+  it("preserves media capabilities without putting paid writes in the user-message queue", async () => {
+    const gate = { acquire: vi.fn() };
+    const imageGeneration = vi.fn(async () => ({ data: [] }));
+    const imageEdit = vi.fn(async () => ({ data: [] }));
+    const videoGeneration = vi.fn(async () => ({ request_id: "video_1" }));
+    const videoRetrieve = vi.fn(async () => ({ status: "pending" }));
+    const client = createSerializingClient({
+      inner: {
+        ...makeInner(),
+        imageGeneration,
+        imageEdit,
+        videoGeneration,
+        videoRetrieve,
+      },
+      gate,
+      key: "xai a",
+      getConfig: () => ({ enabled: true, delayMs: 200, timeoutMs: 5_000 }),
+      isUserMessage: isUserMessageRequest,
+    });
+
+    await expect(
+      client.imageGeneration?.({ model: "grok-imagine-image-quality" }),
+    ).resolves.toEqual({
+      data: [],
+    });
+    await expect(
+      client.imageEdit?.({ model: "grok-imagine-image-quality" } as never),
+    ).resolves.toEqual({
+      data: [],
+    });
+    await expect(client.videoGeneration?.({ model: "grok-imagine-video" })).resolves.toEqual({
+      request_id: "video_1",
+    });
+    await expect(client.videoRetrieve?.("video_1", { statefulAccount: "a" })).resolves.toEqual({
+      status: "pending",
+    });
+
+    expect(gate.acquire).not.toHaveBeenCalled();
+    expect(videoRetrieve).toHaveBeenCalledWith("video_1", { statefulAccount: "a" });
+  });
+
   it("serializes two user-message chatCompletions with the configured delay", async () => {
     const inner = makeInner();
     const client = makeClient(inner, { enabled: true, delayMs: 200, timeoutMs: 5_000 });

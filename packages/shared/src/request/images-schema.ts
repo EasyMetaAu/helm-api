@@ -21,23 +21,34 @@ export const ImageGenerationRequestSchema = z.looseObject({
   user: z.string().optional(),
 });
 
-export const ImageEditRequestSchema = z.looseObject({
+const ImageEditCommonShape = {
   model: z.string().min(1),
   prompt: z.string().min(1),
-  images: z
-    .array(
-      z.union([
-        z.looseObject({ image_url: z.string().min(1) }),
-        z.looseObject({ file_id: z.string().min(1) }),
-      ]),
-    )
-    .min(1),
   n: z.number().int().positive().optional(),
   size: z.string().optional(),
   quality: z.string().optional(),
   background: z.string().optional(),
   output_format: z.string().optional(),
-});
+};
+
+export const ImageEditRequestSchema = z.union([
+  z.looseObject({
+    ...ImageEditCommonShape,
+    image: z.looseObject({ url: z.string().min(1) }),
+  }),
+  z.looseObject({
+    ...ImageEditCommonShape,
+    images: z
+      .array(
+        z.union([
+          z.looseObject({ image_url: z.string().min(1) }),
+          z.looseObject({ file_id: z.string().min(1) }),
+          z.looseObject({ url: z.string().min(1) }),
+        ]),
+      )
+      .min(1),
+  }),
+]);
 
 // Upstream usage shape (OpenAI Images): the generated image is billed as
 // output_tokens (= output_tokens_details.image_tokens). Loose — typing only for

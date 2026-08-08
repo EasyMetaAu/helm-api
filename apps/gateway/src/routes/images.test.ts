@@ -124,6 +124,75 @@ describe("registerImagesRoute", () => {
     expect(decision.usage.prompt_tokens).toBe(15);
   });
 
+  it("attributes an OAuth image to the selected subscription account", async () => {
+    const recordOAuthUsage = vi.fn();
+    const { app, enqueueTelemetry } = setup({
+      captureServingAccount: async (call) => ({
+        result: await call(),
+        servingAccount: { providerId: "xai", account: "supergrok-a" },
+      }),
+      recordOAuthUsage,
+    });
+
+    expect((await post(app, { model: "gpt-image-2", prompt: "a cat" })).status).toBe(200);
+    expect(enqueueTelemetry.mock.calls[0]?.[0].decision.serving_account).toEqual({
+      provider_id: "xai",
+      account: "supergrok-a",
+    });
+    expect(recordOAuthUsage).toHaveBeenCalledWith(
+      { providerId: "xai", account: "supergrok-a" },
+      "gpt-image-2",
+      { tokens: 211, costUsd: 0.006 },
+    );
+  });
+
+  it("records the selected OAuth account when an image POST outcome is unknown", async () => {
+    const imageGeneration = vi.fn(async (_body, options) => {
+      await options?.onAccountSelected?.("supergrok-a");
+      throw new Error("socket closed after POST");
+    });
+    const client = { imageGeneration } as unknown as ProviderClient;
+    const { app, enqueueTelemetry } = setup({
+      resolveImageChain: () => ({
+        ok: true,
+        laneName: "image",
+        candidateChain: ["xai/grok-imagine-image-quality"],
+        targets: [
+          {
+            client,
+            providerModel: "grok-imagine-image-quality",
+            alias: "xai/grok-imagine-image-quality",
+            kind: "openai",
+          },
+        ],
+      }),
+    });
+
+    const response = await post(app, {
+      model: "grok-imagine-image-quality",
+      prompt: "a cat",
+    });
+
+    expect(response.status).toBe(503);
+    expect(imageGeneration).toHaveBeenCalledOnce();
+    expect(enqueueTelemetry.mock.calls[0]?.[0]?.decision.serving_account).toEqual({
+      provider_id: "xai",
+      account: "supergrok-a",
+    });
+  });
+
+  it("rejects unpriced image media before a paid call for a spend-capped key", async () => {
+    const { app, imageGeneration } = setup({ isPriced: () => false });
+
+    const response = await post(app, { model: "gpt-image-2", prompt: "a cat" });
+
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({
+      error: { code: "media_pricing_unavailable" },
+    });
+    expect(imageGeneration).not.toHaveBeenCalled();
+  });
+
   it("forwards Codex JSON image edits through the existing image chain", async () => {
     const { app, imageEdit } = setup();
     const res = await app.request("/v1/images/edits", {
@@ -357,12 +426,13 @@ describe("registerImagesRoute", () => {
     expect(res.status).toBe(400);
   });
 
-  it("maps an UpstreamError to 502 and records an error decision", async () => {
+  it("maps an ambiguous UpstreamError to outcome_unknown and records an error decision", async () => {
     const { app, imageGeneration, enqueueTelemetry } = setup();
     imageGeneration.mockRejectedValueOnce(new UpstreamError("upstream_error", "boom", null, 400));
     const res = await post(app, { model: "gpt-image-2", prompt: "x" });
 
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ error: { code: "outcome_unknown" } });
     const decision = enqueueTelemetry.mock.calls[0]?.[0].decision;
     expect(decision.final.status).toBe("error");
     expect(decision.provider_attempts[0].status).toBe("error");

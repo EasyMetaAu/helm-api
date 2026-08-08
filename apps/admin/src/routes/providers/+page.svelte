@@ -55,8 +55,8 @@
   let showConnect = $state<boolean>(false);
   let managing = $state<{ providerId: string; providerName: string; account: string } | null>(null);
   // The account whose connectivity-test dialog is open (providers page "Test"
-  // button). Carries the row's effective models so the dialog's picker offers only
-  // routable ids — no extra fetch.
+  // button). Carries the row's chat models; media creates are paid, non-streaming
+  // operations and must never be triggered by this short-message test.
   let testing = $state<{
     providerId: string;
     providerName: string;
@@ -149,6 +149,14 @@
 
   function providerName(id: string): string {
     return overview.providers.find((p) => p.id === id)?.name ?? id;
+  }
+
+  function mediaBadge(model: string): 'Image' | 'Video' | null {
+    if (model === 'grok-imagine-image-quality') return 'Image';
+    if (model === 'grok-imagine-video-1.5-preview' || model === 'grok-imagine-video') {
+      return 'Video';
+    }
+    return null;
   }
 
   // A short "platform · auth" pill so the supply-chain shape is legible at a glance
@@ -917,7 +925,9 @@
                   href={accountDetailHref(base, row.provider.id, row.account.account)}
                   title={$t('View token usage per reset period')}
                 >
-                  <div class="font-medium text-ink-body group-hover:text-indigo-600 group-hover:underline">
+                  <div
+                    class="font-medium text-ink-body group-hover:text-indigo-600 group-hover:underline"
+                  >
                     {row.provider.name}
                   </div>
                   <code class="font-mono text-xs text-ink-strong group-hover:text-indigo-600">
@@ -982,7 +992,9 @@
                       <!-- Toggle on: the account still serves off its remaining credits
                            despite the limit, so the pill reflects that instead of a plain
                            "parked" rate-limited state. -->
-                      <span class="badge-warning">{$t('Rate limited · still spending credits')}</span>
+                      <span class="badge-warning"
+                        >{$t('Rate limited · still spending credits')}</span
+                      >
                     {:else}
                       <span class="badge-error">{$t('Rate limited')}</span>
                     {/if}
@@ -1011,7 +1023,12 @@
               <!-- Account models (manual allowlist or auto discovery; pills capped +N) -->
               <td data-label={$t('Models')} class="px-3 py-3">
                 {#if row.account.models.length > 0}
-                  {@const shown = row.account.models.slice(0, MODELS_SHOWN)}
+                  {@const shown = [...row.account.models]
+                    .sort(
+                      (left, right) =>
+                        Number(Boolean(mediaBadge(right))) - Number(Boolean(mediaBadge(left))),
+                    )
+                    .slice(0, MODELS_SHOWN)}
                   {@const extra = row.account.models.length - shown.length}
                   <div
                     class="flex max-w-full flex-wrap gap-1 lg:w-48"
@@ -1019,6 +1036,9 @@
                   >
                     {#each shown as m (m)}
                       <span class="badge-neutral font-mono text-[10px]">{m}</span>
+                      {#if mediaBadge(m)}
+                        <span class="badge-ok text-[10px]">{mediaBadge(m)}</span>
+                      {/if}
                     {/each}
                     {#if extra > 0}
                       <span class="badge-neutral text-[10px]">+{extra}</span>
@@ -1210,7 +1230,7 @@
                         providerId: row.provider.id,
                         providerName: row.provider.name,
                         account: row.account.account,
-                        models: row.account.models,
+                        models: row.account.models.filter((model) => mediaBadge(model) === null),
                       })}>{$t('Test')}</button
                   >
                   <button

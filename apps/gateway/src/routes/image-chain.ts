@@ -13,12 +13,10 @@ import {
 } from "./execute.js";
 
 // Image-generation candidate-chain executor. The model-pinned image routes
-// (/v1/images/generations, /v1beta/interactions) historically resolved a model to a
-// SINGLE provider with no fallback. This runs the resolved chain of image targets
-// (one per provider alias) with the SAME circuit-breaker + terminal/fallback rules as
-// the chat executor (apps/gateway/src/routes/execute.ts), so an image LANE fails over
-// across providers exactly like a text lane — but specialized to a single, non-stream
-// upstream call (image gen never streams), so there is no peekStream / pre-output guard.
+// (/v1/images/generations, /v1beta/interactions) may resolve a lane containing
+// multiple provider aliases. Local breaker skips can advance before any write, but
+// once one paid create call starts this executor terminates on every failure instead
+// of replaying the POST through another provider.
 //
 // The terminal-vs-fallback classification REUSES execute.ts's exported helpers
 // (isAbort / isUpstreamRequestRejection / errorClassOf / errorDetailOf) — the breaker
@@ -46,6 +44,7 @@ export interface ImageAttemptResult {
   usage: Record<string, unknown> | null; // for budget-settle tokens + decision usage
   cost: number | null; // costOf(servedAlias, body)
   upstreamRequestJson: string | null; // exact bytes forwarded upstream (capture)
+  servingAccount?: { providerId: string; account: string } | null;
 }
 
 export type ImageAttempt = (target: ImageChainTarget) => Promise<ImageAttemptResult>;
@@ -138,24 +137,22 @@ export async function runImageChain(
     } catch (err) {
       const cancellation = requestCancellationReason(signal);
       if (cancellation === CONCURRENCY_LEASE_LOST_REASON || cancellation === "request_timeout") {
-        const leaseLost = cancellation === CONCURRENCY_LEASE_LOST_REASON;
-        const errorClass = leaseLost ? "lane_unavailable" : "timeout";
         releaseProbeLock();
         attempts.push({
           alias: target.alias,
           skipped: false,
           skip_reason: cancellation,
           status: "error",
-          error_class: errorClass,
+          error_class: "outcome_unknown",
           latency_ms: Date.now() - started,
           cost_usd: null,
           error_detail: null,
         });
         return {
           ok: false,
-          errorClass,
-          httpStatus: ERROR_CLASS_HTTP_STATUS[errorClass],
-          message: leaseLost ? "concurrency lease lost" : "request timed out",
+          errorClass: "outcome_unknown",
+          httpStatus: 503,
+          message: "image create outcome is unknown",
           providerRaw: null,
           aborted: false,
           attempts,
@@ -165,13 +162,23 @@ export async function runImageChain(
       // WITHOUT recording it as a provider error (mirrors execute.ts's recordAbort).
       if (isAbort(err, signal)) {
         releaseProbeLock();
+        attempts.push({
+          alias: target.alias,
+          skipped: false,
+          skip_reason: "client_abort",
+          status: "error",
+          error_class: "outcome_unknown",
+          latency_ms: Date.now() - started,
+          cost_usd: null,
+          error_detail: null,
+        });
         return {
           ok: false,
-          errorClass: "client_abort",
-          httpStatus: ERROR_CLASS_HTTP_STATUS.client_abort,
-          message: "client aborted request",
+          errorClass: "outcome_unknown",
+          httpStatus: 503,
+          message: "image create outcome is unknown",
           providerRaw: null,
-          aborted: true,
+          aborted: false,
           attempts,
         };
       }
@@ -202,8 +209,10 @@ export async function runImageChain(
           attempts,
         };
       }
-      // Genuine pre-output failure: record on the breaker, try the next candidate.
+      // The paid write may already have been accepted. Fault the breaker, but never
+      // advance to another provider: doing so could create and bill a duplicate.
       breaker.recordFailure(target.alias);
+      const detail = errorDetailOf(err);
       attempts.push({
         alias: target.alias,
         skipped: false,
@@ -212,8 +221,17 @@ export async function runImageChain(
         error_class: errorClassOf(err),
         latency_ms: Date.now() - started,
         cost_usd: null,
-        error_detail: errorDetailOf(err),
+        error_detail: detail,
       });
+      return {
+        ok: false,
+        errorClass: "outcome_unknown",
+        httpStatus: 503,
+        message: "image create outcome is unknown",
+        providerRaw: detail.provider_raw,
+        aborted: false,
+        attempts,
+      };
     }
   }
 

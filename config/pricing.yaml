@@ -36,6 +36,24 @@ xai/grok-composer-2.5-fast:
   outputPerMTokUsd: null
   cacheReadPerMTokUsd: null
   cacheWritePerMTokUsd: null
+# SuperGrok media has no verified per-generation rate card. Keep cost unknown;
+# request-count budgets may admit it, while spend-capped keys fail closed upstream
+# of the paid create path until a trustworthy maximum price is configured.
+xai/grok-imagine-image-quality:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+  cacheReadPerMTokUsd: null
+  cacheWritePerMTokUsd: null
+xai/grok-imagine-video-1.5-preview:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+  cacheReadPerMTokUsd: null
+  cacheWritePerMTokUsd: null
+xai/grok-imagine-video:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+  cacheReadPerMTokUsd: null
+  cacheWritePerMTokUsd: null
 # Codex auto-review is a dynamic internal route with no published fixed API rate.
 openai-codex/codex-auto-review:
   inputPerMTokUsd: null

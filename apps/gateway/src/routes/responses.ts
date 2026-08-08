@@ -163,6 +163,7 @@ import type { ResponsesRegistryRecord } from "@helm/core";
 
 export interface ResponsesRegistryPort {
   put(record: ResponsesRegistryRecord): void | Promise<void>;
+  putIfAbsent?(record: ResponsesRegistryRecord): boolean | Promise<boolean>;
   get(
     responseId: string,
     identity: MessagesIdentity,

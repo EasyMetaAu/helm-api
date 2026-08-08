@@ -69,6 +69,7 @@ describe('ConnectClientDialog', () => {
     await fireEvent.click(screen.getByRole('tab', { name: /grok build/i }));
     const snippet = screen.getByTestId('snippet-grok').textContent ?? '';
     expect(snippet).toContain(`export GROK_MODELS_BASE_URL="${ORIGIN}/v1"`);
+    expect(snippet).toContain(`export GROK_XAI_API_BASE_URL="${ORIGIN}/v1"`);
     expect(snippet).toContain('export XAI_API_KEY="helm_live_GROK"');
     expect(snippet).toContain('grok -m auto');
   });

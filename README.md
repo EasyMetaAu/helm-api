@@ -242,6 +242,7 @@ curl http://localhost:8080/v1/chat/completions \
 | `POST /v1beta/models/{model}:generateContent` | Google Gemini | ✅ (via `:streamGenerateContent`; auth via `x-goog-api-key`) |
 | `POST /v1/images/generations` | OpenAI Images API ([image generation](#image-generation)) | — (image model/lane, any key) |
 | `POST /v1/images/edits` | OpenAI Images API (JSON or multipart edits) | — (image model/lane, any key) |
+| `POST /v1/videos/generations` · `GET /v1/videos/{request_id}` | Grok Imagine video start / poll ([SuperGrok OAuth](#experimental-supergrokx-premium-oauth)) | — (asynchronous, any key) |
 | `POST /v1beta/interactions` | Gemini Interactions API ([image generation](#image-generation)) | — (image model/lane, any key) |
 
 **What to put in `model`:**
@@ -291,6 +292,8 @@ curl http://localhost:8080/v1beta/interactions \
 ```
 
 > The OpenAI Images endpoint serves both OpenAI and Gemini image models (Helm translates Gemini to/from `generateContent`). The two Gemini-native entrypoints serve only Gemini image models. `gpt-image-2` on `/v1beta/interactions` is a 400 → use `/v1/images/generations`.
+
+With a connected SuperGrok account, the same Images endpoint also accepts `grok-imagine-image-quality`. Grok video uses `grok-imagine-video-1.5-preview` with one `image`, or `grok-imagine-video` with 2–7 `reference_images`; start with `POST /v1/videos/generations`, then poll the returned `request_id` at `GET /v1/videos/{request_id}`. Media creates are paid single writes: Helm never retries a result-unknown POST or switches OAuth accounts, and each video task remains bound to its original Helm account, API key, provider, and SuperGrok account.
 
 #### Image provider lanes
 
@@ -389,9 +392,9 @@ Everything hot-reloads — connect, disconnect, curation, proxy, scheduling — 
 
 #### Experimental SuperGrok/X Premium OAuth
 
-Helm exposes the device-code flow used by xAI's own Grok CLI. Set `HELM_OAUTH_ENC_KEY`, then choose **xAI (SuperGrok/X Premium) · Experimental** under **Providers → Connect**. Helm discovers OAuth endpoints from `https://auth.x.ai`, stores rotating tokens encrypted, discovers entitled models from `https://cli-chat-proxy.grok.com/v1/models`, and uses the generic Responses transport at that subscription proxy. No static `providers.yaml` entry or feature flag is required.
+Helm exposes the device-code flow used by xAI's own Grok CLI. Set `HELM_OAUTH_ENC_KEY`, then choose **xAI (SuperGrok/X Premium) · Experimental** under **Providers → Connect**. Helm discovers OAuth endpoints from `https://auth.x.ai`, stores rotating tokens encrypted, discovers entitled text models from `https://cli-chat-proxy.grok.com/v1/models`, and uses the generic Responses transport at that subscription proxy. The three verified Imagine aliases are projected separately: image/video requests go to `https://api.x.ai/v1` with the selected account's OAuth bearer. No static `providers.yaml` entry or feature flag is required.
 
-xAI documents OAuth/device-code login for its own Grok CLI, but does **not** publish third-party OAuth client registration or a stable third-party contract for the CLI client ID and subscription proxy. SuperGrok is also separate from prepaid xAI API credits. The provider is available by default but remains visibly labeled **Experimental**. Use it only with your own account for personal self-hosted evaluation; do not share, resell, or expose it to unrelated tenants. For a supported production integration, use an `XAI_API_KEY` with `https://api.x.ai/v1`, or obtain a Helm-specific OAuth client and written permission from xAI.
+xAI documents OAuth/device-code login for its own Grok CLI, but does **not** publish third-party OAuth client registration or a stable third-party contract for the CLI client ID and subscription proxy. SuperGrok is also separate from prepaid xAI API credits. The provider is available by default but remains visibly labeled **Experimental**. Use it only with your own account for personal self-hosted evaluation; do not share, resell, or expose it to unrelated tenants. This implementation intentionally has no official `XAI_API_KEY` media branch: all Grok Imagine execution is tied to a connected SuperGrok OAuth account. Obtain xAI's written permission and a Helm-specific OAuth client before broader production use.
 
 There is no public SuperGrok quota API contract. Helm follows the current first-party [`xai-org/grok-build`](https://github.com/xai-org/grok-build) implementation and reads `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` with the account's existing xAI OAuth bearer, account identity, Grok client headers, and egress proxy. Only a current weekly `config.currentPeriod` and its `creditUsagePercent` are normalized into the Providers-page quota window; prepaid balance, on-demand billing, monthly periods, and history are deliberately ignored. Malformed, stale, oversized, redirected, or failed responses are cached briefly and fail open to the last stored snapshot or `—`. Helm never substitutes public `api.x.ai` credit limits for the consumer subscription's weekly pool. This remains an unsupported third-party use of a first-party contract, so a real-account quota smoke is required after every protocol change.
 

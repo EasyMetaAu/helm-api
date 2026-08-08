@@ -27,6 +27,7 @@ import { guardPreOutputFailure, type PreOutputClassifier } from "../failover-gua
 import {
   type ChatCompletionRequest,
   type ChatCompletionResponse,
+  type ImageEditInput,
   type ProviderCallOptions,
   type ProviderClient,
   type RealtimeCallRequest,
@@ -801,8 +802,18 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   function isStrictAccountSticky(stickyKey: string | null): stickyKey is string {
     return (
       stickyKey?.startsWith("previous_response_id:") === true ||
-      stickyKey?.startsWith("x-codex-turn-state:") === true
+      stickyKey?.startsWith("x-codex-turn-state:") === true ||
+      stickyKey?.startsWith("provider_account:") === true
     );
+  }
+
+  function mediaModel(req: Record<string, unknown>): string | null {
+    const model = req.model;
+    return typeof model === "string" && model.length > 0 ? model : null;
+  }
+
+  function imageEditModel(req: ImageEditInput): string | null {
+    return req.kind === "json" ? mediaModel(req.body) : null;
   }
 
   function restorePersistedAffinity(stickyKey: string | null, account: string | undefined): void {
@@ -1329,6 +1340,79 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
                 return client.responsesCompact(req, callOptionsForEntry(opts, entry));
               },
             );
+          },
+        }
+      : {}),
+    ...(entries.length > 0 &&
+    entries.every((entry) => typeof entry.member.client.imageGeneration === "function")
+      ? {
+          async imageGeneration(
+            req: Record<string, unknown>,
+            opts?: ProviderCallOptions,
+          ): Promise<Record<string, unknown>> {
+            // Image generation is a paid write. One selected account gets one
+            // upstream attempt; an ambiguous result must never rotate to a sibling.
+            const entry = select(null, undefined, { model: mediaModel(req) });
+            if (!entry.member.client.imageGeneration) {
+              throw new Error("oauth pool member does not support image generation");
+            }
+            await opts?.onAccountSelected?.(entry.member.account);
+            return entry.member.client.imageGeneration(req, callOptionsForEntry(opts, entry));
+          },
+        }
+      : {}),
+    ...(entries.length > 0 &&
+    entries.every((entry) => typeof entry.member.client.imageEdit === "function")
+      ? {
+          async imageEdit(req, opts?: ProviderCallOptions): Promise<Record<string, unknown>> {
+            // Same single-write rule as image generation; image edits can create a
+            // billable asset and cannot be safely replayed through another account.
+            const entry = select(null, undefined, { model: imageEditModel(req) });
+            if (!entry.member.client.imageEdit) {
+              throw new Error("oauth pool member does not support image editing");
+            }
+            await opts?.onAccountSelected?.(entry.member.account);
+            return entry.member.client.imageEdit(req, callOptionsForEntry(opts, entry));
+          },
+        }
+      : {}),
+    ...(entries.length > 0 &&
+    entries.every((entry) => typeof entry.member.client.videoGeneration === "function")
+      ? {
+          async videoGeneration(
+            req: Record<string, unknown>,
+            opts?: ProviderCallOptions,
+          ): Promise<Record<string, unknown>> {
+            // Video creation is also a single write: no in-pool retry, cooldown, or
+            // sibling failover after an upstream attempt has started.
+            const entry = select(null, undefined, { model: mediaModel(req) });
+            if (!entry.member.client.videoGeneration) {
+              throw new Error("oauth pool member does not support video generation");
+            }
+            await opts?.onAccountSelected?.(entry.member.account);
+            return entry.member.client.videoGeneration(req, callOptionsForEntry(opts, entry));
+          },
+        }
+      : {}),
+    ...(entries.length > 0 &&
+    entries.every((entry) => typeof entry.member.client.videoRetrieve === "function")
+      ? {
+          async videoRetrieve(
+            requestId: string,
+            opts?: ProviderCallOptions,
+          ): Promise<Record<string, unknown>> {
+            // The registry's persisted provider account is authoritative for a poll.
+            // Restore it as a strict sticky target: if unavailable, fail closed rather
+            // than revealing or polling the same upstream task through a sibling.
+            const providerAccount = opts?.providerAccount ?? opts?.statefulAccount;
+            const stickyKey = providerAccount ? `provider_account:${providerAccount}` : null;
+            restorePersistedAffinity(stickyKey, providerAccount);
+            return completeWithRetry(stickyKey, null, false, (client, entry) => {
+              if (!client.videoRetrieve) {
+                throw new Error("oauth pool member does not support video retrieval");
+              }
+              return client.videoRetrieve(requestId, callOptionsForEntry(opts, entry));
+            });
           },
         }
       : {}),

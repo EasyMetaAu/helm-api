@@ -1253,6 +1253,8 @@ export interface ResponsesRegistryRecord {
 
 export interface ResponsesRegistryStore {
   upsert(record: ResponsesRegistryRecord): Promise<void>;
+  /** Atomically claim a registry id. False means another request already owns it. */
+  insertIfAbsent(record: ResponsesRegistryRecord): Promise<boolean>;
   prune(input: { nowMs: number; maxEntries: number; limit: number }): Promise<void>;
   getOwnedLive(input: {
     responseId: string;

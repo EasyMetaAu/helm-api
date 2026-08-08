@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createResponseWorkAdmission } from "../runtime/response-work-admission.js";
 import { createOpenAIClient } from "./openai.js";
 
 const CONFIG = { baseUrl: "https://upstream.test/v1", apiKey: "sk-secret-key" };
@@ -54,6 +55,35 @@ describe("createOpenAIClient.imageGeneration", () => {
       upstreamStatus: 400,
     });
   });
+
+  it.each([503, 529])("does not retry a paid image write after an overload %s", async (status) => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({ error: { message: "busy" } }, status));
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+
+    await expect(client.imageGeneration?.({ model: "m", prompt: "p" })).rejects.toMatchObject({
+      upstreamStatus: status,
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not replay a paid image write to refresh OAuth after 401", async () => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({ error: { message: "expired" } }, 401));
+    const onUnauthorized = vi.fn();
+    const client = createOpenAIClient({
+      config: {
+        baseUrl: "https://upstream.test/v1",
+        getAuthHeader: async () => "Bearer oauth",
+        onUnauthorized,
+      },
+      fetch,
+    });
+
+    await expect(client.imageGeneration?.({ model: "m", prompt: "p" })).rejects.toMatchObject({
+      upstreamStatus: 401,
+    });
+    expect(onUnauthorized).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("createOpenAIClient.imageEdit", () => {
@@ -105,5 +135,140 @@ describe("createOpenAIClient.imageEdit", () => {
     const image = form.get("image[]") as File;
     expect(image.name).toBe("source.png");
     expect([...new Uint8Array(await image.arrayBuffer())]).toEqual([1, 2, 3]);
+  });
+
+  it("does not retry a paid edit after a transport error", async () => {
+    const transportError = Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
+    const fetch = vi.fn().mockRejectedValue(transportError);
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+
+    await expect(
+      client.imageEdit?.({
+        kind: "json",
+        body: { model: "m", prompt: "p", images: [{ image_url: "x" }] },
+      }),
+    ).rejects.toMatchObject({ name: "UpstreamError" });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createOpenAIClient.videoGeneration", () => {
+  it.each([503, 529])("POSTs a single paid video write without retrying a %s", async (status) => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({ error: { message: "busy" } }, status));
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+
+    await expect(
+      client.videoGeneration?.({ model: "grok-imagine-video", prompt: "x" }),
+    ).rejects.toMatchObject({
+      upstreamStatus: status,
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0]?.[0]).toBe("https://upstream.test/v1/videos/generations");
+  });
+
+  it("does not retry a paid video write after a transport error", async () => {
+    const transportError = Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
+    const fetch = vi.fn().mockRejectedValue(transportError);
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+
+    await expect(
+      client.videoGeneration?.({ model: "grok-imagine-video", prompt: "x" }),
+    ).rejects.toMatchObject({
+      name: "UpstreamError",
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a valid start response and rejects a successful response without request_id", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ request_id: "req_123" }))
+      .mockResolvedValueOnce(jsonResponse({ status: "processing" }));
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+
+    await expect(
+      client.videoGeneration?.({ model: "grok-imagine-video", prompt: "x" }),
+    ).resolves.toEqual({
+      request_id: "req_123",
+    });
+    await expect(
+      client.videoGeneration?.({ model: "grok-imagine-video", prompt: "x" }),
+    ).rejects.toMatchObject({
+      name: "UpstreamError",
+      upstreamStatus: 200,
+    });
+  });
+});
+
+describe("createOpenAIClient.videoRetrieve", () => {
+  it("GETs an encoded task id, accepts 202, and refreshes auth once after 401", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ error: { message: "expired" } }, 401))
+      .mockResolvedValueOnce(jsonResponse({ status: "processing" }, 202));
+    const onUnauthorized = vi.fn();
+    const client = createOpenAIClient({
+      config: {
+        baseUrl: "https://upstream.test/v1",
+        getAuthHeader: async () => "Bearer oauth",
+        onUnauthorized,
+      },
+      fetch,
+    });
+
+    await expect(client.videoRetrieve?.("request/id?x=1")).resolves.toEqual({
+      status: "processing",
+    });
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch.mock.calls[0]?.[0]).toBe("https://upstream.test/v1/videos/request%2Fid%3Fx%3D1");
+    expect(fetch.mock.calls[0]?.[1]).toMatchObject({ method: "GET" });
+  });
+
+  it("rejects a poll response whose status is not a string", async () => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({ status: 1 }));
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+
+    await expect(client.videoRetrieve?.("req_123")).rejects.toMatchObject({
+      name: "UpstreamError",
+      upstreamStatus: 200,
+    });
+  });
+
+  it("scrubs an echoed credential from a poll error", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ error: { message: "Bearer sk-secret-key expired" } }, 401));
+    const client = createOpenAIClient({
+      config: CONFIG,
+      fetch,
+      responseWorkAdmission: createResponseWorkAdmission({
+        capacityBytes: 1024,
+        jsonAmplification: 1,
+        minChargeBytes: 1,
+      }),
+    });
+
+    await expect(client.videoRetrieve?.("req_secret")).rejects.toMatchObject({
+      name: "UpstreamError",
+      providerRaw: { error: { message: "Bearer [redacted] expired" } },
+    });
+  });
+
+  it("bounds a poll transport wait with the configured timeout", async () => {
+    const fetch = vi.fn((_input: string | URL | Request, init?: RequestInit) => {
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+        );
+      });
+    });
+    const client = createOpenAIClient({ config: { ...CONFIG, timeoutMs: 5 }, fetch });
+
+    await expect(client.videoRetrieve?.("req_timeout")).rejects.toMatchObject({
+      name: "UpstreamError",
+      errorClass: "timeout",
+    });
+    expect(fetch).toHaveBeenCalledOnce();
   });
 });

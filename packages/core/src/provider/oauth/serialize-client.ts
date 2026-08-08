@@ -173,6 +173,26 @@ export function createSerializingClient(deps: SerializeClientDeps): ProviderClie
     client.realtimeCall = (req, opts) => innerRealtime(req, opts);
   }
 
+  // Media generation may have a paid side effect, so it deliberately bypasses the
+  // user-turn serial gate. The pool chooses the one serving account before this
+  // decorator is reached; preserve these optional capabilities truthfully.
+  const innerImageGeneration = deps.inner.imageGeneration;
+  if (innerImageGeneration) {
+    client.imageGeneration = (req, opts) => innerImageGeneration(req, opts);
+  }
+  const innerImageEdit = deps.inner.imageEdit;
+  if (innerImageEdit) {
+    client.imageEdit = (req, opts) => innerImageEdit(req, opts);
+  }
+  const innerVideoGeneration = deps.inner.videoGeneration;
+  if (innerVideoGeneration) {
+    client.videoGeneration = (req, opts) => innerVideoGeneration(req, opts);
+  }
+  const innerVideoRetrieve = deps.inner.videoRetrieve;
+  if (innerVideoRetrieve) {
+    client.videoRetrieve = (requestId, opts) => innerVideoRetrieve(requestId, opts);
+  }
+
   if (deps.inner.closeResponsesWebSocketSession) {
     client.closeResponsesWebSocketSession = (sessionId) =>
       deps.inner.closeResponsesWebSocketSession?.(sessionId) ?? Promise.resolve();

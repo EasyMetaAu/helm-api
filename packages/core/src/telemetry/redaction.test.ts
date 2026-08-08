@@ -178,6 +178,32 @@ describe("redact", () => {
     expect(JSON.stringify(out)).not.toContain("sk-secret");
   });
 
+  it("removes inline media and presigned query credentials from URL fields", () => {
+    const out = redact({
+      provider_raw: {
+        image: { url: "data:image/png;base64,PRIVATE" },
+        output: { upload_url: "https://upload.test/object?X-Amz-Signature=secret#fragment" },
+        video: { url: "https://download.test/video.mp4?token=secret" },
+      },
+    }) as {
+      provider_raw: {
+        image: { url: unknown };
+        output: { upload_url: string };
+        video: { url: string };
+      };
+    };
+
+    expect(out.provider_raw.image.url).toEqual({
+      redacted: true,
+      kind: "string",
+      length: "data:image/png;base64,PRIVATE".length,
+    });
+    expect(out.provider_raw.output.upload_url).toBe("https://upload.test/object");
+    expect(out.provider_raw.video.url).toBe("https://download.test/video.mp4");
+    expect(JSON.stringify(out)).not.toContain("PRIVATE");
+    expect(JSON.stringify(out)).not.toContain("secret");
+  });
+
   it("handles null, primitives, and circular references without throwing", () => {
     expect(redact(null)).toBeNull();
     expect(redact(42)).toBe(42);

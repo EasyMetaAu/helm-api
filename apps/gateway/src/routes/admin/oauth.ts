@@ -2,6 +2,7 @@ import {
   aggregateByCalendar,
   computeUsagePeriods,
   filterRetiredOpenAICodexLimits,
+  GROK_OAUTH_MEDIA_MODELS,
   windowMinutesForKey,
   windowsToActiveUsageRecovery,
   windowsToUsageLimit,
@@ -1160,6 +1161,9 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     const prompt = typeof body.prompt === "string" ? body.prompt : undefined;
     if (!account) return c.json({ error: "account is required" }, 400);
     if (!model) return c.json({ error: "model is required" }, 400);
+    if (GROK_OAUTH_MEDIA_MODELS.some((mediaModel) => mediaModel === model)) {
+      return c.json({ error: "media models are not supported by the chat connectivity test" }, 400);
+    }
     const signal = c.req.raw.signal;
     return streamSSE(c, async (sse) => {
       const startedAt = Date.now();

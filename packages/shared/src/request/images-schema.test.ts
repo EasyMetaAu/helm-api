@@ -6,6 +6,23 @@ import {
 } from "./images-schema.js";
 
 describe("ImageEditRequestSchema", () => {
+  it("accepts Grok single-image and multi-reference URL carriers", () => {
+    expect(
+      ImageEditRequestSchema.safeParse({
+        model: "grok-imagine-image-quality",
+        prompt: "restyle",
+        image: { url: "data:image/png;base64,AAA=" },
+      }).success,
+    ).toBe(true);
+    expect(
+      ImageEditRequestSchema.safeParse({
+        model: "grok-imagine-image-quality",
+        prompt: "combine",
+        images: [{ url: "https://example.test/a.png" }, { url: "https://example.test/b.png" }],
+      }).success,
+    ).toBe(true);
+  });
+
   it("accepts the Codex JSON image_url carrier", () => {
     expect(
       ImageEditRequestSchema.safeParse({

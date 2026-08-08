@@ -351,6 +351,14 @@ export {
   type TargetProviderProtocol,
   TargetProviderProtocolSchema,
 } from "./request/schema.js";
+export {
+  type VideoGenerationRequest,
+  VideoGenerationRequestSchema,
+  type VideoGenerationResponse,
+  VideoGenerationResponseSchema,
+  type VideoRetrieveResponse,
+  VideoRetrieveResponseSchema,
+} from "./request/videos-schema.js";
 // Read-side session transcript reconstruction (shared by gateway + admin browser).
 export {
   restoreSessionRequestJson,

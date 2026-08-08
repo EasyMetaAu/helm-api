@@ -48,10 +48,9 @@ export function echoResponse(model: string) {
 export const FAIL_PRIMARY_SENTINEL = "__HELM_FAIL_PRIMARY__";
 export const FAIL_PRIMARY_MODEL = "deepseek-v4-flash";
 
-// Image-lane fallback steering: a sentinel in the image prompt fails ONLY the
-// `gemini-image` lane's PRIMARY (gemini-3.1-flash-image) on the generateContent
-// endpoint, so the image chain falls forward to the fallback (gemini-3-pro-image).
-// Steered (not a hard fail) so the direct-flash image tests still return 200.
+// Image single-write steering: a sentinel in the image prompt fails ONLY the
+// `gemini-image` lane's PRIMARY (gemini-3.1-flash-image). The gateway must return
+// outcome_unknown without contacting a fallback provider.
 export const FAIL_IMAGE_PRIMARY_SENTINEL = "__HELM_FAIL_IMAGE_PRIMARY__";
 export const FAIL_IMAGE_PRIMARY_MODEL = "gemini-3.1-flash-image";
 
@@ -207,6 +206,19 @@ export const OAUTH_RESET_PATH = "/__oauth_reset";
 // process), forcing the OAuth client to refresh + retry exactly once.
 export const OAUTH_401_ONCE_SENTINEL = "__HELM_OAUTH_401_ONCE__";
 
+// —— Grok Imagine video stand-in (e2e.videos) ———————————————————————————————
+// The mock binds each async request id to the OAuth bearer that created it.
+// Polling with a sibling account fails, so the e2e proves the gateway restores
+// and reuses the persisted serving-account binding instead of pool-selecting.
+export const VIDEO_CAPTURE_PATH = "/__video_capture";
+export const VIDEO_RESET_PATH = "/__video_reset";
+
+export interface VideoCapture {
+  images: Array<{ account: string; body: Record<string, unknown> }>;
+  starts: Array<{ requestId: string; account: string; body: Record<string, unknown> }>;
+  polls: Array<{ requestId: string; account: string }>;
+}
+
 // —— upstream request capture (e2e.protocol) —————————————————————————————————
 // The path the spec GETs to read back the LAST request the gateway forwarded
 // upstream. Lets the e2e assert the NORMALIZED (OpenAI-Chat IR) request shape
@@ -233,6 +245,9 @@ export function createMockUpstream() {
   // Whether the OAuth-401-once branch has already fired in THIS process. Reset via
   // OAUTH_RESET_PATH between spec cases.
   let oauth401Fired = false;
+  let videoCapture: VideoCapture = { images: [], starts: [], polls: [] };
+  const videoOwners = new Map<string, string>();
+  const videoPollCounts = new Map<string, number>();
 
   // Readiness probe for Playwright's webServer wait.
   app.get("/", (c) => c.text("mock upstream ok"));
@@ -263,6 +278,49 @@ export function createMockUpstream() {
     oauthTokenCount = 0;
     oauth401Fired = false;
     return c.json({ ok: true });
+  });
+  app.get(VIDEO_CAPTURE_PATH, (c) => c.json(videoCapture));
+  app.post(VIDEO_RESET_PATH, (c) => {
+    videoCapture = { images: [], starts: [], polls: [] };
+    videoOwners.clear();
+    videoPollCounts.clear();
+    return c.json({ ok: true });
+  });
+
+  // Minimal Grok model discovery used while the offline gateway synthesizes its
+  // xAI OAuth pool. Imagine aliases are added from Helm's signed-in allowlist.
+  app.get("/models", (c) =>
+    c.json({ data: [{ id: "grok-4.5", model: "grok-4.5", apiBackend: "responses" }] }),
+  );
+
+  app.post("/videos/generations", async (c) => {
+    const account = (c.req.header("authorization") ?? "").replace(/^Bearer xai-access-/, "");
+    if (!account || account.startsWith("Bearer ")) {
+      return c.json({ error: { message: "missing xAI OAuth bearer" } }, 401);
+    }
+    const body = (await c.req.json()) as Record<string, unknown>;
+    const requestId = `video_${account}_${videoCapture.starts.length + 1}`;
+    videoOwners.set(requestId, account);
+    videoCapture.starts.push({ requestId, account, body });
+    return c.json({ request_id: requestId, status: "queued" });
+  });
+
+  app.get("/videos/:requestId", (c) => {
+    const requestId = c.req.param("requestId");
+    const account = (c.req.header("authorization") ?? "").replace(/^Bearer xai-access-/, "");
+    if (videoOwners.get(requestId) !== account) {
+      return c.json({ error: { message: "video belongs to another OAuth account" } }, 409);
+    }
+    videoCapture.polls.push({ requestId, account });
+    const count = (videoPollCounts.get(requestId) ?? 0) + 1;
+    videoPollCounts.set(requestId, count);
+    return count === 1
+      ? c.json({ request_id: requestId, status: "rendering" })
+      : c.json({
+          request_id: requestId,
+          status: "done",
+          video: { url: `https://download.example.test/${requestId}.mp4` },
+        });
   });
 
   app.post("/chat/completions", async (c) => {
@@ -365,8 +423,8 @@ export function createMockUpstream() {
     }
     const model = spec.slice(0, -":generateContent".length);
     const body = (await c.req.json().catch(() => ({}))) as { contents?: unknown };
-    // Image-lane fallback injection: fail ONLY the lane's primary image model so the
-    // gateway's image chain advances to the fallback (which serves the image below).
+    // Fail only the lane primary. A second provider call would violate media
+    // single-write semantics, so the e2e expects outcome_unknown.
     if (
       geminiPromptText(body).includes(FAIL_IMAGE_PRIMARY_SENTINEL) &&
       model === FAIL_IMAGE_PRIMARY_MODEL
@@ -395,7 +453,11 @@ export function createMockUpstream() {
   // deterministic image body so the e2e can assert the round-trip + recorded cost
   // (output_tokens = 196 image tokens, matching the live gpt-image-2 shape).
   app.post("/images/generations", async (c) => {
-    const body = (await c.req.json().catch(() => ({}))) as { model?: string };
+    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    const account = (c.req.header("authorization") ?? "").replace(/^Bearer xai-access-/, "");
+    if (body.model === "grok-imagine-image-quality") {
+      videoCapture.images.push({ account, body });
+    }
     return c.json({
       created: 0,
       model: body.model ?? "gpt-image-2",

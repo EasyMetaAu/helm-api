@@ -24,6 +24,9 @@ function record(responseId: string, createdAt: number): ResponsesRegistryRecord 
 }
 
 async function verify(store: ResponsesRegistryStore): Promise<void> {
+  expect(await store.insertIfAbsent(record("video-create:req_1", 500))).toBe(true);
+  expect(await store.insertIfAbsent(record("video-create:req_1", 600))).toBe(false);
+
   await Promise.all([store.upsert(record("resp_1", 1_000)), store.upsert(record("resp_2", 2_000))]);
   await expect(
     store.getOwnedLive({ responseId: "resp_1", ...identity, nowMs: 3_000 }),

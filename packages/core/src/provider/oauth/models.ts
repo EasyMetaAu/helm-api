@@ -35,6 +35,15 @@ export const CURATED_OAUTH_MODELS: Record<string, string[]> = {
   ],
 };
 
+// Grok Imagine is a separate, verified OAuth media capability. Keep it out of
+// the text-model discovery catalog: its upstream `apiBackend` is not Responses,
+// and treating it as such would incorrectly make it chat-routable.
+export const GROK_OAUTH_MEDIA_MODELS = [
+  "grok-imagine-image-quality",
+  "grok-imagine-video-1.5-preview",
+  "grok-imagine-video",
+] as const;
+
 const OPENAI_CODEX_MODEL_ALIASES: Readonly<Record<string, string>> = {
   "gpt-5.6": "gpt-5.6-sol",
 };

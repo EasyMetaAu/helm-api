@@ -10,6 +10,7 @@ const DEFAULT_KEY_PREFIX_LEN = 12;
 const DEFAULT_PAYLOAD_KEYS = ["messages", "attachments", "prompt", "content", "input"];
 const DEFAULT_SECRET_PATTERN =
   /^(?:api[_-]?key|x[_-]?(?:goog(?:le)?[_-]?)?api[_-]?key|authorization|(?:x[_-]?)?proxy[_-]?authorization|cookie|set[_-]?cookie|password|client[_-]?secret|secret(?:[_-]?(?:key|enc))?|credential(?:s)?|token|token[_-]?bundle|(?:x[_-]?)?access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|oauth[_-]?token|x[_-]?auth[_-]?token)$/i;
+const URL_FIELD_PATTERN = /^(?:url|.*_url)$/i;
 
 export interface RedactOptions {
   keyPrefixLen?: number;
@@ -46,6 +47,20 @@ function summarizePayload(value: unknown): Record<string, unknown> {
   return { redacted: true, kind: typeof value };
 }
 
+function redactUrl(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  if (value.startsWith("data:")) return summarizePayload(value);
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return value;
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return value;
+  }
+}
+
 function redactNode(value: unknown, opts: ResolvedOptions, seen: WeakSet<object>): unknown {
   if (value === null || typeof value !== "object") return value;
   if (seen.has(value)) return undefined; // break cycles safely
@@ -57,7 +72,9 @@ function redactNode(value: unknown, opts: ResolvedOptions, seen: WeakSet<object>
 
   const out: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(value)) {
-    if (opts.secretKeyPattern.test(key)) {
+    if (URL_FIELD_PATTERN.test(key)) {
+      out[key] = redactUrl(child);
+    } else if (opts.secretKeyPattern.test(key)) {
       // Strings under a secret-matching key are fingerprinted; objects/arrays are
       // summarized (they could hold credentials). SCALARS pass through: a number,
       // boolean, null or undefined can never carry key material, and summarizing

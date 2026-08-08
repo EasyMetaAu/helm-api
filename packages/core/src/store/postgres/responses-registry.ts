@@ -16,6 +16,15 @@ export class PgResponsesRegistryStore implements ResponsesRegistryStore {
       .onConflictDoUpdate({ target: responsesRegistry.responseId, set: row });
   }
 
+  async insertIfAbsent(record: ResponsesRegistryRecord): Promise<boolean> {
+    const rows = await this.db
+      .insert(responsesRegistry)
+      .values(this.row(record))
+      .onConflictDoNothing()
+      .returning();
+    return rows.length > 0;
+  }
+
   async prune(input: { nowMs: number; maxEntries: number; limit: number }): Promise<void> {
     const maxEntries = Math.max(1, Math.floor(input.maxEntries));
     const limit = Math.max(1, Math.floor(input.limit));

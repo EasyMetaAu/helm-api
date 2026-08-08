@@ -1881,6 +1881,105 @@ describe("createOAuthPoolClient — responsesCompact", () => {
   });
 });
 
+describe("createOAuthPoolClient — media", () => {
+  function mediaMember(
+    account: string,
+    priority: number,
+    calls: string[],
+    opts: { imageFailure?: Error; videoFailure?: Error } = {},
+  ): OAuthPoolMember {
+    return {
+      account,
+      priority,
+      schedulable: true,
+      client: {
+        ...stubClient(account, []),
+        async imageGeneration() {
+          calls.push(`image:${account}`);
+          if (opts.imageFailure) throw opts.imageFailure;
+          return { data: [{ served_by: account }] };
+        },
+        async imageEdit() {
+          calls.push(`edit:${account}`);
+          return { data: [{ served_by: account }] };
+        },
+        async videoGeneration() {
+          calls.push(`video:${account}`);
+          if (opts.videoFailure) throw opts.videoFailure;
+          return { request_id: `request-${account}` };
+        },
+        async videoRetrieve(_requestId, options) {
+          calls.push(`retrieve:${account}`);
+          return {
+            status: "pending",
+            provider_account: options?.providerAccount ?? options?.statefulAccount,
+          };
+        },
+      },
+    };
+  }
+
+  it("selects one account for a paid media create and never changes sibling after ambiguity", async () => {
+    const calls: string[] = [];
+    const selected: string[] = [];
+    const ambiguous = new UpstreamError("timeout", "media create outcome unknown", null, null);
+    const pool = createOAuthPoolClient({
+      members: [
+        mediaMember("a", 10, calls, { imageFailure: ambiguous, videoFailure: ambiguous }),
+        mediaMember("b", 10, calls),
+      ],
+    });
+
+    await expect(
+      pool.imageGeneration?.(
+        { model: "grok-imagine-image-quality" },
+        {
+          onAccountSelected: (account) => {
+            selected.push(`image:${account}`);
+          },
+        },
+      ),
+    ).rejects.toBe(ambiguous);
+    const videoPool = createOAuthPoolClient({
+      members: [
+        mediaMember("a", 10, calls, { videoFailure: ambiguous }),
+        mediaMember("b", 10, calls),
+      ],
+    });
+    await expect(
+      videoPool.videoGeneration?.(
+        { model: "grok-imagine-video" },
+        {
+          onAccountSelected: (account) => {
+            selected.push(`video:${account}`);
+          },
+        },
+      ),
+    ).rejects.toBe(ambiguous);
+
+    expect(calls).toEqual(["image:a", "video:a"]);
+    expect(selected).toEqual(["image:a", "video:a"]);
+  });
+
+  it("pins video retrieval to either persisted account carrier without rotating to a sibling", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [mediaMember("a", 10, calls), mediaMember("b", 10, calls)],
+    });
+
+    await expect(pool.videoRetrieve?.("request-a", { statefulAccount: "a" })).resolves.toEqual({
+      status: "pending",
+      provider_account: "a",
+    });
+    await expect(pool.videoRetrieve?.("request-b", { providerAccount: "b" })).resolves.toEqual({
+      status: "pending",
+      provider_account: "b",
+    });
+
+    expect(calls).toEqual(["retrieve:a", "retrieve:b"]);
+  });
+});
+
 // In-pool retry (the real fix for the Codex `all_providers_failed` on a single OpenAI
 // overload): when the picked account fails with a TRANSIENT, account-agnostic upstream
 // fault BEFORE the first chunk, try the next eligible sibling in the SAME pool before the
