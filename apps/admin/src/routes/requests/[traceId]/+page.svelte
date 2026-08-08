@@ -525,12 +525,9 @@
         </p>
         {#if data.payload?.reason === 'session_recovery_limited'}
           {#if transcriptStatus === 'loaded'}
-            <p class="field-help mb-2 mt-3">
-              {$t(
-                'Rebuilt from the session transcript in your browser — semantically equal to the original request, not the exact HTTP body.',
-              )}
-            </p>
-            <JsonViewer value={transcriptValue} testid="transcript-body" />
+            <!-- Reuse the same JsonViewer as a captured/recovered request body; the
+                 rebuilt transcript IS the request, so it needs no separate display. -->
+            <JsonViewer value={transcriptValue} testid="request-body" />
           {:else}
             <div class="mt-3 rounded border border-dashed border-border bg-canvas p-3">
               <p class="field-help mb-2">
