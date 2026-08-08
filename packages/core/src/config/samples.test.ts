@@ -200,6 +200,24 @@ describe("checked-in config samples", () => {
     expect(luna?.reasoningEffort?.openaiReasoning?.levels).not.toContain("ultra");
   });
 
+  it("ships fail-closed Grok Imagine media capabilities and dedicated lanes", () => {
+    const cfg = loadConfig({ configDir, env: {} });
+    const capabilities = CapabilitiesOverrideSchema.parse(readYaml("capabilities.yaml"));
+    const lanes = cfg.lanes;
+    if (lanes === undefined) throw new Error("config/lanes.yaml must load into config.lanes");
+
+    expect(capabilities["xai/grok-imagine-image-quality"]?.outputImage).toBe(true);
+    expect(capabilities["xai/grok-imagine-image-quality"]?.outputVideo).toBeUndefined();
+    for (const model of ["grok-imagine-video-1.5-preview", "grok-imagine-video"]) {
+      expect(capabilities[`xai/${model}`]?.outputVideo).toBe(true);
+      expect(capabilities[`xai/${model}`]?.outputImage).toBeUndefined();
+      expect(lanes[model]?.primary).toBe(`xai/${model}`);
+      expect(lanes[model]?.fallback).toEqual([]);
+    }
+    expect(lanes["grok-imagine-image-quality"]?.primary).toBe("xai/grok-imagine-image-quality");
+    expect(lanes["grok-imagine-image-quality"]?.fallback).toEqual([]);
+  });
+
   it("routes bare Gemini ids onto the gemini vendor-family lanes (pro vs flash vs catch-all)", () => {
     const cfg = loadConfig({ configDir, env: {} });
     const lanes = cfg.lanes;

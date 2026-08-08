@@ -1051,11 +1051,11 @@ test.describe("real PostgreSQL distributed concurrency leases", () => {
         expect(outcome.ok).toBe(false);
         if (outcome.ok) throw new Error("expected terminal image error");
         expect(outcome.aborted).toBe(false);
-        expect(outcome.errorClass).toBe("lane_unavailable");
+        expect(outcome.errorClass).toBe("outcome_unknown");
         expect(outcome.httpStatus).toBe(503);
         expect(outcome.attempts[0]).toMatchObject({
           skip_reason: "concurrency_lease_lost",
-          error_class: "lane_unavailable",
+          error_class: "outcome_unknown",
         });
         expect(calls).toBe(1);
         expect(imageBreaker.getState(`${kind}-primary`)).toBe("CLOSED");

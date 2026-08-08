@@ -56,6 +56,7 @@ export {
   discoverOAuthModels,
   expandOpenAICodexModelAliases,
   filterRetiredOpenAICodexLimits,
+  GROK_OAUTH_MEDIA_MODELS,
   hasLiveModelDiscovery,
   isRetiredOpenAICodexLimit,
   isRetiredOpenAICodexModel,

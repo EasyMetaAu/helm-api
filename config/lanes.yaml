@@ -262,3 +262,21 @@ gemini-image:
   fallback:
     - gemini-3.1-flash-image
     - gemini-3-pro-image
+
+# Grok CLI sends these bare ids. Each lane pins the corresponding synthesized
+# SuperGrok OAuth alias and deliberately has no cross-provider fallback: media
+# create is a paid single-write operation.
+grok-imagine-image-quality:
+  purpose: Grok Imagine quality image generation via SuperGrok OAuth
+  primary: xai/grok-imagine-image-quality
+  fallback: []
+
+grok-imagine-video-1.5-preview:
+  purpose: Grok Imagine single-image video generation via SuperGrok OAuth
+  primary: xai/grok-imagine-video-1.5-preview
+  fallback: []
+
+grok-imagine-video:
+  purpose: Grok Imagine multi-reference video generation via SuperGrok OAuth
+  primary: xai/grok-imagine-video
+  fallback: []

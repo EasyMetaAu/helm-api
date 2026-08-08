@@ -15,6 +15,7 @@ import {
   discoverOAuthModels,
   encryptSecret,
   expandOpenAICodexModelAliases,
+  GROK_OAUTH_MEDIA_MODELS,
   getOAuthProvider,
   hasLiveModelDiscovery,
   isRoutableXaiOAuthModel,
@@ -664,9 +665,13 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     discovered: { available: string[]; entitled: string[] },
   ): string[] {
     if (providerId === CODEX) return codexEffectiveModels(settings, discovered.entitled);
-    return resolveAccountModelsMode(providerId, settings) === "auto"
-      ? discovered.available
-      : (settings.enabledModels ?? []);
+    const mode = resolveAccountModelsMode(providerId, settings);
+    const enabled = mode === "auto" ? discovered.available : (settings.enabledModels ?? []);
+    return mode === "auto" ? withXaiMediaModels(providerId, enabled) : enabled;
+  }
+
+  function withXaiMediaModels(providerId: string, models: string[]): string[] {
+    return providerId === XAI ? [...new Set([...models, ...GROK_OAUTH_MEDIA_MODELS])] : models;
   }
 
   function prune(): void {
@@ -1037,7 +1042,8 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         account,
       );
       const discovered = await discoverAccountModels(providerId, account, settings);
-      // `available` is the exact account discovery — only SUGGESTIONS to seed from.
+      // `available` is account discovery plus verified xAI media aliases — only
+      // SUGGESTIONS to seed from.
       // In manual mode `enabled` is the operator's AUTHORITATIVE list (verbatim,
       // NOT intersected), so a custom id survives stale discovery. In auto mode it
       // is the exact discovery projection; runtime composition separately retains
@@ -1046,7 +1052,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       const enabled = enabledAccountModels(providerId, settings, discovered);
       // `canPull` tells the UI whether account-scoped model refresh is meaningful.
       return {
-        available: discovered.available,
+        available: withXaiMediaModels(providerId, discovered.available),
         enabled,
         modelsMode,
         canPull: hasLiveModelDiscovery(providerId),

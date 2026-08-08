@@ -391,7 +391,8 @@ export function registerInteractionsRoute(app: Hono<AppEnv>, deps: InteractionsR
 
     const outcome = await runImageChain(geminiTargets, deps.breaker, attempt, requestSignal(c));
 
-    // 6b) Terminal failure. A client abort is a NON-provider fault → no record.
+    // 6b) Terminal failure. Once media execution starts, abort/timeout remains an
+    // observable outcome_unknown because the paid upstream may have accepted it.
     if (!outcome.ok) {
       if (outcome.aborted) return errorJson(c, 400, "client disconnected", "CANCELLED");
       if (captureRecord !== undefined) {

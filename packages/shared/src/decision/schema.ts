@@ -113,6 +113,13 @@ export const ProviderAttemptSchema = z.object({
   response_protocol: ProtocolSchema.nullable().optional(),
   provider_name: z.string().nullable().optional(),
   provider_model: z.string().nullable().optional(),
+  // Opaque async media task correlation. Only a one-way hash is retained in the
+  // body-free DecisionRecord; the pollable upstream id lives in the owner-gated
+  // registry and optional payload capture.
+  upstream_request_ref: z
+    .string()
+    .regex(/^sha256:[a-f0-9]{64}$/)
+    .optional(),
   passthrough_mutations: NativePassthroughMutationLedgerSchema.optional(),
   // Target-protocol request shims on translated attempts. Body-free: codes,
   // counters, and field names only; never payload values.

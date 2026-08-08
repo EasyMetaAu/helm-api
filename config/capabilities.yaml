@@ -90,6 +90,36 @@ xai/grok-composer-2.5-fast:
       supported: false
   maxContextTokens: 200000
   maxOutputTokens: null
+# Grok Imagine media aliases are synthesized only for connected SuperGrok OAuth
+# accounts. They are output capabilities, not chat models; dedicated media routes
+# require these explicit flags and fail closed when an alias is absent.
+xai/grok-imagine-image-quality:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: true
+  supportsStreaming: false
+  supportsCachedContent: false
+  outputImage: true
+  maxContextTokens: 32768
+  maxOutputTokens: null
+xai/grok-imagine-video-1.5-preview:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: true
+  supportsStreaming: false
+  supportsCachedContent: false
+  outputVideo: true
+  maxContextTokens: 32768
+  maxOutputTokens: null
+xai/grok-imagine-video:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: true
+  supportsStreaming: false
+  supportsCachedContent: false
+  outputVideo: true
+  maxContextTokens: 32768
+  maxOutputTokens: null
 #
 # GPT-5.6 fallback metadata mirrors the bundled Codex model catalog. At runtime the
 # authenticated `/models` response is authoritative per account; these entries are

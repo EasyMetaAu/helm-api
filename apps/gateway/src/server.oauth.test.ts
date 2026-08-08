@@ -528,6 +528,17 @@ function codexJwt(payload: Record<string, unknown>): string {
 
 describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
   const noop = () => {};
+  const mediaModels = [
+    {
+      alias: "xai/grok-imagine-image-quality",
+      provider_model: "grok-imagine-image-quality",
+    },
+    {
+      alias: "xai/grok-imagine-video-1.5-preview",
+      provider_model: "grok-imagine-video-1.5-preview",
+    },
+    { alias: "xai/grok-imagine-video", provider_model: "grok-imagine-video" },
+  ];
   const runInBackground = (task: () => Promise<unknown>) => {
     void task();
     return true;
@@ -623,7 +634,10 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       type: "openai-responses-generic",
       base_url: "https://cli-chat-proxy.grok.com/v1",
       targetProviderProtocol: "openai_responses",
-      models: [{ alias: "xai/grok-composer-2.5-fast", provider_model: "grok-composer-2.5-fast" }],
+      models: [
+        { alias: "xai/grok-composer-2.5-fast", provider_model: "grok-composer-2.5-fast" },
+        ...mediaModels,
+      ],
     });
     expect(enabled.poolClients.has("xai")).toBe(true);
     expect(fetchMock).toHaveBeenCalledWith(
@@ -635,6 +649,114 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
         .get("xai")
         ?.nativePassthrough?.({ model: "grok-composer-2.5-fast", input: "hello" }),
     ).resolves.toMatchObject({ id: "resp-grok", status: "completed" });
+  });
+
+  it("synthesizes Grok Imagine aliases and routes media through api.x.ai with the same OAuth bearer", async () => {
+    const { ctx, config } = oauthStores();
+    await seedXai(ctx, "media");
+    const calls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const target = String(url);
+      calls.push(`${init?.method ?? "GET"} ${target}`);
+      if (target.endsWith("/models")) {
+        return Response.json({ data: [{ id: "grok-4.5", apiBackend: "responses" }] });
+      }
+      const headers = new Headers(init?.headers);
+      expect(headers.get("Authorization")).toBe("Bearer xai-access-media");
+      if (target === "https://api.x.ai/v1/images/generations") {
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          model: "grok-imagine-image-quality",
+          prompt: "draw",
+        });
+        return Response.json({ data: [{ b64_json: "image" }] });
+      }
+      if (target === "https://api.x.ai/v1/videos/generations") {
+        return Response.json({ request_id: "video_1" });
+      }
+      if (target === "https://api.x.ai/v1/videos/video_1") {
+        return Response.json({ status: "done", video: { url: "https://cdn.test/video" } });
+      }
+      throw new Error(`unexpected URL ${target}`);
+    });
+
+    const enabled = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+    );
+    expect(enabled.providers[0]?.models).toEqual(
+      expect.arrayContaining([
+        {
+          alias: "xai/grok-imagine-image-quality",
+          provider_model: "grok-imagine-image-quality",
+        },
+        {
+          alias: "xai/grok-imagine-video-1.5-preview",
+          provider_model: "grok-imagine-video-1.5-preview",
+        },
+        { alias: "xai/grok-imagine-video", provider_model: "grok-imagine-video" },
+      ]),
+    );
+    const pool = enabled.poolClients.get("xai");
+    await expect(
+      pool?.imageGeneration?.({ model: "grok-imagine-image-quality", prompt: "draw" }),
+    ).resolves.toEqual({ data: [{ b64_json: "image" }] });
+    await expect(
+      pool?.videoGeneration?.({ model: "grok-imagine-video", prompt: "move" }),
+    ).resolves.toEqual({ request_id: "video_1" });
+    await expect(
+      pool?.videoRetrieve?.("video_1", { providerAccount: "media" }),
+    ).resolves.toMatchObject({ status: "done" });
+    expect(calls).toContain("POST https://api.x.ai/v1/images/generations");
+    expect(calls).toContain("POST https://api.x.ai/v1/videos/generations");
+    expect(calls).toContain("GET https://api.x.ai/v1/videos/video_1");
+  });
+
+  it("honors each xAI account's manual media allowlist", async () => {
+    const { ctx, config } = oauthStores();
+    await seedXai(ctx, "media-enabled");
+    await seedXai(ctx, "text-only");
+    await setAccountSettings(config, ENC_KEY, "xai", "media-enabled", {
+      modelsMode: "manual",
+      enabledModels: ["grok-imagine-image-quality"],
+    });
+    await setAccountSettings(config, ENC_KEY, "xai", "text-only", {
+      modelsMode: "manual",
+      enabledModels: ["grok-4.5"],
+    });
+    const mediaAuth: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const target = String(url);
+      if (target.endsWith("/models")) {
+        return Response.json({ data: [{ id: "grok-4.5", apiBackend: "responses" }] });
+      }
+      if (target === "https://api.x.ai/v1/images/generations") {
+        mediaAuth.push(new Headers(init?.headers).get("authorization") ?? "");
+        return Response.json({ data: [{ b64_json: "image" }] });
+      }
+      throw new Error(`unexpected URL ${target}`);
+    });
+
+    const enabled = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+    );
+
+    expect((enabled.providers[0]?.models ?? []).map((model) => model.alias)).toEqual([
+      "xai/grok-imagine-image-quality",
+      "xai/grok-4.5",
+    ]);
+    await enabled.poolClients
+      .get("xai")
+      ?.imageGeneration?.({ model: "grok-imagine-image-quality", prompt: "draw" });
+    expect(mediaAuth).toEqual(["Bearer xai-access-media-enabled"]);
   });
 
   it("refreshes x-grok-user-id from current xAI credential metadata on a 401 retry", async () => {
@@ -751,6 +873,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
 
     expect(enabled.providers[0]?.models).toEqual([
       { alias: "xai/grok-display-key", provider_model: "grok-wire-model" },
+      ...mediaModels,
     ]);
     expect(enabled.xaiModels.get("xai/grok-display-key")).toMatchObject({
       id: "grok-display-key",
@@ -797,6 +920,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     );
     expect(live.providers[0]?.models).toEqual([
       { alias: "xai/grok-display-lkg", provider_model: "grok-wire-lkg" },
+      ...mediaModels,
     ]);
     expect(
       getAccountSettings(await loadAccountSettings(config, ENC_KEY), "xai", "heavy")
@@ -820,8 +944,14 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     );
     expect(restarted.providers[0]?.models).toEqual([
       { alias: "xai/grok-display-lkg", provider_model: "grok-wire-lkg" },
+      ...mediaModels,
     ]);
-    expect(restarted.xaiModelAccounts).toEqual(new Map([["xai/grok-display-lkg", ["heavy"]]]));
+    expect(restarted.xaiModelAccounts).toEqual(
+      new Map([
+        ["xai/grok-display-lkg", ["heavy"]],
+        ...mediaModels.map((model) => [model.alias, ["heavy"]] as const),
+      ]),
+    );
   });
 
   it("treats a successful empty xAI catalog as authoritative and clears stale LKG", async () => {
@@ -851,8 +981,10 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       60_000,
       noop,
     );
-    expect(emptied.providers).toEqual([]);
-    expect(emptied.xaiModelAccounts).toEqual(new Map());
+    expect(emptied.providers[0]?.models).toEqual(mediaModels);
+    expect(emptied.xaiModelAccounts).toEqual(
+      new Map(mediaModels.map((model) => [model.alias, ["heavy"]])),
+    );
     expect(getAccountSettings(await loadAccountSettings(config, ENC_KEY), "xai", "heavy")).toEqual({
       xaiDiscoveredModels: [],
     });
@@ -888,13 +1020,14 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
 
     expect(enabled.providers[0]?.models).toEqual([
       { alias: "xai/shared-grok", provider_model: "shared-grok-wire" },
+      ...mediaModels,
     ]);
     expect(logs).toContainEqual(
       expect.objectContaining({ msg: "oauth.autoroute.model_metadata_conflict" }),
     );
     expect(logs).toContainEqual({
       msg: "oauth.autoroute",
-      fields: expect.objectContaining({ providerId: "xai", accounts: 1, models: 1 }),
+      fields: expect.objectContaining({ providerId: "xai", accounts: 2, models: 4 }),
     });
   });
 
@@ -1539,6 +1672,10 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
   });
 
   it("hoists non-Lite native instructions, preserves Lite input, and sends ultra as max", async () => {
+    // This protocol-shaping test is unrelated to live host pressure. Keep the
+    // shared response-work coordinator deterministic when the developer machine
+    // happens to be low on free memory; admission behavior has dedicated tests.
+    vi.spyOn(process, "availableMemory").mockReturnValue(4 * 1024 * 1024 * 1024);
     const { ctx, config } = oauthStores();
     await ctx.store.upsert({
       providerId: "openai-codex",

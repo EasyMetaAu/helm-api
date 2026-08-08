@@ -197,6 +197,36 @@ describe("externalizeImages / rehydrateImages", () => {
     expect(JSON.parse(rehydrateImages(json, store(blobs)))).toEqual(JSON.parse(original));
   });
 
+  it("Grok Imagine image.url and reference_images[].url: externalizes + round-trips", () => {
+    const image = bigB64(30);
+    const reference = bigB64(31);
+    const original = JSON.stringify({
+      model: "grok-imagine-video",
+      image: { url: `data:image/png;base64,${image}` },
+      reference_images: [{ url: `data:image/jpeg;base64,${reference}` }],
+    });
+    const { json, blobs } = externalizeImages(original);
+    expect(json).not.toContain(image);
+    expect(json).not.toContain(reference);
+    expect(blobs).toHaveLength(2);
+    expect(JSON.parse(rehydrateImages(json, store(blobs)))).toEqual(JSON.parse(original));
+  });
+
+  it("strips query and fragment secrets from captured media URL fields", () => {
+    const original = JSON.stringify({
+      output: { upload_url: "https://s3.example/video.mp4?signature=secret#fragment" },
+      video: { url: "https://cdn.example/video.mp4?token=secret" },
+      image: { url: "https://cdn.example/frame.png?token=secret" },
+    });
+    const { json, blobs } = externalizeImages(original);
+    expect(blobs).toHaveLength(0);
+    expect(JSON.parse(json)).toEqual({
+      output: { upload_url: "https://s3.example/video.mp4" },
+      video: { url: "https://cdn.example/video.mp4" },
+      image: { url: "https://cdn.example/frame.png" },
+    });
+  });
+
   it("rehydrate fails open on non-JSON text containing the sentinel literal", () => {
     // Raw SSE (not a JSON document) whose model text happens to include the literal.
     const sse = 'event: delta\ndata: {"t":"helm-blob:sha256:dead"}\n\n';

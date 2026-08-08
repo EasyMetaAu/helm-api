@@ -47,7 +47,7 @@ test.describe("images e2e", () => {
     expect(res.headers()["x-helm-final-model"]).toBe("gemini-3.1-flash-image");
   });
 
-  test("an image LANE serves its primary, and fails over to the fallback provider when the primary is down", async ({
+  test("an image lane never replays a paid create on fallback after the primary was contacted", async ({
     request,
   }) => {
     // `gemini-image` is a cross-provider lane (Google official
@@ -61,18 +61,14 @@ test.describe("images e2e", () => {
     expect(ok.headers()["x-helm-lane"]).toBe("gemini-image");
     expect(ok.headers()["x-helm-final-model"]).toBe("google/gemini-3.1-flash-image");
 
-    // …and when the flash model is failing on BOTH providers (the sentinel fails
-    // provider_model gemini-3.1-flash-image, i.e. the Google primary AND the ZenMux
-    // flash leg), the chain falls over to the pro fallback — still a 200 with an image.
-    const failover = await request.post("/v1/images/generations", {
+    // Once the primary POST has started, an ambiguous provider failure must not
+    // create a second paid image through another provider.
+    const unknown = await request.post("/v1/images/generations", {
       headers: AUTH,
       data: { model: "gemini-image", prompt: "__HELM_FAIL_IMAGE_PRIMARY__ a kite" },
     });
-    expect(failover.status()).toBe(200);
-    const body = (await failover.json()) as { data: Array<{ b64_json?: string }> };
-    expect((body.data[0]?.b64_json ?? "").length).toBeGreaterThan(0);
-    expect(failover.headers()["x-helm-final-model"]).toBe("gemini-3-pro-image"); // fell over
-    expect(failover.headers()["x-helm-lane"]).toBe("gemini-image");
+    expect(unknown.status()).toBe(503);
+    expect(await unknown.json()).toMatchObject({ error: { code: "outcome_unknown" } });
   });
 
   test("an unknown image model is a 404 (not a 5xx)", async ({ request }) => {

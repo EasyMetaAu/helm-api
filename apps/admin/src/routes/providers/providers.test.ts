@@ -204,6 +204,41 @@ describe('providers page', () => {
     expect(screen.queryByText('GitHub Enterprise domain (optional)')).not.toBeInTheDocument();
   });
 
+  it('labels Grok Imagine models by output media capability', () => {
+    renderPage({
+      providers: [
+        provider({
+          id: 'xai',
+          accounts: [
+            {
+              account: 'media',
+              expiresAt: null,
+              updatedAt: Date.now(),
+              healthy: true,
+              priority: 50,
+              schedulable: true,
+              proxy: null,
+              models: [
+                'grok-composer-2.5-fast',
+                'grok-4.5',
+                'grok-4.5-fast',
+                'grok-imagine-image-quality',
+                'grok-imagine-video-1.5-preview',
+                'grok-imagine-video',
+              ],
+            },
+          ],
+        }),
+      ],
+      usage: [],
+      quota: [],
+    });
+
+    const row = screen.getByTestId('provider-account-row');
+    expect(within(row).getByText('Image')).toBeInTheDocument();
+    expect(within(row).getAllByText('Video')).toHaveLength(2);
+  });
+
   it('renders connected subscription accounts with usage, quota, and scheduling controls', () => {
     renderPage();
 
@@ -864,6 +899,50 @@ describe('providers page', () => {
     // The picker offers the row's effective models; the first is selected by default.
     expect(within(dialog).getByRole('option', { name: 'claude-opus-4-6' })).toBeInTheDocument();
     expect(within(dialog).getByRole('button', { name: /run test/i })).toBeInTheDocument();
+  });
+
+  it('keeps Grok media aliases out of the chat connectivity test', async () => {
+    renderPage({
+      providers: [
+        provider({
+          id: 'xai',
+          accounts: [
+            {
+              account: 'media',
+              expiresAt: null,
+              updatedAt: Date.now(),
+              healthy: true,
+              priority: 50,
+              schedulable: true,
+              proxy: null,
+              models: [
+                'grok-4.5',
+                'grok-imagine-image-quality',
+                'grok-imagine-video-1.5-preview',
+                'grok-imagine-video',
+              ],
+            },
+          ],
+        }),
+      ],
+      usage: [],
+      quota: [],
+    });
+
+    await fireEvent.click(
+      within(screen.getByTestId('provider-account-row')).getByRole('button', { name: /^test$/i }),
+    );
+    const dialog = screen.getByRole('dialog', { name: /test connection/i });
+    expect(within(dialog).getByRole('option', { name: 'grok-4.5' })).toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole('option', { name: 'grok-imagine-image-quality' }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole('option', { name: 'grok-imagine-video-1.5-preview' }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole('option', { name: 'grok-imagine-video' }),
+    ).not.toBeInTheDocument();
   });
 
   it('streams the test reply through the gateway and reports success', async () => {

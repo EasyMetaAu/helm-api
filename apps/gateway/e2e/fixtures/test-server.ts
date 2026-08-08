@@ -17,7 +17,8 @@ const DB_PATH = `${DATA_DIR}/helm.db`;
 rmSync(DATA_DIR, { recursive: true, force: true });
 mkdirSync(DATA_DIR, { recursive: true });
 
-const { createSqliteDb, SqliteKeyStore, SqliteTelemetryStore } = await import("@helm/core");
+const { createRuntimeMemoryCoordinator, createSqliteDb, SqliteKeyStore, SqliteTelemetryStore } =
+  await import("@helm/core");
 const seedDb = createSqliteDb(DB_PATH);
 const keyStore = new SqliteKeyStore(seedDb);
 await keyStore.createKey({
@@ -147,6 +148,11 @@ const configDir = `${DATA_DIR}/config`;
 cpSync(repoConfigDir, configDir, { recursive: true });
 const { app, port, host } = await buildServer({
   configDir,
+  // Keep the hermetic gateway independent of host-wide memory pressure. Runtime
+  // admission behavior has focused tests; media e2e should exercise routing.
+  memoryCoordinator: createRuntimeMemoryCoordinator({
+    capacityBytes: () => Number.MAX_SAFE_INTEGER,
+  }),
   resourcePressure: {
     shouldRun: async () => true,
     shouldRunHeavy: async () => false,

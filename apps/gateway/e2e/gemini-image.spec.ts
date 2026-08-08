@@ -55,24 +55,19 @@ test.describe("gemini image generation e2e", () => {
     expect(res.headers()["x-helm-lane"]).toBe("image");
   });
 
-  test("interactions fails over across an image LANE when the primary provider is down", async ({
+  test("interactions does not replay a paid image create when the lane primary fails", async ({
     request,
   }) => {
-    // The `gemini-image` lane (primary gemini-3.1-flash-image → fallback
-    // gemini-3-pro-image) on the Interactions endpoint: the sentinel fails the
-    // primary, so the chain serves the fallback — still a steps[] image, any key.
+    // The sentinel fails the `gemini-image` lane primary after it was contacted.
+    // Retrying the fallback could create and bill a duplicate image.
     const res = await request.post("/v1beta/interactions", {
       headers: GOOG,
       data: { model: "gemini-image", input: "__HELM_FAIL_IMAGE_PRIMARY__ a leaf" },
     });
-    expect(res.status()).toBe(200);
-    const body = (await res.json()) as {
-      steps: Array<{ content: Array<{ type: string; data?: string }> }>;
-    };
-    const img = body.steps[0]?.content.find((b) => b.type === "image");
-    expect((img?.data ?? "").length).toBeGreaterThan(0);
-    expect(res.headers()["x-helm-final-model"]).toBe("gemini-3-pro-image"); // fell over
-    expect(res.headers()["x-helm-lane"]).toBe("gemini-image");
+    expect(res.status()).toBe(503);
+    expect(await res.json()).toMatchObject({
+      error: { code: 503, status: "INTERNAL", message: "image create outcome is unknown" },
+    });
   });
 
   test("interactions rejects an OpenAI image model with 400 (→ /v1/images/generations)", async ({

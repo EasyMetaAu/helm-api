@@ -11,6 +11,10 @@ interface RegistryBlob {
   records: ResponsesRegistryRecord[];
 }
 
+export interface AtomicResponsesRegistryPort extends ResponsesRegistryPort {
+  putIfAbsent(record: ResponsesRegistryRecord): boolean | Promise<boolean>;
+}
+
 function isProtocol(value: unknown): value is ResponsesRegistryRecord["providerProtocol"] {
   return (
     value === null ||
@@ -75,7 +79,7 @@ export function createResponsesRegistry(
   store: ResponsesRegistryStore,
   legacyConfig?: ConfigStore,
   opts: { now?: () => number } = {},
-): ResponsesRegistryPort {
+): AtomicResponsesRegistryPort {
   const now = opts.now ?? (() => Date.now());
   const pending = new Map<string, ResponsesRegistryRecord>();
   let lastPrunedAt = now();
@@ -93,6 +97,9 @@ export function createResponsesRegistry(
   };
   const persist = async (record: ResponsesRegistryRecord) => {
     await store.upsert(record);
+    await pruneIfDue();
+  };
+  const pruneIfDue = async () => {
     const nowMs = now();
     if (nowMs - lastPrunedAt < REGISTRY_PRUNE_INTERVAL_MS) return;
     lastPrunedAt = nowMs;
@@ -111,6 +118,14 @@ export function createResponsesRegistry(
       } finally {
         if (pending.get(record.responseId) === record) pending.delete(record.responseId);
       }
+    },
+    async putIfAbsent(record) {
+      const inserted = await store.insertIfAbsent(record);
+      // The reservation is already durable at this point. Pruning is auxiliary
+      // maintenance and must not turn a successful paid media write into an
+      // ambiguous failure that invites a duplicate retry.
+      if (inserted) await pruneIfDue().catch(() => undefined);
+      return inserted;
     },
     async get(responseId: string, identity: MessagesIdentity) {
       const pendingRecord = pending.get(responseId);

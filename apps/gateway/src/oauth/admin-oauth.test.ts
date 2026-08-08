@@ -3,6 +3,7 @@ import {
   createSqliteDb,
   decryptSecret,
   encryptSecret,
+  GROK_OAUTH_MEDIA_MODELS,
   type ProxyConfig,
   SqliteConfigStore,
   SqliteOAuthTokenStore,
@@ -36,6 +37,7 @@ const XAI_STRUCTURED_MODEL: XaiOAuthModel = {
   reasoningEfforts: [{ id: "high", value: "high", label: "High" }],
   streamToolCalls: true,
 };
+const XAI_ADMIN_MODELS = [XAI_STRUCTURED_MODEL.id, ...GROK_OAUTH_MEDIA_MODELS];
 
 type XaiAccountSettings = AccountSettings & { xaiDiscoveredModels?: XaiOAuthModel[] };
 
@@ -870,7 +872,7 @@ describe("createOAuthAdmin", () => {
     const live = (await admin.listStatus({ forceRefresh: true })).providers
       .find((provider) => provider.id === "xai")
       ?.accounts.find((account) => account.account === "heavy");
-    expect(live?.models).toEqual(["display-grok"]);
+    expect(live?.models).toEqual(XAI_ADMIN_MODELS);
     expect(
       getAccountSettings(
         await loadAccountSettings(config, KEY),
@@ -885,7 +887,7 @@ describe("createOAuthAdmin", () => {
     const empty = (await admin.listStatus({ forceRefresh: true })).providers
       .find((provider) => provider.id === "xai")
       ?.accounts.find((account) => account.account === "heavy");
-    expect(empty?.models).toEqual([]);
+    expect(empty?.models).toEqual(GROK_OAUTH_MEDIA_MODELS);
     expect(
       getAccountSettings(
         await loadAccountSettings(config, KEY),
@@ -932,7 +934,7 @@ describe("createOAuthAdmin", () => {
       .find((provider) => provider.id === "xai")
       ?.accounts.find((candidate) => candidate.account === "heavy");
 
-    expect(account?.models).toEqual(["display-grok"]);
+    expect(account?.models).toEqual(XAI_ADMIN_MODELS);
     expect(account?.models).not.toContain("stale-generic-cache");
     expect(account?.models).not.toContain("stale-string-model");
     expect(account?.models).not.toContain("grok-4.5");
@@ -973,10 +975,69 @@ describe("createOAuthAdmin", () => {
       .find((provider) => provider.id === "xai")
       ?.accounts.find((candidate) => candidate.account === "heavy");
 
-    expect(account?.models).toEqual(["display-grok"]);
+    expect(account?.models).toEqual(XAI_ADMIN_MODELS);
     expect(account?.models).not.toContain("stale-string-model");
     expect(account?.models).not.toContain("stale-generic-cache");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("xAI admin status and model manager include the executable Grok media aliases", async () => {
+    const { tokens, config } = makeStores();
+    await tokens.upsert({
+      providerId: "xai",
+      account: "heavy",
+      accessEnc: encryptSecret("xai-access", KEY),
+      refreshEnc: encryptSecret("xai-refresh", KEY),
+      expiresAt: Date.now() + 3_600_000,
+      meta: JSON.stringify({ accountId: "xai-user-heavy", email: "heavy@example.test" }),
+      updatedAt: 1,
+    });
+    await setAccountSettings(config, KEY, "xai", "heavy", {
+      xaiDiscoveredModels: [XAI_STRUCTURED_MODEL],
+    } as XaiAccountSettings);
+    const fetchMock = vi.fn(async () =>
+      Response.json({
+        data: [
+          {
+            id: XAI_STRUCTURED_MODEL.id,
+            model: XAI_STRUCTURED_MODEL.model,
+            api_backend: XAI_STRUCTURED_MODEL.apiBackend,
+            context_window: XAI_STRUCTURED_MODEL.contextWindow,
+            max_completion_tokens: XAI_STRUCTURED_MODEL.maxCompletionTokens,
+            supports_reasoning_effort: true,
+            reasoning_effort: "high",
+            reasoning_efforts: [{ id: "high", value: "high", label: "High" }],
+            stream_tool_calls: true,
+          },
+        ],
+      }),
+    );
+    const admin = createOAuthAdmin({
+      store: tokens,
+      encKey: KEY,
+      config,
+      makeFetch: () => fetchMock as typeof fetch,
+    });
+
+    const account = (await admin.listCachedStatus()).providers
+      .find((provider) => provider.id === "xai")
+      ?.accounts.find((candidate) => candidate.account === "heavy");
+    const modelManager = await admin.listModels({ providerId: "xai", account: "heavy" });
+    expect(account?.models).toEqual(XAI_ADMIN_MODELS);
+    expect(modelManager.available).toEqual(XAI_ADMIN_MODELS);
+    expect(modelManager.enabled).toEqual(XAI_ADMIN_MODELS);
+    expect(new Set(modelManager.available).size).toBe(modelManager.available.length);
+
+    await admin.setEnabledModels({
+      providerId: "xai",
+      account: "heavy",
+      mode: "manual",
+      models: [XAI_STRUCTURED_MODEL.id, GROK_OAUTH_MEDIA_MODELS[0]],
+    });
+    expect((await admin.listModels({ providerId: "xai", account: "heavy" })).enabled).toEqual([
+      XAI_STRUCTURED_MODEL.id,
+      GROK_OAUTH_MEDIA_MODELS[0],
+    ]);
   });
 
   it("does not persist an old discovery result after its credential cache generation is invalidated", async () => {

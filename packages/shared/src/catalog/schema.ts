@@ -85,6 +85,10 @@ export const CapabilitiesSchema = z.object({
   // its provider via native passthrough (preserving responseModalities → inlineData)
   // instead of being swallowed by a `gemini-*flash*` glob onto a text lane.
   outputImage: z.boolean().optional(),
+  // VIDEO-GENERATION model: asynchronously creates a video asset. This is
+  // distinct from `modalities:["video"]`, which only describes video INPUT.
+  // Absent means false so video routes fail closed for every existing model card.
+  outputVideo: z.boolean().optional(),
   reasoningEffort: ReasoningEffortCapabilitySchema.optional(),
   maxContextTokens: z.number().int().nonnegative(),
   maxOutputTokens: z.number().int().nonnegative().nullable(),

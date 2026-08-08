@@ -49,6 +49,7 @@ import {
   filterRetiredOpenAICodexLimits,
   type GeminiGenerateContentResponse,
   type GeneratedKey,
+  GROK_OAUTH_MEDIA_MODELS,
   geminiTransformer,
   generateKey,
   getGitHubCopilotBaseUrl,
@@ -227,6 +228,7 @@ import {
   registerResponsesRoute,
 } from "./routes/responses.js";
 import { registerUsageStatsRoute } from "./routes/usage.js";
+import { registerVideosRoute, type VideoCreateTarget } from "./routes/videos.js";
 import {
   createMaintenanceActivityGate,
   createSerializedMaintenanceQueue,
@@ -1063,9 +1065,16 @@ export async function synthesizeOAuthProviders(
         const routable = catalog.filter(isRoutableXaiOAuthModel);
         const enabled = modelsMode === "manual" ? new Set(s.enabledModels ?? []) : undefined;
         const selected = enabled ? routable.filter((model) => enabled.has(model.id)) : routable;
+        const selectedMedia = enabled
+          ? GROK_OAUTH_MEDIA_MODELS.filter((model) => enabled.has(model))
+          : GROK_OAUTH_MEDIA_MODELS;
         discovered = selected.map((model) => model.id);
         discoveredWireModels = new Map(selected.map((model) => [model.id, model.model]));
         discoveredXaiModels = new Map(selected.map((model) => [model.id, model]));
+        for (const model of selectedMedia) {
+          if (!discovered.includes(model)) discovered.push(model);
+          discoveredWireModels.set(model, model);
+        }
         accountXaiRuntime = {
           modelsByWireModel: new Map(selected.map((model) => [model.model, model])),
         };
@@ -1678,7 +1687,7 @@ function createProviderClient(
   ) {
     const isXaiOAuth =
       p.oauth !== undefined && isOAuthPreset(p.oauth) && p.oauth.provider === "xai";
-    return createGenericOpenAIResponsesClient({
+    const responsesClient = createGenericOpenAIResponsesClient({
       config: { ...base, ...cred },
       ...(isXaiOAuth
         ? {
@@ -1714,6 +1723,18 @@ function createProviderClient(
         : {}),
       fetch: providerFetch,
     });
+    if (!isXaiOAuth) return responsesClient;
+    const mediaClient = createOpenAIClient({
+      config: { ...base, baseUrl: "https://api.x.ai/v1", ...cred },
+      fetch: providerFetch,
+    });
+    return {
+      ...responsesClient,
+      imageGeneration: mediaClient.imageGeneration,
+      imageEdit: mediaClient.imageEdit,
+      videoGeneration: mediaClient.videoGeneration,
+      videoRetrieve: mediaClient.videoRetrieve,
+    };
   }
   if (p.type === "gemini") {
     return createGeminiClient({
@@ -1839,6 +1860,7 @@ export async function buildServer(
   opts: {
     logger?: Logger;
     configDir?: string;
+    memoryCoordinator?: ReturnType<typeof runtimeMemoryCoordinator>;
     resourcePressure?: Pick<
       ReturnType<typeof createRuntimeResourcePressureGate>,
       "shouldRun" | "shouldRunHeavy"
@@ -1850,7 +1872,7 @@ export async function buildServer(
   const memoryBudget = runtimeMemoryBudget();
   const maintenanceActivityGate = createMaintenanceActivityGate();
   const backgroundTasks = createTrackedBackgroundTasks();
-  const memoryCoordinator = runtimeMemoryCoordinator();
+  const memoryCoordinator = opts.memoryCoordinator ?? runtimeMemoryCoordinator();
   const requestBodyMemoryAdmission = createBodyMemoryAdmission({
     activeRequestBytes: memoryBudget.activeRequestBytes,
     jsonAmplification: memoryBudget.jsonAmplification,
@@ -3808,10 +3830,7 @@ export async function buildServer(
     }
     return null;
   };
-  const responsesRegistry: ResponsesRouteDeps["registry"] = createResponsesRegistry(
-    store.responsesRegistry,
-    store.config,
-  );
+  const responsesRegistry = createResponsesRegistry(store.responsesRegistry, store.config);
   const responsesLifecycleUnsupported = (operation: string): HelmHttpError =>
     new HelmHttpError(
       makeHelmError({
@@ -4105,6 +4124,20 @@ export async function buildServer(
   // the OpenAI Images API. Only catalog `capabilities.outputImage` models qualify (a
   // TEXT gemini alias that merely has nativePassthrough is NOT an image model → null).
   const resolveImageTarget = (model: string): ImageChainTarget | { kind: "unavailable" } | null => {
+    const slash = model.indexOf("/");
+    const prefix = slash > 0 ? model.slice(0, slash) : "";
+    if (prefix && ROUTABLE_OAUTH_IDS.has(prefix)) {
+      if (!oauthAliasSet.has(model)) return null;
+      if (catalog.get(model)?.capabilities.outputImage !== true) return null;
+      const client = providerClients.get(prefix);
+      if (!client?.imageGeneration) return { kind: "unavailable" };
+      return {
+        client,
+        providerModel: oauthWireModelMap.get(model) ?? model.slice(slash + 1),
+        alias: model,
+        kind: "openai",
+      };
+    }
     const r = registry.resolve(model);
     if (!r.ok) return null; // unknown alias → 404
     if (catalog.get(r.value.alias)?.capabilities.outputImage !== true) return null;
@@ -4123,12 +4156,13 @@ export async function buildServer(
     return { client, providerModel: r.value.providerModel, alias: r.value.alias, kind };
   };
 
-  // Resolve a client id (bare image model OR image LANE) → the ordered provider chain.
+  // Resolve a client id (bare image model OR image LANE) → ordered local candidates.
   // A lane expands via expandLaneChain (the SAME flattener routing uses); each member
   // resolves through resolveImageTarget, with non-image / wrong-credential members
-  // DROPPED (fallback semantics — the chain tries the next provider). All-unavailable
+  // DROPPED before execution. Breaker-open candidates may also be skipped locally;
+  // after any paid provider call begins, image-chain never advances. All-unavailable
   // → 503; nothing resolvable → 404. Shared by both model-pinned image routes; this is
-  // what makes image gen fail over across providers like a text lane (any key).
+  // keeps the existing 503/404 distinction without permitting paid POST replay.
   const resolveImageChain: ResolveImageChain = (model) => {
     const isLane = Object.hasOwn(lanes, model);
     const aliases = isLane ? expandLaneChain(model, lanes) : [model];
@@ -4160,6 +4194,12 @@ export async function buildServer(
     resolveImageChain,
     breaker,
     costOf: (alias, body) => resolveCostUsd(catalog.get(alias)?.pricing, body),
+    isPriced: (alias) => {
+      const pricing = catalog.get(alias)?.pricing;
+      return pricing?.inputPerMTokUsd != null || pricing?.outputPerMTokUsd != null;
+    },
+    captureServingAccount: withServingAccountCapture,
+    recordOAuthUsage,
     // Per-key usage-budget enforcement — the SAME gate + settle the chat face uses, so
     // image spend is capped (reject) and counted (settle) like every other request.
     budgetGate,
@@ -4172,6 +4212,80 @@ export async function buildServer(
       capturePayloads: () => settings.capture_payloads,
       captureSessions: () => settings.capture_sessions,
       captureGeneration: () => captureGeneration,
+    },
+  });
+
+  const resolveVideoTarget = (model: string): VideoCreateTarget | null => {
+    const aliases = Object.hasOwn(lanes, model) ? expandLaneChain(model, lanes) : [model];
+    for (const alias of aliases) {
+      const slash = alias.indexOf("/");
+      const prefix = slash > 0 ? alias.slice(0, slash) : "";
+      // Grok Imagine is deliberately subscription-only. Static API-key or generic
+      // outputVideo providers must not become an implicit second credential path.
+      if (prefix !== "xai" || !oauthAliasSet.has(alias)) continue;
+      const providerAlias = alias;
+      const providerName = prefix;
+      const providerModel = oauthWireModelMap.get(alias) ?? alias.slice(slash + 1);
+      if (catalog.get(providerAlias)?.capabilities.outputVideo !== true) continue;
+      const client = providerClients.get(providerName);
+      if (!client?.videoGeneration) continue;
+      const target: VideoCreateTarget = {
+        providerAlias,
+        providerName,
+        providerModel,
+        providerAccount: null,
+        client: {
+          create: async (body, signal, onAccountSelected) => {
+            const call = await withServingAccountCapture(
+              () =>
+                client.videoGeneration?.(body, { signal, onAccountSelected }) ??
+                Promise.reject(new Error("video generation unavailable")),
+            );
+            if (call.servingAccount?.providerId === providerName) {
+              target.providerAccount = call.servingAccount.account;
+            }
+            return call.result;
+          },
+        },
+      };
+      return target;
+    }
+    return null;
+  };
+
+  registerVideosRoute(app, {
+    auth: { resolve: resolveIdentity },
+    registry: responsesRegistry,
+    rateLimiter,
+    concurrencyGate,
+    memoryAdmission: requestBodyMemoryAdmission,
+    budgetGate,
+    settleBudget: settleKeyBudget,
+    record: {
+      telemetry,
+      writes: writeQueue,
+      redact: (payload) => redact(payload),
+      now: () => Date.now(),
+      capturePayloads: () => settings.capture_payloads,
+      captureSessions: () => settings.capture_sessions,
+      captureGeneration: () => captureGeneration,
+    },
+    log: (event, fields) => logger.log("info", event, fields),
+    resolver: {
+      create: async (body) =>
+        typeof body.model === "string" ? resolveVideoTarget(body.model) : null,
+      poll: async (record) => {
+        if (!record.providerName) return null;
+        const client = providerClients.get(record.providerName);
+        if (!client?.videoRetrieve) return null;
+        return {
+          retrieve: (requestId, signal) =>
+            client.videoRetrieve?.(requestId, {
+              signal,
+              ...(record.providerAccount ? { providerAccount: record.providerAccount } : {}),
+            }) ?? Promise.reject(new Error("video retrieval unavailable")),
+        };
+      },
     },
   });
 

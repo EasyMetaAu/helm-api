@@ -4255,6 +4255,55 @@ describe("createExecute — gateway execution adapter", () => {
     expect(out.attempts.every((a) => a.skipped)).toBe(true);
   });
 
+  it.each([
+    ["image", { outputImage: true }],
+    ["video", { outputVideo: true }],
+  ] as const)("rejects an xAI media-only %s model on conversational protocols", async (_kind, caps) => {
+    const provider = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ "xai/media": "media-wire" }),
+      breaker: breaker(),
+      catalog: new Map([["xai/media", entry("xai/media", caps)]]),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["xai/media"]), req());
+
+    expect(out.final.status).toBe("error");
+    if (out.final.status === "error") {
+      expect(out.final.error.error_class).toBe("capability_unsatisfiable");
+    }
+    expect(out.attempts[0]?.skip_reason).toBe("media_endpoint_required");
+    expect(provider.chatCompletion).not.toHaveBeenCalled();
+  });
+
+  it("preserves native conversational image output for non-xAI models", async () => {
+    const provider = {
+      chatCompletion: vi.fn().mockResolvedValue({ id: "gemini-image-ok" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: registry({ "gemini/image": "gemini-image-wire" }),
+      breaker: breaker(),
+      catalog: new Map([["gemini/image", entry("gemini/image", { outputImage: true })]]),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["gemini/image"]), req());
+
+    expect(out.final.status).toBe("ok");
+    expect(provider.chatCompletion).toHaveBeenCalledOnce();
+  });
+
   it("does NOT over-prune a model with no catalog entry (unknown → fail-open)", async () => {
     const provider = {
       chatCompletion: vi.fn().mockResolvedValue({ id: "unknown-ok" }),

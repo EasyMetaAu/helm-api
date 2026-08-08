@@ -212,6 +212,25 @@ describe("effectiveOAuthAliases", () => {
 });
 
 describe("effectiveOAuthModelOptions", () => {
+  it("projects verified xAI media aliases only from the synthesized runtime pool", async () => {
+    const { tokens, config } = makeStores();
+    await bind(tokens, "xai", "supergrok-a");
+
+    await expect(
+      effectiveOAuthModelOptions({ store: tokens, encKey: KEY }, config, ROUTABLE, {
+        xaiRuntimeModelOptions: () => [
+          { alias: "xai/grok-imagine-image-quality", accounts: ["supergrok-a"] },
+          { alias: "xai/grok-imagine-video-1.5-preview", accounts: ["supergrok-a"] },
+          { alias: "xai/grok-imagine-video", accounts: ["supergrok-a"] },
+        ],
+      }),
+    ).resolves.toEqual([
+      { alias: "xai/grok-imagine-image-quality", accounts: ["supergrok-a"] },
+      { alias: "xai/grok-imagine-video", accounts: ["supergrok-a"] },
+      { alias: "xai/grok-imagine-video-1.5-preview", accounts: ["supergrok-a"] },
+    ]);
+  });
+
   it.each([
     ["anthropic", "claude-fable-5"],
     ["github-copilot", "gpt-5.99-copilot"],

@@ -38,11 +38,10 @@ import {
 
 // POST /v1/images/generations — OpenAI Images API (the gpt-image-* / DALL·E surface).
 // A model-pinned endpoint distinct from the chat/messages/responses/gemini pipeline,
-// but it DOES fall over across providers: the requested id may be a bare image model
-// (a one-element chain) or an image LANE (one target per provider alias), and the
-// route runs the resolved chain through runImageChain — same circuit-breaker +
-// terminal/fallback rules as the chat executor, specialized to a single non-stream
-// image call. PURE HTTP glue (principle 1): the upstream call + cost live in core.
+// where the requested id may be a bare image model or an image lane. Local gates may
+// remove unavailable candidates before execution, but a paid create is never replayed
+// through another provider after one call starts. PURE HTTP glue (principle 1): the
+// upstream wire call stays in core.
 
 export interface ImagesRouteDeps {
   rateLimiter?: GeminiRateLimiterPort;
@@ -60,6 +59,16 @@ export interface ImagesRouteDeps {
   breaker: CircuitBreaker;
   /** Price the served upstream body at the SERVED alias's catalog pricing (resolveCostUsd). */
   costOf(alias: string, body: unknown): number | null;
+  isPriced?(alias: string): boolean;
+  captureServingAccount?<T>(call: () => Promise<T>): Promise<{
+    result: T;
+    servingAccount: { providerId: string; account: string } | null;
+  }>;
+  recordOAuthUsage?(
+    servingAccount: { providerId: string; account: string } | null,
+    servedAlias: string | null,
+    usage: { tokens: number; costUsd: number | null },
+  ): void;
   /** Per-key usage-budget gate + settle (docs/06) — the SAME instances the chat face
    *  uses. Omitted = no budget enforcement (test doubles). */
   budgetGate?: { check(probe: BudgetProbe): Promise<BudgetCheckResult> };
@@ -345,10 +354,25 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         "model_blocked",
       );
     }
+    const spendCapped = (identity.caps?.budget?.spendUsd ?? 0) > 0;
+    const pricedTargets =
+      spendCapped && deps.isPriced
+        ? permittedTargets.filter((target) => deps.isPriced?.(target.alias) === true)
+        : permittedTargets;
+    if (spendCapped && pricedTargets.length === 0) {
+      return errorJson(
+        c,
+        422,
+        "invalid_request_error",
+        "image pricing is unavailable for this spend-capped key",
+        "media_pricing_unavailable",
+      );
+    }
+    const pricedAliases = new Set(pricedTargets.map((target) => target.alias));
     const permittedChain = {
       ...chain,
-      candidateChain: permittedCandidateChain,
-      targets: permittedTargets,
+      candidateChain: permittedCandidateChain.filter((alias) => pricedAliases.has(alias)),
+      targets: pricedTargets,
     };
 
     // 5b) Per-key usage-budget gate (docs/06), mirroring the chat face — ONCE, before
@@ -366,53 +390,68 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
 
     // 6) Run the provider chain. Each attempt forwards verbatim (openai-kind) or
     //    translates to generateContent (gemini-kind), producing an OpenAI-Images body.
+    const attempted = {
+      servingAccount: null as { providerId: string; account: string } | null,
+    };
     const attempt: ImageAttempt = async (target: ImageChainTarget) => {
       let upstreamRequestJson: string | null = null;
       const captureUpstream = (b: string) => {
         upstreamRequestJson = b;
       };
-      let upstream: Record<string, unknown>;
-      if (editing) {
-        if (!editInput || !target.client.imageEdit) {
-          throw new Error("image edit provider is unavailable");
+      const onAccountSelected = (account: string) => {
+        const slash = target.alias.indexOf("/");
+        if (slash > 0)
+          attempted.servingAccount = { providerId: target.alias.slice(0, slash), account };
+      };
+      const invoke = async (): Promise<Record<string, unknown>> => {
+        if (editing) {
+          if (!editInput || !target.client.imageEdit) {
+            throw new Error("image edit provider is unavailable");
+          }
+          const providerInput: ImageEditInput =
+            editInput.kind === "json"
+              ? { kind: "json", body: { ...editInput.body, model: target.providerModel } }
+              : {
+                  kind: "multipart",
+                  fields: editInput.fields.map((field) =>
+                    field.name === "model" && typeof field.value === "string"
+                      ? { name: field.name, value: target.providerModel }
+                      : field,
+                  ),
+                };
+          return await target.client.imageEdit(providerInput, {
+            signal: requestSignal(c),
+            captureUpstream,
+            onAccountSelected,
+          });
         }
-        const providerInput: ImageEditInput =
-          editInput.kind === "json"
-            ? { kind: "json", body: { ...editInput.body, model: target.providerModel } }
-            : {
-                kind: "multipart",
-                fields: editInput.fields.map((field) =>
-                  field.name === "model" && typeof field.value === "string"
-                    ? { name: field.name, value: target.providerModel }
-                    : field,
-                ),
-              };
-        upstream = await target.client.imageEdit(providerInput, {
-          signal: requestSignal(c),
-          captureUpstream,
-        });
-      } else if (target.kind === "gemini") {
-        const native = await target.client.nativePassthrough?.(
-          {
-            model: target.providerModel,
-            contents: [{ role: "user", parts: [{ text: prompt }] }],
-            generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
-          },
-          { signal: requestSignal(c), captureUpstream },
-        );
-        upstream = mapGeminiToImages((native ?? {}) as Record<string, unknown>);
-      } else {
-        upstream = (await target.client.imageGeneration?.(
+        if (target.kind === "gemini") {
+          const native = await target.client.nativePassthrough?.(
+            {
+              model: target.providerModel,
+              contents: [{ role: "user", parts: [{ text: prompt }] }],
+              generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
+            },
+            { signal: requestSignal(c), captureUpstream, onAccountSelected },
+          );
+          return mapGeminiToImages((native ?? {}) as Record<string, unknown>);
+        }
+        return (await target.client.imageGeneration?.(
           { ...generationBody, model: target.providerModel },
-          { signal: requestSignal(c), captureUpstream },
+          { signal: requestSignal(c), captureUpstream, onAccountSelected },
         )) as Record<string, unknown>;
-      }
+      };
+      const captured = deps.captureServingAccount
+        ? await deps.captureServingAccount(invoke)
+        : { result: await invoke(), servingAccount: null };
+      const upstream = captured.result;
       const usage = (upstream as { usage?: Record<string, unknown> }).usage ?? null;
       return {
         clientBody: upstream,
         usage,
         cost: deps.costOf(target.alias, upstream),
         upstreamRequestJson,
+        servingAccount: captured.servingAccount ?? attempted.servingAccount,
       };
     };
 
@@ -439,6 +478,12 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
           finalErrorClass: outcome.errorClass,
           usage: null,
         });
+        decision.serving_account = attempted.servingAccount
+          ? {
+              provider_id: attempted.servingAccount.providerId,
+              account: attempted.servingAccount.account,
+            }
+          : null;
         await recordServed(
           captureRecord,
           {
@@ -459,7 +504,11 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         outcome.httpStatus as ContentfulStatusCode,
         outcome.errorClass === "invalid_request" ? "invalid_request_error" : "upstream_error",
         outcome.message,
-        outcome.errorClass === "invalid_request" ? "invalid_request" : null,
+        outcome.errorClass === "invalid_request"
+          ? "invalid_request"
+          : outcome.errorClass === "outcome_unknown"
+            ? "outcome_unknown"
+            : null,
       );
     }
 
@@ -478,6 +527,12 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         finalErrorClass: null,
         usage: result.usage,
       });
+      decision.serving_account = result.servingAccount
+        ? {
+            provider_id: result.servingAccount.providerId,
+            account: result.servingAccount.account,
+          }
+        : null;
       // Capture the FULL body — the store's externalizeImages (payload-blobs.ts)
       // content-addresses the base64 image into payload_blobs (deduped + retention-
       // pruned) and rehydrates it for the admin detail view. request_payloads keeps
@@ -501,10 +556,14 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
 
     // 7b) Settle the served usage against the per-key budget (docs/06) — ONCE, on the
     //     SERVED target's cost. Fail-open: a settle failure is logged, never 5xx's.
+    const tokens =
+      (numField(result.usage, "input_tokens", "prompt_tokens") ?? 0) +
+      (numField(result.usage, "output_tokens", "completion_tokens") ?? 0);
+    deps.recordOAuthUsage?.(result.servingAccount ?? null, served.alias, {
+      tokens,
+      costUsd: result.cost,
+    });
     if (deps.settleBudget !== undefined && identity.caps?.budget !== undefined) {
-      const tokens =
-        (numField(result.usage, "input_tokens", "prompt_tokens") ?? 0) +
-        (numField(result.usage, "output_tokens", "completion_tokens") ?? 0);
       try {
         await deps.settleBudget(
           identity.keyId,

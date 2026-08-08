@@ -8,6 +8,9 @@ import {
   ModelsListSchema,
   OpenAIChatRequestSchema,
   RealtimeSessionSchema,
+  VideoGenerationRequestSchema,
+  VideoGenerationResponseSchema,
+  VideoRetrieveResponseSchema,
 } from "@helm/shared";
 import { swaggerUI } from "@hono/swagger-ui";
 import type { Hono } from "hono";
@@ -123,6 +126,9 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
         InteractionsRequest: component(InteractionsRequestSchema),
         InteractionsResponse: component(InteractionsResponseSchema),
         RealtimeSession: component(RealtimeSessionSchema),
+        VideoGenerationRequest: component(VideoGenerationRequestSchema),
+        VideoGenerationResponse: component(VideoGenerationResponseSchema),
+        VideoRetrieveResponse: component(VideoRetrieveResponseSchema),
         UsageStats: {
           type: "object",
           properties: {
@@ -421,6 +427,69 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
             "401": errorResponse("Missing or invalid API key"),
             "404": errorResponse("Model is not a configured image model"),
             "503": errorResponse("Image provider unavailable (missing credential)"),
+          },
+        },
+      },
+      "/v1/videos/generations": {
+        post: {
+          tags: ["Inference"],
+          summary: "Start Grok Imagine video generation",
+          description:
+            "Starts one asynchronous, account-pinned SuperGrok OAuth video task. " +
+            "The paid create is attempted once and returns the upstream request_id.",
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/VideoGenerationRequest" },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Video task accepted.",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/VideoGenerationResponse" },
+                },
+              },
+            },
+            "400": errorResponse("Invalid video generation request"),
+            "401": errorResponse("Missing or invalid API key"),
+            "404": errorResponse("Model is not a configured video model"),
+            "503": errorResponse("Video provider unavailable or create outcome unknown"),
+          },
+        },
+      },
+      "/v1/videos/{requestId}": {
+        get: {
+          tags: ["Inference"],
+          summary: "Poll a Grok Imagine video task",
+          description:
+            "Polls the original SuperGrok OAuth account selected at creation. " +
+            "The same Helm account and API key must own the request id.",
+          security: [{ bearerAuth: [] }],
+          parameters: [
+            {
+              name: "requestId",
+              in: "path",
+              required: true,
+              schema: { type: "string", minLength: 1 },
+            },
+          ],
+          responses: {
+            "200": {
+              description: "Current upstream video status.",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/VideoRetrieveResponse" },
+                },
+              },
+            },
+            "401": errorResponse("Missing or invalid API key"),
+            "404": errorResponse("Video request not found for this key"),
+            "502": errorResponse("Video poll failed"),
           },
         },
       },

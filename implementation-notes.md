@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-08-08 · Grok Imagine 仅复用 SuperGrok OAuth 媒体链路（Grok media spec §2/6–10/13）
+
+- **凭证与上游边界**：客户端 `helm_live_*` 只做 Helm 鉴权；媒体执行复用后台已连接 xAI 订阅账号的 OAuth bearer。文本仍去 `cli-chat-proxy.grok.com/v1`，图片/视频固定去 `api.x.ai/v1`，不保留官方 `XAI_API_KEY` 分支。
+- **任务归属**：MVP 复用 `ResponsesRegistryStore`，以 `video-create:${helm_request_id}` 先占位、`video:${upstream_request_id}` 原子映射；poll 同时绑定 Helm account、原 key、provider 和 OAuth account。这个选择避免新建 `MediaTaskStore`，代价是 key 轮转后不能接管旧任务，长期历史/取消/reconcile UI 仍需未来独立任务模型。
+- **付费单写**：图片 generation/edit 与视频 start 一旦进入媒体执行就不重放 POST、不切 provider、不切 OAuth sibling；timeout、断线、无法确认的 5xx/成功响应及 registry 映射失败统一为 `outcome_unknown`。视频 poll 是固定原账号的只读 GET，可在同账号内刷新一次 401 bearer。
+- **预算与正文**：没有可信媒体价格时 `cost_usd:null`；带美元 spend cap 的 key 在 create 前以 `media_pricing_unavailable` fail-closed。data URL 进入既有 blob externalizer，捕获的 HTTP(S) URL 删除 query/fragment。
+- **后台模型投影**：xAI 文本 discovery 继续保持 fail-closed；Providers 账号卡片与“管理模型”接口在 auto 模式合并三个已验证媒体 alias，manual 模式严格服从账号 allowlist。媒体项不写入文本 discovery。现有“连通性测试”只验证流式聊天，因此 UI 排除媒体 alias，服务端也在上游调用前以 400 拒绝，不能借测试按钮隐式创建付费媒体任务。
+- **审查后收紧**：媒体 alias 在 auto 模式默认可用，但 manual 模式严格服从每个账号的 `enabledModels`；视频模型和单图/多参考图 schema 一一绑定，聊天协议在执行前拒绝 xAI `outputImage` 与所有 `outputVideo` 模型，同时保留 Gemini 等供应商通过原生聊天协议返回图片的既有能力。OAuth pool 在付费 POST 前回报所选账号，视频 reservation 先持久化账号，图片/视频的 `outcome_unknown` telemetry 也保留账号归因；原子媒体 reservation 复用 registry 的节流 prune，但 reservation 已成功后 prune 失败按辅助维护 fail-open，避免把成功的付费单写误报为 `outcome_unknown`；Providers 卡片优先展示媒体 badge。
+- **刻意延后**：ZDR `output.upload_url` 在 request/upstream/response/error 四类正文都完成预签名 query 脱敏前由严格 schema 拒绝；本机 SuperGrok 图片/视频真实 canary 已通过，staging canary、GitHub Docker CI 与生产单副本观察仍是发布 No-Go 门禁。
+
 ## 2026-08-07 · 真上游上下文溢出短路直返 400，不再 fall back（Gateway / execution chain，docs/03/04/07，原则 3/5）
 
 - **现场（box 12a22879）**：客户端请求 `claude-opus-5`（anthropic passthrough），链上 anthropic/opus-4-8 与 sonnet-5 都真上游 400 `prompt is too long: N > 1000000`，被当作 `context_too_small` skip，一路 fall back 到 `openrouter/deepseek-v4-pro`（更大窗口）**成功返回 200**。客户端拿到成功响应→永不触发 context compaction→下一轮请求只会更长。透传场景尤其致命：Claude Code / Codex 靠收到 4xx 才压缩。
@@ -90,19 +100,6 @@
 - **已知限制（Grok 次要发现，本 PR 不修）**：`custom_tool_call.input` 是 free-form 文本（apply_patch 的 patch / shell 命令），fold 进 IR `function.arguments` 后，Anthropic 侧 `JSON.parse` 失败会回退成 `{}`——历史轮 tool call 的**参数**在跨协议翻译时降级为空对象。这是既有 fold 语义（本 PR 只是让该路径可达），影响历史工具调用的参数保真度，不影响 Claude 理解“上一轮做过什么”（结果在 tool_output 里）与调用新工具。修它需改 IR tool-call arguments 的 non-JSON 承载语义、波及所有 provider，超出本 PR 范围，留作 follow-up。
 - **数据完整性论证（回应“服务端数据取不回”质疑）**：原跳过的理由是“Responses body 不完整、部分数据只在服务端”。代码+OpenAI 文档双证：真正“历史在服务端”的机制只有 `previous_response_id`，该 guard **原封不动保留**（`protocolGuardSkipReason` 在收窄的 items 检查之前先 return，换 provider 续接另有 `_provider_mismatch`）。Codex 恒发 `store:false`，语义是服务端无状态、客户端每轮重发完整历史——`sanitizeStoreFalseInputItems` 主动删每个 item 的 `id` 死引用，正证明 `input[]` 自包含、正文全在 body（`custom_tool_call.input` / `function_call.arguments` 皆 inline `z.string()`）。翻译丢弃的 `reasoning.encrypted_content` 是 OpenAI 私有的**加密推理 token 缓存（跨轮 reasoning 连续性优化），不是对话内容**——对话由 message/tool item 承载并完整保留，且任何非-OpenAI provider 本就无法消费该加密串。故“可折叠 ⇒ 自包含 ⇒ 可翻译”成立，放行范围无需再收窄。
 
-## 2026-08-03 · 受限容器不再重复套用宿主机固定内存预留（Gateway runtime，docs/02/05/10，原则 3/7/8）
-
-- **现场根因**：1.5 GiB cgroup 当时仍有约 457.96 MiB 可用内存，但动态准入先扣除面向非受限宿主机的 384 MiB 固定预留，再只使用剩余量的 70%，把安全工作容量压到约 51.78 MiB；一个 25.64 MiB Responses 请求按 6 倍 JSON 放大计为约 153.86 MiB，即使共享协调器没有任何活动 lease 也会稳定返回 503。
-- **最小修复**：受 cgroup 约束时只按容器总量的 5%（最多 1 GiB）保留 native headroom；未受约束进程继续使用原有 384 MiB 下限。V8 128 MiB emergency reserve、70% utilization、HTTP/WebSocket/response-work 共享协调器和 maintenance drain 均保持不变。事故快照下容量变为约 266.81 MiB，单请求可通过，而两个同体积并发请求仍超过共享容量。
-- **e2e 边界**：Playwright gateway 注入确定性压力门，普通后台观察始终允许，重型维护始终禁止，避免 hosted runner 的瞬时 PSI 暂停 60 秒 Memory worker。生产入口不注入，继续读取真实 cgroup、可用内存与 PSI；request、WebSocket 与 response work 仍共享同一个全局 coordinator。
-- **边界**：不恢复固定 HTTP/WebSocket/Session 大小上限，不为空闲协调器增加超额旁路，也不以扩大容器替代算法修复。有限进程仍可能对真正超过实时安全 headroom 的请求返回结构化过载错误。
-
-## 2026-08-03 · 多候选上下文溢出优先恢复客户端压缩信号（Provider execution / protocol errors，docs/04/05/07，原则 3/5/8）
-
-- **终态优先级**：单个候选的上下文溢出若混有真实 provider failure，仍返回 `all_providers_failed / 502`；同一链中至少两个不同 provider/model 通过精确 `count_tokens` 或结构化 `context_length_exceeded` 分别确认溢出时，即使夹有其他候选故障，也返回 `invalid_request / 400` 并保留上游消息，让 Claude/Codex 客户端进入既有自动压缩路径。
-- **流式诊断保真**：首输出前的原生 Responses SSE 错误现在只把 `type/code/message/param` 与嵌套 error envelope 放入 `UpstreamError.providerRaw`，并读取 top-level `message`；既保留 fallback 分类依据，又不让 `response.failed.response` 中的 instructions、tools、metadata 或 output 进入常规 telemetry。
-- **保守边界**：近似字符/token 估算和自由文本错误仍可用于“整链只有上下文/能力 skip”的既有 400，但不能压过真实 5xx/422；没有增加请求、Session 或上下文固定上限。top-level `error` 的 exact-once 终态统一和 CRLF SSE framing 属于独立协议问题，本次不扩大修改面。
-
 ## 历史条目摘要（最新要点）
 
 - **2026-08-02 · Responses WebSocket 首输出前恢复并提前释放物化准入**：上游 WebSocket 只产生 created/in_progress 后关闭时丢弃未提交 preamble 并按连接重试预算重连、耗尽回退 HTTP/SSE，最多缓冲两个 preamble、第三个重复立即提交为已开始输出，真实输出绝不重放，`response.cancelled` 两处均为失败终态；bridge 用进程内 `WeakMap<Request,callback>` 把 request-body lease 交给可信内部路由、随机 proof 匹配后第二次 parse 完即标物化，避免长期持有 6 倍预留，并发大请求仍受动态 headroom 保护，未恢复任何固定大小上限，完整原文经 git history 回溯。
@@ -180,6 +177,8 @@
 - **2026-07-05 · OAuth 凭证失效持久化为 needs reconnect（OAuth provider pool / Admin providers，docs/04/11，原则 3/5/7）**：refresh/持久 upstream 400/401/403 标记 credential failure、写入账号设置并摘出调度，reconnect 成功后按手动/自动停车边界恢复。
 
 ## 更早历史总览
+
+2026-08-03 压缩条目包括受限容器按 cgroup 比例保留内存、Playwright 注入确定性压力门，以及多候选上下文溢出在链耗尽时恢复客户端 400 压缩信号；后续短路语义以顶部 2026-08-07 条目为准。
 
 2026-07-07–09 压缩条目包括 self-service portal 完整实现与多语言、视觉压缩后的 cache-control 收敛和 Anthropic 兼容路径 CCH 稳定化。
 

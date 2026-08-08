@@ -20,6 +20,11 @@ function fakeRegistryStore(): ResponsesRegistryStore {
     async upsert(value) {
       records.set(value.responseId, value);
     },
+    async insertIfAbsent(value) {
+      if (records.has(value.responseId)) return false;
+      records.set(value.responseId, value);
+      return true;
+    },
     async prune({ nowMs, maxEntries }) {
       for (const [id, item] of records) {
         if (item.expiresAt <= nowMs || item.status === "deleted") records.delete(id);
@@ -61,6 +66,29 @@ function record(over: Partial<ResponsesRegistryRecord> = {}): ResponsesRegistryR
 }
 
 describe("createResponsesRegistry", () => {
+  it("atomically reserves a registry id without overwriting its original owner", async () => {
+    const registry = createResponsesRegistry(fakeRegistryStore(), undefined, { now: () => 1000 });
+    const first = record({ responseId: "video-create:req_1", providerAccount: "oauth-a" });
+
+    expect(
+      await (
+        registry as typeof registry & {
+          putIfAbsent(record: ResponsesRegistryRecord): Promise<boolean>;
+        }
+      ).putIfAbsent(first),
+    ).toBe(true);
+    expect(
+      await (
+        registry as typeof registry & {
+          putIfAbsent(record: ResponsesRegistryRecord): Promise<boolean>;
+        }
+      ).putIfAbsent(record({ responseId: "video-create:req_1", providerAccount: "oauth-b" })),
+    ).toBe(false);
+    await expect(registry.get("video-create:req_1", identity)).resolves.toMatchObject({
+      providerAccount: "oauth-a",
+    });
+  });
+
   it("persists response ids across fresh registry instances", async () => {
     const store = fakeRegistryStore();
     await createResponsesRegistry(store, undefined, { now: () => 1000 }).put(record());
@@ -126,6 +154,48 @@ describe("createResponsesRegistry", () => {
     expect(prune).toHaveBeenCalledWith({ nowMs: now, maxEntries: 10_000, limit: 1_000 });
   });
 
+  it("applies the same bounded prune cadence to atomic media reservations", async () => {
+    let now = 1_000;
+    const insertIfAbsent = vi.fn(async () => true);
+    const prune = vi.fn(async () => {});
+    const store = {
+      insertIfAbsent,
+      prune,
+      upsert: async () => {},
+      getOwnedLive: async () => null,
+    } as unknown as ResponsesRegistryStore;
+    const registry = createResponsesRegistry(store, undefined, { now: () => now });
+
+    await registry.putIfAbsent(record({ responseId: "video-create:req_1" }));
+    expect(prune).not.toHaveBeenCalled();
+
+    now += 5 * 60_000;
+    await registry.putIfAbsent(record({ responseId: "video:req_1" }));
+    expect(prune).toHaveBeenCalledOnce();
+    expect(prune).toHaveBeenCalledWith({ nowMs: now, maxEntries: 10_000, limit: 1_000 });
+  });
+
+  it("keeps a successful atomic reservation when best-effort pruning fails", async () => {
+    let now = 1_000;
+    const insertIfAbsent = vi.fn(async () => true);
+    const prune = vi.fn(async () => {
+      throw new Error("prune unavailable");
+    });
+    const store = {
+      insertIfAbsent,
+      prune,
+      upsert: async () => {},
+      getOwnedLive: async () => null,
+    } as unknown as ResponsesRegistryStore;
+    const registry = createResponsesRegistry(store, undefined, { now: () => now });
+
+    await registry.putIfAbsent(record({ responseId: "video-create:req_1" }));
+    now += 5 * 60_000;
+
+    await expect(registry.putIfAbsent(record({ responseId: "video:req_1" }))).resolves.toBe(true);
+    expect(prune).toHaveBeenCalledOnce();
+  });
+
   it("serves a continuation while its registry write is still pending", async () => {
     let release!: () => void;
     const persistence = new Promise<void>((resolve) => {
@@ -133,6 +203,7 @@ describe("createResponsesRegistry", () => {
     });
     const store: ResponsesRegistryStore = {
       upsert: async () => persistence,
+      insertIfAbsent: async () => false,
       prune: async () => {},
       getOwnedLive: async () => null,
     };

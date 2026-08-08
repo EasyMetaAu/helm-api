@@ -5,6 +5,7 @@ import {
   discoverOAuthModels,
   expandOpenAICodexModelAliases,
   filterRetiredOpenAICodexLimits,
+  GROK_OAUTH_MEDIA_MODELS,
   hasLiveModelDiscovery,
   listAnthropicModels,
   listOpenAICodexModels,
@@ -62,6 +63,15 @@ afterEach(() => {
 });
 
 describe("discoverOAuthModels", () => {
+  it("keeps the verified Grok Imagine media aliases in a separate exported allowlist", () => {
+    expect(GROK_OAUTH_MEDIA_MODELS).toEqual([
+      "grok-imagine-image-quality",
+      "grok-imagine-video-1.5-preview",
+      "grok-imagine-video",
+    ]);
+    expect(CURATED_OAUTH_MODELS.xai).toBeUndefined();
+  });
+
   it("returns the curated list for anthropic but no Codex entitlement without a token", async () => {
     expect(await discoverOAuthModels("anthropic", undefined)).toEqual(
       CURATED_OAUTH_MODELS.anthropic,

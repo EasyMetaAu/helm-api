@@ -545,6 +545,7 @@ export {
   discoverOAuthModels,
   expandOpenAICodexModelAliases,
   filterRetiredOpenAICodexLimits,
+  GROK_OAUTH_MEDIA_MODELS,
   getGitHubCopilotBaseUrl,
   getOAuthProvider,
   getOAuthProviders,
