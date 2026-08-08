@@ -293,12 +293,15 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
     const decision = await deps.telemetry.getByRequestId(traceId);
     const sessionRef = decision?.session?.ref;
     if (!sessionRef) return c.json({ captured: false, reason: "no_session" });
-    const listPage = deps.telemetry.listSessionRevisionsPage;
-    if (!listPage) return c.json({ captured: false, reason: "session_unavailable" });
+    // Streaming variant (NOT the all-or-nothing listSessionRevisionsPage the server-side
+    // rebuild uses): every page returns ≥1 row and always advances the cursor, so a large
+    // session pages through instead of dead-ending on an empty page.
+    const streamPage = deps.telemetry.streamSessionRevisionsPage;
+    if (!streamPage) return c.json({ captured: false, reason: "session_unavailable" });
     const afterRaw = c.req.query("after");
     const afterSequence =
       afterRaw !== undefined && /^\d+$/.test(afterRaw) ? Number(afterRaw) : undefined;
-    const page = await listPage.call(deps.telemetry, sessionRef, {
+    const page = await streamPage.call(deps.telemetry, sessionRef, {
       afterSequence,
       limit: SESSION_REVISION_PAGE_LIMIT,
       maxBytes: SESSION_REVISION_PAGE_MAX_BYTES,
@@ -323,11 +326,11 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
   });
 }
 
-// One raw-revision page: bounded so a single request never materializes an unbounded
-// chain, but large enough that most transcripts page in a few round-trips. The client
-// drives the cursor, so this is a per-page cap, not a whole-transcript budget.
-const SESSION_REVISION_PAGE_LIMIT = 100;
-const SESSION_REVISION_PAGE_MAX_BYTES = 4 * 1024 * 1024;
+// One raw-revision page: `limit` caps rows/page, `maxBytes` is a SOFT ceiling (a single
+// oversized row still returns, so a large session never dead-ends). The client drives
+// the cursor across pages, so these are per-page bounds, not a whole-transcript budget.
+const SESSION_REVISION_PAGE_LIMIT = 50;
+const SESSION_REVISION_PAGE_MAX_BYTES = 8 * 1024 * 1024;
 
 async function getSessionRequest(
   deps: AdminApiDeps,

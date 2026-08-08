@@ -613,6 +613,17 @@ export interface TelemetryStore {
     sessionRef: string,
     options: SessionRevisionPageOptions,
   ): Promise<SessionRevisionPage>;
+  // Like listSessionRevisionsPage but for CLIENT-SIDE reconstruction: the caller
+  // accumulates raw rows across pages and rebuilds in the browser, so a single page
+  // need NOT be a complete chain. maxBytes is a SOFT ceiling — every page returns at
+  // least one row (even one larger than maxBytes; the client can hold it) and always
+  // advances the cursor. Contrast listSessionRevisionsPage, whose all-or-nothing page
+  // (empty + limited when the budget is exceeded) is correct for SERVER-side rebuild
+  // but dead-ends a streaming client on large sessions. `limited` is always false here.
+  streamSessionRevisionsPage?(
+    sessionRef: string,
+    options: SessionRevisionPageOptions,
+  ): Promise<SessionRevisionPage>;
   findSessionRequestIdByResponseId?(
     sessionRef: string,
     responseId: string,

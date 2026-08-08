@@ -34,6 +34,7 @@ import type {
   UpsertSessionRevisionInput,
 } from "../ports.js";
 import { PERSISTED_SESSION_MAX_REVISIONS } from "../ports.js";
+import { selectStreamingSessionRevisions } from "../session-page.js";
 import { likeContains } from "../sql-like.js";
 import { denormalizedDecisionCost } from "../telemetry-cost.js";
 import { runBatchedPrune, yieldToEventLoop } from "./batched-prune.js";
@@ -617,6 +618,51 @@ export class SqliteTelemetryStore implements TelemetryStore {
     return {
       revisions: revisions.map((row) => decodeSessionRevisionRow(row, chunks.get(row.requestId))),
       nextSequence: metadata.length > selected.length ? (selected.at(-1) ?? null) : null,
+      limited: false,
+    };
+  }
+
+  // Streaming variant for client-side rebuild: soft byte ceiling, always ≥1 row per
+  // page, cursor always advances. See the port doc for why this differs from the
+  // all-or-nothing listSessionRevisionsPage.
+  async streamSessionRevisionsPage(
+    sessionRef: string,
+    options: SessionRevisionPageOptions,
+  ): Promise<SessionRevisionPage> {
+    const limit = boundedSessionPageLimit(options);
+    const afterSequence = options.afterSequence ?? 0;
+    const metadata = this.db
+      .select({ sequence: sessionRevisions.sequence, bytes: sessionRevisionWireBytes })
+      .from(sessionRevisions)
+      .where(
+        and(
+          eq(sessionRevisions.sessionRef, sessionRef),
+          gt(sessionRevisions.sequence, afterSequence),
+        ),
+      )
+      .orderBy(asc(sessionRevisions.sequence))
+      .limit(limit + 1)
+      .all();
+    const selected = selectStreamingSessionRevisions(metadata, limit, options.maxBytes);
+    if (selected.length === 0) return { revisions: [], nextSequence: null, limited: false };
+    const revisions = this.db
+      .select()
+      .from(sessionRevisions)
+      .where(
+        and(
+          eq(sessionRevisions.sessionRef, sessionRef),
+          inArray(sessionRevisions.sequence, selected),
+        ),
+      )
+      .orderBy(asc(sessionRevisions.sequence))
+      .all();
+    const chunks = this.chunksByRevisions(revisions);
+    // More rows remain iff the store held any sequence beyond the last one we returned.
+    const lastSelected = selected.at(-1) ?? null;
+    const hasMore = metadata.some((row) => row.sequence > (lastSelected ?? 0));
+    return {
+      revisions: revisions.map((row) => decodeSessionRevisionRow(row, chunks.get(row.requestId))),
+      nextSequence: hasMore ? lastSelected : null,
       limited: false,
     };
   }
