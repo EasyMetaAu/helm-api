@@ -703,12 +703,14 @@ describe('requests detail page', () => {
       },
     });
 
-    // Not loaded up front — the button is present, no transcript body yet.
+    // Not loaded up front — the button is present, no request body yet.
     expect(rebuildSessionTranscript).not.toHaveBeenCalled();
-    expect(screen.queryByTestId('transcript-body')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('request-body')).not.toBeInTheDocument();
     await fireEvent.click(screen.getByTestId('load-transcript'));
 
-    expect(await screen.findByTestId('transcript-body')).toHaveTextContent(/"model": "auto"/);
+    // Rebuilt transcript renders through the SAME request-body JsonViewer as a
+    // captured/recovered request — no separate viewer.
+    expect(await screen.findByTestId('request-body')).toHaveTextContent(/"model": "auto"/);
     expect(rebuildSessionTranscript).toHaveBeenCalledWith('tr_big');
   });
 
