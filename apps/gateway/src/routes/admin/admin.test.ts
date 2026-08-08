@@ -2198,7 +2198,7 @@ describe("admin.api request payload", () => {
       listSessionRevisions: async () => {
         throw new Error("unbounded Session read must not be used");
       },
-      listSessionRevisionsPage: async (
+      streamSessionRevisionsPage: async (
         _sessionRef: string,
         options: { afterSequence?: number; limit: number; maxBytes: number },
       ) => {
@@ -2245,7 +2245,7 @@ describe("admin.api request payload", () => {
     const telemetry = {
       ...makeTelemetry([rec]),
       getPayload: async () => null,
-      listSessionRevisionsPage: async (
+      streamSessionRevisionsPage: async (
         _sessionRef: string,
         options: { afterSequence?: number; limit: number; maxBytes: number },
       ) => {
@@ -2275,7 +2275,7 @@ describe("admin.api request payload", () => {
     expect(await response.json()).toEqual({ captured: false, reason: "no_session" });
   });
 
-  it("reports session_unavailable when the store cannot page revisions", async () => {
+  it("reports session_unavailable when the store cannot stream revisions", async () => {
     const rec = {
       ...decision("req_child", "balanced"),
       session: { ref: "session-ref", source: "x-thread-id" as const },
@@ -2283,7 +2283,7 @@ describe("admin.api request payload", () => {
     const telemetry = {
       ...makeTelemetry([rec]),
       getPayload: async () => null,
-      listSessionRevisionsPage: undefined,
+      streamSessionRevisionsPage: undefined,
     } as unknown as TelemetryStore;
     const response = await buildApp(buildDeps({ telemetry })).request(
       "/admin/api/requests/req_child/session-revisions",

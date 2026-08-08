@@ -737,6 +737,97 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(limited).toEqual({ revisions: [], nextSequence: null, limited: true });
     });
 
+    it("streams raw revision pages that always progress (never all-or-nothing)", async () => {
+      ctx = await make();
+      const t = ctx.stores.telemetry;
+      if (!t.upsertSessionRevision || !("streamSessionRevisionsPage" in t))
+        throw new Error("streamSessionRevisionsPage required");
+      const stream = (
+        t as TelemetryStore & {
+          streamSessionRevisionsPage(
+            sessionRef: string,
+            options: { afterSequence?: number; limit: number; maxBytes: number },
+          ): Promise<{
+            revisions: Array<{ requestId: string; sequence: number; requestDeltaJson: string }>;
+            nextSequence: number | null;
+            limited: boolean;
+          }>;
+        }
+      ).streamSessionRevisionsPage.bind(t);
+      const base = {
+        sessionRef: "s_stream",
+        accountId: "acct_1",
+        apiKeyId: "key_1",
+        source: "codex" as const,
+        externalSessionId: "external-stream",
+      };
+      // Three revisions; row 1 carries a large body so its wire bytes dwarf maxBytes.
+      const bigDelta = `[${JSON.stringify("x".repeat(5000))}]`;
+      await t.upsertSessionRevision({
+        ...base,
+        requestId: "s1",
+        parentRequestId: null,
+        retainCount: 0,
+        requestDeltaJson: bigDelta,
+        requestEnvelopeJson: '{"model":"x"}',
+        responseId: null,
+        responseJson: null,
+        fidelity: "semantic",
+        createdAt: new Date(1000),
+      });
+      await t.upsertSessionRevision({
+        ...base,
+        requestId: "s2",
+        parentRequestId: "s1",
+        retainCount: 1,
+        requestDeltaJson: '["two"]',
+        requestEnvelopeJson: '{"model":"x"}',
+        responseId: null,
+        responseJson: null,
+        fidelity: "semantic",
+        createdAt: new Date(2000),
+      });
+      await t.upsertSessionRevision({
+        ...base,
+        requestId: "s3",
+        parentRequestId: "s2",
+        retainCount: 2,
+        requestDeltaJson: '["three"]',
+        requestEnvelopeJson: '{"model":"x"}',
+        responseId: null,
+        responseJson: null,
+        fidelity: "semantic",
+        createdAt: new Date(3000),
+      });
+
+      // A single row far exceeding maxBytes must STILL be returned (client can hold it),
+      // with a cursor to continue — the all-or-nothing dead end is exactly the bug.
+      const p1 = await stream("s_stream", { limit: 10, maxBytes: 1 });
+      expect(p1.revisions.map((r) => r.sequence)).toEqual([1]);
+      expect(p1.revisions[0]?.requestDeltaJson).toBe(bigDelta); // body reassembled
+      expect(p1.nextSequence).toBe(1);
+      expect(p1.limited).toBe(false);
+
+      // maxBytes is a soft ceiling: once at least one row is selected, the next row that
+      // would breach it stops the page WITHOUT dropping the already-selected rows.
+      const p2 = await stream("s_stream", { afterSequence: 1, limit: 10, maxBytes: 40 });
+      expect(p2.revisions.map((r) => r.sequence)).toEqual([2]);
+      expect(p2.nextSequence).toBe(2);
+
+      const p3 = await stream("s_stream", { afterSequence: 2, limit: 10, maxBytes: 40 });
+      expect(p3.revisions.map((r) => r.sequence)).toEqual([3]);
+      expect(p3.nextSequence).toBeNull();
+
+      // Walking the whole chain in one generous page reassembles every row in order.
+      const whole = await stream("s_stream", { limit: 100, maxBytes: 8 * 1024 * 1024 });
+      expect(whole.revisions.map((r) => r.sequence)).toEqual([1, 2, 3]);
+      expect(whole.nextSequence).toBeNull();
+
+      // Unknown session → empty, no cursor.
+      const empty = await stream("s_missing", { limit: 10, maxBytes: 1024 });
+      expect(empty).toEqual({ revisions: [], nextSequence: null, limited: false });
+    });
+
     it("atomically publishes one matching body generation for concurrent duplicate writes", async () => {
       ctx = await make();
       const t = ctx.stores.telemetry;
