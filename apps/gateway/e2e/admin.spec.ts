@@ -366,14 +366,16 @@ test.describe("admin request payload view", () => {
     await expect(page.getByTestId("payload-summary")).toContainText(
       /too large to rebuild on the server/i,
     );
-    // The server-side payload-part buttons stay absent; the client rebuild is offered,
-    // and nothing renders in the request-body viewer until the button is clicked.
+    // The server-side payload-part buttons and the normal request lenses stay absent
+    // until the rebuild button is clicked.
     await expect(page.getByTestId("load-conversation")).toHaveCount(0);
     await expect(page.getByTestId("load-request-body")).toHaveCount(0);
-    await expect(page.getByTestId("request-body")).toHaveCount(0);
+    await expect(page.getByTestId("request-view-raw")).toHaveCount(0);
 
     await page.getByTestId("load-transcript").click();
-    // Rebuilt transcript renders through the SAME request-body JsonViewer.
+    // After rebuild the whole Request section renders through the SAME captured-path
+    // lenses; switch to Raw and assert the standard request-body JsonViewer shows it.
+    await page.getByTestId("request-view-raw").click();
     await expect(page.getByTestId("request-body")).toContainText("rebuilt-in-browser");
   });
 });

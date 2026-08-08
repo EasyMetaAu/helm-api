@@ -88,21 +88,23 @@
 
   // Client-side transcript rebuild for sessions the server refuses to reconstruct
   // (session_recovery_limited). Loaded only on click — a large transcript can be many
-  // MB, so we stream the raw revisions and rebuild in the browser.
-  let transcriptStatus = $state<'idle' | 'loading' | 'loaded' | 'error'>('idle');
-  let transcriptValue = $state<unknown>(null);
-  let transcriptError = $state<string | undefined>(undefined);
+  // MB, so we stream the raw revisions and rebuild in the browser. On success the
+  // rebuilt body is written into the NORMAL request slot so the whole Request section
+  // renders it through the exact same Chat/Raw lenses + JsonViewer as a captured
+  // request — no separate viewer.
+  let transcriptLoaded = $state(false);
 
   async function loadTranscript(): Promise<void> {
-    if (transcriptStatus === 'loading' || transcriptStatus === 'loaded') return;
-    transcriptStatus = 'loading';
-    transcriptError = undefined;
+    if (payloadStatus.request === 'loading' || transcriptLoaded) return;
+    payloadStatus.request = 'loading';
+    payloadErrors.request = undefined;
     try {
-      transcriptValue = await rebuildSessionTranscript(data.requestId);
-      transcriptStatus = 'loaded';
+      payloadValues.request = await rebuildSessionTranscript(data.requestId);
+      payloadStatus.request = 'loaded';
+      transcriptLoaded = true;
     } catch {
-      transcriptStatus = 'error';
-      transcriptError = $t('The session transcript could not be rebuilt.');
+      payloadStatus.request = 'error';
+      payloadErrors.request = $t('The session transcript could not be rebuilt.');
     }
   }
 
@@ -411,8 +413,8 @@
       <h2 class="section-header">
         {upstreamDiffers ? $t('Request (from client)') : $t('Request')}
       </h2>
-      {#if data.payload?.captured}
-        {#if data.payload.source === 'session'}
+      {#if data.payload?.captured || transcriptLoaded}
+        {#if data.payload?.source === 'session' || transcriptLoaded}
           <p
             data-testid="session-recovery-warning"
             class="mb-3 rounded border border-amber-200 bg-amber-50 p-3 text-amber-800"
@@ -423,7 +425,11 @@
           </p>
         {/if}
         <p class="field-help mb-2">
-          {#if upstreamDiffers}
+          {#if transcriptLoaded}
+            {$t(
+              'Rebuilt from the session transcript in your browser — semantically equal to the original request, not the exact HTTP body.',
+            )}
+          {:else if upstreamDiffers}
             {$t(
               'The request body as received from the client — before memory injection and translation.',
             )}
@@ -523,31 +529,28 @@
             {$t('Full request/response not recorded (payload capture was off for this request).')}
           {/if}
         </p>
+        <!-- Before rebuild: offer the button. On success transcriptLoaded flips and the
+             captured-path branch above renders the body in the normal Request view
+             (Chat/Raw + the same JsonViewer as any captured request). -->
         {#if data.payload?.reason === 'session_recovery_limited'}
-          {#if transcriptStatus === 'loaded'}
-            <!-- Reuse the same JsonViewer as a captured/recovered request body; the
-                 rebuilt transcript IS the request, so it needs no separate display. -->
-            <JsonViewer value={transcriptValue} testid="request-body" />
-          {:else}
-            <div class="mt-3 rounded border border-dashed border-border bg-canvas p-3">
-              <p class="field-help mb-2">
-                {$t('Rebuild the transcript in your browser instead of on the server.')}
-              </p>
-              <button
-                type="button"
-                data-testid="load-transcript"
-                class="btn-secondary"
-                disabled={transcriptStatus === 'loading'}
-                onclick={loadTranscript}
-                >{transcriptStatus === 'loading'
-                  ? $t('Loading')
-                  : $t('Load transcript')}</button
-              >
-              {#if transcriptError}
-                <p class="mt-2 text-sm text-red-600">{transcriptError}</p>
-              {/if}
-            </div>
-          {/if}
+          <div class="mt-3 rounded border border-dashed border-border bg-canvas p-3">
+            <p class="field-help mb-2">
+              {$t('Rebuild the transcript in your browser instead of on the server.')}
+            </p>
+            <button
+              type="button"
+              data-testid="load-transcript"
+              class="btn-secondary"
+              disabled={payloadStatus.request === 'loading'}
+              onclick={loadTranscript}
+              >{payloadStatus.request === 'loading'
+                ? $t('Loading')
+                : $t('Load transcript')}</button
+            >
+            {#if payloadErrors.request}
+              <p class="mt-2 text-sm text-red-600">{payloadErrors.request}</p>
+            {/if}
+          </div>
         {/if}
       {/if}
     </section>

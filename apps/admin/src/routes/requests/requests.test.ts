@@ -703,15 +703,17 @@ describe('requests detail page', () => {
       },
     });
 
-    // Not loaded up front — the button is present, no request body yet.
+    // Not loaded up front — the button is present, the normal request lenses are not.
     expect(rebuildSessionTranscript).not.toHaveBeenCalled();
-    expect(screen.queryByTestId('request-body')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('request-view-raw')).not.toBeInTheDocument();
     await fireEvent.click(screen.getByTestId('load-transcript'));
-
-    // Rebuilt transcript renders through the SAME request-body JsonViewer as a
-    // captured/recovered request — no separate viewer.
-    expect(await screen.findByTestId('request-body')).toHaveTextContent(/"model": "auto"/);
     expect(rebuildSessionTranscript).toHaveBeenCalledWith('tr_big');
+
+    // After rebuild the whole Request section renders through the SAME captured-path
+    // lenses (Chat/Raw) — the rebuilt body is in the normal request slot, no separate
+    // viewer. Switch to Raw and assert the standard request-body JsonViewer shows it.
+    await fireEvent.click(await screen.findByTestId('request-view-raw'));
+    expect(await screen.findByTestId('request-body')).toHaveTextContent(/"model": "auto"/);
   });
 
   // A 1×1 PNG (bare base64) — the form a generated/input image takes inside a body.
