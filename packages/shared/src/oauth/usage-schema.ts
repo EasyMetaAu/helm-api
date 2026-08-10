@@ -531,16 +531,13 @@ export type OAuthUsagePeriod = z.infer<typeof OAuthUsagePeriodSchema>;
 // per reset window (exact upstream boundary — the "this window has burned X so far"
 // summary; a window with no anchorable resetsAtMs is omitted), grouped by windowKey.
 //
-// History is NOT sliced by reset period: real reset boundaries drift and are cut short
-// by reset-credit consumption (an account can burn a weekly allowance in a day), and
-// the true boundaries were never recorded — so rolling back a fixed window length is
-// misleading. Instead history is aggregated by NATURAL CALENDAR day and week in the
-// admin's local timezone (`daily` / `weekly`), which are exact and honest. Both are
-// most-recent first; the caller marks the oldest as `partial` if it precedes retained
-// data. `windowKey` on these carries the granularity ("day" / "week"), not a window.
+// `periods` is the primary history, sliced on recorded upstream/reset-credit boundaries
+// and falling back to approximate fixed-length windows before such facts exist. Natural
+// calendar `daily` / `weekly` views remain available for compatibility and operations.
 export const OAuthUsagePeriodsSchema = z
   .object({
     current: z.array(OAuthUsagePeriodSchema),
+    periods: z.array(OAuthUsagePeriodSchema).default([]),
     daily: z.array(OAuthUsagePeriodSchema),
     weekly: z.array(OAuthUsagePeriodSchema),
   })
@@ -548,10 +545,9 @@ export const OAuthUsagePeriodsSchema = z
 
 export type OAuthUsagePeriods = z.infer<typeof OAuthUsagePeriodsSchema>;
 
-// One RECORDED reset boundary — an append-only fact captured when a quota refresh saw
-// resetsAtMs advance. [periodStartMs, periodEndMs) is the window that just ended
-// (start = prior resetsAtMs, end = new resetsAtMs). Lets the usage-period read slice
-// history on TRUE boundaries instead of rolling back a fixed window length.
+// One RECORDED reset period — an append-only fact captured when an upstream snapshot or
+// reset-credit action closes the prior allowance window. [periodStartMs, periodEndMs)
+// is the window that actually ended.
 export const OAuthResetPeriodSchema = z
   .object({
     providerId: z.string(),

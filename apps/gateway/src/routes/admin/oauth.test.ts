@@ -217,15 +217,34 @@ describe("admin OAuth routes — read endpoints", () => {
         resetCredits: null,
       })),
     } as unknown as AdminApiDeps["oauthQuota"];
+    const oauthResetPeriod = {
+      queryPeriods: vi.fn(async () => [
+        {
+          providerId: "anthropic",
+          account: "a@x.com",
+          windowKey: "5h",
+          periodStartMs: reset - 10 * HOUR,
+          periodEndMs: reset - 5 * HOUR,
+          detectedAtMs: reset - 5 * HOUR,
+        },
+      ]),
+    } as unknown as AdminApiDeps["oauthResetPeriod"];
     const settings = {
       get: () => ({ oauth_usage_retention_days: 180 }),
     } as unknown as AdminApiDeps["settings"];
-    const res = await app({ oauth: fullSeam(), oauthUsage, oauthQuota, settings }).request(
+    const res = await app({
+      oauth: fullSeam(),
+      oauthUsage,
+      oauthQuota,
+      oauthResetPeriod,
+      settings,
+    }).request(
       "/admin/api/oauth/usage/periods?provider=anthropic&account=a%40x.com&tzOffsetMinutes=0",
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       current: Array<{ windowKey: string; tokens: number }>;
+      periods: Array<{ windowKey: string; periodStartMs: number; periodEndMs: number }>;
       daily: Array<{
         windowKey: string;
         tokens: number;
@@ -239,6 +258,12 @@ describe("admin OAuth routes — read endpoints", () => {
     expect(body.current).toHaveLength(1);
     expect(body.current[0]?.windowKey).toBe("5h");
     expect(body.current[0]?.tokens ?? 0).toBeGreaterThan(0);
+    expect(oauthResetPeriod?.queryPeriods).toHaveBeenCalledWith("anthropic", "a@x.com", "5h", 53);
+    expect(body.periods[0]).toMatchObject({
+      windowKey: "5h",
+      periodStartMs: reset - 10 * HOUR,
+      periodEndMs: reset - 5 * HOUR,
+    });
     // daily: natural-day buckets, most recent first, each a 24h span, windowKey "day".
     expect(body.daily.length).toBeGreaterThanOrEqual(2);
     expect(body.daily[0]?.windowKey).toBe("day");
@@ -268,7 +293,7 @@ describe("admin OAuth routes — read endpoints", () => {
       "/admin/api/oauth/usage/periods?provider=xai&account=nobody",
     );
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ current: [], daily: [], weekly: [] });
+    expect(await res.json()).toEqual({ current: [], periods: [], daily: [], weekly: [] });
   });
 
   it("GET /oauth/quota returns cached rows without pulling upstream", async () => {
@@ -465,7 +490,7 @@ describe("admin OAuth routes — read endpoints", () => {
     });
   });
 
-  it("POST /oauth/refresh records a reset-period boundary when resetsAtMs advances", async () => {
+  it("POST /oauth/refresh records the period that actually ended when resetsAtMs advances", async () => {
     const now = Date.now();
     const oldReset = now - 86_400_000; // yesterday
     const newReset = now + 6 * 86_400_000; // next week
@@ -505,8 +530,55 @@ describe("admin OAuth routes — read endpoints", () => {
         providerId: "xai",
         account: "subscription",
         windowKey: "7d",
-        periodStartMs: oldReset,
-        periodEndMs: newReset,
+        periodStartMs: oldReset - 7 * 86_400_000,
+        periodEndMs: oldReset,
+      }),
+    );
+  });
+
+  it("POST /oauth/refresh records an upstream early reset before the old deadline", async () => {
+    const now = Date.now();
+    const week = 7 * 86_400_000;
+    const oldReset = now + 2 * 86_400_000;
+    const newReset = now + week;
+    const oldStart = oldReset - week;
+    const oauthQuota = {
+      get: vi.fn(async () => ({
+        providerId: "openai-codex",
+        account: "subscription",
+        windows: [{ key: "7d", usedPercent: 73, resetsAtMs: oldReset, windowMinutes: 10_080 }],
+        capturedAt: now - 1_000,
+        source: "codex",
+        usageLimitedUntilMs: null,
+        resetCredits: 1,
+      })),
+      getAll: vi.fn(async () => []),
+      upsert: vi.fn(async () => {}),
+      delete: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const oauthResetPeriod = {
+      record: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthResetPeriod"];
+    const seam = fullSeam({
+      listStatus: vi.fn(async () => ({
+        selectionStrategy: "balanced",
+        providers: [{ id: "openai-codex", name: "Codex", accounts: [{ account: "subscription" }] }],
+      })) as never,
+      fetchCodexQuota: vi.fn(async () => ({
+        windows: [{ key: "7d", usedPercent: 0, resetsAtMs: newReset, windowMinutes: 10_080 }],
+        resetCredits: 1,
+      })) as never,
+    });
+
+    await enqueueRefresh(app({ oauth: seam, oauthQuota, oauthResetPeriod }));
+
+    expect(oauthResetPeriod?.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerId: "openai-codex",
+        account: "subscription",
+        windowKey: "7d",
+        periodStartMs: oldStart,
+        periodEndMs: expect.closeTo(now, -3),
       }),
     );
   });
@@ -1666,6 +1738,7 @@ describe("admin OAuth routes — reset credit", () => {
       redeemRequestId: "idem-1",
     }));
     const guard = allowResetCredit();
+    const onCodexQuotaResetConsumed = vi.fn(async () => {});
     const seam = fullSeam({
       fetchCodexQuota: vi.fn(async () => ({
         windows: codexWindows(100),
@@ -1681,6 +1754,7 @@ describe("admin OAuth routes — reset credit", () => {
       oauth: seam,
       oauthQuota: quotaStore(),
       resetCreditGuard: guard,
+      onCodexQuotaResetConsumed,
     }).request("/admin/api/oauth/openai-codex/reset-credit", {
       method: "POST",
       headers: JSONH,
@@ -1713,6 +1787,13 @@ describe("admin OAuth routes — reset credit", () => {
     });
     expect(guard.commit).toHaveBeenCalledOnce();
     expect(guard.rollback).not.toHaveBeenCalled();
+    expect(onCodexQuotaResetConsumed).toHaveBeenCalledWith(
+      "openai-codex",
+      "default",
+      expect.arrayContaining([expect.objectContaining({ key: "secondary" })]),
+      "manual",
+      expect.any(Number),
+    );
   });
 
   it.each([
@@ -1721,6 +1802,7 @@ describe("admin OAuth routes — reset credit", () => {
     ["already_redeemed", "alreadyRedeemed", true],
   ] as const)("200 preserves the %s reset-credit outcome", async (code, outcome, consumed) => {
     const guard = allowResetCredit();
+    const onCodexQuotaResetConsumed = vi.fn(async () => {});
     const seam = fullSeam({
       fetchCodexQuota: vi.fn(async () => ({
         windows: codexWindows(100),
@@ -1742,6 +1824,7 @@ describe("admin OAuth routes — reset credit", () => {
       oauth: seam,
       oauthQuota: quotaStore(codexWindows(100)),
       resetCreditGuard: guard,
+      onCodexQuotaResetConsumed,
     }).request("/admin/api/oauth/openai-codex/reset-credit", {
       method: "POST",
       headers: JSONH,
@@ -1752,6 +1835,16 @@ describe("admin OAuth routes — reset credit", () => {
     expect(await res.json()).toMatchObject({ code, outcome, windowsReset: 0 });
     expect(guard.commit).toHaveBeenCalledTimes(consumed ? 1 : 0);
     expect(guard.rollback).toHaveBeenCalledTimes(consumed ? 0 : 1);
+    expect(onCodexQuotaResetConsumed).toHaveBeenCalledTimes(consumed ? 1 : 0);
+    if (consumed) {
+      expect(onCodexQuotaResetConsumed).toHaveBeenCalledWith(
+        "openai-codex",
+        "default",
+        expect.any(Array),
+        "manual",
+        null,
+      );
+    }
   });
 
   it("passes an explicit account through to the seam", async () => {
@@ -2319,12 +2412,15 @@ describe("admin OAuth routes — POST /oauth/:provider/reset (Reset usage)", () 
 
   it("204 and clears the cooldown (untilMs null) for the default account", async () => {
     const applyUsageLimit = vi.fn(async () => {});
-    const res = await app({ oauth: fullSeam(), applyUsageLimit }).request(
-      "/admin/api/oauth/openai-codex/reset",
-      { method: "POST" },
-    );
+    const onCodexQuotaResetConsumed = vi.fn(async () => {});
+    const res = await app({
+      oauth: fullSeam(),
+      applyUsageLimit,
+      onCodexQuotaResetConsumed,
+    }).request("/admin/api/oauth/openai-codex/reset", { method: "POST" });
     expect(res.status).toBe(204);
     expect(applyUsageLimit).toHaveBeenCalledWith("openai-codex", "default", null);
+    expect(onCodexQuotaResetConsumed).not.toHaveBeenCalled();
   });
 
   it("rejects Anthropic reset because Claude usage windows are not resettable", async () => {

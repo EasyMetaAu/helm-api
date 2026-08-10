@@ -555,6 +555,13 @@ export interface AdminApiDeps {
     capturedAtMs: number,
     rateLimitReachedType: CodexRateLimitReachedType | null,
   ) => Promise<boolean>;
+  onCodexQuotaResetConsumed?: (
+    providerId: "openai-codex",
+    account: string,
+    windows: OAuthQuotaWindow[],
+    mode: "manual" | "auto",
+    occurredAtMs: number | null,
+  ) => Promise<void>;
   // Durable OAuth credential failure. A refresh 400/401/403 or persistent upstream
   // 401/403 means the account needs reconnecting, not just a short cooldown. The
   // gateway persists that state and rebuilds the pool so admin status and routing agree.

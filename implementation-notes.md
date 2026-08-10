@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-08-10 · 配额统计按真实重置点切分（OAuth quota / Admin providers，docs/04/11，原则 3/7）
+
+- **根因**：旧 writer 在 `resetsAtMs` 推进时写入 `[oldReset,newReset)`，把新周期误当成已结束历史；自然周 UI 又掩盖了 OpenAI 提前重置、reset-credit 重置和非整点边界，所以“每周”并不等于真实额度周期。
+- **实现**：复用既有 `oauth_reset_period`，统一记录刚结束的 `[previousStart,actualResetAt)`；PULL、Codex header PUSH、手动/自动 reset-credit 共用记录入口。quota snapshot 按 `capturedAt` 单调更新，晚到的旧采样既不覆盖新状态，也不写伪 reset。旧版 `detectedAtMs < periodEndMs` 行只在读取时忽略，不改写历史库；本地“Reset usage”仍只清 Helm cooldown，不冒充上游重置。
+- **精度边界**：usage 继续按小时聚合，但真实重置发生在小时中间时，新请求的 bucket 起点提升到最近 reset point，因此不会再跨边界混入上一周期。部署前已经落入旧整点 bucket 的历史数据不可逆，继续标 `≈`/`partial`；新记录到的真实边界作为精确周期返回。Admin 默认显示 Period，并保留 Daily / Weekly 兼容视图。
+
 ## 2026-08-10 · 大 Session 客户端重建按记录时间展示并提前停止分页（Admin / requests debug，docs/07/11，原则 1/3/7）
 
 - **现场与根因**：生产 v0.28.56 的目标详情点击后约 46 秒才完成，普通 Conversation 把重建后的请求 `input` 与最终响应折成一条聊天；现场原始 `input` 自身就是角色分段排列，因此 UI 没有再次排序，但这种折叠不能代表 Session 的真实请求/响应发生顺序。大 Session 客户端路径还丢弃了目标 revision 已保存的 `responseJson`，所以最终响应只能退化成脱敏 metadata。
@@ -87,16 +93,9 @@
 - **测试**：box 回归（`N>M` 首 + 兄弟 422 → 两候选都试、终态 400）；`context_length_exceeded` 变体同理；“更大窗口兄弟胜过 shaped 溢出”（不短路、fallback 成功）；“回显内容不伪造 400”（全链失败 → `all_providers_failed`）；per-model / 流式 / 多候选确认 / 近似估算不压真实故障用例全绿。execute.test.ts 164 全绿；messages/chat/gemini/responses/image-chain/pipeline 相关 239 全绿。
 - **遗留（本次不修）**：`xai/grok-4.5` 的 422 `invalid type: map, expected a sequence` 是独立的 anthropic→openai_responses 翻译缺陷；另开 change。
 
-## 2026-08-06 · HALF_OPEN 探测锁：释放路径 + 探针所有权令牌（Provider execution / circuit breaker，docs/02/04，原则 3/5）
-
-- **现场**：`anthropic/claude-opus-4-8` 连续数小时 `skip_reason=circuit_open`（0ms），同 Anthropic OAuth 池的 haiku/sonnet 仍正常；账号配额未 limited。请求 `5c27cf5d…` 正确 fallback 到 `openai-codex/gpt-5.6-sol`。
-- **根因 1（#698）**：`canAttempt` 在 cooldown 后置 `HALF_OPEN` 并持锁；随后路径故意不 `recordFailure`（OAuth 账号级 429/401/403、capability skip、`free_429` 等）也未 `recordAbort` → 锁永不释放。
-- **根因 2（#700 加固）**：无主的 `recordAbort(model)` 会释放**任意** in-flight probe。若 CLOSED 请求晚结束，而新 probe 已启动，旧 abort 会误清新 probe 的锁，或相反地形成竞态。
-- **修复**：`execute.ts` / `image-chain.ts` 在 allow 后 `settleBreaker` + `try/finally`（或等价显式 release）；`recordAbort(model, probeToken?)` 仅当 `probeToken` 与 entry 匹配时清锁；`canAttempt` 对 probe 返回 opaque `probeToken`。
-- **测试**：HALF_OPEN OAuth 429 / capability / free_429；breaker 单测「stale CLOSED abort 不释放新 probe」；image-chain invalid-request / capability 恢复。阈值仍 5 / 30s。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-06 · HALF_OPEN 探测锁释放与所有权令牌**：所有被允许的 provider/image 尝试都结算 breaker，HALF_OPEN abort 仅凭匹配的 probe token 释放对应探针，避免锁永久卡住或旧请求误清新探针；完整原文经 git history 回溯。
 - **2026-08-04 · per-key 请求内容存储覆盖优先级**：显式 `none`/`payload`/`session` 无条件覆盖实时全局设置，仅 `null`/`undefined` 继承；共享 capture helper 一处修复覆盖全部协议入口，完整原文经 git history 回溯。
 - **2026-08-04 · Codex 跨协议 fallback 修复**：可折叠 Responses items 走协议翻译，generic Responses 禁止 Codex 私有 passthrough，多账号池恢复 runtime profile；unknown/caller-linked/encrypted sub-agent items 继续 fail-closed，完整原文经 git history 回溯。
 

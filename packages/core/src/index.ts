@@ -542,6 +542,7 @@ export {
   createSerializingClient,
   DEFAULT_429_COOLDOWN_MS,
   DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
+  detectQuotaResetPeriods,
   discoverOAuthModels,
   expandOpenAICodexModelAliases,
   filterRetiredOpenAICodexLimits,

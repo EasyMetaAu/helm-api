@@ -4,7 +4,7 @@ import {
   packCodexQuotaMetadata,
   unpackCodexQuotaMetadata,
 } from "@helm/shared";
-import { and, eq } from "drizzle-orm";
+import { and, eq, lte } from "drizzle-orm";
 import type { OAuthQuotaStore } from "../ports.js";
 import type { SqliteDb } from "./migrate.js";
 import { oauthQuota } from "./schema.js";
@@ -50,6 +50,7 @@ export class SqliteOAuthQuotaStore implements OAuthQuotaStore {
       .onConflictDoUpdate({
         target: [oauthQuota.providerId, oauthQuota.account],
         set,
+        setWhere: lte(oauthQuota.capturedAt, snapshot.capturedAt),
       })
       .run();
   }

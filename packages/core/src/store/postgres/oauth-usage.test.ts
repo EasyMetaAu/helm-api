@@ -243,6 +243,24 @@ describe("PgOAuthResetPeriodStore (pglite)", () => {
     expect(rows.map((r) => r.periodEndMs)).toEqual([37000, 19000]);
     expect(rows[1]?.detectedAtMs).toBe(19500); // first write wins
     expect(await store.queryPeriods("anthropic", "nobody", "5h", 10)).toHaveLength(0);
+
+    await store.record({
+      ...base,
+      windowKey: "7d",
+      periodStartMs: 37000,
+      periodEndMs: 55000,
+      detectedAtMs: 55000,
+    });
+    await store.record({
+      ...base,
+      windowKey: "7d",
+      periodStartMs: 55000,
+      periodEndMs: 90000,
+      detectedAtMs: 60000,
+    });
+    expect(await store.latestResetAt("anthropic", "a@x.com", 70000)).toBe(55000);
+    expect(await store.latestResetAt("anthropic", "a@x.com", 70000, "5h")).toBe(19000);
+    expect(await store.latestResetAt("anthropic", "nobody", 70000)).toBeNull();
     await db.$close();
   });
 });

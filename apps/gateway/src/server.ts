@@ -193,6 +193,10 @@ import {
   createOAuthModelDiscoveryCache,
   type OAuthModelDiscoveryCache,
 } from "./oauth/model-discovery-cache.js";
+import {
+  recordObservedQuotaResetPeriods,
+  recordQuotaResetCreditPeriods,
+} from "./oauth/quota-reset-period.js";
 import { createResetCreditGuard, resetCreditGuardHash } from "./oauth/reset-credit-guard.js";
 import { createRealtimeCallRegistry, type RealtimeCallRegistry } from "./realtime-call-registry.js";
 import { createResponsesRegistry } from "./responses-registry.js";
@@ -2493,7 +2497,7 @@ export async function buildServer(
   });
 
   const maybeAutoReset = (
-    providerId: string,
+    providerId: "openai-codex",
     account: string,
     windows: OAuthQuotaWindow[],
     rateLimitReachedType: CodexRateLimitReachedType | null,
@@ -2561,29 +2565,13 @@ export async function buildServer(
                 code: r.code ?? null,
                 windows_reset: r.windowsReset ?? null,
               });
-              // The consume restored the shared window for EVERY sibling on this login — unpark
-              // them all (the trigger account included), or a sibling parked by its own
-              // saturated reply would stay out of rotation until its window's natural reset.
-              const codexAccounts = (await store.oauthTokens.list()).filter(
-                (t) => t.providerId === providerId,
+              await onCodexQuotaResetConsumed(
+                providerId,
+                account,
+                windows,
+                "auto",
+                r.outcome === "reset" ? Date.now() : null,
               );
-              const unparkResults = await Promise.allSettled(
-                codexAccounts.map(async (t) => {
-                  if ((await resolveCodexAccountKey(t.providerId, t.account)) === sharedKey) {
-                    await applyUsageLimit(t.providerId, t.account, null);
-                  }
-                }),
-              );
-              const unparkFailed = unparkResults.filter((x) => x.status === "rejected").length;
-              if (unparkFailed > 0) {
-                logger.log("error", "oauth.auto_reset.unpark_failed", {
-                  provider_id: providerId,
-                  account,
-                  guard: guardHash,
-                  failed_accounts: unparkFailed,
-                  redeem_request_id: r.redeemRequestId ?? null,
-                });
-              }
             },
           });
           if (!attempt.consumed) {
@@ -2638,6 +2626,84 @@ export async function buildServer(
       ?.setQuotaSnapshot(account, windows, capturedAtMs, resetCredits);
   };
 
+  async function onCodexQuotaResetConsumed(
+    providerId: "openai-codex",
+    account: string,
+    windows: OAuthQuotaWindow[],
+    mode: "manual" | "auto",
+    occurredAtMs: number | null,
+  ): Promise<void> {
+    const sharedKey = await resolveCodexAccountKey(providerId, account);
+    const connected = (await store.oauthTokens.list().catch(() => [])).filter(
+      (token) => token.providerId === providerId,
+    );
+    const siblings = new Set<string>([account]);
+    await Promise.all(
+      connected.map(async (token) => {
+        if ((await resolveCodexAccountKey(providerId, token.account)) === sharedKey) {
+          siblings.add(token.account);
+        }
+      }),
+    );
+
+    const results = await Promise.allSettled(
+      [...siblings].map(async (sibling) => {
+        const previous = await store.oauthQuota.get(providerId, sibling).catch(() => null);
+        if (occurredAtMs !== null) {
+          await recordQuotaResetCreditPeriods({
+            periodStore: store.oauthResetPeriod,
+            providerId,
+            account: sibling,
+            windows: previous?.windows.length
+              ? previous.windows
+              : sibling === account
+                ? windows
+                : [],
+            occurredAtMs,
+          });
+        }
+        await applyUsageLimit(providerId, sibling, null).catch(() => {});
+
+        const fresh = await oauthAdmin?.fetchCodexQuota?.({ account: sibling, force: true });
+        if (!fresh) return;
+        const freshWindows = filterRetiredOpenAICodexLimits(fresh.windows);
+        const capturedAt = Date.now();
+        await recordObservedQuotaResetPeriods({
+          quotaStore: store.oauthQuota,
+          periodStore: store.oauthResetPeriod,
+          providerId,
+          account: sibling,
+          windows: freshWindows,
+          observedAtMs: capturedAt,
+        });
+        await store.oauthQuota.upsert({
+          providerId,
+          account: sibling,
+          windows: freshWindows,
+          capturedAt,
+          source: "codex",
+          resetCredits: fresh.resetCredits,
+          planType: fresh.planType,
+          credits: fresh.credits,
+          resetCreditDetails: fresh.resetCreditDetails,
+          individualLimit: fresh.individualLimit,
+          additionalLimits: filterRetiredOpenAICodexLimits(fresh.additionalLimits),
+          rateLimitReachedType: fresh.rateLimitReachedType,
+        });
+        applyQuotaSnapshot(providerId, sibling, freshWindows, capturedAt, fresh.resetCredits);
+      }),
+    );
+    const failed = results.filter((result) => result.status === "rejected").length;
+    if (failed > 0) {
+      logger.log("warn", "oauth.reset_credit.post_consume_failed", {
+        provider_id: providerId,
+        account,
+        mode,
+        failed_accounts: failed,
+      });
+    }
+  }
+
   // Every AUTHORITATIVE fresh Codex snapshot must feed the same auto-reset path.
   // Header PUSHes and explicit upstream PULL refreshes are both fresh truth;
   // cache-only admin reads never call this hook. Without the PULL trigger, a 100%
@@ -2655,23 +2721,46 @@ export async function buildServer(
   // Codex quota-window scrape (providers page Tier 3): parse the `x-codex-*` headers
   // off each Codex reply and snapshot them per account. FAIL-OPEN — a parse/store
   // failure is swallowed (an observability scrape never breaks a served request).
+  const quotaObservationInFlight = new Map<string, Promise<void>>();
   const captureCodexQuota = (providerId: string, account: string, headers: Headers): void => {
     const nowMs = Date.now();
     const details = parseCodexQuotaHeaderDetails(headers, nowMs);
     const windows = details.windows;
     if (windows.length === 0) return; // no quota headers on this reply → nothing to store
     applyQuotaSnapshot(providerId, account, windows, nowMs);
-    backgroundTasks.run(
-      () =>
-        store.oauthQuota.upsert({
+    const observationKey = `${providerId}\u0000${account}`;
+    const previous = quotaObservationInFlight.get(observationKey) ?? Promise.resolve();
+    const task = previous
+      .catch(() => {})
+      .then(async () => {
+        await recordObservedQuotaResetPeriods({
+          quotaStore: store.oauthQuota,
+          periodStore: store.oauthResetPeriod,
+          providerId,
+          account,
+          windows,
+          observedAtMs: nowMs,
+        });
+        await store.oauthQuota.upsert({
           providerId,
           account,
           windows,
           capturedAt: nowMs,
           source: "codex-headers",
-        }),
+        });
+      });
+    quotaObservationInFlight.set(observationKey, task);
+    backgroundTasks.run(
+      () => task,
       () => logger.log("error", "oauth.quota.capture_failed", { provider_id: providerId }),
     );
+    void task
+      .finally(() => {
+        if (quotaObservationInFlight.get(observationKey) === task) {
+          quotaObservationInFlight.delete(observationKey);
+        }
+      })
+      .catch(() => {});
     // Auto-park when a window is saturated (≥100% with a future reset): the precise
     // long cooldown the 429 backstop can't know. Fire-and-forget (fail-open).
     const until = windowsToUsageLimit(windows, nowMs);
@@ -3427,15 +3516,22 @@ export async function buildServer(
     if (!servingAccount || !servedByAccount(servingAccount, servedAlias)) return;
     const nowMs = Date.now();
     backgroundTasks.run(
-      () =>
-        store.oauthUsage.record({
+      async () => {
+        await quotaObservationInFlight
+          .get(`${servingAccount.providerId}\u0000${servingAccount.account}`)
+          ?.catch(() => {});
+        const resetAt = await store.oauthResetPeriod
+          .latestResetAt(servingAccount.providerId, servingAccount.account, nowMs)
+          .catch(() => null);
+        await store.oauthUsage.record({
           providerId: servingAccount.providerId,
           account: servingAccount.account,
-          bucketMs: nowMs - (nowMs % 3_600_000),
+          bucketMs: Math.max(nowMs - (nowMs % 3_600_000), resetAt ?? 0),
           tokens: usage.tokens,
           costUsd: usage.costUsd,
           nowMs,
-        }),
+        });
+      },
       () =>
         logger.log("error", "oauth.usage.record_failed", {
           provider_id: servingAccount.providerId,
@@ -3653,6 +3749,7 @@ export async function buildServer(
       applyUsageLimit,
       applyQuotaSnapshot,
       onCodexQuotaSaturated,
+      onCodexQuotaResetConsumed,
       onOAuthCredentialFailure: markOAuthCredentialFailure,
     });
 
