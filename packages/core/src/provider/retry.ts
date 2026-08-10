@@ -33,6 +33,7 @@ const TRANSIENT_MESSAGE_PATTERNS = [
   "other side closed",
   "terminated",
   "socket hang up",
+  "codex responses websocket is closed",
   "socket connection was closed",
   "premature close",
 ];
