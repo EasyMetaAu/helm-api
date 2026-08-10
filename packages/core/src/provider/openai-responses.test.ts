@@ -2713,13 +2713,13 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect(chunks.join("")).toContain("response.completed");
   });
 
-  it("falls back to HTTP after websocket write ECANCELED exhausts the retry budget", async () => {
+  it("falls back to HTTP after a closed websocket exhausts the retry budget", async () => {
     let closeCalls = 0;
     const connect = vi.fn(
       async (): Promise<CodexResponsesWebSocketConnection> => ({
         responseHeaders: new Headers(),
         async send() {
-          throw Object.assign(new Error("write ECANCELED"), { code: "ECANCELED" });
+          throw new Error("Codex Responses websocket is closed");
         },
         async receive() {
           return null;
@@ -2729,7 +2729,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
         },
       }),
     );
-    const fetchMock = vi.fn(async () =>
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
       rawSSEResponse(
         'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
       ),
@@ -2737,9 +2737,8 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     const client = createCodexResponsesClient({
       config: {
         baseUrl: "https://chatgpt.com/backend-api/codex",
-        getAuthHeader: async () => `Bearer ${jwt("acct_ecanceled_fallback")}`,
+        getAuthHeader: async () => `Bearer ${jwt("acct_ws_closed_fallback")}`,
         responsesWebSocketConnector: connect,
-        connectRetries: 1,
         connectRetryBackoffMs: [0],
       },
       fetch: fetchMock as unknown as typeof fetch,
@@ -2747,7 +2746,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     const chunks: string[] = [];
 
     for await (const chunk of client.nativePassthroughStream?.(
-      carrier("ingress-ecanceled-fallback", {
+      carrier("ingress-ws-closed-fallback", {
         model: "gpt-5.6-sol",
         input: [],
         stream: true,
@@ -2757,9 +2756,12 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       chunks.push(chunk);
     }
 
-    expect(connect).toHaveBeenCalledTimes(2);
-    expect(closeCalls).toBe(2);
+    expect(connect).toHaveBeenCalledTimes(3);
+    expect(closeCalls).toBe(3);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    const fallbackHeaders = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
+    expect(fallbackHeaders.get("authorization")).toBe(`Bearer ${jwt("acct_ws_closed_fallback")}`);
+    expect(fallbackHeaders.get("chatgpt-account-id")).toBe("acct_ws_closed_fallback");
     expect(chunks.join("")).toContain("response.completed");
   });
 
