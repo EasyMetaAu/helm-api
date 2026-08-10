@@ -693,7 +693,7 @@ describe('requests detail page', () => {
     expect(getRequestPayloadPart).toHaveBeenCalledWith('tr_lazy', 'request');
   });
 
-  it('rebuilds a too-large transcript client-side only on click', async () => {
+  it('rebuilds a too-large transcript without duplicating the Session timeline', async () => {
     rebuildSessionTranscript.mockResolvedValueOnce({
       request: { model: 'auto', messages: [{ role: 'user', content: 'question' }] },
       response: { ok: true },
@@ -726,7 +726,7 @@ describe('requests detail page', () => {
     await fireEvent.click(screen.getByTestId('request-view-raw'));
     expect(screen.getByTestId('request-body')).toHaveTextContent(/"model": "auto"/);
     expect(screen.getByTestId('response-body')).toHaveTextContent(/"ok": true/);
-    expect(screen.getByTestId('session-timeline-body')).toHaveTextContent('Array(1)');
+    expect(screen.queryByTestId('session-timeline')).not.toBeInTheDocument();
   });
 
   // A 1×1 PNG (bare base64) — the form a generated/input image takes inside a body.

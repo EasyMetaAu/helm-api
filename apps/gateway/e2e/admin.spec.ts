@@ -326,7 +326,7 @@ test.describe("admin request payload view", () => {
     await expect(page.getByTestId("payload-summary")).toContainText(/no captured Session ID/i);
   });
 
-  test("rebuilds a too-large transcript client-side on demand", async ({ page }) => {
+  test("rebuilds a too-large transcript without a duplicate Session panel", async ({ page }) => {
     await page.route(`**/admin/api/requests/${SEED_TRACE_ID}/payload?part=meta`, async (route) =>
       route.fulfill({
         contentType: "application/json",
@@ -379,6 +379,6 @@ test.describe("admin request payload view", () => {
     await page.getByTestId("request-view-raw").click();
     await expect(page.getByTestId("request-body")).toContainText("rebuilt-in-browser");
     await expect(page.getByTestId("response-body")).toContainText("rebuilt-response");
-    await expect(page.getByTestId("session-timeline-body")).toContainText("Array(1)");
+    await expect(page.getByTestId("session-timeline")).toHaveCount(0);
   });
 });

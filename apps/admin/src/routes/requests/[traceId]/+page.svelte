@@ -90,9 +90,7 @@
   // (session_recovery_limited). Loaded only on click — a large transcript can be many
   // MB, so we stream raw revisions and rebuild in the browser. Only data retrieval is
   // different: the target request and response reuse the normal server-recovery lenses.
-  // Raw revision pairs stay separate and are ordered by their persisted timestamp.
   let transcriptLoaded = $state(false);
-  let transcriptTimeline = $state<unknown[]>([]);
 
   async function loadTranscript(): Promise<void> {
     if (payloadStatus.request === 'loading' || transcriptLoaded) return;
@@ -101,7 +99,6 @@
     try {
       const rebuilt = await rebuildSessionTranscript(data.requestId);
       payloadValues.request = rebuilt.request;
-      transcriptTimeline = rebuilt.timeline;
       if (hasOwn(rebuilt, 'response')) {
         payloadValues.response = rebuilt.response;
         payloadStatus.response = 'loaded';
@@ -557,18 +554,6 @@
         {/if}
       {/if}
     </section>
-
-    {#if transcriptLoaded && transcriptTimeline.length > 0}
-      <section data-testid="session-timeline" class="card text-sm">
-        <h2 class="section-header">{$t('Session')}</h2>
-        <p class="field-help mb-2">
-          {$t(
-            'Session mode stores repeated conversation history once, reconstructs each request semantically, and keeps available response snapshots.',
-          )}
-        </p>
-        <JsonViewer value={transcriptTimeline} testid="session-timeline-body" />
-      </section>
-    {/if}
 
     <!-- Forwarded upstream request: the EXACT body sent to the provider, AFTER
          memory injection + protocol translation. Shown as a SEPARATE panel only when
