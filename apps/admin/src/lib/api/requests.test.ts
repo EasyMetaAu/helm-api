@@ -574,12 +574,14 @@ describe('session-revisions client-side transcript rebuild', () => {
         revisions: [
           {
             requestId: 'r_root',
+            sequence: 1,
+            createdAt: 2000,
             parentRequestId: null,
             retainCount: 0,
             requestDeltaJson: '[{"role":"user","content":"one"}]',
             requestEnvelopeJson: '{"model":"x","messages":[]}',
             responseId: null,
-            responseJson: null,
+            responseJson: '{"role":"assistant","content":"reply one"}',
           },
         ],
       },
@@ -591,22 +593,41 @@ describe('session-revisions client-side transcript rebuild', () => {
         revisions: [
           {
             requestId: 'tr_child',
+            sequence: 2,
+            createdAt: 1000,
             parentRequestId: 'r_root',
             retainCount: 1,
             requestDeltaJson: '[{"role":"assistant","content":"two"}]',
             requestEnvelopeJson: '{"model":"x","messages":[]}',
             responseId: null,
-            responseJson: null,
+            responseJson: '{"ok":true}',
           },
         ],
       },
     });
     const result = await rebuildSessionTranscript('tr_child');
     expect(result).toEqual({
-      model: 'x',
-      messages: [
-        { role: 'user', content: 'one' },
-        { role: 'assistant', content: 'two' },
+      request: {
+        model: 'x',
+        messages: [
+          { role: 'user', content: 'one' },
+          { role: 'assistant', content: 'two' },
+        ],
+      },
+      response: { ok: true },
+      timeline: [
+        {
+          recorded_at: '1970-01-01T00:00:01.000Z',
+          sequence: 2,
+          request: [{ role: 'assistant', content: 'two' }],
+          response: { ok: true },
+        },
+        {
+          recorded_at: '1970-01-01T00:00:02.000Z',
+          sequence: 1,
+          request: [{ role: 'user', content: 'one' }],
+          response: { role: 'assistant', content: 'reply one' },
+        },
       ],
     });
     // Two round-trips: bare page then cursor page.
@@ -624,5 +645,51 @@ describe('session-revisions client-side transcript rebuild', () => {
       },
     });
     await expect(rebuildSessionTranscript('tr_gone')).rejects.toThrow();
+  });
+
+  it('stops paging as soon as the target revision is present', async () => {
+    const f = stubFetchByUrl({
+      '/admin/api/requests/tr_target/session-revisions': {
+        captured: true,
+        sessionRef: 's1',
+        targetRequestId: 'tr_target',
+        nextSequence: 2,
+        revisions: [
+          {
+            requestId: 'tr_target',
+            sequence: 1,
+            createdAt: 1000,
+            parentRequestId: null,
+            retainCount: 0,
+            requestDeltaJson: '[{"role":"user","content":"target"}]',
+            requestEnvelopeJson: '{"model":"x","messages":[]}',
+            responseId: null,
+            responseJson: null,
+          },
+          {
+            requestId: 'later_revision',
+            sequence: 2,
+            createdAt: 2000,
+            parentRequestId: 'tr_target',
+            retainCount: 1,
+            requestDeltaJson: '[]',
+            requestEnvelopeJson: '{"model":"x","messages":[]}',
+            responseId: null,
+            responseJson: null,
+          },
+        ],
+      },
+      '/admin/api/requests/tr_target/session-revisions?after=2': {
+        captured: true,
+        targetRequestId: 'tr_target',
+        nextSequence: null,
+        revisions: [],
+      },
+    });
+
+    const result = await rebuildSessionTranscript('tr_target');
+
+    expect(result.timeline).toHaveLength(1);
+    expect(f.calls()).toEqual(['/admin/api/requests/tr_target/session-revisions']);
   });
 });
