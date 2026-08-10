@@ -1,5 +1,5 @@
 import { type OAuthResetPeriod, OAuthResetPeriodSchema } from "@helm/shared";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, lte, sql } from "drizzle-orm";
 import type { OAuthResetPeriodStore } from "../ports.js";
 import type { PgDb } from "./migrate.js";
 import { oauthResetPeriod } from "./schema.js";
@@ -59,5 +59,28 @@ export class PgOAuthResetPeriodStore implements OAuthResetPeriodStore {
         detectedAtMs: Number(r.detectedAtMs),
       }),
     );
+  }
+
+  async latestResetAt(
+    providerId: string,
+    account: string,
+    beforeMs: number,
+    windowKey?: string,
+  ): Promise<number | null> {
+    const rows = await this.db
+      .select({ periodEndMs: oauthResetPeriod.periodEndMs })
+      .from(oauthResetPeriod)
+      .where(
+        and(
+          eq(oauthResetPeriod.providerId, providerId),
+          eq(oauthResetPeriod.account, account),
+          ...(windowKey === undefined ? [] : [eq(oauthResetPeriod.windowKey, windowKey)]),
+          lte(oauthResetPeriod.periodEndMs, beforeMs),
+          sql`${oauthResetPeriod.detectedAtMs} >= ${oauthResetPeriod.periodEndMs}`,
+        ),
+      )
+      .orderBy(desc(oauthResetPeriod.periodEndMs))
+      .limit(1);
+    return rows[0] ? Number(rows[0].periodEndMs) : null;
   }
 }

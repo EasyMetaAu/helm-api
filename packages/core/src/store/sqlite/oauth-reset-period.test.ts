@@ -65,4 +65,22 @@ describe("SqliteOAuthResetPeriodStore", () => {
     expect(await store.queryPeriods("anthropic", "nobody", "5h", 10)).toHaveLength(0);
     close();
   });
+
+  it("latestResetAt ignores legacy future-period rows and can filter one window", async () => {
+    const { store, close } = freshStore();
+    await store.record(
+      period({ windowKey: "5h", periodStartMs: 1000, periodEndMs: 2000, detectedAtMs: 2000 }),
+    );
+    await store.record(
+      period({ windowKey: "7d", periodStartMs: 2000, periodEndMs: 3000, detectedAtMs: 3000 }),
+    );
+    await store.record(
+      period({ windowKey: "7d", periodStartMs: 3000, periodEndMs: 9000, detectedAtMs: 4000 }),
+    );
+
+    expect(await store.latestResetAt("anthropic", "a@x.com", 5000)).toBe(3000);
+    expect(await store.latestResetAt("anthropic", "a@x.com", 5000, "5h")).toBe(2000);
+    expect(await store.latestResetAt("anthropic", "nobody", 5000)).toBeNull();
+    close();
+  });
 });

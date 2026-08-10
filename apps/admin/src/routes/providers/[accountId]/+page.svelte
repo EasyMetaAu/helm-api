@@ -51,7 +51,7 @@
   const windowKeys = $derived.by(() => {
     const seen = new Set<string>();
     const keys: string[] = [];
-    for (const p of data.periods.current) {
+    for (const p of [...data.periods.current, ...data.periods.periods]) {
       if (!seen.has(p.windowKey)) {
         seen.add(p.windowKey);
         keys.push(p.windowKey);
@@ -83,11 +83,14 @@
     return data.periods.current.find((p) => p.windowKey === activeKey) ?? null;
   });
 
-  // History granularity toggle: natural DAYS or WEEKS (local tz), account-wide. Default
-  // to daily — the accounts here can burn billions of tokens in a day, so per-day best
-  // surfaces a spike or a provider quietly cutting the allowance.
-  let granularity = $state<'day' | 'week'>('day');
-  const history = $derived(granularity === 'day' ? data.periods.daily : data.periods.weekly);
+  let granularity = $state<'period' | 'day' | 'week'>('period');
+  const history = $derived.by(() =>
+    granularity === 'period'
+      ? data.periods.periods.filter((p) => p.windowKey === activeKey)
+      : granularity === 'day'
+        ? data.periods.daily
+        : data.periods.weekly,
+  );
 
   // Bar-chart data (oldest → newest so the trend reads left-to-right).
   const trend = $derived([...history].reverse());
@@ -117,6 +120,9 @@
   // doesn't imply a full Mon–Sun span that hasn't happened yet.
   function periodLabel(p: OAuthUsagePeriod): string {
     const start = new Date(p.periodStartMs);
+    if (granularity === 'period') {
+      return `${start.toLocaleString()} – ${new Date(p.periodEndMs).toLocaleString()}`;
+    }
     if (granularity === 'day') return start.toLocaleDateString();
     const endMs = Math.min(p.periodEndMs, Date.now());
     const end = new Date(endMs - 1); // inclusive last day
@@ -132,7 +138,7 @@
       <code class="font-mono text-sm text-ink-muted">{data.providerId}</code>
     </div>
     <p class="mt-1 text-sm text-ink-muted">
-      {$t('Current quota window usage, plus token history by calendar day or week.')}
+      {$t('Token usage per quota reset period. Periods marked ≈ have approximate boundaries.')}
     </p>
   </header>
 
@@ -164,7 +170,11 @@
     <!-- (a) Current reset-window summary — the real resetsAtMs boundary, exact. -->
     <section class="mb-6">
       <div class="mb-2 flex items-baseline justify-between">
-        <h2 class="section-header">{$t('Current period')}</h2>
+        <h2 class="section-header">
+          {$t('Current period')}
+          {#if currentPeriod?.approximate}<span class="text-xs text-ink-muted">≈</span>{/if}
+          {#if currentPeriod?.partial}<span class="text-xs text-amber-600">{$t('(partial)')}</span>{/if}
+        </h2>
         {#if quotaWindow && !snapshotStale && resetIn(quotaWindow.resetsAtMs)}
           <span class="text-sm text-ink-muted"
             >{$t('resets in {t}', { t: resetIn(quotaWindow.resetsAtMs) })}</span
@@ -227,13 +237,15 @@
     </section>
     {/if}
 
-    <!-- History: token usage by NATURAL calendar day/week (exact, account-wide). This
-         replaces reset-period slicing — real reset windows drift and get cut short by
-         reset-credit, so calendar buckets are the honest way to spot a spike or a
-         shrinking allowance. -->
+    <!-- Reset periods are primary; natural day/week remain as compatibility views. -->
     <div class="mb-3 flex items-center justify-between">
       <h2 class="section-header">{$t('Usage history')}</h2>
       <div class="flex gap-1" role="tablist">
+        <button
+          type="button"
+          class={granularity === 'period' ? 'btn-primary' : 'btn-secondary'}
+          onclick={() => (granularity = 'period')}>{$t('Period')}</button
+        >
         <button
           type="button"
           class={granularity === 'day' ? 'btn-primary' : 'btn-secondary'}
@@ -273,7 +285,13 @@
       <table class="cards-table">
         <thead class="table-head">
           <tr>
-            <th class="px-3 py-2 text-left">{granularity === 'day' ? $t('Day') : $t('Week')}</th>
+            <th class="px-3 py-2 text-left">
+              {granularity === 'period'
+                ? $t('Period')
+                : granularity === 'day'
+                  ? $t('Day')
+                  : $t('Week')}
+            </th>
             <th class="px-3 py-2 text-right">{$t('Requests')}</th>
             <th class="px-3 py-2 text-right">{$t('Tokens')}</th>
             <th class="px-3 py-2 text-right">{$t('Cost')}</th>
@@ -282,8 +300,11 @@
         <tbody>
           {#each history as p (p.periodStartMs)}
             <tr>
-              <td data-label={granularity === 'day' ? $t('Day') : $t('Week')} class="px-3 py-2">
+              <td data-label={$t('Period')} class="px-3 py-2">
                 {periodLabel(p)}
+                {#if p.approximate}
+                  <span class="ml-1 text-xs text-ink-muted">≈</span>
+                {/if}
                 {#if p.partial}
                   <span class="ml-1 text-xs text-amber-600">{$t('(partial)')}</span>
                 {/if}

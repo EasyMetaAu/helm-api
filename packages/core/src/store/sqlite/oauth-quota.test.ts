@@ -48,6 +48,14 @@ describe("SqliteOAuthQuotaStore", () => {
     close();
   });
 
+  it("ignores a snapshot captured before the stored snapshot", async () => {
+    const { store, close } = freshStore();
+    await store.upsert(snap({ capturedAt: 999, windows: [] }));
+    await store.upsert(snap({ capturedAt: 500 }));
+    expect(await store.get("anthropic", "a")).toMatchObject({ capturedAt: 999, windows: [] });
+    close();
+  });
+
   it("round-trips reset credits and preserves them when a header snapshot omits the count", async () => {
     const { store, close } = freshStore();
     await store.upsert(

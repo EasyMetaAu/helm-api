@@ -16,6 +16,14 @@ const snap = (over: Partial<OAuthQuotaSnapshot> = {}): OAuthQuotaSnapshot => ({
 });
 
 describe("PgOAuthQuotaStore (pglite)", () => {
+  it("ignores a snapshot captured before the stored snapshot", async () => {
+    const db: PgDb = await createPgliteDb();
+    const store = new PgOAuthQuotaStore(db);
+    await store.upsert(snap({ capturedAt: 999, windows: [] }));
+    await store.upsert(snap({ capturedAt: 500 }));
+    expect(await store.get("openai-codex", "a")).toMatchObject({ capturedAt: 999, windows: [] });
+  });
+
   it("round-trips Codex live metadata and preserves it when a header snapshot omits it", async () => {
     const db: PgDb = await createPgliteDb();
     const store = new PgOAuthQuotaStore(db);

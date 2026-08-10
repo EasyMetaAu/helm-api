@@ -1385,6 +1385,14 @@ export interface OAuthResetPeriodStore {
     windowKey: string,
     limit: number,
   ): Promise<OAuthResetPeriod[]>;
+  // Latest trustworthy reset point at/before `beforeMs`. Legacy rows from the old
+  // [oldReset,newReset) writer have detectedAtMs < periodEndMs and are ignored.
+  latestResetAt(
+    providerId: string,
+    account: string,
+    beforeMs: number,
+    windowKey?: string,
+  ): Promise<number | null>;
 }
 
 export interface OAuthTokenStore {

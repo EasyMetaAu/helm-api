@@ -1,6 +1,6 @@
 import type { OAuthQuotaWindow, OAuthUsageBucket, OAuthUsagePeriod } from "@helm/shared";
 import { describe, expect, it } from "vitest";
-import { computeUsagePeriods } from "./usage-periods.js";
+import { computeUsagePeriods, detectQuotaResetPeriods } from "./usage-periods.js";
 
 // Helper: the single current period for a given window key (the function returns an
 // array — one per anchorable window; tests below pass one window at a time mostly).
@@ -277,8 +277,8 @@ describe("computeUsagePeriods", () => {
       nowMs: now,
       dataStartMs: 0,
       limit: 3,
-      // endMs 106h > curStart 105h → must be ignored (would overlap current).
-      recordedBoundaries: { "5h": [{ startMs: 101 * HOUR, endMs: 106 * HOUR }] },
+      // endMs 108h is still in the FUTURE → it cannot be a completed reset period.
+      recordedBoundaries: { "5h": [{ startMs: 103 * HOUR, endMs: 108 * HOUR }] },
     });
     // No exact history period from the overlapping boundary; all history is approximate.
     expect(out.periods.every((p) => p.approximate)).toBe(true);
@@ -323,7 +323,7 @@ describe("computeUsagePeriods", () => {
     }
   });
 
-  it("marks a NON-hour-aligned recorded boundary as approximate (hour-bucket quantization)", () => {
+  it("treats a recorded non-hour reset as exact once usage buckets split at that reset", () => {
     const now = 107 * HOUR;
     const reset = 110 * HOUR; // current starts at 105h
     const bs = buckets(90 * HOUR, 17, 100);
@@ -336,8 +336,7 @@ describe("computeUsagePeriods", () => {
       limit: 2,
       recordedBoundaries: { "5h": [{ startMs: 100 * HOUR + 1_800_000, endMs: 105 * HOUR }] },
     });
-    // start not hour-aligned → approximate despite being a real recorded boundary
-    expect(out.periods[0]).toMatchObject({ periodEndMs: 105 * HOUR, approximate: true });
+    expect(out.periods[0]).toMatchObject({ periodEndMs: 105 * HOUR, approximate: false });
   });
 
   it("anchors the current period on a recorded boundary whose length differs from winMs", () => {
@@ -370,6 +369,33 @@ describe("computeUsagePeriods", () => {
     expect(out.periods[0]).toMatchObject({
       periodStartMs: 100 * HOUR,
       periodEndMs: 105 * HOUR + HALF,
+    });
+  });
+
+  it("anchors current usage after an early reset that closed the prior period", () => {
+    const reset = 110 * HOUR;
+    const now = 107 * HOUR;
+    const earlyResetAt = 106 * HOUR;
+    const out = computeUsagePeriods({
+      windows: [win("5h", reset, null)],
+      buckets: buckets(95 * HOUR, 12, 100),
+      nowMs: now,
+      dataStartMs: 0,
+      limit: 2,
+      recordedBoundaries: {
+        "5h": [{ startMs: 101 * HOUR, endMs: earlyResetAt }],
+      },
+    });
+
+    expect(currentFor(out, "5h")).toMatchObject({
+      periodStartMs: earlyResetAt,
+      periodEndMs: now,
+      tokens: 100,
+    });
+    expect(out.periods[0]).toMatchObject({
+      periodStartMs: 101 * HOUR,
+      periodEndMs: earlyResetAt,
+      approximate: false,
     });
   });
 
@@ -437,5 +463,55 @@ describe("computeUsagePeriods", () => {
     }
     // And no period ends above the current period's start (105h).
     expect(out.periods.every((p) => p.periodEndMs <= 105 * HOUR)).toBe(true);
+  });
+});
+
+describe("detectQuotaResetPeriods", () => {
+  const WEEK = 7 * 24 * HOUR;
+
+  it("records the period that ended when the provider advances the deadline", () => {
+    const observedAtMs = 20 * WEEK + HOUR;
+    const oldReset = 20 * WEEK;
+    expect(
+      detectQuotaResetPeriods({
+        providerId: "openai-codex",
+        account: "a",
+        previous: [win("7d", oldReset, 10_080)],
+        next: [win("7d", oldReset + WEEK, 10_080)],
+        observedAtMs,
+      }),
+    ).toEqual([expect.objectContaining({ periodStartMs: oldReset - WEEK, periodEndMs: oldReset })]);
+  });
+
+  it("records an early provider reset at the observed new-window start", () => {
+    const observedAtMs = 20 * WEEK;
+    const oldReset = observedAtMs + 2 * 24 * HOUR;
+    expect(
+      detectQuotaResetPeriods({
+        providerId: "openai-codex",
+        account: "a",
+        previous: [{ ...win("7d", oldReset, 10_080), usedPercent: 73 }],
+        next: [{ ...win("7d", observedAtMs + WEEK, 10_080), usedPercent: 0 }],
+        observedAtMs,
+      }),
+    ).toEqual([
+      expect.objectContaining({ periodStartMs: oldReset - WEEK, periodEndMs: observedAtMs }),
+    ]);
+  });
+
+  it("records a reset when usage drops even if the provider keeps the same deadline", () => {
+    const observedAtMs = 20 * WEEK;
+    const reset = observedAtMs + 2 * 24 * HOUR;
+    expect(
+      detectQuotaResetPeriods({
+        providerId: "openai-codex",
+        account: "a",
+        previous: [{ ...win("7d", reset, 10_080), usedPercent: 91 }],
+        next: [{ ...win("7d", reset, 10_080), usedPercent: 4 }],
+        observedAtMs,
+      }),
+    ).toEqual([
+      expect.objectContaining({ periodStartMs: reset - WEEK, periodEndMs: observedAtMs }),
+    ]);
   });
 });

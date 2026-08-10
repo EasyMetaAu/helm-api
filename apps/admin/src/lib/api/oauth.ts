@@ -249,7 +249,7 @@ export async function getOAuthQuota(): Promise<OAuthQuotaSnapshot[]> {
 export type OAuthUsagePeriod = SharedOAuthUsagePeriod;
 export type OAuthUsagePeriods = SharedOAuthUsagePeriods;
 
-const EMPTY_PERIODS: OAuthUsagePeriods = { current: [], daily: [], weekly: [] };
+const EMPTY_PERIODS: OAuthUsagePeriods = { current: [], periods: [], daily: [], weekly: [] };
 
 // GET /oauth/usage/periods -> the account-detail page: current reset-period summary +
 // natural day/week history (bucketed in the viewer's local tz). FAIL-OPEN: any failure

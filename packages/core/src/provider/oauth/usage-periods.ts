@@ -1,8 +1,59 @@
-import type { OAuthQuotaWindow, OAuthUsageBucket, OAuthUsagePeriod } from "@helm/shared";
+import type {
+  OAuthQuotaWindow,
+  OAuthResetPeriod,
+  OAuthUsageBucket,
+  OAuthUsagePeriod,
+} from "@helm/shared";
 import { windowMinutesForKey } from "./window-minutes.js";
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
+const RESET_JITTER_MS = 30 * MINUTE_MS;
+
+export function detectQuotaResetPeriods(input: {
+  providerId: string;
+  account: string;
+  previous: OAuthQuotaWindow[];
+  next: OAuthQuotaWindow[];
+  observedAtMs: number;
+}): OAuthResetPeriod[] {
+  const oldByKey = new Map(input.previous.map((window) => [window.key, window] as const));
+  const periods: OAuthResetPeriod[] = [];
+
+  for (const next of input.next) {
+    const previous = oldByKey.get(next.key);
+    if (previous?.resetsAtMs == null || next.resetsAtMs == null) continue;
+    const oldMinutes = windowMinutesForKey(previous.key, previous.windowMinutes);
+    const nextMinutes = windowMinutesForKey(next.key, next.windowMinutes);
+    if (oldMinutes === null || nextMinutes === null) continue;
+
+    const oldStart = previous.resetsAtMs - oldMinutes * MINUTE_MS;
+    const nextStart = next.resetsAtMs - nextMinutes * MINUTE_MS;
+    const resetDeadlineAdvanced = next.resetsAtMs - previous.resetsAtMs > RESET_JITTER_MS;
+    const usageDropped = next.usedPercent + 1 < previous.usedPercent;
+    const resetAtMs = resetDeadlineAdvanced ? nextStart : usageDropped ? input.observedAtMs : null;
+    if (
+      resetAtMs === null ||
+      resetAtMs <= oldStart ||
+      resetAtMs > input.observedAtMs + RESET_JITTER_MS
+    ) {
+      continue;
+    }
+
+    const maxWindowMs = Math.max(oldMinutes, nextMinutes) * MINUTE_MS;
+    if (resetAtMs - oldStart > maxWindowMs * 1.5) continue;
+    periods.push({
+      providerId: input.providerId,
+      account: input.account,
+      windowKey: next.key,
+      periodStartMs: oldStart,
+      periodEndMs: resetAtMs,
+      detectedAtMs: input.observedAtMs,
+    });
+  }
+
+  return periods;
+}
 
 export interface ComputeUsagePeriodsInput {
   // The account's current quota windows (each names a reset cadence: 5h / 7d / ...).
@@ -23,10 +74,8 @@ export interface ComputeUsagePeriodsInput {
   recordedBoundaries?: Record<string, Array<{ startMs: number; endMs: number }>>;
 }
 
-// A period's boundary is "exact" only when it comes from a real upstream resetsAtMs
-// AND lands on an hour floor — because usage lives in whole UTC-hour buckets, a
-// mid-hour boundary can mis-bin up to one hour of tokens on each side, so those
-// totals are approximate too (grok review: current mustn't claim exactness it lacks).
+// Cadence-derived boundaries are exact only on an hour floor. Recorded reset points can
+// be exact at any timestamp because the writer starts a new sub-hour usage bucket there.
 function isHourAligned(ms: number): boolean {
   return ms % HOUR_MS === 0;
 }
@@ -117,17 +166,23 @@ export function computeUsagePeriods(input: ComputeUsagePeriodsInput): UsagePerio
       curStart = openRow.startMs;
       curBoundaryReal = true; // start came from a real recorded boundary
       recIdx++;
+    } else if (openRow && openRow.endMs <= nowMs && openRow.endMs > curStart) {
+      // A provider/reset-credit can cut a window short without changing its next reset
+      // deadline. The newest CLOSED period then ends at the real reset point inside the
+      // cadence-derived current span; start current usage there.
+      curStart = openRow.endMs;
+      curBoundaryReal = true;
     }
 
     // Current: [curStart, min(reset, now)). Exact only when the START boundary is a
-    // confirmed reset (not advanced) AND hour-aligned — hour-bucket quantization makes a
-    // mid-hour START approximate. curEnd is `now`, a LIVE cap on an in-progress period,
+    // confirmed reset (not advanced). A recorded mid-hour start is exact because usage
+    // buckets split there. curEnd is `now`, a LIVE cap on an in-progress period,
     // not a period-grid cut, so its (almost never hour-aligned) value must NOT force the
     // period approximate — else current would be ≈ forever and defeat phase 2 (grok
     // review P2R3-1). A real recorded curStart still needs hour-alignment.
     const curEnd = Math.min(reset, nowMs);
     const curExact =
-      !boundaryAdvanced && (curBoundaryReal || isHourAligned(reset)) && isHourAligned(curStart);
+      !boundaryAdvanced && (curBoundaryReal || (isHourAligned(reset) && isHourAligned(curStart)));
     if (curEnd > curStart) {
       const sums = sumWindow(buckets, curStart, curEnd);
       current.push({
@@ -165,7 +220,7 @@ export function computeUsagePeriods(input: ComputeUsagePeriodsInput): UsagePerio
       // start is strictly older — its real start becomes the next cursor.
       if (rec && cursor - rec.endMs <= tol && rec.startMs < cursor) {
         start = rec.startMs;
-        approximate = !(isHourAligned(rec.startMs) && isHourAligned(rec.endMs));
+        approximate = false;
         recIdx++;
       } else {
         start = cursor - winMs;

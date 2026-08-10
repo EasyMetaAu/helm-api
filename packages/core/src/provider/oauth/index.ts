@@ -132,6 +132,7 @@ export {
 export {
   type ComputeUsagePeriodsInput,
   computeUsagePeriods,
+  detectQuotaResetPeriods,
   type UsagePeriodsResult,
 } from "./usage-periods.js";
 export { ANTHROPIC_WINDOW_MINUTES, windowMinutesForKey } from "./window-minutes.js";

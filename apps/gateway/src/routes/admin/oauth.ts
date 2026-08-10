@@ -3,7 +3,6 @@ import {
   computeUsagePeriods,
   filterRetiredOpenAICodexLimits,
   GROK_OAUTH_MEDIA_MODELS,
-  windowMinutesForKey,
   windowsToActiveUsageRecovery,
   windowsToUsageLimit,
 } from "@helm/core";
@@ -23,6 +22,7 @@ import {
   isPermanentOAuthCredentialFailure,
   oauthCredentialFailureReason,
 } from "../../oauth/credential-failure.js";
+import { recordObservedQuotaResetPeriods } from "../../oauth/quota-reset-period.js";
 import type {
   AccountProxyInput,
   AdminApiDeps,
@@ -240,12 +240,12 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
   // silently shrinking an allowance (per-period token totals trending down). Token
   // totals are exact; historical boundaries are approximate (rolled back a fixed
   // window length — flagged per period). Cache-only + FAIL-OPEN: any gap → empty.
-  const EMPTY_PERIODS = { current: [], daily: [], weekly: [] };
+  const EMPTY_PERIODS = { current: [], periods: [], daily: [], weekly: [] };
   const readPeriods = async (
     providerId: string,
     account: string,
     rawTz: unknown,
-  ): Promise<{ current: unknown[]; daily: unknown[]; weekly: unknown[] }> => {
+  ): Promise<{ current: unknown[]; periods: unknown[]; daily: unknown[]; weekly: unknown[] }> => {
     const usage = deps.oauthUsage;
     const quotaStore = deps.oauthQuota;
     if (!usage || !quotaStore) return EMPTY_PERIODS;
@@ -264,12 +264,27 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       // "this window has burned X so far" summary. limit 1: we only want the current one.
       const earliestBucketMs = buckets[0]?.bucketMs ?? now; // ascending → [0] is earliest
       const dataStartMs = Math.max(retentionFloorMs, earliestBucketMs);
-      const { current } = computeUsagePeriods({
+      const recordedBoundaries = Object.fromEntries(
+        await Promise.all(
+          snapshot.windows.map(async (window) => [
+            window.key,
+            (
+              await deps.oauthResetPeriod
+                ?.queryPeriods(providerId, account, window.key, 53)
+                .catch(() => [])
+            )
+              ?.filter((row) => row.detectedAtMs >= row.periodEndMs)
+              .map((row) => ({ startMs: row.periodStartMs, endMs: row.periodEndMs })) ?? [],
+          ]),
+        ),
+      );
+      const { current, periods } = computeUsagePeriods({
         windows: snapshot.windows,
         buckets,
         nowMs: now,
         dataStartMs,
-        limit: 1,
+        limit: 52,
+        recordedBoundaries,
       });
       // History: NATURAL calendar day/week in the admin's local tz — exact, honest, and
       // free of the reset-period drift/reset-credit distortion. A period is `partial`
@@ -283,7 +298,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         rows.map((r) =>
           r.periodStartMs < dataStartMs || r.periodEndMs > now ? { ...r, partial: true } : r,
         );
-      return { current, daily: markPartial(daily), weekly: markPartial(weekly) };
+      return { current, periods, daily: markPartial(daily), weekly: markPartial(weekly) };
     } catch {
       return EMPTY_PERIODS;
     }
@@ -326,56 +341,19 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       if (currentUntil === quotaUntil) return;
       await deps.applyUsageLimit(providerId, account, quotaUntil, "replace").catch(() => {});
     };
-    // Detect real reset boundaries by diffing the OLD snapshot against the NEW windows,
-    // per window key: when resetsAtMs advances (old and new both present, new > old), the
-    // window that ended at the old reset just closed — record [oldReset, newReset). Must
-    // run BEFORE store.upsert overwrites the snapshot. FAIL-OPEN: a missed record only
-    // leaves that span on the approximate path (never breaks the refresh).
-    //
-    // Only record a SINGLE-window advance. If the refresh lagged by 2+ windows (the
-    // reset jumped by a multiple of the window length), [oldReset, newReset) would span
-    // several real periods; recording that as one exact period would sum tokens across
-    // them and fake a huge/empty allowance — a false shrink signal. Oversized jumps are
-    // skipped and stay on the approximate path (grok review P2R-1).
     const recordResetBoundaries = async (
       providerId: string,
       account: string,
       newWindows: OAuthQuotaWindow[],
-    ): Promise<void> => {
-      const sink = deps.oauthResetPeriod;
-      if (!sink) return;
-      const prior = await store.get(providerId, account).catch(() => null);
-      if (!prior) return;
-      const nowMs = Date.now();
-      const oldByKey = new Map(
-        prior.windows.map(
-          (w) => [w.key, { resetsAtMs: w.resetsAtMs, windowMinutes: w.windowMinutes }] as const,
-        ),
-      );
-      for (const w of newWindows) {
-        const old = oldByKey.get(w.key);
-        const oldReset = old?.resetsAtMs;
-        if (oldReset == null || w.resetsAtMs == null || w.resetsAtMs <= oldReset) continue;
-        // Require the advance to be one window long (within half a window's tolerance).
-        const winMinutes = windowMinutesForKey(
-          w.key,
-          w.windowMinutes ?? old?.windowMinutes ?? null,
-        );
-        if (winMinutes === null) continue; // unknown length → can't validate a single step
-        const winMs = winMinutes * 60_000;
-        if (Math.abs(w.resetsAtMs - oldReset - winMs) > winMs / 2) continue; // multi-window jump → skip
-        await sink
-          .record({
-            providerId,
-            account,
-            windowKey: w.key,
-            periodStartMs: oldReset,
-            periodEndMs: w.resetsAtMs,
-            detectedAtMs: nowMs,
-          })
-          .catch(() => {});
-      }
-    };
+    ): Promise<void> =>
+      recordObservedQuotaResetPeriods({
+        quotaStore: store,
+        periodStore: deps.oauthResetPeriod,
+        providerId,
+        account,
+        windows: newWindows,
+        observedAtMs: Date.now(),
+      });
     if (s) {
       try {
         const status = await s.listStatus({ forceRefresh: true, serial: true });
@@ -804,6 +782,14 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
             ...(creditId === undefined ? {} : { creditId }),
             idempotencyKey: reservation.idempotencyKey,
           }),
+        onConsumed: (result) =>
+          deps.onCodexQuotaResetConsumed?.(
+            "openai-codex",
+            account,
+            windows,
+            "manual",
+            result.outcome === "reset" ? Date.now() : null,
+          ),
       });
       return c.json(result, 200);
     } catch (e) {

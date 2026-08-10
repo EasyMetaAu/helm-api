@@ -4,7 +4,7 @@ import {
   packCodexQuotaMetadata,
   unpackCodexQuotaMetadata,
 } from "@helm/shared";
-import { and, eq } from "drizzle-orm";
+import { and, eq, lte } from "drizzle-orm";
 import type { OAuthQuotaStore } from "../ports.js";
 import type { PgDb } from "./migrate.js";
 import { oauthQuota } from "./schema.js";
@@ -49,6 +49,7 @@ export class PgOAuthQuotaStore implements OAuthQuotaStore {
       .onConflictDoUpdate({
         target: [oauthQuota.providerId, oauthQuota.account],
         set,
+        setWhere: lte(oauthQuota.capturedAt, snapshot.capturedAt),
       });
   }
 
