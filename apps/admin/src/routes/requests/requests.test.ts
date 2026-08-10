@@ -899,7 +899,7 @@ describe('requests detail page', () => {
           status_is_error_marker: undefined,
           error: {
             error_class: 'all_providers_failed',
-            http_status: 502,
+            upstream_status: 502,
             message: 'all providers failed',
             provider_raw: null,
           },
@@ -914,6 +914,29 @@ describe('requests detail page', () => {
     expect(err).toHaveTextContent(/all providers failed/);
     // trace_id is copyable.
     expect(screen.getByTestId('copy-trace')).toBeInTheDocument();
+  });
+
+  it('shows an in-stream failure without inventing HTTP 0 or claiming every attempt failed', () => {
+    render(DetailPage, {
+      data: {
+        detail: detail({
+          error: {
+            error_class: 'upstream_error',
+            upstream_status: null,
+            message: 'The prompt is invalid.',
+            provider_raw: { error: { code: 'invalid_prompt' } },
+          },
+        }),
+        payload: { captured: false },
+        requestId: 'tr_stream_err',
+      },
+    });
+
+    const err = screen.getByTestId('request-error');
+    expect(err).toHaveTextContent('The prompt is invalid.');
+    expect(err).toHaveTextContent('Provider HTTP status: —');
+    expect(err).not.toHaveTextContent('Provider HTTP status: 0');
+    expect(err).not.toHaveTextContent('all attempts');
   });
 
   it('shows reasoning effort metadata when full payload capture is off', () => {

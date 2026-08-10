@@ -105,6 +105,16 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
 }
 
 describe('DecisionChain', () => {
+  it('labels a committed attempt as partial when its stream later fails', () => {
+    render(DecisionChain, {
+      detail: detail({ status: 'error', stream_outcome: 'failed' }),
+    });
+
+    const servedAttempt = screen.getAllByTestId('attempt-row')[1];
+    expect(within(servedAttempt).getByText('partial')).toBeInTheDocument();
+    expect(within(servedAttempt).queryByText('Success')).not.toBeInTheDocument();
+  });
+
   it('renders classifier output with confidence and matched dimensions', () => {
     render(DecisionChain, { detail: detail() });
     const cls = screen.getByTestId('chain-classifier');

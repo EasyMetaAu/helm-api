@@ -131,6 +131,9 @@ export const FinalDecisionSchema = z.object({
   provider_model: z.string().nullable(),
   status: AttemptStatusSchema,
   error_reason: z.string().nullable(),
+  // A stream can fail after the provider attempt has committed its first real
+  // output. Preserve that terminal diagnostic without rewriting attempt status.
+  error_detail: AttemptErrorDetailSchema.nullable().optional(),
 });
 
 export const ServingAccountDecisionSchema = z.object({

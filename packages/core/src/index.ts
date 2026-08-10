@@ -496,6 +496,7 @@ export {
   guardPreOutputFailure,
   type PreOutputClassifier,
   preOutputClassifierFor,
+  streamErrorFromData,
 } from "./provider/failover-guard.js";
 export {
   createGeminiClient,

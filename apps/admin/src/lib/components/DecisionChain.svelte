@@ -249,6 +249,10 @@
     </p>
     <ul class="flex flex-col gap-2">
       {#each detail.provider_attempts as a, i (i)}
+        {@const partial =
+          a.outcome === 'success' &&
+          detail.status === 'error' &&
+          (detail.stream_outcome === 'failed' || detail.stream_outcome === 'truncated')}
         <li data-testid="attempt-row" class="flex flex-col gap-1 text-sm">
           <div class="flex flex-wrap items-center gap-2">
             <span class="font-mono text-ink-strong">{a.provider ?? '—'}</span>
@@ -263,8 +267,10 @@
                 >{$t('wire:')} {a.provider_model}</span
               >
             {/if}
-            <span class={outcomeBadge(a.outcome)} title={a.outcome}
-              >{$t(attemptCodeLabel(a.outcome))}</span
+            <span
+              class={partial ? 'badge-warning' : outcomeBadge(a.outcome)}
+              title={partial ? detail.stream_outcome : a.outcome}
+              >{$t(partial ? 'partial' : attemptCodeLabel(a.outcome))}</span
             >
             <span class="text-ink-muted">{formatDurationMs(a.latency_ms)}</span>
             {#if a.error_class}<span class="text-red-600" title={a.error_class}
