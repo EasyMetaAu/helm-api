@@ -80,6 +80,39 @@ function rawRecord(overrides: Record<string, unknown> = {}): Record<string, unkn
 }
 
 describe('toDetail', () => {
+  it('uses the recorded terminal stream error instead of fabricating HTTP 0', () => {
+    const detail = toDetail(
+      rawRecord({
+        final: {
+          model_alias: 'premium',
+          provider_model: 'claude-x',
+          status: 'error',
+          error_reason: 'upstream_error',
+          error_detail: {
+            upstream_status: null,
+            message: 'The prompt is invalid.',
+            provider_raw: {
+              type: 'response.failed',
+              response: {
+                error: { code: 'invalid_prompt', message: 'The prompt is invalid.' },
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    expect(detail.error).toEqual({
+      error_class: 'upstream_error',
+      upstream_status: null,
+      message: 'The prompt is invalid.',
+      provider_raw: {
+        type: 'response.failed',
+        response: { error: { code: 'invalid_prompt', message: 'The prompt is invalid.' } },
+      },
+    });
+  });
+
   it('maps the recorded request body byte count without inventing legacy values', () => {
     const measured = toDetail(rawRecord({ request_body_bytes: 1_572_864 }));
     const legacy = toDetail(rawRecord());

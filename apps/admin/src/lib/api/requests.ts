@@ -203,7 +203,7 @@ export interface RequestDetail {
   response_meta: Record<string, unknown> | null;
   error: {
     error_class: string;
-    http_status: number;
+    upstream_status: number | null;
     message: string;
     provider_raw: unknown;
   } | null;
@@ -322,6 +322,11 @@ interface RawDecisionRecord {
     provider_model?: string | null;
     status?: string;
     error_reason?: string | null;
+    error_detail?: {
+      upstream_status?: number | null;
+      message?: string;
+      provider_raw?: unknown;
+    } | null;
   };
   serving_account?: {
     provider_id?: string | null;
@@ -731,9 +736,14 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
       status === 'error'
         ? {
             error_class: String(raw.final?.error_reason ?? 'upstream_error'),
-            http_status: 0, // backend does not record the upstream http status yet
-            message: String(raw.final?.error_reason ?? 'request failed'), // already redacted
-            provider_raw: null, // redacted — never surface raw upstream bodies (Principle 7)
+            upstream_status:
+              typeof raw.final?.error_detail?.upstream_status === 'number'
+                ? raw.final.error_detail.upstream_status
+                : null,
+            message:
+              nonEmptyString(raw.final?.error_detail?.message) ??
+              String(raw.final?.error_reason ?? 'request failed'),
+            provider_raw: raw.final?.error_detail?.provider_raw ?? null,
           }
         : null,
     // Cost split from the record (docs/07 "cost breakdown (incl. eval cost)"): eval self-cost is

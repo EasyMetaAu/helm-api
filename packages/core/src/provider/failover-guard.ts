@@ -88,6 +88,10 @@ function errorProviderRaw(data: string): Record<string, unknown> | null {
   return out;
 }
 
+export function streamErrorFromData(classifier: PreOutputClassifier, data: string): UpstreamError {
+  return new UpstreamError("upstream_error", classifier.errorMessage(data), errorProviderRaw(data));
+}
+
 function nonEmptyString(value: unknown): boolean {
   return typeof value === "string" && value.length > 0;
 }
@@ -260,13 +264,7 @@ export async function* guardPreOutputFailure(
       sse = sse.slice(sep + 2);
       if (data !== null) {
         const cls = classifier.classify(data);
-        if (cls === "error") {
-          throw new UpstreamError(
-            "upstream_error",
-            classifier.errorMessage(data),
-            errorProviderRaw(data),
-          );
-        }
+        if (cls === "error") throw streamErrorFromData(classifier, data);
         if (cls === "output") {
           committed = true;
           for (const b of buffered) yield b;

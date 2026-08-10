@@ -5,11 +5,14 @@ import {
   type BudgetProbe,
   CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
   type DecisionRecord,
+  preOutputClassifierFor,
   type RateLimitProbe,
   type RateLimitResult,
+  streamErrorFromData,
   UpstreamError,
 } from "@helm/core";
 import {
+  type AttemptErrorDetail,
   cloneCarrierWithBody,
   type ErrorClass,
   ErrorClassSchema,
@@ -42,6 +45,7 @@ import {
   readAdmittedRequestBody,
 } from "../runtime/memory-admission.js";
 import { servedByAccount, stampServingAccount } from "../runtime/serving-account.js";
+import { errorDetailOf } from "./execute.js";
 import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
@@ -448,12 +452,20 @@ function isResponsesTerminalEvent(eventName: string): boolean {
 
 type ResponsesStreamOutcome = NonNullable<DecisionRecord["stream_outcome"]>;
 
+function responsesFrameErrorDetail(eventName: string, data: string): AttemptErrorDetail | null {
+  if (eventName !== "error" && eventName !== "response.failed") return null;
+  const classifier = preOutputClassifierFor("openai_responses");
+  if (classifier === null) return null;
+  return errorDetailOf(streamErrorFromData(classifier, data));
+}
+
 export function settleResponsesStreamOutcome(args: {
   decision: DecisionRecord;
   streamStatus: string | null;
   cancellationReason: RequestCancellationReason | null;
   caughtErrorReason: string | null;
   timedOut: boolean;
+  errorDetail?: AttemptErrorDetail | null;
 }): ResponsesStreamOutcome {
   const terminalObserved =
     args.streamStatus === "completed" ||
@@ -504,6 +516,7 @@ export function settleResponsesStreamOutcome(args: {
       ...args.decision.final,
       status: "error",
       error_reason: args.caughtErrorReason ?? "upstream_error",
+      ...(args.errorDetail ? { error_detail: args.errorDetail } : {}),
     };
   }
   return outcome;
@@ -1281,6 +1294,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         let streamStatus: string | null = null;
         let cancellationReason: RequestCancellationReason | null = null;
         let caughtErrorReason: string | null = null;
+        let finalErrorDetail: AttemptErrorDetail | null = null;
         let registryCommit: Promise<void> | null = null;
         const commitRegistry = async (status: string): Promise<void> => {
           if (deps.registry === undefined || result === null || streamResponseId === null) {
@@ -1334,6 +1348,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
             const snapshot = responseSnapshotFromStreamFrame(frame.event, frame.data);
             if (snapshot.responseId !== null) streamResponseId = snapshot.responseId;
             if (snapshot.status !== null) streamStatus = snapshot.status;
+            finalErrorDetail ??= responsesFrameErrorDetail(frame.event, frame.data);
             if (captureSessionResponse && terminalEvent && !captureBodies) {
               if (sessionTerminalCapture?.limited()) {
                 c.get("logger").log("warn", "session.response_limited", { trace_id: traceId });
@@ -1366,6 +1381,9 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           if (cancellationReason !== null) {
             // Cancellation ends the wire without a fabricated terminal event.
           } else {
+            if (err instanceof UpstreamError || err instanceof PipelineError) {
+              finalErrorDetail ??= errorDetailOf(err);
+            }
             caughtErrorReason =
               err instanceof PipelineError
                 ? err.error_class
@@ -1402,6 +1420,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                   cancellationReason,
                   caughtErrorReason,
                   timedOut: requestTimedOut(c),
+                  errorDetail: finalErrorDetail,
                 });
           // Record AFTER releaseConcurrency so the bookkeeping never extends the
           // concurrency hold, and AFTER the for-await loop ended so the pipeline's

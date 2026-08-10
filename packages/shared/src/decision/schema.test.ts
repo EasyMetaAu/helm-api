@@ -117,6 +117,26 @@ describe("DecisionRecordSchema", () => {
     expect(DecisionRecordSchema.safeParse(fullRecord()).success).toBe(true);
   });
 
+  it("preserves a terminal stream error separately from the committed attempt", () => {
+    const parsed = DecisionRecordSchema.parse({
+      ...fullRecord(),
+      final: {
+        model_alias: "premium",
+        provider_model: "claude-x",
+        status: "error",
+        error_reason: "upstream_error",
+        error_detail: {
+          upstream_status: null,
+          message: "The prompt is invalid.",
+          provider_raw: { error: { code: "invalid_prompt" } },
+        },
+      },
+    });
+
+    expect(parsed.provider_attempts[1]?.status).toBe("ok");
+    expect(parsed.final.error_detail?.message).toBe("The prompt is invalid.");
+  });
+
   it("round-trips body-free session linkage and keeps legacy rows valid", () => {
     expect(DecisionRecordSchema.parse(fullRecord()).session).toBeUndefined();
     const parsed = DecisionRecordSchema.parse({

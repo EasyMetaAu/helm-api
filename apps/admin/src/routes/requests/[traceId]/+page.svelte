@@ -656,16 +656,17 @@
     {#if d.error}
       <section data-testid="request-error" role="alert" class="alert-error text-sm">
         <h2 class="section-header text-red-700">{$t('Error')}</h2>
-        <p class="field-help mb-2 text-red-600">
-          {$t(
-            'This request ended in an error after all attempts. Details below are recorded as-is.',
-          )}
-        </p>
         <div>
           {$t('Error type')}:
           <span title={d.error.error_class}>{$t(attemptCodeLabel(d.error.error_class))}</span>
         </div>
-        <div>{$t('HTTP status')}: <span class="font-mono">{d.error.http_status}</span></div>
+        <div>
+          {$t('Provider')}
+          {$t('HTTP status')}:
+          <span class="font-mono"
+            >{d.error.upstream_status === null ? '—' : d.error.upstream_status}</span
+          >
+        </div>
         <div>{$t('Message')}: {d.error.message}</div>
         <div class="mt-1 text-xs text-red-500">
           {$t('Raw provider response')}: {d.error.provider_raw === null
