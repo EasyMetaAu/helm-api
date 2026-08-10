@@ -88,9 +88,9 @@
 
   // Client-side transcript rebuild for sessions the server refuses to reconstruct
   // (session_recovery_limited). Loaded only on click — a large transcript can be many
-  // MB, so we stream raw revisions and rebuild in the browser. The target request and
-  // response reuse the normal JsonViewer slots; the raw revision pairs stay separate
-  // and are ordered by their persisted timestamp instead of being flattened as chat.
+  // MB, so we stream raw revisions and rebuild in the browser. Only data retrieval is
+  // different: the target request and response reuse the normal server-recovery lenses.
+  // Raw revision pairs stay separate and are ordered by their persisted timestamp.
   let transcriptLoaded = $state(false);
   let transcriptTimeline = $state<unknown[]>([]);
 
@@ -447,25 +447,23 @@
             {$t('Payload capture is available for this call. Large bodies are loaded on demand.')}
           {/if}
         </p>
-        {#if !transcriptLoaded}
-          <!-- Two lenses over the same captured body: Chat (a readable user⇄agent
-               transcript, default) and Raw (the JSON tree — source of truth). -->
-          <div class="mb-3 flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              data-testid="request-view-chat"
-              class={`rounded border px-3 py-1 text-sm ${reqView === 'chat' ? 'border-action bg-action text-white' : 'border-border bg-surface text-ink-muted hover:bg-canvas'}`}
-              onclick={() => (reqView = 'chat')}>{$t('Conversation')}</button
-            >
-            <button
-              type="button"
-              data-testid="request-view-raw"
-              class={`rounded border px-3 py-1 text-sm ${reqView === 'raw' ? 'border-action bg-action text-white' : 'border-border bg-surface text-ink-muted hover:bg-canvas'}`}
-              onclick={() => (reqView = 'raw')}>{$t('Raw')}</button
-            >
-          </div>
-        {/if}
-        {#if !transcriptLoaded && reqView === 'chat'}
+        <!-- Two lenses over the same captured body: Chat (a readable user⇄agent
+             transcript, default) and Raw (the JSON tree — source of truth). -->
+        <div class="mb-3 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            data-testid="request-view-chat"
+            class={`rounded border px-3 py-1 text-sm ${reqView === 'chat' ? 'border-action bg-action text-white' : 'border-border bg-surface text-ink-muted hover:bg-canvas'}`}
+            onclick={() => (reqView = 'chat')}>{$t('Conversation')}</button
+          >
+          <button
+            type="button"
+            data-testid="request-view-raw"
+            class={`rounded border px-3 py-1 text-sm ${reqView === 'raw' ? 'border-action bg-action text-white' : 'border-border bg-surface text-ink-muted hover:bg-canvas'}`}
+            onclick={() => (reqView = 'raw')}>{$t('Raw')}</button
+          >
+        </div>
+        {#if reqView === 'chat'}
           {#if !requestLoaded || (hasPayloadPart('response') && !responseLoaded)}
             <div class="rounded border border-dashed border-border bg-canvas p-3">
               <p class="field-help mb-2">
@@ -538,7 +536,7 @@
           {/if}
         </p>
         <!-- Before rebuild: offer the button. On success transcriptLoaded flips and the
-             captured-path branch above reuses the normal request JsonViewer. -->
+             captured-path branch above reuses the normal Conversation/Raw lenses. -->
         {#if data.payload?.reason === 'session_recovery_limited'}
           <div class="mt-3 rounded border border-dashed border-border bg-canvas p-3">
             <p class="field-help mb-2">

@@ -714,17 +714,17 @@ describe('requests detail page', () => {
       },
     });
 
-    // Not loaded up front — the button is present, the normal request lenses are not.
+    // Not loaded up front — the rebuild button is present, while body controls stay lazy.
     expect(rebuildSessionTranscript).not.toHaveBeenCalled();
     expect(screen.queryByTestId('request-view-raw')).not.toBeInTheDocument();
     await fireEvent.click(screen.getByTestId('load-transcript'));
     expect(rebuildSessionTranscript).toHaveBeenCalledWith('tr_big');
 
-    // Large Session recovery uses the existing JsonViewer directly for the request,
-    // target response, and time-ordered revision timeline. It must not flatten raw
-    // revisions into the ordinary Conversation lens.
-    expect(await screen.findByTestId('request-body')).toHaveTextContent(/"model": "auto"/);
-    expect(screen.queryByTestId('conversation')).not.toBeInTheDocument();
+    // Client rebuilding changes only where the body came from. The normal Conversation
+    // and Raw lenses must remain identical to server-side Session recovery.
+    expect(await screen.findByTestId('conversation')).toHaveTextContent('question');
+    await fireEvent.click(screen.getByTestId('request-view-raw'));
+    expect(screen.getByTestId('request-body')).toHaveTextContent(/"model": "auto"/);
     expect(screen.getByTestId('response-body')).toHaveTextContent(/"ok": true/);
     expect(screen.getByTestId('session-timeline-body')).toHaveTextContent('Array(1)');
   });

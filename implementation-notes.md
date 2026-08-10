@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-08-10 · 大 Session 客户端重建恢复服务端同款 Conversation 展示（Admin / requests debug，docs/07/11，原则 1/3/7）
+
+- **回归**：上一版为了展示时间线，把 `transcriptLoaded` 后的主请求区域强制切到 `JsonViewer`，隐藏了服务端恢复路径使用的 Conversation/Raw tabs，导致客户端加载后的可读性明显下降。
+- **修复**：客户端只替换数据获取与重建方式；重建完成后继续走同一套 Conversation、Raw `JsonViewer`、Response `StreamViewer/JsonViewer` 路径。按记录时间排序的 revision 时间线仍作为额外审计视图保留。
+
 ## 2026-08-10 · 配额统计按真实重置点切分（OAuth quota / Admin providers，docs/04/11，原则 3/7）
 
 - **根因**：旧 writer 在 `resetsAtMs` 推进时写入 `[oldReset,newReset)`，把新周期误当成已结束历史；自然周 UI 又掩盖了 OpenAI 提前重置、reset-credit 重置和非整点边界，所以“每周”并不等于真实额度周期。
@@ -16,7 +21,7 @@
 ## 2026-08-10 · 大 Session 客户端重建按记录时间展示并提前停止分页（Admin / requests debug，docs/07/11，原则 1/3/7）
 
 - **现场与根因**：生产 v0.28.56 的目标详情点击后约 46 秒才完成，普通 Conversation 把重建后的请求 `input` 与最终响应折成一条聊天；现场原始 `input` 自身就是角色分段排列，因此 UI 没有再次排序，但这种折叠不能代表 Session 的真实请求/响应发生顺序。大 Session 客户端路径还丢弃了目标 revision 已保存的 `responseJson`，所以最终响应只能退化成脱敏 metadata。
-- **展示修复**：raw revision API 增加已有的 `sequence` 与 `createdAt`；浏览器把每个 revision 的 request delta / response snapshot 组成记录，按 `createdAt` 升序、`sequence` 稳定打破同毫秒并列，并统一复用现有 `JsonViewer`。目标请求和目标响应也分别进入原有 Request / Response JSON viewer；大 Session 不再经过普通 Conversation lens，避免把“请求文档顺序”误称为“会话时间线”。
+- **展示修复**：raw revision API 增加已有的 `sequence` 与 `createdAt`；浏览器把每个 revision 的 request delta / response snapshot 组成记录，按 `createdAt` 升序、`sequence` 稳定打破同毫秒并列。目标请求和目标响应继续进入原有 Conversation/Response viewer；额外时间线使用 `JsonViewer` 展示持久化 revision 记录，避免把“请求文档顺序”误称为“会话时间线”。
 - **加载加速**：浏览器一旦收到目标 revision 就停止游标分页，不再下载该目标之后的同 Session revision；行上限从 50 恢复到 100，单页 `maxBytes=8 MiB` 不变，所以服务端单请求正文物化上限不扩大。没有改成多进程/并发请求，因为下一页游标依赖上一页的 soft-byte 结果，并发会产生跳页或重复读取风险。
 - **边界**：时间线展示的是持久化的增量 request delta 与可用 response snapshot，不伪装成原始 HTTP body；Session 恢复仍是 `exact=false`、不可精确 Retry。响应为空表示当时没有可用快照，不补造内容。
 
@@ -74,14 +79,6 @@
 - **TDD**：pool.test 先加失败用例（parked 成员带 flag 仍应被选中→原本落到兄弟）→ Red→加 flag+bypass→Green（99/99）。admin-oauth/oauth 路由测试补 round-trip 与 400 校验。
 - **坑**：worktree 内编辑必须用 worktree 绝对路径——首次 Edit 误落主库（共享 checkout），已 `git checkout --` 干净回退后在 worktree 重做。
 
-## 2026-08-07 · per-key `max_reasoning_effort` 上限在三处身份解析器漏挂，全协议静默失效（Gateway / Key governance，docs/06/11，原则 2/7）
-
-- **现场（box v0.28.43）**：luke 的 key 设了 `max_reasoning_effort=medium`，但 `decision_json` 显示 Anthropic 请求 `xhigh→xhigh`、Responses 请求 `high→high`，**两协议都没被 clamp**。DB 列值正确、v0.28.39 的 `clampClientReasoningEffortToKeyMax` 也被各路由正确调用。
-- **根因**：composition root（`server.ts`）里 `/v1/chat`、`/v1/messages`、`/v1/responses` 各自**内联**一份 `record → caps` 映射（三份几乎相同的 25 行块）。v0.28.39 加 `max_reasoning_effort` 时改了 DB、clamp 调用点、以及 `middleware/auth.ts` 的构造器——但**漏了这三份内联副本**。于是 `identity.caps.maxReasoningEffort` 运行时恒为 `undefined`，clamp 第一行 `if (maxEffort == null) return req` 直接 no-op。`middleware/auth.ts` 版本有该字段，但那个 middleware 并不服务这三条路由（它们走 `resolveIdentity`/内联 resolver）。经典“同一映射多副本漂移”bug（与 memory 里 KeySummary/toSummary 同类）。
-- **修复（消除漂移，不加兼容层）**：把三份内联块抽成单一 `capsFromRecord(record)`（`routes/messages.ts` 导出），三处 resolver 全部改调它。新增 cap 只改一处，物理上杜绝再漂移。删除 server.ts ~90 行重复。
-- **测试**：`messages.caps.test.ts` 直接 pin 映射（`max_reasoning_effort=medium → caps.maxReasoningEffort=medium`，null 透传，其余 caps 齐全）；`responses.test.ts` 新增用例走**真实 `capsFromRecord`** 构造 identity + 真实 pipeline + stateful passthrough continuation，断言到达 `route()` 的 carrier body 与 `reasoning_effort` 均被压到 medium。临时注释掉修复 → 两测试红，且 responses 用例复现 box 症状 `expected 'high' to be 'medium'`；恢复后全绿（reasoning-cap 29 / auth 10 / responses 99 / messages+chat+pipeline 191 全绿）。
-- **坑/边界**：clamp 本身对 `openai_responses` 原生 passthrough carrier 处理完整（早已覆盖），本次纯粹是 cap 值没送达。三处 resolver 之外，`realtime` 的 auth 子集不含 reasoning cap（realtime 无 reasoning，无需）。box 需部署新版本后该 key 才会真正生效（旧进程仍 undefined）。
-
 ## 2026-08-07 · 真实上游超长溢出在链耗尽时胜出终态，修复客户端无法压缩（Provider execution / protocol errors，docs/04/05/07，原则 3/5/8）
 
 - **现场（box `c211e4a1`，v0.28.42）**：Claude Code 发 ~102 万 token，Anthropic（链首、最大窗口）返回真实 400 `prompt is too long: 1022145 tokens > 1000000 maximum`（**无** `context_length_exceeded` code）。helm 把它当可重试 `context_too_small` 继续 fallback；`xai/grok-4.5` 因独立翻译 bug 返回 422，把 `onlyContextOrCapabilitySkips` 打成 false，终态选择器降级为合成 `all_providers_failed / 502`。客户端拿不到真实 400 → 认不出该压缩 → 卡死。
@@ -95,6 +92,7 @@
 
 ## 历史条目摘要（最新要点）
 
+- **2026-08-07 · per-key `max_reasoning_effort` 上限**：统一三协议身份 caps 映射，避免内联副本漂移导致上限静默失效，完整原文经 git history 回溯。
 - **2026-08-06 · HALF_OPEN 探测锁释放与所有权令牌**：所有被允许的 provider/image 尝试都结算 breaker，HALF_OPEN abort 仅凭匹配的 probe token 释放对应探针，避免锁永久卡住或旧请求误清新探针；完整原文经 git history 回溯。
 - **2026-08-04 · per-key 请求内容存储覆盖优先级**：显式 `none`/`payload`/`session` 无条件覆盖实时全局设置，仅 `null`/`undefined` 继承；共享 capture helper 一处修复覆盖全部协议入口，完整原文经 git history 回溯。
 - **2026-08-04 · Codex 跨协议 fallback 修复**：可折叠 Responses items 走协议翻译，generic Responses 禁止 Codex 私有 passthrough，多账号池恢复 runtime profile；unknown/caller-linked/encrypted sub-agent items 继续 fail-closed，完整原文经 git history 回溯。

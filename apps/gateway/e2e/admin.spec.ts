@@ -368,15 +368,15 @@ test.describe("admin request payload view", () => {
     await expect(page.getByTestId("payload-summary")).toContainText(
       /too large to rebuild on the server/i,
     );
-    // The server-side payload-part buttons and the normal request lenses stay absent
-    // until the rebuild button is clicked.
+    // The server-side payload-part buttons and body lenses stay lazy until rebuilding.
     await expect(page.getByTestId("load-conversation")).toHaveCount(0);
     await expect(page.getByTestId("load-request-body")).toHaveCount(0);
     await expect(page.getByTestId("request-view-raw")).toHaveCount(0);
 
     await page.getByTestId("load-transcript").click();
-    // Large Session recovery reuses the standard JsonViewer for the target request,
-    // response, and recorded-time revision list without flattening them into chat.
+    // Client rebuilding uses the same Conversation/Raw lenses as server recovery.
+    await expect(page.getByTestId("conversation")).toContainText("rebuilt-in-browser");
+    await page.getByTestId("request-view-raw").click();
     await expect(page.getByTestId("request-body")).toContainText("rebuilt-in-browser");
     await expect(page.getByTestId("response-body")).toContainText("rebuilt-response");
     await expect(page.getByTestId("session-timeline-body")).toContainText("Array(1)");
