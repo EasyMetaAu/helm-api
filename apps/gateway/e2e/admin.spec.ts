@@ -350,12 +350,14 @@ test.describe("admin request payload view", () => {
           revisions: [
             {
               requestId: SEED_TRACE_ID,
+              sequence: 1,
+              createdAt: 1_786_327_200_000,
               parentRequestId: null,
               retainCount: 0,
               requestDeltaJson: '[{"role":"user","content":"rebuilt-in-browser"}]',
               requestEnvelopeJson: '{"model":"auto","messages":[]}',
               responseId: null,
-              responseJson: null,
+              responseJson: '{"ok":"rebuilt-response"}',
             },
           ],
         }),
@@ -373,9 +375,10 @@ test.describe("admin request payload view", () => {
     await expect(page.getByTestId("request-view-raw")).toHaveCount(0);
 
     await page.getByTestId("load-transcript").click();
-    // After rebuild the whole Request section renders through the SAME captured-path
-    // lenses; switch to Raw and assert the standard request-body JsonViewer shows it.
-    await page.getByTestId("request-view-raw").click();
+    // Large Session recovery reuses the standard JsonViewer for the target request,
+    // response, and recorded-time revision list without flattening them into chat.
     await expect(page.getByTestId("request-body")).toContainText("rebuilt-in-browser");
+    await expect(page.getByTestId("response-body")).toContainText("rebuilt-response");
+    await expect(page.getByTestId("session-timeline-body")).toContainText("Array(1)");
   });
 });

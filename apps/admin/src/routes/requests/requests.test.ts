@@ -694,7 +694,18 @@ describe('requests detail page', () => {
   });
 
   it('rebuilds a too-large transcript client-side only on click', async () => {
-    rebuildSessionTranscript.mockResolvedValueOnce({ model: 'auto', messages: [] });
+    rebuildSessionTranscript.mockResolvedValueOnce({
+      request: { model: 'auto', messages: [{ role: 'user', content: 'question' }] },
+      response: { ok: true },
+      timeline: [
+        {
+          recorded_at: '2026-08-10T01:00:00.000Z',
+          sequence: 1,
+          request: [{ role: 'user', content: 'question' }],
+          response: { ok: true },
+        },
+      ],
+    });
     render(DetailPage, {
       data: {
         detail: detail(),
@@ -709,11 +720,13 @@ describe('requests detail page', () => {
     await fireEvent.click(screen.getByTestId('load-transcript'));
     expect(rebuildSessionTranscript).toHaveBeenCalledWith('tr_big');
 
-    // After rebuild the whole Request section renders through the SAME captured-path
-    // lenses (Chat/Raw) — the rebuilt body is in the normal request slot, no separate
-    // viewer. Switch to Raw and assert the standard request-body JsonViewer shows it.
-    await fireEvent.click(await screen.findByTestId('request-view-raw'));
+    // Large Session recovery uses the existing JsonViewer directly for the request,
+    // target response, and time-ordered revision timeline. It must not flatten raw
+    // revisions into the ordinary Conversation lens.
     expect(await screen.findByTestId('request-body')).toHaveTextContent(/"model": "auto"/);
+    expect(screen.queryByTestId('conversation')).not.toBeInTheDocument();
+    expect(screen.getByTestId('response-body')).toHaveTextContent(/"ok": true/);
+    expect(screen.getByTestId('session-timeline-body')).toHaveTextContent('Array(1)');
   });
 
   // A 1×1 PNG (bare base64) — the form a generated/input image takes inside a body.

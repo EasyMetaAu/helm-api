@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-08-10 · 大 Session 客户端重建按记录时间展示并提前停止分页（Admin / requests debug，docs/07/11，原则 1/3/7）
+
+- **现场与根因**：生产 v0.28.56 的目标详情点击后约 46 秒才完成，普通 Conversation 把重建后的请求 `input` 与最终响应折成一条聊天；现场原始 `input` 自身就是角色分段排列，因此 UI 没有再次排序，但这种折叠不能代表 Session 的真实请求/响应发生顺序。大 Session 客户端路径还丢弃了目标 revision 已保存的 `responseJson`，所以最终响应只能退化成脱敏 metadata。
+- **展示修复**：raw revision API 增加已有的 `sequence` 与 `createdAt`；浏览器把每个 revision 的 request delta / response snapshot 组成记录，按 `createdAt` 升序、`sequence` 稳定打破同毫秒并列，并统一复用现有 `JsonViewer`。目标请求和目标响应也分别进入原有 Request / Response JSON viewer；大 Session 不再经过普通 Conversation lens，避免把“请求文档顺序”误称为“会话时间线”。
+- **加载加速**：浏览器一旦收到目标 revision 就停止游标分页，不再下载该目标之后的同 Session revision；行上限从 50 恢复到 100，单页 `maxBytes=8 MiB` 不变，所以服务端单请求正文物化上限不扩大。没有改成多进程/并发请求，因为下一页游标依赖上一页的 soft-byte 结果，并发会产生跳页或重复读取风险。
+- **边界**：时间线展示的是持久化的增量 request delta 与可用 response snapshot，不伪装成原始 HTTP body；Session 恢复仍是 `exact=false`、不可精确 Retry。响应为空表示当时没有可用快照，不补造内容。
+
 ## 2026-08-08 · Grok Imagine 仅复用 SuperGrok OAuth 媒体链路（Grok media spec §2/6–10/13）
 
 - **凭证与上游边界**：客户端 `helm_live_*` 只做 Helm 鉴权；媒体执行复用后台已连接 xAI 订阅账号的 OAuth bearer。文本仍去 `cli-chat-proxy.grok.com/v1`，图片/视频固定去 `api.x.ai/v1`，不保留官方 `XAI_API_KEY` 分支。
@@ -88,26 +95,10 @@
 - **修复**：`execute.ts` / `image-chain.ts` 在 allow 后 `settleBreaker` + `try/finally`（或等价显式 release）；`recordAbort(model, probeToken?)` 仅当 `probeToken` 与 entry 匹配时清锁；`canAttempt` 对 probe 返回 opaque `probeToken`。
 - **测试**：HALF_OPEN OAuth 429 / capability / free_429；breaker 单测「stale CLOSED abort 不释放新 probe」；image-chain invalid-request / capability 恢复。阈值仍 5 / 30s。
 
-## 2026-08-04 · 修复 per-key 请求内容存储覆盖的优先级回归（Gateway / Telemetry，docs/06/07/11，原则 2/7）
-
-- **回归根因**：`withRequestContentMode`（payload-capture.ts）自 PR #677（`52bb5f9b`，v0.28.29）起把 key 覆盖包在 `globallyEnabled() && …` 内——全局关闭即成 hard-off，强制所有 key 关闭，与 #675 承诺的“key 显式值 > 全局值”完全相反。测试也被同步改成断言这个错误语义，故 CI 一直绿。生产实测：WW 落库 `request_content_mode='payload'` 但全局关闭后 38 个请求全部无 payload。
-- **修复**：恢复 #675 原始语义——`none`/`payload`/`session` 无条件覆盖实时全局开关，仅 `null`/`undefined` 继承全局。仅改共享 helper 一处，Chat/Messages/Responses/Gemini/Images/Interactions/Admin Replay 复用同一 getter，自动同修。
-- **契约澄清**：更正 2026-08-02 Session-storage 条目中“全局 metadata-only 是 hard-off、key 不能绕过”的错误措辞。资源保护的 generation-drop（切换后丢弃已排队正文写入）保持不变——那是全局开关翻转时的机制，与 per-key 优先级正交。
-
-## 2026-08-04 · Codex 请求跨协议 fallback 全军覆没（Provider execution / Protocol，docs/03/04/05，原则 3/5/8）
-
-- **现场根因（三个叠加的独立 bug）**：一个带 Codex 原生 items（`custom_tool_call` / caller-linked PTC）的 Responses 请求，在 GPT 订阅池耗尽后返回 `all_providers_failed`——Grok 422、Claude/DeepSeek/zenmux/openrouter 全被 skip。用户切 Grok / Claude 都用不了。
-  - **Bug A**：`protocolGuardSkipReason`（execute.ts）对“源 Responses + 目标非 Responses + 带 native items”一律整体跳过候选，连协议翻译都不做——过度保守。实测 IR 折叠器 `toIRRequest` 已能把 `custom_tool_call` / 无 caller 的 `function_call` 无损折进 `assistant.tool_calls`；真正跨协议装不下的只有 unknown item 类型与 caller-linked PTC 并行链。
-  - **Bug B**：`canUseNativePassthrough` 只比协议，把 Codex(responses)→Grok(generic responses) 判为“同协议→透传”，逐字（只换 model 名）把 Codex 私有 body 发给 Grok → 422。
-  - **Bug C（矛盾根因）**：`candidateGuardSkipReason` 的 profile 检查读 `target.provider?.nativeProtocolProfile`，但 `createSerializingClient` 逐方法转发时**漏了 `nativeProtocolProfile` 这个数据字段**。多账号 OAuth 池（box xai 有 2 个账号）因 pool 要求“所有成员 profile 一致才暴露”而塌成 `undefined`，profile 检查失效 → Grok 漏过 skip 发出 422。这解释了诊断时“Grok 未 skip 却 422、Claude 被 skip”的字面矛盾（两 guard 条件不对称，非数据被 mutate）。
-- **修复**：(A) 新增纯函数 `responsesInputItemsAreCrossProtocolLossy`（core，导出），把两个 guard 收窄为“仅 unknown_items 或 caller-linked/unknown item 才 skip”，可折叠 items 放行走翻译。(B) `canUseNativePassthrough` 新增 `sourceCarriesResponsesNativeItems` + `targetIsGenericResponsesProfile` 两个输入与新 disable reason `responses_native_body_provider_incompatible`：Codex-origin body → generic responses provider 不透传，fall through 到 `chatCompletion(Stream)` 翻译，`openaiToGenericResponsesRequest` 天生产出干净 body。(C) `createSerializingClient` 补透传 `nativeProtocolProfile`，让多成员池正确暴露 profile。
-- **权衡与边界**：profile 判据选择读 pool client 运行时字段（Bug C 修好后可靠）而非 `resolveAttemptTarget` 静态标志——更贴近“这个成员实际讲什么协议”。有损降级会丢 `reasoning.encrypted_content`（Grok 本就不认）；caller-linked PTC / unknown items **仍保持 hard skip**，不做有损翻译。判据读 `provider_raw.responses_input_items`/`unknown_items`（copy-on-write 恒定、是“带不可翻译结构”的精确信号），**不改读** `native_request.body.input`（任何 responses 请求都有 input，会误判）。TDD 全绿：新增 predicate 单测、pool profile 透传测、两个 guard 收窄测、Grok 走翻译集成测（411 tests）。
-- **Grok 双轮 review 追加修复**：(High) 放行 `type:"custom"` 工具后必须真正降级——`normalizeResponsesTools` 把 custom 工具声明转成标准 function tool 进 `IR.tools`（不再进 `responses_native_tools`），否则跨协议到 Claude 时工具声明整个丢失、agent 工具环断（`responses_native_tools` 不在 anthropic forward 白名单）。custom 降级后 `responses_native_tools` 只剩服务端工具，guard 恢复无条件 hard-skip（删掉了中途加的 allowlist 判据，净简化）。原始 custom 形状仍由 `responses_tools`（rawTools 快照）保护 Codex→Codex 同协议回渲染。(Medium) generic responses target 不再 forward `responses_input_items`（`renderProviderRawForTarget` 加 `targetIsGenericResponsesProfile` 参数删该 key），正确性不再依赖 Grok 客户端碰巧 ignore 它。(Medium) serialize-client 补透传 `streamReframed`（连同 profile）。
-- **Codex sub-agent 加密编排确实无法 fallback（用户直觉证实）**：线上 `cbb3ca55` 请求带 Codex GPT-5.6 新 agent 运行时的两类 unknown item——`agent_message`（子 agent 间通信，content 多含 **`encrypted_content`** 服务端密文）与 `additional_tools`（工具声明打包成 input item）。二者落进 `unknown_items`（responses.ts default 分支）→ 跨协议 skip。这正是用户最初"部分数据只在服务端、取不回"的**真实实例**：`agent_message.encrypted_content` 本地只有密文，翻译到 Anthropic 无法解密还原，子 agent 说了什么就丢——**保持 skip 是正确的**（宁可明确失败也不产出语义残缺请求）。修复：链耗尽时若检测到 `responses_native_items_*` skip，把 `all_providers_failed` 的 message 从"all providers failed"换成明确说明"请求带 Codex sub-agent/encrypted agent_message 类 Responses native items，无法跨 provider 翻译，唯一兼容的 provider 不可用"（execute.ts else 分支，不新增 error_class，避免协议映射连锁）。结论：**sub-agent 模式结构上绑定 OpenAI 服务端，本质不可 fallback**；普通 response 模式（message + tool_call + custom_tool_call + reasoning）不受影响、已能兜底 Grok/Claude。
-- **已知限制（Grok 次要发现，本 PR 不修）**：`custom_tool_call.input` 是 free-form 文本（apply_patch 的 patch / shell 命令），fold 进 IR `function.arguments` 后，Anthropic 侧 `JSON.parse` 失败会回退成 `{}`——历史轮 tool call 的**参数**在跨协议翻译时降级为空对象。这是既有 fold 语义（本 PR 只是让该路径可达），影响历史工具调用的参数保真度，不影响 Claude 理解“上一轮做过什么”（结果在 tool_output 里）与调用新工具。修它需改 IR tool-call arguments 的 non-JSON 承载语义、波及所有 provider，超出本 PR 范围，留作 follow-up。
-- **数据完整性论证（回应“服务端数据取不回”质疑）**：原跳过的理由是“Responses body 不完整、部分数据只在服务端”。代码+OpenAI 文档双证：真正“历史在服务端”的机制只有 `previous_response_id`，该 guard **原封不动保留**（`protocolGuardSkipReason` 在收窄的 items 检查之前先 return，换 provider 续接另有 `_provider_mismatch`）。Codex 恒发 `store:false`，语义是服务端无状态、客户端每轮重发完整历史——`sanitizeStoreFalseInputItems` 主动删每个 item 的 `id` 死引用，正证明 `input[]` 自包含、正文全在 body（`custom_tool_call.input` / `function_call.arguments` 皆 inline `z.string()`）。翻译丢弃的 `reasoning.encrypted_content` 是 OpenAI 私有的**加密推理 token 缓存（跨轮 reasoning 连续性优化），不是对话内容**——对话由 message/tool item 承载并完整保留，且任何非-OpenAI provider 本就无法消费该加密串。故“可折叠 ⇒ 自包含 ⇒ 可翻译”成立，放行范围无需再收窄。
-
 ## 历史条目摘要（最新要点）
+
+- **2026-08-04 · per-key 请求内容存储覆盖优先级**：显式 `none`/`payload`/`session` 无条件覆盖实时全局设置，仅 `null`/`undefined` 继承；共享 capture helper 一处修复覆盖全部协议入口，完整原文经 git history 回溯。
+- **2026-08-04 · Codex 跨协议 fallback 修复**：可折叠 Responses items 走协议翻译，generic Responses 禁止 Codex 私有 passthrough，多账号池恢复 runtime profile；unknown/caller-linked/encrypted sub-agent items 继续 fail-closed，完整原文经 git history 回溯。
 
 - **2026-08-02 · Responses WebSocket 首输出前恢复并提前释放物化准入**：上游 WebSocket 只产生 created/in_progress 后关闭时丢弃未提交 preamble 并按连接重试预算重连、耗尽回退 HTTP/SSE，最多缓冲两个 preamble、第三个重复立即提交为已开始输出，真实输出绝不重放，`response.cancelled` 两处均为失败终态；bridge 用进程内 `WeakMap<Request,callback>` 把 request-body lease 交给可信内部路由、随机 proof 匹配后第二次 parse 完即标物化，避免长期持有 6 倍预留，并发大请求仍受动态 headroom 保护，未恢复任何固定大小上限，完整原文经 git history 回溯。
 

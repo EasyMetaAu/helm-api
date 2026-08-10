@@ -929,13 +929,31 @@ export async function getRequestPayloadPart(
 // See the top-of-file @helm/shared import for why this one exception to the
 // "admin imports NO core/gateway business logic" rule exists.
 
+export interface SessionRevisionView extends SessionRevisionForRestore {
+  sequence: number;
+  createdAt: number;
+}
+
 export interface SessionRevisionsPageView {
   captured: boolean;
   reason?: 'no_session' | 'session_unavailable';
   sessionRef?: string;
   targetRequestId?: string;
   nextSequence?: number | null;
-  revisions?: SessionRevisionForRestore[];
+  revisions?: SessionRevisionView[];
+}
+
+export interface SessionTimelineEntry {
+  recorded_at: string;
+  sequence: number;
+  request: unknown;
+  response: unknown;
+}
+
+export interface RebuiltSessionTranscript {
+  request: unknown;
+  response?: unknown;
+  timeline: SessionTimelineEntry[];
 }
 
 // GET /admin/api/requests/:id/session-revisions?after=<seq> -> one raw revision page.
@@ -945,10 +963,9 @@ export async function getSessionRevisionsPage(
 ): Promise<SessionRevisionsPageView> {
   const suffix = afterSequence === undefined ? '' : `?after=${encodeURIComponent(afterSequence)}`;
   try {
-    const res = await fetch(
-      `${BASE}/${encodeURIComponent(requestId)}/session-revisions${suffix}`,
-      { headers: { accept: 'application/json' } },
-    );
+    const res = await fetch(`${BASE}/${encodeURIComponent(requestId)}/session-revisions${suffix}`, {
+      headers: { accept: 'application/json' },
+    });
     if (!res.ok) return { captured: false };
     return (await res.json()) as SessionRevisionsPageView;
   } catch {
@@ -956,11 +973,22 @@ export async function getSessionRevisionsPage(
   }
 }
 
-// Walk the keyset cursor to collect the whole revision chain, then rebuild the target
-// request client-side. Returns the parsed request body (what JsonViewer renders).
-// Throws on an unavailable session so the caller can surface an error state.
-export async function rebuildSessionTranscript(requestId: string): Promise<unknown> {
-  const revisions: SessionRevisionForRestore[] = [];
+function parseSessionJson(value: string | null | undefined): unknown {
+  if (value == null) return null;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
+}
+
+// Walk the keyset cursor only until the requested revision is present, then rebuild
+// its request + response and expose the raw revision pairs in recorded-time order.
+// Throws on an unavailable/incomplete session so the caller can surface one error.
+export async function rebuildSessionTranscript(
+  requestId: string,
+): Promise<RebuiltSessionTranscript> {
+  const revisions: SessionRevisionView[] = [];
   let after: number | undefined;
   let targetRequestId: string | undefined;
   for (;;) {
@@ -968,13 +996,28 @@ export async function rebuildSessionTranscript(requestId: string): Promise<unkno
     if (!page.captured) throw new Error(page.reason ?? 'session unavailable');
     targetRequestId = page.targetRequestId ?? requestId;
     if (page.revisions) revisions.push(...page.revisions);
+    if (page.revisions?.some((revision) => revision.requestId === targetRequestId)) break;
     const next = page.nextSequence;
     // Stop at the final page, or if the cursor fails to advance (defensive: a stuck
     // cursor would otherwise loop forever).
     if (next === null || next === undefined || next === after) break;
     after = next;
   }
-  return JSON.parse(restoreSessionRevisionJson(revisions, targetRequestId));
+  const target = revisions.find((revision) => revision.requestId === targetRequestId);
+  if (!target) throw new Error(`unknown session revision: ${targetRequestId}`);
+  const timeline = revisions
+    .filter((revision) => revision.sequence <= target.sequence)
+    .sort((a, b) => a.createdAt - b.createdAt || a.sequence - b.sequence)
+    .map((revision) => ({
+      recorded_at: new Date(revision.createdAt).toISOString(),
+      sequence: revision.sequence,
+      request: parseSessionJson(revision.requestDeltaJson),
+      response: parseSessionJson(revision.responseJson),
+    }));
+  const request = JSON.parse(restoreSessionRevisionJson(revisions, targetRequestId)) as unknown;
+  return target.responseJson == null
+    ? { request, timeline }
+    : { request, response: parseSessionJson(target.responseJson), timeline };
 }
 
 // POST /admin/api/requests/:requestId/replay -> { trace_id } | throws. Re-issues the

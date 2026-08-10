@@ -2191,7 +2191,7 @@ describe("admin.api request payload", () => {
       fidelity: "semantic",
       createdAt: new Date(1000),
     };
-    const pages: Array<{ afterSequence?: number; maxBytes: number }> = [];
+    const pages: Array<{ afterSequence?: number; limit: number; maxBytes: number }> = [];
     const telemetry = {
       ...makeTelemetry([rec]),
       getPayload: async () => null,
@@ -2220,6 +2220,8 @@ describe("admin.api request payload", () => {
       revisions: [
         {
           requestId: "req_root",
+          sequence: 1,
+          createdAt: 1000,
           parentRequestId: null,
           retainCount: 0,
           requestDeltaJson: '[{"role":"user","content":"root"}]',
@@ -2233,6 +2235,7 @@ describe("admin.api request payload", () => {
     // page is byte-bounded but does NOT reserve a whole response window up front.
     expect(pages).toHaveLength(1);
     expect(pages[0]?.afterSequence).toBeUndefined();
+    expect(pages[0]?.limit).toBe(100);
     expect(pages[0]?.maxBytes).toBeGreaterThan(0);
   });
 

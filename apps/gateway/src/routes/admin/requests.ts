@@ -311,10 +311,12 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
       sessionRef,
       targetRequestId: traceId,
       nextSequence: page.nextSequence,
-      // Only the fields restoreSessionRevisionJson consumes — createdAt/sequence/
-      // sessionRef/fidelity are recovery-irrelevant and stay off the wire.
+      // sequence + createdAt let the browser render the raw request/response pairs
+      // by their recorded time; sessionRef/fidelity remain recovery-irrelevant.
       revisions: page.revisions.map((r) => ({
         requestId: r.requestId,
+        sequence: r.sequence,
+        createdAt: r.createdAt.getTime(),
         parentRequestId: r.parentRequestId,
         retainCount: r.retainCount,
         requestDeltaJson: r.requestDeltaJson,
@@ -329,7 +331,7 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
 // One raw-revision page: `limit` caps rows/page, `maxBytes` is a SOFT ceiling (a single
 // oversized row still returns, so a large session never dead-ends). The client drives
 // the cursor across pages, so these are per-page bounds, not a whole-transcript budget.
-const SESSION_REVISION_PAGE_LIMIT = 50;
+const SESSION_REVISION_PAGE_LIMIT = 100;
 const SESSION_REVISION_PAGE_MAX_BYTES = 8 * 1024 * 1024;
 
 async function getSessionRequest(

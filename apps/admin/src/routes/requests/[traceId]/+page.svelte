@@ -88,18 +88,24 @@
 
   // Client-side transcript rebuild for sessions the server refuses to reconstruct
   // (session_recovery_limited). Loaded only on click — a large transcript can be many
-  // MB, so we stream the raw revisions and rebuild in the browser. On success the
-  // rebuilt body is written into the NORMAL request slot so the whole Request section
-  // renders it through the exact same Chat/Raw lenses + JsonViewer as a captured
-  // request — no separate viewer.
+  // MB, so we stream raw revisions and rebuild in the browser. The target request and
+  // response reuse the normal JsonViewer slots; the raw revision pairs stay separate
+  // and are ordered by their persisted timestamp instead of being flattened as chat.
   let transcriptLoaded = $state(false);
+  let transcriptTimeline = $state<unknown[]>([]);
 
   async function loadTranscript(): Promise<void> {
     if (payloadStatus.request === 'loading' || transcriptLoaded) return;
     payloadStatus.request = 'loading';
     payloadErrors.request = undefined;
     try {
-      payloadValues.request = await rebuildSessionTranscript(data.requestId);
+      const rebuilt = await rebuildSessionTranscript(data.requestId);
+      payloadValues.request = rebuilt.request;
+      transcriptTimeline = rebuilt.timeline;
+      if (hasOwn(rebuilt, 'response')) {
+        payloadValues.response = rebuilt.response;
+        payloadStatus.response = 'loaded';
+      }
       payloadStatus.request = 'loaded';
       transcriptLoaded = true;
     } catch {
@@ -441,23 +447,25 @@
             {$t('Payload capture is available for this call. Large bodies are loaded on demand.')}
           {/if}
         </p>
-        <!-- Two lenses over the same captured body: Chat (a readable user⇄agent
-             transcript, default) and Raw (the JSON tree — source of truth). -->
-        <div class="mb-3 flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            data-testid="request-view-chat"
-            class={`rounded border px-3 py-1 text-sm ${reqView === 'chat' ? 'border-action bg-action text-white' : 'border-border bg-surface text-ink-muted hover:bg-canvas'}`}
-            onclick={() => (reqView = 'chat')}>{$t('Conversation')}</button
-          >
-          <button
-            type="button"
-            data-testid="request-view-raw"
-            class={`rounded border px-3 py-1 text-sm ${reqView === 'raw' ? 'border-action bg-action text-white' : 'border-border bg-surface text-ink-muted hover:bg-canvas'}`}
-            onclick={() => (reqView = 'raw')}>{$t('Raw')}</button
-          >
-        </div>
-        {#if reqView === 'chat'}
+        {#if !transcriptLoaded}
+          <!-- Two lenses over the same captured body: Chat (a readable user⇄agent
+               transcript, default) and Raw (the JSON tree — source of truth). -->
+          <div class="mb-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              data-testid="request-view-chat"
+              class={`rounded border px-3 py-1 text-sm ${reqView === 'chat' ? 'border-action bg-action text-white' : 'border-border bg-surface text-ink-muted hover:bg-canvas'}`}
+              onclick={() => (reqView = 'chat')}>{$t('Conversation')}</button
+            >
+            <button
+              type="button"
+              data-testid="request-view-raw"
+              class={`rounded border px-3 py-1 text-sm ${reqView === 'raw' ? 'border-action bg-action text-white' : 'border-border bg-surface text-ink-muted hover:bg-canvas'}`}
+              onclick={() => (reqView = 'raw')}>{$t('Raw')}</button
+            >
+          </div>
+        {/if}
+        {#if !transcriptLoaded && reqView === 'chat'}
           {#if !requestLoaded || (hasPayloadPart('response') && !responseLoaded)}
             <div class="rounded border border-dashed border-border bg-canvas p-3">
               <p class="field-help mb-2">
@@ -530,8 +538,7 @@
           {/if}
         </p>
         <!-- Before rebuild: offer the button. On success transcriptLoaded flips and the
-             captured-path branch above renders the body in the normal Request view
-             (Chat/Raw + the same JsonViewer as any captured request). -->
+             captured-path branch above reuses the normal request JsonViewer. -->
         {#if data.payload?.reason === 'session_recovery_limited'}
           <div class="mt-3 rounded border border-dashed border-border bg-canvas p-3">
             <p class="field-help mb-2">
@@ -543,9 +550,7 @@
               class="btn-secondary"
               disabled={payloadStatus.request === 'loading'}
               onclick={loadTranscript}
-              >{payloadStatus.request === 'loading'
-                ? $t('Loading')
-                : $t('Load transcript')}</button
+              >{payloadStatus.request === 'loading' ? $t('Loading') : $t('Load transcript')}</button
             >
             {#if payloadErrors.request}
               <p class="mt-2 text-sm text-red-600">{payloadErrors.request}</p>
@@ -554,6 +559,18 @@
         {/if}
       {/if}
     </section>
+
+    {#if transcriptLoaded && transcriptTimeline.length > 0}
+      <section data-testid="session-timeline" class="card text-sm">
+        <h2 class="section-header">{$t('Session')}</h2>
+        <p class="field-help mb-2">
+          {$t(
+            'Session mode stores repeated conversation history once, reconstructs each request semantically, and keeps available response snapshots.',
+          )}
+        </p>
+        <JsonViewer value={transcriptTimeline} testid="session-timeline-body" />
+      </section>
+    {/if}
 
     <!-- Forwarded upstream request: the EXACT body sent to the provider, AFTER
          memory injection + protocol translation. Shown as a SEPARATE panel only when
@@ -673,7 +690,7 @@
             : JSON.stringify(d.error.provider_raw)}
         </div>
       </section>
-    {:else if data.payload?.captured && hasPayloadPart('response')}
+    {:else if (data.payload?.captured && hasPayloadPart('response')) || (transcriptLoaded && responseLoaded)}
       <section class="card text-sm">
         <h2 class="section-header">{$t('Response')}</h2>
         {#if !responseLoaded}
