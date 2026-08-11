@@ -546,6 +546,101 @@ export class SqliteMemoryStore implements MemoryStore {
     });
   }
 
+  async listInjectionObservationsPage(input: {
+    accountId: string;
+    threadId: string;
+    limit: number;
+    offset: number;
+    order: "newest" | "score";
+    score?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+    };
+  }): Promise<Observation[]> {
+    const where = observationScopeWhere({ accountId: input.accountId, threadId: input.threadId });
+    if (where === null) return [];
+    const score = input.score;
+    const scoreOrder =
+      score === undefined
+        ? undefined
+        : sql`pow(0.5, max(0, (${score.nowMs} - COALESCE(${memoryObservations.referencedAt}, ${memoryObservations.observedAt})) / 1000.0) / ${score.half_life_s}) * (min(max(${memoryObservations.importance}, ${score.importance_floor}), ${score.importance_ceil}) + ${score.access_weight} * ln(1 + ${memoryObservations.referenceCount}))`;
+    const rows = this.db
+      .select()
+      .from(memoryObservations)
+      .where(
+        and(
+          where,
+          eq(memoryObservations.status, "active"),
+          isNull(memoryObservations.expiredAt),
+        ) as SQL,
+      )
+      .orderBy(
+        input.order === "score" && scoreOrder !== undefined
+          ? desc(scoreOrder)
+          : desc(memoryObservations.observedAt),
+        desc(memoryObservations.observedAt),
+        desc(memoryObservations.id),
+      )
+      .limit(input.limit)
+      .offset(input.offset)
+      .all();
+    return rows.map((row) => ({
+      id: row.id,
+      threadId: row.threadId,
+      sourceMessageRange: JSON.parse(row.sourceMessageRange) as [string, string],
+      observationText: row.observationText,
+      observedAt: row.observedAt,
+      referenceCount: row.referenceCount,
+      importance: row.importance,
+      status: row.status as Observation["status"],
+      referencedAt: row.referencedAt,
+      archivedAt: row.archivedAt,
+      expiredAt: row.expiredAt,
+      ...(row.priority !== null ? { priority: row.priority } : {}),
+      ...(row.tags !== null ? { tags: JSON.parse(row.tags) as string[] } : {}),
+    }));
+  }
+
+  async isInjectionObservationRedundant(input: {
+    accountId: string;
+    threadId: string;
+    sourceMessageRange: [string, string];
+    windowContentHashCounts: ReadonlyMap<string, number>;
+  }): Promise<boolean> {
+    if (input.windowContentHashCounts.size === 0) return false;
+    const live = JSON.stringify(Object.fromEntries(input.windowContentHashCounts));
+    const row = this.db.$sqlite
+      .prepare(
+        `WITH ordered AS (
+         SELECT id, content_hash, ROW_NUMBER() OVER (ORDER BY CASE WHEN message_index IS NULL THEN 1 ELSE 0 END, message_index, created_at, id) AS n
+           FROM memory_messages WHERE thread_id = ?
+       ), endpoints AS (
+         SELECT MIN(n) AS first_n, MAX(n) AS last_n, COUNT(*) AS found
+           FROM ordered WHERE id IN (?, ?)
+       ), required AS (
+         SELECT content_hash, COUNT(*) AS n FROM ordered, endpoints
+          WHERE ordered.n BETWEEN endpoints.first_n AND endpoints.last_n
+          GROUP BY content_hash
+       )
+       SELECT CASE WHEN (SELECT found FROM endpoints) = 2 AND NOT EXISTS (
+         SELECT 1 FROM required LEFT JOIN json_each(?) live ON live.key = required.content_hash
+          WHERE CAST(live.value AS INTEGER) < required.n OR live.value IS NULL
+       ) THEN 1 ELSE 0 END AS redundant`,
+      )
+      .get(input.threadId, input.sourceMessageRange[0], input.sourceMessageRange[1], live) as
+      | { redundant: number }
+      | undefined;
+    // The owner check is deliberately a separate cheap guard; an unknown thread
+    // must never turn an observation from another account into a dedup hit.
+    const owned = this.db.$sqlite
+      .prepare("SELECT 1 FROM memory_threads WHERE id = ? AND owner_id = ?")
+      .get(input.threadId, input.accountId);
+    return owned !== undefined && row?.redundant === 1;
+  }
+
   // Read the latest (highest-version) reflection for an EXACT scope match. Absent
   // scope levels must be NULL in storage (never a different scope's row) so the
   // Reflector never crosses project/resource/thread boundaries (docs/08 isolation).
@@ -1150,6 +1245,47 @@ export class SqliteMemoryStore implements MemoryStore {
       .orderBy(asc(memoryFacts.createdAt), asc(memoryFacts.id))
       .all();
     return rows.map(sqliteRowToFact);
+  }
+
+  async listInjectionFacts(input: {
+    accountId: string;
+    projectId?: string;
+    resourceId?: string;
+    threadId?: string;
+    limit: number;
+    score?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+    };
+  }): Promise<Fact[]> {
+    const clauses: SQL[] = [
+      eq(memoryFacts.ownerId, input.accountId),
+      eq(memoryFacts.status, "active"),
+      isNull(memoryFacts.expiredAt),
+    ];
+    if (input.projectId !== undefined) clauses.push(eq(memoryFacts.projectId, input.projectId));
+    if (input.resourceId !== undefined) clauses.push(eq(memoryFacts.resourceId, input.resourceId));
+    if (input.threadId !== undefined) clauses.push(eq(memoryFacts.threadId, input.threadId));
+    const score = input.score;
+    const scoreOrder =
+      score === undefined
+        ? undefined
+        : sql`pow(0.5, max(0, (${score.nowMs} - COALESCE(${memoryFacts.referencedAt}, ${memoryFacts.createdAt})) / 1000.0) / ${score.half_life_s}) * (min(max(${memoryFacts.importance}, ${score.importance_floor}), ${score.importance_ceil}) + ${score.access_weight} * ln(1 + ${memoryFacts.referenceCount}))`;
+    return this.db
+      .select()
+      .from(memoryFacts)
+      .where(and(...clauses) as SQL)
+      .orderBy(
+        scoreOrder === undefined ? desc(memoryFacts.validFrom) : desc(scoreOrder),
+        desc(memoryFacts.validFrom),
+        desc(memoryFacts.id),
+      )
+      .limit(input.limit)
+      .all()
+      .map(sqliteRowToFact);
   }
 
   // =========================================================================

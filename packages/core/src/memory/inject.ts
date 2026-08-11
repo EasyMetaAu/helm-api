@@ -189,6 +189,8 @@ async function loadMemory(
   scope: InjectInput["scope"],
   store: MemoryStore,
   injectKnownFacts: boolean,
+  factLimit?: number,
+  factScore?: ScoreConfig & { nowMs: number },
 ): Promise<{
   projectReflection: Reflection | null;
   resourceReflection: Reflection | null;
@@ -215,22 +217,33 @@ async function loadMemory(
     injectKnownFacts &&
     store.listActiveFacts !== undefined &&
     (hasBroadFactScope || scope.threadId !== undefined)
-      ? await store.listActiveFacts({
-          accountId: scope.accountId,
-          ...(scope.projectId !== undefined ? { projectId: scope.projectId } : {}),
-          ...(scope.resourceId !== undefined ? { resourceId: scope.resourceId } : {}),
-          // Thread fallback ONLY when there is no broader scope: a project read must
-          // omit threadId (project facts carry threadId=null and would be filtered out).
-          ...(!hasBroadFactScope && scope.threadId !== undefined
-            ? { threadId: scope.threadId }
-            : {}),
-        })
+      ? factLimit !== undefined && store.listInjectionFacts !== undefined
+        ? await store.listInjectionFacts({
+            accountId: scope.accountId,
+            ...(scope.projectId !== undefined ? { projectId: scope.projectId } : {}),
+            ...(scope.resourceId !== undefined ? { resourceId: scope.resourceId } : {}),
+            ...(!hasBroadFactScope && scope.threadId !== undefined
+              ? { threadId: scope.threadId }
+              : {}),
+            limit: factLimit,
+            ...(factScore !== undefined ? { score: factScore } : {}),
+          })
+        : await store.listActiveFacts({
+            accountId: scope.accountId,
+            ...(scope.projectId !== undefined ? { projectId: scope.projectId } : {}),
+            ...(scope.resourceId !== undefined ? { resourceId: scope.resourceId } : {}),
+            // Thread fallback ONLY when there is no broader scope: a project read must
+            // omit threadId (project facts carry threadId=null and would be filtered out).
+            ...(!hasBroadFactScope && scope.threadId !== undefined
+              ? { threadId: scope.threadId }
+              : {}),
+          })
       : [];
   // The inject layers stay THREAD-ANCHORED: pass threadId alone so this read
   // never crosses threads (the cross-thread project/resource aggregation is the
   // REFLECTOR's read shape, not inject's).
   const observations =
-    scope.threadId !== undefined
+    scope.threadId !== undefined && store.listInjectionObservationsPage === undefined
       ? await store.listObservations({ accountId: scope.accountId, threadId: scope.threadId })
       : [];
   // The thread's raw rows are loaded ONLY to resolve each observation's covered
@@ -238,7 +251,7 @@ async function loadMemory(
   // conversation already carries the recent turns). A thread with no observations
   // never needs them, but a single read keeps the dedup deterministic + cheap.
   const threadMessages =
-    scope.threadId !== undefined
+    scope.threadId !== undefined && store.isInjectionObservationRedundant === undefined
       ? await store.listMessages({ accountId: scope.accountId, threadId: scope.threadId })
       : [];
   return { projectReflection, resourceReflection, facts, observations, threadMessages };
@@ -293,7 +306,15 @@ export async function assembleInjectedContext(
   // null) and is recorded — the request continues without memory.
   let loaded: Awaited<ReturnType<typeof loadMemory>>;
   try {
-    loaded = await loadMemory(input.scope, deps.memoryStore, input.injectKnownFacts === true);
+    loaded = await loadMemory(
+      input.scope,
+      deps.memoryStore,
+      input.injectKnownFacts === true,
+      Math.max(0, input.maxFactsInjected ?? DEFAULT_MAX_FACTS_INJECTED),
+      deps.forgetting?.enabled === true
+        ? { nowMs: deps.now().getTime(), ...deps.forgetting.scoreConfig }
+        : undefined,
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     deps.log("memory.inject.load_failed", { scope: input.scope, error: message });
@@ -463,56 +484,101 @@ export async function assembleInjectedContext(
   // re-sorted oldest-first for the deterministic block order.
   const observationBudget = Math.max(0, input.tokenBudget - reflectionTokens - factTokens);
 
-  // observationEntries is oldest-first. Legacy keep order = newest-first (reverse)
-  // so the oldest is the first sacrificed.
-  const legacyKeepOrder = (): ObsEntry[] => [...observationEntries].reverse();
-  let keepOrder: ObsEntry[];
-  if (forgettingOn && deps.forgetting?.dropOrder === "score") {
-    // Score-trim: keep highest-score first so the lowest-scored is dropped first.
-    // FAIL-OPEN: if scoring throws for ANY row, abandon the score order and fall
-    // back to legacy oldest-first, logging the fallback so the degrade is observable.
-    try {
-      const scoreCfg = deps.forgetting.scoreConfig;
-      const now = deps.now();
-      const scored = observationEntries.map((entry) => ({
-        entry,
-        score: forgettingScore(
-          {
-            referencedAt: entry.observation.referencedAt ?? null,
-            fallbackTs: entry.observation.observedAt,
-            referenceCount: entry.observation.referenceCount ?? 0,
-            importance: entry.observation.importance ?? 0.5,
-          },
-          scoreCfg,
-          now,
-        ),
-      }));
-      scored.sort(
-        (a, b) =>
-          b.score - a.score ||
-          b.entry.observation.observedAt.getTime() - a.entry.observation.observedAt.getTime(),
-      );
-      keepOrder = scored.map((s) => s.entry);
-    } catch (err) {
-      deps.log("memory.inject.score_trim_fallback", {
-        scope: input.scope,
-        error: err instanceof Error ? err.message : String(err),
+  const keptEntries: ObsEntry[] = [];
+  const pagedRead = deps.memoryStore.listInjectionObservationsPage;
+  if (pagedRead !== undefined && input.scope.threadId !== undefined) {
+    // Read only one small page of bodies at a time. The SQL order is the same
+    // priority order used below (newest first, or score then newest), so once the
+    // remaining budget reaches zero no older row can displace a kept one.
+    let offset = 0;
+    let remaining = observationBudget;
+    const scoreMode = forgettingOn && deps.forgetting?.dropOrder === "score";
+    const score = scoreMode ? deps.forgetting?.scoreConfig : undefined;
+    const scoreNowMs = score === undefined ? undefined : deps.now().getTime();
+    while (remaining > 0) {
+      const page = await pagedRead({
+        accountId: input.scope.accountId,
+        threadId: input.scope.threadId,
+        limit: 64,
+        offset,
+        order: scoreMode ? "score" : "newest",
+        ...(score !== undefined && scoreNowMs !== undefined
+          ? { score: { nowMs: scoreNowMs, ...score } }
+          : {}),
       });
-      keepOrder = legacyKeepOrder();
+      if (page.length === 0) break;
+      offset += page.length;
+      for (const observation of page) {
+        if (remaining === 0) break;
+        const redundant =
+          deps.memoryStore.isInjectionObservationRedundant !== undefined
+            ? await deps.memoryStore.isInjectionObservationRedundant({
+                accountId: input.scope.accountId,
+                threadId: input.scope.threadId,
+                sourceMessageRange: observation.sourceMessageRange,
+                windowContentHashCounts,
+              })
+            : observationIsRedundant(observation, threadMessages, windowContentHashCounts);
+        if (redundant) continue;
+        const cost = tokensOf(observation.observationText);
+        if (cost <= remaining) {
+          keptEntries.push({ id: observation.id, text: observation.observationText, observation });
+          remaining -= cost;
+        }
+      }
+      if (page.length < 64) break;
     }
   } else {
-    keepOrder = legacyKeepOrder();
-  }
-
-  let remaining = observationBudget;
-  const keptEntries: ObsEntry[] = [];
-  for (const entry of keepOrder) {
-    const cost = tokensOf(entry.text);
-    if (cost <= remaining) {
-      keptEntries.push(entry);
-      remaining -= cost;
+    // observationEntries is oldest-first. Legacy keep order = newest-first (reverse)
+    // so the oldest is the first sacrificed.
+    const legacyKeepOrder = (): ObsEntry[] => [...observationEntries].reverse();
+    let keepOrder: ObsEntry[];
+    if (forgettingOn && deps.forgetting?.dropOrder === "score") {
+      // Score-trim: keep highest-score first so the lowest-scored is dropped first.
+      // FAIL-OPEN: if scoring throws for ANY row, abandon the score order and fall
+      // back to legacy oldest-first, logging the fallback so the degrade is observable.
+      try {
+        const scoreCfg = deps.forgetting.scoreConfig;
+        const now = deps.now();
+        const scored = observationEntries.map((entry) => ({
+          entry,
+          score: forgettingScore(
+            {
+              referencedAt: entry.observation.referencedAt ?? null,
+              fallbackTs: entry.observation.observedAt,
+              referenceCount: entry.observation.referenceCount ?? 0,
+              importance: entry.observation.importance ?? 0.5,
+            },
+            scoreCfg,
+            now,
+          ),
+        }));
+        scored.sort(
+          (a, b) =>
+            b.score - a.score ||
+            b.entry.observation.observedAt.getTime() - a.entry.observation.observedAt.getTime(),
+        );
+        keepOrder = scored.map((s) => s.entry);
+      } catch (err) {
+        deps.log("memory.inject.score_trim_fallback", {
+          scope: input.scope,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        keepOrder = legacyKeepOrder();
+      }
+    } else {
+      keepOrder = legacyKeepOrder();
     }
-    // else: skip this (lowest-priority) observation — trimmed for budget.
+
+    let remaining = observationBudget;
+    for (const entry of keepOrder) {
+      const cost = tokensOf(entry.text);
+      if (cost <= remaining) {
+        keptEntries.push(entry);
+        remaining -= cost;
+      }
+      // else: skip this (lowest-priority) observation — trimmed for budget.
+    }
   }
   // Restore oldest-first order for the block regardless of which drop order chose
   // the survivors.

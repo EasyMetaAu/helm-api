@@ -802,6 +802,32 @@ export interface MemoryStore {
   // that id (the Reflector's target read — a project reflection covers the whole
   // project). Never cross-project, never cross-account.
   listObservations(scope: ReflectionScope): Promise<Observation[]>;
+  // Injection reads observations in priority order, one bounded page at a time.
+  // This is deliberately separate from listObservations: reflector/admin callers
+  // need the complete scope, while request-time injection must not allocate it.
+  listInjectionObservationsPage?(input: {
+    accountId: string;
+    threadId: string;
+    limit: number;
+    offset: number;
+    order: "newest" | "score";
+    score?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+    };
+  }): Promise<Observation[]>;
+  // Database-side counterpart of window-aware observation dedup. It never
+  // returns transcript bodies, which keeps a large historical thread off the
+  // request heap. Missing endpoints/hashes are conservatively non-redundant.
+  isInjectionObservationRedundant?(input: {
+    accountId: string;
+    threadId: string;
+    sourceMessageRange: [string, string];
+    windowContentHashCounts: ReadonlyMap<string, number>;
+  }): Promise<boolean>;
   // Read the current (latest) ACTIVE reflection for a scope, or null if none yet.
   // ARCHIVED reflections (cleared by the decay→rebuild path when a scope's whole
   // active observation set is forgotten — Codex review fix) are invisible here, so
@@ -995,6 +1021,22 @@ export interface MemoryStore {
     projectId?: string;
     resourceId?: string;
     threadId?: string;
+  }): Promise<Fact[]>;
+  // Injection only needs its bounded top-K facts. Keep the broad management read
+  // above intact for callers that genuinely need the full scoped history.
+  listInjectionFacts?(input: {
+    accountId: string;
+    projectId?: string;
+    resourceId?: string;
+    threadId?: string;
+    limit: number;
+    score?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+    };
   }): Promise<Fact[]>;
   // docs/12 "Hard-delete (rare, retention only)" pass 4 (P7) — the ONLY DELETE in the
   // forgetting system. Mirrors the existing payload_retention_days prune (an account-

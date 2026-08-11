@@ -153,6 +153,48 @@ function baseInput(over: Partial<InjectInput> = {}): InjectInput {
 }
 
 describe("assembleInjectedContext — memory TEXT BLOCK (trailing-reminder model)", () => {
+  it("uses bounded injection pages and database dedup instead of loading a whole thread", async () => {
+    const store = makeFakeStore({});
+    const newest = makeObservation("new", "newest", "2026-05-30T00:00:00.000Z");
+    const older = makeObservation("old", "older", "2026-05-20T00:00:00.000Z");
+    store.listInjectionObservationsPage = vi.fn(async ({ offset }) =>
+      offset === 0 ? [newest, older] : [],
+    );
+    store.isInjectionObservationRedundant = vi.fn(async () => false);
+
+    const out = await assembleInjectedContext(baseInput({ tokenBudget: 1 }), makeDeps(store));
+
+    expect(out.memoryBlock).toContain("newest");
+    expect(out.memoryBlock).not.toContain("older");
+    expect(store.listInjectionObservationsPage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        limit: 64,
+        offset: 0,
+        order: "newest",
+      }),
+    );
+    expect(store.listObservations).not.toHaveBeenCalled();
+    expect(store.listMessages).not.toHaveBeenCalled();
+    expect(store.isInjectionObservationRedundant).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the bounded fact read when the store provides it", async () => {
+    const store = makeFakeStore({ facts: [makeFact({ factText: "legacy full read" })] });
+    store.listInjectionFacts = vi.fn(async () => [makeFact({ factText: "bounded fact" })]);
+
+    const out = await assembleInjectedContext(
+      baseInput({ injectKnownFacts: true, maxFactsInjected: 1 }),
+      makeDeps(store),
+    );
+
+    expect(out.memoryBlock).toContain("bounded fact");
+    expect(out.memoryBlock).not.toContain("legacy full read");
+    expect(store.listInjectionFacts).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 1, accountId: "acct-a" }),
+    );
+    expect(store.listActiveFacts).not.toHaveBeenCalled();
+  });
+
   it("assembles a single system-level block with section headers in deterministic order", async () => {
     const store = makeFakeStore({
       projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "project memory" }),

@@ -540,6 +540,92 @@ export class PgMemoryStore implements MemoryStore {
     }));
   }
 
+  async listInjectionObservationsPage(input: {
+    accountId: string;
+    threadId: string;
+    limit: number;
+    offset: number;
+    order: "newest" | "score";
+    score?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+    };
+  }): Promise<Observation[]> {
+    const where = observationScopeWhere({ accountId: input.accountId, threadId: input.threadId });
+    if (where === null) return [];
+    const score = input.score;
+    const scoreOrder =
+      score === undefined
+        ? undefined
+        : sql`power(0.5, GREATEST(0, (${score.nowMs} - COALESCE(${memoryObservations.referencedAt}, ${memoryObservations.observedAt})) / 1000.0) / ${score.half_life_s}) * (LEAST(GREATEST(${memoryObservations.importance}, ${score.importance_floor}), ${score.importance_ceil}) + ${score.access_weight} * ln(1 + ${memoryObservations.referenceCount}))`;
+    const rows = await this.db
+      .select()
+      .from(memoryObservations)
+      .where(
+        and(
+          where,
+          eq(memoryObservations.status, "active"),
+          isNull(memoryObservations.expiredAt),
+        ) as SQL,
+      )
+      .orderBy(
+        input.order === "score" && scoreOrder !== undefined
+          ? desc(scoreOrder)
+          : desc(memoryObservations.observedAt),
+        desc(memoryObservations.observedAt),
+        desc(memoryObservations.id),
+      )
+      .limit(input.limit)
+      .offset(input.offset);
+    return rows.map((row) => ({
+      id: row.id,
+      threadId: row.threadId,
+      sourceMessageRange: row.sourceMessageRange,
+      observationText: row.observationText,
+      observedAt: new Date(row.observedAt),
+      referenceCount: row.referenceCount,
+      importance: row.importance,
+      status: row.status as Observation["status"],
+      referencedAt: row.referencedAt === null ? null : new Date(row.referencedAt),
+      archivedAt: row.archivedAt === null ? null : new Date(row.archivedAt),
+      expiredAt: row.expiredAt === null ? null : new Date(row.expiredAt),
+      ...(row.priority !== null ? { priority: row.priority } : {}),
+      ...(row.tags !== null ? { tags: row.tags } : {}),
+    }));
+  }
+
+  async isInjectionObservationRedundant(input: {
+    accountId: string;
+    threadId: string;
+    sourceMessageRange: [string, string];
+    windowContentHashCounts: ReadonlyMap<string, number>;
+  }): Promise<boolean> {
+    if (input.windowContentHashCounts.size === 0) return false;
+    const live = JSON.stringify(Object.fromEntries(input.windowContentHashCounts));
+    const rows = pgRows<{ redundant: boolean }>(
+      await this.db.execute(sql`
+      WITH ordered AS (
+        SELECT id, content_hash, ROW_NUMBER() OVER (ORDER BY CASE WHEN message_index IS NULL THEN 1 ELSE 0 END, message_index, created_at, id) AS n
+          FROM memory_messages WHERE thread_id = ${input.threadId}
+      ), endpoints AS (
+        SELECT MIN(n) AS first_n, MAX(n) AS last_n, COUNT(*) AS found FROM ordered
+         WHERE id IN (${input.sourceMessageRange[0]}, ${input.sourceMessageRange[1]})
+      ), required AS (
+        SELECT content_hash, COUNT(*) AS n FROM ordered, endpoints
+         WHERE ordered.n BETWEEN endpoints.first_n AND endpoints.last_n GROUP BY content_hash
+      )
+      SELECT (SELECT found FROM endpoints) = 2 AND NOT EXISTS (
+        SELECT 1 FROM required LEFT JOIN jsonb_each_text(${live}::jsonb) live ON live.key = required.content_hash
+         WHERE live.value IS NULL OR live.value::integer < required.n
+      ) AND EXISTS (SELECT 1 FROM memory_threads WHERE id = ${input.threadId} AND owner_id = ${input.accountId}) AS redundant
+    `),
+    );
+    return rows[0]?.redundant === true;
+  }
+
   async getReflection(scope: ReflectionScope): Promise<Reflection | null> {
     // Latest ACTIVE version only (Codex review fix; pg mirror) — archived reflections
     // are invisible so forgotten content never re-injects.
@@ -1216,6 +1302,46 @@ export class PgMemoryStore implements MemoryStore {
       .from(memoryFacts)
       .where(and(...clauses) as SQL)
       .orderBy(asc(memoryFacts.createdAt), asc(memoryFacts.id));
+    return rows.map(pgRowToFact);
+  }
+
+  async listInjectionFacts(input: {
+    accountId: string;
+    projectId?: string;
+    resourceId?: string;
+    threadId?: string;
+    limit: number;
+    score?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+    };
+  }): Promise<Fact[]> {
+    const clauses: SQL[] = [
+      eq(memoryFacts.ownerId, input.accountId),
+      eq(memoryFacts.status, "active"),
+      isNull(memoryFacts.expiredAt),
+    ];
+    if (input.projectId !== undefined) clauses.push(eq(memoryFacts.projectId, input.projectId));
+    if (input.resourceId !== undefined) clauses.push(eq(memoryFacts.resourceId, input.resourceId));
+    if (input.threadId !== undefined) clauses.push(eq(memoryFacts.threadId, input.threadId));
+    const score = input.score;
+    const scoreOrder =
+      score === undefined
+        ? undefined
+        : sql`power(0.5, GREATEST(0, (${score.nowMs} - COALESCE(${memoryFacts.referencedAt}, ${memoryFacts.createdAt})) / 1000.0) / ${score.half_life_s}) * (LEAST(GREATEST(${memoryFacts.importance}, ${score.importance_floor}), ${score.importance_ceil}) + ${score.access_weight} * ln(1 + ${memoryFacts.referenceCount}))`;
+    const rows = await this.db
+      .select()
+      .from(memoryFacts)
+      .where(and(...clauses) as SQL)
+      .orderBy(
+        scoreOrder === undefined ? desc(memoryFacts.validFrom) : desc(scoreOrder),
+        desc(memoryFacts.validFrom),
+        desc(memoryFacts.id),
+      )
+      .limit(input.limit);
     return rows.map(pgRowToFact);
   }
 
