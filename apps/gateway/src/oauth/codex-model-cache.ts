@@ -262,7 +262,7 @@ export function createCodexModelCache(
       const normalizedKey = normalizeKey(key);
       if (normalizedKey === null) return null;
       return serializeMutation(config, async () => {
-        const { entries } = await loadEntries(config, encKey, maxEntries);
+        const entries = hotEntries ?? (await loadEntries(config, encKey, maxEntries)).entries;
         const index = entries.findIndex((candidate) => sameKey(candidate, normalizedKey));
         if (index === -1 || entries[index]?.etag !== etag) return null;
         const renewed = cloneEntry({
@@ -271,7 +271,9 @@ export function createCodexModelCache(
         });
         entries[index] = renewed;
         const bounded = boundEntries(entries, maxEntries);
-        await saveEntries(config, encKey, bounded);
+        // Same-ETag renewal is only a process-local freshness optimization. Persisting
+        // the whole encrypted catalog every TTL window creates a large periodic heap
+        // spike; after a restart, a stale timestamp safely causes one network refresh.
         hotEntries = bounded;
         return cloneEntry(renewed);
       });

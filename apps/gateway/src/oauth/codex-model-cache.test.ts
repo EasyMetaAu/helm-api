@@ -274,6 +274,36 @@ describe("createCodexModelCache", () => {
     });
   });
 
+  it("renews a hot entry without rereading or rewriting the persistent cache", async () => {
+    let now = 9_000;
+    let reads = 0;
+    let writes = 0;
+    const persisted = encryptSecret(JSON.stringify({ version: 1, entries: [entry()] }), ENC_KEY);
+    const store: ConfigStore = {
+      get: async () => {
+        reads += 1;
+        return persisted;
+      },
+      set: async () => {
+        writes += 1;
+      },
+    };
+    const cache = createCodexModelCache(store, ENC_KEY, { now: () => now });
+
+    await expect(cache.get(BASE_KEY)).resolves.toMatchObject({ fresh: true });
+    now = 10_000;
+    await expect(cache.renew(BASE_KEY, '"models-v1"')).resolves.toMatchObject({
+      fetchedAtMs: 10_000,
+    });
+    await expect(cache.get(BASE_KEY)).resolves.toMatchObject({
+      entry: { fetchedAtMs: 10_000 },
+      fresh: true,
+    });
+
+    expect(reads).toBe(1);
+    expect(writes).toBe(0);
+  });
+
   it("serializes concurrent upserts so unrelated accounts are not lost", async () => {
     const store = new DelayedFirstSetConfig();
     const cache = createCodexModelCache(store, ENC_KEY, { now: () => 2_000 });
