@@ -1,5 +1,5 @@
 import { createResponseWorkAdmission, createRuntimeMemoryCoordinator } from "@helm/core";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createBodyMemoryAdmission, readAdmittedRequestBody } from "./memory-admission.js";
 
 describe("body memory admission (unlimited body size and aggregate capacity)", () => {
@@ -225,6 +225,51 @@ describe("body memory admission (unlimited body size and aggregate capacity)", (
     expect(admitted.text).toBe("x".repeat(11));
     admitted.release();
     expect(admission.reservedBytes).toBe(0);
+  });
+
+  it("fills a declared body directly instead of creating a concat peak", async () => {
+    const admission = createBodyMemoryAdmission({
+      activeRequestBytes: 120,
+      jsonAmplification: 6,
+    });
+    const concat = vi.spyOn(Buffer, "concat");
+    try {
+      const admitted = await readAdmittedRequestBody(
+        new Request("http://helm.test/v1/responses", {
+          method: "POST",
+          headers: { "content-length": "11" },
+          body: "x".repeat(11),
+        }),
+        admission,
+      );
+      expect(admitted.text).toBe("x".repeat(11));
+      expect(concat).not.toHaveBeenCalled();
+      admitted.release();
+    } finally {
+      concat.mockRestore();
+    }
+  });
+
+  it("does not retain an over-declared backing buffer", async () => {
+    const admission = createBodyMemoryAdmission({
+      activeRequestBytes: 120,
+      jsonAmplification: 6,
+    });
+    const request = new Request("http://helm.test/v1/responses", {
+      method: "POST",
+      headers: { "content-length": "11" },
+      body: "abc",
+    });
+    const allocUnsafe = vi.spyOn(Buffer, "allocUnsafe");
+    try {
+      const admitted = await readAdmittedRequestBody(request, admission);
+      expect(admitted.text).toBe("abc");
+      expect(admitted.bytes.byteLength).toBe(3);
+      expect(allocUnsafe).toHaveBeenCalledWith(11);
+      admitted.release();
+    } finally {
+      allocUnsafe.mockRestore();
+    }
   });
 
   it("rejects readAdmittedRequestBody while paused for maintenance", async () => {
