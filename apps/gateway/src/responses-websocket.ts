@@ -18,6 +18,7 @@ import {
 
 const RESPONSES_WEBSOCKET_PATHS = new Set(["/v1/responses", "/responses", "/openai/v1/responses"]);
 const DEFAULT_PREFLIGHT_TIMEOUT_MS = 6_000;
+const DEFAULT_MAX_PREFLIGHT_REQUESTS = 128;
 
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -63,6 +64,10 @@ export interface ResponsesWebSocketBridgeOptions {
   memoryAdmission?: BodyMemoryAdmission;
   /** Optional test/embedding override for bytes retained by `ws` before `message`. */
   ingressAdmission?: BodyMemoryAdmission;
+  /** Optional test/embedding limit for bytes retained by `ws` before `message`. */
+  maxPayloadBytes?: number;
+  /** Optional test/embedding limit for pending authenticated upgrades. */
+  maxPreflightRequests?: number;
   preflightTimeoutMs?: number;
 }
 
@@ -506,6 +511,8 @@ export function installResponsesWebSocketBridge({
   sessionProof,
   memoryAdmission,
   ingressAdmission,
+  maxPayloadBytes,
+  maxPreflightRequests,
   preflightTimeoutMs,
 }: ResponsesWebSocketBridgeOptions): ResponsesWebSocketBridge {
   const memoryBudget = runtimeMemoryBudget();
@@ -522,7 +529,14 @@ export function installResponsesWebSocketBridge({
       jsonAmplification: 1,
       minRequestChargeBytes: 1,
     });
-  const websocketMaxPayloadBytes = 0;
+  const websocketMaxPayloadBytes = Math.max(
+    1,
+    Math.floor(maxPayloadBytes ?? memoryBudget.responseCaptureBytes),
+  );
+  const websocketMaxPreflightRequests = Math.max(
+    1,
+    Math.floor(maxPreflightRequests ?? DEFAULT_MAX_PREFLIGHT_REQUESTS),
+  );
   const metadataByRequest = new WeakMap<IncomingMessage, UpgradeMetadata>();
   const websocketServer = new WebSocketServer({
     noServer: true,
@@ -623,7 +637,28 @@ export function installResponsesWebSocketBridge({
 
   const onUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer) => {
     if (!isResponsesWebSocketPath(request.url)) return;
-    // Unlimited admission: no upgrade-time capacity probe / rejection.
+    if (preflightControllers.size >= websocketMaxPreflightRequests) {
+      const onRejectedSocketError = () => socket.destroy();
+      socket.once("error", onRejectedSocketError);
+      void rejectUpgrade(
+        socket,
+        new Response(
+          JSON.stringify({
+            type: "error",
+            status: 503,
+            status_code: 503,
+            error: {
+              type: "server_error",
+              code: "websocket_preflight_capacity_exceeded",
+              message: "websocket upgrade capacity is temporarily exhausted",
+            },
+            headers: { "retry-after": "1" },
+          }),
+          { status: 503, headers: { "content-type": "application/json", "retry-after": "1" } },
+        ),
+      ).catch(() => socket.destroy());
+      return;
+    }
     const preflightController = new AbortController();
     preflightControllers.add(preflightController);
     responsesPreflightPending += 1;

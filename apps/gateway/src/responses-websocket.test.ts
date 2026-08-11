@@ -83,6 +83,8 @@ async function startBridge(
     memoryAdmission?: ReturnType<typeof createBodyMemoryAdmission>;
     ingressAdmission?: ReturnType<typeof createBodyMemoryAdmission>;
     preflightTimeoutMs?: number;
+    maxPayloadBytes?: number;
+    maxPreflightRequests?: number;
   } = {},
 ) {
   const server = createServer((_req, res) => {
@@ -102,6 +104,8 @@ async function startBridge(
     memoryAdmission: options.memoryAdmission,
     ingressAdmission: options.ingressAdmission,
     preflightTimeoutMs: options.preflightTimeoutMs,
+    maxPayloadBytes: options.maxPayloadBytes,
+    maxPreflightRequests: options.maxPreflightRequests,
   });
   openBridges.push(bridge);
   server.listen(0, "127.0.0.1");
@@ -126,6 +130,21 @@ async function connect(url: string, headers: Record<string, string> = {}): Promi
 }
 
 describe("Responses websocket bridge", () => {
+  it("rejects an oversized client frame before the response handler runs", async () => {
+    const fetch = vi.fn(() => {
+      throw new Error("oversized frame must not reach the response handler");
+    });
+    const baseUrl = await startBridge(fetch, undefined, { maxPayloadBytes: 10 });
+    const socket = await connect(`${baseUrl}/v1/responses`);
+    const closed = once(socket, "close");
+
+    socket.send("01234567890");
+
+    const [code] = await closed;
+    expect(code).toBe(1009);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("does not reserve a maximum frame for idle websocket connections", async () => {
     const ingressAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 20,
@@ -359,6 +378,52 @@ describe("Responses websocket bridge", () => {
     "/v1/chat/completions",
   ])("rejects non-create path %s", (path) => {
     expect(isResponsesWebSocketPath(path)).toBe(false);
+  });
+
+  it("rejects upgrades beyond the bounded preflight capacity", async () => {
+    let resolveModels!: (response: Response) => void;
+    const pendingModels = new Promise<Response>((resolve) => {
+      resolveModels = resolve;
+    });
+    const baseUrl = await startBridge(
+      () => {
+        throw new Error("response handler must not run");
+      },
+      () => pendingModels,
+      { maxPreflightRequests: 1 },
+    );
+    const first = new WebSocket(`${baseUrl}/v1/responses`, {
+      headers: { authorization: "Bearer helm-test-key", "user-agent": "codex_cli_rs/0.144.1" },
+    });
+    first.on("error", () => {});
+    openSockets.push(first);
+    for (
+      let attempt = 0;
+      attempt < 40 && responsesWebSocketPreflightPending() === 0;
+      attempt += 1
+    ) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(responsesWebSocketPreflightPending()).toBe(1);
+
+    const rejected = new WebSocket(`${baseUrl}/v1/responses`, {
+      headers: { authorization: "Bearer helm-test-key", "user-agent": "codex_cli_rs/0.144.1" },
+    });
+    rejected.on("error", () => {});
+    openSockets.push(rejected);
+    const [, response] = (await once(rejected, "unexpected-response")) as [
+      unknown,
+      { statusCode: number },
+    ];
+    expect(response.statusCode).toBe(503);
+
+    const opened = once(first, "open");
+    resolveModels(
+      new Response(JSON.stringify({ data: [] }), {
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await opened;
   });
 
   it("handles an upgrade socket reset while async preflight is pending", async () => {

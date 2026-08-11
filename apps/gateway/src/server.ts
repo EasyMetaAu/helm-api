@@ -1899,7 +1899,7 @@ export async function buildServer(
     sse_tail_chars: memoryBudget.sseTailChars,
     sqlite_page_cache_bytes: memoryBudget.sqlitePageCacheBytes,
     sqlite_maintenance_cache_bytes: memoryBudget.sqliteMaintenanceCacheBytes,
-    websocket_max_payload_bytes: 0,
+    websocket_max_payload_bytes: memoryBudget.responseCaptureBytes,
   });
   const config = loadConfig({ configDir: opts.configDir ?? "./config" });
   // Validate the optional Grok proxy protocol override before opening stores or

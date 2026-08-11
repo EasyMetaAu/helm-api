@@ -22,6 +22,8 @@ export interface RealtimeWebSocketBridgeOptions {
   registry: RealtimeCallRegistry;
   resolveKey(credential: string | null): Promise<string | null>;
   memoryAdmission?: BodyMemoryAdmission;
+  /** Optional test/embedding limit for bytes retained by `ws` before `message`. */
+  maxPayloadBytes?: number;
 }
 
 interface PendingUpstream {
@@ -154,10 +156,14 @@ export function installRealtimeWebSocketBridge(
       jsonAmplification: 1,
       minRequestChargeBytes: 1,
     });
+  const websocketMaxPayloadBytes = Math.max(
+    1,
+    Math.floor(options.maxPayloadBytes ?? memoryBudget.responseCaptureBytes),
+  );
   const websocketServer = new WebSocketServer({
     noServer: true,
     perMessageDeflate: false,
-    maxPayload: 0,
+    maxPayload: websocketMaxPayloadBytes,
   });
   const upstreams = new Set<WebSocket>();
   let closed = false;
@@ -221,7 +227,7 @@ export function installRealtimeWebSocketBridge(
       }
       let upstream: PendingUpstream;
       try {
-        upstream = await openUpstream(call.target, 0);
+        upstream = await openUpstream(call.target, websocketMaxPayloadBytes);
       } catch (cause) {
         options.registry.put(callId, keyId, call.target);
         throw cause;

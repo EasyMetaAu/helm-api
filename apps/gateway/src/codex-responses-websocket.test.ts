@@ -185,6 +185,26 @@ describe("createCodexResponsesWebSocketConnector", () => {
     expect(caught).toMatchObject({ queueTimeout: true });
   });
 
+  it("rejects an oversized upstream websocket frame before queueing it", async () => {
+    const server = createServer();
+    const websocketServer = new WebSocketServer({ noServer: true });
+    server.on("upgrade", (request, socket, head) => {
+      websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+        websocketServer.emit("connection", websocket, request);
+      });
+    });
+    websocketServer.on("connection", (socket) => socket.send("01234567890"));
+    const port = await listen(server);
+    const connector = createCodexResponsesWebSocketConnector({
+      timeoutMs: 2_000,
+      maxPayloadBytes: 10,
+    });
+    const connection = await connector({ url: `ws://127.0.0.1:${port}/responses`, headers: {} });
+    connections.push(connection);
+
+    await expect(settlePromptly(connection.receive())).rejects.toThrow(/payload|frame/i);
+  });
+
   it("holds one shared response-work lease through receive and rejects another session when full", async () => {
     const server = createServer();
     const websocketServer = new WebSocketServer({ noServer: true });

@@ -143,6 +143,45 @@ describe("Realtime websocket bridge", () => {
     expect(data.toString()).toBe("12345");
   });
 
+  it("rejects an oversized client frame before it reaches the upstream relay", async () => {
+    const upstreamHttp = await listeningServer();
+    const upstream = new WebSocketServer({ server: upstreamHttp.server, perMessageDeflate: false });
+    let relayed = false;
+    upstream.on("connection", (socket) => socket.on("message", () => (relayed = true)));
+    closers.push(
+      () =>
+        new Promise<void>((resolve) => {
+          for (const socket of upstream.clients) socket.terminate();
+          upstream.close(() => resolve());
+        }),
+    );
+
+    const gateway = await listeningServer();
+    const registry = createRealtimeCallRegistry();
+    registry.put("rtc_1", "key-1", {
+      url: `ws://127.0.0.1:${upstreamHttp.port}/v1/realtime?call_id=rtc_1`,
+      headers: async () => ({}),
+    });
+    const bridge = installRealtimeWebSocketBridge({
+      server: gateway.server,
+      registry,
+      resolveKey: async () => "key-1",
+      maxPayloadBytes: 10,
+    });
+    closers.push(() => bridge.close());
+
+    const client = new WebSocket(`ws://127.0.0.1:${gateway.port}/v1/realtime?call_id=rtc_1`, {
+      headers: { Authorization: "Bearer helm-key" },
+    });
+    await once(client, "open");
+    const closed = once(client, "close");
+    client.send("01234567890");
+
+    const [code] = await closed;
+    expect(code).toBe(1009);
+    expect(relayed).toBe(false);
+  });
+
   it("refreshes OAuth once when the upstream sideband rejects with 401", async () => {
     const upstreamHttp = await listeningServer();
     const upstream = new WebSocketServer({ noServer: true, perMessageDeflate: false });
