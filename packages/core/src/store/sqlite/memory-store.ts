@@ -963,48 +963,108 @@ export class SqliteMemoryStore implements MemoryStore {
   async findRedundantInjectionObservations(input: {
     accountId: string;
     threadId: string;
-    observations: Array<{ id: string; sourceMessageRange: [string, string] }>;
+    candidateLimit: number;
+    maxCoverageMessages: number;
+    order: "newest" | "score";
+    score?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+    };
     windowContentHashCounts: ReadonlyMap<string, number>;
   }): Promise<ReadonlySet<string>> {
-    if (input.observations.length === 0 || input.windowContentHashCounts.size === 0)
+    const candidateLimit = Math.max(0, Math.floor(input.candidateLimit));
+    const maxCoverageMessages = Math.max(0, Math.floor(input.maxCoverageMessages));
+    if (
+      candidateLimit === 0 ||
+      maxCoverageMessages === 0 ||
+      input.windowContentHashCounts.size === 0
+    ) {
       return new Set();
-    const requested = JSON.stringify(
-      input.observations.map(({ id, sourceMessageRange: [startId, endId] }) => ({
-        id,
-        startId,
-        endId,
-      })),
-    );
+    }
     const live = JSON.stringify(Object.fromEntries(input.windowContentHashCounts));
+    const score = input.order === "score" ? input.score : undefined;
+    const scoreOrder =
+      score === undefined
+        ? "o.observed_at DESC, o.id DESC"
+        : `pow(0.5, max(0, (? - COALESCE(o.referenced_at, o.observed_at)) / 1000.0) / ?)
+             * (min(max(o.importance, ?), ?) + ? * ln(1 + o.reference_count)) DESC,
+           o.observed_at DESC, o.id DESC`;
+    const scoreArgs =
+      score === undefined
+        ? []
+        : [
+            score.nowMs,
+            score.half_life_s,
+            score.importance_floor,
+            score.importance_ceil,
+            score.access_weight,
+          ];
     const rows = this.db.$sqlite
       .prepare(
-        `WITH requested AS (
-           SELECT json_extract(value, '$.id') AS id, json_extract(value, '$.startId') AS start_id,
-                  json_extract(value, '$.endId') AS end_id FROM json_each(?)
-         ), live AS (SELECT key, CAST(value AS INTEGER) AS n FROM json_each(?)),
-         ordered AS (
-           SELECT id, content_hash, ROW_NUMBER() OVER (ORDER BY CASE WHEN message_index IS NULL THEN 1 ELSE 0 END, message_index, created_at, id) AS n
-             FROM memory_messages WHERE thread_id = ?
-         ), endpoints AS (
-           SELECT r.id, r.start_id, r.end_id, MIN(o.n) AS first_n, MAX(o.n) AS last_n,
-                  COUNT(DISTINCT o.id) AS found
-             FROM requested r LEFT JOIN ordered o ON o.id = r.start_id OR o.id = r.end_id
-            GROUP BY r.id, r.start_id, r.end_id
-         ), required AS (
-           SELECT e.id, o.content_hash, COUNT(*) AS n FROM endpoints e JOIN ordered o
-             ON o.n BETWEEN e.first_n AND e.last_n
-            WHERE e.found = CASE WHEN e.start_id = e.end_id THEN 1 ELSE 2 END
-            GROUP BY e.id, o.content_hash
+        `WITH live AS (
+           SELECT key, CAST(value AS INTEGER) AS n FROM json_each(?)
+         ), candidates AS MATERIALIZED (
+           SELECT o.id,
+                  json_extract(o.source_message_range, '$[0]') AS start_id,
+                  json_extract(o.source_message_range, '$[1]') AS end_id
+             FROM memory_observations o
+             JOIN memory_threads t ON t.id = o.thread_id AND t.owner_id = ?
+            WHERE o.thread_id = ? AND o.status = 'active' AND o.expired_at IS NULL
+            ORDER BY ${scoreOrder}
+            LIMIT ?
+         ), endpoints AS MATERIALIZED (
+           SELECT c.id,
+                  CASE WHEN (s.created_at, s.id) <= (e.created_at, e.id)
+                    THEN s.created_at ELSE e.created_at END AS first_at,
+                  CASE WHEN (s.created_at, s.id) <= (e.created_at, e.id)
+                    THEN s.id ELSE e.id END AS first_id,
+                  CASE WHEN (s.created_at, s.id) <= (e.created_at, e.id)
+                    THEN e.created_at ELSE s.created_at END AS last_at,
+                  CASE WHEN (s.created_at, s.id) <= (e.created_at, e.id)
+                    THEN e.id ELSE s.id END AS last_id
+             FROM candidates c
+             JOIN memory_messages s ON s.id = c.start_id AND s.thread_id = ?
+             JOIN memory_messages e ON e.id = c.end_id AND e.thread_id = ?
+         ), bounded AS MATERIALIZED (
+           SELECT e.* FROM endpoints e
+            WHERE (
+              SELECT COUNT(*) FROM (
+                SELECT 1 FROM memory_messages m
+                 WHERE m.thread_id = ?
+                   AND (m.created_at, m.id) >= (e.first_at, e.first_id)
+                   AND (m.created_at, m.id) <= (e.last_at, e.last_id)
+                 ORDER BY m.created_at, m.id
+                 LIMIT ?
+              ) covered_limit
+            ) <= ?
          )
-         SELECT e.id FROM endpoints e
-          WHERE e.found = CASE WHEN e.start_id = e.end_id THEN 1 ELSE 2 END
-            AND EXISTS (SELECT 1 FROM memory_threads WHERE id = ? AND owner_id = ?)
-            AND NOT EXISTS (
-              SELECT 1 FROM required r LEFT JOIN live l ON l.key = r.content_hash
-               WHERE r.id = e.id AND (r.content_hash IS NULL OR l.n IS NULL OR l.n < r.n)
+         SELECT b.id FROM bounded b
+          WHERE NOT EXISTS (
+              SELECT 1 FROM memory_messages m
+              LEFT JOIN live l ON l.key = m.content_hash
+               WHERE m.thread_id = ?
+                 AND (m.created_at, m.id) >= (b.first_at, b.first_id)
+                 AND (m.created_at, m.id) <= (b.last_at, b.last_id)
+               GROUP BY m.content_hash, l.n
+              HAVING m.content_hash IS NULL OR l.n IS NULL OR l.n < COUNT(*)
             )`,
       )
-      .all(requested, live, input.threadId, input.threadId, input.accountId) as Array<{
+      .all(
+        live,
+        input.accountId,
+        input.threadId,
+        ...scoreArgs,
+        candidateLimit,
+        input.threadId,
+        input.threadId,
+        input.threadId,
+        maxCoverageMessages + 1,
+        maxCoverageMessages,
+        input.threadId,
+      ) as Array<{
       id: string;
     }>;
     return new Set(rows.map((row) => row.id));

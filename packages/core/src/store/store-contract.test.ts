@@ -1,5 +1,6 @@
 import type { ApiKeyRecord, DecisionRecord, RoutingSignal } from "@helm/shared";
 import { afterEach, describe, expect, it } from "vitest";
+import { sha256Hex } from "../memory/message-hash.js";
 import type {
   ConfigStore,
   KeyStore,
@@ -2019,6 +2020,66 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         "first-batch-index-1",
         "second-batch-index-0",
       ]);
+    });
+
+    it("resolves bounded injection coverage by chronological tuple with occurrence counts", async () => {
+      ctx = await make();
+      const store = ctx.stores.memory;
+      if (!store.findRedundantInjectionObservations) {
+        throw new Error("adapter must implement bounded injection coverage");
+      }
+      await store.ensureThread({ id: "inject-coverage-t", ownerId: "acct-a" });
+      const contents = Array.from({ length: 520 }, (_, index) => `history-${index}`);
+      contents.splice(400, 3, "yes", "ok", "yes");
+      const messageIds = await store.appendMessages?.(
+        contents.map((content, messageIndex) => ({
+          threadId: "inject-coverage-t",
+          // The current request-local index resets after the covered range. A range
+          // ordered by message_index would pull this later batch into the middle.
+          messageIndex:
+            messageIndex < 400
+              ? messageIndex + 10
+              : messageIndex <= 402
+                ? messageIndex - 400
+                : messageIndex - 403,
+          role: "user" as const,
+          content,
+          tokenEstimate: 1,
+        })),
+      );
+      if (!messageIds || messageIds.length !== contents.length) {
+        throw new Error("adapter must persist the long-history fixture");
+      }
+      const boundedObservationId = await store.appendObservation({
+        threadId: "inject-coverage-t",
+        // Legacy rows may store reversed endpoints; coverage remains inclusive.
+        sourceMessageRange: [messageIds[402] ?? "", messageIds[400] ?? ""],
+        observationText: "bounded repeated turns",
+        observedAt: new Date(2_000),
+      });
+      await store.appendObservation({
+        threadId: "inject-coverage-t",
+        sourceMessageRange: [messageIds[0] ?? "", messageIds[519] ?? ""],
+        observationText: "legacy oversized range",
+        observedAt: new Date(1_000),
+      });
+
+      const lookup = (accountId: string, yesCount: number) =>
+        store.findRedundantInjectionObservations?.({
+          accountId,
+          threadId: "inject-coverage-t",
+          candidateLimit: 8,
+          maxCoverageMessages: 512,
+          order: "newest",
+          windowContentHashCounts: new Map([
+            [sha256Hex("yes"), yesCount],
+            [sha256Hex("ok"), 1],
+          ]),
+        });
+
+      expect(await lookup("acct-a", 2)).toEqual(new Set([boundedObservationId]));
+      expect(await lookup("acct-a", 1)).toEqual(new Set());
+      expect(await lookup("other-account", 2)).toEqual(new Set());
     });
 
     it("pages Observer input with a durable CAS frontier", async () => {

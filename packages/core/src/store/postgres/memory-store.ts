@@ -965,45 +965,87 @@ export class PgMemoryStore implements MemoryStore {
   async findRedundantInjectionObservations(input: {
     accountId: string;
     threadId: string;
-    observations: Array<{ id: string; sourceMessageRange: [string, string] }>;
+    candidateLimit: number;
+    maxCoverageMessages: number;
+    order: "newest" | "score";
+    score?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+    };
     windowContentHashCounts: ReadonlyMap<string, number>;
   }): Promise<ReadonlySet<string>> {
-    if (input.observations.length === 0 || input.windowContentHashCounts.size === 0)
+    const candidateLimit = Math.max(0, Math.floor(input.candidateLimit));
+    const maxCoverageMessages = Math.max(0, Math.floor(input.maxCoverageMessages));
+    if (
+      candidateLimit === 0 ||
+      maxCoverageMessages === 0 ||
+      input.windowContentHashCounts.size === 0
+    ) {
       return new Set();
-    const requested = JSON.stringify(
-      input.observations.map(({ id, sourceMessageRange: [startId, endId] }) => ({
-        id,
-        startId,
-        endId,
-      })),
-    );
+    }
     const live = JSON.stringify(Object.fromEntries(input.windowContentHashCounts));
+    const score = input.order === "score" ? input.score : undefined;
+    const candidateOrder =
+      score === undefined
+        ? sql`${memoryObservations.observedAt} DESC, ${memoryObservations.id} DESC`
+        : sql`power(0.5, GREATEST(0, (${score.nowMs} - COALESCE(${memoryObservations.referencedAt}, ${memoryObservations.observedAt})) / 1000.0) / ${score.half_life_s})
+              * (LEAST(GREATEST(${memoryObservations.importance}, ${score.importance_floor}), ${score.importance_ceil}) + ${score.access_weight} * ln(1 + ${memoryObservations.referenceCount})) DESC,
+              ${memoryObservations.observedAt} DESC, ${memoryObservations.id} DESC`;
     const rows = pgRows<{ id: string }>(
       await this.db.execute(sql`
-        WITH requested AS (
-          SELECT id, "startId" AS start_id, "endId" AS end_id
-            FROM jsonb_to_recordset(${requested}::jsonb) AS r(id text, "startId" text, "endId" text)
-        ), live AS (SELECT key, value::integer AS n FROM jsonb_each_text(${live}::jsonb)),
-        ordered AS (
-          SELECT id, content_hash, ROW_NUMBER() OVER (ORDER BY CASE WHEN message_index IS NULL THEN 1 ELSE 0 END, message_index, created_at, id) AS n
-            FROM memory_messages WHERE thread_id = ${input.threadId}
-        ), endpoints AS (
-          SELECT r.id, r.start_id, r.end_id, MIN(o.n) AS first_n, MAX(o.n) AS last_n,
-                 COUNT(DISTINCT o.id) AS found
-            FROM requested r LEFT JOIN ordered o ON o.id = r.start_id OR o.id = r.end_id
-           GROUP BY r.id, r.start_id, r.end_id
-        ), required AS (
-          SELECT e.id, o.content_hash, COUNT(*) AS n FROM endpoints e JOIN ordered o
-            ON o.n BETWEEN e.first_n AND e.last_n
-           WHERE e.found = CASE WHEN e.start_id = e.end_id THEN 1 ELSE 2 END
-           GROUP BY e.id, o.content_hash
+        WITH live AS (
+          SELECT key, value::integer AS n FROM jsonb_each_text(${live}::jsonb)
+        ), candidates AS MATERIALIZED (
+          SELECT ${memoryObservations.id} AS id,
+                 ${memoryObservations.sourceMessageRange} ->> 0 AS start_id,
+                 ${memoryObservations.sourceMessageRange} ->> 1 AS end_id
+            FROM ${memoryObservations}
+            JOIN ${memoryThreads}
+              ON ${memoryThreads.id} = ${memoryObservations.threadId}
+             AND ${memoryThreads.ownerId} = ${input.accountId}
+           WHERE ${memoryObservations.threadId} = ${input.threadId}
+             AND ${memoryObservations.status} = 'active'
+             AND ${memoryObservations.expiredAt} IS NULL
+           ORDER BY ${candidateOrder}
+           LIMIT ${candidateLimit}
+        ), endpoints AS MATERIALIZED (
+          SELECT c.id,
+                 CASE WHEN (s.created_at, s.id) <= (e.created_at, e.id)
+                   THEN s.created_at ELSE e.created_at END AS first_at,
+                 CASE WHEN (s.created_at, s.id) <= (e.created_at, e.id)
+                   THEN s.id ELSE e.id END AS first_id,
+                 CASE WHEN (s.created_at, s.id) <= (e.created_at, e.id)
+                   THEN e.created_at ELSE s.created_at END AS last_at,
+                 CASE WHEN (s.created_at, s.id) <= (e.created_at, e.id)
+                   THEN e.id ELSE s.id END AS last_id
+            FROM candidates c
+            JOIN memory_messages s ON s.id = c.start_id AND s.thread_id = ${input.threadId}
+            JOIN memory_messages e ON e.id = c.end_id AND e.thread_id = ${input.threadId}
+        ), bounded AS MATERIALIZED (
+          SELECT e.* FROM endpoints e
+           WHERE (
+             SELECT COUNT(*) FROM (
+               SELECT 1 FROM memory_messages m
+                WHERE m.thread_id = ${input.threadId}
+                  AND (m.created_at, m.id) >= (e.first_at, e.first_id)
+                  AND (m.created_at, m.id) <= (e.last_at, e.last_id)
+                ORDER BY m.created_at, m.id
+                LIMIT ${maxCoverageMessages + 1}
+             ) covered_limit
+           ) <= ${maxCoverageMessages}
         )
-        SELECT e.id FROM endpoints e
-         WHERE e.found = CASE WHEN e.start_id = e.end_id THEN 1 ELSE 2 END
-           AND EXISTS (SELECT 1 FROM memory_threads WHERE id = ${input.threadId} AND owner_id = ${input.accountId})
-           AND NOT EXISTS (
-             SELECT 1 FROM required r LEFT JOIN live l ON l.key = r.content_hash
-              WHERE r.id = e.id AND (r.content_hash IS NULL OR l.n IS NULL OR l.n < r.n)
+        SELECT b.id FROM bounded b
+         WHERE NOT EXISTS (
+             SELECT 1 FROM memory_messages m
+             LEFT JOIN live l ON l.key = m.content_hash
+              WHERE m.thread_id = ${input.threadId}
+                AND (m.created_at, m.id) >= (b.first_at, b.first_id)
+                AND (m.created_at, m.id) <= (b.last_at, b.last_id)
+              GROUP BY m.content_hash, l.n
+             HAVING m.content_hash IS NULL OR l.n IS NULL OR l.n < COUNT(*)
            )
       `),
     );

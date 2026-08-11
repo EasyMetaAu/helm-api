@@ -155,15 +155,23 @@ describe("sqlite memory schema + migrations", () => {
       content: "one turn",
       tokenEstimate: 2,
     });
+    const observationId = await store.appendObservation({
+      threadId: "t1",
+      sourceMessageRange: [messageId, messageId],
+      observationText: "one turn summary",
+      observedAt: new Date(),
+    });
 
     const redundant = await store.findRedundantInjectionObservations({
       accountId: "acct-a",
       threadId: "t1",
-      observations: [{ id: "obs-1", sourceMessageRange: [messageId, messageId] }],
+      candidateLimit: 8,
+      maxCoverageMessages: 512,
+      order: "newest",
       windowContentHashCounts: new Map([[sha256Hex("one turn"), 1]]),
     });
 
-    expect(redundant).toEqual(new Set(["obs-1"]));
+    expect(redundant).toEqual(new Set([observationId]));
     db.$sqlite.close();
   });
 

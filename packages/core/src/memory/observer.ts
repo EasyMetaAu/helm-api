@@ -17,7 +17,9 @@ const DEFAULT_MAX_FACTS_PER_SUBJECT = 8;
 // keyset page below and never materialize a whole thread.
 const MAX_OBSERVER_THREAD_MESSAGES = 4_096;
 const MAX_OBSERVER_THREAD_OBSERVATIONS = 512;
-const OBSERVER_PAGE_MESSAGES = 512;
+// Also bounds inject's coverage lookup: production observations cannot cover more
+// raw rows than the Observer page that created them.
+export const OBSERVER_PAGE_MESSAGES = 512;
 const OBSERVER_PAGE_BYTES = 1 * 1024 * 1024;
 const OBSERVER_PAGE_TOKENS = 64 * 1024;
 

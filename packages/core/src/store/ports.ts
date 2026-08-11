@@ -920,12 +920,24 @@ export interface MemoryStore {
       access_weight: number;
     };
   }): Promise<Observation[]>;
-  // Bounded page counterpart: resolve all window-dedup ranges in ONE store query,
-  // returning only the redundant observation ids (never transcript bodies).
+  // Resolve window-dedup coverage for the whole bounded injection candidate set in
+  // ONE store query, returning only redundant observation ids (never transcript
+  // bodies). Candidate selection uses the same priority order as the paged body read.
+  // Each inclusive source range is resolved by canonical (created_at,id) tuple order;
+  // unresolved or over-limit legacy ranges are conservatively kept.
   findRedundantInjectionObservations?(input: {
     accountId: string;
     threadId: string;
-    observations: Array<{ id: string; sourceMessageRange: [string, string] }>;
+    candidateLimit: number;
+    maxCoverageMessages: number;
+    order: "newest" | "score";
+    score?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+    };
     windowContentHashCounts: ReadonlyMap<string, number>;
   }): Promise<ReadonlySet<string>>;
   // Read the current (latest) ACTIVE reflection for a scope, or null if none yet.
