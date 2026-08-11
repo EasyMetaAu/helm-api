@@ -125,8 +125,6 @@ export function createBodyMemoryAdmission(options: {
             if (released || isMaterialized) return;
             isMaterialized = true;
             pendingBytes -= current;
-            sharedLease?.release();
-            sharedLease = undefined;
           },
           release() {
             if (released) return;
