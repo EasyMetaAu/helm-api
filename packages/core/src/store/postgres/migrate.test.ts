@@ -207,7 +207,7 @@ describe("runPgMigrations — per-migration atomicity", () => {
     await db.$close();
   });
 
-  it("v48 reconciles stale Memory counters and checkpoints legacy raw history", async () => {
+  it("v48 reconciles stale Memory counters without skipping uncovered legacy raw history", async () => {
     const db = await createPgliteDb();
     await db.execute(
       sql.raw(`
@@ -251,8 +251,8 @@ describe("runPgMigrations — per-migration atomicity", () => {
         last_message_at: 2000,
         observation_count: 1,
         last_observation_at: 3000,
-        observer_frontier_at: 2000,
-        observer_frontier_id: "frontier-m2",
+        observer_frontier_at: null,
+        observer_frontier_id: null,
       },
     ]);
     await db.$close();

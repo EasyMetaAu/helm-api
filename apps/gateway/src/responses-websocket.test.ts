@@ -149,6 +149,38 @@ describe("Responses websocket bridge", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("caps active clients and releases the slot after close", async () => {
+    const baseUrl = await startBridge(
+      () =>
+        new Response(
+          'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+      undefined,
+      { maxPreflightRequests: 1 },
+    );
+    const first = await connect(`${baseUrl}/v1/responses`);
+
+    const rejected = new WebSocket(`${baseUrl}/v1/responses`, {
+      headers: {
+        authorization: "Bearer helm-test-key",
+        "user-agent": "codex_cli_rs/0.144.1",
+      },
+    });
+    rejected.on("error", () => {});
+    openSockets.push(rejected);
+    const [, response] = (await once(rejected, "unexpected-response")) as [
+      unknown,
+      { statusCode: number },
+    ];
+    expect(response.statusCode).toBe(503);
+
+    const firstClosed = once(first, "close");
+    first.close();
+    await firstClosed;
+    await connect(`${baseUrl}/v1/responses`);
+  });
+
   it("does not reserve a maximum frame for idle websocket connections", async () => {
     const ingressAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 20,

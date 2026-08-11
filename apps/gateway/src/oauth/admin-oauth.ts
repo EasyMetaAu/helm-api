@@ -119,7 +119,7 @@ const XAI_GROK_CREDITS_HEADERS = {
   // process mode for headless requests.
   "x-grok-client-mode": "headless",
 } as const;
-const XAI_GROK_CREDITS_MAX_RESPONSE_BYTES = 1024 * 1024;
+const OAUTH_OPERATOR_JSON_MAX_RESPONSE_BYTES = 1024 * 1024;
 const ANTHROPIC_USAGE_HEADERS = {
   "anthropic-beta": "oauth-2025-04-20",
   "user-agent": "claude-cli/2.0.53 (external, cli)",
@@ -1230,7 +1230,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           signal: AbortSignal.timeout(QUOTA_FETCH_TIMEOUT_MS),
         });
         if (res.ok) {
-          const body: unknown = await res.json();
+          const body = await readBoundedJsonResponse(res, OAUTH_OPERATOR_JSON_MAX_RESPONSE_BYTES);
           windows = parseAnthropicUsageBody(body, now());
           // A 200 that yields ZERO windows means the schema rejected the body (or
           // it carried no windows at all) — the upsert is skipped and the stored
@@ -1301,7 +1301,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           signal: AbortSignal.timeout(QUOTA_FETCH_TIMEOUT_MS),
         });
         if (res.ok) {
-          const body = await readBoundedJsonResponse(res, XAI_GROK_CREDITS_MAX_RESPONSE_BYTES);
+          const body = await readBoundedJsonResponse(res, OAUTH_OPERATOR_JSON_MAX_RESPONSE_BYTES);
           windows = parseXaiGrokCreditsResponse(body, now());
           if (windows.length === 0) {
             log("warn", "oauth.quota.pull_empty", { provider_id: XAI, account });
@@ -1387,7 +1387,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           }).catch(() => null),
         ]);
         if (res.ok) {
-          const body: unknown = await res.json();
+          const body = await readBoundedJsonResponse(res, OAUTH_OPERATOR_JSON_MAX_RESPONSE_BYTES);
           const quota = parseCodexQuotaDetails(body, now());
           windows = quota?.windows ?? [];
           additionalLimits = quota?.additionalLimits ?? [];
@@ -1397,7 +1397,10 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           planType = quota?.planType ?? null;
           rateLimitReachedType = quota?.rateLimitReachedType ?? null;
           if (detailsRes?.ok) {
-            const detailsBody: unknown = await detailsRes.json().catch(() => null);
+            const detailsBody = await readBoundedJsonResponse(
+              detailsRes,
+              OAUTH_OPERATOR_JSON_MAX_RESPONSE_BYTES,
+            ).catch(() => null);
             const details = codexResetCreditDetails(detailsBody);
             if (details) {
               resetCredits = details.availableCount;
@@ -1522,7 +1525,9 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         });
         throw new Error(`codex reset-credit consume failed (status ${res.status})`);
       }
-      const body: unknown = await res.json().catch(() => null);
+      const body = await readBoundedJsonResponse(res, OAUTH_OPERATOR_JSON_MAX_RESPONSE_BYTES).catch(
+        () => null,
+      );
       const result = parseCodexResetResult(body);
       if (result.outcome === null) {
         log("warn", "oauth.reset_credit.failed", {

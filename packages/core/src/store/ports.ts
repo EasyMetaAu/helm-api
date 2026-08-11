@@ -765,6 +765,29 @@ export interface MemoryFactReconcileResult {
   resurrectedIds?: string[];
 }
 
+export type MemoryReflectionCommitAction =
+  | {
+      action: "upsert";
+      reflectionText: string;
+      version: number;
+      tokenEstimate: number;
+      updatedAt: Date;
+    }
+  | { action: "archive" }
+  | { action: "unchanged" };
+
+export interface MemoryReflectionJobCommitInput {
+  target: ReflectionScope;
+  reflection: MemoryReflectionCommitAction;
+  facts: MemoryFactInput[];
+  now: Date;
+}
+
+export interface MemoryReflectionJobCommitResult {
+  reflectionId: string | null;
+  facts: MemoryFactReconcileResult;
+}
+
 export interface MemoryObserverCursor {
   createdAtMs: number;
   id: string;
@@ -994,6 +1017,7 @@ export interface MemoryStore {
     triggerObservations: number;
     triggerIntervalS: number;
     nowMs: number;
+    limit?: number;
   }): Promise<string[]>;
   // docs/12 (Codex review fix) — the reflection-rebuild half of forgetting. A
   // reflection is a derived cache of its scope's ACTIVE observations, so when the
@@ -1017,6 +1041,14 @@ export interface MemoryStore {
   //     caches reading `reflection_version`. The Reflector writes at high-water + 1
   //     (monotonic forever) while still merging/injecting only the ACTIVE text.
   getReflectionVersionHighWater?(scope: ReflectionScope): Promise<number>;
+  // Atomically publish every output of one claimed Reflector job. The adapter first
+  // changes the exact matching reflector row from running -> done; only the winner
+  // may reconcile facts and upsert/archive/retain the reflection in that transaction.
+  // A stale/fenced/reclaimed execution returns null and writes nothing.
+  commitReflectionJob?(
+    jobId: string,
+    input: MemoryReflectionJobCommitInput,
+  ): Promise<MemoryReflectionJobCommitResult | null>;
   // docs/12 "Eviction, demotion, promotion" passes 2–3 (P6) — fact ingest with
   // DETERMINISTIC dedup + same-subject supersede, all in ONE batch. The Reflector
   // extracts discrete facts (its new sibling output) and calls this; per fact:

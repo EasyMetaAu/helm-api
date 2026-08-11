@@ -43,10 +43,13 @@ import {
   type MemoryAdminStats,
   type MemoryAdminStatsScope,
   MemoryFactContentHashConflictError,
+  type MemoryFactReconcileResult,
   type MemoryJobStatus,
   type MemoryMessageArchiveRow,
   type MemoryObserverCursor,
   type MemoryObserverPage,
+  type MemoryReflectionJobCommitInput,
+  type MemoryReflectionJobCommitResult,
   type MemoryStore,
 } from "../ports.js";
 import { runBatchedPrune } from "./batched-prune.js";
@@ -961,6 +964,62 @@ export class SqliteMemoryStore implements MemoryStore {
     return row?.version ?? 0;
   }
 
+  async commitReflectionJob(
+    jobId: string,
+    input: MemoryReflectionJobCommitInput,
+  ): Promise<MemoryReflectionJobCommitResult | null> {
+    const db = this.db.$sqlite;
+    return db.transaction(() => {
+      const scopeId = encodeScopeId(input.target);
+      const claimed = db
+        .prepare(
+          `UPDATE memory_jobs
+              SET status = 'done', error = NULL, updated_at = ?
+            WHERE id = ? AND type = 'reflector' AND scope_id = ? AND status = 'running'
+          RETURNING id`,
+        )
+        .get(input.now.getTime(), jobId, scopeId) as { id: string } | undefined;
+      if (claimed === undefined) return null;
+
+      const facts = this.reconcileFactsSync({
+        accountId: input.target.accountId,
+        scope: {
+          ...(input.target.projectId !== undefined ? { projectId: input.target.projectId } : {}),
+          ...(input.target.resourceId !== undefined ? { resourceId: input.target.resourceId } : {}),
+          ...(input.target.threadId !== undefined ? { threadId: input.target.threadId } : {}),
+        },
+        facts: input.facts,
+        now: input.now,
+      });
+
+      let reflectionId: string | null = null;
+      if (input.reflection.action === "archive") {
+        this.db
+          .update(memoryReflections)
+          .set({ status: "archived" })
+          .where(and(reflectionScopeWhere(input.target), eq(memoryReflections.status, "active")))
+          .run();
+      } else if (input.reflection.action === "upsert") {
+        reflectionId = this.genId();
+        this.db
+          .insert(memoryReflections)
+          .values({
+            id: reflectionId,
+            ownerId: input.target.accountId,
+            projectId: input.target.projectId ?? null,
+            resourceId: input.target.resourceId ?? null,
+            threadId: input.target.threadId ?? null,
+            reflectionText: input.reflection.reflectionText,
+            version: input.reflection.version,
+            tokenEstimate: input.reflection.tokenEstimate,
+            updatedAt: input.reflection.updatedAt,
+          })
+          .run();
+      }
+      return { reflectionId, facts };
+    })();
+  }
+
   // Update a background job's lifecycle status (+ optional error on failure).
   async updateJobStatus(jobId: string, status: MemoryJobStatus, error?: string): Promise<void> {
     this.db
@@ -1220,17 +1279,38 @@ export class SqliteMemoryStore implements MemoryStore {
             )`,
       ).run(input.now.getTime(), ...input.ids, input.accountId);
 
-      const scopeIds = new Set<string>();
+      const scopes = new Map<string, ReflectionScope>();
       for (const row of rows) {
-        const scopeId = encodeScopeId(
-          row.project_id !== null
-            ? { accountId: input.accountId, projectId: row.project_id }
-            : row.resource_id !== null
-              ? { accountId: input.accountId, resourceId: row.resource_id }
-              : { accountId: input.accountId, threadId: row.thread_id },
+        const targets: ReflectionScope[] = [];
+        if (row.project_id !== null) {
+          targets.push({ accountId: input.accountId, projectId: row.project_id });
+        }
+        if (row.resource_id !== null) {
+          targets.push({ accountId: input.accountId, resourceId: row.resource_id });
+        }
+        if (targets.length === 0) {
+          targets.push({ accountId: input.accountId, threadId: row.thread_id });
+        }
+        for (const target of targets) scopes.set(encodeScopeId(target), target);
+      }
+      for (const [scopeId, target] of scopes) {
+        db.prepare(
+          `UPDATE memory_reflections
+              SET status = 'archived'
+            WHERE owner_id = ?
+              AND project_id IS ? AND resource_id IS ? AND thread_id IS ?
+              AND status = 'active'`,
+        ).run(
+          target.accountId,
+          target.projectId ?? null,
+          target.resourceId ?? null,
+          target.threadId ?? null,
         );
-        if (scopeIds.has(scopeId)) continue;
-        scopeIds.add(scopeId);
+        db.prepare(
+          `UPDATE memory_jobs
+              SET status = 'failed', error = 'superseded by observation archive', updated_at = ?
+            WHERE type = 'reflector' AND scope_id = ? AND status = 'running'`,
+        ).run(input.now.getTime(), scopeId);
         db.prepare(
           `INSERT OR IGNORE INTO memory_jobs
              (id, type, scope_id, status, error, created_at, updated_at)
@@ -1256,8 +1336,11 @@ export class SqliteMemoryStore implements MemoryStore {
     triggerObservations: number;
     triggerIntervalS: number;
     nowMs: number;
+    limit?: number;
   }): Promise<string[]> {
     const intervalCutoff = input.nowMs - input.triggerIntervalS * 1000;
+    const limit = input.limit === undefined ? 100 : Math.max(0, input.limit);
+    if (limit === 0) return [];
     const rows = this.db.$sqlite
       .prepare(
         `WITH decay_sweeps AS MATERIALIZED (
@@ -1277,21 +1360,23 @@ export class SqliteMemoryStore implements MemoryStore {
            LEFT JOIN decay_sweeps ds ON ds.owner_id = mt.owner_id
           WHERE o.status = 'active'
             AND mt.owner_id IS NOT NULL
-          GROUP BY mt.owner_id, ds.last_sweep`,
+           GROUP BY mt.owner_id, ds.last_sweep
+          HAVING COUNT(o.id) > 0
+             AND (
+               SUM(CASE WHEN o.observed_at > COALESCE(ds.last_sweep, 0) THEN 1 ELSE 0 END) >= ?
+               OR ds.last_sweep IS NULL
+               OR ds.last_sweep <= ?
+             )
+          ORDER BY mt.owner_id
+          LIMIT ?`,
       )
-      .all() as Array<{
+      .all(input.triggerObservations, intervalCutoff, limit) as Array<{
       owner_id: string;
       last_sweep: number | null;
       active_total: number;
       new_since_sweep: number;
     }>;
-    return rows
-      .filter((row) => {
-        const countGate = row.new_since_sweep >= input.triggerObservations;
-        const timeGate = row.last_sweep === null || row.last_sweep <= intervalCutoff;
-        return (row.active_total > 0 && countGate) || (row.active_total > 0 && timeGate);
-      })
-      .map((row) => row.owner_id);
+    return rows.map((row) => row.owner_id);
   }
 
   // docs/12 P6 — fact ingest with deterministic dedup + same-subject supersede,
@@ -1308,12 +1393,12 @@ export class SqliteMemoryStore implements MemoryStore {
   //      (Graphiti borrow — decay hides, retention deletes). A skipped (deduped)
   //      fact triggers no supersede (changes === 0). The owner_id guard is the
   //      tenant boundary; every predicate carries it.
-  async insertFactsReconciled(input: {
+  private reconcileFactsSync(input: {
     accountId: string;
     scope: { projectId?: string; resourceId?: string; threadId?: string };
     facts: MemoryFactInput[];
     now: Date;
-  }): Promise<{ insertedIds: string[]; supersededIds: string[]; resurrectedIds: string[] }> {
+  }): MemoryFactReconcileResult {
     if (input.facts.length === 0) return { insertedIds: [], supersededIds: [], resurrectedIds: [] };
     const nowMs = input.now.getTime();
     const insertOne = this.db.$sqlite.prepare(
@@ -1466,6 +1551,15 @@ export class SqliteMemoryStore implements MemoryStore {
       return { insertedIds, supersededIds, resurrectedIds };
     });
     return runBatch(input.facts);
+  }
+
+  async insertFactsReconciled(input: {
+    accountId: string;
+    scope: { projectId?: string; resourceId?: string; threadId?: string };
+    facts: MemoryFactInput[];
+    now: Date;
+  }): Promise<MemoryFactReconcileResult> {
+    return this.reconcileFactsSync(input);
   }
 
   // docs/12 P6 — fact READ half. The account's still-alive facts: owner_id =

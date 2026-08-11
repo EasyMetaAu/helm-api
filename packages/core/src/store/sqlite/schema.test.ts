@@ -32,7 +32,7 @@ describe("sqlite schema + migrations", () => {
     }
   });
 
-  it("v49 reconciles stale Memory counters and checkpoints legacy raw history", () => {
+  it("v49 reconciles stale Memory counters without skipping uncovered legacy raw history", () => {
     const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v49-memory-frontier-"));
     const path = join(dir, "helm.db");
     try {
@@ -70,8 +70,8 @@ describe("sqlite schema + migrations", () => {
         last_message_at: 2000,
         observation_count: 1,
         last_observation_at: 3000,
-        observer_frontier_at: 2000,
-        observer_frontier_id: "m2",
+        observer_frontier_at: null,
+        observer_frontier_id: null,
       });
       after.close();
     } finally {

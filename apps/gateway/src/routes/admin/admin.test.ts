@@ -1682,6 +1682,65 @@ describe("admin.api request payload", () => {
     });
   });
 
+  it("rejects an exact payload whose response allocation cannot be admitted", async () => {
+    const telemetry = {
+      ...makeTelemetry(),
+      getPayload: async () => ({
+        requestId: "req_large",
+        requestJson: JSON.stringify({ input: "x".repeat(128) }),
+        responseJson: null,
+        upstreamRequestJson: null,
+        createdAt: new Date(1234),
+      }),
+    } as unknown as TelemetryStore;
+    const responseWorkAdmission = createResponseWorkAdmission({
+      capacityBytes: 64,
+      jsonAmplification: 1,
+      minChargeBytes: 1,
+    });
+
+    const response = await buildApp(buildDeps({ telemetry, responseWorkAdmission })).request(
+      "/admin/api/requests/req_large/payload",
+    );
+
+    expect(await response.json()).toEqual({
+      captured: false,
+      source: "unavailable",
+      reason: "payload_recovery_limited",
+    });
+    expect(responseWorkAdmission.reservedBytes).toBe(0);
+  });
+
+  it("does not read an exact payload while shared response-work capacity is busy", async () => {
+    let reads = 0;
+    const telemetry = {
+      ...makeTelemetry(),
+      getPayload: async () => {
+        reads++;
+        return null;
+      },
+    } as unknown as TelemetryStore;
+    const responseWorkAdmission = createResponseWorkAdmission({
+      capacityBytes: 64,
+      jsonAmplification: 1,
+      minChargeBytes: 1,
+    });
+    const competing = responseWorkAdmission.acquire(64);
+    if (!competing.ok) throw new Error("test capacity setup failed");
+
+    const response = await buildApp(buildDeps({ telemetry, responseWorkAdmission })).request(
+      "/admin/api/requests/req_busy/payload",
+    );
+
+    expect(await response.json()).toEqual({
+      captured: false,
+      source: "unavailable",
+      reason: "payload_recovery_limited",
+    });
+    expect(reads).toBe(0);
+    competing.lease.release();
+  });
+
   it("returns upstream_request:null when the forwarded body was not captured", async () => {
     const telemetry = {
       ...makeTelemetry(),
@@ -2065,6 +2124,38 @@ describe("admin.api request payload", () => {
     });
   });
 
+  it("rejects an oversized Session from metadata before loading its first revision body", async () => {
+    const rec = {
+      ...decision("req_session_meta_limit", "balanced"),
+      session: { ref: "session-ref", source: "x-thread-id" as const },
+    };
+    const telemetry = {
+      ...makeTelemetry([rec]),
+      getPayload: async () => null,
+      getSessionRevisionMeta: async () => ({
+        requestId: "req_session_meta_limit",
+        sessionRef: "session-ref",
+        responseBodyStored: false,
+        recoveryWireBytes: 1_000_000,
+        fidelity: "semantic",
+        createdAt: new Date(1234),
+      }),
+      listSessionRevisionsPage: async () => {
+        throw new Error("oversized revision body must not be materialized");
+      },
+    } as unknown as TelemetryStore;
+
+    const response = await buildApp(buildDeps({ telemetry })).request(
+      "/admin/api/requests/req_session_meta_limit/payload",
+    );
+
+    expect(await response.json()).toEqual({
+      captured: false,
+      source: "unavailable",
+      reason: "session_recovery_limited",
+    });
+  });
+
   it("allows two bounded Session recoveries while a third fails before reading", async () => {
     const rec = {
       ...decision("req_session", "balanced"),
@@ -2077,6 +2168,7 @@ describe("admin.api request payload", () => {
     const telemetry = {
       ...makeTelemetry([rec]),
       getPayload: async () => null,
+      getPayloadMeta: async () => null,
       listSessionRevisionsPage: async () => {
         pageReads++;
         pageEntered.resolve();

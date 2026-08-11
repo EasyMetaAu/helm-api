@@ -1932,6 +1932,28 @@ describe("createOAuthAdmin > fetchAnthropicQuota", () => {
     expect(second).toEqual(first); // served from the warm cache
     expect(usageHits()).toBe(1);
   });
+
+  it("rejects a successful usage response whose declared size exceeds the operator limit", async () => {
+    let cancelled = false;
+    const { fetchQuota } = await connected(
+      () =>
+        new Response(
+          new ReadableStream({
+            pull(controller) {
+              controller.enqueue(new TextEncoder().encode("{}"));
+              controller.close();
+            },
+            cancel() {
+              cancelled = true;
+            },
+          }),
+          { headers: { "content-length": String(1024 * 1024 + 1) } },
+        ),
+    );
+
+    await expect(fetchQuota({ account: "default" })).resolves.toBeNull();
+    expect(cancelled).toBe(true);
+  });
 });
 
 describe("createOAuthAdmin > fetchXaiQuota", () => {
@@ -2514,6 +2536,28 @@ describe("createOAuthAdmin > codex reset credit", () => {
     expect(result).toMatchObject({ resetCreditDetails: null });
   });
 
+  it("rejects a streamed Codex quota response once it crosses the operator limit", async () => {
+    const payload = new TextEncoder().encode(
+      JSON.stringify({ padding: "x".repeat(1024 * 1024 + 1) }),
+    );
+    let offset = 0;
+    const { admin } = await connectCodex({
+      onUsage: () =>
+        new Response(
+          new ReadableStream({
+            pull(controller) {
+              if (offset >= payload.byteLength) return controller.close();
+              const end = Math.min(offset + 600 * 1024, payload.byteLength);
+              controller.enqueue(payload.slice(offset, end));
+              offset = end;
+            },
+          }),
+        ),
+    });
+
+    await expect(admin.fetchCodexQuota?.({ account: "default" })).resolves.toBeNull();
+  });
+
   it("consumeCodexResetCredit POSTs and audits a redeem id with the bearer + account-id headers", async () => {
     const { admin, consumeCalls, logs } = await connectCodex({
       onConsume: () => json({ code: "reset", credit: { id: "c_1" }, windows_reset: 2 }),
@@ -2626,6 +2670,34 @@ describe("createOAuthAdmin > codex reset credit", () => {
   it("rejects an unknown successful consume body", async () => {
     const { admin } = await connectCodex({
       onConsume: () => json({ code: "future_code", windows_reset: 0 }),
+    });
+
+    await expect(admin.consumeCodexResetCredit?.({ account: "default" })).rejects.toThrow(
+      /unrecognized response/,
+    );
+  });
+
+  it("rejects a streamed reset response once it crosses the operator limit", async () => {
+    const payload = new TextEncoder().encode(
+      JSON.stringify({
+        code: "reset",
+        windows_reset: 2,
+        padding: "x".repeat(1024 * 1024 + 1),
+      }),
+    );
+    let offset = 0;
+    const { admin } = await connectCodex({
+      onConsume: () =>
+        new Response(
+          new ReadableStream({
+            pull(controller) {
+              if (offset >= payload.byteLength) return controller.close();
+              const end = Math.min(offset + 600 * 1024, payload.byteLength);
+              controller.enqueue(payload.slice(offset, end));
+              offset = end;
+            },
+          }),
+        ),
     });
 
     await expect(admin.consumeCodexResetCredit?.({ account: "default" })).rejects.toThrow(

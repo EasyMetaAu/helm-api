@@ -30,7 +30,12 @@ describe("PgMemoryStore decay sweep", () => {
   it("lists only ACTIVE observations of the swept account and archives account-guarded", async () => {
     const now = new Date("2026-06-05T00:00:00.000Z");
     const { store } = await newStore(now);
-    await store.ensureThread({ id: "t-a", ownerId: "acct-a", projectId: "p-a" });
+    await store.ensureThread({
+      id: "t-a",
+      ownerId: "acct-a",
+      projectId: "p-a",
+      resourceId: "r-a",
+    });
     await store.ensureThread({ id: "t-b", ownerId: "acct-b", projectId: "p-b" });
     const obsA = await store.appendObservation({
       threadId: "t-a",
@@ -61,13 +66,20 @@ describe("PgMemoryStore decay sweep", () => {
     await store.archiveObservations({ accountId: "acct-a", ids: [obsA, obsB], now: archivedAt });
     expect(await store.listScorableObservations({ accountId: "acct-a" })).toEqual([]); // archived → gone
     expect(await store.listScorableObservations({ accountId: "acct-b" })).toHaveLength(1); // untouched
-    expect(await store.claimPendingJobs(10)).toEqual([
-      {
-        jobId: expect.any(String),
-        type: "reflector",
-        scope: { accountId: "acct-a", projectId: "p-a" },
-      },
-    ]);
+    expect(await store.claimPendingJobs(10)).toEqual(
+      expect.arrayContaining([
+        {
+          jobId: expect.any(String),
+          type: "reflector",
+          scope: { accountId: "acct-a", projectId: "p-a" },
+        },
+        {
+          jobId: expect.any(String),
+          type: "reflector",
+          scope: { accountId: "acct-a", resourceId: "r-a" },
+        },
+      ]),
+    );
   });
 
   // docs/12 (Codex review fix II — starvation; pg mirror) — with `candidates` the
@@ -215,5 +227,29 @@ describe("PgMemoryStore decay sweep", () => {
         nowMs: t0.getTime() + 60_000,
       }),
     ).toEqual([]);
+  });
+
+  it("returns due accounts in deterministic bounded pages", async () => {
+    const t0 = new Date("2026-06-05T00:00:00.000Z");
+    const { store } = await newStore(t0);
+    for (let i = 0; i < 3; i += 1) {
+      const accountId = `acct-${String(i).padStart(3, "0")}`;
+      await store.ensureThread({ id: `thread-${i}`, ownerId: accountId });
+      await store.appendObservation({
+        threadId: `thread-${i}`,
+        sourceMessageRange: [`m-${i}`, `m-${i}`],
+        observationText: "due",
+        observedAt: t0,
+      });
+    }
+
+    expect(
+      await store.listDecayCandidateAccounts({
+        triggerObservations: 50,
+        triggerIntervalS: 3600,
+        nowMs: t0.getTime(),
+        limit: 1,
+      }),
+    ).toEqual(["acct-000"]);
   });
 });

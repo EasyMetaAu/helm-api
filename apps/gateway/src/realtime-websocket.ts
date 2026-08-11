@@ -6,6 +6,9 @@ import { codexWebSocketAgent } from "./codex-responses-websocket.js";
 import type { RealtimeCallRegistry } from "./realtime-call-registry.js";
 import { type BodyMemoryAdmission, createBodyMemoryAdmission } from "./runtime/memory-admission.js";
 
+const DEFAULT_MAX_REALTIME_CONNECTIONS = 128;
+const DEFAULT_REALTIME_IDLE_TIMEOUT_MS = 30 * 60_000;
+
 export interface RealtimeWebSocketBridge {
   close(): Promise<void>;
 }
@@ -24,6 +27,10 @@ export interface RealtimeWebSocketBridgeOptions {
   memoryAdmission?: BodyMemoryAdmission;
   /** Optional test/embedding limit for bytes retained by `ws` before `message`. */
   maxPayloadBytes?: number;
+  /** Optional test/embedding limit for active plus preflight realtime sessions. */
+  maxConnections?: number;
+  /** Optional test/embedding limit for an inactive realtime websocket session. */
+  idleSessionTimeoutMs?: number;
 }
 
 interface PendingUpstream {
@@ -160,12 +167,21 @@ export function installRealtimeWebSocketBridge(
     1,
     Math.floor(options.maxPayloadBytes ?? memoryBudget.responseCaptureBytes),
   );
+  const websocketMaxConnections = Math.max(
+    1,
+    Math.floor(options.maxConnections ?? DEFAULT_MAX_REALTIME_CONNECTIONS),
+  );
+  const websocketIdleSessionTimeoutMs = Math.max(
+    1,
+    Math.floor(options.idleSessionTimeoutMs ?? DEFAULT_REALTIME_IDLE_TIMEOUT_MS),
+  );
   const websocketServer = new WebSocketServer({
     noServer: true,
     perMessageDeflate: false,
     maxPayload: websocketMaxPayloadBytes,
   });
   const upstreams = new Set<WebSocket>();
+  const preflightControllers = new Set<AbortController>();
   let closed = false;
 
   const bind = (client: WebSocket, pending: PendingUpstream) => {
@@ -173,14 +189,28 @@ export function installRealtimeWebSocketBridge(
     pending.stopQueue();
     upstreams.add(upstream);
     let closing = false;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearIdleTimer = () => {
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
+      idleTimer = undefined;
+    };
     const closeBoth = (code: number, reason: string) => {
       if (closing) return;
       closing = true;
+      clearIdleTimer();
       const forwardedCode = forwardedCloseCode(code);
       if (client.readyState === WebSocket.OPEN) client.close(forwardedCode, reason);
       else if (client.readyState !== WebSocket.CLOSED) client.terminate();
       if (upstream.readyState === WebSocket.OPEN) upstream.close(forwardedCode, reason);
       else if (upstream.readyState !== WebSocket.CLOSED) upstream.terminate();
+    };
+    const armIdleTimer = () => {
+      clearIdleTimer();
+      idleTimer = setTimeout(() => {
+        idleTimer = undefined;
+        closeBoth(1001, "realtime websocket session idle timeout");
+      }, websocketIdleSessionTimeoutMs);
+      idleTimer.unref?.();
     };
     const relay = (destination: WebSocket, data: WebSocket.RawData, isBinary: boolean) => {
       // Size/capacity checks are disabled; maintenance pause remains.
@@ -199,21 +229,46 @@ export function installRealtimeWebSocketBridge(
         if (error) closeBoth(1011, "realtime relay failed");
       });
     };
-    client.on("message", (data, isBinary) => relay(upstream, data, isBinary));
-    upstream.on("message", (data, isBinary) => relay(client, data, isBinary));
+    client.on("message", (data, isBinary) => {
+      armIdleTimer();
+      relay(upstream, data, isBinary);
+    });
+    upstream.on("message", (data, isBinary) => {
+      armIdleTimer();
+      relay(client, data, isBinary);
+    });
     client.on("close", (code, reason) => closeBoth(code, reason.toString()));
     upstream.on("close", (code, reason) => closeBoth(code, reason.toString()));
     client.on("error", () => closeBoth(1011, "realtime client error"));
     upstream.on("error", () => closeBoth(1011, "realtime upstream error"));
-    upstream.on("close", () => upstreams.delete(upstream));
+    upstream.on("close", () => {
+      clearIdleTimer();
+      upstreams.delete(upstream);
+    });
+    armIdleTimer();
     for (const frame of pending.pending) relay(client, frame.data, frame.isBinary);
   };
 
   const onUpgrade: UpgradeListener = (request, socket, head) => {
     const callId = callIdFromUrl(request.url);
     if (callId === null) return;
-    const onSocketError = () => socket.destroy();
+    if (websocketServer.clients.size + preflightControllers.size >= websocketMaxConnections) {
+      const onRejectedSocketError = () => socket.destroy();
+      socket.once("error", onRejectedSocketError);
+      void rejectUpgrade(socket, 503, "realtime websocket capacity is temporarily exhausted")
+        .catch(() => socket.destroy())
+        .finally(() => socket.off("error", onRejectedSocketError));
+      return;
+    }
+    const preflightController = new AbortController();
+    preflightControllers.add(preflightController);
+    const onSocketError = () => {
+      preflightController.abort();
+      socket.destroy();
+    };
+    const onSocketClose = () => preflightController.abort();
     socket.on("error", onSocketError);
+    socket.on("close", onSocketClose);
     void (async () => {
       const keyId = await options.resolveKey(bearer(request));
       if (!keyId) {
@@ -247,7 +302,11 @@ export function installRealtimeWebSocketBridge(
         const message = cause instanceof Error ? cause.message : "realtime websocket failed";
         await rejectUpgrade(socket, 502, message).catch(() => socket.destroy());
       })
-      .finally(() => socket.off("error", onSocketError));
+      .finally(() => {
+        preflightControllers.delete(preflightController);
+        socket.off("error", onSocketError);
+        socket.off("close", onSocketClose);
+      });
   };
   options.server.on("upgrade", onUpgrade);
 
@@ -256,6 +315,7 @@ export function installRealtimeWebSocketBridge(
       if (closed) return;
       closed = true;
       options.server.off("upgrade", onUpgrade);
+      for (const controller of preflightControllers) controller.abort();
       for (const socket of websocketServer.clients) socket.terminate();
       for (const socket of upstreams) socket.terminate();
       await new Promise<void>((resolve) => websocketServer.close(() => resolve()));

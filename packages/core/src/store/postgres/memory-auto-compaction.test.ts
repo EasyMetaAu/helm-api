@@ -85,11 +85,25 @@ describe("PgMemoryStore — idle-flush candidates", () => {
       content: "kept tail",
       tokenEstimate: 1,
     });
-    await store.appendObservation({
+    const pageA = await store.listObserverMessagesPage({
+      accountId: "acct-a",
       threadId: "tA",
-      sourceMessageRange: [a1, a2],
-      observationText: "prefix",
-      observedAt: new Date(clock() + 1),
+      limit: 2,
+      maxBytes: 1024,
+      maxTokens: 1024,
+    });
+    const lastA = pageA.messages.at(-1);
+    if (lastA === undefined) throw new Error("expected Observer page");
+    await store.appendObservationAndAdvanceFrontier({
+      accountId: "acct-a",
+      observation: {
+        threadId: "tA",
+        sourceMessageRange: [a1, a2],
+        observationText: "prefix",
+        observedAt: new Date(clock() + 1),
+      },
+      expectedFrontier: pageA.expectedFrontier,
+      nextFrontier: { createdAtMs: lastA.createdAt.getTime(), id: lastA.id },
     });
 
     // Thread B: fully covered → must NOT be a candidate (sweep terminates).
@@ -100,11 +114,25 @@ describe("PgMemoryStore — idle-flush candidates", () => {
       content: "x",
       tokenEstimate: 1,
     });
-    await store.appendObservation({
+    const pageB = await store.listObserverMessagesPage({
+      accountId: "acct-a",
       threadId: "tB",
-      sourceMessageRange: [b1, b1],
-      observationText: "covered",
-      observedAt: new Date(clock() + 1),
+      limit: 10,
+      maxBytes: 1024,
+      maxTokens: 1024,
+    });
+    const lastB = pageB.messages.at(-1);
+    if (lastB === undefined) throw new Error("expected Observer page");
+    await store.appendObservationAndAdvanceFrontier({
+      accountId: "acct-a",
+      observation: {
+        threadId: "tB",
+        sourceMessageRange: [b1, b1],
+        observationText: "covered",
+        observedAt: new Date(clock() + 1),
+      },
+      expectedFrontier: pageB.expectedFrontier,
+      nextFrontier: { createdAtMs: lastB.createdAt.getTime(), id: lastB.id },
     });
 
     const candidates = await store.listIdleFlushCandidates({
@@ -122,7 +150,7 @@ describe("PgMemoryStore — idle-flush candidates", () => {
     await db.$close();
   });
 
-  it("uses observer message order, not created_at order, when testing covered ranges", async () => {
+  it("uses the durable Observer frontier when persisted timestamps are reordered", async () => {
     const { store, db, clock } = await newStore();
     await store.ensureThread({ id: "t1", ownerId: "acct-a" });
     const m1 = await store.appendMessage({
@@ -149,11 +177,27 @@ describe("PgMemoryStore — idle-flush candidates", () => {
     await db.execute(
       `UPDATE memory_messages SET created_at = 1 WHERE id = '${m2.replace(/'/g, "''")}'`,
     );
-    await store.appendObservation({
+    const page = await store.listObserverMessagesPage({
+      accountId: "acct-a",
       threadId: "t1",
-      sourceMessageRange: [m1, m3],
-      observationText: "covers all three transcript positions",
-      observedAt: new Date(clock() + 1),
+      limit: 10,
+      maxBytes: 1024,
+      maxTokens: 1024,
+    });
+    const first = page.messages.at(0);
+    const last = page.messages.at(-1);
+    if (first === undefined || last === undefined) throw new Error("expected Observer page");
+    expect(new Set(page.messages.map((message) => message.id))).toEqual(new Set([m1, m2, m3]));
+    await store.appendObservationAndAdvanceFrontier({
+      accountId: "acct-a",
+      observation: {
+        threadId: "t1",
+        sourceMessageRange: [first.id, last.id],
+        observationText: "covers all persisted messages",
+        observedAt: new Date(clock() + 1),
+      },
+      expectedFrontier: page.expectedFrontier,
+      nextFrontier: { createdAtMs: last.createdAt.getTime(), id: last.id },
     });
 
     expect(

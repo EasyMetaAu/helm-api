@@ -185,19 +185,32 @@ describe("SqliteMemoryStore — idle-flush candidates", () => {
       content: "b",
       tokenEstimate: 1,
     });
-    // Idle flush wrote one observation covering EVERYTHING.
-    await store.appendObservation({
+    const page = await store.listObserverMessagesPage({
+      accountId: "acct-a",
       threadId: "t1",
-      sourceMessageRange: [m1, m2],
-      observationText: "covered",
-      observedAt: new Date(clock() + 1),
+      limit: 10,
+      maxBytes: 1024,
+      maxTokens: 1024,
+    });
+    const last = page.messages.at(-1);
+    if (last === undefined) throw new Error("expected Observer page");
+    await store.appendObservationAndAdvanceFrontier({
+      accountId: "acct-a",
+      observation: {
+        threadId: "t1",
+        sourceMessageRange: [m1, m2],
+        observationText: "covered",
+        observedAt: new Date(clock() + 1),
+      },
+      expectedFrontier: page.expectedFrontier,
+      nextFrontier: { createdAtMs: last.createdAt.getTime(), id: last.id },
     });
     expect(
       await store.listIdleFlushCandidates({ idleBeforeMs: clock() + 1000, limit: 10 }),
     ).toEqual([]);
   });
 
-  it("uses observer message order, not created_at order, when testing covered ranges", async () => {
+  it("uses the durable Observer frontier when persisted timestamps are reordered", async () => {
     const { store, db, clock } = newStore();
     await store.ensureThread({ id: "t1", ownerId: "acct-a" });
     const m1 = await store.appendMessage({
@@ -221,14 +234,30 @@ describe("SqliteMemoryStore — idle-flush candidates", () => {
       content: "last in transcript",
       tokenEstimate: 1,
     });
-    // Historical rows can have created_at out of observer order. The observer and
-    // source ranges are based on message_index order, so this middle row is covered.
+    // Legacy rows can have reordered timestamps; the production Observer owns the
+    // stable (created_at,id) frontier rather than trusting request-local indexes.
     db.$sqlite.prepare("UPDATE memory_messages SET created_at = ? WHERE id = ?").run(1, m2);
-    await store.appendObservation({
+    const page = await store.listObserverMessagesPage({
+      accountId: "acct-a",
       threadId: "t1",
-      sourceMessageRange: [m1, m3],
-      observationText: "covers all three transcript positions",
-      observedAt: new Date(clock() + 1),
+      limit: 10,
+      maxBytes: 1024,
+      maxTokens: 1024,
+    });
+    const first = page.messages.at(0);
+    const last = page.messages.at(-1);
+    if (first === undefined || last === undefined) throw new Error("expected Observer page");
+    expect(new Set(page.messages.map((message) => message.id))).toEqual(new Set([m1, m2, m3]));
+    await store.appendObservationAndAdvanceFrontier({
+      accountId: "acct-a",
+      observation: {
+        threadId: "t1",
+        sourceMessageRange: [first.id, last.id],
+        observationText: "covers all persisted messages",
+        observedAt: new Date(clock() + 1),
+      },
+      expectedFrontier: page.expectedFrontier,
+      nextFrontier: { createdAtMs: last.createdAt.getTime(), id: last.id },
     });
 
     expect(

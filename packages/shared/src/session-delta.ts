@@ -53,6 +53,10 @@ function responseOutput(responseJson: string | null | undefined): unknown[] {
   return response.output;
 }
 
+function appendEvents(target: unknown[], source: readonly unknown[]): void {
+  for (const event of source) target.push(event);
+}
+
 // Reconstruct one revision by walking its explicit parent chain, so a branch never
 // accidentally borrows the most-recent sibling's prefix.
 export function restoreSessionRevisionJson(
@@ -74,7 +78,7 @@ export function restoreSessionRevisionJson(
     if (!current) throw new Error(`unknown session revision: ${chain.at(-1)?.parentRequestId}`);
   }
 
-  let events: unknown[] = [];
+  const events: unknown[] = [];
   let parent: SessionRevisionForRestore | null = null;
   for (const item of chain.reverse()) {
     if (!Number.isInteger(item.retainCount) || item.retainCount < 0)
@@ -87,12 +91,14 @@ export function restoreSessionRevisionJson(
       if (item.retainCount !== 0) throw new Error("invalid session continuation retain_count");
       if ("responseId" in parent && parent.responseId !== previousId)
         throw new Error("session continuation response mismatch");
-      events = [...events, ...responseOutput(parent.responseJson), ...delta];
+      appendEvents(events, responseOutput(parent.responseJson));
+      appendEvents(events, delta);
     } else if (item.parentRequestId === null) {
-      events = delta;
+      appendEvents(events, delta);
     } else {
       if (item.retainCount > events.length) throw new Error("invalid session retain_count");
-      events = [...events.slice(0, item.retainCount), ...delta];
+      events.length = item.retainCount;
+      appendEvents(events, delta);
     }
     parent = item;
   }

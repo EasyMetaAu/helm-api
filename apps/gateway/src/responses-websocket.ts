@@ -674,7 +674,7 @@ export function installResponsesWebSocketBridge({
 
   const onUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer) => {
     if (!isResponsesWebSocketPath(request.url)) return;
-    if (preflightControllers.size >= websocketMaxPreflightRequests) {
+    if (websocketServer.clients.size + preflightControllers.size >= websocketMaxPreflightRequests) {
       const onRejectedSocketError = () => socket.destroy();
       socket.once("error", onRejectedSocketError);
       void rejectUpgrade(

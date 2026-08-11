@@ -43,10 +43,13 @@ import {
   type MemoryAdminStats,
   type MemoryAdminStatsScope,
   MemoryFactContentHashConflictError,
+  type MemoryFactReconcileResult,
   type MemoryJobStatus,
   type MemoryMessageArchiveRow,
   type MemoryObserverCursor,
   type MemoryObserverPage,
+  type MemoryReflectionJobCommitInput,
+  type MemoryReflectionJobCommitResult,
   type MemoryStore,
 } from "../ports.js";
 import type { PgDb } from "./migrate.js";
@@ -945,6 +948,70 @@ export class PgMemoryStore implements MemoryStore {
     return rows[0]?.version ?? 0;
   }
 
+  async commitReflectionJob(
+    jobId: string,
+    input: MemoryReflectionJobCommitInput,
+  ): Promise<MemoryReflectionJobCommitResult | null> {
+    return this.db.transaction(async (tx) => {
+      const scopeId = encodeScopeId(input.target);
+      const claimed = pgRows<{ id: string }>(
+        await tx.execute(sql`
+          UPDATE memory_jobs
+             SET status = 'done', error = NULL, updated_at = ${input.now.getTime()}
+           WHERE id = ${jobId}
+             AND type = 'reflector'
+             AND scope_id = ${scopeId}
+             AND status = 'running'
+          RETURNING id
+        `),
+      );
+      if (claimed[0] === undefined) return null;
+
+      const facts = await this.reconcileFacts(
+        { execute: (query) => tx.execute(query) },
+        {
+          accountId: input.target.accountId,
+          scope: {
+            ...(input.target.projectId !== undefined ? { projectId: input.target.projectId } : {}),
+            ...(input.target.resourceId !== undefined
+              ? { resourceId: input.target.resourceId }
+              : {}),
+            ...(input.target.threadId !== undefined ? { threadId: input.target.threadId } : {}),
+          },
+          facts: input.facts,
+          now: input.now,
+        },
+      );
+
+      let reflectionId: string | null = null;
+      if (input.reflection.action === "archive") {
+        await tx.execute(sql`
+          UPDATE memory_reflections
+             SET status = 'archived'
+           WHERE owner_id = ${input.target.accountId}
+             AND project_id IS NOT DISTINCT FROM ${input.target.projectId ?? null}
+             AND resource_id IS NOT DISTINCT FROM ${input.target.resourceId ?? null}
+             AND thread_id IS NOT DISTINCT FROM ${input.target.threadId ?? null}
+             AND status = 'active'
+        `);
+      } else if (input.reflection.action === "upsert") {
+        reflectionId = this.genId();
+        await tx.insert(memoryReflections).values({
+          id: reflectionId,
+          ownerId: input.target.accountId,
+          projectId: input.target.projectId ?? null,
+          resourceId: input.target.resourceId ?? null,
+          threadId: input.target.threadId ?? null,
+          reflectionText: input.reflection.reflectionText,
+          version: input.reflection.version,
+          tokenEstimate: input.reflection.tokenEstimate,
+          updatedAt: input.reflection.updatedAt.getTime(),
+        });
+      }
+      return { reflectionId, facts };
+    });
+  }
+
   async updateJobStatus(jobId: string, status: MemoryJobStatus, error?: string): Promise<void> {
     await this.db
       .update(memoryJobs)
@@ -1334,17 +1401,35 @@ export class PgMemoryStore implements MemoryStore {
              SELECT id FROM memory_threads WHERE owner_id = ${input.accountId}
            )
       `);
-      const scopeIds = new Set<string>();
+      const scopes = new Map<string, ReflectionScope>();
       for (const row of rows) {
-        const scopeId = encodeScopeId(
-          row.project_id !== null
-            ? { accountId: input.accountId, projectId: row.project_id }
-            : row.resource_id !== null
-              ? { accountId: input.accountId, resourceId: row.resource_id }
-              : { accountId: input.accountId, threadId: row.thread_id },
-        );
-        if (scopeIds.has(scopeId)) continue;
-        scopeIds.add(scopeId);
+        const targets: ReflectionScope[] = [];
+        if (row.project_id !== null) {
+          targets.push({ accountId: input.accountId, projectId: row.project_id });
+        }
+        if (row.resource_id !== null) {
+          targets.push({ accountId: input.accountId, resourceId: row.resource_id });
+        }
+        if (targets.length === 0) {
+          targets.push({ accountId: input.accountId, threadId: row.thread_id });
+        }
+        for (const target of targets) scopes.set(encodeScopeId(target), target);
+      }
+      for (const [scopeId, target] of scopes) {
+        await tx.execute(sql`
+          UPDATE memory_reflections
+             SET status = 'archived'
+           WHERE owner_id = ${target.accountId}
+             AND project_id IS NOT DISTINCT FROM ${target.projectId ?? null}
+             AND resource_id IS NOT DISTINCT FROM ${target.resourceId ?? null}
+             AND thread_id IS NOT DISTINCT FROM ${target.threadId ?? null}
+             AND status = 'active'
+        `);
+        await tx.execute(sql`
+          UPDATE memory_jobs
+             SET status = 'failed', error = 'superseded by observation archive', updated_at = ${nowMs}
+           WHERE type = 'reflector' AND scope_id = ${scopeId} AND status = 'running'
+        `);
         await tx.execute(sql`
           INSERT INTO memory_jobs (id, type, scope_id, status, error, created_at, updated_at)
           VALUES (${this.genId()}, 'reflector', ${scopeId}, 'pending', NULL, ${nowMs}, ${nowMs})
@@ -1367,24 +1452,36 @@ export class PgMemoryStore implements MemoryStore {
     triggerObservations: number;
     triggerIntervalS: number;
     nowMs: number;
+    limit?: number;
   }): Promise<string[]> {
     const intervalCutoff = input.nowMs - input.triggerIntervalS * 1000;
+    const limit = input.limit === undefined ? 100 : Math.max(0, input.limit);
+    if (limit === 0) return [];
     const result = (await this.db.execute(sql`
-      SELECT mt.owner_id AS owner_id,
-             (SELECT MAX(j.created_at) FROM memory_jobs j
-               WHERE j.type = 'decay'
-                 AND j.scope_id::jsonb ->> 'accountId' = mt.owner_id) AS last_sweep,
-             COUNT(o.id) AS active_total,
-             SUM(CASE WHEN o.observed_at > COALESCE(
-               (SELECT MAX(j2.created_at) FROM memory_jobs j2
-                 WHERE j2.type = 'decay'
-                   AND j2.scope_id::jsonb ->> 'accountId' = mt.owner_id), 0)
-               THEN 1 ELSE 0 END) AS new_since_sweep
-        FROM memory_observations o
-        JOIN memory_threads mt ON mt.id = o.thread_id
-       WHERE o.status = 'active'
-         AND mt.owner_id IS NOT NULL
-       GROUP BY mt.owner_id
+      WITH decay_sweeps AS (
+        SELECT scope_id::jsonb ->> 'accountId' AS owner_id, MAX(created_at) AS last_sweep
+          FROM memory_jobs
+         WHERE type = 'decay'
+         GROUP BY scope_id::jsonb ->> 'accountId'
+      ), candidates AS (
+        SELECT mt.owner_id AS owner_id, ds.last_sweep AS last_sweep,
+               COUNT(o.id) AS active_total,
+               SUM(CASE WHEN o.observed_at > COALESCE(ds.last_sweep, 0)
+                   THEN 1 ELSE 0 END) AS new_since_sweep
+          FROM memory_observations o
+          JOIN memory_threads mt ON mt.id = o.thread_id
+          LEFT JOIN decay_sweeps ds ON ds.owner_id = mt.owner_id
+         WHERE o.status = 'active' AND mt.owner_id IS NOT NULL
+         GROUP BY mt.owner_id, ds.last_sweep
+        HAVING COUNT(o.id) > 0
+           AND (
+             SUM(CASE WHEN o.observed_at > COALESCE(ds.last_sweep, 0) THEN 1 ELSE 0 END) >= ${input.triggerObservations}
+             OR ds.last_sweep IS NULL OR ds.last_sweep <= ${intervalCutoff}
+           )
+      )
+      SELECT owner_id FROM candidates
+       ORDER BY owner_id
+       LIMIT ${limit}
     `)) as unknown;
     const rows = (
       Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])
@@ -1394,16 +1491,7 @@ export class PgMemoryStore implements MemoryStore {
       active_total: number | string;
       new_since_sweep: number | string | null;
     }>;
-    return rows
-      .filter((row) => {
-        const activeTotal = Number(row.active_total);
-        const newSince = Number(row.new_since_sweep ?? 0);
-        const lastSweep = row.last_sweep === null ? null : Number(row.last_sweep);
-        const countGate = newSince >= input.triggerObservations;
-        const timeGate = lastSweep === null || lastSweep <= intervalCutoff;
-        return activeTotal > 0 && (countGate || timeGate);
-      })
-      .map((row) => row.owner_id);
+    return rows.map((row) => row.owner_id);
   }
 
   // docs/12 P6 — fact ingest with deterministic dedup + same-subject supersede
@@ -1423,9 +1511,7 @@ export class PgMemoryStore implements MemoryStore {
     scope: { projectId?: string; resourceId?: string; threadId?: string };
     facts: MemoryFactInput[];
     now: Date;
-  }): Promise<{ insertedIds: string[]; supersededIds: string[]; resurrectedIds: string[] }> {
-    if (input.facts.length === 0) return { insertedIds: [], supersededIds: [], resurrectedIds: [] };
-    const nowMs = input.now.getTime();
+  }): Promise<MemoryFactReconcileResult> {
     // docs/12 P6 (Codex review fix #3) — insert + supersede must be ATOMIC. The pg
     // adapter previously ran them as two un-wrapped statements: a crash AFTER the
     // insert but BEFORE the supersede left the new fact persisted while the old one
@@ -1435,20 +1521,37 @@ export class PgMemoryStore implements MemoryStore {
     // partial work back, and the content_hash unique index makes the retry's
     // re-insert idempotent so supersede runs again. Mirrors the sqlite adapter, which
     // already wraps the batch in `$sqlite.transaction`.
-    return await this.db.transaction(async (tx) => {
-      const insertedIds: string[] = [];
-      const supersededIds: string[] = [];
-      const resurrectedIds: string[] = [];
-      for (const f of input.facts) {
-        // The top-level accountId is the authoritative tenant guard; persist it as
-        // owner_id so a mismatched input can never write under another tenant.
-        const ownerId = input.accountId;
-        const projectId = f.projectId ?? null;
-        const resourceId = f.resourceId ?? null;
-        const threadId = f.threadId ?? null;
-        const id = this.genId();
-        const validFromMs = f.validFrom.getTime();
-        const inserted = (await tx.execute(sql`
+    return this.db.transaction((tx) =>
+      this.reconcileFacts({ execute: (query) => tx.execute(query) }, input),
+    );
+  }
+
+  private async reconcileFacts(
+    tx: { execute: (query: SQL) => Promise<unknown> },
+    input: {
+      accountId: string;
+      scope: { projectId?: string; resourceId?: string; threadId?: string };
+      facts: MemoryFactInput[];
+      now: Date;
+    },
+  ): Promise<MemoryFactReconcileResult> {
+    if (input.facts.length === 0) {
+      return { insertedIds: [], supersededIds: [], resurrectedIds: [] };
+    }
+    const nowMs = input.now.getTime();
+    const insertedIds: string[] = [];
+    const supersededIds: string[] = [];
+    const resurrectedIds: string[] = [];
+    for (const f of input.facts) {
+      // The top-level accountId is the authoritative tenant guard; persist it as
+      // owner_id so a mismatched input can never write under another tenant.
+      const ownerId = input.accountId;
+      const projectId = f.projectId ?? null;
+      const resourceId = f.resourceId ?? null;
+      const threadId = f.threadId ?? null;
+      const id = this.genId();
+      const validFromMs = f.validFrom.getTime();
+      const inserted = (await tx.execute(sql`
         INSERT INTO memory_facts
           (id, owner_id, project_id, resource_id, thread_id, subject_key, fact_text,
            content_hash, importance, reference_count, referenced_at, valid_from,
@@ -1465,40 +1568,40 @@ export class PgMemoryStore implements MemoryStore {
         ON CONFLICT (owner_id, content_hash) DO NOTHING
         RETURNING id
       `)) as { rows?: Array<{ id: string }> } | Array<{ id: string }>;
-        const insertedRows = Array.isArray(inserted) ? inserted : (inserted.rows ?? []);
-        if (insertedRows[0] === undefined) {
-          // Dedup hit: the (owner_id, content_hash) row already exists. Resurrect it
-          // when NOT live (pruned by a manual delete, or archived) so a re-observed
-          // fact returns rather than being permanently suppressed by the idempotency
-          // index. A live duplicate stays a no-op. Mirrors the sqlite adapter.
-          const existingRes = (await tx.execute(sql`
+      const insertedRows = Array.isArray(inserted) ? inserted : (inserted.rows ?? []);
+      if (insertedRows[0] === undefined) {
+        // Dedup hit: the (owner_id, content_hash) row already exists. Resurrect it
+        // when NOT live (pruned by a manual delete, or archived) so a re-observed
+        // fact returns rather than being permanently suppressed by the idempotency
+        // index. A live duplicate stays a no-op. Mirrors the sqlite adapter.
+        const existingRes = (await tx.execute(sql`
           SELECT id, status FROM memory_facts
            WHERE owner_id = ${ownerId} AND content_hash = ${f.contentHash}
            LIMIT 1
         `)) as
-            | { rows?: Array<{ id: string; status: string }> }
-            | Array<{ id: string; status: string }>;
-          const existingRows = Array.isArray(existingRes) ? existingRes : (existingRes.rows ?? []);
-          const existing = existingRows[0];
-          if (
-            existing !== undefined &&
-            (existing.status === "pruned" || existing.status === "archived")
-          ) {
-            // Re-scope on resurrect (Codex review fix; sqlite mirror): the
-            // (owner_id, content_hash) index is ACCOUNT-GLOBAL, so a fact re-stated under
-            // a different project/resource/thread dedup-hits the old row. Reactivating
-            // without re-scoping would revive it at the STALE scope and the scoped inject
-            // read would never surface it. The re-ingest's scope is authoritative, so
-            // overwrite the scope columns too (same-scope re-statement = no-op rewrite).
-            await tx.execute(sql`
+          | { rows?: Array<{ id: string; status: string }> }
+          | Array<{ id: string; status: string }>;
+        const existingRows = Array.isArray(existingRes) ? existingRes : (existingRes.rows ?? []);
+        const existing = existingRows[0];
+        if (
+          existing !== undefined &&
+          (existing.status === "pruned" || existing.status === "archived")
+        ) {
+          // Re-scope on resurrect (Codex review fix; sqlite mirror): the
+          // (owner_id, content_hash) index is ACCOUNT-GLOBAL, so a fact re-stated under
+          // a different project/resource/thread dedup-hits the old row. Reactivating
+          // without re-scoping would revive it at the STALE scope and the scoped inject
+          // read would never surface it. The re-ingest's scope is authoritative, so
+          // overwrite the scope columns too (same-scope re-statement = no-op rewrite).
+          await tx.execute(sql`
             UPDATE memory_facts
                SET status = 'active', expired_at = NULL, invalid_at = NULL,
                    valid_from = ${validFromMs}, updated_at = ${nowMs},
                    project_id = ${projectId}, resource_id = ${resourceId}, thread_id = ${threadId}
              WHERE id = ${existing.id}
           `);
-            resurrectedIds.push(existing.id);
-            const reSuperseded = (await tx.execute(sql`
+          resurrectedIds.push(existing.id);
+          const reSuperseded = (await tx.execute(sql`
             UPDATE memory_facts
                SET expired_at = ${nowMs}, invalid_at = ${validFromMs}, updated_at = ${nowMs}
              WHERE owner_id = ${ownerId}
@@ -1512,22 +1615,22 @@ export class PgMemoryStore implements MemoryStore {
                AND (${threadId}::text IS NULL OR thread_id = ${threadId})
             RETURNING id
           `)) as { rows?: Array<{ id: string }> } | Array<{ id: string }>;
-            const reSupersededRows = Array.isArray(reSuperseded)
-              ? reSuperseded
-              : (reSuperseded.rows ?? []);
-            for (const s of reSupersededRows) supersededIds.push(s.id);
-          }
-          continue; // deduped (or resurrected above) → skip the fresh-insert supersede
+          const reSupersededRows = Array.isArray(reSuperseded)
+            ? reSuperseded
+            : (reSuperseded.rows ?? []);
+          for (const s of reSupersededRows) supersededIds.push(s.id);
         }
-        insertedIds.push(id);
+        continue; // deduped (or resurrected above) → skip the fresh-insert supersede
+      }
+      insertedIds.push(id);
 
-        // Supersede narrows by the NEW fact's NON-NULL scope columns ONLY — the SAME
-        // semantics as the listActiveFacts read path (Codex review fix; pg mirror of
-        // the sqlite adapter). A null scope column on the new fact imposes NO
-        // constraint: `(${"value"}::text IS NULL OR col = value)` short-circuits to
-        // a no-op clause when the bound value is null. RETURNING id surfaces the
-        // superseded rows (docs/13 — the MCP add tool echoes them).
-        const superseded = (await tx.execute(sql`
+      // Supersede narrows by the NEW fact's NON-NULL scope columns ONLY — the SAME
+      // semantics as the listActiveFacts read path (Codex review fix; pg mirror of
+      // the sqlite adapter). A null scope column on the new fact imposes NO
+      // constraint: `(${"value"}::text IS NULL OR col = value)` short-circuits to
+      // a no-op clause when the bound value is null. RETURNING id surfaces the
+      // superseded rows (docs/13 — the MCP add tool echoes them).
+      const superseded = (await tx.execute(sql`
         UPDATE memory_facts
            SET expired_at = ${nowMs}, invalid_at = ${validFromMs}, updated_at = ${nowMs}
          WHERE owner_id = ${ownerId}
@@ -1541,11 +1644,10 @@ export class PgMemoryStore implements MemoryStore {
            AND (${threadId}::text IS NULL OR thread_id = ${threadId})
         RETURNING id
       `)) as { rows?: Array<{ id: string }> } | Array<{ id: string }>;
-        const supersededRows = Array.isArray(superseded) ? superseded : (superseded.rows ?? []);
-        for (const s of supersededRows) supersededIds.push(s.id);
-      }
-      return { insertedIds, supersededIds, resurrectedIds };
-    });
+      const supersededRows = Array.isArray(superseded) ? superseded : (superseded.rows ?? []);
+      for (const s of supersededRows) supersededIds.push(s.id);
+    }
+    return { insertedIds, supersededIds, resurrectedIds };
   }
 
   // docs/12 P6 — fact READ half (pg mirror). The account's still-alive facts:
@@ -2176,40 +2278,48 @@ export class PgMemoryStore implements MemoryStore {
           thread_id TEXT PRIMARY KEY
         ) ON COMMIT DELETE ROWS
       `);
-      await tx.execute(sql`DELETE FROM _helm_pruned_message_threads`);
-      await tx.execute(sql`
-        INSERT INTO _helm_pruned_message_threads (thread_id)
-        SELECT DISTINCT m.thread_id
-          FROM memory_messages m
-          JOIN memory_threads t ON t.id = m.thread_id
-         WHERE m.created_at < ${olderThanMs}
-           AND t.observer_frontier_at IS NOT NULL
-           AND (
-             m.created_at < t.observer_frontier_at OR
-             (m.created_at = t.observer_frontier_at AND m.id <= t.observer_frontier_id)
-           )
-        ON CONFLICT (thread_id) DO NOTHING
-      `);
-      // Serialize summary maintenance with appendMessage/appendMessages, whose
-      // counter increments lock the same parent rows. The deterministic order
-      // also keeps concurrent multi-thread cleanup passes from lock-order drift.
-      // This lock MUST precede DELETE: a blocked locker gets a fresh snapshot for
-      // the later delete/recompute statements after the appender commits.
-      await tx.execute(sql`
-        SELECT t.id
-          FROM memory_threads t
-          JOIN _helm_pruned_message_threads a ON a.thread_id = t.id
-         ORDER BY t.id
-           FOR UPDATE
-      `);
       let deletedCount = 0;
       for (;;) {
+        await tx.execute(sql`DELETE FROM _helm_pruned_message_threads`);
+        // Discover only the threads touched by this bounded delete batch. The old
+        // implementation materialized every affected thread before pruning.
+        await tx.execute(sql`
+          INSERT INTO _helm_pruned_message_threads (thread_id)
+          WITH doomed AS (
+            SELECT m.id
+              FROM memory_messages m
+              JOIN memory_threads t ON t.id = m.thread_id
+             WHERE m.created_at < ${olderThanMs}
+               AND t.observer_frontier_at IS NOT NULL
+               AND (
+                 m.created_at < t.observer_frontier_at OR
+                 (m.created_at = t.observer_frontier_at AND m.id <= t.observer_frontier_id)
+               )
+             ORDER BY m.created_at, m.id
+             LIMIT 1000
+          )
+          SELECT DISTINCT m.thread_id
+            FROM memory_messages m
+            JOIN doomed d ON d.id = m.id
+          ON CONFLICT (thread_id) DO NOTHING
+        `);
+        // Serialize summary maintenance with appendMessage/appendMessages, whose
+        // counter increments lock the same parent rows. The lock set is bounded
+        // by this batch, not the tenant's full historical thread set.
+        await tx.execute(sql`
+          SELECT t.id
+            FROM memory_threads t
+            JOIN _helm_pruned_message_threads a ON a.thread_id = t.id
+           ORDER BY t.id
+             FOR UPDATE
+        `);
         const deleted = pgRows<{ n: number | string }>(
           await tx.execute(sql`
             WITH doomed AS (
               SELECT m.id
                 FROM memory_messages m
                 JOIN memory_threads t ON t.id = m.thread_id
+                JOIN _helm_pruned_message_threads a ON a.thread_id = m.thread_id
                WHERE m.created_at < ${olderThanMs}
                  AND t.observer_frontier_at IS NOT NULL
                  AND (
@@ -2228,20 +2338,22 @@ export class PgMemoryStore implements MemoryStore {
         )[0];
         const n = numberOf(deleted?.n);
         deletedCount += n;
+        // Repair summaries while this batch's bounded lock set is still the
+        // active temp set; do not accumulate every touched thread in memory.
+        await tx.execute(sql`
+          UPDATE memory_threads AS t
+             SET message_count = (
+                   SELECT COUNT(*)::integer FROM memory_messages m WHERE m.thread_id = t.id
+                 ),
+                 last_message_at = (
+                   SELECT MAX(m.created_at)::bigint FROM memory_messages m WHERE m.thread_id = t.id
+                 )
+           WHERE EXISTS (
+             SELECT 1 FROM _helm_pruned_message_threads a WHERE a.thread_id = t.id
+           )
+        `);
         if (n < 1000) break;
       }
-      await tx.execute(sql`
-        UPDATE memory_threads AS t
-           SET message_count = (
-                 SELECT COUNT(*)::integer FROM memory_messages m WHERE m.thread_id = t.id
-               ),
-               last_message_at = (
-                 SELECT MAX(m.created_at)::bigint FROM memory_messages m WHERE m.thread_id = t.id
-               )
-         WHERE EXISTS (
-           SELECT 1 FROM _helm_pruned_message_threads a WHERE a.thread_id = t.id
-         )
-      `);
       return deletedCount;
     });
   }

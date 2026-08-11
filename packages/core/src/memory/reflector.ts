@@ -1,5 +1,5 @@
-import type { Observation, Reflection, ReflectionScope } from "@helm/shared";
-import type { MemoryStore } from "../store/ports.js";
+import type { MemoryFactInput, Observation, Reflection, ReflectionScope } from "@helm/shared";
+import type { MemoryFactReconcileResult, MemoryStore } from "../store/ports.js";
 import { buildReconciledFactBatch } from "./forgetting/facts.js";
 
 // ponytail: skip oversized legacy scopes; replace with bounded incremental merging when required.
@@ -148,7 +148,20 @@ export async function runReflectorJob(
       observationCount !== null &&
       observationCount > MAX_REFLECTOR_OBSERVATIONS
     ) {
-      await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      if (deps.memoryStore.commitReflectionJob !== undefined) {
+        const committed = await deps.memoryStore.commitReflectionJob(job.jobId, {
+          target,
+          reflection: { action: "unchanged" },
+          facts: [],
+          now: deps.now(),
+        });
+        if (committed === null) {
+          deps.log("memory.reflector.stale", { scope: job.scope, target_scope: target });
+          return { reflectionId: null, version: null, changed: false };
+        }
+      } else {
+        await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      }
       deps.log("memory.reflector.history_skipped", {
         scope: job.scope,
         target_scope: target,
@@ -185,8 +198,35 @@ export async function runReflectorJob(
       // an ordinary reflector job over a no-observation scope must keep its existing
       // reflection exactly as the base behaviour did (enabled:false = byte-identical)
       // — AND on the optional store method (absent ⇒ pre-phase store, legacy no-op).
+      const shouldArchive = deps.forgetting?.enabled === true && previousReflection !== null;
+      if (deps.memoryStore.commitReflectionJob !== undefined) {
+        const committed = await deps.memoryStore.commitReflectionJob(job.jobId, {
+          target,
+          reflection: { action: shouldArchive ? "archive" : "unchanged" },
+          facts: [],
+          now: deps.now(),
+        });
+        if (committed === null) {
+          deps.log("memory.reflector.stale", { scope: job.scope, target_scope: target });
+          return { reflectionId: null, version: null, changed: false };
+        }
+        if (shouldArchive) {
+          deps.log("memory.reflector.archived_empty_scope", {
+            scope: job.scope,
+            target_scope: target,
+            archived_reflection_id: previousReflection.id,
+          });
+          return { reflectionId: null, version: null, changed: true };
+        }
+        deps.log("memory.reflector.noop_no_observations", { scope: job.scope });
+        return {
+          reflectionId: previousReflection?.id ?? null,
+          version: previousReflection?.version ?? null,
+          changed: false,
+        };
+      }
       if (
-        deps.forgetting?.enabled === true &&
+        shouldArchive &&
         previousReflection !== null &&
         deps.memoryStore.archiveReflections !== undefined
       ) {
@@ -223,40 +263,70 @@ export async function runReflectorJob(
     // ran, since it consumed tokens even if the text turned out unchanged.
     deps.costSink("reflector", tokenEstimate);
 
-    // docs/12 P6 (spec pass 2) — facts are a NEW sibling output of the Reflector.
-    // Gated on forgetting.enabled && the consolidate token trigger; runs whether
-    // or not the reflection text changed (a stable reflection can still surface
-    // discrete facts). SELF-CONTAINED fail-open: a fact failure must NEVER break
-    // the reflection write below — so it has its own try/catch and is awaited HERE
-    // (before the version branches) only so the cost/merge already ran.
-    await tryExtractFacts({ deps, target, observations, previousReflection, now });
+    // Extract facts as DATA first. Production adapters publish this batch together
+    // with the reflection + job completion in one fenced transaction below.
+    const facts = await extractFactBatch({ deps, target, observations, previousReflection, now });
+    const unchanged =
+      previousReflection !== null && previousReflection.reflectionText === reflectionText;
+    const highWater = unchanged
+      ? previousReflection.version
+      : deps.memoryStore.getReflectionVersionHighWater !== undefined
+        ? await deps.memoryStore.getReflectionVersionHighWater(target)
+        : (previousReflection?.version ?? 0);
+    const nextVersion = unchanged
+      ? previousReflection.version
+      : Math.max(highWater, previousReflection?.version ?? 0) + 1;
 
-    // STABILITY: only bump the version + write a new row when the text actually
-    // changed. Identical input → identical text → no churn (cache-friendly).
-    if (previousReflection !== null && previousReflection.reflectionText === reflectionText) {
-      await deps.memoryStore.updateJobStatus(job.jobId, "done");
-      deps.log("memory.reflector.unchanged", {
-        scope: job.scope,
-        version: previousReflection.version,
+    if (deps.memoryStore.commitReflectionJob !== undefined) {
+      const committed = await deps.memoryStore.commitReflectionJob(job.jobId, {
+        target,
+        reflection: unchanged
+          ? { action: "unchanged" }
+          : {
+              action: "upsert",
+              reflectionText,
+              version: nextVersion,
+              tokenEstimate,
+              updatedAt: now,
+            },
+        facts,
+        now,
       });
+      if (committed === null) {
+        deps.log("memory.reflector.stale", { scope: job.scope, target_scope: target });
+        return { reflectionId: null, version: null, changed: false };
+      }
+      logFactCommit(deps, target, facts, committed.facts);
+      if (unchanged) {
+        deps.log("memory.reflector.unchanged", { scope: job.scope, version: nextVersion });
+        return {
+          reflectionId: previousReflection.id,
+          version: nextVersion,
+          changed: false,
+        };
+      }
+      deps.log("memory.reflector.merged", {
+        scope: job.scope,
+        target_scope: target,
+        reflection_id: committed.reflectionId,
+        version: nextVersion,
+        observation_count: observations.length,
+      });
+      return { reflectionId: committed.reflectionId, version: nextVersion, changed: true };
+    }
+
+    // Legacy fake/pre-phase stores retain the old two-call behavior. Real adapters
+    // implement commitReflectionJob and never take this non-atomic fallback.
+    await persistFactsLegacy(deps, target, facts, now);
+    if (unchanged) {
+      await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      deps.log("memory.reflector.unchanged", { scope: job.scope, version: nextVersion });
       return {
         reflectionId: previousReflection.id,
-        version: previousReflection.version,
+        version: nextVersion,
         changed: false,
       };
     }
-
-    // Next version = high-water + 1 across EVERY status (Codex review fix II):
-    // getReflection hides archived rows, so deriving from the active row alone would
-    // RESET the sequence to 1 after an archive→rebuild cycle — a `reflection_version`
-    // regression for clients/caches. The optional store method falls back to the
-    // active row's version for pre-phase stores (legacy fakes), preserving the old
-    // behaviour when no archive can have happened.
-    const highWater =
-      deps.memoryStore.getReflectionVersionHighWater !== undefined
-        ? await deps.memoryStore.getReflectionVersionHighWater(target)
-        : (previousReflection?.version ?? 0);
-    const nextVersion = Math.max(highWater, previousReflection?.version ?? 0) + 1;
     const reflectionId = await deps.memoryStore.upsertReflection({
       ...target,
       reflectionText,
@@ -264,7 +334,6 @@ export async function runReflectorJob(
       tokenEstimate,
       updatedAt: now,
     });
-
     await deps.memoryStore.updateJobStatus(job.jobId, "done");
     deps.log("memory.reflector.merged", {
       scope: job.scope,
@@ -298,9 +367,8 @@ function defaultEstimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-// docs/12 P6 (spec pass 2) — the gated fact-extraction step, fully SELF-CONTAINED
-// and fail-open so a fact failure can never break the reflection write. Returns
-// nothing; all effects are the optional insertFactsReconciled call + logging.
+// Build the optional fact batch without publishing it. Production stores commit
+// these facts atomically with reflection output and job completion.
 //
 // Gates (ALL must hold, else a silent no-op):
 //   - forgetting.enabled (the master lever — off ⇒ byte-identical to today);
@@ -315,28 +383,33 @@ function defaultEstimateTokens(text: string): number {
 // max_facts_per_subject PER subject_key (the spec's hard cap regardless of
 // extractor output). The fact scope mirrors the reflection TARGET (project >
 // resource > thread), and validFrom = now (the fact became known at this run).
-async function tryExtractFacts(args: {
+async function extractFactBatch(args: {
   deps: ReflectorDeps;
   target: ReflectionScope;
   observations: Observation[];
   previousReflection: Reflection | null;
   now: Date;
-}): Promise<void> {
+}): Promise<MemoryFactInput[]> {
   const { deps, target, observations, previousReflection, now } = args;
   const { extractFacts, forgetting } = deps;
   // Gate 1–3: flag on, extractor wired, store capable.
-  if (forgetting?.enabled !== true) return;
-  if (extractFacts === undefined) return;
-  if (deps.memoryStore.insertFactsReconciled === undefined) return;
+  if (forgetting?.enabled !== true) return [];
+  if (extractFacts === undefined) return [];
+  if (
+    deps.memoryStore.commitReflectionJob === undefined &&
+    deps.memoryStore.insertFactsReconciled === undefined
+  ) {
+    return [];
+  }
 
   try {
     // Gate 4: the buffer-flush token trigger — active-observation token sum.
     const estimate = deps.estimateTokens ?? defaultEstimateTokens;
     const tokenSum = observations.reduce((sum, o) => sum + estimate(o.observationText), 0);
-    if (tokenSum < forgetting.consolidate.trigger_tokens) return;
+    if (tokenSum < forgetting.consolidate.trigger_tokens) return [];
 
     const extracted = await extractFacts({ observations, previousReflection, now });
-    if (extracted.length === 0) return;
+    if (extracted.length === 0) return [];
 
     // Normalize + cap + supersede-order via the shared deterministic builder (also
     // used by the Observer's raw-message eager path, so both derive subject_key +
@@ -354,24 +427,53 @@ async function tryExtractFacts(args: {
       cap: forgetting.consolidate.max_facts_per_subject,
       fallbackNow: now,
     });
-    if (facts.length === 0) return;
+    return facts;
+  } catch (err) {
+    deps.log("memory.reflector.facts_failed", {
+      target_scope: target,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
+}
 
+function logFactCommit(
+  deps: ReflectorDeps,
+  target: ReflectionScope,
+  facts: MemoryFactInput[],
+  reconciled: MemoryFactReconcileResult,
+): void {
+  if (facts.length === 0) return;
+  deps.log("memory.reflector.facts_extracted", {
+    target_scope: target,
+    fact_count: facts.length,
+    inserted: reconciled.insertedIds.length,
+    resurrected: reconciled.resurrectedIds?.length ?? 0,
+    superseded: reconciled.supersededIds.length,
+  });
+}
+
+async function persistFactsLegacy(
+  deps: ReflectorDeps,
+  target: ReflectionScope,
+  facts: MemoryFactInput[],
+  now: Date,
+): Promise<void> {
+  if (facts.length === 0 || deps.memoryStore.insertFactsReconciled === undefined) return;
+  const scope = {
+    ...(target.projectId !== undefined ? { projectId: target.projectId } : {}),
+    ...(target.resourceId !== undefined ? { resourceId: target.resourceId } : {}),
+    ...(target.threadId !== undefined ? { threadId: target.threadId } : {}),
+  };
+  try {
     const reconciled = await deps.memoryStore.insertFactsReconciled({
       accountId: target.accountId,
       scope,
       facts,
       now,
     });
-    deps.log("memory.reflector.facts_extracted", {
-      target_scope: target,
-      fact_count: facts.length,
-      inserted: reconciled.insertedIds.length,
-      // A re-observed fact that had been deleted is REACTIVATED, not re-inserted.
-      resurrected: reconciled.resurrectedIds?.length ?? 0,
-      superseded: reconciled.supersededIds.length,
-    });
+    logFactCommit(deps, target, facts, reconciled);
   } catch (err) {
-    // FAIL-OPEN: a fact failure must never break the reflection write. Log + swallow.
     deps.log("memory.reflector.facts_failed", {
       target_scope: target,
       error: err instanceof Error ? err.message : String(err),

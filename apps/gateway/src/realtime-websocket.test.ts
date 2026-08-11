@@ -1,7 +1,7 @@
 import { once } from "node:events";
 import { createServer } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket, { WebSocketServer } from "ws";
 import { createRealtimeCallRegistry } from "./realtime-call-registry.js";
 import {
@@ -180,6 +180,133 @@ describe("Realtime websocket bridge", () => {
     const [code] = await closed;
     expect(code).toBe(1009);
     expect(relayed).toBe(false);
+  });
+
+  it("rejects the connection over the active cap and admits one after close", async () => {
+    const upstreamHttp = await listeningServer();
+    const upstream = new WebSocketServer({ server: upstreamHttp.server, perMessageDeflate: false });
+    upstream.on("connection", () => {});
+    closers.push(
+      () =>
+        new Promise<void>((resolve) => {
+          for (const socket of upstream.clients) socket.terminate();
+          upstream.close(() => resolve());
+        }),
+    );
+
+    const gateway = await listeningServer();
+    const registry = createRealtimeCallRegistry();
+    const target = {
+      url: `ws://127.0.0.1:${upstreamHttp.port}/v1/realtime`,
+      headers: async () => ({}),
+    };
+    registry.put("rtc_1", "key-1", target);
+    registry.put("rtc_2", "key-1", target);
+    const bridge = installRealtimeWebSocketBridge({
+      server: gateway.server,
+      registry,
+      resolveKey: async () => "key-1",
+      maxConnections: 1,
+      idleSessionTimeoutMs: 5_000,
+    });
+    closers.push(() => bridge.close());
+
+    const first = new WebSocket(`ws://127.0.0.1:${gateway.port}/v1/realtime?call_id=rtc_1`, {
+      headers: { Authorization: "Bearer helm-key" },
+    });
+    await once(first, "open");
+    const rejected = new WebSocket(`ws://127.0.0.1:${gateway.port}/v1/realtime?call_id=rtc_2`, {
+      headers: { Authorization: "Bearer helm-key" },
+    });
+    const [, response] = (await once(rejected, "unexpected-response")) as [
+      unknown,
+      { statusCode: number },
+    ];
+    expect(response.statusCode).toBe(503);
+
+    const firstClosed = once(first, "close");
+    first.close();
+    await firstClosed;
+
+    const second = new WebSocket(`ws://127.0.0.1:${gateway.port}/v1/realtime?call_id=rtc_2`, {
+      headers: { Authorization: "Bearer helm-key" },
+    });
+    await once(second, "open");
+    second.terminate();
+  });
+
+  it("counts a pending upgrade against the connection cap", async () => {
+    const gateway = await listeningServer();
+    const registry = createRealtimeCallRegistry();
+    let releaseKey!: (keyId: string | null) => void;
+    const pendingKey = new Promise<string | null>((resolve) => {
+      releaseKey = resolve;
+    });
+    let resolveCalls = 0;
+    const bridge = installRealtimeWebSocketBridge({
+      server: gateway.server,
+      registry,
+      resolveKey: async () => {
+        resolveCalls += 1;
+        return resolveCalls === 1 ? pendingKey : "key-1";
+      },
+      maxConnections: 1,
+    });
+    closers.push(() => bridge.close());
+
+    const first = new WebSocket(`ws://127.0.0.1:${gateway.port}/v1/realtime?call_id=rtc_1`);
+    await vi.waitFor(() => expect(resolveCalls).toBe(1));
+    const second = new WebSocket(`ws://127.0.0.1:${gateway.port}/v1/realtime?call_id=rtc_2`);
+    const [, secondResponse] = (await once(second, "unexpected-response")) as [
+      unknown,
+      { statusCode: number },
+    ];
+    expect(secondResponse.statusCode).toBe(503);
+
+    const firstRejected = once(first, "unexpected-response");
+    releaseKey("key-1");
+    const [, firstResponse] = (await firstRejected) as [unknown, { statusCode: number }];
+    expect(firstResponse.statusCode).toBe(404);
+  });
+
+  it("closes an idle realtime connection and its upstream", async () => {
+    const upstreamHttp = await listeningServer();
+    const upstream = new WebSocketServer({ server: upstreamHttp.server, perMessageDeflate: false });
+    let upstreamClosed = false;
+    upstream.on("connection", (socket) => {
+      socket.once("close", () => {
+        upstreamClosed = true;
+      });
+    });
+    closers.push(
+      () =>
+        new Promise<void>((resolve) => {
+          for (const socket of upstream.clients) socket.terminate();
+          upstream.close(() => resolve());
+        }),
+    );
+
+    const gateway = await listeningServer();
+    const registry = createRealtimeCallRegistry();
+    registry.put("rtc_1", "key-1", {
+      url: `ws://127.0.0.1:${upstreamHttp.port}/v1/realtime`,
+      headers: async () => ({}),
+    });
+    const bridge = installRealtimeWebSocketBridge({
+      server: gateway.server,
+      registry,
+      resolveKey: async () => "key-1",
+      idleSessionTimeoutMs: 30,
+    });
+    closers.push(() => bridge.close());
+
+    const client = new WebSocket(`ws://127.0.0.1:${gateway.port}/v1/realtime?call_id=rtc_1`, {
+      headers: { Authorization: "Bearer helm-key" },
+    });
+    await once(client, "open");
+    const [code] = (await once(client, "close")) as [number, Buffer];
+    expect(code).toBe(1001);
+    await vi.waitFor(() => expect(upstreamClosed).toBe(true));
   });
 
   it("refreshes OAuth once when the upstream sideband rejects with 401", async () => {

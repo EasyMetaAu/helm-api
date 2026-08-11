@@ -2562,6 +2562,172 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(revived?.version).toBe(3); // active again, sequence continued
       expect(revived?.reflectionText).toBe("p-v3 (revived)");
     });
+
+    it("decay fences stale Reflector reflection/fact commits and queues every aggregate target", async () => {
+      ctx = await make();
+      const m = ctx.stores.memory;
+      if (m.archiveObservations === undefined || m.commitReflectionJob === undefined) {
+        throw new Error("MemoryStore must fence Reflector commits after decay");
+      }
+      await m.ensureThread({
+        id: "t-race",
+        ownerId: "acct-a",
+        projectId: "p-race",
+        resourceId: "r-race",
+      });
+      const observationId = await m.appendObservation({
+        threadId: "t-race",
+        sourceMessageRange: ["m1", "m2"],
+        observationText: "must be forgotten",
+        observedAt: new Date(1000),
+      });
+      await m.ensureThread({ id: "t-thread-only", ownerId: "acct-a" });
+      const threadObservationId = await m.appendObservation({
+        threadId: "t-thread-only",
+        sourceMessageRange: ["m3", "m4"],
+        observationText: "thread-only memory",
+        observedAt: new Date(1000),
+      });
+      await m.upsertReflection({
+        accountId: "acct-a",
+        projectId: "p-race",
+        reflectionText: "old project reflection",
+        version: 1,
+        tokenEstimate: 4,
+        updatedAt: new Date(1000),
+      });
+      await m.upsertReflection({
+        accountId: "acct-a",
+        threadId: "t-thread-only",
+        reflectionText: "old thread reflection",
+        version: 1,
+        tokenEstimate: 4,
+        updatedAt: new Date(1000),
+      });
+      await m.upsertReflection({
+        accountId: "acct-a",
+        resourceId: "r-race",
+        reflectionText: "old resource reflection",
+        version: 1,
+        tokenEstimate: 4,
+        updatedAt: new Date(1000),
+      });
+      await m.enqueueJob({
+        type: "reflector",
+        scope: { accountId: "acct-a", projectId: "p-race" },
+      });
+      const running = await m.claimPendingJobs(1);
+      const staleJob = running[0];
+      if (staleJob === undefined) throw new Error("expected running reflector job");
+
+      await m.archiveObservations({
+        accountId: "acct-a",
+        ids: [observationId, threadObservationId],
+        now: new Date(2000),
+      });
+
+      await expect(
+        m.commitReflectionJob(staleJob.jobId, {
+          target: { accountId: "acct-a", projectId: "p-race" },
+          reflection: {
+            action: "upsert",
+            reflectionText: "stale reflection",
+            version: 2,
+            tokenEstimate: 4,
+            updatedAt: new Date(3000),
+          },
+          facts: [
+            {
+              ownerId: "acct-a",
+              projectId: "p-race",
+              subjectKey: "forgotten",
+              factText: "stale fact",
+              contentHash: "a".repeat(64),
+              validFrom: new Date(1000),
+            },
+          ],
+          now: new Date(3000),
+        }),
+      ).resolves.toBeNull();
+      expect(await m.getReflection({ accountId: "acct-a", projectId: "p-race" })).toBeNull();
+      expect(await m.getReflection({ accountId: "acct-a", resourceId: "r-race" })).toBeNull();
+      expect(await m.getReflection({ accountId: "acct-a", threadId: "t-thread-only" })).toBeNull();
+      expect(await m.listActiveFacts?.({ accountId: "acct-a", projectId: "p-race" })).toEqual([]);
+      expect((await m.claimPendingJobs(10)).map((job) => job.scope)).toEqual(
+        expect.arrayContaining([
+          { accountId: "acct-a", projectId: "p-race" },
+          { accountId: "acct-a", resourceId: "r-race" },
+          { accountId: "acct-a", threadId: "t-thread-only" },
+        ]),
+      );
+    });
+
+    it("rolls back the job fence and every output when publication fails", async () => {
+      ctx = await make();
+      const m = ctx.stores.memory;
+      if (m.commitReflectionJob === undefined) {
+        throw new Error("MemoryStore must atomically commit Reflector output");
+      }
+      const target = { accountId: "acct-a", projectId: "p-atomic" };
+      await m.upsertReflection({
+        ...target,
+        reflectionText: "v1",
+        version: 1,
+        tokenEstimate: 1,
+        updatedAt: new Date(1000),
+      });
+      const jobId = await m.enqueueJob({ type: "reflector", scope: target });
+      expect((await m.claimPendingJobs(1))[0]?.jobId).toBe(jobId);
+      const fact = {
+        ownerId: "acct-a",
+        projectId: "p-atomic",
+        subjectKey: "atomic",
+        factText: "must roll back with the failed publication",
+        contentHash: "b".repeat(64),
+        validFrom: new Date(1000),
+      };
+
+      const invalidFact = {
+        ...fact,
+        sourceObservationRange: [1n, "m"] as unknown as [string, string],
+      };
+      await expect(
+        m.commitReflectionJob(jobId, {
+          target,
+          reflection: {
+            action: "upsert",
+            reflectionText: "v2",
+            version: 2,
+            tokenEstimate: 1,
+            updatedAt: new Date(2000),
+          },
+          facts: [invalidFact],
+          now: new Date(2000),
+        }),
+      ).rejects.toThrow();
+      expect(await m.listActiveFacts?.({ accountId: "acct-a", projectId: "p-atomic" })).toEqual([]);
+
+      await expect(
+        m.commitReflectionJob(jobId, {
+          target,
+          reflection: {
+            action: "upsert",
+            reflectionText: "v2",
+            version: 2,
+            tokenEstimate: 1,
+            updatedAt: new Date(3000),
+          },
+          facts: [fact],
+          now: new Date(3000),
+        }),
+      ).resolves.toMatchObject({ reflectionId: expect.any(String) });
+      expect(
+        (await m.listActiveFacts?.({ accountId: "acct-a", projectId: "p-atomic" }))?.map(
+          (row) => row.factText,
+        ),
+      ).toEqual([fact.factText]);
+      expect((await m.getReflection(target))?.reflectionText).toBe("v2");
+    });
   });
 
   // --- ConfigStore --------------------------------------------------------

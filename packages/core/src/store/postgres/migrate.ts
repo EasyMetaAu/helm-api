@@ -1285,7 +1285,8 @@ const MIGRATIONS: readonly Migration[] = [
   },
   {
     // Pg mirror of SQLite v49: stable server-time order, durable Observer
-    // frontier, cleanup index, and transactional counter reconciliation.
+    // frontier columns, cleanup index, and transactional counter reconciliation.
+    // Legacy rows keep a null frontier and are drained by bounded worker pages.
     version: 48,
     run: async (db) => {
       if (!(await pgTableHasColumns(db, "memory_threads", ["id"]))) return;
@@ -1314,15 +1315,7 @@ const MIGRATIONS: readonly Migration[] = [
         sql.raw(`
         UPDATE memory_threads AS t
            SET message_count = (SELECT COUNT(*)::integer FROM memory_messages m WHERE m.thread_id = t.id),
-               last_message_at = (SELECT MAX(created_at)::bigint FROM memory_messages m WHERE m.thread_id = t.id),
-               observer_frontier_at = (
-                 SELECT m.created_at FROM memory_messages m
-                  WHERE m.thread_id = t.id ORDER BY m.created_at DESC, m.id DESC LIMIT 1
-               ),
-               observer_frontier_id = (
-                 SELECT m.id FROM memory_messages m
-                  WHERE m.thread_id = t.id ORDER BY m.created_at DESC, m.id DESC LIMIT 1
-               )
+               last_message_at = (SELECT MAX(created_at)::bigint FROM memory_messages m WHERE m.thread_id = t.id)
       `),
       );
       if (await pgTableHasColumns(db, "memory_observations", ["thread_id", "observed_at"])) {

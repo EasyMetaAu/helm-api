@@ -37,6 +37,7 @@ export type TestStreamEvent =
 // low token cap so a test costs almost nothing. Both overridable by the caller.
 export const DEFAULT_TEST_PROMPT = "Hi! Reply with a short one-sentence greeting.";
 export const DEFAULT_TEST_MAX_TOKENS = 512;
+export const OAUTH_TEST_MAX_SSE_LINE_BYTES = 1024 * 1024;
 
 export interface OpenAiStreamParser {
   // Feed a raw decoded body chunk (NOT necessarily frame-aligned). Returns the
@@ -84,6 +85,12 @@ function eventsFromChunk(json: unknown): TestStreamEvent[] {
 export function createOpenAiStreamParser(): OpenAiStreamParser {
   let buffer = "";
 
+  function assertLineFits(line: string): void {
+    if (Buffer.byteLength(line, "utf8") <= OAUTH_TEST_MAX_SSE_LINE_BYTES) return;
+    buffer = "";
+    throw new Error(`OAuth test SSE line exceeds ${OAUTH_TEST_MAX_SSE_LINE_BYTES} bytes`);
+  }
+
   // Parse ONE complete SSE line. Non-`data:` lines (comments `:`, blank lines,
   // `event:` fields) and `[DONE]` / unparseable payloads are ignored (fail-open —
   // a malformed frame must never abort the test stream).
@@ -107,14 +114,17 @@ export function createOpenAiStreamParser(): OpenAiStreamParser {
       while (nl !== -1) {
         const line = buffer.slice(0, nl);
         buffer = buffer.slice(nl + 1);
+        assertLineFits(line);
         out.push(...handleLine(line));
         nl = buffer.indexOf("\n");
       }
+      assertLineFits(buffer);
       return out;
     },
     flush(): TestStreamEvent[] {
       const rest = buffer;
       buffer = "";
+      assertLineFits(rest);
       return rest.length > 0 ? handleLine(rest) : [];
     },
   };
