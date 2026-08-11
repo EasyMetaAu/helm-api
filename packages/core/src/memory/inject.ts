@@ -130,6 +130,8 @@ const OBSERVATIONS_HEADER = "## Earlier context (summarized)";
 // overrides it). The token budget is the real bound; this caps a pathological fact
 // set so it never crowds out observations.
 const DEFAULT_MAX_FACTS_INJECTED = 16;
+const MAX_INJECTION_CANDIDATE_PAGES = 32;
+const INJECTION_CANDIDATE_PAGE_SIZE = 64;
 
 function buildMemoryBlock(parts: {
   projectReflectionText: string | null;
@@ -178,6 +180,29 @@ export async function enqueueObserverWriteback(
     deps.log("memory.inject.writeback_enqueue_failed", { scope, error: message });
     return { observerJobId: null, status: "failed" };
   }
+}
+
+async function failOpenInjectResult(
+  input: InjectInput,
+  deps: InjectDeps,
+  err: unknown,
+): Promise<InjectResult> {
+  const message = err instanceof Error ? err.message : String(err);
+  deps.log("memory.inject.load_failed", { scope: input.scope, error: message });
+  const writeback = await enqueueObserverWriteback(input.scope, deps);
+  return {
+    memoryBlock: null,
+    metadata: {
+      memory_hydrated: false,
+      reflection_version: null,
+      observation_count: 0,
+      facts_injected: 0,
+      memory_tokens_injected: 0,
+      observer_job_id: writeback.observerJobId,
+      memory_writeback_status: writeback.status === "skipped" ? "skipped" : "failed",
+      degraded: true,
+    },
+  };
 }
 
 // Load every memory layer for the scope. project + resource reflections are read
@@ -251,7 +276,7 @@ async function loadMemory(
   // conversation already carries the recent turns). A thread with no observations
   // never needs them, but a single read keeps the dedup deterministic + cheap.
   const threadMessages =
-    scope.threadId !== undefined && store.isInjectionObservationRedundant === undefined
+    scope.threadId !== undefined && store.findRedundantInjectionObservations === undefined
       ? await store.listMessages({ accountId: scope.accountId, threadId: scope.threadId })
       : [];
   return { projectReflection, resourceReflection, facts, observations, threadMessages };
@@ -311,33 +336,12 @@ export async function assembleInjectedContext(
       deps.memoryStore,
       input.injectKnownFacts === true,
       Math.max(0, input.maxFactsInjected ?? DEFAULT_MAX_FACTS_INJECTED),
-      deps.forgetting?.enabled === true
+      input.injectKnownFacts === true && deps.forgetting?.enabled === true
         ? { nowMs: deps.now().getTime(), ...deps.forgetting.scoreConfig }
         : undefined,
     );
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    deps.log("memory.inject.load_failed", { scope: input.scope, error: message });
-    // Still attempt write-back enqueue so the originals get compressed later;
-    // if that also fails it stays best-effort (never throws).
-    const writeback = await enqueueObserverWriteback(input.scope, deps);
-    return {
-      memoryBlock: null,
-      metadata: {
-        memory_hydrated: false,
-        reflection_version: null,
-        observation_count: 0,
-        facts_injected: 0,
-        memory_tokens_injected: 0,
-        observer_job_id: writeback.observerJobId,
-        // Memory load failed → the whole memory step is a degraded path; mark the
-        // writeback status as failed. EXCEPT when there was no writeback target at
-        // all (no threadId): nothing could be enqueued, so it stays an honest
-        // "skipped", not "failed".
-        memory_writeback_status: writeback.status === "skipped" ? "skipped" : "failed",
-        degraded: true,
-      },
-    };
+    return failOpenInjectResult(input, deps, err);
   }
 
   const { projectReflection, resourceReflection, facts, observations, threadMessages } = loaded;
@@ -490,43 +494,74 @@ export async function assembleInjectedContext(
     // Read only one small page of bodies at a time. The SQL order is the same
     // priority order used below (newest first, or score then newest), so once the
     // remaining budget reaches zero no older row can displace a kept one.
-    let offset = 0;
-    let remaining = observationBudget;
-    const scoreMode = forgettingOn && deps.forgetting?.dropOrder === "score";
-    const score = scoreMode ? deps.forgetting?.scoreConfig : undefined;
-    const scoreNowMs = score === undefined ? undefined : deps.now().getTime();
-    while (remaining > 0) {
-      const page = await pagedRead({
-        accountId: input.scope.accountId,
-        threadId: input.scope.threadId,
-        limit: 64,
-        offset,
-        order: scoreMode ? "score" : "newest",
-        ...(score !== undefined && scoreNowMs !== undefined
-          ? { score: { nowMs: scoreNowMs, ...score } }
-          : {}),
-      });
-      if (page.length === 0) break;
-      offset += page.length;
-      for (const observation of page) {
-        if (remaining === 0) break;
-        const redundant =
-          deps.memoryStore.isInjectionObservationRedundant !== undefined
-            ? await deps.memoryStore.isInjectionObservationRedundant({
-                accountId: input.scope.accountId,
-                threadId: input.scope.threadId,
-                sourceMessageRange: observation.sourceMessageRange,
-                windowContentHashCounts,
-              })
-            : observationIsRedundant(observation, threadMessages, windowContentHashCounts);
-        if (redundant) continue;
-        const cost = tokensOf(observation.observationText);
-        if (cost <= remaining) {
-          keptEntries.push({ id: observation.id, text: observation.observationText, observation });
-          remaining -= cost;
+    try {
+      let offset = 0;
+      let remaining = observationBudget;
+      let scoreMode = forgettingOn && deps.forgetting?.dropOrder === "score";
+      let score: ScoreConfig | undefined;
+      let scoreNowMs: number | undefined;
+      if (scoreMode) {
+        try {
+          score = deps.forgetting?.scoreConfig;
+          scoreNowMs = deps.now().getTime();
+        } catch (err) {
+          deps.log("memory.inject.score_trim_fallback", {
+            scope: input.scope,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          scoreMode = false;
         }
       }
-      if (page.length < 64) break;
+      for (
+        let pageNumber = 0;
+        pageNumber < MAX_INJECTION_CANDIDATE_PAGES && remaining > 0;
+        pageNumber++
+      ) {
+        const page = await pagedRead({
+          accountId: input.scope.accountId,
+          threadId: input.scope.threadId,
+          limit: INJECTION_CANDIDATE_PAGE_SIZE,
+          offset,
+          order: scoreMode ? "score" : "newest",
+          ...(score !== undefined && scoreNowMs !== undefined
+            ? { score: { nowMs: scoreNowMs, ...score } }
+            : {}),
+        });
+        if (page.length === 0) break;
+        offset += page.length;
+        const redundantIds =
+          deps.memoryStore.findRedundantInjectionObservations !== undefined
+            ? await deps.memoryStore.findRedundantInjectionObservations({
+                accountId: input.scope.accountId,
+                threadId: input.scope.threadId,
+                observations: page.map((observation) => ({
+                  id: observation.id,
+                  sourceMessageRange: observation.sourceMessageRange,
+                })),
+                windowContentHashCounts,
+              })
+            : new Set<string>();
+        for (const observation of page) {
+          if (remaining === 0) break;
+          const redundant =
+            redundantIds.has(observation.id) ||
+            (deps.memoryStore.findRedundantInjectionObservations === undefined &&
+              observationIsRedundant(observation, threadMessages, windowContentHashCounts));
+          if (redundant) continue;
+          const cost = tokensOf(observation.observationText);
+          if (cost <= remaining) {
+            keptEntries.push({
+              id: observation.id,
+              text: observation.observationText,
+              observation,
+            });
+            remaining -= cost;
+          }
+        }
+        if (page.length < INJECTION_CANDIDATE_PAGE_SIZE) break;
+      }
+    } catch (err) {
+      return failOpenInjectResult(input, deps, err);
     }
   } else {
     // observationEntries is oldest-first. Legacy keep order = newest-first (reverse)

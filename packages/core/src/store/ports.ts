@@ -819,15 +819,14 @@ export interface MemoryStore {
       access_weight: number;
     };
   }): Promise<Observation[]>;
-  // Database-side counterpart of window-aware observation dedup. It never
-  // returns transcript bodies, which keeps a large historical thread off the
-  // request heap. Missing endpoints/hashes are conservatively non-redundant.
-  isInjectionObservationRedundant?(input: {
+  // Bounded page counterpart: resolve all window-dedup ranges in ONE store query,
+  // returning only the redundant observation ids (never transcript bodies).
+  findRedundantInjectionObservations?(input: {
     accountId: string;
     threadId: string;
-    sourceMessageRange: [string, string];
+    observations: Array<{ id: string; sourceMessageRange: [string, string] }>;
     windowContentHashCounts: ReadonlyMap<string, number>;
-  }): Promise<boolean>;
+  }): Promise<ReadonlySet<string>>;
   // Read the current (latest) ACTIVE reflection for a scope, or null if none yet.
   // ARCHIVED reflections (cleared by the decay→rebuild path when a scope's whole
   // active observation set is forgotten — Codex review fix) are invisible here, so

@@ -597,33 +597,52 @@ export class PgMemoryStore implements MemoryStore {
     }));
   }
 
-  async isInjectionObservationRedundant(input: {
+  async findRedundantInjectionObservations(input: {
     accountId: string;
     threadId: string;
-    sourceMessageRange: [string, string];
+    observations: Array<{ id: string; sourceMessageRange: [string, string] }>;
     windowContentHashCounts: ReadonlyMap<string, number>;
-  }): Promise<boolean> {
-    if (input.windowContentHashCounts.size === 0) return false;
-    const live = JSON.stringify(Object.fromEntries(input.windowContentHashCounts));
-    const rows = pgRows<{ redundant: boolean }>(
-      await this.db.execute(sql`
-      WITH ordered AS (
-        SELECT id, content_hash, ROW_NUMBER() OVER (ORDER BY CASE WHEN message_index IS NULL THEN 1 ELSE 0 END, message_index, created_at, id) AS n
-          FROM memory_messages WHERE thread_id = ${input.threadId}
-      ), endpoints AS (
-        SELECT MIN(n) AS first_n, MAX(n) AS last_n, COUNT(*) AS found FROM ordered
-         WHERE id IN (${input.sourceMessageRange[0]}, ${input.sourceMessageRange[1]})
-      ), required AS (
-        SELECT content_hash, COUNT(*) AS n FROM ordered, endpoints
-         WHERE ordered.n BETWEEN endpoints.first_n AND endpoints.last_n GROUP BY content_hash
-      )
-      SELECT (SELECT found FROM endpoints) = 2 AND NOT EXISTS (
-        SELECT 1 FROM required LEFT JOIN jsonb_each_text(${live}::jsonb) live ON live.key = required.content_hash
-         WHERE live.value IS NULL OR live.value::integer < required.n
-      ) AND EXISTS (SELECT 1 FROM memory_threads WHERE id = ${input.threadId} AND owner_id = ${input.accountId}) AS redundant
-    `),
+  }): Promise<ReadonlySet<string>> {
+    if (input.observations.length === 0 || input.windowContentHashCounts.size === 0)
+      return new Set();
+    const requested = JSON.stringify(
+      input.observations.map(({ id, sourceMessageRange: [startId, endId] }) => ({
+        id,
+        startId,
+        endId,
+      })),
     );
-    return rows[0]?.redundant === true;
+    const live = JSON.stringify(Object.fromEntries(input.windowContentHashCounts));
+    const rows = pgRows<{ id: string }>(
+      await this.db.execute(sql`
+        WITH requested AS (
+          SELECT id, "startId" AS start_id, "endId" AS end_id
+            FROM jsonb_to_recordset(${requested}::jsonb) AS r(id text, "startId" text, "endId" text)
+        ), live AS (SELECT key, value::integer AS n FROM jsonb_each_text(${live}::jsonb)),
+        ordered AS (
+          SELECT id, content_hash, ROW_NUMBER() OVER (ORDER BY CASE WHEN message_index IS NULL THEN 1 ELSE 0 END, message_index, created_at, id) AS n
+            FROM memory_messages WHERE thread_id = ${input.threadId}
+        ), endpoints AS (
+          SELECT r.id, r.start_id, r.end_id, MIN(o.n) AS first_n, MAX(o.n) AS last_n,
+                 COUNT(DISTINCT o.id) AS found
+            FROM requested r LEFT JOIN ordered o ON o.id = r.start_id OR o.id = r.end_id
+           GROUP BY r.id, r.start_id, r.end_id
+        ), required AS (
+          SELECT e.id, o.content_hash, COUNT(*) AS n FROM endpoints e JOIN ordered o
+            ON o.n BETWEEN e.first_n AND e.last_n
+           WHERE e.found = CASE WHEN e.start_id = e.end_id THEN 1 ELSE 2 END
+           GROUP BY e.id, o.content_hash
+        )
+        SELECT e.id FROM endpoints e
+         WHERE e.found = CASE WHEN e.start_id = e.end_id THEN 1 ELSE 2 END
+           AND EXISTS (SELECT 1 FROM memory_threads WHERE id = ${input.threadId} AND owner_id = ${input.accountId})
+           AND NOT EXISTS (
+             SELECT 1 FROM required r LEFT JOIN live l ON l.key = r.content_hash
+              WHERE r.id = e.id AND (r.content_hash IS NULL OR l.n IS NULL OR l.n < r.n)
+           )
+      `),
+    );
+    return new Set(rows.map((row) => row.id));
   }
 
   async getReflection(scope: ReflectionScope): Promise<Reflection | null> {

@@ -160,7 +160,7 @@ describe("assembleInjectedContext — memory TEXT BLOCK (trailing-reminder model
     store.listInjectionObservationsPage = vi.fn(async ({ offset }) =>
       offset === 0 ? [newest, older] : [],
     );
-    store.isInjectionObservationRedundant = vi.fn(async () => false);
+    store.findRedundantInjectionObservations = vi.fn(async () => new Set<string>());
 
     const out = await assembleInjectedContext(baseInput({ tokenBudget: 1 }), makeDeps(store));
 
@@ -175,7 +175,7 @@ describe("assembleInjectedContext — memory TEXT BLOCK (trailing-reminder model
     );
     expect(store.listObservations).not.toHaveBeenCalled();
     expect(store.listMessages).not.toHaveBeenCalled();
-    expect(store.isInjectionObservationRedundant).toHaveBeenCalledTimes(1);
+    expect(store.findRedundantInjectionObservations).toHaveBeenCalledTimes(1);
   });
 
   it("uses the bounded fact read when the store provides it", async () => {
@@ -193,6 +193,34 @@ describe("assembleInjectedContext — memory TEXT BLOCK (trailing-reminder model
       expect.objectContaining({ limit: 1, accountId: "acct-a" }),
     );
     expect(store.listActiveFacts).not.toHaveBeenCalled();
+  });
+
+  it("fails open when a bounded page query fails", async () => {
+    const store = makeFakeStore({});
+    store.listInjectionObservationsPage = vi.fn(async () => {
+      throw new Error("page boom");
+    });
+
+    const out = await assembleInjectedContext(baseInput(), makeDeps(store));
+
+    expect(out.memoryBlock).toBeNull();
+    expect(out.metadata.degraded).toBe(true);
+  });
+
+  it("caps bounded candidates even when the estimator cannot consume budget", async () => {
+    const store = makeFakeStore({});
+    const page = Array.from({ length: 64 }, (_, index) =>
+      makeObservation(`obs-${index}`, "candidate", "2026-05-30T00:00:00.000Z"),
+    );
+    store.listInjectionObservationsPage = vi.fn(async () => page);
+    store.findRedundantInjectionObservations = vi.fn(async () => new Set<string>());
+
+    await assembleInjectedContext(
+      baseInput({ tokenBudget: 1 }),
+      makeDeps(store, { estimateTokens: () => 0 }),
+    );
+
+    expect(store.listInjectionObservationsPage).toHaveBeenCalledTimes(32);
   });
 
   it("assembles a single system-level block with section headers in deterministic order", async () => {

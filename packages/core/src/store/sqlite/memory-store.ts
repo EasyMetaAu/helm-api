@@ -604,41 +604,54 @@ export class SqliteMemoryStore implements MemoryStore {
     }));
   }
 
-  async isInjectionObservationRedundant(input: {
+  async findRedundantInjectionObservations(input: {
     accountId: string;
     threadId: string;
-    sourceMessageRange: [string, string];
+    observations: Array<{ id: string; sourceMessageRange: [string, string] }>;
     windowContentHashCounts: ReadonlyMap<string, number>;
-  }): Promise<boolean> {
-    if (input.windowContentHashCounts.size === 0) return false;
+  }): Promise<ReadonlySet<string>> {
+    if (input.observations.length === 0 || input.windowContentHashCounts.size === 0)
+      return new Set();
+    const requested = JSON.stringify(
+      input.observations.map(({ id, sourceMessageRange: [startId, endId] }) => ({
+        id,
+        startId,
+        endId,
+      })),
+    );
     const live = JSON.stringify(Object.fromEntries(input.windowContentHashCounts));
-    const row = this.db.$sqlite
+    const rows = this.db.$sqlite
       .prepare(
-        `WITH ordered AS (
-         SELECT id, content_hash, ROW_NUMBER() OVER (ORDER BY CASE WHEN message_index IS NULL THEN 1 ELSE 0 END, message_index, created_at, id) AS n
-           FROM memory_messages WHERE thread_id = ?
-       ), endpoints AS (
-         SELECT MIN(n) AS first_n, MAX(n) AS last_n, COUNT(*) AS found
-           FROM ordered WHERE id IN (?, ?)
-       ), required AS (
-         SELECT content_hash, COUNT(*) AS n FROM ordered, endpoints
-          WHERE ordered.n BETWEEN endpoints.first_n AND endpoints.last_n
-          GROUP BY content_hash
-       )
-       SELECT CASE WHEN (SELECT found FROM endpoints) = 2 AND NOT EXISTS (
-         SELECT 1 FROM required LEFT JOIN json_each(?) live ON live.key = required.content_hash
-          WHERE CAST(live.value AS INTEGER) < required.n OR live.value IS NULL
-       ) THEN 1 ELSE 0 END AS redundant`,
+        `WITH requested AS (
+           SELECT json_extract(value, '$.id') AS id, json_extract(value, '$.startId') AS start_id,
+                  json_extract(value, '$.endId') AS end_id FROM json_each(?)
+         ), live AS (SELECT key, CAST(value AS INTEGER) AS n FROM json_each(?)),
+         ordered AS (
+           SELECT id, content_hash, ROW_NUMBER() OVER (ORDER BY CASE WHEN message_index IS NULL THEN 1 ELSE 0 END, message_index, created_at, id) AS n
+             FROM memory_messages WHERE thread_id = ?
+         ), endpoints AS (
+           SELECT r.id, r.start_id, r.end_id, MIN(o.n) AS first_n, MAX(o.n) AS last_n,
+                  COUNT(DISTINCT o.id) AS found
+             FROM requested r LEFT JOIN ordered o ON o.id = r.start_id OR o.id = r.end_id
+            GROUP BY r.id, r.start_id, r.end_id
+         ), required AS (
+           SELECT e.id, o.content_hash, COUNT(*) AS n FROM endpoints e JOIN ordered o
+             ON o.n BETWEEN e.first_n AND e.last_n
+            WHERE e.found = CASE WHEN e.start_id = e.end_id THEN 1 ELSE 2 END
+            GROUP BY e.id, o.content_hash
+         )
+         SELECT e.id FROM endpoints e
+          WHERE e.found = CASE WHEN e.start_id = e.end_id THEN 1 ELSE 2 END
+            AND EXISTS (SELECT 1 FROM memory_threads WHERE id = ? AND owner_id = ?)
+            AND NOT EXISTS (
+              SELECT 1 FROM required r LEFT JOIN live l ON l.key = r.content_hash
+               WHERE r.id = e.id AND (r.content_hash IS NULL OR l.n IS NULL OR l.n < r.n)
+            )`,
       )
-      .get(input.threadId, input.sourceMessageRange[0], input.sourceMessageRange[1], live) as
-      | { redundant: number }
-      | undefined;
-    // The owner check is deliberately a separate cheap guard; an unknown thread
-    // must never turn an observation from another account into a dedup hit.
-    const owned = this.db.$sqlite
-      .prepare("SELECT 1 FROM memory_threads WHERE id = ? AND owner_id = ?")
-      .get(input.threadId, input.accountId);
-    return owned !== undefined && row?.redundant === 1;
+      .all(requested, live, input.threadId, input.threadId, input.accountId) as Array<{
+      id: string;
+    }>;
+    return new Set(rows.map((row) => row.id));
   }
 
   // Read the latest (highest-version) reflection for an EXACT scope match. Absent
