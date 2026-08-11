@@ -151,7 +151,38 @@ describe("SqliteMemoryStore — idle-flush candidates", () => {
   it("returns an idle thread with uncovered messages; respects the idle cutoff", async () => {
     const { store, clock } = newStore();
     await store.ensureThread({ id: "t1", ownerId: "acct-a" });
-    await store.appendMessage({ threadId: "t1", role: "user", content: "hi", tokenEstimate: 2 });
+    const covered = await store.appendMessage({
+      threadId: "t1",
+      role: "user",
+      content: "covered prefix",
+      tokenEstimate: 2,
+    });
+    const page = await store.listObserverMessagesPage({
+      accountId: "acct-a",
+      threadId: "t1",
+      limit: 10,
+      maxBytes: 1024,
+      maxTokens: 1024,
+    });
+    const last = page.messages.at(-1);
+    if (last === undefined) throw new Error("expected Observer page");
+    await store.appendObservationAndAdvanceFrontier({
+      accountId: "acct-a",
+      observation: {
+        threadId: "t1",
+        sourceMessageRange: [covered, covered],
+        observationText: "covered",
+        observedAt: new Date(clock() + 1),
+      },
+      expectedFrontier: page.expectedFrontier,
+      nextFrontier: { createdAtMs: last.createdAt.getTime(), id: last.id },
+    });
+    await store.appendMessage({
+      threadId: "t1",
+      role: "user",
+      content: "uncovered tail",
+      tokenEstimate: 2,
+    });
 
     const afterActivity = clock() + 1;
     // Not yet idle (cutoff before the thread's last activity) → no candidates.
