@@ -1,4 +1,4 @@
-import { type ConfigStore, decryptSecret, encryptSecret } from "@helm/core";
+import type { ConfigStore } from "@helm/core";
 import { describe, expect, it } from "vitest";
 import {
   CODEX_MODEL_CACHE_CONFIG_KEY,
@@ -40,36 +40,8 @@ function entry(overrides: Partial<CodexModelCacheEntry> = {}): CodexModelCacheEn
   };
 }
 
-function deferred(): { promise: Promise<void>; resolve: () => void } {
-  let resolve!: () => void;
-  const promise = new Promise<void>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
-
-class DelayedFirstSetConfig implements ConfigStore {
-  readonly values = new Map<string, string>();
-  readonly firstSetStarted = deferred();
-  readonly releaseFirstSet = deferred();
-  private setCount = 0;
-
-  async get(key: string): Promise<string | null> {
-    return this.values.get(key) ?? null;
-  }
-
-  async set(key: string, value: string): Promise<void> {
-    this.setCount += 1;
-    if (this.setCount === 1) {
-      this.firstSetStarted.resolve();
-      await this.releaseFirstSet.promise;
-    }
-    this.values.set(key, value);
-  }
-}
-
 describe("createCodexModelCache", () => {
-  it("fails open when the cache is missing, corrupt, or unreadable", async () => {
+  it("never reads or writes ConfigStore", async () => {
     const missing = createCodexModelCache(fakeConfigStore(), ENC_KEY);
     await expect(missing.get(BASE_KEY)).resolves.toBeNull();
 
@@ -90,21 +62,47 @@ describe("createCodexModelCache", () => {
     const unavailable = createCodexModelCache(unreadable, ENC_KEY);
     await expect(unavailable.get(BASE_KEY)).resolves.toBeNull();
     await expect(unavailable.upsert(entry())).resolves.toEqual(entry());
+    await expect(unavailable.get(BASE_KEY)).resolves.toMatchObject({ entry: entry() });
+    await expect(unavailable.renew(BASE_KEY, '"models-v1"')).resolves.toMatchObject({
+      etag: '"models-v1"',
+    });
   });
 
-  it("persists an encrypted blob and returns an exact fresh match", async () => {
+  it("ignores the aggregate legacy blob and stays hot-only", async () => {
+    const values = new Map<string, string>([
+      [CODEX_MODEL_CACHE_CONFIG_KEY, "legacy-aggregate-blob"],
+    ]);
+    let legacyReads = 0;
+    const store: ConfigStore = {
+      get: async (key) => {
+        if (key === CODEX_MODEL_CACHE_CONFIG_KEY) legacyReads += 1;
+        return values.get(key) ?? null;
+      },
+      set: async (key, value) => {
+        values.set(key, value);
+      },
+    };
+    const cache = createCodexModelCache(store, ENC_KEY, { now: () => 1_100 });
+
+    await expect(cache.get(BASE_KEY)).resolves.toBeNull();
+    expect(legacyReads).toBe(0);
+    await expect(cache.upsert(entry())).resolves.toEqual(entry());
+
+    const exactKeys = [...values.keys()].filter((key) => key !== CODEX_MODEL_CACHE_CONFIG_KEY);
+    expect(exactKeys).toHaveLength(0);
+    await expect(
+      createCodexModelCache(store, ENC_KEY, { now: () => 1_100 }).get(BASE_KEY),
+    ).resolves.toBeNull();
+    expect(legacyReads).toBe(0);
+  });
+
+  it("returns an exact fresh match from the hot cache", async () => {
     const store = fakeConfigStore();
     const cache = createCodexModelCache(store, ENC_KEY, { now: () => 1_100 });
 
     await cache.upsert(entry());
 
-    const blob = store.values.get(CODEX_MODEL_CACHE_CONFIG_KEY);
-    expect(blob).toMatch(/^v1:/);
-    expect(blob).not.toContain("gpt-5.6-sol");
-    expect(JSON.parse(decryptSecret(blob ?? "", ENC_KEY))).toEqual({
-      version: 1,
-      entries: [entry()],
-    });
+    expect(store.values.size).toBe(0);
     await expect(cache.get(BASE_KEY)).resolves.toEqual({
       entry: entry(),
       fresh: true,
@@ -126,48 +124,14 @@ describe("createCodexModelCache", () => {
     });
   });
 
-  it("hydrates the encrypted blob once and serves repeated hot gets from memory", async () => {
-    let reads = 0;
-    const persisted = encryptSecret(JSON.stringify({ version: 1, entries: [entry()] }), ENC_KEY);
-    const base = fakeConfigStore({ [CODEX_MODEL_CACHE_CONFIG_KEY]: persisted });
-    const store: ConfigStore = {
-      get: async (key) => {
-        reads += 1;
-        return base.get(key);
-      },
-      set: (key, value) => base.set(key, value),
-    };
-    const cache = createCodexModelCache(store, ENC_KEY, { now: () => 1_100 });
-
-    await expect(cache.get(BASE_KEY)).resolves.toMatchObject({ fresh: true });
-    await expect(cache.get(BASE_KEY)).resolves.toMatchObject({ fresh: true });
-    expect(reads).toBe(1);
-  });
-
-  it("keeps one underlying hydration when the first caller disconnects", async () => {
-    let reads = 0;
-    const loading = deferred();
-    const persisted = encryptSecret(JSON.stringify({ version: 1, entries: [entry()] }), ENC_KEY);
-    const store: ConfigStore = {
-      get: async () => {
-        reads += 1;
-        await loading.promise;
-        return persisted;
-      },
-      set: async () => {},
-    };
-    const cache = createCodexModelCache(store, ENC_KEY, { now: () => 1_100 });
+  it("honors an already-aborted get without touching the hot cache", async () => {
+    const cache = createCodexModelCache(fakeConfigStore(), ENC_KEY, { now: () => 1_100 });
+    await cache.upsert(entry());
     const caller = new AbortController();
-    const first = cache.get(BASE_KEY, caller.signal);
     caller.abort(new Error("caller disconnected"));
 
-    await expect(first).rejects.toThrow("caller disconnected");
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    const second = cache.get(BASE_KEY);
-    loading.resolve();
-
-    await expect(second).resolves.toMatchObject({ fresh: true });
-    expect(reads).toBe(1);
+    await expect(cache.get(BASE_KEY, caller.signal)).rejects.toThrow("caller disconnected");
+    await expect(cache.get(BASE_KEY)).resolves.toMatchObject({ fresh: true });
   });
 
   it("requires provider, account, identity, and client version to all match", async () => {
@@ -198,13 +162,10 @@ describe("createCodexModelCache", () => {
       entry: { clientVersion: "0.145.0" },
     });
 
-    const blob = store.values.get(CODEX_MODEL_CACHE_CONFIG_KEY);
-    expect(JSON.parse(decryptSecret(blob ?? "", ENC_KEY))).toMatchObject({
-      entries: [{ clientVersion: "0.145.0" }],
-    });
+    expect(store.values.size).toBe(0);
   });
 
-  it("fails closed without persisting malformed or oversized client versions", async () => {
+  it("fails closed for malformed or oversized client versions", async () => {
     const store = fakeConfigStore();
     const cache = createCodexModelCache(store, ENC_KEY);
 
@@ -274,15 +235,14 @@ describe("createCodexModelCache", () => {
     });
   });
 
-  it("renews a hot entry without rereading or rewriting the persistent cache", async () => {
+  it("renews a hot entry without reading or writing ConfigStore", async () => {
     let now = 9_000;
     let reads = 0;
     let writes = 0;
-    const persisted = encryptSecret(JSON.stringify({ version: 1, entries: [entry()] }), ENC_KEY);
     const store: ConfigStore = {
       get: async () => {
         reads += 1;
-        return persisted;
+        return null;
       },
       set: async () => {
         writes += 1;
@@ -290,6 +250,7 @@ describe("createCodexModelCache", () => {
     };
     const cache = createCodexModelCache(store, ENC_KEY, { now: () => now });
 
+    await cache.upsert(entry());
     await expect(cache.get(BASE_KEY)).resolves.toMatchObject({ fresh: true });
     now = 10_000;
     await expect(cache.renew(BASE_KEY, '"models-v1"')).resolves.toMatchObject({
@@ -300,25 +261,19 @@ describe("createCodexModelCache", () => {
       fresh: true,
     });
 
-    expect(reads).toBe(1);
+    expect(reads).toBe(0);
     expect(writes).toBe(0);
   });
 
-  it("serializes concurrent upserts so unrelated accounts are not lost", async () => {
-    const store = new DelayedFirstSetConfig();
-    const cache = createCodexModelCache(store, ENC_KEY, { now: () => 2_000 });
-    const personal = cache.upsert(entry());
-    await store.firstSetStarted.promise;
+  it("keeps unrelated account entries across concurrent upserts", async () => {
+    const cache = createCodexModelCache(fakeConfigStore(), ENC_KEY, { now: () => 2_000 });
     const teamEntry = entry({
       account: "team",
       accountIdentity: "workspace-9",
       etag: '"team-v1"',
       models: [{ slug: "gpt-5.6-terra" }],
     });
-    const team = cache.upsert(teamEntry);
-
-    store.releaseFirstSet.resolve();
-    await Promise.all([personal, team]);
+    await Promise.all([cache.upsert(entry()), cache.upsert(teamEntry)]);
 
     await expect(cache.get(BASE_KEY)).resolves.toMatchObject({ entry: entry() });
     await expect(
@@ -331,9 +286,8 @@ describe("createCodexModelCache", () => {
     ).resolves.toMatchObject({ entry: teamEntry });
   });
 
-  it("bounds the encrypted persistent cache by newest fetchedAtMs entries", async () => {
-    const store = fakeConfigStore();
-    const cache = createCodexModelCache(store, ENC_KEY, { maxEntries: 3 });
+  it("bounds the hot cache by newest fetchedAtMs entries", async () => {
+    const cache = createCodexModelCache(fakeConfigStore(), ENC_KEY, { maxEntries: 3 });
 
     for (let index = 1; index <= 5; index += 1) {
       await cache.upsert(
@@ -346,44 +300,30 @@ describe("createCodexModelCache", () => {
       );
     }
 
-    const blob = store.values.get(CODEX_MODEL_CACHE_CONFIG_KEY);
-    const persisted = JSON.parse(decryptSecret(blob ?? "", ENC_KEY)) as {
-      entries: CodexModelCacheEntry[];
-    };
-    expect(persisted.entries).toHaveLength(3);
-    expect(persisted.entries.map((item) => item.fetchedAtMs).sort()).toEqual([3, 4, 5]);
-    expect(DEFAULT_CODEX_MODEL_CACHE_MAX_ENTRIES).toBe(64);
-  });
-
-  it("drops invalid and excess legacy entries while loading an existing blob", async () => {
-    const persisted = {
-      version: 1,
-      entries: [
-        entry({ account: "old", fetchedAtMs: 1 }),
-        entry({ account: "new", fetchedAtMs: 3 }),
-        entry({ account: "middle", fetchedAtMs: 2 }),
-        entry({ account: "invalid", clientVersion: "latest", fetchedAtMs: 4 }),
-      ],
-    };
-    const store = fakeConfigStore({
-      [CODEX_MODEL_CACHE_CONFIG_KEY]: encryptSecret(JSON.stringify(persisted), ENC_KEY),
-    });
-    const cache = createCodexModelCache(store, ENC_KEY, { maxEntries: 2 });
-
-    await expect(cache.get({ ...BASE_KEY, account: "new" })).resolves.toMatchObject({
-      entry: { account: "new" },
-    });
-    await expect(cache.get({ ...BASE_KEY, account: "middle" })).resolves.toMatchObject({
-      entry: { account: "middle" },
-    });
-    await expect(cache.get({ ...BASE_KEY, account: "old" })).resolves.toBeNull();
     await expect(
-      cache.get({ ...BASE_KEY, account: "invalid", clientVersion: "latest" }),
+      cache.get({
+        ...BASE_KEY,
+        account: "account-1",
+        accountIdentity: "identity-1",
+        clientVersion: "0.1.0",
+      }),
     ).resolves.toBeNull();
-
-    const cleaned = JSON.parse(
-      decryptSecret(store.values.get(CODEX_MODEL_CACHE_CONFIG_KEY) ?? "", ENC_KEY),
-    ) as { entries: CodexModelCacheEntry[] };
-    expect(cleaned.entries.map((item) => item.account)).toEqual(["new", "middle"]);
+    await expect(
+      cache.get({
+        ...BASE_KEY,
+        account: "account-3",
+        accountIdentity: "identity-3",
+        clientVersion: "0.3.0",
+      }),
+    ).resolves.toMatchObject({ entry: { fetchedAtMs: 3 } });
+    await expect(
+      cache.get({
+        ...BASE_KEY,
+        account: "account-5",
+        accountIdentity: "identity-5",
+        clientVersion: "0.5.0",
+      }),
+    ).resolves.toMatchObject({ entry: { fetchedAtMs: 5 } });
+    expect(DEFAULT_CODEX_MODEL_CACHE_MAX_ENTRIES).toBe(64);
   });
 });
