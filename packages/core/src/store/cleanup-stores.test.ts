@@ -82,6 +82,33 @@ describe.each(drivers)("Cleanup store contract — $name", ({ open }) => {
       tokenEstimate: 1,
     });
 
+    if (!recent.listObserverMessagesPage || !recent.appendObservationAndAdvanceFrontier) {
+      throw new Error("adapter must implement bounded Observer paging");
+    }
+    const covered = await recent.listObserverMessagesPage({
+      threadId: "t",
+      accountId: "a",
+      limit: 10,
+      maxBytes: 10_000,
+      maxTokens: 1_000,
+    });
+    const first = covered.messages[0];
+    const last = covered.messages.at(-1);
+    if (first === undefined || last === undefined || covered.nextCursor === null) {
+      throw new Error("expected messages to cover");
+    }
+    await recent.appendObservationAndAdvanceFrontier({
+      accountId: "a",
+      observation: {
+        threadId: "t",
+        sourceMessageRange: [first.id, last.id],
+        observationText: "covered",
+        observedAt: new Date(3001),
+      },
+      expectedFrontier: covered.expectedFrontier,
+      nextFrontier: covered.nextCursor,
+    });
+
     const q = ctx.mkMemory(0);
     if (!q.countMessagesOlderThan || !q.selectMessagesOlderThan || !q.pruneMessagesOlderThan)
       throw new Error("adapter must implement memory_messages cleanup");
@@ -114,6 +141,32 @@ describe.each(drivers)("Cleanup store contract — $name", ({ open }) => {
     for (let i = 0; i < 5; i++) {
       await w.appendMessage({ threadId: "t", role: "user", content: `m${i}`, tokenEstimate: 1 });
     }
+    if (!w.listObserverMessagesPage || !w.appendObservationAndAdvanceFrontier) {
+      throw new Error("adapter must implement bounded Observer paging");
+    }
+    const covered = await w.listObserverMessagesPage({
+      threadId: "t",
+      accountId: "a",
+      limit: 10,
+      maxBytes: 10_000,
+      maxTokens: 1_000,
+    });
+    const first = covered.messages[0];
+    const last = covered.messages.at(-1);
+    if (first === undefined || last === undefined || covered.nextCursor === null) {
+      throw new Error("expected messages to cover");
+    }
+    await w.appendObservationAndAdvanceFrontier({
+      accountId: "a",
+      observation: {
+        threadId: "t",
+        sourceMessageRange: [first.id, last.id],
+        observationText: "covered",
+        observedAt: new Date(1001),
+      },
+      expectedFrontier: covered.expectedFrontier,
+      nextFrontier: covered.nextCursor,
+    });
     const q = ctx.mkMemory(0);
     if (!q.selectMessagesOlderThan) throw new Error("missing selectMessagesOlderThan");
     const seen: string[] = [];
@@ -126,6 +179,24 @@ describe.each(drivers)("Cleanup store contract — $name", ({ open }) => {
     }
     expect(seen.sort()).toEqual(["m0", "m1", "m2", "m3", "m4"]);
     expect(new Set(seen).size).toBe(5);
+  });
+
+  it("memory_messages: cleanup never deletes uncovered raw rows", async () => {
+    ctx = await open();
+    const w = ctx.mkMemory(1000);
+    await w.ensureThread({ id: "uncovered", ownerId: "a" });
+    await w.appendMessage({
+      threadId: "uncovered",
+      role: "user",
+      content: "not formed yet",
+      tokenEstimate: 4,
+    });
+    if (!w.countMessagesOlderThan || !w.pruneMessagesOlderThan) {
+      throw new Error("missing memory cleanup methods");
+    }
+    expect(await w.countMessagesOlderThan(2000)).toBe(0);
+    expect(await w.pruneMessagesOlderThan(2000)).toBe(0);
+    expect(await w.listMessages({ threadId: "uncovered", accountId: "a" })).toHaveLength(1);
   });
 
   it("memory_jobs: prune deletes FINISHED rows older than the cutoff, never pending", async () => {

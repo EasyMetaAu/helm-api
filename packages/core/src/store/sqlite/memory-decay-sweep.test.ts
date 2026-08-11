@@ -29,8 +29,8 @@ describe("SqliteMemoryStore decay sweep (listScorableObservations / archiveObser
   it("lists only ACTIVE observations of the swept account with the score-input fields", async () => {
     const now = new Date("2026-06-05T00:00:00.000Z");
     const { store } = newStore(now);
-    await store.ensureThread({ id: "t-a", ownerId: "acct-a" });
-    await store.ensureThread({ id: "t-b", ownerId: "acct-b" });
+    await store.ensureThread({ id: "t-a", ownerId: "acct-a", projectId: "p-a" });
+    await store.ensureThread({ id: "t-b", ownerId: "acct-b", projectId: "p-b" });
     const obsA = await store.appendObservation({
       threadId: "t-a",
       sourceMessageRange: ["m1", "m2"],
@@ -141,8 +141,8 @@ describe("SqliteMemoryStore decay sweep (listScorableObservations / archiveObser
   it("archiveObservations soft-invalidates only the named ACTIVE rows of the account", async () => {
     const now = new Date("2026-06-05T00:00:00.000Z");
     const { store, db } = newStore(now);
-    await store.ensureThread({ id: "t-a", ownerId: "acct-a" });
-    await store.ensureThread({ id: "t-b", ownerId: "acct-b" });
+    await store.ensureThread({ id: "t-a", ownerId: "acct-a", projectId: "p-a" });
+    await store.ensureThread({ id: "t-b", ownerId: "acct-b", projectId: "p-b" });
     const obsA = await store.appendObservation({
       threadId: "t-a",
       sourceMessageRange: ["m1", "m2"],
@@ -162,6 +162,13 @@ describe("SqliteMemoryStore decay sweep (listScorableObservations / archiveObser
 
     expect(readStatus(db, obsA)).toEqual({ status: "archived", archived_at: archivedAt.getTime() });
     expect(readStatus(db, obsB)).toEqual({ status: "active", archived_at: null }); // other account untouched
+    expect(await store.claimPendingJobs(10)).toEqual([
+      {
+        jobId: expect.any(String),
+        type: "reflector",
+        scope: { accountId: "acct-a", projectId: "p-a" },
+      },
+    ]);
 
     // Archived rows drop out of the scorable list → idempotent re-sweep finds nothing new.
     const remaining = await store.listScorableObservations({ accountId: "acct-a" });

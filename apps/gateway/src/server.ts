@@ -2189,6 +2189,7 @@ export async function buildServer(
   // counts / mode, never memory content or keys (principle 7).
   const observe: ObserveDeps = {
     memoryStore: store.memory,
+    enqueueObserverJob: (scope) => store.memory.enqueueJob({ type: "observer", scope }),
     now: () => new Date(),
     estimateTokens: (text) => Math.ceil(text.length / 4),
     log: (line, meta) => logger.log("info", line, meta as Record<string, unknown> | undefined),

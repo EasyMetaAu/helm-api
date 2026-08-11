@@ -9,6 +9,8 @@ import type { OAuthUsageStore } from "../ports.js";
 import type { PgDb } from "./migrate.js";
 import { oauthUsage } from "./schema.js";
 
+const PG_RETENTION_PRUNE_BATCH_ROWS = 1_000;
+
 // Postgres adapter for the OAuthUsageStore port (providers page Tier 2) — the
 // supabase mirror of the sqlite adapter. Additive upsert per (provider_id,
 // account, day); cost_usd null-aware (NULL only while never measured). Pure
@@ -116,11 +118,28 @@ export class PgOAuthUsageStore implements OAuthUsageStore {
   }
 
   async pruneUsageOlderThan(olderThanMs: number): Promise<number> {
-    const rows = await this.db
-      .delete(oauthUsage)
-      .where(lt(oauthUsage.bucketMs, olderThanMs))
-      .returning();
-    return rows.length;
+    let total = 0;
+    for (;;) {
+      const result = (await this.db.execute(sql`
+        WITH doomed AS (
+          SELECT provider_id, account, bucket_ms FROM oauth_usage
+           WHERE bucket_ms < ${olderThanMs}
+           ORDER BY bucket_ms, provider_id, account
+           LIMIT ${PG_RETENTION_PRUNE_BATCH_ROWS}
+        ), deleted AS (
+          DELETE FROM oauth_usage u USING doomed d
+           WHERE u.provider_id = d.provider_id
+             AND u.account = d.account
+             AND u.bucket_ms = d.bucket_ms
+          RETURNING 1
+        )
+        SELECT COUNT(*)::int AS deleted FROM deleted
+      `)) as { rows?: Array<{ deleted: number | string }> } | Array<{ deleted: number | string }>;
+      const rows = Array.isArray(result) ? result : (result.rows ?? []);
+      const deleted = Number(rows[0]?.deleted ?? 0);
+      total += deleted;
+      if (deleted < PG_RETENTION_PRUNE_BATCH_ROWS) return total;
+    }
   }
 
   // Aggregated row -> OAuthUsageRow. pg marshals SUM()/MIN()/MAX() over bigint as

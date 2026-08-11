@@ -219,6 +219,24 @@ describe("observeInbound", () => {
 });
 
 describe("observeOutbound", () => {
+  it("enqueues one coalesced observer job in pure observe mode", async () => {
+    const { store } = makeFakeStore();
+    const enqueueObserverJob = vi.fn(async () => "observer-job");
+    const deps = makeDeps(store, { enqueueObserverJob });
+
+    await observeOutbound(deps, scope(), {
+      responseMessages: [{ role: "assistant", content: "hi back" }],
+      toolResults: [],
+    });
+
+    expect(enqueueObserverJob).toHaveBeenCalledWith({
+      accountId: "acct-a",
+      threadId: projectScopedThreadId("acct-a", "project-1", "thread-1"),
+      projectId: "project-1",
+      resourceId: "resource-1",
+    });
+  });
+
   it("persists response messages + tool results when observe", async () => {
     const { store, messages } = makeFakeStore();
     const deps = makeDeps(store);

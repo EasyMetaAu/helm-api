@@ -162,7 +162,7 @@ describe("assembleInjectedContext — memory TEXT BLOCK (trailing-reminder model
     );
     store.findRedundantInjectionObservations = vi.fn(async () => new Set<string>());
 
-    const out = await assembleInjectedContext(baseInput({ tokenBudget: 1 }), makeDeps(store));
+    const out = await assembleInjectedContext(baseInput({ tokenBudget: 11 }), makeDeps(store));
 
     expect(out.memoryBlock).toContain("newest");
     expect(out.memoryBlock).not.toContain("older");
@@ -437,8 +437,8 @@ describe("assembleInjectedContext — memory TEXT BLOCK (trailing-reminder model
         makeObservation("o2", "keep me newer", "2026-05-28T00:00:00.000Z", ["c", "d"]),
       ],
     });
-    // Budget fits the reflection (3 tokens) + exactly one 3-token observation.
-    const out = await assembleInjectedContext(baseInput({ tokenBudget: 6 }), makeDeps(store));
+    // Budget fits the rendered headers + reflection + exactly one observation.
+    const out = await assembleInjectedContext(baseInput({ tokenBudget: 19 }), makeDeps(store));
     const block = out.memoryBlock ?? "";
     // reflection survives.
     expect(block).toContain("keep this proj");
@@ -446,12 +446,7 @@ describe("assembleInjectedContext — memory TEXT BLOCK (trailing-reminder model
     expect(block).toContain("keep me newer");
     expect(block).not.toContain("drop me oldest");
     expect(out.metadata.observation_count).toBe(1);
-    // The CONTENT selected (reflection + kept observation text) respects the budget;
-    // the rendered block adds fixed section-header overhead on top, so
-    // memory_tokens_injected (the final string) is reported separately.
-    const selectedContentTokens =
-      estimateTokens("keep this proj") + estimateTokens("keep me newer");
-    expect(selectedContentTokens).toBeLessThanOrEqual(6);
+    expect(out.metadata.memory_tokens_injected).toBeLessThanOrEqual(19);
   });
 
   it("trims reflections (resource before project) only when the budget cannot fit them, and signals overflow", async () => {
@@ -460,14 +455,15 @@ describe("assembleInjectedContext — memory TEXT BLOCK (trailing-reminder model
       resourceReflection: makeReflection({ resourceId: "res-1", reflectionText: "RES" }),
     });
     const log = vi.fn();
-    // Budget fits exactly one 1-token reflection → project kept, resource dropped.
+    // Budget fits one fully rendered reflection section → project kept, resource dropped.
     const out = await assembleInjectedContext(
-      baseInput({ tokenBudget: 1 }),
+      baseInput({ tokenBudget: 10 }),
       makeDeps(store, { log }),
     );
     const block = out.memoryBlock ?? "";
     expect(block).toContain("PROJ");
     expect(block).not.toContain("RES");
+    expect(out.metadata.memory_tokens_injected).toBeLessThanOrEqual(10);
     const logged = log.mock.calls.map((c) => String(c[0])).join("\n");
     expect(logged).toMatch(/memory.inject.*overflow/i);
   });

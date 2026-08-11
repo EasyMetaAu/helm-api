@@ -1283,6 +1283,63 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // Pg mirror of SQLite v49: stable server-time order, durable Observer
+    // frontier, cleanup index, and transactional counter reconciliation.
+    version: 48,
+    run: async (db) => {
+      if (!(await pgTableHasColumns(db, "memory_threads", ["id"]))) return;
+      await db.execute(
+        sql.raw("ALTER TABLE memory_threads ADD COLUMN IF NOT EXISTS observer_frontier_at BIGINT"),
+      );
+      await db.execute(
+        sql.raw("ALTER TABLE memory_threads ADD COLUMN IF NOT EXISTS observer_frontier_id TEXT"),
+      );
+      if (!(await pgTableHasColumns(db, "memory_messages", ["thread_id", "created_at", "id"]))) {
+        return;
+      }
+      await db.execute(
+        sql.raw(`
+        CREATE INDEX IF NOT EXISTS idx_memory_messages_thread_created_id
+          ON memory_messages (thread_id, created_at, id)
+      `),
+      );
+      await db.execute(
+        sql.raw(`
+        CREATE INDEX IF NOT EXISTS idx_memory_messages_created_id
+          ON memory_messages (created_at, id)
+      `),
+      );
+      await db.execute(
+        sql.raw(`
+        UPDATE memory_threads AS t
+           SET message_count = (SELECT COUNT(*)::integer FROM memory_messages m WHERE m.thread_id = t.id),
+               last_message_at = (SELECT MAX(created_at)::bigint FROM memory_messages m WHERE m.thread_id = t.id),
+               observer_frontier_at = (
+                 SELECT m.created_at FROM memory_messages m
+                  WHERE m.thread_id = t.id ORDER BY m.created_at DESC, m.id DESC LIMIT 1
+               ),
+               observer_frontier_id = (
+                 SELECT m.id FROM memory_messages m
+                  WHERE m.thread_id = t.id ORDER BY m.created_at DESC, m.id DESC LIMIT 1
+               )
+      `),
+      );
+      if (await pgTableHasColumns(db, "memory_observations", ["thread_id", "observed_at"])) {
+        await db.execute(
+          sql.raw(`
+          UPDATE memory_threads AS t
+             SET observation_count = (
+                   SELECT COUNT(*)::integer FROM memory_observations o WHERE o.thread_id = t.id
+                 ),
+                 last_observation_at = (
+                   SELECT MAX(observed_at)::bigint FROM memory_observations o WHERE o.thread_id = t.id
+                 )
+        `),
+        );
+      }
+    },
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {

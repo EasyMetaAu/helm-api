@@ -207,6 +207,57 @@ describe("runPgMigrations — per-migration atomicity", () => {
     await db.$close();
   });
 
+  it("v48 reconciles stale Memory counters and checkpoints legacy raw history", async () => {
+    const db = await createPgliteDb();
+    await db.execute(
+      sql.raw(`
+      INSERT INTO memory_threads (
+        id, owner_id, message_count, last_message_at,
+        observation_count, created_at, updated_at
+      ) VALUES ('frontier-t', 'a', 999, 9999, 999, 1, 1)
+    `),
+    );
+    await db.execute(
+      sql.raw(`
+      INSERT INTO memory_messages (
+        id, thread_id, role, content, token_estimate, created_at
+      ) VALUES ('frontier-m1', 'frontier-t', 'user', 'one', 1, 1000),
+               ('frontier-m2', 'frontier-t', 'assistant', 'two', 1, 2000)
+    `),
+    );
+    await db.execute(
+      sql.raw(`
+      INSERT INTO memory_observations (
+        id, thread_id, source_message_range, observation_text, observed_at
+      ) VALUES ('frontier-o1', 'frontier-t', '["frontier-m1","frontier-m2"]', 'summary', 3000)
+    `),
+    );
+    await db.execute(sql.raw("DELETE FROM _migrations WHERE version = 48"));
+
+    await runPgMigrations(db);
+
+    const result = (await db.execute(
+      sql.raw(`
+      SELECT message_count, last_message_at, observation_count,
+             last_observation_at, observer_frontier_at, observer_frontier_id
+        FROM memory_threads WHERE id = 'frontier-t'
+    `),
+    )) as {
+      rows: Array<Record<string, number | string | null>>;
+    };
+    expect(result.rows).toEqual([
+      {
+        message_count: 2,
+        last_message_at: 2000,
+        observation_count: 1,
+        last_observation_at: 3000,
+        observer_frontier_at: 2000,
+        observer_frontier_id: "frontier-m2",
+      },
+    ]);
+    await db.$close();
+  });
+
   it("v31 backfills telemetry latency and creates admin aggregate indexes", async () => {
     const client = new PGlite();
     const db = Object.assign(drizzlePglite(client), { $close: () => client.close() });

@@ -29,8 +29,7 @@ const fileScans = new WeakMap<Database.Database, Promise<IdleFlushCandidate[]>>(
 const candidateSql = `WITH candidates AS (
   SELECT t.owner_id AS owner_id, t.id AS thread_id,
          t.project_id AS project_id, t.resource_id AS resource_id,
-         (SELECT MAX(m.created_at) FROM memory_messages m WHERE m.thread_id = t.id)
-           AS last_activity
+         t.last_message_at AS last_activity
     FROM memory_threads t
    WHERE t.owner_id IS NOT NULL
      AND last_activity IS NOT NULL
@@ -39,58 +38,10 @@ const candidateSql = `WITH candidates AS (
      AND EXISTS (
        SELECT 1 FROM memory_messages m
         WHERE m.thread_id = t.id
-          AND NOT EXISTS (
-            SELECT 1 FROM memory_observations o
-            JOIN memory_messages mf
-              ON mf.id = json_extract(o.source_message_range, '$[0]')
-            JOIN memory_messages ml
-              ON ml.id = json_extract(o.source_message_range, '$[1]')
-             WHERE o.thread_id = t.id
-               AND (
-                 (
-                   (CASE WHEN mf.message_index IS NULL THEN 1 ELSE 0 END,
-                    COALESCE(mf.message_index, 9223372036854775807),
-                    mf.created_at,
-                    mf.id)
-                   <=
-                   (CASE WHEN m.message_index IS NULL THEN 1 ELSE 0 END,
-                    COALESCE(m.message_index, 9223372036854775807),
-                    m.created_at,
-                    m.id)
-                   AND
-                   (CASE WHEN m.message_index IS NULL THEN 1 ELSE 0 END,
-                    COALESCE(m.message_index, 9223372036854775807),
-                    m.created_at,
-                    m.id)
-                   <=
-                   (CASE WHEN ml.message_index IS NULL THEN 1 ELSE 0 END,
-                    COALESCE(ml.message_index, 9223372036854775807),
-                    ml.created_at,
-                    ml.id)
-                 )
-                 OR
-                 (
-                   (CASE WHEN ml.message_index IS NULL THEN 1 ELSE 0 END,
-                    COALESCE(ml.message_index, 9223372036854775807),
-                    ml.created_at,
-                    ml.id)
-                   <=
-                   (CASE WHEN m.message_index IS NULL THEN 1 ELSE 0 END,
-                    COALESCE(m.message_index, 9223372036854775807),
-                    m.created_at,
-                    m.id)
-                   AND
-                   (CASE WHEN m.message_index IS NULL THEN 1 ELSE 0 END,
-                    COALESCE(m.message_index, 9223372036854775807),
-                    m.created_at,
-                    m.id)
-                   <=
-                   (CASE WHEN mf.message_index IS NULL THEN 1 ELSE 0 END,
-                    COALESCE(mf.message_index, 9223372036854775807),
-                    mf.created_at,
-                    mf.id)
-                 )
-               )
+          AND (
+            t.observer_frontier_at IS NULL OR
+            m.created_at > t.observer_frontier_at OR
+            (m.created_at = t.observer_frontier_at AND m.id > t.observer_frontier_id)
           )
      )
 ),

@@ -1983,6 +1983,133 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(msgs.map((m) => m.content)).toEqual(["m0", "m1", "m2"]);
     });
 
+    it("orders incremental batches by persisted time, not request-local message_index", async () => {
+      ctx = await make();
+      const store = ctx.stores.memory;
+      await store.ensureThread({ id: "incremental-t", ownerId: "acct-a" });
+      await store.appendMessages?.([
+        {
+          threadId: "incremental-t",
+          messageIndex: 0,
+          role: "tool",
+          content: "first-batch-index-0",
+          tokenEstimate: 1,
+        },
+        {
+          threadId: "incremental-t",
+          messageIndex: 1,
+          role: "assistant",
+          content: "first-batch-index-1",
+          tokenEstimate: 1,
+        },
+      ]);
+      await store.appendMessages?.([
+        {
+          threadId: "incremental-t",
+          messageIndex: 0,
+          role: "tool",
+          content: "second-batch-index-0",
+          tokenEstimate: 1,
+        },
+      ]);
+
+      const msgs = await store.listMessages({ threadId: "incremental-t", accountId: "acct-a" });
+      expect(msgs.map((m) => m.content)).toEqual([
+        "first-batch-index-0",
+        "first-batch-index-1",
+        "second-batch-index-0",
+      ]);
+    });
+
+    it("pages Observer input with a durable CAS frontier", async () => {
+      ctx = await make();
+      const store = ctx.stores.memory;
+      if (!store.listObserverMessagesPage || !store.appendObservationAndAdvanceFrontier) {
+        throw new Error("adapter must implement bounded Observer paging");
+      }
+      await store.ensureThread({ id: "observer-page-t", ownerId: "acct-a" });
+      await store.appendMessages?.(
+        ["m0", "m1", "m2"].map((content, messageIndex) => ({
+          threadId: "observer-page-t",
+          messageIndex,
+          role: "user" as const,
+          content,
+          tokenEstimate: 1,
+        })),
+      );
+
+      const first = await store.listObserverMessagesPage({
+        threadId: "observer-page-t",
+        accountId: "acct-a",
+        limit: 2,
+        maxBytes: 1024,
+        maxTokens: 100,
+      });
+      expect(first.messages.map((message) => message.content)).toEqual(["m0", "m1"]);
+      expect(first.hasMore).toBe(true);
+      expect(first.expectedFrontier).toBeNull();
+      expect(first.nextCursor).not.toBeNull();
+      if (first.nextCursor === null) {
+        throw new Error("Observer page must return a cursor for non-empty messages");
+      }
+      const range = [first.messages[0]?.id, first.messages[1]?.id] as [string, string];
+      const observation = {
+        threadId: "observer-page-t",
+        sourceMessageRange: range,
+        observationText: "m0 and m1",
+        observedAt: new Date(10_000),
+      };
+      const id = await store.appendObservationAndAdvanceFrontier({
+        accountId: "acct-a",
+        observation,
+        expectedFrontier: first.expectedFrontier,
+        nextFrontier: first.nextCursor,
+      });
+      expect(id).not.toBeNull();
+      expect(
+        await store.appendObservationAndAdvanceFrontier({
+          accountId: "acct-a",
+          observation,
+          expectedFrontier: first.expectedFrontier,
+          nextFrontier: first.nextCursor,
+        }),
+      ).toBeNull();
+
+      const second = await store.listObserverMessagesPage({
+        threadId: "observer-page-t",
+        accountId: "acct-a",
+        limit: 2,
+        maxBytes: 1024,
+        maxTokens: 100,
+      });
+      expect(second.messages.map((message) => message.content)).toEqual(["m2"]);
+      expect(second.expectedFrontier).toEqual(first.nextCursor);
+      expect(second.hasMore).toBe(false);
+    });
+
+    it("replaces one oversized Observer row with a bounded digest placeholder", async () => {
+      ctx = await make();
+      const store = ctx.stores.memory;
+      if (!store.listObserverMessagesPage) throw new Error("missing bounded Observer paging");
+      await store.ensureThread({ id: "observer-large-t", ownerId: "acct-a" });
+      await store.appendMessage({
+        threadId: "observer-large-t",
+        role: "tool",
+        content: "x".repeat(100_000),
+        tokenEstimate: 25_000,
+      });
+      const page = await store.listObserverMessagesPage({
+        threadId: "observer-large-t",
+        accountId: "acct-a",
+        limit: 8,
+        maxBytes: 1024,
+        maxTokens: 256,
+      });
+      expect(page.messages).toHaveLength(1);
+      expect(page.messages[0]?.content).toMatch(/^\[oversized tool message omitted; sha256=/);
+      expect(page.messages[0]?.content.length).toBeLessThan(128);
+    });
+
     it("appendMessages on an empty batch writes nothing and returns []", async () => {
       ctx = await make();
       const store = ctx.stores.memory;

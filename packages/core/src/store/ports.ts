@@ -653,6 +653,7 @@ export interface TelemetryStore {
   // aggregate a window AFTER the fact. Half-open interval keeps adjacent windows
   // non-overlapping → idempotent re-collect. NEVER called on the request path.
   queryWindow(startMs: number, endMs: number): Promise<DecisionRecord[]>;
+  countWindow?(startMs: number, endMs: number): Promise<number>;
   // Dashboard token-accounting aggregate over [startMs, endMs), bucketed by hour or
   // day (admin homepage). SQL-level SUM/COUNT/GROUP BY over the denormalized token
   // columns — see TelemetryAggregate. READ-ONLY; never on the request path. Both
@@ -764,6 +765,18 @@ export interface MemoryFactReconcileResult {
   resurrectedIds?: string[];
 }
 
+export interface MemoryObserverCursor {
+  createdAtMs: number;
+  id: string;
+}
+
+export interface MemoryObserverPage {
+  messages: RawMessage[];
+  expectedFrontier: MemoryObserverCursor | null;
+  nextCursor: MemoryObserverCursor | null;
+  hasMore: boolean;
+}
+
 export interface MemoryStore {
   // Idempotent upsert of a thread; safe to call on every observed request.
   ensureThread(input: MemoryThreadInput): Promise<void>;
@@ -792,9 +805,27 @@ export interface MemoryStore {
   // background Observer can compress the older ones into an observation. Returns
   // the persisted rows (with ids + createdAt) for an auditable source range.
   listMessages(scope: { threadId: string; accountId: string }): Promise<RawMessage[]>;
+  // Strictly bounded Observer read. Content is loaded only after a metadata page
+  // fits the row/token/byte budgets; a single oversized row becomes a digest
+  // placeholder so the durable frontier can still advance.
+  listObserverMessagesPage?(input: {
+    threadId: string;
+    accountId: string;
+    limit: number;
+    maxBytes: number;
+    maxTokens: number;
+  }): Promise<MemoryObserverPage>;
   // Persist one compressed observation; returns its generated id. source range
   // is REQUIRED on the input (docs/08) so memory can be audited against originals.
   appendObservation(input: MemoryObservationInput): Promise<string>;
+  // Observation insert + frontier CAS are one transaction. null means another
+  // worker already advanced the thread, so this result must be discarded.
+  appendObservationAndAdvanceFrontier?(input: {
+    accountId: string;
+    observation: MemoryObservationInput;
+    expectedFrontier: MemoryObserverCursor | null;
+    nextFrontier: MemoryObserverCursor;
+  }): Promise<string | null>;
   // POST-MVP Phase 2 (Reflector). Read a scope's ACTIVE observations so the
   // background Reflector can merge them into a stable reflection. Two read
   // shapes: a THREAD scope returns that thread's rows (inject/observer); a
@@ -802,6 +833,8 @@ export interface MemoryStore {
   // that id (the Reflector's target read — a project reflection covers the whole
   // project). Never cross-project, never cross-account.
   listObservations(scope: ReflectionScope): Promise<Observation[]>;
+  // Newest active observations only, returned oldest-first for deterministic merge.
+  listActiveObservationsBounded?(scope: ReflectionScope, limit: number): Promise<Observation[]>;
   // Injection reads observations in priority order, one bounded page at a time.
   // This is deliberately separate from listObservations: reflector/admin callers
   // need the complete scope, while request-time injection must not allocate it.
@@ -943,6 +976,10 @@ export interface MemoryStore {
   // Empty id lists are a no-op. OPTIONAL (`?`): additive + gated, same contract as
   // listScorableObservations / bumpReferences.
   archiveObservations?(input: { accountId: string; ids: string[]; now: Date }): Promise<void>;
+  // Production adapters atomically enqueue reflector rebuilds for the exact
+  // scopes affected by archiveObservations. Older adapters may omit this marker;
+  // decay retains the bounded account-scan fallback for them.
+  readonly archiveObservationsEnqueuesReflectors?: true;
   // docs/12 P5 trigger — the buffer-flush gate, run OFF the request path (the worker
   // tick, never per request). Return the account ids DUE for a decay sweep: an account
   // owning ≥1 active observation that EITHER has accumulated ≥ `triggerObservations`
@@ -966,7 +1003,7 @@ export interface MemoryStore {
   //     ACTIVE reflection for the account, so the decay job can enqueue ONE reflector
   //     rebuild per scope (the rebuild re-merges the now-reduced active set, dropping
   //     forgotten content; the open-job dedupe collapses duplicates).
-  listActiveReflectionScopes?(accountId: string): Promise<ReflectionScope[]>;
+  listActiveReflectionScopes?(accountId: string, limit?: number): Promise<ReflectionScope[]>;
   //   - archiveReflections: soft-invalidate (status='archived') EVERY reflection
   //     version of a scope. Called by the Reflector when a scope's active observation
   //     set is EMPTY (everything decayed) — getReflection then returns null, so the

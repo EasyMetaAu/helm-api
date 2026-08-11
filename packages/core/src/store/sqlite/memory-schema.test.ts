@@ -199,6 +199,13 @@ describe("sqlite memory schema + migrations", () => {
     expect(
       (await store.listMessages({ accountId: "o1", threadId: "t1" })).map((m) => m.content),
     ).toEqual([content, "legacy text"]);
+    db.$sqlite
+      .prepare(
+        `UPDATE memory_threads
+            SET observer_frontier_at = 2000, observer_frontier_id = 'legacy-message'
+          WHERE id = 't1'`,
+      )
+      .run();
     expect((await store.selectMessagesOlderThan(3_000, 10)).map((m) => m.content).sort()).toEqual(
       [content, "legacy text"].sort(),
     );

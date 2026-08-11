@@ -26,6 +26,10 @@ export const memoryThreads = sqliteTable("memory_threads", {
   lastMessageAt: integer("last_message_at", { mode: "timestamp_ms" }),
   observationCount: integer("observation_count").notNull().default(0),
   lastObservationAt: integer("last_observation_at", { mode: "timestamp_ms" }),
+  // Durable keyset frontier for bounded Observer reads. Legacy rows are
+  // checkpointed at migration time; new rows advance only with an observation.
+  observerFrontierAt: integer("observer_frontier_at", { mode: "timestamp_ms" }),
+  observerFrontierId: text("observer_frontier_id"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });

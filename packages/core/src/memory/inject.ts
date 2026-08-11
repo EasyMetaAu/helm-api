@@ -478,7 +478,7 @@ export async function assembleInjectedContext(
   keptFacts.sort(
     (a, b) => a.validFrom.getTime() - b.validFrom.getTime() || a.id.localeCompare(b.id),
   );
-  const keptFactTexts = keptFacts.map((f) => `- ${f.factText}`);
+  let keptFactTexts = keptFacts.map((f) => `- ${f.factText}`);
   const factTokens = keptFactTexts.reduce((sum, t) => sum + tokensOf(t), 0);
 
   // Observations get whatever the budget has left after the kept reflections. The
@@ -620,8 +620,8 @@ export async function assembleInjectedContext(
   keptEntries.sort(
     (a, b) => a.observation.observedAt.getTime() - b.observation.observedAt.getTime(),
   );
-  const keptObservationTexts = keptEntries.map((e) => e.text);
-  const keptObservationIds = keptEntries.map((e) => e.id);
+  let keptObservationTexts = keptEntries.map((e) => e.text);
+  let keptObservationIds = keptEntries.map((e) => e.id);
 
   // Signal a budget breach whenever the reflections alone would have exceeded the
   // cap — i.e. the budget actually forced a reflection drop. Surfacing it keeps the
@@ -638,12 +638,68 @@ export async function assembleInjectedContext(
   }
 
   // Assemble the final memory text block (null when no section has content).
-  const memoryBlock = buildMemoryBlock({
-    projectReflectionText: keptProjectReflectionText,
-    resourceReflectionText: keptResourceReflectionText,
-    factTexts: keptFactTexts,
-    observationTexts: keptObservationTexts,
-  });
+  const render = (): string | null =>
+    buildMemoryBlock({
+      projectReflectionText: keepProjectReflection ? keptProjectReflectionText : null,
+      resourceReflectionText: keepResourceReflection ? keptResourceReflectionText : null,
+      factTexts: keptFactTexts,
+      observationTexts: keptObservationTexts,
+    });
+  let memoryBlock = render();
+  let trimmedForHeaders = false;
+  while (memoryBlock !== null && tokensOf(memoryBlock) > input.tokenBudget) {
+    trimmedForHeaders = true;
+    if (keptEntries.length > 0) {
+      let dropIndex = 0;
+      if (forgettingOn && deps.forgetting?.dropOrder === "score") {
+        try {
+          const scoreConfig = deps.forgetting.scoreConfig;
+          const scoreNow = deps.now();
+          let lowest = Number.POSITIVE_INFINITY;
+          for (const [index, entry] of keptEntries.entries()) {
+            const score = forgettingScore(
+              {
+                referencedAt: entry.observation.referencedAt ?? null,
+                fallbackTs: entry.observation.observedAt,
+                referenceCount: entry.observation.referenceCount ?? 0,
+                importance: entry.observation.importance ?? 0.5,
+              },
+              scoreConfig,
+              scoreNow,
+            );
+            if (score < lowest) {
+              lowest = score;
+              dropIndex = index;
+            }
+          }
+        } catch {
+          dropIndex = 0;
+        }
+      }
+      keptEntries.splice(dropIndex, 1);
+      keptObservationTexts = keptEntries.map((entry) => entry.text);
+      keptObservationIds = keptEntries.map((entry) => entry.id);
+    } else if (keptFacts.length > 0) {
+      keptFacts.shift();
+      keptFactTexts = keptFacts.map((fact) => `- ${fact.factText}`);
+    } else if (keepResourceReflection) {
+      keepResourceReflection = false;
+    } else if (keepProjectReflection) {
+      keepProjectReflection = false;
+    } else {
+      memoryBlock = null;
+      break;
+    }
+    memoryBlock = render();
+  }
+  if (trimmedForHeaders) {
+    deps.log("memory.inject.budget_overflow", {
+      scope: input.scope,
+      token_budget: input.tokenBudget,
+      rendered_tokens: memoryBlock === null ? 0 : tokensOf(memoryBlock),
+      reason: "rendered_headers",
+    });
+  }
 
   // memory_tokens_injected = estimated tokens of the FINAL block string.
   const memoryTokensInjected = memoryBlock !== null ? tokensOf(memoryBlock) : 0;

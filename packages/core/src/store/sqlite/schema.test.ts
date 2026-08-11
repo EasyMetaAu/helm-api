@@ -32,6 +32,53 @@ describe("sqlite schema + migrations", () => {
     }
   });
 
+  it("v49 reconciles stale Memory counters and checkpoints legacy raw history", () => {
+    const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v49-memory-frontier-"));
+    const path = join(dir, "helm.db");
+    try {
+      runMigrations(path);
+      const seed = new Database(path);
+      seed.exec(`
+        INSERT INTO memory_threads (
+          id, owner_id, message_count, last_message_at,
+          observation_count, created_at, updated_at
+        ) VALUES ('t', 'a', 999, 9999, 999, 1, 1);
+        INSERT INTO memory_messages (
+          id, thread_id, role, content, token_estimate, created_at
+        ) VALUES ('m1', 't', 'user', 'one', 1, 1000),
+                 ('m2', 't', 'assistant', 'two', 1, 2000);
+        INSERT INTO memory_observations (
+          id, thread_id, source_message_range, observation_text, observed_at
+        ) VALUES ('o1', 't', '["m1","m2"]', 'summary', 3000);
+        DELETE FROM _migrations WHERE version = 49;
+      `);
+      seed.close();
+
+      runMigrations(path);
+
+      const after = new Database(path);
+      expect(
+        after
+          .prepare(
+            `SELECT message_count, last_message_at, observation_count,
+                    last_observation_at, observer_frontier_at, observer_frontier_id
+               FROM memory_threads WHERE id = 't'`,
+          )
+          .get(),
+      ).toEqual({
+        message_count: 2,
+        last_message_at: 2000,
+        observation_count: 1,
+        last_observation_at: 3000,
+        observer_frontier_at: 2000,
+        observer_frontier_id: "m2",
+      });
+      after.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("upgrades a real pre-unique-index memory_jobs table with duplicate open jobs", () => {
     const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v13-memory-jobs-"));
     const path = join(dir, "helm.db");

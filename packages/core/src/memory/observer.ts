@@ -12,9 +12,13 @@ import type { ExtractedFact } from "./reflector.js";
 // consolidate.max_facts_per_subject schema default — used when the composition root
 // wires the eager extractor without an explicit cap.
 const DEFAULT_MAX_FACTS_PER_SUBJECT = 8;
-// ponytail: skip oversized legacy histories; replace with cursor paging when they must compact.
+// Legacy fakes/adapters retain the old guard. Production adapters use the bounded
+// keyset page below and never materialize a whole thread.
 const MAX_OBSERVER_THREAD_MESSAGES = 4_096;
 const MAX_OBSERVER_THREAD_OBSERVATIONS = 512;
+const OBSERVER_PAGE_MESSAGES = 512;
+const OBSERVER_PAGE_BYTES = 1 * 1024 * 1024;
+const OBSERVER_PAGE_TOKENS = 64 * 1024;
 
 // Salient-fact fast path (salient-fact-memory-spec Change A). Mine the thread's
 // UNCOVERED raw turns for durable facts and persist them at the thread's
@@ -356,9 +360,13 @@ export async function runObserverJob(
         : await deps.memoryStore
             .getThreadMeta({ accountId: job.accountId, threadId: job.threadId })
             .catch(() => null);
+    const bounded =
+      deps.memoryStore.listObserverMessagesPage !== undefined &&
+      deps.memoryStore.appendObservationAndAdvanceFrontier !== undefined;
     if (
-      (readMeta?.messageCount ?? 0) > MAX_OBSERVER_THREAD_MESSAGES ||
-      (readMeta?.observationCount ?? 0) > MAX_OBSERVER_THREAD_OBSERVATIONS
+      !bounded &&
+      ((readMeta?.messageCount ?? 0) > MAX_OBSERVER_THREAD_MESSAGES ||
+        (readMeta?.observationCount ?? 0) > MAX_OBSERVER_THREAD_OBSERVATIONS)
     ) {
       await deps.memoryStore.updateJobStatus(job.jobId, "done");
       deps.log("memory.observer.history_skipped", {
@@ -368,19 +376,32 @@ export async function runObserverJob(
       });
       return { observationId: null, sourceMessageRange: null };
     }
-    const all = await deps.memoryStore.listMessages({
-      accountId: job.accountId,
-      threadId: job.threadId,
-    });
+    const observerPage = bounded
+      ? await deps.memoryStore.listObserverMessagesPage?.({
+          accountId: job.accountId,
+          threadId: job.threadId,
+          limit: OBSERVER_PAGE_MESSAGES,
+          maxBytes: OBSERVER_PAGE_BYTES,
+          maxTokens: OBSERVER_PAGE_TOKENS,
+        })
+      : undefined;
+    const all =
+      observerPage?.messages ??
+      (await deps.memoryStore.listMessages({
+        accountId: job.accountId,
+        threadId: job.threadId,
+      }));
     // The snapshot frontier: the message ids THIS run can see. A turn that lands
     // after this read — coalesced into this still-running job by the open-job unique
     // index — is invisible here. The completion re-check compares against this set so
     // the lost turn gets a fresh job (see maybeReenqueueForLateMessages).
     const snapshotMessageIds = new Set(all.map((m) => m.id));
-    const existing = await deps.memoryStore.listObservations({
-      accountId: job.accountId,
-      threadId: job.threadId,
-    });
+    const existing = bounded
+      ? []
+      : await deps.memoryStore.listObservations({
+          accountId: job.accountId,
+          threadId: job.threadId,
+        });
     const covered = alreadyObservedMessageIds(
       all,
       existing.map((o) => o.sourceMessageRange),
@@ -404,7 +425,9 @@ export async function runObserverJob(
     // can share ONE plain-scope open-job lock per thread (no overlap hazard).
     const nowMs = deps.now().getTime();
     const newestMessageMs = all.reduce((max, m) => Math.max(max, m.createdAt.getTime()), 0);
-    const idle = all.length > 0 && nowMs - newestMessageMs >= tunables.idleFlushS * 1000;
+    const idle =
+      observerPage?.hasMore === true ||
+      (all.length > 0 && nowMs - newestMessageMs >= tunables.idleFlushS * 1000);
     // Context-pressure footprint = the ACTIVE prompt size, not the full raw audit
     // history. Inject suppresses covered raw messages (they are represented by
     // their observation), so a thread compacted once would otherwise keep
@@ -468,7 +491,7 @@ export async function runObserverJob(
       // No compaction this run → mine the uncovered turns for durable facts.
       await maybeEagerExtractFacts(job, all, covered, deps);
       await deps.memoryStore.updateJobStatus(job.jobId, "done");
-      await maybeReenqueueForLateMessages(job, snapshotMessageIds, deps);
+      if (!bounded) await maybeReenqueueForLateMessages(job, snapshotMessageIds, deps);
       const lastDecision = decisions.at(-1)?.decision;
       deps.log("memory.observer.noop_compaction_skipped", {
         thread_id: job.threadId,
@@ -488,7 +511,7 @@ export async function runObserverJob(
       // no-compaction run, so the eager fact pass applies.
       await maybeEagerExtractFacts(job, all, covered, deps);
       await deps.memoryStore.updateJobStatus(job.jobId, "done");
-      await maybeReenqueueForLateMessages(job, snapshotMessageIds, deps);
+      if (!bounded) await maybeReenqueueForLateMessages(job, snapshotMessageIds, deps);
       deps.log("memory.observer.noop_no_old_messages", { thread_id: job.threadId });
       return { observationId: null, sourceMessageRange: null };
     }
@@ -526,7 +549,7 @@ export async function runObserverJob(
     }
     const sourceMessageRange: [string, string] = [first.id, last.id];
 
-    const observationId = await deps.memoryStore.appendObservation({
+    const observationInput = {
       threadId: job.threadId,
       sourceMessageRange,
       observationText,
@@ -534,13 +557,43 @@ export async function runObserverJob(
       ...(priority !== undefined ? { priority } : {}),
       ...(importance !== undefined ? { importance } : {}),
       ...(tags !== undefined ? { tags } : {}),
-    });
+    };
+    const observationId = bounded
+      ? await deps.memoryStore.appendObservationAndAdvanceFrontier?.({
+          accountId: job.accountId,
+          observation: observationInput,
+          expectedFrontier: observerPage?.expectedFrontier ?? null,
+          nextFrontier: {
+            createdAtMs: last.createdAt.getTime(),
+            id: last.id,
+          },
+        })
+      : await deps.memoryStore.appendObservation(observationInput);
+    if (observationId == null) {
+      await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      deps.log("memory.observer.frontier_stale", { thread_id: job.threadId });
+      return { observationId: null, sourceMessageRange: null };
+    }
 
     // Book Observer tokens into their OWN bucket — never the provider/actor one.
     deps.costSink("observer", estimateObserverTokens(compressed, observationText));
 
     await deps.memoryStore.updateJobStatus(job.jobId, "done");
-    await maybeReenqueueForLateMessages(job, snapshotMessageIds, deps);
+    if (bounded) {
+      if (observerPage?.hasMore === true || compressed.length < all.length) {
+        await deps.memoryStore.enqueueJob({
+          type: "observer",
+          scope: {
+            accountId: job.accountId,
+            threadId: job.threadId,
+            ...(job.projectId !== undefined ? { projectId: job.projectId } : {}),
+            ...(job.resourceId !== undefined ? { resourceId: job.resourceId } : {}),
+          },
+        });
+      }
+    } else {
+      await maybeReenqueueForLateMessages(job, snapshotMessageIds, deps);
+    }
     deps.log("memory.observer.compressed", {
       thread_id: job.threadId,
       observation_id: observationId,

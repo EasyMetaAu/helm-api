@@ -1331,6 +1331,59 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // Bounded Memory Observer v2. created_at+id is the server-assigned stable
+    // order; request-local message_index remains ingest dedup metadata only.
+    // Existing raw history is checkpointed instead of re-summarized under the
+    // old incorrect order. The same pass repairs parent counters after any
+    // out-of-band purge script that bypassed Store invariants.
+    version: 49,
+    run: (db) => {
+      if (!sqliteTableHasColumns(db, "memory_threads", ["id"])) return;
+      const columns = new Set(
+        (db.prepare("PRAGMA table_info(memory_threads)").all() as Array<{ name: string }>).map(
+          (column) => column.name,
+        ),
+      );
+      if (!columns.has("observer_frontier_at")) {
+        db.exec("ALTER TABLE memory_threads ADD COLUMN observer_frontier_at INTEGER");
+      }
+      if (!columns.has("observer_frontier_id")) {
+        db.exec("ALTER TABLE memory_threads ADD COLUMN observer_frontier_id TEXT");
+      }
+      if (!sqliteTableHasColumns(db, "memory_messages", ["thread_id", "created_at", "id"])) {
+        return;
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_memory_messages_thread_created_id
+          ON memory_messages (thread_id, created_at, id);
+        CREATE INDEX IF NOT EXISTS idx_memory_messages_created_id
+          ON memory_messages (created_at, id);
+        UPDATE memory_threads AS t
+           SET message_count = (SELECT COUNT(*) FROM memory_messages m WHERE m.thread_id = t.id),
+               last_message_at = (SELECT MAX(created_at) FROM memory_messages m WHERE m.thread_id = t.id),
+               observer_frontier_at = (
+                 SELECT created_at FROM memory_messages m
+                  WHERE m.thread_id = t.id ORDER BY created_at DESC, id DESC LIMIT 1
+               ),
+               observer_frontier_id = (
+                 SELECT id FROM memory_messages m
+                  WHERE m.thread_id = t.id ORDER BY created_at DESC, id DESC LIMIT 1
+               );
+      `);
+      if (sqliteTableHasColumns(db, "memory_observations", ["thread_id", "observed_at"])) {
+        db.exec(`
+          UPDATE memory_threads AS t
+             SET observation_count = (
+                   SELECT COUNT(*) FROM memory_observations o WHERE o.thread_id = t.id
+                 ),
+                 last_observation_at = (
+                   SELECT MAX(observed_at) FROM memory_observations o WHERE o.thread_id = t.id
+                 );
+        `);
+      }
+    },
+  },
 ];
 
 function sqliteTableHasColumns(

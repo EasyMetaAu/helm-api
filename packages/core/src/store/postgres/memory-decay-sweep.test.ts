@@ -30,8 +30,8 @@ describe("PgMemoryStore decay sweep", () => {
   it("lists only ACTIVE observations of the swept account and archives account-guarded", async () => {
     const now = new Date("2026-06-05T00:00:00.000Z");
     const { store } = await newStore(now);
-    await store.ensureThread({ id: "t-a", ownerId: "acct-a" });
-    await store.ensureThread({ id: "t-b", ownerId: "acct-b" });
+    await store.ensureThread({ id: "t-a", ownerId: "acct-a", projectId: "p-a" });
+    await store.ensureThread({ id: "t-b", ownerId: "acct-b", projectId: "p-b" });
     const obsA = await store.appendObservation({
       threadId: "t-a",
       sourceMessageRange: ["m1", "m2"],
@@ -61,6 +61,13 @@ describe("PgMemoryStore decay sweep", () => {
     await store.archiveObservations({ accountId: "acct-a", ids: [obsA, obsB], now: archivedAt });
     expect(await store.listScorableObservations({ accountId: "acct-a" })).toEqual([]); // archived → gone
     expect(await store.listScorableObservations({ accountId: "acct-b" })).toHaveLength(1); // untouched
+    expect(await store.claimPendingJobs(10)).toEqual([
+      {
+        jobId: expect.any(String),
+        type: "reflector",
+        scope: { accountId: "acct-a", projectId: "p-a" },
+      },
+    ]);
   });
 
   // docs/12 (Codex review fix II — starvation; pg mirror) — with `candidates` the

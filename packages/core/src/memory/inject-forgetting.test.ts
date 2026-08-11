@@ -127,7 +127,7 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4), trailing-remin
       { bumpReferences },
     );
     // Budget forces a single observation through → legacy oldest-first keeps "newer".
-    const out = await assembleInjectedContext(baseInput({ tokenBudget: 1 }), makeDeps(store));
+    const out = await assembleInjectedContext(baseInput({ tokenBudget: 11 }), makeDeps(store));
 
     expect(injectedObservationIds(out.memoryBlock, ["older", "newer"])).toEqual(["newer"]);
     expect(bumpReferences).not.toHaveBeenCalled(); // no reinforcement when flag off
@@ -148,7 +148,7 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4), trailing-remin
       ],
       { bumpReferences },
     );
-    const out = await assembleInjectedContext(baseInput({ tokenBudget: 1 }), {
+    const out = await assembleInjectedContext(baseInput({ tokenBudget: 11 }), {
       ...makeDeps(store),
       forgetting: forgetting({ enabled: false, bumpReferences }),
     });
@@ -174,7 +174,7 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4), trailing-remin
       }),
     ]);
     // Budget allows exactly one observation token.
-    const out = await assembleInjectedContext(baseInput({ tokenBudget: 1 }), {
+    const out = await assembleInjectedContext(baseInput({ tokenBudget: 11 }), {
       ...makeDeps(store),
       forgetting: forgetting(),
     });
@@ -196,7 +196,7 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4), trailing-remin
         },
       }) as ScoreConfig,
     });
-    const out = await assembleInjectedContext(baseInput({ tokenBudget: 1 }), {
+    const out = await assembleInjectedContext(baseInput({ tokenBudget: 11 }), {
       ...makeDeps(store, { log }),
       forgetting: poisoned,
     });
@@ -238,8 +238,8 @@ describe("assembleInjectedContext — forgetting gated (P3 + P4), trailing-remin
       ],
       { bumpReferences },
     );
-    // drop_order=oldest so the trim is deterministic regardless of score; budget = 1.
-    await assembleInjectedContext(baseInput({ tokenBudget: 1 }), {
+    // drop_order=oldest so the trim is deterministic regardless of score.
+    await assembleInjectedContext(baseInput({ tokenBudget: 11 }), {
       ...makeDeps(store),
       forgetting: forgetting({ dropOrder: "oldest", bumpReferences }),
     });

@@ -138,11 +138,16 @@ export async function runReflectorJob(
     // only the promoting thread's observations would make the project reflection
     // last-writer-wins per thread.
     const target = reflectionTargetScope(job.scope);
+    const boundedRead = deps.memoryStore.listActiveObservationsBounded;
     const observationCount =
       deps.memoryStore.getObservationCount === undefined
         ? null
         : await deps.memoryStore.getObservationCount(target);
-    if (observationCount !== null && observationCount > MAX_REFLECTOR_OBSERVATIONS) {
+    if (
+      boundedRead === undefined &&
+      observationCount !== null &&
+      observationCount > MAX_REFLECTOR_OBSERVATIONS
+    ) {
       await deps.memoryStore.updateJobStatus(job.jobId, "done");
       deps.log("memory.reflector.history_skipped", {
         scope: job.scope,
@@ -159,7 +164,10 @@ export async function runReflectorJob(
     // resurrecting through the back door. Filter here, unconditionally: with
     // forgetting OFF every row is `active` so this is a pure no-op (byte-identical
     // to today); with it ON, hidden rows stay hidden everywhere, not just in inject.
-    const allObservations = await deps.memoryStore.listObservations(target);
+    const allObservations =
+      boundedRead === undefined
+        ? await deps.memoryStore.listObservations(target)
+        : await boundedRead.call(deps.memoryStore, target, MAX_REFLECTOR_OBSERVATIONS);
     const observations = allObservations.filter(
       (o) => (o.status ?? "active") === "active" && (o.expiredAt ?? null) === null,
     );
@@ -204,7 +212,9 @@ export async function runReflectorJob(
     const now = deps.now();
     const { reflectionText, tokenEstimate } = await deps.merge({
       observations,
-      previousReflection,
+      // Forgetting rebuilds from the active bounded set only. Feeding the stale
+      // reflection back into the model can resurrect archived content.
+      previousReflection: deps.forgetting?.enabled === true ? null : previousReflection,
       now,
     });
 

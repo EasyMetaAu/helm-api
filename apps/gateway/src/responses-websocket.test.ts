@@ -1121,6 +1121,40 @@ describe("Responses websocket bridge", () => {
     expect(cancelled).toBe(true);
   });
 
+  it("cancels an upstream stream whose SSE frame exceeds the configured bound", async () => {
+    let cancelled = false;
+    const baseUrl = await startBridge(
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(`data: ${"x".repeat(128)}`));
+            },
+            cancel() {
+              cancelled = true;
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+      undefined,
+      { maxSseFrameBytes: 64 },
+    );
+    const socket = await connect(`${baseUrl}/v1/responses`);
+
+    const events = await collectTurn(socket, {
+      type: "response.create",
+      model: "gpt-5.6-sol",
+      input: [],
+      stream: true,
+    });
+
+    expect(events.at(-1)).toMatchObject({
+      type: "error",
+      error: { code: "websocket_bridge_error" },
+    });
+    expect(cancelled).toBe(true);
+  });
+
   it("stops at the terminal event and cancels the internal HTTP stream", async () => {
     let cancelled = false;
     let trailingTimer: ReturnType<typeof setTimeout> | null = null;

@@ -69,6 +69,8 @@ export interface ResponsesWebSocketBridgeOptions {
   maxPayloadBytes?: number;
   /** Optional test/embedding limit for pending authenticated upgrades. */
   maxPreflightRequests?: number;
+  /** Optional test/embedding limit for one upstream SSE frame. */
+  maxSseFrameBytes?: number;
   preflightTimeoutMs?: number;
   /** Optional test/embedding limit for an inactive Responses websocket session. */
   idleSessionTimeoutMs?: number;
@@ -335,6 +337,7 @@ async function forwardResponse(
   sessionId: string,
   sessionProof: string | undefined,
   materialized: () => void,
+  maxSseFrameBytes: number,
 ): Promise<boolean> {
   const headers = normalizedFetchHeaders(request);
   headers.set("accept", "text/event-stream");
@@ -369,7 +372,7 @@ async function forwardResponse(
   }
 
   let terminalType: unknown;
-  for await (const frame of readSSE(body)) {
+  for await (const frame of readSSE(body, maxSseFrameBytes)) {
     const payload = websocketPayload(frame.event, frame.data);
     if (payload === null) continue;
     await sendText(socket, payload);
@@ -516,6 +519,7 @@ export function installResponsesWebSocketBridge({
   ingressAdmission,
   maxPayloadBytes,
   maxPreflightRequests,
+  maxSseFrameBytes,
   preflightTimeoutMs,
   idleSessionTimeoutMs,
 }: ResponsesWebSocketBridgeOptions): ResponsesWebSocketBridge {
@@ -540,6 +544,10 @@ export function installResponsesWebSocketBridge({
   const websocketMaxPreflightRequests = Math.max(
     1,
     Math.floor(maxPreflightRequests ?? DEFAULT_MAX_PREFLIGHT_REQUESTS),
+  );
+  const websocketMaxSseFrameBytes = Math.max(
+    1,
+    Math.floor(maxSseFrameBytes ?? memoryBudget.responseCaptureBytes),
   );
   const websocketIdleSessionTimeoutMs = Math.max(
     1,
@@ -640,6 +648,7 @@ export function installResponsesWebSocketBridge({
             sessionId,
             sessionProof,
             acquired.lease.materialized,
+            websocketMaxSseFrameBytes,
           );
           if (invalidatesSession) {
             socket.close(1000, "upstream session reset");
