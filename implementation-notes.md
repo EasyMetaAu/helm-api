@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-08-11 · Admin Memory 范围分页与 Key 点查（Admin / Store，docs/11/13，原则 1/7）
+
+- **分页契约**：`/admin/api/memory/scopes` 采用与 facts/reflections 一致的 `{ rows, total }` 响应；默认 50、最大 200。SQLite/Postgres 都在聚合结果上执行服务端 `LIMIT/OFFSET`，并以 scope tuple 作为 `lastUpdated` 并列时的稳定次序，避免翻页重复或遗漏。
+- **加载边界**：Memory 首屏只并发加载第一批 scopes 与轻量 stats；完整 redacted key 列表仅在用户打开 By Key 时加载。`?key=` 深链直接走单 key 解析，不为校验一个 id 扫描全部 keys。
+- **Store 取舍**：`KeyStore` 新增按不可变 `key_id` 的 `getById`，SQLite/Postgres 使用索引点查，缓存包装器只透传；不缓存 admin 低频 id 查询，也不改变全局 Keys 页面既有列表契约。
+
 ## 2026-08-11 · Memory 大线程有界形成与遗忘原子性（Memory Observer / Reflector / cleanup，docs/08/12，原则 3/7）
 
 - **生产根因**：2026-07-29 的外部 purge 脚本重建 `memory_messages` 却未重算 `memory_threads.message_count/last_message_at`，Admin 因此把约 18.5 万真实 raw 行显示成约 208 万；三天 cleanup 实际有效。真正的 OOM 路径是 Observer/Reflector/注入及部分 cleanup 会一次物化大线程/大结果，pure `observe` 又不直接形成 observation，最大线程累积到 51,116 行。
@@ -76,20 +82,11 @@
 - **测试**：三向锁定——翻译 strip 到 generic xai（mutation `provider_raw_stripped_for_target`）+ 非 generic Codex-official 保留 + 同协议 passthrough strip（mutation `context_management_stripped_for_generic`）。execute.test.ts 169 全绿；execute/pipeline/responses/core-responses 合计 539 全绿。
 - **遗留**：allowlist 里 `text`/`reasoning_config`/`truncation`/`logit_bias`/`include`/`responses_tools`/`container` 等对 generic provider 是否有同类 array/object 形状风险，Codex 抽查未确认第二例，未逐一核；本次只修实测触发的 `context_management`。
 
-## 2026-08-07 · OAuth 账号「限流后继续用剩余点数」每账号开关（OAuth pool / account settings，docs/06，原则 3/6）
-
-- **需求**：账号周限 100%（`已限流`）但仍想榨干剩余点数——加一个每账号开关，开了就别把它从池里 park 掉。
-- **实现**：`AccountSettings.allowSpendRemainingCredits`（可选布尔）→ 合成时喂进 `OAuthPoolMember.allowSpendRemainingCredits` → pool 的 `usageLimited()` 首行：`if (member.allowSpendRemainingCredits) return false`。整条读侧只有这一处 gate（`eligibleEntries` 的 `!usageLimited`），所以一处 bypass 即全覆盖（chat/stream/native/responses/realtime 都走 `select()`）。
-- **刻意的边界**：只绕过**账号级 usage-limit park**（`usageLimitedUntilMs`）。model-scoped（`scopedRateLimits`）与 transient retryable（`retryableAccountFailures`）冷却**不动**——它们是不同轴，绕过会误伤。写侧（park 的记录）也不碰：账号真没预算时上游照样 429，pool 正常 in-pool failover 到兄弟账号，不会死循环打爆上游。
-- **拍板（AskUserQuestion）**：① 忽略**全部** usage-limit park（不只周限）；② **每账号**开关，跟 `autoReset`/`fastMode` 并列。开关对所有 OAuth provider 生效（非 Codex 专属），所以 ManageAccountDialog 里是无条件 toggle。
-- **布线**镜像 `autoReset`：account-settings → server 合成 → admin-oauth 的 `getAccountSchedule`/`setAccountSchedule` seam → deps.ts 三处类型（list-item / setAccountSchedule 入参 / `AccountScheduleView`）→ PUT 路由校验（非布尔 400）→ admin client `oauth.ts`（list-item 可选、schedule 必填，跟 `autoReset?`/`autoReset` 的可选/必填分裂一致）→ Svelte toggle + 3 条 i18n 串（7 语已对齐；`i18n:translate` 离线失败无碍，key 已由 `i18n:update` 填英文占位）。
-- **TDD**：pool.test 先加失败用例（parked 成员带 flag 仍应被选中→原本落到兄弟）→ Red→加 flag+bypass→Green（99/99）。admin-oauth/oauth 路由测试补 round-trip 与 400 校验。
-- **坑**：worktree 内编辑必须用 worktree 绝对路径——首次 Edit 误落主库（共享 checkout），已 `git checkout --` 干净回退后在 worktree 重做。
-
 - **2026-08-07 · 真实上游超长溢出链耗尽终态**：真实 `prompt is too long: N > M` 在链耗尽时胜出为客户端 400，但仍允许更大窗口候选继续 fallback；弱措辞只认结构化 error message，完整原文经 git history 回溯。
 
 ## 历史条目摘要（最新要点）
 
+- **2026-08-07 · OAuth 账号限流后继续用剩余点数**：每账号开关只绕过 usage-limit park，model-scoped 与 transient 冷却保持不变；完整原文经 git history 回溯。
 - **2026-08-07 · per-key `max_reasoning_effort` 上限**：统一三协议身份 caps 映射，避免内联副本漂移导致上限静默失效，完整原文经 git history 回溯。
 - **2026-08-06 · HALF_OPEN 探测锁释放与所有权令牌**：所有被允许的 provider/image 尝试都结算 breaker，HALF_OPEN abort 仅凭匹配的 probe token 释放对应探针，避免锁永久卡住或旧请求误清新探针；完整原文经 git history 回溯。
 - **2026-08-04 · per-key 请求内容存储覆盖优先级**：显式 `none`/`payload`/`session` 无条件覆盖实时全局设置，仅 `null`/`undefined` 继承；共享 capture helper 一处修复覆盖全部协议入口，完整原文经 git history 回溯。

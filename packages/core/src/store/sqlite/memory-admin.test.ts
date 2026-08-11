@@ -142,8 +142,9 @@ describe("SqliteMemoryStore.listMemoryScopes (docs/13)", () => {
       updatedAt: NOW,
     });
 
-    const scopes = await store.listMemoryScopes({ accountId: "a" });
-    const byProject = new Map(scopes.map((s) => [s.projectId, s]));
+    const scopes = await store.listMemoryScopes({ accountId: "a", limit: 50, offset: 0 });
+    const byProject = new Map(scopes.rows.map((s) => [s.projectId, s]));
+    expect(scopes.total).toBe(3);
     expect(byProject.get("p1")).toMatchObject({ factCount: 2, reflectionCount: 0 });
     expect(byProject.get("p2")).toMatchObject({ factCount: 0, reflectionCount: 1 });
     expect(byProject.get("p3")).toMatchObject({ factCount: 1, reflectionCount: 1 });
@@ -153,11 +154,17 @@ describe("SqliteMemoryStore.listMemoryScopes (docs/13)", () => {
     const { store } = newStore(NOW);
     await addFact(store, { accountId: "a", projectId: "p1", factText: "fa", now: NOW });
     await addFact(store, { accountId: "b", projectId: "p1", factText: "fb", now: NOW });
-    const onlyA = await store.listMemoryScopes({ accountId: "a" });
-    expect(onlyA).toHaveLength(1);
-    expect(onlyA[0]?.accountId).toBe("a");
-    const all = await store.listMemoryScopes({});
-    expect(all.map((s) => s.accountId).sort()).toEqual(["a", "b"]);
+    const onlyA = await store.listMemoryScopes({ accountId: "a", limit: 50, offset: 0 });
+    expect(onlyA.rows).toHaveLength(1);
+    expect(onlyA.rows[0]?.accountId).toBe("a");
+    const all = await store.listMemoryScopes({ limit: 1, offset: 1 });
+    expect(all.total).toBe(2);
+    expect(all.rows).toHaveLength(1);
+    expect(all.rows[0]?.accountId).toBe("b");
+    const beyond = await store.listMemoryScopes({ limit: 1, offset: 5 });
+    expect(beyond).toMatchObject({ rows: [], total: 2 });
+    const countOnly = await store.listMemoryScopes({ limit: 0, offset: 0 });
+    expect(countOnly).toMatchObject({ rows: [], total: 2 });
   });
 });
 

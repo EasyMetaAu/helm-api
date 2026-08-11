@@ -164,6 +164,7 @@ describe("bootstrapRootKey", () => {
       list: vi.fn().mockRejectedValue(new Error("db down")),
       createKey: vi.fn(),
       getByHash: vi.fn(),
+      getById: vi.fn(),
       disable: vi.fn(),
       deleteKey: vi.fn(),
       updateKey: vi.fn(),

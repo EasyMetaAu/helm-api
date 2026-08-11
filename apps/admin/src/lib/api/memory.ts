@@ -19,6 +19,12 @@ export interface MemoryScope {
   lastUpdated: string | null;
 }
 
+export interface MemoryScopeQuery {
+  accountId?: string;
+  limit?: number;
+  offset?: number;
+}
+
 // Lifecycle status shared by facts (active|archived|pruned) and reflections
 // (active|archived). 'pruned' never appears on a reflection.
 export type MemoryStatus = 'active' | 'archived' | 'pruned';
@@ -216,11 +222,13 @@ function queryString(params: Record<string, string | number | boolean | undefine
 }
 
 // GET /admin/api/memory/scopes -> one row per (account,project,resource,thread).
-export async function listScopes(accountId?: string): Promise<MemoryScope[]> {
-  const res = await fetch(`${BASE}/scopes${queryString({ accountId })}`, {
+export async function listScopes(
+  params: MemoryScopeQuery = {},
+): Promise<{ rows: MemoryScope[]; total: number }> {
+  const res = await fetch(`${BASE}/scopes${queryString({ ...params })}`, {
     headers: { accept: 'application/json' },
   });
-  return asJson<MemoryScope[]>(res);
+  return asJson<{ rows: MemoryScope[]; total: number }>(res);
 }
 
 // GET /admin/api/memory/by-key/:keyId -> the key's memory scope (account +

@@ -62,6 +62,10 @@ export function createCachedKeyStore(inner: KeyStore, opts: CachedKeyStoreOption
       return value;
     },
 
+    getById(keyId: string): Promise<ApiKeyRecord | null> {
+      return inner.getById(keyId);
+    },
+
     list(): Promise<ApiKeyRecord[]> {
       return inner.list();
     },

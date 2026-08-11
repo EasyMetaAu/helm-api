@@ -11,6 +11,8 @@ import MemoryPage from './+page.svelte';
 
 const listFacts = vi.fn();
 const listReflections = vi.fn();
+const listScopes = vi.fn();
+const listKeys = vi.fn();
 const getMemoryStats = vi.fn();
 const resolveKey = vi.fn();
 const createFact = vi.fn();
@@ -22,12 +24,16 @@ vi.mock('$lib/api/memory.js', () => ({
   getMemoryStats: (...args: unknown[]) => getMemoryStats(...args),
   listFacts: (...args: unknown[]) => listFacts(...args),
   listReflections: (...args: unknown[]) => listReflections(...args),
+  listScopes: (...args: unknown[]) => listScopes(...args),
   resolveKey: (...args: unknown[]) => resolveKey(...args),
   createFact: (...args: unknown[]) => createFact(...args),
   updateFact: (...args: unknown[]) => updateFact(...args),
   updateReflection: (...args: unknown[]) => updateReflection(...args),
   deleteFact: (...args: unknown[]) => deleteFact(...args),
   deleteReflection: (...args: unknown[]) => deleteReflection(...args),
+}));
+vi.mock('$lib/api/keys.js', () => ({
+  listKeys: (...args: unknown[]) => listKeys(...args),
 }));
 
 function scope(overrides: Partial<MemoryScope> = {}): MemoryScope {
@@ -152,7 +158,10 @@ function stats(overrides: Partial<MemoryStats> = {}): MemoryStats {
 }
 
 function renderPage(scopes: MemoryScope[], keys: ApiKeyView[] = [key('k1')]) {
-  return render(MemoryPage, { data: { scopes, keys, initialStats: stats() } });
+  listKeys.mockResolvedValue(keys);
+  return render(MemoryPage, {
+    data: { scopePage: { rows: scopes, total: scopes.length }, initialStats: stats() },
+  });
 }
 
 describe('memory page', () => {
@@ -160,6 +169,8 @@ describe('memory page', () => {
     localStorage.clear();
     listFacts.mockReset();
     listReflections.mockReset();
+    listScopes.mockReset();
+    listKeys.mockReset();
     getMemoryStats.mockReset();
     resolveKey.mockReset();
     createFact.mockReset();
@@ -169,6 +180,8 @@ describe('memory page', () => {
     deleteReflection.mockReset();
     listFacts.mockResolvedValue({ rows: [fact('f1'), fact('f2')], total: 2 });
     listReflections.mockResolvedValue({ rows: [reflection('r1')], total: 1 });
+    listScopes.mockResolvedValue({ rows: [], total: 0 });
+    listKeys.mockResolvedValue([key('k1')]);
     getMemoryStats.mockResolvedValue(stats());
     resolveKey.mockResolvedValue({ key_id: 'k1', accountId: 'acct', projectId: 'proj-a' });
   });
@@ -221,11 +234,13 @@ describe('memory page', () => {
 
   it('switching to the By Key tab shows a key selector and resolves a scope on pick', async () => {
     renderPage([scope()], [key('k1', { name: 'Prod backend' })]);
+    expect(listKeys).not.toHaveBeenCalled();
     await fireEvent.click(screen.getByRole('tab', { name: /by key/i }));
 
     const select = screen.getByLabelText(/^key$/i);
     expect(select).toBeInTheDocument();
-    expect(within(select).getByText('Prod backend')).toBeInTheDocument();
+    await waitFor(() => expect(within(select).getByText('Prod backend')).toBeInTheDocument());
+    expect(listKeys).toHaveBeenCalledTimes(1);
 
     await fireEvent.change(select, { target: { value: 'k1' } });
     await waitFor(() => expect(resolveKey).toHaveBeenCalledWith('k1'));
@@ -250,7 +265,10 @@ describe('memory page', () => {
   });
 
   it('delete on an ARCHIVED reflection warns it is permanent and purges it', async () => {
-    listReflections.mockResolvedValue({ rows: [reflection('r1', { status: 'archived' })], total: 1 });
+    listReflections.mockResolvedValue({
+      rows: [reflection('r1', { status: 'archived' })],
+      total: 1,
+    });
     deleteReflection.mockResolvedValue(undefined);
     renderPage([scope()]);
     await fireEvent.click(screen.getAllByTestId('scope-row')[0]);
@@ -272,7 +290,10 @@ describe('memory page', () => {
 
   it('deep link (initialKeyId) lands on the By Key tab pre-selected and loads that key', async () => {
     render(MemoryPage, {
-      data: { scopes: [scope()], keys: [key('k1', { name: 'Prod backend' })], initialKeyId: 'k1' },
+      data: {
+        scopePage: { rows: [scope()], total: 1 },
+        initialKeyId: 'k1',
+      },
     });
     // Opens on By Key (not the default By Scope) with the key resolved + facts loaded.
     await waitFor(() =>
@@ -284,14 +305,25 @@ describe('memory page', () => {
     await waitFor(() => expect(listFacts).toHaveBeenCalled());
   });
 
-  it('ignores an initialKeyId that is not in the key list (no crash, stays on By Scope)', async () => {
+  it('surfaces an unknown deep-linked key without loading every key first', async () => {
+    resolveKey.mockRejectedValue(new Error('key not found'));
     render(MemoryPage, {
-      data: { scopes: [scope()], keys: [key('k1')], initialKeyId: 'ghost' },
+      data: { scopePage: { rows: [scope()], total: 1 }, initialKeyId: 'ghost' },
     });
-    expect(screen.getByRole('tab', { name: /by scope/i }).getAttribute('aria-selected')).toBe(
-      'true',
-    );
-    expect(resolveKey).not.toHaveBeenCalled();
+    await waitFor(() => expect(resolveKey).toHaveBeenCalledWith('ghost'));
+    expect(listKeys).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent('key not found');
+  });
+
+  it('paginates scopes on demand', async () => {
+    listScopes.mockResolvedValue({ rows: [scope({ projectId: 'proj-b' })], total: 51 });
+    render(MemoryPage, {
+      data: { scopePage: { rows: [scope()], total: 51 }, initialStats: stats() },
+    });
+
+    await fireEvent.click(screen.getByTestId('scope-pager-next'));
+    await waitFor(() => expect(listScopes).toHaveBeenCalledWith({ limit: 50, offset: 50 }));
+    await waitFor(() => expect(screen.getByText('proj-b')).toBeInTheDocument());
   });
 
   it('renders Reflections ABOVE Facts (the overview comes first)', async () => {
@@ -301,9 +333,7 @@ describe('memory page', () => {
     // The reflection card must appear earlier in the DOM than the first fact row.
     const reflectionEl = screen.getByText('The user is a backend engineer working on a gateway.');
     const factEl = screen.getAllByText('User prefers blue')[0];
-    expect(reflectionEl.compareDocumentPosition(factEl)).toBe(
-      Node.DOCUMENT_POSITION_FOLLOWING,
-    );
+    expect(reflectionEl.compareDocumentPosition(factEl)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 
   it('exposes a Superseded status option that filters facts to status=superseded', async () => {

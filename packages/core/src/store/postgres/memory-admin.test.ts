@@ -63,8 +63,15 @@ describe("PgMemoryStore admin/MCP surface (docs/13)", () => {
       tokenEstimate: 1,
       updatedAt: NOW,
     });
-    const scopes = await store.listMemoryScopes({ accountId: "a" });
-    const byProject = new Map(scopes.map((s) => [s.projectId, s]));
+    const scopes = await store.listMemoryScopes({ accountId: "a", limit: 1, offset: 1 });
+    expect(scopes.total).toBe(2);
+    expect(scopes.rows).toHaveLength(1);
+    const beyond = await store.listMemoryScopes({ accountId: "a", limit: 1, offset: 5 });
+    expect(beyond).toMatchObject({ rows: [], total: 2 });
+    const countOnly = await store.listMemoryScopes({ accountId: "a", limit: 0, offset: 0 });
+    expect(countOnly).toMatchObject({ rows: [], total: 2 });
+    const allScopes = await store.listMemoryScopes({ accountId: "a", limit: 50, offset: 0 });
+    const byProject = new Map(allScopes.rows.map((s) => [s.projectId, s]));
     expect(byProject.get("p1")).toMatchObject({ factCount: 2, reflectionCount: 0 });
     expect(byProject.get("p2")).toMatchObject({ factCount: 0, reflectionCount: 1 });
     expect(byProject.get("p1")?.lastUpdated).toBeInstanceOf(Date);

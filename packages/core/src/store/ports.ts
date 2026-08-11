@@ -218,6 +218,8 @@ export interface KeyStore {
   // Used by the Auth Resolver. A disabled key is still returned (with
   // disabled:true) so the caller — not the store — decides to reject it.
   getByHash(hash: string): Promise<ApiKeyRecord | null>;
+  // Direct admin lookup by immutable key id. Never scan list() for one key.
+  getById(keyId: string): Promise<ApiKeyRecord | null>;
   // Used for bootstrap emptiness check / admin display. Never includes plaintext.
   list(): Promise<ApiKeyRecord[]>;
   // Soft revoke: set disabled=true. Never physically deletes, never rewrites
@@ -1281,7 +1283,11 @@ export interface MemoryStore {
   // reflections via a UNION of grouped subqueries (SQLite has no FULL OUTER JOIN);
   // reflections are guarded owner_id IS NOT NULL (nullable column — legacy/global
   // rows must never surface under an account).
-  listMemoryScopes?(input: { accountId?: string }): Promise<MemoryScopeSummary[]>;
+  listMemoryScopes?(input: {
+    accountId?: string;
+    limit: number;
+    offset: number;
+  }): Promise<{ rows: MemoryScopeSummary[]; total: number }>;
 
   // Operational snapshot for the admin Memory page. This is READ-ONLY
   // observability: queue depth, stale running leases, raw/derived row counts, and

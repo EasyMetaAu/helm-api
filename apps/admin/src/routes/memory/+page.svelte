@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
-  import type { ApiKeyView } from '$lib/api/keys.js';
+  import { listKeys, type ApiKeyView } from '$lib/api/keys.js';
   import {
     deleteFact,
     deleteReflection,
@@ -11,6 +11,7 @@
     getMemoryStats,
     listFacts,
     listReflections,
+    listScopes,
     type MemoryScope,
     type MemoryStats,
     type Reflection,
@@ -31,25 +32,33 @@
   // is a MANAGEMENT surface — it can show superseded/archived/pruned rows (status
   // filter) and soft-deletes (facts → pruned, reflections → archived) so an
   // operator can curate what the gateway remembers. Pure consumer of
-  // /admin/api/memory/* (CLAUDE.md Principle 1); the loader seeds scopes + keys,
-  // facts/reflections load on selection.
+  // /admin/api/memory/* (CLAUDE.md Principle 1); the loader seeds one scope page,
+  // while keys and facts/reflections load only on interaction.
   let {
     data,
   }: {
     data: {
-      scopes: MemoryScope[];
-      keys: ApiKeyView[];
+      scopePage: { rows: MemoryScope[]; total: number };
       initialStats?: MemoryStats;
       initialKeyId?: string | null;
     };
   } = $props();
 
-  const scopes = untrack(() => data.scopes);
-  const keys = untrack(() => data.keys);
+  const initialScopePage = untrack(() => data.scopePage);
   const initialStats = untrack(() => data.initialStats ?? null);
 
   type Tab = 'scope' | 'key';
   let tab = $state<Tab>('scope');
+
+  const SCOPE_PAGE_SIZE = 50;
+  let scopes = $state<MemoryScope[]>(initialScopePage.rows);
+  let scopesTotal = $state(initialScopePage.total);
+  let scopePage = $state(1);
+  let loadingScopes = $state(false);
+
+  let keys = $state<ApiKeyView[]>([]);
+  let keysLoaded = $state(false);
+  let loadingKeys = $state(false);
 
   // The scope currently selected (its facts/reflections fill the tables below).
   // accountId + project/resource/thread together address one memory scope; null
@@ -194,6 +203,39 @@
   // Pager: total pages from the server count, plus the number/ellipsis row.
   const factTotalPages = $derived(Math.max(1, Math.ceil(factsTotal / FACT_PAGE_SIZE)));
   const factPageItems = $derived(paginationItems(factPage, factTotalPages));
+
+  const scopeTotalPages = $derived(Math.max(1, Math.ceil(scopesTotal / SCOPE_PAGE_SIZE)));
+
+  async function goScopePage(n: number): Promise<void> {
+    if (n < 1 || n > scopeTotalPages || n === scopePage) return;
+    loadingScopes = true;
+    error = null;
+    try {
+      const page = await listScopes({ limit: SCOPE_PAGE_SIZE, offset: (n - 1) * SCOPE_PAGE_SIZE });
+      scopes = page.rows;
+      scopesTotal = page.total;
+      scopePage = n;
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t('Failed to load memory scopes');
+    } finally {
+      loadingScopes = false;
+    }
+  }
+
+  async function openKeyTab(): Promise<void> {
+    tab = 'key';
+    if (keysLoaded || loadingKeys) return;
+    loadingKeys = true;
+    error = null;
+    try {
+      keys = await listKeys();
+      keysLoaded = true;
+    } catch (e) {
+      error = e instanceof Error ? e.message : $t('Failed to load keys');
+    } finally {
+      loadingKeys = false;
+    }
+  }
 
   // Any change that alters the result set resets to page 1 before reloading.
   function reloadFactsFromFirstPage(): void {
@@ -364,11 +406,11 @@
   }
 
   // Deep link from a key's detail page (/memory?key=<keyId>): open on the By Key tab
-  // pre-selected to that key and load its memory — the same path as picking it from
-  // the dropdown. Ignored when the key isn't in the list (stale link / deleted key).
+  // pre-selected to that key and load its memory directly. Do not fetch every key
+  // merely to validate one id; the keyed route returns 404 for a stale link.
   onMount(() => {
     const id = data.initialKeyId;
-    if (id && keys.some((k) => k.key_id === id)) {
+    if (id) {
       tab = 'key';
       void pickKey(id);
     } else if (initialStats === null) {
@@ -533,12 +575,14 @@
       role="tab"
       aria-selected={tab === 'key'}
       class={tab === 'key' ? 'btn-primary-sm' : 'btn-secondary'}
-      onclick={() => (tab = 'key')}>{$t('By Key')}</button
+      onclick={() => void openKeyTab()}>{$t('By Key')}</button
     >
   </div>
 
   {#if tab === 'scope'}
-    {#if scopes.length === 0}
+    {#if loadingScopes}
+      <p class="section-desc">{$t('Loading…')}</p>
+    {:else if scopes.length === 0}
       <div class="empty-state">
         <p>{$t('No memory yet. The gateway forms facts and reflections as it serves traffic.')}</p>
       </div>
@@ -597,6 +641,27 @@
           </tbody>
         </table>
       </div>
+      {#if scopeTotalPages > 1}
+        <nav class="flex items-center justify-end gap-2" aria-label={$t('Pagination')}>
+          <button
+            type="button"
+            class="btn-secondary"
+            data-testid="scope-pager-prev"
+            disabled={scopePage === 1}
+            onclick={() => void goScopePage(scopePage - 1)}>{$t('Previous')}</button
+          >
+          <span data-testid="scope-pager-status" class="text-sm text-ink-muted">
+            {$t('Page {page} of {pages}', { page: scopePage, pages: scopeTotalPages })}
+          </span>
+          <button
+            type="button"
+            class="btn-secondary"
+            data-testid="scope-pager-next"
+            disabled={scopePage === scopeTotalPages}
+            onclick={() => void goScopePage(scopePage + 1)}>{$t('Next')}</button
+          >
+        </nav>
+      {/if}
     {/if}
   {:else}
     <div class="card flex flex-col gap-2">
@@ -606,9 +671,13 @@
         class="select"
         aria-label={$t('Key')}
         value={selectedKeyId}
+        onfocus={() => void openKeyTab()}
         onchange={(e) => pickKey((e.currentTarget as HTMLSelectElement).value)}
       >
         <option value="">{$t('Select a key…')}</option>
+        {#if selectedKeyId !== '' && !keys.some((key) => key.key_id === selectedKeyId)}
+          <option value={selectedKeyId}>{selectionLabel || selectedKeyId}</option>
+        {/if}
         {#each keys as key (key.key_id)}
           <option value={key.key_id}
             >{key.name && key.name.length > 0 ? key.name : key.prefix}</option

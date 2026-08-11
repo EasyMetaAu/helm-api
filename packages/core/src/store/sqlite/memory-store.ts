@@ -1891,13 +1891,17 @@ export class SqliteMemoryStore implements MemoryStore {
   // updatedAt. facts ⊎ reflections via a UNION of grouped subqueries (SQLite has
   // no FULL OUTER JOIN); reflections guarded owner_id IS NOT NULL (nullable
   // column). An optional accountId narrows to one tenant.
-  async listMemoryScopes(input: { accountId?: string }): Promise<MemoryScopeSummary[]> {
+  async listMemoryScopes(input: {
+    accountId?: string;
+    limit: number;
+    offset: number;
+  }): Promise<{ rows: MemoryScopeSummary[]; total: number }> {
     const acct = input.accountId ?? null;
-    const rows = this.db.$sqlite
-      .prepare(
-        `SELECT owner_id AS accountId, project_id AS projectId, resource_id AS resourceId,
+    const aggregateSql = `SELECT owner_id AS accountId, project_id AS projectId,
+                resource_id AS resourceId,
                 thread_id AS threadId,
-                SUM(fc) AS factCount, SUM(rc) AS reflectionCount, MAX(lu) AS lastUpdated
+                SUM(fc) AS factCount, SUM(rc) AS reflectionCount, MAX(lu) AS lastUpdated,
+                COUNT(*) OVER() AS total
            FROM (
              SELECT owner_id, project_id, resource_id, thread_id,
                     COUNT(*) AS fc, 0 AS rc, MAX(updated_at) AS lu
@@ -1913,10 +1917,17 @@ export class SqliteMemoryStore implements MemoryStore {
                 AND (? IS NULL OR owner_id = ?)
               GROUP BY owner_id, project_id, resource_id, thread_id
            )
-          GROUP BY owner_id, project_id, resource_id, thread_id
-          ORDER BY lastUpdated DESC`,
+          GROUP BY owner_id, project_id, resource_id, thread_id`;
+    const rows = this.db.$sqlite
+      .prepare(
+        `${aggregateSql}
+          ORDER BY lastUpdated DESC, accountId ASC,
+                   CASE WHEN projectId IS NULL THEN 0 ELSE 1 END, projectId ASC,
+                   CASE WHEN resourceId IS NULL THEN 0 ELSE 1 END, resourceId ASC,
+                   CASE WHEN threadId IS NULL THEN 0 ELSE 1 END, threadId ASC
+          LIMIT ? OFFSET ?`,
       )
-      .all(acct, acct, acct, acct) as Array<{
+      .all(acct, acct, acct, acct, input.limit, input.offset) as Array<{
       accountId: string;
       projectId: string | null;
       resourceId: string | null;
@@ -1924,16 +1935,29 @@ export class SqliteMemoryStore implements MemoryStore {
       factCount: number;
       reflectionCount: number;
       lastUpdated: number | null;
+      total: number;
     }>;
-    return rows.map((r) => ({
-      accountId: r.accountId,
-      projectId: r.projectId,
-      resourceId: r.resourceId,
-      threadId: r.threadId,
-      factCount: r.factCount,
-      reflectionCount: r.reflectionCount,
-      lastUpdated: r.lastUpdated !== null ? new Date(r.lastUpdated) : null,
-    }));
+    const total =
+      rows[0]?.total ??
+      (input.offset === 0 && input.limit > 0
+        ? 0
+        : (
+            this.db.$sqlite
+              .prepare(`SELECT COUNT(*) AS total FROM (${aggregateSql}) scopes`)
+              .get(acct, acct, acct, acct) as { total: number }
+          ).total);
+    return {
+      rows: rows.map((r) => ({
+        accountId: r.accountId,
+        projectId: r.projectId,
+        resourceId: r.resourceId,
+        threadId: r.threadId,
+        factCount: r.factCount,
+        reflectionCount: r.reflectionCount,
+        lastUpdated: r.lastUpdated !== null ? new Date(r.lastUpdated) : null,
+      })),
+      total,
+    };
   }
 
   async getMemoryAdminStats(

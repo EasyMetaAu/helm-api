@@ -24,6 +24,9 @@ function rec(keyId: string, hash: string): ApiKeyRecord {
 function makeInner(rows: Map<string, ApiKeyRecord | null> = new Map()): KeyStore {
   return {
     getByHash: vi.fn(async (hash: string) => rows.get(hash) ?? null),
+    getById: vi.fn(
+      async (keyId: string) => [...rows.values()].find((row) => row?.key_id === keyId) ?? null,
+    ),
     createKey: vi.fn(async (input: CreateKeyInput) => rec(input.keyId, input.hash)),
     list: vi.fn(async () => [...rows.values()].filter((r): r is ApiKeyRecord => r !== null)),
     disable: vi.fn(async (_keyId: string) => {}),
@@ -52,6 +55,16 @@ describe("createCachedKeyStore", () => {
     expect(a?.key_id).toBe("k1");
     expect(b).toEqual(a);
     expect(inner.getByHash).toHaveBeenCalledTimes(1);
+  });
+
+  it("delegates getById without scanning list", async () => {
+    const rows = new Map<string, ApiKeyRecord | null>([["h1", rec("k1", "h1")]]);
+    const inner = makeInner(rows);
+    const cached = createCachedKeyStore(inner, { ttlMs: 30_000, maxEntries: 100, now });
+
+    expect((await cached.getById("k1"))?.hash).toBe("h1");
+    expect(inner.getById).toHaveBeenCalledWith("k1");
+    expect(inner.list).not.toHaveBeenCalled();
   });
 
   it("caches a negative (null) result so an invalid-key flood does not hammer the DB", async () => {

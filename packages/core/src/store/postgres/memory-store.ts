@@ -1999,13 +1999,17 @@ export class PgMemoryStore implements MemoryStore {
 
   // Admin "By Scope" view. facts ⊎ reflections via a UNION of grouped subqueries
   // (kept for dialect parity with sqlite); reflections guarded owner_id IS NOT NULL.
-  async listMemoryScopes(input: { accountId?: string }): Promise<MemoryScopeSummary[]> {
+  async listMemoryScopes(input: {
+    accountId?: string;
+    limit: number;
+    offset: number;
+  }): Promise<{ rows: MemoryScopeSummary[]; total: number }> {
     const acct = input.accountId ?? null;
-    const result = (await this.db.execute(sql`
+    const aggregate = sql`
       SELECT owner_id AS "accountId", project_id AS "projectId", resource_id AS "resourceId",
              thread_id AS "threadId",
              SUM(fc)::bigint AS "factCount", SUM(rc)::bigint AS "reflectionCount",
-             MAX(lu)::bigint AS "lastUpdated"
+             MAX(lu)::bigint AS "lastUpdated", COUNT(*) OVER()::bigint AS total
         FROM (
           SELECT owner_id, project_id, resource_id, thread_id,
                  COUNT(*) AS fc, 0 AS rc, MAX(updated_at) AS lu
@@ -2020,20 +2024,44 @@ export class PgMemoryStore implements MemoryStore {
            WHERE status = 'active' AND owner_id IS NOT NULL
              AND (${acct}::text IS NULL OR owner_id = ${acct})
            GROUP BY owner_id, project_id, resource_id, thread_id
-        ) g
+       ) g
        GROUP BY owner_id, project_id, resource_id, thread_id
-       ORDER BY "lastUpdated" DESC
-    `)) as { rows?: ScopeAggRow[] } | ScopeAggRow[];
+    `;
+    const result = (await this.db.execute(sql`
+      ${aggregate}
+      ORDER BY MAX(lu) DESC, owner_id ASC,
+               CASE WHEN project_id IS NULL THEN 0 ELSE 1 END, project_id ASC,
+               CASE WHEN resource_id IS NULL THEN 0 ELSE 1 END, resource_id ASC,
+               CASE WHEN thread_id IS NULL THEN 0 ELSE 1 END, thread_id ASC
+      LIMIT ${input.limit} OFFSET ${input.offset}
+    `)) as
+      | { rows?: Array<ScopeAggRow & { total: number | string }> }
+      | Array<ScopeAggRow & { total: number | string }>;
     const rows = Array.isArray(result) ? result : (result.rows ?? []);
-    return rows.map((r) => ({
-      accountId: r.accountId,
-      projectId: r.projectId,
-      resourceId: r.resourceId,
-      threadId: r.threadId,
-      factCount: Number(r.factCount),
-      reflectionCount: Number(r.reflectionCount),
-      lastUpdated: r.lastUpdated !== null ? new Date(Number(r.lastUpdated)) : null,
-    }));
+    const total =
+      rows[0] !== undefined
+        ? Number(rows[0].total)
+        : input.offset === 0 && input.limit > 0
+          ? 0
+          : Number(
+              pgRows<{ total: number | string }>(
+                await this.db.execute(
+                  sql`SELECT COUNT(*)::bigint AS total FROM (${aggregate}) scopes`,
+                ),
+              )[0]?.total ?? 0,
+            );
+    return {
+      rows: rows.map((r) => ({
+        accountId: r.accountId,
+        projectId: r.projectId,
+        resourceId: r.resourceId,
+        threadId: r.threadId,
+        factCount: Number(r.factCount),
+        reflectionCount: Number(r.reflectionCount),
+        lastUpdated: r.lastUpdated !== null ? new Date(Number(r.lastUpdated)) : null,
+      })),
+      total,
+    };
   }
 
   async getMemoryAdminStats(

@@ -60,6 +60,9 @@ class InMemoryKeyStore implements KeyStore {
     }
     return null;
   }
+  async getById(keyId: string): Promise<ApiKeyRecord | null> {
+    return this.byId.get(keyId) ?? null;
+  }
   async list(): Promise<ApiKeyRecord[]> {
     return [...this.byId.values()];
   }
