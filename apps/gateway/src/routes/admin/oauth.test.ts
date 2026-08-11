@@ -194,11 +194,13 @@ describe("admin OAuth routes — read endpoints", () => {
   it("GET /oauth/usage/periods returns current reset summary + natural day/week history", async () => {
     const HOUR = 3_600_000;
     const DAY = 86_400_000;
-    // Current 5h reset window (real resetsAtMs in the future). Buckets span ~3 days so
-    // the calendar aggregation produces multiple day rows and at least one week row.
-    const reset = Date.now() + HOUR;
-    const buckets = Array.from({ length: 60 }, (_, i) => ({
-      bucketMs: reset - (60 - i) * HOUR, // last ~2.5 days of hourly buckets
+    const WEEK = 7 * DAY;
+    const now = Date.now();
+    const todayReset = now - HOUR;
+    const saturdayReset = todayReset - 3 * DAY;
+    const reset = todayReset + WEEK;
+    const buckets = Array.from({ length: 10 * 24 }, (_, i) => ({
+      bucketMs: now - (10 * 24 - i) * HOUR,
       requests: 1,
       tokens: 100,
       costUsd: null,
@@ -208,24 +210,41 @@ describe("admin OAuth routes — read endpoints", () => {
     } as unknown as AdminApiDeps["oauthUsage"];
     const oauthQuota = {
       get: vi.fn(async () => ({
-        providerId: "anthropic",
+        providerId: "openai-codex",
         account: "a@x.com",
-        windows: [{ key: "5h", usedPercent: 50, resetsAtMs: reset, windowMinutes: null }],
-        capturedAt: 0,
-        source: "anthropic",
+        windows: [{ key: "primary", usedPercent: 7, resetsAtMs: reset, windowMinutes: 10_080 }],
+        capturedAt: now,
+        source: "codex-headers",
         usageLimitedUntilMs: null,
-        resetCredits: null,
+        resetCredits: 0,
       })),
     } as unknown as AdminApiDeps["oauthQuota"];
     const oauthResetPeriod = {
+      // Current rows prove the end; the old writer stored the prior reset in the start.
       queryPeriods: vi.fn(async () => [
         {
-          providerId: "anthropic",
+          providerId: "openai-codex",
           account: "a@x.com",
-          windowKey: "5h",
-          periodStartMs: reset - 10 * HOUR,
-          periodEndMs: reset - 5 * HOUR,
-          detectedAtMs: reset - 5 * HOUR,
+          windowKey: "primary",
+          periodStartMs: saturdayReset + DAY,
+          periodEndMs: todayReset,
+          detectedAtMs: todayReset,
+        },
+        {
+          providerId: "openai-codex",
+          account: "a@x.com",
+          windowKey: "primary",
+          periodStartMs: saturdayReset,
+          periodEndMs: saturdayReset + WEEK,
+          detectedAtMs: saturdayReset + HOUR,
+        },
+        {
+          providerId: "openai-codex",
+          account: "a@x.com",
+          windowKey: "primary",
+          periodStartMs: saturdayReset - 4 * WEEK,
+          periodEndMs: saturdayReset - 3 * WEEK,
+          detectedAtMs: saturdayReset - 4 * WEEK + HOUR,
         },
       ]),
     } as unknown as AdminApiDeps["oauthResetPeriod"];
@@ -239,11 +258,11 @@ describe("admin OAuth routes — read endpoints", () => {
       oauthResetPeriod,
       settings,
     }).request(
-      "/admin/api/oauth/usage/periods?provider=anthropic&account=a%40x.com&tzOffsetMinutes=0",
+      "/admin/api/oauth/usage/periods?provider=openai-codex&account=a%40x.com&tzOffsetMinutes=0",
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      current: Array<{ windowKey: string; tokens: number }>;
+      current: Array<{ windowKey: string; periodStartMs: number; tokens: number }>;
       periods: Array<{ windowKey: string; periodStartMs: number; periodEndMs: number }>;
       daily: Array<{
         windowKey: string;
@@ -254,15 +273,27 @@ describe("admin OAuth routes — read endpoints", () => {
       }>;
       weekly: Array<{ windowKey: string; tokens: number; partial: boolean; periodEndMs: number }>;
     };
-    // current: the in-progress 5h reset window summary (exact resetsAtMs boundary).
+    // The newest row proves today's reset; the legacy row proves Saturday's reset.
     expect(body.current).toHaveLength(1);
-    expect(body.current[0]?.windowKey).toBe("5h");
+    expect(body.current[0]?.windowKey).toBe("primary");
+    expect(body.current[0]?.periodStartMs).toBe(todayReset);
     expect(body.current[0]?.tokens ?? 0).toBeGreaterThan(0);
-    expect(oauthResetPeriod?.queryPeriods).toHaveBeenCalledWith("anthropic", "a@x.com", "5h", 53);
+    expect(oauthResetPeriod?.queryPeriods).toHaveBeenCalledWith(
+      "openai-codex",
+      "a@x.com",
+      "primary",
+      53,
+    );
     expect(body.periods[0]).toMatchObject({
-      windowKey: "5h",
-      periodStartMs: reset - 10 * HOUR,
-      periodEndMs: reset - 5 * HOUR,
+      windowKey: "primary",
+      periodStartMs: saturdayReset,
+      periodEndMs: todayReset,
+      approximate: false,
+    });
+    expect(body.periods[1]).toMatchObject({
+      periodStartMs: saturdayReset - WEEK,
+      periodEndMs: saturdayReset,
+      approximate: true,
     });
     // daily: natural-day buckets, most recent first, each a 24h span, windowKey "day".
     expect(body.daily.length).toBeGreaterThanOrEqual(2);
@@ -276,9 +307,9 @@ describe("admin OAuth routes — read endpoints", () => {
     // weekly: at least one 7-day bucket, windowKey "week".
     expect(body.weekly.length).toBeGreaterThanOrEqual(1);
     expect(body.weekly[0]?.windowKey).toBe("week");
-    // token conservation: the day buckets cover ALL 60 hourly buckets (6000 tokens).
+    // token conservation: the day buckets cover all 240 hourly buckets.
     const dayTotal = body.daily.reduce((s, p) => s + p.tokens, 0);
-    expect(dayTotal).toBe(6000);
+    expect(dayTotal).toBe(24_000);
   });
 
   it("GET /oauth/usage/periods fails open to empty when the quota snapshot is missing", async () => {
