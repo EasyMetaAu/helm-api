@@ -36,6 +36,8 @@ describe("SqliteMemoryStore — thread model stamp", () => {
     // Never stamped → null alias (not a missing row).
     expect(await store.getThreadMeta({ accountId: "acct-a", threadId: "t1" })).toEqual({
       lastServedModel: null,
+      messageCount: 0,
+      observationCount: 0,
     });
 
     await store.stampThreadModel({
@@ -45,6 +47,8 @@ describe("SqliteMemoryStore — thread model stamp", () => {
     });
     expect(await store.getThreadMeta({ accountId: "acct-a", threadId: "t1" })).toEqual({
       lastServedModel: "anthropic/claude-x",
+      messageCount: 0,
+      observationCount: 0,
     });
 
     // A later turn served by a different model overwrites the stamp.
@@ -55,6 +59,8 @@ describe("SqliteMemoryStore — thread model stamp", () => {
     });
     expect(await store.getThreadMeta({ accountId: "acct-a", threadId: "t1" })).toEqual({
       lastServedModel: "openai/gpt-x",
+      messageCount: 0,
+      observationCount: 0,
     });
   });
 
@@ -68,6 +74,8 @@ describe("SqliteMemoryStore — thread model stamp", () => {
     });
     expect(await store.getThreadMeta({ accountId: "acct-a", threadId: "t1" })).toEqual({
       lastServedModel: null,
+      messageCount: 0,
+      observationCount: 0,
     });
     // Wrong-owner read → null (indistinguishable from an unknown thread).
     expect(await store.getThreadMeta({ accountId: "acct-b", threadId: "t1" })).toBeNull();

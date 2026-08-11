@@ -2,6 +2,7 @@ import type { Observation, Reflection, ReflectionScope } from "@helm/shared";
 import type { MemoryStore } from "../store/ports.js";
 import { buildReconciledFactBatch } from "./forgetting/facts.js";
 
+// ponytail: skip oversized legacy scopes; replace with bounded incremental merging when required.
 const MAX_REFLECTOR_OBSERVATIONS = 512;
 
 // Background Reflector (docs/08 Phase 2 "observational-memory MVP"). This is an OFF-the-main-

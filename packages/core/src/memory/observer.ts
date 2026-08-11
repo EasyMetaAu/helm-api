@@ -12,6 +12,7 @@ import type { ExtractedFact } from "./reflector.js";
 // consolidate.max_facts_per_subject schema default — used when the composition root
 // wires the eager extractor without an explicit cap.
 const DEFAULT_MAX_FACTS_PER_SUBJECT = 8;
+// ponytail: skip oversized legacy histories; replace with cursor paging when they must compact.
 const MAX_OBSERVER_THREAD_MESSAGES = 4_096;
 const MAX_OBSERVER_THREAD_OBSERVATIONS = 512;
 
