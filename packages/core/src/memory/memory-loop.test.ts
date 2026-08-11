@@ -206,7 +206,9 @@ describe("memory background loop (observer → reflector → inject)", () => {
         }),
     });
 
-    // Tick 1: both observers run + promote. Tick 2: the reflector(s) merge.
+    // concurrency=1 claims only immediately runnable capacity: two Observer ticks,
+    // then one Reflector tick aggregates both observations.
+    await vi.advanceTimersByTimeAsync(100);
     await vi.advanceTimersByTimeAsync(100);
     await vi.advanceTimersByTimeAsync(100);
     handle.stop();
