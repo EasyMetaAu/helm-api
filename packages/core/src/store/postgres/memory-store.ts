@@ -1811,20 +1811,41 @@ export class PgMemoryStore implements MemoryStore {
   }
 
   // Read half: the thread's stamped model alias, account-guarded.
-  async getThreadMeta(input: {
-    accountId: string;
-    threadId: string;
-  }): Promise<{ lastServedModel: string | null } | null> {
+  async getThreadMeta(input: { accountId: string; threadId: string }): Promise<{
+    lastServedModel: string | null;
+    messageCount: number;
+    observationCount: number;
+  } | null> {
     const result = (await this.db.execute(sql`
-      SELECT last_served_model
+      SELECT last_served_model, message_count, observation_count
         FROM memory_threads
        WHERE id = ${input.threadId} AND owner_id = ${input.accountId}
     `)) as unknown;
     const rows = (
       Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])
-    ) as Array<{ last_served_model: string | null }>;
+    ) as Array<{
+      last_served_model: string | null;
+      message_count: number;
+      observation_count: number;
+    }>;
     const row = rows[0];
-    return row === undefined ? null : { lastServedModel: row.last_served_model };
+    return row === undefined
+      ? null
+      : {
+          lastServedModel: row.last_served_model,
+          messageCount: Number(row.message_count),
+          observationCount: Number(row.observation_count),
+        };
+  }
+
+  async getObservationCount(scope: ReflectionScope): Promise<number> {
+    const where = observationScopeWhere(scope);
+    if (where === null) return 0;
+    const rows = await this.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(memoryObservations)
+      .where(where);
+    return Number(rows[0]?.n ?? 0);
   }
 
   // Idle-flush sweep candidates — pg mirror of the sqlite adapter. Idleness =

@@ -678,4 +678,22 @@ describe("runObserverJob — re-enqueue on a turn that arrives during the run", 
       thread_id: "thread-1",
     });
   });
+
+  it("does not materialize an oversized thread history", async () => {
+    const { store, jobUpdates } = makeFakeStore(makeShortThread());
+    store.getThreadMeta = vi.fn(async () => ({
+      lastServedModel: null,
+      messageCount: 4_097,
+      observationCount: 0,
+    }));
+    const deps = makeDeps(store);
+
+    await expect(runObserverJob(JOB, deps)).resolves.toEqual({
+      observationId: null,
+      sourceMessageRange: null,
+    });
+    expect(store.listMessages).not.toHaveBeenCalled();
+    expect(store.listObservations).not.toHaveBeenCalled();
+    expect(jobUpdates).toEqual([{ jobId: JOB.jobId, status: "done" }]);
+  });
 });

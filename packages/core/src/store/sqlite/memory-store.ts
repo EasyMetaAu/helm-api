@@ -2047,18 +2047,38 @@ export class SqliteMemoryStore implements MemoryStore {
 
   // Read half: the thread's stamped model alias, account-guarded. null row =
   // unknown thread; null alias = never stamped (the policy's heuristics apply).
-  async getThreadMeta(input: {
-    accountId: string;
-    threadId: string;
-  }): Promise<{ lastServedModel: string | null } | null> {
+  async getThreadMeta(input: { accountId: string; threadId: string }): Promise<{
+    lastServedModel: string | null;
+    messageCount: number;
+    observationCount: number;
+  } | null> {
     const row = this.db.$sqlite
       .prepare(
-        `SELECT last_served_model AS last_served_model
+        `SELECT last_served_model AS last_served_model,
+                message_count AS message_count,
+                observation_count AS observation_count
            FROM memory_threads
           WHERE id = ? AND owner_id = ?`,
       )
-      .get(input.threadId, input.accountId) as { last_served_model: string | null } | undefined;
-    return row === undefined ? null : { lastServedModel: row.last_served_model };
+      .get(input.threadId, input.accountId) as
+      | { last_served_model: string | null; message_count: number; observation_count: number }
+      | undefined;
+    return row === undefined
+      ? null
+      : {
+          lastServedModel: row.last_served_model,
+          messageCount: row.message_count,
+          observationCount: row.observation_count,
+        };
+  }
+
+  async getObservationCount(scope: ReflectionScope): Promise<number> {
+    const where = observationScopeWhere(scope);
+    if (where === null) return 0;
+    return (
+      this.db.select({ n: sql<number>`count(*)` }).from(memoryObservations).where(where).get()?.n ??
+      0
+    );
   }
 
   // Idle-flush sweep candidates: threads quiet since `idleBeforeMs` that still
