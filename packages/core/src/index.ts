@@ -642,6 +642,7 @@ export {
   type RealtimeCallRequest,
   type RealtimeCallResult,
   type RealtimeSidebandTarget,
+  readUpstreamJsonWithinBudget,
   UpstreamError,
 } from "./provider/openai.js";
 export {

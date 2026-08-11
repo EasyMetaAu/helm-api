@@ -7,12 +7,16 @@ import { geminiTransformer } from "../protocol/gemini/gemini-transformer.js";
 import type { GeminiSSEEvent } from "../protocol/gemini/gemini-types.js";
 import { openaiTransformer } from "../protocol/openai.js";
 import { createSSEIncompleteFrameGuard, splitCompleteSSEFrames } from "../protocol/streaming.js";
-import { runtimeResponseWorkAdmission } from "../runtime/response-work-admission.js";
+import {
+  type ResponseWorkAdmission,
+  runtimeResponseWorkAdmission,
+} from "../runtime/response-work-admission.js";
 import {
   type ChatCompletionRequest,
   type ChatCompletionResponse,
   type ProviderClient,
   readUpstreamErrorBody,
+  readUpstreamJsonWithinBudget,
   safeUpstreamHeaders,
   UpstreamError,
   upstreamTransportError,
@@ -171,6 +175,7 @@ export interface GeminiRemoteMediaFetchConfig {
 export interface GeminiClientDeps {
   config: GeminiClientConfig;
   fetch?: typeof globalThis.fetch;
+  responseWorkAdmission?: ResponseWorkAdmission;
   /** Override hostname resolution for the remote-media SSRF guard (tests). */
   dnsLookup?: HostnameLookup;
   /** Override the remote-media fetcher (tests). Production uses the pinned node:https
@@ -626,7 +631,7 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
   }
 
   async function errorFromResponse(res: Response): Promise<UpstreamError> {
-    const providerRaw = await readUpstreamErrorBody(res, scrub);
+    const providerRaw = await readUpstreamErrorBody(res, scrub, deps.responseWorkAdmission);
     return new UpstreamError(
       "upstream_error",
       `upstream returned ${res.status}`,
@@ -674,7 +679,9 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
         opts?.captureUpstream,
       );
       if (!res.ok) throw await errorFromResponse(res);
-      return geminiResponseToOpenAIChat(await res.json());
+      return geminiResponseToOpenAIChat(
+        await readUpstreamJsonWithinBudget(res, deps.responseWorkAdmission),
+      );
     },
 
     async *chatCompletionStream(req, opts) {
@@ -704,7 +711,7 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
         opts?.captureUpstream,
       );
       if (!res.ok) throw await errorFromResponse(res);
-      return (await res.json()) as Record<string, unknown>;
+      return await readUpstreamJsonWithinBudget(res, deps.responseWorkAdmission);
     },
 
     async *nativePassthroughStream(input, opts) {
@@ -721,7 +728,7 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
     async countTokens(req: ChatCompletionRequest, opts) {
       const res = await requestWithAuthRetry("countTokens", req, opts?.signal);
       if (!res.ok) throw await errorFromResponse(res);
-      return (await res.json()) as Record<string, unknown>;
+      return await readUpstreamJsonWithinBudget(res, deps.responseWorkAdmission);
     },
   };
 }
