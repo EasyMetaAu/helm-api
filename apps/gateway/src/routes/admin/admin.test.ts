@@ -1871,6 +1871,35 @@ describe("admin.api request payload", () => {
     });
   });
 
+  it("does not advertise transcript loading when the request is absent from its recorded Session", async () => {
+    const rec = {
+      ...decision("req_session_mismatch", "balanced"),
+      session: { ref: "recorded-session", label: "thread-1", source: "x-thread-id" as const },
+    };
+    const telemetry = {
+      ...makeTelemetry([rec]),
+      getPayloadMeta: async () => null,
+      getSessionRevisionMeta: async () => ({
+        requestId: "req_session_mismatch",
+        sessionRef: "different-session",
+        responseBodyStored: true,
+        recoveryWireBytes: 1_000_000,
+        fidelity: "semantic",
+        createdAt: new Date(1234),
+      }),
+    } as unknown as TelemetryStore;
+
+    const response = await buildApp(buildDeps({ telemetry })).request(
+      "/admin/api/requests/req_session_mismatch/payload?part=meta",
+    );
+
+    expect(await response.json()).toEqual({
+      captured: false,
+      source: "unavailable",
+      reason: "session_unavailable",
+    });
+  });
+
   it.each([
     null,
     1_000_000,

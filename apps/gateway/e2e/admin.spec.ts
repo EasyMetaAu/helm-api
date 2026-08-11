@@ -326,6 +326,27 @@ test.describe("admin request payload view", () => {
     await expect(page.getByTestId("payload-summary")).toContainText(/no captured Session ID/i);
   });
 
+  test("does not offer transcript loading when the request is absent from its recorded Session", async ({
+    page,
+  }) => {
+    await page.route(`**/admin/api/requests/${SEED_TRACE_ID}/payload?part=meta`, async (route) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          captured: false,
+          source: "unavailable",
+          reason: "session_unavailable",
+        }),
+      }),
+    );
+
+    await page.goto(`${BASE}/admin/requests/${SEED_TRACE_ID}`);
+    await expect(page.getByTestId("payload-summary")).toContainText(
+      /session transcript is unavailable/i,
+    );
+    await expect(page.getByTestId("load-transcript")).toHaveCount(0);
+  });
+
   test("rebuilds a too-large transcript without a duplicate Session panel", async ({ page }) => {
     await page.route(`**/admin/api/requests/${SEED_TRACE_ID}/payload?part=meta`, async (route) =>
       route.fulfill({
