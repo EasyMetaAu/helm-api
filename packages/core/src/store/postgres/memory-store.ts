@@ -84,6 +84,7 @@ function reflectionScopeWhere(scope: ReflectionScope): SQL {
 // How long a claimed (`running`) job stays exclusively leased — pg mirror of the
 // sqlite adapter's constant (same contract, see its comment).
 const RUNNING_LEASE_MS = 5 * 60_000;
+const REFLECTOR_JOB_LOCK_SEED = 740;
 
 function dateOrNull(ms: number | string | null | undefined): Date | null {
   return ms === null || ms === undefined ? null : new Date(Number(ms));
@@ -1026,31 +1027,44 @@ export class PgMemoryStore implements MemoryStore {
   // Enqueue a background job. DEDUPE (D6): the partial unique index on OPEN
   // (pending/running) jobs owns the concurrency boundary; this method tries the
   // insert first, then reads the existing open row when another request won.
+  // Reflectors also share a scope advisory lock with decay so no new open row can
+  // slip between decay's fence and successor enqueue.
   async enqueueJob(input: MemoryJobEnqueueInput): Promise<string> {
     const scopeId = encodeScopeId(input.scope);
     const id = this.genId();
     const ts = this.now().getTime();
-    const inserted = (await this.db.execute(sql`
-      INSERT INTO memory_jobs (id, type, scope_id, status, error, created_at, updated_at)
-      VALUES (${id}, ${input.type}, ${scopeId}, 'pending', NULL, ${ts}, ${ts})
-      ON CONFLICT (type, scope_id) WHERE status IN ('pending', 'running') DO NOTHING
-      RETURNING id
-    `)) as { rows?: Array<{ id: string }> } | Array<{ id: string }>;
-    const insertedRows = Array.isArray(inserted) ? inserted : (inserted.rows ?? []);
-    if (insertedRows[0] !== undefined) return insertedRows[0].id;
+    const enqueue = async (executor: { execute: (query: SQL) => Promise<unknown> }) => {
+      const insertedRows = pgRows<{ id: string }>(
+        await executor.execute(sql`
+          INSERT INTO memory_jobs (id, type, scope_id, status, error, created_at, updated_at)
+          VALUES (${id}, ${input.type}, ${scopeId}, 'pending', NULL, ${ts}, ${ts})
+          ON CONFLICT (type, scope_id) WHERE status IN ('pending', 'running') DO NOTHING
+          RETURNING id
+        `),
+      );
+      if (insertedRows[0] !== undefined) return insertedRows[0].id;
 
-    const existing = (await this.db.execute(sql`
-      SELECT id FROM memory_jobs
-       WHERE type = ${input.type}
-         AND scope_id = ${scopeId}
-         AND status IN ('pending', 'running')
-       ORDER BY created_at ASC, id ASC
-       LIMIT 1
-    `)) as { rows?: Array<{ id: string }> } | Array<{ id: string }>;
-    const existingRows = Array.isArray(existing) ? existing : (existing.rows ?? []);
-    if (existingRows[0] !== undefined) return existingRows[0].id;
+      const existingRows = pgRows<{ id: string }>(
+        await executor.execute(sql`
+          SELECT id FROM memory_jobs
+           WHERE type = ${input.type}
+             AND scope_id = ${scopeId}
+             AND status IN ('pending', 'running')
+           ORDER BY created_at ASC, id ASC
+           LIMIT 1
+        `),
+      );
+      if (existingRows[0] !== undefined) return existingRows[0].id;
+      throw new Error("memory job enqueue conflict without existing open row");
+    };
 
-    throw new Error("memory job enqueue conflict without existing open row");
+    if (input.type !== "reflector") return enqueue(this.db);
+    return this.db.transaction(async (tx) => {
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtextextended(${scopeId}, ${REFLECTOR_JOB_LOCK_SEED}))`,
+      );
+      return enqueue({ execute: (query) => tx.execute(query) });
+    });
   }
 
   // Atomically claim up to `limit` open jobs (oldest-first). Postgres uses
@@ -1392,15 +1406,6 @@ export class PgMemoryStore implements MemoryStore {
              AND o.status = 'active' AND t.owner_id = ${input.accountId}
         `),
       );
-      await tx.execute(sql`
-        UPDATE memory_observations
-           SET status = 'archived', archived_at = ${nowMs}
-         WHERE id IN (${ids})
-           AND status = 'active'
-           AND thread_id IN (
-             SELECT id FROM memory_threads WHERE owner_id = ${input.accountId}
-           )
-      `);
       const scopes = new Map<string, ReflectionScope>();
       for (const row of rows) {
         const targets: ReflectionScope[] = [];
@@ -1415,6 +1420,33 @@ export class PgMemoryStore implements MemoryStore {
         }
         for (const target of targets) scopes.set(encodeScopeId(target), target);
       }
+      const scopeIds = [...scopes.keys()].sort();
+      // Serialize enqueue + publication around each affected scope. Close every
+      // old open execution before hiding its inputs, then publish successors only
+      // after observations and reflections have been archived in this transaction.
+      for (const scopeId of scopeIds) {
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtextextended(${scopeId}, ${REFLECTOR_JOB_LOCK_SEED}))`,
+        );
+      }
+      for (const scopeId of scopeIds) {
+        await tx.execute(sql`
+          UPDATE memory_jobs
+             SET status = 'failed', error = 'superseded by observation archive', updated_at = ${nowMs}
+           WHERE type = 'reflector'
+             AND scope_id = ${scopeId}
+             AND status IN ('pending', 'running')
+        `);
+      }
+      await tx.execute(sql`
+        UPDATE memory_observations
+           SET status = 'archived', archived_at = ${nowMs}
+         WHERE id IN (${ids})
+           AND status = 'active'
+           AND thread_id IN (
+             SELECT id FROM memory_threads WHERE owner_id = ${input.accountId}
+           )
+      `);
       for (const [scopeId, target] of scopes) {
         await tx.execute(sql`
           UPDATE memory_reflections
@@ -1424,11 +1456,6 @@ export class PgMemoryStore implements MemoryStore {
              AND resource_id IS NOT DISTINCT FROM ${target.resourceId ?? null}
              AND thread_id IS NOT DISTINCT FROM ${target.threadId ?? null}
              AND status = 'active'
-        `);
-        await tx.execute(sql`
-          UPDATE memory_jobs
-             SET status = 'failed', error = 'superseded by observation archive', updated_at = ${nowMs}
-           WHERE type = 'reflector' AND scope_id = ${scopeId} AND status = 'running'
         `);
         await tx.execute(sql`
           INSERT INTO memory_jobs (id, type, scope_id, status, error, created_at, updated_at)
