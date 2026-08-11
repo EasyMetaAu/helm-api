@@ -33,7 +33,7 @@ export function decodePayloadValue(value: unknown): string | null {
   const buf = Buffer.isBuffer(value) ? value : Buffer.from(value as Uint8Array);
   if (buf.length >= 2 && buf[0] === GZIP_MAGIC_0 && buf[1] === GZIP_MAGIC_1) {
     try {
-      return gunzipSync(buf).toString("utf8");
+      return gunzipSync(buf, { maxOutputLength: PAYLOAD_TEXT_CHUNK_RAW_BYTES }).toString("utf8");
     } catch {
       return null;
     }
