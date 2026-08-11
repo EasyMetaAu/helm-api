@@ -48,6 +48,8 @@ import {
   type MemoryMessageArchiveRow,
   type MemoryObserverCursor,
   type MemoryObserverPage,
+  type MemoryObserverPageCommitInput,
+  type MemoryObserverPageCommitResult,
   type MemoryReflectionJobCommitInput,
   type MemoryReflectionJobCommitResult,
   type MemoryStore,
@@ -728,6 +730,120 @@ export class PgMemoryStore implements MemoryStore {
           : {}),
       });
       return id;
+    });
+  }
+
+  async commitObserverPage(
+    input: MemoryObserverPageCommitInput,
+  ): Promise<MemoryObserverPageCommitResult | null> {
+    const threadId =
+      input.action === "observe" ? input.observation.threadId : input.job.scope.threadId;
+    if (
+      threadId === undefined ||
+      input.job.scope.accountId !== input.accountId ||
+      input.job.scope.threadId !== threadId ||
+      (input.successorScope !== undefined &&
+        (input.successorScope.accountId !== input.accountId ||
+          input.successorScope.threadId !== threadId))
+    ) {
+      return null;
+    }
+    const id = input.action === "observe" ? this.genId() : null;
+    const successorId = input.successorScope === undefined ? null : this.genId();
+    const jobScopeId = encodeScopeId(input.job.scope);
+    const successorScopeId =
+      input.successorScope === undefined ? null : encodeScopeId(input.successorScope);
+    const observedAt = input.action === "observe" ? input.observation.observedAt.getTime() : null;
+    return this.db.transaction(async (tx) => {
+      const currentJob = await tx
+        .select({ id: memoryJobs.id })
+        .from(memoryJobs)
+        .where(
+          and(
+            eq(memoryJobs.id, input.job.id),
+            eq(memoryJobs.type, "observer"),
+            eq(memoryJobs.scopeId, jobScopeId),
+            eq(memoryJobs.status, "running"),
+            eq(memoryJobs.leaseGeneration, input.job.leaseGeneration),
+          ),
+        )
+        .for("update");
+      if (currentJob.length === 0) return null;
+      const expected = input.expectedFrontier;
+      const update =
+        input.action === "observe"
+          ? {
+              observerFrontierAt: input.nextFrontier.createdAtMs,
+              observerFrontierId: input.nextFrontier.id,
+              observationCount: sql`${memoryThreads.observationCount} + 1`,
+              lastObservationAt: sql`CASE
+                WHEN ${memoryThreads.lastObservationAt} IS NULL OR ${memoryThreads.lastObservationAt} < ${observedAt}
+                  THEN ${observedAt}
+                ELSE ${memoryThreads.lastObservationAt}
+              END`,
+            }
+          : {
+              observerFrontierAt: input.nextFrontier.createdAtMs,
+              observerFrontierId: input.nextFrontier.id,
+            };
+      const updated = await tx
+        .update(memoryThreads)
+        .set(update)
+        .where(
+          and(
+            eq(memoryThreads.id, threadId),
+            eq(memoryThreads.ownerId, input.accountId),
+            expected === null
+              ? and(
+                  isNull(memoryThreads.observerFrontierAt),
+                  isNull(memoryThreads.observerFrontierId),
+                )
+              : and(
+                  eq(memoryThreads.observerFrontierAt, expected.createdAtMs),
+                  eq(memoryThreads.observerFrontierId, expected.id),
+                ),
+          ),
+        )
+        .returning();
+      if (updated.length === 0) return null;
+      if (input.action === "observe" && id !== null && observedAt !== null) {
+        await tx.insert(memoryObservations).values({
+          id,
+          threadId,
+          sourceMessageRange: input.observation.sourceMessageRange,
+          observationText: input.observation.observationText,
+          observedAt,
+          referencedAt: null,
+          priority: input.observation.priority ?? null,
+          tags: input.observation.tags ?? null,
+          ...(input.observation.importance !== undefined
+            ? { importance: input.observation.importance }
+            : {}),
+        });
+      }
+      const completed = await tx
+        .update(memoryJobs)
+        .set({ status: "done", error: null, updatedAt: this.now().getTime() })
+        .where(
+          and(
+            eq(memoryJobs.id, input.job.id),
+            eq(memoryJobs.type, "observer"),
+            eq(memoryJobs.scopeId, jobScopeId),
+            eq(memoryJobs.status, "running"),
+            eq(memoryJobs.leaseGeneration, input.job.leaseGeneration),
+          ),
+        )
+        .returning();
+      if (completed.length !== 1) throw new Error("observer job fence changed during commit");
+      if (successorId !== null && successorScopeId !== null) {
+        const ts = this.now().getTime();
+        await tx.execute(sql`
+          INSERT INTO memory_jobs (id, type, scope_id, status, error, created_at, updated_at)
+          VALUES (${successorId}, 'observer', ${successorScopeId}, 'pending', NULL, ${ts}, ${ts})
+          ON CONFLICT (type, scope_id) WHERE status IN ('pending', 'running') DO NOTHING
+        `);
+      }
+      return { observationId: id };
     });
   }
 

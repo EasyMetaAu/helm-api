@@ -805,6 +805,37 @@ export interface MemoryObserverPage {
   hasMore: boolean;
 }
 
+export interface MemoryObserverJobFence {
+  id: string;
+  scope: ReflectionScope;
+  // Incremented by claim; the commit CAS rejects a worker whose lease was
+  // reclaimed while it was summarizing.
+  leaseGeneration: number;
+}
+
+export type MemoryObserverPageCommitInput =
+  | {
+      accountId: string;
+      job: MemoryObserverJobFence;
+      action: "observe";
+      observation: MemoryObservationInput;
+      expectedFrontier: MemoryObserverCursor | null;
+      nextFrontier: MemoryObserverCursor;
+      successorScope?: ReflectionScope;
+    }
+  | {
+      accountId: string;
+      job: MemoryObserverJobFence;
+      action: "advance";
+      expectedFrontier: MemoryObserverCursor | null;
+      nextFrontier: MemoryObserverCursor;
+      successorScope?: ReflectionScope;
+    };
+
+export interface MemoryObserverPageCommitResult {
+  observationId: string | null;
+}
+
 export interface MemoryStore {
   // Idempotent upsert of a thread; safe to call on every observed request.
   ensureThread(input: MemoryThreadInput): Promise<void>;
@@ -854,6 +885,12 @@ export interface MemoryStore {
     expectedFrontier: MemoryObserverCursor | null;
     nextFrontier: MemoryObserverCursor;
   }): Promise<string | null>;
+  // Commit one bounded Observer page as one recovery-safe unit: frontier CAS,
+  // observation insert, current running-job completion, and any successor job.
+  // null rejects a stale frontier or job fence without changing durable state.
+  commitObserverPage?(
+    input: MemoryObserverPageCommitInput,
+  ): Promise<MemoryObserverPageCommitResult | null>;
   // POST-MVP Phase 2 (Reflector). Read a scope's ACTIVE observations so the
   // background Reflector can merge them into a stable reflection. Two read
   // shapes: a THREAD scope returns that thread's rows (inject/observer); a

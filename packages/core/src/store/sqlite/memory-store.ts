@@ -48,6 +48,8 @@ import {
   type MemoryMessageArchiveRow,
   type MemoryObserverCursor,
   type MemoryObserverPage,
+  type MemoryObserverPageCommitInput,
+  type MemoryObserverPageCommitResult,
   type MemoryReflectionJobCommitInput,
   type MemoryReflectionJobCommitResult,
   type MemoryStore,
@@ -715,6 +717,123 @@ export class SqliteMemoryStore implements MemoryStore {
       return true;
     })();
     return committed ? id : null;
+  }
+
+  async commitObserverPage(
+    input: MemoryObserverPageCommitInput,
+  ): Promise<MemoryObserverPageCommitResult | null> {
+    const threadId =
+      input.action === "observe" ? input.observation.threadId : input.job.scope.threadId;
+    if (
+      threadId === undefined ||
+      input.job.scope.accountId !== input.accountId ||
+      input.job.scope.threadId !== threadId ||
+      (input.successorScope !== undefined &&
+        (input.successorScope.accountId !== input.accountId ||
+          input.successorScope.threadId !== threadId))
+    ) {
+      return null;
+    }
+    const id = input.action === "observe" ? this.genId() : null;
+    const successorId = input.successorScope === undefined ? null : this.genId();
+    const jobScopeId = encodeScopeId(input.job.scope);
+    const successorScopeId =
+      input.successorScope === undefined ? null : encodeScopeId(input.successorScope);
+    const db = this.db.$sqlite;
+    const committed = db.transaction(() => {
+      const currentJob = db
+        .prepare(
+          `SELECT id FROM memory_jobs
+            WHERE id = ? AND type = 'observer' AND scope_id = ? AND status = 'running'
+              AND lease_generation = ?`,
+        )
+        .get(input.job.id, jobScopeId, input.job.leaseGeneration) as { id: string } | undefined;
+      if (currentJob === undefined) return false;
+      const current = db
+        .prepare(
+          `SELECT observer_frontier_at AS frontier_at, observer_frontier_id AS frontier_id
+             FROM memory_threads WHERE id = ? AND owner_id = ?`,
+        )
+        .get(threadId, input.accountId) as
+        | { frontier_at: number | null; frontier_id: string | null }
+        | undefined;
+      const expected = input.expectedFrontier;
+      if (
+        current === undefined ||
+        current.frontier_at !== (expected?.createdAtMs ?? null) ||
+        current.frontier_id !== (expected?.id ?? null)
+      ) {
+        return false;
+      }
+      if (input.action === "observe" && id !== null) {
+        db.prepare(
+          `INSERT INTO memory_observations (
+             id, thread_id, source_message_range, observation_text, observed_at,
+             referenced_at, priority, tags, importance
+           ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+        ).run(
+          id,
+          threadId,
+          JSON.stringify(input.observation.sourceMessageRange),
+          input.observation.observationText,
+          input.observation.observedAt.getTime(),
+          input.observation.priority ?? null,
+          input.observation.tags === undefined ? null : JSON.stringify(input.observation.tags),
+          input.observation.importance ?? 0.5,
+        );
+        db.prepare(
+          `UPDATE memory_threads
+              SET observer_frontier_at = ?, observer_frontier_id = ?,
+                  observation_count = observation_count + 1,
+                  last_observation_at = CASE
+                    WHEN last_observation_at IS NULL OR last_observation_at < ? THEN ?
+                    ELSE last_observation_at END
+            WHERE id = ? AND owner_id = ?`,
+        ).run(
+          input.nextFrontier.createdAtMs,
+          input.nextFrontier.id,
+          input.observation.observedAt.getTime(),
+          input.observation.observedAt.getTime(),
+          threadId,
+          input.accountId,
+        );
+      } else {
+        db.prepare(
+          `UPDATE memory_threads SET observer_frontier_at = ?, observer_frontier_id = ?
+            WHERE id = ? AND owner_id = ?`,
+        ).run(input.nextFrontier.createdAtMs, input.nextFrontier.id, threadId, input.accountId);
+      }
+      const finished = db
+        .prepare(
+          `UPDATE memory_jobs SET status = 'done', error = NULL, updated_at = ?
+            WHERE id = ? AND type = 'observer' AND scope_id = ? AND status = 'running'
+              AND lease_generation = ?`,
+        )
+        .run(this.now().getTime(), input.job.id, jobScopeId, input.job.leaseGeneration);
+      if (finished.changes !== 1) throw new Error("observer job fence changed during commit");
+      if (successorId !== null && successorScopeId !== null) {
+        const ts = this.now().getTime();
+        const inserted = db
+          .prepare(
+            `INSERT OR IGNORE INTO memory_jobs
+               (id, type, scope_id, status, error, created_at, updated_at)
+             VALUES (?, 'observer', ?, 'pending', NULL, ?, ?)`,
+          )
+          .run(successorId, successorScopeId, ts, ts);
+        if (inserted.changes !== 1) {
+          const existing = db
+            .prepare(
+              `SELECT id FROM memory_jobs
+                WHERE type = 'observer' AND scope_id = ? AND status IN ('pending', 'running')
+                LIMIT 1`,
+            )
+            .get(successorScopeId) as { id: string } | undefined;
+          if (existing === undefined) throw new Error("observer successor enqueue conflict");
+        }
+      }
+      return true;
+    })();
+    return committed ? { observationId: id } : null;
   }
 
   // POST-MVP Phase 2: read a scope's active observations oldest-first. Thread

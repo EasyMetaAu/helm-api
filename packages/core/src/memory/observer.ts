@@ -185,9 +185,11 @@ async function maybeReenqueueForLateMessages(
 // (the idle backstop) is decided at RUN TIME from message ages, not a job flag.
 export interface ObserverJob {
   jobId: string;
-  leaseGeneration?: number;
   accountId: string;
   threadId: string;
+  // Claim generation fences a worker that keeps running after its lease is reclaimed.
+  // Optional only for direct unit fixtures; claimed production jobs always carry it.
+  leaseGeneration?: number;
   // Salient-fact fast path (Change A): the thread's cross-thread scope, carried
   // verbatim from the enqueued job (the worker already has it — observer jobs are
   // enqueued with the full {accountId, projectId?, resourceId?, threadId} scope).
@@ -362,9 +364,14 @@ export async function runObserverJob(
         : await deps.memoryStore
             .getThreadMeta({ accountId: job.accountId, threadId: job.threadId })
             .catch(() => null);
+    const leaseGeneration = job.leaseGeneration;
+    const atomicBounded =
+      deps.memoryStore.listObserverMessagesPage !== undefined &&
+      deps.memoryStore.commitObserverPage !== undefined &&
+      leaseGeneration !== undefined;
     const bounded =
       deps.memoryStore.listObserverMessagesPage !== undefined &&
-      deps.memoryStore.appendObservationAndAdvanceFrontier !== undefined;
+      (atomicBounded || deps.memoryStore.appendObservationAndAdvanceFrontier !== undefined);
     if (
       !bounded &&
       ((readMeta?.messageCount ?? 0) > MAX_OBSERVER_THREAD_MESSAGES ||
@@ -494,6 +501,34 @@ export async function runObserverJob(
           )
         : decisions.find(({ decision }) => decision.shouldCompact);
     if (selected === undefined) {
+      const pageFullyCovered =
+        atomicBounded &&
+        observerPage !== undefined &&
+        observerPage.messages.length > 0 &&
+        observerPage.coveredMessageIds?.length === observerPage.messages.length &&
+        observerPage.nextCursor !== null;
+      if (pageFullyCovered && observerPage.nextCursor !== null) {
+        const observerScope = {
+          accountId: job.accountId,
+          threadId: job.threadId,
+          ...(job.projectId !== undefined ? { projectId: job.projectId } : {}),
+          ...(job.resourceId !== undefined ? { resourceId: job.resourceId } : {}),
+        };
+        const commit = await deps.memoryStore.commitObserverPage?.({
+          accountId: job.accountId,
+          job: { id: job.jobId, scope: observerScope, leaseGeneration: leaseGeneration ?? 0 },
+          action: "advance",
+          expectedFrontier: observerPage.expectedFrontier,
+          nextFrontier: observerPage.nextCursor,
+          ...(observerPage.hasMore ? { successorScope: observerScope } : {}),
+        });
+        if (commit === null) {
+          deps.log("memory.observer.frontier_stale", { thread_id: job.threadId });
+          return { observationId: null, sourceMessageRange: null };
+        }
+        deps.log("memory.observer.coverage_advanced", { thread_id: job.threadId });
+        return { observationId: null, sourceMessageRange: null };
+      }
       // No compaction this run → mine the uncovered turns for durable facts.
       await maybeEagerExtractFacts(job, all, covered, deps);
       await updateClaimedJobStatus(deps.memoryStore, job, "done");
@@ -564,41 +599,55 @@ export async function runObserverJob(
       ...(importance !== undefined ? { importance } : {}),
       ...(tags !== undefined ? { tags } : {}),
     };
-    const observationId = bounded
-      ? await deps.memoryStore.appendObservationAndAdvanceFrontier?.({
+    const hasRemainder = observerPage?.hasMore === true || compressed.length < all.length;
+    const observerScope = {
+      accountId: job.accountId,
+      threadId: job.threadId,
+      ...(job.projectId !== undefined ? { projectId: job.projectId } : {}),
+      ...(job.resourceId !== undefined ? { resourceId: job.resourceId } : {}),
+    };
+    const commit = atomicBounded
+      ? await deps.memoryStore.commitObserverPage?.({
           accountId: job.accountId,
+          job: { id: job.jobId, scope: observerScope, leaseGeneration: leaseGeneration ?? 0 },
+          action: "observe",
           observation: observationInput,
           expectedFrontier: observerPage?.expectedFrontier ?? null,
           nextFrontier: {
             createdAtMs: last.createdAt.getTime(),
             id: last.id,
           },
+          ...(hasRemainder ? { successorScope: observerScope } : {}),
         })
-      : await deps.memoryStore.appendObservation(observationInput);
-    if (observationId == null) {
-      await updateClaimedJobStatus(deps.memoryStore, job, "done");
+      : bounded
+        ? await deps.memoryStore.appendObservationAndAdvanceFrontier?.({
+            accountId: job.accountId,
+            observation: observationInput,
+            expectedFrontier: observerPage?.expectedFrontier ?? null,
+            nextFrontier: {
+              createdAtMs: last.createdAt.getTime(),
+              id: last.id,
+            },
+          })
+        : await deps.memoryStore.appendObservation(observationInput);
+    if (commit == null) {
+      if (!atomicBounded) await updateClaimedJobStatus(deps.memoryStore, job, "done");
       deps.log("memory.observer.frontier_stale", { thread_id: job.threadId });
       return { observationId: null, sourceMessageRange: null };
     }
+    const observationId = typeof commit === "string" ? commit : commit.observationId;
 
     // Book Observer tokens into their OWN bucket — never the provider/actor one.
     deps.costSink("observer", estimateObserverTokens(compressed, observationText));
 
-    await updateClaimedJobStatus(deps.memoryStore, job, "done");
-    if (bounded) {
-      if (observerPage?.hasMore === true || compressed.length < all.length) {
+    if (!atomicBounded) {
+      await updateClaimedJobStatus(deps.memoryStore, job, "done");
+      if (bounded && hasRemainder) {
         await deps.memoryStore.enqueueJob({
           type: "observer",
-          scope: {
-            accountId: job.accountId,
-            threadId: job.threadId,
-            ...(job.projectId !== undefined ? { projectId: job.projectId } : {}),
-            ...(job.resourceId !== undefined ? { resourceId: job.resourceId } : {}),
-          },
+          scope: observerScope,
         });
       }
-    } else {
-      await maybeReenqueueForLateMessages(job, snapshotMessageIds, deps);
     }
     deps.log("memory.observer.compressed", {
       thread_id: job.threadId,

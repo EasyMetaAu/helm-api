@@ -451,3 +451,131 @@ describe("SqliteMemoryStore — idle-flush candidates", () => {
     expect(limited.map((c) => c.threadId)).toEqual(["a1", "b1"]);
   });
 });
+
+describe("SqliteMemoryStore — atomic Observer page commit", () => {
+  it("commits observation/frontier, completes the current job, and enqueues its remainder together", async () => {
+    const { store, clock } = newStore();
+    const scope = { accountId: "acct-a", threadId: "t1" };
+    await store.ensureThread({ id: scope.threadId, ownerId: scope.accountId });
+    const firstId = await store.appendMessage({
+      threadId: scope.threadId,
+      role: "user",
+      content: "first",
+      tokenEstimate: 1,
+    });
+    await store.appendMessage({
+      threadId: scope.threadId,
+      role: "user",
+      content: "remainder",
+      tokenEstimate: 1,
+    });
+    const jobId = await store.enqueueJob({ type: "observer", scope });
+    expect((await store.claimPendingJobs(1)).map((job) => job.jobId)).toEqual([jobId]);
+    const page = await store.listObserverMessagesPage({
+      ...scope,
+      limit: 1,
+      maxBytes: 1024,
+      maxTokens: 1024,
+    });
+    const message = page.messages[0];
+    if (message === undefined) throw new Error("expected Observer page");
+
+    const observationId = await store.commitObserverPage({
+      accountId: scope.accountId,
+      job: { id: jobId, scope, leaseGeneration: 1 },
+      action: "observe",
+      observation: {
+        threadId: scope.threadId,
+        sourceMessageRange: [firstId, firstId],
+        observationText: "first observed",
+        observedAt: new Date(clock() + 1),
+      },
+      expectedFrontier: page.expectedFrontier,
+      nextFrontier: { createdAtMs: message.createdAt.getTime(), id: message.id },
+      successorScope: scope,
+    });
+
+    expect(observationId).toMatchObject({ observationId: expect.any(String) });
+    expect(await store.listObservations(scope)).toHaveLength(1);
+    expect((await store.claimPendingJobs(1)).map((job) => job.scope)).toEqual([scope]);
+  });
+
+  it("advances an already-covered page without inserting another observation", async () => {
+    const { store } = newStore();
+    const scope = { accountId: "acct-a", threadId: "t1" };
+    await store.ensureThread({ id: scope.threadId, ownerId: scope.accountId });
+    await store.appendMessage({
+      threadId: scope.threadId,
+      role: "user",
+      content: "already covered",
+      tokenEstimate: 1,
+    });
+    const jobId = await store.enqueueJob({ type: "observer", scope });
+    await store.claimPendingJobs(1);
+    const page = await store.listObserverMessagesPage({
+      ...scope,
+      limit: 1,
+      maxBytes: 1024,
+      maxTokens: 1024,
+    });
+    const cursor = page.nextCursor;
+    if (cursor === null) throw new Error("expected Observer page cursor");
+
+    await expect(
+      store.commitObserverPage({
+        accountId: scope.accountId,
+        job: { id: jobId, scope, leaseGeneration: 1 },
+        action: "advance",
+        expectedFrontier: page.expectedFrontier,
+        nextFrontier: cursor,
+        successorScope: scope,
+      }),
+    ).resolves.toEqual({ observationId: null });
+
+    expect(await store.listObservations(scope)).toEqual([]);
+    expect(
+      (
+        await store.listObserverMessagesPage({
+          ...scope,
+          limit: 1,
+          maxBytes: 1024,
+          maxTokens: 1024,
+        })
+      ).messages,
+    ).toEqual([]);
+    expect((await store.claimPendingJobs(1)).map((job) => job.scope)).toEqual([scope]);
+  });
+
+  it("rolls back a stale frontier/job fence without an observation or successor", async () => {
+    const { store } = newStore();
+    const scope = { accountId: "acct-a", threadId: "t1" };
+    await store.ensureThread({ id: scope.threadId, ownerId: scope.accountId });
+    const messageId = await store.appendMessage({
+      threadId: scope.threadId,
+      role: "user",
+      content: "first",
+      tokenEstimate: 1,
+    });
+    const jobId = await store.enqueueJob({ type: "observer", scope });
+    await store.claimPendingJobs(1);
+
+    await expect(
+      store.commitObserverPage({
+        accountId: scope.accountId,
+        job: { id: jobId, scope, leaseGeneration: 1 },
+        action: "observe",
+        observation: {
+          threadId: scope.threadId,
+          sourceMessageRange: [messageId, messageId],
+          observationText: "must not persist",
+          observedAt: new Date(1),
+        },
+        expectedFrontier: { createdAtMs: 1, id: "stale" },
+        nextFrontier: { createdAtMs: 1, id: messageId },
+        successorScope: scope,
+      }),
+    ).resolves.toBeNull();
+    expect(await store.listObservations(scope)).toEqual([]);
+    expect(await store.enqueueJob({ type: "observer", scope })).toBe(jobId);
+  });
+});
