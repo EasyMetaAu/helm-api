@@ -39,7 +39,7 @@ import {
   applyForcedAnthropicThinking,
   reasoningEffortToAnthropicThinking,
 } from "../protocol/reasoning-effort.js";
-import { createSSEIncompleteFrameGuard } from "../protocol/streaming.js";
+import { createSSEIncompleteFrameGuard, splitCompleteSSEFrames } from "../protocol/streaming.js";
 import {
   type ResponseWorkAdmission,
   runtimeResponseWorkAdmission,
@@ -2527,8 +2527,8 @@ export async function* translateAnthropicSSE(
       const decoded = decoder.decode(value, { stream: true });
       frameGuard.resize(Buffer.byteLength(buffer) + Buffer.byteLength(decoded));
       buffer += decoded;
-      const events = buffer.split("\n\n");
-      buffer = events.pop() ?? "";
+      const { frames: events, tail } = splitCompleteSSEFrames(buffer);
+      buffer = tail;
       frameGuard.resize(Buffer.byteLength(buffer));
       for (const raw of events) {
         const dataLine = raw.split("\n").find((l) => l.startsWith("data:"));

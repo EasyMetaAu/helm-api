@@ -5,7 +5,7 @@
 
 import { Buffer } from "node:buffer";
 import type { NativePassthroughInput } from "@helm/shared";
-import { createSSEIncompleteFrameGuard } from "../protocol/streaming.js";
+import { createSSEIncompleteFrameGuard, nextSSEFrameBoundary } from "../protocol/streaming.js";
 import {
   consumeResponseTextWithinBudget,
   ResponseBodyTooLargeError,
@@ -377,15 +377,6 @@ export async function readUpstreamErrorBody(
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000;
-
-function nextSseFrameBoundary(buffer: string): { index: number; separator: string } | null {
-  const lf = buffer.indexOf("\n\n");
-  const crlf = buffer.indexOf("\r\n\r\n");
-  if (lf === -1 && crlf === -1) return null;
-  if (lf === -1) return { index: crlf, separator: "\r\n\r\n" };
-  if (crlf === -1) return { index: lf, separator: "\n\n" };
-  return crlf < lf ? { index: crlf, separator: "\r\n\r\n" } : { index: lf, separator: "\n\n" };
-}
 
 function normalizeOpenAIReasoningPayload(value: unknown): boolean {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
@@ -1012,12 +1003,13 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
           frameGuard?.resize(Buffer.byteLength(pendingFrame) + Buffer.byteLength(chunk));
           pendingFrame += chunk;
           while (true) {
-            const boundary = nextSseFrameBoundary(pendingFrame);
+            const boundary = nextSSEFrameBoundary(pendingFrame);
             if (!boundary) break;
             const frame = pendingFrame.slice(0, boundary.index);
-            pendingFrame = pendingFrame.slice(boundary.index + boundary.separator.length);
+            const separator = pendingFrame.slice(boundary.index, boundary.index + boundary.length);
+            pendingFrame = pendingFrame.slice(boundary.index + boundary.length);
             frameGuard?.resize(Buffer.byteLength(pendingFrame));
-            yield `${normalizeReasoningDeltaFrame(frame)}${boundary.separator}`;
+            yield `${normalizeReasoningDeltaFrame(frame)}${separator}`;
           }
         }
         if (cfg.normalizeReasoningDeltaAlias && pendingFrame.length > 0) {

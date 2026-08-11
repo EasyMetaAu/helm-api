@@ -5,10 +5,12 @@ import {
   type Controller,
   createSSEIncompleteFrameGuard,
   createStreamState,
+  nextSSEFrameBoundary,
   parseSSEData,
   readSSE,
   safeClose,
   safeEnqueue,
+  splitCompleteSSEFrames,
   synthesizeSSE,
 } from "./streaming.js";
 
@@ -16,6 +18,14 @@ import {
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
+
+function testResponseWorkAdmission() {
+  return createResponseWorkAdmission({
+    capacityBytes: 1024 * 1024,
+    jsonAmplification: 1,
+    minChargeBytes: 1,
+  });
+}
 
 /** Build a ReadableStream that emits the given byte chunks in order. */
 function streamOf(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
@@ -98,8 +108,30 @@ describe("readSSE — generic SSE splitter", () => {
 
   it("captures the optional event: name and tolerates CRLF/LF mix + [DONE]", async () => {
     const wire = 'event: message\r\ndata: {"x":1}\r\n\r\ndata: [DONE]\n\n';
-    const events = await collect(readSSE(streamOf([enc.encode(wire)])));
+    const events = await collect(
+      readSSE(streamOf([enc.encode(wire)]), 0, testResponseWorkAdmission()),
+    );
     expect(events).toEqual([{ event: "message", data: '{"x":1}' }, { data: "[DONE]" }]);
+  });
+
+  it("waits for a CRLF delimiter split across chunks while preserving split UTF-8", async () => {
+    const frame = 'data: {"text":"你好👋"}\r\n\r\n';
+    const bytes = enc.encode(frame);
+    const emojiCut = enc.encode('data: {"text":"你好').length + 2;
+    const delimiterCut = bytes.length - 1;
+    const events = await collect(
+      readSSE(
+        streamOf([
+          bytes.slice(0, emojiCut),
+          bytes.slice(emojiCut, delimiterCut),
+          bytes.slice(delimiterCut),
+        ]),
+        0,
+        testResponseWorkAdmission(),
+      ),
+    );
+    expect(events).toEqual([{ data: '{"text":"你好👋"}' }]);
+    expect(JSON.parse(nth(events, 0).data).text).toBe("你好👋");
   });
 
   it("joins multi-line data fields within one event", async () => {
@@ -154,6 +186,16 @@ describe("readSSE — generic SSE splitter", () => {
       { data: "one" },
     ]);
     expect(admission.reservedBytes).toBe(0);
+  });
+});
+
+describe("SSE frame boundaries", () => {
+  it("does not consume a partial CRLF delimiter and supports mixed legal line endings", () => {
+    expect(nextSSEFrameBoundary("data: one\r\n\r")).toBeNull();
+    expect(splitCompleteSSEFrames("data: one\r\n\r\ndata: two\n\r\n")).toEqual({
+      frames: ["data: one", "data: two"],
+      tail: "",
+    });
   });
 });
 

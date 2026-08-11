@@ -23,7 +23,11 @@ import {
   isNativePassthroughCarrier,
   type NativePassthroughInput,
 } from "@helm/shared";
-import { createSSEIncompleteFrameGuard } from "../protocol/streaming.js";
+import {
+  createSSEIncompleteFrameGuard,
+  nextSSEFrameBoundary,
+  splitCompleteSSEFrames,
+} from "../protocol/streaming.js";
 import {
   consumeResponseTextWithinBudget,
   ResponseBodyTooLargeError,
@@ -2657,18 +2661,6 @@ function parseResponsesSSEFrame(raw: string): Record<string, unknown> | null {
   }
 }
 
-function splitCompleteSSEFrames(buffer: string): { frames: string[]; tail: string } {
-  const normalized = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const parts = normalized.split("\n\n");
-  const tail = parts.pop() ?? "";
-  return { frames: parts, tail };
-}
-
-function nextRawSSEFrameBoundary(buffer: string): { index: number; length: number } | null {
-  const match = /(?:\r\n|\r|\n)(?:\r\n|\r|\n)/.exec(buffer);
-  return match ? { index: match.index, length: match[0].length } : null;
-}
-
 export async function* readResponsesEvents(
   res: Response,
   // Inter-chunk liveness deadline (ms); 0 disables. Threaded from the client's
@@ -2753,7 +2745,7 @@ export async function* readResponsesSSERaw(
     let remaining = detectionBuffer + text;
     let consumed = 0;
     while (true) {
-      const boundary = nextRawSSEFrameBoundary(remaining);
+      const boundary = nextSSEFrameBoundary(remaining);
       if (!boundary) break;
       const frameEnd = boundary.index + boundary.length;
       const event = parseResponsesSSEFrame(remaining.slice(0, boundary.index));

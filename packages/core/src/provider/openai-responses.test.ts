@@ -625,7 +625,16 @@ describe("translateResponsesSSE", () => {
       ].join(""),
     );
     const events: Array<Record<string, unknown>> = [];
-    for await (const evt of readResponsesEvents(res)) events.push(evt);
+    for await (const evt of readResponsesEvents(
+      res,
+      0,
+      createResponseWorkAdmission({
+        capacityBytes: 1024 * 1024,
+        jsonAmplification: 1,
+        minChargeBytes: 1,
+      }),
+    ))
+      events.push(evt);
     expect(events).toHaveLength(2);
     expect(events[0]).toMatchObject({ type: "response.output_text.delta", delta: "Hel" });
     expect(events[1]).toMatchObject({
@@ -1215,6 +1224,35 @@ describe("aggregateResponsesStream", () => {
 // trailing-buffer flush, empty-body short-circuit, and the non-stall reader-error
 // re-throw arm directly (the translator + aggregator both consume it).
 describe("readResponsesEvents", () => {
+  it("parses a CRLF delimiter split across chunks without corrupting UTF-8", async () => {
+    const wire = 'data: {"type":"response.output_text.delta","delta":"你好👋"}\r\n\r\n';
+    const bytes = new TextEncoder().encode(wire);
+    const emojiCut =
+      new TextEncoder().encode('data: {"type":"response.output_text.delta","delta":"你好').length +
+      2;
+    const delimiterCut = bytes.length - 1;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.slice(0, emojiCut));
+        controller.enqueue(bytes.slice(emojiCut, delimiterCut));
+        controller.enqueue(bytes.slice(delimiterCut));
+        controller.close();
+      },
+    });
+    const events: Record<string, unknown>[] = [];
+    for await (const event of readResponsesEvents(
+      new Response(body),
+      0,
+      createResponseWorkAdmission({
+        capacityBytes: 1024 * 1024,
+        jsonAmplification: 1,
+        minChargeBytes: 1,
+      }),
+    ))
+      events.push(event);
+    expect(events).toEqual([{ type: "response.output_text.delta", delta: "你好👋" }]);
+  });
+
   it("cancels an unterminated frame when the shared response-work budget is exhausted", async () => {
     let cancelled = false;
     const stream = new ReadableStream<Uint8Array>({

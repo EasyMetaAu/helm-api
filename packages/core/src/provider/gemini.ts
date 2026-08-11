@@ -6,7 +6,7 @@ import { type NativePassthroughInput, nativePassthroughBody } from "@helm/shared
 import { geminiTransformer } from "../protocol/gemini/gemini-transformer.js";
 import type { GeminiSSEEvent } from "../protocol/gemini/gemini-types.js";
 import { openaiTransformer } from "../protocol/openai.js";
-import { createSSEIncompleteFrameGuard } from "../protocol/streaming.js";
+import { createSSEIncompleteFrameGuard, splitCompleteSSEFrames } from "../protocol/streaming.js";
 import { runtimeResponseWorkAdmission } from "../runtime/response-work-admission.js";
 import {
   type ChatCompletionRequest,
@@ -135,13 +135,12 @@ async function* parseGeminiStreamEvents(raw: AsyncIterable<string>): AsyncIterab
     for await (const chunk of raw) {
       frameGuard.resize(Buffer.byteLength(buffer) + Buffer.byteLength(chunk));
       buffer += chunk;
-      let idx = buffer.indexOf("\n\n");
-      while (idx !== -1) {
-        const event = flushFrame(buffer.slice(0, idx));
-        buffer = buffer.slice(idx + 2);
-        frameGuard.resize(Buffer.byteLength(buffer));
+      const { frames, tail } = splitCompleteSSEFrames(buffer);
+      buffer = tail;
+      frameGuard.resize(Buffer.byteLength(buffer));
+      for (const frame of frames) {
+        const event = flushFrame(frame);
         if (event !== null) yield event;
-        idx = buffer.indexOf("\n\n");
       }
     }
     const tail = flushFrame(buffer);

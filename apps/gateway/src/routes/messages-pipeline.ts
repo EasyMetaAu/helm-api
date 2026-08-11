@@ -17,6 +17,7 @@ import {
   type IRResponse,
   injectIntoIR,
   type MemoryScope,
+  nextSSEFrameBoundary,
   type ObserveDeps,
   observeInbound,
   observeOutbound,
@@ -26,6 +27,7 @@ import {
   type RouteOptions,
   resolveMemoryMode,
   runtimeResponseWorkAdmission,
+  splitCompleteSSEFrames,
   UpstreamError,
 } from "@helm/core";
 import type { InternalRequest, MemoryDecision, Protocol } from "@helm/shared";
@@ -477,17 +479,14 @@ async function* parseOpenAISSE(raw: AsyncIterable<string>): AsyncIterable<Record
   const frameGuard = createSSEIncompleteFrameGuard(runtimeResponseWorkAdmission());
   try {
     for await (const piece of raw) {
-      const normalized = piece.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-      frameGuard.resize(Buffer.byteLength(buffer) + Buffer.byteLength(normalized));
-      buffer += normalized;
-      let sep = buffer.indexOf("\n\n");
-      while (sep !== -1) {
-        const event = buffer.slice(0, sep);
-        buffer = buffer.slice(sep + 2);
-        frameGuard.resize(Buffer.byteLength(buffer));
+      frameGuard.resize(Buffer.byteLength(buffer) + Buffer.byteLength(piece));
+      buffer += piece;
+      const { frames, tail } = splitCompleteSSEFrames(buffer);
+      buffer = tail;
+      frameGuard.resize(Buffer.byteLength(buffer));
+      for (const event of frames) {
         const chunk = parseFrame(event);
         if (chunk !== null) yield chunk;
-        sep = buffer.indexOf("\n\n");
       }
     }
     const tail = parseFrame(buffer);
@@ -499,7 +498,7 @@ async function* parseOpenAISSE(raw: AsyncIterable<string>): AsyncIterable<Record
 
 function parseFrame(event: string): Record<string, unknown> | null {
   const dataLines: string[] = [];
-  for (const line of event.split("\n")) {
+  for (const line of event.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n")) {
     const trimmed = line.trimStart();
     if (!trimmed.startsWith("data:")) continue;
     dataLines.push(trimmed.slice(5).replace(/^ /, ""));
@@ -555,17 +554,6 @@ function parseRawSSEFrame(event: string, raw: string): RawSSEFrame | null {
   return { event: evtName, data: dataLines.join("\n"), raw };
 }
 
-function nextSSEBoundary(buffer: string): { index: number; length: number } | null {
-  const candidates = [
-    { index: buffer.indexOf("\r\n\r\n"), length: 4 },
-    { index: buffer.indexOf("\n\n"), length: 2 },
-    { index: buffer.indexOf("\r\r"), length: 2 },
-  ].filter((candidate) => candidate.index >= 0);
-  if (candidates.length === 0) return null;
-  candidates.sort((a, b) => a.index - b.index || b.length - a.length);
-  return candidates[0] ?? null;
-}
-
 function assertNativeSSEFrameFits(frame: string, maxFrameBytes: number): void {
   if (maxFrameBytes === 0 || Buffer.byteLength(frame) <= maxFrameBytes) return;
   throw new UpstreamError("upstream_error", "upstream SSE frame exceeds the runtime memory budget");
@@ -596,7 +584,7 @@ export async function* splitSSEFrames(
     for await (const piece of raw) {
       resize(Buffer.byteLength(buffer) + Buffer.byteLength(piece));
       buffer += piece;
-      let sep = nextSSEBoundary(buffer);
+      let sep = nextSSEFrameBoundary(buffer);
       while (sep !== null) {
         const rawFrame = buffer.slice(0, sep.index + sep.length);
         assertNativeSSEFrameFits(rawFrame, maxFrameBytes);
@@ -604,7 +592,7 @@ export async function* splitSSEFrames(
         buffer = buffer.slice(sep.index + sep.length);
         if (frame !== null) yield frame;
         resize(Buffer.byteLength(buffer));
-        sep = nextSSEBoundary(buffer);
+        sep = nextSSEFrameBoundary(buffer);
       }
       assertNativeSSEFrameFits(buffer, maxFrameBytes);
     }
