@@ -21,6 +21,7 @@ import {
   observeOutbound,
   openaiTransformer,
   projectScopedThreadId,
+  runtimeMemoryBudget,
 } from "@helm/core";
 import {
   type HelmError,
@@ -396,11 +397,35 @@ function outboundFromOpenAIBody(body: unknown): {
 interface SSEAccumulator {
   text: string;
   pending: string;
+  limited: boolean;
+  push(chunk: string): void;
+}
+
+export function createSSEAccumulator(
+  maxBytes = runtimeMemoryBudget().responseCaptureBytes,
+): SSEAccumulator {
+  const limit = Math.max(0, Math.floor(maxBytes));
+  const accumulator: SSEAccumulator = {
+    text: "",
+    pending: "",
+    limited: false,
+    push(chunk) {
+      if (this.limited) return;
+      if (Buffer.byteLength(this.pending) + Buffer.byteLength(chunk) > limit) {
+        this.text = "";
+        this.pending = "";
+        this.limited = true;
+        return;
+      }
+      accumulateOpenAIChunk(this, chunk, limit);
+    },
+  };
+  return accumulator;
 }
 
 // Parse ONE complete SSE event and append any assistant delta content. A
 // malformed/`[DONE]` frame is swallowed (fail-open).
-function parseOpenAIEvent(buffer: SSEAccumulator, event: string): void {
+function parseOpenAIEvent(buffer: SSEAccumulator, event: string, maxBytes: number): void {
   for (const line of event.split("\n")) {
     const trimmed = line.trimStart();
     if (!trimmed.startsWith("data:")) continue;
@@ -411,7 +436,15 @@ function parseOpenAIEvent(buffer: SSEAccumulator, event: string): void {
       const choices = Array.isArray(parsed.choices) ? parsed.choices : [];
       for (const ch of choices) {
         const delta = (ch as { delta?: unknown })?.delta as { content?: unknown } | undefined;
-        if (typeof delta?.content === "string") buffer.text += delta.content;
+        if (typeof delta?.content === "string") {
+          if (Buffer.byteLength(buffer.text) + Buffer.byteLength(delta.content) > maxBytes) {
+            buffer.text = "";
+            buffer.pending = "";
+            buffer.limited = true;
+            return;
+          }
+          buffer.text += delta.content;
+        }
       }
     } catch {
       // malformed frame: skip (fail-open) — never alters the forwarded stream.
@@ -427,19 +460,22 @@ function parseOpenAIEvent(buffer: SSEAccumulator, event: string): void {
 // JSON frame would JSON.parse-fail and silently drop assistant content. Never
 // disturbs the bytes forwarded to the client (principle 8 — the caller writes the
 // chunk FIRST, then feeds a copy here).
-function accumulateOpenAIChunk(buffer: SSEAccumulator, chunk: string): void {
+function accumulateOpenAIChunk(buffer: SSEAccumulator, chunk: string, maxBytes: number): void {
   buffer.pending += chunk;
   const events = buffer.pending.split("\n\n");
   // The last segment may be an incomplete event — keep it for the next chunk.
   buffer.pending = events.pop() ?? "";
-  for (const event of events) parseOpenAIEvent(buffer, event);
+  for (const event of events) {
+    parseOpenAIEvent(buffer, event, maxBytes);
+    if (buffer.limited) return;
+  }
 }
 
 // Flush the final buffered event at stream end (the last frame may arrive without
 // a trailing `\n\n`). Clears pending so it is idempotent.
-function flushOpenAIChunk(buffer: SSEAccumulator): void {
+function flushOpenAIChunk(buffer: SSEAccumulator, maxBytes: number): void {
   if (buffer.pending !== "") {
-    parseOpenAIEvent(buffer, buffer.pending);
+    parseOpenAIEvent(buffer, buffer.pending, maxBytes);
     buffer.pending = "";
   }
 }
@@ -897,7 +933,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
       const stream = result.stream;
       // Accumulate the assistant text for observeOutbound WITHOUT touching the
       // forwarded bytes (principle 8): write the chunk first, then parse a copy.
-      const assistant: SSEAccumulator = { text: "", pending: "" };
+      const assistant = createSSEAccumulator();
       // Accumulate raw SSE chunks so the finally block can parse the trailing
       // usage chunk and backfill the streamed completion cost (#6 — execute()
       // couldn't know it at peek time). This runs REGARDLESS of capture_payloads:
@@ -951,7 +987,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
             captured.push(outboundChunk);
             await sse.write(outboundChunk);
             genTimer.mark();
-            if (deps.memory !== undefined) accumulateOpenAIChunk(assistant, outboundChunk);
+            if (deps.memory !== undefined) assistant.push(outboundChunk);
             lastWrite = outboundChunk;
           }
           const tail = streamModelRestamper?.flush() ?? "";
@@ -959,7 +995,7 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
             captured.push(tail);
             await sse.write(tail);
             genTimer.mark();
-            if (deps.memory !== undefined) accumulateOpenAIChunk(assistant, tail);
+            if (deps.memory !== undefined) assistant.push(tail);
             lastWrite = tail;
           }
         } catch (err) {
@@ -1025,10 +1061,10 @@ export function registerChatRoutes(app: Hono<AppEnv>, deps: ChatRouteDeps): void
               // tool-call-only turn) so the served-model stamp still lands; the empty
               // responseMessages just persist nothing while the stamp records the
               // model auto-compaction prices itself from.
-              if (deps.memory !== undefined) {
+              if (deps.memory !== undefined && !assistant.limited) {
                 // Flush the last partial event the \n\n-split loop held back, so a
                 // final frame without a trailing \n\n is not dropped.
-                flushOpenAIChunk(assistant);
+                flushOpenAIChunk(assistant, runtimeMemoryBudget().responseCaptureBytes);
                 const memoryObserve = deps.memory.observe;
                 const responseMessages: IRMessage[] =
                   assistant.text.length > 0 ? [{ role: "assistant", content: assistant.text }] : [];

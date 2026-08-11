@@ -20,7 +20,18 @@ import { createApp } from "../app.js";
 import { authMiddleware } from "../middleware/auth.js";
 import { createBodyMemoryAdmission } from "../runtime/memory-admission.js";
 import { createWriteQueue } from "../runtime/write-queue.js";
-import { type ChatRouteDeps, registerChatRoutes } from "./chat.js";
+import { type ChatRouteDeps, createSSEAccumulator, registerChatRoutes } from "./chat.js";
+
+describe("createSSEAccumulator", () => {
+  it("drops reconstructed text after its byte budget is exceeded", () => {
+    const accumulator = createSSEAccumulator(4);
+
+    accumulator.push('data: {"choices":[{"delta":{"content":"hello"}}]}\n\n');
+
+    expect(accumulator.limited).toBe(true);
+    expect(accumulator.text).toBe("");
+  });
+});
 
 // ── auth fixtures ─────────────────────────────────────────────────────────────
 

@@ -18,6 +18,7 @@ import {
 
 const RESPONSES_WEBSOCKET_PATHS = new Set(["/v1/responses", "/responses", "/openai/v1/responses"]);
 const DEFAULT_PREFLIGHT_TIMEOUT_MS = 6_000;
+const DEFAULT_IDLE_SESSION_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_MAX_PREFLIGHT_REQUESTS = 128;
 
 const HOP_BY_HOP_HEADERS = new Set([
@@ -69,6 +70,8 @@ export interface ResponsesWebSocketBridgeOptions {
   /** Optional test/embedding limit for pending authenticated upgrades. */
   maxPreflightRequests?: number;
   preflightTimeoutMs?: number;
+  /** Optional test/embedding limit for an inactive Responses websocket session. */
+  idleSessionTimeoutMs?: number;
 }
 
 export interface ResponsesWebSocketUpgradeServer {
@@ -514,6 +517,7 @@ export function installResponsesWebSocketBridge({
   maxPayloadBytes,
   maxPreflightRequests,
   preflightTimeoutMs,
+  idleSessionTimeoutMs,
 }: ResponsesWebSocketBridgeOptions): ResponsesWebSocketBridge {
   const memoryBudget = runtimeMemoryBudget();
   const admission =
@@ -537,6 +541,10 @@ export function installResponsesWebSocketBridge({
     1,
     Math.floor(maxPreflightRequests ?? DEFAULT_MAX_PREFLIGHT_REQUESTS),
   );
+  const websocketIdleSessionTimeoutMs = Math.max(
+    1,
+    Math.floor(idleSessionTimeoutMs ?? DEFAULT_IDLE_SESSION_TIMEOUT_MS),
+  );
   const metadataByRequest = new WeakMap<IncomingMessage, UpgradeMetadata>();
   const websocketServer = new WebSocketServer({
     noServer: true,
@@ -558,6 +566,11 @@ export function installResponsesWebSocketBridge({
     let sessionClosed = false;
     let processing = false;
     let activeTurnController: AbortController | null = null;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearIdleTimer = () => {
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
+      idleTimer = undefined;
+    };
     const closeUpstreamSession = async () => {
       if (sessionClosed) return;
       sessionClosed = true;
@@ -566,12 +579,25 @@ export function installResponsesWebSocketBridge({
         .catch(() => {});
     };
     const abort = () => {
+      clearIdleTimer();
       controller.abort();
       activeTurnController?.abort();
       void closeUpstreamSession();
     };
+    const armIdleTimer = () => {
+      clearIdleTimer();
+      idleTimer = setTimeout(() => {
+        idleTimer = undefined;
+        if (processing) return;
+        abort();
+        if (socket.readyState === WebSocket.OPEN)
+          socket.close(1001, "websocket session idle timeout");
+      }, websocketIdleSessionTimeoutMs);
+      idleTimer.unref?.();
+    };
     socket.on("close", abort);
     socket.on("error", abort);
+    armIdleTimer();
     socket.on("message", (data) => {
       if (controller.signal.aborted || socket.readyState !== WebSocket.OPEN) return;
       if (processing) {
@@ -598,6 +624,7 @@ export function installResponsesWebSocketBridge({
         return;
       }
       processing = true;
+      clearIdleTimer();
       const turnController = new AbortController();
       activeTurnController = turnController;
       const abortTurn = () => turnController.abort();
@@ -630,6 +657,7 @@ export function installResponsesWebSocketBridge({
           processing = false;
           acquired.lease.release();
           ingressAcquired.lease.release();
+          if (!controller.signal.aborted && socket.readyState === WebSocket.OPEN) armIdleTimer();
         }
       })();
     });

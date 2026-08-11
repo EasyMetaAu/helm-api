@@ -85,6 +85,8 @@ async function startBridge(
     preflightTimeoutMs?: number;
     maxPayloadBytes?: number;
     maxPreflightRequests?: number;
+    maxSseFrameBytes?: number;
+    idleSessionTimeoutMs?: number;
   } = {},
 ) {
   const server = createServer((_req, res) => {
@@ -106,6 +108,8 @@ async function startBridge(
     preflightTimeoutMs: options.preflightTimeoutMs,
     maxPayloadBytes: options.maxPayloadBytes,
     maxPreflightRequests: options.maxPreflightRequests,
+    maxSseFrameBytes: options.maxSseFrameBytes,
+    idleSessionTimeoutMs: options.idleSessionTimeoutMs,
   });
   openBridges.push(bridge);
   server.listen(0, "127.0.0.1");
@@ -545,6 +549,42 @@ describe("Responses websocket bridge", () => {
     expect(captured[0]?.headers.get("upgrade")).toBeNull();
     expect(captured[0]?.headers.get("sec-websocket-key")).toBeNull();
     expect(captured[0]?.headers.get("accept")).toBe("text/event-stream");
+  });
+
+  it("resets the idle deadline for accepted turns and closes the upstream session on expiry", async () => {
+    let closeSessionCalls = 0;
+    let closedSessionId = "";
+    const baseUrl = await startBridge(
+      () =>
+        new Response(
+          'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+      undefined,
+      {
+        idleSessionTimeoutMs: 100,
+        closeSession: (sessionId) => {
+          closeSessionCalls += 1;
+          closedSessionId = sessionId;
+        },
+      },
+    );
+    const socket = await connect(`${baseUrl}/v1/responses`);
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await collectTurn(socket, { type: "response.create", input: [], stream: true });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+
+    const [code] = (await Promise.race([
+      once(socket, "close"),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("idle close timed out")), 250),
+      ),
+    ])) as [number, Buffer];
+    expect(code).toBe(1001);
+    expect(closeSessionCalls).toBe(1);
+    expect(closedSessionId).not.toBe("");
   });
 
   it("closes a connection that pipelines a second active response without injecting an error", async () => {
