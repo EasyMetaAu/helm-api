@@ -1,4 +1,4 @@
-import { type ConfigStore, decryptSecret, encryptSecret } from "@helm/core";
+import type { ConfigStore } from "@helm/core";
 import { normalizeOpenAICodexClientVersion } from "./codex-client-version.js";
 
 export const CODEX_MODEL_CACHE_CONFIG_KEY = "oauth.codex_model_cache";
@@ -37,18 +37,6 @@ export interface CodexModelCacheOptions {
   maxEntries?: number;
   now?: () => number;
 }
-
-interface PersistedCodexModelCache {
-  version: 1;
-  entries: CodexModelCacheEntry[];
-}
-
-interface LoadedCodexModelCache {
-  entries: CodexModelCacheEntry[];
-  needsCleanup: boolean;
-}
-
-const mutationQueues = new WeakMap<ConfigStore, Promise<void>>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -89,15 +77,6 @@ function normalizeKey(key: CodexModelCacheKey): CodexModelCacheKey | null {
   return clientVersion === null ? null : { ...key, clientVersion };
 }
 
-function sameKey(left: CodexModelCacheKey, right: CodexModelCacheKey): boolean {
-  return (
-    left.providerId === right.providerId &&
-    left.account === right.account &&
-    left.accountIdentity === right.accountIdentity &&
-    left.clientVersion === right.clientVersion
-  );
-}
-
 function keyId(key: CodexModelCacheKey): string {
   return JSON.stringify([key.providerId, key.account, key.accountIdentity, key.clientVersion]);
 }
@@ -109,100 +88,9 @@ function cloneEntry(entry: CodexModelCacheEntry): CodexModelCacheEntry {
   };
 }
 
-function boundEntries(values: readonly unknown[], maxEntries: number): CodexModelCacheEntry[] {
-  const sorted = values
-    .map(parseEntry)
-    .filter((entry): entry is CodexModelCacheEntry => entry !== null)
-    .sort((left, right) => right.fetchedAtMs - left.fetchedAtMs);
-  const seen = new Set<string>();
-  const bounded: CodexModelCacheEntry[] = [];
-  for (const entry of sorted) {
-    const id = keyId(entry);
-    if (seen.has(id)) continue;
-    seen.add(id);
-    bounded.push(entry);
-    if (bounded.length >= maxEntries) break;
-  }
-  return bounded;
-}
-
-async function loadEntries(
-  config: ConfigStore,
-  encKey: Buffer,
-  maxEntries: number,
-): Promise<LoadedCodexModelCache> {
-  try {
-    const blob = await config.get(CODEX_MODEL_CACHE_CONFIG_KEY);
-    if (!blob) return { entries: [], needsCleanup: false };
-    const parsed: unknown = JSON.parse(decryptSecret(blob, encKey));
-    if (!isRecord(parsed) || parsed.version !== 1 || !Array.isArray(parsed.entries)) {
-      return { entries: [], needsCleanup: false };
-    }
-    const entries = boundEntries(parsed.entries, maxEntries);
-    return {
-      entries,
-      needsCleanup: JSON.stringify(parsed.entries) !== JSON.stringify(entries),
-    };
-  } catch {
-    return { entries: [], needsCleanup: false };
-  }
-}
-
-async function saveEntries(
-  config: ConfigStore,
-  encKey: Buffer,
-  entries: CodexModelCacheEntry[],
-): Promise<void> {
-  try {
-    const payload: PersistedCodexModelCache = {
-      version: 1,
-      entries: entries.map(cloneEntry),
-    };
-    await config.set(CODEX_MODEL_CACHE_CONFIG_KEY, encryptSecret(JSON.stringify(payload), encKey));
-  } catch {
-    // Model discovery is an optimization; persistence failure must not block routing.
-  }
-}
-
-function waitForSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (!signal) return promise;
-  if (signal.aborted) return Promise.reject(signal.reason);
-  return new Promise<T>((resolve, reject) => {
-    const aborted = () => reject(signal.reason);
-    signal.addEventListener("abort", aborted, { once: true });
-    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", aborted));
-  });
-}
-
-function serializeMutation<T>(
-  config: ConfigStore,
-  work: () => Promise<T>,
-  signal?: AbortSignal,
-): Promise<T> {
-  const previous = mutationQueues.get(config) ?? Promise.resolve();
-  const run = previous.then(
-    () => {
-      signal?.throwIfAborted();
-      return work();
-    },
-    () => {
-      signal?.throwIfAborted();
-      return work();
-    },
-  );
-  mutationQueues.set(
-    config,
-    run.then(
-      () => undefined,
-      () => undefined,
-    ),
-  );
-  return waitForSignal(run, signal);
-}
-
 export function createCodexModelCache(
-  config: ConfigStore,
-  encKey: Buffer,
+  _config: ConfigStore,
+  _encKey: Buffer,
   options: CodexModelCacheOptions = {},
 ): CodexModelCache {
   const now = options.now ?? (() => Date.now());
@@ -211,30 +99,34 @@ export function createCodexModelCache(
     options.maxEntries === undefined || !Number.isFinite(options.maxEntries)
       ? DEFAULT_CODEX_MODEL_CACHE_MAX_ENTRIES
       : Math.max(1, Math.floor(options.maxEntries));
-  let hotEntries: CodexModelCacheEntry[] | null = null;
-  let hydration: Promise<CodexModelCacheEntry[]> | null = null;
+  // Model discovery is an optimization. Keep it process-local so the legacy
+  // aggregate encrypted blob can never be materialized on a request path.
+  const hotEntries = new Map<string, CodexModelCacheEntry>();
 
-  const hydrate = (signal?: AbortSignal): Promise<CodexModelCacheEntry[]> => {
-    if (hotEntries !== null) return Promise.resolve(hotEntries);
-    if (hydration === null) {
-      hydration = serializeMutation(config, async () => {
-        const loaded = await loadEntries(config, encKey, maxEntries);
-        if (loaded.needsCleanup) await saveEntries(config, encKey, loaded.entries);
-        hotEntries = loaded.entries;
-        return loaded.entries;
-      }).finally(() => {
-        hydration = null;
-      });
+  const remember = (entry: CodexModelCacheEntry): void => {
+    const id = keyId(entry);
+    hotEntries.delete(id);
+    hotEntries.set(id, entry);
+    while (hotEntries.size > maxEntries) {
+      let oldestId: string | undefined;
+      let oldestAt = Number.POSITIVE_INFINITY;
+      for (const [candidateId, candidate] of hotEntries) {
+        if (candidate.fetchedAtMs < oldestAt) {
+          oldestId = candidateId;
+          oldestAt = candidate.fetchedAtMs;
+        }
+      }
+      if (oldestId === undefined) break;
+      hotEntries.delete(oldestId);
     }
-    return waitForSignal(hydration, signal);
   };
 
   return {
     async get(key, signal) {
+      signal?.throwIfAborted();
       const normalizedKey = normalizeKey(key);
       if (normalizedKey === null) return null;
-      const entries = await hydrate(signal);
-      const entry = entries.find((candidate) => sameKey(candidate, normalizedKey));
+      const entry = hotEntries.get(keyId(normalizedKey));
       if (!entry) return null;
       return {
         entry: cloneEntry(entry),
@@ -245,38 +137,19 @@ export function createCodexModelCache(
     async upsert(entry) {
       const normalized = parseEntry(entry);
       if (normalized === null) return null;
-      return serializeMutation(config, async () => {
-        const { entries } = await loadEntries(config, encKey, maxEntries);
-        const next = cloneEntry(normalized);
-        const index = entries.findIndex((candidate) => sameKey(candidate, next));
-        if (index === -1) entries.push(next);
-        else entries[index] = next;
-        const bounded = boundEntries(entries, maxEntries);
-        await saveEntries(config, encKey, bounded);
-        hotEntries = bounded;
-        return cloneEntry(next);
-      });
+      remember(normalized);
+      return cloneEntry(normalized);
     },
 
     async renew(key, etag) {
       const normalizedKey = normalizeKey(key);
       if (normalizedKey === null) return null;
-      return serializeMutation(config, async () => {
-        const entries = hotEntries ?? (await loadEntries(config, encKey, maxEntries)).entries;
-        const index = entries.findIndex((candidate) => sameKey(candidate, normalizedKey));
-        if (index === -1 || entries[index]?.etag !== etag) return null;
-        const renewed = cloneEntry({
-          ...entries[index],
-          fetchedAtMs: now(),
-        });
-        entries[index] = renewed;
-        const bounded = boundEntries(entries, maxEntries);
-        // Same-ETag renewal is only a process-local freshness optimization. Persisting
-        // the whole encrypted catalog every TTL window creates a large periodic heap
-        // spike; after a restart, a stale timestamp safely causes one network refresh.
-        hotEntries = bounded;
-        return cloneEntry(renewed);
-      });
+      const id = keyId(normalizedKey);
+      const entry = hotEntries.get(id);
+      if (!entry || entry.etag !== etag) return null;
+      const renewed = cloneEntry({ ...entry, fetchedAtMs: now() });
+      hotEntries.set(id, renewed);
+      return cloneEntry(renewed);
     },
   };
 }
