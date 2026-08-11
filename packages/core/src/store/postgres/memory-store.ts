@@ -996,6 +996,7 @@ export class PgMemoryStore implements MemoryStore {
              AND type = 'reflector'
              AND scope_id = ${scopeId}
              AND status = 'running'
+             AND lease_generation = ${input.leaseGeneration}
           RETURNING id
         `),
       );
@@ -1046,7 +1047,12 @@ export class PgMemoryStore implements MemoryStore {
     });
   }
 
-  async updateJobStatus(jobId: string, status: MemoryJobStatus, error?: string): Promise<void> {
+  async updateJobStatus(
+    jobId: string,
+    status: MemoryJobStatus,
+    error?: string,
+    leaseGeneration?: number,
+  ): Promise<void> {
     await this.db
       .update(memoryJobs)
       .set({
@@ -1054,7 +1060,15 @@ export class PgMemoryStore implements MemoryStore {
         error: error ?? null,
         updatedAt: this.now().getTime(),
       })
-      .where(eq(memoryJobs.id, jobId));
+      .where(
+        leaseGeneration === undefined
+          ? eq(memoryJobs.id, jobId)
+          : and(
+              eq(memoryJobs.id, jobId),
+              eq(memoryJobs.status, "running"),
+              eq(memoryJobs.leaseGeneration, leaseGeneration),
+            ),
+      );
   }
 
   // Enqueue a background job. DEDUPE (D6): the partial unique index on OPEN
@@ -1115,7 +1129,8 @@ export class PgMemoryStore implements MemoryStore {
     const staleBefore = updatedAt - RUNNING_LEASE_MS;
     const result = (await this.db.execute(sql`
       UPDATE memory_jobs
-         SET status = 'running', updated_at = ${updatedAt}
+         SET status = 'running', updated_at = ${updatedAt},
+             lease_generation = lease_generation + 1
        WHERE id IN (
          SELECT id FROM memory_jobs
           WHERE status = 'pending'
@@ -1124,17 +1139,26 @@ export class PgMemoryStore implements MemoryStore {
           LIMIT ${limit}
           FOR UPDATE SKIP LOCKED
        )
-      RETURNING id, type, scope_id
+      RETURNING id, type, scope_id, lease_generation
     `)) as
-      | { rows?: Array<{ id: string; type: string; scope_id: string }> }
+      | {
+          rows?: Array<{
+            id: string;
+            type: string;
+            scope_id: string;
+            lease_generation: number;
+          }>;
+        }
       | Array<{
           id: string;
           type: string;
           scope_id: string;
+          lease_generation: number;
         }>;
     const rows = Array.isArray(result) ? result : (result.rows ?? []);
     return rows.map((row) => ({
       jobId: row.id,
+      leaseGeneration: Number(row.lease_generation),
       type: row.type as MemoryJobRow["type"],
       scope: decodeScopeId(row.scope_id),
     }));

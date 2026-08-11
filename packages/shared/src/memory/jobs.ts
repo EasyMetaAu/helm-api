@@ -31,6 +31,9 @@ export const MemoryJobEnqueueInputSchema = z.object({
 // the scope_id column. The worker dispatches on `type` and consumes `scope`.
 export const MemoryJobRowSchema = z.object({
   jobId: z.string().min(1),
+  // Incremented atomically on every claim/reclaim. Optional only so older
+  // in-process fixtures remain parseable; production claims always return it.
+  leaseGeneration: z.number().int().positive().optional(),
   type: MemoryJobTypeSchema,
   scope: ReflectionScopeSchema,
 });

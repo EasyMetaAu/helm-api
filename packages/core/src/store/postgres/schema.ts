@@ -344,6 +344,7 @@ export const memoryJobs = pgTable("memory_jobs", {
   type: text("type").notNull(),
   scopeId: text("scope_id").notNull(),
   status: text("status").notNull(),
+  leaseGeneration: integer("lease_generation").notNull().default(0),
   error: text("error"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
   updatedAt: bigint("updated_at", { mode: "number" }).notNull(),

@@ -1,6 +1,7 @@
 import type { MemoryFactInput, Observation, Reflection, ReflectionScope } from "@helm/shared";
 import type { MemoryFactReconcileResult, MemoryStore } from "../store/ports.js";
 import { buildReconciledFactBatch } from "./forgetting/facts.js";
+import { updateClaimedJobStatus } from "./job-lease.js";
 
 // ponytail: skip oversized legacy scopes; replace with bounded incremental merging when required.
 const MAX_REFLECTOR_OBSERVATIONS = 512;
@@ -20,6 +21,7 @@ const MAX_REFLECTOR_OBSERVATIONS = 512;
 // model). Enqueued by the periodic scheduler, consumed asynchronously by a worker.
 export interface ReflectorJob {
   jobId: string;
+  leaseGeneration?: number;
   scope: ReflectionScope;
 }
 
@@ -150,6 +152,7 @@ export async function runReflectorJob(
     ) {
       if (deps.memoryStore.commitReflectionJob !== undefined) {
         const committed = await deps.memoryStore.commitReflectionJob(job.jobId, {
+          leaseGeneration: job.leaseGeneration ?? 0,
           target,
           reflection: { action: "unchanged" },
           facts: [],
@@ -160,7 +163,7 @@ export async function runReflectorJob(
           return { reflectionId: null, version: null, changed: false };
         }
       } else {
-        await deps.memoryStore.updateJobStatus(job.jobId, "done");
+        await updateClaimedJobStatus(deps.memoryStore, job, "done");
       }
       deps.log("memory.reflector.history_skipped", {
         scope: job.scope,
@@ -201,6 +204,7 @@ export async function runReflectorJob(
       const shouldArchive = deps.forgetting?.enabled === true && previousReflection !== null;
       if (deps.memoryStore.commitReflectionJob !== undefined) {
         const committed = await deps.memoryStore.commitReflectionJob(job.jobId, {
+          leaseGeneration: job.leaseGeneration ?? 0,
           target,
           reflection: { action: shouldArchive ? "archive" : "unchanged" },
           facts: [],
@@ -231,7 +235,7 @@ export async function runReflectorJob(
         deps.memoryStore.archiveReflections !== undefined
       ) {
         await deps.memoryStore.archiveReflections(target);
-        await deps.memoryStore.updateJobStatus(job.jobId, "done");
+        await updateClaimedJobStatus(deps.memoryStore, job, "done");
         deps.log("memory.reflector.archived_empty_scope", {
           scope: job.scope,
           target_scope: target,
@@ -240,7 +244,7 @@ export async function runReflectorJob(
         return { reflectionId: null, version: null, changed: true };
       }
       // No previous reflection (or no archive support) — nothing to merge or clear.
-      await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      await updateClaimedJobStatus(deps.memoryStore, job, "done");
       deps.log("memory.reflector.noop_no_observations", { scope: job.scope });
       return {
         reflectionId: previousReflection?.id ?? null,
@@ -279,6 +283,7 @@ export async function runReflectorJob(
 
     if (deps.memoryStore.commitReflectionJob !== undefined) {
       const committed = await deps.memoryStore.commitReflectionJob(job.jobId, {
+        leaseGeneration: job.leaseGeneration ?? 0,
         target,
         reflection: unchanged
           ? { action: "unchanged" }
@@ -319,7 +324,7 @@ export async function runReflectorJob(
     // implement commitReflectionJob and never take this non-atomic fallback.
     await persistFactsLegacy(deps, target, facts, now);
     if (unchanged) {
-      await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      await updateClaimedJobStatus(deps.memoryStore, job, "done");
       deps.log("memory.reflector.unchanged", { scope: job.scope, version: nextVersion });
       return {
         reflectionId: previousReflection.id,
@@ -334,7 +339,7 @@ export async function runReflectorJob(
       tokenEstimate,
       updatedAt: now,
     });
-    await deps.memoryStore.updateJobStatus(job.jobId, "done");
+    await updateClaimedJobStatus(deps.memoryStore, job, "done");
     deps.log("memory.reflector.merged", {
       scope: job.scope,
       target_scope: target,
@@ -348,7 +353,7 @@ export async function runReflectorJob(
     // it on the job + log; this runs off the main request path entirely.
     const message = err instanceof Error ? err.message : String(err);
     try {
-      await deps.memoryStore.updateJobStatus(job.jobId, "failed", message);
+      await updateClaimedJobStatus(deps.memoryStore, job, "failed", message);
     } catch (updateErr) {
       // Even the failure bookkeeping is best-effort — still never throw.
       deps.log("memory.reflector.job_update_failed", {

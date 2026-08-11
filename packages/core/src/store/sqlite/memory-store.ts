@@ -1008,9 +1008,12 @@ export class SqliteMemoryStore implements MemoryStore {
           `UPDATE memory_jobs
               SET status = 'done', error = NULL, updated_at = ?
             WHERE id = ? AND type = 'reflector' AND scope_id = ? AND status = 'running'
+              AND lease_generation = ?
           RETURNING id`,
         )
-        .get(input.now.getTime(), jobId, scopeId) as { id: string } | undefined;
+        .get(input.now.getTime(), jobId, scopeId, input.leaseGeneration) as
+        | { id: string }
+        | undefined;
       if (claimed === undefined) return null;
 
       const facts = this.reconcileFactsSync({
@@ -1053,15 +1056,24 @@ export class SqliteMemoryStore implements MemoryStore {
   }
 
   // Update a background job's lifecycle status (+ optional error on failure).
-  async updateJobStatus(jobId: string, status: MemoryJobStatus, error?: string): Promise<void> {
+  async updateJobStatus(
+    jobId: string,
+    status: MemoryJobStatus,
+    error?: string,
+    leaseGeneration?: number,
+  ): Promise<void> {
     this.db
       .update(memoryJobs)
-      .set({
-        status,
-        error: error ?? null,
-        updatedAt: this.now(),
-      })
-      .where(eq(memoryJobs.id, jobId))
+      .set({ status, error: error ?? null, updatedAt: this.now() })
+      .where(
+        leaseGeneration === undefined
+          ? eq(memoryJobs.id, jobId)
+          : and(
+              eq(memoryJobs.id, jobId),
+              eq(memoryJobs.status, "running"),
+              eq(memoryJobs.leaseGeneration, leaseGeneration),
+            ),
+      )
       .run();
   }
 
@@ -1122,7 +1134,7 @@ export class SqliteMemoryStore implements MemoryStore {
     const rows = this.db.$sqlite
       .prepare(
         `UPDATE memory_jobs
-            SET status = 'running', updated_at = ?
+            SET status = 'running', updated_at = ?, lease_generation = lease_generation + 1
           WHERE id IN (
             SELECT id FROM memory_jobs
              WHERE status = 'pending'
@@ -1130,11 +1142,17 @@ export class SqliteMemoryStore implements MemoryStore {
              ORDER BY created_at ASC, id ASC
              LIMIT ?
           )
-        RETURNING id, type, scope_id`,
+        RETURNING id, type, scope_id, lease_generation`,
       )
-      .all(updatedAt, staleBefore, limit) as Array<{ id: string; type: string; scope_id: string }>;
+      .all(updatedAt, staleBefore, limit) as Array<{
+      id: string;
+      type: string;
+      scope_id: string;
+      lease_generation: number;
+    }>;
     return rows.map((row) => ({
       jobId: row.id,
+      leaseGeneration: row.lease_generation,
       // The type column is constrained to the enum at enqueue time; widen back.
       type: row.type as MemoryJobRow["type"],
       scope: decodeScopeId(row.scope_id),

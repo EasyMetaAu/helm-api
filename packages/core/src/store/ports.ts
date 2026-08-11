@@ -777,6 +777,7 @@ export type MemoryReflectionCommitAction =
   | { action: "unchanged" };
 
 export interface MemoryReflectionJobCommitInput {
+  leaseGeneration: number;
   target: ReflectionScope;
   reflection: MemoryReflectionCommitAction;
   facts: MemoryFactInput[];
@@ -901,7 +902,12 @@ export interface MemoryStore {
   // Update a background job's lifecycle status (+ optional error on failure).
   // The Observer/Reflector mark their job done/failed; failure is recorded here,
   // never bubbled to the main request path (fail-open).
-  updateJobStatus(jobId: string, status: MemoryJobStatus, error?: string): Promise<void>;
+  updateJobStatus(
+    jobId: string,
+    status: MemoryJobStatus,
+    error?: string,
+    leaseGeneration?: number,
+  ): Promise<void>;
   // POST-MVP Phase 2 (queue). Enqueue a background job (observer | reflector) for
   // a scope. The scope is encoded into the single scope_id column (canonical JSON,
   // D1). DEDUPE (D6): if an OPEN (pending) job of the same (type, scope_id) already

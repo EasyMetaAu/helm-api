@@ -7,6 +7,7 @@ import {
   resolveCompactionTunables,
 } from "./compaction-policy.js";
 import { buildReconciledFactBatch } from "./forgetting/facts.js";
+import { updateClaimedJobStatus } from "./job-lease.js";
 import type { ExtractedFact } from "./reflector.js";
 
 // consolidate.max_facts_per_subject schema default — used when the composition root
@@ -184,6 +185,7 @@ async function maybeReenqueueForLateMessages(
 // (the idle backstop) is decided at RUN TIME from message ages, not a job flag.
 export interface ObserverJob {
   jobId: string;
+  leaseGeneration?: number;
   accountId: string;
   threadId: string;
   // Salient-fact fast path (Change A): the thread's cross-thread scope, carried
@@ -368,7 +370,7 @@ export async function runObserverJob(
       ((readMeta?.messageCount ?? 0) > MAX_OBSERVER_THREAD_MESSAGES ||
         (readMeta?.observationCount ?? 0) > MAX_OBSERVER_THREAD_OBSERVATIONS)
     ) {
-      await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      await updateClaimedJobStatus(deps.memoryStore, job, "done");
       deps.log("memory.observer.history_skipped", {
         thread_id: job.threadId,
         max_messages: MAX_OBSERVER_THREAD_MESSAGES,
@@ -494,7 +496,7 @@ export async function runObserverJob(
     if (selected === undefined) {
       // No compaction this run → mine the uncovered turns for durable facts.
       await maybeEagerExtractFacts(job, all, covered, deps);
-      await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      await updateClaimedJobStatus(deps.memoryStore, job, "done");
       if (!bounded) await maybeReenqueueForLateMessages(job, snapshotMessageIds, deps);
       const lastDecision = decisions.at(-1)?.decision;
       deps.log("memory.observer.noop_compaction_skipped", {
@@ -514,7 +516,7 @@ export async function runObserverJob(
       // Idempotent / nothing to do — never write an empty observation. Still a
       // no-compaction run, so the eager fact pass applies.
       await maybeEagerExtractFacts(job, all, covered, deps);
-      await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      await updateClaimedJobStatus(deps.memoryStore, job, "done");
       if (!bounded) await maybeReenqueueForLateMessages(job, snapshotMessageIds, deps);
       deps.log("memory.observer.noop_no_old_messages", { thread_id: job.threadId });
       return { observationId: null, sourceMessageRange: null };
@@ -574,7 +576,7 @@ export async function runObserverJob(
         })
       : await deps.memoryStore.appendObservation(observationInput);
     if (observationId == null) {
-      await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      await updateClaimedJobStatus(deps.memoryStore, job, "done");
       deps.log("memory.observer.frontier_stale", { thread_id: job.threadId });
       return { observationId: null, sourceMessageRange: null };
     }
@@ -582,7 +584,7 @@ export async function runObserverJob(
     // Book Observer tokens into their OWN bucket — never the provider/actor one.
     deps.costSink("observer", estimateObserverTokens(compressed, observationText));
 
-    await deps.memoryStore.updateJobStatus(job.jobId, "done");
+    await updateClaimedJobStatus(deps.memoryStore, job, "done");
     if (bounded) {
       if (observerPage?.hasMore === true || compressed.length < all.length) {
         await deps.memoryStore.enqueueJob({
@@ -619,7 +621,7 @@ export async function runObserverJob(
     // it on the job + log; the request that enqueued this job is long gone.
     const message = err instanceof Error ? err.message : String(err);
     try {
-      await deps.memoryStore.updateJobStatus(job.jobId, "failed", message);
+      await updateClaimedJobStatus(deps.memoryStore, job, "failed", message);
     } catch (updateErr) {
       // Even the failure bookkeeping is best-effort — still never throw.
       deps.log("memory.observer.job_update_failed", {

@@ -2779,6 +2779,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
 
       await expect(
         m.commitReflectionJob(staleJob.jobId, {
+          leaseGeneration: staleJob.leaseGeneration ?? 0,
           target: { accountId: "acct-a", projectId: "p-race" },
           reflection: {
             action: "upsert",
@@ -2828,7 +2829,8 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         updatedAt: new Date(1000),
       });
       const jobId = await m.enqueueJob({ type: "reflector", scope: target });
-      expect((await m.claimPendingJobs(1))[0]?.jobId).toBe(jobId);
+      const claimed = (await m.claimPendingJobs(1))[0];
+      expect(claimed?.jobId).toBe(jobId);
       const fact = {
         ownerId: "acct-a",
         projectId: "p-atomic",
@@ -2844,6 +2846,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       };
       await expect(
         m.commitReflectionJob(jobId, {
+          leaseGeneration: claimed?.leaseGeneration ?? 0,
           target,
           reflection: {
             action: "upsert",
@@ -2860,6 +2863,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
 
       await expect(
         m.commitReflectionJob(jobId, {
+          leaseGeneration: claimed?.leaseGeneration ?? 0,
           target,
           reflection: {
             action: "upsert",

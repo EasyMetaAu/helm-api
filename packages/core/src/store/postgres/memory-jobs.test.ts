@@ -62,6 +62,7 @@ describe("PgMemoryStore job queue", () => {
     expect(claimed).toEqual([
       {
         jobId: id,
+        leaseGeneration: 1,
         type: "reflector",
         scope: { accountId: "acct-a", projectId: "p1", threadId: "t1" },
       },
@@ -123,9 +124,67 @@ describe("PgMemoryStore job queue", () => {
     const reclaimed = await store.claimPendingJobs(10);
     expect(reclaimed).toHaveLength(1);
     expect(reclaimed[0]?.jobId).toBe(first[0]?.jobId);
+    expect(reclaimed[0]?.leaseGeneration).toBe((first[0]?.leaseGeneration ?? 0) + 1);
+
+    await store.updateJobStatus(
+      first[0]?.jobId ?? "",
+      "failed",
+      "stale owner",
+      first[0]?.leaseGeneration,
+    );
+    const statusRows = await db.execute(
+      sql`SELECT status FROM memory_jobs WHERE id = ${first[0]?.jobId ?? ""}`,
+    );
+    expect((statusRows as { rows?: Array<{ status: string }> }).rows?.[0]?.status).toBe("running");
 
     nowMs += 60_000;
     expect(await store.claimPendingJobs(10)).toEqual([]);
+    await db.$close();
+  });
+
+  it("fences stale atomic reflector publication after reclaim", async () => {
+    let nowMs = 1_000_000;
+    const db = await createPgliteDb();
+    const store = new PgMemoryStore(db, undefined, () => new Date(nowMs));
+    const target = { accountId: "acct-a", projectId: "p1" };
+    const jobId = await store.enqueueJob({ type: "reflector", scope: target });
+    const first = (await store.claimPendingJobs(1))[0];
+    nowMs += 11 * 60_000;
+    const reclaimed = (await store.claimPendingJobs(1))[0];
+
+    expect(
+      await store.commitReflectionJob(jobId, {
+        leaseGeneration: first?.leaseGeneration ?? 0,
+        target,
+        reflection: {
+          action: "upsert",
+          reflectionText: "stale",
+          version: 1,
+          tokenEstimate: 1,
+          updatedAt: new Date(nowMs),
+        },
+        facts: [],
+        now: new Date(nowMs),
+      }),
+    ).toBeNull();
+    expect(await store.getReflection(target)).toBeNull();
+
+    expect(
+      await store.commitReflectionJob(jobId, {
+        leaseGeneration: reclaimed?.leaseGeneration ?? 0,
+        target,
+        reflection: {
+          action: "upsert",
+          reflectionText: "current",
+          version: 1,
+          tokenEstimate: 1,
+          updatedAt: new Date(nowMs),
+        },
+        facts: [],
+        now: new Date(nowMs),
+      }),
+    ).not.toBeNull();
+    expect((await store.getReflection(target))?.reflectionText).toBe("current");
     await db.$close();
   });
 });

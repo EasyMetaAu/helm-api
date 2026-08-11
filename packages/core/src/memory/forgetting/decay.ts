@@ -1,5 +1,6 @@
 import type { ForgettingConfig, ReflectionScope } from "@helm/shared";
 import type { MemoryStore } from "../../store/ports.js";
+import { updateClaimedJobStatus } from "../job-lease.js";
 import { forgettingScore } from "./score.js";
 
 // The decay SWEEP (docs/12 "Eviction, demotion, promotion", pass 1 — memory_jobs.
@@ -32,6 +33,7 @@ import { forgettingScore } from "./score.js";
 // open decay row per account (docs/12 "buffer-flush … never per request").
 export interface DecayJob {
   jobId: string;
+  leaseGeneration?: number;
   scope: ReflectionScope;
 }
 
@@ -81,7 +83,7 @@ export async function runDecayJob(job: DecayJob, deps: DecayDeps): Promise<void>
     // Mark it done (a no-op, not a failure: nothing is wrong, the operator turned
     // forgetting off) so it never lingers pending. enabled:false ⇒ zero archives.
     if (deps.config.enabled !== true) {
-      await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      await updateClaimedJobStatus(deps.memoryStore, job, "done");
       deps.log("memory.decay.noop_disabled", { account_id: accountId });
       return;
     }
@@ -91,8 +93,9 @@ export async function runDecayJob(job: DecayJob, deps: DecayDeps): Promise<void>
     const list = deps.memoryStore.listScorableObservations;
     const archive = deps.memoryStore.archiveObservations;
     if (list === undefined || archive === undefined) {
-      await deps.memoryStore.updateJobStatus(
-        job.jobId,
+      await updateClaimedJobStatus(
+        deps.memoryStore,
+        job,
         "failed",
         "decay: store lacks sweep methods",
       );
@@ -146,7 +149,7 @@ export async function runDecayJob(job: DecayJob, deps: DecayDeps): Promise<void>
     }
 
     if (condemned.length === 0) {
-      await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      await updateClaimedJobStatus(deps.memoryStore, job, "done");
       deps.log("memory.decay.noop_nothing_below_threshold", {
         account_id: accountId,
         scanned: rows.length,
@@ -244,7 +247,7 @@ export async function runDecayJob(job: DecayJob, deps: DecayDeps): Promise<void>
       }
     }
 
-    await deps.memoryStore.updateJobStatus(job.jobId, "done");
+    await updateClaimedJobStatus(deps.memoryStore, job, "done");
     deps.log("memory.decay.swept", {
       account_id: accountId,
       scanned: rows.length,
@@ -256,7 +259,7 @@ export async function runDecayJob(job: DecayJob, deps: DecayDeps): Promise<void>
     // runs entirely off the request path (the trigger that enqueued it is long gone).
     const message = err instanceof Error ? err.message : String(err);
     try {
-      await deps.memoryStore.updateJobStatus(job.jobId, "failed", message);
+      await updateClaimedJobStatus(deps.memoryStore, job, "failed", message);
     } catch (updateErr) {
       // Even the failure bookkeeping is best-effort — still never throw.
       deps.log("memory.decay.job_update_failed", {

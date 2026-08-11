@@ -1,5 +1,6 @@
 import type { ReflectionScope } from "@helm/shared";
 import type { MemoryStore } from "../../store/ports.js";
+import { updateClaimedJobStatus } from "../job-lease.js";
 import type { Embedder } from "./embedder.js";
 
 // docs/14 — the background embedding job: fill memory_facts.embedding (+ the sqlite-vec
@@ -11,6 +12,7 @@ import type { Embedder } from "./embedder.js";
 
 export interface EmbeddingJob {
   readonly jobId: string;
+  readonly leaseGeneration?: number;
   readonly scope: ReflectionScope; // account-scoped (scope.accountId)
 }
 
@@ -29,7 +31,12 @@ export async function runEmbeddingJob(job: EmbeddingJob, deps: EmbeddingJobDeps)
     const list = deps.memoryStore.listFactsNeedingEmbedding;
     const sink = deps.memoryStore.setFactEmbeddings;
     if (list === undefined || sink === undefined) {
-      await deps.memoryStore.updateJobStatus(job.jobId, "failed", "embedding: store lacks methods");
+      await updateClaimedJobStatus(
+        deps.memoryStore,
+        job,
+        "failed",
+        "embedding: store lacks methods",
+      );
       return;
     }
     const facts = await list.call(deps.memoryStore, {
@@ -39,7 +46,7 @@ export async function runEmbeddingJob(job: EmbeddingJob, deps: EmbeddingJobDeps)
       limit: deps.batchSize,
     });
     if (facts.length === 0) {
-      await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      await updateClaimedJobStatus(deps.memoryStore, job, "done");
       return;
     }
     const vectors = await deps.embedder.embed(facts.map((f) => f.factText));
@@ -52,7 +59,7 @@ export async function runEmbeddingJob(job: EmbeddingJob, deps: EmbeddingJobDeps)
           it.embedding !== undefined && it.embedding.length === deps.dim,
       );
     if (items.length > 0) await sink.call(deps.memoryStore, { accountId, items });
-    await deps.memoryStore.updateJobStatus(job.jobId, "done");
+    await updateClaimedJobStatus(deps.memoryStore, job, "done");
     deps.log("memory.embedding.done", { account_id: accountId, embedded: items.length });
     // A FULL batch likely leaves more unembedded facts (common right after enabling
     // embeddings or changing models on an existing store). Re-enqueue so the worker
@@ -69,7 +76,7 @@ export async function runEmbeddingJob(job: EmbeddingJob, deps: EmbeddingJobDeps)
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await deps.memoryStore.updateJobStatus(job.jobId, "failed", message);
+    await updateClaimedJobStatus(deps.memoryStore, job, "failed", message);
     deps.log("memory.embedding.failed", { account_id: accountId, error: message });
   }
 }
