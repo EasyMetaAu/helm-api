@@ -31,6 +31,8 @@ describe("PgMemoryStore — thread model stamp", () => {
 
     expect(await store.getThreadMeta({ accountId: "acct-a", threadId: "t1" })).toEqual({
       lastServedModel: null,
+      messageCount: 0,
+      observationCount: 0,
     });
     await store.stampThreadModel({
       accountId: "acct-a",
@@ -39,6 +41,8 @@ describe("PgMemoryStore — thread model stamp", () => {
     });
     expect(await store.getThreadMeta({ accountId: "acct-a", threadId: "t1" })).toEqual({
       lastServedModel: "anthropic/claude-x",
+      messageCount: 0,
+      observationCount: 0,
     });
     await db.$close();
   });
@@ -49,6 +53,8 @@ describe("PgMemoryStore — thread model stamp", () => {
     await store.stampThreadModel({ accountId: "acct-b", threadId: "t1", modelAlias: "evil" });
     expect(await store.getThreadMeta({ accountId: "acct-a", threadId: "t1" })).toEqual({
       lastServedModel: null,
+      messageCount: 0,
+      observationCount: 0,
     });
     expect(await store.getThreadMeta({ accountId: "acct-b", threadId: "t1" })).toBeNull();
     expect(await store.getThreadMeta({ accountId: "acct-a", threadId: "nope" })).toBeNull();
