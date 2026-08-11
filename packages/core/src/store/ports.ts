@@ -1048,10 +1048,14 @@ export interface MemoryStore {
   }): Promise<void>;
   // Auto-compaction — the read half. Return the thread's stamped model alias
   // (null when never stamped / unknown thread). OPTIONAL (`?`), same contract.
-  getThreadMeta?(input: {
-    accountId: string;
-    threadId: string;
-  }): Promise<{ lastServedModel: string | null } | null>;
+  getThreadMeta?(input: { accountId: string; threadId: string }): Promise<{
+    lastServedModel: string | null;
+    messageCount?: number;
+    observationCount?: number;
+  } | null>;
+  // Scalar guard for cross-thread reflector reads, avoiding unbounded heap
+  // materialization of project/resource observation sets.
+  getObservationCount?(scope: ReflectionScope): Promise<number>;
   // Idle-flush sweep (memory formation backstop) — run on the worker tick, never
   // per request. Return threads that went QUIET with uncompacted history: last
   // activity ≤ idleBeforeMs AND at least one message NEWER than the thread's

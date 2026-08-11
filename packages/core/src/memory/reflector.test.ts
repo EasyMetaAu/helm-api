@@ -479,3 +479,23 @@ describe("runReflectorJob — reflection target scope (readable by inject)", () 
     expect(upserts[0]?.threadId).toBeUndefined();
   });
 });
+
+describe("runReflectorJob — materialization guard", () => {
+  it("does not load an oversized cross-thread observation set", async () => {
+    const { store, jobUpdates } = makeFakeStore(makeObservations(["obs A"]));
+    store.getObservationCount = vi.fn(async () => 513);
+    const deps = makeDeps(store);
+    const job: ReflectorJob = {
+      jobId: "job-large",
+      scope: { accountId: "acct-a", projectId: "proj-1" },
+    };
+
+    await expect(runReflectorJob(job, deps)).resolves.toEqual({
+      reflectionId: null,
+      version: null,
+      changed: false,
+    });
+    expect(store.listObservations).not.toHaveBeenCalled();
+    expect(jobUpdates).toEqual([{ jobId: "job-large", status: "done" }]);
+  });
+});
