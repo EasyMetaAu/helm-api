@@ -143,6 +143,14 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
       if (!meta) {
         const sessionMeta = await deps.telemetry.getSessionRevisionMeta?.(traceId);
         if (sessionMeta) {
+          const decision = await deps.telemetry.getByRequestId(traceId);
+          if (decision?.session?.ref !== sessionMeta.sessionRef) {
+            return c.json({
+              captured: false,
+              source: "unavailable",
+              reason: "session_unavailable",
+            });
+          }
           const responseAdmission = deps.responseWorkAdmission ?? runtimeResponseWorkAdmission();
           if (
             sessionMeta.recoveryWireBytes === null ||
@@ -154,7 +162,6 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
               reason: "session_recovery_limited",
             });
           }
-          const decision = await deps.telemetry.getByRequestId(traceId);
           return c.json({
             captured: true,
             source: "session",

@@ -892,6 +892,25 @@ describe('requests detail page', () => {
     expect(screen.getByTestId('load-transcript')).toBeInTheDocument();
   });
 
+  it('hides transcript loading when the recorded Session is unavailable', () => {
+    render(DetailPage, {
+      data: {
+        detail: detail(),
+        payload: {
+          captured: false,
+          source: 'unavailable',
+          reason: 'session_unavailable',
+        },
+        requestId: 'tr_session_unavailable',
+      },
+    });
+
+    expect(screen.getByTestId('payload-summary')).toHaveTextContent(
+      'The session transcript is unavailable or has been cleaned up.',
+    );
+    expect(screen.queryByTestId('load-transcript')).not.toBeInTheDocument();
+  });
+
   it('surfaces a structured error with class, status, redacted message and redacted provider_raw', () => {
     render(DetailPage, {
       data: {
