@@ -3,7 +3,9 @@
 // (all Phase 1/2). Framework-agnostic (no Hono). Credentials come only from the
 // injected config (env-sourced) and are never logged or echoed. See docs/02.
 
+import { Buffer } from "node:buffer";
 import type { NativePassthroughInput } from "@helm/shared";
+import { createSSEIncompleteFrameGuard } from "../protocol/streaming.js";
 import {
   consumeResponseTextWithinBudget,
   ResponseBodyTooLargeError,
@@ -989,6 +991,9 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
       const reader = body.getReader();
       const decoder = new TextDecoder();
       let pendingFrame = "";
+      const frameGuard = cfg.normalizeReasoningDeltaAlias
+        ? createSSEIncompleteFrameGuard(runtimeResponseWorkAdmission())
+        : null;
       try {
         while (true) {
           // Inter-chunk liveness: `withTimeout` already cleared once headers
@@ -1004,12 +1009,14 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
             yield chunk;
             continue;
           }
+          frameGuard?.resize(Buffer.byteLength(pendingFrame) + Buffer.byteLength(chunk));
           pendingFrame += chunk;
           while (true) {
             const boundary = nextSseFrameBoundary(pendingFrame);
             if (!boundary) break;
             const frame = pendingFrame.slice(0, boundary.index);
             pendingFrame = pendingFrame.slice(boundary.index + boundary.separator.length);
+            frameGuard?.resize(Buffer.byteLength(pendingFrame));
             yield `${normalizeReasoningDeltaFrame(frame)}${boundary.separator}`;
           }
         }
@@ -1022,7 +1029,9 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
         }
         throw err;
       } finally {
+        await reader.cancel().catch(() => {});
         reader.releaseLock();
+        frameGuard?.release();
       }
     },
   };

@@ -23,11 +23,16 @@ import {
   isNativePassthroughCarrier,
   type NativePassthroughInput,
 } from "@helm/shared";
+import { createSSEIncompleteFrameGuard } from "../protocol/streaming.js";
 import {
   consumeResponseTextWithinBudget,
   ResponseBodyTooLargeError,
 } from "../runtime/bounded-response.js";
-import { ResponseWorkCapacityError } from "../runtime/response-work-admission.js";
+import {
+  type ResponseWorkAdmission,
+  ResponseWorkCapacityError,
+  runtimeResponseWorkAdmission,
+} from "../runtime/response-work-admission.js";
 import {
   type PreparedNativePassthroughRequest,
   prepareNativePassthroughRequest,
@@ -2670,12 +2675,14 @@ export async function* readResponsesEvents(
   // request timeout so a wedged mid-stream upstream is reclaimed, not hung
   // (connect/TTFB timeout was already cleared at headers).
   idleMs = 0,
+  workAdmission: ResponseWorkAdmission = runtimeResponseWorkAdmission(),
 ): AsyncGenerator<Record<string, unknown>> {
   const body = res.body;
   if (!body) return;
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  const frameGuard = createSSEIncompleteFrameGuard(workAdmission);
   try {
     while (true) {
       let read: { done: boolean; value?: Uint8Array };
@@ -2687,23 +2694,30 @@ export async function* readResponsesEvents(
       }
       const { done, value } = read;
       if (done) {
-        buffer += decoder.decode();
+        const tail = decoder.decode();
+        frameGuard.resize(Buffer.byteLength(buffer) + Buffer.byteLength(tail));
+        buffer += tail;
         if (buffer.trim() !== "") {
           const evt = parseResponsesSSEFrame(buffer);
           if (evt !== null) yield evt;
         }
         break;
       }
-      buffer += decoder.decode(value, { stream: true });
+      const decoded = decoder.decode(value, { stream: true });
+      frameGuard.resize(Buffer.byteLength(buffer) + Buffer.byteLength(decoded));
+      buffer += decoded;
       const { frames, tail } = splitCompleteSSEFrames(buffer);
       buffer = tail;
+      frameGuard.resize(Buffer.byteLength(buffer));
       for (const raw of frames) {
         const evt = parseResponsesSSEFrame(raw);
         if (evt !== null) yield evt;
       }
     }
   } finally {
+    await reader.cancel().catch(() => {});
     reader.releaseLock();
+    frameGuard.release();
   }
 }
 
@@ -2722,6 +2736,7 @@ export async function* readResponsesSSERaw(
   // timeout so a stream that wedges mid-flight is reclaimed (the connect/TTFB timeout was
   // already cleared once headers arrived). Identical semantics to readResponsesEvents.
   idleMs = 0,
+  workAdmission: ResponseWorkAdmission = runtimeResponseWorkAdmission(),
 ): AsyncGenerator<string> {
   const body = res.body;
   if (!body) {
@@ -2730,8 +2745,10 @@ export async function* readResponsesSSERaw(
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let detectionBuffer = "";
+  const frameGuard = createSSEIncompleteFrameGuard(workAdmission);
 
   function terminalEndInChunk(text: string, flush = false): number | null {
+    frameGuard.resize(Buffer.byteLength(detectionBuffer) + Buffer.byteLength(text));
     const previousTailLength = detectionBuffer.length;
     let remaining = detectionBuffer + text;
     let consumed = 0;
@@ -2763,6 +2780,7 @@ export async function* readResponsesSSERaw(
       }
     }
     detectionBuffer = flush ? "" : remaining;
+    frameGuard.resize(Buffer.byteLength(detectionBuffer));
     return null;
   }
 
@@ -2799,7 +2817,9 @@ export async function* readResponsesSSERaw(
       }
     }
   } finally {
+    await reader.cancel().catch(() => {});
     reader.releaseLock();
+    frameGuard.release();
   }
   throw new UpstreamError("upstream_error", "stream closed before response.completed");
 }

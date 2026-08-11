@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { lookup as nodeDnsLookup } from "node:dns/promises";
 import https from "node:https";
 import { Readable } from "node:stream";
@@ -5,6 +6,8 @@ import { type NativePassthroughInput, nativePassthroughBody } from "@helm/shared
 import { geminiTransformer } from "../protocol/gemini/gemini-transformer.js";
 import type { GeminiSSEEvent } from "../protocol/gemini/gemini-types.js";
 import { openaiTransformer } from "../protocol/openai.js";
+import { createSSEIncompleteFrameGuard } from "../protocol/streaming.js";
+import { runtimeResponseWorkAdmission } from "../runtime/response-work-admission.js";
 import {
   type ChatCompletionRequest,
   type ChatCompletionResponse,
@@ -113,6 +116,7 @@ function geminiResponseToOpenAIChat(json: unknown): ChatCompletionResponse {
 // (which re-validates each via Zod). Buffers across non-frame-aligned chunks.
 async function* parseGeminiStreamEvents(raw: AsyncIterable<string>): AsyncIterable<GeminiSSEEvent> {
   let buffer = "";
+  const frameGuard = createSSEIncompleteFrameGuard(runtimeResponseWorkAdmission());
   const flushFrame = (frame: string): GeminiSSEEvent | null => {
     for (const line of frame.split("\n")) {
       const trimmed = line.trim();
@@ -127,18 +131,24 @@ async function* parseGeminiStreamEvents(raw: AsyncIterable<string>): AsyncIterab
     }
     return null;
   };
-  for await (const chunk of raw) {
-    buffer += chunk;
-    let idx = buffer.indexOf("\n\n");
-    while (idx !== -1) {
-      const event = flushFrame(buffer.slice(0, idx));
-      buffer = buffer.slice(idx + 2);
-      if (event !== null) yield event;
-      idx = buffer.indexOf("\n\n");
+  try {
+    for await (const chunk of raw) {
+      frameGuard.resize(Buffer.byteLength(buffer) + Buffer.byteLength(chunk));
+      buffer += chunk;
+      let idx = buffer.indexOf("\n\n");
+      while (idx !== -1) {
+        const event = flushFrame(buffer.slice(0, idx));
+        buffer = buffer.slice(idx + 2);
+        frameGuard.resize(Buffer.byteLength(buffer));
+        if (event !== null) yield event;
+        idx = buffer.indexOf("\n\n");
+      }
     }
+    const tail = flushFrame(buffer);
+    if (tail !== null) yield tail;
+  } finally {
+    frameGuard.release();
   }
-  const tail = flushFrame(buffer);
-  if (tail !== null) yield tail;
 }
 
 export interface GeminiClientConfig {
@@ -645,6 +655,7 @@ export function createGeminiClient(deps: GeminiClientDeps): ProviderClient {
         if (read.value) yield decoder.decode(read.value, { stream: true });
       }
     } finally {
+      await reader.cancel().catch(() => {});
       reader.releaseLock();
     }
   }

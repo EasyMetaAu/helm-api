@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { UpstreamError } from "../provider/openai.js";
 import {
   type ResponseWorkAdmission,
+  type ResponseWorkLease,
   runtimeResponseWorkAdmission,
 } from "../runtime/response-work-admission.js";
 import type { IRResponse } from "./ir.js";
@@ -47,6 +48,41 @@ function responseWorkError(): UpstreamError {
     "upstream_error",
     "upstream response memory capacity is temporarily exhausted",
   );
+}
+
+/**
+ * Holds a shared response-work lease for one incomplete SSE frame. Call `resize`
+ * before appending the next decoded chunk and `release` from the reader's finally.
+ * This keeps delimiter-only parsers from retaining an unbounded malformed frame.
+ */
+export function createSSEIncompleteFrameGuard(
+  workAdmission: ResponseWorkAdmission = runtimeResponseWorkAdmission(),
+): { resize(wireBytes: number): void; release(): void } {
+  let lease: ResponseWorkLease | undefined;
+  let released = false;
+  return {
+    resize(wireBytes) {
+      if (released) return;
+      if (wireBytes === 0) {
+        lease?.release();
+        lease = undefined;
+        return;
+      }
+      if (lease === undefined) {
+        const acquired = workAdmission.acquire(wireBytes);
+        if (!acquired.ok) throw responseWorkError();
+        lease = acquired.lease;
+        return;
+      }
+      if (!lease.resize(wireBytes).ok) throw responseWorkError();
+    },
+    release() {
+      if (released) return;
+      released = true;
+      lease?.release();
+      lease = undefined;
+    },
+  };
 }
 
 // Per the SSE spec a frame ends at a BLANK line. `data:`/`event:` fields may

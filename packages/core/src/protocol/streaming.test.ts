@@ -3,6 +3,7 @@ import { createResponseWorkAdmission } from "../runtime/response-work-admission.
 import type { IRResponse } from "./ir.js";
 import {
   type Controller,
+  createSSEIncompleteFrameGuard,
   createStreamState,
   parseSSEData,
   readSSE,
@@ -152,6 +153,24 @@ describe("readSSE — generic SSE splitter", () => {
     await expect(collect(readSSE(streamOf([enc.encode(wire)]), 64, admission))).resolves.toEqual([
       { data: "one" },
     ]);
+    expect(admission.reservedBytes).toBe(0);
+  });
+});
+
+describe("createSSEIncompleteFrameGuard", () => {
+  it("rejects an unterminated frame once its shared response-work budget is exhausted", () => {
+    const admission = createResponseWorkAdmission({
+      capacityBytes: 32,
+      jsonAmplification: 1,
+      minChargeBytes: 1,
+    });
+    const guard = createSSEIncompleteFrameGuard(admission);
+
+    guard.resize(32);
+    expect(() => guard.resize(33)).toThrow(
+      "upstream response memory capacity is temporarily exhausted",
+    );
+    guard.release();
     expect(admission.reservedBytes).toBe(0);
   });
 });

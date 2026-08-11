@@ -13,6 +13,7 @@
 // ⚠️ ToS: subscription use via a third-party gateway may violate Anthropic's terms
 // (see README disclaimer). Identity recipe ported from openclaw (MIT).
 
+import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir, release as osRelease, type as osType } from "node:os";
 import {
@@ -38,6 +39,11 @@ import {
   applyForcedAnthropicThinking,
   reasoningEffortToAnthropicThinking,
 } from "../protocol/reasoning-effort.js";
+import { createSSEIncompleteFrameGuard } from "../protocol/streaming.js";
+import {
+  type ResponseWorkAdmission,
+  runtimeResponseWorkAdmission,
+} from "../runtime/response-work-admission.js";
 import { prepareNativePassthroughRequest } from "./native-passthrough.js";
 import {
   type ChatCompletionRequest,
@@ -1848,6 +1854,7 @@ export async function* readAnthropicSSERaw(
       if (value) yield decoder.decode(value, { stream: true });
     }
   } finally {
+    await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
 }
@@ -2485,12 +2492,14 @@ export async function* translateAnthropicSSE(
   // hanging forever (the connect/TTFB timeout was already cleared at headers).
   idleMs = 0,
   toolNameMap?: ToolNameReverseMap,
+  workAdmission: ResponseWorkAdmission = runtimeResponseWorkAdmission(),
 ): AsyncGenerator<string> {
   const body = res.body;
   if (!body) return;
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  const frameGuard = createSSEIncompleteFrameGuard(workAdmission);
   // tool-call streaming state: anthropic emits one content_block per tool_use.
   let toolIndex = -1;
   let started = false;
@@ -2515,9 +2524,12 @@ export async function* translateAnthropicSSE(
       }
       const { done, value } = read;
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      const decoded = decoder.decode(value, { stream: true });
+      frameGuard.resize(Buffer.byteLength(buffer) + Buffer.byteLength(decoded));
+      buffer += decoded;
       const events = buffer.split("\n\n");
       buffer = events.pop() ?? "";
+      frameGuard.resize(Buffer.byteLength(buffer));
       for (const raw of events) {
         const dataLine = raw.split("\n").find((l) => l.startsWith("data:"));
         if (!dataLine) continue;
@@ -2639,6 +2651,8 @@ export async function* translateAnthropicSSE(
       }
     }
   } finally {
+    await reader.cancel().catch(() => {});
     reader.releaseLock();
+    frameGuard.release();
   }
 }

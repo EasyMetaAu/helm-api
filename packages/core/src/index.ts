@@ -465,6 +465,7 @@ export {
 // cache hits / non-streaming upstreams. Framework-agnostic (Web ReadableStream).
 export {
   type Controller,
+  createSSEIncompleteFrameGuard,
   createStreamState,
   parseSSEData,
   readSSE,

@@ -7,6 +7,7 @@ import {
   type BudgetProbe,
   convertOpenAIStreamToAnthropic,
   convertOpenAIStreamToResponses,
+  createSSEIncompleteFrameGuard,
   type ExecutionResult,
   enqueueObserverWriteback,
   geminiTransformer,
@@ -473,19 +474,27 @@ function openAIBodyToIR(body: unknown): IRResponse {
 // (fail-open) rather than 5xx'ing the stream.
 async function* parseOpenAISSE(raw: AsyncIterable<string>): AsyncIterable<Record<string, unknown>> {
   let buffer = "";
-  for await (const piece of raw) {
-    buffer += piece.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-    let sep = buffer.indexOf("\n\n");
-    while (sep !== -1) {
-      const event = buffer.slice(0, sep);
-      buffer = buffer.slice(sep + 2);
-      const chunk = parseFrame(event);
-      if (chunk !== null) yield chunk;
-      sep = buffer.indexOf("\n\n");
+  const frameGuard = createSSEIncompleteFrameGuard(runtimeResponseWorkAdmission());
+  try {
+    for await (const piece of raw) {
+      const normalized = piece.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      frameGuard.resize(Buffer.byteLength(buffer) + Buffer.byteLength(normalized));
+      buffer += normalized;
+      let sep = buffer.indexOf("\n\n");
+      while (sep !== -1) {
+        const event = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        frameGuard.resize(Buffer.byteLength(buffer));
+        const chunk = parseFrame(event);
+        if (chunk !== null) yield chunk;
+        sep = buffer.indexOf("\n\n");
+      }
     }
+    const tail = parseFrame(buffer);
+    if (tail !== null) yield tail;
+  } finally {
+    frameGuard.release();
   }
-  const tail = parseFrame(buffer);
-  if (tail !== null) yield tail;
 }
 
 function parseFrame(event: string): Record<string, unknown> | null {
