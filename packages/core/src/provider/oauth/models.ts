@@ -9,6 +9,8 @@
 // (that wins).
 
 import { arch, platform, release } from "node:os";
+import type { ResponseWorkAdmission } from "../../runtime/response-work-admission.js";
+import { readUpstreamJsonWithinBudget } from "../openai.js";
 import { type CodexModelInfo, CodexModelsResponseSchema } from "./codex-model-info.js";
 import { listGitHubCopilotModels } from "./github-copilot.js";
 import { parseOpenAICodexIdentity } from "./openai-codex.js";
@@ -101,6 +103,7 @@ export interface OpenAICodexModelsOptions {
   fetchImpl?: typeof globalThis.fetch;
   timeoutMs?: number;
   signal?: AbortSignal;
+  responseWorkAdmission?: ResponseWorkAdmission;
 }
 
 export interface OpenAICodexModelsResult {
@@ -210,13 +213,13 @@ export async function listOpenAICodexModels(
     signal: buildOAuthRequestSignal({ signal: options.signal, timeoutMs }),
   });
   if (!response.ok) {
-    await response.text().catch(() => "");
+    await response.body?.cancel().catch(() => {});
     throw new OpenAICodexModelsError(response.status);
   }
 
   let body: unknown;
   try {
-    body = await response.json();
+    body = await readUpstreamJsonWithinBudget(response, options.responseWorkAdmission);
   } catch {
     throw new Error("OpenAI Codex /models returned invalid JSON");
   }
@@ -256,8 +259,11 @@ export async function listAnthropicModels(
     },
     signal: AbortSignal.timeout(timeoutMs),
   });
-  if (!res.ok) throw new Error(`anthropic /v1/models HTTP ${res.status}`);
-  const body = (await res.json()) as { data?: Array<{ id?: unknown }> };
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => {});
+    throw new Error(`anthropic /v1/models HTTP ${res.status}`);
+  }
+  const body = await readUpstreamJsonWithinBudget<{ data?: Array<{ id?: unknown }> }>(res);
   const ids = (body.data ?? [])
     .map((m) => (typeof m.id === "string" ? m.id.trim() : ""))
     .filter((id) => id.length > 0);

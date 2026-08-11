@@ -9,6 +9,7 @@
 //
 // ⚠️ ToS: reverse-engineered first-party client; operator opts in (issue #38).
 
+import { readUpstreamJsonWithinBudget } from "../openai.js";
 import {
   nonNegativeSecondsToSafeMs,
   OAuthHttpError,
@@ -83,10 +84,10 @@ async function fetchJson(
       : AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!res.ok) {
-    await res.text().catch(() => "");
+    await res.body?.cancel().catch(() => {});
     throw new OAuthHttpError("GitHub Copilot", res.status);
   }
-  return res.json();
+  return await readUpstreamJsonWithinBudget(res);
 }
 
 interface DeviceCode {

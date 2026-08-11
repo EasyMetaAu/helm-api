@@ -9,6 +9,7 @@
 //
 // ⚠️ ToS: reverse-engineered first-party Codex client; operator opts in (issue #38).
 
+import { readUpstreamJsonWithinBudget } from "../openai.js";
 import {
   buildOAuthRequestSignal,
   generateOAuthState,
@@ -165,10 +166,10 @@ async function postToken(
     signal: buildOAuthRequestSignal({ signal, timeoutMs: 30_000 }),
   });
   if (!res.ok) {
-    await res.text().catch(() => "");
+    await res.body?.cancel().catch(() => {});
     throw new OAuthHttpError("OpenAI Codex", res.status);
   }
-  return (await res.json()) as TokenResponseJson;
+  return await readUpstreamJsonWithinBudget<TokenResponseJson>(res);
 }
 
 function postTokenForm(

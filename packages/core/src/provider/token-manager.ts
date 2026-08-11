@@ -18,11 +18,13 @@
 // rotated refresh token survives restarts.
 
 import { createHash } from "node:crypto";
+import type { ResponseWorkAdmission } from "../runtime/response-work-admission.js";
 import { decryptSecret, encryptSecret } from "../store/crypto/token-cipher.js";
 import type { OAuthTokenStore } from "../store/ports.js";
 import { OpenAICodexIdentityMismatchError } from "./oauth/openai-codex.js";
 import { buildOAuthRequestSignal, OAuthHttpError } from "./oauth/runtime.js";
 import type { OAuthCredentials, OAuthProviderInterface } from "./oauth/types.js";
+import { readUpstreamJsonWithinBudget } from "./openai.js";
 import { isFetchTransportError } from "./retry.js";
 
 // Cross-instance refresh serialization for PRESET credentials. The composition root
@@ -117,6 +119,7 @@ export interface TokenManagerDeps {
   expirySkewMs?: number;
   /** Internal deadline for the shared refresh fetch. */
   refreshTimeoutMs?: number;
+  responseWorkAdmission?: ResponseWorkAdmission;
   // ── preset-kind deps (REQUIRED when oauth.kind === "preset") ────────────────
   /** Persistent credential store (read on first use, rotation write-back on refresh). */
   tokenStore?: OAuthTokenStore;
@@ -263,13 +266,16 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
       throw new TokenRefreshError("oauth token request failed (network error)");
     }
     if (!res.ok) {
-      // Drain + discard the body: an OAuth error body can echo the credential.
-      await res.text().catch(() => "");
+      // Discard without decoding: an OAuth error body can echo the credential.
+      await res.body?.cancel().catch(() => {});
       throw new TokenRefreshError(`oauth token request failed (status ${res.status})`, res.status);
     }
     let parsed: TokenEndpointResponse;
     try {
-      parsed = (await res.json()) as TokenEndpointResponse;
+      parsed = await readUpstreamJsonWithinBudget<TokenEndpointResponse>(
+        res,
+        deps.responseWorkAdmission,
+      );
     } catch {
       throw new TokenRefreshError("oauth token response was not valid JSON", res.status);
     }
