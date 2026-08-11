@@ -291,8 +291,8 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
   // reserve a whole response-work window: reconstruction never happens server-side, so
   // only ONE byte-bounded page is materialized per request. That is what lets a large
   // transcript that the server refuses to rebuild (session_recovery_limited) still be
-  // inspected. `maxBytes` caps a single page; a `limited` page still returns its rows
-  // and cursor so the client keeps paging rather than failing.
+  // inspected. `maxBytes` caps a single page; each row is also hard-capped before
+  // JSON serialization so one malformed historical revision cannot bypass the bound.
   app.get("/admin/api/requests/:traceId/session-revisions", async (c) => {
     const traceId = c.req.param("traceId");
     // no_session (not a session request at all) is more fundamental than the store's
@@ -313,6 +313,13 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
       limit: SESSION_REVISION_PAGE_LIMIT,
       maxBytes: SESSION_REVISION_PAGE_MAX_BYTES,
     });
+    if (
+      page.revisions.some(
+        (revision) => sessionRevisionWireBytes(revision) > SESSION_REVISION_PAGE_MAX_BYTES,
+      )
+    ) {
+      return c.json({ captured: false, reason: "session_recovery_limited" });
+    }
     return c.json({
       captured: true,
       sessionRef,
@@ -335,9 +342,9 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
   });
 }
 
-// One raw-revision page: `limit` caps rows/page, `maxBytes` is a SOFT ceiling (a single
-// oversized row still returns, so a large session never dead-ends). The client drives
-// the cursor across pages, so these are per-page bounds, not a whole-transcript budget.
+// One raw-revision page: `limit` caps rows/page and `maxBytes` caps both the page and
+// every returned row. The client drives the cursor across pages, so these are per-page
+// bounds, not a whole-transcript budget.
 const SESSION_REVISION_PAGE_LIMIT = 100;
 const SESSION_REVISION_PAGE_MAX_BYTES = 8 * 1024 * 1024;
 

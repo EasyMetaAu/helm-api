@@ -98,6 +98,7 @@ const COPILOT = "github-copilot";
 const CODEX = "openai-codex";
 const XAI = "xai";
 const SESSION_TTL_MS = 15 * 60 * 1000;
+export const MAX_PENDING_OAUTH_SESSIONS = 128;
 
 // Anthropic OAuth usage endpoint (providers page Tier 3 quota PULL). Mirrors the
 // claude-relay-service reference: the `oauth-2025-04-20` beta flag + a claude-cli
@@ -684,6 +685,13 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     }
   }
 
+  function ensureSessionCapacity(): void {
+    prune();
+    if (sessions.size >= MAX_PENDING_OAUTH_SESSIONS) {
+      throw new Error("too many pending OAuth sessions; complete or wait for an existing login");
+    }
+  }
+
   function take(sessionId: string): Session {
     prune();
     const s = sessions.get(sessionId);
@@ -906,6 +914,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       if (!flow) {
         throw new Error(`provider '${providerId}' does not support the manual-paste flow`);
       }
+      ensureSessionCapacity();
       // Validate the proxy up-front (fail-closed) and pin it to the session. begin()
       // is a pure URL build (no network), so the only flow call that egresses — the
       // token exchange in complete — already has the proxy.
@@ -949,6 +958,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       if (providerId !== COPILOT && providerId !== XAI) {
         throw new Error(`provider '${providerId}' does not support the device-code flow`);
       }
+      ensureSessionCapacity();
       // CRITICAL: the device-code POST is the FIRST network call of the flow. Build
       // the proxy fetch BEFORE it so step 1 never leaves from the operator's real IP.
       const pinned = toProxy(proxy);
@@ -957,6 +967,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         providerId === XAI
           ? await beginXaiDeviceLogin(doFetch, now)
           : await beginCopilotDeviceLogin(enterprise, doFetch);
+      ensureSessionCapacity();
       const sessionId = genId();
       sessions.set(sessionId, {
         kind: "device",

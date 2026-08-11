@@ -18,7 +18,7 @@ import {
   loadAccountSettings,
   setAccountSettings,
 } from "./account-settings.js";
-import { createOAuthAdmin } from "./admin-oauth.js";
+import { createOAuthAdmin, MAX_PENDING_OAUTH_SESSIONS } from "./admin-oauth.js";
 import type { CodexModelCatalog } from "./codex-model-catalog.js";
 import { createOAuthModelDiscoveryCache } from "./model-discovery-cache.js";
 
@@ -443,6 +443,55 @@ describe("createOAuthAdmin", () => {
     await expect(
       admin.completeManualPaste({ sessionId: "nope", redirectInput: "code=x", account: "default" }),
     ).rejects.toThrow(/session not found/);
+  });
+
+  it("bounds abandoned starts, prunes them on the next start, and retains live sessions", async () => {
+    let now = 0;
+    let sequence = 0;
+    const admin = createOAuthAdmin({
+      store: makeStore(),
+      encKey: KEY,
+      config: makeConfig(),
+      now: () => now,
+      genSessionId: () => `pending-${++sequence}`,
+    });
+    vi.stubGlobal(
+      "fetch",
+      routeFetch([
+        [/oauth\/token/, () => json({ access_token: "AT", refresh_token: "RT", expires_in: 3600 })],
+      ]),
+    );
+
+    const pending = await Promise.all(
+      Array.from({ length: MAX_PENDING_OAUTH_SESSIONS }, () =>
+        admin.startManualPaste({ providerId: "anthropic" }),
+      ),
+    );
+    await expect(admin.startManualPaste({ providerId: "anthropic" })).rejects.toThrow(
+      /too many pending OAuth sessions/,
+    );
+
+    const retained = pending[0];
+    if (!retained) throw new Error("missing retained session");
+    await expect(
+      admin.completeManualPaste({
+        sessionId: retained.sessionId,
+        redirectInput: `https://x/cb?code=C&state=${new URL(retained.authorizeUrl).searchParams.get("state")}`,
+        account: "retained",
+      }),
+    ).resolves.toBeUndefined();
+
+    now = 15 * 60 * 1000 - 1;
+    const live = await admin.startManualPaste({ providerId: "anthropic" });
+    now = 15 * 60 * 1000 + 1;
+    await expect(admin.startManualPaste({ providerId: "anthropic" })).resolves.toBeDefined();
+    await expect(
+      admin.completeManualPaste({
+        sessionId: live.sessionId,
+        redirectInput: `https://x/cb?code=C&state=${new URL(live.authorizeUrl).searchParams.get("state")}`,
+        account: "live",
+      }),
+    ).resolves.toBeUndefined();
   });
 
   it("listStatus AUTO-RENEWS an expired account on view (openclaw-style lazy refresh)", async () => {
