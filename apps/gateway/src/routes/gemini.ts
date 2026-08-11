@@ -22,7 +22,13 @@ import {
   readAdmittedRequestBody,
 } from "../runtime/memory-admission.js";
 import { stampServingAccount } from "../runtime/serving-account.js";
-import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.js";
+import {
+  atEventBoundary,
+  createStreamAbort,
+  HEARTBEAT_COMMENT,
+  onceAsync,
+  withHeartbeat,
+} from "./heartbeat.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult, RouteError } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
@@ -416,9 +422,10 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
     // 3) Route through the shared core. The per-request abort signal rides along so
     //    a client disconnect is a non-provider fault (docs/02). run() throws a
     //    PipelineError(invalid_request) for an empty request.
+    const streamAbort = createStreamAbort(requestSignal(c));
     let result: PipelineRunResult;
     try {
-      result = await deps.pipeline.run(ir, identity, requestSignal(c));
+      result = await deps.pipeline.run(ir, identity, streamAbort.signal);
       stampSessionCapture(result.decision, sessionCapture, sessionCaptureScope);
     } catch (err) {
       if (err instanceof PipelineError) {
@@ -449,10 +456,20 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
       const releaseRequestMemory = c.get("requestMemoryRelease");
       c.set("requestMemoryRelease", undefined);
       return streamSSE(c, async (sse) => {
+        const releaseConcurrencyOnce = onceAsync(releaseConcurrency);
+        const releaseRequestMemoryOnce = onceAsync(releaseRequestMemory);
+        let releaseCaptureOnAbort = () => {};
+        sse.onAbort(() => {
+          streamAbort.abort();
+          void releaseConcurrencyOnce().catch(() => {});
+          void releaseRequestMemoryOnce().catch(() => {});
+          releaseCaptureOnAbort();
+        });
         // Accumulate the serialized wire frames so the served response body can be
         // captured (verbatim) alongside the telemetry row in the finally below.
         // Gemini frames are nameless `data:` frames (no `event:` name, no [DONE]).
         const captured = captureBodies ? createSseCapture(true) : null;
+        releaseCaptureOnAbort = () => captured?.release();
         // SSE keep-alive: emit a `:` comment during inter-chunk idle (wire-only, never
         // captured) so a proxy/client idle-timeout does not sever a long healthy stream.
         // Gemini frames are whole `data:` frames (writeSSE) → always at a boundary.
@@ -462,7 +479,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
         try {
           for await (const item of withHeartbeat(result.streamIR(), {
             heartbeatMs,
-            signal: requestSignal(c),
+            signal: streamAbort.signal,
           })) {
             if (item.type === "beat") {
               if (atEventBoundary(lastWrite)) await sse.write(HEARTBEAT_COMMENT);
@@ -489,7 +506,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
             }
           }
         } catch (err) {
-          const cancellation = requestCancellationReason(requestSignal(c), err);
+          const cancellation = requestCancellationReason(streamAbort.signal, err);
           if (cancellation !== null) {
             markStartedStreamCancellation(result.decision, cancellation);
           } else {
@@ -509,7 +526,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
             await sse.writeSSE({ data });
           }
         } finally {
-          await releaseConcurrency?.();
+          await releaseConcurrencyOnce();
           try {
             await withSseCaptureRelease(captured, async () => {
               // Record AFTER releaseConcurrency (never extend the hold) and AFTER the
@@ -538,7 +555,7 @@ export function registerGeminiRoute(app: Hono<AppEnv>, deps: GeminiRouteDeps): v
               }
             });
           } finally {
-            releaseRequestMemory?.();
+            await releaseRequestMemoryOnce();
           }
         }
       });

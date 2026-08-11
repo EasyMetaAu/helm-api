@@ -176,6 +176,9 @@ export interface OAuthPoolDeps {
   // Native CLI safety: bind repeated requests with the same client/session
   // fingerprint to the same OAuth account for this TTL.
   stickyTtlMs?: number;
+  // Bound untrusted client/session identifiers. Expired entries are pruned on
+  // selection and least-recently-used entries are evicted under a key flood.
+  maxStickySessions?: number;
   // Fires with the selected account on each served call — the seam the gateway
   // uses to record the serving subscription in telemetry / logs (no secrets).
   onSelect?: (account: string, selection: OAuthPoolSelection) => void;
@@ -232,9 +235,15 @@ export interface OAuthPoolSelection {
   retryAttempt: number;
 }
 
+export const DEFAULT_MAX_STICKY_SESSIONS = 5_000;
+
 export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   const now = deps.now ?? (() => Date.now());
   const stickyTtlMs = deps.stickyTtlMs ?? 10 * 60 * 1000;
+  const maxStickySessions = Math.max(
+    1,
+    Math.floor(deps.maxStickySessions ?? DEFAULT_MAX_STICKY_SESSIONS),
+  );
   const accountRateLimitCooldownMs = deps.accountRateLimitCooldownMs ?? DEFAULT_429_COOLDOWN_MS;
   const selectionStrategy = deps.selectionStrategy ?? "balanced";
   const quotaFreshMs = deps.quotaFreshMs ?? 10 * 60 * 1000;
@@ -258,6 +267,22 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   const retryableAccountFailures = new Map<string, number>();
   const credentialFailureReported = new Set<string>();
   let selectionCounter = 0;
+
+  function rememberSticky(stickyKey: string, account: string, expiresAt: number): void {
+    // Map insertion order is our LRU order. A repeated session gets a renewed
+    // lease and becomes most-recent; a flood of one-off client keys stays bounded.
+    stickySessions.delete(stickyKey);
+    stickySessions.set(stickyKey, { account, expiresAt });
+    for (const [key, value] of stickySessions) {
+      if (value.expiresAt > now()) continue;
+      stickySessions.delete(key);
+    }
+    while (stickySessions.size > maxStickySessions) {
+      const oldest = stickySessions.keys().next().value;
+      if (oldest === undefined) break;
+      stickySessions.delete(oldest);
+    }
+  }
 
   // An account is eligible only when the operator has not parked it (`schedulable`)
   // AND its auto-park cooldown has elapsed. Re-evaluated on every select() against the
@@ -818,7 +843,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
 
   function restorePersistedAffinity(stickyKey: string | null, account: string | undefined): void {
     if (!isStrictAccountSticky(stickyKey) || !account) return;
-    stickySessions.set(stickyKey, { account, expiresAt: now() + stickyTtlMs });
+    rememberSticky(stickyKey, account, now() + stickyTtlMs);
   }
 
   function commitSelection(
@@ -830,10 +855,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     selectionCounter += 1;
     entry.lastUsedAt = selectionCounter;
     if (stickyKey) {
-      stickySessions.set(stickyKey, {
-        account: entry.member.account,
-        expiresAt: nowMs + stickyTtlMs,
-      });
+      rememberSticky(stickyKey, entry.member.account, nowMs + stickyTtlMs);
     }
     deps.onSelect?.(entry.member.account, selection);
     return entry;
@@ -879,7 +901,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
           (candidate) => candidate.member.account === sticky.account,
         );
         if (entry !== undefined) {
-          sticky.expiresAt = nowMs + stickyTtlMs;
+          rememberSticky(stickyKey, sticky.account, nowMs + stickyTtlMs);
           stickyEntry = entry;
         }
       }
