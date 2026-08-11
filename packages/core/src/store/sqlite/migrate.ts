@@ -1380,9 +1380,14 @@ const MIGRATIONS: readonly Migration[] = [
     // Fence reclaimed memory jobs. Existing rows start at generation 0; the next
     // claim atomically increments to 1 before any worker can publish.
     version: 50,
-    sql: `
-      ALTER TABLE memory_jobs ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0;
-    `,
+    run: (db) => {
+      if (
+        sqliteTableHasColumns(db, "memory_jobs", ["id"]) &&
+        !sqliteTableHasColumns(db, "memory_jobs", ["lease_generation"])
+      ) {
+        db.exec("ALTER TABLE memory_jobs ADD COLUMN lease_generation INTEGER NOT NULL DEFAULT 0");
+      }
+    },
   },
 ];
 

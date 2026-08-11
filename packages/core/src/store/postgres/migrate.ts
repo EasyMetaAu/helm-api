@@ -1336,9 +1336,15 @@ const MIGRATIONS: readonly Migration[] = [
   {
     // Pg mirror of SQLite v50: one monotonic fencing generation per job row.
     version: 49,
-    sql: `
-      ALTER TABLE memory_jobs ADD COLUMN IF NOT EXISTS lease_generation INTEGER NOT NULL DEFAULT 0;
-    `,
+    run: async (db) => {
+      if (await pgTableHasColumns(db, "memory_jobs", ["id"])) {
+        await db.execute(
+          sql.raw(
+            "ALTER TABLE memory_jobs ADD COLUMN IF NOT EXISTS lease_generation INTEGER NOT NULL DEFAULT 0",
+          ),
+        );
+      }
+    },
   },
 ];
 

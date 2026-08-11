@@ -93,7 +93,8 @@ describe("real PostgreSQL concurrency contracts", () => {
     });
     const scope = { accountId, projectId };
     const jobId = await setupStore.enqueueJob({ type: "reflector", scope });
-    expect((await setupStore.claimPendingJobs(1))[0]?.jobId).toBe(jobId);
+    const claimedJob = (await setupStore.claimPendingJobs(1))[0];
+    expect(claimedJob?.jobId).toBe(jobId);
 
     let releaseReflectionLock!: () => void;
     const holdReflectionLock = new Promise<void>((resolve) => {
@@ -119,6 +120,7 @@ describe("real PostgreSQL concurrency contracts", () => {
       await waitForBlockedQuery(probeDb, decayApplication, "update memory_reflections");
 
       const staleCommit = reflectorStore.commitReflectionJob(jobId, {
+        leaseGeneration: claimedJob?.leaseGeneration ?? 0,
         target: scope,
         reflection: {
           action: "upsert",

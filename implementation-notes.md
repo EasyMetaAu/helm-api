@@ -18,6 +18,7 @@
 - **生产根因**：2026-07-29 的外部 purge 脚本重建 `memory_messages` 却未重算 `memory_threads.message_count/last_message_at`，Admin 因此把约 18.5 万真实 raw 行显示成约 208 万；三天 cleanup 实际有效。真正的 OOM 路径是 Observer/Reflector/注入及部分 cleanup 会一次物化大线程/大结果，pure `observe` 又不直接形成 observation，最大线程累积到 51,116 行。
 - **有界生命周期**：pure `observe` outbound 也 enqueue；Observer 按服务端 `(created_at,id)` 每页最多 512 行/1 MiB/64K tokens，超大单行用带 SHA-256 的 placeholder，Observation 与 durable frontier CAS 同事务提交并继续排下一页。Reflector 只取最新 512 条 active/unexpired observation；forgetting rebuild 不再带旧 reflection，最终注入含 header 也严格服从 token budget。
 - **清理与遗忘**：raw cleanup 只删 frontier 已覆盖行，Postgres cleanup/telemetry/OAuth usage 使用小批次；decay 会在同一事务立即归档受影响 reflection、fence 正在运行的旧 Reflector，并为 project/resource 各自排 successor。Reflector 的 facts + reflection + job completion 也由 job 状态 fence 后原子提交，避免遗忘后复活。SQLite/Postgres migration 会重算 stale counters、补索引，legacy raw 保持 null frontier 后按有界页回放。
+- **升级兼容**：lease generation migration 仅在 `memory_jobs` 已存在时加列；历史上的精简/部分 schema 仍可继续升级，完整生产 schema 则照常初始化 generation 0。不能用无条件 `ALTER TABLE`，否则会让无 Memory 表的旧安装启动失败。
 - **取舍/限制**：`message_index` 仍只用于当前 ingest dedup，不能作为线程顺序；没有客户端稳定 turn id 时无法同时保证跨请求精确去重和保留合法重复。legacy bounded backfill 可能与旧 Observation 暂时重叠，因为旧 range 的错误顺序无法精确还原；这里选择宁可短期过度保留，也不静默丢失未覆盖 raw。Reflection 使用 bounded latest-set，而非持久 rolling draft。生产恢复 worker 必须 concurrency=1 灰度，先验证 migration/frontier/RSS/restart/OOM/502，再开启 raw cleanup。
 
 ## 2026-08-10 · 大 Session 客户端重建恢复服务端同款 Conversation 展示（Admin / requests debug，docs/07/11，原则 1/3/7）
