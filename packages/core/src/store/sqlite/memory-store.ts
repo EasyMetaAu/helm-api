@@ -559,6 +559,37 @@ export class SqliteMemoryStore implements MemoryStore {
       if (oversized) break;
     }
     const safeIds = selected.filter((row) => !row.oversized).map((row) => row.id);
+    const selectedIds = selected.map((row) => row.id);
+    const coveredMessageIds =
+      selectedIds.length === 0
+        ? []
+        : (
+            this.db.$sqlite
+              .prepare(
+                `SELECT m.id
+                   FROM memory_messages m
+                  WHERE m.id IN (${selectedIds.map(() => "?").join(",")})
+                    AND EXISTS (
+                      SELECT 1
+                        FROM memory_observations o
+                        JOIN memory_messages first_message
+                          ON first_message.id = json_extract(o.source_message_range, '$[0]')
+                         AND first_message.thread_id = o.thread_id
+                        JOIN memory_messages last_message
+                          ON last_message.id = json_extract(o.source_message_range, '$[1]')
+                         AND last_message.thread_id = o.thread_id
+                       WHERE o.thread_id = m.thread_id
+                         AND (
+                           ((first_message.created_at, first_message.id) <= (m.created_at, m.id)
+                            AND (m.created_at, m.id) <= (last_message.created_at, last_message.id))
+                           OR
+                           ((last_message.created_at, last_message.id) <= (m.created_at, m.id)
+                            AND (m.created_at, m.id) <= (first_message.created_at, first_message.id))
+                         )
+                    )`,
+              )
+              .all(...selectedIds) as Array<{ id: string }>
+          ).map((row) => row.id);
     const contentById = new Map<string, unknown>();
     if (safeIds.length > 0) {
       const placeholders = safeIds.map(() => "?").join(",");
@@ -581,6 +612,7 @@ export class SqliteMemoryStore implements MemoryStore {
     const nextCursor = last === undefined ? null : { createdAtMs: last.created_at, id: last.id };
     return {
       messages,
+      coveredMessageIds,
       expectedFrontier,
       nextCursor,
       hasMore: selected.length < rows.length,

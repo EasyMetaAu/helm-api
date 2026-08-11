@@ -34,7 +34,7 @@ const candidateSql = `WITH candidates AS (
    WHERE t.owner_id IS NOT NULL
      AND last_activity IS NOT NULL
      AND last_activity <= ?
-     AND (? IS NULL OR last_activity >= ?)
+     AND (? IS NULL OR last_activity >= ? OR t.observer_frontier_at IS NULL)
      AND EXISTS (
        SELECT 1 FROM memory_messages m
         WHERE m.thread_id = t.id

@@ -582,6 +582,38 @@ export class PgMemoryStore implements MemoryStore {
       if (oversized) break;
     }
     const safeIds = selected.filter((row) => !row.oversized).map((row) => row.id);
+    const selectedIds = selected.map((row) => row.id);
+    const coveredMessageIds =
+      selectedIds.length === 0
+        ? []
+        : pgRows<{ id: string }>(
+            await this.db.execute(sql`
+              SELECT m.id
+                FROM memory_messages m
+               WHERE m.id IN (${sql.join(
+                 selectedIds.map((id) => sql`${id}`),
+                 sql`, `,
+               )})
+                 AND EXISTS (
+                   SELECT 1
+                     FROM memory_observations o
+                     JOIN memory_messages first_message
+                       ON first_message.id = o.source_message_range ->> 0
+                      AND first_message.thread_id = o.thread_id
+                     JOIN memory_messages last_message
+                       ON last_message.id = o.source_message_range ->> 1
+                      AND last_message.thread_id = o.thread_id
+                    WHERE o.thread_id = m.thread_id
+                      AND (
+                        ((first_message.created_at, first_message.id) <= (m.created_at, m.id)
+                         AND (m.created_at, m.id) <= (last_message.created_at, last_message.id))
+                        OR
+                        ((last_message.created_at, last_message.id) <= (m.created_at, m.id)
+                         AND (m.created_at, m.id) <= (first_message.created_at, first_message.id))
+                      )
+                 )
+            `),
+          ).map((row) => row.id);
     const contentRows =
       safeIds.length === 0
         ? []
@@ -604,6 +636,7 @@ export class PgMemoryStore implements MemoryStore {
     const nextCursor = last === undefined ? null : { createdAtMs: last.createdAt, id: last.id };
     return {
       messages,
+      coveredMessageIds,
       expectedFrontier,
       nextCursor,
       hasMore: selected.length < rows.length,
@@ -2486,7 +2519,8 @@ export class PgMemoryStore implements MemoryStore {
          WHERE t.owner_id IS NOT NULL
            AND t.last_message_at <= ${input.idleBeforeMs}
            AND (${idleAfterMs}::bigint IS NULL OR
-                t.last_message_at >= ${idleAfterMs})
+                t.last_message_at >= ${idleAfterMs} OR
+                t.observer_frontier_at IS NULL)
            AND EXISTS (
              SELECT 1 FROM memory_messages m
               WHERE m.thread_id = t.id

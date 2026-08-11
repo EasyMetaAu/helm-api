@@ -730,4 +730,28 @@ describe("runObserverJob — re-enqueue on a turn that arrives during the run", 
       scope: { accountId: "acct-a", threadId: "thread-1" },
     });
   });
+
+  it("compresses only the oldest uncovered gap from an all-status bounded coverage page", async () => {
+    const page = makeMessages(8);
+    const { store } = makeFakeStore(page);
+    store.listObserverMessagesPage = vi.fn(async () => ({
+      messages: page,
+      coveredMessageIds: ["m1", "m2", "m3", "m5", "m6", "m7", "m8"],
+      expectedFrontier: null,
+      nextCursor: { createdAtMs: page[7]?.createdAt.getTime() ?? 0, id: "m8" },
+      hasMore: true,
+    }));
+    store.appendObservationAndAdvanceFrontier = vi.fn(async () => "obs-gap");
+
+    const out = await runObserverJob(JOB, makeDeps(store));
+
+    expect(out).toEqual({ observationId: "obs-gap", sourceMessageRange: ["m4", "m4"] });
+    expect(store.listObservations).not.toHaveBeenCalled();
+    expect(store.appendObservationAndAdvanceFrontier).toHaveBeenCalledWith(
+      expect.objectContaining({
+        observation: expect.objectContaining({ sourceMessageRange: ["m4", "m4"] }),
+        nextFrontier: expect.objectContaining({ id: "m4" }),
+      }),
+    );
+  });
 });

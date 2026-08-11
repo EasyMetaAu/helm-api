@@ -795,6 +795,10 @@ export interface MemoryObserverCursor {
 
 export interface MemoryObserverPage {
   messages: RawMessage[];
+  // Any-status historical observations remain coverage after archive/prune.
+  // Real adapters return only ids from this bounded page; optional keeps older
+  // test/third-party stores source-compatible.
+  coveredMessageIds?: string[];
   expectedFrontier: MemoryObserverCursor | null;
   nextCursor: MemoryObserverCursor | null;
   hasMore: boolean;
