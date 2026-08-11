@@ -85,7 +85,19 @@ async function maybeEagerExtractFacts(
     // so a bare `insert(...)` would lose `this` and throw "reading 'db'" (fail-open ⇒
     // silent no-write). Mirror the `.call(deps.memoryStore, ...)` pattern used by the
     // idle-flush / decay-trigger optional-method call sites.
-    await insert.call(deps.memoryStore, { accountId: job.accountId, scope, facts, now });
+    const reconciled = await insert.call(deps.memoryStore, {
+      accountId: job.accountId,
+      scope,
+      facts,
+      now,
+      ...(job.leaseGeneration !== undefined
+        ? { job: { id: job.jobId, leaseGeneration: job.leaseGeneration } }
+        : {}),
+    });
+    if (reconciled.accepted === false) {
+      deps.log("memory.observer.eager_facts_stale", { thread_id: job.threadId });
+      return;
+    }
     deps.log("memory.observer.eager_facts_extracted", {
       thread_id: job.threadId,
       fact_count: facts.length,

@@ -42,6 +42,7 @@ function makeStore(rows: ScorableObservation[], reflectionScopes: unknown[] = []
     }),
     archiveObservations: vi.fn(async (input: { accountId: string; ids: string[]; now: Date }) => {
       archived.push(...input.ids);
+      return true;
     }),
     // docs/12 (Codex review fix) — decay enqueues a reflector rebuild per active
     // reflection scope after it archives observations.
@@ -119,6 +120,20 @@ describe("runDecayJob", () => {
     expect(archived).toEqual(["stale"]);
     expect(archived).not.toContain("fresh");
     expect(jobUpdates).toContainEqual({ jobId: "d1", status: "done" });
+  });
+
+  it("stops without completing when the archive publication lease is stale", async () => {
+    const { store, jobUpdates } = makeStore([row("stale", 100)]);
+    store.archiveObservations.mockResolvedValueOnce(false);
+    const deps = makeDeps(store, NOW);
+
+    await runDecayJob({ jobId: "d1", leaseGeneration: 7, scope: { accountId: "acct-a" } }, deps);
+
+    expect(store.archiveObservations).toHaveBeenCalledWith(
+      expect.objectContaining({ job: { id: "d1", leaseGeneration: 7 } }),
+    );
+    expect(jobUpdates).toEqual([]);
+    expect(deps.log).toHaveBeenCalledWith("memory.decay.stale", { account_id: "acct-a" });
   });
 
   it("scopes the read + archive to the swept account (two-account isolation)", async () => {

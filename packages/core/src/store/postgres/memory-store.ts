@@ -1098,6 +1098,23 @@ export class PgMemoryStore implements MemoryStore {
     return rows[0]?.version ?? 0;
   }
 
+  private async hasCurrentJobLease(
+    tx: { execute: (query: SQL) => Promise<unknown> },
+    job: { id: string; leaseGeneration: number },
+  ): Promise<boolean> {
+    return (
+      pgRows<{ id: string }>(
+        await tx.execute(sql`
+          SELECT id FROM memory_jobs
+           WHERE id = ${job.id}
+             AND status = 'running'
+             AND lease_generation = ${job.leaseGeneration}
+           FOR UPDATE
+        `),
+      )[0] !== undefined
+    );
+  }
+
   async commitReflectionJob(
     jobId: string,
     input: MemoryReflectionJobCommitInput,
@@ -1445,16 +1462,21 @@ export class PgMemoryStore implements MemoryStore {
   async setFactEmbeddings(input: {
     accountId: string;
     items: Array<{ factId: string; embedding: Float32Array; model: string; dim: number }>;
-  }): Promise<void> {
-    if (input.items.length === 0) return;
-    for (const it of input.items) {
-      const vecLiteral = `[${Array.from(it.embedding).join(",")}]`;
-      await this.db.execute(sql`
-        UPDATE memory_facts
-           SET embedding = ${vecLiteral}::vector, embedding_model = ${it.model}, embedding_dim = ${it.dim}
-         WHERE id = ${it.factId} AND owner_id = ${input.accountId}
-      `);
-    }
+    job?: { id: string; leaseGeneration: number };
+  }): Promise<boolean> {
+    if (input.items.length === 0) return true;
+    return this.db.transaction(async (tx) => {
+      if (input.job !== undefined && !(await this.hasCurrentJobLease(tx, input.job))) return false;
+      for (const it of input.items) {
+        const vecLiteral = `[${Array.from(it.embedding).join(",")}]`;
+        await tx.execute(sql`
+          UPDATE memory_facts
+             SET embedding = ${vecLiteral}::vector, embedding_model = ${it.model}, embedding_dim = ${it.dim}
+           WHERE id = ${it.factId} AND owner_id = ${input.accountId}
+        `);
+      }
+      return true;
+    });
   }
 
   // docs/14 — embedding job READ half (pg). ACTIVE facts with no embedding, one from a
@@ -1558,14 +1580,20 @@ export class PgMemoryStore implements MemoryStore {
   // observations (status='archived', archived_at=now) — NEVER a DELETE. ACCOUNT-GUARDED
   // via the thread's owner_id; empty id list → no statement; touches ONLY the
   // observation status/archived_at, never raw messages nor other accounts' rows.
-  async archiveObservations(input: { accountId: string; ids: string[]; now: Date }): Promise<void> {
-    if (input.ids.length === 0) return;
+  async archiveObservations(input: {
+    accountId: string;
+    ids: string[];
+    now: Date;
+    job?: { id: string; leaseGeneration: number };
+  }): Promise<boolean> {
+    if (input.ids.length === 0) return true;
     const nowMs = input.now.getTime();
     const ids = sql.join(
       input.ids.map((id) => sql`${id}`),
       sql`, `,
     );
-    await this.db.transaction(async (tx) => {
+    return this.db.transaction(async (tx) => {
+      if (input.job !== undefined && !(await this.hasCurrentJobLease(tx, input.job))) return false;
       const rows = pgRows<{
         project_id: string | null;
         resource_id: string | null;
@@ -1636,6 +1664,7 @@ export class PgMemoryStore implements MemoryStore {
           ON CONFLICT (type, scope_id) WHERE status IN ('pending', 'running') DO NOTHING
         `);
       }
+      return true;
     });
   }
 
@@ -1711,6 +1740,7 @@ export class PgMemoryStore implements MemoryStore {
     scope: { projectId?: string; resourceId?: string; threadId?: string };
     facts: MemoryFactInput[];
     now: Date;
+    job?: { id: string; leaseGeneration: number };
   }): Promise<MemoryFactReconcileResult> {
     // docs/12 P6 (Codex review fix #3) — insert + supersede must be ATOMIC. The pg
     // adapter previously ran them as two un-wrapped statements: a crash AFTER the
@@ -1733,10 +1763,14 @@ export class PgMemoryStore implements MemoryStore {
       scope: { projectId?: string; resourceId?: string; threadId?: string };
       facts: MemoryFactInput[];
       now: Date;
+      job?: { id: string; leaseGeneration: number };
     },
   ): Promise<MemoryFactReconcileResult> {
     if (input.facts.length === 0) {
       return { insertedIds: [], supersededIds: [], resurrectedIds: [] };
+    }
+    if (input.job !== undefined && !(await this.hasCurrentJobLease(tx, input.job))) {
+      return { insertedIds: [], supersededIds: [], resurrectedIds: [], accepted: false };
     }
     const nowMs = input.now.getTime();
     const insertedIds: string[] = [];

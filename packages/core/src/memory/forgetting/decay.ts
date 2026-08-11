@@ -181,7 +181,18 @@ export async function runDecayJob(job: DecayJob, deps: DecayDeps): Promise<void>
       iterations += 1;
       const ids = condemned.slice(offset, offset + ARCHIVE_CHUNK);
       try {
-        await archive.call(deps.memoryStore, { accountId, ids, now });
+        const accepted = await archive.call(deps.memoryStore, {
+          accountId,
+          ids,
+          now,
+          ...(job.leaseGeneration !== undefined
+            ? { job: { id: job.jobId, leaseGeneration: job.leaseGeneration } }
+            : {}),
+        });
+        if (accepted === false) {
+          deps.log("memory.decay.stale", { account_id: accountId });
+          return;
+        }
         archivedCount += ids.length;
         consecutiveErrors = 0;
       } catch (chunkErr) {

@@ -1340,3 +1340,25 @@ describe("runPgMigrations — per-migration atomicity", () => {
     await db.$close();
   });
 });
+
+describe("runPgMigrations — memory job lease generation", () => {
+  it("v49 preserves existing jobs and initializes their lease generation to zero", async () => {
+    const db = await createPgliteDb();
+    await db.execute(
+      sql.raw(`
+      INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at)
+      VALUES ('legacy', 'observer', '{"accountId":"a","threadId":"t"}', 'pending', 1, 1)
+    `),
+    );
+    await db.execute(sql.raw("ALTER TABLE memory_jobs DROP COLUMN lease_generation"));
+    await db.execute(sql.raw("DELETE FROM _migrations WHERE version = 49"));
+
+    await runPgMigrations(db);
+
+    const rows = (await db.execute(
+      sql.raw("SELECT status, lease_generation FROM memory_jobs WHERE id = 'legacy'"),
+    )) as { rows: Array<{ status: string; lease_generation: number }> };
+    expect(rows.rows).toEqual([{ status: "pending", lease_generation: 0 }]);
+    await db.$close();
+  });
+});

@@ -390,6 +390,31 @@ describe("runObserverJob — eager fact extraction", () => {
     });
   });
 
+  it("passes the lease guard and does not report stale eager facts as published", async () => {
+    const { store } = makeFakeStore(makeShortThread());
+    (store.insertFactsReconciled as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      insertedIds: [],
+      supersededIds: [],
+      accepted: false,
+    });
+    const deps = makeDeps(store, {
+      extractFactsFromMessages: vi.fn(async () => [eagerFact]),
+    });
+
+    await runObserverJob({ ...JOB, leaseGeneration: 7, projectId: "proj-x" }, deps);
+
+    expect(store.insertFactsReconciled).toHaveBeenCalledWith(
+      expect.objectContaining({ job: { id: "job-1", leaseGeneration: 7 } }),
+    );
+    expect(deps.log).toHaveBeenCalledWith("memory.observer.eager_facts_stale", {
+      thread_id: "thread-1",
+    });
+    expect(deps.log).not.toHaveBeenCalledWith(
+      "memory.observer.eager_facts_extracted",
+      expect.anything(),
+    );
+  });
+
   it("feeds ONLY user messages to the extractor (assistant/tool noise excluded)", async () => {
     // deepseek drops the user's stated fact when the wire body is full of agent
     // tool/file noise (e.g. Mimi reading/writing its own MEMORY.md). Only user turns

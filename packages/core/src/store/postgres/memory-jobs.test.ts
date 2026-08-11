@@ -187,4 +187,102 @@ describe("PgMemoryStore job queue", () => {
     expect((await store.getReflection(target))?.reflectionText).toBe("current");
     await db.$close();
   });
+
+  it("fences stale decay, embedding, and eager-fact publication after reclaim", async () => {
+    let nowMs = 1_000_000;
+    const db = await createPgliteDb();
+    const store = new PgMemoryStore(db, undefined, () => new Date(nowMs));
+    await store.ensureThread({ id: "t1", ownerId: "acct-a" });
+    const observationId = await store.appendObservation({
+      threadId: "t1",
+      sourceMessageRange: ["m1", "m1"],
+      observationText: "keep me",
+      observedAt: new Date(nowMs),
+    });
+
+    const staleLease = async (type: "decay" | "embedding" | "observer") => {
+      const jobId = await store.enqueueJob({
+        type,
+        scope: { accountId: "acct-a", ...(type === "observer" ? { threadId: "t1" } : {}) },
+      });
+      const first = (await store.claimPendingJobs(1))[0];
+      nowMs += 11 * 60_000;
+      await store.claimPendingJobs(10);
+      return { id: jobId, leaseGeneration: first?.leaseGeneration ?? 0 };
+    };
+
+    const decay = await staleLease("decay");
+    expect(
+      await store.archiveObservations({
+        accountId: "acct-a",
+        ids: [observationId],
+        now: new Date(nowMs),
+        job: decay,
+      }),
+    ).toBe(false);
+    expect(await store.listScorableObservations({ accountId: "acct-a" })).toHaveLength(1);
+
+    await store.insertFactsReconciled({
+      accountId: "acct-a",
+      scope: {},
+      facts: [
+        {
+          ownerId: "acct-a",
+          subjectKey: "existing",
+          factText: "existing fact",
+          contentHash: "existing-hash",
+          validFrom: new Date(nowMs),
+        },
+      ],
+      now: new Date(nowMs),
+    });
+    const existing = (await store.listActiveFacts({ accountId: "acct-a" }))[0];
+    if (existing === undefined) throw new Error("expected existing fact");
+    const embedding = await staleLease("embedding");
+    expect(
+      await store.setFactEmbeddings({
+        accountId: "acct-a",
+        items: [
+          {
+            factId: existing.id,
+            embedding: new Float32Array([1, 0]),
+            model: "test",
+            dim: 2,
+          },
+        ],
+        job: embedding,
+      }),
+    ).toBe(false);
+    expect(
+      await store.listFactsNeedingEmbedding({
+        accountId: "acct-a",
+        model: "test",
+        dim: 2,
+        limit: 10,
+      }),
+    ).toHaveLength(1);
+
+    const observer = await staleLease("observer");
+    const reconciled = await store.insertFactsReconciled({
+      accountId: "acct-a",
+      scope: { threadId: "t1" },
+      facts: [
+        {
+          ownerId: "acct-a",
+          threadId: "t1",
+          subjectKey: "stale",
+          factText: "stale fact",
+          contentHash: "stale-hash",
+          validFrom: new Date(nowMs),
+        },
+      ],
+      now: new Date(nowMs),
+      job: observer,
+    });
+    expect(reconciled.accepted).toBe(false);
+    expect(
+      (await store.listActiveFacts({ accountId: "acct-a" })).map((fact) => fact.factText),
+    ).toEqual(["existing fact"]);
+    await db.$close();
+  });
 });

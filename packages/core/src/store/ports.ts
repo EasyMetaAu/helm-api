@@ -763,6 +763,9 @@ export interface MemoryFactReconcileResult {
   insertedIds: string[];
   supersededIds: string[];
   resurrectedIds?: string[];
+  // False only when a background worker lost its lease before publication.
+  // Optional so existing adapters and direct/manual fact writes stay compatible.
+  accepted?: boolean;
 }
 
 export type MemoryReflectionCommitAction =
@@ -1045,7 +1048,12 @@ export interface MemoryStore {
   // owner_id (defence in depth; the ids already came from an account-scoped read).
   // Empty id lists are a no-op. OPTIONAL (`?`): additive + gated, same contract as
   // listScorableObservations / bumpReferences.
-  archiveObservations?(input: { accountId: string; ids: string[]; now: Date }): Promise<void>;
+  archiveObservations?(input: {
+    accountId: string;
+    ids: string[];
+    now: Date;
+    job?: { id: string; leaseGeneration: number };
+  }): Promise<boolean> | Promise<void>;
   // Production adapters atomically enqueue reflector rebuilds for the exact
   // scopes affected by archiveObservations. Older adapters may omit this marker;
   // decay retains the bounded account-scan fallback for them.
@@ -1124,6 +1132,7 @@ export interface MemoryStore {
     scope: { projectId?: string; resourceId?: string; threadId?: string };
     facts: MemoryFactInput[];
     now: Date;
+    job?: { id: string; leaseGeneration: number };
   }): Promise<MemoryFactReconcileResult>;
   // docs/12 "Supersede within long" — the fact READ half. Return the account's
   // facts that are still alive: owner_id = accountId AND status='active' AND
@@ -1323,7 +1332,8 @@ export interface MemoryStore {
   setFactEmbeddings?(input: {
     accountId: string;
     items: Array<{ factId: string; embedding: Float32Array; model: string; dim: number }>;
-  }): Promise<void>;
+    job?: { id: string; leaseGeneration: number };
+  }): Promise<boolean> | Promise<void>;
 
   // docs/14 — the embedding job's READ half: ACTIVE facts that still need a (re-)
   // embedding for the vector leg — NULL embedding, OR one from a DIFFERENT model, OR

@@ -1,5 +1,5 @@
 import type { MemoryFactInput } from "@helm/shared";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { SqliteMemoryStore } from "../../store/sqlite/memory-store.js";
 import { createSqliteDb } from "../../store/sqlite/migrate.js";
 import { factContentHash } from "../forgetting/facts.js";
@@ -41,11 +41,11 @@ function deps(store: SqliteMemoryStore, embedder: Embedder = fakeEmbedder) {
 
 async function claimOne(
   store: SqliteMemoryStore,
-): Promise<{ jobId: string; scope: { accountId: string } }> {
+): Promise<{ jobId: string; leaseGeneration?: number; scope: { accountId: string } }> {
   await store.enqueueJob({ type: "embedding", scope: { accountId: "a" } });
   const [job] = await store.claimPendingJobs(10);
   if (job === undefined) throw new Error("no job claimed");
-  return { jobId: job.jobId, scope: job.scope };
+  return { jobId: job.jobId, leaseGeneration: job.leaseGeneration, scope: job.scope };
 }
 
 describe("runEmbeddingJob (docs/14)", () => {
@@ -111,6 +111,31 @@ describe("runEmbeddingJob (docs/14)", () => {
       limit: 10,
     });
     expect(pending).toHaveLength(1);
+  });
+
+  it("stops without completing or re-enqueueing when embedding publication is stale", async () => {
+    const store = new SqliteMemoryStore(createSqliteDb(":memory:"));
+    await store.insertFactsReconciled({
+      accountId: "a",
+      scope: {},
+      now: NOW,
+      facts: [makeFact("stale embedding")],
+    });
+    const sink = vi.spyOn(store, "setFactEmbeddings").mockResolvedValueOnce(false);
+    const log = vi.fn();
+    const job = await claimOne(store);
+
+    await runEmbeddingJob(job, { ...deps(store), log });
+
+    expect(sink).toHaveBeenCalledWith(
+      expect.objectContaining({
+        job: { id: job.jobId, leaseGeneration: job.leaseGeneration },
+      }),
+    );
+    expect(log).toHaveBeenCalledWith("memory.embedding.stale", { account_id: "a" });
+    expect((await store.claimPendingJobs(10)).some((next) => next.type === "embedding")).toBe(
+      false,
+    );
   });
 
   it("re-enqueues a follow-up job after a FULL batch so the backlog drains", async () => {

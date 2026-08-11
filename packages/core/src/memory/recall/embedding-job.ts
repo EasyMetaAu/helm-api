@@ -58,7 +58,19 @@ export async function runEmbeddingJob(job: EmbeddingJob, deps: EmbeddingJobDeps)
         (it): it is { factId: string; embedding: Float32Array; dim: number; model: string } =>
           it.embedding !== undefined && it.embedding.length === deps.dim,
       );
-    if (items.length > 0) await sink.call(deps.memoryStore, { accountId, items });
+    if (items.length > 0) {
+      const accepted = await sink.call(deps.memoryStore, {
+        accountId,
+        items,
+        ...(job.leaseGeneration !== undefined
+          ? { job: { id: job.jobId, leaseGeneration: job.leaseGeneration } }
+          : {}),
+      });
+      if (accepted === false) {
+        deps.log("memory.embedding.stale", { account_id: accountId });
+        return;
+      }
+    }
     await updateClaimedJobStatus(deps.memoryStore, job, "done");
     deps.log("memory.embedding.done", { account_id: accountId, embedded: items.length });
     // A FULL batch likely leaves more unembedded facts (common right after enabling

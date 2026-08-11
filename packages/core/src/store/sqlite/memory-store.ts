@@ -1115,6 +1115,16 @@ export class SqliteMemoryStore implements MemoryStore {
     return row?.version ?? 0;
   }
 
+  private hasCurrentJobLease(job: { id: string; leaseGeneration: number }): boolean {
+    return (
+      this.db.$sqlite
+        .prepare(
+          "SELECT 1 FROM memory_jobs WHERE id = ? AND status = 'running' AND lease_generation = ?",
+        )
+        .get(job.id, job.leaseGeneration) !== undefined
+    );
+  }
+
   async commitReflectionJob(
     jobId: string,
     input: MemoryReflectionJobCommitInput,
@@ -1420,11 +1430,17 @@ export class SqliteMemoryStore implements MemoryStore {
   // GUARDED via the thread's owner_id (defence in depth — the ids already came from an
   // account-scoped read). Empty id list → no statement. Touches ONLY memory_observations
   // status/archived_at; raw messages and other accounts' rows are never affected.
-  async archiveObservations(input: { accountId: string; ids: string[]; now: Date }): Promise<void> {
-    if (input.ids.length === 0) return;
+  async archiveObservations(input: {
+    accountId: string;
+    ids: string[];
+    now: Date;
+    job?: { id: string; leaseGeneration: number };
+  }): Promise<boolean> {
+    if (input.ids.length === 0) return true;
     const placeholders = input.ids.map(() => "?").join(", ");
     const db = this.db.$sqlite;
-    db.transaction(() => {
+    return db.transaction(() => {
+      if (input.job !== undefined && !this.hasCurrentJobLease(input.job)) return false;
       const rows = db
         .prepare(
           `SELECT DISTINCT t.project_id, t.resource_id, t.id AS thread_id
@@ -1486,6 +1502,7 @@ export class SqliteMemoryStore implements MemoryStore {
            VALUES (?, 'reflector', ?, 'pending', NULL, ?, ?)`,
         ).run(this.genId(), scopeId, input.now.getTime(), input.now.getTime());
       }
+      return true;
     })();
   }
 
@@ -1567,6 +1584,7 @@ export class SqliteMemoryStore implements MemoryStore {
     scope: { projectId?: string; resourceId?: string; threadId?: string };
     facts: MemoryFactInput[];
     now: Date;
+    job?: { id: string; leaseGeneration: number };
   }): MemoryFactReconcileResult {
     if (input.facts.length === 0) return { insertedIds: [], supersededIds: [], resurrectedIds: [] };
     const nowMs = input.now.getTime();
@@ -1615,6 +1633,9 @@ export class SqliteMemoryStore implements MemoryStore {
     // without its supersede applied (or vice versa). Returns the ids inserted +
     // superseded + resurrected (docs/13 — the MCP `memory_add` tool echoes them).
     const runBatch = this.db.$sqlite.transaction((facts: MemoryFactInput[]) => {
+      if (input.job !== undefined && !this.hasCurrentJobLease(input.job)) {
+        return { insertedIds: [], supersededIds: [], resurrectedIds: [], accepted: false };
+      }
       const insertedIds: string[] = [];
       const supersededIds: string[] = [];
       const resurrectedIds: string[] = [];
@@ -1727,6 +1748,7 @@ export class SqliteMemoryStore implements MemoryStore {
     scope: { projectId?: string; resourceId?: string; threadId?: string };
     facts: MemoryFactInput[];
     now: Date;
+    job?: { id: string; leaseGeneration: number };
   }): Promise<MemoryFactReconcileResult> {
     return this.reconcileFactsSync(input);
   }
@@ -2252,8 +2274,9 @@ export class SqliteMemoryStore implements MemoryStore {
   async setFactEmbeddings(input: {
     accountId: string;
     items: Array<{ factId: string; embedding: Float32Array; model: string; dim: number }>;
-  }): Promise<void> {
-    if (input.items.length === 0) return;
+    job?: { id: string; leaseGeneration: number };
+  }): Promise<boolean> {
+    if (input.items.length === 0) return true;
     const selectRowid = this.db.$sqlite.prepare(
       "SELECT rowid AS rowid FROM memory_facts WHERE id = ? AND owner_id = ?",
     );
@@ -2261,6 +2284,7 @@ export class SqliteMemoryStore implements MemoryStore {
       "UPDATE memory_facts SET embedding = ?, embedding_model = ?, embedding_dim = ? WHERE rowid = ?",
     );
     const run = this.db.$sqlite.transaction(() => {
+      if (input.job !== undefined && !this.hasCurrentJobLease(input.job)) return false;
       for (const it of input.items) {
         const row = selectRowid.get(it.factId, input.accountId) as { rowid: number } | undefined;
         if (row === undefined) continue;
@@ -2284,8 +2308,9 @@ export class SqliteMemoryStore implements MemoryStore {
           }
         }
       }
+      return true;
     });
-    run();
+    return run();
   }
 
   // docs/14 — the embedding job's read half. ACTIVE facts with no embedding, or one
