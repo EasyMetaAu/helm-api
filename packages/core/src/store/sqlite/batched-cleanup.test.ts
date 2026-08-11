@@ -80,6 +80,18 @@ function seedExpiredRows() {
     )
     .run(rows, rows);
   insert();
+  db.$sqlite
+    .prepare(
+      `UPDATE memory_threads
+          SET observer_frontier_at = 1000,
+              observer_frontier_id = (
+                SELECT id FROM memory_messages
+                 WHERE thread_id = 'thread'
+                 ORDER BY created_at DESC, id DESC LIMIT 1
+              )
+        WHERE id = 'thread'`,
+    )
+    .run();
   return {
     db,
     rows,

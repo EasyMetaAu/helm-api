@@ -517,7 +517,7 @@ export async function assembleInjectedContext(
         pageNumber < MAX_INJECTION_CANDIDATE_PAGES && remaining > 0;
         pageNumber++
       ) {
-        const page = await pagedRead({
+        const page = await pagedRead.call(deps.memoryStore, {
           accountId: input.scope.accountId,
           threadId: input.scope.threadId,
           limit: INJECTION_CANDIDATE_PAGE_SIZE,
