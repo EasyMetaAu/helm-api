@@ -494,6 +494,39 @@ describe("createOAuthAdmin", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("reserves device-code capacity before the upstream request and releases it on failure", async () => {
+    let release!: () => void;
+    const upstreamGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fetchImpl = vi.fn(async () => {
+      await upstreamGate;
+      throw new Error("upstream failed");
+    }) as unknown as typeof fetch;
+    const admin = createOAuthAdmin({
+      store: makeStore(),
+      encKey: KEY,
+      config: makeConfig(),
+      makeFetch: () => fetchImpl,
+    });
+
+    const starts = Array.from({ length: MAX_PENDING_OAUTH_SESSIONS + 1 }, () =>
+      admin.startDeviceCode({ providerId: "github-copilot" }),
+    );
+    const settled = Promise.allSettled(starts);
+    expect(fetchImpl).toHaveBeenCalledTimes(MAX_PENDING_OAUTH_SESSIONS);
+
+    release();
+    const results = await settled;
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(
+      MAX_PENDING_OAUTH_SESSIONS + 1,
+    );
+    await expect(admin.startDeviceCode({ providerId: "github-copilot" })).rejects.toThrow(
+      /upstream failed/,
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(MAX_PENDING_OAUTH_SESSIONS + 1);
+  });
+
   it("listStatus AUTO-RENEWS an expired account on view (openclaw-style lazy refresh)", async () => {
     const store = makeStore();
     const NOW = 10_000_000;

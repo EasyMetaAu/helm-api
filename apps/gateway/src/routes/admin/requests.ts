@@ -313,9 +313,13 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
       limit: SESSION_REVISION_PAGE_LIMIT,
       maxBytes: SESSION_REVISION_PAGE_MAX_BYTES,
     });
+    // `c.json()` can expand escaped strings and holds transient copies; use the shared
+    // worst-case JSON allocation multiplier before admitting an individual row.
+    const jsonAmplification = runtimeMemoryBudget().jsonAmplification;
     if (
       page.revisions.some(
-        (revision) => sessionRevisionWireBytes(revision) > SESSION_REVISION_PAGE_MAX_BYTES,
+        (revision) =>
+          sessionRevisionWireBytes(revision) * jsonAmplification > SESSION_REVISION_PAGE_MAX_BYTES,
       )
     ) {
       return c.json({ captured: false, reason: "session_recovery_limited" });

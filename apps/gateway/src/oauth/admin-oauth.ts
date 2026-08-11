@@ -482,6 +482,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     };
   }
   const sessions = new Map<string, Session>();
+  let pendingDeviceStarts = 0;
   // Per-account provider quota cache (5-min TTL): key `<provider> <account>`.
   // Caches the OUTCOME of a usage fetch — windows on success, `null` on failure —
   // so a rate-limited/erroring endpoint is NOT retried until the TTL lapses
@@ -687,7 +688,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
 
   function ensureSessionCapacity(): void {
     prune();
-    if (sessions.size >= MAX_PENDING_OAUTH_SESSIONS) {
+    if (sessions.size + pendingDeviceStarts >= MAX_PENDING_OAUTH_SESSIONS) {
       throw new Error("too many pending OAuth sessions; complete or wait for an existing login");
     }
   }
@@ -959,40 +960,44 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         throw new Error(`provider '${providerId}' does not support the device-code flow`);
       }
       ensureSessionCapacity();
-      // CRITICAL: the device-code POST is the FIRST network call of the flow. Build
-      // the proxy fetch BEFORE it so step 1 never leaves from the operator's real IP.
-      const pinned = toProxy(proxy);
-      const doFetch = makeFetch(pinned);
-      const start =
-        providerId === XAI
-          ? await beginXaiDeviceLogin(doFetch, now)
-          : await beginCopilotDeviceLogin(enterprise, doFetch);
-      ensureSessionCapacity();
-      const sessionId = genId();
-      sessions.set(sessionId, {
-        kind: "device",
-        providerId,
-        deviceCode: start.deviceCode,
-        ...(providerId === XAI
-          ? { tokenEndpoint: (start as XaiDeviceStart).tokenEndpoint }
-          : {
-              domain: (start as CopilotDeviceStart).domain,
-              enterpriseDomain: (start as CopilotDeviceStart).enterpriseDomain,
-            }),
-        proxy: pinned,
-        createdAt: now(),
-        expiresAt: start.expiresAt,
-      });
-      return {
-        sessionId,
-        userCode: start.userCode,
-        verificationUri: start.verificationUri,
-        intervalMs: start.intervalMs,
-        expiresAt: start.expiresAt,
-        // The browser converts the absolute upstream expiry into a relative TTL
-        // using this same-clock reference. Browser and gateway clocks need not agree.
-        serverNowMs: now(),
-      };
+      pendingDeviceStarts += 1;
+      try {
+        // CRITICAL: the device-code POST is the FIRST network call of the flow. Build
+        // the proxy fetch BEFORE it so step 1 never leaves from the operator's real IP.
+        const pinned = toProxy(proxy);
+        const doFetch = makeFetch(pinned);
+        const start =
+          providerId === XAI
+            ? await beginXaiDeviceLogin(doFetch, now)
+            : await beginCopilotDeviceLogin(enterprise, doFetch);
+        const sessionId = genId();
+        sessions.set(sessionId, {
+          kind: "device",
+          providerId,
+          deviceCode: start.deviceCode,
+          ...(providerId === XAI
+            ? { tokenEndpoint: (start as XaiDeviceStart).tokenEndpoint }
+            : {
+                domain: (start as CopilotDeviceStart).domain,
+                enterpriseDomain: (start as CopilotDeviceStart).enterpriseDomain,
+              }),
+          proxy: pinned,
+          createdAt: now(),
+          expiresAt: start.expiresAt,
+        });
+        return {
+          sessionId,
+          userCode: start.userCode,
+          verificationUri: start.verificationUri,
+          intervalMs: start.intervalMs,
+          expiresAt: start.expiresAt,
+          // The browser converts the absolute upstream expiry into a relative TTL
+          // using this same-clock reference. Browser and gateway clocks need not agree.
+          serverNowMs: now(),
+        };
+      } finally {
+        pendingDeviceStarts -= 1;
+      }
     },
 
     async pollDeviceCode({ sessionId, account }) {

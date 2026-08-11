@@ -2268,7 +2268,7 @@ describe("admin.api request payload", () => {
     expect(pages[0]?.maxBytes).toBeGreaterThan(0);
   });
 
-  it("refuses an oversized raw revision before serializing it to JSON", async () => {
+  it("refuses a JSON-escaping revision before serializing it to JSON", async () => {
     const rec = {
       ...decision("req_child", "balanced"),
       session: { ref: "session-ref", source: "x-thread-id" as const },
@@ -2284,7 +2284,8 @@ describe("admin.api request payload", () => {
             sequence: 1,
             parentRequestId: null,
             retainCount: 0,
-            requestDeltaJson: "x".repeat(8 * 1024 * 1024),
+            // Raw UTF-8 is below 8 MiB, but JSON doubles every quote.
+            requestDeltaJson: '"'.repeat(7 * 1024 * 1024),
             requestEnvelopeJson: '{"model":"auto","messages":[]}',
             responseId: null,
             responseJson: null,
@@ -2302,10 +2303,9 @@ describe("admin.api request payload", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
-      captured: false,
-      reason: "session_recovery_limited",
-    });
+    const body = (await response.json()) as { captured: boolean; reason?: string };
+    expect(body.captured).toBe(false);
+    expect(body.reason).toBe("session_recovery_limited");
   });
 
   it("advances the cursor from the ?after= query", async () => {
