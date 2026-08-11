@@ -56,6 +56,20 @@ describe("serialized maintenance queue", () => {
     finish();
     await Promise.all([active, closing]);
   });
+
+  it("bounds queued maintenance while an earlier run is stalled", async () => {
+    const queue = createSerializedMaintenanceQueue({ maxDepth: 2 });
+    let finish = () => {};
+    const waiting = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const active = queue.run(() => waiting);
+    const queued = queue.run(async () => {});
+
+    await expect(queue.run(async () => {})).rejects.toThrow("database maintenance queue is full");
+    finish();
+    await Promise.all([active, queued]);
+  });
 });
 
 describe("maintenance activity gate", () => {
@@ -453,5 +467,19 @@ describe("maintenance activity gate", () => {
     finishChild();
     await waiting;
     expect(paused).toBe(true);
+  });
+});
+
+describe("tracked background tasks", () => {
+  it("rejects new detached work once its bounded backlog is full", async () => {
+    const tasks = createTrackedBackgroundTasks({ maxTasks: 1 });
+    let finish = () => {};
+    const waiting = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    expect(tasks.run(() => waiting)).toBe(true);
+    expect(tasks.run(async () => {})).toBe(false);
+    finish();
+    await tasks.pauseAndWait();
   });
 });

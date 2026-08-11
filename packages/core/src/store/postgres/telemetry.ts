@@ -876,6 +876,14 @@ export class PgTelemetryStore implements TelemetryStore {
     return rows.map((r) => this.toDecision(r));
   }
 
+  async countWindow(startMs: number, endMs: number): Promise<number> {
+    const rows = await this.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(telemetry)
+      .where(and(gte(telemetry.createdAt, startMs), lt(telemetry.createdAt, endMs)));
+    return Number(rows[0]?.n ?? 0);
+  }
+
   // Dashboard token-accounting aggregate — pg mirror of the sqlite adapter. Same
   // three SUM/COUNT/GROUP BY queries and the SAME integer-division bucketing (the
   // window size + tz offset are inlined via sql.raw so pg does bigint INTEGER

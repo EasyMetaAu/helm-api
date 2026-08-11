@@ -43,6 +43,19 @@ describe("createKeyedSerialGate", () => {
     if (res.ok) res.release();
   });
 
+  it("rejects excess waiters immediately instead of retaining them until timeout", async () => {
+    const gate = createKeyedSerialGate();
+    const holder = await gate.acquire(args({ delayMs: 0 }));
+    const queued = gate.acquire(args({ delayMs: 0, maxQueue: 1 }));
+    await expect(gate.acquire(args({ delayMs: 0, maxQueue: 1 }))).resolves.toEqual({
+      ok: false,
+      reason: "queue_full",
+    });
+    if (holder.ok) holder.release();
+    const next = await queued;
+    if (next.ok) next.release();
+  });
+
   it("enforces delayMs measured from the previous COMPLETION", async () => {
     const gate = createKeyedSerialGate();
     const first = await gate.acquire(args());

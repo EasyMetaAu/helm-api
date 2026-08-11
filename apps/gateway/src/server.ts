@@ -2721,7 +2721,14 @@ export async function buildServer(
   // Codex quota-window scrape (providers page Tier 3): parse the `x-codex-*` headers
   // off each Codex reply and snapshot them per account. FAIL-OPEN — a parse/store
   // failure is swallowed (an observability scrape never breaks a served request).
+  // At most one persistence worker per account. Header snapshots may arrive much
+  // faster than SQLite/Postgres can write; retain only the newest authoritative
+  // window instead of one promise closure per served request.
   const quotaObservationInFlight = new Map<string, Promise<void>>();
+  const pendingQuotaObservations = new Map<
+    string,
+    { providerId: string; account: string; windows: OAuthQuotaWindow[]; observedAtMs: number }
+  >();
   const captureCodexQuota = (providerId: string, account: string, headers: Headers): void => {
     const nowMs = Date.now();
     const details = parseCodexQuotaHeaderDetails(headers, nowMs);
@@ -2729,38 +2736,56 @@ export async function buildServer(
     if (windows.length === 0) return; // no quota headers on this reply → nothing to store
     applyQuotaSnapshot(providerId, account, windows, nowMs);
     const observationKey = `${providerId}\u0000${account}`;
-    const previous = quotaObservationInFlight.get(observationKey) ?? Promise.resolve();
-    const task = previous
-      .catch(() => {})
-      .then(async () => {
-        await recordObservedQuotaResetPeriods({
-          quotaStore: store.oauthQuota,
-          periodStore: store.oauthResetPeriod,
-          providerId,
-          account,
-          windows,
-          observedAtMs: nowMs,
-        });
-        await store.oauthQuota.upsert({
-          providerId,
-          account,
-          windows,
-          capturedAt: nowMs,
-          source: "codex-headers",
-        });
+    pendingQuotaObservations.set(observationKey, {
+      providerId,
+      account,
+      windows,
+      observedAtMs: nowMs,
+    });
+    if (!quotaObservationInFlight.has(observationKey)) {
+      let resolveDone!: () => void;
+      const done = new Promise<void>((resolve) => {
+        resolveDone = resolve;
       });
-    quotaObservationInFlight.set(observationKey, task);
-    backgroundTasks.run(
-      () => task,
-      () => logger.log("error", "oauth.quota.capture_failed", { provider_id: providerId }),
-    );
-    void task
-      .finally(() => {
-        if (quotaObservationInFlight.get(observationKey) === task) {
-          quotaObservationInFlight.delete(observationKey);
-        }
-      })
-      .catch(() => {});
+      quotaObservationInFlight.set(observationKey, done);
+      const started = backgroundTasks.run(
+        async () => {
+          try {
+            for (;;) {
+              const snapshot = pendingQuotaObservations.get(observationKey);
+              if (snapshot === undefined) break;
+              pendingQuotaObservations.delete(observationKey);
+              await recordObservedQuotaResetPeriods({
+                quotaStore: store.oauthQuota,
+                periodStore: store.oauthResetPeriod,
+                providerId: snapshot.providerId,
+                account: snapshot.account,
+                windows: snapshot.windows,
+                observedAtMs: snapshot.observedAtMs,
+              });
+              await store.oauthQuota.upsert({
+                providerId: snapshot.providerId,
+                account: snapshot.account,
+                windows: snapshot.windows,
+                capturedAt: snapshot.observedAtMs,
+                source: "codex-headers",
+              });
+            }
+          } finally {
+            resolveDone();
+            if (quotaObservationInFlight.get(observationKey) === done) {
+              quotaObservationInFlight.delete(observationKey);
+            }
+          }
+        },
+        () => logger.log("error", "oauth.quota.capture_failed", { provider_id: providerId }),
+      );
+      if (!started) {
+        pendingQuotaObservations.delete(observationKey);
+        resolveDone();
+        quotaObservationInFlight.delete(observationKey);
+      }
+    }
     // Auto-park when a window is saturated (≥100% with a future reset): the precise
     // long cooldown the 429 backstop can't know. Fire-and-forget (fail-open).
     const until = windowsToUsageLimit(windows, nowMs);
