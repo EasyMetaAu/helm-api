@@ -3,10 +3,15 @@ import {
   computeUsagePeriods,
   filterRetiredOpenAICodexLimits,
   GROK_OAUTH_MEDIA_MODELS,
+  windowMinutesForKey,
   windowsToActiveUsageRecovery,
   windowsToUsageLimit,
 } from "@helm/core";
-import { isCodexQuotaWindowPlaceholder, type OAuthQuotaWindow } from "@helm/shared";
+import {
+  isCodexQuotaWindowPlaceholder,
+  type OAuthQuotaWindow,
+  type OAuthResetPeriod,
+} from "@helm/shared";
 import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AppEnv } from "../../app.js";
@@ -43,6 +48,42 @@ import type {
 //   - device_code (Copilot): start -> show user code -> poll until done.
 
 const DEFAULT_ACCOUNT = "default";
+
+function resetEventBoundaries(
+  rows: OAuthResetPeriod[],
+  nextResetAtMs: number | null,
+  nowMs: number,
+  windowMs: number | null,
+): Array<{ startMs: number; endMs: number }> {
+  // The old writer stored [oldReset, projectedNextReset); the current writer stores a
+  // closed period ending at the observed reset. Reduce both shapes to proven events.
+  const points = [
+    ...new Set(
+      rows.flatMap((row) => {
+        if (row.detectedAtMs >= row.periodEndMs) return [row.periodEndMs];
+        return row.periodStartMs <= row.detectedAtMs ? [row.periodStartMs] : [];
+      }),
+    ),
+  ]
+    .filter((point) => point <= nowMs)
+    .sort((a, b) => a - b);
+  const plausible = (startMs: number, endMs: number) =>
+    windowMs !== null && endMs - startMs <= windowMs * 1.5;
+  const boundaries = points.slice(1).flatMap((endMs, index) => {
+    const startMs = points[index] ?? endMs;
+    return plausible(startMs, endMs) ? [{ startMs, endMs }] : [];
+  });
+  const latest = points.at(-1);
+  if (
+    latest !== undefined &&
+    nextResetAtMs !== null &&
+    nextResetAtMs > nowMs &&
+    plausible(latest, nextResetAtMs)
+  ) {
+    boundaries.push({ startMs: latest, endMs: nextResetAtMs });
+  }
+  return boundaries;
+}
 
 // Narrow an unknown thrown value to a safe, already-scrubbed message. The seam's
 // errors are constructed without token material (TokenRefreshError / generic),
@@ -266,16 +307,22 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       const dataStartMs = Math.max(retentionFloorMs, earliestBucketMs);
       const recordedBoundaries = Object.fromEntries(
         await Promise.all(
-          snapshot.windows.map(async (window) => [
-            window.key,
-            (
-              await deps.oauthResetPeriod
+          snapshot.windows.map(async (window) => {
+            const rows =
+              (await deps.oauthResetPeriod
                 ?.queryPeriods(providerId, account, window.key, 53)
-                .catch(() => [])
-            )
-              ?.filter((row) => row.detectedAtMs >= row.periodEndMs)
-              .map((row) => ({ startMs: row.periodStartMs, endMs: row.periodEndMs })) ?? [],
-          ]),
+                .catch(() => [])) ?? [];
+            const minutes = windowMinutesForKey(window.key, window.windowMinutes);
+            return [
+              window.key,
+              resetEventBoundaries(
+                rows,
+                window.resetsAtMs,
+                now,
+                minutes === null ? null : minutes * 60_000,
+              ),
+            ] as const;
+          }),
         ),
       );
       const { current, periods } = computeUsagePeriods({
