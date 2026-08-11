@@ -13,6 +13,23 @@ describe("payload-codec", () => {
     expect(decodePayloadValue(encodePayloadText(text))).toBe(text);
   });
 
+  it("reads a legacy gzip row at the raw chunk boundary", () => {
+    const text = "x".repeat(PAYLOAD_TEXT_CHUNK_RAW_BYTES);
+    expect(decodePayloadValue(encodePayloadText(text))).toBe(text);
+  });
+
+  it("treats a legacy gzip row one byte over the raw chunk boundary as unavailable", () => {
+    const compressed = encodePayloadText("x".repeat(PAYLOAD_TEXT_CHUNK_RAW_BYTES + 1));
+    expect(decodePayloadValue(compressed)).toBeNull();
+  });
+
+  it("rejects a highly compressed legacy gzip bomb without returning its output", () => {
+    const rawBytes = PAYLOAD_TEXT_CHUNK_RAW_BYTES * 8;
+    const compressed = encodePayloadText("x".repeat(rawBytes));
+    expect(compressed.length).toBeLessThan(rawBytes / 100);
+    expect(decodePayloadValue(compressed)).toBeNull();
+  });
+
   it("actually shrinks repetitive transcript text", () => {
     const text = "the quick brown fox ".repeat(2000);
     expect(encodePayloadText(text).length).toBeLessThan(text.length / 5);

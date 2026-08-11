@@ -390,6 +390,31 @@ describe("runObserverJob — eager fact extraction", () => {
     });
   });
 
+  it("passes the lease guard and does not report stale eager facts as published", async () => {
+    const { store } = makeFakeStore(makeShortThread());
+    (store.insertFactsReconciled as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      insertedIds: [],
+      supersededIds: [],
+      accepted: false,
+    });
+    const deps = makeDeps(store, {
+      extractFactsFromMessages: vi.fn(async () => [eagerFact]),
+    });
+
+    await runObserverJob({ ...JOB, leaseGeneration: 7, projectId: "proj-x" }, deps);
+
+    expect(store.insertFactsReconciled).toHaveBeenCalledWith(
+      expect.objectContaining({ job: { id: "job-1", leaseGeneration: 7 } }),
+    );
+    expect(deps.log).toHaveBeenCalledWith("memory.observer.eager_facts_stale", {
+      thread_id: "thread-1",
+    });
+    expect(deps.log).not.toHaveBeenCalledWith(
+      "memory.observer.eager_facts_extracted",
+      expect.anything(),
+    );
+  });
+
   it("feeds ONLY user messages to the extractor (assistant/tool noise excluded)", async () => {
     // deepseek drops the user's stated fact when the wire body is full of agent
     // tool/file noise (e.g. Mimi reading/writing its own MEMORY.md). Only user turns
@@ -729,5 +754,92 @@ describe("runObserverJob — re-enqueue on a turn that arrives during the run", 
       type: "observer",
       scope: { accountId: "acct-a", threadId: "thread-1" },
     });
+  });
+
+  it("compresses only the oldest uncovered gap from an all-status bounded coverage page", async () => {
+    const page = makeMessages(8);
+    const { store } = makeFakeStore(page);
+    store.listObserverMessagesPage = vi.fn(async () => ({
+      messages: page,
+      coveredMessageIds: ["m1", "m2", "m3", "m5", "m6", "m7", "m8"],
+      expectedFrontier: null,
+      nextCursor: { createdAtMs: page[7]?.createdAt.getTime() ?? 0, id: "m8" },
+      hasMore: true,
+    }));
+    store.commitObserverPage = vi.fn(async () => ({ observationId: "obs-gap" }));
+
+    const out = await runObserverJob({ ...JOB, leaseGeneration: 1 }, makeDeps(store));
+
+    expect(out).toEqual({ observationId: "obs-gap", sourceMessageRange: ["m4", "m4"] });
+    expect(store.listObservations).not.toHaveBeenCalled();
+    expect(store.commitObserverPage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "observe",
+        observation: expect.objectContaining({ sourceMessageRange: ["m4", "m4"] }),
+        nextFrontier: expect.objectContaining({ id: "m4" }),
+      }),
+    );
+  });
+
+  it("uses one atomic page commit for the observation, job completion, and remainder", async () => {
+    const page = makeMessages(8);
+    const { store } = makeFakeStore(page);
+    store.getThreadMeta = vi.fn(async () => ({
+      lastServedModel: null,
+      messageCount: 51_116,
+      observationCount: 513,
+    }));
+    store.listObserverMessagesPage = vi.fn(async () => ({
+      messages: page,
+      expectedFrontier: null,
+      nextCursor: { createdAtMs: page[7]?.createdAt.getTime() ?? 0, id: "m8" },
+      hasMore: true,
+    }));
+    store.commitObserverPage = vi.fn(async () => ({ observationId: "obs-atomic" }));
+
+    const out = await runObserverJob({ ...JOB, leaseGeneration: 1 }, makeDeps(store));
+
+    expect(out.observationId).toBe("obs-atomic");
+    expect(store.commitObserverPage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "observe",
+        job: {
+          id: JOB.jobId,
+          scope: { accountId: "acct-a", threadId: "thread-1" },
+          leaseGeneration: 1,
+        },
+        successorScope: { accountId: "acct-a", threadId: "thread-1" },
+      }),
+    );
+    expect(store.updateJobStatus).not.toHaveBeenCalled();
+    expect(store.enqueueJob).not.toHaveBeenCalled();
+  });
+
+  it("atomically advances a fully covered page without another observation", async () => {
+    const page = makeMessages(2, 10);
+    const { store } = makeFakeStore(page);
+    store.listObserverMessagesPage = vi.fn(async () => ({
+      messages: page,
+      coveredMessageIds: page.map((message) => message.id),
+      expectedFrontier: null,
+      nextCursor: { createdAtMs: page[1]?.createdAt.getTime() ?? 0, id: "m2" },
+      hasMore: true,
+    }));
+    store.commitObserverPage = vi.fn(async () => ({ observationId: null }));
+    const deps = makeDeps(store);
+
+    const out = await runObserverJob({ ...JOB, leaseGeneration: 1 }, deps);
+
+    expect(out).toEqual({ observationId: null, sourceMessageRange: null });
+    expect(deps.summarize).not.toHaveBeenCalled();
+    expect(store.commitObserverPage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "advance",
+        nextFrontier: expect.objectContaining({ id: "m2" }),
+        successorScope: { accountId: "acct-a", threadId: "thread-1" },
+      }),
+    );
+    expect(store.updateJobStatus).not.toHaveBeenCalled();
+    expect(store.enqueueJob).not.toHaveBeenCalled();
   });
 });

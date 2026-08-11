@@ -1,4 +1,8 @@
-import type { Embedder } from "@helm/core";
+import {
+  type Embedder,
+  type ResponseWorkAdmission,
+  readUpstreamJsonWithinBudget,
+} from "@helm/core";
 
 // docs/14 — the embedding port impl for hybrid recall's vector leg. helm has no
 // /v1/embeddings route and ProviderClient has no embeddings method, so this is a thin
@@ -26,6 +30,7 @@ export function createMemoryEmbedder(deps: {
   providers: readonly EmbedderProvider[];
   env?: Record<string, string | undefined>;
   fetchImpl?: typeof fetch;
+  responseWorkAdmission?: ResponseWorkAdmission;
   // Bounds every embeddings request so a stalled endpoint can't hang memory_recall
   // (it fails open to FTS+score) or wedge an embedding worker. Defaults to 30s.
   timeoutMs?: number;
@@ -67,7 +72,10 @@ export function createMemoryEmbedder(deps: {
         signal: AbortSignal.timeout(timeoutMs),
       });
       if (!res.ok) throw new Error(`embeddings request failed: ${res.status}`);
-      const json = (await res.json()) as OpenAiEmbeddingsResponse;
+      const json = await readUpstreamJsonWithinBudget<OpenAiEmbeddingsResponse>(
+        res,
+        deps.responseWorkAdmission,
+      );
       // Preserve input order (OpenAI returns data in request order); be defensive.
       return json.data.map((d) => Float32Array.from(d.embedding));
     },

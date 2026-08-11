@@ -1,3 +1,4 @@
+import { createResponseWorkAdmission } from "@helm/core";
 import { describe, expect, it, vi } from "vitest";
 import { createMemoryEmbedder } from "./memory-embedder.js";
 
@@ -7,11 +8,9 @@ const PROVIDERS = [
 ];
 
 function okFetch(vectors: number[][]) {
-  return vi.fn(async () => ({
-    ok: true,
-    status: 200,
-    json: async () => ({ data: vectors.map((embedding) => ({ embedding })) }),
-  })) as unknown as typeof fetch;
+  return vi.fn(async () =>
+    Response.json({ data: vectors.map((embedding) => ({ embedding })) }),
+  ) as unknown as typeof fetch;
 }
 
 describe("createMemoryEmbedder (docs/14)", () => {
@@ -53,6 +52,11 @@ describe("createMemoryEmbedder (docs/14)", () => {
       providers: PROVIDERS,
       env: { EMB_KEY: "secret-key" },
       fetchImpl,
+      responseWorkAdmission: createResponseWorkAdmission({
+        capacityBytes: 1024,
+        jsonAmplification: 1,
+        minChargeBytes: 1,
+      }),
     });
     expect(embedder).toBeDefined();
     const out = await embedder?.embed(["hello", "world"]);
@@ -94,5 +98,30 @@ describe("createMemoryEmbedder (docs/14)", () => {
       fetchImpl,
     });
     await expect(embedder?.embed(["x"])).rejects.toThrow();
+  });
+
+  it("rejects an oversized successful embeddings body before JSON materialization", async () => {
+    const responseWorkAdmission = createResponseWorkAdmission({
+      capacityBytes: 8,
+      jsonAmplification: 1,
+      minChargeBytes: 1,
+    });
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response("{}", {
+          headers: { "content-type": "application/json", "content-length": "9" },
+        }),
+    );
+    const embedder = createMemoryEmbedder({
+      embeddingModel: "openai/bge-m3",
+      providers: PROVIDERS,
+      fetchImpl,
+      responseWorkAdmission,
+    });
+
+    await expect(embedder?.embed(["x"])).rejects.toMatchObject({
+      providerRaw: { error: { code: "response_body_too_large", limit_bytes: 8 } },
+    });
+    expect(responseWorkAdmission.reservedBytes).toBe(0);
   });
 });

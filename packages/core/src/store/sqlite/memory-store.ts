@@ -48,6 +48,8 @@ import {
   type MemoryMessageArchiveRow,
   type MemoryObserverCursor,
   type MemoryObserverPage,
+  type MemoryObserverPageCommitInput,
+  type MemoryObserverPageCommitResult,
   type MemoryReflectionJobCommitInput,
   type MemoryReflectionJobCommitResult,
   type MemoryStore,
@@ -559,6 +561,37 @@ export class SqliteMemoryStore implements MemoryStore {
       if (oversized) break;
     }
     const safeIds = selected.filter((row) => !row.oversized).map((row) => row.id);
+    const selectedIds = selected.map((row) => row.id);
+    const coveredMessageIds =
+      selectedIds.length === 0
+        ? []
+        : (
+            this.db.$sqlite
+              .prepare(
+                `SELECT m.id
+                   FROM memory_messages m
+                  WHERE m.id IN (${selectedIds.map(() => "?").join(",")})
+                    AND EXISTS (
+                      SELECT 1
+                        FROM memory_observations o
+                        JOIN memory_messages first_message
+                          ON first_message.id = json_extract(o.source_message_range, '$[0]')
+                         AND first_message.thread_id = o.thread_id
+                        JOIN memory_messages last_message
+                          ON last_message.id = json_extract(o.source_message_range, '$[1]')
+                         AND last_message.thread_id = o.thread_id
+                       WHERE o.thread_id = m.thread_id
+                         AND (
+                           ((first_message.created_at, first_message.id) <= (m.created_at, m.id)
+                            AND (m.created_at, m.id) <= (last_message.created_at, last_message.id))
+                           OR
+                           ((last_message.created_at, last_message.id) <= (m.created_at, m.id)
+                            AND (m.created_at, m.id) <= (first_message.created_at, first_message.id))
+                         )
+                    )`,
+              )
+              .all(...selectedIds) as Array<{ id: string }>
+          ).map((row) => row.id);
     const contentById = new Map<string, unknown>();
     if (safeIds.length > 0) {
       const placeholders = safeIds.map(() => "?").join(",");
@@ -581,6 +614,7 @@ export class SqliteMemoryStore implements MemoryStore {
     const nextCursor = last === undefined ? null : { createdAtMs: last.created_at, id: last.id };
     return {
       messages,
+      coveredMessageIds,
       expectedFrontier,
       nextCursor,
       hasMore: selected.length < rows.length,
@@ -683,6 +717,123 @@ export class SqliteMemoryStore implements MemoryStore {
       return true;
     })();
     return committed ? id : null;
+  }
+
+  async commitObserverPage(
+    input: MemoryObserverPageCommitInput,
+  ): Promise<MemoryObserverPageCommitResult | null> {
+    const threadId =
+      input.action === "observe" ? input.observation.threadId : input.job.scope.threadId;
+    if (
+      threadId === undefined ||
+      input.job.scope.accountId !== input.accountId ||
+      input.job.scope.threadId !== threadId ||
+      (input.successorScope !== undefined &&
+        (input.successorScope.accountId !== input.accountId ||
+          input.successorScope.threadId !== threadId))
+    ) {
+      return null;
+    }
+    const id = input.action === "observe" ? this.genId() : null;
+    const successorId = input.successorScope === undefined ? null : this.genId();
+    const jobScopeId = encodeScopeId(input.job.scope);
+    const successorScopeId =
+      input.successorScope === undefined ? null : encodeScopeId(input.successorScope);
+    const db = this.db.$sqlite;
+    const committed = db.transaction(() => {
+      const currentJob = db
+        .prepare(
+          `SELECT id FROM memory_jobs
+            WHERE id = ? AND type = 'observer' AND scope_id = ? AND status = 'running'
+              AND lease_generation = ?`,
+        )
+        .get(input.job.id, jobScopeId, input.job.leaseGeneration) as { id: string } | undefined;
+      if (currentJob === undefined) return false;
+      const current = db
+        .prepare(
+          `SELECT observer_frontier_at AS frontier_at, observer_frontier_id AS frontier_id
+             FROM memory_threads WHERE id = ? AND owner_id = ?`,
+        )
+        .get(threadId, input.accountId) as
+        | { frontier_at: number | null; frontier_id: string | null }
+        | undefined;
+      const expected = input.expectedFrontier;
+      if (
+        current === undefined ||
+        current.frontier_at !== (expected?.createdAtMs ?? null) ||
+        current.frontier_id !== (expected?.id ?? null)
+      ) {
+        return false;
+      }
+      if (input.action === "observe" && id !== null) {
+        db.prepare(
+          `INSERT INTO memory_observations (
+             id, thread_id, source_message_range, observation_text, observed_at,
+             referenced_at, priority, tags, importance
+           ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+        ).run(
+          id,
+          threadId,
+          JSON.stringify(input.observation.sourceMessageRange),
+          input.observation.observationText,
+          input.observation.observedAt.getTime(),
+          input.observation.priority ?? null,
+          input.observation.tags === undefined ? null : JSON.stringify(input.observation.tags),
+          input.observation.importance ?? 0.5,
+        );
+        db.prepare(
+          `UPDATE memory_threads
+              SET observer_frontier_at = ?, observer_frontier_id = ?,
+                  observation_count = observation_count + 1,
+                  last_observation_at = CASE
+                    WHEN last_observation_at IS NULL OR last_observation_at < ? THEN ?
+                    ELSE last_observation_at END
+            WHERE id = ? AND owner_id = ?`,
+        ).run(
+          input.nextFrontier.createdAtMs,
+          input.nextFrontier.id,
+          input.observation.observedAt.getTime(),
+          input.observation.observedAt.getTime(),
+          threadId,
+          input.accountId,
+        );
+      } else {
+        db.prepare(
+          `UPDATE memory_threads SET observer_frontier_at = ?, observer_frontier_id = ?
+            WHERE id = ? AND owner_id = ?`,
+        ).run(input.nextFrontier.createdAtMs, input.nextFrontier.id, threadId, input.accountId);
+      }
+      const finished = db
+        .prepare(
+          `UPDATE memory_jobs SET status = 'done', error = NULL, updated_at = ?
+            WHERE id = ? AND type = 'observer' AND scope_id = ? AND status = 'running'
+              AND lease_generation = ?`,
+        )
+        .run(this.now().getTime(), input.job.id, jobScopeId, input.job.leaseGeneration);
+      if (finished.changes !== 1) throw new Error("observer job fence changed during commit");
+      if (successorId !== null && successorScopeId !== null) {
+        const ts = this.now().getTime();
+        const inserted = db
+          .prepare(
+            `INSERT OR IGNORE INTO memory_jobs
+               (id, type, scope_id, status, error, created_at, updated_at)
+             VALUES (?, 'observer', ?, 'pending', NULL, ?, ?)`,
+          )
+          .run(successorId, successorScopeId, ts, ts);
+        if (inserted.changes !== 1) {
+          const existing = db
+            .prepare(
+              `SELECT id FROM memory_jobs
+                WHERE type = 'observer' AND scope_id = ? AND status IN ('pending', 'running')
+                LIMIT 1`,
+            )
+            .get(successorScopeId) as { id: string } | undefined;
+          if (existing === undefined) throw new Error("observer successor enqueue conflict");
+        }
+      }
+      return true;
+    })();
+    return committed ? { observationId: id } : null;
   }
 
   // POST-MVP Phase 2: read a scope's active observations oldest-first. Thread
@@ -812,48 +963,108 @@ export class SqliteMemoryStore implements MemoryStore {
   async findRedundantInjectionObservations(input: {
     accountId: string;
     threadId: string;
-    observations: Array<{ id: string; sourceMessageRange: [string, string] }>;
+    candidateLimit: number;
+    maxCoverageMessages: number;
+    order: "newest" | "score";
+    score?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+    };
     windowContentHashCounts: ReadonlyMap<string, number>;
   }): Promise<ReadonlySet<string>> {
-    if (input.observations.length === 0 || input.windowContentHashCounts.size === 0)
+    const candidateLimit = Math.max(0, Math.floor(input.candidateLimit));
+    const maxCoverageMessages = Math.max(0, Math.floor(input.maxCoverageMessages));
+    if (
+      candidateLimit === 0 ||
+      maxCoverageMessages === 0 ||
+      input.windowContentHashCounts.size === 0
+    ) {
       return new Set();
-    const requested = JSON.stringify(
-      input.observations.map(({ id, sourceMessageRange: [startId, endId] }) => ({
-        id,
-        startId,
-        endId,
-      })),
-    );
+    }
     const live = JSON.stringify(Object.fromEntries(input.windowContentHashCounts));
+    const score = input.order === "score" ? input.score : undefined;
+    const scoreOrder =
+      score === undefined
+        ? "o.observed_at DESC, o.id DESC"
+        : `pow(0.5, max(0, (? - COALESCE(o.referenced_at, o.observed_at)) / 1000.0) / ?)
+             * (min(max(o.importance, ?), ?) + ? * ln(1 + o.reference_count)) DESC,
+           o.observed_at DESC, o.id DESC`;
+    const scoreArgs =
+      score === undefined
+        ? []
+        : [
+            score.nowMs,
+            score.half_life_s,
+            score.importance_floor,
+            score.importance_ceil,
+            score.access_weight,
+          ];
     const rows = this.db.$sqlite
       .prepare(
-        `WITH requested AS (
-           SELECT json_extract(value, '$.id') AS id, json_extract(value, '$.startId') AS start_id,
-                  json_extract(value, '$.endId') AS end_id FROM json_each(?)
-         ), live AS (SELECT key, CAST(value AS INTEGER) AS n FROM json_each(?)),
-         ordered AS (
-           SELECT id, content_hash, ROW_NUMBER() OVER (ORDER BY CASE WHEN message_index IS NULL THEN 1 ELSE 0 END, message_index, created_at, id) AS n
-             FROM memory_messages WHERE thread_id = ?
-         ), endpoints AS (
-           SELECT r.id, r.start_id, r.end_id, MIN(o.n) AS first_n, MAX(o.n) AS last_n,
-                  COUNT(DISTINCT o.id) AS found
-             FROM requested r LEFT JOIN ordered o ON o.id = r.start_id OR o.id = r.end_id
-            GROUP BY r.id, r.start_id, r.end_id
-         ), required AS (
-           SELECT e.id, o.content_hash, COUNT(*) AS n FROM endpoints e JOIN ordered o
-             ON o.n BETWEEN e.first_n AND e.last_n
-            WHERE e.found = CASE WHEN e.start_id = e.end_id THEN 1 ELSE 2 END
-            GROUP BY e.id, o.content_hash
+        `WITH live AS (
+           SELECT key, CAST(value AS INTEGER) AS n FROM json_each(?)
+         ), candidates AS MATERIALIZED (
+           SELECT o.id,
+                  json_extract(o.source_message_range, '$[0]') AS start_id,
+                  json_extract(o.source_message_range, '$[1]') AS end_id
+             FROM memory_observations o
+             JOIN memory_threads t ON t.id = o.thread_id AND t.owner_id = ?
+            WHERE o.thread_id = ? AND o.status = 'active' AND o.expired_at IS NULL
+            ORDER BY ${scoreOrder}
+            LIMIT ?
+         ), endpoints AS MATERIALIZED (
+           SELECT c.id,
+                  CASE WHEN (s.created_at, s.id) <= (e.created_at, e.id)
+                    THEN s.created_at ELSE e.created_at END AS first_at,
+                  CASE WHEN (s.created_at, s.id) <= (e.created_at, e.id)
+                    THEN s.id ELSE e.id END AS first_id,
+                  CASE WHEN (s.created_at, s.id) <= (e.created_at, e.id)
+                    THEN e.created_at ELSE s.created_at END AS last_at,
+                  CASE WHEN (s.created_at, s.id) <= (e.created_at, e.id)
+                    THEN e.id ELSE s.id END AS last_id
+             FROM candidates c
+             JOIN memory_messages s ON s.id = c.start_id AND s.thread_id = ?
+             JOIN memory_messages e ON e.id = c.end_id AND e.thread_id = ?
+         ), bounded AS MATERIALIZED (
+           SELECT e.* FROM endpoints e
+            WHERE (
+              SELECT COUNT(*) FROM (
+                SELECT 1 FROM memory_messages m
+                 WHERE m.thread_id = ?
+                   AND (m.created_at, m.id) >= (e.first_at, e.first_id)
+                   AND (m.created_at, m.id) <= (e.last_at, e.last_id)
+                 ORDER BY m.created_at, m.id
+                 LIMIT ?
+              ) covered_limit
+            ) <= ?
          )
-         SELECT e.id FROM endpoints e
-          WHERE e.found = CASE WHEN e.start_id = e.end_id THEN 1 ELSE 2 END
-            AND EXISTS (SELECT 1 FROM memory_threads WHERE id = ? AND owner_id = ?)
-            AND NOT EXISTS (
-              SELECT 1 FROM required r LEFT JOIN live l ON l.key = r.content_hash
-               WHERE r.id = e.id AND (r.content_hash IS NULL OR l.n IS NULL OR l.n < r.n)
+         SELECT b.id FROM bounded b
+          WHERE NOT EXISTS (
+              SELECT 1 FROM memory_messages m
+              LEFT JOIN live l ON l.key = m.content_hash
+               WHERE m.thread_id = ?
+                 AND (m.created_at, m.id) >= (b.first_at, b.first_id)
+                 AND (m.created_at, m.id) <= (b.last_at, b.last_id)
+               GROUP BY m.content_hash, l.n
+              HAVING m.content_hash IS NULL OR l.n IS NULL OR l.n < COUNT(*)
             )`,
       )
-      .all(requested, live, input.threadId, input.threadId, input.accountId) as Array<{
+      .all(
+        live,
+        input.accountId,
+        input.threadId,
+        ...scoreArgs,
+        candidateLimit,
+        input.threadId,
+        input.threadId,
+        input.threadId,
+        maxCoverageMessages + 1,
+        maxCoverageMessages,
+        input.threadId,
+      ) as Array<{
       id: string;
     }>;
     return new Set(rows.map((row) => row.id));
@@ -964,6 +1175,16 @@ export class SqliteMemoryStore implements MemoryStore {
     return row?.version ?? 0;
   }
 
+  private hasCurrentJobLease(job: { id: string; leaseGeneration: number }): boolean {
+    return (
+      this.db.$sqlite
+        .prepare(
+          "SELECT 1 FROM memory_jobs WHERE id = ? AND status = 'running' AND lease_generation = ?",
+        )
+        .get(job.id, job.leaseGeneration) !== undefined
+    );
+  }
+
   async commitReflectionJob(
     jobId: string,
     input: MemoryReflectionJobCommitInput,
@@ -976,9 +1197,12 @@ export class SqliteMemoryStore implements MemoryStore {
           `UPDATE memory_jobs
               SET status = 'done', error = NULL, updated_at = ?
             WHERE id = ? AND type = 'reflector' AND scope_id = ? AND status = 'running'
+              AND lease_generation = ?
           RETURNING id`,
         )
-        .get(input.now.getTime(), jobId, scopeId) as { id: string } | undefined;
+        .get(input.now.getTime(), jobId, scopeId, input.leaseGeneration) as
+        | { id: string }
+        | undefined;
       if (claimed === undefined) return null;
 
       const facts = this.reconcileFactsSync({
@@ -1021,15 +1245,24 @@ export class SqliteMemoryStore implements MemoryStore {
   }
 
   // Update a background job's lifecycle status (+ optional error on failure).
-  async updateJobStatus(jobId: string, status: MemoryJobStatus, error?: string): Promise<void> {
+  async updateJobStatus(
+    jobId: string,
+    status: MemoryJobStatus,
+    error?: string,
+    leaseGeneration?: number,
+  ): Promise<void> {
     this.db
       .update(memoryJobs)
-      .set({
-        status,
-        error: error ?? null,
-        updatedAt: this.now(),
-      })
-      .where(eq(memoryJobs.id, jobId))
+      .set({ status, error: error ?? null, updatedAt: this.now() })
+      .where(
+        leaseGeneration === undefined
+          ? eq(memoryJobs.id, jobId)
+          : and(
+              eq(memoryJobs.id, jobId),
+              eq(memoryJobs.status, "running"),
+              eq(memoryJobs.leaseGeneration, leaseGeneration),
+            ),
+      )
       .run();
   }
 
@@ -1090,7 +1323,7 @@ export class SqliteMemoryStore implements MemoryStore {
     const rows = this.db.$sqlite
       .prepare(
         `UPDATE memory_jobs
-            SET status = 'running', updated_at = ?
+            SET status = 'running', updated_at = ?, lease_generation = lease_generation + 1
           WHERE id IN (
             SELECT id FROM memory_jobs
              WHERE status = 'pending'
@@ -1098,11 +1331,17 @@ export class SqliteMemoryStore implements MemoryStore {
              ORDER BY created_at ASC, id ASC
              LIMIT ?
           )
-        RETURNING id, type, scope_id`,
+        RETURNING id, type, scope_id, lease_generation`,
       )
-      .all(updatedAt, staleBefore, limit) as Array<{ id: string; type: string; scope_id: string }>;
+      .all(updatedAt, staleBefore, limit) as Array<{
+      id: string;
+      type: string;
+      scope_id: string;
+      lease_generation: number;
+    }>;
     return rows.map((row) => ({
       jobId: row.id,
+      leaseGeneration: row.lease_generation,
       // The type column is constrained to the enum at enqueue time; widen back.
       type: row.type as MemoryJobRow["type"],
       scope: decodeScopeId(row.scope_id),
@@ -1251,11 +1490,17 @@ export class SqliteMemoryStore implements MemoryStore {
   // GUARDED via the thread's owner_id (defence in depth — the ids already came from an
   // account-scoped read). Empty id list → no statement. Touches ONLY memory_observations
   // status/archived_at; raw messages and other accounts' rows are never affected.
-  async archiveObservations(input: { accountId: string; ids: string[]; now: Date }): Promise<void> {
-    if (input.ids.length === 0) return;
+  async archiveObservations(input: {
+    accountId: string;
+    ids: string[];
+    now: Date;
+    job?: { id: string; leaseGeneration: number };
+  }): Promise<boolean> {
+    if (input.ids.length === 0) return true;
     const placeholders = input.ids.map(() => "?").join(", ");
     const db = this.db.$sqlite;
-    db.transaction(() => {
+    return db.transaction(() => {
+      if (input.job !== undefined && !this.hasCurrentJobLease(input.job)) return false;
       const rows = db
         .prepare(
           `SELECT DISTINCT t.project_id, t.resource_id, t.id AS thread_id
@@ -1317,6 +1562,7 @@ export class SqliteMemoryStore implements MemoryStore {
            VALUES (?, 'reflector', ?, 'pending', NULL, ?, ?)`,
         ).run(this.genId(), scopeId, input.now.getTime(), input.now.getTime());
       }
+      return true;
     })();
   }
 
@@ -1398,6 +1644,7 @@ export class SqliteMemoryStore implements MemoryStore {
     scope: { projectId?: string; resourceId?: string; threadId?: string };
     facts: MemoryFactInput[];
     now: Date;
+    job?: { id: string; leaseGeneration: number };
   }): MemoryFactReconcileResult {
     if (input.facts.length === 0) return { insertedIds: [], supersededIds: [], resurrectedIds: [] };
     const nowMs = input.now.getTime();
@@ -1446,6 +1693,9 @@ export class SqliteMemoryStore implements MemoryStore {
     // without its supersede applied (or vice versa). Returns the ids inserted +
     // superseded + resurrected (docs/13 — the MCP `memory_add` tool echoes them).
     const runBatch = this.db.$sqlite.transaction((facts: MemoryFactInput[]) => {
+      if (input.job !== undefined && !this.hasCurrentJobLease(input.job)) {
+        return { insertedIds: [], supersededIds: [], resurrectedIds: [], accepted: false };
+      }
       const insertedIds: string[] = [];
       const supersededIds: string[] = [];
       const resurrectedIds: string[] = [];
@@ -1558,6 +1808,7 @@ export class SqliteMemoryStore implements MemoryStore {
     scope: { projectId?: string; resourceId?: string; threadId?: string };
     facts: MemoryFactInput[];
     now: Date;
+    job?: { id: string; leaseGeneration: number };
   }): Promise<MemoryFactReconcileResult> {
     return this.reconcileFactsSync(input);
   }
@@ -1640,13 +1891,17 @@ export class SqliteMemoryStore implements MemoryStore {
   // updatedAt. facts ⊎ reflections via a UNION of grouped subqueries (SQLite has
   // no FULL OUTER JOIN); reflections guarded owner_id IS NOT NULL (nullable
   // column). An optional accountId narrows to one tenant.
-  async listMemoryScopes(input: { accountId?: string }): Promise<MemoryScopeSummary[]> {
+  async listMemoryScopes(input: {
+    accountId?: string;
+    limit: number;
+    offset: number;
+  }): Promise<{ rows: MemoryScopeSummary[]; total: number }> {
     const acct = input.accountId ?? null;
-    const rows = this.db.$sqlite
-      .prepare(
-        `SELECT owner_id AS accountId, project_id AS projectId, resource_id AS resourceId,
+    const aggregateSql = `SELECT owner_id AS accountId, project_id AS projectId,
+                resource_id AS resourceId,
                 thread_id AS threadId,
-                SUM(fc) AS factCount, SUM(rc) AS reflectionCount, MAX(lu) AS lastUpdated
+                SUM(fc) AS factCount, SUM(rc) AS reflectionCount, MAX(lu) AS lastUpdated,
+                COUNT(*) OVER() AS total
            FROM (
              SELECT owner_id, project_id, resource_id, thread_id,
                     COUNT(*) AS fc, 0 AS rc, MAX(updated_at) AS lu
@@ -1662,10 +1917,17 @@ export class SqliteMemoryStore implements MemoryStore {
                 AND (? IS NULL OR owner_id = ?)
               GROUP BY owner_id, project_id, resource_id, thread_id
            )
-          GROUP BY owner_id, project_id, resource_id, thread_id
-          ORDER BY lastUpdated DESC`,
+          GROUP BY owner_id, project_id, resource_id, thread_id`;
+    const rows = this.db.$sqlite
+      .prepare(
+        `${aggregateSql}
+          ORDER BY lastUpdated DESC, accountId ASC,
+                   CASE WHEN projectId IS NULL THEN 0 ELSE 1 END, projectId ASC,
+                   CASE WHEN resourceId IS NULL THEN 0 ELSE 1 END, resourceId ASC,
+                   CASE WHEN threadId IS NULL THEN 0 ELSE 1 END, threadId ASC
+          LIMIT ? OFFSET ?`,
       )
-      .all(acct, acct, acct, acct) as Array<{
+      .all(acct, acct, acct, acct, input.limit, input.offset) as Array<{
       accountId: string;
       projectId: string | null;
       resourceId: string | null;
@@ -1673,16 +1935,29 @@ export class SqliteMemoryStore implements MemoryStore {
       factCount: number;
       reflectionCount: number;
       lastUpdated: number | null;
+      total: number;
     }>;
-    return rows.map((r) => ({
-      accountId: r.accountId,
-      projectId: r.projectId,
-      resourceId: r.resourceId,
-      threadId: r.threadId,
-      factCount: r.factCount,
-      reflectionCount: r.reflectionCount,
-      lastUpdated: r.lastUpdated !== null ? new Date(r.lastUpdated) : null,
-    }));
+    const total =
+      rows[0]?.total ??
+      (input.offset === 0 && input.limit > 0
+        ? 0
+        : (
+            this.db.$sqlite
+              .prepare(`SELECT COUNT(*) AS total FROM (${aggregateSql}) scopes`)
+              .get(acct, acct, acct, acct) as { total: number }
+          ).total);
+    return {
+      rows: rows.map((r) => ({
+        accountId: r.accountId,
+        projectId: r.projectId,
+        resourceId: r.resourceId,
+        threadId: r.threadId,
+        factCount: r.factCount,
+        reflectionCount: r.reflectionCount,
+        lastUpdated: r.lastUpdated !== null ? new Date(r.lastUpdated) : null,
+      })),
+      total,
+    };
   }
 
   async getMemoryAdminStats(
@@ -2083,8 +2358,9 @@ export class SqliteMemoryStore implements MemoryStore {
   async setFactEmbeddings(input: {
     accountId: string;
     items: Array<{ factId: string; embedding: Float32Array; model: string; dim: number }>;
-  }): Promise<void> {
-    if (input.items.length === 0) return;
+    job?: { id: string; leaseGeneration: number };
+  }): Promise<boolean> {
+    if (input.items.length === 0) return true;
     const selectRowid = this.db.$sqlite.prepare(
       "SELECT rowid AS rowid FROM memory_facts WHERE id = ? AND owner_id = ?",
     );
@@ -2092,6 +2368,7 @@ export class SqliteMemoryStore implements MemoryStore {
       "UPDATE memory_facts SET embedding = ?, embedding_model = ?, embedding_dim = ? WHERE rowid = ?",
     );
     const run = this.db.$sqlite.transaction(() => {
+      if (input.job !== undefined && !this.hasCurrentJobLease(input.job)) return false;
       for (const it of input.items) {
         const row = selectRowid.get(it.factId, input.accountId) as { rowid: number } | undefined;
         if (row === undefined) continue;
@@ -2115,8 +2392,9 @@ export class SqliteMemoryStore implements MemoryStore {
           }
         }
       }
+      return true;
     });
-    run();
+    return run();
   }
 
   // docs/14 — the embedding job's read half. ACTIVE facts with no embedding, or one

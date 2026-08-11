@@ -135,6 +135,7 @@ export const memoryJobs = sqliteTable("memory_jobs", {
   type: text("type").notNull(), // 'observer' | 'reflector'
   scopeId: text("scope_id").notNull(), // thread/resource/project id
   status: text("status").notNull(), // 'pending' | 'running' | 'done' | 'failed'
+  leaseGeneration: integer("lease_generation").notNull().default(0),
   error: text("error"), // nullable
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),

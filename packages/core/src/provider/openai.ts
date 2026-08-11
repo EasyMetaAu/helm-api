@@ -376,6 +376,44 @@ export async function readUpstreamErrorBody(
   }
 }
 
+export async function consumeUpstreamBodyWithinBudget<T>(
+  response: Response,
+  consume: (text: string) => T | Promise<T>,
+  admission: ResponseWorkAdmission = runtimeResponseWorkAdmission(),
+): Promise<T> {
+  try {
+    return await consumeResponseTextWithinBudget(
+      response,
+      admission.capacityBytes,
+      consume,
+      admission,
+    );
+  } catch (error) {
+    if (error instanceof ResponseBodyTooLargeError) {
+      throw new UpstreamError("upstream_error", error.message, {
+        error: { code: "response_body_too_large", limit_bytes: error.limitBytes },
+      });
+    }
+    if (error instanceof ResponseWorkCapacityError) {
+      throw new UpstreamError("upstream_error", error.message, {
+        error: { code: "response_work_capacity_exhausted", limit_bytes: error.capacityBytes },
+      });
+    }
+    throw error;
+  }
+}
+
+export async function readUpstreamJsonWithinBudget<T = Record<string, unknown>>(
+  response: Response,
+  admission: ResponseWorkAdmission = runtimeResponseWorkAdmission(),
+): Promise<T> {
+  return await consumeUpstreamBodyWithinBudget(
+    response,
+    (text) => JSON.parse(text) as T,
+    admission,
+  );
+}
+
 const DEFAULT_TIMEOUT_MS = 60_000;
 
 function normalizeOpenAIReasoningPayload(value: unknown): boolean {
@@ -765,8 +803,9 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
   async function mediaJsonResponse(res: Response, requiredField: "request_id" | "status") {
     let body: unknown;
     try {
-      body = await res.json();
-    } catch {
+      body = await readUpstreamJsonWithinBudget(res, deps.responseWorkAdmission);
+    } catch (error) {
+      if (error instanceof UpstreamError) throw error;
       throw invalidMediaResponse(res, null, "upstream returned invalid media JSON");
     }
     if (
@@ -831,7 +870,10 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
     async chatCompletion(req, opts) {
       const res = await requestWithAuthRetry(req, opts?.signal, opts?.captureUpstream);
       if (!res.ok) throw await errorFromResponse(res);
-      return (await res.json()) as ChatCompletionResponse;
+      return await readUpstreamJsonWithinBudget<ChatCompletionResponse>(
+        res,
+        deps.responseWorkAdmission,
+      );
     },
 
     async imageGeneration(req, opts) {
@@ -844,7 +886,7 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
         signal: opts?.signal,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      return (await res.json()) as Record<string, unknown>;
+      return await readUpstreamJsonWithinBudget(res, deps.responseWorkAdmission);
     },
 
     async imageEdit(req, opts) {
@@ -878,7 +920,7 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
         signal: opts?.signal,
       });
       if (!res.ok) throw await errorFromResponse(res);
-      return (await res.json()) as Record<string, unknown>;
+      return await readUpstreamJsonWithinBudget(res, deps.responseWorkAdmission);
     },
 
     async videoGeneration(req, opts) {
@@ -936,7 +978,11 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
         signal: opts?.signal,
       });
       if (!response.ok) throw await realtimeErrorFromResponse(response);
-      const sdp = await response.text();
+      const sdp = await consumeUpstreamBodyWithinBudget(
+        response,
+        (text) => text,
+        deps.responseWorkAdmission,
+      );
       const location = response.headers.get("location") ?? "";
       const callId = realtimeCallId(location);
       if (callId === null) {

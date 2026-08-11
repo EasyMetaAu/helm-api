@@ -66,6 +66,12 @@ export class PgKeyStore implements KeyStore {
     return row ? this.toRecord(row) : null;
   }
 
+  async getById(keyId: string): Promise<ApiKeyRecord | null> {
+    const rows = await this.db.select().from(apiKeys).where(eq(apiKeys.keyId, keyId)).limit(1);
+    const row = rows[0];
+    return row ? this.toRecord(row) : null;
+  }
+
   async list(): Promise<ApiKeyRecord[]> {
     // Deterministic order: creation time, key_id as the unique tiebreaker. Without an
     // explicit ORDER BY Postgres returns rows in an unspecified order that shifts as

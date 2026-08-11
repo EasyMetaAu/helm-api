@@ -123,6 +123,9 @@ function makeKeyStore(): KeyStore & { rows: TestKeyRecord[] } {
     async getByHash(hash) {
       return rows.find((r) => r.hash === hash) ?? null;
     },
+    async getById(keyId) {
+      return rows.find((r) => r.key_id === keyId) ?? null;
+    },
     async list() {
       return [...rows];
     },

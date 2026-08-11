@@ -50,6 +50,7 @@ import {
   type ChatCompletionResponse,
   type ProviderClient,
   readUpstreamErrorBody,
+  readUpstreamJsonWithinBudget,
   safeUpstreamHeaders,
   UpstreamError,
   upstreamTransportError,
@@ -86,6 +87,7 @@ export interface AnthropicClientConfig {
 export interface AnthropicClientDeps {
   config: AnthropicClientConfig;
   fetch?: typeof globalThis.fetch;
+  responseWorkAdmission?: ResponseWorkAdmission;
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -1706,7 +1708,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
   }
 
   async function errorFromResponse(res: Response): Promise<UpstreamError> {
-    const providerRaw = await readUpstreamErrorBody(res, scrub);
+    const providerRaw = await readUpstreamErrorBody(res, scrub, deps.responseWorkAdmission);
     return new UpstreamError(
       "upstream_error",
       `upstream returned ${res.status}`,
@@ -1735,7 +1737,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         true,
       );
       if (!res.ok) throw await errorFromResponse(res);
-      const anthResp = (await res.json()) as Record<string, unknown>;
+      const anthResp = await readUpstreamJsonWithinBudget(res, deps.responseWorkAdmission);
       return anthropicToOpenAIResponse(anthResp, model, toolNameMap);
     },
 
@@ -1780,7 +1782,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         false,
       );
       if (!res.ok) throw await errorFromResponse(res);
-      const nativeResponse = (await res.json()) as Record<string, unknown>;
+      const nativeResponse = await readUpstreamJsonWithinBudget(res, deps.responseWorkAdmission);
       return opts?.toolCallXmlRecovery === true
         ? recoverNativeAnthropicJSON(nativeResponse, declaredTools)
         : nativeResponse;
@@ -1791,7 +1793,7 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
         TOKEN_COUNTING_BETA,
       ]);
       if (!res.ok) throw await errorFromResponse(res);
-      return (await res.json()) as Record<string, unknown>;
+      return await readUpstreamJsonWithinBudget(res, deps.responseWorkAdmission);
     },
 
     // Streaming native passthrough (issue #217, Phase 2). The native body from a

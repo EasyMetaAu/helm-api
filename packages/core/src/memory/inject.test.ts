@@ -162,7 +162,13 @@ describe("assembleInjectedContext — memory TEXT BLOCK (trailing-reminder model
     );
     store.findRedundantInjectionObservations = vi.fn(async () => new Set<string>());
 
-    const out = await assembleInjectedContext(baseInput({ tokenBudget: 11 }), makeDeps(store));
+    const out = await assembleInjectedContext(
+      baseInput({
+        tokenBudget: 11,
+        windowContentHashCounts: new Map([[sha256Hex("live"), 1]]),
+      }),
+      makeDeps(store),
+    );
 
     expect(out.memoryBlock).toContain("newest");
     expect(out.memoryBlock).not.toContain("older");
@@ -216,11 +222,22 @@ describe("assembleInjectedContext — memory TEXT BLOCK (trailing-reminder model
     store.findRedundantInjectionObservations = vi.fn(async () => new Set<string>());
 
     await assembleInjectedContext(
-      baseInput({ tokenBudget: 1 }),
+      baseInput({
+        tokenBudget: 1,
+        windowContentHashCounts: new Map([[sha256Hex("live"), 1]]),
+      }),
       makeDeps(store, { estimateTokens: () => 0 }),
     );
 
     expect(store.listInjectionObservationsPage).toHaveBeenCalledTimes(32);
+    expect(store.findRedundantInjectionObservations).toHaveBeenCalledTimes(1);
+    expect(store.findRedundantInjectionObservations).toHaveBeenCalledWith(
+      expect.objectContaining({
+        candidateLimit: 32 * 64,
+        maxCoverageMessages: 512,
+        order: "newest",
+      }),
+    );
   });
 
   it("assembles a single system-level block with section headers in deterministic order", async () => {

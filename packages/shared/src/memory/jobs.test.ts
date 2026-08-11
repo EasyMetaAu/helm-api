@@ -60,6 +60,7 @@ describe("MemoryJobRowSchema", () => {
   it("round-trips a claimed observer row", () => {
     const row = {
       jobId: "job-1",
+      leaseGeneration: 3,
       type: "observer" as const,
       scope: { accountId: "acct-a", threadId: "t1" },
     };

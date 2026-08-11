@@ -1,5 +1,6 @@
 import type { ApiKeyRecord, DecisionRecord, RoutingSignal } from "@helm/shared";
 import { afterEach, describe, expect, it } from "vitest";
+import { sha256Hex } from "../memory/message-hash.js";
 import type {
   ConfigStore,
   KeyStore,
@@ -2021,6 +2022,66 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       ]);
     });
 
+    it("resolves bounded injection coverage by chronological tuple with occurrence counts", async () => {
+      ctx = await make();
+      const store = ctx.stores.memory;
+      if (!store.findRedundantInjectionObservations) {
+        throw new Error("adapter must implement bounded injection coverage");
+      }
+      await store.ensureThread({ id: "inject-coverage-t", ownerId: "acct-a" });
+      const contents = Array.from({ length: 520 }, (_, index) => `history-${index}`);
+      contents.splice(400, 3, "yes", "ok", "yes");
+      const messageIds = await store.appendMessages?.(
+        contents.map((content, messageIndex) => ({
+          threadId: "inject-coverage-t",
+          // The current request-local index resets after the covered range. A range
+          // ordered by message_index would pull this later batch into the middle.
+          messageIndex:
+            messageIndex < 400
+              ? messageIndex + 10
+              : messageIndex <= 402
+                ? messageIndex - 400
+                : messageIndex - 403,
+          role: "user" as const,
+          content,
+          tokenEstimate: 1,
+        })),
+      );
+      if (!messageIds || messageIds.length !== contents.length) {
+        throw new Error("adapter must persist the long-history fixture");
+      }
+      const boundedObservationId = await store.appendObservation({
+        threadId: "inject-coverage-t",
+        // Legacy rows may store reversed endpoints; coverage remains inclusive.
+        sourceMessageRange: [messageIds[402] ?? "", messageIds[400] ?? ""],
+        observationText: "bounded repeated turns",
+        observedAt: new Date(2_000),
+      });
+      await store.appendObservation({
+        threadId: "inject-coverage-t",
+        sourceMessageRange: [messageIds[0] ?? "", messageIds[519] ?? ""],
+        observationText: "legacy oversized range",
+        observedAt: new Date(1_000),
+      });
+
+      const lookup = (accountId: string, yesCount: number) =>
+        store.findRedundantInjectionObservations?.({
+          accountId,
+          threadId: "inject-coverage-t",
+          candidateLimit: 8,
+          maxCoverageMessages: 512,
+          order: "newest",
+          windowContentHashCounts: new Map([
+            [sha256Hex("yes"), yesCount],
+            [sha256Hex("ok"), 1],
+          ]),
+        });
+
+      expect(await lookup("acct-a", 2)).toEqual(new Set([boundedObservationId]));
+      expect(await lookup("acct-a", 1)).toEqual(new Set());
+      expect(await lookup("other-account", 2)).toEqual(new Set());
+    });
+
     it("pages Observer input with a durable CAS frontier", async () => {
       ctx = await make();
       const store = ctx.stores.memory;
@@ -2085,6 +2146,157 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(second.messages.map((message) => message.content)).toEqual(["m2"]);
       expect(second.expectedFrontier).toEqual(first.nextCursor);
       expect(second.hasMore).toBe(false);
+    });
+
+    it("keeps archived/pruned cross-page ranges covered without making a gap cleanup-eligible", async () => {
+      ctx = await make();
+      const store = ctx.stores.memory;
+      if (
+        !store.listObserverMessagesPage ||
+        !store.appendObservationAndAdvanceFrontier ||
+        !store.archiveObservations ||
+        !store.pruneExpiredMemory ||
+        !store.pruneMessagesOlderThan
+      ) {
+        throw new Error("adapter must implement bounded Observer coverage and cleanup");
+      }
+      await store.ensureThread({ id: "observer-legacy-t", ownerId: "acct-a" });
+      await store.appendMessages?.(
+        Array.from({ length: 12 }, (_, messageIndex) => ({
+          threadId: "observer-legacy-t",
+          messageIndex,
+          role: "user" as const,
+          content: `legacy-${messageIndex}`,
+          tokenEstimate: 1,
+        })),
+      );
+      const ordered = await store.listMessages({
+        threadId: "observer-legacy-t",
+        accountId: "acct-a",
+      });
+      expect(ordered).toHaveLength(12);
+      const archived = await store.appendObservation({
+        threadId: "observer-legacy-t",
+        sourceMessageRange: [ordered[0]?.id ?? "", ordered[4]?.id ?? ""],
+        observationText: "archived prefix crossing page one",
+        observedAt: new Date(1_000),
+      });
+      const pruned = await store.appendObservation({
+        threadId: "observer-legacy-t",
+        sourceMessageRange: [ordered[6]?.id ?? "", ordered[10]?.id ?? ""],
+        observationText: "pruned range crossing page two",
+        observedAt: new Date(1_000),
+      });
+      await store.archiveObservations({
+        accountId: "acct-a",
+        ids: [archived, pruned],
+        now: new Date(2_000),
+      });
+      await store.pruneExpiredMemory({
+        archivedObservationsBeforeMs: 3_000,
+        expiredFactsBeforeMs: 0,
+      });
+
+      const first = await store.listObserverMessagesPage({
+        threadId: "observer-legacy-t",
+        accountId: "acct-a",
+        limit: 4,
+        maxBytes: 1024,
+        maxTokens: 100,
+      });
+      expect(first.messages).toHaveLength(4);
+      expect(new Set(first.coveredMessageIds)).toEqual(
+        new Set(first.messages.map((message) => message.id)),
+      );
+      if (first.nextCursor === null) throw new Error("expected first page cursor");
+      await store.appendObservationAndAdvanceFrontier({
+        accountId: "acct-a",
+        observation: {
+          threadId: "observer-legacy-t",
+          sourceMessageRange: [first.messages[0]?.id ?? "", first.messages[3]?.id ?? ""],
+          observationText: "test-only frontier marker",
+          observedAt: new Date(4_000),
+        },
+        expectedFrontier: first.expectedFrontier,
+        nextFrontier: first.nextCursor,
+      });
+
+      const second = await store.listObserverMessagesPage({
+        threadId: "observer-legacy-t",
+        accountId: "acct-a",
+        limit: 4,
+        maxBytes: 1024,
+        maxTokens: 100,
+      });
+      expect(second.messages.map((message) => message.content)).toEqual([
+        "legacy-4",
+        "legacy-5",
+        "legacy-6",
+        "legacy-7",
+      ]);
+      expect(new Set(second.coveredMessageIds)).toEqual(
+        new Set([second.messages[0]?.id, second.messages[2]?.id, second.messages[3]?.id]),
+      );
+      expect(second.coveredMessageIds).not.toContain(second.messages[1]?.id);
+      await store.pruneMessagesOlderThan(Number.MAX_SAFE_INTEGER);
+      expect(
+        (await store.listMessages({ threadId: "observer-legacy-t", accountId: "acct-a" })).some(
+          (message) => message.content === "legacy-5",
+        ),
+      ).toBe(true);
+    });
+
+    it("discovers a cold null-frontier legacy backlog once despite the normal max-age floor", async () => {
+      ctx = await make();
+      const store = ctx.stores.memory;
+      if (!store.listIdleFlushCandidates || !store.appendObservationAndAdvanceFrontier) {
+        throw new Error("adapter must implement legacy backfill discovery");
+      }
+      await store.ensureThread({ id: "cold-null-frontier", ownerId: "acct-a" });
+      await store.appendMessage({
+        threadId: "cold-null-frontier",
+        role: "user",
+        content: "cold legacy raw",
+        tokenEstimate: 1,
+      });
+      await store.ensureThread({ id: "cold-started", ownerId: "acct-a" });
+      await store.appendMessages?.(
+        ["covered", "successor-owned tail"].map((content, messageIndex) => ({
+          threadId: "cold-started",
+          messageIndex,
+          role: "user" as const,
+          content,
+          tokenEstimate: 1,
+        })),
+      );
+      const startedPage = await store.listObserverMessagesPage?.({
+        threadId: "cold-started",
+        accountId: "acct-a",
+        limit: 1,
+        maxBytes: 1024,
+        maxTokens: 100,
+      });
+      const startedMessage = startedPage?.messages[0];
+      if (!startedPage?.nextCursor || !startedMessage) throw new Error("expected started page");
+      await store.appendObservationAndAdvanceFrontier({
+        accountId: "acct-a",
+        observation: {
+          threadId: "cold-started",
+          sourceMessageRange: [startedMessage.id, startedMessage.id],
+          observationText: "started",
+          observedAt: new Date(1_000),
+        },
+        expectedFrontier: startedPage.expectedFrontier,
+        nextFrontier: startedPage.nextCursor,
+      });
+
+      expect(
+        await store.listIdleFlushCandidates({
+          idleBeforeMs: Number.MAX_SAFE_INTEGER,
+          idleAfterMs: Number.MAX_SAFE_INTEGER - 1,
+          limit: 10,
+        }),
+      ).toEqual([{ accountId: "acct-a", threadId: "cold-null-frontier" }]);
     });
 
     it("replaces one oversized Observer row with a bounded digest placeholder", async () => {
@@ -2628,6 +2840,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
 
       await expect(
         m.commitReflectionJob(staleJob.jobId, {
+          leaseGeneration: staleJob.leaseGeneration ?? 0,
           target: { accountId: "acct-a", projectId: "p-race" },
           reflection: {
             action: "upsert",
@@ -2677,7 +2890,8 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         updatedAt: new Date(1000),
       });
       const jobId = await m.enqueueJob({ type: "reflector", scope: target });
-      expect((await m.claimPendingJobs(1))[0]?.jobId).toBe(jobId);
+      const claimed = (await m.claimPendingJobs(1))[0];
+      expect(claimed?.jobId).toBe(jobId);
       const fact = {
         ownerId: "acct-a",
         projectId: "p-atomic",
@@ -2693,6 +2907,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       };
       await expect(
         m.commitReflectionJob(jobId, {
+          leaseGeneration: claimed?.leaseGeneration ?? 0,
           target,
           reflection: {
             action: "upsert",
@@ -2709,6 +2924,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
 
       await expect(
         m.commitReflectionJob(jobId, {
+          leaseGeneration: claimed?.leaseGeneration ?? 0,
           target,
           reflection: {
             action: "upsert",

@@ -52,13 +52,22 @@ function addFact(
   });
 }
 
-function buildApp(memoryStore: MemoryStore | undefined, keyRows: ApiKeyRecord[] = []) {
+function buildApp(
+  memoryStore: MemoryStore | undefined,
+  keyStore: {
+    getById: (keyId: string) => Promise<ApiKeyRecord | null>;
+    list: () => Promise<ApiKeyRecord[]>;
+  } = {
+    getById: async () => null,
+    list: async () => [],
+  },
+) {
   const app = new Hono<AppEnv>();
   const deps = {
     memoryStore,
     accountId: "acct",
     estimateTokens: (t: string) => Math.ceil(t.length / 4),
-    keyStore: { list: async () => keyRows },
+    keyStore,
   } as unknown as AdminApiDeps;
   registerMemoryRoutes(app, deps);
   return app;
@@ -85,14 +94,24 @@ describe("/admin/api/memory routes (docs/13)", () => {
     const app = buildApp(store);
     const res = await app.request("/admin/api/memory/scopes");
     expect(res.status).toBe(200);
-    const scopes = (await res.json()) as Array<{
-      projectId: string | null;
-      factCount: number;
-      reflectionCount: number;
-    }>;
-    const byProject = new Map(scopes.map((s) => [s.projectId, s]));
+    const scopes = (await res.json()) as {
+      rows: Array<{
+        projectId: string | null;
+        factCount: number;
+        reflectionCount: number;
+      }>;
+      total: number;
+    };
+    const byProject = new Map(scopes.rows.map((s) => [s.projectId, s]));
+    expect(scopes.total).toBe(2);
     expect(byProject.get("p1")?.factCount).toBe(1);
     expect(byProject.get("p2")?.reflectionCount).toBe(1);
+
+    const countOnly = (await (await app.request("/admin/api/memory/scopes?limit=0")).json()) as {
+      rows: unknown[];
+      total: number;
+    };
+    expect(countOnly).toEqual({ rows: [], total: 2 });
   });
 
   it("round-trips client thread ids through By Scope", async () => {
@@ -128,8 +147,8 @@ describe("/admin/api/memory routes (docs/13)", () => {
 
     const scopes = (await (
       await app.request("/admin/api/memory/scopes?accountId=acct")
-    ).json()) as Array<{ projectId: string | null; threadId: string | null }>;
-    expect(scopes).toContainEqual(
+    ).json()) as { rows: Array<{ projectId: string | null; threadId: string | null }> };
+    expect(scopes.rows).toContainEqual(
       expect.objectContaining({ projectId: "p1", threadId: "client-thread" }),
     );
 
@@ -522,7 +541,13 @@ describe("/admin/api/memory routes (docs/13)", () => {
       account_id: "acct",
       memory_project_id: null,
     } as unknown as ApiKeyRecord;
-    const app = buildApp(store, [sharedKey, isolatedKey]);
+    const getById = vi.fn(
+      async (keyId: string) => [sharedKey, isolatedKey].find((key) => key.key_id === keyId) ?? null,
+    );
+    const list = vi.fn(async (): Promise<ApiKeyRecord[]> => {
+      throw new Error("by-key must not scan the key list");
+    });
+    const app = buildApp(store, { getById, list });
     const ok = (await (await app.request("/admin/api/memory/by-key/k1")).json()) as {
       accountId: string;
       projectId: string | null;
@@ -533,6 +558,8 @@ describe("/admin/api/memory routes (docs/13)", () => {
     };
     expect(isolated.projectId).toBe("k2");
     expect((await app.request("/admin/api/memory/by-key/missing")).status).toBe(404);
+    expect(getById).toHaveBeenCalledTimes(3);
+    expect(list).not.toHaveBeenCalled();
   });
 
   it("GET /memory/facts/:id returns the fact or 404", async () => {
@@ -680,11 +707,26 @@ describe("/admin/api/memory routes (docs/13)", () => {
     // With accountId param → lists for that account
     const scoped = (await (
       await app.request("/admin/api/memory/scopes?accountId=acct")
-    ).json()) as unknown[];
-    expect(scoped.length).toBeGreaterThan(0);
+    ).json()) as { rows: unknown[]; total: number };
+    expect(scoped.rows.length).toBeGreaterThan(0);
     // Without accountId param → lists all (same store, same result)
-    const all = (await (await app.request("/admin/api/memory/scopes")).json()) as unknown[];
-    expect(all.length).toBeGreaterThan(0);
+    const all = (await (await app.request("/admin/api/memory/scopes")).json()) as {
+      rows: unknown[];
+      total: number;
+    };
+    expect(all.rows.length).toBeGreaterThan(0);
+  });
+
+  it("listScopes applies default and bounded pagination", async () => {
+    const { store } = seededStore();
+    const listMemoryScopes = vi.spyOn(store, "listMemoryScopes");
+    const app = buildApp(store);
+
+    await app.request("/admin/api/memory/scopes");
+    expect(listMemoryScopes).toHaveBeenLastCalledWith({ limit: 50, offset: 0 });
+
+    await app.request("/admin/api/memory/scopes?accountId=acct&limit=999&offset=7");
+    expect(listMemoryScopes).toHaveBeenLastCalledWith({ accountId: "acct", limit: 200, offset: 7 });
   });
 
   it("PATCH fact: non-collision error is re-thrown (line 141-142)", async () => {

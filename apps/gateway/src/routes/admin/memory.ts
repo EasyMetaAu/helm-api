@@ -136,8 +136,12 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
     const store = resolveStore(c, deps);
     if (store instanceof Response) return store;
     const accountId = c.req.query("accountId") ?? undefined;
-    const scopes = await store.listMemoryScopes(accountId !== undefined ? { accountId } : {});
-    return c.json(scopes.map(scopeForAdmin));
+    const page = await store.listMemoryScopes({
+      ...(accountId !== undefined ? { accountId } : {}),
+      limit: intParam(c.req.query("limit"), DEFAULT_LIMIT, MAX_LIMIT),
+      offset: intParam(c.req.query("offset"), 0, Number.MAX_SAFE_INTEGER),
+    });
+    return c.json({ ...page, rows: page.rows.map(scopeForAdmin) });
   });
 
   // GET /memory/stats — operational snapshot for the top status panels: queue
@@ -168,8 +172,8 @@ export function registerMemoryRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): voi
   // 404 on unknown key.
   app.get("/admin/api/memory/by-key/:keyId", async (c) => {
     const keyId = c.req.param("keyId");
-    const key = (await deps.keyStore.list()).find((r) => r.key_id === keyId);
-    if (key === undefined) return c.json({ error: "key not found" }, 404);
+    const key = await deps.keyStore.getById(keyId);
+    if (key === null) return c.json({ error: "key not found" }, 404);
     return c.json({
       key_id: key.key_id,
       accountId: key.account_id,

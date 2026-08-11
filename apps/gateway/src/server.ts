@@ -3163,6 +3163,7 @@ export async function buildServer(
     embeddingModel: config.memory.llm.embedding_model,
     providers: config.providers,
     timeoutMs: config.memory.llm.timeout_ms,
+    responseWorkAdmission: runtimeResponseWorkAdmission(),
   });
   const embeddingModel = config.memory.llm.embedding_model;
   const embeddingDim = config.memory.llm.embedding_dimensions;

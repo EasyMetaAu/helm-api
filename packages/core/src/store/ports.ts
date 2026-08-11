@@ -218,6 +218,8 @@ export interface KeyStore {
   // Used by the Auth Resolver. A disabled key is still returned (with
   // disabled:true) so the caller — not the store — decides to reject it.
   getByHash(hash: string): Promise<ApiKeyRecord | null>;
+  // Direct admin lookup by immutable key id. Never scan list() for one key.
+  getById(keyId: string): Promise<ApiKeyRecord | null>;
   // Used for bootstrap emptiness check / admin display. Never includes plaintext.
   list(): Promise<ApiKeyRecord[]>;
   // Soft revoke: set disabled=true. Never physically deletes, never rewrites
@@ -763,6 +765,9 @@ export interface MemoryFactReconcileResult {
   insertedIds: string[];
   supersededIds: string[];
   resurrectedIds?: string[];
+  // False only when a background worker lost its lease before publication.
+  // Optional so existing adapters and direct/manual fact writes stay compatible.
+  accepted?: boolean;
 }
 
 export type MemoryReflectionCommitAction =
@@ -777,6 +782,7 @@ export type MemoryReflectionCommitAction =
   | { action: "unchanged" };
 
 export interface MemoryReflectionJobCommitInput {
+  leaseGeneration: number;
   target: ReflectionScope;
   reflection: MemoryReflectionCommitAction;
   facts: MemoryFactInput[];
@@ -795,9 +801,44 @@ export interface MemoryObserverCursor {
 
 export interface MemoryObserverPage {
   messages: RawMessage[];
+  // Any-status historical observations remain coverage after archive/prune.
+  // Real adapters return only ids from this bounded page; optional keeps older
+  // test/third-party stores source-compatible.
+  coveredMessageIds?: string[];
   expectedFrontier: MemoryObserverCursor | null;
   nextCursor: MemoryObserverCursor | null;
   hasMore: boolean;
+}
+
+export interface MemoryObserverJobFence {
+  id: string;
+  scope: ReflectionScope;
+  // Incremented by claim; the commit CAS rejects a worker whose lease was
+  // reclaimed while it was summarizing.
+  leaseGeneration: number;
+}
+
+export type MemoryObserverPageCommitInput =
+  | {
+      accountId: string;
+      job: MemoryObserverJobFence;
+      action: "observe";
+      observation: MemoryObservationInput;
+      expectedFrontier: MemoryObserverCursor | null;
+      nextFrontier: MemoryObserverCursor;
+      successorScope?: ReflectionScope;
+    }
+  | {
+      accountId: string;
+      job: MemoryObserverJobFence;
+      action: "advance";
+      expectedFrontier: MemoryObserverCursor | null;
+      nextFrontier: MemoryObserverCursor;
+      successorScope?: ReflectionScope;
+    };
+
+export interface MemoryObserverPageCommitResult {
+  observationId: string | null;
 }
 
 export interface MemoryStore {
@@ -849,6 +890,12 @@ export interface MemoryStore {
     expectedFrontier: MemoryObserverCursor | null;
     nextFrontier: MemoryObserverCursor;
   }): Promise<string | null>;
+  // Commit one bounded Observer page as one recovery-safe unit: frontier CAS,
+  // observation insert, current running-job completion, and any successor job.
+  // null rejects a stale frontier or job fence without changing durable state.
+  commitObserverPage?(
+    input: MemoryObserverPageCommitInput,
+  ): Promise<MemoryObserverPageCommitResult | null>;
   // POST-MVP Phase 2 (Reflector). Read a scope's ACTIVE observations so the
   // background Reflector can merge them into a stable reflection. Two read
   // shapes: a THREAD scope returns that thread's rows (inject/observer); a
@@ -875,12 +922,24 @@ export interface MemoryStore {
       access_weight: number;
     };
   }): Promise<Observation[]>;
-  // Bounded page counterpart: resolve all window-dedup ranges in ONE store query,
-  // returning only the redundant observation ids (never transcript bodies).
+  // Resolve window-dedup coverage for the whole bounded injection candidate set in
+  // ONE store query, returning only redundant observation ids (never transcript
+  // bodies). Candidate selection uses the same priority order as the paged body read.
+  // Each inclusive source range is resolved by canonical (created_at,id) tuple order;
+  // unresolved or over-limit legacy ranges are conservatively kept.
   findRedundantInjectionObservations?(input: {
     accountId: string;
     threadId: string;
-    observations: Array<{ id: string; sourceMessageRange: [string, string] }>;
+    candidateLimit: number;
+    maxCoverageMessages: number;
+    order: "newest" | "score";
+    score?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+    };
     windowContentHashCounts: ReadonlyMap<string, number>;
   }): Promise<ReadonlySet<string>>;
   // Read the current (latest) ACTIVE reflection for a scope, or null if none yet.
@@ -897,7 +956,12 @@ export interface MemoryStore {
   // Update a background job's lifecycle status (+ optional error on failure).
   // The Observer/Reflector mark their job done/failed; failure is recorded here,
   // never bubbled to the main request path (fail-open).
-  updateJobStatus(jobId: string, status: MemoryJobStatus, error?: string): Promise<void>;
+  updateJobStatus(
+    jobId: string,
+    status: MemoryJobStatus,
+    error?: string,
+    leaseGeneration?: number,
+  ): Promise<void>;
   // POST-MVP Phase 2 (queue). Enqueue a background job (observer | reflector) for
   // a scope. The scope is encoded into the single scope_id column (canonical JSON,
   // D1). DEDUPE (D6): if an OPEN (pending) job of the same (type, scope_id) already
@@ -998,7 +1062,12 @@ export interface MemoryStore {
   // owner_id (defence in depth; the ids already came from an account-scoped read).
   // Empty id lists are a no-op. OPTIONAL (`?`): additive + gated, same contract as
   // listScorableObservations / bumpReferences.
-  archiveObservations?(input: { accountId: string; ids: string[]; now: Date }): Promise<void>;
+  archiveObservations?(input: {
+    accountId: string;
+    ids: string[];
+    now: Date;
+    job?: { id: string; leaseGeneration: number };
+  }): Promise<boolean> | Promise<void>;
   // Production adapters atomically enqueue reflector rebuilds for the exact
   // scopes affected by archiveObservations. Older adapters may omit this marker;
   // decay retains the bounded account-scan fallback for them.
@@ -1077,6 +1146,7 @@ export interface MemoryStore {
     scope: { projectId?: string; resourceId?: string; threadId?: string };
     facts: MemoryFactInput[];
     now: Date;
+    job?: { id: string; leaseGeneration: number };
   }): Promise<MemoryFactReconcileResult>;
   // docs/12 "Supersede within long" — the fact READ half. Return the account's
   // facts that are still alive: owner_id = accountId AND status='active' AND
@@ -1213,7 +1283,11 @@ export interface MemoryStore {
   // reflections via a UNION of grouped subqueries (SQLite has no FULL OUTER JOIN);
   // reflections are guarded owner_id IS NOT NULL (nullable column — legacy/global
   // rows must never surface under an account).
-  listMemoryScopes?(input: { accountId?: string }): Promise<MemoryScopeSummary[]>;
+  listMemoryScopes?(input: {
+    accountId?: string;
+    limit: number;
+    offset: number;
+  }): Promise<{ rows: MemoryScopeSummary[]; total: number }>;
 
   // Operational snapshot for the admin Memory page. This is READ-ONLY
   // observability: queue depth, stale running leases, raw/derived row counts, and
@@ -1276,7 +1350,8 @@ export interface MemoryStore {
   setFactEmbeddings?(input: {
     accountId: string;
     items: Array<{ factId: string; embedding: Float32Array; model: string; dim: number }>;
-  }): Promise<void>;
+    job?: { id: string; leaseGeneration: number };
+  }): Promise<boolean> | Promise<void>;
 
   // docs/14 — the embedding job's READ half: ACTIVE facts that still need a (re-)
   // embedding for the vector leg — NULL embedding, OR one from a DIFFERENT model, OR

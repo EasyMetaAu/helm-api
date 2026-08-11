@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { encodePayloadText, PAYLOAD_TEXT_CHUNK_RAW_BYTES } from "../payload-codec.js";
 import { createSqliteDb } from "./migrate.js";
 import { SqliteTelemetryStore } from "./telemetry.js";
 
@@ -60,6 +61,23 @@ describe("SqliteTelemetryStore — image CAS + gzip", () => {
     const got = await store.getPayload("r1");
     expect(JSON.parse(got?.requestJson ?? "")).toEqual(JSON.parse(body));
     expect(got?.responseJson).toBe('{"ok":true}');
+  });
+
+  it("returns null for an oversized legacy gzip payload body", async () => {
+    const { db, store } = setup();
+    await store.insertPayload({
+      requestId: "legacy-gzip-bomb",
+      requestJson: "{}",
+      responseJson: null,
+      createdAt: new Date(1_000),
+    });
+    const bomb = encodePayloadText("x".repeat(PAYLOAD_TEXT_CHUNK_RAW_BYTES + 1));
+    db.$sqlite
+      .prepare("UPDATE request_payloads SET request_json = ? WHERE request_id = ?")
+      .run(bomb, "legacy-gzip-bomb");
+
+    await expect(store.getPayload("legacy-gzip-bomb")).resolves.toMatchObject({ requestJson: "" });
+    db.$sqlite.close();
   });
 
   it("externalizes an image-GEN RESPONSE (data[].b64_json) off-row + rehydrates it for the admin view", async () => {

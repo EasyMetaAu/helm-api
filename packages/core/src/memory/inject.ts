@@ -2,7 +2,7 @@ import type { Fact, Observation, RawMessage, Reflection } from "@helm/shared";
 import type { MemoryStore } from "../store/ports.js";
 import { forgettingScore, type ScoreConfig } from "./forgetting/score.js";
 import { sha256Hex } from "./message-hash.js";
-import { alreadyObservedMessageIds } from "./observer.js";
+import { alreadyObservedMessageIds, OBSERVER_PAGE_MESSAGES } from "./observer.js";
 
 // Memory middleware — INJECT phase (docs/08 Phase 2, #217 Phase 4 TRAILING-REMINDER
 // model). When x-memory-mode=inject, this runs SYNCHRONOUSLY on the main request path,
@@ -512,6 +512,25 @@ export async function assembleInjectedContext(
           scoreMode = false;
         }
       }
+      // Resolve coverage once for the whole bounded candidate horizon. The store
+      // selects only ids/ranges and returns at most that many ids; page bodies remain
+      // incremental below, so neither the transcript nor 2,048 observation bodies are
+      // materialized in Node merely to avoid 32 repeated full-thread coverage scans.
+      const redundantIds =
+        deps.memoryStore.findRedundantInjectionObservations !== undefined &&
+        windowContentHashCounts.size > 0
+          ? await deps.memoryStore.findRedundantInjectionObservations({
+              accountId: input.scope.accountId,
+              threadId: input.scope.threadId,
+              candidateLimit: MAX_INJECTION_CANDIDATE_PAGES * INJECTION_CANDIDATE_PAGE_SIZE,
+              maxCoverageMessages: OBSERVER_PAGE_MESSAGES,
+              order: scoreMode ? "score" : "newest",
+              ...(score !== undefined && scoreNowMs !== undefined
+                ? { score: { nowMs: scoreNowMs, ...score } }
+                : {}),
+              windowContentHashCounts,
+            })
+          : new Set<string>();
       for (
         let pageNumber = 0;
         pageNumber < MAX_INJECTION_CANDIDATE_PAGES && remaining > 0;
@@ -529,18 +548,6 @@ export async function assembleInjectedContext(
         });
         if (page.length === 0) break;
         offset += page.length;
-        const redundantIds =
-          deps.memoryStore.findRedundantInjectionObservations !== undefined
-            ? await deps.memoryStore.findRedundantInjectionObservations({
-                accountId: input.scope.accountId,
-                threadId: input.scope.threadId,
-                observations: page.map((observation) => ({
-                  id: observation.id,
-                  sourceMessageRange: observation.sourceMessageRange,
-                })),
-                windowContentHashCounts,
-              })
-            : new Set<string>();
         for (const observation of page) {
           if (remaining === 0) break;
           const redundant =

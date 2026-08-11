@@ -79,6 +79,32 @@ describe("sqlite schema + migrations", () => {
     }
   });
 
+  it("v50 preserves existing jobs and initializes their lease generation to zero", () => {
+    const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v50-job-lease-"));
+    const path = join(dir, "helm.db");
+    try {
+      runMigrations(path);
+      const seed = new Database(path);
+      seed.exec(`
+        INSERT INTO memory_jobs (id, type, scope_id, status, created_at, updated_at)
+        VALUES ('legacy', 'observer', '{"accountId":"a","threadId":"t"}', 'pending', 1, 1);
+        ALTER TABLE memory_jobs DROP COLUMN lease_generation;
+        DELETE FROM _migrations WHERE version = 50;
+      `);
+      seed.close();
+
+      runMigrations(path);
+
+      const after = new Database(path);
+      expect(
+        after.prepare("SELECT status, lease_generation FROM memory_jobs WHERE id = 'legacy'").get(),
+      ).toEqual({ status: "pending", lease_generation: 0 });
+      after.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("upgrades a real pre-unique-index memory_jobs table with duplicate open jobs", () => {
     const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v13-memory-jobs-"));
     const path = join(dir, "helm.db");

@@ -1,5 +1,6 @@
 import type { DecisionRecord } from "@helm/shared";
 import { describe, expect, it } from "vitest";
+import { encodePayloadText, PAYLOAD_TEXT_CHUNK_RAW_BYTES } from "../payload-codec.js";
 import { createSqliteDb } from "./migrate.js";
 import { SqliteTelemetryStore } from "./telemetry.js";
 
@@ -203,6 +204,45 @@ describe("SqliteTelemetryStore", () => {
       )
       .run(legacy);
     expect((await store.listSessionRevisions("s1"))[0]?.requestDeltaJson).toBe(legacy);
+    db.$sqlite.close();
+  });
+
+  it("maps oversized legacy gzip Session bodies to existing unavailable placeholders", async () => {
+    const db = createSqliteDb(":memory:");
+    const store = new SqliteTelemetryStore(db);
+    await store.upsertSessionRevision({
+      sessionRef: "s-gzip-bomb",
+      accountId: "a1",
+      apiKeyId: "k1",
+      source: "header",
+      externalSessionId: "external-gzip-bomb",
+      requestId: "r-gzip-bomb",
+      parentRequestId: null,
+      retainCount: 0,
+      requestDeltaJson: "[]",
+      requestEnvelopeJson: "{}",
+      responseId: "resp-gzip-bomb",
+      responseJson: "{}",
+      fidelity: "semantic",
+      createdAt: new Date(1_000),
+    });
+    const bomb = encodePayloadText("x".repeat(PAYLOAD_TEXT_CHUNK_RAW_BYTES + 1));
+    db.$sqlite
+      .prepare(
+        `UPDATE session_revisions
+            SET request_delta_json = ?, request_envelope_json = ?, response_json = ?,
+                request_body_generation = NULL, response_body_generation = NULL, body_bytes = NULL
+          WHERE request_id = 'r-gzip-bomb'`,
+      )
+      .run(bomb, bomb, bomb);
+
+    await expect(store.listSessionRevisions("s-gzip-bomb")).resolves.toEqual([
+      expect.objectContaining({
+        requestDeltaJson: "",
+        requestEnvelopeJson: "",
+        responseJson: null,
+      }),
+    ]);
     db.$sqlite.close();
   });
 

@@ -1,6 +1,7 @@
 import type { MemoryJobRow, ReflectionScope } from "@helm/shared";
 import type { MemoryStore } from "../store/ports.js";
 import type { DecayJob } from "./forgetting/decay.js";
+import { updateClaimedJobStatus } from "./job-lease.js";
 import type { ObserverJob, ObserverResult } from "./observer.js";
 import type { EmbeddingJob } from "./recall/embedding-job.js";
 import { type ReflectorJob, type ReflectorResult, reflectionTargetScope } from "./reflector.js";
@@ -107,7 +108,11 @@ async function maybeEnqueueEmbedding(
 async function processJob(job: MemoryJobRow, deps: MemoryWorkerDeps): Promise<void> {
   if (job.type === "reflector") {
     // reflector: the whole scope drives the merge.
-    await deps.runReflector({ jobId: job.jobId, scope: job.scope });
+    await deps.runReflector({
+      jobId: job.jobId,
+      ...(job.leaseGeneration !== undefined ? { leaseGeneration: job.leaseGeneration } : {}),
+      scope: job.scope,
+    });
     await maybeEnqueueEmbedding(job.scope, deps);
     return;
   }
@@ -117,15 +122,20 @@ async function processJob(job: MemoryJobRow, deps: MemoryWorkerDeps): Promise<vo
     // if it is not (a worker built without forgetting), fail the row cleanly instead of
     // crashing or mis-routing.
     if (deps.runDecay === undefined) {
-      await deps.memoryStore.updateJobStatus(
-        job.jobId,
+      await updateClaimedJobStatus(
+        deps.memoryStore,
+        job,
         "failed",
         "decay job but worker has no runDecay",
       );
       deps.log("memory.worker.decay_unsupported", { job_id: job.jobId });
       return;
     }
-    await deps.runDecay({ jobId: job.jobId, scope: job.scope });
+    await deps.runDecay({
+      jobId: job.jobId,
+      ...(job.leaseGeneration !== undefined ? { leaseGeneration: job.leaseGeneration } : {}),
+      scope: job.scope,
+    });
     return;
   }
   if (job.type === "embedding") {
@@ -133,15 +143,20 @@ async function processJob(job: MemoryJobRow, deps: MemoryWorkerDeps): Promise<vo
     // enqueued when the embedder is wired (runEmbedding set); a stray row on a worker
     // without it is failed cleanly, never mis-routed.
     if (deps.runEmbedding === undefined) {
-      await deps.memoryStore.updateJobStatus(
-        job.jobId,
+      await updateClaimedJobStatus(
+        deps.memoryStore,
+        job,
         "failed",
         "embedding job but worker has no runEmbedding",
       );
       deps.log("memory.worker.embedding_unsupported", { job_id: job.jobId });
       return;
     }
-    await deps.runEmbedding({ jobId: job.jobId, scope: job.scope });
+    await deps.runEmbedding({
+      jobId: job.jobId,
+      ...(job.leaseGeneration !== undefined ? { leaseGeneration: job.leaseGeneration } : {}),
+      scope: job.scope,
+    });
     return;
   }
   if (job.type === "observer") {
@@ -150,12 +165,18 @@ async function processJob(job: MemoryJobRow, deps: MemoryWorkerDeps): Promise<vo
     // thread anchor is unrunnable, so mark it failed and skip it.
     const threadId = job.scope.threadId;
     if (threadId === undefined) {
-      await deps.memoryStore.updateJobStatus(job.jobId, "failed", "observer job missing threadId");
+      await updateClaimedJobStatus(
+        deps.memoryStore,
+        job,
+        "failed",
+        "observer job missing threadId",
+      );
       deps.log("memory.worker.observer_missing_thread", { job_id: job.jobId });
       return;
     }
     const result = await deps.runObserver({
       jobId: job.jobId,
+      ...(job.leaseGeneration !== undefined ? { leaseGeneration: job.leaseGeneration } : {}),
       accountId: job.scope.accountId,
       threadId,
       // Carry the cross-thread scope through so the Observer's salient-fact fast
@@ -199,8 +220,9 @@ async function processJob(job: MemoryJobRow, deps: MemoryWorkerDeps): Promise<vo
   // forever) rather than dispatching it to the wrong worker — the P5 dispatch
   // requirement (no reflector fall-through). `never` on a clean enum widening means a
   // newly-added MemoryJobType would surface here at compile time too.
-  await deps.memoryStore.updateJobStatus(
-    job.jobId,
+  await updateClaimedJobStatus(
+    deps.memoryStore,
+    job,
     "failed",
     `unknown memory job type: ${String((job as { type: string }).type)}`,
   );
@@ -245,7 +267,7 @@ export function startMemoryWorker(deps: MemoryWorkerDeps): MemoryWorkerHandle {
       // closing the row would block this scope's queue FOREVER. Best-effort:
       // even the failure bookkeeping must never escape the tick.
       try {
-        await deps.memoryStore.updateJobStatus(job.jobId, "failed", message);
+        await updateClaimedJobStatus(deps.memoryStore, job, "failed", message);
       } catch (updateErr) {
         deps.log("memory.worker.job_update_failed", {
           job_id: job.jobId,
@@ -271,7 +293,8 @@ export function startMemoryWorker(deps: MemoryWorkerDeps): MemoryWorkerHandle {
   };
 
   const drainJobs = async (): Promise<number> => {
-    const jobs = await deps.memoryStore.claimPendingJobs(deps.batchSize);
+    const claimLimit = Math.min(Math.max(1, Math.floor(deps.batchSize)), workerConcurrency);
+    const jobs = await deps.memoryStore.claimPendingJobs(claimLimit);
     await processClaimedJobs(jobs);
     return jobs.length;
   };
@@ -302,13 +325,14 @@ export function startMemoryWorker(deps: MemoryWorkerDeps): MemoryWorkerHandle {
           if (!(await shouldRun())) break;
           lastClaimed = await drainJobs();
           batches += 1;
-          if (lastClaimed < deps.batchSize) break;
+          if (lastClaimed < Math.min(deps.batchSize, workerConcurrency)) break;
           if (maxDrainMs !== null && deps.now() - startedAt >= maxDrainMs) break;
           if (batches < maxBatches) await deps.yieldBetweenBatches?.();
         } while (batches < maxBatches);
-        if (lastClaimed >= deps.batchSize && batches >= maxBatches) {
-          deps.log("memory.worker.drain_batch_cap", { batches, batch_size: deps.batchSize });
-        } else if (lastClaimed >= deps.batchSize && maxDrainMs !== null) {
+        const claimLimit = Math.min(deps.batchSize, workerConcurrency);
+        if (lastClaimed >= claimLimit && batches >= maxBatches) {
+          deps.log("memory.worker.drain_batch_cap", { batches, batch_size: claimLimit });
+        } else if (lastClaimed >= claimLimit && maxDrainMs !== null) {
           deps.log("memory.worker.drain_time_cap", { batches, max_drain_ms: maxDrainMs });
         }
       } while (rerun);

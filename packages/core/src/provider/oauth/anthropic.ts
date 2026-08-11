@@ -11,6 +11,7 @@
 // the operator opts in (see README disclaimer, issue #38).
 
 import { createServer, type Server } from "node:http";
+import { consumeUpstreamBodyWithinBudget } from "../openai.js";
 import {
   buildOAuthRequestSignal,
   generateOAuthState,
@@ -134,7 +135,7 @@ async function postJson(
   // so the token exchange / refresh can tunnel through the SAME hop as execution —
   // the bind-time call must never leak the operator's real IP (issue #38).
   fetchImpl: typeof globalThis.fetch = fetch,
-): Promise<string> {
+): Promise<OAuthCredentials> {
   throwIfOAuthLoginAborted(signal);
   const res = await fetchImpl(url, {
     method: "POST",
@@ -142,13 +143,13 @@ async function postJson(
     body: JSON.stringify(body),
     signal: buildOAuthRequestSignal({ signal, timeoutMs: 30_000 }),
   });
-  const text = await res.text();
   if (!res.ok) {
     // Never echo the body — an OAuth error body can carry credential material. The
     // status alone is safe and lets the token manager surface a diagnosable reason.
+    await res.body?.cancel().catch(() => {});
     throw new OAuthHttpError("Anthropic", res.status);
   }
-  return text;
+  return await consumeUpstreamBodyWithinBudget(res, parseTokenCredentials);
 }
 
 async function exchangeAuthorizationCode(
@@ -161,7 +162,7 @@ async function exchangeAuthorizationCode(
   signal?: AbortSignal,
   fetchImpl: typeof globalThis.fetch = fetch,
 ): Promise<OAuthCredentials> {
-  const body = await postJson(
+  return await postJson(
     TOKEN_URL,
     {
       grant_type: "authorization_code",
@@ -174,7 +175,6 @@ async function exchangeAuthorizationCode(
     signal,
     fetchImpl,
   );
-  return parseTokenCredentials(body);
 }
 
 // Interactive login: open the authorize URL, wait for the localhost callback, and
@@ -332,7 +332,7 @@ export async function refreshAnthropicToken(
   refreshToken: string,
   fetchImpl: typeof globalThis.fetch = fetch,
 ): Promise<OAuthCredentials> {
-  const body = await postJson(
+  return await postJson(
     TOKEN_URL,
     {
       grant_type: "refresh_token",
@@ -342,7 +342,6 @@ export async function refreshAnthropicToken(
     undefined,
     fetchImpl,
   );
-  return parseTokenCredentials(body);
 }
 
 export const anthropicOAuthProvider: OAuthProviderInterface = {

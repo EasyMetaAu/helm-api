@@ -48,6 +48,8 @@ import {
   type MemoryMessageArchiveRow,
   type MemoryObserverCursor,
   type MemoryObserverPage,
+  type MemoryObserverPageCommitInput,
+  type MemoryObserverPageCommitResult,
   type MemoryReflectionJobCommitInput,
   type MemoryReflectionJobCommitResult,
   type MemoryStore,
@@ -84,6 +86,7 @@ function reflectionScopeWhere(scope: ReflectionScope): SQL {
 // How long a claimed (`running`) job stays exclusively leased — pg mirror of the
 // sqlite adapter's constant (same contract, see its comment).
 const RUNNING_LEASE_MS = 5 * 60_000;
+const REFLECTOR_JOB_LOCK_SEED = 740;
 
 function dateOrNull(ms: number | string | null | undefined): Date | null {
   return ms === null || ms === undefined ? null : new Date(Number(ms));
@@ -581,6 +584,38 @@ export class PgMemoryStore implements MemoryStore {
       if (oversized) break;
     }
     const safeIds = selected.filter((row) => !row.oversized).map((row) => row.id);
+    const selectedIds = selected.map((row) => row.id);
+    const coveredMessageIds =
+      selectedIds.length === 0
+        ? []
+        : pgRows<{ id: string }>(
+            await this.db.execute(sql`
+              SELECT m.id
+                FROM memory_messages m
+               WHERE m.id IN (${sql.join(
+                 selectedIds.map((id) => sql`${id}`),
+                 sql`, `,
+               )})
+                 AND EXISTS (
+                   SELECT 1
+                     FROM memory_observations o
+                     JOIN memory_messages first_message
+                       ON first_message.id = o.source_message_range ->> 0
+                      AND first_message.thread_id = o.thread_id
+                     JOIN memory_messages last_message
+                       ON last_message.id = o.source_message_range ->> 1
+                      AND last_message.thread_id = o.thread_id
+                    WHERE o.thread_id = m.thread_id
+                      AND (
+                        ((first_message.created_at, first_message.id) <= (m.created_at, m.id)
+                         AND (m.created_at, m.id) <= (last_message.created_at, last_message.id))
+                        OR
+                        ((last_message.created_at, last_message.id) <= (m.created_at, m.id)
+                         AND (m.created_at, m.id) <= (first_message.created_at, first_message.id))
+                      )
+                 )
+            `),
+          ).map((row) => row.id);
     const contentRows =
       safeIds.length === 0
         ? []
@@ -603,6 +638,7 @@ export class PgMemoryStore implements MemoryStore {
     const nextCursor = last === undefined ? null : { createdAtMs: last.createdAt, id: last.id };
     return {
       messages,
+      coveredMessageIds,
       expectedFrontier,
       nextCursor,
       hasMore: selected.length < rows.length,
@@ -694,6 +730,120 @@ export class PgMemoryStore implements MemoryStore {
           : {}),
       });
       return id;
+    });
+  }
+
+  async commitObserverPage(
+    input: MemoryObserverPageCommitInput,
+  ): Promise<MemoryObserverPageCommitResult | null> {
+    const threadId =
+      input.action === "observe" ? input.observation.threadId : input.job.scope.threadId;
+    if (
+      threadId === undefined ||
+      input.job.scope.accountId !== input.accountId ||
+      input.job.scope.threadId !== threadId ||
+      (input.successorScope !== undefined &&
+        (input.successorScope.accountId !== input.accountId ||
+          input.successorScope.threadId !== threadId))
+    ) {
+      return null;
+    }
+    const id = input.action === "observe" ? this.genId() : null;
+    const successorId = input.successorScope === undefined ? null : this.genId();
+    const jobScopeId = encodeScopeId(input.job.scope);
+    const successorScopeId =
+      input.successorScope === undefined ? null : encodeScopeId(input.successorScope);
+    const observedAt = input.action === "observe" ? input.observation.observedAt.getTime() : null;
+    return this.db.transaction(async (tx) => {
+      const currentJob = await tx
+        .select({ id: memoryJobs.id })
+        .from(memoryJobs)
+        .where(
+          and(
+            eq(memoryJobs.id, input.job.id),
+            eq(memoryJobs.type, "observer"),
+            eq(memoryJobs.scopeId, jobScopeId),
+            eq(memoryJobs.status, "running"),
+            eq(memoryJobs.leaseGeneration, input.job.leaseGeneration),
+          ),
+        )
+        .for("update");
+      if (currentJob.length === 0) return null;
+      const expected = input.expectedFrontier;
+      const update =
+        input.action === "observe"
+          ? {
+              observerFrontierAt: input.nextFrontier.createdAtMs,
+              observerFrontierId: input.nextFrontier.id,
+              observationCount: sql`${memoryThreads.observationCount} + 1`,
+              lastObservationAt: sql`CASE
+                WHEN ${memoryThreads.lastObservationAt} IS NULL OR ${memoryThreads.lastObservationAt} < ${observedAt}
+                  THEN ${observedAt}
+                ELSE ${memoryThreads.lastObservationAt}
+              END`,
+            }
+          : {
+              observerFrontierAt: input.nextFrontier.createdAtMs,
+              observerFrontierId: input.nextFrontier.id,
+            };
+      const updated = await tx
+        .update(memoryThreads)
+        .set(update)
+        .where(
+          and(
+            eq(memoryThreads.id, threadId),
+            eq(memoryThreads.ownerId, input.accountId),
+            expected === null
+              ? and(
+                  isNull(memoryThreads.observerFrontierAt),
+                  isNull(memoryThreads.observerFrontierId),
+                )
+              : and(
+                  eq(memoryThreads.observerFrontierAt, expected.createdAtMs),
+                  eq(memoryThreads.observerFrontierId, expected.id),
+                ),
+          ),
+        )
+        .returning();
+      if (updated.length === 0) return null;
+      if (input.action === "observe" && id !== null && observedAt !== null) {
+        await tx.insert(memoryObservations).values({
+          id,
+          threadId,
+          sourceMessageRange: input.observation.sourceMessageRange,
+          observationText: input.observation.observationText,
+          observedAt,
+          referencedAt: null,
+          priority: input.observation.priority ?? null,
+          tags: input.observation.tags ?? null,
+          ...(input.observation.importance !== undefined
+            ? { importance: input.observation.importance }
+            : {}),
+        });
+      }
+      const completed = await tx
+        .update(memoryJobs)
+        .set({ status: "done", error: null, updatedAt: this.now().getTime() })
+        .where(
+          and(
+            eq(memoryJobs.id, input.job.id),
+            eq(memoryJobs.type, "observer"),
+            eq(memoryJobs.scopeId, jobScopeId),
+            eq(memoryJobs.status, "running"),
+            eq(memoryJobs.leaseGeneration, input.job.leaseGeneration),
+          ),
+        )
+        .returning();
+      if (completed.length !== 1) throw new Error("observer job fence changed during commit");
+      if (successorId !== null && successorScopeId !== null) {
+        const ts = this.now().getTime();
+        await tx.execute(sql`
+          INSERT INTO memory_jobs (id, type, scope_id, status, error, created_at, updated_at)
+          VALUES (${successorId}, 'observer', ${successorScopeId}, 'pending', NULL, ${ts}, ${ts})
+          ON CONFLICT (type, scope_id) WHERE status IN ('pending', 'running') DO NOTHING
+        `);
+      }
+      return { observationId: id };
     });
   }
 
@@ -815,45 +965,87 @@ export class PgMemoryStore implements MemoryStore {
   async findRedundantInjectionObservations(input: {
     accountId: string;
     threadId: string;
-    observations: Array<{ id: string; sourceMessageRange: [string, string] }>;
+    candidateLimit: number;
+    maxCoverageMessages: number;
+    order: "newest" | "score";
+    score?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+    };
     windowContentHashCounts: ReadonlyMap<string, number>;
   }): Promise<ReadonlySet<string>> {
-    if (input.observations.length === 0 || input.windowContentHashCounts.size === 0)
+    const candidateLimit = Math.max(0, Math.floor(input.candidateLimit));
+    const maxCoverageMessages = Math.max(0, Math.floor(input.maxCoverageMessages));
+    if (
+      candidateLimit === 0 ||
+      maxCoverageMessages === 0 ||
+      input.windowContentHashCounts.size === 0
+    ) {
       return new Set();
-    const requested = JSON.stringify(
-      input.observations.map(({ id, sourceMessageRange: [startId, endId] }) => ({
-        id,
-        startId,
-        endId,
-      })),
-    );
+    }
     const live = JSON.stringify(Object.fromEntries(input.windowContentHashCounts));
+    const score = input.order === "score" ? input.score : undefined;
+    const candidateOrder =
+      score === undefined
+        ? sql`${memoryObservations.observedAt} DESC, ${memoryObservations.id} DESC`
+        : sql`power(0.5, GREATEST(0, (${score.nowMs} - COALESCE(${memoryObservations.referencedAt}, ${memoryObservations.observedAt})) / 1000.0) / ${score.half_life_s})
+              * (LEAST(GREATEST(${memoryObservations.importance}, ${score.importance_floor}), ${score.importance_ceil}) + ${score.access_weight} * ln(1 + ${memoryObservations.referenceCount})) DESC,
+              ${memoryObservations.observedAt} DESC, ${memoryObservations.id} DESC`;
     const rows = pgRows<{ id: string }>(
       await this.db.execute(sql`
-        WITH requested AS (
-          SELECT id, "startId" AS start_id, "endId" AS end_id
-            FROM jsonb_to_recordset(${requested}::jsonb) AS r(id text, "startId" text, "endId" text)
-        ), live AS (SELECT key, value::integer AS n FROM jsonb_each_text(${live}::jsonb)),
-        ordered AS (
-          SELECT id, content_hash, ROW_NUMBER() OVER (ORDER BY CASE WHEN message_index IS NULL THEN 1 ELSE 0 END, message_index, created_at, id) AS n
-            FROM memory_messages WHERE thread_id = ${input.threadId}
-        ), endpoints AS (
-          SELECT r.id, r.start_id, r.end_id, MIN(o.n) AS first_n, MAX(o.n) AS last_n,
-                 COUNT(DISTINCT o.id) AS found
-            FROM requested r LEFT JOIN ordered o ON o.id = r.start_id OR o.id = r.end_id
-           GROUP BY r.id, r.start_id, r.end_id
-        ), required AS (
-          SELECT e.id, o.content_hash, COUNT(*) AS n FROM endpoints e JOIN ordered o
-            ON o.n BETWEEN e.first_n AND e.last_n
-           WHERE e.found = CASE WHEN e.start_id = e.end_id THEN 1 ELSE 2 END
-           GROUP BY e.id, o.content_hash
+        WITH live AS (
+          SELECT key, value::integer AS n FROM jsonb_each_text(${live}::jsonb)
+        ), candidates AS MATERIALIZED (
+          SELECT ${memoryObservations.id} AS id,
+                 ${memoryObservations.sourceMessageRange} ->> 0 AS start_id,
+                 ${memoryObservations.sourceMessageRange} ->> 1 AS end_id
+            FROM ${memoryObservations}
+            JOIN ${memoryThreads}
+              ON ${memoryThreads.id} = ${memoryObservations.threadId}
+             AND ${memoryThreads.ownerId} = ${input.accountId}
+           WHERE ${memoryObservations.threadId} = ${input.threadId}
+             AND ${memoryObservations.status} = 'active'
+             AND ${memoryObservations.expiredAt} IS NULL
+           ORDER BY ${candidateOrder}
+           LIMIT ${candidateLimit}
+        ), endpoints AS MATERIALIZED (
+          SELECT c.id,
+                 CASE WHEN (s.created_at, s.id) <= (e.created_at, e.id)
+                   THEN s.created_at ELSE e.created_at END AS first_at,
+                 CASE WHEN (s.created_at, s.id) <= (e.created_at, e.id)
+                   THEN s.id ELSE e.id END AS first_id,
+                 CASE WHEN (s.created_at, s.id) <= (e.created_at, e.id)
+                   THEN e.created_at ELSE s.created_at END AS last_at,
+                 CASE WHEN (s.created_at, s.id) <= (e.created_at, e.id)
+                   THEN e.id ELSE s.id END AS last_id
+            FROM candidates c
+            JOIN memory_messages s ON s.id = c.start_id AND s.thread_id = ${input.threadId}
+            JOIN memory_messages e ON e.id = c.end_id AND e.thread_id = ${input.threadId}
+        ), bounded AS MATERIALIZED (
+          SELECT e.* FROM endpoints e
+           WHERE (
+             SELECT COUNT(*) FROM (
+               SELECT 1 FROM memory_messages m
+                WHERE m.thread_id = ${input.threadId}
+                  AND (m.created_at, m.id) >= (e.first_at, e.first_id)
+                  AND (m.created_at, m.id) <= (e.last_at, e.last_id)
+                ORDER BY m.created_at, m.id
+                LIMIT ${maxCoverageMessages + 1}
+             ) covered_limit
+           ) <= ${maxCoverageMessages}
         )
-        SELECT e.id FROM endpoints e
-         WHERE e.found = CASE WHEN e.start_id = e.end_id THEN 1 ELSE 2 END
-           AND EXISTS (SELECT 1 FROM memory_threads WHERE id = ${input.threadId} AND owner_id = ${input.accountId})
-           AND NOT EXISTS (
-             SELECT 1 FROM required r LEFT JOIN live l ON l.key = r.content_hash
-              WHERE r.id = e.id AND (r.content_hash IS NULL OR l.n IS NULL OR l.n < r.n)
+        SELECT b.id FROM bounded b
+         WHERE NOT EXISTS (
+             SELECT 1 FROM memory_messages m
+             LEFT JOIN live l ON l.key = m.content_hash
+              WHERE m.thread_id = ${input.threadId}
+                AND (m.created_at, m.id) >= (b.first_at, b.first_id)
+                AND (m.created_at, m.id) <= (b.last_at, b.last_id)
+              GROUP BY m.content_hash, l.n
+             HAVING m.content_hash IS NULL OR l.n IS NULL OR l.n < COUNT(*)
            )
       `),
     );
@@ -948,6 +1140,23 @@ export class PgMemoryStore implements MemoryStore {
     return rows[0]?.version ?? 0;
   }
 
+  private async hasCurrentJobLease(
+    tx: { execute: (query: SQL) => Promise<unknown> },
+    job: { id: string; leaseGeneration: number },
+  ): Promise<boolean> {
+    return (
+      pgRows<{ id: string }>(
+        await tx.execute(sql`
+          SELECT id FROM memory_jobs
+           WHERE id = ${job.id}
+             AND status = 'running'
+             AND lease_generation = ${job.leaseGeneration}
+           FOR UPDATE
+        `),
+      )[0] !== undefined
+    );
+  }
+
   async commitReflectionJob(
     jobId: string,
     input: MemoryReflectionJobCommitInput,
@@ -962,6 +1171,7 @@ export class PgMemoryStore implements MemoryStore {
              AND type = 'reflector'
              AND scope_id = ${scopeId}
              AND status = 'running'
+             AND lease_generation = ${input.leaseGeneration}
           RETURNING id
         `),
       );
@@ -1012,7 +1222,12 @@ export class PgMemoryStore implements MemoryStore {
     });
   }
 
-  async updateJobStatus(jobId: string, status: MemoryJobStatus, error?: string): Promise<void> {
+  async updateJobStatus(
+    jobId: string,
+    status: MemoryJobStatus,
+    error?: string,
+    leaseGeneration?: number,
+  ): Promise<void> {
     await this.db
       .update(memoryJobs)
       .set({
@@ -1020,37 +1235,58 @@ export class PgMemoryStore implements MemoryStore {
         error: error ?? null,
         updatedAt: this.now().getTime(),
       })
-      .where(eq(memoryJobs.id, jobId));
+      .where(
+        leaseGeneration === undefined
+          ? eq(memoryJobs.id, jobId)
+          : and(
+              eq(memoryJobs.id, jobId),
+              eq(memoryJobs.status, "running"),
+              eq(memoryJobs.leaseGeneration, leaseGeneration),
+            ),
+      );
   }
 
   // Enqueue a background job. DEDUPE (D6): the partial unique index on OPEN
   // (pending/running) jobs owns the concurrency boundary; this method tries the
   // insert first, then reads the existing open row when another request won.
+  // Reflectors also share a scope advisory lock with decay so no new open row can
+  // slip between decay's fence and successor enqueue.
   async enqueueJob(input: MemoryJobEnqueueInput): Promise<string> {
     const scopeId = encodeScopeId(input.scope);
     const id = this.genId();
     const ts = this.now().getTime();
-    const inserted = (await this.db.execute(sql`
-      INSERT INTO memory_jobs (id, type, scope_id, status, error, created_at, updated_at)
-      VALUES (${id}, ${input.type}, ${scopeId}, 'pending', NULL, ${ts}, ${ts})
-      ON CONFLICT (type, scope_id) WHERE status IN ('pending', 'running') DO NOTHING
-      RETURNING id
-    `)) as { rows?: Array<{ id: string }> } | Array<{ id: string }>;
-    const insertedRows = Array.isArray(inserted) ? inserted : (inserted.rows ?? []);
-    if (insertedRows[0] !== undefined) return insertedRows[0].id;
+    const enqueue = async (executor: { execute: (query: SQL) => Promise<unknown> }) => {
+      const insertedRows = pgRows<{ id: string }>(
+        await executor.execute(sql`
+          INSERT INTO memory_jobs (id, type, scope_id, status, error, created_at, updated_at)
+          VALUES (${id}, ${input.type}, ${scopeId}, 'pending', NULL, ${ts}, ${ts})
+          ON CONFLICT (type, scope_id) WHERE status IN ('pending', 'running') DO NOTHING
+          RETURNING id
+        `),
+      );
+      if (insertedRows[0] !== undefined) return insertedRows[0].id;
 
-    const existing = (await this.db.execute(sql`
-      SELECT id FROM memory_jobs
-       WHERE type = ${input.type}
-         AND scope_id = ${scopeId}
-         AND status IN ('pending', 'running')
-       ORDER BY created_at ASC, id ASC
-       LIMIT 1
-    `)) as { rows?: Array<{ id: string }> } | Array<{ id: string }>;
-    const existingRows = Array.isArray(existing) ? existing : (existing.rows ?? []);
-    if (existingRows[0] !== undefined) return existingRows[0].id;
+      const existingRows = pgRows<{ id: string }>(
+        await executor.execute(sql`
+          SELECT id FROM memory_jobs
+           WHERE type = ${input.type}
+             AND scope_id = ${scopeId}
+             AND status IN ('pending', 'running')
+           ORDER BY created_at ASC, id ASC
+           LIMIT 1
+        `),
+      );
+      if (existingRows[0] !== undefined) return existingRows[0].id;
+      throw new Error("memory job enqueue conflict without existing open row");
+    };
 
-    throw new Error("memory job enqueue conflict without existing open row");
+    if (input.type !== "reflector") return enqueue(this.db);
+    return this.db.transaction(async (tx) => {
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtextextended(${scopeId}, ${REFLECTOR_JOB_LOCK_SEED}))`,
+      );
+      return enqueue({ execute: (query) => tx.execute(query) });
+    });
   }
 
   // Atomically claim up to `limit` open jobs (oldest-first). Postgres uses
@@ -1068,7 +1304,8 @@ export class PgMemoryStore implements MemoryStore {
     const staleBefore = updatedAt - RUNNING_LEASE_MS;
     const result = (await this.db.execute(sql`
       UPDATE memory_jobs
-         SET status = 'running', updated_at = ${updatedAt}
+         SET status = 'running', updated_at = ${updatedAt},
+             lease_generation = lease_generation + 1
        WHERE id IN (
          SELECT id FROM memory_jobs
           WHERE status = 'pending'
@@ -1077,17 +1314,26 @@ export class PgMemoryStore implements MemoryStore {
           LIMIT ${limit}
           FOR UPDATE SKIP LOCKED
        )
-      RETURNING id, type, scope_id
+      RETURNING id, type, scope_id, lease_generation
     `)) as
-      | { rows?: Array<{ id: string; type: string; scope_id: string }> }
+      | {
+          rows?: Array<{
+            id: string;
+            type: string;
+            scope_id: string;
+            lease_generation: number;
+          }>;
+        }
       | Array<{
           id: string;
           type: string;
           scope_id: string;
+          lease_generation: number;
         }>;
     const rows = Array.isArray(result) ? result : (result.rows ?? []);
     return rows.map((row) => ({
       jobId: row.id,
+      leaseGeneration: Number(row.lease_generation),
       type: row.type as MemoryJobRow["type"],
       scope: decodeScopeId(row.scope_id),
     }));
@@ -1258,16 +1504,21 @@ export class PgMemoryStore implements MemoryStore {
   async setFactEmbeddings(input: {
     accountId: string;
     items: Array<{ factId: string; embedding: Float32Array; model: string; dim: number }>;
-  }): Promise<void> {
-    if (input.items.length === 0) return;
-    for (const it of input.items) {
-      const vecLiteral = `[${Array.from(it.embedding).join(",")}]`;
-      await this.db.execute(sql`
-        UPDATE memory_facts
-           SET embedding = ${vecLiteral}::vector, embedding_model = ${it.model}, embedding_dim = ${it.dim}
-         WHERE id = ${it.factId} AND owner_id = ${input.accountId}
-      `);
-    }
+    job?: { id: string; leaseGeneration: number };
+  }): Promise<boolean> {
+    if (input.items.length === 0) return true;
+    return this.db.transaction(async (tx) => {
+      if (input.job !== undefined && !(await this.hasCurrentJobLease(tx, input.job))) return false;
+      for (const it of input.items) {
+        const vecLiteral = `[${Array.from(it.embedding).join(",")}]`;
+        await tx.execute(sql`
+          UPDATE memory_facts
+             SET embedding = ${vecLiteral}::vector, embedding_model = ${it.model}, embedding_dim = ${it.dim}
+           WHERE id = ${it.factId} AND owner_id = ${input.accountId}
+        `);
+      }
+      return true;
+    });
   }
 
   // docs/14 — embedding job READ half (pg). ACTIVE facts with no embedding, one from a
@@ -1371,14 +1622,20 @@ export class PgMemoryStore implements MemoryStore {
   // observations (status='archived', archived_at=now) — NEVER a DELETE. ACCOUNT-GUARDED
   // via the thread's owner_id; empty id list → no statement; touches ONLY the
   // observation status/archived_at, never raw messages nor other accounts' rows.
-  async archiveObservations(input: { accountId: string; ids: string[]; now: Date }): Promise<void> {
-    if (input.ids.length === 0) return;
+  async archiveObservations(input: {
+    accountId: string;
+    ids: string[];
+    now: Date;
+    job?: { id: string; leaseGeneration: number };
+  }): Promise<boolean> {
+    if (input.ids.length === 0) return true;
     const nowMs = input.now.getTime();
     const ids = sql.join(
       input.ids.map((id) => sql`${id}`),
       sql`, `,
     );
-    await this.db.transaction(async (tx) => {
+    return this.db.transaction(async (tx) => {
+      if (input.job !== undefined && !(await this.hasCurrentJobLease(tx, input.job))) return false;
       const rows = pgRows<{
         project_id: string | null;
         resource_id: string | null;
@@ -1392,15 +1649,6 @@ export class PgMemoryStore implements MemoryStore {
              AND o.status = 'active' AND t.owner_id = ${input.accountId}
         `),
       );
-      await tx.execute(sql`
-        UPDATE memory_observations
-           SET status = 'archived', archived_at = ${nowMs}
-         WHERE id IN (${ids})
-           AND status = 'active'
-           AND thread_id IN (
-             SELECT id FROM memory_threads WHERE owner_id = ${input.accountId}
-           )
-      `);
       const scopes = new Map<string, ReflectionScope>();
       for (const row of rows) {
         const targets: ReflectionScope[] = [];
@@ -1415,6 +1663,33 @@ export class PgMemoryStore implements MemoryStore {
         }
         for (const target of targets) scopes.set(encodeScopeId(target), target);
       }
+      const scopeIds = [...scopes.keys()].sort();
+      // Serialize enqueue + publication around each affected scope. Close every
+      // old open execution before hiding its inputs, then publish successors only
+      // after observations and reflections have been archived in this transaction.
+      for (const scopeId of scopeIds) {
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtextextended(${scopeId}, ${REFLECTOR_JOB_LOCK_SEED}))`,
+        );
+      }
+      for (const scopeId of scopeIds) {
+        await tx.execute(sql`
+          UPDATE memory_jobs
+             SET status = 'failed', error = 'superseded by observation archive', updated_at = ${nowMs}
+           WHERE type = 'reflector'
+             AND scope_id = ${scopeId}
+             AND status IN ('pending', 'running')
+        `);
+      }
+      await tx.execute(sql`
+        UPDATE memory_observations
+           SET status = 'archived', archived_at = ${nowMs}
+         WHERE id IN (${ids})
+           AND status = 'active'
+           AND thread_id IN (
+             SELECT id FROM memory_threads WHERE owner_id = ${input.accountId}
+           )
+      `);
       for (const [scopeId, target] of scopes) {
         await tx.execute(sql`
           UPDATE memory_reflections
@@ -1426,16 +1701,12 @@ export class PgMemoryStore implements MemoryStore {
              AND status = 'active'
         `);
         await tx.execute(sql`
-          UPDATE memory_jobs
-             SET status = 'failed', error = 'superseded by observation archive', updated_at = ${nowMs}
-           WHERE type = 'reflector' AND scope_id = ${scopeId} AND status = 'running'
-        `);
-        await tx.execute(sql`
           INSERT INTO memory_jobs (id, type, scope_id, status, error, created_at, updated_at)
           VALUES (${this.genId()}, 'reflector', ${scopeId}, 'pending', NULL, ${nowMs}, ${nowMs})
           ON CONFLICT (type, scope_id) WHERE status IN ('pending', 'running') DO NOTHING
         `);
       }
+      return true;
     });
   }
 
@@ -1511,6 +1782,7 @@ export class PgMemoryStore implements MemoryStore {
     scope: { projectId?: string; resourceId?: string; threadId?: string };
     facts: MemoryFactInput[];
     now: Date;
+    job?: { id: string; leaseGeneration: number };
   }): Promise<MemoryFactReconcileResult> {
     // docs/12 P6 (Codex review fix #3) — insert + supersede must be ATOMIC. The pg
     // adapter previously ran them as two un-wrapped statements: a crash AFTER the
@@ -1533,10 +1805,14 @@ export class PgMemoryStore implements MemoryStore {
       scope: { projectId?: string; resourceId?: string; threadId?: string };
       facts: MemoryFactInput[];
       now: Date;
+      job?: { id: string; leaseGeneration: number };
     },
   ): Promise<MemoryFactReconcileResult> {
     if (input.facts.length === 0) {
       return { insertedIds: [], supersededIds: [], resurrectedIds: [] };
+    }
+    if (input.job !== undefined && !(await this.hasCurrentJobLease(tx, input.job))) {
+      return { insertedIds: [], supersededIds: [], resurrectedIds: [], accepted: false };
     }
     const nowMs = input.now.getTime();
     const insertedIds: string[] = [];
@@ -1723,13 +1999,17 @@ export class PgMemoryStore implements MemoryStore {
 
   // Admin "By Scope" view. facts ⊎ reflections via a UNION of grouped subqueries
   // (kept for dialect parity with sqlite); reflections guarded owner_id IS NOT NULL.
-  async listMemoryScopes(input: { accountId?: string }): Promise<MemoryScopeSummary[]> {
+  async listMemoryScopes(input: {
+    accountId?: string;
+    limit: number;
+    offset: number;
+  }): Promise<{ rows: MemoryScopeSummary[]; total: number }> {
     const acct = input.accountId ?? null;
-    const result = (await this.db.execute(sql`
+    const aggregate = sql`
       SELECT owner_id AS "accountId", project_id AS "projectId", resource_id AS "resourceId",
              thread_id AS "threadId",
              SUM(fc)::bigint AS "factCount", SUM(rc)::bigint AS "reflectionCount",
-             MAX(lu)::bigint AS "lastUpdated"
+             MAX(lu)::bigint AS "lastUpdated", COUNT(*) OVER()::bigint AS total
         FROM (
           SELECT owner_id, project_id, resource_id, thread_id,
                  COUNT(*) AS fc, 0 AS rc, MAX(updated_at) AS lu
@@ -1744,20 +2024,44 @@ export class PgMemoryStore implements MemoryStore {
            WHERE status = 'active' AND owner_id IS NOT NULL
              AND (${acct}::text IS NULL OR owner_id = ${acct})
            GROUP BY owner_id, project_id, resource_id, thread_id
-        ) g
+       ) g
        GROUP BY owner_id, project_id, resource_id, thread_id
-       ORDER BY "lastUpdated" DESC
-    `)) as { rows?: ScopeAggRow[] } | ScopeAggRow[];
+    `;
+    const result = (await this.db.execute(sql`
+      ${aggregate}
+      ORDER BY MAX(lu) DESC, owner_id ASC,
+               CASE WHEN project_id IS NULL THEN 0 ELSE 1 END, project_id ASC,
+               CASE WHEN resource_id IS NULL THEN 0 ELSE 1 END, resource_id ASC,
+               CASE WHEN thread_id IS NULL THEN 0 ELSE 1 END, thread_id ASC
+      LIMIT ${input.limit} OFFSET ${input.offset}
+    `)) as
+      | { rows?: Array<ScopeAggRow & { total: number | string }> }
+      | Array<ScopeAggRow & { total: number | string }>;
     const rows = Array.isArray(result) ? result : (result.rows ?? []);
-    return rows.map((r) => ({
-      accountId: r.accountId,
-      projectId: r.projectId,
-      resourceId: r.resourceId,
-      threadId: r.threadId,
-      factCount: Number(r.factCount),
-      reflectionCount: Number(r.reflectionCount),
-      lastUpdated: r.lastUpdated !== null ? new Date(Number(r.lastUpdated)) : null,
-    }));
+    const total =
+      rows[0] !== undefined
+        ? Number(rows[0].total)
+        : input.offset === 0 && input.limit > 0
+          ? 0
+          : Number(
+              pgRows<{ total: number | string }>(
+                await this.db.execute(
+                  sql`SELECT COUNT(*)::bigint AS total FROM (${aggregate}) scopes`,
+                ),
+              )[0]?.total ?? 0,
+            );
+    return {
+      rows: rows.map((r) => ({
+        accountId: r.accountId,
+        projectId: r.projectId,
+        resourceId: r.resourceId,
+        threadId: r.threadId,
+        factCount: Number(r.factCount),
+        reflectionCount: Number(r.reflectionCount),
+        lastUpdated: r.lastUpdated !== null ? new Date(Number(r.lastUpdated)) : null,
+      })),
+      total,
+    };
   }
 
   async getMemoryAdminStats(
@@ -2459,7 +2763,8 @@ export class PgMemoryStore implements MemoryStore {
          WHERE t.owner_id IS NOT NULL
            AND t.last_message_at <= ${input.idleBeforeMs}
            AND (${idleAfterMs}::bigint IS NULL OR
-                t.last_message_at >= ${idleAfterMs})
+                t.last_message_at >= ${idleAfterMs} OR
+                t.observer_frontier_at IS NULL)
            AND EXISTS (
              SELECT 1 FROM memory_messages m
               WHERE m.thread_id = t.id

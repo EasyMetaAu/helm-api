@@ -171,11 +171,13 @@ describe("SqliteMemoryStore decay sweep (listScorableObservations / archiveObser
       expect.arrayContaining([
         {
           jobId: expect.any(String),
+          leaseGeneration: 1,
           type: "reflector",
           scope: { accountId: "acct-a", projectId: "p-a" },
         },
         {
           jobId: expect.any(String),
+          leaseGeneration: 1,
           type: "reflector",
           scope: { accountId: "acct-a", resourceId: "r-a" },
         },

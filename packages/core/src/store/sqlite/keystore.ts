@@ -64,6 +64,11 @@ export class SqliteKeyStore implements KeyStore {
     return row ? this.toRecord(row) : null;
   }
 
+  async getById(keyId: string): Promise<ApiKeyRecord | null> {
+    const row = this.db.select().from(apiKeys).where(eq(apiKeys.keyId, keyId)).get();
+    return row ? this.toRecord(row) : null;
+  }
+
   async list(): Promise<ApiKeyRecord[]> {
     // Deterministic order: creation time, key_id as the unique tiebreaker. Without an
     // explicit ORDER BY the engine returns rows in an unspecified order that shifts as

@@ -157,6 +157,15 @@ describe("startMemoryWorker", () => {
     expect(runObserver).toHaveBeenCalledWith({ jobId: "j1", accountId: "acct-a", threadId: "t1" });
   });
 
+  it("claims only the capacity it can run now", async () => {
+    const { store, claim } = makeStore([]);
+    const handle = startMemoryWorker(makeDeps(store, { batchSize: 50, concurrency: 1 }));
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(claim).toHaveBeenCalledWith(1);
+    await handle.stop();
+  });
+
   it("can drain multiple full batches in one tick for backlog catch-up", async () => {
     const batches: MemoryJobRow[][] = [
       [{ jobId: "j1", type: "observer", scope: { accountId: "acct-a", threadId: "t1" } }],

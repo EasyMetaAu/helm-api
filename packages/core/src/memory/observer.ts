@@ -7,6 +7,7 @@ import {
   resolveCompactionTunables,
 } from "./compaction-policy.js";
 import { buildReconciledFactBatch } from "./forgetting/facts.js";
+import { updateClaimedJobStatus } from "./job-lease.js";
 import type { ExtractedFact } from "./reflector.js";
 
 // consolidate.max_facts_per_subject schema default — used when the composition root
@@ -16,7 +17,9 @@ const DEFAULT_MAX_FACTS_PER_SUBJECT = 8;
 // keyset page below and never materialize a whole thread.
 const MAX_OBSERVER_THREAD_MESSAGES = 4_096;
 const MAX_OBSERVER_THREAD_OBSERVATIONS = 512;
-const OBSERVER_PAGE_MESSAGES = 512;
+// Also bounds inject's coverage lookup: production observations cannot cover more
+// raw rows than the Observer page that created them.
+export const OBSERVER_PAGE_MESSAGES = 512;
 const OBSERVER_PAGE_BYTES = 1 * 1024 * 1024;
 const OBSERVER_PAGE_TOKENS = 64 * 1024;
 
@@ -84,7 +87,19 @@ async function maybeEagerExtractFacts(
     // so a bare `insert(...)` would lose `this` and throw "reading 'db'" (fail-open ⇒
     // silent no-write). Mirror the `.call(deps.memoryStore, ...)` pattern used by the
     // idle-flush / decay-trigger optional-method call sites.
-    await insert.call(deps.memoryStore, { accountId: job.accountId, scope, facts, now });
+    const reconciled = await insert.call(deps.memoryStore, {
+      accountId: job.accountId,
+      scope,
+      facts,
+      now,
+      ...(job.leaseGeneration !== undefined
+        ? { job: { id: job.jobId, leaseGeneration: job.leaseGeneration } }
+        : {}),
+    });
+    if (reconciled.accepted === false) {
+      deps.log("memory.observer.eager_facts_stale", { thread_id: job.threadId });
+      return;
+    }
     deps.log("memory.observer.eager_facts_extracted", {
       thread_id: job.threadId,
       fact_count: facts.length,
@@ -186,6 +201,9 @@ export interface ObserverJob {
   jobId: string;
   accountId: string;
   threadId: string;
+  // Claim generation fences a worker that keeps running after its lease is reclaimed.
+  // Optional only for direct unit fixtures; claimed production jobs always carry it.
+  leaseGeneration?: number;
   // Salient-fact fast path (Change A): the thread's cross-thread scope, carried
   // verbatim from the enqueued job (the worker already has it — observer jobs are
   // enqueued with the full {accountId, projectId?, resourceId?, threadId} scope).
@@ -360,15 +378,20 @@ export async function runObserverJob(
         : await deps.memoryStore
             .getThreadMeta({ accountId: job.accountId, threadId: job.threadId })
             .catch(() => null);
+    const leaseGeneration = job.leaseGeneration;
+    const atomicBounded =
+      deps.memoryStore.listObserverMessagesPage !== undefined &&
+      deps.memoryStore.commitObserverPage !== undefined &&
+      leaseGeneration !== undefined;
     const bounded =
       deps.memoryStore.listObserverMessagesPage !== undefined &&
-      deps.memoryStore.appendObservationAndAdvanceFrontier !== undefined;
+      (atomicBounded || deps.memoryStore.appendObservationAndAdvanceFrontier !== undefined);
     if (
       !bounded &&
       ((readMeta?.messageCount ?? 0) > MAX_OBSERVER_THREAD_MESSAGES ||
         (readMeta?.observationCount ?? 0) > MAX_OBSERVER_THREAD_OBSERVATIONS)
     ) {
-      await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      await updateClaimedJobStatus(deps.memoryStore, job, "done");
       deps.log("memory.observer.history_skipped", {
         thread_id: job.threadId,
         max_messages: MAX_OBSERVER_THREAD_MESSAGES,
@@ -402,10 +425,12 @@ export async function runObserverJob(
           accountId: job.accountId,
           threadId: job.threadId,
         });
-    const covered = alreadyObservedMessageIds(
-      all,
-      existing.map((o) => o.sourceMessageRange),
-    );
+    const covered = bounded
+      ? new Set(observerPage?.coveredMessageIds ?? [])
+      : alreadyObservedMessageIds(
+          all,
+          existing.map((o) => o.sourceMessageRange),
+        );
 
     // Auto-compaction inputs — all DERIVED, none configured (the whole point):
     //   model    → thread's last served alias, stamped by observeOutbound; the
@@ -474,23 +499,53 @@ export async function runObserverJob(
     // observations: tiny one-message gaps before a large uncovered tail. Pick the
     // largest compactable segment first so one quiet thread cannot burn one LLM
     // call per tiny gap while still keeping every source range exact.
-    const selected = idle
-      ? decisions.reduce<(typeof decisions)[number] | undefined>(
-          (best, item) =>
-            item.decision.shouldCompact &&
-            (best === undefined ||
-              item.decision.compressedTokens > best.decision.compressedTokens ||
-              (item.decision.compressedTokens === best.decision.compressedTokens &&
-                item.decision.compressedCount > best.decision.compressedCount))
-              ? item
-              : best,
-          undefined,
-        )
-      : decisions.find(({ decision }) => decision.shouldCompact);
+    const selected = bounded
+      ? decisions.find(({ decision }) => decision.shouldCompact)
+      : idle
+        ? decisions.reduce<(typeof decisions)[number] | undefined>(
+            (best, item) =>
+              item.decision.shouldCompact &&
+              (best === undefined ||
+                item.decision.compressedTokens > best.decision.compressedTokens ||
+                (item.decision.compressedTokens === best.decision.compressedTokens &&
+                  item.decision.compressedCount > best.decision.compressedCount))
+                ? item
+                : best,
+            undefined,
+          )
+        : decisions.find(({ decision }) => decision.shouldCompact);
     if (selected === undefined) {
+      const pageFullyCovered =
+        atomicBounded &&
+        observerPage !== undefined &&
+        observerPage.messages.length > 0 &&
+        observerPage.coveredMessageIds?.length === observerPage.messages.length &&
+        observerPage.nextCursor !== null;
+      if (pageFullyCovered && observerPage.nextCursor !== null) {
+        const observerScope = {
+          accountId: job.accountId,
+          threadId: job.threadId,
+          ...(job.projectId !== undefined ? { projectId: job.projectId } : {}),
+          ...(job.resourceId !== undefined ? { resourceId: job.resourceId } : {}),
+        };
+        const commit = await deps.memoryStore.commitObserverPage?.({
+          accountId: job.accountId,
+          job: { id: job.jobId, scope: observerScope, leaseGeneration: leaseGeneration ?? 0 },
+          action: "advance",
+          expectedFrontier: observerPage.expectedFrontier,
+          nextFrontier: observerPage.nextCursor,
+          ...(observerPage.hasMore ? { successorScope: observerScope } : {}),
+        });
+        if (commit === null) {
+          deps.log("memory.observer.frontier_stale", { thread_id: job.threadId });
+          return { observationId: null, sourceMessageRange: null };
+        }
+        deps.log("memory.observer.coverage_advanced", { thread_id: job.threadId });
+        return { observationId: null, sourceMessageRange: null };
+      }
       // No compaction this run → mine the uncovered turns for durable facts.
       await maybeEagerExtractFacts(job, all, covered, deps);
-      await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      await updateClaimedJobStatus(deps.memoryStore, job, "done");
       if (!bounded) await maybeReenqueueForLateMessages(job, snapshotMessageIds, deps);
       const lastDecision = decisions.at(-1)?.decision;
       deps.log("memory.observer.noop_compaction_skipped", {
@@ -510,7 +565,7 @@ export async function runObserverJob(
       // Idempotent / nothing to do — never write an empty observation. Still a
       // no-compaction run, so the eager fact pass applies.
       await maybeEagerExtractFacts(job, all, covered, deps);
-      await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      await updateClaimedJobStatus(deps.memoryStore, job, "done");
       if (!bounded) await maybeReenqueueForLateMessages(job, snapshotMessageIds, deps);
       deps.log("memory.observer.noop_no_old_messages", { thread_id: job.threadId });
       return { observationId: null, sourceMessageRange: null };
@@ -558,41 +613,55 @@ export async function runObserverJob(
       ...(importance !== undefined ? { importance } : {}),
       ...(tags !== undefined ? { tags } : {}),
     };
-    const observationId = bounded
-      ? await deps.memoryStore.appendObservationAndAdvanceFrontier?.({
+    const hasRemainder = observerPage?.hasMore === true || compressed.length < all.length;
+    const observerScope = {
+      accountId: job.accountId,
+      threadId: job.threadId,
+      ...(job.projectId !== undefined ? { projectId: job.projectId } : {}),
+      ...(job.resourceId !== undefined ? { resourceId: job.resourceId } : {}),
+    };
+    const commit = atomicBounded
+      ? await deps.memoryStore.commitObserverPage?.({
           accountId: job.accountId,
+          job: { id: job.jobId, scope: observerScope, leaseGeneration: leaseGeneration ?? 0 },
+          action: "observe",
           observation: observationInput,
           expectedFrontier: observerPage?.expectedFrontier ?? null,
           nextFrontier: {
             createdAtMs: last.createdAt.getTime(),
             id: last.id,
           },
+          ...(hasRemainder ? { successorScope: observerScope } : {}),
         })
-      : await deps.memoryStore.appendObservation(observationInput);
-    if (observationId == null) {
-      await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      : bounded
+        ? await deps.memoryStore.appendObservationAndAdvanceFrontier?.({
+            accountId: job.accountId,
+            observation: observationInput,
+            expectedFrontier: observerPage?.expectedFrontier ?? null,
+            nextFrontier: {
+              createdAtMs: last.createdAt.getTime(),
+              id: last.id,
+            },
+          })
+        : await deps.memoryStore.appendObservation(observationInput);
+    if (commit == null) {
+      if (!atomicBounded) await updateClaimedJobStatus(deps.memoryStore, job, "done");
       deps.log("memory.observer.frontier_stale", { thread_id: job.threadId });
       return { observationId: null, sourceMessageRange: null };
     }
+    const observationId = typeof commit === "string" ? commit : commit.observationId;
 
     // Book Observer tokens into their OWN bucket — never the provider/actor one.
     deps.costSink("observer", estimateObserverTokens(compressed, observationText));
 
-    await deps.memoryStore.updateJobStatus(job.jobId, "done");
-    if (bounded) {
-      if (observerPage?.hasMore === true || compressed.length < all.length) {
+    if (!atomicBounded) {
+      await updateClaimedJobStatus(deps.memoryStore, job, "done");
+      if (bounded && hasRemainder) {
         await deps.memoryStore.enqueueJob({
           type: "observer",
-          scope: {
-            accountId: job.accountId,
-            threadId: job.threadId,
-            ...(job.projectId !== undefined ? { projectId: job.projectId } : {}),
-            ...(job.resourceId !== undefined ? { resourceId: job.resourceId } : {}),
-          },
+          scope: observerScope,
         });
       }
-    } else {
-      await maybeReenqueueForLateMessages(job, snapshotMessageIds, deps);
     }
     deps.log("memory.observer.compressed", {
       thread_id: job.threadId,
@@ -615,7 +684,7 @@ export async function runObserverJob(
     // it on the job + log; the request that enqueued this job is long gone.
     const message = err instanceof Error ? err.message : String(err);
     try {
-      await deps.memoryStore.updateJobStatus(job.jobId, "failed", message);
+      await updateClaimedJobStatus(deps.memoryStore, job, "failed", message);
     } catch (updateErr) {
       // Even the failure bookkeeping is best-effort — still never throw.
       deps.log("memory.observer.job_update_failed", {

@@ -136,6 +136,13 @@ describe("SqliteKeyStore", () => {
     expect(await store.getByHash("unknown")).toBeNull();
   });
 
+  it("getById performs a direct keyed lookup", async () => {
+    const store = freshStore();
+    await store.createKey({ keyId: "k1", hash: "h1", prefix: "p1", accountId: "a", role: "user" });
+    expect((await store.getById("k1"))?.hash).toBe("h1");
+    expect(await store.getById("missing")).toBeNull();
+  });
+
   it("restores boolean/array dialect on read", async () => {
     const store = freshStore();
     await store.createKey({

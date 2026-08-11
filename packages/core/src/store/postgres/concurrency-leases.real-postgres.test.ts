@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 import { PgConcurrencyLeaseStore } from "./concurrency-leases.js";
+import { PgMemoryStore } from "./memory-store.js";
 import { createPgDb, type PgDb, runPgMigrations } from "./migrate.js";
 
 const postgresUrl: string =
@@ -8,7 +9,7 @@ const postgresUrl: string =
   process.env.HELM_TEST_POSTGRES_URL ??
   (() => {
     throw new Error(
-      "real PostgreSQL lease tests require PG_TEST_URL or HELM_TEST_POSTGRES_URL; run through apps/gateway/e2e/run-with-postgres.sh",
+      "real PostgreSQL concurrency tests require PG_TEST_URL or HELM_TEST_POSTGRES_URL; run through apps/gateway/e2e/run-with-postgres.sh",
     );
   })();
 
@@ -31,7 +32,137 @@ async function db(): Promise<PgDb> {
   return connection;
 }
 
-describe("real PostgreSQL concurrency lease contract", () => {
+async function namedDb(applicationName: string): Promise<PgDb> {
+  const url = new URL(postgresUrl);
+  url.searchParams.set("application_name", applicationName);
+  const connection = await createPgDb(url.toString());
+  openDbs.push(connection);
+  return connection;
+}
+
+async function waitForBlockedQuery(
+  db: PgDb,
+  applicationName: string,
+  fragment: string,
+): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const rows = rowsOf(
+      await db.execute(sql`
+        SELECT query, wait_event_type
+          FROM pg_stat_activity
+         WHERE application_name = ${applicationName} AND state = 'active'
+      `),
+    ) as Array<{ query: string; wait_event_type: string | null }>;
+    if (
+      rows.some(
+        (row) => row.wait_event_type === "Lock" && row.query.toLowerCase().includes(fragment),
+      )
+    ) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`timed out waiting for blocked query: ${fragment}`);
+}
+
+describe("real PostgreSQL concurrency contracts", () => {
+  it("prevents a stale Reflector from publishing after decay wins the job fence", async () => {
+    const suffix = crypto.randomUUID();
+    const accountId = `decay-account-${suffix}`;
+    const projectId = `decay-project-${suffix}`;
+    const threadId = `decay-thread-${suffix}`;
+    const setupDb = await db();
+    const lockDb = await db();
+    const reflectorApplication = `helm-reflector-${suffix}`;
+    const reflectorDb = await namedDb(reflectorApplication);
+    const decayApplication = `helm-decay-${suffix}`;
+    const decayDb = await namedDb(decayApplication);
+    const probeDb = await db();
+    const setupStore = new PgMemoryStore(setupDb);
+    const reflectorStore = new PgMemoryStore(reflectorDb);
+    const decayStore = new PgMemoryStore(decayDb);
+    const probeStore = new PgMemoryStore(probeDb);
+
+    await setupStore.ensureThread({ id: threadId, ownerId: accountId, projectId });
+    const observationId = await setupStore.appendObservation({
+      threadId,
+      sourceMessageRange: [`m1-${suffix}`, `m2-${suffix}`],
+      observationText: "must be forgotten",
+      observedAt: new Date(1_000),
+    });
+    const scope = { accountId, projectId };
+    const jobId = await setupStore.enqueueJob({ type: "reflector", scope });
+    const claimedJob = (await setupStore.claimPendingJobs(1))[0];
+    expect(claimedJob?.jobId).toBe(jobId);
+
+    let releaseReflectionLock!: () => void;
+    const holdReflectionLock = new Promise<void>((resolve) => {
+      releaseReflectionLock = resolve;
+    });
+    let reflectionLocked!: () => void;
+    const reflectionLockReady = new Promise<void>((resolve) => {
+      reflectionLocked = resolve;
+    });
+    const blocker = lockDb.transaction(async (tx) => {
+      await tx.execute(sql.raw("LOCK TABLE memory_reflections IN ACCESS EXCLUSIVE MODE"));
+      reflectionLocked();
+      await holdReflectionLock;
+    });
+
+    try {
+      await reflectionLockReady;
+      const decay = decayStore.archiveObservations({
+        accountId,
+        ids: [observationId],
+        now: new Date(3_000),
+      });
+      await waitForBlockedQuery(probeDb, decayApplication, "update memory_reflections");
+
+      const staleCommit = reflectorStore.commitReflectionJob(jobId, {
+        leaseGeneration: claimedJob?.leaseGeneration ?? 0,
+        target: scope,
+        reflection: {
+          action: "upsert",
+          reflectionText: "stale reflection",
+          version: 1,
+          tokenEstimate: 4,
+          updatedAt: new Date(2_000),
+        },
+        facts: [
+          {
+            ownerId: accountId,
+            projectId,
+            subjectKey: "stale",
+            factText: "stale fact",
+            contentHash: suffix.replaceAll("-", "").padEnd(64, "a"),
+            validFrom: new Date(1_000),
+          },
+        ],
+        now: new Date(2_000),
+      });
+      await waitForBlockedQuery(probeDb, reflectorApplication, "update memory_jobs");
+
+      releaseReflectionLock();
+      await blocker;
+      await decay;
+      await expect(staleCommit).resolves.toBeNull();
+
+      expect(await probeStore.getReflection(scope)).toBeNull();
+      expect(await probeStore.listActiveFacts({ accountId, projectId })).toEqual([]);
+    } finally {
+      releaseReflectionLock();
+      await blocker.catch(() => {});
+      await setupDb.execute(
+        sql`DELETE FROM memory_jobs WHERE scope_id::jsonb ->> 'accountId' = ${accountId}`,
+      );
+      await setupDb.execute(sql`DELETE FROM memory_reflections WHERE owner_id = ${accountId}`);
+      await setupDb.execute(sql`DELETE FROM memory_facts WHERE owner_id = ${accountId}`);
+      await setupDb.execute(sql`DELETE FROM memory_observations WHERE thread_id = ${threadId}`);
+      await setupDb.execute(sql`DELETE FROM memory_threads WHERE id = ${threadId}`);
+    }
+  }, 20_000);
+
   it("bases expiry on statement time after waiting for a row lock across two pools", async () => {
     const dbA = await db();
     const dbB = await db();

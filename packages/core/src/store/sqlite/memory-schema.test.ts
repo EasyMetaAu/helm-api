@@ -4,6 +4,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { sha256Hex } from "../../memory/message-hash.js";
+import { encodePayloadText, PAYLOAD_TEXT_CHUNK_RAW_BYTES } from "../payload-codec.js";
 import { SqliteMemoryStore } from "./memory-store.js";
 import { createSqliteDb, runMigrations } from "./migrate.js";
 
@@ -154,15 +155,23 @@ describe("sqlite memory schema + migrations", () => {
       content: "one turn",
       tokenEstimate: 2,
     });
+    const observationId = await store.appendObservation({
+      threadId: "t1",
+      sourceMessageRange: [messageId, messageId],
+      observationText: "one turn summary",
+      observedAt: new Date(),
+    });
 
     const redundant = await store.findRedundantInjectionObservations({
       accountId: "acct-a",
       threadId: "t1",
-      observations: [{ id: "obs-1", sourceMessageRange: [messageId, messageId] }],
+      candidateLimit: 8,
+      maxCoverageMessages: 512,
+      order: "newest",
       windowContentHashCounts: new Map([[sha256Hex("one turn"), 1]]),
     });
 
-    expect(redundant).toEqual(new Set(["obs-1"]));
+    expect(redundant).toEqual(new Set([observationId]));
     db.$sqlite.close();
   });
 
@@ -209,6 +218,16 @@ describe("sqlite memory schema + migrations", () => {
     expect((await store.selectMessagesOlderThan(3_000, 10)).map((m) => m.content).sort()).toEqual(
       [content, "legacy text"].sort(),
     );
+
+    const bomb = encodePayloadText("x".repeat(PAYLOAD_TEXT_CHUNK_RAW_BYTES + 1));
+    db.$sqlite
+      .prepare("UPDATE memory_messages SET content = ? WHERE id = 'legacy-message'")
+      .run(bomb);
+    expect(
+      (await store.listMessages({ accountId: "o1", threadId: "t1" })).find(
+        (message) => message.id === "legacy-message",
+      )?.content,
+    ).toBe("");
     db.$sqlite.close();
   });
 
