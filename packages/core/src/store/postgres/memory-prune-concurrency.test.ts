@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { PgMemoryStore } from "./memory-store.js";
 import { createPgliteDb } from "./migrate.js";
@@ -31,6 +32,11 @@ describe("PgMemoryStore prune summary serialization", () => {
         content: "old",
         tokenEstimate: 1,
       });
+      await db.execute(
+        sql.raw(
+          "UPDATE memory_threads SET observer_frontier_at = 2000, observer_frontier_id = 'id-1' WHERE id = 't'",
+        ),
+      );
 
       const statements: string[] = [];
       const traceable = db as unknown as TraceablePgliteDb;
@@ -49,6 +55,12 @@ describe("PgMemoryStore prune summary serialization", () => {
           query.includes("order by t.id") &&
           query.includes("for update"),
       );
+      const boundedThreadDiscovery = statements.find(
+        (query) =>
+          query.includes("_helm_pruned_message_threads") &&
+          query.includes("with doomed") &&
+          query.includes("limit"),
+      );
       const deleteAt = statements.findIndex((query) =>
         query.includes("delete from memory_messages"),
       );
@@ -57,8 +69,62 @@ describe("PgMemoryStore prune summary serialization", () => {
       );
 
       expect(lockAt).toBeGreaterThanOrEqual(0);
+      expect(boundedThreadDiscovery).toBeDefined();
       expect(deleteAt).toBeGreaterThan(lockAt);
       expect(repairAt).toBeGreaterThan(deleteAt);
+    } finally {
+      await db.$close();
+    }
+  });
+
+  it("repairs every bounded thread batch instead of only the last one", async () => {
+    const db = await createPgliteDb();
+    try {
+      const store = new PgMemoryStore(db);
+      await store.ensureThread({ id: "a", ownerId: "owner" });
+      await store.ensureThread({ id: "b", ownerId: "owner" });
+      await db.execute(
+        sql.raw(`
+        INSERT INTO memory_messages
+          (id, thread_id, message_index, role, content, token_estimate, created_at, content_hash)
+        SELECT 'a-' || g, 'a', g, 'user', 'old', 1, g, 'hash-a-' || g
+          FROM generate_series(1, 1000) AS g
+      `),
+      );
+      await db.execute(
+        sql.raw(`
+        INSERT INTO memory_messages
+          (id, thread_id, message_index, role, content, token_estimate, created_at, content_hash)
+        VALUES ('b-1', 'b', 1, 'user', 'old', 1, 1001, 'hash-b-1')
+      `),
+      );
+      await db.execute(
+        sql.raw(`
+        UPDATE memory_threads SET message_count = 1000, last_message_at = 1000,
+          observer_frontier_at = 2000, observer_frontier_id = 'a-999' WHERE id = 'a'
+      `),
+      );
+      await db.execute(
+        sql.raw(`
+        UPDATE memory_threads SET message_count = 1, last_message_at = 1001,
+          observer_frontier_at = 2000, observer_frontier_id = 'b-1' WHERE id = 'b'
+      `),
+      );
+
+      expect(await store.pruneMessagesOlderThan(3_000)).toBe(1001);
+      const result = (await db.execute(
+        sql.raw("SELECT id, message_count FROM memory_threads ORDER BY id"),
+      )) as unknown;
+      const rows = (
+        Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])
+      ) as Array<{
+        id: string;
+        message_count: number | string;
+      }>;
+      expect(rows.map((row) => [row.id, Number(row.message_count)])).toEqual([
+        ["a", 0],
+        ["b", 0],
+      ]);
     } finally {
       await db.$close();
     }

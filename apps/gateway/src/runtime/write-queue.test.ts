@@ -282,6 +282,40 @@ describe("createWriteQueue", () => {
     ]);
   });
 
+  it("drops excess pending admissions while a stalled sink retains the bounded backlog", async () => {
+    const sink = fakeSink();
+    const logs: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    (sink.insertMany as ReturnType<typeof vi.fn>).mockImplementation(async (inputs) => {
+      await gate;
+      sink.inserts.push(...inputs);
+    });
+    const q = createWriteQueue({
+      telemetry: sink,
+      log: (message) => logs.push(message),
+      flushIntervalMs: 10_000,
+      maxDepth: 1,
+      maxPendingAdmissions: 2,
+    });
+
+    await q.enqueueTelemetry(tele("first"));
+    const queued = ["second", "third", "dropped"].map((id) => q.enqueueTelemetry(tele(id)));
+    await Promise.resolve();
+    expect(logs).toContain("writequeue.admission_dropped");
+
+    release();
+    await Promise.all(queued);
+    await q.flush();
+    expect(sink.inserts.map((i) => (i.decision as { request_id: string }).request_id)).toEqual([
+      "first",
+      "second",
+      "third",
+    ]);
+  });
+
   it("backpressures payloads on the byte budget and preserves every body", async () => {
     const sink = fakeSink();
     const logs: string[] = [];

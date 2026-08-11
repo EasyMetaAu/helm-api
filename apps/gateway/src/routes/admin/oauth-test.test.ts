@@ -5,6 +5,7 @@ import {
   createOpenAiStreamParser,
   DEFAULT_TEST_MAX_TOKENS,
   DEFAULT_TEST_PROMPT,
+  OAUTH_TEST_MAX_SSE_LINE_BYTES,
   type TestStreamEvent,
 } from "./oauth-test.js";
 
@@ -77,6 +78,13 @@ describe("createOpenAiStreamParser — normalizes OpenAI chunk SSE to test event
     expect(run(p, [`data: ${JSON.stringify(delta("bye"))}`])).toEqual([
       { type: "content", text: "bye" },
     ]);
+  });
+
+  it("rejects an unterminated SSE line after one MiB of buffered UTF-8", () => {
+    const p = createOpenAiStreamParser();
+    expect(() => p.push("你".repeat(Math.floor(OAUTH_TEST_MAX_SSE_LINE_BYTES / 3) + 1))).toThrow(
+      /SSE line exceeds 1048576 bytes/,
+    );
   });
 
   it("skips empty content deltas (e.g. the priming role-only frame)", () => {

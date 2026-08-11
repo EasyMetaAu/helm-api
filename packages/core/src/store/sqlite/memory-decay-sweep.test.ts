@@ -29,8 +29,8 @@ describe("SqliteMemoryStore decay sweep (listScorableObservations / archiveObser
   it("lists only ACTIVE observations of the swept account with the score-input fields", async () => {
     const now = new Date("2026-06-05T00:00:00.000Z");
     const { store } = newStore(now);
-    await store.ensureThread({ id: "t-a", ownerId: "acct-a" });
-    await store.ensureThread({ id: "t-b", ownerId: "acct-b" });
+    await store.ensureThread({ id: "t-a", ownerId: "acct-a", projectId: "p-a" });
+    await store.ensureThread({ id: "t-b", ownerId: "acct-b", projectId: "p-b" });
     const obsA = await store.appendObservation({
       threadId: "t-a",
       sourceMessageRange: ["m1", "m2"],
@@ -141,8 +141,13 @@ describe("SqliteMemoryStore decay sweep (listScorableObservations / archiveObser
   it("archiveObservations soft-invalidates only the named ACTIVE rows of the account", async () => {
     const now = new Date("2026-06-05T00:00:00.000Z");
     const { store, db } = newStore(now);
-    await store.ensureThread({ id: "t-a", ownerId: "acct-a" });
-    await store.ensureThread({ id: "t-b", ownerId: "acct-b" });
+    await store.ensureThread({
+      id: "t-a",
+      ownerId: "acct-a",
+      projectId: "p-a",
+      resourceId: "r-a",
+    });
+    await store.ensureThread({ id: "t-b", ownerId: "acct-b", projectId: "p-b" });
     const obsA = await store.appendObservation({
       threadId: "t-a",
       sourceMessageRange: ["m1", "m2"],
@@ -162,6 +167,20 @@ describe("SqliteMemoryStore decay sweep (listScorableObservations / archiveObser
 
     expect(readStatus(db, obsA)).toEqual({ status: "archived", archived_at: archivedAt.getTime() });
     expect(readStatus(db, obsB)).toEqual({ status: "active", archived_at: null }); // other account untouched
+    expect(await store.claimPendingJobs(10)).toEqual(
+      expect.arrayContaining([
+        {
+          jobId: expect.any(String),
+          type: "reflector",
+          scope: { accountId: "acct-a", projectId: "p-a" },
+        },
+        {
+          jobId: expect.any(String),
+          type: "reflector",
+          scope: { accountId: "acct-a", resourceId: "r-a" },
+        },
+      ]),
+    );
 
     // Archived rows drop out of the scorable list → idempotent re-sweep finds nothing new.
     const remaining = await store.listScorableObservations({ accountId: "acct-a" });
@@ -385,5 +404,36 @@ describe("SqliteMemoryStore.listDecayCandidateAccounts (P5 buffer-flush gate)", 
       )
       .get() as { c: number };
     expect(openCount.c).toBe(1); // only ONE open decay row despite two enqueues
+  });
+
+  it("returns due accounts in deterministic bounded pages", async () => {
+    const t0 = new Date("2026-06-05T00:00:00.000Z");
+    const { store } = clockStore(t0);
+    for (let i = 0; i < 105; i += 1) {
+      const accountId = `acct-${String(i).padStart(3, "0")}`;
+      await store.ensureThread({ id: `thread-${i}`, ownerId: accountId });
+      await store.appendObservation({
+        threadId: `thread-${i}`,
+        sourceMessageRange: [`m-${i}`, `m-${i}`],
+        observationText: "due",
+        observedAt: t0,
+      });
+    }
+
+    const defaultPage = await store.listDecayCandidateAccounts({
+      triggerObservations: 50,
+      triggerIntervalS: 3600,
+      nowMs: t0.getTime(),
+    });
+    const first = await store.listDecayCandidateAccounts({
+      triggerObservations: 50,
+      triggerIntervalS: 3600,
+      nowMs: t0.getTime(),
+      limit: 2,
+    });
+
+    expect(defaultPage).toHaveLength(100);
+    expect(defaultPage.at(-1)).toBe("acct-099");
+    expect(first).toEqual(["acct-000", "acct-001"]);
   });
 });

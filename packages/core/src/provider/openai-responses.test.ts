@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { transformRequestOut as anthropicToIRRequest } from "../protocol/anthropic/request.js";
+import { createResponseWorkAdmission } from "../runtime/response-work-admission.js";
 import type { CodexModelInfo } from "./oauth/codex-model-info.js";
 import { UpstreamError } from "./openai.js";
 import {
@@ -624,7 +625,16 @@ describe("translateResponsesSSE", () => {
       ].join(""),
     );
     const events: Array<Record<string, unknown>> = [];
-    for await (const evt of readResponsesEvents(res)) events.push(evt);
+    for await (const evt of readResponsesEvents(
+      res,
+      0,
+      createResponseWorkAdmission({
+        capacityBytes: 1024 * 1024,
+        jsonAmplification: 1,
+        minChargeBytes: 1,
+      }),
+    ))
+      events.push(evt);
     expect(events).toHaveLength(2);
     expect(events[0]).toMatchObject({ type: "response.output_text.delta", delta: "Hel" });
     expect(events[1]).toMatchObject({
@@ -1214,6 +1224,60 @@ describe("aggregateResponsesStream", () => {
 // trailing-buffer flush, empty-body short-circuit, and the non-stall reader-error
 // re-throw arm directly (the translator + aggregator both consume it).
 describe("readResponsesEvents", () => {
+  it("parses a CRLF delimiter split across chunks without corrupting UTF-8", async () => {
+    const wire = 'data: {"type":"response.output_text.delta","delta":"你好👋"}\r\n\r\n';
+    const bytes = new TextEncoder().encode(wire);
+    const emojiCut =
+      new TextEncoder().encode('data: {"type":"response.output_text.delta","delta":"你好').length +
+      2;
+    const delimiterCut = bytes.length - 1;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.slice(0, emojiCut));
+        controller.enqueue(bytes.slice(emojiCut, delimiterCut));
+        controller.enqueue(bytes.slice(delimiterCut));
+        controller.close();
+      },
+    });
+    const events: Record<string, unknown>[] = [];
+    for await (const event of readResponsesEvents(
+      new Response(body),
+      0,
+      createResponseWorkAdmission({
+        capacityBytes: 1024 * 1024,
+        jsonAmplification: 1,
+        minChargeBytes: 1,
+      }),
+    ))
+      events.push(event);
+    expect(events).toEqual([{ type: "response.output_text.delta", delta: "你好👋" }]);
+  });
+
+  it("cancels an unterminated frame when the shared response-work budget is exhausted", async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${"x".repeat(64)}`));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const admission = createResponseWorkAdmission({
+      capacityBytes: 32,
+      jsonAmplification: 1,
+      minChargeBytes: 1,
+    });
+
+    await expect(async () => {
+      for await (const _ of readResponsesEvents(new Response(stream), 0, admission)) {
+        // drain
+      }
+    }).rejects.toMatchObject({ errorClass: "upstream_error" });
+    expect(cancelled).toBe(true);
+    expect(admission.reservedBytes).toBe(0);
+  });
+
   it("flushes a final event held in the buffer when the stream ends without a trailing blank line", async () => {
     // A last frame with NO terminating \n\n stays in `buffer` until EOF; the done-branch
     // decodes + parses it (lines 512-518).
@@ -1752,6 +1816,31 @@ describe("createCodexResponsesClient", () => {
 // included) reaches the client untouched; this ELIMINATES the responses→IR→responses
 // round trip (the reasoning/tool mangling source) instead of replacing it.
 describe("readResponsesSSERaw", () => {
+  it("cancels an unterminated frame when terminal detection exhausts response work", async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${"x".repeat(64)}`));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const admission = createResponseWorkAdmission({
+      capacityBytes: 32,
+      jsonAmplification: 1,
+      minChargeBytes: 1,
+    });
+
+    await expect(async () => {
+      for await (const _ of readResponsesSSERaw(new Response(stream), 0, admission)) {
+        // drain
+      }
+    }).rejects.toMatchObject({ errorClass: "upstream_error" });
+    expect(cancelled).toBe(true);
+    expect(admission.reservedBytes).toBe(0);
+  });
+
   it("yields the upstream SSE chunks VERBATIM (no openai chunk shape, no translation)", async () => {
     // Two distinct upstream writes; each must surface unchanged (raw passthrough, not
     // re-framed per-event, not converted to chat.completion.chunk).

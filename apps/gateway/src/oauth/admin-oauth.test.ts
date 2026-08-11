@@ -18,7 +18,7 @@ import {
   loadAccountSettings,
   setAccountSettings,
 } from "./account-settings.js";
-import { createOAuthAdmin } from "./admin-oauth.js";
+import { createOAuthAdmin, MAX_PENDING_OAUTH_SESSIONS } from "./admin-oauth.js";
 import type { CodexModelCatalog } from "./codex-model-catalog.js";
 import { createOAuthModelDiscoveryCache } from "./model-discovery-cache.js";
 
@@ -443,6 +443,88 @@ describe("createOAuthAdmin", () => {
     await expect(
       admin.completeManualPaste({ sessionId: "nope", redirectInput: "code=x", account: "default" }),
     ).rejects.toThrow(/session not found/);
+  });
+
+  it("bounds abandoned starts, prunes them on the next start, and retains live sessions", async () => {
+    let now = 0;
+    let sequence = 0;
+    const admin = createOAuthAdmin({
+      store: makeStore(),
+      encKey: KEY,
+      config: makeConfig(),
+      now: () => now,
+      genSessionId: () => `pending-${++sequence}`,
+    });
+    vi.stubGlobal(
+      "fetch",
+      routeFetch([
+        [/oauth\/token/, () => json({ access_token: "AT", refresh_token: "RT", expires_in: 3600 })],
+      ]),
+    );
+
+    const pending = await Promise.all(
+      Array.from({ length: MAX_PENDING_OAUTH_SESSIONS }, () =>
+        admin.startManualPaste({ providerId: "anthropic" }),
+      ),
+    );
+    await expect(admin.startManualPaste({ providerId: "anthropic" })).rejects.toThrow(
+      /too many pending OAuth sessions/,
+    );
+
+    const retained = pending[0];
+    if (!retained) throw new Error("missing retained session");
+    await expect(
+      admin.completeManualPaste({
+        sessionId: retained.sessionId,
+        redirectInput: `https://x/cb?code=C&state=${new URL(retained.authorizeUrl).searchParams.get("state")}`,
+        account: "retained",
+      }),
+    ).resolves.toBeUndefined();
+
+    now = 15 * 60 * 1000 - 1;
+    const live = await admin.startManualPaste({ providerId: "anthropic" });
+    now = 15 * 60 * 1000 + 1;
+    await expect(admin.startManualPaste({ providerId: "anthropic" })).resolves.toBeDefined();
+    await expect(
+      admin.completeManualPaste({
+        sessionId: live.sessionId,
+        redirectInput: `https://x/cb?code=C&state=${new URL(live.authorizeUrl).searchParams.get("state")}`,
+        account: "live",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("reserves device-code capacity before the upstream request and releases it on failure", async () => {
+    let release!: () => void;
+    const upstreamGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fetchImpl = vi.fn(async () => {
+      await upstreamGate;
+      throw new Error("upstream failed");
+    }) as unknown as typeof fetch;
+    const admin = createOAuthAdmin({
+      store: makeStore(),
+      encKey: KEY,
+      config: makeConfig(),
+      makeFetch: () => fetchImpl,
+    });
+
+    const starts = Array.from({ length: MAX_PENDING_OAUTH_SESSIONS + 1 }, () =>
+      admin.startDeviceCode({ providerId: "github-copilot" }),
+    );
+    const settled = Promise.allSettled(starts);
+    expect(fetchImpl).toHaveBeenCalledTimes(MAX_PENDING_OAUTH_SESSIONS);
+
+    release();
+    const results = await settled;
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(
+      MAX_PENDING_OAUTH_SESSIONS + 1,
+    );
+    await expect(admin.startDeviceCode({ providerId: "github-copilot" })).rejects.toThrow(
+      /upstream failed/,
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(MAX_PENDING_OAUTH_SESSIONS + 1);
   });
 
   it("listStatus AUTO-RENEWS an expired account on view (openclaw-style lazy refresh)", async () => {
@@ -1850,6 +1932,28 @@ describe("createOAuthAdmin > fetchAnthropicQuota", () => {
     expect(second).toEqual(first); // served from the warm cache
     expect(usageHits()).toBe(1);
   });
+
+  it("rejects a successful usage response whose declared size exceeds the operator limit", async () => {
+    let cancelled = false;
+    const { fetchQuota } = await connected(
+      () =>
+        new Response(
+          new ReadableStream({
+            pull(controller) {
+              controller.enqueue(new TextEncoder().encode("{}"));
+              controller.close();
+            },
+            cancel() {
+              cancelled = true;
+            },
+          }),
+          { headers: { "content-length": String(1024 * 1024 + 1) } },
+        ),
+    );
+
+    await expect(fetchQuota({ account: "default" })).resolves.toBeNull();
+    expect(cancelled).toBe(true);
+  });
 });
 
 describe("createOAuthAdmin > fetchXaiQuota", () => {
@@ -2432,6 +2536,28 @@ describe("createOAuthAdmin > codex reset credit", () => {
     expect(result).toMatchObject({ resetCreditDetails: null });
   });
 
+  it("rejects a streamed Codex quota response once it crosses the operator limit", async () => {
+    const payload = new TextEncoder().encode(
+      JSON.stringify({ padding: "x".repeat(1024 * 1024 + 1) }),
+    );
+    let offset = 0;
+    const { admin } = await connectCodex({
+      onUsage: () =>
+        new Response(
+          new ReadableStream({
+            pull(controller) {
+              if (offset >= payload.byteLength) return controller.close();
+              const end = Math.min(offset + 600 * 1024, payload.byteLength);
+              controller.enqueue(payload.slice(offset, end));
+              offset = end;
+            },
+          }),
+        ),
+    });
+
+    await expect(admin.fetchCodexQuota?.({ account: "default" })).resolves.toBeNull();
+  });
+
   it("consumeCodexResetCredit POSTs and audits a redeem id with the bearer + account-id headers", async () => {
     const { admin, consumeCalls, logs } = await connectCodex({
       onConsume: () => json({ code: "reset", credit: { id: "c_1" }, windows_reset: 2 }),
@@ -2544,6 +2670,34 @@ describe("createOAuthAdmin > codex reset credit", () => {
   it("rejects an unknown successful consume body", async () => {
     const { admin } = await connectCodex({
       onConsume: () => json({ code: "future_code", windows_reset: 0 }),
+    });
+
+    await expect(admin.consumeCodexResetCredit?.({ account: "default" })).rejects.toThrow(
+      /unrecognized response/,
+    );
+  });
+
+  it("rejects a streamed reset response once it crosses the operator limit", async () => {
+    const payload = new TextEncoder().encode(
+      JSON.stringify({
+        code: "reset",
+        windows_reset: 2,
+        padding: "x".repeat(1024 * 1024 + 1),
+      }),
+    );
+    let offset = 0;
+    const { admin } = await connectCodex({
+      onConsume: () =>
+        new Response(
+          new ReadableStream({
+            pull(controller) {
+              if (offset >= payload.byteLength) return controller.close();
+              const end = Math.min(offset + 600 * 1024, payload.byteLength);
+              controller.enqueue(payload.slice(offset, end));
+              offset = end;
+            },
+          }),
+        ),
     });
 
     await expect(admin.consumeCodexResetCredit?.({ account: "default" })).rejects.toThrow(

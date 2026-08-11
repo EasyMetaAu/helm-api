@@ -696,4 +696,38 @@ describe("runObserverJob — re-enqueue on a turn that arrives during the run", 
     expect(store.listObservations).not.toHaveBeenCalled();
     expect(jobUpdates).toEqual([{ jobId: JOB.jobId, status: "done" }]);
   });
+
+  it("advances a bounded page even when the thread counter is above the legacy guard", async () => {
+    const page = makeMessages(8);
+    const { store } = makeFakeStore(page);
+    store.getThreadMeta = vi.fn(async () => ({
+      lastServedModel: null,
+      messageCount: 51_116,
+      observationCount: 513,
+    }));
+    store.listObserverMessagesPage = vi.fn(async () => ({
+      messages: page,
+      expectedFrontier: null,
+      nextCursor: { createdAtMs: page[7]?.createdAt.getTime() ?? 0, id: "m8" },
+      hasMore: true,
+    }));
+    store.appendObservationAndAdvanceFrontier = vi.fn(async () => "obs-bounded");
+
+    const out = await runObserverJob(JOB, makeDeps(store));
+
+    expect(out.observationId).toBe("obs-bounded");
+    expect(store.listMessages).not.toHaveBeenCalled();
+    expect(store.listObservations).not.toHaveBeenCalled();
+    expect(store.appendObservationAndAdvanceFrontier).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountId: "acct-a",
+        expectedFrontier: null,
+        nextFrontier: expect.objectContaining({ id: "m8" }),
+      }),
+    );
+    expect(store.enqueueJob).toHaveBeenCalledWith({
+      type: "observer",
+      scope: { accountId: "acct-a", threadId: "thread-1" },
+    });
+  });
 });

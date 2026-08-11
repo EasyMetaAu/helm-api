@@ -1139,10 +1139,10 @@ describe("createSseCapture", () => {
 
     first.push("👋"); // 4 UTF-8 bytes; parts + joined value reserve 8 bytes.
     expect(first.limited()).toBe(false);
-    expect(first.payloadValue()).toBe("👋");
 
     blocked.push("x");
     expect(blocked.limited()).toBe(true);
+    expect(first.payloadValue()).toBe("👋");
     first.release();
 
     afterRelease.push("👋");
@@ -1150,6 +1150,25 @@ describe("createSseCapture", () => {
     expect(afterRelease.payloadValue()).toBe("👋");
     blocked.release();
     afterRelease.release();
+  });
+
+  it("drops the retained chunks after materializing a full payload", () => {
+    const first = createSseCapture(true, 0, 8, 12);
+    const blocked = createSseCapture(true, 0, 8, 12);
+
+    first.push("😀"); // 4 UTF-8 bytes; parts + joined value reserve 8 bytes.
+    blocked.push("😀");
+    expect(blocked.limited()).toBe(true);
+
+    expect(first.payloadValue()).toBe("😀");
+    // Materializing releases the parts reservation; only the returned string
+    // remains live, so another bounded capture can use the freed half.
+    const second = createSseCapture(true, 0, 8, 12);
+    second.push("😀");
+    expect(second.limited()).toBe(false);
+    first.release();
+    blocked.release();
+    second.release();
   });
 
   it("charges tail retention to the global capture budget and releases it", () => {

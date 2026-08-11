@@ -31,6 +31,7 @@ import {
   isNull,
   lt,
   ne,
+  or,
   type SQL,
   sql,
 } from "drizzle-orm";
@@ -42,8 +43,13 @@ import {
   type MemoryAdminStats,
   type MemoryAdminStatsScope,
   MemoryFactContentHashConflictError,
+  type MemoryFactReconcileResult,
   type MemoryJobStatus,
   type MemoryMessageArchiveRow,
+  type MemoryObserverCursor,
+  type MemoryObserverPage,
+  type MemoryReflectionJobCommitInput,
+  type MemoryReflectionJobCommitResult,
   type MemoryStore,
 } from "../ports.js";
 import type { PgDb } from "./migrate.js";
@@ -247,6 +253,7 @@ function factListClauses(input: {
 // pg bigint column has no native Date mode like sqlite's timestamp_ms). Memory is
 // a MIDDLEWARE: this store never reads or writes routing/lane state.
 export class PgMemoryStore implements MemoryStore {
+  readonly archiveObservationsEnqueuesReflectors = true as const;
   constructor(
     private readonly db: PgDb,
     private readonly genId: () => string = randomUUID,
@@ -324,11 +331,19 @@ export class PgMemoryStore implements MemoryStore {
 
   async appendMessage(input: MemoryMessageInput): Promise<string> {
     const id = this.genId();
-    const createdAt = this.now().getTime();
+    const nowMs = this.now().getTime();
     // Idempotent ingest (pg v20 mirror of sqlite v21): a re-sent
     // (thread_id, message_index, role, content) collapses to a no-op via the
     // UNIQUE index while repeated text at a new transcript position persists.
     await this.db.transaction(async (tx) => {
+      const thread = (
+        await tx
+          .select({ lastMessageAt: memoryThreads.lastMessageAt })
+          .from(memoryThreads)
+          .where(eq(memoryThreads.id, input.threadId))
+          .for("update")
+      )[0];
+      const createdAt = Math.max(nowMs, (thread?.lastMessageAt ?? nowMs - 1) + 1);
       const inserted = await tx
         .insert(memoryMessages)
         .values({
@@ -420,6 +435,23 @@ export class PgMemoryStore implements MemoryStore {
     // first row too. Cheaper than making every future editor re-prove the invariant.
     if (rows.length === 0) return ids;
     await this.db.transaction(async (tx) => {
+      const nextAt = new Map<string, number>();
+      for (const threadId of [...new Set(rows.map((row) => row.threadId))].sort()) {
+        const thread = (
+          await tx
+            .select({ lastMessageAt: memoryThreads.lastMessageAt })
+            .from(memoryThreads)
+            .where(eq(memoryThreads.id, threadId))
+            .for("update")
+        )[0];
+        nextAt.set(threadId, Math.max(base, (thread?.lastMessageAt ?? base - 1) + 1));
+      }
+      for (const row of rows) {
+        const createdAt = nextAt.get(row.threadId);
+        if (createdAt === undefined) continue;
+        row.createdAt = createdAt;
+        nextAt.set(row.threadId, createdAt + 1);
+      }
       const inserted = await tx
         .insert(memoryMessages)
         .values(rows)
@@ -467,12 +499,7 @@ export class PgMemoryStore implements MemoryStore {
           sql`EXISTS (SELECT 1 FROM memory_threads mt WHERE mt.id = ${memoryMessages.threadId} AND mt.owner_id = ${scope.accountId})`,
         ),
       )
-      .orderBy(
-        sql`CASE WHEN ${memoryMessages.messageIndex} IS NULL THEN 1 ELSE 0 END`,
-        asc(memoryMessages.messageIndex),
-        asc(memoryMessages.createdAt),
-        asc(memoryMessages.id),
-      );
+      .orderBy(asc(memoryMessages.createdAt), asc(memoryMessages.id));
     return rows.map((row) => ({
       id: row.id,
       threadId: row.threadId,
@@ -481,6 +508,105 @@ export class PgMemoryStore implements MemoryStore {
       tokenEstimate: row.tokenEstimate,
       createdAt: new Date(row.createdAt),
     }));
+  }
+
+  async listObserverMessagesPage(input: {
+    threadId: string;
+    accountId: string;
+    limit: number;
+    maxBytes: number;
+    maxTokens: number;
+  }): Promise<MemoryObserverPage> {
+    const thread = (
+      await this.db
+        .select({
+          frontierAt: memoryThreads.observerFrontierAt,
+          frontierId: memoryThreads.observerFrontierId,
+        })
+        .from(memoryThreads)
+        .where(
+          and(eq(memoryThreads.id, input.threadId), eq(memoryThreads.ownerId, input.accountId)),
+        )
+        .limit(1)
+    )[0];
+    if (thread === undefined) {
+      return { messages: [], expectedFrontier: null, nextCursor: null, hasMore: false };
+    }
+    const expectedFrontier =
+      thread.frontierAt === null || thread.frontierId === null
+        ? null
+        : { createdAtMs: thread.frontierAt, id: thread.frontierId };
+    const cursorWhere =
+      expectedFrontier === null
+        ? undefined
+        : or(
+            gt(memoryMessages.createdAt, expectedFrontier.createdAtMs),
+            and(
+              eq(memoryMessages.createdAt, expectedFrontier.createdAtMs),
+              gt(memoryMessages.id, expectedFrontier.id),
+            ),
+          );
+    const rowLimit = Math.max(1, Math.floor(input.limit));
+    const rows = await this.db
+      .select({
+        id: memoryMessages.id,
+        threadId: memoryMessages.threadId,
+        role: memoryMessages.role,
+        tokenEstimate: memoryMessages.tokenEstimate,
+        createdAt: memoryMessages.createdAt,
+        contentHash: memoryMessages.contentHash,
+        storedBytes: sql<number>`octet_length(${memoryMessages.content})`,
+      })
+      .from(memoryMessages)
+      .where(and(eq(memoryMessages.threadId, input.threadId), cursorWhere))
+      .orderBy(asc(memoryMessages.createdAt), asc(memoryMessages.id))
+      .limit(rowLimit + 1);
+    const selected: Array<(typeof rows)[number] & { oversized: boolean }> = [];
+    let tokens = 0;
+    let bytes = 0;
+    for (const row of rows.slice(0, rowLimit)) {
+      const rowBytes = Math.max(row.storedBytes, row.tokenEstimate * 4);
+      const oversized = row.tokenEstimate > input.maxTokens || rowBytes > input.maxBytes;
+      if (
+        selected.length > 0 &&
+        (tokens + row.tokenEstimate > input.maxTokens || bytes + rowBytes > input.maxBytes)
+      ) {
+        break;
+      }
+      selected.push({ ...row, oversized });
+      if (!oversized) {
+        tokens += row.tokenEstimate;
+        bytes += rowBytes;
+      }
+      if (oversized) break;
+    }
+    const safeIds = selected.filter((row) => !row.oversized).map((row) => row.id);
+    const contentRows =
+      safeIds.length === 0
+        ? []
+        : await this.db
+            .select({ id: memoryMessages.id, content: memoryMessages.content })
+            .from(memoryMessages)
+            .where(inArray(memoryMessages.id, safeIds));
+    const contentById = new Map(contentRows.map((row) => [row.id, row.content]));
+    const messages = selected.map((row) => ({
+      id: row.id,
+      threadId: row.threadId,
+      role: row.role as RawMessage["role"],
+      content: row.oversized
+        ? `[oversized ${row.role} message omitted; sha256=${row.contentHash ?? "unknown"}]`
+        : (contentById.get(row.id) ?? ""),
+      tokenEstimate: row.oversized ? 32 : row.tokenEstimate,
+      createdAt: new Date(row.createdAt),
+    }));
+    const last = selected.at(-1);
+    const nextCursor = last === undefined ? null : { createdAtMs: last.createdAt, id: last.id };
+    return {
+      messages,
+      expectedFrontier,
+      nextCursor,
+      hasMore: selected.length < rows.length,
+    };
   }
 
   async appendObservation(input: MemoryObservationInput): Promise<string> {
@@ -515,6 +641,62 @@ export class PgMemoryStore implements MemoryStore {
     return id;
   }
 
+  async appendObservationAndAdvanceFrontier(input: {
+    accountId: string;
+    observation: MemoryObservationInput;
+    expectedFrontier: MemoryObserverCursor | null;
+    nextFrontier: MemoryObserverCursor;
+  }): Promise<string | null> {
+    const id = this.genId();
+    const observedAt = input.observation.observedAt.getTime();
+    return this.db.transaction(async (tx) => {
+      const expected = input.expectedFrontier;
+      const updated = await tx
+        .update(memoryThreads)
+        .set({
+          observerFrontierAt: input.nextFrontier.createdAtMs,
+          observerFrontierId: input.nextFrontier.id,
+          observationCount: sql`${memoryThreads.observationCount} + 1`,
+          lastObservationAt: sql`CASE
+            WHEN ${memoryThreads.lastObservationAt} IS NULL OR ${memoryThreads.lastObservationAt} < ${observedAt}
+              THEN ${observedAt}
+            ELSE ${memoryThreads.lastObservationAt}
+          END`,
+        })
+        .where(
+          and(
+            eq(memoryThreads.id, input.observation.threadId),
+            eq(memoryThreads.ownerId, input.accountId),
+            expected === null
+              ? and(
+                  isNull(memoryThreads.observerFrontierAt),
+                  isNull(memoryThreads.observerFrontierId),
+                )
+              : and(
+                  eq(memoryThreads.observerFrontierAt, expected.createdAtMs),
+                  eq(memoryThreads.observerFrontierId, expected.id),
+                ),
+          ),
+        )
+        .returning();
+      if (updated.length === 0) return null;
+      await tx.insert(memoryObservations).values({
+        id,
+        threadId: input.observation.threadId,
+        sourceMessageRange: input.observation.sourceMessageRange,
+        observationText: input.observation.observationText,
+        observedAt,
+        referencedAt: null,
+        priority: input.observation.priority ?? null,
+        tags: input.observation.tags ?? null,
+        ...(input.observation.importance !== undefined
+          ? { importance: input.observation.importance }
+          : {}),
+      });
+      return id;
+    });
+  }
+
   async listObservations(scope: ReflectionScope): Promise<Observation[]> {
     const where = observationScopeWhere(scope);
     if (where === null) return [];
@@ -538,6 +720,144 @@ export class PgMemoryStore implements MemoryStore {
       ...(row.priority !== null ? { priority: row.priority } : {}),
       ...(row.tags !== null ? { tags: row.tags } : {}),
     }));
+  }
+
+  async listActiveObservationsBounded(
+    scope: ReflectionScope,
+    limit: number,
+  ): Promise<Observation[]> {
+    const where = observationScopeWhere(scope);
+    if (where === null) return [];
+    const rows = (
+      await this.db
+        .select()
+        .from(memoryObservations)
+        .where(
+          and(where, eq(memoryObservations.status, "active"), isNull(memoryObservations.expiredAt)),
+        )
+        .orderBy(desc(memoryObservations.observedAt), desc(memoryObservations.id))
+        .limit(Math.max(1, Math.floor(limit)))
+    ).reverse();
+    return rows.map((row) => ({
+      id: row.id,
+      threadId: row.threadId,
+      sourceMessageRange: row.sourceMessageRange,
+      observationText: row.observationText,
+      observedAt: new Date(row.observedAt),
+      referenceCount: row.referenceCount,
+      importance: row.importance,
+      status: row.status as Observation["status"],
+      referencedAt: row.referencedAt !== null ? new Date(row.referencedAt) : null,
+      archivedAt: row.archivedAt !== null ? new Date(row.archivedAt) : null,
+      expiredAt: row.expiredAt !== null ? new Date(row.expiredAt) : null,
+      ...(row.priority !== null ? { priority: row.priority } : {}),
+      ...(row.tags !== null ? { tags: row.tags } : {}),
+    }));
+  }
+
+  async listInjectionObservationsPage(input: {
+    accountId: string;
+    threadId: string;
+    limit: number;
+    offset: number;
+    order: "newest" | "score";
+    score?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+    };
+  }): Promise<Observation[]> {
+    const where = observationScopeWhere({ accountId: input.accountId, threadId: input.threadId });
+    if (where === null) return [];
+    const score = input.score;
+    const scoreOrder =
+      score === undefined
+        ? undefined
+        : sql`power(0.5, GREATEST(0, (${score.nowMs} - COALESCE(${memoryObservations.referencedAt}, ${memoryObservations.observedAt})) / 1000.0) / ${score.half_life_s}) * (LEAST(GREATEST(${memoryObservations.importance}, ${score.importance_floor}), ${score.importance_ceil}) + ${score.access_weight} * ln(1 + ${memoryObservations.referenceCount}))`;
+    const rows = await this.db
+      .select()
+      .from(memoryObservations)
+      .where(
+        and(
+          where,
+          eq(memoryObservations.status, "active"),
+          isNull(memoryObservations.expiredAt),
+        ) as SQL,
+      )
+      .orderBy(
+        input.order === "score" && scoreOrder !== undefined
+          ? desc(scoreOrder)
+          : desc(memoryObservations.observedAt),
+        desc(memoryObservations.observedAt),
+        desc(memoryObservations.id),
+      )
+      .limit(input.limit)
+      .offset(input.offset);
+    return rows.map((row) => ({
+      id: row.id,
+      threadId: row.threadId,
+      sourceMessageRange: row.sourceMessageRange,
+      observationText: row.observationText,
+      observedAt: new Date(row.observedAt),
+      referenceCount: row.referenceCount,
+      importance: row.importance,
+      status: row.status as Observation["status"],
+      referencedAt: row.referencedAt === null ? null : new Date(row.referencedAt),
+      archivedAt: row.archivedAt === null ? null : new Date(row.archivedAt),
+      expiredAt: row.expiredAt === null ? null : new Date(row.expiredAt),
+      ...(row.priority !== null ? { priority: row.priority } : {}),
+      ...(row.tags !== null ? { tags: row.tags } : {}),
+    }));
+  }
+
+  async findRedundantInjectionObservations(input: {
+    accountId: string;
+    threadId: string;
+    observations: Array<{ id: string; sourceMessageRange: [string, string] }>;
+    windowContentHashCounts: ReadonlyMap<string, number>;
+  }): Promise<ReadonlySet<string>> {
+    if (input.observations.length === 0 || input.windowContentHashCounts.size === 0)
+      return new Set();
+    const requested = JSON.stringify(
+      input.observations.map(({ id, sourceMessageRange: [startId, endId] }) => ({
+        id,
+        startId,
+        endId,
+      })),
+    );
+    const live = JSON.stringify(Object.fromEntries(input.windowContentHashCounts));
+    const rows = pgRows<{ id: string }>(
+      await this.db.execute(sql`
+        WITH requested AS (
+          SELECT id, "startId" AS start_id, "endId" AS end_id
+            FROM jsonb_to_recordset(${requested}::jsonb) AS r(id text, "startId" text, "endId" text)
+        ), live AS (SELECT key, value::integer AS n FROM jsonb_each_text(${live}::jsonb)),
+        ordered AS (
+          SELECT id, content_hash, ROW_NUMBER() OVER (ORDER BY CASE WHEN message_index IS NULL THEN 1 ELSE 0 END, message_index, created_at, id) AS n
+            FROM memory_messages WHERE thread_id = ${input.threadId}
+        ), endpoints AS (
+          SELECT r.id, r.start_id, r.end_id, MIN(o.n) AS first_n, MAX(o.n) AS last_n,
+                 COUNT(DISTINCT o.id) AS found
+            FROM requested r LEFT JOIN ordered o ON o.id = r.start_id OR o.id = r.end_id
+           GROUP BY r.id, r.start_id, r.end_id
+        ), required AS (
+          SELECT e.id, o.content_hash, COUNT(*) AS n FROM endpoints e JOIN ordered o
+            ON o.n BETWEEN e.first_n AND e.last_n
+           WHERE e.found = CASE WHEN e.start_id = e.end_id THEN 1 ELSE 2 END
+           GROUP BY e.id, o.content_hash
+        )
+        SELECT e.id FROM endpoints e
+         WHERE e.found = CASE WHEN e.start_id = e.end_id THEN 1 ELSE 2 END
+           AND EXISTS (SELECT 1 FROM memory_threads WHERE id = ${input.threadId} AND owner_id = ${input.accountId})
+           AND NOT EXISTS (
+             SELECT 1 FROM required r LEFT JOIN live l ON l.key = r.content_hash
+              WHERE r.id = e.id AND (r.content_hash IS NULL OR l.n IS NULL OR l.n < r.n)
+           )
+      `),
+    );
+    return new Set(rows.map((row) => row.id));
   }
 
   async getReflection(scope: ReflectionScope): Promise<Reflection | null> {
@@ -584,7 +904,7 @@ export class PgMemoryStore implements MemoryStore {
 
   // docs/12 (Codex review fix; pg mirror) — distinct ACTIVE-reflection scopes for the
   // account, so the decay job can enqueue one reflector rebuild per scope.
-  async listActiveReflectionScopes(accountId: string): Promise<ReflectionScope[]> {
+  async listActiveReflectionScopes(accountId: string, limit = 512): Promise<ReflectionScope[]> {
     const rows = await this.db
       .selectDistinct({
         projectId: memoryReflections.projectId,
@@ -592,7 +912,13 @@ export class PgMemoryStore implements MemoryStore {
         threadId: memoryReflections.threadId,
       })
       .from(memoryReflections)
-      .where(and(eq(memoryReflections.ownerId, accountId), eq(memoryReflections.status, "active")));
+      .where(and(eq(memoryReflections.ownerId, accountId), eq(memoryReflections.status, "active")))
+      .orderBy(
+        asc(memoryReflections.projectId),
+        asc(memoryReflections.resourceId),
+        asc(memoryReflections.threadId),
+      )
+      .limit(Math.max(1, Math.floor(limit)));
     return rows.map((r) => ({
       accountId,
       ...(r.projectId !== null ? { projectId: r.projectId } : {}),
@@ -620,6 +946,70 @@ export class PgMemoryStore implements MemoryStore {
       .orderBy(desc(memoryReflections.version))
       .limit(1);
     return rows[0]?.version ?? 0;
+  }
+
+  async commitReflectionJob(
+    jobId: string,
+    input: MemoryReflectionJobCommitInput,
+  ): Promise<MemoryReflectionJobCommitResult | null> {
+    return this.db.transaction(async (tx) => {
+      const scopeId = encodeScopeId(input.target);
+      const claimed = pgRows<{ id: string }>(
+        await tx.execute(sql`
+          UPDATE memory_jobs
+             SET status = 'done', error = NULL, updated_at = ${input.now.getTime()}
+           WHERE id = ${jobId}
+             AND type = 'reflector'
+             AND scope_id = ${scopeId}
+             AND status = 'running'
+          RETURNING id
+        `),
+      );
+      if (claimed[0] === undefined) return null;
+
+      const facts = await this.reconcileFacts(
+        { execute: (query) => tx.execute(query) },
+        {
+          accountId: input.target.accountId,
+          scope: {
+            ...(input.target.projectId !== undefined ? { projectId: input.target.projectId } : {}),
+            ...(input.target.resourceId !== undefined
+              ? { resourceId: input.target.resourceId }
+              : {}),
+            ...(input.target.threadId !== undefined ? { threadId: input.target.threadId } : {}),
+          },
+          facts: input.facts,
+          now: input.now,
+        },
+      );
+
+      let reflectionId: string | null = null;
+      if (input.reflection.action === "archive") {
+        await tx.execute(sql`
+          UPDATE memory_reflections
+             SET status = 'archived'
+           WHERE owner_id = ${input.target.accountId}
+             AND project_id IS NOT DISTINCT FROM ${input.target.projectId ?? null}
+             AND resource_id IS NOT DISTINCT FROM ${input.target.resourceId ?? null}
+             AND thread_id IS NOT DISTINCT FROM ${input.target.threadId ?? null}
+             AND status = 'active'
+        `);
+      } else if (input.reflection.action === "upsert") {
+        reflectionId = this.genId();
+        await tx.insert(memoryReflections).values({
+          id: reflectionId,
+          ownerId: input.target.accountId,
+          projectId: input.target.projectId ?? null,
+          resourceId: input.target.resourceId ?? null,
+          threadId: input.target.threadId ?? null,
+          reflectionText: input.reflection.reflectionText,
+          version: input.reflection.version,
+          tokenEstimate: input.reflection.tokenEstimate,
+          updatedAt: input.reflection.updatedAt.getTime(),
+        });
+      }
+      return { reflectionId, facts };
+    });
   }
 
   async updateJobStatus(jobId: string, status: MemoryJobStatus, error?: string): Promise<void> {
@@ -988,15 +1378,65 @@ export class PgMemoryStore implements MemoryStore {
       input.ids.map((id) => sql`${id}`),
       sql`, `,
     );
-    await this.db.execute(sql`
-      UPDATE memory_observations
-         SET status = 'archived', archived_at = ${nowMs}
-       WHERE id IN (${ids})
-         AND status = 'active'
-         AND thread_id IN (
-           SELECT id FROM memory_threads WHERE owner_id = ${input.accountId}
-         )
-    `);
+    await this.db.transaction(async (tx) => {
+      const rows = pgRows<{
+        project_id: string | null;
+        resource_id: string | null;
+        thread_id: string;
+      }>(
+        await tx.execute(sql`
+          SELECT DISTINCT t.project_id, t.resource_id, t.id AS thread_id
+            FROM memory_observations o
+            JOIN memory_threads t ON t.id = o.thread_id
+           WHERE o.id IN (${ids})
+             AND o.status = 'active' AND t.owner_id = ${input.accountId}
+        `),
+      );
+      await tx.execute(sql`
+        UPDATE memory_observations
+           SET status = 'archived', archived_at = ${nowMs}
+         WHERE id IN (${ids})
+           AND status = 'active'
+           AND thread_id IN (
+             SELECT id FROM memory_threads WHERE owner_id = ${input.accountId}
+           )
+      `);
+      const scopes = new Map<string, ReflectionScope>();
+      for (const row of rows) {
+        const targets: ReflectionScope[] = [];
+        if (row.project_id !== null) {
+          targets.push({ accountId: input.accountId, projectId: row.project_id });
+        }
+        if (row.resource_id !== null) {
+          targets.push({ accountId: input.accountId, resourceId: row.resource_id });
+        }
+        if (targets.length === 0) {
+          targets.push({ accountId: input.accountId, threadId: row.thread_id });
+        }
+        for (const target of targets) scopes.set(encodeScopeId(target), target);
+      }
+      for (const [scopeId, target] of scopes) {
+        await tx.execute(sql`
+          UPDATE memory_reflections
+             SET status = 'archived'
+           WHERE owner_id = ${target.accountId}
+             AND project_id IS NOT DISTINCT FROM ${target.projectId ?? null}
+             AND resource_id IS NOT DISTINCT FROM ${target.resourceId ?? null}
+             AND thread_id IS NOT DISTINCT FROM ${target.threadId ?? null}
+             AND status = 'active'
+        `);
+        await tx.execute(sql`
+          UPDATE memory_jobs
+             SET status = 'failed', error = 'superseded by observation archive', updated_at = ${nowMs}
+           WHERE type = 'reflector' AND scope_id = ${scopeId} AND status = 'running'
+        `);
+        await tx.execute(sql`
+          INSERT INTO memory_jobs (id, type, scope_id, status, error, created_at, updated_at)
+          VALUES (${this.genId()}, 'reflector', ${scopeId}, 'pending', NULL, ${nowMs}, ${nowMs})
+          ON CONFLICT (type, scope_id) WHERE status IN ('pending', 'running') DO NOTHING
+        `);
+      }
+    });
   }
 
   // docs/12 P5 trigger — pg mirror of the sqlite buffer-flush gate (same contract). For
@@ -1012,24 +1452,36 @@ export class PgMemoryStore implements MemoryStore {
     triggerObservations: number;
     triggerIntervalS: number;
     nowMs: number;
+    limit?: number;
   }): Promise<string[]> {
     const intervalCutoff = input.nowMs - input.triggerIntervalS * 1000;
+    const limit = input.limit === undefined ? 100 : Math.max(0, input.limit);
+    if (limit === 0) return [];
     const result = (await this.db.execute(sql`
-      SELECT mt.owner_id AS owner_id,
-             (SELECT MAX(j.created_at) FROM memory_jobs j
-               WHERE j.type = 'decay'
-                 AND j.scope_id::jsonb ->> 'accountId' = mt.owner_id) AS last_sweep,
-             COUNT(o.id) AS active_total,
-             SUM(CASE WHEN o.observed_at > COALESCE(
-               (SELECT MAX(j2.created_at) FROM memory_jobs j2
-                 WHERE j2.type = 'decay'
-                   AND j2.scope_id::jsonb ->> 'accountId' = mt.owner_id), 0)
-               THEN 1 ELSE 0 END) AS new_since_sweep
-        FROM memory_observations o
-        JOIN memory_threads mt ON mt.id = o.thread_id
-       WHERE o.status = 'active'
-         AND mt.owner_id IS NOT NULL
-       GROUP BY mt.owner_id
+      WITH decay_sweeps AS (
+        SELECT scope_id::jsonb ->> 'accountId' AS owner_id, MAX(created_at) AS last_sweep
+          FROM memory_jobs
+         WHERE type = 'decay'
+         GROUP BY scope_id::jsonb ->> 'accountId'
+      ), candidates AS (
+        SELECT mt.owner_id AS owner_id, ds.last_sweep AS last_sweep,
+               COUNT(o.id) AS active_total,
+               SUM(CASE WHEN o.observed_at > COALESCE(ds.last_sweep, 0)
+                   THEN 1 ELSE 0 END) AS new_since_sweep
+          FROM memory_observations o
+          JOIN memory_threads mt ON mt.id = o.thread_id
+          LEFT JOIN decay_sweeps ds ON ds.owner_id = mt.owner_id
+         WHERE o.status = 'active' AND mt.owner_id IS NOT NULL
+         GROUP BY mt.owner_id, ds.last_sweep
+        HAVING COUNT(o.id) > 0
+           AND (
+             SUM(CASE WHEN o.observed_at > COALESCE(ds.last_sweep, 0) THEN 1 ELSE 0 END) >= ${input.triggerObservations}
+             OR ds.last_sweep IS NULL OR ds.last_sweep <= ${intervalCutoff}
+           )
+      )
+      SELECT owner_id FROM candidates
+       ORDER BY owner_id
+       LIMIT ${limit}
     `)) as unknown;
     const rows = (
       Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? [])
@@ -1039,16 +1491,7 @@ export class PgMemoryStore implements MemoryStore {
       active_total: number | string;
       new_since_sweep: number | string | null;
     }>;
-    return rows
-      .filter((row) => {
-        const activeTotal = Number(row.active_total);
-        const newSince = Number(row.new_since_sweep ?? 0);
-        const lastSweep = row.last_sweep === null ? null : Number(row.last_sweep);
-        const countGate = newSince >= input.triggerObservations;
-        const timeGate = lastSweep === null || lastSweep <= intervalCutoff;
-        return activeTotal > 0 && (countGate || timeGate);
-      })
-      .map((row) => row.owner_id);
+    return rows.map((row) => row.owner_id);
   }
 
   // docs/12 P6 — fact ingest with deterministic dedup + same-subject supersede
@@ -1068,9 +1511,7 @@ export class PgMemoryStore implements MemoryStore {
     scope: { projectId?: string; resourceId?: string; threadId?: string };
     facts: MemoryFactInput[];
     now: Date;
-  }): Promise<{ insertedIds: string[]; supersededIds: string[]; resurrectedIds: string[] }> {
-    if (input.facts.length === 0) return { insertedIds: [], supersededIds: [], resurrectedIds: [] };
-    const nowMs = input.now.getTime();
+  }): Promise<MemoryFactReconcileResult> {
     // docs/12 P6 (Codex review fix #3) — insert + supersede must be ATOMIC. The pg
     // adapter previously ran them as two un-wrapped statements: a crash AFTER the
     // insert but BEFORE the supersede left the new fact persisted while the old one
@@ -1080,20 +1521,37 @@ export class PgMemoryStore implements MemoryStore {
     // partial work back, and the content_hash unique index makes the retry's
     // re-insert idempotent so supersede runs again. Mirrors the sqlite adapter, which
     // already wraps the batch in `$sqlite.transaction`.
-    return await this.db.transaction(async (tx) => {
-      const insertedIds: string[] = [];
-      const supersededIds: string[] = [];
-      const resurrectedIds: string[] = [];
-      for (const f of input.facts) {
-        // The top-level accountId is the authoritative tenant guard; persist it as
-        // owner_id so a mismatched input can never write under another tenant.
-        const ownerId = input.accountId;
-        const projectId = f.projectId ?? null;
-        const resourceId = f.resourceId ?? null;
-        const threadId = f.threadId ?? null;
-        const id = this.genId();
-        const validFromMs = f.validFrom.getTime();
-        const inserted = (await tx.execute(sql`
+    return this.db.transaction((tx) =>
+      this.reconcileFacts({ execute: (query) => tx.execute(query) }, input),
+    );
+  }
+
+  private async reconcileFacts(
+    tx: { execute: (query: SQL) => Promise<unknown> },
+    input: {
+      accountId: string;
+      scope: { projectId?: string; resourceId?: string; threadId?: string };
+      facts: MemoryFactInput[];
+      now: Date;
+    },
+  ): Promise<MemoryFactReconcileResult> {
+    if (input.facts.length === 0) {
+      return { insertedIds: [], supersededIds: [], resurrectedIds: [] };
+    }
+    const nowMs = input.now.getTime();
+    const insertedIds: string[] = [];
+    const supersededIds: string[] = [];
+    const resurrectedIds: string[] = [];
+    for (const f of input.facts) {
+      // The top-level accountId is the authoritative tenant guard; persist it as
+      // owner_id so a mismatched input can never write under another tenant.
+      const ownerId = input.accountId;
+      const projectId = f.projectId ?? null;
+      const resourceId = f.resourceId ?? null;
+      const threadId = f.threadId ?? null;
+      const id = this.genId();
+      const validFromMs = f.validFrom.getTime();
+      const inserted = (await tx.execute(sql`
         INSERT INTO memory_facts
           (id, owner_id, project_id, resource_id, thread_id, subject_key, fact_text,
            content_hash, importance, reference_count, referenced_at, valid_from,
@@ -1110,40 +1568,40 @@ export class PgMemoryStore implements MemoryStore {
         ON CONFLICT (owner_id, content_hash) DO NOTHING
         RETURNING id
       `)) as { rows?: Array<{ id: string }> } | Array<{ id: string }>;
-        const insertedRows = Array.isArray(inserted) ? inserted : (inserted.rows ?? []);
-        if (insertedRows[0] === undefined) {
-          // Dedup hit: the (owner_id, content_hash) row already exists. Resurrect it
-          // when NOT live (pruned by a manual delete, or archived) so a re-observed
-          // fact returns rather than being permanently suppressed by the idempotency
-          // index. A live duplicate stays a no-op. Mirrors the sqlite adapter.
-          const existingRes = (await tx.execute(sql`
+      const insertedRows = Array.isArray(inserted) ? inserted : (inserted.rows ?? []);
+      if (insertedRows[0] === undefined) {
+        // Dedup hit: the (owner_id, content_hash) row already exists. Resurrect it
+        // when NOT live (pruned by a manual delete, or archived) so a re-observed
+        // fact returns rather than being permanently suppressed by the idempotency
+        // index. A live duplicate stays a no-op. Mirrors the sqlite adapter.
+        const existingRes = (await tx.execute(sql`
           SELECT id, status FROM memory_facts
            WHERE owner_id = ${ownerId} AND content_hash = ${f.contentHash}
            LIMIT 1
         `)) as
-            | { rows?: Array<{ id: string; status: string }> }
-            | Array<{ id: string; status: string }>;
-          const existingRows = Array.isArray(existingRes) ? existingRes : (existingRes.rows ?? []);
-          const existing = existingRows[0];
-          if (
-            existing !== undefined &&
-            (existing.status === "pruned" || existing.status === "archived")
-          ) {
-            // Re-scope on resurrect (Codex review fix; sqlite mirror): the
-            // (owner_id, content_hash) index is ACCOUNT-GLOBAL, so a fact re-stated under
-            // a different project/resource/thread dedup-hits the old row. Reactivating
-            // without re-scoping would revive it at the STALE scope and the scoped inject
-            // read would never surface it. The re-ingest's scope is authoritative, so
-            // overwrite the scope columns too (same-scope re-statement = no-op rewrite).
-            await tx.execute(sql`
+          | { rows?: Array<{ id: string; status: string }> }
+          | Array<{ id: string; status: string }>;
+        const existingRows = Array.isArray(existingRes) ? existingRes : (existingRes.rows ?? []);
+        const existing = existingRows[0];
+        if (
+          existing !== undefined &&
+          (existing.status === "pruned" || existing.status === "archived")
+        ) {
+          // Re-scope on resurrect (Codex review fix; sqlite mirror): the
+          // (owner_id, content_hash) index is ACCOUNT-GLOBAL, so a fact re-stated under
+          // a different project/resource/thread dedup-hits the old row. Reactivating
+          // without re-scoping would revive it at the STALE scope and the scoped inject
+          // read would never surface it. The re-ingest's scope is authoritative, so
+          // overwrite the scope columns too (same-scope re-statement = no-op rewrite).
+          await tx.execute(sql`
             UPDATE memory_facts
                SET status = 'active', expired_at = NULL, invalid_at = NULL,
                    valid_from = ${validFromMs}, updated_at = ${nowMs},
                    project_id = ${projectId}, resource_id = ${resourceId}, thread_id = ${threadId}
              WHERE id = ${existing.id}
           `);
-            resurrectedIds.push(existing.id);
-            const reSuperseded = (await tx.execute(sql`
+          resurrectedIds.push(existing.id);
+          const reSuperseded = (await tx.execute(sql`
             UPDATE memory_facts
                SET expired_at = ${nowMs}, invalid_at = ${validFromMs}, updated_at = ${nowMs}
              WHERE owner_id = ${ownerId}
@@ -1157,22 +1615,22 @@ export class PgMemoryStore implements MemoryStore {
                AND (${threadId}::text IS NULL OR thread_id = ${threadId})
             RETURNING id
           `)) as { rows?: Array<{ id: string }> } | Array<{ id: string }>;
-            const reSupersededRows = Array.isArray(reSuperseded)
-              ? reSuperseded
-              : (reSuperseded.rows ?? []);
-            for (const s of reSupersededRows) supersededIds.push(s.id);
-          }
-          continue; // deduped (or resurrected above) → skip the fresh-insert supersede
+          const reSupersededRows = Array.isArray(reSuperseded)
+            ? reSuperseded
+            : (reSuperseded.rows ?? []);
+          for (const s of reSupersededRows) supersededIds.push(s.id);
         }
-        insertedIds.push(id);
+        continue; // deduped (or resurrected above) → skip the fresh-insert supersede
+      }
+      insertedIds.push(id);
 
-        // Supersede narrows by the NEW fact's NON-NULL scope columns ONLY — the SAME
-        // semantics as the listActiveFacts read path (Codex review fix; pg mirror of
-        // the sqlite adapter). A null scope column on the new fact imposes NO
-        // constraint: `(${"value"}::text IS NULL OR col = value)` short-circuits to
-        // a no-op clause when the bound value is null. RETURNING id surfaces the
-        // superseded rows (docs/13 — the MCP add tool echoes them).
-        const superseded = (await tx.execute(sql`
+      // Supersede narrows by the NEW fact's NON-NULL scope columns ONLY — the SAME
+      // semantics as the listActiveFacts read path (Codex review fix; pg mirror of
+      // the sqlite adapter). A null scope column on the new fact imposes NO
+      // constraint: `(${"value"}::text IS NULL OR col = value)` short-circuits to
+      // a no-op clause when the bound value is null. RETURNING id surfaces the
+      // superseded rows (docs/13 — the MCP add tool echoes them).
+      const superseded = (await tx.execute(sql`
         UPDATE memory_facts
            SET expired_at = ${nowMs}, invalid_at = ${validFromMs}, updated_at = ${nowMs}
          WHERE owner_id = ${ownerId}
@@ -1186,11 +1644,10 @@ export class PgMemoryStore implements MemoryStore {
            AND (${threadId}::text IS NULL OR thread_id = ${threadId})
         RETURNING id
       `)) as { rows?: Array<{ id: string }> } | Array<{ id: string }>;
-        const supersededRows = Array.isArray(superseded) ? superseded : (superseded.rows ?? []);
-        for (const s of supersededRows) supersededIds.push(s.id);
-      }
-      return { insertedIds, supersededIds, resurrectedIds };
-    });
+      const supersededRows = Array.isArray(superseded) ? superseded : (superseded.rows ?? []);
+      for (const s of supersededRows) supersededIds.push(s.id);
+    }
+    return { insertedIds, supersededIds, resurrectedIds };
   }
 
   // docs/12 P6 — fact READ half (pg mirror). The account's still-alive facts:
@@ -1216,6 +1673,46 @@ export class PgMemoryStore implements MemoryStore {
       .from(memoryFacts)
       .where(and(...clauses) as SQL)
       .orderBy(asc(memoryFacts.createdAt), asc(memoryFacts.id));
+    return rows.map(pgRowToFact);
+  }
+
+  async listInjectionFacts(input: {
+    accountId: string;
+    projectId?: string;
+    resourceId?: string;
+    threadId?: string;
+    limit: number;
+    score?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+    };
+  }): Promise<Fact[]> {
+    const clauses: SQL[] = [
+      eq(memoryFacts.ownerId, input.accountId),
+      eq(memoryFacts.status, "active"),
+      isNull(memoryFacts.expiredAt),
+    ];
+    if (input.projectId !== undefined) clauses.push(eq(memoryFacts.projectId, input.projectId));
+    if (input.resourceId !== undefined) clauses.push(eq(memoryFacts.resourceId, input.resourceId));
+    if (input.threadId !== undefined) clauses.push(eq(memoryFacts.threadId, input.threadId));
+    const score = input.score;
+    const scoreOrder =
+      score === undefined
+        ? undefined
+        : sql`power(0.5, GREATEST(0, (${score.nowMs} - COALESCE(${memoryFacts.referencedAt}, ${memoryFacts.createdAt})) / 1000.0) / ${score.half_life_s}) * (LEAST(GREATEST(${memoryFacts.importance}, ${score.importance_floor}), ${score.importance_ceil}) + ${score.access_weight} * ln(1 + ${memoryFacts.referenceCount}))`;
+    const rows = await this.db
+      .select()
+      .from(memoryFacts)
+      .where(and(...clauses) as SQL)
+      .orderBy(
+        scoreOrder === undefined ? desc(memoryFacts.validFrom) : desc(scoreOrder),
+        desc(memoryFacts.validFrom),
+        desc(memoryFacts.id),
+      )
+      .limit(input.limit);
     return rows.map(pgRowToFact);
   }
 
@@ -1671,27 +2168,46 @@ export class PgMemoryStore implements MemoryStore {
     // docs/12 (P7, Codex review fix) — TOMBSTONE, not delete: free the text but
     // keep the row + sourceMessageRange so raw coverage survives (pg mirror of the
     // sqlite adapter; see that comment for why a hard DELETE resurrects raw turns).
-    const obs = (await this.db.execute(sql`
-      UPDATE memory_observations
-         SET status = 'pruned', observation_text = '[pruned]', tags = NULL
-       WHERE status = 'archived'
-         AND archived_at IS NOT NULL
-         AND archived_at < ${input.archivedObservationsBeforeMs}
-      RETURNING id
-    `)) as unknown;
-    const obsRows = (
-      Array.isArray(obs) ? obs : ((obs as { rows?: unknown[] }).rows ?? [])
-    ) as unknown[];
-    const facts = (await this.db.execute(sql`
-      DELETE FROM memory_facts
-       WHERE expired_at IS NOT NULL
-         AND expired_at < ${input.expiredFactsBeforeMs}
-      RETURNING id
-    `)) as unknown;
-    const factRows = (
-      Array.isArray(facts) ? facts : ((facts as { rows?: unknown[] }).rows ?? [])
-    ) as unknown[];
-    return { observationsDeleted: obsRows.length, factsDeleted: factRows.length };
+    let observationsDeleted = 0;
+    for (;;) {
+      const row = pgRows<{ n: number | string }>(
+        await this.db.execute(sql`
+          WITH doomed AS (
+            SELECT id FROM memory_observations
+             WHERE status = 'archived' AND archived_at IS NOT NULL
+               AND archived_at < ${input.archivedObservationsBeforeMs}
+             ORDER BY archived_at, id LIMIT 1000
+          ), changed AS (
+            UPDATE memory_observations o
+               SET status = 'pruned', observation_text = '[pruned]', tags = NULL
+              FROM doomed d WHERE o.id = d.id RETURNING 1
+          )
+          SELECT COUNT(*)::integer AS n FROM changed
+        `),
+      )[0];
+      const n = numberOf(row?.n);
+      observationsDeleted += n;
+      if (n < 1000) break;
+    }
+    let factsDeleted = 0;
+    for (;;) {
+      const row = pgRows<{ n: number | string }>(
+        await this.db.execute(sql`
+          WITH doomed AS (
+            SELECT id FROM memory_facts
+             WHERE expired_at IS NOT NULL AND expired_at < ${input.expiredFactsBeforeMs}
+             ORDER BY expired_at, id LIMIT 1000
+          ), deleted AS (
+            DELETE FROM memory_facts f USING doomed d WHERE f.id = d.id RETURNING 1
+          )
+          SELECT COUNT(*)::integer AS n FROM deleted
+        `),
+      )[0];
+      const n = numberOf(row?.n);
+      factsDeleted += n;
+      if (n < 1000) break;
+    }
+    return { observationsDeleted, factsDeleted };
   }
 
   // ——— Cleanup/archival (raw transcript + job log) — pg mirror; created_at/
@@ -1700,7 +2216,20 @@ export class PgMemoryStore implements MemoryStore {
     const rows = await this.db
       .select({ value: count() })
       .from(memoryMessages)
-      .where(lt(memoryMessages.createdAt, olderThanMs));
+      .where(
+        and(
+          lt(memoryMessages.createdAt, olderThanMs),
+          sql`EXISTS (
+            SELECT 1 FROM memory_threads mt
+             WHERE mt.id = ${memoryMessages.threadId}
+               AND mt.observer_frontier_at IS NOT NULL
+               AND (
+                 ${memoryMessages.createdAt} < mt.observer_frontier_at OR
+                 (${memoryMessages.createdAt} = mt.observer_frontier_at AND ${memoryMessages.id} <= mt.observer_frontier_id)
+               )
+          )`,
+        ),
+      );
     return rows[0]?.value ?? 0;
   }
 
@@ -1709,7 +2238,18 @@ export class PgMemoryStore implements MemoryStore {
     limit: number,
     afterId?: string,
   ): Promise<MemoryMessageArchiveRow[]> {
-    const conds: SQL[] = [lt(memoryMessages.createdAt, olderThanMs)];
+    const conds: SQL[] = [
+      lt(memoryMessages.createdAt, olderThanMs),
+      sql`EXISTS (
+        SELECT 1 FROM memory_threads mt
+         WHERE mt.id = ${memoryMessages.threadId}
+           AND mt.observer_frontier_at IS NOT NULL
+           AND (
+             ${memoryMessages.createdAt} < mt.observer_frontier_at OR
+             (${memoryMessages.createdAt} = mt.observer_frontier_at AND ${memoryMessages.id} <= mt.observer_frontier_id)
+           )
+      )`,
+    ];
     if (afterId !== undefined) conds.push(gt(memoryMessages.id, afterId));
     const rows = await this.db
       .select()
@@ -1738,61 +2278,105 @@ export class PgMemoryStore implements MemoryStore {
           thread_id TEXT PRIMARY KEY
         ) ON COMMIT DELETE ROWS
       `);
-      await tx.execute(sql`DELETE FROM _helm_pruned_message_threads`);
-      await tx.execute(sql`
-        INSERT INTO _helm_pruned_message_threads (thread_id)
-        SELECT DISTINCT thread_id FROM memory_messages WHERE created_at < ${olderThanMs}
-        ON CONFLICT (thread_id) DO NOTHING
-      `);
-      // Serialize summary maintenance with appendMessage/appendMessages, whose
-      // counter increments lock the same parent rows. The deterministic order
-      // also keeps concurrent multi-thread cleanup passes from lock-order drift.
-      // This lock MUST precede DELETE: a blocked locker gets a fresh snapshot for
-      // the later delete/recompute statements after the appender commits.
-      await tx.execute(sql`
-        SELECT t.id
-          FROM memory_threads t
-          JOIN _helm_pruned_message_threads a ON a.thread_id = t.id
-         ORDER BY t.id
-           FOR UPDATE
-      `);
-      const deleted = pgRows<{ n: number | string }>(
+      let deletedCount = 0;
+      for (;;) {
+        await tx.execute(sql`DELETE FROM _helm_pruned_message_threads`);
+        // Discover only the threads touched by this bounded delete batch. The old
+        // implementation materialized every affected thread before pruning.
         await tx.execute(sql`
-          WITH deleted AS (
-            DELETE FROM memory_messages
-             WHERE created_at < ${olderThanMs}
-             RETURNING 1
-          )
-          SELECT COUNT(*)::bigint AS n FROM deleted
-        `),
-      )[0];
-      await tx.execute(sql`
-        UPDATE memory_threads AS t
-           SET message_count = (
-                 SELECT COUNT(*)::integer FROM memory_messages m WHERE m.thread_id = t.id
-               ),
-               last_message_at = (
-                 SELECT MAX(m.created_at)::bigint FROM memory_messages m WHERE m.thread_id = t.id
+          INSERT INTO _helm_pruned_message_threads (thread_id)
+          WITH doomed AS (
+            SELECT m.id
+              FROM memory_messages m
+              JOIN memory_threads t ON t.id = m.thread_id
+             WHERE m.created_at < ${olderThanMs}
+               AND t.observer_frontier_at IS NOT NULL
+               AND (
+                 m.created_at < t.observer_frontier_at OR
+                 (m.created_at = t.observer_frontier_at AND m.id <= t.observer_frontier_id)
                )
-         WHERE EXISTS (
-           SELECT 1 FROM _helm_pruned_message_threads a WHERE a.thread_id = t.id
-         )
-      `);
-      return numberOf(deleted?.n);
+             ORDER BY m.created_at, m.id
+             LIMIT 1000
+          )
+          SELECT DISTINCT m.thread_id
+            FROM memory_messages m
+            JOIN doomed d ON d.id = m.id
+          ON CONFLICT (thread_id) DO NOTHING
+        `);
+        // Serialize summary maintenance with appendMessage/appendMessages, whose
+        // counter increments lock the same parent rows. The lock set is bounded
+        // by this batch, not the tenant's full historical thread set.
+        await tx.execute(sql`
+          SELECT t.id
+            FROM memory_threads t
+            JOIN _helm_pruned_message_threads a ON a.thread_id = t.id
+           ORDER BY t.id
+             FOR UPDATE
+        `);
+        const deleted = pgRows<{ n: number | string }>(
+          await tx.execute(sql`
+            WITH doomed AS (
+              SELECT m.id
+                FROM memory_messages m
+                JOIN memory_threads t ON t.id = m.thread_id
+                JOIN _helm_pruned_message_threads a ON a.thread_id = m.thread_id
+               WHERE m.created_at < ${olderThanMs}
+                 AND t.observer_frontier_at IS NOT NULL
+                 AND (
+                   m.created_at < t.observer_frontier_at OR
+                   (m.created_at = t.observer_frontier_at AND m.id <= t.observer_frontier_id)
+                 )
+               ORDER BY m.created_at, m.id
+               LIMIT 1000
+            ), deleted AS (
+              DELETE FROM memory_messages m USING doomed d
+               WHERE m.id = d.id
+               RETURNING 1
+            )
+            SELECT COUNT(*)::integer AS n FROM deleted
+          `),
+        )[0];
+        const n = numberOf(deleted?.n);
+        deletedCount += n;
+        // Repair summaries while this batch's bounded lock set is still the
+        // active temp set; do not accumulate every touched thread in memory.
+        await tx.execute(sql`
+          UPDATE memory_threads AS t
+             SET message_count = (
+                   SELECT COUNT(*)::integer FROM memory_messages m WHERE m.thread_id = t.id
+                 ),
+                 last_message_at = (
+                   SELECT MAX(m.created_at)::bigint FROM memory_messages m WHERE m.thread_id = t.id
+                 )
+           WHERE EXISTS (
+             SELECT 1 FROM _helm_pruned_message_threads a WHERE a.thread_id = t.id
+           )
+        `);
+        if (n < 1000) break;
+      }
+      return deletedCount;
     });
   }
 
   async pruneFinishedJobsOlderThan(olderThanMs: number): Promise<number> {
-    const res = (await this.db.execute(sql`
-      DELETE FROM memory_jobs
-       WHERE status IN ('done', 'failed')
-         AND updated_at < ${olderThanMs}
-      RETURNING id
-    `)) as unknown;
-    const rows = (
-      Array.isArray(res) ? res : ((res as { rows?: unknown[] }).rows ?? [])
-    ) as unknown[];
-    return rows.length;
+    let total = 0;
+    for (;;) {
+      const row = pgRows<{ n: number | string }>(
+        await this.db.execute(sql`
+          WITH doomed AS (
+            SELECT id FROM memory_jobs
+             WHERE status IN ('done', 'failed') AND updated_at < ${olderThanMs}
+             ORDER BY updated_at, id LIMIT 1000
+          ), deleted AS (
+            DELETE FROM memory_jobs j USING doomed d WHERE j.id = d.id RETURNING 1
+          )
+          SELECT COUNT(*)::integer AS n FROM deleted
+        `),
+      )[0];
+      const n = numberOf(row?.n);
+      total += n;
+      if (n < 1000) return total;
+    }
   }
 
   // Auto-compaction model→price resolution — pg mirror of the sqlite adapter
@@ -1844,7 +2428,9 @@ export class PgMemoryStore implements MemoryStore {
     const rows = await this.db
       .select({ n: sql<number>`count(*)::int` })
       .from(memoryObservations)
-      .where(where);
+      .where(
+        and(where, eq(memoryObservations.status, "active"), isNull(memoryObservations.expiredAt)),
+      );
     return Number(rows[0]?.n ?? 0);
   }
 
@@ -1868,88 +2454,19 @@ export class PgMemoryStore implements MemoryStore {
       WITH candidates AS (
         SELECT t.owner_id AS owner_id, t.id AS thread_id,
                t.project_id AS project_id, t.resource_id AS resource_id,
-               (SELECT MAX(m.created_at) FROM memory_messages m WHERE m.thread_id = t.id)
-                 AS last_activity
+               t.last_message_at AS last_activity
           FROM memory_threads t
          WHERE t.owner_id IS NOT NULL
-           AND (SELECT MAX(m.created_at) FROM memory_messages m WHERE m.thread_id = t.id)
-                 <= ${input.idleBeforeMs}
+           AND t.last_message_at <= ${input.idleBeforeMs}
            AND (${idleAfterMs}::bigint IS NULL OR
-                (SELECT MAX(m.created_at) FROM memory_messages m WHERE m.thread_id = t.id)
-                  >= ${idleAfterMs})
+                t.last_message_at >= ${idleAfterMs})
            AND EXISTS (
-             -- A message NOT covered by ANY observation's [first,last] range,
-             -- using the SAME order as listMessages/Observer.
              SELECT 1 FROM memory_messages m
               WHERE m.thread_id = t.id
-                AND NOT EXISTS (
-                  SELECT 1 FROM memory_observations o
-                  JOIN memory_messages mf
-                    ON mf.id = o.source_message_range ->> 0
-                  JOIN memory_messages ml
-                    ON ml.id = o.source_message_range ->> 1
-                   WHERE o.thread_id = t.id
-                     AND (
-                       (
-                         ROW(
-                           CASE WHEN mf.message_index IS NULL THEN 1 ELSE 0 END,
-                           COALESCE(mf.message_index, 2147483647),
-                           mf.created_at,
-                           mf.id
-                         )
-                         <=
-                         ROW(
-                           CASE WHEN m.message_index IS NULL THEN 1 ELSE 0 END,
-                           COALESCE(m.message_index, 2147483647),
-                           m.created_at,
-                           m.id
-                         )
-                         AND
-                         ROW(
-                           CASE WHEN m.message_index IS NULL THEN 1 ELSE 0 END,
-                           COALESCE(m.message_index, 2147483647),
-                           m.created_at,
-                           m.id
-                         )
-                         <=
-                         ROW(
-                           CASE WHEN ml.message_index IS NULL THEN 1 ELSE 0 END,
-                           COALESCE(ml.message_index, 2147483647),
-                           ml.created_at,
-                           ml.id
-                         )
-                       )
-                       OR
-                       (
-                         ROW(
-                           CASE WHEN ml.message_index IS NULL THEN 1 ELSE 0 END,
-                           COALESCE(ml.message_index, 2147483647),
-                           ml.created_at,
-                           ml.id
-                         )
-                         <=
-                         ROW(
-                           CASE WHEN m.message_index IS NULL THEN 1 ELSE 0 END,
-                           COALESCE(m.message_index, 2147483647),
-                           m.created_at,
-                           m.id
-                         )
-                         AND
-                         ROW(
-                           CASE WHEN m.message_index IS NULL THEN 1 ELSE 0 END,
-                           COALESCE(m.message_index, 2147483647),
-                           m.created_at,
-                           m.id
-                         )
-                         <=
-                         ROW(
-                           CASE WHEN mf.message_index IS NULL THEN 1 ELSE 0 END,
-                           COALESCE(mf.message_index, 2147483647),
-                           mf.created_at,
-                           mf.id
-                         )
-                       )
-                     )
+                AND (
+                  t.observer_frontier_at IS NULL OR
+                  m.created_at > t.observer_frontier_at OR
+                  (m.created_at = t.observer_frontier_at AND m.id > t.observer_frontier_id)
                 )
            )
       ),

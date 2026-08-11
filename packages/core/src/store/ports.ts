@@ -653,6 +653,7 @@ export interface TelemetryStore {
   // aggregate a window AFTER the fact. Half-open interval keeps adjacent windows
   // non-overlapping → idempotent re-collect. NEVER called on the request path.
   queryWindow(startMs: number, endMs: number): Promise<DecisionRecord[]>;
+  countWindow?(startMs: number, endMs: number): Promise<number>;
   // Dashboard token-accounting aggregate over [startMs, endMs), bucketed by hour or
   // day (admin homepage). SQL-level SUM/COUNT/GROUP BY over the denormalized token
   // columns — see TelemetryAggregate. READ-ONLY; never on the request path. Both
@@ -764,6 +765,41 @@ export interface MemoryFactReconcileResult {
   resurrectedIds?: string[];
 }
 
+export type MemoryReflectionCommitAction =
+  | {
+      action: "upsert";
+      reflectionText: string;
+      version: number;
+      tokenEstimate: number;
+      updatedAt: Date;
+    }
+  | { action: "archive" }
+  | { action: "unchanged" };
+
+export interface MemoryReflectionJobCommitInput {
+  target: ReflectionScope;
+  reflection: MemoryReflectionCommitAction;
+  facts: MemoryFactInput[];
+  now: Date;
+}
+
+export interface MemoryReflectionJobCommitResult {
+  reflectionId: string | null;
+  facts: MemoryFactReconcileResult;
+}
+
+export interface MemoryObserverCursor {
+  createdAtMs: number;
+  id: string;
+}
+
+export interface MemoryObserverPage {
+  messages: RawMessage[];
+  expectedFrontier: MemoryObserverCursor | null;
+  nextCursor: MemoryObserverCursor | null;
+  hasMore: boolean;
+}
+
 export interface MemoryStore {
   // Idempotent upsert of a thread; safe to call on every observed request.
   ensureThread(input: MemoryThreadInput): Promise<void>;
@@ -792,9 +828,27 @@ export interface MemoryStore {
   // background Observer can compress the older ones into an observation. Returns
   // the persisted rows (with ids + createdAt) for an auditable source range.
   listMessages(scope: { threadId: string; accountId: string }): Promise<RawMessage[]>;
+  // Strictly bounded Observer read. Content is loaded only after a metadata page
+  // fits the row/token/byte budgets; a single oversized row becomes a digest
+  // placeholder so the durable frontier can still advance.
+  listObserverMessagesPage?(input: {
+    threadId: string;
+    accountId: string;
+    limit: number;
+    maxBytes: number;
+    maxTokens: number;
+  }): Promise<MemoryObserverPage>;
   // Persist one compressed observation; returns its generated id. source range
   // is REQUIRED on the input (docs/08) so memory can be audited against originals.
   appendObservation(input: MemoryObservationInput): Promise<string>;
+  // Observation insert + frontier CAS are one transaction. null means another
+  // worker already advanced the thread, so this result must be discarded.
+  appendObservationAndAdvanceFrontier?(input: {
+    accountId: string;
+    observation: MemoryObservationInput;
+    expectedFrontier: MemoryObserverCursor | null;
+    nextFrontier: MemoryObserverCursor;
+  }): Promise<string | null>;
   // POST-MVP Phase 2 (Reflector). Read a scope's ACTIVE observations so the
   // background Reflector can merge them into a stable reflection. Two read
   // shapes: a THREAD scope returns that thread's rows (inject/observer); a
@@ -802,6 +856,33 @@ export interface MemoryStore {
   // that id (the Reflector's target read — a project reflection covers the whole
   // project). Never cross-project, never cross-account.
   listObservations(scope: ReflectionScope): Promise<Observation[]>;
+  // Newest active observations only, returned oldest-first for deterministic merge.
+  listActiveObservationsBounded?(scope: ReflectionScope, limit: number): Promise<Observation[]>;
+  // Injection reads observations in priority order, one bounded page at a time.
+  // This is deliberately separate from listObservations: reflector/admin callers
+  // need the complete scope, while request-time injection must not allocate it.
+  listInjectionObservationsPage?(input: {
+    accountId: string;
+    threadId: string;
+    limit: number;
+    offset: number;
+    order: "newest" | "score";
+    score?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+    };
+  }): Promise<Observation[]>;
+  // Bounded page counterpart: resolve all window-dedup ranges in ONE store query,
+  // returning only the redundant observation ids (never transcript bodies).
+  findRedundantInjectionObservations?(input: {
+    accountId: string;
+    threadId: string;
+    observations: Array<{ id: string; sourceMessageRange: [string, string] }>;
+    windowContentHashCounts: ReadonlyMap<string, number>;
+  }): Promise<ReadonlySet<string>>;
   // Read the current (latest) ACTIVE reflection for a scope, or null if none yet.
   // ARCHIVED reflections (cleared by the decay→rebuild path when a scope's whole
   // active observation set is forgotten — Codex review fix) are invisible here, so
@@ -918,6 +999,10 @@ export interface MemoryStore {
   // Empty id lists are a no-op. OPTIONAL (`?`): additive + gated, same contract as
   // listScorableObservations / bumpReferences.
   archiveObservations?(input: { accountId: string; ids: string[]; now: Date }): Promise<void>;
+  // Production adapters atomically enqueue reflector rebuilds for the exact
+  // scopes affected by archiveObservations. Older adapters may omit this marker;
+  // decay retains the bounded account-scan fallback for them.
+  readonly archiveObservationsEnqueuesReflectors?: true;
   // docs/12 P5 trigger — the buffer-flush gate, run OFF the request path (the worker
   // tick, never per request). Return the account ids DUE for a decay sweep: an account
   // owning ≥1 active observation that EITHER has accumulated ≥ `triggerObservations`
@@ -932,6 +1017,7 @@ export interface MemoryStore {
     triggerObservations: number;
     triggerIntervalS: number;
     nowMs: number;
+    limit?: number;
   }): Promise<string[]>;
   // docs/12 (Codex review fix) — the reflection-rebuild half of forgetting. A
   // reflection is a derived cache of its scope's ACTIVE observations, so when the
@@ -941,7 +1027,7 @@ export interface MemoryStore {
   //     ACTIVE reflection for the account, so the decay job can enqueue ONE reflector
   //     rebuild per scope (the rebuild re-merges the now-reduced active set, dropping
   //     forgotten content; the open-job dedupe collapses duplicates).
-  listActiveReflectionScopes?(accountId: string): Promise<ReflectionScope[]>;
+  listActiveReflectionScopes?(accountId: string, limit?: number): Promise<ReflectionScope[]>;
   //   - archiveReflections: soft-invalidate (status='archived') EVERY reflection
   //     version of a scope. Called by the Reflector when a scope's active observation
   //     set is EMPTY (everything decayed) — getReflection then returns null, so the
@@ -955,6 +1041,14 @@ export interface MemoryStore {
   //     caches reading `reflection_version`. The Reflector writes at high-water + 1
   //     (monotonic forever) while still merging/injecting only the ACTIVE text.
   getReflectionVersionHighWater?(scope: ReflectionScope): Promise<number>;
+  // Atomically publish every output of one claimed Reflector job. The adapter first
+  // changes the exact matching reflector row from running -> done; only the winner
+  // may reconcile facts and upsert/archive/retain the reflection in that transaction.
+  // A stale/fenced/reclaimed execution returns null and writes nothing.
+  commitReflectionJob?(
+    jobId: string,
+    input: MemoryReflectionJobCommitInput,
+  ): Promise<MemoryReflectionJobCommitResult | null>;
   // docs/12 "Eviction, demotion, promotion" passes 2–3 (P6) — fact ingest with
   // DETERMINISTIC dedup + same-subject supersede, all in ONE batch. The Reflector
   // extracts discrete facts (its new sibling output) and calls this; per fact:
@@ -995,6 +1089,22 @@ export interface MemoryStore {
     projectId?: string;
     resourceId?: string;
     threadId?: string;
+  }): Promise<Fact[]>;
+  // Injection only needs its bounded top-K facts. Keep the broad management read
+  // above intact for callers that genuinely need the full scoped history.
+  listInjectionFacts?(input: {
+    accountId: string;
+    projectId?: string;
+    resourceId?: string;
+    threadId?: string;
+    limit: number;
+    score?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+    };
   }): Promise<Fact[]>;
   // docs/12 "Hard-delete (rare, retention only)" pass 4 (P7) — the ONLY DELETE in the
   // forgetting system. Mirrors the existing payload_retention_days prune (an account-

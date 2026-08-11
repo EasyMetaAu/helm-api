@@ -3,7 +3,9 @@
 // (all Phase 1/2). Framework-agnostic (no Hono). Credentials come only from the
 // injected config (env-sourced) and are never logged or echoed. See docs/02.
 
+import { Buffer } from "node:buffer";
 import type { NativePassthroughInput } from "@helm/shared";
+import { createSSEIncompleteFrameGuard, nextSSEFrameBoundary } from "../protocol/streaming.js";
 import {
   consumeResponseTextWithinBudget,
   ResponseBodyTooLargeError,
@@ -375,15 +377,6 @@ export async function readUpstreamErrorBody(
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000;
-
-function nextSseFrameBoundary(buffer: string): { index: number; separator: string } | null {
-  const lf = buffer.indexOf("\n\n");
-  const crlf = buffer.indexOf("\r\n\r\n");
-  if (lf === -1 && crlf === -1) return null;
-  if (lf === -1) return { index: crlf, separator: "\r\n\r\n" };
-  if (crlf === -1) return { index: lf, separator: "\n\n" };
-  return crlf < lf ? { index: crlf, separator: "\r\n\r\n" } : { index: lf, separator: "\n\n" };
-}
 
 function normalizeOpenAIReasoningPayload(value: unknown): boolean {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
@@ -989,6 +982,9 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
       const reader = body.getReader();
       const decoder = new TextDecoder();
       let pendingFrame = "";
+      const frameGuard = cfg.normalizeReasoningDeltaAlias
+        ? createSSEIncompleteFrameGuard(runtimeResponseWorkAdmission())
+        : null;
       try {
         while (true) {
           // Inter-chunk liveness: `withTimeout` already cleared once headers
@@ -1004,13 +1000,16 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
             yield chunk;
             continue;
           }
+          frameGuard?.resize(Buffer.byteLength(pendingFrame) + Buffer.byteLength(chunk));
           pendingFrame += chunk;
           while (true) {
-            const boundary = nextSseFrameBoundary(pendingFrame);
+            const boundary = nextSSEFrameBoundary(pendingFrame);
             if (!boundary) break;
             const frame = pendingFrame.slice(0, boundary.index);
-            pendingFrame = pendingFrame.slice(boundary.index + boundary.separator.length);
-            yield `${normalizeReasoningDeltaFrame(frame)}${boundary.separator}`;
+            const separator = pendingFrame.slice(boundary.index, boundary.index + boundary.length);
+            pendingFrame = pendingFrame.slice(boundary.index + boundary.length);
+            frameGuard?.resize(Buffer.byteLength(pendingFrame));
+            yield `${normalizeReasoningDeltaFrame(frame)}${separator}`;
           }
         }
         if (cfg.normalizeReasoningDeltaAlias && pendingFrame.length > 0) {
@@ -1022,7 +1021,9 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
         }
         throw err;
       } finally {
+        await reader.cancel().catch(() => {});
         reader.releaseLock();
+        frameGuard?.release();
       }
     },
   };

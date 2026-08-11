@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
-import { describe, expect, it } from "vitest";
-import { createPgliteDb } from "./migrate.js";
+import { describe, expect, it, vi } from "vitest";
+import { createPgliteDb, type PgDb } from "./migrate.js";
 import { PgTelemetryStore } from "./telemetry.js";
 
 describe("PgTelemetryStore", () => {
@@ -85,5 +85,16 @@ describe("PgTelemetryStore", () => {
     await expect(store.pruneInactiveSessions(2_000)).resolves.toBe(1);
     expect(await store.getSessionByRef("s-prune")).toBeNull();
     await db.$close();
+  });
+
+  it("prunes telemetry in bounded database batches", async () => {
+    const execute = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [{ deleted: 1_000 }] })
+      .mockResolvedValueOnce({ rows: [{ deleted: "3" }] });
+    const store = new PgTelemetryStore({ execute } as unknown as PgDb);
+
+    await expect(store.pruneTelemetry(2_000)).resolves.toBe(1_003);
+    expect(execute).toHaveBeenCalledTimes(2);
   });
 });

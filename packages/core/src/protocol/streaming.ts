@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { UpstreamError } from "../provider/openai.js";
 import {
   type ResponseWorkAdmission,
+  type ResponseWorkLease,
   runtimeResponseWorkAdmission,
 } from "../runtime/response-work-admission.js";
 import type { IRResponse } from "./ir.js";
@@ -37,6 +38,48 @@ export interface SSEFrame {
   data: string;
 }
 
+export interface SSEFrameBoundary {
+  index: number;
+  length: number;
+}
+
+/**
+ * Find an SSE blank-line delimiter without changing the buffered wire text.
+ * Waiting for both line endings avoids accepting a CRLF separator split across
+ * chunks as complete, while raw relays retain the exact upstream bytes.
+ */
+export function nextSSEFrameBoundary(buffer: string): SSEFrameBoundary | null {
+  const lineEndingLengthAt = (index: number): number | null => {
+    const char = buffer[index];
+    if (char === "\n") return 1;
+    if (char !== "\r") return 0;
+    const next = buffer[index + 1];
+    if (next === undefined) return null;
+    return next === "\n" ? 2 : 1;
+  };
+  for (let index = 0; index < buffer.length; index += 1) {
+    const firstLength = lineEndingLengthAt(index);
+    if (firstLength === null) return null;
+    if (firstLength === 0) continue;
+    const secondLength = lineEndingLengthAt(index + firstLength);
+    if (secondLength === null) return null;
+    if (secondLength > 0) return { index, length: firstLength + secondLength };
+  }
+  return null;
+}
+
+/** Split complete SSE frames and leave only the incomplete tail buffered. */
+export function splitCompleteSSEFrames(buffer: string): { frames: string[]; tail: string } {
+  const frames: string[] = [];
+  let tail = buffer;
+  while (true) {
+    const boundary = nextSSEFrameBoundary(tail);
+    if (boundary === null) return { frames, tail };
+    frames.push(tail.slice(0, boundary.index));
+    tail = tail.slice(boundary.index + boundary.length);
+  }
+}
+
 function assertSSEFrameFits(frame: string, maxFrameBytes: number): void {
   if (maxFrameBytes === 0 || Buffer.byteLength(frame) <= maxFrameBytes) return;
   throw new UpstreamError("upstream_error", "upstream SSE frame exceeds the runtime memory budget");
@@ -47,6 +90,41 @@ function responseWorkError(): UpstreamError {
     "upstream_error",
     "upstream response memory capacity is temporarily exhausted",
   );
+}
+
+/**
+ * Holds a shared response-work lease for one incomplete SSE frame. Call `resize`
+ * before appending the next decoded chunk and `release` from the reader's finally.
+ * This keeps delimiter-only parsers from retaining an unbounded malformed frame.
+ */
+export function createSSEIncompleteFrameGuard(
+  workAdmission: ResponseWorkAdmission = runtimeResponseWorkAdmission(),
+): { resize(wireBytes: number): void; release(): void } {
+  let lease: ResponseWorkLease | undefined;
+  let released = false;
+  return {
+    resize(wireBytes) {
+      if (released) return;
+      if (wireBytes === 0) {
+        lease?.release();
+        lease = undefined;
+        return;
+      }
+      if (lease === undefined) {
+        const acquired = workAdmission.acquire(wireBytes);
+        if (!acquired.ok) throw responseWorkError();
+        lease = acquired.lease;
+        return;
+      }
+      if (!lease.resize(wireBytes).ok) throw responseWorkError();
+    },
+    release() {
+      if (released) return;
+      released = true;
+      lease?.release();
+      lease = undefined;
+    },
+  };
 }
 
 // Per the SSE spec a frame ends at a BLANK line. `data:`/`event:` fields may
@@ -100,17 +178,15 @@ export async function* readSSE(
       resize(Buffer.byteLength(buffer) + value.byteLength);
       // `stream: true` keeps multibyte chars split across chunks intact.
       buffer += decoder.decode(value, { stream: true });
-      // Normalize CRLF so we can split on a single blank line.
-      buffer = buffer.replace(/\r\n/g, "\n");
-      let sep = buffer.indexOf("\n\n");
-      while (sep !== -1) {
-        const block = buffer.slice(0, sep);
-        buffer = buffer.slice(sep + 2);
+      let boundary = nextSSEFrameBoundary(buffer);
+      while (boundary !== null) {
+        const block = buffer.slice(0, boundary.index);
+        buffer = buffer.slice(boundary.index + boundary.length);
         assertSSEFrameFits(block, maxFrameBytes);
         const frame = parseFrame(block);
         if (frame !== null) yield frame;
         resize(Buffer.byteLength(buffer));
-        sep = buffer.indexOf("\n\n");
+        boundary = nextSSEFrameBoundary(buffer);
       }
       assertSSEFrameFits(buffer, maxFrameBytes);
     }
@@ -118,7 +194,6 @@ export async function* readSSE(
     const decodedTail = decoder.decode();
     resize(Buffer.byteLength(buffer) + Buffer.byteLength(decodedTail));
     buffer += decodedTail;
-    buffer = buffer.replace(/\r\n/g, "\n");
     assertSSEFrameFits(buffer, maxFrameBytes);
     const tail = parseFrame(buffer);
     if (tail !== null) yield tail;

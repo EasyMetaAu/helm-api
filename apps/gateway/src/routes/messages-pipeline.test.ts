@@ -16,6 +16,7 @@ import {
 import { describe, expect, it, vi } from "vitest";
 import type { MessagesIdentity } from "./messages.js";
 import {
+  createAssistantTextAccumulator,
   createMessagesPipeline,
   type InjectWiring,
   type PipelineBudgetDeps,
@@ -23,6 +24,17 @@ import {
   type RouteFn,
   splitSSEFrames,
 } from "./messages-pipeline.js";
+
+describe("createAssistantTextAccumulator", () => {
+  it("drops reconstructed text after its byte budget is exceeded", () => {
+    const accumulator = createAssistantTextAccumulator(4);
+
+    accumulator.push("hello");
+
+    expect(accumulator.limited).toBe(true);
+    expect(accumulator.text).toBe("");
+  });
+});
 
 // messages-pipeline — the framework-agnostic bridge injected into both
 // /v1/messages and /v1/responses. These tests pin the FAILURE seams the route

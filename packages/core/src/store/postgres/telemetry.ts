@@ -62,6 +62,7 @@ type SessionBodyPart = "request_delta" | "request_envelope" | "response";
 const SESSION_CHUNKS_PER_WRITE = 4;
 const SESSION_PRUNE_MARKER = "__helm_pruning__";
 const PG_PRUNE_BATCH_ROWS = 16;
+const PG_RETENTION_PRUNE_BATCH_ROWS = 1_000;
 const PG_PRUNE_TICK_ROWS = 128;
 const ORPHAN_CHUNK_TTL_MS = 86_400_000;
 const sessionRevisionWireBytes = sql<number>`
@@ -876,6 +877,14 @@ export class PgTelemetryStore implements TelemetryStore {
     return rows.map((r) => this.toDecision(r));
   }
 
+  async countWindow(startMs: number, endMs: number): Promise<number> {
+    const rows = await this.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(telemetry)
+      .where(and(gte(telemetry.createdAt, startMs), lt(telemetry.createdAt, endMs)));
+    return Number(rows[0]?.n ?? 0);
+  }
+
   // Dashboard token-accounting aggregate — pg mirror of the sqlite adapter. Same
   // three SUM/COUNT/GROUP BY queries and the SAME integer-division bucketing (the
   // window size + tz offset are inlined via sql.raw so pg does bigint INTEGER
@@ -1163,11 +1172,26 @@ export class PgTelemetryStore implements TelemetryStore {
   // Telemetry retention prune — the decision table's equivalent of prunePayloads
   // (it had none before). Strict lower bound on created_at (epoch ms).
   async pruneTelemetry(olderThanMs: number): Promise<number> {
-    const rows = await this.db
-      .delete(telemetry)
-      .where(lt(telemetry.createdAt, olderThanMs))
-      .returning();
-    return rows.length;
+    let total = 0;
+    for (;;) {
+      const result = (await this.db.execute(sql`
+        WITH doomed AS (
+          SELECT id FROM telemetry
+           WHERE created_at < ${olderThanMs}
+           ORDER BY id
+           LIMIT ${PG_RETENTION_PRUNE_BATCH_ROWS}
+        ), deleted AS (
+          DELETE FROM telemetry
+           WHERE id IN (SELECT id FROM doomed)
+          RETURNING 1
+        )
+        SELECT COUNT(*)::int AS deleted FROM deleted
+      `)) as { rows?: Array<{ deleted: number | string }> } | Array<{ deleted: number | string }>;
+      const rows = Array.isArray(result) ? result : (result.rows ?? []);
+      const deleted = Number(rows[0]?.deleted ?? 0);
+      total += deleted;
+      if (deleted < PG_RETENTION_PRUNE_BATCH_ROWS) return total;
+    }
   }
 
   async countTelemetryOlderThan(olderThanMs: number): Promise<number> {

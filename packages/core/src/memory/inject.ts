@@ -130,6 +130,8 @@ const OBSERVATIONS_HEADER = "## Earlier context (summarized)";
 // overrides it). The token budget is the real bound; this caps a pathological fact
 // set so it never crowds out observations.
 const DEFAULT_MAX_FACTS_INJECTED = 16;
+const MAX_INJECTION_CANDIDATE_PAGES = 32;
+const INJECTION_CANDIDATE_PAGE_SIZE = 64;
 
 function buildMemoryBlock(parts: {
   projectReflectionText: string | null;
@@ -180,6 +182,29 @@ export async function enqueueObserverWriteback(
   }
 }
 
+async function failOpenInjectResult(
+  input: InjectInput,
+  deps: InjectDeps,
+  err: unknown,
+): Promise<InjectResult> {
+  const message = err instanceof Error ? err.message : String(err);
+  deps.log("memory.inject.load_failed", { scope: input.scope, error: message });
+  const writeback = await enqueueObserverWriteback(input.scope, deps);
+  return {
+    memoryBlock: null,
+    metadata: {
+      memory_hydrated: false,
+      reflection_version: null,
+      observation_count: 0,
+      facts_injected: 0,
+      memory_tokens_injected: 0,
+      observer_job_id: writeback.observerJobId,
+      memory_writeback_status: writeback.status === "skipped" ? "skipped" : "failed",
+      degraded: true,
+    },
+  };
+}
+
 // Load every memory layer for the scope. project + resource reflections are read
 // as separate scoped lookups so each lands in its own section. observations + the
 // thread's raw messages come from the thread; the raw messages back the
@@ -189,6 +214,8 @@ async function loadMemory(
   scope: InjectInput["scope"],
   store: MemoryStore,
   injectKnownFacts: boolean,
+  factLimit?: number,
+  factScore?: ScoreConfig & { nowMs: number },
 ): Promise<{
   projectReflection: Reflection | null;
   resourceReflection: Reflection | null;
@@ -215,22 +242,33 @@ async function loadMemory(
     injectKnownFacts &&
     store.listActiveFacts !== undefined &&
     (hasBroadFactScope || scope.threadId !== undefined)
-      ? await store.listActiveFacts({
-          accountId: scope.accountId,
-          ...(scope.projectId !== undefined ? { projectId: scope.projectId } : {}),
-          ...(scope.resourceId !== undefined ? { resourceId: scope.resourceId } : {}),
-          // Thread fallback ONLY when there is no broader scope: a project read must
-          // omit threadId (project facts carry threadId=null and would be filtered out).
-          ...(!hasBroadFactScope && scope.threadId !== undefined
-            ? { threadId: scope.threadId }
-            : {}),
-        })
+      ? factLimit !== undefined && store.listInjectionFacts !== undefined
+        ? await store.listInjectionFacts({
+            accountId: scope.accountId,
+            ...(scope.projectId !== undefined ? { projectId: scope.projectId } : {}),
+            ...(scope.resourceId !== undefined ? { resourceId: scope.resourceId } : {}),
+            ...(!hasBroadFactScope && scope.threadId !== undefined
+              ? { threadId: scope.threadId }
+              : {}),
+            limit: factLimit,
+            ...(factScore !== undefined ? { score: factScore } : {}),
+          })
+        : await store.listActiveFacts({
+            accountId: scope.accountId,
+            ...(scope.projectId !== undefined ? { projectId: scope.projectId } : {}),
+            ...(scope.resourceId !== undefined ? { resourceId: scope.resourceId } : {}),
+            // Thread fallback ONLY when there is no broader scope: a project read must
+            // omit threadId (project facts carry threadId=null and would be filtered out).
+            ...(!hasBroadFactScope && scope.threadId !== undefined
+              ? { threadId: scope.threadId }
+              : {}),
+          })
       : [];
   // The inject layers stay THREAD-ANCHORED: pass threadId alone so this read
   // never crosses threads (the cross-thread project/resource aggregation is the
   // REFLECTOR's read shape, not inject's).
   const observations =
-    scope.threadId !== undefined
+    scope.threadId !== undefined && store.listInjectionObservationsPage === undefined
       ? await store.listObservations({ accountId: scope.accountId, threadId: scope.threadId })
       : [];
   // The thread's raw rows are loaded ONLY to resolve each observation's covered
@@ -238,7 +276,7 @@ async function loadMemory(
   // conversation already carries the recent turns). A thread with no observations
   // never needs them, but a single read keeps the dedup deterministic + cheap.
   const threadMessages =
-    scope.threadId !== undefined
+    scope.threadId !== undefined && store.findRedundantInjectionObservations === undefined
       ? await store.listMessages({ accountId: scope.accountId, threadId: scope.threadId })
       : [];
   return { projectReflection, resourceReflection, facts, observations, threadMessages };
@@ -293,30 +331,17 @@ export async function assembleInjectedContext(
   // null) and is recorded — the request continues without memory.
   let loaded: Awaited<ReturnType<typeof loadMemory>>;
   try {
-    loaded = await loadMemory(input.scope, deps.memoryStore, input.injectKnownFacts === true);
+    loaded = await loadMemory(
+      input.scope,
+      deps.memoryStore,
+      input.injectKnownFacts === true,
+      Math.max(0, input.maxFactsInjected ?? DEFAULT_MAX_FACTS_INJECTED),
+      input.injectKnownFacts === true && deps.forgetting?.enabled === true
+        ? { nowMs: deps.now().getTime(), ...deps.forgetting.scoreConfig }
+        : undefined,
+    );
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    deps.log("memory.inject.load_failed", { scope: input.scope, error: message });
-    // Still attempt write-back enqueue so the originals get compressed later;
-    // if that also fails it stays best-effort (never throws).
-    const writeback = await enqueueObserverWriteback(input.scope, deps);
-    return {
-      memoryBlock: null,
-      metadata: {
-        memory_hydrated: false,
-        reflection_version: null,
-        observation_count: 0,
-        facts_injected: 0,
-        memory_tokens_injected: 0,
-        observer_job_id: writeback.observerJobId,
-        // Memory load failed → the whole memory step is a degraded path; mark the
-        // writeback status as failed. EXCEPT when there was no writeback target at
-        // all (no threadId): nothing could be enqueued, so it stays an honest
-        // "skipped", not "failed".
-        memory_writeback_status: writeback.status === "skipped" ? "skipped" : "failed",
-        degraded: true,
-      },
-    };
+    return failOpenInjectResult(input, deps, err);
   }
 
   const { projectReflection, resourceReflection, facts, observations, threadMessages } = loaded;
@@ -453,7 +478,7 @@ export async function assembleInjectedContext(
   keptFacts.sort(
     (a, b) => a.validFrom.getTime() - b.validFrom.getTime() || a.id.localeCompare(b.id),
   );
-  const keptFactTexts = keptFacts.map((f) => `- ${f.factText}`);
+  let keptFactTexts = keptFacts.map((f) => `- ${f.factText}`);
   const factTokens = keptFactTexts.reduce((sum, t) => sum + tokensOf(t), 0);
 
   // Observations get whatever the budget has left after the kept reflections. The
@@ -463,64 +488,140 @@ export async function assembleInjectedContext(
   // re-sorted oldest-first for the deterministic block order.
   const observationBudget = Math.max(0, input.tokenBudget - reflectionTokens - factTokens);
 
-  // observationEntries is oldest-first. Legacy keep order = newest-first (reverse)
-  // so the oldest is the first sacrificed.
-  const legacyKeepOrder = (): ObsEntry[] => [...observationEntries].reverse();
-  let keepOrder: ObsEntry[];
-  if (forgettingOn && deps.forgetting?.dropOrder === "score") {
-    // Score-trim: keep highest-score first so the lowest-scored is dropped first.
-    // FAIL-OPEN: if scoring throws for ANY row, abandon the score order and fall
-    // back to legacy oldest-first, logging the fallback so the degrade is observable.
+  const keptEntries: ObsEntry[] = [];
+  const pagedRead = deps.memoryStore.listInjectionObservationsPage;
+  if (pagedRead !== undefined && input.scope.threadId !== undefined) {
+    // Read only one small page of bodies at a time. The SQL order is the same
+    // priority order used below (newest first, or score then newest), so once the
+    // remaining budget reaches zero no older row can displace a kept one.
     try {
-      const scoreCfg = deps.forgetting.scoreConfig;
-      const now = deps.now();
-      const scored = observationEntries.map((entry) => ({
-        entry,
-        score: forgettingScore(
-          {
-            referencedAt: entry.observation.referencedAt ?? null,
-            fallbackTs: entry.observation.observedAt,
-            referenceCount: entry.observation.referenceCount ?? 0,
-            importance: entry.observation.importance ?? 0.5,
-          },
-          scoreCfg,
-          now,
-        ),
-      }));
-      scored.sort(
-        (a, b) =>
-          b.score - a.score ||
-          b.entry.observation.observedAt.getTime() - a.entry.observation.observedAt.getTime(),
-      );
-      keepOrder = scored.map((s) => s.entry);
+      let offset = 0;
+      let remaining = observationBudget;
+      let scoreMode = forgettingOn && deps.forgetting?.dropOrder === "score";
+      let score: ScoreConfig | undefined;
+      let scoreNowMs: number | undefined;
+      if (scoreMode) {
+        try {
+          score = deps.forgetting?.scoreConfig;
+          scoreNowMs = deps.now().getTime();
+        } catch (err) {
+          deps.log("memory.inject.score_trim_fallback", {
+            scope: input.scope,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          scoreMode = false;
+        }
+      }
+      for (
+        let pageNumber = 0;
+        pageNumber < MAX_INJECTION_CANDIDATE_PAGES && remaining > 0;
+        pageNumber++
+      ) {
+        const page = await pagedRead.call(deps.memoryStore, {
+          accountId: input.scope.accountId,
+          threadId: input.scope.threadId,
+          limit: INJECTION_CANDIDATE_PAGE_SIZE,
+          offset,
+          order: scoreMode ? "score" : "newest",
+          ...(score !== undefined && scoreNowMs !== undefined
+            ? { score: { nowMs: scoreNowMs, ...score } }
+            : {}),
+        });
+        if (page.length === 0) break;
+        offset += page.length;
+        const redundantIds =
+          deps.memoryStore.findRedundantInjectionObservations !== undefined
+            ? await deps.memoryStore.findRedundantInjectionObservations({
+                accountId: input.scope.accountId,
+                threadId: input.scope.threadId,
+                observations: page.map((observation) => ({
+                  id: observation.id,
+                  sourceMessageRange: observation.sourceMessageRange,
+                })),
+                windowContentHashCounts,
+              })
+            : new Set<string>();
+        for (const observation of page) {
+          if (remaining === 0) break;
+          const redundant =
+            redundantIds.has(observation.id) ||
+            (deps.memoryStore.findRedundantInjectionObservations === undefined &&
+              observationIsRedundant(observation, threadMessages, windowContentHashCounts));
+          if (redundant) continue;
+          const cost = tokensOf(observation.observationText);
+          if (cost <= remaining) {
+            keptEntries.push({
+              id: observation.id,
+              text: observation.observationText,
+              observation,
+            });
+            remaining -= cost;
+          }
+        }
+        if (page.length < INJECTION_CANDIDATE_PAGE_SIZE) break;
+      }
     } catch (err) {
-      deps.log("memory.inject.score_trim_fallback", {
-        scope: input.scope,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      keepOrder = legacyKeepOrder();
+      return failOpenInjectResult(input, deps, err);
     }
   } else {
-    keepOrder = legacyKeepOrder();
-  }
-
-  let remaining = observationBudget;
-  const keptEntries: ObsEntry[] = [];
-  for (const entry of keepOrder) {
-    const cost = tokensOf(entry.text);
-    if (cost <= remaining) {
-      keptEntries.push(entry);
-      remaining -= cost;
+    // observationEntries is oldest-first. Legacy keep order = newest-first (reverse)
+    // so the oldest is the first sacrificed.
+    const legacyKeepOrder = (): ObsEntry[] => [...observationEntries].reverse();
+    let keepOrder: ObsEntry[];
+    if (forgettingOn && deps.forgetting?.dropOrder === "score") {
+      // Score-trim: keep highest-score first so the lowest-scored is dropped first.
+      // FAIL-OPEN: if scoring throws for ANY row, abandon the score order and fall
+      // back to legacy oldest-first, logging the fallback so the degrade is observable.
+      try {
+        const scoreCfg = deps.forgetting.scoreConfig;
+        const now = deps.now();
+        const scored = observationEntries.map((entry) => ({
+          entry,
+          score: forgettingScore(
+            {
+              referencedAt: entry.observation.referencedAt ?? null,
+              fallbackTs: entry.observation.observedAt,
+              referenceCount: entry.observation.referenceCount ?? 0,
+              importance: entry.observation.importance ?? 0.5,
+            },
+            scoreCfg,
+            now,
+          ),
+        }));
+        scored.sort(
+          (a, b) =>
+            b.score - a.score ||
+            b.entry.observation.observedAt.getTime() - a.entry.observation.observedAt.getTime(),
+        );
+        keepOrder = scored.map((s) => s.entry);
+      } catch (err) {
+        deps.log("memory.inject.score_trim_fallback", {
+          scope: input.scope,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        keepOrder = legacyKeepOrder();
+      }
+    } else {
+      keepOrder = legacyKeepOrder();
     }
-    // else: skip this (lowest-priority) observation — trimmed for budget.
+
+    let remaining = observationBudget;
+    for (const entry of keepOrder) {
+      const cost = tokensOf(entry.text);
+      if (cost <= remaining) {
+        keptEntries.push(entry);
+        remaining -= cost;
+      }
+      // else: skip this (lowest-priority) observation — trimmed for budget.
+    }
   }
   // Restore oldest-first order for the block regardless of which drop order chose
   // the survivors.
   keptEntries.sort(
     (a, b) => a.observation.observedAt.getTime() - b.observation.observedAt.getTime(),
   );
-  const keptObservationTexts = keptEntries.map((e) => e.text);
-  const keptObservationIds = keptEntries.map((e) => e.id);
+  let keptObservationTexts = keptEntries.map((e) => e.text);
+  let keptObservationIds = keptEntries.map((e) => e.id);
 
   // Signal a budget breach whenever the reflections alone would have exceeded the
   // cap — i.e. the budget actually forced a reflection drop. Surfacing it keeps the
@@ -537,12 +638,68 @@ export async function assembleInjectedContext(
   }
 
   // Assemble the final memory text block (null when no section has content).
-  const memoryBlock = buildMemoryBlock({
-    projectReflectionText: keptProjectReflectionText,
-    resourceReflectionText: keptResourceReflectionText,
-    factTexts: keptFactTexts,
-    observationTexts: keptObservationTexts,
-  });
+  const render = (): string | null =>
+    buildMemoryBlock({
+      projectReflectionText: keepProjectReflection ? keptProjectReflectionText : null,
+      resourceReflectionText: keepResourceReflection ? keptResourceReflectionText : null,
+      factTexts: keptFactTexts,
+      observationTexts: keptObservationTexts,
+    });
+  let memoryBlock = render();
+  let trimmedForHeaders = false;
+  while (memoryBlock !== null && tokensOf(memoryBlock) > input.tokenBudget) {
+    trimmedForHeaders = true;
+    if (keptEntries.length > 0) {
+      let dropIndex = 0;
+      if (forgettingOn && deps.forgetting?.dropOrder === "score") {
+        try {
+          const scoreConfig = deps.forgetting.scoreConfig;
+          const scoreNow = deps.now();
+          let lowest = Number.POSITIVE_INFINITY;
+          for (const [index, entry] of keptEntries.entries()) {
+            const score = forgettingScore(
+              {
+                referencedAt: entry.observation.referencedAt ?? null,
+                fallbackTs: entry.observation.observedAt,
+                referenceCount: entry.observation.referenceCount ?? 0,
+                importance: entry.observation.importance ?? 0.5,
+              },
+              scoreConfig,
+              scoreNow,
+            );
+            if (score < lowest) {
+              lowest = score;
+              dropIndex = index;
+            }
+          }
+        } catch {
+          dropIndex = 0;
+        }
+      }
+      keptEntries.splice(dropIndex, 1);
+      keptObservationTexts = keptEntries.map((entry) => entry.text);
+      keptObservationIds = keptEntries.map((entry) => entry.id);
+    } else if (keptFacts.length > 0) {
+      keptFacts.shift();
+      keptFactTexts = keptFacts.map((fact) => `- ${fact.factText}`);
+    } else if (keepResourceReflection) {
+      keepResourceReflection = false;
+    } else if (keepProjectReflection) {
+      keepProjectReflection = false;
+    } else {
+      memoryBlock = null;
+      break;
+    }
+    memoryBlock = render();
+  }
+  if (trimmedForHeaders) {
+    deps.log("memory.inject.budget_overflow", {
+      scope: input.scope,
+      token_budget: input.tokenBudget,
+      rendered_tokens: memoryBlock === null ? 0 : tokensOf(memoryBlock),
+      reason: "rendered_headers",
+    });
+  }
 
   // memory_tokens_injected = estimated tokens of the FINAL block string.
   const memoryTokensInjected = memoryBlock !== null ? tokensOf(memoryBlock) : 0;

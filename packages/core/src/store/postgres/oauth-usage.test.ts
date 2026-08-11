@@ -1,5 +1,5 @@
 import type { OAuthQuotaSnapshot } from "@helm/shared";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createPgliteDb, type PgDb } from "./migrate.js";
 import { PgOAuthQuotaStore } from "./oauth-quota.js";
 import { PgOAuthResetPeriodStore } from "./oauth-reset-period.js";
@@ -49,6 +49,17 @@ describe("PgOAuthUsageStore (pglite)", () => {
     expect(rows[0]).toMatchObject({ requests: 3, tokens: 380, firstSeenMs: T0 });
     expect(rows[0]?.costUsd).toBeCloseTo(0.03, 6);
     await db.$close();
+  });
+
+  it("prunes usage in bounded database batches", async () => {
+    const execute = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [{ deleted: 1_000 }] })
+      .mockResolvedValueOnce({ rows: [{ deleted: "2" }] });
+    const store = new PgOAuthUsageStore({ execute } as unknown as PgDb);
+
+    await expect(store.pruneUsageOlderThan(2_000)).resolves.toBe(1_002);
+    expect(execute).toHaveBeenCalledTimes(2);
   });
 
   it("excludes hour buckets outside the window", async () => {

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { guardPreOutputFailure, preOutputClassifierFor } from "./failover-guard.js";
+import {
+  guardPreOutputFailure,
+  MAX_PRE_OUTPUT_BUFFER_BYTES,
+  preOutputClassifierFor,
+} from "./failover-guard.js";
 import { UpstreamError } from "./openai.js";
 
 // failover-guard — the pre-output streaming failure detector. A native upstream that
@@ -26,6 +30,26 @@ const chat = preOutputClassifierFor("openai_chat");
 if (!responses || !anthropic || !chat) throw new Error("classifier missing");
 
 describe("guardPreOutputFailure — openai_responses", () => {
+  it("rejects an oversized pre-output buffer before retaining more raw chunks", async () => {
+    const chunk = `event: response.created\ndata: {"type":"response.created"}\n\n${"x".repeat(
+      Math.floor(MAX_PRE_OUTPUT_BUFFER_BYTES / 2),
+    )}`;
+    let yielded = 0;
+    async function* src(): AsyncGenerator<string> {
+      yielded += 1;
+      yield chunk;
+      yielded += 1;
+      yield "y".repeat(Math.floor(MAX_PRE_OUTPUT_BUFFER_BYTES / 2));
+      yielded += 1;
+      yield "z";
+    }
+
+    await expect(collect(guardPreOutputFailure(src(), responses))).rejects.toThrow(
+      "upstream pre-output buffer exceeds the memory budget",
+    );
+    expect(yielded).toBe(2);
+  });
+
   it("preamble then a terminal error frame → throws UpstreamError (no output yielded)", async () => {
     const src = fromChunks([
       'event: response.created\ndata: {"type":"response.created"}\n\n',
@@ -76,6 +100,15 @@ describe("guardPreOutputFailure — openai_responses", () => {
       'event: response.created\ndata: {"type":"response.created"}\n\n',
       'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"Hi"}\n\n',
       'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+    ];
+    const out = await collect(guardPreOutputFailure(fromChunks(chunks), responses));
+    expect(out.join("")).toBe(chunks.join(""));
+  });
+
+  it("commits CRLF-framed preamble and output when the delimiter crosses chunks", async () => {
+    const chunks = [
+      'event: response.created\r\ndata: {"type":"response.created"}\r\n\r',
+      '\nevent: response.output_text.delta\r\ndata: {"type":"response.output_text.delta","delta":"Hi"}\r\n\r\n',
     ];
     const out = await collect(guardPreOutputFailure(fromChunks(chunks), responses));
     expect(out.join("")).toBe(chunks.join(""));

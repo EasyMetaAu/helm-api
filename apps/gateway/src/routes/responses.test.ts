@@ -302,12 +302,18 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 
-  it("does not reject aggregate capacity while a parsed streaming request remains active", async () => {
+  it("rejects aggregate capacity while a parsed streaming request remains active", async () => {
     const finish = deferred<void>();
+    const activeBody = JSON.stringify({ ...REQ, input: "x".repeat(800), stream: true });
+    const nextBody = JSON.stringify({ ...REQ, input: "x".repeat(800) });
+    const coordinator = createRuntimeMemoryCoordinator({
+      capacityBytes: () => Buffer.byteLength(activeBody) + 1,
+    });
     const memoryAdmission = createBodyMemoryAdmission({
-      activeRequestBytes: 1_000,
+      activeRequestBytes: 1,
       jsonAmplification: 1,
       minRequestChargeBytes: 1,
+      coordinator,
     });
     const { deps } = makeDeps({
       memoryAdmission,
@@ -330,21 +336,64 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     const active = await app.request("/v1/responses", {
       method: "POST",
       headers: AUTH,
-      body: JSON.stringify({ ...REQ, stream: true }),
+      body: activeBody,
     });
     expect(active.status).toBe(200);
     expect(memoryAdmission.reservedBytes).toBeGreaterThan(0);
     expect(memoryAdmission.pendingBytes).toBe(0);
+    expect(coordinator.reservedBytes).toBeGreaterThan(0);
 
     const next = await app.request("/v1/responses", {
       method: "POST",
       headers: AUTH,
-      body: JSON.stringify(REQ),
+      body: nextBody,
     });
-    expect(next.status).toBe(200);
+    expect(next.status).toBe(503);
+    expect(coordinator.reservedBytes).toBeGreaterThan(0);
 
     finish.resolve(undefined);
     await active.text();
+    expect(memoryAdmission.reservedBytes).toBe(0);
+    expect(coordinator.reservedBytes).toBe(0);
+  });
+
+  it("releases a live stream lease when the response body is cancelled", async () => {
+    const started = deferred<void>();
+    const body = JSON.stringify({ ...REQ, input: "x".repeat(800), stream: true });
+    const coordinator = createRuntimeMemoryCoordinator({
+      capacityBytes: () => Buffer.byteLength(body) + 1,
+    });
+    const memoryAdmission = createBodyMemoryAdmission({
+      activeRequestBytes: 1,
+      jsonAmplification: 1,
+      minRequestChargeBytes: 1,
+      coordinator,
+    });
+    let pipelineSignal: AbortSignal | undefined;
+    const { deps } = makeDeps({
+      memoryAdmission,
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      run: async (_ir, _identity, signal) => {
+        pipelineSignal = signal;
+        return {
+          decision: FAKE_DECISION,
+          collect: async () => ({}),
+          streamIR: async function* () {
+            started.resolve(undefined);
+            yield { type: "response.created", sequence_number: 0 };
+            await new Promise<void>(() => {});
+          },
+        };
+      },
+    });
+    const app = buildApp(deps);
+
+    const response = await app.request("/v1/responses", { method: "POST", headers: AUTH, body });
+    await started.promise;
+    await response.body?.cancel();
+
+    expect(pipelineSignal?.aborted).toBe(true);
+    expect(coordinator.reservedBytes).toBe(0);
     expect(memoryAdmission.reservedBytes).toBe(0);
   });
 

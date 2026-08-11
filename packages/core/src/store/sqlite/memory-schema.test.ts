@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
+import { sha256Hex } from "../../memory/message-hash.js";
 import { SqliteMemoryStore } from "./memory-store.js";
 import { createSqliteDb, runMigrations } from "./migrate.js";
 
@@ -143,6 +144,28 @@ describe("sqlite memory schema + migrations", () => {
     db.$sqlite.close();
   });
 
+  it("marks a single-message observation range redundant", async () => {
+    const db = createSqliteDb(":memory:");
+    const store = new SqliteMemoryStore(db);
+    await store.ensureThread({ id: "t1", ownerId: "acct-a" });
+    const messageId = await store.appendMessage({
+      threadId: "t1",
+      role: "user",
+      content: "one turn",
+      tokenEstimate: 2,
+    });
+
+    const redundant = await store.findRedundantInjectionObservations({
+      accountId: "acct-a",
+      threadId: "t1",
+      observations: [{ id: "obs-1", sourceMessageRange: [messageId, messageId] }],
+      windowContentHashCounts: new Map([[sha256Hex("one turn"), 1]]),
+    });
+
+    expect(redundant).toEqual(new Set(["obs-1"]));
+    db.$sqlite.close();
+  });
+
   it("stores large messages as gzip BLOBs and reads mixed legacy TEXT", async () => {
     const db = createSqliteDb(":memory:");
     const store = new SqliteMemoryStore(
@@ -176,6 +199,13 @@ describe("sqlite memory schema + migrations", () => {
     expect(
       (await store.listMessages({ accountId: "o1", threadId: "t1" })).map((m) => m.content),
     ).toEqual([content, "legacy text"]);
+    db.$sqlite
+      .prepare(
+        `UPDATE memory_threads
+            SET observer_frontier_at = 2000, observer_frontier_id = 'legacy-message'
+          WHERE id = 't1'`,
+      )
+      .run();
     expect((await store.selectMessagesOlderThan(3_000, 10)).map((m) => m.content).sort()).toEqual(
       [content, "legacy text"].sort(),
     );

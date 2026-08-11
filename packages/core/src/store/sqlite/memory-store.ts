@@ -43,8 +43,13 @@ import {
   type MemoryAdminStats,
   type MemoryAdminStatsScope,
   MemoryFactContentHashConflictError,
+  type MemoryFactReconcileResult,
   type MemoryJobStatus,
   type MemoryMessageArchiveRow,
+  type MemoryObserverCursor,
+  type MemoryObserverPage,
+  type MemoryReflectionJobCommitInput,
+  type MemoryReflectionJobCommitResult,
   type MemoryStore,
 } from "../ports.js";
 import { runBatchedPrune } from "./batched-prune.js";
@@ -272,6 +277,7 @@ function toFtsMatch(queryText: string): string | null {
 // so core/ports stay DB-agnostic. Memory is a MIDDLEWARE: this store never reads
 // or writes routing/lane state.
 export class SqliteMemoryStore implements MemoryStore {
+  readonly archiveObservationsEnqueuesReflectors = true as const;
   constructor(
     private readonly db: SqliteDb,
     private readonly genId: () => string = randomUUID,
@@ -382,11 +388,15 @@ export class SqliteMemoryStore implements MemoryStore {
 
   async appendMessage(input: MemoryMessageInput): Promise<string> {
     const id = this.genId();
-    const createdAt = this.now();
+    const nowMs = this.now().getTime();
     // Idempotent ingest: a re-sent (thread_id, role, content) collapses to a
     // no-op via the v21 UNIQUE index (re-ingestion fix). Returned id is still
     // generated per call; on conflict it is inert (the row was left untouched).
     this.db.$sqlite.transaction(() => {
+      const activity = this.db.$sqlite
+        .prepare("SELECT last_message_at AS last_at FROM memory_threads WHERE id = ?")
+        .get(input.threadId) as { last_at: number | null } | undefined;
+      const createdAt = new Date(Math.max(nowMs, (activity?.last_at ?? nowMs - 1) + 1));
       const inserted = this.messageInsert().run({
         id,
         threadId: input.threadId,
@@ -416,9 +426,18 @@ export class SqliteMemoryStore implements MemoryStore {
     const ids: string[] = [];
     const run = this.db.$sqlite.transaction(() => {
       const activity = new Map<string, { count: number; lastAt: number }>();
+      const nextAt = new Map<string, number>();
       inputs.forEach((input, i) => {
         const id = this.genId();
         ids.push(id);
+        let createdAt = nextAt.get(input.threadId);
+        if (createdAt === undefined) {
+          const thread = this.db.$sqlite
+            .prepare("SELECT last_message_at AS last_at FROM memory_threads WHERE id = ?")
+            .get(input.threadId) as { last_at: number | null } | undefined;
+          createdAt = Math.max(base, (thread?.last_at ?? base - 1) + 1);
+        }
+        nextAt.set(input.threadId, createdAt + 1);
         const inserted = this.messageInsert().run({
           id,
           threadId: input.threadId,
@@ -426,11 +445,10 @@ export class SqliteMemoryStore implements MemoryStore {
           role: input.role,
           content: encodeMemoryContent(input.content),
           tokenEstimate: input.tokenEstimate,
-          createdAt: base + i,
+          createdAt,
           contentHash: sha256Hex(input.content),
         });
         if (inserted.changes > 0) {
-          const createdAt = base + i;
           const current = activity.get(input.threadId);
           activity.set(input.threadId, {
             count: (current?.count ?? 0) + 1,
@@ -458,12 +476,7 @@ export class SqliteMemoryStore implements MemoryStore {
           sql`EXISTS (SELECT 1 FROM memory_threads mt WHERE mt.id = ${memoryMessages.threadId} AND mt.owner_id = ${scope.accountId})`,
         ),
       )
-      .orderBy(
-        sql`CASE WHEN ${memoryMessages.messageIndex} IS NULL THEN 1 ELSE 0 END`,
-        asc(memoryMessages.messageIndex),
-        asc(memoryMessages.createdAt),
-        asc(memoryMessages.id),
-      )
+      .orderBy(asc(memoryMessages.createdAt), asc(memoryMessages.id))
       .all();
     return rows.map((row) => ({
       id: row.id,
@@ -474,6 +487,104 @@ export class SqliteMemoryStore implements MemoryStore {
       tokenEstimate: row.tokenEstimate,
       createdAt: row.createdAt,
     }));
+  }
+
+  async listObserverMessagesPage(input: {
+    threadId: string;
+    accountId: string;
+    limit: number;
+    maxBytes: number;
+    maxTokens: number;
+  }): Promise<MemoryObserverPage> {
+    type MetaRow = {
+      id: string;
+      thread_id: string;
+      role: RawMessage["role"];
+      token_estimate: number;
+      created_at: number;
+      content_hash: string | null;
+      stored_bytes: number;
+    };
+    const thread = this.db.$sqlite
+      .prepare(
+        `SELECT observer_frontier_at AS frontier_at, observer_frontier_id AS frontier_id
+           FROM memory_threads WHERE id = ? AND owner_id = ?`,
+      )
+      .get(input.threadId, input.accountId) as
+      | { frontier_at: number | null; frontier_id: string | null }
+      | undefined;
+    if (thread === undefined) {
+      return { messages: [], expectedFrontier: null, nextCursor: null, hasMore: false };
+    }
+    const expectedFrontier =
+      thread.frontier_at === null || thread.frontier_id === null
+        ? null
+        : { createdAtMs: thread.frontier_at, id: thread.frontier_id };
+    const rowLimit = Math.max(1, Math.floor(input.limit));
+    const rows = this.db.$sqlite
+      .prepare(
+        `SELECT id, thread_id, role, token_estimate, created_at, content_hash,
+                length(content) AS stored_bytes
+           FROM memory_messages
+          WHERE thread_id = ?
+            AND (? IS NULL OR created_at > ? OR (created_at = ? AND id > ?))
+          ORDER BY created_at, id
+          LIMIT ?`,
+      )
+      .all(
+        input.threadId,
+        expectedFrontier?.createdAtMs ?? null,
+        expectedFrontier?.createdAtMs ?? 0,
+        expectedFrontier?.createdAtMs ?? 0,
+        expectedFrontier?.id ?? "",
+        rowLimit + 1,
+      ) as MetaRow[];
+    const selected: Array<MetaRow & { oversized: boolean }> = [];
+    let tokens = 0;
+    let bytes = 0;
+    for (const row of rows.slice(0, rowLimit)) {
+      const rowBytes = Math.max(row.stored_bytes, row.token_estimate * 4);
+      const oversized = row.token_estimate > input.maxTokens || rowBytes > input.maxBytes;
+      if (
+        selected.length > 0 &&
+        (tokens + row.token_estimate > input.maxTokens || bytes + rowBytes > input.maxBytes)
+      ) {
+        break;
+      }
+      selected.push({ ...row, oversized });
+      if (!oversized) {
+        tokens += row.token_estimate;
+        bytes += rowBytes;
+      }
+      if (oversized) break;
+    }
+    const safeIds = selected.filter((row) => !row.oversized).map((row) => row.id);
+    const contentById = new Map<string, unknown>();
+    if (safeIds.length > 0) {
+      const placeholders = safeIds.map(() => "?").join(",");
+      const contentRows = this.db.$sqlite
+        .prepare(`SELECT id, content FROM memory_messages WHERE id IN (${placeholders})`)
+        .all(...safeIds) as Array<{ id: string; content: unknown }>;
+      for (const row of contentRows) contentById.set(row.id, row.content);
+    }
+    const messages = selected.map((row) => ({
+      id: row.id,
+      threadId: row.thread_id,
+      role: row.role,
+      content: row.oversized
+        ? `[oversized ${row.role} message omitted; sha256=${row.content_hash ?? "unknown"}]`
+        : decodeMemoryContent(contentById.get(row.id)),
+      tokenEstimate: row.oversized ? 32 : row.token_estimate,
+      createdAt: new Date(row.created_at),
+    }));
+    const last = selected.at(-1);
+    const nextCursor = last === undefined ? null : { createdAtMs: last.created_at, id: last.id };
+    return {
+      messages,
+      expectedFrontier,
+      nextCursor,
+      hasMore: selected.length < rows.length,
+    };
   }
 
   // Persist one compressed observation. tags are JSON-encoded (SQLite has no
@@ -513,6 +624,67 @@ export class SqliteMemoryStore implements MemoryStore {
     return id;
   }
 
+  async appendObservationAndAdvanceFrontier(input: {
+    accountId: string;
+    observation: MemoryObservationInput;
+    expectedFrontier: MemoryObserverCursor | null;
+    nextFrontier: MemoryObserverCursor;
+  }): Promise<string | null> {
+    const id = this.genId();
+    const db = this.db.$sqlite;
+    const committed = db.transaction(() => {
+      const current = db
+        .prepare(
+          `SELECT observer_frontier_at AS frontier_at, observer_frontier_id AS frontier_id
+             FROM memory_threads WHERE id = ? AND owner_id = ?`,
+        )
+        .get(input.observation.threadId, input.accountId) as
+        | { frontier_at: number | null; frontier_id: string | null }
+        | undefined;
+      const expected = input.expectedFrontier;
+      if (
+        current === undefined ||
+        current.frontier_at !== (expected?.createdAtMs ?? null) ||
+        current.frontier_id !== (expected?.id ?? null)
+      ) {
+        return false;
+      }
+      db.prepare(
+        `INSERT INTO memory_observations (
+           id, thread_id, source_message_range, observation_text, observed_at,
+           referenced_at, priority, tags, importance
+         ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+      ).run(
+        id,
+        input.observation.threadId,
+        JSON.stringify(input.observation.sourceMessageRange),
+        input.observation.observationText,
+        input.observation.observedAt.getTime(),
+        input.observation.priority ?? null,
+        input.observation.tags === undefined ? null : JSON.stringify(input.observation.tags),
+        input.observation.importance ?? 0.5,
+      );
+      db.prepare(
+        `UPDATE memory_threads
+            SET observer_frontier_at = ?, observer_frontier_id = ?,
+                observation_count = observation_count + 1,
+                last_observation_at = CASE
+                  WHEN last_observation_at IS NULL OR last_observation_at < ? THEN ?
+                  ELSE last_observation_at END
+          WHERE id = ? AND owner_id = ?`,
+      ).run(
+        input.nextFrontier.createdAtMs,
+        input.nextFrontier.id,
+        input.observation.observedAt.getTime(),
+        input.observation.observedAt.getTime(),
+        input.observation.threadId,
+        input.accountId,
+      );
+      return true;
+    })();
+    return committed ? id : null;
+  }
+
   // POST-MVP Phase 2: read a scope's active observations oldest-first. Thread
   // scope = the thread's own rows (inject/observer); project/resource scope =
   // aggregated across all the owner's matching threads (the Reflector's target
@@ -544,6 +716,147 @@ export class SqliteMemoryStore implements MemoryStore {
         ...(row.tags !== null ? { tags: JSON.parse(row.tags) as string[] } : {}),
       };
     });
+  }
+
+  async listActiveObservationsBounded(
+    scope: ReflectionScope,
+    limit: number,
+  ): Promise<Observation[]> {
+    const where = observationScopeWhere(scope);
+    if (where === null) return [];
+    const rows = this.db
+      .select()
+      .from(memoryObservations)
+      .where(
+        and(where, eq(memoryObservations.status, "active"), isNull(memoryObservations.expiredAt)),
+      )
+      .orderBy(desc(memoryObservations.observedAt), desc(memoryObservations.id))
+      .limit(Math.max(1, Math.floor(limit)))
+      .all()
+      .reverse();
+    return rows.map((row) => ({
+      id: row.id,
+      threadId: row.threadId,
+      sourceMessageRange: JSON.parse(row.sourceMessageRange) as [string, string],
+      observationText: row.observationText,
+      observedAt: row.observedAt,
+      referenceCount: row.referenceCount,
+      importance: row.importance,
+      status: row.status as Observation["status"],
+      referencedAt: row.referencedAt,
+      archivedAt: row.archivedAt,
+      expiredAt: row.expiredAt,
+      ...(row.priority !== null ? { priority: row.priority } : {}),
+      ...(row.tags !== null ? { tags: JSON.parse(row.tags) as string[] } : {}),
+    }));
+  }
+
+  async listInjectionObservationsPage(input: {
+    accountId: string;
+    threadId: string;
+    limit: number;
+    offset: number;
+    order: "newest" | "score";
+    score?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+    };
+  }): Promise<Observation[]> {
+    const where = observationScopeWhere({ accountId: input.accountId, threadId: input.threadId });
+    if (where === null) return [];
+    const score = input.score;
+    const scoreOrder =
+      score === undefined
+        ? undefined
+        : sql`pow(0.5, max(0, (${score.nowMs} - COALESCE(${memoryObservations.referencedAt}, ${memoryObservations.observedAt})) / 1000.0) / ${score.half_life_s}) * (min(max(${memoryObservations.importance}, ${score.importance_floor}), ${score.importance_ceil}) + ${score.access_weight} * ln(1 + ${memoryObservations.referenceCount}))`;
+    const rows = this.db
+      .select()
+      .from(memoryObservations)
+      .where(
+        and(
+          where,
+          eq(memoryObservations.status, "active"),
+          isNull(memoryObservations.expiredAt),
+        ) as SQL,
+      )
+      .orderBy(
+        input.order === "score" && scoreOrder !== undefined
+          ? desc(scoreOrder)
+          : desc(memoryObservations.observedAt),
+        desc(memoryObservations.observedAt),
+        desc(memoryObservations.id),
+      )
+      .limit(input.limit)
+      .offset(input.offset)
+      .all();
+    return rows.map((row) => ({
+      id: row.id,
+      threadId: row.threadId,
+      sourceMessageRange: JSON.parse(row.sourceMessageRange) as [string, string],
+      observationText: row.observationText,
+      observedAt: row.observedAt,
+      referenceCount: row.referenceCount,
+      importance: row.importance,
+      status: row.status as Observation["status"],
+      referencedAt: row.referencedAt,
+      archivedAt: row.archivedAt,
+      expiredAt: row.expiredAt,
+      ...(row.priority !== null ? { priority: row.priority } : {}),
+      ...(row.tags !== null ? { tags: JSON.parse(row.tags) as string[] } : {}),
+    }));
+  }
+
+  async findRedundantInjectionObservations(input: {
+    accountId: string;
+    threadId: string;
+    observations: Array<{ id: string; sourceMessageRange: [string, string] }>;
+    windowContentHashCounts: ReadonlyMap<string, number>;
+  }): Promise<ReadonlySet<string>> {
+    if (input.observations.length === 0 || input.windowContentHashCounts.size === 0)
+      return new Set();
+    const requested = JSON.stringify(
+      input.observations.map(({ id, sourceMessageRange: [startId, endId] }) => ({
+        id,
+        startId,
+        endId,
+      })),
+    );
+    const live = JSON.stringify(Object.fromEntries(input.windowContentHashCounts));
+    const rows = this.db.$sqlite
+      .prepare(
+        `WITH requested AS (
+           SELECT json_extract(value, '$.id') AS id, json_extract(value, '$.startId') AS start_id,
+                  json_extract(value, '$.endId') AS end_id FROM json_each(?)
+         ), live AS (SELECT key, CAST(value AS INTEGER) AS n FROM json_each(?)),
+         ordered AS (
+           SELECT id, content_hash, ROW_NUMBER() OVER (ORDER BY CASE WHEN message_index IS NULL THEN 1 ELSE 0 END, message_index, created_at, id) AS n
+             FROM memory_messages WHERE thread_id = ?
+         ), endpoints AS (
+           SELECT r.id, r.start_id, r.end_id, MIN(o.n) AS first_n, MAX(o.n) AS last_n,
+                  COUNT(DISTINCT o.id) AS found
+             FROM requested r LEFT JOIN ordered o ON o.id = r.start_id OR o.id = r.end_id
+            GROUP BY r.id, r.start_id, r.end_id
+         ), required AS (
+           SELECT e.id, o.content_hash, COUNT(*) AS n FROM endpoints e JOIN ordered o
+             ON o.n BETWEEN e.first_n AND e.last_n
+            WHERE e.found = CASE WHEN e.start_id = e.end_id THEN 1 ELSE 2 END
+            GROUP BY e.id, o.content_hash
+         )
+         SELECT e.id FROM endpoints e
+          WHERE e.found = CASE WHEN e.start_id = e.end_id THEN 1 ELSE 2 END
+            AND EXISTS (SELECT 1 FROM memory_threads WHERE id = ? AND owner_id = ?)
+            AND NOT EXISTS (
+              SELECT 1 FROM required r LEFT JOIN live l ON l.key = r.content_hash
+               WHERE r.id = e.id AND (r.content_hash IS NULL OR l.n IS NULL OR l.n < r.n)
+            )`,
+      )
+      .all(requested, live, input.threadId, input.threadId, input.accountId) as Array<{
+      id: string;
+    }>;
+    return new Set(rows.map((row) => row.id));
   }
 
   // Read the latest (highest-version) reflection for an EXACT scope match. Absent
@@ -603,14 +916,16 @@ export class SqliteMemoryStore implements MemoryStore {
   // per scope. Reflections are stored at a single target level (project-only or
   // resource-only — reflectionTargetScope), so each returned scope carries exactly
   // the level(s) that were set.
-  async listActiveReflectionScopes(accountId: string): Promise<ReflectionScope[]> {
+  async listActiveReflectionScopes(accountId: string, limit = 512): Promise<ReflectionScope[]> {
     const rows = this.db.$sqlite
       .prepare(
         `SELECT DISTINCT project_id, resource_id, thread_id
            FROM memory_reflections
-          WHERE owner_id = ? AND status = 'active'`,
+          WHERE owner_id = ? AND status = 'active'
+          ORDER BY project_id, resource_id, thread_id
+          LIMIT ?`,
       )
-      .all(accountId) as Array<{
+      .all(accountId, Math.max(1, Math.floor(limit))) as Array<{
       project_id: string | null;
       resource_id: string | null;
       thread_id: string | null;
@@ -647,6 +962,62 @@ export class SqliteMemoryStore implements MemoryStore {
       .limit(1)
       .get();
     return row?.version ?? 0;
+  }
+
+  async commitReflectionJob(
+    jobId: string,
+    input: MemoryReflectionJobCommitInput,
+  ): Promise<MemoryReflectionJobCommitResult | null> {
+    const db = this.db.$sqlite;
+    return db.transaction(() => {
+      const scopeId = encodeScopeId(input.target);
+      const claimed = db
+        .prepare(
+          `UPDATE memory_jobs
+              SET status = 'done', error = NULL, updated_at = ?
+            WHERE id = ? AND type = 'reflector' AND scope_id = ? AND status = 'running'
+          RETURNING id`,
+        )
+        .get(input.now.getTime(), jobId, scopeId) as { id: string } | undefined;
+      if (claimed === undefined) return null;
+
+      const facts = this.reconcileFactsSync({
+        accountId: input.target.accountId,
+        scope: {
+          ...(input.target.projectId !== undefined ? { projectId: input.target.projectId } : {}),
+          ...(input.target.resourceId !== undefined ? { resourceId: input.target.resourceId } : {}),
+          ...(input.target.threadId !== undefined ? { threadId: input.target.threadId } : {}),
+        },
+        facts: input.facts,
+        now: input.now,
+      });
+
+      let reflectionId: string | null = null;
+      if (input.reflection.action === "archive") {
+        this.db
+          .update(memoryReflections)
+          .set({ status: "archived" })
+          .where(and(reflectionScopeWhere(input.target), eq(memoryReflections.status, "active")))
+          .run();
+      } else if (input.reflection.action === "upsert") {
+        reflectionId = this.genId();
+        this.db
+          .insert(memoryReflections)
+          .values({
+            id: reflectionId,
+            ownerId: input.target.accountId,
+            projectId: input.target.projectId ?? null,
+            resourceId: input.target.resourceId ?? null,
+            threadId: input.target.threadId ?? null,
+            reflectionText: input.reflection.reflectionText,
+            version: input.reflection.version,
+            tokenEstimate: input.reflection.tokenEstimate,
+            updatedAt: input.reflection.updatedAt,
+          })
+          .run();
+      }
+      return { reflectionId, facts };
+    })();
   }
 
   // Update a background job's lifecycle status (+ optional error on failure).
@@ -883,8 +1254,22 @@ export class SqliteMemoryStore implements MemoryStore {
   async archiveObservations(input: { accountId: string; ids: string[]; now: Date }): Promise<void> {
     if (input.ids.length === 0) return;
     const placeholders = input.ids.map(() => "?").join(", ");
-    this.db.$sqlite
-      .prepare(
+    const db = this.db.$sqlite;
+    db.transaction(() => {
+      const rows = db
+        .prepare(
+          `SELECT DISTINCT t.project_id, t.resource_id, t.id AS thread_id
+             FROM memory_observations o
+             JOIN memory_threads t ON t.id = o.thread_id
+            WHERE o.id IN (${placeholders})
+              AND o.status = 'active' AND t.owner_id = ?`,
+        )
+        .all(...input.ids, input.accountId) as Array<{
+        project_id: string | null;
+        resource_id: string | null;
+        thread_id: string;
+      }>;
+      db.prepare(
         `UPDATE memory_observations
             SET status = 'archived', archived_at = ?
           WHERE id IN (${placeholders})
@@ -892,8 +1277,47 @@ export class SqliteMemoryStore implements MemoryStore {
             AND thread_id IN (
               SELECT id FROM memory_threads WHERE owner_id = ?
             )`,
-      )
-      .run(input.now.getTime(), ...input.ids, input.accountId);
+      ).run(input.now.getTime(), ...input.ids, input.accountId);
+
+      const scopes = new Map<string, ReflectionScope>();
+      for (const row of rows) {
+        const targets: ReflectionScope[] = [];
+        if (row.project_id !== null) {
+          targets.push({ accountId: input.accountId, projectId: row.project_id });
+        }
+        if (row.resource_id !== null) {
+          targets.push({ accountId: input.accountId, resourceId: row.resource_id });
+        }
+        if (targets.length === 0) {
+          targets.push({ accountId: input.accountId, threadId: row.thread_id });
+        }
+        for (const target of targets) scopes.set(encodeScopeId(target), target);
+      }
+      for (const [scopeId, target] of scopes) {
+        db.prepare(
+          `UPDATE memory_reflections
+              SET status = 'archived'
+            WHERE owner_id = ?
+              AND project_id IS ? AND resource_id IS ? AND thread_id IS ?
+              AND status = 'active'`,
+        ).run(
+          target.accountId,
+          target.projectId ?? null,
+          target.resourceId ?? null,
+          target.threadId ?? null,
+        );
+        db.prepare(
+          `UPDATE memory_jobs
+              SET status = 'failed', error = 'superseded by observation archive', updated_at = ?
+            WHERE type = 'reflector' AND scope_id = ? AND status = 'running'`,
+        ).run(input.now.getTime(), scopeId);
+        db.prepare(
+          `INSERT OR IGNORE INTO memory_jobs
+             (id, type, scope_id, status, error, created_at, updated_at)
+           VALUES (?, 'reflector', ?, 'pending', NULL, ?, ?)`,
+        ).run(this.genId(), scopeId, input.now.getTime(), input.now.getTime());
+      }
+    })();
   }
 
   // docs/12 P5 trigger — the buffer-flush gate, computed in ONE account-grouped read.
@@ -912,8 +1336,11 @@ export class SqliteMemoryStore implements MemoryStore {
     triggerObservations: number;
     triggerIntervalS: number;
     nowMs: number;
+    limit?: number;
   }): Promise<string[]> {
     const intervalCutoff = input.nowMs - input.triggerIntervalS * 1000;
+    const limit = input.limit === undefined ? 100 : Math.max(0, input.limit);
+    if (limit === 0) return [];
     const rows = this.db.$sqlite
       .prepare(
         `WITH decay_sweeps AS MATERIALIZED (
@@ -933,21 +1360,23 @@ export class SqliteMemoryStore implements MemoryStore {
            LEFT JOIN decay_sweeps ds ON ds.owner_id = mt.owner_id
           WHERE o.status = 'active'
             AND mt.owner_id IS NOT NULL
-          GROUP BY mt.owner_id, ds.last_sweep`,
+           GROUP BY mt.owner_id, ds.last_sweep
+          HAVING COUNT(o.id) > 0
+             AND (
+               SUM(CASE WHEN o.observed_at > COALESCE(ds.last_sweep, 0) THEN 1 ELSE 0 END) >= ?
+               OR ds.last_sweep IS NULL
+               OR ds.last_sweep <= ?
+             )
+          ORDER BY mt.owner_id
+          LIMIT ?`,
       )
-      .all() as Array<{
+      .all(input.triggerObservations, intervalCutoff, limit) as Array<{
       owner_id: string;
       last_sweep: number | null;
       active_total: number;
       new_since_sweep: number;
     }>;
-    return rows
-      .filter((row) => {
-        const countGate = row.new_since_sweep >= input.triggerObservations;
-        const timeGate = row.last_sweep === null || row.last_sweep <= intervalCutoff;
-        return (row.active_total > 0 && countGate) || (row.active_total > 0 && timeGate);
-      })
-      .map((row) => row.owner_id);
+    return rows.map((row) => row.owner_id);
   }
 
   // docs/12 P6 — fact ingest with deterministic dedup + same-subject supersede,
@@ -964,12 +1393,12 @@ export class SqliteMemoryStore implements MemoryStore {
   //      (Graphiti borrow — decay hides, retention deletes). A skipped (deduped)
   //      fact triggers no supersede (changes === 0). The owner_id guard is the
   //      tenant boundary; every predicate carries it.
-  async insertFactsReconciled(input: {
+  private reconcileFactsSync(input: {
     accountId: string;
     scope: { projectId?: string; resourceId?: string; threadId?: string };
     facts: MemoryFactInput[];
     now: Date;
-  }): Promise<{ insertedIds: string[]; supersededIds: string[]; resurrectedIds: string[] }> {
+  }): MemoryFactReconcileResult {
     if (input.facts.length === 0) return { insertedIds: [], supersededIds: [], resurrectedIds: [] };
     const nowMs = input.now.getTime();
     const insertOne = this.db.$sqlite.prepare(
@@ -1124,6 +1553,15 @@ export class SqliteMemoryStore implements MemoryStore {
     return runBatch(input.facts);
   }
 
+  async insertFactsReconciled(input: {
+    accountId: string;
+    scope: { projectId?: string; resourceId?: string; threadId?: string };
+    facts: MemoryFactInput[];
+    now: Date;
+  }): Promise<MemoryFactReconcileResult> {
+    return this.reconcileFactsSync(input);
+  }
+
   // docs/12 P6 — fact READ half. The account's still-alive facts: owner_id =
   // accountId AND status='active' AND expired_at IS NULL (the single predicate
   // that hides superseded/archived facts without deleting them), optionally
@@ -1150,6 +1588,47 @@ export class SqliteMemoryStore implements MemoryStore {
       .orderBy(asc(memoryFacts.createdAt), asc(memoryFacts.id))
       .all();
     return rows.map(sqliteRowToFact);
+  }
+
+  async listInjectionFacts(input: {
+    accountId: string;
+    projectId?: string;
+    resourceId?: string;
+    threadId?: string;
+    limit: number;
+    score?: {
+      nowMs: number;
+      half_life_s: number;
+      importance_floor: number;
+      importance_ceil: number;
+      access_weight: number;
+    };
+  }): Promise<Fact[]> {
+    const clauses: SQL[] = [
+      eq(memoryFacts.ownerId, input.accountId),
+      eq(memoryFacts.status, "active"),
+      isNull(memoryFacts.expiredAt),
+    ];
+    if (input.projectId !== undefined) clauses.push(eq(memoryFacts.projectId, input.projectId));
+    if (input.resourceId !== undefined) clauses.push(eq(memoryFacts.resourceId, input.resourceId));
+    if (input.threadId !== undefined) clauses.push(eq(memoryFacts.threadId, input.threadId));
+    const score = input.score;
+    const scoreOrder =
+      score === undefined
+        ? undefined
+        : sql`pow(0.5, max(0, (${score.nowMs} - COALESCE(${memoryFacts.referencedAt}, ${memoryFacts.createdAt})) / 1000.0) / ${score.half_life_s}) * (min(max(${memoryFacts.importance}, ${score.importance_floor}), ${score.importance_ceil}) + ${score.access_weight} * ln(1 + ${memoryFacts.referenceCount}))`;
+    return this.db
+      .select()
+      .from(memoryFacts)
+      .where(and(...clauses) as SQL)
+      .orderBy(
+        scoreOrder === undefined ? desc(memoryFacts.validFrom) : desc(scoreOrder),
+        desc(memoryFacts.validFrom),
+        desc(memoryFacts.id),
+      )
+      .limit(input.limit)
+      .all()
+      .map(sqliteRowToFact);
   }
 
   // =========================================================================
@@ -1946,7 +2425,20 @@ export class SqliteMemoryStore implements MemoryStore {
     const row = this.db
       .select({ value: count() })
       .from(memoryMessages)
-      .where(lt(memoryMessages.createdAt, new Date(olderThanMs)))
+      .where(
+        and(
+          lt(memoryMessages.createdAt, new Date(olderThanMs)),
+          sql`EXISTS (
+            SELECT 1 FROM memory_threads mt
+             WHERE mt.id = ${memoryMessages.threadId}
+               AND mt.observer_frontier_at IS NOT NULL
+               AND (
+                 ${memoryMessages.createdAt} < mt.observer_frontier_at OR
+                 (${memoryMessages.createdAt} = mt.observer_frontier_at AND ${memoryMessages.id} <= mt.observer_frontier_id)
+               )
+          )`,
+        ),
+      )
       .get();
     return row?.value ?? 0;
   }
@@ -1956,7 +2448,18 @@ export class SqliteMemoryStore implements MemoryStore {
     limit: number,
     afterId?: string,
   ): Promise<MemoryMessageArchiveRow[]> {
-    const conds: SQL[] = [lt(memoryMessages.createdAt, new Date(olderThanMs))];
+    const conds: SQL[] = [
+      lt(memoryMessages.createdAt, new Date(olderThanMs)),
+      sql`EXISTS (
+        SELECT 1 FROM memory_threads mt
+         WHERE mt.id = ${memoryMessages.threadId}
+           AND mt.observer_frontier_at IS NOT NULL
+           AND (
+             ${memoryMessages.createdAt} < mt.observer_frontier_at OR
+             (${memoryMessages.createdAt} = mt.observer_frontier_at AND ${memoryMessages.id} <= mt.observer_frontier_id)
+           )
+      )`,
+    ];
     if (afterId !== undefined) conds.push(gt(memoryMessages.id, afterId));
     return this.db
       .select()
@@ -1990,15 +2493,23 @@ export class SqliteMemoryStore implements MemoryStore {
       db.prepare(
         `INSERT OR IGNORE INTO _helm_pruned_message_threads (thread_id)
          SELECT DISTINCT thread_id FROM memory_messages WHERE id IN (
-           SELECT id FROM memory_messages WHERE created_at < ?
-           ORDER BY created_at, id LIMIT ?
+           SELECT m.id FROM memory_messages m
+           JOIN memory_threads t ON t.id = m.thread_id
+           WHERE m.created_at < ? AND t.observer_frontier_at IS NOT NULL
+             AND (m.created_at < t.observer_frontier_at OR
+                  (m.created_at = t.observer_frontier_at AND m.id <= t.observer_frontier_id))
+           ORDER BY m.created_at, m.id LIMIT ?
          )`,
       ).run(olderThanMs, limit);
       const res = db
         .prepare(
           `DELETE FROM memory_messages WHERE id IN (
-             SELECT id FROM memory_messages WHERE created_at < ?
-             ORDER BY created_at, id LIMIT ?
+             SELECT m.id FROM memory_messages m
+             JOIN memory_threads t ON t.id = m.thread_id
+             WHERE m.created_at < ? AND t.observer_frontier_at IS NOT NULL
+               AND (m.created_at < t.observer_frontier_at OR
+                    (m.created_at = t.observer_frontier_at AND m.id <= t.observer_frontier_id))
+             ORDER BY m.created_at, m.id LIMIT ?
            )`,
         )
         .run(olderThanMs, limit);
@@ -2076,8 +2587,13 @@ export class SqliteMemoryStore implements MemoryStore {
     const where = observationScopeWhere(scope);
     if (where === null) return 0;
     return (
-      this.db.select({ n: sql<number>`count(*)` }).from(memoryObservations).where(where).get()?.n ??
-      0
+      this.db
+        .select({ n: sql<number>`count(*)` })
+        .from(memoryObservations)
+        .where(
+          and(where, eq(memoryObservations.status, "active"), isNull(memoryObservations.expiredAt)),
+        )
+        .get()?.n ?? 0
     );
   }
 

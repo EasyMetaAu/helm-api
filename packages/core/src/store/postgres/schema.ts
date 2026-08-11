@@ -244,6 +244,8 @@ export const memoryThreads = pgTable("memory_threads", {
   lastMessageAt: bigint("last_message_at", { mode: "number" }),
   observationCount: integer("observation_count").notNull().default(0),
   lastObservationAt: bigint("last_observation_at", { mode: "number" }),
+  observerFrontierAt: bigint("observer_frontier_at", { mode: "number" }),
+  observerFrontierId: text("observer_frontier_id"),
   createdAt: bigint("created_at", { mode: "number" }).notNull(),
   updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
 });

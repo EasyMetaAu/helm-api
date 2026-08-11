@@ -11,6 +11,8 @@ export type {
   InsertTelemetryInput,
   KeyStore,
   MemoryJobStatus,
+  MemoryObserverCursor,
+  MemoryObserverPage,
   MemoryStore,
   OAuthQuotaStore,
   OAuthResetPeriodStore,

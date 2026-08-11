@@ -588,7 +588,17 @@ export function createSseCapture(
     tail = "";
   };
   const joinedFullValue = () => {
-    if (fullValue === undefined) fullValue = parts.join("");
+    if (fullValue !== undefined) return fullValue;
+    fullValue = parts.join("");
+    // `parts.join("")` necessarily creates a second full-sized string. Once it
+    // exists, discard the chunk array and charge only the returned string; keeping
+    // both live for the rest of the request turns a bounded capture into an avoidable
+    // double peak (especially when persistPayload immediately parses/compresses it).
+    const joinedReservation = fullValue.length * 2;
+    retainedSseCaptureBytes += joinedReservation - fullReservation;
+    fullReservation = joinedReservation;
+    fullBytes = Buffer.byteLength(fullValue, "utf8");
+    parts.length = 0;
     return fullValue;
   };
   return {

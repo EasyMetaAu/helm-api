@@ -117,14 +117,12 @@ review—it is never reassigned automatically.
 | Mode | Memory reads | Request/response writes | Observer enqueue |
 |---|---:|---:|---:|
 | `off` | none | none | none |
-| `observe` | none on the request path | raw user/assistant/tool turns | **not directly**; quiet uncovered threads are picked up by the interval idle-flush sweep |
+| `observe` | none on the request path | raw user/assistant/tool turns | one coalesced observer job after outbound persistence |
 | `inject` | reflections, optional facts, thread observations, and raw rows needed for dedup | same raw turns as `observe` | one best-effort observer write-back job when a thread exists |
 
-`observe` is deliberately write-only. It wakes the worker after the outbound
-write settles, but waking drains jobs; it does not create an observer job. A
-pure `observe` thread therefore forms an observation through the periodic
-idle-flush candidate scan after it becomes quiet, unless another path already
-queued work for that thread.
+`observe` remains write-only on the request path. After outbound persistence it
+best-effort enqueues the same coalesced observer job used by `inject`, then wakes
+the worker. The interval idle-flush scan remains a restart/failure backstop.
 
 `inject` loads memory before persisting the current inbound turn. This prevents
 same-turn self-injection. The normal lifecycle is:
@@ -232,10 +230,12 @@ longer forces translation mode.
 `tool` roles. System and developer messages are execution policy and are not
 long-term memory inputs. Multipart content is stored as JSON text.
 
-Raw ingestion is idempotent on
+Raw ingestion currently deduplicates on
 `(thread_id, message_index, role, content_hash)`, where `content_hash` is the
 SHA-256 of the serialized content. Batch append is used by the real adapters to
-avoid one synchronous SQLite commit per message.
+avoid one synchronous SQLite commit per message. `message_index` is local to one
+request transcript and is not a durable thread sequence; Observer ordering and
+cursors therefore use the server-owned `(created_at, id)` tuple.
 
 The outbound path also best-effort stamps the actually served model alias on the
 thread. The Observer uses that alias to resolve catalog pricing and context
@@ -243,8 +243,12 @@ limits for auto-compaction.
 
 ### Observer
 
-`runObserverJob()` reads raw messages and all observation coverage ranges,
-selects a contiguous uncovered segment, and may write one dated observation.
+`runObserverJob()` reads the oldest rows after the durable thread frontier. One
+page is bounded to 512 rows, 1 MiB of decoded input, and 64K estimated tokens. A
+single larger row is replaced by a small role + SHA-256 placeholder so progress
+does not stall. The observation insert and frontier compare-and-swap commit in
+one transaction; a stale worker cannot create a duplicate range. Remaining rows
+enqueue a successor job, so a 50K-message thread drains page by page.
 It has three compaction triggers:
 
 - uncovered segment size (internal default `2048` tokens);
@@ -255,6 +259,8 @@ It has three compaction triggers:
 Optional overrides live in `memory.compaction`. The policy derives the keep
 boundary from catalog pricing, the served model, existing active observations,
 and measured prior retention. Raw source rows are never deleted by compaction.
+Optional raw cleanup may delete only rows at or behind the durable Observer
+frontier; uncovered rows always remain.
 
 The gateway summarizer remembers user-authored content only. With
 `memory.llm.enabled=false`, it uses deterministic concatenate/truncate behavior
@@ -273,8 +279,12 @@ retried once when empty, and remains fail-open. See
 After an Observer writes an observation, the worker promotes a reflector job
 only when project or resource scope exists. The target is project first, else
 resource. The Reflector aggregates active observations across all threads in
-that target scope, merges a stable reflection, and increments the version only
-when text changes.
+that target scope. Each rebuild reads at most the newest 512 active/unexpired
+observations and increments the version only when text changes. Forgetting
+rebuilds from that bounded active set without feeding the old reflection back to
+the model. Reconciled facts, the reflection write/archive action, and job
+completion publish in one fenced transaction, so an in-flight stale Reflector
+cannot resurrect archived text.
 
 When forgetting is enabled and the active-observation token sum reaches
 `consolidate.trigger_tokens`, the Reflector also extracts facts. Observation
@@ -350,6 +360,7 @@ columns are:
 memory_threads
   id, owner_id, project_id, resource_id, last_served_model,
   message_count, last_message_at, observation_count, last_observation_at,
+  observer_frontier_at, observer_frontier_id,
   created_at, updated_at
 
 memory_messages
@@ -376,11 +387,20 @@ memory_jobs
   error, created_at, updated_at
 ```
 
-`source_message_range` remains after observation pruning so raw coverage does
-not resurrect. `memory_facts.owner_id` is its direct tenant boundary because a
+`source_message_range` remains after observation pruning for audit; the durable
+thread frontier prevents covered raw rows from being observed again after raw
+cleanup. `memory_facts.owner_id` is its direct tenant boundary because a
 project/resource fact need not have a thread parent. Reflection `owner_id` is
 nullable for legacy schema compatibility; current account-scoped reads reject
 legacy null-owner rows.
+
+The frontier migration first reconciles denormalized thread counters. Legacy
+raw rows keep a null frontier and drain through the same bounded
+`(created_at,id)` pages as new traffic; migration never makes uncovered content
+cleanup-eligible. Existing derived observations remain, so the bounded backfill
+may temporarily overlap an older summary whose original request-local ordering
+cannot be reconstructed exactly. This deliberately prefers over-retention to
+silent loss.
 
 ## Observability and accounting
 

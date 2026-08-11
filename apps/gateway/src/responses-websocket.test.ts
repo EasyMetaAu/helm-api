@@ -83,6 +83,10 @@ async function startBridge(
     memoryAdmission?: ReturnType<typeof createBodyMemoryAdmission>;
     ingressAdmission?: ReturnType<typeof createBodyMemoryAdmission>;
     preflightTimeoutMs?: number;
+    maxPayloadBytes?: number;
+    maxPreflightRequests?: number;
+    maxSseFrameBytes?: number;
+    idleSessionTimeoutMs?: number;
   } = {},
 ) {
   const server = createServer((_req, res) => {
@@ -102,6 +106,10 @@ async function startBridge(
     memoryAdmission: options.memoryAdmission,
     ingressAdmission: options.ingressAdmission,
     preflightTimeoutMs: options.preflightTimeoutMs,
+    maxPayloadBytes: options.maxPayloadBytes,
+    maxPreflightRequests: options.maxPreflightRequests,
+    maxSseFrameBytes: options.maxSseFrameBytes,
+    idleSessionTimeoutMs: options.idleSessionTimeoutMs,
   });
   openBridges.push(bridge);
   server.listen(0, "127.0.0.1");
@@ -126,6 +134,53 @@ async function connect(url: string, headers: Record<string, string> = {}): Promi
 }
 
 describe("Responses websocket bridge", () => {
+  it("rejects an oversized client frame before the response handler runs", async () => {
+    const fetch = vi.fn(() => {
+      throw new Error("oversized frame must not reach the response handler");
+    });
+    const baseUrl = await startBridge(fetch, undefined, { maxPayloadBytes: 10 });
+    const socket = await connect(`${baseUrl}/v1/responses`);
+    const closed = once(socket, "close");
+
+    socket.send("01234567890");
+
+    const [code] = await closed;
+    expect(code).toBe(1009);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("caps active clients and releases the slot after close", async () => {
+    const baseUrl = await startBridge(
+      () =>
+        new Response(
+          'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+      undefined,
+      { maxPreflightRequests: 1 },
+    );
+    const first = await connect(`${baseUrl}/v1/responses`);
+
+    const rejected = new WebSocket(`${baseUrl}/v1/responses`, {
+      headers: {
+        authorization: "Bearer helm-test-key",
+        "user-agent": "codex_cli_rs/0.144.1",
+      },
+    });
+    rejected.on("error", () => {});
+    openSockets.push(rejected);
+    const [, response] = (await once(rejected, "unexpected-response")) as [
+      unknown,
+      { statusCode: number },
+    ];
+    expect(response.statusCode).toBe(503);
+
+    const firstClosed = once(first, "close");
+    first.close();
+    await firstClosed;
+    await connect(`${baseUrl}/v1/responses`);
+  });
+
   it("does not reserve a maximum frame for idle websocket connections", async () => {
     const ingressAdmission = createBodyMemoryAdmission({
       activeRequestBytes: 20,
@@ -361,6 +416,52 @@ describe("Responses websocket bridge", () => {
     expect(isResponsesWebSocketPath(path)).toBe(false);
   });
 
+  it("rejects upgrades beyond the bounded preflight capacity", async () => {
+    let resolveModels!: (response: Response) => void;
+    const pendingModels = new Promise<Response>((resolve) => {
+      resolveModels = resolve;
+    });
+    const baseUrl = await startBridge(
+      () => {
+        throw new Error("response handler must not run");
+      },
+      () => pendingModels,
+      { maxPreflightRequests: 1 },
+    );
+    const first = new WebSocket(`${baseUrl}/v1/responses`, {
+      headers: { authorization: "Bearer helm-test-key", "user-agent": "codex_cli_rs/0.144.1" },
+    });
+    first.on("error", () => {});
+    openSockets.push(first);
+    for (
+      let attempt = 0;
+      attempt < 40 && responsesWebSocketPreflightPending() === 0;
+      attempt += 1
+    ) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(responsesWebSocketPreflightPending()).toBe(1);
+
+    const rejected = new WebSocket(`${baseUrl}/v1/responses`, {
+      headers: { authorization: "Bearer helm-test-key", "user-agent": "codex_cli_rs/0.144.1" },
+    });
+    rejected.on("error", () => {});
+    openSockets.push(rejected);
+    const [, response] = (await once(rejected, "unexpected-response")) as [
+      unknown,
+      { statusCode: number },
+    ];
+    expect(response.statusCode).toBe(503);
+
+    const opened = once(first, "open");
+    resolveModels(
+      new Response(JSON.stringify({ data: [] }), {
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await opened;
+  });
+
   it("handles an upgrade socket reset while async preflight is pending", async () => {
     let upgradeListener: Parameters<ResponsesWebSocketUpgradeServer["on"]>[1] | undefined;
     const server: ResponsesWebSocketUpgradeServer = {
@@ -480,6 +581,42 @@ describe("Responses websocket bridge", () => {
     expect(captured[0]?.headers.get("upgrade")).toBeNull();
     expect(captured[0]?.headers.get("sec-websocket-key")).toBeNull();
     expect(captured[0]?.headers.get("accept")).toBe("text/event-stream");
+  });
+
+  it("resets the idle deadline for accepted turns and closes the upstream session on expiry", async () => {
+    let closeSessionCalls = 0;
+    let closedSessionId = "";
+    const baseUrl = await startBridge(
+      () =>
+        new Response(
+          'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+      undefined,
+      {
+        idleSessionTimeoutMs: 100,
+        closeSession: (sessionId) => {
+          closeSessionCalls += 1;
+          closedSessionId = sessionId;
+        },
+      },
+    );
+    const socket = await connect(`${baseUrl}/v1/responses`);
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await collectTurn(socket, { type: "response.create", input: [], stream: true });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+
+    const [code] = (await Promise.race([
+      once(socket, "close"),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("idle close timed out")), 250),
+      ),
+    ])) as [number, Buffer];
+    expect(code).toBe(1001);
+    expect(closeSessionCalls).toBe(1);
+    expect(closedSessionId).not.toBe("");
   });
 
   it("closes a connection that pipelines a second active response without injecting an error", async () => {
@@ -999,6 +1136,40 @@ describe("Responses websocket bridge", () => {
           }),
           { headers: { "content-type": "application/json" } },
         ),
+    );
+    const socket = await connect(`${baseUrl}/v1/responses`);
+
+    const events = await collectTurn(socket, {
+      type: "response.create",
+      model: "gpt-5.6-sol",
+      input: [],
+      stream: true,
+    });
+
+    expect(events.at(-1)).toMatchObject({
+      type: "error",
+      error: { code: "websocket_bridge_error" },
+    });
+    expect(cancelled).toBe(true);
+  });
+
+  it("cancels an upstream stream whose SSE frame exceeds the configured bound", async () => {
+    let cancelled = false;
+    const baseUrl = await startBridge(
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(`data: ${"x".repeat(128)}`));
+            },
+            cancel() {
+              cancelled = true;
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+      undefined,
+      { maxSseFrameBytes: 64 },
     );
     const socket = await connect(`${baseUrl}/v1/responses`);
 

@@ -7,6 +7,7 @@ import {
   type ProxyConfig,
   proxyConfigToUrl,
   type ResponseWorkAdmission,
+  runtimeMemoryBudget,
   runtimeResponseWorkAdmission,
 } from "@helm/core";
 import { HttpsProxyAgent } from "https-proxy-agent";
@@ -231,8 +232,11 @@ export function createCodexResponsesWebSocketConnector(
 ): CodexResponsesWebSocketConnector {
   const agent = codexWebSocketAgent(options.proxy);
   const connectTimeoutMs = codexWebSocketConnectTimeoutMs(options.timeoutMs);
-  const maxPayloadBytes = Math.max(0, Math.floor(options.maxPayloadBytes ?? 0));
-  const maxPendingBytes = Math.max(0, Math.floor(options.maxPendingBytes ?? 0));
+  const maxPayloadBytes = Math.max(
+    1,
+    Math.floor(options.maxPayloadBytes ?? runtimeMemoryBudget().responseCaptureBytes),
+  );
+  const maxPendingBytes = Math.max(1, Math.floor(options.maxPendingBytes ?? maxPayloadBytes));
   const responseWorkAdmission = options.responseWorkAdmission ?? runtimeResponseWorkAdmission();
 
   return async ({ url, headers, signal }) =>

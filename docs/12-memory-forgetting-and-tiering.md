@@ -209,8 +209,8 @@ The sweep:
 3. archives ids in chunks of 50;
 4. stops at `max_iterations`, `max_wallclock_s`, or
    `max_consecutive_errors`;
-5. enqueues reflector rebuilds for current active-reflection scopes after any
-   archival.
+5. in the same database transaction, enqueues coalesced reflector rebuilds for
+   the exact project/resource/thread scopes whose observations were archived.
 
 The scan itself is bounded at `max_iterations * 50`. Failures over-retain and
 log; they do not affect an in-flight model request.
@@ -220,9 +220,14 @@ log; they do not affect an in-flight model request.
 A reflection is derived from active observations. Archiving observations
 without rebuilding would keep forgotten text in the long tier.
 
-After a successful decay archive, the job lists active reflection scopes and
-enqueues reflector work. The Reflector always filters to active/unexpired
-observations:
+Each archive batch derives its affected scopes from the archived observation
+rows and persists the reflector jobs atomically. It never scans or materializes
+all scopes for an account, so a 513th scope cannot starve behind a fixed first
+page. The same transaction immediately archives current reflections for every
+affected project/resource target and fences any running stale Reflector before
+queuing its successor. A Reflector publishes reconciled facts, its reflection
+action, and job completion in one job-status-fenced transaction. The Reflector
+always filters to active/unexpired observations:
 
 - if observations remain, it merges the reduced set;
 - if none remain and forgetting is enabled, it archives all reflection versions
@@ -281,6 +286,10 @@ It computes strict age cutoffs and delegates to the active adapter:
 - facts with `expired_at` older than `facts_expired_days` are hard-deleted;
 - reflections are untouched by automatic retention;
 - raw messages are untouched by this forgetting retention function.
+
+Raw-message cleanup is a separate runtime retention control. It may prune only
+rows at or behind a thread's durable Observer frontier and in bounded batches;
+age alone never authorizes deleting uncovered raw turns.
 
 Method/result names still use `observationsDeleted`, but that count represents
 observation rows changed to tombstones in the real adapters.

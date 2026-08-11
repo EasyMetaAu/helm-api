@@ -7,6 +7,7 @@ import {
   type BudgetProbe,
   convertOpenAIStreamToAnthropic,
   convertOpenAIStreamToResponses,
+  createSSEIncompleteFrameGuard,
   type ExecutionResult,
   enqueueObserverWriteback,
   geminiTransformer,
@@ -16,6 +17,7 @@ import {
   type IRResponse,
   injectIntoIR,
   type MemoryScope,
+  nextSSEFrameBoundary,
   type ObserveDeps,
   observeInbound,
   observeOutbound,
@@ -24,7 +26,9 @@ import {
   type ResponseWorkAdmission,
   type RouteOptions,
   resolveMemoryMode,
+  runtimeMemoryBudget,
   runtimeResponseWorkAdmission,
+  splitCompleteSSEFrames,
   UpstreamError,
 } from "@helm/core";
 import type { InternalRequest, MemoryDecision, Protocol } from "@helm/shared";
@@ -473,24 +477,29 @@ function openAIBodyToIR(body: unknown): IRResponse {
 // (fail-open) rather than 5xx'ing the stream.
 async function* parseOpenAISSE(raw: AsyncIterable<string>): AsyncIterable<Record<string, unknown>> {
   let buffer = "";
-  for await (const piece of raw) {
-    buffer += piece.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-    let sep = buffer.indexOf("\n\n");
-    while (sep !== -1) {
-      const event = buffer.slice(0, sep);
-      buffer = buffer.slice(sep + 2);
-      const chunk = parseFrame(event);
-      if (chunk !== null) yield chunk;
-      sep = buffer.indexOf("\n\n");
+  const frameGuard = createSSEIncompleteFrameGuard(runtimeResponseWorkAdmission());
+  try {
+    for await (const piece of raw) {
+      frameGuard.resize(Buffer.byteLength(buffer) + Buffer.byteLength(piece));
+      buffer += piece;
+      const { frames, tail } = splitCompleteSSEFrames(buffer);
+      buffer = tail;
+      frameGuard.resize(Buffer.byteLength(buffer));
+      for (const event of frames) {
+        const chunk = parseFrame(event);
+        if (chunk !== null) yield chunk;
+      }
     }
+    const tail = parseFrame(buffer);
+    if (tail !== null) yield tail;
+  } finally {
+    frameGuard.release();
   }
-  const tail = parseFrame(buffer);
-  if (tail !== null) yield tail;
 }
 
 function parseFrame(event: string): Record<string, unknown> | null {
   const dataLines: string[] = [];
-  for (const line of event.split("\n")) {
+  for (const line of event.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n")) {
     const trimmed = line.trimStart();
     if (!trimmed.startsWith("data:")) continue;
     dataLines.push(trimmed.slice(5).replace(/^ /, ""));
@@ -546,17 +555,6 @@ function parseRawSSEFrame(event: string, raw: string): RawSSEFrame | null {
   return { event: evtName, data: dataLines.join("\n"), raw };
 }
 
-function nextSSEBoundary(buffer: string): { index: number; length: number } | null {
-  const candidates = [
-    { index: buffer.indexOf("\r\n\r\n"), length: 4 },
-    { index: buffer.indexOf("\n\n"), length: 2 },
-    { index: buffer.indexOf("\r\r"), length: 2 },
-  ].filter((candidate) => candidate.index >= 0);
-  if (candidates.length === 0) return null;
-  candidates.sort((a, b) => a.index - b.index || b.length - a.length);
-  return candidates[0] ?? null;
-}
-
 function assertNativeSSEFrameFits(frame: string, maxFrameBytes: number): void {
   if (maxFrameBytes === 0 || Buffer.byteLength(frame) <= maxFrameBytes) return;
   throw new UpstreamError("upstream_error", "upstream SSE frame exceeds the runtime memory budget");
@@ -587,7 +585,7 @@ export async function* splitSSEFrames(
     for await (const piece of raw) {
       resize(Buffer.byteLength(buffer) + Buffer.byteLength(piece));
       buffer += piece;
-      let sep = nextSSEBoundary(buffer);
+      let sep = nextSSEFrameBoundary(buffer);
       while (sep !== null) {
         const rawFrame = buffer.slice(0, sep.index + sep.length);
         assertNativeSSEFrameFits(rawFrame, maxFrameBytes);
@@ -595,7 +593,7 @@ export async function* splitSSEFrames(
         buffer = buffer.slice(sep.index + sep.length);
         if (frame !== null) yield frame;
         resize(Buffer.byteLength(buffer));
-        sep = nextSSEBoundary(buffer);
+        sep = nextSSEFrameBoundary(buffer);
       }
       assertNativeSSEFrameFits(buffer, maxFrameBytes);
     }
@@ -611,7 +609,35 @@ export async function* splitSSEFrames(
 // payload for observeOutbound on the native-passthrough stream (#217 Phase 2). Reads
 // `delta.type==='text_delta' → delta.text` off the parsed frame data. Fail-open: a
 // non-JSON / non-text-delta frame contributes nothing. NEVER throws.
-function accumulateAnthropicAssistantText(buffer: { text: string }, dataPayload: string): void {
+export interface AssistantTextAccumulator {
+  text: string;
+  limited: boolean;
+  push(text: string): void;
+}
+
+export function createAssistantTextAccumulator(
+  maxBytes = runtimeMemoryBudget().responseCaptureBytes,
+): AssistantTextAccumulator {
+  const limit = Math.max(0, Math.floor(maxBytes));
+  return {
+    text: "",
+    limited: false,
+    push(text) {
+      if (this.limited) return;
+      if (Buffer.byteLength(this.text) + Buffer.byteLength(text) > limit) {
+        this.text = "";
+        this.limited = true;
+        return;
+      }
+      this.text += text;
+    },
+  };
+}
+
+function accumulateAnthropicAssistantText(
+  buffer: AssistantTextAccumulator,
+  dataPayload: string,
+): void {
   if (dataPayload === "" || dataPayload === "[DONE]") return;
   let evt: { type?: unknown; delta?: unknown };
   try {
@@ -621,7 +647,7 @@ function accumulateAnthropicAssistantText(buffer: { text: string }, dataPayload:
   }
   if (evt?.type !== "content_block_delta") return;
   const delta = evt.delta as { type?: unknown; text?: unknown } | undefined;
-  if (delta?.type === "text_delta" && typeof delta.text === "string") buffer.text += delta.text;
+  if (delta?.type === "text_delta" && typeof delta.text === "string") buffer.push(delta.text);
 }
 
 // Accumulate assistant text from a VERBATIM Codex Responses SSE data payload for
@@ -629,7 +655,10 @@ function accumulateAnthropicAssistantText(buffer: { text: string }, dataPayload:
 // carries assistant text as `response.output_text.delta` events whose `delta` is a
 // plain STRING (unlike Anthropic's nested delta.text). Fail-open: a non-JSON / non-
 // output-text-delta frame contributes nothing. NEVER throws.
-function accumulateResponsesAssistantText(buffer: { text: string }, dataPayload: string): void {
+function accumulateResponsesAssistantText(
+  buffer: AssistantTextAccumulator,
+  dataPayload: string,
+): void {
   if (dataPayload === "" || dataPayload === "[DONE]") return;
   let evt: { type?: unknown; delta?: unknown };
   try {
@@ -638,7 +667,7 @@ function accumulateResponsesAssistantText(buffer: { text: string }, dataPayload:
     return;
   }
   if (evt?.type !== "response.output_text.delta") return;
-  if (typeof evt.delta === "string") buffer.text += evt.delta;
+  if (typeof evt.delta === "string") buffer.push(evt.delta);
 }
 
 // Accumulate assistant text from a VERBATIM Gemini streamGenerateContent SSE data
@@ -646,7 +675,10 @@ function accumulateResponsesAssistantText(buffer: { text: string }, dataPayload:
 // Gemini frames are nameless `data:` GenerateContent deltas carrying
 // `candidates[].content.parts[].text` (no `type` discriminator). Fail-open: a non-JSON
 // frame contributes nothing. NEVER throws.
-function accumulateGeminiAssistantText(buffer: { text: string }, dataPayload: string): void {
+function accumulateGeminiAssistantText(
+  buffer: AssistantTextAccumulator,
+  dataPayload: string,
+): void {
   if (dataPayload === "" || dataPayload === "[DONE]") return;
   let evt: { candidates?: unknown };
   try {
@@ -660,7 +692,7 @@ function accumulateGeminiAssistantText(buffer: { text: string }, dataPayload: st
     if (!Array.isArray(parts)) continue;
     for (const part of parts) {
       const p = part as { text?: unknown } | null;
-      if (typeof p?.text === "string") buffer.text += p.text;
+      if (typeof p?.text === "string") buffer.push(p.text);
     }
   }
 }
@@ -1174,7 +1206,7 @@ export function createMessagesPipeline(
             // encrypted/base64 payloads are ignored, while fragments are joined
             // before tokenization so network chunking cannot change the estimate.
             const responsesDeltas = createResponsesDeltaAccumulator();
-            const passthroughAssistant = { text: "" };
+            const passthroughAssistant = createAssistantTextAccumulator();
             try {
               for await (const frame of splitSSEFrames(passthroughStream)) {
                 // Tee (read-only): usage carriers feed the SSE usage extractor; every
@@ -1250,7 +1282,7 @@ export function createMessagesPipeline(
                   }
                 }
               }
-              if (memory !== undefined) {
+              if (memory !== undefined && !passthroughAssistant.limited) {
                 const memoryObserve = memory.observe;
                 const responseMessages: IRMessage[] =
                   passthroughAssistant.text.length > 0

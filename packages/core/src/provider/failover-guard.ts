@@ -1,5 +1,11 @@
+import { Buffer } from "node:buffer";
 import type { Protocol } from "@helm/shared";
+import { nextSSEFrameBoundary } from "../protocol/streaming.js";
 import { UpstreamError } from "./openai.js";
+
+// The guard must retain preamble bytes verbatim until the first real output, so
+// cap that replay window independently of the upstream's total response size.
+export const MAX_PRE_OUTPUT_BUFFER_BYTES = 1_048_576;
 
 // provider.failover-guard — pre-output streaming failure detector (CLAUDE.md
 // principle 5 + 8: streaming correctness is the #1 risk; classification fallback ≠
@@ -246,6 +252,7 @@ export async function* guardPreOutputFailure(
   classifier: PreOutputClassifier,
 ): AsyncGenerator<string> {
   const buffered: string[] = [];
+  let bufferedBytes = 0;
   let sse = "";
   let committed = false;
 
@@ -254,14 +261,22 @@ export async function* guardPreOutputFailure(
       yield chunk;
       continue;
     }
+    const nextBufferedBytes = bufferedBytes + Buffer.byteLength(chunk);
+    if (nextBufferedBytes > MAX_PRE_OUTPUT_BUFFER_BYTES) {
+      throw new UpstreamError(
+        "upstream_error",
+        "upstream pre-output buffer exceeds the memory budget",
+      );
+    }
     // Hold the raw bytes for verbatim replay; accumulate a parallel text buffer only
     // to frame complete SSE events (split on the blank-line terminator).
     buffered.push(chunk);
+    bufferedBytes = nextBufferedBytes;
     sse += chunk;
-    let sep = sse.indexOf("\n\n");
-    while (sep >= 0) {
-      const data = extractData(sse.slice(0, sep));
-      sse = sse.slice(sep + 2);
+    let boundary = nextSSEFrameBoundary(sse);
+    while (boundary !== null) {
+      const data = extractData(sse.slice(0, boundary.index));
+      sse = sse.slice(boundary.index + boundary.length);
       if (data !== null) {
         const cls = classifier.classify(data);
         if (cls === "error") throw streamErrorFromData(classifier, data);
@@ -269,10 +284,11 @@ export async function* guardPreOutputFailure(
           committed = true;
           for (const b of buffered) yield b;
           buffered.length = 0;
+          bufferedBytes = 0;
           break;
         }
       }
-      sep = sse.indexOf("\n\n");
+      boundary = nextSSEFrameBoundary(sse);
     }
   }
 

@@ -495,6 +495,25 @@ describe("createOAuthPoolClient — account selection", () => {
     expect(selected).toEqual(["b", "b", "b"]);
   });
 
+  it("bounds one-off sticky session keys and evicts the least-recently-used entry", async () => {
+    const calls: string[] = [];
+    const reasons: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [member("a", 50, true, calls), member("b", 50, true, calls)],
+      maxStickySessions: 2,
+      onSelect: (_account, selection) => reasons.push(selection.reason),
+    });
+
+    for (const key of ["one", "two", "three"]) {
+      await pool.chatCompletion({ ...USER_REQ, prompt_cache_key: key });
+    }
+    await pool.chatCompletion({ ...USER_REQ, prompt_cache_key: "one" });
+
+    // The fourth selection cannot be a sticky hit: `one` was the oldest of
+    // three distinct untrusted keys in a two-entry cache.
+    expect(reasons.at(-1)).toBe("hash_assign");
+  });
+
   it("uses chat metadata conversation_id as a sticky account key for streams", async () => {
     const calls: string[] = [];
     const selected: string[] = [];

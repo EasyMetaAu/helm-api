@@ -874,6 +874,21 @@ export class SqliteTelemetryStore implements TelemetryStore {
       .map((r) => this.toDecision(r));
   }
 
+  async countWindow(startMs: number, endMs: number): Promise<number> {
+    return (
+      this.db
+        .select({ n: sql<number>`count(*)` })
+        .from(telemetry)
+        .where(
+          and(
+            gte(telemetry.createdAt, new Date(startMs)),
+            lt(telemetry.createdAt, new Date(endMs)),
+          ),
+        )
+        .get()?.n ?? 0
+    );
+  }
+
   // Dashboard token-accounting aggregate (admin homepage). THREE SQL queries —
   // headline totals, a per-bucket time series, a per-served-model breakdown — all
   // SUM/COUNT/GROUP BY over the denormalized token columns (never row-by-row JS).

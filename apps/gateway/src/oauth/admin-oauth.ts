@@ -98,6 +98,7 @@ const COPILOT = "github-copilot";
 const CODEX = "openai-codex";
 const XAI = "xai";
 const SESSION_TTL_MS = 15 * 60 * 1000;
+export const MAX_PENDING_OAUTH_SESSIONS = 128;
 
 // Anthropic OAuth usage endpoint (providers page Tier 3 quota PULL). Mirrors the
 // claude-relay-service reference: the `oauth-2025-04-20` beta flag + a claude-cli
@@ -118,7 +119,7 @@ const XAI_GROK_CREDITS_HEADERS = {
   // process mode for headless requests.
   "x-grok-client-mode": "headless",
 } as const;
-const XAI_GROK_CREDITS_MAX_RESPONSE_BYTES = 1024 * 1024;
+const OAUTH_OPERATOR_JSON_MAX_RESPONSE_BYTES = 1024 * 1024;
 const ANTHROPIC_USAGE_HEADERS = {
   "anthropic-beta": "oauth-2025-04-20",
   "user-agent": "claude-cli/2.0.53 (external, cli)",
@@ -481,6 +482,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     };
   }
   const sessions = new Map<string, Session>();
+  let pendingDeviceStarts = 0;
   // Per-account provider quota cache (5-min TTL): key `<provider> <account>`.
   // Caches the OUTCOME of a usage fetch — windows on success, `null` on failure —
   // so a rate-limited/erroring endpoint is NOT retried until the TTL lapses
@@ -681,6 +683,13 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       if (s.createdAt < cutoff || (s.kind === "device" && s.expiresAt <= current)) {
         sessions.delete(id);
       }
+    }
+  }
+
+  function ensureSessionCapacity(): void {
+    prune();
+    if (sessions.size + pendingDeviceStarts >= MAX_PENDING_OAUTH_SESSIONS) {
+      throw new Error("too many pending OAuth sessions; complete or wait for an existing login");
     }
   }
 
@@ -906,6 +915,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       if (!flow) {
         throw new Error(`provider '${providerId}' does not support the manual-paste flow`);
       }
+      ensureSessionCapacity();
       // Validate the proxy up-front (fail-closed) and pin it to the session. begin()
       // is a pure URL build (no network), so the only flow call that egresses — the
       // token exchange in complete — already has the proxy.
@@ -949,39 +959,45 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       if (providerId !== COPILOT && providerId !== XAI) {
         throw new Error(`provider '${providerId}' does not support the device-code flow`);
       }
-      // CRITICAL: the device-code POST is the FIRST network call of the flow. Build
-      // the proxy fetch BEFORE it so step 1 never leaves from the operator's real IP.
-      const pinned = toProxy(proxy);
-      const doFetch = makeFetch(pinned);
-      const start =
-        providerId === XAI
-          ? await beginXaiDeviceLogin(doFetch, now)
-          : await beginCopilotDeviceLogin(enterprise, doFetch);
-      const sessionId = genId();
-      sessions.set(sessionId, {
-        kind: "device",
-        providerId,
-        deviceCode: start.deviceCode,
-        ...(providerId === XAI
-          ? { tokenEndpoint: (start as XaiDeviceStart).tokenEndpoint }
-          : {
-              domain: (start as CopilotDeviceStart).domain,
-              enterpriseDomain: (start as CopilotDeviceStart).enterpriseDomain,
-            }),
-        proxy: pinned,
-        createdAt: now(),
-        expiresAt: start.expiresAt,
-      });
-      return {
-        sessionId,
-        userCode: start.userCode,
-        verificationUri: start.verificationUri,
-        intervalMs: start.intervalMs,
-        expiresAt: start.expiresAt,
-        // The browser converts the absolute upstream expiry into a relative TTL
-        // using this same-clock reference. Browser and gateway clocks need not agree.
-        serverNowMs: now(),
-      };
+      ensureSessionCapacity();
+      pendingDeviceStarts += 1;
+      try {
+        // CRITICAL: the device-code POST is the FIRST network call of the flow. Build
+        // the proxy fetch BEFORE it so step 1 never leaves from the operator's real IP.
+        const pinned = toProxy(proxy);
+        const doFetch = makeFetch(pinned);
+        const start =
+          providerId === XAI
+            ? await beginXaiDeviceLogin(doFetch, now)
+            : await beginCopilotDeviceLogin(enterprise, doFetch);
+        const sessionId = genId();
+        sessions.set(sessionId, {
+          kind: "device",
+          providerId,
+          deviceCode: start.deviceCode,
+          ...(providerId === XAI
+            ? { tokenEndpoint: (start as XaiDeviceStart).tokenEndpoint }
+            : {
+                domain: (start as CopilotDeviceStart).domain,
+                enterpriseDomain: (start as CopilotDeviceStart).enterpriseDomain,
+              }),
+          proxy: pinned,
+          createdAt: now(),
+          expiresAt: start.expiresAt,
+        });
+        return {
+          sessionId,
+          userCode: start.userCode,
+          verificationUri: start.verificationUri,
+          intervalMs: start.intervalMs,
+          expiresAt: start.expiresAt,
+          // The browser converts the absolute upstream expiry into a relative TTL
+          // using this same-clock reference. Browser and gateway clocks need not agree.
+          serverNowMs: now(),
+        };
+      } finally {
+        pendingDeviceStarts -= 1;
+      }
     },
 
     async pollDeviceCode({ sessionId, account }) {
@@ -1214,7 +1230,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           signal: AbortSignal.timeout(QUOTA_FETCH_TIMEOUT_MS),
         });
         if (res.ok) {
-          const body: unknown = await res.json();
+          const body = await readBoundedJsonResponse(res, OAUTH_OPERATOR_JSON_MAX_RESPONSE_BYTES);
           windows = parseAnthropicUsageBody(body, now());
           // A 200 that yields ZERO windows means the schema rejected the body (or
           // it carried no windows at all) — the upsert is skipped and the stored
@@ -1285,7 +1301,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           signal: AbortSignal.timeout(QUOTA_FETCH_TIMEOUT_MS),
         });
         if (res.ok) {
-          const body = await readBoundedJsonResponse(res, XAI_GROK_CREDITS_MAX_RESPONSE_BYTES);
+          const body = await readBoundedJsonResponse(res, OAUTH_OPERATOR_JSON_MAX_RESPONSE_BYTES);
           windows = parseXaiGrokCreditsResponse(body, now());
           if (windows.length === 0) {
             log("warn", "oauth.quota.pull_empty", { provider_id: XAI, account });
@@ -1371,7 +1387,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           }).catch(() => null),
         ]);
         if (res.ok) {
-          const body: unknown = await res.json();
+          const body = await readBoundedJsonResponse(res, OAUTH_OPERATOR_JSON_MAX_RESPONSE_BYTES);
           const quota = parseCodexQuotaDetails(body, now());
           windows = quota?.windows ?? [];
           additionalLimits = quota?.additionalLimits ?? [];
@@ -1381,7 +1397,10 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
           planType = quota?.planType ?? null;
           rateLimitReachedType = quota?.rateLimitReachedType ?? null;
           if (detailsRes?.ok) {
-            const detailsBody: unknown = await detailsRes.json().catch(() => null);
+            const detailsBody = await readBoundedJsonResponse(
+              detailsRes,
+              OAUTH_OPERATOR_JSON_MAX_RESPONSE_BYTES,
+            ).catch(() => null);
             const details = codexResetCreditDetails(detailsBody);
             if (details) {
               resetCredits = details.availableCount;
@@ -1506,7 +1525,9 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
         });
         throw new Error(`codex reset-credit consume failed (status ${res.status})`);
       }
-      const body: unknown = await res.json().catch(() => null);
+      const body = await readBoundedJsonResponse(res, OAUTH_OPERATOR_JSON_MAX_RESPONSE_BYTES).catch(
+        () => null,
+      );
       const result = parseCodexResetResult(body);
       if (result.outcome === null) {
         log("warn", "oauth.reset_credit.failed", {

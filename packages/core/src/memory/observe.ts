@@ -20,6 +20,12 @@ export type IRToolResult = IRMessage;
 
 export interface ObserveDeps {
   memoryStore: MemoryStore;
+  enqueueObserverJob?: (scope: {
+    accountId: string;
+    threadId: string;
+    projectId?: string;
+    resourceId?: string;
+  }) => Promise<unknown>;
   now: () => Date;
   estimateTokens: (text: string) => number;
   // Structured logger; callers thread trace_id through meta. Must not log full
@@ -169,8 +175,8 @@ export async function observeInbound(
 }
 
 // Outbound: on observe/inject, persist the response messages + tool results. off
-// is a no-op. Fail-open — a store failure is logged, never thrown. observe does
-// NOT enqueue an observer job (that is docs/08 Phase 2).
+// is a no-op. Fail-open — a store failure is logged, never thrown. Every completed
+// turn best-effort enqueues the coalesced Observer job, including pure observe mode.
 //
 // `servedModel` is the alias that ACTUALLY handled this turn (known only post-
 // route, so it cannot be set at inject time). We stamp it onto the thread so the
@@ -221,6 +227,22 @@ export async function observeOutbound(
       });
     } catch (err) {
       deps.log("memory.observe.stamp_model_failed", {
+        thread_id: threadId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  if (deps.enqueueObserverJob !== undefined) {
+    try {
+      await deps.enqueueObserverJob({
+        accountId: scope.accountId,
+        threadId,
+        ...(scope.projectId !== null ? { projectId: scope.projectId } : {}),
+        ...(scope.resourceId !== null ? { resourceId: scope.resourceId } : {}),
+      });
+    } catch (err) {
+      deps.log("memory.observe.enqueue_failed", {
         thread_id: threadId,
         error: err instanceof Error ? err.message : String(err),
       });

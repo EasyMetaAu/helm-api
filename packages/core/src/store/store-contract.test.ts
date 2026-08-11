@@ -1983,6 +1983,133 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(msgs.map((m) => m.content)).toEqual(["m0", "m1", "m2"]);
     });
 
+    it("orders incremental batches by persisted time, not request-local message_index", async () => {
+      ctx = await make();
+      const store = ctx.stores.memory;
+      await store.ensureThread({ id: "incremental-t", ownerId: "acct-a" });
+      await store.appendMessages?.([
+        {
+          threadId: "incremental-t",
+          messageIndex: 0,
+          role: "tool",
+          content: "first-batch-index-0",
+          tokenEstimate: 1,
+        },
+        {
+          threadId: "incremental-t",
+          messageIndex: 1,
+          role: "assistant",
+          content: "first-batch-index-1",
+          tokenEstimate: 1,
+        },
+      ]);
+      await store.appendMessages?.([
+        {
+          threadId: "incremental-t",
+          messageIndex: 0,
+          role: "tool",
+          content: "second-batch-index-0",
+          tokenEstimate: 1,
+        },
+      ]);
+
+      const msgs = await store.listMessages({ threadId: "incremental-t", accountId: "acct-a" });
+      expect(msgs.map((m) => m.content)).toEqual([
+        "first-batch-index-0",
+        "first-batch-index-1",
+        "second-batch-index-0",
+      ]);
+    });
+
+    it("pages Observer input with a durable CAS frontier", async () => {
+      ctx = await make();
+      const store = ctx.stores.memory;
+      if (!store.listObserverMessagesPage || !store.appendObservationAndAdvanceFrontier) {
+        throw new Error("adapter must implement bounded Observer paging");
+      }
+      await store.ensureThread({ id: "observer-page-t", ownerId: "acct-a" });
+      await store.appendMessages?.(
+        ["m0", "m1", "m2"].map((content, messageIndex) => ({
+          threadId: "observer-page-t",
+          messageIndex,
+          role: "user" as const,
+          content,
+          tokenEstimate: 1,
+        })),
+      );
+
+      const first = await store.listObserverMessagesPage({
+        threadId: "observer-page-t",
+        accountId: "acct-a",
+        limit: 2,
+        maxBytes: 1024,
+        maxTokens: 100,
+      });
+      expect(first.messages.map((message) => message.content)).toEqual(["m0", "m1"]);
+      expect(first.hasMore).toBe(true);
+      expect(first.expectedFrontier).toBeNull();
+      expect(first.nextCursor).not.toBeNull();
+      if (first.nextCursor === null) {
+        throw new Error("Observer page must return a cursor for non-empty messages");
+      }
+      const range = [first.messages[0]?.id, first.messages[1]?.id] as [string, string];
+      const observation = {
+        threadId: "observer-page-t",
+        sourceMessageRange: range,
+        observationText: "m0 and m1",
+        observedAt: new Date(10_000),
+      };
+      const id = await store.appendObservationAndAdvanceFrontier({
+        accountId: "acct-a",
+        observation,
+        expectedFrontier: first.expectedFrontier,
+        nextFrontier: first.nextCursor,
+      });
+      expect(id).not.toBeNull();
+      expect(
+        await store.appendObservationAndAdvanceFrontier({
+          accountId: "acct-a",
+          observation,
+          expectedFrontier: first.expectedFrontier,
+          nextFrontier: first.nextCursor,
+        }),
+      ).toBeNull();
+
+      const second = await store.listObserverMessagesPage({
+        threadId: "observer-page-t",
+        accountId: "acct-a",
+        limit: 2,
+        maxBytes: 1024,
+        maxTokens: 100,
+      });
+      expect(second.messages.map((message) => message.content)).toEqual(["m2"]);
+      expect(second.expectedFrontier).toEqual(first.nextCursor);
+      expect(second.hasMore).toBe(false);
+    });
+
+    it("replaces one oversized Observer row with a bounded digest placeholder", async () => {
+      ctx = await make();
+      const store = ctx.stores.memory;
+      if (!store.listObserverMessagesPage) throw new Error("missing bounded Observer paging");
+      await store.ensureThread({ id: "observer-large-t", ownerId: "acct-a" });
+      await store.appendMessage({
+        threadId: "observer-large-t",
+        role: "tool",
+        content: "x".repeat(100_000),
+        tokenEstimate: 25_000,
+      });
+      const page = await store.listObserverMessagesPage({
+        threadId: "observer-large-t",
+        accountId: "acct-a",
+        limit: 8,
+        maxBytes: 1024,
+        maxTokens: 256,
+      });
+      expect(page.messages).toHaveLength(1);
+      expect(page.messages[0]?.content).toMatch(/^\[oversized tool message omitted; sha256=/);
+      expect(page.messages[0]?.content.length).toBeLessThan(128);
+    });
+
     it("appendMessages on an empty batch writes nothing and returns []", async () => {
       ctx = await make();
       const store = ctx.stores.memory;
@@ -2434,6 +2561,172 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       const revived = await m.getReflection({ accountId: "acct-a", projectId: "p1" });
       expect(revived?.version).toBe(3); // active again, sequence continued
       expect(revived?.reflectionText).toBe("p-v3 (revived)");
+    });
+
+    it("decay fences stale Reflector reflection/fact commits and queues every aggregate target", async () => {
+      ctx = await make();
+      const m = ctx.stores.memory;
+      if (m.archiveObservations === undefined || m.commitReflectionJob === undefined) {
+        throw new Error("MemoryStore must fence Reflector commits after decay");
+      }
+      await m.ensureThread({
+        id: "t-race",
+        ownerId: "acct-a",
+        projectId: "p-race",
+        resourceId: "r-race",
+      });
+      const observationId = await m.appendObservation({
+        threadId: "t-race",
+        sourceMessageRange: ["m1", "m2"],
+        observationText: "must be forgotten",
+        observedAt: new Date(1000),
+      });
+      await m.ensureThread({ id: "t-thread-only", ownerId: "acct-a" });
+      const threadObservationId = await m.appendObservation({
+        threadId: "t-thread-only",
+        sourceMessageRange: ["m3", "m4"],
+        observationText: "thread-only memory",
+        observedAt: new Date(1000),
+      });
+      await m.upsertReflection({
+        accountId: "acct-a",
+        projectId: "p-race",
+        reflectionText: "old project reflection",
+        version: 1,
+        tokenEstimate: 4,
+        updatedAt: new Date(1000),
+      });
+      await m.upsertReflection({
+        accountId: "acct-a",
+        threadId: "t-thread-only",
+        reflectionText: "old thread reflection",
+        version: 1,
+        tokenEstimate: 4,
+        updatedAt: new Date(1000),
+      });
+      await m.upsertReflection({
+        accountId: "acct-a",
+        resourceId: "r-race",
+        reflectionText: "old resource reflection",
+        version: 1,
+        tokenEstimate: 4,
+        updatedAt: new Date(1000),
+      });
+      await m.enqueueJob({
+        type: "reflector",
+        scope: { accountId: "acct-a", projectId: "p-race" },
+      });
+      const running = await m.claimPendingJobs(1);
+      const staleJob = running[0];
+      if (staleJob === undefined) throw new Error("expected running reflector job");
+
+      await m.archiveObservations({
+        accountId: "acct-a",
+        ids: [observationId, threadObservationId],
+        now: new Date(2000),
+      });
+
+      await expect(
+        m.commitReflectionJob(staleJob.jobId, {
+          target: { accountId: "acct-a", projectId: "p-race" },
+          reflection: {
+            action: "upsert",
+            reflectionText: "stale reflection",
+            version: 2,
+            tokenEstimate: 4,
+            updatedAt: new Date(3000),
+          },
+          facts: [
+            {
+              ownerId: "acct-a",
+              projectId: "p-race",
+              subjectKey: "forgotten",
+              factText: "stale fact",
+              contentHash: "a".repeat(64),
+              validFrom: new Date(1000),
+            },
+          ],
+          now: new Date(3000),
+        }),
+      ).resolves.toBeNull();
+      expect(await m.getReflection({ accountId: "acct-a", projectId: "p-race" })).toBeNull();
+      expect(await m.getReflection({ accountId: "acct-a", resourceId: "r-race" })).toBeNull();
+      expect(await m.getReflection({ accountId: "acct-a", threadId: "t-thread-only" })).toBeNull();
+      expect(await m.listActiveFacts?.({ accountId: "acct-a", projectId: "p-race" })).toEqual([]);
+      expect((await m.claimPendingJobs(10)).map((job) => job.scope)).toEqual(
+        expect.arrayContaining([
+          { accountId: "acct-a", projectId: "p-race" },
+          { accountId: "acct-a", resourceId: "r-race" },
+          { accountId: "acct-a", threadId: "t-thread-only" },
+        ]),
+      );
+    });
+
+    it("rolls back the job fence and every output when publication fails", async () => {
+      ctx = await make();
+      const m = ctx.stores.memory;
+      if (m.commitReflectionJob === undefined) {
+        throw new Error("MemoryStore must atomically commit Reflector output");
+      }
+      const target = { accountId: "acct-a", projectId: "p-atomic" };
+      await m.upsertReflection({
+        ...target,
+        reflectionText: "v1",
+        version: 1,
+        tokenEstimate: 1,
+        updatedAt: new Date(1000),
+      });
+      const jobId = await m.enqueueJob({ type: "reflector", scope: target });
+      expect((await m.claimPendingJobs(1))[0]?.jobId).toBe(jobId);
+      const fact = {
+        ownerId: "acct-a",
+        projectId: "p-atomic",
+        subjectKey: "atomic",
+        factText: "must roll back with the failed publication",
+        contentHash: "b".repeat(64),
+        validFrom: new Date(1000),
+      };
+
+      const invalidFact = {
+        ...fact,
+        sourceObservationRange: [1n, "m"] as unknown as [string, string],
+      };
+      await expect(
+        m.commitReflectionJob(jobId, {
+          target,
+          reflection: {
+            action: "upsert",
+            reflectionText: "v2",
+            version: 2,
+            tokenEstimate: 1,
+            updatedAt: new Date(2000),
+          },
+          facts: [invalidFact],
+          now: new Date(2000),
+        }),
+      ).rejects.toThrow();
+      expect(await m.listActiveFacts?.({ accountId: "acct-a", projectId: "p-atomic" })).toEqual([]);
+
+      await expect(
+        m.commitReflectionJob(jobId, {
+          target,
+          reflection: {
+            action: "upsert",
+            reflectionText: "v2",
+            version: 2,
+            tokenEstimate: 1,
+            updatedAt: new Date(3000),
+          },
+          facts: [fact],
+          now: new Date(3000),
+        }),
+      ).resolves.toMatchObject({ reflectionId: expect.any(String) });
+      expect(
+        (await m.listActiveFacts?.({ accountId: "acct-a", projectId: "p-atomic" }))?.map(
+          (row) => row.factText,
+        ),
+      ).toEqual([fact.factText]);
+      expect((await m.getReflection(target))?.reflectionText).toBe("v2");
     });
   });
 

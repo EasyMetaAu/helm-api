@@ -153,6 +153,47 @@ describe("runReflectorJob", () => {
     expect(upserts[0]?.reflectionText).toBe("active fact");
   });
 
+  it("rebuilds from a bounded active set when archived history exceeds the old guard", async () => {
+    const active = makeObservations(["still active"]);
+    const existing: Reflection = {
+      id: "refl-stale",
+      projectId: null,
+      resourceId: null,
+      threadId: "thread-1",
+      reflectionText: "forgotten old content",
+      version: 3,
+      tokenEstimate: 5,
+      updatedAt: new Date("2026-05-01T00:00:00.000Z"),
+      referencedAt: null,
+      referenceCount: 0,
+      status: "active",
+    };
+    const { store, upserts } = makeFakeStore(active, existing);
+    store.getObservationCount = vi.fn(async () => 513);
+    store.listActiveObservationsBounded = vi.fn(async () => active);
+    const merge = vi.fn(async ({ observations, previousReflection }) => ({
+      reflectionText: observations.map((o: Observation) => o.observationText).join(" | "),
+      tokenEstimate: previousReflection === null ? 1 : 999,
+    }));
+
+    const out = await runReflectorJob(
+      JOB,
+      makeDeps(store, {
+        merge,
+        forgetting: {
+          enabled: true,
+          consolidate: { trigger_tokens: 1024, max_facts_per_subject: 8 },
+        },
+      }),
+    );
+
+    expect(out.changed).toBe(true);
+    expect(store.listObservations).not.toHaveBeenCalled();
+    expect(store.listActiveObservationsBounded).toHaveBeenCalledWith(JOB.scope, 512);
+    expect(merge.mock.calls[0]?.[0]?.previousReflection).toBeNull();
+    expect(upserts[0]?.reflectionText).toBe("still active");
+  });
+
   it("is stable/slowly-changing: identical observations do not bump the version or write a new row", async () => {
     const obs = makeObservations(["a", "b"]);
     // Existing reflection whose text already equals what merge would produce.

@@ -101,6 +101,23 @@ describe("createSignalCollector", () => {
     expect(upsertSpy).not.toHaveBeenCalled();
   });
 
+  it("skips an oversized telemetry window before materializing decision records", async () => {
+    const telemetry = fakeTelemetry([makeRecord("chat", "balanced")]);
+    telemetry.countWindow = vi.fn(async () => 2_049);
+    const signals = new RecordingSignalStore();
+    const log = vi.fn();
+    const collector = createSignalCollector({ telemetry, signals, now: () => 0, log });
+
+    await expect(collector.collect(1_000, 2_000)).resolves.toEqual({ written: 0, ok: true });
+    expect(telemetry.queryWindow).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith("warn", "signals.collect_skipped_oversized_window", {
+      windowStart: 1_000,
+      windowEnd: 2_000,
+      recordCount: 2_049,
+      maxRecords: 2_048,
+    });
+  });
+
   it("is fail-open: an upsert throw is swallowed (no rethrow) → no 5xx / no main-path impact", async () => {
     const telemetry = fakeTelemetry([makeRecord("chat", "balanced")]);
     const log = vi.fn();

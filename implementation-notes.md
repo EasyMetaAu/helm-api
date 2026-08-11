@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-08-11 · Memory 大线程有界形成与遗忘原子性（Memory Observer / Reflector / cleanup，docs/08/12，原则 3/7）
+
+- **生产根因**：2026-07-29 的外部 purge 脚本重建 `memory_messages` 却未重算 `memory_threads.message_count/last_message_at`，Admin 因此把约 18.5 万真实 raw 行显示成约 208 万；三天 cleanup 实际有效。真正的 OOM 路径是 Observer/Reflector/注入及部分 cleanup 会一次物化大线程/大结果，pure `observe` 又不直接形成 observation，最大线程累积到 51,116 行。
+- **有界生命周期**：pure `observe` outbound 也 enqueue；Observer 按服务端 `(created_at,id)` 每页最多 512 行/1 MiB/64K tokens，超大单行用带 SHA-256 的 placeholder，Observation 与 durable frontier CAS 同事务提交并继续排下一页。Reflector 只取最新 512 条 active/unexpired observation；forgetting rebuild 不再带旧 reflection，最终注入含 header 也严格服从 token budget。
+- **清理与遗忘**：raw cleanup 只删 frontier 已覆盖行，Postgres cleanup/telemetry/OAuth usage 使用小批次；decay 会在同一事务立即归档受影响 reflection、fence 正在运行的旧 Reflector，并为 project/resource 各自排 successor。Reflector 的 facts + reflection + job completion 也由 job 状态 fence 后原子提交，避免遗忘后复活。SQLite/Postgres migration 会重算 stale counters、补索引，legacy raw 保持 null frontier 后按有界页回放。
+- **取舍/限制**：`message_index` 仍只用于当前 ingest dedup，不能作为线程顺序；没有客户端稳定 turn id 时无法同时保证跨请求精确去重和保留合法重复。legacy bounded backfill 可能与旧 Observation 暂时重叠，因为旧 range 的错误顺序无法精确还原；这里选择宁可短期过度保留，也不静默丢失未覆盖 raw。Reflection 使用 bounded latest-set，而非持久 rolling draft。生产恢复 worker 必须 concurrency=1 灰度，先验证 migration/frontier/RSS/restart/OOM/502，再开启 raw cleanup。
+
 ## 2026-08-10 · 大 Session 客户端重建恢复服务端同款 Conversation 展示（Admin / requests debug，docs/07/11，原则 1/3/7）
 
 - **回归**：上一版为了展示时间线，把 `transcriptLoaded` 后的主请求区域强制切到 `JsonViewer`，隐藏了服务端恢复路径使用的 Conversation/Raw tabs，导致客户端加载后的可读性明显下降。
@@ -79,16 +86,7 @@
 - **TDD**：pool.test 先加失败用例（parked 成员带 flag 仍应被选中→原本落到兄弟）→ Red→加 flag+bypass→Green（99/99）。admin-oauth/oauth 路由测试补 round-trip 与 400 校验。
 - **坑**：worktree 内编辑必须用 worktree 绝对路径——首次 Edit 误落主库（共享 checkout），已 `git checkout --` 干净回退后在 worktree 重做。
 
-## 2026-08-07 · 真实上游超长溢出在链耗尽时胜出终态，修复客户端无法压缩（Provider execution / protocol errors，docs/04/05/07，原则 3/5/8）
-
-- **现场（box `c211e4a1`，v0.28.42）**：Claude Code 发 ~102 万 token，Anthropic（链首、最大窗口）返回真实 400 `prompt is too long: 1022145 tokens > 1000000 maximum`（**无** `context_length_exceeded` code）。helm 把它当可重试 `context_too_small` 继续 fallback；`xai/grok-4.5` 因独立翻译 bug 返回 422，把 `onlyContextOrCapabilitySkips` 打成 false，终态选择器降级为合成 `all_providers_failed / 502`。客户端拿不到真实 400 → 认不出该压缩 → 卡死。
-- **根因**：2026-08-03 的终态优先级（下方同标题条目）只在“整链仅上下文/能力 skip”或“≥2 个 `context_length_exceeded` code 确认”时才回 `invalid_request / 400`。Anthropic 绝对上限用 `prompt is too long: N > M` 措辞、不带该 code，一个无关兄弟失败就翻掉守卫。
-- **关键教训（Codex review 纠偏，避免过修）**：初版曾想“命中即短路、不再 fallback”，**错**——`N > M` 只证明**该候选**的窗口，200k 模型也用同一措辞；若链后面有更大窗口候选，短路会误杀可成功的 fallback。正解是**继续 fallback 试更大窗口**，仅在**链耗尽**时让这个溢出胜出终态。
-- **修复（拍板：所有协议一致；不短路，改终态守卫）**：单独追踪 `authoritativeShapedOverflow`——**只有真实上游响应**报的、且消息形如 `prompt is too long: N > M`（逗号分组容错）的溢出才记入；预检估算（char / `count_tokens`）绝不进。终态在原两条件（`onlyContextOrCapabilitySkips` / `≥2` 确认）后新增：`authoritativeShapedOverflow !== undefined` → 即使夹有无关 provider failure 也回 `invalid_request / 400` 保留其 `provider_raw`。把「形状」与「真实来源」绑在同一条记录，杜绝近似估算冒充硬上限压过真实 5xx（守住既有 “approximate estimate override provider failure” 用例）。
-- **Codex 对抗式 review 的价值**：Codex 曾提「短路会误杀更大窗口兄弟」（真，已改为不短路）、「近似估算的 shape 经 boolean 合并冒充 authoritative」（合理担忧，实测该路径下 `onlyContextOrCapabilitySkips` 仍为 true、第一条守卫本就触发，不会错翻 error class——属 plausible-but-not-reachable，但仍按其建议重构成 provenance 绑定，更干净且消息来源正确）、「回显内容误判」（真，已收窄 `isContextWindowRejection` 弱措辞只匹配结构化 message）。遗留：强标记 `context_length_exceeded`/“maximum context” 仍全 body 匹配（API 专有 token，正文混入概率极低，ponytail 上限）；真实溢出行仍记 `skipped:true`（既有全体 context-overflow 约定，`fallback_count` 少计一次，非本次回归，另议）。
-- **顺带加固 `isContextWindowRejection`（Codex #2 回显内容误判）**：强信号（`context_length_exceeded` code / “maximum context”）仍全 body 匹配；弱措辞（“prompt is too long”/“context window/length”）只在**结构化 error message** 匹配，不扫 `rawErrorText`——否则 provider-failure body 里回显的用户 prompt 会被误判为溢出，甚至在终态**伪造**一个客户端 400。
-- **测试**：box 回归（`N>M` 首 + 兄弟 422 → 两候选都试、终态 400）；`context_length_exceeded` 变体同理；“更大窗口兄弟胜过 shaped 溢出”（不短路、fallback 成功）；“回显内容不伪造 400”（全链失败 → `all_providers_failed`）；per-model / 流式 / 多候选确认 / 近似估算不压真实故障用例全绿。execute.test.ts 164 全绿；messages/chat/gemini/responses/image-chain/pipeline 相关 239 全绿。
-- **遗留（本次不修）**：`xai/grok-4.5` 的 422 `invalid type: map, expected a sequence` 是独立的 anthropic→openai_responses 翻译缺陷；另开 change。
+- **2026-08-07 · 真实上游超长溢出链耗尽终态**：真实 `prompt is too long: N > M` 在链耗尽时胜出为客户端 400，但仍允许更大窗口候选继续 fallback；弱措辞只认结构化 error message，完整原文经 git history 回溯。
 
 ## 历史条目摘要（最新要点）
 

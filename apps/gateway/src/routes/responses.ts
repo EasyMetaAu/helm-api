@@ -46,7 +46,13 @@ import {
 } from "../runtime/memory-admission.js";
 import { servedByAccount, stampServingAccount } from "../runtime/serving-account.js";
 import { errorDetailOf } from "./execute.js";
-import { atEventBoundary, HEARTBEAT_COMMENT, withHeartbeat } from "./heartbeat.js";
+import {
+  atEventBoundary,
+  createStreamAbort,
+  HEARTBEAT_COMMENT,
+  onceAsync,
+  withHeartbeat,
+} from "./heartbeat.js";
 import { resolveMemoryScope } from "./memory-scope.js";
 import type { MessagesIdentity, PipelineRunResult } from "./messages.js";
 import { PipelineError } from "./messages-pipeline.js";
@@ -1249,10 +1255,11 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       c.set("concurrencyRelease", undefined);
       const releaseMemory = c.get("requestMemoryRelease");
       c.set("requestMemoryRelease", undefined);
+      const streamAbort = createStreamAbort(requestSignal(c));
       let initialResult: PipelineRunResult | null = null;
       let initialError: unknown = null;
       try {
-        initialResult = await deps.pipeline.run(ir, identity, requestSignal(c));
+        initialResult = await deps.pipeline.run(ir, identity, streamAbort.signal);
         stampSessionCapture(initialResult.decision, sessionCapture, sessionCaptureScope);
         applyResponseMetadata(
           c,
@@ -1263,6 +1270,17 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         initialError = err;
       }
       return streamSSE(c, async (sse) => {
+        const releaseConcurrencyOnce = onceAsync(releaseConcurrency);
+        const releaseMemoryOnce = onceAsync(releaseMemory);
+        let releaseCaptureOnAbort = () => {};
+        sse.onAbort(() => {
+          streamAbort.abort();
+          // The callback can remain blocked in a provider read; make admission
+          // capacity available immediately and let the stream finally do the rest.
+          void releaseConcurrencyOnce().catch(() => {});
+          void releaseMemoryOnce().catch(() => {});
+          releaseCaptureOnAbort();
+        });
         let sessionResponseJson: string | null = null;
         // Translate path: each IR event is serialized by the transformer's stream
         // mapping; the pipeline already ran the Responses state machine (principle 8 —
@@ -1283,6 +1301,10 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         const captured = captureBodies ? makeSseCapture(true) : null;
         const sessionTerminalCapture =
           captureSessionResponse && !captureBodies ? makeSseCapture(true) : null;
+        releaseCaptureOnAbort = () => {
+          captured?.release();
+          sessionTerminalCapture?.release();
+        };
         const result = initialResult;
         // SSE keep-alive: emit a `:` comment during inter-chunk idle (wire-only, never
         // captured) so a proxy/client idle-timeout does not sever a long healthy stream.
@@ -1323,7 +1345,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           if (result === null) throw new Error("Responses pipeline did not return a result");
           for await (const item of withHeartbeat(result.streamIR(), {
             heartbeatMs,
-            signal: requestSignal(c),
+            signal: streamAbort.signal,
           })) {
             if (item.type === "beat") {
               if (atEventBoundary(lastWrite)) await sse.write(HEARTBEAT_COMMENT);
@@ -1377,7 +1399,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           // before the stream started — writes a SINGLE terminal Responses-shaped
           // error event DIRECTLY into the stream. We CANNOT throw here (the stream
           // has already started; onError would never see it).
-          cancellationReason = requestCancellationReason(requestSignal(c), err);
+          cancellationReason = requestCancellationReason(streamAbort.signal, err);
           if (cancellationReason !== null) {
             // Cancellation ends the wire without a fabricated terminal event.
           } else {
@@ -1410,7 +1432,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
             await sse.writeSSE({ event: "error", data });
           }
         } finally {
-          await releaseConcurrency?.();
+          await releaseConcurrencyOnce();
           const streamOutcome =
             result === null
               ? null
@@ -1456,7 +1478,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
             } finally {
               captured?.release();
               sessionTerminalCapture?.release();
-              releaseMemory?.();
+              await releaseMemoryOnce();
             }
           }
         }

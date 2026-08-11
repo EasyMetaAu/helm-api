@@ -13,13 +13,16 @@ export interface SerialAcquireArgs {
   delayMs: number;
   // Max time to wait for the lock + delay before a timeout rejection.
   timeoutMs: number;
+  // Bound retained request waiters for one subscription account. The first
+  // immediately-grantable request never counts against this queue.
+  maxQueue?: number;
   // Client disconnect: a queued waiter is removed and resolves "aborted".
   signal?: AbortSignal;
 }
 
 export type SerialAcquireResult =
   | { ok: true; release: () => void }
-  | { ok: false; reason: "timeout" | "aborted" };
+  | { ok: false; reason: "timeout" | "aborted" | "queue_full" };
 
 export interface KeyedSerialGate {
   acquire(args: SerialAcquireArgs): Promise<SerialAcquireResult>;
@@ -130,6 +133,14 @@ export function createKeyedSerialGate(deps: KeyedSerialGateDeps = {}): KeyedSeri
       if (entry.gcTimer !== undefined) {
         clearTimeout(entry.gcTimer);
         entry.gcTimer = undefined;
+      }
+      const mustQueue =
+        entry.locked ||
+        entry.waiters.length > 0 ||
+        (entry.lastCompletionMs !== null && entry.lastCompletionMs + args.delayMs > now());
+      if (mustQueue && entry.waiters.length >= (args.maxQueue ?? 64)) {
+        scheduleGc(args.key, entry);
+        return { ok: false, reason: "queue_full" };
       }
       return new Promise<SerialAcquireResult>((resolve) => {
         const waiter: Waiter = { delayMs: args.delayMs, resolve, cleanup: () => {} };

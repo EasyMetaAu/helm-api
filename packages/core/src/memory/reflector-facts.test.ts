@@ -111,6 +111,44 @@ function extractStub(facts: ExtractedFact[]) {
 }
 
 describe("runReflectorJob — fact extraction (docs/12 P6, gated)", () => {
+  it("publishes facts and reflection through one fenced store commit", async () => {
+    const obs = [bigObs("o1", "x".repeat(100))];
+    const { store, factCalls, upserts } = makeFactStore(obs);
+    const commitReflectionJob = vi.fn(async (_jobId, input) => ({
+      reflectionId: "atomic-reflection",
+      facts: {
+        insertedIds: input.facts.map((fact: MemoryFactInput) => fact.contentHash),
+        supersededIds: [],
+        resurrectedIds: [],
+      },
+    }));
+    store.commitReflectionJob = commitReflectionJob;
+
+    const out = await runReflectorJob(
+      JOB,
+      baseDeps(store, {
+        extractFacts: extractStub([
+          { subjectText: "Favourite Language", factText: "User likes TypeScript" },
+        ]),
+        forgetting: {
+          enabled: true,
+          consolidate: { trigger_tokens: 10, max_facts_per_subject: 3 },
+        },
+      }),
+    );
+
+    expect(out).toEqual({ reflectionId: "atomic-reflection", version: 1, changed: true });
+    expect(commitReflectionJob).toHaveBeenCalledTimes(1);
+    expect(commitReflectionJob.mock.calls[0]?.[1]).toMatchObject({
+      target: { accountId: "acct-a", projectId: "proj-1" },
+      reflection: { action: "upsert", version: 1 },
+      facts: [{ factText: "User likes TypeScript" }],
+    });
+    expect(factCalls).toEqual([]);
+    expect(upserts).toEqual([]);
+    expect(store.updateJobStatus).not.toHaveBeenCalled();
+  });
+
   it("extracts + writes facts when forgetting.enabled and the token sum crosses trigger_tokens", async () => {
     // ~100-char observation → ~25 tokens; trigger_tokens=10 → crosses.
     const obs = [bigObs("o1", "x".repeat(100))];

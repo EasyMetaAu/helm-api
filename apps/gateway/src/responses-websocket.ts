@@ -18,6 +18,8 @@ import {
 
 const RESPONSES_WEBSOCKET_PATHS = new Set(["/v1/responses", "/responses", "/openai/v1/responses"]);
 const DEFAULT_PREFLIGHT_TIMEOUT_MS = 6_000;
+const DEFAULT_IDLE_SESSION_TIMEOUT_MS = 30 * 60_000;
+const DEFAULT_MAX_PREFLIGHT_REQUESTS = 128;
 
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -63,7 +65,15 @@ export interface ResponsesWebSocketBridgeOptions {
   memoryAdmission?: BodyMemoryAdmission;
   /** Optional test/embedding override for bytes retained by `ws` before `message`. */
   ingressAdmission?: BodyMemoryAdmission;
+  /** Optional test/embedding limit for bytes retained by `ws` before `message`. */
+  maxPayloadBytes?: number;
+  /** Optional test/embedding limit for pending authenticated upgrades. */
+  maxPreflightRequests?: number;
+  /** Optional test/embedding limit for one upstream SSE frame. */
+  maxSseFrameBytes?: number;
   preflightTimeoutMs?: number;
+  /** Optional test/embedding limit for an inactive Responses websocket session. */
+  idleSessionTimeoutMs?: number;
 }
 
 export interface ResponsesWebSocketUpgradeServer {
@@ -327,6 +337,7 @@ async function forwardResponse(
   sessionId: string,
   sessionProof: string | undefined,
   materialized: () => void,
+  maxSseFrameBytes: number,
 ): Promise<boolean> {
   const headers = normalizedFetchHeaders(request);
   headers.set("accept", "text/event-stream");
@@ -361,7 +372,7 @@ async function forwardResponse(
   }
 
   let terminalType: unknown;
-  for await (const frame of readSSE(body)) {
+  for await (const frame of readSSE(body, maxSseFrameBytes)) {
     const payload = websocketPayload(frame.event, frame.data);
     if (payload === null) continue;
     await sendText(socket, payload);
@@ -506,7 +517,11 @@ export function installResponsesWebSocketBridge({
   sessionProof,
   memoryAdmission,
   ingressAdmission,
+  maxPayloadBytes,
+  maxPreflightRequests,
+  maxSseFrameBytes,
   preflightTimeoutMs,
+  idleSessionTimeoutMs,
 }: ResponsesWebSocketBridgeOptions): ResponsesWebSocketBridge {
   const memoryBudget = runtimeMemoryBudget();
   const admission =
@@ -522,7 +537,22 @@ export function installResponsesWebSocketBridge({
       jsonAmplification: 1,
       minRequestChargeBytes: 1,
     });
-  const websocketMaxPayloadBytes = 0;
+  const websocketMaxPayloadBytes = Math.max(
+    1,
+    Math.floor(maxPayloadBytes ?? memoryBudget.responseCaptureBytes),
+  );
+  const websocketMaxPreflightRequests = Math.max(
+    1,
+    Math.floor(maxPreflightRequests ?? DEFAULT_MAX_PREFLIGHT_REQUESTS),
+  );
+  const websocketMaxSseFrameBytes = Math.max(
+    1,
+    Math.floor(maxSseFrameBytes ?? memoryBudget.responseCaptureBytes),
+  );
+  const websocketIdleSessionTimeoutMs = Math.max(
+    1,
+    Math.floor(idleSessionTimeoutMs ?? DEFAULT_IDLE_SESSION_TIMEOUT_MS),
+  );
   const metadataByRequest = new WeakMap<IncomingMessage, UpgradeMetadata>();
   const websocketServer = new WebSocketServer({
     noServer: true,
@@ -544,6 +574,11 @@ export function installResponsesWebSocketBridge({
     let sessionClosed = false;
     let processing = false;
     let activeTurnController: AbortController | null = null;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearIdleTimer = () => {
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
+      idleTimer = undefined;
+    };
     const closeUpstreamSession = async () => {
       if (sessionClosed) return;
       sessionClosed = true;
@@ -552,12 +587,25 @@ export function installResponsesWebSocketBridge({
         .catch(() => {});
     };
     const abort = () => {
+      clearIdleTimer();
       controller.abort();
       activeTurnController?.abort();
       void closeUpstreamSession();
     };
+    const armIdleTimer = () => {
+      clearIdleTimer();
+      idleTimer = setTimeout(() => {
+        idleTimer = undefined;
+        if (processing) return;
+        abort();
+        if (socket.readyState === WebSocket.OPEN)
+          socket.close(1001, "websocket session idle timeout");
+      }, websocketIdleSessionTimeoutMs);
+      idleTimer.unref?.();
+    };
     socket.on("close", abort);
     socket.on("error", abort);
+    armIdleTimer();
     socket.on("message", (data) => {
       if (controller.signal.aborted || socket.readyState !== WebSocket.OPEN) return;
       if (processing) {
@@ -584,6 +632,7 @@ export function installResponsesWebSocketBridge({
         return;
       }
       processing = true;
+      clearIdleTimer();
       const turnController = new AbortController();
       activeTurnController = turnController;
       const abortTurn = () => turnController.abort();
@@ -599,6 +648,7 @@ export function installResponsesWebSocketBridge({
             sessionId,
             sessionProof,
             acquired.lease.materialized,
+            websocketMaxSseFrameBytes,
           );
           if (invalidatesSession) {
             socket.close(1000, "upstream session reset");
@@ -616,6 +666,7 @@ export function installResponsesWebSocketBridge({
           processing = false;
           acquired.lease.release();
           ingressAcquired.lease.release();
+          if (!controller.signal.aborted && socket.readyState === WebSocket.OPEN) armIdleTimer();
         }
       })();
     });
@@ -623,7 +674,28 @@ export function installResponsesWebSocketBridge({
 
   const onUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer) => {
     if (!isResponsesWebSocketPath(request.url)) return;
-    // Unlimited admission: no upgrade-time capacity probe / rejection.
+    if (websocketServer.clients.size + preflightControllers.size >= websocketMaxPreflightRequests) {
+      const onRejectedSocketError = () => socket.destroy();
+      socket.once("error", onRejectedSocketError);
+      void rejectUpgrade(
+        socket,
+        new Response(
+          JSON.stringify({
+            type: "error",
+            status: 503,
+            status_code: 503,
+            error: {
+              type: "server_error",
+              code: "websocket_preflight_capacity_exceeded",
+              message: "websocket upgrade capacity is temporarily exhausted",
+            },
+            headers: { "retry-after": "1" },
+          }),
+          { status: 503, headers: { "content-type": "application/json", "retry-after": "1" } },
+        ),
+      ).catch(() => socket.destroy());
+      return;
+    }
     const preflightController = new AbortController();
     preflightControllers.add(preflightController);
     responsesPreflightPending += 1;

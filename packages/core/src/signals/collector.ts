@@ -30,12 +30,24 @@ export interface SignalCollector {
   collect(windowStart: number, windowEnd: number): Promise<{ written: number; ok: boolean }>;
 }
 
+const MAX_SIGNAL_WINDOW_RECORDS = 2_048;
+
 export function createSignalCollector(deps: SignalCollectorDeps): SignalCollector {
   const log = deps.log ?? (() => {});
 
   return {
     async collect(windowStart, windowEnd) {
       try {
+        const count = await deps.telemetry.countWindow?.(windowStart, windowEnd);
+        if (count !== undefined && count > MAX_SIGNAL_WINDOW_RECORDS) {
+          log("warn", "signals.collect_skipped_oversized_window", {
+            windowStart,
+            windowEnd,
+            recordCount: count,
+            maxRecords: MAX_SIGNAL_WINDOW_RECORDS,
+          });
+          return { written: 0, ok: true };
+        }
         const records = await deps.telemetry.queryWindow(windowStart, windowEnd);
         if (records.length === 0) return { written: 0, ok: true };
 

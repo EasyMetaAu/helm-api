@@ -21,6 +21,36 @@ export const HEARTBEAT_COMMENT = ":\n\n";
 
 export type HeartbeatItem<T> = { type: "chunk"; value: T } | { type: "beat" };
 
+/** A route-owned abort signal for an SSE body, composed with the HTTP request. */
+export interface StreamAbort {
+  signal: AbortSignal;
+  abort: () => void;
+}
+
+/**
+ * `streamSSE()` learns about response-body cancellation after the HTTP request has
+ * already completed. Keep a route-owned controller so that cancellation still
+ * reaches a pending provider read and the stream iterator can unwind.
+ */
+export function createStreamAbort(requestSignal: AbortSignal): StreamAbort {
+  const controller = new AbortController();
+  return {
+    signal: AbortSignal.any([requestSignal, controller.signal]),
+    abort: () => controller.abort(),
+  };
+}
+
+/** Make a release callback safe to invoke from both stream abort and finalization. */
+export function onceAsync(release: (() => void | Promise<void>) | undefined): () => Promise<void> {
+  let task: Promise<void> | undefined;
+  return () => {
+    task ??= Promise.resolve().then(async () => {
+      await release?.();
+    });
+    return task;
+  };
+}
+
 /** Schedule `cb` after `ms`; the returned canceller clears it. Cancels on abort. */
 export type ScheduleTimer = (cb: () => void, ms: number, signal?: AbortSignal) => () => void;
 
@@ -44,6 +74,31 @@ const defaultScheduleTimer: ScheduleTimer = (cb, ms, signal) => {
   };
 };
 
+function abortWait(signal: AbortSignal | undefined): {
+  promise: Promise<{ kind: "abort" }>;
+  dispose: () => void;
+} {
+  let onAbort: (() => void) | undefined;
+  const promise = new Promise<{ kind: "abort" }>((resolve) => {
+    if (signal?.aborted) {
+      resolve({ kind: "abort" });
+      return;
+    }
+    onAbort = () => resolve({ kind: "abort" });
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+  return {
+    promise,
+    dispose: () => {
+      if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
+    },
+  };
+}
+
+function throwAbortReason(signal: AbortSignal | undefined): never {
+  throw signal?.reason ?? new DOMException("The stream was aborted", "AbortError");
+}
+
 /**
  * Wrap an async iterable, yielding `{type:"beat"}` whenever it stays silent for
  * `heartbeatMs`, otherwise `{type:"chunk", value}`. The SAME pending `next()` is
@@ -63,7 +118,18 @@ export async function* withHeartbeat<T>(
     while (true) {
       const nextPromise = iterator.next();
       if (heartbeatMs <= 0) {
-        const r = await nextPromise;
+        const abort = abortWait(opts.signal);
+        const outcome = await Promise.race([
+          nextPromise.then(
+            (r) => ({ kind: "next" as const, r }),
+            (e) => ({ kind: "error" as const, e }),
+          ),
+          abort.promise,
+        ]);
+        abort.dispose();
+        if (outcome.kind === "abort") throwAbortReason(opts.signal);
+        if (outcome.kind === "error") throw outcome.e;
+        const { r } = outcome;
         if (r.done) return;
         yield { type: "chunk", value: r.value };
         continue;
@@ -75,15 +141,19 @@ export async function* withHeartbeat<T>(
           fireBeat = resolve;
         });
         cancelTimer = schedule(fireBeat, heartbeatMs, opts.signal);
+        const abort = abortWait(opts.signal);
         const outcome = await Promise.race([
           nextPromise.then(
             (r) => ({ kind: "next" as const, r }),
             (e) => ({ kind: "error" as const, e }),
           ),
           beat.then(() => ({ kind: "beat" as const })),
+          abort.promise,
         ]);
+        abort.dispose();
         cancelTimer();
         cancelTimer = () => {};
+        if (outcome.kind === "abort") throwAbortReason(opts.signal);
         if (outcome.kind === "beat") {
           yield { type: "beat" };
           continue;
@@ -96,7 +166,15 @@ export async function* withHeartbeat<T>(
     }
   } finally {
     cancelTimer();
-    await iterator.return?.();
+    const returned = iterator.return?.();
+    if (opts.signal?.aborted) {
+      // A non-cooperative upstream may remain blocked in `next()` even after the
+      // client has gone away. We already delivered the abort signal; do not retain
+      // the route's capture buffers and bookkeeping while waiting for it to comply.
+      void returned?.catch(() => {});
+    } else {
+      await returned;
+    }
   }
 }
 

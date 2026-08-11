@@ -1,4 +1,8 @@
-import type { RuntimeMemoryCoordinator, RuntimeMemoryLease } from "@helm/core";
+import {
+  type RuntimeMemoryCoordinator,
+  type RuntimeMemoryLease,
+  runtimeMemoryBudget,
+} from "@helm/core";
 import type { MiddlewareHandler } from "hono";
 import type { AppEnv } from "../app.js";
 
@@ -125,8 +129,6 @@ export function createBodyMemoryAdmission(options: {
             if (released || isMaterialized) return;
             isMaterialized = true;
             pendingBytes -= current;
-            sharedLease?.release();
-            sharedLease = undefined;
           },
           release() {
             if (released) return;
@@ -210,6 +212,15 @@ export async function readAdmittedRequestBody(
     throw requestAdmissionError(acquired.admission);
   }
   const { lease } = acquired;
+  // A declared length lets us fill one buffer directly. The dynamic cap avoids
+  // turning a bogus multi-gigabyte Content-Length into an immediate allocation;
+  // larger/chunked bodies retain the existing admission-checked path below.
+  const directLimit = runtimeMemoryBudget().responseCaptureBytes;
+  const declaredBuffer =
+    Number.isSafeInteger(declared) && declared >= 0 && declared <= directLimit
+      ? Buffer.allocUnsafe(declared)
+      : null;
+  let bodyBuffer = declaredBuffer;
   const chunks: Uint8Array[] = [];
   let bytes = 0;
   try {
@@ -224,14 +235,27 @@ export async function readAdmittedRequestBody(
           await reader.cancel().catch(() => {});
           throw requestAdmissionError(resized.admission);
         }
-        chunks.push(next.value);
+        if (bodyBuffer !== null && bytes <= bodyBuffer.length) {
+          bodyBuffer.set(next.value, bytes - next.value.byteLength);
+        } else {
+          if (bodyBuffer !== null) {
+            chunks.push(bodyBuffer.subarray(0, bytes - next.value.byteLength));
+            bodyBuffer = null;
+          }
+          chunks.push(next.value);
+        }
       }
     }
     const resized = lease.resize(bytes);
     if (!resized.ok) {
       throw requestAdmissionError(resized.admission);
     }
-    const body = Buffer.concat(chunks, bytes);
+    const body =
+      bodyBuffer === null
+        ? Buffer.concat(chunks, bytes)
+        : bytes === bodyBuffer.length
+          ? bodyBuffer
+          : Buffer.from(bodyBuffer.subarray(0, bytes));
     return {
       text: body.toString("utf8"),
       bytes: body,

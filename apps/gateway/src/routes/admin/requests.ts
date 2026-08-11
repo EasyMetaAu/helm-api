@@ -209,7 +209,29 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
       });
     }
     if (part !== "full") {
-      const p = await getPayloadPart(deps, traceId, part);
+      const exactMeta = await deps.telemetry.getPayloadMeta?.(traceId);
+      const partStored =
+        exactMeta === undefined ||
+        (exactMeta !== null &&
+          (part === "request"
+            ? exactMeta.parts.request
+            : part === "response"
+              ? exactMeta.parts.response
+              : exactMeta.parts.upstreamRequest));
+      const admitted = partStored
+        ? await readPayloadWithinResponseWork(
+            deps,
+            () => getPayloadPart(deps, traceId, part),
+            payloadPartWireBytes,
+          )
+        : ({ status: "missing", value: null } as const);
+      if (admitted.status === "limited")
+        return c.json({
+          captured: false,
+          source: "unavailable",
+          reason: "payload_recovery_limited",
+        });
+      const p = admitted.value;
       if (!p) {
         const recovered =
           part === "request" || part === "response" ? await getSessionRequest(deps, traceId) : null;
@@ -238,18 +260,37 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
           recovered.release();
         }
       }
-      return c.json({
-        captured: true,
-        source: "payload",
-        exact: true,
-        fidelity: "exact",
-        part,
-        value: p.json === null ? null : parseMaybeJson(p.json),
-        created_at: p.createdAt.getTime(),
-      });
+      try {
+        return c.json({
+          captured: true,
+          source: "payload",
+          exact: true,
+          fidelity: "exact",
+          part,
+          value: p.json === null ? null : parseMaybeJson(p.json),
+          created_at: p.createdAt.getTime(),
+        });
+      } finally {
+        admitted.release();
+      }
     }
 
-    const p = await deps.telemetry.getPayload(traceId);
+    const exactMeta = await deps.telemetry.getPayloadMeta?.(traceId);
+    const admitted =
+      exactMeta === null
+        ? ({ status: "missing", value: null } as const)
+        : await readPayloadWithinResponseWork(
+            deps,
+            () => deps.telemetry.getPayload(traceId),
+            payloadWireBytes,
+          );
+    if (admitted.status === "limited")
+      return c.json({
+        captured: false,
+        source: "unavailable",
+        reason: "payload_recovery_limited",
+      });
+    const p = admitted.value;
     if (!p) {
       const recovered = await getSessionRequest(deps, traceId);
       if (recovered.status === "unavailable")
@@ -269,19 +310,23 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
         recovered.release();
       }
     }
-    return c.json({
-      captured: true,
-      source: "payload",
-      exact: true,
-      fidelity: "exact",
-      request: parseMaybeJson(p.requestJson),
-      response: p.responseJson === null ? null : parseMaybeJson(p.responseJson),
-      // The EXACT body forwarded upstream (post memory-inject + protocol-translation)
-      // — what the model actually received. Null when no provider served / pre-feature.
-      upstream_request:
-        p.upstreamRequestJson === null ? null : parseMaybeJson(p.upstreamRequestJson),
-      created_at: p.createdAt.getTime(),
-    });
+    try {
+      return c.json({
+        captured: true,
+        source: "payload",
+        exact: true,
+        fidelity: "exact",
+        request: parseMaybeJson(p.requestJson),
+        response: p.responseJson === null ? null : parseMaybeJson(p.responseJson),
+        // The EXACT body forwarded upstream (post memory-inject + protocol-translation)
+        // — what the model actually received. Null when no provider served / pre-feature.
+        upstream_request:
+          p.upstreamRequestJson === null ? null : parseMaybeJson(p.upstreamRequestJson),
+        created_at: p.createdAt.getTime(),
+      });
+    } finally {
+      admitted.release();
+    }
   });
 
   // GET /requests/:traceId/session-revisions?after=<seq> — one keyset page of RAW,
@@ -291,8 +336,8 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
   // reserve a whole response-work window: reconstruction never happens server-side, so
   // only ONE byte-bounded page is materialized per request. That is what lets a large
   // transcript that the server refuses to rebuild (session_recovery_limited) still be
-  // inspected. `maxBytes` caps a single page; a `limited` page still returns its rows
-  // and cursor so the client keeps paging rather than failing.
+  // inspected. `maxBytes` caps a single page; each row is also hard-capped before
+  // JSON serialization so one malformed historical revision cannot bypass the bound.
   app.get("/admin/api/requests/:traceId/session-revisions", async (c) => {
     const traceId = c.req.param("traceId");
     // no_session (not a session request at all) is more fundamental than the store's
@@ -313,6 +358,17 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
       limit: SESSION_REVISION_PAGE_LIMIT,
       maxBytes: SESSION_REVISION_PAGE_MAX_BYTES,
     });
+    // `c.json()` can expand escaped strings and holds transient copies; use the shared
+    // worst-case JSON allocation multiplier before admitting an individual row.
+    const jsonAmplification = runtimeMemoryBudget().jsonAmplification;
+    if (
+      page.revisions.some(
+        (revision) =>
+          sessionRevisionWireBytes(revision) * jsonAmplification > SESSION_REVISION_PAGE_MAX_BYTES,
+      )
+    ) {
+      return c.json({ captured: false, reason: "session_recovery_limited" });
+    }
     return c.json({
       captured: true,
       sessionRef,
@@ -335,9 +391,9 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
   });
 }
 
-// One raw-revision page: `limit` caps rows/page, `maxBytes` is a SOFT ceiling (a single
-// oversized row still returns, so a large session never dead-ends). The client drives
-// the cursor across pages, so these are per-page bounds, not a whole-transcript budget.
+// One raw-revision page: `limit` caps rows/page and `maxBytes` caps both the page and
+// every returned row. The client drives the cursor across pages, so these are per-page
+// bounds, not a whole-transcript budget.
 const SESSION_REVISION_PAGE_LIMIT = 100;
 const SESSION_REVISION_PAGE_MAX_BYTES = 8 * 1024 * 1024;
 
@@ -375,6 +431,13 @@ async function getSessionRequest(
     responseAdmission,
     budget.jsonAmplification,
   );
+  const meta = await deps.telemetry.getSessionRevisionMeta?.(requestId);
+  if (meta) {
+    if (meta.sessionRef !== sessionRef)
+      return { status: "unavailable", reason: "session_unavailable" };
+    if (meta.recoveryWireBytes === null || meta.recoveryWireBytes > recoveryMaxWireBytes)
+      return { status: "unavailable", reason: "session_recovery_limited" };
+  }
   // Reserve one whole safe recovery window before the adapter materializes even
   // the first page. Reserving after listPage() would let concurrent readers each
   // allocate a large page before either one became visible to the shared budget.
@@ -500,6 +563,47 @@ function payloadPartJson(p: RequestPayload, part: RequestPayloadPart): string | 
   if (part === "request") return p.requestJson;
   if (part === "response") return p.responseJson;
   return p.upstreamRequestJson;
+}
+
+function payloadWireBytes(payload: RequestPayload): number {
+  return [payload.requestJson, payload.responseJson, payload.upstreamRequestJson].reduce(
+    (bytes, value) => bytes + (value === null ? 0 : Buffer.byteLength(value, "utf8")),
+    64,
+  );
+}
+
+function payloadPartWireBytes(payload: RequestPayloadPartRecord): number {
+  return 64 + (payload.json === null ? 0 : Buffer.byteLength(payload.json, "utf8"));
+}
+
+async function readPayloadWithinResponseWork<T>(
+  deps: AdminApiDeps,
+  read: () => Promise<T | null>,
+  wireBytes: (value: T) => number,
+): Promise<
+  | { status: "loaded"; value: T; release: () => void }
+  | { status: "missing"; value: null }
+  | { status: "limited" }
+> {
+  const admission = deps.responseWorkAdmission ?? runtimeResponseWorkAdmission();
+  const maxWireBytes = sessionRecoveryMaxWireBytes(admission);
+  const acquired = admission.acquire(maxWireBytes);
+  if (!acquired.ok) return { status: "limited" };
+  try {
+    const value = await read();
+    if (value === null) {
+      acquired.lease.release();
+      return { status: "missing", value: null };
+    }
+    if (wireBytes(value) > maxWireBytes) {
+      acquired.lease.release();
+      return { status: "limited" };
+    }
+    return { status: "loaded", value, release: acquired.lease.release };
+  } catch (error) {
+    acquired.lease.release();
+    throw error;
+  }
 }
 
 // Parse stored JSON text back to a value; if it isn't valid JSON (e.g. assembled

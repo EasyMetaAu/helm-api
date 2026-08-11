@@ -46,6 +46,23 @@ describe("restoreSessionRevisionJson", () => {
     );
   });
 
+  it("reconstructs a long linear chain without copying the full prefix per revision", () => {
+    const revisions = Array.from({ length: 40_000 }, (_, index) => ({
+      requestId: `request-${index}`,
+      parentRequestId: index === 0 ? null : `request-${index - 1}`,
+      retainCount: index,
+      requestDeltaJson: `[${index}]`,
+      requestEnvelopeJson: '{"messages":[]}',
+    }));
+
+    const restored = JSON.parse(
+      restoreSessionRevisionJson(revisions, `request-${revisions.length - 1}`),
+    ) as { messages: number[] };
+
+    expect(restored.messages).toHaveLength(revisions.length);
+    expect(restored.messages.at(-1)).toBe(revisions.length - 1);
+  }, 1_000);
+
   it("restores a branch from its explicit parent rather than its newest sibling", () => {
     expect(
       restoreSessionRevisionJson(

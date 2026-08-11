@@ -17,17 +17,25 @@ export function maintenanceDrainTimeoutMs(requestTimeoutMs: number): number {
   return Math.min(Math.floor(requestTimeoutMs), 120_000);
 }
 
-export function createSerializedMaintenanceQueue() {
+export function createSerializedMaintenanceQueue(options: { maxDepth?: number } = {}) {
   let tail: Promise<void> = Promise.resolve();
   let closed = false;
+  let depth = 0;
+  const maxDepth = options.maxDepth ?? 2;
 
   return {
     run<T>(work: () => Promise<T>): Promise<T> {
       if (closed) return Promise.reject(new Error("database maintenance is shutting down"));
+      if (depth >= maxDepth) return Promise.reject(new Error("database maintenance queue is full"));
+      depth++;
       const result = tail.then(work, work);
       tail = result.then(
-        () => undefined,
-        () => undefined,
+        () => {
+          depth--;
+        },
+        () => {
+          depth--;
+        },
       );
       return result;
     },
@@ -123,11 +131,12 @@ function maintenanceErrorBody(path: string, traceId: string) {
   };
 }
 
-export function createTrackedBackgroundTasks() {
+export function createTrackedBackgroundTasks(options: { maxTasks?: number } = {}) {
   type TaskToken = object;
   const current = new AsyncLocalStorage<TaskToken>();
   const active = new Map<TaskToken, Promise<void>>();
   let state: "open" | "paused" | "closed" = "open";
+  const maxTasks = options.maxTasks ?? 1_024;
   const waitForIdle = async (): Promise<void> => {
     while (active.size > 0) await Promise.all(active.values());
   };
@@ -136,6 +145,7 @@ export function createTrackedBackgroundTasks() {
     run(task: () => Promise<unknown>, onError: (error: unknown) => void = () => {}): boolean {
       const parent = current.getStore();
       if (state !== "open" && (parent === undefined || !active.has(parent))) return false;
+      if (active.size >= maxTasks) return false;
       const token = {};
       const promise = Promise.resolve()
         .then(() => current.run(token, task))

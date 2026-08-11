@@ -153,6 +153,76 @@ function baseInput(over: Partial<InjectInput> = {}): InjectInput {
 }
 
 describe("assembleInjectedContext — memory TEXT BLOCK (trailing-reminder model)", () => {
+  it("uses bounded injection pages and database dedup instead of loading a whole thread", async () => {
+    const store = makeFakeStore({});
+    const newest = makeObservation("new", "newest", "2026-05-30T00:00:00.000Z");
+    const older = makeObservation("old", "older", "2026-05-20T00:00:00.000Z");
+    store.listInjectionObservationsPage = vi.fn(async ({ offset }) =>
+      offset === 0 ? [newest, older] : [],
+    );
+    store.findRedundantInjectionObservations = vi.fn(async () => new Set<string>());
+
+    const out = await assembleInjectedContext(baseInput({ tokenBudget: 11 }), makeDeps(store));
+
+    expect(out.memoryBlock).toContain("newest");
+    expect(out.memoryBlock).not.toContain("older");
+    expect(store.listInjectionObservationsPage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        limit: 64,
+        offset: 0,
+        order: "newest",
+      }),
+    );
+    expect(store.listObservations).not.toHaveBeenCalled();
+    expect(store.listMessages).not.toHaveBeenCalled();
+    expect(store.findRedundantInjectionObservations).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the bounded fact read when the store provides it", async () => {
+    const store = makeFakeStore({ facts: [makeFact({ factText: "legacy full read" })] });
+    store.listInjectionFacts = vi.fn(async () => [makeFact({ factText: "bounded fact" })]);
+
+    const out = await assembleInjectedContext(
+      baseInput({ injectKnownFacts: true, maxFactsInjected: 1 }),
+      makeDeps(store),
+    );
+
+    expect(out.memoryBlock).toContain("bounded fact");
+    expect(out.memoryBlock).not.toContain("legacy full read");
+    expect(store.listInjectionFacts).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 1, accountId: "acct-a" }),
+    );
+    expect(store.listActiveFacts).not.toHaveBeenCalled();
+  });
+
+  it("fails open when a bounded page query fails", async () => {
+    const store = makeFakeStore({});
+    store.listInjectionObservationsPage = vi.fn(async () => {
+      throw new Error("page boom");
+    });
+
+    const out = await assembleInjectedContext(baseInput(), makeDeps(store));
+
+    expect(out.memoryBlock).toBeNull();
+    expect(out.metadata.degraded).toBe(true);
+  });
+
+  it("caps bounded candidates even when the estimator cannot consume budget", async () => {
+    const store = makeFakeStore({});
+    const page = Array.from({ length: 64 }, (_, index) =>
+      makeObservation(`obs-${index}`, "candidate", "2026-05-30T00:00:00.000Z"),
+    );
+    store.listInjectionObservationsPage = vi.fn(async () => page);
+    store.findRedundantInjectionObservations = vi.fn(async () => new Set<string>());
+
+    await assembleInjectedContext(
+      baseInput({ tokenBudget: 1 }),
+      makeDeps(store, { estimateTokens: () => 0 }),
+    );
+
+    expect(store.listInjectionObservationsPage).toHaveBeenCalledTimes(32);
+  });
+
   it("assembles a single system-level block with section headers in deterministic order", async () => {
     const store = makeFakeStore({
       projectReflection: makeReflection({ projectId: "proj-1", reflectionText: "project memory" }),
@@ -367,8 +437,8 @@ describe("assembleInjectedContext — memory TEXT BLOCK (trailing-reminder model
         makeObservation("o2", "keep me newer", "2026-05-28T00:00:00.000Z", ["c", "d"]),
       ],
     });
-    // Budget fits the reflection (3 tokens) + exactly one 3-token observation.
-    const out = await assembleInjectedContext(baseInput({ tokenBudget: 6 }), makeDeps(store));
+    // Budget fits the rendered headers + reflection + exactly one observation.
+    const out = await assembleInjectedContext(baseInput({ tokenBudget: 19 }), makeDeps(store));
     const block = out.memoryBlock ?? "";
     // reflection survives.
     expect(block).toContain("keep this proj");
@@ -376,12 +446,7 @@ describe("assembleInjectedContext — memory TEXT BLOCK (trailing-reminder model
     expect(block).toContain("keep me newer");
     expect(block).not.toContain("drop me oldest");
     expect(out.metadata.observation_count).toBe(1);
-    // The CONTENT selected (reflection + kept observation text) respects the budget;
-    // the rendered block adds fixed section-header overhead on top, so
-    // memory_tokens_injected (the final string) is reported separately.
-    const selectedContentTokens =
-      estimateTokens("keep this proj") + estimateTokens("keep me newer");
-    expect(selectedContentTokens).toBeLessThanOrEqual(6);
+    expect(out.metadata.memory_tokens_injected).toBeLessThanOrEqual(19);
   });
 
   it("trims reflections (resource before project) only when the budget cannot fit them, and signals overflow", async () => {
@@ -390,14 +455,15 @@ describe("assembleInjectedContext — memory TEXT BLOCK (trailing-reminder model
       resourceReflection: makeReflection({ resourceId: "res-1", reflectionText: "RES" }),
     });
     const log = vi.fn();
-    // Budget fits exactly one 1-token reflection → project kept, resource dropped.
+    // Budget fits one fully rendered reflection section → project kept, resource dropped.
     const out = await assembleInjectedContext(
-      baseInput({ tokenBudget: 1 }),
+      baseInput({ tokenBudget: 10 }),
       makeDeps(store, { log }),
     );
     const block = out.memoryBlock ?? "";
     expect(block).toContain("PROJ");
     expect(block).not.toContain("RES");
+    expect(out.metadata.memory_tokens_injected).toBeLessThanOrEqual(10);
     const logged = log.mock.calls.map((c) => String(c[0])).join("\n");
     expect(logged).toMatch(/memory.inject.*overflow/i);
   });

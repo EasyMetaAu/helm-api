@@ -205,9 +205,16 @@ export async function runDecayJob(job: DecayJob, deps: DecayDeps): Promise<void>
     // reflection archived by the Reflector's empty-set branch. Dedupe via the
     // open-job index; FULLY fail-open — a rebuild-enqueue failure never fails the
     // sweep (the next sweep re-enqueues).
-    if (archivedCount > 0 && deps.memoryStore.listActiveReflectionScopes !== undefined) {
+    if (
+      archivedCount > 0 &&
+      deps.memoryStore.archiveObservationsEnqueuesReflectors !== true &&
+      deps.memoryStore.listActiveReflectionScopes !== undefined
+    ) {
       try {
-        const scopes = await deps.memoryStore.listActiveReflectionScopes(accountId);
+        const scopes = await deps.memoryStore.listActiveReflectionScopes(accountId, 512);
+        if (scopes.length === 512) {
+          deps.log("memory.decay.rebuild_scope_cap", { account_id: accountId, limit: 512 });
+        }
         let enqueued = 0;
         for (const scope of scopes) {
           try {

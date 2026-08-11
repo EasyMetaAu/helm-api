@@ -34,6 +34,7 @@ function makeStore(rows: ScorableObservation[], reflectionScopes: unknown[] = []
   const enqueued: Array<{ type: string; scope: unknown }> = [];
   let served = false;
   const store = {
+    archiveObservationsEnqueuesReflectors: undefined as true | undefined,
     listScorableObservations: vi.fn(async (_scope: { accountId: string; limit?: number }) => {
       if (served) return [];
       served = true;
@@ -149,11 +150,25 @@ describe("runDecayJob", () => {
 
     await runDecayJob({ jobId: "d1", scope: { accountId: "acct-a" } }, deps);
 
-    expect(store.listActiveReflectionScopes).toHaveBeenCalledWith("acct-a");
+    expect(store.listActiveReflectionScopes).toHaveBeenCalledWith("acct-a", 512);
     expect(enqueued).toEqual([
       { type: "reflector", scope: { accountId: "acct-a", projectId: "p1" } },
       { type: "reflector", scope: { accountId: "acct-a", resourceId: "r1" } },
     ]);
+  });
+
+  it("does not rescan a capped account scope list when archival enqueues exact rebuilds", async () => {
+    const { store } = makeStore(
+      [row("a-stale", 100)],
+      Array.from({ length: 513 }, (_, i) => ({ accountId: "acct-a", projectId: `p${i}` })),
+    );
+    store.archiveObservationsEnqueuesReflectors = true;
+    const deps = makeDeps(store, NOW);
+
+    await runDecayJob({ jobId: "d1", scope: { accountId: "acct-a" } }, deps);
+
+    expect(store.listActiveReflectionScopes).not.toHaveBeenCalled();
+    expect(store.enqueueJob).not.toHaveBeenCalled();
   });
 
   it("does NOT enqueue rebuilds when the sweep archived nothing", async () => {

@@ -34,6 +34,11 @@ export interface WriteQueueDeps {
   // rows × 7MB). Independent of maxBatch (the row-count eager-flush). Default
   // maxBytes/4.
   flushBytes?: number;
+  // Hard cap on producers waiting to enter the bounded queue. Their async frames
+  // retain payloads/tasks too, so waiting work needs an independent ceiling.
+  // Deferred writes are observational; overflow is dropped fail-open.
+  maxPendingAdmissions?: number;
+  maxPendingAdmissionBytes?: number;
   // Optional hook fired AFTER each enqueued task settles (success or failure). The
   // composition root wires this to memoryWorker.wake() so a memory observe landing
   // here schedules the debounced drain — request-driven memory formation without
@@ -88,6 +93,8 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
   const maxDepth = deps.maxDepth ?? 10_000;
   const maxBytes = deps.maxBytes ?? runtimeMemoryBudget().writeQueueBytes;
   const flushBytes = deps.flushBytes ?? Math.floor(maxBytes / 4);
+  const maxPendingAdmissions = deps.maxPendingAdmissions ?? 256;
+  const maxPendingAdmissionBytes = deps.maxPendingAdmissionBytes ?? maxBytes;
   const jsonAmplification = runtimeMemoryBudget().jsonAmplification;
 
   let telemetryBuf: InsertTelemetryInput[] = [];
@@ -119,6 +126,7 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
   // capacity is available.
   let admissionTail: Promise<void> = Promise.resolve();
   let pendingAdmissions = 0;
+  let pendingAdmissionBytes = 0;
 
   const depth = (): number =>
     telemetryBuf.length + payloadBuf.length + inFlightDepth + pendingTasks;
@@ -272,8 +280,19 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
 
   const admit = async (incomingBytes: number, append: () => void): Promise<void> => {
     // The uncontended hot path is synchronous: the check and append are one JS turn.
-    if (pendingAdmissions === 0 && !overBudget(incomingBytes)) {
+    if (pendingAdmissions === 0 && (!overBudget(incomingBytes) || depth() === 0)) {
       append();
+      return;
+    }
+
+    // The caller's suspended async frame retains `input` / `task` until it wins
+    // admission. Do not turn a stalled store into an unbounded second queue.
+    const pendingCost = Math.min(incomingBytes, maxPendingAdmissionBytes);
+    if (
+      pendingAdmissions >= maxPendingAdmissions ||
+      pendingAdmissionBytes + pendingCost > maxPendingAdmissionBytes
+    ) {
+      log("writequeue.admission_dropped");
       return;
     }
 
@@ -283,12 +302,14 @@ export function createWriteQueue(deps: WriteQueueDeps): WriteQueue {
       release = resolve;
     });
     pendingAdmissions++;
+    pendingAdmissionBytes += pendingCost;
     await previous;
     try {
       if (overBudget(incomingBytes)) await waitForCapacity(incomingBytes);
       append();
     } finally {
       pendingAdmissions--;
+      pendingAdmissionBytes -= pendingCost;
       release();
     }
   };

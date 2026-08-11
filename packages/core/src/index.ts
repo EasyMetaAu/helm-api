@@ -465,13 +465,17 @@ export {
 // cache hits / non-streaming upstreams. Framework-agnostic (Web ReadableStream).
 export {
   type Controller,
+  createSSEIncompleteFrameGuard,
   createStreamState,
+  nextSSEFrameBoundary,
   parseSSEData,
   readSSE,
   type SSEFrame,
+  type SSEFrameBoundary,
   type StreamState,
   safeClose,
   safeEnqueue,
+  splitCompleteSSEFrames,
   synthesizeSSE,
 } from "./protocol/streaming.js";
 export type {
