@@ -2,6 +2,8 @@ import type { Observation, Reflection, ReflectionScope } from "@helm/shared";
 import type { MemoryStore } from "../store/ports.js";
 import { buildReconciledFactBatch } from "./forgetting/facts.js";
 
+const MAX_REFLECTOR_OBSERVATIONS = 512;
+
 // Background Reflector (docs/08 Phase 2 "observational-memory MVP"). This is an OFF-the-main-
 // request-path job: a scheduler triggers it PERIODICALLY to merge a scope's many
 // observations into ONE stable, slowly-changing, VERSIONED reflection — the
@@ -135,6 +137,19 @@ export async function runReflectorJob(
     // only the promoting thread's observations would make the project reflection
     // last-writer-wins per thread.
     const target = reflectionTargetScope(job.scope);
+    const observationCount =
+      deps.memoryStore.getObservationCount === undefined
+        ? null
+        : await deps.memoryStore.getObservationCount(target);
+    if (observationCount !== null && observationCount > MAX_REFLECTOR_OBSERVATIONS) {
+      await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      deps.log("memory.reflector.history_skipped", {
+        scope: job.scope,
+        target_scope: target,
+        max_observations: MAX_REFLECTOR_OBSERVATIONS,
+      });
+      return { reflectionId: null, version: null, changed: false };
+    }
     // docs/12 (P5/P6 correctness) — the Reflector merges + extracts facts from
     // ACTIVE observations ONLY. `listObservations` returns every status (the
     // archived/pruned rows still serve as raw-coverage markers for inject/observer),

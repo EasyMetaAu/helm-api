@@ -12,6 +12,8 @@ import type { ExtractedFact } from "./reflector.js";
 // consolidate.max_facts_per_subject schema default — used when the composition root
 // wires the eager extractor without an explicit cap.
 const DEFAULT_MAX_FACTS_PER_SUBJECT = 8;
+const MAX_OBSERVER_THREAD_MESSAGES = 4_096;
+const MAX_OBSERVER_THREAD_OBSERVATIONS = 512;
 
 // Salient-fact fast path (salient-fact-memory-spec Change A). Mine the thread's
 // UNCOVERED raw turns for durable facts and persist them at the thread's
@@ -347,6 +349,24 @@ export async function runObserverJob(
   deps: ObserverDeps,
 ): Promise<ObserverResult> {
   try {
+    const readMeta =
+      deps.memoryStore.getThreadMeta === undefined
+        ? null
+        : await deps.memoryStore
+            .getThreadMeta({ accountId: job.accountId, threadId: job.threadId })
+            .catch(() => null);
+    if (
+      (readMeta?.messageCount ?? 0) > MAX_OBSERVER_THREAD_MESSAGES ||
+      (readMeta?.observationCount ?? 0) > MAX_OBSERVER_THREAD_OBSERVATIONS
+    ) {
+      await deps.memoryStore.updateJobStatus(job.jobId, "done");
+      deps.log("memory.observer.history_skipped", {
+        thread_id: job.threadId,
+        max_messages: MAX_OBSERVER_THREAD_MESSAGES,
+        max_observations: MAX_OBSERVER_THREAD_OBSERVATIONS,
+      });
+      return { observationId: null, sourceMessageRange: null };
+    }
     const all = await deps.memoryStore.listMessages({
       accountId: job.accountId,
       threadId: job.threadId,
@@ -374,10 +394,7 @@ export async function runObserverJob(
     //   priorCompactionCount → the thread's actual observation count (the v1
     //              static 0 never engaged the distortion brake).
     //   retention → measured output/source ratio of prior observations.
-    const threadMeta = await deps.memoryStore
-      .getThreadMeta?.({ accountId: job.accountId, threadId: job.threadId })
-      .catch(() => null);
-    const modelAlias = threadMeta?.lastServedModel ?? null;
+    const modelAlias = readMeta?.lastServedModel ?? null;
     const pricing = deps.resolvePricing(modelAlias);
     const tunables = resolveCompactionTunables(deps.compaction);
     // Idle is derived HERE, at run time, from the newest message's age — NOT from
