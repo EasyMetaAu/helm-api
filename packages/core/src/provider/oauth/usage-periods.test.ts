@@ -524,7 +524,7 @@ describe("detectQuotaResetPeriods", () => {
     ]);
   });
 
-  it("records a reset when usage drops even if the provider keeps the same deadline", () => {
+  it("marks a usage-drop-only reset approximate when the provider keeps the same deadline", () => {
     const observedAtMs = 20 * WEEK;
     const reset = observedAtMs + 2 * 24 * HOUR;
     expect(
@@ -536,7 +536,11 @@ describe("detectQuotaResetPeriods", () => {
         observedAtMs,
       }),
     ).toEqual([
-      expect.objectContaining({ periodStartMs: reset - WEEK, periodEndMs: observedAtMs }),
+      expect.objectContaining({
+        periodStartMs: reset - WEEK,
+        periodEndMs: observedAtMs,
+        approximate: true,
+      }),
     ]);
   });
 });

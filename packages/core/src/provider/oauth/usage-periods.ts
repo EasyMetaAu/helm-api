@@ -49,7 +49,7 @@ export function detectQuotaResetPeriods(input: {
       periodStartMs: oldStart,
       periodEndMs: resetAtMs,
       detectedAtMs: input.observedAtMs,
-      approximate: false,
+      approximate: !resetDeadlineAdvanced,
     });
   }
 
