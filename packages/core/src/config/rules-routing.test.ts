@@ -192,9 +192,10 @@ describe("shipped config rules drive routing", () => {
 
     const chain = result.decision.lane.candidate_chain;
     expect(result.decision.lane.selected_lane).toBe("premium");
-    expect(chain.slice(0, 5)).toEqual([
+    expect(chain.slice(0, 6)).toEqual([
       "openai-codex/gpt-5.6-sol",
       "xai/grok-4.5",
+      "xai/grok-4.6",
       "anthropic/claude-opus-4-8",
       "openai-codex/gpt-5.6-terra",
       "anthropic/claude-sonnet-5",
