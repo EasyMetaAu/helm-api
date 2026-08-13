@@ -1389,6 +1389,18 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // Public reset announcements can fill historical gaps, but remain estimates.
+    version: 51,
+    run: (db) => {
+      if (
+        sqliteTableHasColumns(db, "oauth_reset_period", ["provider_id"]) &&
+        !sqliteTableHasColumns(db, "oauth_reset_period", ["approximate"])
+      ) {
+        db.exec("ALTER TABLE oauth_reset_period ADD COLUMN approximate INTEGER NOT NULL DEFAULT 0");
+      }
+    },
+  },
 ];
 
 function sqliteTableHasColumns(

@@ -49,6 +49,7 @@ export function detectQuotaResetPeriods(input: {
       periodStartMs: oldStart,
       periodEndMs: resetAtMs,
       detectedAtMs: input.observedAtMs,
+      approximate: false,
     });
   }
 
@@ -67,11 +68,13 @@ export interface ComputeUsagePeriodsInput {
   dataStartMs: number;
   // Max historical periods to roll back per window.
   limit: number;
-  // Optional REAL reset boundaries per window key (from oauth_reset_period), each a
-  // half-open [startMs, endMs). When present, history uses these exact boundaries
-  // (approximate:false) and only rolls back the fixed-window approximation for the
-  // GAP older than the earliest recorded boundary. Absent/empty → all-approximate.
-  recordedBoundaries?: Record<string, Array<{ startMs: number; endMs: number }>>;
+  // Optional recorded reset boundaries per window key (from oauth_reset_period), each
+  // a half-open [startMs, endMs). Exact observations remain exact; public-announcement
+  // estimates keep their approximate marker. Older gaps use fixed-window rollback.
+  recordedBoundaries?: Record<
+    string,
+    Array<{ startMs: number; endMs: number; approximate?: boolean }>
+  >;
 }
 
 // Cadence-derived boundaries are exact only on an hour floor. Recorded reset points can
@@ -160,18 +163,21 @@ export function computeUsagePeriods(input: ComputeUsagePeriodsInput): UsagePerio
     let recIdx = 0;
     // Skip recordings that end AFTER reset (future / already-superseded).
     while (recIdx < recorded.length && (recorded[recIdx]?.endMs ?? 0) > reset + tol) recIdx++;
-    let curBoundaryReal = false;
+    let curBoundaryRecorded = false;
+    let curBoundaryApproximate = false;
     const openRow = recorded[recIdx];
     if (openRow && abuts(openRow.endMs, reset)) {
       curStart = openRow.startMs;
-      curBoundaryReal = true; // start came from a real recorded boundary
+      curBoundaryRecorded = true;
+      curBoundaryApproximate = openRow.approximate ?? false;
       recIdx++;
     } else if (openRow && openRow.endMs <= nowMs && openRow.endMs > curStart) {
       // A provider/reset-credit can cut a window short without changing its next reset
       // deadline. The newest CLOSED period then ends at the real reset point inside the
       // cadence-derived current span; start current usage there.
       curStart = openRow.endMs;
-      curBoundaryReal = true;
+      curBoundaryRecorded = true;
+      curBoundaryApproximate = openRow.approximate ?? false;
     }
 
     // Current: [curStart, min(reset, now)). Exact only when the START boundary is a
@@ -182,7 +188,9 @@ export function computeUsagePeriods(input: ComputeUsagePeriodsInput): UsagePerio
     // review P2R3-1). A real recorded curStart still needs hour-alignment.
     const curEnd = Math.min(reset, nowMs);
     const curExact =
-      !boundaryAdvanced && (curBoundaryReal || (isHourAligned(reset) && isHourAligned(curStart)));
+      !boundaryAdvanced &&
+      !curBoundaryApproximate &&
+      (curBoundaryRecorded || (isHourAligned(reset) && isHourAligned(curStart)));
     if (curEnd > curStart) {
       const sums = sumWindow(buckets, curStart, curEnd);
       current.push({
@@ -220,7 +228,7 @@ export function computeUsagePeriods(input: ComputeUsagePeriodsInput): UsagePerio
       // start is strictly older — its real start becomes the next cursor.
       if (rec && cursor - rec.endMs <= tol && rec.startMs < cursor) {
         start = rec.startMs;
-        approximate = false;
+        approximate = rec.approximate ?? false;
         recIdx++;
       } else {
         start = cursor - winMs;

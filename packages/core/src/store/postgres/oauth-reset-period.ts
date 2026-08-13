@@ -5,30 +5,40 @@ import type { PgDb } from "./migrate.js";
 import { oauthResetPeriod } from "./schema.js";
 
 // PgOAuthResetPeriodStore — pg mirror of the sqlite adapter. Idempotent append via
-// onConflictDoNothing; bigint columns marshal as strings, so Number()-normalize before
-// the shared schema parse.
+// onConflictDoNothing for estimates; a later exact observation may replace one. Bigint
+// columns marshal as strings, so Number()-normalize before the shared schema parse.
 export class PgOAuthResetPeriodStore implements OAuthResetPeriodStore {
   constructor(private readonly db: PgDb) {}
 
   async record(row: OAuthResetPeriod): Promise<void> {
-    await this.db
-      .insert(oauthResetPeriod)
-      .values({
-        providerId: row.providerId,
-        account: row.account,
-        windowKey: row.windowKey,
-        periodStartMs: row.periodStartMs,
+    const insert = this.db.insert(oauthResetPeriod).values({
+      providerId: row.providerId,
+      account: row.account,
+      windowKey: row.windowKey,
+      periodStartMs: row.periodStartMs,
+      periodEndMs: row.periodEndMs,
+      detectedAtMs: row.detectedAtMs,
+      approximate: row.approximate,
+    });
+    const target = [
+      oauthResetPeriod.providerId,
+      oauthResetPeriod.account,
+      oauthResetPeriod.windowKey,
+      oauthResetPeriod.periodStartMs,
+    ];
+    if (row.approximate) {
+      await insert.onConflictDoNothing({ target });
+      return;
+    }
+    await insert.onConflictDoUpdate({
+      target,
+      set: {
         periodEndMs: row.periodEndMs,
         detectedAtMs: row.detectedAtMs,
-      })
-      .onConflictDoNothing({
-        target: [
-          oauthResetPeriod.providerId,
-          oauthResetPeriod.account,
-          oauthResetPeriod.windowKey,
-          oauthResetPeriod.periodStartMs,
-        ],
-      });
+        approximate: false,
+      },
+      setWhere: eq(oauthResetPeriod.approximate, true),
+    });
   }
 
   async queryPeriods(
@@ -57,6 +67,7 @@ export class PgOAuthResetPeriodStore implements OAuthResetPeriodStore {
         periodStartMs: Number(r.periodStartMs),
         periodEndMs: Number(r.periodEndMs),
         detectedAtMs: Number(r.detectedAtMs),
+        approximate: r.approximate,
       }),
     );
   }
@@ -76,6 +87,7 @@ export class PgOAuthResetPeriodStore implements OAuthResetPeriodStore {
           eq(oauthResetPeriod.account, account),
           ...(windowKey === undefined ? [] : [eq(oauthResetPeriod.windowKey, windowKey)]),
           lte(oauthResetPeriod.periodEndMs, beforeMs),
+          eq(oauthResetPeriod.approximate, false),
           sql`${oauthResetPeriod.detectedAtMs} >= ${oauthResetPeriod.periodEndMs}`,
         ),
       )

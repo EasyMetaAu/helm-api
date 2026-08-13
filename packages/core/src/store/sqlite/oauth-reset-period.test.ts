@@ -16,6 +16,7 @@ function period(over: Partial<OAuthResetPeriod> = {}): OAuthResetPeriod {
     periodStartMs: 1000,
     periodEndMs: 19000,
     detectedAtMs: 19500,
+    approximate: false,
     ...over,
   };
 }
@@ -30,6 +31,27 @@ describe("SqliteOAuthResetPeriodStore", () => {
     const rows = await store.queryPeriods("anthropic", "a@x.com", "5h", 10);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.detectedAtMs).toBe(19500);
+    close();
+  });
+
+  it("round-trips an announcement-estimated boundary", async () => {
+    const { store, close } = freshStore();
+    await store.record(period({ approximate: true }));
+    expect(await store.queryPeriods("anthropic", "a@x.com", "5h", 10)).toMatchObject([
+      { approximate: true },
+    ]);
+    close();
+  });
+
+  it("lets an exact observation replace an estimate with the same period start", async () => {
+    const { store, close } = freshStore();
+    await store.record(period({ periodEndMs: 18000, approximate: true }));
+    await store.record(period({ periodEndMs: 19000, approximate: false }));
+    await store.record(period({ periodEndMs: 20000, approximate: true }));
+
+    expect(await store.queryPeriods("anthropic", "a@x.com", "5h", 10)).toMatchObject([
+      { periodEndMs: 19000, approximate: false },
+    ]);
     close();
   });
 
@@ -76,6 +98,15 @@ describe("SqliteOAuthResetPeriodStore", () => {
     );
     await store.record(
       period({ windowKey: "7d", periodStartMs: 3000, periodEndMs: 9000, detectedAtMs: 4000 }),
+    );
+    await store.record(
+      period({
+        windowKey: "7d",
+        periodStartMs: 4000,
+        periodEndMs: 4500,
+        detectedAtMs: 4500,
+        approximate: true,
+      }),
     );
 
     expect(await store.latestResetAt("anthropic", "a@x.com", 5000)).toBe(3000);

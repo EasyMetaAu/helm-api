@@ -354,12 +354,9 @@ export const oauthQuota = sqliteTable(
   (t) => [primaryKey({ columns: [t.providerId, t.account] })],
 );
 
-// Per-account RESET-PERIOD boundaries — the append-only history the latest-wins
-// oauth_quota snapshot lacks. One row per real reset event detected during a quota
-// refresh: [period_start_ms, period_end_ms) is the window that just ended (its start
-// = the prior resetsAtMs, its end = the new resetsAtMs). Lets the usage-period read
-// slice history on TRUE boundaries going forward instead of rolling back a fixed
-// window length. Pure observability, no secret column (principle 7).
+// Per-account RESET-PERIOD boundaries — the history the latest-wins oauth_quota
+// snapshot lacks. Exact observations and explicitly marked public-announcement
+// estimates share the table. Pure observability, no secret column (principle 7).
 export const oauthResetPeriod = sqliteTable(
   "oauth_reset_period",
   {
@@ -369,6 +366,7 @@ export const oauthResetPeriod = sqliteTable(
     periodStartMs: integer("period_start_ms").notNull(), // prior resetsAtMs
     periodEndMs: integer("period_end_ms").notNull(), // new resetsAtMs
     detectedAtMs: integer("detected_at_ms").notNull(), // when the refresh saw it
+    approximate: integer("approximate", { mode: "boolean" }).notNull().default(false),
   },
   // PK on (provider, account, window, start) makes re-detection idempotent — the same
   // reset seen by repeated refreshes folds to one row.

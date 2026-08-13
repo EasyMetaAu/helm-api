@@ -48,39 +48,68 @@ import type {
 //   - device_code (Copilot): start -> show user code -> poll until done.
 
 const DEFAULT_ACCOUNT = "default";
+const ESTIMATE_SUPERSEDE_MS = 3 * 60 * 60_000;
 
 function resetEventBoundaries(
   rows: OAuthResetPeriod[],
   nextResetAtMs: number | null,
   nowMs: number,
   windowMs: number | null,
-): Array<{ startMs: number; endMs: number }> {
+): Array<{ startMs: number; endMs: number; approximate: boolean }> {
   // The old writer stored [oldReset, projectedNextReset); the current writer stores a
   // closed period ending at the observed reset. Reduce both shapes to proven events.
+  const rawPoints = rows
+    .flatMap((row) => {
+      const atMs =
+        row.detectedAtMs >= row.periodEndMs
+          ? row.periodEndMs
+          : row.periodStartMs <= row.detectedAtMs
+            ? row.periodStartMs
+            : null;
+      return atMs === null ? [] : [{ atMs, approximate: row.approximate ?? false }];
+    })
+    .filter((point) => point.atMs <= nowMs);
+  const exactPoints = rawPoints.filter((point) => !point.approximate);
   const points = [
-    ...new Set(
-      rows.flatMap((row) => {
-        if (row.detectedAtMs >= row.periodEndMs) return [row.periodEndMs];
-        return row.periodStartMs <= row.detectedAtMs ? [row.periodStartMs] : [];
-      }),
-    ),
-  ]
-    .filter((point) => point <= nowMs)
-    .sort((a, b) => a - b);
+    ...new Map(
+      rawPoints
+        .filter(
+          (point) =>
+            !point.approximate ||
+            !exactPoints.some(
+              (exact) => Math.abs(exact.atMs - point.atMs) <= ESTIMATE_SUPERSEDE_MS,
+            ),
+        )
+        .sort((a, b) => Number(b.approximate) - Number(a.approximate))
+        .map((point) => [point.atMs, point] as const),
+    ).values(),
+  ].sort((a, b) => a.atMs - b.atMs);
   const plausible = (startMs: number, endMs: number) =>
     windowMs !== null && endMs - startMs <= windowMs * 1.5;
-  const boundaries = points.slice(1).flatMap((endMs, index) => {
-    const startMs = points[index] ?? endMs;
-    return plausible(startMs, endMs) ? [{ startMs, endMs }] : [];
+  const boundaries = points.slice(1).flatMap((end, index) => {
+    const start = points[index] ?? end;
+    return plausible(start.atMs, end.atMs)
+      ? [
+          {
+            startMs: start.atMs,
+            endMs: end.atMs,
+            approximate: start.approximate || end.approximate,
+          },
+        ]
+      : [];
   });
   const latest = points.at(-1);
   if (
     latest !== undefined &&
     nextResetAtMs !== null &&
     nextResetAtMs > nowMs &&
-    plausible(latest, nextResetAtMs)
+    plausible(latest.atMs, nextResetAtMs)
   ) {
-    boundaries.push({ startMs: latest, endMs: nextResetAtMs });
+    boundaries.push({
+      startMs: latest.atMs,
+      endMs: nextResetAtMs,
+      approximate: latest.approximate,
+    });
   }
   return boundaries;
 }

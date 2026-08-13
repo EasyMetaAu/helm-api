@@ -545,9 +545,8 @@ export const OAuthUsagePeriodsSchema = z
 
 export type OAuthUsagePeriods = z.infer<typeof OAuthUsagePeriodsSchema>;
 
-// One RECORDED reset period — an append-only fact captured when an upstream snapshot or
-// reset-credit action closes the prior allowance window. [periodStartMs, periodEndMs)
-// is the window that actually ended.
+// One recorded reset period. Exact rows come from an upstream snapshot/reset-credit;
+// approximate rows may come from a public announcement when account evidence is absent.
 export const OAuthResetPeriodSchema = z
   .object({
     providerId: z.string(),
@@ -556,6 +555,7 @@ export const OAuthResetPeriodSchema = z
     periodStartMs: z.number().int(),
     periodEndMs: z.number().int(),
     detectedAtMs: z.number().int(),
+    approximate: z.boolean().default(false),
   })
   .strict();
 

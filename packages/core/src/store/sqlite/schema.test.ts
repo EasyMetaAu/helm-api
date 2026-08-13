@@ -105,6 +105,33 @@ describe("sqlite schema + migrations", () => {
     }
   });
 
+  it("v51 preserves reset rows and marks legacy boundaries exact", () => {
+    const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v51-reset-estimates-"));
+    const path = join(dir, "helm.db");
+    try {
+      runMigrations(path);
+      const seed = new Database(path);
+      seed.exec(`
+        INSERT INTO oauth_reset_period (
+          provider_id, account, window_key, period_start_ms, period_end_ms, detected_at_ms
+        ) VALUES ('openai-codex', 'a', 'primary', 1, 2, 2);
+        ALTER TABLE oauth_reset_period DROP COLUMN approximate;
+        DELETE FROM _migrations WHERE version = 51;
+      `);
+      seed.close();
+
+      runMigrations(path);
+
+      const after = new Database(path);
+      expect(after.prepare("SELECT approximate FROM oauth_reset_period").get()).toEqual({
+        approximate: 0,
+      });
+      after.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("upgrades a real pre-unique-index memory_jobs table with duplicate open jobs", () => {
     const dir = mkdtempSync(join(tmpdir(), "helm-sqlite-v13-memory-jobs-"));
     const path = join(dir, "helm.db");
