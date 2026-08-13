@@ -32,6 +32,7 @@ economy:
   fallback:
     - openai-codex/gpt-5.4-mini
     - anthropic/claude-haiku-4-5-20251001
+    - grok
     - deepseek/deepseek-v4-flash
     - openrouter/deepseek-v4-flash
     - openrouter/auto
@@ -43,6 +44,7 @@ balanced:
   primary: openai-codex/gpt-5.6-terra
   fallback:
     - anthropic/claude-sonnet-5
+    - grok
     - deepseek/deepseek-v4-pro
     - openrouter/deepseek-v4-pro
     - zenmux/auto
@@ -55,7 +57,7 @@ premium:
   fallback:
     # Absorb premium fallback traffic before Claude Opus; an unbound or parked
     # SuperGrok account fails open to the next candidate.
-    - xai/grok-4.5
+    - grok
     - anthropic/claude-opus-4-8
     - balanced
 
@@ -93,7 +95,7 @@ vision:
   # and long-context vision without automatically invoking a paid ZenMux model.
   primary: openai-codex/gpt-5.6-terra
   fallback:
-    - xai/grok-4.5
+    - grok
     - anthropic/claude-sonnet-5
     - anthropic/claude-opus-4-8
   constraints:
@@ -230,6 +232,11 @@ gemini-flash:
   primary: zenmux-vertex/gemini-3.5-flash
   fallback:
     - balanced
+
+grok:
+  purpose: Stable Grok channel; update only this primary when Grok changes version
+  primary: xai/grok-4.6
+  fallback: []
 
 # —— image-generation lanes (failover across image providers) ——
 # Image gen (POST /v1/images/generations, POST /v1beta/interactions, and Gemini

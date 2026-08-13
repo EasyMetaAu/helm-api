@@ -102,7 +102,7 @@ describe("shipped config rules drive routing", () => {
     expect(config.lanes?.json?.constraints.require_json).toBe(true);
     expect(config.lanes?.vision).toMatchObject({
       primary: "openai-codex/gpt-5.6-terra",
-      fallback: ["xai/grok-4.5", "anthropic/claude-sonnet-5", "anthropic/claude-opus-4-8"],
+      fallback: ["grok", "anthropic/claude-sonnet-5", "anthropic/claude-opus-4-8"],
     });
     expect(config.lanes?.tool_use).toBeDefined();
   });
@@ -172,7 +172,7 @@ describe("shipped config rules drive routing", () => {
     }
   });
 
-  it("expands the shipped premium chain with Grok before Claude Opus", async () => {
+  it("expands the shipped premium chain through the stable Grok lane", async () => {
     const config = loadConfig({ configDir, env: {} });
     if (config.lanes === undefined) throw new Error("config.lanes must be loaded from lanes.yaml");
 
@@ -192,12 +192,13 @@ describe("shipped config rules drive routing", () => {
 
     const chain = result.decision.lane.candidate_chain;
     expect(result.decision.lane.selected_lane).toBe("premium");
-    expect(chain.slice(0, 5)).toEqual([
+    expect(chain.slice(0, 6)).toEqual([
       "openai-codex/gpt-5.6-sol",
-      "xai/grok-4.5",
+      "xai/grok-4.6",
       "anthropic/claude-opus-4-8",
       "openai-codex/gpt-5.6-terra",
       "anthropic/claude-sonnet-5",
+      "deepseek/deepseek-v4-pro",
     ]);
     expect(new Set(chain).size).toBe(chain.length);
   });

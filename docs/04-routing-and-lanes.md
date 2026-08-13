@@ -206,6 +206,7 @@ economy:
   fallback:
     - openai-codex/gpt-5.4-mini
     - anthropic/claude-haiku-4-5-20251001
+    - grok
     - deepseek/deepseek-v4-flash
     - openrouter/deepseek-v4-flash
     - openrouter/auto
@@ -217,6 +218,7 @@ balanced:
   primary: openai-codex/gpt-5.6-terra
   fallback:
     - anthropic/claude-sonnet-5
+    - grok
     - deepseek/deepseek-v4-pro
     - openrouter/deepseek-v4-pro
     - zenmux/auto
@@ -227,10 +229,18 @@ premium:
   reasoning_effort: high
   primary: openai-codex/gpt-5.6-sol
   fallback:
-    - xai/grok-4.5
+    - grok
     - anthropic/claude-opus-4-8
     - balanced
+
+grok:
+  purpose: Stable Grok channel; update only this primary when Grok changes version
+  primary: xai/grok-4.6
+  fallback: []
 ```
+
+The shared `grok` lane is also referenced by `vision`. Future Grok upgrades change
+only `grok.primary`; every referencing lane inherits the new model.
 
 The lane map must contain at least one lane. `balanced` is the shipped
 `runtime.default_lane`, not a schema-mandatory name; an operator may choose another
@@ -259,7 +269,7 @@ vision:
   purpose: Multimodal / image understanding
   primary: openai-codex/gpt-5.6-terra
   fallback:
-    - xai/grok-4.5
+    - grok
     - anthropic/claude-sonnet-5
     - anthropic/claude-opus-4-8
   constraints:

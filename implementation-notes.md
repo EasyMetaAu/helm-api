@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-08-13 · Grok 4.6 补齐 Agent 能力、价格与 lane 投影（Catalog / routing，docs/04/07，原则 2/3/6）
+
+- **根因**：xAI OAuth 实时 catalog 已把 `grok-4.6` 合成为可执行 alias，但签入的手工 catalog 没有对应条目；执行层对只有实时元数据的新 xAI 模型保守合成 `supportsTools:false`，所以裸 chat 可过，Grok Build 默认携带 `tools` 时在 provider 调用前被能力过滤为 `capability_unsatisfiable`。`/v1/models` 同样只能列出 id，无法附带 capabilities/pricing/lane membership。
+- **修复边界**：为已实际出现的 `xai/grok-4.6` 增加手工能力条目，开放已验证的 tools/SSE/常用 reasoning effort，保持 subscription vision、JSON 与额外媒体能力 fail-closed；没有把任意未来 xAI alias 自动推断为支持 tools。同步线上已验证的稳定 `grok` lane（当前 `primary: xai/grok-4.6`），`economy`、`balanced`、`premium`、`vision` 统一引用它；以后升级 Grok 只需改一处，能力不满足的请求仍由既有过滤器跳过。
+- **价格口径**：SuperGrok 仍是包月订阅；预算与遥测沿用“官方 API 等价估价”。2026-08-13 xAI 官方价卡为短上下文 input/cache/output `$2/$0.5/$6`，prompt 达到 200K 后 `$4/$1/$12`，priority 为对应档位 2 倍；配置显式保存 context + priority 两层，避免长上下文预算低估。
+- **限制**：官方公开模型支持 vision/structured outputs/xhigh，但本次现场只证明 Helm/Grok Build 的 chat + tools；subscription proxy 上未做真实 vision/JSON/xhigh canary，因此这些能力没有借用 public API 声明自动放开。生产修复仍需按部署流程发布，并从 `/version`、`/v1/models` 和一条带 tools 的真实请求三处回读。
+
 ## 2026-08-13 · 使用率下降观测不得冒充精确重置（OAuth quota，docs/04/11，原则 3/7）
 
 - **根因与修复**：provider deadline 未变化时，刷新只能证明“使用率已下降”，不能证明下降发生在刷新瞬间；这类记录改为 `approximate=true`。deadline 推进推导出的窗口起点和 reset-credit 事件仍为精确事实。这样同账号 ±3 小时内已有 header 精确点时会自动压过刷新推测，且刷新推测不再进入 `latestResetAt`。
@@ -66,21 +73,9 @@
 - **架构取舍（AskUserQuestion 敲定）**：重建纯函数 `restoreSessionRevisionJson` 从 `packages/core/src/store/session-delta.ts` 抽到 **`@helm/shared`**（零 node 依赖、浏览器安全），core 反向 re-export（barrel 与调用方无感）；写入侧 `splitSessionRequestJson`/`hashEvents`（依赖 `node:crypto`）留在 core。admin `lib/api/requests.ts` **破例 import** shared 的这一个纯函数——打破该文件「零 core/gateway 业务逻辑」红线，理由：复制重建逻辑违反 DRY 更糟。破例已在两处注释标明。
 - **坑**：① 不能让 admin `import "@helm/core"`——core barrel 拽入 better-sqlite3/postgres/undici，浏览器 bundle 炸。② `session-revisions` 端点检查顺序：先取 sessionRef（`no_session` 更根本）再 null-check `listSessionRevisionsPage`（`session_unavailable`）。③ e2e/单测跑前须 `pnpm --filter @helm/{shared,core} build`——gateway e2e test-server 从 dist 解析 `@helm/core`，改 shared 后 core dist 会过期报 `runtimeResponseWorkAdmission` 缺失（红鲱鱼，非本改动）。④ 新增 5 个 UI 字符串须同步 7 locale + 加进 `request-detail-locales.test.ts` 的 `requestDetailPayloadKeys`（CI 门槛，要求 zh/ja/ko 真译文 ≠ 英文）；旧 key `...recover safely.` 变成孤儿但对齐无害（未跑 i18n:extract 清理）。
 
-## 2026-08-07 · 真上游上下文溢出短路直返 400，不再 fall back（Gateway / execution chain，docs/03/04/07，原则 3/5）
-
-- **现场（box 12a22879）**：客户端请求 `claude-opus-5`（anthropic passthrough），链上 anthropic/opus-4-8 与 sonnet-5 都真上游 400 `prompt is too long: N > 1000000`，被当作 `context_too_small` skip，一路 fall back 到 `openrouter/deepseek-v4-pro`（更大窗口）**成功返回 200**。客户端拿到成功响应→永不触发 context compaction→下一轮请求只会更长。透传场景尤其致命：Claude Code / Codex 靠收到 4xx 才压缩。
-- **根因**：`#702`（v0.28.43）的设计是「真上游溢出当 skip 继续 fall back，只在**链条耗尽**时由 `authoritativeShapedOverflow` 返回 400」。但只要链上有一个更大窗口模型兜住（deepseek 返回 200），链条就没耗尽，那段终态逻辑永远走不到。「让更大 sibling 试」的假设直接破坏了压缩语义。
-- **修复（Lukin 拍板"遇到一个上下文太大就直接返回，不要往后走"）**：`isContextWindowRejection(err)` 命中的分支从 `skip + continue` 改为**短路返回 400**（`error_class:invalid_request`，原样透传上游 `provider_raw`），形态对齐紧邻的 `isUpstreamRequestRejection` 短路模板。不记熔断（上游健康、错的是请求），不算 execution-fallback。
-- **刻意的边界（AskUserQuestion 敲定）**：**仅真上游 400 短路**。预检估算两条路径——能力过滤近似估算（`execute.ts` ~1776）与 `count_tokens` 精确预检（~1863）——**仍 skip 继续 fall back**，因为估算可能偏保守，更大真实窗口的模型也许真能服务。这两条继续走 `contextOverflow` + `contextConfirmations`（≥2 确认）的链条耗尽终态。
-- **清理死代码**：真上游溢出短路后不再进终态判定，删除只服务旧机制的 `authoritativeShapedOverflow` 变量、`rememberContextOverflow` 的 `authoritative` 形参、`ABSOLUTE_CONTEXT_MAX_PATTERN`、终态 `else if (authoritativeShapedOverflow)` 分支。`contextOverflow` 择优逻辑同步简化（两个预检调用点 message 都是 shaped，择优永不触发）。
-- **可观测影响**：这类请求 `provider_attempts` 从多条变 1 条、`fallback_count` 从 1 变 0、admin「提供商尝试」面板只显示第一个候选返回 400。这是短路的直接结果，预期内。
-- **Codex review 补的 gate（round 1-2 HIGH）**：短路把一个潜伏 bug 放大了——`isContextWindowRejection` 原本纯靠 error body/message 标记判定，**不看 `err.upstreamStatus`**。一个可重试的 429/5xx/408 若 body 恰好含 `context_length_exceeded` 标记（如上游把上下文相关的过载包成 500），会被短路成客户端 400 → 不再 fall back 到健康兄弟、不记熔断。round-1 用黑名单（`status === 429 || status >= 500`）；round-2 Codex 指出漏了 408 → 改成**白名单** `if (status !== null && status !== 400 && status !== 413 && status !== 422) return false;`。只有确定性请求-shape 4xx（400/413/422）+ `null`（in-band 流式，无 HTTP 状态）短路；其余所有 numeric status（408/409/425/429/5xx…）走正常 fall back + 记熔断。与 `isUpstreamRequestRejection` 的 4xx 白名单一致，未来新增可重试 status 天然被排除，不用补黑名单。旧的 skip-and-continue 设计下这个误判无害（只少试一个候选），是短路抬高了代价。
-- **测试**：9 个围绕旧「skip+耗尽才返回/多候选确认/让位给更大 sibling」的 case 全部重写为「第一个真上游溢出即短路、后续候选从不被调用」（含 in-band 流式溢出、native Responses 脱敏、逗号分组、box c211e4a1）；新增复现线上 case 的短路测试 + 预检估算不短路的正向证明 + 5xx-gate 测试（500 带溢出标记必须 fall back 而非短路）。execute.test.ts 170 全绿；route-request 92 全绿；typecheck + lint 全绿。
-
-- **2026-08-07 · 真实上游超长溢出链耗尽终态**：真实 `prompt is too long: N > M` 在链耗尽时胜出为客户端 400，但仍允许更大窗口候选继续 fallback；弱措辞只认结构化 error message，完整原文经 git history 回溯。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-07 · 真上游上下文溢出短路直返 400**：确定性上游 400/413/422 上下文溢出立即返回客户端并保留原始错误；预检估算仍允许 fallback，可重试状态不误判为客户端错误，完整原文经 git history 回溯。
 - **2026-08-07 · Codex 配额富元数据持久化**：`oauth_quota.metadata` 保存 plan/credits/limits，冷缓存读取 durable metadata；限流账号上游缺富数据时待窗口重置后自愈，完整原文经 git history 回溯。
 - **2026-08-07 · generic Responses 剥离 Anthropic `context_management`**：翻译与同协议 passthrough 都在 generic profile 边界删除不兼容字段，Codex official 保留；完整原文经 git history 回溯。
 - **2026-08-07 · OAuth 账号限流后继续用剩余点数**：每账号开关只绕过 usage-limit park，model-scoped 与 transient 冷却保持不变；完整原文经 git history 回溯。

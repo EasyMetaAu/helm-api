@@ -156,9 +156,10 @@ describe("loadRuntimeCatalog", () => {
     ).toBeCloseTo((600 * 2 + 300 * 0.2 + 100 * 2.5 + 200 * 10) / 1_000_000, 12);
   });
 
-  it("loads verified xAI capabilities with public-API-equivalent Grok 4.5 pricing", () => {
+  it("loads verified xAI capabilities with public-API-equivalent Grok pricing", () => {
     const catalog = loadRuntimeCatalog({ configDir: "config" });
     const grok45 = catalog.get("xai/grok-4.5");
+    const grok46 = catalog.get("xai/grok-4.6");
     const composer = catalog.get("xai/grok-composer-2.5-fast");
 
     expect(grok45?.capabilities).toMatchObject({
@@ -183,6 +184,17 @@ describe("loadRuntimeCatalog", () => {
         openaiReasoning: { supported: false },
       },
     });
+    expect(grok46?.capabilities).toMatchObject({
+      supportsTools: true,
+      jsonOutput: "none",
+      supportsVision: false,
+      supportsStreaming: true,
+      maxContextTokens: 500_000,
+      maxOutputTokens: null,
+      reasoningEffort: {
+        openaiReasoning: { supported: true, levels: ["low", "medium", "high"] },
+      },
+    });
     // SuperGrok itself is flat-fee. These are explicitly API-equivalent telemetry
     // and budget estimates, while Composer stays unpriced because it has no verified rate.
     expect(grok45?.pricing).toEqual({
@@ -195,6 +207,35 @@ describe("loadRuntimeCatalog", () => {
           inputPerMTokUsd: 4,
           cacheReadPerMTokUsd: 1,
           outputPerMTokUsd: 12,
+        },
+      },
+    });
+    expect(grok46?.pricing).toEqual({
+      inputPerMTokUsd: 2,
+      outputPerMTokUsd: 6,
+      cacheReadPerMTokUsd: 0.5,
+      cacheWritePerMTokUsd: null,
+      contextTiers: [
+        {
+          minPromptTokens: 200_000,
+          inputPerMTokUsd: 4,
+          outputPerMTokUsd: 12,
+          cacheReadPerMTokUsd: 1,
+        },
+      ],
+      serviceTiers: {
+        priority: {
+          inputPerMTokUsd: 4,
+          cacheReadPerMTokUsd: 1,
+          outputPerMTokUsd: 12,
+          contextTiers: [
+            {
+              minPromptTokens: 200_000,
+              inputPerMTokUsd: 8,
+              outputPerMTokUsd: 24,
+              cacheReadPerMTokUsd: 2,
+            },
+          ],
         },
       },
     });
