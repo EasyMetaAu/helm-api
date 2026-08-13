@@ -75,27 +75,25 @@ describe("checked-in config samples", () => {
     expect(JSON.stringify(lanes)).not.toContain("zenmux/gpt-5.5");
     expect(JSON.stringify(lanes)).not.toContain("openai/gpt-5");
     expect(lanes.economy?.primary).toBe("openai-codex/gpt-5.6-luna");
-    expect(lanes.economy?.fallback.slice(0, 4)).toEqual([
+    expect(lanes.economy?.fallback.slice(0, 5)).toEqual([
       "openai-codex/gpt-5.4-mini",
       "anthropic/claude-haiku-4-5-20251001",
+      "grok",
       "deepseek/deepseek-v4-flash",
       "openrouter/deepseek-v4-flash",
     ]);
     expect(lanes.balanced?.primary).toBe("openai-codex/gpt-5.6-terra");
-    expect(lanes.balanced?.fallback.slice(0, 4)).toEqual([
+    expect(lanes.balanced?.fallback.slice(0, 5)).toEqual([
       "anthropic/claude-sonnet-5",
+      "grok",
       "deepseek/deepseek-v4-pro",
       "openrouter/deepseek-v4-pro",
       "zenmux/auto",
     ]);
     expect(lanes.balanced?.fallback).not.toContain("anthropic/claude-sonnet-4-6");
     expect(lanes.premium?.primary).toBe("openai-codex/gpt-5.6-sol");
-    expect(lanes.premium?.fallback).toEqual([
-      "xai/grok-4.5",
-      "xai/grok-4.6",
-      "anthropic/claude-opus-4-8",
-      "balanced",
-    ]);
+    expect(lanes.premium?.fallback).toEqual(["grok", "anthropic/claude-opus-4-8", "balanced"]);
+    expect(lanes.grok).toMatchObject({ primary: "xai/grok-4.6", fallback: [] });
     // task lanes
     expect(lanes.coding?.fallback).toEqual(["premium", "balanced"]);
     expect(lanes.json?.constraints.require_json).toBe(true);
@@ -107,7 +105,7 @@ describe("checked-in config samples", () => {
     expect(lanes.vision?.constraints.require_vision).toBe(true);
     expect(lanes.vision?.primary).toBe("openai-codex/gpt-5.6-terra");
     expect(lanes.vision?.fallback).toEqual([
-      "xai/grok-4.5",
+      "grok",
       "anthropic/claude-sonnet-5",
       "anthropic/claude-opus-4-8",
     ]);

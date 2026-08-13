@@ -10,7 +10,7 @@
 ## 2026-08-13 · Grok 4.6 补齐 Agent 能力、价格与 lane 投影（Catalog / routing，docs/04/07，原则 2/3/6）
 
 - **根因**：xAI OAuth 实时 catalog 已把 `grok-4.6` 合成为可执行 alias，但签入的手工 catalog 没有对应条目；执行层对只有实时元数据的新 xAI 模型保守合成 `supportsTools:false`，所以裸 chat 可过，Grok Build 默认携带 `tools` 时在 provider 调用前被能力过滤为 `capability_unsatisfiable`。`/v1/models` 同样只能列出 id，无法附带 capabilities/pricing/lane membership。
-- **修复边界**：为已实际出现的 `xai/grok-4.6` 增加手工能力条目，开放已验证的 tools/SSE/常用 reasoning effort，保持 subscription vision、JSON 与额外媒体能力 fail-closed；没有把任意未来 xAI alias 自动推断为支持 tools。`premium` 在现有 4.5 后加入 4.6，因此直指定模型和 agent 能工作，也能得到非空 lane 投影，但不会抢走当前 4.5 的首选 fallback 流量。
+- **修复边界**：为已实际出现的 `xai/grok-4.6` 增加手工能力条目，开放已验证的 tools/SSE/常用 reasoning effort，保持 subscription vision、JSON 与额外媒体能力 fail-closed；没有把任意未来 xAI alias 自动推断为支持 tools。同步线上已验证的稳定 `grok` lane（当前 `primary: xai/grok-4.6`），`economy`、`balanced`、`premium`、`vision` 统一引用它；以后升级 Grok 只需改一处，能力不满足的请求仍由既有过滤器跳过。
 - **价格口径**：SuperGrok 仍是包月订阅；预算与遥测沿用“官方 API 等价估价”。2026-08-13 xAI 官方价卡为短上下文 input/cache/output `$2/$0.5/$6`，prompt 达到 200K 后 `$4/$1/$12`，priority 为对应档位 2 倍；配置显式保存 context + priority 两层，避免长上下文预算低估。
 - **限制**：官方公开模型支持 vision/structured outputs/xhigh，但本次现场只证明 Helm/Grok Build 的 chat + tools；subscription proxy 上未做真实 vision/JSON/xhigh canary，因此这些能力没有借用 public API 声明自动放开。生产修复仍需按部署流程发布，并从 `/version`、`/v1/models` 和一条带 tools 的真实请求三处回读。
 
