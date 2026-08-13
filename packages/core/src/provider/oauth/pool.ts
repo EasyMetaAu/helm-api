@@ -50,8 +50,8 @@ const RETRYABLE_ACCOUNT_FAILURE_COOLDOWN_MS = 30_000;
 // identically, so surface them immediately for executor classification. Account-local
 // OAuth credential/rate-limit statuses are handled by the dedicated helpers below,
 // because those statuses can say something about the selected subscription account,
-// not about the model alias. The credential statuses are provider-configurable: for
-// example, xAI defines inference 403 as an authenticated policy/content denial.
+// not about the model alias. Credential statuses remain provider-configurable for
+// providers that explicitly document a different authentication status contract.
 // Non-UpstreamError (client abort, programmer error) is never retried.
 function isRetryableTransientError(err: unknown): boolean {
   if (!(err instanceof UpstreamError)) return false;
@@ -69,9 +69,7 @@ function isCredentialAccountFailure(
   upstreamCredentialFailureStatuses: ReadonlySet<number>,
 ): boolean {
   if (err instanceof TokenRefreshError) {
-    if (err.permanentCredentialFailure) return true;
-    const status = err.httpStatus;
-    return status === 400 || status === 401 || status === 403;
+    return err.permanentCredentialFailure;
   }
   if (err instanceof UpstreamError) {
     return err.upstreamStatus !== null && upstreamCredentialFailureStatuses.has(err.upstreamStatus);
@@ -248,7 +246,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   const selectionStrategy = deps.selectionStrategy ?? "balanced";
   const quotaFreshMs = deps.quotaFreshMs ?? 10 * 60 * 1000;
   const upstreamCredentialFailureStatuses = new Set(
-    deps.upstreamCredentialFailureStatuses ?? [401, 403],
+    deps.upstreamCredentialFailureStatuses ?? [401],
   );
   const entries: PoolEntry[] = deps.members.map((member) => ({ member, lastUsedAt: 0 }));
   const firstNativeProtocolProfile = entries[0]?.member.client.nativeProtocolProfile;

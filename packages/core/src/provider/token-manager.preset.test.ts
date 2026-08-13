@@ -594,12 +594,47 @@ describe("createTokenManager (preset kind)", () => {
     await expect(tm.getAuthHeader()).rejects.toMatchObject({
       name: "TokenRefreshError",
       httpStatus: 400,
+      permanentCredentialFailure: false,
     });
     await expect(tm.getAuthHeader()).rejects.toThrow(
       /oauth refresh failed \(anthropic, status 400\)/,
     );
     // Still scrubbed — no token material leaks into the diagnosable message.
     await expect(tm.getAuthHeader()).rejects.not.toThrow(/at-stored|rt-stored/);
+  });
+
+  it("preserves explicit credential rejection and treats a bare 403 as retryable", async () => {
+    const failing = (error: OAuthHttpError) =>
+      createTokenManager({
+        oauth: PRESET,
+        tokenStore: memStore(seedRecord({ expiresAt: 100 })),
+        encKey: KEY,
+        oauthProvider: {
+          id: "anthropic",
+          name: "failing",
+          async login() {
+            throw new Error("not used");
+          },
+          async refreshToken() {
+            throw error;
+          },
+          getApiKey: (credentials) => credentials.access,
+        },
+        now: () => 1_000_000,
+      });
+
+    await expect(
+      failing(new OAuthHttpError("Anthropic", 400, true)).getAuthHeader(),
+    ).rejects.toMatchObject({
+      permanentCredentialFailure: true,
+      retryableAccountFailure: false,
+    });
+    await expect(
+      failing(new OAuthHttpError("Anthropic", 403)).getAuthHeader(),
+    ).rejects.toMatchObject({
+      permanentCredentialFailure: false,
+      retryableAccountFailure: true,
+    });
   });
 
   it("preserves a permanent credential marker when Codex refresh changes account identity", async () => {

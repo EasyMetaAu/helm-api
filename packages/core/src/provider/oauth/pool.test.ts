@@ -134,7 +134,7 @@ describe("createOAuthPoolClient — Realtime account binding", () => {
 
   it("parks the selected account when sideband token refresh permanently fails", async () => {
     const credentialFailures: string[] = [];
-    const refreshFailure = new TokenRefreshError("oauth refresh failed (status 401)", 401);
+    const refreshFailure = new TokenRefreshError("oauth refresh failed (status 401)", 401, true);
     const client = (account: string): ProviderClient => ({
       ...stubClient(account, []),
       async realtimeCall() {
@@ -2044,7 +2044,11 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
   const AUTH_401 = new UpstreamError("upstream_error", "unauthorized", null, 401);
   const AUTH_403 = new UpstreamError("upstream_error", "forbidden", null, 403);
   const BAD = new UpstreamError("upstream_error", "bad request", null, 400);
-  const REFRESH_401 = new TokenRefreshError("oauth refresh failed (openai-codex, status 401)", 401);
+  const REFRESH_401 = new TokenRefreshError(
+    "oauth refresh failed (openai-codex, status 401)",
+    401,
+    true,
+  );
   const REFRESH_429 = new TokenRefreshError("oauth refresh rate-limited (status 429)", 429);
   const SHORT_LEASE = new TokenRefreshError(
     "oauth access token is shorter than required request lease",
@@ -2486,7 +2490,7 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     expect(credentialFailures).toEqual([]);
   });
 
-  it("keeps inference 403 as a permanent credential failure by default", async () => {
+  it("does not park inference 403 as a permanent credential failure by default", async () => {
     const served: string[] = [];
     const selected: string[] = [];
     const credentialFailures: Array<{ account: string; error: unknown }> = [];
@@ -2498,11 +2502,12 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
       },
     });
 
-    await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "good" });
+    await expect(pool.chatCompletion(REQ)).rejects.toThrow(/forbidden/);
+    await expect(pool.chatCompletion(REQ)).rejects.toThrow(/forbidden/);
 
-    expect(served).toEqual(["good"]);
-    expect(selected).toEqual(["bad", "good"]);
-    expect(credentialFailures).toEqual([{ account: "bad", error: AUTH_403 }]);
+    expect(served).toEqual([]);
+    expect(selected).toEqual(["bad", "bad"]);
+    expect(credentialFailures).toEqual([]);
   });
 
   it("does not park a provider-excluded inference 403 on the streaming path", async () => {

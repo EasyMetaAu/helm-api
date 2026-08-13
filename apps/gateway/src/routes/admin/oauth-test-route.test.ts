@@ -175,6 +175,7 @@ describe("POST /admin/api/oauth/:provider/test", () => {
                   throw new TokenRefreshError(
                     "oauth refresh failed (openai-codex, status 401)",
                     401,
+                    true,
                   );
                 },
               };

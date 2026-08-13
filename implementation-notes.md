@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-08-13 · OAuth 永久失效只认明确凭证拒绝（OAuth provider pool / Admin providers，docs/04/11，原则 3/7）
+
+- **根因与修复**：旧逻辑仅按 HTTP 状态把 refresh `400/401/403` 与 inference `401/403` 全部持久化为 `needs reconnect`；代理、地域或 WAF 返回的裸 `403` 因此会永久摘除仍有有效 refresh token 的账号。现在 provider token 边界只把有界解析出的标准 `invalid_grant`、Copilot token mint `401` 与 Codex refresh 身份变化标为永久凭证拒绝；裸 refresh `403` 只短暂冷却，inference `403` 走正常错误/fallback，不写 `credentialFailedAt`。错误正文仍不进入消息、日志或存储。
+- **兼容与恢复**：真正永久失效仍 fail-closed 停止调度，成功 reconnect 继续清除标记；不批量清除升级前的历史失败标记，因为无法证明它们都是误判，受影响账号需在修复代理后按原标签重连。无 schema/migration、新依赖或 UI 契约变化。
+
 ## 2026-08-13 · Grok 4.6 补齐 Agent 能力、价格与 lane 投影（Catalog / routing，docs/04/07，原则 2/3/6）
 
 - **根因**：xAI OAuth 实时 catalog 已把 `grok-4.6` 合成为可执行 alias，但签入的手工 catalog 没有对应条目；执行层对只有实时元数据的新 xAI 模型保守合成 `supportsTools:false`，所以裸 chat 可过，Grok Build 默认携带 `tools` 时在 provider 调用前被能力过滤为 `capability_unsatisfiable`。`/v1/models` 同样只能列出 id，无法附带 capabilities/pricing/lane membership。
@@ -66,15 +71,9 @@
 - **审查后收紧**：媒体 alias 在 auto 模式默认可用，但 manual 模式严格服从每个账号的 `enabledModels`；视频模型和单图/多参考图 schema 一一绑定，聊天协议在执行前拒绝 xAI `outputImage` 与所有 `outputVideo` 模型，同时保留 Gemini 等供应商通过原生聊天协议返回图片的既有能力。OAuth pool 在付费 POST 前回报所选账号，视频 reservation 先持久化账号，图片/视频的 `outcome_unknown` telemetry 也保留账号归因；原子媒体 reservation 复用 registry 的节流 prune，但 reservation 已成功后 prune 失败按辅助维护 fail-open，避免把成功的付费单写误报为 `outcome_unknown`；Providers 卡片优先展示媒体 badge。
 - **刻意延后**：ZDR `output.upload_url` 在 request/upstream/response/error 四类正文都完成预签名 query 脱敏前由严格 schema 拒绝；本机 SuperGrok 图片/视频真实 canary 已通过，staging canary、GitHub Docker CI 与生产单副本观察仍是发布 No-Go 门禁。
 
-## 2026-08-08 · 会话转录客户端重建，绕开服务端内存阀（Admin / requests debug，docs/07，原则 1）
-
-- **现场**：未捕获正文的长 Codex/Responses 会话，请求详情页显示「会话转录过大，无法安全恢复」。数据都在（`session_revisions` 纯 TEXT 增量），但服务端重建 `getSessionRequest`（`apps/gateway/src/routes/admin/requests.ts`）在拉第一页前就 `responseAdmission.acquire(recoveryMaxWireBytes=响应窗口/放大/2)` 预留整窗内存；长链超阀 → `session_recovery_limited`。这是**故意保守**：admin 看后台不该和线上流量抢内存。
-- **方案（Lukin 拍板"吐给客户端自己重建"）**：新增 `GET /admin/api/requests/:id/session-revisions?after=<seq>`，只分页流式吐 raw revision 行（固定 `maxBytes=4MB`/页 + `limit=100`，`nextSequence` 游标），**不做服务端重建、不预留整窗**。前端 `session_recovery_limited` 分支换成「点击加载」懒加载按钮 → 循环拉页攒链 → 浏览器本地重建 → `JsonViewer` 渲染。服务端常驻内存降到「一页」。旧服务端重建路径保留（小转录仍走它，快）。
-- **架构取舍（AskUserQuestion 敲定）**：重建纯函数 `restoreSessionRevisionJson` 从 `packages/core/src/store/session-delta.ts` 抽到 **`@helm/shared`**（零 node 依赖、浏览器安全），core 反向 re-export（barrel 与调用方无感）；写入侧 `splitSessionRequestJson`/`hashEvents`（依赖 `node:crypto`）留在 core。admin `lib/api/requests.ts` **破例 import** shared 的这一个纯函数——打破该文件「零 core/gateway 业务逻辑」红线，理由：复制重建逻辑违反 DRY 更糟。破例已在两处注释标明。
-- **坑**：① 不能让 admin `import "@helm/core"`——core barrel 拽入 better-sqlite3/postgres/undici，浏览器 bundle 炸。② `session-revisions` 端点检查顺序：先取 sessionRef（`no_session` 更根本）再 null-check `listSessionRevisionsPage`（`session_unavailable`）。③ e2e/单测跑前须 `pnpm --filter @helm/{shared,core} build`——gateway e2e test-server 从 dist 解析 `@helm/core`，改 shared 后 core dist 会过期报 `runtimeResponseWorkAdmission` 缺失（红鲱鱼，非本改动）。④ 新增 5 个 UI 字符串须同步 7 locale + 加进 `request-detail-locales.test.ts` 的 `requestDetailPayloadKeys`（CI 门槛，要求 zh/ja/ko 真译文 ≠ 英文）；旧 key `...recover safely.` 变成孤儿但对齐无害（未跑 i18n:extract 清理）。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-08 · 会话转录客户端重建，绕开服务端内存阀**：长 Session 以 4 MiB/100 行游标分页传给浏览器本地重建，小 Session 保留服务端快路径；共享纯重建函数留在浏览器安全的 `@helm/shared`，完整原文经 git history 回溯。
 - **2026-08-07 · 真上游上下文溢出短路直返 400**：确定性上游 400/413/422 上下文溢出立即返回客户端并保留原始错误；预检估算仍允许 fallback，可重试状态不误判为客户端错误，完整原文经 git history 回溯。
 - **2026-08-07 · Codex 配额富元数据持久化**：`oauth_quota.metadata` 保存 plan/credits/limits，冷缓存读取 durable metadata；限流账号上游缺富数据时待窗口重置后自愈，完整原文经 git history 回溯。
 - **2026-08-07 · generic Responses 剥离 Anthropic `context_management`**：翻译与同协议 passthrough 都在 generic profile 边界删除不兼容字段，Codex official 保留；完整原文经 git history 回溯。

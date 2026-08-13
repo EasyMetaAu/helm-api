@@ -192,7 +192,13 @@ function presetRefreshFailureWaitMs(providerId: string, account: string): number
 
 function isRetryableRefreshError(err: unknown): boolean {
   if (err instanceof OAuthHttpError) {
-    return err.httpStatus === 408 || err.httpStatus === 425 || err.httpStatus >= 500;
+    if (err.permanentCredentialFailure) return false;
+    return (
+      err.httpStatus === 403 ||
+      err.httpStatus === 408 ||
+      err.httpStatus === 425 ||
+      err.httpStatus >= 500
+    );
   }
   return isFetchTransportError(err);
 }
@@ -384,6 +390,8 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
       // 429 ⇒ rate limited; 5xx ⇒ upstream down).
       const status = err instanceof OAuthHttpError ? err.httpStatus : null;
       const identityMismatch = err instanceof OpenAICodexIdentityMismatchError;
+      const permanentCredentialFailure =
+        identityMismatch || (err instanceof OAuthHttpError && err.permanentCredentialFailure);
       const retryableAccountFailure = isRetryableRefreshError(err);
       if (retryableAccountFailure) {
         await new Promise<void>((resolve) =>
@@ -404,7 +412,7 @@ export function createTokenManager(deps: TokenManagerDeps): TokenManager {
             ? `oauth refresh failed (${p.providerId})`
             : `oauth refresh failed (${p.providerId}, status ${status})`,
         status,
-        identityMismatch,
+        permanentCredentialFailure,
         retryableAccountFailure,
       );
     }

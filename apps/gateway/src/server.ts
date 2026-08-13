@@ -1269,10 +1269,6 @@ export async function synthesizeOAuthProviders(
       members,
       now: () => Date.now(),
       selectionStrategy,
-      // grok-build treats only inference 401 as an invalid xAI credential. A 403 can
-      // be a policy/content denial and must reach normal fallback without parking the
-      // subscription account. Other OAuth providers keep the legacy 401/403 policy.
-      upstreamCredentialFailureStatuses: providerId === "xai" ? [401] : undefined,
       onSelect: (account, selection) => {
         log("info", "oauth.pool.select", {
           providerId,
