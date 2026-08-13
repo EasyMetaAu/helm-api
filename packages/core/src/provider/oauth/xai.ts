@@ -7,6 +7,7 @@
 
 import {
   buildOAuthRequestSignal,
+  isOAuthInvalidGrant,
   OAuthHttpError,
   resolveExpiresAtMsFromDurationSeconds,
   resolveExpiresAtMsFromEpochSeconds,
@@ -340,7 +341,9 @@ export async function refreshXaiOAuthToken(
     signal: buildOAuthRequestSignal({ timeoutMs: FETCH_TIMEOUT_MS }),
   });
   const body = await readJson(response);
-  if (!response.ok) throw new OAuthHttpError("xAI refresh", response.status);
+  if (!response.ok) {
+    throw new OAuthHttpError("xAI refresh", response.status, isOAuthInvalidGrant(body));
+  }
   return {
     ...credentials,
     ...parseTokenResponse(body, tokenEndpoint, now, credentials.refresh),

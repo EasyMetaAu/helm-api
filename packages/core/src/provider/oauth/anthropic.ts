@@ -21,6 +21,7 @@ import {
   oauthSuccessHtml,
   parseOAuthAuthorizationInput,
   resolveOAuthTokenExpiresAt,
+  responseIsOAuthInvalidGrant,
   throwIfOAuthLoginAborted,
   withOAuthLoginAbort,
 } from "./runtime.js";
@@ -144,10 +145,7 @@ async function postJson(
     signal: buildOAuthRequestSignal({ signal, timeoutMs: 30_000 }),
   });
   if (!res.ok) {
-    // Never echo the body — an OAuth error body can carry credential material. The
-    // status alone is safe and lets the token manager surface a diagnosable reason.
-    await res.body?.cancel().catch(() => {});
-    throw new OAuthHttpError("Anthropic", res.status);
+    throw new OAuthHttpError("Anthropic", res.status, await responseIsOAuthInvalidGrant(res));
   }
   return await consumeUpstreamBodyWithinBudget(res, parseTokenCredentials);
 }

@@ -6,6 +6,8 @@
 // dependency is inlined below so this kit pulls in NOTHING from openclaw.
 
 import { createHash, randomBytes } from "node:crypto";
+import { readResponseTextWithinBudget } from "../../runtime/bounded-response.js";
+import { createResponseWorkAdmission } from "../../runtime/response-work-admission.js";
 import type { OAuthAuthorizationInput } from "./types.js";
 
 // A token-endpoint HTTP failure (non-2xx) raised by a provider's login/refresh
@@ -15,10 +17,50 @@ import type { OAuthAuthorizationInput } from "./types.js";
 // scrubbed) reason instead of an opaque "refresh failed".
 export class OAuthHttpError extends Error {
   readonly httpStatus: number;
-  constructor(provider: string, httpStatus: number) {
+  readonly permanentCredentialFailure: boolean;
+  constructor(provider: string, httpStatus: number, permanentCredentialFailure = false) {
     super(`${provider} OAuth HTTP ${httpStatus}`);
     this.name = "OAuthHttpError";
     this.httpStatus = httpStatus;
+    this.permanentCredentialFailure = permanentCredentialFailure;
+  }
+}
+
+const OAUTH_ERROR_BODY_MAX_BYTES = 8 * 1024;
+const oauthErrorBodyAdmission = createResponseWorkAdmission({
+  capacityBytes: OAUTH_ERROR_BODY_MAX_BYTES,
+  jsonAmplification: 1,
+  minChargeBytes: 1,
+});
+
+export function isOAuthInvalidGrant(body: unknown): boolean {
+  if (typeof body === "string") {
+    try {
+      return isOAuthInvalidGrant(JSON.parse(body) as unknown);
+    } catch {
+      return false;
+    }
+  }
+  return (
+    body !== null &&
+    typeof body === "object" &&
+    !Array.isArray(body) &&
+    (body as { error?: unknown }).error === "invalid_grant"
+  );
+}
+
+export async function responseIsOAuthInvalidGrant(response: Response): Promise<boolean> {
+  try {
+    return isOAuthInvalidGrant(
+      await readResponseTextWithinBudget(
+        response,
+        OAUTH_ERROR_BODY_MAX_BYTES,
+        oauthErrorBodyAdmission,
+      ),
+    );
+  } catch {
+    await response.body?.cancel().catch(() => {});
+    return false;
   }
 }
 

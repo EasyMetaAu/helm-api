@@ -9,6 +9,7 @@ import {
   parseOpenAICodexIdentity,
   refreshOpenAICodexToken,
 } from "./openai-codex.js";
+import { OAuthHttpError } from "./runtime.js";
 import type { OAuthLoginCallbacks } from "./types.js";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -27,12 +28,27 @@ function codexJwt(payload: Record<string, unknown>): string {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("OpenAI Codex token request error handling", () => {
-  it("throws a scrubbed HTTP error (no body echo) on a non-ok token response", async () => {
+  it("marks only an explicit invalid_grant as a permanent credential rejection", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => jsonResponse({ error: "invalid_grant", leak: "secret" }, 400)),
     );
-    await expect(refreshOpenAICodexToken("rt")).rejects.toThrow(/OpenAI Codex OAuth HTTP 400/);
+    await expect(refreshOpenAICodexToken("rt")).rejects.toMatchObject({
+      name: "OAuthHttpError",
+      httpStatus: 400,
+      permanentCredentialFailure: true,
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ error: "access_denied", leak: "secret" }, 403)),
+    );
+    await expect(refreshOpenAICodexToken("rt")).rejects.toMatchObject({
+      name: "OAuthHttpError",
+      httpStatus: 403,
+      permanentCredentialFailure: false,
+    });
+    await expect(refreshOpenAICodexToken("rt")).rejects.toBeInstanceOf(OAuthHttpError);
     await expect(refreshOpenAICodexToken("rt")).rejects.not.toThrow(/secret/);
   });
 });

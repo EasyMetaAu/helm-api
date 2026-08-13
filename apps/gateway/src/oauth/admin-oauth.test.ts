@@ -642,6 +642,42 @@ describe("createOAuthAdmin", () => {
     expect(settings.schedulable).toBe(false);
   });
 
+  it("does not persist a bare Codex refresh 403 as a dead credential", async () => {
+    const { tokens, config } = makeStores();
+    await tokens.upsert({
+      providerId: "openai-codex",
+      account: "proxied",
+      accessEnc: encryptSecret("expired", KEY),
+      refreshEnc: encryptSecret("still-present", KEY),
+      expiresAt: 1_000,
+      meta: null,
+      updatedAt: 1,
+    });
+    const admin = createOAuthAdmin({
+      store: tokens,
+      encKey: KEY,
+      config,
+      now: () => 10_000_000,
+      makeFetch: () => vi.fn(async () => json({ error: "access_denied" }, 403)),
+    });
+
+    const account = (await admin.listStatus()).providers.find((p) => p.id === "openai-codex")
+      ?.accounts[0];
+    const settings = getAccountSettings(
+      await loadAccountSettings(config, KEY),
+      "openai-codex",
+      "proxied",
+    );
+
+    expect(account).toMatchObject({
+      healthy: false,
+      credentialFailed: false,
+      schedulable: true,
+    });
+    expect(settings.credentialFailedAt).toBeUndefined();
+    expect(settings.schedulable).toBeUndefined();
+  });
+
   it("listStatus treats a persisted credential failure as reconnect-only and does not refresh", async () => {
     const { tokens, config } = makeStores();
     await tokens.upsert({

@@ -17,6 +17,7 @@ import {
   OAuthHttpError,
   parseOAuthAuthorizationInput,
   resolveOAuthTokenExpiresAt,
+  responseIsOAuthInvalidGrant,
   throwIfOAuthLoginAborted,
 } from "./runtime.js";
 import type {
@@ -166,8 +167,7 @@ async function postToken(
     signal: buildOAuthRequestSignal({ signal, timeoutMs: 30_000 }),
   });
   if (!res.ok) {
-    await res.body?.cancel().catch(() => {});
-    throw new OAuthHttpError("OpenAI Codex", res.status);
+    throw new OAuthHttpError("OpenAI Codex", res.status, await responseIsOAuthInvalidGrant(res));
   }
   return await readUpstreamJsonWithinBudget<TokenResponseJson>(res);
 }

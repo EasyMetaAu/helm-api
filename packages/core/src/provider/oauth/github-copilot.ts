@@ -85,7 +85,7 @@ async function fetchJson(
   });
   if (!res.ok) {
     await res.body?.cancel().catch(() => {});
-    throw new OAuthHttpError("GitHub Copilot", res.status);
+    throw new OAuthHttpError("GitHub Copilot", res.status, res.status === 401);
   }
   return await readUpstreamJsonWithinBudget(res);
 }
