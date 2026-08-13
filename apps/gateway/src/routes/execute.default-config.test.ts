@@ -248,6 +248,49 @@ describe("default config activates capability filter + cost (alias-namespace ali
     expect(calls).toEqual(["deepseek/deepseek-v4-pro"]);
   });
 
+  it("admits xAI Grok 4.6 OAuth agent requests with tools", async () => {
+    const { client, calls } = stubProvider();
+    const alias = "xai/grok-4.6";
+    const execute = createExecute({
+      defaultProvider: client,
+      providers: new Map([["xai", client]]),
+      registry: buildRegistry(),
+      knownOAuthPrefixes: new Set(["xai"]),
+      oauthAliases: () => new Set([alias]),
+      oauthWireModels: () => new Map([[alias, "grok-4.6"]]),
+      xaiOAuthModels: () =>
+        new Map([
+          [
+            alias,
+            {
+              id: "grok-4.6",
+              model: "grok-4.6",
+              apiBackend: "responses",
+              contextWindow: 500_000,
+              hidden: false,
+              supportedInApi: true,
+              supportsReasoningEffort: true,
+              reasoningEfforts: [],
+              streamToolCalls: true,
+            },
+          ],
+        ]),
+      breaker: breaker(),
+      catalog,
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(
+      plan([alias]),
+      req({ tools: [{ type: "function", function: { name: "run_terminal_command" } }] }),
+    );
+
+    expect(out.attempts[0]?.skipped).toBe(false);
+    expect(out.final.status).toBe("ok");
+    expect(calls).toEqual(["grok-4.6"]);
+  });
+
   it("fails open when the shipped Grok OAuth candidate is not connected", async () => {
     const { client, calls } = stubProvider();
     const execute = createExecute({

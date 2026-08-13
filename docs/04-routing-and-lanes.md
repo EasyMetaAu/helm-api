@@ -228,6 +228,7 @@ premium:
   primary: openai-codex/gpt-5.6-sol
   fallback:
     - xai/grok-4.5
+    - xai/grok-4.6
     - anthropic/claude-opus-4-8
     - balanced
 ```

@@ -92,6 +92,7 @@ describe("checked-in config samples", () => {
     expect(lanes.premium?.primary).toBe("openai-codex/gpt-5.6-sol");
     expect(lanes.premium?.fallback).toEqual([
       "xai/grok-4.5",
+      "xai/grok-4.6",
       "anthropic/claude-opus-4-8",
       "balanced",
     ]);

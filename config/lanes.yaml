@@ -56,6 +56,7 @@ premium:
     # Absorb premium fallback traffic before Claude Opus; an unbound or parked
     # SuperGrok account fails open to the next candidate.
     - xai/grok-4.5
+    - xai/grok-4.6
     - anthropic/claude-opus-4-8
     - balanced
 

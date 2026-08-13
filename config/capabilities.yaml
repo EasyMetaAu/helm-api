@@ -53,22 +53,36 @@
 # manual capability entry here because the subscription aliases are synthesized at
 # runtime and do not exist in LiteLLM's generated catalog.
 #
-# xAI subscription aliases are also synthesized. Only the two models observed from
-# the authenticated Grok CLI catalog and exercised by live Helm smokes are declared:
-# tools + SSE work for both; Grok 4.5 accepts explicit reasoning effort, while
-# Composer may emit internal reasoning but rejects an explicit reasoning_effort.
-# Their effective context limits are 500k and 200k respectively. Grok 4.5 vision
-# is enabled from a live subscription-proxy verification of native Responses
-# `input_image`; Composer rejected the same wire shape. Unverified JSON and
-# extra-media abilities stay explicitly disabled (fail closed). The
+# xAI subscription aliases are also synthesized. Only models observed from the
+# authenticated Grok CLI catalog and exercised by Helm/Grok Build are declared.
+# Tools + SSE work for Grok 4.5, Grok 4.6, and Composer. Grok 4.5/4.6 accept
+# explicit reasoning effort, while Composer may emit internal reasoning but
+# rejects an explicit reasoning_effort. Their effective context limits are 500k,
+# 500k, and 200k respectively. Grok 4.5 vision is enabled from a live subscription-
+# proxy verification of native Responses `input_image`; Grok 4.6 and Composer keep
+# unverified subscription vision closed. Unverified JSON and extra-media abilities
+# stay explicitly disabled (fail closed). The
 # output ceiling is unknown (`null`): the 512-token connectivity smoke is not an
 # upstream limit, and the unverified 64k public-API fallback must not be borrowed.
 # SuperGrok does not publish per-token subscription billing; pricing.yaml documents
-# the public-API-equivalent estimate used for Grok 4.5 telemetry and key budgets.
+# the public-API-equivalent estimates used for Grok telemetry and key budgets.
 xai/grok-4.5:
   supportsTools: true
   jsonOutput: none
   supportsVision: true
+  supportsStreaming: true
+  supportsCachedContent: false
+  modalities: []
+  reasoningEffort:
+    openaiReasoning:
+      supported: true
+      levels: [low, medium, high]
+  maxContextTokens: 500000
+  maxOutputTokens: null
+xai/grok-4.6:
+  supportsTools: true
+  jsonOutput: none
+  supportsVision: false
   supportsStreaming: true
   supportsCachedContent: false
   modalities: []

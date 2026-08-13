@@ -18,9 +18,9 @@
 # Cost telemetry only — never drives selection. DeepSeek rates were verified
 # against the official API price card on 2026-07-14.
 # SuperGrok is flat-fee and has no per-token subscription bill. Per the operator's
-# decision, Grok 4.5 uses xAI's public API rates as an API-equivalent estimate for
-# telemetry AND API-key budget settlement. xAI currently publishes one flat rate
-# across Grok 4.5's full 500K context window (verified 2026-07-14).
+# decision, Grok uses xAI's public API rates as an API-equivalent estimate for
+# telemetry AND API-key budget settlement. Grok 4.6 rates and its >=200K context
+# band were verified against xAI's official price card on 2026-08-13.
 xai/grok-4.5:
   inputPerMTokUsd: 2.0
   outputPerMTokUsd: 6.0
@@ -30,6 +30,25 @@ xai/grok-4.5:
       inputPerMTokUsd: 4.0
       outputPerMTokUsd: 12.0
       cacheReadPerMTokUsd: 1.0
+xai/grok-4.6:
+  inputPerMTokUsd: 2.0
+  outputPerMTokUsd: 6.0
+  cacheReadPerMTokUsd: 0.5
+  contextTiers:
+    - minPromptTokens: 200000
+      inputPerMTokUsd: 4.0
+      outputPerMTokUsd: 12.0
+      cacheReadPerMTokUsd: 1.0
+  serviceTiers:
+    priority:
+      inputPerMTokUsd: 4.0
+      outputPerMTokUsd: 12.0
+      cacheReadPerMTokUsd: 1.0
+      contextTiers:
+        - minPromptTokens: 200000
+          inputPerMTokUsd: 8.0
+          outputPerMTokUsd: 24.0
+          cacheReadPerMTokUsd: 2.0
 # Composer has no verified public xAI price and therefore remains cost_usd=null.
 xai/grok-composer-2.5-fast:
   inputPerMTokUsd: null
