@@ -5,29 +5,40 @@ import type { SqliteDb } from "./migrate.js";
 import { oauthResetPeriod } from "./schema.js";
 
 // SqliteOAuthResetPeriodStore — append-only history of real reset boundaries. `record`
-// is idempotent via onConflictDoNothing on the composite PK, so a reset re-seen by
-// repeated quota refreshes lands once. Pure observability — no key/payload.
+// is idempotent on the composite PK; a later exact observation may replace an estimate.
+// Pure observability — no key/payload.
 export class SqliteOAuthResetPeriodStore implements OAuthResetPeriodStore {
   constructor(private readonly db: SqliteDb) {}
 
   async record(row: OAuthResetPeriod): Promise<void> {
-    this.db
-      .insert(oauthResetPeriod)
-      .values({
-        providerId: row.providerId,
-        account: row.account,
-        windowKey: row.windowKey,
-        periodStartMs: row.periodStartMs,
-        periodEndMs: row.periodEndMs,
-        detectedAtMs: row.detectedAtMs,
-      })
-      .onConflictDoNothing({
-        target: [
-          oauthResetPeriod.providerId,
-          oauthResetPeriod.account,
-          oauthResetPeriod.windowKey,
-          oauthResetPeriod.periodStartMs,
-        ],
+    const insert = this.db.insert(oauthResetPeriod).values({
+      providerId: row.providerId,
+      account: row.account,
+      windowKey: row.windowKey,
+      periodStartMs: row.periodStartMs,
+      periodEndMs: row.periodEndMs,
+      detectedAtMs: row.detectedAtMs,
+      approximate: row.approximate,
+    });
+    const target = [
+      oauthResetPeriod.providerId,
+      oauthResetPeriod.account,
+      oauthResetPeriod.windowKey,
+      oauthResetPeriod.periodStartMs,
+    ];
+    if (row.approximate) {
+      insert.onConflictDoNothing({ target }).run();
+      return;
+    }
+    insert
+      .onConflictDoUpdate({
+        target,
+        set: {
+          periodEndMs: row.periodEndMs,
+          detectedAtMs: row.detectedAtMs,
+          approximate: false,
+        },
+        setWhere: eq(oauthResetPeriod.approximate, true),
       })
       .run();
   }
@@ -69,6 +80,7 @@ export class SqliteOAuthResetPeriodStore implements OAuthResetPeriodStore {
           eq(oauthResetPeriod.account, account),
           ...(windowKey === undefined ? [] : [eq(oauthResetPeriod.windowKey, windowKey)]),
           lte(oauthResetPeriod.periodEndMs, beforeMs),
+          eq(oauthResetPeriod.approximate, false),
           sql`${oauthResetPeriod.detectedAtMs} >= ${oauthResetPeriod.periodEndMs}`,
         ),
       )

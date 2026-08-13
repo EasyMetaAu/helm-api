@@ -198,6 +198,7 @@ describe("admin OAuth routes — read endpoints", () => {
     const now = Date.now();
     const todayReset = now - HOUR;
     const saturdayReset = todayReset - 3 * DAY;
+    const announcementReset = saturdayReset + DAY;
     const reset = todayReset + WEEK;
     const buckets = Array.from({ length: 10 * 24 }, (_, i) => ({
       bucketMs: now - (10 * 24 - i) * HOUR,
@@ -229,6 +230,27 @@ describe("admin OAuth routes — read endpoints", () => {
           periodStartMs: saturdayReset + DAY,
           periodEndMs: todayReset,
           detectedAtMs: todayReset,
+        },
+        {
+          // A historical public announcement fills the otherwise-missing boundary.
+          providerId: "openai-codex",
+          account: "a@x.com",
+          windowKey: "primary",
+          periodStartMs: saturdayReset,
+          periodEndMs: announcementReset,
+          detectedAtMs: announcementReset,
+          approximate: true,
+        },
+        {
+          // An estimate for the same reset must yield to the account's exact header
+          // observation nearby rather than create a tiny duplicate period.
+          providerId: "openai-codex",
+          account: "a@x.com",
+          windowKey: "primary",
+          periodStartMs: announcementReset,
+          periodEndMs: todayReset - 30 * 60_000,
+          detectedAtMs: todayReset - 30 * 60_000,
+          approximate: true,
         },
         {
           providerId: "openai-codex",
@@ -286,13 +308,13 @@ describe("admin OAuth routes — read endpoints", () => {
     );
     expect(body.periods[0]).toMatchObject({
       windowKey: "primary",
-      periodStartMs: saturdayReset,
+      periodStartMs: announcementReset,
       periodEndMs: todayReset,
-      approximate: false,
+      approximate: true,
     });
     expect(body.periods[1]).toMatchObject({
-      periodStartMs: saturdayReset - WEEK,
-      periodEndMs: saturdayReset,
+      periodStartMs: saturdayReset,
+      periodEndMs: announcementReset,
       approximate: true,
     });
     // daily: natural-day buckets, most recent first, each a 24h span, windowKey "day".

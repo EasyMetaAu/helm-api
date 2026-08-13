@@ -1361,4 +1361,23 @@ describe("runPgMigrations — memory job lease generation", () => {
     expect(rows.rows).toEqual([{ status: "pending", lease_generation: 0 }]);
     await db.$close();
   });
+
+  it("v50 preserves reset rows and marks legacy boundaries exact", async () => {
+    const db = await createPgliteDb();
+    await db.execute(
+      sql.raw(`INSERT INTO oauth_reset_period (
+        provider_id, account, window_key, period_start_ms, period_end_ms, detected_at_ms
+      ) VALUES ('openai-codex', 'a', 'primary', 1, 2, 2)`),
+    );
+    await db.execute(sql.raw("ALTER TABLE oauth_reset_period DROP COLUMN approximate"));
+    await db.execute(sql.raw("DELETE FROM _migrations WHERE version = 50"));
+
+    await runPgMigrations(db);
+
+    const rows = (await db.execute(sql.raw("SELECT approximate FROM oauth_reset_period"))) as {
+      rows: Array<{ approximate: boolean }>;
+    };
+    expect(rows.rows).toEqual([{ approximate: false }]);
+    await db.$close();
+  });
 });

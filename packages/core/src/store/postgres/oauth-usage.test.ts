@@ -243,6 +243,7 @@ describe("PgOAuthResetPeriodStore (pglite)", () => {
       account: "a@x.com",
       windowKey: "5h",
       detectedAtMs: 19500,
+      approximate: false,
     };
     await store.record({ ...base, periodStartMs: 1000, periodEndMs: 19000 });
     await store.record({ ...base, periodStartMs: 1000, periodEndMs: 19000, detectedAtMs: 99999 }); // dup PK → no-op
@@ -253,7 +254,21 @@ describe("PgOAuthResetPeriodStore (pglite)", () => {
     // numbers, not pg bigint strings; descending by periodEndMs
     expect(rows.map((r) => r.periodEndMs)).toEqual([37000, 19000]);
     expect(rows[1]?.detectedAtMs).toBe(19500); // first write wins
+    await store.record({
+      ...base,
+      periodStartMs: 37000,
+      periodEndMs: 38000,
+      approximate: true,
+    });
+    expect((await store.queryPeriods("anthropic", "a@x.com", "5h", 1))[0]?.approximate).toBe(true);
     expect(await store.queryPeriods("anthropic", "nobody", "5h", 10)).toHaveLength(0);
+
+    await store.record({ ...base, periodStartMs: 39000, periodEndMs: 40000, approximate: true });
+    await store.record({ ...base, periodStartMs: 39000, periodEndMs: 41000, approximate: false });
+    await store.record({ ...base, periodStartMs: 39000, periodEndMs: 42000, approximate: true });
+    expect(await store.queryPeriods("anthropic", "a@x.com", "5h", 1)).toMatchObject([
+      { periodEndMs: 41000, approximate: false },
+    ]);
 
     await store.record({
       ...base,
@@ -268,6 +283,14 @@ describe("PgOAuthResetPeriodStore (pglite)", () => {
       periodStartMs: 55000,
       periodEndMs: 90000,
       detectedAtMs: 60000,
+    });
+    await store.record({
+      ...base,
+      windowKey: "7d",
+      periodStartMs: 60000,
+      periodEndMs: 65000,
+      detectedAtMs: 65000,
+      approximate: true,
     });
     expect(await store.latestResetAt("anthropic", "a@x.com", 70000)).toBe(55000);
     expect(await store.latestResetAt("anthropic", "a@x.com", 70000, "5h")).toBe(19000);

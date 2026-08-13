@@ -1346,6 +1346,19 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // Pg mirror of SQLite v51: retain whether a historical reset boundary is estimated.
+    version: 50,
+    run: async (db) => {
+      if (await pgTableHasColumns(db, "oauth_reset_period", ["provider_id"])) {
+        await db.execute(
+          sql.raw(
+            "ALTER TABLE oauth_reset_period ADD COLUMN IF NOT EXISTS approximate BOOLEAN NOT NULL DEFAULT FALSE",
+          ),
+        );
+      }
+    },
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {
@@ -1365,6 +1378,7 @@ async function pgTableHasColumns(
     | "memory_facts"
     | "memory_jobs"
     | "oauth_quota"
+    | "oauth_reset_period"
     | "session_revisions"
     | "telemetry",
   requiredColumns: readonly string[],

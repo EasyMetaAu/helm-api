@@ -267,6 +267,31 @@ describe("computeUsagePeriods", () => {
     expect(out.periods[2]?.periodStartMs).toBe(90 * HOUR);
   });
 
+  it("keeps announcement-estimated reset boundaries approximate", () => {
+    const now = 107 * HOUR;
+    const reset = 110 * HOUR;
+    const out = computeUsagePeriods({
+      windows: [win("5h", reset, null)],
+      buckets: buckets(95 * HOUR, 12, 100),
+      nowMs: now,
+      dataStartMs: 0,
+      limit: 2,
+      recordedBoundaries: {
+        "5h": [{ startMs: 101 * HOUR, endMs: 106 * HOUR, approximate: true }],
+      },
+    });
+
+    expect(currentFor(out, "5h")).toMatchObject({
+      periodStartMs: 106 * HOUR,
+      approximate: true,
+    });
+    expect(out.periods[0]).toMatchObject({
+      periodStartMs: 101 * HOUR,
+      periodEndMs: 106 * HOUR,
+      approximate: true,
+    });
+  });
+
   it("ignores recorded boundaries that overlap or postdate the current period", () => {
     const now = 107 * HOUR;
     const reset = 110 * HOUR; // current starts at 105h

@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-08-13 · 历史配额周期使用公开公告补齐近似边界（OAuth quota / Admin providers，docs/04/11，原则 3/7）
+
+- **来源边界**：`codex-reset.com` 的公开 timeline 没有个人账号的 `effective_at`；历史确认公告使用 `announced_at`，带官方窗口的预告使用窗口中点，均只能标记为 `approximate=true`，不能冒充账号真实重置时间。Helm 已记录的 header/reset-credit 时间继续保持精确，并在 ±3 小时内覆盖公告估算。
+- **存储与读取**：复用 `oauth_reset_period`，SQLite/Postgres 只增加 `approximate` 列；估算边界仅参与历史周期切分，不进入 `latestResetAt`，因此不会改变实时请求 bucket 或 reset-credit 判断。同一主键后来收到精确观测时，只允许 `approximate=true → false` 单向升级，估算数据不能覆盖精确事实。
+- **重算方式**：`oauth_usage` 是保留时间戳的小时/边界 bucket，周期 totals 在 Admin API 读取时按边界动态聚合，因此历史修复只需追加缺失的近似 reset facts，不重写或复制请求计数。发布后生产回填必须先备份数据库、预演候选/冲突，并验证拆分前后 requests/tokens/cost 守恒。
+
 ## 2026-08-11 · Admin Memory 范围分页与 Key 点查（Admin / Store，docs/11/13，原则 1/7）
 
 - **分页契约**：`/admin/api/memory/scopes` 采用与 facts/reflections 一致的 `{ rows, total }` 响应；默认 50、最大 200。SQLite/Postgres 都在聚合结果上执行服务端 `LIMIT/OFFSET`，并以 scope tuple 作为 `lastUpdated` 并列时的稳定次序，避免翻页重复或遗漏。
@@ -75,18 +81,11 @@
 - **未修的次要项**：已限流账号（weekly 100%）的 `/wham/usage` PULL 本身拿不到富数据，是 OpenAI 上游对限流账号的行为，非 helm bug；weekly 重置后自愈。
 - **测试**：sqlite round-trip + header-PUSH 保留；pg（pglite）round-trip + 保留 + fail-open；admin route 冷缓存 fallback（fullSeam 无 getCachedCodexQuota → 用行持久化 metadata）。core store 807 全绿；admin oauth route 86 全绿；typecheck + lint 全绿。
 
-## 2026-08-07 · context_management 转发给 generic responses 导致 grok 422（Protocol / provider execution，docs/04/05，原则 3/5/8）
-
-- **现场**：anthropic_messages 请求 fallback 到 xAI grok-4.5（generic openai_responses profile）时，`context_management` 以 Anthropic 对象形状 `{ edits: [...] }` 发出，xAI Responses 反序列化要 array → 422 `invalid type: map, expected a sequence`（正是上一条 prompt-too-long 现场里 grok 那个无关 422）。
-- **根因**：`context_management` 是 Anthropic 原生上下文编辑控制，因 Codex GPT-5.6 订阅工作（`680e570a`）被加进 `openai_responses` 转发 allowlist——供 **Codex 官方**端点消费；但 **generic** profile（grok）继承同一 allowlist，不认这个字段且形状不符。
-- **修复（两条路径都堵）**：(1) **翻译路径** `renderProviderRawForTarget`：对 `targetIsGenericResponsesProfile` 从 allowed 删除 `context_management`，与其上方既有 `responses_input_items` 删除同理同位。(2) **同协议 passthrough 路径**（Codex review 补漏）：`openai_responses → generic grok` 同协议可 verbatim passthrough 绕过 allowlist；在 `prepareNativeRequestForUpstream`（native body 唯一 chokepoint，已有 Codex/Anthropic sanitizer）新增：generic profile 时删除 body 里的 `context_management`（任何形状；对 generic 都是不可执行的 Anthropic 控制），mutation 记 `context_management_stripped_for_generic`。Codex 官方（非 generic）两路都保留。
-- **测试**：三向锁定——翻译 strip 到 generic xai（mutation `provider_raw_stripped_for_target`）+ 非 generic Codex-official 保留 + 同协议 passthrough strip（mutation `context_management_stripped_for_generic`）。execute.test.ts 169 全绿；execute/pipeline/responses/core-responses 合计 539 全绿。
-- **遗留**：allowlist 里 `text`/`reasoning_config`/`truncation`/`logit_bias`/`include`/`responses_tools`/`container` 等对 generic provider 是否有同类 array/object 形状风险，Codex 抽查未确认第二例，未逐一核；本次只修实测触发的 `context_management`。
-
 - **2026-08-07 · 真实上游超长溢出链耗尽终态**：真实 `prompt is too long: N > M` 在链耗尽时胜出为客户端 400，但仍允许更大窗口候选继续 fallback；弱措辞只认结构化 error message，完整原文经 git history 回溯。
 
 ## 历史条目摘要（最新要点）
 
+- **2026-08-07 · generic Responses 剥离 Anthropic `context_management`**：翻译与同协议 passthrough 都在 generic profile 边界删除不兼容字段，Codex official 保留；完整原文经 git history 回溯。
 - **2026-08-07 · OAuth 账号限流后继续用剩余点数**：每账号开关只绕过 usage-limit park，model-scoped 与 transient 冷却保持不变；完整原文经 git history 回溯。
 - **2026-08-07 · per-key `max_reasoning_effort` 上限**：统一三协议身份 caps 映射，避免内联副本漂移导致上限静默失效，完整原文经 git history 回溯。
 - **2026-08-06 · HALF_OPEN 探测锁释放与所有权令牌**：所有被允许的 provider/image 尝试都结算 breaker，HALF_OPEN abort 仅凭匹配的 probe token 释放对应探针，避免锁永久卡住或旧请求误清新探针；完整原文经 git history 回溯。

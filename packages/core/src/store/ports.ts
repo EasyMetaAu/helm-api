@@ -1563,8 +1563,8 @@ export interface OAuthQuotaStore {
 // same reset folds to one row). OBSERVABILITY only — writes are FAIL-OPEN at the call
 // site (a missed reset just leaves that span on the approximate path). No secret column.
 export interface OAuthResetPeriodStore {
-  // Persist one detected reset boundary; a repeat of the same (provider, account,
-  // window, start) is a no-op.
+  // Persist one detected reset boundary. Repeats are no-ops except that an exact
+  // observation may replace an estimate with the same identity.
   record(row: OAuthResetPeriod): Promise<void>;
   // Recorded boundaries for one account/window, most recent first, capped by `limit`.
   // Feeds the usage-period read so history slices on true boundaries where available.

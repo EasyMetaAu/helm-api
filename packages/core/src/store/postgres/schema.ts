@@ -478,8 +478,8 @@ export const oauthQuota = pgTable(
   (t) => [primaryKey({ columns: [t.providerId, t.account] })],
 );
 
-// Per-account RESET-PERIOD boundaries — pg mirror of the sqlite oauth_reset_period
-// table. Append-only history of real reset events; PK makes re-detection idempotent.
+// Per-account RESET-PERIOD boundaries — pg mirror of SQLite, including explicitly
+// marked public-announcement estimates. The PK makes re-detection idempotent.
 export const oauthResetPeriod = pgTable(
   "oauth_reset_period",
   {
@@ -489,6 +489,7 @@ export const oauthResetPeriod = pgTable(
     periodStartMs: bigint("period_start_ms", { mode: "number" }).notNull(), // prior resetsAtMs
     periodEndMs: bigint("period_end_ms", { mode: "number" }).notNull(), // new resetsAtMs
     detectedAtMs: bigint("detected_at_ms", { mode: "number" }).notNull(),
+    approximate: boolean("approximate").notNull().default(false),
   },
   (t) => [primaryKey({ columns: [t.providerId, t.account, t.windowKey, t.periodStartMs] })],
 );
