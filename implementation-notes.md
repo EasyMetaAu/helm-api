@@ -7,6 +7,10 @@
 
 ---
 
+## 2026-08-13 · 使用率下降观测不得冒充精确重置（OAuth quota，docs/04/11，原则 3/7）
+
+- **根因与修复**：provider deadline 未变化时，刷新只能证明“使用率已下降”，不能证明下降发生在刷新瞬间；这类记录改为 `approximate=true`。deadline 推进推导出的窗口起点和 reset-credit 事件仍为精确事实。这样同账号 ±3 小时内已有 header 精确点时会自动压过刷新推测，且刷新推测不再进入 `latestResetAt`。
+
 ## 2026-08-13 · 历史配额周期使用公开公告补齐近似边界（OAuth quota / Admin providers，docs/04/11，原则 3/7）
 
 - **来源边界**：`codex-reset.com` 的公开 timeline 没有个人账号的 `effective_at`；历史确认公告使用 `announced_at`，带官方窗口的预告使用窗口中点，均只能标记为 `approximate=true`，不能冒充账号真实重置时间。Helm 已记录的 header/reset-credit 时间继续保持精确，并在 ±3 小时内覆盖公告估算。
@@ -73,18 +77,11 @@
 - **Codex review 补的 gate（round 1-2 HIGH）**：短路把一个潜伏 bug 放大了——`isContextWindowRejection` 原本纯靠 error body/message 标记判定，**不看 `err.upstreamStatus`**。一个可重试的 429/5xx/408 若 body 恰好含 `context_length_exceeded` 标记（如上游把上下文相关的过载包成 500），会被短路成客户端 400 → 不再 fall back 到健康兄弟、不记熔断。round-1 用黑名单（`status === 429 || status >= 500`）；round-2 Codex 指出漏了 408 → 改成**白名单** `if (status !== null && status !== 400 && status !== 413 && status !== 422) return false;`。只有确定性请求-shape 4xx（400/413/422）+ `null`（in-band 流式，无 HTTP 状态）短路；其余所有 numeric status（408/409/425/429/5xx…）走正常 fall back + 记熔断。与 `isUpstreamRequestRejection` 的 4xx 白名单一致，未来新增可重试 status 天然被排除，不用补黑名单。旧的 skip-and-continue 设计下这个误判无害（只少试一个候选），是短路抬高了代价。
 - **测试**：9 个围绕旧「skip+耗尽才返回/多候选确认/让位给更大 sibling」的 case 全部重写为「第一个真上游溢出即短路、后续候选从不被调用」（含 in-band 流式溢出、native Responses 脱敏、逗号分组、box c211e4a1）；新增复现线上 case 的短路测试 + 预检估算不短路的正向证明 + 5xx-gate 测试（500 带溢出标记必须 fall back 而非短路）。execute.test.ts 170 全绿；route-request 92 全绿；typecheck + lint 全绿。
 
-## 2026-08-07 · Codex 配额富元数据持久化（providers page Tier 3，docs/11，原则 7）
-
-- **现场**：providers 页某 Codex 账号卡片"显示不全"——只有"周限 100%"进度条 + resetCredits 0，缺 Plan 类型、Credits 点数、Reset limit 按钮点数、individualLimit。box 刚重启到 0.28.46 后**所有** Codex 账号都这样；手动 refresh 后未限流账号立即恢复出 planType/credits，已限流账号（其 `/wham/usage` PULL 拿不到富数据）仍缺。
-- **根因**：Codex 富元数据（planType/credits/resetCreditDetails/individualLimit/additionalLimits/rateLimitReachedType）此前**只存在 `admin-oauth.ts` 的进程内 `quotaCache` Map**，从不落库——`oauth_quota` 的 `store.upsert` 只写 windows + resetCredits（`oauth.ts:467`）。重启即清空进程缓存；持久化 store 只剩 windows（→ 周限进度条能显示），`getCachedCodexQuota` 返回 null → 富字段全丢，直到下次 refresh 重填进程缓存。
-- **修复（Lukin 拍板"扩 store schema"）**：给 `oauth_quota` 加一列 `metadata`（sqlite TEXT / pg JSONB，nullable）。① shared 新增 `CodexQuotaMetadataSchema` + `packCodexQuotaMetadata`（header PUSH 无富数据时返回 `undefined` → upsert 里省略该列，保留上次 PULL，与 resetCredits 同 preserve-on-omit 契约）+ `unpackCodexQuotaMetadata`（null/损坏 → `{}` fail-open）。② 两个适配器 upsert 写 metadata、toSnapshot 读回。③ sqlite migration v48 / pg migration v47（都 `ADD COLUMN IF NOT EXISTS`）。④ 刷新路径 `oauth.ts` 把 activeResult 的富字段一并 upsert。⑤ 读取路径 `readCachedQuota`：进程缓存（最新最全）优先，**冷缓存时 fallback 到行上持久化的 metadata**——重启后卡片即完整，无需等 refresh。
-- **未修的次要项**：已限流账号（weekly 100%）的 `/wham/usage` PULL 本身拿不到富数据，是 OpenAI 上游对限流账号的行为，非 helm bug；weekly 重置后自愈。
-- **测试**：sqlite round-trip + header-PUSH 保留；pg（pglite）round-trip + 保留 + fail-open；admin route 冷缓存 fallback（fullSeam 无 getCachedCodexQuota → 用行持久化 metadata）。core store 807 全绿；admin oauth route 86 全绿；typecheck + lint 全绿。
-
 - **2026-08-07 · 真实上游超长溢出链耗尽终态**：真实 `prompt is too long: N > M` 在链耗尽时胜出为客户端 400，但仍允许更大窗口候选继续 fallback；弱措辞只认结构化 error message，完整原文经 git history 回溯。
 
 ## 历史条目摘要（最新要点）
 
+- **2026-08-07 · Codex 配额富元数据持久化**：`oauth_quota.metadata` 保存 plan/credits/limits，冷缓存读取 durable metadata；限流账号上游缺富数据时待窗口重置后自愈，完整原文经 git history 回溯。
 - **2026-08-07 · generic Responses 剥离 Anthropic `context_management`**：翻译与同协议 passthrough 都在 generic profile 边界删除不兼容字段，Codex official 保留；完整原文经 git history 回溯。
 - **2026-08-07 · OAuth 账号限流后继续用剩余点数**：每账号开关只绕过 usage-limit park，model-scoped 与 transient 冷却保持不变；完整原文经 git history 回溯。
 - **2026-08-07 · per-key `max_reasoning_effort` 上限**：统一三协议身份 caps 映射，避免内联副本漂移导致上限静默失效，完整原文经 git history 回溯。
