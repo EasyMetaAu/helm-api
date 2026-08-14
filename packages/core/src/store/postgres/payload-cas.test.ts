@@ -71,6 +71,13 @@ describe("PgTelemetryStore — image CAS (Postgres, no manual gzip)", () => {
     expect(raw.includes(data)).toBe(false);
     expect(raw).toContain("helm-blob:sha256:");
     expect(await blobCount()).toBe(1);
+    const encoded = await store.getPayloadPartEncoded("r1", "request");
+    expect(encoded?.codec).toBe("raw");
+    expect(Buffer.from(encoded?.bytes ?? []).toString("utf8")).toBe(raw);
+    const sha256 = /helm-blob:sha256:([0-9a-f]{64})/.exec(raw)?.[1] ?? "";
+    expect(Buffer.from((await store.getPayloadBlob(sha256))?.bytes ?? []).toString("base64")).toBe(
+      data,
+    );
 
     // getPayload restores the verbatim original body (admin view + replay fidelity).
     const got = await store.getPayload("r1");

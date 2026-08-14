@@ -29,6 +29,18 @@ import type { AdminApiDeps } from "./deps.js";
 // breaking Principle 5). Returning the records keeps the UI a pure consumer (Principle 1).
 
 export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void {
+  app.get("/admin/api/payload-blobs/:sha256", async (c) => {
+    const sha256 = c.req.param("sha256");
+    if (!/^[0-9a-f]{64}$/.test(sha256)) return c.json({ error: "invalid payload blob" }, 400);
+    const blob = await deps.telemetry.getPayloadBlob?.(sha256);
+    if (!blob) return c.json({ error: "payload blob not found" }, 404);
+    return c.body(new Uint8Array(blob.bytes), 200, {
+      "cache-control": "no-store",
+      "content-type": blob.mime ?? "application/octet-stream",
+      "x-content-type-options": "nosniff",
+    });
+  });
+
   // GET /requests -> { items: (DecisionRecord & { created_at })[], total, page,
   // pageSize } — a filtered + numbered page, most recent first, already redacted.
   // The query (page/pageSize + date-window/status/decided_by/lane/model-or-route
@@ -209,6 +221,21 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
       });
     }
     if (part !== "full") {
+      if (
+        c.req.header("accept")?.includes("application/vnd.helm.payload") &&
+        deps.telemetry.getPayloadPartEncoded
+      ) {
+        const encoded = await deps.telemetry.getPayloadPartEncoded(traceId, part);
+        if (encoded) {
+          return c.body(new Uint8Array(encoded.bytes), 200, {
+            "cache-control": "no-store",
+            "content-type": "application/vnd.helm.payload",
+            ...(encoded.codec === "gzip" ? { "content-encoding": "gzip" } : {}),
+            "x-content-type-options": "nosniff",
+            "x-helm-payload-created-at": String(encoded.createdAt.getTime()),
+          });
+        }
+      }
       const exactMeta = await deps.telemetry.getPayloadMeta?.(traceId);
       const partStored =
         exactMeta === undefined ||

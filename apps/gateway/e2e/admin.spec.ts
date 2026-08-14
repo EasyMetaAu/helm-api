@@ -317,11 +317,22 @@ test.describe("per-key request-content storage", () => {
   });
 });
 
-// ── 6. Payload view: the seeded request was stored WITHOUT a captured body ────
+// ── 6. Payload view ───────────────────────────────────────────────────────────
 test.describe("admin request payload view", () => {
+  test("loads a captured body larger than the server decode chunk", async ({ page }) => {
+    await page.goto(`${BASE}/admin/requests/${SEED_TRACE_ID}`);
+    await page.getByTestId("request-view-raw").click();
+    await page.getByTestId("load-request-body").click();
+    await expect(page.getByTestId("request-body")).toContainText("payload-tail");
+  });
+
   test("shows a no-session notice when no payload or Session ID was captured", async ({ page }) => {
-    // The seed uses telemetry.insert only (no insertPayload), so the detail page
-    // must surface the explicit no-Session notice rather than a body.
+    await page.route(`**/admin/api/requests/${SEED_TRACE_ID}/payload?part=meta`, async (route) =>
+      route.fulfill({
+        contentType: "application/json",
+        body: '{"captured":false,"source":"unavailable","reason":"no_session"}',
+      }),
+    );
     await page.goto(`${BASE}/admin/requests/${SEED_TRACE_ID}`);
     await expect(page.getByTestId("payload-summary")).toContainText(/no captured Session ID/i);
   });

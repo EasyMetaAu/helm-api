@@ -125,6 +125,16 @@ await telemetry.insert({
     },
   },
 });
+await telemetry.insertPayload({
+  requestId: SEED_TRACE_ID,
+  requestJson: JSON.stringify({
+    model: "auto",
+    messages: [{ role: "user", content: "large payload readback" }],
+    user: `${"x".repeat(270_000)}payload-tail`,
+  }),
+  responseJson: '{"ok":true}',
+  createdAt: new Date(),
+});
 
 // Close this handle; the server opens its own.
 (seedDb as unknown as { $sqlite: Database.Database }).$sqlite.close();

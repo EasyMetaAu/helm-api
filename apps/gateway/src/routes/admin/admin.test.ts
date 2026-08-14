@@ -1819,6 +1819,49 @@ describe("admin.api request payload", () => {
     });
   });
 
+  it("returns the stored payload bytes without server-side decompression when requested", async () => {
+    const compressed = Buffer.from([0x1f, 0x8b, 0x08, 0x00]);
+    const telemetry = {
+      ...makeTelemetry(),
+      getPayloadPart: async () => {
+        throw new Error("decoded payload should not be read");
+      },
+      getPayloadPartEncoded: async () => ({
+        requestId: "req_large",
+        part: "request" as const,
+        codec: "gzip" as const,
+        bytes: compressed,
+        createdAt: new Date(1234),
+      }),
+    } as unknown as TelemetryStore;
+    const app = buildApp(buildDeps({ telemetry }));
+    const res = await app.request("/admin/api/requests/req_large/payload?part=request", {
+      headers: { accept: "application/vnd.helm.payload" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/vnd.helm.payload");
+    expect(res.headers.get("content-encoding")).toBe("gzip");
+    expect(res.headers.get("x-helm-payload-created-at")).toBe("1234");
+    expect(Buffer.from(await res.arrayBuffer())).toEqual(compressed);
+  });
+
+  it("returns an externalized payload blob to the authenticated admin client", async () => {
+    const sha256 = "a".repeat(64);
+    const telemetry = {
+      ...makeTelemetry(),
+      getPayloadBlob: async (sha: string) =>
+        sha === sha256 ? { sha256, bytes: new Uint8Array([104, 105]), mime: "image/png" } : null,
+    } as unknown as TelemetryStore;
+    const res = await buildApp(buildDeps({ telemetry })).request(
+      `/admin/api/payload-blobs/${sha256}`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("image/png");
+    expect(Buffer.from(await res.arrayBuffer()).toString("utf8")).toBe("hi");
+  });
+
   it("recovers a semantic request and response from the session when no full payload exists", async () => {
     let responseJson: string | null =
       '{"choices":[{"message":{"role":"assistant","content":"hello back"}}]}';

@@ -5,11 +5,13 @@ import { shapeTelemetryAggregate, shapeTelemetryKeyUsage } from "../aggregate-sh
 import { externalizeImages, type PayloadBlob, rehydrateImages } from "../payload-blobs.js";
 import { decodePayloadTextChunks, iteratePayloadTextChunks } from "../payload-codec.js";
 import type {
+  EncodedRequestPayloadPartRecord,
   InsertPayloadInput,
   InsertTelemetryInput,
   RecentDecisionRecord,
   RequestPayload,
   RequestPayloadArchiveRow,
+  RequestPayloadBlobRecord,
   RequestPayloadMeta,
   RequestPayloadPart,
   RequestPayloadPartRecord,
@@ -1158,6 +1160,46 @@ export class PgTelemetryStore implements TelemetryStore {
       json: decode(row.value),
       createdAt: new Date(row.createdAt),
     };
+  }
+
+  async getPayloadPartEncoded(
+    requestId: string,
+    part: RequestPayloadPart,
+  ): Promise<EncodedRequestPayloadPartRecord | null> {
+    const column =
+      part === "request"
+        ? requestPayloads.requestJson
+        : part === "response"
+          ? requestPayloads.responseJson
+          : requestPayloads.upstreamRequestJson;
+    const rows = await this.db
+      .select({
+        requestId: requestPayloads.requestId,
+        value: column,
+        createdAt: requestPayloads.createdAt,
+      })
+      .from(requestPayloads)
+      .where(eq(requestPayloads.requestId, requestId))
+      .limit(1);
+    const row = rows[0];
+    if (!row || row.value === null) return null;
+    return {
+      requestId: row.requestId,
+      part,
+      codec: "raw",
+      bytes: Buffer.from(row.value, "utf8"),
+      createdAt: new Date(row.createdAt),
+    };
+  }
+
+  async getPayloadBlob(sha256: string): Promise<RequestPayloadBlobRecord | null> {
+    const rows = await this.db
+      .select({ bytes: payloadBlobs.bytes, mime: payloadBlobs.mime })
+      .from(payloadBlobs)
+      .where(eq(payloadBlobs.sha256, sha256))
+      .limit(1);
+    const row = rows[0];
+    return row ? { sha256, bytes: row.bytes, mime: row.mime } : null;
   }
 
   // Retention auto-prune: drop rows strictly older than the cutoff (epoch ms), then

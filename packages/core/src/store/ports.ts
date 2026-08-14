@@ -348,6 +348,20 @@ export interface RequestPayloadPartRecord {
   createdAt: Date;
 }
 
+export interface EncodedRequestPayloadPartRecord {
+  requestId: string;
+  part: RequestPayloadPart;
+  codec: "gzip" | "raw";
+  bytes: Uint8Array;
+  createdAt: Date;
+}
+
+export interface RequestPayloadBlobRecord {
+  sha256: string;
+  bytes: Uint8Array;
+  mime: string | null;
+}
+
 // Incremental, session-scoped transcript storage. This is deliberately separate
 // from request_payloads: capture_payloads may be off, while a session must still
 // be recoverable without storing the client's full re-sent transcript per request.
@@ -697,6 +711,13 @@ export interface TelemetryStore {
     requestId: string,
     part: RequestPayloadPart,
   ): Promise<RequestPayloadPartRecord | null>;
+  // Browser payload inspection reads the stored representation directly, avoiding
+  // server-side expansion of large gzip rows. Optional for custom adapters.
+  getPayloadPartEncoded?(
+    requestId: string,
+    part: RequestPayloadPart,
+  ): Promise<EncodedRequestPayloadPartRecord | null>;
+  getPayloadBlob?(sha256: string): Promise<RequestPayloadBlobRecord | null>;
   // Delete payloads with createdAt strictly older than the cutoff (epoch ms).
   // Drives payload_retention_days auto-prune; safe to call opportunistically.
   prunePayloads(olderThanMs: number): Promise<void>;

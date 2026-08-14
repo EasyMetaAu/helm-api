@@ -10,11 +10,13 @@ import {
   iteratePayloadTextChunks,
 } from "../payload-codec.js";
 import type {
+  EncodedRequestPayloadPartRecord,
   InsertPayloadInput,
   InsertTelemetryInput,
   RecentDecisionRecord,
   RequestPayload,
   RequestPayloadArchiveRow,
+  RequestPayloadBlobRecord,
   RequestPayloadMeta,
   RequestPayloadPart,
   RequestPayloadPartRecord,
@@ -1051,7 +1053,7 @@ export class SqliteTelemetryStore implements TelemetryStore {
         `SELECT request_id AS id, upstream_request_json AS value, created_at AS ts
          FROM request_payloads WHERE request_id = ?`,
       ),
-      getBlob: db.prepare("SELECT bytes FROM payload_blobs WHERE sha256 = ?"),
+      getBlob: db.prepare("SELECT bytes, mime FROM payload_blobs WHERE sha256 = ?"),
     };
   }
   private stmts() {
@@ -1161,6 +1163,38 @@ export class SqliteTelemetryStore implements TelemetryStore {
       json: this.decodeColumn(row.value),
       createdAt: new Date(row.ts),
     };
+  }
+
+  async getPayloadPartEncoded(
+    requestId: string,
+    part: RequestPayloadPart,
+  ): Promise<EncodedRequestPayloadPartRecord | null> {
+    const stmt =
+      part === "request"
+        ? this.stmts().getRequestPart
+        : part === "response"
+          ? this.stmts().getResponsePart
+          : this.stmts().getUpstreamPart;
+    const row = stmt.get(requestId) as { id: string; value: unknown; ts: number } | undefined;
+    if (!row || row.value === null || row.value === undefined) return null;
+    const bytes =
+      typeof row.value === "string"
+        ? Buffer.from(row.value, "utf8")
+        : Buffer.from(row.value as Uint8Array);
+    return {
+      requestId: row.id,
+      part,
+      codec: bytes[0] === 0x1f && bytes[1] === 0x8b ? "gzip" : "raw",
+      bytes,
+      createdAt: new Date(row.ts),
+    };
+  }
+
+  async getPayloadBlob(sha256: string): Promise<RequestPayloadBlobRecord | null> {
+    const row = this.stmts().getBlob.get(sha256) as
+      | { bytes: Buffer; mime: string | null }
+      | undefined;
+    return row ? { sha256, bytes: row.bytes, mime: row.mime } : null;
   }
 
   // Retention auto-prune: drop rows strictly older than the cutoff. The

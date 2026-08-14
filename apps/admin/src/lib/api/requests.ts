@@ -335,6 +335,9 @@ interface RawDecisionRecord {
 }
 
 const BASE = '/admin/api/requests';
+const ENCODED_PAYLOAD_MEDIA_TYPE = 'application/vnd.helm.payload';
+const PAYLOAD_BLOB_BASE = '/admin/api/payload-blobs';
+const PAYLOAD_BLOB_REF = /^(?:(data:.*?;base64,))?helm-blob:sha256:([0-9a-f]{64})$/;
 
 async function asJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -925,14 +928,89 @@ export async function getRequestPayloadPart(
     const res = await fetch(
       `${BASE}/${encodeURIComponent(requestId)}/payload?part=${encodeURIComponent(part)}`,
       {
-        headers: { accept: 'application/json' },
+        headers: { accept: `${ENCODED_PAYLOAD_MEDIA_TYPE}, application/json` },
       },
     );
     if (!res.ok) return { captured: false };
+    if (res.headers.get('content-type')?.includes(ENCODED_PAYLOAD_MEDIA_TYPE)) {
+      const text = await res.text();
+      const value = await rehydratePayloadBlobs(parseMaybeJson(text));
+      const createdAtHeader = res.headers.get('x-helm-payload-created-at');
+      const createdAt = createdAtHeader === null ? Number.NaN : Number(createdAtHeader);
+      return {
+        captured: true,
+        source: 'payload',
+        exact: true,
+        fidelity: 'exact',
+        part,
+        value,
+        ...(Number.isFinite(createdAt) ? { created_at: createdAt } : {}),
+      };
+    }
     return (await res.json()) as RequestPayloadPartView;
   } catch {
     return { captured: false };
   }
+}
+
+function parseMaybeJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text;
+  }
+}
+
+function collectPayloadBlobRefs(value: unknown, refs: Set<string>): void {
+  if (typeof value === 'string') {
+    const match = PAYLOAD_BLOB_REF.exec(value);
+    if (match?.[2]) refs.add(match[2]);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectPayloadBlobRefs(item, refs);
+    return;
+  }
+  if (value && typeof value === 'object') {
+    for (const item of Object.values(value)) collectPayloadBlobRefs(item, refs);
+  }
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += 32_768) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 32_768));
+  }
+  return btoa(binary);
+}
+
+function restorePayloadBlobRefs(value: unknown, blobs: ReadonlyMap<string, string>): unknown {
+  if (typeof value === 'string') {
+    const match = PAYLOAD_BLOB_REF.exec(value);
+    const data = match?.[2] ? blobs.get(match[2]) : undefined;
+    return data === undefined ? value : `${match?.[1] ?? ''}${data}`;
+  }
+  if (Array.isArray(value)) return value.map((item) => restorePayloadBlobRefs(item, blobs));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, restorePayloadBlobRefs(item, blobs)]),
+    );
+  }
+  return value;
+}
+
+async function rehydratePayloadBlobs(value: unknown): Promise<unknown> {
+  const refs = new Set<string>();
+  collectPayloadBlobRefs(value, refs);
+  const blobs = new Map<string, string>();
+  await Promise.all(
+    [...refs].map(async (sha256) => {
+      const response = await fetch(`${PAYLOAD_BLOB_BASE}/${sha256}`);
+      if (!response.ok) return;
+      blobs.set(sha256, bytesToBase64(new Uint8Array(await response.arrayBuffer())));
+    }),
+  );
+  return restorePayloadBlobRefs(value, blobs);
 }
 
 // ── Client-side transcript rebuild ───────────────────────────────────────────

@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-08-15 · 大型完整载荷改由浏览器解压与恢复图片（Store / Admin requests，docs/07/11，原则 1/3/7）
+
+- **根因与修复**：SQLite `request_payloads` 的单列 gzip 读取沿用了 Session 单块 256 KiB 解压上限，超过该值的真实正文被映射为 `null`，Admin 随后错误回退到 Session 恢复。Admin 现在优先请求存储态正文；SQLite 原样返回 gzip BLOB，Postgres 返回 raw TEXT，由浏览器通过 HTTP `Content-Encoding` 流式解压并拼装，不再在网关内物化放大的正文。
+- **完整性边界**：存储层为去重而外置的图片继续按 `sha256` 通过受 Admin 鉴权保护的只读端点逐个恢复；缺失 blob 保持既有 fail-open sentinel 语义。旧 JSON 响应契约和自定义 Store 适配器仍可回退使用，无 migration、无依赖、无写入格式变化。
+
 ## 2026-08-13 · OAuth 永久失效只认明确凭证拒绝（OAuth provider pool / Admin providers，docs/04/11，原则 3/7）
 
 - **根因与修复**：旧逻辑仅按 HTTP 状态把 refresh `400/401/403` 与 inference `401/403` 全部持久化为 `needs reconnect`；代理、地域或 WAF 返回的裸 `403` 因此会永久摘除仍有有效 refresh token 的账号。现在 provider token 边界只把有界解析出的标准 `invalid_grant`、Copilot token mint `401` 与 Codex refresh 身份变化标为永久凭证拒绝；裸 refresh `403` 只短暂冷却，inference `403` 走正常错误/fallback，不写 `credentialFailedAt`。错误正文仍不进入消息、日志或存储。
@@ -61,18 +66,9 @@
 - **加载加速**：浏览器一旦收到目标 revision 就停止游标分页，不再下载该目标之后的同 Session revision；行上限从 50 恢复到 100，单页 `maxBytes=8 MiB` 不变，所以服务端单请求正文物化上限不扩大。没有改成多进程/并发请求，因为下一页游标依赖上一页的 soft-byte 结果，并发会产生跳页或重复读取风险。
 - **边界**：时间线展示的是持久化的增量 request delta 与可用 response snapshot，不伪装成原始 HTTP body；Session 恢复仍是 `exact=false`、不可精确 Retry。响应为空表示当时没有可用快照，不补造内容。
 
-## 2026-08-08 · Grok Imagine 仅复用 SuperGrok OAuth 媒体链路（Grok media spec §2/6–10/13）
-
-- **凭证与上游边界**：客户端 `helm_live_*` 只做 Helm 鉴权；媒体执行复用后台已连接 xAI 订阅账号的 OAuth bearer。文本仍去 `cli-chat-proxy.grok.com/v1`，图片/视频固定去 `api.x.ai/v1`，不保留官方 `XAI_API_KEY` 分支。
-- **任务归属**：MVP 复用 `ResponsesRegistryStore`，以 `video-create:${helm_request_id}` 先占位、`video:${upstream_request_id}` 原子映射；poll 同时绑定 Helm account、原 key、provider 和 OAuth account。这个选择避免新建 `MediaTaskStore`，代价是 key 轮转后不能接管旧任务，长期历史/取消/reconcile UI 仍需未来独立任务模型。
-- **付费单写**：图片 generation/edit 与视频 start 一旦进入媒体执行就不重放 POST、不切 provider、不切 OAuth sibling；timeout、断线、无法确认的 5xx/成功响应及 registry 映射失败统一为 `outcome_unknown`。视频 poll 是固定原账号的只读 GET，可在同账号内刷新一次 401 bearer。
-- **预算与正文**：没有可信媒体价格时 `cost_usd:null`；带美元 spend cap 的 key 在 create 前以 `media_pricing_unavailable` fail-closed。data URL 进入既有 blob externalizer，捕获的 HTTP(S) URL 删除 query/fragment。
-- **后台模型投影**：xAI 文本 discovery 继续保持 fail-closed；Providers 账号卡片与“管理模型”接口在 auto 模式合并三个已验证媒体 alias，manual 模式严格服从账号 allowlist。媒体项不写入文本 discovery。现有“连通性测试”只验证流式聊天，因此 UI 排除媒体 alias，服务端也在上游调用前以 400 拒绝，不能借测试按钮隐式创建付费媒体任务。
-- **审查后收紧**：媒体 alias 在 auto 模式默认可用，但 manual 模式严格服从每个账号的 `enabledModels`；视频模型和单图/多参考图 schema 一一绑定，聊天协议在执行前拒绝 xAI `outputImage` 与所有 `outputVideo` 模型，同时保留 Gemini 等供应商通过原生聊天协议返回图片的既有能力。OAuth pool 在付费 POST 前回报所选账号，视频 reservation 先持久化账号，图片/视频的 `outcome_unknown` telemetry 也保留账号归因；原子媒体 reservation 复用 registry 的节流 prune，但 reservation 已成功后 prune 失败按辅助维护 fail-open，避免把成功的付费单写误报为 `outcome_unknown`；Providers 卡片优先展示媒体 badge。
-- **刻意延后**：ZDR `output.upload_url` 在 request/upstream/response/error 四类正文都完成预签名 query 脱敏前由严格 schema 拒绝；本机 SuperGrok 图片/视频真实 canary 已通过，staging canary、GitHub Docker CI 与生产单副本观察仍是发布 No-Go 门禁。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-08 · Grok Imagine 仅复用 SuperGrok OAuth 媒体链路**：媒体执行复用 xAI 订阅 OAuth，付费 POST 单写且不跨账号重试，未知价格对美元预算 fail-closed；完整原文经 git history 回溯。
 - **2026-08-08 · 会话转录客户端重建，绕开服务端内存阀**：长 Session 以 4 MiB/100 行游标分页传给浏览器本地重建，小 Session 保留服务端快路径；共享纯重建函数留在浏览器安全的 `@helm/shared`，完整原文经 git history 回溯。
 - **2026-08-07 · 真上游上下文溢出短路直返 400**：确定性上游 400/413/422 上下文溢出立即返回客户端并保留原始错误；预检估算仍允许 fallback，可重试状态不误判为客户端错误，完整原文经 git history 回溯。
 - **2026-08-07 · Codex 配额富元数据持久化**：`oauth_quota.metadata` 保存 plan/credits/limits，冷缓存读取 durable metadata；限流账号上游缺富数据时待窗口重置后自愈，完整原文经 git history 回溯。

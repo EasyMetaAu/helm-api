@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { encodePayloadText, PAYLOAD_TEXT_CHUNK_RAW_BYTES } from "../payload-codec.js";
 import { createSqliteDb } from "./migrate.js";
@@ -56,6 +57,10 @@ describe("SqliteTelemetryStore — image CAS + gzip", () => {
     expect(Buffer.isBuffer(raw)).toBe(true); // gzip BLOB, not TEXT
     expect((raw as Buffer).includes(Buffer.from(data))).toBe(false);
     expect(blobCount()).toBe(1);
+    const sha256 = createHash("sha256").update(Buffer.from(data, "base64")).digest("hex");
+    expect(Buffer.from((await store.getPayloadBlob(sha256))?.bytes ?? [])).toEqual(
+      Buffer.from(data, "base64"),
+    );
 
     // getPayload restores the verbatim original body (admin view + replay fidelity).
     const got = await store.getPayload("r1");
@@ -77,6 +82,9 @@ describe("SqliteTelemetryStore — image CAS + gzip", () => {
       .run(bomb, "legacy-gzip-bomb");
 
     await expect(store.getPayload("legacy-gzip-bomb")).resolves.toMatchObject({ requestJson: "" });
+    const encoded = await store.getPayloadPartEncoded("legacy-gzip-bomb", "request");
+    expect(encoded?.codec).toBe("gzip");
+    expect(encoded?.bytes).toEqual(bomb);
     db.$sqlite.close();
   });
 

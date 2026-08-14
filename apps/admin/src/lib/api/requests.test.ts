@@ -3,6 +3,7 @@ import {
   computeTps,
   computeTtfbMs,
   getSessionRevisionsPage,
+  getRequestPayloadPart,
   listRequests,
   rebuildSessionTranscript,
   toDetail,
@@ -558,6 +559,49 @@ describe('listRequests', () => {
     expect(res.pageSize).toBe(2);
     expect(res.items).toHaveLength(1);
     expect(res.items[0]?.trace_id).toBe('tr_1');
+  });
+});
+
+describe('getRequestPayloadPart', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reads the browser-decompressed payload representation and restores blob references', async () => {
+    const sha = 'a'.repeat(64);
+    const calls: Array<{ input: string; accept: string | null }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string, init?: RequestInit) => {
+        calls.push({ input, accept: new Headers(init?.headers).get('accept') });
+        if (input.endsWith(`/payload-blobs/${sha}`)) {
+          return new Response(new Uint8Array([104, 105]));
+        }
+        return new Response(JSON.stringify({ image: `helm-blob:sha256:${sha}` }), {
+          headers: {
+            'content-type': 'application/vnd.helm.payload',
+            'x-helm-payload-created-at': '1234',
+          },
+        });
+      }),
+    );
+
+    await expect(getRequestPayloadPart('req large', 'request')).resolves.toEqual({
+      captured: true,
+      source: 'payload',
+      exact: true,
+      fidelity: 'exact',
+      part: 'request',
+      value: { image: 'aGk=' },
+      created_at: 1234,
+    });
+    expect(calls).toEqual([
+      {
+        input: '/admin/api/requests/req%20large/payload?part=request',
+        accept: 'application/vnd.helm.payload, application/json',
+      },
+      { input: `/admin/api/payload-blobs/${sha}`, accept: null },
+    ]);
   });
 });
 
