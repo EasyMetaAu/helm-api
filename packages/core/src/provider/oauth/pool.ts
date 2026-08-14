@@ -143,7 +143,8 @@ export type OAuthSelectionStrategy = "balanced" | "manual_priority" | "low_risk"
 // The pool's ProviderClient plus an out-of-band mutator the gateway uses to park /
 // un-park a single account in O(1) — a single 429 must NOT rebuild the whole pool
 // (which re-refreshes every token). `setUsageLimit` on an unknown account is a no-op
-// (the member may have been dropped by a concurrent rebuild).
+// (the member may have been dropped by a concurrent rebuild). Passing null after
+// a successful account test clears every soft cooldown for that account.
 export interface OAuthPoolClient extends ProviderClient {
   setUsageLimit(account: string, untilMs: number | null): void;
   // The account's current auto-park cooldown (epoch ms), or null if eligible now. Lets
@@ -1168,6 +1169,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       const entry = entries.find((e) => e.member.account === account);
       if (entry) entry.member.usageLimitedUntilMs = untilMs;
       if (untilMs === null) {
+        retryableAccountFailures.delete(account);
         for (const [key, cooldown] of scopedRateLimits) {
           if (cooldown.account === account) scopedRateLimits.delete(key);
         }

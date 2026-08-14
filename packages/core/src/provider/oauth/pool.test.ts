@@ -2339,6 +2339,36 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     expect(credentialFailures).toEqual([]);
   });
 
+  it("clears a retryable refresh cooldown when an account test succeeds", async () => {
+    let refreshFails = true;
+    const pool = createOAuthPoolClient({
+      members: [
+        {
+          account: "a",
+          priority: 10,
+          schedulable: true,
+          client: {
+            async chatCompletion() {
+              if (refreshFails) {
+                refreshFails = false;
+                throw SHORT_LEASE;
+              }
+              return { served_by: "a" };
+            },
+            chatCompletionStream(): AsyncIterable<string> {
+              return (async function* () {})();
+            },
+          },
+        },
+      ],
+      now: () => 1_000,
+    });
+
+    await expect(pool.chatCompletion(REQ)).rejects.toThrow(/shorter than required request lease/);
+    pool.setUsageLimit("a", null);
+    await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "a" });
+  });
+
   it("cools a refresh-failed account for streaming requests too", async () => {
     const served: string[] = [];
     const selected: string[] = [];
