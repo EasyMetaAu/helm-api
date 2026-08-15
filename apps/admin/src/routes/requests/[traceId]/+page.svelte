@@ -534,7 +534,7 @@
         </p>
         <!-- Before rebuild: offer the button. On success transcriptLoaded flips and the
              captured-path branch above reuses the normal Conversation/Raw lenses. -->
-        {#if data.payload?.reason === 'session_recovery_limited'}
+        {#if data.payload?.reason === 'session_recovery_limited' && data.payload.browser_recoverable === true}
           <div class="mt-3 rounded border border-dashed border-border bg-canvas p-3">
             <p class="field-help mb-2">
               {$t('Rebuild the transcript in your browser instead of on the server.')}
