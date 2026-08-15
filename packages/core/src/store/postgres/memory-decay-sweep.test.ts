@@ -84,6 +84,23 @@ describe("PgMemoryStore decay sweep", () => {
     );
   });
 
+  it("archives a parentless observation without enqueueing a thread-only reflector", async () => {
+    const now = new Date("2026-06-05T00:00:00.000Z");
+    const { store } = await newStore(now);
+    await store.ensureThread({ id: "legacy-thread", ownerId: "acct-a" });
+    const observationId = await store.appendObservation({
+      threadId: "legacy-thread",
+      sourceMessageRange: ["m1", "m2"],
+      observationText: "legacy",
+      observedAt: now,
+    });
+
+    await store.archiveObservations({ accountId: "acct-a", ids: [observationId], now });
+
+    expect(await store.listScorableObservations({ accountId: "acct-a" })).toEqual([]);
+    expect(await store.claimPendingJobs(10)).toEqual([]);
+  });
+
   // docs/12 (Codex review fix II — starvation; pg mirror) — with `candidates` the
   // forgetting score runs IN SQL, so a limit-sized page can never fill with survivors
   // and starve condemned rows beyond it.

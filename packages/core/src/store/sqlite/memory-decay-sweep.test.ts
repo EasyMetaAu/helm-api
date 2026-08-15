@@ -215,6 +215,23 @@ describe("SqliteMemoryStore decay sweep (listScorableObservations / archiveObser
       .get(msgId) as { id: string; content: string } | undefined;
     expect(raw).toEqual({ id: msgId, content: "hello" });
   });
+
+  it("archives a parentless observation without enqueueing a thread-only reflector", async () => {
+    const now = new Date("2026-06-05T00:00:00.000Z");
+    const { store, db } = newStore(now);
+    await store.ensureThread({ id: "legacy-thread", ownerId: "acct-a" });
+    const observationId = await store.appendObservation({
+      threadId: "legacy-thread",
+      sourceMessageRange: ["m1", "m2"],
+      observationText: "legacy",
+      observedAt: now,
+    });
+
+    await store.archiveObservations({ accountId: "acct-a", ids: [observationId], now });
+
+    expect(readStatus(db, observationId)?.status).toBe("archived");
+    expect(await store.claimPendingJobs(10)).toEqual([]);
+  });
 });
 
 describe("SqliteMemoryStore.listDecayCandidateAccounts (P5 buffer-flush gate)", () => {

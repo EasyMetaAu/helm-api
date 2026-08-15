@@ -1503,7 +1503,7 @@ export class SqliteMemoryStore implements MemoryStore {
       if (input.job !== undefined && !this.hasCurrentJobLease(input.job)) return false;
       const rows = db
         .prepare(
-          `SELECT DISTINCT t.project_id, t.resource_id, t.id AS thread_id
+          `SELECT DISTINCT t.project_id, t.resource_id
              FROM memory_observations o
              JOIN memory_threads t ON t.id = o.thread_id
             WHERE o.id IN (${placeholders})
@@ -1512,7 +1512,6 @@ export class SqliteMemoryStore implements MemoryStore {
         .all(...input.ids, input.accountId) as Array<{
         project_id: string | null;
         resource_id: string | null;
-        thread_id: string;
       }>;
       db.prepare(
         `UPDATE memory_observations
@@ -1532,9 +1531,6 @@ export class SqliteMemoryStore implements MemoryStore {
         }
         if (row.resource_id !== null) {
           targets.push({ accountId: input.accountId, resourceId: row.resource_id });
-        }
-        if (targets.length === 0) {
-          targets.push({ accountId: input.accountId, threadId: row.thread_id });
         }
         for (const target of targets) scopes.set(encodeScopeId(target), target);
       }

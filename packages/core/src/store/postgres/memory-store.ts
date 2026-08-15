@@ -1639,10 +1639,9 @@ export class PgMemoryStore implements MemoryStore {
       const rows = pgRows<{
         project_id: string | null;
         resource_id: string | null;
-        thread_id: string;
       }>(
         await tx.execute(sql`
-          SELECT DISTINCT t.project_id, t.resource_id, t.id AS thread_id
+          SELECT DISTINCT t.project_id, t.resource_id
             FROM memory_observations o
             JOIN memory_threads t ON t.id = o.thread_id
            WHERE o.id IN (${ids})
@@ -1657,9 +1656,6 @@ export class PgMemoryStore implements MemoryStore {
         }
         if (row.resource_id !== null) {
           targets.push({ accountId: input.accountId, resourceId: row.resource_id });
-        }
-        if (targets.length === 0) {
-          targets.push({ accountId: input.accountId, threadId: row.thread_id });
         }
         for (const target of targets) scopes.set(encodeScopeId(target), target);
       }

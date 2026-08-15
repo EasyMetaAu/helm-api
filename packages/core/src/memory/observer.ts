@@ -39,6 +39,7 @@ async function maybeEagerExtractFacts(
   covered: Set<string>,
   deps: ObserverDeps,
 ): Promise<void> {
+  if (job.projectId === undefined && job.resourceId === undefined) return;
   const extract = deps.extractFactsFromMessages;
   const insert = deps.memoryStore.insertFactsReconciled;
   if (extract === undefined || insert === undefined) return;
@@ -65,16 +66,10 @@ async function maybeEagerExtractFacts(
       extracted = await extract({ messages: userMessages, now });
     }
     if (extracted.length === 0) return;
-    // Scope the fact at the broadest cross-thread level the job carries. With NEITHER
-    // project nor resource (a valid thread-only job), fall back to the THREAD — never
-    // an empty scope, which would persist an account-wide fact and leak a thread-local
-    // statement into unrelated conversations (Codex review fix).
+    // Scope the fact at the broadest cross-thread level the job carries.
     const scope: { projectId?: string; resourceId?: string; threadId?: string } = {};
     if (job.projectId !== undefined) scope.projectId = job.projectId;
     if (job.resourceId !== undefined) scope.resourceId = job.resourceId;
-    if (scope.projectId === undefined && scope.resourceId === undefined) {
-      scope.threadId = job.threadId;
-    }
     const facts = buildReconciledFactBatch({
       extracted,
       ownerId: job.accountId,
@@ -208,7 +203,7 @@ export interface ObserverJob {
   // verbatim from the enqueued job (the worker already has it — observer jobs are
   // enqueued with the full {accountId, projectId?, resourceId?, threadId} scope).
   // Eager facts are written at this scope so they are recallable in a NEW thread.
-  // Absent ⇒ thread-only; the eager pass then writes a thread-scoped fact.
+  // Absent ⇒ thread-only; the eager pass skips fact extraction.
   projectId?: string;
   resourceId?: string;
 }

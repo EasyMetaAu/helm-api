@@ -65,6 +65,10 @@ Resolution is centralized in
    resolves to no thread and suppresses automatic thread derivation for that
    request.
 
+Automatic persistence requires a thread plus at least one project or resource
+parent. A parentless scope is logged and skipped, so it cannot create a top-level
+thread in the Memory scope list.
+
 New user keys are minted with:
 
 ```text
@@ -166,9 +170,10 @@ the protocol-native cached prefix.
 
 Only non-empty sections are emitted. There is no thread-reflection slot in the
 automatic inject path: it reads exact project and resource reflections plus
-thread observations. A thread-only reflection can exist through direct
-management calls, but the automatic worker does not promote thread-only
-observer jobs to a reflector and inject does not load that reflection.
+thread observations. A thread-only reflection can exist through historical or
+direct management data, but automatic persistence does not create one. The
+worker rejects a persisted thread-only Reflector job before reading or writing
+memory, and inject does not load that reflection.
 
 ### Stored raw rows are not re-injected
 
@@ -285,6 +290,9 @@ rebuilds from that bounded active set without feeding the old reflection back to
 the model. Reconciled facts, the reflection write/archive action, and job
 completion publish in one fenced transaction, so an in-flight stale Reflector
 cannot resurrect archived text.
+
+Decay still archives a historical parentless observation, but does not enqueue
+a thread-only reflection rebuild.
 
 When forgetting is enabled and the active-observation token sum reaches
 `consolidate.trigger_tokens`, the Reflector also extracts facts. Observation

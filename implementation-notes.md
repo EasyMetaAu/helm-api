@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-08-15 · 自动 Memory 形成必须挂在项目或资源下（Memory Observer / Reflector / Store，docs/08/12，原则 3/7）
+
+- **根因与修复**：历史 quarantine thread 没有项目/资源；decay 归档 observation 时把它回退成 thread-only Reflector scope，随后生成 Admin「按范围」里没有父级的 active reflection。请求 observe writeback 与 eager fact 路径也允许相同的孤立范围。现在入站/出站观察在缺少项目和资源时直接 fail-open 跳过，eager extraction 不调用模型，Reflector 对已持久化的孤立 job 在任何读写前标记失败。
+- **遗忘与兼容**：SQLite/Postgres 仍会软归档历史孤立 observation，但不再排 thread-only rebuild；正常 project/resource rebuild 与直接管理的历史数据格式不变，无 schema/migration 或新依赖。现有孤立 active facts/reflections 不由升级代码猜测删除，需按运维范围显式清理。
+
 ## 2026-08-15 · 请求级正文模式成为历史读取权威（Telemetry / Admin requests，docs/07/11，原则 3/7）
 
 - **根因与修复**：Admin 只按 `request_payloads` / `session_revisions` 是否存在推断历史请求的正文模式，无法证明请求发生时 Key 与系统设置的实际合并结果；大型 Session 的元数据也只证明服务端整体恢复超限，却仍无条件展示浏览器加载按钮，即使某条 revision 会被同一分页接口的 JSON 内存上限拒绝。每条新 telemetry 现在保存 body-free 的有效 `request_content_mode`；明确 `none` 时任何孤立正文行都不可读取、也不显示加载入口，旧记录继续按存储事实兼容推断。
@@ -58,14 +63,9 @@
 - **回归**：上一版为了展示时间线，把 `transcriptLoaded` 后的主请求区域强制切到 `JsonViewer`，隐藏了服务端恢复路径使用的 Conversation/Raw tabs，导致客户端加载后的可读性明显下降。
 - **修复**：客户端只替换数据获取与重建方式；重建完成后继续走同一套 Conversation、Raw `JsonViewer`、Response `StreamViewer/JsonViewer` 路径。按记录时间排序的 revision 时间线仍作为额外审计视图保留。
 
-## 2026-08-10 · 配额统计按真实重置点切分（OAuth quota / Admin providers，docs/04/11，原则 3/7）
-
-- **根因**：旧 writer 在 `resetsAtMs` 推进时写入 `[oldReset,newReset)`，把新周期误当成已结束历史；自然周 UI 又掩盖了 OpenAI 提前重置、reset-credit 重置和非整点边界，所以“每周”并不等于真实额度周期。
-- **实现**：复用既有 `oauth_reset_period`，统一记录刚结束的 `[previousStart,actualResetAt)`；PULL、Codex header PUSH、手动/自动 reset-credit 共用记录入口。quota snapshot 按 `capturedAt` 单调更新，晚到的旧采样既不覆盖新状态，也不写伪 reset。旧版 `detectedAtMs < periodEndMs` 行只在读取时忽略，不改写历史库；本地“Reset usage”仍只清 Helm cooldown，不冒充上游重置。
-- **精度边界**：usage 继续按小时聚合，但真实重置发生在小时中间时，新请求的 bucket 起点提升到最近 reset point，因此不会再跨边界混入上一周期。部署前已经落入旧整点 bucket 的历史数据不可逆，继续标 `≈`/`partial`；新记录到的真实边界作为精确周期返回。Admin 默认显示 Period，并保留 Daily / Weekly 兼容视图。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-10 · 配额统计按真实重置点切分**：PULL、Codex header 与 reset-credit 共用真实周期边界，晚到采样不写伪 reset；旧整点历史不可逆并继续标记为近似/部分数据，完整原文经 git history 回溯。
 - **2026-08-10 · 大 Session 客户端重建按记录时间展示并提前停止分页**：目标 revision 到达即停，按 `createdAt`/`sequence` 展示持久化增量请求与响应快照；Session 仍为 `exact=false` 且不可精确 Retry，完整原文经 git history 回溯。
 - **2026-08-08 · Grok Imagine 仅复用 SuperGrok OAuth 媒体链路**：媒体执行复用 xAI 订阅 OAuth，付费 POST 单写且不跨账号重试，未知价格对美元预算 fail-closed；完整原文经 git history 回溯。
 - **2026-08-08 · 会话转录客户端重建，绕开服务端内存阀**：长 Session 以 4 MiB/100 行游标分页传给浏览器本地重建，小 Session 保留服务端快路径；共享纯重建函数留在浏览器安全的 `@helm/shared`，完整原文经 git history 回溯。
