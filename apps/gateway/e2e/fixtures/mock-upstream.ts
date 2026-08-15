@@ -246,6 +246,7 @@ export function createMockUpstream() {
   // OAUTH_RESET_PATH between spec cases.
   let oauth401Fired = false;
   let videoCapture: VideoCapture = { images: [], starts: [], polls: [] };
+  let videoStartCount = 0;
   const videoOwners = new Map<string, string>();
   const videoPollCounts = new Map<string, number>();
 
@@ -299,7 +300,7 @@ export function createMockUpstream() {
       return c.json({ error: { message: "missing xAI OAuth bearer" } }, 401);
     }
     const body = (await c.req.json()) as Record<string, unknown>;
-    const requestId = `video_${account}_${videoCapture.starts.length + 1}`;
+    const requestId = `video_${account}_${++videoStartCount}`;
     videoOwners.set(requestId, account);
     videoCapture.starts.push({ requestId, account, body });
     return c.json({ request_id: requestId, status: "queued" });
