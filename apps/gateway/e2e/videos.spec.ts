@@ -203,6 +203,7 @@ test("routes the current Grok Build 1.5 model through the SuperGrok OAuth video 
   expect(await response.json()).toMatchObject({ request_id: expect.any(String) });
   expect((await videoCapture()).starts).toEqual([
     {
+      requestId: expect.any(String),
       account: expect.any(String),
       body: expect.objectContaining({
         model: "grok-imagine-video-1.5",
