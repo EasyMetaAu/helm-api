@@ -1556,11 +1556,13 @@ export class SqliteMemoryStore implements MemoryStore {
               SET status = 'failed', error = 'superseded by observation archive', updated_at = ?
             WHERE type = 'reflector' AND scope_id = ? AND status = 'running'`,
         ).run(input.now.getTime(), scopeId);
-        db.prepare(
-          `INSERT OR IGNORE INTO memory_jobs
-             (id, type, scope_id, status, error, created_at, updated_at)
-           VALUES (?, 'reflector', ?, 'pending', NULL, ?, ?)`,
-        ).run(this.genId(), scopeId, input.now.getTime(), input.now.getTime());
+        if (target.projectId !== undefined || target.resourceId !== undefined) {
+          db.prepare(
+            `INSERT OR IGNORE INTO memory_jobs
+               (id, type, scope_id, status, error, created_at, updated_at)
+             VALUES (?, 'reflector', ?, 'pending', NULL, ?, ?)`,
+          ).run(this.genId(), scopeId, input.now.getTime(), input.now.getTime());
+        }
       }
       return true;
     })();

@@ -742,7 +742,9 @@ describe("createMessagesPipeline — native passthrough collect()", () => {
     const route: RouteFn = async () => passthroughOkResult();
     const pipeline = createMessagesPipeline(route, "anthropic_messages", { observe });
     const run = await pipeline.run(
-      irOf({ metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" } }),
+      irOf({
+        metadata: { trace_id: "t", project_id: "p1", thread_id: "th-1", memory_mode: "observe" },
+      }),
       IDENTITY,
       new AbortController().signal,
     );
@@ -994,7 +996,7 @@ describe("createMessagesPipeline — native passthrough streamIR()", () => {
     const run = await pipeline.run(
       irOf({
         stream: true,
-        metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" },
+        metadata: { trace_id: "t", project_id: "p1", thread_id: "th-1", memory_mode: "observe" },
       }),
       IDENTITY,
       new AbortController().signal,
@@ -1269,7 +1271,7 @@ describe("createMessagesPipeline — openai_responses native passthrough streamI
     const run = await pipeline.run(
       irOf({
         stream: true,
-        metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" },
+        metadata: { trace_id: "t", project_id: "p1", thread_id: "th-1", memory_mode: "observe" },
       }),
       IDENTITY,
       new AbortController().signal,
@@ -1359,7 +1361,9 @@ describe("createMessagesPipeline — openai_responses native passthrough collect
       { observe },
     );
     const run = await pipeline.run(
-      irOf({ metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" } }),
+      irOf({
+        metadata: { trace_id: "t", project_id: "p1", thread_id: "th-1", memory_mode: "observe" },
+      }),
       IDENTITY,
       new AbortController().signal,
     );
@@ -1496,7 +1500,9 @@ describe("createMessagesPipeline — gemini native passthrough collect()", () =>
       { observe },
     );
     const run = await pipeline.run(
-      irOf({ metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" } }),
+      irOf({
+        metadata: { trace_id: "t", project_id: "p1", thread_id: "th-1", memory_mode: "observe" },
+      }),
       IDENTITY,
       new AbortController().signal,
     );
@@ -1565,7 +1571,7 @@ describe("createMessagesPipeline — gemini native passthrough streamIR()", () =
     const run = await pipeline.run(
       irOf({
         stream: true,
-        metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" },
+        metadata: { trace_id: "t", project_id: "p1", thread_id: "th-1", memory_mode: "observe" },
       }),
       IDENTITY,
       new AbortController().signal,
@@ -2267,7 +2273,9 @@ describe("createMessagesPipeline — writes queue (line 635-641)", () => {
       writes,
     );
     const run = await pipeline.run(
-      irOf({ metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" } }),
+      irOf({
+        metadata: { trace_id: "t", project_id: "p1", thread_id: "th-1", memory_mode: "observe" },
+      }),
       IDENTITY,
       new AbortController().signal,
     );
@@ -2286,7 +2294,7 @@ describe("createMessagesPipeline — accumulateAssistantText via streamIR (lines
     const run = await pipeline.run(
       irOf({
         stream: true,
-        metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" },
+        metadata: { trace_id: "t", project_id: "p1", thread_id: "th-1", memory_mode: "observe" },
       }),
       IDENTITY,
       new AbortController().signal,
@@ -2306,7 +2314,7 @@ describe("createMessagesPipeline — accumulateAssistantText via streamIR (lines
     const run = await pipeline.run(
       irOf({
         stream: true,
-        metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" },
+        metadata: { trace_id: "t", project_id: "p1", thread_id: "th-1", memory_mode: "observe" },
       }),
       IDENTITY,
       new AbortController().signal,
@@ -2341,7 +2349,7 @@ describe("createMessagesPipeline — accumulateAnthropicAssistantText edge cases
     const run = await pipeline.run(
       irOf({
         stream: true,
-        metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" },
+        metadata: { trace_id: "t", project_id: "p1", thread_id: "th-1", memory_mode: "observe" },
       }),
       IDENTITY,
       new AbortController().signal,
@@ -2372,7 +2380,7 @@ describe("createMessagesPipeline — accumulateAnthropicAssistantText edge cases
     const run = await pipeline.run(
       irOf({
         stream: true,
-        metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" },
+        metadata: { trace_id: "t", project_id: "p1", thread_id: "th-1", memory_mode: "observe" },
       }),
       IDENTITY,
       new AbortController().signal,

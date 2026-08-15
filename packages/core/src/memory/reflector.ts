@@ -108,8 +108,7 @@ export interface ReflectorResult {
 // docs/08 assembly order has only those two reflection slots). A job scope may
 // also carry a thread anchor: writing it verbatim would pin the reflection to
 // the thread and make it permanently invisible to the next inject. project >
-// resource; a scope with neither keeps the legacy thread-level target (direct
-// callers only — the worker no longer promotes thread-only scopes). EXPORTED so
+// resource; a scope with neither is rejected by runReflectorJob. EXPORTED so
 // the worker promotes reflector jobs ALREADY at the target level (cross-thread
 // promotions for the same project then dedupe to one queue row).
 export function reflectionTargetScope(scope: ReflectionScope): ReflectionScope {
@@ -134,6 +133,9 @@ export async function runReflectorJob(
   deps: ReflectorDeps,
 ): Promise<ReflectorResult> {
   try {
+    if (job.scope.projectId === undefined && job.scope.resourceId === undefined) {
+      throw new Error("reflector scope requires projectId or resourceId");
+    }
     // BOTH reads happen at the TARGET level: the reflection slot the next inject
     // hydrates from, and the observations AGGREGATED ACROSS every thread of that
     // project/resource (the store joins threads by owner + scope id). Merging
