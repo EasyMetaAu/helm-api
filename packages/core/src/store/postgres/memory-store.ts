@@ -1639,9 +1639,10 @@ export class PgMemoryStore implements MemoryStore {
       const rows = pgRows<{
         project_id: string | null;
         resource_id: string | null;
+        thread_id: string;
       }>(
         await tx.execute(sql`
-          SELECT DISTINCT t.project_id, t.resource_id
+          SELECT DISTINCT t.project_id, t.resource_id, t.id AS thread_id
             FROM memory_observations o
             JOIN memory_threads t ON t.id = o.thread_id
            WHERE o.id IN (${ids})
@@ -1656,6 +1657,9 @@ export class PgMemoryStore implements MemoryStore {
         }
         if (row.resource_id !== null) {
           targets.push({ accountId: input.accountId, resourceId: row.resource_id });
+        }
+        if (targets.length === 0) {
+          targets.push({ accountId: input.accountId, threadId: row.thread_id });
         }
         for (const target of targets) scopes.set(encodeScopeId(target), target);
       }
@@ -1696,11 +1700,13 @@ export class PgMemoryStore implements MemoryStore {
              AND thread_id IS NOT DISTINCT FROM ${target.threadId ?? null}
              AND status = 'active'
         `);
-        await tx.execute(sql`
-          INSERT INTO memory_jobs (id, type, scope_id, status, error, created_at, updated_at)
-          VALUES (${this.genId()}, 'reflector', ${scopeId}, 'pending', NULL, ${nowMs}, ${nowMs})
-          ON CONFLICT (type, scope_id) WHERE status IN ('pending', 'running') DO NOTHING
-        `);
+        if (target.projectId !== undefined || target.resourceId !== undefined) {
+          await tx.execute(sql`
+            INSERT INTO memory_jobs (id, type, scope_id, status, error, created_at, updated_at)
+            VALUES (${this.genId()}, 'reflector', ${scopeId}, 'pending', NULL, ${nowMs}, ${nowMs})
+            ON CONFLICT (type, scope_id) WHERE status IN ('pending', 'running') DO NOTHING
+          `);
+        }
       }
       return true;
     });

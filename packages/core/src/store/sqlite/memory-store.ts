@@ -1503,7 +1503,7 @@ export class SqliteMemoryStore implements MemoryStore {
       if (input.job !== undefined && !this.hasCurrentJobLease(input.job)) return false;
       const rows = db
         .prepare(
-          `SELECT DISTINCT t.project_id, t.resource_id
+          `SELECT DISTINCT t.project_id, t.resource_id, t.id AS thread_id
              FROM memory_observations o
              JOIN memory_threads t ON t.id = o.thread_id
             WHERE o.id IN (${placeholders})
@@ -1512,6 +1512,7 @@ export class SqliteMemoryStore implements MemoryStore {
         .all(...input.ids, input.accountId) as Array<{
         project_id: string | null;
         resource_id: string | null;
+        thread_id: string;
       }>;
       db.prepare(
         `UPDATE memory_observations
@@ -1531,6 +1532,9 @@ export class SqliteMemoryStore implements MemoryStore {
         }
         if (row.resource_id !== null) {
           targets.push({ accountId: input.accountId, resourceId: row.resource_id });
+        }
+        if (targets.length === 0) {
+          targets.push({ accountId: input.accountId, threadId: row.thread_id });
         }
         for (const target of targets) scopes.set(encodeScopeId(target), target);
       }
@@ -1552,11 +1556,13 @@ export class SqliteMemoryStore implements MemoryStore {
               SET status = 'failed', error = 'superseded by observation archive', updated_at = ?
             WHERE type = 'reflector' AND scope_id = ? AND status = 'running'`,
         ).run(input.now.getTime(), scopeId);
-        db.prepare(
-          `INSERT OR IGNORE INTO memory_jobs
-             (id, type, scope_id, status, error, created_at, updated_at)
-           VALUES (?, 'reflector', ?, 'pending', NULL, ?, ?)`,
-        ).run(this.genId(), scopeId, input.now.getTime(), input.now.getTime());
+        if (target.projectId !== undefined || target.resourceId !== undefined) {
+          db.prepare(
+            `INSERT OR IGNORE INTO memory_jobs
+               (id, type, scope_id, status, error, created_at, updated_at)
+             VALUES (?, 'reflector', ?, 'pending', NULL, ?, ?)`,
+          ).run(this.genId(), scopeId, input.now.getTime(), input.now.getTime());
+        }
       }
       return true;
     })();

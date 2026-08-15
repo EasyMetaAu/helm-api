@@ -88,6 +88,14 @@ describe("PgMemoryStore decay sweep", () => {
     const now = new Date("2026-06-05T00:00:00.000Z");
     const { store } = await newStore(now);
     await store.ensureThread({ id: "legacy-thread", ownerId: "acct-a" });
+    await store.upsertReflection({
+      accountId: "acct-a",
+      threadId: "legacy-thread",
+      reflectionText: "legacy reflection",
+      version: 1,
+      tokenEstimate: 4,
+      updatedAt: now,
+    });
     const observationId = await store.appendObservation({
       threadId: "legacy-thread",
       sourceMessageRange: ["m1", "m2"],
@@ -98,6 +106,9 @@ describe("PgMemoryStore decay sweep", () => {
     await store.archiveObservations({ accountId: "acct-a", ids: [observationId], now });
 
     expect(await store.listScorableObservations({ accountId: "acct-a" })).toEqual([]);
+    expect(
+      await store.getReflection({ accountId: "acct-a", threadId: "legacy-thread" }),
+    ).toBeNull();
     expect(await store.claimPendingJobs(10)).toEqual([]);
   });
 

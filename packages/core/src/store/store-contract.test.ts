@@ -2777,7 +2777,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(revived?.reflectionText).toBe("p-v3 (revived)");
     });
 
-    it("decay fences stale Reflector reflection/fact commits and queues every aggregate target", async () => {
+    it("decay archives every affected reflection and queues only parent aggregate targets", async () => {
       ctx = await make();
       const m = ctx.stores.memory;
       if (m.archiveObservations === undefined || m.commitReflectionJob === undefined) {
@@ -2868,13 +2868,17 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
       expect(await m.getReflection({ accountId: "acct-a", resourceId: "r-race" })).toBeNull();
       expect(await m.getReflection({ accountId: "acct-a", threadId: "t-thread-only" })).toBeNull();
       expect(await m.listActiveFacts?.({ accountId: "acct-a", projectId: "p-race" })).toEqual([]);
-      expect((await m.claimPendingJobs(10)).map((job) => job.scope)).toEqual(
+      const queuedScopes = (await m.claimPendingJobs(10)).map((job) => job.scope);
+      expect(queuedScopes).toEqual(
         expect.arrayContaining([
           { accountId: "acct-a", projectId: "p-race" },
           { accountId: "acct-a", resourceId: "r-race" },
-          { accountId: "acct-a", threadId: "t-thread-only" },
         ]),
       );
+      expect(queuedScopes).not.toContainEqual({
+        accountId: "acct-a",
+        threadId: "t-thread-only",
+      });
     });
 
     it("rolls back the job fence and every output when publication fails", async () => {
