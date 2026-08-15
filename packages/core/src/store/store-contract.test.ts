@@ -648,6 +648,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         sessionRef: "s_1",
         responseBodyStored: true,
         recoveryWireBytes: expectedR1RecoveryBytes,
+        maxRevisionWireBytes: expectedR1RecoveryBytes,
         fidelity: "verbatim",
         createdAt: new Date(1000),
       });
@@ -659,6 +660,7 @@ describe.each(drivers)("Store port contract — $name", ({ make }) => {
         64;
       expect(await t.getSessionRevisionMeta("r2")).toMatchObject({
         recoveryWireBytes: expectedR2RecoveryBytes,
+        maxRevisionWireBytes: expectedR2RecoveryBytes - expectedR1RecoveryBytes,
       });
       expect(await t.listSessionRevisions("s_1")).toEqual([
         expect.objectContaining({

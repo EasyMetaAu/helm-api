@@ -366,6 +366,7 @@ test.describe("admin request payload view", () => {
           captured: false,
           source: "unavailable",
           reason: "session_recovery_limited",
+          browser_recoverable: true,
         }),
       }),
     );

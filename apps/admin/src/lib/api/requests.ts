@@ -262,6 +262,7 @@ interface RawDecisionRecord {
   requested_reasoning_effort?: string | null;
   reasoning_effort?: string | null;
   request_body_bytes?: number | null;
+  request_content_mode?: 'none' | 'payload' | 'session';
   // Display prefix only (helm_live_ab12) — the record NEVER carries the plaintext
   // key (Principle 7). Null/absent on legacy (pre-enrichment) records.
   key_prefix?: string | null;
@@ -619,6 +620,7 @@ function buildRequestMeta(raw: RawDecisionRecord): Record<string, unknown> {
     requested_model: raw.requested_model ?? null,
     reasoning_effort: raw.reasoning_effort ?? null,
     policy_reason: raw.policy?.reason ?? null,
+    ...(raw.request_content_mode ? { request_content_mode: raw.request_content_mode } : {}),
   };
 }
 
@@ -855,11 +857,13 @@ export interface RequestPayloadView {
   source?: 'payload' | 'session' | 'unavailable';
   reason?:
     | 'no_session'
+    | 'metadata_only'
     | 'session_unavailable'
     | 'session_incomplete'
     | 'session_recovery_limited'
     | 'response_unavailable';
   exact?: boolean;
+  browser_recoverable?: boolean;
   fidelity?: 'exact' | 'semantic' | 'partial' | string;
   request?: unknown;
   response?: unknown;
@@ -882,6 +886,7 @@ export interface RequestPayloadPartView {
   source?: 'payload' | 'session' | 'unavailable';
   reason?:
     | 'no_session'
+    | 'metadata_only'
     | 'session_unavailable'
     | 'session_incomplete'
     | 'session_recovery_limited'
@@ -1024,7 +1029,7 @@ export interface SessionRevisionView extends SessionRevisionForRestore {
 
 export interface SessionRevisionsPageView {
   captured: boolean;
-  reason?: 'no_session' | 'session_unavailable';
+  reason?: 'no_session' | 'metadata_only' | 'session_unavailable' | 'session_recovery_limited';
   sessionRef?: string;
   targetRequestId?: string;
   nextSequence?: number | null;

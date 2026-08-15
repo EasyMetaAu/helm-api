@@ -709,7 +709,11 @@ describe('requests detail page', () => {
     render(DetailPage, {
       data: {
         detail: detail(),
-        payload: { captured: false, reason: 'session_recovery_limited' },
+        payload: {
+          captured: false,
+          reason: 'session_recovery_limited',
+          browser_recoverable: true,
+        },
         requestId: 'tr_big',
       },
     });
@@ -877,6 +881,7 @@ describe('requests detail page', () => {
           captured: false,
           source: 'unavailable',
           reason: 'session_recovery_limited',
+          browser_recoverable: true,
         },
         requestId: 'tr_session_limited',
       },
@@ -890,6 +895,26 @@ describe('requests detail page', () => {
     expect(screen.queryByTestId('load-conversation')).not.toBeInTheDocument();
     expect(screen.queryByTestId('load-request-body')).not.toBeInTheDocument();
     expect(screen.getByTestId('load-transcript')).toBeInTheDocument();
+  });
+
+  it('hides transcript loading when the browser cannot safely page the recorded Session', () => {
+    render(DetailPage, {
+      data: {
+        detail: detail(),
+        payload: {
+          captured: false,
+          source: 'unavailable',
+          reason: 'session_recovery_limited',
+          browser_recoverable: false,
+        },
+        requestId: 'tr_session_browser_limited',
+      },
+    });
+
+    expect(screen.getByTestId('payload-summary')).toHaveTextContent(
+      'The session transcript is too large to rebuild on the server.',
+    );
+    expect(screen.queryByTestId('load-transcript')).not.toBeInTheDocument();
   });
 
   it('hides transcript loading when the recorded Session is unavailable', () => {

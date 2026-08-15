@@ -150,12 +150,16 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
     const traceId = c.req.param("traceId");
     const part = parsePayloadPart(c.req.query("part"));
     if (part === "invalid") return c.json({ error: "invalid payload part" }, 400);
+    const recordedDecision = await deps.telemetry.getByRequestId(traceId);
+    if (recordedDecision?.request_content_mode === "none") {
+      return c.json({ captured: false, source: "unavailable", reason: "metadata_only" });
+    }
     if (part === "meta") {
       const meta = await getPayloadMeta(deps, traceId);
       if (!meta) {
         const sessionMeta = await deps.telemetry.getSessionRevisionMeta?.(traceId);
         if (sessionMeta) {
-          const decision = await deps.telemetry.getByRequestId(traceId);
+          const decision = recordedDecision;
           if (decision?.session?.ref !== sessionMeta.sessionRef) {
             return c.json({
               captured: false,
@@ -172,6 +176,11 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
               captured: false,
               source: "unavailable",
               reason: "session_recovery_limited",
+              browser_recoverable:
+                sessionMeta.maxRevisionWireBytes !== null &&
+                sessionMeta.maxRevisionWireBytes !== undefined &&
+                sessionMeta.maxRevisionWireBytes * runtimeMemoryBudget().jsonAmplification <=
+                  SESSION_REVISION_PAGE_MAX_BYTES,
             });
           }
           return c.json({
@@ -370,6 +379,9 @@ export function registerRequestsRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): v
     // no_session (not a session request at all) is more fundamental than the store's
     // paging capability, so resolve the session ref FIRST.
     const decision = await deps.telemetry.getByRequestId(traceId);
+    if (decision?.request_content_mode === "none") {
+      return c.json({ captured: false, reason: "metadata_only" });
+    }
     const sessionRef = decision?.session?.ref;
     if (!sessionRef) return c.json({ captured: false, reason: "no_session" });
     // Streaming variant (NOT the all-or-nothing listSessionRevisionsPage the server-side

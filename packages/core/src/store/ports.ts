@@ -441,6 +441,9 @@ export interface SessionRevisionMetaRecord extends SessionContinuationRecord {
   // UTF-8 bytes the current recovery path must materialize through this revision.
   // null means legacy storage cannot be measured safely, so callers fail closed.
   recoveryWireBytes: number | null;
+  // Largest decoded revision through the target. Admin uses the same JSON
+  // amplification bound as its paging endpoint before offering browser recovery.
+  maxRevisionWireBytes: number | null;
   fidelity: string;
   createdAt: Date;
 }

@@ -1590,6 +1590,27 @@ describe("recordServed — deferred write queue (the three pipeline faces)", () 
     expect(s.payloads).toHaveLength(1);
   });
 
+  it.each([
+    { mode: "none", capturePayloads: false, captureSessions: false },
+    { mode: "payload", capturePayloads: true, captureSessions: false },
+    { mode: "session", capturePayloads: false, captureSessions: true },
+  ] as const)("records the effective $mode content mode in body-free telemetry", async (row) => {
+    const s = sink();
+    await recordServed(
+      {
+        telemetry: s.telemetry,
+        redact: (x) => x,
+        now: () => 5000,
+        capturePayloads: () => row.capturePayloads,
+        captureSessions: () => row.captureSessions,
+      },
+      { ...args, requestId: `req_${row.mode}` },
+      () => {},
+    );
+
+    expect(s.inserted[0]?.request_content_mode).toBe(row.mode);
+  });
+
   it("records a timed-out request as an error even if the provider later completed", async () => {
     const s = sink();
     const d: RecordServedDeps = {

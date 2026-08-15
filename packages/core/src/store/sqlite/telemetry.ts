@@ -715,6 +715,14 @@ export class SqliteTelemetryStore implements TelemetryStore {
           ) THEN 1 ELSE 0 END) > 0 THEN NULL
           ELSE sum(${sessionRevisionWireBytes})
         END`,
+        maxBytes: sql<number | null>`CASE
+          WHEN sum(CASE WHEN ${sessionRevisions.bodyBytes} IS NULL AND (
+            typeof(${sessionRevisions.requestDeltaJson}) = 'blob' OR
+            typeof(${sessionRevisions.requestEnvelopeJson}) = 'blob' OR
+            typeof(${sessionRevisions.responseJson}) = 'blob'
+          ) THEN 1 ELSE 0 END) > 0 THEN NULL
+          ELSE max(${sessionRevisionWireBytes})
+        END`,
       })
       .from(sessionRevisions)
       .where(
@@ -725,6 +733,7 @@ export class SqliteTelemetryStore implements TelemetryStore {
       )
       .get();
     const recoveryWireBytes = Number(recovery?.bytes);
+    const maxRevisionWireBytes = Number(recovery?.maxBytes);
     return {
       requestId: row.requestId,
       sessionRef: row.sessionRef,
@@ -734,6 +743,12 @@ export class SqliteTelemetryStore implements TelemetryStore {
         Number.isSafeInteger(recoveryWireBytes) &&
         recoveryWireBytes >= 0
           ? recoveryWireBytes
+          : null,
+      maxRevisionWireBytes:
+        recovery?.maxBytes !== null &&
+        Number.isSafeInteger(maxRevisionWireBytes) &&
+        maxRevisionWireBytes >= 0
+          ? maxRevisionWireBytes
           : null,
       fidelity: row.fidelity,
       createdAt: row.createdAt,

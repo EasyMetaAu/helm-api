@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-08-15 · 请求级正文模式成为历史读取权威（Telemetry / Admin requests，docs/07/11，原则 3/7）
+
+- **根因与修复**：Admin 只按 `request_payloads` / `session_revisions` 是否存在推断历史请求的正文模式，无法证明请求发生时 Key 与系统设置的实际合并结果；大型 Session 的元数据也只证明服务端整体恢复超限，却仍无条件展示浏览器加载按钮，即使某条 revision 会被同一分页接口的 JSON 内存上限拒绝。每条新 telemetry 现在保存 body-free 的有效 `request_content_mode`；明确 `none` 时任何孤立正文行都不可读取、也不显示加载入口，旧记录继续按存储事实兼容推断。
+- **加载边界**：SQLite/Postgres 在既有 Session 元数据聚合中同时返回目标链最大单 revision 字节数；Admin 用分页端点相同的 JSON amplification 与 8 MiB 上限决定 `browser_recoverable`，不可安全分页时不再提供必然失败的按钮。该元数据不读取正文、不改变正文格式、无需 migration；当前设置仍不追溯删除历史内容。
+
 ## 2026-08-15 · 大型完整载荷改由浏览器解压与恢复图片（Store / Admin requests，docs/07/11，原则 1/3/7）
 
 - **根因与修复**：SQLite `request_payloads` 的单列 gzip 读取沿用了 Session 单块 256 KiB 解压上限，超过该值的真实正文被映射为 `null`，Admin 随后错误回退到 Session 恢复。Admin 现在优先请求存储态正文；SQLite 原样返回 gzip BLOB，Postgres 返回 raw TEXT，由浏览器通过 HTTP `Content-Encoding` 流式解压并拼装，不再在网关内物化放大的正文。
@@ -59,15 +64,9 @@
 - **实现**：复用既有 `oauth_reset_period`，统一记录刚结束的 `[previousStart,actualResetAt)`；PULL、Codex header PUSH、手动/自动 reset-credit 共用记录入口。quota snapshot 按 `capturedAt` 单调更新，晚到的旧采样既不覆盖新状态，也不写伪 reset。旧版 `detectedAtMs < periodEndMs` 行只在读取时忽略，不改写历史库；本地“Reset usage”仍只清 Helm cooldown，不冒充上游重置。
 - **精度边界**：usage 继续按小时聚合，但真实重置发生在小时中间时，新请求的 bucket 起点提升到最近 reset point，因此不会再跨边界混入上一周期。部署前已经落入旧整点 bucket 的历史数据不可逆，继续标 `≈`/`partial`；新记录到的真实边界作为精确周期返回。Admin 默认显示 Period，并保留 Daily / Weekly 兼容视图。
 
-## 2026-08-10 · 大 Session 客户端重建按记录时间展示并提前停止分页（Admin / requests debug，docs/07/11，原则 1/3/7）
-
-- **现场与根因**：生产 v0.28.56 的目标详情点击后约 46 秒才完成，普通 Conversation 把重建后的请求 `input` 与最终响应折成一条聊天；现场原始 `input` 自身就是角色分段排列，因此 UI 没有再次排序，但这种折叠不能代表 Session 的真实请求/响应发生顺序。大 Session 客户端路径还丢弃了目标 revision 已保存的 `responseJson`，所以最终响应只能退化成脱敏 metadata。
-- **展示修复**：raw revision API 增加已有的 `sequence` 与 `createdAt`；浏览器把每个 revision 的 request delta / response snapshot 组成记录，按 `createdAt` 升序、`sequence` 稳定打破同毫秒并列。目标请求和目标响应继续进入原有 Conversation/Response viewer；额外时间线使用 `JsonViewer` 展示持久化 revision 记录，避免把“请求文档顺序”误称为“会话时间线”。
-- **加载加速**：浏览器一旦收到目标 revision 就停止游标分页，不再下载该目标之后的同 Session revision；行上限从 50 恢复到 100，单页 `maxBytes=8 MiB` 不变，所以服务端单请求正文物化上限不扩大。没有改成多进程/并发请求，因为下一页游标依赖上一页的 soft-byte 结果，并发会产生跳页或重复读取风险。
-- **边界**：时间线展示的是持久化的增量 request delta 与可用 response snapshot，不伪装成原始 HTTP body；Session 恢复仍是 `exact=false`、不可精确 Retry。响应为空表示当时没有可用快照，不补造内容。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-10 · 大 Session 客户端重建按记录时间展示并提前停止分页**：目标 revision 到达即停，按 `createdAt`/`sequence` 展示持久化增量请求与响应快照；Session 仍为 `exact=false` 且不可精确 Retry，完整原文经 git history 回溯。
 - **2026-08-08 · Grok Imagine 仅复用 SuperGrok OAuth 媒体链路**：媒体执行复用 xAI 订阅 OAuth，付费 POST 单写且不跨账号重试，未知价格对美元预算 fail-closed；完整原文经 git history 回溯。
 - **2026-08-08 · 会话转录客户端重建，绕开服务端内存阀**：长 Session 以 4 MiB/100 行游标分页传给浏览器本地重建，小 Session 保留服务端快路径；共享纯重建函数留在浏览器安全的 `@helm/shared`，完整原文经 git history 回溯。
 - **2026-08-07 · 真上游上下文溢出短路直返 400**：确定性上游 400/413/422 上下文溢出立即返回客户端并保留原始错误；预检估算仍允许 fallback，可重试状态不误判为客户端错误，完整原文经 git history 回溯。
