@@ -287,3 +287,8 @@ grok-imagine-video:
   purpose: Grok Imagine multi-reference video generation via SuperGrok OAuth
   primary: xai/grok-imagine-video
   fallback: []
+
+grok-imagine-video-1.5:
+  purpose: Current Grok Imagine image/reference video generation via SuperGrok OAuth
+  primary: xai/grok-imagine-video-1.5
+  fallback: []

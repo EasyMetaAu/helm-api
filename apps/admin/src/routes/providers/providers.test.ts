@@ -219,12 +219,9 @@ describe('providers page', () => {
               schedulable: true,
               proxy: null,
               models: [
-                'grok-composer-2.5-fast',
-                'grok-4.5',
-                'grok-4.5-fast',
                 'grok-imagine-image-quality',
-                'grok-imagine-video-1.5-preview',
                 'grok-imagine-video',
+                'grok-imagine-video-1.5',
               ],
             },
           ],
@@ -920,6 +917,7 @@ describe('providers page', () => {
                 'grok-imagine-image-quality',
                 'grok-imagine-video-1.5-preview',
                 'grok-imagine-video',
+                'grok-imagine-video-1.5',
               ],
             },
           ],
@@ -942,6 +940,9 @@ describe('providers page', () => {
     ).not.toBeInTheDocument();
     expect(
       within(dialog).queryByRole('option', { name: 'grok-imagine-video' }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole('option', { name: 'grok-imagine-video-1.5' }),
     ).not.toBeInTheDocument();
   });
 

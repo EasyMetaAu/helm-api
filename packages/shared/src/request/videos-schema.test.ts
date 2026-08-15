@@ -35,6 +35,29 @@ describe("VideoGenerationRequestSchema", () => {
     ).toBe(true);
   });
 
+  it("accepts current Grok Build 1.5 single-image and reference contracts", () => {
+    expect(
+      VideoGenerationRequestSchema.safeParse({
+        model: "grok-imagine-video-1.5",
+        prompt: "",
+        image: { url: "https://example.test/first-frame.png" },
+        duration: 10,
+        resolution: "720p",
+      }).success,
+    ).toBe(true);
+    expect(
+      VideoGenerationRequestSchema.safeParse({
+        model: "grok-imagine-video-1.5",
+        prompt: "the subject from <IMAGE_0> speaks with <AUDIO_0>",
+        reference_images: [{ url: "https://example.test/subject.png" }],
+        reference_audios: [{ voice_id: "eve" }],
+        aspect_ratio: "4:3",
+        duration: 15,
+        resolution: "480p",
+      }).success,
+    ).toBe(true);
+  });
+
   it("rejects unsupported shapes and ZDR output instead of silently forwarding them", () => {
     expect(
       VideoGenerationRequestSchema.safeParse({
@@ -85,6 +108,25 @@ describe("VideoGenerationRequestSchema", () => {
         duration: 6,
         resolution: "480p",
         output: { upload_url: "https://example.test/upload" },
+      }).success,
+    ).toBe(false);
+    expect(
+      VideoGenerationRequestSchema.safeParse({
+        model: "grok-imagine-video-1.5",
+        prompt: "missing every reference",
+        aspect_ratio: "16:9",
+        duration: 15,
+        resolution: "480p",
+      }).success,
+    ).toBe(false);
+    expect(
+      VideoGenerationRequestSchema.safeParse({
+        model: "grok-imagine-video-1.5",
+        prompt: "too long",
+        reference_audios: [{ voice_id: "eve" }],
+        aspect_ratio: "16:9",
+        duration: 16,
+        resolution: "480p",
       }).success,
     ).toBe(false);
   });

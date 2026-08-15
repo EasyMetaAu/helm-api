@@ -222,11 +222,13 @@ describe("effectiveOAuthModelOptions", () => {
           { alias: "xai/grok-imagine-image-quality", accounts: ["supergrok-a"] },
           { alias: "xai/grok-imagine-video-1.5-preview", accounts: ["supergrok-a"] },
           { alias: "xai/grok-imagine-video", accounts: ["supergrok-a"] },
+          { alias: "xai/grok-imagine-video-1.5", accounts: ["supergrok-a"] },
         ],
       }),
     ).resolves.toEqual([
       { alias: "xai/grok-imagine-image-quality", accounts: ["supergrok-a"] },
       { alias: "xai/grok-imagine-video", accounts: ["supergrok-a"] },
+      { alias: "xai/grok-imagine-video-1.5", accounts: ["supergrok-a"] },
       { alias: "xai/grok-imagine-video-1.5-preview", accounts: ["supergrok-a"] },
     ]);
   });

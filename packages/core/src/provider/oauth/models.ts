@@ -44,6 +44,7 @@ export const GROK_OAUTH_MEDIA_MODELS = [
   "grok-imagine-image-quality",
   "grok-imagine-video-1.5-preview",
   "grok-imagine-video",
+  "grok-imagine-video-1.5",
 ] as const;
 
 const OPENAI_CODEX_MODEL_ALIASES: Readonly<Record<string, string>> = {

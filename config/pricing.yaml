@@ -73,6 +73,11 @@ xai/grok-imagine-video:
   outputPerMTokUsd: null
   cacheReadPerMTokUsd: null
   cacheWritePerMTokUsd: null
+xai/grok-imagine-video-1.5:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+  cacheReadPerMTokUsd: null
+  cacheWritePerMTokUsd: null
 # Codex auto-review is a dynamic internal route with no published fixed API rate.
 openai-codex/codex-auto-review:
   inputPerMTokUsd: null

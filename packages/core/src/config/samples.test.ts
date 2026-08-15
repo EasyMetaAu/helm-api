@@ -207,7 +207,11 @@ describe("checked-in config samples", () => {
 
     expect(capabilities["xai/grok-imagine-image-quality"]?.outputImage).toBe(true);
     expect(capabilities["xai/grok-imagine-image-quality"]?.outputVideo).toBeUndefined();
-    for (const model of ["grok-imagine-video-1.5-preview", "grok-imagine-video"]) {
+    for (const model of [
+      "grok-imagine-video-1.5-preview",
+      "grok-imagine-video",
+      "grok-imagine-video-1.5",
+    ]) {
       expect(capabilities[`xai/${model}`]?.outputVideo).toBe(true);
       expect(capabilities[`xai/${model}`]?.outputImage).toBeUndefined();
       expect(lanes[model]?.primary).toBe(`xai/${model}`);

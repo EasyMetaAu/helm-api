@@ -134,6 +134,15 @@ xai/grok-imagine-video:
   outputVideo: true
   maxContextTokens: 32768
   maxOutputTokens: null
+xai/grok-imagine-video-1.5:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: true
+  supportsStreaming: false
+  supportsCachedContent: false
+  outputVideo: true
+  maxContextTokens: 32768
+  maxOutputTokens: null
 #
 # GPT-5.6 fallback metadata mirrors the bundled Codex model catalog. At runtime the
 # authenticated `/models` response is authoritative per account; these entries are

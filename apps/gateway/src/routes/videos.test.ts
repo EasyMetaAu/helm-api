@@ -198,6 +198,34 @@ describe("registerVideosRoute", () => {
     );
   });
 
+  it("forwards the current Grok Build 1.5 reference contract unchanged", async () => {
+    const create = vi.fn().mockResolvedValue({ request_id: "vid_1", status: "queued" });
+    const { app } = setup({
+      resolver: {
+        create: async () => ({
+          providerAlias: "xai/grok-imagine-video-1.5",
+          providerName: "xai",
+          providerModel: "grok-imagine-video-1.5",
+          providerAccount: "oauth-a",
+          client: { create },
+        }),
+        poll: async () => null,
+      },
+    });
+    const body = {
+      model: "grok-imagine-video-1.5",
+      prompt: "the subject from <IMAGE_0> speaks with <AUDIO_0>",
+      reference_images: [{ url: "https://example.test/subject.png" }],
+      reference_audios: [{ voice_id: "eve" }],
+      aspect_ratio: "3:4",
+      duration: 15,
+      resolution: "480p",
+    };
+
+    expect((await post(app, body)).status).toBe(200);
+    expect(create).toHaveBeenCalledWith(body, expect.any(AbortSignal), expect.any(Function));
+  });
+
   it("records an outcome_unknown video create under the Helm request id without a retry", async () => {
     const { app, create, enqueueTelemetry, enqueuePayload } = setup();
     create.mockRejectedValueOnce(new Error("socket closed after POST"));

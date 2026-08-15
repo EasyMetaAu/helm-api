@@ -68,6 +68,7 @@ describe("discoverOAuthModels", () => {
       "grok-imagine-image-quality",
       "grok-imagine-video-1.5-preview",
       "grok-imagine-video",
+      "grok-imagine-video-1.5",
     ]);
     expect(CURATED_OAUTH_MODELS.xai).toBeUndefined();
   });

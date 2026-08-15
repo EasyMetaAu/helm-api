@@ -2,7 +2,7 @@
 
 > 状态：**MVP 已实现；发布仍为 No-Go**
 >
-> 证据基线：2026-08-08 的 `helm-api` 与本机 `grok-build` 源码
+> 证据基线：2026-08-15 的 `helm-api` 与本机最新 `grok-build` 源码
 >
 > 目标：让 Grok CLI 使用 Helm API key，通过 Helm 后台已经连接的 SuperGrok OAuth 订阅池完成图片生成、单图生视频和多参考图生视频。
 
@@ -20,8 +20,8 @@
 - [x] `grok-imagine-image-quality` 可通过 Helm 已连接的 SuperGrok OAuth 账号生成图片。
 - [x] 新增 `POST /v1/videos/generations`，兼容 Grok 的异步视频 start 协议。
 - [x] 新增 `GET /v1/videos/{request_id}`，兼容 Grok 的异步视频 poll 协议。
-- [x] `grok-imagine-video-1.5-preview` 支持单图生视频。
-- [x] `grok-imagine-video` 支持 2–7 张参考图生视频。
+- [x] `grok-imagine-video-1.5` 支持单图生视频，以及参考图片/预设声音驱动的视频生成。
+- [x] 旧的 `grok-imagine-video-1.5-preview` 与 `grok-imagine-video` 请求形状继续兼容。
 - [ ] 使用真实 Grok CLI 验证 `/imagine-video` 默认流程：先生成首帧，再生成视频。
 - [x] 图片和视频创建遵守“单写”规则：结果不明时不自动重试、不切 provider、不切 OAuth 账号。
 - [x] 视频 poll 始终绑定创建任务时的 Helm owner、provider 和 OAuth account。
@@ -39,7 +39,7 @@
 - [ ] 支持视频 ZDR 的 `output.upload_url` 原样透传。
 - [ ] ZDR 模式的完成响应允许没有 `video.url`。
 - [x] 后台用 Image / Video badge 区分媒体模型与文本模型。
-- [x] 后台提供商账号卡片和“管理模型”列表显示三个 Grok Imagine 媒体 alias。
+- [x] 后台提供商账号卡片和“管理模型”列表显示四个 Grok Imagine 媒体 alias。
 - [x] “发送短消息”的聊天连通性测试排除媒体 alias，服务端也在上游调用前拒绝伪造请求，避免误触发付费媒体生成。
 
 ### 2.3 明确不做
@@ -59,7 +59,7 @@
 - 媒体基址默认是 `https://api.x.ai/v1`，不是 `cli-chat-proxy.grok.com/v1`。
 - `GROK_XAI_API_BASE_URL` 决定 Imagine 请求地址；`GROK_MODELS_BASE_URL` 不参与媒体 URL 选择。
 - 图片默认模型完整 ID 是 `grok-imagine-image-quality`；`quality` 是模型名后缀，实际清晰度字段是 `resolution: "1k"`。
-- 视频模型不能混用：单图使用 `grok-imagine-video-1.5-preview`，多参考图使用 `grok-imagine-video`。
+- 最新 Grok Build 的单图与参考输入统一使用 `grok-imagine-video-1.5`；两个旧模型名仅作为兼容入口保留。
 - video start 返回字段是 `request_id`；poll 只有 `done`、`failed`、`expired` 是已知终态，其他状态继续等待。
 - `/imagine-video` 是 `image_gen → image_to_video` 的客户端编排，不是新的 HTTP endpoint。
 
@@ -179,7 +179,7 @@ POST {xai_api_base_url}/videos/generations
 
 ```json
 {
-  "model": "grok-imagine-video-1.5-preview",
+  "model": "grok-imagine-video-1.5",
   "prompt": "short motion description",
   "image": { "url": "https://... 或 data:image/..." },
   "duration": 6,
@@ -194,18 +194,18 @@ POST {xai_api_base_url}/videos/generations
 - `resolution` 只能是 `480p` 或 `720p`。
 - 该形状不发送 `reference_images`。
 
-### 4.4 多参考图生视频
+### 4.4 参考图片或预设声音生视频
 
 ```json
 {
-  "model": "grok-imagine-video",
-  "prompt": "...",
+  "model": "grok-imagine-video-1.5",
+  "prompt": "The subject from <IMAGE_0> speaks with <AUDIO_0>",
   "reference_images": [
-    { "url": "https://... 或 data:image/..." },
     { "url": "https://... 或 data:image/..." }
   ],
+  "reference_audios": [{ "voice_id": "eve" }],
   "aspect_ratio": "16:9",
-  "duration": 6,
+  "duration": 15,
   "resolution": "480p"
 }
 ```
@@ -213,9 +213,9 @@ POST {xai_api_base_url}/videos/generations
 约束：
 
 - `prompt` 不能为空。
-- `reference_images` 数量为 2–7。
-- `aspect_ratio` 只能是 `1:1`、`16:9`、`9:16`、`3:2`、`2:3`。
-- `duration` 和 `resolution` 与单图模式相同。
+- `reference_images` 最多 7 张，`reference_audios` 最多 3 个；两者至少提供一项。
+- `aspect_ratio` 只能是 `1:1`、`16:9`、`9:16`、`4:3`、`3:4`、`3:2`、`2:3`。
+- `duration` 是 1–15 秒整数；`resolution` 仍只能是 `480p` 或 `720p`。
 
 ### 4.5 视频 start / poll
 
@@ -357,7 +357,7 @@ flowchart LR
 
 - [x] 注册 `POST /v1/videos/generations`。
 - [x] 复用图片入口的 auth、rate、concurrency、blocked model、memory admission 和 budget gate。
-- [x] 用严格 Zod schema 校验 image/reference_images、duration、resolution、aspect ratio；当前阶段明确拒绝 ZDR `output`。
+- [x] 用严格 Zod schema 校验 image/reference_images/reference_audios、duration、resolution、aspect ratio；当前阶段明确拒绝 ZDR `output`。
 - [x] resolver 只接受 `outputVideo: true` 的 target。
 - [x] upstream 成功后校验非空 `request_id`。
 - [x] 用 insert-if-absent 写入内部 `video:${request_id}` registry 记录，禁止覆盖不同 owner/provider/account 的已有行。
@@ -489,7 +489,7 @@ Helm 不会把任意 xAI bearer 当成自己的 API key。
 ### 12.3 Gateway 单测
 
 - [x] 扩展 `images.test.ts`：Grok OAuth generation、serving account、single write。
-- [x] 新增 `videos-schema.test.ts`：单图、多图、边界和拒绝路径。
+- [x] 新增 `videos-schema.test.ts`：单图、参考图/声音、时长边界和拒绝路径。
 - [x] 新增 `videos.test.ts`：auth、blocked model、budget、concurrency、start/poll。
 - [x] 同 key 可 poll；不同 key、不同 Helm account 均不能 poll。
 - [x] 过期记录由复用的 registry owner/TTL 合同拒绝。
@@ -565,6 +565,7 @@ CI=true pnpm test:e2e
 - [x] video data URL 外置与 capture/error 脱敏。
 - [x] OAuth video unit/e2e 通过。
 - [x] 使用本机测试 SuperGrok 账号完成受控视频 canary（start HTTP 200，poll 到 `done`，未重试媒体 POST）。
+- [ ] 使用真实 SuperGrok OAuth 对 `grok-imagine-video-1.5` 完成一次受控 canary；旧模型 canary 不能代替新 wire model 的生产证据。
 
 ### P3：完整对等与发布
 

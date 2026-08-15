@@ -538,6 +538,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       provider_model: "grok-imagine-video-1.5-preview",
     },
     { alias: "xai/grok-imagine-video", provider_model: "grok-imagine-video" },
+    { alias: "xai/grok-imagine-video-1.5", provider_model: "grok-imagine-video-1.5" },
   ];
   const runInBackground = (task: () => Promise<unknown>) => {
     void task();
@@ -698,6 +699,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
           provider_model: "grok-imagine-video-1.5-preview",
         },
         { alias: "xai/grok-imagine-video", provider_model: "grok-imagine-video" },
+        { alias: "xai/grok-imagine-video-1.5", provider_model: "grok-imagine-video-1.5" },
       ]),
     );
     const pool = enabled.poolClients.get("xai");
@@ -705,7 +707,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       pool?.imageGeneration?.({ model: "grok-imagine-image-quality", prompt: "draw" }),
     ).resolves.toEqual({ data: [{ b64_json: "image" }] });
     await expect(
-      pool?.videoGeneration?.({ model: "grok-imagine-video", prompt: "move" }),
+      pool?.videoGeneration?.({ model: "grok-imagine-video-1.5", prompt: "move" }),
     ).resolves.toEqual({ request_id: "video_1" });
     await expect(
       pool?.videoRetrieve?.("video_1", { providerAccount: "media" }),
@@ -713,6 +715,26 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     expect(calls).toContain("POST https://api.x.ai/v1/images/generations");
     expect(calls).toContain("POST https://api.x.ai/v1/videos/generations");
     expect(calls).toContain("GET https://api.x.ai/v1/videos/video_1");
+  });
+
+  it("exposes the current Grok Build 1.5 video alias from the synthesized OAuth pool", async () => {
+    const { ctx, config } = oauthStores();
+    await seedXai(ctx, "media-current");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ data: [] }));
+
+    const enabled = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+    );
+
+    expect(enabled.providers[0]?.models).toContainEqual({
+      alias: "xai/grok-imagine-video-1.5",
+      provider_model: "grok-imagine-video-1.5",
+    });
   });
 
   it("honors each xAI account's manual media allowlist", async () => {

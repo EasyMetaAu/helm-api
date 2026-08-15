@@ -59,7 +59,7 @@ async function createVideo(key: string, prompt: string): Promise<Response> {
       method: "POST",
       headers: AUTH(key),
       body: JSON.stringify({
-        model: "grok-imagine-video-1.5-preview",
+        model: "grok-imagine-video-1.5",
         prompt,
         image: { url: "data:image/png;base64,aGVsbQ==" },
         duration: 6,
@@ -193,6 +193,26 @@ test("rejects a configured static outputVideo alias at the closed Imagine reques
   expect(response.status).toBe(400);
   expect(await response.json()).toMatchObject({ error: { code: "invalid_request" } });
   expect((await videoCapture()).starts).toHaveLength(0);
+});
+
+test("routes the current Grok Build 1.5 model through the SuperGrok OAuth video client", async () => {
+  await nativeFetch(`${MOCK}${VIDEO_RESET_PATH}`, { method: "POST" });
+
+  const response = await createVideo(KEY_A, "camera slowly pushes toward the subject");
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ request_id: expect.any(String) });
+  expect((await videoCapture()).starts).toEqual([
+    {
+      account: expect.any(String),
+      body: expect.objectContaining({
+        model: "grok-imagine-video-1.5",
+        duration: 6,
+        resolution: "480p",
+      }),
+    },
+  ]);
+
+  await nativeFetch(`${MOCK}${VIDEO_RESET_PATH}`, { method: "POST" });
 });
 
 test("start, owner isolation, OAuth pinning, and restart recovery stay on one durable journey", async () => {

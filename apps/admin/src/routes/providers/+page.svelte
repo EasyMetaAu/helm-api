@@ -153,7 +153,11 @@
 
   function mediaBadge(model: string): 'Image' | 'Video' | null {
     if (model === 'grok-imagine-image-quality') return 'Image';
-    if (model === 'grok-imagine-video-1.5-preview' || model === 'grok-imagine-video') {
+    if (
+      model === 'grok-imagine-video-1.5-preview' ||
+      model === 'grok-imagine-video' ||
+      model === 'grok-imagine-video-1.5'
+    ) {
       return 'Video';
     }
     return null;

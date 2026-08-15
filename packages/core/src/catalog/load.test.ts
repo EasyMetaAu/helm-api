@@ -454,6 +454,7 @@ describe("loadRuntimeCatalog", () => {
       "xai/grok-imagine-image-quality",
       "xai/grok-imagine-video-1.5-preview",
       "xai/grok-imagine-video",
+      "xai/grok-imagine-video-1.5",
       "xai/grok-composer-2.5-fast",
       "zenmux/auto",
       "openrouter/auto",
