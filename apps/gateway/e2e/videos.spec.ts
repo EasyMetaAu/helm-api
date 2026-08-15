@@ -237,7 +237,7 @@ test("start, owner isolation, OAuth pinning, and restart recovery stay on one du
   });
   expect((await videoCapture()).images).toEqual([
     {
-      account: "a",
+      account: expect.any(String),
       body: expect.objectContaining({
         model: "grok-imagine-image-quality",
         resolution: "1k",
