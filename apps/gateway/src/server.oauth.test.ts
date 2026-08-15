@@ -1049,7 +1049,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     );
     expect(logs).toContainEqual({
       msg: "oauth.autoroute",
-      fields: expect.objectContaining({ providerId: "xai", accounts: 2, models: 4 }),
+      fields: expect.objectContaining({ providerId: "xai", accounts: 2, models: 5 }),
     });
   });
 
