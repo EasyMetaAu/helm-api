@@ -142,7 +142,9 @@ describe("createMessagesPipeline — translate collect() governance", () => {
     );
 
     const run = await pipeline.run(
-      irOf({ metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" } }),
+      irOf({
+        metadata: { trace_id: "t", project_id: "p1", thread_id: "th-1", memory_mode: "observe" },
+      }),
       BUDGET_IDENTITY,
       new AbortController().signal,
     );
@@ -182,7 +184,7 @@ describe("createMessagesPipeline — translate streamIR() governance finally", (
     const run = await pipeline.run(
       irOf({
         stream: true,
-        metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" },
+        metadata: { trace_id: "t", project_id: "p1", thread_id: "th-1", memory_mode: "observe" },
       }),
       BUDGET_IDENTITY,
       new AbortController().signal,
@@ -314,7 +316,9 @@ describe("createMessagesPipeline — deferred observe via write queue", () => {
     );
 
     const run = await pipeline.run(
-      irOf({ metadata: { trace_id: "t", thread_id: "th-q", memory_mode: "observe" } }),
+      irOf({
+        metadata: { trace_id: "t", project_id: "p1", thread_id: "th-q", memory_mode: "observe" },
+      }),
       IDENTITY,
       new AbortController().signal,
     );
@@ -343,7 +347,9 @@ describe("createMessagesPipeline — passthrough collect() OAuth + observe", () 
     );
 
     const run = await pipeline.run(
-      irOf({ metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" } }),
+      irOf({
+        metadata: { trace_id: "t", project_id: "p1", thread_id: "th-1", memory_mode: "observe" },
+      }),
       IDENTITY,
       new AbortController().signal,
     );
@@ -414,7 +420,7 @@ describe("createMessagesPipeline — passthrough streamIR() OAuth + observe fina
     const run = await pipeline.run(
       irOf({
         stream: true,
-        metadata: { trace_id: "t", thread_id: "th-1", memory_mode: "observe" },
+        metadata: { trace_id: "t", project_id: "p1", thread_id: "th-1", memory_mode: "observe" },
       }),
       BUDGET_IDENTITY,
       new AbortController().signal,

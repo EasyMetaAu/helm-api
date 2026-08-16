@@ -320,6 +320,12 @@ export function sessionCaptureEnabled(deps: PayloadCaptureDeps): boolean {
   return deps.captureSessions?.() === true;
 }
 
+function effectiveRequestContentMode(deps: PayloadCaptureDeps): RequestContentMode {
+  if (captureEnabled(deps)) return "payload";
+  if (sessionCaptureEnabled(deps)) return "session";
+  return "none";
+}
+
 function capturedResponseObject(value: unknown): {
   responseId: string;
   responseJson: string;
@@ -744,6 +750,7 @@ export async function recordServed(
   const storageDecision: DecisionRecord = {
     ...stampRequestBodyBytes(args.decision, args.requestJson, args.requestBodyBytes),
     request_id: args.requestId,
+    request_content_mode: effectiveRequestContentMode(deps),
   };
   const decision =
     args.timedOut === true ? decisionForTimedOutRequest(storageDecision) : storageDecision;

@@ -126,8 +126,8 @@ The model returns raw `{subjectText, factText}`. Core then uses
 - supply `validFrom` from the extraction run time.
 
 The write scope carries both project and resource when both exist. If neither
-exists, it falls back to the storage thread id. It never writes an account-wide
-empty-scope fact.
+exists, eager extraction is skipped; it never creates a thread-only or
+account-wide fact.
 
 Persistence calls `insertFactsReconciled.call(memoryStore, ...)`. The explicit
 receiver binding is required because real store methods read `this.db`; an older

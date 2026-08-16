@@ -81,7 +81,11 @@ function makeObservations(texts: string[]): Observation[] {
 }
 
 const NOW = new Date("2026-05-30T12:00:00.000Z");
-const JOB: ReflectorJob = { jobId: "job-1", scope: { accountId: "acct-a", threadId: "thread-1" } };
+const JOB: ReflectorJob = { jobId: "job-1", scope: { accountId: "acct-a", projectId: "proj-1" } };
+const THREAD_ONLY_JOB: ReflectorJob = {
+  jobId: "job-1",
+  scope: { accountId: "acct-a", threadId: "thread-1" },
+};
 
 // Deterministic merge stub: joins the observation texts (+ optional previous
 // reflection prefix). Stands in for an LLM — same input → same output.
@@ -101,6 +105,24 @@ function makeDeps(store: MemoryStore, overrides: Partial<ReflectorDeps> = {}): R
 }
 
 describe("runReflectorJob", () => {
+  it("rejects a thread-only scope before reading or writing memory", async () => {
+    const { store, upserts, jobUpdates } = makeFakeStore(makeObservations(["legacy"]));
+    const deps = makeDeps(store);
+
+    const out = await runReflectorJob(THREAD_ONLY_JOB, deps);
+
+    expect(out).toEqual({ reflectionId: null, version: null, changed: false });
+    expect(store.listObservations).not.toHaveBeenCalled();
+    expect(upserts).toEqual([]);
+    expect(jobUpdates).toEqual([
+      {
+        jobId: "job-1",
+        status: "failed",
+        error: "reflector scope requires projectId or resourceId",
+      },
+    ]);
+  });
+
   it("merges observations into a version=1 reflection when the scope has none", async () => {
     const obs = makeObservations(["likes terse answers", "prefers TypeScript"]);
     const { store, upserts } = makeFakeStore(obs);
@@ -121,7 +143,8 @@ describe("runReflectorJob", () => {
     // updatedAt is exactly now().
     expect(up.updatedAt).toEqual(NOW);
     // Scope propagated.
-    expect(up.threadId).toBe("thread-1");
+    expect(up.projectId).toBe("proj-1");
+    expect(up.threadId).toBeUndefined();
   });
 
   // docs/12 (Codex review fix #2) — a decayed (archived) or retention-tombstoned
@@ -157,9 +180,9 @@ describe("runReflectorJob", () => {
     const active = makeObservations(["still active"]);
     const existing: Reflection = {
       id: "refl-stale",
-      projectId: null,
+      projectId: "proj-1",
       resourceId: null,
-      threadId: "thread-1",
+      threadId: null,
       reflectionText: "forgotten old content",
       version: 3,
       tokenEstimate: 5,
@@ -199,9 +222,9 @@ describe("runReflectorJob", () => {
     // Existing reflection whose text already equals what merge would produce.
     const existing: Reflection = {
       id: "refl-existing",
-      projectId: null,
+      projectId: "proj-1",
       resourceId: null,
-      threadId: "thread-1",
+      threadId: null,
       reflectionText: "a | b",
       version: 7,
       tokenEstimate: 1,
@@ -233,9 +256,9 @@ describe("runReflectorJob", () => {
     const obs = makeObservations(["a", "b", "c"]); // new observation 'c'
     const existing: Reflection = {
       id: "refl-existing",
-      projectId: null,
+      projectId: "proj-1",
       resourceId: null,
-      threadId: "thread-1",
+      threadId: null,
       reflectionText: "a | b",
       version: 1,
       tokenEstimate: 1,
@@ -267,9 +290,9 @@ describe("runReflectorJob", () => {
     const obs = makeObservations(["fresh insight"]);
     const existing: Reflection = {
       id: "refl-existing",
-      projectId: null,
+      projectId: "proj-1",
       resourceId: null,
-      threadId: "thread-1",
+      threadId: null,
       reflectionText: "old stable summary",
       version: 3,
       tokenEstimate: 1,

@@ -1700,11 +1700,13 @@ export class PgMemoryStore implements MemoryStore {
              AND thread_id IS NOT DISTINCT FROM ${target.threadId ?? null}
              AND status = 'active'
         `);
-        await tx.execute(sql`
-          INSERT INTO memory_jobs (id, type, scope_id, status, error, created_at, updated_at)
-          VALUES (${this.genId()}, 'reflector', ${scopeId}, 'pending', NULL, ${nowMs}, ${nowMs})
-          ON CONFLICT (type, scope_id) WHERE status IN ('pending', 'running') DO NOTHING
-        `);
+        if (target.projectId !== undefined || target.resourceId !== undefined) {
+          await tx.execute(sql`
+            INSERT INTO memory_jobs (id, type, scope_id, status, error, created_at, updated_at)
+            VALUES (${this.genId()}, 'reflector', ${scopeId}, 'pending', NULL, ${nowMs}, ${nowMs})
+            ON CONFLICT (type, scope_id) WHERE status IN ('pending', 'running') DO NOTHING
+          `);
+        }
       }
       return true;
     });

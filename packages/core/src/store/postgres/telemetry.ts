@@ -627,7 +627,10 @@ export class PgTelemetryStore implements TelemetryStore {
     const row = rows[0];
     if (!row) return null;
     const recoveryRows = await this.db
-      .select({ bytes: sql<number>`sum(${sessionRevisionWireBytes})` })
+      .select({
+        bytes: sql<number>`sum(${sessionRevisionWireBytes})`,
+        maxBytes: sql<number>`max(${sessionRevisionWireBytes})`,
+      })
       .from(sessionRevisions)
       .where(
         and(
@@ -636,6 +639,7 @@ export class PgTelemetryStore implements TelemetryStore {
         ),
       );
     const recoveryWireBytes = Number(recoveryRows[0]?.bytes);
+    const maxRevisionWireBytes = Number(recoveryRows[0]?.maxBytes);
     return {
       requestId: row.requestId,
       sessionRef: row.sessionRef,
@@ -643,6 +647,10 @@ export class PgTelemetryStore implements TelemetryStore {
       recoveryWireBytes:
         Number.isSafeInteger(recoveryWireBytes) && recoveryWireBytes >= 0
           ? recoveryWireBytes
+          : null,
+      maxRevisionWireBytes:
+        Number.isSafeInteger(maxRevisionWireBytes) && maxRevisionWireBytes >= 0
+          ? maxRevisionWireBytes
           : null,
       fidelity: row.fidelity,
       createdAt: new Date(row.createdAt),

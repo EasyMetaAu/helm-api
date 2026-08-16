@@ -23,6 +23,7 @@ function rawRecord(overrides: Record<string, unknown> = {}): Record<string, unkn
     requested_model: 'gpt-4o',
     requested_reasoning_effort: 'low',
     reasoning_effort: 'high',
+    request_content_mode: 'session',
     key_prefix: 'helm_live_ab12',
     classifier: {
       task_type: 'coding',
@@ -128,6 +129,7 @@ describe('toDetail', () => {
       requested_model: 'gpt-4o',
       reasoning_effort: 'high',
       policy_reason: 'matched',
+      request_content_mode: 'session',
     });
   });
 });

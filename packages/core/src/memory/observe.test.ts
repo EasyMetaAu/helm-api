@@ -182,6 +182,25 @@ describe("observeInbound", () => {
     expect(messages).toHaveLength(0);
   });
 
+  it("does not create a thread without a project or resource", async () => {
+    const { store, threads, messages } = makeFakeStore();
+    const log = vi.fn();
+    const deps = makeDeps(store, { log });
+
+    const out = await observeInbound(
+      deps,
+      scope({ projectId: null, resourceId: null }),
+      SAMPLE_MESSAGES,
+    );
+
+    expect(out.persisted).toBe(false);
+    expect(threads).toEqual([]);
+    expect(messages).toEqual([]);
+    expect(log).toHaveBeenCalledWith("memory.observe.skip_no_parent_scope", {
+      memory_mode: "observe",
+    });
+  });
+
   it("reports memoryMeta with memory_hydrated=false and the docs/08 debug field set", async () => {
     const { store } = makeFakeStore();
     const deps = makeDeps(store);
@@ -219,6 +238,27 @@ describe("observeInbound", () => {
 });
 
 describe("observeOutbound", () => {
+  it("does not write or enqueue without a project or resource", async () => {
+    const { store, messages, stamps } = makeFakeStore();
+    const enqueueObserverJob = vi.fn(async () => "observer-job");
+    const log = vi.fn();
+    const deps = makeDeps(store, { enqueueObserverJob, log });
+
+    await observeOutbound(
+      deps,
+      scope({ projectId: null, resourceId: null }),
+      { responseMessages: [{ role: "assistant", content: "hi" }], toolResults: [] },
+      "openai/gpt-x",
+    );
+
+    expect(messages).toEqual([]);
+    expect(stamps).toEqual([]);
+    expect(enqueueObserverJob).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith("memory.observe.skip_no_parent_scope", {
+      memory_mode: "observe",
+    });
+  });
+
   it("enqueues one coalesced observer job in pure observe mode", async () => {
     const { store } = makeFakeStore();
     const enqueueObserverJob = vi.fn(async () => "observer-job");

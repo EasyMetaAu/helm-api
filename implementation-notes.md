@@ -13,6 +13,16 @@
 - **兼容与边界**：Helm 新增 1.5 的 OAuth 媒体 allowlist、能力/价格/lane 与严格请求 schema，同时保留两个旧模型入口，避免破坏已部署客户端。新版参考请求至少包含一张图片或一个声音，最多 7 图/3 声；ZDR `output` 继续 fail-closed，付费 POST 单写语义不变。
 - **未完成证据**：本次不执行付费请求；旧模型 canary 不能证明新 wire model 已在生产账号可用，部署前仍需一次明确批准的 1.5 start/poll canary。
 
+## 2026-08-15 · 自动 Memory 形成必须挂在项目或资源下（Memory Observer / Reflector / Store，docs/08/12，原则 3/7）
+
+- **根因与修复**：历史 quarantine thread 没有项目/资源；decay 归档 observation 时把它回退成 thread-only Reflector scope，随后生成 Admin「按范围」里没有父级的 active reflection。请求 observe writeback 与 eager fact 路径也允许相同的孤立范围。现在入站/出站观察在缺少项目和资源时直接 fail-open 跳过，eager extraction 不调用模型，Reflector 对已持久化的孤立 job 在任何读写前标记失败。
+- **遗忘与兼容**：SQLite/Postgres 仍会软归档历史孤立 observation，但不再排 thread-only rebuild；正常 project/resource rebuild 与直接管理的历史数据格式不变，无 schema/migration 或新依赖。现有孤立 active facts/reflections 不由升级代码猜测删除，需按运维范围显式清理。
+
+## 2026-08-15 · 请求级正文模式成为历史读取权威（Telemetry / Admin requests，docs/07/11，原则 3/7）
+
+- **根因与修复**：Admin 只按 `request_payloads` / `session_revisions` 是否存在推断历史请求的正文模式，无法证明请求发生时 Key 与系统设置的实际合并结果；大型 Session 的元数据也只证明服务端整体恢复超限，却仍无条件展示浏览器加载按钮，即使某条 revision 会被同一分页接口的 JSON 内存上限拒绝。每条新 telemetry 现在保存 body-free 的有效 `request_content_mode`；明确 `none` 时任何孤立正文行都不可读取、也不显示加载入口，旧记录继续按存储事实兼容推断。
+- **加载边界**：SQLite/Postgres 在既有 Session 元数据聚合中同时返回目标链最大单 revision 字节数；Admin 用分页端点相同的 JSON amplification 与 8 MiB 上限决定 `browser_recoverable`，不可安全分页时不再提供必然失败的按钮。该元数据不读取正文、不改变正文格式、无需 migration；当前设置仍不追溯删除历史内容。
+
 ## 2026-08-15 · 大型完整载荷改由浏览器解压与恢复图片（Store / Admin requests，docs/07/11，原则 1/3/7）
 
 - **根因与修复**：SQLite `request_payloads` 的单列 gzip 读取沿用了 Session 单块 256 KiB 解压上限，超过该值的真实正文被映射为 `null`，Admin 随后错误回退到 Session 恢复。Admin 现在优先请求存储态正文；SQLite 原样返回 gzip BLOB，Postgres 返回 raw TEXT，由浏览器通过 HTTP `Content-Encoding` 流式解压并拼装，不再在网关内物化放大的正文。
@@ -54,20 +64,10 @@
 - **升级兼容**：lease generation migration 仅在 `memory_jobs` 已存在时加列；历史上的精简/部分 schema 仍可继续升级，完整生产 schema 则照常初始化 generation 0。不能用无条件 `ALTER TABLE`，否则会让无 Memory 表的旧安装启动失败。
 - **取舍/限制**：`message_index` 仍只用于当前 ingest dedup，不能作为线程顺序；没有客户端稳定 turn id 时无法同时保证跨请求精确去重和保留合法重复。legacy bounded backfill 可能与旧 Observation 暂时重叠，因为旧 range 的错误顺序无法精确还原；这里选择宁可短期过度保留，也不静默丢失未覆盖 raw。Reflection 使用 bounded latest-set，而非持久 rolling draft。生产恢复 worker 必须 concurrency=1 灰度，先验证 migration/frontier/RSS/restart/OOM/502，再开启 raw cleanup。
 
-## 2026-08-10 · 大 Session 客户端重建恢复服务端同款 Conversation 展示（Admin / requests debug，docs/07/11，原则 1/3/7）
-
-- **回归**：上一版为了展示时间线，把 `transcriptLoaded` 后的主请求区域强制切到 `JsonViewer`，隐藏了服务端恢复路径使用的 Conversation/Raw tabs，导致客户端加载后的可读性明显下降。
-- **修复**：客户端只替换数据获取与重建方式；重建完成后继续走同一套 Conversation、Raw `JsonViewer`、Response `StreamViewer/JsonViewer` 路径。按记录时间排序的 revision 时间线仍作为额外审计视图保留。
-
-## 2026-08-10 · 配额统计按真实重置点切分（OAuth quota / Admin providers，docs/04/11，原则 3/7）
-
-- **根因**：旧 writer 在 `resetsAtMs` 推进时写入 `[oldReset,newReset)`，把新周期误当成已结束历史；自然周 UI 又掩盖了 OpenAI 提前重置、reset-credit 重置和非整点边界，所以“每周”并不等于真实额度周期。
-- **实现**：复用既有 `oauth_reset_period`，统一记录刚结束的 `[previousStart,actualResetAt)`；PULL、Codex header PUSH、手动/自动 reset-credit 共用记录入口。quota snapshot 按 `capturedAt` 单调更新，晚到的旧采样既不覆盖新状态，也不写伪 reset。旧版 `detectedAtMs < periodEndMs` 行只在读取时忽略，不改写历史库；本地“Reset usage”仍只清 Helm cooldown，不冒充上游重置。
-- **精度边界**：usage 继续按小时聚合，但真实重置发生在小时中间时，新请求的 bucket 起点提升到最近 reset point，因此不会再跨边界混入上一周期。部署前已经落入旧整点 bucket 的历史数据不可逆，继续标 `≈`/`partial`；新记录到的真实边界作为精确周期返回。Admin 默认显示 Period，并保留 Daily / Weekly 兼容视图。
-
 ## 历史条目摘要（最新要点）
 
-- **2026-08-10 · 大 Session 客户端重建按记录时间展示并提前停止分页**：浏览器按 `createdAt/sequence` 展示持久化 revision 时间线，收到目标 revision 后停止继续分页；恢复结果仍标记 `exact=false`，完整原文经 git history 回溯。
+- **2026-08-10 · 配额统计按真实重置点切分**：PULL、Codex header 与 reset-credit 共用真实周期边界，晚到采样不写伪 reset；旧整点历史不可逆并继续标记为近似/部分数据，完整原文经 git history 回溯。
+- **2026-08-10 · 大 Session 客户端重建按记录时间展示并提前停止分页**：目标 revision 到达即停，按 `createdAt`/`sequence` 展示持久化增量请求与响应快照；Session 仍为 `exact=false` 且不可精确 Retry，完整原文经 git history 回溯。
 - **2026-08-08 · Grok Imagine 仅复用 SuperGrok OAuth 媒体链路**：媒体执行复用 xAI 订阅 OAuth，付费 POST 单写且不跨账号重试，未知价格对美元预算 fail-closed；完整原文经 git history 回溯。
 - **2026-08-08 · 会话转录客户端重建，绕开服务端内存阀**：长 Session 以 4 MiB/100 行游标分页传给浏览器本地重建，小 Session 保留服务端快路径；共享纯重建函数留在浏览器安全的 `@helm/shared`，完整原文经 git history 回溯。
 - **2026-08-07 · 真上游上下文溢出短路直返 400**：确定性上游 400/413/422 上下文溢出立即返回客户端并保留原始错误；预检估算仍允许 fallback，可重试状态不误判为客户端错误，完整原文经 git history 回溯。

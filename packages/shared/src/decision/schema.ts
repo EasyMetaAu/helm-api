@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { RequestContentModeSchema } from "../key/schema.js";
 import {
   NativePassthroughMutationLedgerSchema,
   ProtocolSchema,
@@ -286,6 +287,9 @@ export const DecisionRecordSchema = z.object({
   // Body-free telemetry only: the bytes themselves remain governed by capture mode.
   // null/absent for legacy rows that predate measurement.
   request_body_bytes: z.number().int().nonnegative().nullable().optional(),
+  // Effective content-retention mode for this request. Unlike the mutable key/system
+  // settings, this body-free marker makes historical Admin reads authoritative.
+  request_content_mode: RequestContentModeSchema.optional(),
   // Total served latency = Σ provider_attempts.latency_ms (docs/07 latency).
   // `.default(0)` so legacy records validate; the builder computes the real sum.
   latency_total_ms: z.number().nonnegative().default(0),

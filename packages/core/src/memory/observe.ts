@@ -141,6 +141,10 @@ export async function observeInbound(
   if (scope.mode === "off") {
     return { persisted: false, memoryMeta: meta };
   }
+  if (scope.projectId === null && scope.resourceId === null) {
+    deps.log("memory.observe.skip_no_parent_scope", { memory_mode: scope.mode });
+    return { persisted: false, memoryMeta: meta };
+  }
   // observe requires a thread scope; without one there is nothing to attach
   // messages to — degrade to no-op rather than fabricating an id.
   if (scope.threadId === null) {
@@ -194,6 +198,10 @@ export async function observeOutbound(
   servedModel?: string | null,
 ): Promise<void> {
   if (scope.mode === "off") return;
+  if (scope.projectId === null && scope.resourceId === null) {
+    deps.log("memory.observe.skip_no_parent_scope", { memory_mode: scope.mode });
+    return;
+  }
   const threadId = storageThreadId(scope);
   if (threadId === null) return;
 

@@ -2005,6 +2005,80 @@ describe("admin.api request payload", () => {
     });
   });
 
+  it("treats an explicitly metadata-only request as authoritative over orphan content rows", async () => {
+    const rec = {
+      ...decision("req_metadata_only", "balanced"),
+      request_content_mode: "none" as const,
+      session: { ref: "session-ref", label: "thread-1", source: "x-thread-id" as const },
+    };
+    const getPayloadMeta = vi.fn(async () => ({
+      requestId: "req_metadata_only",
+      createdAt: new Date(1234),
+      parts: { request: true, response: true, upstreamRequest: true },
+    }));
+    const getSessionRevisionMeta = vi.fn(async () => ({
+      requestId: "req_metadata_only",
+      sessionRef: "session-ref",
+      responseBodyStored: true,
+      recoveryWireBytes: 1_000_000,
+      fidelity: "semantic",
+      createdAt: new Date(1234),
+    }));
+    const telemetry = {
+      ...makeTelemetry([rec]),
+      getPayloadMeta,
+      getSessionRevisionMeta,
+    } as unknown as TelemetryStore;
+
+    const app = buildApp(buildDeps({ telemetry }));
+    const meta = await app.request("/admin/api/requests/req_metadata_only/payload?part=meta");
+    expect(await meta.json()).toEqual({
+      captured: false,
+      source: "unavailable",
+      reason: "metadata_only",
+    });
+    const revisions = await app.request("/admin/api/requests/req_metadata_only/session-revisions");
+    expect(await revisions.json()).toEqual({ captured: false, reason: "metadata_only" });
+    expect(getPayloadMeta).not.toHaveBeenCalled();
+    expect(getSessionRevisionMeta).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { maxRevisionWireBytes: 100_000, browserRecoverable: true },
+    { maxRevisionWireBytes: 2_000_000, browserRecoverable: false },
+  ])("advertises browser recovery only when every revision fits its JSON response bound", async ({
+    maxRevisionWireBytes,
+    browserRecoverable,
+  }) => {
+    const rec = {
+      ...decision("req_session_browser", "balanced"),
+      request_content_mode: "session" as const,
+      session: { ref: "session-ref", label: "thread-1", source: "x-thread-id" as const },
+    };
+    const telemetry = {
+      ...makeTelemetry([rec]),
+      getPayloadMeta: async () => null,
+      getSessionRevisionMeta: async () => ({
+        requestId: "req_session_browser",
+        sessionRef: "session-ref",
+        responseBodyStored: true,
+        recoveryWireBytes: 1_000_000,
+        maxRevisionWireBytes,
+        fidelity: "semantic",
+        createdAt: new Date(1234),
+      }),
+    } as unknown as TelemetryStore;
+
+    const response = await buildApp(buildDeps({ telemetry })).request(
+      "/admin/api/requests/req_session_browser/payload?part=meta",
+    );
+    expect(await response.json()).toMatchObject({
+      captured: false,
+      reason: "session_recovery_limited",
+      browser_recoverable: browserRecoverable,
+    });
+  });
+
   it.each([
     null,
     1_000_000,
@@ -2037,6 +2111,7 @@ describe("admin.api request payload", () => {
       captured: false,
       source: "unavailable",
       reason: "session_recovery_limited",
+      browser_recoverable: false,
     });
   });
 

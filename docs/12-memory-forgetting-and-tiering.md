@@ -70,7 +70,7 @@ threads:
 ```text
 uncovered user raw turns
   -> background Observer fact extraction
-  -> project/resource fact, or thread fact when no broader scope exists
+  -> project/resource fact; skip when neither parent exists
 ```
 
 No transition deletes raw messages. Separate cleanup settings may archive/prune
@@ -210,7 +210,8 @@ The sweep:
 4. stops at `max_iterations`, `max_wallclock_s`, or
    `max_consecutive_errors`;
 5. in the same database transaction, enqueues coalesced reflector rebuilds for
-   the exact project/resource/thread scopes whose observations were archived.
+   the exact project/resource scopes whose observations were archived; a
+   parentless historical observation is archived without a rebuild.
 
 The scan itself is bounded at `max_iterations * 50`. Failures over-retain and
 log; they do not affect an in-flight model request.
