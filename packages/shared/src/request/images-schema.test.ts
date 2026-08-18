@@ -88,7 +88,7 @@ describe("ImageGenerationRequestSchema", () => {
 });
 
 describe("GrokImagineImageGenerationRequestSchema", () => {
-  it("accepts only the proven prompt-only fast-image contract", () => {
+  it("accepts the supported fast-image options", () => {
     expect(
       GrokImagineImageGenerationRequestSchema.safeParse({
         model: "grok-imagine-image",
@@ -104,7 +104,7 @@ describe("GrokImagineImageGenerationRequestSchema", () => {
         resolution: "1k",
         response_format: "b64_json",
       }).success,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       GrokImagineImageGenerationRequestSchema.safeParse({
         model: "grok-imagine-image-quality",
@@ -113,7 +113,7 @@ describe("GrokImagineImageGenerationRequestSchema", () => {
     ).toBe(false);
   });
 
-  it("rejects unverified Grok web image fields before a paid create", () => {
+  it("rejects image options outside the supported contract", () => {
     expect(
       GrokImagineImageGenerationRequestSchema.safeParse({
         model: "grok-imagine-image",

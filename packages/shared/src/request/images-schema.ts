@@ -21,12 +21,15 @@ export const ImageGenerationRequestSchema = z.looseObject({
   user: z.string().optional(),
 });
 
-// Fast Imagine is new and only its prompt-only path is proven account-wide.
-// Keep it closed until the entitlement boundary can prove paid options per account.
+// Fast Imagine keeps the bounded web options already exposed by Helm.
 // The older quality model stays on the generic compatibility path in the route.
 export const GrokImagineImageGenerationRequestSchema = z.strictObject({
   model: z.literal("grok-imagine-image"),
   prompt: z.string().min(1),
+  n: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]).optional(),
+  aspect_ratio: z.enum(["auto", "1:1", "16:9", "9:16", "3:2", "2:3"]).optional(),
+  resolution: z.literal("1k").optional(),
+  response_format: z.literal("b64_json").optional(),
 });
 
 const ImageEditCommonShape = {
