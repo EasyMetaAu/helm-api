@@ -29,10 +29,24 @@ import {
   normalizeCodexNativeClientVersion,
   type OAuthRuntimeCtx,
   resolveProviderTransportProfile,
+  resolveXaiMediaEmergencyState,
   runCodexCompactProviderCall,
   synthesizeOAuthProviders,
   tlsTransportProviders,
 } from "./server.js";
+
+describe("xAI media emergency latch", () => {
+  it("survives ordinary and failed restore rebuilds until a successful restore", () => {
+    let disabled = resolveXaiMediaEmergencyState(false, "disable", true);
+    expect(disabled).toBe(true);
+    disabled = resolveXaiMediaEmergencyState(disabled, undefined, true);
+    expect(disabled).toBe(true);
+    disabled = resolveXaiMediaEmergencyState(disabled, "restore", false);
+    expect(disabled).toBe(true);
+    disabled = resolveXaiMediaEmergencyState(disabled, "restore", true);
+    expect(disabled).toBe(false);
+  });
+});
 
 function sseResponse(events: object[]): Response {
   const body = events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");

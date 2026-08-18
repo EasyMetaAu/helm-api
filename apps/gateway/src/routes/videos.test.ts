@@ -28,7 +28,11 @@ function record(responseId: string, status = "in_progress"): ResponsesRegistryRe
 function setup(over: Partial<VideosRouteDeps> = {}) {
   const records = new Map<string, ResponsesRegistryRecord>();
   const create = vi.fn().mockResolvedValue({ request_id: "vid_1", status: "queued" });
-  const retrieve = vi.fn().mockResolvedValue({ request_id: "vid_1", status: "done" });
+  const retrieve = vi.fn().mockResolvedValue({
+    request_id: "vid_1",
+    status: "done",
+    video: { url: "https://cdn.example.test/video.mp4" },
+  });
   const enqueuePayload = vi.fn();
   const enqueueTelemetry = vi.fn();
   const record = {
@@ -324,7 +328,11 @@ describe("registerVideosRoute", () => {
       headers: { Authorization: "Bearer k" },
     });
     expect(polled.status).toBe(200);
-    expect(await polled.json()).toEqual({ request_id: "vid_1", status: "done" });
+    expect(await polled.json()).toEqual({
+      request_id: "vid_1",
+      status: "done",
+      video: { url: "https://cdn.example.test/video.mp4" },
+    });
     expect(retrieve).toHaveBeenCalledWith("vid_1", expect.any(AbortSignal));
     expect(put).toHaveBeenCalledWith(
       expect.objectContaining({ responseId: "video:vid_1", status: "done" }),
@@ -376,7 +384,7 @@ describe("registerVideosRoute", () => {
     expect(create).toHaveBeenCalledOnce();
   });
 
-  it("accepts prompt-only Grok video and forwards one paid create", async () => {
+  it("rejects unverified prompt-only Grok video options before reservation", async () => {
     const { app, create, putIfAbsent } = setup();
     const response = await app.request("/v1/videos/generations", {
       method: "POST",
@@ -391,20 +399,41 @@ describe("registerVideosRoute", () => {
       }),
     });
 
+    expect(response.status).toBe(400);
+    expect(create).not.toHaveBeenCalled();
+    expect(putIfAbsent).not.toHaveBeenCalled();
+  });
+
+  it("accepts a concrete xAI video alias for a custom-model key with one paid create", async () => {
+    const customIdentity: MessagesIdentity = {
+      ...identity,
+      caps: { allowCustomModel: true },
+    };
+    const { app, create, putIfAbsent } = setup({
+      auth: { resolve: async () => customIdentity },
+    });
+
+    const response = await post(app, {
+      model: "xai/grok-imagine-video",
+      prompt: "waves rolling across a neon ocean",
+    });
+
     expect(response.status).toBe(200);
     expect(create).toHaveBeenCalledOnce();
-    expect(create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        model: "grok-imagine-video",
-        prompt: "waves rolling across a neon ocean",
-        duration: 15,
-        resolution: "1080p",
-        audio: true,
-      }),
-      expect.any(AbortSignal),
-      expect.any(Function),
-    );
     expect(putIfAbsent).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a concrete xAI video alias for a normal key before reservation", async () => {
+    const { app, create, putIfAbsent } = setup();
+
+    const response = await post(app, {
+      model: "xai/grok-imagine-video",
+      prompt: "waves rolling across a neon ocean",
+    });
+
+    expect(response.status).toBe(400);
+    expect(create).not.toHaveBeenCalled();
+    expect(putIfAbsent).not.toHaveBeenCalled();
   });
 
   it("keeps bearer and prompt out of regular logs and DecisionRecord", async () => {
@@ -443,6 +472,19 @@ describe("registerVideosRoute", () => {
     });
 
     expect(response.status).toBe(200);
+    expect(put).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed done without persisting a terminal state", async () => {
+    const { app, retrieve, put } = setup();
+    retrieve.mockResolvedValueOnce({ request_id: "vid_1", status: "done" });
+    await post(app);
+
+    const response = await app.request("/v1/videos/vid_1", {
+      headers: { Authorization: "Bearer k" },
+    });
+
+    expect(response.status).toBe(502);
     expect(put).not.toHaveBeenCalled();
   });
 

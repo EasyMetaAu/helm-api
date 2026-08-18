@@ -4,7 +4,11 @@
 // injected config (env-sourced) and are never logged or echoed. See docs/02.
 
 import { Buffer } from "node:buffer";
-import type { NativePassthroughInput } from "@helm/shared";
+import {
+  type NativePassthroughInput,
+  VideoGenerationResponseSchema,
+  VideoRetrieveResponseSchema,
+} from "@helm/shared";
 import { createSSEIncompleteFrameGuard, nextSSEFrameBoundary } from "../protocol/streaming.js";
 import {
   consumeResponseTextWithinBudget,
@@ -808,21 +812,18 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
       if (error instanceof UpstreamError) throw error;
       throw invalidMediaResponse(res, null, "upstream returned invalid media JSON");
     }
-    if (
-      body === null ||
-      typeof body !== "object" ||
-      Array.isArray(body) ||
-      typeof (body as Record<string, unknown>)[requiredField] !== "string" ||
-      (requiredField === "request_id" &&
-        ((body as Record<string, unknown>).request_id as string).trim().length === 0)
-    ) {
+    const parsed =
+      requiredField === "request_id"
+        ? VideoGenerationResponseSchema.safeParse(body)
+        : VideoRetrieveResponseSchema.safeParse(body);
+    if (!parsed.success) {
       throw invalidMediaResponse(
         res,
         body,
         `upstream media response omitted valid ${requiredField}`,
       );
     }
-    return body as Record<string, unknown>;
+    return parsed.data as Record<string, unknown>;
   }
 
   async function realtimeErrorFromResponse(res: Response): Promise<UpstreamError> {

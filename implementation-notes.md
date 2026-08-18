@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-08-18 · Grok Imagine 合并后收紧 entitlement 与媒体协议边界（OAuth / Images / Videos，Phase 1 spec §4–9，原则 3/6/7/8）
+
+- **撤权与 cooldown**：xAI billing 刷新失败不再删除整条 quota；改写入 `windows: []` 的 entitlement tombstone，复用两种 Store 已有的 upsert 语义保留 `usageLimitedUntilMs`。若 tombstone 无法持久化，进程级紧急 latch 会先摘除全部 xAI 媒体 alias，并在任何普通 OAuth pool rebuild 后继续生效；只有权威 billing 刷新成功持久化且对应 rebuild 成功后才恢复。
+- **公开合同**：`/v1/models` 已公开的 `xai/grok-imagine-video*` alias 现在可由 `allow_custom_model` key 直接调用，普通 key 仍在付费 reservation 前拒绝。新 fast image 与 prompt-only video 只接受已证明的 `model + prompt`；合并前已有的 quality image、single-image video 和 reference-video 合同保持兼容，不从一次默认 canary 外推细粒度付费能力。
+- **视频终态**：共享 Zod response schema、provider 客户端和 gateway poll 边界共同要求非空 `status`，且 `done` 必须带非空 `video.url`；畸形完成响应返回 502，不写入 durable terminal state。
+- **限制**：紧急 latch 是进程内状态；quota Store 完全不可写且进程在下一次成功刷新前重启时，无法把该瞬时失败跨进程持久化。正常失败路径会优先写 tombstone，因此不新增 migration、配置项或依赖。
+
 ## 2026-08-18 · Grok.com Imagine 复用 OAuth 媒体链并以短期 billing 证据授权（OAuth / Images / Videos，Phase 1 spec §4–9，原则 2/3/6/7）
 
 - **账号资格**：不新增 entitlement 表；复用 SQLite/Postgres 已持久化的 xAI 周 billing snapshot。媒体正向授权必须同时满足“24 小时内的新鲜周 billing”与“当前 OAuth JWT 是明确的已知付费 tier”，opaque、缺失、未知、`free`、`x_basic` 均 fail-closed；有效期取 `capturedAt + 24h` 与周窗口 reset 的较早者。普通 Grok 文本模型不读取此媒体 gate。
@@ -61,16 +68,9 @@
 - **加载边界**：Memory 首屏只并发加载第一批 scopes 与轻量 stats；完整 redacted key 列表仅在用户打开 By Key 时加载。`?key=` 深链直接走单 key 解析，不为校验一个 id 扫描全部 keys。
 - **Store 取舍**：`KeyStore` 新增按不可变 `key_id` 的 `getById`，SQLite/Postgres 使用索引点查，缓存包装器只透传；不缓存 admin 低频 id 查询，也不改变全局 Keys 页面既有列表契约。
 
-## 2026-08-11 · Memory 大线程有界形成与遗忘原子性（Memory Observer / Reflector / cleanup，docs/08/12，原则 3/7）
-
-- **生产根因**：2026-07-29 的外部 purge 脚本重建 `memory_messages` 却未重算 `memory_threads.message_count/last_message_at`，Admin 因此把约 18.5 万真实 raw 行显示成约 208 万；三天 cleanup 实际有效。真正的 OOM 路径是 Observer/Reflector/注入及部分 cleanup 会一次物化大线程/大结果，pure `observe` 又不直接形成 observation，最大线程累积到 51,116 行。
-- **有界生命周期**：pure `observe` outbound 也 enqueue；Observer 按服务端 `(created_at,id)` 每页最多 512 行/1 MiB/64K tokens，超大单行用带 SHA-256 的 placeholder，Observation 与 durable frontier CAS 同事务提交并继续排下一页。Reflector 只取最新 512 条 active/unexpired observation；forgetting rebuild 不再带旧 reflection，最终注入含 header 也严格服从 token budget。
-- **清理与遗忘**：raw cleanup 只删 frontier 已覆盖行，Postgres cleanup/telemetry/OAuth usage 使用小批次；decay 会在同一事务立即归档受影响 reflection、fence 正在运行的旧 Reflector，并为 project/resource 各自排 successor。Reflector 的 facts + reflection + job completion 也由 job 状态 fence 后原子提交，避免遗忘后复活。SQLite/Postgres migration 会重算 stale counters、补索引，legacy raw 保持 null frontier 后按有界页回放。
-- **升级兼容**：lease generation migration 仅在 `memory_jobs` 已存在时加列；历史上的精简/部分 schema 仍可继续升级，完整生产 schema 则照常初始化 generation 0。不能用无条件 `ALTER TABLE`，否则会让无 Memory 表的旧安装启动失败。
-- **取舍/限制**：`message_index` 仍只用于当前 ingest dedup，不能作为线程顺序；没有客户端稳定 turn id 时无法同时保证跨请求精确去重和保留合法重复。legacy bounded backfill 可能与旧 Observation 暂时重叠，因为旧 range 的错误顺序无法精确还原；这里选择宁可短期过度保留，也不静默丢失未覆盖 raw。Reflection 使用 bounded latest-set，而非持久 rolling draft。生产恢复 worker 必须 concurrency=1 灰度，先验证 migration/frontier/RSS/restart/OOM/502，再开启 raw cleanup。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-11 · Memory 大线程有界形成与遗忘原子性**：Observer/Reflector/cleanup 改为有界分页、frontier/fence 与原子提交，避免超大线程 OOM、遗忘后复活和 stale counter 漂移；完整原文经 git history 回溯。
 - **2026-08-10 · 配额统计按真实重置点切分**：PULL、Codex header 与 reset-credit 共用真实周期边界，晚到采样不写伪 reset；旧整点历史不可逆并继续标记为近似/部分数据，完整原文经 git history 回溯。
 - **2026-08-10 · 大 Session 客户端重建按记录时间展示并提前停止分页**：目标 revision 到达即停，按 `createdAt`/`sequence` 展示持久化增量请求与响应快照；Session 仍为 `exact=false` 且不可精确 Retry，完整原文经 git history 回溯。
 - **2026-08-08 · Grok Imagine 仅复用 SuperGrok OAuth 媒体链路**：媒体执行复用 xAI 订阅 OAuth，付费 POST 单写且不跨账号重试，未知价格对美元预算 fail-closed；完整原文经 git history 回溯。

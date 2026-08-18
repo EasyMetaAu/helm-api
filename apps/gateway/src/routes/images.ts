@@ -353,7 +353,7 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
       const grokTarget = operationTargets.find((target) =>
         GROK_IMAGE_MODELS.has(target.providerModel),
       );
-      if (grokTarget) {
+      if (grokTarget?.providerModel === "grok-imagine-image") {
         const parsed = GrokImagineImageGenerationRequestSchema.safeParse({
           ...generationBody,
           model: grokTarget.providerModel,

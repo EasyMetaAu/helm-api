@@ -27,6 +27,7 @@ import type { PayloadCaptureDeps } from "../payload-capture.js";
 import type { OAuthTester } from "./oauth-test.js";
 
 export type UsageLimitWriteMode = "extend" | "replace";
+export type OAuthMutationOptions = { xaiMediaEmergency?: "disable" | "restore" };
 
 // Injected dependency contracts for the admin API. Per CLAUDE.md principle 1 the
 // route files are PURE HTTP glue — they own no business logic and never touch the
@@ -521,7 +522,7 @@ export interface AdminApiDeps {
   // rebuild failed — the route then returns a 503 "saved but not applied" rather than
   // a false 204, honoring the Save == applied contract. Optional: absent in unit tests
   // (treated as applied).
-  onOAuthMutation?: (options?: { disableXaiMedia?: boolean }) => Promise<{ applied: boolean }>;
+  onOAuthMutation?: (options?: OAuthMutationOptions) => Promise<{ applied: boolean }>;
   // Auto-park control (OAuth usage limit). Sets (untilMs) / clears (null) one
   // account's usage-limit cooldown on BOTH the live pool member (in place — no
   // rebuild) and the persisted snapshot. The reset route passes null ("Reset usage");

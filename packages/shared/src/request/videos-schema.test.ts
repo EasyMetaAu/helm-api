@@ -8,15 +8,17 @@ import {
 
 describe("VideoGenerationRequestSchema", () => {
   it("accepts the minimal Sub2API-compatible prompt-only video contract", () => {
-    expect(
-      VideoGenerationRequestSchema.safeParse({
-        model: "grok-imagine-video",
-        prompt: "waves rolling across a neon ocean",
-      }).success,
-    ).toBe(true);
+    for (const model of ["grok-imagine-video", "xai/grok-imagine-video"]) {
+      expect(
+        VideoGenerationRequestSchema.safeParse({
+          model,
+          prompt: "waves rolling across a neon ocean",
+        }).success,
+      ).toBe(true);
+    }
   });
 
-  it("accepts the Grok prompt-only video contract and current web options", () => {
+  it("rejects unverified prompt-only video options", () => {
     expect(
       VideoGenerationRequestSchema.safeParse({
         model: "grok-imagine-video",
@@ -26,13 +28,22 @@ describe("VideoGenerationRequestSchema", () => {
         resolution: "1080p",
         audio: true,
       }).success,
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("accepts the single-image Grok video contract, including an empty prompt", () => {
     expect(
       VideoGenerationRequestSchema.safeParse({
         model: "grok-imagine-video-1.5-preview",
+        prompt: "",
+        image: { url: "data:image/png;base64,AAA=" },
+        duration: 6,
+        resolution: "480p",
+      }).success,
+    ).toBe(true);
+    expect(
+      VideoGenerationRequestSchema.safeParse({
+        model: "xai/grok-imagine-video-1.5-preview",
         prompt: "",
         image: { url: "data:image/png;base64,AAA=" },
         duration: 6,
@@ -139,6 +150,20 @@ describe("video response schemas", () => {
     expect(parsed.success).toBe(true);
     if (parsed.success) expect(parsed.data.progress).toBe(40);
     expect(VideoRetrieveResponseSchema.safeParse({ status: 202 }).success).toBe(false);
+  });
+
+  it("requires a non-blank video URL for a completed task", () => {
+    expect(
+      VideoRetrieveResponseSchema.safeParse({
+        status: "done",
+        video: { url: "https://cdn.example.test/video.mp4" },
+      }).success,
+    ).toBe(true);
+    expect(VideoRetrieveResponseSchema.safeParse({ status: "done" }).success).toBe(false);
+    expect(
+      VideoRetrieveResponseSchema.safeParse({ status: "done", video: { url: "  " } }).success,
+    ).toBe(false);
+    expect(VideoRetrieveResponseSchema.safeParse({ status: " " }).success).toBe(false);
   });
 });
 

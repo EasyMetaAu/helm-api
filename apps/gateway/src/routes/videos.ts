@@ -7,7 +7,11 @@ import {
   type DecisionRecord,
   type ResponsesRegistryRecord,
 } from "@helm/core";
-import { type ProviderAttempt, VideoGenerationRequestSchema } from "@helm/shared";
+import {
+  type ProviderAttempt,
+  VideoGenerationRequestSchema,
+  VideoRetrieveResponseSchema,
+} from "@helm/shared";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
@@ -273,11 +277,14 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
       return errorJson(c, 400, "malformed video generation request", "invalid_request");
     }
 
+    const requestedModel = typeof body.model === "string" ? body.model : "";
+    if (requestedModel.includes("/") && identity.caps?.allowCustomModel !== true) {
+      return errorJson(c, 400, "video model is not available to this key", "model_not_found");
+    }
     const target = await deps.resolver.create(body, identity);
     if (target === null)
       return errorJson(c, 503, "video provider is unavailable", "provider_unavailable");
     const blocked = createBlockedModelMatcher(identity.caps?.blockedModels);
-    const requestedModel = typeof body.model === "string" ? body.model : "";
     if (
       blocked !== null &&
       (blocked.matches(requestedModel) || blocked.matches(target.providerAlias))
@@ -448,7 +455,20 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
       });
       return errorJson(c, 502, "video poll failed", "upstream_error");
     }
-    const status = typeof upstream.status === "string" ? upstream.status : "unknown";
+    const parsed = VideoRetrieveResponseSchema.safeParse(upstream);
+    if (!parsed.success) {
+      deps.log?.("video.poll.lifecycle", {
+        request_id: pollRequestId,
+        video_request_id: requestId,
+        provider_alias: record.providerAlias,
+        provider_account: record.providerAccount,
+        status: "upstream_error",
+        terminal: false,
+      });
+      return errorJson(c, 502, "video poll returned an invalid response", "upstream_error");
+    }
+    upstream = parsed.data;
+    const status = upstream.status;
     deps.log?.("video.poll.lifecycle", {
       request_id: pollRequestId,
       video_request_id: requestId,

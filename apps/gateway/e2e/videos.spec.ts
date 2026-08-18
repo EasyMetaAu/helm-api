@@ -75,18 +75,14 @@ async function createVideo(key: string, prompt: string): Promise<Response> {
   );
 }
 
-async function createPromptVideo(key: string, prompt: string): Promise<Response> {
+async function createPromptVideo(key: string, prompt: string, model = "grok-imagine-video") {
   return gateway().fetch(
     new Request("http://gateway.test/v1/videos/generations", {
       method: "POST",
       headers: AUTH(key),
       body: JSON.stringify({
-        model: "grok-imagine-video",
+        model,
         prompt,
-        aspect_ratio: "16:9",
-        duration: 15,
-        resolution: "1080p",
-        audio: true,
       }),
     }),
   );
@@ -139,10 +135,10 @@ static/video:
 
   const db = createSqliteDb(join(dataDir, "helm.db"));
   const keys = new SqliteKeyStore(db);
-  for (const [keyId, key, accountId] of [
-    ["video_key_a", KEY_A, HELM_ACCOUNT],
-    ["video_key_b", KEY_B, HELM_ACCOUNT],
-    ["video_key_c", KEY_C, "acct_video_other"],
+  for (const [keyId, key, accountId, allowCustomModel] of [
+    ["video_key_a", KEY_A, HELM_ACCOUNT, true],
+    ["video_key_b", KEY_B, HELM_ACCOUNT, false],
+    ["video_key_c", KEY_C, "acct_video_other", false],
   ] as const) {
     await keys.createKey({
       keyId,
@@ -150,6 +146,7 @@ static/video:
       prefix: key.slice(0, 16),
       accountId,
       role: "user",
+      allowCustomModel,
     });
   }
   const oauth = new SqliteOAuthTokenStore(db);
@@ -263,7 +260,11 @@ test("start, owner isolation, OAuth pinning, and restart recovery stay on one du
     },
   ]);
 
-  const first = await createPromptVideo(KEY_A, "camera pushes toward the subject");
+  const first = await createPromptVideo(
+    KEY_A,
+    "camera pushes toward the subject",
+    "xai/grok-imagine-video",
+  );
   const second = await createVideo(KEY_B, "wind moves the subject's coat");
   expect(first.status).toBe(200);
   expect(second.status).toBe(200);
