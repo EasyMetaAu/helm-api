@@ -204,6 +204,7 @@ import { createRealtimeCallRegistry, type RealtimeCallRegistry } from "./realtim
 import { createResponsesRegistry } from "./responses-registry.js";
 import { responsesWebSocketPreflightPending } from "./responses-websocket.js";
 import { createArchiveFsAccess } from "./routes/admin/cleanup-fs.js";
+import type { OAuthMutationOptions } from "./routes/admin/deps.js";
 import { registerAdminApi } from "./routes/admin/index.js";
 import { createOAuthAccountTester, type OAuthTester } from "./routes/admin/oauth-test.js";
 import { createRuntimeRuleStore } from "./routes/admin/rule-store.js";
@@ -1866,6 +1867,16 @@ export function supportsAutomaticVacuum(driver: "sqlite" | "supabase"): boolean 
   return driver === "sqlite";
 }
 
+export function resolveXaiMediaEmergencyState(
+  current: boolean,
+  command: OAuthMutationOptions["xaiMediaEmergency"],
+  rebuildApplied: boolean,
+): boolean {
+  if (command === "disable") return true;
+  if (command === "restore" && rebuildApplied) return false;
+  return current;
+}
+
 // Full wiring: config -> store -> bootstrap key -> provider -> routing pipeline.
 // Fail-closed: an invalid config throws (caller exits non-zero). The HTTP listen
 // is performed by the caller (index.ts) so this stays testable. Async because the
@@ -1987,7 +1998,7 @@ export async function buildServer(
     ? { store: store.oauthTokens, encKey: oauthEncKey }
     : undefined;
   let rebuildOAuthPool:
-    | ((options?: { disableXaiMedia?: boolean }) => Promise<{ applied: boolean }>)
+    | ((options?: OAuthMutationOptions) => Promise<{ applied: boolean }>)
     | undefined;
   const codexModelsEtagTracker = createCodexModelsEtagTracker();
   const oauthModelDiscoveryCache = createOAuthModelDiscoveryCache();
@@ -2949,6 +2960,21 @@ export async function buildServer(
     ...configuredClients,
     ...oauthPoolClients,
   ]);
+  let xaiMediaEmergencyDisabled = false;
+  const removeXaiMediaAliases = (
+    aliasSet: typeof oauthAliasSet,
+    wireModelMap: typeof oauthWireModelMap,
+    modelMap: typeof xaiOAuthModelMap,
+    modelAccounts: typeof xaiOAuthModelAccounts,
+  ) => {
+    for (const model of GROK_OAUTH_MEDIA_MODELS) {
+      const alias = `xai/${model}`;
+      aliasSet.delete(alias);
+      wireModelMap.delete(alias);
+      modelMap.delete(alias);
+      modelAccounts.delete(alias);
+    }
+  };
   // Serialize rebuilds onto a chain so two rapid admin saves can't interleave a stale
   // read with a fresh assign — each link re-reads the CURRENT account settings + bound
   // credentials, re-synthesizes, and swaps the map + alias set. The chain itself never
@@ -2959,14 +2985,18 @@ export async function buildServer(
   rebuildOAuthPool = async (options): Promise<{ applied: boolean }> => {
     let applied = true;
     rebuildChain = rebuildChain.then(async () => {
-      if (options?.disableXaiMedia) {
-        for (const model of GROK_OAUTH_MEDIA_MODELS) {
-          const alias = `xai/${model}`;
-          oauthAliasSet.delete(alias);
-          oauthWireModelMap.delete(alias);
-          xaiOAuthModelMap.delete(alias);
-          xaiOAuthModelAccounts.delete(alias);
-        }
+      if (options?.xaiMediaEmergency === "disable") {
+        xaiMediaEmergencyDisabled = resolveXaiMediaEmergencyState(
+          xaiMediaEmergencyDisabled,
+          "disable",
+          true,
+        );
+        removeXaiMediaAliases(
+          oauthAliasSet,
+          oauthWireModelMap,
+          xaiOAuthModelMap,
+          xaiOAuthModelAccounts,
+        );
         logger.log("warn", "oauth.xai_media.disabled", {
           reason: "entitlement refresh was inconclusive",
         });
@@ -2988,15 +3018,37 @@ export async function buildServer(
           codexRuntime,
           oauthModelDiscoveryCache,
         );
+        const nextAliasSet = aliasSetOf(next);
+        const nextWireModelMap = wireModelsOf(next);
+        const nextXaiModelMap = next.xaiModels;
+        const nextXaiModelAccounts = next.xaiModelAccounts;
+        if (xaiMediaEmergencyDisabled && options?.xaiMediaEmergency !== "restore") {
+          removeXaiMediaAliases(
+            nextAliasSet,
+            nextWireModelMap,
+            nextXaiModelMap,
+            nextXaiModelAccounts,
+          );
+        }
         oauthPoolClients = next.poolClients;
-        oauthAliasSet = aliasSetOf(next);
-        oauthWireModelMap = wireModelsOf(next);
-        xaiOAuthModelMap = next.xaiModels;
-        xaiOAuthModelAccounts = next.xaiModelAccounts;
+        oauthAliasSet = nextAliasSet;
+        oauthWireModelMap = nextWireModelMap;
+        xaiOAuthModelMap = nextXaiModelMap;
+        xaiOAuthModelAccounts = nextXaiModelAccounts;
         providerClients = new Map<string, ProviderClient>([
           ...configuredClients,
           ...oauthPoolClients,
         ]);
+        if (options?.xaiMediaEmergency === "restore") {
+          xaiMediaEmergencyDisabled = resolveXaiMediaEmergencyState(
+            xaiMediaEmergencyDisabled,
+            "restore",
+            true,
+          );
+          logger.log("info", "oauth.xai_media.restored", {
+            reason: "fresh entitlement was persisted",
+          });
+        }
         codexModelTokenManagers.clear();
         codexModelsEtagTracker.invalidate();
         logger.log("info", "oauth.pool.rebuilt", {
@@ -3004,6 +3056,11 @@ export async function buildServer(
         });
       } catch (err) {
         applied = false;
+        xaiMediaEmergencyDisabled = resolveXaiMediaEmergencyState(
+          xaiMediaEmergencyDisabled,
+          options?.xaiMediaEmergency,
+          false,
+        );
         logger.log("warn", "oauth.pool.rebuild_failed", {
           line: err instanceof Error ? err.message : String(err),
         });

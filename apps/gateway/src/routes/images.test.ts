@@ -203,7 +203,8 @@ describe("registerImagesRoute", () => {
     const response = await post(app, {
       model: "grok-imagine-image",
       prompt: "a cat",
-      resolution: "2k",
+      n: 2,
+      aspect_ratio: "16:9",
     });
 
     expect(response.status).toBe(400);

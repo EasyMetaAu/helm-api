@@ -62,4 +62,25 @@ describe("PgOAuthQuotaStore (pglite)", () => {
     expect(got?.planType ?? null).toBeNull();
     expect(got?.credits ?? null).toBeNull();
   });
+
+  it("preserves an active cooldown when an xAI entitlement tombstone replaces windows", async () => {
+    const db: PgDb = await createPgliteDb();
+    const store = new PgOAuthQuotaStore(db);
+    await store.setUsageLimit("xai", "subscription", 9_000);
+
+    await store.upsert(
+      snap({
+        providerId: "xai",
+        account: "subscription",
+        source: "xai",
+        capturedAt: 1_234,
+        windows: [],
+      }),
+    );
+
+    expect(await store.get("xai", "subscription")).toMatchObject({
+      windows: [],
+      usageLimitedUntilMs: 9_000,
+    });
+  });
 });

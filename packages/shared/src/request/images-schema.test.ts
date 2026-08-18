@@ -88,22 +88,29 @@ describe("ImageGenerationRequestSchema", () => {
 });
 
 describe("GrokImagineImageGenerationRequestSchema", () => {
-  it("accepts both Grok web image modes and the observed count/aspect-ratio controls", () => {
-    for (const model of ["grok-imagine-image", "grok-imagine-image-quality"]) {
-      expect(
-        GrokImagineImageGenerationRequestSchema.safeParse({ model, prompt: "a cat" }).success,
-      ).toBe(true);
-      expect(
-        GrokImagineImageGenerationRequestSchema.safeParse({
-          model,
-          prompt: "a cat",
-          n: 4,
-          aspect_ratio: "16:9",
-          resolution: "1k",
-          response_format: "b64_json",
-        }).success,
-      ).toBe(true);
-    }
+  it("accepts only the proven prompt-only fast-image contract", () => {
+    expect(
+      GrokImagineImageGenerationRequestSchema.safeParse({
+        model: "grok-imagine-image",
+        prompt: "a cat",
+      }).success,
+    ).toBe(true);
+    expect(
+      GrokImagineImageGenerationRequestSchema.safeParse({
+        model: "grok-imagine-image",
+        prompt: "a cat",
+        n: 4,
+        aspect_ratio: "16:9",
+        resolution: "1k",
+        response_format: "b64_json",
+      }).success,
+    ).toBe(false);
+    expect(
+      GrokImagineImageGenerationRequestSchema.safeParse({
+        model: "grok-imagine-image-quality",
+        prompt: "a cat",
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects unverified Grok web image fields before a paid create", () => {

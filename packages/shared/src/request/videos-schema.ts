@@ -7,21 +7,22 @@ const VideoSourceSchema = z.strictObject({ url: z.string().min(1) });
 const VideoDurationSchema = z.union([z.literal(6), z.literal(10)]);
 const VideoResolutionSchema = z.enum(["480p", "720p"]);
 const VideoAspectRatioSchema = z.enum(["1:1", "16:9", "9:16", "3:2", "2:3"]);
+const PromptVideoModelSchema = z.enum(["grok-imagine-video", "xai/grok-imagine-video"]);
+const SingleImageVideoModelSchema = z.enum([
+  "grok-imagine-video-1.5-preview",
+  "xai/grok-imagine-video-1.5-preview",
+]);
 
 // Sub2API's proven forwarding contract uses the base Imagine model for a native
 // prompt-only create. Keep this separate from 1.5, whose upstream contract still
 // requires an input image.
 const PromptOnlyVideoRequestSchema = z.strictObject({
-  model: z.literal("grok-imagine-video"),
+  model: PromptVideoModelSchema,
   prompt: z.string().min(1),
-  aspect_ratio: VideoAspectRatioSchema.optional(),
-  duration: z.union([VideoDurationSchema, z.literal(15)]).optional(),
-  resolution: z.union([VideoResolutionSchema, z.literal("1080p")]).optional(),
-  audio: z.boolean().optional(),
 });
 
 const SingleImageVideoRequestSchema = z.strictObject({
-  model: z.literal("grok-imagine-video-1.5-preview"),
+  model: SingleImageVideoModelSchema,
   // xAI permits an empty motion prompt for the single-image workflow.
   prompt: z.string(),
   image: VideoSourceSchema,
@@ -30,7 +31,7 @@ const SingleImageVideoRequestSchema = z.strictObject({
 });
 
 const ReferenceImageVideoRequestSchema = z.strictObject({
-  model: z.literal("grok-imagine-video"),
+  model: PromptVideoModelSchema,
   prompt: z.string().min(1),
   reference_images: z.array(VideoSourceSchema).min(2).max(7),
   aspect_ratio: VideoAspectRatioSchema,
@@ -50,11 +51,28 @@ export const VideoGenerationResponseSchema = z.looseObject({
   request_id: z.string().refine((value) => value.trim().length > 0, "request_id must not be blank"),
 });
 
-export const VideoRetrieveResponseSchema = z.looseObject({
-  // Unknown states intentionally stay untouched; only the client knows whether to
-  // continue polling, while Helm merely proves the response is a video task body.
-  status: z.string(),
-});
+export const VideoRetrieveResponseSchema = z
+  .looseObject({
+    // Unknown states intentionally stay untouched; only the client knows whether to
+    // continue polling, while Helm merely proves the response is a video task body.
+    status: z.string().refine((value) => value.trim().length > 0, "status must not be blank"),
+  })
+  .superRefine((body, ctx) => {
+    if (body.status !== "done") return;
+    const video = body.video;
+    if (
+      video === null ||
+      typeof video !== "object" ||
+      Array.isArray(video) ||
+      typeof (video as Record<string, unknown>).url !== "string" ||
+      ((video as Record<string, unknown>).url as string).trim().length === 0
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message: "done video response requires a non-blank video.url",
+      });
+    }
+  });
 
 export type VideoGenerationRequest = z.infer<typeof VideoGenerationRequestSchema>;
 export type VideoGenerationResponse = z.infer<typeof VideoGenerationResponseSchema>;

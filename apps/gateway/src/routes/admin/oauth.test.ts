@@ -775,16 +775,21 @@ describe("admin OAuth routes — read endpoints", () => {
     expect(oauthQuota?.upsert).toHaveBeenCalledWith(
       expect.objectContaining({ providerId: "anthropic", account: "default" }),
     );
-    expect(oauthQuota?.upsert).not.toHaveBeenCalledWith(
-      expect.objectContaining({ providerId: "xai" }),
+    expect(oauthQuota?.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerId: "xai",
+        account: "subscription",
+        windows: [],
+        source: "xai",
+      }),
     );
-    expect(oauthQuota?.delete).toHaveBeenCalledWith("xai", "subscription");
+    expect(oauthQuota?.delete).not.toHaveBeenCalledWith("xai", "subscription");
     expect(oauthQuota?.delete).toHaveBeenCalledWith("xai", "orphan");
     expect(onOAuthMutation).toHaveBeenNthCalledWith(1, undefined);
-    expect(onOAuthMutation).toHaveBeenNthCalledWith(2, { disableXaiMedia: true });
+    expect(onOAuthMutation).toHaveBeenNthCalledWith(2, { xaiMediaEmergency: "disable" });
   });
 
-  it("POST /oauth/refresh disables live xAI media when stale entitlement deletion fails", async () => {
+  it("POST /oauth/refresh disables live xAI media when entitlement revocation persistence fails", async () => {
     const stale = {
       providerId: "xai",
       account: "subscription",
@@ -802,10 +807,12 @@ describe("admin OAuth routes — read endpoints", () => {
     const oauthQuota = {
       get: vi.fn(async () => stale),
       getAll: vi.fn(async () => [stale]),
-      upsert: vi.fn(async () => {}),
-      delete: vi.fn(async () => {
-        throw new Error("sqlite busy");
+      upsert: vi.fn(async (snapshot) => {
+        if (snapshot.providerId === "xai" && snapshot.windows.length === 0) {
+          throw new Error("sqlite busy");
+        }
       }),
+      delete: vi.fn(async () => {}),
     } as unknown as AdminApiDeps["oauthQuota"];
     const seam = fullSeam({
       listStatus: vi.fn(async () => ({
@@ -820,8 +827,40 @@ describe("admin OAuth routes — read endpoints", () => {
 
     await enqueueRefresh(app({ oauth: seam, oauthQuota, onOAuthMutation }), "failed");
 
-    expect(onOAuthMutation).toHaveBeenNthCalledWith(1, undefined);
-    expect(onOAuthMutation).toHaveBeenNthCalledWith(2, { disableXaiMedia: true });
+    expect(onOAuthMutation).toHaveBeenNthCalledWith(1, { xaiMediaEmergency: "disable" });
+    expect(onOAuthMutation).toHaveBeenNthCalledWith(2, undefined);
+  });
+
+  it("POST /oauth/refresh restores xAI media only after fresh entitlement persists", async () => {
+    const oauthQuota = {
+      get: vi.fn(async () => null),
+      getAll: vi.fn(async () => []),
+      upsert: vi.fn(async () => {}),
+      delete: vi.fn(async () => {}),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const seam = fullSeam({
+      listStatus: vi.fn(async () => ({
+        selectionStrategy: "balanced",
+        providers: [{ id: "xai", name: "Grok", accounts: [{ account: "subscription" }] }],
+      })) as never,
+      fetchXaiQuota: vi.fn(async () => [
+        {
+          key: "7d",
+          usedPercent: 1,
+          resetsAtMs: Date.now() + 86_400_000,
+          windowMinutes: 10_080,
+        },
+      ]),
+    });
+    const onOAuthMutation = vi.fn(async () => ({ applied: true }));
+
+    await enqueueRefresh(app({ oauth: seam, oauthQuota, onOAuthMutation }));
+
+    expect(oauthQuota?.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: "xai", account: "subscription" }),
+    );
+    expect(onOAuthMutation).toHaveBeenCalledOnce();
+    expect(onOAuthMutation).toHaveBeenCalledWith({ xaiMediaEmergency: "restore" });
   });
 
   it("POST /oauth/refresh extends an active cooldown to the saturated window reset", async () => {

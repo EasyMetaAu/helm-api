@@ -235,6 +235,16 @@ describe("createOpenAIClient.videoRetrieve", () => {
     });
   });
 
+  it("rejects a completed poll response without a playable video URL", async () => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({ status: "done" }));
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+
+    await expect(client.videoRetrieve?.("req_123")).rejects.toMatchObject({
+      name: "UpstreamError",
+      upstreamStatus: 200,
+    });
+  });
+
   it("scrubs an echoed credential from a poll error", async () => {
     const fetch = vi
       .fn()

@@ -34,6 +34,7 @@ import type {
   CodexQuotaResult,
   OAuthAdminAccess,
   OAuthAdminStatusResponse,
+  OAuthMutationOptions,
   OAuthSelectionStrategy,
 } from "./deps.js";
 
@@ -226,7 +227,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
   // re-synthesis), the persist still SUCCEEDED, so the caller returns a 503
   // "saved but not applied" rather than a false 204 — the change takes effect on the
   // next successful mutation or a restart. No hook wired (unit tests) ⇒ applied.
-  const afterMutation = async (options?: { disableXaiMedia?: boolean }): Promise<boolean> => {
+  const afterMutation = async (options?: OAuthMutationOptions): Promise<boolean> => {
     if (!deps.onOAuthMutation) return true;
     try {
       return (await deps.onOAuthMutation(options)).applied;
@@ -395,6 +396,16 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     const failures: string[] = [];
     let xaiEntitlementUncertain = false;
     let xaiEntitlementCleanupFailed = false;
+    let xaiAccountsToRefresh = 0;
+    let xaiEntitlementsPersisted = 0;
+    const revokeXaiEntitlement = (account: string) =>
+      store.upsert({
+        providerId: "xai",
+        account,
+        windows: [],
+        capturedAt: Date.now(),
+        source: "xai",
+      });
     const syncCooldownFromWindows = async (
       providerId: string,
       account: string,
@@ -482,7 +493,9 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         // media fails closed; ordinary xAI text routing remains independent.
         const fetchXai = s.fetchXaiQuota;
         if (fetchXai) {
-          for (const a of acctsOf("xai")) {
+          const xaiAccounts = acctsOf("xai");
+          xaiAccountsToRefresh = xaiAccounts.length;
+          for (const a of xaiAccounts) {
             tasks.push({
               label: `xai/${a.account}`,
               run: async () => {
@@ -500,16 +513,17 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
                     capturedAt,
                     source: "xai",
                   });
+                  xaiEntitlementsPersisted += 1;
                   deps.applyQuotaSnapshot?.("xai", a.account, windows, capturedAt);
                   await syncCooldownFromWindows("xai", a.account, windows);
                 } catch (error) {
                   xaiEntitlementUncertain = true;
                   try {
-                    await store.delete("xai", a.account);
-                  } catch (deleteError) {
+                    await revokeXaiEntitlement(a.account);
+                  } catch (cleanupError) {
                     xaiEntitlementCleanupFailed = true;
                     failures.push(
-                      `xai/${a.account} entitlement cleanup: ${errMessage(deleteError)}`,
+                      `xai/${a.account} entitlement cleanup: ${errMessage(cleanupError)}`,
                     );
                   }
                   throw error;
@@ -608,7 +622,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       const results = await Promise.allSettled(
         all
           .filter((snapshot) => snapshot.providerId === "xai")
-          .map((snapshot) => store.delete("xai", snapshot.account)),
+          .map((snapshot) => revokeXaiEntitlement(snapshot.account)),
       );
       if (results.some((result) => result.status === "rejected")) {
         xaiEntitlementCleanupFailed = true;
@@ -628,9 +642,18 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     // not hide a different account whose fresh entitlement refresh succeeded. If the
     // rebuild itself fails after entitlement became uncertain, immediately remove
     // every live xAI media alias so stale positive evidence cannot keep serving.
-    const rebuilt = await afterMutation();
-    if (xaiEntitlementCleanupFailed || (!rebuilt && xaiEntitlementUncertain)) {
-      await afterMutation({ disableXaiMedia: true });
+    if (xaiEntitlementCleanupFailed) {
+      await afterMutation({ xaiMediaEmergency: "disable" });
+    }
+    const restoreXaiMedia =
+      xaiAccountsToRefresh > 0 &&
+      xaiEntitlementsPersisted === xaiAccountsToRefresh &&
+      !xaiEntitlementUncertain;
+    const rebuilt = await afterMutation(
+      restoreXaiMedia ? { xaiMediaEmergency: "restore" } : undefined,
+    );
+    if (!rebuilt && xaiEntitlementUncertain) {
+      await afterMutation({ xaiMediaEmergency: "disable" });
     }
     if (!rebuilt) {
       failures.push("oauth pool: refreshed entitlement not applied");
