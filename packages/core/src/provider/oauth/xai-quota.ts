@@ -3,7 +3,16 @@ import type { OAuthQuotaWindow } from "@helm/shared";
 const WEEKLY_WINDOW_MINUTES = 7 * 24 * 60;
 const MIN_WEEKLY_WINDOW_MS = 6 * 24 * 60 * 60_000;
 const MAX_WEEKLY_WINDOW_MS = 8 * 24 * 60 * 60_000;
+const MEDIA_ENTITLEMENT_MAX_AGE_MS = 24 * 60 * 60_000;
 const WEEKLY_PERIOD_TYPE = "USAGE_PERIOD_TYPE_WEEKLY";
+const PAID_MEDIA_TIERS = new Set([
+  "supergrok",
+  "x_premium",
+  "x_premium_plus",
+  "supergrok_heavy",
+  "supergrok_lite",
+  "supergrok_plus",
+]);
 const RFC3339_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|([+-])(\d{2}):(\d{2}))$/;
 
@@ -103,7 +112,8 @@ function officialBillingWindow(body: unknown, nowMs: number): OAuthQuotaWindow |
 /**
  * Parse the official Grok Build credits JSON returned by
  * `GET /v1/billing?format=credits`.
- * Malformed, stale, and non-weekly responses fail open.
+ * Malformed, stale, and non-weekly responses return no window. Callers use that
+ * as fail-open observability data and fail-closed media entitlement evidence.
  */
 export function parseXaiGrokCreditsResponse(
   body: unknown,
@@ -112,4 +122,57 @@ export function parseXaiGrokCreditsResponse(
   if (!Number.isSafeInteger(nowMs)) return [];
   const window = officialBillingWindow(body, nowMs);
   return window === null ? [] : [window];
+}
+
+/**
+ * Grok media requires two independent positive signals: a fresh weekly billing
+ * window and an explicit known-paid tier in the current OAuth token. Missing,
+ * malformed, stale, free, or unknown-tier evidence fails closed for media only;
+ * ordinary xAI text routing remains independent.
+ */
+export function xaiGrokMediaEntitlementValidUntil(
+  snapshot:
+    | {
+        windows: readonly OAuthQuotaWindow[];
+        capturedAt: number;
+      }
+    | undefined,
+  nowMs: number = Date.now(),
+  tierHint?: string,
+): number | null {
+  const normalizedTier = tierHint?.trim().toLowerCase().replaceAll("-", "_");
+  if (
+    snapshot === undefined ||
+    !Number.isSafeInteger(snapshot.capturedAt) ||
+    !Number.isSafeInteger(nowMs) ||
+    snapshot.capturedAt > nowMs ||
+    nowMs - snapshot.capturedAt >= MEDIA_ENTITLEMENT_MAX_AGE_MS ||
+    normalizedTier === undefined ||
+    !PAID_MEDIA_TIERS.has(normalizedTier)
+  ) {
+    return null;
+  }
+  const weeklyReset = snapshot.windows.find(
+    (window) =>
+      window.key === "7d" &&
+      window.windowMinutes === WEEKLY_WINDOW_MINUTES &&
+      window.resetsAtMs !== null &&
+      window.resetsAtMs > nowMs,
+  )?.resetsAtMs;
+  return weeklyReset === null || weeklyReset === undefined
+    ? null
+    : Math.min(snapshot.capturedAt + MEDIA_ENTITLEMENT_MAX_AGE_MS, weeklyReset);
+}
+
+export function isXaiGrokMediaEntitled(
+  snapshot:
+    | {
+        windows: readonly OAuthQuotaWindow[];
+        capturedAt: number;
+      }
+    | undefined,
+  nowMs: number = Date.now(),
+  tierHint?: string,
+): boolean {
+  return xaiGrokMediaEntitlementValidUntil(snapshot, nowMs, tierHint) !== null;
 }

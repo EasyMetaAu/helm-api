@@ -7,6 +7,17 @@
 
 ---
 
+## 2026-08-18 · Grok.com Imagine 复用 OAuth 媒体链并以短期 billing 证据授权（OAuth / Images / Videos，Phase 1 spec §4–9，原则 2/3/6/7）
+
+- **账号资格**：不新增 entitlement 表；复用 SQLite/Postgres 已持久化的 xAI 周 billing snapshot。媒体正向授权必须同时满足“24 小时内的新鲜周 billing”与“当前 OAuth JWT 是明确的已知付费 tier”，opaque、缺失、未知、`free`、`x_basic` 均 fail-closed；有效期取 `capturedAt + 24h` 与周窗口 reset 的较早者。普通 Grok 文本模型不读取此媒体 gate。
+- **动态撤权与混合账号池**：每个媒体模型把 `validUntilMs` 带进账号池，选择、图片/视频 resolver 和 `/v1/models` 都按实时 clock 重评估，无需重启或定时 sweep；只指向已失效 OAuth leaf 的媒体 lane 也同步从 discovery 隐藏。OAuth 完成后异步拉取 xAI billing；空结果或失败会删除旧快照并重建。若删除失败，即使普通 rebuild 成功也立即摘除全部 live xAI 媒体 alias，避免旧行重新授权；单账号失败不遮蔽其他有新鲜证据的账号。
+- **媒体合同**：图片继续使用原 `/v1/images/generations` 与单写保护，只给 Grok 快速/质量模型增加严格的 `n=1..4`、六种宽高比合同，并把空数组、空字符串或纯空白图片载体视为 `outcome_unknown`；其他图片 provider 保持宽松 OpenAI 兼容合同。纯文字视频复用原 `/v1/videos/generations`、任务 registry 与固定账号 poll，不新增文字转图片的两步 workflow。
+- **真实 canary 与运行边界**：用户批准的本机 canary 恰好执行一次默认 fast 图片 create 和一次默认 prompt-only 视频 create，均未重试；图片得到 1 个非空结果，视频取得 receipt 后由原账号 6 次 GET 轮询到 `done` 和非空结果。候选镜像 `sha256:2940600c…`、`/version` dirty SHA、entitlement、serving account、registry、telemetry 与普通日志脱敏回读一致，旧 v0.28.74 容器保留为停止态回滚点。宿主 Playwright 因真实 `response_work_capacity_exhausted` 保护无法解析 mock 响应，未削弱生产保护；同一 `videos.spec.ts` 在 Docker builder 中 2/2 通过。现有 recovery key 没有低 cap，因此完整 Go 门禁仍未满足。
+- **可重复 live smoke**：新增默认跳过的 `apps/gateway/src/live-grok-imagine.test.ts`，必须同时提供 loopback Helm 地址、环境变量 key 与 `I_ACCEPT_EXACTLY_2_MEDIA_CREATES` 才会执行；每次只发 1 次默认图片 create 和 1 次纯文字视频 create，POST 无重试，视频只做有界同 receipt GET poll，测试输出不包含 key、prompt、receipt、正文或签名 URL。用户同日明确要求的实跑为 2/2 通过：图片结果可读；视频一次接受后经 5 次只读 poll 到 `done`，且结果字节可读取。
+- **完整 CI 本机复刻**：在不再调用付费媒体接口的前提下，以 Docker 隔离环境逐项复刻 `.github/workflows/ci.yml`：typecheck、lint、build 通过；fast suite 355/355 文件、6417/6417 用例通过；Store suite 60/60 文件、650/650 用例通过；真实 PostgreSQL 合约与完整 Playwright e2e 95/95 通过；正式多阶段镜像 `sha256:fbfa07f3…` 的 `/healthz` 回读 `ready:true`，`/version` 回读 `0.28.74` 与非 `unknown` Git SHA。最初的缺 `.github`、root 权限、OpenSSL 和容器内 Docker 都是本地测试壳与 GitHub Ubuntu runner 的环境差异，补齐同等前置条件后均全绿；临时数据库、网络、浏览器缓存和 smoke 容器已清理，现有 `helm` 候选容器未受影响。
+- **交付边界**：本轮只提交、推送并创建正式 PR，不合并或部署；规格中的“完整 CI”勾选仅表示本机对四个执行 job 的等价复刻已经通过，正式 PR 仍须由托管 CI 复验。P1 细粒度媒体选项、低 cap key 前置条件与“关闭新能力但保留已接受视频 poll”的回滚门禁仍未完成，因此整体发布 Go 门禁仍是 No-Go。
+- **剩余限制**：当前只有账号级媒体开关；默认 fast 图片已经真实验证，但仍没有可靠的上游细粒度 entitlement 分别证明 quality、数量、宽高比、6/10/15s、480p/720p/1080p 或 audio 对该套餐都可用。这些 P1 选项继续保持关闭/未完成，不能从一次默认 canary 外推。
+
 ## 2026-08-15 · 自动 Memory 形成必须挂在项目或资源下（Memory Observer / Reflector / Store，docs/08/12，原则 3/7）
 
 - **根因与修复**：历史 quarantine thread 没有项目/资源；decay 归档 observation 时把它回退成 thread-only Reflector scope，随后生成 Admin「按范围」里没有父级的 active reflection。请求 observe writeback 与 eager fact 路径也允许相同的孤立范围。现在入站/出站观察在缺少项目和资源时直接 fail-open 跳过，eager extraction 不调用模型，Reflector 对已持久化的孤立 job 在任何读写前标记失败。
@@ -57,11 +68,6 @@
 - **清理与遗忘**：raw cleanup 只删 frontier 已覆盖行，Postgres cleanup/telemetry/OAuth usage 使用小批次；decay 会在同一事务立即归档受影响 reflection、fence 正在运行的旧 Reflector，并为 project/resource 各自排 successor。Reflector 的 facts + reflection + job completion 也由 job 状态 fence 后原子提交，避免遗忘后复活。SQLite/Postgres migration 会重算 stale counters、补索引，legacy raw 保持 null frontier 后按有界页回放。
 - **升级兼容**：lease generation migration 仅在 `memory_jobs` 已存在时加列；历史上的精简/部分 schema 仍可继续升级，完整生产 schema 则照常初始化 generation 0。不能用无条件 `ALTER TABLE`，否则会让无 Memory 表的旧安装启动失败。
 - **取舍/限制**：`message_index` 仍只用于当前 ingest dedup，不能作为线程顺序；没有客户端稳定 turn id 时无法同时保证跨请求精确去重和保留合法重复。legacy bounded backfill 可能与旧 Observation 暂时重叠，因为旧 range 的错误顺序无法精确还原；这里选择宁可短期过度保留，也不静默丢失未覆盖 raw。Reflection 使用 bounded latest-set，而非持久 rolling draft。生产恢复 worker 必须 concurrency=1 灰度，先验证 migration/frontier/RSS/restart/OOM/502，再开启 raw cleanup。
-
-## 2026-08-10 · 大 Session 客户端重建恢复服务端同款 Conversation 展示（Admin / requests debug，docs/07/11，原则 1/3/7）
-
-- **回归**：上一版为了展示时间线，把 `transcriptLoaded` 后的主请求区域强制切到 `JsonViewer`，隐藏了服务端恢复路径使用的 Conversation/Raw tabs，导致客户端加载后的可读性明显下降。
-- **修复**：客户端只替换数据获取与重建方式；重建完成后继续走同一套 Conversation、Raw `JsonViewer`、Response `StreamViewer/JsonViewer` 路径。按记录时间排序的 revision 时间线仍作为额外审计视图保留。
 
 ## 历史条目摘要（最新要点）
 

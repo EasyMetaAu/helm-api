@@ -128,6 +128,8 @@ import {
   XAI_GROK_OAUTH_BASE_URL,
   type XaiOAuthModel,
   xaiGrokInferenceHeaders,
+  xaiGrokMediaEntitlementValidUntil,
+  xaiGrokSubscriptionTierHint,
 } from "@helm/core";
 import type {
   CatalogEntry,
@@ -996,6 +998,8 @@ export async function synthesizeOAuthProviders(
     const unionWireModels = new Map<string, string>();
     for (const account of accounts) {
       const s = getAccountSettings(accountSettings, providerId, account);
+      const queueKey = `${providerId} ${account}`;
+      const quotaSeed = quotaSeeds?.get(queueKey);
       if (typeof s.credentialFailedAt === "number") {
         log("warn", "oauth.autoroute.skip", {
           providerId,
@@ -1036,6 +1040,7 @@ export async function synthesizeOAuthProviders(
       let discovered: string[];
       let discoveredWireModels = new Map<string, string>();
       let discoveredXaiModels = new Map<string, XaiOAuthModel>();
+      let modelValidUntilMs: Record<string, number> | undefined;
       let accountCodexRuntime: CodexAccountRuntime | undefined;
       let accountXaiRuntime: XaiAccountRuntime | undefined;
       if (providerId === "xai") {
@@ -1069,9 +1074,20 @@ export async function synthesizeOAuthProviders(
         const routable = catalog.filter(isRoutableXaiOAuthModel);
         const enabled = modelsMode === "manual" ? new Set(s.enabledModels ?? []) : undefined;
         const selected = enabled ? routable.filter((model) => enabled.has(model.id)) : routable;
+        const entitlementValidUntil = xaiGrokMediaEntitlementValidUntil(
+          quotaSeed,
+          Date.now(),
+          xaiGrokSubscriptionTierHint(accessToken),
+        );
+        const entitledMedia = entitlementValidUntil === null ? [] : GROK_OAUTH_MEDIA_MODELS;
         const selectedMedia = enabled
-          ? GROK_OAUTH_MEDIA_MODELS.filter((model) => enabled.has(model))
-          : GROK_OAUTH_MEDIA_MODELS;
+          ? entitledMedia.filter((model) => enabled.has(model))
+          : entitledMedia;
+        if (entitlementValidUntil !== null) {
+          modelValidUntilMs = Object.fromEntries(
+            selectedMedia.map((model) => [model, entitlementValidUntil]),
+          );
+        }
         discovered = selected.map((model) => model.id);
         discoveredWireModels = new Map(selected.map((model) => [model.id, model.model]));
         discoveredXaiModels = new Map(selected.map((model) => [model.id, model]));
@@ -1213,8 +1229,6 @@ export async function synthesizeOAuthProviders(
       // Serialize user-message requests per account (issue #93, feature B). The
       // wrap sits INSIDE the pool member so the gate key is the concrete account
       // the pool selected; non-user turns and a disabled setting pass through.
-      const queueKey = `${providerId} ${account}`;
-      const quotaSeed = quotaSeeds?.get(queueKey);
       const serialized = userMessageQueue
         ? createSerializingClient({
             inner: client,
@@ -1230,6 +1244,7 @@ export async function synthesizeOAuthProviders(
         priority: s.priority ?? 50,
         schedulable: true,
         models: memberModels,
+        ...(modelValidUntilMs ? { modelValidUntilMs } : {}),
         client: serialized,
         isAtCapacity: userMessageQueue
           ? () => {
@@ -1971,7 +1986,9 @@ export async function buildServer(
   const oauthCtx: OAuthRuntimeCtx | undefined = oauthEncKey
     ? { store: store.oauthTokens, encKey: oauthEncKey }
     : undefined;
-  let rebuildOAuthPool: (() => Promise<{ applied: boolean }>) | undefined;
+  let rebuildOAuthPool:
+    | ((options?: { disableXaiMedia?: boolean }) => Promise<{ applied: boolean }>)
+    | undefined;
   const codexModelsEtagTracker = createCodexModelsEtagTracker();
   const oauthModelDiscoveryCache = createOAuthModelDiscoveryCache();
   const codexModelTokenManagers = new Map<string, ReturnType<typeof createTokenManager>>();
@@ -2341,8 +2358,8 @@ export async function buildServer(
 
   // Read persisted quota snapshots (oauth_quota) keyed `${providerId} ${account}`.
   // Cooldowns seed hard scheduling; windows/capturedAt seed quota-aware strategies.
-  // Fail-open to empty — a read error just means every member starts un-parked and
-  // quota-aware strategies fall back to balanced behavior.
+  // A read error returns an empty map: scheduling cooldowns fail open to balanced,
+  // while xAI media entitlement fails closed because no positive seed is present.
   const readQuotaSeeds = async (): Promise<Map<string, OAuthQuotaSeed>> => {
     const seeds = new Map<string, OAuthQuotaSeed>();
     try {
@@ -2918,6 +2935,16 @@ export async function buildServer(
   let oauthWireModelMap = wireModelsOf(synthesizedOAuth);
   let xaiOAuthModelMap = synthesizedOAuth.xaiModels;
   let xaiOAuthModelAccounts = synthesizedOAuth.xaiModelAccounts;
+  const isOAuthAliasAvailable = (alias: string): boolean => {
+    if (!oauthAliasSet.has(alias)) return false;
+    const slash = alias.indexOf("/");
+    if (slash <= 0) return false;
+    const pool = oauthPoolClients.get(alias.slice(0, slash));
+    const wireModel = oauthWireModelMap.get(alias) ?? alias.slice(slash + 1);
+    return pool?.hasAvailableModel(wireModel) === true;
+  };
+  const availableOAuthAliases = (): Set<string> =>
+    new Set([...oauthAliasSet].filter(isOAuthAliasAvailable));
   let providerClients = new Map<string, ProviderClient>([
     ...configuredClients,
     ...oauthPoolClients,
@@ -2929,9 +2956,22 @@ export async function buildServer(
   // admin route can return an honest "saved but not applied" (503) on failure instead
   // of a false 204 (the persisted change still wins on the next rebuild / restart).
   let rebuildChain: Promise<void> = Promise.resolve();
-  rebuildOAuthPool = async (): Promise<{ applied: boolean }> => {
+  rebuildOAuthPool = async (options): Promise<{ applied: boolean }> => {
     let applied = true;
     rebuildChain = rebuildChain.then(async () => {
+      if (options?.disableXaiMedia) {
+        for (const model of GROK_OAUTH_MEDIA_MODELS) {
+          const alias = `xai/${model}`;
+          oauthAliasSet.delete(alias);
+          oauthWireModelMap.delete(alias);
+          xaiOAuthModelMap.delete(alias);
+          xaiOAuthModelAccounts.delete(alias);
+        }
+        logger.log("warn", "oauth.xai_media.disabled", {
+          reason: "entitlement refresh was inconclusive",
+        });
+        return;
+      }
       try {
         const next = await synthesizeOAuthProviders(
           config.providers,
@@ -3128,7 +3168,7 @@ export async function buildServer(
     const slash = alias.indexOf("/");
     const prefix = slash > 0 ? alias.slice(0, slash) : "";
     if (prefix && ROUTABLE_OAUTH_IDS.has(prefix)) {
-      if (!oauthAliasSet.has(alias)) return null;
+      if (!isOAuthAliasAvailable(alias)) return null;
       const client = providerClients.get(prefix);
       return client
         ? { client, providerModel: oauthWireModelMap.get(alias) ?? alias.slice(slash + 1) }
@@ -3285,7 +3325,7 @@ export async function buildServer(
     // Live curated subscription aliases — the SAME hot-reloadable set the executor
     // routes by (rebound on OAuth curation/connect/disconnect), so discovery and
     // routability never disagree.
-    oauthAliases: () => oauthAliasSet,
+    oauthAliases: availableOAuthAliases,
     codexModels: async ({
       clientVersion,
       allowCustomModel,
@@ -3456,7 +3496,7 @@ export async function buildServer(
             // pool (fail-closed), bypassing the startup registry — so de-curation /
             // disconnect take effect immediately and never cross provider boundaries.
             knownOAuthPrefixes: ROUTABLE_OAUTH_IDS,
-            oauthAliases: () => oauthAliasSet,
+            oauthAliases: availableOAuthAliases,
             oauthWireModels: () => oauthWireModelMap,
             xaiOAuthModels: () => xaiOAuthModelMap,
             // Native protocol passthrough (issue #217): the OAuth pool aliases never
@@ -3489,7 +3529,7 @@ export async function buildServer(
           // Reads the LIVE oauthAliasSet/providerClients bindings (reassigned on
           // OAuth curation changes), exactly like the executor's oauthAliases thunk.
           isKnownModel: (alias) => {
-            if (oauthAliasSet.has(alias)) return true; // live curated OAuth set
+            if (isOAuthAliasAvailable(alias)) return true; // live curated OAuth set
             const slash = alias.indexOf("/");
             const prefix = slash > 0 ? alias.slice(0, slash) : "";
             // Un-curated subscription alias: fail closed (executor would skip it).
@@ -3992,7 +4032,7 @@ export async function buildServer(
       requestedModel,
       lanes,
       modelAliases,
-      oauthAliases: oauthAliasSet,
+      oauthAliases: availableOAuthAliases(),
       allowCustomModel: identity.caps?.allowCustomModel === true,
       allowedLanes: identity.caps?.allowedLanes,
       blockedModels: identity.caps?.blockedModels,
@@ -4247,7 +4287,7 @@ export async function buildServer(
     const slash = model.indexOf("/");
     const prefix = slash > 0 ? model.slice(0, slash) : "";
     if (prefix && ROUTABLE_OAUTH_IDS.has(prefix)) {
-      if (!oauthAliasSet.has(model)) return null;
+      if (!isOAuthAliasAvailable(model)) return null;
       if (catalog.get(model)?.capabilities.outputImage !== true) return null;
       const client = providerClients.get(prefix);
       if (!client?.imageGeneration) return { kind: "unavailable" };
@@ -4342,7 +4382,7 @@ export async function buildServer(
       const prefix = slash > 0 ? alias.slice(0, slash) : "";
       // Grok Imagine is deliberately subscription-only. Static API-key or generic
       // outputVideo providers must not become an implicit second credential path.
-      if (prefix !== "xai" || !oauthAliasSet.has(alias)) continue;
+      if (prefix !== "xai" || !isOAuthAliasAvailable(alias)) continue;
       const providerAlias = alias;
       const providerName = prefix;
       const providerModel = oauthWireModelMap.get(alias) ?? alias.slice(slash + 1);

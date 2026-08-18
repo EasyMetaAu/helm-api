@@ -155,6 +155,11 @@ export {
   xaiGrokCatalogHeaders,
   xaiGrokInferenceHeaders,
   xaiGrokProtocolHeaders,
+  xaiGrokSubscriptionTierHint,
   xaiOAuthProvider,
 } from "./xai.js";
-export { parseXaiGrokCreditsResponse } from "./xai-quota.js";
+export {
+  isXaiGrokMediaEntitled,
+  parseXaiGrokCreditsResponse,
+  xaiGrokMediaEntitlementValidUntil,
+} from "./xai-quota.js";

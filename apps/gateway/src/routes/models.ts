@@ -59,16 +59,16 @@ export function registerModelsRoute(app: Hono<AppEnv>, deps: ModelsRouteDeps): v
   const build = (c: Context<AppEnv>) => {
     const identity = c.get("identity");
     const caps = identity.caps;
-    // Fingerprint the only inputs that vary the output: the key's caps. lanes /
-    // oauth aliases are process-wide, so TTL alone (not the key) covers their drift.
-    const fp = `${caps.allowCustomModel ? 1 : 0}|${JSON.stringify(caps.allowedLanes)}|${JSON.stringify(caps.blockedModels)}`;
+    // OAuth aliases are part of the fingerprint so an entitlement expiry is visible
+    // immediately; lane/config drift still uses the short TTL.
+    const oauth = deps.oauthAliases ? [...deps.oauthAliases()].sort() : [];
+    const fp = `${caps.allowCustomModel ? 1 : 0}|${JSON.stringify(caps.allowedLanes)}|${JSON.stringify(caps.blockedModels)}|${JSON.stringify(oauth)}`;
     const now = Date.now();
     const hit = cache.get(fp);
     if (hit && now - hit.at < TTL_MS) return hit.value;
 
     // Merge static config aliases with the LIVE subscription set. buildModelsList
     // dedups + sorts, so an alias that is both configured and OAuth-curated lists once.
-    const oauth = deps.oauthAliases ? [...deps.oauthAliases()] : [];
     const value = buildModelsList({
       lanes: deps.lanes(),
       catalog: deps.catalog,

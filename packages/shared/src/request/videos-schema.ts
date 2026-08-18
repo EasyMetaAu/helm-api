@@ -6,6 +6,19 @@ import { z } from "zod";
 const VideoSourceSchema = z.strictObject({ url: z.string().min(1) });
 const VideoDurationSchema = z.union([z.literal(6), z.literal(10)]);
 const VideoResolutionSchema = z.enum(["480p", "720p"]);
+const VideoAspectRatioSchema = z.enum(["1:1", "16:9", "9:16", "3:2", "2:3"]);
+
+// Sub2API's proven forwarding contract uses the base Imagine model for a native
+// prompt-only create. Keep this separate from 1.5, whose upstream contract still
+// requires an input image.
+const PromptOnlyVideoRequestSchema = z.strictObject({
+  model: z.literal("grok-imagine-video"),
+  prompt: z.string().min(1),
+  aspect_ratio: VideoAspectRatioSchema.optional(),
+  duration: z.union([VideoDurationSchema, z.literal(15)]).optional(),
+  resolution: z.union([VideoResolutionSchema, z.literal("1080p")]).optional(),
+  audio: z.boolean().optional(),
+});
 
 const SingleImageVideoRequestSchema = z.strictObject({
   model: z.literal("grok-imagine-video-1.5-preview"),
@@ -20,12 +33,13 @@ const ReferenceImageVideoRequestSchema = z.strictObject({
   model: z.literal("grok-imagine-video"),
   prompt: z.string().min(1),
   reference_images: z.array(VideoSourceSchema).min(2).max(7),
-  aspect_ratio: z.enum(["1:1", "16:9", "9:16", "3:2", "2:3"]),
+  aspect_ratio: VideoAspectRatioSchema,
   duration: VideoDurationSchema,
   resolution: VideoResolutionSchema,
 });
 
 export const VideoGenerationRequestSchema = z.union([
+  PromptOnlyVideoRequestSchema,
   SingleImageVideoRequestSchema,
   ReferenceImageVideoRequestSchema,
 ]);

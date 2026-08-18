@@ -192,6 +192,54 @@ describe("GET /v1/models", () => {
     expect(codex?.owned_by).toBe("openai-codex");
   });
 
+  it("does not serve a cached OAuth alias after its live entitlement disappears", async () => {
+    const mediaLanes = parseLanesConfig({
+      ...lanes,
+      "grok-imagine-image": { primary: "xai/grok-imagine-image", fallback: [] },
+    });
+    let aliases = ["xai/grok-imagine-image"];
+    const app = buildApp(
+      record({ allow_custom_model: true }),
+      () => aliases,
+      () => mediaLanes,
+    );
+    const listed = (await (
+      await app.request("/v1/models", { headers: AUTH })
+    ).json()) as ModelsList;
+    expect(listed.data.map((model) => model.id)).toContain("xai/grok-imagine-image");
+    expect(listed.data.map((model) => model.id)).toContain("grok-imagine-image");
+
+    aliases = [];
+    const expired = (await (
+      await app.request("/v1/models", { headers: AUTH })
+    ).json()) as ModelsList;
+    expect(expired.data.map((model) => model.id)).not.toContain("xai/grok-imagine-image");
+    expect(expired.data.map((model) => model.id)).not.toContain("grok-imagine-image");
+  });
+
+  it("hides an OAuth-only lane from a normal key after entitlement disappears", async () => {
+    const mediaLanes = parseLanesConfig({
+      ...lanes,
+      "grok-imagine-image": { primary: "xai/grok-imagine-image", fallback: [] },
+    });
+    let aliases = ["xai/grok-imagine-image"];
+    const app = buildApp(
+      record(),
+      () => aliases,
+      () => mediaLanes,
+    );
+    const listed = (await (
+      await app.request("/v1/models", { headers: AUTH })
+    ).json()) as ModelsList;
+    expect(listed.data.map((model) => model.id)).toContain("grok-imagine-image");
+
+    aliases = [];
+    const expired = (await (
+      await app.request("/v1/models", { headers: AUTH })
+    ).json()) as ModelsList;
+    expect(expired.data.map((model) => model.id)).not.toContain("grok-imagine-image");
+  });
+
   it("normal key: subscription aliases stay hidden (lane abstraction)", async () => {
     const res = await buildApp(record(), () => ["openai-codex/gpt-5.6-sol"]).request("/v1/models", {
       headers: AUTH,

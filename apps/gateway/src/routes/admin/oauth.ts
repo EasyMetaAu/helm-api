@@ -226,10 +226,10 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
   // re-synthesis), the persist still SUCCEEDED, so the caller returns a 503
   // "saved but not applied" rather than a false 204 — the change takes effect on the
   // next successful mutation or a restart. No hook wired (unit tests) ⇒ applied.
-  const afterMutation = async (): Promise<boolean> => {
+  const afterMutation = async (options?: { disableXaiMedia?: boolean }): Promise<boolean> => {
     if (!deps.onOAuthMutation) return true;
     try {
-      return (await deps.onOAuthMutation()).applied;
+      return (await deps.onOAuthMutation(options)).applied;
     } catch {
       return false;
     }
@@ -393,6 +393,8 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
     const acctKey = (providerId: string, account: string) => `${providerId}\u0000${account}`;
     let bound: Set<string> | null = null;
     const failures: string[] = [];
+    let xaiEntitlementUncertain = false;
+    let xaiEntitlementCleanupFailed = false;
     const syncCooldownFromWindows = async (
       providerId: string,
       account: string,
@@ -475,31 +477,43 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
             });
           }
         }
-        // xAI: the Grok subscription usage endpoint also yields normalized windows
-        // only. Keep the same best-effort semantics as Anthropic: a missing/empty
-        // snapshot leaves the previous stored value intact, while a successful PULL
-        // feeds both the durable store and the live pool's quota/cooldown view.
+        // xAI: the Grok billing endpoint is also the media entitlement boundary.
+        // Missing/empty evidence therefore removes the prior positive snapshot so
+        // media fails closed; ordinary xAI text routing remains independent.
         const fetchXai = s.fetchXaiQuota;
         if (fetchXai) {
           for (const a of acctsOf("xai")) {
             tasks.push({
               label: `xai/${a.account}`,
               run: async () => {
-                const windows = await fetchXai({ account: a.account, force: true });
-                if (!windows || windows.length === 0) {
-                  throw new Error("quota refresh returned no windows");
+                try {
+                  const windows = await fetchXai({ account: a.account, force: true });
+                  if (!windows || windows.length === 0) {
+                    throw new Error("quota refresh returned no windows");
+                  }
+                  const capturedAt = Date.now();
+                  await recordResetBoundaries("xai", a.account, windows);
+                  await store.upsert({
+                    providerId: "xai",
+                    account: a.account,
+                    windows,
+                    capturedAt,
+                    source: "xai",
+                  });
+                  deps.applyQuotaSnapshot?.("xai", a.account, windows, capturedAt);
+                  await syncCooldownFromWindows("xai", a.account, windows);
+                } catch (error) {
+                  xaiEntitlementUncertain = true;
+                  try {
+                    await store.delete("xai", a.account);
+                  } catch (deleteError) {
+                    xaiEntitlementCleanupFailed = true;
+                    failures.push(
+                      `xai/${a.account} entitlement cleanup: ${errMessage(deleteError)}`,
+                    );
+                  }
+                  throw error;
                 }
-                const capturedAt = Date.now();
-                await recordResetBoundaries("xai", a.account, windows);
-                await store.upsert({
-                  providerId: "xai",
-                  account: a.account,
-                  windows,
-                  capturedAt,
-                  source: "xai",
-                });
-                deps.applyQuotaSnapshot?.("xai", a.account, windows, capturedAt);
-                await syncCooldownFromWindows("xai", a.account, windows);
               },
             });
           }
@@ -581,13 +595,26 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
           }
         }
       } catch (error) {
+        xaiEntitlementUncertain = true;
         failures.push(`provider status: ${errMessage(error)}`);
       }
     }
     const all = await store.getAll().catch((error: unknown) => {
       failures.push(`quota cache: ${errMessage(error)}`);
+      if (xaiEntitlementUncertain) xaiEntitlementCleanupFailed = true;
       return [];
     });
+    if (xaiEntitlementUncertain && bound === null) {
+      const results = await Promise.allSettled(
+        all
+          .filter((snapshot) => snapshot.providerId === "xai")
+          .map((snapshot) => store.delete("xai", snapshot.account)),
+      );
+      if (results.some((result) => result.status === "rejected")) {
+        xaiEntitlementCleanupFailed = true;
+        failures.push("xAI entitlement cleanup: durable snapshot deletion failed");
+      }
+    }
     if (bound) {
       // Best-effort prune so orphans don't accumulate. A delete failure does not
       // discard fresh rows or hide a successful provider pull.
@@ -596,6 +623,17 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
           .filter((q) => !bound.has(acctKey(q.providerId, q.account)))
           .map((o) => store.delete(o.providerId, o.account).catch(() => {})),
       );
+    }
+    // Rebuild from the account-level durable snapshots: one failed xAI account must
+    // not hide a different account whose fresh entitlement refresh succeeded. If the
+    // rebuild itself fails after entitlement became uncertain, immediately remove
+    // every live xAI media alias so stale positive evidence cannot keep serving.
+    const rebuilt = await afterMutation();
+    if (xaiEntitlementCleanupFailed || (!rebuilt && xaiEntitlementUncertain)) {
+      await afterMutation({ disableXaiMedia: true });
+    }
+    if (!rebuilt) {
+      failures.push("oauth pool: refreshed entitlement not applied");
     }
     if (failures.length > 0) {
       throw new Error(`provider refresh failed (${failures.join("; ")})`);
@@ -923,6 +961,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       if (!(await clearDurableQuota(providerId, account))) return c.json(notApplied, 503);
       // A completed login adds/refreshes an account → rebuild the routable pool.
       if (!(await afterMutation())) return c.json(notApplied, 503);
+      if (providerId === "xai") refreshCoordinator.enqueue();
       return c.body(null, 204);
     } catch (e) {
       return c.json({ error: errMessage(e) }, 400);
@@ -982,6 +1021,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
       if (result.status === "done") {
         if (!(await clearDurableQuota(providerId, account))) return c.json(notApplied, 503);
         if (!(await afterMutation())) return c.json(notApplied, 503);
+        if (providerId === "xai") refreshCoordinator.enqueue();
       }
       return c.json(result);
     } catch (e) {

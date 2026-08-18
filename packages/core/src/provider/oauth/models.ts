@@ -41,6 +41,7 @@ export const CURATED_OAUTH_MODELS: Record<string, string[]> = {
 // the text-model discovery catalog: its upstream `apiBackend` is not Responses,
 // and treating it as such would incorrectly make it chat-routable.
 export const GROK_OAUTH_MEDIA_MODELS = [
+  "grok-imagine-image",
   "grok-imagine-image-quality",
   "grok-imagine-video-1.5-preview",
   "grok-imagine-video",

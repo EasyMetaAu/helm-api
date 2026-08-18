@@ -562,6 +562,7 @@ export {
   isRetiredOpenAICodexLimit,
   isRetiredOpenAICodexModel,
   isRoutableXaiOAuthModel,
+  isXaiGrokMediaEntitled,
   LIMIT_THRESHOLD,
   listOAuthProviderIds,
   listOpenAICodexModels,
@@ -627,7 +628,9 @@ export {
   type XaiReasoningEffortOption,
   xaiGrokCatalogHeaders,
   xaiGrokInferenceHeaders,
+  xaiGrokMediaEntitlementValidUntil,
   xaiGrokProtocolHeaders,
+  xaiGrokSubscriptionTierHint,
   xaiOAuthProvider,
 } from "./provider/oauth/index.js";
 export {

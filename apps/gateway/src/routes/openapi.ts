@@ -1,4 +1,5 @@
 import {
+  GrokImagineImageGenerationRequestSchema,
   ImageEditRequestSchema,
   ImageGenerationRequestSchema,
   ImageGenerationResponseSchema,
@@ -121,6 +122,7 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
         ModelObject: component(ModelObjectSchema),
         ChatCompletionRequest: component(OpenAIChatRequestSchema),
         ImageEditRequest: component(ImageEditRequestSchema),
+        GrokImagineImageGenerationRequest: component(GrokImagineImageGenerationRequestSchema),
         ImageGenerationRequest: component(ImageGenerationRequestSchema),
         ImageGenerationResponse: component(ImageGenerationResponseSchema),
         InteractionsRequest: component(InteractionsRequestSchema),
@@ -405,7 +407,27 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
             required: true,
             content: {
               "application/json": {
-                schema: { $ref: "#/components/schemas/ImageGenerationRequest" },
+                schema: {
+                  anyOf: [
+                    { $ref: "#/components/schemas/GrokImagineImageGenerationRequest" },
+                    {
+                      allOf: [
+                        { $ref: "#/components/schemas/ImageGenerationRequest" },
+                        {
+                          not: {
+                            type: "object",
+                            properties: {
+                              model: {
+                                enum: ["grok-imagine-image", "grok-imagine-image-quality"],
+                              },
+                            },
+                            required: ["model"],
+                          },
+                        },
+                      ],
+                    },
+                  ],
+                },
                 example: {
                   model: "gpt-image-2",
                   prompt: "a single red apple on a plain white background",
@@ -436,7 +458,8 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
           summary: "Start Grok Imagine video generation",
           description:
             "Starts one asynchronous, account-pinned SuperGrok OAuth video task. " +
-            "The paid create is attempted once and returns the upstream request_id.",
+            "A native text-only task needs only `model: grok-imagine-video` and `prompt`; " +
+            "the paid create is attempted once and returns the upstream request_id.",
           security: [{ bearerAuth: [] }],
           requestBody: {
             required: true,

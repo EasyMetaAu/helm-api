@@ -451,6 +451,7 @@ describe("loadRuntimeCatalog", () => {
     ).toEqual(["deepseek-v4-flash", "openai-codex/codex-auto-review"]);
 
     const intentionallyUnpriced = new Set([
+      "xai/grok-imagine-image",
       "xai/grok-imagine-image-quality",
       "xai/grok-imagine-video-1.5-preview",
       "xai/grok-imagine-video",

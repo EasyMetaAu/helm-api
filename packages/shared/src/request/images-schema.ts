@@ -21,6 +21,18 @@ export const ImageGenerationRequestSchema = z.looseObject({
   user: z.string().optional(),
 });
 
+// Grok.com Imagine keeps a deliberately smaller contract than the generic OpenAI
+// Images surface. These are the web controls observed for the fast/quality modes;
+// unknown fields fail before the paid create instead of riding through loosely.
+export const GrokImagineImageGenerationRequestSchema = z.strictObject({
+  model: z.enum(["grok-imagine-image", "grok-imagine-image-quality"]),
+  prompt: z.string().min(1),
+  n: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]).optional(),
+  aspect_ratio: z.enum(["auto", "1:1", "16:9", "9:16", "3:2", "2:3"]).optional(),
+  resolution: z.literal("1k").optional(),
+  response_format: z.literal("b64_json").optional(),
+});
+
 const ImageEditCommonShape = {
   model: z.string().min(1),
   prompt: z.string().min(1),
@@ -68,5 +80,8 @@ export const ImageGenerationResponseSchema = z.looseObject({
 });
 
 export type ImageGenerationRequest = z.infer<typeof ImageGenerationRequestSchema>;
+export type GrokImagineImageGenerationRequest = z.infer<
+  typeof GrokImagineImageGenerationRequestSchema
+>;
 export type ImageEditRequest = z.infer<typeof ImageEditRequestSchema>;
 export type ImageGenerationResponse = z.infer<typeof ImageGenerationResponseSchema>;

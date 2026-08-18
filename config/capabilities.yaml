@@ -107,6 +107,15 @@ xai/grok-composer-2.5-fast:
 # Grok Imagine media aliases are synthesized only for connected SuperGrok OAuth
 # accounts. They are output capabilities, not chat models; dedicated media routes
 # require these explicit flags and fail closed when an alias is absent.
+xai/grok-imagine-image:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: true
+  supportsStreaming: false
+  supportsCachedContent: false
+  outputImage: true
+  maxContextTokens: 32768
+  maxOutputTokens: null
 xai/grok-imagine-image-quality:
   supportsTools: false
   jsonOutput: none

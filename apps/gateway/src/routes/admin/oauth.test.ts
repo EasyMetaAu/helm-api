@@ -760,7 +760,11 @@ describe("admin OAuth routes — read endpoints", () => {
       }),
     });
 
-    const api = app({ oauth: seam, oauthQuota });
+    const onOAuthMutation = vi
+      .fn()
+      .mockResolvedValueOnce({ applied: false })
+      .mockResolvedValueOnce({ applied: true });
+    const api = app({ oauth: seam, oauthQuota, onOAuthMutation });
     await enqueueRefresh(api, "failed");
     const res = await api.request("/admin/api/oauth/quota");
 
@@ -774,7 +778,50 @@ describe("admin OAuth routes — read endpoints", () => {
     expect(oauthQuota?.upsert).not.toHaveBeenCalledWith(
       expect.objectContaining({ providerId: "xai" }),
     );
+    expect(oauthQuota?.delete).toHaveBeenCalledWith("xai", "subscription");
     expect(oauthQuota?.delete).toHaveBeenCalledWith("xai", "orphan");
+    expect(onOAuthMutation).toHaveBeenNthCalledWith(1, undefined);
+    expect(onOAuthMutation).toHaveBeenNthCalledWith(2, { disableXaiMedia: true });
+  });
+
+  it("POST /oauth/refresh disables live xAI media when stale entitlement deletion fails", async () => {
+    const stale = {
+      providerId: "xai",
+      account: "subscription",
+      windows: [
+        {
+          key: "7d",
+          usedPercent: 1,
+          resetsAtMs: Date.now() + 86_400_000,
+          windowMinutes: 10_080,
+        },
+      ],
+      capturedAt: Date.now(),
+      source: "xai",
+    };
+    const oauthQuota = {
+      get: vi.fn(async () => stale),
+      getAll: vi.fn(async () => [stale]),
+      upsert: vi.fn(async () => {}),
+      delete: vi.fn(async () => {
+        throw new Error("sqlite busy");
+      }),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const seam = fullSeam({
+      listStatus: vi.fn(async () => ({
+        selectionStrategy: "balanced",
+        providers: [{ id: "xai", name: "Grok", accounts: [{ account: "subscription" }] }],
+      })) as never,
+      fetchXaiQuota: vi.fn(async () => {
+        throw new Error("upstream unavailable");
+      }),
+    });
+    const onOAuthMutation = vi.fn(async () => ({ applied: true }));
+
+    await enqueueRefresh(app({ oauth: seam, oauthQuota, onOAuthMutation }), "failed");
+
+    expect(onOAuthMutation).toHaveBeenNthCalledWith(1, undefined);
+    expect(onOAuthMutation).toHaveBeenNthCalledWith(2, { disableXaiMedia: true });
   });
 
   it("POST /oauth/refresh extends an active cooldown to the saturated window reset", async () => {

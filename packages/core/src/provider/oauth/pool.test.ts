@@ -1997,6 +1997,24 @@ describe("createOAuthPoolClient — media", () => {
 
     expect(calls).toEqual(["retrieve:a", "retrieve:b"]);
   });
+
+  it("removes an expired model entitlement from discovery and paid create selection", async () => {
+    let nowMs = 1_000;
+    const calls: string[] = [];
+    const entitled = mediaMember("paid", 10, calls);
+    entitled.models = ["grok-imagine-image", "grok-4.5"];
+    entitled.modelValidUntilMs = { "grok-imagine-image": 1_500 };
+    const pool = createOAuthPoolClient({ members: [entitled], now: () => nowMs });
+
+    expect(pool.hasAvailableModel("grok-imagine-image")).toBe(true);
+    nowMs = 1_500;
+    expect(pool.hasAvailableModel("grok-imagine-image")).toBe(false);
+    expect(pool.hasAvailableModel("grok-4.5")).toBe(true);
+    await expect(
+      pool.imageGeneration?.({ model: "grok-imagine-image", prompt: "draw" }),
+    ).rejects.toThrow('no account supports model "grok-imagine-image"');
+    expect(calls).toEqual([]);
+  });
 });
 
 // In-pool retry (the real fix for the Codex `all_providers_failed` on a single OpenAI
