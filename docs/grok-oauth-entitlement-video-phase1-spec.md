@@ -358,7 +358,7 @@ CI=true pnpm --filter @helm/gateway exec playwright test e2e/videos.spec.ts
 - [x] `e2e`：使用隔离的 PostgreSQL 17 + pgvector 与本地 mock upstream，真实 PostgreSQL 合约和完整 Playwright 套件共 95 项全绿；没有调用任何付费媒体接口。
 - [x] `docker`：正式多阶段镜像构建成功，镜像为 `sha256:fbfa07f3…`；随机宿主端口映射到容器 `8080` 后，`/healthz` 回读 `ready: true`，`/version` 回读 `0.28.74` 与非 `unknown` Git SHA。
 - [x] CI 隔离数据库、网络、浏览器缓存和 smoke 容器均已清理；正在运行的 `helm` 候选容器未停止、未重启、未替换。
-- [ ] 正式 PR 已创建，且托管 GitHub Actions 的 `PR / verify`、`PR / store`、`PR / e2e`、`PR / docker` 均已回读为成功；本轮不合并或部署。
+- [x] 正式 PR #761 已创建；实现提交 `29ff7655` 的托管 GitHub Actions run `32142663949` 中，`PR / verify`、`PR / store`、`PR / e2e`、`PR / docker` 均已回读为成功。本轮不合并或部署。
 
 ### 9.3 Go / No-Go
 
