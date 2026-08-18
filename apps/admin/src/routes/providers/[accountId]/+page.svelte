@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { invalidateAll } from '$app/navigation';
   import { base } from '$app/paths';
   import type { OAuthQuotaWindow, OAuthUsagePeriod } from '$lib/api/oauth.js';
+  import RefreshControl from '$lib/components/RefreshControl.svelte';
   import { formatCount, formatTokens, formatUsd } from '$lib/format.js';
   import { t } from '$lib/i18n';
   import type { AccountDetailData } from './+page.js';
@@ -45,9 +47,8 @@
     return parts.join(' ');
   }
 
-  // Reset-window keys present in the CURRENT summary (Anthropic: 5h then 7d…). Each is
-  // a tab for the current-period summary card. History does NOT use these — it's by
-  // natural calendar day/week (see below).
+  // Reset-window keys present in the current summary/history (Anthropic: 5h then 7d…).
+  // Natural calendar day/week views remain account-wide.
   const windowKeys = $derived.by(() => {
     const seen = new Set<string>();
     const keys: string[] = [];
@@ -86,7 +87,9 @@
   let granularity = $state<'period' | 'day' | 'week'>('period');
   const history = $derived.by(() =>
     granularity === 'period'
-      ? data.periods.periods.filter((p) => p.windowKey === activeKey)
+      ? [...data.periods.current, ...data.periods.periods].filter(
+          (p) => p.windowKey === activeKey,
+        )
       : granularity === 'day'
         ? data.periods.daily
         : data.periods.weekly,
@@ -140,6 +143,9 @@
     <p class="mt-1 text-sm text-ink-muted">
       {$t('Token usage per quota reset period. Periods marked ≈ have approximate boundaries.')}
     </p>
+    <div class="mt-3">
+      <RefreshControl onRefresh={invalidateAll} />
+    </div>
   </header>
 
   {#if windowKeys.length === 0 && history.length === 0}
@@ -268,7 +274,7 @@
           {#each trend as p, i (i)}
             <div class="flex h-full flex-1 items-end">
               <div
-                class={`w-full rounded-t ${p.partial ? 'bg-slate-300' : 'bg-indigo-400'}`}
+                class={`w-full rounded-t ${p === currentPeriod ? 'bg-emerald-400' : p.partial ? 'bg-slate-300' : 'bg-indigo-400'}`}
                 style={`height: ${Math.max(2, (p.tokens / trendMax) * 100)}%`}
                 title={`${periodLabel(p)} — ${formatTokens(p.tokens)} tokens${p.partial ? ' (partial)' : ''}`}
               ></div>
@@ -302,6 +308,11 @@
             <tr>
               <td data-label={$t('Period')} class="px-3 py-2">
                 {periodLabel(p)}
+                {#if p === currentPeriod}
+                  <span class="ml-1 rounded bg-emerald-100 px-1.5 py-0.5 text-xs text-emerald-700"
+                    >{$t('Current period')}</span
+                  >
+                {/if}
                 {#if p.approximate}
                   <span class="ml-1 text-xs text-ink-muted">≈</span>
                 {/if}
