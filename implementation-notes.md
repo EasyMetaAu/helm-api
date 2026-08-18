@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-08-19 · 保留已公开的 Grok Imagine 媒体选项（Images / Videos，Phase 1 spec §4–9，原则 3/6/7）
+
+- **兼容决定**：用户确认 fast image 与 prompt-only video 的已公开选项不得移除。`grok-imagine-image` 继续接受并透传 `n=1..4`、六种 `aspect_ratio`、`resolution=1k` 与 `response_format=b64_json`；`grok-imagine-video` 继续接受并透传 `aspect_ratio`、`duration=6/10/15`、`resolution=480p/720p/1080p` 与 `audio`。合同仍为严格对象，不开放任意未知字段或 ZDR `output`。
+- **边界不变**：此次只恢复请求 schema 兼容性；model/key 授权、blocked model、预算 fail-closed、OAuth 账号选择与固定账号轮询、付费 POST 单写，以及视频 `done` 必须带非空 `video.url` 均保持不变。旧 quality image、single-image video 与 reference-video 路径不改。
+
 ## 2026-08-18 · Grok Imagine 合并后收紧 entitlement 与媒体协议边界（OAuth / Images / Videos，Phase 1 spec §4–9，原则 3/6/7/8）
 
 - **撤权与 cooldown**：xAI billing 刷新失败不再删除整条 quota；改写入 `windows: []` 的 entitlement tombstone，复用两种 Store 已有的 upsert 语义保留 `usageLimitedUntilMs`。若 tombstone 无法持久化，进程级紧急 latch 会先摘除全部 xAI 媒体 alias，并在任何普通 OAuth pool rebuild 后继续生效；只有权威 billing 刷新成功持久化且对应 rebuild 成功后才恢复。
@@ -62,14 +67,9 @@
 - **存储与读取**：复用 `oauth_reset_period`，SQLite/Postgres 只增加 `approximate` 列；估算边界仅参与历史周期切分，不进入 `latestResetAt`，因此不会改变实时请求 bucket 或 reset-credit 判断。同一主键后来收到精确观测时，只允许 `approximate=true → false` 单向升级，估算数据不能覆盖精确事实。
 - **重算方式**：`oauth_usage` 是保留时间戳的小时/边界 bucket，周期 totals 在 Admin API 读取时按边界动态聚合，因此历史修复只需追加缺失的近似 reset facts，不重写或复制请求计数。发布后生产回填必须先备份数据库、预演候选/冲突，并验证拆分前后 requests/tokens/cost 守恒。
 
-## 2026-08-11 · Admin Memory 范围分页与 Key 点查（Admin / Store，docs/11/13，原则 1/7）
-
-- **分页契约**：`/admin/api/memory/scopes` 采用与 facts/reflections 一致的 `{ rows, total }` 响应；默认 50、最大 200。SQLite/Postgres 都在聚合结果上执行服务端 `LIMIT/OFFSET`，并以 scope tuple 作为 `lastUpdated` 并列时的稳定次序，避免翻页重复或遗漏。
-- **加载边界**：Memory 首屏只并发加载第一批 scopes 与轻量 stats；完整 redacted key 列表仅在用户打开 By Key 时加载。`?key=` 深链直接走单 key 解析，不为校验一个 id 扫描全部 keys。
-- **Store 取舍**：`KeyStore` 新增按不可变 `key_id` 的 `getById`，SQLite/Postgres 使用索引点查，缓存包装器只透传；不缓存 admin 低频 id 查询，也不改变全局 Keys 页面既有列表契约。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-11 · Admin Memory 范围分页与 Key 点查**：scopes 使用稳定服务端分页，首屏只加载轻量数据，Key 深链走不可变 id 索引点查；完整原文经 git history 回溯。
 - **2026-08-11 · Memory 大线程有界形成与遗忘原子性**：Observer/Reflector/cleanup 改为有界分页、frontier/fence 与原子提交，避免超大线程 OOM、遗忘后复活和 stale counter 漂移；完整原文经 git history 回溯。
 - **2026-08-10 · 配额统计按真实重置点切分**：PULL、Codex header 与 reset-credit 共用真实周期边界，晚到采样不写伪 reset；旧整点历史不可逆并继续标记为近似/部分数据，完整原文经 git history 回溯。
 - **2026-08-10 · 大 Session 客户端重建按记录时间展示并提前停止分页**：目标 revision 到达即停，按 `createdAt`/`sequence` 展示持久化增量请求与响应快照；Session 仍为 `exact=false` 且不可精确 Retry，完整原文经 git history 回溯。

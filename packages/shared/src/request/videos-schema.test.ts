@@ -18,7 +18,7 @@ describe("VideoGenerationRequestSchema", () => {
     }
   });
 
-  it("rejects unverified prompt-only video options", () => {
+  it("accepts prompt-only video options", () => {
     expect(
       VideoGenerationRequestSchema.safeParse({
         model: "grok-imagine-video",
@@ -28,7 +28,7 @@ describe("VideoGenerationRequestSchema", () => {
         resolution: "1080p",
         audio: true,
       }).success,
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("accepts the single-image Grok video contract, including an empty prompt", () => {

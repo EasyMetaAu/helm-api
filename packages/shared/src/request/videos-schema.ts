@@ -19,6 +19,10 @@ const SingleImageVideoModelSchema = z.enum([
 const PromptOnlyVideoRequestSchema = z.strictObject({
   model: PromptVideoModelSchema,
   prompt: z.string().min(1),
+  aspect_ratio: VideoAspectRatioSchema.optional(),
+  duration: z.union([VideoDurationSchema, z.literal(15)]).optional(),
+  resolution: z.union([VideoResolutionSchema, z.literal("1080p")]).optional(),
+  audio: z.boolean().optional(),
 });
 
 const SingleImageVideoRequestSchema = z.strictObject({

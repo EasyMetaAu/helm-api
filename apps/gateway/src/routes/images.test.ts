@@ -181,7 +181,7 @@ describe("registerImagesRoute", () => {
     });
   });
 
-  it("rejects unverified Grok image options before the paid create", async () => {
+  it("forwards supported Grok image options in one paid create", async () => {
     const imageGeneration = vi.fn().mockResolvedValue(UPSTREAM);
     const client = { imageGeneration } as unknown as ProviderClient;
     const { app } = setup({
@@ -203,12 +203,20 @@ describe("registerImagesRoute", () => {
     const response = await post(app, {
       model: "grok-imagine-image",
       prompt: "a cat",
-      n: 2,
+      n: 4,
       aspect_ratio: "16:9",
     });
 
-    expect(response.status).toBe(400);
-    expect(imageGeneration).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(imageGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "grok-imagine-image",
+        prompt: "a cat",
+        n: 4,
+        aspect_ratio: "16:9",
+      }),
+      expect.anything(),
+    );
   });
 
   it("treats an empty Grok image response as one ambiguous paid write", async () => {

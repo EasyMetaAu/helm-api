@@ -384,7 +384,7 @@ describe("registerVideosRoute", () => {
     expect(create).toHaveBeenCalledOnce();
   });
 
-  it("rejects unverified prompt-only Grok video options before reservation", async () => {
+  it("forwards supported prompt-only Grok video options in one paid create", async () => {
     const { app, create, putIfAbsent } = setup();
     const response = await app.request("/v1/videos/generations", {
       method: "POST",
@@ -399,9 +399,20 @@ describe("registerVideosRoute", () => {
       }),
     });
 
-    expect(response.status).toBe(400);
-    expect(create).not.toHaveBeenCalled();
-    expect(putIfAbsent).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(create).toHaveBeenCalledWith(
+      {
+        model: "grok-imagine-video",
+        prompt: "waves rolling across a neon ocean",
+        aspect_ratio: "16:9",
+        duration: 15,
+        resolution: "1080p",
+        audio: true,
+      },
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+    expect(putIfAbsent).toHaveBeenCalledTimes(2);
   });
 
   it("accepts a concrete xAI video alias for a custom-model key with one paid create", async () => {
