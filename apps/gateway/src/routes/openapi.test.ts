@@ -44,6 +44,7 @@ describe("OpenAPI docs", () => {
     // Image/interactions bodies reuse their Zod schemas (single source of truth).
     for (const name of [
       "ImageGenerationRequest",
+      "GrokImagineImageGenerationRequest",
       "ImageEditRequest",
       "ImageGenerationResponse",
       "VideoGenerationRequest",

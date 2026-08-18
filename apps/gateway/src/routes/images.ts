@@ -6,7 +6,11 @@ import {
   createBlockedModelMatcher,
   type ImageEditInput,
 } from "@helm/core";
-import { ImageEditRequestSchema, ImageGenerationRequestSchema } from "@helm/shared";
+import {
+  GrokImagineImageGenerationRequestSchema,
+  ImageEditRequestSchema,
+  ImageGenerationRequestSchema,
+} from "@helm/shared";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "../app.js";
@@ -80,6 +84,20 @@ export interface ImagesRouteDeps {
   ) => Promise<void>;
   /** Telemetry + payload recorder. Omitted = record nothing (test doubles). */
   record?: RecordServedDeps;
+}
+
+const GROK_IMAGE_MODELS = new Set(["grok-imagine-image", "grok-imagine-image-quality"]);
+
+function hasImageResult(body: Record<string, unknown>): boolean {
+  if (!Array.isArray(body.data)) return false;
+  return body.data.some((item) => {
+    if (typeof item !== "object" || item === null) return false;
+    const image = item as { b64_json?: unknown; url?: unknown };
+    return (
+      (typeof image.b64_json === "string" && image.b64_json.trim().length > 0) ||
+      (typeof image.url === "string" && image.url.trim().length > 0)
+    );
+  });
 }
 
 function errorJson(
@@ -331,6 +349,25 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         "unsupported_operation",
       );
     }
+    if (!editing && generationBody !== null) {
+      const grokTarget = operationTargets.find((target) =>
+        GROK_IMAGE_MODELS.has(target.providerModel),
+      );
+      if (grokTarget) {
+        const parsed = GrokImagineImageGenerationRequestSchema.safeParse({
+          ...generationBody,
+          model: grokTarget.providerModel,
+        });
+        if (!parsed.success) {
+          return errorJson(
+            c,
+            400,
+            "invalid_request_error",
+            parsed.error.issues[0]?.message ?? "invalid Grok image generation request",
+          );
+        }
+      }
+    }
     const blockedModels = createBlockedModelMatcher(identity.caps?.blockedModels);
     const permittedTargets =
       blockedModels === null
@@ -445,6 +482,9 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
         ? await deps.captureServingAccount(invoke)
         : { result: await invoke(), servingAccount: null };
       const upstream = captured.result;
+      if (!hasImageResult(upstream)) {
+        throw new Error("image create returned no image result");
+      }
       const usage = (upstream as { usage?: Record<string, unknown> }).usage ?? null;
       return {
         clientBody: upstream,

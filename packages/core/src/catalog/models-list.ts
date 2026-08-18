@@ -50,13 +50,14 @@ export function buildModelsList(input: BuildModelsListInput): ModelsList {
   const { lanes, catalog, providerAliases, allowCustomModel } = input;
 
   const blocked = createBlockedModelMatcher(input.blockedModels);
+  const availableAliases = new Set(providerAliases);
   const isBlocked = (alias: string): boolean => blocked?.matches(alias) === true;
   const laneHasVisibleCandidate = (name: string): boolean =>
-    expandLaneChain(name, lanes).some((alias) => !isBlocked(alias));
+    expandLaneChain(name, lanes).some((alias) => availableAliases.has(alias) && !isBlocked(alias));
 
   // Visible lanes: config (insertion) order, narrowed by the key's allowed_lanes
-  // and by the key's blocked_models. A lane whose entire expanded chain is
-  // blocked is not actually usable by this key, so do not advertise it.
+  // and by the key's blocked_models/current provider aliases. A lane whose entire
+  // expanded chain is blocked or unavailable is not usable, so do not advertise it.
   const allowed = input.allowedLanes ?? null;
   const visibleLanes = Object.keys(lanes).filter(
     (name) => (allowed === null || allowed.includes(name)) && laneHasVisibleCandidate(name),

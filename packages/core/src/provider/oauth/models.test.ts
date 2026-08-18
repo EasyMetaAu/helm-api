@@ -65,6 +65,7 @@ afterEach(() => {
 describe("discoverOAuthModels", () => {
   it("keeps the verified Grok Imagine media aliases in a separate exported allowlist", () => {
     expect(GROK_OAUTH_MEDIA_MODELS).toEqual([
+      "grok-imagine-image",
       "grok-imagine-image-quality",
       "grok-imagine-video-1.5-preview",
       "grok-imagine-video",

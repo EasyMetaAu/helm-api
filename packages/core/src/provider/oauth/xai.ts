@@ -225,6 +225,46 @@ function decodeJwtPayload(token: string | undefined): Record<string, unknown> {
   }
 }
 
+/**
+ * Decode xAI's self-described subscription tier for conservative scheduling.
+ * This unverified JWT claim may deny known free tiers, but must never grant
+ * media access without separate authoritative billing evidence.
+ */
+export function xaiGrokSubscriptionTierHint(accessToken: string): string | undefined {
+  const raw = decodeJwtPayload(accessToken).tier;
+  const numeric =
+    typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0
+      ? raw
+      : typeof raw === "string" && /^\d+$/.test(raw.trim())
+        ? Number(raw.trim())
+        : null;
+  if (numeric !== null) {
+    return (
+      [
+        "free",
+        "supergrok",
+        "x_basic",
+        "x_premium",
+        "x_premium_plus",
+        "supergrok_heavy",
+        "supergrok_lite",
+        "supergrok_plus",
+      ][numeric] ?? String(numeric)
+    );
+  }
+  if (typeof raw !== "string" || raw.trim().length === 0) return undefined;
+  const normalized = raw.trim().toLowerCase().replaceAll("-", "_").replaceAll(" ", "_");
+  return (
+    {
+      free_tier: "free",
+      grok_basic: "free",
+      supergrokheavy: "supergrok_heavy",
+      supergroklite: "supergrok_lite",
+      supergrokplus: "supergrok_plus",
+    }[normalized] ?? normalized
+  );
+}
+
 function parseTokenResponse(
   body: unknown,
   tokenEndpoint: string,

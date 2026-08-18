@@ -461,11 +461,16 @@ async function seedXai(
   ctx: OAuthRuntimeCtx,
   account: string,
   expiresAt = FAR_FUTURE,
+  tier?: unknown,
 ): Promise<void> {
+  const access =
+    tier === undefined
+      ? `xai-access-${account}`
+      : codexJwt({ sub: `xai-user-${account}`, email: `${account}@example.test`, tier });
   await ctx.store.upsert({
     providerId: "xai",
     account,
-    accessEnc: encryptSecret(`xai-access-${account}`, ENC_KEY),
+    accessEnc: encryptSecret(access, ENC_KEY),
     refreshEnc: encryptSecret(`xai-refresh-${account}`, ENC_KEY),
     expiresAt,
     meta: JSON.stringify({
@@ -530,6 +535,10 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
   const noop = () => {};
   const mediaModels = [
     {
+      alias: "xai/grok-imagine-image",
+      provider_model: "grok-imagine-image",
+    },
+    {
       alias: "xai/grok-imagine-image-quality",
       provider_model: "grok-imagine-image-quality",
     },
@@ -543,6 +552,24 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     void task();
     return true;
   };
+  const xaiMediaQuotaSeeds = (...accounts: string[]) =>
+    new Map(
+      accounts.map((account) => [
+        `xai ${account}`,
+        {
+          windows: [
+            {
+              key: "7d",
+              usedPercent: 1,
+              resetsAtMs: Date.now() + 7 * 24 * 60 * 60_000,
+              windowMinutes: 7 * 24 * 60,
+            },
+          ],
+          capturedAt: Date.now(),
+          usageLimitedUntilMs: null,
+        },
+      ]),
+    );
 
   it("refreshes a subscription token before the request-timeout lease begins", async () => {
     const { ctx, config } = oauthStores();
@@ -572,7 +599,12 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
 
   it("routes xAI subscription OAuth through the generic Responses proxy by default", async () => {
     const { ctx, config } = oauthStores();
-    await seedXai(ctx, "heavy");
+    await seedXai(ctx, "heavy", FAR_FUTURE, 1);
+    const heavyAccess = codexJwt({
+      sub: "xai-user-heavy",
+      email: "heavy@example.test",
+      tier: 1,
+    });
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       if (String(url).endsWith("/models")) {
         return new Response(
@@ -594,7 +626,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       }
       expect(String(url)).toBe("https://cli-chat-proxy.grok.com/v1/responses");
       const headers = new Headers(init?.headers);
-      expect(headers.get("Authorization")).toBe("Bearer xai-access-heavy");
+      expect(headers.get("Authorization")).toBe(`Bearer ${heavyAccess}`);
       expect(headers.get("chatgpt-account-id")).toBeNull();
       expect(headers.get("X-XAI-Token-Auth")).toBe("xai-grok-cli");
       expect(headers.get("x-authenticateresponse")).toBe("authenticate-response");
@@ -628,6 +660,9 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       "https://fallback/v1",
       60_000,
       noop,
+      undefined,
+      undefined,
+      xaiMediaQuotaSeeds("heavy"),
     );
     expect(enabled.providers[0]).toMatchObject({
       name: "xai",
@@ -653,7 +688,12 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
 
   it("synthesizes Grok Imagine aliases and routes media through api.x.ai with the same OAuth bearer", async () => {
     const { ctx, config } = oauthStores();
-    await seedXai(ctx, "media");
+    await seedXai(ctx, "media", FAR_FUTURE, 1);
+    const mediaAccess = codexJwt({
+      sub: "xai-user-media",
+      email: "media@example.test",
+      tier: 1,
+    });
     const calls: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
       const target = String(url);
@@ -662,7 +702,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
         return Response.json({ data: [{ id: "grok-4.5", apiBackend: "responses" }] });
       }
       const headers = new Headers(init?.headers);
-      expect(headers.get("Authorization")).toBe("Bearer xai-access-media");
+      expect(headers.get("Authorization")).toBe(`Bearer ${mediaAccess}`);
       if (target === "https://api.x.ai/v1/images/generations") {
         expect(JSON.parse(String(init?.body))).toMatchObject({
           model: "grok-imagine-image-quality",
@@ -686,9 +726,16 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       "https://fallback/v1",
       60_000,
       noop,
+      undefined,
+      undefined,
+      xaiMediaQuotaSeeds("media"),
     );
     expect(enabled.providers[0]?.models).toEqual(
       expect.arrayContaining([
+        {
+          alias: "xai/grok-imagine-image",
+          provider_model: "grok-imagine-image",
+        },
         {
           alias: "xai/grok-imagine-image-quality",
           provider_model: "grok-imagine-image-quality",
@@ -715,10 +762,145 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     expect(calls).toContain("GET https://api.x.ai/v1/videos/video_1");
   });
 
+  it("keeps xAI text routable but omits media without positive persisted billing evidence", async () => {
+    const { ctx, config } = oauthStores();
+    await seedXai(ctx, "free-or-unknown");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ data: [{ id: "grok-4.5", apiBackend: "responses" }] }),
+    );
+
+    const enabled = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+      undefined,
+      undefined,
+      new Map(),
+    );
+
+    expect((enabled.providers[0]?.models ?? []).map((model) => model.alias)).toEqual([
+      "xai/grok-4.5",
+    ]);
+  });
+
+  it("keeps xAI text routable but omits media when fresh billing has no known paid tier", async () => {
+    const { ctx, config } = oauthStores();
+    await seedXai(ctx, "opaque-tier");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ data: [{ id: "grok-4.5", apiBackend: "responses" }] }),
+    );
+
+    const enabled = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+      undefined,
+      undefined,
+      xaiMediaQuotaSeeds("opaque-tier"),
+    );
+
+    expect((enabled.providers[0]?.models ?? []).map((model) => model.alias)).toEqual([
+      "xai/grok-4.5",
+    ]);
+  });
+
+  it("removes synthesized xAI media at runtime when its billing evidence TTL expires", async () => {
+    const nowMs = Date.parse("2026-08-18T00:00:00Z");
+    const now = vi.spyOn(Date, "now").mockReturnValue(nowMs);
+    const { ctx, config } = oauthStores();
+    await seedXai(ctx, "expiring-media", FAR_FUTURE, 1);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({ data: [{ id: "grok-4.5", apiBackend: "responses" }] }),
+    );
+
+    const enabled = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+      undefined,
+      undefined,
+      new Map([
+        [
+          "xai expiring-media",
+          {
+            windows: [
+              {
+                key: "7d",
+                usedPercent: 1,
+                resetsAtMs: nowMs + 7 * 24 * 60 * 60_000,
+                windowMinutes: 7 * 24 * 60,
+              },
+            ],
+            capturedAt: nowMs,
+            usageLimitedUntilMs: null,
+          },
+        ],
+      ]),
+    );
+    const pool = enabled.poolClients.get("xai");
+    expect(pool?.hasAvailableModel("grok-imagine-image")).toBe(true);
+
+    now.mockReturnValue(nowMs + 24 * 60 * 60_000);
+    expect(pool?.hasAvailableModel("grok-imagine-image")).toBe(false);
+    expect(pool?.hasAvailableModel("grok-4.5")).toBe(true);
+  });
+
+  it("never serves media from an unentitled sibling in a mixed xAI pool", async () => {
+    const { ctx, config } = oauthStores();
+    await seedXai(ctx, "entitled", FAR_FUTURE, 1);
+    await seedXai(ctx, "unknown");
+    const mediaAuth: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      const target = String(url);
+      if (target.endsWith("/models")) {
+        return Response.json({ data: [{ id: "grok-4.5", apiBackend: "responses" }] });
+      }
+      if (target === "https://api.x.ai/v1/images/generations") {
+        mediaAuth.push(new Headers(init?.headers).get("authorization") ?? "");
+        throw new Error("stop after account selection");
+      }
+      throw new Error(`unexpected URL ${target}`);
+    });
+
+    const enabled = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+      undefined,
+      undefined,
+      xaiMediaQuotaSeeds("entitled"),
+    );
+
+    await expect(
+      enabled.poolClients
+        .get("xai")
+        ?.imageGeneration?.({ model: "grok-imagine-image", prompt: "draw" }),
+    ).rejects.toThrow();
+    expect(mediaAuth).toEqual([
+      `Bearer ${codexJwt({
+        sub: "xai-user-entitled",
+        email: "entitled@example.test",
+        tier: 1,
+      })}`,
+    ]);
+  });
+
   it("honors each xAI account's manual media allowlist", async () => {
     const { ctx, config } = oauthStores();
-    await seedXai(ctx, "media-enabled");
-    await seedXai(ctx, "text-only");
+    await seedXai(ctx, "media-enabled", FAR_FUTURE, 1);
+    await seedXai(ctx, "text-only", FAR_FUTURE, 1);
     await setAccountSettings(config, ENC_KEY, "xai", "media-enabled", {
       modelsMode: "manual",
       enabledModels: ["grok-imagine-image-quality"],
@@ -747,6 +929,9 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       "https://fallback/v1",
       60_000,
       noop,
+      undefined,
+      undefined,
+      xaiMediaQuotaSeeds("media-enabled", "text-only"),
     );
 
     expect((enabled.providers[0]?.models ?? []).map((model) => model.alias)).toEqual([
@@ -756,7 +941,13 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     await enabled.poolClients
       .get("xai")
       ?.imageGeneration?.({ model: "grok-imagine-image-quality", prompt: "draw" });
-    expect(mediaAuth).toEqual(["Bearer xai-access-media-enabled"]);
+    expect(mediaAuth).toEqual([
+      `Bearer ${codexJwt({
+        sub: "xai-user-media-enabled",
+        email: "media-enabled@example.test",
+        tier: 1,
+      })}`,
+    ]);
   });
 
   it("refreshes x-grok-user-id from current xAI credential metadata on a 401 retry", async () => {
@@ -873,7 +1064,6 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
 
     expect(enabled.providers[0]?.models).toEqual([
       { alias: "xai/grok-display-key", provider_model: "grok-wire-model" },
-      ...mediaModels,
     ]);
     expect(enabled.xaiModels.get("xai/grok-display-key")).toMatchObject({
       id: "grok-display-key",
@@ -920,7 +1110,6 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     );
     expect(live.providers[0]?.models).toEqual([
       { alias: "xai/grok-display-lkg", provider_model: "grok-wire-lkg" },
-      ...mediaModels,
     ]);
     expect(
       getAccountSettings(await loadAccountSettings(config, ENC_KEY), "xai", "heavy")
@@ -944,14 +1133,8 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     );
     expect(restarted.providers[0]?.models).toEqual([
       { alias: "xai/grok-display-lkg", provider_model: "grok-wire-lkg" },
-      ...mediaModels,
     ]);
-    expect(restarted.xaiModelAccounts).toEqual(
-      new Map([
-        ["xai/grok-display-lkg", ["heavy"]],
-        ...mediaModels.map((model) => [model.alias, ["heavy"]] as const),
-      ]),
-    );
+    expect(restarted.xaiModelAccounts).toEqual(new Map([["xai/grok-display-lkg", ["heavy"]]]));
   });
 
   it("treats a successful empty xAI catalog as authoritative and clears stale LKG", async () => {
@@ -981,10 +1164,8 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       60_000,
       noop,
     );
-    expect(emptied.providers[0]?.models).toEqual(mediaModels);
-    expect(emptied.xaiModelAccounts).toEqual(
-      new Map(mediaModels.map((model) => [model.alias, ["heavy"]])),
-    );
+    expect(emptied.providers).toEqual([]);
+    expect(emptied.xaiModelAccounts).toEqual(new Map());
     expect(getAccountSettings(await loadAccountSettings(config, ENC_KEY), "xai", "heavy")).toEqual({
       xaiDiscoveredModels: [],
     });
@@ -1020,14 +1201,13 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
 
     expect(enabled.providers[0]?.models).toEqual([
       { alias: "xai/shared-grok", provider_model: "shared-grok-wire" },
-      ...mediaModels,
     ]);
     expect(logs).toContainEqual(
       expect.objectContaining({ msg: "oauth.autoroute.model_metadata_conflict" }),
     );
     expect(logs).toContainEqual({
       msg: "oauth.autoroute",
-      fields: expect.objectContaining({ providerId: "xai", accounts: 2, models: 4 }),
+      fields: expect.objectContaining({ providerId: "xai", accounts: 1, models: 1 }),
     });
   });
 

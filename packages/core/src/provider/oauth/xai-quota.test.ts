@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import * as xaiQuota from "./xai-quota.js";
-import { parseXaiGrokCreditsResponse } from "./xai-quota.js";
+import {
+  isXaiGrokMediaEntitled,
+  parseXaiGrokCreditsResponse,
+  xaiGrokMediaEntitlementValidUntil,
+} from "./xai-quota.js";
 
 const OFFICIAL_NOW_MS = Date.parse("2026-06-04T12:00:00Z");
 
@@ -102,5 +106,81 @@ describe("parseXaiGrokCreditsResponse > official Grok Build JSON", () => {
     ],
   ])("rejects %s", (_label, body) => {
     expect(parseXaiGrokCreditsResponse(body, OFFICIAL_NOW_MS)).toEqual([]);
+  });
+});
+
+describe("isXaiGrokMediaEntitled", () => {
+  const eligible = {
+    windows: [
+      {
+        key: "7d",
+        usedPercent: 42.5,
+        resetsAtMs: Date.parse("2026-06-08T00:00:00Z"),
+        windowMinutes: 10_080,
+      },
+    ],
+    capturedAt: OFFICIAL_NOW_MS,
+  };
+
+  it("accepts only a current authoritative weekly billing window", () => {
+    expect(isXaiGrokMediaEntitled(eligible, OFFICIAL_NOW_MS, "supergrok")).toBe(true);
+    expect(isXaiGrokMediaEntitled(undefined, OFFICIAL_NOW_MS)).toBe(false);
+    expect(isXaiGrokMediaEntitled({ ...eligible, windows: [] }, OFFICIAL_NOW_MS)).toBe(false);
+    expect(isXaiGrokMediaEntitled(eligible, Date.parse("2026-06-08T00:00:00Z"))).toBe(false);
+  });
+
+  it("rejects stale evidence and known free tiers", () => {
+    const nowMs = OFFICIAL_NOW_MS + 23 * 60 * 60_000;
+    expect(isXaiGrokMediaEntitled(eligible, nowMs, "supergrok")).toBe(true);
+    expect(isXaiGrokMediaEntitled(eligible, OFFICIAL_NOW_MS + 24 * 60 * 60_000)).toBe(false);
+    expect(isXaiGrokMediaEntitled(eligible, OFFICIAL_NOW_MS, "free")).toBe(false);
+    expect(isXaiGrokMediaEntitled(eligible, OFFICIAL_NOW_MS, "x_basic")).toBe(false);
+  });
+
+  it("requires an explicit known paid tier in addition to fresh weekly billing", () => {
+    expect(isXaiGrokMediaEntitled(eligible, OFFICIAL_NOW_MS)).toBe(false);
+    expect(isXaiGrokMediaEntitled(eligible, OFFICIAL_NOW_MS, "opaque-paid-label")).toBe(false);
+    expect(isXaiGrokMediaEntitled(eligible, OFFICIAL_NOW_MS, "supergrok")).toBe(true);
+    expect(isXaiGrokMediaEntitled(eligible, OFFICIAL_NOW_MS, "x_premium_plus")).toBe(true);
+  });
+
+  it("expires at the earlier of the evidence TTL and weekly reset", () => {
+    expect(xaiGrokMediaEntitlementValidUntil(eligible, OFFICIAL_NOW_MS, "supergrok")).toBe(
+      OFFICIAL_NOW_MS + 24 * 60 * 60_000,
+    );
+    const nearReset = {
+      ...eligible,
+      windows: [
+        {
+          key: "7d",
+          usedPercent: 42.5,
+          resetsAtMs: OFFICIAL_NOW_MS + 60_000,
+          windowMinutes: 10_080,
+        },
+      ],
+    };
+    expect(xaiGrokMediaEntitlementValidUntil(nearReset, OFFICIAL_NOW_MS, "supergrok")).toBe(
+      OFFICIAL_NOW_MS + 60_000,
+    );
+  });
+
+  it("does not confuse exhaustion with missing subscription entitlement", () => {
+    expect(
+      isXaiGrokMediaEntitled(
+        {
+          ...eligible,
+          windows: [
+            {
+              key: "7d",
+              usedPercent: 100,
+              resetsAtMs: Date.parse("2026-06-08T00:00:00Z"),
+              windowMinutes: 10_080,
+            },
+          ],
+        },
+        OFFICIAL_NOW_MS,
+        "supergrok",
+      ),
+    ).toBe(true);
   });
 });

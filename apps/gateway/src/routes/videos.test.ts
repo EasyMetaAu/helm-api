@@ -376,17 +376,61 @@ describe("registerVideosRoute", () => {
     expect(create).toHaveBeenCalledOnce();
   });
 
-  it("rejects an unsupported video generation shape before reservation", async () => {
+  it("accepts prompt-only Grok video and forwards one paid create", async () => {
     const { app, create, putIfAbsent } = setup();
     const response = await app.request("/v1/videos/generations", {
       method: "POST",
       headers: { Authorization: "Bearer k", "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "grok-imagine-video", prompt: "missing source" }),
+      body: JSON.stringify({
+        model: "grok-imagine-video",
+        prompt: "waves rolling across a neon ocean",
+        aspect_ratio: "16:9",
+        duration: 15,
+        resolution: "1080p",
+        audio: true,
+      }),
     });
 
-    expect(response.status).toBe(400);
-    expect(create).not.toHaveBeenCalled();
-    expect(putIfAbsent).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(create).toHaveBeenCalledOnce();
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "grok-imagine-video",
+        prompt: "waves rolling across a neon ocean",
+        duration: 15,
+        resolution: "1080p",
+        audio: true,
+      }),
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+    expect(putIfAbsent).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps bearer and prompt out of regular logs and DecisionRecord", async () => {
+    const bearer = "super-secret-client-bearer";
+    const prompt = "private prompt marker 7f59f2";
+    const log = vi.fn();
+    const { app, enqueueTelemetry, enqueuePayload } = setup({
+      auth: { resolve: async (credential) => (credential === bearer ? identity : null) },
+      log,
+    });
+
+    const response = await app.request("/v1/videos/generations", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bearer}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "grok-imagine-video", prompt }),
+    });
+
+    expect(response.status).toBe(200);
+    const regularEvidence = JSON.stringify({
+      decision: enqueueTelemetry.mock.calls[0]?.[0]?.decision,
+      logs: log.mock.calls,
+    });
+    expect(regularEvidence).not.toContain(bearer);
+    expect(regularEvidence).not.toContain(prompt);
+    // Full prompt capture remains confined to the explicitly enabled payload store.
+    expect(enqueuePayload.mock.calls[0]?.[0]?.requestJson).toContain(prompt);
   });
 
   it("keeps a non-terminal poll status out of the durable terminal state", async () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  GrokImagineImageGenerationRequestSchema,
   ImageEditRequestSchema,
   ImageGenerationRequestSchema,
   ImageGenerationResponseSchema,
@@ -83,6 +84,43 @@ describe("ImageGenerationRequestSchema", () => {
       expect((r.data as Record<string, unknown>).style).toBe("vivid");
       expect((r.data as Record<string, unknown>).moderation).toBe("low");
     }
+  });
+});
+
+describe("GrokImagineImageGenerationRequestSchema", () => {
+  it("accepts both Grok web image modes and the observed count/aspect-ratio controls", () => {
+    for (const model of ["grok-imagine-image", "grok-imagine-image-quality"]) {
+      expect(
+        GrokImagineImageGenerationRequestSchema.safeParse({ model, prompt: "a cat" }).success,
+      ).toBe(true);
+      expect(
+        GrokImagineImageGenerationRequestSchema.safeParse({
+          model,
+          prompt: "a cat",
+          n: 4,
+          aspect_ratio: "16:9",
+          resolution: "1k",
+          response_format: "b64_json",
+        }).success,
+      ).toBe(true);
+    }
+  });
+
+  it("rejects unverified Grok web image fields before a paid create", () => {
+    expect(
+      GrokImagineImageGenerationRequestSchema.safeParse({
+        model: "grok-imagine-image",
+        prompt: "a cat",
+        n: 5,
+      }).success,
+    ).toBe(false);
+    expect(
+      GrokImagineImageGenerationRequestSchema.safeParse({
+        model: "grok-imagine-image",
+        prompt: "a cat",
+        resolution: "2k",
+      }).success,
+    ).toBe(false);
   });
 });
 

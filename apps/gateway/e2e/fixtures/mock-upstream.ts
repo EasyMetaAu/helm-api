@@ -110,6 +110,21 @@ export const TOOL_CALL_SENTINEL = "__HELM_TOOL_CALL__";
 const TOOL_CALL_ID = "call_mock_weather";
 const TOOL_CALL_NAME = "get_weather";
 
+function fixedJson(body: unknown, status = 200): Response {
+  const text = JSON.stringify(body);
+  return new Response(text, {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Content-Length": String(Buffer.byteLength(text)),
+    },
+  });
+}
+
+function xaiAccount(authorization: string | undefined): string {
+  return (authorization ?? "").replace(/^Bearer xai-access-/, "").split(".", 1)[0] ?? "";
+}
+
 // Non-stream OpenAI tool_call completion.
 function toolCallResponse(model: string) {
   return {
@@ -294,7 +309,7 @@ export function createMockUpstream() {
   );
 
   app.post("/videos/generations", async (c) => {
-    const account = (c.req.header("authorization") ?? "").replace(/^Bearer xai-access-/, "");
+    const account = xaiAccount(c.req.header("authorization"));
     if (!account || account.startsWith("Bearer ")) {
       return c.json({ error: { message: "missing xAI OAuth bearer" } }, 401);
     }
@@ -302,12 +317,12 @@ export function createMockUpstream() {
     const requestId = `video_${account}_${videoCapture.starts.length + 1}`;
     videoOwners.set(requestId, account);
     videoCapture.starts.push({ requestId, account, body });
-    return c.json({ request_id: requestId, status: "queued" });
+    return fixedJson({ request_id: requestId, status: "queued" });
   });
 
   app.get("/videos/:requestId", (c) => {
     const requestId = c.req.param("requestId");
-    const account = (c.req.header("authorization") ?? "").replace(/^Bearer xai-access-/, "");
+    const account = xaiAccount(c.req.header("authorization"));
     if (videoOwners.get(requestId) !== account) {
       return c.json({ error: { message: "video belongs to another OAuth account" } }, 409);
     }
@@ -315,8 +330,8 @@ export function createMockUpstream() {
     const count = (videoPollCounts.get(requestId) ?? 0) + 1;
     videoPollCounts.set(requestId, count);
     return count === 1
-      ? c.json({ request_id: requestId, status: "rendering" })
-      : c.json({
+      ? fixedJson({ request_id: requestId, status: "rendering" })
+      : fixedJson({
           request_id: requestId,
           status: "done",
           video: { url: `https://download.example.test/${requestId}.mp4` },
@@ -436,7 +451,7 @@ export function createMockUpstream() {
         500,
       );
     }
-    return c.json({
+    return fixedJson({
       candidates: [
         {
           content: {
@@ -454,11 +469,11 @@ export function createMockUpstream() {
   // (output_tokens = 196 image tokens, matching the live gpt-image-2 shape).
   app.post("/images/generations", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    const account = (c.req.header("authorization") ?? "").replace(/^Bearer xai-access-/, "");
+    const account = xaiAccount(c.req.header("authorization"));
     if (body.model === "grok-imagine-image-quality") {
       videoCapture.images.push({ account, body });
     }
-    return c.json({
+    return fixedJson({
       created: 0,
       model: body.model ?? "gpt-image-2",
       data: [{ b64_json: "iVBORw0KGgoAAAANSUhEUg==" }],

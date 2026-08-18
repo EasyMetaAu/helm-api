@@ -8,6 +8,7 @@ import {
   encryptSecret,
   hashKey,
   SqliteKeyStore,
+  SqliteOAuthQuotaStore,
   SqliteOAuthTokenStore,
 } from "@helm/core";
 import { expect, test } from "@playwright/test";
@@ -27,6 +28,11 @@ const AUTH = (key: string) => ({
   Authorization: `Bearer ${key}`,
   "Content-Type": "application/json",
 });
+
+function xaiAccessToken(account: string): string {
+  const payload = Buffer.from(JSON.stringify({ tier: "supergrok" })).toString("base64url");
+  return `xai-access-${account}.${payload}.signature`;
+}
 
 let dataDir = "";
 let configDir = "";
@@ -64,6 +70,23 @@ async function createVideo(key: string, prompt: string): Promise<Response> {
         image: { url: "data:image/png;base64,aGVsbQ==" },
         duration: 6,
         resolution: "480p",
+      }),
+    }),
+  );
+}
+
+async function createPromptVideo(key: string, prompt: string): Promise<Response> {
+  return gateway().fetch(
+    new Request("http://gateway.test/v1/videos/generations", {
+      method: "POST",
+      headers: AUTH(key),
+      body: JSON.stringify({
+        model: "grok-imagine-video",
+        prompt,
+        aspect_ratio: "16:9",
+        duration: 15,
+        resolution: "1080p",
+        audio: true,
       }),
     }),
   );
@@ -130,15 +153,30 @@ static/video:
     });
   }
   const oauth = new SqliteOAuthTokenStore(db);
+  const quota = new SqliteOAuthQuotaStore(db);
   for (const account of ["a", "b"]) {
     await oauth.upsert({
       providerId: "xai",
       account,
-      accessEnc: encryptSecret(`xai-access-${account}`, ENC_KEY),
+      accessEnc: encryptSecret(xaiAccessToken(account), ENC_KEY),
       refreshEnc: encryptSecret(`xai-refresh-${account}`, ENC_KEY),
       expiresAt: Date.now() + 60 * 60_000,
       meta: JSON.stringify({ accountId: `xai-user-${account}`, email: `${account}@example.test` }),
       updatedAt: Date.now(),
+    });
+    await quota.upsert({
+      providerId: "xai",
+      account,
+      windows: [
+        {
+          key: "7d",
+          usedPercent: 1,
+          resetsAtMs: Date.now() + 7 * 24 * 60 * 60_000,
+          windowMinutes: 7 * 24 * 60,
+        },
+      ],
+      capturedAt: Date.now(),
+      source: "xai",
     });
   }
   (db as unknown as { $sqlite: { close(): void } }).$sqlite.close();
@@ -209,8 +247,9 @@ test("start, owner isolation, OAuth pinning, and restart recovery stay on one du
       }),
     }),
   );
-  expect(image.status).toBe(200);
-  expect(await image.json()).toMatchObject({
+  const imageBody = await image.json();
+  expect(image.status, JSON.stringify(imageBody)).toBe(200);
+  expect(imageBody).toMatchObject({
     model: "grok-imagine-image-quality",
     data: [{ b64_json: expect.any(String) }],
   });
@@ -224,7 +263,7 @@ test("start, owner isolation, OAuth pinning, and restart recovery stay on one du
     },
   ]);
 
-  const first = await createVideo(KEY_A, "camera pushes toward the subject");
+  const first = await createPromptVideo(KEY_A, "camera pushes toward the subject");
   const second = await createVideo(KEY_B, "wind moves the subject's coat");
   expect(first.status).toBe(200);
   expect(second.status).toBe(200);

@@ -307,6 +307,8 @@ export {
   unpackCodexQuotaMetadata,
 } from "./oauth/usage-schema.js";
 export {
+  type GrokImagineImageGenerationRequest,
+  GrokImagineImageGenerationRequestSchema,
   type ImageEditRequest,
   ImageEditRequestSchema,
   type ImageGenerationRequest,

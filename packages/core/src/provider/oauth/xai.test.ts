@@ -17,6 +17,7 @@ import {
   XAI_OAUTH_CLIENT_ID,
   XAI_OAUTH_SCOPE,
   xaiGrokInferenceHeaders,
+  xaiGrokSubscriptionTierHint,
   xaiOAuthProvider,
 } from "./xai.js";
 
@@ -56,6 +57,17 @@ describe("xAI OAuth", () => {
     expect(() => xaiGrokInferenceHeaders("grok-4.5\r\nx-injected: yes")).toThrow(
       /invalid wire model/,
     );
+  });
+
+  it("reads only the xAI tier claim as a scheduling hint", () => {
+    const token = (tier: unknown) => {
+      const payload = Buffer.from(JSON.stringify({ tier })).toString("base64url");
+      return `header.${payload}.signature`;
+    };
+    expect(xaiGrokSubscriptionTierHint(token(0))).toBe("free");
+    expect(xaiGrokSubscriptionTierHint(token(2))).toBe("x_basic");
+    expect(xaiGrokSubscriptionTierHint(token("SuperGrok Heavy"))).toBe("supergrok_heavy");
+    expect(xaiGrokSubscriptionTierHint("opaque-token")).toBeUndefined();
   });
 
   it("uses a validated operator override for the Grok CLI protocol version", () => {

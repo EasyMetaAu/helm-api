@@ -181,6 +181,95 @@ describe("registerImagesRoute", () => {
     });
   });
 
+  it("rejects unverified Grok image options before the paid create", async () => {
+    const imageGeneration = vi.fn().mockResolvedValue(UPSTREAM);
+    const client = { imageGeneration } as unknown as ProviderClient;
+    const { app } = setup({
+      resolveImageChain: () => ({
+        ok: true,
+        laneName: "grok-imagine-image",
+        candidateChain: ["xai/grok-imagine-image"],
+        targets: [
+          {
+            client,
+            providerModel: "grok-imagine-image",
+            alias: "xai/grok-imagine-image",
+            kind: "openai",
+          },
+        ],
+      }),
+    });
+
+    const response = await post(app, {
+      model: "grok-imagine-image",
+      prompt: "a cat",
+      resolution: "2k",
+    });
+
+    expect(response.status).toBe(400);
+    expect(imageGeneration).not.toHaveBeenCalled();
+  });
+
+  it("treats an empty Grok image response as one ambiguous paid write", async () => {
+    const imageGeneration = vi.fn().mockResolvedValue({ data: [] });
+    const client = { imageGeneration } as unknown as ProviderClient;
+    const { app } = setup({
+      resolveImageChain: () => ({
+        ok: true,
+        laneName: "grok-imagine-image-quality",
+        candidateChain: ["xai/grok-imagine-image-quality"],
+        targets: [
+          {
+            client,
+            providerModel: "grok-imagine-image-quality",
+            alias: "xai/grok-imagine-image-quality",
+            kind: "openai",
+          },
+        ],
+      }),
+    });
+
+    const response = await post(app, {
+      model: "grok-imagine-image-quality",
+      prompt: "a cat",
+    });
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { code: "outcome_unknown" } });
+    expect(imageGeneration).toHaveBeenCalledOnce();
+  });
+
+  it("treats whitespace-only Grok image carriers as one ambiguous paid write", async () => {
+    const imageGeneration = vi.fn().mockResolvedValue({
+      data: [{ b64_json: " \t " }, { url: "  " }],
+    });
+    const client = { imageGeneration } as unknown as ProviderClient;
+    const { app } = setup({
+      resolveImageChain: () => ({
+        ok: true,
+        laneName: "grok-imagine-image-quality",
+        candidateChain: ["xai/grok-imagine-image-quality"],
+        targets: [
+          {
+            client,
+            providerModel: "grok-imagine-image-quality",
+            alias: "xai/grok-imagine-image-quality",
+            kind: "openai",
+          },
+        ],
+      }),
+    });
+
+    const response = await post(app, {
+      model: "grok-imagine-image-quality",
+      prompt: "a cat",
+    });
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { code: "outcome_unknown" } });
+    expect(imageGeneration).toHaveBeenCalledOnce();
+  });
+
   it("rejects unpriced image media before a paid call for a spend-capped key", async () => {
     const { app, imageGeneration } = setup({ isPriced: () => false });
 

@@ -917,6 +917,7 @@ describe('providers page', () => {
               proxy: null,
               models: [
                 'grok-4.5',
+                'grok-imagine-image',
                 'grok-imagine-image-quality',
                 'grok-imagine-video-1.5-preview',
                 'grok-imagine-video',
@@ -934,6 +935,9 @@ describe('providers page', () => {
     );
     const dialog = screen.getByRole('dialog', { name: /test connection/i });
     expect(within(dialog).getByRole('option', { name: 'grok-4.5' })).toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole('option', { name: 'grok-imagine-image' }),
+    ).not.toBeInTheDocument();
     expect(
       within(dialog).queryByRole('option', { name: 'grok-imagine-image-quality' }),
     ).not.toBeInTheDocument();

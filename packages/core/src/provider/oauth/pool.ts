@@ -109,6 +109,10 @@ export interface OAuthPoolMember {
   // Optional per-account model entitlement. Undefined preserves the legacy
   // "supports every routed model" behavior; an explicit empty list supports none.
   models?: readonly string[];
+  // Optional per-model entitlement expiry. Models omitted from this map keep the
+  // legacy non-expiring behavior; a mapped model is re-checked against the live
+  // clock on every discovery/read/create selection.
+  modelValidUntilMs?: Readonly<Record<string, number>>;
   client: ProviderClient;
   // Optional live capacity probe. When true, the pool prefers another eligible account
   // before committing this request. If every eligible account is busy, selection falls
@@ -146,6 +150,7 @@ export type OAuthSelectionStrategy = "balanced" | "manual_priority" | "low_risk"
 // (the member may have been dropped by a concurrent rebuild). Passing null after
 // a successful account test clears every soft cooldown for that account.
 export interface OAuthPoolClient extends ProviderClient {
+  hasAvailableModel(model: string): boolean;
   setUsageLimit(account: string, untilMs: number | null): void;
   // The account's current auto-park cooldown (epoch ms), or null if eligible now. Lets
   // the gateway make a park EXTEND-ONLY — never shorten a precise quota reset already set.
@@ -323,8 +328,11 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     return false;
   }
 
-  function supportsModel(member: OAuthPoolMember, model: string | null): boolean {
-    return model === null || member.models === undefined || member.models.includes(model);
+  function supportsModel(member: OAuthPoolMember, model: string | null, nowMs: number): boolean {
+    if (model === null) return true;
+    if (member.models !== undefined && !member.models.includes(model)) return false;
+    const validUntil = member.modelValidUntilMs?.[model];
+    return validUntil === undefined || (Number.isSafeInteger(validUntil) && nowMs < validUntil);
   }
 
   function scopedRateLimitKey(account: string, model: string, limitId: string | null): string {
@@ -492,7 +500,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     return entries.filter(
       (e) =>
         e.member.schedulable &&
-        supportsModel(e.member, model) &&
+        supportsModel(e.member, model, nowMs) &&
         !usageLimited(e.member, nowMs) &&
         !retryableAccountLimited(e.member.account, nowMs) &&
         !modelLimited(e.member.account, model, nowMs) &&
@@ -925,7 +933,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       nowMs,
     );
     if (!best) {
-      if (model !== null && !entries.some((entry) => supportsModel(entry.member, model))) {
+      if (model !== null && !entries.some((entry) => supportsModel(entry.member, model, nowMs))) {
         throw new Error(`oauth pool: no account supports model "${model}"`);
       }
       throw new Error("oauth pool has no schedulable account");
@@ -1162,6 +1170,12 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
 
   return {
     ...(nativeProtocolProfile === undefined ? {} : { nativeProtocolProfile }),
+    hasAvailableModel(model: string): boolean {
+      const nowMs = now();
+      return entries.some(
+        (entry) => entry.member.schedulable && supportsModel(entry.member, model, nowMs),
+      );
+    },
     // Park / un-park ONE account's auto-park cooldown in place. The next select()
     // observes the new value without a pool rebuild; null clears it (the manual
     // "Reset usage" path). Unknown account = no-op.

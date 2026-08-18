@@ -7,6 +7,28 @@ import {
 } from "./videos-schema.js";
 
 describe("VideoGenerationRequestSchema", () => {
+  it("accepts the minimal Sub2API-compatible prompt-only video contract", () => {
+    expect(
+      VideoGenerationRequestSchema.safeParse({
+        model: "grok-imagine-video",
+        prompt: "waves rolling across a neon ocean",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("accepts the Grok prompt-only video contract and current web options", () => {
+    expect(
+      VideoGenerationRequestSchema.safeParse({
+        model: "grok-imagine-video",
+        prompt: "waves rolling across a neon ocean",
+        aspect_ratio: "16:9",
+        duration: 15,
+        resolution: "1080p",
+        audio: true,
+      }).success,
+    ).toBe(true);
+  });
+
   it("accepts the single-image Grok video contract, including an empty prompt", () => {
     expect(
       VideoGenerationRequestSchema.safeParse({
@@ -36,6 +58,22 @@ describe("VideoGenerationRequestSchema", () => {
   });
 
   it("rejects unsupported shapes and ZDR output instead of silently forwarding them", () => {
+    expect(
+      VideoGenerationRequestSchema.safeParse({
+        model: "grok-imagine-video-1.5-preview",
+        prompt: "text only is unsupported by the image-to-video model",
+        duration: 6,
+        resolution: "480p",
+      }).success,
+    ).toBe(false);
+    expect(
+      VideoGenerationRequestSchema.safeParse({
+        model: "grok-imagine-video",
+        prompt: "unsupported duration",
+        duration: 30,
+        resolution: "720p",
+      }).success,
+    ).toBe(false);
     expect(
       VideoGenerationRequestSchema.safeParse({
         model: "grok-imagine-video",
