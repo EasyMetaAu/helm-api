@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+
 jobs:
   # Every Action is pinned to an audited full SHA and uses a Node 24 runtime.
   # The persistent runner pool is on 2.335.1 (newer than the required 2.329.0).
