@@ -1682,6 +1682,18 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     return nested.code === "websocket_connection_limit_reached";
   }
 
+  function isInvalidPreviousResponseIdError(error: UpstreamError): boolean {
+    if (
+      error.upstreamStatus !== 400 ||
+      error.message !== "Invalid `previous_response_id`." ||
+      !isRecord(error.providerRaw)
+    ) {
+      return false;
+    }
+    const nested = isRecord(error.providerRaw.error) ? error.providerRaw.error : {};
+    return nested.type === "invalid_request_error";
+  }
+
   function websocketSessionId(input: NativePassthroughInput): string | undefined {
     return nativeHeader(input, CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER);
   }
@@ -2031,6 +2043,10 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         sessionId &&
         !websocketHttpFallbackSessions.has(sessionId)
       ) {
+        const nativeBody = isNativePassthroughCarrier(body) ? body.body : body;
+        const previousResponseId = nativeBody.previous_response_id;
+        const hasPreviousResponseId =
+          typeof previousResponseId === "string" && previousResponseId.trim().length > 0;
         const { prepared, turnKey } = await prepareRequest(
           body,
           modelInfo,
@@ -2039,6 +2055,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         );
         const maxRetries = websocketRetryCount();
         let retries = 0;
+        let retriedInvalidPreviousResponseId = false;
         while (!websocketHttpFallbackSessions.has(sessionId)) {
           let lease:
             | {
@@ -2062,6 +2079,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
           }
 
           let retryConnection = false;
+          let retryTurn = false;
           let fallbackToHttp = false;
           let sendingRequest = false;
           let outputStarted = false;
@@ -2105,6 +2123,16 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
                 }
                 if (event.kind === "error") {
                   fireResponseMetaHeaders(event.headers, opts?.onResponseMeta);
+                  if (
+                    !outputStarted &&
+                    hasPreviousResponseId &&
+                    !retriedInvalidPreviousResponseId &&
+                    isInvalidPreviousResponseIdError(event.error)
+                  ) {
+                    retriedInvalidPreviousResponseId = true;
+                    retryTurn = true;
+                    break;
+                  }
                   if (isWebsocketConnectionLimitError(event.error)) {
                     await closeWebSocketSession(sessionId);
                     if (!outputStarted && retries < maxRetries) {
@@ -2154,6 +2182,10 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
             }
           } finally {
             lease.release();
+          }
+          if (retryTurn) {
+            await waitForWebsocketRetry(0, opts?.signal);
+            continue;
           }
           if (fallbackToHttp) break;
           if (retryConnection) {

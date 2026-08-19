@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-08-19 · Codex Responses 续接 ID 在原 WebSocket 上做一次有界恢复（OAuth provider / Responses，docs/04/05/07，原则 3/5/8）
+
+- **根因与修复**：生产证据显示多个刚成功的同账号续接约一秒后收到上游 `400 Invalid previous_response_id`，且成功与失败请求使用相同 native sanitizer；这不是账号轮换或正文变换。provider 现在只在首个客户端可见输出前、只针对该精确 400，在同一上游 WebSocket 上原样重发一次，吸收短暂的上游状态传播竞态。
+- **安全边界**：重试不删除 `previous_response_id`、不换账号/模型、不重建正文，也不占用连接重建预算；第二次相同错误继续关闭 session 并 fail-closed，避免确定性坏 ID 循环或上下文串线。无 schema、配置或依赖变化。
+
 ## 2026-08-19 · 保留已公开的 Grok Imagine 媒体选项（Images / Videos，Phase 1 spec §4–9，原则 3/6/7）
 
 - **兼容决定**：用户确认 fast image 与 prompt-only video 的已公开选项不得移除。`grok-imagine-image` 继续接受并透传 `n=1..4`、六种 `aspect_ratio`、`resolution=1k` 与 `response_format=b64_json`；`grok-imagine-video` 继续接受并透传 `aspect_ratio`、`duration=6/10/15`、`resolution=480p/720p/1080p` 与 `audio`。合同仍为严格对象，不开放任意未知字段或 ZDR `output`。
@@ -61,14 +66,9 @@
 
 - **根因与修复**：provider deadline 未变化时，刷新只能证明“使用率已下降”，不能证明下降发生在刷新瞬间；这类记录改为 `approximate=true`。deadline 推进推导出的窗口起点和 reset-credit 事件仍为精确事实。这样同账号 ±3 小时内已有 header 精确点时会自动压过刷新推测，且刷新推测不再进入 `latestResetAt`。
 
-## 2026-08-13 · 历史配额周期使用公开公告补齐近似边界（OAuth quota / Admin providers，docs/04/11，原则 3/7）
-
-- **来源边界**：`codex-reset.com` 的公开 timeline 没有个人账号的 `effective_at`；历史确认公告使用 `announced_at`，带官方窗口的预告使用窗口中点，均只能标记为 `approximate=true`，不能冒充账号真实重置时间。Helm 已记录的 header/reset-credit 时间继续保持精确，并在 ±3 小时内覆盖公告估算。
-- **存储与读取**：复用 `oauth_reset_period`，SQLite/Postgres 只增加 `approximate` 列；估算边界仅参与历史周期切分，不进入 `latestResetAt`，因此不会改变实时请求 bucket 或 reset-credit 判断。同一主键后来收到精确观测时，只允许 `approximate=true → false` 单向升级，估算数据不能覆盖精确事实。
-- **重算方式**：`oauth_usage` 是保留时间戳的小时/边界 bucket，周期 totals 在 Admin API 读取时按边界动态聚合，因此历史修复只需追加缺失的近似 reset facts，不重写或复制请求计数。发布后生产回填必须先备份数据库、预演候选/冲突，并验证拆分前后 requests/tokens/cost 守恒。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-13 · 历史配额周期使用公开公告补齐近似边界**：公开公告只能形成 `approximate=true` 的历史 reset facts，精确 header/reset-credit 继续优先且实时 bucket 不受影响；完整原文经 git history 回溯。
 - **2026-08-11 · Admin Memory 范围分页与 Key 点查**：scopes 使用稳定服务端分页，首屏只加载轻量数据，Key 深链走不可变 id 索引点查；完整原文经 git history 回溯。
 - **2026-08-11 · Memory 大线程有界形成与遗忘原子性**：Observer/Reflector/cleanup 改为有界分页、frontier/fence 与原子提交，避免超大线程 OOM、遗忘后复活和 stale counter 漂移；完整原文经 git history 回溯。
 - **2026-08-10 · 配额统计按真实重置点切分**：PULL、Codex header 与 reset-credit 共用真实周期边界，晚到采样不写伪 reset；旧整点历史不可逆并继续标记为近似/部分数据，完整原文经 git history 回溯。

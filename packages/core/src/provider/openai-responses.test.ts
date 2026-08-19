@@ -3342,6 +3342,109 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect(responseMetadata[0]?.get("x-models-etag")).toBe('"models-ws-1"');
   });
 
+  it("retries an invalid previous_response_id once on the same websocket before output", async () => {
+    const connection = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-1" } },
+        { type: "response.completed", response: { id: "resp-1", status: "completed" } },
+      ],
+      [
+        {
+          type: "error",
+          status: 400,
+          error: {
+            type: "invalid_request_error",
+            message: "Invalid `previous_response_id`.",
+          },
+        },
+      ],
+      [
+        { type: "response.created", response: { id: "resp-2" } },
+        { type: "response.completed", response: { id: "resp-2", status: "completed" } },
+      ],
+    ]);
+    const connect = vi.fn(async () => connection);
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_invalid_previous")}`,
+        responsesWebSocketConnector: connect,
+        connectRetryBackoffMs: [0],
+      },
+    });
+
+    for await (const _chunk of client.nativePassthroughStream?.(
+      carrier("ingress-invalid-previous", {
+        model: "gpt-5.6-sol",
+        input: [],
+        stream: true,
+        store: false,
+      }),
+    ) ?? []) {
+      // drain
+    }
+    const chunks: string[] = [];
+    for await (const chunk of client.nativePassthroughStream?.(
+      carrier("ingress-invalid-previous", {
+        model: "gpt-5.6-sol",
+        input: [],
+        stream: true,
+        store: false,
+        previous_response_id: "resp-1",
+      }),
+    ) ?? []) {
+      chunks.push(chunk);
+    }
+
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(connection.sent).toHaveLength(3);
+    expect(connection.sent.slice(1).map((text) => JSON.parse(text))).toEqual([
+      expect.objectContaining({ previous_response_id: "resp-1" }),
+      expect.objectContaining({ previous_response_id: "resp-1" }),
+    ]);
+    expect(chunks.join("")).toContain("response.completed");
+  });
+
+  it("surfaces a repeated invalid previous_response_id without looping or changing sockets", async () => {
+    const invalidPreviousResponseId = {
+      type: "error",
+      status: 400,
+      error: {
+        type: "invalid_request_error",
+        message: "Invalid `previous_response_id`.",
+      },
+    };
+    const connection = fakeConnection([[invalidPreviousResponseId], [invalidPreviousResponseId]]);
+    const connect = vi.fn(async () => connection);
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_invalid_previous_repeat")}`,
+        responsesWebSocketConnector: connect,
+        connectRetryBackoffMs: [0],
+      },
+    });
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier("ingress-invalid-previous-repeat", {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+          previous_response_id: "resp-missing",
+        }),
+      )
+      [Symbol.asyncIterator]();
+
+    await expect(iterator?.next()).rejects.toMatchObject({
+      upstreamStatus: 400,
+      message: "Invalid `previous_response_id`.",
+    });
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(connection.sent).toHaveLength(2);
+    expect(connection.closeCalls).toBe(1);
+  });
+
   it("falls back to HTTP after a websocket 426 and keeps the named session on HTTP", async () => {
     const connect = vi.fn(async () => {
       throw new CodexResponsesWebSocketConnectError("upgrade required", {
