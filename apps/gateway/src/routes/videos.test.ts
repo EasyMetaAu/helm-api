@@ -59,10 +59,10 @@ function setup(over: Partial<VideosRouteDeps> = {}) {
     auth: { resolve: async (credential) => (credential === "k" ? identity : null) },
     registry,
     resolver: {
-      create: async () => ({
-        providerAlias: "xai/grok-imagine-video",
+      create: async (body) => ({
+        providerAlias: `xai/${String(body.model).replace(/^xai\//, "")}`,
         providerName: "xai",
-        providerModel: "grok-imagine-video",
+        providerModel: String(body.model).replace(/^xai\//, ""),
         providerAccount: "oauth-a",
         client: { create },
       }),
@@ -106,11 +106,140 @@ function post(app: Hono<AppEnv>, body?: Record<string, unknown>) {
   });
 }
 
+function extend(app: Hono<AppEnv>, body?: Record<string, unknown>) {
+  return app.request("/v1/videos/extensions", {
+    method: "POST",
+    headers: { Authorization: "Bearer k", "Content-Type": "application/json" },
+    body: JSON.stringify(
+      body ?? {
+        model: "grok-imagine-video",
+        prompt: "continue the camera movement",
+        video: { url: "https://example.test/source.mp4" },
+        duration: 30,
+      },
+    ),
+  });
+}
+
 describe("registerVideosRoute", () => {
-  it("rejects missing auth before reservation or create", async () => {
+  it.each([
+    ["prompt-only", { model: "grok-imagine-video", prompt: "waves", duration: 30 }],
+    [
+      "single-image",
+      {
+        model: "grok-imagine-video-1.5",
+        prompt: "move",
+        image: { url: "https://example.test/source.png" },
+        duration: 30,
+        resolution: "720p",
+      },
+    ],
+    [
+      "reference_images",
+      {
+        model: "grok-imagine-video-1.5",
+        prompt: "connect <IMAGE_0> and <IMAGE_1>",
+        reference_images: [
+          { url: "https://example.test/one.png" },
+          { url: "https://example.test/two.png" },
+        ],
+        aspect_ratio: "16:9",
+        duration: 30,
+        resolution: "720p",
+      },
+    ],
+  ])("forwards one 30-second %s generation with the resolved wire model", async (_name, body) => {
+    const { app, create } = setup();
+
+    expect((await post(app, body)).status).toBe(200);
+    expect(create).toHaveBeenCalledOnce();
+    expect(create).toHaveBeenCalledWith(body, expect.any(AbortSignal), expect.any(Function));
+  });
+
+  it("normalizes the compatible images field to reference_images before the paid POST", async () => {
+    const { app, create } = setup();
+    const references = [
+      { url: "https://example.test/one.png" },
+      { url: "https://example.test/two.png" },
+    ];
+
+    expect(
+      (
+        await post(app, {
+          model: "grok-imagine-video-1.5",
+          prompt: "connect <IMAGE_0> and <IMAGE_1>",
+          images: references,
+          aspect_ratio: "16:9",
+          duration: 15,
+          resolution: "720p",
+        })
+      ).status,
+    ).toBe(200);
+    expect(create).toHaveBeenCalledOnce();
+    expect(create).toHaveBeenCalledWith(
+      {
+        model: "grok-imagine-video-1.5",
+        prompt: "connect <IMAGE_0> and <IMAGE_1>",
+        reference_images: references,
+        aspect_ratio: "16:9",
+        duration: 15,
+        resolution: "720p",
+      },
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+  });
+
+  it("runs a valid extension through the same single-write registry contract", async () => {
+    const { app, create, putIfAbsent } = setup();
+    const body = {
+      model: "grok-imagine-video",
+      prompt: "continue the camera movement",
+      video: { url: "https://example.test/source.mp4" },
+      duration: 30,
+    };
+
+    expect((await extend(app, body)).status).toBe(200);
+    expect(create).toHaveBeenCalledOnce();
+    expect(create).toHaveBeenCalledWith(body, expect.any(AbortSignal), expect.any(Function));
+    expect(putIfAbsent).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns outcome_unknown without retrying an ambiguous extension", async () => {
+    const { app, create } = setup();
+    create.mockRejectedValueOnce(new Error("socket closed after extension POST"));
+
+    const response = await extend(app);
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: { code: "outcome_unknown" } });
+    expect(create).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an invalid extension before reservation or create", async () => {
     const { app, create, putIfAbsent } = setup();
 
-    const response = await app.request("/v1/videos/generations", {
+    expect(
+      (
+        await extend(app, {
+          model: "grok-imagine-video",
+          prompt: "",
+          video: { url: "" },
+          duration: 30,
+        })
+      ).status,
+    ).toBe(400);
+    expect(putIfAbsent).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "generations",
+    "extensions",
+  ])("rejects missing auth on %s before reservation or create", async (operation) => {
+    const { app, create, putIfAbsent } = setup();
+
+    const response = await app.request(`/v1/videos/${operation}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: "{}",
@@ -174,17 +303,17 @@ describe("registerVideosRoute", () => {
       request_id: "req_1",
       requested_model: "grok-imagine-video-1.5-preview",
       final: {
-        model_alias: "xai/grok-imagine-video",
-        provider_model: "grok-imagine-video",
+        model_alias: "xai/grok-imagine-video-1.5-preview",
+        provider_model: "grok-imagine-video-1.5-preview",
         status: "ok",
       },
       serving_account: { provider_id: "xai", account: "oauth-a" },
       cost_breakdown: { total_usd: null },
       provider_attempts: [
         expect.objectContaining({
-          alias: "xai/grok-imagine-video",
+          alias: "xai/grok-imagine-video-1.5-preview",
           provider_name: "xai",
-          provider_model: "grok-imagine-video",
+          provider_model: "grok-imagine-video-1.5-preview",
           upstream_request_ref: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
           status: "ok",
           cost_usd: null,
@@ -502,7 +631,7 @@ describe("registerVideosRoute", () => {
   it("rejects a blocked resolved video alias before reservation or create", async () => {
     const blockedIdentity: MessagesIdentity = {
       ...identity,
-      caps: { blockedModels: ["xai/grok-imagine-video"] },
+      caps: { blockedModels: ["xai/grok-imagine-video-1.5-preview"] },
     };
     const { app, create, putIfAbsent } = setup({
       auth: { resolve: async () => blockedIdentity },

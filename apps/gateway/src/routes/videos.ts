@@ -9,6 +9,7 @@ import {
 } from "@helm/core";
 import {
   type ProviderAttempt,
+  VideoExtensionRequestSchema,
   VideoGenerationRequestSchema,
   VideoRetrieveResponseSchema,
 } from "@helm/shared";
@@ -51,6 +52,8 @@ export interface VideoCreateTarget {
   };
 }
 
+export type VideoCreateOperation = "generation" | "extension";
+
 export interface VideosRouteDeps {
   auth: { resolve(credential: string | null): Promise<MessagesIdentity | null> };
   registry: AtomicResponsesRegistryPort;
@@ -58,6 +61,7 @@ export interface VideosRouteDeps {
     create(
       body: Record<string, unknown>,
       identity: MessagesIdentity,
+      operation: VideoCreateOperation,
     ): Promise<VideoCreateTarget | null>;
     poll(record: ResponsesRegistryRecord): Promise<{
       retrieve(requestId: string, signal: AbortSignal): Promise<Record<string, unknown>>;
@@ -95,6 +99,15 @@ function errorJson(
 
 function isTerminal(status: unknown): status is string {
   return status === "done" || status === "failed" || status === "expired";
+}
+
+function normalizeVideoCreateBody(
+  body: Record<string, unknown>,
+  operation: VideoCreateOperation,
+): Record<string, unknown> {
+  if (operation !== "generation" || !Object.hasOwn(body, "images")) return body;
+  const { images, ...rest } = body;
+  return { ...rest, reference_images: images };
 }
 
 function registryRecord(
@@ -232,9 +245,14 @@ async function admit(
 export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): void {
   app.use("/v1/videos/generations", concurrencyReleaseGuard());
   app.use("/v1/videos/generations", memoryAdmissionReleaseGuard());
+  app.use("/v1/videos/extensions", concurrencyReleaseGuard());
+  app.use("/v1/videos/extensions", memoryAdmissionReleaseGuard());
   app.use("/v1/videos/:requestId", concurrencyReleaseGuard());
 
-  app.post("/v1/videos/generations", async (c): Promise<Response> => {
+  const createVideo = async (
+    c: Context<AppEnv>,
+    operation: VideoCreateOperation,
+  ): Promise<Response> => {
     const identity = await deps.auth.resolve(extractBearer(c.req.header("Authorization")));
     if (identity === null)
       return errorJson(c, 401, "missing or invalid API key", "invalid_api_key");
@@ -258,7 +276,9 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
       const raw = admitted?.text ?? (await c.req.text());
       requestJson = raw;
       if (admitted !== null) c.set("requestMemoryRelease", admitted.release);
-      const parsed = VideoGenerationRequestSchema.safeParse(JSON.parse(raw));
+      const parsed = (
+        operation === "extension" ? VideoExtensionRequestSchema : VideoGenerationRequestSchema
+      ).safeParse(JSON.parse(raw));
       if (!parsed.success) {
         return errorJson(
           c,
@@ -281,7 +301,7 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
     if (requestedModel.includes("/") && identity.caps?.allowCustomModel !== true) {
       return errorJson(c, 400, "video model is not available to this key", "model_not_found");
     }
-    const target = await deps.resolver.create(body, identity);
+    const target = await deps.resolver.create(body, identity, operation);
     if (target === null)
       return errorJson(c, 503, "video provider is unavailable", "provider_unavailable");
     const blocked = createBlockedModelMatcher(identity.caps?.blockedModels);
@@ -312,7 +332,8 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
 
     const now = deps.now ?? Date.now;
     const startedAt = now();
-    const upstreamRequestJson = JSON.stringify({ ...body, model: target.providerModel });
+    const upstreamBody = normalizeVideoCreateBody(body, operation);
+    const upstreamRequestJson = JSON.stringify({ ...upstreamBody, model: target.providerModel });
     const recordStart = async (
       status: "ok" | "error",
       errorClass: string | null,
@@ -376,7 +397,7 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
     let upstream: Record<string, unknown>;
     try {
       upstream = await target.client.create(
-        { ...body, model: target.providerModel },
+        { ...upstreamBody, model: target.providerModel },
         requestSignal(c),
         async (account) => {
           target.providerAccount = account;
@@ -424,7 +445,10 @@ export function registerVideosRoute(app: Hono<AppEnv>, deps: VideosRouteDeps): v
       }
     }
     return c.json(upstream);
-  });
+  };
+
+  app.post("/v1/videos/generations", (c) => createVideo(c, "generation"));
+  app.post("/v1/videos/extensions", (c) => createVideo(c, "extension"));
 
   app.get("/v1/videos/:requestId", async (c): Promise<Response> => {
     const identity = await deps.auth.resolve(extractBearer(c.req.header("Authorization")));

@@ -12,6 +12,12 @@
 - **根因与修复**：生产证据显示多个刚成功的同账号续接约一秒后收到上游 `400 Invalid previous_response_id`，且成功与失败请求使用相同 native sanitizer；这不是账号轮换或正文变换。provider 现在只在首个客户端可见输出前、只针对该精确 400，在同一上游 WebSocket 上原样重发一次，吸收短暂的上游状态传播竞态。
 - **安全边界**：重试不删除 `previous_response_id`、不换账号/模型、不重建正文，也不占用连接重建预算；第二次相同错误继续关闭 session 并 fail-closed，避免确定性坏 ID 循环或上下文串线。无 schema、配置或依赖变化。
 
+## 2026-08-19 · Grok 视频统一 30 秒并复用单写链增加扩展接口（Videos，扩展方案 §4–7，原则 2/3/6/7）
+
+- **统一合同**：纯文本、单图、多图与 extension 共用 `6 | 10 | 15 | 30` 时长；单图 stable/preview 名称复用既有 preview entitlement，但 stable 请求仍以 `grok-imagine-video-1.5` 原样发送。当前 Grok Build 证明多图上游 wire 为 stable `grok-imagine-video-1.5 + reference_images: [{ url }]`；Helm 因此只允许 stable 1.5 多图 model，并把严格互斥的兼容入参 `images` 在付费 POST 前统一转成 `reference_images`，不做单图/多图升降级。
+- **执行边界**：`POST /v1/videos/extensions` 复用 generation 的鉴权、预算、付费单写 reservation、telemetry、receipt registry 与固定账号 poll；provider 精确发送 `/videos/extensions`，任何 transport/5xx/无 receipt 都返回 `503 outcome_unknown`，不重试、不换账号。未新增 Store、migration、无版本别名或内容代理。
+- **验收与限制**：shared/provider/OAuth/route/OpenAPI 定向测试及 `e2e/videos.spec.ts` 通过；离线 e2e 覆盖四种 30 秒 body、单次 POST、跨 key、账号亲和与重启恢复。2026-08-19 获授权后，本机账号的 30 秒纯文本生成仅 POST 一次，上游链返回 `503 outcome_unknown` 且无 receipt；按单写边界没有重试，extension POST 为 0 次。用户随后确认该环境账号不支持 30 秒；新的 15 秒纯文本 canary 仅 POST 一次，取得 receipt 后经同账号 18 次只读轮询到 `done`，结果 URL 有效，`ffprobe` 实测 15.041667 秒。15 秒单图 canary 使用 `grok-imagine-video-1.5-preview + image` 仅 POST 一次，经 8 次同账号 GET 到 `done`，下载结果同样实测 15.041667 秒。修正前的多图 `grok-imagine-video + reference_images` canary 返回 `503 outcome_unknown` 且无 receipt，没有重放；按 Grok Build 当前合同改为 `grok-imagine-video-1.5 + reference_images` 后，一次本机入站鉴权错误被 Helm 以 401 拒绝且未进入付费链，随后一次有效鉴权的付费 POST 取得 receipt，经同账号 6 次 GET 到 `done`，结果实测 15.041667 秒、1280×720。当前真实证据证明 15 秒纯文本、单图与多图 generation；仍不证明 30 秒或 extension 的真实能力。
+
 ## 2026-08-19 · 保留已公开的 Grok Imagine 媒体选项（Images / Videos，Phase 1 spec §4–9，原则 3/6/7）
 
 - **兼容决定**：用户确认 fast image 与 prompt-only video 的已公开选项不得移除。`grok-imagine-image` 继续接受并透传 `n=1..4`、六种 `aspect_ratio`、`resolution=1k` 与 `response_format=b64_json`；`grok-imagine-video` 继续接受并透传 `aspect_ratio`、`duration=6/10/15`、`resolution=480p/720p/1080p` 与 `audio`。合同仍为严格对象，不开放任意未知字段或 ZDR `output`。
@@ -62,12 +68,9 @@
 - **价格口径**：SuperGrok 仍是包月订阅；预算与遥测沿用“官方 API 等价估价”。2026-08-13 xAI 官方价卡为短上下文 input/cache/output `$2/$0.5/$6`，prompt 达到 200K 后 `$4/$1/$12`，priority 为对应档位 2 倍；配置显式保存 context + priority 两层，避免长上下文预算低估。
 - **限制**：官方公开模型支持 vision/structured outputs/xhigh，但本次现场只证明 Helm/Grok Build 的 chat + tools；subscription proxy 上未做真实 vision/JSON/xhigh canary，因此这些能力没有借用 public API 声明自动放开。生产修复仍需按部署流程发布，并从 `/version`、`/v1/models` 和一条带 tools 的真实请求三处回读。
 
-## 2026-08-13 · 使用率下降观测不得冒充精确重置（OAuth quota，docs/04/11，原则 3/7）
-
-- **根因与修复**：provider deadline 未变化时，刷新只能证明“使用率已下降”，不能证明下降发生在刷新瞬间；这类记录改为 `approximate=true`。deadline 推进推导出的窗口起点和 reset-credit 事件仍为精确事实。这样同账号 ±3 小时内已有 header 精确点时会自动压过刷新推测，且刷新推测不再进入 `latestResetAt`。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-13 · 使用率下降观测不得冒充精确重置**：deadline 未变化时的使用率下降只形成 `approximate=true` 事实，精确 header/reset-credit 继续优先；完整原文经 git history 回溯。
 - **2026-08-13 · 历史配额周期使用公开公告补齐近似边界**：公开公告只能形成 `approximate=true` 的历史 reset facts，精确 header/reset-credit 继续优先且实时 bucket 不受影响；完整原文经 git history 回溯。
 - **2026-08-11 · Admin Memory 范围分页与 Key 点查**：scopes 使用稳定服务端分页，首屏只加载轻量数据，Key 深链走不可变 id 索引点查；完整原文经 git history 回溯。
 - **2026-08-11 · Memory 大线程有界形成与遗忘原子性**：Observer/Reflector/cleanup 改为有界分页、frontier/fence 与原子提交，避免超大线程 OOM、遗忘后复活和 stale counter 漂移；完整原文经 git history 回溯。

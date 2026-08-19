@@ -841,6 +841,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
 
   function mediaModel(req: Record<string, unknown>): string | null {
     const model = req.model;
+    if (model === "grok-imagine-video-1.5") return "grok-imagine-video-1.5-preview";
     return typeof model === "string" && model.length > 0 ? model : null;
   }
 
@@ -1427,6 +1428,22 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
             }
             await opts?.onAccountSelected?.(entry.member.account);
             return entry.member.client.videoGeneration(req, callOptionsForEntry(opts, entry));
+          },
+        }
+      : {}),
+    ...(entries.length > 0 &&
+    entries.every((entry) => typeof entry.member.client.videoExtension === "function")
+      ? {
+          async videoExtension(
+            req: Record<string, unknown>,
+            opts?: ProviderCallOptions,
+          ): Promise<Record<string, unknown>> {
+            const entry = select(null, undefined, { model: mediaModel(req) });
+            if (!entry.member.client.videoExtension) {
+              throw new Error("oauth pool member does not support video extension");
+            }
+            await opts?.onAccountSelected?.(entry.member.account);
+            return entry.member.client.videoExtension(req, callOptionsForEntry(opts, entry));
           },
         }
       : {}),

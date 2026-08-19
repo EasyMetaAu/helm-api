@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
+import { createRuntimeMemoryCoordinator } from "../../runtime/memory-budget.js";
+import { runtimeResponseWorkAdmission } from "../../runtime/response-work-admission.js";
 import { preOutputClassifierFor } from "../failover-guard.js";
 import {
   type ChatCompletionRequest,
@@ -12,6 +14,12 @@ import {
 } from "../openai-responses.js";
 import { TokenRefreshError } from "../token-manager.js";
 import { createOAuthPoolClient, type OAuthPoolMember } from "./pool.js";
+
+beforeEach(() => {
+  runtimeResponseWorkAdmission(
+    createRuntimeMemoryCoordinator({ capacityBytes: () => Number.MAX_SAFE_INTEGER }),
+  );
+});
 
 // A stub account client that records every call it served (so a test can assert
 // which account the pool routed to). Returns a body tagged with the account.
@@ -1905,7 +1913,7 @@ describe("createOAuthPoolClient — media", () => {
     account: string,
     priority: number,
     calls: string[],
-    opts: { imageFailure?: Error; videoFailure?: Error } = {},
+    opts: { imageFailure?: Error; videoFailure?: Error; extensionFailure?: Error } = {},
   ): OAuthPoolMember {
     return {
       account,
@@ -1926,6 +1934,11 @@ describe("createOAuthPoolClient — media", () => {
           calls.push(`video:${account}`);
           if (opts.videoFailure) throw opts.videoFailure;
           return { request_id: `request-${account}` };
+        },
+        async videoExtension() {
+          calls.push(`extension:${account}`);
+          if (opts.extensionFailure) throw opts.extensionFailure;
+          return { request_id: `extension-${account}` };
         },
         async videoRetrieve(_requestId, options) {
           calls.push(`retrieve:${account}`);
@@ -1975,9 +1988,25 @@ describe("createOAuthPoolClient — media", () => {
         },
       ),
     ).rejects.toBe(ambiguous);
+    const extensionPool = createOAuthPoolClient({
+      members: [
+        mediaMember("a", 10, calls, { extensionFailure: ambiguous }),
+        mediaMember("b", 10, calls),
+      ],
+    });
+    await expect(
+      extensionPool.videoExtension?.(
+        { model: "grok-imagine-video" },
+        {
+          onAccountSelected: (account) => {
+            selected.push(`extension:${account}`);
+          },
+        },
+      ),
+    ).rejects.toBe(ambiguous);
 
-    expect(calls).toEqual(["image:a", "video:a"]);
-    expect(selected).toEqual(["image:a", "video:a"]);
+    expect(calls).toEqual(["image:a", "video:a", "extension:a"]);
+    expect(selected).toEqual(["image:a", "video:a", "extension:a"]);
   });
 
   it("pins video retrieval to either persisted account carrier without rotating to a sibling", async () => {

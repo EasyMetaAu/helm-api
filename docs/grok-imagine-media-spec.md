@@ -21,7 +21,11 @@
 - [x] 新增 `POST /v1/videos/generations`，兼容 Grok 的异步视频 start 协议。
 - [x] 新增 `GET /v1/videos/{request_id}`，兼容 Grok 的异步视频 poll 协议。
 - [x] `grok-imagine-video-1.5-preview` 支持单图生视频。
+- [x] `grok-imagine-video-1.5` 兼容同一单图能力池，并保留 stable wire model。
 - [x] `grok-imagine-video` 支持 2–7 张参考图生视频。
+- [x] 所有视频写入统一支持 `duration: 6 | 10 | 15 | 30`。
+- [x] 多参考图兼容 `reference_images` 与 `images`，两者严格互斥。
+- [x] 新增 `POST /v1/videos/extensions`，复用现有单写与任务轮询链路。
 - [ ] 使用真实 Grok CLI 验证 `/imagine-video` 默认流程：先生成首帧，再生成视频。
 - [x] 图片和视频创建遵守“单写”规则：结果不明时不自动重试、不切 provider、不切 OAuth 账号。
 - [x] 视频 poll 始终绑定创建任务时的 Helm owner、provider 和 OAuth account。
@@ -190,7 +194,7 @@ POST {xai_api_base_url}/videos/generations
 约束：
 
 - `prompt` 可以是空字符串。
-- `duration` 只能是 `6` 或 `10`。
+- `duration` 只能是 `6`、`10`、`15` 或 `30`。
 - `resolution` 只能是 `480p` 或 `720p`。
 - 该形状不发送 `reference_images`。
 
@@ -198,8 +202,8 @@ POST {xai_api_base_url}/videos/generations
 
 ```json
 {
-  "model": "grok-imagine-video",
-  "prompt": "...",
+  "model": "grok-imagine-video-1.5",
+  "prompt": "让 <IMAGE_0> 平滑过渡到 <IMAGE_1> 的机位",
   "reference_images": [
     { "url": "https://... 或 data:image/..." },
     { "url": "https://... 或 data:image/..." }
@@ -213,11 +217,29 @@ POST {xai_api_base_url}/videos/generations
 约束：
 
 - `prompt` 不能为空。
-- `reference_images` 数量为 2–7。
+- `reference_images` 或兼容字段 `images` 数量为 2–7，两者不能同时出现；兼容字段会在付费 POST 前统一转成上游 `reference_images`。
+- 多图只接受 stable `grok-imagine-video-1.5` 及对应 `xai/` alias；prompt 建议用 `<IMAGE_0>`、`<IMAGE_1>` 标注引用。
 - `aspect_ratio` 只能是 `1:1`、`16:9`、`9:16`、`3:2`、`2:3`。
 - `duration` 和 `resolution` 与单图模式相同。
 
-### 4.5 视频 start / poll
+### 4.5 视频扩展
+
+```http
+POST {xai_api_base_url}/videos/extensions
+```
+
+```json
+{
+  "model": "grok-imagine-video",
+  "prompt": "continue the camera movement",
+  "video": { "url": "https://example.com/source.mp4" },
+  "duration": 30
+}
+```
+
+扩展请求使用严格对象并复用视频 create 的付费单写、receipt registry 与固定账号 poll；模糊结果返回 `503 outcome_unknown`，不重试或切换账号。
+
+### 4.6 视频 start / poll
 
 start 成功：
 
@@ -356,8 +378,9 @@ flowchart LR
 ### 8.2 视频 start
 
 - [x] 注册 `POST /v1/videos/generations`。
+- [x] 注册 `POST /v1/videos/extensions`，并复用同一付费单写与 registry 闭环。
 - [x] 复用图片入口的 auth、rate、concurrency、blocked model、memory admission 和 budget gate。
-- [x] 用严格 Zod schema 校验 image/reference_images、duration、resolution、aspect ratio；当前阶段明确拒绝 ZDR `output`。
+- [x] 用严格 Zod schema 校验 image/reference_images/images/video、duration、resolution、aspect ratio；当前阶段明确拒绝 ZDR `output`。
 - [x] resolver 只接受 `outputVideo: true` 的 target。
 - [x] upstream 成功后校验非空 `request_id`。
 - [x] 用 insert-if-absent 写入内部 `video:${request_id}` registry 记录，禁止覆盖不同 owner/provider/account 的已有行。
@@ -441,8 +464,8 @@ Helm 不会把任意 xAI bearer 当成自己的 API key。
 
 ### 11.2 Core
 
-- [x] 扩展 `ProviderClient` 的 video start/poll 方法。
-- [x] OpenAI-compatible client 增加 `/videos/generations` 和 `/videos/{id}`。
+- [x] 扩展 `ProviderClient` 的 video generation/extension/poll 方法。
+- [x] OpenAI-compatible client 增加 `/videos/generations`、`/videos/extensions` 和 `/videos/{id}`。
 - [x] 增加不重试的 media write 路径及 `outcome_unknown` 错误分类。
 - [x] `serialize-client` 透传 media 方法。
 - [x] OAuth pool 增加 media create 与 pinned retrieve。
@@ -456,7 +479,7 @@ Helm 不会把任意 xAI bearer 当成自己的 API key。
 - [x] 在 `server.ts` 组合 SuperGrok OAuth media client、resolver 和 registry。
 - [x] 扩展 image resolver 支持动态 xAI OAuth alias。
 - [x] 扩展 image telemetry 的 serving account。
-- [x] OpenAPI 增加 video start/poll。
+- [x] OpenAPI 增加 video generation/extension/poll。
 
 ### 11.4 Config / Admin / Docs / Deployment
 
@@ -489,8 +512,8 @@ Helm 不会把任意 xAI bearer 当成自己的 API key。
 ### 12.3 Gateway 单测
 
 - [x] 扩展 `images.test.ts`：Grok OAuth generation、serving account、single write。
-- [x] 新增 `videos-schema.test.ts`：单图、多图、边界和拒绝路径。
-- [x] 新增 `videos.test.ts`：auth、blocked model、budget、concurrency、start/poll。
+- [x] 新增 `videos-schema.test.ts`：纯文本、单图、多图、extension、统一 duration、边界和拒绝路径。
+- [x] 新增 `videos.test.ts`：auth、blocked model、budget、concurrency、generation/extension/poll。
 - [x] 同 key 可 poll；不同 key、不同 Helm account 均不能 poll。
 - [x] 过期记录由复用的 registry owner/TTL 合同拒绝。
 - [x] 进程重建后可从 store 恢复视频绑定。
@@ -511,6 +534,7 @@ Helm 不会把任意 xAI bearer 当成自己的 API key。
 - [x] 两个 Helm key 的任务严格隔离。
 - [x] 两个 OAuth account 时 poll 始终回创建账号。
 - [x] 重启 gateway 后使用原 request ID 继续 poll，绝不重新 start。
+- [x] 四种 30 秒请求形状均原样转发一次；extension 跨 key 隔离并在重启后固定原账号 poll。
 
 ### 12.5 定向命令
 

@@ -4,13 +4,19 @@ import { z } from "zod";
 // this schema closed prevents unsupported paid options (notably ZDR `output`) from
 // being silently forwarded before Helm has an end-to-end redaction contract for it.
 const VideoSourceSchema = z.strictObject({ url: z.string().min(1) });
-const VideoDurationSchema = z.union([z.literal(6), z.literal(10)]);
+const VideoDurationSchema = z.union([z.literal(6), z.literal(10), z.literal(15), z.literal(30)]);
 const VideoResolutionSchema = z.enum(["480p", "720p"]);
 const VideoAspectRatioSchema = z.enum(["1:1", "16:9", "9:16", "3:2", "2:3"]);
 const PromptVideoModelSchema = z.enum(["grok-imagine-video", "xai/grok-imagine-video"]);
 const SingleImageVideoModelSchema = z.enum([
   "grok-imagine-video-1.5-preview",
   "xai/grok-imagine-video-1.5-preview",
+  "grok-imagine-video-1.5",
+  "xai/grok-imagine-video-1.5",
+]);
+const ReferenceImageVideoModelSchema = z.enum([
+  "grok-imagine-video-1.5",
+  "xai/grok-imagine-video-1.5",
 ]);
 
 // Sub2API's proven forwarding contract uses the base Imagine model for a native
@@ -20,7 +26,7 @@ const PromptOnlyVideoRequestSchema = z.strictObject({
   model: PromptVideoModelSchema,
   prompt: z.string().min(1),
   aspect_ratio: VideoAspectRatioSchema.optional(),
-  duration: z.union([VideoDurationSchema, z.literal(15)]).optional(),
+  duration: VideoDurationSchema.optional(),
   resolution: z.union([VideoResolutionSchema, z.literal("1080p")]).optional(),
   audio: z.boolean().optional(),
 });
@@ -34,20 +40,39 @@ const SingleImageVideoRequestSchema = z.strictObject({
   resolution: VideoResolutionSchema,
 });
 
-const ReferenceImageVideoRequestSchema = z.strictObject({
-  model: PromptVideoModelSchema,
+const ReferenceImageVideoRequestBase = {
+  // Grok Build's reference_to_video tool sends the stable 1.5 wire model.
+  // The base model is prompt-only; preview has no verified reference contract.
+  model: ReferenceImageVideoModelSchema,
   prompt: z.string().min(1),
-  reference_images: z.array(VideoSourceSchema).min(2).max(7),
   aspect_ratio: VideoAspectRatioSchema,
   duration: VideoDurationSchema,
   resolution: VideoResolutionSchema,
-});
+};
+
+const ReferenceImageVideoRequestSchema = z.union([
+  z.strictObject({
+    ...ReferenceImageVideoRequestBase,
+    reference_images: z.array(VideoSourceSchema).min(2).max(7),
+  }),
+  z.strictObject({
+    ...ReferenceImageVideoRequestBase,
+    images: z.array(VideoSourceSchema).min(2).max(7),
+  }),
+]);
 
 export const VideoGenerationRequestSchema = z.union([
   PromptOnlyVideoRequestSchema,
   SingleImageVideoRequestSchema,
   ReferenceImageVideoRequestSchema,
 ]);
+
+export const VideoExtensionRequestSchema = z.strictObject({
+  model: PromptVideoModelSchema,
+  prompt: z.string().min(1),
+  video: VideoSourceSchema,
+  duration: VideoDurationSchema,
+});
 
 // The provider body may contain extra task metadata. Helm validates only the
 // fields needed for safe ownership/polling while returning the provider shape.
@@ -79,5 +104,6 @@ export const VideoRetrieveResponseSchema = z
   });
 
 export type VideoGenerationRequest = z.infer<typeof VideoGenerationRequestSchema>;
+export type VideoExtensionRequest = z.infer<typeof VideoExtensionRequestSchema>;
 export type VideoGenerationResponse = z.infer<typeof VideoGenerationResponseSchema>;
 export type VideoRetrieveResponse = z.infer<typeof VideoRetrieveResponseSchema>;

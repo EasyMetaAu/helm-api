@@ -1,7 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { createResponseWorkAdmission } from "./response-work-admission.js";
+import { createRuntimeMemoryCoordinator } from "./memory-budget.js";
+import {
+  createResponseWorkAdmission,
+  runtimeResponseWorkAdmission,
+} from "./response-work-admission.js";
 
 describe("response work admission", () => {
+  it("uses an explicitly supplied runtime coordinator for hermetic server builds", () => {
+    const injected = runtimeResponseWorkAdmission(
+      createRuntimeMemoryCoordinator({ capacityBytes: () => Number.MAX_SAFE_INTEGER }),
+    );
+
+    expect(runtimeResponseWorkAdmission()).toBe(injected);
+    const acquired = injected.acquire(1);
+    expect(acquired.ok).toBe(true);
+    if (acquired.ok) acquired.lease.release();
+  });
+
   it("uses the current safe capacity on every acquire", () => {
     let capacity = 60;
     const admission = createResponseWorkAdmission({

@@ -235,7 +235,11 @@ import {
   registerResponsesRoute,
 } from "./routes/responses.js";
 import { registerUsageStatsRoute } from "./routes/usage.js";
-import { registerVideosRoute, type VideoCreateTarget } from "./routes/videos.js";
+import {
+  registerVideosRoute,
+  type VideoCreateOperation,
+  type VideoCreateTarget,
+} from "./routes/videos.js";
 import {
   createMaintenanceActivityGate,
   createSerializedMaintenanceQueue,
@@ -1749,6 +1753,7 @@ function createProviderClient(
       imageGeneration: mediaClient.imageGeneration,
       imageEdit: mediaClient.imageEdit,
       videoGeneration: mediaClient.videoGeneration,
+      videoExtension: mediaClient.videoExtension,
       videoRetrieve: mediaClient.videoRetrieve,
     };
   }
@@ -1899,6 +1904,7 @@ export async function buildServer(
   const maintenanceActivityGate = createMaintenanceActivityGate();
   const backgroundTasks = createTrackedBackgroundTasks();
   const memoryCoordinator = opts.memoryCoordinator ?? runtimeMemoryCoordinator();
+  runtimeResponseWorkAdmission(memoryCoordinator);
   const requestBodyMemoryAdmission = createBodyMemoryAdmission({
     activeRequestBytes: memoryBudget.activeRequestBytes,
     jsonAmplification: memoryBudget.jsonAmplification,
@@ -4432,8 +4438,19 @@ export async function buildServer(
     },
   });
 
-  const resolveVideoTarget = (model: string): VideoCreateTarget | null => {
-    const aliases = Object.hasOwn(lanes, model) ? expandLaneChain(model, lanes) : [model];
+  const resolveVideoTarget = (
+    model: string,
+    operation: VideoCreateOperation,
+  ): VideoCreateTarget | null => {
+    const selectionModel =
+      model === "grok-imagine-video-1.5"
+        ? "grok-imagine-video-1.5-preview"
+        : model === "xai/grok-imagine-video-1.5"
+          ? "xai/grok-imagine-video-1.5-preview"
+          : model;
+    const aliases = Object.hasOwn(lanes, selectionModel)
+      ? expandLaneChain(selectionModel, lanes)
+      : [selectionModel];
     for (const alias of aliases) {
       const slash = alias.indexOf("/");
       const prefix = slash > 0 ? alias.slice(0, slash) : "";
@@ -4442,10 +4459,13 @@ export async function buildServer(
       if (prefix !== "xai" || !isOAuthAliasAvailable(alias)) continue;
       const providerAlias = alias;
       const providerName = prefix;
-      const providerModel = oauthWireModelMap.get(alias) ?? alias.slice(slash + 1);
+      const providerModel = model.endsWith("grok-imagine-video-1.5")
+        ? "grok-imagine-video-1.5"
+        : (oauthWireModelMap.get(alias) ?? alias.slice(slash + 1));
       if (catalog.get(providerAlias)?.capabilities.outputVideo !== true) continue;
       const client = providerClients.get(providerName);
-      if (!client?.videoGeneration) continue;
+      const create = operation === "extension" ? client?.videoExtension : client?.videoGeneration;
+      if (!create) continue;
       const target: VideoCreateTarget = {
         providerAlias,
         providerName,
@@ -4453,10 +4473,8 @@ export async function buildServer(
         providerAccount: null,
         client: {
           create: async (body, signal, onAccountSelected) => {
-            const call = await withServingAccountCapture(
-              () =>
-                client.videoGeneration?.(body, { signal, onAccountSelected }) ??
-                Promise.reject(new Error("video generation unavailable")),
+            const call = await withServingAccountCapture(() =>
+              create(body, { signal, onAccountSelected }),
             );
             if (call.servingAccount?.providerId === providerName) {
               target.providerAccount = call.servingAccount.account;
@@ -4489,8 +4507,8 @@ export async function buildServer(
     },
     log: (event, fields) => logger.log("info", event, fields),
     resolver: {
-      create: async (body) =>
-        typeof body.model === "string" ? resolveVideoTarget(body.model) : null,
+      create: async (body, _identity, operation) =>
+        typeof body.model === "string" ? resolveVideoTarget(body.model, operation) : null,
       poll: async (record) => {
         if (!record.providerName) return null;
         const client = providerClients.get(record.providerName);

@@ -1,5 +1,5 @@
 import { serve } from "@hono/node-server";
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 
 // A local stand-in for an OpenAI-compatible upstream. Deterministic, offline.
@@ -230,7 +230,12 @@ export const VIDEO_RESET_PATH = "/__video_reset";
 
 export interface VideoCapture {
   images: Array<{ account: string; body: Record<string, unknown> }>;
-  starts: Array<{ requestId: string; account: string; body: Record<string, unknown> }>;
+  starts: Array<{
+    requestId: string;
+    account: string;
+    operation: "generation" | "extension";
+    body: Record<string, unknown>;
+  }>;
   polls: Array<{ requestId: string; account: string }>;
 }
 
@@ -261,6 +266,7 @@ export function createMockUpstream() {
   // OAUTH_RESET_PATH between spec cases.
   let oauth401Fired = false;
   let videoCapture: VideoCapture = { images: [], starts: [], polls: [] };
+  let videoStartCount = 0;
   const videoOwners = new Map<string, string>();
   const videoPollCounts = new Map<string, number>();
 
@@ -308,17 +314,19 @@ export function createMockUpstream() {
     c.json({ data: [{ id: "grok-4.5", model: "grok-4.5", apiBackend: "responses" }] }),
   );
 
-  app.post("/videos/generations", async (c) => {
+  const startVideo = async (c: Context, operation: "generation" | "extension") => {
     const account = xaiAccount(c.req.header("authorization"));
     if (!account || account.startsWith("Bearer ")) {
       return c.json({ error: { message: "missing xAI OAuth bearer" } }, 401);
     }
     const body = (await c.req.json()) as Record<string, unknown>;
-    const requestId = `video_${account}_${videoCapture.starts.length + 1}`;
+    const requestId = `video_${account}_${++videoStartCount}`;
     videoOwners.set(requestId, account);
-    videoCapture.starts.push({ requestId, account, body });
+    videoCapture.starts.push({ requestId, account, operation, body });
     return fixedJson({ request_id: requestId, status: "queued" });
-  });
+  };
+  app.post("/videos/generations", (c) => startVideo(c, "generation"));
+  app.post("/videos/extensions", (c) => startVideo(c, "extension"));
 
   app.get("/videos/:requestId", (c) => {
     const requestId = c.req.param("requestId");

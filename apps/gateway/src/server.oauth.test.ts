@@ -2,15 +2,17 @@ import {
   __setWreqModuleForTesting,
   type CodexModelInfo,
   createKeyedSerialGate,
+  createRuntimeMemoryCoordinator,
   createSqliteDb,
   DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
   encryptSecret,
+  runtimeResponseWorkAdmission,
   SqliteConfigStore,
   SqliteOAuthTokenStore,
 } from "@helm/core";
 import type { ProviderConfig as ProviderConfigShared } from "@helm/shared";
 import { ProviderConfigSchema } from "@helm/shared";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getAccountSettings,
   loadAccountSettings,
@@ -97,6 +99,11 @@ function setEnv(env: Record<string, string>): string[] {
 }
 
 const ADDED_KEYS: string[] = [];
+beforeEach(() => {
+  runtimeResponseWorkAdmission(
+    createRuntimeMemoryCoordinator({ capacityBytes: () => Number.MAX_SAFE_INTEGER }),
+  );
+});
 afterEach(() => {
   for (const k of ADDED_KEYS.splice(0)) delete process.env[k];
   __setWreqModuleForTesting(undefined);
@@ -727,6 +734,9 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       if (target === "https://api.x.ai/v1/videos/generations") {
         return Response.json({ request_id: "video_1" });
       }
+      if (target === "https://api.x.ai/v1/videos/extensions") {
+        return Response.json({ request_id: "video_2" });
+      }
       if (target === "https://api.x.ai/v1/videos/video_1") {
         return Response.json({ status: "done", video: { url: "https://cdn.test/video" } });
       }
@@ -769,10 +779,19 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       pool?.videoGeneration?.({ model: "grok-imagine-video", prompt: "move" }),
     ).resolves.toEqual({ request_id: "video_1" });
     await expect(
+      pool?.videoExtension?.({
+        model: "grok-imagine-video",
+        prompt: "continue",
+        video: { url: "https://cdn.test/source.mp4" },
+        duration: 30,
+      }),
+    ).resolves.toEqual({ request_id: "video_2" });
+    await expect(
       pool?.videoRetrieve?.("video_1", { providerAccount: "media" }),
     ).resolves.toMatchObject({ status: "done" });
     expect(calls).toContain("POST https://api.x.ai/v1/images/generations");
     expect(calls).toContain("POST https://api.x.ai/v1/videos/generations");
+    expect(calls).toContain("POST https://api.x.ai/v1/videos/extensions");
     expect(calls).toContain("GET https://api.x.ai/v1/videos/video_1");
   });
 
