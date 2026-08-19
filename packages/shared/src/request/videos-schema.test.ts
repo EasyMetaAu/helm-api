@@ -1,12 +1,48 @@
 import { describe, expect, it } from "vitest";
 import { CapabilitiesSchema } from "../catalog/schema.js";
 import {
+  VideoExtensionRequestSchema,
   VideoGenerationRequestSchema,
   VideoGenerationResponseSchema,
   VideoRetrieveResponseSchema,
 } from "./videos-schema.js";
 
 describe("VideoGenerationRequestSchema", () => {
+  it.each([6, 10, 15, 30])("accepts duration %s across every generation shape", (duration) => {
+    const bodies = [
+      { model: "grok-imagine-video", prompt: "waves", duration },
+      {
+        model: "grok-imagine-video-1.5",
+        prompt: "move",
+        image: { url: "https://example.test/source.png" },
+        duration,
+        resolution: "720p",
+      },
+      {
+        model: "grok-imagine-video-1.5",
+        prompt: "connect <IMAGE_0> and <IMAGE_1>",
+        reference_images: [
+          { url: "https://example.test/one.png" },
+          { url: "https://example.test/two.png" },
+        ],
+        aspect_ratio: "16:9",
+        duration,
+        resolution: "720p",
+      },
+      {
+        model: "grok-imagine-video-1.5",
+        prompt: "connect <IMAGE_0> and <IMAGE_1>",
+        images: [{ url: "https://example.test/one.png" }, { url: "https://example.test/two.png" }],
+        aspect_ratio: "16:9",
+        duration,
+        resolution: "720p",
+      },
+    ];
+
+    for (const body of bodies)
+      expect(VideoGenerationRequestSchema.safeParse(body).success).toBe(true);
+  });
+
   it("accepts the minimal Sub2API-compatible prompt-only video contract", () => {
     for (const model of ["grok-imagine-video", "xai/grok-imagine-video"]) {
       expect(
@@ -32,31 +68,29 @@ describe("VideoGenerationRequestSchema", () => {
   });
 
   it("accepts the single-image Grok video contract, including an empty prompt", () => {
-    expect(
-      VideoGenerationRequestSchema.safeParse({
-        model: "grok-imagine-video-1.5-preview",
-        prompt: "",
-        image: { url: "data:image/png;base64,AAA=" },
-        duration: 6,
-        resolution: "480p",
-      }).success,
-    ).toBe(true);
-    expect(
-      VideoGenerationRequestSchema.safeParse({
-        model: "xai/grok-imagine-video-1.5-preview",
-        prompt: "",
-        image: { url: "data:image/png;base64,AAA=" },
-        duration: 6,
-        resolution: "480p",
-      }).success,
-    ).toBe(true);
+    for (const model of [
+      "grok-imagine-video-1.5-preview",
+      "xai/grok-imagine-video-1.5-preview",
+      "grok-imagine-video-1.5",
+      "xai/grok-imagine-video-1.5",
+    ]) {
+      expect(
+        VideoGenerationRequestSchema.safeParse({
+          model,
+          prompt: "",
+          image: { url: "data:image/png;base64,AAA=" },
+          duration: 30,
+          resolution: "480p",
+        }).success,
+      ).toBe(true);
+    }
   });
 
   it("accepts 2-7 reference images for the multi-image contract", () => {
     expect(
       VideoGenerationRequestSchema.safeParse({
-        model: "grok-imagine-video",
-        prompt: "make them move",
+        model: "grok-imagine-video-1.5",
+        prompt: "move from <IMAGE_0> toward <IMAGE_1>",
         reference_images: [
           { url: "https://example.test/one.png" },
           { url: "https://example.test/two.png" },
@@ -81,7 +115,7 @@ describe("VideoGenerationRequestSchema", () => {
       VideoGenerationRequestSchema.safeParse({
         model: "grok-imagine-video",
         prompt: "unsupported duration",
-        duration: 30,
+        duration: 29,
         resolution: "720p",
       }).success,
     ).toBe(false);
@@ -96,8 +130,8 @@ describe("VideoGenerationRequestSchema", () => {
     ).toBe(false);
     expect(
       VideoGenerationRequestSchema.safeParse({
-        model: "grok-imagine-video-1.5-preview",
-        prompt: "wrong model for references",
+        model: "grok-imagine-video",
+        prompt: "base model is wrong for references",
         reference_images: [
           { url: "https://example.test/one.png" },
           { url: "https://example.test/two.png" },
@@ -118,7 +152,7 @@ describe("VideoGenerationRequestSchema", () => {
     ).toBe(false);
     expect(
       VideoGenerationRequestSchema.safeParse({
-        model: "grok-imagine-video",
+        model: "grok-imagine-video-1.5",
         prompt: "x",
         reference_images: [{ url: "https://example.test/one.png" }],
         aspect_ratio: "16:9",
@@ -135,6 +169,55 @@ describe("VideoGenerationRequestSchema", () => {
         resolution: "480p",
         output: { upload_url: "https://example.test/upload" },
       }).success,
+    ).toBe(false);
+    expect(
+      VideoGenerationRequestSchema.safeParse({
+        model: "grok-imagine-video-1.5",
+        prompt: "ambiguous references",
+        reference_images: [
+          { url: "https://example.test/one.png" },
+          { url: "https://example.test/two.png" },
+        ],
+        images: [
+          { url: "https://example.test/three.png" },
+          { url: "https://example.test/four.png" },
+        ],
+        aspect_ratio: "16:9",
+        duration: 30,
+        resolution: "720p",
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("VideoExtensionRequestSchema", () => {
+  it.each([
+    "grok-imagine-video",
+    "xai/grok-imagine-video",
+  ])("accepts the strict extension contract for %s", (model) => {
+    expect(
+      VideoExtensionRequestSchema.safeParse({
+        model,
+        prompt: "continue the camera movement",
+        video: { url: "https://example.test/source.mp4" },
+        duration: 30,
+      }).success,
+    ).toBe(true);
+  });
+
+  it.each([
+    { prompt: "", video: { url: "https://example.test/source.mp4" }, duration: 30 },
+    { prompt: "continue", video: { url: "" }, duration: 30 },
+    { prompt: "continue", video: { url: "https://example.test/source.mp4" }, duration: 29 },
+    {
+      prompt: "continue",
+      video: { url: "https://example.test/source.mp4" },
+      duration: 30,
+      output: { upload_url: "https://example.test/upload" },
+    },
+  ])("rejects an invalid extension shape", (fields) => {
+    expect(
+      VideoExtensionRequestSchema.safeParse({ model: "grok-imagine-video", ...fields }).success,
     ).toBe(false);
   });
 });

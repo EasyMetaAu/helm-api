@@ -354,6 +354,8 @@ export {
   TargetProviderProtocolSchema,
 } from "./request/schema.js";
 export {
+  type VideoExtensionRequest,
+  VideoExtensionRequestSchema,
   type VideoGenerationRequest,
   VideoGenerationRequestSchema,
   type VideoGenerationResponse,

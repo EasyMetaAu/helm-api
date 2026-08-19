@@ -1,8 +1,18 @@
-import { describe, expect, it, vi } from "vitest";
-import { createResponseWorkAdmission } from "../runtime/response-work-admission.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createRuntimeMemoryCoordinator } from "../runtime/memory-budget.js";
+import {
+  createResponseWorkAdmission,
+  runtimeResponseWorkAdmission,
+} from "../runtime/response-work-admission.js";
 import { createOpenAIClient } from "./openai.js";
 
 const CONFIG = { baseUrl: "https://upstream.test/v1", apiKey: "sk-secret-key" };
+
+beforeEach(() => {
+  runtimeResponseWorkAdmission(
+    createRuntimeMemoryCoordinator({ capacityBytes: () => Number.MAX_SAFE_INTEGER }),
+  );
+});
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -197,6 +207,51 @@ describe("createOpenAIClient.videoGeneration", () => {
       name: "UpstreamError",
       upstreamStatus: 200,
     });
+  });
+});
+
+describe("createOpenAIClient.videoExtension", () => {
+  it("POSTs the verbatim body to /videos/extensions and requires a request_id", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ request_id: "ext_123" }))
+      .mockResolvedValueOnce(jsonResponse({ status: "processing" }));
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+    const body = {
+      model: "grok-imagine-video",
+      prompt: "continue",
+      video: { url: "https://example.test/source.mp4" },
+      duration: 30,
+    };
+
+    await expect(client.videoExtension?.(body)).resolves.toEqual({ request_id: "ext_123" });
+    expect(fetch.mock.calls[0]?.[0]).toBe("https://upstream.test/v1/videos/extensions");
+    expect(fetch.mock.calls[0]?.[1]).toMatchObject({ method: "POST", body: JSON.stringify(body) });
+    await expect(client.videoExtension?.(body)).rejects.toMatchObject({
+      name: "UpstreamError",
+      upstreamStatus: 200,
+    });
+  });
+
+  it.each([503, 529])("never retries an ambiguous extension response %s", async (status) => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({ error: { message: "busy" } }, status));
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+
+    await expect(
+      client.videoExtension?.({ model: "grok-imagine-video", prompt: "continue" }),
+    ).rejects.toMatchObject({ upstreamStatus: status });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("never retries an extension transport error", async () => {
+    const transportError = Object.assign(new Error("socket hang up"), { code: "ECONNRESET" });
+    const fetch = vi.fn().mockRejectedValue(transportError);
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+
+    await expect(
+      client.videoExtension?.({ model: "grok-imagine-video", prompt: "continue" }),
+    ).rejects.toMatchObject({ name: "UpstreamError" });
+    expect(fetch).toHaveBeenCalledOnce();
   });
 });
 

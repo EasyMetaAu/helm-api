@@ -188,6 +188,10 @@ export function createSerializingClient(deps: SerializeClientDeps): ProviderClie
   if (innerVideoGeneration) {
     client.videoGeneration = (req, opts) => innerVideoGeneration(req, opts);
   }
+  const innerVideoExtension = deps.inner.videoExtension;
+  if (innerVideoExtension) {
+    client.videoExtension = (req, opts) => innerVideoExtension(req, opts);
+  }
   const innerVideoRetrieve = deps.inner.videoRetrieve;
   if (innerVideoRetrieve) {
     client.videoRetrieve = (requestId, opts) => innerVideoRetrieve(requestId, opts);

@@ -92,14 +92,16 @@ export function createResponseWorkAdmission(options: {
 
 let detected: ResponseWorkAdmission | undefined;
 
-export function runtimeResponseWorkAdmission(): ResponseWorkAdmission {
-  if (detected !== undefined) return detected;
+export function runtimeResponseWorkAdmission(
+  coordinator?: RuntimeMemoryCoordinator,
+): ResponseWorkAdmission {
+  if (coordinator === undefined && detected !== undefined) return detected;
   const budget = runtimeMemoryBudget();
   detected = createResponseWorkAdmission({
     capacityBytes: budget.responseWorkBytes,
     jsonAmplification: budget.jsonAmplification,
     minChargeBytes: budget.minRequestChargeBytes,
-    coordinator: runtimeMemoryCoordinator(),
+    coordinator: coordinator ?? runtimeMemoryCoordinator(),
   });
   return detected;
 }

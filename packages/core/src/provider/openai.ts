@@ -209,6 +209,10 @@ export interface ProviderClient {
     req: Record<string, unknown>,
     opts?: ProviderCallOptions,
   ): Promise<Record<string, unknown>>;
+  videoExtension?(
+    req: Record<string, unknown>,
+    opts?: ProviderCallOptions,
+  ): Promise<Record<string, unknown>>;
   videoRetrieve?(requestId: string, opts?: ProviderCallOptions): Promise<Record<string, unknown>>;
   realtimeCall?(req: RealtimeCallRequest, opts?: ProviderCallOptions): Promise<RealtimeCallResult>;
   responsesInputTokens?(
@@ -511,6 +515,11 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
   async function videosUrl(): Promise<string> {
     const base = cfg.resolveBaseUrl ? await cfg.resolveBaseUrl() : cfg.baseUrl;
     return `${base}/videos/generations`;
+  }
+
+  async function videoExtensionsUrl(): Promise<string> {
+    const base = cfg.resolveBaseUrl ? await cfg.resolveBaseUrl() : cfg.baseUrl;
+    return `${base}/videos/extensions`;
   }
 
   async function videoRetrieveUrl(requestId: string): Promise<string> {
@@ -929,6 +938,19 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
       opts?.captureUpstream?.(bodyText);
       const res = await mediaWriteRequest({
         url: videosUrl,
+        body: () => bodyText,
+        headers,
+        signal: opts?.signal,
+      });
+      if (!res.ok) throw await errorFromResponse(res);
+      return await mediaJsonResponse(res, "request_id");
+    },
+
+    async videoExtension(req, opts) {
+      const bodyText = JSON.stringify(req);
+      opts?.captureUpstream?.(bodyText);
+      const res = await mediaWriteRequest({
+        url: videoExtensionsUrl,
         body: () => bodyText,
         headers,
         signal: opts?.signal,

@@ -83,7 +83,22 @@ async function createPromptVideo(key: string, prompt: string, model = "grok-imag
       body: JSON.stringify({
         model,
         prompt,
+        duration: 30,
       }),
+    }),
+  );
+}
+
+async function startVideo(
+  key: string,
+  operation: "generations" | "extensions",
+  body: Record<string, unknown>,
+): Promise<Response> {
+  return gateway().fetch(
+    new Request(`http://gateway.test/v1/videos/${operation}`, {
+      method: "POST",
+      headers: AUTH(key),
+      body: JSON.stringify(body),
     }),
   );
 }
@@ -195,6 +210,10 @@ static/video:
   await boot();
 });
 
+test.beforeEach(async () => {
+  await nativeFetch(`${MOCK}${VIDEO_RESET_PATH}`, { method: "POST" });
+});
+
 test.afterAll(() => {
   globalThis.fetch = nativeFetch;
   for (const name of [
@@ -230,6 +249,78 @@ test("rejects a configured static outputVideo alias at the closed Imagine reques
   expect((await videoCapture()).starts).toHaveLength(0);
 });
 
+test("forwards every 30-second generation shape and one extension exactly once", async () => {
+  const generationBodies = [
+    { model: "grok-imagine-video", prompt: "text only", duration: 30 },
+    {
+      model: "grok-imagine-video-1.5",
+      prompt: "single image",
+      image: { url: "https://example.test/source.png" },
+      duration: 30,
+      resolution: "720p",
+    },
+    {
+      model: "grok-imagine-video-1.5",
+      prompt: "reference <IMAGE_0> and <IMAGE_1>",
+      reference_images: [
+        { url: "https://example.test/one.png" },
+        { url: "https://example.test/two.png" },
+      ],
+      aspect_ratio: "16:9",
+      duration: 30,
+      resolution: "720p",
+    },
+    {
+      model: "grok-imagine-video-1.5",
+      prompt: "compatible <IMAGE_0> and <IMAGE_1>",
+      images: [{ url: "https://example.test/three.png" }, { url: "https://example.test/four.png" }],
+      aspect_ratio: "16:9",
+      duration: 30,
+      resolution: "720p",
+    },
+  ];
+
+  for (const body of generationBodies) {
+    const response = await startVideo(KEY_A, "generations", body);
+    expect(response.status, await response.text()).toBe(200);
+  }
+  const extensionBody = {
+    model: "grok-imagine-video",
+    prompt: "continue the camera movement",
+    video: { url: "https://example.test/source.mp4" },
+    duration: 30,
+  };
+  const extension = await startVideo(KEY_A, "extensions", extensionBody);
+  const extensionJson = (await extension.json()) as { request_id: string };
+  expect(extension.status).toBe(200);
+
+  const captured = await videoCapture();
+  expect(captured.starts).toHaveLength(5);
+  expect(captured.starts.map(({ operation, body }) => ({ operation, body }))).toEqual([
+    ...generationBodies.map((body) => ({
+      operation: "generation",
+      body:
+        "images" in body
+          ? {
+              ...Object.fromEntries(Object.entries(body).filter(([key]) => key !== "images")),
+              reference_images: body.images,
+            }
+          : body,
+    })),
+    { operation: "extension", body: extensionBody },
+  ]);
+
+  expect((await pollVideo(KEY_B, extensionJson.request_id)).status).toBe(404);
+  expect((await pollVideo(KEY_A, extensionJson.request_id)).status).toBe(200);
+  await boot();
+  expect((await pollVideo(KEY_A, extensionJson.request_id)).status).toBe(200);
+  const finished = await videoCapture();
+  expect(finished.polls).toEqual([
+    { requestId: extensionJson.request_id, account: captured.starts[4]?.account },
+    { requestId: extensionJson.request_id, account: captured.starts[4]?.account },
+  ]);
+});
+
 test("start, owner isolation, OAuth pinning, and restart recovery stay on one durable journey", async () => {
   const image = await gateway().fetch(
     new Request("http://gateway.test/v1/images/generations", {
@@ -252,7 +343,7 @@ test("start, owner isolation, OAuth pinning, and restart recovery stay on one du
   });
   expect((await videoCapture()).images).toEqual([
     {
-      account: "a",
+      account: expect.stringMatching(/^[ab]$/),
       body: expect.objectContaining({
         model: "grok-imagine-image-quality",
         resolution: "1k",

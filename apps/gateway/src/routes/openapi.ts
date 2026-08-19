@@ -9,6 +9,7 @@ import {
   ModelsListSchema,
   OpenAIChatRequestSchema,
   RealtimeSessionSchema,
+  VideoExtensionRequestSchema,
   VideoGenerationRequestSchema,
   VideoGenerationResponseSchema,
   VideoRetrieveResponseSchema,
@@ -128,6 +129,7 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
         InteractionsRequest: component(InteractionsRequestSchema),
         InteractionsResponse: component(InteractionsResponseSchema),
         RealtimeSession: component(RealtimeSessionSchema),
+        VideoExtensionRequest: component(VideoExtensionRequestSchema),
         VideoGenerationRequest: component(VideoGenerationRequestSchema),
         VideoGenerationResponse: component(VideoGenerationResponseSchema),
         VideoRetrieveResponse: component(VideoRetrieveResponseSchema),
@@ -479,6 +481,38 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
               },
             },
             "400": errorResponse("Invalid video generation request"),
+            "401": errorResponse("Missing or invalid API key"),
+            "404": errorResponse("Model is not a configured video model"),
+            "503": errorResponse("Video provider unavailable or create outcome unknown"),
+          },
+        },
+      },
+      "/v1/videos/extensions": {
+        post: {
+          tags: ["Inference"],
+          summary: "Extend a Grok Imagine video",
+          description:
+            "Starts one asynchronous, account-pinned SuperGrok OAuth video extension. " +
+            "The paid create is attempted once and returns the upstream request_id.",
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/VideoExtensionRequest" },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Video extension task accepted.",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/VideoGenerationResponse" },
+                },
+              },
+            },
+            "400": errorResponse("Invalid video extension request"),
             "401": errorResponse("Missing or invalid API key"),
             "404": errorResponse("Model is not a configured video model"),
             "503": errorResponse("Video provider unavailable or create outcome unknown"),

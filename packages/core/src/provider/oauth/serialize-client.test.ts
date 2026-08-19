@@ -168,6 +168,7 @@ describe("createSerializingClient", () => {
     const imageGeneration = vi.fn(async () => ({ data: [] }));
     const imageEdit = vi.fn(async () => ({ data: [] }));
     const videoGeneration = vi.fn(async () => ({ request_id: "video_1" }));
+    const videoExtension = vi.fn(async () => ({ request_id: "video_2" }));
     const videoRetrieve = vi.fn(async () => ({ status: "pending" }));
     const client = createSerializingClient({
       inner: {
@@ -175,6 +176,7 @@ describe("createSerializingClient", () => {
         imageGeneration,
         imageEdit,
         videoGeneration,
+        videoExtension,
         videoRetrieve,
       },
       gate,
@@ -196,11 +198,15 @@ describe("createSerializingClient", () => {
     await expect(client.videoGeneration?.({ model: "grok-imagine-video" })).resolves.toEqual({
       request_id: "video_1",
     });
+    await expect(client.videoExtension?.({ model: "grok-imagine-video" })).resolves.toEqual({
+      request_id: "video_2",
+    });
     await expect(client.videoRetrieve?.("video_1", { statefulAccount: "a" })).resolves.toEqual({
       status: "pending",
     });
 
     expect(gate.acquire).not.toHaveBeenCalled();
+    expect(videoExtension).toHaveBeenCalledOnce();
     expect(videoRetrieve).toHaveBeenCalledWith("video_1", { statefulAccount: "a" });
   });
 
