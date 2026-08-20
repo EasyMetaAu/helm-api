@@ -1359,6 +1359,19 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // Pg mirror of SQLite v52: capture usage percentage at observed reset time.
+    version: 51,
+    run: async (db) => {
+      if (await pgTableHasColumns(db, "oauth_reset_period", ["provider_id"])) {
+        await db.execute(
+          sql.raw(
+            "ALTER TABLE oauth_reset_period ADD COLUMN IF NOT EXISTS used_percent DOUBLE PRECISION",
+          ),
+        );
+      }
+    },
+  },
 ];
 
 function resultRows<T>(result: unknown): T[] {

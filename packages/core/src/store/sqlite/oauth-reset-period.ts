@@ -18,6 +18,7 @@ export class SqliteOAuthResetPeriodStore implements OAuthResetPeriodStore {
       periodStartMs: row.periodStartMs,
       periodEndMs: row.periodEndMs,
       detectedAtMs: row.detectedAtMs,
+      usedPercent: row.usedPercent ?? null,
       approximate: row.approximate,
     });
     const target = [
@@ -36,6 +37,7 @@ export class SqliteOAuthResetPeriodStore implements OAuthResetPeriodStore {
         set: {
           periodEndMs: row.periodEndMs,
           detectedAtMs: row.detectedAtMs,
+          usedPercent: row.usedPercent ?? null,
           approximate: false,
         },
         setWhere: eq(oauthResetPeriod.approximate, true),

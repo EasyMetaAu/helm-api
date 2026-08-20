@@ -301,6 +301,7 @@
             <th class="px-3 py-2 text-right">{$t('Requests')}</th>
             <th class="px-3 py-2 text-right">{$t('Tokens')}</th>
             <th class="px-3 py-2 text-right">{$t('Cost')}</th>
+            <th class="px-3 py-2 text-right">{$t('Used')} %</th>
           </tr>
         </thead>
         <tbody>
@@ -329,6 +330,11 @@
               <td data-label={$t('Cost')} class="px-3 py-2 text-right font-mono"
                 >{formatUsd(p.costUsd)}</td
               >
+              <td data-label={`${$t('Used')} %`} class="px-3 py-2 text-right font-mono">
+                {granularity === 'period' && p.usedPercent != null
+                  ? `${Math.round(p.usedPercent)}%`
+                  : '—'}
+              </td>
             </tr>
           {/each}
         </tbody>

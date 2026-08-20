@@ -246,7 +246,7 @@ describe("computeUsagePeriods", () => {
       limit: 5,
       recordedBoundaries: {
         "5h": [
-          { startMs: 100 * HOUR, endMs: 105 * HOUR },
+          { startMs: 100 * HOUR, endMs: 105 * HOUR, usedPercent: 88 },
           { startMs: 95 * HOUR, endMs: 100 * HOUR },
         ],
       },
@@ -255,6 +255,7 @@ describe("computeUsagePeriods", () => {
     expect(out.periods[0]).toMatchObject({
       periodStartMs: 100 * HOUR,
       periodEndMs: 105 * HOUR,
+      usedPercent: 88,
       approximate: false,
     });
     expect(out.periods[1]).toMatchObject({
@@ -539,6 +540,7 @@ describe("detectQuotaResetPeriods", () => {
       expect.objectContaining({
         periodStartMs: reset - WEEK,
         periodEndMs: observedAtMs,
+        usedPercent: 91,
         approximate: true,
       }),
     ]);

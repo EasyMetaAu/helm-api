@@ -520,6 +520,9 @@ export const OAuthUsagePeriodSchema = z
     requests: z.number().int().nonnegative(),
     tokens: z.number().int().nonnegative(),
     costUsd: z.number().nullable(),
+    // Upstream quota usage at the end of this reset period. Legacy rows have no
+    // snapshot and remain null.
+    usedPercent: z.number().min(0).nullable().optional(),
     approximate: z.boolean(),
     partial: z.boolean(),
   })
@@ -555,6 +558,9 @@ export const OAuthResetPeriodSchema = z
     periodStartMs: z.number().int(),
     periodEndMs: z.number().int(),
     detectedAtMs: z.number().int(),
+    // Usage percentage captured from the quota snapshot that closed this period.
+    // Nullable for legacy boundary rows and reset events without a snapshot.
+    usedPercent: z.number().min(0).nullable().optional(),
     approximate: z.boolean().default(false),
   })
   .strict();

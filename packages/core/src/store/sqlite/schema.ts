@@ -366,6 +366,7 @@ export const oauthResetPeriod = sqliteTable(
     periodStartMs: integer("period_start_ms").notNull(), // prior resetsAtMs
     periodEndMs: integer("period_end_ms").notNull(), // new resetsAtMs
     detectedAtMs: integer("detected_at_ms").notNull(), // when the refresh saw it
+    usedPercent: real("used_percent"), // nullable; legacy rows have no snapshot
     approximate: integer("approximate", { mode: "boolean" }).notNull().default(false),
   },
   // PK on (provider, account, window, start) makes re-detection idempotent — the same

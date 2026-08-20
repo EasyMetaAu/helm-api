@@ -18,6 +18,7 @@ export class PgOAuthResetPeriodStore implements OAuthResetPeriodStore {
       periodStartMs: row.periodStartMs,
       periodEndMs: row.periodEndMs,
       detectedAtMs: row.detectedAtMs,
+      usedPercent: row.usedPercent ?? null,
       approximate: row.approximate,
     });
     const target = [
@@ -35,6 +36,7 @@ export class PgOAuthResetPeriodStore implements OAuthResetPeriodStore {
       set: {
         periodEndMs: row.periodEndMs,
         detectedAtMs: row.detectedAtMs,
+        usedPercent: row.usedPercent ?? null,
         approximate: false,
       },
       setWhere: eq(oauthResetPeriod.approximate, true),
@@ -67,6 +69,7 @@ export class PgOAuthResetPeriodStore implements OAuthResetPeriodStore {
         periodStartMs: Number(r.periodStartMs),
         periodEndMs: Number(r.periodEndMs),
         detectedAtMs: Number(r.detectedAtMs),
+        usedPercent: r.usedPercent == null ? null : Number(r.usedPercent),
         approximate: r.approximate,
       }),
     );

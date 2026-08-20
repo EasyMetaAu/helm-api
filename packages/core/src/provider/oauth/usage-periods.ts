@@ -49,6 +49,7 @@ export function detectQuotaResetPeriods(input: {
       periodStartMs: oldStart,
       periodEndMs: resetAtMs,
       detectedAtMs: input.observedAtMs,
+      usedPercent: previous.usedPercent,
       approximate: !resetDeadlineAdvanced,
     });
   }
@@ -73,7 +74,7 @@ export interface ComputeUsagePeriodsInput {
   // estimates keep their approximate marker. Older gaps use fixed-window rollback.
   recordedBoundaries?: Record<
     string,
-    Array<{ startMs: number; endMs: number; approximate?: boolean }>
+    Array<{ startMs: number; endMs: number; approximate?: boolean; usedPercent?: number | null }>
   >;
 }
 
@@ -198,6 +199,7 @@ export function computeUsagePeriods(input: ComputeUsagePeriodsInput): UsagePerio
         periodStartMs: curStart,
         periodEndMs: curEnd,
         ...sums,
+        usedPercent: boundaryAdvanced ? null : w.usedPercent,
         approximate: !curExact,
         partial: curStart < dataStartMs,
       });
@@ -224,11 +226,13 @@ export function computeUsagePeriods(input: ComputeUsagePeriodsInput): UsagePerio
       const end = cursor; // ALWAYS the cursor — guarantees contiguity, no overlap
       let start: number;
       let approximate: boolean;
+      let usedPercent: number | null | undefined;
       // Usable when the recording's end sits at/just under the cursor (gap ≤ tol) and its
       // start is strictly older — its real start becomes the next cursor.
       if (rec && cursor - rec.endMs <= tol && rec.startMs < cursor) {
         start = rec.startMs;
         approximate = rec.approximate ?? false;
+        usedPercent = rec.usedPercent;
         recIdx++;
       } else {
         start = cursor - winMs;
@@ -240,6 +244,7 @@ export function computeUsagePeriods(input: ComputeUsagePeriodsInput): UsagePerio
         periodStartMs: start,
         periodEndMs: end,
         ...sums,
+        usedPercent: usedPercent ?? null,
         approximate,
         partial: start < dataStartMs,
       });

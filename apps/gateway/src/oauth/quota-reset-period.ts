@@ -54,6 +54,7 @@ export async function recordQuotaResetCreditPeriods(input: {
           periodStartMs,
           periodEndMs: input.occurredAtMs,
           detectedAtMs: input.occurredAtMs,
+          usedPercent: window.usedPercent,
           approximate: false,
         })
         .catch(() => {});

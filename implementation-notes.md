@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-08-20 · 配额周期历史新增已用百分比（OAuth providers，原则 3/7）
+
+- 重置边界记录新增可空 `usedPercent`，仅在以后观测到周期关闭时从上游快照写入；旧行不回填，无法证明的近似/日周聚合继续显示空值。
+- SQLite/Postgres 各新增一次可空列迁移；当前周期仅使用未过期快照，避免把上一周期百分比套到新周期。
+
 ## 2026-08-19 · Codex Responses 续接 ID 在原 WebSocket 上做一次有界恢复（OAuth provider / Responses，docs/04/05/07，原则 3/5/8）
 
 - **根因与修复**：生产证据显示多个刚成功的同账号续接约一秒后收到上游 `400 Invalid previous_response_id`，且成功与失败请求使用相同 native sanitizer；这不是账号轮换或正文变换。provider 现在只在首个客户端可见输出前、只针对该精确 400，在同一上游 WebSocket 上原样重发一次，吸收短暂的上游状态传播竞态。
