@@ -1,6 +1,7 @@
 import { once } from "node:events";
 import { createServer, IncomingMessage } from "node:http";
 import { Socket } from "node:net";
+import { createResponseWorkAdmission } from "@helm/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import {
@@ -58,6 +59,7 @@ function collectTurn(
       events.push(event);
       if (
         event.type === "response.completed" ||
+        event.type === "response.cancelled" ||
         event.type === "response.failed" ||
         event.type === "response.incomplete" ||
         event.type === "error"
@@ -82,6 +84,7 @@ async function startBridge(
     closeSession?: (sessionId: string) => void | Promise<void>;
     memoryAdmission?: ReturnType<typeof createBodyMemoryAdmission>;
     ingressAdmission?: ReturnType<typeof createBodyMemoryAdmission>;
+    responseWorkAdmission?: ReturnType<typeof createResponseWorkAdmission>;
     preflightTimeoutMs?: number;
     maxPayloadBytes?: number;
     maxPreflightRequests?: number;
@@ -105,6 +108,7 @@ async function startBridge(
     closeSession: options.closeSession,
     memoryAdmission: options.memoryAdmission,
     ingressAdmission: options.ingressAdmission,
+    responseWorkAdmission: options.responseWorkAdmission,
     preflightTimeoutMs: options.preflightTimeoutMs,
     maxPayloadBytes: options.maxPayloadBytes,
     maxPreflightRequests: options.maxPreflightRequests,
@@ -1074,6 +1078,7 @@ describe("Responses websocket bridge", () => {
         },
       },
     ]);
+    expect(socket.readyState).toBe(WebSocket.OPEN);
   });
 
   it("normalizes nested HTTP errors into a Codex websocket error envelope", async () => {
@@ -1245,24 +1250,51 @@ describe("Responses websocket bridge", () => {
   });
 
   it("treats response.cancelled as terminal without adding a bridge error", async () => {
+    let requestCount = 0;
     const baseUrl = await startBridge(
-      () =>
-        new Response(
-          'event: response.cancelled\ndata: {"type":"response.cancelled","response":{"status":"cancelled"}}\n\n',
+      () => {
+        requestCount += 1;
+        return new Response(
+          requestCount === 1
+            ? 'event: response.cancelled\ndata: {"type":"response.cancelled","response":{"status":"cancelled"}}\n\n'
+            : 'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n',
           { headers: { "content-type": "text/event-stream" } },
-        ),
+        );
+      },
+      undefined,
+      {
+        memoryAdmission: createBodyMemoryAdmission({
+          activeRequestBytes: 1_000_000,
+          jsonAmplification: 1,
+          minRequestChargeBytes: 1,
+        }),
+        ingressAdmission: createBodyMemoryAdmission({
+          activeRequestBytes: 1_000_000,
+          jsonAmplification: 1,
+          minRequestChargeBytes: 1,
+        }),
+        responseWorkAdmission: createResponseWorkAdmission({
+          capacityBytes: 1_000_000,
+          jsonAmplification: 1,
+          minChargeBytes: 1,
+        }),
+      },
     );
     const socket = await connect(`${baseUrl}/v1/responses`);
-    const events: Record<string, unknown>[] = [];
-    socket.on("message", (data) =>
-      events.push(JSON.parse(data.toString()) as Record<string, unknown>),
-    );
-    const closed = once(socket, "close");
+    const cancelled = await collectTurn(socket, {
+      type: "response.create",
+      input: [],
+      stream: true,
+    });
+    const completed = await collectTurn(socket, {
+      type: "response.create",
+      input: [],
+      stream: true,
+    });
 
-    socket.send(JSON.stringify({ type: "response.create", input: [], stream: true }));
-    await closed;
-
-    expect(events).toEqual([{ type: "response.cancelled", response: { status: "cancelled" } }]);
+    expect(cancelled).toEqual([{ type: "response.cancelled", response: { status: "cancelled" } }]);
+    expect(completed).toEqual([{ type: "response.completed", response: { status: "completed" } }]);
+    expect(socket.readyState).toBe(WebSocket.OPEN);
   });
 
   it("does not wait for internal stream cancellation before handling the next turn", async () => {
@@ -1322,58 +1354,64 @@ describe("Responses websocket bridge", () => {
     "response.failed",
     "response.incomplete",
     "error",
-  ] as const)("closes downstream normally without waiting for session cleanup after %s", async (terminalType) => {
+  ] as const)("keeps the downstream websocket reusable after %s", async (terminalType) => {
     let closedSessionId = "";
     let closeSessionCalls = 0;
-    let resolveClosed!: () => void;
-    const closed = new Promise<void>((resolve) => {
-      resolveClosed = resolve;
-    });
+    let requestCount = 0;
     const baseUrl = await startBridge(
-      () =>
-        new Response(
-          `event: ${terminalType}\ndata: ${JSON.stringify({
-            type: terminalType,
-            ...(terminalType === "error"
-              ? { code: "synthetic_error", message: "synthetic bridge error" }
-              : { response: { status: terminalType.split(".")[1] } }),
-          })}\n\n`,
-          { headers: { "content-type": "text/event-stream" } },
-        ),
+      () => {
+        requestCount += 1;
+        const body =
+          requestCount === 1
+            ? `event: ${terminalType}\ndata: ${JSON.stringify({
+                type: terminalType,
+                ...(terminalType === "error"
+                  ? { code: "synthetic_error", message: "synthetic bridge error" }
+                  : { response: { status: terminalType.split(".")[1] } }),
+              })}\n\n`
+            : 'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n';
+        return new Response(body, { headers: { "content-type": "text/event-stream" } });
+      },
       undefined,
       {
+        memoryAdmission: createBodyMemoryAdmission({
+          activeRequestBytes: 1_000,
+          jsonAmplification: 6,
+        }),
+        ingressAdmission: createBodyMemoryAdmission({
+          activeRequestBytes: 1_000_000,
+          jsonAmplification: 1,
+          minRequestChargeBytes: 1,
+        }),
+        responseWorkAdmission: createResponseWorkAdmission({
+          capacityBytes: 1_000_000,
+          jsonAmplification: 1,
+          minChargeBytes: 1,
+        }),
         closeSession: (sessionId) => {
           closeSessionCalls += 1;
           closedSessionId = sessionId;
-          resolveClosed();
-          return new Promise<void>(() => {});
         },
       },
     );
     const socket = await connect(`${baseUrl}/v1/responses`);
-    const socketClosed = once(socket, "close");
 
-    const events = await collectTurn(socket, {
+    const failed = await collectTurn(socket, {
       type: "response.create",
       model: "gpt-5.6-sol",
       input: [],
       stream: true,
     });
-    const closeResult = await Promise.race([
-      closed.then(() => "closed" as const),
-      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 100)),
-    ]);
-
-    expect(events.at(-1)?.type).toBe(terminalType);
-    expect(closeResult).toBe("closed");
+    const recovered = await collectTurn(socket, {
+      type: "response.create",
+      model: "gpt-5.6-sol",
+      input: [],
+      stream: true,
+    });
+    expect(failed.at(-1)?.type).toBe(terminalType);
+    expect(recovered.at(-1)?.type).toBe("response.completed");
+    expect(socket.readyState).toBe(WebSocket.OPEN);
     expect(closedSessionId).not.toBe("");
-    const [code] = (await Promise.race([
-      socketClosed,
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("downstream close waited for session cleanup")), 100),
-      ),
-    ])) as [number, Buffer];
-    expect(code).toBe(1000);
     expect(closeSessionCalls).toBe(1);
   });
 
@@ -1392,7 +1430,6 @@ describe("Responses websocket bridge", () => {
       },
     );
     const socket = await connect(`${baseUrl}/v1/responses`);
-    const socketClosed = once(socket, "close");
 
     await collectTurn(socket, {
       type: "response.create",
@@ -1400,7 +1437,7 @@ describe("Responses websocket bridge", () => {
       input: [],
       stream: true,
     });
-    await socketClosed;
+    expect(socket.readyState).toBe(WebSocket.OPEN);
     await new Promise((resolve) => setImmediate(resolve));
   });
 
