@@ -1401,6 +1401,19 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    // Capture the upstream percentage when a reset boundary is observed. Legacy
+    // rows stay NULL and are intentionally not backfilled.
+    version: 52,
+    run: (db) => {
+      if (
+        sqliteTableHasColumns(db, "oauth_reset_period", ["provider_id"]) &&
+        !sqliteTableHasColumns(db, "oauth_reset_period", ["used_percent"])
+      ) {
+        db.exec("ALTER TABLE oauth_reset_period ADD COLUMN used_percent REAL");
+      }
+    },
+  },
 ];
 
 function sqliteTableHasColumns(

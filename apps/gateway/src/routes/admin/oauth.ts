@@ -56,7 +56,7 @@ function resetEventBoundaries(
   nextResetAtMs: number | null,
   nowMs: number,
   windowMs: number | null,
-): Array<{ startMs: number; endMs: number; approximate: boolean }> {
+): Array<{ startMs: number; endMs: number; approximate: boolean; usedPercent?: number | null }> {
   // The old writer stored [oldReset, projectedNextReset); the current writer stores a
   // closed period ending at the observed reset. Reduce both shapes to proven events.
   const rawPoints = rows
@@ -67,7 +67,9 @@ function resetEventBoundaries(
           : row.periodStartMs <= row.detectedAtMs
             ? row.periodStartMs
             : null;
-      return atMs === null ? [] : [{ atMs, approximate: row.approximate ?? false }];
+      return atMs === null
+        ? []
+        : [{ atMs, approximate: row.approximate ?? false, usedPercent: row.usedPercent ?? null }];
     })
     .filter((point) => point.atMs <= nowMs);
   const exactPoints = rawPoints.filter((point) => !point.approximate);
@@ -95,6 +97,7 @@ function resetEventBoundaries(
             startMs: start.atMs,
             endMs: end.atMs,
             approximate: start.approximate || end.approximate,
+            usedPercent: end.usedPercent,
           },
         ]
       : [];
@@ -110,6 +113,7 @@ function resetEventBoundaries(
       startMs: latest.atMs,
       endMs: nextResetAtMs,
       approximate: latest.approximate,
+      usedPercent: null,
     });
   }
   return boundaries;

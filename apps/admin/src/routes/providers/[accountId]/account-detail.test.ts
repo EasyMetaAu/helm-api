@@ -18,6 +18,7 @@ const data: AccountDetailData = {
         requests: 3_600,
         tokens: 383_000_000,
         costUsd: 369.37,
+        usedPercent: 80,
         approximate: false,
         partial: false,
       },
@@ -30,6 +31,7 @@ const data: AccountDetailData = {
         requests: 0,
         tokens: 0,
         costUsd: null,
+        usedPercent: null,
         approximate: false,
         partial: false,
       },
@@ -64,6 +66,7 @@ describe('provider account detail', () => {
     expect(within(table).getByText('Current period')).toBeInTheDocument();
     expect(within(table).getByText('383M')).toBeInTheDocument();
     expect(within(table).getByText('3.6K')).toBeInTheDocument();
+    expect(within(table).getByText('80%')).toBeInTheDocument();
     expect(within(table).getAllByRole('row')).toHaveLength(3);
   });
 

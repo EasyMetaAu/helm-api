@@ -489,6 +489,7 @@ export const oauthResetPeriod = pgTable(
     periodStartMs: bigint("period_start_ms", { mode: "number" }).notNull(), // prior resetsAtMs
     periodEndMs: bigint("period_end_ms", { mode: "number" }).notNull(), // new resetsAtMs
     detectedAtMs: bigint("detected_at_ms", { mode: "number" }).notNull(),
+    usedPercent: doublePrecision("used_percent"), // nullable; legacy rows have no snapshot
     approximate: boolean("approximate").notNull().default(false),
   },
   (t) => [primaryKey({ columns: [t.providerId, t.account, t.windowKey, t.periodStartMs] })],
