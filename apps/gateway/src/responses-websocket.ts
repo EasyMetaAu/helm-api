@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { type IncomingMessage, STATUS_CODES } from "node:http";
 import type { Duplex } from "node:stream";
-import { CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER, readSSE, runtimeMemoryBudget } from "@helm/core";
+import {
+  CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
+  type ResponseWorkAdmission,
+  readSSE,
+  runtimeMemoryBudget,
+  runtimeResponseWorkAdmission,
+} from "@helm/core";
 import WebSocket, { WebSocketServer } from "ws";
 import { normalizeOpenAICodexClientVersion } from "./oauth/codex-client-version.js";
 import {
@@ -65,6 +71,7 @@ export interface ResponsesWebSocketBridgeOptions {
   memoryAdmission?: BodyMemoryAdmission;
   /** Optional test/embedding override for bytes retained by `ws` before `message`. */
   ingressAdmission?: BodyMemoryAdmission;
+  responseWorkAdmission?: ResponseWorkAdmission;
   /** Optional test/embedding limit for bytes retained by `ws` before `message`. */
   maxPayloadBytes?: number;
   /** Optional test/embedding limit for pending authenticated upgrades. */
@@ -338,6 +345,7 @@ async function forwardResponse(
   sessionProof: string | undefined,
   materialized: () => void,
   maxSseFrameBytes: number,
+  responseWorkAdmission: ResponseWorkAdmission,
 ): Promise<boolean> {
   const headers = normalizedFetchHeaders(request);
   headers.set("accept", "text/event-stream");
@@ -372,7 +380,7 @@ async function forwardResponse(
   }
 
   let terminalType: unknown;
-  for await (const frame of readSSE(body, maxSseFrameBytes)) {
+  for await (const frame of readSSE(body, maxSseFrameBytes, responseWorkAdmission)) {
     const payload = websocketPayload(frame.event, frame.data);
     if (payload === null) continue;
     await sendText(socket, payload);
@@ -517,6 +525,7 @@ export function installResponsesWebSocketBridge({
   sessionProof,
   memoryAdmission,
   ingressAdmission,
+  responseWorkAdmission,
   maxPayloadBytes,
   maxPreflightRequests,
   maxSseFrameBytes,
@@ -537,6 +546,7 @@ export function installResponsesWebSocketBridge({
       jsonAmplification: 1,
       minRequestChargeBytes: 1,
     });
+  const responseWork = responseWorkAdmission ?? runtimeResponseWorkAdmission();
   const websocketMaxPayloadBytes = Math.max(
     1,
     Math.floor(maxPayloadBytes ?? memoryBudget.responseCaptureBytes),
@@ -632,6 +642,10 @@ export function installResponsesWebSocketBridge({
         return;
       }
       processing = true;
+      // A previous failed turn may have torn down the provider session. The
+      // downstream WebSocket remains reusable, so the next turn gets a fresh
+      // upstream-session cleanup lifecycle.
+      sessionClosed = false;
       clearIdleTimer();
       const turnController = new AbortController();
       activeTurnController = turnController;
@@ -649,15 +663,14 @@ export function installResponsesWebSocketBridge({
             sessionProof,
             acquired.lease.materialized,
             websocketMaxSseFrameBytes,
+            responseWork,
           );
           if (invalidatesSession) {
-            socket.close(1000, "upstream session reset");
             void closeUpstreamSession();
           }
         } catch (error) {
           if (controller.signal.aborted || socket.readyState !== WebSocket.OPEN) return;
           await sendEnvelope(socket, localErrorEnvelope(error)).catch(() => {});
-          socket.close(1000, "upstream session reset");
           void closeUpstreamSession();
         } finally {
           turnController.abort();
