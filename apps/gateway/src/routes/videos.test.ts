@@ -130,25 +130,24 @@ describe("registerVideosRoute", () => {
         model: "grok-imagine-video-1.5",
         prompt: "move",
         image: { url: "https://example.test/source.png" },
-        duration: 30,
-        resolution: "720p",
+        aspect_ratio: "4:3",
+        duration: 12,
+        resolution: "1080p",
       },
     ],
     [
       "reference_images",
       {
         model: "grok-imagine-video-1.5",
-        prompt: "connect <IMAGE_0> and <IMAGE_1>",
-        reference_images: [
-          { url: "https://example.test/one.png" },
-          { url: "https://example.test/two.png" },
-        ],
-        aspect_ratio: "16:9",
-        duration: 30,
+        prompt: "have <IMAGE_0> speak with <AUDIO_0>",
+        reference_images: [{ url: "https://example.test/one.png" }],
+        reference_audios: [{ voice_id: "eve" }],
+        aspect_ratio: "3:4",
+        duration: 8,
         resolution: "720p",
       },
     ],
-  ])("forwards one 30-second %s generation with the resolved wire model", async (_name, body) => {
+  ])("forwards one supported %s generation with the resolved wire model", async (_name, body) => {
     const { app, create } = setup();
 
     expect((await post(app, body)).status).toBe(200);
@@ -158,19 +157,18 @@ describe("registerVideosRoute", () => {
 
   it("normalizes the compatible images field to reference_images before the paid POST", async () => {
     const { app, create } = setup();
-    const references = [
-      { url: "https://example.test/one.png" },
-      { url: "https://example.test/two.png" },
-    ];
+    const references = [{ url: "https://example.test/one.png" }];
+    const referenceAudios = [{ voice_id: "eve" }];
 
     expect(
       (
         await post(app, {
           model: "grok-imagine-video-1.5",
-          prompt: "connect <IMAGE_0> and <IMAGE_1>",
+          prompt: "have <IMAGE_0> speak with <AUDIO_0>",
           images: references,
-          aspect_ratio: "16:9",
-          duration: 15,
+          reference_audios: referenceAudios,
+          aspect_ratio: "3:4",
+          duration: 8,
           resolution: "720p",
         })
       ).status,
@@ -179,10 +177,11 @@ describe("registerVideosRoute", () => {
     expect(create).toHaveBeenCalledWith(
       {
         model: "grok-imagine-video-1.5",
-        prompt: "connect <IMAGE_0> and <IMAGE_1>",
+        prompt: "have <IMAGE_0> speak with <AUDIO_0>",
         reference_images: references,
-        aspect_ratio: "16:9",
-        duration: 15,
+        reference_audios: referenceAudios,
+        aspect_ratio: "3:4",
+        duration: 8,
         resolution: "720p",
       },
       expect.any(AbortSignal),

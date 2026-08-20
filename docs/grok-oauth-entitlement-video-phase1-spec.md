@@ -106,6 +106,8 @@
 
 网页控件只能证明产品能力存在，不能单独证明底层 endpoint、请求字段或生成步骤。
 
+2026-08-20 复核 xAI 官方 [reference-to-video](https://docs.x.ai/developers/model-capabilities/video/reference-to-video)、[image-to-video](https://docs.x.ai/developers/model-capabilities/video/image-to-video)、[generation](https://docs.x.ai/developers/model-capabilities/video/generation) 与 [Videos REST](https://docs.x.ai/developers/rest-api-reference/inference/videos) 文档后，公共 API 合同已经明确：`grok-imagine-video-1.5` 的 `reference_images` 可只含 1 张图，支持七种 `aspect_ratio`；`reference_audios` 可携带最多 3 个预设 `voice_id`；image-to-video 支持画幅覆盖与 1080p。Helm 已据此扩展严格 schema。官方 API-key 文档仍不等于任意 Grok.com OAuth 账号的 entitlement；本机账号随后用单写 canary 验证了 1 张参考图 + `eve`、16:9/9:16、720p、8 秒和 AAC 音轨，1080p、其他时长与其他画幅仍只以官方合同和离线测试为证据。
+
 ## 3. 证据边界与实现路线
 
 ### 3.1 四个证据来源分别能证明什么
@@ -205,7 +207,7 @@ GET  /v1/videos/:request_id
 
 - [x] 图片请求使用共享 Zod schema；Grok.com 专有选项只在 xAI OAuth 分支严格校验。
 - [x] 视频 schema 新增严格的 prompt-only 形状：最小请求只要求 `model + prompt`，已确认的网页选项才加入枚举。
-- [x] 现有单图/多参考图视频合同保持兼容。
+- [x] 现有单图/参考图视频合同保持兼容，并补齐官方单张参考图、完整画幅、预设 `reference_audios`、单图画幅与 1080p 输入。
 - [x] 不把 provider 内部 model/endpoint 暴露为新的公共市场；公开参数表达用户可理解的模式和选项。
 
 ### 5.2 账号能力投影

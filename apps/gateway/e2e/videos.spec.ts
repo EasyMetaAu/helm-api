@@ -249,25 +249,24 @@ test("rejects a configured static outputVideo alias at the closed Imagine reques
   expect((await videoCapture()).starts).toHaveLength(0);
 });
 
-test("forwards every 30-second generation shape and one extension exactly once", async () => {
+test("forwards official and compatibility generation shapes plus one extension exactly once", async () => {
   const generationBodies = [
     { model: "grok-imagine-video", prompt: "text only", duration: 30 },
     {
       model: "grok-imagine-video-1.5",
       prompt: "single image",
       image: { url: "https://example.test/source.png" },
-      duration: 30,
-      resolution: "720p",
+      aspect_ratio: "4:3",
+      duration: 12,
+      resolution: "1080p",
     },
     {
       model: "grok-imagine-video-1.5",
-      prompt: "reference <IMAGE_0> and <IMAGE_1>",
-      reference_images: [
-        { url: "https://example.test/one.png" },
-        { url: "https://example.test/two.png" },
-      ],
-      aspect_ratio: "16:9",
-      duration: 30,
+      prompt: "reference <IMAGE_0> with <AUDIO_0>",
+      reference_images: [{ url: "https://example.test/one.png" }],
+      reference_audios: [{ voice_id: "eve" }],
+      aspect_ratio: "3:4",
+      duration: 8,
       resolution: "720p",
     },
     {

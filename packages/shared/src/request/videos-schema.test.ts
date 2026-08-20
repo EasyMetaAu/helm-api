@@ -8,7 +8,7 @@ import {
 } from "./videos-schema.js";
 
 describe("VideoGenerationRequestSchema", () => {
-  it.each([6, 10, 15, 30])("accepts duration %s across every generation shape", (duration) => {
+  it.each([1, 8, 15, 30])("accepts duration %s across every generation shape", (duration) => {
     const bodies = [
       { model: "grok-imagine-video", prompt: "waves", duration },
       {
@@ -67,7 +67,7 @@ describe("VideoGenerationRequestSchema", () => {
     ).toBe(true);
   });
 
-  it("accepts the single-image Grok video contract, including an empty prompt", () => {
+  it("accepts the official single-image options, including an empty prompt", () => {
     for (const model of [
       "grok-imagine-video-1.5-preview",
       "xai/grok-imagine-video-1.5-preview",
@@ -79,24 +79,23 @@ describe("VideoGenerationRequestSchema", () => {
           model,
           prompt: "",
           image: { url: "data:image/png;base64,AAA=" },
-          duration: 30,
-          resolution: "480p",
+          aspect_ratio: "4:3",
+          duration: 12,
+          resolution: "1080p",
         }).success,
       ).toBe(true);
     }
   });
 
-  it("accepts 2-7 reference images for the multi-image contract", () => {
+  it("accepts one reference image with aspect ratio and a preset voice", () => {
     expect(
       VideoGenerationRequestSchema.safeParse({
         model: "grok-imagine-video-1.5",
-        prompt: "move from <IMAGE_0> toward <IMAGE_1>",
-        reference_images: [
-          { url: "https://example.test/one.png" },
-          { url: "https://example.test/two.png" },
-        ],
-        aspect_ratio: "16:9",
-        duration: 10,
+        prompt: "have <IMAGE_0> speak with <AUDIO_0>",
+        reference_images: [{ url: "https://example.test/one.png" }],
+        reference_audios: [{ voice_id: "eve" }],
+        aspect_ratio: "3:4",
+        duration: 8,
         resolution: "720p",
       }).success,
     ).toBe(true);
@@ -113,9 +112,20 @@ describe("VideoGenerationRequestSchema", () => {
     ).toBe(false);
     expect(
       VideoGenerationRequestSchema.safeParse({
+        model: "grok-imagine-video-1.5",
+        prompt: "too many voices",
+        reference_images: [{ url: "https://example.test/one.png" }],
+        reference_audios: ["ara", "eve", "leo", "rex"].map((voice_id) => ({ voice_id })),
+        aspect_ratio: "16:9",
+        duration: 6,
+        resolution: "480p",
+      }).success,
+    ).toBe(false);
+    expect(
+      VideoGenerationRequestSchema.safeParse({
         model: "grok-imagine-video",
         prompt: "unsupported duration",
-        duration: 29,
+        duration: 16,
         resolution: "720p",
       }).success,
     ).toBe(false);
@@ -143,10 +153,11 @@ describe("VideoGenerationRequestSchema", () => {
     ).toBe(false);
     expect(
       VideoGenerationRequestSchema.safeParse({
-        model: "grok-imagine-video-1.5-preview",
-        prompt: "",
-        image: { url: "https://example.test/image.png" },
-        duration: 5,
+        model: "grok-imagine-video-1.5",
+        prompt: "x",
+        reference_images: [],
+        aspect_ratio: "16:9",
+        duration: 6,
         resolution: "480p",
       }).success,
     ).toBe(false);
@@ -155,6 +166,7 @@ describe("VideoGenerationRequestSchema", () => {
         model: "grok-imagine-video-1.5",
         prompt: "x",
         reference_images: [{ url: "https://example.test/one.png" }],
+        reference_audios: [{ voice_id: "" }],
         aspect_ratio: "16:9",
         duration: 6,
         resolution: "480p",

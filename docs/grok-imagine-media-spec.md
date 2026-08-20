@@ -22,9 +22,10 @@
 - [x] 新增 `GET /v1/videos/{request_id}`，兼容 Grok 的异步视频 poll 协议。
 - [x] `grok-imagine-video-1.5-preview` 支持单图生视频。
 - [x] `grok-imagine-video-1.5` 兼容同一单图能力池，并保留 stable wire model。
-- [x] `grok-imagine-video` 支持 2–7 张参考图生视频。
-- [x] 所有视频写入统一支持 `duration: 6 | 10 | 15 | 30`。
-- [x] 多参考图兼容 `reference_images` 与 `images`，两者严格互斥。
+- [x] `grok-imagine-video-1.5` 支持 1–7 张参考图生视频，并可附带最多 3 个预设声音引用。
+- [x] 视频 generation 支持官方 `1–15` 秒整数并兼容既有 `30`；extension 复用同一输入域。
+- [x] 参考图模式兼容 `reference_images` 与 `images`，两者严格互斥。
+- [x] 本机 SuperGrok OAuth 单写 canary 已验证 1 张参考图 + `eve` 预设声音、16:9/9:16、720p、8 秒，产物均含 AAC 音轨。
 - [x] 新增 `POST /v1/videos/extensions`，复用现有单写与任务轮询链路。
 - [ ] 使用真实 Grok CLI 验证 `/imagine-video` 默认流程：先生成首帧，再生成视频。
 - [x] 图片和视频创建遵守“单写”规则：结果不明时不自动重试、不切 provider、不切 OAuth 账号。
@@ -63,7 +64,7 @@
 - 媒体基址默认是 `https://api.x.ai/v1`，不是 `cli-chat-proxy.grok.com/v1`。
 - `GROK_XAI_API_BASE_URL` 决定 Imagine 请求地址；`GROK_MODELS_BASE_URL` 不参与媒体 URL 选择。
 - 图片默认模型完整 ID 是 `grok-imagine-image-quality`；`quality` 是模型名后缀，实际清晰度字段是 `resolution: "1k"`。
-- 视频模型不能混用：单图使用 `grok-imagine-video-1.5-preview`，多参考图使用 `grok-imagine-video`。
+- 视频模型不能混用：首帧单图使用 `grok-imagine-video-1.5-preview` 或 stable 1.5，参考图模式只使用 stable `grok-imagine-video-1.5`。
 - video start 返回字段是 `request_id`；poll 只有 `done`、`failed`、`expired` 是已知终态，其他状态继续等待。
 - `/imagine-video` 是 `image_gen → image_to_video` 的客户端编排，不是新的 HTTP endpoint。
 
@@ -186,41 +187,46 @@ POST {xai_api_base_url}/videos/generations
   "model": "grok-imagine-video-1.5-preview",
   "prompt": "short motion description",
   "image": { "url": "https://... 或 data:image/..." },
-  "duration": 6,
-  "resolution": "480p"
+  "aspect_ratio": "4:3",
+  "duration": 12,
+  "resolution": "1080p"
 }
 ```
 
 约束：
 
 - `prompt` 可以是空字符串。
-- `duration` 只能是 `6`、`10`、`15` 或 `30`。
-- `resolution` 只能是 `480p` 或 `720p`。
+- `duration` 接受官方 `1–15` 秒整数；为兼容已公开合同继续接受 `30`，但 30 秒仍需账号 entitlement 与真实 canary。
+- `resolution` 可为 `480p`、`720p` 或 `1080p`。
+- `aspect_ratio` 可选；省略时沿用输入图片比例，传入时由上游覆盖输出比例。
 - 该形状不发送 `reference_images`。
 
-### 4.4 多参考图生视频
+### 4.4 参考图生视频
 
 ```json
 {
   "model": "grok-imagine-video-1.5",
-  "prompt": "让 <IMAGE_0> 平滑过渡到 <IMAGE_1> 的机位",
+  "prompt": "让 <IMAGE_0> 用 <AUDIO_0> 的声音介绍产品",
   "reference_images": [
-    { "url": "https://... 或 data:image/..." },
     { "url": "https://... 或 data:image/..." }
   ],
-  "aspect_ratio": "16:9",
-  "duration": 6,
-  "resolution": "480p"
+  "reference_audios": [
+    { "voice_id": "eve" }
+  ],
+  "aspect_ratio": "3:4",
+  "duration": 8,
+  "resolution": "720p"
 }
 ```
 
 约束：
 
 - `prompt` 不能为空。
-- `reference_images` 或兼容字段 `images` 数量为 2–7，两者不能同时出现；兼容字段会在付费 POST 前统一转成上游 `reference_images`。
-- 多图只接受 stable `grok-imagine-video-1.5` 及对应 `xai/` alias；prompt 建议用 `<IMAGE_0>`、`<IMAGE_1>` 标注引用。
-- `aspect_ratio` 只能是 `1:1`、`16:9`、`9:16`、`3:2`、`2:3`。
-- `duration` 和 `resolution` 与单图模式相同。
+- `reference_images` 或兼容字段 `images` 数量为 1–7，两者不能同时出现；兼容字段会在付费 POST 前统一转成上游 `reference_images`。
+- 参考图模式只接受 stable `grok-imagine-video-1.5` 及对应 `xai/` alias；prompt 用 `<IMAGE_0>`…标注图片引用。
+- 可选 `reference_audios` 接受 1–3 个严格 `{ voice_id }` 预设声音；prompt 用 `<AUDIO_0>`…标注声音引用。自定义音频 URL 属于受限 partner 能力，本阶段不开放。
+- `aspect_ratio` 可为 `1:1`、`16:9`、`9:16`、`4:3`、`3:4`、`3:2`、`2:3`。
+- `duration` 接受 `1–15` 秒整数以及兼容值 `30`；reference-to-video 仍限 `480p | 720p`。
 
 ### 4.5 视频扩展
 
