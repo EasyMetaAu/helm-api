@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-08-20 · Grok 视频输入对齐 xAI 官方 reference-to-video 合同（Videos，Imagine spec §4 / Phase 1 §2–5，原则 2/3/6/7）
+
+- **官方合同与最小修复**：2026-08-20 复核 xAI Videos 文档与 Sub2API `49504adc` 后，确认 stable `grok-imagine-video-1.5` 接受 1–7 张 `reference_images`、七种画幅，以及最多 3 个预设 `{ voice_id }` `reference_audios`；image-to-video 接受可选画幅并支持 1080p。共享严格 schema 在同一边界扩展这些字段，`images` 兼容输入仍只在付费 POST 前规范成 `reference_images`。
+- **兼容、实测与限制**：generation/extension 时长扩大为官方 `1–15` 秒整数，同时保留已公开的 `30` 兼容值；reference-to-video 仍限 480p/720p。当前只开放普遍可用的预设 voice ID，不开放需 partner 权限且会引入大正文处理的自定义音频 URL；既有 prompt-only `audio` 仅作为历史兼容，不把它宣称为官方 REST 字段。付费单写、账号 entitlement、receipt 绑定和 `outcome_unknown` 边界不变。本机 SuperGrok OAuth 单写 canary 已验证 1 张参考图 + `eve`、16:9/9:16、720p、8 秒和 AAC 音轨；1080p、其他时长与其他画幅未做付费穷举。
+
 ## 2026-08-20 · 配额周期历史新增已用百分比（OAuth providers，原则 3/7）
 
 - 重置边界记录新增可空 `usedPercent`，仅在以后观测到周期关闭时从上游快照写入；旧行不回填，无法证明的近似/日周聚合继续显示空值。
@@ -61,20 +66,10 @@
 - **根因与修复**：SQLite `request_payloads` 的单列 gzip 读取沿用了 Session 单块 256 KiB 解压上限，超过该值的真实正文被映射为 `null`，Admin 随后错误回退到 Session 恢复。Admin 现在优先请求存储态正文；SQLite 原样返回 gzip BLOB，Postgres 返回 raw TEXT，由浏览器通过 HTTP `Content-Encoding` 流式解压并拼装，不再在网关内物化放大的正文。
 - **完整性边界**：存储层为去重而外置的图片继续按 `sha256` 通过受 Admin 鉴权保护的只读端点逐个恢复；缺失 blob 保持既有 fail-open sentinel 语义。旧 JSON 响应契约和自定义 Store 适配器仍可回退使用，无 migration、无依赖、无写入格式变化。
 
-## 2026-08-13 · OAuth 永久失效只认明确凭证拒绝（OAuth provider pool / Admin providers，docs/04/11，原则 3/7）
-
-- **根因与修复**：旧逻辑仅按 HTTP 状态把 refresh `400/401/403` 与 inference `401/403` 全部持久化为 `needs reconnect`；代理、地域或 WAF 返回的裸 `403` 因此会永久摘除仍有有效 refresh token 的账号。现在 provider token 边界只把有界解析出的标准 `invalid_grant`、Copilot token mint `401` 与 Codex refresh 身份变化标为永久凭证拒绝；裸 refresh `403` 只短暂冷却，inference `403` 走正常错误/fallback，不写 `credentialFailedAt`。错误正文仍不进入消息、日志或存储。
-- **兼容与恢复**：真正永久失效仍 fail-closed 停止调度，成功 reconnect 继续清除标记；不批量清除升级前的历史失败标记，因为无法证明它们都是误判，受影响账号需在修复代理后按原标签重连。无 schema/migration、新依赖或 UI 契约变化。
-
-## 2026-08-13 · Grok 4.6 补齐 Agent 能力、价格与 lane 投影（Catalog / routing，docs/04/07，原则 2/3/6）
-
-- **根因**：xAI OAuth 实时 catalog 已把 `grok-4.6` 合成为可执行 alias，但签入的手工 catalog 没有对应条目；执行层对只有实时元数据的新 xAI 模型保守合成 `supportsTools:false`，所以裸 chat 可过，Grok Build 默认携带 `tools` 时在 provider 调用前被能力过滤为 `capability_unsatisfiable`。`/v1/models` 同样只能列出 id，无法附带 capabilities/pricing/lane membership。
-- **修复边界**：为已实际出现的 `xai/grok-4.6` 增加手工能力条目，开放已验证的 tools/SSE/常用 reasoning effort，保持 subscription vision、JSON 与额外媒体能力 fail-closed；没有把任意未来 xAI alias 自动推断为支持 tools。同步线上已验证的稳定 `grok` lane（当前 `primary: xai/grok-4.6`），`economy`、`balanced`、`premium`、`vision` 统一引用它；以后升级 Grok 只需改一处，能力不满足的请求仍由既有过滤器跳过。
-- **价格口径**：SuperGrok 仍是包月订阅；预算与遥测沿用“官方 API 等价估价”。2026-08-13 xAI 官方价卡为短上下文 input/cache/output `$2/$0.5/$6`，prompt 达到 200K 后 `$4/$1/$12`，priority 为对应档位 2 倍；配置显式保存 context + priority 两层，避免长上下文预算低估。
-- **限制**：官方公开模型支持 vision/structured outputs/xhigh，但本次现场只证明 Helm/Grok Build 的 chat + tools；subscription proxy 上未做真实 vision/JSON/xhigh canary，因此这些能力没有借用 public API 声明自动放开。生产修复仍需按部署流程发布，并从 `/version`、`/v1/models` 和一条带 tools 的真实请求三处回读。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-13 · OAuth 永久失效只认明确凭证拒绝**：仅标准 `invalid_grant`、Copilot mint 401 与 Codex refresh 身份变化永久摘除账号，裸 refresh 403 只短暂冷却；完整原文经 git history 回溯。
+- **2026-08-13 · Grok 4.6 补齐 Agent 能力、价格与 lane 投影**：手工 catalog 补齐已验证的 tools/SSE/常用 reasoning 与 API 等价估价，subscription vision/JSON/xhigh 继续 fail-closed；完整原文经 git history 回溯。
 - **2026-08-13 · 使用率下降观测不得冒充精确重置**：deadline 未变化时的使用率下降只形成 `approximate=true` 事实，精确 header/reset-credit 继续优先；完整原文经 git history 回溯。
 - **2026-08-13 · 历史配额周期使用公开公告补齐近似边界**：公开公告只能形成 `approximate=true` 的历史 reset facts，精确 header/reset-credit 继续优先且实时 bucket 不受影响；完整原文经 git history 回溯。
 - **2026-08-11 · Admin Memory 范围分页与 Key 点查**：scopes 使用稳定服务端分页，首屏只加载轻量数据，Key 深链走不可变 id 索引点查；完整原文经 git history 回溯。

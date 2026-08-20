@@ -58,6 +58,16 @@ describe("OpenAPI docs", () => {
     ]) {
       expect(doc.components.schemas[name]).toBeDefined();
     }
+    const videoGenerationSchema = JSON.stringify(doc.components.schemas.VideoGenerationRequest);
+    for (const officialVideoField of [
+      '"reference_audios"',
+      '"voice_id"',
+      '"4:3"',
+      '"3:4"',
+      '"1080p"',
+    ]) {
+      expect(videoGenerationSchema).toContain(officialVideoField);
+    }
     // The Gemini-native endpoints advertise the `x-goog-api-key` auth scheme.
     expect(doc.components.securitySchemes.googleApiKey).toMatchObject({
       type: "apiKey",

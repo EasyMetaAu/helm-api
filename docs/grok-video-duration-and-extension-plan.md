@@ -5,9 +5,12 @@
 > Helm 证据基线：`967b9f9f8ee22e39f21aec9ac8d11376b44a4aed`
 > Sub2API 证据基线：`49504adc98d2b6d539491e865a340e644548979e`（本地 `main` 与 `origin/main` 一致）
 
+> 2026-08-20 官方合同校准：xAI 当前 Videos 文档确认 generation 时长为 `1–15` 秒、默认 8 秒；Helm 在此基础上保留既有 `30` 兼容值。image-to-video 新增可选 `aspect_ratio` 与 1080p；reference-to-video 改为 1–7 张参考图、七种画幅，并支持最多 3 个严格 `{ voice_id }` 预设 `reference_audios`。
+> 同日本机 SuperGrok OAuth 单写 canary 已验证 1 张参考图 + `eve`、16:9/9:16、720p、8 秒和 AAC 音轨；1080p、其他时长与其他画幅未做付费穷举。
+
 ## 实施状态
 
-- [x] 纯文本、单图、多图与 extension 统一接受 `duration: 6 | 10 | 15 | 30`。
+- [x] 纯文本、单图、参考图与 extension 统一接受 `duration: 1–15 | 30`。
 - [x] 单图兼容 stable/preview 及对应 `xai/` alias，并继续使用 `image`。
 - [x] 多图只使用 stable 1.5 模型；客户端兼容 `reference_images` 与 `images`，两者严格互斥，`images` 在付费 POST 前统一转成上游 `reference_images`。
 - [x] 增加 `POST /v1/videos/extensions`、严格 schema、OpenAPI 与上游 provider 方法。
@@ -23,7 +26,7 @@
 
 本次只扩展现有 Grok/SuperGrok OAuth 视频链路，不新增通用媒体队列或第二套 provider 架构：
 
-1. 所有视频写入模式统一使用 `duration: 6 | 10 | 15 | 30`，不再按纯文本、单图、多图或扩展维护不同枚举。
+1. 所有视频写入模式统一使用 `duration: 1–15 | 30`，不再按纯文本、单图、参考图或扩展维护不同枚举。
 2. 为纯文本、单图、多图和视频扩展分别增加一条 30 秒原样转发测试。
 3. 增加视频扩展入口；Helm 客户端入口为 `POST /v1/videos/extensions`，上游请求为 `POST https://api.x.ai/v1/videos/extensions`。
 
@@ -49,9 +52,9 @@
 ### 2.1 协议与 API 语义专家
 
 - 当前单图 schema 位于 `packages/shared/src/request/videos-schema.ts`，要求 `image` 且只接受 6/10 秒；15/30 秒会在 provider 选择和付费 POST 前被严格拒绝。
-- 当前多参考图 schema 要求 `reference_images`；还不接受 Sub2API 已兼容的 `images`。单图的 `image` 与多图的 `reference_images/images` 必须保持互斥，避免请求被错误分型。
+- 参考图 schema 使用 `reference_images`，并兼容 Sub2API 的 `images`；单图的 `image` 与参考图的 `reference_images/images` 必须保持互斥，避免请求被错误分型。
 - 当前 Helm 只注册 `grok-imagine-video-1.5-preview` 单图别名；还需把 `grok-imagine-video-1.5` 作为同一 1.5 能力族的兼容输入，同时保留客户端选择的 stable/preview 上游 wire model，不能仅靠改模型名判断请求模式。
-- 当前纯文本 schema 已接受 6/10/15 秒；多图仍只有 6/10，extension 尚无 Helm schema。目标状态是四种模式统一复用同一个 6/10/15/30 schema。
+- 四种模式统一复用同一个 `1–15 | 30` schema；官方范围之外只保留已有的 30 秒兼容值。
 - 实施后的转发层保留 `image`、`reference_images`、`duration` 与 `resolution`；仅把兼容入参 `images` 规范成 Grok Build 已证明的上游 `reference_images`，不做单图/多图升降级。
 - Helm 当前没有 `/videos/extensions` 路由、schema、provider 方法或 OpenAPI 合同，不能只加一个 Hono 路由就宣称完成。
 
@@ -87,7 +90,7 @@
 
 | 项目 | 代码开发 | 离线验收 | 生产能力结论 |
 |---|---|---|---|
-| 所有视频模式统一 6/10/15/30 秒 | Go | 可完整证明原样转发 | 最高级账号支持 30 秒；部署后回读确认 |
+| 所有视频模式统一 1–15 秒并兼容 30 秒 | Go | 可完整证明原样转发 | 30 秒仍需账号能力与部署后回读确认 |
 | 单图/多图字段判别与 `images` 兼容 | Go | 可完整证明 | 不改变上游端点 |
 | `/videos/extensions` | Go，但先冻结严格请求合同 | 可证明路由、单写、receipt 与轮询绑定 | 当前 No-Go；Sub2API 本地实现不能替代真实上游验收 |
 
@@ -106,64 +109,66 @@
   "image": {
     "url": "https://example.com/source.png"
   },
-  "duration": 30,
-  "resolution": "720p"
+  "aspect_ratio": "4:3",
+  "duration": 12,
+  "resolution": "1080p"
 }
 ```
 
 保持现有 prompt、image 与 resolution 合同，duration 使用统一 schema：
 
 ```ts
-duration: 6 | 10 | 15 | 30
+duration: 1..15 | 30
 ```
 
 - 适用 model 为 `grok-imagine-video-1.5-preview`、`grok-imagine-video-1.5` 及对应 `xai/` concrete alias。
 - stable/preview 名称共用同一 1.5 capability/account pool，不新增重复 lane/catalog；provider wire body 与 telemetry 都保留客户端选择的具体名称。
 - `prompt` 继续允许空字符串。
-- `resolution` 继续仅允许 `480p | 720p`。
-- 除 6/10/15/30 以外的数值、小数和字符串仍在本地返回 400 `invalid_request`，且上游写次数为 0。
+- `aspect_ratio` 可选，支持官方七种画幅；`resolution` 允许 `480p | 720p | 1080p`。
+- 除 1–15 整数与兼容值 30 以外的数值、小数和字符串仍在本地返回 400 `invalid_request`，且上游写次数为 0。
 
 ### 4.2 纯文本生视频
 
 保持现有字段，复用同一个 duration schema：
 
 ```ts
-duration?: 6 | 10 | 15 | 30
+duration?: 1..15 | 30
 ```
 
 - 适用 model 继续为 `grok-imagine-video` 与 `xai/grok-imagine-video`。
 - 不传 duration 时保持现有上游默认行为，Helm 不注入默认值。
 - 6/10/15 秒现有合同及测试保留；30 秒增加相同级别的 schema 与原样转发覆盖。
-- 除 6/10/15/30 以外的数值、小数和字符串仍拒绝。
+- 除 1–15 整数与兼容值 30 以外的数值、小数和字符串仍拒绝。
 
-### 4.3 多参考图生视频
+### 4.3 参考图生视频
 
-多参考图与单图使用同一个 endpoint，但必须使用数组字段。规范字段为 `reference_images`：
+参考图与首帧单图使用同一个 endpoint，但必须使用数组字段。规范字段为 `reference_images`：
 
 ```json
 {
   "model": "grok-imagine-video-1.5",
-  "prompt": "让 <IMAGE_0> 中的纸船平滑移动到 <IMAGE_1> 的机位",
+  "prompt": "让 <IMAGE_0> 中的人用 <AUDIO_0> 的声音介绍产品",
   "reference_images": [
     {
       "url": "https://example.com/one.png"
-    },
-    {
-      "url": "https://example.com/two.png"
     }
   ],
-  "aspect_ratio": "16:9",
-  "duration": 30,
+  "reference_audios": [
+    { "voice_id": "eve" }
+  ],
+  "aspect_ratio": "3:4",
+  "duration": 8,
   "resolution": "720p"
 }
 ```
 
 兼容请求可把 `reference_images` 改为 `images`，其余合同相同：
 
-- 两个字段都要求 2–7 个严格 `{ url }` 对象。
+- 两个字段都要求 1–7 个严格 `{ url }` 对象。
 - 一次请求只能出现 `reference_images` 或 `images` 其中一个；同时出现、两者都缺失或误用单个 `image` 均返回 400 `invalid_request`，上游写次数为 0。
 - Helm 把兼容入参 `images` 统一转换为上游 `reference_images`；不会把单图 `image` 自动提升为数组，也不会把多图数组压成单图。
-- model 只接受 `grok-imagine-video-1.5 | xai/grok-imagine-video-1.5`；prompt 建议用 `<IMAGE_0>`、`<IMAGE_1>` 对应引用。duration 继续复用 Helm 的 6/10/15/30 合同。
+- 可选 `reference_audios` 接受 1–3 个严格 `{ voice_id }` 预设声音；自定义音频 URL 暂不开放。
+- model 只接受 `grok-imagine-video-1.5 | xai/grok-imagine-video-1.5`；prompt 用 `<IMAGE_0>`…对应图片引用，预设声音用 `<AUDIO_0>`…对应引用。duration 继续复用 Helm 的 `1–15 | 30` 合同。
 
 ### 4.4 视频扩展
 
@@ -191,7 +196,7 @@ Content-Type: application/json
 - `model`：`grok-imagine-video | xai/grok-imagine-video`。
 - `prompt`：非空字符串。
 - `video`：严格对象，只接受非空 `url`。
-- `duration`：与其他视频写入统一接受 6/10/15/30；不复制 Sub2API 的计费 clamp，也不为 extension 单独维护枚举。
+- `duration`：与其他视频写入统一接受 1–15 整数与兼容值 30；不复制 Sub2API 的计费 clamp，也不为 extension 单独维护枚举。
 - 未知字段 fail-closed；不接受原任务 ID 代替 source video URL，除非实施前取得明确上游合同与测试证据。
 - 成功响应复用 `VideoGenerationResponseSchema`，必须有非空 `request_id`；其他上游字段原样保留。
 - 返回的新 `request_id` 写入现有 `video:{request_id}` registry，随后仍用 `GET /v1/videos/{request_id}` 轮询。
@@ -204,9 +209,9 @@ Content-Type: application/json
 
 在 `packages/shared/src/request/videos-schema.ts`：
 
-- 把 `VideoDurationSchema` 统一定义为 `6 | 10 | 15 | 30`，纯文本、单图、多图和 extension 全部复用；删除各 shape 上额外拼接 literal 的写法。
+- 把 `VideoDurationSchema` 统一定义为 `1–15 | 30`，纯文本、单图、参考图和 extension 全部复用；删除各 shape 上额外拼接 literal 的写法。
 - 单图 model schema 增加 `grok-imagine-video-1.5` 及对应 `xai/` alias；resolver 复用现有 1.5 capability/account pool，但 provider wire body 保留 stable/preview 名称。
-- 多参考图拆成两个严格、互斥的请求 shape：`reference_images` 或兼容 `images`；两者都保持 2–7 张、只接受 stable 1.5 model 并复用统一 duration schema。
+- 参考图拆成两个严格、互斥的请求 shape：`reference_images` 或兼容 `images`；两者都接受 1–7 张、只接受 stable 1.5 model，并可携带最多 3 个预设声音。
 - 新增并导出 `VideoExtensionRequestSchema` 与 `VideoExtensionRequest`。
 - 扩展响应复用现有 `VideoGenerationResponseSchema`，不重复定义同形 schema。
 
@@ -258,7 +263,7 @@ telemetry 的 policy reason/operation 应区分 `video_generation` 与 `video_ex
 ### P0.1：先锁定统一 duration 合同
 
 1. Shared 红测：
-   - 纯文本、单图、`reference_images` 多图、`images` 多图和 extension 均接受同一组 6/10/15/30；
+   - 纯文本、单图、`reference_images`、`images` 和 extension 均接受同一组 `1–15 | 30`；
    - preview/stable 及对应 `xai/` 单图 alias 均接受 `image + duration: 30`，并保留图片字段和值；
    - 多图分别接受 `reference_images + duration: 30` 和 `images + duration: 30`，拒绝两个字段同时出现、都不出现或误用 `image`；
    - 保留上述非法边界值拒绝测试。

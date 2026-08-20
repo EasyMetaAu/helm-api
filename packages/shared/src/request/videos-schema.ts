@@ -1,12 +1,14 @@
 import { z } from "zod";
 
-// Grok's async video surface deliberately has two strict request shapes. Keeping
+// Grok's async video surface deliberately has distinct strict request shapes. Keeping
 // this schema closed prevents unsupported paid options (notably ZDR `output`) from
 // being silently forwarded before Helm has an end-to-end redaction contract for it.
 const VideoSourceSchema = z.strictObject({ url: z.string().min(1) });
-const VideoDurationSchema = z.union([z.literal(6), z.literal(10), z.literal(15), z.literal(30)]);
+const VideoDurationSchema = z.union([z.number().int().min(1).max(15), z.literal(30)]);
 const VideoResolutionSchema = z.enum(["480p", "720p"]);
-const VideoAspectRatioSchema = z.enum(["1:1", "16:9", "9:16", "3:2", "2:3"]);
+const VideoFullResolutionSchema = z.enum(["480p", "720p", "1080p"]);
+const VideoAspectRatioSchema = z.enum(["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"]);
+const PresetVoiceReferenceSchema = z.strictObject({ voice_id: z.string().trim().min(1) });
 const PromptVideoModelSchema = z.enum(["grok-imagine-video", "xai/grok-imagine-video"]);
 const SingleImageVideoModelSchema = z.enum([
   "grok-imagine-video-1.5-preview",
@@ -27,7 +29,7 @@ const PromptOnlyVideoRequestSchema = z.strictObject({
   prompt: z.string().min(1),
   aspect_ratio: VideoAspectRatioSchema.optional(),
   duration: VideoDurationSchema.optional(),
-  resolution: z.union([VideoResolutionSchema, z.literal("1080p")]).optional(),
+  resolution: VideoFullResolutionSchema.optional(),
   audio: z.boolean().optional(),
 });
 
@@ -36,8 +38,9 @@ const SingleImageVideoRequestSchema = z.strictObject({
   // xAI permits an empty motion prompt for the single-image workflow.
   prompt: z.string(),
   image: VideoSourceSchema,
+  aspect_ratio: VideoAspectRatioSchema.optional(),
   duration: VideoDurationSchema,
-  resolution: VideoResolutionSchema,
+  resolution: VideoFullResolutionSchema,
 });
 
 const ReferenceImageVideoRequestBase = {
@@ -48,16 +51,17 @@ const ReferenceImageVideoRequestBase = {
   aspect_ratio: VideoAspectRatioSchema,
   duration: VideoDurationSchema,
   resolution: VideoResolutionSchema,
+  reference_audios: z.array(PresetVoiceReferenceSchema).min(1).max(3).optional(),
 };
 
 const ReferenceImageVideoRequestSchema = z.union([
   z.strictObject({
     ...ReferenceImageVideoRequestBase,
-    reference_images: z.array(VideoSourceSchema).min(2).max(7),
+    reference_images: z.array(VideoSourceSchema).min(1).max(7),
   }),
   z.strictObject({
     ...ReferenceImageVideoRequestBase,
-    images: z.array(VideoSourceSchema).min(2).max(7),
+    images: z.array(VideoSourceSchema).min(1).max(7),
   }),
 ]);
 

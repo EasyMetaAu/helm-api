@@ -275,7 +275,7 @@ curl http://localhost:8080/v1beta/interactions \
 
 > OpenAI Images 端点可调用 OpenAI 和 Gemini 图片模型，Helm 会在内部与 Gemini `generateContent` 做双向转换；两个 Gemini 原生入口则只接受 Gemini 图片模型。在 `/v1beta/interactions` 请求 `gpt-image-2` 会返回 400，请改用 `/v1/images/generations`。
 
-连接 SuperGrok 账号后，同一个 Images 端点还可使用 `grok-imagine-image-quality`。Grok 视频分成两种严格请求：`grok-imagine-video-1.5-preview` 搭配单个 `image`，`grok-imagine-video` 搭配 2–7 个 `reference_images`；先调用 `POST /v1/videos/generations`，再用返回的 `request_id` 轮询 `GET /v1/videos/{request_id}`。媒体创建属于付费单写：结果不明时 Helm 不会重试 POST 或切换 OAuth 账号；视频任务始终绑定原 Helm account、API key、provider 和 SuperGrok 账号。
+连接 SuperGrok 账号后，同一个 Images 端点还可使用 `grok-imagine-image-quality`。Grok 视频支持三种严格请求：`grok-imagine-video` 纯文字生成；`grok-imagine-video-1.5[-preview]` 搭配单个首帧 `image`；stable `grok-imagine-video-1.5` 搭配 1–7 个 `reference_images`，并可附带预设声音 `reference_audios`。先调用 `POST /v1/videos/generations`，再用返回的 `request_id` 轮询 `GET /v1/videos/{request_id}`。媒体创建属于付费单写：结果不明时 Helm 不会重试 POST 或切换 OAuth 账号；视频任务始终绑定原 Helm account、API key、provider 和 SuperGrok 账号。
 
 #### 图片 Provider Lane
 

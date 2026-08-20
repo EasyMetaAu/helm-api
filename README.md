@@ -293,7 +293,7 @@ curl http://localhost:8080/v1beta/interactions \
 
 > The OpenAI Images endpoint serves both OpenAI and Gemini image models (Helm translates Gemini to/from `generateContent`). The two Gemini-native entrypoints serve only Gemini image models. `gpt-image-2` on `/v1beta/interactions` is a 400 → use `/v1/images/generations`.
 
-With a connected SuperGrok account, the same Images endpoint also accepts `grok-imagine-image-quality`. Grok video uses `grok-imagine-video-1.5-preview` with one `image`, or `grok-imagine-video` with 2–7 `reference_images`; start with `POST /v1/videos/generations`, then poll the returned `request_id` at `GET /v1/videos/{request_id}`. Media creates are paid single writes: Helm never retries a result-unknown POST or switches OAuth accounts, and each video task remains bound to its original Helm account, API key, provider, and SuperGrok account.
+With a connected SuperGrok account, the same Images endpoint also accepts `grok-imagine-image-quality`. Grok video supports prompt-only `grok-imagine-video`, `grok-imagine-video-1.5[-preview]` with one first-frame `image`, and stable `grok-imagine-video-1.5` with 1–7 `reference_images` plus optional preset `reference_audios`; start with `POST /v1/videos/generations`, then poll the returned `request_id` at `GET /v1/videos/{request_id}`. Media creates are paid single writes: Helm never retries a result-unknown POST or switches OAuth accounts, and each video task remains bound to its original Helm account, API key, provider, and SuperGrok account.
 
 #### Image provider lanes
 
