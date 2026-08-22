@@ -243,6 +243,7 @@ curl http://localhost:8080/v1/chat/completions \
 | `POST /v1/images/generations` | OpenAI Images API ([image generation](#image-generation)) | — (image model/lane, any key) |
 | `POST /v1/images/edits` | OpenAI Images API (JSON or multipart edits) | — (image model/lane, any key) |
 | `POST /v1/videos/generations` · `GET /v1/videos/{request_id}` | Grok Imagine video start / poll ([SuperGrok OAuth](#experimental-supergrokx-premium-oauth)) | — (asynchronous, any key) |
+| `GET /v1/tts/voices` · `POST /v1/tts` | xAI / SuperGrok OAuth TTS ([TTS API](docs/15-tts-api.md)) | — (read-only voices; audio response) |
 | `POST /v1beta/interactions` | Gemini Interactions API ([image generation](#image-generation)) | — (image model/lane, any key) |
 
 **What to put in `model`:**

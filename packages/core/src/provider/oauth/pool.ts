@@ -1519,6 +1519,30 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
           },
         }
       : {}),
+    ...(entries.length > 0 &&
+    entries.every((entry) => typeof entry.member.client.ttsSpeech === "function")
+      ? {
+          async ttsSpeech(req: Record<string, unknown>, opts?: ProviderCallOptions) {
+            const entry = select(null, undefined, { model: mediaModel(req) });
+            if (!entry.member.client.ttsSpeech)
+              throw new Error("oauth pool member does not support TTS");
+            await opts?.onAccountSelected?.(entry.member.account);
+            return entry.member.client.ttsSpeech(req, callOptionsForEntry(opts, entry));
+          },
+        }
+      : {}),
+    ...(entries.length > 0 &&
+    entries.every((entry) => typeof entry.member.client.ttsVoices === "function")
+      ? {
+          async ttsVoices(opts?: ProviderCallOptions) {
+            const entry = select(null, undefined);
+            if (!entry.member.client.ttsVoices)
+              throw new Error("oauth pool member does not support TTS voices");
+            await opts?.onAccountSelected?.(entry.member.account);
+            return entry.member.client.ttsVoices(callOptionsForEntry(opts, entry));
+          },
+        }
+      : {}),
     async closeResponsesWebSocketSession(sessionId: string): Promise<void> {
       stickySessions.delete(`responses_websocket_session:${sessionId}`);
       await Promise.all(

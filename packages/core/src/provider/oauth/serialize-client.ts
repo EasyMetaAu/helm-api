@@ -196,6 +196,14 @@ export function createSerializingClient(deps: SerializeClientDeps): ProviderClie
   if (innerVideoRetrieve) {
     client.videoRetrieve = (requestId, opts) => innerVideoRetrieve(requestId, opts);
   }
+  const innerTtsSpeech = deps.inner.ttsSpeech;
+  if (innerTtsSpeech) {
+    client.ttsSpeech = (req, opts) => innerTtsSpeech(req, opts);
+  }
+  const innerTtsVoices = deps.inner.ttsVoices;
+  if (innerTtsVoices) {
+    client.ttsVoices = (opts) => innerTtsVoices(opts);
+  }
 
   if (deps.inner.closeResponsesWebSocketSession) {
     client.closeResponsesWebSocketSession = (sessionId) =>

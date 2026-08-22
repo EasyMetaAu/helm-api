@@ -353,6 +353,7 @@ export {
   type TargetProviderProtocol,
   TargetProviderProtocolSchema,
 } from "./request/schema.js";
+export { type TtsSpeechRequest, TtsSpeechRequestSchema } from "./request/tts-schema.js";
 export {
   type VideoExtensionRequest,
   VideoExtensionRequestSchema,

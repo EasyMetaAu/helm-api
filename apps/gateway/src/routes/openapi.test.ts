@@ -31,6 +31,8 @@ describe("OpenAPI docs", () => {
       "/v1/videos/generations",
       "/v1/videos/extensions",
       "/v1/videos/{requestId}",
+      "/v1/tts/voices",
+      "/v1/tts",
       "/v1/realtime/calls",
       "/v1/live",
       "/v1beta/interactions",
@@ -55,6 +57,7 @@ describe("OpenAPI docs", () => {
       "InteractionsRequest",
       "InteractionsResponse",
       "RealtimeSession",
+      "TtsSpeechRequest",
     ]) {
       expect(doc.components.schemas[name]).toBeDefined();
     }

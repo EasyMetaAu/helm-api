@@ -11,6 +11,7 @@ import {
 } from "@helm/shared";
 import { createSSEIncompleteFrameGuard, nextSSEFrameBoundary } from "../protocol/streaming.js";
 import {
+  consumeResponseBytesWithinBudget,
   consumeResponseTextWithinBudget,
   ResponseBodyTooLargeError,
 } from "../runtime/bounded-response.js";
@@ -214,6 +215,11 @@ export interface ProviderClient {
     opts?: ProviderCallOptions,
   ): Promise<Record<string, unknown>>;
   videoRetrieve?(requestId: string, opts?: ProviderCallOptions): Promise<Record<string, unknown>>;
+  ttsSpeech?(
+    req: Record<string, unknown>,
+    opts?: ProviderCallOptions,
+  ): Promise<{ audio: Uint8Array; contentType: string }>;
+  ttsVoices?(opts?: ProviderCallOptions): Promise<Record<string, unknown>>;
   realtimeCall?(req: RealtimeCallRequest, opts?: ProviderCallOptions): Promise<RealtimeCallResult>;
   responsesInputTokens?(
     req: ChatCompletionRequest,
@@ -525,6 +531,16 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
   async function videoRetrieveUrl(requestId: string): Promise<string> {
     const base = cfg.resolveBaseUrl ? await cfg.resolveBaseUrl() : cfg.baseUrl;
     return `${base}/videos/${encodeURIComponent(requestId)}`;
+  }
+
+  async function ttsUrl(): Promise<string> {
+    const base = cfg.resolveBaseUrl ? await cfg.resolveBaseUrl() : cfg.baseUrl;
+    return `${base}/tts`;
+  }
+
+  async function ttsVoicesUrl(): Promise<string> {
+    const base = cfg.resolveBaseUrl ? await cfg.resolveBaseUrl() : cfg.baseUrl;
+    return `${base}/tts/voices`;
   }
 
   // Fail-closed credential guard (principle 2): EXACTLY ONE of static apiKey or
@@ -963,6 +979,47 @@ export function createOpenAIClient(deps: OpenAIClientDeps): ProviderClient {
       const res = await mediaRetrieveRequest(() => videoRetrieveUrl(requestId), opts?.signal);
       if (!res.ok) throw await errorFromResponse(res);
       return await mediaJsonResponse(res, "status");
+    },
+
+    async ttsSpeech(req, opts) {
+      const bodyText = JSON.stringify(req);
+      opts?.captureUpstream?.(bodyText);
+      const res = await mediaWriteRequest({
+        url: ttsUrl,
+        body: () => bodyText,
+        headers,
+        signal: opts?.signal,
+      });
+      if (!res.ok) throw await errorFromResponse(res);
+      try {
+        return {
+          audio: await consumeResponseBytesWithinBudget(
+            res,
+            deps.responseWorkAdmission?.capacityBytes ??
+              runtimeResponseWorkAdmission().capacityBytes,
+            deps.responseWorkAdmission,
+          ),
+          contentType: res.headers.get("content-type") ?? "audio/mpeg",
+        };
+      } catch (error) {
+        if (error instanceof ResponseBodyTooLargeError) {
+          throw new UpstreamError("upstream_error", error.message, {
+            error: { code: "response_body_too_large", limit_bytes: error.limitBytes },
+          });
+        }
+        if (error instanceof ResponseWorkCapacityError) {
+          throw new UpstreamError("upstream_error", error.message, {
+            error: { code: "response_work_capacity_exhausted", limit_bytes: error.capacityBytes },
+          });
+        }
+        throw error;
+      }
+    },
+
+    async ttsVoices(opts) {
+      const res = await mediaRetrieveRequest(ttsVoicesUrl, opts?.signal);
+      if (!res.ok) throw await errorFromResponse(res);
+      return await readUpstreamJsonWithinBudget(res, deps.responseWorkAdmission);
     },
 
     async realtimeCall(req, opts) {

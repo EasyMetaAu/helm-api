@@ -235,6 +235,7 @@ import {
   type ResponsesRouteDeps,
   registerResponsesRoute,
 } from "./routes/responses.js";
+import { registerTtsRoute } from "./routes/tts.js";
 import { registerUsageStatsRoute } from "./routes/usage.js";
 import {
   registerVideosRoute,
@@ -1814,6 +1815,8 @@ function createProviderClient(
       videoGeneration: mediaClient.videoGeneration,
       videoExtension: mediaClient.videoExtension,
       videoRetrieve: mediaClient.videoRetrieve,
+      ttsSpeech: mediaClient.ttsSpeech,
+      ttsVoices: mediaClient.ttsVoices,
     };
   }
   if (p.type === "gemini") {
@@ -4583,6 +4586,17 @@ export async function buildServer(
             }) ?? Promise.reject(new Error("video retrieval unavailable")),
         };
       },
+    },
+  });
+
+  registerTtsRoute(app, {
+    auth: { resolve: resolveIdentity },
+    memoryAdmission: requestBodyMemoryAdmission,
+    rateLimiter,
+    concurrencyGate,
+    resolve: () => {
+      const client = providerClients.get("xai");
+      return client?.ttsSpeech && client.ttsVoices ? client : null;
     },
   });
 

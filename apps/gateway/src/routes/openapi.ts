@@ -9,6 +9,7 @@ import {
   ModelsListSchema,
   OpenAIChatRequestSchema,
   RealtimeSessionSchema,
+  TtsSpeechRequestSchema,
   VideoExtensionRequestSchema,
   VideoGenerationRequestSchema,
   VideoGenerationResponseSchema,
@@ -133,6 +134,7 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
         VideoGenerationRequest: component(VideoGenerationRequestSchema),
         VideoGenerationResponse: component(VideoGenerationResponseSchema),
         VideoRetrieveResponse: component(VideoRetrieveResponseSchema),
+        TtsSpeechRequest: component(TtsSpeechRequestSchema),
         UsageStats: {
           type: "object",
           properties: {
@@ -590,6 +592,45 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
             "400": errorResponse("Invalid image edit request"),
             "401": errorResponse("Missing or invalid API key"),
             "404": errorResponse("Model is not a configured image model"),
+          },
+        },
+      },
+      "/v1/tts/voices": {
+        get: {
+          tags: ["Inference"],
+          summary: "List xAI TTS voices",
+          description: "Read-only SuperGrok OAuth entitlement probe and voice catalog.",
+          security: [{ bearerAuth: [] }],
+          responses: {
+            "200": {
+              description: "Voice catalog",
+              content: { "application/json": { schema: { type: "object" } } },
+            },
+            "401": errorResponse("Missing or invalid API key"),
+            "503": errorResponse("xAI TTS provider unavailable"),
+          },
+        },
+      },
+      "/v1/tts": {
+        post: {
+          tags: ["Inference"],
+          summary: "Generate speech with xAI TTS",
+          description: "One-shot paid speech generation through the xAI OAuth provider.",
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": { schema: { $ref: "#/components/schemas/TtsSpeechRequest" } },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Audio bytes",
+              content: { "audio/mpeg": { schema: { type: "string", format: "binary" } } },
+            },
+            "400": errorResponse("Invalid TTS request"),
+            "401": errorResponse("Missing or invalid API key"),
+            "503": errorResponse("xAI TTS provider unavailable"),
           },
         },
       },
