@@ -7129,6 +7129,16 @@ describe("isAccountScopedFault — classifier", () => {
     expect(isAccountScopedFault(new UpstreamError("upstream_error", "x", null, 401))).toBe(true);
     expect(isAccountScopedFault(new UpstreamError("upstream_error", "x", null, 403))).toBe(true);
     expect(isAccountScopedFault(new UpstreamError("upstream_error", "x", null, 429))).toBe(true);
+    expect(
+      isAccountScopedFault(
+        new Error("oauth pool: previous_response_id original account is unavailable"),
+      ),
+    ).toBe(true);
+    expect(
+      isAccountScopedFault(
+        new Error("oauth pool: x-codex-turn-state original account is unavailable"),
+      ),
+    ).toBe(true);
   });
 
   it("FALSE for server/transport + request-shape faults that belong on the breaker", () => {
@@ -7193,6 +7203,26 @@ describe("createExecute — onOAuthSubscription429 (auto-park)", () => {
     const execute = createExecute({
       defaultProvider: rejects(e429()),
       providers: new Map([["openai-codex", rejects(e429())]]),
+      knownOAuthPrefixes: new Set(["openai-codex"]),
+      oauthAliases: () => new Set(["openai-codex/gpt-5"]),
+      registry: registry({}),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+    const out = await execute(plan(["openai-codex/gpt-5"]), req());
+    expect(out.final.status).toBe("error");
+    expect(recordFailure).not.toHaveBeenCalled();
+  });
+
+  it("does NOT record a breaker failure for unavailable strict account affinity", async () => {
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const unavailable = new Error("oauth pool: x-codex-turn-state original account is unavailable");
+    const execute = createExecute({
+      defaultProvider: rejects(unavailable),
+      providers: new Map([["openai-codex", rejects(unavailable)]]),
       knownOAuthPrefixes: new Set(["openai-codex"]),
       oauthAliases: () => new Set(["openai-codex/gpt-5"]),
       registry: registry({}),

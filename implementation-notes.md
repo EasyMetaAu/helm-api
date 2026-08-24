@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-08-25 · 持久化 Responses 亲和失效时先探测 sibling 且隔离模型熔断（OAuth provider / Responses，docs/04/05/07，原则 3/5/8）
+
+- **根因与修复**：pool rebuild 后，`previous_response_id` 仍指向已 parked/limited 的原账号时，旧逻辑在访问上游前直接抛出 `original account is unavailable`，没有尝试其他账号；现在该类续接从初始选择即进入有界 sibling 探测，成功后继续沿用既有 sticky/registry 修复链。`x-codex-turn-state` 仍保持严格原账号绑定，避免把不可迁移的上游会话状态串到其他账号。
+- **熔断边界**：两种严格亲和的“原账号不可用”均按账号级故障处理，不再累积到共享 model breaker，防止少数失效 pin 把健康 sibling 一起变成 `circuit_open`；服务器/传输故障仍照常计入 breaker。无 schema、配置或依赖变化。
+
 ## 2026-08-24 · Codex Responses 续接 ID 可在账号池内有界找回原账号（OAuth provider / Responses，docs/04/05/07，原则 3/5/8）
 
 - **恢复边界**：同一账号、同一 WebSocket 的一次原样重试仍优先；只有它再次返回精确的 `400 Invalid previous_response_id` 且尚未产生客户端可见输出时，OAuth pool 才逐个尝试其余同 provider、同 model 的可调度账号。其他 4xx、限流、凭证、超时、断连与已开始输出的错误继续保持原有 fail-closed 语义，搜索次数天然受账号数限制。

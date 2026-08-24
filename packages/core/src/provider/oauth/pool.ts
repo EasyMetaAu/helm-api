@@ -1061,7 +1061,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   ): Promise<R> {
     const tried = new Set<string>();
     const statefulContinuation = isStrictAccountSticky(stickyKey);
-    let recoveringPreviousResponseAccount = false;
+    // A persisted previous_response_id pin can point at an account that is now
+    // parked/limited after a pool rebuild. Probe siblings immediately; waiting for
+    // an upstream 400 would otherwise fail before any account search occurs.
+    let recoveringPreviousResponseAccount = stickyKey?.startsWith("previous_response_id:") === true;
     let lastErr: unknown;
     for (;;) {
       let entry: PoolEntry;
@@ -1328,7 +1331,11 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       const avoidBusy = isUserMessageRequest(nativePassthroughBody(body));
       // Pick + fail-closed check SYNCHRONOUSLY on the call turn (rotation + onSelect, and a
       // synchronous throw if the picked member can't passthrough-stream), exactly as before.
-      const first = select(stickyKey, undefined, { avoidBusy, model: modelFromNative(body) });
+      const first = select(stickyKey, undefined, {
+        avoidBusy,
+        model: modelFromNative(body),
+        recoverStrictSticky: stickyKey?.startsWith("previous_response_id:") === true,
+      });
       if (!first.member.client.nativePassthroughStream) {
         throw new Error("oauth pool member does not support native passthrough streaming");
       }

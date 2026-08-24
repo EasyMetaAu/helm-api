@@ -885,6 +885,17 @@ export function upstreamStatusOf(err: unknown): number | null {
 // — they survive the pool's sibling retry only when the WHOLE pool is unhealthy, so they DO
 // belong on the breaker (back off + half-open probe), exactly like a configured provider.
 export function isAccountScopedFault(err: unknown): boolean {
+  // Pool affinity failures identify one unavailable subscription account. They are
+  // not evidence that the shared model alias is unhealthy; counting them here can
+  // open the alias breaker and strand otherwise healthy sibling accounts.
+  if (
+    err instanceof Error &&
+    /^oauth pool: (?:previous_response_id|x-codex-turn-state) original account is unavailable$/i.test(
+      err.message,
+    )
+  ) {
+    return true;
+  }
   if (err instanceof TokenRefreshError) {
     const s = err.httpStatus;
     return s === 400 || s === 401 || s === 403 || s === 429;
