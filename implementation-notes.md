@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-08-25 · Responses 续接只在原账号不可用时搜索 sibling（OAuth provider / Responses，docs/04/05/07，原则 3/5/8）
+
+- **生产根因**：`v0.28.83` 会在原账号已明确返回 `Invalid previous_response_id` 后继续遍历其余账号；每个账号内部又会原样重试一次，六个失败请求因此在返回 SSE error 前静默约 24–26 秒。现在已知原账号实际接到请求后若仍返回精确 invalid-ID，立即 fail-closed；只有持久化原账号已不可调度或 ID 尚无归属时，才保留同 provider/model 的 sibling 搜索。
+- **亲和优先级**：同一请求同时携带 `x-codex-turn-state` 与 `previous_response_id` 时，以不可迁移的 turn state 为最高优先级；Responses WebSocket session 首次成功后也固定到其账号，即使账号繁忙也不把同一上游 socket 状态切到 sibling。translated streaming 补齐原账号不可用时的 previous-ID 恢复入口。无 schema、配置、迁移或依赖变化。
+
 ## 2026-08-25 · 持久化 Responses 亲和失效时先探测 sibling 且隔离模型熔断（OAuth provider / Responses，docs/04/05/07，原则 3/5/8）
 
 - **根因与修复**：pool rebuild 后，`previous_response_id` 仍指向已 parked/limited 的原账号时，旧逻辑在访问上游前直接抛出 `original account is unavailable`，没有尝试其他账号；现在该类续接从初始选择即进入有界 sibling 探测，成功后继续沿用既有 sticky/registry 修复链。`x-codex-turn-state` 仍保持严格原账号绑定，避免把不可迁移的上游会话状态串到其他账号。
@@ -61,18 +66,10 @@
 - **交付边界**：正式 PR #761 已创建；实现提交 `29ff7655` 的托管 GitHub Actions run `32142663949` 已回读 `verify`、`store`、`e2e`、`docker` 与四个稳定 required checks 全部成功。本轮不合并或部署；P1 细粒度媒体选项、低 cap key 前置条件与“关闭新能力但保留已接受视频 poll”的回滚门禁仍未完成，因此整体发布 Go 门禁仍是 No-Go。
 - **剩余限制**：当前只有账号级媒体开关；默认 fast 图片已经真实验证，但仍没有可靠的上游细粒度 entitlement 分别证明 quality、数量、宽高比、6/10/15s、480p/720p/1080p 或 audio 对该套餐都可用。这些 P1 选项继续保持关闭/未完成，不能从一次默认 canary 外推。
 
-## 2026-08-15 · 自动 Memory 形成必须挂在项目或资源下（Memory Observer / Reflector / Store，docs/08/12，原则 3/7）
-
-- **根因与修复**：历史 quarantine thread 没有项目/资源；decay 归档 observation 时把它回退成 thread-only Reflector scope，随后生成 Admin「按范围」里没有父级的 active reflection。请求 observe writeback 与 eager fact 路径也允许相同的孤立范围。现在入站/出站观察在缺少项目和资源时直接 fail-open 跳过，eager extraction 不调用模型，Reflector 对已持久化的孤立 job 在任何读写前标记失败。
-- **遗忘与兼容**：SQLite/Postgres 仍会软归档历史孤立 observation，但不再排 thread-only rebuild；正常 project/resource rebuild 与直接管理的历史数据格式不变，无 schema/migration 或新依赖。现有孤立 active facts/reflections 不由升级代码猜测删除，需按运维范围显式清理。
-
-## 2026-08-15 · 请求级正文模式成为历史读取权威（Telemetry / Admin requests，docs/07/11，原则 3/7）
-
-- **根因与修复**：Admin 只按 `request_payloads` / `session_revisions` 是否存在推断历史请求的正文模式，无法证明请求发生时 Key 与系统设置的实际合并结果；大型 Session 的元数据也只证明服务端整体恢复超限，却仍无条件展示浏览器加载按钮，即使某条 revision 会被同一分页接口的 JSON 内存上限拒绝。每条新 telemetry 现在保存 body-free 的有效 `request_content_mode`；明确 `none` 时任何孤立正文行都不可读取、也不显示加载入口，旧记录继续按存储事实兼容推断。
-- **加载边界**：SQLite/Postgres 在既有 Session 元数据聚合中同时返回目标链最大单 revision 字节数；Admin 用分页端点相同的 JSON amplification 与 8 MiB 上限决定 `browser_recoverable`，不可安全分页时不再提供必然失败的按钮。该元数据不读取正文、不改变正文格式、无需 migration；当前设置仍不追溯删除历史内容。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-15 · 自动 Memory 形成必须挂在项目或资源下**：缺少 project/resource 的入站观察与 eager extraction 跳过，历史孤立 Reflector job 标记失败；完整原文经 git history 回溯。
+- **2026-08-15 · 请求级正文模式成为历史读取权威**：telemetry 保存有效正文模式，Session 元数据以单 revision 上限决定浏览器可恢复性；完整原文经 git history 回溯。
 - **2026-08-15 · 大型完整载荷改由浏览器解压与恢复图片**：Admin 优先读取 gzip/raw 存储态正文并由浏览器解压，外置图片按 `sha256` 经鉴权端点恢复，避免网关内存化放大；完整原文经 git history 回溯。
 - **2026-08-13 · OAuth 永久失效只认明确凭证拒绝**：仅标准 `invalid_grant`、Copilot mint 401 与 Codex refresh 身份变化永久摘除账号，裸 refresh 403 只短暂冷却；完整原文经 git history 回溯。
 - **2026-08-13 · Grok 4.6 补齐 Agent 能力、价格与 lane 投影**：手工 catalog 补齐已验证的 tools/SSE/常用 reasoning 与 API 等价估价，subscription vision/JSON/xhigh 继续 fail-closed；完整原文经 git history 回溯。

@@ -543,6 +543,27 @@ describe("createOAuthPoolClient — account selection", () => {
     expect(selected).toEqual(["a", "a"]);
   });
 
+  it("recovers a translated continuation when its persisted account is unavailable", async () => {
+    const calls: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        { ...member("a", 50, true, calls), schedulable: false },
+        member("b", 50, true, calls),
+      ],
+    });
+
+    const chunks: string[] = [];
+    for await (const chunk of pool.chatCompletionStream(
+      { ...USER_REQ, previous_response_id: "resp-a" },
+      { statefulAccount: "a" },
+    )) {
+      chunks.push(chunk);
+    }
+
+    expect(calls).toEqual(["b"]);
+    expect(chunks).toEqual(["data: b\n\n"]);
+  });
+
   it("spreads distinct sticky sessions across equal-priority accounts", async () => {
     const calls: string[] = [];
     const pool = createOAuthPoolClient({
@@ -1507,6 +1528,62 @@ describe("createOAuthPoolClient — nativePassthroughStream", () => {
     expect(chunks).toEqual(["data: b\n\n"]);
   });
 
+  it("keeps a Responses websocket session on its owning account under capacity", async () => {
+    const pt: string[] = [];
+    let aBusy = false;
+    const pool = createOAuthPoolClient({
+      members: [
+        { ...ptStreamMember("a", 50, pt), isAtCapacity: () => aBusy },
+        ptStreamMember("b", 50, pt),
+      ],
+    });
+    const session = {
+      protocol: "openai_responses" as const,
+      body: { model: "gpt-5.6-sol", stream: true, input: "turn" },
+      headers: { [CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER]: "ws-1" },
+      mutations: {},
+    };
+
+    for await (const _chunk of pool.nativePassthroughStream?.(session) ?? []) {
+    }
+    aBusy = true;
+    for await (const _chunk of pool.nativePassthroughStream?.(session) ?? []) {
+    }
+
+    expect(pt).toEqual(["a", "a"]);
+  });
+
+  it("does not let previous_response_id override a strict Codex turn state", async () => {
+    const pt: string[] = [];
+    const pool = createOAuthPoolClient({
+      members: [
+        { ...ptStreamMember("a", 50, pt), schedulable: false },
+        ptStreamMember("b", 50, pt),
+      ],
+    });
+
+    await expect(
+      (async () => {
+        for await (const _chunk of pool.nativePassthroughStream?.(
+          {
+            protocol: "openai_responses" as const,
+            body: {
+              model: "gpt-5.6-sol",
+              stream: true,
+              input: "turn",
+              previous_response_id: "resp-a",
+            },
+            headers: { "x-codex-turn-state": "turn-a" },
+            mutations: {},
+          },
+          { statefulAccount: "a" },
+        ) ?? []) {
+        }
+      })(),
+    ).rejects.toThrow(/original account is unavailable/);
+    expect(pt).toEqual([]);
+  });
+
   it("binds a streamed Responses response id to the account that produced it", async () => {
     const calls: string[] = [];
     const responseMember = (account: string): OAuthPoolMember => ({
@@ -1560,7 +1637,7 @@ describe("createOAuthPoolClient — nativePassthroughStream", () => {
     expect(calls).toEqual(["a", "a"]);
   });
 
-  it("recovers an invalid previous_response_id on a sibling and remembers its account", async () => {
+  it("does not move a known previous_response_id to a sibling after an upstream invalid-id", async () => {
     const calls: string[] = [];
     const invalidPreviousResponseId = new UpstreamError(
       "upstream_error",
@@ -1610,10 +1687,9 @@ describe("createOAuthPoolClient — nativePassthroughStream", () => {
       }
     };
 
-    await drain("a");
-    await drain();
+    await expect(drain("a")).rejects.toThrow("Invalid `previous_response_id`.");
 
-    expect(calls).toEqual(["a", "b", "b"]);
+    expect(calls).toEqual(["a"]);
   });
 
   it("prioritizes previous_response_id affinity over websocket session affinity", async () => {
