@@ -47,7 +47,10 @@ const RETRYABLE_ACCOUNT_FAILURE_COOLDOWN_MS = 30_000;
 // retry only TRANSIENT, account-agnostic server faults (a 5xx / overload / connect
 // timeout on one account says nothing about its siblings) and DELIBERATELY exclude
 // deterministic request-shape 4xx (400/413/422) — a sibling would hit those
-// identically, so surface them immediately for executor classification. Account-local
+// identically, so surface them immediately for executor classification. The one bounded
+// exception is an exact invalid previous_response_id: the id is account-local, so the
+// pool probes each sibling until it finds and remembers the account that owns it.
+// Account-local
 // OAuth credential/rate-limit statuses are handled by the dedicated helpers below,
 // because those statuses can say something about the selected subscription account,
 // not about the model alias. Credential statuses remain provider-configurable for
@@ -371,6 +374,20 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     return value !== null && typeof value === "object" && !Array.isArray(value)
       ? (value as Record<string, unknown>)
       : null;
+  }
+
+  function isInvalidPreviousResponseIdFailure(stickyKey: string | null, err: unknown): boolean {
+    if (
+      !stickyKey?.startsWith("previous_response_id:") ||
+      !(err instanceof UpstreamError) ||
+      err.upstreamStatus !== 400 ||
+      err.message !== "Invalid `previous_response_id`."
+    ) {
+      return false;
+    }
+    const raw = objectRecord(err.providerRaw);
+    const nested = objectRecord(raw?.error);
+    return nested?.type === "invalid_request_error";
   }
 
   function deviceIdFromMetadataUserId(userId: string): string | null {
@@ -879,7 +896,11 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   function select(
     stickyKey?: string | null,
     exclude?: ReadonlySet<string>,
-    opts: { avoidBusy?: boolean; model?: string | null } = {},
+    opts: {
+      avoidBusy?: boolean;
+      model?: string | null;
+      recoverStrictSticky?: boolean;
+    } = {},
   ): PoolEntry {
     const nowMs = now();
     const model = opts.model ?? null;
@@ -922,7 +943,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         reason: "sticky_hit",
       });
     }
-    if (stickyOnly && knownSticky) {
+    if (stickyOnly && knownSticky && opts.recoverStrictSticky !== true) {
       const source = affinityKeySource(stickyKey ?? null) ?? "stateful continuation";
       throw new Error(`oauth pool: ${source} original account is unavailable`);
     }
@@ -1040,20 +1061,33 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   ): Promise<R> {
     const tried = new Set<string>();
     const statefulContinuation = isStrictAccountSticky(stickyKey);
+    let recoveringPreviousResponseAccount = false;
     let lastErr: unknown;
     for (;;) {
       let entry: PoolEntry;
       try {
-        entry = select(stickyKey, tried, { avoidBusy, model });
+        entry = select(stickyKey, tried, {
+          avoidBusy,
+          model,
+          recoverStrictSticky: recoveringPreviousResponseAccount,
+        });
       } catch (selErr) {
         throw lastErr ?? selErr;
       }
       tried.add(entry.member.account);
       try {
         const result = await call(entry.member.client, entry);
+        if (stickyKey?.startsWith("previous_response_id:")) {
+          rememberSticky(stickyKey, entry.member.account, now() + stickyTtlMs);
+        }
         rememberResponseAffinity(result, entry);
         return result;
       } catch (err) {
+        if (isInvalidPreviousResponseIdFailure(stickyKey, err)) {
+          recoveringPreviousResponseAccount = true;
+          lastErr = err;
+          continue;
+        }
         if (isRetryableAccountFailure(err)) {
           coolRetryableAccount(entry);
           if (statefulContinuation) throw err;
@@ -1111,6 +1145,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   ): AsyncIterable<string> {
     const tried = new Set<string>([firstEntry.member.account]);
     const statefulContinuation = isStrictAccountSticky(stickyKey);
+    let recoveringPreviousResponseAccount = false;
     let entry = firstEntry;
     let lastErr: unknown;
     for (;;) {
@@ -1124,7 +1159,11 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         first = await iterator.next(); // pre-first-(real-)chunk fault surfaces HERE
       } catch (err) {
         if (iterator) await iterator.return?.().catch(() => {});
-        if (isRetryableAccountFailure(err)) {
+        const invalidPreviousResponseId = isInvalidPreviousResponseIdFailure(stickyKey, err);
+        if (invalidPreviousResponseId) {
+          recoveringPreviousResponseAccount = true;
+          lastErr = err;
+        } else if (isRetryableAccountFailure(err)) {
           coolRetryableAccount(entry);
           lastErr = err;
         } else if (isCredentialAccountFailure(err, upstreamCredentialFailureStatuses)) {
@@ -1139,10 +1178,14 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
           if (!isRetryableTransientError(err)) throw err;
           lastErr = err;
         }
-        if (statefulContinuation) throw lastErr;
+        if (statefulContinuation && !invalidPreviousResponseId) throw lastErr;
         let next: PoolEntry;
         try {
-          next = select(stickyKey, tried, { avoidBusy, model });
+          next = select(stickyKey, tried, {
+            avoidBusy,
+            model,
+            recoverStrictSticky: recoveringPreviousResponseAccount,
+          });
         } catch {
           throw lastErr; // no sibling left → surface the real upstream cause
         }
@@ -1151,6 +1194,9 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         continue;
       }
       // First chunk obtained (or a clean empty stream) → COMMIT to this account.
+      if (stickyKey?.startsWith("previous_response_id:")) {
+        rememberSticky(stickyKey, entry.member.account, now() + stickyTtlMs);
+      }
       const trackResponseAffinity = streamResponseAffinityTracker(entry);
       try {
         if (!first.done) {
