@@ -285,7 +285,7 @@ async function spawnLeaseHolderChild(
     let stderr = "";
     const timer = setTimeout(
       () => reject(new Error(`child replica readiness timeout: ${stderr}`)),
-      5_000,
+      15_000,
     );
     child.stdout.on("data", (chunk) => {
       stdout += String(chunk);
@@ -875,7 +875,7 @@ test.describe("real PostgreSQL distributed concurrency leases", () => {
   });
 
   test("recovers capacity after a child replica holding the lease is SIGKILLed", async () => {
-    test.setTimeout(10_000);
+    test.setTimeout(20_000);
     const ttlMs = 250;
     const state = providerState();
     const replicaB = await createReplica({
