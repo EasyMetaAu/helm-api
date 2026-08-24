@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
 
 jobs:
-  # Every Action is pinned to an audited full SHA and uses a Node 24 runtime.
+  # Every Action is pinned to an audited full SHA and uses a Node 22 runtime.
   # The persistent runner pool is on 2.335.1 (newer than the required 2.329.0).
   # checkout v7's fork-PR opt-in is scoped to pull_request_target jobs below;
   # those jobs run only on disposable hosted runners with a read-only token.
@@ -108,10 +108,11 @@ jobs:
   # the gateway via tsx against SOURCE + a fully offline deterministic mock
   # upstream (no network, fixed worker interval), so the suite is hermetic. Only
   # admin.spec drives a real browser; the rest use Playwright's HTTP request
-  # context. NOTE: `--with-deps` apt-installs Chromium's system libs and needs
-  # passwordless sudo. GitHub-hosted pull-request runners provide it; trusted main
-  # pushes retain the preconfigured self-hosted pool.
+  # context. GitHub-hosted pull-request runners already provide Chromium's system
+  # libraries, so avoid the slow apt step; trusted main pushes retain the
+  # preconfigured self-hosted pool.
   e2e:
+    timeout-minutes: 10
     runs-on: ${{ fromJSON(github.event_name == 'pull_request_target' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","docker"]') }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -145,13 +146,14 @@ jobs:
       # build first. admin.spec also serves apps/admin/build.
       - run: pnpm build
       - name: Install Playwright Chromium (admin.spec drives a real browser)
-        run: pnpm --filter @helm/gateway exec playwright install --with-deps chromium
+        run: pnpm --filter @helm/gateway exec playwright install chromium
       - run: pnpm test:e2e
 
   # Builds and smoke-tests the real gateway Docker image (docs/10). Kept fully
   # independent of `verify` (no `needs`) so the unit gates run on their own and
   # neither job blocks the other.
   docker:
+    timeout-minutes: 8
     runs-on: ${{ fromJSON(github.event_name == 'pull_request_target' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","docker"]') }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
