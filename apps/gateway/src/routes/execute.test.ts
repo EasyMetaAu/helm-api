@@ -7139,6 +7139,11 @@ describe("isAccountScopedFault — classifier", () => {
         new Error("oauth pool: x-codex-turn-state original account is unavailable"),
       ),
     ).toBe(true);
+    expect(
+      isAccountScopedFault(
+        new Error("oauth pool: responses_websocket_session original account is unavailable"),
+      ),
+    ).toBe(true);
   });
 
   it("FALSE for server/transport + request-shape faults that belong on the breaker", () => {
@@ -7216,10 +7221,13 @@ describe("createExecute — onOAuthSubscription429 (auto-park)", () => {
     expect(recordFailure).not.toHaveBeenCalled();
   });
 
-  it("does NOT record a breaker failure for unavailable strict account affinity", async () => {
+  it.each([
+    "x-codex-turn-state",
+    "responses_websocket_session",
+  ])("does NOT record a breaker failure for unavailable %s affinity", async (affinity) => {
     const cb = breaker();
     const recordFailure = vi.spyOn(cb, "recordFailure");
-    const unavailable = new Error("oauth pool: x-codex-turn-state original account is unavailable");
+    const unavailable = new Error(`oauth pool: ${affinity} original account is unavailable`);
     const execute = createExecute({
       defaultProvider: rejects(unavailable),
       providers: new Map([["openai-codex", rejects(unavailable)]]),

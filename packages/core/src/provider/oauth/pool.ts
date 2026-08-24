@@ -414,15 +414,15 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
 
   function stickyKeyFromNative(input: NativePassthroughInput): string | null {
     const body = nativePassthroughBody(input);
+    if (isNativePassthroughCarrier(input)) {
+      const turnState = headerValue(input.headers, "x-codex-turn-state");
+      if (turnState !== null) return `x-codex-turn-state:${turnState}`;
+    }
     const previousResponseId = bodyString(body, "previous_response_id");
     if (previousResponseId !== null) return `previous_response_id:${previousResponseId}`;
     if (isNativePassthroughCarrier(input)) {
       const websocketSession = headerValue(input.headers, CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER);
       if (websocketSession !== null) return `responses_websocket_session:${websocketSession}`;
-    }
-    if (isNativePassthroughCarrier(input)) {
-      const turnState = headerValue(input.headers, "x-codex-turn-state");
-      if (turnState !== null) return `x-codex-turn-state:${turnState}`;
     }
     const bodyDeviceKey = deviceAffinityKeyFromBody(body);
     if (bodyDeviceKey !== null) return bodyDeviceKey;
@@ -852,6 +852,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     return (
       stickyKey?.startsWith("previous_response_id:") === true ||
       stickyKey?.startsWith("x-codex-turn-state:") === true ||
+      stickyKey?.startsWith("responses_websocket_session:") === true ||
       stickyKey?.startsWith("provider_account:") === true
     );
   }
@@ -1065,6 +1066,11 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     // parked/limited after a pool rebuild. Probe siblings immediately; waiting for
     // an upstream 400 would otherwise fail before any account search occurs.
     let recoveringPreviousResponseAccount = stickyKey?.startsWith("previous_response_id:") === true;
+    let firstSelection = true;
+    const knownPreviousResponseAccount =
+      stickyKey?.startsWith("previous_response_id:") === true
+        ? stickySessions.get(stickyKey)?.account
+        : undefined;
     let lastErr: unknown;
     for (;;) {
       let entry: PoolEntry;
@@ -1078,6 +1084,13 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         throw lastErr ?? selErr;
       }
       tried.add(entry.member.account);
+      if (firstSelection) {
+        firstSelection = false;
+        recoveringPreviousResponseAccount =
+          stickyKey?.startsWith("previous_response_id:") === true &&
+          (knownPreviousResponseAccount === undefined ||
+            knownPreviousResponseAccount !== entry.member.account);
+      }
       try {
         const result = await call(entry.member.client, entry);
         if (stickyKey?.startsWith("previous_response_id:")) {
@@ -1086,7 +1099,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         rememberResponseAffinity(result, entry);
         return result;
       } catch (err) {
-        if (isInvalidPreviousResponseIdFailure(stickyKey, err)) {
+        if (
+          isInvalidPreviousResponseIdFailure(stickyKey, err) &&
+          recoveringPreviousResponseAccount
+        ) {
           recoveringPreviousResponseAccount = true;
           lastErr = err;
           continue;
@@ -1149,8 +1165,16 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     const tried = new Set<string>([firstEntry.member.account]);
     const statefulContinuation = isStrictAccountSticky(stickyKey);
     let recoveringPreviousResponseAccount = false;
+    const knownPreviousResponseAccount =
+      stickyKey?.startsWith("previous_response_id:") === true
+        ? stickySessions.get(stickyKey)?.account
+        : undefined;
     let entry = firstEntry;
     let lastErr: unknown;
+    recoveringPreviousResponseAccount =
+      stickyKey?.startsWith("previous_response_id:") === true &&
+      (knownPreviousResponseAccount === undefined ||
+        knownPreviousResponseAccount !== firstEntry.member.account);
     for (;;) {
       let iterator: AsyncIterator<string> | undefined;
       let first: IteratorResult<string>;
@@ -1163,7 +1187,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       } catch (err) {
         if (iterator) await iterator.return?.().catch(() => {});
         const invalidPreviousResponseId = isInvalidPreviousResponseIdFailure(stickyKey, err);
-        if (invalidPreviousResponseId) {
+        if (invalidPreviousResponseId && recoveringPreviousResponseAccount) {
           recoveringPreviousResponseAccount = true;
           lastErr = err;
         } else if (isRetryableAccountFailure(err)) {
@@ -1198,6 +1222,9 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       }
       // First chunk obtained (or a clean empty stream) → COMMIT to this account.
       if (stickyKey?.startsWith("previous_response_id:")) {
+        rememberSticky(stickyKey, entry.member.account, now() + stickyTtlMs);
+      }
+      if (stickyKey?.startsWith("responses_websocket_session:")) {
         rememberSticky(stickyKey, entry.member.account, now() + stickyTtlMs);
       }
       const trackResponseAffinity = streamResponseAffinityTracker(entry);
@@ -1276,7 +1303,11 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       const stickyKey = stickyKeyFromChat(req);
       restorePersistedAffinity(stickyKey, opts?.statefulAccount);
       const avoidBusy = isUserMessageRequest(req);
-      const first = select(stickyKey, undefined, { avoidBusy, model: modelFromChat(req) });
+      const first = select(stickyKey, undefined, {
+        avoidBusy,
+        model: modelFromChat(req),
+        recoverStrictSticky: stickyKey?.startsWith("previous_response_id:") === true,
+      });
       return streamWithRetry(
         first,
         stickyKey,

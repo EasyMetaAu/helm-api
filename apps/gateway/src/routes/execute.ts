@@ -890,7 +890,7 @@ export function isAccountScopedFault(err: unknown): boolean {
   // open the alias breaker and strand otherwise healthy sibling accounts.
   if (
     err instanceof Error &&
-    /^oauth pool: (?:previous_response_id|x-codex-turn-state) original account is unavailable$/i.test(
+    /^oauth pool: (?:previous_response_id|x-codex-turn-state|responses_websocket_session) original account is unavailable$/i.test(
       err.message,
     )
   ) {
