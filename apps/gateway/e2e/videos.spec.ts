@@ -89,6 +89,30 @@ async function createPromptVideo(key: string, prompt: string, model = "grok-imag
   );
 }
 
+async function createQualityImage(
+  key: string,
+  aspectRatio: "3:4" | "4:5",
+  responseFormat: "b64_json" | "url",
+): Promise<Response> {
+  return gateway().fetch(
+    new Request("http://gateway.test/v1/images/generations", {
+      method: "POST",
+      headers: AUTH(key),
+      body: JSON.stringify({
+        model: "grok-imagine-image-quality",
+        prompt: "a picture-book scene",
+        aspect_ratio: aspectRatio,
+        response_format: responseFormat,
+      }),
+    }),
+  );
+}
+
+function pngDimensions(base64: string): [number, number] {
+  const bytes = Buffer.from(base64, "base64");
+  return [bytes.readUInt32BE(16), bytes.readUInt32BE(20)];
+}
+
 async function startVideo(
   key: string,
   operation: "generations" | "extensions",
@@ -227,6 +251,26 @@ test.afterAll(() => {
   }
   if (dataDir) rmSync(dataDir, { recursive: true, force: true });
   if (configDir) rmSync(configDir, { recursive: true, force: true });
+});
+
+test("quality images request upstream 2:3 and return cropped 3:4/4:5 carriers", async () => {
+  const cover = await createQualityImage(KEY_B, "3:4", "b64_json");
+  expect(cover.status).toBe(200);
+  const coverBody = (await cover.json()) as { data: Array<{ b64_json: string }> };
+  expect(pngDimensions(coverBody.data[0]?.b64_json ?? "")).toEqual([6, 8]);
+
+  const page = await createQualityImage(KEY_B, "4:5", "url");
+  expect(page.status).toBe(200);
+  const pageBody = (await page.json()) as { data: Array<{ url: string }> };
+  expect(pageBody.data[0]?.url).toMatch(/^data:image\/png;base64,/);
+  expect(pngDimensions(pageBody.data[0]?.url.split(",", 2)[1] ?? "")).toEqual([8, 10]);
+
+  const capture = await videoCapture();
+  expect(capture.images).toHaveLength(2);
+  expect(capture.images.map(({ body }) => body)).toEqual([
+    expect.objectContaining({ aspect_ratio: "2:3", response_format: "b64_json" }),
+    expect.objectContaining({ aspect_ratio: "2:3", response_format: "b64_json" }),
+  ]);
 });
 
 test("rejects a configured static outputVideo alias at the closed Imagine request boundary", async () => {

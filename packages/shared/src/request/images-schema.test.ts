@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   GrokImagineImageGenerationRequestSchema,
+  GrokImagineQualityImageGenerationRequestSchema,
   ImageEditRequestSchema,
   ImageGenerationRequestSchema,
   ImageGenerationResponseSchema,
@@ -126,6 +127,30 @@ describe("GrokImagineImageGenerationRequestSchema", () => {
         model: "grok-imagine-image",
         prompt: "a cat",
         resolution: "2k",
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("GrokImagineQualityImageGenerationRequestSchema", () => {
+  it.each(["3:4", "4:5"])("accepts the picture-book %s ratio", (aspectRatio) => {
+    expect(
+      GrokImagineQualityImageGenerationRequestSchema.safeParse({
+        model: "grok-imagine-image-quality",
+        prompt: "a cat",
+        aspect_ratio: aspectRatio,
+        resolution: "1k",
+        response_format: "b64_json",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("does not admit the picture-book ratios for the fast model", () => {
+    expect(
+      GrokImagineQualityImageGenerationRequestSchema.safeParse({
+        model: "grok-imagine-image",
+        prompt: "a cat",
+        aspect_ratio: "3:4",
       }).success,
     ).toBe(false);
   });

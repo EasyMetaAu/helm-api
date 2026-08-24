@@ -53,6 +53,8 @@ export const FAIL_PRIMARY_MODEL = "deepseek-v4-flash";
 // outcome_unknown without contacting a fallback provider.
 export const FAIL_IMAGE_PRIMARY_SENTINEL = "__HELM_FAIL_IMAGE_PRIMARY__";
 export const FAIL_IMAGE_PRIMARY_MODEL = "gemini-3.1-flash-image";
+const PNG_8X12 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAMAQMAAABlUG7eAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAAGUExURf8AAP///0EdNBEAAAABYktHRAH/Ai3eAAAAB3RJTUUH6ggYDjMa3UEXtQAAACV0RVh0ZGF0ZTpjcmVhdGUAMjAyNi0wOC0yNFQxNDo1MToyNiswMDowMJUXg2wAAAAldEVYdGRhdGU6bW9kaWZ5ADIwMjYtMDgtMjRUMTQ6NTE6MjYrMDA6MDDkSjvQAAAAKHRFWHRkYXRlOnRpbWVzdGFtcAAyMDI2LTA4LTI0VDE0OjUxOjI2KzAwOjAws18aDwAAAAtJREFUCNdjYMAOAAAYAAFNB2pIAAAAAElFTkSuQmCC";
 
 // Extract the joined text of a Gemini generateContent body's contents[].parts[].text
 // (the images/interactions routes put the prompt there) — for prompt-steered injection.
@@ -484,7 +486,12 @@ export function createMockUpstream() {
     return fixedJson({
       created: 0,
       model: body.model ?? "gpt-image-2",
-      data: [{ b64_json: "iVBORw0KGgoAAAANSUhEUg==" }],
+      data: [
+        {
+          b64_json:
+            body.model === "grok-imagine-image-quality" ? PNG_8X12 : "iVBORw0KGgoAAAANSUhEUg==",
+        },
+      ],
       usage: {
         input_tokens: 15,
         output_tokens: 196,

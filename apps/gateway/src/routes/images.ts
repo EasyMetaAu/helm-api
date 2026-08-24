@@ -8,11 +8,13 @@ import {
 } from "@helm/core";
 import {
   GrokImagineImageGenerationRequestSchema,
+  GrokImagineQualityImageGenerationRequestSchema,
   ImageEditRequestSchema,
   ImageGenerationRequestSchema,
 } from "@helm/shared";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
+import sharp from "sharp";
 import type { AppEnv } from "../app.js";
 import { type ConcurrencyGatePort, concurrencyReleaseGuard } from "../middleware/concurrency.js";
 import { estimateRequestTokens } from "../middleware/estimate-tokens.js";
@@ -87,6 +89,54 @@ export interface ImagesRouteDeps {
 }
 
 const GROK_IMAGE_MODELS = new Set(["grok-imagine-image", "grok-imagine-image-quality"]);
+const QUALITY_CROP_RATIOS = {
+  "3:4": [3, 4],
+  "4:5": [4, 5],
+} as const;
+type QualityCropRatio = keyof typeof QUALITY_CROP_RATIOS;
+
+async function cropQualityImageResponse(
+  body: Record<string, unknown>,
+  aspectRatio: QualityCropRatio,
+  responseFormat: "b64_json" | "url",
+): Promise<Record<string, unknown>> {
+  const [ratioWidth, ratioHeight] = QUALITY_CROP_RATIOS[aspectRatio];
+  const data = Array.isArray(body.data) ? body.data : [];
+  return {
+    ...body,
+    data: await Promise.all(
+      data.map(async (item) => {
+        if (typeof item !== "object" || item === null) throw new Error("invalid image result");
+        const { b64_json: base64, url: _url, ...rest } = item as Record<string, unknown>;
+        if (typeof base64 !== "string" || base64.length === 0) {
+          throw new Error("quality image crop requires base64 upstream output");
+        }
+        const image = sharp(Buffer.from(base64, "base64"));
+        const metadata = await image.metadata();
+        if (!metadata.width || !metadata.height) throw new Error("image dimensions unavailable");
+        const scale = Math.min(
+          Math.floor(metadata.width / ratioWidth),
+          Math.floor(metadata.height / ratioHeight),
+        );
+        const width = ratioWidth * scale;
+        const height = ratioHeight * scale;
+        if (width === 0 || height === 0) throw new Error("image is too small to crop");
+        const { data: cropped, info } = await image
+          .extract({
+            left: Math.floor((metadata.width - width) / 2),
+            top: Math.floor((metadata.height - height) / 2),
+            width,
+            height,
+          })
+          .toBuffer({ resolveWithObject: true });
+        const croppedBase64 = cropped.toString("base64");
+        return responseFormat === "url"
+          ? { ...rest, url: `data:image/${info.format};base64,${croppedBase64}` }
+          : { ...rest, b64_json: croppedBase64 };
+      }),
+    ),
+  };
+}
 
 function hasImageResult(body: Record<string, unknown>): boolean {
   if (!Array.isArray(body.data)) return false;
@@ -353,8 +403,12 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
       const grokTarget = operationTargets.find((target) =>
         GROK_IMAGE_MODELS.has(target.providerModel),
       );
-      if (grokTarget?.providerModel === "grok-imagine-image") {
-        const parsed = GrokImagineImageGenerationRequestSchema.safeParse({
+      if (grokTarget !== undefined) {
+        const schema =
+          grokTarget.providerModel === "grok-imagine-image"
+            ? GrokImagineImageGenerationRequestSchema
+            : GrokImagineQualityImageGenerationRequestSchema;
+        const parsed = schema.safeParse({
           ...generationBody,
           model: grokTarget.providerModel,
         });
@@ -473,10 +527,26 @@ export function registerImagesRoute(app: Hono<AppEnv>, deps: ImagesRouteDeps): v
           );
           return mapGeminiToImages((native ?? {}) as Record<string, unknown>);
         }
-        return (await target.client.imageGeneration?.(
-          { ...generationBody, model: target.providerModel },
+        const cropRatio =
+          target.providerModel === "grok-imagine-image-quality" &&
+          (generationBody?.aspect_ratio === "3:4" || generationBody?.aspect_ratio === "4:5")
+            ? generationBody.aspect_ratio
+            : null;
+        const upstream = (await target.client.imageGeneration?.(
+          {
+            ...generationBody,
+            model: target.providerModel,
+            ...(cropRatio === null ? {} : { aspect_ratio: "2:3", response_format: "b64_json" }),
+          },
           { signal: requestSignal(c), captureUpstream, onAccountSelected },
         )) as Record<string, unknown>;
+        return cropRatio === null
+          ? upstream
+          : cropQualityImageResponse(
+              upstream,
+              cropRatio,
+              generationBody?.response_format === "url" ? "url" : "b64_json",
+            );
       };
       const captured = deps.captureServingAccount
         ? await deps.captureServingAccount(invoke)

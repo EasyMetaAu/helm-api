@@ -46,6 +46,7 @@ describe("OpenAPI docs", () => {
     for (const name of [
       "ImageGenerationRequest",
       "GrokImagineImageGenerationRequest",
+      "GrokImagineQualityImageGenerationRequest",
       "ImageEditRequest",
       "ImageGenerationResponse",
       "VideoGenerationRequest",
@@ -58,6 +59,11 @@ describe("OpenAPI docs", () => {
     ]) {
       expect(doc.components.schemas[name]).toBeDefined();
     }
+    const qualityImageSchema = JSON.stringify(
+      doc.components.schemas.GrokImagineQualityImageGenerationRequest,
+    );
+    expect(qualityImageSchema).toContain('"3:4"');
+    expect(qualityImageSchema).toContain('"4:5"');
     const videoGenerationSchema = JSON.stringify(doc.components.schemas.VideoGenerationRequest);
     for (const officialVideoField of [
       '"reference_audios"',

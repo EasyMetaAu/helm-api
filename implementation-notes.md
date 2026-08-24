@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-08-24 · Grok quality 图片以 2:3 上游结果中心裁切绘本画幅（Images，Imagine spec §4.1，原则 3/6/7）
+
+- **兼容决定**：`grok-imagine-image-quality` 新接受 `3:4` 封面与 `4:5` 内页；Helm 的唯一付费 POST 固定向上游请求 `2:3 + b64_json`，再以整数像素最大内接矩形做确定性中心裁切，不重采样、不二次调用 provider。
+- **响应边界**：客户端请求 `b64_json` 时仍返回 `data[].b64_json`；请求 `url` 时返回同一 `data[].url` 字段中的 `data:image/...;base64` URL，避免为裁切结果新增对象存储与 SSRF 下载面。Sharp 是仓库原先缺少的唯一运行时图片编解码依赖；结构 QA 不替代人工视觉验收。
+
 ## 2026-08-24 · Codex Responses 续接 ID 可在账号池内有界找回原账号（OAuth provider / Responses，docs/04/05/07，原则 3/5/8）
 
 - **恢复边界**：同一账号、同一 WebSocket 的一次原样重试仍优先；只有它再次返回精确的 `400 Invalid previous_response_id` 且尚未产生客户端可见输出时，OAuth pool 才逐个尝试其余同 provider、同 model 的可调度账号。其他 4xx、限流、凭证、超时、断连与已开始输出的错误继续保持原有 fail-closed 语义，搜索次数天然受账号数限制。
@@ -61,13 +66,9 @@
 - **根因与修复**：历史 quarantine thread 没有项目/资源；decay 归档 observation 时把它回退成 thread-only Reflector scope，随后生成 Admin「按范围」里没有父级的 active reflection。请求 observe writeback 与 eager fact 路径也允许相同的孤立范围。现在入站/出站观察在缺少项目和资源时直接 fail-open 跳过，eager extraction 不调用模型，Reflector 对已持久化的孤立 job 在任何读写前标记失败。
 - **遗忘与兼容**：SQLite/Postgres 仍会软归档历史孤立 observation，但不再排 thread-only rebuild；正常 project/resource rebuild 与直接管理的历史数据格式不变，无 schema/migration 或新依赖。现有孤立 active facts/reflections 不由升级代码猜测删除，需按运维范围显式清理。
 
-## 2026-08-15 · 请求级正文模式成为历史读取权威（Telemetry / Admin requests，docs/07/11，原则 3/7）
-
-- **根因与修复**：Admin 只按 `request_payloads` / `session_revisions` 是否存在推断历史请求的正文模式，无法证明请求发生时 Key 与系统设置的实际合并结果；大型 Session 的元数据也只证明服务端整体恢复超限，却仍无条件展示浏览器加载按钮，即使某条 revision 会被同一分页接口的 JSON 内存上限拒绝。每条新 telemetry 现在保存 body-free 的有效 `request_content_mode`；明确 `none` 时任何孤立正文行都不可读取、也不显示加载入口，旧记录继续按存储事实兼容推断。
-- **加载边界**：SQLite/Postgres 在既有 Session 元数据聚合中同时返回目标链最大单 revision 字节数；Admin 用分页端点相同的 JSON amplification 与 8 MiB 上限决定 `browser_recoverable`，不可安全分页时不再提供必然失败的按钮。该元数据不读取正文、不改变正文格式、无需 migration；当前设置仍不追溯删除历史内容。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-15 · 请求级正文模式成为历史读取权威**：新 telemetry 保存实际有效正文模式，Admin 据此拒绝读取明确 `none` 的孤立正文，并用单 revision 大小判断浏览器恢复能力；完整原文经 git history 回溯。
 - **2026-08-15 · 大型完整载荷改由浏览器解压与恢复图片**：Admin 优先读取 gzip/raw 存储态正文并由浏览器解压，外置图片按 `sha256` 经鉴权端点恢复，避免网关内存化放大；完整原文经 git history 回溯。
 - **2026-08-13 · OAuth 永久失效只认明确凭证拒绝**：仅标准 `invalid_grant`、Copilot mint 401 与 Codex refresh 身份变化永久摘除账号，裸 refresh 403 只短暂冷却；完整原文经 git history 回溯。
 - **2026-08-13 · Grok 4.6 补齐 Agent 能力、价格与 lane 投影**：手工 catalog 补齐已验证的 tools/SSE/常用 reasoning 与 API 等价估价，subscription vision/JSON/xhigh 继续 fail-closed；完整原文经 git history 回溯。

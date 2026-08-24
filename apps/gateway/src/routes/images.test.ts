@@ -25,6 +25,14 @@ const UPSTREAM = {
   usage: { input_tokens: 15, output_tokens: 196, output_tokens_details: { image_tokens: 196 } },
 };
 
+const PNG_8X12 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAMAQMAAABlUG7eAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAAGUExURf8AAP///0EdNBEAAAABYktHRAH/Ai3eAAAAB3RJTUUH6ggYDjMa3UEXtQAAACV0RVh0ZGF0ZTpjcmVhdGUAMjAyNi0wOC0yNFQxNDo1MToyNiswMDowMJUXg2wAAAAldEVYdGRhdGU6bW9kaWZ5ADIwMjYtMDgtMjRUMTQ6NTE6MjYrMDA6MDDkSjvQAAAAKHRFWHRkYXRlOnRpbWVzdGFtcAAyMDI2LTA4LTI0VDE0OjUxOjI2KzAwOjAws18aDwAAAAtJREFUCNdjYMAOAAAYAAFNB2pIAAAAAElFTkSuQmCC";
+
+function pngDimensions(base64: string): [number, number] {
+  const bytes = Buffer.from(base64, "base64");
+  return [bytes.readUInt32BE(16), bytes.readUInt32BE(20)];
+}
+
 // Minimal budget caps so the route's budget gate/settle fire (the gate is a mock, so
 // the values are irrelevant — only `caps.budget !== undefined` matters).
 const BUDGET_CAPS = {
@@ -217,6 +225,83 @@ describe("registerImagesRoute", () => {
       }),
       expect.anything(),
     );
+  });
+
+  it.each([
+    ["3:4", [6, 8]],
+    ["4:5", [8, 10]],
+  ])("requests upstream 2:3 then center-crops quality b64 output to %s", async (ratio, size) => {
+    const imageGeneration = vi.fn().mockResolvedValue({
+      created: 0,
+      data: [{ b64_json: PNG_8X12 }],
+    });
+    const client = { imageGeneration } as unknown as ProviderClient;
+    const { app } = setup({
+      resolveImageChain: () => ({
+        ok: true,
+        laneName: "grok-imagine-image-quality",
+        candidateChain: ["xai/grok-imagine-image-quality"],
+        targets: [
+          {
+            client,
+            providerModel: "grok-imagine-image-quality",
+            alias: "xai/grok-imagine-image-quality",
+            kind: "openai",
+          },
+        ],
+      }),
+    });
+
+    const response = await post(app, {
+      model: "grok-imagine-image-quality",
+      prompt: "a cat",
+      aspect_ratio: ratio,
+      response_format: "b64_json",
+    });
+
+    expect(response.status).toBe(200);
+    expect(imageGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ aspect_ratio: "2:3", response_format: "b64_json" }),
+      expect.anything(),
+    );
+    const body = (await response.json()) as { data: Array<{ b64_json: string }> };
+    expect(pngDimensions(body.data[0]?.b64_json ?? "")).toEqual(size);
+  });
+
+  it("keeps the url response field when cropping a quality image", async () => {
+    const imageGeneration = vi.fn().mockResolvedValue({ data: [{ b64_json: PNG_8X12 }] });
+    const client = { imageGeneration } as unknown as ProviderClient;
+    const { app } = setup({
+      resolveImageChain: () => ({
+        ok: true,
+        laneName: "grok-imagine-image-quality",
+        candidateChain: ["xai/grok-imagine-image-quality"],
+        targets: [
+          {
+            client,
+            providerModel: "grok-imagine-image-quality",
+            alias: "xai/grok-imagine-image-quality",
+            kind: "openai",
+          },
+        ],
+      }),
+    });
+
+    const response = await post(app, {
+      model: "grok-imagine-image-quality",
+      prompt: "a cat",
+      aspect_ratio: "4:5",
+      response_format: "url",
+    });
+
+    expect(response.status).toBe(200);
+    expect(imageGeneration).toHaveBeenCalledWith(
+      expect.objectContaining({ aspect_ratio: "2:3", response_format: "b64_json" }),
+      expect.anything(),
+    );
+    const body = (await response.json()) as { data: Array<{ url: string }> };
+    expect(body.data[0]?.url).toMatch(/^data:image\/png;base64,/);
+    expect(pngDimensions(body.data[0]?.url.split(",", 2)[1] ?? "")).toEqual([8, 10]);
   });
 
   it("treats an empty Grok image response as one ambiguous paid write", async () => {

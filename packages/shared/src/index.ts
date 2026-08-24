@@ -309,6 +309,8 @@ export {
 export {
   type GrokImagineImageGenerationRequest,
   GrokImagineImageGenerationRequestSchema,
+  type GrokImagineQualityImageGenerationRequest,
+  GrokImagineQualityImageGenerationRequestSchema,
   type ImageEditRequest,
   ImageEditRequestSchema,
   type ImageGenerationRequest,

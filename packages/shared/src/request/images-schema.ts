@@ -32,6 +32,17 @@ export const GrokImagineImageGenerationRequestSchema = z.strictObject({
   response_format: z.literal("b64_json").optional(),
 });
 
+// The quality model keeps its existing loose compatibility surface, while
+// explicitly advertising the two client-side picture-book crops Helm adds.
+export const GrokImagineQualityImageGenerationRequestSchema = z.looseObject({
+  model: z.literal("grok-imagine-image-quality"),
+  prompt: z.string().min(1),
+  n: z.number().int().positive().optional(),
+  aspect_ratio: z.enum(["auto", "1:1", "16:9", "9:16", "3:2", "2:3", "3:4", "4:5"]).optional(),
+  resolution: z.string().optional(),
+  response_format: z.enum(["b64_json", "url"]).optional(),
+});
+
 const ImageEditCommonShape = {
   model: z.string().min(1),
   prompt: z.string().min(1),
@@ -81,6 +92,9 @@ export const ImageGenerationResponseSchema = z.looseObject({
 export type ImageGenerationRequest = z.infer<typeof ImageGenerationRequestSchema>;
 export type GrokImagineImageGenerationRequest = z.infer<
   typeof GrokImagineImageGenerationRequestSchema
+>;
+export type GrokImagineQualityImageGenerationRequest = z.infer<
+  typeof GrokImagineQualityImageGenerationRequestSchema
 >;
 export type ImageEditRequest = z.infer<typeof ImageEditRequestSchema>;
 export type ImageGenerationResponse = z.infer<typeof ImageGenerationResponseSchema>;

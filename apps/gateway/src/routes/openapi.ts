@@ -1,5 +1,6 @@
 import {
   GrokImagineImageGenerationRequestSchema,
+  GrokImagineQualityImageGenerationRequestSchema,
   ImageEditRequestSchema,
   ImageGenerationRequestSchema,
   ImageGenerationResponseSchema,
@@ -124,6 +125,9 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
         ChatCompletionRequest: component(OpenAIChatRequestSchema),
         ImageEditRequest: component(ImageEditRequestSchema),
         GrokImagineImageGenerationRequest: component(GrokImagineImageGenerationRequestSchema),
+        GrokImagineQualityImageGenerationRequest: component(
+          GrokImagineQualityImageGenerationRequestSchema,
+        ),
         ImageGenerationRequest: component(ImageGenerationRequestSchema),
         ImageGenerationResponse: component(ImageGenerationResponseSchema),
         InteractionsRequest: component(InteractionsRequestSchema),
@@ -412,6 +416,7 @@ export function buildOpenApiDocument(buildInfo?: BuildInfo): JsonSchema {
                 schema: {
                   anyOf: [
                     { $ref: "#/components/schemas/GrokImagineImageGenerationRequest" },
+                    { $ref: "#/components/schemas/GrokImagineQualityImageGenerationRequest" },
                     {
                       allOf: [
                         { $ref: "#/components/schemas/ImageGenerationRequest" },
