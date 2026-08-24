@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-08-24 · Codex Responses 续接 ID 可在账号池内有界找回原账号（OAuth provider / Responses，docs/04/05/07，原则 3/5/8）
+
+- **恢复边界**：同一账号、同一 WebSocket 的一次原样重试仍优先；只有它再次返回精确的 `400 Invalid previous_response_id` 且尚未产生客户端可见输出时，OAuth pool 才逐个尝试其余同 provider、同 model 的可调度账号。其他 4xx、限流、凭证、超时、断连与已开始输出的错误继续保持原有 fail-closed 语义，搜索次数天然受账号数限制。
+- **亲和修复**：找到能继续该 ID 的账号后，同时更新进程内 sticky 映射与 durable Responses registry 中旧 ID 的 `provider_account`；后续续接优先回到这个实际拥有状态的原账号。全部账号都报告不存在时仍返回最后一个上游错误，不删除 ID、不伪造历史，也不跨 provider/协议。
+
 ## 2026-08-20 · Grok 视频输入对齐 xAI 官方 reference-to-video 合同（Videos，Imagine spec §4 / Phase 1 §2–5，原则 2/3/6/7）
 
 - **官方合同与最小修复**：2026-08-20 复核 xAI Videos 文档与 Sub2API `49504adc` 后，确认 stable `grok-imagine-video-1.5` 接受 1–7 张 `reference_images`、七种画幅，以及最多 3 个预设 `{ voice_id }` `reference_audios`；image-to-video 接受可选画幅并支持 1080p。共享严格 schema 在同一边界扩展这些字段，`images` 兼容输入仍只在付费 POST 前规范成 `reference_images`。
@@ -61,13 +66,9 @@
 - **根因与修复**：Admin 只按 `request_payloads` / `session_revisions` 是否存在推断历史请求的正文模式，无法证明请求发生时 Key 与系统设置的实际合并结果；大型 Session 的元数据也只证明服务端整体恢复超限，却仍无条件展示浏览器加载按钮，即使某条 revision 会被同一分页接口的 JSON 内存上限拒绝。每条新 telemetry 现在保存 body-free 的有效 `request_content_mode`；明确 `none` 时任何孤立正文行都不可读取、也不显示加载入口，旧记录继续按存储事实兼容推断。
 - **加载边界**：SQLite/Postgres 在既有 Session 元数据聚合中同时返回目标链最大单 revision 字节数；Admin 用分页端点相同的 JSON amplification 与 8 MiB 上限决定 `browser_recoverable`，不可安全分页时不再提供必然失败的按钮。该元数据不读取正文、不改变正文格式、无需 migration；当前设置仍不追溯删除历史内容。
 
-## 2026-08-15 · 大型完整载荷改由浏览器解压与恢复图片（Store / Admin requests，docs/07/11，原则 1/3/7）
-
-- **根因与修复**：SQLite `request_payloads` 的单列 gzip 读取沿用了 Session 单块 256 KiB 解压上限，超过该值的真实正文被映射为 `null`，Admin 随后错误回退到 Session 恢复。Admin 现在优先请求存储态正文；SQLite 原样返回 gzip BLOB，Postgres 返回 raw TEXT，由浏览器通过 HTTP `Content-Encoding` 流式解压并拼装，不再在网关内物化放大的正文。
-- **完整性边界**：存储层为去重而外置的图片继续按 `sha256` 通过受 Admin 鉴权保护的只读端点逐个恢复；缺失 blob 保持既有 fail-open sentinel 语义。旧 JSON 响应契约和自定义 Store 适配器仍可回退使用，无 migration、无依赖、无写入格式变化。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-15 · 大型完整载荷改由浏览器解压与恢复图片**：Admin 优先读取 gzip/raw 存储态正文并由浏览器解压，外置图片按 `sha256` 经鉴权端点恢复，避免网关内存化放大；完整原文经 git history 回溯。
 - **2026-08-13 · OAuth 永久失效只认明确凭证拒绝**：仅标准 `invalid_grant`、Copilot mint 401 与 Codex refresh 身份变化永久摘除账号，裸 refresh 403 只短暂冷却；完整原文经 git history 回溯。
 - **2026-08-13 · Grok 4.6 补齐 Agent 能力、价格与 lane 投影**：手工 catalog 补齐已验证的 tools/SSE/常用 reasoning 与 API 等价估价，subscription vision/JSON/xhigh 继续 fail-closed；完整原文经 git history 回溯。
 - **2026-08-13 · 使用率下降观测不得冒充精确重置**：deadline 未变化时的使用率下降只形成 `approximate=true` 事实，精确 header/reset-credit 继续优先；完整原文经 git history 回溯。

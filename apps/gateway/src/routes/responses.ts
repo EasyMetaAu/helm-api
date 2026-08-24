@@ -1204,6 +1204,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       nativeRec.previous_response_id.length > 0
         ? nativeRec.previous_response_id
         : null;
+    let previousRegistryRecord: ResponsesRegistryRecord | null = null;
     if (previousResponseId !== null) {
       const previous =
         deps.registry === undefined ? null : await deps.registry.get(previousResponseId, identity);
@@ -1214,6 +1215,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
           traceId,
         );
       }
+      previousRegistryRecord = previous;
       ir.metadata = {
         ...ir.metadata,
         stateful_provider_alias: previous.providerAlias,
@@ -1244,6 +1246,32 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     const captureBodies = captureRecord !== undefined && captureEnabled(captureRecord);
     const captureSessionResponse =
       captureRecord !== undefined && sessionCaptureEnabled(captureRecord);
+    const persistRecoveredPreviousAccount = async (result: PipelineRunResult): Promise<void> => {
+      const servingAccount = result.servingAccount ?? null;
+      if (
+        previousRegistryRecord === null ||
+        servingAccount === null ||
+        successfulAttempt(result.decision) === null ||
+        !servedByAccount(servingAccount, previousRegistryRecord.providerAlias) ||
+        previousRegistryRecord.providerAccount === servingAccount.account
+      ) {
+        return;
+      }
+      try {
+        await deps.registry?.put({
+          ...previousRegistryRecord,
+          providerAccount: servingAccount.account,
+        });
+        previousRegistryRecord = {
+          ...previousRegistryRecord,
+          providerAccount: servingAccount.account,
+        };
+      } catch {
+        c.get("logger").log("warn", "responses.registry_affinity_repair_failed", {
+          trace_id: traceId,
+        });
+      }
+    };
 
     // 4) Outbound: stream vs non-stream, isomorphic shape.
     if (ir.stream === true) {
@@ -1261,6 +1289,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
       try {
         initialResult = await deps.pipeline.run(ir, identity, streamAbort.signal);
         stampSessionCapture(initialResult.decision, sessionCapture, sessionCaptureScope);
+        await persistRecoveredPreviousAccount(initialResult);
         applyResponseMetadata(
           c,
           initialResult.responseMetadata,
@@ -1516,6 +1545,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
         result.nativePassthrough === true
           ? (collected as Record<string, unknown>)
           : (deps.transformer.transformResponseOut(collected) as Record<string, unknown>);
+      await persistRecoveredPreviousAccount(result);
     } catch (err) {
       // Record the FAILED served request before surfacing the error (mirrors
       // chat.ts, which records failures too) so an all-providers-failed request

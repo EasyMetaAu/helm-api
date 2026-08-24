@@ -720,7 +720,7 @@ describe("createOAuthPoolClient — account selection", () => {
     expect(calls).toEqual(["a"]);
   });
 
-  it("never retries a known previous_response_id on a sibling account", async () => {
+  it("never retries a known previous_response_id on a sibling after a transient fault", async () => {
     const calls: string[] = [];
     const pool = createOAuthPoolClient({
       members: [
@@ -1558,6 +1558,62 @@ describe("createOAuthPoolClient — nativePassthroughStream", () => {
     }
 
     expect(calls).toEqual(["a", "a"]);
+  });
+
+  it("recovers an invalid previous_response_id on a sibling and remembers its account", async () => {
+    const calls: string[] = [];
+    const invalidPreviousResponseId = new UpstreamError(
+      "upstream_error",
+      "Invalid `previous_response_id`.",
+      { error: { type: "invalid_request_error" } },
+      400,
+    );
+    const responseMember = (account: string): OAuthPoolMember => ({
+      account,
+      priority: 50,
+      schedulable: true,
+      client: {
+        async chatCompletion() {
+          return { served_by: account };
+        },
+        async *chatCompletionStream() {
+          yield `data: ${account}\n\n`;
+        },
+        async *nativePassthroughStream() {
+          calls.push(account);
+          if (account === "a") throw invalidPreviousResponseId;
+          yield `event: response.created\ndata: {"type":"response.created","response":{"id":"resp-next"}}\n\n`;
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [responseMember("a"), responseMember("b")],
+      now: () => 1_000,
+    });
+    const drain = async (statefulAccount?: string): Promise<void> => {
+      const stream = pool.nativePassthroughStream?.(
+        {
+          protocol: "openai_responses",
+          body: {
+            model: "gpt-5.6-sol",
+            stream: true,
+            input: "continue",
+            previous_response_id: "resp-original",
+          },
+          headers: {},
+          mutations: {},
+        },
+        statefulAccount ? { statefulAccount } : undefined,
+      );
+      for await (const _chunk of stream ?? []) {
+        // Drain until the account search completes.
+      }
+    };
+
+    await drain("a");
+    await drain();
+
+    expect(calls).toEqual(["a", "b", "b"]);
   });
 
   it("prioritizes previous_response_id affinity over websocket session affinity", async () => {

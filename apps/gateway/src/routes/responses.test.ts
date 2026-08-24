@@ -1533,6 +1533,63 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     });
   });
 
+  it("persists a recovered previous_response_id account", async () => {
+    const put = vi.fn();
+    const registryRecord = {
+      responseId: "resp_previous",
+      accountId: "acct",
+      keyId: "k1",
+      providerAlias: "openai-codex/gpt-5.6-sol",
+      providerName: "openai-codex",
+      providerModel: "gpt-5.6-sol",
+      providerProtocol: "openai_responses" as const,
+      providerAccount: "oauth-a",
+      createdAt: 1,
+      expiresAt: Date.now() + 60_000,
+      status: "completed",
+    };
+    const decision = {
+      final: {
+        status: "ok",
+        model_alias: "openai-codex/gpt-5.6-sol",
+        provider_model: "gpt-5.6-sol",
+      },
+      provider_attempts: [
+        {
+          alias: "openai-codex/gpt-5.6-sol",
+          status: "ok",
+          skipped: false,
+          provider_name: "openai-codex",
+          provider_model: "gpt-5.6-sol",
+          target_provider_protocol: "openai_responses",
+        },
+      ],
+    } as never;
+    const { deps } = makeDeps({
+      run: async () => ({
+        decision,
+        servingAccount: { providerId: "openai-codex", account: "oauth-b" },
+        nativePassthrough: true,
+        collect: async () => ({ id: "resp_next", object: "response", status: "completed" }),
+        streamIR: async function* () {},
+      }),
+      registry: { put, get: vi.fn().mockResolvedValue(registryRecord) },
+    });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, previous_response_id: "resp_previous" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(put).toHaveBeenCalledWith({ ...registryRecord, providerAccount: "oauth-b" });
+    expect(put).toHaveBeenCalledWith(
+      expect.objectContaining({ responseId: "resp_next", providerAccount: "oauth-b" }),
+    );
+  });
+
   it("serves a native WebSocket-style continuation whose incremental input is empty", async () => {
     const routeHarness: { routed: Parameters<RouteFn>[0] | null } = { routed: null };
     const route: RouteFn = async (request) => {
