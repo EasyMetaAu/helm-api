@@ -1,11 +1,9 @@
 import type { DecisionRecord, ProviderAttempt } from "@helm/shared";
 import { tokenBreakdownFromUsage } from "./payload-capture.js";
 
-// Shared telemetry helpers for the model-pinned image-generation routes
-// (POST /v1/images/generations and POST /v1beta/interactions). Both bypass the
-// classify→lane→fallback pipeline (image gen has none of that), so they build a
-// minimal DecisionRecord with a fixed passthrough classifier and the `image` lane —
-// one source of truth so the two routes never drift.
+// Shared telemetry helpers for model-pinned media routes. They bypass the
+// classify→lane→fallback pipeline, so they build a minimal DecisionRecord with a
+// fixed passthrough classifier.
 
 // Image generation has no classification — a fixed passthrough classifier, mirroring
 // route-request.ts's explicit-passthrough records.
@@ -51,6 +49,7 @@ export function buildImageDecision(p: {
   served: { alias: string; providerModel: string } | null; // null on terminal error
   finalErrorClass: string | null; // the terminal error class (error case)
   usage: Record<string, unknown> | null; // the SERVED upstream body's usage
+  policyReason?: string;
 }): DecisionRecord {
   const usage = p.usage === null ? null : tokenBreakdownFromUsage(p.usage);
   const hasUsageEvidence = usage !== null && Object.values(usage).some((value) => value !== null);
@@ -65,7 +64,7 @@ export function buildImageDecision(p: {
     protocol: null,
     key_prefix: p.keyPrefix,
     classifier: PASSTHROUGH_CLASSIFIER,
-    policy: { matched_policy_id: null, reason: "image_generation" },
+    policy: { matched_policy_id: null, reason: p.policyReason ?? "image_generation" },
     lane: { selected_lane: p.selectedLane, candidate_chain: p.candidateChain },
     provider_attempts: p.attempts,
     final:

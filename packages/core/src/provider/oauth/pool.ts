@@ -43,6 +43,11 @@ import { DEFAULT_429_COOLDOWN_MS } from "./usage-limit.js";
 
 const RETRYABLE_ACCOUNT_FAILURE_COOLDOWN_MS = 30_000;
 
+// Hidden scheduling capability for xAI TTS. It is never exposed as a public
+// model alias; the gateway grants it only while the account's media entitlement
+// is live, so TTS cannot fall through to a text-only subscription.
+export const XAI_TTS_CAPABILITY = "helm-internal:xai-tts";
+
 // Which PRE-FIRST-CHUNK failure justifies trying a SIBLING account in the same pool
 // before the executor advances to the next alias. A Codex (openai_responses + native
 // tools) request has NO valid cross-protocol fallback — every non-Responses alias is
@@ -1523,7 +1528,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     entries.every((entry) => typeof entry.member.client.ttsSpeech === "function")
       ? {
           async ttsSpeech(req: Record<string, unknown>, opts?: ProviderCallOptions) {
-            const entry = select(null, undefined, { model: mediaModel(req) });
+            const entry = select(null, undefined, { model: XAI_TTS_CAPABILITY });
             if (!entry.member.client.ttsSpeech)
               throw new Error("oauth pool member does not support TTS");
             await opts?.onAccountSelected?.(entry.member.account);
@@ -1535,7 +1540,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     entries.every((entry) => typeof entry.member.client.ttsVoices === "function")
       ? {
           async ttsVoices(opts?: ProviderCallOptions) {
-            const entry = select(null, undefined);
+            const entry = select(null, undefined, { model: XAI_TTS_CAPABILITY });
             if (!entry.member.client.ttsVoices)
               throw new Error("oauth pool member does not support TTS voices");
             await opts?.onAccountSelected?.(entry.member.account);

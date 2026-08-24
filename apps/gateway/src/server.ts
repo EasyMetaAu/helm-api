@@ -127,6 +127,7 @@ import {
   validateModelAliasTargets,
   windowsToUsageLimit,
   XAI_GROK_OAUTH_BASE_URL,
+  XAI_TTS_CAPABILITY,
   type XaiOAuthModel,
   xaiGrokInferenceHeaders,
   xaiGrokMediaEntitlementValidUntil,
@@ -1104,6 +1105,9 @@ export async function synthesizeOAuthProviders(
           modelValidUntilMs = Object.fromEntries(
             selectedMedia.map((model) => [model, entitlementValidUntil]),
           );
+          if (selectedMedia.length > 0) {
+            modelValidUntilMs[XAI_TTS_CAPABILITY] = entitlementValidUntil;
+          }
         }
         discovered = selected.map((model) => model.id);
         discoveredWireModels = new Map(selected.map((model) => [model.id, model.model]));
@@ -1213,6 +1217,9 @@ export async function synthesizeOAuthProviders(
         }
         discovered = acceptedIds;
         memberModels = acceptedWireModels;
+        if (modelValidUntilMs?.[XAI_TTS_CAPABILITY] !== undefined) {
+          memberModels = [...memberModels, XAI_TTS_CAPABILITY];
+        }
       } else {
         for (const model of discovered) {
           unionModels.add(model);
@@ -1942,6 +1949,15 @@ export function resolveXaiMediaEmergencyState(
   if (command === "disable") return true;
   if (command === "restore" && rebuildApplied) return false;
   return current;
+}
+
+export function resolveXaiTtsClient(
+  oauthPools: ReadonlyMap<string, ProviderClient>,
+  mediaEmergencyDisabled: boolean,
+): Pick<ProviderClient, "ttsSpeech" | "ttsVoices"> | null {
+  if (mediaEmergencyDisabled) return null;
+  const client = oauthPools.get("xai");
+  return client?.ttsSpeech && client.ttsVoices ? client : null;
 }
 
 // Full wiring: config -> store -> bootstrap key -> provider -> routing pipeline.
@@ -4594,10 +4610,20 @@ export async function buildServer(
     memoryAdmission: requestBodyMemoryAdmission,
     rateLimiter,
     concurrencyGate,
-    resolve: () => {
-      const client = providerClients.get("xai");
-      return client?.ttsSpeech && client.ttsVoices ? client : null;
+    budgetGate,
+    settleBudget: settleKeyBudget,
+    captureServingAccount: withServingAccountCapture,
+    recordOAuthUsage,
+    record: {
+      telemetry,
+      writes: writeQueue,
+      redact: (payload) => redact(payload),
+      now: () => Date.now(),
+      capturePayloads: () => settings.capture_payloads,
+      captureSessions: () => settings.capture_sessions,
+      captureGeneration: () => captureGeneration,
     },
+    resolve: () => resolveXaiTtsClient(oauthPoolClients, xaiMediaEmergencyDisabled),
   });
 
   // POST /v1beta/interactions — Gemini Interactions API image gen (the SDK's

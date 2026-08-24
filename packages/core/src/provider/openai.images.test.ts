@@ -130,6 +130,28 @@ describe("createOpenAIClient TTS", () => {
     expect(onUnauthorized).not.toHaveBeenCalled();
   });
 
+  it.each([429, 503])("does not replay a paid TTS POST after upstream %s", async (status) => {
+    const fetch = vi.fn().mockResolvedValue(new Response("failed", { status }));
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+
+    await expect(client.ttsSpeech?.({ text: "hello" })).rejects.toMatchObject({
+      upstreamStatus: status,
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("does not replay a paid TTS POST after a transport error", async () => {
+    const fetch = vi
+      .fn()
+      .mockRejectedValue(Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }));
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+
+    await expect(client.ttsSpeech?.({ text: "hello" })).rejects.toMatchObject({
+      name: "UpstreamError",
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   it("GETs /tts/voices and refreshes once on 401", async () => {
     const fetch = vi
       .fn()

@@ -65,7 +65,7 @@
 ## 历史条目摘要（最新要点）
 
 - **2026-08-24 · Codex Responses 续接 ID 可在账号池内有界找回原账号**：只在尚无可靠归属且没有客户端可见输出时有界探测同 provider/model sibling，并同步修复 sticky/registry；其他状态型失败保持 fail-closed，完整原文经 git history 回溯。
-- **2026-08-22 · xAI OAuth TTS 端点**：新增只绑定 xAI OAuth pool 的 voices 查询与音频生成端点；付费生成保持单写、不重试、不切账号，独立 TTS 定价仍待官方合同，完整原文经 git history 回溯。
+- **2026-08-22 · xAI OAuth TTS 端点**：新增只绑定实时媒体 entitlement 的 xAI OAuth voices 查询与音频生成端点；付费生成单写、不重试、不切账号，并接入请求预算、用量与脱敏 telemetry；无可信 TTS 价格合同时美元限额 key fail-closed，完整原文经 git history 回溯。
 - **2026-08-20 · Grok 视频输入对齐 xAI 官方 reference-to-video 合同**：stable 视频合同扩展 1–7 张参考图、七种画幅、最多 3 个预设 voice，并保留已公开的 30 秒兼容值；付费单写与 entitlement 边界不变，完整原文经 git history 回溯。
 - **2026-08-20 · 配额周期历史新增已用百分比**：仅在以后真实观测周期关闭时保存可空 `usedPercent`，旧行和不可证明的近似历史不回填，完整原文经 git history 回溯。
 - **2026-08-19 · Codex Responses 续接 ID 在原 WebSocket 上做一次有界恢复**：仅在首个客户端可见输出前、针对精确 `Invalid previous_response_id` 在同一活动 WebSocket 原样重发一次；第二次仍失败则 fail-closed，完整原文经 git history 回溯。
