@@ -689,7 +689,7 @@ describe("createOAuthPoolClient — account selection", () => {
     expect(calls).toEqual(["a", "a"]);
   });
 
-  it("fails a known previous_response_id when its original account is unavailable", async () => {
+  it("probes a sibling when a known previous_response_id original account is unavailable", async () => {
     const calls: string[] = [];
     const responseMember = (account: string): OAuthPoolMember => ({
       account,
@@ -716,8 +716,8 @@ describe("createOAuthPoolClient — account selection", () => {
 
     await expect(
       pool.chatCompletion({ ...USER_REQ, previous_response_id: "resp-a" }),
-    ).rejects.toThrow(/previous_response_id.*original account.*unavailable/i);
-    expect(calls).toEqual(["a"]);
+    ).resolves.toEqual({ id: "resp-b", served_by: "b" });
+    expect(calls).toEqual(["a", "b"]);
   });
 
   it("never retries a known previous_response_id on a sibling after a transient fault", async () => {
