@@ -3221,7 +3221,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect(connect).toHaveBeenCalledTimes(1);
   });
 
-  it("reuses one upstream websocket for prewarm and previous_response_id continuation", async () => {
+  it("reuses one upstream websocket for completed and incomplete continuations", async () => {
     const connection = fakeConnection([
       [
         { type: "response.created", response: { id: "warm-1" } },
@@ -3237,8 +3237,8 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
           item: { type: "function_call", call_id: "call-1", name: "exec_command" },
         },
         {
-          type: "response.completed",
-          response: { id: "resp-1", status: "completed", usage: {} },
+          type: "response.incomplete",
+          response: { id: "resp-1", status: "incomplete" },
         },
       ],
       [
@@ -3337,6 +3337,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     ]);
     expect(turns[0]).toContain("response.completed");
     expect(turns[1]).toContain("function_call");
+    expect(turns[1]).toContain("response.incomplete");
     expect(turns[2]).toContain('"delta":"done"');
     expect(responseMetadata).toHaveLength(1);
     expect(responseMetadata[0]?.get("x-models-etag")).toBe('"models-ws-1"');
@@ -3657,7 +3658,6 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
 
   it.each([
     "response.failed",
-    "response.incomplete",
     "response.cancelled",
     "error",
   ] as const)("closes the upstream websocket before yielding %s and reconnects after iterator.return", async (terminalType) => {

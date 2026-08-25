@@ -1946,7 +1946,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         type === "response.incomplete" ||
         type === "response.cancelled" ||
         type === "error",
-      reusable: type === "response.completed",
+      reusable: type === "response.completed" || type === "response.incomplete",
       responseId:
         isRecord(event.response) && typeof event.response.id === "string"
           ? event.response.id
