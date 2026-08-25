@@ -195,6 +195,8 @@ describe("admin OAuth routes — read endpoints", () => {
     const HOUR = 3_600_000;
     const DAY = 86_400_000;
     const WEEK = 7 * DAY;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-25T12:00:00.000Z"));
     const now = Date.now();
     const todayReset = now - HOUR;
     const saturdayReset = todayReset - 3 * DAY;
@@ -282,6 +284,7 @@ describe("admin OAuth routes — read endpoints", () => {
     }).request(
       "/admin/api/oauth/usage/periods?provider=openai-codex&account=a%40x.com&tzOffsetMinutes=0",
     );
+    vi.useRealTimers();
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       current: Array<{ windowKey: string; periodStartMs: number; tokens: number }>;
