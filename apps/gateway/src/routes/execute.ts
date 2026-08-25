@@ -1333,6 +1333,16 @@ export function isUpstreamRequestRejection(err: unknown): boolean {
   return text.includes("max allowed size");
 }
 
+// Anthropic can reject a translated tool_result even though the source request is
+// valid for another protocol. This is candidate-specific, so let the chain try the
+// next compatible target without treating Anthropic as unhealthy.
+export function isCandidateSpecificProtocolRejection(err: unknown): boolean {
+  if (!(err instanceof UpstreamError)) return false;
+  if (err.upstreamStatus !== 400 && err.upstreamStatus !== 422) return false;
+  const text = `${err.message} ${upstreamErrorMessage(err.providerRaw) ?? ""}`.toLowerCase();
+  return text.includes("tool result content could not be processed");
+}
+
 function isReasoningHistoryRejection(err: unknown): boolean {
   if (!(err instanceof UpstreamError)) return false;
   if (err.upstreamStatus !== 400) return false;
@@ -2361,6 +2371,22 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               alias,
               skipped: true,
               skip_reason: "reasoning_history_incompatible",
+              status: "error",
+              error_class: null,
+              latency_ms: elapsed(),
+              cost_usd: null,
+              error_detail: errorDetailOf(err),
+              ...attemptTelemetry,
+            });
+            continue;
+          }
+
+          if (isCandidateSpecificProtocolRejection(err)) {
+            capabilityPruned = true;
+            attempts.push({
+              alias,
+              skipped: true,
+              skip_reason: "provider_protocol_incompatible",
               status: "error",
               error_class: null,
               latency_ms: elapsed(),

@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-08-25 · Anthropic tool_result 400 允许协议级 fallback（协议互译 / docs/05、07，原则 3/5/8）
+
+- Anthropic 的 `Advisor tool result content could not be processed` 是目标 provider 的工具结果格式拒绝，不等价于跨 provider 的全局请求非法；该候选现在记录 `provider_protocol_incompatible` 并继续尝试下一个兼容 lane，不处罚共享 breaker。
+- 只识别这个稳定、精确的上游消息；context overflow、413 和其他确定性请求形状错误仍保持 fail-closed 400，避免把客户端应修复的问题静默转移到 fallback。
+- 当前限制：未开启 payload capture 的历史请求无法定位具体工具字段；修复覆盖路由级 fallback 语义，仍需后续针对真实 Responses→Anthropic tool schema 的 fixture 扩展协议测试。
+
 ## 2026-08-25 · Responses 续接只在原账号不可用时搜索 sibling（OAuth provider / Responses，docs/04/05/07，原则 3/5/8）
 
 - **生产根因**：`v0.28.83` 会在原账号已明确返回 `Invalid previous_response_id` 后继续遍历其余账号；每个账号内部又会原样重试一次，六个失败请求因此在返回 SSE error 前静默约 24–26 秒。现在已知原账号实际接到请求后若仍返回精确 invalid-ID，立即 fail-closed；只有持久化原账号已不可调度或 ID 尚无归属时，才保留同 provider/model 的 sibling 搜索。
