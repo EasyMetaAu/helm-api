@@ -1512,6 +1512,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       providerName: "openai-codex",
       providerModel: "gpt-5.6-sol",
       providerProtocol: "openai_responses" as const,
+      providerAccount: "oauth-a",
       createdAt: 1,
       expiresAt: Date.now() + 60_000,
       status: "completed",
@@ -1536,7 +1537,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
   it.each([
     "failed",
     "truncated",
-    "incomplete",
+    "cancelled",
   ])("rejects a previous_response_id whose registry status is %s", async (status) => {
     const get = vi.fn().mockResolvedValue({
       responseId: "resp_unusable",
@@ -1564,6 +1565,62 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(await res.json()).toMatchObject({
       error: { type: "invalid_request_error" },
     });
+    expect(harness.pipelineSawIR).toBeNull();
+  });
+
+  it("allows an incomplete previous_response_id to preserve the Responses terminal contract", async () => {
+    const get = vi.fn().mockResolvedValue({
+      responseId: "resp_incomplete",
+      accountId: "acct",
+      keyId: "k1",
+      providerAlias: "responses/gpt-5.5",
+      providerName: "openai",
+      providerModel: "gpt-5.5",
+      providerProtocol: "openai_responses" as const,
+      providerAccount: null,
+      createdAt: 1,
+      expiresAt: Date.now() + 60_000,
+      status: "incomplete",
+    });
+    const { deps, harness } = makeDeps({ registry: { put: vi.fn(), get } });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, previous_response_id: "resp_incomplete" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(harness.pipelineSawIR).toMatchObject({
+      metadata: { stateful_provider_alias: "responses/gpt-5.5" },
+    });
+  });
+
+  it("rejects an OAuth previous_response_id with no persisted owner before routing", async () => {
+    const get = vi.fn().mockResolvedValue({
+      responseId: "resp_ownerless",
+      accountId: "acct",
+      keyId: "k1",
+      providerAlias: "openai-codex/gpt-5.6-sol",
+      providerName: "openai-codex",
+      providerModel: "gpt-5.6-sol",
+      providerProtocol: "openai_responses" as const,
+      providerAccount: null,
+      createdAt: 1,
+      expiresAt: Date.now() + 60_000,
+      status: "completed",
+    });
+    const { deps, harness } = makeDeps({ registry: { put: vi.fn(), get } });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: { ...AUTH, "x-codex-turn-state": "turn-ownerless" },
+      body: JSON.stringify({ ...REQ, previous_response_id: "resp_ownerless" }),
+    });
+
+    expect(res.status).toBe(400);
     expect(harness.pipelineSawIR).toBeNull();
   });
 
@@ -1649,6 +1706,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       providerName: "openai-codex",
       providerModel: "gpt-5.6-sol",
       providerProtocol: "openai_responses" as const,
+      providerAccount: "oauth-a",
       createdAt: 1,
       expiresAt: Date.now() + 60_000,
       status: "completed",
@@ -1715,6 +1773,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       providerName: "openai-codex",
       providerModel: "gpt-5.6-sol",
       providerProtocol: "openai_responses" as const,
+      providerAccount: "oauth-a",
       createdAt: 1,
       expiresAt: Date.now() + 60_000,
       status: "completed",

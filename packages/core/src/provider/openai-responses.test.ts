@@ -3495,6 +3495,62 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("rejects a previous_response_id created on another live websocket session", async () => {
+    const sessionA = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-session-a" } },
+        { type: "response.completed", response: { id: "resp-session-a", status: "completed" } },
+      ],
+    ]);
+    const sessionB = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-session-b" } },
+        { type: "response.completed", response: { id: "resp-session-b", status: "completed" } },
+      ],
+    ]);
+    const connect = vi.fn().mockResolvedValueOnce(sessionA).mockResolvedValueOnce(sessionB);
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_cross_session")}`,
+        responsesWebSocketConnector: connect,
+      },
+    });
+    for (const sessionId of ["ingress-session-a", "ingress-session-b"]) {
+      for await (const _chunk of client.nativePassthroughStream?.(
+        carrier(sessionId, {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+        }),
+      ) ?? []) {
+        // Establish one response on each live websocket.
+      }
+    }
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier("ingress-session-b", {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+          previous_response_id: "resp-session-a",
+        }),
+      )
+      [Symbol.asyncIterator]();
+
+    await expect(iterator?.next()).rejects.toMatchObject({
+      upstreamStatus: 400,
+      providerRaw: {
+        error: { code: "previous_response_id_session_unavailable" },
+      },
+    });
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(sessionA.sent).toHaveLength(1);
+    expect(sessionB.sent).toHaveLength(1);
+  });
+
   it("does not reconnect or fall back to HTTP when a continuation websocket closes", async () => {
     const replies: Array<Array<Record<string, unknown>>> = [
       [

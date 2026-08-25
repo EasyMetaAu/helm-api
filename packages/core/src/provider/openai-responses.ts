@@ -1167,6 +1167,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
   const turnStates = new Map<string, string>();
   const websocketMetadataFired = new WeakSet<CodexResponsesWebSocketConnection>();
   const websocketHttpFallbackSessions = new Set<string>();
+  const responseWebsocketSessions = new Map<string, string>();
   const websocketSessions = new Map<
     string,
     {
@@ -1761,6 +1762,9 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
 
   async function closeWebSocketSession(sessionId: string): Promise<void> {
     websocketHttpFallbackSessions.delete(sessionId);
+    for (const [responseId, ownerSessionId] of responseWebsocketSessions) {
+      if (ownerSessionId === sessionId) responseWebsocketSessions.delete(responseId);
+    }
     const state = websocketSessions.get(sessionId);
     if (!state) return;
     websocketSessions.delete(sessionId);
@@ -1778,6 +1782,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         preamble: boolean;
         terminal: boolean;
         reusable: boolean;
+        responseId: string | null;
       }
     | {
         kind: "rate_limits";
@@ -1942,7 +1947,24 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         type === "response.cancelled" ||
         type === "error",
       reusable: type === "response.completed",
+      responseId:
+        isRecord(event.response) && typeof event.response.id === "string"
+          ? event.response.id
+          : null,
     };
+  }
+
+  function rememberResponseWebSocketSession(responseId: string, sessionId: string): void {
+    // ponytail: recent branches only; raise this existing turn-state-sized bound if
+    // clients prove they legitimately continue responses older than 128 turns.
+    if (
+      !responseWebsocketSessions.has(responseId) &&
+      responseWebsocketSessions.size >= MAX_CODEX_TURN_STATES
+    ) {
+      const oldest = responseWebsocketSessions.keys().next().value;
+      if (oldest !== undefined) responseWebsocketSessions.delete(oldest);
+    }
+    responseWebsocketSessions.set(responseId, sessionId);
   }
 
   async function receiveWebSocketMessage(
@@ -2062,7 +2084,8 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         (!cfg.responsesWebSocketConnector ||
           !sessionId ||
           websocketHttpFallbackSessions.has(sessionId) ||
-          !websocketSessions.has(sessionId))
+          !websocketSessions.has(sessionId) ||
+          responseWebsocketSessions.get(previousResponseId.trim()) !== sessionId)
       ) {
         throw continuationSessionUnavailable(
           "previous_response_id cannot be continued because its original websocket session is unavailable; send the full conversation input instead",
@@ -2188,6 +2211,9 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
                   }
                   await closeWebSocketSession(sessionId);
                   throw event.error;
+                }
+                if (event.responseId !== null) {
+                  rememberResponseWebSocketSession(event.responseId, sessionId);
                 }
                 if (!outputStarted && event.preamble && preambleFrames.length < 2) {
                   preambleFrames.push(event.frame);

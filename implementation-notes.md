@@ -10,8 +10,8 @@
 ## 2026-08-25 · Responses continuation 不跨账号或 transport 恢复（OAuth provider / Responses，docs/04/05/07，原则 3/5/8）
 
 - **根因修正**：`previous_response_id` 的持久化 provider/account 归属不能证明上游 WebSocket 状态仍存在。OAuth pool 现在只允许已知且可调度的原账号执行；原账号缺失、不可用或过期时在 provider dispatch 前拒绝，不再搜索 sibling。其他无状态请求的账号级 failover 保持不变。
-- **transport 边界**：Codex continuation 必须复用当前活动的原 WebSocket；原 session 缺失、连接关闭、426/connection-limit、模糊 send failure 均禁止重连和 HTTP fallback，返回 `previous_response_id_session_unavailable` 并要求完整会话。精确 invalid-ID 仍只在同一活动 WebSocket 上原样重试一次。
-- **registry 边界**：只有 `completed` response registry 记录可作为续接父节点；`failed`、`truncated`、`incomplete` 与其他状态在路由前 fail-closed。没有新增 schema、迁移、配置或正文持久化。
+- **transport 边界**：Codex continuation 必须复用产生该 response ID 的当前活动原 WebSocket；原 session 缺失/不匹配、连接关闭、426/connection-limit、模糊 send failure 均禁止重连和 HTTP fallback，返回 `previous_response_id_session_unavailable` 并要求完整会话。精确 invalid-ID 仍只在同一活动 WebSocket 上原样重试一次。
+- **registry 边界**：`completed` 与协议允许的 `incomplete` registry 记录可作为续接父节点；`failed`、`cancelled`、内部 `truncated` 与其他状态在路由前 fail-closed。OAuth 记录还必须带原账号，避免旧空 owner 被 turn-state 绕过；静态 Responses provider 继续允许空账号。没有新增 schema、迁移、配置或正文持久化。
 
 ## 2026-08-25 · Anthropic tool_result 400 允许协议级 fallback（协议互译 / docs/05、07，原则 3/5/8）
 
