@@ -900,7 +900,6 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     opts: {
       avoidBusy?: boolean;
       model?: string | null;
-      recoverStrictSticky?: boolean;
     } = {},
   ): PoolEntry {
     const nowMs = now();
@@ -944,7 +943,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         reason: "sticky_hit",
       });
     }
-    if (stickyOnly && knownSticky && opts.recoverStrictSticky !== true) {
+    if (stickyKey?.startsWith("previous_response_id:") && !knownSticky) {
+      throw new Error("oauth pool: previous_response_id original account is unavailable");
+    }
+    if (stickyOnly && knownSticky) {
       const source = affinityKeySource(stickyKey ?? null) ?? "stateful continuation";
       throw new Error(`oauth pool: ${source} original account is unavailable`);
     }
@@ -1062,35 +1064,15 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   ): Promise<R> {
     const tried = new Set<string>();
     const statefulContinuation = isStrictAccountSticky(stickyKey);
-    // A persisted previous_response_id pin can point at an account that is now
-    // parked/limited after a pool rebuild. Probe siblings immediately; waiting for
-    // an upstream 400 would otherwise fail before any account search occurs.
-    let recoveringPreviousResponseAccount = stickyKey?.startsWith("previous_response_id:") === true;
-    let firstSelection = true;
-    const knownPreviousResponseAccount =
-      stickyKey?.startsWith("previous_response_id:") === true
-        ? stickySessions.get(stickyKey)?.account
-        : undefined;
     let lastErr: unknown;
     for (;;) {
       let entry: PoolEntry;
       try {
-        entry = select(stickyKey, tried, {
-          avoidBusy,
-          model,
-          recoverStrictSticky: recoveringPreviousResponseAccount,
-        });
+        entry = select(stickyKey, tried, { avoidBusy, model });
       } catch (selErr) {
         throw lastErr ?? selErr;
       }
       tried.add(entry.member.account);
-      if (firstSelection) {
-        firstSelection = false;
-        recoveringPreviousResponseAccount =
-          stickyKey?.startsWith("previous_response_id:") === true &&
-          (knownPreviousResponseAccount === undefined ||
-            knownPreviousResponseAccount !== entry.member.account);
-      }
       try {
         const result = await call(entry.member.client, entry);
         if (stickyKey?.startsWith("previous_response_id:")) {
@@ -1099,14 +1081,6 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         rememberResponseAffinity(result, entry);
         return result;
       } catch (err) {
-        if (
-          isInvalidPreviousResponseIdFailure(stickyKey, err) &&
-          recoveringPreviousResponseAccount
-        ) {
-          recoveringPreviousResponseAccount = true;
-          lastErr = err;
-          continue;
-        }
         if (isRetryableAccountFailure(err)) {
           coolRetryableAccount(entry);
           if (statefulContinuation) throw err;
@@ -1164,17 +1138,8 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   ): AsyncIterable<string> {
     const tried = new Set<string>([firstEntry.member.account]);
     const statefulContinuation = isStrictAccountSticky(stickyKey);
-    let recoveringPreviousResponseAccount = false;
-    const knownPreviousResponseAccount =
-      stickyKey?.startsWith("previous_response_id:") === true
-        ? stickySessions.get(stickyKey)?.account
-        : undefined;
     let entry = firstEntry;
     let lastErr: unknown;
-    recoveringPreviousResponseAccount =
-      stickyKey?.startsWith("previous_response_id:") === true &&
-      (knownPreviousResponseAccount === undefined ||
-        knownPreviousResponseAccount !== firstEntry.member.account);
     for (;;) {
       let iterator: AsyncIterator<string> | undefined;
       let first: IteratorResult<string>;
@@ -1187,10 +1152,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       } catch (err) {
         if (iterator) await iterator.return?.().catch(() => {});
         const invalidPreviousResponseId = isInvalidPreviousResponseIdFailure(stickyKey, err);
-        if (invalidPreviousResponseId && recoveringPreviousResponseAccount) {
-          recoveringPreviousResponseAccount = true;
-          lastErr = err;
-        } else if (isRetryableAccountFailure(err)) {
+        if (isRetryableAccountFailure(err)) {
           coolRetryableAccount(entry);
           lastErr = err;
         } else if (isCredentialAccountFailure(err, upstreamCredentialFailureStatuses)) {
@@ -1208,11 +1170,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         if (statefulContinuation && !invalidPreviousResponseId) throw lastErr;
         let next: PoolEntry;
         try {
-          next = select(stickyKey, tried, {
-            avoidBusy,
-            model,
-            recoverStrictSticky: recoveringPreviousResponseAccount,
-          });
+          next = select(stickyKey, tried, { avoidBusy, model });
         } catch {
           throw lastErr; // no sibling left → surface the real upstream cause
         }
@@ -1303,11 +1261,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       const stickyKey = stickyKeyFromChat(req);
       restorePersistedAffinity(stickyKey, opts?.statefulAccount);
       const avoidBusy = isUserMessageRequest(req);
-      const first = select(stickyKey, undefined, {
-        avoidBusy,
-        model: modelFromChat(req),
-        recoverStrictSticky: stickyKey?.startsWith("previous_response_id:") === true,
-      });
+      const first = select(stickyKey, undefined, { avoidBusy, model: modelFromChat(req) });
       return streamWithRetry(
         first,
         stickyKey,
@@ -1362,11 +1316,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       const avoidBusy = isUserMessageRequest(nativePassthroughBody(body));
       // Pick + fail-closed check SYNCHRONOUSLY on the call turn (rotation + onSelect, and a
       // synchronous throw if the picked member can't passthrough-stream), exactly as before.
-      const first = select(stickyKey, undefined, {
-        avoidBusy,
-        model: modelFromNative(body),
-        recoverStrictSticky: stickyKey?.startsWith("previous_response_id:") === true,
-      });
+      const first = select(stickyKey, undefined, { avoidBusy, model: modelFromNative(body) });
       if (!first.member.client.nativePassthroughStream) {
         throw new Error("oauth pool member does not support native passthrough streaming");
       }

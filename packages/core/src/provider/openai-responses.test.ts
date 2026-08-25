@@ -3414,7 +3414,14 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
         message: "Invalid `previous_response_id`.",
       },
     };
-    const connection = fakeConnection([[invalidPreviousResponseId], [invalidPreviousResponseId]]);
+    const connection = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-missing" } },
+        { type: "response.completed", response: { id: "resp-missing", status: "completed" } },
+      ],
+      [invalidPreviousResponseId],
+      [invalidPreviousResponseId],
+    ]);
     const connect = vi.fn(async () => connection);
     const client = createCodexResponsesClient({
       config: {
@@ -3424,6 +3431,16 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
         connectRetryBackoffMs: [0],
       },
     });
+    for await (const _chunk of client.nativePassthroughStream?.(
+      carrier("ingress-invalid-previous-repeat", {
+        model: "gpt-5.6-sol",
+        input: [],
+        stream: true,
+        store: false,
+      }),
+    ) ?? []) {
+      // Establish the parent on the original websocket.
+    }
     const iterator = client
       .nativePassthroughStream?.(
         carrier("ingress-invalid-previous-repeat", {
@@ -3441,8 +3458,106 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       message: "Invalid `previous_response_id`.",
     });
     expect(connect).toHaveBeenCalledTimes(1);
-    expect(connection.sent).toHaveLength(2);
+    expect(connection.sent).toHaveLength(3);
     expect(connection.closeCalls).toBe(1);
+  });
+
+  it("rejects a previous_response_id when its original websocket session is absent", async () => {
+    const connect = vi.fn();
+    const fetchMock = vi.fn();
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_missing_session")}`,
+        responsesWebSocketConnector: connect,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier("ingress-missing-session", {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+          previous_response_id: "resp-old",
+        }),
+      )
+      [Symbol.asyncIterator]();
+
+    await expect(iterator?.next()).rejects.toMatchObject({
+      upstreamStatus: 400,
+      providerRaw: {
+        error: { code: "previous_response_id_session_unavailable" },
+      },
+    });
+    expect(connect).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not reconnect or fall back to HTTP when a continuation websocket closes", async () => {
+    const replies: Array<Array<Record<string, unknown>>> = [
+      [
+        { type: "response.created", response: { id: "resp-parent" } },
+        { type: "response.completed", response: { id: "resp-parent", status: "completed" } },
+      ],
+      [],
+    ];
+    let turn = -1;
+    let eventIndex = 0;
+    const connection: CodexResponsesWebSocketConnection = {
+      responseHeaders: new Headers(),
+      async send() {
+        turn += 1;
+        eventIndex = 0;
+      },
+      async receive() {
+        const event = replies[turn]?.[eventIndex++];
+        return event === undefined ? null : JSON.stringify(event);
+      },
+      async close() {},
+    };
+    const connect = vi.fn(async () => connection);
+    const fetchMock = vi.fn();
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_closed_continuation")}`,
+        responsesWebSocketConnector: connect,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    for await (const _chunk of client.nativePassthroughStream?.(
+      carrier("ingress-closed-continuation", {
+        model: "gpt-5.6-sol",
+        input: [],
+        stream: true,
+        store: false,
+      }),
+    ) ?? []) {
+      // Establish the original response on the live websocket.
+    }
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier("ingress-closed-continuation", {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+          previous_response_id: "resp-parent",
+        }),
+      )
+      [Symbol.asyncIterator]();
+
+    await expect(iterator?.next()).rejects.toMatchObject({
+      upstreamStatus: 400,
+      providerRaw: {
+        error: { code: "previous_response_id_session_unavailable" },
+      },
+    });
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("falls back to HTTP after a websocket 426 and keeps the named session on HTTP", async () => {
@@ -3832,6 +3947,10 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
   it("preserves a Responses Lite incremental continuation without re-inserting tools", async () => {
     const connection = fakeConnection([
       [
+        { type: "response.created", response: { id: "resp-1" } },
+        { type: "response.completed", response: { id: "resp-1", status: "completed" } },
+      ],
+      [
         { type: "response.created", response: { id: "resp-2" } },
         { type: "response.output_text.delta", delta: "done" },
         {
@@ -3859,6 +3978,17 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     for await (const _chunk of client.nativePassthroughStream?.(
       carrier("ingress-lite-continuation", {
         model: "gpt-5.6-sol",
+        input: [],
+        stream: true,
+        store: false,
+      }),
+    ) ?? []) {
+      // Establish resp-1 on the original websocket.
+    }
+
+    for await (const _chunk of client.nativePassthroughStream?.(
+      carrier("ingress-lite-continuation", {
+        model: "gpt-5.6-sol",
         input: [output],
         stream: true,
         store: false,
@@ -3871,7 +4001,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       // drain
     }
 
-    expect(connection.sent.map((text) => JSON.parse(text))).toEqual([
+    expect(connection.sent.slice(1).map((text) => JSON.parse(text))).toEqual([
       expect.objectContaining({
         type: "response.create",
         previous_response_id: "resp-1",

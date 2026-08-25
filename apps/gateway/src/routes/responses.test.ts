@@ -1533,6 +1533,40 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     });
   });
 
+  it.each([
+    "failed",
+    "truncated",
+    "incomplete",
+  ])("rejects a previous_response_id whose registry status is %s", async (status) => {
+    const get = vi.fn().mockResolvedValue({
+      responseId: "resp_unusable",
+      accountId: "acct",
+      keyId: "k1",
+      providerAlias: "openai-codex/gpt-5.6-sol",
+      providerName: "openai-codex",
+      providerModel: "gpt-5.6-sol",
+      providerProtocol: "openai_responses" as const,
+      providerAccount: "oauth-a",
+      createdAt: 1,
+      expiresAt: Date.now() + 60_000,
+      status,
+    });
+    const { deps, harness } = makeDeps({ registry: { put: vi.fn(), get } });
+    const app = buildApp(deps);
+
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, previous_response_id: "resp_unusable" }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      error: { type: "invalid_request_error" },
+    });
+    expect(harness.pipelineSawIR).toBeNull();
+  });
+
   it("persists a recovered previous_response_id account", async () => {
     const put = vi.fn();
     const registryRecord = {

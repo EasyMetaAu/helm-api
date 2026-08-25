@@ -1208,7 +1208,11 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     if (previousResponseId !== null) {
       const previous =
         deps.registry === undefined ? null : await deps.registry.get(previousResponseId, identity);
-      if (previous?.providerAlias === null || previous?.providerProtocol !== "openai_responses") {
+      if (
+        previous?.providerAlias === null ||
+        previous?.providerProtocol !== "openai_responses" ||
+        previous.status !== "completed"
+      ) {
         throw helmError(
           "invalid_request",
           `previous_response_id '${previousResponseId}' cannot be continued safely; send the full conversation input instead`,
