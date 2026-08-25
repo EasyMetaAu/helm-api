@@ -526,6 +526,95 @@ describe('providers page', () => {
     expect(screen.getByTestId('refresh-interval-10')).toHaveTextContent('10s');
   });
 
+  it('automatically requests one upstream refresh when the cached quota is one hour old', async () => {
+    vi.useFakeTimers();
+    try {
+      const now = Date.UTC(2026, 7, 25, 15, 0);
+      vi.setSystemTime(now);
+      renderPage({
+        quota: [
+          {
+            ...quota[0]!,
+            capturedAt: now - 60 * 60_000,
+          },
+        ],
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(requestOAuthRefresh).toHaveBeenCalledOnce();
+      expect(getOAuthOverview).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('treats a missing quota snapshot for a quota provider as stale', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(Date.UTC(2026, 7, 25, 15, 0));
+      renderPage({ quota: [] });
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(requestOAuthRefresh).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('waits for a stale background tab to become visible before refreshing upstream', async () => {
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    try {
+      const now = Date.UTC(2026, 7, 25, 15, 0);
+      vi.setSystemTime(now);
+      renderPage({
+        quota: [
+          {
+            ...quota[0]!,
+            capturedAt: now - 60 * 60_000,
+          },
+        ],
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(requestOAuthRefresh).not.toHaveBeenCalled();
+
+      visibility.mockReturnValue('visible');
+      await fireEvent(document, new Event('visibilitychange'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(requestOAuthRefresh).toHaveBeenCalledOnce();
+    } finally {
+      visibility.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a fresh quota cache until its one-hour freshness window expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const now = Date.UTC(2026, 7, 25, 15, 0);
+      vi.setSystemTime(now);
+      renderPage({
+        quota: [
+          {
+            ...quota[0]!,
+            capturedAt: now,
+          },
+        ],
+      });
+
+      await vi.advanceTimersByTimeAsync(60 * 60_000 - 1);
+      expect(requestOAuthRefresh).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(requestOAuthRefresh).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('shows the latest cached data after the queued refresh completes', async () => {
     const refreshedAt = Date.now();
     getOAuthOverview.mockResolvedValue({
@@ -553,6 +642,29 @@ describe('providers page', () => {
     expect(screen.getByTestId('provider-refresh-status')).toHaveTextContent(
       'refresh available again in 1.5min',
     );
+  });
+
+  it('does not enqueue a second automatic refresh after a manual refresh of stale data', async () => {
+    vi.useFakeTimers();
+    try {
+      const now = Date.UTC(2026, 7, 25, 15, 0);
+      vi.setSystemTime(now);
+      renderPage({
+        quota: [
+          {
+            ...quota[0]!,
+            capturedAt: now - 60 * 60_000,
+          },
+        ],
+      });
+
+      await fireEvent.click(screen.getByTestId('refresh-now'));
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(requestOAuthRefresh).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps timer-driven auto refresh cache-only', async () => {

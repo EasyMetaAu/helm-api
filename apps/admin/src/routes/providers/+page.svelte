@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import { invalidateAll } from '$app/navigation';
   import { base } from '$app/paths';
   import { accountDetailHref } from '$lib/oauth-account-id.js';
@@ -102,6 +102,7 @@
   $effect(() => {
     overview = { ...data };
     if (data.loadError) error = data.loadError;
+    scheduleProviderRevalidation();
   });
 
   const keyOf = (providerId: string, account: string): string => `${providerId}/${account}`;
@@ -485,11 +486,77 @@
 
   const REFRESH_POLL_MS = 750;
   const REFRESH_POLL_LIMIT = 160;
+  const PROVIDER_REFRESH_TTL_MS = 60 * 60_000;
+  const QUOTA_PROVIDER_IDS = new Set(['anthropic', 'openai-codex', 'xai']);
   let destroyed = false;
+  let mounted = false;
   let pollGeneration = 0;
+  let providerRevalidationTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastProviderRefreshAttemptAt: number | null = null;
+
+  function clearProviderRevalidationTimer(): void {
+    if (providerRevalidationTimer !== null) {
+      clearTimeout(providerRevalidationTimer);
+      providerRevalidationTimer = null;
+    }
+  }
+
+  function oldestQuotaCapture(): number | null {
+    const snapshots = new Map(
+      overview.quota.map((snapshot) => [keyOf(snapshot.providerId, snapshot.account), snapshot]),
+    );
+    let oldest: number | null = null;
+    for (const provider of overview.providers) {
+      if (!QUOTA_PROVIDER_IDS.has(provider.id)) continue;
+      for (const account of provider.accounts) {
+        const capturedAt = snapshots.get(keyOf(provider.id, account.account))?.capturedAt ?? 0;
+        oldest = oldest === null ? capturedAt : Math.min(oldest, capturedAt);
+      }
+    }
+    return oldest;
+  }
+
+  function scheduleProviderRevalidation(): void {
+    if (!mounted || destroyed) return;
+    clearProviderRevalidationTimer();
+    const capturedAt = oldestQuotaCapture();
+    if (capturedAt === null) return;
+    const staleAt = capturedAt + PROVIDER_REFRESH_TTL_MS;
+    const retryAt = (lastProviderRefreshAttemptAt ?? 0) + PROVIDER_REFRESH_TTL_MS;
+    const delayMs = Math.max(0, Math.max(staleAt, retryAt) - Date.now());
+    providerRevalidationTimer = setTimeout(() => {
+      providerRevalidationTimer = null;
+      void revalidateStaleProviders();
+    }, delayMs);
+  }
+
+  async function revalidateStaleProviders(): Promise<void> {
+    if (destroyed) return;
+    if (document.visibilityState === 'hidden') return;
+    const capturedAt = oldestQuotaCapture();
+    if (capturedAt === null || Date.now() - capturedAt < PROVIDER_REFRESH_TTL_MS) {
+      scheduleProviderRevalidation();
+      return;
+    }
+    await refresh();
+    scheduleProviderRevalidation();
+  }
+
+  function onVisibilityChange(): void {
+    if (document.visibilityState !== 'hidden') scheduleProviderRevalidation();
+  }
+
+  onMount(() => {
+    mounted = true;
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    scheduleProviderRevalidation();
+  });
+
   onDestroy(() => {
     destroyed = true;
     pollGeneration += 1;
+    clearProviderRevalidationTimer();
+    document.removeEventListener('visibilitychange', onVisibilityChange);
   });
 
   function refreshActive(status: OAuthAdminRefreshStatus): boolean {
@@ -506,6 +573,7 @@
       if (!destroyed) {
         overview = next;
         error = null;
+        scheduleProviderRevalidation();
       }
       return next;
     } catch (e) {
@@ -534,6 +602,7 @@
   // is rendered at once, then cache-only polling picks up the completed snapshot.
   async function refresh(): Promise<void> {
     error = null;
+    lastProviderRefreshAttemptAt = Date.now();
     try {
       const queued = await requestOAuthRefresh();
       overview = { ...overview, refresh: queued.status };

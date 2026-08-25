@@ -138,6 +138,25 @@ describe("CI workflow", () => {
     expect(report).not.toContain("actions/checkout@");
   });
 
+  it("restores Core CI as a fail-closed aggregate without re-running repository code", () => {
+    const core = jobBlock(raw, "core_ci");
+    expect(core).toContain("name: Core CI");
+    expect(core).toContain("if: always()");
+    expect(core).toContain("needs: [verify, store, e2e, docker, report_pr_checks]");
+    expect(core).toContain("runs-on: ubuntu-24.04");
+    expect(core).toContain("VERIFY_RESULT: ${{ needs.verify.result }}");
+    expect(core).toContain("STORE_RESULT: ${{ needs.store.result }}");
+    expect(core).toContain("E2E_RESULT: ${{ needs.e2e.result }}");
+    expect(core).toContain("DOCKER_RESULT: ${{ needs.docker.result }}");
+    expect(core).toContain("REPORT_RESULT: ${{ needs.report_pr_checks.result }}");
+    expect(core).toContain('[[ "${VERIFY_RESULT}" == "success" ]]');
+    expect(core).toContain('[[ "${STORE_RESULT}" == "success" ]]');
+    expect(core).toContain('[[ "${E2E_RESULT}" == "success" ]]');
+    expect(core).toContain('[[ "${DOCKER_RESULT}" == "success" ]]');
+    expect(core).toContain('[[ "${REPORT_RESULT}" == "success" ]]');
+    expect(core).not.toContain("actions/checkout@");
+  });
+
   it("disables package-manager caching explicitly without enabling pnpm cache", () => {
     expect(raw.match(/package-manager-cache:\s*false/g)).toHaveLength(3);
     expect(raw).not.toMatch(/^\s+cache:\s*(?:pnpm|true)\s*$/m);

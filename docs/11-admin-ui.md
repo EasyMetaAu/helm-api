@@ -171,8 +171,10 @@ never diverge.
     Strategies use sticky sessions, priority, live quota windows, usage cooldowns,
     and reset-credit soft scoring without exposing account labels as client
     models.
-  - **Quota controls** — the page opens from cache-only overview reads; an explicit
-    refresh is globally coordinated and serializes account pulls. It shows today's
+  - **Quota controls** — the page opens from cache-only overview reads; after rendering,
+    a visible page automatically joins the globally coordinated refresh job when any
+    connected quota snapshot is missing or at least one hour old. An explicit refresh
+    remains immediate, and account pulls stay serialized. It shows today's
     served traffic, live quota windows, usage-limit cooldowns, Codex reset-credit
     count, **Test** account action, local **Reset usage**, and guarded Codex
     **Reset limit**. A fresh saturated Codex weekly PULL can enter guarded
