@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-08-25 · Providers 配额缓存一小时后后台重验证（Admin OAuth providers，docs/11，原则 3/7）
+
+- **刷新语义**：Providers 首屏继续只读取本地缓存，保证上游慢或不可用时仍立即渲染；Anthropic、Codex、xAI 任一已连接账号的 quota snapshot 缺失或 `capturedAt` 达到 60 分钟后，页面在可见状态自动提交既有全局 refresh job，并继续用 cache-only 轮询接收结果。手动 Refresh 仍是立即强制刷新，用户选择的短周期自动刷新仍不产生 provider 流量。
+- **限流与失败边界**：自动重验证复用后端单任务合并、串行账号 PULL 与 60 秒冷却；同一挂载页面在 snapshot 未变化或刷新失败时最多每小时重试一次，后台隐藏期间不发起同步，重新可见后再按 TTL 判断。旧数据在失败时继续保留并显示既有错误，不把观测缓存过期升级为路由或鉴权失败。未新增 Store、migration、依赖或配置字段。
+
 ## 2026-08-25 · Responses continuation 不跨账号或 transport 恢复（OAuth provider / Responses，docs/04/05/07，原则 3/5/8）
 
 - **根因修正**：`previous_response_id` 的持久化 provider/account 归属不能证明上游 WebSocket 状态仍存在。OAuth pool 现在只允许已知且可调度的原账号执行；原账号缺失、不可用或过期时在 provider dispatch 前拒绝，不再搜索 sibling。其他无状态请求的账号级 failover 保持不变。
@@ -55,13 +60,9 @@
 - **执行边界**：`POST /v1/videos/extensions` 复用 generation 的鉴权、预算、付费单写 reservation、telemetry、receipt registry 与固定账号 poll；provider 精确发送 `/videos/extensions`，任何 transport/5xx/无 receipt 都返回 `503 outcome_unknown`，不重试、不换账号。未新增 Store、migration、无版本别名或内容代理。
 - **验收与限制**：shared/provider/OAuth/route/OpenAPI 定向测试及 `e2e/videos.spec.ts` 通过；离线 e2e 覆盖四种 30 秒 body、单次 POST、跨 key、账号亲和与重启恢复。2026-08-19 获授权后，本机账号的 30 秒纯文本生成仅 POST 一次，上游链返回 `503 outcome_unknown` 且无 receipt；按单写边界没有重试，extension POST 为 0 次。用户随后确认该环境账号不支持 30 秒；新的 15 秒纯文本 canary 仅 POST 一次，取得 receipt 后经同账号 18 次只读轮询到 `done`，结果 URL 有效，`ffprobe` 实测 15.041667 秒。15 秒单图 canary 使用 `grok-imagine-video-1.5-preview + image` 仅 POST 一次，经 8 次同账号 GET 到 `done`，下载结果同样实测 15.041667 秒。修正前的多图 `grok-imagine-video + reference_images` canary 返回 `503 outcome_unknown` 且无 receipt，没有重放；按 Grok Build 当前合同改为 `grok-imagine-video-1.5 + reference_images` 后，一次本机入站鉴权错误被 Helm 以 401 拒绝且未进入付费链，随后一次有效鉴权的付费 POST 取得 receipt，经同账号 6 次 GET 到 `done`，结果实测 15.041667 秒、1280×720。当前真实证据证明 15 秒纯文本、单图与多图 generation；仍不证明 30 秒或 extension 的真实能力。
 
-## 2026-08-19 · 保留已公开的 Grok Imagine 媒体选项（Images / Videos，Phase 1 spec §4–9，原则 3/6/7）
-
-- **兼容决定**：用户确认 fast image 与 prompt-only video 的已公开选项不得移除。`grok-imagine-image` 继续接受并透传 `n=1..4`、六种 `aspect_ratio`、`resolution=1k` 与 `response_format=b64_json`；`grok-imagine-video` 继续接受并透传 `aspect_ratio`、`duration=6/10/15`、`resolution=480p/720p/1080p` 与 `audio`。合同仍为严格对象，不开放任意未知字段或 ZDR `output`。
-- **边界不变**：此次只恢复请求 schema 兼容性；model/key 授权、blocked model、预算 fail-closed、OAuth 账号选择与固定账号轮询、付费 POST 单写，以及视频 `done` 必须带非空 `video.url` 均保持不变。旧 quality image、single-image video 与 reference-video 路径不改。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-19 · 保留已公开的 Grok Imagine 媒体选项**：恢复 fast image 与 prompt-only video 的既有有界字段，同时保持严格 schema、授权、预算与付费单写边界；完整原文经 git history 回溯。
 - **2026-08-18 · Grok Imagine 合并后收紧 entitlement 与媒体协议边界**：billing 失败以 tombstone/latch fail-closed，公开 alias 与严格视频终态合同保持兼容；完整原文经 git history 回溯。
 - **2026-08-18 · Grok.com Imagine 复用 OAuth 媒体链并以短期 billing 证据授权**：复用新鲜 billing snapshot、付费单写和固定账号轮询，真实 canary 与完整 CI 证据边界经 git history 回溯。
 - **2026-08-15 · 自动 Memory 形成必须挂在项目或资源下**：缺少 project/resource 的入站观察与 eager extraction 跳过，历史孤立 Reflector job 标记失败；完整原文经 git history 回溯。
