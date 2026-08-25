@@ -2498,6 +2498,69 @@ describe("createExecute — gateway execution adapter", () => {
     expect(recordFailure).not.toHaveBeenCalled();
   });
 
+  it("falls back when Anthropic rejects a translated tool result", async () => {
+    const provider = {
+      chatCompletion: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new UpstreamError(
+            "upstream_error",
+            "upstream returned 400",
+            {
+              type: "error",
+              error: {
+                type: "invalid_request_error",
+                message: "Advisor tool result content could not be processed.",
+              },
+            },
+            400,
+          ),
+        )
+        .mockResolvedValueOnce({ id: "codex-fallback" }),
+      chatCompletionStream: vi.fn(),
+    } as unknown as ProviderClient;
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["mock", provider]]),
+      registry: protocolRegistry({
+        opus: {
+          providerName: "mock",
+          providerModel: "claude-opus-4-8",
+          targetProviderProtocol: "anthropic_messages",
+        },
+        codex: {
+          providerName: "mock",
+          providerModel: "gpt-5.6-sol",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+    });
+
+    const out = await execute(plan(["opus", "codex"]), req());
+
+    expect(out.final).toEqual({
+      status: "ok",
+      alias: "codex",
+      providerModel: "gpt-5.6-sol",
+    });
+    expect(out.attempts[0]).toMatchObject({
+      alias: "opus",
+      skipped: true,
+      status: "error",
+      skip_reason: "provider_protocol_incompatible",
+      error_class: null,
+      error_detail: { upstream_status: 400 },
+    });
+    expect(provider.chatCompletion).toHaveBeenCalledTimes(2);
+    expect(recordFailure).not.toHaveBeenCalled();
+  });
+
   it("short-circuits the real overflow 400 before an unrelated sibling is tried (box c211e4a1)", async () => {
     // Anthropic (head of chain) returns a REAL 400 "prompt is too long: N > M maximum".
     // The chain short-circuits: the grok sibling is NEVER tried, and the 400 is surfaced
