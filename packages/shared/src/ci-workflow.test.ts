@@ -99,6 +99,11 @@ describe("CI workflow", () => {
     expect(dockerJob).not.toMatch(/needs:/);
   });
 
+  it("gives the Docker smoke enough time to survive bounded registry retries", () => {
+    const dockerJob = jobBlock(raw, "docker");
+    expect(dockerJob).toContain("timeout-minutes: 12");
+  });
+
   it("fetches both parents before validating a pull-request merge ref", () => {
     expect(raw.match(/fetch-depth:\s*2/g)).toHaveLength(4);
   });

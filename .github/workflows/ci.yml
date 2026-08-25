@@ -153,7 +153,9 @@ jobs:
   # independent of `verify` (no `needs`) so the unit gates run on their own and
   # neither job blocks the other.
   docker:
-    timeout-minutes: 8
+    # Cold self-hosted builds have twice spent ~8 minutes inside pnpm's bounded
+    # npm-registry retries before the image could reach its smoke-test steps.
+    timeout-minutes: 12
     runs-on: ${{ fromJSON(github.event_name == 'pull_request_target' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","docker"]') }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
