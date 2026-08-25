@@ -11,6 +11,7 @@
 
 - **刷新语义**：Providers 首屏继续只读取本地缓存，保证上游慢或不可用时仍立即渲染；Anthropic、Codex、xAI 任一已连接账号的 quota snapshot 缺失或 `capturedAt` 达到 60 分钟后，页面在可见状态自动提交既有全局 refresh job，并继续用 cache-only 轮询接收结果。手动 Refresh 仍是立即强制刷新，用户选择的短周期自动刷新仍不产生 provider 流量。
 - **限流与失败边界**：自动重验证复用后端单任务合并、串行账号 PULL 与 60 秒冷却；同一挂载页面在 snapshot 未变化或刷新失败时最多每小时重试一次，后台隐藏期间不发起同步，重新可见后再按 TTL 判断。旧数据在失败时继续保留并显示既有错误，不把观测缓存过期升级为路由或鉴权失败。未新增 Store、migration、依赖或配置字段。
+- **交付门禁**：组织规则仍要求历史 `Core CI` context，因此 CI 恢复同名 checkout-free 聚合 job；它不重复运行代码，只在 verify、store、e2e、docker 全部成功，并且 PR 场景的可信 head reporter 成功后通过。现有四道独立边界与最小权限保持不变。
 
 ## 2026-08-25 · Responses continuation 不跨账号或 transport 恢复（OAuth provider / Responses，docs/04/05/07，原则 3/5/8）
 

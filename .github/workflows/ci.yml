@@ -274,3 +274,35 @@ jobs:
           publish_check "PR / store" "${STORE_RESULT}"
           publish_check "PR / e2e" "${E2E_RESULT}"
           publish_check "PR / docker" "${DOCKER_RESULT}"
+
+  # Organization policy retains this legacy aggregate context. Keep it as a
+  # checkout-free summary of the four distinct gates instead of duplicating their
+  # repository-code work. On PRs it also requires the trusted PR-head reporter;
+  # on main pushes that reporter is intentionally skipped.
+  core_ci:
+    name: Core CI
+    if: always()
+    needs: [verify, store, e2e, docker, report_pr_checks]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every essential CI boundary
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+          STORE_RESULT: ${{ needs.store.result }}
+          E2E_RESULT: ${{ needs.e2e.result }}
+          DOCKER_RESULT: ${{ needs.docker.result }}
+          REPORT_RESULT: ${{ needs.report_pr_checks.result }}
+        run: |
+          set -euo pipefail
+
+          [[ "${VERIFY_RESULT}" == "success" ]] || { echo "::error::verify: ${VERIFY_RESULT}"; exit 1; }
+          [[ "${STORE_RESULT}" == "success" ]] || { echo "::error::store: ${STORE_RESULT}"; exit 1; }
+          [[ "${E2E_RESULT}" == "success" ]] || { echo "::error::e2e: ${E2E_RESULT}"; exit 1; }
+          [[ "${DOCKER_RESULT}" == "success" ]] || { echo "::error::docker: ${DOCKER_RESULT}"; exit 1; }
+
+          if [[ "${EVENT_NAME}" == "pull_request_target" ]]; then
+            [[ "${REPORT_RESULT}" == "success" ]] || { echo "::error::report_pr_checks: ${REPORT_RESULT}"; exit 1; }
+          else
+            [[ "${REPORT_RESULT}" == "skipped" ]] || { echo "::error::unexpected report_pr_checks result: ${REPORT_RESULT}"; exit 1; }
+          fi
