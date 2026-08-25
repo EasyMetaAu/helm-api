@@ -1167,6 +1167,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
   const turnStates = new Map<string, string>();
   const websocketMetadataFired = new WeakSet<CodexResponsesWebSocketConnection>();
   const websocketHttpFallbackSessions = new Set<string>();
+  const responseWebsocketSessions = new Map<string, string>();
   const websocketSessions = new Map<
     string,
     {
@@ -1694,6 +1695,21 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     return nested.type === "invalid_request_error";
   }
 
+  function continuationSessionUnavailable(message: string): UpstreamError {
+    return new UpstreamError(
+      "upstream_error",
+      message,
+      {
+        error: {
+          type: "invalid_request_error",
+          code: "previous_response_id_session_unavailable",
+          message,
+        },
+      },
+      400,
+    );
+  }
+
   function websocketSessionId(input: NativePassthroughInput): string | undefined {
     return nativeHeader(input, CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER);
   }
@@ -1746,6 +1762,9 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
 
   async function closeWebSocketSession(sessionId: string): Promise<void> {
     websocketHttpFallbackSessions.delete(sessionId);
+    for (const [responseId, ownerSessionId] of responseWebsocketSessions) {
+      if (ownerSessionId === sessionId) responseWebsocketSessions.delete(responseId);
+    }
     const state = websocketSessions.get(sessionId);
     if (!state) return;
     websocketSessions.delete(sessionId);
@@ -1763,6 +1782,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         preamble: boolean;
         terminal: boolean;
         reusable: boolean;
+        responseId: string | null;
       }
     | {
         kind: "rate_limits";
@@ -1926,8 +1946,25 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         type === "response.incomplete" ||
         type === "response.cancelled" ||
         type === "error",
-      reusable: type === "response.completed",
+      reusable: type === "response.completed" || type === "response.incomplete",
+      responseId:
+        isRecord(event.response) && typeof event.response.id === "string"
+          ? event.response.id
+          : null,
     };
+  }
+
+  function rememberResponseWebSocketSession(responseId: string, sessionId: string): void {
+    // ponytail: recent branches only; raise this existing turn-state-sized bound if
+    // clients prove they legitimately continue responses older than 128 turns.
+    if (
+      !responseWebsocketSessions.has(responseId) &&
+      responseWebsocketSessions.size >= MAX_CODEX_TURN_STATES
+    ) {
+      const oldest = responseWebsocketSessions.keys().next().value;
+      if (oldest !== undefined) responseWebsocketSessions.delete(oldest);
+    }
+    responseWebsocketSessions.set(responseId, sessionId);
   }
 
   async function receiveWebSocketMessage(
@@ -2038,15 +2075,27 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     async *nativePassthroughStream(body, opts) {
       const modelInfo = await resolveModelInfo(nativeInputModel(body));
       const sessionId = websocketSessionId(body);
+      const nativeBody = isNativePassthroughCarrier(body) ? body.body : body;
+      const previousResponseId = nativeBody.previous_response_id;
+      const hasPreviousResponseId =
+        typeof previousResponseId === "string" && previousResponseId.trim().length > 0;
+      if (
+        hasPreviousResponseId &&
+        (!cfg.responsesWebSocketConnector ||
+          !sessionId ||
+          websocketHttpFallbackSessions.has(sessionId) ||
+          !websocketSessions.has(sessionId) ||
+          responseWebsocketSessions.get(previousResponseId.trim()) !== sessionId)
+      ) {
+        throw continuationSessionUnavailable(
+          "previous_response_id cannot be continued because its original websocket session is unavailable; send the full conversation input instead",
+        );
+      }
       if (
         cfg.responsesWebSocketConnector &&
         sessionId &&
         !websocketHttpFallbackSessions.has(sessionId)
       ) {
-        const nativeBody = isNativePassthroughCarrier(body) ? body.body : body;
-        const previousResponseId = nativeBody.previous_response_id;
-        const hasPreviousResponseId =
-          typeof previousResponseId === "string" && previousResponseId.trim().length > 0;
         const { prepared, turnKey } = await prepareRequest(
           body,
           modelInfo,
@@ -2072,6 +2121,11 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
               (error.upstreamStatus === 426 || error.upstreamStatus === null) &&
               !opts?.signal?.aborted
             ) {
+              if (hasPreviousResponseId) {
+                throw continuationSessionUnavailable(
+                  "previous_response_id cannot be continued because its original websocket connection failed; send the full conversation input instead",
+                );
+              }
               websocketHttpFallbackSessions.add(sessionId);
               break;
             }
@@ -2107,6 +2161,11 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
                     "upstream websocket closed before a terminal response event",
                   );
                 }
+                if (hasPreviousResponseId) {
+                  throw continuationSessionUnavailable(
+                    "previous_response_id cannot be continued because its original websocket closed; send the full conversation input instead",
+                  );
+                }
                 if (retries < maxRetries) {
                   retryConnection = true;
                 } else {
@@ -2135,6 +2194,11 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
                   }
                   if (isWebsocketConnectionLimitError(event.error)) {
                     await closeWebSocketSession(sessionId);
+                    if (hasPreviousResponseId) {
+                      throw continuationSessionUnavailable(
+                        "previous_response_id cannot be continued because its original websocket cannot accept another turn; send the full conversation input instead",
+                      );
+                    }
                     if (!outputStarted && retries < maxRetries) {
                       retryConnection = true;
                     } else if (!outputStarted) {
@@ -2147,6 +2211,9 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
                   }
                   await closeWebSocketSession(sessionId);
                   throw event.error;
+                }
+                if (event.responseId !== null) {
+                  rememberResponseWebSocketSession(event.responseId, sessionId);
                 }
                 if (!outputStarted && event.preamble && preambleFrames.length < 2) {
                   preambleFrames.push(event.frame);
@@ -2171,6 +2238,11 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
             await closeWebSocketSession(sessionId);
             if (opts?.signal?.aborted) throw opts.signal.reason ?? error;
             if (sendingRequest && isTransientConnectionError(error)) {
+              if (hasPreviousResponseId) {
+                throw continuationSessionUnavailable(
+                  "previous_response_id continuation has an ambiguous websocket send outcome; send the full conversation input instead",
+                );
+              }
               if (retries < maxRetries) {
                 retryConnection = true;
               } else {

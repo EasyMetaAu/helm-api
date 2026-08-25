@@ -1380,12 +1380,17 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       noop,
     );
     await expect(
-      enabled.poolClients.get("xai")?.nativePassthrough?.({
-        model: "grok-4.5",
-        previous_response_id: "resp-prev",
-        instructions: "Follow the repository policy.",
-        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "next" }] }],
-      }),
+      enabled.poolClients.get("xai")?.nativePassthrough?.(
+        {
+          model: "grok-4.5",
+          previous_response_id: "resp-prev",
+          instructions: "Follow the repository policy.",
+          input: [
+            { type: "message", role: "user", content: [{ type: "input_text", text: "next" }] },
+          ],
+        },
+        { statefulAccount: "heavy" },
+      ),
     ).rejects.toMatchObject({
       upstreamStatus: 400,
       providerRaw: expect.objectContaining({ code: "previous_response_id_unsupported" }),

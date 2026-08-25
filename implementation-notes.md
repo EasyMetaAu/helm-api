@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-08-25 · Responses continuation 不跨账号或 transport 恢复（OAuth provider / Responses，docs/04/05/07，原则 3/5/8）
+
+- **根因修正**：`previous_response_id` 的持久化 provider/account 归属不能证明上游 WebSocket 状态仍存在。OAuth pool 现在只允许已知且可调度的原账号执行；原账号缺失、不可用或过期时在 provider dispatch 前拒绝，不再搜索 sibling。其他无状态请求的账号级 failover 保持不变。
+- **transport 边界**：Codex continuation 必须复用产生该 response ID 的当前活动原 WebSocket；原 session 缺失/不匹配、连接关闭、426/connection-limit、模糊 send failure 均禁止重连和 HTTP fallback，返回 `previous_response_id_session_unavailable` 并要求完整会话。精确 invalid-ID 仍只在同一活动 WebSocket 上原样重试一次。
+- **registry 边界**：`completed` 与协议允许的 `incomplete` registry 记录可作为续接父节点；`failed`、`cancelled`、内部 `truncated` 与其他状态在路由前 fail-closed。OAuth 记录还必须带原账号，避免旧空 owner 被 turn-state 绕过；静态 Responses provider 继续允许空账号。没有新增 schema、迁移、配置或正文持久化。
+
 ## 2026-08-25 · Anthropic tool_result 400 允许协议级 fallback（协议互译 / docs/05、07，原则 3/5/8）
 
 - Anthropic 的 `Advisor tool result content could not be processed` 是目标 provider 的工具结果格式拒绝，不等价于跨 provider 的全局请求非法；该候选现在记录 `provider_protocol_incompatible` 并继续尝试下一个兼容 lane，不处罚共享 breaker。
@@ -54,26 +60,10 @@
 - **兼容决定**：用户确认 fast image 与 prompt-only video 的已公开选项不得移除。`grok-imagine-image` 继续接受并透传 `n=1..4`、六种 `aspect_ratio`、`resolution=1k` 与 `response_format=b64_json`；`grok-imagine-video` 继续接受并透传 `aspect_ratio`、`duration=6/10/15`、`resolution=480p/720p/1080p` 与 `audio`。合同仍为严格对象，不开放任意未知字段或 ZDR `output`。
 - **边界不变**：此次只恢复请求 schema 兼容性；model/key 授权、blocked model、预算 fail-closed、OAuth 账号选择与固定账号轮询、付费 POST 单写，以及视频 `done` 必须带非空 `video.url` 均保持不变。旧 quality image、single-image video 与 reference-video 路径不改。
 
-## 2026-08-18 · Grok Imagine 合并后收紧 entitlement 与媒体协议边界（OAuth / Images / Videos，Phase 1 spec §4–9，原则 3/6/7/8）
-
-- **撤权与 cooldown**：xAI billing 刷新失败不再删除整条 quota；改写入 `windows: []` 的 entitlement tombstone，复用两种 Store 已有的 upsert 语义保留 `usageLimitedUntilMs`。若 tombstone 无法持久化，进程级紧急 latch 会先摘除全部 xAI 媒体 alias，并在任何普通 OAuth pool rebuild 后继续生效；只有权威 billing 刷新成功持久化且对应 rebuild 成功后才恢复。
-- **公开合同**：`/v1/models` 已公开的 `xai/grok-imagine-video*` alias 现在可由 `allow_custom_model` key 直接调用，普通 key 仍在付费 reservation 前拒绝。新 fast image 与 prompt-only video 只接受已证明的 `model + prompt`；合并前已有的 quality image、single-image video 和 reference-video 合同保持兼容，不从一次默认 canary 外推细粒度付费能力。
-- **视频终态**：共享 Zod response schema、provider 客户端和 gateway poll 边界共同要求非空 `status`，且 `done` 必须带非空 `video.url`；畸形完成响应返回 502，不写入 durable terminal state。
-- **限制**：紧急 latch 是进程内状态；quota Store 完全不可写且进程在下一次成功刷新前重启时，无法把该瞬时失败跨进程持久化。正常失败路径会优先写 tombstone，因此不新增 migration、配置项或依赖。
-
-## 2026-08-18 · Grok.com Imagine 复用 OAuth 媒体链并以短期 billing 证据授权（OAuth / Images / Videos，Phase 1 spec §4–9，原则 2/3/6/7）
-
-- **账号资格**：不新增 entitlement 表；复用 SQLite/Postgres 已持久化的 xAI 周 billing snapshot。媒体正向授权必须同时满足“24 小时内的新鲜周 billing”与“当前 OAuth JWT 是明确的已知付费 tier”，opaque、缺失、未知、`free`、`x_basic` 均 fail-closed；有效期取 `capturedAt + 24h` 与周窗口 reset 的较早者。普通 Grok 文本模型不读取此媒体 gate。
-- **动态撤权与混合账号池**：每个媒体模型把 `validUntilMs` 带进账号池，选择、图片/视频 resolver 和 `/v1/models` 都按实时 clock 重评估，无需重启或定时 sweep；只指向已失效 OAuth leaf 的媒体 lane 也同步从 discovery 隐藏。OAuth 完成后异步拉取 xAI billing；空结果或失败会删除旧快照并重建。若删除失败，即使普通 rebuild 成功也立即摘除全部 live xAI 媒体 alias，避免旧行重新授权；单账号失败不遮蔽其他有新鲜证据的账号。
-- **媒体合同**：图片继续使用原 `/v1/images/generations` 与单写保护，只给 Grok 快速/质量模型增加严格的 `n=1..4`、六种宽高比合同，并把空数组、空字符串或纯空白图片载体视为 `outcome_unknown`；其他图片 provider 保持宽松 OpenAI 兼容合同。纯文字视频复用原 `/v1/videos/generations`、任务 registry 与固定账号 poll，不新增文字转图片的两步 workflow。
-- **真实 canary 与运行边界**：用户批准的本机 canary 恰好执行一次默认 fast 图片 create 和一次默认 prompt-only 视频 create，均未重试；图片得到 1 个非空结果，视频取得 receipt 后由原账号 6 次 GET 轮询到 `done` 和非空结果。候选镜像 `sha256:2940600c…`、`/version` dirty SHA、entitlement、serving account、registry、telemetry 与普通日志脱敏回读一致，旧 v0.28.74 容器保留为停止态回滚点。宿主 Playwright 因真实 `response_work_capacity_exhausted` 保护无法解析 mock 响应，未削弱生产保护；同一 `videos.spec.ts` 在 Docker builder 中 2/2 通过。现有 recovery key 没有低 cap，因此完整 Go 门禁仍未满足。
-- **可重复 live smoke**：新增默认跳过的 `apps/gateway/src/live-grok-imagine.test.ts`，必须同时提供 loopback Helm 地址、环境变量 key 与 `I_ACCEPT_EXACTLY_2_MEDIA_CREATES` 才会执行；每次只发 1 次默认图片 create 和 1 次纯文字视频 create，POST 无重试，视频只做有界同 receipt GET poll，测试输出不包含 key、prompt、receipt、正文或签名 URL。用户同日明确要求的实跑为 2/2 通过：图片结果可读；视频一次接受后经 5 次只读 poll 到 `done`，且结果字节可读取。
-- **完整 CI 本机复刻**：在不再调用付费媒体接口的前提下，以 Docker 隔离环境逐项复刻 `.github/workflows/ci.yml`：typecheck、lint、build 通过；fast suite 355/355 文件、6417/6417 用例通过；Store suite 60/60 文件、650/650 用例通过；真实 PostgreSQL 合约与完整 Playwright e2e 95/95 通过；正式多阶段镜像 `sha256:fbfa07f3…` 的 `/healthz` 回读 `ready:true`，`/version` 回读 `0.28.74` 与非 `unknown` Git SHA。最初的缺 `.github`、root 权限、OpenSSL 和容器内 Docker 都是本地测试壳与 GitHub Ubuntu runner 的环境差异，补齐同等前置条件后均全绿；临时数据库、网络、浏览器缓存和 smoke 容器已清理，现有 `helm` 候选容器未受影响。
-- **交付边界**：正式 PR #761 已创建；实现提交 `29ff7655` 的托管 GitHub Actions run `32142663949` 已回读 `verify`、`store`、`e2e`、`docker` 与四个稳定 required checks 全部成功。本轮不合并或部署；P1 细粒度媒体选项、低 cap key 前置条件与“关闭新能力但保留已接受视频 poll”的回滚门禁仍未完成，因此整体发布 Go 门禁仍是 No-Go。
-- **剩余限制**：当前只有账号级媒体开关；默认 fast 图片已经真实验证，但仍没有可靠的上游细粒度 entitlement 分别证明 quality、数量、宽高比、6/10/15s、480p/720p/1080p 或 audio 对该套餐都可用。这些 P1 选项继续保持关闭/未完成，不能从一次默认 canary 外推。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-18 · Grok Imagine 合并后收紧 entitlement 与媒体协议边界**：billing 失败以 tombstone/latch fail-closed，公开 alias 与严格视频终态合同保持兼容；完整原文经 git history 回溯。
+- **2026-08-18 · Grok.com Imagine 复用 OAuth 媒体链并以短期 billing 证据授权**：复用新鲜 billing snapshot、付费单写和固定账号轮询，真实 canary 与完整 CI 证据边界经 git history 回溯。
 - **2026-08-15 · 自动 Memory 形成必须挂在项目或资源下**：缺少 project/resource 的入站观察与 eager extraction 跳过，历史孤立 Reflector job 标记失败；完整原文经 git history 回溯。
 - **2026-08-15 · 请求级正文模式成为历史读取权威**：telemetry 保存有效正文模式，Session 元数据以单 revision 上限决定浏览器可恢复性；完整原文经 git history 回溯。
 - **2026-08-15 · 大型完整载荷改由浏览器解压与恢复图片**：Admin 优先读取 gzip/raw 存储态正文并由浏览器解压，外置图片按 `sha256` 经鉴权端点恢复，避免网关内存化放大；完整原文经 git history 回溯。

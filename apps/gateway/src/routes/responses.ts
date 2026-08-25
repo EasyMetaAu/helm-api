@@ -5,6 +5,7 @@ import {
   type BudgetProbe,
   CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
   type DecisionRecord,
+  getOAuthProvider,
   preOutputClassifierFor,
   type RateLimitProbe,
   type RateLimitResult,
@@ -561,6 +562,11 @@ function responseSnapshotFromStreamFrame(
 function isUsableRegistryRecord(record: ResponsesRegistryRecord): boolean {
   if (record.expiresAt <= Date.now()) return false;
   return record.status !== "deleted";
+}
+
+function isOAuthSubscriptionAlias(alias: string): boolean {
+  const slash = alias.indexOf("/");
+  return slash > 0 && getOAuthProvider(alias.slice(0, slash)) !== undefined;
 }
 
 // Validate a PipelineError's free-form `error_class` against the known ErrorClass
@@ -1208,7 +1214,16 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
     if (previousResponseId !== null) {
       const previous =
         deps.registry === undefined ? null : await deps.registry.get(previousResponseId, identity);
-      if (previous?.providerAlias === null || previous?.providerProtocol !== "openai_responses") {
+      const continuableStatus =
+        previous?.status === "completed" || previous?.status === "incomplete";
+      if (
+        previous?.providerAlias === null ||
+        previous?.providerProtocol !== "openai_responses" ||
+        !continuableStatus ||
+        (typeof previous.providerAlias === "string" &&
+          isOAuthSubscriptionAlias(previous.providerAlias) &&
+          !previous.providerAccount)
+      ) {
         throw helmError(
           "invalid_request",
           `previous_response_id '${previousResponseId}' cannot be continued safely; send the full conversation input instead`,

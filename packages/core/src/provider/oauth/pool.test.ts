@@ -543,7 +543,7 @@ describe("createOAuthPoolClient — account selection", () => {
     expect(selected).toEqual(["a", "a"]);
   });
 
-  it("recovers a translated continuation when its persisted account is unavailable", async () => {
+  it("rejects a translated continuation when its persisted account is unavailable", async () => {
     const calls: string[] = [];
     const pool = createOAuthPoolClient({
       members: [
@@ -552,16 +552,13 @@ describe("createOAuthPoolClient — account selection", () => {
       ],
     });
 
-    const chunks: string[] = [];
-    for await (const chunk of pool.chatCompletionStream(
-      { ...USER_REQ, previous_response_id: "resp-a" },
-      { statefulAccount: "a" },
-    )) {
-      chunks.push(chunk);
-    }
-
-    expect(calls).toEqual(["b"]);
-    expect(chunks).toEqual(["data: b\n\n"]);
+    expect(() =>
+      pool.chatCompletionStream(
+        { ...USER_REQ, previous_response_id: "resp-a" },
+        { statefulAccount: "a" },
+      ),
+    ).toThrow("previous_response_id original account is unavailable");
+    expect(calls).toEqual([]);
   });
 
   it("spreads distinct sticky sessions across equal-priority accounts", async () => {
@@ -710,7 +707,7 @@ describe("createOAuthPoolClient — account selection", () => {
     expect(calls).toEqual(["a", "a"]);
   });
 
-  it("probes a sibling when a known previous_response_id original account is unavailable", async () => {
+  it("rejects when a known previous_response_id original account is unavailable", async () => {
     const calls: string[] = [];
     const responseMember = (account: string): OAuthPoolMember => ({
       account,
@@ -737,8 +734,8 @@ describe("createOAuthPoolClient — account selection", () => {
 
     await expect(
       pool.chatCompletion({ ...USER_REQ, previous_response_id: "resp-a" }),
-    ).resolves.toEqual({ id: "resp-b", served_by: "b" });
-    expect(calls).toEqual(["a", "b"]);
+    ).rejects.toThrow("previous_response_id original account is unavailable");
+    expect(calls).toEqual(["a"]);
   });
 
   it("never retries a known previous_response_id on a sibling after a transient fault", async () => {
@@ -773,16 +770,16 @@ describe("createOAuthPoolClient — account selection", () => {
     expect(calls).toEqual(["a", "a"]);
   });
 
-  it("does not hash an unknown previous_response_id as a fake stable account key", async () => {
+  it("rejects an unknown previous_response_id without calling any account", async () => {
     const calls: string[] = [];
     const pool = createOAuthPoolClient({
       members: [member("a", 50, true, calls), member("b", 50, true, calls)],
     });
 
-    await pool.chatCompletion({ ...USER_REQ, previous_response_id: "resp-1" });
-    await pool.chatCompletion({ ...USER_REQ, previous_response_id: "resp-2" });
-
-    expect(calls).toEqual(["a", "b"]);
+    await expect(
+      pool.chatCompletion({ ...USER_REQ, previous_response_id: "resp-1" }),
+    ).rejects.toThrow("previous_response_id original account is unavailable");
+    expect(calls).toEqual([]);
   });
 
   it("restores a persisted previous_response_id account pin after pool restart", async () => {
