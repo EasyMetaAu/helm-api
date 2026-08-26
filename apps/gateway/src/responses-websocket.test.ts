@@ -1351,10 +1351,10 @@ describe("Responses websocket bridge", () => {
   });
 
   it.each([
-    "response.failed",
-    "response.incomplete",
-    "error",
-  ] as const)("keeps the downstream websocket reusable after %s", async (terminalType) => {
+    ["response.failed", 1],
+    ["response.incomplete", 0],
+    ["error", 1],
+  ] as const)("keeps the downstream websocket reusable after %s", async (terminalType, closes) => {
     let closedSessionId = "";
     let closeSessionCalls = 0;
     let requestCount = 0;
@@ -1411,8 +1411,8 @@ describe("Responses websocket bridge", () => {
     expect(failed.at(-1)?.type).toBe(terminalType);
     expect(recovered.at(-1)?.type).toBe("response.completed");
     expect(socket.readyState).toBe(WebSocket.OPEN);
-    expect(closedSessionId).not.toBe("");
-    expect(closeSessionCalls).toBe(1);
+    expect(closedSessionId === "").toBe(closes === 0);
+    expect(closeSessionCalls).toBe(closes);
   });
 
   it("swallows a synchronous session cleanup failure", async () => {

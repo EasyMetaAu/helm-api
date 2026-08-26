@@ -1710,6 +1710,13 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     );
   }
 
+  function acknowledgedResponseCreateError(): UpstreamError {
+    return new UpstreamError(
+      "upstream_error",
+      "upstream websocket closed after acknowledging response.create",
+    );
+  }
+
   function websocketSessionId(input: NativePassthroughInput): string | undefined {
     return nativeHeader(input, CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER);
   }
@@ -2161,6 +2168,9 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
                     "upstream websocket closed before a terminal response event",
                   );
                 }
+                if (preambleFrames.length > 0) {
+                  throw acknowledgedResponseCreateError();
+                }
                 if (hasPreviousResponseId) {
                   throw continuationSessionUnavailable(
                     "previous_response_id cannot be continued because its original websocket closed; send the full conversation input instead",
@@ -2188,12 +2198,19 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
                     !retriedInvalidPreviousResponseId &&
                     isInvalidPreviousResponseIdError(event.error)
                   ) {
+                    if (preambleFrames.length > 0) {
+                      await closeWebSocketSession(sessionId);
+                      throw acknowledgedResponseCreateError();
+                    }
                     retriedInvalidPreviousResponseId = true;
                     retryTurn = true;
                     break;
                   }
                   if (isWebsocketConnectionLimitError(event.error)) {
                     await closeWebSocketSession(sessionId);
+                    if (preambleFrames.length > 0) {
+                      throw acknowledgedResponseCreateError();
+                    }
                     if (hasPreviousResponseId) {
                       throw continuationSessionUnavailable(
                         "previous_response_id cannot be continued because its original websocket cannot accept another turn; send the full conversation input instead",

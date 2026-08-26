@@ -151,6 +151,58 @@ describe("createCodexResponsesWebSocketConnector", () => {
     await expect(settlePromptly(connection.receive())).rejects.toThrow(Error);
   });
 
+  it("keeps an idle upstream websocket alive with ping and pong", async () => {
+    const server = createServer();
+    const websocketServer = new WebSocketServer({ noServer: true });
+    server.on("upgrade", (request, socket, head) => {
+      websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+        websocketServer.emit("connection", websocket, request);
+      });
+    });
+    const serverConnection = once(websocketServer, "connection");
+    const port = await listen(server);
+    const connector = createCodexResponsesWebSocketConnector({
+      timeoutMs: 2_000,
+      keepAliveIntervalMs: 20,
+      keepAliveTimeoutMs: 100,
+    });
+    const connection = await connector({
+      url: `ws://127.0.0.1:${port}/responses`,
+      headers: {},
+    });
+    connections.push(connection);
+    const [serverSocket] = (await serverConnection) as [WebSocket];
+
+    await settlePromptly(once(serverSocket, "ping"));
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    await expect(connection.send('{"type":"response.create"}')).resolves.toBeUndefined();
+  });
+
+  it("terminates an idle upstream websocket that does not pong", async () => {
+    const server = createServer();
+    const websocketServer = new WebSocketServer({ noServer: true, autoPong: false });
+    server.on("upgrade", (request, socket, head) => {
+      websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+        websocketServer.emit("connection", websocket, request);
+      });
+    });
+    const port = await listen(server);
+    const connector = createCodexResponsesWebSocketConnector({
+      timeoutMs: 2_000,
+      keepAliveIntervalMs: 20,
+      keepAliveTimeoutMs: 30,
+    });
+    const connection = await connector({
+      url: `ws://127.0.0.1:${port}/responses`,
+      headers: {},
+    });
+    connections.push(connection);
+
+    await expect(settlePromptly(connection.receive())).rejects.toThrow(
+      "Codex Responses websocket keepalive timed out",
+    );
+  });
+
   it("closes an upstream connection when unread messages exceed the dynamic pending budget", async () => {
     const server = createServer();
     const websocketServer = new WebSocketServer({ noServer: true });

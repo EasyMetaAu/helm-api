@@ -17,6 +17,8 @@ import WebSocket, { type RawData } from "ws";
 export interface CodexResponsesWebSocketConnectorOptions {
   proxy?: ProxyConfig;
   timeoutMs?: number;
+  keepAliveIntervalMs?: number;
+  keepAliveTimeoutMs?: number;
   maxPayloadBytes?: number;
   maxPendingBytes?: number;
   responseWorkAdmission?: ResponseWorkAdmission;
@@ -56,21 +58,28 @@ class WsCodexConnection implements CodexResponsesWebSocketConnection {
     reject: (error: Error) => void;
   }> = [];
   private terminal: Error | null | undefined;
+  private keepAliveTimer: ReturnType<typeof setTimeout> | undefined;
+  private keepAliveTimeout: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
     private readonly socket: WebSocket,
     headers: Headers,
     private readonly maxPendingBytes: number,
     private readonly responseWorkAdmission: ResponseWorkAdmission,
+    private readonly keepAliveIntervalMs: number,
+    private readonly keepAliveTimeoutMs: number,
   ) {
     this.responseHeaders = headers;
     socket.on("message", (data) => this.enqueueMessage(data));
     socket.on("close", () => this.terminate(null));
     socket.on("error", (error) => this.terminate(error));
+    socket.on("pong", () => this.handlePong());
+    this.scheduleKeepAlive();
   }
 
   private terminate(value: Error | null): void {
     if (this.terminal !== undefined) return;
+    this.clearKeepAlive();
     this.terminal = value;
     for (const pending of this.pending.splice(0)) pending.release();
     this.pendingBytes = 0;
@@ -78,6 +87,39 @@ class WsCodexConnection implements CodexResponsesWebSocketConnection {
       if (value instanceof Error) waiter.reject(value);
       else waiter.resolve(value);
     }
+  }
+
+  private clearKeepAlive(): void {
+    clearTimeout(this.keepAliveTimer);
+    clearTimeout(this.keepAliveTimeout);
+    this.keepAliveTimer = undefined;
+    this.keepAliveTimeout = undefined;
+  }
+
+  private scheduleKeepAlive(): void {
+    this.keepAliveTimer = setTimeout(() => {
+      if (this.terminal !== undefined || this.socket.readyState !== WebSocket.OPEN) return;
+      this.keepAliveTimeout = setTimeout(() => {
+        const error = new Error("Codex Responses websocket keepalive timed out");
+        this.terminate(error);
+        this.socket.terminate();
+      }, this.keepAliveTimeoutMs);
+      this.keepAliveTimeout.unref?.();
+      try {
+        this.socket.ping();
+      } catch (error) {
+        this.terminate(error instanceof Error ? error : new Error("websocket ping failed"));
+        this.socket.terminate();
+      }
+    }, this.keepAliveIntervalMs);
+    this.keepAliveTimer.unref?.();
+  }
+
+  private handlePong(): void {
+    if (this.keepAliveTimeout === undefined) return;
+    clearTimeout(this.keepAliveTimeout);
+    this.keepAliveTimeout = undefined;
+    this.scheduleKeepAlive();
   }
 
   private capacityError(): Error {
@@ -167,6 +209,7 @@ class WsCodexConnection implements CodexResponsesWebSocketConnection {
   }
 
   async close(): Promise<void> {
+    this.clearKeepAlive();
     if (this.socket.readyState === WebSocket.CLOSED) return;
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
@@ -238,6 +281,8 @@ export function createCodexResponsesWebSocketConnector(
   );
   const maxPendingBytes = Math.max(1, Math.floor(options.maxPendingBytes ?? maxPayloadBytes));
   const responseWorkAdmission = options.responseWorkAdmission ?? runtimeResponseWorkAdmission();
+  const keepAliveIntervalMs = Math.max(1, Math.floor(options.keepAliveIntervalMs ?? 60_000));
+  const keepAliveTimeoutMs = Math.max(1, Math.floor(options.keepAliveTimeoutMs ?? 15_000));
 
   return async ({ url, headers, signal }) =>
     await new Promise<CodexResponsesWebSocketConnection>((resolve, reject) => {
@@ -284,7 +329,14 @@ export function createCodexResponsesWebSocketConnector(
         settled = true;
         cleanup();
         resolve(
-          new WsCodexConnection(socket, upgradeHeaders, maxPendingBytes, responseWorkAdmission),
+          new WsCodexConnection(
+            socket,
+            upgradeHeaders,
+            maxPendingBytes,
+            responseWorkAdmission,
+            keepAliveIntervalMs,
+            keepAliveTimeoutMs,
+          ),
         );
       });
       socket.once("unexpected-response", (request, response) => {

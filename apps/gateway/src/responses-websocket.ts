@@ -403,7 +403,7 @@ async function forwardResponse(
   }
   if (terminalType !== undefined) {
     void body.cancel().catch(() => {});
-    return terminalType !== "response.completed";
+    return terminalType !== "response.completed" && terminalType !== "response.incomplete";
   }
   if (!signal.aborted) {
     throw new Error("Responses stream ended before a terminal event");
