@@ -326,7 +326,7 @@ describe("admin OAuth routes — read endpoints", () => {
     expect((body.daily[0]?.periodEndMs ?? 0) - (body.daily[0]?.periodStartMs ?? 0)).toBe(DAY);
     // The newest day/week is IN PROGRESS (ends in the future) → marked partial so a
     // half-elapsed bar isn't misread as an allowance drop (grok review CR1).
-    expect(body.daily[0]?.periodEndMs).toBeGreaterThan(Date.now());
+    expect(body.daily[0]?.periodEndMs).toBeGreaterThan(now);
     expect(body.daily[0]?.partial).toBe(true);
     expect(body.weekly[0]?.partial).toBe(true);
     // weekly: at least one 7-day bucket, windowKey "week".

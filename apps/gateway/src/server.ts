@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import {
@@ -10,6 +10,7 @@ import {
   buildOpenAICodexUserAgent,
   COPILOT_HEADERS,
   type CodexRateLimitReachedType,
+  type CodexResponsesWebSocketConnector,
   type ConfigStore,
   type CreateKeyInput,
   CURATED_OAUTH_MODELS,
@@ -411,6 +412,7 @@ export interface CodexOAuthRuntime {
   clientVersion?: string;
   userAgent?: string;
   onCatalogChanged?: () => void;
+  responsesWebSocketConnector?: CodexResponsesWebSocketConnector;
 }
 
 interface CodexAccountRuntime {
@@ -422,6 +424,7 @@ interface CodexAccountRuntime {
   userAgent: string;
   runInBackground: CodexOAuthRuntime["runInBackground"];
   onCatalogChanged?: () => void;
+  responsesWebSocketConnector?: CodexResponsesWebSocketConnector;
 }
 
 interface XaiAccountRuntime {
@@ -476,6 +479,7 @@ async function loadCodexAccountCatalog(input: {
   catalog: CodexModelCatalog;
   onCatalogChanged?: () => void;
   runInBackground: CodexOAuthRuntime["runInBackground"];
+  responsesWebSocketConnector?: CodexResponsesWebSocketConnector;
   signal?: AbortSignal;
 }): Promise<LoadedCodexAccountCatalog | null> {
   const clientVersion = normalizeOpenAICodexClientVersion(input.clientVersion);
@@ -529,6 +533,7 @@ async function loadCodexAccountCatalog(input: {
       userAgent,
       runInBackground: input.runInBackground,
       onCatalogChanged: input.onCatalogChanged,
+      responsesWebSocketConnector: input.responsesWebSocketConnector,
     },
   };
 }
@@ -848,6 +853,8 @@ export interface SynthesizedOAuth {
   xaiModelAccounts: Map<string, string[]>;
 }
 
+export type OAuthPoolReuseCache = Map<string, { signature: string; pool: OAuthPoolClient }>;
+
 export interface OAuthQuotaSeed {
   windows: OAuthQuotaWindow[];
   capturedAt: number;
@@ -958,6 +965,9 @@ export async function synthesizeOAuthProviders(
   // root also gives this instance to Admin so status reads and pool rebuilds do
   // not independently call the provider's models endpoint.
   modelDiscoveryCache?: OAuthModelDiscoveryCache,
+  // Hot quota/model refreshes rebuild pool policy, but an unchanged Codex pool owns
+  // live continuation WebSockets that must survive that rebuild.
+  poolReuseCache?: OAuthPoolReuseCache,
 ): Promise<SynthesizedOAuth> {
   if (!oauthCtx) {
     return {
@@ -1001,6 +1011,7 @@ export async function synthesizeOAuthProviders(
     const members: OAuthPoolMember[] = [];
     const unionModels = new Set<string>();
     const unionWireModels = new Map<string, string>();
+    const codexMemberSignatures: Array<Record<string, unknown>> = [];
     for (const account of accounts) {
       const s = getAccountSettings(accountSettings, providerId, account);
       const queueKey = `${providerId} ${account}`;
@@ -1115,6 +1126,7 @@ export async function synthesizeOAuthProviders(
           catalog: codex.catalog,
           runInBackground: codex.runInBackground,
           onCatalogChanged: codex.onCatalogChanged,
+          responsesWebSocketConnector: codex.responsesWebSocketConnector,
         });
         discovered = loaded
           ? expandOpenAICodexModelAliases(
@@ -1210,6 +1222,19 @@ export async function synthesizeOAuthProviders(
         log("warn", "oauth.autoroute.no_models", { providerId, account });
         continue;
       }
+      if (providerId === "openai-codex") {
+        codexMemberSignatures.push({
+          account,
+          priority: s.priority ?? 50,
+          fastMode: s.fastMode === true,
+          allowSpendRemainingCredits: s.allowSpendRemainingCredits === true,
+          models: [...memberModels].sort(),
+          proxy: proxy ?? null,
+          accountIdentity: accountCodexRuntime?.accountIdentity ?? null,
+          clientVersion: accountCodexRuntime?.clientVersion ?? null,
+          userAgent: accountCodexRuntime?.userAgent ?? null,
+        });
+      }
       // Bind the quota-header scrape to THIS account (providers page Tier 3): the
       // Codex client invokes it with each reply's headers; synthesis closes over the
       // account so the snapshot is attributed correctly. undefined ⇒ no capture.
@@ -1285,7 +1310,7 @@ export async function synthesizeOAuthProviders(
     }
     // ONE pool client per provider, keyed by providerId. onSelect records the
     // serving account (Stage 3 telemetry) — a non-secret structured log line.
-    const pool = createOAuthPoolClient({
+    let pool = createOAuthPoolClient({
       members,
       now: () => Date.now(),
       selectionStrategy,
@@ -1320,6 +1345,37 @@ export async function synthesizeOAuthProviders(
       nativeStreamPreambleClassifier: preOutputClassifierFor(spec.targetProviderProtocol),
       chatStreamPreambleClassifier: preOutputClassifierFor("openai_chat"),
     });
+    if (providerId === "openai-codex" && poolReuseCache) {
+      const signature = createHash("sha256")
+        .update(
+          JSON.stringify({
+            baseUrl: spec.baseUrl ?? fallbackBaseUrl,
+            timeoutMs,
+            selectionStrategy,
+            members: codexMemberSignatures.sort((a, b) =>
+              String(a.account).localeCompare(String(b.account)),
+            ),
+          }),
+        )
+        .digest("hex");
+      const previous = poolReuseCache.get(providerId);
+      if (previous?.signature === signature) {
+        pool = previous.pool;
+        for (const member of members) {
+          pool.seedUsageLimit(member.account, member.usageLimitedUntilMs ?? null);
+          if (member.quotaWindows && member.quotaCapturedAtMs != null) {
+            pool.setQuotaSnapshot(
+              member.account,
+              member.quotaWindows,
+              member.quotaCapturedAtMs,
+              member.quotaResetCredits,
+            );
+          }
+        }
+      } else {
+        poolReuseCache.set(providerId, { signature, pool });
+      }
+    }
     poolClients.set(providerId, pool);
     providers.push({
       name: providerId,
@@ -1343,6 +1399,7 @@ export async function synthesizeOAuthProviders(
       selection_strategy: selectionStrategy,
     });
   }
+  if (!poolClients.has("openai-codex")) poolReuseCache?.delete("openai-codex");
   return { providers, poolClients, codexKeys, xaiModels, xaiModelAccounts };
 }
 
@@ -1609,10 +1666,12 @@ function createProviderClient(
               );
             }
           : undefined,
-        responsesWebSocketConnector: createCodexResponsesWebSocketConnector({
-          proxy,
-          timeoutMs: base.timeoutMs,
-        }),
+        responsesWebSocketConnector:
+          codexRuntime?.responsesWebSocketConnector ??
+          createCodexResponsesWebSocketConnector({
+            proxy,
+            timeoutMs: base.timeoutMs,
+          }),
       },
       fetch: providerFetch,
     });
@@ -2847,6 +2906,7 @@ export async function buildServer(
       timeoutMs: settings.user_message_queue_wait_timeout_ms,
     }),
   };
+  const oauthPoolReuseCache: OAuthPoolReuseCache = new Map();
   const synthesizedOAuth = await synthesizeOAuthProviders(
     config.providers,
     oauthCtx,
@@ -2861,6 +2921,7 @@ export async function buildServer(
     markOAuthCredentialFailureLater,
     codexRuntime,
     oauthModelDiscoveryCache,
+    oauthPoolReuseCache,
   );
   const routableProviders: ProviderConfigShared[] = [
     ...config.providers,
@@ -3023,6 +3084,7 @@ export async function buildServer(
           markOAuthCredentialFailureLater,
           codexRuntime,
           oauthModelDiscoveryCache,
+          oauthPoolReuseCache,
         );
         const nextAliasSet = aliasSetOf(next);
         const nextWireModelMap = wireModelsOf(next);

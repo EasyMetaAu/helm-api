@@ -1,6 +1,8 @@
 import {
   __setWreqModuleForTesting,
+  CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
   type CodexModelInfo,
+  type CodexResponsesWebSocketConnection,
   createKeyedSerialGate,
   createRuntimeMemoryCoordinator,
   createSqliteDb,
@@ -29,6 +31,7 @@ import {
   loadCodexCatalogForClientVersion,
   makeProviderFetch,
   normalizeCodexNativeClientVersion,
+  type OAuthPoolReuseCache,
   type OAuthRuntimeCtx,
   resolveProviderTransportProfile,
   resolveXaiMediaEmergencyState,
@@ -1660,6 +1663,164 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     expect(poolClients.has("openai-codex")).toBe(true);
     const aliases = (providers[0]?.models ?? []).map((m) => m.alias).sort();
     expect(aliases).toEqual(["openai-codex/gpt-5.6-luna", "openai-codex/gpt-5.6-sol"]);
+  });
+
+  it("keeps a live Codex continuation websocket across an unchanged OAuth hot rebuild", async () => {
+    const { ctx, config } = oauthStores();
+    await ctx.store.upsert({
+      providerId: "openai-codex",
+      account: "default",
+      accessEnc: encryptSecret("codex-access", ENC_KEY),
+      refreshEnc: encryptSecret("codex-refresh", ENC_KEY),
+      expiresAt: FAR_FUTURE,
+      meta: JSON.stringify({ accountId: "workspace-42" }),
+      updatedAt: 1,
+    });
+    await setAccountSettings(config, ENC_KEY, "openai-codex", "default", {
+      modelsMode: "manual",
+      enabledModels: ["gpt-5.6-sol"],
+    });
+    const catalog = createCodexModelCatalog({
+      cache: createCodexModelCache(config, ENC_KEY),
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ models: [codexModel("gpt-5.6-sol"), codexModel("gpt-5.6-luna")] }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+    const pending: string[] = [];
+    const waiters: Array<(value: string | null) => void> = [];
+    const replies = [
+      [
+        { type: "response.created", response: { id: "resp-parent" } },
+        {
+          type: "response.completed",
+          response: { id: "resp-parent", status: "completed", usage: {} },
+        },
+      ],
+      [
+        { type: "response.created", response: { id: "resp-child" } },
+        {
+          type: "response.completed",
+          response: { id: "resp-child", status: "completed", usage: {} },
+        },
+      ],
+    ];
+    const sent: string[] = [];
+    const connection: CodexResponsesWebSocketConnection = {
+      responseHeaders: new Headers(),
+      async send(text) {
+        sent.push(text);
+        for (const event of replies[sent.length - 1] ?? []) {
+          const payload = JSON.stringify(event);
+          const waiter = waiters.shift();
+          if (waiter) waiter(payload);
+          else pending.push(payload);
+        }
+      },
+      async receive() {
+        const next = pending.shift();
+        if (next !== undefined) return next;
+        return await new Promise<string | null>((resolve) => waiters.push(resolve));
+      },
+      async close() {
+        for (const waiter of waiters.splice(0)) waiter(null);
+      },
+    };
+    const connect = vi.fn(async () => connection);
+    const reuseCache: OAuthPoolReuseCache = new Map();
+    const build = () =>
+      synthesizeOAuthProviders(
+        [],
+        ctx,
+        config,
+        "https://fallback/v1",
+        60_000,
+        noop,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { catalog, runInBackground, responsesWebSocketConnector: connect },
+        undefined,
+        reuseCache,
+      );
+
+    const first = await build();
+    const sessionHeaders = {
+      [CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER]: "ingress-session",
+      "session-id": "client-session",
+    };
+    const drain = async (
+      pool: NonNullable<ReturnType<typeof reuseCache.get>>["pool"],
+      body: Record<string, unknown>,
+    ) => {
+      const chunks: string[] = [];
+      for await (const chunk of pool.nativePassthroughStream?.({
+        protocol: "openai_responses",
+        body,
+        headers: sessionHeaders,
+        mutations: {},
+      }) ?? []) {
+        chunks.push(chunk);
+      }
+      return chunks.join("");
+    };
+    const firstPool = first.poolClients.get("openai-codex");
+    if (!firstPool) throw new Error("expected synthesized Codex pool");
+    expect(
+      await drain(firstPool, {
+        model: "gpt-5.6-sol",
+        input: "parent",
+        stream: true,
+        store: false,
+      }),
+    ).toContain("resp-parent");
+    const second = await build();
+
+    const secondPool = second.poolClients.get("openai-codex");
+    expect(secondPool).toBe(firstPool);
+    if (!secondPool) throw new Error("expected reused Codex pool");
+    expect(
+      await drain(secondPool, {
+        model: "gpt-5.6-sol",
+        input: "child",
+        stream: true,
+        store: false,
+        previous_response_id: "resp-parent",
+      }),
+    ).toContain("resp-child");
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(sent.map((body) => JSON.parse(body))).toEqual([
+      expect.objectContaining({ model: "gpt-5.6-sol" }),
+      expect.objectContaining({ previous_response_id: "resp-parent" }),
+    ]);
+
+    await ctx.store.upsert({
+      providerId: "openai-codex",
+      account: "default",
+      accessEnc: encryptSecret("codex-access", ENC_KEY),
+      refreshEnc: encryptSecret("codex-refresh", ENC_KEY),
+      expiresAt: FAR_FUTURE,
+      meta: JSON.stringify({ accountId: "workspace-42", isFedramp: true }),
+      updatedAt: 2,
+    });
+    const identityChanged = await build();
+    expect(identityChanged.poolClients.get("openai-codex")).not.toBe(secondPool);
+
+    await setAccountSettings(config, ENC_KEY, "openai-codex", "default", {
+      modelsMode: "manual",
+      enabledModels: ["gpt-5.6-luna"],
+    });
+    const modelChanged = await build();
+    expect(modelChanged.poolClients.get("openai-codex")).not.toBe(
+      identityChanged.poolClients.get("openai-codex"),
+    );
   });
 
   it("wires the account-scoped Codex catalog, persisted identity, and model entitlement into the live client", async () => {

@@ -155,6 +155,9 @@ export type OAuthSelectionStrategy = "balanced" | "manual_priority" | "low_risk"
 export interface OAuthPoolClient extends ProviderClient {
   hasAvailableModel(model: string): boolean;
   setUsageLimit(account: string, untilMs: number | null): void;
+  // Restore only the persisted account-wide park after a hot rebuild. Unlike the
+  // explicit reset path above, this must preserve transient/model-scoped cooldowns.
+  seedUsageLimit(account: string, untilMs: number | null): void;
   // The account's current auto-park cooldown (epoch ms), or null if eligible now. Lets
   // the gateway make a park EXTEND-ONLY — never shorten a precise quota reset already set.
   getUsageLimit(account: string): number | null;
@@ -1223,6 +1226,10 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
           if (cooldown.account === account) scopedRateLimits.delete(key);
         }
       }
+    },
+    seedUsageLimit(account: string, untilMs: number | null): void {
+      const entry = entries.find((e) => e.member.account === account);
+      if (entry) entry.member.usageLimitedUntilMs = untilMs;
     },
     getUsageLimit(account: string): number | null {
       return entries.find((e) => e.member.account === account)?.member.usageLimitedUntilMs ?? null;
