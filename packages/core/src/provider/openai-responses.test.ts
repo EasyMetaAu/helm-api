@@ -2854,7 +2854,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect(chunks.join("")).toContain("response.completed");
   });
 
-  it("reconnects after a preamble-only websocket close without replaying its preamble", async () => {
+  it("does not replay a response.create after the upstream acknowledged it", async () => {
     let firstCloseCalls = 0;
     let firstReceiveCalls = 0;
     const first: CodexResponsesWebSocketConnection = {
@@ -2890,24 +2890,122 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
         connectRetryBackoffMs: [0],
       },
     });
-    const chunks: string[] = [];
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier("ingress-preamble-reconnect", {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+        }),
+      )
+      [Symbol.asyncIterator]();
 
-    for await (const chunk of client.nativePassthroughStream?.(
-      carrier("ingress-preamble-reconnect", {
+    await expect(iterator?.next()).rejects.toThrow(
+      "upstream websocket closed after acknowledging response.create",
+    );
+    expect(firstCloseCalls).toBe(1);
+    expect(connect).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry invalid previous_response_id after the upstream acknowledged it", async () => {
+    const connection = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-parent" } },
+        { type: "response.completed", response: { id: "resp-parent", status: "completed" } },
+      ],
+      [
+        { type: "response.created", response: { id: "resp-acknowledged" } },
+        {
+          type: "error",
+          status: 400,
+          error: {
+            type: "invalid_request_error",
+            message: "Invalid `previous_response_id`.",
+          },
+        },
+      ],
+    ]);
+    const connect = vi.fn(async () => connection);
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_acknowledged_invalid_previous")}`,
+        responsesWebSocketConnector: connect,
+      },
+    });
+    for await (const _chunk of client.nativePassthroughStream?.(
+      carrier("ingress-acknowledged-invalid-previous", {
         model: "gpt-5.6-sol",
         input: [],
         stream: true,
         store: false,
       }),
     ) ?? []) {
-      chunks.push(chunk);
+      // Establish the parent on the original websocket.
     }
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier("ingress-acknowledged-invalid-previous", {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+          previous_response_id: "resp-parent",
+        }),
+      )
+      [Symbol.asyncIterator]();
 
-    const output = chunks.join("");
-    expect(firstCloseCalls).toBe(1);
-    expect(connect).toHaveBeenCalledTimes(2);
-    expect(output.match(/event: response\.created/g)).toHaveLength(1);
-    expect(output).toContain("response.completed");
+    await expect(iterator?.next()).rejects.toThrow(
+      "upstream websocket closed after acknowledging response.create",
+    );
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(connection.sent).toHaveLength(2);
+  });
+
+  it("does not reconnect after an acknowledged websocket connection-limit error", async () => {
+    const first = fakeConnection([
+      [
+        { type: "response.in_progress" },
+        {
+          type: "error",
+          status: 400,
+          error: {
+            code: "websocket_connection_limit_reached",
+            message: "Create a new websocket connection to continue.",
+          },
+        },
+      ],
+    ]);
+    const second = fakeConnection([]);
+    const connect = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const fetchMock = vi.fn();
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_acknowledged_connection_limit")}`,
+        responsesWebSocketConnector: connect,
+        connectRetries: 1,
+        connectRetryBackoffMs: [0],
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier("ingress-acknowledged-connection-limit", {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+        }),
+      )
+      [Symbol.asyncIterator]();
+
+    await expect(iterator?.next()).rejects.toThrow(
+      "upstream websocket closed after acknowledging response.create",
+    );
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("commits repeated websocket preambles instead of buffering them without bound", async () => {
@@ -2951,57 +3049,6 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect((await iterator?.next())?.value).toContain("response.created");
     expect(fetchMock).not.toHaveBeenCalled();
     await iterator?.return?.();
-  });
-
-  it("falls back to HTTP after preamble-only websocket closes exhaust retries", async () => {
-    let closeCalls = 0;
-    const connect = vi.fn(async (): Promise<CodexResponsesWebSocketConnection> => {
-      let receiveCalls = 0;
-      return {
-        responseHeaders: new Headers(),
-        async send() {},
-        async receive() {
-          receiveCalls += 1;
-          return receiveCalls === 1 ? JSON.stringify({ type: "response.created" }) : null;
-        },
-        async close() {
-          closeCalls += 1;
-        },
-      };
-    });
-    const fetchMock = vi.fn(async () =>
-      rawSSEResponse(
-        'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
-      ),
-    );
-    const client = createCodexResponsesClient({
-      config: {
-        baseUrl: "https://chatgpt.com/backend-api/codex",
-        getAuthHeader: async () => `Bearer ${jwt("acct_preamble_fallback")}`,
-        responsesWebSocketConnector: connect,
-        connectRetries: 1,
-        connectRetryBackoffMs: [0],
-      },
-      fetch: fetchMock as unknown as typeof fetch,
-    });
-    const chunks: string[] = [];
-
-    for await (const chunk of client.nativePassthroughStream?.(
-      carrier("ingress-preamble-fallback", {
-        model: "gpt-5.6-sol",
-        input: [],
-        stream: true,
-        store: false,
-      }),
-    ) ?? []) {
-      chunks.push(chunk);
-    }
-
-    expect(connect).toHaveBeenCalledTimes(2);
-    expect(closeCalls).toBe(2);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(chunks.join("")).not.toContain("response.created");
-    expect(chunks.join("")).toContain("response.completed");
   });
 
   it("requeues a same-session request after an ECANCELED connection is replaced", async () => {

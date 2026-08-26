@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-08-26 · Codex Responses WebSocket 保活与已确认请求禁止重放（Responses / Gateway，docs/05/07，原则 3/8）
+
+- **空闲连接恢复**：上游 Codex WebSocket 现在每 60 秒发送协议 Ping，并要求 15 秒内收到 Pong；超时立即终止半开连接，让仍未发送的新请求在本地明确失败。测试可缩短两个时限，生产配置与协议正文不变。
+- **会话与单写边界**：`response.incomplete` 与 core 已有语义一致，继续保留同一上游 session 供 `previous_response_id` 续接；`failed`、`cancelled` 与 `error` 仍关闭。上游一旦发出 `response.created`/`response.in_progress` 即视为已接收 `response.create`，随后断连不再重连或回落 HTTP 重放，避免重复推理、工具副作用与计费；已有状态丢失仍要求客户端发送完整历史。
+
 ## 2026-08-26 · OAuth 热刷新保留未变化的 Codex continuation transport（OAuth provider / Responses，docs/04/05/07/11，原则 3/5/8）
 
 - **生产根因与修复**：全局 `POST /admin/api/oauth/refresh` 会重建所有 OAuth pool；即使 Codex 账号、代理、模型与执行设置均未变化，也会替换持有上游 WebSocket 和 `response_id → session` 映射的 `openai-codex` client，使仍活跃的下游 session 下一轮在本地收到 `previous_response_id_session_unavailable`。composition root 现在保留一个进程级复用缓存；重建后的 Codex pool 拓扑与 transport 身份签名完全相同时复用原 pool/client，并原位刷新 quota/cooldown 信号。
@@ -55,13 +60,9 @@
 - 重置边界记录新增可空 `usedPercent`，仅在以后观测到周期关闭时从上游快照写入；旧行不回填，无法证明的近似/日周聚合继续显示空值。
 - SQLite/Postgres 各新增一次可空列迁移；当前周期仅使用未过期快照，避免把上一周期百分比套到新周期。
 
-## 2026-08-19 · Codex Responses 续接 ID 在原 WebSocket 上做一次有界恢复（OAuth provider / Responses，docs/04/05/07，原则 3/5/8）
-
-- **根因与修复**：生产证据显示多个刚成功的同账号续接约一秒后收到上游 `400 Invalid previous_response_id`，且成功与失败请求使用相同 native sanitizer；这不是账号轮换或正文变换。provider 现在只在首个客户端可见输出前、只针对该精确 400，在同一上游 WebSocket 上原样重发一次，吸收短暂的上游状态传播竞态。
-- **安全边界**：重试不删除 `previous_response_id`、不换账号/模型、不重建正文，也不占用连接重建预算；第二次相同错误继续关闭 session 并 fail-closed，避免确定性坏 ID 循环或上下文串线。无 schema、配置或依赖变化。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-19 · Codex Responses 续接 ID 在原 WebSocket 上做一次有界恢复**：仅在首个客户端可见输出前、针对精确 `Invalid previous_response_id` 在同一活动 WebSocket 原样重发一次；第二次仍失败则 fail-closed，完整原文经 git history 回溯。
 - **2026-08-19 · Grok 视频统一时长并复用单写链增加扩展接口**：generation/extension 共用严格媒体合同、付费单写与固定账号轮询；真实 canary 只证明 15 秒纯文本、单图和多图，30 秒与 extension 仍未获能力证明；完整原文经 git history 回溯。
 - **2026-08-19 · 保留已公开的 Grok Imagine 媒体选项**：恢复 fast image 与 prompt-only video 的既有有界字段，同时保持严格 schema、授权、预算与付费单写边界；完整原文经 git history 回溯。
 - **2026-08-18 · Grok Imagine 合并后收紧 entitlement 与媒体协议边界**：billing 失败以 tombstone/latch fail-closed，公开 alias 与严格视频终态合同保持兼容；完整原文经 git history 回溯。
