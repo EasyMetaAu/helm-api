@@ -1145,6 +1145,67 @@ describe("createOAuthPoolClient — account selection", () => {
     expect(() => pool.setUsageLimit("nope", 5_000)).not.toThrow();
   });
 
+  it("re-seeds an account usage limit without clearing a live model cooldown", async () => {
+    const served: string[] = [];
+    let nowMs = 1_000;
+    let scopedFailures = 1;
+    const scoped429 = new UpstreamError(
+      "upstream_error",
+      "usage limit",
+      { headers: { "x-codex-active-limit": "codex_luna" } },
+      429,
+    );
+    const mk = (account: string, priority: number): OAuthPoolMember => ({
+      account,
+      priority,
+      schedulable: true,
+      client: {
+        async chatCompletion() {
+          return { served_by: account };
+        },
+        async *chatCompletionStream() {
+          yield `data: ${account}\n\n`;
+        },
+        nativePassthroughStream(body: Record<string, unknown>): AsyncIterable<string> {
+          return (async function* () {
+            if (account === "a" && body.model === "gpt-5.6-luna" && scopedFailures-- > 0) {
+              throw scoped429;
+            }
+            served.push(account);
+            yield `data: ${account}\n\n`;
+          })();
+        },
+      },
+    });
+    const pool = createOAuthPoolClient({
+      members: [mk("a", 10), mk("b", 50)],
+      now: () => nowMs,
+      accountRateLimitCooldownMs: 250,
+      resolveRateLimitScope: ({ model, error }) =>
+        error === scoped429
+          ? { scope: "model", model: model ?? "", limitId: "codex_luna" }
+          : { scope: "account" },
+    });
+    const drain = async (): Promise<void> => {
+      for await (const _chunk of pool.nativePassthroughStream?.({
+        model: "gpt-5.6-luna",
+        stream: true,
+        input: "hi",
+      }) ?? []) {
+        // Drain so selection and cooldown state are observable.
+      }
+    };
+
+    await drain();
+    pool.seedUsageLimit("a", null);
+    await drain();
+
+    expect(served).toEqual(["b", "b"]);
+    nowMs = 1_251;
+    await drain();
+    expect(served.at(-1)).toBe("a");
+  });
+
   it("does not pin a sticky session to a now-limited account", async () => {
     const pt: string[] = [];
     const clock = 1_000;
