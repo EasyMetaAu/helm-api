@@ -2663,8 +2663,9 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect(releaseCalls).toBe(1);
   });
 
-  it("releases websocket response-work after malformed JSON", async () => {
+  it("ignores a malformed websocket event without replaying the request", async () => {
     let releaseCalls = 0;
+    let receiveCalls = 0;
     const connection: CodexResponsesWebSocketConnection = {
       responseHeaders: new Headers(),
       async send() {},
@@ -2672,8 +2673,15 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
         throw new Error("legacy receive should not be used");
       },
       async receiveWithWork() {
+        receiveCalls += 1;
         return {
-          text: "not-json",
+          text:
+            receiveCalls === 1
+              ? "not-json"
+              : JSON.stringify({
+                  type: "response.completed",
+                  response: { id: "resp-after-malformed", status: "completed" },
+                }),
           release() {
             releaseCalls += 1;
           },
@@ -2699,11 +2707,13 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       )
       [Symbol.asyncIterator]();
 
-    await expect(iterator?.next()).rejects.toMatchObject({ name: "UpstreamError" });
+    expect((await iterator?.next())?.value).toContain("response.completed");
     expect(releaseCalls).toBe(1);
+    expect((await iterator?.next())?.done).toBe(true);
+    expect(releaseCalls).toBe(2);
   });
 
-  it("releases a late websocket response when the receive timeout wins", async () => {
+  it("marks a post-send receive timeout without replaying the request", async () => {
     let resolveReceive: ((value: { text: string; release(): void } | null) => void) | undefined;
     let releaseCalls = 0;
     const connection: CodexResponsesWebSocketConnection = {
@@ -2739,8 +2749,10 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       [Symbol.asyncIterator]();
 
     await expect(iterator?.next()).rejects.toMatchObject({
-      name: "UpstreamError",
-      errorClass: "timeout",
+      providerRaw: {
+        error: { code: "response_create_outcome_unknown" },
+        websocket: { lifecycle_phase: "after_send_before_event" },
+      },
     });
     resolveReceive?.({
       text: JSON.stringify({ type: "response.created" }),
@@ -2752,7 +2764,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect(releaseCalls).toBe(1);
   });
 
-  it("reconnects after a pre-output websocket write ECANCELED", async () => {
+  it("does not replay after an ambiguous pre-output websocket write ECANCELED", async () => {
     let firstCloseCalls = 0;
     const first: CodexResponsesWebSocketConnection = {
       responseHeaders: new Headers(),
@@ -2785,25 +2797,66 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
         connectRetryBackoffMs: [0],
       },
     });
-    const chunks: string[] = [];
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier("ingress-ecanceled", {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+        }),
+      )
+      [Symbol.asyncIterator]();
 
-    for await (const chunk of client.nativePassthroughStream?.(
-      carrier("ingress-ecanceled", {
-        model: "gpt-5.6-sol",
-        input: [],
-        stream: true,
-        store: false,
-      }),
-    ) ?? []) {
-      chunks.push(chunk);
-    }
-
+    await expect(iterator?.next()).rejects.toMatchObject({
+      providerRaw: { error: { code: "response_create_outcome_unknown" } },
+    });
     expect(firstCloseCalls).toBe(1);
-    expect(connect).toHaveBeenCalledTimes(2);
-    expect(chunks.join("")).toContain("response.completed");
+    expect(connect).toHaveBeenCalledTimes(1);
   });
 
-  it("reconnects a continuation when the websocket is closed before send", async () => {
+  it("does not replay after a non-transient websocket send callback error", async () => {
+    const connection: CodexResponsesWebSocketConnection = {
+      responseHeaders: new Headers(),
+      async send() {
+        throw new Error("send callback failed");
+      },
+      async receive() {
+        return null;
+      },
+      async close() {},
+    };
+    const connect = vi.fn(async () => connection);
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_send_callback")}`,
+        responsesWebSocketConnector: connect,
+        connectRetries: 2,
+        connectRetryBackoffMs: [0],
+      },
+    });
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier("ingress-send-callback", {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+        }),
+      )
+      [Symbol.asyncIterator]();
+
+    await expect(iterator?.next()).rejects.toMatchObject({
+      providerRaw: {
+        error: { code: "response_create_outcome_unknown" },
+        websocket: { lifecycle_phase: "send_callback_error" },
+      },
+    });
+    expect(connect).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks the client to recover when a continuation websocket is closed before send", async () => {
     let sendCalls = 0;
     const first = fakeConnection([
       [
@@ -2843,21 +2896,22 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       // drain parent
     }
 
-    const chunks: string[] = [];
-    for await (const chunk of client.nativePassthroughStream?.(
-      carrier("ingress-closed-before-send", {
-        model: "gpt-5.6-sol",
-        input: [],
-        previous_response_id: "resp-parent",
-        stream: true,
-        store: false,
-      }),
-    ) ?? []) {
-      chunks.push(chunk);
-    }
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier("ingress-closed-before-send", {
+          model: "gpt-5.6-sol",
+          input: [],
+          previous_response_id: "resp-parent",
+          stream: true,
+          store: false,
+        }),
+      )
+      [Symbol.asyncIterator]();
 
-    expect(connect).toHaveBeenCalledTimes(2);
-    expect(chunks.join("")).toContain("response.completed");
+    await expect(iterator?.next()).rejects.toMatchObject({
+      providerRaw: { error: { code: "previous_response_id_session_unavailable" } },
+    });
+    expect(connect).toHaveBeenCalledTimes(1);
   });
 
   it("keeps an ambiguous continuation send fail-closed", async () => {
@@ -2909,17 +2963,17 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     await expect(continuationIterator?.next()).rejects.toMatchObject({
       errorClass: "upstream_error",
       upstreamStatus: 400,
-      providerRaw: { error: { code: "previous_response_id_session_unavailable" } },
+      providerRaw: { error: { code: "response_create_outcome_unknown" } },
     });
   });
 
-  it("falls back to HTTP after a closed websocket exhausts the retry budget", async () => {
+  it("falls back to HTTP after a websocket proven closed before send exhausts retries", async () => {
     let closeCalls = 0;
     const connect = vi.fn(
       async (): Promise<CodexResponsesWebSocketConnection> => ({
         responseHeaders: new Headers(),
         async send() {
-          throw new Error("Codex Responses websocket is closed");
+          throw new CodexResponsesWebSocketNotOpenError();
         },
         async receive() {
           return null;
@@ -3012,11 +3066,112 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       )
       [Symbol.asyncIterator]();
 
-    await expect(iterator?.next()).rejects.toThrow(
-      "upstream websocket closed after acknowledging response.create",
-    );
+    await expect(iterator?.next()).rejects.toMatchObject({
+      providerRaw: { error: { code: "response_create_outcome_unknown" } },
+    });
     expect(firstCloseCalls).toBe(1);
     expect(connect).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not replay a response.create when the websocket closes after send but before any event", async () => {
+    let sends = 0;
+    const connection: CodexResponsesWebSocketConnection = {
+      responseHeaders: new Headers(),
+      async send() {
+        sends += 1;
+      },
+      async receive() {
+        return null;
+      },
+      closeInfo() {
+        return { code: 1012, reason: "upstream restart" };
+      },
+      async close() {},
+    };
+    const connect = vi.fn(async () => connection);
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_post_send_close")}`,
+        responsesWebSocketConnector: connect,
+        connectRetries: 2,
+        connectRetryBackoffMs: [0],
+      },
+    });
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier("ingress-post-send-close", {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+        }),
+      )
+      [Symbol.asyncIterator]();
+
+    await expect(iterator?.next()).rejects.toMatchObject({
+      upstreamStatus: 400,
+      providerRaw: {
+        error: { code: "response_create_outcome_unknown" },
+        websocket: {
+          lifecycle_phase: "after_send_before_event",
+          close_code: 1012,
+          close_reason: "upstream restart",
+        },
+      },
+    });
+    expect(sends).toBe(1);
+    expect(connect).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not report Helm's local close as upstream close metadata", async () => {
+    let closeDetails: { code: number; reason: string } | null = null;
+    const connection: CodexResponsesWebSocketConnection = {
+      responseHeaders: new Headers(),
+      async send() {},
+      async receive() {
+        return null;
+      },
+      closeInfo() {
+        return closeDetails;
+      },
+      async close() {
+        closeDetails = { code: 1000, reason: "" };
+      },
+    };
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_local_close")}`,
+        responsesWebSocketConnector: vi.fn(async () => connection),
+      },
+    });
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier("ingress-local-close", {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+        }),
+      )
+      [Symbol.asyncIterator]();
+
+    let caught: unknown;
+    try {
+      await iterator?.next();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      providerRaw: {
+        error: { code: "response_create_outcome_unknown" },
+        websocket: { lifecycle_phase: "after_send_before_event" },
+      },
+    });
+    expect((caught as UpstreamError).providerRaw).not.toMatchObject({
+      websocket: { close_code: 1000 },
+    });
   });
 
   it("does not retry invalid previous_response_id after the upstream acknowledged it", async () => {
@@ -3067,9 +3222,9 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       )
       [Symbol.asyncIterator]();
 
-    await expect(iterator?.next()).rejects.toThrow(
-      "upstream websocket closed after acknowledging response.create",
-    );
+    await expect(iterator?.next()).rejects.toMatchObject({
+      providerRaw: { error: { code: "response_create_outcome_unknown" } },
+    });
     expect(connect).toHaveBeenCalledTimes(1);
     expect(connection.sent).toHaveLength(2);
   });
@@ -3112,9 +3267,9 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       )
       [Symbol.asyncIterator]();
 
-    await expect(iterator?.next()).rejects.toThrow(
-      "upstream websocket closed after acknowledging response.create",
-    );
+    await expect(iterator?.next()).rejects.toMatchObject({
+      providerRaw: { error: { code: "response_create_outcome_unknown" } },
+    });
     expect(connect).toHaveBeenCalledTimes(1);
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -3162,7 +3317,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     await iterator?.return?.();
   });
 
-  it("requeues a same-session request after an ECANCELED connection is replaced", async () => {
+  it("recovers a queued same-session request without replaying the ambiguous one", async () => {
     let releaseFirstSend = () => {};
     let markFirstSendStarted = () => {};
     const firstSendStarted = new Promise<void>((resolve) => {
@@ -3224,11 +3379,18 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     releaseFirstSend();
 
-    const output = await Promise.all([firstTurn, secondTurn]);
+    const output = await Promise.allSettled([firstTurn, secondTurn]);
     expect(firstSendCalls).toBe(1);
     expect(connect).toHaveBeenCalledTimes(2);
-    expect(second.sent).toHaveLength(2);
-    expect(output.every((text) => text.includes("response.completed"))).toBe(true);
+    expect(second.sent).toHaveLength(1);
+    expect(output[0]).toMatchObject({
+      status: "rejected",
+      reason: { providerRaw: { error: { code: "response_create_outcome_unknown" } } },
+    });
+    expect(output[1]).toMatchObject({ status: "fulfilled" });
+    if (output[1]?.status === "fulfilled") {
+      expect(output[1].value).toContain("response.completed");
+    }
   });
 
   it("does not send a same-session request aborted while waiting for its lease", async () => {
@@ -3292,7 +3454,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect(connection.sent).toHaveLength(1);
   });
 
-  it("does not retry ECANCELED after websocket output starts", async () => {
+  it("marks a websocket read ECANCELED after output without retrying", async () => {
     const boom = Object.assign(new Error("read ECANCELED"), { code: "ECANCELED" });
     let receiveCalls = 0;
     const connection: CodexResponsesWebSocketConnection = {
@@ -3331,7 +3493,12 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       [Symbol.asyncIterator]();
 
     expect((await iterator?.next())?.value).toContain("response.output_text.delta");
-    await expect(iterator?.next()).rejects.toBe(boom);
+    await expect(iterator?.next()).rejects.toMatchObject({
+      providerRaw: {
+        error: { code: "response_create_outcome_unknown" },
+        websocket: { lifecycle_phase: "after_send_after_output" },
+      },
+    });
     expect(connect).toHaveBeenCalledTimes(1);
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -4117,10 +4284,10 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
   it.each([
     ["invalid JSON", "not-json"],
     ["an untyped JSON event", JSON.stringify({ response: { status: "in_progress" } })],
-  ])("destroys the upstream websocket session after %s", async (_label, malformedEvent) => {
-    const first = fakeConnection([[malformedEvent]]);
-    const second = fakeConnection([
+  ])("ignores %s on the upstream websocket", async (_label, malformedEvent) => {
+    const connection = fakeConnection([
       [
+        malformedEvent,
         { type: "response.created", response: { id: "resp-next" } },
         {
           type: "response.completed",
@@ -4128,7 +4295,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
         },
       ],
     ]);
-    const connect = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const connect = vi.fn(async () => connection);
     const client = createCodexResponsesClient({
       config: {
         baseUrl: "https://chatgpt.com/backend-api/codex",
@@ -4143,19 +4310,14 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       store: false,
     });
 
-    const firstIterator = client.nativePassthroughStream?.(request)[Symbol.asyncIterator]();
-    await expect(firstIterator?.next()).rejects.toMatchObject({
-      name: "UpstreamError",
-      errorClass: "upstream_error",
-    });
-    const secondTurn: string[] = [];
+    const chunks: string[] = [];
     for await (const chunk of client.nativePassthroughStream?.(request) ?? []) {
-      secondTurn.push(chunk);
+      chunks.push(chunk);
     }
 
-    expect(first.closeCalls).toBe(1);
-    expect(connect).toHaveBeenCalledTimes(2);
-    expect(secondTurn.join("")).toContain("response.completed");
+    expect(connection.closeCalls).toBe(0);
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(chunks.join("")).toContain("response.completed");
   });
 
   it("preserves a Responses Lite incremental continuation without re-inserting tools", async () => {

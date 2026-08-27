@@ -1126,6 +1126,84 @@ describe("Responses websocket bridge", () => {
     ]);
   });
 
+  it("turns a lost continuation session into a retryable disconnect, then accepts full history", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    let closedSessionId = "";
+    const baseUrl = await startBridge(
+      async (request) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        bodies.push(body);
+        return body.previous_response_id
+          ? new Response(
+              'event: error\ndata: {"type":"error","code":"previous_response_id_session_unavailable","message":"send full history"}\n\n',
+              { headers: { "content-type": "text/event-stream" } },
+            )
+          : new Response(
+              'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+              { headers: { "content-type": "text/event-stream" } },
+            );
+      },
+      undefined,
+      {
+        closeSession: (sessionId) => {
+          closedSessionId = sessionId;
+        },
+      },
+    );
+    const first = await connect(`${baseUrl}/v1/responses`);
+    const closed = once(first, "close");
+    first.send(
+      JSON.stringify({
+        type: "response.create",
+        model: "gpt-5.6-sol",
+        previous_response_id: "resp-parent",
+        input: [{ role: "user", content: "incremental" }],
+      }),
+    );
+
+    const [code, reason] = await closed;
+    expect(code).toBe(1012);
+    expect(reason.toString()).toBe("upstream response stream disconnected");
+
+    const second = await connect(`${baseUrl}/v1/responses`);
+    const recovered = await collectTurn(second, {
+      type: "response.create",
+      model: "gpt-5.6-sol",
+      input: [
+        { role: "user", content: "parent" },
+        { role: "assistant", content: "parent response" },
+        { role: "user", content: "incremental" },
+      ],
+    });
+
+    expect(recovered.at(-1)?.type).toBe("response.completed");
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]?.previous_response_id).toBe("resp-parent");
+    expect(bodies[1]?.previous_response_id).toBeUndefined();
+    expect(closedSessionId).not.toBe("");
+  });
+
+  it("turns a non-OK nested recovery marker into a retryable disconnect", async () => {
+    const baseUrl = await startBridge(async () =>
+      Response.json(
+        {
+          error: {
+            code: "lane_unavailable",
+            provider_raw: { error: { code: "response_create_outcome_unknown" } },
+          },
+        },
+        { status: 503 },
+      ),
+    );
+    const socket = await connect(`${baseUrl}/v1/responses`);
+    const closed = once(socket, "close");
+    socket.send(JSON.stringify({ type: "response.create", model: "gpt-5.6-sol", input: [] }));
+
+    const [code, reason] = await closed;
+    expect(code).toBe(1012);
+    expect(reason.toString()).toBe("upstream response stream disconnected");
+  });
+
   it("cancels an unexpected successful non-SSE response body", async () => {
     let cancelled = false;
     const baseUrl = await startBridge(

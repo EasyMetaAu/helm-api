@@ -665,6 +665,7 @@ export {
   createGenericOpenAIResponsesClient,
   type GenericOpenAIResponsesClientDeps,
   hoistResponsesInstructions,
+  isCodexResponsesRecoverableDisconnectCode,
   openaiToResponsesRequest,
   type ResponsesInstructionsFix,
   sanitizeCodexResponsesNativeBody,

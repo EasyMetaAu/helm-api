@@ -6554,6 +6554,78 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
     expect(out.nativePassthrough).toBe(true);
   });
 
+  it("does not advance the chain when a sent response.create has an unknown outcome", async () => {
+    // biome-ignore lint/correctness/useYield: pre-first-chunk failure throws before any yield
+    async function* unknownOutcome(): AsyncGenerator<string> {
+      throw new UpstreamError(
+        "upstream_error",
+        "upstream websocket closed after send",
+        { error: { code: "response_create_outcome_unknown" } },
+        400,
+      );
+    }
+    const head = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: vi.fn().mockReturnValue(unknownOutcome()),
+    } as unknown as ProviderClient & { nativePassthroughStream: ReturnType<typeof vi.fn> };
+    const tail = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: vi.fn().mockReturnValue(gen(SSE)),
+    } as unknown as ProviderClient & { nativePassthroughStream: ReturnType<typeof vi.fn> };
+    const cb = breaker();
+    const recordFailure = vi.spyOn(cb, "recordFailure");
+    const execute = createExecute({
+      defaultProvider: head,
+      providers: new Map([
+        ["codex-a", head],
+        ["codex-b", tail],
+      ]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "codex-a",
+          providerModel: "gpt-5.6-sol",
+          targetProviderProtocol: "openai_responses",
+        },
+        b: {
+          providerName: "codex-b",
+          providerModel: "gpt-5.6-sol",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: cb,
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(
+      plan(["a", "b"]),
+      req({
+        protocol: "openai_responses",
+        stream: true,
+        native_request: createNativePassthroughCarrier({
+          protocol: "openai_responses",
+          body: { model: "auto", input: [], stream: true },
+          headers: {},
+        }),
+      }),
+    );
+
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected a terminal error");
+    expect(out.final.error).toMatchObject({
+      error_class: "lane_unavailable",
+      http_status: 503,
+      provider_raw: { error: { code: "response_create_outcome_unknown" } },
+    });
+    expect(out.attempts).toHaveLength(1);
+    expect(tail.nativePassthroughStream).not.toHaveBeenCalled();
+    expect(recordFailure).not.toHaveBeenCalled();
+  });
+
   it("short-circuits a native Responses in-band context error to a scrubbed 400", async () => {
     // The head passthrough stream reports an in-band context overflow (response.failed with
     // context_length_exceeded). It short-circuits to a 400 with the provider_raw SCRUBBED of

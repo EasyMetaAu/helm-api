@@ -6,6 +6,7 @@ import {
   CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
   type DecisionRecord,
   getOAuthProvider,
+  isCodexResponsesRecoverableDisconnectCode,
   preOutputClassifierFor,
   type RateLimitProbe,
   type RateLimitResult,
@@ -578,6 +579,18 @@ function coerceErrorClass(value: string): ErrorClass {
   return parsed.success ? parsed.data : "upstream_error";
 }
 
+function recoverableDisconnectCode(providerRaw: unknown): string | null {
+  const nested =
+    providerRaw !== null && typeof providerRaw === "object" && !Array.isArray(providerRaw)
+      ? (providerRaw as { error?: unknown }).error
+      : null;
+  const code =
+    nested !== null && typeof nested === "object" && !Array.isArray(nested)
+      ? (nested as { code?: unknown }).code
+      : null;
+  return typeof code === "string" && isCodexResponsesRecoverableDisconnectCode(code) ? code : null;
+}
+
 // A PipelineError surfaced across the pipeline seam → a throwable HelmHttpError so
 // the global onError serializes it in the OpenAI envelope (all_providers_failed →
 // 502, invalid_request → 400, …) instead of degrading to an empty 200.
@@ -609,6 +622,7 @@ function pipelineToHelm(err: PipelineError, traceId: string): HelmHttpError {
       error_class: coerceErrorClass(err.error_class),
       message: err.message,
       trace_id: traceId,
+      provider_raw: err.provider_raw,
     }),
   );
 }
@@ -1456,17 +1470,23 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                 : isUpstreamTimeout(err)
                   ? "timeout"
                   : "upstream_error";
+            const recoveryCode =
+              err instanceof PipelineError
+                ? recoverableDisconnectCode(err.provider_raw)
+                : err instanceof UpstreamError
+                  ? recoverableDisconnectCode(err.providerRaw)
+                  : null;
             const body =
               err instanceof PipelineError
                 ? responsesStreamError({
-                    code: coerceErrorClass(err.error_class),
+                    code: recoveryCode ?? coerceErrorClass(err.error_class),
                     message: err.message,
                     traceId,
                     sequenceNumber: nextErrorSequence,
                   })
                 : responsesStreamError({
                     // Preserve a mid-stream idle timeout instead of internal_error.
-                    code: isUpstreamTimeout(err) ? "timeout" : "internal_error",
+                    code: recoveryCode ?? (isUpstreamTimeout(err) ? "timeout" : "internal_error"),
                     message: err instanceof Error ? err.message : "upstream error",
                     traceId,
                     sequenceNumber: nextErrorSequence,
