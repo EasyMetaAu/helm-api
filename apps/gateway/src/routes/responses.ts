@@ -6,6 +6,8 @@ import {
   CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
   type DecisionRecord,
   getOAuthProvider,
+  isCodexResponsesBeforeSendError,
+  isCodexResponsesPostSendFailureCode,
   isCodexResponsesRecoverableDisconnectCode,
   preOutputClassifierFor,
   type RateLimitProbe,
@@ -39,6 +41,7 @@ import {
 } from "../request-cancellation.js";
 import {
   CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER,
+  CODEX_RESPONSES_WEBSOCKET_RECOVERY_PROOF_HEADER,
   markResponsesWebSocketRequestParsed,
 } from "../responses-websocket-internal.js";
 import {
@@ -579,7 +582,7 @@ function coerceErrorClass(value: string): ErrorClass {
   return parsed.success ? parsed.data : "upstream_error";
 }
 
-function recoverableDisconnectCode(providerRaw: unknown): string | null {
+function codexResponsesLifecycleFailureCode(providerRaw: unknown): string | null {
   const nested =
     providerRaw !== null && typeof providerRaw === "object" && !Array.isArray(providerRaw)
       ? (providerRaw as { error?: unknown }).error
@@ -588,7 +591,26 @@ function recoverableDisconnectCode(providerRaw: unknown): string | null {
     nested !== null && typeof nested === "object" && !Array.isArray(nested)
       ? (nested as { code?: unknown }).code
       : null;
-  return typeof code === "string" && isCodexResponsesRecoverableDisconnectCode(code) ? code : null;
+  return typeof code === "string" &&
+    (isCodexResponsesRecoverableDisconnectCode(code) || isCodexResponsesPostSendFailureCode(code))
+    ? code
+    : null;
+}
+
+function scrubUntrustedRecoveryCode(data: string): string | null {
+  let changed = false;
+  try {
+    const parsed = JSON.parse(data, (key, value: unknown) => {
+      if (key === "code" && isCodexResponsesRecoverableDisconnectCode(value)) {
+        changed = true;
+        return "upstream_error";
+      }
+      return value;
+    }) as unknown;
+    return changed ? JSON.stringify(parsed) : null;
+  } catch {
+    return null;
+  }
 }
 
 // A PipelineError surfaced across the pipeline seam → a throwable HelmHttpError so
@@ -1146,6 +1168,15 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
   const handleResponses = async (c: Context<AppEnv>) => {
     const traceId = c.get("trace_id");
     const requestId = c.get("request_id");
+    if (
+      deps.responsesWebSocketSessionProof !== undefined &&
+      c.req.header(CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER) === deps.responsesWebSocketSessionProof
+    ) {
+      c.header(
+        CODEX_RESPONSES_WEBSOCKET_RECOVERY_PROOF_HEADER,
+        deps.responsesWebSocketSessionProof,
+      );
+    }
 
     // 1) Auth FIRST (docs/02 pipeline order).
     const identity = await authenticateResponsesRequest(c);
@@ -1420,7 +1451,9 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                     raw: (event as { raw?: string }).raw,
                   }
                 : { ...deps.transformer.transformStreamOut(event), raw: undefined };
-            const raw = frame.raw;
+            const scrubbedData = scrubUntrustedRecoveryCode(frame.data);
+            if (scrubbedData !== null) frame.data = scrubbedData;
+            const raw = scrubbedData === null ? frame.raw : undefined;
             const serializedFrame = raw ?? `event: ${frame.event}\ndata: ${frame.data}\n\n`;
             captured?.push(serializedFrame);
             const terminalEvent = isResponsesTerminalEvent(frame.event);
@@ -1470,23 +1503,32 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                 : isUpstreamTimeout(err)
                   ? "timeout"
                   : "upstream_error";
-            const recoveryCode =
+            const lifecycleFailureCode =
               err instanceof PipelineError
-                ? recoverableDisconnectCode(err.provider_raw)
+                ? err.error_class === "lane_unavailable"
+                  ? codexResponsesLifecycleFailureCode(err.provider_raw)
+                  : null
                 : err instanceof UpstreamError
-                  ? recoverableDisconnectCode(err.providerRaw)
+                  ? isCodexResponsesBeforeSendError(err) ||
+                    isCodexResponsesPostSendFailureCode(
+                      codexResponsesLifecycleFailureCode(err.providerRaw),
+                    )
+                    ? codexResponsesLifecycleFailureCode(err.providerRaw)
+                    : null
                   : null;
             const body =
               err instanceof PipelineError
                 ? responsesStreamError({
-                    code: recoveryCode ?? coerceErrorClass(err.error_class),
+                    code: lifecycleFailureCode ?? coerceErrorClass(err.error_class),
                     message: err.message,
                     traceId,
                     sequenceNumber: nextErrorSequence,
                   })
                 : responsesStreamError({
                     // Preserve a mid-stream idle timeout instead of internal_error.
-                    code: recoveryCode ?? (isUpstreamTimeout(err) ? "timeout" : "internal_error"),
+                    code:
+                      lifecycleFailureCode ??
+                      (isUpstreamTimeout(err) ? "timeout" : "internal_error"),
                     message: err instanceof Error ? err.message : "upstream error",
                     traceId,
                     sequenceNumber: nextErrorSequence,

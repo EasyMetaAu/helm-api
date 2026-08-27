@@ -2909,7 +2909,11 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       [Symbol.asyncIterator]();
 
     await expect(iterator?.next()).rejects.toMatchObject({
-      providerRaw: { error: { code: "previous_response_id_session_unavailable" } },
+      upstreamStatus: null,
+      providerRaw: {
+        error: { code: "response_create_not_sent" },
+        recovery: { safe_to_replay: true, lifecycle_phase: "before_send" },
+      },
     });
     expect(connect).toHaveBeenCalledTimes(1);
   });
@@ -3812,9 +3816,10 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       [Symbol.asyncIterator]();
 
     await expect(iterator?.next()).rejects.toMatchObject({
-      upstreamStatus: 400,
+      upstreamStatus: null,
       providerRaw: {
-        error: { code: "previous_response_id_session_unavailable" },
+        error: { code: "response_create_not_sent" },
+        recovery: { safe_to_replay: true, lifecycle_phase: "before_send" },
       },
     });
     expect(connect).not.toHaveBeenCalled();
@@ -3867,9 +3872,10 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       [Symbol.asyncIterator]();
 
     await expect(iterator?.next()).rejects.toMatchObject({
-      upstreamStatus: 400,
+      upstreamStatus: null,
       providerRaw: {
-        error: { code: "previous_response_id_session_unavailable" },
+        error: { code: "response_create_not_sent" },
+        recovery: { safe_to_replay: true, lifecycle_phase: "before_send" },
       },
     });
     expect(connect).toHaveBeenCalledTimes(2);
@@ -3935,7 +3941,8 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     await expect(iterator?.next()).rejects.toMatchObject({
       upstreamStatus: 400,
       providerRaw: {
-        error: { code: "previous_response_id_session_unavailable" },
+        error: { code: "response_create_outcome_unknown" },
+        websocket: { lifecycle_phase: "after_send_before_event" },
       },
     });
     expect(connect).toHaveBeenCalledTimes(1);

@@ -13,6 +13,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import { normalizeOpenAICodexClientVersion } from "./oauth/codex-client-version.js";
 import {
   CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER,
+  CODEX_RESPONSES_WEBSOCKET_RECOVERY_PROOF_HEADER,
   markResponsesWebSocketRequestParsed,
   trackResponsesWebSocketRequest,
 } from "./responses-websocket-internal.js";
@@ -392,9 +393,12 @@ async function forwardResponse(
   } finally {
     markResponsesWebSocketRequestParsed(internalRequest);
   }
+  const trustedRecovery =
+    sessionProof !== undefined &&
+    response.headers.get(CODEX_RESPONSES_WEBSOCKET_RECOVERY_PROOF_HEADER) === sessionProof;
   if (!response.ok) {
     const envelope = await responseErrorEnvelope(response);
-    if (recoverableDisconnectCode(envelope) !== null) {
+    if (trustedRecovery && recoverableDisconnectCode(envelope) !== null) {
       closeForFullHistoryRecovery(socket);
       return true;
     }
@@ -416,7 +420,7 @@ async function forwardResponse(
     try {
       const parsed = JSON.parse(payload) as { type?: unknown };
       type = parsed.type;
-      if (recoverableDisconnectCode(parsed) !== null) {
+      if (trustedRecovery && recoverableDisconnectCode(parsed) !== null) {
         void body.cancel().catch(() => {});
         closeForFullHistoryRecovery(socket);
         return true;

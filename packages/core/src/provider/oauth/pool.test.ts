@@ -10,6 +10,7 @@ import {
 } from "../openai.js";
 import {
   CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
+  CodexResponsesBeforeSendError,
   createCodexResponsesClient,
 } from "../openai-responses.js";
 import { TokenRefreshError } from "../token-manager.js";
@@ -557,7 +558,7 @@ describe("createOAuthPoolClient — account selection", () => {
         { ...USER_REQ, previous_response_id: "resp-a" },
         { statefulAccount: "a" },
       ),
-    ).toThrow("previous_response_id original account is unavailable");
+    ).toThrow(CodexResponsesBeforeSendError);
     expect(calls).toEqual([]);
   });
 

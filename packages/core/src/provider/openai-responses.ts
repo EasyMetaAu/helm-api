@@ -170,12 +170,45 @@ export interface GenericOpenAIResponsesRequestContract {
 export const CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER = "x-helm-codex-responses-websocket-session";
 const CODEX_RESPONSES_OUTCOME_UNKNOWN_CODE = "response_create_outcome_unknown";
 const CODEX_RESPONSES_SESSION_UNAVAILABLE_CODE = "previous_response_id_session_unavailable";
+const CODEX_RESPONSES_NOT_SENT_CODE = "response_create_not_sent";
 
 export function isCodexResponsesRecoverableDisconnectCode(code: unknown): boolean {
+  return code === CODEX_RESPONSES_NOT_SENT_CODE;
+}
+
+export function isCodexResponsesPostSendFailureCode(code: unknown): boolean {
   return (
     code === CODEX_RESPONSES_OUTCOME_UNKNOWN_CODE ||
     code === CODEX_RESPONSES_SESSION_UNAVAILABLE_CODE
   );
+}
+
+/** The current response.create is proven not to have reached an upstream provider. */
+export class CodexResponsesBeforeSendError extends UpstreamError {
+  constructor(message: string, recovery: Record<string, unknown> = {}) {
+    super(
+      "upstream_error",
+      message,
+      {
+        error: {
+          type: "server_error",
+          code: CODEX_RESPONSES_NOT_SENT_CODE,
+          message,
+        },
+        recovery: {
+          safe_to_replay: true,
+          lifecycle_phase: "before_send",
+          ...recovery,
+        },
+      },
+      null,
+    );
+    this.name = "CodexResponsesBeforeSendError";
+  }
+}
+
+export function isCodexResponsesBeforeSendError(error: unknown): boolean {
+  return error instanceof CodexResponsesBeforeSendError;
 }
 
 export interface CodexResponsesWebSocketConnectInput {
@@ -2142,8 +2175,9 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
           !websocketSessions.has(sessionId) ||
           responseWebsocketSessions.get(previousResponseId.trim()) !== sessionId)
       ) {
-        throw continuationSessionUnavailable(
+        throw new CodexResponsesBeforeSendError(
           "previous_response_id cannot be continued because its original websocket session is unavailable; send the full conversation input instead",
+          { reason: "websocket_session_unavailable" },
         );
       }
       if (
@@ -2177,8 +2211,9 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
               !opts?.signal?.aborted
             ) {
               if (hasPreviousResponseId) {
-                throw continuationSessionUnavailable(
+                throw new CodexResponsesBeforeSendError(
                   "previous_response_id cannot be continued because its original websocket connection failed; send the full conversation input instead",
+                  { reason: "websocket_connection_failed" },
                 );
               }
               websocketHttpFallbackSessions.add(sessionId);
@@ -2222,15 +2257,8 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
                 );
               }
               if (received === null) {
-                const websocket = websocketCloseDetails(
-                  lease.connection,
-                  "after_send_before_event",
-                );
                 if (hasPreviousResponseId && !outputStarted && preambleFrames.length === 0) {
-                  throw continuationSessionUnavailable(
-                    "previous_response_id cannot be continued because its original websocket closed; send the full conversation input instead",
-                    websocket,
-                  );
+                  throw responseCreateOutcomeUnknown(lease.connection, "after_send_before_event");
                 }
                 throw responseCreateOutcomeUnknown(
                   lease.connection,
@@ -2327,9 +2355,9 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
               const websocket = websocketCloseDetails(lease.connection, "before_send");
               await closeWebSocketSession(sessionId);
               if (hasPreviousResponseId) {
-                throw continuationSessionUnavailable(
+                throw new CodexResponsesBeforeSendError(
                   "previous_response_id cannot be continued because its websocket closed before send; send the full conversation input instead",
-                  websocket,
+                  { ...websocket, reason: "websocket_closed_before_send" },
                 );
               } else if (retries < maxRetries) {
                 retryConnection = true;

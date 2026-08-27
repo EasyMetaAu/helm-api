@@ -651,6 +651,7 @@ export {
 export {
   aggregateResponsesStream,
   CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
+  CodexResponsesBeforeSendError,
   type CodexResponsesClientConfig,
   type CodexResponsesClientDeps,
   type CodexResponsesNativeBodyFix,
@@ -665,6 +666,8 @@ export {
   createGenericOpenAIResponsesClient,
   type GenericOpenAIResponsesClientDeps,
   hoistResponsesInstructions,
+  isCodexResponsesBeforeSendError,
+  isCodexResponsesPostSendFailureCode,
   isCodexResponsesRecoverableDisconnectCode,
   openaiToResponsesRequest,
   type ResponsesInstructionsFix,
