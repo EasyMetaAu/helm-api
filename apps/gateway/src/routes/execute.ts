@@ -18,7 +18,8 @@ import {
   checkCapability,
   correlationTraceId,
   guardPreOutputFailure,
-  isCodexResponsesRecoverableDisconnectCode,
+  isCodexResponsesBeforeSendError,
+  isCodexResponsesPostSendFailureCode,
   type NativePassthroughDisableReason,
   openaiTransformer,
   optimizeVisualContext,
@@ -2303,13 +2304,17 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             };
           }
 
-          // `response.create` may already be running upstream. Never replay it on a
-          // sibling provider: the Responses WebSocket bridge converts this marker into
-          // a transport disconnect so Codex can rebuild from its own full history.
-          if (
+          // Strict Codex affinity is resolved before provider invocation. If the pinned
+          // account/session is unavailable, stop the chain and let the downstream client
+          // rebuild from full history; never send the stateful delta to another provider.
+          const beforeSendRecovery =
+            req.protocol === "openai_responses" && isCodexResponsesBeforeSendError(err);
+          // Post-send lifecycle failures are also terminal, but are not safe to replay:
+          // response.create may already be running upstream.
+          const postSendFailure =
             err instanceof UpstreamError &&
-            isCodexResponsesRecoverableDisconnectCode(upstreamErrorCode(err.providerRaw))
-          ) {
+            isCodexResponsesPostSendFailureCode(upstreamErrorCode(err.providerRaw));
+          if (beforeSendRecovery || postSendFailure) {
             settleBreaker("abort");
             const detail = errorDetailOf(err);
             attempts.push({

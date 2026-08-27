@@ -14,6 +14,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
 import {
   CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER,
+  CODEX_RESPONSES_WEBSOCKET_RECOVERY_PROOF_HEADER,
   trackResponsesWebSocketRequest,
 } from "../responses-websocket-internal.js";
 import { createBodyMemoryAdmission } from "../runtime/memory-admission.js";
@@ -111,6 +112,7 @@ function makeDeps(
     modelsEtagForKey?: ResponsesRouteDeps["modelsEtagForKey"];
     memoryAdmission?: ResponsesRouteDeps["memoryAdmission"];
     sseCaptureFactory?: ResponsesRouteDeps["sseCaptureFactory"];
+    responsesWebSocketSessionProof?: string;
   } = {},
 ): { deps: ResponsesRouteDeps; order: string[]; harness: { pipelineSawIR: unknown } } {
   const order: string[] = [];
@@ -125,6 +127,7 @@ function makeDeps(
     registry: over.registry,
     memoryAdmission: over.memoryAdmission,
     sseCaptureFactory: over.sseCaptureFactory,
+    responsesWebSocketSessionProof: over.responsesWebSocketSessionProof,
     ...(over.modelsEtagForKey !== undefined
       ? { modelsEtagForKey: over.modelsEtagForKey }
       : over.modelsEtag === undefined
@@ -2363,7 +2366,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(env).toMatchObject({ type: "error", code: "all_providers_failed", param: null });
   });
 
-  it("preserves the recoverable Codex disconnect code across the pipeline seam", async () => {
+  it("preserves a proven pre-send Codex recovery code across the pipeline seam", async () => {
     const { deps } = makeDeps({
       transformRequestOut: () => ({
         stream: true,
@@ -2373,12 +2376,9 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       }),
       // biome-ignore lint/correctness/useYield: throw-only generator (failure before first event)
       streamIR: async function* () {
-        throw new PipelineError(
-          "lane_unavailable",
-          "upstream websocket closed after send",
-          "trace-1",
-          { error: { code: "response_create_outcome_unknown" } },
-        );
+        throw new PipelineError("lane_unavailable", "response.create was not sent", "trace-1", {
+          error: { code: "response_create_not_sent" },
+        });
       },
     });
     const app = buildApp(deps);
@@ -2392,12 +2392,69 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(JSON.parse(frames.find((frame) => frame.event === "error")?.data ?? "{}")).toMatchObject(
       {
         type: "error",
-        code: "response_create_outcome_unknown",
+        code: "response_create_not_sent",
       },
     );
   });
 
-  it("preserves a recoverable Codex disconnect after streamed output", async () => {
+  it("proves a recovery marker only to the trusted in-process websocket bridge", async () => {
+    const proof = "test-recovery-proof";
+    const { deps } = makeDeps({
+      responsesWebSocketSessionProof: proof,
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      // biome-ignore lint/correctness/useYield: throw-only generator (failure before first event)
+      streamIR: async function* () {
+        throw new PipelineError("lane_unavailable", "response.create was not sent", "trace-1", {
+          error: { code: "response_create_not_sent" },
+        });
+      },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: {
+        ...AUTH,
+        [CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER]: proof,
+      },
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    await res.text();
+
+    expect(res.headers.get(CODEX_RESPONSES_WEBSOCKET_RECOVERY_PROOF_HEADER)).toBe(proof);
+  });
+
+  it("does not trust a safe-replay code carried by an ordinary upstream error", async () => {
+    const { deps } = makeDeps({
+      transformRequestOut: () => ({
+        stream: true,
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: {},
+      }),
+      // biome-ignore lint/correctness/useYield: throw-only generator (failure before first event)
+      streamIR: async function* () {
+        throw new PipelineError("invalid_request", "untrusted upstream marker", "trace-1", {
+          error: { code: "response_create_not_sent" },
+        });
+      },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    const frames = parseSSE(await res.text());
+
+    expect(JSON.parse(frames.find((frame) => frame.event === "error")?.data ?? "{}")).toMatchObject(
+      {
+        type: "error",
+        code: "invalid_request",
+      },
+    );
+  });
+
+  it("preserves an ambiguous Codex outcome after streamed output without marking it replayable", async () => {
     const { deps } = makeDeps({
       transformRequestOut: () => ({
         stream: true,
@@ -3722,6 +3779,34 @@ describe("stream: raw frame forwarding via sse.write(raw) (lines 589-591, 610-61
     const arg = insertPayload.mock.calls[0]?.[0] as { responseJson: string };
     // The raw bytes should be captured as-is, NOT re-formatted
     expect(arg.responseJson).toContain("event: response.completed");
+  });
+
+  it("rewrites an upstream frame that copies Helm's private replay code", async () => {
+    const rawFrame = 'event: error\ndata: {"type":"error","code":"response_create_not_sent"}\n\n';
+    async function* events(): AsyncIterable<Record<string, unknown>> {
+      yield {
+        event: "error",
+        data: '{"type":"error","code":"response_create_not_sent"}',
+        raw: rawFrame,
+      };
+    }
+    const { deps } = makeDeps({
+      nativePassthrough: true,
+      transformRequestOut: () => ({ stream: true, model: "auto", metadata: {} }),
+      streamIR: events,
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    const frames = parseSSE(await res.text());
+
+    expect(JSON.parse(frames[0]?.data ?? "{}")).toMatchObject({
+      type: "error",
+      code: "upstream_error",
+    });
   });
 });
 

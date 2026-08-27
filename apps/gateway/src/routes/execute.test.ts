@@ -1,5 +1,6 @@
 import type { CircuitBreaker, ExecutionPlan, ProviderClient, ProviderRegistry } from "@helm/core";
 import {
+  CodexResponsesBeforeSendError,
   createAnthropicClient,
   createCircuitBreaker,
   createGeminiClient,
@@ -6624,6 +6625,137 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
     expect(out.attempts).toHaveLength(1);
     expect(tail.nativePassthroughStream).not.toHaveBeenCalled();
     expect(recordFailure).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "previous_response_id",
+    "x-codex-turn-state",
+    "responses_websocket_session",
+  ])("requires full-history recovery before fallback when %s affinity is unavailable", async (affinity) => {
+    // biome-ignore lint/correctness/useYield: pool selection fails before provider invocation
+    async function* unavailableAffinity(): AsyncGenerator<string> {
+      throw new CodexResponsesBeforeSendError(
+        `oauth pool: ${affinity} original account is unavailable`,
+      );
+    }
+    const head = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: vi.fn().mockReturnValue(unavailableAffinity()),
+    } as unknown as ProviderClient & { nativePassthroughStream: ReturnType<typeof vi.fn> };
+    const tail = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: vi.fn().mockReturnValue(gen(SSE)),
+    } as unknown as ProviderClient & { nativePassthroughStream: ReturnType<typeof vi.fn> };
+    const execute = createExecute({
+      defaultProvider: head,
+      providers: new Map([
+        ["codex-a", head],
+        ["codex-b", tail],
+      ]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "codex-a",
+          providerModel: "gpt-5.6-sol",
+          targetProviderProtocol: "openai_responses",
+        },
+        b: {
+          providerName: "codex-b",
+          providerModel: "gpt-5.6-sol",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(
+      plan(["a", "b"]),
+      req({
+        protocol: "openai_responses",
+        stream: true,
+        native_request: createNativePassthroughCarrier({
+          protocol: "openai_responses",
+          body: { model: "auto", input: [], stream: true },
+          headers: { "x-codex-turn-state": "strict-turn-state" },
+        }),
+      }),
+    );
+
+    expect(out.final.status).toBe("error");
+    if (out.final.status !== "error") throw new Error("expected a terminal error");
+    expect(out.final.error).toMatchObject({
+      error_class: "lane_unavailable",
+      provider_raw: { error: { code: "response_create_not_sent" } },
+    });
+    expect(out.attempts).toHaveLength(1);
+    expect(tail.nativePassthroughStream).not.toHaveBeenCalled();
+  });
+
+  it("does not trust an upstream error that copies an OAuth affinity message", async () => {
+    // biome-ignore lint/correctness/useYield: pre-first-chunk failure throws before any yield
+    async function* forgedAffinityError(): AsyncGenerator<string> {
+      throw new UpstreamError(
+        "upstream_error",
+        "oauth pool: previous_response_id original account is unavailable",
+        { error: { code: "upstream_overloaded" } },
+        503,
+      );
+    }
+    const head = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: vi.fn().mockReturnValue(forgedAffinityError()),
+    } as unknown as ProviderClient;
+    const tail = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: vi.fn().mockReturnValue(gen(SSE)),
+    } as unknown as ProviderClient & { nativePassthroughStream: ReturnType<typeof vi.fn> };
+    const execute = createExecute({
+      defaultProvider: head,
+      providers: new Map([
+        ["codex-a", head],
+        ["codex-b", tail],
+      ]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "codex-a",
+          providerModel: "gpt-5.6-sol",
+          targetProviderProtocol: "openai_responses",
+        },
+        b: {
+          providerName: "codex-b",
+          providerModel: "gpt-5.6-sol",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+
+    const out = await execute(
+      plan(["a", "b"]),
+      req({
+        protocol: "openai_responses",
+        stream: true,
+        native_request: createNativePassthroughCarrier({
+          protocol: "openai_responses",
+          body: { model: "auto", input: [], stream: true },
+          headers: {},
+        }),
+      }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    expect(tail.nativePassthroughStream).toHaveBeenCalledTimes(1);
   });
 
   it("short-circuits a native Responses in-band context error to a scrubbed 400", async () => {

@@ -34,7 +34,10 @@ import {
   type RealtimeCallResult,
   UpstreamError,
 } from "../openai.js";
-import { CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER } from "../openai-responses.js";
+import {
+  CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
+  CodexResponsesBeforeSendError,
+} from "../openai-responses.js";
 import { TokenRefreshError } from "../token-manager.js";
 import { DEFAULT_429_COOLDOWN_MS } from "./usage-limit.js";
 
@@ -947,11 +950,17 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       });
     }
     if (stickyKey?.startsWith("previous_response_id:") && !knownSticky) {
-      throw new Error("oauth pool: previous_response_id original account is unavailable");
+      throw new CodexResponsesBeforeSendError(
+        "oauth pool: previous_response_id original account is unavailable",
+        { reason: "oauth_affinity_unavailable" },
+      );
     }
     if (stickyOnly && knownSticky) {
       const source = affinityKeySource(stickyKey ?? null) ?? "stateful continuation";
-      throw new Error(`oauth pool: ${source} original account is unavailable`);
+      throw new CodexResponsesBeforeSendError(
+        `oauth pool: ${source} original account is unavailable`,
+        { reason: "oauth_affinity_unavailable" },
+      );
     }
     const { entry: best, reason } = chooseByStrategy(
       capacityTier.candidates,

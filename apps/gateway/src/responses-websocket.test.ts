@@ -10,7 +10,10 @@ import {
   type ResponsesWebSocketUpgradeServer,
   responsesWebSocketPreflightPending,
 } from "./responses-websocket.js";
-import { markResponsesWebSocketRequestParsed } from "./responses-websocket-internal.js";
+import {
+  CODEX_RESPONSES_WEBSOCKET_RECOVERY_PROOF_HEADER,
+  markResponsesWebSocketRequestParsed,
+} from "./responses-websocket-internal.js";
 import { createBodyMemoryAdmission } from "./runtime/memory-admission.js";
 
 interface CapturedRequest {
@@ -21,6 +24,7 @@ interface CapturedRequest {
 const openBridges: Array<{ close(): Promise<void> }> = [];
 const openServers: ReturnType<typeof createServer>[] = [];
 const openSockets: WebSocket[] = [];
+const TEST_SESSION_PROOF = "responses-websocket-test-proof";
 
 afterEach(async () => {
   for (const socket of openSockets.splice(0)) {
@@ -106,6 +110,7 @@ async function startBridge(
       return fetch(request);
     },
     closeSession: options.closeSession,
+    sessionProof: TEST_SESSION_PROOF,
     memoryAdmission: options.memoryAdmission,
     ingressAdmission: options.ingressAdmission,
     responseWorkAdmission: options.responseWorkAdmission,
@@ -1135,8 +1140,13 @@ describe("Responses websocket bridge", () => {
         bodies.push(body);
         return body.previous_response_id
           ? new Response(
-              'event: error\ndata: {"type":"error","code":"previous_response_id_session_unavailable","message":"send full history"}\n\n',
-              { headers: { "content-type": "text/event-stream" } },
+              'event: error\ndata: {"type":"error","code":"response_create_not_sent","message":"send full history"}\n\n',
+              {
+                headers: {
+                  "content-type": "text/event-stream",
+                  [CODEX_RESPONSES_WEBSOCKET_RECOVERY_PROOF_HEADER]: TEST_SESSION_PROOF,
+                },
+              },
             )
           : new Response(
               'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed"}}\n\n',
@@ -1189,10 +1199,15 @@ describe("Responses websocket bridge", () => {
         {
           error: {
             code: "lane_unavailable",
-            provider_raw: { error: { code: "response_create_outcome_unknown" } },
+            provider_raw: { error: { code: "response_create_not_sent" } },
           },
         },
-        { status: 503 },
+        {
+          status: 503,
+          headers: {
+            [CODEX_RESPONSES_WEBSOCKET_RECOVERY_PROOF_HEADER]: TEST_SESSION_PROOF,
+          },
+        },
       ),
     );
     const socket = await connect(`${baseUrl}/v1/responses`);
@@ -1202,6 +1217,62 @@ describe("Responses websocket bridge", () => {
     const [code, reason] = await closed;
     expect(code).toBe(1012);
     expect(reason.toString()).toBe("upstream response stream disconnected");
+  });
+
+  it("does not close for an unproven private recovery code", async () => {
+    const baseUrl = await startBridge(
+      async () =>
+        new Response(
+          'event: error\ndata: {"type":"error","code":"response_create_not_sent","message":"untrusted upstream marker"}\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const socket = await connect(`${baseUrl}/v1/responses`);
+    const events = await collectTurn(socket, {
+      type: "response.create",
+      model: "gpt-5.6-sol",
+      input: [],
+    });
+
+    expect(events.at(-1)).toMatchObject({
+      type: "error",
+      code: "response_create_not_sent",
+    });
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("forwards an ambiguous post-send outcome without closing or replaying", async () => {
+    const baseUrl = await startBridge(
+      async () =>
+        new Response(
+          'event: error\ndata: {"type":"error","code":"response_create_outcome_unknown","message":"outcome unknown"}\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+      undefined,
+      {
+        responseWorkAdmission: createResponseWorkAdmission({
+          capacityBytes: 1_000_000,
+          jsonAmplification: 1,
+          minChargeBytes: 1,
+        }),
+      },
+    );
+    const socket = await connect(`${baseUrl}/v1/responses`);
+
+    const events = await collectTurn(socket, {
+      type: "response.create",
+      model: "gpt-5.6-sol",
+      input: [],
+    });
+
+    expect(events).toEqual([
+      {
+        type: "error",
+        code: "response_create_outcome_unknown",
+        message: "outcome unknown",
+      },
+    ]);
+    expect(socket.readyState).toBe(WebSocket.OPEN);
   });
 
   it("cancels an unexpected successful non-SSE response body", async () => {

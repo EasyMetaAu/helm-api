@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-08-27 · Responses 只在可证明未发送时触发完整历史恢复（Responses / OAuth provider / Gateway，docs/04/05/07，原则 3/5/8）
+
+- **生产根因**：`v0.28.91` 上线后的 64 个严格亲和失败（110 个 provider attempts）均紧跟两次真实 Codex 账号级 429；账号按 `Retry-After` 暂停期间，`x-codex-turn-state` / `previous_response_id` 仍正确绑定原账号，但 pool 在调用 provider 前抛出的 `original account is unavailable` 被 executor 当作普通失败继续 fallback，最终形成 400/502，甚至可能把状态型增量交给无原上下文的候选。
+- **唯一安全恢复边界**：三个严格亲和源（`previous_response_id`、`x-codex-turn-state`、`responses_websocket_session`）在 provider 调用前不可用时，pool 抛出类型化内部错误，executor 立即终止执行链并生成 `response_create_not_sent`，同时记录 `safe_to_replay:true` / `lifecycle_phase:before_send`；Responses WebSocket bridge 只在进程内 proof 匹配时对这一 code 关闭 `1012`，让 Codex 用完整历史重建。普通错误 message 不再被识别为安全来源，上游原样 SSE 若复制私有 code 会改写成 `upstream_error`；真实 429 本身仍按原账号限流处理，不伪装成未发送。
+- **禁止模糊重放**：`response_create_outcome_unknown` 与发送后产生的 `previous_response_id_session_unavailable` 不再属于可恢复断连 code；它们继续终止 provider/fallback，但以错误事件留在原下游 socket，不触发 `1012` 或自动重放，避免重复推理、工具副作用与计费。本条收紧并取代同日早先“所有结构化 recovery code 均关闭 1012”的决定；无 schema、migration、配置或依赖变化。
+
 ## 2026-08-27 · 将不可安全重放的 Responses 断流交还 Codex 恢复（Responses / Gateway，docs/05/07，原则 3/5/8）
 
 - `response.create` 一旦进入 WebSocket `send()`，发送回调失败、读超时/异常、EOF，以及收到输出后但终态前断连都属于结果不明：Helm 不再重放、不回落 HTTP、不切 sibling，也不处罚 breaker；只有专用错误能证明底层 `socket.send()` 尚未调用时，初始无状态请求才可重试。无法解析的单个上游事件与直连 Codex 一致，释放资源后忽略并继续等待，不因协议扩展重放整轮。续接在发送前发现原 socket 已关闭时同样不把 opaque `previous_response_id` 搬到新连接。本条取代同日早先“续接发送前关闭后重连一次”的决定。
@@ -56,13 +62,9 @@
 - **根因与修复**：pool rebuild 后，`previous_response_id` 仍指向已 parked/limited 的原账号时，旧逻辑在访问上游前直接抛出 `original account is unavailable`，没有尝试其他账号；现在该类续接从初始选择即进入有界 sibling 探测，成功后继续沿用既有 sticky/registry 修复链。`x-codex-turn-state` 仍保持严格原账号绑定，避免把不可迁移的上游会话状态串到其他账号。
 - **熔断边界**：两种严格亲和的“原账号不可用”均按账号级故障处理，不再累积到共享 model breaker，防止少数失效 pin 把健康 sibling 一起变成 `circuit_open`；服务器/传输故障仍照常计入 breaker。无 schema、配置或依赖变化。
 
-## 2026-08-24 · Codex Responses 续接 ID 可在账号池内有界找回原账号（OAuth provider / Responses，docs/04/05/07，原则 3/5/8）
-
-- **恢复边界**：同一账号、同一 WebSocket 的一次原样重试仍优先；只有它再次返回精确的 `400 Invalid previous_response_id` 且尚未产生客户端可见输出时，OAuth pool 才逐个尝试其余同 provider、同 model 的可调度账号。其他 4xx、限流、凭证、超时、断连与已开始输出的错误继续保持原有 fail-closed 语义，搜索次数天然受账号数限制。
-- **亲和修复**：找到能继续该 ID 的账号后，同时更新进程内 sticky 映射与 durable Responses registry 中旧 ID 的 `provider_account`；后续续接优先回到这个实际拥有状态的原账号。全部账号都报告不存在时仍返回最后一个上游错误，不删除 ID、不伪造历史，也不跨 provider/协议。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-24 · Codex Responses 续接 ID 可在账号池内有界找回原账号**：只在尚无可靠归属且没有客户端可见输出时有界探测同 provider/model sibling，并同步修复 sticky/registry；其他状态型失败保持 fail-closed，完整原文经 git history 回溯。
 - **2026-08-20 · Grok 视频输入对齐 xAI 官方 reference-to-video 合同**：stable 视频合同扩展 1–7 张参考图、七种画幅、最多 3 个预设 voice，并保留已公开的 30 秒兼容值；付费单写与 entitlement 边界不变，完整原文经 git history 回溯。
 - **2026-08-20 · 配额周期历史新增已用百分比**：仅在以后真实观测周期关闭时保存可空 `usedPercent`，旧行和不可证明的近似历史不回填，完整原文经 git history 回溯。
 - **2026-08-19 · Codex Responses 续接 ID 在原 WebSocket 上做一次有界恢复**：仅在首个客户端可见输出前、针对精确 `Invalid previous_response_id` 在同一活动 WebSocket 原样重发一次；第二次仍失败则 fail-closed，完整原文经 git history 回溯。

@@ -1,4 +1,6 @@
 export const CODEX_RESPONSES_WEBSOCKET_PROOF_HEADER = "x-helm-codex-responses-websocket-proof";
+export const CODEX_RESPONSES_WEBSOCKET_RECOVERY_PROOF_HEADER =
+  "x-helm-codex-responses-websocket-recovery-proof";
 
 const requestMaterialized = new WeakMap<Request, () => void>();
 
