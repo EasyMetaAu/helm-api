@@ -187,7 +187,7 @@ describe("loadRuntimeCatalog", () => {
     expect(grok46?.capabilities).toMatchObject({
       supportsTools: true,
       jsonOutput: "none",
-      supportsVision: false,
+      supportsVision: true,
       supportsStreaming: true,
       maxContextTokens: 500_000,
       maxOutputTokens: null,
