@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-08-28 · Grok 4.6 Vision 对齐官方模型合同（Provider catalog / routing，docs/02/04，原则 2/3）
+
+- xAI 当前官方模型页与发布说明明确 `grok-4.6` 接受 text/image 输入并输出 text；Sub2API 当前 OAuth relay 也只对官方 Grok base URL 把该模型声明为 `input_modalities:["text","image"]`，并将图片以 Responses `input_image` 发往 `cli-chat-proxy.grok.com/v1/responses`。因此手工 catalog 将 `xai/grok-4.6.supportsVision` 从 `false` 改为 `true`，避免 Helm 在 provider 调用前误报 `capability_unsatisfiable`；provider executor、lane 与 fallback 均不改。
+- 该能力只代表图片理解，不代表图片生成；JSON、Composer vision 与额外媒体能力继续 fail-closed。合并部署后仍需用生产 Helm 通道做图片 canary 并从 `/v1/models` 回读能力，源码/CI 通过不冒充部署证据。
+
 ## 2026-08-27 · Responses 只在可证明未发送时触发完整历史恢复（Responses / OAuth provider / Gateway，docs/04/05/07，原则 3/5/8）
 
 - **生产根因**：`v0.28.91` 上线后的 64 个严格亲和失败（110 个 provider attempts）均紧跟两次真实 Codex 账号级 429；账号按 `Retry-After` 暂停期间，`x-codex-turn-state` / `previous_response_id` 仍正确绑定原账号，但 pool 在调用 provider 前抛出的 `original account is unavailable` 被 executor 当作普通失败继续 fallback，最终形成 400/502，甚至可能把状态型增量交给无原上下文的候选。
@@ -57,13 +62,9 @@
 - **生产根因**：`v0.28.83` 会在原账号已明确返回 `Invalid previous_response_id` 后继续遍历其余账号；每个账号内部又会原样重试一次，六个失败请求因此在返回 SSE error 前静默约 24–26 秒。现在已知原账号实际接到请求后若仍返回精确 invalid-ID，立即 fail-closed；只有持久化原账号已不可调度或 ID 尚无归属时，才保留同 provider/model 的 sibling 搜索。
 - **亲和优先级**：同一请求同时携带 `x-codex-turn-state` 与 `previous_response_id` 时，以不可迁移的 turn state 为最高优先级；Responses WebSocket session 首次成功后也固定到其账号，即使账号繁忙也不把同一上游 socket 状态切到 sibling。translated streaming 补齐原账号不可用时的 previous-ID 恢复入口。无 schema、配置、迁移或依赖变化。
 
-## 2026-08-25 · 持久化 Responses 亲和失效时先探测 sibling 且隔离模型熔断（OAuth provider / Responses，docs/04/05/07，原则 3/5/8）
-
-- **根因与修复**：pool rebuild 后，`previous_response_id` 仍指向已 parked/limited 的原账号时，旧逻辑在访问上游前直接抛出 `original account is unavailable`，没有尝试其他账号；现在该类续接从初始选择即进入有界 sibling 探测，成功后继续沿用既有 sticky/registry 修复链。`x-codex-turn-state` 仍保持严格原账号绑定，避免把不可迁移的上游会话状态串到其他账号。
-- **熔断边界**：两种严格亲和的“原账号不可用”均按账号级故障处理，不再累积到共享 model breaker，防止少数失效 pin 把健康 sibling 一起变成 `circuit_open`；服务器/传输故障仍照常计入 breaker。无 schema、配置或依赖变化。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-25 · 持久化 Responses 亲和失效时先探测 sibling 且隔离模型熔断**：原账号 parked/limited 时有界探测 sibling，严格 turn-state 仍不迁移，账号级不可用不污染共享 breaker；完整原文经 git history 回溯。
 - **2026-08-24 · Codex Responses 续接 ID 可在账号池内有界找回原账号**：只在尚无可靠归属且没有客户端可见输出时有界探测同 provider/model sibling，并同步修复 sticky/registry；其他状态型失败保持 fail-closed，完整原文经 git history 回溯。
 - **2026-08-22 · xAI OAuth TTS 端点**：新增只绑定实时媒体 entitlement 的 xAI OAuth voices 查询与音频生成端点；付费生成单写、不重试、不切账号，并接入请求预算、用量与脱敏 telemetry；无可信 TTS 价格合同时美元限额 key fail-closed，完整原文经 git history 回溯。
 - **2026-08-20 · Grok 视频输入对齐 xAI 官方 reference-to-video 合同**：stable 视频合同扩展 1–7 张参考图、七种画幅、最多 3 个预设 voice，并保留已公开的 30 秒兼容值；付费单写与 entitlement 边界不变，完整原文经 git history 回溯。
