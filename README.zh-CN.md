@@ -230,6 +230,7 @@ curl http://localhost:8080/v1/chat/completions \
 | `POST /v1/images/generations` | OpenAI Images API（[图片生成](#图片生成)） | —（图片模型/lane，任意 key 可用） |
 | `POST /v1/images/edits` | OpenAI Images API（JSON 或 multipart 编辑） | —（图片模型/lane，任意 key 可用） |
 | `POST /v1/videos/generations` · `GET /v1/videos/{request_id}` | Grok Imagine 视频 start / poll（[SuperGrok OAuth](#实验性-supergrok--x-premium-oauth)） | —（异步任务，任意 key 可用） |
+| `GET /v1/tts/voices` · `POST /v1/tts` | xAI / SuperGrok OAuth TTS（[TTS 接口文档](docs/15-tts-api.md)） | —（voices 只读；speech 返回音频） |
 | `POST /v1beta/interactions` | Gemini Interactions API（[图片生成](#图片生成)） | —（图片模型/lane，任意 key 可用） |
 
 **如何填写 `model`：**

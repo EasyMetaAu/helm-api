@@ -96,6 +96,83 @@ describe("createOpenAIClient.imageGeneration", () => {
   });
 });
 
+describe("createOpenAIClient TTS", () => {
+  it("POSTs JSON to /tts and returns bounded audio bytes", async () => {
+    const audio = new Uint8Array([0, 1, 2, 255]);
+    const fetch = vi
+      .fn()
+      .mockResolvedValue(new Response(audio, { headers: { "content-type": "audio/mpeg" } }));
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+    const req = { text: "hello", voice_id: "eve", language: "en" };
+    const out = await client.ttsSpeech?.(req);
+    expect(out?.audio).toEqual(audio);
+    expect(out?.contentType).toBe("audio/mpeg");
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(fetch.mock.calls[0]?.[0]).toBe("https://upstream.test/v1/tts");
+    expect(JSON.parse((fetch.mock.calls[0]?.[1] as RequestInit).body as string)).toEqual(req);
+  });
+
+  it("does not replay a paid TTS POST after 401", async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response("expired", { status: 401 }));
+    const onUnauthorized = vi.fn();
+    const client = createOpenAIClient({
+      config: {
+        baseUrl: CONFIG.baseUrl,
+        getAuthHeader: async () => "Bearer oauth",
+        onUnauthorized,
+      },
+      fetch,
+    });
+    await expect(client.ttsSpeech?.({ text: "hello" })).rejects.toMatchObject({
+      upstreamStatus: 401,
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(onUnauthorized).not.toHaveBeenCalled();
+  });
+
+  it.each([429, 503])("does not replay a paid TTS POST after upstream %s", async (status) => {
+    const fetch = vi.fn().mockResolvedValue(new Response("failed", { status }));
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+
+    await expect(client.ttsSpeech?.({ text: "hello" })).rejects.toMatchObject({
+      upstreamStatus: status,
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("does not replay a paid TTS POST after a transport error", async () => {
+    const fetch = vi
+      .fn()
+      .mockRejectedValue(Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }));
+    const client = createOpenAIClient({ config: CONFIG, fetch });
+
+    await expect(client.ttsSpeech?.({ text: "hello" })).rejects.toMatchObject({
+      name: "UpstreamError",
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("GETs /tts/voices and refreshes once on 401", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("expired", { status: 401 }))
+      .mockResolvedValueOnce(jsonResponse({ voices: [{ id: "eve" }] }));
+    const onUnauthorized = vi.fn();
+    const client = createOpenAIClient({
+      config: {
+        baseUrl: CONFIG.baseUrl,
+        getAuthHeader: async () => "Bearer oauth",
+        onUnauthorized,
+      },
+      fetch,
+    });
+    await expect(client.ttsVoices?.()).resolves.toEqual({ voices: [{ id: "eve" }] });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(onUnauthorized).toHaveBeenCalledOnce();
+    expect(fetch.mock.calls[0]?.[0]).toBe("https://upstream.test/v1/tts/voices");
+  });
+});
+
 describe("createOpenAIClient.imageEdit", () => {
   it("forwards the Codex JSON edit body to /images/edits", async () => {
     const upstream = { created: 0, data: [{ b64_json: "EDITED" }] };

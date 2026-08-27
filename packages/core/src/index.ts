@@ -620,6 +620,7 @@ export {
   XAI_OAUTH_DISCOVERY_URL,
   XAI_OAUTH_ISSUER,
   XAI_OAUTH_SCOPE,
+  XAI_TTS_CAPABILITY,
   type XaiApiBackend,
   type XaiDevicePollResult,
   type XaiDeviceStart,

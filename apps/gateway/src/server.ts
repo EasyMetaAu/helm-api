@@ -127,6 +127,7 @@ import {
   validateModelAliasTargets,
   windowsToUsageLimit,
   XAI_GROK_OAUTH_BASE_URL,
+  XAI_TTS_CAPABILITY,
   type XaiOAuthModel,
   xaiGrokInferenceHeaders,
   xaiGrokMediaEntitlementValidUntil,
@@ -235,6 +236,7 @@ import {
   type ResponsesRouteDeps,
   registerResponsesRoute,
 } from "./routes/responses.js";
+import { registerTtsRoute } from "./routes/tts.js";
 import { registerUsageStatsRoute } from "./routes/usage.js";
 import {
   registerVideosRoute,
@@ -1103,6 +1105,9 @@ export async function synthesizeOAuthProviders(
           modelValidUntilMs = Object.fromEntries(
             selectedMedia.map((model) => [model, entitlementValidUntil]),
           );
+          if (selectedMedia.length > 0) {
+            modelValidUntilMs[XAI_TTS_CAPABILITY] = entitlementValidUntil;
+          }
         }
         discovered = selected.map((model) => model.id);
         discoveredWireModels = new Map(selected.map((model) => [model.id, model.model]));
@@ -1212,6 +1217,9 @@ export async function synthesizeOAuthProviders(
         }
         discovered = acceptedIds;
         memberModels = acceptedWireModels;
+        if (modelValidUntilMs?.[XAI_TTS_CAPABILITY] !== undefined) {
+          memberModels = [...memberModels, XAI_TTS_CAPABILITY];
+        }
       } else {
         for (const model of discovered) {
           unionModels.add(model);
@@ -1814,6 +1822,8 @@ function createProviderClient(
       videoGeneration: mediaClient.videoGeneration,
       videoExtension: mediaClient.videoExtension,
       videoRetrieve: mediaClient.videoRetrieve,
+      ttsSpeech: mediaClient.ttsSpeech,
+      ttsVoices: mediaClient.ttsVoices,
     };
   }
   if (p.type === "gemini") {
@@ -1939,6 +1949,15 @@ export function resolveXaiMediaEmergencyState(
   if (command === "disable") return true;
   if (command === "restore" && rebuildApplied) return false;
   return current;
+}
+
+export function resolveXaiTtsClient(
+  oauthPools: ReadonlyMap<string, ProviderClient>,
+  mediaEmergencyDisabled: boolean,
+): Pick<ProviderClient, "ttsSpeech" | "ttsVoices"> | null {
+  if (mediaEmergencyDisabled) return null;
+  const client = oauthPools.get("xai");
+  return client?.ttsSpeech && client.ttsVoices ? client : null;
 }
 
 // Full wiring: config -> store -> bootstrap key -> provider -> routing pipeline.
@@ -4584,6 +4603,27 @@ export async function buildServer(
         };
       },
     },
+  });
+
+  registerTtsRoute(app, {
+    auth: { resolve: resolveIdentity },
+    memoryAdmission: requestBodyMemoryAdmission,
+    rateLimiter,
+    concurrencyGate,
+    budgetGate,
+    settleBudget: settleKeyBudget,
+    captureServingAccount: withServingAccountCapture,
+    recordOAuthUsage,
+    record: {
+      telemetry,
+      writes: writeQueue,
+      redact: (payload) => redact(payload),
+      now: () => Date.now(),
+      capturePayloads: () => settings.capture_payloads,
+      captureSessions: () => settings.capture_sessions,
+      captureGeneration: () => captureGeneration,
+    },
+    resolve: () => resolveXaiTtsClient(oauthPoolClients, xaiMediaEmergencyDisabled),
   });
 
   // POST /v1beta/interactions — Gemini Interactions API image gen (the SDK's

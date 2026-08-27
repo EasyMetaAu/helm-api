@@ -98,3 +98,61 @@ export async function consumeResponseTextWithinBudget<T>(
     lease.release();
   }
 }
+
+export async function consumeResponseBytesWithinBudget(
+  response: Response,
+  maxBytes: number,
+  admission: ResponseWorkAdmission = runtimeResponseWorkAdmission(),
+): Promise<Uint8Array> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new Error("maxBytes must be a non-negative safe integer");
+  }
+  if (exceedsBudget(response.headers.get("content-length"), maxBytes)) {
+    await response.body?.cancel().catch(() => {});
+    throw new ResponseBodyTooLargeError(maxBytes);
+  }
+  const contentLength = response.headers.get("content-length");
+  const declaredBytes =
+    contentLength !== null && /^\d+$/.test(contentLength) ? Number(contentLength) : 0;
+  let lease: ResponseWorkLease;
+  try {
+    lease = acquireResponseWork(admission, declaredBytes);
+  } catch (error) {
+    await response.body?.cancel().catch(() => {});
+    throw error;
+  }
+  try {
+    const reader = response.body?.getReader();
+    if (reader === undefined) return new Uint8Array();
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        totalBytes += value.byteLength;
+        if (maxBytes > 0 && totalBytes > maxBytes) {
+          await reader.cancel().catch(() => {});
+          throw new ResponseBodyTooLargeError(maxBytes);
+        }
+        if (!lease.resize(totalBytes).ok) {
+          await reader.cancel().catch(() => {});
+          throw new ResponseWorkCapacityError(admission.capacityBytes);
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    const bytes = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return bytes;
+  } finally {
+    lease.release();
+  }
+}

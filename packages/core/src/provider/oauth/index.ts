@@ -92,6 +92,7 @@ export {
   type OAuthPoolMember,
   type OAuthRateLimitParkContext,
   type OAuthSelectionStrategy,
+  XAI_TTS_CAPABILITY,
 } from "./pool.js";
 export { getOAuthProvider, getOAuthProviders, listOAuthProviderIds } from "./registry.js";
 export {

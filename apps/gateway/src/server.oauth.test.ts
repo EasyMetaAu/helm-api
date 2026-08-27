@@ -8,6 +8,7 @@ import {
   createSqliteDb,
   DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
   encryptSecret,
+  type ProviderClient,
   runtimeResponseWorkAdmission,
   SqliteConfigStore,
   SqliteOAuthTokenStore,
@@ -35,6 +36,7 @@ import {
   type OAuthRuntimeCtx,
   resolveProviderTransportProfile,
   resolveXaiMediaEmergencyState,
+  resolveXaiTtsClient,
   runCodexCompactProviderCall,
   synthesizeOAuthProviders,
   tlsTransportProviders,
@@ -50,6 +52,18 @@ describe("xAI media emergency latch", () => {
     expect(disabled).toBe(true);
     disabled = resolveXaiMediaEmergencyState(disabled, "restore", true);
     expect(disabled).toBe(false);
+  });
+
+  it("keeps TTS OAuth-only and fails closed while the emergency latch is active", () => {
+    const client = {
+      ttsSpeech: vi.fn(),
+      ttsVoices: vi.fn(),
+    } as unknown as ProviderClient;
+    const pools = new Map([["xai", client]]);
+
+    expect(resolveXaiTtsClient(pools, false)).toBe(client);
+    expect(resolveXaiTtsClient(pools, true)).toBeNull();
+    expect(resolveXaiTtsClient(new Map(), false)).toBeNull();
   });
 });
 
@@ -743,6 +757,14 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       if (target === "https://api.x.ai/v1/videos/video_1") {
         return Response.json({ status: "done", video: { url: "https://cdn.test/video" } });
       }
+      if (target === "https://api.x.ai/v1/tts") {
+        return new Response(new Uint8Array([1, 2, 3]), {
+          headers: { "content-type": "audio/mpeg" },
+        });
+      }
+      if (target === "https://api.x.ai/v1/tts/voices") {
+        return Response.json({ voices: [{ voice_id: "eve" }] });
+      }
       throw new Error(`unexpected URL ${target}`);
     });
 
@@ -792,10 +814,16 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     await expect(
       pool?.videoRetrieve?.("video_1", { providerAccount: "media" }),
     ).resolves.toMatchObject({ status: "done" });
+    await expect(pool?.ttsSpeech?.({ text: "hello" })).resolves.toMatchObject({
+      contentType: "audio/mpeg",
+    });
+    await expect(pool?.ttsVoices?.()).resolves.toEqual({ voices: [{ voice_id: "eve" }] });
     expect(calls).toContain("POST https://api.x.ai/v1/images/generations");
     expect(calls).toContain("POST https://api.x.ai/v1/videos/generations");
     expect(calls).toContain("POST https://api.x.ai/v1/videos/extensions");
     expect(calls).toContain("GET https://api.x.ai/v1/videos/video_1");
+    expect(calls).toContain("POST https://api.x.ai/v1/tts");
+    expect(calls).toContain("GET https://api.x.ai/v1/tts/voices");
   });
 
   it("keeps xAI text routable but omits media without positive persisted billing evidence", async () => {
@@ -820,6 +848,9 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     expect((enabled.providers[0]?.models ?? []).map((model) => model.alias)).toEqual([
       "xai/grok-4.5",
     ]);
+    await expect(
+      enabled.poolClients.get("xai")?.ttsSpeech?.({ text: "blocked" }),
+    ).rejects.toThrow();
   });
 
   it("keeps xAI text routable but omits media when fresh billing has no known paid tier", async () => {
@@ -955,6 +986,12 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
         mediaAuth.push(new Headers(init?.headers).get("authorization") ?? "");
         return Response.json({ data: [{ b64_json: "image" }] });
       }
+      if (target === "https://api.x.ai/v1/tts") {
+        mediaAuth.push(new Headers(init?.headers).get("authorization") ?? "");
+        return new Response(new Uint8Array([1]), {
+          headers: { "content-type": "audio/mpeg" },
+        });
+      }
       throw new Error(`unexpected URL ${target}`);
     });
 
@@ -977,7 +1014,13 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     await enabled.poolClients
       .get("xai")
       ?.imageGeneration?.({ model: "grok-imagine-image-quality", prompt: "draw" });
+    await enabled.poolClients.get("xai")?.ttsSpeech?.({ text: "hello" });
     expect(mediaAuth).toEqual([
+      `Bearer ${codexJwt({
+        sub: "xai-user-media-enabled",
+        email: "media-enabled@example.test",
+        tier: 1,
+      })}`,
       `Bearer ${codexJwt({
         sub: "xai-user-media-enabled",
         email: "media-enabled@example.test",

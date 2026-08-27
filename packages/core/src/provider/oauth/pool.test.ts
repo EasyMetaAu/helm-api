@@ -2100,6 +2100,8 @@ describe("createOAuthPoolClient — responsesCompact", () => {
 });
 
 describe("createOAuthPoolClient — media", () => {
+  const TTS_CAPABILITY = "helm-internal:xai-tts";
+
   function mediaMember(
     account: string,
     priority: number,
@@ -2138,9 +2140,38 @@ describe("createOAuthPoolClient — media", () => {
             provider_account: options?.providerAccount ?? options?.statefulAccount,
           };
         },
+        async ttsSpeech() {
+          calls.push(`tts:${account}`);
+          return { audio: new Uint8Array([1]), contentType: "audio/mpeg" };
+        },
+        async ttsVoices() {
+          calls.push(`voices:${account}`);
+          return { voices: [] };
+        },
       },
     };
   }
+
+  it("selects TTS only from an account with a live internal entitlement", async () => {
+    let nowMs = 1_000;
+    const calls: string[] = [];
+    const textOnly = mediaMember("text-only", 10, calls);
+    textOnly.models = ["grok-4.5"];
+    const entitled = mediaMember("tts", 10, calls);
+    entitled.models = ["grok-4.5", TTS_CAPABILITY];
+    entitled.modelValidUntilMs = { [TTS_CAPABILITY]: 1_500 };
+    const pool = createOAuthPoolClient({ members: [textOnly, entitled], now: () => nowMs });
+
+    await expect(pool.ttsSpeech?.({ text: "hello" })).resolves.toMatchObject({
+      contentType: "audio/mpeg",
+    });
+    await expect(pool.ttsVoices?.()).resolves.toEqual({ voices: [] });
+    expect(calls).toEqual(["tts:tts", "voices:tts"]);
+
+    nowMs = 1_500;
+    await expect(pool.ttsSpeech?.({ text: "expired" })).rejects.toThrow();
+    expect(calls).toEqual(["tts:tts", "voices:tts"]);
+  });
 
   it("selects one account for a paid media create and never changes sibling after ambiguity", async () => {
     const calls: string[] = [];
