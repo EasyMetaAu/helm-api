@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import {
   CodexResponsesWebSocketConnectError,
   type CodexResponsesWebSocketConnector,
+  CodexResponsesWebSocketNotOpenError,
   createResponseWorkAdmission,
 } from "@helm/core";
 import { HttpsProxyAgent } from "https-proxy-agent";
@@ -88,6 +89,28 @@ describe("createCodexResponsesWebSocketConnector", () => {
     await connection.send('{"type":"response.create"}');
     expect(await connection.receive()).toContain("response.created");
     expect(await connection.receive()).toContain("response.completed");
+  });
+
+  it("reports a typed error when send is attempted after the socket closes", async () => {
+    const server = createServer();
+    const websocketServer = new WebSocketServer({ noServer: true });
+    server.on("upgrade", (request, socket, head) => {
+      websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+        websocketServer.emit("connection", websocket, request);
+      });
+    });
+    websocketServer.on("connection", (socket) => socket.close());
+    const port = await listen(server);
+    const connector = createCodexResponsesWebSocketConnector({ timeoutMs: 2_000 });
+    const connection = await connector({
+      url: `ws://127.0.0.1:${port}/responses`,
+      headers: { authorization: "Bearer subscription-token" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    await expect(connection.send('{"type":"response.create"}')).rejects.toBeInstanceOf(
+      CodexResponsesWebSocketNotOpenError,
+    );
   });
 
   it("keeps close terminal state stable for current and future receivers", async () => {

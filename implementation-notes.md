@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-08-27 · 仅恢复发送前已关闭的 Responses WebSocket（Responses / Gateway，docs/05/07，原则 3/8）
+
+- `send()` 在调用底层 `socket.send()` 前若已确认连接不是 `OPEN`，抛出专用错误；续接请求最多重连并原样发送一次。发送回调失败仍视为结果不明，继续 fail-closed 返回 `previous_response_id_session_unavailable`，不重放、不切 sibling、不回落 HTTP。
+- 该边界只解决可证明“尚未调用发送”的安全恢复；无法证明上游是否收到字节的错误仍要求客户端带完整历史重新发起请求。
+
 ## 2026-08-26 · Codex Responses WebSocket 保活与已确认请求禁止重放（Responses / Gateway，docs/05/07，原则 3/8）
 
 - **空闲连接恢复**：上游 Codex WebSocket 现在每 60 秒发送协议 Ping，并要求 15 秒内收到 Pong；超时立即终止半开连接，让仍未发送的新请求在本地明确失败。测试可缩短两个时限，生产配置与协议正文不变。

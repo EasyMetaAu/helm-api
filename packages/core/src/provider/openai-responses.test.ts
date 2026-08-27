@@ -9,6 +9,7 @@ import {
   CodexResponsesWebSocketConnectError,
   type CodexResponsesWebSocketConnectInput,
   type CodexResponsesWebSocketConnection,
+  CodexResponsesWebSocketNotOpenError,
   codexAccountIdFromToken,
   createCodexResponsesClient,
   createGenericOpenAIResponsesClient,
@@ -2800,6 +2801,116 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect(firstCloseCalls).toBe(1);
     expect(connect).toHaveBeenCalledTimes(2);
     expect(chunks.join("")).toContain("response.completed");
+  });
+
+  it("reconnects a continuation when the websocket is closed before send", async () => {
+    let sendCalls = 0;
+    const first = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-parent" } },
+        { type: "response.completed", response: { id: "resp-parent", status: "completed" } },
+      ],
+    ]);
+    const originalSend = first.send;
+    first.send = async (text) => {
+      sendCalls += 1;
+      if (sendCalls === 2) throw new CodexResponsesWebSocketNotOpenError();
+      await originalSend(text);
+    };
+    const second = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-child" } },
+        { type: "response.completed", response: { id: "resp-child", status: "completed" } },
+      ],
+    ]);
+    const connect = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_closed_before_send")}`,
+        responsesWebSocketConnector: connect,
+        connectRetries: 1,
+        connectRetryBackoffMs: [0],
+      },
+    });
+    const parent = carrier("ingress-closed-before-send", {
+      model: "gpt-5.6-sol",
+      input: [],
+      stream: true,
+      store: false,
+    });
+    for await (const _chunk of client.nativePassthroughStream?.(parent) ?? []) {
+      // drain parent
+    }
+
+    const chunks: string[] = [];
+    for await (const chunk of client.nativePassthroughStream?.(
+      carrier("ingress-closed-before-send", {
+        model: "gpt-5.6-sol",
+        input: [],
+        previous_response_id: "resp-parent",
+        stream: true,
+        store: false,
+      }),
+    ) ?? []) {
+      chunks.push(chunk);
+    }
+
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(chunks.join("")).toContain("response.completed");
+  });
+
+  it("keeps an ambiguous continuation send fail-closed", async () => {
+    const connection = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-parent-ambiguous" } },
+        {
+          type: "response.completed",
+          response: { id: "resp-parent-ambiguous", status: "completed" },
+        },
+      ],
+    ]);
+    const originalSend = connection.send;
+    connection.send = async (text) => {
+      if (connection.sent.length > 0) {
+        throw Object.assign(new Error("write ECANCELED"), { code: "ECANCELED" });
+      }
+      await originalSend(text);
+    };
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_ambiguous_continuation")}`,
+        responsesWebSocketConnector: vi.fn(async () => connection),
+        connectRetries: 0,
+      },
+    });
+    for await (const _chunk of client.nativePassthroughStream?.(
+      carrier("ingress-ambiguous-continuation", {
+        model: "gpt-5.6-sol",
+        input: [],
+        stream: true,
+        store: false,
+      }),
+    ) ?? []) {
+      // drain parent
+    }
+
+    const continuation = client.nativePassthroughStream?.(
+      carrier("ingress-ambiguous-continuation", {
+        model: "gpt-5.6-sol",
+        input: [],
+        previous_response_id: "resp-parent-ambiguous",
+        stream: true,
+        store: false,
+      }),
+    );
+    const continuationIterator = continuation?.[Symbol.asyncIterator]();
+    await expect(continuationIterator?.next()).rejects.toMatchObject({
+      errorClass: "upstream_error",
+      upstreamStatus: 400,
+      providerRaw: { error: { code: "previous_response_id_session_unavailable" } },
+    });
   });
 
   it("falls back to HTTP after a closed websocket exhausts the retry budget", async () => {
