@@ -658,6 +658,7 @@ export {
   type CodexResponsesWebSocketConnectInput,
   type CodexResponsesWebSocketConnection,
   type CodexResponsesWebSocketConnector,
+  CodexResponsesWebSocketNotOpenError,
   type CodexResponsesWebSocketReceivedMessage,
   codexAccountIdFromToken,
   createCodexResponsesClient,

@@ -3,6 +3,7 @@ import {
   CodexResponsesWebSocketConnectError,
   type CodexResponsesWebSocketConnection,
   type CodexResponsesWebSocketConnector,
+  CodexResponsesWebSocketNotOpenError,
   type CodexResponsesWebSocketReceivedMessage,
   type ProxyConfig,
   proxyConfigToUrl,
@@ -175,7 +176,7 @@ class WsCodexConnection implements CodexResponsesWebSocketConnection {
   async send(text: string): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       if (this.socket.readyState !== WebSocket.OPEN) {
-        reject(new Error("Codex Responses websocket is closed"));
+        reject(new CodexResponsesWebSocketNotOpenError());
         return;
       }
       this.socket.send(text, (error) => {

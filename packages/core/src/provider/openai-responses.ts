@@ -188,6 +188,14 @@ export interface CodexResponsesWebSocketConnection {
   close(): Promise<void>;
 }
 
+/** The socket was closed before the request reached `socket.send`. */
+export class CodexResponsesWebSocketNotOpenError extends Error {
+  constructor() {
+    super("Codex Responses websocket is closed before send");
+    this.name = "CodexResponsesWebSocketNotOpenError";
+  }
+}
+
 export type CodexResponsesWebSocketConnector = (
   input: CodexResponsesWebSocketConnectInput,
 ) => Promise<CodexResponsesWebSocketConnection>;
@@ -2112,6 +2120,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         const maxRetries = websocketRetryCount();
         let retries = 0;
         let retriedInvalidPreviousResponseId = false;
+        let retriedClosedBeforeSend = false;
         while (!websocketHttpFallbackSessions.has(sessionId)) {
           let lease:
             | {
@@ -2254,7 +2263,20 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
           } catch (error) {
             await closeWebSocketSession(sessionId);
             if (opts?.signal?.aborted) throw opts.signal.reason ?? error;
-            if (sendingRequest && isTransientConnectionError(error)) {
+            if (
+              error instanceof CodexResponsesWebSocketNotOpenError &&
+              hasPreviousResponseId &&
+              !retriedClosedBeforeSend
+            ) {
+              if (retries < maxRetries) {
+                retriedClosedBeforeSend = true;
+                retryConnection = true;
+              } else {
+                throw continuationSessionUnavailable(
+                  "previous_response_id cannot be continued because its websocket closed before send; send the full conversation input instead",
+                );
+              }
+            } else if (sendingRequest && isTransientConnectionError(error)) {
               if (hasPreviousResponseId) {
                 throw continuationSessionUnavailable(
                   "previous_response_id continuation has an ambiguous websocket send outcome; send the full conversation input instead",
