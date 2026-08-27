@@ -133,12 +133,13 @@ describe("createCodexResponsesWebSocketConnector", () => {
     const currentReceiveA = connection.receive();
     const currentReceiveB = connection.receive();
 
-    serverSocket.close(1000);
+    serverSocket.close(1000, "upstream maintenance");
 
     expect(await settlePromptly(currentReceiveA)).toBeNull();
     expect(await settlePromptly(currentReceiveB)).toBeNull();
     expect(await settlePromptly(connection.receive())).toBeNull();
     expect(await settlePromptly(connection.receive())).toBeNull();
+    expect(connection.closeInfo?.()).toEqual({ code: 1000, reason: "upstream maintenance" });
   });
 
   it("keeps error terminal state stable for current and future receivers", async () => {

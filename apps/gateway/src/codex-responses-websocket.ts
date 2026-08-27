@@ -59,6 +59,7 @@ class WsCodexConnection implements CodexResponsesWebSocketConnection {
     reject: (error: Error) => void;
   }> = [];
   private terminal: Error | null | undefined;
+  private closeDetails: { code: number; reason: string } | null = null;
   private keepAliveTimer: ReturnType<typeof setTimeout> | undefined;
   private keepAliveTimeout: ReturnType<typeof setTimeout> | undefined;
 
@@ -72,7 +73,10 @@ class WsCodexConnection implements CodexResponsesWebSocketConnection {
   ) {
     this.responseHeaders = headers;
     socket.on("message", (data) => this.enqueueMessage(data));
-    socket.on("close", () => this.terminate(null));
+    socket.on("close", (code, reason) => {
+      this.closeDetails = { code, reason: reason.toString("utf8") };
+      this.terminate(null);
+    });
     socket.on("error", (error) => this.terminate(error));
     socket.on("pong", () => this.handlePong());
     this.scheduleKeepAlive();
@@ -207,6 +211,10 @@ class WsCodexConnection implements CodexResponsesWebSocketConnection {
     return await new Promise<CodexResponsesWebSocketReceivedMessage | null>((resolve, reject) => {
       this.waiters.push({ resolve, reject });
     });
+  }
+
+  closeInfo(): { code: number; reason: string } | null {
+    return this.closeDetails;
   }
 
   async close(): Promise<void> {

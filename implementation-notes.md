@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-08-27 · 将不可安全重放的 Responses 断流交还 Codex 恢复（Responses / Gateway，docs/05/07，原则 3/5/8）
+
+- `response.create` 一旦进入 WebSocket `send()`，发送回调失败、读超时/异常、EOF，以及收到输出后但终态前断连都属于结果不明：Helm 不再重放、不回落 HTTP、不切 sibling，也不处罚 breaker；只有专用错误能证明底层 `socket.send()` 尚未调用时，初始无状态请求才可重试。无法解析的单个上游事件与直连 Codex 一致，释放资源后忽略并继续等待，不因协议扩展重放整轮。续接在发送前发现原 socket 已关闭时同样不把 opaque `previous_response_id` 搬到新连接。本条取代同日早先“续接发送前关闭后重连一次”的决定。
+- provider 通过两个结构化 recovery code 把该状态保留到 Responses SSE，包括已经输出后的流内错误与非 2xx 嵌套错误；下游 WebSocket bridge 不先发送 400/error frame，而以 `1012` 关闭连接。Codex 0.145.0 的原生 retry loop 会把 transport close 视为可重试，并在新连接上清空增量 `previous_response_id`、用客户端持有的完整当前会话重建请求；Helm 本身仍只发送上游一次。
+- telemetry 在本地 teardown 前快照上游 close code/reason，并记录 `before_send` / `send_callback_error` / `after_send_before_event` / `after_send_after_preamble` / `after_send_after_output` 生命周期，避免把 Helm 自己的 close `1000` 冒充上游事实。该恢复与直连 Codex 的断流语义一致，但上游没有幂等键时无法承诺 exactly-once；重试决定仍由持有完整历史的客户端负责。无 schema、migration、依赖或配置变化。
+
 ## 2026-08-27 · 仅恢复发送前已关闭的 Responses WebSocket（Responses / Gateway，docs/05/07，原则 3/8）
 
 - `send()` 在调用底层 `socket.send()` 前若已确认连接不是 `OPEN`，抛出专用错误；续接请求最多重连并原样发送一次。发送回调失败仍视为结果不明，继续 fail-closed 返回 `previous_response_id_session_unavailable`，不重放、不切 sibling、不回落 HTTP。
@@ -55,18 +61,10 @@
 - **恢复边界**：同一账号、同一 WebSocket 的一次原样重试仍优先；只有它再次返回精确的 `400 Invalid previous_response_id` 且尚未产生客户端可见输出时，OAuth pool 才逐个尝试其余同 provider、同 model 的可调度账号。其他 4xx、限流、凭证、超时、断连与已开始输出的错误继续保持原有 fail-closed 语义，搜索次数天然受账号数限制。
 - **亲和修复**：找到能继续该 ID 的账号后，同时更新进程内 sticky 映射与 durable Responses registry 中旧 ID 的 `provider_account`；后续续接优先回到这个实际拥有状态的原账号。全部账号都报告不存在时仍返回最后一个上游错误，不删除 ID、不伪造历史，也不跨 provider/协议。
 
-## 2026-08-20 · Grok 视频输入对齐 xAI 官方 reference-to-video 合同（Videos，Imagine spec §4 / Phase 1 §2–5，原则 2/3/6/7）
-
-- **官方合同与最小修复**：2026-08-20 复核 xAI Videos 文档与 Sub2API `49504adc` 后，确认 stable `grok-imagine-video-1.5` 接受 1–7 张 `reference_images`、七种画幅，以及最多 3 个预设 `{ voice_id }` `reference_audios`；image-to-video 接受可选画幅并支持 1080p。共享严格 schema 在同一边界扩展这些字段，`images` 兼容输入仍只在付费 POST 前规范成 `reference_images`。
-- **兼容、实测与限制**：generation/extension 时长扩大为官方 `1–15` 秒整数，同时保留已公开的 `30` 兼容值；reference-to-video 仍限 480p/720p。当前只开放普遍可用的预设 voice ID，不开放需 partner 权限且会引入大正文处理的自定义音频 URL；既有 prompt-only `audio` 仅作为历史兼容，不把它宣称为官方 REST 字段。付费单写、账号 entitlement、receipt 绑定和 `outcome_unknown` 边界不变。本机 SuperGrok OAuth 单写 canary 已验证 1 张参考图 + `eve`、16:9/9:16、720p、8 秒和 AAC 音轨；1080p、其他时长与其他画幅未做付费穷举。
-
-## 2026-08-20 · 配额周期历史新增已用百分比（OAuth providers，原则 3/7）
-
-- 重置边界记录新增可空 `usedPercent`，仅在以后观测到周期关闭时从上游快照写入；旧行不回填，无法证明的近似/日周聚合继续显示空值。
-- SQLite/Postgres 各新增一次可空列迁移；当前周期仅使用未过期快照，避免把上一周期百分比套到新周期。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-20 · Grok 视频输入对齐 xAI 官方 reference-to-video 合同**：stable 视频合同扩展 1–7 张参考图、七种画幅、最多 3 个预设 voice，并保留已公开的 30 秒兼容值；付费单写与 entitlement 边界不变，完整原文经 git history 回溯。
+- **2026-08-20 · 配额周期历史新增已用百分比**：仅在以后真实观测周期关闭时保存可空 `usedPercent`，旧行和不可证明的近似历史不回填，完整原文经 git history 回溯。
 - **2026-08-19 · Codex Responses 续接 ID 在原 WebSocket 上做一次有界恢复**：仅在首个客户端可见输出前、针对精确 `Invalid previous_response_id` 在同一活动 WebSocket 原样重发一次；第二次仍失败则 fail-closed，完整原文经 git history 回溯。
 - **2026-08-19 · Grok 视频统一时长并复用单写链增加扩展接口**：generation/extension 共用严格媒体合同、付费单写与固定账号轮询；真实 canary 只证明 15 秒纯文本、单图和多图，30 秒与 extension 仍未获能力证明；完整原文经 git history 回溯。
 - **2026-08-19 · 保留已公开的 Grok Imagine 媒体选项**：恢复 fast image 与 prompt-only video 的既有有界字段，同时保持严格 schema、授权、预算与付费单写边界；完整原文经 git history 回溯。

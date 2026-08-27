@@ -3,6 +3,7 @@ import { type IncomingMessage, STATUS_CODES } from "node:http";
 import type { Duplex } from "node:stream";
 import {
   CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
+  isCodexResponsesRecoverableDisconnectCode,
   type ResponseWorkAdmission,
   readSSE,
   runtimeMemoryBudget,
@@ -249,11 +250,14 @@ async function responseErrorEnvelope(response: Response): Promise<Record<string,
   } catch {
     body = null;
   }
+  const error = errorShape(body, `HTTP ${response.status}`);
+  const recoverableCode = recoverableDisconnectCode(body);
+  if (recoverableCode !== null) error.code = recoverableCode;
   return {
     type: "error",
     status: response.status,
     status_code: response.status,
-    error: errorShape(body, `HTTP ${response.status}`),
+    error,
     headers: selectedResponseHeaders(response.headers),
   };
 }
@@ -315,6 +319,26 @@ async function sendEnvelope(socket: WebSocket, envelope: Record<string, unknown>
   await sendText(socket, JSON.stringify(envelope));
 }
 
+function recoverableDisconnectCode(value: unknown): string | null {
+  let current = value;
+  while (current !== null && typeof current === "object" && !Array.isArray(current)) {
+    const record = current as Record<string, unknown>;
+    if (isCodexResponsesRecoverableDisconnectCode(record.code)) return record.code as string;
+    current =
+      record.error !== undefined
+        ? record.error
+        : record.provider_raw !== undefined
+          ? record.provider_raw
+          : null;
+  }
+  return null;
+}
+
+function closeForFullHistoryRecovery(socket: WebSocket): void {
+  if (socket.readyState === WebSocket.OPEN)
+    socket.close(1012, "upstream response stream disconnected");
+}
+
 function websocketPayload(event: string | undefined, data: string): string | null {
   const trimmed = data.trim();
   if (trimmed === "" || trimmed === "[DONE]") return null;
@@ -369,7 +393,12 @@ async function forwardResponse(
     markResponsesWebSocketRequestParsed(internalRequest);
   }
   if (!response.ok) {
-    await sendEnvelope(socket, await responseErrorEnvelope(response));
+    const envelope = await responseErrorEnvelope(response);
+    if (recoverableDisconnectCode(envelope) !== null) {
+      closeForFullHistoryRecovery(socket);
+      return true;
+    }
+    await sendEnvelope(socket, envelope);
     return true;
   }
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
@@ -383,13 +412,19 @@ async function forwardResponse(
   for await (const frame of readSSE(body, maxSseFrameBytes, responseWorkAdmission)) {
     const payload = websocketPayload(frame.event, frame.data);
     if (payload === null) continue;
-    await sendText(socket, payload);
     let type: unknown;
     try {
-      type = (JSON.parse(payload) as { type?: unknown }).type;
+      const parsed = JSON.parse(payload) as { type?: unknown };
+      type = parsed.type;
+      if (recoverableDisconnectCode(parsed) !== null) {
+        void body.cancel().catch(() => {});
+        closeForFullHistoryRecovery(socket);
+        return true;
+      }
     } catch {
       type = undefined;
     }
+    await sendText(socket, payload);
     if (
       type === "response.completed" ||
       type === "response.cancelled" ||

@@ -216,11 +216,18 @@ export type RecordOAuthUsageFn = (
 export class PipelineError extends Error {
   readonly error_class: string;
   readonly trace_id: string;
-  constructor(error_class: string, message: string, trace_id: string) {
+  readonly provider_raw: Record<string, unknown> | null;
+  constructor(
+    error_class: string,
+    message: string,
+    trace_id: string,
+    provider_raw: Record<string, unknown> | null = null,
+  ) {
     super(message);
     this.name = "PipelineError";
     this.error_class = error_class;
     this.trace_id = trace_id;
+    this.provider_raw = provider_raw;
   }
 }
 
@@ -1028,6 +1035,7 @@ export function createMessagesPipeline(
               result.error?.error_class ?? "all_providers_failed",
               result.error?.message ?? "all providers failed",
               traceId,
+              result.error?.provider_raw ?? null,
             )
           : null;
 

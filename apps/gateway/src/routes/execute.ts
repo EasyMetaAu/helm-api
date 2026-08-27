@@ -18,6 +18,7 @@ import {
   checkCapability,
   correlationTraceId,
   guardPreOutputFailure,
+  isCodexResponsesRecoverableDisconnectCode,
   type NativePassthroughDisableReason,
   openaiTransformer,
   optimizeVisualContext,
@@ -2295,6 +2296,42 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                   error_class: "lane_unavailable",
                   message: "user message queue wait timed out; retry shortly",
                   trace_id: correlationTraceId(req),
+                }),
+              },
+              body: null,
+              stream: null,
+            };
+          }
+
+          // `response.create` may already be running upstream. Never replay it on a
+          // sibling provider: the Responses WebSocket bridge converts this marker into
+          // a transport disconnect so Codex can rebuild from its own full history.
+          if (
+            err instanceof UpstreamError &&
+            isCodexResponsesRecoverableDisconnectCode(upstreamErrorCode(err.providerRaw))
+          ) {
+            settleBreaker("abort");
+            const detail = errorDetailOf(err);
+            attempts.push({
+              alias,
+              skipped: false,
+              skip_reason: null,
+              status: "error",
+              error_class: "lane_unavailable",
+              latency_ms: elapsed(),
+              cost_usd: null,
+              error_detail: detail,
+              ...attemptTelemetry,
+            });
+            return {
+              attempts,
+              final: {
+                status: "error",
+                error: makeHelmError({
+                  error_class: "lane_unavailable",
+                  message: detail.message,
+                  trace_id: correlationTraceId(req),
+                  provider_raw: detail.provider_raw,
                 }),
               },
               body: null,

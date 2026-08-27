@@ -2363,6 +2363,74 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     expect(env).toMatchObject({ type: "error", code: "all_providers_failed", param: null });
   });
 
+  it("preserves the recoverable Codex disconnect code across the pipeline seam", async () => {
+    const { deps } = makeDeps({
+      transformRequestOut: () => ({
+        stream: true,
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: {},
+      }),
+      // biome-ignore lint/correctness/useYield: throw-only generator (failure before first event)
+      streamIR: async function* () {
+        throw new PipelineError(
+          "lane_unavailable",
+          "upstream websocket closed after send",
+          "trace-1",
+          { error: { code: "response_create_outcome_unknown" } },
+        );
+      },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    const frames = parseSSE(await res.text());
+
+    expect(JSON.parse(frames.find((frame) => frame.event === "error")?.data ?? "{}")).toMatchObject(
+      {
+        type: "error",
+        code: "response_create_outcome_unknown",
+      },
+    );
+  });
+
+  it("preserves a recoverable Codex disconnect after streamed output", async () => {
+    const { deps } = makeDeps({
+      transformRequestOut: () => ({
+        stream: true,
+        model: "auto",
+        messages: [{ role: "user", content: "hi" }],
+        metadata: {},
+      }),
+      streamIR: async function* () {
+        yield { type: "response.output_text.delta", delta: "partial", sequence_number: 0 };
+        throw new UpstreamError(
+          "upstream_error",
+          "upstream websocket closed before completion",
+          { error: { code: "response_create_outcome_unknown" } },
+          400,
+        );
+      },
+    });
+    const app = buildApp(deps);
+    const res = await app.request("/v1/responses", {
+      method: "POST",
+      headers: AUTH,
+      body: JSON.stringify({ ...REQ, stream: true }),
+    });
+    const frames = parseSSE(await res.text());
+
+    expect(JSON.parse(frames.find((frame) => frame.event === "error")?.data ?? "{}")).toMatchObject(
+      {
+        type: "error",
+        code: "response_create_outcome_unknown",
+      },
+    );
+  });
+
   it("client abort emits NO error frame (benign non-provider fault)", async () => {
     const ac = new AbortController();
     const { record, insert } = makeRecord();
