@@ -4284,10 +4284,10 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
   it.each([
     ["invalid JSON", "not-json"],
     ["an untyped JSON event", JSON.stringify({ response: { status: "in_progress" } })],
-  ])("destroys the upstream websocket session after %s", async (_label, malformedEvent) => {
-    const first = fakeConnection([[malformedEvent]]);
-    const second = fakeConnection([
+  ])("ignores %s on the upstream websocket", async (_label, malformedEvent) => {
+    const connection = fakeConnection([
       [
+        malformedEvent,
         { type: "response.created", response: { id: "resp-next" } },
         {
           type: "response.completed",
@@ -4295,7 +4295,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
         },
       ],
     ]);
-    const connect = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const connect = vi.fn(async () => connection);
     const client = createCodexResponsesClient({
       config: {
         baseUrl: "https://chatgpt.com/backend-api/codex",
@@ -4310,19 +4310,14 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       store: false,
     });
 
-    const firstIterator = client.nativePassthroughStream?.(request)[Symbol.asyncIterator]();
-    await expect(firstIterator?.next()).rejects.toMatchObject({
-      name: "UpstreamError",
-      errorClass: "upstream_error",
-    });
-    const secondTurn: string[] = [];
+    const chunks: string[] = [];
     for await (const chunk of client.nativePassthroughStream?.(request) ?? []) {
-      secondTurn.push(chunk);
+      chunks.push(chunk);
     }
 
-    expect(first.closeCalls).toBe(1);
-    expect(connect).toHaveBeenCalledTimes(2);
-    expect(secondTurn.join("")).toContain("response.completed");
+    expect(connection.closeCalls).toBe(0);
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(chunks.join("")).toContain("response.completed");
   });
 
   it("preserves a Responses Lite incremental continuation without re-inserting tools", async () => {
