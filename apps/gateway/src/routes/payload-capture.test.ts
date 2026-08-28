@@ -1611,6 +1611,66 @@ describe("recordServed — deferred write queue (the three pipeline faces)", () 
     expect(s.inserted[0]?.request_content_mode).toBe(row.mode);
   });
 
+  it("captures the exact payload and Session revision for a failed request even in metadata-only mode", async () => {
+    const s = sink();
+    const revisions: UpsertSessionRevisionInput[] = [];
+    const telemetry = {
+      ...s.telemetry,
+      getSessionByRef: vi.fn(async () => null),
+      upsertSessionRevision: vi.fn(async (input: UpsertSessionRevisionInput) => {
+        revisions.push(input);
+      }),
+    } as unknown as RecordServedDeps["telemetry"];
+    const writes = createWriteQueue({ telemetry, log: () => {}, flushIntervalMs: 10_000 });
+    const failed = decision();
+    failed.final = { ...failed.final, status: "error", error_reason: "upstream_error" };
+    failed.session = {
+      ref: "failed-session-ref",
+      label: "failed-thread",
+      source: "x-thread-id",
+    };
+
+    await recordServed(
+      {
+        telemetry,
+        writes,
+        redact: (value) => value,
+        now: () => 5000,
+        capturePayloads: () => false,
+        captureSessions: () => false,
+      },
+      {
+        ...args,
+        requestId: "req_failed",
+        accountId: "account-1",
+        decision: failed,
+        requestJson: '{"messages":[{"role":"user","content":"original"}]}',
+        responseJson: '{"error":{"message":"provider failed"}}',
+        upstreamRequestJson: '{"model":"provider-model","messages":[]}',
+      },
+      () => {},
+    );
+    await writes.flush();
+
+    expect(s.inserted[0]?.request_content_mode).toBe("payload");
+    expect(s.payloads).toEqual([
+      expect.objectContaining({
+        requestId: "req_failed",
+        requestJson: '{"messages":[{"role":"user","content":"original"}]}',
+        responseJson: '{"error":{"message":"provider failed"}}',
+        upstreamRequestJson: '{"model":"provider-model","messages":[]}',
+      }),
+    ]);
+    expect(revisions).toEqual([
+      expect.objectContaining({
+        sessionRef: "failed-session-ref",
+        requestId: "req_failed",
+        requestDeltaJson: '[{"role":"user","content":"original"}]',
+        responseJson: '{"error":{"message":"provider failed"}}',
+      }),
+    ]);
+  });
+
   it("records a timed-out request as an error even if the provider later completed", async () => {
     const s = sink();
     const d: RecordServedDeps = {
