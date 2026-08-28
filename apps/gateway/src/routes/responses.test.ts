@@ -37,7 +37,9 @@ const AUTH = { Authorization: "Bearer helm_live_secret", "Content-Type": "applic
 // to recordServed → redact → telemetry.insert (it never inspects fields). The
 // `model_alias` marker lets a test assert the redacted decision actually rode the
 // insert call.
-const FAKE_DECISION = { final: { status: "ok", model_alias: "gpt-4o" } } as never;
+function fakeDecision(): never {
+  return { final: { status: "ok", model_alias: "gpt-4o" } } as never;
+}
 
 describe("settleResponsesStreamOutcome", () => {
   it("gives an overall request timeout precedence over an AbortError", () => {
@@ -165,7 +167,7 @@ function makeDeps(
           order.push("route");
           harness.pipelineSawIR = ir;
           return {
-            decision: FAKE_DECISION,
+            decision: fakeDecision(),
             ...(over.nativePassthrough === true ? { nativePassthrough: true } : {}),
             ...(over.responseMetadata !== undefined
               ? { responseMetadata: over.responseMetadata }
@@ -379,7 +381,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       run: async (_ir, _identity, signal) => {
         pipelineSignal = signal;
         return {
-          decision: FAKE_DECISION,
+          decision: fakeDecision(),
           collect: async () => ({}),
           streamIR: async function* () {
             started.resolve(undefined);
@@ -568,7 +570,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
       run: async () => {
         pipelineOpened = true;
         return {
-          decision: FAKE_DECISION,
+          decision: fakeDecision(),
           responseMetadata: {
             "openai-model": "gpt-5.6-sol",
             "x-codex-turn-state": "stream-turn-state",
@@ -1689,7 +1691,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     const route: RouteFn = async (request) => {
       routeHarness.routed = request;
       return {
-        decision: FAKE_DECISION,
+        decision: fakeDecision(),
         final: { status: "ok", alias: "openai-codex/gpt-5.6-sol" },
         body: null,
         stream: (async function* () {
@@ -1757,7 +1759,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     const route: RouteFn = async (request) => {
       routeHarness.routed = request;
       return {
-        decision: FAKE_DECISION,
+        decision: fakeDecision(),
         final: { status: "ok", alias: "openai-codex/gpt-5.6-sol" },
         body: null,
         stream: (async function* () {
@@ -1853,7 +1855,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
     const route: RouteFn = async (request) => {
       routeHarness.routed = request;
       return {
-        decision: FAKE_DECISION,
+        decision: fakeDecision(),
         final: { status: "ok", alias: "openai-codex/gpt-5.6-sol" },
         body: null,
         stream: (async function* () {
@@ -2256,7 +2258,7 @@ describe("POST /v1/responses (OpenAI Responses inbound)", () => {
         routeStarted.resolve(undefined);
         await routeMayFinish;
         return {
-          decision: FAKE_DECISION,
+          decision: fakeDecision(),
           collect: async () => ({ id: "ir-resp", choices: [] }),
           streamIR: async function* () {
             yield { type: "response.completed", sequence_number: 2 };
