@@ -183,6 +183,13 @@ and never bloat the decision JSON.
 - `capture_payloads` defaults to **OFF** and stores complete per-request bodies when
   exact inspection or Retry is required. The two modes are mutually exclusive;
   operators can also select metadata-only.
+- A terminally failed request overrides the per-key and global content mode for that
+  request only: Helm stores its verbatim client request, available provider-native
+  request and response/error body in `request_payloads`, and also appends its Session
+  revision. The redacted decision continues to carry the bounded per-attempt upstream
+  status, headers, body, cause, and stack. Successful requests still follow the selected
+  `none` / `payload` / `session` mode. Diagnostic captures use the normal retention and
+  runtime body-size limits and never include authorization headers.
 - Runtime settings are stored in `config_kv`. If that persisted blob is malformed
   or no longer matches the schema, settings load fail-open to safe defaults with
   **both content modes forced off** until the operator saves a valid object; an

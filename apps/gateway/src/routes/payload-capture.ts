@@ -721,9 +721,10 @@ export function stampRequestBodyBytes(
 }
 
 // Record ONE served request: the telemetry row (always — this is what makes the
-// request appear in /admin/requests) plus the verbatim request/response payload
-// (gated by capture_payloads). Shared by the three pipeline faces (/v1/responses,
-// /v1/messages, gemini) so the recording logic can never drift between them again.
+// request appear in /admin/requests) plus the verbatim request/response payload.
+// Successful requests follow the configured content mode; terminal failures force
+// both exact payload and Session capture for diagnosis. Shared by the pipeline faces
+// (/v1/responses, /v1/messages, gemini) so the recording logic cannot drift.
 // Fully FAIL-OPEN: a telemetry/payload failure must never turn a served response
 // into a 5xx or break a stream.
 export async function recordServed(
@@ -747,13 +748,27 @@ export async function recordServed(
   // pipelines may carry a separate client trace_id for response/log correlation,
   // but telemetry.request_id and request_payloads.request_id must always use the
   // server-generated context request_id passed in args.
-  const storageDecision: DecisionRecord = {
-    ...stampRequestBodyBytes(args.decision, args.requestJson, args.requestBodyBytes),
-    request_id: args.requestId,
-    request_content_mode: effectiveRequestContentMode(deps),
-  };
-  const decision =
+  const storageDecision = stampRequestBodyBytes(
+    args.decision,
+    args.requestJson,
+    args.requestBodyBytes,
+  );
+  const finalDecision =
     args.timedOut === true ? decisionForTimedOutRequest(storageDecision) : storageDecision;
+  const failed = finalDecision.final.status === "error";
+  const captureDeps: RecordServedDeps = failed
+    ? {
+        ...deps,
+        capturePayloads: () => true,
+        captureSessions: () => true,
+        captureGeneration: undefined,
+      }
+    : deps;
+  const decision: DecisionRecord = {
+    ...finalDecision,
+    request_id: args.requestId,
+    request_content_mode: failed ? "payload" : effectiveRequestContentMode(deps),
+  };
   const responseJson = args.timedOut === true ? null : args.responseJson;
   const sessionResponse =
     decision.protocol === "openai_responses"
@@ -779,9 +794,9 @@ export async function recordServed(
       apiKeyId: args.apiKeyId,
       createdAt: new Date(deps.now()),
     });
-    await queueOrPersistSessionRequest(deps, sessionArgs, log);
-    if (captureEnabled(deps)) {
-      const generation = deps.captureGeneration?.();
+    await queueOrPersistSessionRequest(captureDeps, sessionArgs, log);
+    if (captureEnabled(captureDeps)) {
+      const generation = captureDeps.captureGeneration?.();
       await w.enqueuePayload(
         {
           requestId: args.requestId,
@@ -792,7 +807,7 @@ export async function recordServed(
         },
         generation === undefined
           ? undefined
-          : () => deps.captureGeneration?.() === generation && captureEnabled(deps),
+          : () => captureDeps.captureGeneration?.() === generation && captureEnabled(captureDeps),
       );
       // Retention is NOT pruned on the request path — the scheduled cleanup runner
       // owns payload retention (archive-first), governed by the cleanup settings.
@@ -801,9 +816,9 @@ export async function recordServed(
   }
 
   // Inline path (no write queue): today's behavior, byte-for-byte.
-  await queueOrPersistSessionRequest(deps, sessionArgs, log);
+  await queueOrPersistSessionRequest(captureDeps, sessionArgs, log);
   await persistPayload(
-    deps,
+    captureDeps,
     {
       requestId: args.requestId,
       requestJson: args.requestJson,
