@@ -84,6 +84,13 @@ openai-codex/codex-auto-review:
   outputPerMTokUsd: null
   cacheReadPerMTokUsd: null
   cacheWritePerMTokUsd: null
+# ChatGPT subscription image usage has no trustworthy USD rate card. Spend-capped
+# keys therefore fail closed before the paid write; request-count budgets still work.
+openai-codex/gpt-image-2:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+  cacheReadPerMTokUsd: null
+  cacheWritePerMTokUsd: null
 openai-codex/gpt-5.6:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0

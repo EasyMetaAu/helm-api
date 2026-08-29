@@ -4530,6 +4530,205 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
   });
 });
 
+describe("createCodexResponsesClient — Images API bridge", () => {
+  const clientFor = (fetchMock: typeof fetch, onUnauthorized?: () => void) =>
+    createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        onUnauthorized,
+      },
+      fetch: fetchMock,
+      responseWorkAdmission: createResponseWorkAdmission({
+        capacityBytes: 1_000_000,
+        jsonAmplification: 1,
+        minChargeBytes: 1,
+      }),
+    });
+
+  it("maps generation to the image_generation tool and maps the completed image back", async () => {
+    let sent: Record<string, unknown> = {};
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      sent = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return sseResponse([
+        {
+          type: "response.output_item.done",
+          item: {
+            type: "image_generation_call",
+            result: "aW1hZ2U=",
+            revised_prompt: "an orange cat",
+            output_format: "png",
+          },
+        },
+        {
+          type: "response.completed",
+          response: {
+            created_at: 1_787_932_800,
+            output: [
+              {
+                type: "image_generation_call",
+                result: "aW1hZ2U=",
+                revised_prompt: "an orange cat",
+                output_format: "png",
+              },
+            ],
+            tool_usage: {
+              image_gen: {
+                input_tokens: 18,
+                output_tokens: 1_056,
+                output_tokens_details: { image_tokens: 1_056 },
+              },
+            },
+          },
+        },
+      ]);
+    }) as unknown as typeof fetch;
+
+    const out = await clientFor(fetchMock).imageGeneration?.({
+      model: "gpt-image-2",
+      prompt: "一只橘猫",
+      kind: "json",
+      n: 2,
+      size: "1024x1024",
+      quality: "medium",
+      output_format: "png",
+    });
+
+    expect(sent).toMatchObject({
+      model: "gpt-5.4-mini",
+      store: false,
+      stream: true,
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "一只橘猫" }],
+        },
+      ],
+      tools: [
+        {
+          type: "image_generation",
+          action: "generate",
+          model: "gpt-image-2",
+          n: 2,
+          size: "1024x1024",
+          quality: "medium",
+          output_format: "png",
+        },
+      ],
+      tool_choice: { type: "image_generation" },
+    });
+    expect(out).toEqual({
+      created: 1_787_932_800,
+      data: [{ b64_json: "aW1hZ2U=", revised_prompt: "an orange cat" }],
+      usage: {
+        input_tokens: 18,
+        output_tokens: 1_056,
+        output_tokens_details: { image_tokens: 1_056 },
+      },
+    });
+  });
+
+  it("maps JSON and multipart edits to input images and a mask", async () => {
+    const sent: Record<string, unknown>[] = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return sseResponse([
+        {
+          type: "response.completed",
+          response: {
+            output: [{ type: "image_generation_call", result: "ZWRpdA==" }],
+          },
+        },
+      ]);
+    }) as unknown as typeof fetch;
+    const client = clientFor(fetchMock);
+
+    await client.imageEdit?.({
+      kind: "json",
+      body: {
+        model: "gpt-image-2",
+        prompt: "加一顶红帽子",
+        image: { url: "data:image/png;base64,aW1hZ2U=" },
+        mask: { url: "data:image/png;base64,bWFzaw==" },
+      },
+    });
+    await client.imageEdit?.({
+      kind: "multipart",
+      fields: [
+        { name: "model", value: "gpt-image-2" },
+        { name: "prompt", value: "改成蓝色" },
+        {
+          name: "image",
+          value: new Uint8Array([1, 2, 3]),
+          filename: "input.png",
+          contentType: "image/png",
+        },
+        {
+          name: "mask",
+          value: new Uint8Array([4, 5]),
+          filename: "mask.png",
+          contentType: "image/png",
+        },
+      ],
+    });
+
+    expect(sent[0]).toMatchObject({
+      input: [
+        {
+          content: [
+            { type: "input_text", text: "加一顶红帽子" },
+            { type: "input_image", image_url: "data:image/png;base64,aW1hZ2U=" },
+          ],
+        },
+      ],
+      tools: [
+        {
+          action: "edit",
+          input_image_mask: { image_url: "data:image/png;base64,bWFzaw==" },
+        },
+      ],
+    });
+    expect(sent[1]).toMatchObject({
+      input: [
+        {
+          content: [
+            { type: "input_text", text: "改成蓝色" },
+            { type: "input_image", image_url: "data:image/png;base64,AQID" },
+          ],
+        },
+      ],
+      tools: [
+        {
+          action: "edit",
+          input_image_mask: { image_url: "data:image/png;base64,BAU=" },
+        },
+      ],
+    });
+  });
+
+  it("never retries an ambiguous image write or a 401", async () => {
+    const transportFetch = vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof fetch;
+    await expect(
+      clientFor(transportFetch).imageGeneration?.({ model: "gpt-image-2", prompt: "draw" }),
+    ).rejects.toBeInstanceOf(UpstreamError);
+    expect(transportFetch).toHaveBeenCalledTimes(1);
+
+    const onUnauthorized = vi.fn();
+    const unauthorizedFetch = vi.fn(async () => jsonResponse({ error: "expired" }, 401));
+    await expect(
+      clientFor(unauthorizedFetch as unknown as typeof fetch, onUnauthorized).imageGeneration?.({
+        model: "gpt-image-2",
+        prompt: "draw",
+      }),
+    ).rejects.toMatchObject({ upstreamStatus: 401 });
+    expect(unauthorizedFetch).toHaveBeenCalledTimes(1);
+    expect(onUnauthorized).not.toHaveBeenCalled();
+  });
+});
+
 // nativePassthrough (non-stream, issue #217, Phase 3). Codex is stream-only in
 // practice (store:false + stream:true), but the non-stream method is implemented for
 // completeness: it forwards the body VERBATIM and returns the upstream JSON untranslated

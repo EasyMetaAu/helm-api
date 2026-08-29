@@ -1708,6 +1708,57 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     expect(aliases).toEqual(["openai-codex/gpt-5.6-luna", "openai-codex/gpt-5.6-sol"]);
   });
 
+  it("exposes the ChatGPT image alias only when gpt-5.4-mini advertises the full image tool", async () => {
+    const variants = [
+      { tool: true, lite: false, image: true },
+      { tool: false, lite: false, image: false },
+      { tool: true, lite: true, image: false },
+    ];
+    for (const [index, variant] of variants.entries()) {
+      const { ctx, config } = oauthStores();
+      await ctx.store.upsert({
+        providerId: "openai-codex",
+        account: `image-${index}`,
+        accessEnc: encryptSecret(`codex-access-${index}`, ENC_KEY),
+        refreshEnc: encryptSecret(`codex-refresh-${index}`, ENC_KEY),
+        expiresAt: FAR_FUTURE,
+        meta: null,
+        updatedAt: 1,
+      });
+      const catalog = createCodexModelCatalog({ cache: createCodexModelCache(config, ENC_KEY) });
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            models: [
+              codexModel("gpt-5.4-mini", {
+                experimental_supported_tools: variant.tool ? ["image_generation"] : [],
+                use_responses_lite: variant.lite,
+              }),
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+
+      const result = await synthesizeOAuthProviders(
+        [],
+        ctx,
+        config,
+        "https://fallback/v1",
+        60_000,
+        noop,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { catalog, runInBackground },
+      );
+      const aliases = (result.providers[0]?.models ?? []).map((model) => model.alias);
+      expect(aliases.includes("openai-codex/gpt-image-2")).toBe(variant.image);
+    }
+  });
+
   it("keeps a live Codex continuation websocket across an unchanged OAuth hot rebuild", async () => {
     const { ctx, config } = oauthStores();
     await ctx.store.upsert({

@@ -46,6 +46,8 @@ import { resolveOpenAICodexModelAlias } from "./oauth/models.js";
 import {
   type ChatCompletionRequest,
   type ChatCompletionResponse,
+  type ImageEditInput,
+  type ProviderCallOptions,
   type ProviderClient,
   type ProviderConfig,
   readUpstreamErrorBody,
@@ -117,6 +119,7 @@ export interface CodexResponsesClientConfig {
 export interface CodexResponsesClientDeps {
   config: CodexResponsesClientConfig;
   fetch?: typeof globalThis.fetch;
+  responseWorkAdmission?: ResponseWorkAdmission;
 }
 
 export interface GenericOpenAIResponsesClientDeps {
@@ -1206,6 +1209,186 @@ function canonicalizeCodexNativeInput(
   return carrier;
 }
 
+const CODEX_IMAGE_CONTROLLER_MODEL = "gpt-5.4-mini";
+const CODEX_IMAGE_INSTRUCTIONS = "Use the user's image prompt exactly as provided.";
+const CODEX_IMAGE_STRING_TOOL_FIELDS = [
+  "size",
+  "quality",
+  "background",
+  "output_format",
+  "moderation",
+  "style",
+] as const;
+const CODEX_IMAGE_NUMBER_TOOL_FIELDS = ["n", "output_compression", "partial_images"] as const;
+
+function imageString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function imagePart(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  const imageUrl = imageString(value.image_url) ?? imageString(value.url);
+  if (imageUrl) return { type: "input_image", image_url: imageUrl };
+  const fileId = imageString(value.file_id);
+  return fileId ? { type: "input_image", file_id: fileId } : null;
+}
+
+function imageDataUrl(bytes: Uint8Array, contentType: string): string {
+  return `data:${contentType || "application/octet-stream"};base64,${Buffer.from(bytes).toString("base64")}`;
+}
+
+function codexImageInput(
+  req: Record<string, unknown> | ImageEditInput,
+  editing: boolean,
+): {
+  body: Record<string, unknown>;
+  images: Record<string, unknown>[];
+  mask: Record<string, unknown> | null;
+} {
+  if (!editing) return { body: req as Record<string, unknown>, images: [], mask: null };
+  const edit = req as ImageEditInput;
+  if (edit.kind === "json") {
+    const images: Record<string, unknown>[] = [];
+    const single = imagePart(edit.body.image);
+    if (single) images.push(single);
+    if (Array.isArray(edit.body.images)) {
+      for (const value of edit.body.images) {
+        const part = imagePart(value);
+        if (part) images.push(part);
+      }
+    }
+    return { body: edit.body, images, mask: imagePart(edit.body.mask) };
+  }
+
+  const body: Record<string, unknown> = {};
+  const images: Record<string, unknown>[] = [];
+  let mask: Record<string, unknown> | null = null;
+  for (const field of edit.fields) {
+    if (!("filename" in field)) {
+      body[field.name] = field.value;
+      if (field.name === "image" || field.name === "image[]") {
+        images.push({ type: "input_image", image_url: field.value });
+      } else if (field.name === "mask") {
+        mask = { type: "input_image", image_url: field.value };
+      }
+      continue;
+    }
+    const part = {
+      type: "input_image",
+      image_url: imageDataUrl(field.value, field.contentType),
+    };
+    if (field.name === "image" || field.name === "image[]") images.push(part);
+    else if (field.name === "mask") mask = part;
+  }
+  return { body, images, mask };
+}
+
+function buildCodexImageRequest(
+  action: "generate" | "edit",
+  req: Record<string, unknown> | ImageEditInput,
+): { body: Record<string, unknown>; responseFormat: string } {
+  const input = codexImageInput(req, action === "edit");
+  const prompt = imageString(input.body.prompt) ?? "";
+  const tool: Record<string, unknown> = {
+    type: "image_generation",
+    action,
+    model: imageString(input.body.model) ?? "gpt-image-2",
+  };
+  for (const field of CODEX_IMAGE_STRING_TOOL_FIELDS) {
+    const value = imageString(input.body[field]);
+    if (value) tool[field] = value;
+  }
+  for (const field of CODEX_IMAGE_NUMBER_TOOL_FIELDS) {
+    const raw = input.body[field];
+    const value = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
+    if (Number.isFinite(value)) tool[field] = value;
+  }
+  if (input.mask) {
+    const { type: _type, ...mask } = input.mask;
+    tool.input_image_mask = mask;
+  }
+  return {
+    responseFormat: imageString(input.body.response_format) ?? "b64_json",
+    body: {
+      model: CODEX_IMAGE_CONTROLLER_MODEL,
+      instructions: CODEX_IMAGE_INSTRUCTIONS,
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: prompt }, ...input.images],
+        },
+      ],
+      tools: [tool],
+      tool_choice: { type: "image_generation" },
+      reasoning: { effort: "medium", summary: "auto" },
+      parallel_tool_calls: true,
+      include: ["reasoning.encrypted_content"],
+      store: false,
+      stream: true,
+    },
+  };
+}
+
+function codexImageData(result: Record<string, unknown>, responseFormat: string) {
+  const b64 = imageString(result.result);
+  if (!b64) return null;
+  const item: Record<string, unknown> =
+    responseFormat === "url"
+      ? {
+          url: `data:image/${imageString(result.output_format) === "jpg" ? "jpeg" : (imageString(result.output_format) ?? "png")};base64,${b64}`,
+        }
+      : { b64_json: b64 };
+  const revisedPrompt = imageString(result.revised_prompt);
+  if (revisedPrompt) item.revised_prompt = revisedPrompt;
+  return item;
+}
+
+async function readCodexImageResponse(
+  response: Response,
+  responseFormat: string,
+  idleMs: number,
+  workAdmission: ResponseWorkAdmission,
+): Promise<Record<string, unknown>> {
+  const data: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+  let created = Math.floor(Date.now() / 1_000);
+  let usage: Record<string, unknown> | undefined;
+  let completed = false;
+  const append = (value: unknown): void => {
+    if (!isRecord(value)) return;
+    const result = imageString(value.result);
+    if (!result || seen.has(result)) return;
+    const item = codexImageData(value, responseFormat);
+    if (!item) return;
+    seen.add(result);
+    data.push(item);
+  };
+
+  for await (const event of readResponsesEvents(response, idleMs, workAdmission)) {
+    if (
+      event.type === "error" ||
+      event.type === "response.failed" ||
+      event.type === "response.incomplete"
+    ) {
+      throw responseEventError(event);
+    }
+    if (event.type === "response.output_item.done") append(event.item);
+    if (event.type !== "response.completed") continue;
+    const final = isRecord(event.response) ? event.response : {};
+    if (typeof final.created_at === "number" && final.created_at > 0) created = final.created_at;
+    if (Array.isArray(final.output)) final.output.forEach(append);
+    const toolUsage = isRecord(final.tool_usage) ? final.tool_usage : {};
+    if (isRecord(toolUsage.image_gen)) usage = toolUsage.image_gen;
+    completed = true;
+    break;
+  }
+  if (!completed)
+    throw new UpstreamError("upstream_error", "image stream closed before completion");
+  if (data.length === 0) throw new UpstreamError("upstream_error", "image tool returned no image");
+  return { created, data, ...(usage ? { usage } : {}) };
+}
+
 export function createCodexResponsesClient(deps: CodexResponsesClientDeps): ProviderClient {
   const doFetch = deps.fetch ?? globalThis.fetch;
   const cfg = deps.config;
@@ -1374,6 +1557,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       signal?: AbortSignal;
       capture?: (wireBody: string) => void;
       timeoutThroughBody?: boolean;
+      retry?: boolean;
     },
   ): Promise<CodexHttpResponse> {
     const { prepared, turnKey } = await prepareRequest(
@@ -1392,39 +1576,34 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       // normal Response (never a throw), so it re-issues the whole attempt after a pause
       // rather than burning a candidate on transient upstream capacity pressure. A
       // discarded attempt's deferred body-timeout timer is released explicitly.
+      const send = async (): Promise<CodexHttpResponse> => {
+        const t = withTimeout(timeoutMs, init.signal);
+        try {
+          const response = await doFetch(init.endpoint, {
+            method: "POST",
+            headers: prepared.headers,
+            body: prepared.bodyText,
+            signal: t.signal,
+          });
+          if (init.timeoutThroughBody === true) return { response, bodyTimeout: t, turnKey };
+          return { response, turnKey };
+        } catch (err) {
+          if (t.isTimeout() && !t.isExternalAbort()) {
+            throw new UpstreamError("timeout", "upstream request timed out");
+          }
+          throw err;
+        } finally {
+          if (init.timeoutThroughBody !== true) t.cleanup();
+        }
+      };
+      if (init.retry === false) return await send();
       return await withOverloadRetry(
         () =>
-          withConnectionRetry(
-            async () => {
-              const t = withTimeout(timeoutMs, init.signal);
-              try {
-                const response = await doFetch(init.endpoint, {
-                  method: "POST",
-                  headers: prepared.headers,
-                  body: prepared.bodyText,
-                  signal: t.signal,
-                });
-                if (init.timeoutThroughBody === true) {
-                  return { response, bodyTimeout: t, turnKey };
-                }
-                return { response, turnKey };
-              } catch (err) {
-                if (t.isTimeout() && !t.isExternalAbort()) {
-                  throw new UpstreamError("timeout", "upstream request timed out");
-                }
-                throw err;
-              } finally {
-                if (init.timeoutThroughBody !== true) {
-                  t.cleanup();
-                }
-              }
-            },
-            {
-              retries: cfg.connectRetries,
-              backoffMs: cfg.connectRetryBackoffMs,
-              signal: init.signal,
-            },
-          ),
+          withConnectionRetry(send, {
+            retries: cfg.connectRetries,
+            backoffMs: cfg.connectRetryBackoffMs,
+            signal: init.signal,
+          }),
         {
           signal: init.signal,
           pick: (value) => value.response,
@@ -1594,6 +1773,43 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       structuredRaw,
       result.response.status,
       scrub(safeUpstreamHeaders(result.response.headers)) as Record<string, string>,
+    );
+  }
+
+  async function runCodexImageTool(
+    action: "generate" | "edit",
+    input: Record<string, unknown> | ImageEditInput,
+    opts?: ProviderCallOptions,
+  ): Promise<Record<string, unknown>> {
+    const requestBody = buildCodexImageRequest(action, input);
+    const modelInfo = await resolveModelInfo(CODEX_IMAGE_CONTROLLER_MODEL);
+    if (
+      modelInfo &&
+      (modelInfo.use_responses_lite ||
+        !modelInfo.experimental_supported_tools.includes("image_generation"))
+    ) {
+      throw new UpstreamError(
+        "upstream_error",
+        "ChatGPT account does not expose the image_generation tool",
+      );
+    }
+    // A subscription image create/edit is billable and may have succeeded before a
+    // disconnect. Deliberately bypass connection, overload, and 401 replay here.
+    const result = await request(requestBody.body, modelInfo, {
+      endpoint: url,
+      accept: "text/event-stream",
+      signal: opts?.signal,
+      capture: opts?.captureUpstream,
+      retry: false,
+    });
+    captureTurnState(result);
+    fireResponseMeta(result.response, opts?.onResponseMeta);
+    if (!result.response.ok) throw await errorFromResponse(result);
+    return await readCodexImageResponse(
+      result.response,
+      requestBody.responseFormat,
+      timeoutMs,
+      deps.responseWorkAdmission ?? runtimeResponseWorkAdmission(),
     );
   }
 
@@ -2098,6 +2314,14 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
 
   return {
     nativeProtocolProfile: "codex_responses",
+
+    async imageGeneration(req, opts) {
+      return await runCodexImageTool("generate", req, opts);
+    },
+
+    async imageEdit(req, opts) {
+      return await runCodexImageTool("edit", req, opts);
+    },
 
     async chatCompletion(req, opts) {
       const model = String((req as Record<string, unknown>).model ?? "");

@@ -263,6 +263,11 @@ gpt-image:
   primary: gpt-image-2
   fallback: []
 
+chatgpt-image:
+  purpose: OpenAI image generation and editing via ChatGPT OAuth
+  primary: openai-codex/gpt-image-2
+  fallback: []
+
 gemini-image:
   purpose: Gemini image — Google official → ZenMux Vertex flash → ZenMux pro
   primary: google/gemini-3.1-flash-image

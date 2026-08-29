@@ -274,6 +274,24 @@ curl http://localhost:8080/v1/images/generations \
   -d '{ "model": "gpt-image-2", "prompt": "a single red apple on a plain white background", "size": "1024x1024" }'
 ```
 
+With a connected ChatGPT OAuth account, Helm exposes a separate `chatgpt-image`
+lane when that account's live Codex catalog explicitly advertises non-Lite
+`gpt-5.4-mini` with the `image_generation` tool. Generation keeps the route above;
+editing uses the Images edit route:
+
+```bash
+curl http://localhost:8080/v1/images/edits \
+  -H "Authorization: Bearer $HELM_KEY" -H "Content-Type: application/json" \
+  -d '{ "model": "chatgpt-image", "prompt": "add a red hat to the cat",
+        "image": { "url": "data:image/png;base64,..." } }'
+```
+
+Both operations become Responses `image_generation` tool calls with `action`
+set to `generate` or `edit`. These are subscription-backed paid single writes:
+disconnects, timeouts, 401s, and overload responses are not retried or moved to
+another account. A key with a USD spend cap fails closed while subscription image
+pricing remains unknown.
+
 **2. Gemini `generateContent`** — the Gemini SDK's `generate_content` path. Name an image model and ask for image output; Helm routes it natively, so the response carries `candidates[].content.parts[].inlineData`:
 
 ```bash
@@ -310,6 +328,9 @@ gpt-image:                          # request `model: "gpt-image"`
 gpt-image-2:                        # request `model: "gpt-image-2"`
   primary: zenmux/gpt-image-2       # low-cost generation path
   fallback: [openai/gpt-image-2]    # operation fallback, including image edits
+chatgpt-image:                      # request `model: "chatgpt-image"`
+  primary: openai-codex/gpt-image-2 # ChatGPT OAuth; no cross-account/provider replay
+  fallback: []
 gemini-image:                       # request `model: "gemini-image"`
   primary: google/gemini-3.1-flash-image   # Google official → ZenMux flash → pro
   fallback: [gemini-3.1-flash-image, gemini-3-pro-image]

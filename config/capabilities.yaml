@@ -225,6 +225,17 @@ openai-codex/gpt-5.4-mini:
       levels: [low, medium, high, xhigh]
   maxContextTokens: 272000
   maxOutputTokens: 65536
+# Synthesized only when the authenticated Codex catalog says gpt-5.4-mini can
+# invoke the full image_generation tool. This alias is media-only.
+openai-codex/gpt-image-2:
+  supportsTools: false
+  jsonOutput: none
+  supportsVision: true
+  supportsStreaming: false
+  supportsCachedContent: false
+  outputImage: true
+  maxContextTokens: 32768
+  maxOutputTokens: 32768
 # Official DeepSeek API: json_object YES, json_schema NO (response_format json_schema
 # 400s "This response_format type is unavailable now"). Hence `object`, not `schema` —
 # a strict json_schema request prunes these and lands on a schema-capable backend

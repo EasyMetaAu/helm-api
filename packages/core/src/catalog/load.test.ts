@@ -266,6 +266,10 @@ describe("loadRuntimeCatalog", () => {
     });
     expect(catalog.get("deepseek/deepseek-v4-pro")?.pricing.cacheReadPerMTokUsd).toBe(0.003625);
     expect(catalog.get("openai-codex/gpt-5.4-mini")?.pricing.cacheReadPerMTokUsd).toBe(0.075);
+    expect(catalog.get("openai-codex/gpt-image-2")).toMatchObject({
+      capabilities: { outputImage: true },
+      pricing: { inputPerMTokUsd: null, outputPerMTokUsd: null },
+    });
     expect(catalog.get("zenmux-vertex/gemini-3.5-flash")?.pricing.cacheReadPerMTokUsd).toBe(0.15);
     expect(catalog.get("zenmux-vertex/gemini-3.5-flash")?.pricing.serviceTiers).toEqual({
       flex: {
@@ -451,6 +455,7 @@ describe("loadRuntimeCatalog", () => {
     ).toEqual(["deepseek-v4-flash", "openai-codex/codex-auto-review"]);
 
     const intentionallyUnpriced = new Set([
+      "openai-codex/gpt-image-2",
       "xai/grok-imagine-image",
       "xai/grok-imagine-image-quality",
       "xai/grok-imagine-video-1.5-preview",
