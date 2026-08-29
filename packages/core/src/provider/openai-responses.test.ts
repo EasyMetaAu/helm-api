@@ -4629,6 +4629,30 @@ describe("createCodexResponsesClient — Images API bridge", () => {
     });
   });
 
+  it("preserves duplicate image payloads when the upstream returns n > 1", async () => {
+    const fetchMock = vi.fn(async () =>
+      sseResponse([
+        {
+          type: "response.completed",
+          response: {
+            output: [
+              { type: "image_generation_call", result: "same-image" },
+              { type: "image_generation_call", result: "same-image" },
+            ],
+          },
+        },
+      ]),
+    ) as unknown as typeof fetch;
+
+    const out = await clientFor(fetchMock).imageGeneration?.({
+      model: "gpt-image-2",
+      prompt: "draw two identical icons",
+      n: 2,
+    });
+
+    expect(out?.data).toHaveLength(2);
+  });
+
   it("maps JSON and multipart edits to input images and a mask", async () => {
     const sent: Record<string, unknown>[] = [];
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
