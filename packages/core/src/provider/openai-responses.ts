@@ -1349,23 +1349,22 @@ async function readCodexImageResponse(
   responseFormat: string,
   idleMs: number,
   workAdmission: ResponseWorkAdmission,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
-  const data: Record<string, unknown>[] = [];
-  const seen = new Set<string>();
+  let data: Record<string, unknown>[] = [];
   let created = Math.floor(Date.now() / 1_000);
   let usage: Record<string, unknown> | undefined;
   let completed = false;
-  const append = (value: unknown): void => {
+  const append = (value: unknown, target: Record<string, unknown>[]): void => {
     if (!isRecord(value)) return;
     const result = imageString(value.result);
-    if (!result || seen.has(result)) return;
+    if (!result) return;
     const item = codexImageData(value, responseFormat);
     if (!item) return;
-    seen.add(result);
-    data.push(item);
+    target.push(item);
   };
 
-  for await (const event of readResponsesEvents(response, idleMs, workAdmission)) {
+  for await (const event of readResponsesEvents(response, idleMs, workAdmission, signal)) {
     if (
       event.type === "error" ||
       event.type === "response.failed" ||
@@ -1373,11 +1372,21 @@ async function readCodexImageResponse(
     ) {
       throw responseEventError(event);
     }
-    if (event.type === "response.output_item.done") append(event.item);
+    if (event.type === "response.output_item.done") {
+      const item: Record<string, unknown>[] = [];
+      append(event.item, item);
+      data.push(...item);
+    }
     if (event.type !== "response.completed") continue;
     const final = isRecord(event.response) ? event.response : {};
     if (typeof final.created_at === "number" && final.created_at > 0) created = final.created_at;
-    if (Array.isArray(final.output)) final.output.forEach(append);
+    if (Array.isArray(final.output)) {
+      const completedData: Record<string, unknown>[] = [];
+      for (const value of final.output) append(value, completedData);
+      // The completed response is authoritative when present. Do not deduplicate
+      // by base64 payload: two valid generated images may intentionally be identical.
+      if (completedData.length > 0) data = completedData;
+    }
     const toolUsage = isRecord(final.tool_usage) ? final.tool_usage : {};
     if (isRecord(toolUsage.image_gen)) usage = toolUsage.image_gen;
     completed = true;
@@ -1810,6 +1819,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       requestBody.responseFormat,
       timeoutMs,
       deps.responseWorkAdmission ?? runtimeResponseWorkAdmission(),
+      opts?.signal,
     );
   }
 
@@ -3120,6 +3130,7 @@ export async function* readResponsesEvents(
   // (connect/TTFB timeout was already cleared at headers).
   idleMs = 0,
   workAdmission: ResponseWorkAdmission = runtimeResponseWorkAdmission(),
+  signal?: AbortSignal,
 ): AsyncGenerator<Record<string, unknown>> {
   const body = res.body;
   if (!body) return;
@@ -3131,7 +3142,7 @@ export async function* readResponsesEvents(
     while (true) {
       let read: { done: boolean; value?: Uint8Array };
       try {
-        read = await readChunkWithIdle(reader, idleMs);
+        read = await readChunkWithIdle(reader, idleMs, signal);
       } catch (err) {
         if (err instanceof StreamStalledError) throw new UpstreamError("timeout", err.message);
         throw err;

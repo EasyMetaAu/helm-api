@@ -53,6 +53,15 @@ describe("readChunkWithIdle", () => {
     expect(reader.cancelReasons).toHaveLength(0);
   });
 
+  it("cancels a pending read when the caller aborts", async () => {
+    const reader = fakeReader([() => new Promise<ReadResult>(() => {})]);
+    const controller = new AbortController();
+    const pending = readChunkWithIdle(reader, 0, controller.signal);
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(reader.cancelReasons).toHaveLength(1);
+  });
+
   describe("with fake timers", () => {
     beforeEach(() => vi.useFakeTimers());
     afterEach(() => vi.useRealTimers());

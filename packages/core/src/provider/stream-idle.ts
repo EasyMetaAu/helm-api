@@ -57,13 +57,28 @@ export interface IdleReader<T> {
 export async function readChunkWithIdle<T>(
   reader: IdleReader<T>,
   idleMs: number,
+  signal?: AbortSignal,
 ): Promise<IdleReadResult<T>> {
-  if (!(idleMs > 0)) return reader.read();
+  if (signal?.aborted)
+    throw signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+  if (!(idleMs > 0) && signal === undefined) return reader.read();
 
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const idle = new Promise<typeof STALLED>((resolve) => {
-    timer = setTimeout(() => resolve(STALLED), idleMs);
-  });
+  const idle =
+    idleMs > 0
+      ? new Promise<typeof STALLED>((resolve) => {
+          timer = setTimeout(() => resolve(STALLED), idleMs);
+        })
+      : null;
+  let abort: Promise<never> | null = null;
+  let onAbort: (() => void) | undefined;
+  if (signal !== undefined) {
+    abort = new Promise<never>((_, reject) => {
+      onAbort = () =>
+        reject(signal.reason ?? new DOMException("The operation was aborted", "AbortError"));
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
 
   const read = reader.read();
   // If the deadline wins, `read` is still pending; swallow any later rejection so
@@ -71,7 +86,7 @@ export async function readChunkWithIdle<T>(
   read.catch(() => {});
 
   try {
-    const raced = await Promise.race([read, idle]);
+    const raced = await Promise.race([read, ...(idle ? [idle] : []), ...(abort ? [abort] : [])]);
     if (raced === STALLED) {
       const err = new StreamStalledError(idleMs);
       // Fire-and-forget: a slow or never-resolving cancel must NOT delay the
@@ -81,7 +96,11 @@ export async function readChunkWithIdle<T>(
       throw err;
     }
     return raced;
+  } catch (error) {
+    if (signal?.aborted) void reader.cancel(error).catch(() => {});
+    throw error;
   } finally {
     if (timer) clearTimeout(timer);
+    if (signal !== undefined && onAbort !== undefined) signal.removeEventListener("abort", onAbort);
   }
 }
