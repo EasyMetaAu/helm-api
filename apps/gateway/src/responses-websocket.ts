@@ -28,6 +28,7 @@ const RESPONSES_WEBSOCKET_PATHS = new Set(["/v1/responses", "/responses", "/open
 const DEFAULT_PREFLIGHT_TIMEOUT_MS = 6_000;
 const DEFAULT_IDLE_SESSION_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_MAX_PREFLIGHT_REQUESTS = 128;
+const MAX_RECOVERY_DELAY_MS = 10_000;
 
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -335,9 +336,42 @@ function recoverableDisconnectCode(value: unknown): string | null {
   return null;
 }
 
-function closeForFullHistoryRecovery(socket: WebSocket): void {
-  if (socket.readyState === WebSocket.OPEN)
+function recoveryDelayMs(value: unknown): number {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return 0;
+  const recovery = (value as { recovery?: unknown }).recovery;
+  if (recovery === null || typeof recovery !== "object" || Array.isArray(recovery)) return 0;
+  const record = recovery as Record<string, unknown>;
+  const delay = record.retry_after_ms;
+  return record.safe_to_replay === true &&
+    record.lifecycle_phase === "before_send" &&
+    Number.isSafeInteger(delay) &&
+    (delay as number) > 0
+    ? Math.min(delay as number, MAX_RECOVERY_DELAY_MS)
+    : 0;
+}
+
+function waitForRecoveryDelay(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (delayMs <= 0 || signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, delayMs);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
+async function closeForFullHistoryRecovery(
+  socket: WebSocket,
+  recovery: unknown,
+  signal: AbortSignal,
+): Promise<void> {
+  await waitForRecoveryDelay(recoveryDelayMs(recovery), signal);
+  if (!signal.aborted && socket.readyState === WebSocket.OPEN) {
     socket.close(1012, "upstream response stream disconnected");
+  }
 }
 
 function websocketPayload(event: string | undefined, data: string): string | null {
@@ -399,7 +433,7 @@ async function forwardResponse(
   if (!response.ok) {
     const envelope = await responseErrorEnvelope(response);
     if (trustedRecovery && recoverableDisconnectCode(envelope) !== null) {
-      closeForFullHistoryRecovery(socket);
+      await closeForFullHistoryRecovery(socket, envelope, signal);
       return true;
     }
     await sendEnvelope(socket, envelope);
@@ -422,7 +456,7 @@ async function forwardResponse(
       type = parsed.type;
       if (trustedRecovery && recoverableDisconnectCode(parsed) !== null) {
         void body.cancel().catch(() => {});
-        closeForFullHistoryRecovery(socket);
+        await closeForFullHistoryRecovery(socket, parsed, signal);
         return true;
       }
     } catch {

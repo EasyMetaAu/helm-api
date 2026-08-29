@@ -4116,6 +4116,9 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect(connection.closeCalls).toBe(1);
     expect(connect).toHaveBeenCalledTimes(1);
     if (status === 429) {
+      expect((caught as UpstreamError).upstreamHeaders).toMatchObject({
+        "retry-after": "17",
+      });
       expect((caught as UpstreamError).providerRaw).toMatchObject({
         headers: {
           "retry-after": "17",

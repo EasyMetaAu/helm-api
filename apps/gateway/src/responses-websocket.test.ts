@@ -1193,6 +1193,80 @@ describe("Responses websocket bridge", () => {
     expect(closedSessionId).not.toBe("");
   });
 
+  it("paces a trusted pre-send recovery until its short account cooldown expires", async () => {
+    const baseUrl = await startBridge(
+      async () =>
+        new Response(
+          'event: error\ndata: {"type":"error","code":"response_create_not_sent","message":"retry original account","recovery":{"safe_to_replay":true,"lifecycle_phase":"before_send","retry_after_ms":50}}\n\n',
+          {
+            headers: {
+              "content-type": "text/event-stream",
+              [CODEX_RESPONSES_WEBSOCKET_RECOVERY_PROOF_HEADER]: TEST_SESSION_PROOF,
+            },
+          },
+        ),
+      undefined,
+      {
+        responseWorkAdmission: createResponseWorkAdmission({
+          capacityBytes: 1_000_000,
+          jsonAmplification: 1,
+          minChargeBytes: 1,
+        }),
+      },
+    );
+    const socket = await connect(`${baseUrl}/v1/responses`);
+    const startedAt = Date.now();
+    const closed = once(socket, "close");
+    socket.send(JSON.stringify({ type: "response.create", model: "gpt-5.6-sol", input: [] }));
+
+    const [code] = await closed;
+
+    expect(code).toBe(1012);
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(40);
+  });
+
+  it("caps a trusted recovery delay before closing once", async () => {
+    const baseUrl = await startBridge(
+      async () =>
+        new Response(
+          'event: error\ndata: {"type":"error","code":"response_create_not_sent","message":"retry original account","recovery":{"safe_to_replay":true,"lifecycle_phase":"before_send","retry_after_ms":50000}}\n\n',
+          {
+            headers: {
+              "content-type": "text/event-stream",
+              [CODEX_RESPONSES_WEBSOCKET_RECOVERY_PROOF_HEADER]: TEST_SESSION_PROOF,
+            },
+          },
+        ),
+      undefined,
+      {
+        responseWorkAdmission: createResponseWorkAdmission({
+          capacityBytes: 1_000_000,
+          jsonAmplification: 1,
+          minChargeBytes: 1,
+        }),
+      },
+    );
+    const socket = await connect(`${baseUrl}/v1/responses`);
+    let closeCode: number | undefined;
+    socket.once("close", (code) => {
+      closeCode = code;
+    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    try {
+      socket.send(JSON.stringify({ type: "response.create", model: "gpt-5.6-sol", input: [] }));
+      await vi.waitFor(() => expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 10_000));
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(closeCode).toBeUndefined();
+
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.waitFor(() => expect(closeCode).toBe(1012));
+    } finally {
+      timeoutSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("turns a non-OK nested recovery marker into a retryable disconnect", async () => {
     const baseUrl = await startBridge(async () =>
       Response.json(

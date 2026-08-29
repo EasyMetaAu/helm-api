@@ -38,6 +38,7 @@ import {
   CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER,
   CodexResponsesBeforeSendError,
 } from "../openai-responses.js";
+import { numericRetryAfterMs } from "../retry.js";
 import { TokenRefreshError } from "../token-manager.js";
 import { DEFAULT_429_COOLDOWN_MS } from "./usage-limit.js";
 
@@ -354,16 +355,26 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
   }
 
   function modelLimited(account: string, model: string | null, nowMs: number): boolean {
-    if (model === null) return false;
-    let limited = false;
+    return modelLimitUntilMs(account, model, nowMs) !== null;
+  }
+
+  function modelLimitUntilMs(account: string, model: string | null, nowMs: number): number | null {
+    if (model === null) return null;
+    let untilMs: number | null = null;
     for (const [key, cooldown] of scopedRateLimits) {
       if (cooldown.untilMs <= nowMs) {
         scopedRateLimits.delete(key);
         continue;
       }
-      if (cooldown.account === account && cooldown.model === model) limited = true;
+      if (
+        cooldown.account === account &&
+        cooldown.model === model &&
+        (untilMs === null || cooldown.untilMs > untilMs)
+      ) {
+        untilMs = cooldown.untilMs;
+      }
     }
-    return limited;
+    return untilMs;
   }
 
   function headerValue(headers: Record<string, string | string[]>, name: string): string | null {
@@ -931,11 +942,13 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     };
     let stickyEntry: PoolEntry | undefined;
     let knownSticky = false;
+    let knownStickyAccount: string | null = null;
     const stickyOnly = isStrictAccountSticky(stickyKey ?? null);
     if (stickyKey) {
       const sticky = stickySessions.get(stickyKey);
       if (sticky !== undefined && sticky.expiresAt > nowMs) {
         knownSticky = true;
+        knownStickyAccount = sticky.account;
         const stickyCandidates = stickyOnly ? eligible : capacityTier.candidates;
         const entry = stickyCandidates.find(
           (candidate) => candidate.member.account === sticky.account,
@@ -962,9 +975,22 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     }
     if (stickyOnly && knownSticky) {
       const source = affinityKeySource(stickyKey ?? null) ?? "stateful continuation";
+      const stickyMember = entries.find(
+        (entry) => entry.member.account === knownStickyAccount,
+      )?.member;
+      const accountLimit =
+        stickyMember?.allowSpendRemainingCredits === true
+          ? null
+          : (stickyMember?.usageLimitedUntilMs ?? null);
+      const modelLimit =
+        knownStickyAccount === null ? null : modelLimitUntilMs(knownStickyAccount, model, nowMs);
+      const limitUntilMs = Math.max(accountLimit ?? 0, modelLimit ?? 0);
       throw new CodexResponsesBeforeSendError(
         `oauth pool: ${source} original account is unavailable`,
-        { reason: "oauth_affinity_unavailable" },
+        {
+          reason: "oauth_affinity_unavailable",
+          ...(limitUntilMs > nowMs ? { retry_after_ms: limitUntilMs - nowMs } : {}),
+        },
       );
     }
     const { entry: best, reason } = chooseByStrategy(
@@ -1038,9 +1064,14 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
 
   function parkRateLimitedAccount(entry: PoolEntry, err: unknown, model: string | null): void {
     const scope = rateLimitScope(entry, err, model);
+    const retryAfter =
+      err instanceof UpstreamError && err.upstreamHeaders !== null
+        ? headerValue(err.upstreamHeaders, "retry-after")
+        : null;
+    const cooldownMs = numericRetryAfterMs(retryAfter) ?? accountRateLimitCooldownMs;
     if (scope.scope === "model") {
       const key = scopedRateLimitKey(entry.member.account, scope.model, scope.limitId);
-      const candidate = now() + accountRateLimitCooldownMs;
+      const candidate = now() + cooldownMs;
       const current = scopedRateLimits.get(key);
       scopedRateLimits.set(key, {
         account: entry.member.account,
@@ -1051,7 +1082,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       forgetStickyAccount(entry.member.account, true);
       return;
     }
-    const candidate = now() + accountRateLimitCooldownMs;
+    const candidate = now() + cooldownMs;
     // Extend-only: a precise upstream quota reset (e.g. a Codex weekly limit, captured
     // from response headers before the 429 threw) may already sit far in the future —
     // the generic short fallback must never pull it back in. Propagate the kept value to

@@ -1991,7 +1991,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     const providerRaw =
       Object.keys(selectedHeaders).length > 0 ? { body, headers: scrub(selectedHeaders) } : body;
     return {
-      error: new UpstreamError("upstream_error", message, providerRaw, rawStatus),
+      error: new UpstreamError("upstream_error", message, providerRaw, rawStatus, selectedHeaders),
       headers,
     };
   }

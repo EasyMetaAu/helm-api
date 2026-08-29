@@ -597,6 +597,23 @@ function codexResponsesLifecycleFailureCode(providerRaw: unknown): string | null
     : null;
 }
 
+function codexResponsesRecovery(providerRaw: unknown): Record<string, unknown> | undefined {
+  if (providerRaw === null || typeof providerRaw !== "object" || Array.isArray(providerRaw)) {
+    return undefined;
+  }
+  const recovery = (providerRaw as { recovery?: unknown }).recovery;
+  if (recovery === null || typeof recovery !== "object" || Array.isArray(recovery)) {
+    return undefined;
+  }
+  const retryAfterMs = (recovery as { retry_after_ms?: unknown }).retry_after_ms;
+  if (!Number.isSafeInteger(retryAfterMs) || (retryAfterMs as number) <= 0) return undefined;
+  return {
+    safe_to_replay: true,
+    lifecycle_phase: "before_send",
+    retry_after_ms: retryAfterMs,
+  };
+}
+
 function scrubUntrustedRecoveryCode(data: string): string | null {
   let changed = false;
   try {
@@ -622,6 +639,7 @@ function responsesStreamError(args: {
   message: string;
   traceId: string;
   sequenceNumber: number;
+  recovery?: Record<string, unknown>;
 }): Record<string, unknown> {
   return {
     type: "error",
@@ -630,6 +648,7 @@ function responsesStreamError(args: {
     param: null,
     sequence_number: args.sequenceNumber,
     trace_id: args.traceId,
+    ...(args.recovery === undefined ? {} : { recovery: args.recovery }),
   };
 }
 
@@ -1516,6 +1535,17 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                     ? codexResponsesLifecycleFailureCode(err.providerRaw)
                     : null
                   : null;
+            const lifecycleProviderRaw =
+              err instanceof PipelineError
+                ? err.provider_raw
+                : err instanceof UpstreamError
+                  ? err.providerRaw
+                  : null;
+            const lifecycleRecovery = isCodexResponsesRecoverableDisconnectCode(
+              lifecycleFailureCode,
+            )
+              ? codexResponsesRecovery(lifecycleProviderRaw)
+              : undefined;
             const body =
               err instanceof PipelineError
                 ? responsesStreamError({
@@ -1523,6 +1553,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                     message: err.message,
                     traceId,
                     sequenceNumber: nextErrorSequence,
+                    recovery: lifecycleRecovery,
                   })
                 : responsesStreamError({
                     // Preserve a mid-stream idle timeout instead of internal_error.
@@ -1532,6 +1563,7 @@ export function registerResponsesRoute(app: Hono<AppEnv>, deps: ResponsesRouteDe
                     message: err instanceof Error ? err.message : "upstream error",
                     traceId,
                     sequenceNumber: nextErrorSequence,
+                    recovery: lifecycleRecovery,
                   });
             const data = JSON.stringify(body);
             captured?.push(`event: error\ndata: ${data}\n\n`);

@@ -2,9 +2,23 @@ import { describe, expect, it, vi } from "vitest";
 import {
   isFetchTransportError,
   isTransientConnectionError,
+  numericRetryAfterMs,
   overloadRetryDelayMs,
   withConnectionRetry,
 } from "./retry.js";
+
+describe("numericRetryAfterMs", () => {
+  it("parses positive delta-seconds and rejects unusable values", () => {
+    expect(numericRetryAfterMs("6")).toBe(6_000);
+    expect(numericRetryAfterMs("0.5")).toBeNull();
+    expect(numericRetryAfterMs("soon")).toBeNull();
+    expect(numericRetryAfterMs("0")).toBeNull();
+    expect(numericRetryAfterMs("-1")).toBeNull();
+    expect(numericRetryAfterMs("999999999999999999999999999999999999999999999999999999")).toBe(
+      86_400_000,
+    );
+  });
+});
 
 // A transient connection error is one safe to retry BEFORE any bytes reached the
 // client (idempotent: no upstream response consumed). The classifier is a strict
