@@ -1953,14 +1953,24 @@ describe("createOAuthPoolClient — nativePassthroughStream", () => {
     }
     pool.setUsageLimit("a", 50_000);
 
-    expect(() =>
+    let caught: unknown;
+    try {
       pool.nativePassthroughStream?.({
         protocol: "openai_responses",
         body: { model: "gpt-5.6-sol", stream: true, input: "continue" },
         headers: { "x-codex-turn-state": "strict-turn-state" },
         mutations: {},
-      }),
-    ).toThrow(/x-codex-turn-state.*original account.*unavailable/i);
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(CodexResponsesBeforeSendError);
+    expect((caught as CodexResponsesBeforeSendError).message).toMatch(
+      /x-codex-turn-state.*original account.*unavailable/i,
+    );
+    expect((caught as CodexResponsesBeforeSendError).providerRaw).toMatchObject({
+      recovery: { retry_after_ms: 49_000 },
+    });
     expect(calls).toEqual(["a"]);
   });
 
@@ -2365,10 +2375,16 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     const served: string[] = [];
     const limited: Array<{ account: string; untilMs: number }> = [];
     const selected: string[] = [];
+    const rateWithRetryAfter = new UpstreamError("upstream_error", "usage limit", null, 429, {
+      "Retry-After": "6",
+    });
     const pool = createOAuthPoolClient({
-      members: [faultMember("a", 10, served, RATE), faultMember("b", 50, served, null)],
+      members: [
+        faultMember("a", 10, served, rateWithRetryAfter),
+        faultMember("b", 50, served, null),
+      ],
       now: () => 1_000,
-      accountRateLimitCooldownMs: 250,
+      accountRateLimitCooldownMs: 60_000,
       onAccountRateLimit: (account, untilMs) => limited.push({ account, untilMs }),
       onSelect: (account) => selected.push(account),
     });
@@ -2377,7 +2393,7 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     await expect(pool.chatCompletion(REQ)).resolves.toEqual({ served_by: "b" });
     expect(served).toEqual(["b", "b"]);
     expect(selected).toEqual(["a", "b", "b"]);
-    expect(limited).toEqual([{ account: "a", untilMs: 1_250 }]);
+    expect(limited).toEqual([{ account: "a", untilMs: 7_000 }]);
   });
 
   it("treats an account queue timeout as sibling capacity failover", async () => {

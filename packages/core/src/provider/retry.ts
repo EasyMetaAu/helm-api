@@ -104,6 +104,17 @@ const OVERLOAD_BACKOFF_MS = [1_000, 3_000] as const;
 // must not hold the client's socket open — past this we give up and let the executor
 // fall back to another candidate, which is the faster path to an answer.
 const OVERLOAD_MAX_DELAY_MS = 10_000;
+const MAX_NUMERIC_RETRY_AFTER_MS = 24 * 60 * 60_000;
+
+export function numericRetryAfterMs(value: string | null | undefined): number | null {
+  const raw = value?.trim();
+  if (raw === undefined || !/^\d+$/.test(raw)) return null;
+  const seconds = Number(raw);
+  if (seconds <= 0) return null;
+  return Number.isFinite(seconds)
+    ? Math.min(seconds * 1_000, MAX_NUMERIC_RETRY_AFTER_MS)
+    : MAX_NUMERIC_RETRY_AFTER_MS;
+}
 
 /**
  * Backoff (ms) before re-issuing an overloaded upstream request, or null when this
@@ -120,10 +131,8 @@ export function overloadRetryDelayMs(args: {
   if (!OVERLOAD_STATUSES.has(args.status)) return null;
   const fallback = OVERLOAD_BACKOFF_MS[args.attempt];
   if (fallback === undefined) return null;
-  const seconds = Number(args.retryAfter?.trim());
-  if (Number.isFinite(seconds) && seconds > 0) {
-    return Math.min(seconds * 1000, OVERLOAD_MAX_DELAY_MS);
-  }
+  const retryAfterMs = numericRetryAfterMs(args.retryAfter);
+  if (retryAfterMs !== null) return Math.min(retryAfterMs, OVERLOAD_MAX_DELAY_MS);
   return fallback;
 }
 

@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-08-29 · Codex 429 短冷却在安全恢复前精确等待（OAuth provider / Responses / Gateway，docs/04/05/07，原则 3/5/8）
+
+- **根因与冷却语义**：Codex 上游已用数值型 `Retry-After` 声明短暂限流，但 OAuth pool 仍按固定 60 秒停车；严格 `x-codex-turn-state` 亲和在原账号停车期间连续产生本地 400。pool 现在复用既有重试解析规则、大小写不敏感读取 HTTP 与 WebSocket 包装 header，并以严格 delta-seconds 设置账号或模型冷却；异常超大值最多停车 24 小时，已有更晚的精确 quota reset 继续 extend-only，不会被缩短。
+- **安全恢复边界**：严格亲和仍不切 sibling；仅 provider 调用前即可证明未发送的 `response_create_not_sent` 携带原账号剩余 `retry_after_ms`。Gateway 只接受内部 recovery proof 与类型化字段，Responses WebSocket 对短冷却做可中止等待，超过 10 秒的等待封顶为 10 秒，再沿用一次 `1012` 完整历史恢复；未知或过期冷却立即恢复，发送后或结果不明的 `response.create` 仍禁止重放。
+- 没有新增 schema、migration、配置或依赖；10 秒上限只约束网关本地等待，不改变 provider/account/WebSocket 亲和合同。
+
 ## 2026-08-28 · 终端失败强制保留原始载荷与 Session（Gateway / observability，docs/07，原则 3/7）
 
 - 终端 `DecisionRecord.final.status=error`（含请求总超时）在共享 `recordServed` 持久化边界强制写入完整客户端请求、可用的 provider-native 请求及响应/错误正文，同时追加 Session revision；该次 telemetry 标为 `request_content_mode=payload`，因此 Admin 可直接读取精确载荷。成功请求仍严格服从 key 级或全局 `none` / `payload` / `session` 设置。
@@ -56,14 +62,9 @@
 - **transport 边界**：Codex continuation 必须复用产生该 response ID 的当前活动原 WebSocket；原 session 缺失/不匹配、连接关闭、426/connection-limit、模糊 send failure 均禁止重连和 HTTP fallback，返回 `previous_response_id_session_unavailable` 并要求完整会话。精确 invalid-ID 仍只在同一活动 WebSocket 上原样重试一次。
 - **registry 边界**：`completed` 与协议允许的 `incomplete` registry 记录可作为续接父节点；`failed`、`cancelled`、内部 `truncated` 与其他状态在路由前 fail-closed。OAuth 记录还必须带原账号，避免旧空 owner 被 turn-state 绕过；静态 Responses provider 继续允许空账号。没有新增 schema、迁移、配置或正文持久化。
 
-## 2026-08-25 · Anthropic tool_result 400 允许协议级 fallback（协议互译 / docs/05、07，原则 3/5/8）
-
-- Anthropic 的 `Advisor tool result content could not be processed` 是目标 provider 的工具结果格式拒绝，不等价于跨 provider 的全局请求非法；该候选现在记录 `provider_protocol_incompatible` 并继续尝试下一个兼容 lane，不处罚共享 breaker。
-- 只识别这个稳定、精确的上游消息；context overflow、413 和其他确定性请求形状错误仍保持 fail-closed 400，避免把客户端应修复的问题静默转移到 fallback。
-- 当前限制：未开启 payload capture 的历史请求无法定位具体工具字段；修复覆盖路由级 fallback 语义，仍需后续针对真实 Responses→Anthropic tool schema 的 fixture 扩展协议测试。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-25 · Anthropic tool_result 400 允许协议级 fallback**：仅精确的 `Advisor tool result content could not be processed` 记为候选协议不兼容并继续 fallback；其他确定性客户端错误仍 fail-closed，完整原文经 git history 回溯。
 - **2026-08-25 · Responses 续接只在原账号不可用时搜索 sibling**：已知原账号实际收到请求后若仍返回 invalid-ID 立即 fail-closed；只有原账号已不可调度或 ID 尚无归属时才搜索 sibling，turn-state 与活动 WebSocket 始终不迁移；完整原文经 git history 回溯。
 - **2026-08-25 · 持久化 Responses 亲和失效时先探测 sibling 且隔离模型熔断**：原账号 parked/limited 时有界探测 sibling，严格 turn-state 仍不迁移，账号级不可用不污染共享 breaker；完整原文经 git history 回溯。
 - **2026-08-24 · Codex Responses 续接 ID 可在账号池内有界找回原账号**：只在尚无可靠归属且没有客户端可见输出时有界探测同 provider/model sibling，并同步修复 sticky/registry；其他状态型失败保持 fail-closed，完整原文经 git history 回溯。
