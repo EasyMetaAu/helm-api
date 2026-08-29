@@ -1708,11 +1708,12 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     expect(aliases).toEqual(["openai-codex/gpt-5.6-luna", "openai-codex/gpt-5.6-sol"]);
   });
 
-  it("exposes the ChatGPT image alias only when gpt-5.4-mini advertises the full image tool", async () => {
+  it("exposes the ChatGPT image alias without treating Codex catalog tool metadata as admission", async () => {
     const variants = [
-      { tool: true, lite: false, image: true },
-      { tool: false, lite: false, image: false },
-      { tool: true, lite: true, image: false },
+      { slug: "gpt-5.4-mini", tool: true, lite: false },
+      { slug: "gpt-5.4-mini", tool: false, lite: false },
+      { slug: "gpt-5.4-mini", tool: true, lite: true },
+      { slug: "gpt-5.6-sol", tool: false, lite: false },
     ];
     for (const [index, variant] of variants.entries()) {
       const { ctx, config } = oauthStores();
@@ -1730,7 +1731,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
         new Response(
           JSON.stringify({
             models: [
-              codexModel("gpt-5.4-mini", {
+              codexModel(variant.slug, {
                 experimental_supported_tools: variant.tool ? ["image_generation"] : [],
                 use_responses_lite: variant.lite,
               }),
@@ -1755,7 +1756,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
         { catalog, runInBackground },
       );
       const aliases = (result.providers[0]?.models ?? []).map((model) => model.alias);
-      expect(aliases.includes("openai-codex/gpt-image-2")).toBe(variant.image);
+      expect(aliases).toContain("openai-codex/gpt-image-2");
     }
   });
 
@@ -2006,6 +2007,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       "openai-codex/gpt-5.6-sol",
       "openai-codex/codex-auto-review",
       "openai-codex/gpt-5.6",
+      "openai-codex/gpt-image-2",
     ]);
     await poolClients.get("openai-codex")?.chatCompletion({
       model: "gpt-5.6-sol",
@@ -2405,6 +2407,43 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     expect(result.poolClients.size).toBe(0);
   });
 
+  it("keeps ChatGPT image routable when an auto-mode account catalog is unavailable", async () => {
+    const { ctx, config } = oauthStores();
+    await ctx.store.upsert({
+      providerId: "openai-codex",
+      account: "default",
+      accessEnc: encryptSecret("codex-access", ENC_KEY),
+      refreshEnc: encryptSecret("codex-refresh", ENC_KEY),
+      expiresAt: FAR_FUTURE,
+      meta: JSON.stringify({ accountId: "workspace-1" }),
+      updatedAt: 1,
+    });
+    const catalog = createCodexModelCatalog({ cache: createCodexModelCache(config, ENC_KEY) });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "unavailable" }), { status: 503 }),
+    );
+
+    const result = await synthesizeOAuthProviders(
+      [],
+      ctx,
+      config,
+      "https://fallback/v1",
+      60_000,
+      noop,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { catalog, runInBackground },
+    );
+
+    expect((result.providers[0]?.models ?? []).map((model) => model.alias)).toEqual([
+      "openai-codex/gpt-image-2",
+    ]);
+    expect(result.poolClients.get("openai-codex")?.hasAvailableModel("gpt-image-2")).toBe(true);
+  });
+
   it("refreshes once and retries /models after a 401 without changing account identity", async () => {
     const { ctx, config } = oauthStores();
     await ctx.store.upsert({
@@ -2486,6 +2525,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     expect((result.providers[0]?.models ?? []).map((model) => model.alias)).toEqual([
       "openai-codex/gpt-5.6-sol",
       "openai-codex/gpt-5.6",
+      "openai-codex/gpt-image-2",
     ]);
   });
 

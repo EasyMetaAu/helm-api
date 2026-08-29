@@ -58,6 +58,7 @@ function codexModelInfo(
     supported_reasoning_levels: Array<{ effort: string; description: string }>;
     service_tiers: Array<{ id: string; name: string; description: string }>;
     supports_parallel_tool_calls: boolean;
+    experimental_supported_tools: string[];
   }> = {},
 ): CodexModelInfo {
   return {
@@ -4531,12 +4532,17 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
 });
 
 describe("createCodexResponsesClient — Images API bridge", () => {
-  const clientFor = (fetchMock: typeof fetch, onUnauthorized?: () => void) =>
+  const clientFor = (
+    fetchMock: typeof fetch,
+    onUnauthorized?: () => void,
+    resolveModelInfo?: () => CodexModelInfo,
+  ) =>
     createCodexResponsesClient({
       config: {
         baseUrl: "https://chatgpt.com/backend-api/codex",
         getAuthHeader: async () => `Bearer ${jwt("acct")}`,
         onUnauthorized,
+        resolveModelInfo,
       },
       fetch: fetchMock,
       responseWorkAdmission: createResponseWorkAdmission({
@@ -4545,6 +4551,24 @@ describe("createCodexResponsesClient — Images API bridge", () => {
         minChargeBytes: 1,
       }),
     });
+
+  it("treats Codex catalog tool metadata as advisory and attempts one upstream image write", async () => {
+    const fetchMock = vi.fn(async () =>
+      sseResponse([
+        {
+          type: "response.completed",
+          response: { output: [{ type: "image_generation_call", result: "aW1hZ2U=" }] },
+        },
+      ]),
+    ) as unknown as typeof fetch;
+
+    await expect(
+      clientFor(fetchMock, undefined, () =>
+        codexModelInfo({ use_responses_lite: true, experimental_supported_tools: [] }),
+      ).imageGeneration?.({ model: "gpt-image-2", prompt: "draw" }),
+    ).resolves.toMatchObject({ data: [{ b64_json: "aW1hZ2U=" }] });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
 
   it("maps generation to the image_generation tool and maps the completed image back", async () => {
     let sent: Record<string, unknown> = {};

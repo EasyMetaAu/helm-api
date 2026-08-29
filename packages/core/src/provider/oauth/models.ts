@@ -52,17 +52,6 @@ const OPENAI_CODEX_MODEL_ALIASES: Readonly<Record<string, string>> = {
 };
 
 export const OPENAI_CODEX_IMAGE_MODEL = "gpt-image-2";
-const OPENAI_CODEX_IMAGE_CONTROLLER_MODEL = "gpt-5.4-mini";
-
-export function supportsOpenAICodexImageGeneration(models: readonly CodexModelInfo[]): boolean {
-  return models.some(
-    (model) =>
-      model.slug === OPENAI_CODEX_IMAGE_CONTROLLER_MODEL &&
-      model.supported_in_api &&
-      !model.use_responses_lite &&
-      model.experimental_supported_tools.includes("image_generation"),
-  );
-}
 
 const RETIRED_OPENAI_CODEX_MODELS = new Set(["gpt-5.3-codex-spark"]);
 

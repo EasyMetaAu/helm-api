@@ -8,7 +8,6 @@ import {
   OPENAI_CODEX_IMAGE_MODEL,
   openAICodexIdentityFingerprint,
   parseOpenAICodexIdentity,
-  supportsOpenAICodexImageGeneration,
 } from "@helm/core";
 import {
   type AccountSettings,
@@ -136,10 +135,10 @@ async function automaticCodexModels(
       clientVersion: options.codexClientVersion ?? DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
     };
     const snapshot = options.codexCatalog.snapshot(key);
-    if (!snapshot) return undefined;
+    if (!snapshot) return [OPENAI_CODEX_IMAGE_MODEL];
     const models = [...snapshot.models].sort((left, right) => left.priority - right.priority);
     const aliases = expandOpenAICodexModelAliases(models.map((model) => model.slug));
-    if (supportsOpenAICodexImageGeneration(models)) aliases.push(OPENAI_CODEX_IMAGE_MODEL);
+    if (!aliases.includes(OPENAI_CODEX_IMAGE_MODEL)) aliases.push(OPENAI_CODEX_IMAGE_MODEL);
     return aliases;
   } catch {
     return undefined;
