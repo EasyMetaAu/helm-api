@@ -5,8 +5,10 @@ import {
   DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
   decryptSecret,
   expandOpenAICodexModelAliases,
+  OPENAI_CODEX_IMAGE_MODEL,
   openAICodexIdentityFingerprint,
   parseOpenAICodexIdentity,
+  supportsOpenAICodexImageGeneration,
 } from "@helm/core";
 import {
   type AccountSettings,
@@ -135,11 +137,10 @@ async function automaticCodexModels(
     };
     const snapshot = options.codexCatalog.snapshot(key);
     if (!snapshot) return undefined;
-    return expandOpenAICodexModelAliases(
-      [...snapshot.models]
-        .sort((left, right) => left.priority - right.priority)
-        .map((model) => model.slug),
-    );
+    const models = [...snapshot.models].sort((left, right) => left.priority - right.priority);
+    const aliases = expandOpenAICodexModelAliases(models.map((model) => model.slug));
+    if (supportsOpenAICodexImageGeneration(models)) aliases.push(OPENAI_CODEX_IMAGE_MODEL);
+    return aliases;
   } catch {
     return undefined;
   }

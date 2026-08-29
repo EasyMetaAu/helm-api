@@ -109,6 +109,15 @@ network, timeout, and eligible upstream failures can advance; client errors and
 client aborts are terminal. A lane must not mix OpenAI-Images and Gemini member
 kinds because their verbatim parameter surfaces differ.
 
+When a connected ChatGPT OAuth account's live Codex catalog explicitly exposes
+the non-Lite `gpt-5.4-mini` controller with the `image_generation` tool, Helm also
+publishes `openai-codex/gpt-image-2` through the `chatgpt-image` lane. Generation
+and editing keep the public Images routes above; the provider adapter converts
+both operations to one Responses tool call (`action: generate|edit`) and maps the
+completed base64 result back to `data[].b64_json`. This paid POST is sent once:
+transport errors, overload responses, and 401s are not replayed or moved to a
+sibling OAuth account.
+
 ## Protocol behavior
 
 ### OpenAI Chat Completions

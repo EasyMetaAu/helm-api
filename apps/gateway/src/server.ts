@@ -83,6 +83,7 @@ import {
   type OAuthTokenStore,
   type ObserveDeps,
   type ObserverDeps,
+  OPENAI_CODEX_IMAGE_MODEL,
   type OpenAICodexIdentity,
   OpenAICodexModelsError,
   type OpenAICodexModelsResult,
@@ -122,6 +123,7 @@ import {
   startCleanupScheduler,
   startMemoryWorker,
   startSignalScheduler,
+  supportsOpenAICodexImageGeneration,
   type TransportProfile,
   toRegistryProviders,
   validateModelAliasTargets,
@@ -1133,13 +1135,13 @@ export async function synthesizeOAuthProviders(
           onCatalogChanged: codex.onCatalogChanged,
           responsesWebSocketConnector: codex.responsesWebSocketConnector,
         });
-        discovered = loaded
-          ? expandOpenAICodexModelAliases(
-              [...loaded.snapshot.models]
-                .sort((left, right) => left.priority - right.priority)
-                .map((model) => model.slug),
-            )
+        const catalogModels = loaded
+          ? [...loaded.snapshot.models].sort((left, right) => left.priority - right.priority)
           : [];
+        discovered = expandOpenAICodexModelAliases(catalogModels.map((model) => model.slug));
+        if (supportsOpenAICodexImageGeneration(catalogModels)) {
+          discovered.push(OPENAI_CODEX_IMAGE_MODEL);
+        }
         if (loaded) codexKeys.push(loaded.key);
         accountCodexRuntime = loaded?.runtime;
       } else {

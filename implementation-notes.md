@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-08-29 · ChatGPT OAuth 图片生成与编辑复用 Images 协议（OAuth provider / Images / Routing，docs/04/05/07，原则 2/3/5/7/8）
+
+- **协议与准入**：保留既有 `POST /v1/images/generations` 与 `POST /v1/images/edits`，新增独立 `chatgpt-image → openai-codex/gpt-image-2` lane；只有账号实时 Codex 目录中的 `gpt-5.4-mini` 同时声明 `supported_in_api`、非 Responses Lite 和 `experimental_supported_tools:image_generation` 时才合成该媒体 alias，未知能力不猜测。
+- **执行与单写边界**：生成、JSON 编辑和 multipart 编辑共用一个 Responses 图片适配器，以 `action:generate|edit` 区分，并把 `image_generation_call.result` 映射回 Images `data[]`。这是订阅额度付费单写；连接错误、过载、401、超时或断线均不重试、不切 OAuth 账号，结果不明继续由现有图片链返回 `outcome_unknown`。
+- **计价限制**：ChatGPT 订阅图片没有可信美元价目，catalog 显式记录 null pricing；请求数预算仍可工作，配置美元支出上限的 key 在付费调用前 fail-closed。实现独立参考 Sub2API 当前协议行为与测试，没有复制其 LGPL 源码；未执行真实付费生图。
+
 ## 2026-08-29 · Codex 429 短冷却在安全恢复前精确等待（OAuth provider / Responses / Gateway，docs/04/05/07，原则 3/5/8）
 
 - **根因与冷却语义**：Codex 上游已用数值型 `Retry-After` 声明短暂限流，但 OAuth pool 仍按固定 60 秒停车；严格 `x-codex-turn-state` 亲和在原账号停车期间连续产生本地 400。pool 现在复用既有重试解析规则、大小写不敏感读取 HTTP 与 WebSocket 包装 header，并以严格 delta-seconds 设置账号或模型冷却；异常超大值最多停车 24 小时，已有更晚的精确 quota reset 继续 extend-only，不会被缩短。
@@ -56,14 +62,9 @@
 - **限流与失败边界**：自动重验证复用后端单任务合并、串行账号 PULL 与 60 秒冷却；同一挂载页面在 snapshot 未变化或刷新失败时最多每小时重试一次，后台隐藏期间不发起同步，重新可见后再按 TTL 判断。旧数据在失败时继续保留并显示既有错误，不把观测缓存过期升级为路由或鉴权失败。未新增 Store、migration、依赖或配置字段。
 - **交付门禁**：组织规则仍要求历史 `Core CI` context，因此 CI 恢复同名 checkout-free 聚合 job；它不重复运行代码，只在 verify、store、e2e、docker 全部成功，并且 PR 场景的可信 head reporter 成功后通过。现有四道独立边界与最小权限保持不变。
 
-## 2026-08-25 · Responses continuation 不跨账号或 transport 恢复（OAuth provider / Responses，docs/04/05/07，原则 3/5/8）
-
-- **根因修正**：`previous_response_id` 的持久化 provider/account 归属不能证明上游 WebSocket 状态仍存在。OAuth pool 现在只允许已知且可调度的原账号执行；原账号缺失、不可用或过期时在 provider dispatch 前拒绝，不再搜索 sibling。其他无状态请求的账号级 failover 保持不变。
-- **transport 边界**：Codex continuation 必须复用产生该 response ID 的当前活动原 WebSocket；原 session 缺失/不匹配、连接关闭、426/connection-limit、模糊 send failure 均禁止重连和 HTTP fallback，返回 `previous_response_id_session_unavailable` 并要求完整会话。精确 invalid-ID 仍只在同一活动 WebSocket 上原样重试一次。
-- **registry 边界**：`completed` 与协议允许的 `incomplete` registry 记录可作为续接父节点；`failed`、`cancelled`、内部 `truncated` 与其他状态在路由前 fail-closed。OAuth 记录还必须带原账号，避免旧空 owner 被 turn-state 绕过；静态 Responses provider 继续允许空账号。没有新增 schema、迁移、配置或正文持久化。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-25 · Responses continuation 不跨账号或 transport 恢复**：续接只允许可调度的原账号与产生该 ID 的活动原 WebSocket；失配、关闭和模糊发送失败均 fail-closed，完整原文经 git history 回溯。
 - **2026-08-25 · Anthropic tool_result 400 允许协议级 fallback**：仅精确的 `Advisor tool result content could not be processed` 记为候选协议不兼容并继续 fallback；其他确定性客户端错误仍 fail-closed，完整原文经 git history 回溯。
 - **2026-08-25 · Responses 续接只在原账号不可用时搜索 sibling**：已知原账号实际收到请求后若仍返回 invalid-ID 立即 fail-closed；只有原账号已不可调度或 ID 尚无归属时才搜索 sibling，turn-state 与活动 WebSocket 始终不迁移；完整原文经 git history 回溯。
 - **2026-08-25 · 持久化 Responses 亲和失效时先探测 sibling 且隔离模型熔断**：原账号 parked/limited 时有界探测 sibling，严格 turn-state 仍不迁移，账号级不可用不污染共享 breaker；完整原文经 git history 回溯。

@@ -256,6 +256,21 @@ curl http://localhost:8080/v1/images/generations \
   -d '{ "model": "gpt-image-2", "prompt": "纯白背景上的一颗红苹果", "size": "1024x1024" }'
 ```
 
+连接 ChatGPT OAuth 账号后，若该账号的实时 Codex 模型目录明确开放非 Lite 的
+`gpt-5.4-mini` 和 `image_generation` 工具，Helm 会提供独立的 `chatgpt-image`
+lane。生成仍调用上面的路径；编辑调用同一套 Images 协议的编辑路径：
+
+```bash
+curl http://localhost:8080/v1/images/edits \
+  -H "Authorization: Bearer $HELM_KEY" -H "Content-Type: application/json" \
+  -d '{ "model": "chatgpt-image", "prompt": "给猫加一顶红帽子",
+        "image": { "url": "data:image/png;base64,..." } }'
+```
+
+两种操作在内部都使用 Responses `image_generation` 工具，只是 `action` 分别为
+`generate` 和 `edit`。这是订阅额度下的付费单写：断线、超时、401 或过载响应均不
+重试、不换账号。订阅图片没有可信美元价目时，设置了美元支出上限的 key 会在调用前拒绝。
+
 **2. Gemini `generateContent`** —— 对应 Gemini SDK 的 `generate_content` 调用。指定图片模型并要求返回图片后，Helm 会按 Gemini 原生协议路由，响应中的图片位于 `candidates[].content.parts[].inlineData`：
 
 ```bash
@@ -293,6 +308,9 @@ gpt-image:                          # 请求填 `model: "gpt-image"`
 gpt-image-2:                        # 请求填 `model: "gpt-image-2"`
   primary: zenmux/gpt-image-2       # 低成本图片生成路径
   fallback: [openai/gpt-image-2]    # 操作级回退，包含图片编辑
+chatgpt-image:                      # 请求填 `model: "chatgpt-image"`
+  primary: openai-codex/gpt-image-2 # ChatGPT OAuth；无跨账号/Provider 重放
+  fallback: []
 gemini-image:                       # 请求填 `model: "gemini-image"`
   primary: google/gemini-3.1-flash-image   # Google 官方 → ZenMux flash → pro
   fallback: [gemini-3.1-flash-image, gemini-3-pro-image]
