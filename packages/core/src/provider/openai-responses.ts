@@ -1792,16 +1792,6 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
   ): Promise<Record<string, unknown>> {
     const requestBody = buildCodexImageRequest(action, input);
     const modelInfo = await resolveModelInfo(CODEX_IMAGE_CONTROLLER_MODEL);
-    if (
-      modelInfo &&
-      (modelInfo.use_responses_lite ||
-        !modelInfo.experimental_supported_tools.includes("image_generation"))
-    ) {
-      throw new UpstreamError(
-        "upstream_error",
-        "ChatGPT account does not expose the image_generation tool",
-      );
-    }
     // A subscription image create/edit is billable and may have succeeded before a
     // disconnect. Deliberately bypass connection, overload, and 401 replay here.
     const result = await request(requestBody.body, modelInfo, {

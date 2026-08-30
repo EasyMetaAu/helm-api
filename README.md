@@ -274,10 +274,10 @@ curl http://localhost:8080/v1/images/generations \
   -d '{ "model": "gpt-image-2", "prompt": "a single red apple on a plain white background", "size": "1024x1024" }'
 ```
 
-With a connected ChatGPT OAuth account, Helm exposes a separate `chatgpt-image`
-lane when that account's live Codex catalog explicitly advertises non-Lite
-`gpt-5.4-mini` with the `image_generation` tool. Generation keeps the route above;
-editing uses the Images edit route:
+With a schedulable ChatGPT OAuth account, Helm exposes a separate `chatgpt-image`
+lane. Codex catalog tool metadata is advisory rather than an admission gate; the
+single client-requested upstream call determines whether that account can use the
+tool. Generation keeps the route above; editing uses the Images edit route:
 
 ```bash
 curl http://localhost:8080/v1/images/edits \

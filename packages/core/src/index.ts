@@ -610,7 +610,6 @@ export {
   resolveXaiGrokClientVersion,
   type SerializeClientDeps,
   selectCodexActiveLimitWindows,
-  supportsOpenAICodexImageGeneration,
   type UsagePeriodsResult,
   windowMinutesForKey,
   windowsToActiveUsageRecovery,

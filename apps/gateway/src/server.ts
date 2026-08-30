@@ -123,7 +123,6 @@ import {
   startCleanupScheduler,
   startMemoryWorker,
   startSignalScheduler,
-  supportsOpenAICodexImageGeneration,
   type TransportProfile,
   toRegistryProviders,
   validateModelAliasTargets,
@@ -1139,9 +1138,8 @@ export async function synthesizeOAuthProviders(
           ? [...loaded.snapshot.models].sort((left, right) => left.priority - right.priority)
           : [];
         discovered = expandOpenAICodexModelAliases(catalogModels.map((model) => model.slug));
-        if (supportsOpenAICodexImageGeneration(catalogModels)) {
+        if (!discovered.includes(OPENAI_CODEX_IMAGE_MODEL))
           discovered.push(OPENAI_CODEX_IMAGE_MODEL);
-        }
         if (loaded) codexKeys.push(loaded.key);
         accountCodexRuntime = loaded?.runtime;
       } else {

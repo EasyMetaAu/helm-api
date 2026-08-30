@@ -212,6 +212,21 @@ describe("effectiveOAuthAliases", () => {
 });
 
 describe("effectiveOAuthModelOptions", () => {
+  it("projects the ChatGPT image alias without requiring catalog tool metadata", async () => {
+    const { tokens, config } = makeStores();
+    await bind(tokens, "openai-codex", "default", { accountId: "acc-default" });
+
+    await expect(
+      effectiveOAuthModelOptions({ store: tokens, encKey: KEY }, config, ROUTABLE, {
+        codexCatalog: codexCatalog({ default: [{ slug: "gpt-5.6-sol" }] }),
+      }),
+    ).resolves.toEqual([
+      { alias: "openai-codex/gpt-5.6", accounts: ["default"] },
+      { alias: "openai-codex/gpt-5.6-sol", accounts: ["default"] },
+      { alias: "openai-codex/gpt-image-2", accounts: ["default"] },
+    ]);
+  });
+
   it("projects verified xAI media aliases only from the synthesized runtime pool", async () => {
     const { tokens, config } = makeStores();
     await bind(tokens, "xai", "supergrok-a");
@@ -421,10 +436,22 @@ describe("effectiveOAuthModelOptions", () => {
       { alias: "openai-codex/codex-auto-review", accounts: ["default"] },
       { alias: "openai-codex/gpt-5.6", accounts: ["default"] },
       { alias: "openai-codex/gpt-5.6-sol", accounts: ["default"] },
+      { alias: "openai-codex/gpt-image-2", accounts: ["default"] },
     ]);
   });
 
-  it("exposes no Codex aliases when the account has no exact catalog or stale LKG", async () => {
+  it("keeps the image alias when an auto-mode Codex account has no catalog snapshot", async () => {
+    const { tokens, config } = makeStores();
+    await bind(tokens, "openai-codex", "default", { accountId: "acc-default" });
+
+    await expect(
+      effectiveOAuthModelOptions({ store: tokens, encKey: KEY }, config, ROUTABLE, {
+        codexCatalog: codexCatalog({}),
+      }),
+    ).resolves.toEqual([{ alias: "openai-codex/gpt-image-2", accounts: ["default"] }]);
+  });
+
+  it("does not grant manual Codex text aliases without an exact catalog or stale LKG", async () => {
     const { tokens, config } = makeStores();
     await bind(tokens, "openai-codex", "default", { accountId: "acc-default" });
     await setAccountSettings(config, KEY, "openai-codex", "default", {

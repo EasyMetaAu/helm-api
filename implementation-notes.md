@@ -7,9 +7,14 @@
 
 ---
 
+## 2026-08-30 · ChatGPT 生图能力由单次上游调用判定（OAuth provider / Images / Routing，docs/04/05/07，原则 3/5/7）
+
+- **目录不再准入**：Codex `/models` 的 `supported_in_api`、`use_responses_lite` 与 `experimental_supported_tools` 不是 ChatGPT 图片工具的权威能力合同；可调度的 `openai-codex` 账号现在合成 `gpt-image-2` alias，执行前也不再按这些目录字段本地拒绝，实际支持状态由客户端请求触发的上游调用返回。
+- **单写边界与实测**：没有新增自动探测或后台付费 probe；图片生成/编辑仍只选择一个 OAuth 账号、只发送一次，连接错误、过载、401、超时与结果不明均不重试、不切 sibling。2026-08-30 本机 Docker 经明确授权执行一次 `chatgpt-image` canary：单次账号选择、HTTP 200、返回一张非空 PNG（21 input tokens、229 image output tokens）；请求 `1024x1024`，上游实际返回 `1254x1254`，尺寸并非严格兑现。
+
 ## 2026-08-29 · ChatGPT OAuth 图片生成与编辑复用 Images 协议（OAuth provider / Images / Routing，docs/04/05/07，原则 2/3/5/7/8）
 
-- **协议与准入**：保留既有 `POST /v1/images/generations` 与 `POST /v1/images/edits`，新增独立 `chatgpt-image → openai-codex/gpt-image-2` lane；只有账号实时 Codex 目录中的 `gpt-5.4-mini` 同时声明 `supported_in_api`、非 Responses Lite 和 `experimental_supported_tools:image_generation` 时才合成该媒体 alias，未知能力不猜测。
+- **协议与准入**：保留既有 `POST /v1/images/generations` 与 `POST /v1/images/edits`，新增独立 `chatgpt-image → openai-codex/gpt-image-2` lane；当时采用的 Codex 目录硬准入已由 2026-08-30 条目纠正。
 - **执行与单写边界**：生成、JSON 编辑和 multipart 编辑共用一个 Responses 图片适配器，以 `action:generate|edit` 区分，并把 `image_generation_call.result` 映射回 Images `data[]`。这是订阅额度付费单写；连接错误、过载、401、超时或断线均不重试、不切 OAuth 账号，结果不明继续由现有图片链返回 `outcome_unknown`。
 - **计价限制**：ChatGPT 订阅图片没有可信美元价目，catalog 显式记录 null pricing；请求数预算仍可工作，配置美元支出上限的 key 在付费调用前 fail-closed。实现独立参考 Sub2API 当前协议行为与测试，没有复制其 LGPL 源码；未执行真实付费生图。
 
@@ -56,14 +61,9 @@
 - **生产根因与修复**：全局 `POST /admin/api/oauth/refresh` 会重建所有 OAuth pool；即使 Codex 账号、代理、模型与执行设置均未变化，也会替换持有上游 WebSocket 和 `response_id → session` 映射的 `openai-codex` client，使仍活跃的下游 session 下一轮在本地收到 `previous_response_id_session_unavailable`。composition root 现在保留一个进程级复用缓存；重建后的 Codex pool 拓扑与 transport 身份签名完全相同时复用原 pool/client，并原位刷新 quota/cooldown 信号。
 - **失效边界**：账号集合、模型、优先级、Fast mode、剩余额度策略、代理、ChatGPT account identity、Codex client identity、base URL、timeout 或 selection strategy 任一变化都会创建新 pool；真正的配置/身份变化、进程重启、原 WebSocket 关闭仍保持原有 fail-closed 400，不跨账号、不重连 opaque ID、不伪造完整历史。无 schema、migration、依赖或配置字段变化。
 
-## 2026-08-25 · Providers 配额缓存一小时后后台重验证（Admin OAuth providers，docs/11，原则 3/7）
-
-- **刷新语义**：Providers 首屏继续只读取本地缓存，保证上游慢或不可用时仍立即渲染；Anthropic、Codex、xAI 任一已连接账号的 quota snapshot 缺失或 `capturedAt` 达到 60 分钟后，页面在可见状态自动提交既有全局 refresh job，并继续用 cache-only 轮询接收结果。手动 Refresh 仍是立即强制刷新，用户选择的短周期自动刷新仍不产生 provider 流量。
-- **限流与失败边界**：自动重验证复用后端单任务合并、串行账号 PULL 与 60 秒冷却；同一挂载页面在 snapshot 未变化或刷新失败时最多每小时重试一次，后台隐藏期间不发起同步，重新可见后再按 TTL 判断。旧数据在失败时继续保留并显示既有错误，不把观测缓存过期升级为路由或鉴权失败。未新增 Store、migration、依赖或配置字段。
-- **交付门禁**：组织规则仍要求历史 `Core CI` context，因此 CI 恢复同名 checkout-free 聚合 job；它不重复运行代码，只在 verify、store、e2e、docker 全部成功，并且 PR 场景的可信 head reporter 成功后通过。现有四道独立边界与最小权限保持不变。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-25 · Providers 配额缓存一小时后后台重验证**：Providers 首屏保持 cache-only；缺失或满一小时的 quota snapshot 仅在页面可见时复用既有后台 refresh job，失败保留旧数据且不改变路由/鉴权，完整原文经 git history 回溯。
 - **2026-08-25 · Responses continuation 不跨账号或 transport 恢复**：续接只允许可调度的原账号与产生该 ID 的活动原 WebSocket；失配、关闭和模糊发送失败均 fail-closed，完整原文经 git history 回溯。
 - **2026-08-25 · Anthropic tool_result 400 允许协议级 fallback**：仅精确的 `Advisor tool result content could not be processed` 记为候选协议不兼容并继续 fallback；其他确定性客户端错误仍 fail-closed，完整原文经 git history 回溯。
 - **2026-08-25 · Responses 续接只在原账号不可用时搜索 sibling**：已知原账号实际收到请求后若仍返回 invalid-ID 立即 fail-closed；只有原账号已不可调度或 ID 尚无归属时才搜索 sibling，turn-state 与活动 WebSocket 始终不迁移；完整原文经 git history 回溯。

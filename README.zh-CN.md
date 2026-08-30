@@ -256,9 +256,10 @@ curl http://localhost:8080/v1/images/generations \
   -d '{ "model": "gpt-image-2", "prompt": "纯白背景上的一颗红苹果", "size": "1024x1024" }'
 ```
 
-连接 ChatGPT OAuth 账号后，若该账号的实时 Codex 模型目录明确开放非 Lite 的
-`gpt-5.4-mini` 和 `image_generation` 工具，Helm 会提供独立的 `chatgpt-image`
-lane。生成仍调用上面的路径；编辑调用同一套 Images 协议的编辑路径：
+存在可调度的 ChatGPT OAuth 账号时，Helm 会提供独立的 `chatgpt-image` lane。
+Codex 模型目录中的工具元数据只作参考，不作为准入门槛；该账号是否真正支持
+生图，由客户端发起的那一次上游调用判定。生成仍调用上面的路径；编辑调用同一套
+Images 协议的编辑路径：
 
 ```bash
 curl http://localhost:8080/v1/images/edits \

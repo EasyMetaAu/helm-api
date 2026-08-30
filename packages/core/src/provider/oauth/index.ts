@@ -70,7 +70,6 @@ export {
   parseXaiOAuthModels,
   resolveOpenAICodexClientVersion,
   resolveOpenAICodexModelAlias,
-  supportsOpenAICodexImageGeneration,
   type XaiApiBackend,
   type XaiOAuthModel,
   type XaiReasoningEffort,
