@@ -90,7 +90,7 @@
   {/if}
 
   <div
-    class="sticky bottom-0 -mx-4 flex items-center justify-end gap-3 border-t border-border bg-canvas/95 px-4 py-3 backdrop-blur sm:static sm:m-0 sm:border-0 sm:bg-transparent sm:p-0 sm:backdrop-blur-none"
+    class="fixed right-4 bottom-4 z-20 flex items-center gap-3 rounded-lg border border-border bg-canvas/95 p-3 shadow-lg backdrop-blur"
   >
     {#if saved}
       <span class="badge-ok" data-testid="lanes-saved" role="status">{$t('Saved')}</span>
