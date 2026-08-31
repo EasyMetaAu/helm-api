@@ -303,7 +303,7 @@
   </div>
 
   <div
-    class="sticky bottom-0 -mx-4 flex items-center justify-between gap-3 border-t border-border bg-canvas/95 px-4 py-3 backdrop-blur sm:static sm:m-0 sm:border-0 sm:bg-transparent sm:p-0 sm:backdrop-blur-none"
+    class="fixed right-4 bottom-4 z-20 flex items-center justify-between gap-3 rounded-lg border border-border bg-canvas/95 p-3 shadow-lg backdrop-blur"
   >
     <button type="button" class="btn-secondary" onclick={addRow}>{$t('Add policy')}</button>
     <div class="flex items-center gap-3">

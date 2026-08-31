@@ -78,6 +78,9 @@ test.describe("admin lane editing", () => {
     const newPrimary = `e2e_edited_${Date.now()}`;
 
     await page.goto(`${BASE}/admin/lanes`);
+    const saveButton = page.getByRole("button", { name: /^save$/i });
+    await expect(saveButton.locator("..")).toHaveCSS("position", "fixed");
+    await expect(saveButton).toBeInViewport();
     // Scope the card by its heading so a lane that merely lists "economy" as a
     // fallback does not also match (the balanced card references economy).
     const card = page
@@ -87,7 +90,7 @@ test.describe("admin lane editing", () => {
 
     const primary = card.locator("input[name='primary']");
     await primary.fill(newPrimary);
-    await page.getByRole("button", { name: /^save$/i }).click();
+    await saveButton.click();
 
     // The one page-level success indicator appears after the atomic write-back.
     await expect(page.getByTestId("lanes-saved")).toBeVisible();
@@ -98,6 +101,19 @@ test.describe("admin lane editing", () => {
       .getByTestId("lane-card")
       .filter({ has: page.getByRole("heading", { name: "economy", exact: true }) });
     await expect(reloaded.locator("input[name='primary']")).toHaveValue(newPrimary);
+  });
+});
+
+test.describe("admin policy editing", () => {
+  test("policy save controls stay available on the long form", async ({ page }) => {
+    await page.goto(`${BASE}/admin/policies`);
+    const saveButton = page.getByRole("button", { name: /^save policies$/i });
+    const actions = saveButton.locator("..").locator("..");
+    await expect(actions).toHaveCSS("position", "fixed");
+    await expect(saveButton).toBeInViewport();
+
+    await saveButton.click();
+    await expect(page.getByTestId("policies-saved")).toBeVisible();
   });
 });
 
