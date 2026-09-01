@@ -58,7 +58,8 @@ function resetEventBoundaries(
   windowMs: number | null,
 ): Array<{ startMs: number; endMs: number; approximate: boolean; usedPercent?: number | null }> {
   // The old writer stored [oldReset, projectedNextReset); the current writer stores a
-  // closed period ending at the observed reset. Reduce both shapes to proven events.
+  // complete closed period ending at the observed reset. Keep complete periods intact;
+  // only the legacy shape needs reconstructing from proven reset events.
   const rawPoints = rows
     .flatMap((row) => {
       const atMs =
@@ -88,7 +89,7 @@ function resetEventBoundaries(
     ).values(),
   ].sort((a, b) => a.atMs - b.atMs);
   const plausible = (startMs: number, endMs: number) =>
-    windowMs !== null && endMs - startMs <= windowMs * 1.5;
+    windowMs !== null && startMs < endMs && endMs - startMs <= windowMs * 1.5;
   const boundaries = points.slice(1).flatMap((end, index) => {
     const start = points[index] ?? end;
     return plausible(start.atMs, end.atMs)
@@ -102,6 +103,25 @@ function resetEventBoundaries(
         ]
       : [];
   });
+  for (const row of rows) {
+    if (
+      row.usedPercent == null ||
+      row.detectedAtMs < row.periodEndMs ||
+      row.periodEndMs > nowMs ||
+      !plausible(row.periodStartMs, row.periodEndMs)
+    ) {
+      continue;
+    }
+    const closed = {
+      startMs: row.periodStartMs,
+      endMs: row.periodEndMs,
+      approximate: row.approximate ?? false,
+      usedPercent: row.usedPercent,
+    };
+    const index = boundaries.findIndex((boundary) => boundary.endMs === row.periodEndMs);
+    if (index < 0) boundaries.push(closed);
+    else boundaries[index] = closed;
+  }
   const latest = points.at(-1);
   if (
     latest !== undefined &&
