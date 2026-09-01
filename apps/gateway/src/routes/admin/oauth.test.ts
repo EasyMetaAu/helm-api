@@ -337,6 +337,72 @@ describe("admin OAuth routes — read endpoints", () => {
     expect(dayTotal).toBe(24_000);
   });
 
+  it("keeps the used percentage from the first closed Anthropic quota period", async () => {
+    const HOUR = 3_600_000;
+    const WEEK = 7 * 86_400_000;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T12:00:00.000Z"));
+    const now = Date.now();
+    const currentStart = now - HOUR;
+    const closedStart = currentStart - WEEK;
+    const oauthUsage = {
+      queryBuckets: vi.fn(async () => [
+        { bucketMs: closedStart, requests: 1, tokens: 100, costUsd: null },
+      ]),
+    } as unknown as AdminApiDeps["oauthUsage"];
+    const oauthQuota = {
+      get: vi.fn(async () => ({
+        providerId: "anthropic",
+        account: "claude@example.com",
+        windows: [
+          {
+            key: "7d",
+            usedPercent: 2,
+            resetsAtMs: currentStart + WEEK,
+            windowMinutes: 10_080,
+          },
+        ],
+        capturedAt: now,
+        source: "anthropic",
+        usageLimitedUntilMs: null,
+      })),
+    } as unknown as AdminApiDeps["oauthQuota"];
+    const oauthResetPeriod = {
+      queryPeriods: vi.fn(async () => [
+        {
+          providerId: "anthropic",
+          account: "claude@example.com",
+          windowKey: "7d",
+          periodStartMs: closedStart,
+          periodEndMs: currentStart,
+          detectedAtMs: currentStart,
+          usedPercent: 100,
+          approximate: false,
+        },
+      ]),
+    } as unknown as AdminApiDeps["oauthResetPeriod"];
+    const settings = {
+      get: () => ({ oauth_usage_retention_days: 180 }),
+    } as unknown as AdminApiDeps["settings"];
+
+    const res = await app({
+      oauth: fullSeam(),
+      oauthUsage,
+      oauthQuota,
+      oauthResetPeriod,
+      settings,
+    }).request("/admin/api/oauth/usage/periods?provider=anthropic&account=claude%40example.com");
+    vi.useRealTimers();
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      current: Array<{ usedPercent?: number | null }>;
+      periods: Array<{ usedPercent?: number | null }>;
+    };
+    expect(body.current[0]?.usedPercent).toBe(2);
+    expect(body.periods[0]?.usedPercent).toBe(100);
+  });
+
   it("GET /oauth/usage/periods fails open to empty when the quota snapshot is missing", async () => {
     const oauthUsage = {
       queryBuckets: vi.fn(async () => []),
