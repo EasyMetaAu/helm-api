@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-09-01 · Codex Responses 超大首轮 WebSocket 改走 HTTP（Responses / docs/05，原则 3/5/8）
+
+- 上游以 WebSocket close `1009` 拒绝无 `previous_response_id` 的完整历史请求时，Helm 只在尚未收到任何事件且尚未开始输出的窗口关闭该 socket，并单次切换到 HTTP Responses；不对有状态续接、已产生输出或其他关闭码做重放。
+- 这是传输兜底，不是服务端历史重建：客户端仍负责首轮完整 baseline、后续 `previous_response_id + delta`，compaction 仍应走专用 compact 流程。这样避免重复执行工具调用，同时保留既有 native passthrough 语义。
+
 ## 2026-08-30 · ChatGPT 生图能力由单次上游调用判定（OAuth provider / Images / Routing，docs/04/05/07，原则 3/5/7）
 
 - **目录不再准入**：Codex `/models` 的 `supported_in_api`、`use_responses_lite` 与 `experimental_supported_tools` 不是 ChatGPT 图片工具的权威能力合同；可调度的 `openai-codex` 账号现在合成 `gpt-image-2` alias，执行前也不再按这些目录字段本地拒绝，实际支持状态由客户端请求触发的上游调用返回。

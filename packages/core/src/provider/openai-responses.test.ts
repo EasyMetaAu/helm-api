@@ -3129,6 +3129,48 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect(connect).toHaveBeenCalledTimes(1);
   });
 
+  it("falls back to HTTP when the websocket rejects a full-history request as too large", async () => {
+    let sends = 0;
+    const connection: CodexResponsesWebSocketConnection = {
+      responseHeaders: new Headers(),
+      async send() {
+        sends += 1;
+      },
+      async receive() {
+        return null;
+      },
+      closeInfo() {
+        return { code: 1009, reason: "" };
+      },
+      async close() {},
+    };
+    const fetchMock = vi.fn(async () => new Response(null, { status: 400 }));
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_oversized_ws")}`,
+        responsesWebSocketConnector: vi.fn(async () => connection),
+        connectRetries: 2,
+        connectRetryBackoffMs: [0],
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier("ingress-oversized-ws", {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+        }),
+      )
+      [Symbol.asyncIterator]();
+
+    await expect(iterator?.next()).rejects.toMatchObject({ upstreamStatus: 400 });
+    expect(sends).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("does not report Helm's local close as upstream close metadata", async () => {
     let closeDetails: { code: number; reason: string } | null = null;
     const connection: CodexResponsesWebSocketConnection = {
@@ -3903,6 +3945,9 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       async receive() {
         const event = replies[turn]?.[eventIndex++];
         return event === undefined ? null : JSON.stringify(event);
+      },
+      closeInfo() {
+        return turn === 1 ? { code: 1009, reason: "" } : null;
       },
       async close() {},
     };
