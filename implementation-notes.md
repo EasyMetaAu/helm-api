@@ -7,10 +7,11 @@
 
 ---
 
-## 2026-09-01 · Codex Responses 超大首轮 WebSocket 改走 HTTP（Responses / docs/05，原则 3/5/8）
+## 2026-09-01 · Codex Responses 超大首轮 WebSocket 的 HTTP 生命周期（Responses / docs/05，原则 3/5/8）
 
-- 上游以 WebSocket close `1009` 拒绝无 `previous_response_id` 的完整历史请求时，Helm 只在尚未收到任何事件且尚未开始输出的窗口关闭该 socket，并单次切换到 HTTP Responses；不对有状态续接、已产生输出或其他关闭码做重放。
-- 这是传输兜底，不是服务端历史重建：客户端仍负责首轮完整 baseline、后续 `previous_response_id + delta`，compaction 仍应走专用 compact 流程。这样避免重复执行工具调用，同时保留既有 native passthrough 语义。
+- 上游以 WebSocket close `1009` 拒绝无 `previous_response_id` 的完整历史请求时，Helm 只在尚未收到任何上游 frame 的窗口关闭该 socket，并单次切换到 HTTP Responses；rate-limit、无法解析及未知类型 frame 也会把结果标记为不确定，因此禁止 HTTP 重放。
+- 首轮安全回落成功后，该 ingress session 的后续 `previous_response_id` 增量继续走同一 HTTP transport，而不是再进入只适用于活动 WebSocket 的 response/session registry 校验；其他 session、跨账号与活动 WebSocket 续接仍 fail-closed。
+- 这是传输兜底，不是服务端历史重建：客户端仍负责首轮完整 baseline、后续 `previous_response_id + delta`，compaction 仍走专用 compact 流程。HTTP SSE 读取复用 client 已配置的 response-work admission，不新增缓存、schema、配置或依赖。
 
 ## 2026-08-30 · ChatGPT 生图能力由单次上游调用判定（OAuth provider / Images / Routing，docs/04/05/07，原则 3/5/7）
 

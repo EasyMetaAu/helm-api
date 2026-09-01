@@ -3171,6 +3171,133 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps continuations on HTTP after an oversized websocket request falls back", async () => {
+    let sends = 0;
+    const connection: CodexResponsesWebSocketConnection = {
+      responseHeaders: new Headers(),
+      async send() {
+        sends += 1;
+      },
+      async receive() {
+        return null;
+      },
+      closeInfo() {
+        return { code: 1009, reason: "" };
+      },
+      async close() {},
+    };
+    const sentBodies: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      sentBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      const responseId = sentBodies.length === 1 ? "resp-http-parent" : "resp-http-child";
+      return rawSSEResponse(
+        [
+          `event: response.created\ndata: ${JSON.stringify({ type: "response.created", response: { id: responseId } })}\n\n`,
+          `event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { id: responseId, status: "completed", usage: {} } })}\n\n`,
+        ].join(""),
+      );
+    });
+    const connect = vi.fn(async () => connection);
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_oversized_http_session")}`,
+        responsesWebSocketConnector: connect,
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+      responseWorkAdmission: createResponseWorkAdmission({
+        capacityBytes: 1_000_000,
+        jsonAmplification: 1,
+        minChargeBytes: 1,
+      }),
+    });
+
+    for await (const _ of client.nativePassthroughStream?.(
+      carrier("ingress-oversized-http-session", {
+        model: "gpt-5.6-sol",
+        input: [],
+        stream: true,
+        store: false,
+      }),
+    ) ?? []) {
+      // Establish the HTTP fallback response.
+    }
+    for await (const _ of client.nativePassthroughStream?.(
+      carrier("ingress-oversized-http-session", {
+        model: "gpt-5.6-sol",
+        input: [],
+        stream: true,
+        store: false,
+        previous_response_id: "resp-http-parent",
+      }),
+    ) ?? []) {
+      // Continue the same provider-owned response over HTTP.
+    }
+
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(sends).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sentBodies[1]?.previous_response_id).toBe("resp-http-parent");
+  });
+
+  it.each([
+    ["rate-limit", JSON.stringify({ type: "codex.rate_limits", rate_limits: {} })],
+    ["malformed", "not-json"],
+    ["untyped", JSON.stringify({ unexpected: true })],
+  ])("does not fall back to HTTP after receiving a %s websocket frame", async (_label, frame) => {
+    let receiveCalls = 0;
+    const connection: CodexResponsesWebSocketConnection = {
+      responseHeaders: new Headers(),
+      async send() {},
+      async receive() {
+        receiveCalls += 1;
+        return receiveCalls === 1 ? frame : null;
+      },
+      closeInfo() {
+        return { code: 1009, reason: "" };
+      },
+      async close() {},
+    };
+    const fetchMock = vi.fn(async () =>
+      rawSSEResponse(
+        [
+          'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+        ].join(""),
+      ),
+    );
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_frame_before_1009")}`,
+        responsesWebSocketConnector: vi.fn(async () => connection),
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+      responseWorkAdmission: createResponseWorkAdmission({
+        capacityBytes: 1_000_000,
+        jsonAmplification: 1,
+        minChargeBytes: 1,
+      }),
+    });
+    const iterator = client
+      .nativePassthroughStream?.(
+        carrier(`ingress-frame-before-1009-${_label}`, {
+          model: "gpt-5.6-sol",
+          input: [],
+          stream: true,
+          store: false,
+        }),
+      )
+      [Symbol.asyncIterator]();
+
+    await expect(iterator?.next()).rejects.toMatchObject({
+      providerRaw: {
+        error: { code: "response_create_outcome_unknown" },
+        websocket: { lifecycle_phase: "after_send_before_event", close_code: 1009 },
+      },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("does not report Helm's local close as upstream close metadata", async () => {
     let closeDetails: { code: number; reason: string } | null = null;
     const connection: CodexResponsesWebSocketConnection = {
