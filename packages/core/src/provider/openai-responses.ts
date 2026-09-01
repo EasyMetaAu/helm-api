@@ -2452,6 +2452,20 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
           let sendingRequest = false;
           let outputStarted = false;
           const preambleFrames: string[] = [];
+          const fallbackOversizedRequestToHttp = async (): Promise<boolean> => {
+            if (
+              hasPreviousResponseId ||
+              outputStarted ||
+              preambleFrames.length > 0 ||
+              lease?.connection.closeInfo?.()?.code !== 1009
+            ) {
+              return false;
+            }
+            await closeWebSocketSession(sessionId);
+            websocketHttpFallbackSessions.add(sessionId);
+            fallbackToHttp = true;
+            return true;
+          };
           try {
             if (!websocketMetadataFired.has(lease.connection)) {
               websocketMetadataFired.add(lease.connection);
@@ -2471,6 +2485,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
                 received = await receiveWebSocketMessage(lease.connection, opts?.signal);
               } catch (error) {
                 if (opts?.signal?.aborted) throw opts.signal.reason ?? error;
+                if (await fallbackOversizedRequestToHttp()) break;
                 throw responseCreateOutcomeUnknown(
                   lease.connection,
                   outputStarted
@@ -2481,6 +2496,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
                 );
               }
               if (received === null) {
+                if (await fallbackOversizedRequestToHttp()) break;
                 if (hasPreviousResponseId && !outputStarted && preambleFrames.length === 0) {
                   throw responseCreateOutcomeUnknown(lease.connection, "after_send_before_event");
                 }
