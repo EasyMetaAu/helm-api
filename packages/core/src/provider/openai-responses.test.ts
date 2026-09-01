@@ -1,3 +1,4 @@
+import sharp from "sharp";
 import { describe, expect, it, vi } from "vitest";
 import { transformRequestOut as anthropicToIRRequest } from "../protocol/anthropic/request.js";
 import { createResponseWorkAdmission } from "../runtime/response-work-admission.js";
@@ -16,6 +17,7 @@ import {
   hoistResponsesInstructions,
   openaiToGenericResponsesRequest,
   openaiToResponsesRequest,
+  optimizeCodexInlineImages,
   readResponsesEvents,
   readResponsesSSERaw,
   sanitizeCodexResponsesNativeBody,
@@ -2619,6 +2621,235 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     };
     return connection;
   }
+
+  it("downscales oversized inline images without changing non-image input", async () => {
+    const pixels = Buffer.alloc(4096 * 64 * 3);
+    let seed = 0x1234_5678;
+    for (let index = 0; index < pixels.length; index += 1) {
+      seed = (seed * 1_664_525 + 1_013_904_223) >>> 0;
+      pixels[index] = seed & 0xff;
+    }
+    const source = await sharp(pixels, {
+      raw: { width: 4096, height: 64, channels: 3 },
+    })
+      .png()
+      .toBuffer();
+    const untouched = { type: "input_text", text: "keep me" };
+
+    const optimized = await optimizeCodexInlineImages(
+      {
+        input: [
+          untouched,
+          {
+            type: "input_image",
+            image_url: `data:image/png;base64,${source.toString("base64")}`,
+          },
+        ],
+      },
+      {
+        admission: createResponseWorkAdmission({
+          capacityBytes: 10_000_000,
+          jsonAmplification: 1,
+          minChargeBytes: 1,
+        }),
+        maxEdge: 2048,
+      },
+    );
+
+    expect(optimized.optimizedImages).toBe(1);
+    expect((optimized.value as { input: unknown[] }).input[0]).toBe(untouched);
+    const imageUrl =
+      (optimized.value as { input: Array<{ image_url?: string }> }).input[1]?.image_url ?? "";
+    expect(imageUrl).toMatch(/^data:image\/webp;base64,/);
+    const metadata = await sharp(
+      Buffer.from(imageUrl.replace(/^data:image\/webp;base64,/, ""), "base64"),
+    ).metadata();
+    expect(metadata.width).toBe(2048);
+    expect(metadata.height).toBe(32);
+    expect(metadata.format).toBe("webp");
+    expect(
+      Buffer.from(imageUrl.replace(/^data:image\/webp;base64,/, ""), "base64").byteLength,
+    ).toBeLessThan(source.byteLength);
+
+    const denied = await optimizeCodexInlineImages(
+      {
+        type: "input_image",
+        image_url: `data:image/png;base64,${source.toString("base64")}`,
+      },
+      {
+        admission: createResponseWorkAdmission({
+          capacityBytes: 1,
+          jsonAmplification: 1,
+          minChargeBytes: 1,
+        }),
+      },
+    );
+    expect(denied.optimizedImages).toBe(0);
+
+    const charges: number[] = [];
+    await optimizeCodexInlineImages(
+      {
+        type: "input_image",
+        image_url: `data:image/png;base64,${source.toString("base64")}`,
+      },
+      {
+        admission: {
+          acquire(wireBytes) {
+            charges.push(wireBytes);
+            return { ok: false, reason: "busy" };
+          },
+          capacityBytes: 1,
+          reservedBytes: 0,
+        },
+      },
+    );
+    expect(charges).toEqual([source.byteLength]);
+  });
+
+  it("leaves requests below the safety threshold untouched", async () => {
+    const imageUrl = "data:image/png;base64,aGVsbG8=";
+    const connection = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-small" } },
+        { type: "response.completed", response: { id: "resp-small", status: "completed" } },
+      ],
+    ]);
+    const fetchMock = vi.fn();
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_small_request")}`,
+        responsesWebSocketConnector: vi.fn(async () => connection),
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+      autoCompactRequestBytes: 10_000,
+    });
+
+    for await (const _ of client.nativePassthroughStream?.(
+      carrier("ingress-small-request", {
+        model: "gpt-5.6-sol",
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_image", image_url: imageUrl }],
+          },
+        ],
+        stream: true,
+        store: false,
+      }),
+    ) ?? []) {
+      // drain
+    }
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(connection.sent).toHaveLength(1);
+    expect(connection.sent[0]).toContain(imageUrl);
+  });
+
+  it("auto-compacts an oversized full-history request before response.create", async () => {
+    const captured: string[] = [];
+    const connection = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-compacted" } },
+        { type: "response.completed", response: { id: "resp-compacted", status: "completed" } },
+      ],
+    ]);
+    const compactOutput = [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "latest" }] },
+      { type: "compaction", encrypted_content: "compact-context" },
+    ];
+    const fetchMock = vi.fn(async (url: string) => {
+      expect(url).toBe("https://chatgpt.com/backend-api/codex/responses/compact");
+      return jsonResponse({ output: compactOutput });
+    });
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_auto_compact")}`,
+        responsesWebSocketConnector: vi.fn(async () => connection),
+        resolveModelInfo: () => codexModelInfo({ use_responses_lite: true }),
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+      autoCompactRequestBytes: 512,
+      responseWorkAdmission: createResponseWorkAdmission({
+        capacityBytes: 1_000_000,
+        jsonAmplification: 1,
+        minChargeBytes: 1,
+      }),
+    });
+    const request = carrier("ingress-auto-compact", {
+      model: "gpt-5.6-sol",
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "x".repeat(2_000) }],
+        },
+      ],
+      tools: [{ type: "function", name: "search" }],
+      stream: true,
+      store: false,
+    });
+
+    for await (const _ of client.nativePassthroughStream?.(request, {
+      captureUpstream: (body) => captured.push(body),
+    }) ?? []) {
+      // drain
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(captured).toHaveLength(2);
+    expect(connection.sent).toHaveLength(1);
+    const sent = JSON.parse(connection.sent[0] ?? "{}") as {
+      input?: Array<Record<string, unknown>>;
+    };
+    expect(sent.input?.map((item) => item.type)).toEqual([
+      "additional_tools",
+      "message",
+      "compaction",
+    ]);
+    expect(JSON.stringify(sent)).not.toContain("x".repeat(100));
+    expect(request.mutations).toMatchObject({
+      body_shims_applied: expect.arrayContaining(["codex_oversized_request_auto_compacted"]),
+    });
+  });
+
+  it("keeps the existing transport fallback when automatic compaction fails", async () => {
+    const connection = fakeConnection([
+      [
+        { type: "response.created", response: { id: "resp-original" } },
+        { type: "response.completed", response: { id: "resp-original", status: "completed" } },
+      ],
+    ]);
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ error: { message: "compact failed" } }, 400),
+    );
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct_compact_fail_open")}`,
+        responsesWebSocketConnector: vi.fn(async () => connection),
+      },
+      fetch: fetchMock as unknown as typeof fetch,
+      autoCompactRequestBytes: 128,
+    });
+
+    for await (const _ of client.nativePassthroughStream?.(
+      carrier("ingress-compact-fail-open", {
+        model: "gpt-5.6-sol",
+        input: [{ type: "message", role: "user", content: "x".repeat(1_000) }],
+        stream: true,
+        store: false,
+      }),
+    ) ?? []) {
+      // drain
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(connection.sent).toHaveLength(1);
+    expect(connection.sent[0]).toContain("x".repeat(100));
+  });
 
   it("holds a websocket response-work lease until the yielded frame is consumed", async () => {
     let releaseCalls = 0;

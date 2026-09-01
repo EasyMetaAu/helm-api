@@ -23,6 +23,7 @@ import {
   isNativePassthroughCarrier,
   type NativePassthroughInput,
 } from "@helm/shared";
+import sharp from "sharp";
 import {
   createSSEIncompleteFrameGuard,
   nextSSEFrameBoundary,
@@ -120,6 +121,8 @@ export interface CodexResponsesClientDeps {
   config: CodexResponsesClientConfig;
   fetch?: typeof globalThis.fetch;
   responseWorkAdmission?: ResponseWorkAdmission;
+  /** Test seam for the provider's fixed pre-send safety threshold. */
+  autoCompactRequestBytes?: number;
 }
 
 export interface GenericOpenAIResponsesClientDeps {
@@ -278,6 +281,11 @@ const RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite";
 const CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata";
 const CODEX_TURN_STATE_HEADER = "x-codex-turn-state";
 const MAX_CODEX_TURN_STATES = 128;
+const DEFAULT_CODEX_AUTO_COMPACT_REQUEST_BYTES = 32 * 1024 * 1024;
+const DEFAULT_CODEX_IMAGE_MAX_EDGE = 2048;
+const MAX_CODEX_IMAGE_PIXELS = 16_000_000;
+const MAX_CODEX_IMAGE_OPTIMIZATION_PIXELS = 32_000_000;
+const MAX_CODEX_IMAGE_OPTIMIZATION_COUNT = 12;
 
 function responseBodyTooLargeUpstreamError(error: ResponseBodyTooLargeError): UpstreamError {
   return new UpstreamError("upstream_error", error.message, {
@@ -517,6 +525,123 @@ export type CodexResponsesNativeBodyFix =
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+type CodexImageOptimizationState = {
+  admission: ResponseWorkAdmission;
+  maxEdge: number;
+  remainingImages: number;
+  remainingPixels: number;
+  signal?: AbortSignal;
+};
+
+async function optimizeCodexInlineImagesInner(
+  value: unknown,
+  state: CodexImageOptimizationState,
+): Promise<{ value: unknown; optimizedImages: number }> {
+  if (state.signal?.aborted) throw state.signal.reason ?? new Error("client aborted");
+  if (Array.isArray(value)) {
+    let next: unknown[] = value;
+    let optimizedImages = 0;
+    for (let index = 0; index < value.length; index += 1) {
+      const optimized = await optimizeCodexInlineImagesInner(value[index], state);
+      optimizedImages += optimized.optimizedImages;
+      if (optimized.value !== value[index]) {
+        if (next === value) next = [...value];
+        next[index] = optimized.value;
+      }
+    }
+    return { value: next, optimizedImages };
+  }
+  if (!isRecord(value)) return { value, optimizedImages: 0 };
+
+  let next = value;
+  let optimizedImages = 0;
+  if (
+    value.type === "input_image" &&
+    typeof value.image_url === "string" &&
+    state.remainingImages > 0 &&
+    state.remainingPixels > 0
+  ) {
+    const match = /^data:(image\/(?:png|jpe?g|webp));base64,([a-z\d+/=]+)$/i.exec(value.image_url);
+    if (match?.[2]) {
+      state.remainingImages -= 1;
+      const sourceAcquired = state.admission.acquire(Buffer.byteLength(match[2], "base64"));
+      if (sourceAcquired.ok) {
+        try {
+          const source = Buffer.from(match[2], "base64");
+          const pipeline = sharp(source, {
+            failOn: "error",
+            limitInputPixels: MAX_CODEX_IMAGE_PIXELS,
+          });
+          const metadata = await pipeline.metadata();
+          if (state.signal?.aborted) throw state.signal.reason ?? new Error("client aborted");
+          const pixels = (metadata.width ?? 0) * (metadata.height ?? 0);
+          if (Number.isSafeInteger(pixels) && pixels > 0 && pixels <= state.remainingPixels) {
+            state.remainingPixels -= pixels;
+            const pixelsAcquired = state.admission.acquire(pixels * 4);
+            if (pixelsAcquired.ok) {
+              try {
+                const optimized = await pipeline
+                  .rotate()
+                  .resize({
+                    width: state.maxEdge,
+                    height: state.maxEdge,
+                    fit: "inside",
+                    withoutEnlargement: true,
+                  })
+                  .webp({ quality: 82 })
+                  .toBuffer();
+                if (state.signal?.aborted) {
+                  throw state.signal.reason ?? new Error("client aborted");
+                }
+                if (optimized.byteLength < source.byteLength) {
+                  next = {
+                    ...value,
+                    image_url: `data:image/webp;base64,${optimized.toString("base64")}`,
+                  };
+                  optimizedImages = 1;
+                }
+              } finally {
+                pixelsAcquired.lease.release();
+              }
+            }
+          }
+        } catch (error) {
+          if (state.signal?.aborted) throw state.signal.reason ?? error;
+        } finally {
+          sourceAcquired.lease.release();
+        }
+      }
+    }
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "image_url" && value.type === "input_image") continue;
+    const optimized = await optimizeCodexInlineImagesInner(child, state);
+    optimizedImages += optimized.optimizedImages;
+    if (optimized.value !== child) {
+      if (next === value) next = { ...value };
+      next[key] = optimized.value;
+    }
+  }
+  return { value: next, optimizedImages };
+}
+
+export async function optimizeCodexInlineImages(
+  value: unknown,
+  options: {
+    admission?: ResponseWorkAdmission;
+    maxEdge?: number;
+    signal?: AbortSignal;
+  } = {},
+): Promise<{ value: unknown; optimizedImages: number }> {
+  return await optimizeCodexInlineImagesInner(value, {
+    admission: options.admission ?? runtimeResponseWorkAdmission(),
+    maxEdge: options.maxEdge ?? DEFAULT_CODEX_IMAGE_MAX_EDGE,
+    remainingImages: MAX_CODEX_IMAGE_OPTIMIZATION_COUNT,
+    remainingPixels: MAX_CODEX_IMAGE_OPTIMIZATION_PIXELS,
+    signal: options.signal,
+  });
 }
 
 function hasNonEmptyArray(value: unknown): boolean {
@@ -1402,6 +1527,10 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
   const doFetch = deps.fetch ?? globalThis.fetch;
   const cfg = deps.config;
   const timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const autoCompactRequestBytes = Math.max(
+    1,
+    Math.floor(deps.autoCompactRequestBytes ?? DEFAULT_CODEX_AUTO_COMPACT_REQUEST_BYTES),
+  );
   // baseUrl may or may not already end in /responses (mirror openclaw normalize).
   const url = cfg.baseUrl.endsWith("/responses")
     ? cfg.baseUrl
@@ -1634,7 +1763,12 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     maxBytes = 0,
   ): Promise<T> {
     try {
-      return await consumeResponseTextWithinBudget(result.response, maxBytes, consume);
+      return await consumeResponseTextWithinBudget(
+        result.response,
+        maxBytes,
+        consume,
+        deps.responseWorkAdmission ?? runtimeResponseWorkAdmission(),
+      );
     } catch (err) {
       if (result.bodyTimeout?.isTimeout() && !result.bodyTimeout.isExternalAbort()) {
         throw new UpstreamError("timeout", "upstream request timed out");
@@ -1783,6 +1917,109 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       result.response.status,
       scrub(safeUpstreamHeaders(result.response.headers)) as Record<string, string>,
     );
+  }
+
+  function inputWithBody(
+    input: NativePassthroughInput,
+    body: Record<string, unknown>,
+  ): NativePassthroughInput {
+    return isNativePassthroughCarrier(input) ? cloneCarrierWithBody(input, body) : body;
+  }
+
+  function compactRequestBody(body: Record<string, unknown>): Record<string, unknown> {
+    const compact: Record<string, unknown> = {};
+    for (const key of [
+      "model",
+      "input",
+      "instructions",
+      "parallel_tool_calls",
+      "reasoning",
+      "prompt_cache_key",
+    ]) {
+      if (body[key] !== undefined) compact[key] = body[key];
+    }
+    return compact;
+  }
+
+  function compactedResponseBody(
+    body: Record<string, unknown>,
+    output: unknown[],
+  ): Record<string, unknown> {
+    const input = Array.isArray(body.input) ? body.input : [];
+    const prefix = input[0];
+    const outputStartsWithTools = isRecord(output[0]) && output[0].type === "additional_tools";
+    return {
+      ...body,
+      input:
+        isRecord(prefix) && prefix.type === "additional_tools" && !outputStartsWithTools
+          ? [prefix, ...output]
+          : output,
+    };
+  }
+
+  async function prepareOversizedNativeStreamRequest(
+    input: NativePassthroughInput,
+    modelInfo: CodexModelInfo | undefined,
+    opts: ProviderCallOptions | undefined,
+  ): Promise<{
+    input: NativePassthroughInput;
+    prepared: PreparedNativePassthroughRequest;
+    turnKey: string | undefined;
+  }> {
+    let currentInput = input;
+    let current = await prepareRequest(currentInput, modelInfo, "text/event-stream", true);
+    let currentBytes = Buffer.byteLength(current.prepared.bodyText);
+    if (currentBytes <= autoCompactRequestBytes) return { input: currentInput, ...current };
+
+    const optimized = await optimizeCodexInlineImages(current.prepared.body, {
+      ...(deps.responseWorkAdmission ? { admission: deps.responseWorkAdmission } : {}),
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+    });
+    if (optimized.optimizedImages > 0 && isRecord(optimized.value)) {
+      if (isNativePassthroughCarrier(input)) {
+        appendMutationList(input.mutations, "body_shims_applied", [
+          "codex_oversized_images_optimized",
+        ]);
+      }
+      currentInput = inputWithBody(input, optimized.value);
+      current = await prepareRequest(currentInput, modelInfo, "text/event-stream", true);
+      currentBytes = Buffer.byteLength(current.prepared.bodyText);
+      if (currentBytes <= autoCompactRequestBytes) return { input: currentInput, ...current };
+    }
+
+    try {
+      const compactInput = inputWithBody(currentInput, compactRequestBody(current.prepared.body));
+      const result = await requestWithRetry(compactInput, modelInfo, {
+        endpoint: compactUrl,
+        accept: "application/json",
+        signal: opts?.signal,
+        capture: opts?.captureUpstream,
+        onResponseMeta: opts?.onResponseMeta,
+        timeoutThroughBody: true,
+      });
+      if (!result.response.ok) throw await errorFromResponse(result);
+      const compacted = await readUnaryJson(result);
+      if (!Array.isArray(compacted.output) || compacted.output.length === 0) {
+        return { input: currentInput, ...current };
+      }
+      const compactedInput = inputWithBody(
+        currentInput,
+        compactedResponseBody(current.prepared.body, compacted.output),
+      );
+      const next = await prepareRequest(compactedInput, modelInfo, "text/event-stream", true);
+      if (Buffer.byteLength(next.prepared.bodyText) >= currentBytes) {
+        return { input: currentInput, ...current };
+      }
+      if (isNativePassthroughCarrier(input)) {
+        appendMutationList(input.mutations, "body_shims_applied", [
+          "codex_oversized_request_auto_compacted",
+        ]);
+      }
+      return { input: compactedInput, ...next };
+    } catch (error) {
+      if (opts?.signal?.aborted) throw opts.signal.reason ?? error;
+      return { input: currentInput, ...current };
+    }
   }
 
   async function runCodexImageTool(
@@ -2393,6 +2630,18 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         typeof previousResponseId === "string" && previousResponseId.trim().length > 0;
       const usingHttpFallback =
         sessionId !== undefined && websocketHttpFallbackSessions.has(sessionId);
+      let outboundBody = body;
+      let preparedRequest:
+        | {
+            prepared: PreparedNativePassthroughRequest;
+            turnKey: string | undefined;
+          }
+        | undefined;
+      if (cfg.responsesWebSocketConnector && sessionId && !hasPreviousResponseId) {
+        const guarded = await prepareOversizedNativeStreamRequest(body, modelInfo, opts);
+        outboundBody = guarded.input;
+        preparedRequest = { prepared: guarded.prepared, turnKey: guarded.turnKey };
+      }
       if (
         hasPreviousResponseId &&
         (!cfg.responsesWebSocketConnector ||
@@ -2407,12 +2656,9 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         );
       }
       if (cfg.responsesWebSocketConnector && sessionId && !usingHttpFallback) {
-        const { prepared, turnKey } = await prepareRequest(
-          body,
-          modelInfo,
-          "text/event-stream",
-          true,
-        );
+        const { prepared, turnKey } =
+          preparedRequest ??
+          (await prepareRequest(outboundBody, modelInfo, "text/event-stream", true));
         const maxRetries = websocketRetryCount();
         let retries = 0;
         let retriedInvalidPreviousResponseId = false;
@@ -2633,7 +2879,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
           break;
         }
       }
-      const result = await requestWithRetry(body, modelInfo, {
+      const result = await requestWithRetry(outboundBody, modelInfo, {
         signal: opts?.signal,
         capture: opts?.captureUpstream,
         onResponseMeta: opts?.onResponseMeta,

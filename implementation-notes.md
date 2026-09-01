@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-09-01 · Codex 超大完整历史在发送前缩图并压缩（Responses / docs/05，原则 3/7/8）
+
+- 生产失败请求在单个完整历史中重复携带 11–24 张内联 Base64 图片，正文达到 46–49 MiB；Codex 客户端按 token 而非 wire bytes 触发自动压缩，Helm 的后台 Memory compaction 也不修改当前请求，因此会先撞上 WebSocket/HTTP 传输上限。
+- 仅对没有 `previous_response_id`、准备走 Codex WebSocket 的完整历史做 32 MiB 发送前保护：先将 PNG/JPEG/WebP 内联图片转成最长边 2048px、质量 82 的 WebP（不放大，单图输入像素上限 1600 万），仍超限再调用同账号 `/responses/compact` 并用其 `output` 替换历史；小请求和增量续接保持原样。官方 Responses 图片输入合同支持 WebP data URL。
+- 缩图或 compact 失败均 fail-open 到既有 `1009 → HTTP` 兜底，不删除图片或私有 Responses item；compact 结果只有比当前正文更小时才采用。缩图在 Base64 解码前预留源文件字节，并在变换期间另行预留解码像素内存；每请求最多处理 12 张/3200 万总像素及单图 1600 万像素，并在图片之间响应客户端取消。新增 `sharp` 是唯一依赖，生产镜像必须验证 native addon 可加载。
+
 ## 2026-09-01 · Codex Responses 超大首轮 WebSocket 的 HTTP 生命周期（Responses / docs/05，原则 3/5/8）
 
 - 上游以 WebSocket close `1009` 拒绝无 `previous_response_id` 的完整历史请求时，Helm 只在尚未收到任何上游 frame 的窗口关闭该 socket，并单次切换到 HTTP Responses；rate-limit、无法解析及未知类型 frame 也会把结果标记为不确定，因此禁止 HTTP 重放。
@@ -62,13 +68,9 @@
 - **空闲连接恢复**：上游 Codex WebSocket 现在每 60 秒发送协议 Ping，并要求 15 秒内收到 Pong；超时立即终止半开连接，让仍未发送的新请求在本地明确失败。测试可缩短两个时限，生产配置与协议正文不变。
 - **会话与单写边界**：`response.incomplete` 与 core 已有语义一致，继续保留同一上游 session 供 `previous_response_id` 续接；`failed`、`cancelled` 与 `error` 仍关闭。上游一旦发出 `response.created`/`response.in_progress` 即视为已接收 `response.create`，随后断连不再重连或回落 HTTP 重放，避免重复推理、工具副作用与计费；已有状态丢失仍要求客户端发送完整历史。
 
-## 2026-08-26 · OAuth 热刷新保留未变化的 Codex continuation transport（OAuth provider / Responses，docs/04/05/07/11，原则 3/5/8）
-
-- **生产根因与修复**：全局 `POST /admin/api/oauth/refresh` 会重建所有 OAuth pool；即使 Codex 账号、代理、模型与执行设置均未变化，也会替换持有上游 WebSocket 和 `response_id → session` 映射的 `openai-codex` client，使仍活跃的下游 session 下一轮在本地收到 `previous_response_id_session_unavailable`。composition root 现在保留一个进程级复用缓存；重建后的 Codex pool 拓扑与 transport 身份签名完全相同时复用原 pool/client，并原位刷新 quota/cooldown 信号。
-- **失效边界**：账号集合、模型、优先级、Fast mode、剩余额度策略、代理、ChatGPT account identity、Codex client identity、base URL、timeout 或 selection strategy 任一变化都会创建新 pool；真正的配置/身份变化、进程重启、原 WebSocket 关闭仍保持原有 fail-closed 400，不跨账号、不重连 opaque ID、不伪造完整历史。无 schema、migration、依赖或配置字段变化。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-26 · OAuth 热刷新保留未变化的 Codex continuation transport**：重建后拓扑与 transport 身份签名完全相同时复用原 pool/client 与 continuation 状态；真实账号、代理、模型或执行配置变化仍新建并保持失效 fail-closed，完整原文经 git history 回溯。
 - **2026-08-25 · Providers 配额缓存一小时后后台重验证**：Providers 首屏保持 cache-only；缺失或满一小时的 quota snapshot 仅在页面可见时复用既有后台 refresh job，失败保留旧数据且不改变路由/鉴权，完整原文经 git history 回溯。
 - **2026-08-25 · Responses continuation 不跨账号或 transport 恢复**：续接只允许可调度的原账号与产生该 ID 的活动原 WebSocket；失配、关闭和模糊发送失败均 fail-closed，完整原文经 git history 回溯。
 - **2026-08-25 · Anthropic tool_result 400 允许协议级 fallback**：仅精确的 `Advisor tool result content could not be processed` 记为候选协议不兼容并继续 fallback；其他确定性客户端错误仍 fail-closed，完整原文经 git history 回溯。
