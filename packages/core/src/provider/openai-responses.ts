@@ -2391,24 +2391,22 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       const previousResponseId = nativeBody.previous_response_id;
       const hasPreviousResponseId =
         typeof previousResponseId === "string" && previousResponseId.trim().length > 0;
+      const usingHttpFallback =
+        sessionId !== undefined && websocketHttpFallbackSessions.has(sessionId);
       if (
         hasPreviousResponseId &&
         (!cfg.responsesWebSocketConnector ||
           !sessionId ||
-          websocketHttpFallbackSessions.has(sessionId) ||
-          !websocketSessions.has(sessionId) ||
-          responseWebsocketSessions.get(previousResponseId.trim()) !== sessionId)
+          (!usingHttpFallback &&
+            (!websocketSessions.has(sessionId) ||
+              responseWebsocketSessions.get(previousResponseId.trim()) !== sessionId)))
       ) {
         throw new CodexResponsesBeforeSendError(
           "previous_response_id cannot be continued because its original websocket session is unavailable; send the full conversation input instead",
           { reason: "websocket_session_unavailable" },
         );
       }
-      if (
-        cfg.responsesWebSocketConnector &&
-        sessionId &&
-        !websocketHttpFallbackSessions.has(sessionId)
-      ) {
+      if (cfg.responsesWebSocketConnector && sessionId && !usingHttpFallback) {
         const { prepared, turnKey } = await prepareRequest(
           body,
           modelInfo,
@@ -2451,10 +2449,12 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
           let fallbackToHttp = false;
           let sendingRequest = false;
           let outputStarted = false;
+          let receivedAnyFrame = false;
           const preambleFrames: string[] = [];
           const fallbackOversizedRequestToHttp = async (): Promise<boolean> => {
             if (
               hasPreviousResponseId ||
+              receivedAnyFrame ||
               outputStarted ||
               preambleFrames.length > 0 ||
               lease?.connection.closeInfo?.()?.code !== 1009
@@ -2509,6 +2509,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
                       : "after_send_before_event",
                 );
               }
+              receivedAnyFrame = true;
               try {
                 let event: ParsedWebSocketEvent;
                 try {
@@ -2638,7 +2639,11 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         onResponseMeta: opts?.onResponseMeta,
       });
       if (!result.response.ok) throw await errorFromResponse(result);
-      yield* readResponsesSSERaw(result.response, timeoutMs);
+      yield* readResponsesSSERaw(
+        result.response,
+        timeoutMs,
+        deps.responseWorkAdmission ?? runtimeResponseWorkAdmission(),
+      );
     },
 
     closeResponsesWebSocketSession: closeWebSocketSession,
