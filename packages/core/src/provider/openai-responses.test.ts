@@ -42,6 +42,32 @@ function rawSSEResponse(body: string): Response {
   return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
 }
 
+function responseThatErrorsAfter(body: string, error: Error, contentType: string): Response {
+  let pulled = false;
+  const stream = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        if (!pulled) {
+          pulled = true;
+          controller.enqueue(new TextEncoder().encode(body));
+        } else {
+          controller.error(error);
+        }
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  return new Response(stream, { status: 200, headers: { "Content-Type": contentType } });
+}
+
+function isolatedResponseWorkAdmission() {
+  return createResponseWorkAdmission({
+    capacityBytes: 1_000_000,
+    jsonAmplification: 1,
+    minChargeBytes: 1,
+  });
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -1392,6 +1418,7 @@ describe("createCodexResponsesClient", () => {
         currentSecrets: () => [token],
       },
       fetch: fetchMock as unknown as typeof fetch,
+      responseWorkAdmission: isolatedResponseWorkAdmission(),
     });
     const resp = (await client.chatCompletion({
       model: "gpt-5.5",
@@ -1671,7 +1698,7 @@ describe("createCodexResponsesClient", () => {
     expect(seenUrl).toBe("https://chatgpt.com/backend-api/codex/responses");
   });
 
-  it("maps a connect/TTFB timeout (internal abort, no external signal) to UpstreamError(timeout)", async () => {
+  it("does not replay a Responses POST after an ambiguous connect/TTFB timeout", async () => {
     vi.useFakeTimers();
     try {
       const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
@@ -1693,7 +1720,13 @@ describe("createCodexResponsesClient", () => {
         fetch: fetchMock as unknown as typeof fetch,
       });
       const run = client.chatCompletion({ model: "m", messages: [{ role: "user", content: "x" }] });
-      const assertion = expect(run).rejects.toMatchObject({ errorClass: "timeout" });
+      const assertion = expect(run).rejects.toMatchObject({
+        upstreamStatus: 400,
+        providerRaw: {
+          error: { code: "response_create_outcome_unknown" },
+          http: { lifecycle_phase: "after_send_before_response" },
+        },
+      });
       await vi.advanceTimersByTimeAsync(50);
       await assertion;
     } finally {
@@ -1731,9 +1764,8 @@ describe("createCodexResponsesClient", () => {
     expect(caught).not.toBeInstanceOf(UpstreamError);
   });
 
-  it("retries write ECANCELED then wraps it for account-pool failover", async () => {
-    // A pre-response Node socket cancellation is transient → retried at the fetch
-    // boundary; exhaustion is then classified for account-pool failover.
+  it("does not replay a Responses POST when fetch fails before returning headers", async () => {
+    // No response headers does not prove the POST was not accepted upstream.
     const boom = Object.assign(new Error("write ECANCELED"), { code: "ECANCELED" });
     const fetch = vi.fn(async () => {
       throw boom;
@@ -1742,6 +1774,7 @@ describe("createCodexResponsesClient", () => {
       config: {
         baseUrl: "https://chatgpt.com/backend-api/codex",
         getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        connectRetries: 2,
         connectRetryBackoffMs: [0, 0],
       },
       fetch: fetch as unknown as typeof globalThis.fetch,
@@ -1750,10 +1783,200 @@ describe("createCodexResponsesClient", () => {
       client.chatCompletion({ model: "m", messages: [{ role: "user", content: "x" }] }),
     ).rejects.toMatchObject({
       errorClass: "upstream_error",
-      upstreamStatus: null,
-      providerRaw: { error: { name: "Error", message: "write ECANCELED", code: "ECANCELED" } },
+      upstreamStatus: 400,
+      providerRaw: {
+        error: { code: "response_create_outcome_unknown" },
+        http: { lifecycle_phase: "after_send_before_response" },
+      },
     });
-    expect(fetch).toHaveBeenCalledTimes(3); // 1 initial + 2 retries
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks translated unary and streaming read failures after HTTP 200 as outcome-unknown", async () => {
+    const preamble = 'data: {"type":"response.created","response":{"id":"resp-read"}}\n\n';
+    for (const method of ["unary", "stream"] as const) {
+      const client = createCodexResponsesClient({
+        config: {
+          baseUrl: "https://chatgpt.com/backend-api/codex",
+          getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        },
+        fetch: (async () =>
+          responseThatErrorsAfter(
+            preamble,
+            new Error(`stream broke: ${method}`),
+            "text/event-stream",
+          )) as unknown as typeof fetch,
+        responseWorkAdmission: isolatedResponseWorkAdmission(),
+      });
+      const run = async () => {
+        if (method === "unary") {
+          await client.chatCompletion({ model: "m", messages: [{ role: "user", content: "x" }] });
+          return;
+        }
+        for await (const _ of client.chatCompletionStream({
+          model: "m",
+          messages: [{ role: "user", content: "x" }],
+        })) {
+          // drain
+        }
+      };
+
+      await expect(run()).rejects.toMatchObject({
+        upstreamStatus: 400,
+        providerRaw: {
+          error: { code: "response_create_outcome_unknown" },
+          http: { lifecycle_phase: "after_response_before_terminal" },
+        },
+      });
+    }
+  });
+
+  it("marks native unary and raw-stream read failures after HTTP 200 as outcome-unknown", async () => {
+    const nativeBody = { model: "m", input: [], store: false };
+    for (const method of ["unary", "stream"] as const) {
+      const body =
+        method === "stream"
+          ? 'data: {"type":"response.created","response":{"id":"resp-native-read"}}\n\n'
+          : "";
+      const client = createCodexResponsesClient({
+        config: {
+          baseUrl: "https://chatgpt.com/backend-api/codex",
+          getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        },
+        fetch: (async () =>
+          responseThatErrorsAfter(
+            body,
+            new Error(`native stream broke: ${method}`),
+            method === "stream" ? "text/event-stream" : "application/json",
+          )) as unknown as typeof fetch,
+        responseWorkAdmission: isolatedResponseWorkAdmission(),
+      });
+      const run = async () => {
+        if (method === "unary") {
+          await client.nativePassthrough?.(nativeBody);
+          return;
+        }
+        for await (const _ of client.nativePassthroughStream?.({ ...nativeBody, stream: true }) ??
+          []) {
+          // drain
+        }
+      };
+
+      await expect(run()).rejects.toMatchObject({
+        upstreamStatus: 400,
+        providerRaw: {
+          error: { code: "response_create_outcome_unknown" },
+          http: { lifecycle_phase: "after_response_before_terminal" },
+        },
+      });
+    }
+  });
+
+  it("preserves an explicit response.failed as a safe fallback signal", async () => {
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+      },
+      fetch: (async () =>
+        sseResponse([
+          { type: "response.created", response: { id: "resp-failed" } },
+          {
+            type: "response.failed",
+            response: { error: { code: "server_error", message: "explicit failure" } },
+          },
+        ])) as unknown as typeof fetch,
+      responseWorkAdmission: isolatedResponseWorkAdmission(),
+    });
+
+    await expect(
+      client.chatCompletion({ model: "m", messages: [{ role: "user", content: "x" }] }),
+    ).rejects.toMatchObject({
+      upstreamStatus: null,
+      message: "explicit failure",
+      providerRaw: { type: "response.failed" },
+    });
+  });
+
+  it("preserves unterminated explicit failure frames before a reader error", async () => {
+    for (const method of ["unary", "stream"] as const) {
+      for (const event of [
+        {
+          type: "response.failed",
+          response: { error: { code: "server_error", message: "explicit failure" } },
+        },
+        { type: "error", code: "server_error", message: "explicit failure" },
+      ]) {
+        const client = createCodexResponsesClient({
+          config: {
+            baseUrl: "https://chatgpt.com/backend-api/codex",
+            getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+          },
+          fetch: (async () =>
+            responseThatErrorsAfter(
+              `data: ${JSON.stringify(event)}`,
+              new Error("stream broke after explicit failure"),
+              "text/event-stream",
+            )) as unknown as typeof fetch,
+          responseWorkAdmission: isolatedResponseWorkAdmission(),
+        });
+        const run = async () => {
+          if (method === "unary") {
+            await client.chatCompletion({
+              model: "m",
+              messages: [{ role: "user", content: "x" }],
+            });
+            return;
+          }
+          for await (const _ of client.chatCompletionStream({
+            model: "m",
+            messages: [{ role: "user", content: "x" }],
+          })) {
+            // drain
+          }
+        };
+
+        await expect(run()).rejects.toMatchObject({
+          upstreamStatus: null,
+          message: "explicit failure",
+          providerRaw: { type: event.type },
+        });
+      }
+    }
+  });
+
+  it("keeps explicit 503/529 overload retries bounded to three attempts", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(new Response("overloaded", { status: 503 }))
+        .mockResolvedValueOnce(new Response("overloaded", { status: 529 }))
+        .mockResolvedValueOnce(
+          sseResponse([
+            { type: "response.output_text.delta", delta: "ok" },
+            { type: "response.completed", response: { status: "completed", usage: {} } },
+          ]),
+        );
+      const client = createCodexResponsesClient({
+        config: {
+          baseUrl: "https://chatgpt.com/backend-api/codex",
+          getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        },
+        fetch: fetchMock as unknown as typeof fetch,
+        responseWorkAdmission: isolatedResponseWorkAdmission(),
+      });
+      const run = client.chatCompletion({
+        model: "m",
+        messages: [{ role: "user", content: "x" }],
+      });
+
+      await vi.advanceTimersByTimeAsync(4_000);
+      await expect(run).resolves.toMatchObject({ choices: [{ message: { content: "ok" } }] });
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("preserves a non-JSON upstream error body as raw text in the UpstreamError", async () => {

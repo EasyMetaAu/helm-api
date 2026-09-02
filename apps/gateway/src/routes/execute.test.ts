@@ -6555,20 +6555,14 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
     expect(out.nativePassthrough).toBe(true);
   });
 
-  it("does not advance the chain when a sent response.create has an unknown outcome", async () => {
-    // biome-ignore lint/correctness/useYield: pre-first-chunk failure throws before any yield
-    async function* unknownOutcome(): AsyncGenerator<string> {
-      throw new UpstreamError(
-        "upstream_error",
-        "upstream websocket closed after send",
-        { error: { code: "response_create_outcome_unknown" } },
-        400,
-      );
+  it("does not advance the chain after HTTP response.created then EOF", async () => {
+    async function* acceptedThenEof(): AsyncGenerator<string> {
+      yield 'event: response.created\ndata: {"type":"response.created"}\n\n';
     }
     const head = {
       chatCompletion: vi.fn(),
       chatCompletionStream: vi.fn(),
-      nativePassthroughStream: vi.fn().mockReturnValue(unknownOutcome()),
+      nativePassthroughStream: vi.fn().mockReturnValue(acceptedThenEof()),
     } as unknown as ProviderClient & { nativePassthroughStream: ReturnType<typeof vi.fn> };
     const tail = {
       chatCompletion: vi.fn(),

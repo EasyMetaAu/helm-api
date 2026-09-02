@@ -2924,7 +2924,7 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
     expect(served).toEqual(["b"]);
   });
 
-  it("rotates to a sibling Codex account after an exhausted raw fetch failure", async () => {
+  it("does not replay a Codex HTTP POST on a sibling after a raw fetch failure", async () => {
     const selected: string[] = [];
     const raw = Object.assign(new TypeError("fetch failed"), {
       cause: Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" }),
@@ -2970,11 +2970,16 @@ describe("createOAuthPoolClient — in-pool retry on transient upstream fault", 
       mutations: {},
     };
 
-    const chunks: string[] = [];
-    for await (const chunk of pool.nativePassthroughStream?.(request) ?? []) chunks.push(chunk);
-
-    expect(selected).toEqual(["a", "b"]);
-    expect(chunks.join("")).toContain('"id":"resp-b"');
+    await expect(
+      (async () => {
+        for await (const _ of pool.nativePassthroughStream?.(request) ?? []) {
+          /* drain */
+        }
+      })(),
+    ).rejects.toMatchObject({
+      providerRaw: { error: { code: "response_create_outcome_unknown" } },
+    });
+    expect(selected).toEqual(["a"]);
   });
 
   it("cools a Codex model-scoped 429 on native streaming without parking sibling models", async () => {
@@ -3212,7 +3217,7 @@ describe("createOAuthPoolClient — in-band pre-output failover (preamble then e
     expect(chunks.filter((c) => c === ERROR)).toEqual([]); // the error frame was never relayed
   });
 
-  it("also fails over when the first account closes after only a preamble", async () => {
+  it("does not replay on a sibling after response.created then EOF", async () => {
     const pool = createOAuthPoolClient({
       members: [
         nativeStreamMember("a", 10, "preamble_only"),
@@ -3220,9 +3225,15 @@ describe("createOAuthPoolClient — in-band pre-output failover (preamble then e
       ],
       nativeStreamPreambleClassifier: responses,
     });
-    const chunks: string[] = [];
-    for await (const c of pool.nativePassthroughStream?.(NATIVE) ?? []) chunks.push(c);
-    expect(chunks).toContain(OUTPUT);
+    await expect(
+      (async () => {
+        for await (const _ of pool.nativePassthroughStream?.(NATIVE) ?? []) {
+          /* drain */
+        }
+      })(),
+    ).rejects.toMatchObject({
+      providerRaw: { error: { code: "response_create_outcome_unknown" } },
+    });
   });
 
   it("commits (no spurious retry) when the only account reaches real output", async () => {
