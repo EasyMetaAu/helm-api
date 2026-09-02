@@ -38,6 +38,7 @@ import {
   ResponseWorkCapacityError,
   runtimeResponseWorkAdmission,
 } from "../runtime/response-work-admission.js";
+import { CODEX_RESPONSES_OUTCOME_UNKNOWN_CODE } from "./failover-guard.js";
 import {
   type PreparedNativePassthroughRequest,
   prepareNativePassthroughRequest,
@@ -174,7 +175,6 @@ export interface GenericOpenAIResponsesRequestContract {
 }
 
 export const CODEX_RESPONSES_WEBSOCKET_SESSION_HEADER = "x-helm-codex-responses-websocket-session";
-const CODEX_RESPONSES_OUTCOME_UNKNOWN_CODE = "response_create_outcome_unknown";
 const CODEX_RESPONSES_SESSION_UNAVAILABLE_CODE = "previous_response_id_session_unavailable";
 const CODEX_RESPONSES_NOT_SENT_CODE = "response_create_not_sent";
 
@@ -1640,6 +1640,46 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     turnKey?: string;
   }
 
+  function httpResponseOutcomeUnknown(
+    cause: unknown,
+    lifecyclePhase = "after_send_before_response",
+  ): UpstreamError {
+    const message =
+      lifecyclePhase === "after_send_before_response"
+        ? "upstream HTTP connection failed after Responses POST; outcome unknown"
+        : "upstream HTTP response ended before a terminal Responses event; outcome unknown";
+    return new UpstreamError(
+      "upstream_error",
+      message,
+      {
+        error: {
+          type: "invalid_request_error",
+          code: CODEX_RESPONSES_OUTCOME_UNKNOWN_CODE,
+          message,
+        },
+        http: { lifecycle_phase: lifecyclePhase },
+        ...(cause instanceof UpstreamError ? { transport: cause.providerRaw } : {}),
+      },
+      400,
+      null,
+      cause,
+    );
+  }
+
+  function throwAcceptedResponseError(error: unknown, signal?: AbortSignal): never {
+    const raw =
+      error instanceof UpstreamError && isRecord(error.providerRaw) ? error.providerRaw : null;
+    if (
+      signal?.aborted ||
+      raw?.type === "error" ||
+      raw?.type === "response.failed" ||
+      raw?.type === "response.incomplete"
+    ) {
+      throw error;
+    }
+    throw httpResponseOutcomeUnknown(error, "after_response_before_terminal");
+  }
+
   async function prepareRequest(
     input: NativePassthroughInput,
     modelInfo: CodexModelInfo | undefined,
@@ -1696,6 +1736,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       capture?: (wireBody: string) => void;
       timeoutThroughBody?: boolean;
       retry?: boolean;
+      outcomeUnknownOnTransport?: boolean;
     },
   ): Promise<CodexHttpResponse> {
     const { prepared, turnKey } = await prepareRequest(
@@ -1707,13 +1748,13 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
     // The exact Responses-native bytes POSTed upstream (translate path: OpenAI→Responses
     // re-serialization; native passthrough: verbatim, model patched) — surfaced for capture.
     init.capture?.(prepared.bodyText);
-    // Retry transient connection blips at the fetch boundary (pre-first-byte → idempotent);
-    // a timeout becomes a non-transient UpstreamError and a client abort rethrows as-is.
+    // A timeout becomes a non-transient UpstreamError and a client abort rethrows as-is.
+    // Do not retry a thrown fetch: no response headers does not prove the POST was not
+    // accepted upstream, so replaying it can duplicate inference, tools, or billing.
     try {
-      // withOverloadRetry wraps the connection retry: an overloaded 529/503 answer is a
-      // normal Response (never a throw), so it re-issues the whole attempt after a pause
-      // rather than burning a candidate on transient upstream capacity pressure. A
-      // discarded attempt's deferred body-timeout timer is released explicitly.
+      // An overloaded 529/503 answer is an explicit rejection, so it is safe to re-issue
+      // the same body after a pause. A discarded attempt's deferred body-timeout timer is
+      // released explicitly.
       const send = async (): Promise<CodexHttpResponse> => {
         const t = withTimeout(timeoutMs, init.signal);
         try {
@@ -1735,25 +1776,26 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         }
       };
       if (init.retry === false) return await send();
-      return await withOverloadRetry(
-        () =>
-          withConnectionRetry(send, {
-            retries: cfg.connectRetries,
-            backoffMs: cfg.connectRetryBackoffMs,
-            signal: init.signal,
-          }),
-        {
-          signal: init.signal,
-          pick: (value) => value.response,
-          release: (value) => value.bodyTimeout?.cleanup(),
-        },
-      );
+      return await withOverloadRetry(send, {
+        signal: init.signal,
+        pick: (value) => value.response,
+        release: (value) => value.bodyTimeout?.cleanup(),
+      });
     } catch (error) {
       // An external abort is client-owned even when fetch happens to surface a
-      // transport-shaped TypeError. Explicit provider timeouts are already
-      // UpstreamError("timeout") and therefore fail this raw-transport guard.
-      if (init.signal?.aborted || !isFetchTransportError(error)) throw error;
-      throw upstreamTransportError(error, scrub);
+      // transport-shaped TypeError.
+      if (init.signal?.aborted) throw error;
+      if (
+        init.outcomeUnknownOnTransport === true &&
+        error instanceof UpstreamError &&
+        error.errorClass === "timeout"
+      ) {
+        throw httpResponseOutcomeUnknown(error);
+      }
+      if (!isFetchTransportError(error)) throw error;
+      const transport = upstreamTransportError(error, scrub);
+      if (init.outcomeUnknownOnTransport !== true) throw transport;
+      throw httpResponseOutcomeUnknown(transport);
     }
   }
 
@@ -1850,6 +1892,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       signal: init.signal,
       capture: init.capture,
       timeoutThroughBody: init.timeoutThroughBody,
+      outcomeUnknownOnTransport: (init.endpoint ?? url) === url,
     };
     const first = await request(body, modelInfo, requestInit);
     if (first.response.status === 401 && cfg.onUnauthorized !== undefined) {
@@ -2574,7 +2617,14 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       );
       if (!result.response.ok) throw await errorFromResponse(result);
       // Codex is stream-only → aggregate the SSE into a single Chat response.
-      return await aggregateResponsesStream(result.response, model, timeoutMs);
+      try {
+        return await aggregateResponsesStream(result.response, model, timeoutMs, {
+          workAdmission: deps.responseWorkAdmission,
+          signal: opts?.signal,
+        });
+      } catch (error) {
+        throwAcceptedResponseError(error, opts?.signal);
+      }
     },
 
     async *chatCompletionStream(req, opts) {
@@ -2590,7 +2640,14 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         },
       );
       if (!result.response.ok) throw await errorFromResponse(result);
-      yield* translateResponsesSSE(result.response, model, timeoutMs);
+      try {
+        yield* translateResponsesSSE(result.response, model, timeoutMs, {
+          workAdmission: deps.responseWorkAdmission,
+          signal: opts?.signal,
+        });
+      } catch (error) {
+        throwAcceptedResponseError(error, opts?.signal);
+      }
     },
 
     // Native protocol passthrough (issue #217, Phase 3): the inbound /v1/responses body
@@ -2612,7 +2669,11 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         timeoutThroughBody: true,
       });
       if (!result.response.ok) throw await errorFromResponse(result);
-      return await readUnaryJson(result);
+      try {
+        return await readUnaryJson(result);
+      } catch (error) {
+        throwAcceptedResponseError(error, opts?.signal);
+      }
     },
 
     // Streaming native passthrough (issue #217, Phase 3). The native body from a STREAMING
@@ -2885,11 +2946,15 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         onResponseMeta: opts?.onResponseMeta,
       });
       if (!result.response.ok) throw await errorFromResponse(result);
-      yield* readResponsesSSERaw(
-        result.response,
-        timeoutMs,
-        deps.responseWorkAdmission ?? runtimeResponseWorkAdmission(),
-      );
+      try {
+        yield* readResponsesSSERaw(
+          result.response,
+          timeoutMs,
+          deps.responseWorkAdmission ?? runtimeResponseWorkAdmission(),
+        );
+      } catch (error) {
+        throwAcceptedResponseError(error, opts?.signal);
+      }
     },
 
     closeResponsesWebSocketSession: closeWebSocketSession,
@@ -3395,12 +3460,28 @@ export async function* readResponsesEvents(
   const decoder = new TextDecoder();
   let buffer = "";
   const frameGuard = createSSEIncompleteFrameGuard(workAdmission);
+  const bufferedTerminalEvent = (): Record<string, unknown> | null => {
+    if (buffer.trim() === "") return null;
+    const event = parseResponsesSSEFrame(buffer);
+    return event !== null &&
+      (event.type === "response.completed" ||
+        event.type === "response.failed" ||
+        event.type === "response.incomplete" ||
+        event.type === "error")
+      ? event
+      : null;
+  };
   try {
     while (true) {
       let read: { done: boolean; value?: Uint8Array };
       try {
         read = await readChunkWithIdle(reader, idleMs, signal);
       } catch (err) {
+        const terminal = bufferedTerminalEvent();
+        if (terminal !== null) {
+          yield terminal;
+          return;
+        }
         if (err instanceof StreamStalledError) throw new UpstreamError("timeout", err.message);
         throw err;
       }
@@ -3647,7 +3728,11 @@ export async function* translateResponsesSSE(
   res: Response,
   model: string,
   idleMs = 0,
-  options: { strictTerminal?: boolean } = {},
+  options: {
+    strictTerminal?: boolean;
+    workAdmission?: ResponseWorkAdmission;
+    signal?: AbortSignal;
+  } = {},
 ): AsyncGenerator<string> {
   const strictTerminal = options.strictTerminal ?? true;
   let started = false;
@@ -3676,7 +3761,7 @@ export async function* translateResponsesSSE(
     return state;
   };
 
-  for await (const evt of readResponsesEvents(res, idleMs)) {
+  for await (const evt of readResponsesEvents(res, idleMs, options.workAdmission, options.signal)) {
     const type = evt.type;
     if (type === "error" || type === "response.failed") {
       throw responseEventError(evt);
@@ -3829,7 +3914,11 @@ export async function aggregateResponsesStream(
   res: Response,
   model: string,
   idleMs = 0,
-  options: { allowIncomplete?: boolean } = {},
+  options: {
+    allowIncomplete?: boolean;
+    workAdmission?: ResponseWorkAdmission;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<ChatCompletionResponse> {
   const allowIncomplete = options.allowIncomplete ?? false;
   let text = "";
@@ -3867,7 +3956,7 @@ export async function aggregateResponsesStream(
     return tool;
   };
 
-  for await (const evt of readResponsesEvents(res, idleMs)) {
+  for await (const evt of readResponsesEvents(res, idleMs, options.workAdmission, options.signal)) {
     const type = evt.type;
     if (
       type === "error" ||

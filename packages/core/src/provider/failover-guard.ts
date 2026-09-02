@@ -6,6 +6,7 @@ import { UpstreamError } from "./openai.js";
 // The guard must retain preamble bytes verbatim until the first real output, so
 // cap that replay window independently of the upstream's total response size.
 export const MAX_PRE_OUTPUT_BUFFER_BYTES = 1_048_576;
+export const CODEX_RESPONSES_OUTCOME_UNKNOWN_CODE = "response_create_outcome_unknown";
 
 // provider.failover-guard — pre-output streaming failure detector (CLAUDE.md
 // principle 5 + 8: streaming correctness is the #1 risk; classification fallback ≠
@@ -125,6 +126,25 @@ const responsesClassifier: PreOutputClassifier = {
     return top.message || nested.message || "upstream responses stream error";
   },
 };
+
+function responsesOutcomeUnknown(cause?: unknown): UpstreamError {
+  const message = "upstream response stream ended after request acceptance before producing output";
+  return new UpstreamError(
+    "upstream_error",
+    message,
+    {
+      error: {
+        type: "invalid_request_error",
+        code: CODEX_RESPONSES_OUTCOME_UNKNOWN_CODE,
+        message,
+      },
+      http: { lifecycle_phase: "after_response_created_before_output" },
+    },
+    400,
+    null,
+    cause,
+  );
+}
 
 // ── Anthropic Messages ───────────────────────────────────────────────────────
 // Preamble: message_start / ping / empty block lifecycle events. Error: error.
@@ -255,47 +275,69 @@ export async function* guardPreOutputFailure(
   let bufferedBytes = 0;
   let sse = "";
   let committed = false;
+  let explicitPreOutputError = false;
 
-  for await (const chunk of source) {
-    if (committed) {
-      yield chunk;
-      continue;
-    }
-    const nextBufferedBytes = bufferedBytes + Buffer.byteLength(chunk);
-    if (nextBufferedBytes > MAX_PRE_OUTPUT_BUFFER_BYTES) {
-      throw new UpstreamError(
-        "upstream_error",
-        "upstream pre-output buffer exceeds the memory budget",
-      );
-    }
-    // Hold the raw bytes for verbatim replay; accumulate a parallel text buffer only
-    // to frame complete SSE events (split on the blank-line terminator).
-    buffered.push(chunk);
-    bufferedBytes = nextBufferedBytes;
-    sse += chunk;
-    let boundary = nextSSEFrameBoundary(sse);
-    while (boundary !== null) {
-      const data = extractData(sse.slice(0, boundary.index));
-      sse = sse.slice(boundary.index + boundary.length);
-      if (data !== null) {
-        const cls = classifier.classify(data);
-        if (cls === "error") throw streamErrorFromData(classifier, data);
-        if (cls === "output") {
-          committed = true;
-          for (const b of buffered) yield b;
-          buffered.length = 0;
-          bufferedBytes = 0;
-          break;
-        }
+  const unterminatedError = (): UpstreamError | null => {
+    if (classifier !== responsesClassifier) return null;
+    const data = extractData(sse);
+    return data !== null && classifier.classify(data) === "error"
+      ? streamErrorFromData(classifier, data)
+      : null;
+  };
+
+  try {
+    for await (const chunk of source) {
+      if (committed) {
+        yield chunk;
+        continue;
       }
-      boundary = nextSSEFrameBoundary(sse);
+      const nextBufferedBytes = bufferedBytes + Buffer.byteLength(chunk);
+      if (nextBufferedBytes > MAX_PRE_OUTPUT_BUFFER_BYTES) {
+        throw new Error("upstream pre-output buffer exceeds the memory budget");
+      }
+      // Hold the raw bytes for verbatim replay; accumulate a parallel text buffer only
+      // to frame complete SSE events (split on the blank-line terminator).
+      buffered.push(chunk);
+      bufferedBytes = nextBufferedBytes;
+      sse += chunk;
+      let boundary = nextSSEFrameBoundary(sse);
+      while (boundary !== null) {
+        const data = extractData(sse.slice(0, boundary.index));
+        sse = sse.slice(boundary.index + boundary.length);
+        if (data !== null) {
+          const cls = classifier.classify(data);
+          if (cls === "error") {
+            explicitPreOutputError = true;
+            throw streamErrorFromData(classifier, data);
+          }
+          if (cls === "output") {
+            committed = true;
+            for (const b of buffered) yield b;
+            buffered.length = 0;
+            bufferedBytes = 0;
+            break;
+          }
+        }
+        boundary = nextSSEFrameBoundary(sse);
+      }
     }
+  } catch (error) {
+    const tailError = unterminatedError();
+    if (tailError) throw tailError;
+    if (error instanceof UpstreamError) throw error;
+    if (classifier === responsesClassifier && !committed && !explicitPreOutputError) {
+      throw responsesOutcomeUnknown(error);
+    }
+    throw error;
   }
 
   // Source ended having emitted only preamble (no output, no error): an abnormal
-  // close. Throw so the caller records a failure and falls back, rather than serving
-  // an empty body as success.
+  // close. An HTTP 200 Responses stream means the POST may already have been accepted,
+  // even when the body is empty or its final SSE delimiter never arrived.
   if (!committed) {
+    const tailError = unterminatedError();
+    if (tailError) throw tailError;
+    if (classifier === responsesClassifier) throw responsesOutcomeUnknown();
     throw new UpstreamError("upstream_error", "upstream stream ended before producing any output");
   }
 }

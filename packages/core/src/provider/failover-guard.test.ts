@@ -30,7 +30,7 @@ const chat = preOutputClassifierFor("openai_chat");
 if (!responses || !anthropic || !chat) throw new Error("classifier missing");
 
 describe("guardPreOutputFailure — openai_responses", () => {
-  it("rejects an oversized pre-output buffer before retaining more raw chunks", async () => {
+  it("does not replay an accepted Responses request when its pre-output buffer overflows", async () => {
     const chunk = `event: response.created\ndata: {"type":"response.created"}\n\n${"x".repeat(
       Math.floor(MAX_PRE_OUTPUT_BUFFER_BYTES / 2),
     )}`;
@@ -44,9 +44,9 @@ describe("guardPreOutputFailure — openai_responses", () => {
       yield "z";
     }
 
-    await expect(collect(guardPreOutputFailure(src(), responses))).rejects.toThrow(
-      "upstream pre-output buffer exceeds the memory budget",
-    );
+    await expect(collect(guardPreOutputFailure(src(), responses))).rejects.toMatchObject({
+      providerRaw: { error: { code: "response_create_outcome_unknown" } },
+    });
     expect(yielded).toBe(2);
   });
 
@@ -139,12 +139,72 @@ describe("guardPreOutputFailure — openai_responses", () => {
     expect(out.join("")).toBe(chunks.join(""));
   });
 
-  it("preamble-only stream that ends with no output and no error → throws (fallback)", async () => {
+  it("response.created then EOF is outcome-unknown and must not fall back", async () => {
     const src = fromChunks([
       'event: response.created\ndata: {"type":"response.created"}\n\n',
       'event: response.in_progress\ndata: {"type":"response.in_progress"}\n\n',
     ]);
-    await expect(collect(guardPreOutputFailure(src, responses))).rejects.toThrow(UpstreamError);
+    await expect(collect(guardPreOutputFailure(src, responses))).rejects.toMatchObject({
+      upstreamStatus: 400,
+      providerRaw: {
+        error: { code: "response_create_outcome_unknown" },
+        http: { lifecycle_phase: "after_response_created_before_output" },
+      },
+    });
+  });
+
+  it("response.created then a reader failure is outcome-unknown and must not fall back", async () => {
+    async function* src(): AsyncGenerator<string> {
+      yield 'event: response.created\ndata: {"type":"response.created"}\n\n';
+      throw new Error("socket reset while reading");
+    }
+
+    await expect(collect(guardPreOutputFailure(src(), responses))).rejects.toMatchObject({
+      upstreamStatus: 400,
+      providerRaw: {
+        error: { code: "response_create_outcome_unknown" },
+        http: { lifecycle_phase: "after_response_created_before_output" },
+      },
+    });
+  });
+
+  it("recognizes an unterminated response.created frame before EOF", async () => {
+    const src = fromChunks(['event: response.created\ndata: {"type":"response.created"}']);
+
+    await expect(collect(guardPreOutputFailure(src, responses))).rejects.toMatchObject({
+      upstreamStatus: 400,
+      providerRaw: { error: { code: "response_create_outcome_unknown" } },
+    });
+  });
+
+  it("recognizes an unterminated response.created frame before a reader failure", async () => {
+    async function* src(): AsyncGenerator<string> {
+      yield 'event: response.created\ndata: {"type":"response.created"}';
+      throw new Error("socket reset while reading");
+    }
+
+    await expect(collect(guardPreOutputFailure(src(), responses))).rejects.toMatchObject({
+      upstreamStatus: 400,
+      providerRaw: { error: { code: "response_create_outcome_unknown" } },
+    });
+  });
+
+  it("preserves an unterminated explicit response.failed as a safe fallback signal", async () => {
+    const src = fromChunks([
+      'event: response.failed\ndata: {"type":"response.failed","response":{"error":{"message":"overloaded"}}}',
+    ]);
+
+    await expect(collect(guardPreOutputFailure(src, responses))).rejects.toMatchObject({
+      upstreamStatus: null,
+      message: "overloaded",
+    });
+  });
+
+  it("treats an empty HTTP 200 Responses stream as outcome-unknown", async () => {
+    await expect(collect(guardPreOutputFailure(fromChunks([]), responses))).rejects.toMatchObject({
+      upstreamStatus: 400,
+      providerRaw: { error: { code: "response_create_outcome_unknown" } },
+    });
   });
 });
 

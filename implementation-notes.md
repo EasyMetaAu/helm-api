@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-09-02 · Codex Responses HTTP 只重放明确拒绝的请求（Responses / provider execution，docs/04/05/07，原则 3/5/8）
+
+- Codex HTTP POST 在 `fetch()` 抛出连接错误或首字节超时后无法证明上游未接收请求；这类结果现在单次终止为 `response_create_outcome_unknown`，记录 `after_send_before_response`，不再由 fetch 层、OAuth sibling 或候选链重放。外部客户端取消保持原分类。
+- HTTP 200 后在终态前发生 EOF、读超时/异常、本地 response-work 拒绝、空 body 或缺少 SSE 结尾分隔符，都属于上游可能已接收但结果不明，记录 `after_response_before_terminal`（已解析 preamble 的外层 guard 记录 `after_response_created_before_output`）并停止 sibling/provider fallback；即使缺少末尾空行且随后读失败，完整可解析的 `response.failed` / `error` 仍作为明确拒绝保留，可在无真实输出时 fallback。
+- 明确拒绝仍保留既有安全恢复：401 刷新后一次重发、503/529 最多三次总尝试、WebSocket 握手及可证明发送前关闭总计三次尝试。无 schema、migration、配置或依赖变化。
+
 ## 2026-09-01 · Codex 超大完整历史在发送前缩图并压缩（Responses / docs/05，原则 3/7/8）
 
 - 生产失败请求在单个完整历史中重复携带 11–24 张内联 Base64 图片，正文达到 46–49 MiB；Codex 客户端按 token 而非 wire bytes 触发自动压缩，Helm 的后台 Memory compaction 也不修改当前请求，因此会先撞上 WebSocket/HTTP 传输上限。
@@ -58,18 +64,10 @@
 - provider 通过两个结构化 recovery code 把该状态保留到 Responses SSE，包括已经输出后的流内错误与非 2xx 嵌套错误；下游 WebSocket bridge 不先发送 400/error frame，而以 `1012` 关闭连接。Codex 0.145.0 的原生 retry loop 会把 transport close 视为可重试，并在新连接上清空增量 `previous_response_id`、用客户端持有的完整当前会话重建请求；Helm 本身仍只发送上游一次。
 - telemetry 在本地 teardown 前快照上游 close code/reason，并记录 `before_send` / `send_callback_error` / `after_send_before_event` / `after_send_after_preamble` / `after_send_after_output` 生命周期，避免把 Helm 自己的 close `1000` 冒充上游事实。该恢复与直连 Codex 的断流语义一致，但上游没有幂等键时无法承诺 exactly-once；重试决定仍由持有完整历史的客户端负责。无 schema、migration、依赖或配置变化。
 
-## 2026-08-27 · 仅恢复发送前已关闭的 Responses WebSocket（Responses / Gateway，docs/05/07，原则 3/8）
-
-- `send()` 在调用底层 `socket.send()` 前若已确认连接不是 `OPEN`，抛出专用错误；续接请求最多重连并原样发送一次。发送回调失败仍视为结果不明，继续 fail-closed 返回 `previous_response_id_session_unavailable`，不重放、不切 sibling、不回落 HTTP。
-- 该边界只解决可证明“尚未调用发送”的安全恢复；无法证明上游是否收到字节的错误仍要求客户端带完整历史重新发起请求。
-
-## 2026-08-26 · Codex Responses WebSocket 保活与已确认请求禁止重放（Responses / Gateway，docs/05/07，原则 3/8）
-
-- **空闲连接恢复**：上游 Codex WebSocket 现在每 60 秒发送协议 Ping，并要求 15 秒内收到 Pong；超时立即终止半开连接，让仍未发送的新请求在本地明确失败。测试可缩短两个时限，生产配置与协议正文不变。
-- **会话与单写边界**：`response.incomplete` 与 core 已有语义一致，继续保留同一上游 session 供 `previous_response_id` 续接；`failed`、`cancelled` 与 `error` 仍关闭。上游一旦发出 `response.created`/`response.in_progress` 即视为已接收 `response.create`，随后断连不再重连或回落 HTTP 重放，避免重复推理、工具副作用与计费；已有状态丢失仍要求客户端发送完整历史。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-27 · 仅恢复发送前已关闭的 Responses WebSocket**：只有底层 `socket.send()` 尚未调用时允许安全恢复；发送回调失败与其他不确定结果保持 fail-closed，完整原文经 git history 回溯。
+- **2026-08-26 · Codex Responses WebSocket 保活与已确认请求禁止重放**：空闲 socket 用 Ping/Pong 检测半开连接，`response.created` / `response.in_progress` 后断连不重放，完整原文经 git history 回溯。
 - **2026-08-26 · OAuth 热刷新保留未变化的 Codex continuation transport**：重建后拓扑与 transport 身份签名完全相同时复用原 pool/client 与 continuation 状态；真实账号、代理、模型或执行配置变化仍新建并保持失效 fail-closed，完整原文经 git history 回溯。
 - **2026-08-25 · Providers 配额缓存一小时后后台重验证**：Providers 首屏保持 cache-only；缺失或满一小时的 quota snapshot 仅在页面可见时复用既有后台 refresh job，失败保留旧数据且不改变路由/鉴权，完整原文经 git history 回溯。
 - **2026-08-25 · Responses continuation 不跨账号或 transport 恢复**：续接只允许可调度的原账号与产生该 ID 的活动原 WebSocket；失配、关闭和模糊发送失败均 fail-closed，完整原文经 git history 回溯。
