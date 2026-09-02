@@ -38,11 +38,7 @@ import {
   ResponseWorkCapacityError,
   runtimeResponseWorkAdmission,
 } from "../runtime/response-work-admission.js";
-import {
-  CODEX_RESPONSES_BEFORE_SEND,
-  CODEX_RESPONSES_OUTCOME_UNKNOWN_CODE,
-  isTrustedCodexResponsesBeforeSendError,
-} from "./failover-guard.js";
+import { CODEX_RESPONSES_OUTCOME_UNKNOWN_CODE } from "./failover-guard.js";
 import {
   type PreparedNativePassthroughRequest,
   prepareNativePassthroughRequest,
@@ -195,8 +191,6 @@ export function isCodexResponsesPostSendFailureCode(code: unknown): boolean {
 
 /** The current response.create is proven not to have reached an upstream provider. */
 export class CodexResponsesBeforeSendError extends UpstreamError {
-  readonly [CODEX_RESPONSES_BEFORE_SEND] = true;
-
   constructor(message: string, recovery: Record<string, unknown> = {}) {
     super(
       "upstream_error",
@@ -220,7 +214,7 @@ export class CodexResponsesBeforeSendError extends UpstreamError {
 }
 
 export function isCodexResponsesBeforeSendError(error: unknown): boolean {
-  return isTrustedCodexResponsesBeforeSendError(error);
+  return error instanceof CodexResponsesBeforeSendError;
 }
 
 export interface CodexResponsesWebSocketConnectInput {
