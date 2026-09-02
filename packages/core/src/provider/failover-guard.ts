@@ -6,7 +6,17 @@ import { UpstreamError } from "./openai.js";
 // The guard must retain preamble bytes verbatim until the first real output, so
 // cap that replay window independently of the upstream's total response size.
 export const MAX_PRE_OUTPUT_BUFFER_BYTES = 1_048_576;
+export const CODEX_RESPONSES_BEFORE_SEND = Symbol("CodexResponsesBeforeSendError");
 export const CODEX_RESPONSES_OUTCOME_UNKNOWN_CODE = "response_create_outcome_unknown";
+
+export function isTrustedCodexResponsesBeforeSendError(error: unknown): boolean {
+  return (
+    error instanceof UpstreamError &&
+    (error as UpstreamError & { [CODEX_RESPONSES_BEFORE_SEND]?: boolean })[
+      CODEX_RESPONSES_BEFORE_SEND
+    ] === true
+  );
+}
 
 // provider.failover-guard — pre-output streaming failure detector (CLAUDE.md
 // principle 5 + 8: streaming correctness is the #1 risk; classification fallback ≠
@@ -327,6 +337,7 @@ export async function* guardPreOutputFailure(
   } catch (error) {
     const tailError = unterminatedError();
     if (tailError) throw tailError;
+    if (isTrustedCodexResponsesBeforeSendError(error)) throw error;
     if (classifier === responsesClassifier && !committed && !explicitPreOutputError) {
       throw responsesOutcomeUnknown(error);
     }
