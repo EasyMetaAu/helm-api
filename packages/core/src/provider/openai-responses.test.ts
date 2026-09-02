@@ -5725,7 +5725,7 @@ describe("createCodexResponsesClient — responsesCompact", () => {
   it.each([
     "nativePassthrough",
     "responsesCompact",
-  ] as const)("keeps the timeout active while %s reads the complete unary response body", async (method) => {
+  ] as const)("handles a %s unary body timeout after HTTP 200 according to replay safety", async (method) => {
     vi.useFakeTimers();
     try {
       const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
@@ -5751,6 +5751,7 @@ describe("createCodexResponsesClient — responsesCompact", () => {
           timeoutMs: 50,
         },
         fetch: fetchMock as unknown as typeof fetch,
+        responseWorkAdmission: isolatedResponseWorkAdmission(),
       });
       const run =
         method === "nativePassthrough"
@@ -5770,7 +5771,18 @@ describe("createCodexResponsesClient — responsesCompact", () => {
       await Promise.resolve();
 
       expect(outcome).toBeInstanceOf(UpstreamError);
-      expect(outcome).toMatchObject({ errorClass: "timeout" });
+      expect(outcome).toMatchObject(
+        method === "nativePassthrough"
+          ? {
+              errorClass: "upstream_error",
+              upstreamStatus: 400,
+              providerRaw: {
+                error: { code: "response_create_outcome_unknown" },
+                http: { lifecycle_phase: "after_response_before_terminal" },
+              },
+            }
+          : { errorClass: "timeout" },
+      );
     } finally {
       vi.useRealTimers();
     }
