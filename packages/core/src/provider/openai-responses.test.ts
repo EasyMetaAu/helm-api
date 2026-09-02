@@ -5490,7 +5490,7 @@ describe("createCodexResponsesClient — nativePassthrough", () => {
     expect(JSON.stringify(err.providerRaw)).toContain("[redacted]");
   });
 
-  it("wraps an exhausted raw fetch failure with scrubbed nested cause details", async () => {
+  it("marks an exhausted raw fetch failure outcome-unknown with scrubbed cause details", async () => {
     const secret = "proxy-secret-1234";
     const raw = Object.assign(new TypeError("fetch failed"), {
       cause: Object.assign(new Error(`other side closed ${secret}`), {
@@ -5519,15 +5519,19 @@ describe("createCodexResponsesClient — nativePassthrough", () => {
     expect(caught).toBeInstanceOf(UpstreamError);
     expect(caught).toMatchObject({
       errorClass: "upstream_error",
-      upstreamStatus: null,
+      upstreamStatus: 400,
       providerRaw: {
-        error: {
-          name: "TypeError",
-          message: "fetch failed",
-          cause: {
-            name: "Error",
-            code: "UND_ERR_SOCKET",
-            message: "other side closed [redacted]",
+        error: { code: "response_create_outcome_unknown" },
+        http: { lifecycle_phase: "after_send_before_response" },
+        transport: {
+          error: {
+            name: "TypeError",
+            message: "fetch failed",
+            cause: {
+              name: "Error",
+              code: "UND_ERR_SOCKET",
+              message: "other side closed [redacted]",
+            },
           },
         },
       },
