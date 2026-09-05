@@ -102,7 +102,7 @@
   $effect(() => {
     overview = { ...data };
     if (data.loadError) error = data.loadError;
-    scheduleProviderRevalidation();
+    untrack(scheduleProviderRevalidation);
   });
 
   const keyOf = (providerId: string, account: string): string => `${providerId}/${account}`;
