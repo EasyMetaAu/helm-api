@@ -1054,8 +1054,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
       // SUGGESTIONS to seed from.
       // In manual mode `enabled` is the operator's AUTHORITATIVE list (verbatim,
       // NOT intersected), so a custom id survives stale discovery. In auto mode it
-      // is the exact discovery projection; runtime composition separately retains
-      // its curated fail-open safety net.
+      // is the exact official discovery projection.
       const modelsMode = resolveAccountModelsMode(providerId, settings);
       const enabled = enabledAccountModels(providerId, settings, discovered);
       // `canPull` tells the UI whether account-scoped model refresh is meaningful.

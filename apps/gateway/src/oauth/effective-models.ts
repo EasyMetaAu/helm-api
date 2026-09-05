@@ -1,11 +1,9 @@
 import type { OAuthTokenStore } from "@helm/core";
 import {
   type ConfigStore,
-  CURATED_OAUTH_MODELS,
   DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
   decryptSecret,
   expandOpenAICodexModelAliases,
-  OPENAI_CODEX_IMAGE_MODEL,
   openAICodexIdentityFingerprint,
   parseOpenAICodexIdentity,
 } from "@helm/core";
@@ -38,19 +36,9 @@ export interface OAuthRuntimeCtxLike {
   encKey: Buffer;
 }
 
-// Network-free suggestions for a BOUND subscription account. xAI deliberately
-// stays out of core's CURATED_OAUTH_MODELS: runtime pool synthesis must continue
-// to fail closed when its live `/models` entitlement discovery has no result.
-// The picker fallback only repairs the Admin projection for the two models Helm
-// has already verified through the authenticated Grok CLI catalog.
-const ACCOUNT_MODEL_FALLBACKS: Readonly<Record<string, readonly string[]>> = {
-  ...CURATED_OAUTH_MODELS,
-  xai: ["grok-4.5", "grok-composer-2.5-fast"],
-};
-
 // The effective enabled models for ONE account (no network): Manual uses the
 // saved `enabledModels` verbatim; Auto uses the durable discovery snapshot when
-// available, then the provider's curated fallback (else []).
+// available, else [] when no official list has been obtained.
 export function effectiveAccountModels(
   settings: Pick<AccountSettings, "modelsMode" | "enabledModels" | "discoveredModels">,
   providerId: string,
@@ -61,12 +49,11 @@ export function effectiveAccountModels(
   if (providerId === "openai-codex") return [];
   return settings.discoveredModels && settings.discoveredModels.length > 0
     ? [...settings.discoveredModels]
-    : [...(ACCOUNT_MODEL_FALLBACKS[providerId] ?? [])];
+    : [];
 }
 
 // Every routable `${providerId}/${model}` alias across all bound accounts, deduped
-// and sorted. Fail-open: a missing/corrupt settings blob yields the curated
-// fallback (loadAccountSettings already swallows decrypt errors to {}).
+// and sorted. A missing/corrupt settings blob yields no automatic models.
 
 // One routable model alias + which subscription account(s) currently expose it.
 // `accounts` lets the Lanes picker show, under each model, the bound account(s)
@@ -136,10 +123,9 @@ async function automaticCodexModels(
       clientVersion: options.codexClientVersion ?? DEFAULT_OPENAI_CODEX_CLIENT_VERSION,
     };
     const snapshot = options.codexCatalog.snapshot(key);
-    if (!snapshot) return [OPENAI_CODEX_IMAGE_MODEL];
+    if (!snapshot) return [];
     const models = [...snapshot.models].sort((left, right) => left.priority - right.priority);
     const aliases = expandOpenAICodexModelAliases(models.map((model) => model.slug));
-    if (!aliases.includes(OPENAI_CODEX_IMAGE_MODEL)) aliases.push(OPENAI_CODEX_IMAGE_MODEL);
     return aliases;
   } catch {
     return undefined;
@@ -183,9 +169,8 @@ export async function effectiveOAuthModelOptions(
               account: row.account,
             })
           : undefined;
-      // Auto follows the exact account catalog when a successful discovery has
-      // populated the shared cache. A missing/negative snapshot keeps the existing
-      // curated fail-open projection; Manual remains the operator's saved list.
+      // Auto follows only the official account catalog (live cache or durable
+      // last-known-good snapshot); Manual remains the operator's saved list.
       models =
         discovered && discovered.length > 0
           ? discovered

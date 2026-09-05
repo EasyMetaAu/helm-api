@@ -974,7 +974,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     });
     await setAccountSettings(config, ENC_KEY, "xai", "text-only", {
       modelsMode: "manual",
-      enabledModels: ["grok-4.5"],
+      enabledModels: ["grok-4.5", "grok-custom-9"],
     });
     const mediaAuth: string[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
@@ -1010,6 +1010,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     expect((enabled.providers[0]?.models ?? []).map((model) => model.alias)).toEqual([
       "xai/grok-imagine-image-quality",
       "xai/grok-4.5",
+      "xai/grok-custom-9",
     ]);
     await enabled.poolClients
       .get("xai")
@@ -1756,7 +1757,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
         { catalog, runInBackground },
       );
       const aliases = (result.providers[0]?.models ?? []).map((model) => model.alias);
-      expect(aliases).toContain("openai-codex/gpt-image-2");
+      expect(aliases).not.toContain("openai-codex/gpt-image-2");
     }
   });
 
@@ -2007,7 +2008,6 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       "openai-codex/gpt-5.6-sol",
       "openai-codex/codex-auto-review",
       "openai-codex/gpt-5.6",
-      "openai-codex/gpt-image-2",
     ]);
     await poolClients.get("openai-codex")?.chatCompletion({
       model: "gpt-5.6-sol",
@@ -2476,10 +2476,8 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       { catalog, runInBackground },
     );
 
-    expect((result.providers[0]?.models ?? []).map((model) => model.alias)).toEqual([
-      "openai-codex/gpt-image-2",
-    ]);
-    expect(result.poolClients.get("openai-codex")?.hasAvailableModel("gpt-image-2")).toBe(true);
+    expect((result.providers[0]?.models ?? []).map((model) => model.alias)).toEqual([]);
+    expect(result.poolClients.get("openai-codex")?.hasAvailableModel("gpt-image-2")).toBeFalsy();
   });
 
   it("refreshes once and retries /models after a 401 without changing account identity", async () => {
@@ -2563,7 +2561,6 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     expect((result.providers[0]?.models ?? []).map((model) => model.alias)).toEqual([
       "openai-codex/gpt-5.6-sol",
       "openai-codex/gpt-5.6",
-      "openai-codex/gpt-image-2",
     ]);
   });
 

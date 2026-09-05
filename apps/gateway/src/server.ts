@@ -13,7 +13,6 @@ import {
   type CodexResponsesWebSocketConnector,
   type ConfigStore,
   type CreateKeyInput,
-  CURATED_OAUTH_MODELS,
   checkTlsTransportAvailable,
   codexActiveLimitIdFromProviderRaw,
   createAnthropicClient,
@@ -83,7 +82,6 @@ import {
   type OAuthTokenStore,
   type ObserveDeps,
   type ObserverDeps,
-  OPENAI_CODEX_IMAGE_MODEL,
   type OpenAICodexIdentity,
   OpenAICodexModelsError,
   type OpenAICodexModelsResult,
@@ -925,8 +923,8 @@ function buildOAuthAccountClient(
 // account gets its own per-account client (token manager + egress proxy + executor
 // type); the pool selects one per request by priority (asc) then LRU round-robin
 // (Stage 3). The synthetic provider config exposes the UNION of the accounts'
-// enabled models to Lanes. Discovery is live where possible (Copilot /models),
-// else curated. Fail-open (principle 3): a dead credential / empty model list skips
+// enabled models to Lanes. Discovery uses the provider's official catalog (live
+// or last-known-good). Fail-open (principle 3): a dead credential / empty model list skips
 // THAT account (logged); a provider with no live account is skipped entirely;
 // startup is never blocked.
 export async function synthesizeOAuthProviders(
@@ -1090,8 +1088,26 @@ export async function synthesizeOAuthProviders(
           log("warn", "oauth.models.snapshot_write_failed", { providerId, account });
         }
         const routable = catalog.filter(isRoutableXaiOAuthModel);
+        const mediaModels = new Set<string>(GROK_OAUTH_MEDIA_MODELS);
         const enabled = modelsMode === "manual" ? new Set(s.enabledModels ?? []) : undefined;
-        const selected = enabled ? routable.filter((model) => enabled.has(model.id)) : routable;
+        const selected =
+          modelsMode === "manual"
+            ? [...new Set(s.enabledModels ?? [])]
+                .filter((id) => !mediaModels.has(id))
+                .map(
+                  (id) =>
+                    routable.find((model) => model.id === id) ?? {
+                      id,
+                      model: id,
+                      apiBackend: "responses" as const,
+                      contextWindow: 256_000,
+                      hidden: false,
+                      supportedInApi: true,
+                      supportsReasoningEffort: false,
+                      reasoningEfforts: [],
+                    },
+                )
+            : routable;
         const entitlementValidUntil = xaiGrokMediaEntitlementValidUntil(
           quotaSeed,
           Date.now(),
@@ -1137,8 +1153,6 @@ export async function synthesizeOAuthProviders(
           ? [...loaded.snapshot.models].sort((left, right) => left.priority - right.priority)
           : [];
         discovered = expandOpenAICodexModelAliases(catalogModels.map((model) => model.slug));
-        if (!discovered.includes(OPENAI_CODEX_IMAGE_MODEL))
-          discovered.push(OPENAI_CODEX_IMAGE_MODEL);
         if (loaded) codexKeys.push(loaded.key);
         accountCodexRuntime = loaded?.runtime;
       } else {
@@ -1165,7 +1179,7 @@ export async function synthesizeOAuthProviders(
         ) {
           log("warn", "oauth.models.snapshot_write_failed", { providerId, account });
         }
-        discovered = exact.length > 0 ? exact : (CURATED_OAUTH_MODELS[providerId] ?? []);
+        discovered = exact;
       }
       // Auto follows the authenticated account catalog. Manual is authoritative,
       // including custom ids that a newly released upstream catalog does not report yet.
