@@ -3503,6 +3503,10 @@ export async function buildServer(
       return (
         codexModelCatalog?.listRoutable(models, {
           keys: versionCatalog.keys,
+          // `models` is already filtered by the authenticated key and the
+          // account's auto/manual mode above. Preserve manual ids even when
+          // the upstream catalog has not learned them yet.
+          allowUnknown: true,
         }) ?? null
       );
     },

@@ -2118,6 +2118,42 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     ).toBe(true);
   });
 
+  it("uses the manual Codex model ids instead of the discovered set", async () => {
+    const { ctx, config } = oauthStores();
+    await ctx.store.upsert({
+      providerId: "openai-codex",
+      account: "default",
+      accessEnc: encryptSecret("opaque-access", ENC_KEY),
+      refreshEnc: encryptSecret("codex-refresh", ENC_KEY),
+      expiresAt: FAR_FUTURE,
+      meta: JSON.stringify({ accountId: "workspace-42" }),
+      updatedAt: 1,
+    });
+    await setAccountSettings(config, ENC_KEY, "openai-codex", "default", {
+      modelsMode: "manual",
+      enabledModels: ["gpt-6-astra"],
+    });
+    const catalog = createCodexModelCatalog({
+      cache: createCodexModelCache(config, ENC_KEY),
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ models: [codexModel("gpt-5.6-sol")] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    const result = await loadCodexCatalogForClientVersion({
+      configured: [],
+      oauthCtx: ctx,
+      config,
+      catalog,
+      clientVersion: "0.145.0",
+    });
+
+    expect(result.models).toEqual(["gpt-6-astra"]);
+  });
+
   it("fails closed before account or network work for invalid client versions", async () => {
     const { ctx, config } = oauthStores();
     const catalog = createCodexModelCatalog({

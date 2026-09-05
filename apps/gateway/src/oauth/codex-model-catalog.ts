@@ -39,7 +39,7 @@ export interface CodexModelCatalog {
   resolve(key: CodexModelCacheKey, model: string): CodexModelInfo | undefined;
   listRoutable(
     models: Iterable<string>,
-    scope?: { keys?: readonly CodexModelCacheKey[] },
+    scope?: { keys?: readonly CodexModelCacheKey[]; allowUnknown?: boolean },
   ): OpenAICodexModelsResult | null;
   observeEtag(
     key: CodexModelCacheKey,
@@ -339,10 +339,17 @@ export function createCodexModelCatalog(options: CodexModelCatalogOptions): Code
           }
         }
       }
+      const fallback = [...available.values()].sort(
+        (left, right) => left.priority - right.priority,
+      )[0];
       const selected = new Map<string, CodexModelInfo>();
       for (const slug of new Set(models)) {
         const source = available.get(resolveOpenAICodexModelAlias(slug));
-        if (source === undefined) continue;
+        if (source === undefined) {
+          if (!scope?.allowUnknown || fallback === undefined) continue;
+          selected.set(slug, { ...fallback, slug, display_name: slug, description: null });
+          continue;
+        }
         selected.set(slug, slug === source.slug ? source : { ...source, slug });
       }
       const combined = [...selected.values()]

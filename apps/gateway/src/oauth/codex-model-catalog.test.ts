@@ -390,6 +390,20 @@ describe("createCodexModelCatalog", () => {
     expect(catalog.listRoutable(["not-entitled"])).toBeNull();
   });
 
+  it("preserves manually configured ids missing from the upstream catalog", async () => {
+    const catalog = createCodexModelCatalog({ cache: fakeCache(null) });
+    await catalog.load(KEY, remote([model("gpt-5.6-sol")]));
+
+    const result = catalog.listRoutable(["gpt-6-astra"], { keys: [KEY], allowUnknown: true });
+
+    expect(result?.models).toHaveLength(1);
+    expect(result?.models[0]).toMatchObject({
+      slug: "gpt-6-astra",
+      display_name: "gpt-6-astra",
+      description: null,
+    });
+  });
+
   it("advertises Codex-compatible derived and clamped compact thresholds", async () => {
     const catalog = createCodexModelCatalog({ cache: fakeCache(null) });
     await catalog.load(
