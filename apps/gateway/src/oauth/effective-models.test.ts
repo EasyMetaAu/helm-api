@@ -78,7 +78,8 @@ describe("effectiveAccountModels", () => {
 
   it("falls back to the provider's curated set when enabledModels is unset", () => {
     expect(effectiveAccountModels({}, "anthropic")).toEqual([
-      "claude-opus-4-6",
+      "claude-opus-5",
+      "claude-fable-5-1",
       "claude-sonnet-5",
       "claude-haiku-4-5",
     ]);
@@ -160,8 +161,9 @@ describe("effectiveOAuthAliases", () => {
     await bind(tokens, "anthropic", "default");
     const aliases = await effectiveOAuthAliases({ store: tokens, encKey: KEY }, config, ROUTABLE);
     expect(aliases).toEqual([
+      "anthropic/claude-fable-5-1",
       "anthropic/claude-haiku-4-5",
-      "anthropic/claude-opus-4-6",
+      "anthropic/claude-opus-5",
       "anthropic/claude-sonnet-5",
     ]);
   });

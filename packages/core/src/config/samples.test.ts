@@ -262,7 +262,7 @@ describe("checked-in config samples", () => {
     expect(validateModelAliasTargets(aliases, Object.keys(lanes))).toEqual([]);
   });
 
-  it("loads the shipped claude-fable vendor-family lane (native anthropic primary, premium fallback)", () => {
+  it("loads the shipped claude-fable vendor-family lane (Fable 5.1 primary, legacy fallback)", () => {
     const cfg = loadConfig({ configDir, env: {} });
     const lanes = cfg.lanes;
     const aliases = cfg.model_aliases;
@@ -271,12 +271,12 @@ describe("checked-in config samples", () => {
     // Mirrors claude-opus exactly: LEADS with the native Anthropic OAuth alias and
     // degrades straight into the GPT-led `premium` chain (no static Fable mirror is
     // wired), so an unconnected `anthropic/*` candidate fails OPEN to `premium`.
-    expect(lanes["claude-fable"]?.primary).toBe("anthropic/claude-fable-5");
-    expect(lanes["claude-fable"]?.fallback).toEqual(["premium"]);
+    expect(lanes["claude-fable"]?.primary).toBe("anthropic/claude-fable-5-1");
+    expect(lanes["claude-fable"]?.fallback).toEqual(["anthropic/claude-fable-5", "premium"]);
     // A bare / dated Fable id routes to the dedicated lane: the `claude-fable-*` glob
     // (longest literal) beats the broad `claude-*` -> balanced catch-all.
-    expect(resolveModelAlias("claude-fable-5", aliases)).toBe("claude-fable");
-    expect(resolveModelAlias("claude-fable-5-20260115", aliases)).toBe("claude-fable");
+    expect(resolveModelAlias("claude-fable-5-1", aliases)).toBe("claude-fable");
+    expect(resolveModelAlias("claude-fable-5-1-20260115", aliases)).toBe("claude-fable");
     // No drift: the shipped aliases still validate against the shipped lanes.
     expect(validateModelAliasTargets(aliases, Object.keys(lanes))).toEqual([]);
   });

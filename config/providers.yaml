@@ -36,7 +36,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # PRIMARY STATIC FALLBACK = official DeepSeek. The quality lanes now lead with the
 # synthesized `openai-codex/*` subscription aliases and then the static official
-# OpenAI GPT-5.6 API aliases below. The former self-built `openai-crs` relay
+# OpenAI GPT-5.6/GPT-6 Astra API aliases below. The former self-built `openai-crs` relay
 # (la.atmy.work) was deleted: it WAS just a proxy in front of a ChatGPT/Codex
 # subscription, which Helm now connects natively via the built-in `openai-codex`
 # OAuth preset (admin → Providers → Connect). That preset is SYNTHESIZED at
@@ -187,7 +187,7 @@ providers:
   # chain keeps official OpenAI behind ZenMux as an operation fallback; gemini-image
   # still uses Google direct with ZenMux failover. Keys are env-var NAMES, never plaintext.
 
-  # OpenAI OFFICIAL — direct Responses/Chat models for GPT-5.6, plus Images API
+  # OpenAI OFFICIAL — direct Responses/Chat models for GPT-5.6/GPT-6 Astra, plus Images API
   # for gpt-image-2. Text aliases require explicit custom-model access; the official
   # image alias is the fallback for operations the ZenMux relay cannot serve.
   - name: openai
@@ -195,6 +195,8 @@ providers:
     base_url: https://api.openai.com/v1
     api_key_env: OPENAI_API_KEY
     models:
+      - alias: openai/gpt-6-astra
+        provider_model: gpt-6-astra
       - alias: openai/gpt-5.6
         provider_model: gpt-5.6
       - alias: openai/gpt-5.6-sol

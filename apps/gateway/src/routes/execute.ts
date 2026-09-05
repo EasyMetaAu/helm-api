@@ -1033,7 +1033,7 @@ function hasOpenAIChatTools(body: Record<string, unknown>): boolean {
 }
 
 function isGpt56FamilyModel(model: unknown): boolean {
-  return typeof model === "string" && /^gpt-5\.6(?:$|-)/.test(model);
+  return typeof model === "string" && /^(?:gpt-5\.6|gpt-6-astra)(?:$|-)/.test(model);
 }
 
 function openAIReasoningEffort(body: Record<string, unknown>): string | null {

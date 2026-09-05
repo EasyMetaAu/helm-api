@@ -275,6 +275,21 @@ openrouter/deepseek-v4-flash:
   maxOutputTokens: 65536 # OpenRouter /v1/models: deepseek-v4-flash max_completion_tokens=65536
 # Claude capabilities now live under the native `zenmux-anthropic/claude-*` aliases
 # below (issue #217); the OpenAI-compat `zenmux/claude-*` entries were removed.
+# Official GPT-6 Astra (developers.openai.com/api/docs/models/gpt-6-astra,
+# checked 2026-09-05): text+image input, text output, 1.05M context, 128K output.
+# It supports reasoning levels low..max (not none), streaming, tools and strict
+# structured outputs. Keep this separate from the GPT-5.6 subscription aliases.
+openai/gpt-6-astra:
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  reasoningEffort:
+    openaiReasoning:
+      supported: true
+      levels: [low, medium, high, xhigh, max]
+  maxContextTokens: 1050000
+  maxOutputTokens: 128000
 openai/gpt-5.6:
   supportsTools: true
   jsonOutput: schema
@@ -576,6 +591,25 @@ anthropic/claude-sonnet-4-6:
 # https://platform.claude.com/docs/en/about-claude/models/whats-new-sonnet-5
 # https://platform.claude.com/docs/en/build-with-claude/effort
 anthropic/claude-sonnet-5:
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  reasoningEffort:
+    anthropicOutputConfig:
+      supported: true
+      levels: [low, medium, high, xhigh, max]
+      map:
+        minimal: low
+    anthropicThinking:
+      supported: false
+  modalities: [document]
+  maxContextTokens: 1000000
+  maxOutputTokens: 128000
+# Official Claude Fable 5.1 (platform.claude.com/docs/en/models/fable-5-1/overview,
+# checked 2026-09-05): adaptive thinking always on, default high; 1M context,
+# 128K output, text+image input, tools/computer-use/PDF and structured output.
+anthropic/claude-fable-5-1:
   supportsTools: true
   jsonOutput: schema
   supportsVision: true

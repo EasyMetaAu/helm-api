@@ -20,7 +20,7 @@ import { XAI_GROK_OAUTH_BASE_URL, xaiGrokCatalogHeaders } from "./xai.js";
 // Curated FALLBACK model ids — used when live discovery is unavailable or fails.
 // Anthropic and Codex are normally live; these are only their safety net.
 export const CURATED_OAUTH_MODELS: Record<string, string[]> = {
-  anthropic: ["claude-opus-4-6", "claude-sonnet-5", "claude-haiku-4-5"],
+  anthropic: ["claude-opus-5", "claude-fable-5-1", "claude-sonnet-5", "claude-haiku-4-5"],
   // ChatGPT Codex set. The family alias is derived from Sol entitlement and is
   // never an independent authorization source.
   "openai-codex": [

@@ -132,15 +132,16 @@ claude-opus:
     # When the native OAuth pool is parked/absent, degrade into the generic premium chain.
     - premium
 
-# Claude Fable 5 — the Mythos-class Claude (autonomous knowledge work + coding),
+# Claude Fable 5.1 — the Mythos-class Claude (autonomous knowledge work + coding),
 # 1M context. Mirrors claude-opus: LEADS with the native Anthropic OAuth alias (an
 # unconnected `anthropic/*` candidate fails OPEN to the next fallback) and degrades
 # straight into the generic `premium` chain. No static Fable mirror is wired, so
 # without a Claude subscription this lane serves via `premium`.
 claude-fable:
-  purpose: Anthropic Claude Fable tier — Mythos-class autonomous work
-  primary: anthropic/claude-fable-5
+  purpose: Anthropic Claude Fable 5.1 tier — Mythos-class autonomous work
+  primary: anthropic/claude-fable-5-1
   fallback:
+    - anthropic/claude-fable-5
     - premium
 
 claude-sonnet:

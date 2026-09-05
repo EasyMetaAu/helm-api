@@ -80,7 +80,7 @@ and it never escapes policy/key caps.
 For an `allow_custom_model` key, `plan()` runs model-alias compatibility only
 after checking exact configured lanes and deployment-known models. Clients that
 pin a **fixed vendor model id** — Claude Code's `claude-opus-4-8`,
-or an SDK locked to `openai.gpt-5.6` — know neither Helm's lanes nor its provider
+or an SDK locked to `gpt-6-astra` / `openai.gpt-5.6` — know neither Helm's lanes nor its provider
 aliases, so left alone they would get a `400 unknown model`. The shim rewrites
 that inbound `model` field onto a lane (or the `auto` sentinel) **before**
 routing, so a fixed-model client routes cleanly while Helm still only exposes the
