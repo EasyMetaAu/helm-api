@@ -161,8 +161,9 @@ describe("effectiveOAuthAliases", () => {
     await bind(tokens, "anthropic", "default");
     const aliases = await effectiveOAuthAliases({ store: tokens, encKey: KEY }, config, ROUTABLE);
     expect(aliases).toEqual([
+      "anthropic/claude-fable-5-1",
       "anthropic/claude-haiku-4-5",
-      "anthropic/claude-opus-4-6",
+      "anthropic/claude-opus-5",
       "anthropic/claude-sonnet-5",
     ]);
   });
