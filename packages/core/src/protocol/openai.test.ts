@@ -754,6 +754,17 @@ describe("openaiTransformer — max_completion_tokens (o-series, order 4)", () =
     expect(native.max_tokens).toBeUndefined();
   });
 
+  it("renders GPT-6 Astra output caps as max_completion_tokens", async () => {
+    const native = (await openaiTransformer.transformRequestIn({
+      model: "gpt-6-astra",
+      messages: [{ role: "user", content: "x" }],
+      max_tokens: 32000,
+    })) as { max_tokens?: number; max_completion_tokens?: number };
+
+    expect(native.max_completion_tokens).toBe(32000);
+    expect(native).not.toHaveProperty("max_tokens");
+  });
+
   it("leaves max_tokens unchanged for legacy OpenAI-compatible chat models", async () => {
     const native = (await openaiTransformer.transformRequestIn({
       model: "deepseek-v4-flash",

@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-09-05 · GPT-6 Astra 官方 API 目录与价格（Provider catalog / routing / cost telemetry，docs/04/05/07，原则 2/3/5/6）
+
+- OpenAI 官方开发者文档现将 `gpt-6-astra` 列为 API 模型：文本+图片输入、文本输出、1,050,000 context、922,000 max input、128,000 max output，支持 reasoning（`low`–`max`，不支持 `none`）、streaming、tools、structured outputs、file/web search 与 prompt caching。
+- 官方标准价格为 input `$10`、cached input `$1`、cache writes `$12.50`、output `$50`/1M tokens；超过 272K 输入时为 `$20`/`$2`/`$25`/`$75`。Helm 将这些值加入 `openai/gpt-6-astra` 的手工 capability/pricing 覆盖，并保留 GPT-5.6 兼容别名与订阅 lane 不变。
+- GPT-6 Astra 不支持 `temperature`、`top_p`、`logprobs`，且不支持 `none` reasoning effort；现有 OpenAI reasoning-model 的 `max_completion_tokens` shim 扩展到该模型。Fast mode 在 EU data residency 下不可用；未新增服务层自动降级。
+
 ## 2026-09-02 · Codex Responses HTTP 只重放明确拒绝的请求（Responses / provider execution，docs/04/05/07，原则 3/5/8）
 
 - Codex HTTP POST 在 `fetch()` 抛出连接错误或首字节超时后无法证明上游未接收请求；这类结果现在单次终止为 `response_create_outcome_unknown`，记录 `after_send_before_response`，不再由 fetch 层、OAuth sibling 或候选链重放。外部客户端取消保持原分类。

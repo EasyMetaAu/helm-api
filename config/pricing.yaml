@@ -288,6 +288,44 @@ openrouter/deepseek-v4-flash:
   cacheReadPerMTokUsd: 0.0028
 # Claude pricing now lives under the native `zenmux-anthropic/claude-*` aliases
 # (issue #217); the OpenAI-compat `zenmux/claude-*` entries were removed.
+# Official GPT-6 Astra pricing (developers.openai.com/api/docs/pricing,
+# checked 2026-09-05): $10/$1/$12.50/$50 per 1M input/cached/cache-write/output;
+# >272K input uses the published $20/$2/$25/$75 long-context band. Flex is 50%
+# and priority is 2x, matching the existing OpenAI service-tier representation.
+openai/gpt-6-astra:
+  inputPerMTokUsd: 10.0
+  outputPerMTokUsd: 50.0
+  cacheReadPerMTokUsd: 1.0
+  cacheWritePerMTokUsd: 12.5
+  contextTiers:
+    - minPromptTokens: 272001
+      inputPerMTokUsd: 20.0
+      outputPerMTokUsd: 75.0
+      cacheReadPerMTokUsd: 2.0
+      cacheWritePerMTokUsd: 25.0
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 5.0
+      outputPerMTokUsd: 25.0
+      cacheReadPerMTokUsd: 0.5
+      cacheWritePerMTokUsd: 6.25
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 10.0
+          outputPerMTokUsd: 37.5
+          cacheReadPerMTokUsd: 1.0
+          cacheWritePerMTokUsd: 12.5
+    priority:
+      inputPerMTokUsd: 20.0
+      outputPerMTokUsd: 100.0
+      cacheReadPerMTokUsd: 2.0
+      cacheWritePerMTokUsd: 25.0
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 40.0
+          outputPerMTokUsd: 150.0
+          cacheReadPerMTokUsd: 4.0
+          cacheWritePerMTokUsd: 50.0
 openai/gpt-5.6:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0
