@@ -458,7 +458,7 @@ describe('providers page', () => {
     ).not.toBeInTheDocument();
   });
 
-  it('edits model lists only in manual mode and saves mode with models', async () => {
+  it('adds and saves a custom model id in manual mode', async () => {
     getAccountModels.mockResolvedValue({
       available: ['gpt-5.6-sol', 'gpt-5.6-terra'],
       enabled: ['gpt-5.6-sol'],
@@ -509,12 +509,17 @@ describe('providers page', () => {
       within(dialog).getByRole('button', { name: 'Pull from provider (2)' }),
     ).toBeInTheDocument();
 
+    await fireEvent.input(within(dialog).getByPlaceholderText('Add a model id…'), {
+      target: { value: 'gpt-6-astra' },
+    });
+    await fireEvent.click(within(dialog).getByRole('button', { name: /^add$/i }));
+
     await fireEvent.click(within(dialog).getByRole('button', { name: /^save$/i }));
 
     await waitFor(() =>
       expect(setAccountModels).toHaveBeenCalledWith('openai-codex', 'acct-codex', {
         mode: 'manual',
-        models: ['gpt-5.6-sol'],
+        models: ['gpt-5.6-sol', 'gpt-6-astra'],
       }),
     );
   });

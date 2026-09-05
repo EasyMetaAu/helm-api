@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-09-06 · 订阅账号手动模型允许自定义 ID（OAuth provider / Admin / routing，docs/04/11，原则 2/3/6）
+
+- Manual 模式以运维方保存的 `enabledModels` 为权威，Codex 模型即使尚未出现在账号目录中，也会在 Admin 回读、Lanes 目录和运行时账号池中保留；Automatic 模式仍只跟随上游发现。
+- 自定义 ID 只表示“允许尝试”，不伪造账号 entitlement 或模型能力；账号实际不支持时由上游正常拒绝。没有新增 schema、migration、配置或依赖。
+
 ## 2026-09-05 · GPT-6 Astra 官方 API 目录与价格（Provider catalog / routing / cost telemetry，docs/04/05/07，原则 2/3/5/6）
 
 - OpenAI 官方开发者文档现将 `gpt-6-astra` 列为 API 模型：文本+图片输入、文本输出、1,050,000 context、922,000 max input、128,000 max output，支持 reasoning（`low`–`max`，不支持 `none`）、streaming、tools、structured outputs、file/web search 与 prompt caching。
@@ -58,25 +63,11 @@
 - 终端 `DecisionRecord.final.status=error`（含请求总超时）在共享 `recordServed` 持久化边界强制写入完整客户端请求、可用的 provider-native 请求及响应/错误正文，同时追加 Session revision；该次 telemetry 标为 `request_content_mode=payload`，因此 Admin 可直接读取精确载荷。成功请求仍严格服从 key 级或全局 `none` / `payload` / `session` 设置。
 - 失败诊断留存明确高于用户/全局正文关闭设置，但仍复用原有敏感数据库、定时 retention、单请求正文内存上限、授权头不入库与 fail-open 写入边界；没有可用 Session identity、provider 尚未生成某段正文或正文超过安全上限时，不伪造缺失数据。无 schema、migration、配置或依赖变化。
 
-## 2026-08-28 · Grok 4.6 Vision 对齐官方模型合同（Provider catalog / routing，docs/02/04，原则 2/3）
-
-- xAI 当前官方模型页与发布说明明确 `grok-4.6` 接受 text/image 输入并输出 text；Sub2API 当前 OAuth relay 也只对官方 Grok base URL 把该模型声明为 `input_modalities:["text","image"]`，并将图片以 Responses `input_image` 发往 `cli-chat-proxy.grok.com/v1/responses`。因此手工 catalog 将 `xai/grok-4.6.supportsVision` 从 `false` 改为 `true`，避免 Helm 在 provider 调用前误报 `capability_unsatisfiable`；provider executor、lane 与 fallback 均不改。
-- 该能力只代表图片理解，不代表图片生成；JSON、Composer vision 与额外媒体能力继续 fail-closed。合并部署后仍需用生产 Helm 通道做图片 canary 并从 `/v1/models` 回读能力，源码/CI 通过不冒充部署证据。
-
-## 2026-08-27 · Responses 只在可证明未发送时触发完整历史恢复（Responses / OAuth provider / Gateway，docs/04/05/07，原则 3/5/8）
-
-- **生产根因**：`v0.28.91` 上线后的 64 个严格亲和失败（110 个 provider attempts）均紧跟两次真实 Codex 账号级 429；账号按 `Retry-After` 暂停期间，`x-codex-turn-state` / `previous_response_id` 仍正确绑定原账号，但 pool 在调用 provider 前抛出的 `original account is unavailable` 被 executor 当作普通失败继续 fallback，最终形成 400/502，甚至可能把状态型增量交给无原上下文的候选。
-- **唯一安全恢复边界**：三个严格亲和源（`previous_response_id`、`x-codex-turn-state`、`responses_websocket_session`）在 provider 调用前不可用时，pool 抛出类型化内部错误，executor 立即终止执行链并生成 `response_create_not_sent`，同时记录 `safe_to_replay:true` / `lifecycle_phase:before_send`；Responses WebSocket bridge 只在进程内 proof 匹配时对这一 code 关闭 `1012`，让 Codex 用完整历史重建。普通错误 message 不再被识别为安全来源，上游原样 SSE 若复制私有 code 会改写成 `upstream_error`；真实 429 本身仍按原账号限流处理，不伪装成未发送。
-- **禁止模糊重放**：`response_create_outcome_unknown` 与发送后产生的 `previous_response_id_session_unavailable` 不再属于可恢复断连 code；它们继续终止 provider/fallback，但以错误事件留在原下游 socket，不触发 `1012` 或自动重放，避免重复推理、工具副作用与计费。本条收紧并取代同日早先“所有结构化 recovery code 均关闭 1012”的决定；无 schema、migration、配置或依赖变化。
-
-## 2026-08-27 · 将不可安全重放的 Responses 断流交还 Codex 恢复（Responses / Gateway，docs/05/07，原则 3/5/8）
-
-- `response.create` 一旦进入 WebSocket `send()`，发送回调失败、读超时/异常、EOF，以及收到输出后但终态前断连都属于结果不明：Helm 不再重放、不回落 HTTP、不切 sibling，也不处罚 breaker；只有专用错误能证明底层 `socket.send()` 尚未调用时，初始无状态请求才可重试。无法解析的单个上游事件与直连 Codex 一致，释放资源后忽略并继续等待，不因协议扩展重放整轮。续接在发送前发现原 socket 已关闭时同样不把 opaque `previous_response_id` 搬到新连接。本条取代同日早先“续接发送前关闭后重连一次”的决定。
-- provider 通过两个结构化 recovery code 把该状态保留到 Responses SSE，包括已经输出后的流内错误与非 2xx 嵌套错误；下游 WebSocket bridge 不先发送 400/error frame，而以 `1012` 关闭连接。Codex 0.145.0 的原生 retry loop 会把 transport close 视为可重试，并在新连接上清空增量 `previous_response_id`、用客户端持有的完整当前会话重建请求；Helm 本身仍只发送上游一次。
-- telemetry 在本地 teardown 前快照上游 close code/reason，并记录 `before_send` / `send_callback_error` / `after_send_before_event` / `after_send_after_preamble` / `after_send_after_output` 生命周期，避免把 Helm 自己的 close `1000` 冒充上游事实。该恢复与直连 Codex 的断流语义一致，但上游没有幂等键时无法承诺 exactly-once；重试决定仍由持有完整历史的客户端负责。无 schema、migration、依赖或配置变化。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-28 · Grok 4.6 Vision 对齐官方模型合同**：手工 catalog 将 `xai/grok-4.6.supportsVision` 改为 `true`，避免图片理解请求被本地误拒；图片生成与其他未知能力继续 fail-closed，完整原文经 git history 回溯。
+- **2026-08-27 · Responses 只在可证明未发送时触发完整历史恢复**：严格亲和账号在 provider 调用前不可用时才生成类型化安全重放证明；发送后及结果不明继续禁止 fallback，完整原文经 git history 回溯。
+- **2026-08-27 · 将不可安全重放的 Responses 断流交还 Codex 恢复**：发送后断流不在 Helm 内重放，由持有完整历史的 Codex 客户端通过 `1012` 决定恢复；完整原文经 git history 回溯。
 - **2026-08-27 · 仅恢复发送前已关闭的 Responses WebSocket**：只有底层 `socket.send()` 尚未调用时允许安全恢复；发送回调失败与其他不确定结果保持 fail-closed，完整原文经 git history 回溯。
 - **2026-08-26 · Codex Responses WebSocket 保活与已确认请求禁止重放**：空闲 socket 用 Ping/Pong 检测半开连接，`response.created` / `response.in_progress` 后断连不重放，完整原文经 git history 回溯。
 - **2026-08-26 · OAuth 热刷新保留未变化的 Codex continuation transport**：重建后拓扑与 transport 身份签名完全相同时复用原 pool/client 与 continuation 状态；真实账号、代理、模型或执行配置变化仍新建并保持失效 fail-closed，完整原文经 git history 回溯。

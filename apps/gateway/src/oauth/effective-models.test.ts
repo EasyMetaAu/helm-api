@@ -102,13 +102,13 @@ describe("effectiveAccountModels", () => {
     expect(effectiveAccountModels({}, "mystery")).toEqual([]);
   });
 
-  it("never treats Codex manual settings or curated hints as account entitlement", () => {
+  it("keeps manual Codex ids but does not invent auto-mode entitlement", () => {
     expect(
       effectiveAccountModels(
-        { modelsMode: "manual", enabledModels: ["gpt-5.6-sol"] },
+        { modelsMode: "manual", enabledModels: ["gpt-6-astra"] },
         "openai-codex",
       ),
-    ).toEqual([]);
+    ).toEqual(["gpt-6-astra"]);
     expect(effectiveAccountModels({}, "openai-codex")).toEqual([]);
   });
 });
@@ -387,7 +387,7 @@ describe("effectiveOAuthModelOptions", () => {
     ]);
   });
 
-  it("intersects Codex manual allowlists with the exact account catalog", async () => {
+  it("keeps custom Codex ids from the manual allowlist routable", async () => {
     const { tokens, config } = makeStores();
     await bind(tokens, "openai-codex", "default", {
       accountId: "workspace-1",
@@ -405,7 +405,10 @@ describe("effectiveOAuthModelOptions", () => {
           default: [{ slug: "gpt-5.6-sol" }, { slug: "codex-auto-review", visibility: "hide" }],
         }),
       }),
-    ).resolves.toEqual([{ alias: "openai-codex/gpt-5.6-sol", accounts: ["default"] }]);
+    ).resolves.toEqual([
+      { alias: "openai-codex/gpt-5.6-sol", accounts: ["default"] },
+      { alias: "openai-codex/gpt-never-entitled", accounts: ["default"] },
+    ]);
   });
 
   it("keeps a legacy Codex enabledModels allowlist manual when modelsMode is absent", async () => {
@@ -453,7 +456,7 @@ describe("effectiveOAuthModelOptions", () => {
     ).resolves.toEqual([{ alias: "openai-codex/gpt-image-2", accounts: ["default"] }]);
   });
 
-  it("does not grant manual Codex text aliases without an exact catalog or stale LKG", async () => {
+  it("keeps manual Codex ids routable without a catalog snapshot", async () => {
     const { tokens, config } = makeStores();
     await bind(tokens, "openai-codex", "default", { accountId: "acc-default" });
     await setAccountSettings(config, KEY, "openai-codex", "default", {
@@ -465,6 +468,6 @@ describe("effectiveOAuthModelOptions", () => {
       effectiveOAuthModelOptions({ store: tokens, encKey: KEY }, config, ROUTABLE, {
         codexCatalog: codexCatalog({}),
       }),
-    ).resolves.toEqual([]);
+    ).resolves.toEqual([{ alias: "openai-codex/gpt-5.6-sol", accounts: ["default"] }]);
   });
 });

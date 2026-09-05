@@ -2363,7 +2363,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     expect(client.getUsageLimit("a")).toBeGreaterThan(Date.now());
   });
 
-  it("does not grant manual Codex models when the account catalog has no fresh or stale entry", async () => {
+  it("keeps custom manual Codex models routable when the catalog is unavailable", async () => {
     const { ctx, config } = oauthStores();
     await ctx.store.upsert({
       providerId: "openai-codex",
@@ -2376,7 +2376,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     });
     await setAccountSettings(config, ENC_KEY, "openai-codex", "default", {
       modelsMode: "manual",
-      enabledModels: ["gpt-5.6-sol"],
+      enabledModels: ["gpt-6-astra"],
     });
     const catalog = createCodexModelCatalog({
       cache: createCodexModelCache(config, ENC_KEY),
@@ -2403,8 +2403,10 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       { catalog, runInBackground },
     );
 
-    expect(result.providers).toEqual([]);
-    expect(result.poolClients.size).toBe(0);
+    expect((result.providers[0]?.models ?? []).map((model) => model.alias)).toEqual([
+      "openai-codex/gpt-6-astra",
+    ]);
+    expect(result.poolClients.get("openai-codex")?.hasAvailableModel("gpt-6-astra")).toBe(true);
   });
 
   it("keeps ChatGPT image routable when an auto-mode account catalog is unavailable", async () => {
@@ -2529,7 +2531,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     ]);
   });
 
-  it("intersects a Codex manual allowlist with the account catalog", async () => {
+  it("keeps a custom Codex model from the manual allowlist", async () => {
     const { ctx, config } = oauthStores();
     await ctx.store.upsert({
       providerId: "openai-codex",
@@ -2573,6 +2575,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
 
     expect((result.providers[0]?.models ?? []).map((model) => model.alias)).toEqual([
       "openai-codex/gpt-5.6-sol",
+      "openai-codex/gpt-not-entitled",
     ]);
   });
 
