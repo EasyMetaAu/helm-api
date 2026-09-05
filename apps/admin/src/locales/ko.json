@@ -1066,5 +1066,7 @@
   "Rebuild the transcript in your browser instead of on the server.": "서버가 아닌 브라우저에서 트랜스크립트를 다시 만듭니다.",
   "Rebuilt from the session transcript in your browser — semantically equal to the original request, not the exact HTTP body.": "브라우저에서 세션 트랜스크립트로부터 재구성했습니다. 원래 요청과 의미상 동일하지만 정확한 HTTP 본문은 아닙니다.",
   "The session transcript is too large to rebuild on the server.": "세션 트랜스크립트가 너무 커서 서버에서 재구성할 수 없습니다.",
-  "The session transcript could not be rebuilt.": "세션 트랜스크립트를 재구성할 수 없습니다."
+  "The session transcript could not be rebuilt.": "세션 트랜스크립트를 재구성할 수 없습니다.",
+  "Choose an account model or enter a custom model ID for this test only.": "계정 모델을 선택하거나 이번 테스트에만 사용할 사용자 지정 모델 ID를 입력하세요.",
+  "Enter a model ID": "모델 ID 입력"
 }

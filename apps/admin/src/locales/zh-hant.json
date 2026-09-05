@@ -1066,5 +1066,7 @@
   "Rebuild the transcript in your browser instead of on the server.": "在瀏覽器中重建轉錄，而不是在伺服器上重建。",
   "Rebuilt from the session transcript in your browser — semantically equal to the original request, not the exact HTTP body.": "已在瀏覽器中從工作階段轉錄重建——與原始請求語意等價，但不是精確的 HTTP 內文。",
   "The session transcript is too large to rebuild on the server.": "工作階段轉錄過大，無法在伺服器上重建。",
-  "The session transcript could not be rebuilt.": "無法重建工作階段轉錄。"
+  "The session transcript could not be rebuilt.": "無法重建工作階段轉錄。",
+  "Choose an account model or enter a custom model ID for this test only.": "選擇帳號模型，或輸入僅用於本次測試的自訂模型 ID。",
+  "Enter a model ID": "輸入模型 ID"
 }

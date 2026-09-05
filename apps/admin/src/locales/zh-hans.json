@@ -1066,5 +1066,7 @@
   "Rebuild the transcript in your browser instead of on the server.": "在浏览器中重建转录，而不是在服务器上重建。",
   "Rebuilt from the session transcript in your browser — semantically equal to the original request, not the exact HTTP body.": "已在浏览器中从会话转录重建——与原始请求语义等价，但不是精确的 HTTP 正文。",
   "The session transcript is too large to rebuild on the server.": "会话转录过大，无法在服务器上重建。",
-  "The session transcript could not be rebuilt.": "无法重建会话转录。"
+  "The session transcript could not be rebuilt.": "无法重建会话转录。",
+  "Choose an account model or enter a custom model ID for this test only.": "选择账号模型，或输入仅用于本次测试的自定义模型 ID。",
+  "Enter a model ID": "输入模型 ID"
 }

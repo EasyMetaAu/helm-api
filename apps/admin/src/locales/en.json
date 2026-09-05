@@ -1066,5 +1066,7 @@
   "Rebuild the transcript in your browser instead of on the server.": "Rebuild the transcript in your browser instead of on the server.",
   "Rebuilt from the session transcript in your browser — semantically equal to the original request, not the exact HTTP body.": "Rebuilt from the session transcript in your browser — semantically equal to the original request, not the exact HTTP body.",
   "The session transcript is too large to rebuild on the server.": "The session transcript is too large to rebuild on the server.",
-  "The session transcript could not be rebuilt.": "The session transcript could not be rebuilt."
+  "The session transcript could not be rebuilt.": "The session transcript could not be rebuilt.",
+  "Choose an account model or enter a custom model ID for this test only.": "Choose an account model or enter a custom model ID for this test only.",
+  "Enter a model ID": "Enter a model ID"
 }
