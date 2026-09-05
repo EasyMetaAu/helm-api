@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-09-06 · Codex 原生模型列表保留手动自定义 ID（OAuth provider / Codex discovery，docs/04/05，原则 3/6）
+
+- 原生 `GET /v1/models?client_version=...` 已把手动账号模型作为权威输入；当 ID 尚未出现在上游目录时，使用该账号目录中最低 priority 模型的兼容元数据生成条目，并将 `slug`/`display_name` 改为手动 ID。自动模式仍只输出上游发现项。
+- 这是列表展示与协议兼容的最小兜底，不宣称自定义 ID 的真实能力或 entitlement；实际请求仍由上游决定是否支持。没有新增 schema、migration、配置或依赖。
+
 ## 2026-09-06 · 订阅账号手动模型允许自定义 ID（OAuth provider / Admin / routing，docs/04/11，原则 2/3/6）
 
 - Manual 模式以运维方保存的 `enabledModels` 为权威，Codex 模型即使尚未出现在账号目录中，也会在 Admin 回读、Lanes 目录和运行时账号池中保留；Automatic 模式仍只跟随上游发现。
@@ -58,13 +63,9 @@
 - **安全恢复边界**：严格亲和仍不切 sibling；仅 provider 调用前即可证明未发送的 `response_create_not_sent` 携带原账号剩余 `retry_after_ms`。Gateway 只接受内部 recovery proof 与类型化字段，Responses WebSocket 对短冷却做可中止等待，超过 10 秒的等待封顶为 10 秒，再沿用一次 `1012` 完整历史恢复；未知或过期冷却立即恢复，发送后或结果不明的 `response.create` 仍禁止重放。
 - 没有新增 schema、migration、配置或依赖；10 秒上限只约束网关本地等待，不改变 provider/account/WebSocket 亲和合同。
 
-## 2026-08-28 · 终端失败强制保留原始载荷与 Session（Gateway / observability，docs/07，原则 3/7）
-
-- 终端 `DecisionRecord.final.status=error`（含请求总超时）在共享 `recordServed` 持久化边界强制写入完整客户端请求、可用的 provider-native 请求及响应/错误正文，同时追加 Session revision；该次 telemetry 标为 `request_content_mode=payload`，因此 Admin 可直接读取精确载荷。成功请求仍严格服从 key 级或全局 `none` / `payload` / `session` 设置。
-- 失败诊断留存明确高于用户/全局正文关闭设置，但仍复用原有敏感数据库、定时 retention、单请求正文内存上限、授权头不入库与 fail-open 写入边界；没有可用 Session identity、provider 尚未生成某段正文或正文超过安全上限时，不伪造缺失数据。无 schema、migration、配置或依赖变化。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-08-28 · 终端失败保留原始载荷与 Session**：错误终态在共享持久化边界保存可用请求/响应正文并追加 Session revision，仍受敏感数据、保留期和正文上限约束，完整原文经 git history 回溯。
 - **2026-08-28 · Grok 4.6 Vision 对齐官方模型合同**：手工 catalog 将 `xai/grok-4.6.supportsVision` 改为 `true`，避免图片理解请求被本地误拒；图片生成与其他未知能力继续 fail-closed，完整原文经 git history 回溯。
 - **2026-08-27 · Responses 只在可证明未发送时触发完整历史恢复**：严格亲和账号在 provider 调用前不可用时才生成类型化安全重放证明；发送后及结果不明继续禁止 fallback，完整原文经 git history 回溯。
 - **2026-08-27 · 将不可安全重放的 Responses 断流交还 Codex 恢复**：发送后断流不在 Helm 内重放，由持有完整历史的 Codex 客户端通过 `1012` 决定恢复；完整原文经 git history 回溯。
