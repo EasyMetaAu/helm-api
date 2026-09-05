@@ -178,6 +178,7 @@ import {
   resolveAccountModelsMode,
   saveAccountDiscoveredModels,
   saveAccountXaiDiscoveredModels,
+  selectAccountModels,
 } from "./oauth/account-settings.js";
 import { createOAuthAdmin } from "./oauth/admin-oauth.js";
 import { runResetCreditAttempt, weeklySaturated } from "./oauth/auto-reset.js";
@@ -618,16 +619,14 @@ export async function loadCodexCatalogForClientVersion(input: {
     }
     if (loaded === null) continue;
     keys.push(loaded.key);
-    let discovered = expandOpenAICodexModelAliases(
+    const discovered = expandOpenAICodexModelAliases(
       [...loaded.snapshot.models]
         .sort((left, right) => left.priority - right.priority)
         .map((model) => model.slug),
     );
-    if (resolveAccountModelsMode(binding.providerId, settings) === "manual") {
-      const enabled = new Set(settings.enabledModels ?? []);
-      discovered = discovered.filter((model) => enabled.has(model));
+    for (const model of selectAccountModels(binding.providerId, settings, discovered)) {
+      models.add(model);
     }
-    for (const model of discovered) models.add(model);
   }
 
   return { keys, models: [...models] };
@@ -1168,11 +1167,10 @@ export async function synthesizeOAuthProviders(
         }
         discovered = exact.length > 0 ? exact : (CURATED_OAUTH_MODELS[providerId] ?? []);
       }
-      // Auto follows the authenticated account catalog. Manual is an explicit
-      // allowlist and remains authoritative even for ids discovery did not report.
-      if (modelsMode === "manual" && providerId === "openai-codex") {
-        const enabled = new Set(s.enabledModels ?? []);
-        discovered = discovered.filter((model) => enabled.has(model));
+      // Auto follows the authenticated account catalog. Manual is authoritative,
+      // including custom ids that a newly released upstream catalog does not report yet.
+      if (providerId === "openai-codex") {
+        discovered = selectAccountModels(providerId, s, discovered);
       }
       if (discovered.length === 0) {
         log("warn", "oauth.autoroute.no_models", { providerId, account });

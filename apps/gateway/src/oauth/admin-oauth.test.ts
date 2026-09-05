@@ -808,7 +808,7 @@ describe("createOAuthAdmin", () => {
     );
   });
 
-  it("listModels: Codex manual mode can only narrow the full account entitlement", async () => {
+  it("listModels: Codex manual mode preserves custom model ids outside discovery", async () => {
     const { tokens, config } = makeStores();
     await tokens.upsert({
       providerId: "openai-codex",
@@ -837,13 +837,13 @@ describe("createOAuthAdmin", () => {
       admin.listModels({ providerId: "openai-codex", account: "default" }),
     ).resolves.toMatchObject({
       available: ["gpt-5.6-sol", "gpt-5.6"],
-      enabled: ["gpt-5.6", "codex-auto-review"],
+      enabled: ["gpt-5.6", "codex-auto-review", "gpt-never-entitled"],
       modelsMode: "manual",
       canPull: true,
     });
   });
 
-  it("listStatus: Codex reports the account catalog and applies manual entitlement intersection", async () => {
+  it("listStatus: Codex reports the full manual list including custom model ids", async () => {
     const { tokens, config } = makeStores();
     await tokens.upsert({
       providerId: "openai-codex",
@@ -871,7 +871,7 @@ describe("createOAuthAdmin", () => {
     const account = (await admin.listStatus()).providers
       .find((provider) => provider.id === "openai-codex")
       ?.accounts.find((candidate) => candidate.account === "default");
-    expect(account?.models).toEqual(["gpt-5.6", "codex-auto-review"]);
+    expect(account?.models).toEqual(["gpt-5.6", "codex-auto-review", "gpt-never-entitled"]);
   });
 
   it("listStatus: auto mode reports the account's live-discovered models", async () => {

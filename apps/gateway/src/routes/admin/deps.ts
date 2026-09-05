@@ -192,12 +192,12 @@ export interface OAuthAdminAccess {
   }): Promise<{ status: "pending" | "slow_down" | "done" }>;
   // Remove a stored credential (admin "log out").
   logout(input: { providerId: string; account: string }): Promise<void>;
-  // Per-account model curation: which discovered models are exposed to Lanes.
+  // Per-account model curation: which model ids are exposed to Lanes.
   // `available` is the exact discovery for the account's current token (fail-open
   // to [] when discovery fails); `enabled` is the operator's chosen
-  // subset (unset settings = ALL available). Runtime composition follows the same
-  // account discovery when healthy, but separately retains its curated fail-open
-  // safety net when upstream discovery is unavailable.
+  // manual list, including custom ids (unset settings = ALL available). Runtime
+  // composition follows the same account discovery when healthy, but separately
+  // retains its curated fail-open safety net when upstream discovery is unavailable.
   listModels(input: {
     providerId: string;
     account: string;

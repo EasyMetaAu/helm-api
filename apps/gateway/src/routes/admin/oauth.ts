@@ -1090,7 +1090,7 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
   });
 
   // PUT /oauth/:provider/models { account?, models: string[] } -> 204
-  // Persist which discovered models this account exposes to Lanes.
+  // Persist which model ids this account exposes to Lanes, including custom ids.
   app.put("/admin/api/oauth/:provider/models", async (c) => {
     const s = seam();
     if (!s) return c.json({ error: "oauth login not configured" }, 503);

@@ -69,6 +69,7 @@ import {
   resolveAccountModelsMode,
   saveAccountDiscoveredModels,
   saveAccountXaiDiscoveredModels,
+  selectAccountModels,
   setAccountSettings,
   setGlobalOAuthSettings,
 } from "./account-settings.js";
@@ -410,15 +411,6 @@ function codexModelSets(
   };
 }
 
-function codexEffectiveModels(
-  settings: Readonly<{ modelsMode?: "auto" | "manual"; enabledModels?: string[] }>,
-  entitled: readonly string[],
-): string[] {
-  if (resolveAccountModelsMode(CODEX, settings) !== "manual") return [...entitled];
-  const entitlement = new Set(entitled);
-  return (settings.enabledModels ?? []).filter((model) => entitlement.has(model));
-}
-
 export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
   const now = deps.now ?? (() => Date.now());
   const genId = deps.genSessionId ?? (() => randomUUID());
@@ -666,7 +658,7 @@ export function createOAuthAdmin(deps: OAuthAdminDeps): OAuthAdminAccess {
     settings: AccountSettings,
     discovered: { available: string[]; entitled: string[] },
   ): string[] {
-    if (providerId === CODEX) return codexEffectiveModels(settings, discovered.entitled);
+    if (providerId === CODEX) return selectAccountModels(CODEX, settings, discovered.entitled);
     const mode = resolveAccountModelsMode(providerId, settings);
     const enabled = mode === "auto" ? discovered.available : (settings.enabledModels ?? []);
     return mode === "auto" ? withXaiMediaModels(providerId, enabled) : enabled;

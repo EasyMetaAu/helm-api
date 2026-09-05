@@ -43,7 +43,8 @@ export interface AccountSettings {
   // edit. Manual preserves an explicit enabledModels allowlist. Legacy rows with
   // an enabledModels list remain manual so an upgrade cannot widen operator access.
   modelsMode?: "auto" | "manual";
-  // Subset of discovered models the operator exposes to Lanes. Unset = expose all.
+  // Explicit model ids the operator exposes in manual mode; ids may be custom and
+  // absent from discovery. Unset in auto mode = expose the discovered catalog.
   enabledModels?: string[];
   // Last non-empty remote catalog successfully discovered for this account.
   // Auto mode uses it after a restart or transient discovery failure; live cache
@@ -100,6 +101,16 @@ export function resolveAccountModelsMode(
     return settings.modelsMode;
   }
   return settings.enabledModels === undefined ? "auto" : "manual";
+}
+
+export function selectAccountModels(
+  providerId: string,
+  settings: Pick<AccountSettings, "modelsMode" | "enabledModels">,
+  automaticModels: readonly string[],
+): string[] {
+  return resolveAccountModelsMode(providerId, settings) === "manual"
+    ? [...(settings.enabledModels ?? [])]
+    : [...automaticModels];
 }
 
 export interface GlobalOAuthSettings {

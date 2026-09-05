@@ -14,6 +14,7 @@ import {
   getAccountSettings,
   loadAccountSettings,
   resolveAccountModelsMode,
+  selectAccountModels,
 } from "./account-settings.js";
 import type { CodexModelCacheKey } from "./codex-model-cache.js";
 import type { CodexModelCatalog } from "./codex-model-catalog.js";
@@ -25,9 +26,8 @@ import type { OAuthModelDiscoveryCache } from "./model-discovery-cache.js";
 // never disagree — and an operator's curation edit reflects everywhere on the next
 // read WITHOUT a restart.
 //
-// Effective set per non-Codex account = the operator's `enabledModels` when set,
-// else the provider fallback. Codex is different: its account-scoped catalog is
-// the entitlement boundary, and manual mode may only narrow that catalog.
+// Effective set per account = the operator's `enabledModels` in manual mode,
+// including custom ids not yet reported upstream; auto mode follows discovery.
 //
 // `routableProviderIds` gates which providers route (the keys of server.ts's
 // ROUTABLE_OAUTH) — a provider with no wired executor never appears, so the catalog
@@ -55,12 +55,13 @@ export function effectiveAccountModels(
   settings: Pick<AccountSettings, "modelsMode" | "enabledModels" | "discoveredModels">,
   providerId: string,
 ): string[] {
+  if (resolveAccountModelsMode(providerId, settings) === "manual") {
+    return settings.enabledModels ?? [];
+  }
   if (providerId === "openai-codex") return [];
-  return resolveAccountModelsMode(providerId, settings) === "manual"
-    ? (settings.enabledModels ?? [])
-    : settings.discoveredModels && settings.discoveredModels.length > 0
-      ? [...settings.discoveredModels]
-      : [...(ACCOUNT_MODEL_FALLBACKS[providerId] ?? [])];
+  return settings.discoveredModels && settings.discoveredModels.length > 0
+    ? [...settings.discoveredModels]
+    : [...(ACCOUNT_MODEL_FALLBACKS[providerId] ?? [])];
 }
 
 // Every routable `${providerId}/${model}` alias across all bound accounts, deduped
@@ -172,12 +173,7 @@ export async function effectiveOAuthModelOptions(
     if (row.providerId === "openai-codex") {
       const entitled =
         (await automaticCodexModels(oauthCtx, row.providerId, row.account, options)) ?? [];
-      if (resolveAccountModelsMode(row.providerId, accountSettings) === "manual") {
-        const allowed = new Set(accountSettings.enabledModels ?? []);
-        models = entitled.filter((model) => allowed.has(model));
-      } else {
-        models = entitled;
-      }
+      models = selectAccountModels(row.providerId, accountSettings, entitled);
     } else {
       const modelsMode = resolveAccountModelsMode(row.providerId, accountSettings);
       const discovered =
