@@ -1026,7 +1026,10 @@ describe('providers page', () => {
     const dialog = screen.getByRole('dialog', { name: /test connection/i });
     expect(within(dialog).getByText('acct-claude')).toBeInTheDocument();
     // The picker offers the row's effective models; the first is selected by default.
-    expect(within(dialog).getByRole('option', { name: 'claude-opus-4-6' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('combobox', { name: /^model$/i })).toHaveValue(
+      'claude-opus-4-6',
+    );
+    expect(dialog.querySelector('option[value="claude-opus-4-6"]')).not.toBeNull();
     expect(within(dialog).getByRole('button', { name: /run test/i })).toBeInTheDocument();
   });
 
@@ -1063,19 +1066,11 @@ describe('providers page', () => {
       within(screen.getByTestId('provider-account-row')).getByRole('button', { name: /^test$/i }),
     );
     const dialog = screen.getByRole('dialog', { name: /test connection/i });
-    expect(within(dialog).getByRole('option', { name: 'grok-4.5' })).toBeInTheDocument();
-    expect(
-      within(dialog).queryByRole('option', { name: 'grok-imagine-image' }),
-    ).not.toBeInTheDocument();
-    expect(
-      within(dialog).queryByRole('option', { name: 'grok-imagine-image-quality' }),
-    ).not.toBeInTheDocument();
-    expect(
-      within(dialog).queryByRole('option', { name: 'grok-imagine-video-1.5-preview' }),
-    ).not.toBeInTheDocument();
-    expect(
-      within(dialog).queryByRole('option', { name: 'grok-imagine-video' }),
-    ).not.toBeInTheDocument();
+    expect(dialog.querySelector('option[value="grok-4.5"]')).not.toBeNull();
+    expect(dialog.querySelector('option[value="grok-imagine-image"]')).toBeNull();
+    expect(dialog.querySelector('option[value="grok-imagine-image-quality"]')).toBeNull();
+    expect(dialog.querySelector('option[value="grok-imagine-video-1.5-preview"]')).toBeNull();
+    expect(dialog.querySelector('option[value="grok-imagine-video"]')).toBeNull();
   });
 
   it('streams the test reply through the gateway and reports success', async () => {
@@ -1108,6 +1103,30 @@ describe('providers page', () => {
     await fireEvent.click(within(dialog).getByRole('button', { name: /close/i }));
 
     expect(screen.queryByRole('dialog', { name: /test connection/i })).not.toBeInTheDocument();
+  });
+
+  it('tests a custom model id without adding it to the account allowlist', async () => {
+    streamAccountTest.mockImplementation(async function* () {
+      yield { type: 'done', durationMs: 100 };
+    });
+    renderPage();
+    await fireEvent.click(
+      within(screen.getByTestId('provider-account-row')).getByRole('button', { name: /^test$/i }),
+    );
+    const dialog = screen.getByRole('dialog', { name: /test connection/i });
+
+    await fireEvent.input(within(dialog).getByRole('combobox', { name: /^model$/i }), {
+      target: { value: 'gpt-6-astra' },
+    });
+    await fireEvent.click(within(dialog).getByRole('button', { name: /run test/i }));
+
+    await waitFor(() =>
+      expect(streamAccountTest).toHaveBeenCalledWith(
+        'anthropic',
+        { account: 'acct-claude', model: 'gpt-6-astra', prompt: undefined },
+        expect.any(AbortSignal),
+      ),
+    );
   });
 
   it('confirms and disconnects a stored account credential', async () => {

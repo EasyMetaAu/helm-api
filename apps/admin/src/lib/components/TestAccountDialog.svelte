@@ -39,7 +39,7 @@
   let controller: AbortController | null = null;
 
   const running = $derived(status === 'running');
-  const canRun = $derived(model.length > 0 && !running);
+  const canRun = $derived(model.trim().length > 0 && !running);
 
   async function run(): Promise<void> {
     if (!canRun) return;
@@ -53,7 +53,7 @@
     try {
       for await (const ev of streamAccountTest(
         provider,
-        { account, model, prompt: prompt.trim() || undefined },
+        { account, model: model.trim(), prompt: prompt.trim() || undefined },
         controller.signal,
       )) {
         if (ev.type === 'content') {
@@ -109,18 +109,29 @@
       </div>
     </div>
 
-    {#if models.length === 0}
-      <p class="alert-warn">{$t('No routable models for this account.')}</p>
-    {:else}
-      <label class="flex flex-col gap-1 text-sm">
-        <span class="field-label">{$t('Model')}</span>
-        <select class="input" bind:value={model} disabled={running}>
-          {#each models as m (m)}
-            <option value={m}>{m}</option>
-          {/each}
-        </select>
-      </label>
-    {/if}
+    <div class="flex flex-col gap-1 text-sm">
+      <label class="field-label" for="account-test-model">{$t('Model')}</label>
+      <input
+        id="account-test-model"
+        type="text"
+        class="input font-mono"
+        list="account-test-models"
+        aria-describedby="account-test-model-help"
+        placeholder={$t('Enter a model ID')}
+        bind:value={model}
+        disabled={running}
+        spellcheck="false"
+        autocomplete="off"
+      />
+      <span id="account-test-model-help" class="field-help">
+        {$t('Choose an account model or enter a custom model ID for this test only.')}
+      </span>
+      <datalist id="account-test-models">
+        {#each models as m (m)}
+          <option value={m}></option>
+        {/each}
+      </datalist>
+    </div>
 
     <label class="flex flex-col gap-1 text-sm">
       <span class="field-label">{$t('Message')}</span>
