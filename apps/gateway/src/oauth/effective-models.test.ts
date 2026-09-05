@@ -76,13 +76,8 @@ describe("effectiveAccountModels", () => {
     ).toEqual(["claude-future-9", "claude-opus-4-6"]);
   });
 
-  it("falls back to the provider's curated set when enabledModels is unset", () => {
-    expect(effectiveAccountModels({}, "anthropic")).toEqual([
-      "claude-opus-5",
-      "claude-fable-5-1",
-      "claude-sonnet-5",
-      "claude-haiku-4-5",
-    ]);
+  it("returns no models when auto discovery has no official snapshot", () => {
+    expect(effectiveAccountModels({}, "anthropic")).toEqual([]);
   });
 
   it("uses the durable auto-discovery snapshot after the process cache is lost", () => {
@@ -94,8 +89,8 @@ describe("effectiveAccountModels", () => {
     ).toEqual(["claude-fable-5", "claude-sonnet-4-7"]);
   });
 
-  it("offers the verified xAI catalog when a bound account stays in auto mode", () => {
-    expect(effectiveAccountModels({}, "xai")).toEqual(["grok-4.5", "grok-composer-2.5-fast"]);
+  it("returns no xAI models when auto discovery has no official snapshot", () => {
+    expect(effectiveAccountModels({}, "xai")).toEqual([]);
   });
 
   it("returns [] for an unknown provider with no curated set + no enabled list", () => {
@@ -156,16 +151,11 @@ describe("effectiveOAuthAliases", () => {
     ]);
   });
 
-  it("uses the curated fallback for a bound-but-never-curated account", async () => {
+  it("does not invent models for a bound account without an official snapshot", async () => {
     const { tokens, config } = makeStores();
     await bind(tokens, "anthropic", "default");
     const aliases = await effectiveOAuthAliases({ store: tokens, encKey: KEY }, config, ROUTABLE);
-    expect(aliases).toEqual([
-      "anthropic/claude-fable-5-1",
-      "anthropic/claude-haiku-4-5",
-      "anthropic/claude-opus-5",
-      "anthropic/claude-sonnet-5",
-    ]);
+    expect(aliases).toEqual([]);
   });
 
   it("excludes providers NOT in the routable set (e.g. before its executor is wired)", async () => {
@@ -225,7 +215,6 @@ describe("effectiveOAuthModelOptions", () => {
     ).resolves.toEqual([
       { alias: "openai-codex/gpt-5.6", accounts: ["default"] },
       { alias: "openai-codex/gpt-5.6-sol", accounts: ["default"] },
-      { alias: "openai-codex/gpt-image-2", accounts: ["default"] },
     ]);
   });
 
@@ -441,11 +430,10 @@ describe("effectiveOAuthModelOptions", () => {
       { alias: "openai-codex/codex-auto-review", accounts: ["default"] },
       { alias: "openai-codex/gpt-5.6", accounts: ["default"] },
       { alias: "openai-codex/gpt-5.6-sol", accounts: ["default"] },
-      { alias: "openai-codex/gpt-image-2", accounts: ["default"] },
     ]);
   });
 
-  it("keeps the image alias when an auto-mode Codex account has no catalog snapshot", async () => {
+  it("returns no models when an auto-mode Codex account has no official catalog snapshot", async () => {
     const { tokens, config } = makeStores();
     await bind(tokens, "openai-codex", "default", { accountId: "acc-default" });
 
@@ -453,7 +441,7 @@ describe("effectiveOAuthModelOptions", () => {
       effectiveOAuthModelOptions({ store: tokens, encKey: KEY }, config, ROUTABLE, {
         codexCatalog: codexCatalog({}),
       }),
-    ).resolves.toEqual([{ alias: "openai-codex/gpt-image-2", accounts: ["default"] }]);
+    ).resolves.toEqual([]);
   });
 
   it("keeps manual Codex ids routable without a catalog snapshot", async () => {
