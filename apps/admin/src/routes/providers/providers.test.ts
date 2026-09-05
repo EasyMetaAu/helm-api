@@ -176,6 +176,23 @@ describe('providers page', () => {
     });
   });
 
+  it('accepts refreshed route data without entering a reactive update loop', async () => {
+    const view = renderPage();
+
+    await view.rerender({
+      data: {
+        configured: true,
+        selectionStrategy: 'balanced',
+        providers: [provider()],
+        usage: [{ ...usage[0], requests: 43 }],
+        quota,
+        refresh: idleRefresh,
+      },
+    });
+
+    expect(screen.getByText('43 req')).toBeInTheDocument();
+  });
+
   it('labels the Grok subscription provider as experimental', () => {
     renderPage({
       providers: [
@@ -1087,6 +1104,10 @@ describe('providers page', () => {
     );
     expect(within(dialog).getByText('Success')).toBeInTheDocument();
     expect(within(dialog).getByText('Done in 1.2s')).toBeInTheDocument();
+
+    await fireEvent.click(within(dialog).getByRole('button', { name: /close/i }));
+
+    expect(screen.queryByRole('dialog', { name: /test connection/i })).not.toBeInTheDocument();
   });
 
   it('confirms and disconnects a stored account credential', async () => {
