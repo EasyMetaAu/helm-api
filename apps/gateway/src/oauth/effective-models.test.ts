@@ -78,7 +78,8 @@ describe("effectiveAccountModels", () => {
 
   it("falls back to the provider's curated set when enabledModels is unset", () => {
     expect(effectiveAccountModels({}, "anthropic")).toEqual([
-      "claude-opus-4-6",
+      "claude-opus-5",
+      "claude-fable-5-1",
       "claude-sonnet-5",
       "claude-haiku-4-5",
     ]);
