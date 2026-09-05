@@ -676,6 +676,18 @@ anthropic/claude-sonnet-5:
   inferenceGeoMultipliers:
     global: 1.0
     us: 1.1
+# Official Claude Fable 5.1 pricing (platform.claude.com/docs/en/about-claude/pricing,
+# checked 2026-09-05): $10/M input, $50/M output, $0.25/M cache read, $12.50/M
+# 5-minute cache write and $20/M 1-hour cache write.
+anthropic/claude-fable-5-1:
+  inputPerMTokUsd: 10.0
+  outputPerMTokUsd: 50.0
+  cacheReadPerMTokUsd: 0.25
+  cacheWritePerMTokUsd: 12.5
+  cacheWrite1hPerMTokUsd: 20.0
+  inferenceGeoMultipliers:
+    global: 1.0
+    us: 1.1
 anthropic/claude-fable-5:
   inputPerMTokUsd: 10.0
   outputPerMTokUsd: 50.0

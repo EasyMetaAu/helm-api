@@ -606,6 +606,25 @@ anthropic/claude-sonnet-5:
   modalities: [document]
   maxContextTokens: 1000000
   maxOutputTokens: 128000
+# Official Claude Fable 5.1 (platform.claude.com/docs/en/models/fable-5-1/overview,
+# checked 2026-09-05): adaptive thinking always on, default high; 1M context,
+# 128K output, text+image input, tools/computer-use/PDF and structured output.
+anthropic/claude-fable-5-1:
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  reasoningEffort:
+    anthropicOutputConfig:
+      supported: true
+      levels: [low, medium, high, xhigh, max]
+      map:
+        minimal: low
+    anthropicThinking:
+      supported: false
+  modalities: [document]
+  maxContextTokens: 1000000
+  maxOutputTokens: 128000
 anthropic/claude-fable-5:
   supportsTools: true
   jsonOutput: schema
