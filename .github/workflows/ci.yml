@@ -228,7 +228,7 @@ jobs:
   # separate default-branch-controlled job never checks out or executes PR code;
   # it is the only job allowed to publish stable required checks on the PR head.
   report_pr_checks:
-    if: always() && (github.event_name == 'pull_request_target' || github.event_name == 'pull_request')
+    if: always() && github.event_name == 'pull_request_target' || (always() && github.event_name == 'pull_request')
     needs: [verify, store, e2e, docker]
     runs-on: ubuntu-24.04
     permissions:
