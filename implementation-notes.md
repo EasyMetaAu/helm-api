@@ -10,7 +10,7 @@
 ## 2026-09-06 · 对齐 Codex Lite 身份与流式控制事件（Provider / Responses，docs/04/05/07，原则 3/5/8）
 
 - 对照 Codex `008bbd5884122dc95aaece19ecfe0fc6a59dcf36`：Lite 完整请求和增量续接保留带前缀的输入项 ID；Helm 旧 `store:false` 清理会删除它们。现用已有 Lite 识别逻辑排除旧清理，保留原生历史；普通 Responses 的兼容清理不变。
-- `response.metadata`、`codex.response.metadata`、`codex.rate_limits` 和 `responsesapi.websocket_timing` 属于控制信息。它们不再提前提交执行尝试；正常响应逐字节保留，输出前明确过载沿既有有界策略恢复。真实输出、工具调用、加密 reasoning、未知事件及结果不明断连的禁止重放边界不变。
+- `response.metadata`、`codex.response.metadata`、`codex.rate_limits`、`responsesapi.websocket_timing` 和 `keepalive` 属于控制信息。它们不再提前提交执行尝试；正常响应逐字节保留，输出前明确过载沿既有有界策略恢复。真实输出、工具调用、加密 reasoning、未知事件及结果不明断连的禁止重放边界不变。v0.29.10 部署后重放第二条原请求时，生产流明确出现 `keepalive` 后跟过载，补齐了先前缺失的线上事件证据。
 - 两条生产失败请求确实分别丢失 157/239 个 ID；控制事件导致错误直接下传已由本地网关与账号池回归用例复现，但生产未保留这些失败的完整 SSE，因此不能把两项差异直接认定为全部线上故障的唯一原因。补丁尚未部署，真实会话恢复仍须单独验证。
 
 ## 2026-09-06 · Remote 配置同步后的目录与 e2e 一致性（Config sync，docs/04/05，原则 2/3/6）

@@ -36,6 +36,7 @@ describe("guardPreOutputFailure — openai_responses", () => {
     { type: "codex.response.metadata", metadata: {} },
     { type: "responsesapi.websocket_timing", duration_ms: 1 },
     { type: "codex.rate_limits", rate_limits: { allowed: true, limit_reached: false } },
+    { type: "keepalive" },
   ])("keeps Codex control event $type before output eligible for recovery", async (event) => {
     const forwarded: string[] = [];
     const frames = [
