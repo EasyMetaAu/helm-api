@@ -277,8 +277,12 @@ describe("listOpenAICodexModels", () => {
     expect(abortedByCaller).toBe(true);
   });
   it("uses the current Codex whole client version and permits an environment override", () => {
-    expect(DEFAULT_OPENAI_CODEX_CLIENT_VERSION).toBe("0.145.0");
-    expect(resolveOpenAICodexClientVersion({})).toBe("0.145.0");
+    // The default is generated from the latest codex rust-vX.Y.Z release tag by
+    // scripts/sync-codex-models.ts; lock the shape and the floor gpt-6-astra needs.
+    expect(DEFAULT_OPENAI_CODEX_CLIENT_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+    const [major = 0, minor = 0] = DEFAULT_OPENAI_CODEX_CLIENT_VERSION.split(".").map(Number);
+    expect(major > 0 || minor >= 153).toBe(true);
+    expect(resolveOpenAICodexClientVersion({})).toBe(DEFAULT_OPENAI_CODEX_CLIENT_VERSION);
     expect(
       resolveOpenAICodexClientVersion({
         HELM_OPENAI_CODEX_CLIENT_VERSION: "0.146.2",
