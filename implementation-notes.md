@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-09-06 · 记录 Responses 流内上游错误事件（docs/07，原则 8）
+
+- Decision error detail now records `upstream_event` (`error` or `response.failed`) for in-band SSE failures. HTTP status remains nullable because the upstream may return the error after opening an HTTP 200 stream.
+- This is additive and preserves the raw provider payload; it makes Codex overload failures distinguishable from Helm-generated admission errors in Admin telemetry.
+
+
 ## 2026-09-06 · Responses 空准备事件保留安全恢复窗口（Provider execution / Responses，docs/04/05，原则 3/5/8）
 
 - 空 message/reasoning item、空文本/思考摘要 part 和空 delta 继续缓冲；只有真实内容才提交流，使随后明确的过载错误可以进入既有 OAuth sibling retry 与模型 fallback。正常响应仍逐字节回放原始事件。

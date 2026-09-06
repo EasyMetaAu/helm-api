@@ -87,6 +87,9 @@ export const AttemptErrorDetailSchema = z.object({
   provider_headers: z.record(z.string(), z.string()).nullable().optional(),
   cause: z.unknown().nullable().optional(),
   stack: z.string().nullable().optional(),
+  // For in-band SSE failures, identify the provider event that carried the error.
+  // HTTP status can be null when the response stream was already open.
+  upstream_event: z.string().nullable().optional(),
 });
 
 export const ProviderAttemptSchema = z.object({

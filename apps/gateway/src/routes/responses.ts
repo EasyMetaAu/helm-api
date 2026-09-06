@@ -467,7 +467,7 @@ function responsesFrameErrorDetail(eventName: string, data: string): AttemptErro
   if (eventName !== "error" && eventName !== "response.failed") return null;
   const classifier = preOutputClassifierFor("openai_responses");
   if (classifier === null) return null;
-  return errorDetailOf(streamErrorFromData(classifier, data));
+  return { ...errorDetailOf(streamErrorFromData(classifier, data)), upstream_event: eventName };
 }
 
 export function settleResponsesStreamOutcome(args: {
