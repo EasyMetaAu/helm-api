@@ -11,13 +11,14 @@
 #                               # uncovered segment reaches this many tokens
 #   idle_flush_s: 3600          # fold a quiet thread's whole uncovered history
 #                               # after this many seconds without a new message
-#   idle_flush_max_age_s: 86400 # optional: skip old started backfills after this
-#                               # many seconds; null-frontier legacy rows still
-#                               # drain once (unset = process all history)
 #   force_context_ratio: 0.8    # force compaction once the active footprint
 #                               # reaches this fraction of the model's window
 #   min_recent_messages: 4      # keep floor: at least this many recent messages…
 #   min_keep_ratio: 0.25        # …and this fraction of the segment stay raw
+
+compaction:
+  idle_flush_s: 1800
+  idle_flush_max_age_s: 7200
 
 # Optional LLM-backed memory formation/extraction. Disabled keeps the
 # deterministic local summarizer/merger/fact extractor. When enabled, the worker
@@ -41,16 +42,27 @@
 # Memory forgetting layer (docs/12). enabled:false = byte-identical to pre-docs/12
 # behaviour; flip to true to turn on decay/reinforcement/facts. All knobs are
 # fail-closed validated (snake_case, unknown keys refuse startup).
+
+# LLM-backed memory formation/extraction. Enabled for cross-session fact extraction.
+llm:
+  enabled: true
+  model: economy
+  timeout_ms: 30000
+  temperature: 0
+  max_tokens:
+    observation: 800
+    reflection: 1200
+    facts: 1000
+
 forgetting:
   enabled: true
-  # docs/14 — hybrid fact retrieval for the memory_recall MCP tool: FTS5 (trigram,
-  # CJK-capable) + forgetting-score fused via RRF. ON by default — keyword + recency
-  # recall, NO embedding required. Set memory.llm.embedding_model to additionally
-  # light up the cross-lingual vector leg. enabled:false reverts to substring LIKE.
+  # docs/14 — hybrid fact retrieval engine for the memory_recall MCP tool: FTS5
+  # (trigram, CJK-capable) + forgetting-score fused via RRF. No embedding_model set
+  # yet ⇒ keyword + recency recall only (cross-lingual vector leg stays off).
   facts_retrieval:
     enabled: true
   score:
-    half_life_s: 86400
+    half_life_s: 2592000
     importance_floor: 0.1
     importance_ceil: 1.0
     access_weight: 0.15
@@ -64,6 +76,7 @@ forgetting:
     trigger_tokens: 1024
     max_facts_per_subject: 8
     enable_llm_supersede: false
+    eager_facts: true
   retention:
     archived_days: 30
     facts_expired_days: 90
@@ -71,3 +84,12 @@ forgetting:
     max_iterations: 200
     max_wallclock_s: 900
     max_consecutive_errors: 5
+
+# Memory MCP server (docs/13): POST /mcp exposes fact/reflection CRUD to external
+# agents, authed by the SAME API key as /v1 (scoped to the key's account + default
+# project). Enabled per operator request.
+mcp:
+  enabled: true
+  oauth:
+    enabled: true
+    issuer: https://helm.easymeta.au

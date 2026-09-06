@@ -39,6 +39,7 @@ export default defineConfig({
           testTimeout: 60_000,
           hookTimeout: 60_000,
           environment: "node",
+          setupFiles: ["./vitest.setup.ts"],
           // Native addons (better-sqlite3) must be loaded by Node's require, not
           // transformed by Vite — otherwise the .node bindings cannot be located.
           server: {

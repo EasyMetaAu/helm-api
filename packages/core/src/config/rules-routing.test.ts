@@ -101,8 +101,8 @@ describe("shipped config rules drive routing", () => {
     expect(config.lanes?.coding?.fallback).toEqual(["premium", "balanced"]);
     expect(config.lanes?.json?.constraints.require_json).toBe(true);
     expect(config.lanes?.vision).toMatchObject({
-      primary: "openai-codex/gpt-5.6-terra",
-      fallback: ["grok", "anthropic/claude-sonnet-5", "anthropic/claude-opus-4-8"],
+      primary: "gpt-5.6-terra",
+      fallback: ["grok", "claude-sonnet", "claude-opus"],
     });
     expect(config.lanes?.tool_use).toBeDefined();
   });
@@ -196,9 +196,9 @@ describe("shipped config rules drive routing", () => {
       "openai-codex/gpt-5.6-sol",
       "xai/grok-4.6",
       "anthropic/claude-opus-4-8",
-      "openai-codex/gpt-5.6-terra",
-      "anthropic/claude-sonnet-5",
-      "deepseek/deepseek-v4-pro",
+      "anthropic/claude-opus-5",
+      "anthropic/claude-opus-4-7",
+      "anthropic/claude-opus-4-6",
     ]);
     expect(new Set(chain).size).toBe(chain.length);
   });

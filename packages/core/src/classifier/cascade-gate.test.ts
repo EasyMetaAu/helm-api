@@ -225,9 +225,9 @@ const CASES: Array<{ name: string; request: InternalRequest; lane: string }> = [
     lane: "json",
   },
   {
-    name: "vision",
+    name: "vision (generic simple policy)",
     request: req("describe this screenshot", { attachments: [{ type: "image" }] }),
-    lane: "vision",
+    lane: "economy",
   },
 ];
 

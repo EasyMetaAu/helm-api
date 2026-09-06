@@ -455,17 +455,8 @@ describe("loadRuntimeCatalog", () => {
     >;
     const catalog = loadRuntimeCatalog({ configDir: "config" });
 
-    // Subscription-only and dynamic routes are explicit null rate cards; every
-    // manually configured capability therefore has an intentional price decision.
-    expect(Object.keys(capabilities).filter((alias) => !(alias in pricing))).toEqual([]);
-    // Price-only keys are dynamic Codex auto-review plus the bare Layer-2 eval
-    // model id (which bypasses the provider registry).
-    expect(
-      Object.keys(pricing)
-        .filter((alias) => !(alias in capabilities))
-        .sort(),
-    ).toEqual(["deepseek-v4-flash", "openai-codex/codex-auto-review"]);
-
+    // Subscription-only media aliases may intentionally omit a pricing row when
+    // the remote operator has no trustworthy rate card for that alias.
     const intentionallyUnpriced = new Set([
       "openai-codex/gpt-image-2",
       "xai/grok-imagine-image",
@@ -473,9 +464,22 @@ describe("loadRuntimeCatalog", () => {
       "xai/grok-imagine-video-1.5-preview",
       "xai/grok-imagine-video",
       "xai/grok-composer-2.5-fast",
+      "zenmux/gpt-image-2",
       "zenmux/auto",
       "openrouter/auto",
     ]);
+    expect(
+      Object.keys(capabilities).filter(
+        (alias) => !(alias in pricing) && !intentionallyUnpriced.has(alias),
+      ),
+    ).toEqual([]);
+    // Price-only keys are dynamic Codex auto-review plus the bare Layer-2 eval
+    // model id (which bypasses the provider registry).
+    expect(
+      Object.keys(pricing)
+        .filter((alias) => !(alias in capabilities))
+        .sort(),
+    ).toEqual(["deepseek-v4-flash", "gpt-image-2", "openai-codex/codex-auto-review"]);
     const unexpectedUnpriced = Object.keys(capabilities).filter((alias) => {
       const rates = catalog.get(alias)?.pricing;
       return (

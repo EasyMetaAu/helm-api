@@ -13,12 +13,10 @@
 # routes EVERYTHING through classification (auto) — the model field is ignored, never
 # a 400. A key's `allowed_lanes` whitelist still clamps the rewritten lane.
 #
-# MATCHING: routeRequest first honors an exact configured lane or deployment-known
-# model. Only then does this compatibility map apply: an exact map key wins;
-# otherwise the matching `*`-glob with the most literal characters wins (so
-# `claude-opus-*` beats `claude-*` regardless of order). `*` = any run of chars
-# (incl. empty) — it absorbs the date suffix Claude Code appends
-# (`claude-opus-4-8-20260115`). Case-sensitive.
+# MATCHING: an exact key wins; otherwise the matching `*`-glob with the most
+# literal characters wins (so `claude-opus-*` beats `claude-*` regardless of
+# order). `*` = any run of chars (incl. empty) — it absorbs the date suffix Claude
+# Code appends (`claude-opus-4-8-20260115`). Case-sensitive.
 #
 # FAIL-CLOSED (principle 2): every target must be a configured lane or "auto", or
 # the gateway refuses to boot. This file is OPTIONAL — delete it for no rewrite.
@@ -42,18 +40,17 @@
 "claude-*": balanced # catch-all for any other / future Claude id
 
 # ── OpenAI-compatible clients (Codex, Cursor, …) ─────────────────────────────
-# Bare GPT ids → lanes (config/lanes.yaml). Exact bare names that are configured
-# lanes remain authoritative; the `-*` globs handle dated/suffixed vendor ids.
-# GPT-5.6's exact lane leads with Sol, while `openai.gpt-5.6` maps to the Sol-specific
-# compatibility lane. The cheap `gpt-5.4-mini` needs its OWN mapping
+# Bare GPT ids → lanes (config/lanes.yaml). Each named family maps to its DEDICATED
+# vendor-family lane so the request LEADS with that family's real model; the `-*`
+# globs absorb any dated/suffixed id. The cheap `gpt-5.4-mini` needs its OWN mapping
 # (it is more literal than `gpt-5*`, so longest-literal-wins routes it to the cheap
 # lane, NOT the expensive `premium` catch-all). Comment these out if you don't front
 # any GPT clients.
-"gpt-6-astra": premium
-"gpt-6-astra-*": premium
-"openai.gpt-6-astra": premium
-"openai.gpt-6-astra-*": premium
-"gpt-5.6": gpt-5.6
+"gpt-6-astra": gpt-6-astra
+"gpt-6-astra-*": gpt-6-astra
+"openai.gpt-6-astra": gpt-6-astra
+"openai.gpt-6-astra-*": gpt-6-astra
+"gpt-5.6": gpt-5.6-sol
 "gpt-5.6-sol": gpt-5.6-sol
 "gpt-5.6-sol-*": gpt-5.6-sol
 "gpt-5.6-terra": gpt-5.6-terra
@@ -87,10 +84,6 @@
 # `gemini-*` catch-all (7) — declaration order is irrelevant. The middle `*` absorbs the
 # version, so a future 3.2/4 flash-lite needs no edit; the trailing `*` absorbs any
 # `-preview` / `-latest` / date suffix (gemini-3.1-flash-lite, gemini-3.5-flash, …).
-# NOTE: image-generation ids (`gemini-*-image`) are NOT mapped here — image gen is
-# served ONLY by the dedicated POST /v1/images/generations endpoint (it bypasses the
-# chat lane machinery + allow_custom_model). A `gemini-*-image` id arriving on the
-# CHAT/generateContent surface falls through to the catch-all (text) — by design.
 "gemini-*flash-lite*": economy
 "gemini-*flash*": gemini-flash
 "gemini-*pro*": gemini-pro

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createResponseWorkAdmission } from "../runtime/response-work-admission.js";
 import {
   anthropicToOpenAIResponse,
   createAnthropicClient,
@@ -814,6 +815,11 @@ describe("openaiToAnthropicRequest", () => {
     const client = createAnthropicClient({
       config: { baseUrl: "https://api.anthropic.com", apiKey: "sk-static" },
       fetch: fetchMock as unknown as typeof fetch,
+      responseWorkAdmission: createResponseWorkAdmission({
+        capacityBytes: 1024 * 1024,
+        jsonAmplification: 2,
+        minChargeBytes: 1024,
+      }),
     });
     return client
       .chatCompletion({
@@ -1033,6 +1039,16 @@ function sseResponse(events: object[]): Response {
   return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
 }
 
+const testResponseWorkAdmission = createResponseWorkAdmission({
+  capacityBytes: 1024 * 1024,
+  jsonAmplification: 2,
+  minChargeBytes: 1024,
+});
+
+function translateForTest(res: Response, idleMs = 0) {
+  return translateAnthropicSSE(res, "m", idleMs, undefined, testResponseWorkAdmission);
+}
+
 describe("translateAnthropicSSE", () => {
   it("maps message_start/content_block_delta/message_delta/message_stop to OpenAI chunks + [DONE]", async () => {
     const res = sseResponse([
@@ -1044,7 +1060,7 @@ describe("translateAnthropicSSE", () => {
       { type: "message_stop" },
     ]);
     const chunks: string[] = [];
-    for await (const c of translateAnthropicSSE(res, "m")) chunks.push(c);
+    for await (const c of translateForTest(res)) chunks.push(c);
     const joined = chunks.join("");
     expect(joined).toContain('"role":"assistant"');
     expect(joined).toContain('"content":"Hel"');
@@ -1083,7 +1099,7 @@ describe("translateAnthropicSSE", () => {
       { type: "message_stop" },
     ]);
     const chunks: string[] = [];
-    for await (const c of translateAnthropicSSE(res, "m")) chunks.push(c);
+    for await (const c of translateForTest(res)) chunks.push(c);
     // The usage chunk is the last data frame before [DONE].
     const dataFrames = chunks
       .join("")
@@ -1144,7 +1160,7 @@ describe("translateAnthropicSSE", () => {
       { type: "message_stop" },
     ]);
     const chunks: string[] = [];
-    for await (const c of translateAnthropicSSE(res, "m")) chunks.push(c);
+    for await (const c of translateForTest(res)) chunks.push(c);
     const joined = chunks.join("");
     expect(joined).toContain('"id":"tu1"');
     expect(joined).toContain('"name":"get_weather"');
@@ -1176,7 +1192,7 @@ describe("translateAnthropicSSE", () => {
       { type: "message_stop" },
     ]);
     const chunks: string[] = [];
-    for await (const c of translateAnthropicSSE(res, "m")) chunks.push(c);
+    for await (const c of translateForTest(res)) chunks.push(c);
     const joined = chunks.join("");
     // Unmapped "pause_turn" -> default "stop".
     expect(joined).toContain('"finish_reason":"stop"');
@@ -1206,7 +1222,7 @@ describe("translateAnthropicSSE", () => {
       { type: "message_stop" },
     ]);
     const chunks: string[] = [];
-    for await (const c of translateAnthropicSSE(res, "m")) chunks.push(c);
+    for await (const c of translateForTest(res)) chunks.push(c);
     const joined = chunks.join("");
     expect(joined).toContain('"content":"yo"');
     expect(joined).not.toContain("tool_calls");
@@ -1231,7 +1247,7 @@ describe("translateAnthropicSSE", () => {
     });
     const res = new Response(stream, { status: 200 });
     const chunks: string[] = [];
-    for await (const c of translateAnthropicSSE(res, "m")) chunks.push(c);
+    for await (const c of translateForTest(res)) chunks.push(c);
     const joined = chunks.join("");
     expect(joined).toContain('"content":"ok"');
     expect(joined.trimEnd().endsWith("data: [DONE]")).toBe(true);
@@ -1240,7 +1256,7 @@ describe("translateAnthropicSSE", () => {
   it("returns immediately on an empty body (no events, no [DONE])", async () => {
     const res = new Response(null, { status: 200 });
     const chunks: string[] = [];
-    for await (const c of translateAnthropicSSE(res, "m")) chunks.push(c);
+    for await (const c of translateForTest(res)) chunks.push(c);
     expect(chunks).toEqual([]);
   });
 
@@ -1253,7 +1269,7 @@ describe("translateAnthropicSSE", () => {
     });
     const res = new Response(stream, { status: 200 });
     await expect(async () => {
-      for await (const _ of translateAnthropicSSE(res, "m")) {
+      for await (const _ of translateForTest(res)) {
         // drain
       }
     }).rejects.toBe(boom);
@@ -1278,7 +1294,7 @@ describe("translateAnthropicSSE", () => {
       const res = new Response(stream, { status: 200 });
       const chunks: string[] = [];
       const run = (async () => {
-        for await (const c of translateAnthropicSSE(res, "m", 500)) chunks.push(c);
+        for await (const c of translateForTest(res, 500)) chunks.push(c);
       })();
       // A regression (no early return) would pend on the next read; advancing past
       // the deadline would then reject. With the fix, run already resolved.
@@ -1309,7 +1325,7 @@ describe("translateAnthropicSSE", () => {
       });
       const res = new Response(stream, { status: 200 });
       const run = (async () => {
-        for await (const _ of translateAnthropicSSE(res, "m", 500)) {
+        for await (const _ of translateForTest(res, 500)) {
           // drain
         }
       })();
@@ -3984,7 +4000,7 @@ describe("translateAnthropicSSE — content_block_start tool_use with non-string
       { type: "message_stop" },
     ]);
     const chunks: string[] = [];
-    for await (const c of translateAnthropicSSE(res, "m")) chunks.push(c);
+    for await (const c of translateForTest(res)) chunks.push(c);
     // The name field should be emitted as 99 (number), not coerced
     const joined = chunks.join("");
     expect(joined).toContain('"name":99');

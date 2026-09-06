@@ -74,25 +74,25 @@ describe("checked-in config samples", () => {
     expect(JSON.stringify(lanes)).not.toContain("zenmux-anthropic/claude-opus-4.8");
     expect(JSON.stringify(lanes)).not.toContain("zenmux/gpt-5.5");
     expect(JSON.stringify(lanes)).not.toContain("openai/gpt-5");
-    expect(lanes.economy?.primary).toBe("openai-codex/gpt-5.6-luna");
+    expect(lanes.economy?.primary).toBe("gpt-5.6-luna");
     expect(lanes.economy?.fallback.slice(0, 5)).toEqual([
-      "openai-codex/gpt-5.4-mini",
-      "anthropic/claude-haiku-4-5-20251001",
+      "claude-haiku",
       "grok",
-      "deepseek/deepseek-v4-flash",
       "openrouter/deepseek-v4-flash",
-    ]);
-    expect(lanes.balanced?.primary).toBe("openai-codex/gpt-5.6-terra");
-    expect(lanes.balanced?.fallback.slice(0, 5)).toEqual([
-      "anthropic/claude-sonnet-5",
-      "grok",
-      "deepseek/deepseek-v4-pro",
-      "openrouter/deepseek-v4-pro",
+      "openrouter/auto",
       "zenmux/auto",
     ]);
+    expect(lanes.balanced?.primary).toBe("gpt-5.6-terra");
+    expect(lanes.balanced?.fallback.slice(0, 5)).toEqual([
+      "claude-sonnet",
+      "grok",
+      "openrouter/deepseek-v4-pro",
+      "zenmux/auto",
+      "openrouter/auto",
+    ]);
     expect(lanes.balanced?.fallback).not.toContain("anthropic/claude-sonnet-4-6");
-    expect(lanes.premium?.primary).toBe("openai-codex/gpt-5.6-sol");
-    expect(lanes.premium?.fallback).toEqual(["grok", "anthropic/claude-opus-4-8", "balanced"]);
+    expect(lanes.premium?.primary).toBe("gpt-5.6-sol");
+    expect(lanes.premium?.fallback).toEqual(["grok", "claude-opus", "balanced"]);
     expect(lanes.grok).toMatchObject({ primary: "xai/grok-4.6", fallback: [] });
     // task lanes
     expect(lanes.coding?.fallback).toEqual(["premium", "balanced"]);
@@ -100,15 +100,15 @@ describe("checked-in config samples", () => {
     // json lane: official deepseek (cheap json_object) → cheap native-schema openrouter
     // mirror (where a strict json_schema request lands after the filter prunes official
     // deepseek) → balanced. Locks the json_schema routing fix into the shipped config.
-    expect(lanes.json?.primary).toBe("deepseek/deepseek-v4-flash");
-    expect(lanes.json?.fallback).toEqual(["openrouter/deepseek-v4-flash", "balanced"]);
-    expect(lanes.vision?.constraints.require_vision).toBe(true);
-    expect(lanes.vision?.primary).toBe("openai-codex/gpt-5.6-terra");
-    expect(lanes.vision?.fallback).toEqual([
-      "grok",
-      "anthropic/claude-sonnet-5",
-      "anthropic/claude-opus-4-8",
+    expect(lanes.json?.primary).toBe("gpt-5.6-terra");
+    expect(lanes.json?.fallback).toEqual([
+      "claude-sonnet",
+      "openrouter/deepseek-v4-flash",
+      "balanced",
     ]);
+    expect(lanes.vision?.constraints.require_vision).toBe(true);
+    expect(lanes.vision?.primary).toBe("gpt-5.6-terra");
+    expect(lanes.vision?.fallback).toEqual(["grok", "claude-sonnet", "claude-opus"]);
     expect(lanes.tool_use?.constraints.require_tools).toBe(true);
   });
 
@@ -128,7 +128,7 @@ describe("checked-in config samples", () => {
     // GPT families route to their dedicated vendor-family lanes. The cheap mini must
     // NOT be swallowed by the broad `gpt-5*` -> premium catch-all (longest-literal
     // wins): a dated mini id still lands on the cheap gpt-5.4-mini lane.
-    expect(resolveModelAlias("gpt-5.6", aliases)).toBe("gpt-5.6");
+    expect(resolveModelAlias("gpt-5.6", aliases)).toBe("gpt-5.6-sol");
     expect(resolveModelAlias("gpt-5.6-sol", aliases)).toBe("gpt-5.6-sol");
     expect(resolveModelAlias("gpt-5.6-sol-20260710", aliases)).toBe("gpt-5.6-sol");
     expect(resolveModelAlias("gpt-5.6-terra", aliases)).toBe("gpt-5.6-terra");
@@ -161,28 +161,24 @@ describe("checked-in config samples", () => {
     expect(lanes["gpt-5.6-terra"]?.fallback).toEqual(["balanced"]);
     expect(lanes["gpt-5.6-luna"]?.primary).toBe("openai-codex/gpt-5.6-luna");
     expect(lanes["gpt-5.6-luna"]?.fallback).toEqual(["economy"]);
-    expect(lanes["gpt-image"]).toMatchObject({ primary: "gpt-image-2", fallback: [] });
-    expect(lanes["gpt-image-2"]).toMatchObject({
-      primary: "zenmux/gpt-image-2",
-      fallback: ["openai/gpt-image-2"],
+    expect(lanes["gpt-image"]).toMatchObject({
+      primary: "openai-codex/gpt-image-2",
+      fallback: [],
     });
-    expect(expandLaneChain("gpt-image", lanes)).toEqual([
-      "zenmux/gpt-image-2",
-      "openai/gpt-image-2",
-    ]);
+    expect(expandLaneChain("gpt-image", lanes)).toEqual(["openai-codex/gpt-image-2"]);
     const zenmux = cfg.providers.find((provider) => provider.name === "zenmux");
     expect(zenmux?.models).toContainEqual({
-      alias: "zenmux/gpt-image-2",
+      alias: "gpt-image-2",
       provider_model: "openai/gpt-image-2",
     });
     expect(lanes["claude-haiku"]?.fallback).toEqual(["economy"]);
     expect(lanes["claude-sonnet"]?.primary).toBe("anthropic/claude-sonnet-5");
-    expect(lanes["gpt-5.5"]?.primary).toBe("openai-codex/gpt-5.5");
-    expect(lanes["gpt-5.5"]?.fallback).toEqual(["premium"]);
-    expect(lanes["gpt-5.4"]?.primary).toBe("openai-codex/gpt-5.4");
-    expect(lanes["gpt-5.4"]?.fallback).toEqual(["premium"]);
-    expect(lanes["gpt-5.4-mini"]?.primary).toBe("openai-codex/gpt-5.4-mini");
-    expect(lanes["gpt-5.4-mini"]?.fallback).toEqual(["economy"]);
+    expect(lanes["gpt-5.5"]?.primary).toBe("openai-codex/gpt-5.6-sol");
+    expect(lanes["gpt-5.5"]?.fallback).toEqual(["openai-codex/gpt-5.5", "premium"]);
+    expect(lanes["gpt-5.4"]?.primary).toBe("openai-codex/gpt-5.6-terra");
+    expect(lanes["gpt-5.4"]?.fallback).toEqual(["openai-codex/gpt-5.4", "premium"]);
+    expect(lanes["gpt-5.4-mini"]?.primary).toBe("openai-codex/gpt-5.6-luna");
+    expect(lanes["gpt-5.4-mini"]?.fallback).toEqual(["openai-codex/gpt-5.4-mini", "economy"]);
   });
 
   it("ships Codex GPT-5.6 fallback capabilities matching the Codex model catalog", () => {
@@ -291,8 +287,8 @@ describe("checked-in config samples", () => {
     // FIRST policy. Specific-before-general within a task: coding_complex precedes
     // the coding_simple→economy rule so complex coding is never down-routed.
     expect(cfg.policies.policies[0]?.use_lane).toBe("json");
-    expect(ids.indexOf("coding_complex_to_coding_lane")).toBeLessThan(
-      ids.indexOf("coding_simple_to_economy"),
+    expect(ids.indexOf("coding_simple_to_economy")).toBeLessThan(
+      ids.indexOf("coding_complex_to_coding_lane"),
     );
   });
 

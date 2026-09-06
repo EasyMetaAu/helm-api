@@ -1,5 +1,5 @@
-# Runtime timeout + rate limiting. Rate limiting is OFF by default (zero friction).
-# Env overrides: HELM_REQUEST_TIMEOUT_MS, HELM_RATE_LIMIT_ENABLED.
+# Runtime limits + rate limiting. Rate limiting is OFF by default (zero friction).
+# Env overrides: HELM_MAX_REQUEST_BYTES, HELM_REQUEST_TIMEOUT_MS, HELM_RATE_LIMIT_ENABLED.
 request_timeout_ms: 60000
 rate_limit:
   enabled: false

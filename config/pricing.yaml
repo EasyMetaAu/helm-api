@@ -55,38 +55,8 @@ xai/grok-composer-2.5-fast:
   outputPerMTokUsd: null
   cacheReadPerMTokUsd: null
   cacheWritePerMTokUsd: null
-# SuperGrok media has no verified per-generation rate card. Keep cost unknown;
-# request-count budgets may admit it, while spend-capped keys fail closed upstream
-# of the paid create path until a trustworthy maximum price is configured.
-xai/grok-imagine-image:
-  inputPerMTokUsd: null
-  outputPerMTokUsd: null
-  cacheReadPerMTokUsd: null
-  cacheWritePerMTokUsd: null
-xai/grok-imagine-image-quality:
-  inputPerMTokUsd: null
-  outputPerMTokUsd: null
-  cacheReadPerMTokUsd: null
-  cacheWritePerMTokUsd: null
-xai/grok-imagine-video-1.5-preview:
-  inputPerMTokUsd: null
-  outputPerMTokUsd: null
-  cacheReadPerMTokUsd: null
-  cacheWritePerMTokUsd: null
-xai/grok-imagine-video:
-  inputPerMTokUsd: null
-  outputPerMTokUsd: null
-  cacheReadPerMTokUsd: null
-  cacheWritePerMTokUsd: null
 # Codex auto-review is a dynamic internal route with no published fixed API rate.
 openai-codex/codex-auto-review:
-  inputPerMTokUsd: null
-  outputPerMTokUsd: null
-  cacheReadPerMTokUsd: null
-  cacheWritePerMTokUsd: null
-# ChatGPT subscription image usage has no trustworthy USD rate card. Spend-capped
-# keys therefore fail closed before the paid write; request-count budgets still work.
-openai-codex/gpt-image-2:
   inputPerMTokUsd: null
   outputPerMTokUsd: null
   cacheReadPerMTokUsd: null
@@ -554,7 +524,7 @@ gemini-3-pro-image:
 # output $30/M. The generated image is billed as usage.output_tokens (image_tokens).
 # Worked example: a 1024 low-quality image = 196 output
 # tokens → 196 × $30/M + 15 × $5/M ≈ $0.006.
-zenmux/gpt-image-2:
+gpt-image-2:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0
   cacheReadPerMTokUsd: 1.25
@@ -718,3 +688,22 @@ deepseek-v4-flash:
   inputPerMTokUsd: 0.14
   outputPerMTokUsd: 0.28
   cacheReadPerMTokUsd: 0.0028
+
+# SuperGrok media has no verified per-generation rate card. Keep cost unknown;
+# request-count budgets may admit it, while spend-capped keys fail closed upstream
+# of the paid create path until a trustworthy maximum price is configured.
+xai/grok-imagine-image-quality:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+  cacheReadPerMTokUsd: null
+  cacheWritePerMTokUsd: null
+xai/grok-imagine-video-1.5-preview:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+  cacheReadPerMTokUsd: null
+  cacheWritePerMTokUsd: null
+xai/grok-imagine-video:
+  inputPerMTokUsd: null
+  outputPerMTokUsd: null
+  cacheReadPerMTokUsd: null
+  cacheWritePerMTokUsd: null

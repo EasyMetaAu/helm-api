@@ -12,6 +12,10 @@
 - Decision error detail now records `upstream_event` (`error` or `response.failed`) for in-band SSE failures. HTTP status remains nullable because the upstream may return the error after opening an HTTP 200 stream.
 - This is additive and preserves the raw provider payload; it makes Codex overload failures distinguishable from Helm-generated admission errors in Admin telemetry.
 
+## 2026-09-06 · 将 Remote 运行时配置同步回仓库（Config sync，docs/04/11，原则 2/3/6）
+
+- Remote `/opt/helm-api/config` 没有 Git checkout；本次从服务器读取 11 个正式 YAML，排除 `.bak*` 备份，并原样写入仓库配置。
+- 保留 Remote 的 GPT-6 语义：`gpt-6-astra` lane 主候选为 `openai-codex/gpt-6-astra`，四个 GPT-6 兼容别名均指向 `gpt-6-astra` lane。Remote 还包含已运行的 classifier、Memory、策略和图片配置，因此同步范围不是只改 GPT-6 三行。
 
 ## 2026-09-06 · Responses 空准备事件保留安全恢复窗口（Provider execution / Responses，docs/04/05，原则 3/5/8）
 
