@@ -6678,6 +6678,44 @@ describe("hoistResponsesInstructions", () => {
 });
 
 describe("sanitizeCodexResponsesNativeBody", () => {
+  it.each([
+    false,
+    true,
+  ])("preserves Responses Lite item identity (continuation=%s)", (continuation) => {
+    // Codex client.rs preserves prefixed ResponseItemId values on full and delta requests.
+    const input = [
+      ...(!continuation
+        ? [{ type: "additional_tools", id: "at_stable", role: "developer", tools: [] }]
+        : []),
+      {
+        type: "message",
+        id: "msg_stable",
+        role: "user",
+        content: [{ type: "input_text", text: "next" }],
+      },
+      { type: "reasoning", id: "rs_stable", summary: [], encrypted_content: "opaque" },
+      {
+        type: "custom_tool_call",
+        id: "ctc_stable",
+        call_id: "call_stable",
+        name: "test",
+        input: "{}",
+      },
+      { type: "custom_tool_call_output", id: "ctco_stable", call_id: "call_stable", output: "ok" },
+    ];
+    const original = {
+      model: "gpt-6-astra",
+      store: false,
+      stream: true,
+      reasoning: { effort: "high", context: "all_turns" },
+      ...(continuation ? { previous_response_id: "resp_previous" } : {}),
+      input,
+    };
+    const snapshot = structuredClone(original);
+    expect(sanitizeCodexResponsesNativeBody(original)).toEqual({ body: snapshot, fixes: [] });
+    expect(original).toEqual(snapshot);
+  });
+
   it("removes Codex-unsupported caps and store:false persisted item references", () => {
     const { body, fixes } = sanitizeCodexResponsesNativeBody({
       model: "gpt-5.5",

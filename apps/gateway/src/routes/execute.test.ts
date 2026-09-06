@@ -6017,6 +6017,79 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     expect((forwarded.mutations as Record<string, unknown>).body_shims_applied).toBeUndefined();
   });
 
+  it("preserves Lite identities and falls back after a Codex control-only overload", async () => {
+    const nativeStream = vi.fn(async function* (input: NativePassthroughCarrier) {
+      yield 'data: {"type":"response.metadata","headers":{"x-codex-turn-state":"opaque-state"}}\n\n';
+      yield input.body.model === "gpt-first"
+        ? 'data: {"type":"error","error":{"code":"server_is_overloaded","message":"busy"}}\n\n'
+        : 'data: {"type":"response.output_text.delta","delta":"ok"}\n\n';
+    });
+    const provider = {
+      nativeProtocolProfile: "codex_responses",
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: nativeStream,
+    } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["codex", provider]]),
+      registry: protocolRegistry({
+        first: {
+          providerName: "codex",
+          providerModel: "gpt-first",
+          targetProviderProtocol: "openai_responses",
+        },
+        second: {
+          providerName: "codex",
+          providerModel: "gpt-second",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const input = [
+      { type: "additional_tools", id: "at_stable", role: "developer", tools: [] },
+      {
+        type: "message",
+        id: "msg_stable",
+        role: "user",
+        content: [{ type: "input_text", text: "hello" }],
+      },
+    ];
+    const carrier = createNativePassthroughCarrier({
+      protocol: "openai_responses",
+      body: {
+        model: "auto",
+        stream: true,
+        store: false,
+        reasoning: { context: "all_turns" },
+        input,
+      },
+      headers: {},
+    });
+    const out = await execute(
+      plan(["first", "second"]),
+      req({
+        protocol: "openai_responses",
+        stream: true,
+        native_request: carrier,
+      }),
+    );
+    expect(out.final).toMatchObject({ status: "ok", alias: "second" });
+    expect(out.attempts.map((attempt) => attempt.status)).toEqual(["error", "ok"]);
+    expect(nativeStream.mock.calls.map(([sent]) => sent.body.input)).toEqual([input, input]);
+    const chunks: string[] = [];
+    if (out.stream) for await (const chunk of out.stream) chunks.push(chunk);
+    expect(chunks.join("")).toBe(
+      'data: {"type":"response.metadata","headers":{"x-codex-turn-state":"opaque-state"}}\n\n' +
+        'data: {"type":"response.output_text.delta","delta":"ok"}\n\n',
+    );
+  });
+
   it("sanitizes Codex passthrough bodies that came from stored Responses output items", async () => {
     const responsesBody = {
       id: "resp_sanitized",
