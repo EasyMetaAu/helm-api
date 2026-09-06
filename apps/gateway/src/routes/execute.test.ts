@@ -6,6 +6,8 @@ import {
   createGeminiClient,
   createGenericOpenAIResponsesClient,
   createOAuthPoolClient,
+  createRuntimeMemoryCoordinator,
+  runtimeResponseWorkAdmission,
   TokenRefreshError,
   UpstreamError,
 } from "@helm/core";
@@ -18,8 +20,14 @@ import {
   nativePassthroughBody,
   type TargetProviderProtocol,
 } from "@helm/shared";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createExecute, detectRequestModalities, isAccountScopedFault } from "./execute.js";
+
+beforeEach(() => {
+  runtimeResponseWorkAdmission(
+    createRuntimeMemoryCoordinator({ capacityBytes: () => 64 * 1024 * 1024 }),
+  );
+});
 
 function req(over: Partial<InternalRequest> = {}): InternalRequest {
   return {
@@ -6553,6 +6561,78 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
     expect(out.final.status).toBe("ok");
     expect(out.stream).not.toBeNull();
     expect(out.nativePassthrough).toBe(true);
+  });
+
+  it.each([
+    false,
+    true,
+  ])("respects shared overload exhaustion before model fallback: %s", async (exhausted) => {
+    const output = 'data: {"type":"response.output_text.delta","delta":"recovered"}\n\n';
+    const head = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: vi.fn().mockImplementation((_body, options) => {
+        if (exhausted) options.overloadRetry.exhausted = true;
+        return gen([
+          'data: {"type":"response.created"}\n\n',
+          'data: {"type":"response.output_item.added","item":{"type":"reasoning","summary":[]}}\n\n',
+          'data: {"type":"error","error":{"code":"server_is_overloaded","message":"overloaded"}}\n\n',
+        ]);
+      }),
+    };
+    const tail = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: vi.fn().mockReturnValue(gen([output])),
+    };
+    const execute = createExecute({
+      defaultProvider: head,
+      providers: new Map([
+        ["codex-a", head],
+        ["codex-b", tail],
+      ]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "codex-a",
+          providerModel: "gpt-6-astra",
+          targetProviderProtocol: "openai_responses",
+        },
+        b: {
+          providerName: "codex-b",
+          providerModel: "gpt-5.6-sol",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const out = await execute(
+      plan(["a", "b"]),
+      req({
+        protocol: "openai_responses",
+        stream: true,
+        native_request: createNativePassthroughCarrier({
+          protocol: "openai_responses",
+          body: { model: "auto", input: [], stream: true },
+          headers: {},
+        }),
+      }),
+    );
+    if (exhausted) {
+      expect(out.final.status).toBe("error");
+      expect(out.attempts).toHaveLength(1);
+      expect(tail.nativePassthroughStream).not.toHaveBeenCalled();
+      return;
+    }
+    expect(out.attempts.map((attempt) => attempt.status)).toEqual(["error", "ok"]);
+    expect(out.final).toMatchObject({ status: "ok", alias: "b" });
+    expect(tail.nativePassthroughStream).toHaveBeenCalledTimes(1);
+    const chunks: string[] = [];
+    for await (const chunk of out.stream ?? []) chunks.push(chunk);
+    expect(chunks).toEqual([output]);
   });
 
   it("does not advance the chain after HTTP response.created then EOF", async () => {

@@ -3173,7 +3173,12 @@ describe("createOAuthPoolClient — in-band pre-output failover (preamble then e
   const OUTPUT = 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n';
 
   type Mode = "preamble_then_error" | "preamble_then_output" | "preamble_only";
-  function nativeStreamMember(account: string, priority: number, mode: Mode): OAuthPoolMember {
+  function nativeStreamMember(
+    account: string,
+    priority: number,
+    mode: Mode,
+    preamble = PREAMBLE,
+  ): OAuthPoolMember {
     return {
       account,
       priority,
@@ -3187,7 +3192,7 @@ describe("createOAuthPoolClient — in-band pre-output failover (preamble then e
         },
         nativePassthroughStream(_body: Record<string, unknown>): AsyncIterable<string> {
           return (async function* () {
-            yield PREAMBLE; // content-free preamble — must NOT be a commit point
+            yield preamble; // content-free preamble — must NOT be a commit point
             if (mode === "preamble_only") return; // abnormal close, no output
             if (mode === "preamble_then_error") {
               yield ERROR;
@@ -3202,10 +3207,13 @@ describe("createOAuthPoolClient — in-band pre-output failover (preamble then e
 
   const responses = preOutputClassifierFor("openai_responses");
 
-  it("fails over to the next account when the FIRST emits preamble-then-error", async () => {
+  it.each([
+    PREAMBLE,
+    `${PREAMBLE}data: {"type":"response.output_item.added","item":{"type":"reasoning","summary":[]}}\n\n`,
+  ])("fails over to the next account after a content-free preamble: %s", async (preamble) => {
     const pool = createOAuthPoolClient({
       members: [
-        nativeStreamMember("a", 10, "preamble_then_error"),
+        nativeStreamMember("a", 10, "preamble_then_error", preamble),
         nativeStreamMember("b", 50, "preamble_then_output"),
       ],
       nativeStreamPreambleClassifier: responses,
@@ -3215,6 +3223,34 @@ describe("createOAuthPoolClient — in-band pre-output failover (preamble then e
     // b's real output arrived (with its replayed preamble); a's doomed stream never committed.
     expect(chunks).toContain(OUTPUT);
     expect(chunks.filter((c) => c === ERROR)).toEqual([]); // the error frame was never relayed
+  });
+
+  it("waits and retries the same account after in-band overload before using a sibling", async () => {
+    let calls = 0;
+    const account: OAuthPoolMember = {
+      ...nativeStreamMember("a", 10, "preamble_then_error"),
+      client: {
+        ...nativeStreamMember("a", 10, "preamble_then_error").client,
+        nativePassthroughStream: () =>
+          (async function* () {
+            calls += 1;
+            yield PREAMBLE;
+            if (calls === 1) {
+              yield 'data: {"type":"response.failed","response":{"error":{"code":"server_is_overloaded","message":"overloaded"}}}\n\n';
+              return;
+            }
+            yield OUTPUT;
+          })(),
+      },
+    };
+    const pool = createOAuthPoolClient({
+      members: [account],
+      nativeStreamPreambleClassifier: responses,
+    });
+    const chunks: string[] = [];
+    for await (const chunk of pool.nativePassthroughStream?.(NATIVE) ?? []) chunks.push(chunk);
+    expect(calls).toBe(2);
+    expect(chunks).toEqual([PREAMBLE, OUTPUT]);
   });
 
   it("does not replay on a sibling after response.created then EOF", async () => {

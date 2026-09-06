@@ -171,7 +171,53 @@ function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+/** Trusted per-request budget, shared across HTTP, pool and model attempts. */
+export interface OverloadRetryBudget {
+  attempt: number;
+  exhausted?: boolean;
+  onRetry?: (event: {
+    reason: string;
+    attempt: number;
+    delay_ms: number;
+    exhausted: boolean;
+  }) => void;
+}
+
+export async function waitForOverloadRetry(
+  budget: OverloadRetryBudget,
+  opts: {
+    reason: string;
+    signal?: AbortSignal;
+    sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+    retryAfter?: string | null;
+  },
+): Promise<boolean> {
+  opts.signal?.throwIfAborted();
+  const delay = overloadRetryDelayMs({
+    status: 503,
+    attempt: budget.attempt,
+    retryAfter: opts.retryAfter,
+  });
+  if (delay === null) budget.exhausted = true;
+  else budget.attempt += 1;
+  try {
+    budget.onRetry?.({
+      reason: opts.reason,
+      attempt: budget.attempt,
+      delay_ms: delay ?? 0,
+      exhausted: delay === null,
+    });
+  } catch {
+    // Observability is fail-open.
+  }
+  if (delay === null) return false;
+  await (opts.sleep ?? defaultSleep)(delay, opts.signal);
+  opts.signal?.throwIfAborted();
+  return true;
+}
+
 export interface OverloadRetryOptions<T> {
+  budget?: OverloadRetryBudget;
   signal?: AbortSignal;
   /** Injected for tests; default sleeps real time and resolves early on abort. */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
@@ -194,29 +240,31 @@ export async function withOverloadRetry<T = Response>(
   fn: () => Promise<T>,
   opts: OverloadRetryOptions<T> = {},
 ): Promise<T> {
-  const sleep = opts.sleep ?? defaultSleep;
+  const budget = opts.budget ?? { attempt: 0 };
   const pick = opts.pick ?? ((value: T) => value as unknown as Response);
-  let attempt = 0;
   let result = await fn();
   for (;;) {
     const res = pick(result);
-    if (res.ok || opts.signal?.aborted) return result;
-    const delay = overloadRetryDelayMs({
-      status: res.status,
-      attempt,
-      retryAfter: res.headers.get("retry-after"),
-    });
-    if (delay === null) return result;
-    // Discard the overloaded attempt — an un-drained body pins a socket, and a deferred
-    // per-attempt timeout would otherwise keep running against nothing.
-    await res.body?.cancel().catch(() => {});
-    opts.release?.(result);
-    await sleep(delay, opts.signal);
-    // A disconnect during the backoff means the client is gone; don't burn another
-    // upstream attempt. The caller sees the last overloaded response — with a drained
-    // body, so its error detail degrades to null. Acceptable: nobody is listening.
-    if (opts.signal?.aborted) return result;
-    attempt += 1;
+    if (res.ok || opts.signal?.aborted || !OVERLOAD_STATUSES.has(res.status)) return result;
+    // Preserve the last response body when there is no retry left.
+    if (budget.attempt < OVERLOAD_BACKOFF_MS.length) {
+      await res.body?.cancel().catch(() => {});
+      opts.release?.(result);
+    }
+    try {
+      if (
+        !(await waitForOverloadRetry(budget, {
+          reason: `http_${res.status}`,
+          signal: opts.signal,
+          sleep: opts.sleep,
+          retryAfter: res.headers.get("retry-after"),
+        }))
+      )
+        return result;
+    } catch (error) {
+      if (opts.signal?.aborted) return result;
+      throw error;
+    }
     result = await fn();
   }
 }
