@@ -61,6 +61,42 @@ openai-codex/codex-auto-review:
   outputPerMTokUsd: null
   cacheReadPerMTokUsd: null
   cacheWritePerMTokUsd: null
+# ChatGPT/Codex subscription requests use the official API-equivalent GPT-6
+# Astra rate card for telemetry and historical cost reconstruction.
+openai-codex/gpt-6-astra:
+  inputPerMTokUsd: 10.0
+  outputPerMTokUsd: 50.0
+  cacheReadPerMTokUsd: 1.0
+  cacheWritePerMTokUsd: 12.5
+  contextTiers:
+    - minPromptTokens: 272001
+      inputPerMTokUsd: 20.0
+      outputPerMTokUsd: 75.0
+      cacheReadPerMTokUsd: 2.0
+      cacheWritePerMTokUsd: 25.0
+  serviceTiers:
+    flex:
+      inputPerMTokUsd: 5.0
+      outputPerMTokUsd: 25.0
+      cacheReadPerMTokUsd: 0.5
+      cacheWritePerMTokUsd: 6.25
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 10.0
+          outputPerMTokUsd: 37.5
+          cacheReadPerMTokUsd: 1.0
+          cacheWritePerMTokUsd: 12.5
+    priority:
+      inputPerMTokUsd: 20.0
+      outputPerMTokUsd: 100.0
+      cacheReadPerMTokUsd: 2.0
+      cacheWritePerMTokUsd: 25.0
+      contextTiers:
+        - minPromptTokens: 272001
+          inputPerMTokUsd: 40.0
+          outputPerMTokUsd: 150.0
+          cacheReadPerMTokUsd: 4.0
+          cacheWritePerMTokUsd: 50.0
 openai-codex/gpt-5.6:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0

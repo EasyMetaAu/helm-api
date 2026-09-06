@@ -278,6 +278,30 @@ describe("loadRuntimeCatalog", () => {
     });
     expect(catalog.get("deepseek/deepseek-v4-pro")?.pricing.cacheReadPerMTokUsd).toBe(0.003625);
     expect(catalog.get("openai-codex/gpt-5.4-mini")?.pricing.cacheReadPerMTokUsd).toBe(0.075);
+    const gpt6 = catalog.get("openai-codex/gpt-6-astra");
+    expect(gpt6).toMatchObject({
+      capabilities: {
+        supportsTools: true,
+        jsonOutput: "schema",
+        supportsVision: true,
+        supportsStreaming: true,
+      },
+      pricing: {
+        inputPerMTokUsd: 10,
+        outputPerMTokUsd: 50,
+        cacheReadPerMTokUsd: 1,
+        cacheWritePerMTokUsd: 12.5,
+      },
+    });
+    expect(
+      resolveCostUsd(gpt6?.pricing, {
+        usage: {
+          input_tokens: 1_000,
+          output_tokens: 50,
+          input_tokens_details: { cached_tokens: 200 },
+        },
+      }),
+    ).toBeCloseTo((800 * 10 + 200 * 1 + 50 * 50) / 1_000_000, 12);
     expect(catalog.get("openai-codex/gpt-image-2")).toMatchObject({
       capabilities: { outputImage: true },
       pricing: { inputPerMTokUsd: null, outputPerMTokUsd: null },
