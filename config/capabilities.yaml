@@ -148,6 +148,17 @@ xai/grok-imagine-video:
 # GPT-5.6 fallback metadata mirrors the bundled Codex model catalog. At runtime the
 # authenticated `/models` response is authoritative per account; these entries are
 # only the last-resort fallback when no fresh or last-known-good remote catalog exists.
+openai-codex/gpt-6-astra:
+  supportsTools: true
+  jsonOutput: schema
+  supportsVision: true
+  supportsStreaming: true
+  reasoningEffort:
+    openaiReasoning:
+      supported: true
+      levels: [low, medium, high, xhigh, max]
+  maxContextTokens: 1050000
+  maxOutputTokens: 128000
 openai-codex/gpt-5.6:
   supportsTools: true
   jsonOutput: schema
