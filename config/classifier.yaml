@@ -72,40 +72,276 @@ classifier:
       # magnitude that a boundary-sitting prompt (e.g. a 2-keyword analysis or
       # security request) clears its tier with confidence > threshold rather than
       # hugging the boundary and degrading to fallback.
-      reasoning_kw: { weight: 0.65, keywords: ["prove", "derive", "theorem", "step by step", "reason about", "deduce", "infer", "justify", "rationale", "explain why"] }
-      reasoning_intl_kw: { weight: 0.65, keywords: ["证明", "推导", "定理", "逐步", "分步推理", "推理", "演绎", "推断", "论证", "理由", "解释原因"] }
-      coding_kw: { weight: 0.62, keywords: ["refactor", "debug", "stack trace", "function", "compile", "implement", "unit test", "exception", "traceback", "syntax error", "endpoint", "regex"] }
-      coding_intl_kw: { weight: 0.62, keywords: ["重构", "调试", "堆栈跟踪", "函数", "编译", "实现", "单元测试", "异常", "回溯", "语法错误", "端点", "接口", "正则"] }
-      math_kw: { weight: 0.20, keywords: ["integral", "matrix", "equation", "probability", "derivative", "calculus", "algebra", "solve for", "polynomial", "summation"] }
-      math_intl_kw: { weight: 0.24, keywords: ["积分", "矩阵", "方程", "概率", "导数", "微积分", "代数", "求解", "多项式", "求和", "推导"] }
-      planning_kw: { weight: 0.38, keywords: ["plan", "architecture", "design doc", "trade-off", "strategy", "roadmap", "milestone", "break down", "blueprint", "trade-offs"] }
-      planning_intl_kw: { weight: 0.38, keywords: ["计划", "架构", "设计文档", "权衡", "策略", "路线图", "里程碑", "拆解", "蓝图", "取舍", "方案设计"] }
-      analysis_kw: { weight: 0.76, keywords: ["analyze", "compare", "evaluate", "implications", "root cause", "assess", "critique", "pros and cons", "diagnose", "investigate"] }
-      analysis_intl_kw: { weight: 0.76, keywords: ["分析", "比较", "评估", "影响", "根因", "评价", "批判", "利弊", "诊断", "调查", "排查", "因果关系"] }
-      writing_kw: { weight: 0.14, keywords: ["essay", "rewrite", "draft", "tone", "polish", "summarize", "summary", "paraphrase", "proofread", "article", "headline", "grammar"] }
-      writing_intl_kw: { weight: 0.14, keywords: ["论文", "改写", "草稿", "语气", "润色", "总结", "摘要", "转述", "校对", "文章", "标题", "语法"] }
-      security_kw: { weight: 1.40, keywords: ["cve-", "buffer overflow", "sql injection", "exploit", "privilege escalation", "xss", "reverse engineer", "cryptanalysis", "ctf", "command injection", "rce", "csrf", "malware", "auth bypass", "auth check", "access control"] }
+      reasoning_kw:
+        {
+          weight: 0.65,
+          keywords:
+            [
+              prove,
+              derive,
+              theorem,
+              step by step,
+              reason about,
+              deduce,
+              infer,
+              justify,
+              rationale,
+              explain why
+            ]
+        }
+      reasoning_intl_kw: { weight: 0.65, keywords: [ 证明, 推导, 定理, 逐步, 分步推理, 推理, 演绎, 推断, 论证, 理由, 解释原因 ] }
+      coding_kw:
+        {
+          weight: 0.62,
+          keywords:
+            [
+              refactor,
+              debug,
+              stack trace,
+              function,
+              compile,
+              implement,
+              unit test,
+              exception,
+              traceback,
+              syntax error,
+              endpoint,
+              regex
+            ]
+        }
+      coding_intl_kw:
+        {
+          weight: 0.62,
+          keywords: [ 重构, 调试, 堆栈跟踪, 函数, 编译, 实现, 单元测试, 异常, 回溯, 语法错误, 端点, 接口, 正则 ]
+        }
+      math_kw:
+        {
+          weight: 0.20,
+          keywords:
+            [
+              integral,
+              matrix,
+              equation,
+              probability,
+              derivative,
+              calculus,
+              algebra,
+              solve for,
+              polynomial,
+              summation
+            ]
+        }
+      math_intl_kw: { weight: 0.24, keywords: [ 积分, 矩阵, 方程, 概率, 导数, 微积分, 代数, 求解, 多项式, 求和, 推导 ] }
+      planning_kw:
+        {
+          weight: 0.38,
+          keywords:
+            [
+              plan,
+              architecture,
+              design doc,
+              trade-off,
+              strategy,
+              roadmap,
+              milestone,
+              break down,
+              blueprint,
+              trade-offs
+            ]
+        }
+      planning_intl_kw:
+        {
+          weight: 0.38,
+          keywords: [ 计划, 架构, 设计文档, 权衡, 策略, 路线图, 里程碑, 拆解, 蓝图, 取舍, 方案设计 ]
+        }
+      analysis_kw:
+        {
+          weight: 0.76,
+          keywords:
+            [
+              analyze,
+              compare,
+              evaluate,
+              implications,
+              root cause,
+              assess,
+              critique,
+              pros and cons,
+              diagnose,
+              investigate
+            ]
+        }
+      analysis_intl_kw:
+        {
+          weight: 0.76,
+          keywords: [ 分析, 比较, 评估, 影响, 根因, 评价, 批判, 利弊, 诊断, 调查, 排查, 因果关系 ]
+        }
+      writing_kw:
+        {
+          weight: 0.14,
+          keywords:
+            [
+              essay,
+              rewrite,
+              draft,
+              tone,
+              polish,
+              summarize,
+              summary,
+              paraphrase,
+              proofread,
+              article,
+              headline,
+              grammar
+            ]
+        }
+      writing_intl_kw: { weight: 0.14, keywords: [ 论文, 改写, 草稿, 语气, 润色, 总结, 摘要, 转述, 校对, 文章, 标题, 语法 ] }
+      security_kw:
+        {
+          weight: 1.40,
+          keywords:
+            [
+              cve-,
+              buffer overflow,
+              sql injection,
+              exploit,
+              privilege escalation,
+              xss,
+              reverse engineer,
+              cryptanalysis,
+              ctf,
+              command injection,
+              rce,
+              csrf,
+              malware,
+              auth bypass,
+              auth check,
+              access control
+            ]
+        }
       # International keyword dimensions are separate from English dimensions so
       # they can suppress the language guard without diluting English keywordSignal.
       # Current seed is Simplified Chinese; future Japanese/Korean/Vietnamese/etc.
       # terms should extend *_intl_kw.
-      security_intl_kw: { weight: 1.40, keywords: ["CVE 漏洞", "缓冲区溢出", "SQL 注入", "漏洞利用", "权限提升", "XSS 漏洞", "逆向工程", "密码分析", "CTF 题目", "命令注入", "远程代码执行", "RCE 漏洞", "CSRF 漏洞", "恶意软件", "认证绕过", "认证检查", "访问控制", "越权"] }
+      security_intl_kw:
+        {
+          weight: 1.40,
+          keywords:
+            [
+              CVE 漏洞,
+              缓冲区溢出,
+              SQL 注入,
+              漏洞利用,
+              权限提升,
+              XSS 漏洞,
+              逆向工程,
+              密码分析,
+              CTF 题目,
+              命令注入,
+              远程代码执行,
+              RCE 漏洞,
+              CSRF 漏洞,
+              恶意软件,
+              认证绕过,
+              认证检查,
+              访问控制,
+              越权
+            ]
+        }
       # Short diagnostics/security fragments are meaningful despite being tiny;
       # give them enough positive signal to escape the simple/economy shortcut.
-      diagnostic_short_kw: { weight: 3.60, keywords: ["no output", "no stack trace", "no auth check", "no command injection"] }
+      diagnostic_short_kw:
+        {
+          weight: 3.60,
+          keywords: [ no output, no stack trace, no auth check, no command injection ]
+        }
       # Chinese diagnostic fragments — POSITIVE signal mirrors diagnostic_short_kw so a
       # short ZH diagnostic ("没有输出") escapes the simple/economy shortcut AND gives the
       # language guard real grip. Simplified only (engine.test asserts no Traditional).
-      diagnostic_short_intl_kw: { weight: 3.60, keywords: ["没有输出", "无输出", "没有报错", "无报错", "没有堆栈跟踪", "没有权限检查", "没有命令注入"] }
-      extraction_kw: { weight: 0.12, keywords: ["extract", "parse", "json from", "fields", "schema", "pull out", "list all", "structured data", "named entities", "scrape"] }
-      extraction_intl_kw: { weight: 0.12, keywords: ["提取", "解析", "从 JSON", "字段", "模式", "抽取", "列出所有", "结构化数据", "命名实体", "抓取", "提取字段", "抽取实体"] }
-      data_kw: { weight: 0.20, keywords: ["csv", "dataframe", "aggregate", "sql", "pivot", "group by", "spreadsheet", "histogram", "correlation", "query"] }
-      data_intl_kw: { weight: 0.20, keywords: ["数据框", "聚合", "透视表", "分组", "电子表格", "直方图", "相关性", "查询", "数据集", "SQL 查询", "CSV 文件"] }
-      vision_kw: { weight: 0.16, keywords: ["image", "screenshot", "this picture", "diagram", "chart", "photo", "ocr", "figure", "graph"] }
-      vision_intl_kw: { weight: 0.16, keywords: ["图像", "截图", "这张图片", "流程图", "图表", "照片", "文字识别", "图形", "曲线图", "屏幕截图"] }
-      web_intl_kw: { weight: 0.06, keywords: ["搜索网页", "浏览", "在线查询", "最新新闻", "谷歌搜索", "查找网页", "在线资料", "最新公告", "最新消息"] }
-      multistep_kw: { weight: 0.26, keywords: ["first", "then", "finally", "and then", "after that", "step 1", "lastly", "subsequently", "followed by"] }
-      multistep_intl_kw: { weight: 0.26, keywords: ["首先", "然后", "最后", "接着", "之后", "步骤 1", "第1步", "最终", "随后", "紧接着"] }
+      diagnostic_short_intl_kw: { weight: 3.60, keywords: [ 没有输出, 无输出, 没有报错, 无报错, 没有堆栈跟踪, 没有权限检查, 没有命令注入 ] }
+      extraction_kw:
+        {
+          weight: 0.12,
+          keywords:
+            [
+              extract,
+              parse,
+              json from,
+              fields,
+              schema,
+              pull out,
+              list all,
+              structured data,
+              named entities,
+              scrape
+            ]
+        }
+      extraction_intl_kw:
+        {
+          weight: 0.12,
+          keywords: [ 提取, 解析, 从 JSON, 字段, 模式, 抽取, 列出所有, 结构化数据, 命名实体, 抓取, 提取字段, 抽取实体 ]
+        }
+      data_kw:
+        {
+          weight: 0.20,
+          keywords:
+            [
+              csv,
+              dataframe,
+              aggregate,
+              sql,
+              pivot,
+              group by,
+              spreadsheet,
+              histogram,
+              correlation,
+              query
+            ]
+        }
+      data_intl_kw:
+        {
+          weight: 0.20,
+          keywords: [ 数据框, 聚合, 透视表, 分组, 电子表格, 直方图, 相关性, 查询, 数据集, SQL 查询, CSV 文件 ]
+        }
+      vision_kw:
+        {
+          weight: 0.16,
+          keywords:
+            [
+              image,
+              screenshot,
+              this picture,
+              diagram,
+              chart,
+              photo,
+              ocr,
+              figure,
+              graph
+            ]
+        }
+      vision_intl_kw: { weight: 0.16, keywords: [ 图像, 截图, 这张图片, 流程图, 图表, 照片, 文字识别, 图形, 曲线图, 屏幕截图 ] }
+      web_intl_kw:
+        {
+          weight: 0.06,
+          keywords: [ 搜索网页, 浏览, 在线查询, 最新新闻, 谷歌搜索, 查找网页, 在线资料, 最新公告, 最新消息 ]
+        }
+      multistep_kw:
+        {
+          weight: 0.26,
+          keywords:
+            [
+              first,
+              then,
+              finally,
+              and then,
+              after that,
+              step 1,
+              lastly,
+              subsequently,
+              followed by
+            ]
+        }
+      multistep_intl_kw: { weight: 0.26, keywords: [ 首先, 然后, 最后, 接着, 之后, 步骤 1, 第1步, 最终, 随后, 紧接着 ] }
       # —— negative dimensions —— weights MAGNIFIED (not just expanded). A longer
       # list dilutes each hit toward zero, which pulls a short greeting/lookup
       # prompt's rawScore UP toward the `standard` boundary and tanks its
@@ -122,29 +358,83 @@ classifier:
       # grip-DOWN for medium-length ZH prompts that also carry a positive hit. Politeness
       # preambles (你好/您好/请问/谢谢) are DELIBERATELY excluded: they routinely prefix
       # real tasks, so penalizing them would misroute genuine ZH coding/analysis requests.
-      translation_kw: { weight: -0.78, keywords: ["translate", "in french", "in chinese", "to spanish", "translate to", "in german", "in japanese", "localize", "into english"] }
-      translation_intl_kw: { weight: -0.78, keywords: ["翻译", "翻译成", "译成", "翻成", "用英文", "用中文", "用法语", "用日语", "本地化", "译为"] }
-      lookup_kw: { weight: -1.05, keywords: ["what is", "who is", "define", "meaning of", "when did", "where is", "how many", "capital of", "tell me about", "what are"] }
-      lookup_intl_kw: { weight: -1.05, keywords: ["什么是", "谁是", "是什么", "什么意思", "的意思", "什么时候", "在哪里", "在哪儿", "有多少", "的首都", "多少钱"] }
-      chitchat_kw: { weight: -1.15, keywords: ["how are you", "good morning", "lol", "haha", "thank you", "goodbye", "what's up", "good night", "cheers"] }
-      chitchat_intl_kw: { weight: -1.15, keywords: ["最近怎么样", "早上好", "晚上好", "晚安", "哈哈", "呵呵", "再见", "拜拜", "在吗", "在不在", "吃了吗"] }
-      simple_kw: { weight: -1.35, keywords: ["hi", "thanks", "ok", "ping", "thx"] }
+      translation_kw:
+        {
+          weight: -0.78,
+          keywords:
+            [
+              translate,
+              in french,
+              in chinese,
+              to spanish,
+              translate to,
+              in german,
+              in japanese,
+              localize,
+              into english
+            ]
+        }
+      translation_intl_kw: { weight: -0.78, keywords: [ 翻译, 翻译成, 译成, 翻成, 用英文, 用中文, 用法语, 用日语, 本地化, 译为 ] }
+      lookup_kw:
+        {
+          weight: -1.05,
+          keywords:
+            [
+              what is,
+              who is,
+              define,
+              meaning of,
+              when did,
+              where is,
+              how many,
+              capital of,
+              tell me about,
+              what are
+            ]
+        }
+      lookup_intl_kw:
+        {
+          weight: -1.05,
+          keywords: [ 什么是, 谁是, 是什么, 什么意思, 的意思, 什么时候, 在哪里, 在哪儿, 有多少, 的首都, 多少钱 ]
+        }
+      chitchat_kw:
+        {
+          weight: -1.15,
+          keywords:
+            [
+              how are you,
+              good morning,
+              lol,
+              haha,
+              thank you,
+              goodbye,
+              what's up,
+              good night,
+              cheers
+            ]
+        }
+      chitchat_intl_kw:
+        {
+          weight: -1.15,
+          keywords: [ 最近怎么样, 早上好, 晚上好, 晚安, 哈哈, 呵呵, 再见, 拜拜, 在吗, 在不在, 吃了吗 ]
+        }
+      simple_kw: { weight: -1.35, keywords: [ hi, thanks, ok, ping, thx ] }
       # —— structural / context dimensions (keywords empty; code feeds the score) ——
-      has_code_block: { weight: 0.34 }
-      has_url: { weight: 0.06 }
-      has_stack: { weight: 0.26 }
-      has_math_notation: { weight: 0.22 }
-      has_table: { weight: 0.12 }
-      has_attachment: { weight: 0.16 }
+      has_code_block: { weight: 0.34, keywords: [] }
+      has_url: { weight: 0.06, keywords: [] }
+      has_stack: { weight: 0.26, keywords: [] }
+      has_math_notation: { weight: 0.22, keywords: [] }
+      has_table: { weight: 0.12, keywords: [] }
+      has_attachment: { weight: 0.16, keywords: [] }
       # NEW (calibration): a json-constrained request (response_format json_object/
       # json_schema) carries a real complexity signal and must score clearly off the
       # `standard` boundary so it reaches decided_by=rules → the needs_json policy
       # pins the `json` lane. Kept light so json+keyword requests don't overshoot into
       # the `complex` boundary. Detector already exists in dimensions.ts.
-      has_json_format: { weight: 0.12 }
-      msg_length: { weight: 0.16 }
-      turn_count: { weight: 0.08 }
-      tool_count: { weight: 0.10 }
+      has_json_format: { weight: 0.12, keywords: [] }
+      msg_length: { weight: 0.16, keywords: [] }
+      turn_count: { weight: 0.08, keywords: [] }
+      tool_count: { weight: 0.10, keywords: [] }
     # task_keywords feed TASK detection (taskdetect.ts) and — unlike dimensions —
     # are matched with a plain SUBSTRING `includes()` (no word boundary, no
     # saturation; each hit is a flat +1.0). New terms are therefore kept
@@ -152,38 +442,203 @@ classifier:
     # match "source"/"force", so it lives ONLY in the boundary-matched
     # security_kw dimension, never here). Expanded 2026-06-02.
     task_keywords:
-      coding: ["function", "class", "bug", "compile", "npm", "git", "refactor", "debug", "implement", "unit test", "stack trace", "typescript", "函数", "类", "缺陷", "编译", "重构", "调试", "实现", "单元测试", "堆栈跟踪", "类型脚本", "语法错误", "接口"]
-      math: ["integral", "matrix", "equation", "derivative", "calculus", "algebra", "polynomial", "积分", "矩阵", "方程", "导数", "微积分", "代数", "多项式", "概率", "求解"]
+      coding:
+        - function
+        - class
+        - bug
+        - compile
+        - npm
+        - git
+        - refactor
+        - debug
+        - implement
+        - unit test
+        - stack trace
+        - typescript
+        - 函数
+        - 类
+        - 缺陷
+        - 编译
+        - 重构
+        - 调试
+        - 实现
+        - 单元测试
+        - 堆栈跟踪
+        - 类型脚本
+        - 语法错误
+        - 接口
+      math:
+        - integral
+        - matrix
+        - equation
+        - derivative
+        - calculus
+        - algebra
+        - polynomial
+        - 积分
+        - 矩阵
+        - 方程
+        - 导数
+        - 微积分
+        - 代数
+        - 多项式
+        - 概率
+        - 求解
       # "tone" dropped from task detection: as a SUBSTRING it false-matches
       # "mile{stone}s" → spurious writing task. It stays in the writing_kw
       # dimension (word-boundary matched there, so it is safe).
-      writing: ["essay", "rewrite", "draft", "summarize", "paraphrase", "proofread", "article", "论文", "改写", "草稿", "总结", "转述", "校对", "文章", "润色", "标题"]
-      extraction: ["extract", "parse", "json from", "fields", "pull out", "structured data", "提取", "解析", "JSON 中", "字段", "抽取", "结构化数据", "提取字段", "抽取实体"]
-      web: ["search the web", "browse", "look up online", "latest news", "google for", "搜索网页", "浏览", "在线查询", "最新新闻", "谷歌搜索", "查找网页"]
-      data: ["csv", "dataframe", "aggregate", "sql", "group by", "spreadsheet", "pivot table", "数据框", "聚合", "分组", "电子表格", "透视表", "数据集", "查询"]
-      vision: ["image", "screenshot", "this picture", "photo", "this diagram", "this chart", "图像", "截图", "这张图片", "照片", "流程图", "图表", "屏幕截图"]
+      writing:
+        - essay
+        - rewrite
+        - draft
+        - summarize
+        - paraphrase
+        - proofread
+        - article
+        - 论文
+        - 改写
+        - 草稿
+        - 总结
+        - 转述
+        - 校对
+        - 文章
+        - 润色
+        - 标题
+      extraction:
+        - extract
+        - parse
+        - json from
+        - fields
+        - pull out
+        - structured data
+        - 提取
+        - 解析
+        - JSON 中
+        - 字段
+        - 抽取
+        - 结构化数据
+        - 提取字段
+        - 抽取实体
+      web:
+        - search the web
+        - browse
+        - look up online
+        - latest news
+        - google for
+        - 搜索网页
+        - 浏览
+        - 在线查询
+        - 最新新闻
+        - 谷歌搜索
+        - 查找网页
+      data:
+        - csv
+        - dataframe
+        - aggregate
+        - sql
+        - group by
+        - spreadsheet
+        - pivot table
+        - 数据框
+        - 聚合
+        - 分组
+        - 电子表格
+        - 透视表
+        - 数据集
+        - 查询
+      vision:
+        - image
+        - screenshot
+        - this picture
+        - photo
+        - this diagram
+        - this chart
+        - 图像
+        - 截图
+        - 这张图片
+        - 照片
+        - 流程图
+        - 图表
+        - 屏幕截图
       # security (eval-v2 cybersecurity domain). Conservative, multi-word
       # keywords; paired with a raised task_activation.security (>= 2.0) so a
       # single lone hit (e.g. "explain what XSS is") does NOT false-activate.
-      security: ["cve-", "buffer overflow", "sql injection", "exploit", "privilege escalation", "xss", "reverse engineer", "cryptanalysis", "ctf", "command injection", "remote code execution", "缓冲区溢出", "SQL 注入", "漏洞利用", "权限提升", "逆向工程", "密码分析", "命令注入", "远程代码执行", "越权", "访问控制"]
+      security:
+        - cve-
+        - buffer overflow
+        - sql injection
+        - exploit
+        - privilege escalation
+        - xss
+        - reverse engineer
+        - cryptanalysis
+        - ctf
+        - command injection
+        - remote code execution
+        - 缓冲区溢出
+        - SQL 注入
+        - 漏洞利用
+        - 权限提升
+        - 逆向工程
+        - 密码分析
+        - 命令注入
+        - 远程代码执行
+        - 越权
+        - 访问控制
     tool_prefixes:
-      web: ["browser_", "web_"]
-      coding: ["code_", "shell_", "fs_"]
-      data: ["sql_", "sheet_"]
+      web:
+        - browser_
+        - web_
+      coding:
+        - code_
+        - shell_
+        - fs_
+      data:
+        - sql_
+        - sheet_
     # web raised to 3.0 (a lone URL must not false-trigger); security raised to
     # 2.0 (a single lone keyword like "xss" must not false-trigger — needs >= 2
     # keyword hits, i.e. a clearly security-laden request).
     task_activation: { web: 3.0, security: 2.0 }
     overrides:
-      heartbeat_tokens: ["HEARTBEAT_OK"]
-      exact_confirmation_tokens: ["yes", "no", "sure", "got it", "ok", "thanks", "是", "否", "可以", "好的", "谢谢", "对", "嗯", "行", "好", "没问题", "收到", "明白", "知道了"]
+      heartbeat_tokens:
+        - HEARTBEAT_OK
+      exact_confirmation_tokens:
+        - yes
+        - no
+        - sure
+        - got it
+        - ok
+        - thanks
+        - 是
+        - 否
+        - 可以
+        - 好的
+        - 谢谢
+        - 对
+        - 嗯
+        - 行
+        - 好
+        - 没问题
+        - 收到
+        - 明白
+        - 知道了
       # Low-cost automation guards production monitor/cron probes from being
       # escalated just because the request exposes many tools or names a
       # MONITOR.md path. BOTH marker groups must match, and true long-context
       # fit is left to the capability filter after lane selection.
       low_cost_automation:
-        intent_markers: ["[cron:", "chief-monitor", "architect-monitor", "MONITOR.md"]
-        no_reply_markers: ["NO_REPLY", "nothing to action", "无事不回复", "没事不回复", "无需回复"]
+        intent_markers:
+          - "[cron:"
+          - chief-monitor
+          - architect-monitor
+          - MONITOR.md
+        no_reply_markers:
+          - NO_REPLY
+          - nothing to action
+          - 无事不回复
+          - 没事不回复
+          - 无需回复
       # Cheap-model low-risk keeps short current-turn read/check/status requests
       # on the cheap lane when the client explicitly asked for a cheap model,
       # even if the transcript carries a large history or many tools. It is
@@ -194,9 +649,16 @@ classifier:
         current_turn_max_chars: 300
         low_risk_markers: ["check", "inspect", "status", "health", "read", "list", "show", "summarize", "report", "monitor", "look at", "see if", "查看", "检查", "状态", "健康", "读取", "列出", "展示", "总结", "报告", "监控"]
         blocked_markers: ["debug", "fix", "implement", "refactor", "modify", "edit", "patch", "write", "create", "generate", "delete", "deploy", "release", "security", "vulnerability", "exploit", "prove", "derive", "calculate", "solve", "调试", "修复", "实现", "重构", "修改", "编辑", "补丁", "编写", "创建", "生成", "删除", "部署", "发布", "安全", "漏洞", "利用", "证明", "推导", "计算", "求解"]
-      formal_logic_keywords: ["⊢", "∴", "modus ponens", "first-order logic", "充分必要", "反证法", "归纳法"]
+      formal_logic_keywords:
+        - ⊢
+        - ∴
+        - modus ponens
+        - first-order logic
+        - 充分必要
+        - 反证法
+        - 归纳法
       tools_floor: standard
-      long_context_token_threshold: 64000  # capability signal (NOT a task_type); bumped 50k->64k to match llm-router lanes.yaml long_context anchor
+      long_context_token_threshold: 64000 # capability signal (NOT a task_type); bumped 50k->64k to match llm-router lanes.yaml long_context anchor
       long_context_floor: complex
       short_message_max_chars: 50
     momentum:
@@ -226,17 +688,18 @@ classifier:
   # EvalConfigSchema (@helm/shared): temperature/on_failure/cache.key are locked,
   # max_tokens capped at 1024. Downstream eval modules read this parsed object.
   eval:
-    enabled: false                 # default OFF (non-negotiable). Layer-2 needs a
-                                    # working eval model — the eval client sends
-                                    # `model` straight to providers[0] — so turning
-                                    # it on requires a configured/supported provider.
-                                    # Opt in per deployment once that model exists.
+    enabled: true
+      # default OFF (non-negotiable). Layer-2 needs a
+      # working eval model — the eval client sends
+      # `model` straight to providers[0] — so turning
+      # it on requires a configured/supported provider.
+      # Opt in per deployment once that model exists.
     # The eval client sends this id DIRECTLY on the wire to the primary provider
     # (official DeepSeek, providers[0]), bypassing the registry — so it MUST be a
     # real bare upstream id DeepSeek accepts. `deepseek-v4-flash` is the cheap/fast
     # tier (non-stream OK, json-capable); its eval_usd is priced via the bare
     # `deepseek-v4-flash` key in pricing.yaml.
-    model: deepseek-v4-flash
+    model: economy
     temperature: 0
     max_tokens: 256
     # extra_body is merged VERBATIM onto the eval model's wire request (eval.client →
@@ -249,17 +712,15 @@ classifier:
     # max_tokens always win over extra_body; see classify.ts invokeModel.)
     extra_body:
       thinking: { type: disabled }
-    timeout_ms: 3000               # PER-CANDIDATE deadline (ms): forwarded to the loopback
-                                    # executor so a slow head model (e.g. codex gpt-5.4-mini,
-                                    # p50≈5s) TIMES OUT and FALLS BACK to the next candidate
-                                    # (breaker fault + advance), instead of aborting the whole
-                                    # eval as a client_abort. Repeated timeouts open its breaker.
-    outer_timeout_ms: 8000         # TOTAL eval budget (ms) across fallback hops — strictly > the
-                                    # per-candidate deadline. The final consumer guard: if the
-                                    # chain can't decide within this, abort + fail open to balanced.
+    timeout_ms: 3000
+      # inner (runner) timeout — covers a real cross-region eval
+      # round-trip (~1s with reasoning disabled) with margin.
+      # 250ms lost every race in production → eval_timeout on
+      # every cache-miss prompt; balanced was the only outcome.
+    outer_timeout_ms: 8000 # outer (consumer) timeout — strictly-later backstop (> inner)
     on_failure: balanced
     cache:
       enabled: true
       key: content_hash
       ttl_sec: 300
-      max_entries: 5000            # LRU capacity (eval.cache)
+      max_entries: 5000 # LRU capacity (eval.cache)

@@ -12,6 +12,9 @@ const TEST_KEY = process.env.HELM_TEST_KEY ?? "helm_live_e2e_testkey";
 const DATA_DIR = process.env.HELM_DATA_DIR ?? "./.e2e-data";
 const DB_PATH = `${DATA_DIR}/helm.db`;
 
+// The synced config enables MCP OAuth; keep this hermetic server self-contained.
+process.env.HELM_OAUTH_ENC_KEY ??= Buffer.alloc(32, 11).toString("base64");
+
 // Fresh data dir each run so the seeded key is the only one (and bootstrap is a
 // no-op because a key already exists).
 rmSync(DATA_DIR, { recursive: true, force: true });

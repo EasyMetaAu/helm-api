@@ -477,20 +477,20 @@ describe("default config activates capability filter + cost (alias-namespace ali
       now: clock(),
       signal: new AbortController().signal,
     });
-    // Expand the REAL shipped `json` lane: primary deepseek/deepseek-v4-flash, then
+    // Expand the REAL shipped `json` lane: primary openai-codex/gpt-5.6-terra, then
     // balanced (whose tail is zenmux/auto + openrouter/auto, both json-incapable).
     const chain = expandChain("json");
-    expect(chain).toContain("deepseek/deepseek-v4-flash");
+    expect(chain).toContain("openai-codex/gpt-5.6-terra");
     expect(chain).toContain("zenmux/auto");
     expect(chain).toContain("openrouter/auto");
     const out = await execute(plan(chain), req({ response_format: { type: "json_object" } }));
     expect(out.final.status).toBe("ok");
-    // The json primary deepseek/deepseek-v4-flash is json-capable AND serves
+    // The json primary openai-codex/gpt-5.6-terra is json-capable AND serves
     // non-stream requests, so it lands FIRST — the json-incapable */auto tails
     // (which WOULD be pruned, proven head-on by the previous test) are never
     // reached. The upstream `model` is the bare provider_model.
-    if (out.final.status === "ok") expect(out.final.alias).toBe("deepseek/deepseek-v4-flash");
-    expect(calls).toEqual(["deepseek-v4-flash"]);
+    if (out.final.status === "ok") expect(out.final.alias).toBe("openai-codex/gpt-5.6-terra");
+    expect(calls).toEqual(["openai-codex/gpt-5.6-terra"]);
   });
 
   it("a chain of ONLY json-incapable candidates → capability_unsatisfiable (422 class)", async () => {

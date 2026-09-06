@@ -36,7 +36,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # PRIMARY STATIC FALLBACK = official DeepSeek. The quality lanes now lead with the
 # synthesized `openai-codex/*` subscription aliases and then the static official
-# OpenAI GPT-5.6/GPT-6 Astra API aliases below. The former self-built `openai-crs` relay
+# OpenAI GPT-5.6 API aliases below. The former self-built `openai-crs` relay
 # (la.atmy.work) was deleted: it WAS just a proxy in front of a ChatGPT/Codex
 # subscription, which Helm now connects natively via the built-in `openai-codex`
 # OAuth preset (admin → Providers → Connect). That preset is SYNTHESIZED at
@@ -47,8 +47,8 @@
 # back-fill / skip to the next fallback), never a 5xx.
 providers:
   # PRIMARY provider (providers[0]). Backs the default path, the Layer-2 eval
-  # call, and the Phase-0 passthrough when its optional DEEPSEEK_API_KEY is set.
-  # Without that key, its aliases are skipped. Official DeepSeek OpenAI-compatible API
+  # call, and the Phase-0 passthrough; its credential (DEEPSEEK_API_KEY) is
+  # mandatory (fail-closed if unset). Official DeepSeek OpenAI-compatible API
   # (https://api.deepseek.com). alias == catalog/pricing key; provider_model is
   # the real upstream id sent on the wire.
   - name: deepseek
@@ -88,10 +88,10 @@ providers:
       # lanes do not automatically spend through this ZenMux alias.
       - alias: zenmux/gpt-5.5
         provider_model: openai/gpt-5.5
-      # OpenAI IMAGE GENERATION (Images API). The client-facing `gpt-image-2` lane
-      # leads here for low-cost generation, then falls back to official OpenAI for
-      # edits because ZenMux currently rejects /images/edits for this catalog model.
-      - alias: zenmux/gpt-image-2
+      # OpenAI IMAGE GENERATION (Images API). A bare alias so OpenAI clients can pin
+      # `model: gpt-image-2` directly; served via the dedicated POST /v1/images/
+      # generations route (NOT chat). Verified live 2026-06-28.
+      - alias: gpt-image-2
         provider_model: openai/gpt-image-2
       # Gemini is served via the NATIVE Vertex wire instead — see the
       # `zenmux-vertex` provider below (issue #217). The former OpenAI-compat
@@ -183,13 +183,14 @@ providers:
 
   # ─── OFFICIAL image-generation providers ───
   # Direct aliases remain available for explicit requests. Text aliases require a
-  # custom-model key; exact image aliases accept any valid key. The shipped GPT image
-  # chain keeps official OpenAI behind ZenMux as an operation fallback; gemini-image
-  # still uses Google direct with ZenMux failover. Keys are env-var NAMES, never plaintext.
+  # custom-model key; exact image aliases accept any valid key. The shipped gpt-image
+  # lane excludes official OpenAI for cost; gemini-image still uses Google direct
+  # with ZenMux failover. Keys are env-var NAMES, never plaintext.
 
-  # OpenAI OFFICIAL — direct Responses/Chat models for GPT-5.6/GPT-6 Astra, plus Images API
-  # for gpt-image-2. Text aliases require explicit custom-model access; the official
-  # image alias is the fallback for operations the ZenMux relay cannot serve.
+  # OpenAI OFFICIAL — direct Responses/Chat models for GPT-5.6, plus Images API
+  # for gpt-image-2. Shipped lanes do not reference these paid OpenAI aliases;
+  # text aliases require explicit custom-model access; the exact image alias accepts
+  # any valid key through the dedicated image endpoint.
   - name: openai
     type: openai
     base_url: https://api.openai.com/v1

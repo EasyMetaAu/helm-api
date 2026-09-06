@@ -310,13 +310,13 @@ const CASES: GoldenCase[] = [
     selected_lane: "balanced",
   },
 
-  // — vision (vision task lane resolved by task_type) —
+  // — vision (remote classifier policy keeps simple vision on economy) —
   {
     name: "vision image attachment",
     request: req("describe this screenshot", { attachments: [{ type: "image" }] }),
     task_type: "vision",
     complexity: "simple",
-    selected_lane: "vision",
+    selected_lane: "economy",
   },
 
   // — web (raised activation: needs prefix + url; no `web` lane -> complexity) —
