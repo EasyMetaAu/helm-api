@@ -3,6 +3,7 @@ name: CI
 on:
   # Keep the workflow definition under default-branch control. The test jobs
   # explicitly check out the PR merge ref below, on disposable hosted runners.
+  pull_request:
   pull_request_target:
   push:
     branches: [main]
