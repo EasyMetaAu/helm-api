@@ -3,6 +3,7 @@ name: CI
 on:
   # Keep the workflow definition under default-branch control. The test jobs
   # explicitly check out the PR merge ref below, on disposable hosted runners.
+  "pull_request":
   pull_request_target:
   push:
     branches: [main]
@@ -113,11 +114,7 @@ jobs:
   # preconfigured self-hosted pool.
   e2e:
     timeout-minutes: 10
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request_target' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","docker"]') }}
-    env:
-      # Do not trust a persistent runner's possibly partial global browser cache;
-      # install and execute against one clean per-run directory.
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/helm-playwright
+    runs-on: ${{ fromJSON((github.event_name == 'pull_request_target' || github.event_name == 'pull_request') && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","docker"]') }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -150,8 +147,8 @@ jobs:
       # build first. admin.spec also serves apps/admin/build.
       - run: pnpm build
       - name: Install Playwright Chromium (admin.spec drives a real browser)
-        run: pnpm --filter @helm/gateway exec playwright install chromium
-      - run: pnpm test:e2e
+        run: PLAYWRIGHT_BROWSERS_PATH="${RUNNER_TEMP}/helm-playwright" pnpm --filter @helm/gateway exec playwright install chromium
+      - run: PLAYWRIGHT_BROWSERS_PATH="${RUNNER_TEMP}/helm-playwright" pnpm test:e2e
 
   # Builds and smoke-tests the real gateway Docker image (docs/10). Kept fully
   # independent of `verify` (no `needs`) so the unit gates run on their own and
@@ -231,7 +228,7 @@ jobs:
   # separate default-branch-controlled job never checks out or executes PR code;
   # it is the only job allowed to publish stable required checks on the PR head.
   report_pr_checks:
-    if: always() && github.event_name == 'pull_request_target'
+    if: always() && github.event_name == 'pull_request_target' || (always() && github.event_name == 'pull_request')
     needs: [verify, store, e2e, docker]
     runs-on: ubuntu-24.04
     permissions:
@@ -307,7 +304,7 @@ jobs:
           [[ "${E2E_RESULT}" == "success" ]] || { echo "::error::e2e: ${E2E_RESULT}"; exit 1; }
           [[ "${DOCKER_RESULT}" == "success" ]] || { echo "::error::docker: ${DOCKER_RESULT}"; exit 1; }
 
-          if [[ "${EVENT_NAME}" == "pull_request_target" ]]; then
+          if [[ "${EVENT_NAME}" == "pull_request_target" || "${EVENT_NAME}" == "pull_request" ]]; then
             [[ "${REPORT_RESULT}" == "success" ]] || { echo "::error::report_pr_checks: ${REPORT_RESULT}"; exit 1; }
           else
             [[ "${REPORT_RESULT}" == "skipped" ]] || { echo "::error::unexpected report_pr_checks result: ${REPORT_RESULT}"; exit 1; }
