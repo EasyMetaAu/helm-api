@@ -46,7 +46,7 @@ export function echoResponse(model: string) {
 // gateway forwards the resolved provider_model upstream as `model`, so the mock
 // matches the bare wire id and forces execution fallback to the OpenRouter mirror.
 export const FAIL_PRIMARY_SENTINEL = "__HELM_FAIL_PRIMARY__";
-export const FAIL_PRIMARY_MODEL = "deepseek-v4-flash";
+export const FAIL_PRIMARY_MODEL = "deepseek/deepseek-v4-flash";
 
 // Image single-write steering: a sentinel in the image prompt fails ONLY the
 // `gemini-image` lane's PRIMARY (gemini-3.1-flash-image). The gateway must return

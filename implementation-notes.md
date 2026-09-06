@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-09-06 · Remote 配置同步后的目录与 e2e 一致性（Config sync，docs/04/05，原则 2/3/6）
+
+- Remote 的通用 lane 以 `gpt-5.6-*` 子 lane 为主候选，并移除了官方 DeepSeek 直连候选；e2e 断言同步为实际的 lane 名与 OpenRouter fallback，未改运行时代码。
+- `providers.yaml` 暴露 bare alias `gpt-image-2`，但 capability override 仍使用旧的 `zenmux/gpt-image-2` key，导致图片端点误报 404；将 capability key 对齐为 `gpt-image-2`。GPT-6 Astra lane 与四个兼容别名保持原样。
+- Remote 默认开启 eval；e2e 的关闭场景改为显式 header，慢 eval 按实际边界断言 `eval_timeout`。测试专用 MCP OAuth 签名 key 只存在于 hermetic launcher，不影响生产配置。
+
 ## 2026-09-06 · 记录 Responses 流内上游错误事件（docs/07，原则 8）
 
 - Decision error detail now records `upstream_event` (`error` or `response.failed`) for in-band SSE failures. HTTP status remains nullable because the upstream may return the error after opening an HTTP 200 stream.
@@ -64,15 +70,9 @@
 - HTTP 200 后在终态前发生 EOF、读超时/异常、本地 response-work 拒绝、空 body 或缺少 SSE 结尾分隔符，都属于上游可能已接收但结果不明，记录 `after_response_before_terminal`（已解析 preamble 的外层 guard 记录 `after_response_created_before_output`）并停止 sibling/provider fallback；即使缺少末尾空行且随后读失败，完整可解析的 `response.failed` / `error` 仍作为明确拒绝保留，可在无真实输出时 fallback。
 - 明确拒绝仍保留既有安全恢复：401 刷新后一次重发、503/529 最多三次总尝试、WebSocket 握手及可证明发送前关闭总计三次尝试。无 schema、migration、配置或依赖变化。
 
-## 2026-09-01 · Codex 超大完整历史在发送前缩图并压缩（Responses / docs/05，原则 3/7/8）
-
-- 生产失败请求在单个完整历史中重复携带 11–24 张内联 Base64 图片，正文达到 46–49 MiB；Codex 客户端按 token 而非 wire bytes 触发自动压缩，Helm 的后台 Memory compaction 也不修改当前请求，因此会先撞上 WebSocket/HTTP 传输上限。
-- 仅对没有 `previous_response_id`、准备走 Codex WebSocket 的完整历史做 32 MiB 发送前保护：先将 PNG/JPEG/WebP 内联图片转成最长边 2048px、质量 82 的 WebP（不放大，单图输入像素上限 1600 万），仍超限再调用同账号 `/responses/compact` 并用其 `output` 替换历史；小请求和增量续接保持原样。官方 Responses 图片输入合同支持 WebP data URL。
-- 缩图或 compact 失败均 fail-open 到既有 `1009 → HTTP` 兜底，不删除图片或私有 Responses item；compact 结果只有比当前正文更小时才采用。缩图在 Base64 解码前预留源文件字节，并在变换期间另行预留解码像素内存；每请求最多处理 12 张/3200 万总像素及单图 1600 万像素，并在图片之间响应客户端取消。新增 `sharp` 是唯一依赖，生产镜像必须验证 native addon 可加载。
-
 ## 历史条目摘要（最新要点）
 
-- **2026-09-01 · Codex Responses 超大首轮 WebSocket 的 HTTP 生命周期**：仅在无续接 ID、无任何上游 frame 且收到 close 1009 时单次回落 HTTP，之后同 ingress session 保持 HTTP；未知结果与跨账号续接仍 fail-closed。完整记录见 Git 历史。
+- **2026-09-01 · Codex 超大完整历史发送前保护**：无续接 ID 的 Codex WebSocket 历史超过 32 MiB 时，先限额缩图、仍超限再同账号 compact；仅采用更小结果，失败沿既有安全边界降级。完整记录见 Git 历史。
 
 ## 更早历史总览
 

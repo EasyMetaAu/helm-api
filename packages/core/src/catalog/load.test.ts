@@ -464,7 +464,7 @@ describe("loadRuntimeCatalog", () => {
       "xai/grok-imagine-video-1.5-preview",
       "xai/grok-imagine-video",
       "xai/grok-composer-2.5-fast",
-      "zenmux/gpt-image-2",
+      "gpt-image-2",
       "zenmux/auto",
       "openrouter/auto",
     ]);
@@ -479,7 +479,7 @@ describe("loadRuntimeCatalog", () => {
       Object.keys(pricing)
         .filter((alias) => !(alias in capabilities))
         .sort(),
-    ).toEqual(["deepseek-v4-flash", "gpt-image-2", "openai-codex/codex-auto-review"]);
+    ).toEqual(["deepseek-v4-flash", "openai-codex/codex-auto-review"]);
     const unexpectedUnpriced = Object.keys(capabilities).filter((alias) => {
       const rates = catalog.get(alias)?.pricing;
       return (

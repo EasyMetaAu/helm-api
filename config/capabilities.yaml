@@ -414,7 +414,7 @@ gemini-3-pro-image:
 # OpenAI Images API model (POST /v1/images/generations, NOT chat). The catalog
 # entry exists so the route's cost lookup (catalog.get → pricing) resolves; the
 # capability flags are not used by the images route (it bypasses the lane filter).
-zenmux/gpt-image-2:
+gpt-image-2:
   supportsTools: false
   jsonOutput: none
   supportsVision: true

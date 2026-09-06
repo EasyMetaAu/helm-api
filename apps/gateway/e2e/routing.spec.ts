@@ -23,25 +23,25 @@ const AUTH = { Authorization: `Bearer ${TEST_KEY}`, "Content-Type": "application
 // NO-SUBSCRIPTION FAIL-OPEN (the CI reality). Keep configured subscription
 // primaries distinct from the keyed static models that actually execute when no
 // OAuth account is bound.
-const ECONOMY_CONFIGURED_PRIMARY = "openai-codex/gpt-5.6-luna";
-const PREMIUM_CONFIGURED_PRIMARY = "openai-codex/gpt-5.6-sol";
-const BALANCED_CONFIGURED_PRIMARY = "openai-codex/gpt-5.6-terra";
-const ECONOMY_EXECUTION_FALLBACK = "deepseek/deepseek-v4-flash";
-const QUALITY_EXECUTION_FALLBACK = "deepseek/deepseek-v4-pro";
+const ECONOMY_CONFIGURED_PRIMARY = "gpt-5.6-luna";
+const PREMIUM_CONFIGURED_PRIMARY = "gpt-5.6-sol";
+const BALANCED_CONFIGURED_PRIMARY = "gpt-5.6-terra";
+const ECONOMY_EXECUTION_FALLBACK = "openrouter/deepseek-v4-flash";
+const QUALITY_EXECUTION_FALLBACK = "openrouter/deepseek-v4-pro";
 // Paid OpenAI aliases are absent from shipped lanes but deliberately remain
 // available to a custom-model key as explicit, operator-controlled targets.
 const EXPLICIT_DIRECT_OPENAI_ALIAS = "openai/gpt-5.6-luna";
 const EXPLICIT_DIRECT_OPENAI_WIRE = "gpt-5.6-luna";
 // After the first executable economy candidate returns 5xx, the OpenRouter
 // mirror is the next keyed static candidate.
-const ECONOMY_NEXT = "openrouter/deepseek-v4-flash";
+const ECONOMY_NEXT = "openrouter/auto";
 
 // The upstream WIRE model ids the gateway sends (config/providers.yaml
 // `provider_model`), echoed back by the mock as `model`.
 // The routing ALIAS is surfaced separately via `x-helm-final-model`.
-const ECONOMY_EXECUTION_FALLBACK_WIRE = "deepseek-v4-flash";
-const QUALITY_EXECUTION_FALLBACK_WIRE = "deepseek-v4-pro";
-const ECONOMY_NEXT_WIRE = "deepseek/deepseek-v4-flash";
+const ECONOMY_EXECUTION_FALLBACK_WIRE = "deepseek/deepseek-v4-flash";
+const QUALITY_EXECUTION_FALLBACK_WIRE = "deepseek/deepseek-v4-pro";
+const ECONOMY_NEXT_WIRE = "openrouter/auto";
 
 async function expectConfiguredLanePrimary(
   request: import("@playwright/test").APIRequestContext,

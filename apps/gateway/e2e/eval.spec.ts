@@ -48,9 +48,9 @@ const UNCERTAIN = { ...AUTH, "x-helm-rules-threshold": "0.99" };
 // executes in hermetic CI. No OAuth accounts are bound in this fixture, so the
 // subscription aliases fail open and both balanced/premium eventually serve the
 // keyed DeepSeek Pro fallback through the local mock.
-const BALANCED_CONFIGURED_PRIMARY = "openai-codex/gpt-5.6-terra";
-const PREMIUM_CONFIGURED_PRIMARY = "openai-codex/gpt-5.6-sol";
-const QUALITY_EXECUTION_FALLBACK = "deepseek/deepseek-v4-pro";
+const BALANCED_CONFIGURED_PRIMARY = "gpt-5.6-terra";
+const PREMIUM_CONFIGURED_PRIMARY = "gpt-5.6-sol";
+const QUALITY_EXECUTION_FALLBACK = "openrouter/deepseek-v4-pro";
 
 // An intentionally ambiguous prompt: no strong Layer-1 keyword signal. Paired
 // with the UNCERTAIN header (rules threshold 0.99) the cascade is guaranteed to
@@ -105,7 +105,7 @@ test.describe("eval cascade e2e", () => {
   }) => {
     const res = await request.post("/v1/chat/completions", {
       data: chat(ambiguous("s1")),
-      headers: UNCERTAIN, // no x-helm-eval header → eval stays OFF (default)
+      headers: { ...UNCERTAIN, "x-helm-eval": "off" },
     });
     expect(res.status()).toBe(200);
     expect(res.headers()["x-helm-lane"]).toBe("balanced");
@@ -199,7 +199,7 @@ test.describe("eval cascade e2e", () => {
     await expectConfiguredLanePrimary(request, "balanced", BALANCED_CONFIGURED_PRIMARY);
     expect(res.headers()["x-helm-final-model"]).toBe(QUALITY_EXECUTION_FALLBACK);
     expect(res.headers()["x-helm-decided-by"]).toBe("fallback");
-    expect(res.headers()["x-helm-fallback-reason"]).toBe("eval_provider_error");
+    expect(res.headers()["x-helm-fallback-reason"]).toBe("eval_timeout");
   });
 
   // ── Scenario 6: rules high-confidence → hit-stop, eval never consulted ─────
@@ -284,7 +284,7 @@ test.describe("eval cascade e2e", () => {
       headers: { ...UNCERTAIN, "x-helm-eval": "on" },
     });
     expect(first.status()).toBe(200);
-    expect(first.headers()["x-helm-fallback-reason"]).toBe("eval_provider_error");
+    expect(first.headers()["x-helm-fallback-reason"]).toBe("eval_timeout");
     const afterFirst = await evalCalls(request);
     expect(afterFirst).toBeGreaterThanOrEqual(1);
 
@@ -293,7 +293,7 @@ test.describe("eval cascade e2e", () => {
       headers: { ...UNCERTAIN, "x-helm-eval": "on" },
     });
     expect(second.status()).toBe(200);
-    expect(second.headers()["x-helm-fallback-reason"]).toBe("eval_provider_error");
+    expect(second.headers()["x-helm-fallback-reason"]).toBe("eval_timeout");
     // the failed result was NOT cached → the endpoint is hit again (no permanent
     // wedge on a transient blip, CLAUDE.md principle 3).
     expect(await evalCalls(request)).toBeGreaterThan(afterFirst);
