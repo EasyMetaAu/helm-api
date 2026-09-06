@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-09-06 · 对齐 Codex Lite 身份与流式控制事件（Provider / Responses，docs/04/05/07，原则 3/5/8）
+
+- 对照 Codex `008bbd5884122dc95aaece19ecfe0fc6a59dcf36`：Lite 完整请求和增量续接保留带前缀的输入项 ID；Helm 旧 `store:false` 清理会删除它们。现用已有 Lite 识别逻辑排除旧清理，保留原生历史；普通 Responses 的兼容清理不变。
+- `response.metadata`、`codex.response.metadata`、`codex.rate_limits` 和 `responsesapi.websocket_timing` 属于控制信息。它们不再提前提交执行尝试；正常响应逐字节保留，输出前明确过载沿既有有界策略恢复。真实输出、工具调用、加密 reasoning、未知事件及结果不明断连的禁止重放边界不变。
+- 两条生产失败请求确实分别丢失 157/239 个 ID；控制事件导致错误直接下传已由本地网关与账号池回归用例复现，但生产未保留这些失败的完整 SSE，因此不能把两项差异直接认定为全部线上故障的唯一原因。补丁尚未部署，真实会话恢复仍须单独验证。
+
 ## 2026-09-06 · Remote 配置同步后的目录与 e2e 一致性（Config sync，docs/04/05，原则 2/3/6）
 
 - Remote 的通用 lane 以 `gpt-5.6-*` 子 lane 为主候选，并移除了官方 DeepSeek 直连候选；e2e 断言同步为实际的 lane 名与 OpenRouter fallback，未改运行时代码。
@@ -53,27 +59,10 @@
 - Manual 模式以运维方保存的 `enabledModels` 为权威，Codex 模型即使尚未出现在账号目录中，也会在 Admin 回读、Lanes 目录和运行时账号池中保留；Automatic 模式仍只跟随上游发现。
 - 自定义 ID 只表示“允许尝试”，不伪造账号 entitlement 或模型能力；账号实际不支持时由上游正常拒绝。没有新增 schema、migration、配置或依赖。
 
-## 2026-09-05 · GPT-6 Astra 官方 API 目录与价格（Provider catalog / routing / cost telemetry，docs/04/05/07，原则 2/3/5/6）
-
-- OpenAI 官方开发者文档现将 `gpt-6-astra` 列为 API 模型：文本+图片输入、文本输出、1,050,000 context、922,000 max input、128,000 max output，支持 reasoning（`low`–`max`，不支持 `none`）、streaming、tools、structured outputs、file/web search 与 prompt caching。
-- 官方标准价格为 input `$10`、cached input `$1`、cache writes `$12.50`、output `$50`/1M tokens；超过 272K 输入时为 `$20`/`$2`/`$25`/`$75`。Helm 将这些值加入 `openai/gpt-6-astra` 的手工 capability/pricing 覆盖，并保留 GPT-5.6 兼容别名与订阅 lane 不变。
-- GPT-6 Astra 不支持 `temperature`、`top_p`、`logprobs`，且不支持 `none` reasoning effort；现有 OpenAI reasoning-model 的 `max_completion_tokens` shim 扩展到该模型。Fast mode 在 EU data residency 下不可用；未新增服务层自动降级。
-
-## 2026-09-05 · Claude Fable 5.1 官方目录与价格（Provider catalog / routing / cost telemetry，docs/04/05/07，原则 2/3/5/6）
-
-- Anthropic 官方模型页现将 `claude-fable-5-1` 列为 Fable 最新 API ID：1M context、128K output、text+image、adaptive thinking（always on，默认 `high`）、tools/computer use/PDF 与 structured output。
-- 官方基础价格为 input `$10`、output `$50`、cache read `$0.25`、5-minute cache write `$12.50`、1-hour cache write `$20`/1M tokens。Helm 的 `claude-fable` lane 先走 5.1，保留 Fable 5 作为订阅兼容回退。
-
-## 2026-09-02 · Codex Responses HTTP 只重放明确拒绝的请求（Responses / provider execution，docs/04/05/07，原则 3/5/8）
-
-- Codex HTTP POST 在 `fetch()` 抛出连接错误或首字节超时后无法证明上游未接收请求；这类结果现在单次终止为 `response_create_outcome_unknown`，记录 `after_send_before_response`，不再由 fetch 层、OAuth sibling 或候选链重放。外部客户端取消保持原分类。
-- HTTP 200 后在终态前发生 EOF、读超时/异常、本地 response-work 拒绝、空 body 或缺少 SSE 结尾分隔符，都属于上游可能已接收但结果不明，记录 `after_response_before_terminal`（已解析 preamble 的外层 guard 记录 `after_response_created_before_output`）并停止 sibling/provider fallback；即使缺少末尾空行且随后读失败，完整可解析的 `response.failed` / `error` 仍作为明确拒绝保留，可在无真实输出时 fallback。
-- 明确拒绝仍保留既有安全恢复：401 刷新后一次重发、503/529 最多三次总尝试、WebSocket 握手及可证明发送前关闭总计三次尝试。无 schema、migration、配置或依赖变化。
-
 ## 历史条目摘要（最新要点）
 
-- **2026-09-01 · Codex 超大完整历史发送前保护**：无续接 ID 的 Codex WebSocket 历史超过 32 MiB 时，先限额缩图、仍超限再同账号 compact；仅采用更小结果，失败沿既有安全边界降级。完整记录见 Git 历史。
+- **2026-09-05 · GPT-6 Astra 官方 API 目录与价格**：官方 API capability/pricing 与 reasoning 参数兼容已加入 override，订阅 lane 保留；定价和限制按对应提交回溯。
 
 ## 更早历史总览
 
-2026-08-30 及更早工作涵盖订阅图片/视频/TTS 的 entitlement、单写与价格边界，Responses HTTP/WebSocket 生命周期、发送前恢复证明、账号与 transport 亲和、超大历史与压缩，OAuth 模型发现、额度窗口、Retry-After、冷却、轮转和缓存，协议互译与 SSE/tool-call 保真、能力/价格目录、路由/分类/fallback/熔断，Memory observe/inject/反思/压缩/保留与并发治理，payload/session 分段持久化、失败记录、SQLite/Postgres 数据完整性与资源保护，Admin/Portal/i18n/可访问性、key 权限/预算/计量，以及构建、CI、Docker、发布和生产验收。具体默认值、兼容限制与历史实测均以对应提交为准；本次压缩前的完整条目可从基线 412c7cde02288d9b33d54a87f93b43925177b294 的本文件及 Git 历史回溯。
+2026-09-05 Fable 5.1 目录/价格、2026-09-02 HTTP 结果不明禁止重放（保留明确拒绝的有界重试）、2026-09-01 超大历史发送前保护已并入历史；完整内容见基线 `8a7df80c6684b10bfa7ff7f4f07f237a92f95d58`。2026-08-30 及更早工作涵盖订阅图片/视频/TTS 的 entitlement、单写与价格边界，Responses HTTP/WebSocket 生命周期、发送前恢复证明、账号与 transport 亲和、超大历史与压缩，OAuth 模型发现、额度窗口、Retry-After、冷却、轮转和缓存，协议互译与 SSE/tool-call 保真、能力/价格目录、路由/分类/fallback/熔断，Memory observe/inject/反思/压缩/保留与并发治理，payload/session 分段持久化、失败记录、SQLite/Postgres 数据完整性与资源保护，Admin/Portal/i18n/可访问性、key 权限/预算/计量，以及构建、CI、Docker、发布和生产验收。具体默认值、兼容限制与历史实测均以对应提交为准；本次压缩前的完整条目可从基线 412c7cde02288d9b33d54a87f93b43925177b294 的本文件及 Git 历史回溯。

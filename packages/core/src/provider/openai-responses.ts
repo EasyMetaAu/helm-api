@@ -689,9 +689,10 @@ function sanitizeStoreFalseInputItems(input: unknown): {
 }
 
 // ChatGPT-account Codex Responses is stricter than the public OpenAI Responses API.
-// It rejects max_output_tokens/temperature and store:false item IDs from prior
-// responses. Keep this shim Codex-only; generic OpenAI Responses passthrough must
-// remain byte-faithful.
+// Legacy requests reject max_output_tokens/temperature and store:false item IDs
+// from prior responses. Responses Lite carries stable prefixed IDs (including its
+// additional_tools prefix); preserve that native history instead of applying the
+// legacy reference cleanup. Generic OpenAI passthrough remains byte-faithful.
 export function sanitizeCodexResponsesNativeBody(body: Record<string, unknown>): {
   body: Record<string, unknown>;
   fixes: CodexResponsesNativeBodyFix[];
@@ -711,7 +712,7 @@ export function sanitizeCodexResponsesNativeBody(body: Record<string, unknown>):
     delete ensureCopy().temperature;
     fixes.add("temperature_removed");
   }
-  if (next.store === false) {
+  if (next.store === false && !bodyUsesResponsesLite(next)) {
     const sanitized = sanitizeStoreFalseInputItems(next.input);
     if (sanitized.referencesStripped || sanitized.emptyReasoningDropped) {
       ensureCopy().input = sanitized.input;

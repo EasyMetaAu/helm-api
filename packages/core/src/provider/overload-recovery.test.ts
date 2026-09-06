@@ -116,18 +116,21 @@ describe("bounded pre-output overload recovery", () => {
     expect(sends).toBe(1);
   });
 
-  it("recovers after one second without relaying the failed preamble", async () => {
+  it.each([
+    preamble,
+    'data: {"type":"response.metadata","headers":{"x-codex-turn-state":"opaque-state"}}\n\n',
+  ])("recovers after one second without relaying the failed preamble: %s", async (start) => {
     vi.useFakeTimers();
     let sends = 0;
     const account = member(async function* () {
       sends++;
-      yield preamble + (sends === 1 ? overload : output);
+      yield start + (sends === 1 ? overload : output);
     });
     const result = drain(pool(account).nativePassthroughStream!(body));
     await vi.advanceTimersByTimeAsync(999);
     expect(sends).toBe(1);
     await vi.advanceTimersByTimeAsync(1);
-    expect((await result).join("")).toBe(preamble + output);
+    expect((await result).join("")).toBe(start + output);
     expect(sends).toBe(2);
   });
 

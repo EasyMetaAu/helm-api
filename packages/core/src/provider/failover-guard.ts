@@ -132,6 +132,15 @@ const responsesClassifier: PreOutputClassifier = {
     if (!obj) return "output";
     const t = obj.type;
     if (t === "response.created" || t === "response.in_progress") return "preamble";
+    // Codex consumes these as routing/safety/timing metadata, not generated output.
+    // Preserve their bytes for the successful attempt without committing a failed one.
+    if (
+      t === "response.metadata" ||
+      t === "codex.response.metadata" ||
+      t === "codex.rate_limits" ||
+      t === "responsesapi.websocket_timing"
+    )
+      return "preamble";
     if (t === "error" || t === "response.failed") return "error";
     if (t === "response.output_item.added" || t === "response.output_item.done") {
       const item = asRecord(obj.item);

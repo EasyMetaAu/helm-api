@@ -30,6 +30,28 @@ const chat = preOutputClassifierFor("openai_chat");
 if (!responses || !anthropic || !chat) throw new Error("classifier missing");
 
 describe("guardPreOutputFailure — openai_responses", () => {
+  it.each([
+    { type: "response.metadata", headers: { "x-codex-turn-state": "opaque-state" } },
+    { type: "response.metadata", metadata: { type: "safety_buffering", retry_model: "gpt-test" } },
+    { type: "codex.response.metadata", metadata: {} },
+    { type: "responsesapi.websocket_timing", duration_ms: 1 },
+    { type: "codex.rate_limits", rate_limits: { allowed: true, limit_reached: false } },
+  ])("keeps Codex control event $type before output eligible for recovery", async (event) => {
+    const forwarded: string[] = [];
+    const frames = [
+      { type: "response.created", response: { id: "resp_test" } },
+      event,
+      { type: "error", error: { code: "server_is_overloaded", message: "busy" } },
+    ].map((value) => `data: ${JSON.stringify(value)}\n\n`);
+    await expect(
+      (async () => {
+        for await (const chunk of guardPreOutputFailure(fromChunks(frames), responses))
+          forwarded.push(chunk);
+      })(),
+    ).rejects.toMatchObject({ providerRaw: { error: { code: "server_is_overloaded" } } });
+    expect(forwarded).toEqual([]);
+  });
+
   it("does not replay an accepted Responses request when its pre-output buffer overflows", async () => {
     const chunk = `event: response.created\ndata: {"type":"response.created"}\n\n${"x".repeat(
       Math.floor(MAX_PRE_OUTPUT_BUFFER_BYTES / 2),
