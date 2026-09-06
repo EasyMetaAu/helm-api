@@ -69,6 +69,95 @@ describe("guardPreOutputFailure — openai_responses", () => {
     await expect(collect(guardPreOutputFailure(src, responses))).rejects.toThrow(UpstreamError);
   });
 
+  const emptyEvents = [
+    { type: "response.output_item.added", item: { type: "reasoning", summary: [] } },
+    { type: "response.output_item.added", item: { type: "message", content: [] } },
+    {
+      type: "response.output_item.done",
+      item: { type: "reasoning", summary: [], encrypted_content: null },
+    },
+    { type: "response.content_part.added", part: { type: "output_text", text: "" } },
+    { type: "response.content_part.done", part: { type: "refusal", refusal: "" } },
+    { type: "response.reasoning_summary_part.added", part: { type: "summary_text", text: "" } },
+    { type: "response.output_text.delta", delta: "" },
+    { type: "response.reasoning_summary_text.delta", delta: "" },
+    { type: "response.reasoning_text.delta", delta: "" },
+    { type: "response.refusal.delta", delta: "" },
+  ];
+  const frame = (event: unknown) => `data: ${JSON.stringify(event)}\n\n`;
+  const overloaded = frame({
+    type: "error",
+    error: { code: "server_is_overloaded", message: "upstream overloaded" },
+  });
+
+  it.each(
+    emptyEvents,
+  )("keeps content-free $type before overload eligible for recovery", async (event) => {
+    const forwarded: string[] = [];
+    await expect(
+      (async () => {
+        for await (const chunk of guardPreOutputFailure(
+          fromChunks([frame({ type: "response.created" }), frame(event), overloaded]),
+          responses,
+        ))
+          forwarded.push(chunk);
+      })(),
+    ).rejects.toMatchObject({ providerRaw: { error: { code: "server_is_overloaded" } } });
+    expect(forwarded).toEqual([]);
+  });
+
+  it("replays content-free lifecycle frames verbatim when real output arrives", async () => {
+    const chunks = [
+      ...emptyEvents.map(frame),
+      frame({ type: "response.output_text.delta", delta: "hello" }),
+    ];
+    expect(await collect(guardPreOutputFailure(fromChunks(chunks), responses))).toEqual(chunks);
+  });
+
+  it("does not replay an accepted empty item when the upstream closes without a terminal error", async () => {
+    await expect(
+      collect(guardPreOutputFailure(fromChunks([frame(emptyEvents[0])]), responses)),
+    ).rejects.toMatchObject({
+      providerRaw: { error: { code: "response_create_outcome_unknown" } },
+    });
+  });
+
+  it.each([
+    {
+      type: "response.output_item.added",
+      item: { type: "message", content: [{ type: "output_text", text: "hello" }] },
+    },
+    {
+      type: "response.output_item.done",
+      item: { type: "reasoning", summary: [{ type: "summary_text", text: "thinking" }] },
+    },
+    { type: "response.output_item.added", item: { type: "message", content: "unexpected" } },
+    { type: "response.content_part.added", part: { type: "output_text", text: "hello" } },
+    {
+      type: "response.reasoning_summary_part.added",
+      part: { type: "summary_text", text: "thinking" },
+    },
+    { type: "response.content_part.added", part: { type: "refusal", refusal: "cannot help" } },
+    {
+      type: "response.output_item.done",
+      item: { type: "reasoning", summary: [], encrypted_content: "opaque" },
+    },
+    {
+      type: "response.output_item.added",
+      item: { type: "function_call", name: "write_file", arguments: "" },
+    },
+    {
+      type: "response.output_item.added",
+      item: { type: "web_search_call", status: "in_progress" },
+    },
+    { type: "response.output_item.added", item: { type: "future_tool" } },
+    { type: "response.content_part.added", part: { type: "future_content" } },
+    { type: "response.output_item.added", item: null },
+  ])("preserves the no-replay boundary for content, tools and unknown $type", async (event) => {
+    const chunks = [frame(event), overloaded];
+    expect(await collect(guardPreOutputFailure(fromChunks(chunks), responses))).toEqual(chunks);
+  });
+
   it("preserves the structured terminal error for fallback classification", async () => {
     const raw = {
       type: "error",

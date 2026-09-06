@@ -104,9 +104,27 @@ function nonEmptyString(value: unknown): boolean {
 }
 
 // ── OpenAI Responses ─────────────────────────────────────────────────────────
-// Preamble: response.created / response.in_progress (emitted unconditionally before
-// any model work). Error: error / response.failed. Everything else (deltas,
-// output_item.added, response.completed/incomplete) is committing output.
+// Only positively identified empty text/reasoning lifecycle events may defer
+// commitment. Tool starts, encrypted reasoning, unknown events and malformed
+// content still commit: replaying them could duplicate work already in progress.
+function responsesPartClass(value: unknown): ChunkClass {
+  const part = asRecord(value);
+  switch (part?.type) {
+    case "output_text":
+    case "summary_text":
+    case "reasoning_text":
+      return part.text === "" ? "preamble" : "output";
+    case "refusal":
+      return part.refusal === "" ? "preamble" : "output";
+    default:
+      return "output";
+  }
+}
+
+function emptyResponsesParts(value: unknown): boolean {
+  return Array.isArray(value) && value.every((part) => responsesPartClass(part) === "preamble");
+}
+
 const responsesClassifier: PreOutputClassifier = {
   classify(data) {
     if (data === "[DONE]") return "output";
@@ -115,6 +133,32 @@ const responsesClassifier: PreOutputClassifier = {
     const t = obj.type;
     if (t === "response.created" || t === "response.in_progress") return "preamble";
     if (t === "error" || t === "response.failed") return "error";
+    if (t === "response.output_item.added" || t === "response.output_item.done") {
+      const item = asRecord(obj.item);
+      if (item?.type === "message" && emptyResponsesParts(item.content)) return "preamble";
+      if (
+        item?.type === "reasoning" &&
+        emptyResponsesParts(item.summary) &&
+        (item.content === undefined || emptyResponsesParts(item.content)) &&
+        (item.encrypted_content == null || item.encrypted_content === "")
+      )
+        return "preamble";
+    }
+    if (
+      t === "response.content_part.added" ||
+      t === "response.content_part.done" ||
+      t === "response.reasoning_summary_part.added" ||
+      t === "response.reasoning_summary_part.done"
+    )
+      return responsesPartClass(obj.part);
+    if (
+      (t === "response.output_text.delta" ||
+        t === "response.reasoning_summary_text.delta" ||
+        t === "response.reasoning_text.delta" ||
+        t === "response.refusal.delta") &&
+      obj.delta === ""
+    )
+      return "preamble";
     return "output";
   },
   errorMessage(data) {

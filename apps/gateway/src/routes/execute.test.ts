@@ -6555,6 +6555,70 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
     expect(out.nativePassthrough).toBe(true);
   });
 
+  it("advances the model chain after an empty Responses item then overload", async () => {
+    const output = 'data: {"type":"response.output_text.delta","delta":"recovered"}\n\n';
+    const head = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: vi
+        .fn()
+        .mockReturnValue(
+          gen([
+            'data: {"type":"response.created"}\n\n',
+            'data: {"type":"response.output_item.added","item":{"type":"reasoning","summary":[]}}\n\n',
+            'data: {"type":"error","error":{"code":"server_is_overloaded","message":"overloaded"}}\n\n',
+          ]),
+        ),
+    };
+    const tail = {
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthroughStream: vi.fn().mockReturnValue(gen([output])),
+    };
+    const execute = createExecute({
+      defaultProvider: head,
+      providers: new Map([
+        ["codex-a", head],
+        ["codex-b", tail],
+      ]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "codex-a",
+          providerModel: "gpt-6-astra",
+          targetProviderProtocol: "openai_responses",
+        },
+        b: {
+          providerName: "codex-b",
+          providerModel: "gpt-5.6-sol",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const out = await execute(
+      plan(["a", "b"]),
+      req({
+        protocol: "openai_responses",
+        stream: true,
+        native_request: createNativePassthroughCarrier({
+          protocol: "openai_responses",
+          body: { model: "auto", input: [], stream: true },
+          headers: {},
+        }),
+      }),
+    );
+    expect(out.attempts.map((attempt) => attempt.status)).toEqual(["error", "ok"]);
+    expect(out.final).toMatchObject({ status: "ok", alias: "b" });
+    expect(tail.nativePassthroughStream).toHaveBeenCalledTimes(1);
+    const chunks: string[] = [];
+    for await (const chunk of out.stream ?? []) chunks.push(chunk);
+    expect(chunks).toEqual([output]);
+  });
+
   it("does not advance the chain after HTTP response.created then EOF", async () => {
     async function* acceptedThenEof(): AsyncGenerator<string> {
       yield 'event: response.created\ndata: {"type":"response.created"}\n\n';

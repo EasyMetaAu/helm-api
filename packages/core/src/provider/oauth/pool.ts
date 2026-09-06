@@ -73,6 +73,47 @@ function isRetryableTransientError(err: unknown): boolean {
   return status >= 500; // 5xx incl. 529 (overloaded); excludes 429 + every other 4xx
 }
 
+function isInBandOverload(err: unknown): boolean {
+  if (!(err instanceof UpstreamError)) return false;
+  const raw = err.providerRaw;
+  if (!raw || typeof raw !== "object") return false;
+  const root = raw as Record<string, unknown>;
+  const nested =
+    root.error && typeof root.error === "object" ? (root.error as Record<string, unknown>) : null;
+  const response =
+    root.response && typeof root.response === "object"
+      ? (root.response as Record<string, unknown>)
+      : null;
+  const responseError =
+    response?.error && typeof response.error === "object"
+      ? (response.error as Record<string, unknown>)
+      : null;
+  const candidate = nested ?? responseError;
+  return (
+    candidate?.code === "server_is_overloaded" ||
+    candidate?.type === "service_unavailable_error" ||
+    (typeof candidate?.message === "string" &&
+      candidate.message.toLowerCase().includes("overloaded"))
+  );
+}
+
+async function waitForInBandOverloadRetry(attempt: number, signal?: AbortSignal): Promise<void> {
+  const delay = [1_000, 3_000][attempt];
+  if (delay === undefined) return;
+  await new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason ?? new Error("client aborted"));
+    const timer = setTimeout(resolve, delay);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason ?? new Error("client aborted"));
+      },
+      { once: true },
+    );
+  });
+}
+
 // Token refresh/auth failures are scoped to the selected subscription account.
 // If one account's stored refresh token is rejected, a healthy sibling should rescue
 // the request instead of letting the executor trip the alias-wide circuit breaker.
@@ -83,6 +124,7 @@ function isCredentialAccountFailure(
   if (err instanceof TokenRefreshError) {
     return err.permanentCredentialFailure;
   }
+
   if (err instanceof UpstreamError) {
     return err.upstreamStatus !== null && upstreamCredentialFailureStatuses.has(err.upstreamStatus);
   }
@@ -1177,6 +1219,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     stickyKey: string | null,
     model: string | null,
     avoidBusy: boolean,
+    signal: AbortSignal | undefined,
     open: (client: ProviderClient, entry: PoolEntry) => AsyncIterable<string>,
     // When set, each member's SSE is wrapped so a pre-output error frame (after only a
     // content-free preamble) throws BEFORE the first yielded chunk — turning "commit on
@@ -1188,6 +1231,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
     const statefulContinuation = isStrictAccountSticky(stickyKey);
     let entry = firstEntry;
     let lastErr: unknown;
+    let overloadRetries = 0;
     for (;;) {
       let iterator: AsyncIterator<string> | undefined;
       let first: IteratorResult<string>;
@@ -1200,6 +1244,13 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
       } catch (err) {
         if (iterator) await iterator.return?.().catch(() => {});
         const invalidPreviousResponseId = isInvalidPreviousResponseIdFailure(stickyKey, err);
+        if (isInBandOverload(err) && !statefulContinuation && overloadRetries < 2) {
+          await waitForInBandOverloadRetry(overloadRetries, signal);
+          overloadRetries += 1;
+          // Retry the same account before spending a sibling or model fallback.
+          lastErr = err;
+          continue;
+        }
         if (isRetryableAccountFailure(err)) {
           coolRetryableAccount(entry);
           lastErr = err;
@@ -1319,6 +1370,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         stickyKey,
         modelFromChat(req),
         avoidBusy,
+        opts?.signal,
         (client, entry) => client.chatCompletionStream(req, callOptionsForEntry(opts, entry)),
         deps.chatStreamPreambleClassifier,
       );
@@ -1377,6 +1429,7 @@ export function createOAuthPoolClient(deps: OAuthPoolDeps): OAuthPoolClient {
         stickyKey,
         modelFromNative(body),
         avoidBusy,
+        opts?.signal,
         (client, entry) => {
           if (!client.nativePassthroughStream) {
             throw new Error("oauth pool member does not support native passthrough streaming");
