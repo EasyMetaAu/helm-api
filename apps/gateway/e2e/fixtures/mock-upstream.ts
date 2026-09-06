@@ -399,8 +399,12 @@ export function createMockUpstream() {
       });
     }
 
+    // Background memory calls can race the foreground request after its response.
+    // They are internal work, so keep them from replacing the main-request capture.
+    if (promptText.includes("<memory_")) return c.json(echoResponse(model));
+
     // Record the normalized request so the e2e can assert nativeIn → IR → nativeOut.
-    // (eval calls are excluded — capture tracks the MAIN routed request only.)
+    // (internal eval/memory calls are excluded — capture tracks the MAIN routed request only.)
     lastCapture = {
       body: body as UpstreamCapture["body"],
       count: lastCapture.count + 1,
