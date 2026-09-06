@@ -9,7 +9,7 @@
 
 ## 2026-09-06 · Codex 模型发现跟随上游 client_version 与可选 base_instructions（OAuth provider / Codex discovery，docs/04/05，原则 3/6）
 
-- **根因一**：`chatgpt.com/backend-api/codex/models` 按 `client_version` 门控下发；`gpt-6-astra` 的 `minimal_client_version` 为 `0.153.0`，而 Helm 默认发送 `0.145.0`，账号已有权限仍收不到该模型。默认值不再手写：`pnpm sync:codex-models` 从本地 codex checkout 的最新 `rust-vX.Y.Z` release tag（跳过 alpha）生成 `packages/core/src/provider/oauth/codex-client-version.generated.ts`（当前 `0.153.4`），与 bundled 目录一同刷新；`HELM_OPENAI_CODEX_CLIENT_VERSION` 覆盖规则不变，测试只锁定 semver 形状与 `>= 0.153` 下限。
+- **根因一**：`chatgpt.com/backend-api/codex/models` 按 `client_version` 门控下发；`gpt-6-astra` 的 `minimal_client_version` 为 `0.153.0`，而 Helm 默认发送 `0.145.0`，账号已有权限仍收不到该模型。默认值不再手写：`pnpm sync:codex-models` 通过 GitHub API（`/repos/openai/codex/releases/latest`，天然排除 draft/prerelease）取最新 `rust-vX.Y.Z` tag，并从同一 tag 的 raw `models.json` 拉目录，不依赖本地 codex checkout（可选 `GITHUB_TOKEN` 提升限流），生成 `packages/core/src/provider/oauth/codex-client-version.generated.ts`（当前 `0.153.4`），与 bundled 目录一同刷新；`HELM_OPENAI_CODEX_CLIENT_VERSION` 覆盖规则不变，测试只锁定 semver 形状与 `>= 0.153` 下限。
 - **根因二**：上游 `codex-rs/protocol::openai_models` 已把顶层 `base_instructions` 降为 legacy 可选字段并迁移到 `model_messages.instructions_template`，新条目不再携带；Helm 的 zod schema 仍要求必填，导致整份 `/models` 响应解析失败并回退到旧的内置目录。schema 现改为 `nullable().optional()`，并用 `pnpm sync:codex-models` 重新同步内置 `codex-models.json`（含 `gpt-6-astra`）。
 - 没有新增 schema、migration、配置或依赖变化；发现失败仍沿用既有 LKG / bundled 回退，不放宽任何 fail-closed 边界。
 
