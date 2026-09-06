@@ -11,6 +11,7 @@
 import { arch, platform, release } from "node:os";
 import type { ResponseWorkAdmission } from "../../runtime/response-work-admission.js";
 import { readUpstreamJsonWithinBudget } from "../openai.js";
+import { CLAUDE_CODE_CLIENT_VERSION } from "./claude-client-version.generated.js";
 import { DEFAULT_OPENAI_CODEX_CLIENT_VERSION } from "./codex-client-version.generated.js";
 import { type CodexModelInfo, CodexModelsResponseSchema } from "./codex-model-info.js";
 import { listGitHubCopilotModels } from "./github-copilot.js";
@@ -261,7 +262,7 @@ export async function listAnthropicModels(
       Authorization: `Bearer ${accessToken}`,
       "anthropic-version": "2023-06-01",
       "anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
-      "user-agent": "claude-cli/1.0.0",
+      "user-agent": `claude-cli/${CLAUDE_CODE_CLIENT_VERSION} (external, cli)`,
       "x-app": "cli",
     },
     signal: AbortSignal.timeout(timeoutMs),

@@ -1,3 +1,4 @@
+import { CLAUDE_CODE_CLIENT_VERSION } from "./oauth/claude-client-version.generated.js";
 // Native Anthropic Messages executor (issue #38) — routes Helm's internal
 // OpenAI-Chat IR to the Anthropic /v1/messages API, used by Claude Pro/Max
 // SUBSCRIPTION (OAuth) providers. Implements the same ProviderClient interface as
@@ -92,6 +93,7 @@ export interface AnthropicClientDeps {
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_TOKENS = 4096;
+
 const ANTHROPIC_VERSION = "2023-06-01";
 // Claude-Code identity (openclaw src/llm/providers/anthropic.ts). All load-bearing
 // for the OAuth subscription endpoint — without them it 401/403s.
@@ -102,10 +104,10 @@ const ANTHROPIC_VERSION = "2023-06-01";
 // traffic the request's OWN version/entrypoint are passed through (see
 // `req.metadata.client_billing_header`), which is both zero-maintenance and the most
 // authentic. This fallback still wants to be a REAL recent version (a stale one is an
-// anti-ban fingerprint) — verified field-for-field against the Claude Code 2.1.175
+// anti-ban fingerprint) — verified against the current Claude Code client version
 // binary (user-agent `claude-cli/<v> (external, cli)`, billing block, beta set) — but
 // it is only hit by non-CLI traffic, so its staleness rarely matters. Bump with betas.
-const FALLBACK_CLAUDE_CODE_VERSION = "2.1.175";
+const FALLBACK_CLAUDE_CODE_VERSION = CLAUDE_CODE_CLIENT_VERSION;
 const FALLBACK_CLAUDE_CODE_ENTRYPOINT = "cli";
 const OAUTH_BETA = "claude-code-20250219,oauth-2025-04-20";
 const CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27";

@@ -524,6 +524,7 @@ export {
   buildOAuthRequestSignal,
   buildOpenAICodexUserAgent,
   type CalendarGranularity,
+  CLAUDE_CODE_CLIENT_VERSION,
   COPILOT_HEADERS,
   type CodexCreditsSnapshot,
   type CodexLoginStart,
