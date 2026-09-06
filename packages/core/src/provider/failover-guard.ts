@@ -138,7 +138,8 @@ const responsesClassifier: PreOutputClassifier = {
       t === "response.metadata" ||
       t === "codex.response.metadata" ||
       t === "codex.rate_limits" ||
-      t === "responsesapi.websocket_timing"
+      t === "responsesapi.websocket_timing" ||
+      t === "keepalive"
     )
       return "preamble";
     if (t === "error" || t === "response.failed") return "error";
