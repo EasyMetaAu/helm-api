@@ -10,6 +10,7 @@ export {
   refreshAnthropicToken,
 } from "./anthropic.js";
 export { anthropicUsageToWindows, parseAnthropicUsageBody } from "./anthropic-quota.js";
+export { CLAUDE_CODE_CLIENT_VERSION } from "./claude-client-version.generated.js";
 export {
   type CodexModelInfo,
   CodexModelInfoSchema,

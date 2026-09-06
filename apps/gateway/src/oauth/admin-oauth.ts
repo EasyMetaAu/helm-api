@@ -5,6 +5,7 @@ import {
   beginOpenAICodexLogin,
   beginXaiDeviceLogin,
   buildOpenAICodexUserAgent,
+  CLAUDE_CODE_CLIENT_VERSION,
   type ConfigStore,
   type CopilotDeviceStart,
   completeAnthropicLogin,
@@ -123,7 +124,7 @@ const XAI_GROK_CREDITS_HEADERS = {
 const OAUTH_OPERATOR_JSON_MAX_RESPONSE_BYTES = 1024 * 1024;
 const ANTHROPIC_USAGE_HEADERS = {
   "anthropic-beta": "oauth-2025-04-20",
-  "user-agent": "claude-cli/2.0.53 (external, cli)",
+  "user-agent": `claude-cli/${CLAUDE_CODE_CLIENT_VERSION} (external, cli)`,
   accept: "application/json",
   "accept-language": "en-US,en;q=0.9",
 } as const;

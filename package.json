@@ -1,6 +1,6 @@
 {
   "name": "helm-api",
-  "version": "0.29.5",
+  "version": "0.29.6",
   "private": true,
   "type": "module",
   "engines": {
@@ -41,7 +41,9 @@
     "test:passthrough:live:codex-cli": "NODE_OPTIONS=--conditions=development tsx scripts/passthrough/live-cli.ts codex-cli",
     "test:passthrough:live": "NODE_OPTIONS=--conditions=development tsx scripts/passthrough/live-cli.ts all",
     "test:passthrough:final": "pnpm test:passthrough && pnpm test:passthrough:live",
-    "test:protocol-compat:ast": "bash scripts/protocol-compat/ast-grep-gates.sh"
+    "test:protocol-compat:ast": "bash scripts/protocol-compat/ast-grep-gates.sh",
+    "sync:claude-cli": "tsx scripts/sync-claude-cli.ts",
+    "prebuild": "pnpm sync:claude-cli"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.16",

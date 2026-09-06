@@ -7,6 +7,7 @@ import {
   translateAnthropicSSE,
 } from "./anthropic.js";
 import { STRICT_CLAUDE_CLI_TOOL_GOLDEN } from "./fixtures/claude-cli-strict-tool.js";
+import { CLAUDE_CODE_CLIENT_VERSION } from "./oauth/claude-client-version.generated.js";
 import { UpstreamError } from "./openai.js";
 
 describe("openaiToAnthropicRequest", () => {
@@ -23,7 +24,11 @@ describe("openaiToAnthropicRequest", () => {
     const sys = body.system as Array<{ text: string }>;
     // system[0] is the Claude-Code billing attribution block; the spoof + folded
     // client system follow it (real-CC layout).
-    expect(sys[0]?.text).toMatch(/^x-anthropic-billing-header: cc_version=2\.1\.175\./);
+    expect(sys[0]?.text).toMatch(
+      new RegExp(
+        `^x-anthropic-billing-header: cc_version=${CLAUDE_CODE_CLIENT_VERSION.replaceAll(".", "\\.")}\\.`,
+      ),
+    );
     expect(sys[1]?.text).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
     expect(sys[2]?.text).toContain(
       "You are an interactive agent that helps users with software engineering tasks.",
@@ -825,7 +830,7 @@ describe("openaiToAnthropicRequest", () => {
 // The OAuth subscription endpoint expects real Claude-Code traffic. Real CC injects
 // an x-anthropic-billing-header block as system[0] whose cc_version suffix + cch are
 // content-derived and recomputed every request — that per-turn churn is what guts
-// prompt caching. helm reproduces the block (real 2.1.175 version, system[0] slot)
+// prompt caching. helm reproduces the block (current client version, system[0] slot)
 // but derives the hash from the STABLE system text, so it reads as a normal content
 // hash to Anthropic yet stays byte-identical across a conversation's turns. (Pairs
 // with the inbound strip of the CLIENT's own rotating header in protocol/anthropic.)
@@ -842,7 +847,9 @@ describe("openaiToAnthropicRequest — Claude-Code billing header (anti-ban + ca
       ],
     });
     expect(billingOf(body)).toMatch(
-      /^x-anthropic-billing-header: cc_version=2\.1\.175\.[0-9a-f]{3}; cc_entrypoint=cli; cch=[0-9a-f]{5};$/,
+      new RegExp(
+        `^x-anthropic-billing-header: cc_version=${CLAUDE_CODE_CLIENT_VERSION.replaceAll(".", "\\.")}\\.[0-9a-f]{3}; cc_entrypoint=cli; cch=[0-9a-f]{5};$`,
+      ),
     );
     // No cache_control on the billing block (matches real CC — the breakpoints ride
     // the prompt blocks that follow, not the attribution line).
@@ -1437,7 +1444,7 @@ describe("createAnthropicClient", () => {
       const sys = (JSON.parse(String(init?.body)) as { system: Array<{ text: string }> }).system;
       expect(sys[0]?.text).toMatch(/^x-anthropic-billing-header:/);
       expect(sys[1]?.text).toContain("You are Claude Code");
-      expect(h.get("user-agent")).toBe("claude-cli/2.1.175 (external, cli)");
+      expect(h.get("user-agent")).toBe(`claude-cli/${CLAUDE_CODE_CLIENT_VERSION} (external, cli)`);
       if (calls === 1) return jsonResponse({ error: "expired" }, 401);
       return jsonResponse({
         id: "msg",
@@ -1523,7 +1530,7 @@ describe("createAnthropicClient", () => {
       metadata: { client_billing_header: "cc_version=2.1.173.d11; cc_entrypoint=cli" },
     } as unknown as Parameters<typeof client.chatCompletion>[0]);
     // user-agent uses the client's semver (no 3-hex suffix); billing block carries the
-    // full version+suffix — both reflect 2.1.173, never the fallback 2.1.175.
+    // full version+suffix — both reflect 2.1.173, never the fallback client version.
     expect(seenUA).toBe("claude-cli/2.1.173 (external, cli)");
     expect(seenBilling).toMatch(/^x-anthropic-billing-header: cc_version=2\.1\.173\.d11;/);
   });
