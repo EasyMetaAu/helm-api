@@ -114,6 +114,10 @@ jobs:
   e2e:
     timeout-minutes: 10
     runs-on: ${{ fromJSON(github.event_name == 'pull_request_target' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","docker"]') }}
+    env:
+      # Do not trust a persistent runner's possibly partial global browser cache;
+      # install and execute against one clean per-run directory.
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/helm-playwright
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
