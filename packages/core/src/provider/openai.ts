@@ -30,7 +30,12 @@ import type { ProxyConfig } from "./proxy.js";
 //   - `currentSecrets`: live access + refresh tokens, used by `scrub()` to strip
 //     any echoed credential from an upstream error body (principle 7).
 // Credentials are runtime-only: from env, never persisted/logged.
-import { isFetchTransportError, withConnectionRetry, withOverloadRetry } from "./retry.js";
+import {
+  isFetchTransportError,
+  type OverloadRetryBudget,
+  withConnectionRetry,
+  withOverloadRetry,
+} from "./retry.js";
 import { readChunkWithIdle, StreamStalledError } from "./stream-idle.js";
 
 export interface ProviderConfig {
@@ -127,6 +132,7 @@ export type NativeProtocolProfile =
 // (model patched to the resolved upstream id). Fires once per fetch attempt (idempotent
 // across connection / 401 retries — same body). MUST NOT throw (capture is fail-open).
 export interface ProviderCallOptions {
+  overloadRetry?: OverloadRetryBudget;
   signal?: AbortSignal;
   /** Media pools invoke this after selecting an account and before the paid write. */
   onAccountSelected?: (account: string) => void | Promise<void>;

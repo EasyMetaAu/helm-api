@@ -701,6 +701,7 @@ export {
   type ResolveResult,
   toRegistryProviders,
 } from "./provider/registry.js";
+export type { OverloadRetryBudget } from "./provider/retry.js";
 export {
   __setWreqModuleForTesting,
   checkTlsTransportAvailable,

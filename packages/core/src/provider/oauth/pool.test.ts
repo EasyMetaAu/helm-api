@@ -3236,7 +3236,7 @@ describe("createOAuthPoolClient — in-band pre-output failover (preamble then e
             calls += 1;
             yield PREAMBLE;
             if (calls === 1) {
-              yield ERROR;
+              yield 'data: {"type":"response.failed","response":{"error":{"code":"server_is_overloaded","message":"overloaded"}}}\n\n';
               return;
             }
             yield OUTPUT;

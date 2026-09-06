@@ -1,7 +1,11 @@
 import sharp from "sharp";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { transformRequestOut as anthropicToIRRequest } from "../protocol/anthropic/request.js";
-import { createResponseWorkAdmission } from "../runtime/response-work-admission.js";
+import { createRuntimeMemoryCoordinator } from "../runtime/memory-budget.js";
+import {
+  createResponseWorkAdmission,
+  runtimeResponseWorkAdmission,
+} from "../runtime/response-work-admission.js";
 import type { CodexModelInfo } from "./oauth/codex-model-info.js";
 import { UpstreamError } from "./openai.js";
 import {
@@ -23,6 +27,12 @@ import {
   sanitizeCodexResponsesNativeBody,
   translateResponsesSSE,
 } from "./openai-responses.js";
+
+beforeEach(() => {
+  runtimeResponseWorkAdmission(
+    createRuntimeMemoryCoordinator({ capacityBytes: () => 64 * 1024 * 1024 }),
+  );
+});
 
 // A fake access-token JWT carrying the chatgpt_account_id claim (header.payload.sig).
 function jwt(accountId: string): string {

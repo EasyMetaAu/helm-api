@@ -1733,6 +1733,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       endpoint: string;
       accept: "application/json" | "text/event-stream";
       signal?: AbortSignal;
+      overloadRetry?: ProviderCallOptions["overloadRetry"];
       capture?: (wireBody: string) => void;
       timeoutThroughBody?: boolean;
       retry?: boolean;
@@ -1778,6 +1779,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       if (init.retry === false) return await send();
       return await withOverloadRetry(send, {
         signal: init.signal,
+        budget: init.overloadRetry,
         pick: (value) => value.response,
         release: (value) => value.bodyTimeout?.cleanup(),
       });
@@ -1881,6 +1883,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       endpoint?: string;
       accept?: "application/json" | "text/event-stream";
       signal?: AbortSignal;
+      overloadRetry?: ProviderCallOptions["overloadRetry"];
       capture?: (wireBody: string) => void;
       onResponseMeta?: (headers: Headers) => void;
       timeoutThroughBody?: boolean;
@@ -1890,6 +1893,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       endpoint: init.endpoint ?? url,
       accept: init.accept ?? "text/event-stream",
       signal: init.signal,
+      overloadRetry: init.overloadRetry ?? { attempt: 0 },
       capture: init.capture,
       timeoutThroughBody: init.timeoutThroughBody,
       outcomeUnknownOnTransport: (init.endpoint ?? url) === url,
@@ -2611,6 +2615,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         modelInfo,
         {
           signal: opts?.signal,
+          overloadRetry: opts?.overloadRetry,
           capture: opts?.captureUpstream,
           onResponseMeta: opts?.onResponseMeta,
         },
@@ -2635,6 +2640,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         modelInfo,
         {
           signal: opts?.signal,
+          overloadRetry: opts?.overloadRetry,
           capture: opts?.captureUpstream,
           onResponseMeta: opts?.onResponseMeta,
         },
@@ -2664,6 +2670,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       const result = await requestWithRetry(body, modelInfo, {
         accept: "application/json",
         signal: opts?.signal,
+        overloadRetry: opts?.overloadRetry,
         capture: opts?.captureUpstream,
         onResponseMeta: opts?.onResponseMeta,
         timeoutThroughBody: true,
@@ -2942,6 +2949,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
       }
       const result = await requestWithRetry(outboundBody, modelInfo, {
         signal: opts?.signal,
+        overloadRetry: opts?.overloadRetry,
         capture: opts?.captureUpstream,
         onResponseMeta: opts?.onResponseMeta,
       });
@@ -2965,6 +2973,7 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
         endpoint: compactUrl,
         accept: "application/json",
         signal: opts?.signal,
+        overloadRetry: opts?.overloadRetry,
         capture: opts?.captureUpstream,
         onResponseMeta: opts?.onResponseMeta,
         timeoutThroughBody: true,
@@ -3142,6 +3151,7 @@ export function createGenericOpenAIResponsesClient(
     url: string,
     init: RequestInit,
     external?: AbortSignal,
+    budget?: ProviderCallOptions["overloadRetry"],
   ): Promise<Response> {
     // A 529/503 is transient upstream capacity pressure, not a request fault — pause
     // and re-issue the SAME body (pre-first-byte → idempotent) before the executor
@@ -3161,7 +3171,7 @@ export function createGenericOpenAIResponsesClient(
             t.cleanup();
           }
         },
-        { signal: external },
+        { signal: external, budget },
       );
     } catch (error) {
       if (external?.aborted || !isFetchTransportError(error)) throw error;
@@ -3205,10 +3215,12 @@ export function createGenericOpenAIResponsesClient(
       body?: NativePassthroughInput;
       accept?: string;
       signal?: AbortSignal;
+      overloadRetry?: ProviderCallOptions["overloadRetry"];
       captureUpstream?: (wireBody: string) => void;
       applyRequestContract?: boolean;
     },
   ): Promise<Response> {
+    init.overloadRetry ??= { attempt: 0 };
     const requestBody =
       init.body !== undefined && init.applyRequestContract === true
         ? applyResponsesRequestContract(init.body)
@@ -3249,6 +3261,7 @@ export function createGenericOpenAIResponsesClient(
       await endpoint(path),
       { method: init.method, headers: requestHeaders, ...(bodyText ? { body: bodyText } : {}) },
       init.signal,
+      init.overloadRetry,
     );
     if (res.status === 401 && cfg.onUnauthorized !== undefined) {
       await res.body?.cancel().catch(() => {});
@@ -3287,6 +3300,7 @@ export function createGenericOpenAIResponsesClient(
           ...(retryBodyText ? { body: retryBodyText } : {}),
         },
         init.signal,
+        init.overloadRetry,
       );
     }
     return res;
@@ -3304,6 +3318,7 @@ export function createGenericOpenAIResponsesClient(
         signal: opts?.signal,
         captureUpstream: opts?.captureUpstream,
         applyRequestContract: true,
+        overloadRetry: opts?.overloadRetry,
       });
       if (!res.ok) throw await errorFromResponse(res);
       if (requestContract?.forceSse === true) {
@@ -3321,6 +3336,7 @@ export function createGenericOpenAIResponsesClient(
         signal: opts?.signal,
         captureUpstream: opts?.captureUpstream,
         applyRequestContract: true,
+        overloadRetry: opts?.overloadRetry,
       });
       if (!res.ok) throw await errorFromResponse(res);
       yield* translateResponsesSSE(res, model, timeoutMs, {
@@ -3336,6 +3352,7 @@ export function createGenericOpenAIResponsesClient(
         signal: opts?.signal,
         captureUpstream: opts?.captureUpstream,
         applyRequestContract: true,
+        overloadRetry: opts?.overloadRetry,
       });
       if (!res.ok) throw await errorFromResponse(res);
       if (requestContract?.forceSse === true) {
@@ -3352,6 +3369,7 @@ export function createGenericOpenAIResponsesClient(
         signal: opts?.signal,
         captureUpstream: opts?.captureUpstream,
         applyRequestContract: true,
+        overloadRetry: opts?.overloadRetry,
       });
       if (!res.ok) throw await errorFromResponse(res);
       yield* readResponsesSSERaw(res, timeoutMs);

@@ -3,6 +3,7 @@ import type {
   CircuitBreaker,
   ExecuteOutcome,
   ExecutionPlan,
+  OverloadRetryBudget,
   ProviderClient,
   ProviderRegistry,
   RouteProviderAttempt,
@@ -1607,6 +1608,11 @@ export function createExecute(deps: ExecuteAdapterDeps) {
     req: InternalRequest,
   ): Promise<ExecuteOutcome> {
     const attempts: RouteProviderAttempt[] = [];
+    const overloadRetry: OverloadRetryBudget = {
+      attempt: 0,
+      onRetry: (event) =>
+        log?.("info", "provider.overload_retry", { trace_id: correlationTraceId(req), ...event }),
+    };
     // Chain-exhaustion bookkeeping so we can tell apart the two "nobody served"
     // outcomes (docs/07): a HARD capability mismatch (no candidate could ever
     // satisfy the request → capability_unsatisfiable / 422) vs. transient
@@ -1994,6 +2000,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                   () => {
                     const raw = passthroughStream(passthroughBody, {
                       signal: attemptSignal,
+                      overloadRetry,
                       ...(req.metadata.stateful_provider_account
                         ? { statefulAccount: req.metadata.stateful_provider_account }
                         : {}),
@@ -2052,6 +2059,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                   () => {
                     const raw = provider.chatCompletionStream(rendered.body, {
                       signal: attemptSignal,
+                      overloadRetry,
                       ...(req.metadata.stateful_provider_account
                         ? { statefulAccount: req.metadata.stateful_provider_account }
                         : {}),
@@ -2135,6 +2143,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               (attemptSignal) =>
                 passthroughInvoke(passthroughBody, {
                   signal: attemptSignal,
+                  overloadRetry,
                   ...(req.metadata.stateful_provider_account
                     ? { statefulAccount: req.metadata.stateful_provider_account }
                     : {}),
@@ -2176,6 +2185,7 @@ export function createExecute(deps: ExecuteAdapterDeps) {
           const body = await withAttemptDeadline(req.attempt_timeout_ms, signal, (attemptSignal) =>
             provider.chatCompletion(bodyReq.body, {
               signal: attemptSignal,
+              overloadRetry,
               ...(req.metadata.stateful_provider_account
                 ? { statefulAccount: req.metadata.stateful_provider_account }
                 : {}),
@@ -2502,6 +2512,8 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             error_detail: errorDetailOf(err),
             ...attemptTelemetry,
           });
+          // Do not restart the exhausted overload budget on another model.
+          if (overloadRetry.exhausted) break;
         }
       } finally {
         // Release a HALF_OPEN probe lock on any path that allowed the attempt but
