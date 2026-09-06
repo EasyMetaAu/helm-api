@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-09-06 · Codex 模型发现跟随上游 client_version 与可选 base_instructions（OAuth provider / Codex discovery，docs/04/05，原则 3/6）
+
+- **根因一**：`chatgpt.com/backend-api/codex/models` 按 `client_version` 门控下发；`gpt-6-astra` 的 `minimal_client_version` 为 `0.153.0`，而 Helm 默认发送 `0.145.0`，账号已有权限仍收不到该模型。默认值现在跟随 codex 最新 release tag（`rust-v0.153.4`）为 `0.153.4`，`HELM_OPENAI_CODEX_CLIENT_VERSION` 覆盖规则不变。
+- **根因二**：上游 `codex-rs/protocol::openai_models` 已把顶层 `base_instructions` 降为 legacy 可选字段并迁移到 `model_messages.instructions_template`，新条目不再携带；Helm 的 zod schema 仍要求必填，导致整份 `/models` 响应解析失败并回退到旧的内置目录。schema 现改为 `nullable().optional()`，并用 `pnpm sync:codex-models` 重新同步内置 `codex-models.json`（含 `gpt-6-astra`）。
+- 没有新增 schema、migration、配置或依赖变化；发现失败仍沿用既有 LKG / bundled 回退，不放宽任何 fail-closed 边界。
+
 ## 2026-09-06 · 订阅模型自动/手动列表统一按官方目录与数据库权威（OAuth provider / routing / Admin，docs/04/11，原则 2/3/6）
 
 - Automatic mode now exposes only the provider's live or durable last-known-good official discovery; curated guesses and forced Codex image aliases are no longer injected when discovery is empty.
@@ -57,19 +63,10 @@
 - **目录不再准入**：Codex `/models` 的 `supported_in_api`、`use_responses_lite` 与 `experimental_supported_tools` 不是 ChatGPT 图片工具的权威能力合同；可调度的 `openai-codex` 账号现在合成 `gpt-image-2` alias，执行前也不再按这些目录字段本地拒绝，实际支持状态由客户端请求触发的上游调用返回。
 - **单写边界与实测**：没有新增自动探测或后台付费 probe；图片生成/编辑仍只选择一个 OAuth 账号、只发送一次，连接错误、过载、401、超时与结果不明均不重试、不切 sibling。2026-08-30 本机 Docker 经明确授权执行一次 `chatgpt-image` canary：单次账号选择、HTTP 200、返回一张非空 PNG（21 input tokens、229 image output tokens）；请求 `1024x1024`，上游实际返回 `1254x1254`，尺寸并非严格兑现。
 
-## 2026-08-29 · ChatGPT OAuth 图片生成与编辑复用 Images 协议（OAuth provider / Images / Routing，docs/04/05/07，原则 2/3/5/7/8）
-
-- **协议与准入**：保留既有 `POST /v1/images/generations` 与 `POST /v1/images/edits`，新增独立 `chatgpt-image → openai-codex/gpt-image-2` lane；当时采用的 Codex 目录硬准入已由 2026-08-30 条目纠正。
-- **执行与单写边界**：生成、JSON 编辑和 multipart 编辑共用一个 Responses 图片适配器，以 `action:generate|edit` 区分，并把 `image_generation_call.result` 映射回 Images `data[]`。这是订阅额度付费单写；连接错误、过载、401、超时或断线均不重试、不切 OAuth 账号，结果不明继续由现有图片链返回 `outcome_unknown`。
-- **计价限制**：ChatGPT 订阅图片没有可信美元价目，catalog 显式记录 null pricing；请求数预算仍可工作，配置美元支出上限的 key 在付费调用前 fail-closed。实现独立参考 Sub2API 当前协议行为与测试，没有复制其 LGPL 源码；未执行真实付费生图。
-
-## 2026-08-29 · Codex 429 短冷却在安全恢复前精确等待（OAuth provider / Responses / Gateway，docs/04/05/07，原则 3/5/8）
-
-- **根因与冷却语义**：Codex 上游已用数值型 `Retry-After` 声明短暂限流，但 OAuth pool 仍按固定 60 秒停车；严格 `x-codex-turn-state` 亲和在原账号停车期间连续产生本地 400。pool 现在复用既有重试解析规则、大小写不敏感读取 HTTP 与 WebSocket 包装 header，并以严格 delta-seconds 设置账号或模型冷却；异常超大值最多停车 24 小时，已有更晚的精确 quota reset 继续 extend-only，不会被缩短。
-- **安全恢复边界**：严格亲和仍不切 sibling；仅 provider 调用前即可证明未发送的 `response_create_not_sent` 携带原账号剩余 `retry_after_ms`。Gateway 只接受内部 recovery proof 与类型化字段，Responses WebSocket 对短冷却做可中止等待，超过 10 秒的等待封顶为 10 秒，再沿用一次 `1012` 完整历史恢复；未知或过期冷却立即恢复，发送后或结果不明的 `response.create` 仍禁止重放。
-- 没有新增 schema、migration、配置或依赖；10 秒上限只约束网关本地等待，不改变 provider/account/WebSocket 亲和合同。
-
 ## 历史条目摘要（最新要点）
+
+- **2026-08-29 · ChatGPT OAuth 图片生成与编辑复用 Images 协议**：新增 `chatgpt-image → openai-codex/gpt-image-2` lane，生成/编辑共用一个 Responses 图片适配器且为订阅额度付费单写，不重试、不切账号；ChatGPT 订阅图片记录 null pricing，美元上限 key fail-closed，完整原文经 git history 回溯。
+- **2026-08-29 · Codex 429 短冷却在安全恢复前精确等待**：OAuth pool 按严格 delta-seconds `Retry-After` 设置账号/模型冷却（上限 24 小时，quota reset extend-only）；仅可证明未发送的 `response_create_not_sent` 触发 Gateway 最多 10 秒可中止等待后 `1012` 恢复，完整原文经 git history 回溯。
 
 - **2026-08-28 · 终端失败保留原始载荷与 Session**：错误终态在共享持久化边界保存可用请求/响应正文并追加 Session revision，仍受敏感数据、保留期和正文上限约束，完整原文经 git history 回溯。
 - **2026-08-28 · Grok 4.6 Vision 对齐官方模型合同**：手工 catalog 将 `xai/grok-4.6.supportsVision` 改为 `true`，避免图片理解请求被本地误拒；图片生成与其他未知能力继续 fail-closed，完整原文经 git history 回溯。

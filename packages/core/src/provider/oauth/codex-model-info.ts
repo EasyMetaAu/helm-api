@@ -97,7 +97,10 @@ export const CodexModelInfoSchema = z
     default_service_tier: z.string().nullable().optional(),
     availability_nux: CodexModelAvailabilityNuxSchema.nullable().optional(),
     upgrade: CodexModelInfoUpgradeSchema.nullable().optional(),
-    base_instructions: z.string(),
+    // Legacy top-level field. Upstream codex (protocol::openai_models) now treats it
+    // as optional and promotes it into model_messages.instructions_template; newer
+    // catalog entries (e.g. gpt-6-astra) omit it entirely.
+    base_instructions: z.string().nullable().optional(),
     model_messages: CodexModelMessagesSchema.nullable().optional(),
     include_skills_usage_instructions: z.boolean().default(false),
     supports_reasoning_summaries: z.boolean(),

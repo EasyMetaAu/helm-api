@@ -277,8 +277,8 @@ describe("listOpenAICodexModels", () => {
     expect(abortedByCaller).toBe(true);
   });
   it("uses the current Codex whole client version and permits an environment override", () => {
-    expect(DEFAULT_OPENAI_CODEX_CLIENT_VERSION).toBe("0.145.0");
-    expect(resolveOpenAICodexClientVersion({})).toBe("0.145.0");
+    expect(DEFAULT_OPENAI_CODEX_CLIENT_VERSION).toBe("0.153.4");
+    expect(resolveOpenAICodexClientVersion({})).toBe("0.153.4");
     expect(
       resolveOpenAICodexClientVersion({
         HELM_OPENAI_CODEX_CLIENT_VERSION: "0.146.2",

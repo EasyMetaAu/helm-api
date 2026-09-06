@@ -89,10 +89,11 @@ export function expandOpenAICodexModelAliases(models: readonly string[]): string
   return expanded;
 }
 
-// Codex sends the whole semver (major.minor.patch) to /models. The current main
-// branch is the 0.145.0 line; alpha suffixes are intentionally omitted, matching
-// codex-rs/models-manager::client_version_to_whole.
-export const DEFAULT_OPENAI_CODEX_CLIENT_VERSION = "0.145.0";
+// Codex sends the whole semver (major.minor.patch) to /models. The upstream
+// /models endpoint gates slugs by this value (gpt-6-astra requires >= 0.153.0),
+// so track the latest codex release tag (rust-v0.153.4); alpha suffixes are
+// intentionally omitted, matching codex-rs/models-manager::client_version_to_whole.
+export const DEFAULT_OPENAI_CODEX_CLIENT_VERSION = "0.153.4";
 export const OPENAI_CODEX_CLIENT_VERSION_ENV = "HELM_OPENAI_CODEX_CLIENT_VERSION";
 // Provider-model discovery is an admin observability action. It must never inherit
 // Node fetch's multi-minute default and block the providers page refresh worker.
