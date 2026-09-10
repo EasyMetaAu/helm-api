@@ -64,7 +64,7 @@ export function stampServingAccount(
   decision: DecisionRecord,
   servingAccount: ServingAccount | null,
 ): void {
-  const finalAttemptAlias = decision.provider_attempts.findLast(
+  const finalAttemptAlias = decision.provider_attempts?.findLast(
     (attempt) => !attempt.skipped,
   )?.alias;
   const matchingAlias = decision.final.model_alias ?? finalAttemptAlias ?? null;
