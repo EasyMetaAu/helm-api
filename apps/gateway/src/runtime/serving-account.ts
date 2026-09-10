@@ -45,14 +45,13 @@ export async function withServingAccountCapture<T>(
   return { result, servingAccount: holder.selected };
 }
 
-// Did the marked subscription ACTUALLY serve the request? `onSelect` marks the
+// Did the marked subscription ACTUALLY serve or make the final request attempt?
+// `onSelect` marks the
 // account at SELECTION time — before the upstream call succeeds — so on a fallback
 // (the marked OAuth attempt fails, a LATER candidate serves) the holder is stale.
-// Attribute usage only when the final SERVED alias belongs to the marked account's
-// provider: a synthesized OAuth pool serves `<providerId>/<model>` aliases, so the
-// served alias must be prefixed with `<providerId>/`. A null/errored alias, or one
-// from a different provider (e.g. a configured non-OAuth fallback), is NOT a match
-// → no (mis)attribution. Pure + side-effect-free for unit testing.
+// A synthesized OAuth pool serves `<providerId>/<model>` aliases, so the successful
+// alias or final non-skipped attempt must match that provider. This preserves failed
+// account diagnostics without attributing a later configured-provider attempt to it.
 export function servedByAccount(
   servingAccount: ServingAccount | null,
   servedAlias: string | null,
@@ -65,7 +64,11 @@ export function stampServingAccount(
   decision: DecisionRecord,
   servingAccount: ServingAccount | null,
 ): void {
-  if (!servingAccount || !servedByAccount(servingAccount, decision.final.model_alias)) {
+  const finalAttemptAlias = decision.provider_attempts.findLast(
+    (attempt) => !attempt.skipped,
+  )?.alias;
+  const matchingAlias = decision.final.model_alias ?? finalAttemptAlias ?? null;
+  if (!servingAccount || !servedByAccount(servingAccount, matchingAlias)) {
     decision.serving_account = null;
     return;
   }

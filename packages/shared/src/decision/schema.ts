@@ -282,9 +282,9 @@ export const DecisionRecordSchema = z.object({
   lane: LaneDecisionSchema,
   provider_attempts: z.array(ProviderAttemptSchema),
   final: FinalDecisionSchema,
-  // Concrete subscription account that ultimately served the request. Null for
-  // non-subscription providers, legacy rows, failed requests, or stale selections
-  // that later fell back to a different provider. Body-free routing metadata only.
+  // Concrete subscription account that served the request or made its final
+  // upstream attempt. Null for non-subscription providers, legacy rows, candidates
+  // skipped before account selection, or stale selections followed by another provider.
   serving_account: ServingAccountDecisionSchema.nullable().default(null),
   // Exact UTF-8 byte length of the client request body as received by the gateway.
   // Body-free telemetry only: the bytes themselves remain governed by capture mode.
