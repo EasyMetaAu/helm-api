@@ -56,9 +56,13 @@ describe("servedByAccount", () => {
 });
 
 describe("stampServingAccount", () => {
-  function decision(modelAlias: string | null = "anthropic/claude-opus-4-8"): DecisionRecord {
+  function decision(
+    modelAlias: string | null = "anthropic/claude-opus-4-8",
+    attempts: Array<{ alias: string; skipped: boolean }> = [],
+  ): DecisionRecord {
     return {
       final: { model_alias: modelAlias },
+      provider_attempts: attempts,
       serving_account: null,
     } as unknown as DecisionRecord;
   }
@@ -73,5 +77,24 @@ describe("stampServingAccount", () => {
     const d = decision("openai/gpt-5");
     stampServingAccount(d, ACCT);
     expect(d.serving_account).toBeNull();
+  });
+
+  it("stamps the final attempted subscription account when every provider fails", () => {
+    const d = decision(null, [{ alias: "anthropic/claude-opus-4-8", skipped: false }]);
+    stampServingAccount(d, ACCT);
+    expect(d.serving_account).toEqual({ provider_id: "anthropic", account: "default" });
+  });
+
+  it("does not stamp an account when a later provider was attempted or every candidate skipped", () => {
+    const laterProvider = decision(null, [
+      { alias: "anthropic/claude-opus-4-8", skipped: false },
+      { alias: "openai/gpt-5", skipped: false },
+    ]);
+    stampServingAccount(laterProvider, ACCT);
+    expect(laterProvider.serving_account).toBeNull();
+
+    const skipped = decision(null, [{ alias: "anthropic/claude-opus-4-8", skipped: true }]);
+    stampServingAccount(skipped, ACCT);
+    expect(skipped.serving_account).toBeNull();
   });
 });
