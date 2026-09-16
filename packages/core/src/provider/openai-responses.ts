@@ -3780,6 +3780,27 @@ function openaiUsageChunk(model: string, usage: Record<string, unknown>): string
   return `data: ${JSON.stringify(chunk)}\n\n`;
 }
 
+// Render a message-less upstream error event for human eyes. Bounded so a huge event
+// cannot flood logs or the admin error box; the untruncated event still rides on
+// `UpstreamError.providerRaw` for anyone who needs the whole thing.
+const UPSTREAM_EVENT_SUMMARY_MAX_CHARS = 400;
+
+function summarizeUpstreamEvent(evt: Record<string, unknown>, code: string): string {
+  const parts: string[] = [];
+  if (code.length > 0) parts.push(`code=${code}`);
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(evt) ?? "";
+  } catch {
+    serialized = "";
+  }
+  if (serialized.length > UPSTREAM_EVENT_SUMMARY_MAX_CHARS) {
+    serialized = `${serialized.slice(0, UPSTREAM_EVENT_SUMMARY_MAX_CHARS)}…`;
+  }
+  if (serialized.length > 0) parts.push(serialized);
+  return parts.length > 0 ? parts.join(" ") : "no upstream detail";
+}
+
 function responseEventError(evt: Record<string, unknown>): UpstreamError {
   if (evt.type === "response.incomplete") {
     const response = isRecord(evt.response) ? evt.response : {};
@@ -3800,12 +3821,17 @@ function responseEventError(evt: Record<string, unknown>): UpstreamError {
       : typeof nestedError.code === "string"
         ? nestedError.code
         : "";
+  // An upstream failure with NO message at all (seen live: deactivated ChatGPT accounts
+  // answer `response.failed` carrying only a status) used to collapse to the bare
+  // sentence below, leaving the operator with nothing to act on. Keep the sentence as
+  // the stable prefix, but append the event itself — truncated — so the real upstream
+  // shape (codes, status, nested fields) reaches logs, telemetry, and the admin UI.
   const message =
     typeof evt.message === "string"
       ? evt.message
       : typeof nestedError.message === "string"
         ? nestedError.message
-        : "codex responses stream error";
+        : `codex responses stream error: ${summarizeUpstreamEvent(evt, code)}`;
   const isQuota =
     code === "rate_limit_exceeded" ||
     code === "insufficient_quota" ||

@@ -35,11 +35,29 @@
   let status = $state<Status>('idle');
   let response = $state('');
   let errorMsg = $state('');
+  // Verbatim upstream payload (HTTP status + provider body) for a failed test. Only an
+  // upstream failure carries it; everything else leaves the details block hidden.
+  let errorDetail = $state('');
   let durationMs = $state<number | null>(null);
   let controller: AbortController | null = null;
 
   const running = $derived(status === 'running');
   const canRun = $derived(model.trim().length > 0 && !running);
+
+  // Render the upstream status + provider body as pretty JSON. Returns '' when the
+  // failure carried neither (a local/config error), which hides the details block.
+  function formatErrorDetail(ev: { upstreamStatus?: number; providerRaw?: unknown }): string {
+    const lines: string[] = [];
+    if (ev.upstreamStatus !== undefined) lines.push(`HTTP ${ev.upstreamStatus}`);
+    if (ev.providerRaw !== undefined && ev.providerRaw !== null) {
+      try {
+        lines.push(JSON.stringify(ev.providerRaw, null, 2));
+      } catch {
+        lines.push(String(ev.providerRaw));
+      }
+    }
+    return lines.join('\n');
+  }
 
   async function run(): Promise<void> {
     if (!canRun) return;
@@ -48,6 +66,7 @@
     status = 'running';
     response = '';
     errorMsg = '';
+    errorDetail = '';
     durationMs = null;
     const startedAt = performance.now();
     try {
@@ -61,6 +80,7 @@
         } else if (ev.type === 'error') {
           status = 'error';
           errorMsg = ev.error;
+          errorDetail = formatErrorDetail(ev);
           void invalidateAll();
         } else if (ev.type === 'done') {
           durationMs = ev.durationMs ?? Math.round(performance.now() - startedAt);
@@ -172,6 +192,15 @@
       >{response}{#if running}<span class="animate-pulse">▋</span>{/if}{#if !response && !running}<span class="text-ink-muted">{$t('Waiting for response…')}</span>{/if}</div>
       {#if errorMsg}
         <p class="alert-error" role="alert">{errorMsg}</p>
+      {/if}
+      {#if errorDetail}
+        <!-- Verbatim upstream payload: the only way to tell a ban from a quota stop
+             when the provider returns a failure with no message of its own. -->
+        <details class="mt-2 text-xs" data-testid="test-error-detail">
+          <summary class="cursor-pointer text-ink-muted">{$t('Upstream details')}</summary>
+          <pre
+            class="mt-1 max-h-48 overflow-auto rounded border border-slate-200 bg-slate-50 p-2 font-mono text-xs whitespace-pre-wrap text-ink-body">{errorDetail}</pre>
+        </details>
       {/if}
     </div>
   </div>
