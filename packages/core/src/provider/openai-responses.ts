@@ -525,6 +525,7 @@ export function hoistResponsesInstructions(
 
 export type CodexResponsesNativeBodyFix =
   | "empty_reasoning_items_dropped"
+  | "input_item_metadata_stripped"
   | "input_item_references_stripped"
   | "max_output_tokens_removed"
   | "temperature_removed";
@@ -665,13 +666,20 @@ function hasUsefulReasoningPayload(item: Record<string, unknown>): boolean {
 function sanitizeStoreFalseInputItems(input: unknown): {
   input: unknown;
   referencesStripped: boolean;
+  metadataStripped: boolean;
   emptyReasoningDropped: boolean;
 } {
   if (!Array.isArray(input)) {
-    return { input, referencesStripped: false, emptyReasoningDropped: false };
+    return {
+      input,
+      referencesStripped: false,
+      metadataStripped: false,
+      emptyReasoningDropped: false,
+    };
   }
 
   let referencesStripped = false;
+  let metadataStripped = false;
   let emptyReasoningDropped = false;
   const next: unknown[] = [];
   for (const item of input) {
@@ -684,6 +692,14 @@ function sanitizeStoreFalseInputItems(input: unknown): {
       delete sanitized.id;
       referencesStripped = true;
     }
+    if ("status" in sanitized) {
+      delete sanitized.status;
+      metadataStripped = true;
+    }
+    if ("phase" in sanitized) {
+      delete sanitized.phase;
+      metadataStripped = true;
+    }
     if (sanitized.type === "reasoning" && !hasUsefulReasoningPayload(sanitized)) {
       emptyReasoningDropped = true;
       continue;
@@ -691,7 +707,7 @@ function sanitizeStoreFalseInputItems(input: unknown): {
     next.push(sanitized);
   }
 
-  return { input: next, referencesStripped, emptyReasoningDropped };
+  return { input: next, referencesStripped, metadataStripped, emptyReasoningDropped };
 }
 
 // ChatGPT-account Codex Responses is stricter than the public OpenAI Responses API.
@@ -720,9 +736,14 @@ export function sanitizeCodexResponsesNativeBody(body: Record<string, unknown>):
   }
   if (next.store === false && !bodyUsesResponsesLite(next)) {
     const sanitized = sanitizeStoreFalseInputItems(next.input);
-    if (sanitized.referencesStripped || sanitized.emptyReasoningDropped) {
+    if (
+      sanitized.referencesStripped ||
+      sanitized.metadataStripped ||
+      sanitized.emptyReasoningDropped
+    ) {
       ensureCopy().input = sanitized.input;
       if (sanitized.referencesStripped) fixes.add("input_item_references_stripped");
+      if (sanitized.metadataStripped) fixes.add("input_item_metadata_stripped");
       if (sanitized.emptyReasoningDropped) fixes.add("empty_reasoning_items_dropped");
     }
   }

@@ -6166,8 +6166,6 @@ describe("createExecute — native protocol passthrough (#217)", () => {
         {
           type: "message",
           role: "assistant",
-          status: "completed",
-          phase: "final_answer",
           content: [{ type: "output_text", text: "NO_REPLY" }],
         },
         { role: "user", content: [{ type: "input_text", text: "next" }] },
@@ -6175,6 +6173,7 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     });
     expect((forwarded.mutations as Record<string, unknown>).body_shims_applied).toEqual([
       "empty_reasoning_items_dropped",
+      "input_item_metadata_stripped",
       "input_item_references_stripped",
       "max_output_tokens_removed",
       "temperature_removed",

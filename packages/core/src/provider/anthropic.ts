@@ -1301,7 +1301,10 @@ export function openaiToAnthropicRequest(
   // user_id verbatim. Anthropic's metadata.user_id is an opaque ≤256-char string;
   // we carry {device_id, account_uuid, session_id} like the official client.
   if (opts?.metadataUserId) body.metadata = { user_id: opts.metadataUserId };
-  if (typeof r.temperature === "number") body.temperature = r.temperature;
+  const model = String(r.model ?? "");
+  if (typeof r.temperature === "number" && model !== "claude-sonnet-5") {
+    body.temperature = r.temperature;
+  }
   if (typeof r.top_p === "number") body.top_p = r.top_p;
   if (typeof r.top_k === "number") body.top_k = r.top_k;
   if (r.thinking && typeof r.thinking === "object") {
@@ -1317,7 +1320,7 @@ export function openaiToAnthropicRequest(
     const adjusted = applyForcedAnthropicThinking(body, r.reasoning_effort);
     body.thinking = adjusted.thinking;
     body.max_tokens = adjusted.max_tokens;
-    body.temperature = adjusted.temperature;
+    if (model !== "claude-sonnet-5") body.temperature = adjusted.temperature;
     delete body.top_p;
     delete body.top_k;
   }
@@ -1500,6 +1503,17 @@ function forceAnthropicFastMode(input: NativePassthroughInput): NativePassthroug
   return carrier;
 }
 
+function stripUnsupportedSonnetTemperature(input: NativePassthroughInput): NativePassthroughInput {
+  const body = nativePassthroughBody(input);
+  if (body.model !== "claude-sonnet-5" || !("temperature" in body)) return input;
+  const next = { ...body };
+  delete next.temperature;
+  if (!isNativePassthroughCarrier(input)) return next;
+  const carrier = cloneCarrierWithBody(input, next);
+  appendMutationList(carrier.mutations, "body_shims_applied", ["temperature_removed_for_model"]);
+  return carrier;
+}
+
 export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient {
   const doFetch = deps.fetch ?? globalThis.fetch;
   const cfg = deps.config;
@@ -1590,8 +1604,9 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
     includeClaudeCliRuntimeHeaders = true,
     normalizeToolNames = false,
   ): Promise<AnthropicRequestResult> {
-    const wireInput =
-      cfg.fastMode === true && endpointUrl === url ? forceAnthropicFastMode(input) : input;
+    const wireInput = stripUnsupportedSonnetTemperature(
+      cfg.fastMode === true && endpointUrl === url ? forceAnthropicFastMode(input) : input,
+    );
     const body = nativePassthroughBody(wireInput);
     const prepared = prepareNativePassthroughRequest(
       wireInput,

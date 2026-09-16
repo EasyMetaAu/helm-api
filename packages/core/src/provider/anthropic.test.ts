@@ -12,6 +12,15 @@ import { CLAUDE_CODE_CLIENT_VERSION } from "./oauth/claude-client-version.genera
 import { UpstreamError } from "./openai.js";
 
 describe("openaiToAnthropicRequest", () => {
+  it("omits deprecated temperature for Claude Sonnet 5", () => {
+    const body = openaiToAnthropicRequest({
+      model: "claude-sonnet-5",
+      messages: [{ role: "user", content: "Hi" }],
+      temperature: 0.2,
+    });
+    expect(body.temperature).toBeUndefined();
+  });
+
   it("prepends the Claude-Code system spoof and maps messages + max_tokens", () => {
     const body = openaiToAnthropicRequest({
       model: "claude-opus-4-6",
