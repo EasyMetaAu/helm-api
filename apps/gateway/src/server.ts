@@ -191,7 +191,11 @@ import {
 } from "./oauth/codex-model-catalog.js";
 import { createCodexModelsEtagTracker } from "./oauth/codex-model-etag-tracker.js";
 import { codexResetCreditSharedKey } from "./oauth/codex-reset-account-key.js";
-import { anthropicMetadataUserId, stableSessionId } from "./oauth/device-identity.js";
+import {
+  anthropicMetadataUserId,
+  stableInstallationId,
+  stableSessionId,
+} from "./oauth/device-identity.js";
 import { effectiveOAuthModelOptions, type ModelOption } from "./oauth/effective-models.js";
 import {
   createOAuthModelDiscoveryCache,
@@ -896,13 +900,17 @@ function buildOAuthAccountClient(
   const cred = buildCredential(accountConfig, oauthCtx, proxy, base.timeoutMs);
   if (!cred) return null;
   // Stable per-account anti-ban identity (never rotates): Anthropic gets a
-  // metadata.user_id; Codex a stable session_id. Both deterministic from
-  // (providerId, account) salted by the at-rest key — no DB write-back.
+  // metadata.user_id; Codex a stable session_id plus its own installation id (the
+  // client's is machine-wide, shared by every account on that install). All
+  // deterministic from (providerId, account) salted by the at-rest key — no DB write-back.
   const identity =
     providerId === "anthropic"
       ? { metadataUserId: anthropicMetadataUserId(providerId, account, oauthCtx.encKey) }
       : providerId === "openai-codex"
-        ? { sessionId: stableSessionId(providerId, account, oauthCtx.encKey) }
+        ? {
+            sessionId: stableSessionId(providerId, account, oauthCtx.encKey),
+            installationId: stableInstallationId(providerId, account, oauthCtx.encKey),
+          }
         : undefined;
   return createProviderClient(
     accountConfig,
@@ -1625,7 +1633,7 @@ function createProviderClient(
   // Stable per-account subscription identity (anti-ban, issue #38). Computed ONCE
   // per account by synthesis (deterministic, never per-request): Anthropic carries
   // it as metadata.user_id; Codex as a stable session_id / prompt_cache_key.
-  identity?: { metadataUserId?: string; sessionId?: string },
+  identity?: { metadataUserId?: string; sessionId?: string; installationId?: string },
   // Upstream response-header hook (providers page Tier 3 quota). Only the Codex
   // client uses it today (its `x-codex-*` rate-limit windows are PUSHed on every
   // reply); bound per-account by synthesis so the scrape knows which subscription.
@@ -1664,6 +1672,7 @@ function createProviderClient(
         ...base,
         ...cred,
         sessionId: identity?.sessionId,
+        installationId: identity?.installationId,
         onResponseMeta,
         fastMode,
         userAgent: codexRuntime?.userAgent,

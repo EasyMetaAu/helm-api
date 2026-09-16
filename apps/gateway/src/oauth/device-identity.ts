@@ -43,3 +43,10 @@ export function anthropicMetadataUserId(
 export function stableSessionId(providerId: string, account: string, encKey: Buffer): string {
   return uuidFrom(digest("codex-session", providerId, account, encKey));
 }
+
+// Codex `x-codex-installation-id` (header + `client_metadata` + the `x-codex-turn-metadata`
+// JSON): the CLI's id is MACHINE-wide, so every ChatGPT account served from one install
+// shares it. Bind one per account instead — same never-rotating derivation, distinct label.
+export function stableInstallationId(providerId: string, account: string, encKey: Buffer): string {
+  return uuidFrom(digest("codex-installation", providerId, account, encKey));
+}

@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-09-16 · Codex installation id 按账号重绑（Provider / Responses，docs/04/07，原则 7）
+
+- 查证 Codex 上游实现（`codex-rs/core/src/installation_id.rs`）：`installation_id` 是持久化在 `$CODEX_HOME/installation_id` 的**纯随机 UUID v4**，无任何派生规则——不掺账号、不掺硬件、与 `session_id`/`thread_id` 无关。它标识**安装**而非账号，所以同一台机器上的多个 ChatGPT 账号此前共用一个指纹经 Helm 出网。
+- 改为每账号一个：复用既有 `stableSessionId` 的确定性派生思路，新增 label `codex-installation`，`sha256(encKey ‖ "codex-installation:<provider>:<account>")` 前 16 字节整成 UUID v4 形状。永不轮换、跨重启稳定、被 at-rest 密钥加盐、无需回写 DB。
+- 客户端在**三处**携带该 id，必须一起重绑，否则 header 改了而 body 仍泄漏真实值：HTTP header `x-codex-installation-id`、`client_metadata` 同名 key、以及 `x-codex-turn-metadata` JSON 内的 `installation_id` 字段（header 与 `client_metadata` 两份都要）。
+- 边界：客户端**未携带**该 id 时完全不改写（保留 raw body，不凭空生成）；turn-metadata 非合法 JSON 时原样透传。上游 `prompt_cache_key` 取自 `session_id` 而非 installation id，故本改动不影响 prompt 缓存亲和性。
+- 上游官方只把该 id 放在 body（`compatibility_headers()` 不发它，真 header 仅用于 remote-control WebSocket 配对），但生产抓包显示实际流量 header 里确实带了，因此三处都覆盖。
+
 ## 2026-09-10 · 失败请求保留最终尝试的订阅账号（Telemetry / Admin，docs/07，原则 5/7）
 
 - `serving_account` 在成功时仍表示实际服务账号；全部执行失败时改为记录最后一次真正发起上游请求的订阅账号，便于定位账号级故障。若候选在选账号前被熔断/能力门禁跳过，仍保持 `null`，不伪造分配结果。
