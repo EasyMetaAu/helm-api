@@ -334,11 +334,11 @@ async function main() {
     // ── Known-good model PER PROVIDER — verified live 2026-06-03 ────────────────
     // Each subscription is tested with its OWN model id; they DO NOT share one. This
     // is hard-won knowledge — pinned here so we don't relearn it every time:
-    //   • openai-codex (ChatGPT Codex backend): serves gpt-5.4 / gpt-5.4-mini / gpt-5.5.
+    //   • openai-codex (ChatGPT Codex backend): serves gpt-5.6-sol / gpt-5.4 / gpt-5.4-mini (gpt-5.5 retired 2026-09-16).
     //     The legacy *-codex / *-pro / *-nano slugs 400 "model is not supported when
     //     using Codex with a ChatGPT account" — it is a MODEL-id problem, not auth.
     //   • github-copilot: serves gpt-4o / gpt-4.1 / gpt-4o-mini / gpt-5-mini (+ some
-    //     claude). Copilot's /models ADVERTISES gpt-5.4 / gpt-5.4-mini / gpt-5.5 and
+    //     claude). Copilot's /models ADVERTISES gpt-5.4 / gpt-5.4-mini and
     //     claude-opus/sonnet + gemini, but its chat endpoint REJECTS them
     //     (model_not_supported). So NEVER reuse Codex's gpt-5.4* ids for Copilot.
     //   • anthropic: any live-listed claude model (haiku is the cheapest).

@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-09-16 · 下线 gpt-5.5：断路由但保留价目（Config / OAuth discovery，docs/04，原则 2/6）
+
+- **与 Codex Spark 先例（`33c1f799` + `9e3bfb67`）的有意偏离**：Spark 的 config 条目被删干净，gpt-5.5 不能照做。box 上 `served_model='gpt-5.5'` 有 349,050 条、$28,828.83（2026-06-12 起）。`historical-cost-reprice.ts` 按 alias 查 catalog，查不到就 `skip(alias,"pricing_entry_missing")`——删掉价目等于永久放弃这批记录的重算能力。故采用**只断路由**：移除 lane / alias / provider 条目 / curated list，`pricing.yaml` + `capabilities.yaml` 保留并加退休注释说明为何不是孤儿。Spark 从未有过价目条目（`git log -S` 确认），所以它没有这个取舍。
+- **alias 删除必须与 lane 同步**：`validateModelAliasTargets` 在启动时 fail-closed，只删 lane 会拒绝启动。删掉 `"gpt-5.5"` 映射后，pin 该 id 的客户端由 `"gpt-5*": premium` 接住——优雅降级而非 400。
+- **坑：manual 模式的 allowlist 绕过了退休过滤。** `RETIRED_OPENAI_CODEX_MODELS` 覆盖 live discovery 与 bundled/cached 目录，但 `selectAccountModels` 对 manual 模式**原样返回** `enabledModels`，退休前存下的账号设置会让该模型复活为可路由 alias。已在该 chokepoint 补过滤（仅 openai-codex；manual 保留自定义 id 的语义不变）。这是新写的测试实际抓到的，不是预判。
+- `codex-models.json` 仍含 gpt-5.5 slug——它由 `pnpm sync:codex-models` 从上游生成，手改会被覆盖，保证来自 `parseModels` 的过滤（沿用先例）。
+- gpt-5.5 无独立 quota limit family（Spark 有 `codex_spark` / `-codex-spark` 后缀），故 `isRetiredOpenAICodexLimit` 与 admin `.svelte` 均无需改动。
+- 顺带修正 docs/04 的 lane 计数（13→12 vendor-family；总数标称 22 实为 26，gpt-6-astra / grok / media lane 加入后未更新）。
+
 ## 2026-09-16 · Codex installation id 按账号重绑（Provider / Responses，docs/04/07，原则 7）
 
 - 查证 Codex 上游实现（`codex-rs/core/src/installation_id.rs`）：`installation_id` 是持久化在 `$CODEX_HOME/installation_id` 的**纯随机 UUID v4**，无任何派生规则——不掺账号、不掺硬件、与 `session_id`/`thread_id` 无关。它标识**安装**而非账号，所以同一台机器上的多个 ChatGPT 账号此前共用一个指纹经 Helm 出网。
@@ -62,18 +71,10 @@
 - Manual mode remains the exact saved `enabledModels` list across Admin, Lanes, OpenAI-compatible `/v1/models`, native Codex listings, and runtime pools. xAI custom manual IDs use an identity wire mapping when absent from the structured catalog; the provider remains the final capability authority.
 - No schema, migration, configuration, or dependency changes.
 
-## 2026-09-06 · Codex 原生模型列表保留手动自定义 ID（OAuth provider / Codex discovery，docs/04/05，原则 3/6）
-
-- 原生 `GET /v1/models?client_version=...` 已把手动账号模型作为权威输入；当 ID 尚未出现在上游目录时，使用该账号目录中最低 priority 模型的兼容元数据生成条目，并将 `slug`/`display_name` 改为手动 ID。自动模式仍只输出上游发现项。
-- 这是列表展示与协议兼容的最小兜底，不宣称自定义 ID 的真实能力或 entitlement；实际请求仍由上游决定是否支持。没有新增 schema、migration、配置或依赖。
-
-## 2026-09-06 · 订阅账号手动模型允许自定义 ID（OAuth provider / Admin / routing，docs/04/11，原则 2/3/6）
-
-- Manual 模式以运维方保存的 `enabledModels` 为权威，Codex 模型即使尚未出现在账号目录中，也会在 Admin 回读、Lanes 目录和运行时账号池中保留；Automatic 模式仍只跟随上游发现。
-- 自定义 ID 只表示“允许尝试”，不伪造账号 entitlement 或模型能力；账号实际不支持时由上游正常拒绝。没有新增 schema、migration、配置或依赖。
-
 ## 历史条目摘要（最新要点）
 
+- **2026-09-06 · Codex 原生模型列表保留手动自定义 ID**：`GET /v1/models` 对尚未出现在上游目录的手动 ID，借该账号最低 priority 模型的兼容元数据生成条目（改写 slug/display_name）；只为列表展示与协议兼容兜底，不宣称真实能力，自动模式仍只输出上游发现项。
+- **2026-09-06 · 订阅账号手动模型允许自定义 ID**：Manual 模式以运维保存的 `enabledModels` 为权威，Codex 自定义 ID 即使未出现在账号目录也保留（只表示“允许尝试”，不伪造 entitlement）；Automatic 仍只跟随上游发现。注意其后 2026-09-16 已为该路径补上退休模型过滤。
 - **2026-09-05 · GPT-6 Astra 官方 API 目录与价格**：官方 API capability/pricing 与 reasoning 参数兼容已加入 override，订阅 lane 保留；定价和限制按对应提交回溯。
 
 ## 更早历史总览

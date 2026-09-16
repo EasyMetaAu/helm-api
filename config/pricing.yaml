@@ -213,6 +213,10 @@ openai-codex/gpt-5.6-luna:
       cacheReadPerMTokUsd: 0.2
       cacheWritePerMTokUsd: 2.5
       maxPromptTokens: 272000
+# RETIRED 2026-09-16 — no lane and no alias point here any more. The rate card
+# stays because `pnpm pricing:reprice` looks the served alias up in the catalog and
+# skips the row (`pricing_entry_missing`) when it is absent; deleting this would
+# permanently strand the cost of everything GPT-5.5 already served.
 openai-codex/gpt-5.5:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0
@@ -448,6 +452,8 @@ openai/gpt-5.6-luna:
       cacheReadPerMTokUsd: 0.2
       cacheWritePerMTokUsd: 2.5
       maxPromptTokens: 272000
+# RETIRED 2026-09-16 alongside openai-codex/gpt-5.5 — the providers.yaml alias is
+# gone; this rate card is kept for the same reprice reason.
 zenmux/gpt-5.5:
   inputPerMTokUsd: 5.0
   outputPerMTokUsd: 30.0

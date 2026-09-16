@@ -135,13 +135,38 @@ describe("createCodexModelCatalog", () => {
     });
   });
 
+  // The bundled codex-models.json is regenerated from upstream and still carries the
+  // gpt-5.5 slug, so the guarantee has to come from this filter, not from that file.
+  it("removes retired gpt-5.5 from bundled, cached, and remote catalogs", async () => {
+    const retired = model("gpt-5.5");
+    const cachedCatalog = createCodexModelCatalog({
+      cache: fakeCache({ entry: entry([retired, model("gpt-5.6-terra", 2)]), fresh: true }),
+      bundledModels: [retired, model("gpt-5.6-sol", 2)],
+    });
+
+    await expect(cachedCatalog.load(KEY, remote([retired]))).resolves.toMatchObject({
+      models: [{ slug: "gpt-5.6-terra" }],
+    });
+    expect(cachedCatalog.resolve(KEY, "gpt-5.5")).toBeUndefined();
+
+    const networkCatalog = createCodexModelCatalog({
+      cache: fakeCache(null),
+      bundledModels: [retired],
+    });
+    await expect(
+      networkCatalog.load(KEY, remote([retired, model("gpt-5.6-luna", 2)])),
+    ).resolves.toMatchObject({
+      models: [{ slug: "gpt-5.6-luna" }],
+    });
+  });
+
   it("filters bundled fallback models by minimal_client_version", async () => {
     const oldKey = { ...KEY, clientVersion: "0.139.0" };
     const catalog = createCodexModelCatalog({
       cache: fakeCache(null),
       bundledModels: [
         model("gpt-5.6-sol", 1, { minimal_client_version: "0.144.0" }),
-        model("gpt-5.5", 2, { minimal_client_version: "0.98.0" }),
+        model("gpt-5.4", 2, { minimal_client_version: "0.98.0" }),
       ],
     });
 
@@ -151,7 +176,7 @@ describe("createCodexModelCatalog", () => {
       }),
     ).resolves.toMatchObject({
       source: "bundled",
-      models: [{ slug: "gpt-5.5" }],
+      models: [{ slug: "gpt-5.4" }],
     });
     expect(catalog.resolve(oldKey, "gpt-5.6-sol")).toBeUndefined();
   });
@@ -162,7 +187,7 @@ describe("createCodexModelCatalog", () => {
       cache: fakeCache(null),
       bundledModels: [
         model("gpt-5.6-sol", 1, { minimal_client_version: [0, 144, 0] }),
-        model("gpt-5.5", 2, { minimal_client_version: [0, 98, 0] }),
+        model("gpt-5.4", 2, { minimal_client_version: [0, 98, 0] }),
       ],
     });
 
@@ -172,7 +197,7 @@ describe("createCodexModelCatalog", () => {
       }),
     ).resolves.toMatchObject({
       source: "bundled",
-      models: [{ slug: "gpt-5.5" }],
+      models: [{ slug: "gpt-5.4" }],
     });
   });
 
@@ -228,7 +253,7 @@ describe("createCodexModelCatalog", () => {
   });
 
   it("refreshes a stale cache and persists the complete remote ModelInfo", async () => {
-    const cache = fakeCache({ entry: entry([model("gpt-5.5")]), fresh: false });
+    const cache = fakeCache({ entry: entry([model("gpt-5.4")]), fresh: false });
     const fetched = [model("gpt-5.6-sol"), model("gpt-5.6-luna", 2)];
     const catalog = createCodexModelCatalog({ cache });
 
@@ -249,8 +274,8 @@ describe("createCodexModelCatalog", () => {
   });
 
   it("merges a hidden-only remote response into the bundled catalog like Codex CLI", async () => {
-    const bundled = [model("gpt-5.6-sol"), model("gpt-5.5", 3)];
-    const hiddenOverride = model("gpt-5.5", 1, { visibility: "hide" });
+    const bundled = [model("gpt-5.6-sol"), model("gpt-5.4", 3)];
+    const hiddenOverride = model("gpt-5.4", 1, { visibility: "hide" });
     const hiddenNew = model("codex-auto-review", 2, { visibility: "hide" });
     const cache = fakeCache(null);
     const catalog = createCodexModelCatalog({
@@ -334,9 +359,9 @@ describe("createCodexModelCatalog", () => {
   });
 
   it("deduplicates concurrent refreshes for a changed response ETag", async () => {
-    const cache = fakeCache({ entry: entry([model("gpt-5.5")]), fresh: true });
+    const cache = fakeCache({ entry: entry([model("gpt-5.4")]), fresh: true });
     const catalog = createCodexModelCatalog({ cache });
-    await catalog.load(KEY, remote([model("gpt-5.5")], '"v1"'));
+    await catalog.load(KEY, remote([model("gpt-5.4")], '"v1"'));
 
     let release!: (value: OpenAICodexModelsResult) => void;
     const fetchModels = vi.fn(
@@ -510,7 +535,7 @@ describe("createCodexModelCatalog", () => {
 
   it("notifies only after a successful network catalog refresh", async () => {
     const onRefresh = vi.fn();
-    const freshCache = fakeCache({ entry: entry([model("gpt-5.5")]), fresh: true });
+    const freshCache = fakeCache({ entry: entry([model("gpt-5.4")]), fresh: true });
     const cachedCatalog = createCodexModelCatalog({ cache: freshCache, onRefresh });
     await cachedCatalog.load(KEY, remote([model("gpt-5.6-sol")]));
     expect(onRefresh).not.toHaveBeenCalled();

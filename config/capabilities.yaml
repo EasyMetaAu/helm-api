@@ -203,6 +203,8 @@ openai-codex/gpt-5.6-luna:
       levels: [none, low, medium, high, xhigh, max]
   maxContextTokens: 372000
   maxOutputTokens: 128000
+# RETIRED 2026-09-16 — kept so the catalog entry backing historical cost reprice
+# stays complete. Nothing routes here (no lane, no alias, filtered from discovery).
 openai-codex/gpt-5.5:
   supportsTools: true
   jsonOutput: schema

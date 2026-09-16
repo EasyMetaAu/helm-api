@@ -86,7 +86,6 @@ describe("discoverOAuthModels", () => {
       "gpt-5.6-sol",
       "gpt-5.6-terra",
       "gpt-5.6-luna",
-      "gpt-5.5",
       "gpt-5.4",
       "gpt-5.4-mini",
       "gpt-realtime",
@@ -108,6 +107,14 @@ describe("discoverOAuthModels", () => {
     expect(
       expandOpenAICodexModelAliases(["gpt-5.3-codex-spark", "gpt-5.6-sol", "gpt-5.6-terra"]),
     ).toEqual(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6"]);
+  });
+
+  it("retires gpt-5.5 even when stale settings still contain it", () => {
+    expect(expandOpenAICodexModelAliases(["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra"])).toEqual([
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6",
+    ]);
   });
 
   it("filters retired Spark quota limits while preserving active and account-wide windows", () => {

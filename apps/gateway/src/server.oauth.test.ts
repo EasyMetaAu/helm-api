@@ -2163,7 +2163,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       const version = url.searchParams.get("client_version");
       const models =
         version === "0.139.0"
-          ? [codexModel("gpt-5.5")]
+          ? [codexModel("gpt-5.4")]
           : [
               codexModel("gpt-5.6-sol"),
               codexModel("gpt-5.6-terra", { priority: 2 }),
@@ -2200,7 +2200,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       tokenManagers,
     });
 
-    expect(older.models).toEqual(["gpt-5.5"]);
+    expect(older.models).toEqual(["gpt-5.4"]);
     expect(older.keys.map((key) => key.clientVersion)).toEqual(["0.139.0"]);
     expect(current.models).toEqual(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6"]);
     expect(current.keys.map((key) => key.clientVersion)).toEqual(["0.145.0"]);
@@ -2784,7 +2784,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     });
     await setAccountSettings(config, ENC_KEY, "openai-codex", "fast", {
       modelsMode: "manual",
-      enabledModels: ["gpt-5.5"],
+      enabledModels: ["gpt-5.4"],
       fastMode: true,
     });
     const catalog = createCodexModelCatalog({
@@ -2797,7 +2797,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
         return new Response(
           JSON.stringify({
             models: [
-              codexModel("gpt-5.5", {
+              codexModel("gpt-5.4", {
                 additional_speed_tiers: ["fast"],
                 service_tiers: [
                   {
@@ -2839,7 +2839,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     );
 
     await poolClients.get("openai-codex")?.chatCompletion({
-      model: "gpt-5.5",
+      model: "gpt-5.4",
       messages: [{ role: "user", content: "hi" }],
       service_tier: "default",
     });
@@ -2860,7 +2860,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       });
       await setAccountSettings(config, ENC_KEY, "openai-codex", account, {
         modelsMode: "manual",
-        enabledModels: ["gpt-5.5"],
+        enabledModels: ["gpt-5.4"],
         priority: 50,
       });
     }
@@ -2880,7 +2880,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url.includes("/models?")) {
-        return new Response(JSON.stringify({ models: [codexModel("gpt-5.5")] }), {
+        return new Response(JSON.stringify({ models: [codexModel("gpt-5.4")] }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -2914,7 +2914,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     );
 
     await poolClients.get("openai-codex")?.chatCompletion({
-      model: "gpt-5.5",
+      model: "gpt-5.4",
       messages: [{ role: "user", content: "hi" }],
       prompt_cache_key: "stick-a",
     });
@@ -2949,7 +2949,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
       });
       await setAccountSettings(config, ENC_KEY, "openai-codex", account, {
         modelsMode: "manual",
-        enabledModels: ["gpt-5.5"],
+        enabledModels: ["gpt-5.4"],
         priority: 50,
       });
     }
@@ -2968,7 +2968,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url.includes("/models?")) {
-        return new Response(JSON.stringify({ models: [codexModel("gpt-5.5")] }), {
+        return new Response(JSON.stringify({ models: [codexModel("gpt-5.4")] }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -3002,7 +3002,7 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     );
 
     await poolClients.get("openai-codex")?.chatCompletion({
-      model: "gpt-5.5",
+      model: "gpt-5.4",
       messages: [{ role: "user", content: "hi" }],
       prompt_cache_key: "stick-a",
     });
