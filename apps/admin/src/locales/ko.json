@@ -1027,6 +1027,7 @@
   "vs yesterday": "전일 대비",
   "Waiting for authorization…": "승인 대기 중…",
   "Waiting for response…": "응답 대기 중…",
+  "Upstream details": "업스트림 세부 정보",
   "Waiting longer than this returns 429.": "이보다 오래 기다리면 429를 반환합니다.",
   "Waiting longer than this returns 503.": "이보다 오래 기다리면 503을 반환합니다.",
   "Week": "Week",

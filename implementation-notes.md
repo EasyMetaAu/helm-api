@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-09-17 · 无消息上游失败暴露原始事件（Provider / Admin，docs/05/07/11，原则 3/8）
+
+- **真实触发**：生产两个 ChatGPT Pro 账号（`gongjin843677@` / `smithmark3673@`）全模型失败，连通性面板只显示 `codex responses stream error` 一句，**无法判断是封号、风控还是配额**。同时刻另两个账号正常，排除了通道与网络因素。
+- **根因**：`responseEventError` 的兜底分支——上游 `response.failed` 事件里 `message` 与 `error.message` 都缺失时，直接返回那句固定文案，**原始事件既不进日志也不传前端**，诊断信息在此处彻底丢失。
+- 现在兜底消息保留原句作稳定前缀，追加 `code=<code>` 与事件 JSON（`summarizeUpstreamEvent`，截断 400 字符防刷屏）；完整事件仍在 `UpstreamError.providerRaw`。有 message 的上游错误路径**完全不变**。
+- 连通性测试 SSE 的 error 事件新增 `upstreamStatus` + `providerRaw` 两个**可选**字段，仅 `UpstreamError` 携带；其他错误事件形状不变，前端旧行为兼容。管理面板加可展开的「上游详情」块（7 语言均已补译，CI 的 locale 对齐门禁会卡）。
+- **坑**：测试里用 `async function*` 写"只抛不产出"的 iterator 会被 biome `useYield` 拒绝；改为直接实现 `Symbol.asyncIterator` + `next: () => Promise.reject(...)`，语义上也更贴近"首次拉取即失败"的真实场景。
+- 截断上限 400 字符是拍板值，无配置项——理由同原则 2：会撒谎的旋钮比没有旋钮更糟，完整内容本就在 `providerRaw` 里。
+
 ## 2026-09-16 · 下线 gpt-5.5：断路由但保留价目（Config / OAuth discovery，docs/04，原则 2/6）
 
 - **与 Codex Spark 先例（`33c1f799` + `9e3bfb67`）的有意偏离**：Spark 的 config 条目被删干净，gpt-5.5 不能照做。box 上 `served_model='gpt-5.5'` 有 349,050 条、$28,828.83（2026-06-12 起）。`historical-cost-reprice.ts` 按 alias 查 catalog，查不到就 `skip(alias,"pricing_entry_missing")`——删掉价目等于永久放弃这批记录的重算能力。故采用**只断路由**：移除 lane / alias / provider 条目 / curated list，`pricing.yaml` + `capabilities.yaml` 保留并加退休注释说明为何不是孤儿。Spark 从未有过价目条目（`git log -S` 确认），所以它没有这个取舍。

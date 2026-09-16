@@ -1027,6 +1027,7 @@
   "vs yesterday": "对比昨日",
   "Waiting for authorization…": "正在等待授权…",
   "Waiting for response…": "等待响应…",
+  "Upstream details": "上游详情",
   "Waiting longer than this returns 429.": "等待超过该时间将返回 429。",
   "Waiting longer than this returns 503.": "等待超过该时间将返回 503。",
   "Week": "周",

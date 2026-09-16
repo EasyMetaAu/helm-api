@@ -431,7 +431,9 @@ export type AccountTestEvent =
   | { type: 'finish'; reason?: string }
   | { type: 'usage'; promptTokens?: number; completionTokens?: number; totalTokens?: number }
   | { type: 'done'; durationMs?: number }
-  | { type: 'error'; error: string };
+  // `upstreamStatus` / `providerRaw` ride along ONLY for an upstream failure, so the
+  // panel can show what the provider actually returned instead of a bare sentence.
+  | { type: 'error'; error: string; upstreamStatus?: number; providerRaw?: unknown };
 
 // Pull one normalized event out of an SSE `data:` line (ignores comments, blanks,
 // `[DONE]`, and unparseable payloads — fail-open like the gateway parser).

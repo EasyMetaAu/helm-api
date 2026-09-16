@@ -1,4 +1,4 @@
-import { GROK_OAUTH_MEDIA_MODELS, TokenRefreshError } from "@helm/core";
+import { GROK_OAUTH_MEDIA_MODELS, TokenRefreshError, UpstreamError } from "@helm/core";
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../../app.js";
@@ -162,6 +162,38 @@ describe("POST /admin/api/oauth/:provider/test", () => {
     expect(err?.error).toMatch(/429/);
     // No spurious done event after a failure.
     expect(events.some((e) => e.type === "done")).toBe(false);
+  });
+
+  // The connectivity panel is the operator's only window into WHY an account fails.
+  // An UpstreamError carries the verbatim provider payload + HTTP status; forward both
+  // so a message-less upstream failure is still diagnosable from the UI alone.
+  it("forwards the upstream status and raw provider payload on an UpstreamError", async () => {
+    const upstream = new UpstreamError(
+      "upstream_error",
+      'codex responses stream error: {"type":"response.failed"}',
+      { type: "response.failed", response: { status: "failed" } },
+      403,
+    );
+    // Fails on the FIRST pull, exactly like a Codex account rejected before any output.
+    const tester = testerOf(() => ({
+      [Symbol.asyncIterator]: (): AsyncIterator<TestStreamEvent> => ({
+        next: () => Promise.reject(upstream),
+      }),
+    }));
+    const res = await app({ oauthTester: tester }).request("/admin/api/oauth/openai-codex/test", {
+      method: "POST",
+      headers: JSONH,
+      body: JSON.stringify({ account: "default", model: "gpt-5.6-sol" }),
+    });
+
+    expect(res.status).toBe(200);
+    const err = sseEvents(await res.text()).find((e) => e.type === "error");
+    expect(err?.error).toContain("response.failed");
+    expect(err?.upstreamStatus).toBe(403);
+    expect(err?.providerRaw).toMatchObject({
+      type: "response.failed",
+      response: { status: "failed" },
+    });
   });
 
   it("marks the account as credential-failed when the test refresh gets a permanent 401", async () => {

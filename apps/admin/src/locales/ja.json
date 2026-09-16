@@ -1027,6 +1027,7 @@
   "vs yesterday": "前日比",
   "Waiting for authorization…": "認可を待機中…",
   "Waiting for response…": "応答を待機中…",
+  "Upstream details": "アップストリームの詳細",
   "Waiting longer than this returns 429.": "これより長く待機すると 429 が返されます。",
   "Waiting longer than this returns 503.": "これより長く待機すると 503 が返されます。",
   "Week": "Week",

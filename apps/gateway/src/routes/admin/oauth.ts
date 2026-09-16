@@ -3,6 +3,7 @@ import {
   computeUsagePeriods,
   filterRetiredOpenAICodexLimits,
   GROK_OAUTH_MEDIA_MODELS,
+  UpstreamError,
   windowMinutesForKey,
   windowsToActiveUsageRecovery,
   windowsToUsageLimit,
@@ -144,6 +145,23 @@ function resetEventBoundaries(
 // so echoing the message is safe; anything else degrades to a generic string.
 function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : "oauth request failed";
+}
+
+// The connectivity panel is the only place an operator sees WHY an account fails, so an
+// UpstreamError contributes its verbatim provider payload and HTTP status alongside the
+// message. Both are already redacted upstream (the Codex client scrubs live secrets) and
+// omitted entirely for non-upstream errors, so the event shape stays unchanged elsewhere.
+function upstreamErrorDetail(e: unknown): {
+  upstreamStatus?: number;
+  providerRaw?: unknown;
+} {
+  if (!(e instanceof UpstreamError)) return {};
+  return {
+    ...(e.upstreamStatus !== null ? { upstreamStatus: e.upstreamStatus } : {}),
+    ...(e.providerRaw !== null && e.providerRaw !== undefined
+      ? { providerRaw: e.providerRaw }
+      : {}),
+  };
 }
 
 type DevicePollErrorCode =
@@ -1343,7 +1361,9 @@ export function registerOAuthRoutes(app: Hono<AppEnv>, deps: AdminApiDeps): void
         // A client disconnect / modal close is not a provider failure — stay quiet.
         if (isAbort(e, signal)) return;
         await recordCredentialFailure(deps, providerId, account, e);
-        await sse.writeSSE({ data: JSON.stringify({ type: "error", error: errMessage(e) }) });
+        await sse.writeSSE({
+          data: JSON.stringify({ type: "error", error: errMessage(e), ...upstreamErrorDetail(e) }),
+        });
       }
     });
   });

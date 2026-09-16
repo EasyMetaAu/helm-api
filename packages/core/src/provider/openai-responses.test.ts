@@ -817,8 +817,14 @@ describe("translateResponsesSSE", () => {
     });
   });
 
-  it("falls back to a generic message when response.failed carries no error message", async () => {
-    const res = sseResponse([{ type: "response.failed", response: {} }]);
+  // A message-less upstream failure used to collapse to a bare "codex responses stream
+  // error", hiding WHAT the upstream actually said (it cost a live debugging session:
+  // two banned accounts reported only that sentence). When neither `message` nor
+  // `error.message` exists, surface the event itself so the operator sees the real shape.
+  it("surfaces the raw upstream event when response.failed carries no error message", async () => {
+    const res = sseResponse([
+      { type: "response.failed", response: { status: "failed", id: "resp_9" } },
+    ]);
     let caught: unknown;
     try {
       for await (const _ of translateResponsesSSE(res, "m")) {
@@ -827,11 +833,30 @@ describe("translateResponsesSSE", () => {
     } catch (e) {
       caught = e;
     }
-    expect((caught as UpstreamError).message).toBe("codex responses stream error");
+    const message = (caught as UpstreamError).message;
+    expect(message).toContain("codex responses stream error");
+    // The operator-visible message now carries the upstream event verbatim.
+    expect(message).toContain("response.failed");
+    expect(message).toContain("resp_9");
     expect((caught as UpstreamError).providerRaw).toMatchObject({
       type: "response.failed",
-      response: {},
+      response: { status: "failed" },
     });
+  });
+
+  it("includes an upstream error code in the message when only a code is returned", async () => {
+    const res = sseResponse([
+      { type: "response.failed", response: { error: { code: "account_deactivated" } } },
+    ]);
+    let caught: unknown;
+    try {
+      for await (const _ of translateResponsesSSE(res, "m")) {
+        // drain
+      }
+    } catch (e) {
+      caught = e;
+    }
+    expect((caught as UpstreamError).message).toContain("account_deactivated");
   });
 
   it("throws when the stream ends without response.completed", async () => {
