@@ -404,6 +404,24 @@ describe("effectiveOAuthModelOptions", () => {
     const { tokens, config } = makeStores();
     await bind(tokens, "openai-codex", "default", { accountId: "workspace-1" });
     await setAccountSettings(config, KEY, "openai-codex", "default", {
+      enabledModels: ["gpt-5.6-terra"],
+    });
+
+    await expect(
+      effectiveOAuthModelOptions({ store: tokens, encKey: KEY }, config, ROUTABLE, {
+        codexCatalog: codexCatalog({
+          default: [{ slug: "gpt-5.6-sol" }, { slug: "gpt-5.6-terra" }],
+        }),
+      }),
+    ).resolves.toEqual([{ alias: "openai-codex/gpt-5.6-terra", accounts: ["default"] }]);
+  });
+
+  // A retired slug must not come back to life through settings written before the
+  // retirement — the allowlist is honoured, but the retired entry is dropped.
+  it("drops retired gpt-5.5 from a legacy Codex enabledModels allowlist", async () => {
+    const { tokens, config } = makeStores();
+    await bind(tokens, "openai-codex", "default", { accountId: "workspace-1" });
+    await setAccountSettings(config, KEY, "openai-codex", "default", {
       enabledModels: ["gpt-5.5"],
     });
 
@@ -413,7 +431,7 @@ describe("effectiveOAuthModelOptions", () => {
           default: [{ slug: "gpt-5.6-sol" }, { slug: "gpt-5.5" }],
         }),
       }),
-    ).resolves.toEqual([{ alias: "openai-codex/gpt-5.5", accounts: ["default"] }]);
+    ).resolves.toEqual([]);
   });
 
   it("keeps hidden account models routable in auto mode while leaving display filtering to UI", async () => {

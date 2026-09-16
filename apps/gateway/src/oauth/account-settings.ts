@@ -2,6 +2,7 @@ import {
   type ConfigStore,
   decryptSecret,
   encryptSecret,
+  isRetiredOpenAICodexModel,
   type OAuthSelectionStrategy,
   parseXaiOAuthModels,
   type XaiOAuthModel,
@@ -108,9 +109,14 @@ export function selectAccountModels(
   settings: Pick<AccountSettings, "modelsMode" | "enabledModels">,
   automaticModels: readonly string[],
 ): string[] {
-  return resolveAccountModelsMode(providerId, settings) === "manual"
-    ? [...(settings.enabledModels ?? [])]
-    : [...automaticModels];
+  if (resolveAccountModelsMode(providerId, settings) !== "manual") return [...automaticModels];
+  // Manual deliberately keeps custom ids upstream has not reported yet, but a
+  // RETIRED slug must never come back through an allowlist saved before the
+  // retirement. Auto is already filtered upstream, at discovery.
+  const enabled = settings.enabledModels ?? [];
+  return providerId === "openai-codex"
+    ? enabled.filter((model) => !isRetiredOpenAICodexModel(model))
+    : [...enabled];
 }
 
 export interface GlobalOAuthSettings {

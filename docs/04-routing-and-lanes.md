@@ -290,18 +290,19 @@ quality/cost lanes by complexity (`simple → economy`, `medium → balanced`,
 
 ### Vendor-family lanes
 
-Beyond the 7 generic lanes above, `config/lanes.yaml` ships **13 vendor-family
+Beyond the 7 generic lanes above, `config/lanes.yaml` ships **12 vendor-family
 lanes** — the rewrite targets of the [model-alias compatibility
 shim](#model-alias-compatibility-shim):
 
 ```text
 claude-opus   claude-fable   claude-sonnet   claude-haiku
 gpt-5.6       gpt-5.6-sol    gpt-5.6-terra   gpt-5.6-luna
-gpt-5.5       gpt-5.4        gpt-5.4-mini
+gpt-5.4       gpt-5.4-mini
 gemini-pro    gemini-flash
 ```
 
-(22 lanes total when the two image-generation lanes below are included.) These
+(26 lanes total once `gpt-6-astra`, `grok` and the image/media lanes below are
+included.) These
 exist so a client that pins a fixed vendor id lands on that family's real model
 instead of the GPT-led `premium` lane. Each one
 **leads with the requested vendor's native/subscription alias** — the Claude

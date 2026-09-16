@@ -30,7 +30,6 @@ export const CURATED_OAUTH_MODELS: Record<string, string[]> = {
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
-    "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-mini",
     "gpt-realtime",
@@ -55,7 +54,10 @@ const OPENAI_CODEX_MODEL_ALIASES: Readonly<Record<string, string>> = {
 
 export const OPENAI_CODEX_IMAGE_MODEL = "gpt-image-2";
 
-const RETIRED_OPENAI_CODEX_MODELS = new Set(["gpt-5.3-codex-spark"]);
+// Slugs upstream no longer serves. Filtering here covers the live /models response,
+// the bundled/cached Codex catalog, and any stale enabledModels still persisted in
+// account settings — so a retired slug can never become routable again.
+const RETIRED_OPENAI_CODEX_MODELS = new Set(["gpt-5.3-codex-spark", "gpt-5.5"]);
 
 export function isRetiredOpenAICodexModel(model: string): boolean {
   return RETIRED_OPENAI_CODEX_MODELS.has(model.trim().toLowerCase());

@@ -144,7 +144,7 @@ tool_use:
 
 # —— vendor-family lanes (targets of config/model-aliases.yaml) ——
 # A client that pins a FIXED vendor model id (Claude Code's `claude-opus-4-8`, an
-# SDK locked to `gpt-5.5`) has its `model` rewritten onto one of THESE lanes BEFORE
+# SDK locked to `gpt-5.4`) has its `model` rewritten onto one of THESE lanes BEFORE
 # routing (model-aliases.yaml glob -> lane). Each LEADS with the requested family's
 # real model, so an explicit `claude-opus` lands on a Claude-Opus-led chain instead
 # of the generic `premium` lane, then degrades through the matching generic lane.
@@ -250,18 +250,11 @@ claude-haiku:
     require_json: false
     require_vision: false
 
-# GPT-5.5 uses the Codex subscription only, then degrades to the subscription-led
-# `premium` lane without automatically spending through a ZenMux API key.
-"gpt-5.5":
-  purpose: OpenAI GPT-5.5 tier
-  primary: openai-codex/gpt-5.6-sol
-  fallback:
-    - openai-codex/gpt-5.5
-    - premium
-  constraints:
-    require_tools: false
-    require_json: false
-    require_vision: false
+# GPT-5.5 is RETIRED (2026-09-16) — no lane, and no `gpt-5.5` entry in
+# model-aliases.yaml. A client still pinning that id falls through the `gpt-5*`
+# glob onto `premium`, so it degrades gracefully instead of 400ing. The pricing
+# and capabilities entries deliberately remain so the served history stays
+# repriceable (`pnpm pricing:reprice`).
 
 # GPT-5.4 — strong reasoning one tier below 5.5 ($2.5/$15 vs 5.5's $5/$30). Leads
 # with the Codex subscription's real gpt-5.4. ZenMux exposes NO 5.4 static key, so

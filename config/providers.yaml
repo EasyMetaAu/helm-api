@@ -84,10 +84,8 @@ providers:
       # `zenmux-anthropic` provider below (issue #217). The former OpenAI-compat
       # `zenmux/claude-*` aliases were removed: same upstream, but the native wire
       # preserves prompt-cache / tool-use and skips the lossy IR translation.
-      # openai/gpt-5.5 — retained for explicit custom-model requests only; shipped
-      # lanes do not automatically spend through this ZenMux alias.
-      - alias: zenmux/gpt-5.5
-        provider_model: openai/gpt-5.5
+      # openai/gpt-5.5 was removed when GPT-5.5 was retired (2026-09-16); its
+      # pricing/capabilities entries remain so served history stays repriceable.
       # OpenAI IMAGE GENERATION (Images API). A bare alias so OpenAI clients can pin
       # `model: gpt-image-2` directly; served via the dedicated POST /v1/images/
       # generations route (NOT chat). Verified live 2026-06-28.

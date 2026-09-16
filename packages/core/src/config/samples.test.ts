@@ -142,6 +142,9 @@ describe("checked-in config samples", () => {
     expect(resolveModelAlias("openai.gpt-5.6-luna", aliases)).toBe("gpt-5.6-luna");
     expect(resolveModelAlias("openai.gpt-5.6-20260710", aliases)).toBe("gpt-5.6-sol");
     expect(resolveModelAlias("gpt-5.4", aliases)).toBe("gpt-5.4");
+    // RETIRED gpt-5.5 has no mapping of its own, so a client still pinning it falls
+    // through `gpt-5*` onto premium — degraded, never a 400 unknown model.
+    expect(resolveModelAlias("gpt-5.5", aliases)).toBe("premium");
     expect(resolveModelAlias("gpt-5.4-mini", aliases)).toBe("gpt-5.4-mini");
     expect(resolveModelAlias("gpt-5.4-mini-2026-01-01", aliases)).toBe("gpt-5.4-mini");
     // The shipped aliases must validate against the SHIPPED lanes (no drift): every
@@ -173,8 +176,10 @@ describe("checked-in config samples", () => {
     });
     expect(lanes["claude-haiku"]?.fallback).toEqual(["economy"]);
     expect(lanes["claude-sonnet"]?.primary).toBe("anthropic/claude-sonnet-5");
-    expect(lanes["gpt-5.5"]?.primary).toBe("openai-codex/gpt-5.6-sol");
-    expect(lanes["gpt-5.5"]?.fallback).toEqual(["openai-codex/gpt-5.5", "premium"]);
+    // gpt-5.5 is RETIRED: no lane, no alias — a pinned `gpt-5.5` falls through the
+    // `gpt-5*` glob onto `premium` instead of 400ing. Its pricing/capabilities
+    // entries deliberately survive for historical cost reprice (see load.test.ts).
+    expect(lanes).not.toHaveProperty("gpt-5.5");
     expect(lanes["gpt-5.4"]?.primary).toBe("openai-codex/gpt-5.6-terra");
     expect(lanes["gpt-5.4"]?.fallback).toEqual(["openai-codex/gpt-5.4", "premium"]);
     expect(lanes["gpt-5.4-mini"]?.primary).toBe("openai-codex/gpt-5.6-luna");
