@@ -1348,6 +1348,40 @@ describe("translateAnthropicSSE", () => {
   });
 });
 
+describe("Sonnet 5 temperature at the wire boundary", () => {
+  it.each(["translated", "native"] as const)("omits temperature on %s requests", async (path) => {
+    let sent: Record<string, unknown> = {};
+    const client = createAnthropicClient({
+      config: {
+        baseUrl: "https://api.anthropic.com",
+        getAuthHeader: async () => "Bearer test",
+        claudeCliFingerprintMode: "strict",
+      },
+      fetch: async (_url, init) => {
+        sent = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return jsonResponse({
+          id: "msg_test",
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        });
+      },
+    });
+    const body = {
+      model: "claude-sonnet-5",
+      messages: [{ role: "user", content: "hello" }],
+      temperature: 0.2,
+      thinking: { type: "adaptive" },
+      max_tokens: 64,
+    };
+    if (path === "translated") await client.chatCompletion(body);
+    else await client.nativePassthrough?.(body);
+    expect(sent).not.toHaveProperty("temperature");
+    expect(sent.thinking).toEqual({ type: "adaptive" });
+    expect(body.temperature).toBe(0.2);
+  });
+});
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
