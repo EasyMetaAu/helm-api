@@ -1,7 +1,13 @@
 # 实现笔记（Implementation Notes）
 
 > 记录 spec 未覆盖、不得不自己做的决定，被迫的修改、权衡取舍，以及用户应当知道的坑与 TODO。
-> **新条目追加在最上方**，格式：`## YYYY-MM-DD · 标题`，并注明所属 spec 章节。
+> **新条目追加在最上方**，格式：`## 2026-09-17 · 修复 provider 字段兼容 400（docs/04/05，原则 3/8）
+
+- Codex legacy `store:false` input 删除已由生产证实被拒绝的 `status`；`phase` 没有拒绝证据，保留其历史语义。Lite input 身份、加密 reasoning、tool call 关联均不改动。
+- Claude Sonnet 5 在转换与 native 发送边界移除已弃用的 `temperature`；strict thinking 可能重新注入 `temperature=1`，因此序列化前再次应用同一模型规则。其他模型维持原行为。
+- 不扩大通用 400 fallback，也不重放已提交输出；已知字段在首次发送前修正，后续临时 provider 故障继续走既有 fallback。仅 Sonnet 5 有生产拒绝证据，本次不推测扩大到其他 Claude 模型。
+
+## YYYY-MM-DD · 标题`，并注明所属 spec 章节。
 >
 > **体积控制规则（必须遵守）**：本文件只保留**最近 10 条**可追踪记录。新条目入栈时，保留顶部最新完整记录与历史摘要中最新的一行要点；超过 10 条的更早历史压缩进文末「更早历史总览」的一段概括。完整原文可经 git history 回溯。
 
@@ -68,18 +74,6 @@
 - `provider.overload_retry` 结构化日志只记 trace、原因、次数、等待毫秒与耗尽标志，不记正文或凭证。它记录安排的重试（等待期间仍可取消），不等于 HTTP 实际发送计数；原 `provider_attempts` 仍代表模型尝试。
 - 严格亲和的流内错误不新增重放；显式 HTTP 503/529 的既有安全重试保留。持续过载或总超时仍会失败，不能保证靠等待消除所有上游故障。生产样本正文未保存，不能把本地复现直接当作每条生产错误的确定根因。
 
-## 2026-09-06 · Codex 模型发现跟随上游 client_version 与可选 base_instructions（OAuth provider / Codex discovery，docs/04/05，原则 3/6）
-
-- **根因一**：`chatgpt.com/backend-api/codex/models` 按 `client_version` 门控下发；`gpt-6-astra` 的 `minimal_client_version` 为 `0.153.0`，而 Helm 默认发送 `0.145.0`，账号已有权限仍收不到该模型。默认值不再手写：`pnpm sync:codex-models` 通过 GitHub API（`/repos/openai/codex/releases/latest`，天然排除 draft/prerelease）取最新 `rust-vX.Y.Z` tag，并从同一 tag 的 raw `models.json` 拉目录，不依赖本地 codex checkout（可选 `GITHUB_TOKEN` 提升限流），生成 `packages/core/src/provider/oauth/codex-client-version.generated.ts`（当前 `0.153.4`），与 bundled 目录一同刷新；`HELM_OPENAI_CODEX_CLIENT_VERSION` 覆盖规则不变，测试只锁定 semver 形状与 `>= 0.153` 下限。
-- **根因二**：上游 `codex-rs/protocol::openai_models` 已把顶层 `base_instructions` 降为 legacy 可选字段并迁移到 `model_messages.instructions_template`，新条目不再携带；Helm 的 zod schema 仍要求必填，导致整份 `/models` 响应解析失败并回退到旧的内置目录。schema 现改为 `nullable().optional()`，并用 `pnpm sync:codex-models` 重新同步内置 `codex-models.json`（含 `gpt-6-astra`）。
-- 没有新增 schema、migration、配置或依赖变化；发现失败仍沿用既有 LKG / bundled 回退，不放宽任何 fail-closed 边界。
-
-## 2026-09-06 · 订阅模型自动/手动列表统一按官方目录与数据库权威（OAuth provider / routing / Admin，docs/04/11，原则 2/3/6）
-
-- Automatic mode now exposes only the provider's live or durable last-known-good official discovery; curated guesses and forced Codex image aliases are no longer injected when discovery is empty.
-- Manual mode remains the exact saved `enabledModels` list across Admin, Lanes, OpenAI-compatible `/v1/models`, native Codex listings, and runtime pools. xAI custom manual IDs use an identity wire mapping when absent from the structured catalog; the provider remains the final capability authority.
-- No schema, migration, configuration, or dependency changes.
-
 ## 历史条目摘要（最新要点）
 
 - **2026-09-06 · Codex 原生模型列表保留手动自定义 ID**：`GET /v1/models` 对尚未出现在上游目录的手动 ID，借该账号最低 priority 模型的兼容元数据生成条目（改写 slug/display_name）；只为列表展示与协议兼容兜底，不宣称真实能力，自动模式仍只输出上游发现项。
@@ -87,5 +81,7 @@
 - **2026-09-05 · GPT-6 Astra 官方 API 目录与价格**：官方 API capability/pricing 与 reasoning 参数兼容已加入 override，订阅 lane 保留；定价和限制按对应提交回溯。
 
 ## 更早历史总览
+
+2026-09-06：Codex 模型发现使用上游 client_version 和可选 base_instructions；订阅模型自动/手动列表统一依据官方目录与数据库权威，完整记录见 Git history。
 
 2026-09-05 Fable 5.1 目录/价格、2026-09-02 HTTP 结果不明禁止重放（保留明确拒绝的有界重试）、2026-09-01 超大历史发送前保护已并入历史；完整内容见基线 `8a7df80c6684b10bfa7ff7f4f07f237a92f95d58`。2026-08-30 及更早工作涵盖订阅图片/视频/TTS 的 entitlement、单写与价格边界，Responses HTTP/WebSocket 生命周期、发送前恢复证明、账号与 transport 亲和、超大历史与压缩，OAuth 模型发现、额度窗口、Retry-After、冷却、轮转和缓存，协议互译与 SSE/tool-call 保真、能力/价格目录、路由/分类/fallback/熔断，Memory observe/inject/反思/压缩/保留与并发治理，payload/session 分段持久化、失败记录、SQLite/Postgres 数据完整性与资源保护，Admin/Portal/i18n/可访问性、key 权限/预算/计量，以及构建、CI、Docker、发布和生产验收。具体默认值、兼容限制与历史实测均以对应提交为准；本次压缩前的完整条目可从基线 412c7cde02288d9b33d54a87f93b43925177b294 的本文件及 Git 历史回溯。

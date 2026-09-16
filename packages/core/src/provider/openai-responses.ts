@@ -696,10 +696,6 @@ function sanitizeStoreFalseInputItems(input: unknown): {
       delete sanitized.status;
       metadataStripped = true;
     }
-    if ("phase" in sanitized) {
-      delete sanitized.phase;
-      metadataStripped = true;
-    }
     if (sanitized.type === "reasoning" && !hasUsefulReasoningPayload(sanitized)) {
       emptyReasoningDropped = true;
       continue;
