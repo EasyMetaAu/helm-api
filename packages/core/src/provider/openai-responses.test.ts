@@ -2794,6 +2794,112 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
       '{"turn_id":"turn-a"}',
     ]);
   });
+
+  // The client's own machine-wide installation id is a CROSS-ACCOUNT fingerprint: every
+  // ChatGPT account served from one Codex CLI install would otherwise share it. When the
+  // account binds a stable installation id, rewrite it in EVERY place the CLI carries it
+  // (header, `client_metadata`, and the turn-metadata JSON in both).
+  it("rewrites the client installation id to the per-account id everywhere it rides", async () => {
+    let seen = new Headers();
+    let sentBody: Record<string, unknown> | null = null;
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        installationId: "11111111-2222-4333-8444-555555555555",
+      },
+      fetch: (async (_url: string, init?: RequestInit) => {
+        seen = new Headers(init?.headers);
+        sentBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return sseStreamResponse([
+          'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+        ]);
+      }) as unknown as typeof fetch,
+    });
+    const clientInstall = "25ae6219-e425-402f-b26b-b784b7f9ce5b";
+    const turnMetadata = JSON.stringify({
+      installation_id: clientInstall,
+      session_id: "client-session",
+      turn_id: "turn-1",
+    });
+    const body = {
+      ...nativeStreamBody(),
+      client_metadata: {
+        "x-codex-installation-id": clientInstall,
+        "x-codex-turn-metadata": turnMetadata,
+        thread_id: "client-thread",
+      },
+    };
+    const carrier = {
+      protocol: "openai_responses" as const,
+      body,
+      raw_body: JSON.stringify(body),
+      headers: {
+        "x-codex-installation-id": clientInstall,
+        "x-codex-turn-metadata": turnMetadata,
+      },
+      mutations: {},
+    };
+
+    for await (const _ of client.nativePassthroughStream?.(carrier) ?? []) {
+      // drain
+    }
+
+    const installed = "11111111-2222-4333-8444-555555555555";
+    expect(seen.get("x-codex-installation-id")).toBe(installed);
+    expect(JSON.parse(String(seen.get("x-codex-turn-metadata")))).toMatchObject({
+      installation_id: installed,
+      session_id: "client-session",
+      turn_id: "turn-1",
+    });
+    const metadata = (sentBody as unknown as { client_metadata: Record<string, string> })
+      .client_metadata;
+    expect(metadata["x-codex-installation-id"]).toBe(installed);
+    expect(JSON.parse(String(metadata["x-codex-turn-metadata"]))).toMatchObject({
+      installation_id: installed,
+      turn_id: "turn-1",
+    });
+    // Untouched client fields still ride verbatim.
+    expect(metadata.thread_id).toBe("client-thread");
+    expect(JSON.stringify(sentBody)).not.toContain(clientInstall);
+    expect(carrier.mutations).toMatchObject({
+      body_shims_applied: expect.arrayContaining(["codex_installation_id_rebound"]),
+    });
+  });
+
+  it("leaves the request untouched when the client sends no installation id", async () => {
+    let seen = new Headers();
+    let sentBody = "";
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        installationId: "11111111-2222-4333-8444-555555555555",
+      },
+      fetch: (async (_url: string, init?: RequestInit) => {
+        seen = new Headers(init?.headers);
+        sentBody = String(init?.body);
+        return sseStreamResponse([
+          'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+        ]);
+      }) as unknown as typeof fetch,
+    });
+    const body = nativeStreamBody();
+    const rawBody = JSON.stringify(body, null, 2);
+
+    for await (const _ of client.nativePassthroughStream?.({
+      protocol: "openai_responses" as const,
+      body,
+      raw_body: rawBody,
+      headers: {},
+      mutations: {},
+    }) ?? []) {
+      // drain
+    }
+
+    expect(seen.get("x-codex-installation-id")).toBeNull();
+    expect(sentBody).toBe(rawBody);
+  });
 });
 
 describe("createCodexResponsesClient — native Responses WebSocket", () => {

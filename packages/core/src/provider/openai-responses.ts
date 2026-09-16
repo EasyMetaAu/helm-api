@@ -80,6 +80,11 @@ export interface CodexResponsesClientConfig {
   // Optional request-scoped Codex thread identity. When present it rides on `thread-id`
   // and is also the fallback for `x-client-request-id`, matching Codex CLI.
   threadId?: string;
+  // Stable per-account Codex installation id. The client's own id is machine-wide, so
+  // without this every account driven from one Codex CLI install shares one fingerprint.
+  // When set, the client's id is rebound to this one wherever it rides (header,
+  // `client_metadata`, turn-metadata JSON). Requests that carry no id stay untouched.
+  installationId?: string;
   // Overrides the default Codex-client User-Agent (openclaw proves a custom UA is
   // accepted by the backend; the real first-party value is not required).
   userAgent?: string;
@@ -279,6 +284,7 @@ const CODEX_FAST_SERVICE_TIER = "priority";
 const RESPONSES_WEBSOCKET_BETA = "responses_websockets=2026-02-06";
 const RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite";
 const CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata";
+const CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id";
 const CODEX_TURN_STATE_HEADER = "x-codex-turn-state";
 const MAX_CODEX_TURN_STATES = 128;
 const DEFAULT_CODEX_AUTO_COMPACT_REQUEST_BYTES = 32 * 1024 * 1024;
@@ -1198,6 +1204,90 @@ function withCodexServiceTier(
   return carrier;
 }
 
+// The Codex CLI's `installation_id` identifies the INSTALL, not the account, so every
+// ChatGPT account driven from one machine ships the same value — a cross-account
+// fingerprint. When the account binds its own stable id, rebind the client's id in every
+// place the CLI carries it: the `x-codex-installation-id` header, the same key inside
+// `client_metadata`, and the `installation_id` field of the `x-codex-turn-metadata` JSON
+// (which rides as BOTH a header and a `client_metadata` entry). A request that carries no
+// installation id at all is left untouched (raw body preserved) — nothing to rebind.
+function rewriteCodexTurnMetadata(raw: unknown, installationId: string): string | undefined {
+  if (typeof raw !== "string" || raw.length === 0) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined; // not JSON we understand — forward verbatim
+  }
+  if (!isRecord(parsed) || typeof parsed.installation_id !== "string") return undefined;
+  if (parsed.installation_id === installationId) return undefined;
+  return JSON.stringify({ ...parsed, installation_id: installationId });
+}
+
+function withCodexInstallationId(
+  input: NativePassthroughInput,
+  installationId: string | undefined,
+): NativePassthroughInput {
+  if (installationId === undefined || installationId.length === 0) return input;
+  if (!isNativePassthroughCarrier(input)) return input;
+
+  let headersChanged = false;
+  const headers: Record<string, string | string[]> = {};
+  for (const [name, value] of Object.entries(input.headers)) {
+    const lower = name.toLowerCase();
+    if (lower === CODEX_INSTALLATION_ID_HEADER && typeof value === "string" && value.length > 0) {
+      if (value !== installationId) headersChanged = true;
+      headers[name] = installationId;
+      continue;
+    }
+    if (lower === CODEX_TURN_METADATA_HEADER) {
+      const rewritten = rewriteCodexTurnMetadata(
+        Array.isArray(value) ? value[0] : value,
+        installationId,
+      );
+      if (rewritten !== undefined) {
+        headers[name] = rewritten;
+        headersChanged = true;
+        continue;
+      }
+    }
+    headers[name] = value;
+  }
+
+  const metadata = input.body.client_metadata;
+  let nextMetadata: Record<string, unknown> | undefined;
+  if (isRecord(metadata)) {
+    for (const [name, value] of Object.entries(metadata)) {
+      const lower = name.toLowerCase();
+      if (
+        lower === CODEX_INSTALLATION_ID_HEADER &&
+        typeof value === "string" &&
+        value.length > 0 &&
+        value !== installationId
+      ) {
+        nextMetadata = { ...(nextMetadata ?? metadata), [name]: installationId };
+        continue;
+      }
+      if (lower === CODEX_TURN_METADATA_HEADER) {
+        const rewritten = rewriteCodexTurnMetadata(value, installationId);
+        if (rewritten !== undefined)
+          nextMetadata = { ...(nextMetadata ?? metadata), [name]: rewritten };
+      }
+    }
+  }
+
+  if (!headersChanged && nextMetadata === undefined) return input;
+  const carrier =
+    nextMetadata === undefined
+      ? { ...input, headers }
+      : {
+          ...cloneCarrierWithBody(input, { ...input.body, client_metadata: nextMetadata }),
+          headers,
+        };
+  appendMutationList(carrier.mutations, "body_shims_applied", ["codex_installation_id_rebound"]);
+  return carrier;
+}
+
 function stripNativePassthroughHeader(
   input: NativePassthroughInput,
   headerName: string,
@@ -1692,7 +1782,8 @@ export function createCodexResponsesClient(deps: CodexResponsesClientDeps): Prov
   }> {
     const canonicalInput = canonicalizeCodexNativeInput(input, modelInfo, forceStore);
     const tieredInput = withCodexServiceTier(canonicalInput, cfg.fastMode === true, modelInfo);
-    const wireInput = stripNativePassthroughHeader(tieredInput, "openai-beta");
+    const boundInput = withCodexInstallationId(tieredInput, cfg.installationId);
+    const wireInput = stripNativePassthroughHeader(boundInput, "openai-beta");
     const useResponsesLite = nativeInputUsesResponsesLite(wireInput, modelInfo);
     const turnKey = nativeHeader(input, CODEX_TURN_METADATA_HEADER);
     const explicitTurnState = nativeHeader(input, CODEX_TURN_STATE_HEADER);

@@ -1709,6 +1709,105 @@ describe("synthesizeOAuthProviders (Stage 3 account pool)", () => {
     expect(aliases).toEqual(["openai-codex/gpt-5.6-luna", "openai-codex/gpt-5.6-sol"]);
   });
 
+  // The Codex CLI's installation id identifies the MACHINE, so two ChatGPT accounts
+  // driven from one install would otherwise reach OpenAI under one fingerprint. Each
+  // bound account must egress under its own stable id instead.
+  it("rebinds the client installation id to a stable per-account id for each Codex account", async () => {
+    const clientInstall = "25ae6219-e425-402f-b26b-b784b7f9ce5b";
+    const seen: string[] = [];
+    const bodies: Array<Record<string, unknown>> = [];
+
+    const installationIdFor = async (account: string): Promise<string> => {
+      const { ctx, config } = oauthStores();
+      await ctx.store.upsert({
+        providerId: "openai-codex",
+        account,
+        accessEnc: encryptSecret("codex-access", ENC_KEY),
+        refreshEnc: encryptSecret("codex-refresh", ENC_KEY),
+        expiresAt: FAR_FUTURE,
+        meta: null,
+        updatedAt: 1,
+      });
+      await setAccountSettings(config, ENC_KEY, "openai-codex", account, {
+        modelsMode: "manual",
+        enabledModels: ["gpt-5.6-sol"],
+      });
+      const catalog = createCodexModelCatalog({
+        cache: createCodexModelCache(config, ENC_KEY),
+      });
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/models")) {
+          return new Response(JSON.stringify({ models: [codexModel("gpt-5.6-sol")] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        const headers = new Headers(init?.headers);
+        seen.push(String(headers.get("x-codex-installation-id")));
+        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return sseResponse([
+          { type: "response.completed", response: { status: "completed", usage: {} } },
+        ]);
+      });
+      const { poolClients } = await synthesizeOAuthProviders(
+        [],
+        ctx,
+        config,
+        "https://fallback/v1",
+        60_000,
+        noop,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { catalog, runInBackground },
+      );
+      const turnMetadata = JSON.stringify({ installation_id: clientInstall, turn_id: "t1" });
+      const body = {
+        model: "gpt-5.6-sol",
+        input: [{ type: "message", role: "user", content: "hi" }],
+        stream: true,
+        store: false,
+        client_metadata: {
+          "x-codex-installation-id": clientInstall,
+          "x-codex-turn-metadata": turnMetadata,
+        },
+      };
+      for await (const _chunk of poolClients.get("openai-codex")?.nativePassthroughStream?.({
+        protocol: "openai_responses",
+        body,
+        headers: {
+          "x-codex-installation-id": clientInstall,
+          "x-codex-turn-metadata": turnMetadata,
+        },
+        mutations: {},
+      }) ?? []) {
+        // drain
+      }
+      return seen[seen.length - 1] ?? "";
+    };
+
+    const first = await installationIdFor("default");
+    const second = await installationIdFor("mylukin");
+
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+    expect(first).toMatch(uuid);
+    expect(second).toMatch(uuid);
+    // Never the client's machine id, and never shared between accounts.
+    expect(first).not.toBe(clientInstall);
+    expect(first).not.toBe(second);
+    // The id inside the body rides rebound too — header-only would leak the real one.
+    for (const [index, body] of bodies.entries()) {
+      const metadata = body.client_metadata as Record<string, string>;
+      expect(metadata["x-codex-installation-id"]).toBe(seen[index]);
+      expect(JSON.parse(String(metadata["x-codex-turn-metadata"])).installation_id).toBe(
+        seen[index],
+      );
+    }
+  });
+
   it("exposes the ChatGPT image alias without treating Codex catalog tool metadata as admission", async () => {
     const variants = [
       { slug: "gpt-5.4-mini", tool: true, lite: false },

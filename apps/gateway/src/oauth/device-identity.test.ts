@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { anthropicMetadataUserId, stableSessionId } from "./device-identity.js";
+import {
+  anthropicMetadataUserId,
+  stableInstallationId,
+  stableSessionId,
+} from "./device-identity.js";
 
 const KEY = Buffer.alloc(32, 9);
 const KEY2 = Buffer.alloc(32, 11);
@@ -46,5 +50,20 @@ describe("stableSessionId", () => {
     expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     expect(stableSessionId("openai-codex", "default", KEY)).toBe(a);
     expect(stableSessionId("openai-codex", "mylukin", KEY)).not.toBe(a);
+  });
+});
+
+describe("stableInstallationId", () => {
+  it("returns a stable per-account UUID that never rotates", () => {
+    const a = stableInstallationId("openai-codex", "default", KEY);
+    expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(stableInstallationId("openai-codex", "default", KEY)).toBe(a);
+  });
+
+  it("is UNIQUE per account and distinct from that account's session id", () => {
+    const a = stableInstallationId("openai-codex", "default", KEY);
+    expect(stableInstallationId("openai-codex", "mylukin", KEY)).not.toBe(a);
+    expect(stableSessionId("openai-codex", "default", KEY)).not.toBe(a);
+    expect(stableInstallationId("openai-codex", "default", KEY2)).not.toBe(a);
   });
 });
