@@ -6887,6 +6887,7 @@ describe("sanitizeCodexResponsesNativeBody", () => {
         {
           type: "message",
           role: "assistant",
+          phase: "final_answer",
           content: [{ type: "output_text", text: "NO_REPLY" }],
         },
         { role: "user", content: [{ type: "input_text", text: "next" }] },

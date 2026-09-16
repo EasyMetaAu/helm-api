@@ -1639,10 +1639,14 @@ export function createAnthropicClient(deps: AnthropicClientDeps): ProviderClient
       toolNameMap = composeReverseMaps(specMap, strictPrepared.toolNameMap);
       normalizedBody = target;
     }
+    // Strict thinking normalization can re-add temperature; apply the model gate last.
+    const finalBody = nativePassthroughBody(
+      stripUnsupportedSonnetTemperature(normalizedBody ?? strictPrepared.body),
+    );
     const wireBody = strictClaudeCliFingerprint
-      ? serializeAnthropicBody(strictPrepared.body, { strictClaudeCliFingerprint: true })
-      : normalizedBody !== undefined
-        ? JSON.stringify(normalizedBody)
+      ? serializeAnthropicBody(finalBody, { strictClaudeCliFingerprint: true })
+      : finalBody !== prepared.body
+        ? JSON.stringify(finalBody)
         : prepared.bodyText;
     const wireHeaders = strictClaudeCliFingerprint
       ? orderClaudeCliHeaders(prepared.headers)
