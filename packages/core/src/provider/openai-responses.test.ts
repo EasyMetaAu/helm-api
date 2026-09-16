@@ -6875,6 +6875,7 @@ describe("sanitizeCodexResponsesNativeBody", () => {
 
     expect(fixes).toEqual([
       "empty_reasoning_items_dropped",
+      "input_item_metadata_stripped",
       "input_item_references_stripped",
       "max_output_tokens_removed",
       "temperature_removed",
@@ -6886,8 +6887,6 @@ describe("sanitizeCodexResponsesNativeBody", () => {
         {
           type: "message",
           role: "assistant",
-          status: "completed",
-          phase: "final_answer",
           content: [{ type: "output_text", text: "NO_REPLY" }],
         },
         { role: "user", content: [{ type: "input_text", text: "next" }] },
