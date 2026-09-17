@@ -4,6 +4,7 @@ import {
   ADMIN_USER,
   basicHeader,
   SEED_KEY_PLAINTEXT,
+  SEED_PINNED_TRACE_ID,
   SEED_TRACE_ID,
 } from "./fixtures/admin.js";
 
@@ -148,6 +149,17 @@ test.describe("admin request debugging", () => {
     expect(bodyText).toContain("best_reasoning_model"); // provider attempt alias
     // cost breakdown block is rendered
     await expect(page.getByText(/cost/i).first()).toBeVisible();
+
+    // A one-candidate chain is a DELIBERATE pin, not a truncated chain. The detail
+    // must say WHY, or an operator reads the card as a bug (it was reported as one).
+    await page.goto(`${BASE}/admin/requests/${SEED_PINNED_TRACE_ID}`);
+    const lanes = page.getByTestId("chain-lanes");
+    await expect(lanes.getByTestId("lane-candidate")).toHaveCount(1);
+    await expect(lanes.getByTestId("lane-pin-reason")).toContainText(/continuation/i);
+
+    // The multi-candidate seed keeps NO pin note — the reason line would be noise.
+    await page.goto(`${BASE}/admin/requests/${SEED_TRACE_ID}`);
+    await expect(page.getByTestId("lane-pin-reason")).toHaveCount(0);
   });
 });
 

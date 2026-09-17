@@ -76,6 +76,29 @@
     }
   }
 
+  // A one-candidate chain is a DELIBERATE pin, not a truncated chain: a stateful
+  // Responses continuation is bound to the provider holding the conversation state,
+  // an explicit model / image model names its target exactly. Without this note the
+  // card reads as a bug. Only shown when there is genuinely nothing to fall back to.
+  const pinReason = $derived(
+    detail.lane_candidates.length === 1 && detail.policy_reason ? detail.policy_reason : null,
+  );
+
+  // Human label for a recorded routing reason. An unmapped/new reason renders
+  // verbatim (never blank), same contract as attemptCodeLabel.
+  function pinReasonLabel(reason: string): string {
+    switch (reason) {
+      case 'stateful Responses continuation':
+        return 'Conversation continuation — pinned to the provider holding the conversation state, so there is no fallback.';
+      case 'explicit model passthrough':
+        return 'The client named this exact model, so routing passed it through without fallback.';
+      case 'image generation (model-pinned)':
+        return 'Image generation is pinned to the requested model, so there is no fallback.';
+      default:
+        return reason;
+    }
+  }
+
   function accountTitle(
     account: RequestDetail['provider_attempts'][number]['serving_account'],
   ): string {
@@ -235,6 +258,11 @@
         </li>
       {/each}
     </ol>
+    {#if pinReason}
+      <p data-testid="lane-pin-reason" class="field-help mt-2">
+        <span title={pinReason}>{$t(pinReasonLabel(pinReason))}</span>
+      </p>
+    {/if}
   </section>
 
   <!-- 5. Execution stage: provider attempts (Principle 5: distinct from classification) -->

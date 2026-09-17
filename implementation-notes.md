@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-09-17 · 候选链只有一个候选时说明原因（Admin / 请求详情，docs/07，原则 5）
+
+- **不是 bug，是缺解释**。Lukin 报"通道候选链只有一个模型，展开有问题"。查 box 记录 `5a0e80ed`：`policy.reason` 是 `stateful Responses continuation`，`candidate_chain` 恒为 `["openai-codex/gpt-5.6-terra"]`。`route-request.ts` 的 stateful 分支（最高优先级）**故意**只给一个候选——对话状态存在上游那个 `resp_...` 里，换 provider 兜底只会 400 + 丢上下文；`pool.ts` 里 `if (statefulContinuation …) throw lastErr` 连同池内换账号都不做，同理。近 24h box 上这类 2137 次（成功 2040 / 失败 97），全部单候选。
+- **真问题在 UI**：卡片副标题写"按顺序尝试各通道；首个模型调用成功的通道会处理请求"，读起来像本该有多个；唯一的解释 `policy.reason` 被埋在下面 `request_meta` 的 JSON 里要展开才看得见。
+- **最小改法**：`policy_reason` 从 `request_meta` 提成 `RequestDetail` 的正式字段（后端零改动，值一直都在记录里），`DecisionChain.svelte` 在**候选数 === 1** 时才渲染一行说明。三种钉死场景（stateful 续接 / explicit model / image 模型）各有文案，未知 reason 原样显示不留空白，`title` 挂原始串备查。多候选不显示——那行会是噪音。
+- **没跑 `pnpm i18n:sync`**：它会重排整个 locale 文件并把隔壁 session 的未提交 WIP 卷进 diff（实测 63 行噪音）。7 个 locale 按字典序手工插入 3 条，每个文件只 +3 行。`extraction-anchors.svelte` 必须同步登记——`$t(变量)` 的 key 不挂锚点会被 `i18n:sync` 剪掉（这是已知坑）。
+- **本机坑（与本改动无关）**：`better-sqlite3` 原生模块是 Node 24 编译的，本机已升 Node 26，e2e webServer 起不来（`NODE_MODULE_VERSION 137 vs 147`）。`pnpm rebuild` 无效（无输出不重编），要 `npx prebuild-install -r node` 才拉到对应版本。
+
 ## 2026-09-17 · DSML 泄漏修复补完：工具声明在 `additional_tools` 里，v0.29.21 的修复是 no-op（Provider / 协议互译，docs/05，原则 3/8）
 
 - **v0.29.21 上线后仍然泄漏**（Lukin 在 21:32 复现，box 21:28:29 启动，新代码确实在跑）。遥测证实那轮 `gpt-6-astra` 过载后落到 `deepseek-flash`，而 attempt 的 `mutations` 是**空的** —— 翻译一次都没触发。
@@ -115,16 +123,9 @@
 - **坑**：测试里用 `async function*` 写"只抛不产出"的 iterator 会被 biome `useYield` 拒绝；改为直接实现 `Symbol.asyncIterator` + `next: () => Promise.reject(...)`，语义上也更贴近"首次拉取即失败"的真实场景。
 - 截断上限 400 字符是拍板值，无配置项——理由同原则 2：会撒谎的旋钮比没有旋钮更糟，完整内容本就在 `providerRaw` 里。
 
-## 2026-09-16 · 下线 gpt-5.5：断路由但保留价目（Config / OAuth discovery，docs/04，原则 2/6）
-
-- **与 Codex Spark 先例（`33c1f799` + `9e3bfb67`）的有意偏离**：Spark 的 config 条目被删干净，gpt-5.5 不能照做。box 上 `served_model='gpt-5.5'` 有 349,050 条、$28,828.83（2026-06-12 起）。`historical-cost-reprice.ts` 按 alias 查 catalog，查不到就 `skip(alias,"pricing_entry_missing")`——删掉价目等于永久放弃这批记录的重算能力。故采用**只断路由**：移除 lane / alias / provider 条目 / curated list，`pricing.yaml` + `capabilities.yaml` 保留并加退休注释说明为何不是孤儿。Spark 从未有过价目条目（`git log -S` 确认），所以它没有这个取舍。
-- **alias 删除必须与 lane 同步**：`validateModelAliasTargets` 在启动时 fail-closed，只删 lane 会拒绝启动。删掉 `"gpt-5.5"` 映射后，pin 该 id 的客户端由 `"gpt-5*": premium` 接住——优雅降级而非 400。
-- **坑：manual 模式的 allowlist 绕过了退休过滤。** `RETIRED_OPENAI_CODEX_MODELS` 覆盖 live discovery 与 bundled/cached 目录，但 `selectAccountModels` 对 manual 模式**原样返回** `enabledModels`，退休前存下的账号设置会让该模型复活为可路由 alias。已在该 chokepoint 补过滤（仅 openai-codex；manual 保留自定义 id 的语义不变）。这是新写的测试实际抓到的，不是预判。
-- `codex-models.json` 仍含 gpt-5.5 slug——它由 `pnpm sync:codex-models` 从上游生成，手改会被覆盖，保证来自 `parseModels` 的过滤（沿用先例）。
-- gpt-5.5 无独立 quota limit family（Spark 有 `codex_spark` / `-codex-spark` 后缀），故 `isRetiredOpenAICodexLimit` 与 admin `.svelte` 均无需改动。
-- 顺带修正 docs/04 的 lane 计数（13→12 vendor-family；总数标称 22 实为 26，gpt-6-astra / grok / media lane 加入后未更新）。
-
 ## 历史条目摘要（最新要点）
+
+- **2026-09-16 · 下线 gpt-5.5：断路由但保留价目**：与 Codex Spark 先例（条目删干净）有意偏离——box 上 `served_model='gpt-5.5'` 有 349,050 条 / $28,828.83，`historical-cost-reprice.ts` 查不到价目就 skip，删价目等于永久放弃重算能力。故只移除 lane / alias / provider 条目 / curated list，`pricing.yaml` + `capabilities.yaml` 保留并加退休注释。坑：`validateModelAliasTargets` 启动 fail-closed，alias 必须与 lane 同步删（删后由 `"gpt-5*": premium` 接住，优雅降级非 400）；**manual 模式的 `enabledModels` allowlist 绕过了退休过滤**，已在 `selectAccountModels` chokepoint 补上（测试抓到的，非预判）。`codex-models.json` 由 sync 生成不手改，过滤在 `parseModels`。顺带修正 docs/04 的 lane 计数。
 
 - **2026-09-16 · Codex installation id 按账号重绑**：上游 `installation_id` 是 `$CODEX_HOME/installation_id` 里的纯随机 UUID v4（标识安装而非账号），同机多账号此前共用一个指纹出网。改为每账号确定性派生（`sha256(encKey ‖ "codex-installation:<provider>:<account>")` 前 16 字节整成 UUID v4 形状，永不轮换、免回写 DB）。**三处**必须一起重绑：header `x-codex-installation-id`、`client_metadata` 同名 key、`x-codex-turn-metadata` JSON 内的 `installation_id`——只改 header 则 body 仍泄漏真值。客户端未携带时完全不改写；turn-metadata 非法 JSON 原样透传；`prompt_cache_key` 取自 `session_id`，缓存亲和性不受影响。
 

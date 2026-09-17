@@ -198,6 +198,10 @@ export interface RequestDetail {
   // null on rules/eval/default paths. Lets the UI explain the balanced fallback.
   eval_fallback_reason: string | null;
   matched_policy: string | null;
+  // WHY routing picked this chain, verbatim from the record ('stateful Responses
+  // continuation', 'explicit model passthrough', …). The only thing that explains a
+  // deliberately pinned single-candidate chain; null on a legacy record.
+  policy_reason: string | null;
   lane_candidates: string[]; // primary + fallback[]
   provider_attempts: ProviderAttempt[];
   response_meta: Record<string, unknown> | null;
@@ -716,6 +720,7 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
     eval_fallback_reason:
       typeof raw.classifier?.fallback_reason === 'string' ? raw.classifier.fallback_reason : null,
     matched_policy: raw.policy?.matched_policy_id ?? null,
+    policy_reason: raw.policy?.reason ?? null,
     lane_candidates: Array.isArray(raw.lane?.candidate_chain) ? raw.lane.candidate_chain : [],
     provider_attempts: attempts.map((a) => ({
       model: String(a.alias ?? ''),

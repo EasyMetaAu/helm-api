@@ -122,6 +122,16 @@ describe('toDetail', () => {
     expect(legacy.request_body_bytes).toBeNull();
   });
 
+  // A one-candidate chain is normal (stateful continuation / explicit model / image
+  // pin), but the chain card alone can't say WHY. Surface the recorded reason as a
+  // typed field so the UI can explain it instead of looking like a truncated chain.
+  it('surfaces the recorded routing reason as a typed field', () => {
+    expect(toDetail(rawRecord()).policy_reason).toBe('matched');
+    expect(
+      toDetail({ ...rawRecord(), policy: { matched_policy_id: null } }).policy_reason,
+    ).toBeNull();
+  });
+
   it('surfaces body-free reasoning effort in redacted request metadata', () => {
     const detail = toDetail(rawRecord());
     expect(detail.reasoning_effort).toBe('high');
