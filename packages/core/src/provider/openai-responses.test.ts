@@ -2490,6 +2490,92 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
     expect(headers[1]?.get("x-openai-internal-codex-responses-lite")).toBe("true");
   });
 
+  it.each([
+    false,
+    true,
+  ])("replays encrypted reasoning without plaintext in Lite (stream=%s)", async (stream) => {
+    // Redacted shape of trace 4b84107d: Lite inserts tools AND instructions,
+    // so the source reasoning at input[3] becomes the rejected input[5].
+    const body = {
+      model: "gpt-5.6-sol",
+      instructions: "Repository instructions.",
+      store: false,
+      stream,
+      input: [
+        {
+          type: "message",
+          role: "developer",
+          content: [
+            { type: "input_text", text: "Rule one." },
+            { type: "input_text", text: "Rule two." },
+          ],
+        },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "Context." }] },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "Inspect." }] },
+        {
+          type: "reasoning",
+          id: "rs_stable",
+          summary: [],
+          encrypted_content: "opaque",
+          content: [{ type: "reasoning_text", text: "Inspect the repository." }],
+        },
+        {
+          type: "message",
+          role: "assistant",
+          phase: "commentary",
+          content: [{ type: "output_text", text: "I will inspect the repository." }],
+        },
+        { type: "function_call", call_id: "call_1", name: "exec", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_1", output: "ok" },
+      ],
+    };
+    const snapshot = structuredClone(body);
+    const sent: Array<{ input: Array<Record<string, unknown>> }> = [];
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      sent.push(JSON.parse(String(init?.body)));
+      return stream
+        ? sseResponse([
+            { type: "response.completed", response: { status: "completed", usage: {} } },
+          ])
+        : jsonResponse({ id: "resp_1", object: "response", status: "completed" });
+    });
+    for (const lite of [true, false]) {
+      const client = createCodexResponsesClient({
+        config: {
+          baseUrl: "https://chatgpt.com/backend-api/codex",
+          getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+          resolveModelInfo: () => codexModelInfo({ use_responses_lite: lite }),
+        },
+        fetch: fetchMock as unknown as typeof fetch,
+      });
+      const carrier = {
+        protocol: "openai_responses" as const,
+        body,
+        raw_body: JSON.stringify(body),
+        headers: {},
+        mutations: {},
+      };
+      if (stream) {
+        for await (const _ of client.nativePassthroughStream?.(carrier) ?? []) {
+          /* drain */
+        }
+      } else {
+        await client.nativePassthrough?.(carrier);
+      }
+    }
+    expect(sent[0]?.input[5]).toEqual({
+      type: "reasoning",
+      id: "rs_stable",
+      summary: [],
+      encrypted_content: "opaque",
+      content: [],
+    });
+    expect(sent[0]?.input.slice(6)).toEqual(body.input.slice(4));
+    expect(sent[1]?.input).toEqual(body.input);
+    expect(body).toEqual(snapshot);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("canonicalizes a native GPT-5.6 alias request using dynamic Responses Lite metadata", async () => {
     let sentBody: Record<string, unknown> | null = null;
     let sentHeaders = new Headers();
@@ -5170,7 +5256,10 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     expect(chunks.join("")).toContain("response.completed");
   });
 
-  it("preserves a Responses Lite incremental continuation without re-inserting tools", async () => {
+  it.each([
+    "opaque",
+    "",
+  ])("preserves a Lite continuation with encrypted reasoning '%s' without re-inserting tools", async (encryptedContent) => {
     const connection = fakeConnection([
       [
         { type: "response.created", response: { id: "resp-1" } },
@@ -5200,6 +5289,13 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       call_id: "call-1",
       output: "HELM_TOOL_OK\n",
     };
+    const reasoning = {
+      type: "reasoning",
+      id: "rs_stable",
+      summary: [],
+      encrypted_content: encryptedContent,
+      content: [{ type: "reasoning_text", text: "Continue." }],
+    };
 
     for await (const _chunk of client.nativePassthroughStream?.(
       carrier("ingress-lite-continuation", {
@@ -5215,7 +5311,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
     for await (const _chunk of client.nativePassthroughStream?.(
       carrier("ingress-lite-continuation", {
         model: "gpt-5.6-sol",
-        input: [output],
+        input: [reasoning, output],
         stream: true,
         store: false,
         previous_response_id: "resp-1",
@@ -5231,7 +5327,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
       expect.objectContaining({
         type: "response.create",
         previous_response_id: "resp-1",
-        input: [output],
+        input: [encryptedContent ? { ...reasoning, content: [] } : reasoning, output],
       }),
     ]);
   });
