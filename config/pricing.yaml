@@ -286,16 +286,23 @@ deepseek/deepseek-v4-flash:
   inputPerMTokUsd: 0.14
   outputPerMTokUsd: 0.28
   cacheReadPerMTokUsd: 0.0028
-# DeepSeek's native Responses endpoint: same account, same rate card as the Chat
-# aliases above — only the wire differs. deepseek-flash is the v4-flash tier.
+# DeepSeek's native Responses endpoint. Rates from the official pricing page
+# (2026-09-17), converted from CNY per MTok at ~7.1. DeepSeek bills two tiers —
+# PEAK (Beijing weekdays 09:00-12:00 and 14:00-18:00) and IDLE at half that. A
+# single rate card cannot express the split, so PEAK is recorded: a budget must
+# never UNDER-charge, and an idle-hour request is then merely over-estimated.
+#   flash  peak: in 2 / out 8 / cache-hit 0.04 CNY  -> 0.2817 / 1.1268 / 0.0056 USD
+#   v4-pro peak: in 9 / out 27 / cache-hit 0.30 CNY -> 1.2676 / 3.8028 / 0.0423 USD
+# v4-pro is kept priced although no lane routes to it (see lanes.yaml): an explicit
+# custom-model request can still pin it, and served history must stay repriceable.
 deepseek-responses/deepseek-v4-pro:
-  inputPerMTokUsd: 0.435
-  outputPerMTokUsd: 0.87
-  cacheReadPerMTokUsd: 0.003625
+  inputPerMTokUsd: 1.2676
+  outputPerMTokUsd: 3.8028
+  cacheReadPerMTokUsd: 0.0423
 deepseek-responses/deepseek-flash:
-  inputPerMTokUsd: 0.14
-  outputPerMTokUsd: 0.28
-  cacheReadPerMTokUsd: 0.0028
+  inputPerMTokUsd: 0.2817
+  outputPerMTokUsd: 1.1268
+  cacheReadPerMTokUsd: 0.0056
 # OpenRouter-hosted DeepSeek mirrors use official DeepSeek API-equivalent rates.
 # When the relay returns usage.cost, that real upstream-billed value still wins.
 openrouter/deepseek-v4-pro:

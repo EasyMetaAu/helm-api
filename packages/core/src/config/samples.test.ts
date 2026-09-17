@@ -162,14 +162,18 @@ describe("checked-in config samples", () => {
     // BEFORE the generic lane: a Codex-origin body reaches it via byte passthrough,
     // whereas the generic chain's grok (downgrades to translate) / claude
     // (cross-protocol) candidates are frequently unusable for that request shape.
+    // ALWAYS deepseek-flash, never v4-pro: flash is the strictly better fallback —
+    // it is the only one of the two that accepts image input (v4-pro made a vision
+    // request skip the rung with `no_vision_support`), it is ~3.4x cheaper, and it
+    // has 5x the concurrency limit, at identical 1M context / 384K max output.
     expect(lanes["gpt-5.6-sol"]?.primary).toBe("openai-codex/gpt-5.6-sol");
     expect(lanes["gpt-5.6-sol"]?.fallback).toEqual([
-      "deepseek-responses/deepseek-v4-pro",
+      "deepseek-responses/deepseek-flash",
       "premium",
     ]);
     expect(lanes["gpt-5.6-terra"]?.primary).toBe("openai-codex/gpt-5.6-terra");
     expect(lanes["gpt-5.6-terra"]?.fallback).toEqual([
-      "deepseek-responses/deepseek-v4-pro",
+      "deepseek-responses/deepseek-flash",
       "balanced",
     ]);
     expect(lanes["gpt-5.6-luna"]?.primary).toBe("openai-codex/gpt-5.6-luna");
@@ -179,7 +183,7 @@ describe("checked-in config samples", () => {
     ]);
     expect(lanes["gpt-6-astra"]?.primary).toBe("openai-codex/gpt-6-astra");
     expect(lanes["gpt-6-astra"]?.fallback).toEqual([
-      "deepseek-responses/deepseek-v4-pro",
+      "deepseek-responses/deepseek-flash",
       "premium",
     ]);
     expect(lanes["gpt-image"]).toMatchObject({
@@ -203,7 +207,7 @@ describe("checked-in config samples", () => {
     expect(lanes["gpt-5.4"]?.primary).toBe("openai-codex/gpt-5.6-terra");
     expect(lanes["gpt-5.4"]?.fallback).toEqual([
       "openai-codex/gpt-5.4",
-      "deepseek-responses/deepseek-v4-pro",
+      "deepseek-responses/deepseek-flash",
       "premium",
     ]);
     expect(lanes["gpt-5.4-mini"]?.primary).toBe("openai-codex/gpt-5.6-luna");

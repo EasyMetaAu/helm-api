@@ -197,7 +197,7 @@ describe("shipped config rules drive routing", () => {
     // same-protocol static provider before reaching Grok/Claude.
     expect(chain.slice(0, 7)).toEqual([
       "openai-codex/gpt-5.6-sol",
-      "deepseek-responses/deepseek-v4-pro",
+      "deepseek-responses/deepseek-flash",
       "xai/grok-4.6",
       "anthropic/claude-opus-4-8",
       "anthropic/claude-opus-5",
