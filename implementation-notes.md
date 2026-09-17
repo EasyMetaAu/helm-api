@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-09-17 · 过载预算耗尽不再中断候选链（Provider execution，docs/04，原则 5）
+
+- **现象**：v0.29.18 上线 DeepSeek 兜底后，线上 15 条过载请求里 10 条 `fallback_count: 0` —— 12 个候选只试了第一个，后面连 skip 记录都没有，直接 `all_providers_failed`。堆栈指向 `execute.ts` 的候选循环在首次失败后就退出。
+- **根因**：`if (overloadRetry.exhausted) break;`（#840，2026-09-06 引入）。它 `break` 的是**整个候选链循环**。原意合理——不要在换模型后重启过载退避、把等待时间累加成几十秒——但实现把"不要再等"写成了"不要再试"。
+- **两件事本就该分开**：预算约束的是**单个请求累计 sleep 多久**，而候选推进是另一个问题。下一个候选往往是完全不同的上游（本例是静态 DeepSeek），头部 Codex 过载对它毫无预测力，跳过它没有任何依据。
+- **等待上界没有被削弱**（关键核查）：删 `break` 后重新确认了两道真正的防线 ——（1）`overloadRetryDelayMs` 只按共享的 `budget.attempt` 计算，backoff 表仅 2 项，第 3 次起恒为 null，而 `attempt` 是**跨候选累加**的，所以后来的候选继承的是已花光的预算，无法重启退避表；（2）`pool.ts` 的 `if (budget.exhausted) throw err;` 在池内直接抛出。两者都与链推进无关。
+- **意外发现**：`waitForOverloadRetry` 根本不读 `exhausted` 标志，只看 `attempt`。所以 `{attempt:0, exhausted:true}` 仍会 sleep —— 该标志只是给调用方读的**结果**，不是输入开关。我最初按标志写的测试因此断言失败，改为按 `attempt` 断言才是真实契约。
+- **测试**：`execute.test.ts` 原有那条 `it.each([false,true])` 正是钉住 bug 行为的（`exhausted` 时断言 `attempts` 只有 1 条），改为两种情况都必须推进到第二个候选；另在 `retry.test.ts` 补两条，把"耗尽后不再 sleep / 后来的候选不能重启退避表"这个 #840 的真实本意钉在它该在的那一层。
+
 ## 2026-09-17 · 接入 DeepSeek 原生 Responses 透传（Provider / 协议互译，docs/02/05，原则 3/8）
 
 - **动机**：DeepSeek 上线了自己的 `/v1/responses`（<https://api-docs.deepseek.com/zh-cn/guides/responses_api>）。此前 `deepseek` provider 只是 `type: openai`（`openai_chat` 线路），Codex 请求打过去必须经 `Responses→IR→Chat` 翻译；而 DeepSeek 恰恰**要求把 reasoning 项原样回传**，翻译必然丢掉它们。新增 `deepseek-responses` provider（同 host、同 `DEEPSEEK_API_KEY`，`type: deepseek-responses` → `openai_responses`）后，Codex 走字节透传。
@@ -82,15 +91,9 @@
 - `response.metadata`、`codex.response.metadata`、`codex.rate_limits`、`responsesapi.websocket_timing` 和 `keepalive` 属于控制信息。它们不再提前提交执行尝试；正常响应逐字节保留，输出前明确过载沿既有有界策略恢复。真实输出、工具调用、加密 reasoning、未知事件及结果不明断连的禁止重放边界不变。v0.29.10 部署后重放第二条原请求时，生产流明确出现 `keepalive` 后跟过载，补齐了先前缺失的线上事件证据。
 - 两条生产失败请求确实分别丢失 157/239 个 ID；控制事件导致错误直接下传已由本地网关与账号池回归用例复现，但生产未保留这些失败的完整 SSE，因此不能把两项差异直接认定为全部线上故障的唯一原因。补丁尚未部署，真实会话恢复仍须单独验证。
 
-## 2026-09-06 · Responses 空准备事件保留安全恢复窗口（Provider execution / Responses，docs/04/05，原则 3/5/8）
-
-- 空 message/reasoning item、空文本/思考摘要 part 和空 delta 继续缓冲；只有真实内容才提交流，使随后明确的过载错误可以进入既有 OAuth sibling retry 与模型 fallback。正常响应仍逐字节回放原始事件。
-- 工具开始、加密思考内容、未知或畸形事件保持原先的提交边界；EOF/断连等结果不明仍禁止重放，严格账号亲和和客户端取消规则不变。
-- OAuth pool 在首个实际输出前，仅对结构化 `server_is_overloaded` / `service_unavailable_error` 流内错误进行同账号短退避；默认等待 1 秒、3 秒，HTTP 503/529 与 Responses 账号池共用请求级两次额外重试预算，耗尽后禁止账号/模型层重新开始。沿用整个请求的取消信号与总超时，不重新计时；等待结束重新检查账号可调度性。
-- `provider.overload_retry` 结构化日志只记 trace、原因、次数、等待毫秒与耗尽标志，不记正文或凭证。它记录安排的重试（等待期间仍可取消），不等于 HTTP 实际发送计数；原 `provider_attempts` 仍代表模型尝试。
-- 严格亲和的流内错误不新增重放；显式 HTTP 503/529 的既有安全重试保留。持续过载或总超时仍会失败，不能保证靠等待消除所有上游故障。生产样本正文未保存，不能把本地复现直接当作每条生产错误的确定根因。
-
 ## 历史条目摘要（最新要点）
+
+- **2026-09-06 · Responses 空准备事件保留安全恢复窗口**（#840，本次过载修复的源头）：空 item / 空 part / 空 delta 继续缓冲，只有真实内容才提交流，使随后的过载错误仍能进入 OAuth sibling retry 与模型 fallback；EOF/断连结果不明仍禁止重放。OAuth pool 在首个真实输出前对结构化 `server_is_overloaded` 做同账号短退避（1s、3s），与 HTTP 503/529 共用**请求级**两次额外重试预算。当时把"预算耗尽后禁止账号/模型层重新开始"实现成了 `execute.ts` 里的 `break`，2026-09-17 已纠正为只停等待、不停链推进。`provider.overload_retry` 日志只记 trace/原因/次数/等待毫秒/耗尽标志。
 
 - **2026-09-06 · Remote 配置同步后的目录与 e2e 一致性**：通用 lane 改以 `gpt-5.6-*` 子 lane 为主候选并移除官方 DeepSeek 直连候选，e2e 断言随之对齐；修正 `gpt-image-2` 的 capability key（原为旧的 `zenmux/gpt-image-2`，导致图片端点误报 404）。未改运行时代码。
 - **2026-09-06 · 记录 Responses 流内上游错误事件**：error detail 增记 `upstream_event`（`error` / `response.failed`）；HTTP status 保持可空（上游可能先开 200 流再报错）。纯增量、保留原始 provider payload，使 Codex 过载失败可与 Helm 自身准入错误区分。

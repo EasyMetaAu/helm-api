@@ -3,7 +3,9 @@ import {
   isFetchTransportError,
   isTransientConnectionError,
   numericRetryAfterMs,
+  type OverloadRetryBudget,
   overloadRetryDelayMs,
+  waitForOverloadRetry,
   withConnectionRetry,
 } from "./retry.js";
 
@@ -207,5 +209,47 @@ describe("overloadRetryDelayMs", () => {
   it("ignores an unparseable Retry-After and falls back to the default backoff", () => {
     const parsed = overloadRetryDelayMs({ status: 529, attempt: 0, retryAfter: "soon" });
     expect(parsed).toBe(overloadRetryDelayMs({ status: 529, attempt: 0 }));
+  });
+});
+
+// The overload budget bounds how long ONE request may SLEEP across every upstream
+// it touches — it is deliberately NOT a chain-advancement control (the executor
+// keeps trying later candidates; see execute.ts). This is the guard that makes the
+// waiting bound real: once spent, no caller can sleep again.
+describe("waitForOverloadRetry — a spent budget stops WAITING, and says nothing more", () => {
+  it("sleeps while the budget has attempts left, then refuses without sleeping", async () => {
+    const slept: number[] = [];
+    const sleep = async (ms: number) => {
+      slept.push(ms);
+    };
+    const budget: OverloadRetryBudget = { attempt: 0 };
+
+    expect(await waitForOverloadRetry(budget, { reason: "in_band_overload", sleep })).toBe(true);
+    expect(await waitForOverloadRetry(budget, { reason: "in_band_overload", sleep })).toBe(true);
+    // Third call is past the backoff table: refuse, mark spent, and do NOT sleep.
+    expect(await waitForOverloadRetry(budget, { reason: "in_band_overload", sleep })).toBe(false);
+
+    expect(budget.exhausted).toBe(true);
+    expect(slept).toHaveLength(2);
+    expect(slept[1]).toBeGreaterThan(slept[0] as number);
+  });
+
+  // The waiting bound is carried by the shared `attempt` COUNTER, not by the
+  // `exhausted` flag — the counter keeps climbing across candidates, so a later
+  // model inherits a spent budget and cannot restart the backoff table. This is
+  // what makes it safe for the executor to keep advancing the chain.
+  it("never restarts the backoff table for a later candidate", async () => {
+    const slept: number[] = [];
+    const sleep = async (ms: number) => {
+      slept.push(ms);
+    };
+    // A budget already spent by the FIRST candidate, handed to the next one.
+    const budget: OverloadRetryBudget = { attempt: 2 };
+
+    expect(await waitForOverloadRetry(budget, { reason: "in_band_overload", sleep })).toBe(false);
+    expect(await waitForOverloadRetry(budget, { reason: "in_band_overload", sleep })).toBe(false);
+
+    expect(budget.exhausted).toBe(true);
+    expect(slept).toEqual([]);
   });
 });
