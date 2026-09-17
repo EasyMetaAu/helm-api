@@ -6,7 +6,7 @@ import { cpSync, mkdirSync, rmSync } from "node:fs";
 import { hashKey } from "@helm/core";
 import { serve } from "@hono/node-server";
 import type Database from "better-sqlite3";
-import { SEED_TRACE_ID } from "./admin.js";
+import { SEED_PINNED_MODEL, SEED_PINNED_TRACE_ID, SEED_TRACE_ID } from "./admin.js";
 
 const TEST_KEY = process.env.HELM_TEST_KEY ?? "helm_live_e2e_testkey";
 const DATA_DIR = process.env.HELM_DATA_DIR ?? "./.e2e-data";
@@ -123,6 +123,51 @@ await telemetry.insert({
     final: {
       model_alias: "best_reasoning_model",
       provider_model: "best_reasoning_model",
+      status: "ok",
+      error_reason: null,
+    },
+  },
+});
+// A PINNED single-candidate chain: a stateful Responses continuation is bound to the
+// provider holding the conversation state, so the chain legitimately has no fallback.
+// Seeded so the detail view can be asserted to EXPLAIN the pin rather than render a
+// bare one-item chain that reads as a truncation bug.
+await telemetry.insert({
+  apiKeyId: "k_e2e",
+  createdAt: new Date(),
+  decision: {
+    request_id: SEED_PINNED_TRACE_ID,
+    trace_id: SEED_PINNED_TRACE_ID,
+    requested_model: SEED_PINNED_MODEL,
+    classifier: {
+      task_type: "passthrough",
+      complexity: "passthrough",
+      confidence: 1,
+      decided_by: "default",
+      eval_cache_hit: null,
+      constraints: {},
+      explanation: [],
+    },
+    policy: { matched_policy_id: null, reason: "stateful Responses continuation" },
+    lane: {
+      selected_lane: SEED_PINNED_MODEL,
+      candidate_chain: [SEED_PINNED_MODEL],
+      explicit_model: SEED_PINNED_MODEL,
+    },
+    provider_attempts: [
+      {
+        alias: SEED_PINNED_MODEL,
+        skipped: false,
+        skip_reason: null,
+        status: "ok",
+        error_class: null,
+        latency_ms: 210,
+        cost_usd: 0.0001,
+      },
+    ],
+    final: {
+      model_alias: SEED_PINNED_MODEL,
+      provider_model: SEED_PINNED_MODEL,
       status: "ok",
       error_reason: null,
     },

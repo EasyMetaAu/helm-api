@@ -50,4 +50,10 @@
   <!-- DecisionChain: eval fail-open reasons (evalReasonKey()) -->
   {$t('timed out')}{$t('provider error')}{$t('circuit open')}
   {$t('returned non-JSON')}{$t('returned an invalid schema')}
+  <!-- DecisionChain: pinned single-candidate chain reasons (pinReasonLabel()) -->
+  {$t(
+    'Conversation continuation — pinned to the provider holding the conversation state, so there is no fallback.',
+  )}
+  {$t('The client named this exact model, so routing passed it through without fallback.')}
+  {$t('Image generation is pinned to the requested model, so there is no fallback.')}
 {/if}

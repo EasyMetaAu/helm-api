@@ -158,6 +158,7 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
     eval_latency_ms: null,
     eval_fallback_reason: null,
     matched_policy: 'policy_x',
+    policy_reason: null,
     lane_candidates: ['premium', 'balanced'],
     provider_attempts: [
       {

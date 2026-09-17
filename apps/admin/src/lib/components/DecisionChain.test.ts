@@ -46,6 +46,7 @@ function detail(overrides: Partial<RequestDetail> = {}): RequestDetail {
     eval_latency_ms: 1234,
     eval_fallback_reason: null,
     matched_policy: 'policy_coding_premium',
+    policy_reason: null,
     lane_candidates: ['premium', 'balanced', 'economy'],
     provider_attempts: [
       {
@@ -299,6 +300,36 @@ describe('DecisionChain', () => {
     const lanes = screen.getByTestId('chain-lanes');
     const items = within(lanes).getAllByTestId('lane-candidate');
     expect(items.map((n) => n.textContent?.trim())).toEqual(['premium', 'balanced', 'economy']);
+  });
+
+  // A single-candidate chain is NOT a truncated chain — routing pinned it on purpose
+  // (stateful Responses continuation, explicit model, image model). Without the
+  // recorded reason the card reads like a bug, which is exactly how it was reported.
+  it('explains a pinned single-candidate chain with the recorded reason', () => {
+    render(DecisionChain, {
+      detail: detail({
+        lane_candidates: ['openai-codex/gpt-5.6-terra'],
+        policy_reason: 'stateful Responses continuation',
+      }),
+    });
+    const lanes = screen.getByTestId('chain-lanes');
+    expect(within(lanes).getAllByTestId('lane-candidate')).toHaveLength(1);
+    const pin = within(lanes).getByTestId('lane-pin-reason');
+    expect(pin).toHaveTextContent(/conversation continuation/i);
+    expect(within(pin).getByTitle('stateful Responses continuation')).toBeInTheDocument();
+  });
+
+  it('keeps an unmapped pin reason readable instead of blank', () => {
+    render(DecisionChain, {
+      detail: detail({ lane_candidates: ['x'], policy_reason: 'some future reason' }),
+    });
+    expect(screen.getByTestId('lane-pin-reason')).toHaveTextContent('some future reason');
+  });
+
+  // A multi-candidate chain needs no explanation — the reason line would be noise.
+  it('omits the pin note when the chain really has fallbacks', () => {
+    render(DecisionChain, { detail: detail({ policy_reason: 'explicit lane passthrough' }) });
+    expect(screen.queryByTestId('lane-pin-reason')).toBeNull();
   });
 
   it('renders each provider attempt with outcome, skip_reason and latency', () => {

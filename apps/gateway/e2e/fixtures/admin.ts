@@ -24,6 +24,13 @@ export const SEED_KEY_PLAINTEXT = "helm_live_seed_PLAINTEXT_MUST_NOT_LEAK_abcdef
 // The trace id of the pre-seeded decision record the requests views must show.
 export const SEED_TRACE_ID = "e2e-admin-trace-1";
 
+// A second seeded record whose candidate chain holds exactly ONE model because
+// routing PINNED it (stateful Responses continuation — the conversation state lives
+// on the provider that served the previous turn, so there is nothing to fall back
+// to). The detail view must say so; a bare one-item chain reads as a truncation bug.
+export const SEED_PINNED_TRACE_ID = "e2e-admin-trace-pinned";
+export const SEED_PINNED_MODEL = "pinned_continuation_model";
+
 // The Basic credentials as the gateway expects them (env-injected).
 export const adminEnv = {
   HELM_ADMIN_ENABLED: "1",
