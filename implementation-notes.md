@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-09-17 · Lite 回放加密 reasoning 时清空明文 content（Provider / 协议互译，docs/05，原则 3/8）
+
+- trace `4b84107d-1431-4cbc-afd7-4809dea790b5` 的上游 400 为 `input[5].content` 最大长度 0、实际长度 1。原请求带非空 `instructions`，Lite 插入 `additional_tools` 和 developer instructions 两项后，原始 `input[3]` 的 reasoning 变为 `input[5]`；此前将其判为 commentary 是索引误判，已撤回相关改动。
+- 在 Codex 共用的发送前 canonicalizer 中，仅对 Lite 的 `type:reasoning` 且带非空 `encrypted_content` 的项将非空 `content` 清为 `[]`，保留密文、summary、ID、commentary 与工具关联。无密文时保留原项，避免无依据删除唯一的推理上下文；legacy 和 generic Responses 不受此规则影响。
+- 使用生产请求的脱敏结构验证完整发送体及索引，覆盖 HTTP 流式/非流式、WebSocket 增量续接和无密文边界。本地验证不代表生产已部署或上游已验收。
+
 ## 2026-09-17 · 候选链只有一个候选时说明原因（Admin / 请求详情，docs/07，原则 5）
 
 - **不是 bug，是缺解释**。Lukin 报"通道候选链只有一个模型，展开有问题"。查 box 记录 `5a0e80ed`：`policy.reason` 是 `stateful Responses continuation`，`candidate_chain` 恒为 `["openai-codex/gpt-5.6-terra"]`。`route-request.ts` 的 stateful 分支（最高优先级）**故意**只给一个候选——对话状态存在上游那个 `resp_...` 里，换 provider 兜底只会 400 + 丢上下文；`pool.ts` 里 `if (statefulContinuation …) throw lastErr` 连同池内换账号都不做，同理。近 24h box 上这类 2137 次（成功 2040 / 失败 97），全部单候选。

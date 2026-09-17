@@ -1690,9 +1690,20 @@ function canonicalizeCodexNativeInput(
     ...(forceStore ? { store: false } : {}),
   };
   if (!forceStore) delete next.store;
-  const originalInput = Array.isArray(body.input) ? body.input : [];
+  let originalInput = Array.isArray(body.input) ? body.input : [];
 
   if (useResponsesLite) {
+    // Lite rejects plaintext reasoning replay. Keep its encrypted state and item
+    // identity; without encrypted state, leave the item intact rather than lose it.
+    originalInput = originalInput.map((item) =>
+      isRecord(item) &&
+      item.type === "reasoning" &&
+      typeof item.encrypted_content === "string" &&
+      item.encrypted_content.length > 0 &&
+      hasNonEmptyArray(item.content)
+        ? { ...item, content: [] }
+        : item,
+    );
     const isIncrementalContinuation =
       typeof body.previous_response_id === "string" && body.previous_response_id.length > 0;
     if (isIncrementalContinuation) {
