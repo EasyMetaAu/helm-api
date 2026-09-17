@@ -152,7 +152,7 @@ export interface ExecuteAdapterDeps {
    *  don't wire OAuth protocols → passthrough is `protocol_mismatch`-disabled). */
   oauthProviderProtocols?: ReadonlyMap<string, ProviderProtocolMetadata>;
   breaker: CircuitBreaker;
-  /** Test seam for the fixed 15s first-real-output deadline. */
+  /** Test seam. Production leaves this unset so a slow first output is not cut. */
   firstOutputTimeoutMs?: number;
   /** modelKey -> capabilities; missing entry => capability filter is skipped. */
   catalog: Map<string, CatalogEntry>;
@@ -2007,11 +2007,17 @@ export function createExecute(deps: ExecuteAdapterDeps) {
               req.attempt_timeout_ms,
               signal,
               (attemptSignal) => {
-                const preOutputAbort = new AbortController();
+                const firstOutputTimeoutMs =
+                  deps.firstOutputTimeoutMs && deps.firstOutputTimeoutMs > 0
+                    ? deps.firstOutputTimeoutMs
+                    : undefined;
+                const preOutputAbort = firstOutputTimeoutMs ? new AbortController() : null;
                 return peekStream(
                   () => {
                     const raw = passthroughStream(passthroughBody, {
-                      signal: AbortSignal.any([attemptSignal, preOutputAbort.signal]),
+                      signal: preOutputAbort
+                        ? AbortSignal.any([attemptSignal, preOutputAbort.signal])
+                        : attemptSignal,
                       overloadRetry,
                       ...(req.metadata.stateful_provider_account
                         ? { statefulAccount: req.metadata.stateful_provider_account }
@@ -2024,8 +2030,12 @@ export function createExecute(deps: ExecuteAdapterDeps) {
                     });
                     return passthroughClassifier
                       ? guardPreOutputFailure(raw, passthroughClassifier, {
-                          firstOutputTimeoutMs: deps.firstOutputTimeoutMs ?? 15_000,
-                          onTimeout: () => preOutputAbort.abort(),
+                          ...(firstOutputTimeoutMs
+                            ? {
+                                firstOutputTimeoutMs,
+                                onTimeout: () => preOutputAbort?.abort(),
+                              }
+                            : {}),
                         })
                       : raw;
                   },

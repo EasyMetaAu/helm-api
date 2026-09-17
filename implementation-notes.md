@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-09-18 · 取消 Responses 首帧 15s 超时（Provider execution，docs/04/05，原则 5/8）
+
+- **现象**：v0.29.23 上线后，真实 Codex 请求在 `response.created` 之后、第一帧真实输出之前被切掉。Admin 显示「错误 15s 通道不可用」，`response_create_outcome_unknown` / `after_response_created_before_output`。15s 对思考或工具准备过短。
+- **修复**：执行层不再默认 `firstOutputTimeoutMs: 15_000`。生产路径不设这个上限；测试缝仍可显式传入（单测用 40ms）。`guardPreOutputFailure` 本身的 deadline 能力保留，省略或 ≤0 即关闭，与原先契约一致。
+- **保留**：in-band 前导错误仍会 fallback；Responses 的 `response.created` 后不明结果仍禁止重放。不改 rung。
+
 ## 2026-09-17 · DeepSeek 缺明文 reasoning 时关掉思考，不伪造思考内容（Provider / 协议互译，docs/05，原则 3/8）
 
 - **现象**：Codex 从 OpenAI 落到 `deepseek-responses/deepseek-flash` 后 400：`The reasoning_text in the thinking mode must be passed back to the API.` Lane rung 不动。
@@ -17,7 +23,7 @@
 ## 2026-09-17 · 首字节超时：卡住的 Responses 前导算熔断，禁止重放不明结果（Provider execution，docs/04/05，原则 5/8）
 
 - **现象**：过载上游 HTTP 200 开流，只吐 `response.created` + keepalive，几分钟才在流内报 `server_is_overloaded`。生产一条候选烧掉 103s / 104s 请求；熔断要等尝试结束才记账，5 次跳闸前用户已经等了好几分钟。池内过载退避本就有界（1s、3s），连通性测试用 no-op breaker 是刻意的。
-- **修复**：`guardPreOutputFailure` 增加 `firstOutputTimeoutMs`（执行层默认 15s）。只卡**第一帧真实输出**；提交后拆除，慢生成的尾巴不切。到期抛 `errorClass: "timeout"`，Responses 带 `response_create_outcome_unknown`（请求可能已在上游执行，禁止重放到下一条候选），同时 `onTimeout` abort 上游。
+- **修复**：`guardPreOutputFailure` 增加 `firstOutputTimeoutMs`。只卡**第一帧真实输出**；提交后拆除，慢生成的尾巴不切。到期抛 `errorClass: "timeout"`，Responses 带 `response_create_outcome_unknown`（请求可能已在上游执行，禁止重放到下一条候选），同时 `onTimeout` abort 上游。执行层曾默认 15s；2026-09-18 已取消该默认，见上方条目。
 - **熔断**：post-send 不明结果原先 `recordAbort`。首字节超时是健康故障，即使不能重放也要 `recordFailure`，这样卡住的 Codex 别名会在几次后跳闸。
 - **不改 rung**。测试缝 `firstOutputTimeoutMs` 只给单测把 15s 收到 40ms。
 
@@ -110,16 +116,9 @@
 - **连带效果（已确认并接受）**：`premium`/`balanced`/`economy` 的 primary 本身就是 `gpt-5.6-sol`/`terra`/`luna` 这三条 lane，所以 DeepSeek 自动出现在**每条通用 lane 的第二位**——订阅一挂，全部流量（不止 Codex）先落 DeepSeek，claude/grok 顺延。Lukin 明确接受：延迟与成本更优，且同协议兜底最可靠。`rules-routing.test.ts` 的 premium 链断言已同步。
 - **e2e 未受影响**：routing/protocol/smoke 共 37 例全过。e2e 用 `HELM_PROVIDER_BASE_URL` 把所有 provider 指向同一 mock，其入站是 openai_chat，`deepseek-responses` 因协议不匹配被跳过，故"无订阅时实际执行模型"的断言仍落在 `openrouter/deepseek-*` 上。
 
-## 2026-09-17 · 记录上游回显的 safety_identifier（Responses 路由 / Admin，docs/05/07/11，原则 7/8）
-
-- **动机**：`safety_identifier` 一直在转发给上游、也被 `pool.ts` 当账号亲和键用，却从不落库（线上 50 条 0 命中）。无法回答"上游到底认了哪个终端用户标识"。
-- **记回显值而非发送值**（Lukin 拍板）：回显才证明上游确实接受；两者不一致即暴露上游改写或忽略。
-- **零新增解析**：流式中继的 `responseSnapshotFromStreamFrame` 本就逐帧 `JSON.parse` 取 `response` 对象拿 id/status，`safety_identifier` 在同一对象上，多读一字段即可。字节中继不受影响（原则 8），`raw` 路径原样写出，并有专门用例锁住转发字节。
-- 非流式共用 `echoedSafetyIdentifier`，避免两处读法漂移。两条路径都只在值存在时写入：缺失保持 absent，**不退化成空字符串**（空串像一个真实身份，比没有更糟）。流式取最后一个非空值，`response.completed` 比 `response.created` 前导帧权威。
-- 顶层字段 optional，旧记录 round-trip 不变，**无需迁移**。
-- **后续修正（同日，Lukin 指出）**：Admin 详情页原本把它放进「请求」面板（`buildRequestMeta`），位置错了——记的既然是**上游回显值**，它就是响应侧事实（上游接受了该 id 的证明），应当在「响应」面板。已挪到 `response_meta`。客户端**发送**的那个值本就在抓取的请求正文里可查，不需要在请求元数据里重复。存储字段 `DecisionRecord.safety_identifier` 不动，仅改展示分组；两侧都用通用 `JsonViewer` 渲染，无硬编码标签与 i18n 键需要同步。注意 `response_meta` 在 `status==='error'` 时为 `null`，但该值只在 served 路径写入，不会因此丢失。
-
 ## 历史条目摘要（最新要点）
+
+- **2026-09-17 · 记录上游回显的 safety_identifier**：记回显值而非发送值；流式取最后一个非空。Admin 放在「响应」面板。无迁移。
 
 - **2026-09-17 · 记录真正发送上游的 Codex installation id**：按 attempt 记 mutation ledger，成功值提升到 `DecisionRecord.codex_installation_id`；`source` 三态 rebound/client/absent。未新增传播通道。
 - **2026-09-17 · 修复 provider 字段兼容 400**：legacy `store:false` 删已证实被拒的 `status`；Sonnet 5 发送前再剥 `temperature`。不扩大通用 400 fallback。

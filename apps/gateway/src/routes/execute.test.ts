@@ -6970,6 +6970,76 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
     expect(tail.nativePassthroughStream).not.toHaveBeenCalled();
   }, 1_000);
 
+  it("does not cut a stalled Responses preamble unless a first-output timeout is set", async () => {
+    // Production used to default this to 15s. That killed real Codex turns whose
+    // first output (thinking / tool prep) legitimately takes longer. The deadline
+    // is opt-in via the test seam only.
+    vi.useFakeTimers();
+    const client = new AbortController();
+    let aborted = false;
+    const head = {
+      nativePassthroughStream: async function* (_body: unknown, opts: { signal: AbortSignal }) {
+        yield 'data: {"type":"response.created"}\n\n';
+        await new Promise<void>((resolve) =>
+          opts.signal.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+              resolve();
+            },
+            { once: true },
+          ),
+        );
+      },
+    } as unknown as ProviderClient;
+    const tail = { nativePassthroughStream: vi.fn() } as unknown as ProviderClient;
+    const execute = createExecute({
+      defaultProvider: head,
+      providers: new Map([
+        ["codex-a", head],
+        ["codex-b", tail],
+      ]),
+      registry: protocolRegistry({
+        a: {
+          providerName: "codex-a",
+          providerModel: "gpt-test",
+          targetProviderProtocol: "openai_responses",
+        },
+        b: {
+          providerName: "codex-b",
+          providerModel: "gpt-test",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: client.signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const pending = execute(
+      plan(["a", "b"]),
+      req({
+        protocol: "openai_responses",
+        stream: true,
+        native_request: createNativePassthroughCarrier({
+          protocol: "openai_responses",
+          body: { model: "auto", input: [], stream: true },
+          headers: {},
+        }),
+      }),
+    );
+    try {
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(aborted).toBe(false);
+      expect(tail.nativePassthroughStream).not.toHaveBeenCalled();
+    } finally {
+      client.abort();
+      await pending.catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
+
   it("does not advance the chain after HTTP response.created then EOF", async () => {
     async function* acceptedThenEof(): AsyncGenerator<string> {
       yield 'event: response.created\ndata: {"type":"response.created"}\n\n';
