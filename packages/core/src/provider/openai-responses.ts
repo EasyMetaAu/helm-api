@@ -565,14 +565,26 @@ const TRANSLATED_CUSTOM_TOOL_INPUT_KEY = "input";
 /**
  * Names of the custom tools that must be rewritten as function tools, i.e. every
  * declared custom tool the upstream would reject. An empty set means no rewrite.
+ *
+ * A name already taken by a function tool is EXCLUDED: DeepSeek rejects duplicate
+ * tool names ("Tool names must be unique."), so rewriting it would replace the
+ * upstream's accurate complaint ("Unsupported custom tool: 'exec'.") with a
+ * misleading one. Neither request can succeed, so the honest error wins.
  */
 function unsupportedCustomToolNames(tools: unknown): Set<string> {
   const names = new Set<string>();
   if (!Array.isArray(tools)) return names;
+  const functionToolNames = new Set<string>();
+  for (const tool of tools) {
+    if (!isRecord(tool) || tool.type === "custom") continue;
+    if (typeof tool.name === "string") functionToolNames.add(tool.name);
+  }
   for (const tool of tools) {
     if (!isRecord(tool) || tool.type !== "custom") continue;
     const name = tool.name;
-    if (typeof name === "string" && name !== DEEPSEEK_SUPPORTED_CUSTOM_TOOL) names.add(name);
+    if (typeof name !== "string") continue;
+    if (name === DEEPSEEK_SUPPORTED_CUSTOM_TOOL || functionToolNames.has(name)) continue;
+    names.add(name);
   }
   return names;
 }

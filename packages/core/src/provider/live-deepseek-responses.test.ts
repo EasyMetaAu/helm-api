@@ -125,6 +125,56 @@ describe.skipIf(!liveEnabled)("live DeepSeek Responses passthrough", () => {
     ).resolves.toMatch(/deserialize|queries|action/i);
   });
 
+  // DeepSeek's own Codex guide declares `apply_patch_tool_type: "freeform"` for both
+  // models, i.e. Codex is expected to send apply_patch as a freeform CUSTOM tool.
+  // That is exactly the tool our translation deliberately leaves alone, so pin the
+  // round trip: translating it would have broken the one custom tool that works.
+  // https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/codex/
+  test("keeps apply_patch as a freeform custom tool round trip", async () => {
+    const res = (await translatingClient().nativePassthrough?.({
+      model: "deepseek-flash",
+      instructions: "You are Codex. Use `apply_patch` for local file edits.",
+      store: false,
+      tools: [
+        { type: "custom", name: "apply_patch", description: "Use `apply_patch` to edit files." },
+      ],
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: "在 /tmp/demo.txt 里把 foo 改成 bar，用 apply_patch。文件内容就是一行 foo。",
+            },
+          ],
+        },
+      ],
+    })) as { output: Record<string, unknown>[] };
+
+    const call = res.output.find((item) => item.type === "custom_tool_call");
+    expect(call?.name).toBe("apply_patch");
+    // The freeform input is a patch envelope, NOT a JSON arguments object.
+    expect(String(call?.input)).toContain("*** Begin Patch");
+  });
+
+  // `reasoning.summary` is the one knob DeepSeek rejects outright: the documented
+  // default is "none", but that literal is not an accepted request value (only
+  // auto/concise/detailed are). Worth pinning — a client that echoes the documented
+  // default back would get a deterministic 400.
+  test("400s on reasoning.summary:none despite it being the documented default", async () => {
+    await expect(
+      upstreamMessage(() =>
+        client(true).nativePassthrough?.({
+          model: "deepseek-flash",
+          input: "say ok",
+          store: false,
+          reasoning: { effort: "high", summary: "none" },
+        }),
+      ),
+    ).resolves.toMatch(/unknown variant `none`/i);
+  });
+
   // The DSML-leak regression. A `custom` tool not named `apply_patch` is a hard 400
   // here, so a Codex code-mode transcript (custom tool `exec`) can only be served by
   // translating the declaration AND the replayed calls; left inconsistent, the model

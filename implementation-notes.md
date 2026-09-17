@@ -23,6 +23,10 @@
 - **lane rung 已恢复**（6 条 GPT lane），并重写 `lanes.yaml` 注释块记录这次误判与真根因。
 - **顺带修好两条一直是坏的 live 断言**：`live-deepseek-responses.test.ts` 里两处 `rejects.toThrow(/reasoning_text/)` 之类**从来不可能通过**——`UpstreamError.message` 是通用的 `upstream returned 400`，上游原文在 `providerRaw`。已加 `upstreamMessage()` 辅助函数从 `providerRaw` 读，三条断言统一改正。（在 main 上验证过它们同样红，不是本次引入。）
 - **教训修订**：上一条写的"协议兼容是必要非充分条件"仍然成立，但**排查方法**才是真教训 —— 判定一个模型"不支持某协议"之前，必须用**真实 transcript 重放**，而不是构造单轮探针。单轮探针在这件事上两头都骗了我：它显示 `function_call` 干净（所以 rung 当初敢上），也永远复现不出泄漏（所以根因判错）。
+- **事后对照官方 Codex 集成文档**（<https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/codex/>，Lukin 指出）。文档独立印证了实测结论，并补上一块推不出来的信息：它给 Codex 下发的 `models.json` 里两个模型都声明 `apply_patch_tool_type: "freeform"` —— 即 DeepSeek **明确只为 `apply_patch` 这一个 freeform custom 工具做了适配**，`experimental_supported_tools: []`。这解释了 400 里那句"Only 'apply_patch' is supported"为何是设计而非遗漏，也确认我们**不翻译 `apply_patch`** 是对的（已补 live 用例钉住它的 freeform 往返：返回 `custom_tool_call`，input 是 `*** Begin Patch` 补丁文本而非 JSON）。
+- **据文档补测的边界，全部宽容**：`reasoning.effort` 虽只声明 low/high/max，实测 minimal/medium/xhigh 也照收并原样回显（与 helm 的 clamp 策略相容，无需特判）；`text.verbosity` 三档全收；`parallel_tool_calls: true` 正常。**唯一真会 400 的是 `reasoning.summary: "none"`** —— 文档把它写成默认值，但请求侧只接受 auto/concise/detailed，照着文档默认值回传就是确定性 400。已补 live 用例记录。
+- **`tool_choice` 指定具体工具在思考模式下一律 400**（`Thinking mode does not support this tool_choice`），custom 与 function 两种形态都一样。这与本次翻译无关（翻译前后都 400），但值得知道：Codex 若 pin 某个工具，这条 rung 必然失败并走链上下一个。
+- **修掉一个翻译引入的 gap**：客户端同时声明 `custom exec` 和 `function exec` 时，翻译会撞上 `Tool names must be unique.`，把上游准确的 `Unsupported custom tool: 'exec'.` 换成一句误导性错误（两种情况都失败，但后者看不出真问题）。已改为**名称已被 function 工具占用时跳过翻译**，让诚实的错误浮出。
 
 ## 2026-09-17 · ~~撤回 DeepSeek 的 lane 兜底：它不说 Codex 的工具协议~~（结论已被上一条推翻）（Config / 路由，docs/04，原则 3/5）
 

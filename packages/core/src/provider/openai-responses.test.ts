@@ -6360,6 +6360,31 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
       });
     });
 
+    it("skips a custom tool whose translated name would collide with a function tool", async () => {
+      // DeepSeek rejects duplicate tool names ("Tool names must be unique."), so
+      // rewriting `custom exec` next to an existing `function exec` would swap the
+      // upstream's real complaint ("Unsupported custom tool: 'exec'.") for a
+      // confusing one about uniqueness. Neither request can succeed — leave the body
+      // alone so the operator sees the error that names the actual problem.
+      let seen: Record<string, unknown> = {};
+      const client = translatingClient((body) => {
+        seen = body;
+        return jsonResponse({ id: "r", object: "response", status: "completed", output: [] });
+      });
+
+      const tools = [
+        EXEC_CUSTOM,
+        { type: "function", name: "exec", description: "different exec", parameters: {} },
+      ];
+      const input = [
+        { type: "custom_tool_call", id: "c", call_id: "c", name: "exec", input: "ls" },
+      ];
+      await client.nativePassthrough?.({ model: "deepseek-flash", tools, input });
+
+      expect(seen.tools).toEqual(tools);
+      expect(seen.input).toEqual(input);
+    });
+
     it("leaves everything untouched when the contract is not opted in", async () => {
       let seen: Record<string, unknown> = {};
       const client = createGenericOpenAIResponsesClient({
