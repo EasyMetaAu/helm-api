@@ -168,6 +168,13 @@ export interface ProviderCallOptions {
 
 export interface ProviderClient {
   nativeProtocolProfile?: NativeProtocolProfile;
+  /** A generic-Responses upstream that nonetheless PARSES the Codex-private input
+   *  items (custom_tool_call / echoed reasoning) rather than 422-ing on them, so the
+   *  executor must keep byte passthrough instead of downgrading to translation.
+   *  DeepSeek sets this: it not only accepts those items, it REJECTS a request whose
+   *  reasoning items were dropped — exactly what translation does. Default (absent =
+   *  false) preserves the xAI/Grok downgrade. */
+  supportsResponsesNativeItems?: boolean;
   streamReframed?: boolean;
   chatCompletion(
     req: ChatCompletionRequest,

@@ -136,6 +136,73 @@ describe("buildProviderClients provider dispatch", () => {
     }
   });
 
+  it("creates a DeepSeek Responses client that passes through and drops search call items", async () => {
+    const previous = process.env.DEEPSEEK_API_KEY;
+    process.env.DEEPSEEK_API_KEY = "deepseek-secret";
+    const originalFetch = globalThis.fetch;
+    let seenBody: Record<string, unknown> = {};
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      seenBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({ id: "r", object: "response", status: "completed", output: [] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+    try {
+      const clients = buildProviderClients(
+        [
+          {
+            name: "deepseek-responses",
+            alias: "deepseek-responses",
+            type: "deepseek-responses",
+            base_url: "https://api.deepseek.com/v1",
+            api_key_env: "DEEPSEEK_API_KEY",
+            models: [{ alias: "deepseek-responses/flash", provider_model: "deepseek-flash" }],
+            targetProviderProtocol: "openai_responses",
+            map_developer_role_to_system: false,
+            claude_cli_fingerprint_mode: "auto",
+            transport_profile: "default",
+            normalize_reasoning_delta_alias: false,
+            response_model_policy: "provider",
+          },
+        ],
+        "https://fallback.invalid",
+        1_000,
+      );
+
+      const client = clients.get("deepseek-responses");
+      // Reuses the generic Responses wire profile on purpose: the executor's
+      // Codex-shim guard keys off "not generic", and DeepSeek must NOT get the
+      // Codex shims (it accepts temperature / max_output_tokens).
+      expect(client?.nativeProtocolProfile).toBe("generic_openai_responses");
+      // Opts out of the xAI-style downgrade-to-translate: DeepSeek parses the Codex
+      // items and REQUIRES the reasoning ones back, which translation would drop.
+      expect(client?.supportsResponsesNativeItems).toBe(true);
+      expect(typeof client?.nativePassthrough).toBe("function");
+      expect(typeof client?.nativePassthroughStream).toBe("function");
+
+      await client?.nativePassthrough?.({
+        model: "deepseek-flash",
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+          { type: "web_search_call", id: "ws_1", status: "completed" },
+        ],
+      });
+
+      // The live endpoint 400s on an echoed-back web_search_call.
+      expect(seenBody.input).toEqual([
+        { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+      ]);
+      // DeepSeek is NOT stream-only and honours these; the xAI shims must stay off.
+      expect(seenBody.stream).toBeUndefined();
+      expect(seenBody.instructions).toBeUndefined();
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (previous === undefined) delete process.env.DEEPSEEK_API_KEY;
+      else process.env.DEEPSEEK_API_KEY = previous;
+    }
+  });
+
   it("creates a Gemini-native client for provider type gemini", () => {
     const previous = process.env.GEMINI_API_KEY;
     process.env.GEMINI_API_KEY = "gemini-secret";

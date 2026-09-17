@@ -170,6 +170,17 @@ export interface GenericOpenAIResponsesRequestContract {
   // Some providers accept only the Responses item sequence form; reject the
   // proven object form locally instead of sending a deterministic upstream 422.
   rejectObjectInput?: boolean;
+  // DeepSeek's Responses endpoint ignores unknown input items but deserializes the
+  // built-in SEARCH call items strictly, so an echoed-back `web_search_call` /
+  // `file_search_call` 400s ("missing field `queries`"). A full-transcript client
+  // (Codex) replays them, so drop those items before the POST. Opt-in: the public
+  // OpenAI contract keeps them.
+  dropBuiltInSearchCallItems?: boolean;
+  // The upstream PARSES the Codex-private input items (custom_tool_call, echoed
+  // reasoning) instead of rejecting them, so the executor must keep byte passthrough
+  // rather than downgrading to translation. Surfaced on the client as
+  // `supportsResponsesNativeItems`. Off by default (xAI/Grok still downgrades).
+  acceptsResponsesNativeItems?: boolean;
   // Account-scoped model metadata discovered from the upstream catalog. The
   // resolver receives the final wire model; no provider-wide defaults are guessed.
   resolveModelRequestDefaults?: (
@@ -3197,6 +3208,7 @@ export function createGenericOpenAIResponsesClient(
       contract?.ensureInstructions !== true &&
       contract?.rejectPreviousResponseId !== true &&
       contract?.rejectObjectInput !== true &&
+      contract?.dropBuiltInSearchCallItems !== true &&
       contract?.resolveModelRequestDefaults === undefined
     ) {
       return body;
@@ -3262,6 +3274,17 @@ export function createGenericOpenAIResponsesClient(
         400,
       );
     }
+    let searchCallItemsDropped = false;
+    if (contract.dropBuiltInSearchCallItems === true && Array.isArray(next.input)) {
+      const kept = next.input.filter(
+        (item) =>
+          !isRecord(item) || (item.type !== "web_search_call" && item.type !== "file_search_call"),
+      );
+      if (kept.length !== next.input.length) {
+        next.input = kept;
+        searchCallItemsDropped = true;
+      }
+    }
     const instructionShims: string[] = [];
     if (
       contract.ensureInstructions === true &&
@@ -3278,6 +3301,7 @@ export function createGenericOpenAIResponsesClient(
       ...(reasoningIncludeAdded ? ["generic_responses_include_encrypted_reasoning"] : []),
       ...(streamToolCallsAdded ? ["generic_responses_stream_tool_calls_default"] : []),
       ...(maxOutputTokensAdded ? ["generic_responses_max_output_tokens_default"] : []),
+      ...(searchCallItemsDropped ? ["generic_responses_search_call_items_dropped"] : []),
       ...instructionShims,
     ]);
     return carrier;
@@ -3469,6 +3493,9 @@ export function createGenericOpenAIResponsesClient(
 
   return {
     nativeProtocolProfile: "generic_openai_responses",
+    ...(requestContract?.acceptsResponsesNativeItems === true
+      ? { supportsResponsesNativeItems: true }
+      : {}),
 
     async chatCompletion(req, opts) {
       const model = String((req as Record<string, unknown>).model ?? "");

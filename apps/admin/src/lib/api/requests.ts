@@ -628,8 +628,6 @@ function buildRequestMeta(raw: RawDecisionRecord): Record<string, unknown> {
     // Codex-only: the installation id actually sent upstream. Opaque identifier, not
     // key material. Absent for every other provider, so the panel stays clean.
     ...(raw.codex_installation_id ? { codex_installation_id: raw.codex_installation_id } : {}),
-    // Echoed by the upstream on its response — absent unless it actually came back.
-    ...(raw.safety_identifier ? { safety_identifier: raw.safety_identifier } : {}),
   };
 }
 
@@ -744,6 +742,10 @@ export function toDetail(raw: RawDecisionRecord): RequestDetail {
         ? {
             model_alias: raw.final?.model_alias ?? null,
             provider_model: raw.final?.provider_model ?? null,
+            // The value the UPSTREAM echoed back on its response object — a response
+            // fact (proof it accepted the id), not a request one. Absent unless it
+            // actually came back; what the client SENT lives in the captured payload.
+            ...(raw.safety_identifier ? { safety_identifier: raw.safety_identifier } : {}),
           }
         : null,
     error:

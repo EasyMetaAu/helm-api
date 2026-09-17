@@ -6053,6 +6053,53 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
     });
   });
 
+  it("drops built-in search call items when the contract requires it (DeepSeek)", async () => {
+    // DeepSeek's /v1/responses tolerates unknown item types, but deserializes
+    // web_search_call / file_search_call STRICTLY: an echoed-back item 400s with
+    // "missing field `queries`" (verified live against api.deepseek.com). Codex
+    // replays the whole transcript, so the item must be dropped before the POST.
+    let seenBody: Record<string, unknown> = {};
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://deepseek.test/v1", apiKey: "sk-test" },
+      requestContract: { dropBuiltInSearchCallItems: true },
+      fetch: (async (_url: string, init?: RequestInit) => {
+        seenBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return jsonResponse({ id: "r", object: "response", status: "completed", output: [] });
+      }) as unknown as typeof fetch,
+    });
+
+    await client.nativePassthrough?.({
+      model: "deepseek-flash",
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+        { type: "web_search_call", id: "ws_1", status: "completed" },
+        { type: "file_search_call", id: "fs_1", status: "completed" },
+        { type: "function_call", call_id: "c1", name: "calc", arguments: "{}" },
+      ],
+    });
+
+    expect(seenBody.input).toEqual([
+      { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+      { type: "function_call", call_id: "c1", name: "calc", arguments: "{}" },
+    ]);
+  });
+
+  it("leaves input untouched when the drop contract is not opted in", async () => {
+    let seenBody: Record<string, unknown> = {};
+    const client = createGenericOpenAIResponsesClient({
+      config: { baseUrl: "https://generic.test/v1", apiKey: "sk-test" },
+      fetch: (async (_url: string, init?: RequestInit) => {
+        seenBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return jsonResponse({ id: "r", object: "response", status: "completed", output: [] });
+      }) as unknown as typeof fetch,
+    });
+
+    const input = [{ type: "web_search_call", id: "ws_1", status: "completed" }];
+    await client.nativePassthrough?.({ model: "grok", input });
+
+    expect(seenBody.input).toEqual(input);
+  });
+
   it("preserves requested include fields while requiring encrypted reasoning content", async () => {
     let seenBody: Record<string, unknown> = {};
     const client = createGenericOpenAIResponsesClient({

@@ -149,14 +149,17 @@ describe('toDetail', () => {
     expect(toDetail(rawRecord()).request_meta).not.toHaveProperty('codex_installation_id');
   });
 
-  // Echoed by the upstream — proof it accepted the caller's safety_identifier.
-  it('surfaces the safety_identifier echoed by the upstream', () => {
+  // The safety_identifier we record is the one the UPSTREAM ECHOED BACK on its
+  // response object, so it is a RESPONSE fact, not a request one — it belongs in
+  // response_meta. What the client sent is already visible in the captured payload.
+  it('surfaces the safety_identifier echoed by the upstream in response_meta', () => {
     const detail = toDetail({ ...rawRecord(), safety_identifier: 'lukin-test-001' });
-    expect(detail.request_meta).toMatchObject({ safety_identifier: 'lukin-test-001' });
+    expect(detail.response_meta).toMatchObject({ safety_identifier: 'lukin-test-001' });
+    expect(detail.request_meta).not.toHaveProperty('safety_identifier');
   });
 
   it('omits the safety_identifier when the upstream echoed none', () => {
-    expect(toDetail(rawRecord()).request_meta).not.toHaveProperty('safety_identifier');
+    expect(toDetail(rawRecord()).response_meta).not.toHaveProperty('safety_identifier');
   });
 });
 

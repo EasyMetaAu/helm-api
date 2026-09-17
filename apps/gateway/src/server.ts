@@ -1788,6 +1788,21 @@ function createProviderClient(
       },
     };
   }
+  // DeepSeek's own /v1/responses. Same generic wire profile (so the executor's
+  // Codex-shim guard keeps its hands off), plus the one behaviour DeepSeek needs:
+  // built-in search call items must be dropped, because it deserializes them
+  // strictly and 400s on the ones Codex replays from an earlier provider's turn.
+  // Everything else it silently ignores, so no other shim is warranted.
+  if (p.type === "deepseek-responses") {
+    return createGenericOpenAIResponsesClient({
+      config: { ...base, ...cred },
+      requestContract: {
+        dropBuiltInSearchCallItems: true,
+        acceptsResponsesNativeItems: true,
+      },
+      fetch: providerFetch,
+    });
+  }
   if (
     p.type === "openai-responses" ||
     p.type === "openai-responses-generic" ||

@@ -223,6 +223,9 @@ export function createSerializingClient(deps: SerializeClientDeps): ProviderClie
   if (deps.inner.streamReframed !== undefined) {
     client.streamReframed = deps.inner.streamReframed;
   }
+  if (deps.inner.supportsResponsesNativeItems !== undefined) {
+    client.supportsResponsesNativeItems = deps.inner.supportsResponsesNativeItems;
+  }
 
   return client;
 }

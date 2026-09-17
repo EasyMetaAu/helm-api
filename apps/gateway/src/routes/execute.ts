@@ -465,8 +465,11 @@ function decideNativePassthroughForAttempt(input: {
     sourceCarriesResponsesNativeItems:
       Array.isArray(req.provider_raw?.responses_input_items) ||
       Array.isArray(req.provider_raw?.unknown_items),
+    // A generic-Responses upstream that PARSES those items (DeepSeek) opts out of the
+    // downgrade: translating would strip the reasoning items it requires back.
     targetIsGenericResponsesProfile:
-      target.provider?.nativeProtocolProfile === "generic_openai_responses",
+      target.provider?.nativeProtocolProfile === "generic_openai_responses" &&
+      target.provider?.supportsResponsesNativeItems !== true,
   });
 
   return {
@@ -825,6 +828,9 @@ function candidateGuardSkipReason(
     req.protocol === "openai_responses" &&
     target.targetProviderProtocol === "openai_responses" &&
     target.provider?.nativeProtocolProfile === "generic_openai_responses" &&
+    // DeepSeek parses these items (and ignores the types it doesn't model), so it is
+    // a VALID Codex fallback — do not skip the candidate. See supportsResponsesNativeItems.
+    target.provider?.supportsResponsesNativeItems !== true &&
     (Array.isArray(req.provider_raw?.unknown_items) ||
       responsesInputItemsAreCrossProtocolLossy(req.provider_raw?.responses_input_items))
   ) {
