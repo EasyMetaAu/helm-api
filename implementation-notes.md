@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-09-17 · 记录上游回显的 safety_identifier（Responses 路由 / Admin，docs/05/07/11，原则 7/8）
+
+- **动机**：`safety_identifier` 一直在转发给上游、也被 `pool.ts` 当账号亲和键用，却从不落库（线上 50 条 0 命中）。无法回答"上游到底认了哪个终端用户标识"。
+- **记回显值而非发送值**（Lukin 拍板）：回显才证明上游确实接受；两者不一致即暴露上游改写或忽略。
+- **零新增解析**：流式中继的 `responseSnapshotFromStreamFrame` 本就逐帧 `JSON.parse` 取 `response` 对象拿 id/status，`safety_identifier` 在同一对象上，多读一字段即可。字节中继不受影响（原则 8），`raw` 路径原样写出，并有专门用例锁住转发字节。
+- 非流式共用 `echoedSafetyIdentifier`，避免两处读法漂移。两条路径都只在值存在时写入：缺失保持 absent，**不退化成空字符串**（空串像一个真实身份，比没有更糟）。流式取最后一个非空值，`response.completed` 比 `response.created` 前导帧权威。
+- 顶层字段 optional，旧记录 round-trip 不变，**无需迁移**。
+
 ## 2026-09-17 · 记录真正发送上游的 Codex installation id（Provider / Routing / Admin，docs/05/07/11，原则 7）
 
 - **动机**：#856 把 installation id 重绑为每账号独立值后，真正上到上游的那个值没有任何留存，只有 `body_shims_applied` 里一个"改写过"的布尔标记。账号被风控时无法回答"这次用的是哪个 id"，也无法验证重绑生效。
