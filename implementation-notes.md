@@ -1,17 +1,26 @@
 # 实现笔记（Implementation Notes）
 
 > 记录 spec 未覆盖、不得不自己做的决定，被迫的修改、权衡取舍，以及用户应当知道的坑与 TODO。
-> **新条目追加在最上方**，格式：`## 2026-09-17 · 修复 provider 字段兼容 400（docs/04/05，原则 3/8）
-
-- Codex legacy `store:false` input 删除已由生产证实被拒绝的 `status`；`phase` 没有拒绝证据，保留其历史语义。Lite input 身份、加密 reasoning、tool call 关联均不改动。
-- Claude Sonnet 5 在转换与 native 发送边界移除已弃用的 `temperature`；strict thinking 可能重新注入 `temperature=1`，因此序列化前再次应用同一模型规则。其他模型维持原行为。
-- 不扩大通用 400 fallback，也不重放已提交输出；已知字段在首次发送前修正，后续临时 provider 故障继续走既有 fallback。仅 Sonnet 5 有生产拒绝证据，本次不推测扩大到其他 Claude 模型。
-
-## YYYY-MM-DD · 标题`，并注明所属 spec 章节。
+> **新条目追加在最上方**，格式：`## YYYY-MM-DD · 标题`，并注明所属 spec 章节。
 >
 > **体积控制规则（必须遵守）**：本文件只保留**最近 10 条**可追踪记录。新条目入栈时，保留顶部最新完整记录与历史摘要中最新的一行要点；超过 10 条的更早历史压缩进文末「更早历史总览」的一段概括。完整原文可经 git history 回溯。
 
 ---
+
+## 2026-09-17 · 记录真正发送上游的 Codex installation id（Provider / Routing / Admin，docs/05/07/11，原则 7）
+
+- **动机**：#856 把 installation id 重绑为每账号独立值后，真正上到上游的那个值没有任何留存，只有 `body_shims_applied` 里一个"改写过"的布尔标记。账号被风控时无法回答"这次用的是哪个 id"，也无法验证重绑生效。
+- **粒度**：按 attempt 记在各自的 mutation ledger（fallback 链跨账号，id 各不相同，这是唯一不丢信息的粒度），另把服务成功那次的值提升到顶层 `DecisionRecord.codex_installation_id` 供详情页「请求」面板直接展示；全链路失败时退回最后一次记录到 id 的 attempt。
+- **`source` 三态**：`rebound`（我们改写过，此时才额外留客户端原值）/ `client`（客户端自带且已等于账号绑定值）/ `absent`（请求没带 id）。此前这三种情况在遥测里无法区分。
+- **未新增传播通道**：`prepareRequest` 已有 `Object.assign(input.mutations, prepared.carrier.mutations)` 把 provider 内部 ledger 写回调用方 carrier，`execute.ts` 抓的正是同一引用。原计划的回调机制经验证属多余，已撤销。`execute.test.ts` 新增用例专门守这条链路。
+- 三个字段均为不透明标识符，不含正文或密钥；全部 optional，旧记录 round-trip 不变，**无需迁移**。
+- **顺带修正**：v0.29.15（#861）误把发布条目拼进了文件头部的格式说明行，导致模板被覆盖，本次恢复。
+
+## 2026-09-17 · 修复 provider 字段兼容 400（docs/04/05，原则 3/8）
+
+- Codex legacy `store:false` input 删除已由生产证实被拒绝的 `status`；`phase` 没有拒绝证据，保留其历史语义。Lite input 身份、加密 reasoning、tool call 关联均不改动。
+- Claude Sonnet 5 在转换与 native 发送边界移除已弃用的 `temperature`；strict thinking 可能重新注入 `temperature=1`，因此序列化前再次应用同一模型规则。其他模型维持原行为。
+- 不扩大通用 400 fallback，也不重放已提交输出；已知字段在首次发送前修正，后续临时 provider 故障继续走既有 fallback。仅 Sonnet 5 有生产拒绝证据，本次不推测扩大到其他 Claude 模型。
 
 ## 2026-09-17 · 无消息上游失败暴露原始事件（Provider / Admin，docs/05/07/11，原则 3/8）
 
