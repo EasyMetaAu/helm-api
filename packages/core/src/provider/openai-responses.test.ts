@@ -2516,7 +2516,7 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
           type: "reasoning",
           id: "rs_stable",
           summary: [],
-          encrypted_content: "opaque",
+          encrypted_content: "gAAAAAopaque",
           content: [{ type: "reasoning_text", text: "Inspect the repository." }],
         },
         {
@@ -2567,13 +2567,97 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
       type: "reasoning",
       id: "rs_stable",
       summary: [],
-      encrypted_content: "opaque",
+      encrypted_content: "gAAAAAopaque",
       content: [],
     });
     expect(sent[0]?.input.slice(6)).toEqual(body.input.slice(4));
     expect(sent[1]?.input).toEqual(body.input);
     expect(body).toEqual(snapshot);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    false,
+    true,
+  ])("strips DeepSeek ciphertext before Codex Lite replay (stream=%s)", async (stream) => {
+    const openaiCipher = `gAAAAA${"B".repeat(80)}`;
+    const deepseekCipher = "d8b79690-1120-4bab-b9cb-f053d8ced08a-0";
+    const plaintext = [
+      { type: "reasoning_text", text: "Let me check the current state of the repository..." },
+    ];
+    const body = {
+      model: "gpt-6-astra",
+      store: false,
+      stream,
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "next" }] },
+        {
+          type: "reasoning",
+          id: "rs_openai",
+          summary: [],
+          encrypted_content: openaiCipher,
+          content: [{ type: "reasoning_text", text: "OpenAI private thought." }],
+        },
+        {
+          type: "reasoning",
+          summary: [],
+          encrypted_content: deepseekCipher,
+          content: plaintext,
+        },
+        { type: "custom_tool_call", call_id: "call_ds", name: "exec", input: "{}" },
+        { type: "custom_tool_call_output", call_id: "call_ds", output: "ok" },
+      ],
+    };
+    const snapshot = structuredClone(body);
+    let sent: Record<string, unknown> | undefined;
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        resolveModelInfo: () => codexModelInfo({ use_responses_lite: true }),
+      },
+      fetch: (async (_url: string, init?: RequestInit) => {
+        sent = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return stream
+          ? sseResponse([
+              { type: "response.completed", response: { status: "completed", usage: {} } },
+            ])
+          : jsonResponse({ id: "resp_1", object: "response", status: "completed" });
+      }) as unknown as typeof fetch,
+    });
+    const carrier = {
+      protocol: "openai_responses" as const,
+      body,
+      raw_body: JSON.stringify(body),
+      headers: {},
+      mutations: {},
+    };
+    if (stream) {
+      for await (const _ of client.nativePassthroughStream?.(carrier) ?? []) {
+        /* drain */
+      }
+    } else {
+      await client.nativePassthrough?.(carrier);
+    }
+    expect(sent?.input).toEqual([
+      { type: "additional_tools", role: "developer", tools: [] },
+      body.input[0],
+      {
+        type: "reasoning",
+        id: "rs_openai",
+        summary: [],
+        encrypted_content: openaiCipher,
+        content: [],
+      },
+      {
+        type: "reasoning",
+        summary: [],
+        content: plaintext,
+      },
+      body.input[3],
+      body.input[4],
+    ]);
+    expect(body).toEqual(snapshot);
   });
 
   it("canonicalizes a native GPT-5.6 alias request using dynamic Responses Lite metadata", async () => {
@@ -5257,7 +5341,7 @@ describe("createCodexResponsesClient — native Responses WebSocket", () => {
   });
 
   it.each([
-    "opaque",
+    "gAAAAAopaque",
     "",
   ])("preserves a Lite continuation with encrypted reasoning '%s' without re-inserting tools", async (encryptedContent) => {
     const connection = fakeConnection([
@@ -7563,7 +7647,7 @@ describe("sanitizeCodexResponsesNativeBody", () => {
         role: "user",
         content: [{ type: "input_text", text: "next" }],
       },
-      { type: "reasoning", id: "rs_stable", summary: [], encrypted_content: "opaque" },
+      { type: "reasoning", id: "rs_stable", summary: [], encrypted_content: "gAAAAAopaque" },
       {
         type: "custom_tool_call",
         id: "ctc_stable",
@@ -7642,13 +7726,86 @@ describe("sanitizeCodexResponsesNativeBody", () => {
         {
           type: "reasoning",
           id: "rs_1",
-          encrypted_content: "enc",
+          encrypted_content: "gAAAAAenc",
           summary: [],
         },
       ],
     });
 
-    expect(body.input).toEqual([{ type: "reasoning", encrypted_content: "enc", summary: [] }]);
+    expect(body.input).toEqual([
+      { type: "reasoning", encrypted_content: "gAAAAAenc", summary: [] },
+    ]);
+  });
+
+  it("strips DeepSeek encrypted_content and keeps plaintext for mixed Codex replay", () => {
+    // Production a8b37bb9: DeepSeek success then gpt-6-astra 400
+    // invalid_encrypted_content — OpenAI cannot decrypt d8b7…8a-0.
+    const openaiCipher = `gAAAAA${"A".repeat(80)}`;
+    const deepseekCipher = "d8b79690-1120-4bab-b9cb-f053d8ced08a-0";
+    const original = {
+      model: "gpt-6-astra",
+      store: false,
+      stream: true,
+      reasoning: { effort: "high", context: "all_turns" },
+      input: [
+        {
+          type: "reasoning",
+          id: "rs_openai",
+          summary: [],
+          encrypted_content: openaiCipher,
+          content: null,
+        },
+        {
+          type: "reasoning",
+          summary: [],
+          encrypted_content: deepseekCipher,
+          content: [
+            { type: "reasoning_text", text: "Let me check the current state of the repository..." },
+          ],
+        },
+        { type: "custom_tool_call", call_id: "call_1", name: "exec", input: "{}" },
+        { type: "custom_tool_call_output", call_id: "call_1", output: "ok" },
+      ],
+    };
+    const snapshot = structuredClone(original);
+
+    const { body, fixes } = sanitizeCodexResponsesNativeBody(original);
+
+    expect(fixes).toEqual(["foreign_encrypted_content_stripped"]);
+    expect(body.input).toEqual([
+      original.input[0],
+      {
+        type: "reasoning",
+        summary: [],
+        content: [
+          { type: "reasoning_text", text: "Let me check the current state of the repository..." },
+        ],
+      },
+      original.input[2],
+      original.input[3],
+    ]);
+    expect(original).toEqual(snapshot);
+  });
+
+  it("drops a foreign-only reasoning item that has no plaintext left", () => {
+    const { body, fixes } = sanitizeCodexResponsesNativeBody({
+      model: "gpt-6-astra",
+      store: false,
+      reasoning: { context: "all_turns" },
+      input: [
+        {
+          type: "reasoning",
+          summary: [],
+          encrypted_content: "d8b79690-1120-4bab-b9cb-f053d8ced08a-0",
+        },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "next" }] },
+      ],
+    });
+
+    expect(fixes).toEqual(["foreign_encrypted_content_stripped"]);
+    expect(body.input).toEqual([
+      { type: "message", role: "user", content: [{ type: "input_text", text: "next" }] },
+    ]);
   });
 
   it("handles non-array input: passes through unchanged when store:false but input is not an array", () => {

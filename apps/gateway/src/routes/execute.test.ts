@@ -6322,6 +6322,85 @@ describe("createExecute — native protocol passthrough (#217)", () => {
     ]);
   });
 
+  it("strips DeepSeek encrypted_content before Codex sees mixed history", async () => {
+    const responsesBody = {
+      id: "resp_mixed",
+      object: "response",
+      status: "completed",
+      output: [],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+    const provider = {
+      nativeProtocolProfile: "codex_responses",
+      chatCompletion: vi.fn(),
+      chatCompletionStream: vi.fn(),
+      nativePassthrough: vi.fn().mockResolvedValue(responsesBody),
+    } as unknown as ProviderClient & { nativePassthrough: ReturnType<typeof vi.fn> };
+    const execute = createExecute({
+      defaultProvider: provider,
+      providers: new Map([["codex", provider]]),
+      registry: protocolRegistry({
+        r: {
+          providerName: "codex",
+          providerModel: "gpt-6-astra",
+          targetProviderProtocol: "openai_responses",
+        },
+      }),
+      breaker: breaker(),
+      catalog: new Map(),
+      now: clock(),
+      signal: new AbortController().signal,
+      nativeProtocolPassthroughEnabled: () => true,
+    });
+    const openaiCipher = `gAAAAA${"A".repeat(80)}`;
+    const deepseekCipher = "d8b79690-1120-4bab-b9cb-f053d8ced08a-0";
+    const plaintext = [
+      { type: "reasoning_text", text: "Let me check the current state of the repository..." },
+    ];
+    const carrier = {
+      protocol: "openai_responses" as const,
+      body: {
+        model: "gpt-6-astra",
+        store: false,
+        reasoning: { effort: "high", context: "all_turns" },
+        input: [
+          {
+            type: "reasoning",
+            id: "rs_openai",
+            summary: [],
+            encrypted_content: openaiCipher,
+            content: null,
+          },
+          {
+            type: "reasoning",
+            summary: [],
+            encrypted_content: deepseekCipher,
+            content: plaintext,
+          },
+          { type: "custom_tool_call", call_id: "call_1", name: "exec", input: "{}" },
+        ],
+      },
+      headers: {},
+      mutations: {},
+    };
+
+    const out = await execute(
+      plan(["r"]),
+      req({ protocol: "openai_responses", native_request: carrier }),
+    );
+
+    expect(out.final.status).toBe("ok");
+    const forwarded = provider.nativePassthrough.mock.calls[0]?.[0] as typeof carrier;
+    expect(forwarded.body.input).toEqual([
+      carrier.body.input[0],
+      { type: "reasoning", summary: [], content: plaintext },
+      carrier.body.input[2],
+    ]);
+    expect((forwarded.mutations as Record<string, unknown>).body_shims_applied).toEqual([
+      "foreign_encrypted_content_stripped",
+    ]);
+  });
+
   it("leaves a Codex passthrough body verbatim when `instructions` is already present", async () => {
     const responsesBody = {
       id: "resp_verbatim",

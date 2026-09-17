@@ -556,10 +556,14 @@ export function hoistResponsesInstructions(
 
 export type CodexResponsesNativeBodyFix =
   | "empty_reasoning_items_dropped"
+  | "foreign_encrypted_content_stripped"
   | "input_item_metadata_stripped"
   | "input_item_references_stripped"
   | "max_output_tokens_removed"
   | "temperature_removed";
+
+/** OpenAI/Codex Fernet-style reasoning blobs start with this prefix. */
+const OPENAI_ENCRYPTED_CONTENT_PREFIX = "gAAAAA";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -989,6 +993,42 @@ function hasUsefulReasoningPayload(item: Record<string, unknown>): boolean {
   return encrypted !== undefined && encrypted !== null;
 }
 
+function isForeignEncryptedContent(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    !value.startsWith(OPENAI_ENCRYPTED_CONTENT_PREFIX)
+  );
+}
+
+/**
+ * OpenAI cannot decrypt another provider's `encrypted_content` (DeepSeek
+ * echoes a UUID-like blob). Keep plaintext `reasoning_text` / summary.
+ */
+function stripForeignEncryptedReasoningItems(input: unknown): {
+  input: unknown;
+  stripped: boolean;
+} {
+  if (!Array.isArray(input)) return { input, stripped: false };
+  let stripped = false;
+  const next: unknown[] = [];
+  for (const item of input) {
+    if (
+      !isRecord(item) ||
+      item.type !== "reasoning" ||
+      !isForeignEncryptedContent(item.encrypted_content)
+    ) {
+      next.push(item);
+      continue;
+    }
+    stripped = true;
+    const cleaned = { ...item };
+    delete cleaned.encrypted_content;
+    if (hasUsefulReasoningPayload(cleaned)) next.push(cleaned);
+  }
+  return { input: stripped ? next : input, stripped };
+}
+
 function sanitizeStoreFalseInputItems(input: unknown): {
   input: unknown;
   referencesStripped: boolean;
@@ -1055,6 +1095,11 @@ export function sanitizeCodexResponsesNativeBody(body: Record<string, unknown>):
   if ("temperature" in next) {
     delete ensureCopy().temperature;
     fixes.add("temperature_removed");
+  }
+  const foreignReasoning = stripForeignEncryptedReasoningItems(next.input);
+  if (foreignReasoning.stripped) {
+    ensureCopy().input = foreignReasoning.input;
+    fixes.add("foreign_encrypted_content_stripped");
   }
   if (next.store === false && !bodyUsesResponsesLite(next)) {
     const sanitized = sanitizeStoreFalseInputItems(next.input);
@@ -1737,7 +1782,12 @@ function canonicalizeCodexNativeInput(
     ...(forceStore ? { store: false } : {}),
   };
   if (!forceStore) delete next.store;
-  let originalInput = Array.isArray(body.input) ? body.input : [];
+  const sourceInput = body.input;
+  let originalInput = Array.isArray(sourceInput) ? sourceInput : [];
+  if (Array.isArray(sourceInput)) {
+    originalInput = stripForeignEncryptedReasoningItems(originalInput).input as unknown[];
+    next.input = originalInput;
+  }
 
   if (useResponsesLite) {
     // Lite rejects plaintext reasoning replay. Keep its encrypted state and item

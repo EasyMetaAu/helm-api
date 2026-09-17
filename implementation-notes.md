@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-09-18 · Codex 回放前剥掉外源 encrypted_content（Provider / 协议互译，docs/05，原则 3/8）
+
+- **现象**：DeepSeek 成功后再打 `openai-codex/gpt-6-astra`，上游 400 `invalid_encrypted_content`。生产 `a8b37bb9`：历史 107 条 reasoning 里 106 条是 OpenAI 的 `gAAAAA…`，恰好 1 条是 DeepSeek 的 `d8b79690-…-0`，并带明文 `reasoning_text`。OpenAI 解不开别家密文。
+- **修复**：Codex 发送前（`sanitizeCodexResponsesNativeBody` + Lite canonicalizer）删掉**不以 `gAAAAA` 开头**的 `encrypted_content`，保留明文 `content` / `summary`。没有明文的外源 reasoning item 整条丢掉。OpenAI 自己的 blob 不动。不发明明文，不改 rung。
+- **为何只认 `gAAAAA`**：那是 OpenAI Fernet 密文的稳定前缀；DeepSeek 回的是 UUID 形。Lite 旧规则是「有密文就清空明文」——对这条 DeepSeek 项会把唯一可读的思考清掉、把外源密文留下，正好把 400 钉死，所以剥密文必须在那条规则之前。
+
 ## 2026-09-18 · 取消 Responses 首帧 15s 超时（Provider execution，docs/04/05，原则 5/8）
 
 - **现象**：v0.29.23 上线后，真实 Codex 请求在 `response.created` 之后、第一帧真实输出之前被切掉。Admin 显示「错误 15s 通道不可用」，`response_create_outcome_unknown` / `after_response_created_before_output`。15s 对思考或工具准备过短。
@@ -102,21 +108,9 @@
 - **意外发现**：`waitForOverloadRetry` 根本不读 `exhausted` 标志，只看 `attempt`。所以 `{attempt:0, exhausted:true}` 仍会 sleep —— 该标志只是给调用方读的**结果**，不是输入开关。我最初按标志写的测试因此断言失败，改为按 `attempt` 断言才是真实契约。
 - **测试**：`execute.test.ts` 原有那条 `it.each([false,true])` 正是钉住 bug 行为的（`exhausted` 时断言 `attempts` 只有 1 条），改为两种情况都必须推进到第二个候选；另在 `retry.test.ts` 补两条，把"耗尽后不再 sleep / 后来的候选不能重启退避表"这个 #840 的真实本意钉在它该在的那一层。
 
-## 2026-09-17 · 接入 DeepSeek 原生 Responses 透传（Provider / 协议互译，docs/02/05，原则 3/8）
-
-- **动机**：DeepSeek 上线了自己的 `/v1/responses`（<https://api-docs.deepseek.com/zh-cn/guides/responses_api>）。此前 `deepseek` provider 只是 `type: openai`（`openai_chat` 线路），Codex 请求打过去必须经 `Responses→IR→Chat` 翻译；而 DeepSeek 恰恰**要求把 reasoning 项原样回传**，翻译必然丢掉它们。新增 `deepseek-responses` provider（同 host、同 `DEEPSEEK_API_KEY`，`type: deepseek-responses` → `openai_responses`）后，Codex 走字节透传。
-- **实测（2026-09-17，真打 api.deepseek.com）**：逐条验证而非照抄文档。verbatim Codex body（instructions/tools/store/include/`custom_tool_call`/reasoning 回传）**200**；不支持的字段（`previous_response_id`/`metadata`/`service_tier`/`stream_options`/`context_management`）**静默忽略**；未知 item 类型（`mcp_call`/`local_shell_call`/`totally_unknown_item`）**200**。两个真会 400 的点：①tool-call 历史缺 reasoning → `The reasoning_text in the thinking mode must be passed back to the API.`（只带 `encrypted_content` 无明文 `content[]` 同样 400）；②回显的 `web_search_call`/`file_search_call` 被严格反序列化 → `missing field queries/action`（带不带 `action` 都 400）。
-- **不新增 profile 枚举**（关键权衡）：`execute.ts` 的 `needsCodexResponsesShim` 判定是 `nativeProtocolProfile !== "generic_openai_responses"` 取反，新枚举会让 DeepSeek 误吃 Codex shim（砍掉它明确支持的 `temperature`/`max_output_tokens`）。因此沿用 `generic_openai_responses`，另加一个**能力位** `ProviderClient.supportsResponsesNativeItems`，只在两个降级判定点（透传闸门 `targetIsGenericResponsesProfile` 与 `candidateGuardSkipReason`）放行。默认 absent ⇒ xAI/Grok 的降级行为**完全不变**。
-- **xAI 的降级对 DeepSeek 有害**：Grok 那套"带 Codex items 就降级去翻译"在这里会稳定产出 400（翻译丢 reasoning），所以 DeepSeek 必须反向选择 —— 字节透传是唯一可行路径，不是优化。
-- **两个语义拆成两个 flag**：`dropBuiltInSearchCallItems`（wire 怪癖，剥 `web_search_call`/`file_search_call`）与 `acceptsResponsesNativeItems`（能力声明）分开，避免把"要剥搜索项"和"能吃 Codex items"耦成一个开关。
-- **`serialize-client.ts` 同步转发新字段**：该文件只逐个复制方法，数据字段不列进去就会被悄悄丢掉（此前 `nativeProtocolProfile` 就这样导致多账号池判定失效）。
-- **capabilities**：`jsonOutput: schema` 已实测（Responses 的 `text.format` 支持 `json_schema`，与 Chat 端 `response_format` 不同，故与 `deepseek/*` 的 `object` 有别）。vision 只给 `deepseek-flash` 开：`deepseek-v4-pro` 传图不报错，但官方文档只列 flash 真正处理图片，**按 fail-closed 标 false**，避免 vision 请求被静默忽略图片。
-- **live 测试**：`packages/core/src/provider/live-deepseek-responses.test.ts` 默认 skip（`HELM_LIVE_DEEPSEEK=1` 开启），把上述四条真上游断言固化下来，CI 不会打真上游。
-- **~~已进 lane~~（当天即撤回，见上方 2026-09-17 条目：DeepSeek 不说 Codex 的工具协议，会静默失败）**：曾给 6 条 GPT family lane（`gpt-6-astra` / `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` / `gpt-5.4` / `gpt-5.4-mini`）各加一条 `deepseek-responses/*` rung，排在同族订阅 slug 之后、通用 lane 之前；pro 配高质量档，flash 配廉价档。理由同上：这些 lane 承载 Codex 流量，而通用链里的 grok（同协议但会被降级翻译）与 claude（跨协议常被 skip）对带 Codex items 的请求往往不可用，`deepseek-responses` 是配置中**唯一的静态同协议 rung**。
-- **连带效果（已确认并接受）**：`premium`/`balanced`/`economy` 的 primary 本身就是 `gpt-5.6-sol`/`terra`/`luna` 这三条 lane，所以 DeepSeek 自动出现在**每条通用 lane 的第二位**——订阅一挂，全部流量（不止 Codex）先落 DeepSeek，claude/grok 顺延。Lukin 明确接受：延迟与成本更优，且同协议兜底最可靠。`rules-routing.test.ts` 的 premium 链断言已同步。
-- **e2e 未受影响**：routing/protocol/smoke 共 37 例全过。e2e 用 `HELM_PROVIDER_BASE_URL` 把所有 provider 指向同一 mock，其入站是 openai_chat，`deepseek-responses` 因协议不匹配被跳过，故"无订阅时实际执行模型"的断言仍落在 `openrouter/deepseek-*` 上。
-
 ## 历史条目摘要（最新要点）
+
+- **2026-09-17 · 接入 DeepSeek 原生 Responses 透传**：新增 `deepseek-responses` 字节透传；不新增 profile 枚举，用 `acceptsResponsesNativeItems`。两个真 400：缺明文 reasoning、回显 search call。lane 当天加过又撤，后由工具翻译条目恢复。
 
 - **2026-09-17 · 记录上游回显的 safety_identifier**：记回显值而非发送值；流式取最后一个非空。Admin 放在「响应」面板。无迁移。
 
