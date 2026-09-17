@@ -282,13 +282,16 @@ deepseek-responses/deepseek-v4-pro:
   supportsStreaming: true
   maxContextTokens: 1048576
   maxOutputTokens: 384000
+# The ONLY DeepSeek model every GPT lane falls back to: it is the one that accepts
+# image input, and its 384K output ceiling matches v4-pro (the official pricing page
+# lists identical 1M context / 384K max output for both).
 deepseek-responses/deepseek-flash:
   supportsTools: true
   jsonOutput: schema
   supportsVision: true
   supportsStreaming: true
   maxContextTokens: 1048576
-  maxOutputTokens: 16384
+  maxOutputTokens: 384000
 # OpenRouter-hosted DeepSeek mirrors (lanes fallback f0d0cc6; data from
 # https://openrouter.ai/api/v1/models, 2026-06-04 — tools + structured_outputs
 # supported, text-only input). structured_outputs ⇒ jsonOutput: schema, so a strict

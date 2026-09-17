@@ -76,7 +76,7 @@ gpt-6-astra:
   purpose: Official GPT-6 Astra (paid OpenAI), degrades to premium
   primary: openai-codex/gpt-6-astra
   fallback:
-    - deepseek-responses/deepseek-v4-pro
+    - deepseek-responses/deepseek-flash
     - premium
   constraints:
     require_tools: false
@@ -216,8 +216,16 @@ claude-haiku:
 # chain — `grok` is same-protocol but gets downgraded to translation, and the Claude
 # rungs are cross-protocol and often skipped outright. `deepseek-responses` speaks
 # openai_responses natively, so the verbatim body is forwarded byte-for-byte; it is
-# the only STATIC (non-subscription) same-protocol rung in the config. Pro backs the
-# quality tiers, flash the cheap ones, mirroring each lane's own cost tier.
+# the only STATIC (non-subscription) same-protocol rung in the config.
+#
+# ALWAYS `deepseek-flash`, never `deepseek-v4-pro` — flash is strictly better as a
+# fallback, not merely cheaper (official pricing page, checked 2026-09-17):
+#   • image input: flash YES, v4-pro NO. A vision request skipped the v4-pro rung
+#     with `no_vision_support` in production, so the fallback silently did nothing.
+#   • price: ~3.4x cheaper in and out (idle 1/4 vs 4.5/13.5 CNY per MTok).
+#   • concurrency: 2500 vs 500.
+#   • identical 1M context / 384K max output, tools + thinking on both.
+# There is no tier where v4-pro wins, so no lane uses it.
 # GPT-5.6 family. The unsuffixed `gpt-5.6` alias routes to Sol upstream; Helm keeps
 # an explicit lane so pinned clients get a GPT-5.6-led chain before generic premium.
 "gpt-5.6":
@@ -234,7 +242,7 @@ claude-haiku:
   purpose: OpenAI GPT-5.6 Sol tier — flagship reasoning/coding
   primary: openai-codex/gpt-5.6-sol
   fallback:
-    - deepseek-responses/deepseek-v4-pro
+    - deepseek-responses/deepseek-flash
     - premium
   constraints:
     require_tools: false
@@ -245,7 +253,7 @@ claude-haiku:
   purpose: OpenAI GPT-5.6 Terra tier — balanced intelligence/cost
   primary: openai-codex/gpt-5.6-terra
   fallback:
-    - deepseek-responses/deepseek-v4-pro
+    - deepseek-responses/deepseek-flash
     - balanced
   constraints:
     require_tools: false
@@ -278,7 +286,7 @@ claude-haiku:
   primary: openai-codex/gpt-5.6-terra
   fallback:
     - openai-codex/gpt-5.4
-    - deepseek-responses/deepseek-v4-pro
+    - deepseek-responses/deepseek-flash
     - premium
   constraints:
     require_tools: false
