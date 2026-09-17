@@ -45,6 +45,13 @@ export const NativePassthroughMutationLedgerSchema = z
     provider_profile_applied: z.string().nullable().optional(),
     body_shims_applied: z.array(z.string()).optional(),
     stream_reframed: z.boolean().optional(),
+    // The Codex installation id THIS attempt actually sent upstream, plus the client's
+    // original when we rebound it. Opaque per-account identifiers, never message
+    // content or key material (Principle 7). `source` distinguishes a rebind from the
+    // client's own id riding through, and from a request that carried none.
+    codex_installation_id: z.string().optional(),
+    codex_installation_id_client: z.string().optional(),
+    codex_installation_id_source: z.enum(["rebound", "client", "absent"]).optional(),
     // Visual context compression telemetry. Body-free by design: reason strings,
     // counts, and flags only. Never store the imaged source text or PNG bytes here.
     visual_context_compression: z

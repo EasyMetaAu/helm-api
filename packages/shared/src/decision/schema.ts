@@ -293,6 +293,12 @@ export const DecisionRecordSchema = z.object({
   // Effective content-retention mode for this request. Unlike the mutable key/system
   // settings, this body-free marker makes historical Admin reads authoritative.
   request_content_mode: RequestContentModeSchema.optional(),
+  // The Codex installation id the SERVING attempt actually sent upstream, lifted from
+  // that attempt's ledger so the request detail header can show it without digging
+  // through provider_attempts. Per-attempt values stay authoritative (a fallback chain
+  // spans accounts, each with its own id). Optional: absent for non-Codex and legacy
+  // records, so nothing needs migrating.
+  codex_installation_id: z.string().optional(),
   // Total served latency = Σ provider_attempts.latency_ms (docs/07 latency).
   // `.default(0)` so legacy records validate; the builder computes the real sum.
   latency_total_ms: z.number().nonnegative().default(0),

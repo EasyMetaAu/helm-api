@@ -11,6 +11,9 @@ export interface NativePassthroughMutationLedger {
   provider_profile_applied?: string | null;
   body_shims_applied?: string[];
   stream_reframed?: boolean;
+  codex_installation_id?: string;
+  codex_installation_id_client?: string;
+  codex_installation_id_source?: "rebound" | "client" | "absent";
   [key: string]: unknown;
 }
 

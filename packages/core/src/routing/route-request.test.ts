@@ -1066,6 +1066,56 @@ describe("routeRequest — orchestration", () => {
     expect(rec.cost_breakdown.total_usd).toBeCloseTo(0.00403);
     expect(rec.key_prefix).toBe("helm_live_ab12");
   });
+
+  // A fallback chain spans ACCOUNTS, and each account binds its own installation id.
+  // Every attempt keeps the id it actually sent; the top-level field names the one the
+  // SERVING attempt used, so the request detail header is never the failed account's id.
+  it("lifts the serving attempt's Codex installation id to the decision record", async () => {
+    const d = deps({
+      execute: vi.fn(
+        async (): Promise<ExecuteOutcome> => ({
+          attempts: [
+            {
+              alias: "coder_a",
+              skipped: false,
+              skip_reason: null,
+              status: "error",
+              error_class: "upstream_error",
+              latency_ms: 300,
+              cost_usd: null,
+              error_detail: null,
+              request_mutations: { codex_installation_id: "aaaaaaaa-1111-4111-8111-111111111111" },
+            },
+            {
+              alias: "coder_b",
+              skipped: false,
+              skip_reason: null,
+              status: "ok",
+              error_class: null,
+              latency_ms: 950,
+              cost_usd: 0.004,
+              error_detail: null,
+              request_mutations: { codex_installation_id: "bbbbbbbb-2222-4222-8222-222222222222" },
+            },
+          ],
+          final: { status: "ok", alias: "coder_b", providerModel: "coder-b-model" },
+          body: { id: "x", choices: [] },
+          stream: null,
+        }),
+      ),
+    });
+    const rec = (await routeRequest(req(), d)).decision;
+    expect(rec.codex_installation_id).toBe("bbbbbbbb-2222-4222-8222-222222222222");
+    // The failed account's id is NOT lost — it stays on its own attempt row.
+    expect(rec.provider_attempts[0]?.request_mutations?.codex_installation_id).toBe(
+      "aaaaaaaa-1111-4111-8111-111111111111",
+    );
+  });
+
+  it("omits the installation id when no attempt recorded one", async () => {
+    const rec = (await routeRequest(req(), deps())).decision;
+    expect(rec.codex_installation_id).toBeUndefined();
+  });
 });
 
 describe("routeRequest — per-key blocked models", () => {

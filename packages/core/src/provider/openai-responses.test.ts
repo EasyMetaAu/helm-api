@@ -2890,6 +2890,47 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
     expect(carrier.mutations).toMatchObject({
       body_shims_applied: expect.arrayContaining(["codex_installation_id_rebound"]),
     });
+    // The id that actually went upstream is RECORDED, not just flagged: an account
+    // under review must be answerable with the exact value, long after the request.
+    expect(carrier.mutations).toMatchObject({
+      codex_installation_id: installed,
+      codex_installation_id_client: clientInstall,
+      codex_installation_id_source: "rebound",
+    });
+  });
+
+  // No rebinding happened, but the id still rode upstream — record it, otherwise a
+  // request served with the CLIENT's machine-wide id looks identical to one that
+  // carried no id at all.
+  it("records the client installation id when no per-account id is bound", async () => {
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+      },
+      fetch: (async () =>
+        sseStreamResponse([
+          'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+        ])) as unknown as typeof fetch,
+    });
+    const clientInstall = "25ae6219-e425-402f-b26b-b784b7f9ce5b";
+    const body = nativeStreamBody();
+    const carrier = {
+      protocol: "openai_responses" as const,
+      body,
+      raw_body: JSON.stringify(body),
+      headers: { "x-codex-installation-id": clientInstall },
+      mutations: {},
+    };
+
+    for await (const _ of client.nativePassthroughStream?.(carrier) ?? []) {
+      // drain
+    }
+
+    expect(carrier.mutations).toMatchObject({
+      codex_installation_id: clientInstall,
+      codex_installation_id_source: "client",
+    });
   });
 
   it("leaves the request untouched when the client sends no installation id", async () => {
@@ -2924,6 +2965,37 @@ describe("createCodexResponsesClient — nativePassthroughStream", () => {
 
     expect(seen.get("x-codex-installation-id")).toBeNull();
     expect(sentBody).toBe(rawBody);
+  });
+
+  // "Nothing was sent" must be DISTINGUISHABLE from "we never looked": record the
+  // absence explicitly so an operator can tell the rebinding simply had no input.
+  it("records absent when the request carries no installation id at all", async () => {
+    const client = createCodexResponsesClient({
+      config: {
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        getAuthHeader: async () => `Bearer ${jwt("acct")}`,
+        installationId: "11111111-2222-4333-8444-555555555555",
+      },
+      fetch: (async () =>
+        sseStreamResponse([
+          'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","usage":{}}}\n\n',
+        ])) as unknown as typeof fetch,
+    });
+    const body = nativeStreamBody();
+    const carrier = {
+      protocol: "openai_responses" as const,
+      body,
+      raw_body: JSON.stringify(body),
+      headers: {},
+      mutations: {} as Record<string, unknown>,
+    };
+
+    for await (const _ of client.nativePassthroughStream?.(carrier) ?? []) {
+      // drain
+    }
+
+    expect(carrier.mutations.codex_installation_id_source).toBe("absent");
+    expect(carrier.mutations.codex_installation_id).toBeUndefined();
   });
 });
 
