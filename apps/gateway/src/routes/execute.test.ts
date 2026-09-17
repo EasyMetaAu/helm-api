@@ -6757,7 +6757,7 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
   it.each([
     false,
     true,
-  ])("respects shared overload exhaustion before model fallback: %s", async (exhausted) => {
+  ])("advances to the next model on overload, budget exhausted: %s", async (exhausted) => {
     const output = 'data: {"type":"response.output_text.delta","delta":"recovered"}\n\n';
     const head = {
       chatCompletion: vi.fn(),
@@ -6812,12 +6812,13 @@ describe("createExecute — native protocol STREAMING passthrough (#217 Phase 2)
         }),
       }),
     );
-    if (exhausted) {
-      expect(out.final.status).toBe("error");
-      expect(out.attempts).toHaveLength(1);
-      expect(tail.nativePassthroughStream).not.toHaveBeenCalled();
-      return;
-    }
+    // An exhausted overload budget means "stop WAITING on overloads", NOT "stop
+    // trying other candidates". The next candidate is a DIFFERENT upstream, so the
+    // head's overload says nothing about it — the chain must still advance, it just
+    // must not sleep on another backoff (that is enforced by waitForOverloadRetry
+    // returning false, not by abandoning the chain). Production evidence: a Codex
+    // in-band `server_is_overloaded` stranded 10 of 15 requests on a 12-candidate
+    // chain with fallback_count 0, never reaching the static DeepSeek rung.
     expect(out.attempts.map((attempt) => attempt.status)).toEqual(["error", "ok"]);
     expect(out.final).toMatchObject({ status: "ok", alias: "b" });
     expect(tail.nativePassthroughStream).toHaveBeenCalledTimes(1);

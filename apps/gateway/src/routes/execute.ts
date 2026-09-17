@@ -2518,8 +2518,15 @@ export function createExecute(deps: ExecuteAdapterDeps) {
             error_detail: errorDetailOf(err),
             ...attemptTelemetry,
           });
-          // Do not restart the exhausted overload budget on another model.
-          if (overloadRetry.exhausted) break;
+          // An EXHAUSTED overload budget deliberately does NOT stop the chain. The
+          // budget bounds how long ONE request may SLEEP on overload backoffs, and
+          // that bound is already enforced where it belongs: waitForOverloadRetry
+          // returns false once spent, so no further candidate can wait. Advancement
+          // is a separate question — the next candidate is a different upstream (and
+          // often a different provider entirely), so the head's overload says nothing
+          // about whether it can serve. Stopping here stranded 10 of 15 overloaded
+          // production requests on a 12-candidate chain with fallback_count 0, never
+          // reaching the static same-protocol rung that existed precisely for this.
         }
       } finally {
         // Release a HALF_OPEN probe lock on any path that allowed the attempt but
