@@ -191,7 +191,7 @@
         data-testid="test-response"
       >{response}{#if running}<span class="animate-pulse">▋</span>{/if}{#if !response && !running}<span class="text-ink-muted">{$t('Waiting for response…')}</span>{/if}</div>
       {#if errorMsg}
-        <p class="alert-error" role="alert">{errorMsg}</p>
+        <p class="alert-error [overflow-wrap:anywhere]" role="alert">{errorMsg}</p>
       {/if}
       {#if errorDetail}
         <!-- Verbatim upstream payload: the only way to tell a ban from a quota stop
