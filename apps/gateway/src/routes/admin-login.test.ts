@@ -33,6 +33,7 @@ describe("Admin login page", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("Content-Type")).toContain("text/html");
     expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("Referrer-Policy")).toBe("same-origin");
     const csp = res.headers.get("Content-Security-Policy") ?? "";
     expect(csp).toContain("default-src 'none'");
     expect(csp).not.toContain("script-src");
@@ -98,6 +99,7 @@ describe("Admin login page", () => {
       form({ username: "admin", password: "wrong-secret", next: "/admin" }),
     );
     expect(res.status).toBe(401);
+    expect(res.headers.get("Referrer-Policy")).toBe("same-origin");
     expect(res.headers.get("Set-Cookie")).toBeNull();
     expect(res.headers.get("WWW-Authenticate")).toBeNull();
     const html = await res.text();
@@ -173,6 +175,12 @@ describe("Admin login page", () => {
     };
     const rejected = await appWithLogin().request("/admin/login", crossSiteRequest);
     expect(rejected.status).toBe(403);
+
+    const missingMetadata = form({ username: "admin", password: AUTH.password ?? "" });
+    missingMetadata.headers = { ...missingMetadata.headers, Origin: "null" };
+    const unproven = await appWithLogin().request("/admin/login", missingMetadata);
+    expect(unproven.status).toBe(403);
+    expect(unproven.headers.get("Set-Cookie")).toBeNull();
   });
 
   it("prevents open or non-Admin redirects and clears the cookie on logout", async () => {
