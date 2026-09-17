@@ -7,6 +7,27 @@
 
 ---
 
+## 2026-09-17 · DSML 泄漏修复补完：工具声明在 `additional_tools` 里，v0.29.21 的修复是 no-op（Provider / 协议互译，docs/05，原则 3/8）
+
+- **v0.29.21 上线后仍然泄漏**（Lukin 在 21:32 复现，box 21:28:29 启动，新代码确实在跑）。遥测证实那轮 `gpt-6-astra` 过载后落到 `deepseek-flash`，而 attempt 的 `mutations` 是**空的** —— 翻译一次都没触发。
+- **漏掉的地方**：翻译只扫请求**顶层 `tools`**。抓下真实上行体（box request `0e2ad9d9`）才看见，Codex code-mode 客户端**根本不在那里声明工具**：
+  ```
+  tools: null                              ← 顶层是空的
+  input: [
+    { type: "additional_tools", role: "developer", tools: [
+        { type: "namespace", name: "functions", tools: [ {type:"custom", name:"exec", format:{lark…}}, … ] },
+        { type: "namespace", name: "clock",     tools: [ … ] },   // 共 4 个 namespace / 13 个工具
+    ]},
+    …36 条 custom_tool_call + 36 条 output
+  ]
+  ```
+  DeepSeek 把 `additional_tools` 当未知 item **静默忽略**，所以它看到的是"36 条对未声明工具的调用"——正是触发 DSML 退化的那个状态。
+- **只翻译 `additional_tools` 内部不够**（实测 3/3 仍泄漏）：既然上游压根不读这个 item，改写它等于没改。**必须把工具提升到顶层 `tools`**。实测 hoist 后 3/3 干净。
+- **hoist 所有工具，不只翻译的那个**：只提 `exec` 会让它的 namespace 同伴（`wait`/`sleep`/`send_message`…）继续不可见，而历史里也replay 了对它们的调用。保留原 `additional_tools` item 不删（上游忽略它，没理由动客户端数据）。
+- **去重时机有讲究**：flatten 阶段**不能**按名去重，否则 `custom exec` + `function exec` 的冲突会被提前抹掉，导致本该跳过的翻译又跑起来；去重挪到改写阶段（上游拒绝重名）。
+- **上游校验每个 hoist 上去的 schema**：`parameters: {}` 直接 400（`schema must be a JSON Schema of 'type: "object"'`）；省略 `parameters` 或给合法空对象都可以。这条是写 live 夹具时踩出来的，真实 Codex 工具带的是合法 schema。
+- **我的验证方法第二次骗了我**：上一轮我"端到端验证通过"用的是自己构造的顶层 `tools` body —— 形状不对，所以测出来是绿的。**教训升级为硬规则：涉及客户端 body 形状的修复，夹具必须从 `request_payloads` 抓真实上行体，不能手写。** 本次 live 用例 `CODE_MODE_ADDITIONAL_TOOLS_BODY` 就是按抓下来的结构写的（含 lark `format`）。
+
 ## 2026-09-17 · DSML 泄漏的真根因与修复：翻译不被支持的 custom 工具（Provider / 协议互译，docs/05，原则 3/8）
 
 - **推翻当天早些时候的结论**（见下一条）。那条笔记把 DSML 泄漏判成"模型不会用 Codex 的工具协议"并撤了 lane rung。**判断错了**，因为只测了单轮，没重放真实长历史。
@@ -103,15 +124,9 @@
 - gpt-5.5 无独立 quota limit family（Spark 有 `codex_spark` / `-codex-spark` 后缀），故 `isRetiredOpenAICodexLimit` 与 admin `.svelte` 均无需改动。
 - 顺带修正 docs/04 的 lane 计数（13→12 vendor-family；总数标称 22 实为 26，gpt-6-astra / grok / media lane 加入后未更新）。
 
-## 2026-09-16 · Codex installation id 按账号重绑（Provider / Responses，docs/04/07，原则 7）
-
-- 查证 Codex 上游实现（`codex-rs/core/src/installation_id.rs`）：`installation_id` 是持久化在 `$CODEX_HOME/installation_id` 的**纯随机 UUID v4**，无任何派生规则——不掺账号、不掺硬件、与 `session_id`/`thread_id` 无关。它标识**安装**而非账号，所以同一台机器上的多个 ChatGPT 账号此前共用一个指纹经 Helm 出网。
-- 改为每账号一个：复用既有 `stableSessionId` 的确定性派生思路，新增 label `codex-installation`，`sha256(encKey ‖ "codex-installation:<provider>:<account>")` 前 16 字节整成 UUID v4 形状。永不轮换、跨重启稳定、被 at-rest 密钥加盐、无需回写 DB。
-- 客户端在**三处**携带该 id，必须一起重绑，否则 header 改了而 body 仍泄漏真实值：HTTP header `x-codex-installation-id`、`client_metadata` 同名 key、以及 `x-codex-turn-metadata` JSON 内的 `installation_id` 字段（header 与 `client_metadata` 两份都要）。
-- 边界：客户端**未携带**该 id 时完全不改写（保留 raw body，不凭空生成）；turn-metadata 非合法 JSON 时原样透传。上游 `prompt_cache_key` 取自 `session_id` 而非 installation id，故本改动不影响 prompt 缓存亲和性。
-- 上游官方只把该 id 放在 body（`compatibility_headers()` 不发它，真 header 仅用于 remote-control WebSocket 配对），但生产抓包显示实际流量 header 里确实带了，因此三处都覆盖。
-
 ## 历史条目摘要（最新要点）
+
+- **2026-09-16 · Codex installation id 按账号重绑**：上游 `installation_id` 是 `$CODEX_HOME/installation_id` 里的纯随机 UUID v4（标识安装而非账号），同机多账号此前共用一个指纹出网。改为每账号确定性派生（`sha256(encKey ‖ "codex-installation:<provider>:<account>")` 前 16 字节整成 UUID v4 形状，永不轮换、免回写 DB）。**三处**必须一起重绑：header `x-codex-installation-id`、`client_metadata` 同名 key、`x-codex-turn-metadata` JSON 内的 `installation_id`——只改 header 则 body 仍泄漏真值。客户端未携带时完全不改写；turn-metadata 非法 JSON 原样透传；`prompt_cache_key` 取自 `session_id`，缓存亲和性不受影响。
 
 - **2026-09-10 · 失败请求保留最终尝试的订阅账号**：`serving_account` 成功时仍是实际服务账号；全链路失败时改记最后一次真正发起上游请求的订阅账号，便于定位账号级故障。候选在选账号前就被熔断/能力门禁跳过则保持 `null`，不伪造分配结果；订阅账号失败后又试了其他 provider 时旧账号不会被误标。未新增 schema、迁移或正文记录。
 

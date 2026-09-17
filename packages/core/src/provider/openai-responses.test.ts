@@ -6360,6 +6360,123 @@ describe("createGenericOpenAIResponsesClient — native passthrough", () => {
       });
     });
 
+    // A real Codex code-mode client does NOT declare its tools in the top-level
+    // `tools` field. It sends an `additional_tools` INPUT item holding `namespace`
+    // groups, each with its own nested tool list (verified against a captured
+    // production body: top-level `tools` was absent, 13 tools lived under 4
+    // namespaces). DeepSeek ignores that unknown item entirely, so the tools are
+    // invisible to it — which is exactly the "calls to an undeclared tool" state
+    // that makes the model leak DSML. Hoisting every nested tool into a flat
+    // top-level `tools` (translating the unsupported custom ones) fixes it;
+    // verified live 3/3 clean on the transcript that used to leak.
+    it("hoists tools out of an additional_tools item into a flat top-level tools list", async () => {
+      let seen: Record<string, unknown> = {};
+      const client = translatingClient((body) => {
+        seen = body;
+        return jsonResponse({ id: "r", object: "response", status: "completed", output: [] });
+      });
+
+      const additionalTools = {
+        type: "additional_tools",
+        id: "at_1",
+        role: "developer",
+        tools: [
+          {
+            type: "namespace",
+            name: "functions",
+            description: "",
+            tools: [EXEC_CUSTOM, { type: "function", name: "wait", parameters: {} }],
+          },
+          {
+            type: "namespace",
+            name: "clock",
+            tools: [{ type: "function", name: "sleep", parameters: {} }],
+          },
+        ],
+      };
+
+      await client.nativePassthrough?.({
+        model: "deepseek-flash",
+        input: [
+          additionalTools,
+          { type: "custom_tool_call", id: "c1", call_id: "call_1", name: "exec", input: "ls" },
+          { type: "custom_tool_call_output", call_id: "call_1", output: "a.txt" },
+        ],
+      });
+
+      // Every nested tool is hoisted flat, with `exec` translated to a function tool.
+      expect(seen.tools).toEqual([
+        {
+          type: "function",
+          name: "exec",
+          description: "Run JS.",
+          parameters: {
+            type: "object",
+            properties: { input: { type: "string" } },
+            required: ["input"],
+            additionalProperties: false,
+          },
+        },
+        { type: "function", name: "wait", parameters: {} },
+        { type: "function", name: "sleep", parameters: {} },
+      ]);
+      // The original item is left in place (DeepSeek ignores it) and the replayed
+      // calls are rewritten to match the now-declared function tool.
+      expect(seen.input).toEqual([
+        additionalTools,
+        {
+          type: "function_call",
+          id: "c1",
+          call_id: "call_1",
+          name: "exec",
+          arguments: JSON.stringify({ input: "ls" }),
+        },
+        { type: "function_call_output", call_id: "call_1", output: "a.txt" },
+      ]);
+    });
+
+    it("merges hoisted tools after the ones already declared at the top level", async () => {
+      let seen: Record<string, unknown> = {};
+      const client = translatingClient((body) => {
+        seen = body;
+        return jsonResponse({ id: "r", object: "response", status: "completed", output: [] });
+      });
+
+      await client.nativePassthrough?.({
+        model: "deepseek-flash",
+        tools: [{ type: "function", name: "calc", parameters: {} }],
+        input: [
+          {
+            type: "additional_tools",
+            tools: [{ type: "namespace", name: "n", tools: [EXEC_CUSTOM] }],
+          },
+        ],
+      });
+
+      expect((seen.tools as Record<string, unknown>[]).map((t) => t.name)).toEqual([
+        "calc",
+        "exec",
+      ]);
+    });
+
+    it("leaves a body with no additional_tools and no custom tools untouched", async () => {
+      let seen: Record<string, unknown> = {};
+      const client = translatingClient((body) => {
+        seen = body;
+        return jsonResponse({ id: "r", object: "response", status: "completed", output: [] });
+      });
+
+      const tools = [{ type: "function", name: "calc", parameters: {} }];
+      const input = [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+      ];
+      await client.nativePassthrough?.({ model: "deepseek-flash", tools, input });
+
+      // No hoist, no rewrite: an ordinary body must not be reshaped.
+      expect(seen.tools).toEqual(tools);
+      expect(seen.input).toEqual(input);
+    });
+
     it("skips a custom tool whose translated name would collide with a function tool", async () => {
       // DeepSeek rejects duplicate tool names ("Tool names must be unique."), so
       // rewriting `custom exec` next to an existing `function exec` would swap the

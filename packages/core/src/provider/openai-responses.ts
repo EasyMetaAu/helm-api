@@ -563,6 +563,41 @@ const DEEPSEEK_SUPPORTED_CUSTOM_TOOL = "apply_patch";
 const TRANSLATED_CUSTOM_TOOL_INPUT_KEY = "input";
 
 /**
+ * Every tool a request declares, flattened in declaration order.
+ *
+ * Tools reach a Responses body through TWO channels, and a Codex code-mode client
+ * uses only the second: the top-level `tools` field, and an `additional_tools`
+ * INPUT item whose `tools` hold `namespace` groups with their own nested lists.
+ * DeepSeek reads only the first — the item is an unknown type it silently ignores
+ * — so a code-mode body arrives with NO tools visible at all.
+ */
+function collectDeclaredTools(body: Record<string, unknown>): Record<string, unknown>[] {
+  const flat: Record<string, unknown>[] = [];
+  const visit = (tools: unknown): void => {
+    if (!Array.isArray(tools)) return;
+    for (const tool of tools) {
+      if (!isRecord(tool)) continue;
+      // A grouping entry (`namespace`) carries its members in a nested `tools`.
+      if (Array.isArray(tool.tools)) {
+        visit(tool.tools);
+        continue;
+      }
+      if (typeof tool.name !== "string") continue;
+      flat.push(tool);
+    }
+  };
+  visit(body.tools);
+  if (Array.isArray(body.input)) {
+    for (const item of body.input) {
+      if (isRecord(item) && item.type === "additional_tools") visit(item.tools);
+    }
+  }
+  // Duplicates are NOT dropped here: a name declared twice is what
+  // `unsupportedCustomToolNames` needs to see in order to refuse the rewrite.
+  return flat;
+}
+
+/**
  * Names of the custom tools that must be rewritten as function tools, i.e. every
  * declared custom tool the upstream would reject. An empty set means no rewrite.
  *
@@ -571,16 +606,15 @@ const TRANSLATED_CUSTOM_TOOL_INPUT_KEY = "input";
  * upstream's accurate complaint ("Unsupported custom tool: 'exec'.") with a
  * misleading one. Neither request can succeed, so the honest error wins.
  */
-function unsupportedCustomToolNames(tools: unknown): Set<string> {
+function unsupportedCustomToolNames(tools: Record<string, unknown>[]): Set<string> {
   const names = new Set<string>();
-  if (!Array.isArray(tools)) return names;
   const functionToolNames = new Set<string>();
   for (const tool of tools) {
-    if (!isRecord(tool) || tool.type === "custom") continue;
+    if (tool.type === "custom") continue;
     if (typeof tool.name === "string") functionToolNames.add(tool.name);
   }
   for (const tool of tools) {
-    if (!isRecord(tool) || tool.type !== "custom") continue;
+    if (tool.type !== "custom") continue;
     const name = tool.name;
     if (typeof name !== "string") continue;
     if (name === DEEPSEEK_SUPPORTED_CUSTOM_TOOL || functionToolNames.has(name)) continue;
@@ -589,14 +623,26 @@ function unsupportedCustomToolNames(tools: unknown): Set<string> {
   return names;
 }
 
-/** Rewrites the unsupported custom tools into single-string function tools. */
-function translateCustomToolDeclarations(tools: unknown, translated: Set<string>): unknown {
-  if (!Array.isArray(tools)) return tools;
-  return tools.map((tool) => {
-    if (!isRecord(tool) || tool.type !== "custom") return tool;
-    if (typeof tool.name !== "string" || !translated.has(tool.name)) return tool;
+/**
+ * Rewrites the unsupported custom tools into single-string function tools, keeping
+ * the first declaration of each name (the upstream rejects duplicates outright).
+ */
+function translateCustomToolDeclarations(
+  tools: Record<string, unknown>[],
+  translated: Set<string>,
+): Record<string, unknown>[] {
+  const emitted = new Set<string>();
+  const out: Record<string, unknown>[] = [];
+  for (const tool of tools) {
+    const name = tool.name;
+    if (typeof name !== "string" || emitted.has(name)) continue;
+    emitted.add(name);
+    if (tool.type !== "custom" || !translated.has(name)) {
+      out.push(tool);
+      continue;
+    }
     const { type: _type, format: _format, ...rest } = tool;
-    return {
+    out.push({
       ...rest,
       type: "function",
       parameters: {
@@ -605,8 +651,9 @@ function translateCustomToolDeclarations(tools: unknown, translated: Set<string>
         required: [TRANSLATED_CUSTOM_TOOL_INPUT_KEY],
         additionalProperties: false,
       },
-    };
-  });
+    });
+  }
+  return out;
 }
 
 /**
@@ -3427,7 +3474,8 @@ export function createGenericOpenAIResponsesClient(
   function translatedCustomToolNames(body: NativePassthroughInput): Set<string> {
     if (requestContract?.translateUnsupportedCustomTools !== true) return new Set<string>();
     const source = isNativePassthroughCarrier(body) ? body.body : body;
-    return unsupportedCustomToolNames(isRecord(source) ? source.tools : undefined);
+    if (!isRecord(source)) return new Set<string>();
+    return unsupportedCustomToolNames(collectDeclaredTools(source));
   }
 
   function applyResponsesRequestContract(body: NativePassthroughInput): NativePassthroughInput {
@@ -3518,12 +3566,22 @@ export function createGenericOpenAIResponsesClient(
       }
     }
     let customToolsTranslated = false;
+    let customToolsHoisted = false;
     if (contract.translateUnsupportedCustomTools === true) {
-      const translated = unsupportedCustomToolNames(next.tools);
+      const declared = collectDeclaredTools(next);
+      const translated = unsupportedCustomToolNames(declared);
       if (translated.size > 0) {
-        next.tools = translateCustomToolDeclarations(next.tools, translated);
+        // Hoist EVERY declared tool to the top level, not just the translated one:
+        // the tools a code-mode client sends live inside an `additional_tools` item
+        // that DeepSeek ignores, so leaving the siblings there would declare `exec`
+        // alone while the transcript also replays calls to its namespace peers.
+        // The original item is left in place — the upstream ignores it, and dropping
+        // it would discard client data we have no reason to touch.
+        next.tools = translateCustomToolDeclarations(declared, translated);
         next.input = translateCustomToolCallHistory(next.input, translated);
         customToolsTranslated = true;
+        customToolsHoisted =
+          declared.length > (Array.isArray(source.tools) ? source.tools.length : 0);
       }
     }
     const instructionShims: string[] = [];
@@ -3544,6 +3602,7 @@ export function createGenericOpenAIResponsesClient(
       ...(maxOutputTokensAdded ? ["generic_responses_max_output_tokens_default"] : []),
       ...(searchCallItemsDropped ? ["generic_responses_search_call_items_dropped"] : []),
       ...(customToolsTranslated ? ["generic_responses_custom_tools_translated"] : []),
+      ...(customToolsHoisted ? ["generic_responses_additional_tools_hoisted"] : []),
       ...instructionShims,
     ]);
     return carrier;

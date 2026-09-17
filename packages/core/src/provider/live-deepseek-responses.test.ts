@@ -244,6 +244,89 @@ describe.skipIf(!liveEnabled)("live DeepSeek Responses passthrough", () => {
     expect(joined).not.toContain("DSML");
   });
 
+  // The REAL production shape, captured from a leaking request (box request
+  // 0e2ad9d9): a Codex code-mode client declares NOTHING in the top-level `tools`
+  // field — its tools live inside an `additional_tools` input item, grouped under
+  // `namespace` entries, and the custom `exec` even carries a lark grammar in
+  // `format`. DeepSeek ignores that item wholesale, so before the hoist the model
+  // saw 36 replayed calls to a tool it had never been shown. This is the case the
+  // first fix MISSED: it only scanned top-level `tools`, so it was a silent no-op
+  // in production while every synthetic test passed.
+  const CODE_MODE_ADDITIONAL_TOOLS_BODY = {
+    model: "deepseek-flash",
+    instructions: "You are Codex, based on GPT-5.",
+    store: false,
+    // NOTE: no top-level `tools` key at all — exactly as captured.
+    input: [
+      {
+        type: "additional_tools",
+        id: "at_1",
+        role: "developer",
+        tools: [
+          {
+            type: "namespace",
+            name: "functions",
+            description: "",
+            tools: [
+              {
+                type: "custom",
+                name: "exec",
+                description: "Run JavaScript to orchestrate tool calls via `await tools.x(...)`.",
+                format: { type: "grammar", syntax: "lark", definition: "start: /[\\s\\S]+/" },
+              },
+              // A real sibling tool: DeepSeek validates every hoisted schema, so
+              // `parameters` must be a proper JSON Schema object (`{}` is a 400).
+              {
+                type: "function",
+                name: "wait",
+                description: "Wait.",
+                parameters: { type: "object", properties: {}, additionalProperties: false },
+              },
+            ],
+          },
+          {
+            type: "namespace",
+            name: "clock",
+            tools: [
+              {
+                type: "function",
+                name: "sleep",
+                description: "Sleep.",
+                parameters: { type: "object", properties: {}, additionalProperties: false },
+              },
+            ],
+          },
+        ],
+      },
+      {
+        type: "custom_tool_call",
+        id: "ctc_1",
+        call_id: "call_1",
+        name: "exec",
+        input: 'const r = await tools.exec_command({cmd:"pwd"}); text(r.output);\n',
+      },
+      { type: "custom_tool_call_output", call_id: "call_1", output: "/tmp" },
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Now list the files with ls -la." }],
+      },
+    ],
+  };
+
+  test("serves a code-mode body whose tools live in additional_tools, no DSML leak", async () => {
+    const res = (await translatingClient().nativePassthrough?.(
+      structuredClone(CODE_MODE_ADDITIONAL_TOOLS_BODY),
+    )) as { status: string; output: Record<string, unknown>[] };
+
+    expect(res.status).toBe("completed");
+    const call = res.output.find((item) => item.type === "custom_tool_call");
+    expect(call?.name).toBe("exec");
+    const text = JSON.stringify(res.output);
+    expect(text).not.toContain("DSML");
+    expect(text).not.toContain("｜");
+  });
+
   test("streams native SSE frames verbatim", async () => {
     const frames: string[] = [];
     const stream = client(true).nativePassthroughStream?.({
