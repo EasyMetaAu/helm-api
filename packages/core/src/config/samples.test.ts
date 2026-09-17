@@ -158,34 +158,23 @@ describe("checked-in config samples", () => {
     if (lanes === undefined) throw new Error("config/lanes.yaml must load into config.lanes");
     expect(lanes["gpt-5.6"]?.primary).toBe("openai-codex/gpt-5.6-sol");
     expect(lanes["gpt-5.6"]?.fallback).toEqual(["gpt-5.6-sol"]);
-    // Every GPT family lane carries a same-protocol DeepSeek Responses fallback
-    // BEFORE the generic lane: a Codex-origin body reaches it via byte passthrough,
-    // whereas the generic chain's grok (downgrades to translate) / claude
-    // (cross-protocol) candidates are frequently unusable for that request shape.
-    // ALWAYS deepseek-flash, never v4-pro: flash is the strictly better fallback —
-    // it is the only one of the two that accepts image input (v4-pro made a vision
-    // request skip the rung with `no_vision_support`), it is ~3.4x cheaper, and it
-    // has 5x the concurrency limit, at identical 1M context / 384K max output.
+    // NO `deepseek-responses` rung in ANY lane (reverted 2026-09-17). It was added as
+    // a same-protocol static fallback, but production showed DeepSeek does not speak
+    // the Codex TOOL protocol: instead of `function_call` items it emits its own DSML
+    // markers as plain `output_text`, so Codex renders the tool call as chat text and
+    // silently executes NOTHING. A 200 that looks like work but did none is worse than
+    // a 502 the client would retry — these lanes serve tool-heavy Codex traffic, so the
+    // rung is removed. The provider itself is kept for explicit custom-model use.
     expect(lanes["gpt-5.6-sol"]?.primary).toBe("openai-codex/gpt-5.6-sol");
-    expect(lanes["gpt-5.6-sol"]?.fallback).toEqual([
-      "deepseek-responses/deepseek-flash",
-      "premium",
-    ]);
+    expect(lanes["gpt-5.6-sol"]?.fallback).toEqual(["premium"]);
     expect(lanes["gpt-5.6-terra"]?.primary).toBe("openai-codex/gpt-5.6-terra");
-    expect(lanes["gpt-5.6-terra"]?.fallback).toEqual([
-      "deepseek-responses/deepseek-flash",
-      "balanced",
-    ]);
+    expect(lanes["gpt-5.6-terra"]?.fallback).toEqual(["balanced"]);
     expect(lanes["gpt-5.6-luna"]?.primary).toBe("openai-codex/gpt-5.6-luna");
-    expect(lanes["gpt-5.6-luna"]?.fallback).toEqual([
-      "deepseek-responses/deepseek-flash",
-      "economy",
-    ]);
+    expect(lanes["gpt-5.6-luna"]?.fallback).toEqual(["economy"]);
     expect(lanes["gpt-6-astra"]?.primary).toBe("openai-codex/gpt-6-astra");
-    expect(lanes["gpt-6-astra"]?.fallback).toEqual([
-      "deepseek-responses/deepseek-flash",
-      "premium",
-    ]);
+    expect(lanes["gpt-6-astra"]?.fallback).toEqual(["premium"]);
+    // Defense in depth: no lane anywhere may reintroduce the rung by accident.
+    expect(JSON.stringify(lanes)).not.toContain("deepseek-responses/");
     expect(lanes["gpt-image"]).toMatchObject({
       primary: "openai-codex/gpt-image-2",
       fallback: [],
@@ -202,20 +191,10 @@ describe("checked-in config samples", () => {
     // `gpt-5*` glob onto `premium` instead of 400ing. Its pricing/capabilities
     // entries deliberately survive for historical cost reprice (see load.test.ts).
     expect(lanes).not.toHaveProperty("gpt-5.5");
-    // The DeepSeek rung sits AFTER the sibling subscription slug (still an OpenAI
-    // model, so it is the better degradation) and BEFORE the generic lane.
     expect(lanes["gpt-5.4"]?.primary).toBe("openai-codex/gpt-5.6-terra");
-    expect(lanes["gpt-5.4"]?.fallback).toEqual([
-      "openai-codex/gpt-5.4",
-      "deepseek-responses/deepseek-flash",
-      "premium",
-    ]);
+    expect(lanes["gpt-5.4"]?.fallback).toEqual(["openai-codex/gpt-5.4", "premium"]);
     expect(lanes["gpt-5.4-mini"]?.primary).toBe("openai-codex/gpt-5.6-luna");
-    expect(lanes["gpt-5.4-mini"]?.fallback).toEqual([
-      "openai-codex/gpt-5.4-mini",
-      "deepseek-responses/deepseek-flash",
-      "economy",
-    ]);
+    expect(lanes["gpt-5.4-mini"]?.fallback).toEqual(["openai-codex/gpt-5.4-mini", "economy"]);
   });
 
   it("ships Codex GPT-5.6 fallback capabilities matching the Codex model catalog", () => {

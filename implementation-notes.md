@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-09-17 · 撤回 DeepSeek 的 lane 兜底：它不说 Codex 的工具协议（Config / 路由，docs/04，原则 3/5）
+
+- **现象**：Codex 会话里出现了直接打印给用户的 `<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="exec">`（注意是**全角** `｜`，DeepSeek 私有的 DSML 标记）。命令根本没执行，只是被当成聊天文本渲染。
+- **定位**：查 Codex rollout 日志，该段落的 `role` 是 `assistant`、`type` 是 `output_text`——不是 tool call。再查 helm 遥测，那一轮（13:38:28）请求 `gpt-6-astra`，GPT-6 过载后 fallback 落到 `deepseek-responses/deepseek-flash`。同一分钟内有 5 条请求落到该 rung（含从 `claude-opus-4-8` 转来的）。
+- **根因不在 helm**：透传是对的，是**模型不会用 Codex 的工具协议**。DeepSeek 接受 Codex 的 tools 定义，却不按 `function_call` item 返回，而退化成自己训练时的文本标记。（此前实测过裸 `function_call` 是正常的，所以这是 Codex 特定工具形状下的退化，不是完全不支持。）
+- **为什么必须撤**：这是**静默失败**——上游返回 200、status completed、内容看着像在干活，实际什么都没做。比起客户端会重试的 502，一个"假装干完了"的 200 严重得多，而且只有人眼看到原始标记才会发现。承载重度工具调用的 Codex 流量不能挂这种兜底。
+- **撤的范围**：只撤 6 条 GPT lane 的自动 rung，回到 v0.29.17 的链路。`deepseek-responses` provider 与 capabilities/pricing **全部保留**——显式 `allow_custom_model` 仍可指定（纯对话场景没有工具协议可搞错），且历史必须保持可重新计价。
+- **教训**：同协议（openai_responses）只保证**请求能被解析**，不保证**响应遵循同一套工具语义**。给工具型客户端选兜底，协议兼容是必要条件而非充分条件，得实测工具往返而不只是单轮文本。此前我把"live 测试验证了 custom_tool_call 被接受"当成了"工具链路可用"，这一步跳得太快。
+- 配置注释里留了完整原委与那段 DSML 原文，防止将来有人只看到"同协议兜底"的好处又加回去。
+
 ## 2026-09-17 · 过载预算耗尽不再中断候选链（Provider execution，docs/04，原则 5）
 
 - **现象**：v0.29.18 上线 DeepSeek 兜底后，线上 15 条过载请求里 10 条 `fallback_count: 0` —— 12 个候选只试了第一个，后面连 skip 记录都没有，直接 `all_providers_failed`。堆栈指向 `execute.ts` 的候选循环在首次失败后就退出。
@@ -26,7 +36,7 @@
 - **`serialize-client.ts` 同步转发新字段**：该文件只逐个复制方法，数据字段不列进去就会被悄悄丢掉（此前 `nativeProtocolProfile` 就这样导致多账号池判定失效）。
 - **capabilities**：`jsonOutput: schema` 已实测（Responses 的 `text.format` 支持 `json_schema`，与 Chat 端 `response_format` 不同，故与 `deepseek/*` 的 `object` 有别）。vision 只给 `deepseek-flash` 开：`deepseek-v4-pro` 传图不报错，但官方文档只列 flash 真正处理图片，**按 fail-closed 标 false**，避免 vision 请求被静默忽略图片。
 - **live 测试**：`packages/core/src/provider/live-deepseek-responses.test.ts` 默认 skip（`HELM_LIVE_DEEPSEEK=1` 开启），把上述四条真上游断言固化下来，CI 不会打真上游。
-- **已进 lane（Lukin 拍板）**：6 条 GPT family lane（`gpt-6-astra` / `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` / `gpt-5.4` / `gpt-5.4-mini`）各加一条 `deepseek-responses/*` rung，排在同族订阅 slug 之后、通用 lane 之前；pro 配高质量档，flash 配廉价档。理由同上：这些 lane 承载 Codex 流量，而通用链里的 grok（同协议但会被降级翻译）与 claude（跨协议常被 skip）对带 Codex items 的请求往往不可用，`deepseek-responses` 是配置中**唯一的静态同协议 rung**。
+- **~~已进 lane~~（当天即撤回，见上方 2026-09-17 条目：DeepSeek 不说 Codex 的工具协议，会静默失败）**：曾给 6 条 GPT family lane（`gpt-6-astra` / `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` / `gpt-5.4` / `gpt-5.4-mini`）各加一条 `deepseek-responses/*` rung，排在同族订阅 slug 之后、通用 lane 之前；pro 配高质量档，flash 配廉价档。理由同上：这些 lane 承载 Codex 流量，而通用链里的 grok（同协议但会被降级翻译）与 claude（跨协议常被 skip）对带 Codex items 的请求往往不可用，`deepseek-responses` 是配置中**唯一的静态同协议 rung**。
 - **连带效果（已确认并接受）**：`premium`/`balanced`/`economy` 的 primary 本身就是 `gpt-5.6-sol`/`terra`/`luna` 这三条 lane，所以 DeepSeek 自动出现在**每条通用 lane 的第二位**——订阅一挂，全部流量（不止 Codex）先落 DeepSeek，claude/grok 顺延。Lukin 明确接受：延迟与成本更优，且同协议兜底最可靠。`rules-routing.test.ts` 的 premium 链断言已同步。
 - **e2e 未受影响**：routing/protocol/smoke 共 37 例全过。e2e 用 `HELM_PROVIDER_BASE_URL` 把所有 provider 指向同一 mock，其入站是 openai_chat，`deepseek-responses` 因协议不匹配被跳过，故"无订阅时实际执行模型"的断言仍落在 `openrouter/deepseek-*` 上。
 
@@ -85,13 +95,9 @@
 - `serving_account` 在成功时仍表示实际服务账号；全部执行失败时改为记录最后一次真正发起上游请求的订阅账号，便于定位账号级故障。若候选在选账号前被熔断/能力门禁跳过，仍保持 `null`，不伪造分配结果。
 - 若订阅账号失败后又尝试了其他 provider，旧账号不会被误标为最终尝试；未新增 schema、迁移或正文记录。
 
-## 2026-09-06 · 对齐 Codex Lite 身份与流式控制事件（Provider / Responses，docs/04/05/07，原则 3/5/8）
-
-- 对照 Codex `008bbd5884122dc95aaece19ecfe0fc6a59dcf36`：Lite 完整请求和增量续接保留带前缀的输入项 ID；Helm 旧 `store:false` 清理会删除它们。现用已有 Lite 识别逻辑排除旧清理，保留原生历史；普通 Responses 的兼容清理不变。
-- `response.metadata`、`codex.response.metadata`、`codex.rate_limits`、`responsesapi.websocket_timing` 和 `keepalive` 属于控制信息。它们不再提前提交执行尝试；正常响应逐字节保留，输出前明确过载沿既有有界策略恢复。真实输出、工具调用、加密 reasoning、未知事件及结果不明断连的禁止重放边界不变。v0.29.10 部署后重放第二条原请求时，生产流明确出现 `keepalive` 后跟过载，补齐了先前缺失的线上事件证据。
-- 两条生产失败请求确实分别丢失 157/239 个 ID；控制事件导致错误直接下传已由本地网关与账号池回归用例复现，但生产未保留这些失败的完整 SSE，因此不能把两项差异直接认定为全部线上故障的唯一原因。补丁尚未部署，真实会话恢复仍须单独验证。
-
 ## 历史条目摘要（最新要点）
+
+- **2026-09-06 · 对齐 Codex Lite 身份与流式控制事件**：Lite 完整请求与增量续接保留带前缀的输入项 ID（旧 `store:false` 清理会删掉它们，两条生产失败分别丢了 157/239 个）；`response.metadata` / `codex.rate_limits` / `keepalive` 等控制事件不再提前提交执行尝试，使其后的过载仍能走有界恢复。真实输出、工具调用、加密 reasoning、结果不明断连的禁止重放边界不变。
 
 - **2026-09-06 · Responses 空准备事件保留安全恢复窗口**（#840，本次过载修复的源头）：空 item / 空 part / 空 delta 继续缓冲，只有真实内容才提交流，使随后的过载错误仍能进入 OAuth sibling retry 与模型 fallback；EOF/断连结果不明仍禁止重放。OAuth pool 在首个真实输出前对结构化 `server_is_overloaded` 做同账号短退避（1s、3s），与 HTTP 503/529 共用**请求级**两次额外重试预算。当时把"预算耗尽后禁止账号/模型层重新开始"实现成了 `execute.ts` 里的 `break`，2026-09-17 已纠正为只停等待、不停链推进。`provider.overload_retry` 日志只记 trace/原因/次数/等待毫秒/耗尽标志。
 

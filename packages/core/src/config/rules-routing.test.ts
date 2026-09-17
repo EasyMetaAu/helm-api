@@ -192,12 +192,8 @@ describe("shipped config rules drive routing", () => {
 
     const chain = result.decision.lane.candidate_chain;
     expect(result.decision.lane.selected_lane).toBe("premium");
-    // `premium`'s primary IS the `gpt-5.6-sol` lane, so that lane's DeepSeek rung
-    // surfaces here as the first fallback: a subscription outage now degrades to a
-    // same-protocol static provider before reaching Grok/Claude.
-    expect(chain.slice(0, 7)).toEqual([
+    expect(chain.slice(0, 6)).toEqual([
       "openai-codex/gpt-5.6-sol",
-      "deepseek-responses/deepseek-flash",
       "xai/grok-4.6",
       "anthropic/claude-opus-4-8",
       "anthropic/claude-opus-5",
