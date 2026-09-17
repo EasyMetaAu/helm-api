@@ -299,6 +299,11 @@ export const DecisionRecordSchema = z.object({
   // spans accounts, each with its own id). Optional: absent for non-Codex and legacy
   // records, so nothing needs migrating.
   codex_installation_id: z.string().optional(),
+  // The `safety_identifier` the UPSTREAM echoed back on its response object — the
+  // proof it accepted the value, as opposed to whatever we believe we sent. Recorded
+  // only when actually echoed; absent otherwise (never an empty string). Opaque
+  // end-user label, not key material.
+  safety_identifier: z.string().optional(),
   // Total served latency = Σ provider_attempts.latency_ms (docs/07 latency).
   // `.default(0)` so legacy records validate; the builder computes the real sum.
   latency_total_ms: z.number().nonnegative().default(0),

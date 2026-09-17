@@ -148,6 +148,16 @@ describe('toDetail', () => {
   it('omits the installation id for non-Codex requests', () => {
     expect(toDetail(rawRecord()).request_meta).not.toHaveProperty('codex_installation_id');
   });
+
+  // Echoed by the upstream — proof it accepted the caller's safety_identifier.
+  it('surfaces the safety_identifier echoed by the upstream', () => {
+    const detail = toDetail({ ...rawRecord(), safety_identifier: 'lukin-test-001' });
+    expect(detail.request_meta).toMatchObject({ safety_identifier: 'lukin-test-001' });
+  });
+
+  it('omits the safety_identifier when the upstream echoed none', () => {
+    expect(toDetail(rawRecord()).request_meta).not.toHaveProperty('safety_identifier');
+  });
 });
 
 describe('toListItem', () => {
